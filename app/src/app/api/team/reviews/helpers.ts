@@ -9,6 +9,12 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import type { UserRole } from '@/types';
 
 export const REVIEW_TEXT_MAX_LENGTH = 5000;
+export const REVIEW_REASON_MAX_LENGTH = 500;
+
+export type ReviewStatus = 'scheduled' | 'completed';
+
+export const REVIEW_PROJECTION =
+  'id, review_date, employee_user_id, reviewer_user_id, status, reason, outcomes, problems, recommendations, created_at, updated_at';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -38,7 +44,9 @@ export type EmployeeReviewRow = {
   review_date: string;
   employee_user_id: string;
   reviewer_user_id: string | null;
-  outcomes: string;
+  status: ReviewStatus | null;
+  reason: string | null;
+  outcomes: string | null;
   problems: string | null;
   recommendations: string | null;
   created_at: string;
@@ -48,7 +56,9 @@ export type EmployeeReviewRow = {
 export type ReviewInput = {
   review_date?: string;
   employee_user_id?: string;
-  outcomes?: string;
+  status?: ReviewStatus;
+  reason?: string | null;
+  outcomes?: string | null;
   problems?: string | null;
   recommendations?: string | null;
 };
@@ -97,7 +107,7 @@ export async function authenticateReviewRequest(
   }
 
   const role = (data?.role ?? null) as UserRole | null;
-  if (!isInternalRole(role) || data?.is_demo === true) {
+  if (!isLead(role) || data?.is_demo === true) {
     return { error: jsonError('Forbidden', 403) };
   }
 
@@ -105,7 +115,7 @@ export async function authenticateReviewRequest(
     actor: {
       userId: user.id,
       role: role as UserRole,
-      canManage: isLead(role),
+      canManage: true,
     },
   };
 }
@@ -135,32 +145,18 @@ function isValidIsoDate(value: string): boolean {
   );
 }
 
-function parseRequiredText(
-  value: unknown,
-  field: string,
-): { value: string } | { error: string } {
-  if (typeof value !== 'string') {
-    return { error: `${field} must be a string` };
-  }
-  const normalized = value.trim();
-  if (!normalized) return { error: `${field} is required` };
-  if (normalized.length > REVIEW_TEXT_MAX_LENGTH) {
-    return { error: `${field} must be at most ${REVIEW_TEXT_MAX_LENGTH} characters` };
-  }
-  return { value: normalized };
-}
-
 function parseOptionalText(
   value: unknown,
   field: string,
+  maxLength = REVIEW_TEXT_MAX_LENGTH,
 ): { value: string | null } | { error: string } {
   if (value === null || value === undefined) return { value: null };
   if (typeof value !== 'string') {
     return { error: `${field} must be a string or null` };
   }
   const normalized = value.trim();
-  if (normalized.length > REVIEW_TEXT_MAX_LENGTH) {
-    return { error: `${field} must be at most ${REVIEW_TEXT_MAX_LENGTH} characters` };
+  if (normalized.length > maxLength) {
+    return { error: `${field} must be at most ${maxLength} characters` };
   }
   return { value: normalized || null };
 }
@@ -195,9 +191,30 @@ export function parseReviewInput(
     result.employee_user_id = employeeUserId.value;
   }
 
+  const reason = pickValue(body, 'reason', 'reason');
+  if (!options.partial || reason.present) {
+    const parsed = parseOptionalText(
+      reason.value,
+      'reason',
+      REVIEW_REASON_MAX_LENGTH,
+    );
+    if ('error' in parsed) return parsed;
+    result.reason = parsed.value;
+  }
+
+  if (options.partial) {
+    const status = pickValue(body, 'status', 'status');
+    if (status.present) {
+      if (status.value !== 'scheduled' && status.value !== 'completed') {
+        return { error: 'status must be scheduled or completed' };
+      }
+      result.status = status.value;
+    }
+  }
+
   const outcomes = pickValue(body, 'outcomes', 'outcomes');
-  if (!options.partial || outcomes.present) {
-    const parsed = parseRequiredText(outcomes.value, 'outcomes');
+  if (outcomes.present) {
+    const parsed = parseOptionalText(outcomes.value, 'outcomes');
     if ('error' in parsed) return parsed;
     result.outcomes = parsed.value;
   }
@@ -207,7 +224,7 @@ export function parseReviewInput(
     ['recommendations', 'recommendations', 'recommendations'],
   ] as const) {
     const field = pickValue(body, camelKey, snakeKey);
-    if (!field.present && options.partial) continue;
+    if (!field.present) continue;
     const parsed = parseOptionalText(field.value, camelKey);
     if ('error' in parsed) return parsed;
     result[dbKey] = parsed.value;
@@ -218,6 +235,62 @@ export function parseReviewInput(
   }
 
   return { value: result };
+}
+
+export function hasReviewResultFields(input: ReviewInput): boolean {
+  return (
+    hasOwn(input, 'outcomes')
+    || hasOwn(input, 'problems')
+    || hasOwn(input, 'recommendations')
+  );
+}
+
+export function normalizeReviewStatus(
+  value: unknown,
+): ReviewStatus {
+  return value === 'scheduled' ? 'scheduled' : 'completed';
+}
+
+export function validateReviewUpdate(
+  existing: EmployeeReviewRow,
+  patch: ReviewInput,
+): string | null {
+  const currentStatus = normalizeReviewStatus(existing.status);
+  const nextStatus = patch.status ?? currentStatus;
+
+  if (currentStatus === 'completed' && nextStatus === 'scheduled') {
+    return 'Invalid status transition from completed to scheduled';
+  }
+
+  const nextOutcomes = hasOwn(patch, 'outcomes')
+    ? patch.outcomes ?? null
+    : existing.outcomes;
+  const nextProblems = hasOwn(patch, 'problems')
+    ? patch.problems ?? null
+    : existing.problems;
+  const nextRecommendations = hasOwn(patch, 'recommendations')
+    ? patch.recommendations ?? null
+    : existing.recommendations;
+
+  if (
+    nextStatus === 'scheduled'
+    && (
+      nextOutcomes !== null
+      || nextProblems !== null
+      || nextRecommendations !== null
+    )
+  ) {
+    return 'status must be completed before adding review results';
+  }
+
+  if (
+    nextStatus === 'completed'
+    && (typeof nextOutcomes !== 'string' || !nextOutcomes.trim())
+  ) {
+    return 'outcomes is required for completed review';
+  }
+
+  return null;
 }
 
 export async function validateInternalEmployee(
@@ -283,7 +356,9 @@ export function reviewToApi(
     reviewDate: review.review_date,
     employee: employee ? profileToApi(employee) : null,
     reviewer: reviewer ? profileToApi(reviewer) : null,
-    outcomes: review.outcomes,
+    status: normalizeReviewStatus(review.status),
+    reason: review.reason ?? null,
+    outcomes: review.outcomes ?? null,
     problems: review.problems,
     recommendations: review.recommendations,
     createdAt: review.created_at ?? null,

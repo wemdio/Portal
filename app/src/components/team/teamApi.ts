@@ -70,14 +70,18 @@ export interface TeamReviewEmployee {
   avatarUrl: string | null;
 }
 
+export type TeamReviewStatus = 'scheduled' | 'completed';
+
 export interface TeamReview {
   id: string;
   reviewDate: string;
   employee: TeamReviewEmployee;
   reviewer: TeamReviewEmployee | null;
-  outcomes: string;
-  problems: string;
-  recommendations: string;
+  status: TeamReviewStatus;
+  reason: string | null;
+  outcomes: string | null;
+  problems: string | null;
+  recommendations: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -89,23 +93,51 @@ export interface TeamReviewsResponse {
   currentUserId: string | null;
 }
 
-export interface TeamReviewWrite {
+export interface TeamReviewScheduleWrite {
   reviewDate: string;
   employeeUserId: string;
-  outcomes: string;
-  problems?: string;
-  recommendations?: string;
+  reason?: string | null;
 }
 
-export function buildTeamReviewWrite(values: TeamReviewWrite): TeamReviewWrite {
+export interface TeamReviewCompletionInput {
+  outcomes: string;
+  problems?: string | null;
+  recommendations?: string | null;
+}
+
+export interface TeamReviewCompletionWrite {
+  status: 'completed';
+  outcomes: string;
+  problems: string | null;
+  recommendations: string | null;
+}
+
+
+function trimmedOrNull(value: string | null | undefined): string | null {
+  return value?.trim() || null;
+}
+
+export function buildTeamReviewScheduleWrite(
+  values: TeamReviewScheduleWrite,
+): Required<TeamReviewScheduleWrite> {
   return {
     reviewDate: values.reviewDate,
     employeeUserId: values.employeeUserId,
-    outcomes: values.outcomes.trim(),
-    problems: (values.problems ?? '').trim(),
-    recommendations: (values.recommendations ?? '').trim(),
+    reason: trimmedOrNull(values.reason),
   };
 }
+
+export function buildTeamReviewCompletionWrite(
+  values: TeamReviewCompletionInput,
+): TeamReviewCompletionWrite {
+  return {
+    status: 'completed',
+    outcomes: values.outcomes.trim(),
+    problems: trimmedOrNull(values.problems),
+    recommendations: trimmedOrNull(values.recommendations),
+  };
+}
+
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -236,9 +268,11 @@ function normalizeReview(value: unknown): TeamReview {
     reviewDate: text(review.reviewDate ?? review.review_date),
     employee,
     reviewer: review.reviewer ? normalizeEmployee(review.reviewer) : null,
-    outcomes: text(review.outcomes),
-    problems: text(review.problems),
-    recommendations: text(review.recommendations),
+    status: text(review.status) === 'scheduled' ? 'scheduled' : 'completed',
+    reason: nullableText(review.reason),
+    outcomes: nullableText(review.outcomes),
+    problems: nullableText(review.problems),
+    recommendations: nullableText(review.recommendations),
     createdAt: text(review.createdAt ?? review.created_at),
     updatedAt: text(review.updatedAt ?? review.updated_at),
   };

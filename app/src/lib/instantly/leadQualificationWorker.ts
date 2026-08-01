@@ -30,8 +30,10 @@ import {
   handoffChatId,
   handoffThreadId,
   postHandoffMessage,
+  editHandoffMessage,
   escapeHtml,
 } from './handoffTelegram';
+import { sendHandoffNow } from './handoffSender';
 import type { Email } from './types';
 
 const REPLY_EMAILS_PAGE_SIZE = 100;
@@ -1613,13 +1615,13 @@ async function maybePostLeadHandoff(opts: {
 
     const { data: projects } = await main
       .from('projects')
-      .select('handoff_email, handoff_legend, handoff_ai_adapt, specialist_user_id')
+      .select('handoff_email, handoff_legend, handoff_ai_adapt, handoff_auto_send, specialist_user_id')
       .in('id', projectIds);
     const project = (projects ?? []).find(
       (p) =>
         Boolean((p.handoff_email as string | null)?.trim()) &&
         Boolean((p.handoff_legend as string | null)?.trim()),
-    ) as { handoff_email: string; handoff_legend: string; handoff_ai_adapt: boolean; specialist_user_id: string | null } | undefined;
+    ) as { handoff_email: string; handoff_legend: string; handoff_ai_adapt: boolean; handoff_auto_send: boolean; specialist_user_id: string | null } | undefined;
     if (!project) return; // handoff not configured → off for this project
 
     if (!project.specialist_user_id) {
@@ -1668,7 +1670,9 @@ async function maybePostLeadHandoff(opts: {
       .from('profiles').select('full_name, email').eq('id', project.specialist_user_id).maybeSingle();
     if (prof) specialistName = (prof.full_name as string) || (prof.email as string) || specialistName;
 
-    // 6. Post to Telegram with the Send button.
+    // 6. TG-карточка + pending-запись. По тумблеру проекта: OFF — карточка с
+    // кнопкой (отправка ответственным спецом через webhook), ON (автопередача)
+    // — отправляем сразу, карточка информационная, без кнопки.
     const token = handoffBotToken();
     const chatId = handoffChatId();
     if (!token || !chatId) {
@@ -1677,6 +1681,7 @@ async function maybePostLeadHandoff(opts: {
     }
     const boardLink = await getBoardLinkForProject(instantlyDb, projectIds[0]);
     const contactLabel = opts.leadName ? `${opts.leadName} (${opts.leadEmail})` : opts.leadEmail;
+    const autoSend = Boolean(project.handoff_auto_send);
     const text = [
       '<b>🤝 Передача лида клиенту</b>',
       `<b>Лид:</b> ${escapeHtml(contactLabel)}`,
@@ -1688,14 +1693,16 @@ async function maybePostLeadHandoff(opts: {
       `<pre>${escapeHtml(draft.slice(0, 1500))}</pre>`,
       '',
       boardLink ? `📋 <a href="${escapeHtml(boardLink)}">Все лиды проекта</a>` : '',
-      'Нажмите «Передать клиенту» — письмо уйдёт лиду, клиент в копии. Нажать может только ответственный.',
+      autoSend
+        ? '⚡ Автопередача включена — отправляется автоматически, без кнопки-подтверждения.'
+        : 'Нажмите «Передать клиенту» — письмо уйдёт лиду, клиент в копии. Нажать может только ответственный.',
     ].filter(Boolean).join('\n');
 
     const messageId = await postHandoffMessage({
       token,
       chatId,
       text,
-      callbackData: signHandoffCallback(qualificationId, token),
+      ...(autoSend ? {} : { callbackData: signHandoffCallback(qualificationId, token) }),
       threadId: handoffThreadId(),
     });
     if (!messageId) {
@@ -1703,8 +1710,35 @@ async function maybePostLeadHandoff(opts: {
       return;
     }
 
-    // 7. Pending record the webhook handler acts on.
-    const { error: insErr } = await instantlyDb.from('instantly_pending_handoffs').insert({
+    // 7. Pending record: для авто-режима — основа отправки; для кнопки — акт при нажатии.
+    const { data: pendingRow, error: insErr } = await instantlyDb
+      .from('instantly_pending_handoffs')
+      .insert({
+        qualification_id: qualificationId,
+        campaign_id: campaignId,
+        draft_text: draft,
+        reply_to_uuid: replyToUuid,
+        eaccount,
+        client_email: project.handoff_email,
+        responsible_user_id: project.specialist_user_id,
+        tg_chat_id: Number(chatId),
+        tg_message_id: messageId,
+        status: 'pending',
+      })
+      .select('id')
+      .maybeSingle();
+    if (insErr || !pendingRow) {
+      workerLog('error', `Handoff: pending insert failed (qual ${qualificationId}): ${insErr?.message ?? 'no row returned'}`);
+      return;
+    }
+    if (!autoSend) {
+      workerLog('info', `Handoff posted for ${opts.leadEmail} (qual ${qualificationId}); awaiting ${specialistName}`);
+      return;
+    }
+
+    // 8. Автопередача: отправляем сразу через общий sender (reply + fallback).
+    const sent = await sendHandoffNow(instantlyDb, {
+      id: (pendingRow as { id: string }).id,
       qualification_id: qualificationId,
       campaign_id: campaignId,
       draft_text: draft,
@@ -1712,15 +1746,18 @@ async function maybePostLeadHandoff(opts: {
       eaccount,
       client_email: project.handoff_email,
       responsible_user_id: project.specialist_user_id,
-      tg_chat_id: Number(chatId),
-      tg_message_id: messageId,
-      status: 'pending',
     });
-    if (insErr) {
-      workerLog('error', `Handoff: pending insert failed (qual ${qualificationId}): ${insErr.message}`);
-    } else {
-      workerLog('info', `Handoff posted for ${opts.leadEmail} (qual ${qualificationId}); awaiting ${specialistName}`);
+    if (!sent.ok) {
+      await editHandoffMessage(
+        token,
+        chatId,
+        messageId,
+        `${text}\n\n❌ Автопередача не отправлена: ${escapeHtml(sent.error.slice(0, 200))}`,
+      );
+      workerLog('warn', `Handoff auto-send failed for ${opts.leadEmail} (qual ${qualificationId}): ${sent.error}`);
+      return;
     }
+    workerLog('info', `Handoff auto-sent for ${opts.leadEmail} (qual ${qualificationId}, via ${sent.via})`);
   } catch (err) {
     workerLog('error', `Handoff post failed (qual ${opts.qualificationId})`, err);
   }

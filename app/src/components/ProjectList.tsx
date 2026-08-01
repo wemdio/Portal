@@ -60,7 +60,7 @@ import {
  * (с .join() тип схлопывается в GenericStringError и каст к Project[] падает).
  */
 const PROJECT_LIST_COLUMNS =
-  'id, created_at, updated_at, name, client, status, project_type, lead_source, work_format, budget, margin, contract_date, contract_link, handoff_link, handoff_email, handoff_legend, handoff_ai_adapt, launch_date, deadline, payment_date, kpi_plan, kpi_fact, contacts_obligation, contacts_done, contacts_done_synced_at, specialist, specialist_user_id, manager, weekly_tasks, subtasks, materials_links, comment_elvira, comment_anya, comments, client_feedback, hypotheses, hypotheses_result, lead_criteria';
+  'id, created_at, updated_at, name, client, status, project_type, lead_source, work_format, budget, margin, contract_date, contract_link, handoff_link, handoff_email, handoff_legend, handoff_ai_adapt, handoff_auto_send, launch_date, deadline, payment_date, kpi_plan, kpi_fact, contacts_obligation, contacts_done, contacts_done_synced_at, specialist, specialist_user_id, manager, weekly_tasks, subtasks, materials_links, comment_elvira, comment_anya, comments, client_feedback, hypotheses, hypotheses_result, lead_criteria';
 
 /** Поля брифа/гипотез — грузятся лениво для выбранного проекта. */
 type PanelBrief = {
@@ -2879,6 +2879,17 @@ export function ProjectList() {
                       ИИ-адаптация текста под ответ лида
                     </label>
                     <p className="mt-0.5 text-[10px] text-zinc-400">Вкл — ИИ адаптирует легенду под контекст ответа (демо/цена/звонок) и язык лида, как раньше. Выкл — легенда уходит лиду дословно.</p>
+                    <label className="mt-1.5 flex items-center gap-2 text-xs text-zinc-600">
+                      <input
+                        type="checkbox"
+                        checked={getDraftValue(selectedProject, 'handoff_auto_send') === 'true'}
+                        onChange={(e) => void commitProjectUpdate(selectedProject, { handoff_auto_send: e.target.checked })}
+                        disabled={!canEdit}
+                        className="accent-blue-600"
+                      />
+                      Автопередача без кнопки-подтверждения в TG
+                    </label>
+                    <p className="mt-0.5 text-[10px] text-amber-600">Осторожно: вкл — письмо уходит лиду и клиенту СРАЗУ при квалификации, спец не проверяет текст. Выкл (дефолт) — карточка с кнопкой «Передать клиенту», шлёт ответственный спец.</p>
                   </div>
                 </div>
               </section>

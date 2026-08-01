@@ -9,11 +9,16 @@ let mockMainDb: MockSupabaseClient | null;
 const listEmails = jest.fn();
 const getLeadsByEmail = jest.fn();
 const getCampaign = jest.fn();
+const getEmail = jest.fn();
+const replyToEmail = jest.fn();
+const sendTestEmail = jest.fn();
 const qualifyReply = jest.fn();
 const fetchBriefByCampaign = jest.fn();
 const fetchThreadContext = jest.fn();
 const sendLeadTelegramAlert = jest.fn();
 const sendClientReplyTelegram = jest.fn();
+const postHandoffMessage = jest.fn();
+const editHandoffMessage = jest.fn();
 
 jest.mock('@/lib/supabaseInstantly', () => ({
   get supabaseInstantly() {
@@ -32,6 +37,19 @@ jest.mock('@/lib/instantly/client', () => ({
   listEmails: (...args: unknown[]) => listEmails(...args),
   getLeadsByEmail: (...args: unknown[]) => getLeadsByEmail(...args),
   getCampaign: (...args: unknown[]) => getCampaign(...args),
+  getEmail: (...args: unknown[]) => getEmail(...args),
+  replyToEmail: (...args: unknown[]) => replyToEmail(...args),
+  sendTestEmail: (...args: unknown[]) => sendTestEmail(...args),
+}));
+
+jest.mock('@/lib/instantly/handoffTelegram', () => ({
+  __esModule: true,
+  handoffBotToken: () => 'test-bot-token',
+  handoffChatId: () => '-100123',
+  handoffThreadId: () => 777,
+  postHandoffMessage: (...args: unknown[]) => postHandoffMessage(...args),
+  editHandoffMessage: (...args: unknown[]) => editHandoffMessage(...args),
+  escapeHtml: (s: string) => s,
 }));
 
 jest.mock('@/lib/instantly/leadQualifier', () => ({
@@ -84,6 +102,12 @@ describe('pollAndQualifyReplies', () => {
     listEmails.mockReset();
     getLeadsByEmail.mockReset().mockResolvedValue([]);
     getCampaign.mockReset().mockResolvedValue({ id: 'linked-campaign', name: 'Кампания Новикова' });
+    getEmail.mockReset();
+    replyToEmail.mockReset().mockResolvedValue({ id: 'sent-1' });
+    sendTestEmail.mockReset().mockResolvedValue({ id: 'sent-test-1' });
+    postHandoffMessage.mockReset().mockResolvedValue(555);
+    editHandoffMessage.mockReset().mockResolvedValue(undefined);
+    delete process.env.LEAD_HANDOFF_ENABLED;
     sendLeadTelegramAlert.mockReset().mockResolvedValue({ sent: true, messageId: 42 });
     sendClientReplyTelegram.mockReset().mockResolvedValue({ messageId: 7 });
     fetchBriefByCampaign.mockReset().mockResolvedValue(null);
@@ -369,6 +393,180 @@ describe('pollAndQualifyReplies', () => {
       expect.objectContaining({ boardLink: null }),
     );
     expect(mockInstantlyDb!.getRows('project_lead_board_rows')).toHaveLength(0);
+  });
+
+  it('автопередача (handoff_auto_send): отправляет сразу без кнопки, pending → sent', async () => {
+    process.env.LEAD_HANDOFF_ENABLED = '1';
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          {
+            id: 'project-1',
+            client: 'Acme',
+            specialist_user_id: 'specialist-1',
+            handoff_email: 'client@clientco.ru',
+            handoff_legend: 'Добрый день, [Имя, если есть]. Передаю коллеге в копию.',
+            handoff_auto_send: true,
+          },
+        ],
+        profiles: [
+          { id: 'specialist-1', full_name: 'Sergey Petrov', email: 'sergey@example.com' },
+        ],
+        telegram_links: [
+          { user_id: 'specialist-1', telegram_id: '123456', telegram_username: 'sergey_portal' },
+        ],
+      },
+    });
+    getEmail.mockRejectedValue(new Error('no original — cc only client'));
+    qualifyReply.mockResolvedValueOnce({
+      isLead: true,
+      proposalSeen: true,
+      interestSignals: ['asked_for_call'],
+      reason: 'Просит созвон',
+      confidence: 0.92,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: replyEmail({ id: 'lead-email', from_address_email: 'lead@leadscorp.ru', body: { text: 'Давайте созвонимся' } }),
+        threadEmails: [replyEmail({ id: 'out-1', ue_type: 1 })],
+        lastOutbound: replyEmail({ id: 'out-1', ue_type: 1 }),
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'lead-email', campaign_id: 'linked-campaign', from_address_email: 'lead@leadscorp.ru', eaccount: 'sender@example.com' } as Partial<Email>)],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(1);
+    // Карточка ушла БЕЗ кнопки (callbackData нет), с пометкой автопередачи
+    expect(postHandoffMessage).toHaveBeenCalledTimes(1);
+    const card = postHandoffMessage.mock.calls[0][0] as { text: string; callbackData?: string };
+    expect(card.callbackData).toBeUndefined();
+    expect(card.text).toContain('Автопередача включена');
+    // Отправка сразу через общий sender: reply ушёл, pending → sent, трекинг записан
+    expect(replyToEmail).toHaveBeenCalledTimes(1);
+    const pending = mockInstantlyDb!.getRows('instantly_pending_handoffs');
+    expect(pending).toHaveLength(1);
+    expect(pending[0].status).toBe('sent');
+    expect(pending[0].draft_text).toBe('Добрый день. Передаю коллеге в копию.');
+    const fwd = mockInstantlyDb!.getRows('client_forwarded_leads');
+    expect(fwd).toHaveLength(1);
+    expect(fwd[0].forwarded_via).toBe('handoff-auto');
+    expect(sendTestEmail).not.toHaveBeenCalled();
+  });
+
+  it('автопередача — сбой отправки: pending → failed, карточка помечается ошибкой', async () => {
+    process.env.LEAD_HANDOFF_ENABLED = '1';
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          {
+            id: 'project-1',
+            client: 'Acme',
+            specialist_user_id: 'specialist-1',
+            handoff_email: 'client@clientco.ru',
+            handoff_legend: 'Передаю коллеге.',
+            handoff_auto_send: true,
+          },
+        ],
+        profiles: [
+          { id: 'specialist-1', full_name: 'Sergey Petrov', email: 'sergey@example.com' },
+        ],
+        telegram_links: [
+          { user_id: 'specialist-1', telegram_id: '123456', telegram_username: 'sergey_portal' },
+        ],
+      },
+    });
+    getEmail.mockRejectedValue(new Error('x'));
+    replyToEmail.mockRejectedValue(new Error('InstantlyApiError: Instantly API 500: boom'));
+    qualifyReply.mockResolvedValueOnce({
+      isLead: true,
+      proposalSeen: true,
+      interestSignals: [],
+      reason: 'интерес',
+      confidence: 0.9,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: replyEmail({ id: 'lead-email', from_address_email: 'lead@leadscorp.ru', body: { text: 'ок' } }),
+        threadEmails: [replyEmail({ id: 'out-1', ue_type: 1 })],
+        lastOutbound: replyEmail({ id: 'out-1', ue_type: 1 }),
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'lead-email', campaign_id: 'linked-campaign', from_address_email: 'lead@leadscorp.ru', eaccount: 'sender@example.com' } as Partial<Email>)],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    expect(await pollAndQualifyReplies()).toBe(1);
+
+    const pending = mockInstantlyDb!.getRows('instantly_pending_handoffs');
+    expect(pending).toHaveLength(1);
+    expect(pending[0].status).toBe('failed');
+    expect(String(pending[0].error_message)).toContain('500');
+    expect(editHandoffMessage).toHaveBeenCalledTimes(1);
+    expect(editHandoffMessage.mock.calls[0][3] as string).toContain('Автопередача не отправлена');
+    expect(mockInstantlyDb!.getRows('client_forwarded_leads')).toHaveLength(0);
+  });
+
+  it('кнопочный режим (auto_send выкл): карточка С кнопкой, отправки нет, pending ждёт спеца', async () => {
+    process.env.LEAD_HANDOFF_ENABLED = '1';
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          {
+            id: 'project-1',
+            client: 'Acme',
+            specialist_user_id: 'specialist-1',
+            handoff_email: 'client@clientco.ru',
+            handoff_legend: 'Передаю коллеге.',
+            handoff_auto_send: false,
+          },
+        ],
+        profiles: [
+          { id: 'specialist-1', full_name: 'Sergey Petrov', email: 'sergey@example.com' },
+        ],
+        telegram_links: [
+          { user_id: 'specialist-1', telegram_id: '123456', telegram_username: 'sergey_portal' },
+        ],
+      },
+    });
+    getEmail.mockRejectedValue(new Error('x'));
+    qualifyReply.mockResolvedValueOnce({
+      isLead: true,
+      proposalSeen: true,
+      interestSignals: [],
+      reason: 'интерес',
+      confidence: 0.9,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: replyEmail({ id: 'lead-email', from_address_email: 'lead@leadscorp.ru', body: { text: 'ок' } }),
+        threadEmails: [replyEmail({ id: 'out-1', ue_type: 1 })],
+        lastOutbound: replyEmail({ id: 'out-1', ue_type: 1 }),
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'lead-email', campaign_id: 'linked-campaign', from_address_email: 'lead@leadscorp.ru', eaccount: 'sender@example.com' } as Partial<Email>)],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    expect(await pollAndQualifyReplies()).toBe(1);
+
+    expect(postHandoffMessage).toHaveBeenCalledTimes(1);
+    const card = postHandoffMessage.mock.calls[0][0] as { callbackData?: string };
+    expect(typeof card.callbackData).toBe('string');
+    expect(replyToEmail).not.toHaveBeenCalled();
+    expect(sendTestEmail).not.toHaveBeenCalled();
+    expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')[0].status).toBe('pending');
   });
 
   // Пост-handoff эхо (кейс «Умные Новации» 10.07.2026): после передачи лида
