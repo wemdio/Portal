@@ -13,19 +13,19 @@ export type TopNavDropdownItem = {
 };
 
 /**
- * Курсор идёт от кнопки к списку не по прямой — если закрывать по первому же
- * mouseleave, до пункта долететь невозможно. Держим меню открытым ещё чуть-чуть.
- * Второй (основной) страховкой служит padding-top у обёртки списка: он
- * перекрывает зазор между кнопкой и панелью, и мышь всё время остаётся внутри
- * одного DOM-поддерева.
+ * Курсор идёт от кнопки к списку не по прямой — например, к пункту в правой
+ * части панели (она шире кнопки) он летит по диагонали через зону, которая
+ * не принадлежит ни кнопке, ни панели. Если закрывать по первому же
+ * mouseleave, до такого пункта долететь невозможно — держим меню открытым
+ * ещё чуть-чуть. Панель садится вплотную к кнопке (top панели = bottom
+ * кнопки, без зазора), так что для вертикального перехода отдельный
+ * «мостик»-паддинг не нужен: коробки соприкасаются, мышь и так не покидает
+ * поддерево меню.
  */
 const CLOSE_DELAY_MS = 220;
 
 /** Ширина панели для клампа у правого края экрана (см. min-w ниже). */
 const MENU_MIN_WIDTH = 208;
-
-/** Видимый зазор между нижней границей шапки и панелью. */
-const MENU_GAP_PX = 6;
 
 /**
  * Пункт верхнего меню с выпадающим списком.
@@ -45,7 +45,7 @@ export function TopNavDropdown({
   isActive: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [coords, setCoords] = useState<{ left: number; top: number; bridge: number } | null>(null);
+  const [coords, setCoords] = useState<{ left: number; top: number; alignLeft: boolean } | null>(null);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -81,12 +81,17 @@ export function TopNavDropdown({
     const rect = trigger?.getBoundingClientRect();
     if (!rect) return;
     const maxLeft = Math.max(8, window.innerWidth - MENU_MIN_WIDTH - 8);
-    // Обёртка начинается сразу под кнопкой, а сама панель отодвигается ниже
-    // шапки её padding-ом — так «мостик» перекрывает весь зазор целиком, и
-    // курсор по дороге к списку не покидает поддерево меню.
-    const headerBottom = trigger?.closest('header')?.getBoundingClientRect().bottom;
-    const bridge = Math.max(MENU_GAP_PX, (headerBottom ?? rect.bottom) - rect.bottom + MENU_GAP_PX);
-    setCoords({ left: Math.min(rect.left, maxLeft), top: rect.bottom, bridge });
+    const left = Math.min(rect.left, maxLeft);
+    // Панель стартует ровно там, где кончается кнопка (top = bottom кнопки) —
+    // визуального зазора нет, кнопка и список читаются одним блоком.
+    // alignLeft — не сработал ли кламп у правого края экрана: только тогда
+    // левый край панели совпадает с левым краем кнопки, и её левый верхний
+    // угол можно скруглить «в ноль» (см. rounded-tl-none ниже), чтобы шов
+    // с плоским низом кнопки совпал идеально. Если кламп сработал, панель
+    // сдвинута влево относительно кнопки — под кнопкой окажется прямой
+    // участок верхней границы панели, а не скруглённый угол, и трогать
+    // скругление не нужно.
+    setCoords({ left, top: rect.bottom, alignLeft: left === rect.left });
   }, []);
 
   // Координаты считаем до setOpen, а не в эффекте после: иначе первый кадр
@@ -222,8 +227,19 @@ export function TopNavDropdown({
         aria-controls={open ? menuId : undefined}
         onClick={handleTriggerClick}
         onKeyDown={handleTriggerKeyDown}
-        className={`portal-nav-trigger flex items-center gap-1 whitespace-nowrap rounded-full px-3 py-1 text-[12px] font-medium transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70 ${
-          isActive ? 'bg-zinc-900 text-white shadow-sm' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
+        className={`portal-nav-trigger flex items-center gap-1 whitespace-nowrap px-3 py-1 text-[12px] font-medium transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70 ${
+          open
+            // Раскрытое состояние «перетекает» в панель ниже: тот же bg-white
+            // и тот же border-zinc-200, что у панели, а низ кнопки — плоский
+            // и без собственного нижнего бордера (border-b-0), чтобы шов с
+            // верхом панели читался одной линией, а не двумя рядом. Активная
+            // (чёрная) плашка маршрута на время раскрытия уступает место
+            // этому состоянию — какой пункт активен, всё равно видно по
+            // подсветке в самом списке.
+            ? 'rounded-t-xl rounded-b-none border border-b-0 border-zinc-200 bg-white text-zinc-900 shadow-sm'
+            : isActive
+              ? 'rounded-full bg-zinc-900 text-white shadow-sm'
+              : 'rounded-full text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
         }`}
       >
         {label}
@@ -242,7 +258,7 @@ export function TopNavDropdown({
       {open && coords && (
         <div
           className="fixed z-50"
-          style={{ left: coords.left, top: coords.top, paddingTop: coords.bridge }}
+          style={{ left: coords.left, top: coords.top }}
           onMouseEnter={cancelScheduledClose}
           onMouseLeave={() => { if (hoverCapable.current) scheduleClose(); }}
         >
@@ -250,7 +266,9 @@ export function TopNavDropdown({
             id={menuId}
             role="menu"
             aria-label={label}
-            className="portal-nav-menu min-w-[208px] overflow-hidden rounded-xl border border-zinc-200 bg-white py-1 shadow-lg"
+            className={`portal-nav-menu min-w-[208px] overflow-hidden rounded-xl border border-zinc-200 bg-white py-1 shadow-lg ${
+              coords.alignLeft ? 'rounded-tl-none' : ''
+            }`}
           >
             {items.map((item, index) => (
               <Link
