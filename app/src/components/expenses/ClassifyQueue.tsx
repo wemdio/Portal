@@ -2,10 +2,10 @@
 
 import { useCallback, useEffect, useState } from 'react';
 
-import VendorSelect, { type VendorOption } from '@/components/expenses/VendorSelect';
+import VendorSelect from '@/components/expenses/VendorSelect';
 import { expensesFetch, formatMoney, formatRub, pluralOps } from '@/lib/expenses/client';
 import { sourceLabel } from '@/lib/expenses/labels';
-import type { ExpenseRow } from '@/lib/expenses/types';
+import type { ExpenseRow, VendorOption } from '@/lib/expenses/types';
 
 interface QueueResponse {
   items: ExpenseRow[];
@@ -209,12 +209,16 @@ function QueueRow({
       {row.details ? <div className="mt-1 text-[11px] text-zinc-500">{row.details}</div> : null}
 
       <div className="mt-2 flex flex-wrap items-start gap-2">
-        <VendorSelect
-          value={vendorId}
-          onChange={setVendorId}
-          options={vendors}
-          onCreated={onVendorCreated}
-        />
+        {/* Ширину задаёт обёртка: само поле — блок на 100%, и во flex-строке
+            без ограничения оно схлопнулось бы по содержимому. */}
+        <div className="w-full max-w-[16rem]">
+          <VendorSelect
+            value={vendorId}
+            onChange={setVendorId}
+            options={vendors}
+            onCreated={onVendorCreated}
+          />
+        </div>
 
         <label className="flex items-center gap-1.5 text-xs text-zinc-600">
           <input

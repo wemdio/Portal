@@ -1,9 +1,11 @@
 'use client';
 
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 
-import VendorSelect, { type VendorOption } from '@/components/expenses/VendorSelect';
+import VendorSelect from '@/components/expenses/VendorSelect';
 import { expensesFetch, formatMoney, mskToday } from '@/lib/expenses/client';
+import { DEFAULT_PAYER } from '@/lib/expenses/labels';
+import type { VendorOption } from '@/lib/expenses/types';
 import { useUser } from '@/lib/UserProvider';
 
 interface ManualExpense {
@@ -19,6 +21,29 @@ interface ManualExpense {
 
 const CURRENCIES = ['RUB', 'USD', 'EUR', 'KZT', 'CNY', 'GBP'];
 
+/**
+ * Значение пункта «другой плательщик» в списке.
+ *
+ * Справочника плательщиков на бэкенде нет: `manual_expenses.payer` — свободный
+ * текст, и хранится там сразу человеческое название («Личная карта CEO»), а не
+ * ключ: витрина `expenses_v` подставляет это поле в контрагента, где служебной
+ * строке делать нечего. Поэтому список собирается из того, что уже лежит в
+ * базе, а этот пункт открывает поле для нового названия. В теле запроса он не
+ * появляется никогда — на сабмите на его место подставляется набранный текст,
+ * и служебное значение выбрано так, чтобы не столкнуться с настоящим именем.
+ */
+const OTHER_PAYER = '__other__';
+
+/** Общая отделка полей формы — чтобы дата, сумма и вендор не разъезжались по высоте и радиусам. */
+const FIELD_CLASS =
+  'rounded-lg border border-zinc-200 px-2.5 py-1.5 text-xs text-zinc-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70';
+
+/** Подпись поля. */
+const LABEL_CLASS = 'flex min-w-0 flex-col gap-1 text-[11px] text-zinc-500';
+
+/** Заголовок смысловой группы полей. */
+const LEGEND_CLASS = 'text-[10px] font-semibold uppercase tracking-wide text-zinc-400';
+
 interface EditDraft {
   occurredOn: string;
   amount: string;
@@ -29,6 +54,8 @@ interface EditDraft {
 function matchesSearch(item: ManualExpense, search: string): boolean {
   const needle = search.trim().toLowerCase();
   if (!needle) return true;
+  // Плательщик ищется по тому же тексту, что виден в списке: в базе лежит
+  // название, а не ключ, и второго написания у него нет.
   return [item.occurred_on, String(item.amount), item.currency, item.payer, item.comment ?? '']
     .join(' ')
     .toLowerCase()
@@ -70,7 +97,8 @@ export default function ManualExpenseForm({
   const [amount, setAmount] = useState('');
   const [currency, setCurrency] = useState('RUB');
   const [vendorId, setVendorId] = useState('');
-  const [payer, setPayer] = useState('');
+  const [payer, setPayer] = useState(DEFAULT_PAYER);
+  const [customPayer, setCustomPayer] = useState('');
   const [comment, setComment] = useState('');
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -112,6 +140,19 @@ export default function ManualExpenseForm({
     };
   }, [range.from, range.to, reloadKey]);
 
+  /**
+   * Названия плательщиков для списка: дефолт роута плюс всё, что уже
+   * встречалось в записях за период. Справочника у бэкенда нет, поэтому
+   * единственный честный источник — сами данные; выдуманные названия
+   * разъехались бы с тем, что лежит в базе, и разбивка показала бы двух
+   * плательщиков вместо одного.
+   */
+  const payerNames = useMemo(() => {
+    const names = new Set<string>([DEFAULT_PAYER]);
+    for (const item of items) if (item.payer) names.add(item.payer);
+    return [...names].sort((a, b) => a.localeCompare(b, 'ru'));
+  }, [items]);
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     setSaving(true);
@@ -125,7 +166,10 @@ export default function ManualExpenseForm({
           amount: Number(amount),
           currency,
           vendorId: vendorId || null,
-          payer: payer.trim() || undefined,
+          // Служебный ключ пункта «другой» в базу попасть не должен: вместо
+          // него уходит набранное имя, а если оно пустое — роут подставит свой
+          // дефолт сам.
+          payer: (payer === OTHER_PAYER ? customPayer.trim() : payer) || undefined,
           comment: comment.trim() || undefined,
         }),
       });
@@ -198,92 +242,135 @@ export default function ManualExpenseForm({
     <div className="rounded-xl border border-zinc-200 bg-white p-3">
       <h3 className="text-sm font-semibold text-zinc-900">Ручная трата</h3>
       <p className="mt-0.5 text-xs text-zinc-500">
-        Личная карта и всё, чего нет в банковских выгрузках. Вендор выбирается сразу — тогда запись не попадёт
-        в очередь разметки.
+        Личная карта и всё, чего нет в банковских выгрузках.
       </p>
 
-      <form onSubmit={submit} className="mt-2 flex flex-wrap items-end gap-2">
-        <label className="flex flex-col gap-1 text-[11px] text-zinc-500">
-          Дата
-          <input
-            type="date"
-            value={occurredOn}
-            max={today}
-            onChange={(e) => setOccurredOn(e.target.value)}
-            required
-            className="rounded-lg border border-zinc-200 px-2 py-1 text-xs text-zinc-700"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-[11px] text-zinc-500">
-          Сумма
-          <input
-            type="number"
-            step="0.01"
-            min="0.01"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            required
-            className="w-28 rounded-lg border border-zinc-200 px-2 py-1 text-right text-xs tabular-nums text-zinc-700"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-[11px] text-zinc-500">
-          Валюта
-          <select
-            value={currency}
-            onChange={(e) => setCurrency(e.target.value)}
-            className="rounded-lg border border-zinc-200 px-2 py-1 text-xs text-zinc-700"
-          >
-            {CURRENCIES.map((code) => (
-              <option key={code} value={code}>
-                {code}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="flex flex-col gap-1 text-[11px] text-zinc-500">
-          Вендор
-          <VendorSelect
-            value={vendorId}
-            onChange={setVendorId}
-            options={vendors}
-            onCreated={onVendorCreated}
-            emptyLabel="Без вендора (уйдёт в очередь)"
-          />
-        </div>
-        <label className="flex flex-col gap-1 text-[11px] text-zinc-500">
-          Плательщик
-          <input
-            type="text"
-            value={payer}
-            onChange={(e) => setPayer(e.target.value)}
-            placeholder="ceo_personal_card"
-            className="w-36 rounded-lg border border-zinc-200 px-2 py-1 text-xs text-zinc-700"
-          />
-        </label>
-        <label className="flex min-w-[160px] flex-1 flex-col gap-1 text-[11px] text-zinc-500">
-          Комментарий
-          <input
-            type="text"
-            value={comment}
-            onChange={(e) => setComment(e.target.value)}
-            className="w-full rounded-lg border border-zinc-200 px-2 py-1 text-xs text-zinc-700"
-          />
-        </label>
-        <button
-          type="submit"
-          disabled={saving}
-          className="rounded-lg bg-zinc-900 px-3 py-1.5 text-xs text-white disabled:opacity-40"
-        >
-          {saving ? 'Сохраняю…' : 'Добавить'}
-        </button>
-      </form>
+      {/* Поля разложены по смыслу, а не в строку: одной полосой из семи контролов
+          форма не читается и на узком экране разъезжается на случайные переносы. */}
+      <form onSubmit={submit} className="mt-3 grid gap-x-4 gap-y-3 lg:grid-cols-12">
+        <fieldset className="min-w-0 lg:col-span-7">
+          <legend className={LEGEND_CLASS}>Что за трата</legend>
+          <div className="mt-1.5 grid grid-cols-2 gap-2 sm:grid-cols-[minmax(0,9.5rem)_minmax(0,1fr)_minmax(0,6.5rem)]">
+            <label className={LABEL_CLASS}>
+              Дата
+              <input
+                type="date"
+                value={occurredOn}
+                max={today}
+                onChange={(e) => setOccurredOn(e.target.value)}
+                required
+                className={FIELD_CLASS}
+              />
+            </label>
+            <label className={LABEL_CLASS}>
+              Сумма
+              <input
+                type="number"
+                step="0.01"
+                min="0.01"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                required
+                className={`${FIELD_CLASS} text-right tabular-nums`}
+              />
+            </label>
+            <label className={LABEL_CLASS}>
+              Валюта
+              <select
+                value={currency}
+                onChange={(e) => setCurrency(e.target.value)}
+                className={FIELD_CLASS}
+              >
+                {CURRENCIES.map((code) => (
+                  <option key={code} value={code}>
+                    {code}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {currency !== 'RUB' ? (
+            <p className="mt-1.5 text-[11px] text-zinc-400">
+              Курс ЦБ подтягивается ночным синком: до него трата будет видна в KPI «без курса ЦБ» и не
+              войдёт в рублёвый итог.
+            </p>
+          ) : null}
+        </fieldset>
 
-      {currency !== 'RUB' ? (
-        <p className="mt-1.5 text-[11px] text-zinc-400">
-          Курс ЦБ подтягивается ночным синком: до него трата будет видна в KPI «без курса ЦБ» и не войдёт в
-          рублёвый итог.
-        </p>
-      ) : null}
+        <fieldset className="min-w-0 lg:col-span-5">
+          <legend className={LEGEND_CLASS}>К чему относится</legend>
+          <div className="mt-1.5 max-w-sm lg:max-w-none">
+            <VendorSelect
+              value={vendorId}
+              onChange={setVendorId}
+              options={vendors}
+              onCreated={onVendorCreated}
+              emptyLabel="Без вендора"
+              emptyHint="уйдёт в очередь разметки"
+            />
+          </div>
+        </fieldset>
+
+        <fieldset className="min-w-0 lg:col-span-12">
+          <legend className={LEGEND_CLASS}>Пояснения</legend>
+          <div className="mt-1.5 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,13rem)_minmax(0,1fr)]">
+            <label className={LABEL_CLASS}>
+              Плательщик
+              <select
+                value={payer}
+                onChange={(e) => setPayer(e.target.value)}
+                className={FIELD_CLASS}
+              >
+                {payerNames.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+                <option value={OTHER_PAYER}>Другой плательщик…</option>
+              </select>
+            </label>
+            <label className={LABEL_CLASS}>
+              Комментарий
+              <input
+                type="text"
+                value={comment}
+                onChange={(e) => setComment(e.target.value)}
+                className={FIELD_CLASS}
+              />
+            </label>
+          </div>
+          {payer === OTHER_PAYER ? (
+            <div className="mt-1.5 max-w-md rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2">
+              <label className={LABEL_CLASS}>
+                Как назвать плательщика
+                <input
+                  type="text"
+                  value={customPayer}
+                  onChange={(e) => setCustomPayer(e.target.value)}
+                  placeholder="например, карта партнёра"
+                  className={`${FIELD_CLASS} bg-white sm:max-w-xs`}
+                />
+              </label>
+              <p className="mt-1 text-[11px] text-zinc-400">
+                Название попадёт в разбивку как есть — если пусто, запишем «{DEFAULT_PAYER}».
+              </p>
+            </div>
+          ) : null}
+        </fieldset>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 pt-3 lg:col-span-12">
+          <p className="text-[11px] text-zinc-400">
+            Вендор, выбранный здесь, размечает трату сразу — в очередь она не попадёт.
+          </p>
+          <button
+            type="submit"
+            disabled={saving}
+            className="rounded-lg bg-zinc-900 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70 disabled:opacity-40"
+          >
+            {saving ? 'Сохраняю…' : 'Добавить трату'}
+          </button>
+        </div>
+      </form>
 
       {error ? <div className="mt-2 text-xs text-red-600">{error}</div> : null}
       {notice ? <div className="mt-2 text-xs text-amber-700">{notice}</div> : null}
