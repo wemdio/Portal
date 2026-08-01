@@ -1703,6 +1703,29 @@ body:has(.client-portal) {
   }
 }
 
+/* Выпадающий список поля с поиском (см. components/expenses/VendorSelect).
+   Опять своя пара keyframes по той же причине, что и у блока выше. Подъём
+   меньше остальных: панель раскрывается вплотную под полем ввода, и четыре
+   пикселя смещения на таком расстоянии читаются рывком. */
+@keyframes portal-combobox-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.portal-combobox-menu {
+  animation: portal-combobox-menu-in 110ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .portal-combobox-menu {
+    animation: none;
+  }
+}
+
 /* ─── Палитра рядов графиков раздела «Деньги» ──────────────────────────────
    Цвета лежат здесь, а не константами в JS, ровно по одной причине: тёмная
    тема портала — это переопределение под `html[data-portal-theme='dark']

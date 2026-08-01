@@ -19,6 +19,24 @@ export const CATEGORY_LABELS: Record<ExpenseCategory, string> = {
   other: 'Прочее',
 };
 
+/**
+ * Вендор в выпадающем списке разметки.
+ *
+ * Живёт здесь, а не рядом с компонентом выбора: список собирает `ExpensesView`,
+ * читает его очередь разметки и форма ручной траты, а группирует — чистая
+ * функция в `vendorPicker.ts`. Тип, объявленный внутри `'use client'`-компонента,
+ * втягивал бы за собой всю эту цепочку.
+ *
+ * `category` — обязательное поле с допустимым `null`, а не необязательное:
+ * группировка по категориям без неё молча схлопывается в одну кучу «без
+ * категории», и заметить это можно только глазами на живом списке.
+ */
+export interface VendorOption {
+  id: string;
+  name: string;
+  category: ExpenseCategory | null;
+}
+
 /** Строка витрины expenses_v. */
 export interface ExpenseRow {
   source: ExpenseSource;

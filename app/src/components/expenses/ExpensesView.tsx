@@ -9,9 +9,8 @@ import ManualExpenseForm from '@/components/expenses/ManualExpenseForm';
 import type { PeriodValue } from '@/components/expenses/PeriodBar';
 import TimeChart from '@/components/expenses/TimeChart';
 import VendorBreakdown from '@/components/expenses/VendorBreakdown';
-import type { VendorOption } from '@/components/expenses/VendorSelect';
 import { expensesDownload, expensesFetch } from '@/lib/expenses/client';
-import type { ExpensesSummary, VendorBreakdownItem } from '@/lib/expenses/types';
+import type { ExpensesSummary, VendorBreakdownItem, VendorOption } from '@/lib/expenses/types';
 
 /**
  * Расходная сторона раздела «Деньги».
@@ -90,15 +89,17 @@ export default function ExpensesView({
     };
   }, [query, reloadKey]);
 
+  // Категория едет вместе с вендором: по ней выпадающий список группируется, и
+  // без неё все два десятка вендоров сваливаются в кучу «без категории».
   const vendorOptions = useMemo(() => {
-    const byId = new Map<string, string>();
+    const byId = new Map<string, VendorOption>();
     for (const item of vendors) {
-      if (item.vendorId) byId.set(item.vendorId, item.vendorName);
+      if (item.vendorId) {
+        byId.set(item.vendorId, { id: item.vendorId, name: item.vendorName, category: item.category });
+      }
     }
-    for (const item of createdVendors) byId.set(item.id, item.name);
-    return [...byId.entries()]
-      .map(([id, name]) => ({ id, name }))
-      .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    for (const item of createdVendors) byId.set(item.id, item);
+    return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name, 'ru'));
   }, [vendors, createdVendors]);
 
   const addVendor = (vendor: VendorOption) =>
