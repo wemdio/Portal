@@ -17,7 +17,7 @@
 import { z } from 'zod';
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
-import { callLLMText, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
+import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
 import { buildChainCriticMessages, buildChainMessages, buildChainRewriteMessages } from '../prompts/chain';
 import { getWinnerPatterns, matchSegmentLabels, type HeWinnerPattern } from '../datasetStats';
 import { selectCaseForVertical, type HeCase } from '../caseBank';
@@ -280,7 +280,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   });
 
   const model = getHeModel('chain');
-  let llm = await callLLMText(messages, { model, maxTokens: 6144 });
+  let llm = await callLLMTextWithFallback(messages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
   addUsage(usage, llm);
   let { parsed, letters } = buildChainLetters(llm.text);
 
@@ -291,15 +291,19 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       { role: 'assistant', content: llm.text.slice(0, 2000) },
       { role: 'user', content: RETRY_HINT },
     ];
-    llm = await callLLMText(retryMessages, { model, maxTokens: 6144 });
+    llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
     addUsage(usage, llm);
     ({ parsed, letters } = buildChainLetters(llm.text));
   }
   if (parsed.length < 3) {
     // Диагностика в ошибку (пишется в he_jobs.error): начало сырого ответа,
-    // чтобы по проду было видно формат без реплея.
+    // чтобы по проду было видно формат без реплея. Отдельно размечаем отказ
+    // по контентной политике (регулируемые ниши: крипто, финансы и т.п.).
     const debug = llm.text.replace(/\s+/g, ' ').slice(0, 300);
-    throw new Error(`Цепочка не распарсилась: ${parsed.length} писем после retry. Ответ модели: ${debug}`);
+    const refusal = llm.finishReason === 'content_filter' || llm.text.length < 20
+      ? ` Модель, похоже, отклонила генерацию по контентной политике (finish=${llm.finishReason ?? 'n/a'}): чувствительная ниша клиента — попробуйте переписать оффер/бриф нейтральнее или другую модель (HE_MODEL_CHAIN/HE_MODEL_CHAIN_FALLBACK).`
+      : '';
+    throw new Error(`Цепочка не распарсилась: ${parsed.length} писем после retry.${refusal} Ответ модели: ${debug}`);
   }
 
   // Критик-луп: одна оценка цепочки той же моделью, что и генерация
@@ -322,7 +326,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
         winnerPatterns,
       }),
       HeChainCritiqueSchema,
-      { model, maxTokens: 2048 },
+      { model, maxTokens: 4096 },
     );
     addUsage(usage, critique);
     // letter_index вне 1..letters.length — галлюцинация критика: отбрасываем
@@ -342,7 +346,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
           styleExample,
           winnerPatterns,
         }),
-        { model, maxTokens: 6144 },
+        { model, maxTokens: 16384 },
       );
       addUsage(usage, rewrite);
       // Рерайт выводит только основной вариант (---LETTER N B--- блоков в
