@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react
 
 import VendorSelect from '@/components/expenses/VendorSelect';
 import { expensesFetch, formatMoney, mskToday } from '@/lib/expenses/client';
-import { DEFAULT_PAYER, payerLabel } from '@/lib/expenses/labels';
+import { DEFAULT_PAYER } from '@/lib/expenses/labels';
 import type { VendorOption } from '@/lib/expenses/types';
 import { useUser } from '@/lib/UserProvider';
 
@@ -25,11 +25,12 @@ const CURRENCIES = ['RUB', 'USD', 'EUR', 'KZT', 'CNY', 'GBP'];
  * Значение пункта «другой плательщик» в списке.
  *
  * Справочника плательщиков на бэкенде нет: `manual_expenses.payer` — свободный
- * текст с дефолтом `ceo_personal_card`, и придумывать за него ключи вроде
- * `cash` значило бы заводить словарь, которого никто не поддерживает. Поэтому
- * список собирается из того, что уже лежит в базе, а этот пункт открывает поле
- * для нового значения. В теле запроса он не появляется никогда — на сабмите на
- * его место подставляется набранный текст.
+ * текст, и хранится там сразу человеческое название («Личная карта CEO»), а не
+ * ключ: витрина `expenses_v` подставляет это поле в контрагента, где служебной
+ * строке делать нечего. Поэтому список собирается из того, что уже лежит в
+ * базе, а этот пункт открывает поле для нового названия. В теле запроса он не
+ * появляется никогда — на сабмите на его место подставляется набранный текст,
+ * и служебное значение выбрано так, чтобы не столкнуться с настоящим именем.
  */
 const OTHER_PAYER = '__other__';
 
@@ -53,16 +54,9 @@ interface EditDraft {
 function matchesSearch(item: ManualExpense, search: string): boolean {
   const needle = search.trim().toLowerCase();
   if (!needle) return true;
-  // Плательщик ищется и по ключу, и по подписи: в списке видна «Личная карта
-  // CEO», и искать её по `ceo_personal_card` человек не станет.
-  return [
-    item.occurred_on,
-    String(item.amount),
-    item.currency,
-    item.payer,
-    payerLabel(item.payer),
-    item.comment ?? '',
-  ]
+  // Плательщик ищется по тому же тексту, что виден в списке: в базе лежит
+  // название, а не ключ, и второго написания у него нет.
+  return [item.occurred_on, String(item.amount), item.currency, item.payer, item.comment ?? '']
     .join(' ')
     .toLowerCase()
     .includes(needle);
@@ -147,15 +141,16 @@ export default function ManualExpenseForm({
   }, [range.from, range.to, reloadKey]);
 
   /**
-   * Ключи плательщиков для списка: дефолт роута плюс всё, что уже встречалось в
-   * записях за период. Справочника у бэкенда нет, поэтому единственный честный
-   * источник — сами данные; выдуманные ключи разъехались бы с тем, что лежит в
-   * базе, и разбивка показала бы двух плательщиков вместо одного.
+   * Названия плательщиков для списка: дефолт роута плюс всё, что уже
+   * встречалось в записях за период. Справочника у бэкенда нет, поэтому
+   * единственный честный источник — сами данные; выдуманные названия
+   * разъехались бы с тем, что лежит в базе, и разбивка показала бы двух
+   * плательщиков вместо одного.
    */
-  const payerKeys = useMemo(() => {
-    const keys = new Set<string>([DEFAULT_PAYER]);
-    for (const item of items) if (item.payer) keys.add(item.payer);
-    return [...keys].sort((a, b) => payerLabel(a).localeCompare(payerLabel(b), 'ru'));
+  const payerNames = useMemo(() => {
+    const names = new Set<string>([DEFAULT_PAYER]);
+    for (const item of items) if (item.payer) names.add(item.payer);
+    return [...names].sort((a, b) => a.localeCompare(b, 'ru'));
   }, [items]);
 
   async function submit(e: FormEvent) {
@@ -326,9 +321,9 @@ export default function ManualExpenseForm({
                 onChange={(e) => setPayer(e.target.value)}
                 className={FIELD_CLASS}
               >
-                {payerKeys.map((key) => (
-                  <option key={key} value={key}>
-                    {payerLabel(key)}
+                {payerNames.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
                   </option>
                 ))}
                 <option value={OTHER_PAYER}>Другой плательщик…</option>
@@ -357,7 +352,7 @@ export default function ManualExpenseForm({
                 />
               </label>
               <p className="mt-1 text-[11px] text-zinc-400">
-                Название попадёт в разбивку как есть — если пусто, запишем «{payerLabel(DEFAULT_PAYER)}».
+                Название попадёт в разбивку как есть — если пусто, запишем «{DEFAULT_PAYER}».
               </p>
             </div>
           ) : null}
@@ -481,7 +476,7 @@ export default function ManualExpenseForm({
                   <td className="py-1.5 pl-3 text-zinc-500">
                     <span className="line-clamp-2">{item.comment ?? '—'}</span>
                     <span className="text-[10px] text-zinc-400">
-                      {payerLabel(item.payer)}
+                      {item.payer}
                       {userId && item.created_by !== userId ? ' · запись другого пользователя' : ''}
                     </span>
                   </td>
