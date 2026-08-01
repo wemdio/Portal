@@ -282,20 +282,21 @@ export async function callLLMText(
 }
 
 /**
- * callLLMText с запасной моделью на случай контентного отказа основной.
- * Повторяет вызов на fallbackModel, если основная вернула пустой/короткий
- * текст (< minChars) или finish_reason='content_filter' (типично для
- * регулируемых ниш: крипто, финансы и т.п. — модель молча отказывает).
+ * callLLMText с ОПЦИОНАЛЬНОЙ запасной моделью. По умолчанию fallback НЕТ:
+ * решение владельца — лучше честная ошибка, чем тихая подмена модели.
+ * Включается только явно: opts.fallbackModel или env HE_MODEL_CHAIN_FALLBACK.
+ * Условие повтора: основная вернула пустой/короткий текст (< minChars)
+ * или finish_reason='content_filter'.
  */
 export async function callLLMTextWithFallback(
   messages: LLMMessage[],
   opts: { model: string; maxTokens?: number; fallbackModel?: string; minChars?: number; log?: (msg: string) => void },
 ): Promise<LLMTextResult> {
   const minChars = opts.minChars ?? 20;
-  const fallbackModel = (opts.fallbackModel ?? process.env.HE_MODEL_CHAIN_FALLBACK ?? '').trim() || 'openai/gpt-5.2';
+  const fallbackModel = (opts.fallbackModel ?? process.env.HE_MODEL_CHAIN_FALLBACK ?? '').trim();
   const first = await callLLMText(messages, opts);
   const refused = first.finishReason === 'content_filter' || first.text.length < minChars;
-  if (!refused || fallbackModel === opts.model) return first;
+  if (!refused || !fallbackModel || fallbackModel === opts.model) return first;
   opts.log?.(`[llm] ${opts.model}: отказ или пустой ответ (finish=${first.finishReason ?? 'n/a'}, len=${first.text.length}) — повтор на ${fallbackModel}`);
   const second = await callLLMText(messages, { ...opts, model: fallbackModel });
   // Суммируем стоимость обоих вызовов, текст — от успешного.
