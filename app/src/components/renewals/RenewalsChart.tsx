@@ -69,14 +69,21 @@ export default function RenewalsChart({ series, groupBy }: { series: RenewalSeri
             />
             <Legend align="right" wrapperStyle={{ fontSize: 11, paddingRight: 8 }} />
             <Bar yAxisId="count" dataKey="count" name="Продлений" fill="#d4d4d8" radius={[3, 3, 0, 0]} barSize={18} />
+            {/* linear, а не monotone: сглаженный сплайн между помесячными
+                суммами рисует значения, которых не существует, и вдобавок
+                выгибается выше фактического максимума. Продление — событие
+                дискретное; ломаная честно говорит «вот точки, между ними мы
+                ничего не знаем». Точки показываем — при 32 продлениях за всю
+                историю месяцев с данными мало, и без них ломаная читается как
+                непрерывный процесс. */}
             <Line
               yAxisId="revenue"
-              type="monotone"
+              type="linear"
               dataKey="revenue"
               name="Оборот, ₽"
               stroke="#059669"
               strokeWidth={2}
-              dot={false}
+              dot={{ r: 2.5, fill: '#059669', strokeWidth: 0 }}
             />
           </ComposedChart>
         </ResponsiveContainer>
