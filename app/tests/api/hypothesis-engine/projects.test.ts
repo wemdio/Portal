@@ -181,6 +181,66 @@ describe('GET /api/tools/hypothesis-engine/projects/[id] — bases projection', 
     expect(basesSelect?.columns).toContain('source');
     expect(basesSelect?.columns).toContain('collect_info');
   });
+
+  it('strips the heavy per-task harvest from collect_info before responding', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_projects: [
+          { id: 'p1', name: 'One', website_url: 'https://one.example/', status: 'draft' },
+        ],
+        he_hypotheses: [],
+        he_verticals: [],
+        he_bases: [
+          {
+            id: 'b1',
+            project_id: 'p1',
+            vertical_id: 'v1',
+            source: 'auto',
+            status: 'collecting',
+            collect_info: {
+              limit: 10000,
+              plan: { tasks: [{ source: 'hh', rationale: 'найм' }] },
+              tasks: [
+                {
+                  source: 'hh',
+                  status: 'done',
+                  rows: 2,
+                  // Полный предмерж-харвест задачи (в бою — до 50k строк):
+                  // рабочее состояние воркера, в деталку проекта не отдаём.
+                  harvest: [{ company: 'АС' }, { company: 'ББ' }],
+                },
+                { source: 'companies_directory', status: 'pending' },
+              ],
+            },
+          },
+        ],
+        he_jobs: [],
+        he_vertical_dossiers: [],
+        he_cases: [],
+      },
+    });
+
+    const res = await GET_PROJECT_DETAIL(makeReq(undefined, 'GET'), patchParams);
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as {
+      bases: Array<{
+        id: string;
+        collect_info: {
+          limit?: number;
+          plan?: unknown;
+          tasks: Array<Record<string, unknown>>;
+        };
+      }>;
+    };
+    const info = body.bases[0].collect_info;
+    // Прогресс-карта целиком на месте — вырезан только harvest.
+    expect(info.limit).toBe(10000);
+    expect(info.plan).toEqual({ tasks: [{ source: 'hh', rationale: 'найм' }] });
+    expect(info.tasks).toHaveLength(2);
+    expect(info.tasks[0]).toEqual(expect.objectContaining({ source: 'hh', status: 'done', rows: 2 }));
+    for (const task of info.tasks) expect(task).not.toHaveProperty('harvest');
+  });
 });
 
 describe('PATCH /api/tools/hypothesis-engine/projects/[id] — validation', () => {
