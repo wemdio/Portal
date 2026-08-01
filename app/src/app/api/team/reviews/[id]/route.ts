@@ -8,8 +8,10 @@ import {
   loadInternalProfiles,
   logMeta,
   parseReviewInput,
+  REVIEW_PROJECTION,
   reviewToApi,
   validateInternalEmployee,
+  validateReviewUpdate,
   type EmployeeReviewRow,
 } from '../helpers';
 
@@ -25,7 +27,6 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
   const { actor } = auth;
-  if (!actor.canManage) return jsonError('Forbidden', 403);
 
   let body: unknown;
   try {
@@ -45,12 +46,10 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
   }
 
   const { id } = await context.params;
-  const projection =
-    'id, review_date, employee_user_id, reviewer_user_id, outcomes, problems, recommendations, created_at, updated_at';
 
   const { data: existing, error: existingError } = await supabaseAdmin
     .from('employee_reviews')
-    .select(projection)
+    .select(REVIEW_PROJECTION)
     .eq('id', id)
     .maybeSingle();
 
@@ -64,6 +63,12 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
     return jsonError('Failed to load review', 500);
   }
   if (!existing) return jsonError('Review not found', 404);
+
+  const lifecycleError = validateReviewUpdate(
+    existing as EmployeeReviewRow,
+    parsed.value,
+  );
+  if (lifecycleError) return jsonError(lifecycleError, 400);
 
   const { error: updateError } = await supabaseAdmin
     .from('employee_reviews')
@@ -82,7 +87,7 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
 
   const { data: updated, error: updatedError } = await supabaseAdmin
     .from('employee_reviews')
-    .select(projection)
+    .select(REVIEW_PROJECTION)
     .eq('id', id)
     .single();
 

@@ -1,6 +1,9 @@
 import type { ReactNode } from 'react';
 import { render, screen } from '@testing-library/react';
 import { Sidebar } from '@/components/Sidebar';
+import type { UserRole } from '@/types';
+
+let mockUserRole: UserRole = 'technician';
 
 jest.mock('next/link', () => {
   const MockLink = ({ children, href }: { children: ReactNode; href: string }) => {
@@ -16,7 +19,7 @@ jest.mock('next/link', () => {
 
 jest.mock('@/lib/UserProvider', () => ({
   useUser: () => ({
-    userRole: 'technician',
+    userRole: mockUserRole,
     userEmail: 'test@example.com',
     userFullName: 'Test User',
     userAvatarUrl: null,
@@ -29,13 +32,27 @@ jest.mock('@/lib/UserProvider', () => ({
 }));
 
 describe('Sidebar Component', () => {
-  it('should render navigation items', () => {
-    render(<Sidebar />);
+  beforeEach(() => {
+    mockUserRole = 'technician';
+  });
+
+  it('should render navigation items available to a technician', () => {
+    const { container } = render(<Sidebar />);
 
     expect(screen.getByText('Проекты')).toBeInTheDocument();
-    expect(screen.getByText('Команда')).toBeInTheDocument();
     expect(screen.getByText('Регламент')).toBeInTheDocument();
+    expect(container.querySelector('a[href="/team"]')).not.toBeInTheDocument();
   });
+
+  it.each<UserRole>(['lead', 'director', 'admin'])(
+    'should render the team link for leadership role %s',
+    (role) => {
+      mockUserRole = role;
+      const { container } = render(<Sidebar />);
+
+      expect(container.querySelector('a[href="/team"]')).toBeInTheDocument();
+    },
+  );
 
   it('should not render admin link for non-admin users', () => {
     render(<Sidebar />);

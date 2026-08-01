@@ -92,6 +92,18 @@ export function extractLetterBVariants(raw: string): LetterBExtraction {
   const letterNums = [
     ...new Set([...raw.matchAll(/---\s*LETTER\s*(\d+)\s*---/gi)].map((m) => Number(m[1]))),
   ].sort((a, b) => a - b);
+
+  // Деградация: основных маркеров ---LETTER N--- нет вообще — модель пометила
+  // ВСЕ блоки как B (случай из прода: вырезание давало пустой текст и
+  // «0 писем после retry»). Тогда трактуем B-маркеры как основные письма:
+  // меняем их на ---LETTER N--- и парсим дальше как обычную цепочку.
+  if (letterNums.length === 0) {
+    return {
+      cleaned: raw.replace(/---\s*LETTER\s*(\d+)\s*B\s*---/gi, '---LETTER $1---'),
+      variants: new Map(),
+    };
+  }
+
   const reindex = new Map<number, number>(letterNums.map((n, i) => [n, i + 1] as [number, number]));
 
   const variants = new Map<number, HeChainLetterVariant>();
@@ -284,7 +296,10 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
     ({ parsed, letters } = buildChainLetters(llm.text));
   }
   if (parsed.length < 3) {
-    throw new Error(`Цепочка не распарсилась: ${parsed.length} писем после retry`);
+    // Диагностика в ошибку (пишется в he_jobs.error): начало сырого ответа,
+    // чтобы по проду было видно формат без реплея.
+    const debug = llm.text.replace(/\s+/g, ' ').slice(0, 300);
+    throw new Error(`Цепочка не распарсилась: ${parsed.length} писем после retry. Ответ модели: ${debug}`);
   }
 
   // Критик-луп: одна оценка цепочки той же моделью, что и генерация

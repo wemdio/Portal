@@ -5,10 +5,13 @@ import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/
 
 let mockMainDb: MockSupabaseClient | null = null;
 const mockGetUser = jest.fn();
-const mockIsInternalUser = jest.fn();
+const mockIsLeadershipUser = jest.fn();
 
 jest.mock('@/lib/auth/internalGuard', () => ({
-  isInternalUser: (...args: unknown[]) => mockIsInternalUser(...args),
+  isInternalUser: () => {
+    throw new Error('Team statistics must use isLeadershipUser');
+  },
+  isLeadershipUser: (...args: unknown[]) => mockIsLeadershipUser(...args),
 }));
 
 jest.mock('@/lib/supabaseRouteClient', () => ({
@@ -36,8 +39,8 @@ describe('GET /api/team/statistics', () => {
     jest.setSystemTime(new Date('2026-07-29T12:00:00.000Z'));
     jest.resetModules();
     mockGetUser.mockReset();
-    mockIsInternalUser.mockReset();
-    mockIsInternalUser.mockResolvedValue(true);
+    mockIsLeadershipUser.mockReset();
+    mockIsLeadershipUser.mockResolvedValue(true);
     mockGetUser.mockResolvedValue({
       data: { user: { id: 'lead-a' } },
       error: null,
@@ -91,6 +94,7 @@ describe('GET /api/team/statistics', () => {
     const res = await GET(makeReq('period=month&anchor=2026-07-29'));
 
     expect(res.status).toBe(200);
+    expect(mockIsLeadershipUser).toHaveBeenCalledWith(expect.anything(), 'lead-a');
     const body = await res.json();
     expect(body).toEqual({
       period: {
@@ -299,8 +303,8 @@ describe('GET /api/team/statistics', () => {
     expect((await GET(makeReq('period=month&anchor=2026-07-29'))).status).toBe(401);
   });
 
-  it('denies client and demo accounts before the admin history read', async () => {
-    mockIsInternalUser.mockResolvedValueOnce(false);
+  it('denies callers without leadership access before the admin history read', async () => {
+    mockIsLeadershipUser.mockResolvedValueOnce(false);
     const { GET } = await import('@/app/api/team/statistics/route');
     const res = await GET(makeReq('period=month&anchor=2026-07-29'));
 
