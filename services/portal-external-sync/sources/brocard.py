@@ -53,7 +53,7 @@ import json
 import os
 import traceback
 from collections.abc import Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import NamedTuple
 
 import asyncpg
@@ -75,6 +75,17 @@ API_KEY_ENV = "BROCARD_API_KEY"
 #: названием, и тогда синк должен подхватить обе, а не одну зашитую.
 CARD_TITLE_ENV = "BROCARD_CARD_TITLE"
 DEFAULT_CARD_TITLE = "ХОНГ Покупки"
+
+#: Начало запрашиваемого периода.
+#:
+#: Без явного диапазона Brocard отдаёт только недавнее, и делает это молча:
+#: `/payments` без `dates[]` вернул 252 платежа вместо 2328 за всю историю.
+#: На первом прогоне это стоило четверти движений — их не с чем было связать,
+#: поэтому они ушли в `card_unverified`, — и мерчанта у 162 записей из 178.
+#:
+#: Имя параметра именно `dates[begin]` / `dates[end]`: вариант `date[begin]`
+#: принимается без ошибки и молча игнорируется, оставляя окно по умолчанию.
+HISTORY_BEGIN = "2020-01-01"
 
 #: Потолок пагинации — API отдаёт до 1000 записей на страницу.
 PER_PAGE = 1000
@@ -243,6 +254,11 @@ def parse_datetime(value: object) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=MSK_TZ)
+
+
+def period_params() -> dict[str, str]:
+    """Диапазон дат для обеих ручек Brocard — см. `HISTORY_BEGIN`."""
+    return {"dates[begin]": HISTORY_BEGIN, "dates[end]": date.today().isoformat()}
 
 
 def index_payments(payments: list[dict]) -> dict[str, dict]:
@@ -586,7 +602,12 @@ class BrocardSync(SyncSource):
             # Платежи читаются целиком и без фильтра по карте: серверный
             # фильтр проверен и не работает, а полный индекс нужен ещё и
             # затем, чтобы опознавать чужие карты (см. owner_card).
-            payments = await fetch_all_pages(client, PAYMENTS_URL, label="payments")
+            #
+            # Диапазон дат обязателен: без него ручка отдаёт только недавнее
+            # и молча (см. HISTORY_BEGIN).
+            payments = await fetch_all_pages(
+                client, PAYMENTS_URL, period_params(), label="payments"
+            )
             payments_by_id = index_payments(payments)
             print(
                 f"[brocard] платежей в аккаунте: {len(payments_by_id)}",
@@ -628,7 +649,7 @@ class BrocardSync(SyncSource):
         movements = await fetch_all_pages(
             client,
             BALANCE_HISTORY_URL,
-            {"card": card.id},
+            {"card": card.id, **period_params()},
             label=f"balance/history card={card.id}",
         )
 

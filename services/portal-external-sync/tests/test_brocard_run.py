@@ -184,6 +184,31 @@ async def test_api_key_goes_into_the_authorization_header(monkeypatch):
     assert captured["Authorization"] == f"Bearer {API_KEY}"
 
 
+# ── Диапазон дат ──────────────────────────────────────────────────────────
+
+
+async def test_both_endpoints_ask_for_the_full_period():
+    """Без явного диапазона Brocard отдаёт только недавнее, и делает это молча.
+
+    На первом боевом прогоне `/payments` без `dates[]` вернул 252 платежа
+    вместо 2328: четверть движений оказалась не с чем связать, а у 162 записей
+    из 178 не было мерчанта — то есть разбивка по сервисам почти пустая.
+
+    Имя параметра тоже проверено на живом API: `date[begin]` принимается без
+    ошибки и молча игнорируется, оставляя окно по умолчанию.
+    """
+    conn = _FakeConn()
+    await BrocardSync().run(conn)
+
+    for url in (brocard.PAYMENTS_URL, brocard.BALANCE_HISTORY_URL):
+        asked = [p for u, p in _FakeClient.requests if u == url]
+        assert asked, f"не было ни одного запроса к {url}"
+        for params in asked:
+            assert params.get("dates[begin]") == brocard.HISTORY_BEGIN
+            assert params.get("dates[end]")
+            assert "date[begin]" not in params
+
+
 # ── Пагинация ─────────────────────────────────────────────────────────────
 
 
