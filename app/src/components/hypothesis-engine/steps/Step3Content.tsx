@@ -7,17 +7,6 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
-import {
-  ArrowRight,
-  BarChart3,
-  BookOpen,
-  Check,
-  Copy,
-  Mail,
-  Pencil,
-  Plus,
-  Search,
-} from 'lucide-react';
 import type {
   HeChainLanguage,
   HeCompanyType,
@@ -41,7 +30,8 @@ import type {
   HeJobSummary,
   HeLetterVariant,
 } from '../api';
-import { Badge, PotentialBadge, Spinner, StatusBox, type BadgeTone } from '../ui';
+import { HE, Spinner } from '../design';
+import { Badge, PotentialBadge, StatusBox, type BadgeTone } from '../ui';
 
 const LANG_OPTIONS: Array<{ value: HeChainLanguage; label: string }> = [
   { value: 'ru', label: 'RU' },
@@ -376,27 +366,26 @@ export function Step3Content(props: {
       </header>
 
       {/* Блок A: цепочка писем (черновик) */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+      <section className={`${HE.card} ${HE.cardPad}`}>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <Mail className="h-4 w-4 text-gray-400" aria-hidden />
-              <h3 className="text-sm font-semibold text-gray-800">Цепочка писем (черновик)</h3>
+              <h3 className={HE.secTitle}>Цепочка писем (черновик)</h3>
               {chain ? (
                 <Badge tone="blue">{LANG_LABEL[chain.language] ?? chain.language.toUpperCase()}</Badge>
               ) : null}
             </div>
-            <p className="mt-1 text-xs text-gray-400">
+            <p className={`mt-1 text-xs ${HE.muted}`}>
               Мастер-черновик. В рассылку не идёт — основа для шаблона.
             </p>
           </div>
-          <div className="inline-flex shrink-0 items-center overflow-hidden rounded-lg border border-gray-200">
+          <div className="flex shrink-0 items-center gap-2">
             <select
               value={language}
               onChange={(e) => setLanguage(e.target.value as HeChainLanguage)}
               disabled={chainBusy}
               aria-label="Язык цепочки"
-              className="h-9 border-r border-gray-200 bg-gray-50 px-2 text-xs font-medium text-gray-600 focus:outline-none disabled:opacity-50"
+              className="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs font-medium text-gray-600 focus:outline-none disabled:opacity-50"
             >
               {LANG_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>
@@ -410,13 +399,9 @@ export function Step3Content(props: {
                 if (requestEditorExit('regenerate')) onGenerateChain(language);
               }}
               disabled={chainBusy}
-              className="inline-flex h-9 items-center gap-1.5 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              className={`${HE.btnGhost} inline-flex items-center justify-center gap-1.5`}
             >
-              {chainBusy ? (
-                <Spinner className="h-3.5 w-3.5" />
-              ) : (
-                <Mail className="h-3.5 w-3.5" aria-hidden />
-              )}
+              {chainBusy ? <Spinner className="h-3.5 w-3.5" /> : null}
               {chainFailed ? 'Попробовать снова' : chain ? 'Перегенерировать' : 'Сгенерировать'}
             </button>
           </div>
@@ -477,32 +462,26 @@ export function Step3Content(props: {
                   ? variants[0]
                   : { subject: letter.subject, body: letter.body };
               return (
-                <li key={idx} className="rounded-lg border border-gray-200 bg-gray-50/50 p-4">
-                  <div className="mb-2 flex flex-wrap items-center gap-2">
-                    <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-100 text-[11px] font-bold text-blue-700">
-                      {idx + 1}
+                <li key={idx} className={`${HE.card} p-4`}>
+                  <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                    <span className={`${HE.muted2} text-[11px] font-medium uppercase tracking-wider`}>
+                      Письмо {idx + 1}
+                      {letter.wait_days > 0 ? ` · через ${letter.wait_days} дн.` : ''}
                     </span>
                     {shown.subject ? (
                       <p className="text-sm font-semibold text-gray-900">{shown.subject}</p>
                     ) : (
                       <p className="text-sm italic text-gray-400">Без темы</p>
                     )}
-                    {letter.wait_days > 0 ? (
-                      <span className="text-[11px] text-gray-400">через {letter.wait_days} дн.</span>
-                    ) : null}
-                    <span className="ml-auto inline-flex items-center gap-1">
+                    <span className="ml-auto inline-flex items-center gap-3">
                       <button
                         type="button"
                         onClick={() => copyLetter(idx, shown.subject, shown.body)}
                         title="Скопировать письмо"
                         aria-label="Скопировать письмо"
-                        className="inline-flex h-8 w-8 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
+                        className={HE.btnQuiet}
                       >
-                        {copiedIdx === idx ? (
-                          <Check className="h-3.5 w-3.5 text-emerald-500" aria-hidden />
-                        ) : (
-                          <Copy className="h-3.5 w-3.5" aria-hidden />
-                        )}
+                        {copiedIdx === idx ? '✓' : 'Скопировать'}
                       </button>
                       <button
                         type="button"
@@ -510,15 +489,15 @@ export function Step3Content(props: {
                         disabled={lettersSaving || chainBusy}
                         title="Редактировать письмо"
                         aria-label="Редактировать письмо"
-                        className="inline-flex h-8 w-8 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50"
+                        className={HE.btnQuiet}
                       >
-                        <Pencil className="h-3.5 w-3.5" aria-hidden />
+                        Править
                       </button>
                     </span>
                   </div>
                   {variants.length > 0 ? (
                     <div className="mb-2 flex flex-wrap items-center gap-1.5">
-                      <div className="inline-flex items-center overflow-hidden rounded-md border border-gray-200">
+                      <div className="inline-flex items-center gap-1">
                         {(['A', 'B'] as const).map((side, sideIdx) => (
                           <button
                             key={side}
@@ -529,10 +508,8 @@ export function Step3Content(props: {
                               if (!requestEditorExit('swapVariant')) return;
                               setVariantView({ key: chainKey, map: { ...viewMap, [idx]: sideIdx } });
                             }}
-                            className={`px-2 py-0.5 text-[11px] font-semibold transition disabled:opacity-50 ${
-                              view === sideIdx
-                                ? 'bg-blue-600 text-white'
-                                : 'bg-white text-gray-500 hover:bg-gray-100'
+                            className={`${HE.btnSmall} ${
+                              view === sideIdx ? 'border-blue-600! text-blue-600!' : ''
                             }`}
                           >
                             {side}
@@ -550,7 +527,7 @@ export function Step3Content(props: {
                             type="button"
                             disabled={variantBusy !== null}
                             onClick={() => void makeVariantPrimary(idx)}
-                            className="text-[11px] font-medium text-blue-600 transition hover:text-blue-700 disabled:opacity-50"
+                            className={HE.btnQuiet}
                           >
                             {variantBusy === idx ? 'Сохраняем…' : 'сделать основным'}
                           </button>
@@ -558,7 +535,7 @@ export function Step3Content(props: {
                       )}
                     </div>
                   ) : null}
-                  <p className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700">
+                  <p className="whitespace-pre-wrap text-[13.5px] leading-relaxed text-gray-700">
                     {shown.body}
                   </p>
                 </li>
@@ -572,33 +549,26 @@ export function Step3Content(props: {
               type="button"
               onClick={() => void addLetter()}
               disabled={lettersSaving || chainBusy || letters.length >= 6}
-              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-dashed border-gray-300 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              className={`${HE.btnGhost} inline-flex items-center justify-center gap-1.5`}
             >
-              {lettersSaving ? (
-                <Spinner className="h-3.5 w-3.5" />
-              ) : (
-                <Plus className="h-3.5 w-3.5" aria-hidden />
-              )}
+              {lettersSaving ? <Spinner className="h-3.5 w-3.5" /> : null}
               Добавить письмо
             </button>
           </div>
         ) : null}
         {!chain && !chainBusy && !chainFailed ? (
-          <p className="mt-4 text-xs text-gray-400">
+          <p className={`mt-4 text-xs ${HE.muted}`}>
             Цепочки пока нет — выберите язык и нажмите «Сгенерировать».
           </p>
         ) : null}
       </section>
 
       {/* Блок B: вокабуляр для сбора базы */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+      <section className={`${HE.card} ${HE.cardPad}`}>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <BookOpen className="h-4 w-4 text-gray-400" aria-hidden />
-              <h3 className="text-sm font-semibold text-gray-800">Вокабуляр для сбора базы</h3>
-            </div>
-            <p className="mt-1 text-xs text-gray-400">
+            <h3 className={HE.secTitle}>Вокабуляр для сбора базы</h3>
+            <p className={`mt-1 text-xs ${HE.muted}`}>
               Технический слой: по этим терминам ищем компании и должности в HH/картах/реестрах. В
               письмах не используется.
             </p>
@@ -607,13 +577,9 @@ export function Step3Content(props: {
             type="button"
             onClick={onGenerateVocab}
             disabled={vocabBusy}
-            className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            className={`${HE.btnGhost} shrink-0 inline-flex items-center justify-center gap-1.5`}
           >
-            {vocabBusy ? (
-              <Spinner className="h-3.5 w-3.5" />
-            ) : (
-              <BookOpen className="h-3.5 w-3.5" aria-hidden />
-            )}
+            {vocabBusy ? <Spinner className="h-3.5 w-3.5" /> : null}
             {vocabFailed ? 'Попробовать снова' : vocab ? 'Перегенерировать' : 'Сгенерировать'}
           </button>
         </div>
@@ -642,19 +608,16 @@ export function Step3Content(props: {
           </div>
         ) : null}
         {!vocab && !vocabBusy && !vocabFailed ? (
-          <p className="mt-4 text-xs text-gray-400">Вокабуляра пока нет — нажмите «Сгенерировать».</p>
+          <p className={`mt-4 text-xs ${HE.muted}`}>Вокабуляра пока нет — нажмите «Сгенерировать».</p>
         ) : null}
       </section>
 
       {/* Блок C: досье вертикали — объективные числа сегмента */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+      <section className={`${HE.card} ${HE.cardPad}`}>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-gray-400" aria-hidden />
-              <h3 className="text-sm font-semibold text-gray-800">Досье вертикали</h3>
-            </div>
-            <p className="mt-1 text-xs text-gray-400">
+            <h3 className={HE.secTitle}>Досье вертикали</h3>
+            <p className={`mt-1 text-xs ${HE.muted}`}>
               Объективные числа сегмента: наша директория, hh.ru, статистика наших кампаний.
             </p>
           </div>
@@ -663,13 +626,9 @@ export function Step3Content(props: {
               type="button"
               onClick={onBuildDossier}
               disabled={dossierBusy}
-              className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              className={`${HE.btnGhost} shrink-0 inline-flex items-center justify-center gap-1.5`}
             >
-              {dossierBusy ? (
-                <Spinner className="h-3.5 w-3.5" />
-              ) : (
-                <BarChart3 className="h-3.5 w-3.5" aria-hidden />
-              )}
+              {dossierBusy ? <Spinner className="h-3.5 w-3.5" /> : null}
               {dossierFailed ? 'Попробовать снова' : dossierReady ? 'Пересобрать' : 'Собрать досье'}
             </button>
           ) : null}
@@ -697,7 +656,7 @@ export function Step3Content(props: {
           </div>
         ) : null}
         {!dossier && !dossierBusy && !dossierFailed ? (
-          <p className="mt-4 text-xs text-gray-400">Досье пока нет — нажмите «Собрать досье».</p>
+          <p className={`mt-4 text-xs ${HE.muted}`}>Досье пока нет — нажмите «Собрать досье».</p>
         ) : null}
       </section>
 
@@ -708,10 +667,9 @@ export function Step3Content(props: {
           onClick={() => {
             if (requestEditorExit('leaveStep')) onGoToBase();
           }}
-          className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-medium text-white transition hover:bg-blue-700"
+          className={HE.btnPrimary}
         >
-          Далее: загрузить базу
-          <ArrowRight className="h-4 w-4" aria-hidden />
+          Далее: загрузить базу →
         </button>
       </div>
     </div>
@@ -777,8 +735,8 @@ function ChainLetterEditor({
   return (
     <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-4">
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-100 text-[11px] font-bold text-blue-700">
-          {letterIndex + 1}
+        <span className={`${HE.muted2} text-[11px] font-medium uppercase tracking-wider`}>
+          Письмо {letterIndex + 1}
         </span>
         <p className="text-sm font-semibold text-gray-900">Редактирование письма</p>
         {isFirst ? (
@@ -796,7 +754,7 @@ function ChainLetterEditor({
                 setWaitDays(v);
                 markDirty();
               }}
-              className="w-16 rounded-lg border border-gray-300 px-2 py-1 text-center text-sm"
+              className="w-16 rounded-lg border border-gray-200 px-2 py-1 text-center text-sm focus:border-blue-400 focus:outline-none"
             />
             {daysWord(waitDays)} после предыдущего
           </label>
@@ -815,7 +773,7 @@ function ChainLetterEditor({
             markDirty();
           }}
           placeholder="Тема письма"
-          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
+          className={HE.input}
         />
       </label>
       <label className="mt-3 block">
@@ -829,7 +787,7 @@ function ChainLetterEditor({
             markDirty();
           }}
           rows={Math.min(20, Math.max(8, body.split('\n').length + 1))}
-          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm leading-relaxed focus:border-blue-400 focus:outline-none"
+          className={`${HE.input} leading-relaxed`}
         />
       </label>
       <div className="mt-3 flex items-center justify-end gap-2">
@@ -837,7 +795,7 @@ function ChainLetterEditor({
           type="button"
           onClick={onCancel}
           disabled={saving}
-          className="inline-flex h-9 items-center rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:opacity-50"
+          className={HE.btnGhost}
         >
           Отмена
         </button>
@@ -876,8 +834,8 @@ function DossierNum({ value, caption }: { value: string; caption: string }) {
 function DossierSegmentCard({ data }: { data: HeDossierData }) {
   const { counters, interpretation } = data;
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4">
-      <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">Сегмент в цифрах</p>
+    <div className={`${HE.card} p-4`}>
+      <p className={`mb-2 ${HE.secTitle}`}>Сегмент в цифрах</p>
       <div className="space-y-3">
         {counters.companies_total != null ? (
           <div>
@@ -945,8 +903,8 @@ function DossierSignalsCard({ data }: { data: HeDossierData }) {
   const buysChannels = data.interpretation.buys_sales_channels;
   const buysMeta = buysChannels ? BUYS_CHANNELS_META[buysChannels] : undefined;
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4">
-      <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">Сигналы боли</p>
+    <div className={`${HE.card} p-4`}>
+      <p className={`mb-2 ${HE.secTitle}`}>Сигналы боли</p>
       {signals.length === 0 ? (
         <p className="text-xs text-gray-400">Сигналов не найдено.</p>
       ) : (
@@ -979,8 +937,8 @@ function DossierSignalsCard({ data }: { data: HeDossierData }) {
 function DossierDatasetCard({ data }: { data: HeDossierData }) {
   const { dataset_stats: ds, interpretation } = data;
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4">
-      <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">Наши кампании</p>
+    <div className={`${HE.card} p-4`}>
+      <p className={`mb-2 ${HE.secTitle}`}>Наши кампании</p>
       {ds.reply_pct != null || ds.baseline_pct != null ? (
         <div className="flex flex-wrap gap-6">
           {ds.reply_pct != null ? <DossierNum value={`${ds.reply_pct}%`} caption="reply в вертикали" /> : null}
@@ -1053,8 +1011,8 @@ function CompanyTypesCard({ companyTypes }: { companyTypes: HeCompanyType[] }) {
   }, [companyTypes]);
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4">
-      <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">
+    <div className={`${HE.card} p-4`}>
+      <p className={`mb-2 ${HE.secTitle}`}>
         Типы компаний ({companyTypes.length})
       </p>
       {grouped.length === 0 ? (
@@ -1096,8 +1054,8 @@ function JobTitlesCard({ jobTitles }: { jobTitles: JobTitleRow[] }) {
   const targetRows = hasSide ? jobTitles.filter((jt) => jt.audience_side === 'campaign_target') : [];
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4">
-      <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">
+    <div className={`${HE.card} p-4`}>
+      <p className={`mb-2 ${HE.secTitle}`}>
         Должности ({jobTitles.length})
       </p>
       {jobTitles.length === 0 ? (
@@ -1173,9 +1131,8 @@ function QueriesCard({ queries }: { queries: HeVocab['search_queries'] }) {
   }, [queries]);
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4">
-      <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-widest text-gray-400">
-        <Search className="h-3.5 w-3.5" aria-hidden />
+    <div className={`${HE.card} p-4`}>
+      <p className={`mb-2 ${HE.secTitle}`}>
         Поисковые запросы ({queries.length})
       </p>
       {grouped.length === 0 ? (
