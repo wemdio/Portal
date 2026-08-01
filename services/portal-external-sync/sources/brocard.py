@@ -477,9 +477,24 @@ def map_movement(
     user = payment.get("user") if payment is not None else None
     user = user if isinstance(user, Mapping) else {}
 
+    # `name` заполнен только для мерчантов из собственного справочника Brocard
+    # (там же непустой `merchant.id`) — на живой карте это 22 записи из 232:
+    # LinkedIn, Google, Facebook, Supabase. У остальных `id` и `name` пустые, а
+    # настоящее имя лежит в сырой строке эквайера: «INSTANTLY SHERIDAN USA»,
+    # «UNIPILE.COM RIORGES FRA», «ZAPMAIL.AI WILMINGTON USA».
+    #
+    # Берём её как есть, не вычищая город и страну: где кончается название и
+    # начинается адрес — угадывание, а правила разметки и так ищут вхождение,
+    # так что одно правило «содержит INSTANTLY» закроет все такие строки.
     merchant_name = str(merchant.get("name") or "").strip()
+    merchant_source = "name"
+    if not merchant_name:
+        merchant_name = str(merchant.get("descriptor") or "").strip()
+        merchant_source = "descriptor"
     if not merchant_name:
         _bump(stats, "no_merchant")
+    else:
+        _bump(stats, f"merchant_from_{merchant_source}")
 
     based_on_id = mv.get("based_on_id")
 

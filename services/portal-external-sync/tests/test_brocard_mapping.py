@@ -356,6 +356,42 @@ def test_fee_inherits_merchant_from_the_linked_payment():
     assert row["operation_type"] == "payment_fee"
 
 
+def test_merchant_falls_back_to_the_acquirer_descriptor():
+    """`name` заполнен только для мерчантов из справочника Brocard — на живой
+    карте это 22 записи из 232. У остальных `id` и `name` пустые, а имя лежит
+    в сырой строке эквайера, и без отката к ней разбивка по сервисам пустовала
+    бы на девять десятых.
+
+    Образцы — из прода: INSTANTLY SHERIDAN USA, UNIPILE.COM RIORGES FRA.
+    """
+    payment = {
+        **OUR_PAYMENT,
+        "merchant": {
+            "id": None,
+            "mcc": "5734",
+            "name": None,
+            "descriptor": "UNIPILE.COM RIORGES FRA",
+            "country": {"id": 80, "code": "FR"},
+        },
+    }
+    stats: dict[str, int] = {}
+    row = map_movement(_movement(), payment, OUR_CARD, None, stats)
+
+    assert row["merchant"] == "UNIPILE.COM RIORGES FRA"
+    assert row["merchant_category"] == "5734"
+    assert stats.get("no_merchant") is None
+    assert stats["merchant_from_descriptor"] == 1
+
+
+def test_catalog_name_wins_over_the_descriptor():
+    """Когда Brocard знает мерчанта, его имя короче и чище сырой строки."""
+    stats: dict[str, int] = {}
+    row = map_movement(_movement(), OUR_PAYMENT, OUR_CARD, None, stats)
+
+    assert row["merchant"] == "Facebook"
+    assert stats["merchant_from_name"] == 1
+
+
 def test_declined_payment_fee_keeps_the_declined_state():
     """Сам отклонённый платёж деньгами не стал и строки не даёт — движения
     баланса у него нет. Комиссия за отказ стала, учитывается как трата и
