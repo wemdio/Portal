@@ -425,9 +425,11 @@ services:
       start_period: 120s
     deploy:
       resources:
+        # Удвоено вместе с TG_OUTREACH_MAX_CONCURRENCY (5 → 10): вдвое больше
+        # параллельных кампаний — вдвое больше сессий Telegram в одном процессе.
         limits:
-          memory: 1536M
-          cpus: '1'
+          memory: 3072M
+          cpus: '2'
           pids: 512
     restart: unless-stopped
     networks:
