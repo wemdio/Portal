@@ -8,6 +8,7 @@ import {
   loadInternalProfiles,
   logMeta,
   parseReviewInput,
+  parseReviewUpdatePrecondition,
   REVIEW_PROJECTION,
   reviewToApi,
   validateInternalEmployee,
@@ -21,6 +22,24 @@ type RouteContext = {
   params: Promise<{ id: string }>;
 };
 
+function preconditionError(
+  message: string,
+  status: 400 | 409 | 428,
+  code: 'invalid_precondition' | 'precondition_required' | 'review_conflict',
+  details: Record<string, unknown> = {},
+) {
+  return NextResponse.json({ error: message, code, ...details }, { status });
+}
+
+function reviewConflict(currentUpdatedAt: string) {
+  return preconditionError(
+    'Review was changed by another user. Reload it and try again.',
+    409,
+    'review_conflict',
+    { currentUpdatedAt },
+  );
+}
+
 export async function PATCH(req: NextRequest, context: RouteContext) {
   const auth = await authenticateReviewRequest(req);
   if ('error' in auth) return auth.error;
@@ -33,6 +52,21 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
     body = await req.json();
   } catch {
     return jsonError('Invalid body', 400);
+  }
+
+  const precondition = parseReviewUpdatePrecondition(body);
+  if ('error' in precondition) {
+    return precondition.error === 'missing'
+      ? preconditionError(
+          'expectedUpdatedAt is required',
+          428,
+          'precondition_required',
+        )
+      : preconditionError(
+          'expectedUpdatedAt must be a valid RFC 3339 timestamp',
+          400,
+          'invalid_precondition',
+        );
   }
 
   const parsed = parseReviewInput(body, { partial: true });
@@ -64,16 +98,24 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
   }
   if (!existing) return jsonError('Review not found', 404);
 
+  const expectedUpdatedAt = precondition.value.expectedUpdatedAt;
+  if (existing.updated_at !== expectedUpdatedAt) {
+    return reviewConflict(existing.updated_at);
+  }
+
   const lifecycleError = validateReviewUpdate(
     existing as EmployeeReviewRow,
     parsed.value,
   );
   if (lifecycleError) return jsonError(lifecycleError, 400);
 
-  const { error: updateError } = await supabaseAdmin
+  const { data: updatedMatch, error: updateError } = await supabaseAdmin
     .from('employee_reviews')
     .update(parsed.value)
-    .eq('id', id);
+    .eq('id', id)
+    .eq('updated_at', expectedUpdatedAt)
+    .select('id')
+    .maybeSingle();
 
   if (updateError) {
     await logError(
@@ -83,6 +125,26 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
       logMeta(req, actor.userId),
     );
     return jsonError('Failed to update review', 500);
+  }
+
+  if (!updatedMatch) {
+    const { data: current, error: currentError } = await supabaseAdmin
+      .from('employee_reviews')
+      .select('id, updated_at')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (currentError) {
+      await logError(
+        'team.reviews.update.conflict_reload.failed',
+        currentError,
+        { reviewId: id },
+        logMeta(req, actor.userId),
+      );
+      return jsonError('Failed to verify review update', 500);
+    }
+    if (!current) return jsonError('Review not found', 404);
+    return reviewConflict(String(current.updated_at));
   }
 
   const { data: updated, error: updatedError } = await supabaseAdmin

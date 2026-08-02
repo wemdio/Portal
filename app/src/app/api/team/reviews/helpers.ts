@@ -63,6 +63,10 @@ export type ReviewInput = {
   recommendations?: string | null;
 };
 
+export type ReviewUpdatePrecondition = {
+  expectedUpdatedAt: string;
+};
+
 export function jsonError(message: string, status: number): JsonError {
   return NextResponse.json({ error: message }, { status });
 }
@@ -143,6 +147,49 @@ function isValidIsoDate(value: string): boolean {
     && date.getUTCMonth() === month - 1
     && date.getUTCDate() === day
   );
+}
+
+function isValidRfc3339Timestamp(value: string): boolean {
+  const match = value.match(
+    /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(Z|([+-])(\d{2}):(\d{2}))$/,
+  );
+  if (!match || !isValidIsoDate(match[1])) return false;
+
+  const hour = Number(match[2]);
+  const minute = Number(match[3]);
+  const second = Number(match[4]);
+  const offsetHour = match[7] ? Number(match[7]) : 0;
+  const offsetMinute = match[8] ? Number(match[8]) : 0;
+
+  return (
+    hour <= 23
+    && minute <= 59
+    && second <= 59
+    && offsetHour <= 14
+    && offsetMinute <= 59
+    && (offsetHour < 14 || offsetMinute === 0)
+    && Number.isFinite(Date.parse(value))
+  );
+}
+
+export function parseReviewUpdatePrecondition(
+  value: unknown,
+): { value: ReviewUpdatePrecondition } | { error: 'missing' | 'invalid' } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { error: 'invalid' };
+  }
+
+  const body = value as Record<string, unknown>;
+  const field = pickValue(body, 'expectedUpdatedAt', 'expected_updated_at');
+  if (!field.present) return { error: 'missing' };
+  if (
+    typeof field.value !== 'string'
+    || !isValidRfc3339Timestamp(field.value)
+  ) {
+    return { error: 'invalid' };
+  }
+
+  return { value: { expectedUpdatedAt: field.value } };
 }
 
 function parseOptionalText(

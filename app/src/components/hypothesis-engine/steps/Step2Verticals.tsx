@@ -9,14 +9,29 @@
  * Чтобы разметка десятков гипотез не утомляла: над доской фильтр-чипы и
  * «Свернуть/развернуть все», на карточке — тихий текст-коллапс до одной строки и
  * тихие массовые действия «принять все / отклонить все / сбросить».
+ * Под саммари — тихая строка «что уже собрано» по вертикали (цепочка, вокабуляр,
+ * досье, база, шаблон); у гипотез, под которые собрана база, — метка «база».
  * Визуал — токены design.ts: без иконок, статусы точками, один синий акцент.
  */
 
 import { useMemo, useState, type JSX } from 'react';
-import type { HeHypothesis, HeHypothesisTier, HeStage, HeVertical } from '@/lib/hypothesisEngine/types';
+import type {
+  HeHypothesis,
+  HeHypothesisTier,
+  HeStage,
+  HeTemplate,
+  HeVertical,
+  HeVocab,
+} from '@/lib/hypothesisEngine/types';
 import { TIER_META } from '../ui';
 import { HE, Spinner, StatusDot } from '../design';
-import type { HeDossier, HeJobSummary, HeProjectDetailResponse } from '../api';
+import type {
+  HeBaseSummary,
+  HeChainDto,
+  HeDossier,
+  HeJobSummary,
+  HeProjectDetailResponse,
+} from '../api';
 
 /** Стадии досборки материалов под выбранную вертикаль (письма/вокабуляр/шаблон). */
 const BUILD_STAGES: ReadonlySet<HeStage> = new Set(['chain', 'vocab', 'template']);
@@ -101,6 +116,14 @@ export interface Step2VerticalsProps {
   jobs: HeJobSummary[];
   /** Досье вертикалей (для компактной строки цифр на готовых). */
   dossiers?: HeDossier[];
+  /** Цепочки писем — для строки «что собрано» на карточке вертикали. */
+  chains?: HeChainDto[];
+  /** Вокабуляры вертикалей. */
+  vocabs?: HeVocab[];
+  /** Базы контактов: счётчик/строки в строке артефактов и метки «база» у гипотез. */
+  bases?: HeBaseSummary[];
+  /** Шаблоны писем (готовность относится на вертикаль через base_id). */
+  templates?: HeTemplate[];
 }
 
 export function Step2Verticals({
@@ -111,6 +134,10 @@ export function Step2Verticals({
   onSelectVertical,
   jobs,
   dossiers,
+  chains,
+  vocabs,
+  bases,
+  templates,
 }: Step2VerticalsProps): JSX.Element {
   const sorted = useMemo(
     () =>
@@ -144,13 +171,70 @@ export function Step2Verticals({
   );
 
   // Готовые досье по вертикали — для строки цифр на карточке.
+  // Досье приходят created_at desc: первое готовое и есть новейшее.
   const readyDossierByVertical = useMemo(() => {
     const map = new Map<string, HeDossier>();
     for (const d of dossiers ?? []) {
-      if (d.status === 'ready' && d.data) map.set(d.vertical_id, d);
+      if (d.status === 'ready' && d.data && !map.has(d.vertical_id)) map.set(d.vertical_id, d);
     }
     return map;
   }, [dossiers]);
+
+  // Последняя готовая цепочка по вертикали — для строки «что собрано».
+  const readyChainByVertical = useMemo(() => {
+    const map = new Map<string, HeChainDto>();
+    for (const c of chains ?? []) {
+      if (c.status !== 'ready') continue;
+      const prev = map.get(c.vertical_id);
+      if (!prev || c.created_at > prev.created_at) map.set(c.vertical_id, c);
+    }
+    return map;
+  }, [chains]);
+
+  // В типе HeVocab поля status нет (в таблице он есть, API отдаёт select('*')),
+  // поэтому читаем структурно — как fitRationaleOf.
+  const readyVocabVerticals = useMemo(() => {
+    const set = new Set<string>();
+    for (const v of vocabs ?? []) {
+      if ((v as HeVocab & { status?: unknown }).status === 'ready') set.add(v.vertical_id);
+    }
+    return set;
+  }, [vocabs]);
+
+  const basesByVertical = useMemo(() => {
+    const map = new Map<string, HeBaseSummary[]>();
+    for (const b of bases ?? []) {
+      const list = map.get(b.vertical_id) ?? [];
+      list.push(b);
+      map.set(b.vertical_id, list);
+    }
+    return map;
+  }, [bases]);
+
+  // Шаблон привязан к базе (base_id) и вертикали — у него есть свой vertical_id.
+  const readyTemplateVerticals = useMemo(() => {
+    const set = new Set<string>();
+    for (const t of templates ?? []) {
+      if (t.status === 'ready' && t.vertical_id) set.add(t.vertical_id);
+    }
+    return set;
+  }, [templates]);
+
+  // Гипотезы, под которые собрана база (collect_info.hypothesis_ids; у старых баз
+  // поля нет — они просто ничего не помечают). Фейловые базы не считаем: маркер
+  // «база» на гипотезе должен совпадать со статистикой карточки.
+  const baseHypothesisIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const b of bases ?? []) {
+      if (b.status === 'failed') continue;
+      const ids = b.collect_info?.hypothesis_ids;
+      if (!Array.isArray(ids)) continue;
+      for (const id of ids) {
+        if (typeof id === 'string') set.add(id);
+      }
+    }
+    return set;
+  }, [bases]);
 
   // Фильтр-чипы над доской и набор свёрнутых карточек (по умолчанию все развёрнуты).
   const [filter, setFilter] = useState<HypothesisFilter>('all');
@@ -225,6 +309,11 @@ export function Step2Verticals({
           selected={vertical.id === selectedVerticalId}
           buildNote={vertical.id === selectedVerticalId && buildActive}
           dossier={readyDossierByVertical.get(vertical.id) ?? null}
+          chain={readyChainByVertical.get(vertical.id) ?? null}
+          vocabReady={readyVocabVerticals.has(vertical.id)}
+          bases={basesByVertical.get(vertical.id) ?? []}
+          templateReady={readyTemplateVerticals.has(vertical.id)}
+          baseHypothesisIds={baseHypothesisIds}
           onSelectVertical={onSelectVertical}
           onPatchHypothesis={onPatchHypothesis}
         />
@@ -244,6 +333,11 @@ function VerticalCard({
   selected,
   buildNote,
   dossier,
+  chain,
+  vocabReady,
+  bases,
+  templateReady,
+  baseHypothesisIds,
   onSelectVertical,
   onPatchHypothesis,
 }: {
@@ -255,6 +349,13 @@ function VerticalCard({
   selected: boolean;
   buildNote: boolean;
   dossier: HeDossier | null;
+  /** Последняя готовая цепочка вертикали (null — цепочки ещё нет). */
+  chain: HeChainDto | null;
+  vocabReady: boolean;
+  bases: HeBaseSummary[];
+  templateReady: boolean;
+  /** Id гипотез, под которые собрана база (из collect_info всех баз проекта). */
+  baseHypothesisIds: ReadonlySet<string>;
   onSelectVertical: (id: string) => void;
   onPatchHypothesis: (id: string, status: HypothesisPatchStatus) => void;
 }) {
@@ -366,6 +467,15 @@ function VerticalCard({
           {/* Цифры готового досье — компактная строка под саммари */}
           {dossier ? <DossierStatRow dossier={dossier} /> : null}
 
+          {/* Что уже собрано по вертикали: цепочка/вокабуляр/досье/база/шаблон */}
+          <ArtifactStatRow
+            chain={chain}
+            vocabReady={vocabReady}
+            dossierReady={dossier !== null}
+            bases={bases}
+            templateReady={templateReady}
+          />
+
           {/* Синонимы — за «Подробнее», чтобы не шуметь */}
           {vertical.synonyms.length > 0 ? (
             <div className="mt-2">
@@ -399,7 +509,12 @@ function VerticalCard({
               {visibleHypotheses.length > 0 ? (
                 <ul className="mt-3 space-y-2">
                   {visibleHypotheses.map((h) => (
-                    <HypothesisItem key={h.id} hypothesis={h} onPatch={onPatchHypothesis} />
+                    <HypothesisItem
+                      key={h.id}
+                      hypothesis={h}
+                      onPatch={onPatchHypothesis}
+                      hasBase={baseHypothesisIds.has(h.id)}
+                    />
                   ))}
                 </ul>
               ) : (
@@ -476,12 +591,72 @@ function DossierStatRow({ dossier }: { dossier: HeDossier }) {
   return <p className={`mt-2 text-xs tabular-nums ${HE.muted2}`}>{parts.join(' · ')}</p>;
 }
 
+/**
+ * Тихая строка «что уже собрано» по вертикали: цепочка, вокабуляр, досье, база,
+ * шаблон. Собранное — gray-700, несобранное — gray-300; маркер «база» прячется,
+ * когда баз нет совсем. Разделитель « · » — как в DossierStatRow, без иконок.
+ */
+function ArtifactStatRow({
+  chain,
+  vocabReady,
+  dossierReady,
+  bases,
+  templateReady,
+}: {
+  chain: HeChainDto | null;
+  vocabReady: boolean;
+  dossierReady: boolean;
+  bases: HeBaseSummary[];
+  templateReady: boolean;
+}) {
+  const markers: Array<{ key: string; label: string; ready: boolean }> = [
+    {
+      key: 'chain',
+      label: chain && chain.language !== 'ru' ? `цепочка (${chain.language})` : 'цепочка',
+      ready: chain !== null,
+    },
+    { key: 'vocab', label: 'вокабуляр', ready: vocabReady },
+    { key: 'dossier', label: 'досье', ready: dossierReady },
+  ];
+  if (bases.length > 0) {
+    // Считаем базу артефактом только когда она разобрана (analyzed):
+    // collecting/uploaded/analyzing — это процесс, не результат.
+    const usable = bases.filter((b) => b.status === 'analyzed');
+    const rows = usable.reduce((sum, b) => sum + (b.row_count ?? 0), 0);
+    if (usable.length > 0) {
+      markers.push({
+        key: 'base',
+        label: rows > 0 ? `база ${usable.length} · ${rows.toLocaleString('ru-RU')}` : `база ${usable.length}`,
+        ready: true,
+      });
+    }
+  }
+  markers.push({ key: 'template', label: 'шаблон', ready: templateReady });
+  return (
+    <p className={`mt-2 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-xs tabular-nums ${HE.muted2}`}>
+      {markers.map((m, i) => (
+        <span key={m.key} className={`whitespace-nowrap ${m.ready ? 'text-gray-700' : 'text-gray-300'}`}>
+          {i > 0 ? (
+            <span aria-hidden="true" className="text-gray-300">
+              ·{' '}
+            </span>
+          ) : null}
+          {m.label}
+        </span>
+      ))}
+    </p>
+  );
+}
+
 function HypothesisItem({
   hypothesis,
   onPatch,
+  hasBase,
 }: {
   hypothesis: HeHypothesis;
   onPatch: (id: string, status: HypothesisPatchStatus) => void;
+  /** Под гипотезу уже собрана база (collect_info.hypothesis_ids). */
+  hasBase?: boolean;
 }) {
   const rejected = hypothesis.status === 'rejected';
   const accepted = hypothesis.status === 'accepted';
@@ -503,6 +678,11 @@ function HypothesisItem({
             <TierText tier={hypothesis.tier} />
             <p className="text-sm font-semibold text-gray-900">{hypothesis.title}</p>
             <PctPill pct={hypothesis.potential_pct} />
+            {hasBase ? (
+              <span title="Под эту гипотезу собрана база" className="text-[11px] font-medium text-blue-600">
+                база
+              </span>
+            ) : null}
           </div>
           {fitRationale ? (
             <p className="mt-2 rounded-lg bg-blue-50/60 px-3 py-2 text-[12.5px] leading-relaxed text-gray-700">

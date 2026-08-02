@@ -10,6 +10,16 @@ export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'b
 
 export const ENG_HIRING_SOURCES: EngHiringSource[] = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday', 'smartrecruiters', 'teamtailor', 'jobhive'];
 
+// Default source set for scans and cache filtering: everything EXCEPT workday.
+// Prod evidence (2026-08-02, two full scans): Workday's WAF behaviorally
+// soft-blocks the scanning IP — HTTP 200 with an empty body, no exception, so
+// the curl fallback never fires — even at 2x1500ms pacing (3530 boards -> 0
+// vacancies, ~66 min wasted per run). Single requests pass, so the trigger is
+// the scan pattern, not the TLS fingerprint. Workday coverage comes from the
+// jobhive feed (~729k workday postings, nightly ingest) instead. 'workday'
+// stays a valid source for explicit opt-in (e.g. a future proxy egress).
+export const DEFAULT_ENG_HIRING_SOURCES: EngHiringSource[] = ENG_HIRING_SOURCES.filter((s) => s !== 'workday');
+
 // Sources whose LIST endpoint exposes no posting date at all (BambooHR
 // /careers/list). For these, published_at=null is not a freshness signal — the
 // role is open now — so a recency filter must not silently drop them.
@@ -552,7 +562,7 @@ export function mergeEngHiringVacancyDetail(vacancy: EngHiringVacancy, detailRaw
 }
 
 export function matchesEngHiringVacancy(vacancy: EngHiringVacancy, config: EngHiringSearchConfig): boolean {
-  const sources = config.sources?.length ? config.sources : ENG_HIRING_SOURCES;
+  const sources = config.sources?.length ? config.sources : DEFAULT_ENG_HIRING_SOURCES;
   if (!sources.includes(vacancy.source)) return false;
 
   if (isB2BRoleSearch(config.text)) {

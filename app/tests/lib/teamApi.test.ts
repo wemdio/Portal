@@ -4,13 +4,20 @@ jest.mock('@/lib/supabaseClient', () => ({
   supabase: { auth: { getSession: jest.fn() } },
 }));
 
+import { supabase } from '@/lib/supabaseClient';
+import * as teamApiModule from '@/components/team/teamApi';
 import {
   buildTeamReviewCompletionWrite,
   buildTeamReviewScheduleWrite,
   normalizeReviews,
   normalizeStatistics,
+  teamApiFetch,
   teamStatisticsIsoDate,
 } from '@/components/team/teamApi';
+
+afterEach(() => {
+  jest.restoreAllMocks();
+});
 
 describe('team review write payloads', () => {
   it('builds a minimal scheduled review payload and trims its optional reason', () => {
@@ -106,6 +113,46 @@ describe('normalizeStatistics', () => {
     expect(normalizeStatistics({
       coverage: { status: 'unavailable', startsAt: null },
     }).coverage.startsAt).toBeNull();
+  });
+});
+
+describe('teamApiFetch', () => {
+  it('throws a typed TeamApiError with the 409 conflict metadata intact', async () => {
+    const payload = {
+      error: 'Review changed; reload and try again',
+      code: 'review_conflict',
+      currentUpdatedAt: '2026-08-02T10:15:00.000Z',
+    };
+    (supabase.auth.getSession as jest.Mock).mockResolvedValue({
+      data: { session: { access_token: 'test-token' } },
+    });
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => payload,
+    } as Response);
+
+    let thrown: unknown;
+    try {
+      await teamApiFetch('/api/team/reviews/review-1', {
+        method: 'PATCH',
+        body: JSON.stringify({ expectedUpdatedAt: '2026-08-02T10:00:00.000Z' }),
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    const TeamApiError = (teamApiModule as typeof teamApiModule & {
+      TeamApiError?: new (...args: never[]) => Error;
+    }).TeamApiError;
+    expect(TeamApiError).toBeDefined();
+    expect((thrown as Error).constructor).toBe(TeamApiError);
+    expect(thrown).toMatchObject({
+      message: payload.error,
+      status: 409,
+      code: 'review_conflict',
+      payload,
+    });
   });
 });
 

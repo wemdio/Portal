@@ -10,7 +10,9 @@
  * Фазы:
  *  1. PLAN — один LLM-вызов (модель bulk): вертикаль + неотклонённые гипотезы
  *     + типы компаний из вокабуляра → план задач (промпт/схема — контракт
- *     prompts/sourcePlan.ts + HeSourcePlanSchema). План и статусы задач
+ *     prompts/sourcePlan.ts + HeSourcePlanSchema). Непустой hypothesis_ids в
+ *     payload джобы (выбор гипотез в UI) сужает набор до выбранных id;
+ *     пустое пересечение с неотклонёнными — фейл джобы. План и статусы задач
  *     пишутся в collect_info.
  *  2. DISPATCH — каждая pending-задача уходит в свой коллектор:
  *     companies_directory — синхронно через searchRows с пагинацией страницами
@@ -104,6 +106,18 @@ const YANDEX_RESULTS_PER_URL = 500;
 function payloadNumber(job: HeJob, key: string): number | null {
   const value = job.payload?.[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Достать необязательный string[]-параметр из payload джобы: непустой массив
+ * непустых строк или null. Пустой массив → null (route тоже не пишет пустой) —
+ * фильтрация срабатывает только на осмысленный выбор.
+ */
+function payloadStringArray(job: HeJob, key: string): string[] | null {
+  const value = job.payload?.[key];
+  if (!Array.isArray(value)) return null;
+  const ids = value.filter((v): v is string => typeof v === 'string' && v.length > 0);
+  return ids.length > 0 ? ids : null;
 }
 
 /**
@@ -390,6 +404,8 @@ export interface HeCollectInfo {
   /** Лимит строк, выбранный при запуске сборки (route пишет при создании базы). */
   limit?: number;
   plan?: HeSourcePlan;
+  /** Гипотезы, по которым реально строился план (accepted-дефолт или выбор специалиста). */
+  hypotheses?: Array<{ id: string; title: string; status: string | null }>;
   tasks?: HeCollectTaskState[];
   stats?: {
     tasks_total: number;
@@ -444,26 +460,51 @@ async function buildPlan(
   ctx: HeStageContext,
   vertical: HeVertical,
   usage: HeUsage,
-): Promise<HeSourcePlan> {
-  // Неотклонённые гипотезы вертикали — план обязан их покрывать.
+): Promise<{ plan: HeSourcePlan; usedHypotheses: Array<{ id: string; title: string; status: string | null }> }> {
+  // Гипотезы вертикали для плана. Семантика разметки: если специалист что-то
+  // ПРИНЯЛ (accepted) — план строим только по принятым; предложенные (proposed)
+  // идут в работу, только когда принятых нет (как в пересчёте % вертикали).
   const { data: hypRows, error: hError } = await ctx.supabase
     .from('he_hypotheses')
-    .select('title, description, tier')
+    .select('id, title, description, tier, status')
     .eq('project_id', job.project_id)
     .eq('vertical_id', vertical.id)
     .neq('status', 'rejected')
     .order('potential_pct', { ascending: false });
   if (hError) throw new Error(`he_hypotheses read: ${hError.message}`);
-  const hypotheses = (hypRows ?? [])
+  let hypotheses = (hypRows ?? [])
     .map((r) => {
-      const row = r as { title?: unknown; description?: unknown; tier?: unknown };
+      const row = r as { id?: unknown; title?: unknown; description?: unknown; tier?: unknown; status?: unknown };
       return {
+        id: typeof row.id === 'string' ? row.id : '',
         title: typeof row.title === 'string' ? row.title : '',
         description: typeof row.description === 'string' ? row.description : null,
         tier: typeof row.tier === 'number' ? row.tier : null,
+        status: typeof row.status === 'string' ? row.status : null,
       };
     })
     .filter((h) => h.title);
+
+  // Выбор гипотез из UI (route кладёт hypothesis_ids в payload джобы):
+  // непустой массив → план строим только по выбранным (пересечение с
+  // неотклонёнными — выборка выше уже отрезала rejected, даже если пользователь
+  // их отметил). Пустое пересечение — честный фейл вместо молчаливого сбора
+  // по всем гипотезам («я же выбирал одну гипотезу»).
+  const wantedHypothesisIds = payloadStringArray(job, 'hypothesis_ids');
+  if (wantedHypothesisIds) {
+    const wanted = new Set(wantedHypothesisIds);
+    hypotheses = hypotheses.filter((h) => wanted.has(h.id));
+    if (hypotheses.length === 0) {
+      throw new Error('Выбранные гипотезы не найдены или все отклонены');
+    }
+  } else {
+    // Без явного выбора — семантика разметки: есть принятые → только они.
+    const accepted = hypotheses.filter((h) => h.status === 'accepted');
+    if (accepted.length > 0) {
+      stageLog(ctx, `[base_collect] план только по принятым гипотезам: ${accepted.length} из ${hypotheses.length}`);
+      hypotheses = accepted;
+    }
+  }
 
   // Типы компаний из последнего вокабуляра; вокабуляра может не быть — идём без него.
   let companyTypes: string[] = [];
@@ -494,7 +535,12 @@ async function buildPlan(
     { model: getHeModel('bulk') },
   );
   addUsage(usage, llm);
-  return llm.data;
+  return {
+    plan: llm.data,
+    // Провенанс плана: по каким гипотезам реально строили (для collect_info и UI —
+    // иначе на вопрос «точно все верно?» ответа нет ни в БД, ни на экране).
+    usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, status: h.status })),
+  };
 }
 
 /* ─────────────────────────── Фаза DISPATCH ─────────────────────────── */
@@ -857,7 +903,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
 
   // ─── PLAN ───
   if (!info.plan) {
-    info.plan = await buildPlan(job, ctx, vertical, usage);
+    const { plan, usedHypotheses } = await buildPlan(job, ctx, vertical, usage);
+    info.plan = plan;
+    info.hypotheses = usedHypotheses;
     info.tasks = info.plan.tasks.map((task) => ({
       source: task.source,
       status: 'pending' as const,
