@@ -29,6 +29,9 @@ const CASE_LIST_COLUMNS = 'id, source, filename, industry, client_type, task, me
 // Максимум символов эталона стиля (brief.style_override) — после trim.
 const STYLE_OVERRIDE_MAX_LENGTH = 8000;
 
+// Максимум символов подписи отправителя (brief.signature_override) — после trim.
+const SIGNATURE_OVERRIDE_MAX_LENGTH = 500;
+
 // collect_info.tasks[].harvest — полный предмерж-харвест задачи (до 50k строк
 // на задачу): рабочее состояние воркера для cross-requeue, клиенту не нужен.
 // Деталка проекта поллится каждые 4с, поэтому вырезаем harvest из ответа —
@@ -169,13 +172,16 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   );
 }
 
-// PATCH — точечное обновление проекта. Поддерживаются два необязательных
+// PATCH — точечное обновление проекта. Поддерживаются три необязательных
 // поля (хотя бы одно обязано присутствовать): offer_override — пользовательская
-// формулировка оффера и style_override — эталон стиля (1–2 «идеальных» письма,
-// чью манеру имитирует генерация). Оба ложатся в he_projects.brief и уточняют
-// генерацию цепочек. Пустая (или состоящая из пробелов) строка удаляет
-// соответствующий ключ из brief, остальные ключи brief не трогаем — мержим
-// поверх текущего значения. Незнакомые поля верхнего уровня игнорируем.
+// формулировка оффера, style_override — эталон стиля (1–2 «идеальных» письма,
+// чью манеру имитирует генерация) и signature_override — подпись отправителя,
+// которую генерация ставит в конце каждого письма дословно (без неё модель
+// подписывается командой компании и не выдумывает имя человека). Все ложатся
+// в he_projects.brief и уточняют генерацию цепочек. Пустая (или состоящая из
+// пробелов) строка удаляет соответствующий ключ из brief, остальные ключи
+// brief не трогаем — мержим поверх текущего значения. Незнакомые поля
+// верхнего уровня игнорируем.
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.hypothesis-engine.projects.patch' },
@@ -187,17 +193,22 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       const { id } = await params;
       if (!id) return jsonError('Missing id', 400);
 
-      let body: { offer_override?: unknown; style_override?: unknown };
+      let body: { offer_override?: unknown; style_override?: unknown; signature_override?: unknown };
       try {
-        body = (await req.json()) as { offer_override?: unknown; style_override?: unknown };
+        body = (await req.json()) as {
+          offer_override?: unknown;
+          style_override?: unknown;
+          signature_override?: unknown;
+        };
       } catch {
         return jsonError('Invalid body', 400);
       }
 
       const offerRaw = body?.offer_override;
       const styleRaw = body?.style_override;
-      if (offerRaw === undefined && styleRaw === undefined) {
-        return jsonError('Нужен offer_override или style_override', 400);
+      const signatureRaw = body?.signature_override;
+      if (offerRaw === undefined && styleRaw === undefined && signatureRaw === undefined) {
+        return jsonError('Нужен offer_override, style_override или signature_override', 400);
       }
       if (offerRaw !== undefined && typeof offerRaw !== 'string') {
         return jsonError('offer_override должен быть строкой', 400);
@@ -205,8 +216,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       if (styleRaw !== undefined && typeof styleRaw !== 'string') {
         return jsonError('style_override должен быть строкой', 400);
       }
+      if (signatureRaw !== undefined && typeof signatureRaw !== 'string') {
+        return jsonError('signature_override должен быть строкой', 400);
+      }
       if (typeof styleRaw === 'string' && styleRaw.trim().length > STYLE_OVERRIDE_MAX_LENGTH) {
         return jsonError(`style_override: максимум ${STYLE_OVERRIDE_MAX_LENGTH} символов`, 413);
+      }
+      if (typeof signatureRaw === 'string' && signatureRaw.trim().length > SIGNATURE_OVERRIDE_MAX_LENGTH) {
+        return jsonError(`signature_override: максимум ${SIGNATURE_OVERRIDE_MAX_LENGTH} символов`, 413);
       }
 
       const { data: current, error: loadErr } = await supabaseAdmin
@@ -231,6 +248,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         const style = styleRaw.trim();
         if (style) brief.style_override = style;
         else delete brief.style_override;
+      }
+      if (typeof signatureRaw === 'string') {
+        const signature = signatureRaw.trim();
+        if (signature) brief.signature_override = signature;
+        else delete brief.signature_override;
       }
 
       const { data: project, error } = await supabaseAdmin
