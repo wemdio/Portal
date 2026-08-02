@@ -1554,4 +1554,72 @@ describe('plan phase', () => {
     expect(info.plan?.tasks[0].source).toBe('companies_directory');
     expect(info.tasks?.[0]).toMatchObject({ source: 'companies_directory', child_job_id: null });
   });
+
+  it('plans only over the hypothesis_ids subset from the job payload', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(null)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        he_hypotheses: [
+          { id: 'h-acc', project_id: 'p1', vertical_id: 'v1', title: 'Невыбранная принятая', description: null, tier: 1, status: 'accepted', potential_pct: 90 },
+          { id: 'h-prop', project_id: 'p1', vertical_id: 'v1', title: 'Выбранная гипотеза', description: 'd', tier: 2, status: 'proposed', potential_pct: 60 },
+          { id: 'h-rej', project_id: 'p1', vertical_id: 'v1', title: 'Отклонённая выбранная', description: null, tier: 3, status: 'rejected', potential_pct: 10 },
+        ],
+      },
+    });
+    callLLMMock.mockResolvedValue({
+      data: {
+        tasks: [
+          { source: 'companies_directory', rationale: 'r', directory_filters: { okvedCodes: ['78'] } },
+        ],
+      },
+      tokensUsed: 10,
+      promptTokens: 8,
+      completionTokens: 2,
+      costUsd: 0.0001,
+      rawResponse: {},
+    });
+    searchRowsMock.mockResolvedValue({ rows: [{ name: 'ООО Кадры', website: 'kadry.ru' }] });
+
+    const res = await runBaseCollectStage(
+      makeJob({ payload: { base_id: 'b1', hypothesis_ids: ['h-prop', 'h-rej'] } }),
+      ctx(),
+    );
+    expect((res.result as { rows: number }).rows).toBe(1);
+
+    // В промпт попала ТОЛЬКО выбранная неотклонённая гипотеза: ни невыбранной,
+    // ни отклонённой — даже отмеченной (пересечение с неотклонёнными).
+    expect(callLLMMock).toHaveBeenCalledTimes(1);
+    const [messages] = callLLMMock.mock.calls[0] as [Array<{ role: string; content: string }>];
+    const user = messages.find((m) => m.role === 'user')!.content;
+    expect(user).toContain('Выбранная гипотеза');
+    expect(user).not.toContain('Невыбранная принятая');
+    expect(user).not.toContain('Отклонённая выбранная');
+  });
+
+  it.each([{ ids: ['h-rej'] }, { ids: ['unknown-id'] }])(
+    'fails the job with a clear error when hypothesis_ids intersect nothing non-rejected ($ids)',
+    async ({ ids }) => {
+      mockDb = createMockSupabase({
+        tables: {
+          he_bases: [makeBase(null)],
+          he_verticals: [VERTICAL],
+          he_projects: [PROJECT],
+          he_jobs: [makeJob() as unknown as Record<string, unknown>],
+          he_hypotheses: [
+            { id: 'h-acc', project_id: 'p1', vertical_id: 'v1', title: 'Принятая', description: null, tier: 1, status: 'accepted', potential_pct: 90 },
+            { id: 'h-rej', project_id: 'p1', vertical_id: 'v1', title: 'Отклонённая', description: null, tier: 3, status: 'rejected', potential_pct: 10 },
+          ],
+        },
+      });
+
+      await expect(
+        runBaseCollectStage(makeJob({ payload: { base_id: 'b1', hypothesis_ids: ids } }), ctx()),
+      ).rejects.toThrow(/выбранные гипотезы не найдены или все отклонены/i);
+      // До LLM дело не доходит.
+      expect(callLLMMock).not.toHaveBeenCalled();
+    },
+  );
 });

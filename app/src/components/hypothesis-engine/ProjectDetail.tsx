@@ -489,6 +489,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
           <Step4Base
             projectId={projectId}
             vertical={selectedVertical}
+            hypotheses={hypotheses}
             bases={selectedBases}
             jobs={jobs}
             onUploaded={() => void load({ silent: true })}

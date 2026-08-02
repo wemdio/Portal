@@ -5,10 +5,19 @@
  * (парсинг в браузере через readSpreadsheetFile, лимит строк как в
  * /client/launch), превью, статусы разбора, профиль последней разобранной
  * базы и запуск сборки финального шаблона. Поглощает старый BasesTab.
+ * Автосборка идёт по выбранным гипотезам вертикали (пикер с чекбоксами над
+ * кнопкой, выбор персистится в localStorage): раньше сборка молча покрывала
+ * ВСЕ неотклонённые гипотезы, хотя пользователь выбирал одну.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
-import type { HeBaseAnalysis, HeDistributionEntry, HeVertical } from '@/lib/hypothesisEngine/types';
+import type {
+  HeBaseAnalysis,
+  HeDistributionEntry,
+  HeHypothesis,
+  HeHypothesisTier,
+  HeVertical,
+} from '@/lib/hypothesisEngine/types';
 import { authFetch } from '@/lib/authFetch';
 import { readSpreadsheetFile } from '@/lib/spreadsheet/parseCSV';
 import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
@@ -23,7 +32,7 @@ import {
   type HeJobSummary,
 } from '../api';
 import { HE, StatusDot, Spinner } from '../design';
-import { StatusBox, formatDate } from '../ui';
+import { StatusBox, TIER_META, formatDate } from '../ui';
 
 /** Как часто дёргать reload детали во время автосборки (как POLL_INTERVAL_MS родителя). */
 const COLLECT_POLL_MS = 4000;
@@ -56,13 +65,24 @@ function jobActive(job: HeJobSummary | undefined): boolean {
 export function Step4Base(props: {
   projectId: string;
   vertical: HeVertical;
+  /** Гипотезы проекта (пикер автосборки фильтрует по vertical.id). */
+  hypotheses: HeHypothesis[];
   bases: HeBaseSummary[];
   jobs: HeJobSummary[];
   onUploaded: () => void;
   onTemplateStarted: () => void;
   onGoToTemplate: () => void;
 }): JSX.Element {
-  const { projectId, vertical, bases, jobs, onUploaded, onTemplateStarted, onGoToTemplate } = props;
+  const {
+    projectId,
+    vertical,
+    hypotheses,
+    bases,
+    jobs,
+    onUploaded,
+    onTemplateStarted,
+    onGoToTemplate,
+  } = props;
 
   const [parsed, setParsed] = useState<ParsedFile | null>(null);
   const [parsing, setParsing] = useState(false);
@@ -76,6 +96,84 @@ export function Step4Base(props: {
   const [templateStarting, setTemplateStarting] = useState(false);
   const [templateError, setTemplateError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  /* ── Пикер гипотез автосборки ── */
+
+  // Гипотезы выбранной вертикали (по pct desc, как на доске шага 2).
+  const verticalHypotheses = useMemo(
+    () =>
+      hypotheses
+        .filter((h) => h.vertical_id === vertical.id)
+        .sort((a, b) => b.potential_pct - a.potential_pct),
+    [hypotheses, vertical.id],
+  );
+
+  // localStorage-ключ последнего выбора гипотез под вертикаль.
+  const collectHypsKey = `he.collect.hyps.${vertical.id}`;
+  const [checkedHyps, setCheckedHyps] = useState<ReadonlySet<string>>(new Set());
+  // Инициализация — один раз на вертикаль (дефолт: отмечены неотклонённые),
+  // с восстановлением прошлого выбора из localStorage. Не по эффекту на
+  // verticalHypotheses: родительский поллинг меняет идентичность массива
+  // каждые 4 секунды и сбрасывал бы выбор пользователя.
+  const hypsInitRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (hypsInitRef.current === vertical.id) return;
+    if (verticalHypotheses.length === 0) return; // гипотезы ещё не загрузились
+    hypsInitRef.current = vertical.id;
+    let initial = verticalHypotheses.filter((h) => h.status !== 'rejected').map((h) => h.id);
+    try {
+      const raw = window.localStorage.getItem(collectHypsKey);
+      const saved: unknown = raw ? (JSON.parse(raw) as unknown) : null;
+      if (Array.isArray(saved)) {
+        const known = new Set(verticalHypotheses.map((h) => h.id));
+        const kept = saved.filter((id): id is string => typeof id === 'string' && known.has(id));
+        // Прошлый выбор применяем, только если пересекается с актуальными
+        // гипотезами — иначе он от другой эпохи (гипотезы перегенерированы).
+        if (kept.length > 0) initial = kept;
+      }
+    } catch {
+      // localStorage недоступен или битый JSON — живём на дефолте.
+    }
+    setCheckedHyps(new Set(initial));
+  }, [vertical.id, verticalHypotheses, collectHypsKey]);
+
+  const persistCheckedHyps = useCallback(
+    (next: ReadonlySet<string>) => {
+      try {
+        window.localStorage.setItem(collectHypsKey, JSON.stringify([...next]));
+      } catch {
+        // localStorage недоступен — выбор живёт только в состоянии компонента.
+      }
+    },
+    [collectHypsKey],
+  );
+
+  const toggleHypothesis = useCallback(
+    (id: string) => {
+      const next = new Set(checkedHyps);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      setCheckedHyps(next);
+      persistCheckedHyps(next);
+    },
+    [checkedHyps, persistCheckedHyps],
+  );
+
+  const setAllHypotheses = useCallback(
+    (on: boolean) => {
+      const next = new Set<string>(on ? verticalHypotheses.map((h) => h.id) : []);
+      setCheckedHyps(next);
+      persistCheckedHyps(next);
+    },
+    [verticalHypotheses, persistCheckedHyps],
+  );
+
+  // Считаем по актуальному списку: в checkedHyps могут остаться id уже
+  // удалённых/перегенерированных гипотез.
+  const checkedHypCount = useMemo(
+    () => verticalHypotheses.filter((h) => checkedHyps.has(h.id)).length,
+    [verticalHypotheses, checkedHyps],
+  );
 
   const verticalBases = useMemo(
     () =>
@@ -173,13 +271,23 @@ export function Step4Base(props: {
 
   const handleCollect = useCallback(async () => {
     if (collectStarting || collectingBase) return;
+    // Пикер виден, но ничего не отмечено (кнопка в этом состоянии disabled) —
+    // страховка от «сборки по всем гипотезам при снятых галочках».
+    if (verticalHypotheses.length > 0 && checkedHypCount === 0) return;
     setCollectError('');
     setCollectNotice('');
     setCollectStarting(true);
     try {
+      // Отмеченные гипотезы — всегда в запросе, когда пикер есть: явный выбор
+      // вместо молчаливой сборки по всем неотклонённым. Порядок — как в
+      // пикере (pct desc), детерминированно.
+      const body: { limit: CollectLimit; hypothesis_ids?: string[] } = { limit: collectLimit };
+      if (verticalHypotheses.length > 0) {
+        body.hypothesis_ids = verticalHypotheses.filter((h) => checkedHyps.has(h.id)).map((h) => h.id);
+      }
       const { ok, data } = await hePost<HeBaseCollectResponse>(
         `${HE_API}/verticals/${vertical.id}/collect`,
-        { limit: collectLimit },
+        body,
       );
       if (!ok) {
         setCollectError(data.error || 'Не удалось запустить автосборку');
@@ -203,7 +311,16 @@ export function Step4Base(props: {
     } finally {
       setCollectStarting(false);
     }
-  }, [collectStarting, collectingBase, collectLimit, vertical.id, onUploaded]);
+  }, [
+    collectStarting,
+    collectingBase,
+    collectLimit,
+    verticalHypotheses,
+    checkedHyps,
+    checkedHypCount,
+    vertical.id,
+    onUploaded,
+  ]);
 
   // Сборка создаёт base_collect-джобу, и родительский поллинг по активным
   // джобам её уже покрывает; локальный интервал — запасной вариант поверх
@@ -259,11 +376,22 @@ export function Step4Base(props: {
                 Автосборка завершилась ошибкой. Попробуйте ещё раз или загрузите файл вручную ниже.
               </p>
             ) : null}
+            {verticalHypotheses.length > 0 ? (
+              <HypothesisPicker
+                hypotheses={verticalHypotheses}
+                checked={checkedHyps}
+                checkedCount={checkedHypCount}
+                onToggle={toggleHypothesis}
+                onSetAll={setAllHypotheses}
+              />
+            ) : null}
             <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"
                 onClick={() => void handleCollect()}
-                disabled={collectStarting}
+                disabled={
+                  collectStarting || (verticalHypotheses.length > 0 && checkedHypCount === 0)
+                }
                 className={`${HE.btnPrimary} inline-flex items-center justify-center gap-2`}
               >
                 {collectStarting ? <Spinner /> : null}
@@ -289,6 +417,11 @@ export function Step4Base(props: {
             <p className="mt-1.5 text-[11px] text-gray-400">
               Больше строк — дольше сбор и больше файл.
             </p>
+            {verticalHypotheses.length > 0 && checkedHypCount === 0 ? (
+              <p className="mt-1 text-[11px] text-amber-600" role="alert">
+                Отметьте хотя бы одну гипотезу — сборка идёт по выбранным.
+              </p>
+            ) : null}
             {collectNotice ? (
               <p className="mt-2 text-xs text-gray-500">{collectNotice}</p>
             ) : null}
@@ -647,6 +780,96 @@ function BaseCard({ base }: { base: HeBaseSummary }) {
 }
 
 /* ─────────────────────────── Автосборка базы ─────────────────────────── */
+
+/** Текстовая метка тира (T1/T2/T3); копия приватного хелпера Step2Verticals. */
+function TierText({ tier }: { tier: HeHypothesisTier }) {
+  const meta = TIER_META[tier] ?? TIER_META[3];
+  return (
+    <span title={meta.hint} className={`shrink-0 ${HE.tierText}`}>
+      {meta.label}
+    </span>
+  );
+}
+
+/** Пилюля процента потенциала: ≥50 изумрудная, ≥25 янтарная, <25 серая. */
+function PctPill({ pct }: { pct: number }) {
+  const tone =
+    pct >= 50
+      ? 'bg-emerald-100 text-emerald-700'
+      : pct >= 25
+        ? 'bg-amber-100 text-amber-700'
+        : 'bg-gray-100 text-gray-500';
+  return <span className={`${HE.pill} shrink-0 ${tone}`}>{pct}%</span>;
+}
+
+/**
+ * Пикер гипотез автосборки: неотклонённые отмечены по умолчанию, отклонённые —
+ * приглушены и сняты (отметить можно — стадия пересечёт выбор с
+ * неотклонёнными). POST уходит строго с отмеченными id.
+ */
+function HypothesisPicker({
+  hypotheses,
+  checked,
+  checkedCount,
+  onToggle,
+  onSetAll,
+}: {
+  hypotheses: HeHypothesis[];
+  checked: ReadonlySet<string>;
+  checkedCount: number;
+  onToggle: (id: string) => void;
+  onSetAll: (on: boolean) => void;
+}) {
+  return (
+    <div className="mb-3 rounded-xl border border-gray-200 bg-gray-50/60 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-medium text-gray-600">
+          Гипотезы в сборке · выбрано {checkedCount} из {hypotheses.length}
+        </p>
+        <span className="flex shrink-0 items-center gap-1.5 text-[11px]">
+          <button type="button" onClick={() => onSetAll(true)} className={HE.btnQuiet}>
+            все
+          </button>
+          <span className="text-gray-300" aria-hidden>
+            /
+          </span>
+          <button type="button" onClick={() => onSetAll(false)} className={HE.btnQuiet}>
+            нет
+          </button>
+        </span>
+      </div>
+      <ul className="mt-1.5 space-y-0.5">
+        {hypotheses.map((h) => {
+          const rejected = h.status === 'rejected';
+          return (
+            <li key={h.id}>
+              <label
+                className={`flex cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 transition hover:bg-white ${
+                  rejected ? 'opacity-50' : ''
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked.has(h.id)}
+                  onChange={() => onToggle(h.id)}
+                  className="h-3.5 w-3.5 shrink-0 accent-blue-600"
+                />
+                <TierText tier={h.tier} />
+                <span className="min-w-0 flex-1 truncate text-xs text-gray-700" title={h.title}>
+                  {h.title}
+                </span>
+                {rejected ? (
+                  <span className="shrink-0 text-[10.5px] text-gray-400">отклонена</span>
+                ) : null}
+                <PctPill pct={h.potential_pct} />
+              </label>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
 
 /** Русские имена источников автосборки; неизвестный ключ показываем как пришёл. */
 const COLLECT_SOURCE_LABELS: Record<string, string> = {

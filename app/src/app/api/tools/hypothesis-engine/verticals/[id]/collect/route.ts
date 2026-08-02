@@ -16,10 +16,13 @@ function jsonError(message: string, status: number) {
 // POST — запустить авто-сборку базы под вертикаль (стадия base_collect: план
 // источников → коллекторы → harvest в he_bases). Создаёт he_bases
 // (source='auto', status='collecting') + he_jobs (stage='base_collect').
-// Тело опционально: {limit?: 2000 | 10000 | 50000} — лимит строк сборки
-// (практический предохранитель от раздутого data jsonb; выбор — за
-// пользователем, дефолт 10000). Лимит едет в payload джобы (его читает
-// totalRowsCap в стадии) и в he_bases.collect_info (его показывает UI).
+// Тело опционально: {limit?: 2000 | 10000 | 50000, hypothesis_ids?: string[]}.
+// limit — лимит строк сборки (практический предохранитель от раздутого data
+// jsonb; выбор — за пользователем, дефолт 10000). hypothesis_ids — выбранные
+// в UI гипотезы: массив непустых строк (иначе 400); пустой массив равноценен
+// отсутствию поля. Лимит и непустой hypothesis_ids едут в payload джобы (их
+// читают totalRowsCap и buildPlan в стадии) и в he_bases.collect_info (его
+// показывает UI).
 // Дедуп: активная (pending/running) base_collect-задача этой вертикали или
 // собирающаяся auto-база уже есть → возвращаем её со статусом 200 и флагом
 // existing: true (UI показывает «уже собирается», а не молча продолжает;
@@ -59,6 +62,24 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             return jsonError('limit должен быть одним из: 2000, 10000, 50000', 400);
           }
           limit = raw;
+        }
+      }
+
+      // Выбор гипотез из UI (шаг 4): массив непустых строк или отсутствие
+      // поля; пустой массив трактуем как «поля нет» (стадия фильтрует план
+      // только по непустому массиву — иначе «снял все галочки» молча собирало
+      // бы по всем гипотезам, а UI в таком состоянии кнопку блокирует).
+      let hypothesisIds: string[] | null = null;
+      if (body && typeof body === 'object' && 'hypothesis_ids' in body) {
+        const raw = (body as { hypothesis_ids?: unknown }).hypothesis_ids;
+        if (raw !== undefined) {
+          if (
+            !Array.isArray(raw) ||
+            raw.some((v) => typeof v !== 'string' || v.length === 0)
+          ) {
+            return jsonError('hypothesis_ids должен быть массивом непустых строк', 400);
+          }
+          hypothesisIds = raw.length > 0 ? raw : null;
         }
       }
 
@@ -124,10 +145,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           row_count: 0,
           columns: [],
           data: [],
-          // Лимит — сразу в collect_info: прогресс-карта показывает его,
-          // пока стадия ещё не перезаписала collect_info планом (поле живёт
-          // дальше — стадия мержит collect_info, а не заменяет).
-          collect_info: { limit },
+          // Лимит и выбранные гипотезы — сразу в collect_info: прогресс-карта
+          // показывает лимит, пока стадия ещё не перезаписала collect_info
+          // планом (поля живут дальше — стадия мержит collect_info, а не
+          // заменяет).
+          collect_info: hypothesisIds ? { limit, hypothesis_ids: hypothesisIds } : { limit },
         })
         .select('id, status')
         .single();
@@ -160,7 +182,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           project_id: vertical.project_id,
           stage: 'base_collect',
           status: 'pending',
-          payload: { base_id: base.id, limit },
+          payload: hypothesisIds
+            ? { base_id: base.id, limit, hypothesis_ids: hypothesisIds }
+            : { base_id: base.id, limit },
         });
       if (jobErr) {
         await logError('tools.hypothesis-engine.collect.enqueue_failed', jobErr, {
