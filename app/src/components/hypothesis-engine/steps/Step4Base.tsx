@@ -120,7 +120,12 @@ export function Step4Base(props: {
     if (hypsInitRef.current === vertical.id) return;
     if (verticalHypotheses.length === 0) return; // гипотезы ещё не загрузились
     hypsInitRef.current = vertical.id;
-    let initial = verticalHypotheses.filter((h) => h.status !== 'rejected').map((h) => h.id);
+    // Дефолт: если есть принятые (accepted) — отмечены только они (приоритет
+    // разметки специалиста), иначе — все неотклонённые.
+    const accepted = verticalHypotheses.filter((h) => h.status === 'accepted');
+    let initial = accepted.length > 0
+      ? accepted.map((h) => h.id)
+      : verticalHypotheses.filter((h) => h.status !== 'rejected').map((h) => h.id);
     try {
       const raw = window.localStorage.getItem(collectHypsKey);
       const saved: unknown = raw ? (JSON.parse(raw) as unknown) : null;

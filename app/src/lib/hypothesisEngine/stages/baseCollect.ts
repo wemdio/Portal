@@ -459,10 +459,12 @@ async function buildPlan(
   vertical: HeVertical,
   usage: HeUsage,
 ): Promise<HeSourcePlan> {
-  // Неотклонённые гипотезы вертикали — план обязан их покрывать.
+  // Гипотезы вертикали для плана. Семантика разметки: если специалист что-то
+  // ПРИНЯЛ (accepted) — план строим только по принятым; предложенные (proposed)
+  // идут в работу, только когда принятых нет (как в пересчёте % вертикали).
   const { data: hypRows, error: hError } = await ctx.supabase
     .from('he_hypotheses')
-    .select('id, title, description, tier')
+    .select('id, title, description, tier, status')
     .eq('project_id', job.project_id)
     .eq('vertical_id', vertical.id)
     .neq('status', 'rejected')
@@ -470,12 +472,13 @@ async function buildPlan(
   if (hError) throw new Error(`he_hypotheses read: ${hError.message}`);
   let hypotheses = (hypRows ?? [])
     .map((r) => {
-      const row = r as { id?: unknown; title?: unknown; description?: unknown; tier?: unknown };
+      const row = r as { id?: unknown; title?: unknown; description?: unknown; tier?: unknown; status?: unknown };
       return {
         id: typeof row.id === 'string' ? row.id : '',
         title: typeof row.title === 'string' ? row.title : '',
         description: typeof row.description === 'string' ? row.description : null,
         tier: typeof row.tier === 'number' ? row.tier : null,
+        status: typeof row.status === 'string' ? row.status : null,
       };
     })
     .filter((h) => h.title);
@@ -491,6 +494,13 @@ async function buildPlan(
     hypotheses = hypotheses.filter((h) => wanted.has(h.id));
     if (hypotheses.length === 0) {
       throw new Error('Выбранные гипотезы не найдены или все отклонены');
+    }
+  } else {
+    // Без явного выбора — семантика разметки: есть принятые → только они.
+    const accepted = hypotheses.filter((h) => h.status === 'accepted');
+    if (accepted.length > 0) {
+      stageLog(ctx, `[base_collect] план только по принятым гипотезам: ${accepted.length} из ${hypotheses.length}`);
+      hypotheses = accepted;
     }
   }
 
