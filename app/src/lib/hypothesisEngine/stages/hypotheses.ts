@@ -8,6 +8,7 @@
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { HeHypothesesBatchSchema, type HeBrandCloudOutput, type HeSiteProfileOutput } from '../schemas';
 import { buildHypothesesInstantMessages } from '../prompts/hypotheses';
+import * as datasetStats from '../datasetStats';
 import type { HeJob } from '../types';
 import {
   addUsage,
@@ -20,6 +21,104 @@ import {
   type HeStageResult,
 } from './shared';
 import type { HeCompetitorEntry } from './competitors';
+
+/* ─────────────── калибровочные данные (best-effort) ─────────────── */
+
+/**
+ * Строка портфельного профиля датасета Instantly — контракт
+ * getPortfolioProfile из datasetStats (reply% по сегментам портфеля).
+ */
+export interface HePortfolioProfileRow {
+  segment: string;
+  campaigns: number;
+  clients: number;
+  sent: number;
+  replies: number;
+  reply_pct: number | null;
+}
+
+/** История ручной разметки гипотез: топ-N частотных title по каждому вердикту. */
+export interface HeMarkupHistory {
+  accepted: string[];
+  rejected: string[];
+}
+
+const MARKUP_HISTORY_LIMIT = 10;
+/** Сколько свежих размеченных строк сканируем для частотной статистики. */
+const MARKUP_HISTORY_SCAN = 2000;
+
+/**
+ * Чистая агрегация разметки: частота title отдельно по accepted/rejected,
+ * топ-N по убыванию частоты (при равенстве — порядок первого появления).
+ * Матчинг строго по точному title (после trim, регистр значим), пустые
+ * title и прочие статусы (proposed) игнорируются.
+ */
+export function aggregateMarkupHistory(
+  rows: Array<{ title?: unknown; status?: unknown }>,
+  limit = MARKUP_HISTORY_LIMIT,
+): HeMarkupHistory {
+  const accepted = new Map<string, number>();
+  const rejected = new Map<string, number>();
+  for (const row of rows) {
+    const title = typeof row.title === 'string' ? row.title.trim() : '';
+    if (!title) continue;
+    const bucket = row.status === 'accepted' ? accepted : row.status === 'rejected' ? rejected : null;
+    if (!bucket) continue;
+    bucket.set(title, (bucket.get(title) ?? 0) + 1);
+  }
+  const top = (freq: Map<string, number>): string[] =>
+    [...freq.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([title]) => title);
+  return { accepted: top(accepted), rejected: top(rejected) };
+}
+
+/**
+ * Портфельный профиль датасета для калибровки промпта. Достаём экспорт
+ * getPortfolioProfile динамически: функция живёт в datasetStats и может
+ * подъехать отдельным изменением — до её приземления (или при любом сбое,
+ * датасет может лежать) возвращаем undefined, стадия продолжается.
+ */
+export async function loadPortfolioProfile(
+  ctx: HeStageContext,
+): Promise<HePortfolioProfileRow[] | undefined> {
+  try {
+    const fn = (datasetStats as Record<string, unknown>).getPortfolioProfile as
+      | ((opts?: { limit?: number }) => Promise<HePortfolioProfileRow[]>)
+      | undefined;
+    if (typeof fn !== 'function') return undefined;
+    return await fn({ limit: 10 });
+  } catch (e) {
+    stageLog(ctx, `[hypotheses] getPortfolioProfile упал: ${e instanceof Error ? e.message : String(e)}`);
+    return undefined;
+  }
+}
+
+/**
+ * История ручной разметки гипотез ДРУГИХ проектов (accepted/rejected) —
+ * калибровка «какие гипотезы живут / умирают на ревью специалиста».
+ * Сбой чтения → undefined, стадия продолжается.
+ */
+export async function loadMarkupHistory(
+  ctx: HeStageContext,
+  projectId: string,
+): Promise<HeMarkupHistory | undefined> {
+  try {
+    const { data, error } = await ctx.supabase
+      .from('he_hypotheses')
+      .select('title, status')
+      .in('status', ['accepted', 'rejected'])
+      .neq('project_id', projectId)
+      .order('updated_at', { ascending: false })
+      .limit(MARKUP_HISTORY_SCAN);
+    if (error) throw new Error(error.message);
+    return aggregateMarkupHistory(data ?? []);
+  } catch (e) {
+    stageLog(ctx, `[hypotheses] история разметки недоступна: ${e instanceof Error ? e.message : String(e)}`);
+    return undefined;
+  }
+}
 
 export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
   const usage = newUsage();
@@ -45,9 +144,27 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
   );
   const brandCloud = brandCloudResult?.entities ?? [];
 
+  // Калибровочные данные — best-effort: сбой любого источника → undefined,
+  // мгновенный проход продолжается без калибровки.
+  const [portfolioProfile, markupHistory] = await Promise.all([
+    loadPortfolioProfile(ctx),
+    loadMarkupHistory(ctx, job.project_id),
+  ]);
+
   stageLog(ctx, '[hypotheses] мгновенный проход: 25–40 кандидатов…');
+  // Объект собираем переменной, а не литералом в вызове: поля portfolioProfile /
+  // markupHistory добавляются в HypothesesPromptInput параллельным изменением —
+  // так стадия компилируется и до, и после приземления промпт-контракта.
+  const promptInput = {
+    profile,
+    websiteUrl: project.website_url,
+    brandCloud,
+    competitors,
+    ...(portfolioProfile ? { portfolioProfile } : {}),
+    ...(markupHistory ? { markupHistory } : {}),
+  };
   const llm = await callLLMWithSchema(
-    buildHypothesesInstantMessages({ profile, websiteUrl: project.website_url, brandCloud, competitors }),
+    buildHypothesesInstantMessages(promptInput),
     HeHypothesesBatchSchema,
     // 25–40 гипотез с description/fit_rationale/rationale/search_queries на
     // русском — кириллические BPE-токены дорогие, 8–16k обрезало бы JSON
