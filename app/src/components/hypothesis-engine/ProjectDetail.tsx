@@ -169,6 +169,11 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const hypotheses = useMemo(() => detail?.hypotheses ?? [], [detail]);
   const dossiers = useMemo(() => detail?.dossiers ?? [], [detail]);
   const cases = useMemo(() => detail?.cases ?? [], [detail]);
+  // Полные списки артефактов — доска шага 2 показывает, что собрано по каждой вертикали.
+  const chains = useMemo(() => detail?.chains ?? [], [detail]);
+  const vocabs = useMemo(() => detail?.vocabs ?? [], [detail]);
+  const bases = useMemo(() => detail?.bases ?? [], [detail]);
+  const templates = useMemo(() => detail?.templates ?? [], [detail]);
   const selectedVertical = useMemo(
     () => verticals.find((v) => v.id === selectedVerticalId) ?? null,
     [verticals, selectedVerticalId],
@@ -464,6 +469,10 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             onSelectVertical={handleSelectVertical}
             jobs={jobs}
             dossiers={dossiers}
+            chains={chains}
+            vocabs={vocabs}
+            bases={bases}
+            templates={templates}
           />
         );
       }
