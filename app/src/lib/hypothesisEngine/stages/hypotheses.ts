@@ -8,7 +8,7 @@
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { HeHypothesesBatchSchema, type HeBrandCloudOutput, type HeSiteProfileOutput } from '../schemas';
 import { buildHypothesesInstantMessages } from '../prompts/hypotheses';
-import * as datasetStats from '../datasetStats';
+import { getPortfolioProfile, type HePortfolioEntry } from '../datasetStats';
 import type { HeJob } from '../types';
 import {
   addUsage,
@@ -23,19 +23,6 @@ import {
 import type { HeCompetitorEntry } from './competitors';
 
 /* ─────────────── калибровочные данные (best-effort) ─────────────── */
-
-/**
- * Строка портфельного профиля датасета Instantly — контракт
- * getPortfolioProfile из datasetStats (reply% по сегментам портфеля).
- */
-export interface HePortfolioProfileRow {
-  segment: string;
-  campaigns: number;
-  clients: number;
-  sent: number;
-  replies: number;
-  reply_pct: number | null;
-}
 
 /** История ручной разметки гипотез: топ-N частотных title по каждому вердикту. */
 export interface HeMarkupHistory {
@@ -75,20 +62,15 @@ export function aggregateMarkupHistory(
 }
 
 /**
- * Портфельный профиль датасета для калибровки промпта. Достаём экспорт
- * getPortfolioProfile динамически: функция живёт в datasetStats и может
- * подъехать отдельным изменением — до её приземления (или при любом сбое,
- * датасет может лежать) возвращаем undefined, стадия продолжается.
+ * Портфельный профиль датасета для калибровки промпта. При любом сбое
+ * (датасет лежит/не сконфигурирован) возвращаем undefined — стадия
+ * продолжается без калибровки.
  */
 export async function loadPortfolioProfile(
   ctx: HeStageContext,
-): Promise<HePortfolioProfileRow[] | undefined> {
+): Promise<HePortfolioEntry[] | undefined> {
   try {
-    const fn = (datasetStats as Record<string, unknown>).getPortfolioProfile as
-      | ((opts?: { limit?: number }) => Promise<HePortfolioProfileRow[]>)
-      | undefined;
-    if (typeof fn !== 'function') return undefined;
-    return await fn({ limit: 10 });
+    return await getPortfolioProfile({ limit: 10 });
   } catch (e) {
     stageLog(ctx, `[hypotheses] getPortfolioProfile упал: ${e instanceof Error ? e.message : String(e)}`);
     return undefined;

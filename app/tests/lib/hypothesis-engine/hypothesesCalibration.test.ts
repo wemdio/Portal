@@ -34,11 +34,8 @@ jest.mock('@/lib/hypothesisEngine/llm', () => ({
 import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { callLLMWithSchema } from '@/lib/hypothesisEngine/llm';
-import {
-  aggregateMarkupHistory,
-  runHypothesesStage,
-  type HePortfolioProfileRow,
-} from '@/lib/hypothesisEngine/stages/hypotheses';
+import { aggregateMarkupHistory, runHypothesesStage } from '@/lib/hypothesisEngine/stages/hypotheses';
+import type { HePortfolioEntry } from '@/lib/hypothesisEngine/datasetStats';
 import type { HeJob } from '@/lib/hypothesisEngine/types';
 
 const callLLMMock = callLLMWithSchema as unknown as jest.Mock;
@@ -50,7 +47,7 @@ const PROJECT = {
   brief: { site_profile: { company_name: 'Клиент', product_summary: 'Продукт' } },
 };
 
-const PORTFOLIO: HePortfolioProfileRow[] = [
+const PORTFOLIO: HePortfolioEntry[] = [
   { segment: 'logistics_transport', campaigns: 12, clients: 5, sent: 50000, replies: 800, reply_pct: 1.6 },
   { segment: 'it_software_saas', campaigns: 30, clients: 11, sent: 120000, replies: 600, reply_pct: 0.5 },
 ];
