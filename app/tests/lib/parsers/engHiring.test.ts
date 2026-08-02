@@ -712,6 +712,36 @@ describe('engHiring cache filtering', () => {
     }, config)).toBe(false);
   });
 
+  it('evaluates mixed comma terms each in its own mode (b2b term = strict sales, other terms = role match)', () => {
+    // Regression: previously ANY "b2b" in the text forced the WHOLE query into
+    // the strict sales path, silently dropping plain roles like "head of marketing".
+    const config: EngHiringSearchConfig = {
+      text: 'head of marketing, b2b manager',
+      sources: ['greenhouse'],
+      countries: ['us'],
+      posted_within_days: 30,
+      now: '2026-06-11T00:00:00.000Z',
+    };
+
+    expect(matchesEngHiringVacancy({ ...base, vacancy_title: 'Head of Marketing' }, config)).toBe(true);
+    expect(matchesEngHiringVacancy({ ...base, vacancy_title: 'Business Development Representative' }, config)).toBe(true);
+    expect(matchesEngHiringVacancy({ ...base, vacancy_title: 'Backend Engineer' }, config)).toBe(false);
+    expect(matchesEngHiringVacancy({ ...base, vacancy_title: 'Product Designer', vacancy_description: 'Works on b2b flows.' }, config)).toBe(false);
+  });
+
+  it('keeps pure b2b queries strict (no role-regex fallback)', () => {
+    const config: EngHiringSearchConfig = {
+      text: 'b2b manager',
+      sources: ['greenhouse'],
+      countries: ['us'],
+      posted_within_days: 30,
+      now: '2026-06-11T00:00:00.000Z',
+    };
+
+    expect(matchesEngHiringVacancy({ ...base, vacancy_title: 'Head of Marketing' }, config)).toBe(false);
+    expect(matchesEngHiringVacancy({ ...base, vacancy_title: 'Business Development Representative' }, config)).toBe(true);
+  });
+
   it('deduplicates vacancies by source and source_job_id', () => {
     const rows = dedupeEngHiringVacancies([
       base,
