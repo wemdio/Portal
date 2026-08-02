@@ -155,6 +155,20 @@ function nullableText(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
 }
 
+export class TeamApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  readonly payload: UnknownRecord;
+
+  constructor(message: string, status: number, payload: unknown) {
+    super(message);
+    this.name = 'TeamApiError';
+    this.status = status;
+    this.payload = record(payload);
+    this.code = nullableText(this.payload.code);
+  }
+}
+
 function number(value: unknown): number {
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -311,7 +325,11 @@ export async function teamApiFetch(
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const body = record(payload);
-    throw new Error(text(body.error ?? body.message, 'Не удалось загрузить данные. Попробуйте ещё раз.'));
+    throw new TeamApiError(
+      text(body.error ?? body.message, 'Не удалось загрузить данные. Попробуйте ещё раз.'),
+      response.status,
+      body,
+    );
   }
   return payload;
 }

@@ -1,6 +1,7 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { extractJobs, mergeCompanyTokens, parseCompanyCsv, postingsUrl, type AtsCompanyToken } from '@/lib/jobs/atsCompanyParser';
 import {
+  DEFAULT_ENG_HIRING_SOURCES,
   ENG_HIRING_SOURCES,
   dedupeEngHiringVacanciesByCompany,
   dedupeEngHiringVacancies,
@@ -130,7 +131,9 @@ function log(level: 'info' | 'error' | 'warn', msg: string, extra?: unknown) {
 function sourcesFromConfig(config: EngHiringSearchConfig): EngHiringSource[] {
   const raw = Array.isArray(config.sources) ? config.sources : [];
   const valid = raw.filter((s): s is EngHiringSource => ENG_HIRING_SOURCES.includes(s));
-  return valid.length ? Array.from(new Set(valid)) : [...ENG_HIRING_SOURCES];
+  // No explicit choice -> default set (no workday: its WAF soft-blocks scans;
+  // coverage comes from the jobhive feed). Explicit 'workday' still wins.
+  return valid.length ? Array.from(new Set(valid)) : [...DEFAULT_ENG_HIRING_SOURCES];
 }
 
 function clampCompaniesLimit(value: unknown): number {

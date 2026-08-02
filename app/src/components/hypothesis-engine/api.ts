@@ -45,6 +45,8 @@ export interface HeCollectTask {
 export interface HeCollectInfo {
   /** Лимит строк, выбранный при запуске сборки (у старых записей поля нет). */
   limit?: number | null;
+  /** Гипотезы, выбранные при запуске сборки (у записей до пикера гипотез поля нет). */
+  hypothesis_ids?: string[] | null;
   plan?: { tasks?: HeCollectPlanTask[] } | null;
   tasks?: HeCollectTask[] | null;
 }
