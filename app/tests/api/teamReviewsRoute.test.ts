@@ -11,6 +11,8 @@ const DEMO_LEAD_ID = '00000000-0000-4000-8000-000000000005';
 const UNKNOWN_ROLE_ID = '00000000-0000-4000-8000-000000000006';
 const REVIEW_ID = '00000000-0000-4000-8000-000000000010';
 const SCHEDULED_REVIEW_ID = '00000000-0000-4000-8000-000000000012';
+const REVIEW_UPDATED_AT = '2026-07-24T12:00:00.000Z';
+const SCHEDULED_REVIEW_UPDATED_AT = '2026-07-31T12:00:00.000Z';
 
 let mockMainDb: MockSupabaseClient = createMockSupabase();
 let mockCurrentUser: { id: string } | null = { id: LEAD_ID };
@@ -78,7 +80,7 @@ function seedDatabase() {
           problems: 'Нужно лучше определять приоритеты',
           recommendations: 'Разбирать кейсы раз в неделю',
           created_at: '2026-07-24T12:00:00.000Z',
-          updated_at: '2026-07-24T12:00:00.000Z',
+          updated_at: REVIEW_UPDATED_AT,
         },
         {
           id: '00000000-0000-4000-8000-000000000011',
@@ -104,7 +106,7 @@ function seedDatabase() {
           problems: null,
           recommendations: null,
           created_at: '2026-07-31T12:00:00.000Z',
-          updated_at: '2026-07-31T12:00:00.000Z',
+          updated_at: SCHEDULED_REVIEW_UPDATED_AT,
         },
       ],
     },
@@ -512,13 +514,14 @@ describe('POST /api/team/reviews', () => {
 });
 
 describe('PATCH /api/team/reviews/[id]', () => {
-  it('edits scheduled review metadata without filling post-meeting fields', async () => {
+  it('edits scheduled review with the current expectedUpdatedAt and guards by id plus updated_at', async () => {
     const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
 
     const response = await PATCH(
       request('/api/team/reviews/' + SCHEDULED_REVIEW_ID, {
         method: 'PATCH',
         body: {
+          expectedUpdatedAt: SCHEDULED_REVIEW_UPDATED_AT,
           reviewDate: '2026-08-15',
           employeeUserId: OTHER_EMPLOYEE_ID,
           reason: '  Обсудить новые зоны ответственности  ',
@@ -552,6 +555,14 @@ describe('PATCH /api/team/reviews/[id]', () => {
         outcomes: null,
       }),
     );
+    expect(mockMainDb.updates.at(-1)?.filters).toEqual(
+      expect.arrayContaining([
+        { column: 'id', op: 'eq', value: SCHEDULED_REVIEW_ID },
+        { column: 'updated_at', op: 'eq', value: SCHEDULED_REVIEW_UPDATED_AT },
+      ]),
+    );
+    expect(mockMainDb.updates.at(-1)?.patch).not.toHaveProperty('expectedUpdatedAt');
+    expect(mockMainDb.updates.at(-1)?.patch).not.toHaveProperty('expected_updated_at');
   });
 
   it('completes a scheduled review atomically and exposes it as completed', async () => {
@@ -561,6 +572,7 @@ describe('PATCH /api/team/reviews/[id]', () => {
       request('/api/team/reviews/' + SCHEDULED_REVIEW_ID, {
         method: 'PATCH',
         body: {
+          expectedUpdatedAt: SCHEDULED_REVIEW_UPDATED_AT,
           status: 'completed',
           outcomes: '  Уверенно взяла новые проекты  ',
           problems: '   ',
@@ -614,6 +626,7 @@ describe('PATCH /api/team/reviews/[id]', () => {
       request(`/api/team/reviews/${REVIEW_ID}`, {
         method: 'PATCH',
         body: {
+          expectedUpdatedAt: REVIEW_UPDATED_AT,
           reviewDate: '2026-07-29',
           employeeUserId: OTHER_EMPLOYEE_ID,
           reviewerUserId: OTHER_EMPLOYEE_ID,
@@ -675,37 +688,43 @@ describe('PATCH /api/team/reviews/[id]', () => {
     [
       'requires outcomes when completing a scheduled review',
       SCHEDULED_REVIEW_ID,
-      { status: 'completed' },
+      { expectedUpdatedAt: SCHEDULED_REVIEW_UPDATED_AT, status: 'completed' },
       'outcomes',
     ],
     [
       'does not accept result fields while a review stays scheduled',
       SCHEDULED_REVIEW_ID,
-      { outcomes: 'Преждевременные итоги' },
+      {
+        expectedUpdatedAt: SCHEDULED_REVIEW_UPDATED_AT,
+        outcomes: 'Преждевременные итоги',
+      },
       'status',
     ],
     [
       'rejects an unknown lifecycle status',
       SCHEDULED_REVIEW_ID,
-      { status: 'cancelled' },
+      { expectedUpdatedAt: SCHEDULED_REVIEW_UPDATED_AT, status: 'cancelled' },
       'status',
     ],
     [
       'does not move a completed review back to scheduled',
       REVIEW_ID,
-      { status: 'scheduled' },
+      { expectedUpdatedAt: REVIEW_UPDATED_AT, status: 'scheduled' },
       'transition',
     ],
     [
       'rejects a reason longer than 500 characters',
       SCHEDULED_REVIEW_ID,
-      { reason: 'x'.repeat(501) },
+      {
+        expectedUpdatedAt: SCHEDULED_REVIEW_UPDATED_AT,
+        reason: 'x'.repeat(501),
+      },
       'reason',
     ],
     [
       'does not allow clearing outcomes from a completed review',
       REVIEW_ID,
-      { outcomes: '   ' },
+      { expectedUpdatedAt: REVIEW_UPDATED_AT, outcomes: '   ' },
       'outcomes',
     ],
   ])('%s', async (_title, reviewId, payload, errorField) => {
@@ -741,13 +760,148 @@ describe('PATCH /api/team/reviews/[id]', () => {
     expect(mockMainDb.updates).toHaveLength(0);
   });
 
+  it('rejects a stale expectedUpdatedAt without changing the review or logging success', async () => {
+    const before = mockMainDb.getRows('employee_reviews');
+    const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
+
+    const response = await PATCH(
+      request(`/api/team/reviews/${REVIEW_ID}`, {
+        method: 'PATCH',
+        body: {
+          expectedUpdatedAt: '2026-07-24T11:59:59.000Z',
+          outcomes: 'Эта правка не должна затереть актуальные итоги',
+        },
+      }),
+      { params: Promise.resolve({ id: REVIEW_ID }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(body).toEqual(expect.objectContaining({
+      error: expect.any(String),
+      code: 'review_conflict',
+      currentUpdatedAt: REVIEW_UPDATED_AT,
+    }));
+    expect(mockMainDb.getRows('employee_reviews')).toEqual(before);
+    expect(
+      mockLogAudit.mock.calls.some(([event]) => event === 'team.reviews.update.success'),
+    ).toBe(false);
+  });
+
+  it('detects a write race after the preliminary read and reports the newest timestamp', async () => {
+    const concurrentlyUpdatedAt = '2026-08-02T10:20:30.123456Z';
+    const originalFrom = mockMainDb.from;
+    let injectedConcurrentUpdate = false;
+
+    mockMainDb.from = (table) => {
+      const builder = originalFrom(table);
+      if (table !== 'employee_reviews' || injectedConcurrentUpdate) return builder;
+
+      const maybeSingle = builder.maybeSingle.bind(builder);
+      builder.maybeSingle = async () => {
+        const result = await maybeSingle();
+        if (!injectedConcurrentUpdate && result.data?.id === REVIEW_ID) {
+          injectedConcurrentUpdate = true;
+          await originalFrom('employee_reviews')
+            .update({ updated_at: concurrentlyUpdatedAt })
+            .eq('id', REVIEW_ID);
+        }
+        return result;
+      };
+      return builder;
+    };
+
+    const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
+    const response = await PATCH(
+      request(`/api/team/reviews/${REVIEW_ID}`, {
+        method: 'PATCH',
+        body: {
+          expectedUpdatedAt: REVIEW_UPDATED_AT,
+          outcomes: 'Эта гонка не должна затереть чужую правку',
+        },
+      }),
+      { params: Promise.resolve({ id: REVIEW_ID }) },
+    );
+    const body = await response.json();
+    const current = mockMainDb.getRows('employee_reviews')
+      .find((review) => review.id === REVIEW_ID);
+
+    expect(response.status).toBe(409);
+    expect(body).toEqual(expect.objectContaining({
+      code: 'review_conflict',
+      currentUpdatedAt: concurrentlyUpdatedAt,
+    }));
+    expect(current).toEqual(expect.objectContaining({
+      outcomes: 'Уверенно ведёт проекты',
+      updated_at: concurrentlyUpdatedAt,
+    }));
+    expect(
+      mockLogAudit.mock.calls.some(([event]) => event === 'team.reviews.update.success'),
+    ).toBe(false);
+  });
+
+  it('requires expectedUpdatedAt before attempting an update', async () => {
+    const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
+
+    const response = await PATCH(
+      request(`/api/team/reviews/${REVIEW_ID}`, {
+        method: 'PATCH',
+        body: { outcomes: 'Попытка без версии записи' },
+      }),
+      { params: Promise.resolve({ id: REVIEW_ID }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(428);
+    expect(body).toEqual(expect.objectContaining({
+      error: expect.any(String),
+      code: 'precondition_required',
+    }));
+    expect(mockMainDb.updates).toHaveLength(0);
+  });
+
+  it.each([
+    ['non-timestamp text', 'not-a-timestamp'],
+    ['timestamp without timezone', '2026-08-02T10:15:00'],
+    ['invalid calendar date', '2026-02-30T10:15:00Z'],
+    ['null', null],
+    ['number', 123],
+  ])('rejects invalid expectedUpdatedAt (%s) before attempting an update', async (
+    _case,
+    expectedUpdatedAt,
+  ) => {
+    const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
+
+    const response = await PATCH(
+      request(`/api/team/reviews/${REVIEW_ID}`, {
+        method: 'PATCH',
+        body: {
+          expectedUpdatedAt,
+          outcomes: 'Попытка с невалидной версией записи',
+        },
+      }),
+      { params: Promise.resolve({ id: REVIEW_ID }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body).toEqual(expect.objectContaining({
+      error: expect.any(String),
+      code: 'invalid_precondition',
+    }));
+    expect(mockMainDb.updates).toHaveLength(0);
+  });
+
   it('returns 404 for an unknown review', async () => {
     const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
 
     const response = await PATCH(
       request('/api/team/reviews/00000000-0000-4000-8000-000000000099', {
         method: 'PATCH',
-        body: { outcomes: 'Итоги' },
+        body: {
+          expectedUpdatedAt: REVIEW_UPDATED_AT,
+          outcomes: 'Итоги',
+        },
       }),
       {
         params: Promise.resolve({
@@ -764,7 +918,10 @@ describe('PATCH /api/team/reviews/[id]', () => {
     const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
 
     const response = await PATCH(
-      request(`/api/team/reviews/${REVIEW_ID}`, { method: 'PATCH', body: {} }),
+      request(`/api/team/reviews/${REVIEW_ID}`, {
+        method: 'PATCH',
+        body: { expectedUpdatedAt: REVIEW_UPDATED_AT },
+      }),
       { params: Promise.resolve({ id: REVIEW_ID }) },
     );
 

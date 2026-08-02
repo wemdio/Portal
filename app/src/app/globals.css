@@ -2417,9 +2417,9 @@ html[data-portal-theme='dark'] {
      а спокойнее #d4d4d8 (≈ zinc-300). Контраст всё ещё AA, но без рези. */
   --pd-text: #d4d4d8;
   --pd-text-mute: #9d9da4;
-  /* faint — для captions, +1 ещё, метаданных. Был #6c6c72 — еле читаемо на
-     dark-фоне. Подняли до #82828a — теперь видно, но всё ещё приглушённо. */
-  --pd-text-faint: #82828a;
+  /* faint — для captions, +1 ещё, метаданных и placeholder-текста. #86868e
+     сохраняет приглушённую иерархию и даёт WCAG AA на elevated-поверхности. */
+  --pd-text-faint: #86868e;
   --pd-divider: #25262b;
   --pd-divider-strong: #34353b;
   --pd-ring: rgba(255, 255, 255, 0.12);
@@ -2540,6 +2540,11 @@ html[data-portal-theme='dark'] .portal-shell button.bg-zinc-900,
 html[data-portal-theme='dark'] .portal-shell button.bg-slate-900 {
   background-color: var(--pd-text) !important;
   color: var(--pd-bg) !important;
+}
+html[data-portal-theme='dark'] .portal-shell button.bg-gray-900:hover:not(:disabled),
+html[data-portal-theme='dark'] .portal-shell button.bg-zinc-900:hover:not(:disabled),
+html[data-portal-theme='dark'] .portal-shell button.bg-slate-900:hover:not(:disabled) {
+  background-color: var(--pd-text-mute) !important;
 }
 html[data-portal-theme='dark'] .portal-shell button.bg-gray-900 *,
 html[data-portal-theme='dark'] .portal-shell button.bg-zinc-900 *,
