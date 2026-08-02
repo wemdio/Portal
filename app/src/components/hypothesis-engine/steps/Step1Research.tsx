@@ -2,7 +2,8 @@
 
 /**
  * Шаг 1 мастера «Движка вертикалей» — «Исследование».
- * Три состояния: пустое (объяснение + запуск + оффер + эталон стиля), прогресс по стадиям
+ * Три состояния: пустое (объяснение + запуск + оффер + подпись отправителя +
+ * эталон стиля), прогресс по стадиям
  * research-пайплайна человеческими формулировками (без технических деталей)
  * и компактное «готово». Навигация между шагами — забота оболочки (ProjectDetail).
  * Питается от массива jobs проекта: состояние стадии = статус её последней джобы.
@@ -80,6 +81,9 @@ export function Step1Research({
   // (ProjectDetail может не передавать styleValue).
   const briefStyle = project?.brief?.style_override;
   const resolvedStyleValue = styleValue ?? (typeof briefStyle === 'string' ? briefStyle : '');
+  // Подпись отправителя — тем же паттерном из brief (signature_override).
+  const briefSignature = project?.brief?.signature_override;
+  const resolvedSignatureValue = typeof briefSignature === 'string' ? briefSignature : '';
   const researchJobs = jobs.filter((j) => RESEARCH_STAGE_SET.has(j.stage));
   const hasActiveResearch = researchJobs.some((j) => j.status === 'pending' || j.status === 'running');
   const failedStages = RESEARCH_STAGES.filter(({ stage }) => latestJobOf(jobs, stage)?.status === 'failed');
@@ -161,6 +165,7 @@ export function Step1Research({
       onSaveOffer={onSaveOffer}
       styleValue={resolvedStyleValue}
       onStyleSaved={onStyleSaved}
+      signatureValue={resolvedSignatureValue}
       projectId={project?.id ?? null}
       cases={cases ?? []}
       onCasesChanged={onCasesChanged}
@@ -177,6 +182,7 @@ function NotStarted({
   onSaveOffer,
   styleValue,
   onStyleSaved,
+  signatureValue,
   projectId,
   cases,
   onCasesChanged,
@@ -187,6 +193,7 @@ function NotStarted({
   onSaveOffer: (v: string) => Promise<void> | void;
   styleValue: string;
   onStyleSaved?: () => void;
+  signatureValue: string;
   projectId: string | null;
   cases: HeCaseEntry[];
   onCasesChanged?: () => void;
@@ -206,6 +213,7 @@ function NotStarted({
         Запустить исследование
       </button>
       <OfferBlock offerValue={offerValue} onSaveOffer={onSaveOffer} />
+      <SignatureBlock projectId={projectId} signatureValue={signatureValue} />
       <StyleBlock projectId={projectId} styleValue={styleValue} onSaved={onStyleSaved} />
       <CasesBlock projectId={projectId} cases={cases} onCasesChanged={onCasesChanged} />
     </section>
@@ -270,6 +278,81 @@ function OfferBlock({
         </button>
         {saved ? <span className="text-xs text-emerald-500">Сохранено ✓</span> : null}
       </div>
+    </div>
+  );
+}
+
+/** Подпись отправителя: ставится дословно в конце каждого письма. Сохраняет сам через PATCH. */
+function SignatureBlock({
+  projectId,
+  signatureValue,
+}: {
+  projectId: string | null;
+  signatureValue: string;
+}) {
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleSave = async () => {
+    if (saving || !projectId) return;
+    setSaving(true);
+    setError('');
+    try {
+      const { ok, data } = await hePatch<HeProjectResponse>(`${HE_API}/projects/${projectId}`, {
+        signature_override: taRef.current?.value ?? '',
+      });
+      if (!ok) {
+        setError(data.error || 'Не удалось сохранить подпись');
+        return;
+      }
+      setSaved(true);
+      setDirty(false);
+      window.setTimeout(() => setSaved(false), 2000);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
+      <label
+        htmlFor="he-step1-signature"
+        className="text-xs font-semibold uppercase tracking-widest text-gray-400"
+      >
+        Отправитель (подпись в письмах)
+      </label>
+      <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
+        Как подписываемся в письмах: имя, роль, сайт. Пример: Сергей Лазуткин, руководитель направления, Polza,
+        polzaagency.ru. Пусто: подпишемся командой компании из брифа.
+      </p>
+      <textarea
+        id="he-step1-signature"
+        ref={taRef}
+        rows={2}
+        defaultValue={signatureValue}
+        onChange={() => {
+          setDirty(true);
+          setSaved(false);
+        }}
+        placeholder="Сергей Лазуткин, руководитель направления, Polza, polzaagency.ru"
+        className={`mt-2 resize-y ${HE.input}`}
+      />
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => void handleSave()}
+          disabled={saving || !dirty}
+          className={HE.btnSmall}
+        >
+          {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
+          Сохранить
+        </button>
+        {saved ? <span className="text-xs text-emerald-500">Сохранено ✓</span> : null}
+      </div>
+      {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
     </div>
   );
 }
