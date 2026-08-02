@@ -109,7 +109,9 @@ export function Step4Base(props: {
   );
 
   // localStorage-ключ последнего выбора гипотез под вертикаль.
-  const collectHypsKey = `he.collect.hyps.${vertical.id}`;
+  // v2: смена семантики дефолта (приоритет accepted) — старый выбор эпохи
+  // «все неотклонённые» не должен тихо перекрывать новый дефолт.
+  const collectHypsKey = `he.collect.hyps.v2.${vertical.id}`;
   const [checkedHyps, setCheckedHyps] = useState<ReadonlySet<string>>(new Set());
   // Инициализация — один раз на вертикаль (дефолт: отмечены неотклонённые),
   // с восстановлением прошлого выбора из localStorage. Не по эффекту на
@@ -174,9 +176,14 @@ export function Step4Base(props: {
   );
 
   // Считаем по актуальному списку: в checkedHyps могут остаться id уже
-  // удалённых/перегенерированных гипотез.
+  // удалённых/перегенерированных гипотез. Отклонённые не считаем (как и в POST).
   const checkedHypCount = useMemo(
-    () => verticalHypotheses.filter((h) => checkedHyps.has(h.id)).length,
+    () => verticalHypotheses.filter((h) => checkedHyps.has(h.id) && h.status !== 'rejected').length,
+    [verticalHypotheses, checkedHyps],
+  );
+  // Есть ли в выборе непринятые (proposed) — для подсказки у счётчика.
+  const includesProposed = useMemo(
+    () => verticalHypotheses.some((h) => checkedHyps.has(h.id) && h.status === 'proposed'),
     [verticalHypotheses, checkedHyps],
   );
 
@@ -288,7 +295,11 @@ export function Step4Base(props: {
       // пикере (pct desc), детерминированно.
       const body: { limit: CollectLimit; hypothesis_ids?: string[] } = { limit: collectLimit };
       if (verticalHypotheses.length > 0) {
-        body.hypothesis_ids = verticalHypotheses.filter((h) => checkedHyps.has(h.id)).map((h) => h.id);
+        // Отклонённые не отправляем: стадия их всё равно отрежет — не даём
+        // пользователю включить их молча (в пикере они disabled).
+        body.hypothesis_ids = verticalHypotheses
+          .filter((h) => checkedHyps.has(h.id) && h.status !== 'rejected')
+          .map((h) => h.id);
       }
       const { ok, data } = await hePost<HeBaseCollectResponse>(
         `${HE_API}/verticals/${vertical.id}/collect`,
@@ -386,6 +397,7 @@ export function Step4Base(props: {
                 hypotheses={verticalHypotheses}
                 checked={checkedHyps}
                 checkedCount={checkedHypCount}
+                includesProposed={includesProposed}
                 onToggle={toggleHypothesis}
                 onSetAll={setAllHypotheses}
               />
@@ -816,12 +828,14 @@ function HypothesisPicker({
   hypotheses,
   checked,
   checkedCount,
+  includesProposed,
   onToggle,
   onSetAll,
 }: {
   hypotheses: HeHypothesis[];
   checked: ReadonlySet<string>;
   checkedCount: number;
+  includesProposed: boolean;
   onToggle: (id: string) => void;
   onSetAll: (on: boolean) => void;
 }) {
@@ -830,6 +844,9 @@ function HypothesisPicker({
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs font-medium text-gray-600">
           Гипотезы в сборке · выбрано {checkedCount} из {hypotheses.length}
+          {includesProposed ? (
+            <span className={`ml-1.5 font-normal ${HE.muted}`}>включая непринятые</span>
+          ) : null}
         </p>
         <span className="flex shrink-0 items-center gap-1.5 text-[11px]">
           <button type="button" onClick={() => onSetAll(true)} className={HE.btnQuiet}>
@@ -849,14 +866,15 @@ function HypothesisPicker({
           return (
             <li key={h.id}>
               <label
-                className={`flex cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 transition hover:bg-white ${
-                  rejected ? 'opacity-50' : ''
+                className={`flex items-center gap-2 rounded-lg px-1.5 py-1 transition ${
+                  rejected ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:bg-white'
                 }`}
               >
                 <input
                   type="checkbox"
                   checked={checked.has(h.id)}
                   onChange={() => onToggle(h.id)}
+                  disabled={rejected}
                   className="h-3.5 w-3.5 shrink-0 accent-blue-600"
                 />
                 <TierText tier={h.tier} />
@@ -908,16 +926,25 @@ function readCollectInfo(info: HeCollectInfo | null | undefined) {
   const tasks = info?.tasks;
   // limit появился позже plan/tasks — читаем так же защитно, как весь collect_info.
   const rawLimit = info?.limit;
+  // hypotheses появились позже limit — тоже защитно.
+  const hyps = (info as { hypotheses?: unknown } | null | undefined)?.hypotheses;
   return {
     plan: Array.isArray(plan) ? plan.filter((t) => t && typeof t === 'object') : [],
     tasks: Array.isArray(tasks) ? tasks.filter((t) => t && typeof t === 'object') : [],
     limit: typeof rawLimit === 'number' && Number.isFinite(rawLimit) ? rawLimit : null,
+    hypotheses: Array.isArray(hyps)
+      ? hyps
+          .map((h) => (h && typeof h === 'object' && typeof (h as { title?: unknown }).title === 'string'
+            ? (h as { title: string }).title
+            : ''))
+          .filter(Boolean)
+      : [],
   };
 }
 
 /** Карточка прогресса автосборки: план (почему эти источники) + живые статусы задач. */
 function CollectProgress({ base }: { base: HeBaseSummary }) {
-  const { plan, tasks, limit } = readCollectInfo(base.collect_info);
+  const { plan, tasks, limit, hypotheses } = readCollectInfo(base.collect_info);
   // У баз, созданных до появления limit в collect_info, показываем дефолт.
   const shownLimit = limit ?? DEFAULT_COLLECT_LIMIT;
   return (
@@ -929,6 +956,11 @@ function CollectProgress({ base }: { base: HeBaseSummary }) {
       <p className="mt-1 text-xs text-blue-700/70">
         собираем до {shownLimit.toLocaleString('ru-RU')} строк
       </p>
+      {hypotheses.length > 0 ? (
+        <p className={`mt-1.5 text-[11px] ${HE.muted}`} title={hypotheses.join(', ')}>
+          по гипотезам: {hypotheses.join(' · ')}
+        </p>
+      ) : null}
       {plan.length > 0 ? (
         <ul className="mt-2.5 space-y-1">
           {plan.map((task, i) => (

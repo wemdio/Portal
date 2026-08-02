@@ -404,6 +404,8 @@ export interface HeCollectInfo {
   /** Лимит строк, выбранный при запуске сборки (route пишет при создании базы). */
   limit?: number;
   plan?: HeSourcePlan;
+  /** Гипотезы, по которым реально строился план (accepted-дефолт или выбор специалиста). */
+  hypotheses?: Array<{ id: string; title: string; status: string | null }>;
   tasks?: HeCollectTaskState[];
   stats?: {
     tasks_total: number;
@@ -458,7 +460,7 @@ async function buildPlan(
   ctx: HeStageContext,
   vertical: HeVertical,
   usage: HeUsage,
-): Promise<HeSourcePlan> {
+): Promise<{ plan: HeSourcePlan; usedHypotheses: Array<{ id: string; title: string; status: string | null }> }> {
   // Гипотезы вертикали для плана. Семантика разметки: если специалист что-то
   // ПРИНЯЛ (accepted) — план строим только по принятым; предложенные (proposed)
   // идут в работу, только когда принятых нет (как в пересчёте % вертикали).
@@ -533,7 +535,12 @@ async function buildPlan(
     { model: getHeModel('bulk') },
   );
   addUsage(usage, llm);
-  return llm.data;
+  return {
+    plan: llm.data,
+    // Провенанс плана: по каким гипотезам реально строили (для collect_info и UI —
+    // иначе на вопрос «точно все верно?» ответа нет ни в БД, ни на экране).
+    usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, status: h.status })),
+  };
 }
 
 /* ─────────────────────────── Фаза DISPATCH ─────────────────────────── */
@@ -896,7 +903,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
 
   // ─── PLAN ───
   if (!info.plan) {
-    info.plan = await buildPlan(job, ctx, vertical, usage);
+    const { plan, usedHypotheses } = await buildPlan(job, ctx, vertical, usage);
+    info.plan = plan;
+    info.hypotheses = usedHypotheses;
     info.tasks = info.plan.tasks.map((task) => ({
       source: task.source,
       status: 'pending' as const,

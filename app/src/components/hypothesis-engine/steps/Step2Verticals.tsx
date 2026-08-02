@@ -14,7 +14,7 @@
  * Визуал — токены design.ts: без иконок, статусы точками, один синий акцент.
  */
 
-import { Fragment, useMemo, useState, type JSX } from 'react';
+import { useMemo, useState, type JSX } from 'react';
 import type {
   HeHypothesis,
   HeHypothesisTier,
@@ -171,10 +171,11 @@ export function Step2Verticals({
   );
 
   // Готовые досье по вертикали — для строки цифр на карточке.
+  // Досье приходят created_at desc: первое готовое и есть новейшее.
   const readyDossierByVertical = useMemo(() => {
     const map = new Map<string, HeDossier>();
     for (const d of dossiers ?? []) {
-      if (d.status === 'ready' && d.data) map.set(d.vertical_id, d);
+      if (d.status === 'ready' && d.data && !map.has(d.vertical_id)) map.set(d.vertical_id, d);
     }
     return map;
   }, [dossiers]);
@@ -210,24 +211,22 @@ export function Step2Verticals({
     return map;
   }, [bases]);
 
-  // Шаблон привязан к базе (base_id) — готовность относим на вертикаль этой базы.
+  // Шаблон привязан к базе (base_id) и вертикали — у него есть свой vertical_id.
   const readyTemplateVerticals = useMemo(() => {
-    const verticalByBaseId = new Map<string, string>();
-    for (const b of bases ?? []) verticalByBaseId.set(b.id, b.vertical_id);
     const set = new Set<string>();
     for (const t of templates ?? []) {
-      if (t.status !== 'ready') continue;
-      const verticalId = verticalByBaseId.get(t.base_id);
-      if (verticalId) set.add(verticalId);
+      if (t.status === 'ready' && t.vertical_id) set.add(t.vertical_id);
     }
     return set;
-  }, [bases, templates]);
+  }, [templates]);
 
   // Гипотезы, под которые собрана база (collect_info.hypothesis_ids; у старых баз
-  // поля нет — они просто ничего не помечают).
+  // поля нет — они просто ничего не помечают). Фейловые базы не считаем: маркер
+  // «база» на гипотезе должен совпадать со статистикой карточки.
   const baseHypothesisIds = useMemo(() => {
     const set = new Set<string>();
     for (const b of bases ?? []) {
+      if (b.status === 'failed') continue;
       const ids = b.collect_info?.hypothesis_ids;
       if (!Array.isArray(ids)) continue;
       for (const id of ids) {
@@ -620,8 +619,9 @@ function ArtifactStatRow({
     { key: 'dossier', label: 'досье', ready: dossierReady },
   ];
   if (bases.length > 0) {
-    // И штуки, и строки — только по нефейловым базам (failed ничего не дала).
-    const usable = bases.filter((b) => b.status !== 'failed');
+    // Считаем базу артефактом только когда она разобрана (analyzed):
+    // collecting/uploaded/analyzing — это процесс, не результат.
+    const usable = bases.filter((b) => b.status === 'analyzed');
     const rows = usable.reduce((sum, b) => sum + (b.row_count ?? 0), 0);
     if (usable.length > 0) {
       markers.push({
@@ -635,14 +635,14 @@ function ArtifactStatRow({
   return (
     <p className={`mt-2 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-xs tabular-nums ${HE.muted2}`}>
       {markers.map((m, i) => (
-        <Fragment key={m.key}>
+        <span key={m.key} className={`whitespace-nowrap ${m.ready ? 'text-gray-700' : 'text-gray-300'}`}>
           {i > 0 ? (
             <span aria-hidden="true" className="text-gray-300">
-              ·
+              ·{' '}
             </span>
           ) : null}
-          <span className={m.ready ? 'text-gray-700' : 'text-gray-300'}>{m.label}</span>
-        </Fragment>
+          {m.label}
+        </span>
       ))}
     </p>
   );
