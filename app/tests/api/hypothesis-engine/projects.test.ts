@@ -397,3 +397,68 @@ describe('PATCH /api/tools/hypothesis-engine/projects/[id] — style_override', 
     expect(brief).not.toHaveProperty('style_override');
   });
 });
+
+describe('PATCH /api/tools/hypothesis-engine/projects/[id] — signature_override', () => {
+  it('merges signature_override without clobbering other brief keys', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_projects: [
+          {
+            id: 'p1',
+            name: 'One',
+            website_url: 'https://one.example/',
+            status: 'draft',
+            brief: { site_profile: { usp: 'seo' }, offer_override: '3–5 встреч в месяц' },
+          },
+        ],
+      },
+    });
+
+    const res = await PATCH(
+      makePatchReq({ signature_override: 'Сергей Лазуткин, Polza, polzaagency.ru' }),
+      patchParams,
+    );
+    expect(res.status).toBe(200);
+
+    expect(mockDb.getRows('he_projects')[0].brief).toEqual({
+      site_profile: { usp: 'seo' },
+      offer_override: '3–5 встреч в месяц',
+      signature_override: 'Сергей Лазуткин, Polza, polzaagency.ru',
+    });
+  });
+
+  it('returns 400 when signature_override is not a string', async () => {
+    const res = await PATCH(makePatchReq({ signature_override: 42 }), patchParams);
+    expect(res.status).toBe(400);
+    expect(mockDb.updates).toHaveLength(0);
+  });
+
+  it('returns 413 when signature_override exceeds 500 chars after trim', async () => {
+    const res = await PATCH(makePatchReq({ signature_override: `  ${'д'.repeat(501)}  ` }), patchParams);
+    expect(res.status).toBe(413);
+    expect(mockDb.updates).toHaveLength(0);
+  });
+
+  it('removes signature_override from brief on an empty string', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_projects: [
+          {
+            id: 'p1',
+            name: 'One',
+            website_url: 'https://one.example/',
+            status: 'draft',
+            brief: { site_profile: { usp: 'seo' }, signature_override: 'старая подпись' },
+          },
+        ],
+      },
+    });
+
+    const res = await PATCH(makePatchReq({ signature_override: '' }), patchParams);
+    expect(res.status).toBe(200);
+
+    const brief = mockDb.getRows('he_projects')[0].brief as Record<string, unknown>;
+    expect(brief).toEqual({ site_profile: { usp: 'seo' } });
+    expect(brief).not.toHaveProperty('signature_override');
+  });
+});

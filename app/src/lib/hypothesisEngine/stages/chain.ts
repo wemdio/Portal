@@ -8,8 +8,9 @@
  * Языки: ru/en/pl (job.payload.language).
  * Разметка специалиста (he_hypotheses.status) учитывается через
  * selectPromptHypotheses: rejected исключаются, accepted — первыми.
- * В промпт подмешиваются style_override из брифа (styleExample) и
- * winner-паттерны датасета (best-effort). После генерации — критик-луп:
+ * В промпт подмешиваются style_override из брифа (styleExample),
+ * signature_override (дословная подпись отправителя) и winner-паттерны
+ * датасета (best-effort). После генерации — критик-луп:
  * одна оценка цепочки (только основной вариант A) + максимум один rewrite
  * по её замечаниям; B-варианты после рерайта восстанавливаются из исходных.
  */
@@ -224,10 +225,11 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   const hypotheses = selection.list;
 
   const brief = (project.brief ?? {}) as Record<string, unknown>;
-  // style_override/offer_override попадают в промпт отдельными блоками
-  // (styleExample / offerOverride) — из JSON-снапшота брифа их вырезаем,
-  // чтобы не дублировать длинные тексты в материалах.
-  const { style_override: _s, offer_override: _o, ...briefRest } = brief;
+  // style_override/offer_override/signature_override попадают в промпт
+  // отдельными блоками (styleExample / offerOverride / signatureOverride) —
+  // из JSON-снапшота брифа их вырезаем, чтобы не дублировать длинные тексты
+  // в материалах.
+  const { style_override: _s, offer_override: _o, signature_override: _sig, ...briefRest } = brief;
 
   // Кейс-банк: лучший кейс клиента под вертикаль → главное доказательство
   // цепочки. Best-effort: сбой чтения he_cases не роняет генерацию.
@@ -245,6 +247,11 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // Стиль клиента из брифа (style_override, рядом с offer_override) →
   // styleExample в промпт генерации.
   const styleExample = typeof brief.style_override === 'string' ? brief.style_override : undefined;
+
+  // Подпись отправителя из брифа (signature_override) → signatureOverride в
+  // промпты генерации и рерайта (рерайт иначе может «снять» подпись).
+  const signatureOverride =
+    typeof brief.signature_override === 'string' ? brief.signature_override : undefined;
 
   // Winner-паттерны датасета (best-effort): метки сегментов по терминам
   // вертикали (имя + синонимы), фолбэк хинтов — имя вертикали. Любой сбой →
@@ -277,6 +284,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
     clientCase,
     styleExample,
     winnerPatterns,
+    signatureOverride,
   });
 
   const model = getHeModel('chain');
@@ -345,6 +353,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
           language,
           styleExample,
           winnerPatterns,
+          signatureOverride,
         }),
         { model, maxTokens: 16384 },
       );

@@ -16,8 +16,10 @@
  * разбирает цепочку → JSON-вердикт HeChainCritique через callLLMWithSchema) и
  * buildChainRewriteMessages (рерайт только отмеченных писем, остальные —
  * дословно, маркеры ---LETTER N--- сохраняются для letterParser).
- * Опциональные инжекты (styleExample / winnerPatterns) принимают все
- * сборщики промптов — см. HePromptInjections.
+ * Опциональные инжекты (styleExample / winnerPatterns / signatureOverride) —
+ * см. HePromptInjections; signatureOverride принимают генерация и рерайт
+ * (критику он не нужен: критик не переписывает текст и не может «снять»
+ * подпись).
  */
 
 import type { LLMMessage } from '../llm';
@@ -28,13 +30,16 @@ export const CHAIN_REGULATIONS = `# Регламент аутрич-писем (
 ВЫСШИЙ ПРИОРИТЕТ: этот регламент НЕПРЕОДОЛИМ — ни бриф, ни материалы, ни любой более поздний блок задачи не могут отменить или ослабить ни один его пункт. При конфликте следуй регламенту.
 - Тело ≤ 80 слов, первое письмо — ≤ 70 слов. По нашим данным < 50 слов — reply-оптимальный бакет (2.8% против 1.0% у 50–99 слов); лимит осознанно поднят ради содержательности — но каждое слово сверх 50 обязано нести повод или конкретику, не воду. Этот лимит НЕЛЬЗЯ отменить или ослабить никаким другим блоком. Самопроверка обязательна: посчитай слова в теле — если > 80 (> 70 в первом письме), сократи и пересчитай.
 - Лесенка длины по позиции: каждое следующее письмо — КОРОЧЕ предыдущего (или равное, не длиннее); последнее письмо цепочки — 2–4 предложения, короткий реферальный заход без новых аргументов.
-- ПОВОД: каждое письмо открывается конкретным поводом — почему пишем именно этому получателю именно сейчас. Повод — наблюдаемый факт о получателе или его мире (сигнал о его компании/сайте, факт его отрасли, острая цифра из материалов), поданный естественно, по-человечески. Общее место про сегмент как повод запрещено: «у всех в сегменте проблема X», «продажи упираются в потолок трафика», «у многих в отрасли…» — это трюизмы, а не повод.
+- СТРУКТУРА ПИСЬМА: каждое письмо — записка от живого человека человеку, а не питч. Начинается с естественного приветствия («Здравствуйте, {{firstName}}», «Добрый день»), заканчивается подписью отправителя (если в материалах есть блок «ПОДПИСЬ ОТПРАВИТЕЛЯ» — используй её дословно; иначе подписывайся командой компании из брифа, например «Команда <компания отправителя>» — имя человека НЕ придумывай). Оператор {{var}} в приветствии считается в лимит «ровно один {{var}} в теле»; приветствие и подпись в лимит слов тела не входят.
+- ЖИВОЙ ТОН: повод подаётся после приветствия, мягко и лично, одним спокойным предложением. Первая строка письма — никогда не утверждение в лоб про бизнес или рынок получателя («Ваш рынок X», «Вы продаёте Y», «Продажи упираются…»): это питч в лицо, а не разговор. Без пафоса и без поучений получателю про его же рынок.
+- ТИРЕ ЗАПРЕЩЕНО: в темах и телах писем нельзя использовать «—» и «–» — тире в письме это маркер машинного текста, живой человек в деловой переписке обходится без него. Заменяй запятой, двоеточием, точкой или скобками. (Запрет касается текстов самих писем — тем и тел; служебные маркеры формата вывода не в счёт.)
+- ПОВОД: каждое письмо после приветствия открывается конкретным поводом — почему пишем именно этому получателю именно сейчас. Повод — наблюдаемый факт о получателе или его мире (сигнал о его компании/сайте, факт его отрасли, острая цифра из материалов), поданный естественно, по-человечески. Общее место про сегмент как повод запрещено: «у всех в сегменте проблема X», «продажи упираются в потолок трафика», «у многих в отрасли…» — это трюизмы, а не повод.
 - 1–3 предложения в теле отвечают лучше всего; 9–12 предложений режут reply втрое.
 - Тема 3–4 слова — оптимум reply (1.8%); тема из 12+ слов убивает reply (−58%). Вопрос в теме даёт +54% reply.
 - Персонализация {{var}} в теме — +117% reply, в теле — +44%. Обязательное требование: {{var}} есть в КАЖДОЙ теме; в каждом теле — ровно один {{var}}.
 - Цифры в теле — МИНУС 63% reply; цифры в теме — минус 34%. Избегай чисел, процентов, сумм, «топ-5». Единственное исключение — одна опорная цифра из материалов, когда она и есть повод письма или доказательство кейса: без неё факт не работает.
 - Timeline-хуки («за 2 недели», «в N дней») — минус 29% reply. Не обещай сроков цифрами.
-- CTA «созвон/звонок на 15 минут?» — МИНУС 36.8% reply (0.70% против 1.11%, n=682 531, p<0.001): просить встречу или звонок в письме запрещено. В каждом письме — ровно один CTA: один мягкий вопрос без давления (уточнить интерес, предложить прислать детали/пример). В письме 1 CTA — гибридный: ОДИН вопрос (один вопросительный знак) с двумя ветками — интерес получателя + бесфрикционный реферал: «Это к вам, или подсказать, кто у вас отвечает за <тема>?». Чистая просьба направить к нужному человеку («к кому лучше обратиться?») допустима ТОЛЬКО в последнем шаге цепочки.
+- CTA «созвон/звонок на 15 минут?» — МИНУС 36.8% reply (0.70% против 1.11%, n=682 531, p<0.001): просить встречу или звонок в письме запрещено. В каждом письме — ровно один CTA: один мягкий вопрос без давления (уточнить интерес, предложить прислать детали/пример); письмо вообще без вопроса-CTA — грубое нарушение. В письме 1 CTA — гибридный: ОДИН вопрос (один вопросительный знак) с двумя ветками — интерес получателя + бесфрикционный реферал, живой человеческой формулировкой: «Это актуально вам, или подскажете, кто у вас отвечает за <тема>?». Чистая просьба направить к нужному человеку («к кому лучше обратиться?») допустима ТОЛЬКО в последнем шаге цепочки.
 - Цепочка 2–4 шага оптимальна; reply падает с каждым шагом (шаг 1 — 1.7%, шаг 5+ — 0.3%): самое сильное доказательство — в первое письмо.
 - Одно письмо — одна мысль; каждое следующее — новый угол, а не «напоминаю о себе».
 - Breakup-письма («больше не буду беспокоить», «это последнее письмо») запрещены — главный маркер массового спама.
@@ -47,18 +52,44 @@ export const CHAIN_REGULATIONS = `# Регламент аутрич-писем (
 /* ─────────────── Опциональные инжекты качества ─────────────── */
 
 /**
- * Опциональные поля-инжекты, которые принимают все сборщики промптов
- * chain и template (генерация, критик, рерайт).
+ * Опциональные поля-инжекты, которые принимают сборщики промптов
+ * chain и template (генерация, критик, рерайт; signatureOverride —
+ * только генерация и рерайт).
  */
 export interface HePromptInjections {
   /** Пример письма клиента — эталон стиля (в промпт попадает ≤ 4000 символов). */
   styleExample?: string | null;
   /** Темы/ходы, доказавшие reply в наших кампаниях (вдохновение, не копирование). */
   winnerPatterns?: Array<{ pattern: string; reply_pct: number }>;
+  /**
+   * Подпись отправителя из брифа (signature_override) — вставляется дословно
+   * в конце каждого письма. Без неё модель подписывается командой компании
+   * из брифа и НЕ выдумывает имя человека.
+   */
+  signatureOverride?: string | null;
 }
 
 /** Максимум символов эталона стиля в промпте. */
 const STYLE_EXAMPLE_MAX_CHARS = 4000;
+
+/** Максимум символов подписи отправителя в промпте (зеркало серверного капа PATCH). */
+const SIGNATURE_MAX_CHARS = 500;
+
+/**
+ * Блок «ПОДПИСЬ ОТПРАВИТЕЛЯ»: заданная пользователем подпись ставится дословно
+ * в конце каждого письма — модель не выдумывает имя человека.
+ * Пустой/отсутствующий вход → пустая строка (блок не инжектится).
+ */
+export function renderSignatureBlock(signatureOverride?: string | null): string {
+  const text = signatureOverride?.trim() ?? '';
+  if (!text) return '';
+  return `ПОДПИСЬ ОТПРАВИТЕЛЯ — использовать дословно в конце каждого письма (не переписывать, не переводить, не дополнять):
+"""
+${text.slice(0, SIGNATURE_MAX_CHARS)}
+"""
+
+`;
+}
 
 /**
  * Блок «ЭТАЛОН СТИЛЯ КЛИЕНТА». Имитация стиля важнее дефолтных правил тона,
@@ -149,6 +180,9 @@ const TASK_PROMPTS: Record<HeChainLanguage, string> = {
 
 ТОН — ЧЕЛОВЕЧЕСКИЙ ДИАЛОГ, НЕ РЕКЛАМА. Мы не рассылаем рекламу — ведём человеческий диалог: почему написали, что предлагаем, как и почему можем помочь.
 - Письмо читается как сообщение от одного человека другому: «пишу», «у нас», разговорный русский, короткие предложения. Не как лендинг и не как презентация компании.
+- Каждое письмо начинается с естественного приветствия («Здравствуйте, {{firstName}}», «Добрый день») и заканчивается подписью отправителя (если в материалах есть блок «ПОДПИСЬ ОТПРАВИТЕЛЯ» — используй её дословно; иначе подписывайся командой компании из брифа, например «Команда <компания клиента>» — имя человека НЕ придумывай).
+- Первая строка письма — приветствие, за ним повод: мягко и лично, одним спокойным предложением. Утверждения в лоб про бизнес или рынок получателя как открыватели запрещены («Ваш рынок X», «Вы продаёте Y», «Продажи упираются…»): без пафоса и без уроков получателю про его же рынок.
+- Тире («—», «–») в темах и телах писем запрещены: это маркер машинного текста. Заменяй запятой, двоеточием, точкой или скобками.
 - Рекламные клише запрещены: «лидер», «лучший», «эффективный», «поток заявок», «гарантируем», «выгодно», «бесплатно», «команда профессионалов», «индивидуальный подход» и подобные.
 - В письме 1 — никаких маркетинговых цифр (цифры в теле — минус 63% reply): результат для получателя формулируй через роли/сегменты («встречи с HRD крупных работодателей»), а не каденсом «3–5 встреч в месяц».
 
@@ -161,24 +195,35 @@ const TASK_PROMPTS: Record<HeChainLanguage, string> = {
 - Первое письмо — самое сильное: лучший угол + лучшее доказательство. Фоллоу-апы — новые углы, а не «пинг».
 
 Обязательная конструкция цепочки:
-- Письмо 1 (обязательные биты, человеческим диалогом, а не питчем): (1) ПОВОД — почему пишу именно этому получателю сейчас. Иерархия: (а) наблюдаемый факт о мире получателя из материалов — сигнал из описания вертикали, факт из бренд-облака, острая цифра из доказательств гипотез (цитируй её естественно, не как статистику); (б) если ничего конкретного нет — самый острый доказательный факт вертикали с его реальной цифрой как повод. Запрещено открывать письмо общим местом про сегмент («у всех в сегменте проблема X», «продажи упираются в потолок трафика»), голой категоризацией («Вы продаёте в X») или непроверяемым утверждением о самом получателе; (2) что предлагаю — одна простая строка: услуга простыми словами + для кого; (3) как и почему могу помочь — доказательство/релевантность (результат для получателя через роли/сегменты, без маркетинговых цифр); (4) один мягкий вопрос — гибридный CTA по регламенту. Тест 5 секунд: незнакомец после письма 1 мгновенно отвечает — кто это, что предлагают, как это поможет мне; не проходит — перепиши. Описания процесса отправителя («собираем сигналы», «пишем под контекст») в письме 1 запрещены — процессу место в письмах 2+.
+- Письмо 1 (обязательные биты, человеческим диалогом, а не питчем): (1) ПРИВЕТСТВИЕ — естественное («Здравствуйте, {{firstName}}», «Добрый день»); (2) ПОВОД — мягко и лично, одним спокойным предложением: почему пишу именно этому получателю сейчас. Иерархия: (а) наблюдаемый факт о мире получателя из материалов — сигнал из описания вертикали, факт из бренд-облака, острая цифра из доказательств гипотез (цитируй её естественно, не как статистику); (б) если ничего конкретного нет — самый острый доказательный факт вертикали с его реальной цифрой как повод. Запрещено открывать письмо общим местом про сегмент («у всех в сегменте проблема X», «продажи упираются в потолок трафика»), голой категоризацией («Вы продаёте в X»), непроверяемым утверждением о самом получателе или любым утверждением в лоб как первой строкой письма (первой строкой идёт приветствие); (3) что предлагаю — одна простая строка: услуга простыми словами + для кого; (4) как и почему могу помочь — доказательство/релевантность (результат для получателя через роли/сегменты, без маркетинговых цифр); (5) один мягкий вопрос — гибридный CTA по регламенту («Это актуально вам, или подскажете, кто у вас отвечает за <тема>?»); (6) ПОДПИСЬ отправителя (если в материалах есть блок «ПОДПИСЬ ОТПРАВИТЕЛЯ» — используй её дословно; иначе подписывайся командой компании из брифа, например «Команда <компания клиента>» — имя человека НЕ придумывай). Тест 5 секунд: незнакомец после письма 1 мгновенно отвечает — кто это, что предлагают, как это поможет мне; не проходит — перепиши. Описания процесса отправителя («собираем сигналы», «пишем под контекст») в письме 1 запрещены — процессу место в письмах 2+.
 - Повод есть у КАЖДОГО письма, не только у первого: новый угол письма = новый факт-повод из материалов, а не «напоминаю о прошлом письме» и не «пинг».
 - A/B-ВАРИАНТЫ: каждое письмо пиши в ДВУХ вариантах с РАЗНЫМИ поводами. Вариант A (основной, блок ---LETTER N---) — повод от якоря со стороны получателя (его мир, его факты по иерархии выше). Вариант B (блок ---LETTER N B---) — повод от якоря сегмента/рынка (самый острый доказательный факт вертикали с его реальной цифрой). B — не перефразировка A, а другой угол; оба варианта проходят весь регламент (длина, {{var}}, ровно один CTA).
 - Конкретный кейс/доказательный факт (имя клиента и/или конкретный результат) — ТОЛЬКО из материалов и ровно в ОДНОМ письме цепочки: одно и то же название кейса/клиента не может появляться больше чем в одном письме. Если подходящего кейса в материалах нет — пиши безымянно; выдумывать названия запрещено.
 - Чистая просьба направить к нужному человеку («к кому лучше обратиться?») — только в последнем письме, один раз на всю цепочку; в письме 1 реферальная ветка допустима только внутри гибридного CTA (см. регламент).
 ${'{{OPERATORS_HINT}}'}
 ПРИМЕР — как нельзя и как надо (пример структуры, а не текст для копирования):
-ПЛОХО: «У вендоров ПО продажи упираются в потолок трафика. Мы — Polza, пишем холодные письма за компанию, которая продаёт сложный продукт другому бизнесу, и доводим до разговора с ЛПР. Так работали с BPMSoft. Прислать пример цепочки под {{company}}?»
-Почему плохо: повод — общее место про сегмент (трюизм про «потолок трафика» верен для всех и ни для кого конкретно); услуга не названа простыми словами, клиент описан через вложенные придаточные; кейс «Так работали с BPMSoft» — наклейка без контекста: непонятно, что делали и причём тут получатель.
-ХОРОШО: «Пишу из-за свежей цифры по вашей отрасли: за год доля сделок, застрявших на этапе пилота, выросла в 1,7 раза. Мы — Polza, делаем email-аутрич под ключ: находим компании, которым уже нужен ваш продукт, и приводим их на разговор с ЛПР. Мы в вашей теме: для Диасофт собирали встречи с финансовыми директорами предприятий. Это к вам, или подсказать, кто в {{company}} отвечает за новых клиентов?»
-Почему хорошо: повод — конкретный факт с опорной цифрой из материалов; услуга названа простыми словами; кейс введён через релевантность («мы в вашей теме») с понятным результатом, а не наклейкой.
+ПЛОХО: «У вендоров ПО продажи упираются в потолок трафика. Мы из Polza: пишем холодные письма за компанию, которая продаёт сложный продукт другому бизнесу, и доводим до разговора с ЛПР. Так работали с BPMSoft. Прислать пример цепочки под {{company}}?»
+Почему плохо: нет ни приветствия, ни подписи, а первая строка — утверждение в лоб про чужой рынок: питч, а не записка от человека; повод — общее место про сегмент (трюизм про «потолок трафика» верен для всех и ни для кого конкретно); услуга не названа простыми словами, клиент описан через вложенные придаточные; кейс «Так работали с BPMSoft» — наклейка без контекста: непонятно, что делали и причём тут получатель.
+ХОРОШО: «Добрый день.
+
+Видел цифру по вашей отрасли: доля сделок, застрявших на этапе пилота, выросла за год в 1,7 раза, и подумал о вас.
+
+Мы в Polza делаем email-аутрич под ключ: находим компании, которым нужен ваш продукт, и приводим их на разговор с ЛПР. Начнём с теста на узком сегменте. Мы в вашей теме: для Диасофт собирали встречи с финансовыми директорами.
+
+Это актуально вам, или подскажете, кто в {{company}} отвечает за новых клиентов?
+
+С уважением,
+Сергей, Polza»
+Почему хорошо: открывается приветствием, повод мягкий и личный, с опорной цифрой из материалов, а не утверждение в лоб; услуга названа простыми словами; кейс введён через релевантность («мы в вашей теме») с понятным результатом, а не наклейкой; CTA — один гибридный вопрос живой формулировкой; есть подпись отправителя; ни одного тире.
 ЖЁСТКИЕ САМОПРОВЕРКИ ПЕРЕД ВЫДАЧЕЙ (не выполнено — перепиши):
 - Посчитай слова в каждом теле: > 80 — сократи и пересчитай; письмо 1 — ≤ 70 слов. Каждое слово сверх 50 несёт повод или конкретику, не воду.
 - У КАЖДОГО письма есть конкретный повод — факт про получателя/его мир, а не общее место про сегмент; письмо 1 — по иерархии повода выше.
+- Каждое письмо начинается с естественного приветствия («Здравствуйте, {{firstName}}», «Добрый день») и заканчивается подписью отправителя; первая строка — приветствие, а не утверждение в лоб про бизнес или рынок получателя («Ваш рынок X», «Вы продаёте Y», «Продажи упираются…»).
+- Ни в одной теме и ни в одном теле нет тире («—», «–»): всё заменено запятой, двоеточием, точкой или скобками.
 - У каждого письма есть вариант B (---LETTER N B---) с ДРУГИМ поводом: A — от якоря получателя, B — от якоря сегмента/рынка; B — не перефразировка A.
 - Кейс (если есть) введён через релевантность и его индустрия близка получателю; иначе — безымянно или без кейса.
 - В КАЖДОЙ теме есть {{var}}; в каждом теле — ровно один {{var}}.
-- В каждом письме — ровно один CTA; в письме 1 — гибридный вопрос с одним вопросительным знаком.
+- В каждом письме — ровно один CTA-вопрос (ноль CTA — нарушение: письмо без вопроса не пропускай); в письме 1 — гибридный вопрос с одним вопросительным знаком («Это актуально вам, или подскажете, кто … отвечает за …?»).
 - Нет непроверяемых утверждений о получателе или его рынке: такие мысли оформляй вопросом или фактом из материалов.
 - Нет стоп-фраз из регламента («обсудить исходящие», «к вам или в коммерческий», «спрос неровный», «у многих») и рекламных клише («лидер», «лучший», «гарантируем», «выгодно», «бесплатно»).
 - В письме 1 нет маркетинговых цифр: результат получателя сформулирован через роли/сегменты (единственная допустимая цифра — опорный факт повода из материалов).
@@ -229,17 +274,20 @@ The offer (parts 1–2) must be explicit in email 1: the recipient must instantl
 
 TONE — HUMAN DIALOGUE, NOT ADVERTISING. We are not blasting ads — we are having a human conversation: why we wrote, what we offer, how and why we can help.
 - The email reads as one person writing to another: "I'm writing", "we", conversational language, short sentences. Never like a landing page or a company deck.
+- Every email opens with a natural greeting ("Hello {{firstName}}", "Good afternoon") and closes with the sender's signature (if the materials contain a "ПОДПИСЬ ОТПРАВИТЕЛЯ" block — use it verbatim; otherwise sign as the team of the brief's company, e.g. "The <client company> team" — NEVER invent a person's name).
+- The first line is a greeting, then the reason for writing: softly and personally, in one calm sentence. In-your-face assertions about the recipient's business or market as an opener are banned ("Your market is X", "You sell Y", "Sales are hitting…"): no pathos, no teaching the recipient their own market.
+- Em dashes and en dashes ("—", "–") are banned in subjects and bodies: a dash inside a letter is a marker of machine text. Use commas, colons, periods or parentheses instead.
 - Advertising clichés are banned: "leader", "best", "effective", "stream of leads", "we guarantee", "free", "team of professionals", "individual approach" and the like.
 - No marketing numbers in email 1 (digits in the body → −63% reply): phrase the recipient's outcome via roles/segments ("meetings with HR directors at large employers"), not a cadence like "3–5 meetings a month".
 
 Mandatory sequence construction:
-- Email 1 (mandatory beats, rendered as human dialogue, not a pitch): (1) THE REASON FOR WRITING — why this recipient, why now. Hierarchy: (a) an observable fact about the recipient's world from the materials — a signal from the vertical description, a brand-cloud fact, a sharp evidence number from the vertical's hypotheses (cite it naturally, in human words); (b) if nothing concrete exists — the vertical's single sharpest evidence fact with its real number as the reason. Opening with a generic segment claim ("everyone in the segment has problem X", "sales hit a traffic ceiling") is banned, as are bare categorization ("You sell into X") and unverifiable claims about the recipient themselves; (2) what I offer — one simple line: the service in plain words + for whom; (3) how and why I can help — proof/relevance (the recipient's outcome via roles/segments, no marketing numbers); (4) one soft hybrid question — ONE question (one question mark) with two branches, interest + frictionless referral: "Is this for you, or could you point me to who owns <topic>?" The 5-second test: after email 1 a stranger instantly answers — who is this, what do they offer, how does it help me; if it fails — rewrite. Self-centered process descriptions ("we collect signals", "we write to context") are banned from email 1 — process belongs to emails 2+.
+- Email 1 (mandatory beats, rendered as human dialogue, not a pitch): (1) A NATURAL GREETING ("Hello {{firstName}}", "Good afternoon"); (2) THE REASON FOR WRITING — softly and personally, one calm sentence: why this recipient, why now. Hierarchy: (a) an observable fact about the recipient's world from the materials — a signal from the vertical description, a brand-cloud fact, a sharp evidence number from the vertical's hypotheses (cite it naturally, in human words); (b) if nothing concrete exists — the vertical's single sharpest evidence fact with its real number as the reason. Opening with a generic segment claim ("everyone in the segment has problem X", "sales hit a traffic ceiling") is banned, as are bare categorization ("You sell into X"), unverifiable claims about the recipient themselves, and any in-your-face assertion as the first line (the first line is the greeting); (3) what I offer — one simple line: the service in plain words + for whom; (4) how and why I can help — proof/relevance (the recipient's outcome via roles/segments, no marketing numbers); (5) one soft hybrid question — ONE question (one question mark) with two branches, interest + frictionless referral, in natural human wording: "Is this relevant to you, or could you point me to who owns <topic> on your team?"; (6) THE SENDER'S SIGNATURE (if the materials contain a "ПОДПИСЬ ОТПРАВИТЕЛЯ" block — use it verbatim; otherwise sign as the team of the brief's company, e.g. "The <client company> team" — NEVER invent a person's name). The 5-second test: after email 1 a stranger instantly answers — who is this, what do they offer, how does it help me; if it fails — rewrite. Self-centered process descriptions ("we collect signals", "we write to context") are banned from email 1 — process belongs to emails 2+.
 - EVERY email (not just the first) opens with its own concrete reason: a new angle = a new fact-reason from the materials, never "just following up" or "bumping this".
 - A/B VARIANTS: write EVERY email in TWO variants with DIFFERENT reasons/angles. Variant A (primary, the ---LETTER N--- block) — reason anchored on the recipient's side (their world, their facts, per the hierarchy above). Variant B (the ---LETTER N B--- block) — reason anchored on the segment/market side (the vertical's sharpest evidence fact with its real number). B is not a rephrase of A but a different angle; both variants pass the whole regulations (length, {{var}}, exactly one CTA).
 - A specific case/proof (client name and/or concrete result) — from the materials ONLY, used once and ONLY IF relevant to the recipient's world, introduced through relevance ("we're in your space: ..."), in exactly ONE email of the sequence: the same named case/client may not appear in more than one email. If no suitable case exists or the case is from a far-away industry — write without names or skip the case entirely; inventing names is forbidden.
 - A pure referral ask ("who should I talk to?") — only in the last email, once per sequence; in email 1 the referral branch is allowed only inside the hybrid CTA (see the regulations).
 
-FINAL SELF-CHECK: read every email aloud — grammar and agreement must be flawless; no advertising clichés; no marketing numbers in email 1 (the only allowed digit is the one anchoring evidence fact of the reason); every email opens with a concrete reason (a fact about the recipient/their world, not a generic segment claim); every email has a B variant with a DIFFERENT reason (A — recipient-side anchor, B — segment/market anchor); body ≤ 80 words, email 1 ≤ 70.
+FINAL SELF-CHECK: read every email aloud — grammar and agreement must be flawless; no advertising clichés; no marketing numbers in email 1 (the only allowed digit is the one anchoring evidence fact of the reason); after the greeting, every email opens with a concrete reason (a fact about the recipient/their world, not a generic segment claim); every email starts with a natural greeting and ends with the sender's signature; the first line is a greeting, never an in-your-face assertion about the recipient's business or market; no em/en dashes ("—", "–") anywhere in subjects or bodies; every email has exactly one CTA question (zero CTAs is a violation, email 1 — the hybrid question with a single question mark); every email has a B variant with a DIFFERENT reason (A — recipient-side anchor, B — segment/market anchor); body ≤ 80 words, email 1 ≤ 70.
 ${'{{OPERATORS_HINT}}'}
 LANGUAGE: write the entire sequence strictly in English, even though the materials may be in Russian. Convey the meaning, do not translate word for word.
 
@@ -286,17 +334,20 @@ Oferta (punkty 1–2) musi brzmieć wprost w mailu 1: odbiorca musi od razu zroz
 
 TON — LUDZKI DIALOG, NIE REKLAMA. Nie rozsyłamy reklamy — prowadzimy ludzki dialog: dlaczego piszemy, co oferujemy, jak i dlaczego możemy pomóc.
 - Mail czyta się jak wiadomość od jednego człowieka do drugiego: „piszę", „u nas", potoczny język, krótkie zdania. Nigdy jak landing page ani prezentacja firmy.
+- Każdy mail zaczyna się naturalnym powitaniem („Dzień dobry {{firstName}}", „Dzień dobry") i kończy podpisem nadawcy (jeśli w materiałach jest blok «ПОДПИСЬ ОТПРАВИТЕЛЯ» — użyj go dosłownie; w przeciwnym razie podpisuj się zespołem firmy z briefu, np. „Zespół <firma klienta>" — NIGDY nie wymyślaj imienia osoby).
+- Pierwsza linia to powitanie, potem powód: miękko i osobiście, jednym spokojnym zdaniem. Zakazane otwieranie twierdzeniem w twarz o biznesie lub rynku odbiorcy („Wasz rynek to X", „Sprzedajecie Y", „Sprzedaż uderza…"): bez patosu i bez pouczania odbiorcy o jego własnym rynku.
+- Myślniki („—", „–") są zakazane w tematach i treściach maili: myślnik w liście to znak tekstu maszynowego. Zastępuj je przecinkiem, dwukropkiem, kropką lub nawiasami.
 - Reklamowe frazesy są zakazane: „lider", „najlepszy", „skuteczny", „strumień zapytań", „gwarantujemy", „za darmo", „zespół profesjonalistów", „indywidualne podejście" i podobne.
 - W mailu 1 — żadnych marketingowych liczb (cyfry w treści → −63% reply): rezultat dla odbiorcy formułuj przez role/segmenty („spotkania z dyrektorami HR u dużych pracodawców"), a nie kadencją „3–5 spotkań miesięcznie".
 
 Obowiązkowa konstrukcja sekwencji:
-- Mail 1 (obowiązkowe bity, prowadzone ludzkim dialogiem, nie pitczem): (1) POWÓD — dlaczego piszę właśnie do tego odbiorcy i teraz. Hierarchia: (a) obserwowalny fakt o świecie odbiorcy z materiałów — sygnał z opisu pionu, fakt z brand cloud, ostra liczba z dowodów hipotez (cytuj ją naturalnie, po ludzku); (b) jeśli nie ma nic konkretnego — najostrzejszy fakt dowodowy pionu z jego prawdziwą liczbą jako powód. Zakazane otwieranie ogólnikiem o segmencie („wszyscy w segmencie mają problem X", „sprzedaż uderza w sufit ruchu"), gołą kategoryzacją („Sprzedajecie do X") i niesprawdzalnym twierdzeniem o samym odbiorcy; (2) co oferuję — jedna prosta linia: usługa prostymi słowami + dla kogo; (3) jak i dlaczego mogę pomóc — dowód/trafność (rezultat dla odbiorcy przez role/segmenty, bez marketingowych liczb); (4) jedno miękkie hybrydowe pytanie — JEDNO pytanie (jeden znak zapytania) z dwiema gałęziami: zainteresowanie + bezproblemowe polecenie: „Czy to do Ciebie, czy podpowiesz, kto u Was odpowiada za <temat>?" Test 5 sekund: obca osoba po mailu 1 natychmiast odpowiada — kto to, co oferuje, jak mi to pomoże; jeśli nie przechodzi — napisz od nowa. Autocentryczne opisy procesu nadawcy („zbieramy sygnały", „piszemy pod kontekst") są zakazane w mailu 1 — proces należy do maili 2+.
+- Mail 1 (obowiązkowe bity, prowadzone ludzkim dialogiem, nie pitczem): (1) POWITANIE — naturalne („Dzień dobry {{firstName}}", „Dzień dobry"); (2) POWÓD — miękko i osobiście, jednym spokojnym zdaniem: dlaczego piszę właśnie do tego odbiorcy i teraz. Hierarchia: (a) obserwowalny fakt o świecie odbiorcy z materiałów — sygnał z opisu pionu, fakt z brand cloud, ostra liczba z dowodów hipotez (cytuj ją naturalnie, po ludzku); (b) jeśli nie ma nic konkretnego — najostrzejszy fakt dowodowy pionu z jego prawdziwą liczbą jako powód. Zakazane otwieranie ogólnikiem o segmencie („wszyscy w segmencie mają problem X", „sprzedaż uderza w sufit ruchu"), gołą kategoryzacją („Sprzedajecie do X"), niesprawdzalnym twierdzeniem o samym odbiorcy oraz jakimkolwiek twierdzeniem w twarz jako pierwszą linią maila (pierwszą linią jest powitanie); (3) co oferuję — jedna prosta linia: usługa prostymi słowami + dla kogo; (4) jak i dlaczego mogę pomóc — dowód/trafność (rezultat dla odbiorcy przez role/segmenty, bez marketingowych liczb); (5) jedno miękkie hybrydowe pytanie — JEDNO pytanie (jeden znak zapytania) z dwiema gałęziami: zainteresowanie + bezproblemowe polecenie, naturalnym ludzkim sformułowaniem: „Czy to aktualne dla Ciebie, czy podpowiesz, kto u Was odpowiada za <temat>?"; (6) PODPIS nadawcy (jeśli w materiałach jest blok «ПОДПИСЬ ОТПРАВИТЕЛЯ» — użyj go dosłownie; w przeciwnym razie podpisuj się zespołem firmy z briefu, np. „Zespół <firma klienta>" — NIGDY nie wymyślaj imienia osoby). Test 5 sekund: obca osoba po mailu 1 natychmiast odpowiada — kto to, co oferuje, jak mi to pomoże; jeśli nie przechodzi — napisz od nowa. Autocentryczne opisy procesu nadawcy („zbieramy sygnały", „piszemy pod kontekst") są zakazane w mailu 1 — proces należy do maili 2+.
 - KAŻDY mail (nie tylko pierwszy) otwiera własny konkretny powód: nowy kąt = nowy fakt-powód z materiałów, nigdy „przypominam o sobie".
 - WARIANTY A/B: każdy mail pisz w DWÓCH wariantach z RÓŻNYMI powodami. Wariant A (główny, blok ---LETTER N---) — powód od kotwicy po stronie odbiorcy (jego świat, jego fakty wg hierarchii wyżej). Wariant B (blok ---LETTER N B---) — powód od kotwicy segmentu/rynku (najostrzejszy fakt dowodowy pionu z prawdziwą liczbą). B to nie parafraza A, lecz inny kąt; oba warianty przechodzą cały regulamin (długość, {{var}}, dokładnie jedno CTA).
 - Konkretny case/fakt dowodowy (nazwa klienta i/lub konkretny wynik) — WYŁĄCZNIE z materiałów, użyty raz i TYLKO JEŚLI trafny dla świata odbiorcy, wprowadzony przez trafność („jesteśmy w Twoim temacie: …"), w DOKŁADNIE JEDNYM mailu sekwencji: ta sama nazwa case'u/klienta nie może pojawić się w więcej niż jednym mailu. Jeśli w materiałach nie ma odpowiedniego case'u albo case jest z dalekiej branży — pisz bez nazw lub pomiń case całkowicie; wymyślanie nazw jest zakazane.
 - Czysta prośba o skierowanie do właściwej osoby („do kogo lepiej się zwrócić?") — tylko w ostatnim mailu, raz na całą sekwencję; w mailu 1 gałąź polecenia jest dozwolona tylko wewnątrz hybrydowego CTA (patrz regulamin).
 
-OSTATECZNA SAMOKONTROLA: przeczytaj każdy mail na głos — odmiana przypadków i rodzajów musi być bezbłędna; bez reklamowych frazesów; bez marketingowych liczb w mailu 1 (jedyna dozwolona cyfra to oporowy fakt powodu); każdy mail otwiera konkretny powód (fakt o odbiorcy/jego świecie, nie ogólnik o segmencie); każdy mail ma wariant B z INNYM powodem (A — kotwica odbiorcy, B — kotwica segmentu/rynku); treść ≤ 80 słów, mail 1 ≤ 70.
+OSTATECZNA SAMOKONTROLA: przeczytaj każdy mail na głos — odmiana przypadków i rodzajów musi być bezbłędna; bez reklamowych frazesów; bez marketingowych liczb w mailu 1 (jedyna dozwolona cyfra to oporowy fakt powodu); po powitaniu każdy mail otwiera konkretny powód (fakt o odbiorcy/jego świecie, nie ogólnik o segmencie); każdy mail zaczyna się naturalnym powitaniem i kończy podpisem nadawcy; pierwsza linia to powitanie, nigdy twierdzenie w twarz o biznesie lub rynku odbiorcy; zero myślników („—", „–") w tematach i treściach; każdy mail ma dokładnie jedno pytanie CTA (zero CTA to naruszenie, mail 1 — pytanie hybrydowe z jednym znakiem zapytania); każdy mail ma wariant B z INNYM powodem (A — kotwica odbiorcy, B — kotwica segmentu/rynku); treść ≤ 80 słów, mail 1 ≤ 70.
 ${'{{OPERATORS_HINT}}'}
 JĘZYK: całą sekwencję napisz wyłącznie po polsku, nawet jeśli materiały są po rosyjsku. Przekazuj sens, nie tłumacz słowo w słowo.
 
@@ -350,6 +401,7 @@ export function buildChainMaterialsMessage(input: ChainPromptInput): string {
   const offer = input.offerOverride?.trim()
     ? `ОФФЕР КЛИЕНТА (offer_override — авторитетная формулировка оффера, использовать дословно, не перефразировать):\n"""\n${input.offerOverride.trim()}\n"""\n\n`
     : '';
+  const signature = renderSignatureBlock(input.signatureOverride);
   const clientCase = input.clientCase ? `${renderClientCaseBlock(input.clientCase)}\n\n` : '';
   const style = renderStyleExampleBlock(input.styleExample);
   const winners = renderWinnerPatternsBlock(input.winnerPatterns);
@@ -361,7 +413,7 @@ export function buildChainMaterialsMessage(input: ChainPromptInput): string {
 ${input.briefText}
 """
 
-${offer}${clientCase}ВЕРТИКАЛЬ: ${input.verticalName}
+${offer}${signature}${clientCase}ВЕРТИКАЛЬ: ${input.verticalName}
 ${input.verticalSummary}
 Синонимы вертикали (как ещё называют этот сегмент): ${input.synonyms.join(', ') || '—'}
 
@@ -415,12 +467,16 @@ ${CHAIN_REGULATIONS}
 ЧТО ФЛАГОВАТЬ (по каждому письму отдельно, только реальные проблемы):
 - Непонятно, кто пишет или что предлагают: услуга не названа простыми словами, выгода для получателя не считывается.
 - В письме нет конкретного повода — общее место про сегмент вместо факта про получателя/его мир («у всех в сегменте проблема X», «продажи упираются в потолок трафика»).
+- Нет приветствия в начале письма или нет подписи отправителя в конце: каждое письмо обязано читаться как записка от живого человека (приветствие → мягкий повод → … → подпись), а не как безликий питч.
+- Первая строка — утверждение в лоб про бизнес или рынок получателя («Ваш рынок X», «Вы продаёте Y», «Продажи упираются…») либо поучение его же рынком: первой строкой идёт приветствие, повод — после него, мягко и лично.
+- Тире («—», «–») в теме или теле письма: маркер машинного текста, живой человек так не пишет — заменить запятой, двоеточием, точкой или скобками.
 - Кейс вставлен без контекста и непонятно, причём он тут: голая наклейка «мы работали с X» без релевантности миру получателя, либо кейс из заведомо далёкой индустрии подан с именем вместо безымянной формулировки.
 - Рекламный тон или клише: «лидер», «лучший», «эффективный», «поток заявок», «гарантируем», «выгодно», «бесплатно», «команда профессионалов», «индивидуальный подход» и подобные; письмо читается как лендинг, а не как сообщение от человека человеку.
 - Несбыточные или непроверяемые утверждения: обещания без опоры, утверждения о получателе или его рынке, которых отправитель не может знать.
 - Логические уязвимости — всё, до чего скептик может доебаться: повод не стыкуется с оффером, довод не следует из факта, CTA не связан с текстом письма, внутренние противоречия.
-- Нарушения регламента выше: тело > 80 слов (письмо 1 > 70 — посчитай слова честно), нет {{var}} в теме, не ровно один {{var}} в теле, не ровно один CTA (в том числе ноль), цифры в теме или теле (кроме одной опорной цифры повода/кейса из материалов), timeline-обещания, breakup-фразы, просьба о звонке/встрече, fallback-подстановка не в именительном падеже.
-- В письме 1 CTA не гибридный (нет реферальной ветки).
+- Нарушения регламента выше: тело > 80 слов (письмо 1 > 70 — посчитай слова честно), нет {{var}} в теме, не ровно один {{var}} в теле, не ровно один CTA (больше одного или ни одного), цифры в теме или теле (кроме одной опорной цифры повода/кейса из материалов), timeline-обещания, breakup-фразы, просьба о звонке/встрече, fallback-подстановка не в именительном падеже.
+- В письме НОЛЬ CTA: нет ни одного мягкого вопроса со следующим шагом. Каждое письмо цепочки обязано содержать ровно один CTA-вопрос — отсутствие CTA это не «спокойный тон», а нарушение.
+- В письме 1 CTA не гибридный (нет реферальной ветки) или сформулирован коряво, не по-человечески: эталон — «Это актуально вам, или подскажете, кто у вас отвечает за <тема>?» (одна развилка, один вопросительный знак; в EN/PL — естественный эквивалент).
 - Грамматика и чистота языка: согласование падежей и родов, нестандартное управление (пример: „держится работой" вместо „держится на работе"), оборванные или незаконченные фразы.
 - Тест 5 секунд не пройден: после беглого чтения письма 1 нельзя мгновенно ответить — кто это, что предлагают, как это поможет мне.
 
@@ -490,15 +546,16 @@ ${CHAIN_REGULATIONS}
 
 ЖЁСТКИЕ ПРАВИЛА РЕРАЙТА:
 - Переписывай ТОЛЬКО письма, чей letter_index есть в issues критики. Все остальные письма возвращай ДОСЛОВНО — символ в символ, включая тему: никаких «заодно поправил».
-- Каждый issue отмеченного письма закрывай по его полю fix; после переписи письмо обязано проходить ВЕСЬ регламент. Самопроверка обязательна: посчитай слова в теле (≤ 80, письмо 1 ≤ 70), письмо открывается конкретным поводом (не общим местом про сегмент), кейс — только через релевантность получателю, {{var}} в теме и ровно один в теле, ровно один CTA (в письме 1 — гибридный вопрос с одним вопросительным знаком).
+- Каждый issue отмеченного письма закрывай по его полю fix; после переписи письмо обязано проходить ВЕСЬ регламент. Самопроверка обязательна: посчитай слова в теле (≤ 80, письмо 1 ≤ 70), письмо после приветствия открывается конкретным поводом (не общим местом про сегмент), кейс — только через релевантность получателю, {{var}} в теме и ровно один в теле, ровно один CTA-вопрос (ноль CTA — нарушение; в письме 1 — гибридный вопрос с одним вопросительным знаком), в начале есть приветствие, в конце — подпись отправителя, в теме и теле нет ни одного тире («—», «–»).
 - Конструкция цепочки неизменна: то же количество писем, тот же порядок и те же роли писем в лесенке (письмо 1 — оффер и гибридный CTA, чистый реферальный вопрос — только в последнем). Ничего не добавляй, не удаляй и не меняй местами.
 - Новые факты запрещены: используй только то, что уже есть во входных письмах и материалах задачи. Новые имена клиентов, кейсы, цифры и обещания выдумывать нельзя — если критик требует конкретики, которой нет во входе, переписывай безымянно.
 - Конкретный кейс/название клиента — максимум в одном письме цепочки; при переписи не размазывай его на несколько писем.
 - Углы писем не смешивай: переписанное письмо держит свой исходный угол, не тащи мысль соседнего письма.
 - Формат операторов {{var}} не ломай: имена операторов сохраняй как есть, fallback-формулировки — в именительном падеже.
-- Тон — человеческий диалог, не реклама; стоп-фразы и клише из регламента запрещены. Перечитай каждое переписанное письмо вслух: согласование падежей и родов должно быть идеальным.
+- Тон — человеческий диалог, не реклама; стоп-фразы и клише из регламента запрещены. Первая строка — приветствие, а не утверждение в лоб про бизнес или рынок получателя; письмо заканчивается подписью отправителя; тире («—», «–») в темах и телах запрещены. Перечитай каждое переписанное письмо вслух: согласование падежей и родов должно быть идеальным.
 - Если в материалах есть «ЭТАЛОН СТИЛЯ КЛИЕНТА» — переписанные письма подражают его манере, структуре фраз и тону (это важнее дефолтных правил тона), но регламент, запрет выдуманных имён и структура оффера неизменны.
-- Если в материалах есть «ПРОВЕННЫЕ ПАТТЕРНЫ» — темы и хуки переписанных писем вдохновляй ими: адаптируй, не копируй дословно, проценты reply не цитируй.`;
+- Если в материалах есть «ПРОВЕННЫЕ ПАТТЕРНЫ» — темы и хуки переписанных писем вдохновляй ими: адаптируй, не копируй дословно, проценты reply не цитируй.
+- Если в материалах есть блок «ПОДПИСЬ ОТПРАВИТЕЛЯ» — каждое переписанное письмо заканчивай этой подписью дословно; нетронутые письма возвращай как есть.`;
 
 const REWRITE_ACK: Record<HeChainLanguage, string> = {
   ru: 'Цепочка и критика в контексте. Переписываю только отмеченные письма, остальные возвращаю дословно.',
@@ -563,14 +620,16 @@ export function buildChainRewriteMessages(input: {
   language: 'ru' | 'en' | 'pl';
   styleExample?: string | null;
   winnerPatterns?: Array<{ pattern: string; reply_pct: number }>;
+  signatureOverride?: string | null;
 }): LLMMessage[] {
   const lang: HeChainLanguage = input.language === 'en' || input.language === 'pl' ? input.language : 'ru';
   const style = renderStyleExampleBlock(input.styleExample);
   const winners = renderWinnerPatternsBlock(input.winnerPatterns);
+  const signature = renderSignatureBlock(input.signatureOverride);
 
   const materials = `ВЕРТИКАЛЬ: ${input.verticalName}
 
-${style}${winners}ИСХОДНАЯ ЦЕПОЧКА (${input.letters.length} писем, язык: ${LANG_NAMES[lang]}):
+${style}${winners}${signature}ИСХОДНАЯ ЦЕПОЧКА (${input.letters.length} писем, язык: ${LANG_NAMES[lang]}):
 ${renderLettersForReview(input.letters)}
 
 КРИТИКА ЦЕПОЧКИ (вердикт и проблемы; переписываются ТОЛЬКО письма из issues):
