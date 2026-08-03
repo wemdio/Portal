@@ -229,7 +229,16 @@ export async function generateBriefAutofill(
     // Расширенный whitelist (19 полей вместо 11) + source-snippets для каждого
     // заполненного поля → ответ может занимать 4-5K токенов. Старый лимит 3500
     // приводил к усечённому JSON и failed parse.
-    maxTokens: 6000,
+    //
+    // 2026-07-27: 6000 → 16000. За policy/gemini-flash стоит reasoning-модель
+    // (deepseek-v4-flash): скрытые reasoning_tokens расходуют ТОТ ЖЕ
+    // completion-бюджет. На тяжёлых сайтах (длинные прайсы/реестры услуг)
+    // reasoning съедал 6000 целиком → finish_reason=length при пустом или
+    // обрезанном content (инцидент kelinlaw.ru: 6000/6000 ушло в reasoning,
+    // видимый ответ 0 симв.). Замер на том же сайте: reasoning ~5–6.5K +
+    // output ~2–3K → 16000 покрывает с запасом. Платим за фактические токены,
+    // так что на лёгких сайтах стоимость не растёт.
+    maxTokens: 16_000,
     responseFormat: { type: 'json_object' },
     signal,
     title: 'Portal - Client Brief Autofill',

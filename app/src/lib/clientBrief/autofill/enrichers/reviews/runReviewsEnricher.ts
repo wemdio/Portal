@@ -15,7 +15,9 @@ import {
 } from './parseReviewsResponse';
 
 const PER_PAGE_TEXT_MAX_CHARS = 12_000;
-const MAX_TOKENS_OUTPUT = 2_000;
+// 8000 а не 2000: reasoning-модель за policy/gemini-flash расходует скрытые
+// reasoning_tokens из того же completion-бюджета (см. autofill/index.ts).
+const MAX_TOKENS_OUTPUT = 8_000;
 
 export interface RunReviewsEnricherOptions {
   apiKey: string;
