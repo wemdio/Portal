@@ -37,6 +37,7 @@ import asyncpg
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from alerts import send_worker_alert
 from db import log_run_start, log_run_finish
 from sources.metrika import MetrikaSync
 from sources.amo import AmoSync
@@ -107,6 +108,12 @@ async def run_all() -> None:
                 tb = traceback.format_exc()
                 await log_run_finish(conn, run_id, "error", error=str(e))
                 print(f"[{src.name}] FAIL — {e}\n{tb}", flush=True)
+                await send_worker_alert(
+                    worker_id="portal-external-sync",
+                    subject=f"{src.name} failed",
+                    error=e,
+                    context={"source": src.name},
+                )
     finally:
         await conn.close()
         print("[main] cycle finished", flush=True)
@@ -210,3 +217,15 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, SystemExit):
         print("[main] shutdown", flush=True)
         sys.exit(0)
+    except Exception as fatal:
+        tb = traceback.format_exc()
+        print(f"[main] FATAL — {fatal}\n{tb}", flush=True)
+        try:
+            asyncio.run(send_worker_alert(
+                worker_id="portal-external-sync",
+                subject="fatal (main crashed)",
+                error=fatal,
+            ))
+        except Exception as alert_err:  # noqa: BLE001
+            print(f"[main] alert send failed: {alert_err}", flush=True)
+        sys.exit(1)
