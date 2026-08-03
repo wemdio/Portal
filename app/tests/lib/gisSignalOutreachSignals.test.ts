@@ -600,4 +600,147 @@ describe('тюнинг LLM-промпта 2026-08-03 (S5/S6 дефиниции)'
     expect(prompt).toMatch(/один адрес|один офис/i);
     expect(prompt).toMatch(/по всей России/i);
   });
+
+  it('S1: промпт — только телефонные доказательства, колбэк без номера исключён', async () => {
+    const prompt = await captureLlmSystemPrompt();
+    const line = prompt.split('\n').find((l) => l.startsWith('- generalPhone:')) ?? '';
+
+    expect(line).toContain('8-800');
+    expect(line).toMatch(/многоканальн|горяча[яю]\s+лини|единый\s+(?:телефон|номер)/i);
+    // Колбэк-кнопка/виджет без номера явно объявлены НЕ-сигналом S1.
+    expect(line).toMatch(/Заказать звонок/);
+    expect(line).toMatch(/НЕ сигнал/);
+  });
+});
+
+
+describe('фиксы ревью 04.08.2026 (S1 телефон-only, S4 окно, S5 порог, S6 города)', () => {
+  it('S1: кнопка «Заказать звонок» без номера телефона — НЕ S1 (но S2)', async () => {
+    const html = `
+      <html><body>
+        <main>
+          <h1>Школа скорочтения</h1>
+          <p>Курсы для детей и взрослых.</p>
+          <button>Заказать звонок</button>
+        </main>
+      </body></html>`;
+    const result = await detectOutreachSignals({
+      siteUrl: 'https://callback-only.example',
+      fetchPage: makeFetchRouter({ 'https://callback-only.example/': html }),
+      llmExtract: makeLlm(),
+    });
+
+    expect(result.signals.generalPhone.hit).toBe(false);
+    expect(result.signals.contactForm.hit).toBe(true);
+    expect(result.signalsCount).toBe(1);
+  });
+
+  it('S1: «горячая линия» без 8-800 — по-прежнему срабатывает', async () => {
+    const html = `
+      <html><body><main>
+        <p>Горячая линия для клиентов: +7 (495) 111-22-33.</p>
+      </main></body></html>`;
+    const result = await detectOutreachSignals({
+      siteUrl: 'https://hotline.example',
+      fetchPage: makeFetchRouter({ 'https://hotline.example/': html }),
+      llmExtract: makeLlm(),
+    });
+
+    expect(result.signals.generalPhone.hit).toBe(true);
+    expect(result.signals.generalPhone.evidence).toMatch(/горяча[яю]\s+лини[яю]/i);
+  });
+
+  it('S5: «более 5 клиентов» / «3+ клиентов» — ниже порога величины, НЕ поток', async () => {
+    const html = `
+      <html><body><main>
+        <p>Каждый день мы работаем с более 5 клиентов персонально.</p>
+        <p>3+ клиентов уже оценили сервис.</p>
+      </main></body></html>`;
+    const result = await detectOutreachSignals({
+      siteUrl: 'https://smallflow.example',
+      fetchPage: makeFetchRouter({ 'https://smallflow.example/': html }),
+      llmExtract: makeLlm(),
+    });
+
+    expect(result.signals.highVolume.hit).toBe(false);
+  });
+
+  it('S5: «более чем 500 клиентов» — срабатывает', async () => {
+    const html = `
+      <html><body><main>
+        <p>Более чем 500 клиентов доверяют нам свои проекты.</p>
+      </main></body></html>`;
+    const result = await detectOutreachSignals({
+      siteUrl: 'https://bigflow.example',
+      fetchPage: makeFetchRouter({ 'https://bigflow.example/': html }),
+      llmExtract: makeLlm(),
+    });
+
+    expect(result.signals.highVolume.hit).toBe(true);
+    expect(result.signals.highVolume.evidence).toMatch(/500 клиентов/);
+  });
+
+  it('S4: «Вакансии» в меню далеко от «наш менеджер по продажам перезвонит» — НЕ вакансия', async () => {
+    const filler = 'Описание услуг компании и её преимуществ. '.repeat(30);
+    const html = `
+      <html><body>
+        <nav><a href="/vacancies">Вакансии</a></nav>
+        <main>
+          <p>${filler}</p>
+          <p>Наш менеджер по продажам перезвонит вам в течение часа.</p>
+        </main>
+      </body></html>`;
+    const result = await detectOutreachSignals({
+      siteUrl: 'https://nav-vac.example',
+      fetchPage: makeFetchRouter({ 'https://nav-vac.example/': html }),
+      llmExtract: makeLlm(),
+    });
+
+    expect(result.signals.targetVacancy.hit).toBe(false);
+  });
+
+  it('S4: «Вакансия: менеджер по продажам» рядом с контекстом найма — срабатывает', async () => {
+    const html = `
+      <html><body><main>
+        <h1>О компании</h1>
+        <p>Вакансия: менеджер по продажам, оклад от 80 000 ₽, полный день.</p>
+      </main></body></html>`;
+    const result = await detectOutreachSignals({
+      siteUrl: 'https://near-vac.example',
+      fetchPage: makeFetchRouter({ 'https://near-vac.example/': html }),
+      llmExtract: makeLlm(),
+    });
+
+    expect(result.signals.targetVacancy.hit).toBe(true);
+    expect(result.signals.targetVacancy.evidence).toMatch(/менеджер по продажам/i);
+  });
+
+  it('S6: одна и та же улица в разных городах — РАЗНЫЕ адреса (сеть)', async () => {
+    const html = `
+      <html><body><main>
+        <p>Наши адреса: г. Москва, ул. Ленина, д. 1; г. Казань, ул. Ленина, д. 1.</p>
+      </main></body></html>`;
+    const result = await detectOutreachSignals({
+      siteUrl: 'https://twocities.example',
+      fetchPage: makeFetchRouter({ 'https://twocities.example/': html }),
+      llmExtract: makeLlm(),
+    });
+
+    expect(result.signals.multiOffice.hit).toBe(true);
+  });
+
+  it('S6: один и тот же адрес дважды в одном городе — НЕ сеть', async () => {
+    const html = `
+      <html><body><main>
+        <p>Офис: г. Москва, ул. Ленина, д. 1</p>
+        <p>Как добраться: г. Москва, ул. Ленина, д. 1</p>
+      </main></body></html>`;
+    const result = await detectOutreachSignals({
+      siteUrl: 'https://onecity.example',
+      fetchPage: makeFetchRouter({ 'https://onecity.example/': html }),
+      llmExtract: makeLlm(),
+    });
+
+    expect(result.signals.multiOffice.hit).toBe(false);
+  });
 });

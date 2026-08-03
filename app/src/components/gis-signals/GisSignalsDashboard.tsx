@@ -85,7 +85,7 @@ const SIGNAL_ROWS: Array<{ key: GisSignalKey; label: string }> = [
   { key: 'signal_general_phone', label: 'Общий телефон / колл-центр' },
   { key: 'signal_contact_form', label: 'Форма заявки / обратной связи' },
   { key: 'signal_sales_dept', label: 'Отдел продаж / приемная / call-центр' },
-  { key: 'signal_target_vacancy', label: 'Вакансии: менеджер продаж / оператор call-центра' },
+  { key: 'signal_target_vacancy', label: 'Вакансии: менеджер продаж или оператор call-центра' },
   { key: 'signal_high_volume', label: 'Признак большого потока' },
   { key: 'signal_multi_office', label: 'Несколько офисов / филиалов' },
 ];

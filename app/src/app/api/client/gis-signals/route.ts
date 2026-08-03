@@ -10,6 +10,8 @@ import {
   getSignalSlice,
 } from '@/lib/gisSignalOutreach/reportQueries';
 import { getCampaignAnalytics, getCampaignAnalyticsDaily } from '@/lib/instantly/client';
+import { resolveClientInstantlyRequestOptions } from '@/lib/instantly/clientAccountOptions';
+import type { InstantlyRequestOptions } from '@/lib/instantly/accounts';
 import type { CampaignAnalytics } from '@/lib/instantly/types';
 
 export const dynamic = 'force-dynamic';
@@ -72,9 +74,12 @@ function sumDailyWindow(raw: unknown): CampaignWindowTotals | null {
   return { emailsSent, openCount, replyCount };
 }
 
-async function loadCampaignAnalytics(campaignId: string): Promise<CampaignAnalyticsPayload | null> {
+async function loadCampaignAnalytics(
+  campaignId: string,
+  requestOptions: InstantlyRequestOptions,
+): Promise<CampaignAnalyticsPayload | null> {
   try {
-    const rows = await getCampaignAnalytics({ campaign_id: campaignId });
+    const rows = await getCampaignAnalytics({ campaign_id: campaignId }, requestOptions);
     const allTime =
       (Array.isArray(rows) ? rows : []).find((a) => a.campaign_id === campaignId) ?? null;
 
@@ -87,7 +92,7 @@ async function loadCampaignAnalytics(campaignId: string): Promise<CampaignAnalyt
       campaign_id: campaignId,
       start_date: isoDay(start),
       end_date: isoDay(end),
-    })
+    }, requestOptions)
       .then(sumDailyWindow)
       .catch(() => null);
 
@@ -114,17 +119,37 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 });
   }
 
-  const [segmentsRes, weeklyFunnel, totalFunnel, signalSlice] = await Promise.all([
-    supabaseAdmin.from('gis_signal_segments').select('key, label, instantly_campaign_id'),
-    getWeeklyFunnel(),
-    getTotalFunnel(),
-    getSignalSlice(),
-  ]);
+  // Отчётные запросы кидают при ошибке БД — отвечаем 500 (тихий 200 с
+  // усечёнными числами дашборд показывал бы как полные данные).
+  const segmentsQuery = supabaseAdmin
+    .from('gis_signal_segments')
+    .select('key, label, instantly_campaign_id');
+  let segmentsRes: Awaited<typeof segmentsQuery>;
+  let weeklyFunnel: Awaited<ReturnType<typeof getWeeklyFunnel>>;
+  let totalFunnel: Awaited<ReturnType<typeof getTotalFunnel>>;
+  let signalSlice: Awaited<ReturnType<typeof getSignalSlice>>;
+  try {
+    [segmentsRes, weeklyFunnel, totalFunnel, signalSlice] = await Promise.all([
+      segmentsQuery,
+      getWeeklyFunnel(),
+      getTotalFunnel(),
+      getSignalSlice(),
+    ]);
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Report query failed' },
+      { status: 500 },
+    );
+  }
   if (segmentsRes.error) {
     return NextResponse.json({ error: segmentsRes.error.message }, { status: 500 });
   }
 
   const segments = (segmentsRes.data ?? []) as SegmentRow[];
+
+  // Аналитика — в Instantly-аккаунт КЛИЕНТА (резолв как у appendLeads:
+  // client_campaign_presets.instantly_account_id), не в дефолтный воркспейс.
+  const instantlyRequestOptions = await resolveClientInstantlyRequestOptions(user.id);
 
   const campaigns = await Promise.all(
     segments
@@ -132,7 +157,7 @@ export async function GET(req: NextRequest) {
       .map(async (s) => ({
         segmentKey: s.key,
         label: s.label,
-        analytics: await loadCampaignAnalytics(s.instantly_campaign_id as string),
+        analytics: await loadCampaignAnalytics(s.instantly_campaign_id as string, instantlyRequestOptions),
       })),
   );
 

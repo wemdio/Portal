@@ -141,7 +141,7 @@ interface Builder {
 
   order: (...args: unknown[]) => Builder;
   limit: (...args: unknown[]) => Builder;
-  range: (...args: unknown[]) => Promise<{ data: Row[]; error: null; count: number }>;
+  range: (...args: unknown[]) => Promise<{ data: Row[]; error: { message: string } | null; count: number }>;
 
   single: () => Promise<{ data: Row | null; error: { message: string; code?: string } | null }>;
   maybeSingle: () => Promise<{ data: Row | null; error: null }>;
@@ -406,7 +406,12 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
 
       order: () => builder,
       limit: () => builder,
-      range: async () => flushMutation(),
+      // Как then/single: errorTables/errorSelects обязаны пробиваться и через
+      // range-пагинацию (PostgREST вернёт error на выполнении запроса).
+      range: async () => {
+        if (errorMessage) return { data: [], error: { message: errorMessage }, count: 0 };
+        return flushMutation();
+      },
 
       single: async () => {
         if (mode === 'insert' && insertError) return failInsert(insertError);

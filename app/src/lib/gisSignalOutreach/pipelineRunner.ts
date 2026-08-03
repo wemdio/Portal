@@ -22,7 +22,8 @@
  *      → appendLeadsToClientCampaign. Сегмент без instantly_campaign_id
  *      пропускаем (лог + воронка). markSeen — ТОЛЬКО для компаний, чей ≥1
  *      контакт успешно залит (at-least-once: сбой append → компания ретраится).
- *   6. Финализируем run-строку: status success/error + funnel jsonb
+ *   6. Финализируем run-строку: status completed/failed (CHECK constraint
+ *      миграции: running/completed/failed) + funnel jsonb
  *      ({ perSegment: {...}, total: {...} }) для дашборда.
  *
  * ИЗОЛЯЦИЯ: ни одного импорта из autoPipelineRunner / mailganer* / outreachos.
@@ -31,8 +32,10 @@
 
 import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { appendLeadsToClientCampaign, fetchExistingCampaignEmails } from '@/lib/clientLaunch/appendLeads';
+import { getBlockedEmailSet, filterBlockedLeads } from '@/lib/clientBlocklist/blockedContacts';
 import { extractEmail } from '@/lib/tools/dfybUtils';
 import { loadGisSignalConfig, loadGisSignalSegments, type GisSignalSegment } from './config';
 import { getLatestTwoGisSnapshotId, pullSegmentCandidates, type SegmentCandidate } from './segments';
@@ -62,7 +65,7 @@ export interface GisSignalFunnel {
 
 export interface GisSignalRunResult {
   runId: string | number | null;
-  status: 'success' | 'error' | 'skipped';
+  status: 'completed' | 'failed' | 'skipped';
   pulled: number;
   signalsOk: number;
   validContacts: number;
@@ -131,7 +134,7 @@ export async function runGisSignalPipeline(
   };
 
   if (!supabaseAdmin) {
-    return { ...empty, status: 'error', error: 'supabaseAdmin unavailable' };
+    return { ...empty, status: 'failed', error: 'supabaseAdmin unavailable' };
   }
   const db = supabaseAdmin;
 
@@ -172,7 +175,7 @@ export async function runGisSignalPipeline(
     .select('id')
     .single();
   if (runErr || !runRow) {
-    return { ...empty, status: 'error', error: `run insert failed: ${runErr?.message}` };
+    return { ...empty, status: 'failed', error: `run insert failed: ${runErr?.message}` };
   }
   const runId = (runRow as { id: string | number }).id;
 
@@ -203,8 +206,8 @@ export async function runGisSignalPipeline(
     log(`Кандидатов после seen/cross-segment дедупа: ${candidates.length}`);
 
     if (candidates.length === 0) {
-      await finishRun({ status: 'success', funnel });
-      return { ...empty, runId, status: 'success' };
+      await finishRun({ status: 'completed', funnel });
+      return { ...empty, runId, status: 'completed' };
     }
 
     // 4. Сигнальная квалификация (конкурентность SIGNAL_CHECK_CONCURRENCY).
@@ -260,13 +263,18 @@ export async function runGisSignalPipeline(
         evidence,
         signals_count: r.signalsCount,
         note: r.note,
+        checked_at: new Date().toISOString(),
       };
     });
+    // UPSERT по twogis_id: карточка может проверяться повторно (второй
+    // measure_only-замер, re-pull ещё не seen компании), а на колонке UNIQUE-
+    // индекс — plain insert убивал бы весь прогон конфликтом. Последняя
+    // проверка перетирает сигналы/evidence/count/note/site/segment/checked_at.
     for (let i = 0; i < archiveRows.length; i += SIGNAL_ARCHIVE_CHUNK) {
       const { error } = await db
         .from('gis_signal_company_signals')
-        .insert(archiveRows.slice(i, i + SIGNAL_ARCHIVE_CHUNK));
-      if (error) throw new Error(`signal archive insert failed: ${error.message}`);
+        .upsert(archiveRows.slice(i, i + SIGNAL_ARCHIVE_CHUNK), { onConflict: 'twogis_id' });
+      if (error) throw new Error(`signal archive upsert failed: ${error.message}`);
     }
 
     const qualifiedPairs = candidates
@@ -278,8 +286,8 @@ export async function runGisSignalPipeline(
     log(`Прошли сигнальный фильтр (>=${config.signal_min_count}): ${qualified.length}/${candidates.length}`);
 
     if (qualified.length === 0) {
-      await finishRun({ status: 'success', funnel });
-      return { ...empty, runId, status: 'success', pulled: candidates.length };
+      await finishRun({ status: 'completed', funnel });
+      return { ...empty, runId, status: 'completed', pulled: candidates.length };
     }
 
     // 5. Сетка → ОДИН base_constructor_jobs. Раскладка по сегментам после
@@ -376,11 +384,11 @@ export async function runGisSignalPipeline(
     // MEASURE-режим: только меряем воронку (pulled→signalsOk→valid). НЕ
     // заливаем в Instantly и НЕ пишем seen — замер неразрушающий и повторяемый.
     if (measureOnly) {
-      await finishRun({ status: 'success', funnel });
+      await finishRun({ status: 'completed', funnel });
       log(`MEASURE: pulled=${funnel.total.pulled} signalsOk=${funnel.total.signalsOk} valid=${funnel.total.validContacts} (без заливки, seen не тронут)`);
       return {
         runId,
-        status: 'success',
+        status: 'completed',
         pulled: funnel.total.pulled,
         signalsOk: funnel.total.signalsOk,
         validContacts: funnel.total.validContacts,
@@ -393,6 +401,15 @@ export async function runGisSignalPipeline(
     //    резал бы по пересечению с чужими клиентскими кампаниями). Fail-soft:
     //    не смогли прочитать кампанию — шлём без дедупа.
     //    markSeen — ТОЛЬКО после успешного append (at-least-once).
+    //
+    //    Чёрный список клиента применяем САМИ тем же helper'ом, что внутри
+    //    appendLeadsToClientCampaign (getBlockedEmailSet/filterBlockedLeads):
+    //    send-список обязан совпадать с тем, что append реально попытается
+    //    залить — иначе markSeen сжигал бы компании, чьи лиды append молча
+    //    отрезал блок-листом (accepted=0 при полном блоке).
+    const blockedEmails = supabaseInstantly
+      ? await getBlockedEmailSet(supabaseInstantly, clientUserId)
+      : new Set<string>();
     const appendErrors: string[] = [];
     for (const segment of segments) {
       const leads = leadsBySegment.get(segment.key) ?? [];
@@ -410,12 +427,17 @@ export async function runGisSignalPipeline(
       } catch (err) {
         log(`[${segment.key}] не удалось прочитать кампанию (${err instanceof Error ? err.message : String(err)}) — шлём без дедупа`);
       }
-      const sendLeads = leads.filter((l) => !existingEmails.has(l.email.trim().toLowerCase()));
-      if (sendLeads.length < leads.length) {
-        log(`[${segment.key}] дедуп против кампании: -${leads.length - sendLeads.length} → ${sendLeads.length}`);
+      const freshLeads = leads.filter((l) => !existingEmails.has(l.email.trim().toLowerCase()));
+      if (freshLeads.length < leads.length) {
+        log(`[${segment.key}] дедуп против кампании: -${leads.length - freshLeads.length} → ${freshLeads.length}`);
+      }
+      const { kept: sendLeads, blockedCount } = filterBlockedLeads(freshLeads, blockedEmails);
+      if (blockedCount > 0) {
+        log(`[${segment.key}] блок-лист клиента: -${blockedCount} → ${sendLeads.length}`);
       }
       if (sendLeads.length === 0) continue;
 
+      let accepted = 0;
       try {
         const res = await appendLeadsToClientCampaign({
           userId: clientUserId,
@@ -424,6 +446,7 @@ export async function runGisSignalPipeline(
           contextLabel: 'gis-signals',
           skipIfInCampaign: false,
         });
+        accepted = res.accepted;
         funnel.perSegment[segment.key].appended = res.accepted;
         funnel.total.appended += res.accepted;
         log(`[${segment.key}] Instantly: accepted=${res.accepted} skipped=${res.skipped}`);
@@ -435,32 +458,39 @@ export async function runGisSignalPipeline(
         continue;
       }
 
-      // markSeen: компании сегмента, у которых ≥1 email ушёл в append. Почта →
-      // twogis_id восстанавливаем по сегментной сетке (email уникален после
-      // dedup в gridToLeadPayloads).
-      const segGrid = gridsBySegment.get(segment.key) ?? [];
-      const emailIdx = segGrid[0]?.findIndex((h) => (h ?? '').trim().toLowerCase() === 'email') ?? -1;
-      const sentEmails = new Set(sendLeads.map((l) => l.email.trim().toLowerCase()));
-      const seenIds = new Set<string>();
-      if (idIdx >= 0 && emailIdx >= 0) {
-        for (let r = 1; r < segGrid.length; r++) {
-          const em = extractEmail(segGrid[r][emailIdx] ?? '')?.toLowerCase();
-          if (em && sentEmails.has(em)) seenIds.add((segGrid[r][idIdx] ?? '').trim());
+      // markSeen: ТОЛЬКО компании первых accepted лидов send-списка —
+      // appendLeadsToClientCampaign режет хвост по тарифному остатку
+      // (slice-префикс), значит залиты ровно первые accepted. accepted=0 →
+      // никого не помечаем: иначе сжигали бы компании, ни один лид которых
+      // не дошёл до Instantly. Почта → twogis_id восстанавливаем по сегментной
+      // сетке (email уникален после dedup в gridToLeadPayloads).
+      if (accepted > 0) {
+        const segGrid = gridsBySegment.get(segment.key) ?? [];
+        const emailIdx = segGrid[0]?.findIndex((h) => (h ?? '').trim().toLowerCase() === 'email') ?? -1;
+        const acceptedEmails = new Set(
+          sendLeads.slice(0, accepted).map((l) => l.email.trim().toLowerCase()),
+        );
+        const seenIds = new Set<string>();
+        if (idIdx >= 0 && emailIdx >= 0) {
+          for (let r = 1; r < segGrid.length; r++) {
+            const em = extractEmail(segGrid[r][emailIdx] ?? '')?.toLowerCase();
+            if (em && acceptedEmails.has(em)) seenIds.add((segGrid[r][idIdx] ?? '').trim());
+          }
         }
+        const seenRows = Array.from(seenIds)
+          .map((id) => qualifiedById.get(id))
+          .filter((x): x is { cand: SegmentCandidate; signals: OutreachSignalsResult } => !!x)
+          .map(({ cand }) => ({
+            twogis_id: cand.twogisId,
+            domain: domainOf(cand.site),
+            company_name: cand.name || null,
+            segment_key: cand.segmentKey,
+          }));
+        await markSeen(seenRows);
       }
-      const seenRows = Array.from(seenIds)
-        .map((id) => qualifiedById.get(id))
-        .filter((x): x is { cand: SegmentCandidate; signals: OutreachSignalsResult } => !!x)
-        .map(({ cand }) => ({
-          twogis_id: cand.twogisId,
-          domain: domainOf(cand.site),
-          company_name: cand.name || null,
-          segment_key: cand.segmentKey,
-        }));
-      await markSeen(seenRows);
     }
 
-    const runStatus: 'success' | 'error' = appendErrors.length > 0 ? 'error' : 'success';
+    const runStatus: 'completed' | 'failed' = appendErrors.length > 0 ? 'failed' : 'completed';
     await finishRun({
       status: runStatus,
       funnel,
@@ -487,8 +517,8 @@ export async function runGisSignalPipeline(
     // seen здесь НЕ трогаем: markSeen пишется только сразу после успешного
     // append (шаг 8), так что сбой в любом другом месте оставляет компании
     // eligible — корректный ретрай на следующем прогоне.
-    await finishRun({ status: 'error', funnel, error: message });
+    await finishRun({ status: 'failed', funnel, error: message });
     await logError('gis_signal.run.failed', err, { runId });
-    return { ...empty, runId, status: 'error', error: message };
+    return { ...empty, runId, status: 'failed', error: message };
   }
 }

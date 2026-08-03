@@ -112,15 +112,6 @@ const GENERAL_PHONE_MARKER_RES = [
   /единый\s+(?:телефон|номер)/i,
 ];
 
-// S1/S2: текстовый обратный звонок («Заказать звонок», «перезвоните мне»).
-const CALLBACK_TEXT_RE =
-  /заказ(ать|уйте)?\s+звонок|обратн(ый|ого)\s+звон(ок|ка)|перезвон(ите|им|ю)\s+(?:мне|нам|вам)/i;
-
-// S1: колбэк/коллтрекинг-виджеты (id из signalDetector).
-const CALLBACK_WIDGET_IDS = new Set([
-  'callbackhunter', 'envybox', 'calltouch', 'comagic', 'callibri', 'ringostat', 'mango_office', 'uis',
-]);
-
 // S2: категории виджетов из signalDetector — чаты, лид-формы, коллтрекинг
 // (JivoSite, Verbox, Talk-Me, Calltouch, CoMagic и т.п.).
 const FORM_WIDGET_CATEGORIES = new Set(['chat', 'lead_capture', 'call_tracking']);
@@ -157,11 +148,15 @@ const VACANCY_CONTEXT_RE = /ваканси|ищем|требуетс[яю]|от�
 // а не входящие обращения (калибровка 03.08.2026).
 const HIGH_VOLUME_FLOW_NOUNS =
   '(?:клиентов|заявок|студентов|учеников|пациентов|звонков|обращений|консультаций|заказов)';
+// Числовые варианты — с порогом величины ≥100 (3+ цифры): «более 5 клиентов»
+// или «3+ клиентов» — не «большой поток» (ревью 04.08.2026). Пробел между
+// разрядами допустим («50 000»); «более чем N» — тоже числовой вариант.
+const HIGH_VOLUME_NUMBER = '(?:\\d\\s?){3,}';
 const HIGH_VOLUME_RES: RegExp[] = [
   /сотни\s+(?:заявок|клиентов|звонков|студентов|учеников)/i,
   /тысячи\s+(?:заявок|клиентов|звонков|студентов|учеников)/i,
-  new RegExp(`более\\s+\\d[\\d\\s]{0,7}\\s*${HIGH_VOLUME_FLOW_NOUNS}`, 'i'),
-  new RegExp(`\\d[\\d\\s]{0,6}\\s*\\+\\s*${HIGH_VOLUME_FLOW_NOUNS}`, 'i'),
+  new RegExp(`более\\s+(?:чем\\s+)?${HIGH_VOLUME_NUMBER}\\s*${HIGH_VOLUME_FLOW_NOUNS}`, 'i'),
+  new RegExp(`${HIGH_VOLUME_NUMBER}\\s*\\+\\s*${HIGH_VOLUME_FLOW_NOUNS}`, 'i'),
   /консультации\s+ежедневно/i,
   /ежедневно\s+с\s*\d/i,
   /работаем\s+без\s+выходных/i,
@@ -256,7 +251,12 @@ function isTollFreePhone(phone: string): boolean {
   return digits.startsWith('8800') || digits.startsWith('7800');
 }
 
-/** S1: общий телефон / колл-центр. */
+/**
+ * S1: общий телефон / колл-центр. Только ТЕЛЕФОННЫЕ доказательства (ТЗ:
+ * «есть общий номер телефона → колл-центр»): 8-800, маркеры многоканального/
+ * бесплатного/единого номера, 8-800 с карточки 2GIS. Кнопка «Заказать звонок»
+ * и колбэк-виджеты — это S2 (форма заявки), к S1 не относятся.
+ */
 function detectGeneralPhone(pages: FetchedPage[], twogisPhone?: string | null): SignalVerdict {
   // 1. Номер 8-800 на страницах.
   const tollFree = detectTextSignal(pages, [TOLL_FREE_RE]);
@@ -266,20 +266,7 @@ function detectGeneralPhone(pages: FetchedPage[], twogisPhone?: string | null): 
   const marker = detectTextSignal(pages, GENERAL_PHONE_MARKER_RES);
   if (marker.hit) return marker;
 
-  // 3. Текст/виджет обратного звонка.
-  const callback = detectTextSignal(pages, [CALLBACK_TEXT_RE]);
-  if (callback.hit) return callback;
-
-  for (const page of pages) {
-    const widgets = detectSignals(page.html)
-      .filter((s) => CALLBACK_WIDGET_IDS.has(s.id))
-      .map((s) => s.name);
-    if (widgets.length > 0) {
-      return { hit: true, evidence: clip(`Виджет обратного звонка: ${widgets.join(', ')}`) };
-    }
-  }
-
-  // 4. Вспомогательное доказательство из 2GIS: 8-800 на карточке компании.
+  // 3. Вспомогательное доказательство из 2GIS: 8-800 на карточке компании.
   if (twogisPhone && isTollFreePhone(twogisPhone)) {
     return { hit: true, evidence: clip(`2GIS: ${twogisPhone} (номер 8-800)`) };
   }
@@ -367,11 +354,16 @@ function detectTargetVacancy(pages: FetchedPage[]): SignalVerdict {
     }
   }
 
-  // 3. Прочие страницы: роль только с явным контекстом найма («ищем», «вакансия»).
+  // 3. Прочие страницы: роль только с явным контекстом найма («ищем», «вакансия»)
+  //    В ОКНЕ ±200 символов вокруг роли — иначе «Вакансии» в меню + «наш
+  //    менеджер по продажам перезвонит вам» в подвале давали ложный хит.
   for (const page of pages) {
     if (page.kind === 'careers' || page.kind === 'external_careers') continue;
     const hit = findInText(page.text, TARGET_ROLE_RES);
-    if (hit && VACANCY_CONTEXT_RE.test(page.text)) {
+    if (!hit) continue;
+    const from = Math.max(0, hit.index - 200);
+    const to = Math.min(page.text.length, hit.index + hit.length + 200);
+    if (VACANCY_CONTEXT_RE.test(page.text.slice(from, to))) {
       return { hit: true, evidence: snippetAround(page.text, hit.index, hit.length) };
     }
   }
@@ -389,11 +381,12 @@ function replaceRuWord(s: string, pattern: string, repl: string): string {
 }
 
 /**
- * Ключ дедупликации адреса: один и тот же адрес в разном написании
- * («ул. Тверская, д. 1» / «улица Тверская, дом 1» / «г. Москва, ул. Тверская,
- * д.1» / «105120, ул. Тверская, д. 1, оф. 5») обязан схлопнуться в один ключ,
- * а genuinely разные адреса — остаться различимыми. Калибровка 03.08.2026:
- * «д. 1» vs «д.1» давали ложный S6.
+ * Нормализация УЛИЧНОЙ части адреса для дедупа: один и тот же адрес в разном
+ * написании («ул. Тверская, д. 1» / «улица Тверская, дом 1» / «105120,
+ * ул. Тверская, д. 1, оф. 5») обязан схлопнуться, а genuinely разные адреса —
+ * остаться различимыми. Калибровка 03.08.2026: «д. 1» vs «д.1» давали ложный
+ * S6. Город здесь НЕ учитывается — он часть ключа дедупа отдельно
+ * (cityBeforeAddress), иначе «ул. Ленина, д.1» в Москве и Казани схлопывались.
  */
 function normalizeAddress(raw: string): string {
   let s = raw.toLowerCase().replace(/ё/g, 'е');
@@ -414,26 +407,51 @@ function normalizeAddress(raw: string): string {
   return s;
 }
 
+// S6: «г. <City>» / «город <City>» перед адресом (~80 символов окна) — город
+// включается в ключ дедупа. matchAll клонирует regex (lastIndex не трогаем).
+const CITY_BEFORE_RE = /(?:г\.?|город)\s+([А-Яа-яЁё][А-Яа-яЁё-]*)/gi;
+
+/** Последний («ближайший» к адресу) город в ~80 символах перед матчем адреса. */
+function cityBeforeAddress(text: string, matchIndex: number): string | null {
+  const window = text.slice(Math.max(0, matchIndex - 80), matchIndex);
+  let city: string | null = null;
+  for (const m of window.matchAll(CITY_BEFORE_RE)) city = m[1];
+  return city ? city.toLowerCase().replace(/ё/g, 'е') : null;
+}
+
 /** S6: несколько офисов/филиалов. */
 function detectMultiOffice(pages: FetchedPage[], twogisBranchCount?: number | null): SignalVerdict {
-  // Адреса собираем со всех страниц (живут на /contacts и в подвале),
-  // дедуп по нормализованной строке, в evidence — оригинальное написание.
-  const byNorm = new Map<string, string>();
+  // Адреса собираем со всех страниц (живут на /contacts и в подвале), в
+  // evidence — оригинальное написание. Дедуп: улица+дом + ГОРОД из окна перед
+  // адресом («г. Москва, ул. Ленина, д. 1» и «г. Казань, ул. Ленина, д. 1» —
+  // РАЗНЫЕ адреса, ревью 04.08.2026). Адрес без города считается дублем
+  // любого с той же улицей (неопределённость → схлопываем, как раньше).
+  interface AddressEntry {
+    street: string;
+    city: string | null;
+    raw: string;
+  }
+  const entries: AddressEntry[] = [];
   for (const page of pages) {
     for (const m of page.text.matchAll(ADDRESS_RE)) {
-      const norm = normalizeAddress(m[0]);
-      if (norm && !byNorm.has(norm)) byNorm.set(norm, m[0].trim());
+      const street = normalizeAddress(m[0]);
+      if (!street) continue;
+      const city = cityBeforeAddress(page.text, m.index ?? 0);
+      const isDup = entries.some(
+        (e) => e.street === street && (e.city === null || city === null || e.city === city),
+      );
+      if (!isDup) entries.push({ street, city, raw: m[0].trim() });
     }
   }
 
-  if (byNorm.size >= 2) {
-    const first = Array.from(byNorm.values()).slice(0, 2);
+  if (entries.length >= 2) {
+    const first = entries.slice(0, 2).map((e) => e.raw);
     return { hit: true, evidence: clip(`Адреса: ${first.join('; ')}`) };
   }
 
   // Маркеры сети («наши офисы», «адреса магазинов») — только вместе с адресом,
   // иначе «наша сеть партнёров» без единого адреса давала бы ложный хит.
-  if (byNorm.size >= 1) {
+  if (entries.length >= 1) {
     const marker = detectTextSignal(pages, MULTI_OFFICE_MARKER_RES);
     if (marker.hit) return marker;
   }
@@ -461,7 +479,7 @@ const LLM_SYSTEM_PROMPT = `Ты — детектор признаков вход
 }
 
 Определения сигналов:
-- generalPhone: общий телефон / колл-центр — номер 8-800, «многоканальный телефон», «звонок бесплатный», «бесплатно по России», виджет обратного звонка.
+- generalPhone: общий телефон / колл-центр — ТОЛЬКО телефонные доказательства: номер 8-800, «многоканальный телефон», «звонок бесплатный», «бесплатно по России», «горячая линия», «единый номер». Кнопка или виджет обратного звонка («Заказать звонок», «перезвоните мне») БЕЗ общего номера телефона — НЕ сигнал generalPhone (это contactForm).
 - contactForm: форма заявки/обратной связи, кнопка «Оставить заявку»/«Заказать звонок», онлайн-чат с оператором.
 - salesDept: ЯВНОЕ упоминание отдела продаж, приёмной комиссии, call-центра/колл-центра/контакт-центра, клиентского отдела, отдела заявок. НЕ считай сигналом простое упоминание менеджеров или специалистов («наши менеджеры свяжутся с вами», «цены уточняйте у менеджеров», «менеджер по продажам» как должность) — без явного отдела/центра это не отдел продаж.
 - targetVacancy: открытая вакансия менеджера по продажам, менеджера по работе с клиентами, оператора call-центра.

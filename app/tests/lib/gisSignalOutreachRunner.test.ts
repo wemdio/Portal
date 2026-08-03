@@ -9,10 +9,17 @@ import { SIGNAL_COLUMNS } from '@/lib/gisSignalOutreach/signals';
 import { GRID_HEADER } from '@/lib/gisSignalOutreach/gridMapping';
 
 let mockDb: MockSupabaseClient = createMockSupabase();
+let mockInstantlyDb: MockSupabaseClient = createMockSupabase();
 
 jest.mock('@/lib/supabaseAdmin', () => ({
   get supabaseAdmin() {
     return mockDb;
+  },
+}));
+
+jest.mock('@/lib/supabaseInstantly', () => ({
+  get supabaseInstantly() {
+    return mockInstantlyDb;
   },
 }));
 
@@ -128,17 +135,19 @@ function finalGrid(rows: Array<{ id: string; segment?: string; name: string; ema
 }
 
 /**
- * Ждёт появления job-строки в мок-БД и флипает её в completed с финальной
- * сеткой — эмулирует worker-baseconstructor. Раннер поллит раз в pollIntervalMs=1.
+ * Ждёт появления N-й (minJobs) job-строки в мок-БД и флипает её в completed с
+ * финальной сеткой — эмулирует worker-baseconstructor. Раннер поллит раз в
+ * pollIntervalMs=1. minJobs нужен тестам с несколькими прогонами подряд:
+ * старые completed-job'ы остаются в таблице, целимся в N-ю по счёту.
  */
-async function completeBaseJob(data: string[][]): Promise<void> {
+async function completeNextBaseJob(data: string[][], minJobs = 1): Promise<void> {
   for (let i = 0; i < 5000; i++) {
     const jobs = mockDb.getRows('base_constructor_jobs');
-    if (jobs.length > 0) {
+    if (jobs.length >= minJobs) {
       await mockDb
         .from('base_constructor_jobs')
         .update({ status: 'completed', data })
-        .eq('id', jobs[0].id as string);
+        .eq('id', jobs[minJobs - 1].id as string);
       return;
     }
     await new Promise((r) => setTimeout(r, 1));
@@ -146,11 +155,19 @@ async function completeBaseJob(data: string[][]): Promise<void> {
   throw new Error('base job was not created');
 }
 
-function seed(config: Record<string, unknown> = {}) {
+function seed(config: Record<string, unknown> = {}, blockedEmails: string[] = []) {
   mockDb = createMockSupabase({
     tables: {
       gis_signal_pipeline_config: [configRow(config)],
       gis_signal_segments: segmentRows(),
+    },
+  });
+  mockInstantlyDb = createMockSupabase({
+    tables: {
+      client_blocked_contacts: blockedEmails.map((email) => ({
+        client_user_id: USER_ID,
+        email,
+      })),
     },
   });
 }
@@ -182,10 +199,10 @@ describe('runGisSignalPipeline — live режим', () => {
       { id: 'b1', name: 'Компания b1', email: 'info@b1.ru' },
     ]);
     const runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
-    await completeBaseJob(grid);
+    await completeNextBaseJob(grid);
     const result = await runPromise;
 
-    expect(result.status).toBe('success');
+    expect(result.status).toBe('completed');
     expect(result.pulled).toBe(3);
     expect(result.signalsOk).toBe(2);
 
@@ -216,15 +233,18 @@ describe('runGisSignalPipeline — live режим', () => {
       { twogis_id: 'a1', domain: 'a1.ru', company_name: 'Компания a1', segment_key: 'seg-a' },
     ]);
 
-    // Архив сигналов: все 3 проверенные компании (и pass, и fail).
-    const archive = mockDb.inserts.find((c) => c.table === 'gis_signal_company_signals');
-    expect(archive!.rows).toHaveLength(3);
-    const a2row = archive!.rows.find((r) => r.twogis_id === 'a2');
+    // Архив сигналов: все 3 проверенные компании (и pass, и fail) — upsert'ом
+    // по twogis_id (повторная проверка карточки не должна падать на UNIQUE).
+    const archiveUpserts = mockDb.upserts.filter((c) => c.table === 'gis_signal_company_signals');
+    expect(archiveUpserts).toHaveLength(1);
+    expect(archiveUpserts[0].onConflict).toBe('twogis_id');
+    expect(archiveUpserts[0].rows).toHaveLength(3);
+    const a2row = archiveUpserts[0].rows.find((r) => r.twogis_id === 'a2');
     expect(a2row).toMatchObject({ signals_count: 0, signal_general_phone: false, segment_key: 'seg-a' });
 
-    // Run-строка: status success + funnel jsonb.
+    // Run-строка: status completed (CHECK constraint миграции) + funnel jsonb.
     const runRow = mockDb.getRows('gis_signal_runs')[0];
-    expect(runRow.status).toBe('success');
+    expect(runRow.status).toBe('completed');
     expect(runRow.finished_at).toBeTruthy();
     const funnel = runRow.funnel as {
       perSegment: Record<string, Record<string, number>>;
@@ -243,22 +263,97 @@ describe('runGisSignalPipeline — live режим', () => {
     expect(result.appended).toBe(1);
   });
 
-  it('сбой append → seen НЕ пишется, run завершается со status=error', async () => {
+  it('сбой append → seen НЕ пишется, run завершается со status=failed', async () => {
     seed();
     pullMock.mockResolvedValue([cand('a1', 'seg-a')]);
     appendMock.mockRejectedValue(new Error('Instantly 500'));
 
     const grid = finalGrid([{ id: 'a1', name: 'Компания a1', email: 'info@a1.ru' }]);
     const runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
-    await completeBaseJob(grid);
+    await completeNextBaseJob(grid);
     const result = await runPromise;
 
-    expect(result.status).toBe('error');
+    expect(result.status).toBe('failed');
     expect(result.error).toContain('seg-a');
     expect(mockDb.upserts.filter((c) => c.table === 'gis_signal_seen_companies')).toHaveLength(0);
     const runRow = mockDb.getRows('gis_signal_runs')[0];
-    expect(runRow.status).toBe('error');
+    expect(runRow.status).toBe('failed');
     expect(String(runRow.error)).toContain('Instantly 500');
+  });
+
+  it('accepted=0 (все лиды ушли в skipped) → markSeen НЕ вызывается', async () => {
+    seed();
+    pullMock.mockResolvedValue([cand('a1', 'seg-a')]);
+    appendMock.mockResolvedValue({ accepted: 0, skipped: 1 });
+
+    const grid = finalGrid([{ id: 'a1', name: 'Компания a1', email: 'info@a1.ru' }]);
+    const runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
+    await completeNextBaseJob(grid);
+    const result = await runPromise;
+
+    expect(result.status).toBe('completed');
+    expect(result.appended).toBe(0);
+    expect(mockDb.upserts.filter((c) => c.table === 'gis_signal_seen_companies')).toHaveLength(0);
+    const runRow = mockDb.getRows('gis_signal_runs')[0];
+    expect((runRow.funnel as { total: Record<string, number> }).total.appended).toBe(0);
+  });
+
+  it('accepted < sent → seen только компании первых accepted лидов (append режет префикс)', async () => {
+    seed();
+    pullMock.mockResolvedValue([cand('a1', 'seg-a'), cand('a3', 'seg-a')]);
+    detectMock.mockImplementation(async () => signalResult(true));
+    // append имитирует тарифный срез: из 2 лидов залит только ПЕРВЫЙ.
+    appendMock.mockResolvedValue({ accepted: 1, skipped: 1 });
+
+    const grid = finalGrid([
+      { id: 'a1', name: 'Компания a1', email: 'info@a1.ru' },
+      { id: 'a3', name: 'Компания a3', email: 'info@a3.ru' },
+    ]);
+    const runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
+    await completeNextBaseJob(grid);
+    const result = await runPromise;
+
+    expect(result.status).toBe('completed');
+    const seenUpserts = mockDb.upserts.filter((c) => c.table === 'gis_signal_seen_companies');
+    expect(seenUpserts).toHaveLength(1);
+    // a3 НЕ сожжена: её лид не дошёл до Instantly, ретрай на следующем прогоне.
+    expect(seenUpserts[0].rows.map((r) => r.twogis_id)).toEqual(['a1']);
+  });
+
+  it('блок-лист клиента: заблокированный email вырезается ДО append и не сжигает seen', async () => {
+    seed({}, ['info@a3.ru']);
+    pullMock.mockResolvedValue([cand('a1', 'seg-a'), cand('a3', 'seg-a')]);
+    detectMock.mockImplementation(async () => signalResult(true));
+
+    const grid = finalGrid([
+      { id: 'a1', name: 'Компания a1', email: 'info@a1.ru' },
+      { id: 'a3', name: 'Компания a3', email: 'info@a3.ru' },
+    ]);
+    const runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
+    await completeNextBaseJob(grid);
+    const result = await runPromise;
+
+    expect(result.status).toBe('completed');
+    // Append получает только незаблокированных (тот же фильтр, что внутри appendLeads).
+    const appendArgs = appendMock.mock.calls[0][0];
+    expect(appendArgs.leads.map((l: { email: string }) => l.email)).toEqual(['info@a1.ru']);
+    // accepted=1 (default mock) → seen только a1.
+    const seenUpserts = mockDb.upserts.filter((c) => c.table === 'gis_signal_seen_companies');
+    expect(seenUpserts.flatMap((c) => c.rows).map((r) => r.twogis_id)).toEqual(['a1']);
+  });
+
+  it('все лиды сегмента в блок-листе → append не вызывается, seen не пишется', async () => {
+    seed({}, ['info@a1.ru']);
+    pullMock.mockResolvedValue([cand('a1', 'seg-a')]);
+
+    const grid = finalGrid([{ id: 'a1', name: 'Компания a1', email: 'info@a1.ru' }]);
+    const runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
+    await completeNextBaseJob(grid);
+    const result = await runPromise;
+
+    expect(result.status).toBe('completed');
+    expect(appendMock).not.toHaveBeenCalled();
+    expect(mockDb.upserts.filter((c) => c.table === 'gis_signal_seen_companies')).toHaveLength(0);
   });
 });
 
@@ -272,10 +367,10 @@ describe('runGisSignalPipeline — measure_only', () => {
       { id: 'b1', name: 'Компания b1', email: 'info@b1.ru' },
     ]);
     const runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
-    await completeBaseJob(grid);
+    await completeNextBaseJob(grid);
     const result = await runPromise;
 
-    expect(result.status).toBe('success');
+    expect(result.status).toBe('completed');
     // Полная воронка замерена: кандидаты → сигналы → конструктор → valid.
     expect(mockDb.inserts.find((c) => c.table === 'base_constructor_jobs')).toBeDefined();
     expect(result.validContacts).toBe(2);
@@ -283,12 +378,53 @@ describe('runGisSignalPipeline — measure_only', () => {
     expect(appendMock).not.toHaveBeenCalled();
     expect(mockDb.upserts.filter((c) => c.table === 'gis_signal_seen_companies')).toHaveLength(0);
     // Архив сигналов при этом пишется — это и есть аналитический срез замера.
-    expect(mockDb.inserts.find((c) => c.table === 'gis_signal_company_signals')!.rows).toHaveLength(3);
+    const archiveUpserts = mockDb.upserts.filter((c) => c.table === 'gis_signal_company_signals');
+    expect(archiveUpserts.flatMap((c) => c.rows)).toHaveLength(3);
     const runRow = mockDb.getRows('gis_signal_runs')[0];
-    expect(runRow.status).toBe('success');
+    expect(runRow.status).toBe('completed');
     expect((runRow.funnel as { total: Record<string, number> }).total).toMatchObject({
       pulled: 3, signalsOk: 2, validContacts: 2, appended: 0,
     });
+  });
+
+  it('повторный замер той же карточки: архив обновляется апсертом, прогон не падает', async () => {
+    seed({ measure_only: true });
+    pullMock.mockResolvedValue([cand('a1', 'seg-a')]);
+    detectMock.mockImplementation(async () => signalResult(true));
+
+    const grid = finalGrid([{ id: 'a1', name: 'Компания a1', email: 'info@a1.ru' }]);
+    let runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
+    await completeNextBaseJob(grid, 1);
+    const first = await runPromise;
+    expect(first.status).toBe('completed');
+
+    // Второй замер той же карточки: generalPhone пропал, зато появилась форма
+    // (сайт поменялся). Компания всё ещё qualified (1 сигнал) → BC job есть.
+    detectMock.mockImplementation(async () => {
+      const r = signalResult(false);
+      r.signals.contactForm = { hit: true, evidence: 'форма заявки' };
+      r.signalsCount = 1;
+      return r;
+    });
+    runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
+    await completeNextBaseJob(grid, 2);
+    const second = await runPromise;
+    expect(second.status).toBe('completed');
+
+    // Один twogis_id — одна строка, значения от ПОСЛЕДНЕЙ проверки.
+    const rows = mockDb.getRows('gis_signal_company_signals').filter((r) => r.twogis_id === 'a1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      signal_general_phone: false,
+      signal_contact_form: true,
+      signals_count: 1,
+      site: 'https://a1.ru',
+      segment_key: 'seg-a',
+    });
+    expect(rows[0].checked_at).toBeTruthy();
+    const archiveUpserts = mockDb.upserts.filter((c) => c.table === 'gis_signal_company_signals');
+    expect(archiveUpserts).toHaveLength(2);
+    for (const call of archiveUpserts) expect(call.onConflict).toBe('twogis_id');
   });
 });
 
@@ -318,12 +454,14 @@ describe('runGisSignalPipeline — гарды', () => {
 
     const grid = finalGrid([{ id: 'a1', name: 'Компания a1', email: 'info@a1.ru' }]);
     const runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
-    await completeBaseJob(grid);
+    await completeNextBaseJob(grid);
     const result = await runPromise;
 
-    expect(result.status).toBe('success');
-    const archive = mockDb.inserts.find((c) => c.table === 'gis_signal_company_signals');
-    const boomRow = archive!.rows.find((r) => r.twogis_id === 'boom');
+    expect(result.status).toBe('completed');
+    const archiveRows = mockDb.upserts
+      .filter((c) => c.table === 'gis_signal_company_signals')
+      .flatMap((c) => c.rows);
+    const boomRow = archiveRows.find((r) => r.twogis_id === 'boom');
     expect(boomRow).toMatchObject({ signals_count: 0 });
     expect(String(boomRow!.note)).toContain('Signal check failed');
     expect(result.signalsOk).toBe(1);

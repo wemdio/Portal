@@ -52,7 +52,7 @@ async function main(): Promise<number> {
     const summary = await runGisSignalPipeline((m) => log('info', m));
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
 
-    if (summary.status === 'success') {
+    if (summary.status === 'completed') {
       log(
         'info',
         `Completed in ${elapsedSec}s: pulled=${summary.pulled} signalsOk=${summary.signalsOk} ` +

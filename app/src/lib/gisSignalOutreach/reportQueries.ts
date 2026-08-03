@@ -64,7 +64,9 @@ async function fetchRuns(sinceIso: string | null): Promise<RunFunnelRow[]> {
       .order('started_at', { ascending: true });
     if (sinceIso) q = q.gte('started_at', sinceIso);
     const { data, error } = await q.range(from, from + PAGE - 1);
-    if (error) return out;
+    // Ошибку НЕ глотаем: тихий return отдавал бы дашборду усечённые числа
+    // под видом полных. Throw → роут отвечает 500.
+    if (error) throw new Error(`gis_signal_runs read failed: ${error.message}`);
     const rows = (data ?? []) as RunFunnelRow[];
     out.push(...rows);
     if (rows.length < PAGE) break;
@@ -135,8 +137,12 @@ export async function getSignalSlice(): Promise<GisSignalSliceRow[]> {
     const { data, error } = await supabaseAdmin
       .from('gis_signal_company_signals')
       .select(columns)
+      // Пагинация БЕЗ order by недетерминирована: пока пайплайн дописывает
+      // строки, границы страниц плывут и срез дублирует/теряет компании.
+      .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
-    if (error) break;
+    // Throw, как в fetchRuns: частичный срез не должен уезжать на дашборд.
+    if (error) throw new Error(`gis_signal_company_signals read failed: ${error.message}`);
     const rows = (data ?? []) as unknown as Array<Record<string, unknown>>;
     for (const row of rows) {
       const segmentKey = String(row.segment_key ?? '');
