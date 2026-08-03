@@ -5,11 +5,15 @@ own log-run в external_sync_runs — но остальной pipeline прод�
 крутиться, и без явного алерта сбой обнаруживается только через сутки
 через отсутствие свежих данных. Алерт даёт немедленный сигнал.
 
-Env:
-  WORKER_ALERT_TG_BOT_TOKEN  — приоритетно.
-  WORKER_ALERT_TG_ADMIN_IDS  — csv chat_id, приоритетно.
-  LEADS_REPORT_TG_BOT_TOKEN  — fallback (тот же бот что для отчётов).
-  LEADS_REPORT_TG_ADMIN_IDS  — fallback.
+Дефолтно юзаем существующий health-check бот (он и так шлёт статус
+подключений к БД в тот же канал каждые 30 мин — алерты сбоев ложатся
+туда же, отдельно ничего настраивать не нужно).
+
+Env, в порядке приоритета:
+  WORKER_ALERT_TG_BOT_TOKEN / WORKER_ALERT_TG_ADMIN_IDS — override.
+  TELEGRAM_HEALTH_BOT_TOKEN / TELEGRAM_HEALTH_CHAT_ID   — health-check бот.
+  TELEGRAM_BOT_TOKEN                                    — общий fallback.
+  LEADS_REPORT_TG_BOT_TOKEN / LEADS_REPORT_TG_ADMIN_IDS — последний fallback.
 
 Никогда не бросает: неудачный TG-запрос логируется в stderr и всё.
 """
@@ -28,11 +32,14 @@ _MAX_LEN = 3800  # TG hard-limit 4096, оставляем запас на фор
 def _load_creds() -> Optional[tuple[str, list[str]]]:
     token = (
         os.environ.get("WORKER_ALERT_TG_BOT_TOKEN")
+        or os.environ.get("TELEGRAM_HEALTH_BOT_TOKEN")
+        or os.environ.get("TELEGRAM_BOT_TOKEN")
         or os.environ.get("LEADS_REPORT_TG_BOT_TOKEN")
         or ""
     ).strip()
     raw = (
         os.environ.get("WORKER_ALERT_TG_ADMIN_IDS")
+        or os.environ.get("TELEGRAM_HEALTH_CHAT_ID")
         or os.environ.get("LEADS_REPORT_TG_ADMIN_IDS")
         or ""
     )

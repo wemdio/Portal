@@ -540,6 +540,10 @@ services:
       - AMO_BASE_URL_HOST=${AMO_BASE_URL_HOST:-polzaagency.amocrm.ru}
       - GOOGLE_SERVICE_ACCOUNT_EMAIL=${GOOGLE_SERVICE_ACCOUNT_EMAIL}
       - GOOGLE_PRIVATE_KEY=${GOOGLE_PRIVATE_KEY}
+      # TG-алерт при сбое leadsReportCron / salesReportCron. Дефолтно уходит
+      # в канал health-check бота (см. app/src/lib/telegram/workerAlert.ts).
+      - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN}
+      - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
     deploy:
       resources:
         limits:
@@ -567,6 +571,10 @@ services:
       - LEADS_REPORT_TG_BOT_TOKEN=${LEADS_REPORT_TG_BOT_TOKEN}
       - LEADS_REPORT_TG_ADMIN_IDS=${LEADS_REPORT_TG_ADMIN_IDS}
       - LEADS_REPORT_PIPELINE_NAME=${LEADS_REPORT_PIPELINE_NAME:-Воронка - новые лиды}
+      # TG-алерт при сбое leadsReportSummaryCron. Идёт в канал health-check
+      # бота (см. app/src/lib/telegram/workerAlert.ts).
+      - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN}
+      - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
     stop_grace_period: 30s
     deploy:
       resources:
@@ -1206,6 +1214,11 @@ services:
       # лишь поднимает лимит запросов.
       - TRON_USDT_WALLET_ADDRESS=${TRON_USDT_WALLET_ADDRESS:-}
       - TRONGRID_API_KEY=${TRONGRID_API_KEY:-}
+      # TG-алерт при сбое любого источника (metrika/amo_leads/bank_*/...)
+      # и fatal main. Дефолтно уходит в канал health-check бота
+      # (см. services/portal-external-sync/alerts.py).
+      - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN}
+      - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
     volumes:
       - /var/log/portal-external-sync:/var/log/sync
     command: sh -c "mkdir -p /var/log/sync && exec python -u main.py 2>&1 | tee -a /var/log/sync/main.log"

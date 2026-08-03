@@ -6,10 +6,17 @@
  * администраторы получают короткое сообщение в TG «что-то не так и почему»,
  * вместо того чтобы обнаружить пропущенный отчёт через день.
  *
- * Env-переменные:
- *  - WORKER_ALERT_TG_BOT_TOKEN / WORKER_ALERT_TG_ADMIN_IDS — приоритетно.
- *  - LEADS_REPORT_TG_BOT_TOKEN / LEADS_REPORT_TG_ADMIN_IDS — fallback,
- *    чтобы алерты работали «из коробки» на уже настроенном боте отчётов.
+ * Дефолтно юзаем существующий health-check бот (он и так шлёт админам
+ * каждые 30 мин статус подключения к БД и т.п. — алерты сбоев ложатся в
+ * тот же канал, отдельно настраивать ничего не нужно).
+ *
+ * Env-переменные, в порядке приоритета:
+ *  - WORKER_ALERT_TG_BOT_TOKEN / WORKER_ALERT_TG_ADMIN_IDS — override,
+ *    если хочется отдельный канал под алерты сбоев.
+ *  - TELEGRAM_HEALTH_BOT_TOKEN / TELEGRAM_HEALTH_CHAT_ID — health-check бот.
+ *  - TELEGRAM_BOT_TOKEN — общий fallback token.
+ *  - LEADS_REPORT_TG_BOT_TOKEN / LEADS_REPORT_TG_ADMIN_IDS — последний
+ *    fallback (бот отчётов leads).
  *
  * Никогда не бросает — если TG API отвалился, просто логирует в stderr
  * и возвращает управление. Один сбойный алерт не должен маскировать
@@ -20,12 +27,15 @@ const MAX_MSG_LEN = 3800; // TG hard-limit 4096, оставляем запас �
 
 function loadCreds(): { token: string; chatIds: string[] } | null {
   const token =
-    process.env.WORKER_ALERT_TG_BOT_TOKEN ??
-    process.env.LEADS_REPORT_TG_BOT_TOKEN ??
+    process.env.WORKER_ALERT_TG_BOT_TOKEN ||
+    process.env.TELEGRAM_HEALTH_BOT_TOKEN ||
+    process.env.TELEGRAM_BOT_TOKEN ||
+    process.env.LEADS_REPORT_TG_BOT_TOKEN ||
     '';
   const raw =
-    process.env.WORKER_ALERT_TG_ADMIN_IDS ??
-    process.env.LEADS_REPORT_TG_ADMIN_IDS ??
+    process.env.WORKER_ALERT_TG_ADMIN_IDS ||
+    process.env.TELEGRAM_HEALTH_CHAT_ID ||
+    process.env.LEADS_REPORT_TG_ADMIN_IDS ||
     '';
   const chatIds = raw
     .split(',')
