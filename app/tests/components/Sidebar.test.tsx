@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { render, screen } from '@testing-library/react';
 import { Sidebar } from '@/components/Sidebar';
+import { INTERNAL_ROLES } from '@/lib/roles';
 import type { UserRole } from '@/types';
 
 let mockUserRole: UserRole = 'technician';
@@ -37,15 +38,14 @@ describe('Sidebar Component', () => {
   });
 
   it('should render navigation items available to a technician', () => {
-    const { container } = render(<Sidebar />);
+    render(<Sidebar />);
 
     expect(screen.getByText('Проекты')).toBeInTheDocument();
     expect(screen.getByText('Регламент')).toBeInTheDocument();
-    expect(container.querySelector('a[href="/team"]')).not.toBeInTheDocument();
   });
 
-  it.each<UserRole>(['lead', 'director', 'admin'])(
-    'should render the team link for leadership role %s',
+  it.each<UserRole>(INTERNAL_ROLES)(
+    'should render the team link for internal role %s',
     (role) => {
       mockUserRole = role;
       const { container } = render(<Sidebar />);
