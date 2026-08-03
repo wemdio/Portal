@@ -139,6 +139,11 @@ def _compute_window(now_msk: datetime) -> tuple[datetime, datetime]:
 
 # ── GitHub API ────────────────────────────────────────────────────────────────
 
+# 100 коммитов на страницу × 50 страниц = 5000 коммитов на окно в 1-3 дня.
+# Реальный поток — десятки в день, так что это аварийный стоп, а не рабочий лимит.
+MAX_COMMIT_PAGES = 50
+
+
 async def fetch_commits(since: datetime, until: datetime) -> list[dict[str, Any]]:
     headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
     if GITHUB_TOKEN:
@@ -154,10 +159,23 @@ async def fetch_commits(since: datetime, until: datetime) -> list[dict[str, Any]
     url = f"https://api.github.com/repos/{GITHUB_REPO}/commits"
     commits: list[dict[str, Any]] = []
 
+    # Параметры уходят ТОЛЬКО в первый запрос. Дальше идём по готовому
+    # `Link: rel="next"`, где since/until/per_page/page уже вшиты в query.
+    # Передавать сюда `params={}` нельзя: httpx перезаписывает query целиком,
+    # next-ссылка теряет page= и since= → бесконечный цикл по первой странице
+    # всей истории репозитория (инцидент 03.08.2026: 150k коммитов, 1 ГБ RSS,
+    # выжран часовой лимит GitHub API).
+    next_params: dict[str, str] | None = params
+    seen_urls: set[str] = set()
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            while url:
-                r = await client.get(url, headers=headers, params=params if commits == [] else {})
+            for _ in range(MAX_COMMIT_PAGES):
+                if not url or url in seen_urls:
+                    break
+                seen_urls.add(url)
+                r = await client.get(url, headers=headers, params=next_params)
+                next_params = None
                 if r.status_code == 200:
                     page = r.json()
                     commits.extend(page)
@@ -167,6 +185,12 @@ async def fetch_commits(since: datetime, until: datetime) -> list[dict[str, Any]
                 else:
                     print(f"[changelog] GitHub API error {r.status_code}: {r.text[:200]}", flush=True)
                     break
+            else:
+                print(
+                    f"[changelog] Pagination stopped at {MAX_COMMIT_PAGES} pages "
+                    f"({len(commits)} commits) — окно подозрительно широкое",
+                    flush=True,
+                )
     except Exception as e:
         print(f"[changelog] GitHub fetch error: {e}", flush=True)
 

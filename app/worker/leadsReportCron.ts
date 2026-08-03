@@ -10,6 +10,7 @@ import {
 } from './_shared';
 import { ALL_CONFIGS } from '@/lib/leadsReport/config';
 import { runReport } from '@/lib/leadsReport/report';
+import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
 
 const WORKER_ID = 'leads-report-cron';
 const parsedSinceDays = Number(process.env.LEADS_REPORT_SINCE_DAYS);
@@ -45,6 +46,15 @@ async function main(): Promise<void> {
         config: config.name,
         error: errorMessage,
       });
+      await sendWorkerAlert({
+        workerId: WORKER_ID,
+        subject: `report failed (${config.name})`,
+        error,
+        context: {
+          spreadsheet_id: config.spreadsheetId,
+          sheet_name: config.sheetName,
+        },
+      });
     }
 
     const { error: insertError } = await db.from('external_sync_runs').insert({
@@ -75,7 +85,12 @@ async function main(): Promise<void> {
   log('info', 'done');
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   console.error('[leadsReportCron] fatal', error);
+  await sendWorkerAlert({
+    workerId: WORKER_ID,
+    subject: 'fatal (main crashed)',
+    error,
+  });
   process.exit(1);
 });

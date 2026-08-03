@@ -43,7 +43,7 @@ function sessionCacheEvict(): void {
   if (oldest != null) sessionPathCache.delete(oldest);
 }
 
-async function downloadSessionToTemp(db: SupabaseClient, storagePath: string): Promise<string> {
+export async function downloadSessionToTemp(db: SupabaseClient, storagePath: string): Promise<string> {
   const cached = sessionPathCache.get(storagePath);
   if (cached && fs.existsSync(cached)) return cached;
   const { data, error } = await db.storage.from(BUCKET_SESSIONS).download(storagePath);
@@ -113,15 +113,18 @@ async function handleProxyError(args: {
     log('warning', `Не смог записать ошибку прокси в БД (${e instanceof Error ? e.message : String(e)}) — продолжаю.`);
   }
 
-  // 2) per-account «не помог N прокси подряд»
+  // 2) per-account «не помог N РАЗНЫХ прокси подряд». Повторный провал того
+  //    же прокси счётчик не двигает (см. recordAccountProxyFailure) — иначе на
+  //    аккаунте, которому свап запрещён, degraded выпадает по теории
+  //    вероятностей на любом сыром пуле, а не по состоянию сессии.
   let degradedMarked = false;
   try {
-    const a = await recordAccountProxyFailure(db, account.id);
+    const a = await recordAccountProxyFailure(db, account.id, account.proxy_id);
     degradedMarked = a.markedDegraded;
     if (degradedMarked) {
       log(
         'error',
-        `Аккаунт ${account.session_name}: ${a.consecutiveProxyFailures} разных прокси подряд не помогли — помечаю degraded, отлёжка 24ч. Похоже на shadow-ban или битую сессию, перевыпустите session_data и снимите degraded в UI.`,
+        `Аккаунт ${account.session_name}: ${a.consecutiveProxyFailures} разных прокси подряд не помогли — помечаю degraded, отлёжка 24ч. Сначала проверьте здоровье пула прокси кампании: если брак массовый и на других аккаунтах тоже, дело в пуле. Если пул чистый — похоже на shadow-ban или битую сессию, тогда перевыпустите session_data и снимите degraded в UI.`,
       );
     }
   } catch (e) {
@@ -1330,6 +1333,16 @@ export async function runCampaignLoop(
     .eq('campaign_id', campaignId)
     .eq('is_active', true);
 
+  // Собственные аккаунты кампании. После прогрева (см. warmup/) у них остаются
+  // диалоги друг с другом, и без этого фильтра боевой цикл принял бы свой же
+  // аккаунт за лида: сгенерировал бы продающий ответ, сработал бы триггер и
+  // переписка ушла бы в рабочий чат как заявка.
+  const ownTgUserIds = new Set(
+    (accounts as OutreachAccount[])
+      .map((a) => a.tg_user_id)
+      .filter((v): v is number => typeof v === 'number'),
+  );
+
   log('info', `Запускаю кампанию "${campaign.name}": ${accounts.length} аккаунтов, ${proxies?.length ?? 0} прокси`);
 
   const proxyMap = new Map((proxies ?? []).map((proxy: OutreachProxy) => [proxy.id, proxy]));
@@ -1425,6 +1438,7 @@ export async function runCampaignLoop(
           dialogs_total: 0,
           unread: 0,
           not_user: 0,
+          own_account: 0,
           processed: 0,
           replied: 0,
           flood: 0,
@@ -1583,6 +1597,10 @@ export async function runCampaignLoop(
               cycleStats.not_user++;
               continue;
             }
+            if (ownTgUserIds.has(Number(dialog.entity.id))) {
+              cycleStats.own_account++;
+              continue;
+            }
 
             try {
               const r = await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop, { blockedUserIds });
@@ -1662,6 +1680,7 @@ export async function runCampaignLoop(
             `Аккаунт ${account.session_name}: круг завершён за ${(elapsedMs / 1000).toFixed(1)}с. ` +
               `Обработано ${cycleStats.processed} непрочитанных из ${cycleStats.unread}, отправлено ${cycleStats.replied} ответов. ` +
               `Пропуски: групп/каналов ${cycleStats.not_user}, ошибок ${cycleStats.errors}` +
+              (cycleStats.own_account ? `, своих аккаунтов кампании ${cycleStats.own_account}` : '') +
               (cycleStats.flood ? `, паузы из-за Flood ${cycleStats.flood}` : '') +
               '.',
           );

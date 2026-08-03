@@ -16,6 +16,7 @@ import { getAllRecipients } from '@/lib/leadsReport/subscribers';
 import { formatSummary } from '@/lib/leadsReport/summaryFormatter';
 import { currentMskWeekWindow } from '@/lib/leadsReport/weekWindow';
 import { sendMessage } from '@/lib/tgBot/telegramClient';
+import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
 
 const WORKER_ID = 'leads-report-summary-cron';
 const TOKEN = process.env.LEADS_REPORT_TG_BOT_TOKEN ?? '';
@@ -65,6 +66,15 @@ async function main(): Promise<void> {
     status = 'error';
     errorMessage = error instanceof Error ? error.message : String(error);
     log('error', 'summary failed', errorMessage);
+    await sendWorkerAlert({
+      workerId: WORKER_ID,
+      subject: 'weekly summary failed',
+      error,
+      context: {
+        week_start: window.start.toISOString(),
+        week_end: window.end.toISOString(),
+      },
+    });
   }
 
   const { error: logError } = await db.from('external_sync_runs').insert({
@@ -91,7 +101,12 @@ async function main(): Promise<void> {
   if (status === 'error') process.exitCode = 1;
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   console.error('[leadsReportSummaryCron] fatal', error);
+  await sendWorkerAlert({
+    workerId: WORKER_ID,
+    subject: 'fatal (main crashed)',
+    error,
+  });
   process.exit(1);
 });

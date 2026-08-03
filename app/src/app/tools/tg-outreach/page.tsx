@@ -26,7 +26,9 @@ import {
   Ban,
   RefreshCw,
   AlertCircle,
+  Flame,
 } from 'lucide-react';
+import WarmupTab from '@/components/tg-outreach/WarmupTab';
 import type {
   OutreachCampaign,
   OutreachAccount,
@@ -1851,6 +1853,7 @@ const TABS = [
   { id: 'settings', label: 'Настройки', icon: Settings },
   { id: 'accounts', label: 'Аккаунты', icon: Users },
   { id: 'proxies', label: 'Прокси', icon: Network },
+  { id: 'warmup', label: 'Прогрев', icon: Flame },
   { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
   { id: 'processed', label: 'Обработанные', icon: UserCheck },
@@ -2054,6 +2057,7 @@ function CampaignView({ campaign, isOwn, onUpdate, onDelete }: {
         {tab === 'settings' && <SettingsTab campaign={campaign} onSave={saveSettings} />}
         {tab === 'accounts' && <CampaignAccountsTab campaignId={campaign.id} />}
         {tab === 'proxies' && <CampaignProxiesTab campaignId={campaign.id} />}
+        {tab === 'warmup' && <WarmupTab campaignId={campaign.id} isOwn={isOwn} />}
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
         {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} isOwn={isOwn} />}
         {tab === 'processed' && <ProcessedTab campaignId={campaign.id} />}

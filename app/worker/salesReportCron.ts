@@ -23,6 +23,7 @@ import {
 } from '@/lib/salesReport/sheetSchema';
 import { ensureMonthlySheet } from '@/lib/salesReport/sheetProvisioner';
 import { writeFactCells, type CellUpdate } from '@/lib/salesReport/writer';
+import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
 
 const WORKER_ID = 'sales-report-cron';
 const TEMPLATE_SHEET_NAME =
@@ -62,6 +63,16 @@ async function main(): Promise<void> {
       sheet: sheetName,
       error: e instanceof Error ? e.message : String(e),
     });
+    await sendWorkerAlert({
+      workerId: WORKER_ID,
+      subject: `нет листа «${sheetName}», автосоздание не удалось`,
+      error: e,
+      context: {
+        spreadsheet_id: spreadsheetId,
+        template: TEMPLATE_SHEET_NAME,
+        action: `Добавьте вручную лист «${sheetName}» (копия «${TEMPLATE_SHEET_NAME}»)`,
+      },
+    });
     process.exit(2);
     return;
   }
@@ -73,6 +84,12 @@ async function main(): Promise<void> {
     log('error', 'cannot load sheet schema after ensuring the tab exists', {
       sheet: sheetName,
       error: e instanceof Error ? e.message : String(e),
+    });
+    await sendWorkerAlert({
+      workerId: WORKER_ID,
+      subject: `не могу прочитать структуру листа «${sheetName}»`,
+      error: e,
+      context: { spreadsheet_id: spreadsheetId },
     });
     process.exit(3);
     return;
@@ -110,7 +127,12 @@ async function main(): Promise<void> {
   log('info', 'done', { cells_written: updates.length });
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error('[worker][sales-report-cron][FATAL]', err);
+  await sendWorkerAlert({
+    workerId: WORKER_ID,
+    subject: 'fatal (main crashed)',
+    error: err,
+  });
   process.exit(1);
 });
