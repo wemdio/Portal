@@ -10,11 +10,14 @@ import type { UserRole } from '@/types';
 
 export const REVIEW_TEXT_MAX_LENGTH = 5000;
 export const REVIEW_REASON_MAX_LENGTH = 500;
+export const REVIEW_CANDIDATE_NAME_MAX_LENGTH = 200;
 
 export type ReviewStatus = 'scheduled' | 'completed';
 
 export const REVIEW_PROJECTION =
-  'id, review_date, employee_user_id, reviewer_user_id, status, reason, outcomes, problems, recommendations, created_at, updated_at';
+  'id, review_date, employee_user_id, candidate_name, reviewer_user_id, status, reason, outcomes, problems, recommendations, created_at, updated_at';
+
+const PROFILE_PROJECTION = 'id, full_name, email, role, avatar_url, is_demo';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -42,7 +45,8 @@ export type ProfileRow = {
 export type EmployeeReviewRow = {
   id: string;
   review_date: string;
-  employee_user_id: string;
+  employee_user_id: string | null;
+  candidate_name: string | null;
   reviewer_user_id: string | null;
   status: ReviewStatus | null;
   reason: string | null;
@@ -55,7 +59,8 @@ export type EmployeeReviewRow = {
 
 export type ReviewInput = {
   review_date?: string;
-  employee_user_id?: string;
+  employee_user_id?: string | null;
+  candidate_name?: string | null;
   status?: ReviewStatus;
   reason?: string | null;
   outcomes?: string | null;
@@ -208,6 +213,17 @@ function parseOptionalText(
   return { value: normalized || null };
 }
 
+function validateReviewSubject(
+  employeeUserId: string | null | undefined,
+  candidateName: string | null | undefined,
+): string | null {
+  const hasEmployee = typeof employeeUserId === 'string' && employeeUserId.length > 0;
+  const hasCandidate = typeof candidateName === 'string' && candidateName.length > 0;
+  return hasEmployee === hasCandidate
+    ? 'Exactly one of employeeUserId or candidateName is required'
+    : null;
+}
+
 export function parseReviewInput(
   value: unknown,
   options: { partial: boolean },
@@ -228,14 +244,36 @@ export function parseReviewInput(
   }
 
   const employeeUserId = pickValue(body, 'employeeUserId', 'employee_user_id');
-  if (!options.partial || employeeUserId.present) {
-    if (
+  if (employeeUserId.present) {
+    if (employeeUserId.value === null) {
+      result.employee_user_id = null;
+    } else if (
       typeof employeeUserId.value !== 'string'
       || !UUID_RE.test(employeeUserId.value)
     ) {
       return { error: 'employeeUserId must be a valid UUID' };
+    } else {
+      result.employee_user_id = employeeUserId.value;
     }
-    result.employee_user_id = employeeUserId.value;
+  }
+
+  const candidateName = pickValue(body, 'candidateName', 'candidate_name');
+  if (candidateName.present) {
+    const parsed = parseOptionalText(
+      candidateName.value,
+      'candidateName',
+      REVIEW_CANDIDATE_NAME_MAX_LENGTH,
+    );
+    if ('error' in parsed) return parsed;
+    result.candidate_name = parsed.value;
+  }
+
+  if (!options.partial) {
+    const subjectError = validateReviewSubject(
+      result.employee_user_id,
+      result.candidate_name,
+    );
+    if (subjectError) return { error: subjectError };
   }
 
   const reason = pickValue(body, 'reason', 'reason');
@@ -302,6 +340,18 @@ export function validateReviewUpdate(
   existing: EmployeeReviewRow,
   patch: ReviewInput,
 ): string | null {
+  const nextEmployeeUserId = hasOwn(patch, 'employee_user_id')
+    ? patch.employee_user_id ?? null
+    : existing.employee_user_id;
+  const nextCandidateName = hasOwn(patch, 'candidate_name')
+    ? patch.candidate_name ?? null
+    : existing.candidate_name;
+  const subjectError = validateReviewSubject(
+    nextEmployeeUserId,
+    nextCandidateName,
+  );
+  if (subjectError) return subjectError;
+
   const currentStatus = normalizeReviewStatus(existing.status);
   const nextStatus = patch.status ?? currentStatus;
 
@@ -370,13 +420,43 @@ export async function loadInternalProfiles(): Promise<
 
   const { data, error } = await supabaseAdmin
     .from('profiles')
-    .select('id, full_name, email, role, avatar_url, is_demo')
+    .select(PROFILE_PROJECTION)
     .in('role', INTERNAL_ROLES)
     .eq('is_demo', false)
     .order('full_name', { ascending: true });
 
   if (error) return { error: jsonError('Failed to load employees', 500) };
   return { profiles: (data ?? []) as ProfileRow[] };
+}
+
+export async function loadReviewProfiles(
+  reviews: EmployeeReviewRow[],
+  knownProfiles: ProfileRow[],
+): Promise<{ profilesById: Map<string, ProfileRow> } | { error: JsonError }> {
+  const profilesById = new Map(
+    knownProfiles.map((profile) => [profile.id, profile]),
+  );
+  const referencedIds = new Set<string>();
+  for (const review of reviews) {
+    if (review.employee_user_id) referencedIds.add(review.employee_user_id);
+    if (review.reviewer_user_id) referencedIds.add(review.reviewer_user_id);
+  }
+  const missingIds = Array.from(referencedIds).filter(
+    (profileId) => !profilesById.has(profileId),
+  );
+  if (missingIds.length === 0) return { profilesById };
+  if (!supabaseAdmin) return { error: jsonError('Server misconfigured', 500) };
+
+  const { data, error } = await supabaseAdmin
+    .from('profiles')
+    .select(PROFILE_PROJECTION)
+    .in('id', missingIds);
+
+  if (error) return { error: jsonError('Failed to load review profiles', 500) };
+  for (const profile of (data ?? []) as ProfileRow[]) {
+    profilesById.set(profile.id, profile);
+  }
+  return { profilesById };
 }
 
 export function profileToApi(profile: ProfileRow) {
@@ -393,7 +473,9 @@ export function reviewToApi(
   review: EmployeeReviewRow,
   profilesById: Map<string, ProfileRow>,
 ) {
-  const employee = profilesById.get(review.employee_user_id);
+  const employee = review.employee_user_id
+    ? profilesById.get(review.employee_user_id)
+    : null;
   const reviewer = review.reviewer_user_id
     ? profilesById.get(review.reviewer_user_id)
     : null;
@@ -402,6 +484,7 @@ export function reviewToApi(
     id: review.id,
     reviewDate: review.review_date,
     employee: employee ? profileToApi(employee) : null,
+    candidateName: review.candidate_name?.trim() || null,
     reviewer: reviewer ? profileToApi(reviewer) : null,
     status: normalizeReviewStatus(review.status),
     reason: review.reason ?? null,

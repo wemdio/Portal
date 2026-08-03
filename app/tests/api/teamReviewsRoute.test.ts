@@ -11,8 +11,11 @@ const DEMO_LEAD_ID = '00000000-0000-4000-8000-000000000005';
 const UNKNOWN_ROLE_ID = '00000000-0000-4000-8000-000000000006';
 const REVIEW_ID = '00000000-0000-4000-8000-000000000010';
 const SCHEDULED_REVIEW_ID = '00000000-0000-4000-8000-000000000012';
+const CANDIDATE_REVIEW_ID = '00000000-0000-4000-8000-000000000013';
+const FORMER_EMPLOYEE_REVIEW_ID = '00000000-0000-4000-8000-000000000014';
 const REVIEW_UPDATED_AT = '2026-07-24T12:00:00.000Z';
 const SCHEDULED_REVIEW_UPDATED_AT = '2026-07-31T12:00:00.000Z';
+const CANDIDATE_REVIEW_UPDATED_AT = '2026-08-01T12:00:00.000Z';
 
 let mockMainDb: MockSupabaseClient = createMockSupabase();
 let mockCurrentUser: { id: string } | null = { id: LEAD_ID };
@@ -108,6 +111,34 @@ function seedDatabase() {
           created_at: '2026-07-31T12:00:00.000Z',
           updated_at: SCHEDULED_REVIEW_UPDATED_AT,
         },
+        {
+          id: CANDIDATE_REVIEW_ID,
+          review_date: '2026-08-18',
+          employee_user_id: null,
+          candidate_name: 'Alex Candidate',
+          reviewer_user_id: LEAD_ID,
+          status: 'scheduled',
+          reason: 'Account Executive / final interview / https://example.com/cv',
+          outcomes: null,
+          problems: null,
+          recommendations: null,
+          created_at: '2026-08-01T12:00:00.000Z',
+          updated_at: CANDIDATE_REVIEW_UPDATED_AT,
+        },
+        {
+          id: FORMER_EMPLOYEE_REVIEW_ID,
+          review_date: '2026-07-15',
+          employee_user_id: CLIENT_ID,
+          candidate_name: null,
+          reviewer_user_id: LEAD_ID,
+          status: 'completed',
+          reason: 'Историческая запись до смены роли профиля',
+          outcomes: 'Ревью завершено',
+          problems: null,
+          recommendations: null,
+          created_at: '2026-07-15T12:00:00.000Z',
+          updated_at: '2026-07-15T12:00:00.000Z',
+        },
       ],
     },
   });
@@ -184,6 +215,7 @@ describe('GET /api/team/reviews', () => {
             role: 'technician',
             avatarUrl: 'anna.png',
           },
+          candidateName: null,
           reviewer: {
             id: LEAD_ID,
             name: 'Лид Команды',
@@ -215,6 +247,24 @@ describe('GET /api/team/reviews', () => {
           outcomes: null,
           problems: null,
           recommendations: null,
+        }),
+        expect.objectContaining({
+          id: CANDIDATE_REVIEW_ID,
+          reviewDate: '2026-08-18',
+          employee: null,
+          candidateName: 'Alex Candidate',
+          reviewer: expect.objectContaining({ id: LEAD_ID }),
+          status: 'scheduled',
+          reason: 'Account Executive / final interview / https://example.com/cv',
+        }),
+        expect.objectContaining({
+          id: FORMER_EMPLOYEE_REVIEW_ID,
+          employee: expect.objectContaining({
+            id: CLIENT_ID,
+            name: 'Клиент',
+            role: 'client',
+          }),
+          candidateName: null,
         }),
       ]),
     );
@@ -358,6 +408,75 @@ describe('POST /api/team/reviews', () => {
       }),
       expect.objectContaining({ userId: LEAD_ID }),
     );
+  });
+
+  it('schedules a candidate review without creating or validating a profile', async () => {
+    const { POST } = await import('@/app/api/team/reviews/route');
+
+    const response = await POST(
+      request('/api/team/reviews', {
+        method: 'POST',
+        body: {
+          reviewDate: '2026-08-20',
+          employeeUserId: null,
+          candidateName: '  Dana Candidate  ',
+          reason: '  Product vacancy / screening / https://example.com/dana  ',
+        },
+      }),
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(mockMainDb.inserts).toContainEqual({
+      table: 'employee_reviews',
+      rows: [
+        expect.objectContaining({
+          review_date: '2026-08-20',
+          employee_user_id: null,
+          candidate_name: 'Dana Candidate',
+          reviewer_user_id: LEAD_ID,
+          status: 'scheduled',
+          reason: 'Product vacancy / screening / https://example.com/dana',
+        }),
+      ],
+    });
+    expect(body.review).toEqual(expect.objectContaining({
+      reviewDate: '2026-08-20',
+      employee: null,
+      candidateName: 'Dana Candidate',
+      status: 'scheduled',
+      reason: 'Product vacancy / screening / https://example.com/dana',
+    }));
+  });
+
+  it.each([
+    [
+      'neither employee nor candidate',
+      { reviewDate: '2026-08-20', employeeUserId: null, candidateName: null },
+    ],
+    [
+      'both employee and candidate',
+      { reviewDate: '2026-08-20', employeeUserId: EMPLOYEE_ID, candidateName: 'Dana Candidate' },
+    ],
+    [
+      'blank candidate name',
+      { reviewDate: '2026-08-20', employeeUserId: null, candidateName: '   ' },
+    ],
+    [
+      'candidate name over 200 characters',
+      { reviewDate: '2026-08-20', employeeUserId: null, candidateName: 'x'.repeat(201) },
+    ],
+  ])('rejects a candidate schedule with %s', async (_case, payload) => {
+    const { POST } = await import('@/app/api/team/reviews/route');
+
+    const response = await POST(
+      request('/api/team/reviews', { method: 'POST', body: payload }),
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error).toEqual(expect.stringContaining('candidateName'));
+    expect(mockMainDb.inserts).toHaveLength(0);
   });
 
   it('keeps legacy completion fields and creates the review as completed', async () => {
@@ -565,6 +684,138 @@ describe('PATCH /api/team/reviews/[id]', () => {
     expect(mockMainDb.updates.at(-1)?.patch).not.toHaveProperty('expected_updated_at');
   });
 
+  it('edits a candidate name and comment while retaining the updated_at CAS guard', async () => {
+    const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
+
+    const response = await PATCH(
+      request(`/api/team/reviews/${CANDIDATE_REVIEW_ID}`, {
+        method: 'PATCH',
+        body: {
+          expectedUpdatedAt: CANDIDATE_REVIEW_UPDATED_AT,
+          employeeUserId: null,
+          candidateName: '  Alexandra Candidate  ',
+          reason: '  Account Executive / offer / https://example.com/offer  ',
+        },
+      }),
+      { params: Promise.resolve({ id: CANDIDATE_REVIEW_ID }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mockMainDb.getRows('employee_reviews')).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: CANDIDATE_REVIEW_ID,
+        employee_user_id: null,
+        candidate_name: 'Alexandra Candidate',
+        reason: 'Account Executive / offer / https://example.com/offer',
+      }),
+    ]));
+    expect(body.review).toEqual(expect.objectContaining({
+      id: CANDIDATE_REVIEW_ID,
+      employee: null,
+      candidateName: 'Alexandra Candidate',
+      reason: 'Account Executive / offer / https://example.com/offer',
+    }));
+    expect(mockMainDb.updates.at(-1)?.filters).toEqual(expect.arrayContaining([
+      { column: 'id', op: 'eq', value: CANDIDATE_REVIEW_ID },
+      { column: 'updated_at', op: 'eq', value: CANDIDATE_REVIEW_UPDATED_AT },
+    ]));
+  });
+
+  it('keeps a historical employee review editable after the profile role changes', async () => {
+    const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
+
+    const response = await PATCH(
+      request(`/api/team/reviews/${FORMER_EMPLOYEE_REVIEW_ID}`, {
+        method: 'PATCH',
+        body: {
+          expectedUpdatedAt: '2026-07-15T12:00:00.000Z',
+          employeeUserId: CLIENT_ID,
+          candidateName: null,
+          reason: '  Уточнённый исторический комментарий  ',
+        },
+      }),
+      { params: Promise.resolve({ id: FORMER_EMPLOYEE_REVIEW_ID }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.review).toEqual(expect.objectContaining({
+      id: FORMER_EMPLOYEE_REVIEW_ID,
+      employee: expect.objectContaining({ id: CLIENT_ID, name: 'Клиент' }),
+      candidateName: null,
+      reason: 'Уточнённый исторический комментарий',
+    }));
+  });
+
+  it('switches an employee review to a candidate atomically', async () => {
+    const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
+
+    const response = await PATCH(
+      request(`/api/team/reviews/${SCHEDULED_REVIEW_ID}`, {
+        method: 'PATCH',
+        body: {
+          expectedUpdatedAt: SCHEDULED_REVIEW_UPDATED_AT,
+          employeeUserId: null,
+          candidateName: 'Dana Candidate',
+        },
+      }),
+      { params: Promise.resolve({ id: SCHEDULED_REVIEW_ID }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mockMainDb.getRows('employee_reviews')).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: SCHEDULED_REVIEW_ID,
+        employee_user_id: null,
+        candidate_name: 'Dana Candidate',
+      }),
+    ]));
+    expect(body.review).toEqual(expect.objectContaining({
+      employee: null,
+      candidateName: 'Dana Candidate',
+    }));
+    expect(mockMainDb.updates.at(-1)?.filters).toEqual(expect.arrayContaining([
+      { column: 'id', op: 'eq', value: SCHEDULED_REVIEW_ID },
+      { column: 'updated_at', op: 'eq', value: SCHEDULED_REVIEW_UPDATED_AT },
+    ]));
+  });
+
+  it('switches a candidate review to a validated employee atomically', async () => {
+    const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
+
+    const response = await PATCH(
+      request(`/api/team/reviews/${CANDIDATE_REVIEW_ID}`, {
+        method: 'PATCH',
+        body: {
+          expectedUpdatedAt: CANDIDATE_REVIEW_UPDATED_AT,
+          employeeUserId: OTHER_EMPLOYEE_ID,
+          candidateName: null,
+        },
+      }),
+      { params: Promise.resolve({ id: CANDIDATE_REVIEW_ID }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mockMainDb.getRows('employee_reviews')).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: CANDIDATE_REVIEW_ID,
+        employee_user_id: OTHER_EMPLOYEE_ID,
+        candidate_name: null,
+      }),
+    ]));
+    expect(body.review).toEqual(expect.objectContaining({
+      employee: expect.objectContaining({ id: OTHER_EMPLOYEE_ID }),
+      candidateName: null,
+    }));
+    expect(mockMainDb.updates.at(-1)?.filters).toEqual(expect.arrayContaining([
+      { column: 'id', op: 'eq', value: CANDIDATE_REVIEW_ID },
+      { column: 'updated_at', op: 'eq', value: CANDIDATE_REVIEW_UPDATED_AT },
+    ]));
+  });
+
   it('completes a scheduled review atomically and exposes it as completed', async () => {
     const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
 
@@ -744,6 +995,43 @@ describe('PATCH /api/team/reviews/[id]', () => {
     expect(mockMainDb.updates).toHaveLength(0);
   });
 
+  it.each([
+    [
+      'both employee and candidate',
+      { employeeUserId: EMPLOYEE_ID, candidateName: 'Dana Candidate' },
+    ],
+    [
+      'neither employee nor candidate',
+      { employeeUserId: null, candidateName: null },
+    ],
+    [
+      'blank candidate name',
+      { employeeUserId: null, candidateName: '   ' },
+    ],
+    [
+      'candidate name over 200 characters',
+      { employeeUserId: null, candidateName: 'x'.repeat(201) },
+    ],
+  ])('rejects a candidate identity update with %s', async (_case, identity) => {
+    const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
+
+    const response = await PATCH(
+      request(`/api/team/reviews/${SCHEDULED_REVIEW_ID}`, {
+        method: 'PATCH',
+        body: {
+          expectedUpdatedAt: SCHEDULED_REVIEW_UPDATED_AT,
+          ...identity,
+        },
+      }),
+      { params: Promise.resolve({ id: SCHEDULED_REVIEW_ID }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error).toEqual(expect.stringContaining('candidateName'));
+    expect(mockMainDb.updates).toHaveLength(0);
+  });
+
   it('allows only leadership to update reviews', async () => {
     mockCurrentUser = { id: EMPLOYEE_ID };
     const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
@@ -786,6 +1074,32 @@ describe('PATCH /api/team/reviews/[id]', () => {
     expect(
       mockLogAudit.mock.calls.some(([event]) => event === 'team.reviews.update.success'),
     ).toBe(false);
+  });
+
+  it('rejects a stale candidate update without bypassing the CAS guard', async () => {
+    const before = mockMainDb.getRows('employee_reviews');
+    const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
+
+    const response = await PATCH(
+      request(`/api/team/reviews/${CANDIDATE_REVIEW_ID}`, {
+        method: 'PATCH',
+        body: {
+          expectedUpdatedAt: '2026-08-01T11:59:59.000Z',
+          employeeUserId: null,
+          candidateName: 'Stale Candidate Name',
+        },
+      }),
+      { params: Promise.resolve({ id: CANDIDATE_REVIEW_ID }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(body).toEqual(expect.objectContaining({
+      code: 'review_conflict',
+      currentUpdatedAt: CANDIDATE_REVIEW_UPDATED_AT,
+    }));
+    expect(mockMainDb.getRows('employee_reviews')).toEqual(before);
+    expect(mockMainDb.updates).toHaveLength(0);
   });
 
   it('detects a write race after the preliminary read and reports the newest timestamp', async () => {
