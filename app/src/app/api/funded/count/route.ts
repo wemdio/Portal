@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { applyFundedFilters } from '@/lib/funded/queryFilters';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,16 +35,16 @@ export async function GET(req: NextRequest) {
   const fundedSince = (sp.get('funded_since') ?? '').trim() || null;
   const name = (sp.get('name') ?? '').trim();
 
-  const { data, error } = await supabase.rpc('funded_count_estimate', {
-    p_source: source.length ? source : null,
-    p_country: country.length ? country : null,
-    p_industry: industry.length ? industry : null,
-    p_stage: stage.length ? stage : null,
-    p_has_funding: hasFunding || minFunding != null || fundedSince != null ? true : null,
-    p_min_funding: minFunding,
-    p_funded_since: fundedSince,
-    p_name: name || null,
-  });
+  // EXACT count(*), same filter chain as /api/funded/search. The table is
+  // small (~40k rows) so a real count is instant — and unlike the retired
+  // planner-estimate RPC it stays correct when filters correlate (e.g.
+  // industry='b2b' (all YC) x funded_since (YC has no funding dates) = 0,
+  // which the estimate misreported as ≈1700).
+  // (cast: the concrete postgrest generic is too deep for tsc; the helper
+  // mutates the builder in place and we await the builder itself)
+  const query = supabase.from('funded_companies').select('*', { count: 'exact', head: true });
+  applyFundedFilters(query as never, { source, country, industry, stage, hasFunding, minFunding, fundedSince, name });
+  const { count, error } = await query;
   if (error) return jsonError(error.message, 500);
-  return NextResponse.json({ estimate: Number(data ?? 0) });
+  return NextResponse.json({ estimate: count ?? 0, exact: true });
 }

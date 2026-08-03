@@ -6,6 +6,7 @@ import {
   authenticateReviewRequest,
   jsonError,
   loadInternalProfiles,
+  loadReviewProfiles,
   logMeta,
   parseReviewInput,
   parseReviewUpdatePrecondition,
@@ -72,13 +73,6 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
   const parsed = parseReviewInput(body, { partial: true });
   if ('error' in parsed) return jsonError(parsed.error, 400);
 
-  if (parsed.value.employee_user_id) {
-    const employeeValidation = await validateInternalEmployee(
-      parsed.value.employee_user_id,
-    );
-    if ('error' in employeeValidation) return employeeValidation.error;
-  }
-
   const { id } = await context.params;
 
   const { data: existing, error: existingError } = await supabaseAdmin
@@ -97,14 +91,26 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
     return jsonError('Failed to load review', 500);
   }
   if (!existing) return jsonError('Review not found', 404);
+  const existingReview = existing as EmployeeReviewRow;
 
   const expectedUpdatedAt = precondition.value.expectedUpdatedAt;
   if (existing.updated_at !== expectedUpdatedAt) {
     return reviewConflict(existing.updated_at);
   }
 
+  const selectedEmployeeUserId = parsed.value.employee_user_id;
+  if (
+    typeof selectedEmployeeUserId === 'string'
+    && selectedEmployeeUserId !== existingReview.employee_user_id
+  ) {
+    const employeeValidation = await validateInternalEmployee(
+      selectedEmployeeUserId,
+    );
+    if ('error' in employeeValidation) return employeeValidation.error;
+  }
+
   const lifecycleError = validateReviewUpdate(
-    existing as EmployeeReviewRow,
+    existingReview,
     parsed.value,
   );
   if (lifecycleError) return jsonError(lifecycleError, 400);
@@ -165,9 +171,11 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
 
   const profileResult = await loadInternalProfiles();
   if ('error' in profileResult) return profileResult.error;
-  const profilesById = new Map(
-    profileResult.profiles.map((profile) => [profile.id, profile]),
+  const reviewProfilesResult = await loadReviewProfiles(
+    [updated as EmployeeReviewRow],
+    profileResult.profiles,
   );
+  if ('error' in reviewProfilesResult) return reviewProfilesResult.error;
 
   await logAudit(
     'team.reviews.update.success',
@@ -180,6 +188,9 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
   );
 
   return NextResponse.json({
-    review: reviewToApi(updated as EmployeeReviewRow, profilesById),
+    review: reviewToApi(
+      updated as EmployeeReviewRow,
+      reviewProfilesResult.profilesById,
+    ),
   });
 }

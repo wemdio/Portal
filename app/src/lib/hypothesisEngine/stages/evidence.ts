@@ -19,6 +19,7 @@ import {
 } from '../schemas';
 import { buildEvidenceMessages } from '../prompts/evidence';
 import type { HeEvidenceItem, HeHypothesisTier, HeJob } from '../types';
+import { loadMarkupHistory, loadPortfolioProfile } from './hypotheses';
 import { resolveFetchText, resolveSearch } from './io';
 import {
   addUsage,
@@ -91,6 +92,13 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
   }
   const allTitles = candidates.map((c) => c.title);
 
+  // Та же калибровка, что и на стадии hypotheses, — best-effort: сбой →
+  // undefined, верификация продолжается. Грузим один раз на всех кандидатов.
+  const [portfolioProfile, markupHistory] = await Promise.all([
+    loadPortfolioProfile(ctx),
+    loadMarkupHistory(ctx, job.project_id),
+  ]);
+
   const accepted: AcceptedHypothesis[] = [];
   let merged = 0;
   let dropped = 0;
@@ -129,8 +137,19 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
 
     // 3) LLM-вердикт. Сбой по одному кандидату → drop с reason='stage_error'.
     try {
+      // Переменная, а не литерал (см. hypotheses.ts): промпт-контракт с полями
+      // portfolioProfile / markupHistory приземляется параллельно.
+      const verdictInput = {
+        candidate,
+        profile,
+        allCandidateTitles: allTitles,
+        sources,
+        searchResults,
+        ...(portfolioProfile ? { portfolioProfile } : {}),
+        ...(markupHistory ? { markupHistory } : {}),
+      };
       const llm = await callLLMWithSchema(
-        buildEvidenceMessages({ candidate, profile, allCandidateTitles: allTitles, sources, searchResults }),
+        buildEvidenceMessages(verdictInput),
         HeEvidenceVerdictSchema,
         { model: getHeModel('research'), maxTokens: 4096 },
       );

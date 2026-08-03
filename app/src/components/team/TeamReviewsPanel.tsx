@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, Pencil, Plus, RefreshCw, Search, X } from 'lucide-react';
-import { ROLE_LABELS } from '@/lib/roles';
+import { isInternalRole, ROLE_LABELS } from '@/lib/roles';
 import type { UserRole } from '@/types';
 import {
   buildTeamReviewCompletionWrite,
@@ -20,10 +20,13 @@ import {
 type ReviewFormPurpose = 'schedule' | 'complete';
 type ReviewFormMode = 'create' | 'edit';
 type ReviewFocusTarget = 'primary' | 'edit';
+type ReviewSubjectType = 'employee' | 'candidate';
 
 interface ReviewFormState {
   reviewDate: string;
+  subjectType: ReviewSubjectType;
   employeeUserId: string;
+  candidateName: string;
   reason: string;
   outcomes: string;
   problems: string;
@@ -40,7 +43,9 @@ interface EditorState {
 
 const EMPTY_FORM: ReviewFormState = {
   reviewDate: '',
+  subjectType: 'employee',
   employeeUserId: '',
+  candidateName: '',
   reason: '',
   outcomes: '',
   problems: '',
@@ -49,7 +54,7 @@ const EMPTY_FORM: ReviewFormState = {
 
 const REVIEW_CONFLICT_MESSAGE = 'Ревью уже изменил другой руководитель. Ваш черновик пока остался в форме. Скопируйте нужные изменения, затем нажмите «Отмена»: мы загрузим актуальную версию.';
 
-const REVIEW_TEXTAREA_CLASS = 'w-full resize-y rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm leading-6 text-gray-900 outline-none placeholder:text-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-100';
+const REVIEW_TEXTAREA_CLASS = 'w-full resize-y rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm leading-6 text-gray-900 outline-none placeholder:text-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60';
 
 function reviewText(value: string | null | undefined): string {
   return value || '';
@@ -66,18 +71,30 @@ function storeReviewButtonRef(
 
 function employeeRole(employee: TeamReviewEmployee): string {
   const role = employee.role as UserRole | null;
-  return role && role in ROLE_LABELS ? ROLE_LABELS[role] : employee.role || 'Сотрудник';
+  return role && isInternalRole(role) && role in ROLE_LABELS
+    ? ROLE_LABELS[role]
+    : 'Сотрудник';
 }
 
-function EmployeeAvatar({ employee }: { employee: TeamReviewEmployee }) {
+function reviewSubjectName(review: TeamReview): string {
+  return review.employee?.name || review.candidateName || 'Без имени';
+}
+
+function reviewSubjectLabel(review: TeamReview): string {
+  return review.employee ? employeeRole(review.employee) : 'Кандидат';
+}
+
+function ReviewAvatar({ review }: { review: TeamReview }) {
   const [failed, setFailed] = useState(false);
-  const initial = employee.name.trim().charAt(0).toUpperCase() || '?';
+  const name = reviewSubjectName(review);
+  const avatarUrl = review.employee?.avatarUrl || null;
+  const initial = name.trim().charAt(0).toUpperCase() || '?';
   return (
     <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full border border-gray-200 bg-gray-100 text-sm font-semibold text-gray-600">
-      {employee.avatarUrl && !failed ? (
+      {avatarUrl && !failed ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={employee.avatarUrl}
+          src={avatarUrl}
           alt=""
           className="h-full w-full object-cover"
           loading="lazy"
@@ -121,8 +138,15 @@ function ReviewForm({
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!values.reviewDate || !values.employeeUserId) {
+    if (
+      !values.reviewDate
+      || (values.subjectType === 'employee' && !values.employeeUserId)
+    ) {
       setValidationError('Укажите дату и сотрудника.');
+      return;
+    }
+    if (values.subjectType === 'candidate' && !values.candidateName.trim()) {
+      setValidationError('Укажите дату и имя кандидата.');
       return;
     }
     if (completing && !values.outcomes.trim()) {
@@ -139,6 +163,28 @@ function ReviewForm({
 
   return (
     <form onSubmit={submit} className="space-y-5" aria-label={formLabel}>
+      <fieldset disabled={saving}>
+        <legend className="mb-1.5 block text-sm font-medium text-gray-700">Тип ревью</legend>
+        <div className="flex flex-wrap gap-x-5 gap-y-2">
+          {([
+            ['employee', 'Сотрудник'],
+            ['candidate', 'Кандидат'],
+          ] as const).map(([value, label]) => (
+            <label key={value} className="inline-flex min-h-11 cursor-pointer items-center gap-2 text-sm font-medium text-gray-700">
+              <input
+                type="radio"
+                name="review-subject-type"
+                value={value}
+                checked={values.subjectType === value}
+                onChange={() => update('subjectType', value)}
+                className="h-4 w-4 accent-blue-600 outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
       <div className="grid gap-4 lg:grid-cols-2">
         <label className="block">
           <span className="mb-1.5 block text-sm font-medium text-gray-700">Дата ревью</span>
@@ -147,38 +193,59 @@ function ReviewForm({
             autoFocus={!completing}
             value={values.reviewDate}
             onChange={(event) => update('reviewDate', event.target.value)}
+            disabled={saving}
             required
-            className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
           />
         </label>
-        <label className="block">
-          <span className="mb-1.5 block text-sm font-medium text-gray-700">Сотрудник</span>
-          <select
-            value={values.employeeUserId}
-            onChange={(event) => update('employeeUserId', event.target.value)}
-            required
-            className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-          >
-            <option value="">Выберите сотрудника</option>
-            {employees.map((employee) => (
-              <option key={employee.id} value={employee.id}>
-                {employee.name}{employee.email ? `, ${employee.email}` : ''}
-              </option>
-            ))}
-          </select>
-        </label>
+        {values.subjectType === 'employee' ? (
+          <label className="block">
+            <span className="mb-1.5 block text-sm font-medium text-gray-700">Сотрудник</span>
+            <select
+              value={values.employeeUserId}
+              onChange={(event) => update('employeeUserId', event.target.value)}
+              disabled={saving}
+              required
+              className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <option value="">Выберите сотрудника</option>
+              {employees.map((employee) => (
+                <option key={employee.id} value={employee.id}>
+                  {employee.name}{employee.email ? `, ${employee.email}` : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <label className="block">
+            <span className="mb-1.5 block text-sm font-medium text-gray-700">Имя кандидата</span>
+            <input
+              type="text"
+              value={values.candidateName}
+              onChange={(event) => update('candidateName', event.target.value)}
+              disabled={saving}
+              required
+              maxLength={200}
+              autoComplete="off"
+              className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-900 outline-none placeholder:text-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+            />
+          </label>
+        )}
       </div>
 
       <label className="block">
         <span className="mb-1.5 block text-sm font-medium text-gray-700">
-          Причина / повестка <span className="font-normal text-gray-500">(необязательно)</span>
+          Комментарий <span className="font-normal text-gray-500">(необязательно)</span>
         </span>
         <textarea
           value={values.reason}
           onChange={(event) => update('reason', event.target.value)}
+          disabled={saving}
           rows={2}
           maxLength={500}
-          placeholder="Что важно обсудить на встрече"
+          placeholder={values.subjectType === 'candidate'
+            ? 'Вакансия, этап, ссылка на резюме или другой контекст'
+            : 'Что важно обсудить на встрече'}
           className={REVIEW_TEXTAREA_CLASS}
         />
       </label>
@@ -191,6 +258,7 @@ function ReviewForm({
               autoFocus={completing}
               value={values.outcomes}
               onChange={(event) => update('outcomes', event.target.value)}
+              disabled={saving}
               required
               rows={4}
               maxLength={5000}
@@ -205,6 +273,7 @@ function ReviewForm({
               <textarea
                 value={values.problems}
                 onChange={(event) => update('problems', event.target.value)}
+                disabled={saving}
                 rows={4}
                 maxLength={5000}
                 placeholder="Что мешает работе или требует поддержки"
@@ -216,6 +285,7 @@ function ReviewForm({
               <textarea
                 value={values.recommendations}
                 onChange={(event) => update('recommendations', event.target.value)}
+                disabled={saving}
                 rows={4}
                 maxLength={5000}
                 placeholder="Следующие шаги, поддержка и договорённости"
@@ -285,16 +355,17 @@ function ReviewStatusBadge({ review, today }: { review: TeamReview; today: strin
 function ReviewSummary({ review, today }: { review: TeamReview; today: string }) {
   const isScheduled = review.status === 'scheduled';
   const summary = isScheduled ? reviewText(review.reason) : reviewText(review.outcomes);
+  const subjectName = reviewSubjectName(review);
   return (
     <>
-      <EmployeeAvatar employee={review.employee} />
+      <ReviewAvatar review={review} />
       <span className="min-w-0 flex-1">
         <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span className="truncate text-sm font-semibold text-gray-900">{review.employee.name}</span>
-          <span className="text-xs text-gray-500">{employeeRole(review.employee)}</span>
+          <span className="truncate text-sm font-semibold text-gray-900">{subjectName}</span>
+          <span className="text-xs text-gray-500">{reviewSubjectLabel(review)}</span>
         </span>
         <span className={`mt-0.5 block truncate text-sm ${summary ? 'text-gray-600' : 'text-gray-500'}`}>
-          {summary || (isScheduled ? 'Причина не указана' : 'Итоги не указаны')}
+          {summary || (isScheduled ? 'Комментарий не указан' : 'Итоги не указаны')}
         </span>
         <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 sm:hidden">
           <span className="text-xs font-medium text-gray-500">{formatRussianDate(review.reviewDate)}</span>
@@ -352,9 +423,14 @@ function ReviewRow({
 }) {
   const scheduled = review.status === 'scheduled';
   const regionId = `team-review-${review.id}`;
+  const subjectName = reviewSubjectName(review);
+  const formEmployees = review.employee
+    && !employees.some((employee) => employee.id === review.employee?.id)
+    ? [review.employee, ...employees]
+    : employees;
   const editLabel = scheduled
-    ? `Редактировать запланированное ревью ${review.employee.name}`
-    : `Редактировать ревью ${review.employee.name}`;
+    ? `Редактировать запланированное ревью ${subjectName}`
+    : `Редактировать ревью ${subjectName}`;
 
   const editButton = canManage && (
     <button
@@ -418,10 +494,12 @@ function ReviewRow({
         <div className="border-t border-gray-100 bg-gray-50/60 px-4 py-5 sm:px-6">
           <ReviewForm
             key={`${review.id}:${editorPurpose}`}
-            employees={employees}
+            employees={formEmployees}
             initial={{
               reviewDate: review.reviewDate.slice(0, 10),
-              employeeUserId: review.employee.id,
+              subjectType: review.employee ? 'employee' : 'candidate',
+              employeeUserId: review.employee?.id || '',
+              candidateName: review.candidateName || '',
               reason: reviewText(review.reason),
               outcomes: reviewText(review.outcomes),
               problems: reviewText(review.problems),
@@ -441,7 +519,7 @@ function ReviewRow({
         <div id={regionId} className="border-t border-gray-100 bg-gray-50/60 px-4 py-5 sm:px-6">
           {review.reason && (
             <div className="mb-5">
-              <ReviewSection title="Повестка" text={review.reason} />
+              <ReviewSection title="Комментарий" text={review.reason} />
             </div>
           )}
           <div className="grid gap-5 lg:grid-cols-3">
@@ -516,7 +594,7 @@ export default function TeamReviewsPanel() {
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState('');
-  const [employeeFilter, setEmployeeFilter] = useState('all');
+  const [participantFilter, setParticipantFilter] = useState('all');
   const [yearFilter, setYearFilter] = useState('all');
   const [requestVersion, setRequestVersion] = useState(0);
   const createButtonRef = useRef<HTMLButtonElement>(null);
@@ -573,19 +651,24 @@ export default function TeamReviewsPanel() {
   const filteredReviews = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase('ru-RU');
     return (data?.reviews || []).filter((review) => {
-      if (employeeFilter !== 'all' && review.employee.id !== employeeFilter) return false;
+      if (participantFilter === 'candidates' && review.employee) return false;
+      if (participantFilter === 'employees' && !review.employee) return false;
+      if (
+        !['all', 'candidates', 'employees'].includes(participantFilter)
+        && review.employee?.id !== participantFilter
+      ) return false;
       if (yearFilter !== 'all' && review.reviewDate.slice(0, 4) !== yearFilter) return false;
       if (!normalizedQuery) return true;
       return [
-        review.employee.name,
-        review.employee.email || '',
+        reviewSubjectName(review),
+        review.employee?.email || '',
         reviewText(review.reason),
         reviewText(review.outcomes),
         reviewText(review.problems),
         reviewText(review.recommendations),
       ].some((value) => value.toLocaleLowerCase('ru-RU').includes(normalizedQuery));
     });
-  }, [data?.reviews, employeeFilter, query, yearFilter]);
+  }, [data?.reviews, participantFilter, query, yearFilter]);
 
   const scheduledReviews = useMemo(() => filteredReviews
     .filter((review) => review.status === 'scheduled')
@@ -597,7 +680,7 @@ export default function TeamReviewsPanel() {
 
   const totalScheduled = data?.reviews.filter((review) => review.status === 'scheduled').length || 0;
   const totalCompleted = (data?.reviews.length || 0) - totalScheduled;
-  const filtersActive = Boolean(query.trim() || employeeFilter !== 'all' || yearFilter !== 'all');
+  const filtersActive = Boolean(query.trim() || participantFilter !== 'all' || yearFilter !== 'all');
 
   const submitReview = async (
     values: ReviewFormState,
@@ -608,11 +691,19 @@ export default function TeamReviewsPanel() {
   ) => {
     setSaving(true);
     setActionError('');
-    const schedule = buildTeamReviewScheduleWrite({
-      reviewDate: values.reviewDate,
-      employeeUserId: values.employeeUserId,
-      reason: values.reason,
-    });
+    const schedule = values.subjectType === 'candidate'
+      ? buildTeamReviewScheduleWrite({
+          subjectType: 'candidate',
+          reviewDate: values.reviewDate,
+          candidateName: values.candidateName,
+          reason: values.reason,
+        })
+      : buildTeamReviewScheduleWrite({
+          subjectType: 'employee',
+          reviewDate: values.reviewDate,
+          employeeUserId: values.employeeUserId,
+          reason: values.reason,
+        });
     const body = purpose === 'schedule'
       ? schedule
       : {
@@ -624,7 +715,12 @@ export default function TeamReviewsPanel() {
           }),
         };
     const requestBody = reviewId
-      ? { ...body, expectedUpdatedAt }
+      ? {
+          ...body,
+          employeeUserId: values.subjectType === 'employee' ? values.employeeUserId : null,
+          candidateName: values.subjectType === 'candidate' ? values.candidateName.trim() : null,
+          expectedUpdatedAt,
+        }
       : body;
     let saved = false;
     try {
@@ -748,8 +844,8 @@ export default function TeamReviewsPanel() {
       >
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h2 id="team-reviews-title" className="text-xl font-bold tracking-tight text-gray-900">Ревью сотрудников</h2>
-          <p className="mt-1 text-sm text-gray-500">Запланируйте встречу заранее, а после неё сохраните итоги и договорённости.</p>
+          <h2 id="team-reviews-title" className="text-xl font-bold tracking-tight text-gray-900">Ревью</h2>
+          <p className="mt-1 text-sm text-gray-500">Планируйте ревью сотрудников и кандидатов, затем сохраняйте итоги и договорённости.</p>
         </div>
         {data?.canManage && !creating && (
           <button
@@ -774,7 +870,7 @@ export default function TeamReviewsPanel() {
           <div className="mb-5 flex items-center justify-between gap-3">
             <div>
               <h3 className="text-base font-bold text-gray-900">Запланировать ревью</h3>
-              <p className="mt-0.5 text-sm text-gray-500">Сейчас достаточно даты и сотрудника. Причину можно добавить, если нужна повестка.</p>
+              <p className="mt-0.5 text-sm text-gray-500">Выберите сотрудника или укажите имя кандидата. Остальной контекст можно оставить в комментарии.</p>
             </div>
             <button
               type="button"
@@ -831,18 +927,20 @@ export default function TeamReviewsPanel() {
             type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Поиск по сотруднику, причине или итогам"
+            placeholder="Поиск по имени, комментарию или итогам"
             className="h-11 w-full rounded-xl border border-gray-200 bg-white pl-9 pr-3 text-sm text-gray-900 outline-none placeholder:text-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
           />
         </label>
         <label>
-          <span className="sr-only">Сотрудник</span>
+          <span className="sr-only">Фильтр по участнику</span>
           <select
-            value={employeeFilter}
-            onChange={(event) => setEmployeeFilter(event.target.value)}
+            value={participantFilter}
+            onChange={(event) => setParticipantFilter(event.target.value)}
             className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
           >
-            <option value="all">Все сотрудники</option>
+            <option value="all">Все ревью</option>
+            <option value="employees">Все сотрудники</option>
+            <option value="candidates">Кандидаты</option>
             {data?.employees.map((employee) => (
               <option key={employee.id} value={employee.id}>{employee.name}</option>
             ))}
@@ -870,7 +968,7 @@ export default function TeamReviewsPanel() {
             total={totalScheduled}
             emptyTitle={filtersActive ? 'По фильтрам ничего не найдено' : 'Запланированных ревью нет'}
             emptyDescription={filtersActive
-              ? 'Измените сотрудника, год или поисковый запрос.'
+              ? 'Измените участника, год или поисковый запрос.'
               : 'Запланируйте следующую встречу, чтобы она появилась здесь.'}
           >
             {scheduledReviews.map(renderReview)}
@@ -883,7 +981,7 @@ export default function TeamReviewsPanel() {
             total={totalCompleted}
             emptyTitle={filtersActive ? 'По фильтрам ничего не найдено' : 'Проведённых ревью пока нет'}
             emptyDescription={filtersActive
-              ? 'Измените сотрудника, год или поисковый запрос.'
+              ? 'Измените участника, год или поисковый запрос.'
               : 'После заполнения итогов завершённые ревью появятся здесь.'}
           >
             {completedReviews.map(renderReview)}

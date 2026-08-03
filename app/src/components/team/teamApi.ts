@@ -75,7 +75,8 @@ export type TeamReviewStatus = 'scheduled' | 'completed';
 export interface TeamReview {
   id: string;
   reviewDate: string;
-  employee: TeamReviewEmployee;
+  employee: TeamReviewEmployee | null;
+  candidateName: string | null;
   reviewer: TeamReviewEmployee | null;
   status: TeamReviewStatus;
   reason: string | null;
@@ -93,11 +94,34 @@ export interface TeamReviewsResponse {
   currentUserId: string | null;
 }
 
-export interface TeamReviewScheduleWrite {
+interface TeamReviewScheduleInputBase {
   reviewDate: string;
-  employeeUserId: string;
   reason?: string | null;
 }
+
+export type TeamReviewScheduleInput =
+  | (TeamReviewScheduleInputBase & {
+      subjectType: 'employee';
+      employeeUserId: string;
+      candidateName?: never;
+    })
+  | (TeamReviewScheduleInputBase & {
+      subjectType: 'candidate';
+      candidateName: string;
+      employeeUserId?: never;
+    });
+
+export type TeamReviewScheduleWrite =
+  | {
+      reviewDate: string;
+      employeeUserId: string;
+      reason: string | null;
+    }
+  | {
+      reviewDate: string;
+      candidateName: string;
+      reason: string | null;
+    };
 
 export interface TeamReviewCompletionInput {
   outcomes: string;
@@ -118,13 +142,15 @@ function trimmedOrNull(value: string | null | undefined): string | null {
 }
 
 export function buildTeamReviewScheduleWrite(
-  values: TeamReviewScheduleWrite,
-): Required<TeamReviewScheduleWrite> {
-  return {
+  values: TeamReviewScheduleInput,
+): TeamReviewScheduleWrite {
+  const common = {
     reviewDate: values.reviewDate,
-    employeeUserId: values.employeeUserId,
     reason: trimmedOrNull(values.reason),
   };
+  return values.subjectType === 'candidate'
+    ? { ...common, candidateName: values.candidateName.trim() }
+    : { ...common, employeeUserId: values.employeeUserId };
 }
 
 export function buildTeamReviewCompletionWrite(
@@ -276,11 +302,12 @@ function normalizeEmployee(value: unknown): TeamReviewEmployee {
 
 function normalizeReview(value: unknown): TeamReview {
   const review = record(value);
-  const employee = normalizeEmployee(review.employee);
+  const employee = review.employee ? normalizeEmployee(review.employee) : null;
   return {
     id: text(review.id),
     reviewDate: text(review.reviewDate ?? review.review_date),
     employee,
+    candidateName: nullableText(review.candidateName ?? review.candidate_name),
     reviewer: review.reviewer ? normalizeEmployee(review.reviewer) : null,
     status: text(review.status) === 'scheduled' ? 'scheduled' : 'completed',
     reason: nullableText(review.reason),

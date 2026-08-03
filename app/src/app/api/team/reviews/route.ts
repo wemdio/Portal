@@ -8,6 +8,7 @@ import {
   hasReviewResultFields,
   jsonError,
   loadInternalProfiles,
+  loadReviewProfiles,
   logMeta,
   parseReviewInput,
   profileToApi,
@@ -56,10 +57,13 @@ export async function GET(req: NextRequest) {
 
   const profileResult = await loadInternalProfiles();
   if ('error' in profileResult) return profileResult.error;
-
-  const profilesById = new Map(
-    profileResult.profiles.map((profile) => [profile.id, profile]),
+  const reviewProfilesResult = await loadReviewProfiles(
+    reviewsData,
+    profileResult.profiles,
   );
+  if ('error' in reviewProfilesResult) return reviewProfilesResult.error;
+
+  const { profilesById } = reviewProfilesResult;
   const visibleEmployees = profileResult.profiles;
 
   return NextResponse.json({
@@ -94,13 +98,16 @@ export async function POST(req: NextRequest) {
     return jsonError('outcomes is required for completed review', 400);
   }
 
-  const employeeUserId = parsed.value.employee_user_id!;
-  const employeeValidation = await validateInternalEmployee(employeeUserId);
-  if ('error' in employeeValidation) return employeeValidation.error;
+  const employeeUserId = parsed.value.employee_user_id ?? null;
+  if (employeeUserId) {
+    const employeeValidation = await validateInternalEmployee(employeeUserId);
+    if ('error' in employeeValidation) return employeeValidation.error;
+  }
 
   const row = {
     review_date: parsed.value.review_date!,
     employee_user_id: employeeUserId,
+    candidate_name: parsed.value.candidate_name ?? null,
     reviewer_user_id: actor.userId,
     status: completesReview ? 'completed' as const : 'scheduled' as const,
     reason: parsed.value.reason ?? null,
@@ -127,9 +134,11 @@ export async function POST(req: NextRequest) {
 
   const profileResult = await loadInternalProfiles();
   if ('error' in profileResult) return profileResult.error;
-  const profilesById = new Map(
-    profileResult.profiles.map((profile) => [profile.id, profile]),
+  const reviewProfilesResult = await loadReviewProfiles(
+    [data as EmployeeReviewRow],
+    profileResult.profiles,
   );
+  if ('error' in reviewProfilesResult) return reviewProfilesResult.error;
 
   await logAudit(
     'team.reviews.create.success',
@@ -143,7 +152,12 @@ export async function POST(req: NextRequest) {
   );
 
   return NextResponse.json(
-    { review: reviewToApi(data as EmployeeReviewRow, profilesById) },
+    {
+      review: reviewToApi(
+        data as EmployeeReviewRow,
+        reviewProfilesResult.profilesById,
+      ),
+    },
     { status: 201 },
   );
 }
