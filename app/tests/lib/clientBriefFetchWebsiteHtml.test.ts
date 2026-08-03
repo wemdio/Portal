@@ -16,7 +16,7 @@ type FetchCall = { url: string; init?: { headers?: Record<string, string>; redir
  * stateful-сценариев (cookie меняет поведение сервера).
  */
 function makeStatefulFetchMock(
-  responder: (url: string, init?: { headers?: Record<string, string> }) => MockPage,
+  responder: (url: string, headers?: Record<string, string>) => MockPage,
 ): { fetchMock: jest.Mock; calls: FetchCall[] } {
   const calls: FetchCall[] = [];
   const fetchMock = jest.fn(
