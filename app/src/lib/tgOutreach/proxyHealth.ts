@@ -353,34 +353,63 @@ export function canAutoSwap(account: {
 }
 
 /**
- * Зафиксировать «провал прокси у аккаунта». Если consecutive_proxy_failures
- * достиг порога — пометить degraded и поставить cooldown 24ч.
+ * Зафиксировать «провал прокси у аккаунта». Если РАЗНЫХ прокси подряд
+ * провалилось столько же, сколько DEGRADED_PROXY_FAILURE_THRESHOLD —
+ * пометить degraded и поставить cooldown 24ч.
  *
  * Это вызывается из campaignLoop ПОСЛЕ того, как мы попытались свапнуть
  * прокси (или решили не свапать). Совершенно отдельно от per-proxy
  * counters: один и тот же прокси может «отлежаться» и вернуться,
  * но если у аккаунта подряд 3 разных прокси провалились — проблема в
  * аккаунте, не в прокси.
+ *
+ * Ключевой момент — «РАЗНЫХ». Считаем провал только когда провалился прокси,
+ * отличный от прошлого (last_failed_proxy_id). Повторный провал того же IP
+ * счётчик не двигает: это не «ещё один прокси не помог», это один и тот же
+ * плохой прокси моргает второй раз.
+ *
+ * Инцидент 03.08.2026 (кампания TG_VBI). Счётчик инкрементился на ЛЮБОЙ
+ * ошибке, а автосвап на свежих аккаунтах запрещён (ACCOUNT_FRESH_DAYS).
+ * Прокси физически не менялся ни разу, но при фоновом браке пула ~30%
+ * три неудачных круга подряд выпадали по теории вероятностей — и 11 из 17
+ * живых аккаунтов получили degraded с текстом «3 разных прокси не помогли»
+ * и вредным советом перевыпустить session_data. Разбор:
+ * docs/incidents/2026-08-03-tg-outreach-false-degraded.md.
  */
 export async function recordAccountProxyFailure(
   db: SupabaseClient,
   accountId: string,
+  proxyId: string | null,
 ): Promise<{
   consecutiveProxyFailures: number;
   markedDegraded: boolean;
+  counted: boolean;
 }> {
   const { data: row } = await db
     .from('tg_outreach_accounts')
-    .select('consecutive_proxy_failures')
+    .select('consecutive_proxy_failures, last_failed_proxy_id')
     .eq('id', accountId)
     .maybeSingle();
-  const prev = (row as { consecutive_proxy_failures: number | null } | null)?.consecutive_proxy_failures ?? 0;
+  const r = row as {
+    consecutive_proxy_failures: number | null;
+    last_failed_proxy_id: string | null;
+  } | null;
+  const prev = r?.consecutive_proxy_failures ?? 0;
+  const lastFailedProxyId = r?.last_failed_proxy_id ?? null;
+
+  // Нечего атрибутировать (прокси не назначен) или тот же самый прокси упал
+  // повторно — счётчик «разных прокси» не двигаем.
+  if (!proxyId || proxyId === lastFailedProxyId) {
+    return { consecutiveProxyFailures: prev, markedDegraded: false, counted: false };
+  }
+
   const next = prev + 1;
   const shouldDegrade = next >= DEGRADED_PROXY_FAILURE_THRESHOLD;
   const now = new Date();
 
   const patch: Record<string, unknown> = {
     consecutive_proxy_failures: next,
+    last_failed_proxy_id: proxyId,
   };
   if (shouldDegrade) {
     patch.degraded = true;
@@ -390,11 +419,13 @@ export async function recordAccountProxyFailure(
   }
   await db.from('tg_outreach_accounts').update(patch).eq('id', accountId);
 
-  return { consecutiveProxyFailures: next, markedDegraded: shouldDegrade };
+  return { consecutiveProxyFailures: next, markedDegraded: shouldDegrade, counted: true };
 }
 
 /**
  * Зафиксировать успешный круг аккаунта — сбросить consecutive_proxy_failures.
+ * Сбрасываем и last_failed_proxy_id: серия «разных прокси» началась заново,
+ * иначе прокси, упавший до успешного круга, больше никогда не засчитался бы.
  * НЕ снимает degraded автоматически (это всегда ручная операция оператора).
  */
 export async function recordAccountSuccess(
@@ -403,7 +434,7 @@ export async function recordAccountSuccess(
 ): Promise<void> {
   await db
     .from('tg_outreach_accounts')
-    .update({ consecutive_proxy_failures: 0 })
+    .update({ consecutive_proxy_failures: 0, last_failed_proxy_id: null })
     .eq('id', accountId);
 }
 

@@ -28,6 +28,7 @@ import {
   canAutoSwap,
   recordProxyError,
   recordAccountProxyFailure,
+  recordAccountSuccess,
   findFreeProxy,
   CONSECUTIVE_ERROR_THRESHOLD,
   DEGRADED_PROXY_FAILURE_THRESHOLD,
@@ -161,16 +162,26 @@ describe('proxyHealth — recordProxyError', () => {
   });
 });
 
-describe('proxyHealth — recordAccountProxyFailure → degraded', () => {
-  it(`marks account degraded on ${DEGRADED_PROXY_FAILURE_THRESHOLD} consecutive proxy failures`, async () => {
+describe('proxyHealth — recordAccountProxyFailure → degraded (только РАЗНЫЕ прокси)', () => {
+  // Инцидент 03.08.2026 (TG_VBI): на свежих аккаунтах свап запрещён, прокси
+  // всегда один и тот же — но счётчик рос на каждой ошибке и honest 30% брака
+  // пула выбивал degraded «3 разных прокси не помогли» без единого свапа.
+  // Новый контракт: провал засчитывается только если провалился ДРУГОЙ прокси,
+  // чем в прошлый раз (last_failed_proxy_id).
+
+  it(`marks account degraded when the ${DEGRADED_PROXY_FAILURE_THRESHOLD}-th DISTINCT proxy fails`, async () => {
     const { db, rows } = makeMockDb({
       rows: {
         tg_outreach_accounts: [
-          { id: 'a1', consecutive_proxy_failures: DEGRADED_PROXY_FAILURE_THRESHOLD - 1 },
+          {
+            id: 'a1',
+            consecutive_proxy_failures: DEGRADED_PROXY_FAILURE_THRESHOLD - 1,
+            last_failed_proxy_id: 'p2',
+          },
         ],
       },
     });
-    const r = await recordAccountProxyFailure(db as never, 'a1');
+    const r = await recordAccountProxyFailure(db as never, 'a1', 'p3');
     expect(r.markedDegraded).toBe(true);
     expect(r.consecutiveProxyFailures).toBe(DEGRADED_PROXY_FAILURE_THRESHOLD);
     const upd = rows.tg_outreach_accounts?.[0] as Record<string, unknown>;
@@ -181,13 +192,61 @@ describe('proxyHealth — recordAccountProxyFailure → degraded', () => {
     expect(cooldownMs).toBeGreaterThan((DEGRADED_COOLDOWN_HOURS - 1) * 3600 * 1000);
   });
 
-  it('below threshold: increments but does not degrade', async () => {
+  it('repeat failure on the SAME proxy does not increment and never degrades', async () => {
+    // Точный сценарий инцидента: свежий аккаунт, свап запрещён, один прокси
+    // моргает N раз подряд. Счётчик не должен дорасти до порога никогда.
     const { db, rows } = makeMockDb({
-      rows: { tg_outreach_accounts: [{ id: 'a1', consecutive_proxy_failures: 0 }] },
+      rows: {
+        tg_outreach_accounts: [
+          {
+            id: 'a1',
+            consecutive_proxy_failures: DEGRADED_PROXY_FAILURE_THRESHOLD - 1,
+            last_failed_proxy_id: 'p1',
+          },
+        ],
+      },
     });
-    const r = await recordAccountProxyFailure(db as never, 'a1');
+    const r = await recordAccountProxyFailure(db as never, 'a1', 'p1');
     expect(r.markedDegraded).toBe(false);
-    expect(rows.tg_outreach_accounts?.[0].degraded).toBeUndefined();
+    expect(r.consecutiveProxyFailures).toBe(DEGRADED_PROXY_FAILURE_THRESHOLD - 1);
+    const upd = rows.tg_outreach_accounts?.[0] as Record<string, unknown>;
+    expect(upd.degraded).toBeUndefined();
+    expect(upd.consecutive_proxy_failures).toBe(DEGRADED_PROXY_FAILURE_THRESHOLD - 1);
+  });
+
+  it('first failure ever increments to 1 and remembers which proxy failed', async () => {
+    const { db, rows } = makeMockDb({
+      rows: {
+        tg_outreach_accounts: [
+          { id: 'a1', consecutive_proxy_failures: 0, last_failed_proxy_id: null },
+        ],
+      },
+    });
+    const r = await recordAccountProxyFailure(db as never, 'a1', 'p1');
+    expect(r.markedDegraded).toBe(false);
+    expect(r.consecutiveProxyFailures).toBe(1);
+    const upd = rows.tg_outreach_accounts?.[0] as Record<string, unknown>;
+    expect(upd.last_failed_proxy_id).toBe('p1');
+    expect(upd.degraded).toBeUndefined();
+  });
+
+  it('recordAccountSuccess resets both the counter and last_failed_proxy_id', async () => {
+    // Без сброса last_failed_proxy_id повторный провал того же прокси после
+    // успешного круга не засчитался бы вообще — счётчик застрял бы на 0.
+    const { db, rows } = makeMockDb({
+      rows: {
+        tg_outreach_accounts: [
+          { id: 'a1', consecutive_proxy_failures: 2, last_failed_proxy_id: 'p2' },
+        ],
+      },
+    });
+    await recordAccountSuccess(db as never, 'a1');
+    const upd = rows.tg_outreach_accounts?.[0] as Record<string, unknown>;
+    expect(upd.consecutive_proxy_failures).toBe(0);
+    expect(upd.last_failed_proxy_id).toBeNull();
+
+    const r = await recordAccountProxyFailure(db as never, 'a1', 'p2');
+    expect(r.consecutiveProxyFailures).toBe(1);
   });
 });
 
