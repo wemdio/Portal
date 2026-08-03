@@ -43,14 +43,18 @@ export interface HeCollectTask {
  * все поля опциональны, на клиенте читать защитно.
  */
 export interface HeCollectInfo {
+  /** Лимит строк, выбранный при запуске сборки (у старых записей поля нет). */
+  limit?: number | null;
+  /** Гипотезы, выбранные при запуске сборки (у записей до пикера гипотез поля нет). */
+  hypothesis_ids?: string[] | null;
   plan?: { tasks?: HeCollectPlanTask[] } | null;
   tasks?: HeCollectTask[] | null;
 }
 
-/** GET /projects/[id] отдаёт усечённые строки баз (без data/sample_rows). */
+/** GET /projects/[id] отдаёт усечённые строки баз (без тяжёлого data). */
 export type HeBaseSummary = Pick<
   HeBase,
-  'id' | 'vertical_id' | 'filename' | 'row_count' | 'analysis' | 'created_at'
+  'id' | 'vertical_id' | 'filename' | 'row_count' | 'analysis' | 'created_at' | 'columns' | 'sample_rows'
 > & {
   /** Статус разбора + 'collecting' (идёт автосборка; появился вместе с collect-эндпоинтом). */
   status: HeBase['status'] | 'collecting';
@@ -212,10 +216,16 @@ export interface HeBaseCreateResponse {
   error?: string;
 }
 
-/** POST /verticals/[id]/collect → 201 { ok, base } (200, если сборка уже идёт). */
+/**
+ * POST /verticals/[id]/collect → 201 { ok, base } — сборка стартовала;
+ * 200 { ok, existing: true, base } — уже собирается (дедуп), base несёт
+ * collect_info, чтобы UI показал лимит идущей сборки.
+ */
 export interface HeBaseCollectResponse {
   ok?: boolean;
-  base?: { id: string; status: string };
+  /** true на дедуп-ответах (200): повторный запуск не создан, идёт чужая сборка. */
+  existing?: boolean;
+  base?: { id: string; status: string; collect_info?: HeCollectInfo | null };
   error?: string;
 }
 

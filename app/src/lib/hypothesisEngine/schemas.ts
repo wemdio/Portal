@@ -70,7 +70,8 @@ export const HeHypothesisCandidateSchema = z.object({
   description: z.string(),
   /**
    * «Почему это рынок для клиента» (обязательна): цепочка ЛПР сегмента →
-   * его цель → его боль, которую снимает продукт клиента → оффер клиента.
+   * его цель → его боль, которую снимает продукт клиента → оффер клиента →
+   * почему экономика сойдётся (или честный вывод, что под вопросом).
    */
   fit_rationale: z.string().min(1),
   rationale: z.string().default(''),
@@ -272,7 +273,7 @@ export const HeDirectoryFiltersSchema = z
     hasEmail: z.boolean().optional(),
     includeIp: z.boolean().optional(),
   })
-  // Пустой {} — нефильтрованный срез реестра на DIRECTORY_LIMIT строк: запрещаем.
+  // Пустой {} — нефильтрованный срез реестра на весь лимит сбора: запрещаем.
   .refine((f) => Object.values(f).some((v) => v !== undefined), 'укажи хотя бы один фильтр');
 
 export const HeHhQuerySchema = z.object({

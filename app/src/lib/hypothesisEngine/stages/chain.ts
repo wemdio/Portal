@@ -8,8 +8,9 @@
  * Языки: ru/en/pl (job.payload.language).
  * Разметка специалиста (he_hypotheses.status) учитывается через
  * selectPromptHypotheses: rejected исключаются, accepted — первыми.
- * В промпт подмешиваются style_override из брифа (styleExample) и
- * winner-паттерны датасета (best-effort). После генерации — критик-луп:
+ * В промпт подмешиваются style_override из брифа (styleExample),
+ * signature_override (дословная подпись отправителя) и winner-паттерны
+ * датасета (best-effort). После генерации — критик-луп:
  * одна оценка цепочки (только основной вариант A) + максимум один rewrite
  * по её замечаниям; B-варианты после рерайта восстанавливаются из исходных.
  */
@@ -17,7 +18,7 @@
 import { z } from 'zod';
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
-import { callLLMText, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
+import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
 import { buildChainCriticMessages, buildChainMessages, buildChainRewriteMessages } from '../prompts/chain';
 import { getWinnerPatterns, matchSegmentLabels, type HeWinnerPattern } from '../datasetStats';
 import { selectCaseForVertical, type HeCase } from '../caseBank';
@@ -92,6 +93,18 @@ export function extractLetterBVariants(raw: string): LetterBExtraction {
   const letterNums = [
     ...new Set([...raw.matchAll(/---\s*LETTER\s*(\d+)\s*---/gi)].map((m) => Number(m[1]))),
   ].sort((a, b) => a - b);
+
+  // Деградация: основных маркеров ---LETTER N--- нет вообще — модель пометила
+  // ВСЕ блоки как B (случай из прода: вырезание давало пустой текст и
+  // «0 писем после retry»). Тогда трактуем B-маркеры как основные письма:
+  // меняем их на ---LETTER N--- и парсим дальше как обычную цепочку.
+  if (letterNums.length === 0) {
+    return {
+      cleaned: raw.replace(/---\s*LETTER\s*(\d+)\s*B\s*---/gi, '---LETTER $1---'),
+      variants: new Map(),
+    };
+  }
+
   const reindex = new Map<number, number>(letterNums.map((n, i) => [n, i + 1] as [number, number]));
 
   const variants = new Map<number, HeChainLetterVariant>();
@@ -212,10 +225,11 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   const hypotheses = selection.list;
 
   const brief = (project.brief ?? {}) as Record<string, unknown>;
-  // style_override/offer_override попадают в промпт отдельными блоками
-  // (styleExample / offerOverride) — из JSON-снапшота брифа их вырезаем,
-  // чтобы не дублировать длинные тексты в материалах.
-  const { style_override: _s, offer_override: _o, ...briefRest } = brief;
+  // style_override/offer_override/signature_override попадают в промпт
+  // отдельными блоками (styleExample / offerOverride / signatureOverride) —
+  // из JSON-снапшота брифа их вырезаем, чтобы не дублировать длинные тексты
+  // в материалах.
+  const { style_override: _s, offer_override: _o, signature_override: _sig, ...briefRest } = brief;
 
   // Кейс-банк: лучший кейс клиента под вертикаль → главное доказательство
   // цепочки. Best-effort: сбой чтения he_cases не роняет генерацию.
@@ -233,6 +247,11 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // Стиль клиента из брифа (style_override, рядом с offer_override) →
   // styleExample в промпт генерации.
   const styleExample = typeof brief.style_override === 'string' ? brief.style_override : undefined;
+
+  // Подпись отправителя из брифа (signature_override) → signatureOverride в
+  // промпты генерации и рерайта (рерайт иначе может «снять» подпись).
+  const signatureOverride =
+    typeof brief.signature_override === 'string' ? brief.signature_override : undefined;
 
   // Winner-паттерны датасета (best-effort): метки сегментов по терминам
   // вертикали (имя + синонимы), фолбэк хинтов — имя вертикали. Любой сбой →
@@ -265,10 +284,11 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
     clientCase,
     styleExample,
     winnerPatterns,
+    signatureOverride,
   });
 
   const model = getHeModel('chain');
-  let llm = await callLLMText(messages, { model, maxTokens: 6144 });
+  let llm = await callLLMTextWithFallback(messages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
   addUsage(usage, llm);
   let { parsed, letters } = buildChainLetters(llm.text);
 
@@ -279,12 +299,19 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       { role: 'assistant', content: llm.text.slice(0, 2000) },
       { role: 'user', content: RETRY_HINT },
     ];
-    llm = await callLLMText(retryMessages, { model, maxTokens: 6144 });
+    llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
     addUsage(usage, llm);
     ({ parsed, letters } = buildChainLetters(llm.text));
   }
   if (parsed.length < 3) {
-    throw new Error(`Цепочка не распарсилась: ${parsed.length} писем после retry`);
+    // Диагностика в ошибку (пишется в he_jobs.error): начало сырого ответа,
+    // чтобы по проду было видно формат без реплея. Отдельно размечаем отказ
+    // по контентной политике (регулируемые ниши: крипто, финансы и т.п.).
+    const debug = llm.text.replace(/\s+/g, ' ').slice(0, 300);
+    const refusal = llm.finishReason === 'content_filter' || llm.text.length < 20
+      ? ` Модель, похоже, отклонила генерацию по контентной политике (finish=${llm.finishReason ?? 'n/a'}): чувствительная ниша клиента — попробуйте переписать оффер/бриф нейтральнее или другую модель (HE_MODEL_CHAIN/HE_MODEL_CHAIN_FALLBACK).`
+      : '';
+    throw new Error(`Цепочка не распарсилась: ${parsed.length} писем после retry.${refusal} Ответ модели: ${debug}`);
   }
 
   // Критик-луп: одна оценка цепочки той же моделью, что и генерация
@@ -307,7 +334,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
         winnerPatterns,
       }),
       HeChainCritiqueSchema,
-      { model, maxTokens: 2048 },
+      { model, maxTokens: 4096 },
     );
     addUsage(usage, critique);
     // letter_index вне 1..letters.length — галлюцинация критика: отбрасываем
@@ -326,8 +353,9 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
           language,
           styleExample,
           winnerPatterns,
+          signatureOverride,
         }),
-        { model, maxTokens: 6144 },
+        { model, maxTokens: 16384 },
       );
       addUsage(usage, rewrite);
       // Рерайт выводит только основной вариант (---LETTER N B--- блоков в

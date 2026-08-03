@@ -1,4 +1,4 @@
-import { isInternalRole } from '@/lib/roles';
+import { isInternalRole, isLead } from '@/lib/roles';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { UserRole } from '@/types';
 
@@ -14,12 +14,32 @@ import type { UserRole } from '@/types';
  * layer. Reads profiles via the caller's own (RLS-scoped) client — every user can
  * read their own profile row. Fail-closed: missing row / demo flag => false.
  */
-export async function isInternalUser(supabase: SupabaseClient, userId: string): Promise<boolean> {
+type RolePredicate = (role: UserRole | null) => boolean;
+
+async function userMatchesRole(
+  supabase: SupabaseClient,
+  userId: string,
+  predicate: RolePredicate,
+): Promise<boolean> {
   const { data } = await supabase
     .from('profiles')
     .select('role, is_demo')
     .eq('id', userId)
     .single();
   if (!data || data.is_demo === true) return false;
-  return isInternalRole((data.role ?? null) as UserRole | null);
+  return predicate((data.role ?? null) as UserRole | null);
+}
+
+export async function isInternalUser(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<boolean> {
+  return userMatchesRole(supabase, userId, isInternalRole);
+}
+
+export async function isLeadershipUser(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<boolean> {
+  return userMatchesRole(supabase, userId, isLead);
 }

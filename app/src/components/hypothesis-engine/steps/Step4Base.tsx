@@ -5,11 +5,20 @@
  * (парсинг в браузере через readSpreadsheetFile, лимит строк как в
  * /client/launch), превью, статусы разбора, профиль последней разобранной
  * базы и запуск сборки финального шаблона. Поглощает старый BasesTab.
+ * Автосборка идёт по выбранным гипотезам вертикали (пикер с чекбоксами над
+ * кнопкой, выбор персистится в localStorage): раньше сборка молча покрывала
+ * ВСЕ неотклонённые гипотезы, хотя пользователь выбирал одну.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
-import { ArrowRight, Check, FileSpreadsheet, Sparkles, Upload, X } from 'lucide-react';
-import type { HeBaseAnalysis, HeDistributionEntry, HeVertical } from '@/lib/hypothesisEngine/types';
+import type {
+  HeBaseAnalysis,
+  HeDistributionEntry,
+  HeHypothesis,
+  HeHypothesisTier,
+  HeVertical,
+} from '@/lib/hypothesisEngine/types';
+import { authFetch } from '@/lib/authFetch';
 import { readSpreadsheetFile } from '@/lib/spreadsheet/parseCSV';
 import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
 import {
@@ -22,13 +31,16 @@ import {
   type HeJobResponse,
   type HeJobSummary,
 } from '../api';
-import { Badge, Spinner, StatusBox, formatDate } from '../ui';
-
-const PRIMARY_BTN =
-  'inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50';
+import { HE, StatusDot, Spinner } from '../design';
+import { StatusBox, TIER_META, formatDate } from '../ui';
 
 /** Как часто дёргать reload детали во время автосборки (как POLL_INTERVAL_MS родителя). */
 const COLLECT_POLL_MS = 4000;
+
+/** Лимит строк автосборки — выбор пользователя; route валидирует те же значения. */
+type CollectLimit = 2000 | 10000 | 50000;
+const COLLECT_LIMITS: readonly CollectLimit[] = [2000, 10000, 50000];
+const DEFAULT_COLLECT_LIMIT: CollectLimit = 10000;
 
 interface ParsedFile {
   filename: string;
@@ -53,13 +65,24 @@ function jobActive(job: HeJobSummary | undefined): boolean {
 export function Step4Base(props: {
   projectId: string;
   vertical: HeVertical;
+  /** Гипотезы проекта (пикер автосборки фильтрует по vertical.id). */
+  hypotheses: HeHypothesis[];
   bases: HeBaseSummary[];
   jobs: HeJobSummary[];
   onUploaded: () => void;
   onTemplateStarted: () => void;
   onGoToTemplate: () => void;
 }): JSX.Element {
-  const { projectId, vertical, bases, jobs, onUploaded, onTemplateStarted, onGoToTemplate } = props;
+  const {
+    projectId,
+    vertical,
+    hypotheses,
+    bases,
+    jobs,
+    onUploaded,
+    onTemplateStarted,
+    onGoToTemplate,
+  } = props;
 
   const [parsed, setParsed] = useState<ParsedFile | null>(null);
   const [parsing, setParsing] = useState(false);
@@ -68,9 +91,101 @@ export function Step4Base(props: {
   const [uploadError, setUploadError] = useState('');
   const [collectStarting, setCollectStarting] = useState(false);
   const [collectError, setCollectError] = useState('');
+  const [collectNotice, setCollectNotice] = useState('');
+  const [collectLimit, setCollectLimit] = useState<CollectLimit>(DEFAULT_COLLECT_LIMIT);
   const [templateStarting, setTemplateStarting] = useState(false);
   const [templateError, setTemplateError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  /* ── Пикер гипотез автосборки ── */
+
+  // Гипотезы выбранной вертикали (по pct desc, как на доске шага 2).
+  const verticalHypotheses = useMemo(
+    () =>
+      hypotheses
+        .filter((h) => h.vertical_id === vertical.id)
+        .sort((a, b) => b.potential_pct - a.potential_pct),
+    [hypotheses, vertical.id],
+  );
+
+  // localStorage-ключ последнего выбора гипотез под вертикаль.
+  // v2: смена семантики дефолта (приоритет accepted) — старый выбор эпохи
+  // «все неотклонённые» не должен тихо перекрывать новый дефолт.
+  const collectHypsKey = `he.collect.hyps.v2.${vertical.id}`;
+  const [checkedHyps, setCheckedHyps] = useState<ReadonlySet<string>>(new Set());
+  // Инициализация — один раз на вертикаль (дефолт: отмечены неотклонённые),
+  // с восстановлением прошлого выбора из localStorage. Не по эффекту на
+  // verticalHypotheses: родительский поллинг меняет идентичность массива
+  // каждые 4 секунды и сбрасывал бы выбор пользователя.
+  const hypsInitRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (hypsInitRef.current === vertical.id) return;
+    if (verticalHypotheses.length === 0) return; // гипотезы ещё не загрузились
+    hypsInitRef.current = vertical.id;
+    // Дефолт: если есть принятые (accepted) — отмечены только они (приоритет
+    // разметки специалиста), иначе — все неотклонённые.
+    const accepted = verticalHypotheses.filter((h) => h.status === 'accepted');
+    let initial = accepted.length > 0
+      ? accepted.map((h) => h.id)
+      : verticalHypotheses.filter((h) => h.status !== 'rejected').map((h) => h.id);
+    try {
+      const raw = window.localStorage.getItem(collectHypsKey);
+      const saved: unknown = raw ? (JSON.parse(raw) as unknown) : null;
+      if (Array.isArray(saved)) {
+        const known = new Set(verticalHypotheses.map((h) => h.id));
+        const kept = saved.filter((id): id is string => typeof id === 'string' && known.has(id));
+        // Прошлый выбор применяем, только если пересекается с актуальными
+        // гипотезами — иначе он от другой эпохи (гипотезы перегенерированы).
+        if (kept.length > 0) initial = kept;
+      }
+    } catch {
+      // localStorage недоступен или битый JSON — живём на дефолте.
+    }
+    setCheckedHyps(new Set(initial));
+  }, [vertical.id, verticalHypotheses, collectHypsKey]);
+
+  const persistCheckedHyps = useCallback(
+    (next: ReadonlySet<string>) => {
+      try {
+        window.localStorage.setItem(collectHypsKey, JSON.stringify([...next]));
+      } catch {
+        // localStorage недоступен — выбор живёт только в состоянии компонента.
+      }
+    },
+    [collectHypsKey],
+  );
+
+  const toggleHypothesis = useCallback(
+    (id: string) => {
+      const next = new Set(checkedHyps);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      setCheckedHyps(next);
+      persistCheckedHyps(next);
+    },
+    [checkedHyps, persistCheckedHyps],
+  );
+
+  const setAllHypotheses = useCallback(
+    (on: boolean) => {
+      const next = new Set<string>(on ? verticalHypotheses.map((h) => h.id) : []);
+      setCheckedHyps(next);
+      persistCheckedHyps(next);
+    },
+    [verticalHypotheses, persistCheckedHyps],
+  );
+
+  // Считаем по актуальному списку: в checkedHyps могут остаться id уже
+  // удалённых/перегенерированных гипотез. Отклонённые не считаем (как и в POST).
+  const checkedHypCount = useMemo(
+    () => verticalHypotheses.filter((h) => checkedHyps.has(h.id) && h.status !== 'rejected').length,
+    [verticalHypotheses, checkedHyps],
+  );
+  // Есть ли в выборе непринятые (proposed) — для подсказки у счётчика.
+  const includesProposed = useMemo(
+    () => verticalHypotheses.some((h) => checkedHyps.has(h.id) && h.status === 'proposed'),
+    [verticalHypotheses, checkedHyps],
+  );
 
   const verticalBases = useMemo(
     () =>
@@ -168,15 +283,42 @@ export function Step4Base(props: {
 
   const handleCollect = useCallback(async () => {
     if (collectStarting || collectingBase) return;
+    // Пикер виден, но ничего не отмечено (кнопка в этом состоянии disabled) —
+    // страховка от «сборки по всем гипотезам при снятых галочках».
+    if (verticalHypotheses.length > 0 && checkedHypCount === 0) return;
     setCollectError('');
+    setCollectNotice('');
     setCollectStarting(true);
     try {
+      // Отмеченные гипотезы — всегда в запросе, когда пикер есть: явный выбор
+      // вместо молчаливой сборки по всем неотклонённым. Порядок — как в
+      // пикере (pct desc), детерминированно.
+      const body: { limit: CollectLimit; hypothesis_ids?: string[] } = { limit: collectLimit };
+      if (verticalHypotheses.length > 0) {
+        // Отклонённые не отправляем: стадия их всё равно отрежет — не даём
+        // пользователю включить их молча (в пикере они disabled).
+        body.hypothesis_ids = verticalHypotheses
+          .filter((h) => checkedHyps.has(h.id) && h.status !== 'rejected')
+          .map((h) => h.id);
+      }
       const { ok, data } = await hePost<HeBaseCollectResponse>(
         `${HE_API}/verticals/${vertical.id}/collect`,
+        body,
       );
       if (!ok) {
         setCollectError(data.error || 'Не удалось запустить автосборку');
         return;
+      }
+      // Дедуп-ответ (200, existing): новая сборка не создана. Показываем,
+      // с каким лимитом уже идёт сборка, — иначе клик с другим лимитом
+      // выглядел бы как молча проигнорированный.
+      if (data.existing) {
+        const runningLimit = data.base?.collect_info?.limit;
+        setCollectNotice(
+          typeof runningLimit === 'number' && Number.isFinite(runningLimit)
+            ? `Уже собирается база с лимитом ${runningLimit.toLocaleString('ru-RU')}`
+            : 'Уже собирается база — повторный запуск не создаётся',
+        );
       }
       // 201 (сборка стартовала) и 200 (уже идёт) — в обоих случаях перечитываем деталь.
       onUploaded();
@@ -185,7 +327,16 @@ export function Step4Base(props: {
     } finally {
       setCollectStarting(false);
     }
-  }, [collectStarting, collectingBase, vertical.id, onUploaded]);
+  }, [
+    collectStarting,
+    collectingBase,
+    collectLimit,
+    verticalHypotheses,
+    checkedHyps,
+    checkedHypCount,
+    vertical.id,
+    onUploaded,
+  ]);
 
   // Сборка создаёт base_collect-джобу, и родительский поллинг по активным
   // джобам её уже покрывает; локальный интервал — запасной вариант поверх
@@ -219,16 +370,16 @@ export function Step4Base(props: {
 
   return (
     <div className="space-y-5">
-      <p className="text-sm text-gray-500">
+      <p className={HE.lead}>
         Загрузите CSV или XLSX с контактами под эту вертикаль (до{' '}
         {CLIENT_LAUNCH_ROW_LIMIT.toLocaleString('ru-RU')} строк). Движок разберёт состав базы и
         подготовит финальный шаблон.
       </p>
 
       {/* Автосборка базы под вертикаль */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-        <p className="text-sm font-semibold text-gray-800">Или соберите автоматически</p>
-        <p className="mt-1 text-xs text-gray-500">
+      <section className={`${HE.card} ${HE.cardPad}`}>
+        <p className={HE.secTitle}>Или соберите автоматически</p>
+        <p className={`mt-1 text-xs ${HE.muted}`}>
           Движок сам подберёт источники: реестр компаний, hh.ru, карты — и соберёт базу под это
           направление.
         </p>
@@ -241,15 +392,56 @@ export function Step4Base(props: {
                 Автосборка завершилась ошибкой. Попробуйте ещё раз или загрузите файл вручную ниже.
               </p>
             ) : null}
-            <button
-              type="button"
-              onClick={() => void handleCollect()}
-              disabled={collectStarting}
-              className={PRIMARY_BTN}
-            >
-              {collectStarting ? <Spinner /> : <Sparkles className="h-4 w-4" aria-hidden />}
-              {collectFailed ? 'Попробовать снова' : 'Собрать базу автоматически'}
-            </button>
+            {verticalHypotheses.length > 0 ? (
+              <HypothesisPicker
+                hypotheses={verticalHypotheses}
+                checked={checkedHyps}
+                checkedCount={checkedHypCount}
+                includesProposed={includesProposed}
+                onToggle={toggleHypothesis}
+                onSetAll={setAllHypotheses}
+              />
+            ) : null}
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void handleCollect()}
+                disabled={
+                  collectStarting || (verticalHypotheses.length > 0 && checkedHypCount === 0)
+                }
+                className={`${HE.btnPrimary} inline-flex items-center justify-center gap-2`}
+              >
+                {collectStarting ? <Spinner /> : null}
+                {collectFailed ? 'Попробовать снова' : 'Собрать базу автоматически'}
+              </button>
+              <span className="inline-flex items-center gap-1 text-xs text-gray-500">
+                <span className="mr-0.5">Строк:</span>
+                {COLLECT_LIMITS.map((l) => (
+                  <button
+                    key={l}
+                    type="button"
+                    onClick={() => setCollectLimit(l)}
+                    aria-pressed={collectLimit === l}
+                    className={`${HE.btnSmall} ${
+                      collectLimit === l ? 'border-blue-600! text-blue-600!' : ''
+                    }`}
+                  >
+                    {l.toLocaleString('ru-RU')}
+                  </button>
+                ))}
+              </span>
+            </div>
+            <p className="mt-1.5 text-[11px] text-gray-400">
+              Больше строк — дольше сбор и больше файл.
+            </p>
+            {verticalHypotheses.length > 0 && checkedHypCount === 0 ? (
+              <p className="mt-1 text-[11px] text-amber-600" role="alert">
+                Отметьте хотя бы одну гипотезу — сборка идёт по выбранным.
+              </p>
+            ) : null}
+            {collectNotice ? (
+              <p className="mt-2 text-xs text-gray-500">{collectNotice}</p>
+            ) : null}
             {collectError ? (
               <p className="mt-2 text-sm text-red-600" role="alert">
                 {collectError}
@@ -260,21 +452,17 @@ export function Step4Base(props: {
       </section>
 
       {/* Загрузка файла */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+      <section className={`${HE.card} ${HE.cardPad}`}>
         <label
-          className={`flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-gray-300 bg-gray-50/50 px-4 py-8 text-center transition hover:border-blue-300 hover:bg-blue-50/60 ${
+          className={`${HE.card} flex cursor-pointer flex-col items-center justify-center gap-1.5 border-dashed px-4 py-8 text-center transition hover:border-blue-300 hover:bg-blue-50/60 ${
             parsing ? 'pointer-events-none opacity-60' : ''
           }`}
         >
-          {parsing ? (
-            <Spinner className="h-6 w-6 text-gray-400" />
-          ) : (
-            <Upload className="h-6 w-6 text-gray-400" aria-hidden />
-          )}
-          <span className="text-sm font-medium text-gray-600">
-            {parsing ? 'Читаем файл…' : parsed ? parsed.filename : 'Выберите файл с базой'}
+          {parsing ? <Spinner className="h-5 w-5" /> : null}
+          <span className="text-sm font-medium text-gray-700">
+            {parsing ? 'Читаем файл…' : parsed ? parsed.filename : 'Выберите файл CSV/XLSX'}
           </span>
-          <span className="text-xs text-gray-400">CSV, TSV или XLSX</span>
+          <span className={`text-xs ${HE.muted}`}>CSV, TSV или XLSX</span>
           <input
             ref={fileInputRef}
             type="file"
@@ -312,9 +500,8 @@ export function Step4Base(props: {
               <button
                 type="button"
                 onClick={clearFile}
-                className="inline-flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600"
+                className={HE.btnQuiet}
               >
-                <X className="h-3.5 w-3.5" aria-hidden />
                 Убрать файл
               </button>
             </div>
@@ -350,13 +537,9 @@ export function Step4Base(props: {
                 type="button"
                 onClick={() => void handleUpload()}
                 disabled={uploading || parsing}
-                className={PRIMARY_BTN}
+                className={`${HE.btnPrimary} inline-flex items-center justify-center gap-2`}
               >
-                {uploading ? (
-                  <Spinner />
-                ) : (
-                  <FileSpreadsheet className="h-4 w-4" aria-hidden />
-                )}
+                {uploading ? <Spinner /> : null}
                 Загрузить базу
               </button>
             </div>
@@ -370,45 +553,9 @@ export function Step4Base(props: {
           <p className="text-xs font-semibold uppercase tracking-widest text-gray-400">
             Базы под эту вертикаль ({verticalBases.length})
           </p>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-start gap-2">
             {verticalBases.map((base) => (
-              <div
-                key={base.id}
-                className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2"
-              >
-                <span className="min-w-0">
-                  <span className="flex items-center gap-1.5">
-                    <span className="max-w-[200px] truncate text-xs font-medium text-gray-800">
-                      {base.filename}
-                    </span>
-                    {base.source === 'auto' ? (
-                      <Badge tone="blue">авто</Badge>
-                    ) : (
-                      <Badge tone="gray">загрузка</Badge>
-                    )}
-                  </span>
-                  <span className="block text-[11px] text-gray-400">
-                    {base.row_count.toLocaleString('ru-RU')} строк · {formatDate(base.created_at)}
-                  </span>
-                </span>
-                {base.status === 'collecting' ? (
-                  <span className="inline-flex items-center gap-1 text-[11px] text-blue-600">
-                    <Spinner className="h-3.5 w-3.5" />
-                    Собираем…
-                  </span>
-                ) : base.status === 'analyzing' ? (
-                  <span className="inline-flex items-center gap-1 text-[11px] text-amber-600">
-                    <Spinner className="h-3.5 w-3.5" />
-                    Разбираем…
-                  </span>
-                ) : base.status === 'analyzed' ? (
-                  <Badge tone="emerald">Разобрана</Badge>
-                ) : base.status === 'failed' ? (
-                  <Badge tone="red">Ошибка</Badge>
-                ) : (
-                  <Badge tone="gray">Загружена</Badge>
-                )}
-              </div>
+              <BaseCard key={base.id} base={base} />
             ))}
           </div>
         </section>
@@ -431,22 +578,20 @@ export function Step4Base(props: {
       ) : null}
 
       {/* Переход к шаблону */}
-      <section className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+      <section className={`${HE.card} ${HE.cardPad} flex flex-wrap items-center gap-3`}>
         {templateDone ? (
-          <button type="button" onClick={onGoToTemplate} className={PRIMARY_BTN}>
-            Перейти к шаблону
-            <ArrowRight className="h-4 w-4" aria-hidden />
+          <button type="button" onClick={onGoToTemplate} className={HE.btnPrimary}>
+            Перейти к шаблону →
           </button>
         ) : (
           <button
             type="button"
             onClick={() => void handleBuildTemplate()}
             disabled={templateBusy || latestBase?.status !== 'analyzed'}
-            className={PRIMARY_BTN}
+            className={`${HE.btnPrimary} inline-flex items-center justify-center gap-2`}
           >
-            {templateBusy ? <Spinner /> : <Sparkles className="h-4 w-4" aria-hidden />}
-            {templateBusy ? 'Собираем шаблон…' : 'Собрать шаблон'}
-            {!templateBusy ? <ArrowRight className="h-4 w-4" aria-hidden /> : null}
+            {templateBusy ? <Spinner /> : null}
+            {templateBusy ? 'Собираем шаблон…' : 'Собрать шаблон →'}
           </button>
         )}
         {templateBusy ? (
@@ -471,7 +616,283 @@ export function Step4Base(props: {
   );
 }
 
+/* ─────────────────────────── Карточка базы: скачать CSV / превью ─────────────────────────── */
+
+/** Строк базы в превью на карточке (sample_rows в БД капнут 30 — хватает). */
+const PREVIEW_ROWS = 10;
+/** Усечение текста ячейки превью; полный текст — в title. */
+const PREVIEW_CELL_CHARS = 80;
+
+function previewCellText(value: unknown): string {
+  if (value == null) return '';
+  return typeof value === 'string' ? value : String(value);
+}
+
+/** Имя файла из Content-Disposition ответа экспорта; fallback — base-<id>.csv. */
+function exportDownloadName(res: Response, baseId: string): string {
+  const match = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '');
+  return match?.[1] ?? `base-${baseId}.csv`;
+}
+
+function BaseCard({ base }: { base: HeBaseSummary }) {
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState('');
+
+  const hasRows = base.row_count > 0;
+  const columns = Array.isArray(base.columns) ? base.columns : [];
+  const previewRows = (Array.isArray(base.sample_rows) ? base.sample_rows : []).slice(
+    0,
+    PREVIEW_ROWS,
+  );
+
+  const handleDownload = useCallback(async () => {
+    if (downloading) return;
+    setDownloadError('');
+    setDownloading(true);
+    try {
+      // Не <a href>: экспорт за Bearer-авторизацией — тянем через authFetch
+      // и скачиваем blob через временный objectURL.
+      const res = await authFetch(`${HE_API}/bases/${base.id}/export`);
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || `Ошибка ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = exportDownloadName(res, base.id);
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : 'Не удалось скачать CSV');
+    } finally {
+      setDownloading(false);
+    }
+  }, [base.id, downloading]);
+
+  return (
+    <div
+      className={`${HE.card} px-3 py-2 ${previewOpen ? 'w-full' : ''}`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="min-w-0">
+          <span className="flex items-center gap-1.5">
+            <span className="max-w-[200px] truncate text-xs font-medium text-gray-800">
+              {base.filename}
+            </span>
+            {base.source === 'auto' ? (
+              <span className={`${HE.pill} bg-blue-50 text-blue-700`}>авто</span>
+            ) : (
+              <span className={`${HE.pill} bg-gray-100 text-gray-500`}>загрузка</span>
+            )}
+          </span>
+          <span className="block text-[11px] text-gray-400">
+            {base.row_count.toLocaleString('ru-RU')} строк · {formatDate(base.created_at)}
+          </span>
+        </span>
+        {base.status === 'collecting' ? (
+          <span className="inline-flex items-center gap-1 text-[11px] text-blue-600">
+            <Spinner className="h-3.5 w-3.5" />
+            Собираем…
+          </span>
+        ) : base.status === 'analyzing' ? (
+          <span className="inline-flex items-center gap-1.5 text-[11px] text-amber-600">
+            <StatusDot tone="warn" />
+            Разбираем…
+          </span>
+        ) : base.status === 'analyzed' ? (
+          <span className="inline-flex items-center gap-1.5 text-[11px] text-emerald-600">
+            <StatusDot tone="ok" />
+            Разобрана
+          </span>
+        ) : base.status === 'failed' ? (
+          <span className="inline-flex items-center gap-1.5 text-[11px] text-red-600">
+            <StatusDot tone="err" />
+            Ошибка
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1.5 text-[11px] text-gray-500">
+            <StatusDot tone="muted" />
+            Загружена
+          </span>
+        )}
+        {hasRows ? (
+          <span className="ml-auto inline-flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPreviewOpen((v) => !v)}
+              className={HE.btnQuiet}
+              aria-expanded={previewOpen}
+            >
+              Превью
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleDownload()}
+              disabled={downloading}
+              className={`${HE.btnGhost} inline-flex items-center justify-center gap-1.5`}
+            >
+              {downloading ? <Spinner className="h-3 w-3" /> : null}
+              Скачать CSV
+            </button>
+          </span>
+        ) : null}
+      </div>
+      {downloadError ? (
+        <p className="mt-1 text-[11px] text-red-600" role="alert">
+          {downloadError}
+        </p>
+      ) : null}
+      {previewOpen && hasRows ? (
+        <div className="mt-2 overflow-x-auto rounded-lg border border-gray-200">
+          <table className="min-w-full divide-y divide-gray-200 text-xs">
+            <thead className="bg-gray-50">
+              <tr>
+                {columns.map((col) => (
+                  <th
+                    key={col}
+                    className="whitespace-nowrap px-3 py-1.5 text-left font-semibold uppercase tracking-wider text-gray-500"
+                  >
+                    {col}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100 bg-white">
+              {previewRows.map((row, ri) => (
+                <tr key={ri}>
+                  {columns.map((col) => {
+                    const text = previewCellText(row[col]);
+                    return (
+                      <td
+                        key={col}
+                        className="max-w-[220px] truncate px-3 py-1.5 text-gray-700"
+                        title={text}
+                      >
+                        {text === '' ? (
+                          <span className={HE.chip}>—</span>
+                        ) : text.length > PREVIEW_CELL_CHARS ? (
+                          `${text.slice(0, PREVIEW_CELL_CHARS)}…`
+                        ) : (
+                          text
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {previewRows.length === 0 ? (
+            <p className="px-3 py-2 text-[11px] text-gray-400">Нет строк для превью</p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /* ─────────────────────────── Автосборка базы ─────────────────────────── */
+
+/** Текстовая метка тира (T1/T2/T3); копия приватного хелпера Step2Verticals. */
+function TierText({ tier }: { tier: HeHypothesisTier }) {
+  const meta = TIER_META[tier] ?? TIER_META[3];
+  return (
+    <span title={meta.hint} className={`shrink-0 ${HE.tierText}`}>
+      {meta.label}
+    </span>
+  );
+}
+
+/** Пилюля процента потенциала: ≥50 изумрудная, ≥25 янтарная, <25 серая. */
+function PctPill({ pct }: { pct: number }) {
+  const tone =
+    pct >= 50
+      ? 'bg-emerald-100 text-emerald-700'
+      : pct >= 25
+        ? 'bg-amber-100 text-amber-700'
+        : 'bg-gray-100 text-gray-500';
+  return <span className={`${HE.pill} shrink-0 ${tone}`}>{pct}%</span>;
+}
+
+/**
+ * Пикер гипотез автосборки: неотклонённые отмечены по умолчанию, отклонённые —
+ * приглушены и сняты (отметить можно — стадия пересечёт выбор с
+ * неотклонёнными). POST уходит строго с отмеченными id.
+ */
+function HypothesisPicker({
+  hypotheses,
+  checked,
+  checkedCount,
+  includesProposed,
+  onToggle,
+  onSetAll,
+}: {
+  hypotheses: HeHypothesis[];
+  checked: ReadonlySet<string>;
+  checkedCount: number;
+  includesProposed: boolean;
+  onToggle: (id: string) => void;
+  onSetAll: (on: boolean) => void;
+}) {
+  return (
+    <div className="mb-3 rounded-xl border border-gray-200 bg-gray-50/60 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-medium text-gray-600">
+          Гипотезы в сборке · выбрано {checkedCount} из {hypotheses.length}
+          {includesProposed ? (
+            <span className={`ml-1.5 font-normal ${HE.muted}`}>включая непринятые</span>
+          ) : null}
+        </p>
+        <span className="flex shrink-0 items-center gap-1.5 text-[11px]">
+          <button type="button" onClick={() => onSetAll(true)} className={HE.btnQuiet}>
+            все
+          </button>
+          <span className="text-gray-300" aria-hidden>
+            /
+          </span>
+          <button type="button" onClick={() => onSetAll(false)} className={HE.btnQuiet}>
+            нет
+          </button>
+        </span>
+      </div>
+      <ul className="mt-1.5 space-y-0.5">
+        {hypotheses.map((h) => {
+          const rejected = h.status === 'rejected';
+          return (
+            <li key={h.id}>
+              <label
+                className={`flex items-center gap-2 rounded-lg px-1.5 py-1 transition ${
+                  rejected ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:bg-white'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked.has(h.id)}
+                  onChange={() => onToggle(h.id)}
+                  disabled={rejected}
+                  className="h-3.5 w-3.5 shrink-0 accent-blue-600"
+                />
+                <TierText tier={h.tier} />
+                <span className="min-w-0 flex-1 truncate text-xs text-gray-700" title={h.title}>
+                  {h.title}
+                </span>
+                {rejected ? (
+                  <span className="shrink-0 text-[10.5px] text-gray-400">отклонена</span>
+                ) : null}
+                <PctPill pct={h.potential_pct} />
+              </label>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
 
 /** Русские имена источников автосборки; неизвестный ключ показываем как пришёл. */
 const COLLECT_SOURCE_LABELS: Record<string, string> = {
@@ -503,21 +924,43 @@ function collectTaskFailed(status: string | undefined): boolean {
 function readCollectInfo(info: HeCollectInfo | null | undefined) {
   const plan = info?.plan?.tasks;
   const tasks = info?.tasks;
+  // limit появился позже plan/tasks — читаем так же защитно, как весь collect_info.
+  const rawLimit = info?.limit;
+  // hypotheses появились позже limit — тоже защитно.
+  const hyps = (info as { hypotheses?: unknown } | null | undefined)?.hypotheses;
   return {
     plan: Array.isArray(plan) ? plan.filter((t) => t && typeof t === 'object') : [],
     tasks: Array.isArray(tasks) ? tasks.filter((t) => t && typeof t === 'object') : [],
+    limit: typeof rawLimit === 'number' && Number.isFinite(rawLimit) ? rawLimit : null,
+    hypotheses: Array.isArray(hyps)
+      ? hyps
+          .map((h) => (h && typeof h === 'object' && typeof (h as { title?: unknown }).title === 'string'
+            ? (h as { title: string }).title
+            : ''))
+          .filter(Boolean)
+      : [],
   };
 }
 
 /** Карточка прогресса автосборки: план (почему эти источники) + живые статусы задач. */
 function CollectProgress({ base }: { base: HeBaseSummary }) {
-  const { plan, tasks } = readCollectInfo(base.collect_info);
+  const { plan, tasks, limit, hypotheses } = readCollectInfo(base.collect_info);
+  // У баз, созданных до появления limit в collect_info, показываем дефолт.
+  const shownLimit = limit ?? DEFAULT_COLLECT_LIMIT;
   return (
     <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50/40 p-4">
       <p className="flex items-center gap-2 text-sm font-medium text-blue-800">
         <Spinner className="h-4 w-4" />
         Собираем базу…
       </p>
+      <p className="mt-1 text-xs text-blue-700/70">
+        собираем до {shownLimit.toLocaleString('ru-RU')} строк
+      </p>
+      {hypotheses.length > 0 ? (
+        <p className={`mt-1.5 text-[11px] ${HE.muted}`} title={hypotheses.join(', ')}>
+          по гипотезам: {hypotheses.join(' · ')}
+        </p>
+      ) : null}
       {plan.length > 0 ? (
         <ul className="mt-2.5 space-y-1">
           {plan.map((task, i) => (
@@ -533,11 +976,11 @@ function CollectProgress({ base }: { base: HeBaseSummary }) {
           {tasks.map((task, i) => (
             <li key={`task-${i}`} className="flex items-center gap-2 text-xs text-gray-700">
               {collectTaskDone(task.status) ? (
-                <Check className="h-3.5 w-3.5 shrink-0 text-emerald-500" aria-hidden />
+                <StatusDot tone="ok" />
               ) : collectTaskFailed(task.status) ? (
-                <X className="h-3.5 w-3.5 shrink-0 text-red-500" aria-hidden />
+                <StatusDot tone="err" />
               ) : (
-                <Spinner className="h-3.5 w-3.5 shrink-0 text-blue-500" />
+                <Spinner className="h-3.5 w-3.5 shrink-0" />
               )}
               <span>{collectSourceLabel(task.source)}</span>
               {collectTaskDone(task.status) && typeof task.rows === 'number' ? (
@@ -566,8 +1009,8 @@ function BarList({
   const top = (entries ?? []).slice(0, 6);
   if (top.length === 0) return null;
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3">
-      <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">{title}</p>
+    <div className={`${HE.card} p-3`}>
+      <p className={`mb-2 ${HE.secTitle}`}>{title}</p>
       <ul className="space-y-1.5">
         {top.map((e) => (
           <li key={e.value} className="text-xs">
@@ -628,7 +1071,7 @@ function BaseAnalysisCards({ analysis }: { analysis: HeBaseAnalysis }) {
           <ul className="space-y-1">
             {qualityItems.map((note, i) => (
               <li key={i} className="flex items-start gap-1.5 text-xs text-gray-500">
-                <Check className="mt-0.5 h-3 w-3 shrink-0 text-gray-300" aria-hidden />
+                <span className={`${HE.dot} mt-1.5 shrink-0 bg-gray-300`} aria-hidden />
                 {note}
               </li>
             ))}

@@ -3,7 +3,7 @@ import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { ATS_COUNTRY_CODES } from '@/lib/parsers/atsFilters';
-import { ENG_HIRING_SOURCES, type EngHiringSearchConfig, type EngHiringSource } from '@/lib/parsers/engHiring';
+import { DEFAULT_ENG_HIRING_SOURCES, ENG_HIRING_SOURCES, type EngHiringSearchConfig, type EngHiringSource } from '@/lib/parsers/engHiring';
 
 export const dynamic = 'force-dynamic';
 
@@ -64,7 +64,7 @@ function sanitizeConfig(raw: Partial<EngHiringSearchConfig>): EngHiringSearchCon
 
   return {
     text: text || 'english hiring',
-    sources: sources.length ? Array.from(new Set(sources)) : [...ENG_HIRING_SOURCES],
+    sources: sources.length ? Array.from(new Set(sources)) : [...DEFAULT_ENG_HIRING_SOURCES],
     countries: countries.length ? countries : undefined,
     posted_within_days: postedWithinDays,
     companies_limit: companiesLimit,

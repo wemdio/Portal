@@ -8,7 +8,6 @@
  */
 
 import { useCallback, useMemo, useState, type JSX } from 'react';
-import { Check, Copy, Download, Eye, FileText, Rocket, Sparkles, User } from 'lucide-react';
 import type { HeTemplate } from '@/lib/hypothesisEngine/types';
 import {
   renderTemplatePreview,
@@ -16,19 +15,15 @@ import {
   type HePreviewToken,
 } from '@/lib/hypothesisEngine/renderPreview';
 import {
+  HE_LAUNCH_MAX_LEADS,
   parseLaunchInfo,
   type HeLaunchPresetOption,
   type HeTemplateLaunchInfo,
 } from '@/lib/hypothesisEngine/launchHandoff';
 import { HE_API, heCall, hePost, type HeBaseSummary, type HeJobSummary } from '../api';
+import { HE, StatusDot } from '../design';
 import { Badge, OperatorText, StatusBox, formatDate } from '../ui';
 
-const PRIMARY_BTN =
-  'inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-medium text-white transition hover:bg-blue-700';
-const PRIMARY_SM_BTN =
-  'inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-medium text-white transition hover:bg-blue-700 disabled:opacity-50';
-const SECONDARY_BTN =
-  'inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50';
 const TH_CLASS = 'px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-gray-500';
 
 function templateToText(t: HeTemplate): string {
@@ -154,15 +149,14 @@ function TemplateLeadPreview({ template, baseId }: { template: HeTemplate; baseI
 
   return (
     <details
-      className="rounded-2xl border border-amber-200 bg-amber-50/40 shadow-sm"
+      className={HE.card}
       onToggle={(e) => handleToggle(e.currentTarget.open)}
     >
-      <summary className="flex cursor-pointer select-none flex-wrap items-center gap-2 px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-800">
-        <Eye className="h-4 w-4 text-amber-500" aria-hidden />
+      <summary className={`${HE.btnQuiet} w-full cursor-pointer select-none px-4 py-3`}>
         Превью по лидам — письма глазами конкретных лидов из базы
         <Badge tone="amber">новое</Badge>
       </summary>
-      <div className="border-t border-amber-100 px-4 py-3">
+      <div className="border-t border-gray-100 px-4 py-3">
         {state === 'loading' || state === 'idle' ? (
           <p className="text-xs text-gray-400">Загружаем строки базы…</p>
         ) : null}
@@ -183,10 +177,7 @@ function TemplateLeadPreview({ template, baseId }: { template: HeTemplate; baseI
               const emptyVars = dedupOperatorNames(leadRow.letters.flatMap((l) => l.emptyVars));
               return (
                 <div key={leadIdx} className="rounded-lg border border-gray-200 bg-white p-3">
-                  <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-gray-700">
-                    <User className="h-3.5 w-3.5 text-gray-400" aria-hidden />
-                    {leadRow.rowLabel}
-                  </p>
+                  <p className="mb-2 text-xs font-semibold text-gray-700">{leadRow.rowLabel}</p>
                   <div className="space-y-2">
                     {leadRow.letters.map((letter, letterIdx) => {
                       // Токенизируем ИСХОДНЫЙ текст письма (индексы совпадают с
@@ -346,7 +337,7 @@ function LaunchSection({ launch }: { launch: TemplateLaunchState }) {
     return (
       <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3">
         <p className="flex items-center gap-2 text-sm font-medium text-emerald-800">
-          <Check className="h-4 w-4 shrink-0" aria-hidden />
+          <StatusDot tone="ok" />
           Кампания создана (на паузе): {info.campaign_name} · {info.leads_count.toLocaleString('ru-RU')}{' '}
           лидов
         </p>
@@ -401,12 +392,11 @@ function LaunchSection({ launch }: { launch: TemplateLaunchState }) {
             type="button"
             onClick={launch.submit}
             disabled={launch.submitting || !launch.presetId}
-            className={PRIMARY_SM_BTN}
+            className={HE.btnPrimary}
           >
-            <Rocket className="h-3.5 w-3.5" aria-hidden />
             {launch.submitting ? 'Создаём кампанию…' : 'Создать кампанию (на паузе)'}
           </button>
-          <button type="button" onClick={() => launch.setFormOpen(false)} className={SECONDARY_BTN}>
+          <button type="button" onClick={() => launch.setFormOpen(false)} className={HE.btnGhost}>
             Отмена
           </button>
         </div>
@@ -490,8 +480,7 @@ export function Step5Template(props: {
             Сборка шаблона завершилась ошибкой{templateJob?.error ? `: ${templateJob.error}` : '.'}
           </StatusBox>
           <div>
-            <button type="button" onClick={onBuildTemplate} className={PRIMARY_BTN}>
-              <Sparkles className="h-4 w-4" aria-hidden />
+            <button type="button" onClick={onBuildTemplate} className={HE.btnPrimary}>
               Попробовать снова
             </button>
           </div>
@@ -499,15 +488,13 @@ export function Step5Template(props: {
       );
     }
     return (
-      <div className="flex min-h-[220px] flex-col items-center justify-center rounded-2xl border border-dashed border-gray-200 bg-gray-50/50 p-10 text-center">
-        <FileText className="mb-3 h-8 w-8 text-gray-300" aria-hidden />
+      <div className={`${HE.card} flex min-h-[220px] flex-col items-center justify-center border-dashed p-10 text-center`}>
         <p className="text-sm font-medium text-gray-500">Шаблона пока нет</p>
-        <p className="mt-1 max-w-md text-xs text-gray-400">
+        <p className={`mt-1 max-w-md text-xs ${HE.muted}`}>
           Движок адаптирует цепочку вертикали под базу
           {base?.filename ? ` «${base.filename}»` : ''} и расставит операторы персонализации.
         </p>
-        <button type="button" onClick={onBuildTemplate} className={`${PRIMARY_BTN} mt-4`}>
-          <Sparkles className="h-4 w-4" aria-hidden />
+        <button type="button" onClick={onBuildTemplate} className={`${HE.btnPrimary} mt-4`}>
           Собрать шаблон
         </button>
       </div>
@@ -516,13 +503,15 @@ export function Step5Template(props: {
 
   /* ── Готовый шаблон ── */
   const mapping = template.personalization_plan?.operator_mapping ?? [];
+  // Пречек лимита запуска: роут ответит 413 сверх HE_LAUNCH_MAX_LEADS —
+  // не даём дойти до клика по «Отправить в запуск» с заведомо большой базой.
+  const baseOverLaunchLimit = (base?.row_count ?? 0) > HE_LAUNCH_MAX_LEADS;
 
   return (
     <div className="space-y-5">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <FileText className="h-4 w-4 text-gray-400" aria-hidden />
             <h2 className="text-lg font-bold text-gray-900">Шаблон 85/15</h2>
             {template.status === 'ready' ? (
               <Badge tone="emerald">Готов</Badge>
@@ -540,25 +529,31 @@ export function Step5Template(props: {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {!launch.recorded ? (
-            <button type="button" onClick={launch.openForm} className={PRIMARY_SM_BTN}>
-              <Rocket className="h-3.5 w-3.5" aria-hidden />
+            <button
+              type="button"
+              onClick={launch.openForm}
+              disabled={baseOverLaunchLimit}
+              className={HE.btnPrimary}
+            >
               Отправить в запуск
             </button>
           ) : null}
-          <button type="button" onClick={handleCopy} className={SECONDARY_BTN}>
-            {copied ? (
-              <Check className="h-3.5 w-3.5 text-emerald-500" aria-hidden />
-            ) : (
-              <Copy className="h-3.5 w-3.5" aria-hidden />
-            )}
-            {copied ? 'Скопировано' : 'Скопировать всё'}
+          <button type="button" onClick={handleCopy} className={HE.btnGhost}>
+            {copied ? '✓ Скопировано' : 'Скопировать'}
           </button>
-          <button type="button" onClick={handleDownload} className={SECONDARY_BTN}>
-            <Download className="h-3.5 w-3.5" aria-hidden />
+          <button type="button" onClick={handleDownload} className={HE.btnGhost}>
             Скачать JSON
           </button>
         </div>
       </header>
+
+      {/* База больше лимита запуска — кнопка выключена, объясняем почему */}
+      {baseOverLaunchLimit ? (
+        <p className="text-xs text-gray-400">
+          База больше лимита запуска ({HE_LAUNCH_MAX_LEADS}). Скачайте CSV и запускайте порциями —
+          или соберите базу меньшего лимита.
+        </p>
+      ) : null}
 
       {/* Отправка в запуск: запись о запуске либо форма выбора пресета */}
       <LaunchSection launch={launch} />
@@ -569,31 +564,25 @@ export function Step5Template(props: {
       {/* Финальные письма */}
       <ol className="max-w-3xl space-y-3">
         {template.letters.map((letter, idx) => (
-          <li key={idx} className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-100 text-[11px] font-bold text-blue-700">
-                {idx + 1}
+          <li key={idx} className={`${HE.card} p-4`}>
+            <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+              <span className={`${HE.muted2} text-[11px] font-medium uppercase tracking-wider`}>
+                Письмо {idx + 1}
+                {letter.wait_days > 0 ? ` · через ${letter.wait_days} дн.` : ''}
               </span>
               {letter.subject ? (
                 <OperatorText text={letter.subject} className="text-sm font-semibold text-gray-900" />
               ) : (
                 <p className="text-sm italic text-gray-400">Без темы</p>
               )}
-              {letter.wait_days > 0 ? (
-                <span className="text-[11px] text-gray-400">через {letter.wait_days} дн.</span>
-              ) : null}
               <button
                 type="button"
                 onClick={() => handleCopyLetter(idx)}
                 title="Скопировать письмо"
                 aria-label="Скопировать письмо"
-                className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
+                className={`ml-auto ${HE.btnQuiet}`}
               >
-                {copiedLetterIdx === idx ? (
-                  <Check className="h-3.5 w-3.5 text-emerald-500" aria-hidden />
-                ) : (
-                  <Copy className="h-3.5 w-3.5" aria-hidden />
-                )}
+                {copiedLetterIdx === idx ? '✓' : 'Скопировать'}
               </button>
             </div>
             <OperatorText
@@ -607,7 +596,7 @@ export function Step5Template(props: {
                     key={`${v.when}-${vi}`}
                     className="rounded-lg border border-violet-200 bg-violet-50"
                   >
-                    <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold text-violet-700">
+                    <summary className={`${HE.btnQuiet} w-full cursor-pointer select-none px-3 py-2`}>
                       Вариант для сегмента: {v.when}
                     </summary>
                     <div className="border-t border-violet-100 px-3 py-2">
@@ -626,8 +615,8 @@ export function Step5Template(props: {
 
       {/* Фиксированный блок — длинный, свёрнут */}
       {template.fixed_block ? (
-        <details className="rounded-2xl border border-gray-200 bg-white shadow-sm">
-          <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-800">
+        <details className={HE.card}>
+          <summary className={`${HE.btnQuiet} w-full cursor-pointer select-none px-4 py-3`}>
             Фиксированный блок (85%) — общая основа всех писем
           </summary>
           <div className="border-t border-gray-100 px-4 py-3">
@@ -642,8 +631,8 @@ export function Step5Template(props: {
 
       {/* Маппинг операторов на колонки базы — свёрнут */}
       {mapping.length > 0 ? (
-        <details className="rounded-2xl border border-gray-200 bg-white shadow-sm">
-          <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-800">
+        <details className={HE.card}>
+          <summary className={`${HE.btnQuiet} w-full cursor-pointer select-none px-4 py-3`}>
             Маппинг операторов на колонки базы ({mapping.length})
           </summary>
           <div className="border-t border-gray-100 px-4 py-3">

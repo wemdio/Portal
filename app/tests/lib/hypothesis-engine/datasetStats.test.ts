@@ -10,7 +10,7 @@ jest.mock('@/lib/instantlyDataset', () => ({
   isDatasetConfigured: () => mockIsDatasetConfigured(),
 }));
 
-import { getSegmentStats, getWinnerPatterns } from '@/lib/hypothesisEngine/datasetStats';
+import { getSegmentStats, getWinnerPatterns, getPortfolioProfile } from '@/lib/hypothesisEngine/datasetStats';
 
 type Row = Record<string, unknown>;
 
@@ -19,6 +19,7 @@ const SEGMENT_Q = /WHERE s\.segment ~\* /;
 const BASELINE_Q = /FROM latest l\s*$/; // baseline — единственный запрос, оканчивающийся на FROM latest l
 const SUBJECTS_Q = /GROUP BY lower\(btrim/;
 const PATTERNS_Q = /GROUP BY t\.pattern/;
+const PORTFOLIO_Q = /count\(DISTINCT cl\.client\)/;
 
 /** Ответы по фрагменту SQL; Error → reject. Неузнанный запрос → пустой результат. */
 function stubQueries(map: Array<[RegExp, Row[] | Error]>) {
@@ -324,6 +325,95 @@ describe('getWinnerPatterns', () => {
     mockIsDatasetConfigured.mockReturnValue(false);
 
     expect(await getWinnerPatterns(['auto'])).toEqual([]);
+    expect(mockDatasetQuery).not.toHaveBeenCalled();
+  });
+});
+
+describe('getPortfolioProfile', () => {
+  it('агрегирует сегменты: кампании, distinct клиенты, пулинг reply_pct; limit по умолчанию 10', async () => {
+    // clients < campaigns: несколько кампаний одного клиента схлопнуты count(DISTINCT) на стороне БД
+    stubQueries([[PORTFOLIO_Q, [
+      { segment: 'logistics_transport', campaigns: 25, clients: 8, sent: '120000', replies: '1800' },
+      { segment: 'it_software_saas', campaigns: 12, clients: 12, sent: '60000', replies: '300' },
+    ]]]);
+
+    const res = await getPortfolioProfile();
+
+    expect(res).toEqual([
+      { segment: 'logistics_transport', campaigns: 25, clients: 8, sent: 120000, replies: 1800, reply_pct: 1.5 },
+      { segment: 'it_software_saas', campaigns: 12, clients: 12, sent: 60000, replies: 300, reply_pct: 0.5 },
+    ]);
+    expect(mockDatasetQuery).toHaveBeenCalledTimes(1);
+    expect(paramsOf(0)).toEqual([10]);
+    // сортировка по числу кампаний и лимит — на стороне SQL
+    expect(sqlOf(0)).toMatch(/ORDER BY campaigns DESC/);
+    expect(sqlOf(0)).toMatch(/LIMIT \$1/);
+  });
+
+  it('reply_pct=null при sent < 1000 (тот же гейт честности, что в getSegmentStats)', async () => {
+    stubQueries([[PORTFOLIO_Q, [
+      { segment: 'auto', campaigns: 2, clients: 1, sent: '500', replies: '20' },
+      { segment: 'agriculture', campaigns: 1, clients: 0, sent: '0', replies: '0' },
+    ]]]);
+
+    const res = await getPortfolioProfile();
+
+    expect(res[0].reply_pct).toBeNull();
+    expect(res[0].sent).toBe(500);
+    expect(res[1].reply_pct).toBeNull(); // sent=0 → null, а не 0 и не деление на ноль
+    expect(res[1].clients).toBe(0);
+  });
+
+  it('limit параметризован и клампится: {limit:3}→3, 999→50, 0/NaN→10', async () => {
+    stubQueries([[PORTFOLIO_Q, []]]);
+
+    await getPortfolioProfile({ limit: 3 });
+    expect(paramsOf(0)).toEqual([3]);
+
+    await getPortfolioProfile({ limit: 999 });
+    expect(paramsOf(1)).toEqual([50]);
+
+    await getPortfolioProfile({ limit: 0 });
+    expect(paramsOf(2)).toEqual([10]);
+
+    await getPortfolioProfile({ limit: Number.NaN });
+    expect(paramsOf(3)).toEqual([10]);
+  });
+
+  it('SQL: клиентская связка dim_campaign_client + DISTINCT ON-дедуп снапшотов, без v_latest_snapshot', async () => {
+    stubQueries([[PORTFOLIO_Q, []]]);
+
+    await getPortfolioProfile();
+
+    const sql = sqlOf(0);
+    expect(sql).toContain('DISTINCT ON (o.campaign_id)');
+    expect(sql).toMatch(/JOIN dataset_snapshots ds ON ds\.id = o\.snapshot_id AND ds\.ok/);
+    expect(sql).toMatch(/ORDER BY o\.campaign_id, ds\.started_at DESC/);
+    expect(sql).not.toContain('v_latest_snapshot');
+    expect(sql).toMatch(/FROM dim_campaign_segment s/);
+    expect(sql).toMatch(/LEFT JOIN dim_campaign_client cl ON cl\.campaign_id = s\.campaign_id/);
+    expect(sql).toMatch(/LEFT JOIN latest l ON l\.campaign_id = s\.campaign_id/);
+  });
+
+  it('datasetQuery падает → [] + console.error (never-throw)', async () => {
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      stubQueries([[PORTFOLIO_Q, new Error('connect ECONNREFUSED 10.0.0.1:5432')]]);
+
+      const res = await getPortfolioProfile();
+
+      expect(res).toEqual([]);
+      const logged = errSpy.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+      expect(logged).toContain('ECONNREFUSED 10.0.0.1:5432');
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it('без INSTANTLY_DATASET_DB_URL → [], запросов нет', async () => {
+    mockIsDatasetConfigured.mockReturnValue(false);
+
+    expect(await getPortfolioProfile()).toEqual([]);
     expect(mockDatasetQuery).not.toHaveBeenCalled();
   });
 });

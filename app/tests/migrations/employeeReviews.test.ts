@@ -21,4 +21,11 @@ describe('employee reviews migration', () => {
     expect(sql).toContain('grant select on public.employee_reviews to authenticated');
     expect(sql).not.toContain('grant all on public.employee_reviews to authenticated');
   });
+
+  it('bumps updated_at on every update so API writes can use it as a CAS token', () => {
+    expect(sql).toContain(
+      'create trigger trg_employee_reviews_updated_at before update on public.employee_reviews',
+    );
+    expect(sql).toContain('for each row execute function public.set_updated_at()');
+  });
 });

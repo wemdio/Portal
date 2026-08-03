@@ -5,11 +5,14 @@ import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import {
   authenticateReviewRequest,
+  hasReviewResultFields,
   jsonError,
   loadInternalProfiles,
+  loadReviewProfiles,
   logMeta,
   parseReviewInput,
   profileToApi,
+  REVIEW_PROJECTION,
   reviewToApi,
   validateInternalEmployee,
   type EmployeeReviewRow,
@@ -27,15 +30,9 @@ export async function GET(req: NextRequest) {
   let reviewsData: EmployeeReviewRow[];
   try {
     reviewsData = await collectPages(async (from, to) => {
-      let query = admin
+      const query = admin
         .from('employee_reviews')
-        .select(
-          'id, review_date, employee_user_id, reviewer_user_id, outcomes, problems, recommendations, created_at, updated_at',
-        );
-
-      if (!actor.canManage) {
-        query = query.eq('employee_user_id', actor.userId);
-      }
+        .select(REVIEW_PROJECTION);
 
       const page = await query
         .order('review_date', { ascending: false })
@@ -60,13 +57,14 @@ export async function GET(req: NextRequest) {
 
   const profileResult = await loadInternalProfiles();
   if ('error' in profileResult) return profileResult.error;
-
-  const profilesById = new Map(
-    profileResult.profiles.map((profile) => [profile.id, profile]),
+  const reviewProfilesResult = await loadReviewProfiles(
+    reviewsData,
+    profileResult.profiles,
   );
-  const visibleEmployees = actor.canManage
-    ? profileResult.profiles
-    : profileResult.profiles.filter((profile) => profile.id === actor.userId);
+  if ('error' in reviewProfilesResult) return reviewProfilesResult.error;
+
+  const { profilesById } = reviewProfilesResult;
+  const visibleEmployees = profileResult.profiles;
 
   return NextResponse.json({
     reviews: reviewsData.map((review) =>
@@ -84,7 +82,6 @@ export async function POST(req: NextRequest) {
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
   const { actor } = auth;
-  if (!actor.canManage) return jsonError('Forbidden', 403);
 
   let body: unknown;
   try {
@@ -96,15 +93,25 @@ export async function POST(req: NextRequest) {
   const parsed = parseReviewInput(body, { partial: false });
   if ('error' in parsed) return jsonError(parsed.error, 400);
 
-  const employeeUserId = parsed.value.employee_user_id!;
-  const employeeValidation = await validateInternalEmployee(employeeUserId);
-  if ('error' in employeeValidation) return employeeValidation.error;
+  const completesReview = hasReviewResultFields(parsed.value);
+  if (completesReview && !parsed.value.outcomes) {
+    return jsonError('outcomes is required for completed review', 400);
+  }
+
+  const employeeUserId = parsed.value.employee_user_id ?? null;
+  if (employeeUserId) {
+    const employeeValidation = await validateInternalEmployee(employeeUserId);
+    if ('error' in employeeValidation) return employeeValidation.error;
+  }
 
   const row = {
     review_date: parsed.value.review_date!,
     employee_user_id: employeeUserId,
+    candidate_name: parsed.value.candidate_name ?? null,
     reviewer_user_id: actor.userId,
-    outcomes: parsed.value.outcomes!,
+    status: completesReview ? 'completed' as const : 'scheduled' as const,
+    reason: parsed.value.reason ?? null,
+    outcomes: parsed.value.outcomes ?? null,
     problems: parsed.value.problems ?? null,
     recommendations: parsed.value.recommendations ?? null,
   };
@@ -112,9 +119,7 @@ export async function POST(req: NextRequest) {
   const { data, error } = await supabaseAdmin
     .from('employee_reviews')
     .insert(row)
-    .select(
-      'id, review_date, employee_user_id, reviewer_user_id, outcomes, problems, recommendations, created_at, updated_at',
-    )
+    .select(REVIEW_PROJECTION)
     .single();
 
   if (error || !data) {
@@ -129,9 +134,11 @@ export async function POST(req: NextRequest) {
 
   const profileResult = await loadInternalProfiles();
   if ('error' in profileResult) return profileResult.error;
-  const profilesById = new Map(
-    profileResult.profiles.map((profile) => [profile.id, profile]),
+  const reviewProfilesResult = await loadReviewProfiles(
+    [data as EmployeeReviewRow],
+    profileResult.profiles,
   );
+  if ('error' in reviewProfilesResult) return reviewProfilesResult.error;
 
   await logAudit(
     'team.reviews.create.success',
@@ -145,7 +152,12 @@ export async function POST(req: NextRequest) {
   );
 
   return NextResponse.json(
-    { review: reviewToApi(data as EmployeeReviewRow, profilesById) },
+    {
+      review: reviewToApi(
+        data as EmployeeReviewRow,
+        reviewProfilesResult.profilesById,
+      ),
+    },
     { status: 201 },
   );
 }

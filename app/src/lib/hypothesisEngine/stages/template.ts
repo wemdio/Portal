@@ -10,15 +10,16 @@
  *     консистентность operator_mapping (см. validateOperatorMapping);
  *  4) pure-маппинг операторов {{var}} финальных писем на колонки базы;
  *  5) insert в he_templates (status 'ready', llm_model).
- * В промпты подмешиваются style_override из брифа (styleExample) и
- * winner-паттерны датасета (best-effort); после генерации писем — критик-луп:
+ * В промпты подмешиваются style_override из брифа (styleExample),
+ * signature_override (дословная подпись отправителя) и winner-паттерны
+ * датасета (best-effort); после генерации писем — критик-луп:
  * одна оценка (только основной вариант A) + максимум один rewrite по её
  * замечаниям; B-вариант и сегментные варианты после рерайта восстанавливаются
  * из исходных писем.
  */
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
-import { callLLMText, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
+import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
 import {
   HeBaseAnalysisSchema,
   HeTemplatePlanSchema,
@@ -445,10 +446,13 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   if (clientCase) stageLog(ctx, `[template] кейс клиента под вертикаль: ${clientCase.id}`);
 
   // Стиль клиента из брифа проекта (style_override, рядом с offer_override) →
-  // styleExample в промпты плана и финальных писем.
+  // styleExample в промпты плана и финальных писем. Подпись отправителя
+  // (signature_override) → signatureOverride в план, письма и рерайт.
   const project = await readProject(ctx.supabase, job.project_id);
   const brief = (project.brief ?? {}) as Record<string, unknown>;
   const styleExample = typeof brief.style_override === 'string' ? brief.style_override : undefined;
+  const signatureOverride =
+    typeof brief.signature_override === 'string' ? brief.signature_override : undefined;
 
   // Winner-паттерны датасета (best-effort): метки сегментов по терминам
   // вертикали (имя + синонимы), фолбэк хинтов — имя вертикали. Любой сбой →
@@ -475,6 +479,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       hypotheses,
       clientCase,
       styleExample,
+      signatureOverride,
     }),
     HeTemplatePlanSchema,
     { model: getHeModel('chain'), maxTokens: 8192 },
@@ -493,6 +498,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     clientCase,
     styleExample,
     winnerPatterns,
+    signatureOverride,
   });
 
   /** Сырой ответ модели → письма с приклеенными сегментными и B-вариантами. */
@@ -518,7 +524,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     return { parsed, letters };
   };
 
-  let llm = await callLLMText(messages, { model, maxTokens: 6144 });
+  let llm = await callLLMTextWithFallback(messages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
   addUsage(usage, llm);
   let { parsed, letters } = buildLetters(llm.text);
 
@@ -529,7 +535,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       { role: 'assistant', content: llm.text.slice(0, 2000) },
       { role: 'user', content: RETRY_HINT },
     ];
-    llm = await callLLMText(retryMessages, { model, maxTokens: 6144 });
+    llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
     addUsage(usage, llm);
     ({ parsed, letters } = buildLetters(llm.text));
   }
@@ -546,7 +552,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         { role: 'assistant', content: llm.text.slice(0, 2000) },
         { role: 'user', content: shortenRetryHint(letters) },
       ],
-      { model, maxTokens: 6144 },
+      { model, maxTokens: 16384 },
     );
     addUsage(usage, retryLlm);
     const rebuilt = buildLetters(retryLlm.text);
@@ -579,7 +585,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         winnerPatterns,
       }),
       HeChainCritiqueSchema,
-      { model, maxTokens: 2048 },
+      { model, maxTokens: 4096 },
     );
     addUsage(usage, critique);
     // letter_index вне 1..letters.length — галлюцинация критика: отбрасываем
@@ -598,8 +604,9 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
           language,
           styleExample,
           winnerPatterns,
+          signatureOverride,
         }),
-        { model, maxTokens: 6144 },
+        { model, maxTokens: 16384 },
       );
       addUsage(usage, rewrite);
       const rebuilt = buildLetters(rewrite.text);
@@ -694,7 +701,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         { role: 'assistant', content: llm.text.slice(0, 2000) },
         { role: 'user', content: operatorIssuesHint(mappingIssues) },
       ],
-      { model, maxTokens: 6144 },
+      { model, maxTokens: 16384 },
     );
     addUsage(usage, retryLlm);
     const rebuilt = buildLetters(retryLlm.text);

@@ -108,16 +108,20 @@ export function buildJobhiveDuckdbSql(opts: { parquetUrl: string; cutoffIso: str
   const scanCols = JOBHIVE_SELECT_COLUMNS
     .map((col) => (col === 'description' ? 'substr(description, 1, 2000) AS description' : col))
     .join(', ');
+  // posted_at arrives as VARCHAR (ISO-8601 text) — duckdb refuses VARCHAR >=
+  // TIMESTAMPTZ, so cast at compare/sort time (TRY_CAST: unparseable -> NULL,
+  // which fails the recency predicate and sorts last, both safe).
+  const postedAtTs = 'TRY_CAST(posted_at AS TIMESTAMPTZ)';
   const salesLike = JOBHIVE_COARSE_SALES_TERMS.map((term) => `lower(title) LIKE '${term}'`).join(' OR ');
   return [
     `SELECT ${scanCols}`,
     `FROM read_parquet('${opts.parquetUrl}')`,
-    `WHERE posted_at >= TIMESTAMPTZ '${opts.cutoffIso}'`,
+    `WHERE ${postedAtTs} >= TIMESTAMPTZ '${opts.cutoffIso}'`,
     `  AND title IS NOT NULL`,
     `  AND (${salesLike})`,
     `QUALIFY row_number() OVER (`,
     `  PARTITION BY lower(trim(company)), coalesce(country_iso, '')`,
-    `  ORDER BY posted_at DESC NULLS LAST`,
+    `  ORDER BY ${postedAtTs} DESC NULLS LAST`,
     `) = 1`,
     ...(opts.limit != null ? [`LIMIT ${opts.limit}`] : []),
   ].join('\n');

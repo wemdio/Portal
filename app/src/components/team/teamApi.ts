@@ -70,14 +70,19 @@ export interface TeamReviewEmployee {
   avatarUrl: string | null;
 }
 
+export type TeamReviewStatus = 'scheduled' | 'completed';
+
 export interface TeamReview {
   id: string;
   reviewDate: string;
-  employee: TeamReviewEmployee;
+  employee: TeamReviewEmployee | null;
+  candidateName: string | null;
   reviewer: TeamReviewEmployee | null;
-  outcomes: string;
-  problems: string;
-  recommendations: string;
+  status: TeamReviewStatus;
+  reason: string | null;
+  outcomes: string | null;
+  problems: string | null;
+  recommendations: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -89,23 +94,76 @@ export interface TeamReviewsResponse {
   currentUserId: string | null;
 }
 
-export interface TeamReviewWrite {
+interface TeamReviewScheduleInputBase {
   reviewDate: string;
-  employeeUserId: string;
-  outcomes: string;
-  problems?: string;
-  recommendations?: string;
+  reason?: string | null;
 }
 
-export function buildTeamReviewWrite(values: TeamReviewWrite): TeamReviewWrite {
-  return {
+export type TeamReviewScheduleInput =
+  | (TeamReviewScheduleInputBase & {
+      subjectType: 'employee';
+      employeeUserId: string;
+      candidateName?: never;
+    })
+  | (TeamReviewScheduleInputBase & {
+      subjectType: 'candidate';
+      candidateName: string;
+      employeeUserId?: never;
+    });
+
+export type TeamReviewScheduleWrite =
+  | {
+      reviewDate: string;
+      employeeUserId: string;
+      reason: string | null;
+    }
+  | {
+      reviewDate: string;
+      candidateName: string;
+      reason: string | null;
+    };
+
+export interface TeamReviewCompletionInput {
+  outcomes: string;
+  problems?: string | null;
+  recommendations?: string | null;
+}
+
+export interface TeamReviewCompletionWrite {
+  status: 'completed';
+  outcomes: string;
+  problems: string | null;
+  recommendations: string | null;
+}
+
+
+function trimmedOrNull(value: string | null | undefined): string | null {
+  return value?.trim() || null;
+}
+
+export function buildTeamReviewScheduleWrite(
+  values: TeamReviewScheduleInput,
+): TeamReviewScheduleWrite {
+  const common = {
     reviewDate: values.reviewDate,
-    employeeUserId: values.employeeUserId,
+    reason: trimmedOrNull(values.reason),
+  };
+  return values.subjectType === 'candidate'
+    ? { ...common, candidateName: values.candidateName.trim() }
+    : { ...common, employeeUserId: values.employeeUserId };
+}
+
+export function buildTeamReviewCompletionWrite(
+  values: TeamReviewCompletionInput,
+): TeamReviewCompletionWrite {
+  return {
+    status: 'completed',
     outcomes: values.outcomes.trim(),
-    problems: (values.problems ?? '').trim(),
-    recommendations: (values.recommendations ?? '').trim(),
+    problems: trimmedOrNull(values.problems),
+    recommendations: trimmedOrNull(values.recommendations),
   };
 }
+
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -121,6 +179,20 @@ function text(value: unknown, fallback = ''): string {
 
 function nullableText(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
+}
+
+export class TeamApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  readonly payload: UnknownRecord;
+
+  constructor(message: string, status: number, payload: unknown) {
+    super(message);
+    this.name = 'TeamApiError';
+    this.status = status;
+    this.payload = record(payload);
+    this.code = nullableText(this.payload.code);
+  }
 }
 
 function number(value: unknown): number {
@@ -230,15 +302,18 @@ function normalizeEmployee(value: unknown): TeamReviewEmployee {
 
 function normalizeReview(value: unknown): TeamReview {
   const review = record(value);
-  const employee = normalizeEmployee(review.employee);
+  const employee = review.employee ? normalizeEmployee(review.employee) : null;
   return {
     id: text(review.id),
     reviewDate: text(review.reviewDate ?? review.review_date),
     employee,
+    candidateName: nullableText(review.candidateName ?? review.candidate_name),
     reviewer: review.reviewer ? normalizeEmployee(review.reviewer) : null,
-    outcomes: text(review.outcomes),
-    problems: text(review.problems),
-    recommendations: text(review.recommendations),
+    status: text(review.status) === 'scheduled' ? 'scheduled' : 'completed',
+    reason: nullableText(review.reason),
+    outcomes: nullableText(review.outcomes),
+    problems: nullableText(review.problems),
+    recommendations: nullableText(review.recommendations),
     createdAt: text(review.createdAt ?? review.created_at),
     updatedAt: text(review.updatedAt ?? review.updated_at),
   };
@@ -277,7 +352,11 @@ export async function teamApiFetch(
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const body = record(payload);
-    throw new Error(text(body.error ?? body.message, 'Не удалось загрузить данные. Попробуйте ещё раз.'));
+    throw new TeamApiError(
+      text(body.error ?? body.message, 'Не удалось загрузить данные. Попробуйте ещё раз.'),
+      response.status,
+      body,
+    );
   }
   return payload;
 }

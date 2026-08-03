@@ -2,7 +2,7 @@ import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 import { DEFAULT_LOCALE, LOCALE_COOKIE, normalizeLocale } from '@/lib/i18n'
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient'
-import { isInternalRole } from '@/lib/roles'
+import { isInternalRole, isLead } from '@/lib/roles'
 import type { UserRole } from '@/types'
 
 const ROLE_COOKIE = 'x-portal-role'
@@ -227,6 +227,7 @@ export async function middleware(request: NextRequest) {
 
   if (!supabaseUrl || !supabaseAnonKey) {
     console.error('Missing Supabase environment variables. Please check your .env.local file.');
+    if (pathname === '/team') return NextResponse.redirect(new URL('/', request.url));
     return response;
   }
 
@@ -279,12 +280,55 @@ export async function middleware(request: NextRequest) {
       return NextResponse.redirect(new URL('/login', request.url))
     }
 
+    let authoritativeTeamProfile: {
+      role: string
+      locale: string | null
+      isDemo: boolean
+    } | null = null
+
+    if (user && pathname === '/team') {
+      try {
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('role, locale, is_demo')
+          .eq('id', user.id)
+          .single()
+
+        if (
+          profileError
+          || !profile
+          || typeof profile.role !== 'string'
+          || !profile.role
+        ) {
+          console.error(
+            '[middleware] Failed to verify authoritative /team access:',
+            profileError ?? new Error('Profile role is missing'),
+          )
+          return NextResponse.redirect(new URL('/', request.url))
+        }
+
+        authoritativeTeamProfile = {
+          role: profile.role,
+          locale: typeof profile.locale === 'string' ? profile.locale : null,
+          isDemo: profile.is_demo === true,
+        }
+      } catch (profileError) {
+        console.error(
+          '[middleware] Failed to verify authoritative /team access:',
+          profileError,
+        )
+        return NextResponse.redirect(new URL('/', request.url))
+      }
+    }
+
     let userRole: string | null = null
     let userLocale = DEFAULT_LOCALE
 
     if (user) {
       const raw = request.cookies.get(ROLE_COOKIE)?.value ?? ''
-      const cached = raw ? decodeRoleCache(raw, user.id) : null
+      const cached = authoritativeTeamProfile
+        ? authoritativeTeamProfile.role
+        : (raw ? decodeRoleCache(raw, user.id) : null)
       const rawLocaleCookie = request.cookies.get(LOCALE_COOKIE)?.value
       const cachedLocale = normalizeLocale(rawLocaleCookie)
       userLocale = cachedLocale
@@ -297,7 +341,9 @@ export async function middleware(request: NextRequest) {
         // всегда синхронна с profiles.locale. Это убирает лишний кросс-VPS
         // round-trip к profiles на КАЖДОЙ навигации. Если куки локали нет
         // (первый заход / чистка кук) — падаем в БД, чтобы не потерять локаль.
-        if (rawLocaleCookie) {
+        if (authoritativeTeamProfile) {
+          userLocale = normalizeLocale(authoritativeTeamProfile.locale)
+        } else if (rawLocaleCookie) {
           userLocale = cachedLocale
         } else {
           const { data: localeProfile } = await supabase
@@ -394,6 +440,17 @@ export async function middleware(request: NextRequest) {
       }
     }
 
+    if (
+      user
+      && pathname === '/team'
+      && (
+        authoritativeTeamProfile?.isDemo === true
+        || !isLead(userRole as UserRole | null)
+      )
+    ) {
+      return NextResponse.redirect(new URL('/', request.url))
+    }
+
     if (user && pathname.startsWith('/client')) {
       if (userRole !== 'client' && userRole !== 'admin') {
         return NextResponse.redirect(new URL('/', request.url))
@@ -428,6 +485,7 @@ export async function middleware(request: NextRequest) {
     // отдаём response как есть. Лучше показать ошибку загрузки внутри
     // приложения, чем мигом на /login.
     console.error('[middleware] Supabase error, degrading gracefully:', err)
+    if (pathname === '/team') return NextResponse.redirect(new URL('/', request.url))
     return response
   }
 }

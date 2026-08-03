@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { isInternalUser } from '@/lib/auth/internalGuard';
+import { isLeadershipUser } from '@/lib/auth/internalGuard';
 import { collectPages } from '@/lib/collectPages';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
@@ -51,7 +51,7 @@ export async function GET(req: NextRequest) {
   const authed = createAuthedSupabaseClient(token);
   const { data: authData, error: authError } = await authed.auth.getUser();
   if (authError || !authData?.user) return jsonError('Unauthorized', 401);
-  if (!(await isInternalUser(authed, authData.user.id))) return jsonError('Forbidden', 403);
+  if (!(await isLeadershipUser(authed, authData.user.id))) return jsonError('Forbidden', 403);
 
   const params = new URL(req.url).searchParams;
   let period;

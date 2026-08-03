@@ -55,6 +55,14 @@ describe('buildJobhiveDuckdbSql', () => {
     expect(sql).toContain('2026-03-26T00:00:00.000Z');
   });
 
+  it('casts the VARCHAR posted_at before timestamp compare/sort (duckdb binder rejects VARCHAR >= TIMESTAMPTZ)', () => {
+    // The feed stores posted_at as VARCHAR (ISO-8601 text). Comparing it to a
+    // TIMESTAMPTZ literal fails with "Cannot compare values of type VARCHAR and
+    // type TIMESTAMP WITH TIME ZONE" (prod rehearsal, duckdb v1.5.5).
+    expect(sql).toContain("TRY_CAST(posted_at AS TIMESTAMPTZ) >= TIMESTAMPTZ '2026-03-26T00:00:00.000Z'");
+    expect(sql).toContain('ORDER BY TRY_CAST(posted_at AS TIMESTAMPTZ) DESC NULLS LAST');
+  });
+
   it('coarse-filters to sales-ish titles in SQL (the exact filter runs in Node)', () => {
     expect(sql.toLowerCase()).toContain("like '%sales%'");
     expect(sql.toLowerCase()).toContain('lower(title)');
@@ -63,7 +71,7 @@ describe('buildJobhiveDuckdbSql', () => {
   it('coarse-dedups server-side to one freshest posting per company+country', () => {
     expect(sql.toLowerCase()).toContain('row_number() over');
     expect(sql.toLowerCase()).toContain('partition by');
-    expect(sql.toLowerCase()).toContain('order by posted_at desc');
+    expect(sql.toLowerCase()).toContain('order by try_cast(posted_at as timestamptz) desc');
   });
 
   it('bounds the stored description length to keep the export small', () => {

@@ -23,7 +23,11 @@ import { datasetQuery, isDatasetConfigured } from '@/lib/instantlyDataset';
  *  - raw_campaign_steps × raw_campaign_step_analytics_snap — темы/паттерны шагов
  *    (та же DISTINCT ON-дедупликация, по (campaign_id, step_n, variant_n)).
  *    Пулинг внутри сегмента — эвристика для калибровки, НЕ доказательство A/B
- *    (within-campaign честность — отдельная mv_subject_ab_within_campaign).
+ *    (within-campaign честность — отдельная mv_subject_ab_within_campaign);
+ *  - dim_campaign_client (011) — авторитетный КЛИЕНТ студии (заказчик, от чьего
+ *    имени идёт аутрич) per campaign: source=project — чистый маппинг из
+ *    project_instantly_campaigns→projects.client, source=name_match — имя
+ *    клиента найдено в названии кампании. Ось портфеля getPortfolioProfile.
  *
  * Контракт деградации: функции НИКОГДА не бросают — датасет может лежать, а стадия
  * досье обязана доехать. Любой сбой → null-поля + note (или [] для паттернов).
@@ -56,6 +60,15 @@ export interface HeWinnerPattern {
   pattern: string;
   reply_pct: number;
   sent: number;
+}
+
+export interface HePortfolioEntry {
+  segment: string; // метка сегмента (из dim_campaign_segment)
+  campaigns: number;
+  clients: number; // distinct client companies in the segment
+  sent: number;
+  replies: number;
+  reply_pct: number | null; // null when sent < 1000 (same honesty gate as getSegmentStats)
 }
 
 /* ─────────────────────────── SQL ─────────────────────────── */
@@ -96,6 +109,29 @@ const SQL_BASELINE = `${SQL_LATEST_OVERVIEW}
 SELECT COALESCE(sum(l.emails_sent_count), 0)::bigint AS sent,
        COALESCE(sum(l.reply_count), 0)::bigint AS replies
 FROM latest l`;
+
+/**
+ * Портфельное досье: агрегат по ВСЕМ сегментам сразу — сколько кампаний и
+ * СКОЛЬКИХ РАЗНЫХ КЛИЕНТОВ студия уже вела в нише (объективное доказательство
+ * «кому мы уже успешно продаём»). Клиент — из dim_campaign_client (011):
+ * source=project авторитетен, name_match — эвристика по имени кампании; обе
+ * строки считаем, distinct по имени клиента (NULL — кампания без маппинга —
+ * count(DISTINCT) игнорирует). Оба джойна 1:1 (dim_campaign_client.campaign_id
+ * — PK, latest — DISTINCT ON), fan-out нет; кампании без клиента или без
+ * ok-снапшотов дают 0 отправок, но считаются в campaigns (LEFT JOIN).
+ */
+const SQL_PORTFOLIO_PROFILE = `${SQL_LATEST_OVERVIEW}
+SELECT s.segment,
+       count(*)::int AS campaigns,
+       count(DISTINCT cl.client)::int AS clients,
+       COALESCE(sum(l.emails_sent_count), 0)::bigint AS sent,
+       COALESCE(sum(l.reply_count), 0)::bigint AS replies
+FROM dim_campaign_segment s
+LEFT JOIN dim_campaign_client cl ON cl.campaign_id = s.campaign_id
+LEFT JOIN latest l ON l.campaign_id = s.campaign_id
+GROUP BY s.segment
+ORDER BY campaigns DESC, sent DESC, s.segment
+LIMIT $1`;
 
 /**
  * Step-level «последнее известное состояние»: одна строка на (кампания, шаг,
@@ -170,6 +206,13 @@ interface SubjectRow {
 }
 interface PatternRow {
   pattern: string | null;
+  sent: number | string;
+  replies: number | string;
+}
+interface PortfolioRow {
+  segment: string;
+  campaigns: number | string;
+  clients: number | string;
   sent: number | string;
   replies: number | string;
 }
@@ -373,6 +416,36 @@ export async function getWinnerPatterns(segmentHints: string[], limit = 5): Prom
       });
   } catch {
     return []; // датасет лёг — досье не должно падать из-за вспомогательной статистики
+  }
+}
+
+/**
+ * Портфельное досье: по каждому сегменту датасета — сколько кампаний, скольких
+ * РАЗНЫХ клиентов и с каким объёмом/ответами студия там уже работала. Сортировка
+ * по числу кампаний (SQL), лимит opts.limit ?? 10 (кламп 1..50). Never-throw:
+ * датасет не сконфигурирован или запрос упал → [] (+ console.error при падении).
+ */
+export async function getPortfolioProfile(opts?: { limit?: number }): Promise<HePortfolioEntry[]> {
+  if (!isDatasetConfigured()) return [];
+  const limit = opts?.limit ?? 10;
+  const lim = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 50) : 10;
+  try {
+    const rows = await datasetQuery<PortfolioRow>(SQL_PORTFOLIO_PROFILE, [lim]);
+    return rows.map((r) => {
+      const sent = num(r.sent);
+      const replies = num(r.replies);
+      return {
+        segment: r.segment,
+        campaigns: num(r.campaigns),
+        clients: num(r.clients),
+        sent,
+        replies,
+        reply_pct: gatedPct(replies, sent),
+      };
+    });
+  } catch (e) {
+    console.error('[datasetStats] portfolio profile query failed:', errMsg(e));
+    return [];
   }
 }
 

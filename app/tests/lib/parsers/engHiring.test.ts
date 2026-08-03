@@ -10,9 +10,23 @@ import {
   normalizeAtsJobToEngVacancy,
   resolveEngHiringCompaniesLimit,
   stripUnstorableJsonChars,
+  DEFAULT_ENG_HIRING_SOURCES,
+  ENG_HIRING_SOURCES,
   type EngHiringSearchConfig,
   type EngHiringVacancy,
 } from '@/lib/parsers/engHiring';
+
+describe('default sources (workday via jobhive, not the WAF-blocked native scan)', () => {
+  it('excludes workday from defaults but keeps it as a valid explicit source', () => {
+    // Prod evidence (2026-08-02): Workday's WAF soft-blocks the scan pattern
+    // (HTTP 200 + empty body, no exception) even at 2x1500ms pacing — 3530
+    // boards, 0 vacancies, twice. Jobhive carries 729k workday postings, so
+    // the native scan is out of the default set; explicit opt-in stays valid.
+    expect(ENG_HIRING_SOURCES).toContain('workday');
+    expect(DEFAULT_ENG_HIRING_SOURCES).not.toContain('workday');
+    expect(DEFAULT_ENG_HIRING_SOURCES).toEqual(ENG_HIRING_SOURCES.filter((s) => s !== 'workday'));
+  });
+});
 
 describe('engHiring coverage limits', () => {
   it('keeps the default scan bounded for normal runs', () => {
@@ -584,6 +598,19 @@ describe('engHiring cache filtering', () => {
     raw: {},
   };
 
+  it('skips workday rows when the config has no explicit sources (default set)', () => {
+    const config: EngHiringSearchConfig = {
+      text: 'demand generation',
+      countries: ['us'],
+      posted_within_days: 30,
+      now: '2026-06-11T00:00:00.000Z',
+    };
+    expect(matchesEngHiringVacancy(base, config)).toBe(true);
+    expect(matchesEngHiringVacancy({ ...base, source: 'workday' }, config)).toBe(false);
+    // ...but an explicit opt-in still matches workday rows.
+    expect(matchesEngHiringVacancy({ ...base, source: 'workday' }, { ...config, sources: ['workday'] })).toBe(true);
+  });
+
   it('filters cached vacancies by role, source, country, and recency', () => {
     const config: EngHiringSearchConfig = {
       text: 'demand generation, account executive',
@@ -683,6 +710,36 @@ describe('engHiring cache filtering', () => {
       vacancy_title: 'Sr. Field Marketing Event Manager',
       vacancy_description: 'Supports B2B go-to-market events.',
     }, config)).toBe(false);
+  });
+
+  it('evaluates mixed comma terms each in its own mode (b2b term = strict sales, other terms = role match)', () => {
+    // Regression: previously ANY "b2b" in the text forced the WHOLE query into
+    // the strict sales path, silently dropping plain roles like "head of marketing".
+    const config: EngHiringSearchConfig = {
+      text: 'head of marketing, b2b manager',
+      sources: ['greenhouse'],
+      countries: ['us'],
+      posted_within_days: 30,
+      now: '2026-06-11T00:00:00.000Z',
+    };
+
+    expect(matchesEngHiringVacancy({ ...base, vacancy_title: 'Head of Marketing' }, config)).toBe(true);
+    expect(matchesEngHiringVacancy({ ...base, vacancy_title: 'Business Development Representative' }, config)).toBe(true);
+    expect(matchesEngHiringVacancy({ ...base, vacancy_title: 'Backend Engineer' }, config)).toBe(false);
+    expect(matchesEngHiringVacancy({ ...base, vacancy_title: 'Product Designer', vacancy_description: 'Works on b2b flows.' }, config)).toBe(false);
+  });
+
+  it('keeps pure b2b queries strict (no role-regex fallback)', () => {
+    const config: EngHiringSearchConfig = {
+      text: 'b2b manager',
+      sources: ['greenhouse'],
+      countries: ['us'],
+      posted_within_days: 30,
+      now: '2026-06-11T00:00:00.000Z',
+    };
+
+    expect(matchesEngHiringVacancy({ ...base, vacancy_title: 'Head of Marketing' }, config)).toBe(false);
+    expect(matchesEngHiringVacancy({ ...base, vacancy_title: 'Business Development Representative' }, config)).toBe(true);
   });
 
   it('deduplicates vacancies by source and source_job_id', () => {

@@ -2,49 +2,99 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, Pencil, Plus, RefreshCw, Search, X } from 'lucide-react';
-import { ROLE_LABELS } from '@/lib/roles';
+import { isInternalRole, ROLE_LABELS } from '@/lib/roles';
 import type { UserRole } from '@/types';
 import {
-  buildTeamReviewWrite,
+  buildTeamReviewCompletionWrite,
+  buildTeamReviewScheduleWrite,
   formatRussianDate,
   localIsoDate,
   normalizeReviews,
+  TeamApiError,
   teamApiFetch,
+  type TeamReview,
   type TeamReviewEmployee,
   type TeamReviewsResponse,
-  type TeamReviewWrite,
 } from './teamApi';
+
+type ReviewFormPurpose = 'schedule' | 'complete';
+type ReviewFormMode = 'create' | 'edit';
+type ReviewFocusTarget = 'primary' | 'edit';
+type ReviewSubjectType = 'employee' | 'candidate';
 
 interface ReviewFormState {
   reviewDate: string;
+  subjectType: ReviewSubjectType;
   employeeUserId: string;
+  candidateName: string;
+  reason: string;
   outcomes: string;
   problems: string;
   recommendations: string;
 }
 
+interface EditorState {
+  reviewId: string;
+  purpose: ReviewFormPurpose;
+  returnFocus: ReviewFocusTarget;
+  expectedUpdatedAt: string;
+  conflicted: boolean;
+}
+
 const EMPTY_FORM: ReviewFormState = {
   reviewDate: '',
+  subjectType: 'employee',
   employeeUserId: '',
+  candidateName: '',
+  reason: '',
   outcomes: '',
   problems: '',
   recommendations: '',
 };
 
-function employeeRole(employee: TeamReviewEmployee): string {
-  const role = employee.role as UserRole | null;
-  return role && role in ROLE_LABELS ? ROLE_LABELS[role] : employee.role || 'Сотрудник';
+const REVIEW_CONFLICT_MESSAGE = 'Ревью уже изменил другой руководитель. Ваш черновик пока остался в форме. Скопируйте нужные изменения, затем нажмите «Отмена»: мы загрузим актуальную версию.';
+
+const REVIEW_TEXTAREA_CLASS = 'w-full resize-y rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm leading-6 text-gray-900 outline-none placeholder:text-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60';
+
+function reviewText(value: string | null | undefined): string {
+  return value || '';
 }
 
-function EmployeeAvatar({ employee }: { employee: TeamReviewEmployee }) {
+function storeReviewButtonRef(
+  refs: Map<string, HTMLButtonElement>,
+  reviewId: string,
+  node: HTMLButtonElement | null,
+) {
+  if (node) refs.set(reviewId, node);
+  else refs.delete(reviewId);
+}
+
+function employeeRole(employee: TeamReviewEmployee): string {
+  const role = employee.role as UserRole | null;
+  return role && isInternalRole(role) && role in ROLE_LABELS
+    ? ROLE_LABELS[role]
+    : 'Сотрудник';
+}
+
+function reviewSubjectName(review: TeamReview): string {
+  return review.employee?.name || review.candidateName || 'Без имени';
+}
+
+function reviewSubjectLabel(review: TeamReview): string {
+  return review.employee ? employeeRole(review.employee) : 'Кандидат';
+}
+
+function ReviewAvatar({ review }: { review: TeamReview }) {
   const [failed, setFailed] = useState(false);
-  const initial = employee.name.trim().charAt(0).toUpperCase() || '?';
+  const name = reviewSubjectName(review);
+  const avatarUrl = review.employee?.avatarUrl || null;
+  const initial = name.trim().charAt(0).toUpperCase() || '?';
   return (
     <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full border border-gray-200 bg-gray-100 text-sm font-semibold text-gray-600">
-      {employee.avatarUrl && !failed ? (
+      {avatarUrl && !failed ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={employee.avatarUrl}
+          src={avatarUrl}
           alt=""
           className="h-full w-full object-cover"
           loading="lazy"
@@ -59,6 +109,7 @@ function EmployeeAvatar({ employee }: { employee: TeamReviewEmployee }) {
 function ReviewForm({
   employees,
   initial,
+  purpose,
   mode,
   saving,
   error,
@@ -67,7 +118,8 @@ function ReviewForm({
 }: {
   employees: TeamReviewEmployee[];
   initial?: ReviewFormState;
-  mode: 'create' | 'edit';
+  purpose: ReviewFormPurpose;
+  mode: ReviewFormMode;
   saving: boolean;
   error: string;
   onCancel: () => void;
@@ -78,6 +130,7 @@ function ReviewForm({
     reviewDate: localIsoDate(),
   });
   const [validationError, setValidationError] = useState('');
+  const completing = purpose === 'complete';
 
   const update = <K extends keyof ReviewFormState>(key: K, value: ReviewFormState[K]) => {
     setValues((current) => ({ ...current, [key]: value }));
@@ -85,83 +138,163 @@ function ReviewForm({
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!values.reviewDate || !values.employeeUserId || !values.outcomes.trim()) {
-      setValidationError('Укажите дату, сотрудника и основные итоги.');
+    if (
+      !values.reviewDate
+      || (values.subjectType === 'employee' && !values.employeeUserId)
+    ) {
+      setValidationError('Укажите дату и сотрудника.');
+      return;
+    }
+    if (values.subjectType === 'candidate' && !values.candidateName.trim()) {
+      setValidationError('Укажите дату и имя кандидата.');
+      return;
+    }
+    if (completing && !values.outcomes.trim()) {
+      setValidationError('Заполните основные итоги ревью.');
       return;
     }
     setValidationError('');
     await onSubmit(values);
   };
 
+  const formLabel = purpose === 'schedule'
+    ? mode === 'create' ? 'Планирование ревью' : 'Редактирование запланированного ревью'
+    : 'Редактирование итогов ревью';
+
   return (
-    <form onSubmit={submit} className="space-y-5" aria-label={mode === 'create' ? 'Новое ревью' : 'Редактирование ревью'}>
+    <form onSubmit={submit} className="space-y-5" aria-label={formLabel}>
+      <fieldset disabled={saving}>
+        <legend className="mb-1.5 block text-sm font-medium text-gray-700">Тип ревью</legend>
+        <div className="flex flex-wrap gap-x-5 gap-y-2">
+          {([
+            ['employee', 'Сотрудник'],
+            ['candidate', 'Кандидат'],
+          ] as const).map(([value, label]) => (
+            <label key={value} className="inline-flex min-h-11 cursor-pointer items-center gap-2 text-sm font-medium text-gray-700">
+              <input
+                type="radio"
+                name="review-subject-type"
+                value={value}
+                checked={values.subjectType === value}
+                onChange={() => update('subjectType', value)}
+                className="h-4 w-4 accent-blue-600 outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
       <div className="grid gap-4 lg:grid-cols-2">
         <label className="block">
           <span className="mb-1.5 block text-sm font-medium text-gray-700">Дата ревью</span>
           <input
             type="date"
-            autoFocus
+            autoFocus={!completing}
             value={values.reviewDate}
             onChange={(event) => update('reviewDate', event.target.value)}
+            disabled={saving}
             required
-            className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
           />
         </label>
-        <label className="block">
-          <span className="mb-1.5 block text-sm font-medium text-gray-700">Сотрудник</span>
-          <select
-            value={values.employeeUserId}
-            onChange={(event) => update('employeeUserId', event.target.value)}
-            required
-            className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-          >
-            <option value="">Выберите сотрудника</option>
-            {employees.map((employee) => (
-              <option key={employee.id} value={employee.id}>
-                {employee.name}{employee.email ? `, ${employee.email}` : ''}
-              </option>
-            ))}
-          </select>
-        </label>
+        {values.subjectType === 'employee' ? (
+          <label className="block">
+            <span className="mb-1.5 block text-sm font-medium text-gray-700">Сотрудник</span>
+            <select
+              value={values.employeeUserId}
+              onChange={(event) => update('employeeUserId', event.target.value)}
+              disabled={saving}
+              required
+              className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <option value="">Выберите сотрудника</option>
+              {employees.map((employee) => (
+                <option key={employee.id} value={employee.id}>
+                  {employee.name}{employee.email ? `, ${employee.email}` : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <label className="block">
+            <span className="mb-1.5 block text-sm font-medium text-gray-700">Имя кандидата</span>
+            <input
+              type="text"
+              value={values.candidateName}
+              onChange={(event) => update('candidateName', event.target.value)}
+              disabled={saving}
+              required
+              maxLength={200}
+              autoComplete="off"
+              className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-900 outline-none placeholder:text-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+            />
+          </label>
+        )}
       </div>
 
       <label className="block">
-        <span className="mb-1.5 block text-sm font-medium text-gray-700">Основные итоги</span>
+        <span className="mb-1.5 block text-sm font-medium text-gray-700">
+          Комментарий <span className="font-normal text-gray-500">(необязательно)</span>
+        </span>
         <textarea
-          value={values.outcomes}
-          onChange={(event) => update('outcomes', event.target.value)}
-          required
-          rows={4}
-          maxLength={5000}
-          placeholder="Что получилось, какой прогресс заметен"
-          className="w-full resize-y rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm leading-6 text-gray-900 outline-none placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          value={values.reason}
+          onChange={(event) => update('reason', event.target.value)}
+          disabled={saving}
+          rows={2}
+          maxLength={500}
+          placeholder={values.subjectType === 'candidate'
+            ? 'Вакансия, этап, ссылка на резюме или другой контекст'
+            : 'Что важно обсудить на встрече'}
+          className={REVIEW_TEXTAREA_CLASS}
         />
       </label>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <label className="block">
-          <span className="mb-1.5 block text-sm font-medium text-gray-700">Зоны внимания</span>
-          <textarea
-            value={values.problems}
-            onChange={(event) => update('problems', event.target.value)}
-            rows={4}
-            maxLength={5000}
-            placeholder="Что мешает работе или требует поддержки"
-            className="w-full resize-y rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm leading-6 text-gray-900 outline-none placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-          />
-        </label>
-        <label className="block">
-          <span className="mb-1.5 block text-sm font-medium text-gray-700">Рекомендации</span>
-          <textarea
-            value={values.recommendations}
-            onChange={(event) => update('recommendations', event.target.value)}
-            rows={4}
-            maxLength={5000}
-            placeholder="Следующие шаги, поддержка и договорённости"
-            className="w-full resize-y rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm leading-6 text-gray-900 outline-none placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-          />
-        </label>
-      </div>
+      {completing && (
+        <>
+          <label className="block">
+            <span className="mb-1.5 block text-sm font-medium text-gray-700">Основные итоги</span>
+            <textarea
+              autoFocus={completing}
+              value={values.outcomes}
+              onChange={(event) => update('outcomes', event.target.value)}
+              disabled={saving}
+              required
+              rows={4}
+              maxLength={5000}
+              placeholder="Что получилось, какой прогресс заметен"
+              className={REVIEW_TEXTAREA_CLASS}
+            />
+          </label>
+
+          <div className="grid gap-4 lg:grid-cols-2">
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-medium text-gray-700">Зоны внимания</span>
+              <textarea
+                value={values.problems}
+                onChange={(event) => update('problems', event.target.value)}
+                disabled={saving}
+                rows={4}
+                maxLength={5000}
+                placeholder="Что мешает работе или требует поддержки"
+                className={REVIEW_TEXTAREA_CLASS}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-medium text-gray-700">Рекомендации</span>
+              <textarea
+                value={values.recommendations}
+                onChange={(event) => update('recommendations', event.target.value)}
+                disabled={saving}
+                rows={4}
+                maxLength={5000}
+                placeholder="Следующие шаги, поддержка и договорённости"
+                className={REVIEW_TEXTAREA_CLASS}
+              />
+            </label>
+          </div>
+        </>
+      )}
 
       {(validationError || error) && (
         <p className="text-sm text-red-700" role="alert">{validationError || error}</p>
@@ -181,32 +314,270 @@ function ReviewForm({
           disabled={saving}
           className="inline-flex min-h-11 items-center justify-center rounded-xl bg-gray-900 px-4 text-sm font-semibold text-white outline-none hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-60"
         >
-          {saving ? 'Сохраняем…' : mode === 'create' ? 'Сохранить ревью' : 'Сохранить изменения'}
+          {saving
+            ? 'Сохраняем…'
+            : completing
+              ? 'Сохранить итоги'
+              : mode === 'create' ? 'Запланировать' : 'Сохранить изменения'}
         </button>
       </div>
     </form>
   );
 }
 
-function ReviewSection({ title, text }: { title: string; text: string }) {
+function ReviewSection({ title, text }: { title: string; text: string | null }) {
+  const value = reviewText(text);
   return (
-    <section>
+    <section className="min-w-0">
       <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">{title}</h4>
-      <p className={`mt-1.5 whitespace-pre-wrap text-sm leading-6 ${text ? 'text-gray-800' : 'text-gray-400'}`}>
-        {text || 'Не указано'}
+      <p className={`mt-1.5 whitespace-pre-wrap [overflow-wrap:anywhere] text-sm leading-6 ${value ? 'text-gray-800' : 'text-gray-500'}`}>
+        {value || 'Не указано'}
       </p>
+    </section>
+  );
+}
+
+function ReviewStatusBadge({ review, today }: { review: TeamReview; today: string }) {
+  const meta = review.status === 'completed'
+    ? { label: 'Проведено', dot: 'bg-emerald-500', text: 'text-emerald-700' }
+    : review.reviewDate.slice(0, 10) < today
+      ? { label: 'Ожидает итогов', dot: 'bg-red-500', text: 'text-red-700' }
+      : { label: 'Запланировано', dot: 'bg-amber-500', text: 'text-amber-700' };
+
+  return (
+    <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${meta.text}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${meta.dot}`} aria-hidden="true" />
+      {meta.label}
+    </span>
+  );
+}
+
+function ReviewSummary({ review, today }: { review: TeamReview; today: string }) {
+  const isScheduled = review.status === 'scheduled';
+  const summary = isScheduled ? reviewText(review.reason) : reviewText(review.outcomes);
+  const subjectName = reviewSubjectName(review);
+  return (
+    <>
+      <ReviewAvatar review={review} />
+      <span className="min-w-0 flex-1">
+        <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span className="truncate text-sm font-semibold text-gray-900">{subjectName}</span>
+          <span className="text-xs text-gray-500">{reviewSubjectLabel(review)}</span>
+        </span>
+        <span className={`mt-0.5 block truncate text-sm ${summary ? 'text-gray-600' : 'text-gray-500'}`}>
+          {summary || (isScheduled ? 'Комментарий не указан' : 'Итоги не указаны')}
+        </span>
+        <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 sm:hidden">
+          <span className="text-xs font-medium text-gray-500">{formatRussianDate(review.reviewDate)}</span>
+          <ReviewStatusBadge review={review} today={today} />
+        </span>
+      </span>
+    </>
+  );
+}
+
+function ReviewMeta({ review, today }: { review: TeamReview; today: string }) {
+  return (
+    <span className="hidden shrink-0 text-right sm:block">
+      <span className="block text-sm font-medium text-gray-700">{formatRussianDate(review.reviewDate)}</span>
+      <span className="mt-1 flex justify-end"><ReviewStatusBadge review={review} today={today} /></span>
+      <span className="mt-0.5 block text-xs text-gray-500">
+        {review.reviewer ? `Автор: ${review.reviewer.name}` : 'Автор не указан'}
+      </span>
+    </span>
+  );
+}
+
+function ReviewRow({
+  review,
+  today,
+  employees,
+  canManage,
+  open,
+  editorPurpose,
+  saving,
+  error,
+  primaryButtonRef,
+  editButtonRef,
+  onToggle,
+  onEdit,
+  onComplete,
+  onCancel,
+  onSubmit,
+}: {
+  review: TeamReview;
+  today: string;
+  employees: TeamReviewEmployee[];
+  canManage: boolean;
+  open: boolean;
+  editorPurpose: ReviewFormPurpose | null;
+  saving: boolean;
+  error: string;
+  primaryButtonRef: (node: HTMLButtonElement | null) => void;
+  editButtonRef: (node: HTMLButtonElement | null) => void;
+  onToggle: () => void;
+  onEdit: () => void;
+  onComplete: () => void;
+  onCancel: () => void;
+  onSubmit: (values: ReviewFormState, purpose: ReviewFormPurpose) => Promise<void>;
+}) {
+  const scheduled = review.status === 'scheduled';
+  const regionId = `team-review-${review.id}`;
+  const subjectName = reviewSubjectName(review);
+  const formEmployees = review.employee
+    && !employees.some((employee) => employee.id === review.employee?.id)
+    ? [review.employee, ...employees]
+    : employees;
+  const editLabel = scheduled
+    ? `Редактировать запланированное ревью ${subjectName}`
+    : `Редактировать ревью ${subjectName}`;
+
+  const editButton = canManage && (
+    <button
+      ref={editButtonRef}
+      type="button"
+      onClick={onEdit}
+      disabled={saving}
+      aria-label={editLabel}
+      className="inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-3 text-sm font-medium text-gray-700 outline-none hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50"
+    >
+      <Pencil className="h-4 w-4" aria-hidden="true" />
+      <span className="hidden lg:inline">Редактировать</span>
+    </button>
+  );
+
+  return (
+    <article>
+      {scheduled ? (
+        <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:px-5">
+          <div className="flex min-h-[52px] min-w-0 flex-1 items-center gap-3">
+            <ReviewSummary review={review} today={today} />
+            <ReviewMeta review={review} today={today} />
+          </div>
+          {canManage && (
+            <div className="flex flex-wrap items-center gap-2 sm:ml-2 sm:justify-end">
+              <button
+                ref={primaryButtonRef}
+                type="button"
+                onClick={onComplete}
+                disabled={saving}
+                className="inline-flex min-h-11 flex-1 items-center justify-center rounded-xl bg-gray-900 px-4 text-sm font-semibold text-white outline-none hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 disabled:opacity-50 sm:flex-none"
+              >
+                Заполнить итоги
+              </button>
+              {editButton}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="flex items-stretch">
+          <button
+            ref={primaryButtonRef}
+            type="button"
+            onClick={onToggle}
+            aria-expanded={open}
+            aria-controls={regionId}
+            className="flex min-h-[72px] min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left outline-none transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 sm:px-5"
+          >
+            <ReviewSummary review={review} today={today} />
+            <ReviewMeta review={review} today={today} />
+            <ChevronDown
+              className={`h-4 w-4 shrink-0 text-gray-400 transition-transform duration-200 motion-reduce:transition-none ${open ? 'rotate-180' : ''}`}
+              aria-hidden="true"
+            />
+          </button>
+          {canManage && <div className="flex shrink-0 items-center pr-3 sm:pr-5">{editButton}</div>}
+        </div>
+      )}
+
+      {editorPurpose && canManage && (
+        <div className="border-t border-gray-100 bg-gray-50/60 px-4 py-5 sm:px-6">
+          <ReviewForm
+            key={`${review.id}:${editorPurpose}`}
+            employees={formEmployees}
+            initial={{
+              reviewDate: review.reviewDate.slice(0, 10),
+              subjectType: review.employee ? 'employee' : 'candidate',
+              employeeUserId: review.employee?.id || '',
+              candidateName: review.candidateName || '',
+              reason: reviewText(review.reason),
+              outcomes: reviewText(review.outcomes),
+              problems: reviewText(review.problems),
+              recommendations: reviewText(review.recommendations),
+            }}
+            purpose={editorPurpose}
+            mode="edit"
+            saving={saving}
+            error={error}
+            onCancel={onCancel}
+            onSubmit={(values) => onSubmit(values, editorPurpose)}
+          />
+        </div>
+      )}
+
+      {!scheduled && open && !editorPurpose && (
+        <div id={regionId} className="border-t border-gray-100 bg-gray-50/60 px-4 py-5 sm:px-6">
+          {review.reason && (
+            <div className="mb-5">
+              <ReviewSection title="Комментарий" text={review.reason} />
+            </div>
+          )}
+          <div className="grid gap-5 lg:grid-cols-3">
+            <ReviewSection title="Основные итоги" text={review.outcomes} />
+            <ReviewSection title="Зоны внимания" text={review.problems} />
+            <ReviewSection title="Рекомендации" text={review.recommendations} />
+          </div>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function ReviewsGroup({
+  id,
+  title,
+  shown,
+  total,
+  emptyTitle,
+  emptyDescription,
+  children,
+}: {
+  id: string;
+  title: string;
+  shown: number;
+  total: number;
+  emptyTitle: string;
+  emptyDescription: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section aria-labelledby={id} className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
+      <div className="border-b border-gray-100 bg-gray-50/60 px-4 py-3 sm:px-5">
+        <h3 id={id} className="text-base font-bold text-gray-900">{title}</h3>
+        <p className="text-xs text-gray-500">Показано {shown} из {total}</p>
+      </div>
+      {shown === 0 ? (
+        <div className="px-5 py-10 text-center">
+          <p className="text-sm font-semibold text-gray-900">{emptyTitle}</p>
+          <p className="mx-auto mt-1 max-w-md text-sm text-gray-500">{emptyDescription}</p>
+        </div>
+      ) : <div className="divide-y divide-gray-100">{children}</div>}
     </section>
   );
 }
 
 function ReviewSkeleton() {
   return (
-    <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white" aria-label="Загрузка ревью">
-      {[0, 1, 2].map((item) => (
-        <div key={item} className="flex h-20 items-center gap-3 border-b border-gray-100 px-5 last:border-0">
-          <span className="h-9 w-9 animate-pulse rounded-full bg-gray-100" />
-          <span className="h-4 w-40 animate-pulse rounded bg-gray-100" />
-          <span className="ml-auto h-4 w-24 animate-pulse rounded bg-gray-100" />
+    <div className="space-y-4" aria-hidden="true">
+      {[0, 1].map((group) => (
+        <div key={group} className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
+          {[0, 1].map((item) => (
+            <div key={item} className="flex h-20 items-center gap-3 border-b border-gray-100 px-5 last:border-0">
+              <span className="h-9 w-9 animate-pulse rounded-full bg-gray-100 motion-reduce:animate-none" />
+              <span className="h-4 w-40 animate-pulse rounded bg-gray-100 motion-reduce:animate-none" />
+              <span className="ml-auto h-4 w-24 animate-pulse rounded bg-gray-100 motion-reduce:animate-none" />
+            </div>
+          ))}
         </div>
       ))}
     </div>
@@ -220,23 +591,37 @@ export default function TeamReviewsPanel() {
   const [actionError, setActionError] = useState('');
   const [saving, setSaving] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editor, setEditor] = useState<EditorState | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState('');
-  const [employeeFilter, setEmployeeFilter] = useState('all');
+  const [participantFilter, setParticipantFilter] = useState('all');
   const [yearFilter, setYearFilter] = useState('all');
   const [requestVersion, setRequestVersion] = useState(0);
   const createButtonRef = useRef<HTMLButtonElement>(null);
-  const reviewButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const reviewPrimaryButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const reviewEditButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const today = localIsoDate();
 
-  const restoreFocus = (reviewId?: string) => {
+  const restoreFocus = (
+    reviewId?: string,
+    target: ReviewFocusTarget = 'primary',
+  ) => {
     window.requestAnimationFrame(() => {
-      if (reviewId) reviewButtonRefs.current.get(reviewId)?.focus();
-      else createButtonRef.current?.focus();
+      if (!reviewId) {
+        createButtonRef.current?.focus();
+        return;
+      }
+      const preferredRefs = target === 'edit'
+        ? reviewEditButtonRefs.current
+        : reviewPrimaryButtonRefs.current;
+      const fallback = reviewPrimaryButtonRefs.current.get(reviewId)
+        || createButtonRef.current;
+      (preferredRefs.get(reviewId) || fallback)?.focus();
     });
   };
 
   const load = useCallback(async () => {
+    setLoading(true);
     setError('');
     try {
       const payload = await teamApiFetch('/api/team/reviews');
@@ -266,39 +651,103 @@ export default function TeamReviewsPanel() {
   const filteredReviews = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase('ru-RU');
     return (data?.reviews || []).filter((review) => {
-      if (employeeFilter !== 'all' && review.employee.id !== employeeFilter) return false;
+      if (participantFilter === 'candidates' && review.employee) return false;
+      if (participantFilter === 'employees' && !review.employee) return false;
+      if (
+        !['all', 'candidates', 'employees'].includes(participantFilter)
+        && review.employee?.id !== participantFilter
+      ) return false;
       if (yearFilter !== 'all' && review.reviewDate.slice(0, 4) !== yearFilter) return false;
       if (!normalizedQuery) return true;
       return [
-        review.employee.name,
-        review.employee.email || '',
-        review.outcomes,
-        review.problems,
-        review.recommendations,
+        reviewSubjectName(review),
+        review.employee?.email || '',
+        reviewText(review.reason),
+        reviewText(review.outcomes),
+        reviewText(review.problems),
+        reviewText(review.recommendations),
       ].some((value) => value.toLocaleLowerCase('ru-RU').includes(normalizedQuery));
     });
-  }, [data?.reviews, employeeFilter, query, yearFilter]);
+  }, [data?.reviews, participantFilter, query, yearFilter]);
 
-  const submitReview = async (values: ReviewFormState, reviewId?: string) => {
+  const scheduledReviews = useMemo(() => filteredReviews
+    .filter((review) => review.status === 'scheduled')
+    .sort((a, b) => a.reviewDate.localeCompare(b.reviewDate) || a.createdAt.localeCompare(b.createdAt)), [filteredReviews]);
+
+  const completedReviews = useMemo(() => filteredReviews
+    .filter((review) => review.status !== 'scheduled')
+    .sort((a, b) => b.reviewDate.localeCompare(a.reviewDate) || b.updatedAt.localeCompare(a.updatedAt)), [filteredReviews]);
+
+  const totalScheduled = data?.reviews.filter((review) => review.status === 'scheduled').length || 0;
+  const totalCompleted = (data?.reviews.length || 0) - totalScheduled;
+  const filtersActive = Boolean(query.trim() || participantFilter !== 'all' || yearFilter !== 'all');
+
+  const submitReview = async (
+    values: ReviewFormState,
+    purpose: ReviewFormPurpose,
+    reviewId?: string,
+    focusTarget: ReviewFocusTarget = 'primary',
+    expectedUpdatedAt?: string,
+  ) => {
     setSaving(true);
     setActionError('');
-    const body: TeamReviewWrite = buildTeamReviewWrite(values);
+    const schedule = values.subjectType === 'candidate'
+      ? buildTeamReviewScheduleWrite({
+          subjectType: 'candidate',
+          reviewDate: values.reviewDate,
+          candidateName: values.candidateName,
+          reason: values.reason,
+        })
+      : buildTeamReviewScheduleWrite({
+          subjectType: 'employee',
+          reviewDate: values.reviewDate,
+          employeeUserId: values.employeeUserId,
+          reason: values.reason,
+        });
+    const body = purpose === 'schedule'
+      ? schedule
+      : {
+          ...schedule,
+          ...buildTeamReviewCompletionWrite({
+            outcomes: values.outcomes,
+            problems: values.problems,
+            recommendations: values.recommendations,
+          }),
+        };
+    const requestBody = reviewId
+      ? {
+          ...body,
+          employeeUserId: values.subjectType === 'employee' ? values.employeeUserId : null,
+          candidateName: values.subjectType === 'candidate' ? values.candidateName.trim() : null,
+          expectedUpdatedAt,
+        }
+      : body;
+    let saved = false;
     try {
       await teamApiFetch(reviewId ? `/api/team/reviews/${reviewId}` : '/api/team/reviews', {
         method: reviewId ? 'PATCH' : 'POST',
-        body: JSON.stringify(body),
+        body: JSON.stringify(requestBody),
       });
       await load();
       setCreating(false);
-      setEditingId(null);
-      if (reviewId) {
-        setExpanded((current) => new Set(current).add(reviewId));
-      }
-      restoreFocus(reviewId);
+      setEditor(null);
+      saved = true;
     } catch (submitError) {
-      setActionError(submitError instanceof Error ? submitError.message : 'Не удалось сохранить ревью.');
+      if (
+        reviewId
+        && submitError instanceof TeamApiError
+        && submitError.code === 'review_conflict'
+      ) {
+        setEditor((current) => current?.reviewId === reviewId
+          ? { ...current, conflicted: true }
+          : current);
+        setActionError(REVIEW_CONFLICT_MESSAGE);
+      } else {
+        setActionError(submitError instanceof Error ? submitError.message : 'Не удалось сохранить ревью.');
+      }
     } finally {
       setSaving(false);
+      if (saved) restoreFocus(reviewId, focusTarget);
     }
   };
 
@@ -311,26 +760,107 @@ export default function TeamReviewsPanel() {
     });
   };
 
+  const openEditor = (
+    review: TeamReview,
+    purpose: ReviewFormPurpose,
+    returnFocus: ReviewFocusTarget,
+  ) => {
+    setCreating(false);
+    setEditor({
+      reviewId: review.id,
+      purpose,
+      returnFocus,
+      expectedUpdatedAt: review.updatedAt,
+      conflicted: false,
+    });
+    setActionError('');
+  };
+
+  const closeEditor = (
+    reviewId: string,
+    returnFocus: ReviewFocusTarget,
+    refreshAfterConflict: boolean,
+  ) => {
+    setEditor(null);
+    setActionError('');
+    if (!refreshAfterConflict) {
+      restoreFocus(reviewId, returnFocus);
+      return;
+    }
+
+    void load().finally(() => restoreFocus(reviewId, returnFocus));
+  };
+
+  const renderReview = (review: TeamReview) => {
+    const rowEditor = editor?.reviewId === review.id ? editor : null;
+    const returnFocus = rowEditor?.returnFocus || 'primary';
+
+    return (
+      <ReviewRow
+        key={review.id}
+        review={review}
+        today={today}
+        employees={data?.employees || []}
+        canManage={data?.canManage === true}
+        open={expanded.has(review.id)}
+        editorPurpose={rowEditor?.purpose || null}
+        saving={saving || loading}
+        error={rowEditor ? actionError : ''}
+        primaryButtonRef={(node) => {
+          storeReviewButtonRef(reviewPrimaryButtonRefs.current, review.id, node);
+        }}
+        editButtonRef={(node) => {
+          storeReviewButtonRef(reviewEditButtonRefs.current, review.id, node);
+        }}
+        onToggle={() => toggleReview(review.id)}
+        onEdit={() => openEditor(
+          review,
+          review.status === 'scheduled' ? 'schedule' : 'complete',
+          'edit',
+        )}
+        onComplete={() => openEditor(review, 'complete', 'primary')}
+        onCancel={() => closeEditor(
+          review.id,
+          returnFocus,
+          rowEditor?.conflicted === true,
+        )}
+        onSubmit={(values, purpose) => submitReview(
+          values,
+          purpose,
+          review.id,
+          returnFocus,
+          rowEditor?.expectedUpdatedAt,
+        )}
+      />
+    );
+  };
+
   return (
-    <section className="space-y-5" aria-labelledby="team-reviews-title">
+    <>
+      <section
+        className="space-y-5"
+        aria-labelledby="team-reviews-title"
+        aria-busy={loading}
+      >
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h2 id="team-reviews-title" className="text-xl font-bold tracking-tight text-gray-900">Ревью сотрудников</h2>
-          <p className="mt-1 text-sm text-gray-500">Итоги, зоны внимания и следующие договорённости в одном месте.</p>
+          <h2 id="team-reviews-title" className="text-xl font-bold tracking-tight text-gray-900">Ревью</h2>
+          <p className="mt-1 text-sm text-gray-500">Планируйте ревью сотрудников и кандидатов, затем сохраняйте итоги и договорённости.</p>
         </div>
         {data?.canManage && !creating && (
           <button
             ref={createButtonRef}
             type="button"
+            disabled={loading}
             onClick={() => {
               setCreating(true);
-              setEditingId(null);
+              setEditor(null);
               setActionError('');
             }}
-            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-gray-900 px-4 text-sm font-semibold text-white outline-none hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-gray-900 px-4 text-sm font-semibold text-white outline-none hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-60"
           >
             <Plus className="h-4 w-4" aria-hidden="true" />
-            Добавить ревью
+            Запланировать ревью
           </button>
         )}
       </div>
@@ -339,24 +869,26 @@ export default function TeamReviewsPanel() {
         <div className="rounded-2xl border border-gray-200 bg-gray-50/70 p-4 sm:p-6">
           <div className="mb-5 flex items-center justify-between gap-3">
             <div>
-              <h3 className="text-base font-bold text-gray-900">Новое ревью</h3>
-              <p className="mt-0.5 text-sm text-gray-500">Имя сотрудника выбирается из профилей Portal.</p>
+              <h3 className="text-base font-bold text-gray-900">Запланировать ревью</h3>
+              <p className="mt-0.5 text-sm text-gray-500">Выберите сотрудника или укажите имя кандидата. Остальной контекст можно оставить в комментарии.</p>
             </div>
             <button
               type="button"
+              disabled={saving}
               onClick={() => {
                 setCreating(false);
                 setActionError('');
                 restoreFocus();
               }}
               aria-label="Закрыть форму"
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-gray-500 outline-none hover:bg-gray-200/70 focus-visible:ring-2 focus-visible:ring-blue-500"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-gray-500 outline-none hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <X className="h-4 w-4" aria-hidden="true" />
             </button>
           </div>
           <ReviewForm
             employees={data.employees}
+            purpose="schedule"
             mode="create"
             saving={saving}
             error={actionError}
@@ -365,7 +897,7 @@ export default function TeamReviewsPanel() {
               setActionError('');
               restoreFocus();
             }}
-            onSubmit={(values) => submitReview(values)}
+            onSubmit={(values) => submitReview(values, 'schedule')}
           />
         </div>
       )}
@@ -395,18 +927,20 @@ export default function TeamReviewsPanel() {
             type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Поиск по сотруднику или содержанию"
-            className="h-11 w-full rounded-xl border border-gray-200 bg-white pl-9 pr-3 text-sm text-gray-900 outline-none placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            placeholder="Поиск по имени, комментарию или итогам"
+            className="h-11 w-full rounded-xl border border-gray-200 bg-white pl-9 pr-3 text-sm text-gray-900 outline-none placeholder:text-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
           />
         </label>
         <label>
-          <span className="sr-only">Сотрудник</span>
+          <span className="sr-only">Фильтр по участнику</span>
           <select
-            value={employeeFilter}
-            onChange={(event) => setEmployeeFilter(event.target.value)}
+            value={participantFilter}
+            onChange={(event) => setParticipantFilter(event.target.value)}
             className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
           >
-            <option value="all">Все сотрудники</option>
+            <option value="all">Все ревью</option>
+            <option value="employees">Все сотрудники</option>
+            <option value="candidates">Кандидаты</option>
             {data?.employees.map((employee) => (
               <option key={employee.id} value={employee.id}>{employee.name}</option>
             ))}
@@ -426,134 +960,42 @@ export default function TeamReviewsPanel() {
       </div>
 
       {loading && !data ? <ReviewSkeleton /> : data && (
-        <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
-          <div className="flex items-center justify-between gap-3 border-b border-gray-100 bg-gray-50/60 px-4 py-3 sm:px-5">
-            <div>
-              <h3 className="text-base font-bold text-gray-900">История ревью</h3>
-              <p className="text-xs text-gray-500">
-                Показано {filteredReviews.length} из {data.reviews.length}
-              </p>
-            </div>
-            {!data.canManage && (
-              <span className="rounded-lg bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">Только ваши ревью</span>
-            )}
-          </div>
+        <div className="space-y-5">
+          <ReviewsGroup
+            id="scheduled-reviews-title"
+            title="Запланировано"
+            shown={scheduledReviews.length}
+            total={totalScheduled}
+            emptyTitle={filtersActive ? 'По фильтрам ничего не найдено' : 'Запланированных ревью нет'}
+            emptyDescription={filtersActive
+              ? 'Измените участника, год или поисковый запрос.'
+              : 'Запланируйте следующую встречу, чтобы она появилась здесь.'}
+          >
+            {scheduledReviews.map(renderReview)}
+          </ReviewsGroup>
 
-          {filteredReviews.length === 0 ? (
-            <div className="px-5 py-12 text-center">
-              <p className="text-sm font-semibold text-gray-900">
-                {data.reviews.length === 0 ? 'Ревью пока не добавлены' : 'По фильтрам ничего не найдено'}
-              </p>
-              <p className="mx-auto mt-1 max-w-md text-sm text-gray-500">
-                {data.reviews.length === 0
-                  ? data.canManage ? 'Добавьте первое ревью, чтобы сохранить договорённости.' : 'Когда руководитель добавит ревью, оно появится здесь.'
-                  : 'Измените сотрудника, год или поисковый запрос.'}
-              </p>
-            </div>
-          ) : (
-            <div className="divide-y divide-gray-100">
-              {filteredReviews.map((review) => {
-                const open = expanded.has(review.id);
-                const editing = editingId === review.id;
-                const regionId = `team-review-${review.id}`;
-                return (
-                  <article key={review.id}>
-                    <button
-                      ref={(node) => {
-                        if (node) reviewButtonRefs.current.set(review.id, node);
-                        else reviewButtonRefs.current.delete(review.id);
-                      }}
-                      type="button"
-                      onClick={() => toggleReview(review.id)}
-                      aria-expanded={open}
-                      aria-controls={regionId}
-                      className="flex min-h-[72px] w-full items-center gap-3 px-4 py-3 text-left outline-none transition-colors hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 sm:px-5"
-                    >
-                      <EmployeeAvatar employee={review.employee} />
-                      <span className="min-w-0 flex-1">
-                        <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                          <span className="truncate text-sm font-semibold text-gray-900">{review.employee.name}</span>
-                          <span className="text-xs text-gray-500">{employeeRole(review.employee)}</span>
-                        </span>
-                        <span className="mt-0.5 block truncate text-sm text-gray-600">{review.outcomes}</span>
-                        <span className="mt-0.5 block text-xs font-medium text-gray-500 sm:hidden">{formatRussianDate(review.reviewDate)}</span>
-                      </span>
-                      <span className="hidden shrink-0 text-right sm:block">
-                        <span className="block text-sm font-medium text-gray-700">{formatRussianDate(review.reviewDate)}</span>
-                        <span className="block text-xs text-gray-500">{review.reviewer ? `Автор: ${review.reviewer.name}` : 'Автор не указан'}</span>
-                      </span>
-                      <ChevronDown
-                        className={`h-4 w-4 shrink-0 text-gray-400 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
-                        aria-hidden="true"
-                      />
-                    </button>
-
-                    {open && (
-                      <div id={regionId} className="border-t border-gray-100 bg-gray-50/60 px-4 py-5 sm:px-6">
-                        <div className="mb-4 sm:hidden">
-                          <p className="text-sm font-medium text-gray-700">{formatRussianDate(review.reviewDate)}</p>
-                          <p className="text-xs text-gray-500">{review.reviewer ? `Автор: ${review.reviewer.name}` : 'Автор не указан'}</p>
-                        </div>
-
-                        {editing && data.canManage ? (
-                          <ReviewForm
-                            key={review.id}
-                            employees={data.employees}
-                            initial={{
-                              reviewDate: review.reviewDate.slice(0, 10),
-                              employeeUserId: review.employee.id,
-                              outcomes: review.outcomes,
-                              problems: review.problems,
-                              recommendations: review.recommendations,
-                            }}
-                            mode="edit"
-                            saving={saving}
-                            error={actionError}
-                            onCancel={() => {
-                              setEditingId(null);
-                              setActionError('');
-                              restoreFocus(review.id);
-                            }}
-                            onSubmit={(values) => submitReview(values, review.id)}
-                          />
-                        ) : (
-                          <>
-                            <div className="grid gap-5 lg:grid-cols-3">
-                              <ReviewSection title="Основные итоги" text={review.outcomes} />
-                              <ReviewSection title="Зоны внимания" text={review.problems} />
-                              <ReviewSection title="Рекомендации" text={review.recommendations} />
-                            </div>
-                            {data.canManage && (
-                              <div className="mt-5 flex justify-end border-t border-gray-200 pt-4">
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setCreating(false);
-                                    setEditingId(review.id);
-                                    setActionError('');
-                                  }}
-                                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 outline-none hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500"
-                                >
-                                  <Pencil className="h-4 w-4" aria-hidden="true" />
-                                  Редактировать
-                                </button>
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </article>
-                );
-              })}
-            </div>
-          )}
+          <ReviewsGroup
+            id="completed-reviews-title"
+            title="История"
+            shown={completedReviews.length}
+            total={totalCompleted}
+            emptyTitle={filtersActive ? 'По фильтрам ничего не найдено' : 'Проведённых ревью пока нет'}
+            emptyDescription={filtersActive
+              ? 'Измените участника, год или поисковый запрос.'
+              : 'После заполнения итогов завершённые ревью появятся здесь.'}
+          >
+            {completedReviews.map(renderReview)}
+          </ReviewsGroup>
         </div>
       )}
 
-      <p className="sr-only" aria-live="polite">
-        {saving ? 'Ревью сохраняется' : ''}
-      </p>
-    </section>
+        <p className="sr-only" aria-live="polite">
+          {saving ? 'Ревью сохраняется' : ''}
+        </p>
+      </section>
+      {loading && (
+        <p className="sr-only" role="status">Загружаем ревью…</p>
+      )}
+    </>
   );
 }

@@ -10,6 +10,16 @@ export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'b
 
 export const ENG_HIRING_SOURCES: EngHiringSource[] = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday', 'smartrecruiters', 'teamtailor', 'jobhive'];
 
+// Default source set for scans and cache filtering: everything EXCEPT workday.
+// Prod evidence (2026-08-02, two full scans): Workday's WAF behaviorally
+// soft-blocks the scanning IP — HTTP 200 with an empty body, no exception, so
+// the curl fallback never fires — even at 2x1500ms pacing (3530 boards -> 0
+// vacancies, ~66 min wasted per run). Single requests pass, so the trigger is
+// the scan pattern, not the TLS fingerprint. Workday coverage comes from the
+// jobhive feed (~729k workday postings, nightly ingest) instead. 'workday'
+// stays a valid source for explicit opt-in (e.g. a future proxy egress).
+export const DEFAULT_ENG_HIRING_SOURCES: EngHiringSource[] = ENG_HIRING_SOURCES.filter((s) => s !== 'workday');
+
 // Sources whose LIST endpoint exposes no posting date at all (BambooHR
 // /careers/list). For these, published_at=null is not a freshness signal — the
 // role is open now — so a recency filter must not silently drop them.
@@ -479,8 +489,25 @@ export function inferCountryCode(location?: string | null, country?: string | nu
   return null;
 }
 
-function isB2BRoleSearch(text?: string | null): boolean {
-  return /\bb2b\b/i.test(text ?? '');
+const B2B_TERM_RE = /\bb2b\b/i;
+
+function splitRoleTerms(text?: string | null): string[] {
+  return String(text ?? '')
+    .split(/[,;\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// Per-term role routing: a term containing "b2b" goes through the strict
+// high-intent sales-title check, any other term is a plain role-regex match
+// (against title + description). Mixed queries ("head of marketing, b2b
+// manager") OR the per-term results — so a single b2b term can no longer
+// hijack the WHOLE query into sales-only mode (prod issue 2026-08-03:
+// "head of marketing" was silently dropped).
+function roleTermMatches(term: string, title: string, haystack: string): boolean {
+  return B2B_TERM_RE.test(term)
+    ? isHighIntentB2BSalesTitle(title)
+    : buildRolesRegex(term).test(haystack);
 }
 
 export function isHighIntentB2BSalesTitle(title: string): boolean {
@@ -552,15 +579,13 @@ export function mergeEngHiringVacancyDetail(vacancy: EngHiringVacancy, detailRaw
 }
 
 export function matchesEngHiringVacancy(vacancy: EngHiringVacancy, config: EngHiringSearchConfig): boolean {
-  const sources = config.sources?.length ? config.sources : ENG_HIRING_SOURCES;
+  const sources = config.sources?.length ? config.sources : DEFAULT_ENG_HIRING_SOURCES;
   if (!sources.includes(vacancy.source)) return false;
 
-  if (isB2BRoleSearch(config.text)) {
-    if (!isHighIntentB2BSalesTitle(vacancy.vacancy_title)) return false;
-  } else {
-    const roleRegex = buildRolesRegex(config.text);
+  const roleTerms = splitRoleTerms(config.text);
+  if (roleTerms.length > 0) {
     const roleHaystack = `${vacancy.vacancy_title} ${vacancy.vacancy_description ?? ''}`;
-    if (!roleRegex.test(roleHaystack)) return false;
+    if (!roleTerms.some((term) => roleTermMatches(term, vacancy.vacancy_title, roleHaystack))) return false;
   }
 
   if (config.countries?.length) {
@@ -594,13 +619,11 @@ function parsedTime(value: string | null | undefined): number {
 function scoreEngHiringVacancy(vacancy: EngHiringVacancy, config: Pick<EngHiringSearchConfig, 'text'> = {}): number {
   let score = 0;
   const title = vacancy.vacancy_title;
-  if (isB2BRoleSearch(config.text)) {
-    if (isHighIntentB2BSalesTitle(title)) score += 1000;
-  } else {
-    const roleRegex = buildRolesRegex(config.text);
-    if (roleRegex.test(title)) score += 500;
-    if (vacancy.vacancy_description && roleRegex.test(vacancy.vacancy_description)) score += 100;
-  }
+  const roleTerms = splitRoleTerms(config.text);
+  if (roleTerms.some((term) => B2B_TERM_RE.test(term) && isHighIntentB2BSalesTitle(title))) score += 1000;
+  const plainTerms = roleTerms.filter((term) => !B2B_TERM_RE.test(term));
+  if (plainTerms.some((term) => buildRolesRegex(term).test(title))) score += 500;
+  if (vacancy.vacancy_description && plainTerms.some((term) => buildRolesRegex(term).test(vacancy.vacancy_description!))) score += 100;
   if (vacancy.salary_from != null || vacancy.salary_to != null) score += 40;
   if (vacancy.salary_from != null && vacancy.salary_to != null) score += 10;
   if (vacancy.company_site_url) score += 20;

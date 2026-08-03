@@ -2,16 +2,18 @@
 
 /**
  * Шаг 1 мастера «Движка вертикалей» — «Исследование».
- * Три состояния: пустое (объяснение + запуск + оффер + эталон стиля), прогресс по стадиям
+ * Три состояния: пустое (объяснение + запуск + оффер + подпись отправителя +
+ * эталон стиля), прогресс по стадиям
  * research-пайплайна человеческими формулировками (без технических деталей)
  * и компактное «готово». Навигация между шагами — забота оболочки (ProjectDetail).
  * Питается от массива jobs проекта: состояние стадии = статус её последней джобы.
+ * Визуал — токены design.ts: без иконок, статусы точками, один синий акцент.
  */
 
 import { useRef, useState, type JSX } from 'react';
-import { Check, CheckCircle2, FlaskConical, Play, Trash2, XCircle } from 'lucide-react';
 import type { HeStage } from '@/lib/hypothesisEngine/types';
-import { Badge, Spinner, StatusBox } from '../ui';
+import { Badge, StatusBox } from '../ui';
+import { HE, Spinner, StatusDot } from '../design';
 import {
   HE_API,
   heDelete,
@@ -79,6 +81,9 @@ export function Step1Research({
   // (ProjectDetail может не передавать styleValue).
   const briefStyle = project?.brief?.style_override;
   const resolvedStyleValue = styleValue ?? (typeof briefStyle === 'string' ? briefStyle : '');
+  // Подпись отправителя — тем же паттерном из brief (signature_override).
+  const briefSignature = project?.brief?.signature_override;
+  const resolvedSignatureValue = typeof briefSignature === 'string' ? briefSignature : '';
   const researchJobs = jobs.filter((j) => RESEARCH_STAGE_SET.has(j.stage));
   const hasActiveResearch = researchJobs.some((j) => j.status === 'pending' || j.status === 'running');
   const failedStages = RESEARCH_STAGES.filter(({ stage }) => latestJobOf(jobs, stage)?.status === 'failed');
@@ -89,13 +94,13 @@ export function Step1Research({
 
   if (running) {
     return (
-      <section className="mx-auto max-w-xl rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
-        <h2 className="mb-4 text-base font-semibold text-gray-900">Идёт исследование…</h2>
+      <section className={`mx-auto max-w-xl ${HE.card} ${HE.cardPad}`}>
+        <h2 className={`mb-4 ${HE.secTitle}`}>Идёт исследование…</h2>
         <StageChecklist jobs={jobs} running />
         {failedStages.length > 0 ? (
           <FailureNote failedStages={failedStages} jobs={jobs} busy={busy} onRetry={onStartResearch} />
         ) : null}
-        <p className="mt-4 text-xs text-gray-400">
+        <p className={`mt-4 text-xs ${HE.muted}`}>
           Это займёт несколько минут, страницу можно не держать открытой.
         </p>
       </section>
@@ -104,8 +109,8 @@ export function Step1Research({
 
   if (failed) {
     return (
-      <section className="mx-auto max-w-xl rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
-        <h2 className="mb-4 text-base font-semibold text-gray-900">Исследование остановилось</h2>
+      <section className={`mx-auto max-w-xl ${HE.card} ${HE.cardPad}`}>
+        <h2 className={`mb-4 ${HE.secTitle}`}>Исследование остановилось</h2>
         <StageChecklist jobs={jobs} running={false} />
         <FailureNote
           failedStages={failedStages}
@@ -120,9 +125,9 @@ export function Step1Research({
 
   if (done) {
     return (
-      <section className="mx-auto max-w-xl rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+      <section className={`mx-auto max-w-xl ${HE.card} ${HE.cardPad}`}>
         <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
-          <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-500" aria-hidden />
+          <StatusDot tone="ok" className="mt-1.5" />
           <div>
             <p className="text-sm font-semibold text-emerald-800">Исследование готово</p>
             <p className="mt-0.5 text-sm text-emerald-700">
@@ -143,7 +148,7 @@ export function Step1Research({
                 onStartResearch();
               }
             }}
-            className="text-xs font-medium text-gray-400 underline decoration-dotted underline-offset-4 transition hover:text-gray-600 disabled:opacity-50"
+            className={HE.btnQuiet}
           >
             Перезапустить исследование
           </button>
@@ -160,6 +165,7 @@ export function Step1Research({
       onSaveOffer={onSaveOffer}
       styleValue={resolvedStyleValue}
       onStyleSaved={onStyleSaved}
+      signatureValue={resolvedSignatureValue}
       projectId={project?.id ?? null}
       cases={cases ?? []}
       onCasesChanged={onCasesChanged}
@@ -176,6 +182,7 @@ function NotStarted({
   onSaveOffer,
   styleValue,
   onStyleSaved,
+  signatureValue,
   projectId,
   cases,
   onCasesChanged,
@@ -186,30 +193,27 @@ function NotStarted({
   onSaveOffer: (v: string) => Promise<void> | void;
   styleValue: string;
   onStyleSaved?: () => void;
+  signatureValue: string;
   projectId: string | null;
   cases: HeCaseEntry[];
   onCasesChanged?: () => void;
 }) {
   return (
-    <section className="mx-auto max-w-xl rounded-2xl border border-gray-200 bg-white px-6 py-10 text-center shadow-sm">
-      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
-        <FlaskConical className="h-6 w-6" aria-hidden />
-      </div>
-      <h2 className="mt-4 text-lg font-semibold text-gray-900">Исследование рынка</h2>
-      <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-gray-600">
+    <section className={`mx-auto max-w-xl ${HE.card} px-6 py-10 text-center`}>
+      <p className="text-[44px] font-light leading-none text-gray-200" aria-hidden>
+        01
+      </p>
+      <h2 className="mt-3 text-lg font-semibold text-gray-900">Исследование рынка</h2>
+      <p className={`mx-auto mt-2 max-w-md ${HE.lead}`}>
         Движок изучит сайт, найдёт конкурентов и их клиентов, соберёт 25–40 гипотез рынков с доказательствами
         и сложит их в вертикали. Обычно 10–20 минут.
       </p>
-      <button
-        type="button"
-        onClick={onStartResearch}
-        disabled={busy}
-        className="mt-6 inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {busy ? <Spinner className="h-4 w-4" /> : <Play className="h-4 w-4" aria-hidden />}
+      <button type="button" onClick={onStartResearch} disabled={busy} className={`mt-6 ${HE.btnPrimary}`}>
+        {busy ? <Spinner className="h-4 w-4" /> : null}
         Запустить исследование
       </button>
       <OfferBlock offerValue={offerValue} onSaveOffer={onSaveOffer} />
+      <SignatureBlock projectId={projectId} signatureValue={signatureValue} />
       <StyleBlock projectId={projectId} styleValue={styleValue} onSaved={onStyleSaved} />
       <CasesBlock projectId={projectId} cases={cases} onCasesChanged={onCasesChanged} />
     </section>
@@ -247,7 +251,7 @@ function OfferBlock({
       <label htmlFor="he-step1-offer" className="text-xs font-semibold uppercase tracking-widest text-gray-400">
         Оффер (необязательно)
       </label>
-      <p className="mt-1 text-xs leading-relaxed text-gray-400">
+      <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
         Как именно продаём: кому, что и в какие сроки — движок использует эту формулировку в письмах
       </p>
       <textarea
@@ -260,20 +264,95 @@ function OfferBlock({
           setSaved(false);
         }}
         placeholder="Например: 3–5 встреч в месяц с HRD крупных работодателей, тест за 2 недели"
-        className="mt-2 w-full resize-y rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+        className={`mt-2 resize-y ${HE.input}`}
       />
       <div className="mt-2 flex items-center gap-2">
         <button
           type="button"
           onClick={() => void handleSave()}
           disabled={saving || !dirty}
-          className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+          className={HE.btnSmall}
         >
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
         {saved ? <span className="text-xs text-emerald-500">Сохранено ✓</span> : null}
       </div>
+    </div>
+  );
+}
+
+/** Подпись отправителя: ставится дословно в конце каждого письма. Сохраняет сам через PATCH. */
+function SignatureBlock({
+  projectId,
+  signatureValue,
+}: {
+  projectId: string | null;
+  signatureValue: string;
+}) {
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleSave = async () => {
+    if (saving || !projectId) return;
+    setSaving(true);
+    setError('');
+    try {
+      const { ok, data } = await hePatch<HeProjectResponse>(`${HE_API}/projects/${projectId}`, {
+        signature_override: taRef.current?.value ?? '',
+      });
+      if (!ok) {
+        setError(data.error || 'Не удалось сохранить подпись');
+        return;
+      }
+      setSaved(true);
+      setDirty(false);
+      window.setTimeout(() => setSaved(false), 2000);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
+      <label
+        htmlFor="he-step1-signature"
+        className="text-xs font-semibold uppercase tracking-widest text-gray-400"
+      >
+        Отправитель (подпись в письмах)
+      </label>
+      <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
+        Как подписываемся в письмах: имя, роль, сайт. Пример: Сергей Лазуткин, руководитель направления, Polza,
+        polzaagency.ru. Пусто: подпишемся командой компании из брифа.
+      </p>
+      <textarea
+        id="he-step1-signature"
+        ref={taRef}
+        rows={2}
+        defaultValue={signatureValue}
+        onChange={() => {
+          setDirty(true);
+          setSaved(false);
+        }}
+        placeholder="Сергей Лазуткин, руководитель направления, Polza, polzaagency.ru"
+        className={`mt-2 resize-y ${HE.input}`}
+      />
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => void handleSave()}
+          disabled={saving || !dirty}
+          className={HE.btnSmall}
+        >
+          {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
+          Сохранить
+        </button>
+        {saved ? <span className="text-xs text-emerald-500">Сохранено ✓</span> : null}
+      </div>
+      {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
     </div>
   );
 }
@@ -320,7 +399,7 @@ function StyleBlock({
       <label htmlFor="he-step1-style" className="text-xs font-semibold uppercase tracking-widest text-gray-400">
         Эталон стиля (необязательно)
       </label>
-      <p className="mt-1 text-xs leading-relaxed text-gray-400">
+      <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
         Вставьте 1–2 письма, которые считаете идеальными. Движок будет писать в этой манере — факты и имена не
         копирует.
       </p>
@@ -334,14 +413,14 @@ function StyleBlock({
           setSaved(false);
         }}
         placeholder="Пример письма, которое нравится…"
-        className="mt-2 w-full resize-y rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+        className={`mt-2 resize-y ${HE.input}`}
       />
       <div className="mt-2 flex items-center gap-2">
         <button
           type="button"
           onClick={() => void handleSave()}
           disabled={saving || !dirty}
-          className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+          className={HE.btnSmall}
         >
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
@@ -413,7 +492,7 @@ function CasesBlock({
       <summary className="flex cursor-pointer select-none items-center gap-2 text-xs font-semibold uppercase tracking-widest text-gray-400 transition hover:text-gray-600">
         Кейсы клиента ({cases.length})
       </summary>
-      <p className="mt-2 text-xs leading-relaxed text-gray-400">
+      <p className={`mt-2 text-xs leading-relaxed ${HE.muted}`}>
         Кейсы с сайта собираются автоматически. Можно добавить вручную — текст из PDF/презентации;
         используются как доказательство в письмах.
       </p>
@@ -442,20 +521,16 @@ function CasesBlock({
                   onClick={() => void handleDelete(c.id)}
                   disabled={deletingId === c.id}
                   title="Удалить кейс"
-                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-400 transition hover:border-red-200 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="shrink-0 text-[11px] font-medium text-gray-400 transition hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {deletingId === c.id ? (
-                    <Spinner className="h-3.5 w-3.5" />
-                  ) : (
-                    <Trash2 className="h-3.5 w-3.5" aria-hidden />
-                  )}
+                  {deletingId === c.id ? <Spinner className="h-3.5 w-3.5" /> : 'Удалить'}
                 </button>
               ) : null}
             </li>
           ))}
         </ul>
       ) : (
-        <p className="mt-3 text-xs text-gray-400">Кейсов пока нет.</p>
+        <p className={`mt-3 text-xs ${HE.muted}`}>Кейсов пока нет.</p>
       )}
 
       <div className="mt-3">
@@ -465,7 +540,7 @@ function CasesBlock({
           onChange={(e) => setText(e.target.value)}
           placeholder="Вставьте текст кейса…"
           aria-label="Текст кейса"
-          className="w-full resize-y rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+          className={`resize-y ${HE.input}`}
         />
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <input
@@ -474,13 +549,13 @@ function CasesBlock({
             onChange={(e) => setFilename(e.target.value)}
             placeholder="Имя файла (необязательно)"
             aria-label="Имя файла"
-            className="h-9 min-w-0 flex-1 rounded-lg border border-gray-200 bg-white px-3 text-xs text-gray-800 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+            className={`h-9 min-w-0 flex-1 ${HE.input}`}
           />
           <button
             type="button"
             onClick={() => void handleAdd()}
             disabled={saving || !text.trim()}
-            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            className={HE.btnSmall}
           >
             {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
             Добавить кейс
@@ -506,6 +581,14 @@ function progressText(job: HeJobSummary | undefined): string | null {
   if (!counter && !label) return null;
   return [counter, label].filter(Boolean).join(' · ');
 }
+
+/** Тон статусной точки для состояния стадии. */
+const STAGE_DOT_TONE: Record<StageState, 'ok' | 'info' | 'muted' | 'err'> = {
+  done: 'ok',
+  current: 'info',
+  upcoming: 'muted',
+  failed: 'err',
+};
 
 /** Вертикальный чек-лист стадий: сделано / идёт / впереди / не удалось. У активной — живой счётчик. */
 function StageChecklist({ jobs, running }: { jobs: HeJobSummary[]; running: boolean }) {
@@ -541,7 +624,7 @@ function StageChecklist({ jobs, running }: { jobs: HeJobSummary[]; running: bool
             key={stage}
             className={`flex items-center gap-2.5 text-sm ${
               state === 'current'
-                ? 'font-medium text-blue-700'
+                ? 'font-semibold text-gray-900'
                 : state === 'done'
                   ? 'text-gray-600'
                   : state === 'failed'
@@ -550,15 +633,7 @@ function StageChecklist({ jobs, running }: { jobs: HeJobSummary[]; running: bool
             }`}
           >
             <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-              {state === 'done' ? (
-                <Check className="h-4 w-4 text-emerald-500" aria-hidden />
-              ) : state === 'current' ? (
-                <Spinner className="h-4 w-4 text-blue-500" />
-              ) : state === 'failed' ? (
-                <XCircle className="h-4 w-4 text-red-500" aria-hidden />
-              ) : (
-                <span className="h-1.5 w-1.5 rounded-full bg-gray-300" aria-hidden />
-              )}
+              <StatusDot tone={STAGE_DOT_TONE[state]} className={state === 'current' ? 'animate-pulse' : ''} />
             </span>
             <span>
               {line}
@@ -598,12 +673,7 @@ function FailureNote({
       {failedStages.length === 0 && projectError ? (
         <StatusBox tone="error">Исследование не удалось: {projectError}</StatusBox>
       ) : null}
-      <button
-        type="button"
-        onClick={onRetry}
-        disabled={busy}
-        className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-      >
+      <button type="button" onClick={onRetry} disabled={busy} className={HE.btnPrimary}>
         {busy ? <Spinner className="h-4 w-4" /> : null}
         Попробовать снова
       </button>

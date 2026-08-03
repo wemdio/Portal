@@ -37,7 +37,7 @@ SEC_USER_AGENT="Studio Portal contact@yourstudio.com" \
 #   • pass --include-funds to keep pooled investment funds (excluded by default)
 #   • or point at an already-extracted folder: --dir ./tmp/2025Q4_d
 
-# 3) OPTIONAL: enrich SEC rows with website/industry from PDL (exact-name match)
+# 3) OPTIONAL: enrich SEC rows with website/industry from PDL (normalized-name match)
 psql "$DATABASE_URL" -f scripts/funded/enrich-sec-from-pdl.sql
 ```
 
@@ -71,9 +71,14 @@ psql "$DATABASE_URL" -f scripts/funded/enrich-sec-from-pdl.sql
   email on EVERY request — without it (or with one its WAF dislikes) you get 403.
 - **PDL enrichment** (`enrich-sec-from-pdl.sql`): re-run after every large SEC
   ingest (a bulk quarterly run or a big daily-poller catch-up) — new SEC rows
-  arrive without website/industry. The script creates the `idx_pdl_lower_name`
-  index on `pdl_companies(lower(name))` itself (`create index if not exists`),
-  so the first run over the full PDL catalog is slow; later runs reuse the index.
+  arrive without website/industry. Matching is by NORMALIZED name (lowercase,
+  punctuation and legal/generic suffixes stripped: SEC legal entities ↔ PDL
+  brand names) with false-positive guards (normalized name ≥ 5 chars and
+  contains a letter). Measured on a 2000-row sample (2026-08-02): ~28% of
+  websiteless SEC rows get a website, vs ~4% with the old exact-name match.
+  One pass over `pdl_companies` (~13M rows with website) takes a few minutes;
+  the script is idempotent (touches only `website IS NULL` rows), so re-runs
+  process just the delta.
 
 ## Attribution
 

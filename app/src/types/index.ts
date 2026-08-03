@@ -81,6 +81,10 @@ export interface Project {
   /** Lead handoff to client (auto-передача). Empty handoff_email = disabled. */
   handoff_email?: string | null;
   handoff_legend?: string | null;
+  /** ON: ИИ адаптирует легенду под ответ лида; OFF/NULL: легенда дословно. */
+  handoff_ai_adapt?: boolean | null;
+  /** ON: передача уходит сразу без кнопки-подтверждения спеца в TG; OFF/NULL: кнопка. */
+  handoff_auto_send?: boolean | null;
 
   /** Кастомное определение лида для ИИ-квалификатора (все кампании проекта). Пусто = дефолтные критерии. */
   lead_criteria?: string | null;
