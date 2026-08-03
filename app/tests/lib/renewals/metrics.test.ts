@@ -1,28 +1,32 @@
 import {
   computeRenewalsMetrics,
-  type RenewalMarkRow,
-  type RevenueTransactionRow,
+  CYCLE_RELIABLE_MIN_SHARE,
+  type ProjectPeriodRow,
+  type RenewalProjectRow,
 } from '@/lib/renewals/metrics';
 
-function txn(over: Partial<RevenueTransactionRow> = {}): RevenueTransactionRow {
+function renewal(over: Partial<RenewalProjectRow> = {}): RenewalProjectRow {
   return {
-    id: 1,
-    payer_inn: '7714379242',
-    payer_name: 'ООО «Смартвэй»',
-    amount: 100000,
-    occurred_at: '2026-07-15T10:00:00.000Z',
-    purpose: 'Оплата услуг по договору №1',
+    id: 'p1',
+    name: 'Проект',
+    client: 'Клиент',
+    project_type: 'Продление',
+    budget: '100000',
+    payment_date: '2026-07-15',
+    contract_date: null,
+    kpi_fact: null,
+    status: 'В работе',
+    manager: null,
+    specialist: null,
     ...over,
   };
 }
 
-function mark(over: Partial<RenewalMarkRow> = {}): RenewalMarkRow {
+function period(over: Partial<ProjectPeriodRow> = {}): ProjectPeriodRow {
   return {
-    transaction_id: 1,
-    is_renewal: true,
-    method: 'task_text',
-    amo_deal_id: null,
-    note: null,
+    project_id: 'p1',
+    period_start: '2026-01-01',
+    period_end: '2026-06-30',
     ...over,
   };
 }
@@ -31,120 +35,112 @@ function mark(over: Partial<RenewalMarkRow> = {}): RenewalMarkRow {
 // по UTC. 2026-07-31T20:59:59.999Z — последний момент 31 июля в МСК.
 const from = new Date('2026-07-01T00:00:00.000Z');
 const to = new Date('2026-07-31T20:59:59.999Z');
+const today = new Date('2026-07-20T12:00:00.000Z');
 
-describe('computeRenewalsMetrics — дата платежа, а не дата подтверждения', () => {
-  it('продление считается по occurred_at транзакции — единственной дате, которую вообще видит функция', () => {
-    // RenewalMarkRow намеренно не несёт даты подтверждения (matched_at) —
-    // считать метрику "по дате подтверждения" здесь физически не из чего.
-    // Платёж внутри периода — считается.
+describe('computeRenewalsMetrics — тип продления', () => {
+  it('распознаёт тип с пробелами и в другом регистре', () => {
     const res = computeRenewalsMetrics(
-      [mark({ transaction_id: 1 })],
-      [txn({ id: 1, occurred_at: '2026-07-20T00:00:00.000Z' })],
-      from, to, 'day',
+      [renewal({ project_type: '  ПРОДЛЕНИЕ  ' })],
+      [], from, to, 'day', null, today,
     );
     expect(res.totals.count).toBe(1);
-    expect(res.totals.revenue).toBe(100000);
   });
 
-  it('платёж вне периода не считается, даже если это единственная транзакция в выборке', () => {
+  it('строки других типов не считаются', () => {
     const res = computeRenewalsMetrics(
-      [mark({ transaction_id: 1 })],
-      [txn({ id: 1, occurred_at: '2026-06-15T00:00:00.000Z' })], // раньше from
-      from, to, 'day',
+      [renewal({ project_type: 'Продажа' }), renewal({ project_type: null })],
+      [], from, to, 'day', null, today,
     );
+    expect(res.totals.count).toBe(0);
+    expect(res.totals.withoutDate).toBe(0);
+    expect(res.totals.planned).toBe(0);
+  });
+});
+
+describe('computeRenewalsMetrics — бюджет', () => {
+  it('парсит число с пробелами-разделителями разрядов', () => {
+    const res = computeRenewalsMetrics(
+      [renewal({ budget: '120 000' })],
+      [], from, to, 'day', null, today,
+    );
+    expect(res.totals.revenue).toBe(120000);
+    expect(res.totals.withoutBudget).toBe(0);
+  });
+
+  it('"120к" и пустая строка попадают в withoutBudget, а не в сумму', () => {
+    const res = computeRenewalsMetrics(
+      [
+        renewal({ id: 'p1', budget: '120к' }),
+        renewal({ id: 'p2', budget: '', payment_date: '2026-07-16' }),
+        renewal({ id: 'p3', budget: '   ', payment_date: '2026-07-17' }),
+      ],
+      [], from, to, 'day', null, today,
+    );
+    expect(res.totals.revenue).toBe(0);
+    expect(res.totals.withoutBudget).toBe(3);
+    // Мусорный бюджет не выкидывает продление из количества за период.
+    expect(res.totals.count).toBe(3);
+  });
+});
+
+describe('computeRenewalsMetrics — дата оплаты', () => {
+  it('продление без даты попадает в withoutDate и не теряется', () => {
+    const res = computeRenewalsMetrics(
+      [renewal({ payment_date: null })],
+      [], from, to, 'day', null, today,
+    );
+    expect(res.totals.withoutDate).toBe(1);
+    expect(res.totals.count).toBe(0);
+    expect(res.totals.planned).toBe(0);
+  });
+
+  it('нераспарсенная дата (не YYYY-MM-DD) тоже уходит в withoutDate', () => {
+    const res = computeRenewalsMetrics(
+      [renewal({ payment_date: '15.07.2026' })],
+      [], from, to, 'day', null, today,
+    );
+    expect(res.totals.withoutDate).toBe(1);
+  });
+
+  it('будущая дата не в обороте и не в count, но в planned', () => {
+    const res = computeRenewalsMetrics(
+      [renewal({ payment_date: '2026-11-24', budget: '500000' })],
+      [], from, to, 'month', null, today,
+    );
+    expect(res.totals.planned).toBe(1);
     expect(res.totals.count).toBe(0);
     expect(res.totals.revenue).toBe(0);
   });
 
-  it('обе границы периода включительно', () => {
+  it('дата ровно "сегодня" считается фактом, а не планом', () => {
     const res = computeRenewalsMetrics(
-      [mark({ transaction_id: 1 }), mark({ transaction_id: 2 })],
-      [
-        txn({ id: 1, occurred_at: '2026-07-01T00:00:00.000Z' }),
-        txn({ id: 2, occurred_at: '2026-07-31T20:00:00.000Z' }),
-      ],
-      from, to, 'day',
+      [renewal({ payment_date: '2026-07-20' })],
+      [], from, to, 'day', null, today,
     );
-    expect(res.totals.count).toBe(2);
+    expect(res.totals.planned).toBe(0);
+    expect(res.totals.count).toBe(1);
   });
-});
 
-describe('computeRenewalsMetrics — is_renewal=false не попадает в метрики', () => {
-  it('человек нажал «транш» / «другая услуга» — is_renewal=false исключается из count/revenue', () => {
+  it('дата вне выбранного окна не считается нигде', () => {
     const res = computeRenewalsMetrics(
-      [mark({ transaction_id: 1, is_renewal: false, method: 'not_renewal' })],
-      [txn({ id: 1 })],
-      from, to, 'day',
+      [renewal({ payment_date: '2026-06-15' })], // раньше from
+      [], from, to, 'day', null, today,
     );
     expect(res.totals.count).toBe(0);
-    expect(res.totals.revenue).toBe(0);
+    expect(res.totals.planned).toBe(0);
+    expect(res.totals.withoutDate).toBe(0);
   });
 
-  it('not_renewal — решённый кандидат, поэтому и в «не разобрано» не попадает', () => {
+  it('группирует по месяцам через bucketKey', () => {
     const res = computeRenewalsMetrics(
       [
-        mark({ transaction_id: 1, is_renewal: false, method: 'not_renewal' }), // первый платёж ИНН — не кандидат вовсе
-        mark({ transaction_id: 2, is_renewal: false, method: 'not_renewal' }), // второй — кандидат, но РЕШЁН как не продление
+        renewal({ id: 'p1', payment_date: '2026-07-05', budget: '10000' }),
+        renewal({ id: 'p2', payment_date: '2026-07-15', budget: '20000' }),
       ],
-      [
-        txn({ id: 1, payer_inn: '111', occurred_at: '2026-07-01T00:00:00.000Z' }),
-        txn({ id: 2, payer_inn: '111', occurred_at: '2026-07-15T00:00:00.000Z' }),
-      ],
-      from, to, 'day',
+      [], from, to, 'month', null, today,
     );
-    expect(res.totals.unresolved).toBe(0);
-    expect(res.totals.count).toBe(0);
-  });
-});
-
-describe('computeRenewalsMetrics — «не разобрано»', () => {
-  it('кандидат (повторный приход с ИНН) без отметки — в «не разобрано», а не в продления', () => {
-    const res = computeRenewalsMetrics(
-      [], // ни одной строки в renewal_marks
-      [
-        txn({ id: 1, payer_inn: '222', occurred_at: '2026-07-01T00:00:00.000Z' }), // первый платёж ИНН
-        txn({ id: 2, payer_inn: '222', occurred_at: '2026-07-15T00:00:00.000Z' }), // повторный — кандидат
-      ],
-      from, to, 'day',
-    );
-    expect(res.totals.count).toBe(0);
-    expect(res.totals.unresolved).toBe(1);
-  });
-
-  it('первый платёж ИНН никогда не в «не разобрано», даже без единой отметки', () => {
-    const res = computeRenewalsMetrics(
-      [],
-      [txn({ id: 1, payer_inn: '333', occurred_at: '2026-07-01T00:00:00.000Z' })],
-      from, to, 'day',
-    );
-    expect(res.totals.unresolved).toBe(0);
-  });
-
-  it('«не разобрано» ограничено тем же периодом, что и остальные плитки', () => {
-    const res = computeRenewalsMetrics(
-      [],
-      [
-        txn({ id: 1, payer_inn: '444', occurred_at: '2026-01-01T00:00:00.000Z' }), // первый платёж ИНН
-        txn({ id: 2, payer_inn: '444', occurred_at: '2026-02-01T00:00:00.000Z' }), // кандидат, но вне [from, to]
-      ],
-      from, to, 'day',
-    );
-    expect(res.totals.unresolved).toBe(0);
-  });
-
-  it('несколько ИНН считаются независимо', () => {
-    const res = computeRenewalsMetrics(
-      [],
-      [
-        txn({ id: 1, payer_inn: 'A', occurred_at: '2026-07-01T00:00:00.000Z' }),
-        txn({ id: 2, payer_inn: 'A', occurred_at: '2026-07-05T00:00:00.000Z' }), // кандидат A
-        txn({ id: 3, payer_inn: 'B', occurred_at: '2026-07-02T00:00:00.000Z' }),
-        txn({ id: 4, payer_inn: 'B', occurred_at: '2026-07-06T00:00:00.000Z' }), // кандидат B
-        txn({ id: 5, payer_inn: 'B', occurred_at: '2026-07-10T00:00:00.000Z' }), // тоже кандидат B
-      ],
-      from, to, 'day',
-    );
-    expect(res.totals.unresolved).toBe(3);
+    expect(res.series).toHaveLength(1);
+    expect(res.series[0]).toEqual({ key: '2026-07-01', count: 2, revenue: 30000 });
   });
 });
 
@@ -152,18 +148,12 @@ describe('computeRenewalsMetrics — средний чек', () => {
   it('среднее и медиана расходятся на длинном хвосте, обе верны', () => {
     const res = computeRenewalsMetrics(
       [
-        mark({ transaction_id: 1 }),
-        mark({ transaction_id: 2 }),
-        mark({ transaction_id: 3 }),
-        mark({ transaction_id: 4 }),
+        renewal({ id: 'p1', budget: '10000', payment_date: '2026-07-01' }),
+        renewal({ id: 'p2', budget: '20000', payment_date: '2026-07-02' }),
+        renewal({ id: 'p3', budget: '30000', payment_date: '2026-07-03' }),
+        renewal({ id: 'p4', budget: '600000', payment_date: '2026-07-04' }),
       ],
-      [
-        txn({ id: 1, payer_inn: '1', amount: 10000, occurred_at: '2026-07-01T00:00:00.000Z' }),
-        txn({ id: 2, payer_inn: '2', amount: 20000, occurred_at: '2026-07-02T00:00:00.000Z' }),
-        txn({ id: 3, payer_inn: '3', amount: 30000, occurred_at: '2026-07-03T00:00:00.000Z' }),
-        txn({ id: 4, payer_inn: '4', amount: 600000, occurred_at: '2026-07-04T00:00:00.000Z' }),
-      ],
-      from, to, 'day',
+      [], from, to, 'day', null, today,
     );
     expect(res.totals.avgCheck).toBe(165000);
     expect(res.totals.medianCheck).toBe(25000);
@@ -171,117 +161,153 @@ describe('computeRenewalsMetrics — средний чек', () => {
   });
 });
 
-describe('computeRenewalsMetrics — группировка', () => {
-  it('группирует по месяцам через bucketKey', () => {
-    const res = computeRenewalsMetrics(
-      [mark({ transaction_id: 1 }), mark({ transaction_id: 2 })],
-      [
-        txn({ id: 1, payer_inn: '1', amount: 10000, occurred_at: '2026-07-05T00:00:00.000Z' }),
-        txn({ id: 2, payer_inn: '2', amount: 20000, occurred_at: '2026-07-15T00:00:00.000Z' }),
-      ],
-      from, to, 'month',
-    );
-    expect(res.series).toHaveLength(1);
-    expect(res.series[0]).toEqual({ key: '2026-07-01', count: 2, revenue: 30000 });
-  });
-
-  it('пустые корзины присутствуют в ряду', () => {
-    const res = computeRenewalsMetrics([mark()], [txn()], from, to, 'day');
-    expect(res.series).toHaveLength(31);
-  });
-});
-
-describe('computeRenewalsMetrics — цикл: якорь это предыдущее подтверждённое продление, а не любой предыдущий платёж', () => {
-  // Сквозной сценарий из плана (ООО «СМАРТВЭЙ»): между двумя подтверждёнными
-  // продлениями лежит платёж-транш/другая услуга, который НЕ подтверждён.
-  // Наивный расчёт "от предыдущего платежа вообще" взял бы этот транш за
-  // границу периода и занизил бы цикл. Здесь якорь — предыдущее
-  // ПОДТВЕРЖДЁННОЕ продление (а для самого первого продления — первый платёж
-  // ИНН, он же "первичка").
-  const inn = '7714379242';
-  const firstPayment = txn({ id: 1, payer_inn: inn, amount: 84000, occurred_at: '2026-06-01T00:00:00.000Z' });
-  const renewal1 = txn({ id: 2, payer_inn: inn, amount: 179000, occurred_at: '2026-07-01T00:00:00.000Z' }); // +30 дней от первички
-  const otherService = txn({ id: 3, payer_inn: inn, amount: 20000, occurred_at: '2026-07-11T00:00:00.000Z' }); // +10 дней от renewal1, НЕ подтверждён
-  const renewal2 = txn({ id: 4, payer_inn: inn, amount: 159000, occurred_at: '2026-09-09T00:00:00.000Z' }); // +70 дней от renewal1, +60 от otherService
-
-  const wideFrom = new Date('2026-06-01T00:00:00.000Z');
-  const wideTo = new Date('2026-09-30T20:59:59.999Z');
-
-  it('цикл второго продления считается от первого продления (70 дней), а не от транша между ними (60 дней)', () => {
+describe('computeRenewalsMetrics — цикл', () => {
+  it('считается от period_end предыдущего периода до contract_date', () => {
     const res = computeRenewalsMetrics(
       [
-        mark({ transaction_id: 2, method: 'task_text' }), // renewal1 — подтверждено
-        // otherService (id=3) сознательно БЕЗ строки в renewal_marks — кандидат,
-        // ждёт решения человека, не должен участвовать в расчёте цикла.
-        mark({ transaction_id: 4, method: 'note_text' }), // renewal2 — подтверждено
+        renewal({ id: 'p1', contract_date: '2026-07-10' }),
+        renewal({ id: 'p2', contract_date: '2026-07-12', payment_date: '2026-07-16' }),
+        renewal({ id: 'p3', contract_date: '2026-07-14', payment_date: '2026-07-17' }),
       ],
-      [firstPayment, renewal1, otherService, renewal2],
-      wideFrom, wideTo, 'day',
+      [
+        period({ project_id: 'p1', period_end: '2026-06-30' }), // 10 дней
+        period({ project_id: 'p2', period_end: '2026-07-02' }), // 10 дней
+        period({ project_id: 'p3', period_end: '2026-07-04' }), // 10 дней
+      ],
+      from, to, 'day', null, today,
     );
-
-    expect(res.totals.count).toBe(2); // renewal1 + renewal2, транш не в count
-    expect(res.totals.unresolved).toBe(1); // только транш ждёт решения
-    expect(res.totals.cycleSampleSize).toBe(2);
-    // 30 дней (первичка → renewal1) и 70 дней (renewal1 → renewal2) — НЕ 60
-    // (было бы, если бы якорем взяли транш).
-    expect(res.totals.cycleAvgDays).toBe(50);
-    expect(res.totals.cycleMedianDays).toBe(50);
+    expect(res.totals.cycleSampleSize).toBe(3);
+    expect(res.totals.cycleCandidates).toBe(3);
+    expect(res.totals.cycleReliable).toBe(true);
+    expect(res.totals.cycleAvgDays).toBe(10);
+    expect(res.totals.cycleMedianDays).toBe(10);
   });
 
-  it('первое продление считается от первого платежа ИНН (первички)', () => {
+  it('берёт последний период, если их несколько, а не первый попавшийся', () => {
     const res = computeRenewalsMetrics(
-      [mark({ transaction_id: 2, method: 'task_text' })],
-      [firstPayment, renewal1],
-      wideFrom, wideTo, 'day',
+      [renewal({ id: 'p1', contract_date: '2026-07-10' })],
+      [
+        period({ project_id: 'p1', period_end: '2026-05-01' }),
+        period({ project_id: 'p1', period_end: '2026-06-30' }), // ближайший к contract_date — 10 дней
+      ],
+      from, to, 'day', null, today,
     );
-    expect(res.totals.cycleSampleSize).toBe(1);
-    expect(res.totals.cycleAvgDays).toBe(30);
+    expect(res.totals.cycleAvgDays).toBe(10);
   });
-});
 
-describe('computeRenewalsMetrics — цикл: единственный платёж ИНН не даёт цикла', () => {
-  it('если у ИНН вообще нет платежа раньше — цикл не считается (не 0, а исключается из выборки)', () => {
-    // Транзакция помечена вручную (единственный реалистичный способ получить
-    // is_renewal=true без предшествующего платежа того же ИНН вообще).
+  it('нет истории периодов или нет contract_date — сделка не попадает в цикл', () => {
     const res = computeRenewalsMetrics(
-      [mark({ transaction_id: 1, method: 'manual' })],
-      [txn({ id: 1, payer_inn: '999', occurred_at: '2026-07-10T00:00:00.000Z' })],
-      from, to, 'day',
+      [
+        renewal({ id: 'p1', contract_date: null }), // нет даты договора
+        renewal({ id: 'p2', contract_date: '2026-07-10', payment_date: '2026-07-16' }), // нет истории периодов
+      ],
+      [],
+      from, to, 'day', null, today,
     );
-    expect(res.totals.count).toBe(1); // это всё ещё продление
-    expect(res.totals.cycleSampleSize).toBe(0); // но цикл посчитать не из чего
-    expect(res.totals.cycleCandidates).toBe(1);
+    expect(res.totals.cycleSampleSize).toBe(0);
+    expect(res.totals.cycleCandidates).toBe(2);
+    expect(res.totals.cycleReliable).toBe(false);
     expect(res.totals.cycleAvgDays).toBeNull();
     expect(res.totals.cycleMedianDays).toBeNull();
   });
+
+  it('ровно треть (граница порога) — cycleReliable === true', () => {
+    // 3 продления за период, цикл посчитался только у одного — ровно 1/3,
+    // порог "не меньше трети" эту границу включает.
+    expect(CYCLE_RELIABLE_MIN_SHARE).toBeCloseTo(1 / 3);
+    const res = computeRenewalsMetrics(
+      [
+        renewal({ id: 'p1', contract_date: '2026-07-10' }),
+        renewal({ id: 'p2', contract_date: null, payment_date: '2026-07-16' }),
+        renewal({ id: 'p3', contract_date: null, payment_date: '2026-07-17' }),
+      ],
+      [period({ project_id: 'p1', period_end: '2026-06-30' })],
+      from, to, 'day', null, today,
+    );
+    expect(res.totals.cycleSampleSize).toBe(1);
+    expect(res.totals.cycleCandidates).toBe(3);
+    expect(res.totals.cycleReliable).toBe(true); // 1/3 включительно — порог "не меньше трети"
+    expect(res.totals.cycleAvgDays).toBe(10);
+  });
+
+  it('порог реально режет — 1 из 4 (меньше трети) даёт cycleReliable === false', () => {
+    const res = computeRenewalsMetrics(
+      [
+        renewal({ id: 'p1', contract_date: '2026-07-10' }),
+        renewal({ id: 'p2', contract_date: null, payment_date: '2026-07-15' }),
+        renewal({ id: 'p3', contract_date: null, payment_date: '2026-07-16' }),
+        renewal({ id: 'p4', contract_date: null, payment_date: '2026-07-17' }),
+      ],
+      [period({ project_id: 'p1', period_end: '2026-06-30' })],
+      from, to, 'day', null, today,
+    );
+    expect(res.totals.cycleSampleSize).toBe(1);
+    expect(res.totals.cycleCandidates).toBe(4);
+    expect(res.totals.cycleReliable).toBe(false);
+    expect(res.totals.cycleAvgDays).toBeNull();
+  });
+
+  it('период проекта, закончившийся ПОСЛЕ даты договора, не считается предыдущим', () => {
+    const res = computeRenewalsMetrics(
+      [renewal({ id: 'p1', contract_date: '2026-07-10' })],
+      [period({ project_id: 'p1', period_end: '2026-07-15' })], // позже contract_date
+      from, to, 'day', null, today,
+    );
+    expect(res.totals.cycleSampleSize).toBe(0);
+    expect(res.totals.cycleReliable).toBe(false);
+  });
 });
 
-describe('computeRenewalsMetrics — защитные случаи', () => {
-  it('отметка на транзакцию вне выборки не роняет расчёт', () => {
+describe('computeRenewalsMetrics — фильтр по KPI', () => {
+  it('отсекает по числовому диапазону', () => {
+    const rows = [
+      renewal({ id: 'p1', kpi_fact: '50', payment_date: '2026-07-01' }),
+      renewal({ id: 'p2', kpi_fact: '90', payment_date: '2026-07-02' }),
+      renewal({ id: 'p3', kpi_fact: '120', payment_date: '2026-07-03' }),
+    ];
+    const res = computeRenewalsMetrics(rows, [], from, to, 'day', { min: 60, max: 100 }, today);
+    expect(res.totals.count).toBe(1);
+  });
+
+  it('непарсящийся kpi_fact не подпадает под заданный фильтр', () => {
     const res = computeRenewalsMetrics(
-      [mark({ transaction_id: 999 })], // такой транзакции нет в transactions
-      [txn({ id: 1 })],
-      from, to, 'day',
+      [renewal({ kpi_fact: 'н/д' })],
+      [], from, to, 'day', { min: 0, max: 100 }, today,
     );
     expect(res.totals.count).toBe(0);
+  });
+
+  it('без фильтра продление не выкидывается из-за непарсящегося kpi_fact', () => {
+    const res = computeRenewalsMetrics(
+      [renewal({ kpi_fact: 'н/д' })],
+      [], from, to, 'day', null, today,
+    );
+    expect(res.totals.count).toBe(1);
   });
 });
 
 describe('computeRenewalsMetrics — пустая выборка', () => {
   it('не даёт NaN ни в одном из полей', () => {
-    const res = computeRenewalsMetrics([], [], from, to, 'day');
+    const res = computeRenewalsMetrics([], [], from, to, 'day', null, today);
     expect(res.totals.count).toBe(0);
     expect(res.totals.revenue).toBe(0);
     expect(res.totals.avgCheck).toBeNull();
     expect(res.totals.medianCheck).toBeNull();
+    expect(res.totals.planned).toBe(0);
+    expect(res.totals.withoutDate).toBe(0);
+    expect(res.totals.withoutBudget).toBe(0);
     expect(res.totals.cycleAvgDays).toBeNull();
     expect(res.totals.cycleMedianDays).toBeNull();
-    expect(res.totals.cycleSampleSize).toBe(0);
-    expect(res.totals.cycleCandidates).toBe(0);
-    expect(res.totals.unresolved).toBe(0);
+    expect(res.totals.cycleReliable).toBe(false);
     for (const bucket of res.series) {
       expect(Number.isNaN(bucket.count)).toBe(false);
       expect(Number.isNaN(bucket.revenue)).toBe(false);
     }
+  });
+
+  it('пустые корзины присутствуют в ряду', () => {
+    const res = computeRenewalsMetrics([renewal()], [], from, to, 'day', null, today);
+    expect(res.series).toHaveLength(31);
+    expect(res.series[0]).toEqual({ key: '2026-07-01', count: 0, revenue: 0 });
   });
 });

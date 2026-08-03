@@ -8,9 +8,10 @@ import type { RenewalTableRow } from '@/lib/renewals/tableRows';
 import FiltersBar, { getDefaultFilters, type FiltersState } from '@/components/renewals/FiltersBar';
 import KpiRow from '@/components/renewals/KpiRow';
 import RenewalsTable from '@/components/renewals/RenewalsTable';
+import RenewalsUndatedSection from '@/components/renewals/RenewalsUndatedSection';
 import RenewalsChart from '@/components/renewals/RenewalsChart';
 
-type SummaryResponse = RenewalsResult & { tableRows: RenewalTableRow[] };
+type SummaryResponse = RenewalsResult & { tableRows: RenewalTableRow[]; undatedRows: RenewalTableRow[] };
 
 export default function RenewalsView() {
   const [filters, setFilters] = useState<FiltersState>(() => getDefaultFilters());
@@ -29,6 +30,8 @@ export default function RenewalsView() {
       setLoading(true);
       try {
         const qs = new URLSearchParams({ from: filters.from, to: filters.to, groupBy: filters.groupBy });
+        if (filters.kpiMin !== '') qs.set('kpiMin', filters.kpiMin);
+        if (filters.kpiMax !== '') qs.set('kpiMax', filters.kpiMax);
 
         const res = await authFetch(`/api/analytics/renewals/summary?${qs.toString()}`, {
           signal: controller.signal,
@@ -58,20 +61,12 @@ export default function RenewalsView() {
     };
   }, [filters]);
 
-  // Пока разбор кандидатов только начался (протокол «Продление N - сумма» в
-  // AMO завёлся 2026-08-03), «Не разобрано» почти всегда будет больше, чем
-  // «Продлений», — это переходный период, а не поломка дашборда. Баннер стоит
-  // прямо там, где цифры выглядят подозрительно, а не только сноской внизу
-  // страницы, которую легко пропустить.
-  const showBacklogNotice = data !== null && data.totals.unresolved > data.totals.count;
-
   return (
     <div className="space-y-4">
       <div>
         <h1 className="text-lg font-semibold text-zinc-900">Продления</h1>
         <p className="text-xs text-zinc-500">
-          Платежи, подтверждённые как продление — комментарием в AMO, текстом закрытой задачи или решением
-          человека. Дата и сумма — из банка (когда и сколько реально пришло), а не из карточки проекта.
+          Проекты с типом «Продление»: сколько продлений, на какую сумму, средний чек и цикл.
         </p>
       </div>
 
@@ -86,15 +81,6 @@ export default function RenewalsView() {
 
       {!loading && !error && data && (
         <>
-          {showBacklogNotice && (
-            <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
-              Неразобранных платежей ({data.totals.unresolved.toLocaleString('ru-RU')}) больше, чем
-              подтверждённых продлений ({data.totals.count.toLocaleString('ru-RU')}) — это ожидаемо: разметка
-              через AMO началась 3 августа 2026, и старые платежи ещё не прошли проверку человеком. Цифры
-              слева уточнятся по мере разбора очереди — это не сбой дашборда.
-            </div>
-          )}
-
           <KpiRow totals={data.totals} />
 
           {/* Порядок: сначала динамика, потом расшифровка. График отвечает на
@@ -104,9 +90,18 @@ export default function RenewalsView() {
 
           <RenewalsTable rows={data.tableRows} />
 
+          <RenewalsUndatedSection rows={data.undatedRows} />
+
+          {/* Заметка про отсутствующие фильтры — под таблицей, чтобы не
+              заставлять первым делом спрашивать «а где канал и сфера»:
+              канал заполнен у 3 продлений из 32, поля сферы деятельности в
+              схеме нет вообще. Строить фильтр на трёх заполненных значениях
+              из тридцати двух значит показать инструмент, который врёт при
+              каждом использовании — поэтому фильтров нет, и это осознанный
+              отказ, а не забытая часть. */}
           <p className="text-[11px] text-zinc-400">
-            Фильтров по каналу маркетинга и сфере деятельности здесь пока нет — оба атрибута наследуются от
-            сделки AMO по ИНН плательщика и ещё не подключены к этому дашборду. Добавим отдельно.
+            Фильтров по каналу маркетинга и сфере деятельности здесь пока нет: канал заполнен только у 3 продлений из
+            32, а поле сферы деятельности в базе не заведено. Добавим, когда появятся данные.
           </p>
         </>
       )}

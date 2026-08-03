@@ -1,63 +1,45 @@
 /**
  * Метрики дашборда продлений.
  *
- * Источник — НЕ поле `projects.project_type` (ручная пометка в карточке
- * проекта, 32 записи). Продление — это строка `renewal_marks` с
- * `is_renewal = true`, соединённая с породившей её `bank_transactions`:
- *   - дата продления — `occurred_at` (дата ПЛАТЕЖА, а не дата, когда человек
- *     подтвердил отметку в AMO или на экране разбора);
- *   - сумма продления — `amount` (сумма ПЛАТЕЖА, а не число из текста
- *     комментария/задачи — текст используется только для сверки при
- *     автоподтверждении, см. `apply_renewal_marks()` в
- *     `supabase/migrations/20260803_0002_renewal_marks.sql` и
- *     `20260803_0004_renewal_marks_note_text.sql`).
- *
- * `renewal_marks` сама по себе не хранит весь список кандидатов — кандидат
- * это ВЫЧИСЛЯЕМОЕ множество (повторный приход с ИНН, кроме первого платежа
- * этого ИНН), которого в `renewal_marks` может ещё не быть вовсе. Поэтому
- * этот файл тянет ДВЕ выборки — `renewal_marks` целиком и полную историю
- * приходов с ИНН — и сам восстанавливает то же ранжирование "какой платёж по
- * счёту у ИНН", которое использует SQL-функция `apply_renewal_marks()`, чтобы
- * посчитать счётчик "не разобрано" (см. `computeRenewalsMetrics`).
+ * Продление — не отдельная сущность в схеме, а строка `projects` с
+ * `project_type = 'Продление'`. Ключевые поля (`budget`, `payment_date`,
+ * `contract_date`, `kpi_fact`) — либо текстовые, либо `date`-колонки, которые
+ * PostgREST в любом случае отдаёт строкой; в боевых данных они заполняются
+ * руками, поэтому парсинг везде защитный и никогда не проглатывает мусор
+ * молча — см. счётчики `withoutDate`/`withoutBudget` и разбор `parseAmount`.
  *
  * Стиль и границы — по образцу `firstSales/metrics.ts`:
  *   1. Чистая функция `computeRenewalsMetrics` + отдельные функции выборки.
- *   2. Группировка по датам — только через `bucketKey`/`buildBuckets` из
+ *   2. «Сегодня» приходит параметром, а не берётся из `Date.now()` — иначе
+ *      тест зависит от дня запуска.
+ *   3. Недостоверная метрика — явный флаг (`cycleReliable`), а не тихий ноль.
+ *   4. Группировка по датам — только через `bucketKey`/`buildBuckets` из
  *      `firstSales/buckets.ts`: границы МСК там уже решены, копировать нельзя
  *      — вторая реализация разъедется с первой, и два дашборда начнут
  *      показывать разные месяцы.
- *
- * Старый расчёт по `projects.project_type`/`project_periods` отсюда убран
- * целиком, а не оставлен рядом: две цифры «продлений» под одним названием —
- * гарантированный спор о том, какая правильная (см. задачу).
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
 import { bucketKey, buildBuckets, type GroupBy } from '@/lib/firstSales/buckets';
 
-/** Совпадает с CHECK-констрейнтом `renewal_marks.method`
- *  (`20260803_0004_renewal_marks_note_text.sql`). */
-export type RenewalMarkMethod = 'note_text' | 'task_text' | 'project_type' | 'manual' | 'not_renewal';
-
-export type RenewalMarkRow = {
-  transaction_id: number;
-  is_renewal: boolean;
-  method: RenewalMarkMethod;
-  amo_deal_id: number | null;
-  note: string | null;
+export type RenewalProjectRow = {
+  id: string;
+  name: string | null;
+  client: string | null;
+  project_type: string | null;
+  budget: string | null;
+  payment_date: string | null;
+  contract_date: string | null;
+  kpi_fact: string | null;
+  status: string | null;
+  manager: string | null;
+  specialist: string | null;
 };
 
-export type RevenueTransactionRow = {
-  id: number;
-  payer_inn: string | null;
-  payer_name: string | null;
-  /** `numeric(14,2)` в БД — PostgREST/Supabase-JS отдаёт такие колонки уже
-   *  числом (тот же приём, что `amount`/`amount_rub` в `expenses/types.ts`),
-   *  поэтому, в отличие от старого `projects.budget` (текстовое поле), здесь
-   *  не нужен защитный парсинг вроде `parseAmount` — источник истины сам по
-   *  себе числовой. */
-  amount: number;
-  occurred_at: string;
-  purpose: string | null;
+export type ProjectPeriodRow = {
+  project_id: string;
+  period_start: string | null;
+  period_end: string | null;
 };
 
 export type RenewalSeriesBucket = {
@@ -66,38 +48,43 @@ export type RenewalSeriesBucket = {
   revenue: number;
 };
 
+/** Числовой диапазон для фильтра по KPI-факту. Оба края необязательны. */
+export type KpiFilter = {
+  min?: number;
+  max?: number;
+};
+
 export type RenewalsTotals = {
-  /** Продлений (`is_renewal=true`) с датой ПЛАТЕЖА в [from, to]. */
+  /** Продлений с датой оплаты в [from, to] и не позже «сегодня». */
   count: number;
-  /** Сумма `amount` по тем же продлениям. */
+  /** Сумма `budget` по тем же продлениям, у кого бюджет распарсился. */
   revenue: number;
   avgCheck: number | null;
   medianCheck: number | null;
+  /** Продления с датой оплаты позже «сегодня» — план, не факт. Не завязано
+   *  на [from, to]: это сквозная цифра «сколько ждём», а не метрика периода. */
+  planned: number;
+  /** Продления без парсящейся даты оплаты (пусто или не `YYYY-MM-DD`).
+   *  Тоже сквозная цифра — без даты нельзя понять, попадает ли строка в
+   *  выбранный период вовсе, поэтому не молчим, а считаем отдельно. */
+  withoutDate: number;
+  /** Из `count` — те, у кого `budget` не распарсился. Не входят в `revenue`
+   *  и в выборку для среднего/медианы, но и не выброшены — видны отдельно. */
+  withoutBudget: number;
   cycleAvgDays: number | null;
   cycleMedianDays: number | null;
-  /** Сколько продлений периода реально дали цикл (числитель). Почти всегда
-   *  равно `cycleCandidates` — см. doc-комментарий `computeRenewalsMetrics`
-   *  про якоря цикла, — но может быть меньше, если у платежа-продления
-   *  пустой ИНН после обрезки пробелов (защитный случай). */
-  cycleSampleSize: number;
-  /** Знаменатель — он же `count`, продублирован для удобства UI. */
-  cycleCandidates: number;
   /**
-   * «Не разобрано» — кандидаты (повторный приход с ИНН, не первый платёж
-   * этого ИНН) с датой платежа в [from, to], у которых ещё НЕТ строки в
-   * `renewal_marks` вовсе — ни «продление», ни «не продление». Пока эта
-   * цифра большая, числам `count`/`revenue` за тот же период верить нельзя:
-   * часть из них станет продлениями только после разбора человеком.
-   *
-   * Период тот же, что у остальных плиток ряда (см. отчёт по задаче,
-   * вопрос 2, и `unassignedLeads` в `firstSales/metrics.ts` — тот же приём:
-   * там «лиды без канала» тоже считаются внутри окна `[from, to]`, а не
-   * сквозной цифрой по всей истории). Каждая плитка КПИ-ряда отвечает на
-   * вопрос "что мы знаем про выбранный период" — неразобранные кандидаты
-   * периода прямо отвечают на этот же вопрос («насколько цифрам периода
-   * можно верить»), а не на отдельный вопрос про весь бэклог целиком.
+   * false — цикл удалось посчитать меньше чем у трети продлений периода
+   * (`count`). История периодов (`project_periods`) есть всего у 11 проектов
+   * из 139 в базе, так что у большинства продлений её просто нет — ноль или
+   * среднее по паре точек здесь читалось бы как факт, хотя было бы почти
+   * всегда основано на 1-2 сделках. UI обязан показать прочерк.
    */
-  unresolved: number;
+  cycleReliable: boolean;
+  /** Сколько продлений из `count` реально дали цикл (числитель порога). */
+  cycleSampleSize: number;
+  /** Знаменатель порога — он же `count`, продублирован для удобства UI. */
+  cycleCandidates: number;
 };
 
 export type RenewalsResult = {
@@ -105,7 +92,65 @@ export type RenewalsResult = {
   totals: RenewalsTotals;
 };
 
+/** Доля продлений периода, у которых обязан посчитаться цикл, чтобы считать
+ *  `cycleAvgDays`/`cycleMedianDays` достоверными. Навскidку взята 1/3 — при
+ *  текущей полноте `project_periods` (11 проектов из 139) флаг почти всегда
+ *  будет `false`, и это осознанно: лучше стабильный прочерк, чем метрика,
+ *  посчитанная по одной-двум сделкам и выданная за факт. */
+export const CYCLE_RELIABLE_MIN_SHARE = 1 / 3;
+
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** Строгий разбор `YYYY-MM-DD` в UTC-полночь того дня. Возвращает `null` для
+ *  всего, что не в этом формате, включая календарно невозможные даты
+ *  (`2026-02-30`) — `Date` их не отвергает молча, а перекатывает на март,
+ *  поэтому дату сверяем покомпонентно после конструирования. */
+function parseIsoDate(raw: string | null): Date | null {
+  if (raw == null) return null;
+  const trimmed = raw.trim();
+  const match = ISO_DATE_RE.exec(trimmed);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year
+    || date.getUTCMonth() !== month - 1
+    || date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return date;
+}
+
+/**
+ * Защитный разбор числа из текстового поля (`budget`, `kpi_fact`).
+ *
+ * `parseFloat('120к')` вернёт 120 и не скажет ни слова — ровно так метрика
+ * однажды покажет оборот в тысячу раз меньше настоящего. Поэтому сначала
+ * строка целиком сверяется регуляркой (допустимы пробелы/неразрывные пробелы
+ * как разделители разрядов и `,`/`.` как разделитель дробной части) и только
+ * потом преобразуется. Всё, что не прошло проверку целиком, — `null`.
+ */
+const NUMERIC_RE = /^\d+(?:[  ]\d+)*(?:[.,]\d+)?$/;
+
+function parseAmount(raw: string | null): number | null {
+  if (raw == null) return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  if (!NUMERIC_RE.test(trimmed)) return null;
+  const normalized = trimmed.replace(/[  ]/g, '').replace(',', '.');
+  const value = Number(normalized);
+  return Number.isFinite(value) ? value : null;
+}
+
+function isRenewalType(projectType: string | null): boolean {
+  if (typeof projectType !== 'string') return false;
+  return projectType.trim().toLowerCase() === 'продление';
+}
 
 function median(values: number[]): number | null {
   if (values.length === 0) return null;
@@ -114,191 +159,148 @@ function median(values: number[]): number | null {
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
-/** ИНН без пробелов по краям, `null`/пусто → `null` — единая нормализация,
- *  использованная во всех местах ниже, которые группируют платежи по ИНН. */
-function normInn(raw: string | null): string | null {
-  if (raw == null) return null;
-  const trimmed = raw.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function occurredAtTime(row: RevenueTransactionRow): number {
-  return new Date(row.occurred_at).getTime();
+function passesKpiFilter(kpiFact: string | null, filter: KpiFilter | null): boolean {
+  if (!filter) return true;
+  const value = parseAmount(kpiFact);
+  // Непарсящийся kpi_fact «не подпадает» под заданный диапазон — исключаем,
+  // как и значение вне границ. Но только когда фильтр реально задан: если
+  // filter === null, ни одна строка из-за kpi_fact не выкидывается вовсе.
+  if (value === null) return false;
+  if (filter.min !== undefined && value < filter.min) return false;
+  if (filter.max !== undefined && value > filter.max) return false;
+  return true;
 }
 
 /**
  * Считает метрики продлений за окно `[from, to]`.
  *
- * `marks` — вся таблица `renewal_marks` (и продления, и `not_renewal`, и уже
- * решённые вручную — нужны целиком, чтобы отличить «кандидат без решения» от
- * «кандидат, решённый как не продление»). `transactions` — ВСЯ история
- * приходов с ИНН (`direction=credit, is_revenue=true, payer_inn заполнен`),
- * а не только окно `[from, to]`: без полной истории нельзя понять, каким по
- * счёту для этого ИНН является платёж внутри окна — платёж, третий по счёту
- * для клиента, в обрезанной по датам выборке выглядел бы первым и терял
- * статус кандидата.
- *
- * ### Якорь цикла — почему не «просто предыдущий платёж»
- *
- * Наивное «предыдущий платёж этого ИНН» ломается на реальном примере из
- * плана (ООО «СМАРТВЭЙ», ИНН 7714379242): между подтверждённым продлением
- * 2026-06-14 (задача без слова «продление», НЕ подтверждено) и следующим
- * подтверждённым продлением 2026-07-30 лежит платёж 2026-01-22 за телеграм
- * (другая услуга) и ещё один неподтверждённый платёж — ни один из них не
- * граница периода, оба просто транши/другие услуги внутри уже идущего
- * периода. Взять «предыдущий платёж» буквально — значит мерить цикл до
- * ближайшего шума, а не до конца прошлого периода.
- *
- * Поэтому якорь для платежа-продления X этого ИНН — не предыдущий платёж
- * вообще, а ПРЕДЫДУЩАЯ ГРАНИЦА ПЕРИОДА: последнее из двух — либо самый
- * ранний платёж ИНН (это и есть первичка, начало периода 1 — она специально
- * не считается кандидатом в `apply_renewal_marks()`, но как точка отсчёта
- * цикла годится), либо более раннее подтверждённое продление того же ИНН,
- * если оно есть. Тогда: цикл первого продления = от первички до него; цикл
- * каждого следующего = от предыдущего ПОДТВЕРЖДЁННОГО продления, а не от
- * случайного платежа между ними.
+ * `rows` — ВСЕ продления (без окна по дате оплаты на уровне выборки из БД):
+ * фильтрация по датам, включая «без даты» и «план», происходит здесь, чтобы
+ * ни одна строка не терялась молча на уровне SQL. `periods` — история
+ * `project_periods` для тех же проектов, нужна только для расчёта цикла.
  */
 export function computeRenewalsMetrics(
-  marks: RenewalMarkRow[],
-  transactions: RevenueTransactionRow[],
+  rows: RenewalProjectRow[],
+  periods: ProjectPeriodRow[],
   from: Date,
   to: Date,
   groupBy: GroupBy,
+  kpiFilter: KpiFilter | null,
+  today: Date,
 ): RenewalsResult {
   const fromKey = bucketKey(from, 'day');
   const toKey = bucketKey(to, 'day');
+  const todayKey = bucketKey(today, 'day');
 
   const keys = buildBuckets(from, to, groupBy);
   const series = new Map<string, RenewalSeriesBucket>(
     keys.map((key) => [key, { key, count: 0, revenue: 0 }]),
   );
 
-  const txnById = new Map<number, RevenueTransactionRow>();
-  for (const t of transactions) txnById.set(t.id, t);
-
-  // Платежи с ИНН, сгруппированные по ИНН и отсортированные по возрастанию
-  // (occurred_at, id) — то же упорядочивание, что `row_number() over (
-  // partition by payer_inn order by occurred_at asc, id asc)` в
-  // apply_renewal_marks(). list[0] каждой группы — первый платёж ИНН
-  // (первичка, не кандидат); остальные — кандидаты.
-  const byInn = new Map<string, RevenueTransactionRow[]>();
-  for (const t of transactions) {
-    const inn = normInn(t.payer_inn);
-    if (!inn) continue;
-    const list = byInn.get(inn);
-    if (list) list.push(t);
-    else byInn.set(inn, [t]);
-  }
-  for (const list of byInn.values()) {
-    list.sort((a, b) => {
-      const diff = occurredAtTime(a) - occurredAtTime(b);
-      return diff !== 0 ? diff : a.id - b.id;
-    });
-  }
-
-  const candidateIds = new Set<number>();
-  for (const list of byInn.values()) {
-    for (let i = 1; i < list.length; i += 1) candidateIds.add(list[i].id);
-  }
-
-  const decidedIds = new Set(marks.map((m) => m.transaction_id));
-
-  // Якоря цикла по ИНН: первый платёж ИНН + время каждого подтверждённого
-  // продления этого ИНН (см. doc-комментарий функции). Инициализируем первым
-  // платежом каждого ИНН, затем добавляем подтверждённые продления.
-  const boundariesByInn = new Map<string, number[]>();
-  for (const [inn, list] of byInn) {
-    boundariesByInn.set(inn, [occurredAtTime(list[0])]);
-  }
-  for (const mark of marks) {
-    if (!mark.is_renewal) continue;
-    const txn = txnById.get(mark.transaction_id);
-    if (!txn) continue;
-    const inn = normInn(txn.payer_inn);
-    if (!inn) continue;
-    const t = occurredAtTime(txn);
-    const list = boundariesByInn.get(inn);
-    if (list) list.push(t);
-    else boundariesByInn.set(inn, [t]);
-  }
-  for (const list of boundariesByInn.values()) list.sort((a, b) => a - b);
-
-  /** Дней с последней границы периода этого ИНН СТРОГО раньше `t` (то есть не
-   *  считая саму `t`, даже если она сама есть в списке границ). `null` — нет
-   *  ни одной более ранней границы (не должно случаться для платежа, который
-   *  прошёл через кандидаты, — первый платёж ИНН всегда раньше — но список
-   *  границ инициализируется только для ИНН, встретившихся в `transactions`,
-   *  поэтому защитный `null` на случай расхождения данных не помешает). */
-  function cycleDaysBefore(inn: string, t: number): number | null {
-    const list = boundariesByInn.get(inn);
-    if (!list) return null;
-    let prev: number | null = null;
-    for (const b of list) {
-      if (b < t) prev = b;
-      else break; // список отсортирован по возрастанию — дальше только >= t
-    }
-    if (prev === null) return null;
-    const days = (t - prev) / DAY_MS;
-    return Number.isFinite(days) && days >= 0 ? days : null;
-  }
-
   const totals: RenewalsTotals = {
     count: 0,
     revenue: 0,
     avgCheck: null,
     medianCheck: null,
+    planned: 0,
+    withoutDate: 0,
+    withoutBudget: 0,
     cycleAvgDays: null,
     cycleMedianDays: null,
+    cycleReliable: false,
     cycleSampleSize: 0,
     cycleCandidates: 0,
-    unresolved: 0,
   };
+
+  // Карта project_id -> отсортированные по возрастанию UTC-полночи period_end
+  // (только те, что распарсились). Нужна, чтобы для каждого продления найти
+  // «последний предыдущий период» без O(n*m) пересканирования periods целиком
+  // на каждой строке.
+  const periodEndsByProject = new Map<string, number[]>();
+  for (const p of periods) {
+    const end = parseIsoDate(p.period_end);
+    if (!end) continue;
+    const list = periodEndsByProject.get(p.project_id);
+    if (list) {
+      list.push(end.getTime());
+    } else {
+      periodEndsByProject.set(p.project_id, [end.getTime()]);
+    }
+  }
+  for (const list of periodEndsByProject.values()) list.sort((a, b) => a - b);
+
+  /** Последний period_end проекта, не позже contractTime. `null`, если истории
+   *  нет или все известные периоды закончились уже после даты договора. */
+  function lastPeriodEndBefore(projectId: string, contractTime: number): number | null {
+    const list = periodEndsByProject.get(projectId);
+    if (!list) return null;
+    let best: number | null = null;
+    for (const end of list) {
+      if (end <= contractTime) best = end; // list отсортирован по возрастанию — берём последний подходящий
+    }
+    return best;
+  }
 
   const checks: number[] = [];
   const cycles: number[] = [];
 
-  for (const mark of marks) {
-    if (!mark.is_renewal) continue;
-    const txn = txnById.get(mark.transaction_id);
-    if (!txn) continue; // защитный случай: отметка на транзакцию вне выборки
+  for (const row of rows) {
+    if (!isRenewalType(row.project_type)) continue;
+    if (!passesKpiFilter(row.kpi_fact, kpiFilter)) continue;
 
-    const paymentKey = bucketKey(new Date(txn.occurred_at), 'day');
-    if (paymentKey < fromKey || paymentKey > toKey) continue;
-
-    totals.count += 1;
-    totals.revenue += txn.amount;
-    checks.push(txn.amount);
-
-    const bucket = series.get(bucketKey(new Date(txn.occurred_at), groupBy));
-    if (bucket) {
-      bucket.count += 1;
-      bucket.revenue += txn.amount;
+    const paymentTrimmed = row.payment_date == null ? null : row.payment_date.trim();
+    const paymentDate = parseIsoDate(row.payment_date);
+    if (!paymentDate || !paymentTrimmed) {
+      totals.withoutDate += 1;
+      continue;
     }
 
-    const inn = normInn(txn.payer_inn);
-    if (inn) {
-      const days = cycleDaysBefore(inn, occurredAtTime(txn));
-      if (days !== null) cycles.push(days);
+    // Строка уже валидна как YYYY-MM-DD (parseIsoDate вернул дату), так что
+    // сравнение строк ниже эквивалентно сравнению дат — и не требует лишнего
+    // сдвига в МСК: UTC-полночь + 3 часа никогда не пересекает границу дня.
+    if (paymentTrimmed > todayKey) {
+      totals.planned += 1;
+      continue;
+    }
+
+    if (paymentTrimmed < fromKey || paymentTrimmed > toKey) continue; // вне выбранного периода — не считаем нигде, как в firstSales
+
+    totals.count += 1;
+    const bucket = series.get(bucketKey(paymentDate, groupBy));
+    if (bucket) bucket.count += 1;
+
+    const amount = parseAmount(row.budget);
+    if (amount === null) {
+      totals.withoutBudget += 1;
+    } else {
+      totals.revenue += amount;
+      checks.push(amount);
+      if (bucket) bucket.revenue += amount;
+    }
+
+    // Цикл — от period_end последнего предыдущего периода ДО contract_date
+    // этого продления. Нет даты договора или истории периодов — сделка
+    // просто не попадает в cycles; это не ошибка, а ожидаемая тонкость.
+    const contractDate = parseIsoDate(row.contract_date);
+    if (contractDate) {
+      const prevEnd = lastPeriodEndBefore(row.id, contractDate.getTime());
+      if (prevEnd !== null) {
+        const days = (contractDate.getTime() - prevEnd) / DAY_MS;
+        if (Number.isFinite(days) && days >= 0) cycles.push(days);
+      }
     }
   }
 
-  totals.cycleCandidates = totals.count;
-  totals.cycleSampleSize = cycles.length;
   totals.avgCheck = checks.length > 0 ? checks.reduce((a, b) => a + b, 0) / checks.length : null;
   totals.medianCheck = median(checks);
-  totals.cycleAvgDays = cycles.length > 0 ? cycles.reduce((a, b) => a + b, 0) / cycles.length : null;
-  totals.cycleMedianDays = median(cycles);
 
-  // «Не разобрано»: кандидаты без строки в renewal_marks вовсе, с датой
-  // платежа внутри того же [from, to] — см. doc-комментарий у поля
-  // RenewalsTotals.unresolved про выбор периода вместо сквозной цифры.
-  for (const id of candidateIds) {
-    if (decidedIds.has(id)) continue;
-    const txn = txnById.get(id);
-    if (!txn) continue;
-    const key = bucketKey(new Date(txn.occurred_at), 'day');
-    if (key < fromKey || key > toKey) continue;
-    totals.unresolved += 1;
+  totals.cycleCandidates = totals.count;
+  totals.cycleSampleSize = cycles.length;
+  totals.cycleReliable =
+    totals.count > 0 && cycles.length / totals.count >= CYCLE_RELIABLE_MIN_SHARE;
+  if (totals.cycleReliable) {
+    totals.cycleAvgDays = cycles.reduce((a, b) => a + b, 0) / cycles.length;
+    totals.cycleMedianDays = median(cycles);
   }
 
   return {
@@ -307,68 +309,45 @@ export function computeRenewalsMetrics(
   };
 }
 
-/**
- * PostgREST по умолчанию отдаёт максимум 1000 строк за запрос и делает это
- * МОЛЧА — без пагинации история старше тысячной строки просто обрезалась бы,
- * а метрики занижались бы без единой ошибки в логах (тот же приём и та же
- * причина, что в `expenses/rows.ts`). `MAX_ROWS` — не бизнес-лимит, а защита
- * от бесконечного цикла, если пагинация где-то сломается.
- */
-const PAGE_SIZE = 1000;
-const MAX_ROWS = 100_000;
-
-const REVENUE_TRANSACTION_COLUMNS = 'id, payer_inn, payer_name, amount, occurred_at, purpose';
+const RENEWAL_PROJECT_COLUMNS =
+  'id, name, client, project_type, budget, payment_date, contract_date, kpi_fact, status, manager, specialist';
 
 /**
- * Приходы (`direction=credit`, `is_revenue=true`) с непустым ИНН плательщика
- * — то же множество, из которого `apply_renewal_marks()` (SQL) вычисляет
- * кандидатов. Тянем ВСЮ историю, а не окно `[from, to]` — см. doc-комментарий
- * `computeRenewalsMetrics` про то, зачем нужна полная история для
- * ранжирования «какой платёж по счёту у ИНН».
+ * Тянет продления из `projects`.
  *
- * `.not('payer_inn', 'is', null)` отсекает только NULL; строки из пробелов
- * («   ») проходят фильтр на уровне SQL и отсеиваются уже в
- * `computeRenewalsMetrics` через `normInn` — так же, как `coalesce(btrim(...),
- * '') <> ''` делает это в SQL-функции.
+ * Фильтр на уровне SQL (`ilike '%продление%'`) — грубая предфильтрация ради
+ * меньшей выборки, не источник истины: `project_type` заполняется руками и
+ * может прийти с пробелами или в другом регистре, поэтому окончательное
+ * решение «это продление или нет» — за `computeRenewalsMetrics`
+ * (`isRenewalType`, обрезка + нижний регистр). `%...%`, а не точное
+ * совпадение, — чтобы не потерять строку из-за случайных пробелов по краям,
+ * которые точное `ilike` без wildcard'ов не прощает.
  */
-export async function fetchRevenueTransactions(db: SupabaseClient): Promise<RevenueTransactionRow[]> {
-  const rows: RevenueTransactionRow[] = [];
-  for (let offset = 0; offset < MAX_ROWS; offset += PAGE_SIZE) {
-    const { data, error } = await db
-      .from('bank_transactions')
-      .select(REVENUE_TRANSACTION_COLUMNS)
-      .eq('direction', 'credit')
-      .eq('is_revenue', true)
-      .not('payer_inn', 'is', null)
-      .order('occurred_at', { ascending: true })
-      .order('id', { ascending: true })
-      .range(offset, offset + PAGE_SIZE - 1);
-    if (error) throw error;
-    const page = (data ?? []) as unknown as RevenueTransactionRow[];
-    rows.push(...page);
-    if (page.length < PAGE_SIZE) return rows;
-  }
-  throw new Error(`fetchRevenueTransactions: строк больше ${MAX_ROWS} — пагинация не успевает, проверь потолок`);
+export async function fetchRenewalProjects(db: SupabaseClient): Promise<RenewalProjectRow[]> {
+  const { data, error } = await db
+    .from('projects')
+    .select(RENEWAL_PROJECT_COLUMNS)
+    .ilike('project_type', '%продление%');
+  if (error) throw error;
+  return (data ?? []) as RenewalProjectRow[];
 }
 
-const RENEWAL_MARK_COLUMNS = 'transaction_id, is_renewal, method, amo_deal_id, note';
-
-/** Решения по кандидатам целиком — и автоматические (`apply_renewal_marks`),
- *  и ручные, и `is_renewal=true`, и `not_renewal`. Нужны целиком: чтобы
- *  отличить «кандидат без решения» («не разобрано») от «кандидат, решённый
- *  как не продление», важно видеть решение независимо от `is_renewal`. */
-export async function fetchRenewalMarks(db: SupabaseClient): Promise<RenewalMarkRow[]> {
-  const rows: RenewalMarkRow[] = [];
-  for (let offset = 0; offset < MAX_ROWS; offset += PAGE_SIZE) {
+/** История периодов для расчёта цикла. Порционируется через `chunkArray`,
+ *  как в `firstSales/metrics.ts` — с большим числом проектов `.in(...)`
+ *  одной строкой упирается в лимит длины URL PostgREST. */
+export async function fetchRenewalPeriods(
+  db: SupabaseClient,
+  projectIds: string[],
+): Promise<ProjectPeriodRow[]> {
+  if (projectIds.length === 0) return [];
+  const rows: ProjectPeriodRow[] = [];
+  for (const chunk of chunkArray(projectIds, IN_CHUNK_SIZE)) {
     const { data, error } = await db
-      .from('renewal_marks')
-      .select(RENEWAL_MARK_COLUMNS)
-      .order('id', { ascending: true })
-      .range(offset, offset + PAGE_SIZE - 1);
+      .from('project_periods')
+      .select('project_id, period_start, period_end')
+      .in('project_id', chunk);
     if (error) throw error;
-    const page = (data ?? []) as unknown as RenewalMarkRow[];
-    rows.push(...page);
-    if (page.length < PAGE_SIZE) return rows;
+    rows.push(...((data ?? []) as ProjectPeriodRow[]));
   }
-  throw new Error(`fetchRenewalMarks: строк больше ${MAX_ROWS} — пагинация не успевает, проверь потолок`);
+  return rows;
 }

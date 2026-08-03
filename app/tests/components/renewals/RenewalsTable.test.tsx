@@ -4,17 +4,18 @@ import type { RenewalTableRow } from '@/lib/renewals/tableRows';
 
 function row(over: Partial<RenewalTableRow> = {}): RenewalTableRow {
   return {
-    transactionId: 1,
+    id: 'r',
     client: 'Клиент',
-    inn: '7714379242',
-    amount: 100,
+    name: 'Услуга',
+    budget: 100,
+    budgetRaw: '100',
     paymentDate: '2026-07-01',
-    method: 'task_text',
-    methodLabel: 'текст задачи AMO',
-    note: null,
-    purpose: 'Оплата услуг',
-    amoDealId: null,
-    amoDealUrl: null,
+    isPlanned: false,
+    contractDate: null,
+    kpiFact: null,
+    kpiFactRaw: null,
+    status: 'В работе',
+    manager: null,
     ...over,
   };
 }
@@ -23,9 +24,9 @@ function row(over: Partial<RenewalTableRow> = {}): RenewalTableRow {
 // («свежие сверху»), который отдаёт buildRenewalTableRows. Таблица не должна
 // его трогать, пока пользователь не кликнул по заголовку.
 const DEFAULT_ORDER: RenewalTableRow[] = [
-  row({ transactionId: 2, client: 'Бета', amount: 200 }),
-  row({ transactionId: 1, client: 'Альфа', amount: 20 }),
-  row({ transactionId: 3, client: 'Вета', amount: 100 }),
+  row({ id: 'b', client: 'Бета', budget: 200 }),
+  row({ id: 'a', client: 'Альфа', budget: 20 }),
+  row({ id: 'c', client: 'Вета', budget: 100 }),
 ];
 
 function clientCells() {
@@ -63,6 +64,21 @@ describe('RenewalsTable — сортировка по клику на загол
     expect(clientCells()).toEqual(['Бета', 'Альфа', 'Вета']); // назад к исходному
   });
 
+  it('строки без суммы уходят в конец при сортировке в обе стороны', () => {
+    const rows = [
+      row({ id: 'has-budget', client: 'Есть сумма', budget: 50 }),
+      row({ id: 'no-budget', client: 'Без суммы', budget: null, budgetRaw: 'н/д' }),
+    ];
+    render(<RenewalsTable rows={rows} />);
+    const header = screen.getByRole('button', { name: /Сумма/ });
+
+    fireEvent.click(header); // asc
+    expect(clientCells()).toEqual(['Есть сумма', 'Без суммы']);
+
+    fireEvent.click(header); // desc
+    expect(clientCells()).toEqual(['Есть сумма', 'Без суммы']);
+  });
+
   it('сортировка по клиенту — через ru-локаль (алфавитный порядок)', () => {
     render(<RenewalsTable rows={DEFAULT_ORDER} />);
     fireEvent.click(screen.getByRole('button', { name: /Клиент/ }));
@@ -86,18 +102,5 @@ describe('RenewalsTable — сортировка по клику на загол
 
     fireEvent.click(within(amountTh).getByRole('button'));
     expect(amountTh).toHaveAttribute('aria-sort', 'descending');
-  });
-});
-
-describe('RenewalsTable — ссылка на сделку AMO', () => {
-  it('показывает ссылку, когда она есть', () => {
-    render(<RenewalsTable rows={[row({ amoDealId: 33462035, amoDealUrl: 'https://x.amocrm.ru/leads/detail/33462035' })]} />);
-    const link = screen.getByRole('link', { name: '#33462035' });
-    expect(link).toHaveAttribute('href', 'https://x.amocrm.ru/leads/detail/33462035');
-  });
-
-  it('без сделки показывает прочерк', () => {
-    render(<RenewalsTable rows={[row({ amoDealId: null, amoDealUrl: null })]} />);
-    expect(screen.queryByRole('link')).not.toBeInTheDocument();
   });
 });
