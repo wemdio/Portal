@@ -15,15 +15,23 @@
  * done-апдейтом). Стадии выполняются через runHeStage из lib/hypothesisEngine; fetchText/search
  * не переопределяем — используются дефолты либы (SSRF-гейт + websiteParser,
  * serperSearch).
+ *
+ * Отмена: cancel-роут (projects/[id]/cancel) переводит джобы проекта в
+ * 'cancelled'. Pending не клеймятся; у running наблюдатель в handleJob
+ * аборти́т LLM-запрос через setHeActiveJobSignal, а если стадия успела
+ * завершиться — done/дочейн не выполняются, attempts не растут (failJob).
  */
 
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, startWorkerHeartbeat } from './_shared';
 import { runHeStage } from '@/lib/hypothesisEngine/stages';
+import { setHeActiveJobSignal } from '@/lib/hypothesisEngine/llm';
 import type { HeJob, HeStage } from '@/lib/hypothesisEngine/types';
 
 const WORKER_ID = `hypothesis-engine-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
 const MAX_ATTEMPTS = 3;
+/** Как часто воркер проверяет строку активной джобы на отмену пользователем. */
+const CANCEL_WATCH_MS = 3000;
 
 /**
  * Heartbeat-файл: обновляется каждые 30с независимым setInterval-тиком.
@@ -151,22 +159,54 @@ async function enqueueNextResearchStage(job: HeJob) {
 async function handleJob(job: HeJob) {
   log('info', `Running stage ${job.stage} for project ${job.project_id} (job ${job.id}, attempt ${job.attempts})`);
 
-  const stageResult = await runHeStage(job, {
-    supabase: db,
-    log: (msg) => log('info', `[${job.stage}] ${msg}`),
-  });
+  // Отмена задачи: cancel-роут переводит джобу в 'cancelled'. Наблюдатель
+  // раз в CANCEL_WATCH_MS перечитывает строку и аборти́т контроллер — сигнал
+  // проброшен в LLM-слой (setHeActiveJobSignal), текущий запрос к модели
+  // обрывается сразу, а не по окончании стадии. Если стадия сейчас не в
+  // LLM-вызове, отмена сработает по завершении: статус 'cancelled' ниже не
+  // даёт записать done и дочейнить следующую стадию.
+  const abort = new AbortController();
+  setHeActiveJobSignal(abort.signal);
+  const cancelWatcher = setInterval(() => {
+    void (async () => {
+      try {
+        const { data } = await db
+          .from('he_jobs')
+          .select('status')
+          .eq('id', job.id)
+          .maybeSingle();
+        if (data && (data as { status: string }).status === 'cancelled') abort.abort();
+      } catch {
+        // Транзиентная ошибка БД не должна ронять воркер — следующий тик повторит.
+      }
+    })();
+  }, CANCEL_WATCH_MS);
+
+  let stageResult;
+  try {
+    stageResult = await runHeStage(job, {
+      supabase: db,
+      log: (msg) => log('info', `[${job.stage}] ${msg}`),
+    });
+  } finally {
+    clearInterval(cancelWatcher);
+    setHeActiveJobSignal(null);
+  }
   const tokensUsed = stageResult.tokensUsed ?? 0;
   const costUsd = stageResult.costUsd ?? 0;
 
   // base_collect переводит свою строку обратно в pending (self-requeue на
   // время работы дочерних парсеров) и возвращает {waiting: true}. Не затираем
   // requeue финальным done-апдейтом — только накапливаем расход стадии.
+  // Сюда же попадает 'cancelled': стадия завершилась после отмены — done и
+  // дочейн следующей research-стадии не выполняем, джоба остаётся cancelled.
   const { data: current } = await db
     .from('he_jobs')
     .select('status')
     .eq('id', job.id)
     .maybeSingle();
   if (current && (current as { status: string }).status !== 'running') {
+    const cancelled = (current as { status: string }).status === 'cancelled';
     await db
       .from('he_jobs')
       .update({
@@ -176,7 +216,12 @@ async function handleJob(job: HeJob) {
       })
       .eq('id', job.id);
     await accumulateProjectUsage(job.project_id, tokensUsed, costUsd);
-    log('info', `Job ${job.id} (${job.stage}) → waiting (self-requeue, +${tokensUsed} tok)`);
+    log(
+      'info',
+      cancelled
+        ? `Job ${job.id} (${job.stage}) → cancelled пользователем (+${tokensUsed} tok до отмены)`
+        : `Job ${job.id} (${job.stage}) → waiting (self-requeue, +${tokensUsed} tok)`,
+    );
     return;
   }
 
@@ -200,6 +245,17 @@ async function handleJob(job: HeJob) {
 
 async function failJob(job: HeJob, err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
+  // Отменённая пользователем джоба: стадия упала по AbortSignal. Это не фейл —
+  // не инкрементируем attempts, не затираем 'cancelled', не валим проект/базу.
+  const { data: currentBefore } = await db
+    .from('he_jobs')
+    .select('status')
+    .eq('id', job.id)
+    .maybeSingle();
+  if (currentBefore && (currentBefore as { status: string }).status === 'cancelled') {
+    log('info', `Job ${job.id} (${job.stage}) aborted by user cancel`);
+    return;
+  }
   // attempts — число фейлов, а не клеймов: инкремент только здесь.
   const nextAttempts = job.attempts + 1;
   const finalFail = nextAttempts >= MAX_ATTEMPTS;

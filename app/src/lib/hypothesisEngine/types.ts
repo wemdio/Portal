@@ -22,7 +22,7 @@ export type HeStage =
   | 'template'
   | 'dossier';
 
-export type HeJobStatus = 'pending' | 'running' | 'done' | 'failed';
+export type HeJobStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
 
 export type HeProjectStatus = 'draft' | 'researching' | 'researched' | 'failed';
 

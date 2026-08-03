@@ -71,6 +71,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
 
   const [researchStarting, setResearchStarting] = useState(false);
   const [offerSaving, setOfferSaving] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
 
   // Короткое уведомление «Шаблон собирается…» после запуска сборки.
   const [templateNotice, setTemplateNotice] = useState(false);
@@ -269,6 +270,33 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
       setResearchStarting(false);
     }
   }, [projectId, researchRunning, load]);
+
+  // Отмена всех активных задач проекта (research/chain/vocab/base/template) —
+  // сценарий «запустили по ошибке, воркер жжёт API». Подтверждение обязательно.
+  const cancelJobs = useCallback(async () => {
+    if (cancelling) return;
+    if (
+      !window.confirm(
+        'Остановить все активные задачи проекта? Текущий запрос к модели оборвётся сразу, новые списания прекратятся. Уже готовые результаты сохранятся.',
+      )
+    ) {
+      return;
+    }
+    setActionError('');
+    setCancelling(true);
+    try {
+      const { ok, data } = await hePost<{ ok?: boolean; cancelled?: number; error?: string }>(
+        `${HE_API}/projects/${projectId}/cancel`,
+      );
+      if (!ok) {
+        setActionError(data.error || 'Не удалось остановить задачи');
+        return;
+      }
+      await load({ silent: true });
+    } finally {
+      setCancelling(false);
+    }
+  }, [cancelling, projectId, load]);
 
   const runChain = useCallback(
     async (verticalId: string, language: string) => {
@@ -557,6 +585,17 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             {project ? prettyProjectName(project.name, project.website_url) : 'Проект'}
           </h1>
           {project ? <ProjectStatusBadge status={project.status} /> : null}
+          {hasActiveJobs ? (
+            <button
+              type="button"
+              onClick={() => void cancelJobs()}
+              disabled={cancelling}
+              title="Остановить все активные задачи проекта (исследование, цепочки, шаблоны, сборку баз)"
+              className="h-7 rounded-lg border border-red-200 bg-red-50 px-2.5 text-xs font-medium text-red-600 transition hover:bg-red-100 disabled:opacity-50"
+            >
+              {cancelling ? 'Останавливаем…' : 'Остановить задачи'}
+            </button>
+          ) : null}
         </div>
         {project ? (
           <p className="mt-1 text-xs text-gray-400">
@@ -700,7 +739,9 @@ function JobsDebugTable({ jobs }: { jobs: HeJobSummary[] }) {
                         ? 'red'
                         : j.status === 'running'
                           ? 'blue'
-                          : 'gray'
+                          : j.status === 'cancelled'
+                            ? 'amber'
+                            : 'gray'
                   }
                 >
                   {j.status}
@@ -824,10 +865,10 @@ function collectVisitItems(detail: HeProjectDetailResponse, baselineIso: string)
     }
   }
 
-  // Джобы: только последняя завершившаяся (done/failed) джоба каждой стадии после baseline.
+  // Джобы: только последняя завершившаяся (done/failed/cancelled) джоба каждой стадии после baseline.
   const latestByStage = new Map<string, { job: HeJobSummary; finishedAt: string }>();
   for (const j of detail.jobs ?? []) {
-    if (j.status !== 'done' && j.status !== 'failed') continue;
+    if (j.status !== 'done' && j.status !== 'failed' && j.status !== 'cancelled') continue;
     const finishedAt = j.finished_at;
     if (!after(finishedAt)) continue;
     const prev = latestByStage.get(j.stage);
@@ -840,7 +881,9 @@ function collectVisitItems(detail: HeProjectDetailResponse, baselineIso: string)
     items.push({
       id: `job-${job.id}`,
       tone: job.status === 'done' ? 'ok' : 'err',
-      text: `${VISIT_STAGE_NAMES[job.stage]}: ${job.status === 'done' ? 'готово' : 'ошибка'}`,
+      text: `${VISIT_STAGE_NAMES[job.stage]}: ${
+        job.status === 'done' ? 'готово' : job.status === 'cancelled' ? 'отменено' : 'ошибка'
+      }`,
       at: finishedAt,
     });
   }
