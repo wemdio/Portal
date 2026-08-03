@@ -7,11 +7,14 @@
 
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { HeClusteringSchema, type HeClusteringDecision } from '../schemas';
+import { projectMarket } from '../market';
 import { buildClusteringMessages } from '../prompts/clustering';
+import { buildClusteringMessagesEn } from '../prompts/clustering.en';
 import type { HeHypothesis, HeJob } from '../types';
 import {
   addUsage,
   newUsage,
+  readProject,
   stageLog,
   type HeStageContext,
   type HeStageResult,
@@ -185,6 +188,10 @@ export function applyClusteringDecisions(
 export async function runClusteringStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
   const usage = newUsage();
 
+  // Рынок: ctx.market (воркер), фолбэк — колонка he_projects.market (читаем
+  // проект только в фолбэке: остальное стадии нужно из he_hypotheses).
+  const market = ctx.market ?? projectMarket(await readProject(ctx.supabase, job.project_id));
+
   const { data: hyps, error } = await ctx.supabase
     .from('he_hypotheses')
     .select('*')
@@ -197,7 +204,7 @@ export async function runClusteringStage(job: HeJob, ctx: HeStageContext): Promi
   }
 
   const llm = await callLLMWithSchema(
-    buildClusteringMessages({
+    (market === 'us' ? buildClusteringMessagesEn : buildClusteringMessages)({
       hypotheses: hypotheses.map((h) => ({
         title: h.title,
         tier: h.tier,

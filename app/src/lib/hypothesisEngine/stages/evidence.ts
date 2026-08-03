@@ -17,7 +17,9 @@ import {
   type HeHypothesisCandidate,
   type HeSiteProfileOutput,
 } from '../schemas';
+import { projectMarket } from '../market';
 import { buildEvidenceMessages } from '../prompts/evidence';
+import { buildEvidenceMessagesEn } from '../prompts/evidence.en';
 import type { HeEvidenceItem, HeHypothesisTier, HeJob } from '../types';
 import { loadMarkupHistory, loadPortfolioProfile } from './hypotheses';
 import { resolveFetchText, resolveSearch } from './io';
@@ -80,6 +82,8 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
   const profile = readSiteProfile<HeSiteProfileOutput>(project);
   const search = resolveSearch(ctx);
   const fetchText = resolveFetchText(ctx);
+  // Рынок: ctx.market (воркер), фолбэк — колонка he_projects.market.
+  const market = ctx.market ?? projectMarket(project);
 
   const hypothesesResult = await latestDoneJobResult<{ candidates?: HeHypothesisCandidate[] }>(
     ctx.supabase,
@@ -95,7 +99,7 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
   // Та же калибровка, что и на стадии hypotheses, — best-effort: сбой →
   // undefined, верификация продолжается. Грузим один раз на всех кандидатов.
   const [portfolioProfile, markupHistory] = await Promise.all([
-    loadPortfolioProfile(ctx),
+    loadPortfolioProfile(ctx, market),
     loadMarkupHistory(ctx, job.project_id),
   ]);
 
@@ -109,7 +113,8 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
     stageLog(ctx, `[evidence] «${candidate.title}»…`);
 
     // 1) Поиск по запросам кандидата (2–4), дедуп ссылок, best-effort.
-    const queries = (candidate.search_queries.length ? candidate.search_queries : [`${candidate.title} рынок объём`])
+    const fallbackQuery = market === 'us' ? `${candidate.title} market size` : `${candidate.title} рынок объём`;
+    const queries = (candidate.search_queries.length ? candidate.search_queries : [fallbackQuery])
       .slice(0, MAX_QUERIES_PER_CANDIDATE);
     const seenLinks = new Set<string>();
     const searchResults: Array<{ title: string; link: string; snippet?: string }> = [];
@@ -149,7 +154,7 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
         ...(markupHistory ? { markupHistory } : {}),
       };
       const llm = await callLLMWithSchema(
-        buildEvidenceMessages(verdictInput),
+        (market === 'us' ? buildEvidenceMessagesEn : buildEvidenceMessages)(verdictInput),
         HeEvidenceVerdictSchema,
         { model: getHeModel('research'), maxTokens: 4096 },
       );

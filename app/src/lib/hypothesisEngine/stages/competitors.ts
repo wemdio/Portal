@@ -8,7 +8,9 @@
 
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { HeCompetitorListSchema, type HeSiteProfileOutput } from '../schemas';
+import { projectMarket } from '../market';
 import { buildCompetitorsMessages } from '../prompts/competitors';
+import { buildCompetitorsMessagesEn } from '../prompts/competitors.en';
 import type { HeJob } from '../types';
 import { resolveFetchText, resolveSearch } from './io';
 import {
@@ -61,13 +63,23 @@ export async function runCompetitorsStage(job: HeJob, ctx: HeStageContext): Prom
   const profile = readSiteProfile<HeSiteProfileOutput>(project);
   const search = resolveSearch(ctx);
   const fetchText = resolveFetchText(ctx);
+  // Рынок: ctx.market (воркер), фолбэк — колонка he_projects.market.
+  const market = ctx.market ?? projectMarket(project);
 
-  const queries = [
-    `${profile.company_name} конкуренты`,
-    `${profile.company_name} аналоги альтернативы`,
-    `${profile.company_name} competitors`,
-    `${profile.company_name} vs`,
-  ];
+  const queries =
+    market === 'us'
+      ? [
+          `${profile.company_name} competitors`,
+          `${profile.company_name} alternatives`,
+          `${profile.company_name} vs`,
+          `${profile.company_name} competitor comparison`,
+        ]
+      : [
+          `${profile.company_name} конкуренты`,
+          `${profile.company_name} аналоги альтернативы`,
+          `${profile.company_name} competitors`,
+          `${profile.company_name} vs`,
+        ];
 
   const searchResults: Array<{ query: string; items: Array<{ title: string; link: string; snippet?: string }> }> = [];
   for (const q of queries) {
@@ -82,7 +94,11 @@ export async function runCompetitorsStage(job: HeJob, ctx: HeStageContext): Prom
   stageLog(ctx, `[competitors] выдача собрана, отбор LLM…`);
 
   const llm = await callLLMWithSchema(
-    buildCompetitorsMessages({ profile, websiteUrl: project.website_url, searchResults }),
+    (market === 'us' ? buildCompetitorsMessagesEn : buildCompetitorsMessages)({
+      profile,
+      websiteUrl: project.website_url,
+      searchResults,
+    }),
     HeCompetitorListSchema,
     { model: getHeModel('research'), maxTokens: 4096 },
   );
