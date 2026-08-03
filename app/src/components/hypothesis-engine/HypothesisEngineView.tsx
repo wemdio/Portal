@@ -18,7 +18,7 @@ import {
 } from './api';
 import { HE, Spinner } from './design';
 import { ProjectDetail } from './ProjectDetail';
-import { ProjectStatusBadge, StatusBox, formatDate, prettyHost } from './ui';
+import { ProjectStatusBadge, StatusBox, formatDate, prettyHost, prettyProjectName } from './ui';
 
 export function HypothesisEngineView() {
   const [projects, setProjects] = useState<HeProject[]>([]);
@@ -172,7 +172,7 @@ export function HypothesisEngineView() {
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-semibold text-gray-900">
-                      {p.name?.trim() ? p.name : prettyHost(p.website_url)}
+                      {prettyProjectName(p.name, p.website_url)}
                     </p>
                     {p.name?.trim() ? (
                       <p className={`truncate text-xs ${HE.muted}`}>{prettyHost(p.website_url)}</p>

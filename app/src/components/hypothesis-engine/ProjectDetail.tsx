@@ -29,7 +29,7 @@ import { Step3Content } from './steps/Step3Content';
 import { Step4Base } from './steps/Step4Base';
 import { Step5Template } from './steps/Step5Template';
 import { HE, StatusDot } from './design';
-import { Badge, ProjectStatusBadge, StatusBox, formatDate, prettyHost } from './ui';
+import { Badge, ProjectStatusBadge, StatusBox, formatDate, prettyHost, prettyProjectName } from './ui';
 
 const POLL_INTERVAL_MS = 4000;
 
@@ -554,7 +554,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
         </nav>
         <div className="mt-2 flex flex-wrap items-center gap-2.5">
           <h1 className="truncate text-[21px] font-semibold tracking-tight text-gray-900">
-            {project?.name?.trim() || (project ? prettyHost(project.website_url) : 'Проект')}
+            {project ? prettyProjectName(project.name, project.website_url) : 'Проект'}
           </h1>
           {project ? <ProjectStatusBadge status={project.status} /> : null}
         </div>

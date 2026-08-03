@@ -119,6 +119,24 @@ describe('POST /api/tools/hypothesis-engine/projects — happy path', () => {
     expect(body.project.name).toBe('Acme');
     expect(body.project.website_url).toBe('https://acme.io/about');
   });
+
+  it('stores a Cyrillic (IDN) domain in Unicode, not punycode', async () => {
+    const res = await POST(makeReq({ website_url: 'цельныерешения.рф' }));
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { project: Record<string, unknown> };
+    expect(body.project.website_url).toBe('https://цельныерешения.рф/');
+    expect(body.project.name).toBe('цельныерешения.рф');
+  });
+
+  it('decodes punycode input to Unicode for storage', async () => {
+    const res = await POST(
+      makeReq({ website_url: 'https://xn--e1aaaapoody9c2a6al5c.xn--p1ai/' }),
+    );
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { project: Record<string, unknown> };
+    expect(body.project.website_url).toBe('https://цельныерешения.рф/');
+    expect(body.project.name).toBe('цельныерешения.рф');
+  });
 });
 
 describe('GET /api/tools/hypothesis-engine/projects', () => {

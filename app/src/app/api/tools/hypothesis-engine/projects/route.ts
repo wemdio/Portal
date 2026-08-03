@@ -1,3 +1,4 @@
+import { domainToUnicode } from 'node:url';
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
@@ -34,7 +35,15 @@ function normalizeWebsiteInput(raw: string): { url: string; hostname: string } |
   const hostname = parsed.hostname.toLowerCase();
   if (!/^[a-z0-9.-]+$/.test(hostname)) return null;
   if (!hostname.includes('.') || hostname.includes('..')) return null;
-  return { url: parsed.href, hostname };
+  // IDN-домены (например кириллические .рф) храним в Unicode, а не в punycode
+  // («xn--…») — иначе закодированный вид торчит в интерфейсе, имени проекта
+  // по умолчанию и в промптах. Фетч воркера сам перекодирует при запросе.
+  const unicodeHostname = domainToUnicode(hostname) || hostname;
+  const url =
+    unicodeHostname === hostname
+      ? parsed.href
+      : `${parsed.protocol}//${unicodeHostname}${parsed.port ? `:${parsed.port}` : ''}${parsed.pathname}${parsed.search}${parsed.hash}`;
+  return { url, hostname: unicodeHostname };
 }
 
 // GET — список проектов всех internal-пользователей (инструмент общий),
