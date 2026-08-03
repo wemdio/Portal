@@ -2,7 +2,7 @@
 
 import { normalizeHeMarket, serperGeoForMarket, defaultChainLanguageForMarket, projectMarket } from '@/lib/hypothesisEngine/market';
 
-const mockSerperSearch = jest.fn(async () => []);
+const mockSerperSearch = jest.fn(async (_q?: string, _opts?: unknown) => [] as Array<{ title: string; link: string }>);
 jest.mock('@/lib/search/serperClient', () => ({
   serperSearch: (q: string, opts?: unknown) => mockSerperSearch(q, opts),
 }));
