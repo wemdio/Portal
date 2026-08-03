@@ -4,7 +4,7 @@ import { normalizeHeMarket, serperGeoForMarket, defaultChainLanguageForMarket, p
 
 const mockSerperSearch = jest.fn(async () => []);
 jest.mock('@/lib/search/serperClient', () => ({
-  serperSearch: (...args: unknown[]) => mockSerperSearch(...args),
+  serperSearch: (q: string, opts?: unknown) => mockSerperSearch(q, opts),
 }));
 
 describe('HeMarket helpers', () => {
