@@ -113,15 +113,18 @@ async function handleProxyError(args: {
     log('warning', `Не смог записать ошибку прокси в БД (${e instanceof Error ? e.message : String(e)}) — продолжаю.`);
   }
 
-  // 2) per-account «не помог N прокси подряд»
+  // 2) per-account «не помог N РАЗНЫХ прокси подряд». Повторный провал того
+  //    же прокси счётчик не двигает (см. recordAccountProxyFailure) — иначе на
+  //    аккаунте, которому свап запрещён, degraded выпадает по теории
+  //    вероятностей на любом сыром пуле, а не по состоянию сессии.
   let degradedMarked = false;
   try {
-    const a = await recordAccountProxyFailure(db, account.id);
+    const a = await recordAccountProxyFailure(db, account.id, account.proxy_id);
     degradedMarked = a.markedDegraded;
     if (degradedMarked) {
       log(
         'error',
-        `Аккаунт ${account.session_name}: ${a.consecutiveProxyFailures} разных прокси подряд не помогли — помечаю degraded, отлёжка 24ч. Похоже на shadow-ban или битую сессию, перевыпустите session_data и снимите degraded в UI.`,
+        `Аккаунт ${account.session_name}: ${a.consecutiveProxyFailures} разных прокси подряд не помогли — помечаю degraded, отлёжка 24ч. Сначала проверьте здоровье пула прокси кампании: если брак массовый и на других аккаунтах тоже, дело в пуле. Если пул чистый — похоже на shadow-ban или битую сессию, тогда перевыпустите session_data и снимите degraded в UI.`,
       );
     }
   } catch (e) {
