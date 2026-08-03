@@ -422,3 +422,58 @@ describe('stepValidateEmails', () => {
     expect(out[1][0]).toBe('real@x.ru');
   });
 });
+
+describe('stepFindEmails — step_config.find_emails (stop_at_first / max_per_site)', () => {
+  it('без конфига: stopAtFirstUsableEmail=true (legacy-поведение по умолчанию)', async () => {
+    (scrapeEmails as jest.Mock).mockResolvedValue({ emails: ['x@a.ru'] });
+    const data = [
+      ['Сайт', 'Email'],
+      ['a.ru', ''],
+    ];
+    await stepFindEmails(data, noopProgress);
+    expect(scrapeEmails).toHaveBeenCalledTimes(1);
+    expect(scrapeEmails).toHaveBeenCalledWith(
+      'a.ru',
+      expect.objectContaining({ stopAtFirstUsableEmail: true }),
+    );
+  });
+
+  it('stopAtFirstUsableEmail=false прокидывается в scrapeEmails (собираем больше адресов)', async () => {
+    (scrapeEmails as jest.Mock).mockResolvedValue({ emails: ['x@a.ru'] });
+    const data = [
+      ['Сайт', 'Email'],
+      ['a.ru', ''],
+    ];
+    await stepFindEmails(data, noopProgress, undefined, { stopAtFirstUsableEmail: false });
+    expect(scrapeEmails).toHaveBeenCalledWith(
+      'a.ru',
+      expect.objectContaining({ stopAtFirstUsableEmail: false }),
+    );
+  });
+
+  it('maxEmailsPerSite ограничивает число адресов, пишемых в ячейку', async () => {
+    (scrapeEmails as jest.Mock).mockResolvedValue({
+      emails: ['e1@a.ru', 'e2@a.ru', 'e3@a.ru', 'e4@a.ru'],
+    });
+    const data = [
+      ['Сайт', 'Email'],
+      ['a.ru', ''],
+    ];
+    const out = await stepFindEmails(data, noopProgress, undefined, { maxEmailsPerSite: 2 });
+    expect(out[1][1]).toBe('e1@a.ru, e2@a.ru');
+  });
+
+  it('maxEmailsPerSite не задан — дефолт 8 адресов на сайт', async () => {
+    (scrapeEmails as jest.Mock).mockResolvedValue({
+      emails: Array.from({ length: 10 }, (_, i) => `e${i + 1}@a.ru`),
+    });
+    const data = [
+      ['Сайт', 'Email'],
+      ['a.ru', ''],
+    ];
+    const out = await stepFindEmails(data, noopProgress);
+    expect(out[1][1]).toBe(
+      Array.from({ length: 8 }, (_, i) => `e${i + 1}@a.ru`).join(', '),
+    );
+  });
+});

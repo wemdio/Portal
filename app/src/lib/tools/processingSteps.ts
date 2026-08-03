@@ -220,6 +220,74 @@ export interface StepFindEmailsOptions {
    * за prod-base ≈ 70MB суммарной записи, что приемлемо.
    */
   onCheckpoint?: CheckpointFn;
+  /**
+   * Останавливать скрап после первого пригодного адреса (раньше было
+   * захардкожено true в вызове scrapeEmails). Default true = прежнее
+   * поведение: base-constructor'у исторически хватало одного адреса на
+   * компанию, а обход остальных candidate-страниц — доминирующая трата
+   * времени шага. false — собираем больше адресов с сайта (до
+   * maxEmailsPerSite) — нужно связке с cap_emails_per_company
+   * («до N почт на компанию»).
+   */
+  stopAtFirstUsableEmail?: boolean;
+  /**
+   * Максимум адресов с одного сайта, которые пишем в ячейку (default 8).
+   * Защита от «сайта-простыни» (десятки адресов в футере/на team-странице)
+   * когда stopAtFirstUsableEmail=false.
+   */
+  maxEmailsPerSite?: number;
+}
+
+/* ═══════════════════════════════════════════
+   SHARED HELPERS (per-company grouping, validation status rank)
+   ═══════════════════════════════════════════ */
+
+/**
+ * Ключ «одна компания» для группировки строк после split_emails (одна
+ * компания с N почтами → N почти-идентичных строк, различие только в
+ * email-колонке). Общий для шагов с пер-компанийной логикой:
+ * ta_scoring (дедуп перед AI-оценкой) и cap_emails_per_company.
+ *
+ * Компания+сайт различают «однофамильцев» (одно имя у разных фирм → разные
+ * сайты → разные ключи). Если НЕТ ни компании, ни сайта — не схлопываем
+ * разные строки в одну: ключуем по всему контенту строки кроме email,
+ * т.е. деградируем к поштучному поведению.
+ *
+ * Фабрика (не сама функция ключа), чтобы индексы колонок считались один раз
+ * на header, а не на каждую строку.
+ */
+function makeCompanyKeyFn(header: string[]): (row: string[]) => string {
+  const companyIdx = findColumnIndex(header, 'company', 'компания', 'название', 'наименование', 'организация');
+  const siteIdx = findColumnIndex(header, 'сайт', 'site', 'website', 'домен', 'domain');
+  const emailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
+  return (row: string[]): string => {
+    const company = (companyIdx >= 0 ? row[companyIdx] || '' : '').trim().toLowerCase();
+    const site = (siteIdx >= 0 ? row[siteIdx] || '' : '').trim().toLowerCase();
+    // JSON.stringify даёт collision-proof ключ (["ab","c"] != ["a","bc"]);
+    // ключ живёт только в памяти (Map), никогда не попадает в DB.
+    if (company || site) return 'cs:' + JSON.stringify([company, site]);
+    const copy = [...row];
+    if (emailIdx >= 0) copy[emailIdx] = '';
+    return 'r:' + JSON.stringify(copy);
+  };
+}
+
+// Ранг статусов валидации email (колонка «… Статус» от validate_emails):
+// ok > catch_all > unknown > error > invalid > disposable. Общий для
+// validate_emails (выбор «лучшего» адреса в мульти-email ячейке) и
+// cap_emails_per_company (приоритет строк внутри компании).
+const STATUS_RANK: Record<string, number> = {
+  ok: 5,
+  catch_all: 4,
+  unknown: 3,
+  error: 2,
+  invalid: 1,
+  disposable: 0,
+};
+
+/** Пустой или неизвестный статус — ниже всех (-1). */
+function statusRank(s: string): number {
+  return STATUS_RANK[s] ?? -1;
 }
 
 // Хосты, которые НЕ имеет смысла скрейпить: job-борды/агрегаторы с антиботом.
@@ -258,6 +326,10 @@ export async function stepFindEmails(
 
   const existingEmailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
   const wantsSeparate = options?.target === 'separate';
+  // step_config.find_emails.stop_at_first (default true = прежнее захардкоженное
+  // поведение) и .max_per_site (default 8) — см. StepFindEmailsOptions.
+  const stopAtFirstUsableEmail = options?.stopAtFirstUsableEmail ?? true;
+  const maxPerSite = Math.max(1, options?.maxEmailsPerSite ?? 8);
 
   // Target column resolution:
   //   - target='separate' + есть существующая email-колонка → пишем в FOUND_EMAIL_COL (новая);
@@ -301,17 +373,19 @@ export async function stepFindEmails(
   await processInPool(toProcess, EMAIL_CONCURRENCY, async (item) => {
     if (isCancelled && await isCancelled()) return;
     try {
-      // stopAtFirstUsableEmail: bail as soon as the homepage / first
-      // contact page gives us a usable address. Base-constructor only
+      // stopAtFirstUsableEmail (default true): bail as soon as the homepage /
+      // first contact page gives us a usable address. Base-constructor only
       // needs one — the worker doesn't use the extra addresses, and
       // crawling 4 more pages per company is the dominant time sink.
+      // stop_at_first=false (step_config.find_emails) выключает ранний выход —
+      // для связки с cap_emails_per_company, где нужно несколько почт с сайта.
       const { emails } = await scrapeEmails(item.url, {
         timeout: 15_000,
         maxPages: 5,
-        stopAtFirstUsableEmail: true,
+        stopAtFirstUsableEmail,
       });
       if (emails.length > 0) {
-        body[item.i][targetIdx] = emails.join(', ');
+        body[item.i][targetIdx] = emails.slice(0, maxPerSite).join(', ');
       }
     } catch { /* skip */ }
     done++;
@@ -626,24 +700,11 @@ export async function stepTAScore(
   // (число строк, порядок, колонки, фильтр <7, телеметрия onStats) — прежний;
   // меняется лишь то, что строки одной компании теперь гарантированно получают
   // ОДИН балл (раньше AI оценивал каждую почту отдельно).
-  const companyIdx = findColumnIndex(header, 'company', 'компания', 'название', 'наименование', 'организация');
-  const siteIdx = findColumnIndex(header, 'сайт', 'site', 'website', 'домен', 'domain');
+  // Ключ группировки «одна компания» — общий модульный хелпер (вынесен из
+  // этого шага, та же логика): компания+сайт, fallback — вся строка без email.
+  const keyOf = makeCompanyKeyFn(header);
+  // emailIdx нужен и дальше — чтобы НЕ класть email в AI-промпт (см. ниже).
   const emailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
-
-  // Ключ группировки. Компания+сайт различают «однофамильцев» (одно имя у
-  // разных фирм → разные сайты → разные ключи). Если НЕТ ни компании, ни
-  // сайта — не схлопываем разные строки в одну: ключуем по всему контенту
-  // строки кроме email, т.е. деградируем к старому поведению (поштучно).
-  const keyOf = (row: string[]): string => {
-    const company = (companyIdx >= 0 ? row[companyIdx] || '' : '').trim().toLowerCase();
-    const site = (siteIdx >= 0 ? row[siteIdx] || '' : '').trim().toLowerCase();
-    // JSON.stringify even with a delimiter gives a collision-proof key
-    // (["ab","c"] != ["a","bc"]); key lives only in memory (Map), never in the DB.
-    if (company || site) return 'cs:' + JSON.stringify([company, site]);
-    const copy = [...row];
-    if (emailIdx >= 0) copy[emailIdx] = '';
-    return 'r:' + JSON.stringify(copy);
-  };
 
   // Уникальные представители в порядке первого появления.
   const repByKey = new Map<string, string[]>();
@@ -1044,17 +1105,10 @@ export async function stepValidateEmails(
 
   if (cells.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
 
-  // Ранг статусов для выбора «лучшего» адреса в ячейке:
-  // ok > catch_all > unknown > error > invalid > disposable.
-  const STATUS_RANK: Record<string, number> = {
-    ok: 5,
-    catch_all: 4,
-    unknown: 3,
-    error: 2,
-    invalid: 1,
-    disposable: 0,
-  };
-  const statusRank = (s: string): number => STATUS_RANK[s] ?? -1;
+  // Ранг статусов для выбора «лучшего» адреса в ячейке — общий модульный
+  // statusRank (ok > catch_all > unknown > error > invalid > disposable,
+  // пустой/неизвестный — ниже всех), вынесен наверх т.к. используется и
+  // шагом cap_emails_per_company.
 
   type ProbeResult = { result: string; is_free: boolean; is_catch_all: boolean; errorText: string };
   const results = new Map<string, ProbeResult>();
@@ -1295,6 +1349,90 @@ export async function stepValidateEmails(
 }
 
 /* ═══════════════════════════════════════════
+   STEP: Cap emails per company
+   ═══════════════════════════════════════════ */
+
+export interface StepCapEmailsPerCompanyOptions {
+  /**
+   * Максимум email-строк на одну компанию (default 5). Приходит из
+   * step_config.cap_emails_per_company.max — см. STEP_RUNNERS в worker'е.
+   */
+  max?: number;
+}
+
+/**
+ * Оставляет не больше N (default 5) email-строк на одну компанию.
+ *
+ * Зачем: outreach-автоматизациям нужно «до 5 почт на компанию», а после
+ * split_emails одна компания может занимать десяток строк. Лишние строки
+ * размывают лимиты отправки и донос; шаг оставляет топ-N адресов компании.
+ *
+ * Приоритет — качество адреса по колонке «Email Статус» (её создаёт
+ * validate_emails, поэтому шаг рекомендован ПОСЛЕ неё): общий statusRank —
+ * ok > catch_all > unknown > error > invalid > disposable; пустой или
+ * неизвестный статус — ниже всех. При равном ранге (и когда колонки статуса
+ * нет вовсе) выживают первые N строк компании в исходном порядке.
+ *
+ * Группировка по компании — общий makeCompanyKeyFn (компания+сайт, fallback —
+ * вся строка без email): «однофамильцы» с разными сайтами не склеиваются.
+ * Роли адресов НЕ фильтруем (support@/help@ остаются): это чистое
+ * ограничение количества, а не чистка ролей — для неё есть отдельный шаг
+ * remove_support_emails. Порядок строк в выходной матрице — исходный.
+ */
+export async function stepCapEmailsPerCompany(
+  data: string[][],
+  onProgress: ProgressFn,
+  options?: StepCapEmailsPerCompanyOptions,
+): Promise<string[][]> {
+  if (data.length < 2) { await onProgress(100); return data; }
+  const header = data[0];
+  const body = data.slice(1);
+  const emailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
+  if (emailIdx < 0) { await onProgress(100); return data; }
+  const max = Math.max(1, options?.max ?? 5);
+
+  // Колонка статуса от validate_emails (имя строится от исходной email-
+  // колонки: «Email Статус»). Может отсутствовать (cap без validate) — тогда
+  // все ранги -1 и выживают просто первые N строк каждой компании.
+  const statusIdx = header.findIndex((h) => h.trim() === `${header[emailIdx].trim()} Статус`);
+
+  await onProgress(50);
+
+  // Решаем КАКИЕ строки оставить: внутри группы сортируем по рангу статуса
+  // (лучший первым), при равенстве — по исходному индексу (стабильность).
+  // Сама выходная матрица остаётся в исходном порядке — фильтруем её по
+  // множеству выживших индексов, а не склеиваем отсортированные группы.
+  const keyOf = makeCompanyKeyFn(header);
+  const groups = new Map<string, number[]>();
+  for (let i = 0; i < body.length; i += 1) {
+    const k = keyOf(body[i]);
+    const arr = groups.get(k);
+    if (arr) arr.push(i);
+    else groups.set(k, [i]);
+  }
+  const keep = new Set<number>();
+  for (const idxs of groups.values()) {
+    const ranked = [...idxs].sort((a, b) => {
+      const ra = statusIdx >= 0 ? statusRank((body[a][statusIdx] || '').trim()) : -1;
+      const rb = statusIdx >= 0 ? statusRank((body[b][statusIdx] || '').trim()) : -1;
+      return rb - ra || a - b;
+    });
+    for (const i of ranked.slice(0, max)) keep.add(i);
+  }
+  const out = body.filter((_, i) => keep.has(i));
+  const dropped = body.length - out.length;
+  if (dropped > 0) {
+    console.log(
+      `[cap_emails_per_company] dropped ${dropped} rows over cap ` +
+        `(max=${max}/company): ${body.length} → ${out.length}`,
+    );
+  }
+
+  await onProgress(100);
+  return [header, ...out];
+}
+
+/* ═══════════════════════════════════════════
    STEP REGISTRY
    ═══════════════════════════════════════════ */
 
@@ -1307,6 +1445,7 @@ export type StepKey =
   | 'split_emails'
   | 'remove_support_emails'
   | 'validate_emails'
+  | 'cap_emails_per_company'
   | 'check_sites'
   | 'enrich_descriptions'
   | 'ta_scoring'
@@ -1429,6 +1568,17 @@ export const AVAILABLE_STEPS: StepDefinition[] = [
     priority: 55,
     requiresColumns: [['email', 'e-mail', 'почта', 'mail']],
     recommendedAfter: ['split_emails', 'dedup_email'],
+  },
+  {
+    key: 'cap_emails_per_company',
+    label: 'До N почт на компанию',
+    description: 'Оставляет не больше N email-адресов на одну компанию, приоритет — подтверждённые (ok), затем catch-all',
+    icon: 'mail-minus',
+    category: 'clean',
+    cost: 'free',
+    priority: 57,
+    requiresColumns: [['email', 'e-mail', 'почта', 'mail']],
+    recommendedAfter: ['validate_emails'],
   },
   {
     key: 'clean_names',

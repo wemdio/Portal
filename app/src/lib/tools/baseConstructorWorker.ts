@@ -12,6 +12,7 @@ import {
   stepNameCleanup,
   stepPersonalize,
   stepValidateEmails,
+  stepCapEmailsPerCompany,
   FOUND_EMAIL_COL,
   type StepKey,
   type ProgressFn,
@@ -33,6 +34,19 @@ interface StepConfig {
    * Если колонки email в исходных данных нет — опция игнорируется, шаг создаёт «Email».
    */
   find_emails_target?: 'same' | 'separate';
+  /**
+   * Настройки шага find_emails (вложенный объект в step_config):
+   *   - stop_at_first (default true = прежнее поведение): остановить скрап
+   *     на первом пригодном адресе; false — собрать больше адресов с сайта
+   *     (нужно связке с cap_emails_per_company, «до N почт на компанию»);
+   *   - max_per_site (default 8): максимум адресов, пишемых в ячейку с сайта.
+   */
+  find_emails?: { stop_at_first?: boolean; max_per_site?: number };
+  /**
+   * Настройки шага cap_emails_per_company (вложенный объект в step_config):
+   *   - max (default 5): сколько email-строк оставить на одну компанию.
+   */
+  cap_emails_per_company?: { max?: number };
   /**
    * Какие email-колонки валидирует validate_emails:
    *   - 'original' (default из UI когда есть только исходная): валидируем исходную;
@@ -283,6 +297,10 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
       // Без этой строчки шаг рестартанул для polza@polza.ru job 55d37e8e
       // (с 84% → 28%) после утреннего деплоя.
       onCheckpoint: cfg.onCheckpoint,
+      // step_config.find_emails: stop_at_first (default true = прежнее
+      // захардкоженное поведение шага) и max_per_site (default 8).
+      stopAtFirstUsableEmail: cfg.find_emails?.stop_at_first ?? true,
+      maxEmailsPerSite: cfg.find_emails?.max_per_site,
     }),
   split_emails: (data, prog) => stepSplitEmails(data, prog),
   remove_support_emails: (data, prog) => stepRemoveSupportEmails(data, prog),
@@ -294,6 +312,8 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
       // resume после redeploy перезапускает весь validate с нуля.
       onCheckpoint: cfg.onCheckpoint,
     }),
+  cap_emails_per_company: (data, prog, _cancel, cfg) =>
+    stepCapEmailsPerCompany(data, prog, { max: cfg.cap_emails_per_company?.max }),
   check_sites: (data, prog, cancel) => stepSiteCheck(data, prog, cancel),
   enrich_descriptions: (data, prog, cancel, cfg) => stepEnrich(data, prog, cancel, cfg.onCheckpoint),
   ta_scoring: (data, prog, cancel, cfg) =>
