@@ -51,6 +51,7 @@ from sources.crypto_usdt import CryptoUsdtSync
 from sources.fx_cbr import FxCbrSync
 from sources.expense_rules import ExpenseRulesSync
 from sources.meeting_links import MeetingLinksSync
+from sources.renewal_marks import RenewalMarksSync
 
 # ── Config ────────────────────────────────────────────────────────────────
 
@@ -86,6 +87,10 @@ SOURCES = [
                         # собирается в тот же прогон, что и сами приходы (fx_cbr
                         # спрашивает ЦБ только за даты, где уже есть операции)
     FxCbrSync(),        # после Brocard: спрашивает курсы под уже приехавшие валютные траты
+    RenewalMarksSync(), # после AmoTasksSync И после банков (BankTochkaSync/BankTBankSync выше):
+                        # нужны и свежие задачи (result_text), и свежие платежи, см.
+                        # docs/superpowers/plans/2026-08-03-renewals-from-payments.md (Task 2)
+                        # и sources/renewal_marks.py
     ExpenseRulesSync(), # строго последним: размечает всё, что приехало выше
 ]
 
