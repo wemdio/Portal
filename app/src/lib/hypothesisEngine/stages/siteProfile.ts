@@ -4,22 +4,30 @@
  * переводится в 'researching'.
  *
  * Дополнительно — наполнение кейс-банка (he_cases, source='site'): по тексту
- * сайта + до 3 очевидных кейс-страниц (/cases, /projects, /otzyvy, …) LLM
- * извлекает до 8 доказательных кейсов клиента (дедуп по нормализованному
+ * сайта + до 3 очевидных кейс-страниц (/cases, /case-studies, /otzyvy, …)
+ * LLM извлекает до 8 доказательных кейсов клиента (дедуп по нормализованному
  * тексту). Refresh атомарный: новые кейсы вставляются первыми, затем
  * удаляются устаревшие site-строки проекта (не совпавшие по нормализованному
  * тексту); при пустой выборке или сбое вставки старые кейсы сохраняются.
  * Загруженные вручную (source='upload') не трогаются. Весь кейс-шаг
  * best-effort: ошибка (LLM/БД/нет таблицы на параллельном роллауте)
  * логируется и НЕ роняет основную стадию.
+ *
+ * Локализация: при he_projects.market='us' оба LLM-вызова идут EN-промптами
+ * (prompts/siteProfile.en), иначе — RU (обратная совместимость).
  */
 
 import { z } from 'zod';
 
 import { callLLMWithSchema, getHeModel } from '../llm';
+import { projectMarket, type HeMarket } from '../market';
 import { HeSiteProfileSchema } from '../schemas';
 import { heCaseDraftSchema, normalizeCaseText } from '../caseBank';
 import { buildSiteCaseExtractionMessages, buildSiteProfileMessages } from '../prompts/siteProfile';
+import {
+  buildSiteCaseExtractionMessagesEn,
+  buildSiteProfileMessagesEn,
+} from '../prompts/siteProfile.en';
 import type { HeJob } from '../types';
 import { resolveFetchText, type HeFetchTextFn } from './io';
 import {
@@ -36,13 +44,21 @@ const HeSiteCasesSchema = z.object({
   cases: z.array(heCaseDraftSchema).max(8),
 });
 
-/** Очевидные пути кейс-страниц — слепой перебор на том же origin. */
-const CASE_PAGE_PATHS = [
+/**
+ * Очевидные пути кейс-страниц — слепой перебор на том же origin. Список
+ * общий для обоих рынков: EN-пути (/case-studies, /testimonials, /customers)
+ * перемешаны с RU — для RU-сайтов они безвредны (404 — ожидаемая норма),
+ * а порядок задаёт приоритет в пределах MAX_PAGE_ATTEMPTS.
+ */
+export const CASE_PAGE_PATHS = [
   '/cases',
+  '/case-studies',
   '/kejsy',
   '/projects',
+  '/testimonials',
   '/clients',
   '/portfolio',
+  '/customers',
   '/otzyvy',
   '/reviews',
   '/works',
@@ -97,12 +113,16 @@ async function refreshSiteCases(
   websiteUrl: string,
   siteText: string,
   fetchText: HeFetchTextFn,
+  market: HeMarket,
 ): Promise<{ extracted: number; tokensUsed: number; costUsd: number }> {
   const extraPages = await fetchCasePages(fetchText, websiteUrl);
   stageLog(ctx, `[site_profile] кейс-страницы: ${extraPages.length}`);
 
+  const casesInput = { websiteUrl, siteText, extraPages };
   const llm = await callLLMWithSchema(
-    buildSiteCaseExtractionMessages({ websiteUrl, siteText, extraPages }),
+    market === 'us'
+      ? buildSiteCaseExtractionMessagesEn(casesInput)
+      : buildSiteCaseExtractionMessages(casesInput),
     HeSiteCasesSchema,
     { model: getHeModel('bulk'), maxTokens: 4096 },
   );
@@ -165,14 +185,16 @@ async function refreshSiteCases(
 export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
   const usage = newUsage();
   const project = await readProject(ctx.supabase, job.project_id);
+  const market = projectMarket(project);
 
   const fetchText = resolveFetchText(ctx);
   stageLog(ctx, `[site_profile] фетч ${project.website_url}`);
   const siteText = await fetchText(project.website_url);
   stageLog(ctx, `[site_profile] получено ${siteText.length} символов, профиль…`);
 
+  const profileInput = { websiteUrl: project.website_url, siteText };
   const llm = await callLLMWithSchema(
-    buildSiteProfileMessages({ websiteUrl: project.website_url, siteText }),
+    market === 'us' ? buildSiteProfileMessagesEn(profileInput) : buildSiteProfileMessages(profileInput),
     HeSiteProfileSchema,
     { model: getHeModel('research'), maxTokens: 4096 },
   );
@@ -193,7 +215,7 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
   // Кейс-банк: best-effort — сбой не должен ронять основную стадию
   // (бриф уже сохранён; he_cases может ещё не существовать на роллауте).
   try {
-    const casesResult = await refreshSiteCases(ctx, project.id, project.website_url, siteText, fetchText);
+    const casesResult = await refreshSiteCases(ctx, project.id, project.website_url, siteText, fetchText, market);
     usage.tokensUsed += casesResult.tokensUsed;
     usage.costUsd += casesResult.costUsd;
     stageLog(ctx, `[site_profile] кейсов извлечено: ${casesResult.extracted}`);

@@ -2,6 +2,7 @@ import {
   SBIS_APPROXIMATE_OKVED_BY_ACTIVITY,
   normalizeSbisInn,
 } from '@/lib/companiesDirectory/sbisImportPlan';
+import { getOkvedByCode } from '@/lib/companiesSearch/okved2';
 import {
   assertPortalProductionTarget,
   canonicalJson,
@@ -15,6 +16,17 @@ const POSTGRES_BIGINT_MAX = BigInt('9223372036854775807');
 
 export const TRUSTED_SBIS_V4_PLAN_FINGERPRINT =
   'd36c06f13f09ac9f6ad3c26102b9c29dd87cf83ecd79dd7b2cf5c7068d87ba08';
+
+const SBIS_V4_PLAN = 'sbis-directory-v4';
+const POLZA_REGISTRY_PLAN = 'polza-registry-v1';
+
+export const TRUSTED_SBIS_PLAN_FINGERPRINTS = Object.freeze({
+  [SBIS_V4_PLAN]: TRUSTED_SBIS_V4_PLAN_FINGERPRINT,
+  [POLZA_REGISTRY_PLAN]:
+    '5d2b2691b2e914f3ba854f60789055a45064aad167cfd5f3295182ac1cf77606',
+});
+
+type TrustedSbisPlan = keyof typeof TRUSTED_SBIS_PLAN_FINGERPRINTS;
 
 const INSERT_FIELDS = [
   'name',
@@ -52,8 +64,25 @@ export const SBIS_FILL_EMPTY_FIELDS = [
   'okved_code',
 ] as const;
 
+export const SBIS_BEFORE_IMAGE_FIELDS = [
+  ...SBIS_FILL_EMPTY_FIELDS,
+] as const;
+
+const POLZA_REGISTRY_FILL_EMPTY_FIELDS = [
+  'website',
+  'email',
+] as const;
+
 type SbisFillEmptyField = typeof SBIS_FILL_EMPTY_FIELDS[number];
 type JsonRecord = Record<string, unknown>;
+
+interface SbisHashedArtifact {
+  sha256: string;
+}
+
+interface SbisHashedRowsArtifact extends SbisHashedArtifact {
+  rows: number;
+}
 
 export interface SbisPlanManifest {
   version: 1;
@@ -70,21 +99,15 @@ export interface SbisPlanManifest {
     uniqueInns: number;
   }>;
   artifacts: {
-    'summary.json': {
-      sha256: string;
-    };
-    'inserts.jsonl': {
-      sha256: string;
-      rows: number;
-    };
-    'updates.jsonl': {
-      sha256: string;
-      rows: number;
-    };
-    'rejected.jsonl': {
-      sha256: string;
-      rows: number;
-    };
+    'summary.json': SbisHashedArtifact;
+    'inserts.jsonl': SbisHashedRowsArtifact;
+    'updates.jsonl': SbisHashedRowsArtifact;
+    'rejected.jsonl': SbisHashedRowsArtifact;
+    'skipped.jsonl'?: SbisHashedRowsArtifact;
+    'conflicts.jsonl'?: SbisHashedRowsArtifact;
+    'provenance.jsonl'?: SbisHashedRowsArtifact;
+    'source-locations.jsonl'?: SbisHashedRowsArtifact;
+    'rollback.jsonl'?: SbisHashedRowsArtifact;
   };
   expected: {
     inputRows: number;
@@ -146,6 +169,23 @@ export interface SbisApplyResult {
   alreadyApplied: boolean;
   before: SbisImportPreview;
   after: SbisImportPreview;
+}
+
+export interface SbisApplyAuditHooks {
+  plan: string;
+  planFingerprint: string;
+  captureBeforeImage(input: {
+    before: SbisImportPreview;
+  }): Promise<unknown>;
+  persistPendingReceipt(input: {
+    plan: string;
+    planFingerprint: string;
+    beforeImage: unknown;
+    inserted: number;
+    updated: number;
+    before: SbisImportPreview;
+    after: SbisImportPreview;
+  }): Promise<void>;
 }
 
 export interface SbisApplyCliArgs {
@@ -215,8 +255,11 @@ function readSummaryShape(summary: unknown): {
   if (summary.dryRunOnly !== true) {
     throw new Error('summary.json is not marked dryRunOnly');
   }
-  if (summary.mode !== 'contact-only') {
-    throw new Error('summary.json mode must be contact-only');
+  if (
+    summary.mode !== 'contact-only'
+    && summary.mode !== 'strict-contact'
+  ) {
+    throw new Error('summary.json mode must be contact-only or strict-contact');
   }
   assertRecord(summary.input, 'summary.input');
   if (!Array.isArray(summary.input.files)) {
@@ -244,13 +287,39 @@ export function buildSbisPlanFingerprint(
   return sha256Hex(canonicalJson(manifest));
 }
 
+function assertSupportedSbisPlan(
+  plan: string,
+): asserts plan is TrustedSbisPlan {
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      TRUSTED_SBIS_PLAN_FINGERPRINTS,
+      plan,
+    )
+  ) {
+    throw new Error(`SBIS plan is not trusted: ${plan}`);
+  }
+}
+
+export function assertTrustedSbisPlanFingerprint(
+  plan: string,
+  planFingerprint: string,
+): void {
+  assertSupportedSbisPlan(plan);
+  assertSha256(planFingerprint, 'SBIS plan fingerprint');
+  if (
+    planFingerprint.toLowerCase()
+    !== TRUSTED_SBIS_PLAN_FINGERPRINTS[plan]
+  ) {
+    throw new Error(`SBIS plan fingerprint is not trusted for ${plan}`);
+  }
+}
+
 export function assertTrustedSbisV4PlanFingerprint(
   planFingerprint: string,
 ): void {
-  if (
-    planFingerprint.toLowerCase()
-    !== TRUSTED_SBIS_V4_PLAN_FINGERPRINT
-  ) {
+  try {
+    assertTrustedSbisPlanFingerprint(SBIS_V4_PLAN, planFingerprint);
+  } catch {
     throw new Error(
       'SBIS apply is restricted to the trusted frozen v4 manifest',
     );
@@ -346,7 +415,11 @@ export function validateSbisPlanManifest(
   };
 }
 
-export function validateSbisInsertRow(value: unknown): JsonRecord {
+export function validateSbisInsertRow(
+  value: unknown,
+  plan: string = SBIS_V4_PLAN,
+): JsonRecord {
+  assertSupportedSbisPlan(plan);
   assertRecord(value, 'SBIS insert row');
   assertExactKeys(value, INSERT_FIELDS, 'SBIS insert row');
 
@@ -356,6 +429,11 @@ export function validateSbisInsertRow(value: unknown): JsonRecord {
   }
   if (isBlank(value.website) && isBlank(value.email)) {
     throw new Error(`SBIS insert ${normalizedInn} must have a website or email`);
+  }
+  if (plan === POLZA_REGISTRY_PLAN && value.phones !== null) {
+    throw new Error(
+      `SBIS insert ${normalizedInn} contains forbidden phones`,
+    );
   }
   if (
     value.okved_code_exact !== null
@@ -369,13 +447,25 @@ export function validateSbisInsertRow(value: unknown): JsonRecord {
   ) {
     throw new Error(`SBIS insert ${normalizedInn} has no approximate OKVED mapping`);
   }
-  const expectedCode = (
-    SBIS_APPROXIMATE_OKVED_BY_ACTIVITY as Record<string, string>
-  )[value.activity_type];
-  if (!expectedCode || value.okved_code !== expectedCode) {
-    throw new Error(
-      `SBIS insert ${normalizedInn} has an invalid approximate OKVED mapping`,
-    );
+  if (plan === POLZA_REGISTRY_PLAN) {
+    if (
+      isBlank(value.activity_type)
+      || !/^\d{2}$/.test(value.okved_code)
+      || !getOkvedByCode(value.okved_code)
+    ) {
+      throw new Error(
+        `SBIS insert ${normalizedInn} has an invalid parent OKVED mapping`,
+      );
+    }
+  } else {
+    const expectedCode = (
+      SBIS_APPROXIMATE_OKVED_BY_ACTIVITY as Record<string, string>
+    )[value.activity_type];
+    if (!expectedCode || value.okved_code !== expectedCode) {
+      throw new Error(
+        `SBIS insert ${normalizedInn} has an invalid approximate OKVED mapping`,
+      );
+    }
   }
   if (
     value.region_code !== null
@@ -409,7 +499,11 @@ export function validateSbisInsertRow(value: unknown): JsonRecord {
   return value;
 }
 
-export function validateSbisUpdateRow(value: unknown): JsonRecord {
+export function validateSbisUpdateRow(
+  value: unknown,
+  plan: string = SBIS_V4_PLAN,
+): JsonRecord {
+  assertSupportedSbisPlan(plan);
   assertRecord(value, 'SBIS update row');
   assertExactKeys(value, ['id', 'inn', 'patch'], 'SBIS update row');
   const normalizedInn = normalizeSbisInn(value.inn);
@@ -428,7 +522,11 @@ export function validateSbisUpdateRow(value: unknown): JsonRecord {
   if (patchKeys.length === 0) {
     throw new Error(`SBIS update ${normalizedInn} patch is empty`);
   }
-  const allowed = new Set<string>(SBIS_FILL_EMPTY_FIELDS);
+  const allowed = new Set<string>(
+    plan === POLZA_REGISTRY_PLAN
+      ? POLZA_REGISTRY_FILL_EMPTY_FIELDS
+      : SBIS_FILL_EMPTY_FIELDS,
+  );
   for (const field of patchKeys) {
     if (!allowed.has(field)) {
       throw new Error(
@@ -467,6 +565,12 @@ export function computeSbisFillEmptyPatch(
     }
   }
   return patch;
+}
+
+export function shouldFinalizeSbisApplyReceipt(
+  result: Pick<SbisApplyResult, 'alreadyApplied'>,
+): boolean {
+  return !result.alreadyApplied;
 }
 
 export function computeSbisPreviewFingerprint(
@@ -635,6 +739,7 @@ export async function executeSbisCheck(
 export async function executeSbisApply(
   session: SbisApplySession,
   expectedPreviewFingerprint: string,
+  audit?: SbisApplyAuditHooks,
 ): Promise<SbisApplyResult> {
   let began = false;
   try {
@@ -668,6 +773,10 @@ export async function executeSbisApply(
       );
     }
 
+    const beforeImage = audit
+      ? await audit.captureBeforeImage({ before })
+      : undefined;
+
     const inserted = await session.insertMissing();
     if (inserted !== before.missingInserts) {
       throw new Error(
@@ -691,6 +800,18 @@ export async function executeSbisApply(
       || after.alreadyPresentInserts !== after.stagedInserts
     ) {
       throw new Error('Post-apply verification did not reach an idempotent state');
+    }
+
+    if (audit) {
+      await audit.persistPendingReceipt({
+        plan: audit.plan,
+        planFingerprint: audit.planFingerprint,
+        beforeImage,
+        inserted,
+        updated,
+        before,
+        after,
+      });
     }
 
     await session.commit();

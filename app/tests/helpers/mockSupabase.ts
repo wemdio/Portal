@@ -14,6 +14,8 @@
  * Filtering semantics:
  *   - eq/neq/in/gte/lte/lt/gt run on the in-memory rows in the order they were
  *     called (mirrors how PostgREST stacks predicates).
+ *   - ilike(column, pattern) — case-insensitive match with PostgREST wildcards
+ *     (% — любая подстрока, _ — один символ).
  *   - .or('and(eq.x,eq.y),and(eq.a,eq.b)') is parsed as a disjunction of AND
  *     groups whose terms are simple `column.op.value` expressions. Other
  *     operators (`is`, `like`, ...) are not yet supported here on purpose.
@@ -113,7 +115,7 @@ export interface MockSupabaseClient {
   selects: SelectCall[];
 }
 
-type Op = 'eq' | 'neq' | 'in' | 'gte' | 'lte' | 'gt' | 'lt' | 'is' | 'not_is' | 'not_in';
+type Op = 'eq' | 'neq' | 'in' | 'gte' | 'lte' | 'gt' | 'lt' | 'is' | 'not_is' | 'not_in' | 'ilike';
 
 interface Filter {
   column: string;
@@ -136,12 +138,13 @@ interface Builder {
   gt: (column: string, value: unknown) => Builder;
   lt: (column: string, value: unknown) => Builder;
   is: (column: string, value: unknown) => Builder;
+  ilike: (column: string, pattern: string) => Builder;
   not: (column: string, op: string, value: unknown) => Builder;
   or: (expr: string) => Builder;
 
   order: (...args: unknown[]) => Builder;
   limit: (...args: unknown[]) => Builder;
-  range: (...args: unknown[]) => Promise<{ data: Row[]; error: null; count: number }>;
+  range: (...args: unknown[]) => Promise<{ data: Row[]; error: { message: string } | null; count: number }>;
 
   single: () => Promise<{ data: Row | null; error: { message: string; code?: string } | null }>;
   maybeSingle: () => Promise<{ data: Row | null; error: null }>;
@@ -170,6 +173,15 @@ function applyFilter(rows: Row[], f: Filter): Row[] {
       return rows.filter((r) => (r[f.column] as never) < (f.value as never));
     case 'is':
       return rows.filter((r) => r[f.column] === f.value);
+    case 'ilike': {
+      // PostgREST wildcards: % — любая подстрока, _ — один символ; регистр игнорируется.
+      const source = String(f.value)
+        .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        .replace(/%/g, '.*')
+        .replace(/_/g, '.');
+      const re = new RegExp(`^${source}$`, 'i');
+      return rows.filter((r) => re.test(String(r[f.column] ?? '')));
+    }
     case 'not_is':
       return rows.filter((r) => r[f.column] !== f.value);
     case 'not_in': {
@@ -391,6 +403,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
       gt: (column, value) => { filters.push({ column, op: 'gt', value }); return builder; },
       lt: (column, value) => { filters.push({ column, op: 'lt', value }); return builder; },
       is: (column, value) => { filters.push({ column, op: 'is', value }); return builder; },
+      ilike: (column, pattern) => { filters.push({ column, op: 'ilike', value: pattern }); return builder; },
 
       not: (column, op, value) => {
         if (op === 'is') filters.push({ column, op: 'not_is', value });
@@ -406,7 +419,12 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
 
       order: () => builder,
       limit: () => builder,
-      range: async () => flushMutation(),
+      // Как then/single: errorTables/errorSelects обязаны пробиваться и через
+      // range-пагинацию (PostgREST вернёт error на выполнении запроса).
+      range: async () => {
+        if (errorMessage) return { data: [], error: { message: errorMessage }, count: 0 };
+        return flushMutation();
+      },
 
       single: async () => {
         if (mode === 'insert' && insertError) return failInsert(insertError);

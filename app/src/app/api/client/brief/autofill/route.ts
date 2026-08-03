@@ -11,7 +11,9 @@ import { normalizeWebsiteUrl } from '@/lib/clientBrief/autofill/fetchWebsiteHtml
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-export const maxDuration = 60;
+// После поднятия бюджета AI-вызова (reasoning-модель, см. autofill/index.ts)
+// main-запрос на тяжёлых сайтах занимает ~65-70 секунд.
+export const maxDuration = 120;
 
 const OPENROUTER_BRIEF_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY ?? '';
 

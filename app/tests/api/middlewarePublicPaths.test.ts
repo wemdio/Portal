@@ -40,6 +40,7 @@ jest.mock('@supabase/ssr', () => ({
 }));
 
 import { NextRequest } from 'next/server';
+import { INTERNAL_ROLES } from '@/lib/roles';
 import { middleware } from '@/middleware';
 
 function req(path: string, cookies: Record<string, string> = {}) {
@@ -106,8 +107,8 @@ function redirectPath(response: Response): string | null {
 }
 
 describe('middleware: доступ к /team', () => {
-  it.each(['lead', 'director', 'admin'])(
-    'пропускает руководящую роль %s',
+  it.each(INTERNAL_ROLES)(
+    'пропускает внутреннюю роль %s',
     async (role) => {
       mockUser = { id: `u-${role}` };
       mockRole = role;
@@ -118,38 +119,26 @@ describe('middleware: доступ к /team', () => {
     },
   );
 
-  it.each(['technician', 'manager', 'sales', 'marketer'])(
-    'редиректит внутреннюю роль без руководящего доступа %s на главную',
-    async (role) => {
-      mockUser = { id: `u-${role}` };
-      mockRole = role;
-
-      const res = await middleware(req('/team'));
-
-      expect(redirectPath(res)).toBe('/');
-    },
-  );
-
-  it('does not trust a forged leadership role cookie', async () => {
+  it('does not trust a forged client role cookie over an internal profile', async () => {
     mockUser = { id: 'u-technician' };
     mockRole = 'technician';
 
     const res = await middleware(req('/team', {
-      'x-portal-role': 'u-technician:lead',
-    }));
-
-    expect(redirectPath(res)).toBe('/');
-  });
-
-  it('uses the authoritative profile role instead of a stale role cookie', async () => {
-    mockUser = { id: 'u-lead' };
-    mockRole = 'lead';
-
-    const res = await middleware(req('/team', {
-      'x-portal-role': 'u-lead:technician',
+      'x-portal-role': 'u-technician:client',
     }));
 
     expect(redirectPath(res)).toBeNull();
+  });
+
+  it('uses the authoritative profile role instead of a stale role cookie', async () => {
+    mockUser = { id: 'u-client' };
+    mockRole = 'client';
+
+    const res = await middleware(req('/team', {
+      'x-portal-role': 'u-client:lead',
+    }));
+
+    expect(redirectPath(res)).toBe('/client');
   });
 
   it('denies a demo account even when its stored role is leadership', async () => {

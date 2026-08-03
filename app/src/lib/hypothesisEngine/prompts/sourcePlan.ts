@@ -11,13 +11,14 @@
  *    реестра: короткие рубричные запросы с гео.
  *
  * Выход — JSON под HeSourcePlanSchema (см. schemas.ts), валидируется
- * callLLMWithSchema.
+ * callLLMWithSchema. Для market='us' — EN-вариант промпта с ENG-источниками
+ * (pdl / funded / eng_hiring / google_maps): prompts/sourcePlan.en.ts.
  */
 
 import type { LLMMessage } from '../llm';
 
 export interface HeCollectTask {
-  source: 'companies_directory' | 'hh_live' | 'yandex_maps' | 'google_maps';
+  source: 'companies_directory' | 'hh_live' | 'yandex_maps' | 'google_maps' | 'pdl' | 'funded' | 'eng_hiring';
   /** Что и зачем собираем, 1 строка. */
   rationale: string;
   directory_filters?: {
@@ -32,6 +33,12 @@ export interface HeCollectTask {
   };
   hh_query?: { text: string; area?: string; date_from?: string; date_to?: string };
   maps_query?: { queries: string[]; geo?: string };
+  /** market='us': каталог компаний EU/US (pdl_companies). */
+  pdl_filters?: { industries?: string[]; sizes?: string[]; countries?: string[]; name?: string };
+  /** market='us': стартапы и раунды (funded_companies). */
+  funded_filters?: { industries?: string[]; countries?: string[]; min_funding_usd?: number; funded_since?: string };
+  /** market='us': компании, нанимающие ENG-роли (eng_hiring_cache). */
+  eng_hiring_query?: { roles: string[]; countries?: string[]; posted_within_days?: number };
 }
 
 export interface HeSourcePlan {

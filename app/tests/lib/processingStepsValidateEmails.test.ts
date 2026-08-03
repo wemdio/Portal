@@ -104,6 +104,22 @@ describe('stepValidateEmails — идемпотентность', () => {
     expect(validateEmail).not.toHaveBeenCalled();
     expect(second).toHaveLength(3);
   });
+
+  it('грязный заголовок « Email » → колонки статуса/провайдера от trimmed-имени (как ищет cap_emails_per_company)', async () => {
+    // stepCapEmailsPerCompany ищет «Email Статус» по header[emailIdx].trim() —
+    // validate обязан строить имя колонки тем же способом, иначе cap не
+    // находит статус и ранжирование по качеству адреса молча отключается.
+    mockValidator({ 'a@x.ru': 'ok' });
+    const data = [
+      [' Email ', 'Компания'],
+      ['a@x.ru', 'ООО Ромашка'],
+    ];
+    const out = await stepValidateEmails(data, noopProgress, undefined, {
+      validateTarget: 'original',
+    });
+    expect(out[0]).toEqual([' Email ', 'Компания', 'Email Статус', 'Email Провайдер']);
+    expect(out[1][2]).toBe('ok');
+  });
 });
 
 describe('stepValidateEmails — мемоизация и порядок проб', () => {

@@ -19,6 +19,7 @@
 import { logAudit, logError } from '@/lib/loggerServer';
 import { createLeads, listLeads } from '@/lib/instantly/client';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
+import { resolveClientInstantlyRequestOptions } from '@/lib/instantly/clientAccountOptions';
 import { getBlockedEmailSet, filterBlockedLeads } from '@/lib/clientBlocklist/blockedContacts';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import type { ClientCampaignPreset } from './types';
@@ -79,15 +80,8 @@ export async function fetchExistingCampaignEmails(
   const emails = new Set<string>();
   if (!supabaseInstantly || campaignIds.length === 0) return emails;
 
-  const { data: presetRow } = await supabaseInstantly
-    .from('client_campaign_presets')
-    .select('instantly_account_id')
-    .eq('client_user_id', userId)
-    .maybeSingle();
-  const accountId = resolveInstantlyAccountId(
-    (presetRow as { instantly_account_id?: string } | null)?.instantly_account_id ?? null,
-  );
-  const opts = { accountId };
+  // Аккаунт — из пресета клиента (как в append), общий резолв.
+  const opts = await resolveClientInstantlyRequestOptions(userId);
 
   const MAX_PAGES = 500; // 50k лидов на кампанию — с огромным запасом
   for (const campaignId of campaignIds) {

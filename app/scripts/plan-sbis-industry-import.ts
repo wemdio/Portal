@@ -36,6 +36,7 @@ import {
   applySbisImportPlan,
   buildSbisContactImportPlan,
   buildSbisIndustryImportPlan,
+  buildStrictSbisContactImportPlan,
   collapseSbisRowsByInn,
   mapSbisWorksheetRecord,
   normalizeSbisInn,
@@ -46,12 +47,16 @@ import {
   type SbisDirectoryInputRow,
   type SbisImportPlan,
 } from '@/lib/companiesDirectory/sbisImportPlan';
+import {
+  buildSbisPlanFingerprint,
+  type SbisPlanManifest,
+} from '@/lib/companiesDirectory/sbisPlanApply';
 
 interface CliArgs {
   inputs: string[];
   snapshot: string;
   out: string;
-  mode: 'industry' | 'contact-only';
+  mode: 'industry' | 'contact-only' | 'strict-contact';
   industryCode: string;
 }
 
@@ -112,8 +117,12 @@ function parseArgs(argv: string[]): CliArgs {
   }
 
   const modeValue = values.get('mode')?.at(-1) ?? 'industry';
-  if (modeValue !== 'industry' && modeValue !== 'contact-only') {
-    throw new Error('Режим --mode должен быть industry или contact-only');
+  if (
+    modeValue !== 'industry'
+    && modeValue !== 'contact-only'
+    && modeValue !== 'strict-contact'
+  ) {
+    throw new Error('Режим --mode должен быть industry, contact-only или strict-contact');
   }
   const industryCode = (values.get('industry-code')?.at(-1) ?? '62').trim();
   if (!/^\d{2}(?:\.\d{1,2}){0,2}$/.test(industryCode)) {
@@ -259,6 +268,13 @@ function buildPlan(
 ): SbisImportPlan {
   if (args.mode === 'contact-only') {
     return buildSbisContactImportPlan(
+      source.rows,
+      existingRows,
+      { sourceFile: source.sourceFile },
+    );
+  }
+  if (args.mode === 'strict-contact') {
+    return buildStrictSbisContactImportPlan(
       source.rows,
       existingRows,
       { sourceFile: source.sourceFile },
@@ -456,25 +472,27 @@ async function main(): Promise<void> {
         updateFieldProvenanceById.set(key, provenance);
       }
     }
-    allConflicts.push(
-      ...plan.conflicts.map((conflict) => ({
+    for (const conflict of plan.conflicts) {
+      allConflicts.push({
         source_file: source.sourceFile,
         ...conflict,
-      })),
-    );
-    allSkipped.push(
-      ...plan.skipped.map((skipped) => ({
+      });
+    }
+    for (const skipped of plan.skipped) {
+      allSkipped.push({
         source_file: source.sourceFile,
         ...skipped,
-      })),
-    );
-    allRejected.push(
-      ...plan.rejected.map((rejected) => ({
+      });
+    }
+    for (const rejected of plan.rejected) {
+      allRejected.push({
         source_file: source.sourceFile,
         ...rejected,
-      })),
-    );
-    allLocations.push(...sourceLocations(source));
+      });
+    }
+    for (const location of sourceLocations(source)) {
+      allLocations.push(location);
+    }
 
     const stageSummary = {
       index: index + 1,
@@ -574,6 +592,33 @@ async function main(): Promise<void> {
       };
     }),
   ];
+  const existingRowsById = new Map(
+    existingRows.map((row) => [String(row.id), row]),
+  );
+  const rollbackRows = [
+    ...combinedInserts.map((insert) => ({
+      action: 'delete_inserted',
+      inn: insert.inn,
+      expected_source_file: insert.source_file,
+    })),
+    ...combinedUpdates.map((update) => {
+      const existing = existingRowsById.get(String(update.id));
+      if (!existing) {
+        throw new Error(`Missing before-image row for update ${String(update.id)}`);
+      }
+      return {
+        action: 'restore_update',
+        id: update.id,
+        inn: update.inn,
+        fields: Object.fromEntries(
+          Object.keys(update.patch).map((field) => [
+            field,
+            existing[field as keyof ExistingDirectoryRow] ?? null,
+          ]),
+        ),
+      };
+    }),
+  ];
 
   let idempotencyRows = workingRows;
   let repeatedInserts = 0;
@@ -652,6 +697,7 @@ async function main(): Promise<void> {
       activityCounts,
       approximateOkvedCounts,
       provenanceRecords: provenanceRows.length,
+      rollbackRecords: rollbackRows.length,
     },
     idempotencyCheck: {
       repeatedInserts,
@@ -676,7 +722,73 @@ async function main(): Promise<void> {
       path.join(args.out, 'source-locations.jsonl'),
       allLocations,
     ),
+    writeJsonLines(path.join(args.out, 'rollback.jsonl'), rollbackRows),
   ]);
+
+  if (args.mode === 'strict-contact') {
+    const jsonlArtifacts = [
+      ['inserts.jsonl', combinedInserts.length],
+      ['updates.jsonl', combinedUpdates.length],
+      ['rejected.jsonl', allRejected.length],
+      ['skipped.jsonl', allSkipped.length],
+      ['conflicts.jsonl', allConflicts.length],
+      ['provenance.jsonl', provenanceRows.length],
+      ['source-locations.jsonl', allLocations.length],
+      ['rollback.jsonl', rollbackRows.length],
+    ] as const;
+    const artifacts = {
+      'summary.json': {
+        sha256: await sha256(path.join(args.out, 'summary.json')),
+      },
+      ...Object.fromEntries(await Promise.all(
+        jsonlArtifacts.map(async ([name, rows]) => [
+          name,
+          {
+            sha256: await sha256(path.join(args.out, name)),
+            rows,
+          },
+        ]),
+      )),
+    } as SbisPlanManifest['artifacts'];
+    const manifest: SbisPlanManifest = {
+      version: 1,
+      plan: 'polza-registry-v1',
+      target: {
+        host: '139.60.162.12',
+        port: 35434,
+        database: 'postgres',
+      },
+      sources: sources.map((source) => ({
+        sourceFile: source.sourceFile,
+        sha256: source.sha256,
+        inputRows: source.rows.length,
+        uniqueInns: source.collapsed.companies.length,
+      })),
+      artifacts,
+      expected: {
+        inputRows: sources.reduce(
+          (total, source) => total + source.rows.length,
+          0,
+        ),
+        uniqueIncomingInns: incomingInns.size,
+        inserts: combinedInserts.length,
+        updates: combinedUpdates.length,
+        skipped: allSkipped.length,
+        rejectedRows: allRejected.length,
+        approximateOkvedCounts: Object.fromEntries(approximateOkvedCounts),
+      },
+    };
+    const manifestPath = path.join(args.out, 'manifest.json');
+    await writeFile(
+      manifestPath,
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      'utf8',
+    );
+    process.stdout.write(`${JSON.stringify({
+      manifestPath,
+      planFingerprint: buildSbisPlanFingerprint(manifest),
+    }, null, 2)}\n`);
+  }
 
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }

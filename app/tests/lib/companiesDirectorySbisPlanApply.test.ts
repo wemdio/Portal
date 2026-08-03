@@ -15,6 +15,8 @@ import {
   executeSbisApply,
   executeSbisCheck,
   parseSbisApplyCliArgs,
+  SBIS_BEFORE_IMAGE_FIELDS,
+  shouldFinalizeSbisApplyReceipt,
   validateSbisInsertRow,
   validateSbisPlanManifest,
   validateSbisUpdateRow,
@@ -22,13 +24,16 @@ import {
   type SbisImportPreview,
   type SbisPlanManifest,
 } from '@/lib/companiesDirectory/sbisPlanApply';
+import * as sbisPlanApplyModule from '@/lib/companiesDirectory/sbisPlanApply';
 import { processSbisPlanFiles } from '@/lib/companiesDirectory/sbisPlanFiles';
 import {
+  SBIS_BEFORE_IMAGE_SQL,
   SbisPostgresApplySession,
   verifySbisDatabaseIdentity,
   type SbisPgClient,
 } from '@/lib/companiesDirectory/sbisPostgresApply';
 import frozenSbisV4Manifest from '../../scripts/sbis-directory-v4.manifest.json';
+import frozenPolzaRegistryManifest from '../../scripts/polza-registry-v1.manifest.json';
 
 const MANIFEST: SbisPlanManifest = {
   version: 1,
@@ -199,6 +204,39 @@ function makeSession(previews: SbisImportPreview[]): jest.Mocked<SbisApplySessio
 function hash(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
+
+const POLZA_REGISTRY_PLAN = 'polza-registry-v1';
+
+interface VersionedSbisPlanTrustContract {
+  TRUSTED_SBIS_PLAN_FINGERPRINTS: Readonly<Record<string, string>>;
+  assertTrustedSbisPlanFingerprint(
+    plan: string,
+    planFingerprint: string,
+  ): void;
+}
+
+interface SbisApplyAuditHooks {
+  plan: string;
+  planFingerprint: string;
+  captureBeforeImage(input: {
+    before: SbisImportPreview;
+  }): Promise<unknown>;
+  persistPendingReceipt(input: {
+    plan: string;
+    planFingerprint: string;
+    beforeImage: unknown;
+    inserted: number;
+    updated: number;
+    before: SbisImportPreview;
+    after: SbisImportPreview;
+  }): Promise<void>;
+}
+
+type ExecuteSbisApplyWithAudit = (
+  session: SbisApplySession,
+  expectedPreviewFingerprint: string,
+  audit: SbisApplyAuditHooks,
+) => ReturnType<typeof executeSbisApply>;
 
 describe('SBIS production import guardrails', () => {
   it('defaults to check mode and never invokes persistent writes', async () => {
@@ -782,5 +820,359 @@ describe('SBIS production import guardrails', () => {
     await expect(verifySbisDatabaseIdentity(wrongClient)).rejects.toThrow(
       'database identity',
     );
+  });
+});
+
+describe('Polza registry SBIS import contract', () => {
+  it('pins the versioned registry plan alongside the frozen v4 plan', () => {
+    const contract = sbisPlanApplyModule as unknown as
+      VersionedSbisPlanTrustContract;
+
+    expect(contract.TRUSTED_SBIS_PLAN_FINGERPRINTS).toBeDefined();
+    expect(typeof contract.assertTrustedSbisPlanFingerprint).toBe('function');
+
+    const v4Fingerprint =
+      contract.TRUSTED_SBIS_PLAN_FINGERPRINTS['sbis-directory-v4'];
+    const registryFingerprint =
+      contract.TRUSTED_SBIS_PLAN_FINGERPRINTS[POLZA_REGISTRY_PLAN];
+
+    expect(v4Fingerprint).toBe(
+      'd36c06f13f09ac9f6ad3c26102b9c29dd87cf83ecd79dd7b2cf5c7068d87ba08',
+    );
+    expect(registryFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(registryFingerprint).not.toBe(v4Fingerprint);
+    expect(registryFingerprint).toBe(buildSbisPlanFingerprint(
+      frozenPolzaRegistryManifest as SbisPlanManifest,
+    ));
+
+    expect(() =>
+      contract.assertTrustedSbisPlanFingerprint(
+        'sbis-directory-v4',
+        v4Fingerprint,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      contract.assertTrustedSbisPlanFingerprint(
+        POLZA_REGISTRY_PLAN,
+        registryFingerprint,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      contract.assertTrustedSbisPlanFingerprint(
+        POLZA_REGISTRY_PLAN,
+        v4Fingerprint,
+      ),
+    ).toThrow(/fingerprint|trusted|pinned/i);
+    expect(() =>
+      contract.assertTrustedSbisPlanFingerprint(
+        'unknown-plan-v1',
+        registryFingerprint,
+      ),
+    ).toThrow(/plan|trusted|pinned/i);
+  });
+
+  it('allows only website and email updates for the registry plan', () => {
+    const validateForPlan = validateSbisUpdateRow as unknown as (
+      value: unknown,
+      plan: string,
+    ) => Record<string, unknown>;
+    const update = {
+      id: '10',
+      inn: '7704414297',
+      patch: {
+        website: 'alpha.ru',
+        email: 'hello@alpha.ru',
+      },
+    };
+
+    expect(validateForPlan(update, POLZA_REGISTRY_PLAN)).toEqual(update);
+    expect(() =>
+      validateForPlan({
+        ...update,
+        patch: { phones: '+74951112233' },
+      }, POLZA_REGISTRY_PLAN),
+    ).toThrow(/phones|forbidden/i);
+    expect(() =>
+      validateForPlan({
+        ...update,
+        patch: { okved_code: '62.0' },
+      }, POLZA_REGISTRY_PLAN),
+    ).toThrow(/okved_code|forbidden/i);
+
+    // The reviewed v4 import remains backward compatible.
+    expect(() =>
+      validateSbisUpdateRow({
+        ...update,
+        patch: {
+          phones: '+74951112233',
+          okved_code: '62.0',
+        },
+      }),
+    ).not.toThrow();
+
+    const registryInsert = {
+      ...INSERT_62,
+      phones: null,
+      okved_code: '62',
+    };
+    expect(() =>
+      validateSbisInsertRow(registryInsert, POLZA_REGISTRY_PLAN),
+    ).not.toThrow();
+    expect(() =>
+      validateSbisInsertRow({
+        ...registryInsert,
+        phones: '+74951112233',
+      }, POLZA_REGISTRY_PLAN),
+    ).toThrow(/phones|forbidden/i);
+    expect(() =>
+      validateSbisInsertRow({
+        ...registryInsert,
+        okved_code: '00',
+      }, POLZA_REGISTRY_PLAN),
+    ).toThrow(/OKVED|ОКВЭД|parent/i);
+  });
+
+  it('keeps the original receipt on a no-op repeat and captures every mutable v4 field', () => {
+    expect(SBIS_BEFORE_IMAGE_FIELDS).toEqual([
+      'phones',
+      'email',
+      'website',
+      'okved_code',
+    ]);
+    expect(shouldFinalizeSbisApplyReceipt({ alreadyApplied: false })).toBe(true);
+    expect(shouldFinalizeSbisApplyReceipt({ alreadyApplied: true })).toBe(false);
+    expect(SBIS_BEFORE_IMAGE_SQL).toContain("(s.payload->>'id')::bigint");
+    expect(SBIS_BEFORE_IMAGE_SQL).not.toContain('s.expected_id');
+    for (const field of SBIS_BEFORE_IMAGE_FIELDS) {
+      expect(SBIS_BEFORE_IMAGE_SQL).toContain(`c.${field}`);
+    }
+  });
+
+  it('hashes every audit and provenance artifact used to review the registry plan', async () => {
+    const planDir = await mkdtemp(join(tmpdir(), 'polza-registry-plan-test-'));
+    try {
+      const source = {
+        sourceFile: 'polza-registry.xlsx',
+        sha256: '1'.repeat(64),
+        inputRows: 1,
+        uniqueInns: 1,
+      };
+      const summary = {
+        dryRunOnly: true,
+        mode: 'contact-only',
+        input: {
+          files: [{ file: 'C:\\source\\polza-registry.xlsx', ...source }],
+        },
+        combined: {
+          inputRows: 1,
+          uniqueIncomingInns: 1,
+          inserts: 0,
+          updates: 1,
+          skipped: 0,
+          rejectedRows: 0,
+          approximateOkvedCounts: [],
+        },
+        idempotencyCheck: {
+          repeatedInserts: 0,
+          repeatedUpdates: 0,
+          passed: true,
+        },
+      };
+      const artifactTexts: Record<string, string> = {
+        'summary.json': `${JSON.stringify(summary)}\n`,
+        'inserts.jsonl': '',
+        'updates.jsonl': `${JSON.stringify({
+          id: '10',
+          inn: '7704414297',
+          patch: { website: 'alpha.ru' },
+        })}\n`,
+        'rejected.jsonl': '',
+        'skipped.jsonl': '',
+        'conflicts.jsonl': '',
+        'provenance.jsonl': `${JSON.stringify({
+          action: 'update',
+          id: '10',
+          inn: '7704414297',
+          fields: { website: ['polza-registry.xlsx'] },
+        })}\n`,
+        'source-locations.jsonl': `${JSON.stringify({
+          source_file: 'polza-registry.xlsx',
+          inn: '7704414297',
+          rowNumbers: [2],
+        })}\n`,
+      };
+      const rowCounts: Record<string, number> = {
+        'inserts.jsonl': 0,
+        'updates.jsonl': 1,
+        'rejected.jsonl': 0,
+        'skipped.jsonl': 0,
+        'conflicts.jsonl': 0,
+        'provenance.jsonl': 1,
+        'source-locations.jsonl': 1,
+      };
+      const artifacts = Object.fromEntries(
+        Object.entries(artifactTexts).map(([name, text]) => [
+          name,
+          name === 'summary.json'
+            ? { sha256: hash(text) }
+            : { sha256: hash(text), rows: rowCounts[name] },
+        ]),
+      );
+      const manifest = {
+        version: 1,
+        plan: POLZA_REGISTRY_PLAN,
+        target: MANIFEST.target,
+        sources: [source],
+        artifacts,
+        expected: {
+          inputRows: 1,
+          uniqueIncomingInns: 1,
+          inserts: 0,
+          updates: 1,
+          skipped: 0,
+          rejectedRows: 0,
+          approximateOkvedCounts: {},
+        },
+      };
+      const manifestPath = join(planDir, 'manifest.json');
+
+      await Promise.all([
+        ...Object.entries(artifactTexts).map(([name, text]) =>
+          writeFile(join(planDir, name), text),
+        ),
+        writeFile(manifestPath, `${JSON.stringify(manifest)}\n`),
+      ]);
+
+      await expect(
+        processSbisPlanFiles({ planDir, manifestPath }),
+      ).resolves.toMatchObject({
+        insertRows: 0,
+        updateRows: 1,
+      });
+
+      for (const name of [
+        'skipped.jsonl',
+        'conflicts.jsonl',
+        'provenance.jsonl',
+        'source-locations.jsonl',
+      ]) {
+        await writeFile(
+          join(planDir, name),
+          `${artifactTexts[name]}${JSON.stringify({ tampered: true })}\n`,
+        );
+        await expect(
+          processSbisPlanFiles({ planDir, manifestPath }),
+        ).rejects.toThrow(new RegExp(name.replace('.', '\\.')));
+        await writeFile(join(planDir, name), artifactTexts[name]);
+      }
+    } finally {
+      await rm(planDir, { recursive: true, force: true });
+    }
+  });
+
+  it('persists a before-image and pending receipt before committing', async () => {
+    const before = makePreview();
+    const after = makePreview({
+      missingInserts: 0,
+      alreadyPresentInserts: 2,
+      rowsToUpdate: 0,
+      stateDigest: 'registry-state-after',
+    });
+    const session = makeSession([before, after]);
+    const beforeImage = {
+      rows: [{ id: '10', inn: '7704414297', website: null, email: null }],
+      sha256: '2'.repeat(64),
+    };
+    const captureBeforeImage = jest.fn().mockResolvedValue(beforeImage);
+    const persistPendingReceipt = jest.fn().mockResolvedValue(undefined);
+    const executeWithAudit = executeSbisApply as unknown as
+      ExecuteSbisApplyWithAudit;
+
+    await expect(
+      executeWithAudit(session, before.fingerprint, {
+        plan: POLZA_REGISTRY_PLAN,
+        planFingerprint: '3'.repeat(64),
+        captureBeforeImage,
+        persistPendingReceipt,
+      }),
+    ).resolves.toMatchObject({ inserted: 2, updated: 1 });
+
+    expect(captureBeforeImage).toHaveBeenCalledWith({ before });
+    expect(persistPendingReceipt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        plan: POLZA_REGISTRY_PLAN,
+        planFingerprint: '3'.repeat(64),
+        beforeImage,
+        inserted: 2,
+        updated: 1,
+        before,
+        after,
+      }),
+    );
+    expect(captureBeforeImage.mock.invocationCallOrder[0]).toBeLessThan(
+      session.insertMissing.mock.invocationCallOrder[0],
+    );
+    expect(persistPendingReceipt.mock.invocationCallOrder[0]).toBeLessThan(
+      session.commit.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('rolls back when the before-image cannot be persisted', async () => {
+    const before = makePreview();
+    const after = makePreview({
+      missingInserts: 0,
+      alreadyPresentInserts: 2,
+      rowsToUpdate: 0,
+      stateDigest: 'registry-state-after',
+    });
+    const session = makeSession([before, after]);
+    const executeWithAudit = executeSbisApply as unknown as
+      ExecuteSbisApplyWithAudit;
+
+    await expect(
+      executeWithAudit(session, before.fingerprint, {
+        plan: POLZA_REGISTRY_PLAN,
+        planFingerprint: '4'.repeat(64),
+        captureBeforeImage: jest.fn().mockRejectedValue(
+          new Error('before-image write failed'),
+        ),
+        persistPendingReceipt: jest.fn(),
+      }),
+    ).rejects.toThrow('before-image write failed');
+    expect(session.insertMissing).not.toHaveBeenCalled();
+    expect(session.fillEmpty).not.toHaveBeenCalled();
+    expect(session.commit).not.toHaveBeenCalled();
+    expect(session.rollback).toHaveBeenCalledTimes(1);
+  });
+
+  it('rolls back when the pending receipt cannot be persisted before commit', async () => {
+    const before = makePreview();
+    const after = makePreview({
+      missingInserts: 0,
+      alreadyPresentInserts: 2,
+      rowsToUpdate: 0,
+      stateDigest: 'registry-state-after',
+    });
+    const session = makeSession([before, after]);
+    const executeWithAudit = executeSbisApply as unknown as
+      ExecuteSbisApplyWithAudit;
+
+    await expect(
+      executeWithAudit(session, before.fingerprint, {
+        plan: POLZA_REGISTRY_PLAN,
+        planFingerprint: '5'.repeat(64),
+        captureBeforeImage: jest.fn().mockResolvedValue({
+          rows: [],
+          sha256: '6'.repeat(64),
+        }),
+        persistPendingReceipt: jest.fn().mockRejectedValue(
+          new Error('pending receipt write failed'),
+        ),
+      }),
+    ).rejects.toThrow('pending receipt write failed');
+    expect(session.insertMissing).toHaveBeenCalledTimes(1);
+    expect(session.fillEmpty).toHaveBeenCalledTimes(1);
+    expect(session.commit).not.toHaveBeenCalled();
+    expect(session.rollback).toHaveBeenCalledTimes(1);
   });
 });

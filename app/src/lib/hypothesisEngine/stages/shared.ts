@@ -9,6 +9,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+import type { HeMarket } from '../market';
 import type { HeJob, HeProject, HeStage } from '../types';
 
 export interface HeStageContext {
@@ -17,6 +18,8 @@ export interface HeStageContext {
   fetchText?: (url: string) => Promise<string>;
   /** Подменяемый поиск (дефолт — serperSearch, best-effort: может вернуть []). */
   search?: (q: string) => Promise<Array<{ title: string; link: string; snippet?: string }>>;
+  /** Рынок проекта (воркер читает he_projects.market): geo Serper, язык промптов. */
+  market?: HeMarket;
   log?: (msg: string) => void;
 }
 

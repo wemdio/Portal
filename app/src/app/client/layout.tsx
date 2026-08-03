@@ -83,6 +83,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   // один источник правды) и раздаём в навигацию через ClientPortalProvider.
   const [supportUnread, setSupportUnread] = useState(0);
   const [mailboxesEnabled, setMailboxesEnabled] = useState(false);
+  const [gisSignalsEnabled, setGisSignalsEnabled] = useState(false);
   const supportUnreadInFlightRef = useRef<Promise<void> | null>(null);
   const supportUnreadLastStartedAtRef = useRef(0);
 
@@ -168,6 +169,23 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
       try {
         const data = await clientApiFetch<{ enabled?: boolean }>('/mailboxes/enabled');
         if (!cancelled) setMailboxesEnabled(data.enabled === true);
+      } catch {
+        /* тихо скрываем пункт при любой ошибке */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // «2GIS + сигналы»: пункт виден только клиенту из конфига пайплайна.
+  // Грузим флаг один раз за сессию, как и mailboxes/enabled выше.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await clientApiFetch<{ enabled?: boolean }>('/gis-signals/enabled');
+        if (!cancelled) setGisSignalsEnabled(data.enabled === true);
       } catch {
         /* тихо скрываем пункт при любой ошибке */
       }
@@ -268,8 +286,8 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   }
 
   const portalContextValue = useMemo(
-    () => ({ portalMode: navMode, supportUnread, mailboxesEnabled }),
-    [navMode, supportUnread, mailboxesEnabled],
+    () => ({ portalMode: navMode, supportUnread, mailboxesEnabled, gisSignalsEnabled }),
+    [navMode, supportUnread, mailboxesEnabled, gisSignalsEnabled],
   );
 
   const currentLocaleDesc = LOCALE_DESCRIPTORS[locale];

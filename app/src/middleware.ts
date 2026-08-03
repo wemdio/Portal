@@ -2,7 +2,7 @@ import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 import { DEFAULT_LOCALE, LOCALE_COOKIE, normalizeLocale } from '@/lib/i18n'
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient'
-import { isInternalRole, isLead } from '@/lib/roles'
+import { isInternalRole } from '@/lib/roles'
 import type { UserRole } from '@/types'
 
 const ROLE_COOKIE = 'x-portal-role'
@@ -445,7 +445,7 @@ export async function middleware(request: NextRequest) {
       && pathname === '/team'
       && (
         authoritativeTeamProfile?.isDemo === true
-        || !isLead(userRole as UserRole | null)
+        || !isInternalRole(userRole as UserRole | null)
       )
     ) {
       return NextResponse.redirect(new URL('/', request.url))

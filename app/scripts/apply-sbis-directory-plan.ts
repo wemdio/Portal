@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { mkdir, rename, writeFile } from 'node:fs/promises';
 
 import { Client } from 'pg';
 
@@ -13,13 +15,15 @@ import { Client } from 'pg';
 import {
   assertSbisApplyAuthorized,
   assertSbisProductionTarget,
-  assertTrustedSbisV4PlanFingerprint,
+  assertTrustedSbisPlanFingerprint,
   executeSbisApply,
   executeSbisCheck,
   parseSbisApplyCliArgs,
+  shouldFinalizeSbisApplyReceipt,
 } from '@/lib/companiesDirectory/sbisPlanApply';
 import { processSbisPlanFiles } from '@/lib/companiesDirectory/sbisPlanFiles';
 import {
+  SBIS_BEFORE_IMAGE_SQL,
   SbisPostgresApplySession,
   verifySbisDatabaseIdentity,
   type SbisPgClient,
@@ -45,17 +49,39 @@ function printJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+function hashJson(value: unknown): string {
+  return createHash('sha256')
+    .update(JSON.stringify(value))
+    .digest('hex');
+}
+
+async function writeJsonAtomically(
+  filePath: string,
+  value: unknown,
+): Promise<void> {
+  const temporaryPath = `${filePath}.tmp-${process.pid}`;
+  await writeFile(
+    temporaryPath,
+    `${JSON.stringify(value, null, 2)}\n`,
+    'utf8',
+  );
+  await rename(temporaryPath, filePath);
+}
+
 async function main(): Promise<void> {
   const args = parseSbisApplyCliArgs(process.argv.slice(2));
   const manifestPath = path.resolve(args.manifestPath ?? DEFAULT_MANIFEST);
   const planDir = path.resolve(args.planDir);
 
-  process.stdout.write('Validating frozen SBIS v4 artifacts locally...\n');
+  process.stdout.write('Validating frozen SBIS artifacts locally...\n');
   const localPlan = await processSbisPlanFiles({
     planDir,
     manifestPath,
   });
-  assertTrustedSbisV4PlanFingerprint(localPlan.planFingerprint);
+  assertTrustedSbisPlanFingerprint(
+    localPlan.manifest.plan,
+    localPlan.planFingerprint,
+  );
   process.stdout.write(
     `Validated ${localPlan.insertRows} inserts and ${localPlan.updateRows} updates.\n`,
   );
@@ -84,7 +110,7 @@ async function main(): Promise<void> {
   try {
     await client.query(
       "SELECT set_config('application_name', $1, false)",
-      [`sbis-directory-v4-${args.mode}`],
+      [`${localPlan.manifest.plan}-${args.mode}`.slice(0, 63)],
     );
     const identity = await verifySbisDatabaseIdentity(
       client as unknown as SbisPgClient,
@@ -120,10 +146,59 @@ async function main(): Promise<void> {
       return;
     }
 
+    const auditDir = path.join(planDir, 'apply-audit');
+    await mkdir(auditDir, { recursive: true });
+    const auditStem = `${localPlan.manifest.plan}-${localPlan.planFingerprint}`;
+    const beforeImagePath = path.join(
+      auditDir,
+      `${auditStem}.before-image.json`,
+    );
+    const receiptPath = path.join(
+      auditDir,
+      `${auditStem}.receipt.json`,
+    );
     const result = await executeSbisApply(
       session,
       args.confirmedPreviewFingerprint as string,
+      {
+        plan: localPlan.manifest.plan,
+        planFingerprint: localPlan.planFingerprint,
+        captureBeforeImage: async ({ before }) => {
+          const result = await client.query(SBIS_BEFORE_IMAGE_SQL);
+          const payload = {
+            capturedAt: new Date().toISOString(),
+            plan: localPlan.manifest.plan,
+            planFingerprint: localPlan.planFingerprint,
+            previewFingerprint: before.fingerprint,
+            rows: result.rows,
+          };
+          const beforeImage = {
+            ...payload,
+            sha256: hashJson(payload),
+          };
+          await writeJsonAtomically(beforeImagePath, beforeImage);
+          return beforeImage;
+        },
+        persistPendingReceipt: async (receipt) => {
+          await writeJsonAtomically(receiptPath, {
+            status: 'pending_commit',
+            writtenAt: new Date().toISOString(),
+            ...receipt,
+            beforeImagePath,
+          });
+        },
+      },
     );
+    if (shouldFinalizeSbisApplyReceipt(result)) {
+      await writeJsonAtomically(receiptPath, {
+        status: 'committed',
+        committedAt: new Date().toISOString(),
+        plan: localPlan.manifest.plan,
+        planFingerprint: localPlan.planFingerprint,
+        beforeImagePath,
+        result,
+      });
+    }
     printJson({
       mode: 'apply',
       target,

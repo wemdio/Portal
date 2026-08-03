@@ -130,6 +130,10 @@ export function CrunchbaseParserView() {
   );
   const filtersKey = useMemo(() => filterQuery(filters).toString(), [filters]);
 
+  // SEC is the only funding-data source — with YC-only selected every funding
+  // filter can only return zeros, so the whole block is dimmed for clarity.
+  const fundingUnavailable = source.length > 0 && source.every((s) => s === 'yc');
+
   useEffect(() => {
     countAbort.current?.abort();
     const ac = new AbortController();
@@ -275,8 +279,12 @@ export function CrunchbaseParserView() {
             ) : null}
 
             {/* Funding controls */}
-            <div className="rounded-lg border border-emerald-100 bg-emerald-50/40 p-4 space-y-3">
-              <div className="flex items-center gap-2 text-sm font-medium text-gray-700"><Banknote className="h-4 w-4 text-emerald-600" /> Фандинг</div>
+            <div className={`rounded-lg border p-4 space-y-3 ${fundingUnavailable ? 'border-gray-200 bg-gray-50' : 'border-emerald-100 bg-emerald-50/40'}`}>
+              <div className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                <Banknote className={`h-4 w-4 ${fundingUnavailable ? 'text-gray-400' : 'text-emerald-600'}`} /> Фандинг
+                {fundingUnavailable ? <span className="text-xs font-normal text-gray-400">— недоступен: у YC нет данных о раундах (только SEC)</span> : null}
+              </div>
+              <div className={fundingUnavailable ? 'pointer-events-none opacity-40' : undefined}>
               <div className="flex flex-wrap items-center gap-4">
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-gray-500">сумма раунда:</span>
@@ -301,6 +309,7 @@ export function CrunchbaseParserView() {
                   })}
                 </div>
               ) : null}
+              </div>
             </div>
 
             {/* Country */}

@@ -1,4 +1,5 @@
 import {
+  SBIS_BEFORE_IMAGE_FIELDS,
   computeSbisPreviewFingerprint,
   type SbisApplySession,
   type SbisImportPreview,
@@ -31,6 +32,20 @@ interface SbisPostgresApplySessionOptions {
 }
 
 const STAGE_TABLE = 'sbis_directory_import_stage';
+
+export const SBIS_BEFORE_IMAGE_SQL = `
+SELECT c.id::text AS id,
+       c.inn,
+       ${SBIS_BEFORE_IMAGE_FIELDS
+        .map((field) => `c.${field}`)
+        .join(',\n       ')}
+  FROM public.companies_directory c
+  JOIN ${STAGE_TABLE} s
+    ON s.kind = 'update'
+   AND c.id = (s.payload->>'id')::bigint
+   AND c.inn = s.inn
+ ORDER BY c.inn, c.id
+`.trim();
 
 const CREATE_STAGE_SQL = `
 CREATE TEMP TABLE ${STAGE_TABLE} (

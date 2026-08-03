@@ -281,5 +281,6 @@ export function watchedJobState(jobs: HeJobSummary[], jobId: string | undefined)
   // Джобы ещё нет в выдаче (только что создали, не успели запollить) — считаем активной.
   if (!job) return 'active';
   if (job.status === 'pending' || job.status === 'running') return 'active';
-  return job.status === 'failed' ? 'failed' : 'done';
+  // cancelled схлопываем в failed: наблюдающая кнопка гаснет, успех не рисуем.
+  return job.status === 'failed' || job.status === 'cancelled' ? 'failed' : 'done';
 }

@@ -468,9 +468,13 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
 
   const columns = Array.isArray(base.columns) ? base.columns : [];
 
+  // Язык всех промптов стадии наследуется от цепочки вертикали (he_chains.language).
+  const language = (chain.language === 'en' || chain.language === 'pl' ? chain.language : 'ru') as HeChainLanguage;
+
   // Шаг 1: план 85/15.
   const plan = await callLLMWithSchema(
     buildTemplatePlanMessages({
+      language,
       verticalName: vertical.name,
       verticalSummary: vertical.summary ?? '',
       chainLetters,
@@ -487,7 +491,6 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   addUsage(usage, plan);
 
   // Шаг 2: финальные письма по плану.
-  const language = (chain.language === 'en' || chain.language === 'pl' ? chain.language : 'ru') as HeChainLanguage;
   const model = getHeModel('chain');
   const messages = buildTemplateLettersMessages({
     language,

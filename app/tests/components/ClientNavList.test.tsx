@@ -33,6 +33,7 @@ function renderNav(
         portalMode: 'manual',
         supportUnread: ctx.supportUnread ?? 0,
         mailboxesEnabled: ctx.mailboxesEnabled ?? false,
+        gisSignalsEnabled: false,
       }}
     >
       <ClientNavList activeId={activeId} locale="ru" mode="manual" />
