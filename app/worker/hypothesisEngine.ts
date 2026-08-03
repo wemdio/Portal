@@ -25,6 +25,7 @@
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, startWorkerHeartbeat } from './_shared';
 import { runHeStage } from '@/lib/hypothesisEngine/stages';
 import { setHeActiveJobSignal } from '@/lib/hypothesisEngine/llm';
+import { normalizeHeMarket } from '@/lib/hypothesisEngine/market';
 import type { HeJob, HeStage } from '@/lib/hypothesisEngine/types';
 
 const WORKER_ID = `hypothesis-engine-${process.pid}`;
@@ -184,8 +185,17 @@ async function handleJob(job: HeJob) {
 
   let stageResult;
   try {
+    // Рынок проекта (geo поиска, язык промптов/писем) — один read на джобу.
+    const { data: proj } = await db
+      .from('he_projects')
+      .select('market')
+      .eq('id', job.project_id)
+      .maybeSingle();
+    const market = normalizeHeMarket((proj as { market?: string } | null)?.market);
+
     stageResult = await runHeStage(job, {
       supabase: db,
+      market,
       log: (msg) => log('info', `[${job.stage}] ${msg}`),
     });
   } finally {

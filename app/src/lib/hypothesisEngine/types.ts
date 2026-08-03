@@ -58,6 +58,8 @@ export interface HeProject {
   /** Снапшот брифа: { site_profile, website_url, captured_at, ... }. */
   brief: Record<string, unknown> | null;
   status: HeProjectStatus;
+  /** Рынок проекта: ru (дефолт) | us — geo поиска и язык промптов/писем. */
+  market: string;
   error: string | null;
   llm_model: string | null;
   tokens_used: number;
