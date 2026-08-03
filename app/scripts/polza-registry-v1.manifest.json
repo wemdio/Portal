@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "plan": "polza-registry-v1",
+  "target": {
+    "host": "139.60.162.12",
+    "port": 35434,
+    "database": "postgres"
+  },
+  "sources": [
+    {
+      "sourceFile": "!База_потенциальных_клиентов_polza (2).xlsx",
+      "sha256": "03468372db5ddcf2bd822009ff8e5e6ee2fab831df8921e68e9e6471a3a54277",
+      "inputRows": 304208,
+      "uniqueInns": 287503
+    }
+  ],
+  "artifacts": {
+    "summary.json": {
+      "sha256": "cf9655a4657f257b75ec93fd33ce598ddf5ebdef0594d50a8fafb5775659d903"
+    },
+    "inserts.jsonl": {
+      "sha256": "0f6cad20fdadcbbe70732add1caebaa17637b6989efafbc7cab80c3156e6b3aa",
+      "rows": 46388
+    },
+    "updates.jsonl": {
+      "sha256": "837b4e9f9f2e857a11e940f74856cd4d2b56518212332776678a93e0a6986f18",
+      "rows": 1088
+    },
+    "rejected.jsonl": {
+      "sha256": "0d69c2e85e9e4c2cb35e509542d3b15c32c1c4b2c1d1267e9c92c5c1a781eee5",
+      "rows": 8544
+    },
+    "skipped.jsonl": {
+      "sha256": "137b4f308c32ec588caaf3f8d093df94337cb26dd43921b30b965012d41b7968",
+      "rows": 118852
+    },
+    "conflicts.jsonl": {
+      "sha256": "10e08a08447a2b70831a49d93249377a88217838a5d634485e6990aa36b4957b",
+      "rows": 171885
+    },
+    "provenance.jsonl": {
+      "sha256": "930988b3e5c3b833a6775e53c3cc9e4611d35d44b4f9c4ac875bb585ea703d1f",
+      "rows": 47476
+    },
+    "source-locations.jsonl": {
+      "sha256": "4d8bd109bb5d65286a6478db2e4abeb767f9e415ac3a529f12f2d043db942fbc",
+      "rows": 8161
+    },
+    "rollback.jsonl": {
+      "sha256": "d615fc3c2ef49cf12a83f96b8228036d99aa708434e136ad07025a3fc4046133",
+      "rows": 47476
+    }
+  },
+  "expected": {
+    "inputRows": 304208,
+    "uniqueIncomingInns": 287503,
+    "inserts": 46388,
+    "updates": 1088,
+    "skipped": 118852,
+    "rejectedRows": 8544,
+    "approximateOkvedCounts": {
+      "10": 520,
+      "20": 95,
+      "26": 77,
+      "27": 106,
+      "28": 193,
+      "30": 7,
+      "33": 263,
+      "35": 70,
+      "41": 3038,
+      "43": 1347,
+      "45": 405,
+      "46": 24039,
+      "47": 1377,
+      "52": 794,
+      "55": 97,
+      "56": 735,
+      "61": 1465,
+      "62": 1313,
+      "63": 841,
+      "68": 6325,
+      "70": 1410,
+      "71": 657,
+      "72": 147,
+      "77": 63,
+      "80": 9,
+      "81": 245,
+      "84": 326,
+      "86": 34,
+      "93": 12,
+      "95": 177,
+      "01": 201
+    }
+  }
+}
