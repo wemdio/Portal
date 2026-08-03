@@ -20,6 +20,12 @@ const DEFAULT_MAX_PAGES = 12;
 const BROWSER_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
+// Accept-Language по локали джобы: RU (default, прежнее поведение) и EN
+// (конструктор баз ENG-локали — англоязычные сайты иногда отдают другой
+// контент/редирект по языку).
+const DEFAULT_ACCEPT_LANGUAGE = 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7';
+const EN_ACCEPT_LANGUAGE = 'en-US,en';
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ── Proxy pool (round-robin) ───────────────────────────────────
@@ -114,6 +120,13 @@ const ALL_STATIC_PATHS = [
   ...LEGAL_PATHS,
   ...BUSINESS_PATHS,
 ];
+
+// При locale='en' эти пути идут в обходе ПЕРВЫМИ (до общего списка):
+// англоязычные сайты чаще всего держат почту именно на них. RU-пути не
+// убираем — они остаются доступными дальше по очереди (часть EN-баз
+// содержит RU-сайты). Все пути уже есть в ALL_STATIC_PATHS, дубли при
+// склейке отсекает candidateSeen в scrapeEmails.
+const EN_PRIORITY_PATHS = ['/contact', '/contact-us', '/about', '/team', '/company'];
 
 // ── Link discovery patterns ────────────────────────────────────
 
@@ -519,7 +532,7 @@ function isHtmlLikeContentType(contentType: string | null): boolean {
 
 async function fetchPage(
   url: string,
-  options?: { timeout?: number; signal?: AbortSignal },
+  options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string },
 ): Promise<string | null> {
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
   // Hard outer cap: даже если внутренний fetch() зависнет (видели на проде
@@ -530,14 +543,14 @@ async function fetchPage(
   // worker'ы Node-process'а параллельно ловят сам ассерт через
   // installUndiciAssertGuard() в app/worker/baseConstructor.ts.
   return await Promise.race([
-    fetchPageInner(url, { timeout, signal: options?.signal }),
+    fetchPageInner(url, { timeout, signal: options?.signal, acceptLanguage: options?.acceptLanguage }),
     new Promise<null>((resolve) => setTimeout(() => resolve(null), timeout + 5_000)),
   ]);
 }
 
 async function fetchPageInner(
   url: string,
-  options: { timeout: number; signal?: AbortSignal },
+  options: { timeout: number; signal?: AbortSignal; acceptLanguage?: string },
 ): Promise<string | null> {
   const { timeout } = options;
   const controller = new AbortController();
@@ -550,7 +563,7 @@ async function fetchPageInner(
   const baseHeaders = {
     'User-Agent': BROWSER_USER_AGENT,
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Language': options.acceptLanguage ?? DEFAULT_ACCEPT_LANGUAGE,
   } as const;
 
   const dispatcher = await getProxyDispatcher();
@@ -603,7 +616,7 @@ async function fetchPageInner(
 
 async function fetchPageWithRetry(
   url: string,
-  options?: { timeout?: number; signal?: AbortSignal },
+  options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string },
 ): Promise<string | null> {
   for (let attempt = 0; attempt <= FETCH_RETRIES; attempt += 1) {
     const html = await fetchPage(url, options);
@@ -688,6 +701,15 @@ export async function scrapeEmails(
      * get and don't mind crawling more pages.
      */
     stopAtFirstUsableEmail?: boolean;
+    /**
+     * Локаль джобы конструктора баз ('ru' default — обратная совместимость).
+     * При 'en':
+     *   - Accept-Language запросов → 'en-US,en';
+     *   - в обходе кандидат-страниц EN-пути (/contact, /contact-us, /about,
+     *     /team, /company) идут первыми; RU-пути остаются в списке дальше.
+     * Пробрасывается из stepFindEmails (job.locale конструктора баз).
+     */
+    locale?: 'ru' | 'en';
   },
 ): Promise<ScrapeEmailsResult> {
   const url = normalizeUrl(rawUrl);
@@ -695,6 +717,8 @@ export async function scrapeEmails(
   const signal = options?.signal;
   const maxPages = Math.max(1, Math.min(20, options?.maxPages ?? DEFAULT_MAX_PAGES));
   const stopAtFirstUsableEmail = options?.stopAtFirstUsableEmail === true;
+  const locale = options?.locale === 'en' ? 'en' : 'ru';
+  const acceptLanguage = locale === 'en' ? EN_ACCEPT_LANGUAGE : DEFAULT_ACCEPT_LANGUAGE;
   const origin = new URL(url).origin;
   const tryWithWww = !/^https?:\/\/www\./i.test(url);
   const wwwOrigin = tryWithWww ? origin.replace(/^https?:\/\//i, (m) => `${m}www.`) : null;
@@ -726,7 +750,7 @@ export async function scrapeEmails(
 
     checkedNormalized.add(normalized);
     checkedUrls.push(pageUrl);
-    return fetchPageWithRetry(pageUrl, { timeout, signal });
+    return fetchPageWithRetry(pageUrl, { timeout, signal, acceptLanguage });
   };
 
   // 1. Fetch main page
@@ -775,12 +799,18 @@ export async function scrapeEmails(
   // Discovered links from page have highest priority
   for (const link of discoveredLinks) addCandidate(link);
 
+  // Статичные пути: при locale='en' сначала EN-приоритетные (см. комментарий
+  // к EN_PRIORITY_PATHS), дальше общий список; дубли отсекает addCandidate.
+  const staticPaths = locale === 'en'
+    ? [...EN_PRIORITY_PATHS, ...ALL_STATIC_PATHS]
+    : ALL_STATIC_PATHS;
+
   // Static paths for primary origin
-  for (const path of ALL_STATIC_PATHS) addCandidate(`${origin}${path}`);
+  for (const path of staticPaths) addCandidate(`${origin}${path}`);
 
   // Static paths for www variant
   if (wwwOrigin) {
-    for (const path of ALL_STATIC_PATHS) addCandidate(`${wwwOrigin}${path}`);
+    for (const path of staticPaths) addCandidate(`${wwwOrigin}${path}`);
   }
 
   // 3. Crawl candidate pages (all of them, up to maxPages). Break early

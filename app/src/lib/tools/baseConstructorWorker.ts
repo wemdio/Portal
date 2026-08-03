@@ -13,7 +13,9 @@ import {
   stepPersonalize,
   stepValidateEmails,
   stepCapEmailsPerCompany,
-  FOUND_EMAIL_COL,
+  foundEmailColForLocale,
+  normalizeConstructorLocale,
+  type ConstructorLocale,
   type StepKey,
   type ProgressFn,
   type CancelCheckFn,
@@ -57,6 +59,13 @@ interface StepConfig {
   validate_target?: 'original' | 'found' | 'both';
   /** When true, ta_scoring annotates rows with score+reason but does NOT filter <7. */
   keepAllScored?: boolean;
+  /**
+   * Локаль джобы (колонка base_constructor_jobs.locale, default 'ru').
+   * НЕ приходит из UI step_config — worker проставляет её из job.locale
+   * при построении effectiveStepConfig. При 'en' шаги используют английские
+   * служебные колонки и EN-варианты блок-листов (см. ConstructorLocale).
+   */
+  locale?: ConstructorLocale;
   onCheckpoint?: (data: string[][]) => Promise<void>;
   onTaScoringStats?: (stats: TaScoringStats) => void;
 }
@@ -218,15 +227,84 @@ const CANONICAL_NAMES: Record<string, string> = {
   email: 'email',
 };
 
-function applyColumnMapping(data: string[][], rawMapping?: string): string[][] {
+// EN-локаль конструктора баз (job.locale='en', джобы создаёт Движок вертикалей):
+// канонические имена — английские, чтобы downstream-шаги и финальный экспорт
+// жили в языке данных. RU-набор выше неизменен — на него завязаны UI и шаги.
+const CANONICAL_NAMES_EN: Record<string, string> = {
+  company: 'Company',
+  site: 'Website',
+  email: 'Email',
+};
+
+/**
+ * Алиасы английских заголовков → каноническая колонка EN-локали. Покрывают
+ * типовые варианты выгрузок (company name / organization, site / domain /
+ * url, e-mail / mail) и сквозные атрибуты вертикалей (description, industry,
+ * country, city). Применяются ТОЛЬКО при locale='en' (см. normalizeEnHeaders) —
+ * RU-файлы через эту таблицу не проходят вовсе.
+ */
+const EN_HEADER_ALIASES: Record<string, string> = {
+  'company': 'Company',
+  'company name': 'Company',
+  'organization': 'Company',
+  'website': 'Website',
+  'site': 'Website',
+  'domain': 'Website',
+  'url': 'Website',
+  'email': 'Email',
+  'e-mail': 'Email',
+  'mail': 'Email',
+  'description': 'Description',
+  'industry': 'Industry',
+  'country': 'Country',
+  'city': 'City',
+};
+
+/**
+ * Нормализация заголовков EN-джобы: известные английские алиасы приводятся
+ * к каноническим именам (Company/Website/Email/Description/Industry/Country/
+ * City), чтобы шаги нашли свои колонки без явного column_mapping, а экспорт
+ * был в едином виде. Тело не трогаем. Каноническая колонка, уже занятая
+ * другим заголовком, второй раз не создаётся (алиас остаётся как есть).
+ *
+ * @internal — exported только для тестов; не использовать снаружи модуля.
+ */
+export function normalizeEnHeaders(data: string[][]): string[][] {
+  if (data.length === 0) return data;
+  const header = data[0];
+  const taken = new Set(header.map((h) => (typeof h === 'string' ? h.trim().toLowerCase() : '')));
+  let changed = false;
+  const newHeader = header.map((h) => {
+    if (typeof h !== 'string') return h;
+    const key = h.trim().toLowerCase();
+    const canonical = EN_HEADER_ALIASES[key];
+    if (!canonical) return h;
+    const canonicalKey = canonical.toLowerCase();
+    // Уже каноническое имя или оно занято другой колонкой — не переименовываем
+    // (иначе получили бы в header'е две одинаковые колонки, хуже чем алиас).
+    if (canonicalKey === key || taken.has(canonicalKey)) return h;
+    taken.add(canonicalKey);
+    changed = true;
+    return canonical;
+  });
+  return changed ? [newHeader, ...data.slice(1)] : data;
+}
+
+/** @internal — exported только для тестов; не использовать снаружи модуля. */
+export function applyColumnMapping(
+  data: string[][],
+  rawMapping?: string,
+  locale: ConstructorLocale = 'ru',
+): string[][] {
   if (!rawMapping) return data;
   let mapping: Record<string, string>;
   try { mapping = JSON.parse(rawMapping); } catch { return data; }
   if (!mapping || Object.keys(mapping).length === 0) return data;
 
+  const canonicalNames = locale === 'en' ? CANONICAL_NAMES_EN : CANONICAL_NAMES;
   const header = [...data[0]];
   for (const [role, originalHeader] of Object.entries(mapping)) {
-    const canonical = CANONICAL_NAMES[role];
+    const canonical = canonicalNames[role];
     if (!canonical) continue;
     const idx = header.findIndex((h) => h.trim() === originalHeader.trim());
     if (idx >= 0 && header[idx].trim().toLowerCase() !== canonical.toLowerCase()) {
@@ -301,9 +379,13 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
       // захардкоженное поведение шага) и max_per_site (default 8).
       stopAtFirstUsableEmail: cfg.find_emails?.stop_at_first ?? true,
       maxEmailsPerSite: cfg.find_emails?.max_per_site,
+      // Локаль джобы (job.locale): 'en' → «Found Email», EN-блок-лист
+      // хостов, Accept-Language 'en-US,en' и EN-пути первыми в скрапере.
+      locale: cfg.locale,
     }),
   split_emails: (data, prog) => stepSplitEmails(data, prog),
-  remove_support_emails: (data, prog) => stepRemoveSupportEmails(data, prog),
+  remove_support_emails: (data, prog, _cancel, cfg) =>
+    stepRemoveSupportEmails(data, prog, { locale: cfg.locale }),
   validate_emails: (data, prog, cancel, cfg) =>
     stepValidateEmails(data, prog, cancel, {
       validateTarget: cfg.validate_target ?? 'original',
@@ -311,11 +393,13 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
       // персистить промежуточные состояния каждые N строк — иначе
       // resume после redeploy перезапускает весь validate с нуля.
       onCheckpoint: cfg.onCheckpoint,
+      locale: cfg.locale,
     }),
   cap_emails_per_company: (data, prog, _cancel, cfg) =>
     stepCapEmailsPerCompany(data, prog, { max: cfg.cap_emails_per_company?.max }),
   check_sites: (data, prog, cancel) => stepSiteCheck(data, prog, cancel),
-  enrich_descriptions: (data, prog, cancel, cfg) => stepEnrich(data, prog, cancel, cfg.onCheckpoint),
+  enrich_descriptions: (data, prog, cancel, cfg) =>
+    stepEnrich(data, prog, cancel, cfg.onCheckpoint, { locale: cfg.locale }),
   ta_scoring: (data, prog, cancel, cfg) =>
     stepTAScore(data, cfg.brief || '', prog, cancel, {
       keepAllScored: cfg.keepAllScored,
@@ -344,12 +428,18 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
  * data как есть (no-op). Если есть FOUND_EMAIL_COL но нет исходной — переименовываем
  * FOUND_EMAIL_COL в 'Email' (странный case, но не теряем данные).
  *
+ * Имя found-колонки — по локали джобы: «Найденный Email» (ru, default) или
+ * «Found Email» (en) — см. foundEmailColForLocale.
+ *
  * @internal — exported только для тестов; не использовать снаружи модуля.
  */
-export function mergeFoundEmailColumn(data: string[][]): string[][] {
+export function mergeFoundEmailColumn(
+  data: string[][],
+  locale: ConstructorLocale = 'ru',
+): string[][] {
   if (data.length === 0) return data;
   const header = data[0];
-  const foundIdx = header.findIndex((h) => h.trim() === FOUND_EMAIL_COL);
+  const foundIdx = header.findIndex((h) => h.trim() === foundEmailColForLocale(locale));
   if (foundIdx < 0) return data; // нечего мерджить
 
   // Ищем исходную email-колонку (тот же набор alias'ов что и findColumnIndex
@@ -422,6 +512,11 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
 
     const selectedSteps: StepKey[] = job.selected_steps || [];
     const stepConfig: StepConfig = job.step_config || {};
+    // Локаль джобы (миграция добавила base_constructor_jobs.locale NOT NULL
+    // DEFAULT 'ru'; до деплоя миграции колонки может не быть — читаем с
+    // fallback'ом). 'en' включает ENG-локаль конструктора: EN-алиасы
+    // заголовков, английские служебные колонки, EN-блок-листы в шагах.
+    const locale = normalizeConstructorLocale(job.locale);
 
     if (selectedSteps.length === 0) throw new Error('Не выбрано ни одного шага');
 
@@ -459,7 +554,12 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
       );
     }
 
-    let data: string[][] = applyColumnMapping(job.data || [], stepConfig.column_mapping);
+    let data: string[][] = applyColumnMapping(job.data || [], stepConfig.column_mapping, locale);
+    // EN-локаль: после явного маппинга нормализуем оставшиеся известные
+    // английские заголовки (Company Name/Organization/URL/E-Mail/…) к
+    // каноническим именам — шаги найдут свои колонки, экспорт будет на
+    // языке данных. RU-путь намеренно не трогаем.
+    if (locale === 'en') data = normalizeEnHeaders(data);
     if (data.length === 0) throw new Error('Нет данных для обработки');
 
     const cancelCheck: CancelCheckFn = () => isCancelled(jobId);
@@ -528,6 +628,10 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
       ]);
       const effectiveStepConfig: StepConfig = {
         ...stepConfig,
+        // Локаль джобы (job.locale) — job важнее step_config, поэтому ПОСЛЕ
+        // spread'а: шаги получают 'en' даже если юзерский step_config
+        // что-то туда записал.
+        locale,
         ...(stepsNeedingCheckpoint.has(stepKey)
           ? {
               onCheckpoint: async (checkpointData) => {
@@ -574,13 +678,15 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
       //
       // No-op когда FOUND_EMAIL_COL отсутствует (~95% итераций):
       // дешёвый header-only check без копирования данных.
+      // Имя колонки — по локали джобы («Найденный Email» / «Found Email»).
+      const foundCol = foundEmailColForLocale(locale);
       const preHeader = data[0] ?? [];
       const hasFoundCol = preHeader.some(
-        (h) => typeof h === 'string' && h.trim() === FOUND_EMAIL_COL,
+        (h) => typeof h === 'string' && h.trim() === foundCol,
       );
       if (hasFoundCol) {
         const beforeMergeCols = preHeader.length;
-        data = mergeFoundEmailColumn(data);
+        data = mergeFoundEmailColumn(data, locale);
         const afterMergeCols = data[0]?.length ?? 0;
         console.log(
           `[base-constructor][${jobId}] eager-merged FOUND_EMAIL_COL into email column before step '${stepKey}' (cols ${beforeMergeCols} → ${afterMergeCols})`,
@@ -619,7 +725,8 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
     // Финальный merge двух email-колонок (если find_emails работал в режиме
     // 'separate' — у нас сейчас и исходная Email, и Найденный Email). Юзер хочет
     // итоговый файл с одной колонкой — мерджим case-insensitive с дедупом.
-    data = mergeFoundEmailColumn(data);
+    // Имя found-колонки — по локали джобы («Found Email» при locale='en').
+    data = mergeFoundEmailColumn(data, locale);
     const finalSanitized = sanitizeRowsForJsonb(data);
     const finalApproxBytes = JSON.stringify(finalSanitized).length;
 
