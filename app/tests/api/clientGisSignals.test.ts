@@ -175,7 +175,10 @@ describe('GET /api/client/gis-signals — gating', () => {
     // Кампания только у сегмента с instantly_campaign_id.
     expect(body.campaigns).toHaveLength(1);
     expect(body.campaigns[0].segmentKey).toBe('stomatologii');
-    expect(getCampaignAnalyticsMock).toHaveBeenCalledWith({ campaign_id: CAMPAIGN_ID });
+    expect(getCampaignAnalyticsMock).toHaveBeenCalledWith(
+      { campaign_id: CAMPAIGN_ID },
+      { accountId: 'main' },
+    );
     expect(body.campaigns[0].analytics?.allTime?.emails_sent_count).toBe(50);
     expect(body.campaigns[0].analytics?.last7Days?.emailsSent).toBe(5);
   });
