@@ -114,6 +114,13 @@ function row(partial: Partial<HeUnifiedRow>): HeUnifiedRow {
   return full;
 }
 
+/**
+ * Пометка «фаза CONSTRUCT уже завершена» для сидов collect_info: тесты
+ * PLAN/DISPATCH/HARVEST изолируются от конструктора баз (пункт 4c) — иначе
+ * сборки с email у ≤50% строк уходили бы в base_constructor_jobs и рекью.
+ */
+const CONSTRUCT_DONE = { bc_job_id: 'bc-done', status: 'done' as const };
+
 beforeEach(() => {
   jest.clearAllMocks();
 });
@@ -256,8 +263,11 @@ describe('normalizeCompanyForDedup', () => {
     expect(normalizeCompanyForDedup('Gamma OOO')).toBe('gamma');
     // Латинское IP НЕ срезаем — слишком коллизионно («IP Solutions»).
     expect(normalizeCompanyForDedup('IP Solutions')).toBe('ip solutions');
-    // Только целые токены: «Limited» — не «ltd».
-    expect(normalizeCompanyForDedup('Limited Inc')).toBe('limited');
+    // Только целые токены: «Unlimited» — не «limited»/«ltd».
+    expect(normalizeCompanyForDedup('Unlimited Inc')).toBe('unlimited');
+    // Сама форма «limited» добавлена EN-набором (пункт 4b EN-пайплайна):
+    // «Limited Inc» — две юрформы подряд → пустой ключ (мусор, как «ООО»).
+    expect(normalizeCompanyForDedup('Limited Inc')).toBe('');
   });
 });
 
@@ -613,6 +623,7 @@ describe('dispatch + wait', () => {
     const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
     const info: HeCollectInfo = {
       plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
       tasks: [
         {
           source: 'hh_live',
@@ -672,6 +683,7 @@ describe('harvest', () => {
   it('merges completed child rows into he_bases and enqueues base_analyze', async () => {
     const info: HeCollectInfo = {
       plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
       tasks: [
         {
           source: 'hh_live',
@@ -744,6 +756,7 @@ describe('harvest', () => {
   it('interleaves done task harvests round-robin (first source no longer eats the cap)', async () => {
     const info: HeCollectInfo = {
       plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
       tasks: [
         {
           source: 'companies_directory',
@@ -793,6 +806,7 @@ describe('harvest', () => {
       Array.from({ length: n }, (_, i) => row({ company: `${prefix}-${i}`, website: `${prefix}${i}.ru` }));
     const info: HeCollectInfo = {
       plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
       tasks: [
         {
           source: 'companies_directory',
@@ -838,6 +852,7 @@ describe('harvest', () => {
       Array.from({ length: n }, (_, i) => row({ company: `${prefix}-${i}`, website: `${prefix}${i}.ru` }));
     const info: HeCollectInfo = {
       plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
       tasks: [
         {
           source: 'companies_directory',
@@ -886,6 +901,7 @@ describe('harvest', () => {
       Array.from({ length: n }, (_, i) => row({ company: `${prefix}-${i}`, website: `${prefix}${i}.ru` }));
     const info: HeCollectInfo = {
       plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
       tasks: [
         {
           source: 'companies_directory',
@@ -988,6 +1004,7 @@ describe('harvest', () => {
   it('paginates the directory in 1000-row pages until a short page', async () => {
     const info: HeCollectInfo = {
       plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
       tasks: [
         {
           source: 'companies_directory',
@@ -1030,6 +1047,7 @@ describe('harvest', () => {
   it('stops directory pagination at the default 10000 limit on full pages', async () => {
     const info: HeCollectInfo = {
       plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
       tasks: [
         {
           source: 'companies_directory',
@@ -1064,6 +1082,7 @@ describe('harvest', () => {
   it('excludes companies already present in other bases of the project', async () => {
     const info: HeCollectInfo = {
       plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
       tasks: [
         {
           source: 'companies_directory',
@@ -1133,6 +1152,7 @@ describe('harvest', () => {
   it('failed task does not fail the job when another task produced rows', async () => {
     const info: HeCollectInfo = {
       plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
       tasks: [
         {
           source: 'hh_live',
@@ -1219,6 +1239,7 @@ describe('harvest', () => {
 describe('continuation: other-base exclusion during directory fetch', () => {
   const directoryInfo = (): HeCollectInfo => ({
     plan: { tasks: [] },
+    construct: CONSTRUCT_DONE,
     tasks: [
       {
         source: 'companies_directory',
@@ -1453,6 +1474,7 @@ describe('continuation: other-base exclusion during directory fetch', () => {
   it('still excludes hh/maps rows at merge time (fetch-time exclusion covers only the registry)', async () => {
     const info: HeCollectInfo = {
       plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
       tasks: [
         {
           source: 'hh_live',
@@ -1498,7 +1520,7 @@ describe('plan phase', () => {
   it('builds the source plan via LLM from non-rejected hypotheses and vocab, then persists it', async () => {
     mockDb = createMockSupabase({
       tables: {
-        he_bases: [makeBase(null)],
+        he_bases: [makeBase({ construct: CONSTRUCT_DONE })],
         he_verticals: [VERTICAL],
         he_projects: [PROJECT],
         he_jobs: [makeJob() as unknown as Record<string, unknown>],
@@ -1558,7 +1580,7 @@ describe('plan phase', () => {
   it('plans only over the hypothesis_ids subset from the job payload', async () => {
     mockDb = createMockSupabase({
       tables: {
-        he_bases: [makeBase(null)],
+        he_bases: [makeBase({ construct: CONSTRUCT_DONE })],
         he_verticals: [VERTICAL],
         he_projects: [PROJECT],
         he_jobs: [makeJob() as unknown as Record<string, unknown>],
