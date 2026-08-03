@@ -22,6 +22,7 @@ afterEach(() => {
 describe('team review write payloads', () => {
   it('builds a minimal scheduled review payload and trims its optional reason', () => {
     expect(buildTeamReviewScheduleWrite({
+      subjectType: 'employee',
       reviewDate: '2026-08-12',
       employeeUserId: '00000000-0000-4000-8000-000000000002',
       reason: '  Проверить адаптацию  ',
@@ -32,6 +33,7 @@ describe('team review write payloads', () => {
     });
 
     expect(buildTeamReviewScheduleWrite({
+      subjectType: 'employee',
       reviewDate: '2026-08-13',
       employeeUserId: '00000000-0000-4000-8000-000000000002',
       reason: '   ',
@@ -39,6 +41,19 @@ describe('team review write payloads', () => {
       reviewDate: '2026-08-13',
       employeeUserId: '00000000-0000-4000-8000-000000000002',
       reason: null,
+    });
+  });
+
+  it('builds a candidate payload with a trimmed manual name and no employee id', () => {
+    expect(buildTeamReviewScheduleWrite({
+      subjectType: 'candidate',
+      reviewDate: '2026-08-14',
+      candidateName: '  Мария Соколова  ',
+      reason: '  Вакансия: аккаунт-менеджер, этап: финал  ',
+    })).toEqual({
+      reviewDate: '2026-08-14',
+      candidateName: 'Мария Соколова',
+      reason: 'Вакансия: аккаунт-менеджер, этап: финал',
     });
   });
 
@@ -71,6 +86,7 @@ describe('normalizeReviews', () => {
           id: 'scheduled',
           reviewDate: '2026-08-12',
           employee,
+          candidateName: null,
           reviewer: null,
           status: 'scheduled',
           reason: null,
@@ -84,6 +100,7 @@ describe('normalizeReviews', () => {
           id: 'legacy',
           reviewDate: '2026-07-12',
           employee,
+          candidateName: null,
           reviewer: null,
           outcomes: 'Итоги старого ревью',
           problems: null,
@@ -103,8 +120,39 @@ describe('normalizeReviews', () => {
       outcomes: null,
       problems: null,
       recommendations: null,
+      candidateName: null,
     }));
     expect(reviews[1].status).toBe('completed');
+  });
+
+  it('normalizes a candidate without inventing a placeholder employee profile', () => {
+    const { reviews } = normalizeReviews({
+      reviews: [
+        {
+          id: 'candidate-review',
+          reviewDate: '2026-08-15',
+          employee: null,
+          candidateName: 'Мария Соколова',
+          reviewer: null,
+          status: 'scheduled',
+          reason: 'Вакансия: аккаунт-менеджер',
+          outcomes: null,
+          problems: null,
+          recommendations: null,
+          createdAt: '2026-08-01T10:00:00.000Z',
+          updatedAt: '2026-08-01T10:00:00.000Z',
+        },
+      ],
+      employees: [],
+      canManage: true,
+      currentUserId: null,
+    });
+
+    expect(reviews[0]).toEqual(expect.objectContaining({
+      employee: null,
+      candidateName: 'Мария Соколова',
+      reason: 'Вакансия: аккаунт-менеджер',
+    }));
   });
 });
 

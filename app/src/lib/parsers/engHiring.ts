@@ -489,8 +489,25 @@ export function inferCountryCode(location?: string | null, country?: string | nu
   return null;
 }
 
-function isB2BRoleSearch(text?: string | null): boolean {
-  return /\bb2b\b/i.test(text ?? '');
+const B2B_TERM_RE = /\bb2b\b/i;
+
+function splitRoleTerms(text?: string | null): string[] {
+  return String(text ?? '')
+    .split(/[,;\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// Per-term role routing: a term containing "b2b" goes through the strict
+// high-intent sales-title check, any other term is a plain role-regex match
+// (against title + description). Mixed queries ("head of marketing, b2b
+// manager") OR the per-term results — so a single b2b term can no longer
+// hijack the WHOLE query into sales-only mode (prod issue 2026-08-03:
+// "head of marketing" was silently dropped).
+function roleTermMatches(term: string, title: string, haystack: string): boolean {
+  return B2B_TERM_RE.test(term)
+    ? isHighIntentB2BSalesTitle(title)
+    : buildRolesRegex(term).test(haystack);
 }
 
 export function isHighIntentB2BSalesTitle(title: string): boolean {
@@ -565,12 +582,10 @@ export function matchesEngHiringVacancy(vacancy: EngHiringVacancy, config: EngHi
   const sources = config.sources?.length ? config.sources : DEFAULT_ENG_HIRING_SOURCES;
   if (!sources.includes(vacancy.source)) return false;
 
-  if (isB2BRoleSearch(config.text)) {
-    if (!isHighIntentB2BSalesTitle(vacancy.vacancy_title)) return false;
-  } else {
-    const roleRegex = buildRolesRegex(config.text);
+  const roleTerms = splitRoleTerms(config.text);
+  if (roleTerms.length > 0) {
     const roleHaystack = `${vacancy.vacancy_title} ${vacancy.vacancy_description ?? ''}`;
-    if (!roleRegex.test(roleHaystack)) return false;
+    if (!roleTerms.some((term) => roleTermMatches(term, vacancy.vacancy_title, roleHaystack))) return false;
   }
 
   if (config.countries?.length) {
@@ -604,13 +619,11 @@ function parsedTime(value: string | null | undefined): number {
 function scoreEngHiringVacancy(vacancy: EngHiringVacancy, config: Pick<EngHiringSearchConfig, 'text'> = {}): number {
   let score = 0;
   const title = vacancy.vacancy_title;
-  if (isB2BRoleSearch(config.text)) {
-    if (isHighIntentB2BSalesTitle(title)) score += 1000;
-  } else {
-    const roleRegex = buildRolesRegex(config.text);
-    if (roleRegex.test(title)) score += 500;
-    if (vacancy.vacancy_description && roleRegex.test(vacancy.vacancy_description)) score += 100;
-  }
+  const roleTerms = splitRoleTerms(config.text);
+  if (roleTerms.some((term) => B2B_TERM_RE.test(term) && isHighIntentB2BSalesTitle(title))) score += 1000;
+  const plainTerms = roleTerms.filter((term) => !B2B_TERM_RE.test(term));
+  if (plainTerms.some((term) => buildRolesRegex(term).test(title))) score += 500;
+  if (vacancy.vacancy_description && plainTerms.some((term) => buildRolesRegex(term).test(vacancy.vacancy_description!))) score += 100;
   if (vacancy.salary_from != null || vacancy.salary_to != null) score += 40;
   if (vacancy.salary_from != null && vacancy.salary_to != null) score += 10;
   if (vacancy.company_site_url) score += 20;

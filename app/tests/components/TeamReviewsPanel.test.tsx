@@ -40,6 +40,14 @@ const vera = {
   avatarUrl: null,
 };
 
+const formerEmployee = {
+  id: '00000000-0000-4000-8000-000000000099',
+  name: 'Ольга Смирнова',
+  email: 'olga@example.com',
+  role: 'client',
+  avatarUrl: null,
+};
+
 const reviewer = {
   id: REVIEWER_ID,
   name: 'Лид Команды',
@@ -54,6 +62,7 @@ function initialReviews(): TeamReview[] {
       id: 'scheduled-late',
       reviewDate: '2026-08-20',
       employee: vera,
+      candidateName: null,
       reviewer,
       status: 'scheduled',
       reason: 'Сверить адаптацию на новом проекте',
@@ -67,6 +76,7 @@ function initialReviews(): TeamReview[] {
       id: 'completed-old',
       reviewDate: '2026-06-10',
       employee: vera,
+      candidateName: null,
       reviewer,
       status: 'completed',
       reason: null,
@@ -80,6 +90,7 @@ function initialReviews(): TeamReview[] {
       id: 'scheduled-early',
       reviewDate: '2026-08-05',
       employee: anna,
+      candidateName: null,
       reviewer,
       status: 'scheduled',
       reason: 'Обсудить ближайшие приоритеты',
@@ -93,6 +104,7 @@ function initialReviews(): TeamReview[] {
       id: 'completed-new',
       reviewDate: '2026-07-28',
       employee: anna,
+      candidateName: null,
       reviewer,
       status: 'completed',
       reason: 'Обсудить фокус на следующий квартал',
@@ -103,6 +115,24 @@ function initialReviews(): TeamReview[] {
       updatedAt: '2026-07-28T10:00:00.000Z',
     },
   ];
+}
+
+function candidateReview(overrides: Partial<TeamReview> = {}): TeamReview {
+  return {
+    id: 'candidate-scheduled',
+    reviewDate: '2026-08-18',
+    employee: null,
+    candidateName: 'Мария Соколова',
+    reviewer,
+    status: 'scheduled',
+    reason: 'Вакансия: аккаунт-менеджер, этап: финальное интервью',
+    outcomes: null,
+    problems: null,
+    recommendations: null,
+    createdAt: '2026-08-02T10:00:00.000Z',
+    updatedAt: '2026-08-02T10:00:00.000Z',
+    ...overrides,
+  } as TeamReview;
 }
 
 function jsonBody(init?: RequestInit): Record<string, string> {
@@ -180,11 +210,14 @@ function setupApi() {
 
     if (url === '/api/team/reviews' && method === 'POST') {
       const body = jsonBody(init);
-      const employee = body.employeeUserId === ANNA_ID ? anna : vera;
+      const employee = body.employeeUserId
+        ? body.employeeUserId === ANNA_ID ? anna : vera
+        : null;
       const review: TeamReview = {
         id: 'scheduled-created',
         reviewDate: body.reviewDate,
         employee,
+        candidateName: body.candidateName || null,
         reviewer,
         status: 'scheduled',
         reason: body.reason || null,
@@ -193,7 +226,7 @@ function setupApi() {
         recommendations: null,
         createdAt: '2026-08-01T12:00:00.000Z',
         updatedAt: '2026-08-01T12:00:00.000Z',
-      };
+      } as TeamReview;
       reviews = [...reviews, review];
       return { review };
     }
@@ -205,7 +238,10 @@ function setupApi() {
         ? {
             ...review,
             reviewDate: body.reviewDate,
-            employee: body.employeeUserId === ANNA_ID ? anna : vera,
+            employee: body.employeeUserId
+              ? body.employeeUserId === ANNA_ID ? anna : vera
+              : null,
+            candidateName: body.candidateName || null,
             status: body.status === 'completed' ? 'completed' : review.status,
             reason: body.reason || null,
             outcomes: body.outcomes || null,
@@ -267,11 +303,13 @@ describe('<TeamReviewsPanel />', () => {
     const form = date.closest('form');
     if (!form) throw new Error('Planning form not found');
 
+    expect(within(form).getByRole('radio', { name: 'Сотрудник' })).toBeChecked();
+    expect(within(form).getByRole('radio', { name: 'Кандидат' })).not.toBeChecked();
     expect(within(form).queryByLabelText('Основные итоги')).not.toBeInTheDocument();
     await user.clear(date);
     await user.type(date, '2026-09-01');
-    await user.selectOptions(within(form).getByLabelText('Сотрудник'), ANNA_ID);
-    await user.type(within(form).getByLabelText(/Причина/), '  План развития  ');
+    await user.selectOptions(within(form).getByRole('combobox', { name: 'Сотрудник' }), ANNA_ID);
+    await user.type(within(form).getByLabelText(/Комментарий/), '  План развития  ');
     await user.click(within(form).getByRole('button', { name: 'Запланировать' }));
 
     await waitFor(() => {
@@ -285,6 +323,53 @@ describe('<TeamReviewsPanel />', () => {
     });
   });
 
+  it('plans a candidate review with a manual name and one free-form comment', async () => {
+    const user = userEvent.setup();
+    render(<TeamReviewsPanel />);
+
+    await user.click(await screen.findByRole('button', { name: 'Запланировать ревью' }));
+    const form = screen.getByRole('form', { name: 'Планирование ревью' });
+    const candidateRadio = within(form).getByRole('radio', { name: 'Кандидат' });
+    await user.click(candidateRadio);
+
+    expect(within(form).queryByRole('combobox', { name: 'Сотрудник' })).not.toBeInTheDocument();
+    const candidateName = within(form).getByLabelText('Имя кандидата');
+    const comment = within(form).getByLabelText(/Комментарий/);
+    expect(comment).toHaveAttribute(
+      'placeholder',
+      'Вакансия, этап, ссылка на резюме или другой контекст',
+    );
+
+    const date = within(form).getByLabelText('Дата ревью');
+    await user.clear(date);
+    await user.type(date, '2026-09-02');
+    await user.type(candidateName, '  Мария Соколова  ');
+    await user.type(comment, '  Вакансия: аккаунт-менеджер, этап: финал  ');
+    await user.click(within(form).getByRole('button', { name: 'Запланировать' }));
+
+    await waitFor(() => {
+      const postCall = mockTeamApiFetch.mock.calls.find(([, init]) => init?.method === 'POST');
+      expect(jsonBody(postCall?.[1])).toEqual({
+        reviewDate: '2026-09-02',
+        candidateName: 'Мария Соколова',
+        reason: 'Вакансия: аккаунт-менеджер, этап: финал',
+      });
+    });
+  });
+
+  it('requires a candidate name instead of allowing an anonymous review', async () => {
+    const user = userEvent.setup();
+    render(<TeamReviewsPanel />);
+
+    await user.click(await screen.findByRole('button', { name: 'Запланировать ревью' }));
+    const form = screen.getByRole('form', { name: 'Планирование ревью' });
+    await user.click(within(form).getByRole('radio', { name: 'Кандидат' }));
+    expect(within(form).getByLabelText('Имя кандидата')).toBeRequired();
+    await user.click(within(form).getByRole('button', { name: 'Запланировать' }));
+
+    expect(mockTeamApiFetch.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
+  });
+
   it('searches scheduled reviews by reason', async () => {
     const user = userEvent.setup();
     render(<TeamReviewsPanel />);
@@ -295,6 +380,69 @@ describe('<TeamReviewsPanel />', () => {
     expect(screen.getByText('Сверить адаптацию на новом проекте')).toBeVisible();
     expect(screen.queryByText('Обсудить ближайшие приоритеты')).not.toBeInTheDocument();
     expect(screen.queryByText('Свежие итоги ревью')).not.toBeInTheDocument();
+  });
+
+  it('renders, searches and filters candidate reviews separately from employees', async () => {
+    const user = userEvent.setup();
+    mockTeamApiFetch.mockResolvedValueOnce(reviewsResponse([
+      ...initialReviews(),
+      candidateReview(),
+    ]));
+    render(<TeamReviewsPanel />);
+
+    const candidateName = await screen.findByText('Мария Соколова');
+    const candidateRow = candidateName.closest('article');
+    if (!candidateRow) throw new Error('Candidate review row not found');
+    expect(within(candidateRow).getByText('Кандидат')).toBeVisible();
+    expect(within(candidateRow).getByText(/Вакансия: аккаунт-менеджер/)).toBeVisible();
+
+    const search = screen.getByRole('searchbox', { name: 'Поиск по ревью' });
+    await user.type(search, 'финальное интервью');
+    expect(screen.getByText('Мария Соколова')).toBeVisible();
+    expect(screen.queryByText('Обсудить ближайшие приоритеты')).not.toBeInTheDocument();
+
+    await user.clear(search);
+    const participantFilter = screen.getByRole('combobox', { name: 'Фильтр по участнику' });
+    expect(within(participantFilter).getByRole('option', { name: 'Все ревью' })).toBeInTheDocument();
+    expect(within(participantFilter).getByRole('option', { name: 'Все сотрудники' })).toBeInTheDocument();
+    expect(within(participantFilter).getByRole('option', { name: 'Кандидаты' })).toBeInTheDocument();
+
+    await user.selectOptions(participantFilter, 'candidates');
+    expect(screen.getByText('Мария Соколова')).toBeVisible();
+    expect(screen.queryByText('Обсудить ближайшие приоритеты')).not.toBeInTheDocument();
+
+    await user.selectOptions(participantFilter, 'employees');
+    expect(screen.queryByText('Мария Соколова')).not.toBeInTheDocument();
+    expect(screen.getByText('Обсудить ближайшие приоритеты')).toBeVisible();
+  });
+
+  it('keeps a historical review linked to an employee who is no longer selectable', async () => {
+    const user = userEvent.setup();
+    const historicalReview: TeamReview = {
+      ...candidateReview(),
+      id: 'former-employee-review',
+      employee: formerEmployee,
+      candidateName: null,
+      reason: 'Исторический комментарий',
+    };
+    mockTeamApiFetch.mockResolvedValueOnce(reviewsResponse([historicalReview]));
+    render(<TeamReviewsPanel />);
+
+    const employeeName = await screen.findByText('Ольга Смирнова');
+    const reviewRow = employeeName.closest('article');
+    if (!reviewRow) throw new Error('Historical employee review row not found');
+    expect(within(reviewRow).getByText('Сотрудник')).toBeVisible();
+    expect(within(reviewRow).queryByText('Кандидат')).not.toBeInTheDocument();
+
+    await user.click(within(reviewRow).getByRole('button', {
+      name: 'Редактировать запланированное ревью Ольга Смирнова',
+    }));
+    const form = within(reviewRow).getByRole('form', {
+      name: 'Редактирование запланированного ревью',
+    });
+    expect(within(form).getByRole('radio', { name: 'Сотрудник' })).toBeChecked();
+    expect(within(form).getByRole('combobox', { name: 'Сотрудник' }))
+      .toHaveValue(formerEmployee.id);
   });
 
   it('completes a planned review and moves it to history after reload', async () => {
@@ -320,6 +468,7 @@ describe('<TeamReviewsPanel />', () => {
       expect(jsonBody(patchCall?.[1])).toEqual({
         reviewDate: '2026-08-05',
         employeeUserId: ANNA_ID,
+        candidateName: null,
         expectedUpdatedAt: '2026-08-01T09:00:00.000Z',
         status: 'completed',
         reason: 'Обсудить ближайшие приоритеты',
@@ -361,7 +510,7 @@ describe('<TeamReviewsPanel />', () => {
     await waitFor(() => expect(edit).toHaveFocus());
 
     await user.click(edit);
-    const reason = within(plannedRow).getByLabelText(/Причина/);
+    const reason = within(plannedRow).getByLabelText(/Комментарий/);
     await user.clear(reason);
     await user.type(reason, 'Новая повестка');
     await user.click(within(plannedRow).getByRole('button', { name: 'Сохранить изменения' }));
@@ -372,6 +521,7 @@ describe('<TeamReviewsPanel />', () => {
       expect(jsonBody(patchCall?.[1])).toEqual({
         reviewDate: '2026-08-05',
         employeeUserId: ANNA_ID,
+        candidateName: null,
         expectedUpdatedAt: '2026-08-01T09:00:00.000Z',
         reason: 'Новая повестка',
       });
@@ -384,6 +534,79 @@ describe('<TeamReviewsPanel />', () => {
     });
   });
 
+  it('edits a candidate review with both XOR fields and the original CAS token', async () => {
+    const user = userEvent.setup();
+    const candidate = candidateReview();
+    mockTeamApiFetch.mockResolvedValueOnce(reviewsResponse([candidate]));
+    render(<TeamReviewsPanel />);
+
+    const candidateName = await screen.findByText('Мария Соколова');
+    const candidateRow = candidateName.closest('article');
+    if (!candidateRow) throw new Error('Candidate review row not found');
+    await user.click(within(candidateRow).getByRole('button', {
+      name: 'Редактировать запланированное ревью Мария Соколова',
+    }));
+
+    const form = within(candidateRow).getByRole('form', {
+      name: 'Редактирование запланированного ревью',
+    });
+    expect(within(form).getByRole('radio', { name: 'Кандидат' })).toBeChecked();
+    expect(within(form).queryByRole('combobox', { name: 'Сотрудник' })).not.toBeInTheDocument();
+    const nameInput = within(form).getByLabelText('Имя кандидата');
+    const comment = within(form).getByLabelText(/Комментарий/);
+    await user.clear(nameInput);
+    await user.type(nameInput, 'Мария Соколова-Петрова');
+    await user.clear(comment);
+    await user.type(comment, 'Вакансия: руководитель проектов, этап: оффер');
+    await user.click(within(form).getByRole('button', { name: 'Сохранить изменения' }));
+
+    await waitFor(() => {
+      const patchCall = mockTeamApiFetch.mock.calls.find(([, init]) => init?.method === 'PATCH');
+      expect(patchCall?.[0]).toBe('/api/team/reviews/candidate-scheduled');
+      expect(jsonBody(patchCall?.[1])).toEqual({
+        reviewDate: '2026-08-18',
+        employeeUserId: null,
+        candidateName: 'Мария Соколова-Петрова',
+        expectedUpdatedAt: '2026-08-02T10:00:00.000Z',
+        reason: 'Вакансия: руководитель проектов, этап: оффер',
+      });
+    });
+  });
+
+  it('completes a candidate review without requiring an employee profile', async () => {
+    const user = userEvent.setup();
+    const candidate = candidateReview();
+    mockTeamApiFetch.mockResolvedValueOnce(reviewsResponse([candidate]));
+    render(<TeamReviewsPanel />);
+
+    const candidateName = await screen.findByText('Мария Соколова');
+    const candidateRow = candidateName.closest('article');
+    if (!candidateRow) throw new Error('Candidate review row not found');
+    await user.click(within(candidateRow).getByRole('button', { name: 'Заполнить итоги' }));
+
+    const form = within(candidateRow).getByRole('form', {
+      name: 'Редактирование итогов ревью',
+    });
+    await user.type(within(form).getByLabelText('Основные итоги'), 'Подходит для оффера');
+    await user.click(within(form).getByRole('button', { name: 'Сохранить итоги' }));
+
+    await waitFor(() => {
+      const patchCall = mockTeamApiFetch.mock.calls.find(([, init]) => init?.method === 'PATCH');
+      expect(patchCall?.[0]).toBe('/api/team/reviews/candidate-scheduled');
+      expect(jsonBody(patchCall?.[1])).toEqual({
+        reviewDate: '2026-08-18',
+        employeeUserId: null,
+        candidateName: 'Мария Соколова',
+        expectedUpdatedAt: '2026-08-02T10:00:00.000Z',
+        status: 'completed',
+        reason: 'Вакансия: аккаунт-менеджер, этап: финальное интервью',
+        outcomes: 'Подходит для оффера',
+        problems: null,
+        recommendations: null,
+      });
+    });
+  });
+
   it('shows the original agenda in completed review details', async () => {
     const user = userEvent.setup();
     render(<TeamReviewsPanel />);
@@ -392,7 +615,7 @@ describe('<TeamReviewsPanel />', () => {
     const completedRow = articleForText('Свежие итоги ревью');
     await user.click(within(completedRow).getByRole('button', { name: /Свежие итоги ревью/ }));
 
-    expect(within(completedRow).getByText('Повестка')).toBeVisible();
+    expect(within(completedRow).getByText('Комментарий')).toBeVisible();
     expect(within(completedRow).getByText('Обсудить фокус на следующий квартал')).toBeVisible();
   });
 
@@ -403,7 +626,7 @@ describe('<TeamReviewsPanel />', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Запланировать ревью' }));
     const form = screen.getByRole('form', { name: 'Планирование ревью' });
-    await user.selectOptions(within(form).getByLabelText('Сотрудник'), ANNA_ID);
+    await user.selectOptions(within(form).getByRole('combobox', { name: 'Сотрудник' }), ANNA_ID);
     mockTeamApiFetch.mockImplementationOnce(() => request.promise);
     await user.click(within(form).getByRole('button', { name: 'Запланировать' }));
 
@@ -432,7 +655,7 @@ describe('<TeamReviewsPanel />', () => {
     await user.click(within(plannedRow).getByRole('button', {
       name: 'Редактировать запланированное ревью Анна Ким',
     }));
-    const reason = within(plannedRow).getByLabelText(/Причина/);
+    const reason = within(plannedRow).getByLabelText(/Комментарий/);
     await user.clear(reason);
     await user.type(reason, 'Черновик, который нельзя потерять');
     mockTeamApiFetch.mockRejectedValueOnce(reviewConflictError());
@@ -445,7 +668,7 @@ describe('<TeamReviewsPanel />', () => {
     expect(within(plannedRow).getByRole('form', {
       name: 'Редактирование запланированного ревью',
     })).toBeVisible();
-    expect(within(plannedRow).getByLabelText(/Причина/)).toHaveValue('Черновик, который нельзя потерять');
+    expect(within(plannedRow).getByLabelText(/Комментарий/)).toHaveValue('Черновик, который нельзя потерять');
 
     const refreshedReviews = initialReviews().map((review) => review.id === 'scheduled-early'
       ? {
@@ -466,7 +689,7 @@ describe('<TeamReviewsPanel />', () => {
     mockTeamApiFetch.mockImplementationOnce(() => request.promise);
     render(<TeamReviewsPanel />);
 
-    const region = screen.getByRole('region', { name: 'Ревью сотрудников' });
+    const region = screen.getByRole('region', { name: 'Ревью' });
     const busyWhileLoading = region.getAttribute('aria-busy');
     const loadingStatus = screen.queryByRole('status');
     await act(async () => {
@@ -490,7 +713,8 @@ describe('<TeamReviewsPanel />', () => {
     expect(search).not.toHaveClass('placeholder:text-gray-400');
 
     await user.click(await screen.findByRole('button', { name: 'Запланировать ревью' }));
-    const agenda = screen.getByLabelText(/Причина/);
+    const agenda = screen.getByLabelText(/Комментарий/);
+    expect(agenda).toHaveAttribute('placeholder', 'Что важно обсудить на встрече');
     expect(agenda).toHaveClass('placeholder:text-gray-500');
     expect(agenda).not.toHaveClass('placeholder:text-gray-400');
     await user.click(screen.getByRole('button', { name: 'Закрыть форму' }));

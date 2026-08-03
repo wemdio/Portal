@@ -289,6 +289,7 @@ export function CrunchbaseParserView() {
                   {RECENCY_PRESETS.map((m) => (
                     <button key={m.months} type="button" onClick={() => setRecencyMonths(m.months)} className={`rounded-full px-2.5 py-1 text-xs font-medium border ${recencyMonths === m.months ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-600 border-gray-300 hover:border-emerald-400'}`}>{m.label}</button>
                   ))}
+                  <span className="text-[11px] text-gray-400">только по SEC (US) — у YC дат раундов нет</span>
                 </div>
               </div>
               {facets.stages.length ? (
