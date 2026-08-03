@@ -66,7 +66,13 @@ export type AccountAction =
 
 export type CampaignStatus = 'stopped' | 'running' | 'paused' | 'error';
 export type DialogStatus = 'none' | 'lead' | 'not_lead' | 'later';
-export type JobAction = 'start' | 'stop' | 'restart' | 'refetch_messages';
+export type JobAction =
+  | 'start'
+  | 'stop'
+  | 'restart'
+  | 'refetch_messages'
+  | 'warmup_start'
+  | 'warmup_stop';
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed';
 export type LogLevel = 'info' | 'warning' | 'error';
 
@@ -151,6 +157,15 @@ export interface OutreachAccount {
   /** Consecutive AUTH_KEY_DUPLICATED errors during connect. See migration
    *  20260521_0002. Reset on successful connect; auto-disable at 3. */
   auth_key_dup_count?: number;
+  /**
+   * Личность самого аккаунта — заполняется getMe() при старте прогрева
+   * (миграция 20260803_0006). Боевому циклу не нужна: он всегда отвечает уже
+   * известному собеседнику. Прогреву нужна, чтобы аккаунты могли адресовать
+   * друг друга, а боевому циклу — чтобы не принять свой же аккаунт за лида.
+   */
+  tg_user_id?: number | null;
+  tg_username?: string | null;
+  identity_checked_at?: string | null;
   created_at: string;
 }
 

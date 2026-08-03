@@ -3,11 +3,12 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
-import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
+import { isNavEntryActive, isNavGroup, isNavItemActive, visibleNavEntries } from '@/lib/navigation';
 import { useUser } from '@/lib/UserProvider';
-import { getRoleLabel, isAdmin, isTechnician, isLead, canAccessBillingCalendar } from '@/lib/roles';
+import { getRoleLabel } from '@/lib/roles';
 import { commonDictionary, dict } from '@/lib/i18n';
 import { ThemeToggle } from './ThemeToggle';
+import { TopNavDropdown } from './TopNavDropdown';
 
 export function TopNav() {
   const pathname = usePathname();
@@ -28,16 +29,8 @@ export function TopNav() {
 
   if (pathname === '/login') return null;
 
-  const visibleItems = navItems.filter((item) => {
-    if (item.adminOnly && !isAdmin(userRole)) return false;
-    if (item.technicianOrAdmin && !isTechnician(userRole)) return false;
-    if (item.leadOnly && !isLead(userRole)) return false;
-    if (item.billingCalendarOnly && !canAccessBillingCalendar(userRole)) return false;
-    if (item.navTabId && navTabVisibility[item.navTabId] === false) return false;
-    if (item.requiresTool && visibleTools !== null && !visibleTools.includes(item.requiresTool)) return false;
-    if (item.href === '/profile') return false;
-    return true;
-  });
+  const visibleEntries = visibleNavEntries({ userRole, navTabVisibility, visibleTools })
+    .filter((entry) => isNavGroup(entry) || entry.href !== '/profile');
 
   return (
     <header className="sticky top-0 z-40 w-full shrink-0 border-b border-zinc-200/80 bg-white/90 backdrop-blur-md">
@@ -47,14 +40,26 @@ export function TopNav() {
         </Link>
 
         <nav className="flex-1 flex items-center gap-0.5 overflow-x-auto scrollbar-none pb-1">
-          {visibleItems.map((item) => {
-            const aliases = NAV_PATH_ALIASES[item.href] ?? [];
+          {visibleEntries.map((entry) => {
+            if (isNavGroup(entry)) {
+              return (
+                <TopNavDropdown
+                  key={entry.id}
+                  label={locale === 'en' ? entry.nameEn : entry.name}
+                  isActive={isNavEntryActive(entry, pathname)}
+                  items={entry.children.map((child) => ({
+                    id: child.id,
+                    href: child.href,
+                    label: locale === 'en' ? child.nameEn : child.name,
+                    isActive: isNavItemActive(child, pathname),
+                    badgeCount: child.badgeId ? (badges[child.badgeId] ?? 0) : 0,
+                  }))}
+                />
+              );
+            }
+            const item = entry;
             const isGuide = item.href === '/guide';
-            const isActive = item.href === '/'
-              ? pathname === '/'
-              : pathname === item.href ||
-                pathname.startsWith(`${item.href}/`) ||
-                aliases.some((a) => pathname === a || pathname.startsWith(`${a}/`));
+            const isActive = isNavItemActive(item, pathname);
             const badgeCount = item.badgeId ? (badges[item.badgeId] ?? 0) : 0;
             return (
               <Link

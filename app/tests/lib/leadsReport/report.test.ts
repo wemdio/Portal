@@ -128,6 +128,28 @@ describe('runReport', () => {
     expect(now - since).toBeLessThan(31 * 24 * 3600 * 1000);
   });
 
+  it('игнорирует max-дату из будущего (менеджеры ставят дату «передачи» на день вперёд)', async () => {
+    const config = { ...marketingConfig, spreadsheetId: 'sheet-id' };
+    // В шите max = завтра, вчера тоже есть. Скрипт должен взять «вчера»
+    // (иначе окно уйдёт в будущее → fetch=0).
+    const now = new Date();
+    const yesterday = new Date(now); yesterday.setUTCDate(now.getUTCDate() - 1);
+    const tomorrow = new Date(now); tomorrow.setUTCDate(now.getUTCDate() + 1);
+    const fmt = (d: Date) =>
+      `${String(d.getUTCDate()).padStart(2,'0')}.${String(d.getUTCMonth()+1).padStart(2,'0')}.${d.getUTCFullYear()}`;
+    mockedReadColumn
+      .mockResolvedValueOnce(['Дата', fmt(yesterday), fmt(tomorrow), fmt(tomorrow)])
+      .mockResolvedValueOnce(['AMO id']);
+    const { db, gte } = dbReturning([]);
+    await runReport(db, config, { sinceDays: 30, amoHost: 'polzaagency.amocrm.ru' });
+    const sinceIso = gte.mock.calls[0]?.[1] as string;
+    // since = «вчера 00:00 UTC», не «завтра 00:00 UTC»
+    const yesterdayIso = new Date(Date.UTC(
+      yesterday.getUTCFullYear(), yesterday.getUTCMonth(), yesterday.getUTCDate()
+    )).toISOString();
+    expect(sinceIso).toBe(yesterdayIso);
+  });
+
   it('не маскирует ошибку чтения AMO', async () => {
     mockedReadColumn.mockResolvedValue(['Дата', '20.07.2026']);
     await expect(

@@ -231,6 +231,9 @@ async function main() {
         degraded_reason: null,
         cooldown_until: null,
         consecutive_proxy_failures: 0,
+        // Вместе со счётчиком чистим и «какой прокси упал последним» — иначе
+        // первый провал того же прокси после ресета не будет засчитан.
+        last_failed_proxy_id: null,
       })
       .eq('id', acc.id);
 

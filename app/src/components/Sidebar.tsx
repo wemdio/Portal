@@ -4,8 +4,8 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
-import { getRoleLabel, isAdmin, isTechnician, isLead, canAccessBillingCalendar } from '@/lib/roles';
-import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
+import { getRoleLabel } from '@/lib/roles';
+import { isNavGroup, isNavItemActive, visibleNavEntries, type NavItem } from '@/lib/navigation';
 import { useUser } from '@/lib/UserProvider';
 import { commonDictionary, dict } from '@/lib/i18n';
 
@@ -69,6 +69,37 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
   // Hide sidebar on login page
   if (pathname === '/login') return null;
 
+  const visibleEntries = visibleNavEntries({ userRole, navTabVisibility, visibleTools });
+
+  function renderNavLink(item: NavItem) {
+    const isGuide = item.href === '/guide';
+    const isActive = isNavItemActive(item, pathname);
+    const badgeCount = item.badgeId ? (badges[item.badgeId] ?? 0) : 0;
+    return (
+      <Link
+        key={item.id}
+        href={item.href as Route}
+        prefetch={false}
+        onClick={() => onMobileClose?.()}
+        className={`flex items-center rounded-lg px-2.5 py-1.5 text-[11px] truncate transition-all duration-200
+          ${isGuide
+            ? (isActive ? 'text-orange-600 font-medium' : 'text-orange-500 hover:text-orange-600')
+            : (isActive
+              ? (isTma ? 'tma-chip-active font-medium' : 'bg-gray-100 text-gray-900 font-medium')
+              : (isTma ? 'tma-nav-item' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'))
+          }
+        `}
+      >
+        {locale === 'en' ? item.nameEn : item.name}
+        {badgeCount > 0 && (
+          <span className="ml-auto inline-flex items-center justify-center min-w-[16px] h-4 px-1 text-[9px] font-bold text-white bg-red-500 rounded-full">
+            {badgeCount}
+          </span>
+        )}
+      </Link>
+    );
+  }
+
   const sidebarContent = (
     <>
       <div
@@ -91,44 +122,27 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
       </div>
 
       <nav className="flex-1 space-y-0.5 px-1.5 py-2 overflow-y-auto">
-        {navItems.map((item) => {
-          if (item.adminOnly && !isAdmin(userRole)) return null;
-          if (item.technicianOrAdmin && !isTechnician(userRole)) return null;
-          if (item.leadOnly && !isLead(userRole)) return null;
-          if (item.billingCalendarOnly && !canAccessBillingCalendar(userRole)) return null;
-          if (item.navTabId && navTabVisibility[item.navTabId] === false) return null;
-          if (item.requiresTool && visibleTools !== null && !visibleTools.includes(item.requiresTool)) return null;
-
-          const isGuide = item.href === '/guide';
-          const aliases = NAV_PATH_ALIASES[item.href] ?? [];
-          const isActive = item.href === '/'
-            ? pathname === '/'
-            : pathname === item.href ||
-              pathname.startsWith(`${item.href}/`) ||
-              aliases.some((alias) => pathname === alias || pathname.startsWith(`${alias}/`));
-          const badgeCount = item.badgeId ? (badges[item.badgeId] ?? 0) : 0;
+        {/* Вложенность в вертикальном списке рисуется группой с отступом —
+            выпадающий список тут был бы лишним слоем поверх и так открытого меню. */}
+        {visibleEntries.map((entry) => {
+          if (!isNavGroup(entry)) return renderNavLink(entry);
           return (
-            <Link
-              key={item.id}
-              href={item.href as Route}
-              prefetch={false}
-              onClick={() => onMobileClose?.()}
-              className={`flex items-center rounded-lg px-2.5 py-1.5 text-[11px] truncate transition-all duration-200
-                ${isGuide
-                  ? (isActive ? 'text-orange-600 font-medium' : 'text-orange-500 hover:text-orange-600')
-                  : (isActive
-                    ? (isTma ? 'tma-chip-active font-medium' : 'bg-gray-100 text-gray-900 font-medium')
-                    : (isTma ? 'tma-nav-item' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'))
-                }
-              `}
-            >
-              {locale === 'en' ? item.nameEn : item.name}
-              {badgeCount > 0 && (
-                <span className="ml-auto inline-flex items-center justify-center min-w-[16px] h-4 px-1 text-[9px] font-bold text-white bg-red-500 rounded-full">
-                  {badgeCount}
-                </span>
-              )}
-            </Link>
+            <div key={entry.id} className="pt-1.5 first:pt-0">
+              <p
+                className={`px-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wider ${
+                  isTma ? 'tma-muted' : 'text-gray-400'
+                }`}
+              >
+                {locale === 'en' ? entry.nameEn : entry.name}
+              </p>
+              <div
+                className={`ml-2.5 space-y-0.5 border-l pl-1.5 ${
+                  isTma ? 'border-[color:var(--tma-border)]' : 'border-zinc-100'
+                }`}
+              >
+                {entry.children.map((child) => renderNavLink(child))}
+              </div>
+            </div>
           );
         })}
       </nav>

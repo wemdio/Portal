@@ -81,13 +81,10 @@ const WORKER_CONCURRENCY = Number(process.env.WEBSITE_ENRICHMENT_CONCURRENCY ?? 
 const WORKER_BATCH_SIZE = 15;
 const CACHE_SUCCESS_DAYS = Number(process.env.WEBSITE_ENRICHMENT_CACHE_DAYS ?? '7');
 const CACHE_ERROR_HOURS = Number(process.env.WEBSITE_ENRICHMENT_ERROR_TTL_HOURS ?? '6');
-// До 2026-07-21 стояло '1' — per-domain sequential из-за страха бана. Но email-
-// скрапер теперь ходит через PROXY_URLS (5 residential-IP round-robin), т.е.
-// параллельные запросы к vkusvill.ru приходят с РАЗНЫХ IP — сайт не видит
-// один воркер как источник. Плюс это была главная причина long-tail'а: 601
-// точка ВкусВилла в одном job'е сериализовалась в 1 поток и держала всех
-// остальных воркеров. Откатить в случае жалоб на бан — через env.
-const DOMAIN_CONCURRENCY = Number(process.env.WEBSITE_ENRICHMENT_DOMAIN_CONCURRENCY ?? '4');
+// Email discovery снова ходит напрямую с IP воркера, поэтому одинаковый домен
+// обрабатываем последовательно по умолчанию, чтобы не спровоцировать rate-limit.
+// Явный env override остаётся для контролируемого увеличения параллельности.
+const DOMAIN_CONCURRENCY = Number(process.env.WEBSITE_ENRICHMENT_DOMAIN_CONCURRENCY ?? '1');
 const FETCH_TIMEOUT_MS = Number(process.env.WEBSITE_ENRICHMENT_TIMEOUT_MS ?? '15000');
 const FETCH_HARD_TIMEOUT_MS = Number(
   process.env.WEBSITE_ENRICHMENT_HARD_TIMEOUT_MS ?? String(Math.max(FETCH_TIMEOUT_MS * 4, 60000)),

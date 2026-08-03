@@ -5,13 +5,20 @@
 import type { UserRole } from '@/types';
 
 /** Идентификаторы вкладок боковой панели, управляемых через admin */
-export const ALL_NAV_TAB_IDS = ['nav-tasks-board'] as const;
+export const ALL_NAV_TAB_IDS = ['nav-tasks-board', 'nav-first-sales', 'nav-renewals'] as const;
 export type NavTabId = (typeof ALL_NAV_TAB_IDS)[number];
 
 export interface NavTabConfig {
   id: NavTabId;
   title: string;
   description: string;
+  /**
+   * Вкладка видна админу всегда, без строки в user_tool_visibility.
+   * Нужен потому, что видимость по умолчанию выключена (UserProvider), а
+   * фильтр в Sidebar/TopNav про роли не знает — без флага вкладку не увидел бы
+   * и админ. Ставится только там, где это осознанно.
+   */
+  adminAlwaysOn?: boolean;
 }
 
 export const NAV_TABS_CONFIG: Record<NavTabId, NavTabConfig> = {
@@ -19,6 +26,18 @@ export const NAV_TABS_CONFIG: Record<NavTabId, NavTabConfig> = {
     id: 'nav-tasks-board',
     title: 'Доска',
     description: 'Отдельный пункт в боковой панели для открытия доски задач',
+  },
+  'nav-first-sales': {
+    id: 'nav-first-sales',
+    title: 'Первичка',
+    description: 'Дашборд первичных продаж: лиды по источникам, встречи, договоры, цикл сделки',
+    adminAlwaysOn: true,
+  },
+  'nav-renewals': {
+    id: 'nav-renewals',
+    title: 'Продления',
+    description: 'Дашборд продлений: количество, оборот, средний чек и цикл по проектам с типом «Продление»',
+    adminAlwaysOn: true,
   },
 };
 

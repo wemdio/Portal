@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime, timezone
 
@@ -42,6 +43,31 @@ def classify_revenue(payer: str, payer_inn: str, purpose: str) -> str:
     return ""
 
 
+def coerce_amount(value: object) -> float | None:
+    """Уже извлечённое значение суммы → float, либо None, если его нет или
+    оно не приводится к числу.
+
+    Общее для Точки (значение достаётся из Amount.amount) и Т-Банка
+    (значение — amount верхнего уровня): молчаливый ноль здесь недопустим,
+    настоящий ноль в выписке и отсутствующая сумма — разные вещи, и подмена
+    второго первым тихо занижает расход.
+
+    nan и inf отдельно отсекаются через math.isfinite: float("nan") и
+    float("Infinity") не бросают исключение и не равны None, поэтому без
+    этой проверки одна такая строка тихо попала бы в базу как валидная
+    сумма и отравила бы sum(amount) по всей витрине расходов.
+    """
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
+
+
 def parse_date(s: str | None) -> datetime | None:
     if not s:
         return None
@@ -51,3 +77,18 @@ def parse_date(s: str | None) -> datetime | None:
         except (ValueError, TypeError):
             continue
     return None
+
+
+#: Порядок колонок в INSERT'ах обоих банковских источников.
+#: Менять только вместе с обоими _upsert().
+BANK_COLUMNS: tuple[str, ...] = (
+    "bank", "account_id", "transaction_id", "document_number",
+    "occurred_at", "amount", "currency", "direction",
+    "payer_name", "payer_inn", "payee_name", "payee_inn",
+    "purpose", "is_revenue", "exclude_reason", "raw",
+)
+
+
+def to_row(d: dict) -> tuple:
+    """dict → кортеж в порядке BANK_COLUMNS для executemany."""
+    return tuple(d[c] for c in BANK_COLUMNS)

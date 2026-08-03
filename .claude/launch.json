@@ -17,9 +17,9 @@
     },
     {
       "name": "ui",
-      "runtimeExecutable": "C:\\Program Files\\nodejs\\npm.cmd",
+      "runtimeExecutable": "G:\\NodeJs\\npm.cmd",
       "runtimeArgs": ["run", "dev:ui"],
-      "cwd": "C:\\Users\\wemd1\\Desktop\\Portal\\app",
+      "cwd": "app",
       "port": 3000,
       "autoPort": true
     }
