@@ -1333,6 +1333,16 @@ export async function runCampaignLoop(
     .eq('campaign_id', campaignId)
     .eq('is_active', true);
 
+  // Собственные аккаунты кампании. После прогрева (см. warmup/) у них остаются
+  // диалоги друг с другом, и без этого фильтра боевой цикл принял бы свой же
+  // аккаунт за лида: сгенерировал бы продающий ответ, сработал бы триггер и
+  // переписка ушла бы в рабочий чат как заявка.
+  const ownTgUserIds = new Set(
+    (accounts as OutreachAccount[])
+      .map((a) => a.tg_user_id)
+      .filter((v): v is number => typeof v === 'number'),
+  );
+
   log('info', `Запускаю кампанию "${campaign.name}": ${accounts.length} аккаунтов, ${proxies?.length ?? 0} прокси`);
 
   const proxyMap = new Map((proxies ?? []).map((proxy: OutreachProxy) => [proxy.id, proxy]));
@@ -1428,6 +1438,7 @@ export async function runCampaignLoop(
           dialogs_total: 0,
           unread: 0,
           not_user: 0,
+          own_account: 0,
           processed: 0,
           replied: 0,
           flood: 0,
@@ -1586,6 +1597,10 @@ export async function runCampaignLoop(
               cycleStats.not_user++;
               continue;
             }
+            if (ownTgUserIds.has(Number(dialog.entity.id))) {
+              cycleStats.own_account++;
+              continue;
+            }
 
             try {
               const r = await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop, { blockedUserIds });
@@ -1665,6 +1680,7 @@ export async function runCampaignLoop(
             `Аккаунт ${account.session_name}: круг завершён за ${(elapsedMs / 1000).toFixed(1)}с. ` +
               `Обработано ${cycleStats.processed} непрочитанных из ${cycleStats.unread}, отправлено ${cycleStats.replied} ответов. ` +
               `Пропуски: групп/каналов ${cycleStats.not_user}, ошибок ${cycleStats.errors}` +
+              (cycleStats.own_account ? `, своих аккаунтов кампании ${cycleStats.own_account}` : '') +
               (cycleStats.flood ? `, паузы из-за Flood ${cycleStats.flood}` : '') +
               '.',
           );

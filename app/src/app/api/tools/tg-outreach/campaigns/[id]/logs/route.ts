@@ -29,6 +29,11 @@ export async function GET(req: NextRequest, ctx: Ctx) {
           ? new Date(sinceRaw).toISOString()
           : null;
 
+        // Фильтр по аккаунту. Колонку account_id заполняет прогрев (миграция
+        // 20260803_0006); у боевых логов она пустая, поэтому фильтр работает
+        // только там, где привязка действительно записана.
+        const accountId = url.searchParams.get('account_id');
+
         let query = auth.supabase
           .from('tg_outreach_logs')
           .select('*', { count: 'exact' })
@@ -36,6 +41,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
           .order('created_at', { ascending: false })
           .range(offset, offset + limit - 1);
         if (sinceIso) query = query.gte('created_at', sinceIso);
+        if (accountId) query = query.eq('account_id', accountId);
 
         const { data, error, count } = await query;
 

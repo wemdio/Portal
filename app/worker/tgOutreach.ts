@@ -1,5 +1,6 @@
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop } from './_shared';
 import { runCampaignLoop, refetchEmptyDialogs } from '@/lib/tgOutreach/campaignLoop';
+import { runWarmupLoop } from '@/lib/tgOutreach/warmup/loop';
 import { writeHeartbeat } from '@/lib/tgOutreach/gramClient';
 import { startTrace } from '@/lib/tracer';
 
@@ -46,8 +47,8 @@ async function resetStuckJobs() {
 // до истечения (см. resumeRunningCampaigns:249 — auto-completes stale через
 // 5 мин). Инцидент 29.07.2026: 5 running кампаний → 4 стоп-клика подряд ушли
 // в stale, кампании продолжали работать.
-export const CONTROL_ACTIONS = ['stop', 'restart', 'refetch_messages'] as const;
-export const START_ACTIONS = ['start'] as const;
+export const CONTROL_ACTIONS = ['stop', 'restart', 'refetch_messages', 'warmup_stop'] as const;
+export const START_ACTIONS = ['start', 'warmup_start'] as const;
 
 export async function claimJob(
   actionFilter?: readonly string[],
@@ -196,6 +197,79 @@ async function handleRefetchJob(job: { id: string; campaign_id: string }) {
   }
 }
 
+/**
+ * Прогрев кампании. Занимает тот же слот в runningCampaigns, что и боевой цикл,
+ * — так прогрев и аутрич не могут идти по одной кампании одновременно, а
+ * сторожевой таймер следит за прогревом ровно как за обычной кампанией.
+ */
+async function handleWarmupStartJob(job: { id: string; campaign_id: string }) {
+  const campaignId = job.campaign_id;
+
+  if (runningCampaigns.has(campaignId)) {
+    if (shouldStop()) {
+      log('info', `Warmup for ${campaignId} already running and worker is shutting down — re-queueing`);
+      await db.from('tg_outreach_jobs').update({ status: 'pending', started_at: null }).eq('id', job.id);
+    } else {
+      log('warn', `Campaign ${campaignId} is already busy, skipping warmup start`);
+      await db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
+    }
+    return;
+  }
+
+  let stopRequested = false;
+  const stopFn = () => { stopRequested = true; };
+
+  campaignLastProgressAt.set(campaignId, Date.now());
+  const onProgress = () => { campaignLastProgressAt.set(campaignId, Date.now()); };
+
+  const promise = runWarmupLoop(campaignId, db, () => shouldStop() || stopRequested, onProgress)
+    .then(() => {
+      log('info', `Warmup for campaign ${campaignId} finished`);
+    })
+    .catch((err) => {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log('error', `Warmup for campaign ${campaignId} failed: ${errMsg}`);
+      db.from('tg_outreach_warmup_runs')
+        .update({ status: 'failed', error_message: errMsg, finished_at: new Date().toISOString() })
+        .eq('campaign_id', campaignId)
+        .in('status', ['pending', 'running'])
+        .then(({ error }) => {
+          if (error) log('error', `Failed to mark warmup run failed for ${campaignId}: ${error.message}`);
+        }, () => {});
+    })
+    .finally(() => {
+      runningCampaigns.delete(campaignId);
+      campaignLastProgressAt.delete(campaignId);
+      db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id).then(({ error }) => {
+        if (error) log('error', `Failed to mark tg job ${job.id} as completed: ${error.message}`);
+      }, () => {});
+    });
+
+  runningCampaigns.set(campaignId, { stop: stopFn, promise });
+  log('info', `Started warmup for campaign ${campaignId}`);
+}
+
+async function handleWarmupStopJob(job: { id: string; campaign_id: string }) {
+  const campaignId = job.campaign_id;
+
+  // Статус ставим ДО сигнала остановки: цикл перечитывает run из БД на каждом
+  // проходе и должен увидеть, что активного прогрева больше нет.
+  await db
+    .from('tg_outreach_warmup_runs')
+    .update({ status: 'stopped', finished_at: new Date().toISOString() })
+    .eq('campaign_id', campaignId)
+    .in('status', ['pending', 'running']);
+
+  const running = runningCampaigns.get(campaignId);
+  if (running) {
+    running.stop();
+    log('info', `Signaled warmup stop for campaign ${campaignId}`);
+    await running.promise;
+  }
+
+  await db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
+}
+
 async function dispatchJob(job: { id: string; campaign_id: string; action: string }): Promise<void> {
   log('info', `Claimed job ${job.id}: ${job.action} for campaign ${job.campaign_id}`);
   try {
@@ -211,6 +285,12 @@ async function dispatchJob(job: { id: string; campaign_id: string; action: strin
         break;
       case 'refetch_messages':
         await handleRefetchJob(job);
+        break;
+      case 'warmup_start':
+        await handleWarmupStartJob(job);
+        break;
+      case 'warmup_stop':
+        await handleWarmupStopJob(job);
         break;
       default:
         log('warn', `Unknown action: ${job.action}`);
@@ -339,12 +419,61 @@ export async function resumeRunningCampaigns() {
     .eq('status', 'paused');
 }
 
+/**
+ * Возобновить прогревы после перезапуска процесса.
+ *
+ * Прогрев идёт 3-4 дня, то есть переживает несколько деплоев и срабатываний
+ * сторожевого таймера. Статус кампании при этом остаётся `stopped` (прогрев —
+ * не боевой цикл), поэтому обычный auto-resume его не подхватывает, и без этой
+ * функции прогрев после первого же рестарта тихо умер бы на середине.
+ */
+export async function resumeWarmupRuns() {
+  const { data: runs } = await db
+    .from('tg_outreach_warmup_runs')
+    .select('id, campaign_id')
+    .in('status', ['pending', 'running']);
+  if (!runs?.length) return;
+
+  for (const run of runs as Array<{ id: string; campaign_id: string }>) {
+    if (runningCampaigns.has(run.campaign_id)) continue;
+
+    const { data: existingJob } = await db
+      .from('tg_outreach_jobs')
+      .select('id')
+      .eq('campaign_id', run.campaign_id)
+      .eq('action', 'warmup_start')
+      .in('status', ['pending', 'running'])
+      .limit(1)
+      .maybeSingle();
+    if (existingJob) continue;
+
+    const { data: campaign } = await db
+      .from('tg_outreach_campaigns')
+      .select('user_id')
+      .eq('id', run.campaign_id)
+      .maybeSingle();
+
+    const { error: insertError } = await db.from('tg_outreach_jobs').insert({
+      campaign_id: run.campaign_id,
+      user_id: (campaign as { user_id?: string } | null)?.user_id ?? '00000000-0000-0000-0000-000000000000',
+      action: 'warmup_start',
+      status: 'pending',
+    });
+    if (insertError) {
+      log('error', `Failed to queue warmup resume for campaign ${run.campaign_id}: ${insertError.message}`);
+      continue;
+    }
+    log('info', `Queued warmup resume for campaign ${run.campaign_id}`);
+  }
+}
+
 const RESUME_CHECK_INTERVAL_MS = 5 * 60_000;
 
 async function main() {
   log('info', 'TG Outreach worker starting...');
   await resetStuckJobs();
   await resumeRunningCampaigns();
+  await resumeWarmupRuns();
 
   // Independent heartbeat ticker keeps the docker healthcheck green as long
   // as the Node event loop is alive. False unhealthy flips during long
@@ -380,6 +509,9 @@ async function main() {
     if (shouldStop()) return;
     resumeRunningCampaigns().catch((err) =>
       log('error', `Periodic resume check failed: ${err instanceof Error ? err.message : String(err)}`),
+    );
+    resumeWarmupRuns().catch((err) =>
+      log('error', `Periodic warmup resume check failed: ${err instanceof Error ? err.message : String(err)}`),
     );
   }, RESUME_CHECK_INTERVAL_MS);
 
