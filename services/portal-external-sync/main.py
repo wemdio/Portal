@@ -1,8 +1,9 @@
 """
 portal-external-sync — daily sync of external data into main-postgres.
 
-Sources: Yandex Metrika, AMO CRM (сделки, события, задачи), Точка Банк,
-Т-Банк, Brocard, USDT TRC-20, курсы ЦБ, применение правил разметки расходов.
+Sources: Yandex Metrika, AMO CRM (сделки, события, задачи, комментарии), Точка
+Банк, Т-Банк, Brocard, USDT TRC-20, курсы ЦБ, применение правил разметки
+расходов.
 
 Расписание:
 - Cron `EXTERNAL_SYNC_CRON` (default '30 13 * * *' UTC = 16:30 МСК) через APScheduler.
@@ -44,6 +45,7 @@ from sources.amo import AmoSync
 from sources.amo_enrich import AmoCompanyEnrichSync
 from sources.amo_events import AmoEventsSync
 from sources.amo_tasks import AmoTasksSync
+from sources.amo_notes import AmoNotesSync
 from sources.bank_tochka import BankTochkaSync
 from sources.bank_tbank import BankTBankSync
 from sources.brocard import BrocardSync
@@ -75,6 +77,12 @@ SOURCES = [
                              # см. docs/superpowers/plans/2026-08-03-renewals-from-payments.md;
                              # порядок относительно AmoEventsSync не важен (свой watermark, своя
                              # таблица), поставлено сразу после по просьбе плана Task 1
+    AmoNotesSync(),          # комментарии AMO (note_type=common) — приоритетный сигнал продлений
+                             # начиная с 2026-08-03 («Продление N - сумма»), см.
+                             # supabase/migrations/20260803_0003_amo_notes.sql и
+                             # sources/renewal_marks.py / apply_renewal_marks(); сразу после
+                             # AmoTasksSync по тому же принципу (свой watermark, своя таблица,
+                             # порядок между ними не важен)
     AmoCompanyEnrichSync(),  # ходит на company_website и заполняет company_name; идёт СТРОГО после AmoSync
     MeetingLinksSync(),      # СТРОГО сразу после AmoCompanyEnrichSync(): матчинг по названию
                              # компании опирается на company_name, который заполняет именно она —
@@ -87,8 +95,10 @@ SOURCES = [
                         # собирается в тот же прогон, что и сами приходы (fx_cbr
                         # спрашивает ЦБ только за даты, где уже есть операции)
     FxCbrSync(),        # после Brocard: спрашивает курсы под уже приехавшие валютные траты
-    RenewalMarksSync(), # после AmoTasksSync И после банков (BankTochkaSync/BankTBankSync выше):
-                        # нужны и свежие задачи (result_text), и свежие платежи, см.
+    RenewalMarksSync(), # после AmoNotesSync, AmoTasksSync И после банков (BankTochkaSync/
+                        # BankTBankSync выше): нужны свежие комментарии (приоритетный сигнал,
+                        # см. 20260803_0004_renewal_marks_note_text.sql), свежие задачи
+                        # (result_text) и свежие платежи, см.
                         # docs/superpowers/plans/2026-08-03-renewals-from-payments.md (Task 2)
                         # и sources/renewal_marks.py
     ExpenseRulesSync(), # строго последним: размечает всё, что приехало выше
