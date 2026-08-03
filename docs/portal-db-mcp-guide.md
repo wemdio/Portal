@@ -465,6 +465,14 @@ LIMIT 5;
 - `tg_outreach_campaigns` (11), `tg_outreach_dialogs` (1144), `tg_outreach_logs` (242 900)
 - `li_leads` (8277), `li_campaigns`, `li_accounts`
 
+### Аутрич-пайплайн «2GIS + сигналы» (`gis_signal_*`, с 04.08.2026)
+- Клиентский пайплайн: 2gis_dataset (5 сегментов по рубрикам) → 6 сигналов с сайта → конструктор баз (`base_constructor_jobs`, кап 5 почт/компания) → добор в 5 кампаний Instantly. Воркер `gisSignalOutreachCron`.
+- `gis_signal_pipeline_config` — singleton id=1: `enabled`, `measure_only` (воронка без заливки/seen), `client_user_id` (владелец дашборда `/client/gis-signals`), `monthly_target_companies` (20000), `daily_limit`, `signal_min_count` (порог сигналов, дефолт 1), `selected_steps`/`step_config` конструктора.
+- `gis_signal_segments` — 5 сегментов (edu/remont/legal/accounting/consulting): `rubric_groups jsonb` (маппинг на рубрики 2GIS), `instantly_campaign_id` (NULL = сегмент не заливается), `priority` (компания попадает в один сегмент).
+- `gis_signal_seen_companies` — дедуп по `twogis_id` (PK), реконтакт запрещён навсегда; пишется только после успешного append в Instantly.
+- `gis_signal_company_signals` — архив 6 bool-сигналов + `evidence jsonb` по КАЖДОЙ проверенной компании (вкл. отфильтрованные) — основа среза сегмент×сигнал. Ключ `twogis_id` (unique).
+- `gis_signal_runs` — журнал прогонов: `status` (`running/completed/failed`), `funnel jsonb` = `{perSegment: {key: {pulled, signalsOk, bcIn, validContacts, appended}}, total}`.
+
 ### AI/Copilot слой
 - `sales_copilot_configs/drafts/jobs/logs`, `ai_call_analyses`, `ai_caller_jobs`,
   `ai_campaigns`, `brief_scoring_jobs`, `kb_documents`, `kb_chunks`
@@ -486,6 +494,7 @@ LIMIT 5;
 - **Sales AI risk / confidence:** `low`, `medium`, `high`
 - **Sales AI job status:** `pending`, `running`, `done`, `failed`, `skipped`
 - **Sales AI skip reason:** `no_new_data` (дедуп), `no_context` (нет переписки/звонков)
+- **gis_signal run status:** `running`, `completed`, `failed`
 
 ## Готовые шаблоны запросов
 

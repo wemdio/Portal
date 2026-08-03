@@ -6,6 +6,7 @@ import {
   CLIENT_NAV_AUTO_PIPELINE_SETUP,
   CLIENT_NAV_MANUAL_SCORING,
   CLIENT_NAV_MAILBOXES,
+  CLIENT_NAV_GIS_SIGNALS,
   CLIENT_NAV_DASHBOARD,
   CLIENT_NAV_GROUPS,
   CLIENT_NAV_OFFER,
@@ -94,7 +95,7 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
   // грузит /mailboxes/enabled один раз, вместо дублирования в каждом из двух
   // инстансов навигации (десктоп-сайдбар + мобильный drawer). Оптимистичное
   // обнуление счётчика при открытии «Поддержки» тоже живёт в layout.
-  const { supportUnread, mailboxesEnabled } = useClientPortalContext();
+  const { supportUnread, mailboxesEnabled, gisSignalsEnabled } = useClientPortalContext();
 
   // Пока клиент находится на странице поддержки, бейдж не показываем вовсе:
   // он по определению читает тред (а новые ответы видны прямо в нём).
@@ -121,6 +122,17 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
         <NavItemRow
           item={CLIENT_NAV_MAILBOXES}
           active={activeId === CLIENT_NAV_MAILBOXES.id}
+          locale={locale}
+          onItemClick={onItemClick}
+        />
+      )}
+
+      {/* «2GIS + сигналы»: виден только клиенту из gis_signal_pipeline_config.
+          Флаг приходит из layout через ClientPortalProvider (как mailboxes). */}
+      {gisSignalsEnabled && (
+        <NavItemRow
+          item={CLIENT_NAV_GIS_SIGNALS}
+          active={activeId === CLIENT_NAV_GIS_SIGNALS.id}
           locale={locale}
           onItemClick={onItemClick}
         />

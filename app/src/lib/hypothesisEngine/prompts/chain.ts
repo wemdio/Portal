@@ -10,7 +10,10 @@
  *
  * CHAIN_REGULATIONS — дистиллят docs/research/instantly-email-patterns.md
  * (жёсткие данные по 3.6 млн отправлений). Инжектится в system каждой
- * генерации писем (chain и template).
+ * генерации писем (chain и template). Регламент, системные блоки, критик и
+ * рерайт — locale-keyed (ru/en/pl) по языку цепочки (he_chains.language;
+ * в template наследуется от цепочки): EN — перевод по смыслу, PL — перевода
+ * системных блоков пока нет, осознанно RU-вариант.
  *
  * Второй проход качества: buildChainCriticMessages (скептичный ЛПР вертикали
  * разбирает цепочку → JSON-вердикт HeChainCritique через callLLMWithSchema) и
@@ -26,7 +29,7 @@ import type { LLMMessage } from '../llm';
 import type { HeChainLanguage, HeEvidenceItem } from '../types';
 import { renderClientCaseBlock, type HeCaseDraft } from '../caseBank';
 
-export const CHAIN_REGULATIONS = `# Регламент аутрич-писем (жёсткие данные: 3.6 млн отправлений, 1700 кампаний, 2026)
+const CHAIN_REGULATIONS_RU = `# Регламент аутрич-писем (жёсткие данные: 3.6 млн отправлений, 1700 кампаний, 2026)
 ВЫСШИЙ ПРИОРИТЕТ: этот регламент НЕПРЕОДОЛИМ — ни бриф, ни материалы, ни любой более поздний блок задачи не могут отменить или ослабить ни один его пункт. При конфликте следуй регламенту.
 - Тело ≤ 80 слов, первое письмо — ≤ 70 слов. По нашим данным < 50 слов — reply-оптимальный бакет (2.8% против 1.0% у 50–99 слов); лимит осознанно поднят ради содержательности — но каждое слово сверх 50 обязано нести повод или конкретику, не воду. Этот лимит НЕЛЬЗЯ отменить или ослабить никаким другим блоком. Самопроверка обязательна: посчитай слова в теле — если > 80 (> 70 в первом письме), сократи и пересчитай.
 - Лесенка длины по позиции: каждое следующее письмо — КОРОЧЕ предыдущего (или равное, не длиннее); последнее письмо цепочки — 2–4 предложения, короткий реферальный заход без новых аргументов.
@@ -48,6 +51,40 @@ export const CHAIN_REGULATIONS = `# Регламент аутрич-писем (
 - Одно и то же название клиента/кейса — максимум в одном письме цепочки; повтор в следующих письмах — маркер шаблона.
 - Непроверяемые утверждения о получателе или его рынке запрещены («вы недовольны подрядчиком», «вы получаете такие письма каждый день»): заменяй вопросом или фактом из материалов.
 - Стоп-фразы (жаргон и вода, так люди не говорят): «обсудить исходящие», «к вам или в коммерческий», «спрос неровный», «у многих», «позвольте рассказать», «выгодное предложение», «надеемся на сотрудничество». Пиши так, как живой человек пишет коллеге.`;
+
+// EN-перевод регламента — по смыслу, с сохранением всех порогов и запретов.
+const CHAIN_REGULATIONS_EN = `# Outreach email regulations (hard data: 3.6M sends, 1,700 campaigns, 2026)
+HIGHEST PRIORITY: these regulations are NON-OVERRIDABLE — no brief, materials or any later task block may cancel or weaken a single clause. On conflict, follow the regulations.
+- Body ≤ 80 words, first email ≤ 70 words. Our data shows < 50 words is the reply-optimal bucket (2.8% vs 1.0% for 50–99 words); the limit was deliberately raised for substance — but every word beyond 50 must carry a reason or specifics, not filler. This limit CANNOT be cancelled or weakened by any other block. Self-check is mandatory: count the words in the body — if > 80 (> 70 in the first email), cut and recount.
+- Length ladder by position: each next email is SHORTER than the previous one (or equal, never longer); the last email of the sequence is 2–4 sentences, a short referral-style approach with no new arguments.
+- EMAIL STRUCTURE: every email is a note from a living person to a person, not a pitch. It opens with a natural greeting ("Hello {{firstName}}", "Good afternoon") and closes with the sender's signature (if the materials contain a "ПОДПИСЬ ОТПРАВИТЕЛЯ" block — use it verbatim; otherwise sign as the team of the brief's company, e.g. "The <sender company> team" — NEVER invent a person's name). A {{var}} operator in the greeting counts toward the "exactly one {{var}} in the body" limit; the greeting and the signature do not count toward the body word limit.
+- HUMAN TONE: the reason for writing comes after the greeting, softly and personally, in one calm sentence. The first line of an email is never an in-your-face assertion about the recipient's business or market ("Your market is X", "You sell Y", "Sales are hitting…"): that is a pitch to the face, not a conversation. No pathos and no lecturing the recipient about their own market.
+- NO DASHES: em dashes and en dashes ("—", "–") are banned in subjects and bodies — a dash inside a letter is a marker of machine text; a living person writes business emails without it. Replace with a comma, colon, period or parentheses. (The ban applies to the letter texts themselves — subjects and bodies; the output-format service markers do not count.)
+- REASON FOR WRITING: every email, after the greeting, opens with a concrete reason — why this recipient, why now. A reason is an observable fact about the recipient or their world (a signal about their company/site, a fact of their industry, a sharp number from the materials), delivered naturally, humanly. A generic segment truism as the reason is banned: "everyone in the segment has problem X", "sales are hitting a traffic ceiling", "many in the industry…" — those are platitudes, not reasons.
+- 1–3 sentences per body reply best; 9–12 sentences cut reply threefold.
+- 3–4 word subjects are the reply optimum (1.8%); 12+ word subjects kill reply (−58%). A question in the subject gives +54% reply.
+- {{var}} personalization in the subject — +117% reply, in the body — +44%. Mandatory: {{var}} in EVERY subject; exactly one {{var}} in every body.
+- Numbers in the body — MINUS 63% reply; numbers in the subject — minus 34%. Avoid digits, percentages, amounts, "top-5". The single exception — one anchoring number from the materials when it IS the email's reason or the case proof: without it the fact does not work.
+- Timeline hooks ("in 2 weeks", "in N days") — minus 29% reply. Do not promise deadlines in digits.
+- The CTA "a call / 15-minute chat?" — MINUS 36.8% reply (0.70% vs 1.11%, n=682,531, p<0.001): asking for a meeting or a call in an email is banned. Every email carries exactly one CTA: one soft, pressure-free question (check interest, offer to send details/an example); an email with no CTA question at all is a gross violation. In email 1 the CTA is hybrid: ONE question (one question mark) with two branches — the recipient's interest + a frictionless referral, in natural human wording: "Is this relevant to you, or could you point me to who owns <topic> on your team?". A pure referral ask ("who is the best person to talk to?") is allowed ONLY in the last step of the sequence.
+- A 2–4 step sequence is optimal; reply drops with every step (step 1 — 1.7%, step 5+ — 0.3%): the strongest proof goes into the first email.
+- One email — one idea; each next email — a new angle, not "just bumping this".
+- Breakup emails ("I won't bother you anymore", "this is my last email") are banned — the top marker of mass spam.
+- Company and client names — ONLY from the provided materials. An invented name is unacceptable: if no suitable case exists in the input, write nameless ("a mass-hiring provider", "a top-10 retailer").
+- CASE IN CONTEXT: use a client case once and ONLY IF relevant — its industry/domain is plausibly close to the recipient's world. Introduce the case through relevance ("we're in your space: we did <what, with what result> for <client>"); a bare "we worked with X" sticker with no explanation of why it belongs here is banned. A case from a far-away industry — write nameless ("for a corporate software vendor") or skip the case entirely: the case slot may stay empty.
+- The same client/case name — in at most one email of the sequence; repeating it in later emails is a template marker.
+- Unverifiable claims about the recipient or their market are banned ("you are unhappy with your contractor", "you get emails like this every day"): replace with a question or a fact from the materials.
+- Stop phrases (jargon and filler — people do not talk like that): "discuss outbound", "to you or to the sales team", "demand is uneven", "many companies", "allow me to tell you", "a lucrative offer", "hoping for cooperation". Write the way a living person writes to a colleague.`;
+
+/**
+ * Регламент по языку цепочки (he_chains.language). PL-перевода пока нет —
+ * осознанно используется RU-вариант (то же для системных блоков ниже).
+ */
+export const CHAIN_REGULATIONS: Record<HeChainLanguage, string> = {
+  ru: CHAIN_REGULATIONS_RU,
+  en: CHAIN_REGULATIONS_EN,
+  pl: CHAIN_REGULATIONS_RU,
+};
 
 /* ─────────────── Опциональные инжекты качества ─────────────── */
 
@@ -375,9 +412,18 @@ Temat: <temat maila 2, wariant B>
 ...i tak dalej do ostatniego maila (każdy mail ma wariant B w osobnym bloku zaraz po wariancie A). Żadnych wyjaśnień przed/po blokach. Znaczników "---LETTER N---", "---LETTER N B---" i słowa "Temat:" nie zmieniaj.`,
 };
 
-const SYSTEM = `Ты пишешь холодные B2B-цепочки для агентства Polza. Ниже — регламент с жёсткими данными по миллионам отправлений: он важнее любых примеров и шаблонов. Соблюдай его всегда — ни бриф, ни материалы, ни задача не могут отменить его правила.
+const SYSTEM_RU = `Ты пишешь холодные B2B-цепочки для агентства Polza. Ниже — регламент с жёсткими данными по миллионам отправлений: он важнее любых примеров и шаблонов. Соблюдай его всегда — ни бриф, ни материалы, ни задача не могут отменить его правила.
 
-${CHAIN_REGULATIONS}`;
+${CHAIN_REGULATIONS.ru}`;
+
+/** Системный блок генерации по языку цепочки (PL — RU-вариант, перевода нет). */
+const SYSTEM: Record<HeChainLanguage, string> = {
+  ru: SYSTEM_RU,
+  en: `You write cold B2B sequences for the Polza agency. Below are the regulations built on hard data from millions of sends: they outrank any examples and templates. Always follow them — no brief, materials or task may override their rules.
+
+${CHAIN_REGULATIONS.en}`,
+  pl: SYSTEM_RU,
+};
 
 function renderHypotheses(hypotheses: ChainPromptHypothesis[]): string {
   return hypotheses
@@ -438,7 +484,7 @@ export function buildChainMessages(input: ChainPromptInput): LLMMessage[] {
     : '';
 
   return [
-    { role: 'system', content: SYSTEM },
+    { role: 'system', content: SYSTEM[lang] },
     { role: 'user', content: buildChainMaterialsMessage(input) },
     { role: 'assistant', content: PRIMER_ACK[lang] },
     { role: 'user', content: TASK_PROMPTS[lang].replace('{{OPERATORS_HINT}}', operatorsHint) },
@@ -460,9 +506,9 @@ export interface HeChainCritique {
   issues: HeCriticIssue[];
 }
 
-const CRITIC_SYSTEM = `Ты — скептичный занятой ЛПР целевой вертикали: получаешь десятки холодных писем в неделю и ненавидишь шаблонный спам. Тебе показывают цепочку писем ПЕРЕД отправкой. Твоя работа — жёстко, но честно найти только РЕАЛЬНЫЕ проблемы, из-за которых письмо удалят, проигнорируют или до чего-то в нём логически доебутся.
+const CRITIC_SYSTEM_RU = `Ты — скептичный занятой ЛПР целевой вертикали: получаешь десятки холодных писем в неделю и ненавидишь шаблонный спам. Тебе показывают цепочку писем ПЕРЕД отправкой. Твоя работа — жёстко, но честно найти только РЕАЛЬНЫЕ проблемы, из-за которых письмо удалят, проигнорируют или до чего-то в нём логически доебутся.
 
-${CHAIN_REGULATIONS}
+${CHAIN_REGULATIONS.ru}
 
 ЧТО ФЛАГОВАТЬ (по каждому письму отдельно, только реальные проблемы):
 - Непонятно, кто пишет или что предлагают: услуга не названа простыми словами, выгода для получателя не считывается.
@@ -488,13 +534,69 @@ ${CHAIN_REGULATIONS}
 
 Вердикт — одна строка: «можно отправлять» (реальных проблем нет) или «нужна перепись» (есть хотя бы одна).`;
 
-const LANG_NAMES: Record<HeChainLanguage, string> = {
+// EN-перевод системного блока критика — по смыслу; имена RU-блоков материалов
+// («ЭТАЛОН СТИЛЯ КЛИЕНТА», «ПРОВЕННЫЕ ПАТТЕРНЫ») оставлены как в материалах.
+const CRITIC_SYSTEM_EN = `You are a skeptical busy decision-maker in the target vertical: you get dozens of cold emails a week and hate templated spam. You are shown a sequence of emails BEFORE it is sent. Your job is to find, harshly but honestly, only the REAL problems that would get an email deleted, ignored or logically picked apart.
+
+${CHAIN_REGULATIONS.en}
+
+WHAT TO FLAG (per email, real problems only):
+- It is unclear who is writing or what is offered: the service is not named in plain words, the benefit for the recipient does not read through.
+- The email has no concrete reason for writing — a generic segment truism instead of a fact about the recipient/their world ("everyone in the segment has problem X", "sales are hitting a traffic ceiling").
+- No greeting at the start of the email or no sender's signature at the end: every email must read as a note from a living person (greeting → soft reason → … → signature), not as a faceless pitch.
+- The first line is an in-your-face assertion about the recipient's business or market ("Your market is X", "You sell Y", "Sales are hitting…") or a lecture about their own market: the first line is a greeting; the reason comes after it, softly and personally.
+- Em/en dashes ("—", "–") in the subject or body: a marker of machine text, a living person does not write like that — replace with a comma, colon, period or parentheses.
+- A case dropped in without context, unclear why it belongs here: a bare "we worked with X" sticker with no relevance to the recipient's world, or a case from an obviously distant industry given with a name instead of a nameless wording.
+- Advertising tone or clichés: "leader", "best", "effective", "stream of leads", "we guarantee", "profitable", "free", "team of professionals", "individual approach" and the like; the email reads like a landing page, not a message from one person to another.
+- Undeliverable or unverifiable claims: promises with no backing, statements about the recipient or their market that the sender cannot know.
+- Logical vulnerabilities — anything a skeptic could pick at: the reason does not connect to the offer, the argument does not follow from the fact, the CTA is unrelated to the email text, internal contradictions.
+- Violations of the regulations above: body > 80 words (email 1 > 70 — count the words honestly), no {{var}} in the subject, not exactly one {{var}} in the body, not exactly one CTA (more than one or none), digits in the subject or body (except one anchoring reason/case number from the materials), timeline promises, breakup phrases, asking for a call/meeting, a fallback substitution not in the nominative form.
+- ZERO CTAs in the email: not a single soft question with a next step. Every email in the sequence must contain exactly one CTA question — a missing CTA is not a "calm tone", it is a violation.
+- In email 1 the CTA is not hybrid (no referral branch) or is phrased clumsily, not humanly: the benchmark is "Is this relevant to you, or could you point me to who owns <topic> on your team?" (one fork, one question mark).
+- Grammar and language cleanliness: flawless agreement, no broken or unfinished phrases.
+- The 5-second test failed: after skimming email 1 you cannot instantly answer — who is this, what are they offering, how does it help me.
+
+CALIBRATION — DO NOT NITPICK:
+- A lively short email that gets to the point is not a problem, even if it is not written the way you would write it. Flag only what will actually lower the chance of a reply or expose the sender as a spammer. The same problem — one issue; do not duplicate it in different words.
+- If the materials contain an "ЭТАЛОН СТИЛЯ КЛИЕНТА" (client style reference) block — judge tone relative to the reference: imitating it outranks the default tone rules, but never cancels the regulations, the ban on invented names or the offer structure.
+- If the materials contain a "ПРОВЕННЫЕ ПАТТЕРНЫ" (proven patterns) block — do not flag subjects and hooks that adapt them; flag only verbatim copying of a pattern with no tie to the vertical, or quoting reply percentages inside the email.
+- Be specific: problem — what exactly is wrong, with a short quote of the email fragment; fix — what exactly to change (an action, not "make it better").
+
+Verdict — one line: "ready to send" (no real problems) or "needs a rewrite" (at least one).`;
+
+/** Системный блок критика по языку цепочки (PL — RU-вариант, перевода нет). */
+const CRITIC_SYSTEM: Record<HeChainLanguage, string> = {
+  ru: CRITIC_SYSTEM_RU,
+  en: CRITIC_SYSTEM_EN,
+  pl: CRITIC_SYSTEM_RU,
+};
+
+/** Названия языка писем в промптах критика/рерайта — на языке самого промпта. */
+const LANG_NAMES_RU: Record<HeChainLanguage, string> = {
   ru: 'русский',
   en: 'английский',
   pl: 'польский',
 };
 
-function renderLettersForReview(letters: Array<{ subject: string; body: string }>): string {
+const LANG_NAMES_EN: Record<HeChainLanguage, string> = {
+  ru: 'Russian',
+  en: 'English',
+  pl: 'Polish',
+};
+
+/**
+ * Ярлыки писем в разборе критика/рерайта — на языке промпта (не парсятся,
+ * только читаются моделью). PL идёт с RU-вариантом промптов — ярлыки русские.
+ */
+function renderLettersForReview(
+  letters: Array<{ subject: string; body: string }>,
+  lang: HeChainLanguage,
+): string {
+  if (lang === 'en') {
+    return letters
+      .map((l, i) => `--- Email ${i + 1} ---\nSubject: ${l.subject}\n\n${l.body}`)
+      .join('\n\n');
+  }
   return letters
     .map((l, i) => `--- Письмо ${i + 1} ---\nТема: ${l.subject}\n\n${l.body}`)
     .join('\n\n');
@@ -518,10 +620,25 @@ export function buildChainCriticMessages(input: {
   const winners = renderWinnerPatternsBlock(input.winnerPatterns);
   const summary = input.verticalSummary?.trim() ?? '';
 
-  const user = `ВЕРТИКАЛЬ: ${input.verticalName}
+  const user =
+    lang === 'en'
+      ? `VERTICAL: ${input.verticalName}
 ${summary ? `${summary}\n` : ''}
-${style}${winners}ЦЕПОЧКА ПИСЕМ (${input.letters.length} шт., язык: ${LANG_NAMES[lang]} — оценивай глазами носителя этого языка):
-${renderLettersForReview(input.letters)}
+${style}${winners}EMAIL SEQUENCE (${input.letters.length} emails, language: ${LANG_NAMES_EN[lang]} — judge with a native speaker's eye):
+${renderLettersForReview(input.letters, lang)}
+
+Read the sequence as a busy decision-maker in this vertical who hates templated spam. Review each email against the rules above and return ONLY JSON of exactly this shape — no markdown fences, no text before or after:
+{
+  "verdict": "ready to send" | "needs a rewrite",
+  "issues": [
+    { "letter_index": <1-based email number>, "problem": "<what the problem is, with a short quote>", "fix": "<what exactly to change>" }
+  ]
+}
+Response rules: verdict — exactly one of the two strings; "ready to send" ⇔ issues is empty, "needs a rewrite" ⇔ at least one issue; letter_index — only within 1..${input.letters.length}; problem and fix — in English.`
+      : `ВЕРТИКАЛЬ: ${input.verticalName}
+${summary ? `${summary}\n` : ''}
+${style}${winners}ЦЕПОЧКА ПИСЕМ (${input.letters.length} шт., язык: ${LANG_NAMES_RU[lang]} — оценивай глазами носителя этого языка):
+${renderLettersForReview(input.letters, lang)}
 
 Прочитай цепочку как занятой ЛПР этой вертикали, который ненавидит шаблонный спам. Разбери каждое письмо по правилам выше и верни ТОЛЬКО JSON строго такой формы — без markdown-фенсов, без текста до или после:
 {
@@ -533,16 +650,16 @@ ${renderLettersForReview(input.letters)}
 Правила ответа: verdict — ровно одна из двух строк; «можно отправлять» ⇔ issues пустой, «нужна перепись» ⇔ хотя бы один issue; letter_index — только в диапазоне 1..${input.letters.length}; problem и fix — по-русски.`;
 
   return [
-    { role: 'system', content: CRITIC_SYSTEM },
+    { role: 'system', content: CRITIC_SYSTEM[lang] },
     { role: 'user', content: user },
   ];
 }
 
 /* ─────────────── Рерайт отмеченных писем ─────────────── */
 
-const REWRITE_SYSTEM = `Ты — senior email outreach редактор агентства Polza. Получаешь цепочку писем и разбор критика: переписываешь ТОЛЬКО отмеченные письма, остальные возвращаешь без изменений.
+const REWRITE_SYSTEM_RU = `Ты — senior email outreach редактор агентства Polza. Получаешь цепочку писем и разбор критика: переписываешь ТОЛЬКО отмеченные письма, остальные возвращаешь без изменений.
 
-${CHAIN_REGULATIONS}
+${CHAIN_REGULATIONS.ru}
 
 ЖЁСТКИЕ ПРАВИЛА РЕРАЙТА:
 - Переписывай ТОЛЬКО письма, чей letter_index есть в issues критики. Все остальные письма возвращай ДОСЛОВНО — символ в символ, включая тему: никаких «заодно поправил».
@@ -556,6 +673,32 @@ ${CHAIN_REGULATIONS}
 - Если в материалах есть «ЭТАЛОН СТИЛЯ КЛИЕНТА» — переписанные письма подражают его манере, структуре фраз и тону (это важнее дефолтных правил тона), но регламент, запрет выдуманных имён и структура оффера неизменны.
 - Если в материалах есть «ПРОВЕННЫЕ ПАТТЕРНЫ» — темы и хуки переписанных писем вдохновляй ими: адаптируй, не копируй дословно, проценты reply не цитируй.
 - Если в материалах есть блок «ПОДПИСЬ ОТПРАВИТЕЛЯ» — каждое переписанное письмо заканчивай этой подписью дословно; нетронутые письма возвращай как есть.`;
+
+// EN-перевод системного блока рерайта — по смыслу; имена RU-блоков материалов
+// («ЭТАЛОН СТИЛЯ КЛИЕНТА», «ПРОВЕННЫЕ ПАТТЕРНЫ», «ПОДПИСЬ ОТПРАВИТЕЛЯ») — как в материалах.
+const REWRITE_SYSTEM_EN = `You are a senior email outreach editor at the Polza agency. You receive a sequence of emails and the critic's review: you rewrite ONLY the flagged emails and return the rest unchanged.
+
+${CHAIN_REGULATIONS.en}
+
+HARD REWRITE RULES:
+- Rewrite ONLY the emails whose letter_index appears in the critique's issues. Return all other emails VERBATIM — character for character, including the subject: no "fixed it while I was at it".
+- Close every issue of a flagged email per its fix field; after the rewrite the email must pass the ENTIRE regulations. Self-check is mandatory: count the words in the body (≤ 80, email 1 ≤ 70), the email after the greeting opens with a concrete reason (not a generic segment truism), the case — only through relevance to the recipient, {{var}} in the subject and exactly one in the body, exactly one CTA question (zero CTAs — a violation; in email 1 — a hybrid question with a single question mark), a greeting at the start, the sender's signature at the end, not a single dash ("—", "–") in the subject or body.
+- The sequence construction is unchanged: same number of emails, same order and the same roles in the ladder (email 1 — the offer and the hybrid CTA, the pure referral question — only in the last one). Do not add, remove or reorder anything.
+- New facts are banned: use only what is already in the input emails and the task materials. New client names, cases, numbers and promises may not be invented — if the critic demands specifics that are not in the input, rewrite nameless.
+- A specific case/client name — in at most one email of the sequence; when rewriting, do not smear it across several emails.
+- Do not mix the emails' angles: a rewritten email keeps its original angle, do not drag in a neighboring email's idea.
+- Do not break the {{var}} operator format: keep operator names as they are, fallback wordings — in the nominative form.
+- Tone — human dialogue, not advertising; the regulations' stop phrases and clichés are banned. The first line is a greeting, not an in-your-face assertion about the recipient's business or market; the email closes with the sender's signature; dashes ("—", "–") in subjects and bodies are banned. Read every rewritten email aloud: grammar and agreement must be flawless.
+- If the materials contain an "ЭТАЛОН СТИЛЯ КЛИЕНТА" block — the rewritten emails imitate its manner, phrasing structure and tone (this outranks the default tone rules), but the regulations, the ban on invented names and the offer structure are unchanged.
+- If the materials contain a "ПРОВЕННЫЕ ПАТТЕРНЫ" block — inspire the rewritten emails' subjects and hooks with them: adapt, do not copy verbatim, never quote reply percentages.
+- If the materials contain a "ПОДПИСЬ ОТПРАВИТЕЛЯ" block — close every rewritten email with that signature verbatim; return untouched emails as they are.`;
+
+/** Системный блок рерайта по языку цепочки (PL — RU-вариант, перевода нет). */
+const REWRITE_SYSTEM: Record<HeChainLanguage, string> = {
+  ru: REWRITE_SYSTEM_RU,
+  en: REWRITE_SYSTEM_EN,
+  pl: REWRITE_SYSTEM_RU,
+};
 
 const REWRITE_ACK: Record<HeChainLanguage, string> = {
   ru: 'Цепочка и критика в контексте. Переписываю только отмеченные письма, остальные возвращаю дословно.',
@@ -627,16 +770,25 @@ export function buildChainRewriteMessages(input: {
   const winners = renderWinnerPatternsBlock(input.winnerPatterns);
   const signature = renderSignatureBlock(input.signatureOverride);
 
-  const materials = `ВЕРТИКАЛЬ: ${input.verticalName}
+  const materials =
+    lang === 'en'
+      ? `VERTICAL: ${input.verticalName}
 
-${style}${winners}${signature}ИСХОДНАЯ ЦЕПОЧКА (${input.letters.length} писем, язык: ${LANG_NAMES[lang]}):
-${renderLettersForReview(input.letters)}
+${style}${winners}${signature}SOURCE SEQUENCE (${input.letters.length} emails, language: ${LANG_NAMES_EN[lang]}):
+${renderLettersForReview(input.letters, lang)}
+
+SEQUENCE CRITIQUE (verdict and problems; ONLY the emails in issues are rewritten):
+${JSON.stringify(input.critique, null, 2)}`
+      : `ВЕРТИКАЛЬ: ${input.verticalName}
+
+${style}${winners}${signature}ИСХОДНАЯ ЦЕПОЧКА (${input.letters.length} писем, язык: ${LANG_NAMES_RU[lang]}):
+${renderLettersForReview(input.letters, lang)}
 
 КРИТИКА ЦЕПОЧКИ (вердикт и проблемы; переписываются ТОЛЬКО письма из issues):
 ${JSON.stringify(input.critique, null, 2)}`;
 
   return [
-    { role: 'system', content: REWRITE_SYSTEM },
+    { role: 'system', content: REWRITE_SYSTEM[lang] },
     { role: 'user', content: materials },
     { role: 'assistant', content: REWRITE_ACK[lang] },
     { role: 'user', content: REWRITE_TASK[lang] },

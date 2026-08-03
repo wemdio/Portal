@@ -7,7 +7,9 @@
 
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { HeHypothesesBatchSchema, type HeBrandCloudOutput, type HeSiteProfileOutput } from '../schemas';
+import { projectMarket, type HeMarket } from '../market';
 import { buildHypothesesInstantMessages } from '../prompts/hypotheses';
+import { buildHypothesesInstantMessagesEn } from '../prompts/hypotheses.en';
 import { getPortfolioProfile, type HePortfolioEntry } from '../datasetStats';
 import type { HeJob } from '../types';
 import {
@@ -64,11 +66,18 @@ export function aggregateMarkupHistory(
 /**
  * Портфельный профиль датасета для калибровки промпта. При любом сбое
  * (датасет лежит/не сконфигурирован) возвращаем undefined — стадия
- * продолжается без калибровки.
+ * продолжается без калибровки. Рынок us: датасет — это RU-кампании,
+ * калибровка по нему бессмысленна → undefined, датасет не дёргаем
+ * (см. также рыночный гейт в datasetStats.ts).
  */
 export async function loadPortfolioProfile(
   ctx: HeStageContext,
+  market: HeMarket,
 ): Promise<HePortfolioEntry[] | undefined> {
+  if (market === 'us') {
+    stageLog(ctx, '[hypotheses] market=us — калибровка по RU-датасету пропущена');
+    return undefined;
+  }
   try {
     return await getPortfolioProfile({ limit: 10 });
   } catch (e) {
@@ -106,6 +115,8 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
   const usage = newUsage();
   const project = await readProject(ctx.supabase, job.project_id);
   const profile = readSiteProfile<HeSiteProfileOutput>(project);
+  // Рынок: ctx.market (воркер), фолбэк — колонка he_projects.market.
+  const market = ctx.market ?? projectMarket(project);
 
   const competitorsResult = await latestDoneJobResult<{ competitors?: HeCompetitorEntry[] }>(
     ctx.supabase,
@@ -129,7 +140,7 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
   // Калибровочные данные — best-effort: сбой любого источника → undefined,
   // мгновенный проход продолжается без калибровки.
   const [portfolioProfile, markupHistory] = await Promise.all([
-    loadPortfolioProfile(ctx),
+    loadPortfolioProfile(ctx, market),
     loadMarkupHistory(ctx, job.project_id),
   ]);
 
@@ -146,7 +157,7 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
     ...(markupHistory ? { markupHistory } : {}),
   };
   const llm = await callLLMWithSchema(
-    buildHypothesesInstantMessages(promptInput),
+    (market === 'us' ? buildHypothesesInstantMessagesEn : buildHypothesesInstantMessages)(promptInput),
     HeHypothesesBatchSchema,
     // 25–40 гипотез с description/fit_rationale/rationale/search_queries на
     // русском — кириллические BPE-токены дорогие, 8–16k обрезало бы JSON

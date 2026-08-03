@@ -322,6 +322,22 @@ export const CLIENT_NAV_MAILBOXES: ClientNavItem = {
 };
 
 /**
+ * Дашборд «2GIS + сигналы». Top-level пункт, видим ТОЛЬКО одному клиенту —
+ * чей profiles.id записан в gis_signal_pipeline_config.client_user_id (id=1).
+ * ClientNavList подгружает признак через /api/client/gis-signals/enabled
+ * (флаг приходит из layout через ClientPortalProvider) — у остальных
+ * клиентов пункта не существует, как и самой страницы (404-gate).
+ */
+export const CLIENT_NAV_GIS_SIGNALS: ClientNavItem = {
+  id: 'gis-signals',
+  label: '2GIS + сигналы',
+  labelEn: '2GIS + signals',
+  href: '/client/gis-signals',
+  description: 'Отчётность пайплайна 2GIS + сигналы',
+  descriptionEn: '2GIS + signals pipeline reporting',
+};
+
+/**
  * Возвращает группы, отфильтрованные под текущий mode. В 'manual' — без
  * изменений; в 'auto' — оставляем только items из AUTO_MODE_VISIBLE_ITEM_IDS
  * и группы, в которых что-то осталось.
@@ -379,6 +395,9 @@ export function resolveActiveNavId(pathname: string): string | null {
   }
   if (pathname === '/client/mailboxes' || pathname.startsWith('/client/mailboxes/')) {
     return 'mailboxes';
+  }
+  if (pathname === '/client/gis-signals' || pathname.startsWith('/client/gis-signals/')) {
+    return 'gis-signals';
   }
   // Кампании — both the list (/client) and the detail page (/client/campaigns/:id).
   if (pathname === '/client' || pathname.startsWith('/client/campaigns')) {

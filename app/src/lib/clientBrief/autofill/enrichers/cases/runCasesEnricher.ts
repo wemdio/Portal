@@ -12,8 +12,10 @@
  *   3 страницы × 12K симв ≈ 9K токенов на input — безопасно.
  * - **Тих фейл**: если ни одна страница не загрузилась — возвращаем пустой
  *   patch, не бросаем. Это enricher, а не критический путь.
- * - **maxTokens output = 2500** — узкий формат (3 поля, лаконичные строки),
- *   2500 хватит за глаза. Если ещё раз обрежется — поднимем.
+ * - **maxTokens output = 8000** — формат узкий (3 поля, лаконичные строки),
+ *   но reasoning-модель за policy/gemini-flash (deepseek-v4-flash) расходует
+ *   скрытые reasoning_tokens из того же completion-бюджета: при 2500 весь
+ *   бюджет уходил в reasoning и ответ приходил пустым. См. autofill/index.ts.
  */
 
 import { callOpenRouterChat } from '@/lib/openrouter/client';
@@ -25,7 +27,9 @@ import { buildCasesPrompt } from './prompt';
 import { casesPatchToBriefPatch, parseCasesResponse, type CasesEnricherPatch } from './parseCasesResponse';
 
 const PER_PAGE_TEXT_MAX_CHARS = 12_000;
-const MAX_TOKENS_OUTPUT = 2_500;
+// 8000 а не 2500: reasoning-модель за policy/gemini-flash расходует скрытые
+// reasoning_tokens из того же completion-бюджета (см. autofill/index.ts).
+const MAX_TOKENS_OUTPUT = 8_000;
 
 export interface RunCasesEnricherOptions {
   apiKey: string;

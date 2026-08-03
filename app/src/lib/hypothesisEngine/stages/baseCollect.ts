@@ -14,14 +14,22 @@
  *     payload джобы (выбор гипотез в UI) сужает набор до выбранных id;
  *     пустое пересечение с неотклонёнными — фейл джобы. План и статусы задач
  *     пишутся в collect_info.
+ *     При market='us' промпт — EN (prompts/sourcePlan.en.ts) с ENG-источниками
+ *     (pdl / funded / eng_hiring / google_maps); схема плана общая.
  *  2. DISPATCH — каждая pending-задача уходит в свой коллектор:
  *     companies_directory — синхронно через searchRows с пагинацией страницами
  *     по 1000 (строки сразу в задаче, дочерней джобы нет; кап — limit из
  *     payload джобы, см. totalRowsCap; компании других баз проекта
  *     пропускаются ещё на выборке — см. блок про продолжение ниже);
+ *     pdl / funded / eng_hiring (market='us') — тоже синхронно: прямое чтение
+ *     справочных таблиц pdl_companies / funded_companies / eng_hiring_cache
+ *     через ctx.supabase (keyset-пагинация по id у pdl/funded, офсетная у
+ *     eng_hiring; дочерних джоб нет — исключение чужих баз для них, как для
+ *     hh/карт, только на мёрдже);
  *     hh_live / yandex_maps / google_maps — insert дочерней джобы
  *     (parser_jobs / yandex_maps_jobs / google_maps_jobs), её id — в
- *     child_job_id. collect_info персистится после каждой задачи.
+ *     child_job_id. У google_maps language/region — по рынку проекта
+ *     (us → en/US). collect_info персистится после каждой задачи.
  *  3. WAIT — опрос дочерних джоб по статусу. Есть незавершённые →
  *     self-requeue и выход с {waiting: true}.
  *  4. HARVEST — строки всех done-задач мёржатся в унифицированные колонки
@@ -33,10 +41,22 @@
  *     повторные сборки; для строк hh/карт это единственная точка исключения,
  *     для реестра — страховка после исключения на выборке), кап
  *     totalRowsCap(job) — limit из payload джобы
- *     (дефолт 10000); he_bases → status='analyzing' и ставится
- *     стадия base_analyze. Ноль строк — база failed с разбором по задачам,
+ *     (дефолт 10000). Ноль строк — база failed с разбором по задачам,
  *     джоба падает. Упавшие задачи фиксируются в collect_info, но не валят
  *     джобу, если хотя бы одна задача дала строки.
+ *  5. CONSTRUCT — обогащение собранных строк конструктором баз
+ *     (base_constructor_jobs: dedup_email → find_emails → validate_emails →
+ *     cap_emails_per_company → enrich_descriptions; locale джобы по рынку).
+ *     Пропускается, когда email уже есть у >50% строк (RU-источники богатые)
+ *     или фаза завершалась ранее (construct.status='done' в collect_info).
+ *     DISPATCH-CONSTRUCT создаёт BC-джобу (bc_job_id — в collect_info.construct)
+ *     и уходит в self-requeue с паузой 60с; WAIT-CONSTRUCT опрашивает её до
+ *     терминального статуса (таймаут 6ч → база failed); IMPORT мапит сетку
+ *     обратно в унифицированные колонки по имени заголовка (email — первый
+ *     адрес merged-ячейки) и добавляет колонку description В КОНЕЦ заголовков.
+ *     failed/cancelled BC-джоба базу НЕ валит: импортируется частичный data,
+ *     если он есть, иначе переход к analyzing без обогащения. Далее —
+ *     he_bases → status='analyzing' и ставится стадия base_analyze.
  *
  * Продолжение сбора больших сегментов (>50k — больше одного капа limit):
  * повторная сборка той же вертикали исключает компании других he_bases
@@ -57,12 +77,17 @@
 
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 import { searchRows } from '@/lib/companiesSearch/rpcSearch';
+import { applyFundedFilters } from '@/lib/funded/queryFilters';
+import { buildRolesRegex } from '@/lib/parsers/atsFilters';
+import { extractEmail } from '@/lib/tools/dfybUtils';
 import { callLLMWithSchema, getHeModel } from '../llm';
+import { projectMarket, type HeMarket } from '../market';
 import {
   buildSourcePlanMessages,
   type HeCollectTask,
   type HeSourcePlan,
 } from '../prompts/sourcePlan';
+import { buildSourcePlanMessagesEn } from '../prompts/sourcePlan.en';
 import { HeSourcePlanSchema } from '../schemas';
 import type { HeBase, HeJob, HeProject, HeVertical } from '../types';
 import {
@@ -221,20 +246,63 @@ export function mapGoogleRow(row: Record<string, unknown>): HeUnifiedRow {
   });
 }
 
+/** Локаль из полей справочника: «город, регион, страна» без пустых кусков. */
+function composeAddress(...parts: unknown[]): string {
+  return parts.map(cell).filter(Boolean).join(', ');
+}
+
+/** Строка каталога PDL (market='us') → унифицированная строка (size-бакет → employees). */
+export function mapPdlRow(row: Record<string, unknown>): HeUnifiedRow {
+  return unifiedRow({
+    company: cell(row.name),
+    website: cell(row.website),
+    address: composeAddress(row.locality, row.region, row.country),
+    category: cell(row.industry),
+    employees: cell(row.size),
+    source_detail: 'pdl',
+  });
+}
+
+/** Стартап funded_companies → унифицированная строка (источник данных — в source_detail). */
+export function mapFundedRow(row: Record<string, unknown>): HeUnifiedRow {
+  return unifiedRow({
+    company: cell(row.name),
+    website: cell(row.website),
+    address: composeAddress(row.locality, row.region, row.country),
+    category: cell(row.industry),
+    source_detail: `funded:${cell(row.source) || 'unknown'}`,
+  });
+}
+
+/** Вакансия eng_hiring_cache → работодатель + название вакансии как крючок персонализации. */
+export function mapEngHiringRow(row: Record<string, unknown>): HeUnifiedRow {
+  return unifiedRow({
+    company: cell(row.company_name),
+    website: cell(row.company_site_url),
+    vacancy_title: cell(row.vacancy_title),
+    address: cell(row.location) || cell(row.country),
+    source_detail: `eng_hiring:${cell(row.source) || 'unknown'}`,
+  });
+}
+
 /**
  * Нормализация названия компании для дедупа: lowercase, срез юрформ
- * (ООО/ИП/АО/ПАО/ЗАО/ОАО/АНО/НКО и латинские LLC/LTD/INC/OOO — отдельными
- * словами, в любых кавычках; латинское IP НЕ срезаем — слишком коллизионно:
+ * (ООО/ИП/АО/ПАО/ЗАО/ОАО/АНО/НКО и латинские LLC/LTD/INC/OOO/CORP/CORPORATION/
+ * LLP/LP/LIMITED/GMBH/PLC/SARL/SA/AG/BV/NV/PTY/PTE — отдельными словами, в
+ * любых кавычках; латинское IP НЕ срезаем — слишком коллизионно:
  * «IP Solutions»), удаление кавычек («»„“""'') и прочей пунктуации,
  * схлопывание пробелов. Иначе «ООО "ТЕРАБАЙТ"» из реестра и «ТЕРАБАЙТ»
- * из hh жили в базе обе.
+ * из hh жили в базе обе, как и «Acme, Inc.» из pdl и «ACME LLC» из eng_hiring.
  */
 export function normalizeCompanyForDedup(name: string): string {
   let s = ` ${name.trim().toLowerCase()} `;
   // Пунктуация → пробел: кавычки всех стилей, дефисы, точки — всё небуквенное.
   s = s.replace(/[^0-9a-zа-яё\s]+/gi, ' ');
   // Юрформы отдельными словами (длинные формы раньше коротких: «пао» до «ао»).
-  s = s.replace(/(^|\s)(ооо|ип|пао|зао|оао|ано|нко|ао|llc|ltd|inc|ooo)(?=\s|$)/g, ' ');
+  s = s.replace(
+    /(^|\s)(ооо|ип|пао|зао|оао|ано|нко|ао|llc|ltd|inc|ooo|corporation|corp|limited|llp|lp|gmbh|plc|sarl|sa|ag|bv|nv|pty|pte)(?=\s|$)/g,
+    ' ',
+  );
   return s.replace(/\s+/g, ' ').trim();
 }
 
@@ -400,6 +468,27 @@ export interface HeCollectTaskState {
   note?: string;
 }
 
+/** Состояние фазы CONSTRUCT в collect_info (обогащение конструктором баз). */
+export interface HeConstructInfo {
+  /** id джобы конструктора баз (base_constructor_jobs). */
+  bc_job_id: string | null;
+  /**
+   * dispatched — BC-джоба создана, ждём терминальный статус;
+   * done/failed/cancelled — финал фазы (база ушла в analyzing):
+   * при failed/cancelled импортирован частичный результат либо база оставлена
+   * без обогащения (см. note).
+   */
+  status: 'dispatched' | 'done' | 'failed' | 'cancelled';
+  /** Когда создана BC-джоба (ISO) — таймаут ожидания в WAIT-CONSTRUCT. */
+  dispatched_at?: string;
+  /** Почт найдено конструктором (result_stats.emails_found BC-джобы). */
+  emails_found?: number;
+  /** Почт с вердиктом ok после валидации (колонка «Email Статус» сетки). */
+  valid_count?: number;
+  /** Пометка для UI (частичный импорт / без обогащения / таймаут). */
+  note?: string;
+}
+
 export interface HeCollectInfo {
   /** Лимит строк, выбранный при запуске сборки (route пишет при создании базы). */
   limit?: number;
@@ -407,6 +496,8 @@ export interface HeCollectInfo {
   /** Гипотезы, по которым реально строился план (accepted-дефолт или выбор специалиста). */
   hypotheses?: Array<{ id: string; title: string; status: string | null }>;
   tasks?: HeCollectTaskState[];
+  /** Фаза CONSTRUCT: состояние передачи базы конструктору (появляется после HARVEST). */
+  construct?: HeConstructInfo;
   stats?: {
     tasks_total: number;
     tasks_done: number;
@@ -427,8 +518,8 @@ type HeAutoBase = HeBase & {
   error?: string | null;
 };
 
-/** Таблица дочерней джобы по источнику (у реестра дочерней джобы нет). */
-const CHILD_JOB_TABLE: Record<Exclude<HeCollectSource, 'companies_directory'>, string> = {
+/** Таблица дочерней джобы по источнику (у реестра и ENG-источников pdl/funded/eng_hiring дочерней джобы нет). */
+const CHILD_JOB_TABLE: Record<'hh_live' | 'yandex_maps' | 'google_maps', string> = {
   hh_live: 'parser_jobs',
   yandex_maps: 'yandex_maps_jobs',
   google_maps: 'google_maps_jobs',
@@ -460,6 +551,7 @@ async function buildPlan(
   ctx: HeStageContext,
   vertical: HeVertical,
   usage: HeUsage,
+  market: HeMarket,
 ): Promise<{ plan: HeSourcePlan; usedHypotheses: Array<{ id: string; title: string; status: string | null }> }> {
   // Гипотезы вертикали для плана. Семантика разметки: если специалист что-то
   // ПРИНЯЛ (accepted) — план строим только по принятым; предложенные (proposed)
@@ -524,7 +616,8 @@ async function buildPlan(
   }
 
   const llm = await callLLMWithSchema(
-    buildSourcePlanMessages({
+    // Рынок 'us' — EN-промпт с ENG-источниками (pdl/funded/eng_hiring/google_maps).
+    (market === 'us' ? buildSourcePlanMessagesEn : buildSourcePlanMessages)({
       verticalName: vertical.name,
       verticalSummary: vertical.summary,
       synonyms: Array.isArray(vertical.synonyms) ? vertical.synonyms : [],
@@ -625,6 +718,158 @@ async function fetchDirectoryRows(
   return { rows, excludedDuringFetch, exhausted, hitCeiling };
 }
 
+/* ─────────────────────── ENG-источники: прямое чтение справочников ─────────────────────── */
+
+/** Страница keyset-пагинации справочников pdl/funded (id — text PK). */
+const ENG_CATALOG_PAGE_SIZE = 1000;
+/** Страница офсетной пагинации eng_hiring_cache. */
+const ENG_HIRING_PAGE_SIZE = 1000;
+/**
+ * Потолок страниц eng_hiring_cache за задачу (20 × 1000 = 20k просканированных
+ * строк) — предохранитель: роль-фильтр в JS, и при пустом матче без потолка
+ * задача листала бы весь кэш.
+ */
+const ENG_HIRING_MAX_PAGES = 20;
+
+/** Значения фильтров справочников хранятся в нижнем регистре — приводим и фильтр. */
+function lowerList(values: string[]): string[] {
+  return values.map((v) => v.trim().toLowerCase()).filter(Boolean);
+}
+
+/**
+ * Каталог PDL (компании EU/US) keyset-пагинацией по id до limit строк.
+ * Фильтры — серверные: industry/size/country точным совпадением (значения в
+ * таблице в нижнем регистре), name — подстрокой (ilike, как в /api/company-base).
+ * Исключения чужих баз на выборке нет (как у hh/карт) — только на мёрдже.
+ */
+async function fetchPdlRows(
+  ctx: HeStageContext,
+  filters: HeCollectTask['pdl_filters'],
+  limit: number,
+): Promise<Record<string, unknown>[]> {
+  const rows: Record<string, unknown>[] = [];
+  let lastId = '';
+  for (;;) {
+    let query = ctx.supabase
+      .from('pdl_companies')
+      .select('id, name, website, industry, size, country, region, locality')
+      .gt('id', lastId)
+      .order('id')
+      .limit(ENG_CATALOG_PAGE_SIZE);
+    if (filters?.industries?.length) query = query.in('industry', lowerList(filters.industries));
+    if (filters?.sizes?.length) query = query.in('size', lowerList(filters.sizes));
+    if (filters?.countries?.length) query = query.in('country', lowerList(filters.countries));
+    if (filters?.name) query = query.ilike('name', `%${filters.name.replace(/[%_]/g, '')}%`);
+    const { data, error } = await query;
+    if (error) throw new Error(`pdl_companies read: ${error.message}`);
+    const page = (data ?? []) as Record<string, unknown>[];
+    for (const r of page) {
+      if (rows.length < limit) rows.push(r);
+    }
+    if (rows.length >= limit || page.length < ENG_CATALOG_PAGE_SIZE) return rows;
+    lastId = cell(page[page.length - 1]?.id);
+    // Строка без id — курсора нет, дальше не листнуть (защита от зацикливания).
+    if (!lastId) return rows;
+  }
+}
+
+/**
+ * funded_companies (стартапы и раунды) keyset-пагинацией по id до limit строк.
+ * Фильтры — applyFundedFilters из /api/funded: единая семантика с вкладкой
+ * Crunchbase (min funding: last ИЛИ total; funded_since: last_funding_date >=).
+ */
+async function fetchFundedRows(
+  ctx: HeStageContext,
+  filters: HeCollectTask['funded_filters'],
+  limit: number,
+): Promise<Record<string, unknown>[]> {
+  const rows: Record<string, unknown>[] = [];
+  let lastId = '';
+  for (;;) {
+    let query = ctx.supabase
+      .from('funded_companies')
+      .select(
+        'id, name, website, industry, country, region, locality, total_funding_usd, last_funding_usd, last_funding_type, last_funding_date, batch, source',
+      )
+      .gt('id', lastId)
+      .order('id')
+      .limit(ENG_CATALOG_PAGE_SIZE);
+    query = applyFundedFilters(query, {
+      industry: filters?.industries?.length ? lowerList(filters.industries) : undefined,
+      country: filters?.countries?.length ? lowerList(filters.countries) : undefined,
+      minFunding: filters?.min_funding_usd ?? null,
+      fundedSince: filters?.funded_since ?? null,
+    });
+    const { data, error } = await query;
+    if (error) throw new Error(`funded_companies read: ${error.message}`);
+    const page = (data ?? []) as Record<string, unknown>[];
+    for (const r of page) {
+      if (rows.length < limit) rows.push(r);
+    }
+    if (rows.length >= limit || page.length < ENG_CATALOG_PAGE_SIZE) return rows;
+    lastId = cell(page[page.length - 1]?.id);
+    if (!lastId) return rows;
+  }
+}
+
+/** Время published_at как timestamp; мусор/пусто → 0 (в сортировке уходит в хвост). */
+function publishedTime(value: unknown): number {
+  const time = Date.parse(cell(value));
+  return Number.isNaN(time) ? 0 : time;
+}
+
+/**
+ * eng_hiring_cache (компании, нанимающие ENG-роли): SQL сужает выборку по
+ * стране (country_code) и свежести (published_at >= now - posted_within_days),
+ * роль — regex по vacancy_title в JS (buildRolesRegex из ATS-фильтров, как в
+ * engHiring). Дедуп по компании внутри задачи: выживает самая свежая вакансия.
+ * Пагинация офсетная (order по published_at с keyset несовместим), с потолком
+ * ENG_HIRING_MAX_PAGES.
+ */
+async function fetchEngHiringRows(
+  ctx: HeStageContext,
+  query: HeCollectTask['eng_hiring_query'],
+  limit: number,
+): Promise<Record<string, unknown>[]> {
+  const rolesRegex = buildRolesRegex((query?.roles ?? []).join(', '));
+  const days = query?.posted_within_days ?? 0;
+  const cutoff = days > 0 ? new Date(Date.now() - days * 86_400_000).toISOString() : null;
+  const countries = query?.countries?.length ? lowerList(query.countries) : null;
+
+  const matched: Record<string, unknown>[] = [];
+  let offset = 0;
+  for (let page = 0; page < ENG_HIRING_MAX_PAGES && matched.length < limit; page += 1) {
+    let q = ctx.supabase
+      .from('eng_hiring_cache')
+      .select('company_name, company_site_url, vacancy_title, location, country, country_code, source, published_at');
+    if (countries) q = q.in('country_code', countries);
+    if (cutoff) q = q.gte('published_at', cutoff);
+    const { data, error } = await q
+      .order('published_at', { ascending: false })
+      .range(offset, offset + ENG_HIRING_PAGE_SIZE - 1);
+    if (error) throw new Error(`eng_hiring_cache read: ${error.message}`);
+    const rows = (data ?? []) as Record<string, unknown>[];
+    for (const r of rows) {
+      if (rolesRegex.test(cell(r.vacancy_title))) matched.push(r);
+    }
+    if (rows.length < ENG_HIRING_PAGE_SIZE) break;
+    offset += rows.length;
+  }
+
+  // Дедуп по компании внутри задачи: сортировка по свежести (в JS — порядок
+  // выборки не контракт), первое вхождение компании побеждает.
+  matched.sort((a, b) => publishedTime(b.published_at) - publishedTime(a.published_at));
+  const seen = new Set<string>();
+  const out: Record<string, unknown>[] = [];
+  for (const r of matched) {
+    const key = normalizeCompanyForDedup(cell(r.company_name));
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    if (out.length < limit) out.push(r);
+  }
+  return out;
+}
+
 async function dispatchTask(
   ctx: HeStageContext,
   state: HeCollectTaskState,
@@ -667,6 +912,25 @@ async function dispatchTask(
     return;
   }
 
+  // ENG-источники (market='us') — тоже синхронно, без дочерних джоб: справочные
+  // таблицы читаются напрямую, строки сразу ложатся в задачу (как реестр, но
+  // без исключения чужих баз на выборке — оно на мёрдже, как у hh/карт).
+  if (task.source === 'pdl' || task.source === 'funded' || task.source === 'eng_hiring') {
+    const rows =
+      task.source === 'pdl'
+        ? await fetchPdlRows(ctx, task.pdl_filters, limit)
+        : task.source === 'funded'
+          ? await fetchFundedRows(ctx, task.funded_filters, limit)
+          : await fetchEngHiringRows(ctx, task.eng_hiring_query, limit);
+    state.harvest = rows.map(
+      task.source === 'pdl' ? mapPdlRow : task.source === 'funded' ? mapFundedRow : mapEngHiringRow,
+    );
+    state.status = 'done';
+    state.rows = state.harvest.length;
+    state.child_job_id = null;
+    return;
+  }
+
   // Дочерним джобам парсеров обязателен владелец (user_id NOT NULL).
   if (!project.created_by) {
     throw new Error('he_projects.created_by пуст — дочерней джобе парсера некому принадлежать');
@@ -706,6 +970,11 @@ async function dispatchTask(
     const q = task.maps_query;
     if (!q?.queries?.length) throw new Error('google_maps: в задаче нет maps_query.queries');
     const inputLines = buildGoogleInputLines(q);
+    // Язык/регион выдачи — по рынку проекта (us → en/US), раньше хардкод ru/RU.
+    const gmapsLocale =
+      (ctx.market ?? projectMarket(project)) === 'us'
+        ? { language: 'en', region: 'US' }
+        : { language: 'ru', region: 'RU' };
     state.child_job_id = await insertChildJob(ctx, CHILD_JOB_TABLE.google_maps, {
       user_id: userId,
       status: 'queued',
@@ -713,8 +982,7 @@ async function dispatchTask(
       config: {
         inputLines,
         limitPerQuery: 100,
-        language: 'ru',
-        region: 'RU',
+        ...gmapsLocale,
         enrichContacts: true,
         // Вежливая пауза между запросами (как дефолты GoogleNewsParserForm);
         // без этих полей воркер считает delay от undefined → NaN.
@@ -772,7 +1040,8 @@ async function readChildRows(
 
 /** Опросить дочернюю джобу задачи: completed → harvest, failed/stopped → failed. */
 async function pollTask(ctx: HeStageContext, state: HeCollectTaskState, limit: number): Promise<void> {
-  const table = CHILD_JOB_TABLE[state.source as Exclude<HeCollectSource, 'companies_directory'>];
+  // До poll доходят только источники с дочерними джобами (остальные done на dispatch).
+  const table = CHILD_JOB_TABLE[state.source as keyof typeof CHILD_JOB_TABLE];
   if (!table || !state.child_job_id) return;
 
   const { data, error } = await ctx.supabase
@@ -805,18 +1074,19 @@ async function pollTask(ctx: HeStageContext, state: HeCollectTaskState, limit: n
 
 /**
  * Вернуть свою джобу в pending БЕЗ инкремента attempts — воркер клеймит её
- * не раньше run_after (30с пауза между тиками ожидания дочерних парсеров;
- * без паузы цикл claim→requeue крутился с нулевой задержкой, ~10 запросов
- * к БД на итерацию в течение всего ожидания). Финальный done-апдейт воркер
- * пропускает, видя, что строка больше не running (см. app/worker/hypothesisEngine.ts).
+ * не раньше run_after (пауза между тиками ожидания: 30с — дочерние парсеры,
+ * 60с — конструктор баз; без паузы цикл claim→requeue крутился с нулевой
+ * задержкой, ~10 запросов к БД на итерацию в течение всего ожидания).
+ * Финальный done-апдейт воркер пропускает, видя, что строка больше не running
+ * (см. app/worker/hypothesisEngine.ts).
  */
-async function requeueSelf(ctx: HeStageContext, job: HeJob): Promise<void> {
+async function requeueSelf(ctx: HeStageContext, job: HeJob, cooldownMs = 30_000): Promise<void> {
   const { error } = await ctx.supabase
     .from('he_jobs')
     .update({
       status: 'pending',
       started_at: null,
-      run_after: new Date(Date.now() + 30_000).toISOString(),
+      run_after: new Date(Date.now() + cooldownMs).toISOString(),
       updated_at: new Date().toISOString(),
     })
     .eq('id', job.id);
@@ -862,6 +1132,165 @@ async function loadOtherBaseCompanyKeys(
   return keys;
 }
 
+/* ─────────────────────────── Фаза CONSTRUCT ─────────────────────────── */
+
+/**
+ * Шаги конструктора для авто-базы HE: дедуп почт → поиск на сайтах → валидация
+ * → кап на компанию → описания. AI-шагов (ta_scoring/personalization) нет —
+ * генерация и скоринг остаются в Движке вертикалей.
+ */
+const CONSTRUCT_STEPS = ['dedup_email', 'find_emails', 'validate_emails', 'cap_emails_per_company', 'enrich_descriptions'];
+/** Канонические заголовки сетки конструктора (порядок — как HE_AUTO_COLLECT_COLUMNS). */
+const CONSTRUCT_HEADERS_RU = ['Компания', 'Сайт', 'Email', 'Телефон', 'Вакансия', 'Адрес', 'Категория', 'Сотрудники', 'Выручка', 'ИНН', 'Источник'];
+const CONSTRUCT_HEADERS_EN = ['Company', 'Site', 'Email', 'Phone', 'Vacancy', 'Address', 'Category', 'Employees', 'Revenue', 'INN', 'Source'];
+/** Сколько ждём BC-джобу, прежде чем считать её зависшей (база → failed). */
+const CONSTRUCT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+/** Пауза между тиками ожидания BC-джобы (run_after). */
+const CONSTRUCT_REQUEUE_MS = 60_000;
+
+/** Заголовок сетки конструктора (lowercase) → унифицированная колонка / description. */
+const CONSTRUCT_HEADER_MAP: Record<string, keyof HeUnifiedRow | 'description'> = {
+  company: 'company',
+  'компания': 'company',
+  site: 'website',
+  'сайт': 'website',
+  email: 'email',
+  phone: 'phone',
+  'телефон': 'phone',
+  vacancy: 'vacancy_title',
+  'вакансия': 'vacancy_title',
+  address: 'address',
+  'адрес': 'address',
+  category: 'category',
+  'категория': 'category',
+  employees: 'employees',
+  'сотрудники': 'employees',
+  revenue: 'revenue',
+  'выручка': 'revenue',
+  inn: 'inn',
+  'инн': 'inn',
+  source: 'source_detail',
+  'источник': 'source_detail',
+  description: 'description',
+  'описание': 'description',
+};
+
+/**
+ * Нужен ли конструктор: email есть у ≤50% строк. RU-источники (реестр, карты)
+ * богаты почтами и проходят мимо; ENG-базы (pdl/funded/eng_hiring, почти все
+ * email пустые) и бедные RU-сборки (hh) уходят на поиск/валидацию почт.
+ */
+function needsConstruct(merged: HeUnifiedRow[]): boolean {
+  const withEmail = merged.filter((r) => r.email.trim() !== '').length;
+  return withEmail * 2 <= merged.length;
+}
+
+/** merged-строки → сетка string[][] конструктора (заголовок по локали рынка). */
+function buildConstructGrid(rows: HeUnifiedRow[], market: HeMarket): string[][] {
+  const headers = market === 'us' ? CONSTRUCT_HEADERS_EN : CONSTRUCT_HEADERS_RU;
+  return [
+    [...headers],
+    ...rows.map((r) => [
+      r.company, r.website, r.email, r.phone, r.vacancy_title, r.address,
+      r.category, r.employees, r.revenue, r.inn, r.source_detail,
+    ]),
+  ];
+}
+
+/** Статус BC-джобы (null — строка потерялась: трактуем как failed без данных). */
+async function readConstructJobStatus(
+  ctx: HeStageContext,
+  bcJobId: string,
+): Promise<{ status: string; error_message: string | null } | null> {
+  const { data, error } = await ctx.supabase
+    .from('base_constructor_jobs')
+    .select('status, error_message')
+    .eq('id', bcJobId)
+    .maybeSingle();
+  if (error) throw new Error(`base_constructor_jobs read: ${error.message}`);
+  if (!data) return null;
+  const row = data as { status?: unknown; error_message?: unknown };
+  return {
+    status: String(row.status ?? ''),
+    error_message: typeof row.error_message === 'string' ? row.error_message : null,
+  };
+}
+
+export interface HeConstructImport {
+  rows: Array<HeUnifiedRow & { description: string }>;
+  /** Почт найдено (result_stats.emails_found; фолбэк — строки с email). */
+  emailsFound: number;
+  /** Почт с вердиктом ok (колонка «Email Статус»; 0, если валидация не дошла). */
+  validCount: number;
+  /** В сетке была колонка описания — добавить 'description' в заголовки базы. */
+  hasDescription: boolean;
+}
+
+/**
+ * Сетка завершённой BC-джобы → унифицированные строки. Маппинг по имени
+ * заголовка (RU/EN каноника + Description/Описание); лишние колонки шагов
+ * («Email Статус» и пр.) в базу не переносятся. email — первый адрес
+ * merged-ячейки (контракт he_bases — один email на строку). Строки без
+ * компании отбрасываются. null — данных нет/пусто (импортировать нечего).
+ */
+async function importConstructRows(ctx: HeStageContext, bcJobId: string): Promise<HeConstructImport | null> {
+  const { data, error } = await ctx.supabase
+    .from('base_constructor_jobs')
+    .select('data, result_stats')
+    .eq('id', bcJobId)
+    .maybeSingle();
+  if (error) throw new Error(`base_constructor_jobs data read: ${error.message}`);
+  const grid = (data as { data?: unknown } | null)?.data;
+  if (!Array.isArray(grid) || grid.length < 2) return null;
+
+  const header = (grid[0] as unknown[]).map((h) => String(h ?? '').trim().toLowerCase());
+  const idxByKey = new Map<string, number>();
+  header.forEach((h, i) => {
+    const key = CONSTRUCT_HEADER_MAP[h];
+    if (key && !idxByKey.has(key)) idxByKey.set(key, i);
+  });
+  const statusIdx = header.indexOf('email статус');
+
+  const rows: Array<HeUnifiedRow & { description: string }> = [];
+  let validCount = 0;
+  for (const bodyRow of grid.slice(1) as unknown[][]) {
+    const get = (key: keyof HeUnifiedRow | 'description'): string => {
+      const idx = idxByKey.get(key);
+      return idx === undefined ? '' : String(bodyRow[idx] ?? '').trim();
+    };
+    const company = get('company');
+    // Мусорные строки (пустая/схлопнутая компания) — как на HARVEST: выбросить.
+    if (!normalizeCompanyForDedup(company)) continue;
+    if (statusIdx >= 0 && String(bodyRow[statusIdx] ?? '').trim() === 'ok') validCount += 1;
+    rows.push({
+      ...unifiedRow({
+        company,
+        website: get('website'),
+        // Мerged-ячейка может держать несколько адресов через запятую —
+        // в базе один email на строку: первый (исходный приоритетнее scrape).
+        email: extractEmail(get('email')) ?? '',
+        phone: get('phone'),
+        vacancy_title: get('vacancy_title'),
+        address: get('address'),
+        category: get('category'),
+        employees: get('employees'),
+        revenue: get('revenue'),
+        inn: get('inn'),
+        source_detail: get('source_detail'),
+      }),
+      description: get('description'),
+    });
+  }
+  if (rows.length === 0) return null;
+
+  const stats = (data as { result_stats?: unknown } | null)?.result_stats as { emails_found?: unknown } | null;
+  const emailsFound =
+    typeof stats?.emails_found === 'number' && Number.isFinite(stats.emails_found)
+      ? stats.emails_found
+      : rows.filter((r) => r.email !== '').length;
+  return { rows, emailsFound, validCount, hasDescription: idxByKey.has('description') };
+}
+
 /* ─────────────────────────── Стадия ─────────────────────────── */
 
 export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
@@ -897,13 +1326,16 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   const vertical = verticalRow as HeVertical;
 
   const project = await readProject(ctx.supabase, job.project_id);
+  // Рынок проекта: выбор промпта планировщика (EN-источники при 'us').
+  // ctx.market прокидывает воркер, фолбэк — колонка he_projects.market.
+  const market = ctx.market ?? projectMarket(project);
 
   const info: HeCollectInfo =
     base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
 
   // ─── PLAN ───
   if (!info.plan) {
-    const { plan, usedHypotheses } = await buildPlan(job, ctx, vertical, usage);
+    const { plan, usedHypotheses } = await buildPlan(job, ctx, vertical, usage, market);
     info.plan = plan;
     info.hypotheses = usedHypotheses;
     info.tasks = info.plan.tasks.map((task) => ({
@@ -1058,13 +1490,118 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     throw new Error(note);
   }
 
+  // ─── CONSTRUCT ───
+  // Обогащение собранных строк конструктором баз (почты/описания). Пропуск —
+  // когда email уже есть у >50% строк (RU-источники) или фаза завершалась
+  // ранее (construct.status='done' в collect_info). База в analyzing уходит
+  // только после импорта (или решения failed/cancelled BC-джобы).
+  let finalRows: HeUnifiedRow[] = merged;
+  let finalColumns: string[] = [...HE_AUTO_COLLECT_COLUMNS];
+  const construct = info.construct;
+  if ((!construct || construct.status === 'dispatched') && needsConstruct(merged)) {
+    if (!construct?.bc_job_id) {
+      // DISPATCH-CONSTRUCT: джоба конструктора (воркер baseConstructor клеймит
+      // pending), её id — в collect_info.construct; дальше WAIT с паузой 60с.
+      if (!project.created_by) {
+        throw new Error('he_projects.created_by пуст — джобе конструктора некому принадлежать');
+      }
+      const locale = market === 'us' ? 'en' : 'ru';
+      const bcJobId = await insertChildJob(ctx, 'base_constructor_jobs', {
+        user_id: project.created_by,
+        file_name: `HE · ${base.filename ?? baseId}`,
+        status: 'pending',
+        locale,
+        selected_steps: CONSTRUCT_STEPS,
+        // Кап «до 5 почт на компанию» — ключ max, как читает STEP_RUNNERS воркера.
+        step_config: { cap_emails_per_company: { max: 5 } },
+        data: buildConstructGrid(merged, market),
+        initial_row_count: merged.length,
+        total_steps: CONSTRUCT_STEPS.length,
+      });
+      info.construct = { bc_job_id: bcJobId, status: 'dispatched', dispatched_at: new Date().toISOString() };
+      await persistCollectInfo(ctx, baseId, info);
+      stageLog(ctx, `[base_collect] construct: создана base_constructor_jobs ${bcJobId} (${merged.length} строк, locale ${locale})`);
+      await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+      return {
+        result: { waiting: true, base_id: baseId, construct: 'dispatched' },
+        tokensUsed: usage.tokensUsed,
+        costUsd: usage.costUsd,
+      };
+    }
+
+    // WAIT-CONSTRUCT: опрос BC-джобы до терминального статуса.
+    const bc = await readConstructJobStatus(ctx, construct.bc_job_id);
+    const bcStatus = bc?.status ?? 'failed';
+    if (bcStatus === 'completed' || bcStatus === 'failed' || bcStatus === 'cancelled') {
+      // IMPORT: failed/cancelled базу НЕ валит — импортируем частичный data,
+      // если он есть, иначе идём в analyzing без обогащения.
+      const imported = await importConstructRows(ctx, construct.bc_job_id);
+      const failNote =
+        bcStatus === 'completed'
+          ? null
+          : `конструктор завершился со статусом ${bcStatus}${bc?.error_message ? `: ${bc.error_message}` : ''}`;
+      if (imported) {
+        finalRows = imported.rows;
+        if (imported.hasDescription) finalColumns = [...HE_AUTO_COLLECT_COLUMNS, 'description'];
+        info.construct = {
+          ...construct,
+          status: bcStatus === 'completed' ? 'done' : bcStatus,
+          emails_found: imported.emailsFound,
+          valid_count: imported.validCount,
+          ...(failNote ? { note: `${failNote} — импортирован частичный результат` } : {}),
+        };
+      } else {
+        info.construct = {
+          ...construct,
+          status: bcStatus === 'completed' ? 'done' : bcStatus,
+          note: failNote
+            ? `${failNote} — база без обогащения`
+            : 'конструктор вернул пустые данные — база без обогащения',
+        };
+      }
+      stageLog(
+        ctx,
+        `[base_collect] construct ${bcStatus}: ${
+          imported
+            ? `импортировано ${imported.rows.length} строк, почт ${imported.emailsFound}, валидных ${imported.validCount}`
+            : 'данных нет — база без обогащения'
+        }`,
+      );
+    } else {
+      // Таймаут ожидания конструктора — вечно не ждём: база failed с разбором.
+      if (
+        construct.dispatched_at &&
+        Date.now() - new Date(construct.dispatched_at).getTime() > CONSTRUCT_TIMEOUT_MS
+      ) {
+        const note = `Конструктор баз не завершился за 6ч (job ${construct.bc_job_id}, статус: ${bc?.status ?? 'не найдена'})`;
+        info.construct = { ...construct, note };
+        await ctx.supabase
+          .from('he_bases')
+          .update({
+            status: 'failed',
+            error: note.slice(0, 500),
+            collect_info: { ...info, stats },
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', baseId);
+        throw new Error(note);
+      }
+      await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+      return {
+        result: { waiting: true, base_id: baseId, construct: bc?.status ?? 'missing' },
+        tokensUsed: usage.tokensUsed,
+        costUsd: usage.costUsd,
+      };
+    }
+  }
+
   const { error: updError } = await ctx.supabase
     .from('he_bases')
     .update({
-      columns: [...HE_AUTO_COLLECT_COLUMNS],
-      sample_rows: merged.slice(0, SAMPLE_ROWS),
-      data: merged,
-      row_count: merged.length,
+      columns: finalColumns,
+      sample_rows: finalRows.slice(0, SAMPLE_ROWS),
+      data: finalRows,
+      row_count: finalRows.length,
       status: 'analyzing',
       collect_info: { ...info, stats },
       updated_at: new Date().toISOString(),
@@ -1083,7 +1620,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   return {
     result: {
       base_id: baseId,
-      rows: merged.length,
+      rows: finalRows.length,
       tasks_done: done.length,
       tasks_failed: failed.length,
       failed_sources: failed.map((f) => f.source),

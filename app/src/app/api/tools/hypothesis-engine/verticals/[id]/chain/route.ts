@@ -4,6 +4,7 @@ import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { defaultChainLanguageForMarket, projectMarket } from '@/lib/hypothesisEngine/market';
 import type { HeChainLanguage } from '@/lib/hypothesisEngine/types';
 
 export const dynamic = 'force-dynamic';
@@ -31,7 +32,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const { id } = await params;
       if (!id) return jsonError('Missing id', 400);
 
-      let language: HeChainLanguage = 'ru';
+      // null = язык явно не задан — дефолт вычислим по рынку проекта ниже.
+      let language: HeChainLanguage | null = null;
       try {
         const body = (await req.json()) as { language?: unknown };
         if (body?.language !== undefined) {
@@ -67,6 +69,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         (j) => (j.payload as { vertical_id?: string } | null)?.vertical_id === id,
       );
       if (existing) return NextResponse.json({ ok: true, job: existing });
+
+      // Дефолт языка цепочки — по рынку проекта (market=us → en); явный
+      // language в body в приоритете. Best-effort: нечитаемый/legacy-проект
+      // без market → 'ru', как раньше.
+      if (language === null) {
+        const { data: project } = await supabaseAdmin
+          .from('he_projects')
+          .select('market')
+          .eq('id', vertical.project_id)
+          .maybeSingle();
+        language = defaultChainLanguageForMarket(projectMarket(project ?? {}));
+      }
 
       const { data: job, error: jobErr } = await supabaseAdmin
         .from('he_jobs')

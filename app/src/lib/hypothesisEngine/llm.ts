@@ -112,6 +112,20 @@ export class LLMValidationError extends Error {
   }
 }
 
+/**
+ * AbortSignal активной джобы воркера. Воркер single-flight (handleJob
+ * выполняет строго одну джобу за раз), поэтому сигнал — модульный:
+ * worker/hypothesisEngine.ts ставит его перед runHeStage и снимает после.
+ * Отмена задачи (he_jobs.status='cancelled') через сигнал обрывает текущий
+ * HTTP-запрос к LLM сразу, а не по окончании стадии — деньги не догорают.
+ * Вне воркера (API-роуты) сигнала нет — поведение прежнее.
+ */
+let activeJobSignal: AbortSignal | null = null;
+
+export function setHeActiveJobSignal(signal: AbortSignal | null): void {
+  activeJobSignal = signal;
+}
+
 async function rawCall(
   messages: LLMMessage[],
   model: string,
@@ -127,6 +141,7 @@ async function rawCall(
       max_tokens: maxTokens,
       ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
     }),
+    ...(activeJobSignal ? { signal: activeJobSignal } : {}),
   });
   if (!res.ok) {
     const text = await res.text();

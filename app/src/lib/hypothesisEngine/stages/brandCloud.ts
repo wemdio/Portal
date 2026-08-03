@@ -7,7 +7,9 @@
 
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { HeBrandCloudSchema, type HeSiteProfileOutput } from '../schemas';
+import { projectMarket, type HeMarket } from '../market';
 import { buildBrandCloudMessages } from '../prompts/brandCloud';
+import { buildBrandCloudMessagesEn } from '../prompts/brandCloud.en';
 import type { HeJob } from '../types';
 import { resolveFetchText, resolveSearch } from './io';
 import {
@@ -26,7 +28,8 @@ import type { HeCompetitorEntry } from './competitors';
 const MAX_TARGETS = 6; // клиент + до 5 конкурентов
 const HOMEPAGE_EXCERPT = 1500;
 const CASE_PAGE_EXCERPT = 2000;
-const CASE_LINK_PATTERN = /кейс|case|client|klient|отзыв|review|partner/i;
+const CASE_LINK_PATTERN_RU = /кейс|case|client|klient|отзыв|review|partner/i;
+const CASE_LINK_PATTERN_EN = /case|client|customer|review|testimonial|partner|success/i;
 
 interface BrandCloudEntity {
   name: string;
@@ -62,13 +65,16 @@ async function reportProgress(
 async function collectBrandPages(
   target: { name: string; url: string },
   ctx: HeStageContext,
+  market: HeMarket,
 ): Promise<{ pages: Array<{ url: string; text: string }>; searchResults: Array<{ title: string; link: string; snippet?: string }> }> {
   const search = resolveSearch(ctx);
   const fetchText = resolveFetchText(ctx);
 
   let searchResults: Array<{ title: string; link: string; snippet?: string }> = [];
   try {
-    searchResults = await search(`"${target.name}" кейсы клиенты отзывы`);
+    searchResults = await search(
+      market === 'us' ? `"${target.name}" case studies clients reviews` : `"${target.name}" кейсы клиенты отзывы`,
+    );
   } catch {
     searchResults = [];
   }
@@ -80,7 +86,8 @@ async function collectBrandPages(
     stageLog(ctx, `[brand_cloud] фетч главной ${target.url} пропущен: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  const caseLink = searchResults.find((r) => CASE_LINK_PATTERN.test(r.link))?.link;
+  const caseLinkPattern = market === 'us' ? CASE_LINK_PATTERN_EN : CASE_LINK_PATTERN_RU;
+  const caseLink = searchResults.find((r) => caseLinkPattern.test(r.link))?.link;
   if (caseLink) {
     try {
       pages.push({ url: caseLink, text: truncate(await fetchText(caseLink), CASE_PAGE_EXCERPT) });
@@ -96,6 +103,8 @@ export async function runBrandCloudStage(job: HeJob, ctx: HeStageContext): Promi
   const usage = newUsage();
   const project = await readProject(ctx.supabase, job.project_id);
   const profile = readSiteProfile<HeSiteProfileOutput>(project);
+  // Рынок: ctx.market (воркер), фолбэк — колонка he_projects.market.
+  const market = ctx.market ?? projectMarket(project);
 
   const competitorsResult = await latestDoneJobResult<{ competitors?: HeCompetitorEntry[] }>(
     ctx.supabase,
@@ -114,10 +123,15 @@ export async function runBrandCloudStage(job: HeJob, ctx: HeStageContext): Promi
     const target = targets[i];
     await reportProgress(ctx, job.id, i + 1, targets.length, 'разбираем бренд');
     stageLog(ctx, `[brand_cloud] ${target.name}…`);
-    const { pages, searchResults } = await collectBrandPages(target, ctx);
+    const { pages, searchResults } = await collectBrandPages(target, ctx, market);
     try {
       const llm = await callLLMWithSchema(
-        buildBrandCloudMessages({ brandName: target.name, brandUrl: target.url, pages, searchResults }),
+        (market === 'us' ? buildBrandCloudMessagesEn : buildBrandCloudMessages)({
+          brandName: target.name,
+          brandUrl: target.url,
+          pages,
+          searchResults,
+        }),
         HeBrandCloudSchema,
         { model: getHeModel('bulk'), maxTokens: 4096 },
       );

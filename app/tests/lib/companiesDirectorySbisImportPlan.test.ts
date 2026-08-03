@@ -4,6 +4,7 @@ import {
   applySbisImportPlan,
   buildSbisContactImportPlan,
   buildSbisIndustryImportPlan,
+  buildStrictSbisContactImportPlan,
   collapseSbisRowsByInn,
   mapSbisWorksheetRecord,
   normalizeSbisInn,
@@ -22,6 +23,14 @@ const CONTACT_OPTIONS = {
   sourceFile: 'Компании (2).xlsx',
 };
 
+const STRICT_CONTACT_OPTIONS = {
+  sourceFile: 'strict-contacts.xlsx',
+};
+
+type StrictSbisDirectoryInputRow = SbisDirectoryInputRow & {
+  source_activity?: unknown;
+};
+
 function sourceRow(
   overrides: Partial<SbisDirectoryInputRow> = {},
 ): SbisDirectoryInputRow {
@@ -38,6 +47,17 @@ function sourceRow(
     revenue: 100_000_000,
     website: 'https://www.alpha.ru/about',
     ogrn: '1177746494166',
+    ...overrides,
+  };
+}
+
+function strictSourceRow(
+  overrides: Partial<StrictSbisDirectoryInputRow> = {},
+): StrictSbisDirectoryInputRow {
+  return {
+    ...sourceRow(),
+    activity_type: null,
+    source_activity: '01.00 - Agriculture',
     ...overrides,
   };
 }
@@ -590,5 +610,231 @@ describe('SBIS companies_directory import plan', () => {
     expect(repeatedFirst.metrics.updates).toBe(0);
     expect(repeatedSecond.metrics.inserts).toBe(0);
     expect(repeatedSecond.metrics.updates).toBe(0);
+  });
+});
+
+describe('strict SBIS contact import contract', () => {
+  it('drops technical service email domains and their subdomains but keeps a company email', () => {
+    const plan = buildStrictSbisContactImportPlan(
+      [
+        strictSourceRow({
+          email: [
+            'robot@eo.tensor.ru',
+            'docs@notify.diadoc.ru',
+            'dealer@sub.saby.ru',
+            'SALES@ALPHA.RU',
+          ].join(', '),
+          website: null,
+        }),
+        strictSourceRow({
+          rowNumber: 3,
+          inn: '7729058675',
+          email: 'robot@sub.eo.tensor.ru, dealer@saby.ru',
+          website: null,
+        }),
+      ],
+      [],
+      STRICT_CONTACT_OPTIONS,
+    );
+
+    expect(plan.inserts).toHaveLength(1);
+    expect(plan.inserts[0]).toMatchObject({
+      inn: '7704414297',
+      email: 'sales@alpha.ru',
+      website: null,
+    });
+    expect(plan.skipped).toContainEqual(
+      expect.objectContaining({
+        inn: '7729058675',
+        reason: 'missing_website_or_email',
+      }),
+    );
+  });
+
+  it('drops pseudo-sites, aggregators and social profiles but keeps a corporate domain', () => {
+    const blockedWebsites = [
+      'company.aspx',
+      'https://online.sbis.ru/Company.aspx?id=1',
+      'https://2gis.ru/moscow/firm/1',
+      'https://m.avito.ru/example',
+      'https://biziq.ru/company/example',
+      'https://instagram.com/example',
+      'https://list-org.com/company/1',
+      'https://ok.ru/example',
+      'https://rusprofile.ru/id/1',
+      'https://t.me/example',
+      'https://vk.com/example',
+      'https://maps.yandex.ru/example',
+      'https://youtube.com/@example',
+    ];
+    const plan = buildStrictSbisContactImportPlan(
+      [
+        strictSourceRow({
+          email: null,
+          website: [...blockedWebsites, 'https://www.alpha.ru/about'].join(', '),
+        }),
+        strictSourceRow({
+          rowNumber: 3,
+          inn: '7729058675',
+          email: null,
+          website: blockedWebsites.join(', '),
+        }),
+      ],
+      [],
+      STRICT_CONTACT_OPTIONS,
+    );
+
+    expect(plan.inserts).toHaveLength(1);
+    expect(plan.inserts[0]).toMatchObject({
+      inn: '7704414297',
+      email: null,
+      website: 'alpha.ru',
+    });
+    expect(plan.skipped).toContainEqual(
+      expect.objectContaining({
+        inn: '7729058675',
+        reason: 'missing_website_or_email',
+      }),
+    );
+  });
+
+  it('updates only blank website or email fields and never changes phones or OKVED', () => {
+    const existing: ExistingDirectoryRow = {
+      id: 60,
+      inn: '7704414297',
+      website: null,
+      email: 'current@alpha.ru',
+      phones: null,
+      okved_code: null,
+      okved_code_exact: '62.01',
+      okved_exact_source: 'fns',
+    };
+    const plan = buildStrictSbisContactImportPlan(
+      [
+        strictSourceRow({
+          website: 'https://www.alpha.ru/about',
+          email: 'incoming@alpha.ru',
+          phones: '+7 (495) 111-22-33',
+          source_activity: '01.00 - Agriculture',
+        }),
+      ],
+      [existing],
+      STRICT_CONTACT_OPTIONS,
+    );
+
+    expect(plan.updates).toEqual([
+      {
+        id: 60,
+        inn: '7704414297',
+        patch: { website: 'alpha.ru' },
+      },
+    ]);
+    expect(applySbisImportPlan([existing], plan)[0]).toMatchObject({
+      website: 'alpha.ru',
+      email: 'current@alpha.ru',
+      phones: null,
+      okved_code: null,
+      okved_code_exact: '62.01',
+      okved_exact_source: 'fns',
+    });
+  });
+
+  it('blocks inserts and updates when the target contains duplicate rows for one INN', () => {
+    const plan = buildStrictSbisContactImportPlan(
+      [strictSourceRow()],
+      [
+        { id: 70, inn: '7704414297', website: null, email: null },
+        { id: 71, inn: '7704414297', website: null, email: null },
+      ],
+      STRICT_CONTACT_OPTIONS,
+    );
+
+    expect(plan.inserts).toHaveLength(0);
+    expect(plan.updates).toHaveLength(0);
+    expect(plan.metrics.blockedExistingDuplicates).toBe(1);
+    expect(plan.conflicts).toContainEqual(
+      expect.objectContaining({
+        inn: '7704414297',
+        kind: 'duplicate_existing_inn',
+        existingIds: [70, 71],
+      }),
+    );
+  });
+
+  it('inserts new companies only when at least one cleaned website or email remains', () => {
+    const plan = buildStrictSbisContactImportPlan(
+      [
+        strictSourceRow({
+          email: 'sales@alpha.ru',
+          website: null,
+          phones: '+7 495 111-22-33',
+        }),
+        strictSourceRow({
+          rowNumber: 3,
+          inn: '7729058675',
+          email: null,
+          website: 'https://jet.su/products',
+        }),
+        strictSourceRow({
+          rowNumber: 4,
+          inn: '7811643020',
+          email: 'robot@eo.tensor.ru',
+          website: 'company.aspx',
+          phones: '+7 812 123-45-67',
+        }),
+      ],
+      [],
+      STRICT_CONTACT_OPTIONS,
+    );
+
+    expect(plan.inserts.map((row) => row.inn)).toEqual([
+      '7704414297',
+      '7729058675',
+    ]);
+    expect(plan.inserts.every((row) => row.phones === null)).toBe(true);
+    expect(plan.skipped).toContainEqual(
+      expect.objectContaining({
+        inn: '7811643020',
+        reason: 'missing_website_or_email',
+      }),
+    );
+  });
+
+  it('maps source classification to a parent approximate OKVED and never to exact OKVED', () => {
+    const mapped = mapSbisWorksheetRecord(
+      {
+        'Название': 'ООО "АЛЬФА"',
+        'ИНН': '7704414297',
+        'Адрес': 'г. Москва',
+        'Количество сотрудников': 12,
+        'Телефоны': null,
+        email: 'sales@alpha.ru',
+        'Выручка': null,
+        'Источник': '01.00 - Agriculture',
+      },
+      2,
+    ) as StrictSbisDirectoryInputRow;
+
+    expect(mapped.source_activity).toBe('01.00 - Agriculture');
+
+    const plan = buildStrictSbisContactImportPlan(
+      [mapped],
+      [],
+      STRICT_CONTACT_OPTIONS,
+    );
+    expect(plan.inserts).toHaveLength(1);
+    expect(plan.inserts[0]).toMatchObject({
+      inn: '7704414297',
+      okved_code: '01',
+      okved_code_exact: null,
+      okved_exact_source: null,
+    });
+
+    const invalidParent = buildStrictSbisContactImportPlan(
+      [strictSourceRow({ source_activity: '00.00 - Not an OKVED class' })],
+      [],
+      STRICT_CONTACT_OPTIONS,
+    );
+    expect(invalidParent.inserts[0]?.okved_code).toBeNull();
   });
 });
