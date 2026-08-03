@@ -43,7 +43,7 @@ function sessionCacheEvict(): void {
   if (oldest != null) sessionPathCache.delete(oldest);
 }
 
-async function downloadSessionToTemp(db: SupabaseClient, storagePath: string): Promise<string> {
+export async function downloadSessionToTemp(db: SupabaseClient, storagePath: string): Promise<string> {
   const cached = sessionPathCache.get(storagePath);
   if (cached && fs.existsSync(cached)) return cached;
   const { data, error } = await db.storage.from(BUCKET_SESSIONS).download(storagePath);
