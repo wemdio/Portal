@@ -2,14 +2,19 @@ import 'server-only';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireRenewalsAccess } from '@/lib/renewals/access';
 import { parseRenewalsParams } from '@/lib/renewals/params';
-import { computeRenewalsMetrics, fetchRenewalPeriods, fetchRenewalProjects } from '@/lib/renewals/metrics';
-import { buildRenewalTableRows, buildUndatedRenewalTableRows } from '@/lib/renewals/tableRows';
+import { computeRenewalsMetrics, fetchRenewalMarks, fetchRevenueTransactions } from '@/lib/renewals/metrics';
+import { buildRenewalTableRows } from '@/lib/renewals/tableRows';
 import { bucketKey } from '@/lib/firstSales/buckets';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
 // либо пустой ответ, либо чужой. Явно снимаем этот вопрос, как и соседние
 // роуты аналитики (см. api/analytics/first-sales/summary/route.ts).
 export const dynamic = 'force-dynamic';
+
+// Тот же приём, что first-sales/leads/route.ts: базовый URL AMO-аккаунта из
+// окружения, без хвостового слэша. `null`, если переменная не задана —
+// buildRenewalTableRows в этом случае просто не даёт ссылку на сделку.
+const AMO_BASE_URL = (process.env.AMO_BASE_URL ?? '').replace(/\/$/, '') || null;
 
 export async function GET(req: NextRequest) {
   // `'error' in gate` — принятое в проекте сужение размеченного объединения,
@@ -23,36 +28,29 @@ export async function GET(req: NextRequest) {
   // что в firstSales/summary/route.ts: truthy-сужение по `error` здесь тоже
   // не работает на используемой версии tsc.
   if (parsed.value === null) return NextResponse.json({ error: parsed.error }, { status: 400 });
-  const { from, to, groupBy, kpiFilter } = parsed.value;
+  const { from, to, groupBy } = parsed.value;
 
   try {
-    const rows = await fetchRenewalProjects(db);
-    const projectIds = rows.map((r) => r.id);
-    const periods = await fetchRenewalPeriods(db, projectIds);
+    // Обе выборки — вся история, не только окно [from, to]: ранжирование
+    // «какой платёж по счёту у ИНН» требует видеть платежи ДО периода (см.
+    // doc-комментарий computeRenewalsMetrics в metrics.ts). Окно применяется
+    // только внутри computeRenewalsMetrics/buildRenewalTableRows.
+    const [marks, transactions] = await Promise.all([
+      fetchRenewalMarks(db),
+      fetchRevenueTransactions(db),
+    ]);
 
-    const today = new Date();
-    const result = computeRenewalsMetrics(rows, periods, from, to, groupBy, kpiFilter, today);
+    const result = computeRenewalsMetrics(marks, transactions, from, to, groupBy);
 
     // Таблица срезана тем же периодом, что и плитки: страница фильтруется
-    // целиком, а не по частям. Две выборки под одним фильтром разошлись бы, и
-    // объяснять расхождение пришлось бы в переписке.
-    //
-    // Границы приводим к ключу дня в МСК — тем же bucketKey, которым считаются
-    // корзины. Сравнивать даты оплаты (они уже строки YYYY-MM-DD) с ISO-меткой
-    // времени напрямую нельзя: `'2026-07-15' > '2026-07-15T00:00:00.000Z'`
-    // ложно, и последний день периода потерялся бы.
-    const tableRows = buildRenewalTableRows(rows, kpiFilter, bucketKey(today, 'day'), {
+    // целиком, а не по частям. Границы приводим к ключу дня в МСК — тем же
+    // bucketKey, которым фильтрует сама computeRenewalsMetrics.
+    const tableRows = buildRenewalTableRows(marks, transactions, AMO_BASE_URL, {
       fromKey: bucketKey(from, 'day'),
       toKey: bucketKey(to, 'day'),
     });
 
-    // Продления без даты оплаты в `tableRows` не попадают ни при каком окне —
-    // привязать их ко времени нечем (см. buildRenewalTableRows). Период на них
-    // поэтому не распространяется и здесь: функция ниже вообще не принимает
-    // окно, только тот же фильтр KPI, что и основная таблица.
-    const undatedRows = buildUndatedRenewalTableRows(rows, kpiFilter, bucketKey(today, 'day'));
-
-    return NextResponse.json({ ...result, tableRows, undatedRows });
+    return NextResponse.json({ ...result, tableRows });
   } catch (e) {
     return NextResponse.json(
       { error: e instanceof Error ? e.message : 'renewals_summary_failed' },

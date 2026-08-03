@@ -1,247 +1,182 @@
-import { buildRenewalTableRows, buildUndatedRenewalTableRows } from '@/lib/renewals/tableRows';
-import type { RenewalProjectRow } from '@/lib/renewals/metrics';
+import { buildRenewalTableRows } from '@/lib/renewals/tableRows';
+import type { RenewalMarkRow, RevenueTransactionRow } from '@/lib/renewals/metrics';
 
-function renewal(over: Partial<RenewalProjectRow> = {}): RenewalProjectRow {
+function txn(over: Partial<RevenueTransactionRow> = {}): RevenueTransactionRow {
   return {
-    id: 'p1',
-    name: 'Проект',
-    client: 'Клиент',
-    project_type: 'Продление',
-    budget: '100000',
-    payment_date: '2026-07-15',
-    contract_date: null,
-    kpi_fact: null,
-    status: 'В работе',
-    manager: null,
-    specialist: null,
+    id: 1,
+    payer_inn: '7714379242',
+    payer_name: 'ООО «Смартвэй»',
+    amount: 159000,
+    occurred_at: '2026-07-15T10:00:00.000Z',
+    purpose: 'Оплата по договору №1 за июль',
     ...over,
   };
 }
 
-const TODAY_KEY = '2026-07-20';
+function mark(over: Partial<RenewalMarkRow> = {}): RenewalMarkRow {
+  return {
+    transaction_id: 1,
+    is_renewal: true,
+    method: 'task_text',
+    amo_deal_id: null,
+    note: null,
+    ...over,
+  };
+}
 
-describe('buildRenewalTableRows — тип и фильтр KPI', () => {
-  it('строки других типов не попадают в таблицу', () => {
+describe('buildRenewalTableRows — какие строки попадают', () => {
+  it('только is_renewal=true, соединённые с транзакцией', () => {
     const rows = buildRenewalTableRows(
-      [renewal({ project_type: 'Продажа' }), renewal({ id: 'p2', project_type: null })],
+      [
+        mark({ transaction_id: 1, is_renewal: true }),
+        mark({ transaction_id: 2, is_renewal: false, method: 'not_renewal' }),
+      ],
+      [txn({ id: 1 }), txn({ id: 2, payer_inn: '2' })],
       null,
-      TODAY_KEY,
     );
+    expect(rows.map((r) => r.transactionId)).toEqual([1]);
+  });
+
+  it('отметка на транзакцию вне выборки не роняет и не создаёт строку', () => {
+    const rows = buildRenewalTableRows([mark({ transaction_id: 999 })], [txn({ id: 1 })], null);
     expect(rows).toHaveLength(0);
   });
+});
 
-  it('тип с пробелами и другим регистром распознаётся', () => {
-    const rows = buildRenewalTableRows([renewal({ project_type: '  ПРОДЛЕНИЕ  ' })], null, TODAY_KEY);
-    expect(rows).toHaveLength(1);
+describe('buildRenewalTableRows — поля строки', () => {
+  it('клиент/ИНН/сумма/назначение берутся из транзакции, а не из текста подтверждения', () => {
+    const rows = buildRenewalTableRows(
+      [mark({ transaction_id: 1, note: 'по комментарию: «Продление 1 - 159к»' })],
+      [
+        txn({
+          id: 1,
+          payer_name: 'ООО «Смартвэй»',
+          payer_inn: '7714379242',
+          amount: 159000,
+          purpose: 'Оплата по договору №1 за июль',
+        }),
+      ],
+      null,
+    );
+    expect(rows[0]).toMatchObject({
+      client: 'ООО «Смартвэй»',
+      inn: '7714379242',
+      amount: 159000, // сумма ПЛАТЕЖА, не число из текста
+      purpose: 'Оплата по договору №1 за июль',
+    });
   });
 
-  it('фильтр KPI отсекает так же, как в metrics.ts', () => {
+  it('человеческая подпись метода — по method, для каждого значения своя', () => {
     const rows = buildRenewalTableRows(
       [
-        renewal({ id: 'p1', kpi_fact: '50' }),
-        renewal({ id: 'p2', kpi_fact: '90' }),
-        renewal({ id: 'p3', kpi_fact: 'н/д' }),
+        mark({ transaction_id: 1, method: 'note_text' }),
+        mark({ transaction_id: 2, method: 'task_text' }),
+        mark({ transaction_id: 3, method: 'project_type' }),
+        mark({ transaction_id: 4, method: 'manual' }),
       ],
-      { min: 60, max: 100 },
-      TODAY_KEY,
+      [
+        txn({ id: 1, payer_inn: '1' }),
+        txn({ id: 2, payer_inn: '2' }),
+        txn({ id: 3, payer_inn: '3' }),
+        txn({ id: 4, payer_inn: '4' }),
+      ],
+      null,
     );
-    expect(rows.map((r) => r.id)).toEqual(['p2']);
+    const byId = new Map(rows.map((r) => [r.transactionId, r.methodLabel]));
+    expect(byId.get(1)).toMatch(/комментари/i);
+    expect(byId.get(2)).toMatch(/задач/i);
+    expect(byId.get(3)).toMatch(/проект/i);
+    expect(byId.get(4)).toMatch(/вручную/i);
   });
 
-  it('без фильтра непарсящийся kpi_fact не выкидывает строку', () => {
-    const rows = buildRenewalTableRows([renewal({ kpi_fact: 'н/д' })], null, TODAY_KEY);
-    expect(rows).toHaveLength(1);
+  it('дата платежа — ключ дня в МСК, полученный из occurred_at', () => {
+    const rows = buildRenewalTableRows(
+      [mark({ transaction_id: 1 })],
+      [txn({ id: 1, occurred_at: '2026-07-15T22:00:00.000Z' })], // 16-е в МСК (+3ч)
+      null,
+    );
+    expect(rows[0]?.paymentDate).toBe('2026-07-16');
   });
 });
 
-describe('buildRenewalTableRows — даты и сортировка', () => {
-  it('дата в будущем помечена isPlanned, дата в прошлом — нет', () => {
+describe('buildRenewalTableRows — ссылка на сделку AMO', () => {
+  it('строит ссылку, когда есть и amoBaseUrl, и amo_deal_id', () => {
     const rows = buildRenewalTableRows(
-      [
-        renewal({ id: 'p1', payment_date: '2026-11-24' }),
-        renewal({ id: 'p2', payment_date: '2026-07-01' }),
-      ],
-      null,
-      TODAY_KEY,
+      [mark({ transaction_id: 1, amo_deal_id: 33462035 })],
+      [txn({ id: 1 })],
+      'https://example.amocrm.ru',
     );
-    expect(rows.find((r) => r.id === 'p1')?.isPlanned).toBe(true);
-    expect(rows.find((r) => r.id === 'p2')?.isPlanned).toBe(false);
+    expect(rows[0]?.amoDealUrl).toBe('https://example.amocrm.ru/leads/detail/33462035');
+    expect(rows[0]?.amoDealId).toBe(33462035);
   });
 
-  it('дата ровно "сегодня" не считается планом', () => {
-    const rows = buildRenewalTableRows([renewal({ payment_date: TODAY_KEY })], null, TODAY_KEY);
-    expect(rows[0]?.isPlanned).toBe(false);
+  it('без amoBaseUrl ссылки нет, даже если сделка известна', () => {
+    const rows = buildRenewalTableRows(
+      [mark({ transaction_id: 1, amo_deal_id: 33462035 })],
+      [txn({ id: 1 })],
+      null,
+    );
+    expect(rows[0]?.amoDealUrl).toBeNull();
+    expect(rows[0]?.amoDealId).toBe(33462035);
   });
 
-  it('нераспарсенная и пустая дата дают paymentDate === null', () => {
+  it('без amo_deal_id (например, method=project_type) ссылки нет', () => {
     const rows = buildRenewalTableRows(
-      [
-        renewal({ id: 'p1', payment_date: '15.07.2026' }),
-        renewal({ id: 'p2', payment_date: null }),
-      ],
-      null,
-      TODAY_KEY,
+      [mark({ transaction_id: 1, method: 'project_type', amo_deal_id: null })],
+      [txn({ id: 1 })],
+      'https://example.amocrm.ru',
     );
-    expect(rows.every((r) => r.paymentDate === null)).toBe(true);
-    expect(rows.every((r) => r.isPlanned === false)).toBe(true);
-  });
-
-  it('сортировка по дате оплаты убывает, без даты — в конце', () => {
-    const rows = buildRenewalTableRows(
-      [
-        renewal({ id: 'old', payment_date: '2025-08-01' }),
-        renewal({ id: 'nodate', payment_date: null }),
-        renewal({ id: 'future', payment_date: '2026-11-24' }),
-        renewal({ id: 'recent', payment_date: '2026-07-15' }),
-      ],
-      null,
-      TODAY_KEY,
-    );
-    expect(rows.map((r) => r.id)).toEqual(['future', 'recent', 'old', 'nodate']);
+    expect(rows[0]?.amoDealUrl).toBeNull();
   });
 });
 
-describe('buildRenewalTableRows — суммы', () => {
-  it('парсит бюджет и kpi_fact числом, хранит исходную строку рядом', () => {
-    const rows = buildRenewalTableRows(
-      [renewal({ budget: '120 000', kpi_fact: '85' })],
-      null,
-      TODAY_KEY,
-    );
-    expect(rows[0]).toMatchObject({ budget: 120000, budgetRaw: '120 000', kpiFact: 85, kpiFactRaw: '85' });
-  });
-
-  it('мусорный бюджет даёт budget === null, но строка остаётся в таблице', () => {
-    const rows = buildRenewalTableRows([renewal({ budget: '120к' })], null, TODAY_KEY);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.budget).toBeNull();
-    expect(rows[0]?.budgetRaw).toBe('120к');
-  });
-});
-
-describe('buildRenewalTableRows — срез по периоду', () => {
-  // Период фильтрует страницу целиком: таблица показывает те же продления, что
-  // и плитки. Две выборки под одним фильтром разошлись бы, и объяснять
-  // расхождение пришлось бы в переписке.
+describe('buildRenewalTableRows — период', () => {
   const window = { fromKey: '2026-07-01', toKey: '2026-07-31' };
 
-  it('без окна отдаёт всё — обратная совместимость вызова без периода', () => {
+  it('без окна отдаёт всё', () => {
     const rows = buildRenewalTableRows(
-      [renewal({ payment_date: '2025-01-01' }), renewal({ id: 'p2', payment_date: null })],
+      [mark({ transaction_id: 1 }), mark({ transaction_id: 2 })],
+      [
+        txn({ id: 1, payer_inn: '1', occurred_at: '2025-01-01T00:00:00.000Z' }),
+        txn({ id: 2, payer_inn: '2', occurred_at: '2026-07-15T00:00:00.000Z' }),
+      ],
       null,
-      TODAY_KEY,
     );
     expect(rows).toHaveLength(2);
   });
 
-  it('оставляет только продления внутри периода', () => {
+  it('оставляет только продления внутри периода, обе границы включительно', () => {
     const rows = buildRenewalTableRows(
       [
-        renewal({ id: 'in', payment_date: '2026-07-15' }),
-        renewal({ id: 'before', payment_date: '2026-06-30' }),
-        renewal({ id: 'after', payment_date: '2026-08-01' }),
+        mark({ transaction_id: 1 }),
+        mark({ transaction_id: 2 }),
+        mark({ transaction_id: 3 }),
+        mark({ transaction_id: 4 }),
       ],
-      null,
-      TODAY_KEY,
-      window,
-    );
-    expect(rows.map((r) => r.id)).toEqual(['in']);
-  });
-
-  it('обе границы периода включительно', () => {
-    // Иначе первый и последний день месяца молча выпадали бы, а заметили бы
-    // это в лучшем случае по несходящейся сумме.
-    const rows = buildRenewalTableRows(
       [
-        renewal({ id: 'first', payment_date: '2026-07-01' }),
-        renewal({ id: 'last', payment_date: '2026-07-31' }),
+        txn({ id: 1, payer_inn: '1', occurred_at: '2026-06-30T00:00:00.000Z' }), // раньше окна
+        txn({ id: 2, payer_inn: '2', occurred_at: '2026-07-01T00:00:00.000Z' }), // первый день
+        txn({ id: 3, payer_inn: '3', occurred_at: '2026-07-31T20:00:00.000Z' }), // последний день
+        txn({ id: 4, payer_inn: '4', occurred_at: '2026-08-01T00:00:00.000Z' }), // позже окна
       ],
       null,
-      TODAY_KEY,
       window,
     );
-    expect(rows.map((r) => r.id).sort()).toEqual(['first', 'last']);
-  });
-
-  it('продление без даты оплаты в период не попадает ни при каком выборе', () => {
-    // Привязать его ко времени не к чему. Именно поэтому под таблицей стоит
-    // сноска с их числом — иначе строки исчезли бы с экрана бесследно.
-    const rows = buildRenewalTableRows(
-      [renewal({ payment_date: null })],
-      null,
-      TODAY_KEY,
-      window,
-    );
-    expect(rows).toHaveLength(0);
-  });
-
-  it('запланированное продление внутри периода остаётся и помечено планом', () => {
-    const rows = buildRenewalTableRows(
-      [renewal({ payment_date: '2026-07-28' })],
-      null,
-      TODAY_KEY,
-      window,
-    );
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.isPlanned).toBe(true);
+    expect(rows.map((r) => r.transactionId).sort()).toEqual([2, 3]);
   });
 });
 
-describe('buildUndatedRenewalTableRows', () => {
-  it('берёт только строки без распознанной даты оплаты', () => {
-    const rows = buildUndatedRenewalTableRows(
+describe('buildRenewalTableRows — сортировка', () => {
+  it('свежие сверху', () => {
+    const rows = buildRenewalTableRows(
+      [mark({ transaction_id: 1 }), mark({ transaction_id: 2 }), mark({ transaction_id: 3 })],
       [
-        renewal({ id: 'has-date', payment_date: '2026-07-15' }),
-        renewal({ id: 'empty', payment_date: null }),
-        renewal({ id: 'garbage', payment_date: '15.07.2026' }),
+        txn({ id: 1, payer_inn: '1', occurred_at: '2026-01-01T00:00:00.000Z' }),
+        txn({ id: 2, payer_inn: '2', occurred_at: '2026-07-01T00:00:00.000Z' }),
+        txn({ id: 3, payer_inn: '3', occurred_at: '2026-03-01T00:00:00.000Z' }),
       ],
       null,
-      TODAY_KEY,
     );
-    expect(rows.map((r) => r.id).sort()).toEqual(['empty', 'garbage']);
-  });
-
-  it('период на эту выборку не влияет — у функции вообще нет параметра окна', () => {
-    // buildRenewalTableRows с window выкидывает продления без даты из таблицы
-    // (окно не к чему привязать) — эта функция как раз восполняет то, что там
-    // выпало, и никаким периодом не режется.
-    const rows = buildUndatedRenewalTableRows([renewal({ payment_date: null })], null, TODAY_KEY);
-    expect(rows).toHaveLength(1);
-  });
-
-  it('фильтр KPI распространяется так же, как в основной выборке', () => {
-    const rows = buildUndatedRenewalTableRows(
-      [
-        renewal({ id: 'p1', payment_date: null, kpi_fact: '50' }),
-        renewal({ id: 'p2', payment_date: null, kpi_fact: '90' }),
-      ],
-      { min: 60, max: 100 },
-      TODAY_KEY,
-    );
-    expect(rows.map((r) => r.id)).toEqual(['p2']);
-  });
-
-  it('строки других типов проекта не попадают', () => {
-    const rows = buildUndatedRenewalTableRows(
-      [renewal({ payment_date: null, project_type: 'Продажа' })],
-      null,
-      TODAY_KEY,
-    );
-    expect(rows).toHaveLength(0);
-  });
-
-  it('isPlanned всегда false — без даты план не определить', () => {
-    const rows = buildUndatedRenewalTableRows([renewal({ payment_date: null })], null, TODAY_KEY);
-    expect(rows[0]?.isPlanned).toBe(false);
-    expect(rows[0]?.paymentDate).toBeNull();
-  });
-
-  it('форма строки совпадает с buildRenewalTableRows (тот же budget/kpiFact разбор)', () => {
-    const rows = buildUndatedRenewalTableRows(
-      [renewal({ payment_date: null, budget: '120 000', kpi_fact: null })],
-      null,
-      TODAY_KEY,
-    );
-    expect(rows[0]).toMatchObject({ budget: 120000, budgetRaw: '120 000' });
+    expect(rows.map((r) => r.transactionId)).toEqual([2, 3, 1]);
   });
 });

@@ -35,10 +35,16 @@ function Tile({
 }
 
 export default function KpiRow({ totals }: { totals: RenewalsTotals }) {
+  const cycleSubParts: string[] = [];
+  if (totals.cycleAvgDays !== null) cycleSubParts.push(`среднее: ${fmtDays(totals.cycleAvgDays)} дн.`);
+  if (totals.cycleSampleSize < totals.cycleCandidates) {
+    cycleSubParts.push(`цикл посчитан для ${fmt(totals.cycleSampleSize)} из ${fmt(totals.cycleCandidates)}`);
+  }
+
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
       <Tile label="Продлений" value={fmt(totals.count)} sub="за выбранный период" />
-      <Tile label="Оборот" value={fmtMoney(totals.revenue)} />
+      <Tile label="Оборот" value={fmtMoney(totals.revenue)} sub="за выбранный период" />
       {/* Медиана крупно, среднее подписью — распределение чеков длиннохвостое
           (в данных рядом 45 000 и 600 000), среднее без медианы вводит в
           заблуждение сильнее, чем помогает. */}
@@ -47,43 +53,21 @@ export default function KpiRow({ totals }: { totals: RenewalsTotals }) {
         value={totals.medianCheck !== null ? fmtMoney(totals.medianCheck) : '—'}
         sub={totals.avgCheck !== null ? `среднее: ${fmtMoney(totals.avgCheck)}` : undefined}
       />
-      {/* Прочерк, а не ноль, пока цикл недостоверен: история периодов заведена
-          у 11 проектов из 139, так что чаще всего цикл посчитать не из чего.
-          Ноль читался бы как «продлевают мгновенно». */}
       <Tile
         label="Средний цикл"
-        value={totals.cycleReliable && totals.cycleMedianDays !== null ? `${fmtDays(totals.cycleMedianDays)} дн.` : '—'}
-        sub={
-          totals.cycleReliable
-            ? totals.cycleAvgDays !== null
-              ? `среднее: ${fmtDays(totals.cycleAvgDays)} дн.`
-              : undefined
-            : `истории мало: ${fmt(totals.cycleSampleSize)} из ${fmt(totals.cycleCandidates)}`
-        }
+        value={totals.cycleMedianDays !== null ? `${fmtDays(totals.cycleMedianDays)} дн.` : '—'}
+        sub={cycleSubParts.length > 0 ? cycleSubParts.join(' · ') : undefined}
       />
-      {/* «Запланировано» и «Без даты» — сквозные цифры по всей истории, не по
-          выбранному периоду (см. комментарий в RenewalsTotals в metrics.ts):
-          продление с датой оплаты в будущем или без даты вообще не попадает
-          ни в какой период, поэтому фильтр по датам его не спрячет и не
-          покажет иначе. Подпись явно это называет, чтобы соседство с
-          period-зависимыми плитками слева не читалось как «тоже за период». */}
+      {/* «Не разобрано» — кандидаты периода (повторный приход с ИНН) без
+          решения человека или автомата. Пока цифра большая, «Продлениям» и
+          «Обороту» слева верить нельзя — часть неразобранных станет
+          продлениями только после разбора. Амбер и подпись держат это на
+          виду, а не в примечании под таблицей. */}
       <Tile
-        label="Запланировано"
-        value={fmt(totals.planned)}
-        sub="за всё время, не по периоду"
-        amber={totals.planned > 0}
-      />
-      <Tile
-        label="Без даты"
-        value={fmt(totals.withoutDate)}
-        sub="за всё время, не по периоду"
-        amber={totals.withoutDate > 0}
-      />
-      <Tile
-        label="Без суммы"
-        value={fmt(totals.withoutBudget)}
-        sub="из продлений периода"
-        amber={totals.withoutBudget > 0}
+        label="Не разобрано"
+        value={fmt(totals.unresolved)}
+        sub="ждут решения — «Продления» пока занижены"
+        amber={totals.unresolved > 0}
       />
     </div>
   );
