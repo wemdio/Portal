@@ -87,18 +87,23 @@ export async function runWarmupLoop(
   shouldStop: () => boolean,
   onProgress?: () => void,
 ): Promise<void> {
-  const log: LogFn = (level, message, accountId) => {
-    void db
-      .from('tg_outreach_logs')
-      .insert({ campaign_id: campaignId, level, message, account_id: accountId ?? null })
-      .then(() => {});
-  };
-
   const run = await wdb.getActiveRun(db, campaignId);
   if (!run) {
-    log('warning', 'Прогрев: активного запуска нет — нечего выполнять.');
+    // Логировать некуда — записи прогрева привязаны к запуску, а его нет.
+    // Кампанию на всякий случай возвращаем из «прогрева» в «остановлена»:
+    // иначе она застрянет в статусе, из которого нельзя запустить аутрич.
+    await wdb.setCampaignWarming(db, campaignId, false);
     return;
   }
+
+  const log: LogFn = (level, message, accountId) => {
+    void wdb
+      .logWarmup(db, { runId: run.id, campaignId, accountId, level, message })
+      .catch(() => {
+        // Логи прогрева — диагностика, а не бизнес-логика: сбой записи не
+        // должен ронять сам прогрев.
+      });
+  };
 
   const { data: campaignRow } = await db
     .from('tg_outreach_campaigns')
@@ -110,6 +115,7 @@ export async function runWarmupLoop(
     await wdb.setRunStatus(db, run.id, { status: 'failed', error_message: 'campaign_not_found' });
     return;
   }
+  await wdb.setCampaignWarming(db, campaignId, true);
   const tg = campaign.telegram_settings as TelegramSettings;
 
   const { data: accountRows } = await db
@@ -124,6 +130,7 @@ export async function runWarmupLoop(
       error_message: 'need_at_least_two_accounts',
     });
     log('error', 'Прогрев: нужно минимум два активных аккаунта — греть не с кем.');
+    await wdb.setCampaignWarming(db, campaignId, false);
     return;
   }
 
@@ -151,6 +158,7 @@ export async function runWarmupLoop(
       'error',
       `Прогрев: подключились только ${clients.length} аккаунтов из ${accounts.length} — прогревать не с кем. Проверьте прокси.`,
     );
+    await wdb.setCampaignWarming(db, campaignId, false);
     return;
   }
 
@@ -213,6 +221,8 @@ export async function runWarmupLoop(
           'info',
           `Прогрев завершён: ${summary.conversations_done} переписок, ${summary.messages_sent} сообщений, аккаунтов с проблемами — ${summary.accounts_failed}. Боевой аутрич запускается вручную.`,
         );
+        // Кампания снова доступна для запуска аутрича — решение за оператором.
+        await wdb.setCampaignWarming(db, campaignId, false);
         break;
       }
 

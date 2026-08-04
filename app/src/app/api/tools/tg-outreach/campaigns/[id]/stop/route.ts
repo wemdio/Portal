@@ -24,6 +24,12 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       
         if (!campaign) return jsonError('Кампания не найдена', 404);
         if (campaign.status === 'stopped') return jsonError('Кампания уже остановлена', 409);
+        // Стоп боевого цикла сбросил бы статус в «остановлена» и снял бы
+        // пометку прогрева, хотя сам прогрев продолжал бы идти. Останавливать
+        // прогрев нужно своей кнопкой на вкладке «Прогрев».
+        if (campaign.status === 'warming') {
+          return jsonError('Идёт прогрев аккаунтов — останавливайте его на вкладке «Прогрев».', 409);
+        }
       
         const { data, error } = await supabase
           .from('tg_outreach_jobs')

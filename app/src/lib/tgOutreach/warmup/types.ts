@@ -82,6 +82,17 @@ export interface WarmupMessage {
   timestamp: string;
 }
 
+export interface WarmupLog {
+  id: number;
+  run_id: string;
+  campaign_id: string;
+  /** NULL = событие всего прогрева, иначе конкретного аккаунта. */
+  account_id: string | null;
+  level: 'info' | 'warning' | 'error';
+  message: string;
+  created_at: string;
+}
+
 export interface WarmupConversation {
   id: number;
   run_id: string;

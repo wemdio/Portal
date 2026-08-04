@@ -236,6 +236,13 @@ async function handleWarmupStartJob(job: { id: string; campaign_id: string }) {
         .then(({ error }) => {
           if (error) log('error', `Failed to mark warmup run failed for ${campaignId}: ${error.message}`);
         }, () => {});
+      // Иначе кампания застрянет в статусе «прогрев», из которого нельзя
+      // запустить аутрич.
+      db.from('tg_outreach_campaigns')
+        .update({ status: 'stopped', updated_at: new Date().toISOString() })
+        .eq('id', campaignId)
+        .eq('status', 'warming')
+        .then(() => {}, () => {});
     })
     .finally(() => {
       runningCampaigns.delete(campaignId);
@@ -266,6 +273,15 @@ async function handleWarmupStopJob(job: { id: string; campaign_id: string }) {
     log('info', `Signaled warmup stop for campaign ${campaignId}`);
     await running.promise;
   }
+
+  // Возвращаем кампанию в «остановлена»: прогрев кончился, аутрич снова можно
+  // запустить. Условие на warming — чтобы не затереть статус, если кампанию
+  // тем временем уже перевели во что-то другое.
+  await db
+    .from('tg_outreach_campaigns')
+    .update({ status: 'stopped', updated_at: new Date().toISOString() })
+    .eq('id', campaignId)
+    .eq('status', 'warming');
 
   await db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
 }
