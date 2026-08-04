@@ -158,6 +158,13 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         return jsonError(jobError.message, 500);
       }
 
+      // Статус ставим сразу, не дожидаясь воркера: оператор должен увидеть
+      // «Прогрев» в списке кампаний в тот же момент, когда нажал кнопку.
+      await supabase
+        .from('tg_outreach_campaigns')
+        .update({ status: 'warming', updated_at: new Date().toISOString() })
+        .eq('id', id);
+
       return NextResponse.json(run, { status: 201 });
     },
   );

@@ -20,9 +20,10 @@ import {
   ChevronDown,
   AlertCircle,
 } from 'lucide-react';
-import type { OutreachAccount } from '@/lib/tgOutreach/types';
+import type { CampaignStatus, OutreachAccount } from '@/lib/tgOutreach/types';
 import type {
   WarmupConversation,
+  WarmupLog,
   WarmupRun,
 } from '@/lib/tgOutreach/warmup/types';
 
@@ -47,14 +48,6 @@ interface WarmupStatus {
   defaults: { default_days: number };
 }
 
-interface LogRow {
-  id: number;
-  level: string;
-  message: string;
-  created_at: string;
-  account_id: string | null;
-}
-
 function timeOf(iso: string) {
   return new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 }
@@ -67,11 +60,19 @@ const RUN_LABEL: Record<string, string> = {
   failed: 'сорвался',
 };
 
-export default function WarmupTab({ campaignId, isOwn }: { campaignId: string; isOwn: boolean }) {
+export default function WarmupTab({
+  campaignId,
+  isOwn,
+  campaignStatus,
+}: {
+  campaignId: string;
+  isOwn: boolean;
+  campaignStatus: CampaignStatus;
+}) {
   const [status, setStatus] = useState<WarmupStatus | null>(null);
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   const [conversations, setConversations] = useState<WarmupConversation[]>([]);
-  const [logs, setLogs] = useState<LogRow[]>([]);
+  const [logs, setLogs] = useState<WarmupLog[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [expandedConvId, setExpandedConvId] = useState<number | null>(null);
   const [days, setDays] = useState(4);
@@ -106,13 +107,14 @@ export default function WarmupTab({ campaignId, isOwn }: { campaignId: string; i
   }, [campaignId, selectedAccountId]);
 
   const loadLogs = useCallback(async () => {
-    const params = new URLSearchParams({ limit: '200' });
+    const params = new URLSearchParams({ limit: '300' });
     if (selectedAccountId && !allAccountsLogs) params.set('account_id', selectedAccountId);
-    const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/logs?${params}`);
+    if (errorsOnly) params.set('errors_only', '1');
+    const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup/logs?${params}`);
     if (!res.ok) return;
     const data = await res.json();
-    setLogs((data.items ?? []) as LogRow[]);
-  }, [campaignId, selectedAccountId, allAccountsLogs]);
+    setLogs((data.items ?? []) as WarmupLog[]);
+  }, [campaignId, selectedAccountId, allAccountsLogs, errorsOnly]);
 
   useEffect(() => {
     void (async () => {
@@ -177,10 +179,23 @@ export default function WarmupTab({ campaignId, isOwn }: { campaignId: string; i
   const accountName = (id: string) =>
     accounts.find((a) => a.id === id)?.session_name ?? id.slice(0, 8);
   const problemAccounts = (status?.per_account ?? []).filter((s) => s.failed > 0).length;
-  const visibleLogs = errorsOnly ? logs.filter((l) => l.level === 'error' || l.level === 'warning') : logs;
+  // Прогрев и боевой аутрич взаимоисключающие — на запущенной кампании кнопка
+  // всё равно получит отказ от сервера, поэтому предупреждаем заранее.
+  const blockedByCampaign = campaignStatus === 'running' || campaignStatus === 'paused';
 
   return (
     <div className="space-y-3 p-4">
+      {blockedByCampaign && !isRunning && (
+        <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-800">
+          <AlertCircle className="mt-px h-4 w-4 shrink-0" />
+          <span>
+            <span className="font-medium">Кампания сейчас работает по боевым лидам.</span>{' '}
+            Прогрев можно запустить только на остановленной кампании: аккаунт не может
+            одновременно греться и писать клиентам. Остановите кампанию кнопкой сверху.
+          </span>
+        </div>
+      )}
+
       {/* Полоса управления */}
       <div className="rounded-xl border border-gray-200 bg-white p-4">
         <div className="flex flex-wrap items-center gap-3">
@@ -224,9 +239,10 @@ export default function WarmupTab({ campaignId, isOwn }: { campaignId: string; i
           ) : (
             <button
               type="button"
-              disabled={busy || !isOwn}
+              disabled={busy || !isOwn || blockedByCampaign}
+              title={blockedByCampaign ? 'Сначала остановите кампанию' : undefined}
               onClick={() => void act('POST')}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
               Начать прогрев
@@ -426,10 +442,10 @@ export default function WarmupTab({ campaignId, isOwn }: { campaignId: string; i
           </button>
         </div>
         <div className="max-h-72 overflow-y-auto px-3 py-2 font-mono text-[11px] leading-relaxed">
-          {visibleLogs.length === 0 ? (
+          {logs.length === 0 ? (
             <div className="py-4 text-center text-gray-400">Событий нет</div>
           ) : (
-            visibleLogs.map((l) => (
+            logs.map((l) => (
               <div key={l.id} className="flex gap-2">
                 <span className="shrink-0 text-gray-400">{timeOf(l.created_at)}</span>
                 <span className={l.level === 'error' ? 'text-rose-600' : l.level === 'warning' ? 'text-amber-600' : 'text-gray-600'}>

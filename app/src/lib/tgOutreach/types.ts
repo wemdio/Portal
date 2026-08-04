@@ -64,7 +64,13 @@ export type AccountAction =
   | 'remove_spamblock'
   | 'unblock';
 
-export type CampaignStatus = 'stopped' | 'running' | 'paused' | 'error';
+/**
+ * `warming` — идёт прогрев аккаунтов (см. lib/tgOutreach/warmup/). Прогрев и
+ * боевой аутрич взаимоисключающие, поэтому это именно статус кампании, а не
+ * отдельный флаг: воркер не берёт такие кампании в боевой auto-resume, а API
+ * отказывает в запуске аутрича.
+ */
+export type CampaignStatus = 'stopped' | 'running' | 'paused' | 'error' | 'warming';
 export type DialogStatus = 'none' | 'lead' | 'not_lead' | 'later';
 export type JobAction =
   | 'start'
