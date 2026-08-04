@@ -43,6 +43,48 @@ PAGE_LIMIT = int(os.environ.get("AMO_PAGE_LIMIT", "250"))
 MAX_PAGES = int(os.environ.get("AMO_MAX_PAGES", "500"))
 INTER_PAGE_DELAY_SEC = float(os.environ.get("AMO_INTER_PAGE_DELAY_SEC", "0.2"))
 
+HTTP_RETRIES = int(os.environ.get("AMO_HTTP_RETRIES", "3"))
+HTTP_RETRY_DELAY_SEC = float(os.environ.get("AMO_HTTP_RETRY_DELAY_SEC", "2"))
+
+
+async def get_with_retry(client: httpx.AsyncClient, url: str) -> httpx.Response:
+    """GET к AMO с повтором на обрыве связи и 5xx.
+
+    Зачем: с 01.07 по 04.08.2026 источник amo_leads упал 8 раз из 52 прогонов,
+    каждый раз с «Server disconnected without sending a response.» — AMO рвёт
+    соединение на ровном месте. Одна неудачная попытка роняла весь синк, и
+    отчёты в 17:00 считались по вчерашнему снимку, причём молча.
+
+    Ловим httpx.TransportError — это общий родитель для обрывов, таймаутов и
+    RemoteProtocolError, то есть всех «связь не задалась». Ошибки уровня
+    протокола AMO (4xx) не повторяем: они не про связь, повтор их не вылечит.
+    5xx повторяем — это чаще всего временная перегрузка на стороне AMO.
+
+    Пауза удваивается: 2 с, затем 4 с. После последней попытки исключение
+    пробрасывается наверх, и падение источника логируется как раньше.
+    """
+    for attempt in range(1, HTTP_RETRIES + 1):
+        is_last = attempt == HTTP_RETRIES
+        try:
+            resp = await client.get(url)
+        except httpx.TransportError as e:
+            if is_last:
+                raise
+            print(
+                f"[amo] попытка {attempt}/{HTTP_RETRIES} не удалась ({e!r}) — повтор",
+                flush=True,
+            )
+        else:
+            if resp.status_code < 500 or is_last:
+                return resp
+            print(
+                f"[amo] попытка {attempt}/{HTTP_RETRIES} вернула "
+                f"{resp.status_code} — повтор",
+                flush=True,
+            )
+        await asyncio.sleep(HTTP_RETRY_DELAY_SEC * 2 ** (attempt - 1))
+    raise RuntimeError("get_with_retry: недостижимая ветка")
+
 
 def _ts(unix: int | None) -> datetime | None:
     return datetime.fromtimestamp(unix, tz=timezone.utc) if unix else None
@@ -174,7 +216,7 @@ class AmoSync(SyncSource):
             page = 1
             while page <= MAX_PAGES:
                 url = f"{base}/api/v4/leads?limit={PAGE_LIMIT}&page={page}&with=contacts,companies"
-                resp = await client.get(url)
+                resp = await get_with_retry(client, url)
                 if resp.status_code == 204:
                     break  # AMO отдаёт 204 на пустой странице
                 resp.raise_for_status()
@@ -201,7 +243,7 @@ class AmoSync(SyncSource):
     ) -> dict[tuple[int, int], dict[str, Any]]:
         """{(pipeline_id, status_id) → {pipeline_name, status_name, sort, color, is_editable}}."""
         url = f"{base}/api/v4/leads/pipelines"
-        resp = await client.get(url)
+        resp = await get_with_retry(client, url)
         resp.raise_for_status()
         data = resp.json()
         pipelines = ((data.get("_embedded") or {}).get("pipelines")) or []
@@ -231,7 +273,7 @@ class AmoSync(SyncSource):
         page = 1
         while page <= MAX_PAGES:
             url = f"{base}/api/v4/users?limit={PAGE_LIMIT}&page={page}&with=role,group"
-            resp = await client.get(url)
+            resp = await get_with_retry(client, url)
             if resp.status_code == 204:
                 break
             resp.raise_for_status()
@@ -274,7 +316,7 @@ class AmoSync(SyncSource):
         page = 1
         while page <= MAX_PAGES:
             url = f"{base}/api/v4/contacts?limit={PAGE_LIMIT}&page={page}"
-            resp = await client.get(url)
+            resp = await get_with_retry(client, url)
             if resp.status_code == 204:
                 break
             resp.raise_for_status()
@@ -312,7 +354,7 @@ class AmoSync(SyncSource):
         page = 1
         while page <= MAX_PAGES:
             url = f"{base}/api/v4/companies?limit={PAGE_LIMIT}&page={page}"
-            resp = await client.get(url)
+            resp = await get_with_retry(client, url)
             if resp.status_code == 204:
                 break
             resp.raise_for_status()
