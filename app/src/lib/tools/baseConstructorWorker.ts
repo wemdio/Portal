@@ -77,6 +77,12 @@ export interface TaScoringStats {
   filtered_out_count: number;
   /** Средний балл по всем оцененным до фильтра (для понимания «было ли что-то релевантное»). */
   pre_filter_avg_score: number;
+  /** Строк с заглушкой «Ошибка оценки» — по ним AI не ответил. */
+  failed_rows: number;
+  /** Сколько запросов к AI провалилось (одна пачка = до 10 компаний). */
+  failed_batches: number;
+  /** Причины провалов с частотой. Раньше терялись в немом catch. */
+  errors: Array<{ reason: string; count: number }>;
 }
 
 /**
@@ -500,6 +506,47 @@ export function mergeFoundEmailColumn(
   return [newHeader, ...mergedBody];
 }
 
+/**
+ * Записать провалы оценки ЦА в application_logs.
+ *
+ * Зачем в БД, а не только в stdout: логи контейнеров ротируются (50 МБ × 3),
+ * а base-constructor крутится в трёх репликах — искать там причину недельной
+ * давности бесполезно. Вопрос «как часто падает и всегда ли по одной причине»
+ * отвечается только по истории. Разбор 04.08.2026.
+ *
+ * Никогда не бросает: диагностика не должна ронять джоб.
+ */
+async function logTaScoringFailures(
+  jobId: string,
+  userId: string | null,
+  stats: TaScoringStats,
+): Promise<void> {
+  try {
+    const reasons = stats.errors.map((e) => `${e.reason} ×${e.count}`).join('; ');
+    await admin.from('application_logs').insert({
+      level: 'warn',
+      source: 'server',
+      event: 'base-constructor.ta_scoring.failed',
+      message:
+        `Оценка ЦА: не оценено ${stats.failed_rows} строк из ${stats.pre_filter_rows} ` +
+        `(${stats.failed_batches} неудачных запросов к ИИ). ${reasons}`.slice(0, 2000),
+      context: {
+        job_id: jobId,
+        failed_rows: stats.failed_rows,
+        failed_batches: stats.failed_batches,
+        pre_filter_rows: stats.pre_filter_rows,
+        errors: stats.errors,
+      },
+      user_id: userId,
+      route: 'base_constructor_worker',
+    });
+  } catch (err) {
+    console.warn(
+      `[base-constructor][${jobId}] не смог записать лог провалов ta_scoring: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 export async function runBaseConstructorJob(jobId: string): Promise<void> {
   try {
     const { data: job, error } = await admin
@@ -646,9 +693,16 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
                 console.log(
                   `[base-constructor][${jobId}] ta_scoring stats: scored=${stats.pre_filter_rows}, ` +
                     `avg=${stats.pre_filter_avg_score.toFixed(2)}, ` +
-                    `filtered_out=${stats.filtered_out_count}` +
+                    `filtered_out=${stats.filtered_out_count}, ` +
+                    `failed=${stats.failed_rows}` +
                     (stepConfig.keepAllScored ? ' (keepAllScored=true → no filter)' : ''),
                 );
+                // Провалы оценки — в БД, а не только в stdout контейнера:
+                // логи контейнеров ротируются, а разбирать «как часто и по
+                // какой причине» нужно на истории (разбор 04.08.2026).
+                if (stats.failed_batches > 0) {
+                  void logTaScoringFailures(jobId, job.user_id ?? null, stats);
+                }
               },
             }
           : {}),
@@ -776,6 +830,11 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
                 ta_scoring_pre_filter_rows: taScoringStats.pre_filter_rows,
                 ta_scoring_filtered_out: taScoringStats.filtered_out_count,
                 ta_scoring_pre_filter_avg: Math.round(taScoringStats.pre_filter_avg_score * 10) / 10,
+                // Провалы оценки. Без этого «Ошибка оценки» в результате не
+                // отличалась от настоящего вердикта AI — разбор 04.08.2026.
+                ta_scoring_failed_rows: taScoringStats.failed_rows,
+                ta_scoring_failed_batches: taScoringStats.failed_batches,
+                ta_scoring_errors: taScoringStats.errors,
               }
             : {}),
         },
