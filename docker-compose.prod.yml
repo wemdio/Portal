@@ -400,6 +400,12 @@ services:
       - OPENROUTER_TG_OUTREACH_API_KEY=${OPENROUTER_TG_OUTREACH_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=tgoutreach
+      # Сколько кампаний воркер ведёт одновременно. Значение зашито, а не взято
+      # из .env: прошлый подъём 5 → 10 задумывался, но переменную на сервер так
+      # и не завезли, и воркер продолжал работать с дефолтом 5 из кода. Из-за
+      # этого 04.08.2026 прогрев ATOL-1 два часа висел в pending — слот занимали
+      # пять боевых кампаний, а прогрев берёт слот из того же пула.
+      - TG_OUTREACH_MAX_CONCURRENCY=12
     stop_grace_period: 30m
     # `autoheal=true` makes the autoheal sidecar (defined below) restart this
     # container whenever the healthcheck reports `unhealthy`. Docker's
@@ -415,8 +421,8 @@ services:
       # node event loop aliveness — not whether the main loop is currently
       # busy. Keeping threshold at 900s for now to remain compatible with the
       # legacy build that wrote heartbeat only inside the per-account loop —
-      # those builds can stall heartbeat 15+ min when 5/5 campaigns are busy
-      # with anti-flood pauses (220-545s). Once a build with the independent
+      # those builds can stall heartbeat 15+ min when все слоты заняты
+      # anti-flood-паузами (220-545s). Once a build with the independent
       # heartbeat ticker is on prod we can drop this to 300s.
       test: ["CMD-SHELL", "test -f /tmp/tg-outreach-heartbeat && test $$(( $$(date +%s) - $$(cat /tmp/tg-outreach-heartbeat | cut -c1-10) )) -lt 900 || exit 1"]
       interval: 60s
@@ -425,10 +431,13 @@ services:
       start_period: 120s
     deploy:
       resources:
-        # Удвоено вместе с TG_OUTREACH_MAX_CONCURRENCY (5 → 10): вдвое больше
-        # параллельных кампаний — вдвое больше сессий Telegram в одном процессе.
+        # Память идёт за TG_OUTREACH_MAX_CONCURRENCY: каждая параллельная
+        # кампания — это свой набор клиентов gramJS в одном процессе. 3072M
+        # закладывались под 10 кампаний, лимит подняли до 12 — добавляем тот же
+        # запас, иначе первый же день с полной загрузкой упрётся в OOM, и
+        # docker снесёт воркер вместе со всеми идущими кампаниями.
         limits:
-          memory: 3072M
+          memory: 4096M
           cpus: '2'
           pids: 512
     restart: unless-stopped
