@@ -33,7 +33,7 @@ create table if not exists public.gis_signal_pipeline_config (
   measure_only boolean not null default true,
   client_user_id uuid references public.profiles(id) on delete cascade,
   monthly_target_companies int not null default 20000, -- цель ТЗ: ~20k компаний/мес
-  daily_limit int not null default 1000,               -- потолок компаний за прогон (этап отбора)
+  daily_limit int not null default 1600,               -- потолок кандидатов за прогон (≈1000 контактов/день по конверсии тест-прогона)
   signal_min_count int not null default 1,             -- порог сигналов (ТЗ: 1; в будущем 2-3)
   selected_steps jsonb not null default
     '["remove_empty","dedup_full","find_emails","split_emails","dedup_email","validate_emails","cap_emails_per_company","clean_names"]'::jsonb,
