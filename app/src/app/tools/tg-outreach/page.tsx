@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { supabase } from '@/lib/supabaseClient';
 import {
@@ -1178,6 +1178,109 @@ function ProcessedTab({ campaignId }: { campaignId: string }) {
   );
 }
 
+/* =================== BULK SELECTION =================== */
+
+/**
+ * Чекбокс «выделить всё» с промежуточным состоянием.
+ *
+ * indeterminate нельзя выставить атрибутом — только через DOM-свойство, поэтому
+ * ref + effect. Без него при частичном выделении галка выглядит как «ничего не
+ * выбрано», и оператор жмёт её второй раз, снимая уже сделанный выбор.
+ */
+function SelectAllCheckbox({
+  total,
+  selectedCount,
+  onChange,
+}: {
+  total: number;
+  selectedCount: number;
+  onChange: (checked: boolean) => void;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  const allSelected = total > 0 && selectedCount === total;
+
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = selectedCount > 0 && selectedCount < total;
+  }, [selectedCount, total]);
+
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={allSelected}
+      onChange={e => onChange(e.target.checked)}
+      title={allSelected ? 'Снять выделение' : 'Выделить все'}
+      aria-label={allSelected ? 'Снять выделение' : 'Выделить все'}
+      className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+    />
+  );
+}
+
+/** Панель массовых действий: появляется, только когда что-то выделено. */
+function BulkActionsBar({
+  selectedCount,
+  deleting,
+  onClear,
+  onDelete,
+}: {
+  selectedCount: number;
+  deleting: boolean;
+  onClear: () => void;
+  onDelete: () => void;
+}) {
+  if (selectedCount === 0) return null;
+  return (
+    <div className="flex items-center gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2">
+      <span className="text-xs font-medium text-indigo-900">Выбрано: {selectedCount}</span>
+      <button
+        type="button"
+        onClick={onDelete}
+        disabled={deleting}
+        className="inline-flex items-center gap-1.5 rounded-full bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+      >
+        {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+        Удалить выбранные
+      </button>
+      <button
+        type="button"
+        onClick={onClear}
+        disabled={deleting}
+        className="text-xs text-indigo-700 hover:text-indigo-900 hover:underline transition cursor-pointer disabled:opacity-50"
+      >
+        Снять выделение
+      </button>
+    </div>
+  );
+}
+
+/** Общая механика выделения строк таблицы: toggle, «выделить всё», сброс. */
+function useRowSelection(allIds: string[]) {
+  const [raw, setRaw] = useState<Set<string>>(new Set());
+
+  // Выделение выводим из текущего списка, а не подчищаем эффектом после
+  // перезагрузки: id удалённой строки просто перестаёт попадать в выборку.
+  // Синхронизация через useEffect дала бы лишний каскадный рендер на каждую
+  // загрузку таблицы ради того же результата.
+  const selectedIds = useMemo(() => allIds.filter(id => raw.has(id)), [allIds, raw]);
+  const isSelected = useCallback((id: string) => raw.has(id), [raw]);
+
+  const toggle = useCallback((id: string) => {
+    setRaw(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const setAll = useCallback((checked: boolean) => {
+    setRaw(checked ? new Set(allIds) : new Set());
+  }, [allIds]);
+
+  const clear = useCallback(() => { setRaw(new Set()); }, []);
+
+  return { selectedIds, isSelected, toggle, setAll, clear };
+}
+
 /* =================== CAMPAIGN ACCOUNTS TAB =================== */
 function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
@@ -1197,6 +1300,10 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
   const [saving, setSaving] = useState(false);
   const [editingProxyFor, setEditingProxyFor] = useState<string | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<OutreachAccount | null>(null);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+
+  const accountIds = useMemo(() => accounts.map(a => a.id), [accounts]);
+  const { selectedIds, isSelected, toggle, setAll, clear } = useRowSelection(accountIds);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1258,6 +1365,29 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
     if (!confirm('Удалить аккаунт?')) return;
     await authFetch(`${API_BASE}/accounts/${id}`, { method: 'DELETE' });
     void load();
+  };
+
+  const deleteSelected = async () => {
+    const ids = selectedIds;
+    if (!ids.length) return;
+    if (!confirm(`Удалить аккаунтов: ${ids.length}? Действие необратимо.`)) return;
+    setBulkDeleting(true);
+    setUploadError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/accounts/bulk`, {
+        method: 'DELETE',
+        body: JSON.stringify({ campaign_id: campaignId, ids }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        setUploadError(d?.error ?? `Не удалось удалить (${res.status})`);
+        return;
+      }
+      clear();
+      void load();
+    } finally {
+      setBulkDeleting(false);
+    }
   };
 
   const assignProxy = async (accountId: string, newProxyId: string) => {
@@ -1360,6 +1490,13 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
         </div>
       )}
 
+      <BulkActionsBar
+        selectedCount={selectedIds.length}
+        deleting={bulkDeleting}
+        onClear={clear}
+        onDelete={() => { void deleteSelected(); }}
+      />
+
       {loading ? (
         <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
       ) : accounts.length === 0 ? (
@@ -1369,7 +1506,8 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
         </div>
       ) : (
         <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[1fr_120px_150px_80px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50">
+          <div className="grid grid-cols-[32px_1fr_120px_150px_80px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+            <SelectAllCheckbox total={accounts.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span>Аккаунт</span><span>Телефон</span><span>Прокси</span><span>Активен</span><span />
           </div>
           {accounts.map(a => {
@@ -1378,7 +1516,17 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
             const counts = errorCounts[a.session_name];
             const errorCount = counts?.error ?? 0;
             return (
-              <div key={a.id} className="grid grid-cols-[1fr_120px_150px_80px_40px] gap-4 items-center px-4 py-2.5">
+              <div
+                key={a.id}
+                className={`grid grid-cols-[32px_1fr_120px_150px_80px_40px] gap-4 items-center px-4 py-2.5 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={isSelected(a.id)}
+                  onChange={() => toggle(a.id)}
+                  aria-label={`Выбрать ${a.session_name}`}
+                  className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+                />
                 <div className="min-w-0 flex items-center gap-2">
                   <button
                     type="button"
@@ -1687,6 +1835,10 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   const [saving, setSaving] = useState(false);
   /** Previously errors were ignored — authFetch does not throw on 4xx/5xx, so users saw "nothing happened". */
   const [proxyError, setProxyError] = useState<string | null>(null);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+
+  const proxyIds = useMemo(() => proxies.map(p => p.id), [proxies]);
+  const { selectedIds, isSelected, toggle, setAll, clear } = useRowSelection(proxyIds);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1761,6 +1913,29 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     void load();
   };
 
+  const deleteSelected = async () => {
+    const ids = selectedIds;
+    if (!ids.length) return;
+    if (!confirm(`Удалить прокси: ${ids.length}? Аккаунты с этими прокси будут отвязаны.`)) return;
+    setBulkDeleting(true);
+    setProxyError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/proxies/bulk`, {
+        method: 'DELETE',
+        body: JSON.stringify({ campaign_id: campaignId, ids }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        setProxyError(d?.error ?? `Не удалось удалить (${res.status})`);
+        return;
+      }
+      clear();
+      void load();
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -1779,7 +1954,9 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         </div>
       </div>
 
-      {proxyError && (showAdd || showBulk) && (
+      {/* Без привязки к showAdd/showBulk: ошибка массового удаления приходит при
+          закрытых формах и иначе была бы не видна вообще. */}
+      {proxyError && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
           {proxyError}
         </div>
@@ -1827,6 +2004,13 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         </div>
       )}
 
+      <BulkActionsBar
+        selectedCount={selectedIds.length}
+        deleting={bulkDeleting}
+        onClear={clear}
+        onDelete={() => { void deleteSelected(); }}
+      />
+
       {loading ? (
         <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
       ) : proxies.length === 0 ? (
@@ -1836,11 +2020,22 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         </div>
       ) : (
         <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[1fr_80px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50">
+          <div className="grid grid-cols-[32px_1fr_80px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+            <SelectAllCheckbox total={proxies.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span>URL / Название</span><span>Активен</span><span />
           </div>
           {proxies.map(p => (
-            <div key={p.id} className="grid grid-cols-[1fr_80px_40px] gap-4 items-center px-4 py-2.5">
+            <div
+              key={p.id}
+              className={`grid grid-cols-[32px_1fr_80px_40px] gap-4 items-center px-4 py-2.5 ${isSelected(p.id) ? 'bg-indigo-50/60' : ''}`}
+            >
+              <input
+                type="checkbox"
+                checked={isSelected(p.id)}
+                onChange={() => toggle(p.id)}
+                aria-label={`Выбрать ${p.name || p.url}`}
+                className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+              />
               <div className="min-w-0">
                 {p.name && <p className="text-xs font-medium text-gray-800">{p.name}</p>}
                 <p className="text-xs text-gray-500 truncate font-mono">{p.url}</p>

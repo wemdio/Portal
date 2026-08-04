@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError, normalizeProxyUrl } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
+import { parseBulkDeleteBody } from '@/lib/tgOutreach/bulkDelete';
 
 export const dynamic = 'force-dynamic';
 
@@ -43,6 +44,45 @@ export async function POST(req: NextRequest) {
       
         if (error) return jsonError(error.message, 500);
         return NextResponse.json({ items: data ?? [], count: data?.length ?? 0 }, { status: 201 });
+    },
+  );
+}
+
+/**
+ * Массовое удаление прокси кампании.
+ *
+ * Отвязка аккаунтов идёт первой — тем же порядком, что в /proxies/[id] DELETE:
+ * proxy_id у аккаунта — внешний ключ, и если сначала снести прокси, удаление
+ * упрётся в ссылку. Оба запроса ограничены campaign_id, чтобы список id из
+ * одной кампании не задел соседнюю.
+ */
+export async function DELETE(req: NextRequest) {
+  return withToolTrace(
+    { request: req, operation: 'tools.tg-outreach.proxies.bulk.delete' },
+    async () => {
+      const auth = await authenticateRequest(req.headers.get('authorization'));
+      if ('error' in auth) return auth.error;
+
+      const body = await req.json().catch(() => null);
+      const parsed = parseBulkDeleteBody(body);
+      if (!parsed.ok) return jsonError(parsed.error, 400);
+
+      const { error: unlinkError } = await auth.supabase
+        .from('tg_outreach_accounts')
+        .update({ proxy_id: null })
+        .eq('campaign_id', parsed.campaignId)
+        .in('proxy_id', parsed.ids);
+      if (unlinkError) return jsonError(unlinkError.message, 500);
+
+      const { data, error } = await auth.supabase
+        .from('tg_outreach_proxies')
+        .delete()
+        .eq('campaign_id', parsed.campaignId)
+        .in('id', parsed.ids)
+        .select('id');
+
+      if (error) return jsonError(error.message, 500);
+      return NextResponse.json({ ok: true, count: data?.length ?? 0 });
     },
   );
 }

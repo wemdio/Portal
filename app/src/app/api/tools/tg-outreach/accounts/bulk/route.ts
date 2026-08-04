@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
+import { parseBulkDeleteBody } from '@/lib/tgOutreach/bulkDelete';
 
 export const dynamic = 'force-dynamic';
 
@@ -82,6 +83,38 @@ export async function POST(req: NextRequest) {
         { items: data ?? [], count: data?.length ?? 0 },
         { status: 201 },
       );
+    },
+  );
+}
+
+/**
+ * Массовое удаление аккаунтов кампании.
+ *
+ * Удалять по одному через /accounts/[id] оператор физически не может: партия
+ * аккаунтов — это 20+ строк, а перезаливка после правки файлов требует сначала
+ * снести старые. Фильтр по campaign_id обязателен: без него чужой id в списке
+ * снёс бы аккаунт соседней кампании.
+ */
+export async function DELETE(req: NextRequest) {
+  return withToolTrace(
+    { request: req, operation: 'tools.tg-outreach.accounts.bulk.delete' },
+    async () => {
+      const auth = await authenticateRequest(req.headers.get('authorization'));
+      if ('error' in auth) return auth.error;
+
+      const body = await req.json().catch(() => null);
+      const parsed = parseBulkDeleteBody(body);
+      if (!parsed.ok) return jsonError(parsed.error, 400);
+
+      const { data, error } = await auth.supabase
+        .from('tg_outreach_accounts')
+        .delete()
+        .eq('campaign_id', parsed.campaignId)
+        .in('id', parsed.ids)
+        .select('id');
+
+      if (error) return jsonError(error.message, 500);
+      return NextResponse.json({ ok: true, count: data?.length ?? 0 });
     },
   );
 }
