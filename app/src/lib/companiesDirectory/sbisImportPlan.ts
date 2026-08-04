@@ -1,4 +1,9 @@
 import { FEDERAL_DISTRICTS } from '@/lib/companiesSearch/regions';
+import { getOkvedByCode } from '@/lib/companiesSearch/okved2';
+import {
+  normalizeStrictEmailList,
+  normalizeStrictWebsiteList,
+} from '@/lib/companiesDirectory/contactPolicy';
 
 export interface SbisDirectoryInputRow {
   rowNumber: number;
@@ -10,6 +15,7 @@ export interface SbisDirectoryInputRow {
   director_first_name?: unknown;
   director_middle_name?: unknown;
   activity_type?: unknown;
+  source_activity?: unknown;
   employees_count?: unknown;
   phones?: unknown;
   email?: unknown;
@@ -66,6 +72,7 @@ export interface NormalizedSbisCompany {
   director_first_name: string | null;
   director_middle_name: string | null;
   activity_type: string | null;
+  source_activity: string | null;
   employees_count: number | null;
   phones: string | null;
   email: string | null;
@@ -125,7 +132,7 @@ export interface RejectedSbisRow {
 
 export interface DirectoryInsert extends Omit<
   NormalizedSbisCompany,
-  'rowNumbers' | 'locations'
+  'rowNumbers' | 'locations' | 'source_activity'
 > {
   okved_code: string | null;
   okved_code_exact: null;
@@ -167,6 +174,7 @@ export interface SbisImportOptions {
   approximateOkvedCode?: string | null;
   approximateOkvedResolver?: (
     activityType: string | null,
+    company?: NormalizedSbisCompany,
   ) => string | null;
   eligibility?: 'all' | 'website_or_email';
   sourceFile: string;
@@ -190,6 +198,7 @@ const SBIS_HEADER_TO_FIELD = {
   'Имя руководителя': 'director_first_name',
   'Отчество руководителя': 'director_middle_name',
   'Вид деятельности': 'activity_type',
+  'Источник': 'source_activity',
   'Количество сотрудников': 'employees_count',
   Телефоны: 'phones',
   email: 'email',
@@ -239,8 +248,13 @@ const NUMERIC_FIELDS = [
   'cost',
 ] as const;
 
+const SOURCE_ONLY_FIELDS = [
+  'source_activity',
+] as const;
+
 const SOURCE_SCALAR_FIELDS = [
   ...TEXT_FIELDS,
+  ...SOURCE_ONLY_FIELDS,
   ...NUMERIC_FIELDS,
 ] as const;
 
@@ -321,6 +335,15 @@ export function resolveSbisApproximateOkved(
   return normalized
     ? normalizedSbisActivityOkved.get(normalized) ?? null
     : null;
+}
+
+function resolveSourceParentApproximateOkved(
+  sourceActivity: string | null,
+): string | null {
+  const normalized = normalizeText(sourceActivity);
+  const parentCode = normalized
+    ?.match(/^(\d{2})(?:\.\d{1,2})?(?=\D|$)/)?.[1] ?? null;
+  return parentCode && getOkvedByCode(parentCode) ? parentCode : null;
 }
 
 function normalizeInteger(value: unknown): number | null {
@@ -497,6 +520,26 @@ function normalizeEmailList(value: unknown): string | null {
   return emails.length ? emails.join(', ') : null;
 }
 
+type ContactNormalizationMode = 'legacy' | 'strict';
+
+function normalizeSbisWebsite(
+  value: unknown,
+  mode: ContactNormalizationMode,
+): string | null {
+  if (mode === 'legacy') return normalizeWebsiteList(value);
+  const websites = normalizeStrictWebsiteList(normalizeText(value));
+  return websites.length ? websites.join(', ') : null;
+}
+
+function normalizeSbisEmail(
+  value: unknown,
+  mode: ContactNormalizationMode,
+): string | null {
+  if (mode === 'legacy') return normalizeEmailList(value);
+  const emails = normalizeStrictEmailList(normalizeText(value));
+  return emails.length ? emails.join(', ') : null;
+}
+
 function normalizePhonePart(value: string): string | null {
   let digits = value.replace(/\D/g, '');
   if (digits.length === 11 && digits.startsWith('8')) {
@@ -535,6 +578,7 @@ function deriveRegionCode(address: string | null): string | null {
 
 function normalizeSbisRow(
   input: SbisDirectoryInputRow,
+  contactNormalization: ContactNormalizationMode,
 ): NormalizedSbisRow | RejectedSbisRow {
   const inn = normalizeSbisInn(input.inn);
   if (!inn) {
@@ -555,16 +599,17 @@ function normalizeSbisRow(
     director_first_name: normalizeText(input.director_first_name),
     director_middle_name: normalizeText(input.director_middle_name),
     activity_type: normalizeText(input.activity_type),
+    source_activity: normalizeText(input.source_activity),
     employees_count: normalizeInteger(input.employees_count),
     phones: normalizePhoneList(input.phones),
-    email: normalizeEmailList(input.email),
+    email: normalizeSbisEmail(input.email, contactNormalization),
     revenue: normalizeInteger(input.revenue),
     cost: normalizeInteger(input.cost),
     edo_id: sortedUnique(splitList(input.edo_id)).join(', ') || null,
     okpo: normalizeText(input.okpo),
     pf_reg_number: normalizeText(input.pf_reg_number),
     branch_code: normalizeText(input.branch_code),
-    website: normalizeWebsiteList(input.website),
+    website: normalizeSbisWebsite(input.website, contactNormalization),
     egais: sortedUnique(splitList(input.egais)).join(', ') || null,
     gln: sortedUnique(splitList(input.gln)).join(', ') || null,
     ogrn: normalizeText(input.ogrn),
@@ -628,8 +673,9 @@ function unionNormalizedLists(
   return values.length ? values.join(', ') : null;
 }
 
-export function collapseSbisRowsByInn(
+function collapseSbisRowsByInnWithMode(
   inputs: SbisDirectoryInputRow[],
+  contactNormalization: ContactNormalizationMode,
 ): {
   companies: NormalizedSbisCompany[];
   rejected: RejectedSbisRow[];
@@ -641,7 +687,7 @@ export function collapseSbisRowsByInn(
   const rowsByInn = new Map<string, NormalizedSbisRow[]>();
 
   for (const input of inputs) {
-    const normalized = normalizeSbisRow(input);
+    const normalized = normalizeSbisRow(input, contactNormalization);
     if (isRejected(normalized)) {
       rejected.push(normalized);
       continue;
@@ -679,6 +725,7 @@ export function collapseSbisRowsByInn(
         director_first_name: canonical.director_first_name,
         director_middle_name: canonical.director_middle_name,
         activity_type: canonical.activity_type,
+        source_activity: canonical.source_activity,
         employees_count: canonical.employees_count,
         phones: unionNormalizedLists(rows, 'phones'),
         email: unionNormalizedLists(rows, 'email'),
@@ -712,6 +759,12 @@ export function collapseSbisRowsByInn(
   };
 }
 
+export function collapseSbisRowsByInn(
+  inputs: SbisDirectoryInputRow[],
+): ReturnType<typeof collapseSbisRowsByInnWithMode> {
+  return collapseSbisRowsByInnWithMode(inputs, 'legacy');
+}
+
 function normalizeComparable(
   field: FillableField,
   value: DirectoryValue,
@@ -738,7 +791,7 @@ function resolveApproximateOkved(
   options: SbisImportOptions,
 ): string | null {
   if (options.approximateOkvedResolver) {
-    return options.approximateOkvedResolver(company.activity_type);
+    return options.approximateOkvedResolver(company.activity_type, company);
   }
   return options.approximateOkvedCode ?? null;
 }
@@ -750,6 +803,7 @@ function insertFromCompany(
   const {
     rowNumbers: _rowNumbers,
     locations: _locations,
+    source_activity: _sourceActivity,
     ...directoryFields
   } = company;
   return {
@@ -766,8 +820,12 @@ function buildSbisImportPlan(
   existingRows: ExistingDirectoryRow[],
   options: SbisImportOptions,
   updateFields: readonly FillableField[],
+  contactNormalization: ContactNormalizationMode = 'legacy',
 ): SbisImportPlan {
-  const collapsed = collapseSbisRowsByInn(inputs);
+  const collapsed = collapseSbisRowsByInnWithMode(
+    inputs,
+    contactNormalization,
+  );
   const conflicts = [...collapsed.conflicts];
   const existingByInn = new Map<string, ExistingDirectoryRow[]>();
   for (const existing of existingRows) {
@@ -896,6 +954,32 @@ export function buildSbisContactImportPlan(
     },
     ['phones', 'email', 'website', 'okved_code'],
   );
+}
+
+export function buildStrictSbisContactImportPlan(
+  inputs: SbisDirectoryInputRow[],
+  existingRows: ExistingDirectoryRow[],
+  options: SbisContactImportOptions,
+): SbisImportPlan {
+  const plan = buildSbisImportPlan(
+    inputs,
+    existingRows,
+    {
+      ...options,
+      approximateOkvedResolver: (_activityType, company) =>
+        resolveSourceParentApproximateOkved(company?.source_activity ?? null),
+      eligibility: 'website_or_email',
+    },
+    ['email', 'website'],
+    'strict',
+  );
+  return {
+    ...plan,
+    inserts: plan.inserts.map((insert) => ({
+      ...insert,
+      phones: null,
+    })),
+  };
 }
 
 export function applySbisImportPlan(

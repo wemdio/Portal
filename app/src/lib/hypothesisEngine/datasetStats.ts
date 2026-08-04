@@ -1,5 +1,6 @@
 import 'server-only';
 import { datasetQuery, isDatasetConfigured } from '@/lib/instantlyDataset';
+import type { HeMarket } from './market';
 
 /**
  * Объективная статистика датасета Instantly (`instantly_dataset`, 3.66M писем /
@@ -42,6 +43,23 @@ const MIN_SENT_FOR_PCT = 1000;
 /** Минимум отправок на тему/паттерн, чтобы попасть в топ. */
 const MIN_SUBJECT_SENT = 300;
 const TOP_SUBJECTS_LIMIT = 5;
+
+/* ─────────────────── рыночный гейт калибровки ─────────────────── */
+
+/**
+ * Датасет Instantly — это кампании RU-рынка, а словарь матчинга сегментов
+ * (SEGMENT_LABEL_KEYWORDS) русскоязычный. Для проектов рынка 'us' калибровка
+ * по нему бессмысленна: пропускаем её (пустой/нейтральный результат + лог),
+ * НЕ падаем — never-throw контракт модуля сохраняется. Дефолт (без market) —
+ * прежнее поведение.
+ */
+function calibrationMarketSkip(market: HeMarket | undefined, fn: string): boolean {
+  if (market !== 'us') return false;
+  console.info(`[datasetStats] ${fn}: market=us — калибровка по датасету RU-кампаний пропущена`);
+  return true;
+}
+
+const US_MARKET_SKIP_NOTE = 'рыночный гейт: market=us — калибровка по датасету RU-кампаний пропущена';
 
 /* ─────────────────────────── контракт ─────────────────────────── */
 
@@ -336,7 +354,11 @@ export function matchSegmentLabels(terms: string[]): string[] {
 
 /* ─────────────────────────── API ─────────────────────────── */
 
-export async function getSegmentStats(verticalName: string, synonyms: string[]): Promise<HeDatasetStats> {
+export async function getSegmentStats(
+  verticalName: string,
+  synonyms: string[],
+  opts?: { market?: HeMarket },
+): Promise<HeDatasetStats> {
   const stats: HeDatasetStats = {
     matched_segments: [],
     campaigns: 0,
@@ -347,6 +369,9 @@ export async function getSegmentStats(verticalName: string, synonyms: string[]):
     top_subjects: [],
   };
 
+  if (calibrationMarketSkip(opts?.market, 'getSegmentStats')) {
+    return { ...stats, note: US_MARKET_SKIP_NOTE };
+  }
   if (!isDatasetConfigured()) {
     return { ...stats, note: 'датасет не сконфигурирован (нет INSTANTLY_DATASET_DB_URL)' };
   }
@@ -400,7 +425,12 @@ export async function getSegmentStats(verticalName: string, synonyms: string[]):
   return stats;
 }
 
-export async function getWinnerPatterns(segmentHints: string[], limit = 5): Promise<HeWinnerPattern[]> {
+export async function getWinnerPatterns(
+  segmentHints: string[],
+  limit = 5,
+  opts?: { market?: HeMarket },
+): Promise<HeWinnerPattern[]> {
+  if (calibrationMarketSkip(opts?.market, 'getWinnerPatterns')) return [];
   if (!isDatasetConfigured()) return [];
   const terms = normTerms(segmentHints);
   // Нет хинтов — считаем по всему датасету (без сегментного фильтра).
@@ -424,8 +454,10 @@ export async function getWinnerPatterns(segmentHints: string[], limit = 5): Prom
  * РАЗНЫХ клиентов и с каким объёмом/ответами студия там уже работала. Сортировка
  * по числу кампаний (SQL), лимит opts.limit ?? 10 (кламп 1..50). Never-throw:
  * датасет не сконфигурирован или запрос упал → [] (+ console.error при падении).
+ * Рынок us → рыночный гейт: [] без запроса (см. calibrationMarketSkip).
  */
-export async function getPortfolioProfile(opts?: { limit?: number }): Promise<HePortfolioEntry[]> {
+export async function getPortfolioProfile(opts?: { limit?: number; market?: HeMarket }): Promise<HePortfolioEntry[]> {
+  if (calibrationMarketSkip(opts?.market, 'getPortfolioProfile')) return [];
   if (!isDatasetConfigured()) return [];
   const limit = opts?.limit ?? 10;
   const lim = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 50) : 10;

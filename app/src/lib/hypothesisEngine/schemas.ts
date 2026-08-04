@@ -288,23 +288,80 @@ export const HeMapsQuerySchema = z.object({
   geo: z.string().optional(),
 });
 
+/* ─── ENG-источники (market='us') ─── */
+
+/**
+ * Фильтры каталога PDL (pdl_companies, компании EU/US): industries — метки
+ * LinkedIn-индустрий в нижнем регистре, sizes — бакеты штата («51-200»),
+ * countries — английские названия стран в нижнем регистре, name — подстрока
+ * имени. Пустой {} — нефильтрованный срез 13M-строкового справочника: запрещаем.
+ */
+export const HePdlFiltersSchema = z
+  .object({
+    industries: z.array(z.string().min(1)).optional(),
+    sizes: z.array(z.string().min(1)).optional(),
+    countries: z.array(z.string().min(1)).optional(),
+    name: z.string().min(1).optional(),
+  })
+  .refine((f) => Object.values(f).some((v) => v !== undefined), 'укажи хотя бы один фильтр');
+
+/**
+ * Фильтры funded_companies (стартапы и раунды): min_funding_usd — раунд/сумма
+ * не меньше (семантика applyFundedFilters: last ИЛИ total), funded_since —
+ * последний раунд не раньше даты (YYYY-MM-DD).
+ */
+export const HeFundedFiltersSchema = z
+  .object({
+    industries: z.array(z.string().min(1)).optional(),
+    countries: z.array(z.string().min(1)).optional(),
+    min_funding_usd: z.number().positive().optional(),
+    funded_since: HeDateSchema.optional(),
+  })
+  .refine((f) => Object.values(f).some((v) => v !== undefined), 'укажи хотя бы один фильтр');
+
+/**
+ * Запрос к eng_hiring_cache (компании, нанимающие ENG-роли): roles — EN
+ * ключевые слова ролей (regex по vacancy_title), countries — коды стран ATS
+ * («us», «gb», …), posted_within_days — свежесть вакансии.
+ */
+export const HeEngHiringQuerySchema = z.object({
+  roles: z.array(z.string().min(1).max(300)).min(1),
+  countries: z.array(z.string().min(2).max(20)).optional(),
+  posted_within_days: z.number().int().positive().optional(),
+});
+
 export const HeCollectTaskSchema = z
   .object({
-    source: z.enum(['companies_directory', 'hh_live', 'yandex_maps', 'google_maps']),
+    source: z.enum(['companies_directory', 'hh_live', 'yandex_maps', 'google_maps', 'pdl', 'funded', 'eng_hiring']),
     /** Что и зачем собираем, 1 строка. */
     rationale: z.string().min(1),
     directory_filters: HeDirectoryFiltersSchema.optional(),
     hh_query: HeHhQuerySchema.optional(),
     maps_query: HeMapsQuerySchema.optional(),
+    pdl_filters: HePdlFiltersSchema.optional(),
+    funded_filters: HeFundedFiltersSchema.optional(),
+    eng_hiring_query: HeEngHiringQuerySchema.optional(),
   })
   .superRefine((task, ctx) => {
     // Обязательный под-объект параметров зависит от источника.
-    const required: 'directory_filters' | 'hh_query' | 'maps_query' =
+    const required:
+      | 'directory_filters'
+      | 'hh_query'
+      | 'maps_query'
+      | 'pdl_filters'
+      | 'funded_filters'
+      | 'eng_hiring_query' =
       task.source === 'companies_directory'
         ? 'directory_filters'
         : task.source === 'hh_live'
           ? 'hh_query'
-          : 'maps_query';
+          : task.source === 'pdl'
+            ? 'pdl_filters'
+            : task.source === 'funded'
+              ? 'funded_filters'
+              : task.source === 'eng_hiring'
+                ? 'eng_hiring_query'
+                : 'maps_query';
     if (task[required] == null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

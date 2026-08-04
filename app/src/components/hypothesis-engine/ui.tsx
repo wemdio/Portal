@@ -8,6 +8,7 @@
  * violet/red, тёмную тему подхватывают overrides в globals.css.
  */
 
+import { toUnicode } from 'punycode';
 import type { HeHypothesisTier, HeProjectStatus } from '@/lib/hypothesisEngine/types';
 import { OPERATOR_RE } from '@/lib/hypothesisEngine/renderPreview';
 import { HE, StatusDot } from './design';
@@ -148,7 +149,26 @@ export function formatDate(iso: string | null | undefined): string {
   }
 }
 
-/** Короткий хост для показа: «https://www.acme.com/» → «acme.com». */
+/** Короткий хост для показа: «https://www.acme.com/» → «acme.com»; punycode IDN → Unicode. */
 export function prettyHost(url: string): string {
-  return url.replace(/^https?:\/\/(www\.)?/i, '').replace(/\/+$/, '');
+  const host = url.replace(/^https?:\/\/(www\.)?/i, '').replace(/\/+$/, '');
+  return decodePunycodeHost(host);
+}
+
+/**
+ * Имя проекта для показа. У проектов, созданных до Unicode-нормализации,
+ * имя могло сохраниться как punycode-домен («xn--…») — такие декодируем,
+ * обычные имена не трогаем. Пустое имя → хост сайта.
+ */
+export function prettyProjectName(name: string | null | undefined, websiteUrl: string): string {
+  const trimmed = name?.trim();
+  if (!trimmed) return prettyHost(websiteUrl);
+  return decodePunycodeHost(trimmed);
+}
+
+/** «xn--e1aaa….xn--p1ai» → «цельныерешения.рф»; обычные строки возвращает как есть. */
+function decodePunycodeHost(value: string): string {
+  if (!/^[a-z0-9.-]+$/i.test(value) || !value.toLowerCase().includes('xn--')) return value;
+  const decoded = toUnicode(value.toLowerCase());
+  return decoded || value;
 }

@@ -1,8 +1,6 @@
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { StringDecoder } from 'node:string_decoder';
 
 import {
   validateSbisInsertRow,
@@ -13,8 +11,23 @@ import {
 import {
   parseJsonValue,
   readJsonLines,
-  type JsonLinesReadResult,
 } from '@/lib/companiesDirectory/planFileIO';
+
+const OPTIONAL_AUDIT_ARTIFACTS = [
+  'skipped.jsonl',
+  'conflicts.jsonl',
+  'provenance.jsonl',
+  'source-locations.jsonl',
+  'rollback.jsonl',
+] as const;
+
+const KNOWN_ARTIFACTS = new Set<string>([
+  'summary.json',
+  'inserts.jsonl',
+  'updates.jsonl',
+  'rejected.jsonl',
+  ...OPTIONAL_AUDIT_ARTIFACTS,
+]);
 
 export interface ProcessSbisPlanFilesOptions {
   planDir: string;
@@ -32,46 +45,6 @@ export interface ProcessedSbisPlanFiles {
   updateRows: number;
   approximateOkvedCounts: Record<string, number>;
   artifactHashes: Record<string, string>;
-}
-
-async function readPossiblyEmptyJsonLines(
-  filePath: string,
-  label: string,
-): Promise<JsonLinesReadResult> {
-  const digest = createHash('sha256');
-  const decoder = new StringDecoder('utf8');
-  const stream = createReadStream(filePath);
-  let pending = '';
-  let rows = 0;
-
-  for await (const rawChunk of stream) {
-    const chunk = Buffer.isBuffer(rawChunk)
-      ? rawChunk
-      : Buffer.from(rawChunk);
-    digest.update(chunk);
-    pending += decoder.write(chunk);
-    let newlineIndex = pending.indexOf('\n');
-    while (newlineIndex >= 0) {
-      const line = pending.slice(0, newlineIndex).replace(/\r$/, '');
-      pending = pending.slice(newlineIndex + 1);
-      if (line !== '') {
-        rows += 1;
-      }
-      newlineIndex = pending.indexOf('\n');
-    }
-  }
-  pending += decoder.end();
-  if (pending.replace(/\r$/, '') !== '') {
-    rows += 1;
-  }
-
-  if (rows > 0) {
-    throw new Error(`${label} must be empty, got ${rows} rows`);
-  }
-  return {
-    rows,
-    sha256: digest.digest('hex'),
-  };
 }
 
 function resolveArtifact(planDir: string, name: string): string {
@@ -116,8 +89,17 @@ export async function processSbisPlanFiles(
   const summaryBuffer = await readFile(summaryPath);
   const summary = parseJsonValue<unknown>(summaryBuffer, 'summary.json');
   const artifactHashes: Record<string, string> = {
-    'summary.json': createHash('sha256').update(summaryBuffer).digest('hex'),
+    'summary.json': createHash('sha256')
+      .update(summaryBuffer)
+      .digest('hex'),
   };
+  const artifactRows: Record<string, number> = {};
+
+  for (const artifactName of Object.keys(manifest.artifacts)) {
+    if (!KNOWN_ARTIFACTS.has(artifactName)) {
+      throw new Error(`SBIS manifest contains unknown artifact ${artifactName}`);
+    }
+  }
 
   const insertInns = new Set<string>();
   const updateInns = new Set<string>();
@@ -130,7 +112,7 @@ export async function processSbisPlanFiles(
     resolveArtifact(options.planDir, 'inserts.jsonl'),
     'inserts.jsonl',
     async (raw) => {
-      const row = validateSbisInsertRow(raw);
+      const row = validateSbisInsertRow(raw, manifest.plan);
       const inn = String(row.inn);
       if (insertInns.has(inn)) {
         throw new Error(`inserts.jsonl contains duplicate INN ${inn}`);
@@ -156,13 +138,14 @@ export async function processSbisPlanFiles(
     await options.onInsertBatch?.(insertBatch);
   }
   artifactHashes['inserts.jsonl'] = insertResult.sha256;
+  artifactRows['inserts.jsonl'] = insertResult.rows;
 
   let updateBatch: Record<string, unknown>[] = [];
   const updateResult = await readJsonLines(
     resolveArtifact(options.planDir, 'updates.jsonl'),
     'updates.jsonl',
     async (raw) => {
-      const row = validateSbisUpdateRow(raw);
+      const row = validateSbisUpdateRow(raw, manifest.plan);
       const inn = String(row.inn);
       if (updateInns.has(inn)) {
         throw new Error(`updates.jsonl contains duplicate INN ${inn}`);
@@ -184,22 +167,32 @@ export async function processSbisPlanFiles(
     await options.onUpdateBatch?.(updateBatch);
   }
   artifactHashes['updates.jsonl'] = updateResult.sha256;
+  artifactRows['updates.jsonl'] = updateResult.rows;
 
-  const rejectedResult = await readPossiblyEmptyJsonLines(
+  const rejectedResult = await readJsonLines(
     resolveArtifact(options.planDir, 'rejected.jsonl'),
     'rejected.jsonl',
+    () => undefined,
   );
   artifactHashes['rejected.jsonl'] = rejectedResult.sha256;
+  artifactRows['rejected.jsonl'] = rejectedResult.rows;
+
+  for (const artifactName of OPTIONAL_AUDIT_ARTIFACTS) {
+    if (!(artifactName in manifest.artifacts)) continue;
+    const result = await readJsonLines(
+      resolveArtifact(options.planDir, artifactName),
+      artifactName,
+      () => undefined,
+    );
+    artifactHashes[artifactName] = result.sha256;
+    artifactRows[artifactName] = result.rows;
+  }
 
   const validation = validateSbisPlanManifest({
     manifest,
     summary,
     artifactHashes,
-    artifactRows: {
-      'inserts.jsonl': insertResult.rows,
-      'updates.jsonl': updateResult.rows,
-      'rejected.jsonl': rejectedResult.rows,
-    },
+    artifactRows,
     approximateOkvedCounts,
   });
 

@@ -4,11 +4,16 @@
  * best-effort Serper-верификация топовых терминов и запросов к
  * реестрам/каталогам (термин/запрос без единого результата помечается
  * в notes). Пишется в he_vocab.
+ *
+ * Локализация: при market='us' LLM-вызов идёт EN-промптом
+ * (prompts/vocab.en.ts) — типы компаний/должности/запросы под ENG-источники.
  */
 
 import { callLLMWithSchema, getHeModel } from '../llm';
+import { projectMarket } from '../market';
 import { HeVocabSchema } from '../schemas';
 import { buildVocabMessages } from '../prompts/vocab';
+import { buildVocabMessagesEn } from '../prompts/vocab.en';
 import type { HeHypothesis, HeJob, HeVertical } from '../types';
 import { selectPromptHypotheses } from './chain';
 import { resolveSearch } from './io';
@@ -16,6 +21,7 @@ import {
   addUsage,
   newUsage,
   payloadString,
+  readProject,
   stageLog,
   type HeStageContext,
   type HeStageResult,
@@ -56,9 +62,12 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
     confirmed: h.status === 'accepted',
   }));
 
+  // Рынок: ctx.market (воркер), фолбэк — колонка he_projects.market.
+  const market = ctx.market ?? projectMarket(await readProject(ctx.supabase, job.project_id));
+
   const model = getHeModel('bulk');
   const llm = await callLLMWithSchema(
-    buildVocabMessages({
+    (market === 'us' ? buildVocabMessagesEn : buildVocabMessages)({
       verticalName: vertical.name,
       verticalSummary: vertical.summary ?? '',
       synonyms: Array.isArray(vertical.synonyms) ? vertical.synonyms : [],

@@ -7,6 +7,8 @@ import { useIsTma } from '@/lib/useIsTma';
 import { UserProfile, UserRole } from '@/types';
 import { getAssigneeDisplayName } from '@/lib/projectAssignees';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
+import { useUser } from '@/lib/UserProvider';
+import { isLead } from '@/lib/roles';
 import TeamStatisticsPanel from '@/components/team/TeamStatisticsPanel';
 import TeamReviewsPanel from '@/components/team/TeamReviewsPanel';
 
@@ -43,6 +45,11 @@ const LEAD_ROLES = new Set<UserRole>(['lead']);
 const NO_SPEC = '— без специалиста';
 
 type TeamWorkspaceView = 'load' | 'statistics' | 'reviews';
+const TEAM_WORKSPACE_VIEWS = [
+  ['load', 'Загрузка'],
+  ['statistics', 'Статистика'],
+  ['reviews', 'Ревью'],
+] as const satisfies ReadonlyArray<readonly [TeamWorkspaceView, string]>;
 type Segment = 'leads' | 'specs' | 'projects';
 type SortKey = 'projects' | 'load' | 'result' | 'name';
 type StatusFilter = 'all' | 'Перегруз' | 'Норма' | 'Свободен';
@@ -244,6 +251,8 @@ function Caret({ open, hidden }: { open: boolean; hidden?: boolean }) {
 
 export default function TeamPage() {
   const isTma = useIsTma();
+  const { userRole } = useUser();
+  const canViewPrivateWorkspaces = isLead(userRole);
   const [workspaceView, setWorkspaceView] = useState<TeamWorkspaceView>('load');
   const [projects, setProjects] = useState<ProjectData[]>([]);
   const [profiles, setProfiles] = useState<ProfileData[]>([]);
@@ -259,6 +268,7 @@ export default function TeamPage() {
   const [openLeads, setOpenLeads] = useState<Set<string>>(new Set());
   const [openSpecInLead, setOpenSpecInLead] = useState<Set<string>>(new Set());
   const [openSpecs, setOpenSpecs] = useState<Set<string>>(new Set());
+  const activeWorkspaceView = canViewPrivateWorkspaces ? workspaceView : 'load';
 
   const nameToAvatarUrl = useMemo(() => {
     const map = new Map<string, string>();
@@ -270,11 +280,6 @@ export default function TeamPage() {
     return map;
   }, [profiles]);
 
-
-  useEffect(() => {
-    void fetchData();
-    loadCapacities();
-  }, []);
   useEffect(() => {
     if (profiles.length === 0) return;
     let cancelled = false;
@@ -341,6 +346,13 @@ export default function TeamPage() {
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    // Initial state is synchronized once from Supabase and localStorage.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void fetchData();
+    loadCapacities();
+  }, []);
 
   // ---- derived model ----
   const model = useMemo(() => {
@@ -725,33 +737,31 @@ export default function TeamPage() {
         <div>
           <h1 className={`${isTma ? 'text-2xl' : 'text-3xl'} font-bold tracking-tight text-gray-900`}>Команда</h1>
           <p className="mt-1 text-sm text-gray-500">
-            {workspaceView === 'load'
+            {activeWorkspaceView === 'load'
               ? 'Текущая загрузка, распределение по проектам и результаты'
-              : workspaceView === 'statistics'
+              : activeWorkspaceView === 'statistics'
                 ? 'Показатели команды за выбранный календарный период'
                 : 'Итоги встреч и рекомендации по развитию сотрудников'}
           </p>
         </div>
-        <div role="group" aria-label="Разделы команды" className="inline-flex min-h-11 w-fit gap-1 rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
-          {([
-            ['load', 'Загрузка'],
-            ['statistics', 'Статистика'],
-            ['reviews', 'Ревью'],
-          ] as const).map(([key, label]) => (
-            <button
-              key={key}
-              type="button"
-              aria-pressed={workspaceView === key}
-              onClick={() => setWorkspaceView(key)}
-              className={`min-h-11 rounded-lg px-4 text-sm font-semibold transition-colors ${workspaceView === key ? 'bg-gray-900 text-white' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'}`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        {canViewPrivateWorkspaces && (
+          <div role="group" aria-label="Разделы команды" className="inline-flex min-h-11 w-fit gap-1 rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
+            {TEAM_WORKSPACE_VIEWS.map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                aria-pressed={activeWorkspaceView === key}
+                onClick={() => setWorkspaceView(key)}
+                className={`min-h-11 rounded-lg px-4 text-sm font-semibold transition-colors ${activeWorkspaceView === key ? 'bg-gray-900 text-white' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      {workspaceView === 'load' ? (
+      {activeWorkspaceView === 'load' ? (
         loading ? (
           <div className="flex h-64 items-center justify-center rounded-2xl border border-gray-200 bg-white">
             <div className="text-sm text-gray-400">Загрузка...</div>
@@ -852,7 +862,7 @@ export default function TeamPage() {
       </div>
           </div>
         )
-      ) : workspaceView === 'statistics' ? (
+      ) : activeWorkspaceView === 'statistics' ? (
         <TeamStatisticsPanel />
       ) : (
         <TeamReviewsPanel />

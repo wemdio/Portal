@@ -325,7 +325,7 @@ function SignatureBlock({
         Отправитель (подпись в письмах)
       </label>
       <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
-        Как подписываемся в письмах: имя, роль, сайт. Пример: Сергей Лазуткин, руководитель направления, Polza,
+        Как подписываемся в письмах: имя, роль, сайт. Пример: Иван Иванов, руководитель направления, Polza,
         polzaagency.ru. Пусто: подпишемся командой компании из брифа.
       </p>
       <textarea
@@ -337,7 +337,7 @@ function SignatureBlock({
           setDirty(true);
           setSaved(false);
         }}
-        placeholder="Сергей Лазуткин, руководитель направления, Polza, polzaagency.ru"
+        placeholder="Иван Иванов, руководитель направления, Polza, polzaagency.ru"
         className={`mt-2 resize-y ${HE.input}`}
       />
       <div className="mt-2 flex items-center gap-2">
