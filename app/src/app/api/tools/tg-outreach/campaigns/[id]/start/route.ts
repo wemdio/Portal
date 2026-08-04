@@ -24,6 +24,11 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       
         if (!campaign) return jsonError('Кампания не найдена', 404);
         if (campaign.status === 'running') return jsonError('Кампания уже запущена', 409);
+        // Прогрев и боевой аутрич взаимоисключающие: аккаунт не может
+        // одновременно греться и писать клиентам.
+        if (campaign.status === 'warming') {
+          return jsonError('Идёт прогрев аккаунтов. Остановите его, прежде чем запускать кампанию.', 409);
+        }
       
         const { data, error } = await supabase
           .from('tg_outreach_jobs')

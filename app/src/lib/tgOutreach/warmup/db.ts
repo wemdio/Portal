@@ -17,6 +17,50 @@ import type {
 } from './types';
 import { CONVERSATION_STALE_MINUTES } from './types';
 
+/**
+ * Записать событие прогрева.
+ *
+ * Своя таблица, а не общий tg_outreach_logs: там идёт поток боевого цикла
+ * («круг завершён», «пауза перед переходом к следующему аккаунту»), и во
+ * вкладке «Прогрев» он полностью заглушал события прогрева.
+ */
+export async function logWarmup(
+  db: SupabaseClient,
+  entry: {
+    runId: string;
+    campaignId: string;
+    accountId?: string | null;
+    level: 'info' | 'warning' | 'error';
+    message: string;
+  },
+): Promise<void> {
+  await db.from('tg_outreach_warmup_logs').insert({
+    run_id: entry.runId,
+    campaign_id: entry.campaignId,
+    account_id: entry.accountId ?? null,
+    level: entry.level,
+    message: entry.message.slice(0, 2000),
+  });
+}
+
+/**
+ * Пометить кампанию как греющуюся (или вернуть в «остановлена»).
+ *
+ * Статус кампании — то место, где правило «либо греем, либо работаем по лидам»
+ * становится видимым и проверяемым: воркер не берёт `warming` в боевой
+ * auto-resume, а API отказывает в запуске аутрича.
+ */
+export async function setCampaignWarming(
+  db: SupabaseClient,
+  campaignId: string,
+  warming: boolean,
+): Promise<void> {
+  await db
+    .from('tg_outreach_campaigns')
+    .update({ status: warming ? 'warming' : 'stopped', updated_at: new Date().toISOString() })
+    .eq('id', campaignId);
+}
+
 /** Идущий или ожидающий запуск прогрева. Активный может быть только один. */
 export async function getActiveRun(
   db: SupabaseClient,

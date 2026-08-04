@@ -81,7 +81,20 @@ const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   stopping: { label: 'Останавливается...', cls: 'bg-amber-100 text-amber-700 animate-pulse' },
   paused: { label: 'Пауза', cls: 'bg-amber-100 text-amber-700' },
   error: { label: 'Ошибка', cls: 'bg-rose-100 text-rose-700' },
+  // Прогрев — самостоятельное состояние, а не разновидность «остановлена»:
+  // пока он идёт, боевой аутрич запустить нельзя.
+  warming: { label: 'Прогрев', cls: 'bg-blue-100 text-blue-700' },
 };
+
+/** Цвет точки кампании в списке. */
+function statusDotClass(status: string): string {
+  switch (status) {
+    case 'running': return 'bg-emerald-400';
+    case 'warming': return 'bg-blue-400';
+    case 'error': return 'bg-rose-400';
+    default: return 'bg-gray-400';
+  }
+}
 
 const DIALOG_STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   none: { label: '—', cls: 'text-gray-400' },
@@ -1852,8 +1865,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
 const TABS = [
   { id: 'settings', label: 'Настройки', icon: Settings },
   { id: 'accounts', label: 'Аккаунты', icon: Users },
-  { id: 'proxies', label: 'Прокси', icon: Network },
   { id: 'warmup', label: 'Прогрев', icon: Flame },
+  { id: 'proxies', label: 'Прокси', icon: Network },
   { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
   { id: 'processed', label: 'Обработанные', icon: UserCheck },
@@ -1968,7 +1981,11 @@ function CampaignView({ campaign, isOwn, onUpdate, onDelete }: {
         </div>
         <div className="flex items-center gap-2">
           {campaign.status !== 'running' && !stopping ? (
-            <button type="button" onClick={() => void doAction('start')} disabled={actionLoading}
+            <button type="button" onClick={() => void doAction('start')}
+              disabled={actionLoading || campaign.status === 'warming'}
+              title={campaign.status === 'warming'
+                ? 'Идёт прогрев аккаунтов — остановите его на вкладке «Прогрев»'
+                : undefined}
               className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-emerald-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
               {actionLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
               Запустить
@@ -2057,7 +2074,9 @@ function CampaignView({ campaign, isOwn, onUpdate, onDelete }: {
         {tab === 'settings' && <SettingsTab campaign={campaign} onSave={saveSettings} />}
         {tab === 'accounts' && <CampaignAccountsTab campaignId={campaign.id} />}
         {tab === 'proxies' && <CampaignProxiesTab campaignId={campaign.id} />}
-        {tab === 'warmup' && <WarmupTab campaignId={campaign.id} isOwn={isOwn} />}
+        {tab === 'warmup' && (
+          <WarmupTab campaignId={campaign.id} isOwn={isOwn} campaignStatus={campaign.status} />
+        )}
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
         {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} isOwn={isOwn} />}
         {tab === 'processed' && <ProcessedTab campaignId={campaign.id} />}
@@ -2200,7 +2219,7 @@ function CampaignsSection() {
             return (
               <button key={c.id} type="button" onClick={() => setSelectedId(c.id)} title={st.label}
                 className={`inline-flex items-center gap-2 rounded-full px-5 py-2.5 text-xs font-medium transition border cursor-pointer ${selectedId === c.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm'}`}>
-                <span className={`h-1.5 w-1.5 rounded-full ${c.status === 'running' ? 'bg-emerald-400' : c.status === 'error' ? 'bg-rose-400' : 'bg-gray-400'}`} />
+                <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass(c.status)}`} />
                 {c.name}
               </button>
             );
