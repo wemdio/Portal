@@ -4,9 +4,10 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { DEFAULT_WARMUP_DAYS } from '@/lib/tgOutreach/warmup/types';
 import {
   CONVERSATIONS_FIRST_DAY,
-  CONVERSATIONS_LAST_DAY,
+  CONVERSATIONS_PEAK,
   MESSAGES_FIRST_DAY,
-  MESSAGES_LAST_DAY,
+  MESSAGES_PEAK,
+  RAMP_DAYS,
 } from '@/lib/tgOutreach/warmup/types';
 
 export const dynamic = 'force-dynamic';
@@ -202,9 +203,14 @@ export async function DELETE(req: NextRequest, ctx: Ctx) {
 function defaults() {
   return {
     default_days: DEFAULT_WARMUP_DAYS,
+    // ramp_days — за сколько дней нагрузка доходит до потолка. Не зависит от
+    // выбранного days: короткий прогрев обрывается раньше, а не разгоняется
+    // быстрее. Пишется в settings прогона, чтобы задним числом было понятно,
+    // по какой кривой он шёл.
+    ramp_days: RAMP_DAYS,
     conversations_first_day: CONVERSATIONS_FIRST_DAY,
-    conversations_last_day: CONVERSATIONS_LAST_DAY,
+    conversations_peak: CONVERSATIONS_PEAK,
     messages_first_day: MESSAGES_FIRST_DAY,
-    messages_last_day: MESSAGES_LAST_DAY,
+    messages_peak: MESSAGES_PEAK,
   };
 }

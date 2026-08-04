@@ -235,7 +235,6 @@ export async function runWarmupLoop(
         const plan = planDay({
           accountIds: [...byAccountId.keys()],
           day,
-          totalDays: run.days,
           previousPairs: await wdb.loadPreviousPairs(db, run.id),
           window: activeWindowForDay(now, tg),
           random: Math.random,
