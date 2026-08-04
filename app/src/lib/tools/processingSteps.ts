@@ -97,12 +97,80 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Максимальная пауза между попытками. Провайдер не должен вешать джоб надолго. */
+const MAX_RETRY_DELAY_MS = 60_000;
+
+export type AiRetryKind = 'permanent' | 'rate_limit' | 'server' | 'network' | 'exhausted';
+
+export interface AiRetryDecision {
+  retry: boolean;
+  delayMs: number;
+  kind: AiRetryKind;
+}
+
+/**
+ * Что делать после неудачного обращения к ИИ.
+ *
+ * Разбор 04.08.2026 (шаг «Оценка ЦА»): повторы были, но одинаковые для всех
+ * ошибок — 1.5 + 3 + 6 секунд, всего около десяти. Окно лимита запросов у
+ * провайдера живёт примерно минуту, а заголовок Retry-After игнорировался,
+ * поэтому пачка честно делала четыре попытки внутри одного и того же окна и
+ * всё равно падала. При двенадцати параллельных джобах base-constructor,
+ * которые делят один ключ, это давало ровно наблюдаемую картину: часть пачек
+ * проходит, часть — нет (замеры по проду: 0 из 69 строк, 10 из 154, 98 из 304).
+ *
+ * Отсюда два разных расписания. Лимит запросов пересиживаем долго и уважаем
+ * Retry-After. На «постоянных» ошибках (неверный ключ, кривой запрос) повторы
+ * бессмысленны — сдаёмся сразу, чтобы не терять десять секунд на каждой пачке
+ * и получить честную причину в логе.
+ */
+export function planAiRetry(params: {
+  /** HTTP-статус ответа; null/undefined — сеть не ответила или таймаут. */
+  status?: number | null;
+  attempt: number;
+  maxRetries?: number;
+  /** Значение заголовка Retry-After в секундах, если провайдер его прислал. */
+  retryAfterSec?: number | null;
+}): AiRetryDecision {
+  const { status, attempt, retryAfterSec } = params;
+  const maxRetries = params.maxRetries ?? MAX_RETRIES;
+
+  const permanent =
+    typeof status === 'number' && status >= 400 && status < 500 && status !== 408 && status !== 429;
+  if (permanent) return { retry: false, delayMs: 0, kind: 'permanent' };
+
+  if (attempt >= maxRetries) return { retry: false, delayMs: 0, kind: 'exhausted' };
+
+  if (status === 429 || status === 408) {
+    const fromHeader = retryAfterSec != null && retryAfterSec > 0 ? retryAfterSec * 1000 : 0;
+    // 5 → 15 → 30 секунд: минутное окно лимита пересиживается за три попытки.
+    const ladder = [5_000, 15_000, 30_000][Math.min(attempt, 2)];
+    return {
+      retry: true,
+      delayMs: Math.min(Math.max(fromHeader, ladder), MAX_RETRY_DELAY_MS),
+      kind: 'rate_limit',
+    };
+  }
+
+  const delayMs = Math.min(RETRY_BASE_DELAY * 2 ** attempt, MAX_RETRY_DELAY_MS);
+  return { retry: true, delayMs, kind: typeof status === 'number' ? 'server' : 'network' };
+}
+
+function parseRetryAfter(res: { headers?: { get?: (n: string) => string | null } }): number | null {
+  const raw = res.headers?.get?.('retry-after');
+  if (!raw) return null;
+  const sec = Number(raw);
+  return Number.isFinite(sec) && sec > 0 ? sec : null;
+}
+
 async function callOpenRouter(
   apiKey: string,
   model: string,
   messages: { role: string; content: string }[],
   opts: { temperature?: number; max_tokens?: number; json?: boolean; title?: string } = {},
 ): Promise<string> {
+  let lastError: Error = new Error('Обращение к ИИ не состоялось');
+
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 70_000);
@@ -129,18 +197,35 @@ async function callOpenRouter(
         const json = await res.json();
         return json.choices?.[0]?.message?.content || '';
       }
-      if ([502, 503, 504].includes(res.status) && attempt < MAX_RETRIES) {
-        await sleep(RETRY_BASE_DELAY * 2 ** attempt);
-        continue;
+
+      // Текст ответа кладём в ошибку: без него причина провала теряется, и
+      // разбирать инцидент не по чему (см. комментарий к planAiRetry).
+      let body = '';
+      try {
+        body = (await res.text()).slice(0, 200);
+      } catch {
+        // тело недоступно — статуса достаточно
       }
-      throw new Error(`OpenRouter ${res.status}`);
+      lastError = new Error(`ИИ ответил HTTP ${res.status}${body ? `: ${body}` : ''}`);
+
+      const plan = planAiRetry({ status: res.status, attempt, retryAfterSec: parseRetryAfter(res) });
+      if (!plan.retry) throw lastError;
+      await sleep(plan.delayMs);
     } catch (err) {
       clearTimeout(timeout);
-      if (attempt >= MAX_RETRIES) throw err;
-      await sleep(RETRY_BASE_DELAY * 2 ** attempt);
+      const isOurs = err === lastError;
+      if (!isOurs) {
+        const msg = err instanceof Error ? err.message : String(err);
+        lastError = new Error(`Обращение к ИИ не удалось: ${msg}`);
+        const plan = planAiRetry({ status: null, attempt });
+        if (!plan.retry) throw lastError;
+        await sleep(plan.delayMs);
+        continue;
+      }
+      throw lastError;
     }
   }
-  throw new Error('OpenRouter max retries exceeded');
+  throw lastError;
 }
 
 /* ═══════════════════════════════════════════
@@ -783,6 +868,12 @@ export interface StepTAScoreOptions {
     pre_filter_rows: number;
     filtered_out_count: number;
     pre_filter_avg_score: number;
+    /** Строк с заглушкой «Ошибка оценки» — ИИ по ним не ответил. */
+    failed_rows: number;
+    /** Сколько запросов к ИИ провалилось (одна пачка = до 10 компаний). */
+    failed_batches: number;
+    /** Причины провалов с частотой — то, чего раньше немой catch не оставлял. */
+    errors: Array<{ reason: string; count: number }>;
   }) => void;
 }
 
@@ -832,6 +923,12 @@ export async function stepTAScore(
 
   // ── AI-оценка уникальных представителей (тот же батч-протокол) ───────
   const scoreByKey = new Map<string, { score: string; reason: string }>();
+  // Учёт провалов: какие компании остались без оценки и по каким причинам.
+  // Нужен, чтобы «Ошибка оценки» в результате перестала быть немой — оператор
+  // видит сводку в карточке задачи, а воркер пишет её в application_logs.
+  const failedKeys = new Set<string>();
+  const errorCounts = new Map<string, number>();
+  let failedBatches = 0;
   for (let batch = 0; batch < uniqueRows.length; batch += TA_BATCH) {
     if (isCancelled && await isCancelled()) throw new Error('Отменено');
     const chunkKeys = uniqueKeys.slice(batch, batch + TA_BATCH);
@@ -852,6 +949,10 @@ export async function stepTAScore(
         { role: 'user', content: userMsg },
       ], { temperature: 0.2, json: true, title: 'Portal - Base Constructor TA Scoring' });
 
+      // Пустой ответ раньше падал на JSON.parse('') и попадал в общий catch без
+      // объяснения. Называем причину своими словами — она уйдёт в телеметрию.
+      if (!content.trim()) throw new Error('ИИ вернул пустой ответ');
+
       let parsed: unknown;
       try {
         parsed = JSON.parse(content);
@@ -868,7 +969,16 @@ export async function stepTAScore(
         const s = scoreMap.get(i);
         scoreByKey.set(chunkKeys[i], { score: String(s?.score ?? 0), reason: s?.reason ?? '' });
       }
-    } catch {
+    } catch (err) {
+      // Причину НЕ теряем. Раньше здесь был немой catch, и разобрать инцидент
+      // было нечем: в результате видно «Ошибка оценки», а почему — нигде.
+      const reason = err instanceof Error ? err.message : String(err);
+      failedBatches += 1;
+      for (const k of chunkKeys) failedKeys.add(k);
+      errorCounts.set(reason, (errorCounts.get(reason) ?? 0) + 1);
+      console.warn(
+        `[ta_scoring] пачка ${Math.floor(batch / TA_BATCH) + 1} (${chunk.length} компаний) не оценена: ${reason}`,
+      );
       for (const k of chunkKeys) scoreByKey.set(k, { score: '5', reason: 'Ошибка оценки' });
     }
 
@@ -901,10 +1011,31 @@ export async function stepTAScore(
         return !isNaN(score) && score >= TA_MIN_SCORE;
       });
 
+  // Строки (не компании), оставшиеся без настоящей оценки: у них в результате
+  // стоит заглушка «Ошибка оценки», и оператор должен видеть их количество.
+  const failedRows = failedKeys.size
+    ? body.filter((row) => failedKeys.has(keyOf(row))).length
+    : 0;
+  const errors = [...errorCounts.entries()]
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+
+  if (failedBatches > 0) {
+    console.warn(
+      `[ta_scoring] не оценено ${failedRows} строк из ${preFilterRows} ` +
+        `(${failedBatches} неудачных запросов к ИИ). Причины: ` +
+        errors.map((e) => `${e.reason} ×${e.count}`).join('; '),
+    );
+  }
+
   options?.onStats?.({
     pre_filter_rows: preFilterRows,
     filtered_out_count: preFilterRows - filtered.length,
     pre_filter_avg_score: preFilterAvg,
+    failed_rows: failedRows,
+    failed_batches: failedBatches,
+    errors,
   });
 
   await onProgress(100);

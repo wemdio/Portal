@@ -93,6 +93,14 @@ interface ConstructorJob {
     ta_scoring_pre_filter_rows?: number;
     ta_scoring_filtered_out?: number;
     ta_scoring_pre_filter_avg?: number;
+    /**
+     * Провалы оценки: строки с заглушкой «Ошибка оценки». Это НЕ вердикт AI —
+     * запрос к нему не состоялся. Раньше причина нигде не сохранялась и
+     * отличить сбой от честной низкой оценки было невозможно (разбор 04.08.2026).
+     */
+    ta_scoring_failed_rows?: number;
+    ta_scoring_failed_batches?: number;
+    ta_scoring_errors?: Array<{ reason: string; count: number }>;
   };
   error_message?: string;
   created_at: string;
@@ -2130,6 +2138,27 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     </p>
                   </div>
                 </div>
+                {(activeJob.result_stats.ta_scoring_failed_rows ?? 0) > 0 && (
+                  <div className={clientMode ? 'mt-3 rounded-xl p-3 text-xs text-[var(--cp-paper)]' : 'mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900'}>
+                    <p className="font-semibold">
+                      Не удалось оценить {activeJob.result_stats.ta_scoring_failed_rows} строк
+                      {typeof activeJob.result_stats.ta_scoring_pre_filter_rows === 'number'
+                        ? ` из ${activeJob.result_stats.ta_scoring_pre_filter_rows}`
+                        : ''}
+                    </p>
+                    <p className="mt-1">
+                      У них в колонке «ЦА Причина» стоит «Ошибка оценки» с баллом 5 — это не решение AI,
+                      а сбой обращения к нему. Такие строки стоит перепроверить вручную или прогнать заново.
+                    </p>
+                    {!!activeJob.result_stats.ta_scoring_errors?.length && (
+                      <p className="mt-1.5">
+                        Причина: {activeJob.result_stats.ta_scoring_errors
+                          .map((e) => `${e.reason}${e.count > 1 ? ` (×${e.count})` : ''}`)
+                          .join('; ')}
+                      </p>
+                    )}
+                  </div>
+                )}
                 {activeJob.result_stats.total_rows === 0 && (activeJob.result_stats.ta_scoring_filtered_out ?? 0) > 0 && (
                   <p className={clientMode ? 'mt-3 text-xs text-[var(--cp-paper-mute)]' : 'mt-3 text-xs text-blue-800'}>
                     Все компании AI оценил ниже 7 — это значит, что либо бриф не подходит к базе,
