@@ -338,6 +338,22 @@ export const CLIENT_NAV_GIS_SIGNALS: ClientNavItem = {
 };
 
 /**
+ * Клиентский ENG-кабинет «Движка вертикалей» (research → вертикали → письма →
+ * база → запуск, рынок us, EN-UI). Top-level пункт после Dashboard, как
+ * GIS-сигналы. TODO(eng-gate): сейчас виден всем клиентам — завести флаг
+ * видимости (тариф/allowlist по аналогии с mailboxes/gis-signals) вместе с
+ * тарифной обвязкой ENG-продукта.
+ */
+export const CLIENT_NAV_ENG: ClientNavItem = {
+  id: 'eng',
+  label: 'ENG Outreach',
+  labelEn: 'ENG Outreach',
+  href: '/client/eng',
+  description: 'Движок вертикалей для ENG-рынка (EN-интерфейс)',
+  descriptionEn: 'Verticals engine for the US market (English UI)',
+};
+
+/**
  * Возвращает группы, отфильтрованные под текущий mode. В 'manual' — без
  * изменений; в 'auto' — оставляем только items из AUTO_MODE_VISIBLE_ITEM_IDS
  * и группы, в которых что-то осталось.
@@ -398,6 +414,9 @@ export function resolveActiveNavId(pathname: string): string | null {
   }
   if (pathname === '/client/gis-signals' || pathname.startsWith('/client/gis-signals/')) {
     return 'gis-signals';
+  }
+  if (pathname === '/client/eng' || pathname.startsWith('/client/eng/')) {
+    return 'eng';
   }
   // Кампании — both the list (/client) and the detail page (/client/campaigns/:id).
   if (pathname === '/client' || pathname.startsWith('/client/campaigns')) {

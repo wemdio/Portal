@@ -7,6 +7,7 @@ import {
   CLIENT_NAV_MANUAL_SCORING,
   CLIENT_NAV_MAILBOXES,
   CLIENT_NAV_GIS_SIGNALS,
+  CLIENT_NAV_ENG,
   CLIENT_NAV_DASHBOARD,
   CLIENT_NAV_GROUPS,
   CLIENT_NAV_OFFER,
@@ -137,6 +138,15 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
           onItemClick={onItemClick}
         />
       )}
+
+      {/* ENG-кабинет «Движка вертикалей»: пока виден всем (TODO(eng-gate) в
+          clientNav.ts — флаг видимости появится с тарифной обвязкой). */}
+      <NavItemRow
+        item={CLIENT_NAV_ENG}
+        active={activeId === CLIENT_NAV_ENG.id}
+        locale={locale}
+        onItemClick={onItemClick}
+      />
 
       {/* Auto-mode-only: настройка цепочек под скоры endpoint'а. В manual
           этого пункта не существует — manual-клиент пишет цепочки прямо
