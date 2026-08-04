@@ -534,13 +534,10 @@ services:
       - LEADS_REPORT_MARKETING_SHEET_ID=${LEADS_REPORT_MARKETING_SHEET_ID}
       - LEADS_REPORT_OUTREACH_SHEET_ID=${LEADS_REPORT_OUTREACH_SHEET_ID}
       - LEADS_REPORT_SINCE_DAYS=${LEADS_REPORT_SINCE_DAYS:-30}
-      # ID таблицы «Отчетность продаж Polza Agency» — используется скриптом
-      # /app/workers/salesReportCron.js (host cron 17:10 МСК ежедневно).
-      - SALES_REPORT_SPREADSHEET_ID=${SALES_REPORT_SPREADSHEET_ID}
       - AMO_BASE_URL_HOST=${AMO_BASE_URL_HOST:-polzaagency.amocrm.ru}
       - GOOGLE_SERVICE_ACCOUNT_EMAIL=${GOOGLE_SERVICE_ACCOUNT_EMAIL}
       - GOOGLE_PRIVATE_KEY=${GOOGLE_PRIVATE_KEY}
-      # TG-алерт при сбое leadsReportCron / salesReportCron. Дефолтно уходит
+      # TG-алерт при сбое leadsReportCron. Дефолтно уходит
       # в канал health-check бота (см. app/src/lib/telegram/workerAlert.ts).
       - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN}
       - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
