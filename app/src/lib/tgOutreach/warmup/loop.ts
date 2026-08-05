@@ -141,10 +141,13 @@ export async function runWarmupLoop(
     .eq('is_active', true);
   const proxies = (proxyRows ?? []) as OutreachProxy[];
 
+  // onProgress на каждую строку лога подключения: 16 аккаунтов по 30с таймаута
+  // (а с ретраем и все 60с) — это до четверти часа, за которые сторожевой
+  // таймер воркера успевает счесть кампанию зависшей и убить процесс.
   const clients = await buildClients(
     accounts,
     proxies,
-    (lvl, msg) => log(lvl, msg),
+    (lvl, msg) => { onProgress?.(); log(lvl, msg); },
     (storagePath) => downloadSessionToTemp(db, storagePath),
     db,
   );
@@ -178,8 +181,14 @@ export async function runWarmupLoop(
 
   // Личность нужна до первой переписки: без tg_username/phone аккаунт нечем
   // адресовать, и все его переписки провалятся на резолве.
+  //
+  // onProgress на каждом аккаунте обязателен: этот цикл идёт последовательно по
+  // всем клиентам и до 05.08.2026 был самым длинным участком без единого
+  // признака жизни — от последнего «подключён» до входа в главный цикл. Именно
+  // здесь прогрев и вставал, а сторожевой таймер убивал воркер целиком.
   for (const c of clients) {
     if (shouldStop()) break;
+    onProgress?.();
     try {
       const identity = await bootstrapAccountIdentity(db, c.client, c.account);
       c.account.tg_user_id = identity.tg_user_id;
@@ -193,6 +202,7 @@ export async function runWarmupLoop(
       );
     }
   }
+  onProgress?.();
 
   try {
     while (!shouldStop()) {
