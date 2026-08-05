@@ -12,7 +12,11 @@
  *   3. 6-сигнальная квалификация сайта (signals.ts, конкурентность 5). КАЖДАЯ
  *      проверенная компания архивируется в gis_signal_company_signals (и pass,
  *      и fail — это аналитический срез дашборда). Дальше идут компании с
- *      signalsCount >= signal_min_count.
+ *      signalsCount >= signal_min_count. Для сегментов с require_online=true
+ *      дополнительно считается вердикт onlineFormat (по уже скачанным
+ *      страницам, без лишних fetch'ей) и компания обязана иметь
+ *      onlineFormat.hit — офлайн-only компании архивируются (evidence
+ *      получает ключ online_format), но в конструктор НЕ идут.
  *   4. Сетка (точный заголовок референсного CSV, gridMapping.ts) → ОДИН
  *      base_constructor_jobs (user_id = config.client_user_id, шаги/step_config
  *      из конфига). Ждём, пока worker-baseconstructor доработает. Финальную
@@ -53,6 +57,8 @@ const SIGNAL_ARCHIVE_CHUNK = 500;
 export interface SegmentFunnel {
   pulled: number;
   signalsOk: number;
+  /** Прошли online-гейт (require_online сегменты). Без гейта = signalsOk. */
+  onlineOk: number;
   bcIn: number;
   validContacts: number;
   appended: number;
@@ -68,6 +74,7 @@ export interface GisSignalRunResult {
   status: 'completed' | 'failed' | 'skipped';
   pulled: number;
   signalsOk: number;
+  onlineOk: number;
   validContacts: number;
   appended: number;
   error?: string;
@@ -85,7 +92,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function emptyFunnel(): SegmentFunnel {
-  return { pulled: 0, signalsOk: 0, bcIn: 0, validContacts: 0, appended: 0 };
+  return { pulled: 0, signalsOk: 0, onlineOk: 0, bcIn: 0, validContacts: 0, appended: 0 };
 }
 
 /** Хост сайта (без протокола/www/пути), lowercase. null если не парсится. */
@@ -129,6 +136,7 @@ export async function runGisSignalPipeline(
     status: 'skipped',
     pulled: 0,
     signalsOk: 0,
+    onlineOk: 0,
     validContacts: 0,
     appended: 0,
   };
@@ -167,6 +175,11 @@ export async function runGisSignalPipeline(
     return { ...empty, error: 'no_campaigns' };
   }
   const clientUserId = config.client_user_id;
+  // Сегменты с online-гейтом: компания обязана иметь onlineFormat.hit,
+  // чтобы попасть в конструктор (напр. edu — только онлайн-школы).
+  const requireOnlineSegments = new Set(
+    segments.filter((s) => s.require_online).map((s) => s.key),
+  );
 
   // 2. Run row.
   const { data: runRow, error: runErr } = await db
@@ -223,6 +236,9 @@ export async function runGisSignalPipeline(
             // twogisBranchCount: null — поле branches у карточки не выгружается;
             // можно подключить позже (count филиалов сети из датасета).
             twogisBranchCount: null,
+            // Онлайн-формат — только для сегментов с require_online: вердикт
+            // считается по уже скачанным страницам, лишних fetch'ей нет.
+            checkOnlineFormat: requireOnlineSegments.has(cand.segmentKey),
           });
         } catch (err) {
           return {
@@ -246,9 +262,14 @@ export async function runGisSignalPipeline(
     //     срез. Пишем и в measure_only: замер как раз строит этот срез.
     const archiveRows = candidates.map((cand, i) => {
       const r = signalResults[i];
-      const evidence: Record<string, string> = {};
+      const evidence: Record<string, unknown> = {};
       for (const [key, verdict] of Object.entries(r.signals)) {
         if (verdict.hit && verdict.evidence) evidence[key] = verdict.evidence;
+      }
+      // Вердикт онлайн-формата (require_online сегменты) — со смыслом hit,
+      // чтобы видеть и отвалившиеся ТОЛЬКО на онлайне компании.
+      if (r.onlineFormat) {
+        evidence.online_format = { hit: r.onlineFormat.hit, evidence: r.onlineFormat.evidence };
       }
       return {
         twogis_id: cand.twogisId,
@@ -277,17 +298,36 @@ export async function runGisSignalPipeline(
       if (error) throw new Error(`signal archive upsert failed: ${error.message}`);
     }
 
-    const qualifiedPairs = candidates
+    const signalOkPairs = candidates
       .map((cand, i) => ({ cand, signals: signalResults[i] }))
       .filter((p) => p.signals.signalsCount >= config.signal_min_count);
+    for (const p of signalOkPairs) funnel.perSegment[p.cand.segmentKey].signalsOk += 1;
+    funnel.total.signalsOk = signalOkPairs.length;
+    log(`Прошли сигнальный фильтр (>=${config.signal_min_count}): ${signalOkPairs.length}/${candidates.length}`);
+
+    // 4c. ONLINE-гейт: сегменты с require_online пропускают только компании с
+    //     onlineFormat.hit. У сегментов без флага onlineOk === signalsOk.
+    //     Отвалившиеся ТОЛЬКО на онлайне уже заархивированы (шаг 4b, ключ
+    //     online_format в evidence) — в конструктор они не идут.
+    const qualifiedPairs = signalOkPairs.filter(
+      (p) => !requireOnlineSegments.has(p.cand.segmentKey) || p.signals.onlineFormat?.hit === true,
+    );
     const qualified = qualifiedPairs.map((p) => p.cand);
-    for (const c of qualified) funnel.perSegment[c.segmentKey].signalsOk += 1;
-    funnel.total.signalsOk = qualified.length;
-    log(`Прошли сигнальный фильтр (>=${config.signal_min_count}): ${qualified.length}/${candidates.length}`);
+    for (const p of qualifiedPairs) funnel.perSegment[p.cand.segmentKey].onlineOk += 1;
+    funnel.total.onlineOk = qualified.length;
+    if (requireOnlineSegments.size > 0) {
+      log(`Онлайн-гейт (${Array.from(requireOnlineSegments).join(', ')}): ${qualified.length}/${signalOkPairs.length}`);
+    }
 
     if (qualified.length === 0) {
       await finishRun({ status: 'completed', funnel });
-      return { ...empty, runId, status: 'completed', pulled: candidates.length };
+      return {
+        ...empty,
+        runId,
+        status: 'completed',
+        pulled: candidates.length,
+        signalsOk: signalOkPairs.length,
+      };
     }
 
     // 5. Сетка → ОДИН base_constructor_jobs. Раскладка по сегментам после
@@ -385,12 +425,13 @@ export async function runGisSignalPipeline(
     // заливаем в Instantly и НЕ пишем seen — замер неразрушающий и повторяемый.
     if (measureOnly) {
       await finishRun({ status: 'completed', funnel });
-      log(`MEASURE: pulled=${funnel.total.pulled} signalsOk=${funnel.total.signalsOk} valid=${funnel.total.validContacts} (без заливки, seen не тронут)`);
+      log(`MEASURE: pulled=${funnel.total.pulled} signalsOk=${funnel.total.signalsOk} onlineOk=${funnel.total.onlineOk} valid=${funnel.total.validContacts} (без заливки, seen не тронут)`);
       return {
         runId,
         status: 'completed',
         pulled: funnel.total.pulled,
         signalsOk: funnel.total.signalsOk,
+        onlineOk: funnel.total.onlineOk,
         validContacts: funnel.total.validContacts,
         appended: 0,
       };
@@ -508,6 +549,7 @@ export async function runGisSignalPipeline(
       status: runStatus,
       pulled: funnel.total.pulled,
       signalsOk: funnel.total.signalsOk,
+      onlineOk: funnel.total.onlineOk,
       validContacts: funnel.total.validContacts,
       appended: funnel.total.appended,
       ...(appendErrors.length > 0 ? { error: appendErrors.join('; ') } : {}),

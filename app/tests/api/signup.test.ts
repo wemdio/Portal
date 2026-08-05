@@ -90,10 +90,11 @@ function makeReq(
   body: Record<string, unknown>,
   oosUtm?: string,
   clientLocale?: string,
+  extraHeaders?: Record<string, string>,
 ): NextRequest {
   const req = new Request('http://localhost/api/signup', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...extraHeaders },
     body: JSON.stringify(body),
   }) as unknown as NextRequest;
   // A plain Request has no NextRequest.cookies; stub the getter the route reads
@@ -209,5 +210,59 @@ describe('POST /api/signup', () => {
 
     const c = (supabaseAdmin as unknown as MockedAdmin).__created;
     expect(c.profileUpdates.at(-1)?.patch).toMatchObject({ locale: expectedLocale });
+  });
+
+  const ENG_BODY = {
+    email: 'eng@user.com',
+    password: 'longenough123',
+    full_name: 'Eng Test',
+    company: 'Eng Co',
+  };
+
+  it('marks market=eng when the signup comes from the ENG host (Origin header)', async () => {
+    const res = await POST(makeReq(ENG_BODY, undefined, undefined, {
+      origin: 'https://app.outreachos.xyz',
+    }));
+    expect(res.status).toBe(201);
+
+    const c = (supabaseAdmin as unknown as MockedAdmin).__created;
+    expect(c.auth.at(-1)).toMatchObject({ user_metadata: { role: 'client', market: 'eng' } });
+    expect(c.profileUpdates.at(-1)?.patch).toMatchObject({ market: 'eng' });
+  });
+
+  it('marks market=eng via Host when Origin is absent', async () => {
+    const res = await POST(makeReq(ENG_BODY, undefined, undefined, {
+      host: 'app.outreachos.xyz',
+    }));
+    expect(res.status).toBe(201);
+
+    const c = (supabaseAdmin as unknown as MockedAdmin).__created;
+    expect(c.auth.at(-1)).toMatchObject({ user_metadata: { role: 'client', market: 'eng' } });
+  });
+
+  it('marks market=eng via Referer as the last fallback', async () => {
+    const res = await POST(makeReq(ENG_BODY, undefined, undefined, {
+      referer: 'https://app.outreachos.xyz/signup',
+    }));
+    expect(res.status).toBe(201);
+
+    const c = (supabaseAdmin as unknown as MockedAdmin).__created;
+    expect(c.auth.at(-1)).toMatchObject({ user_metadata: { role: 'client', market: 'eng' } });
+  });
+
+  it('does not pass market on a regular host (column default ru applies)', async () => {
+    const res = await POST(makeReq({
+      email: 'ru@user.com',
+      password: 'longenough123',
+      full_name: 'Ru Test',
+      company: 'Ru Co',
+    }));
+    expect(res.status).toBe(201);
+
+    const c = (supabaseAdmin as unknown as MockedAdmin).__created;
+    const metadata = c.auth.at(-1)?.user_metadata as Record<string, unknown>;
+    expect(metadata).toMatchObject({ role: 'client' });
+    expect(metadata).not.toHaveProperty('market');
+    expect(c.profileUpdates.at(-1)?.patch).not.toHaveProperty('market');
   });
 });

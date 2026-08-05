@@ -1,0 +1,116 @@
+/**
+ * Точечное обновление brief проекта «Движка вертикалей»: offer_override —
+ * пользовательская формулировка оффера, style_override — эталон стиля
+ * (1–2 «идеальных» письма, чью манеру имитирует генерация) и
+ * signature_override — подпись отправителя, которую генерация ставит в конце
+ * каждого письма дословно (без неё модель подписывается командой компании и
+ * не выдумывает имя человека). Все ложатся в he_projects.brief и уточняют
+ * генерацию цепочек. Пустая (или состоящая из пробелов) строка удаляет
+ * соответствующий ключ из brief, остальные ключи brief не трогаем — мержим
+ * поверх текущего значения. Незнакомые поля верхнего уровня игнорируем.
+ *
+ * Вынесено из PATCH api/tools/hypothesis-engine/projects/[id] — клиентский
+ * ENG-контур патчит те же поля (api/client/eng/projects/[id]). Ошибки
+ * возвращаем машинными кодами, текст локализует роут (staff — RU, клиент — EN).
+ */
+
+import type { SupabaseClient } from '@supabase/supabase-js';
+
+// Максимум символов эталона стиля (brief.style_override) — после trim.
+export const STYLE_OVERRIDE_MAX_LENGTH = 8000;
+
+// Максимум символов подписи отправителя (brief.signature_override) — после trim.
+export const SIGNATURE_OVERRIDE_MAX_LENGTH = 500;
+
+export type HeBriefField = 'offer_override' | 'style_override' | 'signature_override';
+
+export type HeBriefPatchError =
+  /** Ни одного из трёх полей в теле. */
+  | { code: 'no_fields' }
+  /** Поле передано не строкой. */
+  | { code: 'bad_type'; field: HeBriefField }
+  /** style/signature длиннее лимита после trim. */
+  | { code: 'too_long'; field: 'style_override' | 'signature_override'; max: number }
+  | { code: 'not_found' }
+  | { code: 'db'; message: string };
+
+export type HeBriefPatchResult =
+  | { ok: true; project: Record<string, unknown> }
+  | { ok: false; error: HeBriefPatchError };
+
+export interface HeBriefPatchBody {
+  offer_override?: unknown;
+  style_override?: unknown;
+  signature_override?: unknown;
+}
+
+/** Хотя бы одно поле обязано присутствовать; применяются только строковые. */
+export async function patchHeProjectBrief(
+  supabase: SupabaseClient,
+  projectId: string,
+  body: HeBriefPatchBody,
+): Promise<HeBriefPatchResult> {
+  const offerRaw = body?.offer_override;
+  const styleRaw = body?.style_override;
+  const signatureRaw = body?.signature_override;
+  if (offerRaw === undefined && styleRaw === undefined && signatureRaw === undefined) {
+    return { ok: false, error: { code: 'no_fields' } };
+  }
+  if (offerRaw !== undefined && typeof offerRaw !== 'string') {
+    return { ok: false, error: { code: 'bad_type', field: 'offer_override' } };
+  }
+  if (styleRaw !== undefined && typeof styleRaw !== 'string') {
+    return { ok: false, error: { code: 'bad_type', field: 'style_override' } };
+  }
+  if (signatureRaw !== undefined && typeof signatureRaw !== 'string') {
+    return { ok: false, error: { code: 'bad_type', field: 'signature_override' } };
+  }
+  if (typeof styleRaw === 'string' && styleRaw.trim().length > STYLE_OVERRIDE_MAX_LENGTH) {
+    return { ok: false, error: { code: 'too_long', field: 'style_override', max: STYLE_OVERRIDE_MAX_LENGTH } };
+  }
+  if (typeof signatureRaw === 'string' && signatureRaw.trim().length > SIGNATURE_OVERRIDE_MAX_LENGTH) {
+    return { ok: false, error: { code: 'too_long', field: 'signature_override', max: SIGNATURE_OVERRIDE_MAX_LENGTH } };
+  }
+
+  const { data: current, error: loadErr } = await supabase
+    .from('he_projects')
+    .select('brief')
+    .eq('id', projectId)
+    .single();
+  if (loadErr) {
+    return {
+      ok: false,
+      error:
+        loadErr.code === 'PGRST116'
+          ? { code: 'not_found' }
+          : { code: 'db', message: loadErr.message },
+    };
+  }
+
+  const brief = { ...((current?.brief as Record<string, unknown> | null) ?? {}) };
+  if (typeof offerRaw === 'string') {
+    const offer = offerRaw.trim();
+    if (offer) brief.offer_override = offer;
+    else delete brief.offer_override;
+  }
+  if (typeof styleRaw === 'string') {
+    const style = styleRaw.trim();
+    if (style) brief.style_override = style;
+    else delete brief.style_override;
+  }
+  if (typeof signatureRaw === 'string') {
+    const signature = signatureRaw.trim();
+    if (signature) brief.signature_override = signature;
+    else delete brief.signature_override;
+  }
+
+  const { data: project, error } = await supabase
+    .from('he_projects')
+    .update({ brief })
+    .eq('id', projectId)
+    .select()
+    .single();
+  if (error) return { ok: false, error: { code: 'db', message: error.message } };
+
+  return { ok: true, project: project as Record<string, unknown> };
+}

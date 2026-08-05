@@ -2,6 +2,7 @@
 
 import { createContext, useContext } from 'react';
 import type { ClientNavMode } from '@/lib/clientNav';
+import type { ClientMarket } from '@/lib/engMarket';
 
 interface ClientPortalContextValue {
   portalMode: ClientNavMode;
@@ -18,6 +19,12 @@ interface ClientPortalContextValue {
    * из gis_signal_pipeline_config.client_user_id. Грузится раз в layout.
    */
   gisSignalsEnabled: boolean;
+  /**
+   * Рынок профиля (profiles.market), приезжает вместе с portal-mode.
+   * 'eng' → навигация сводится к ENG-кабинету; undefined/'ru' → обычный
+   * RU-рендер без ENG-пункта. У демо не запрашивается (= RU-рендер).
+   */
+  market?: ClientMarket;
 }
 
 const ClientPortalContext = createContext<ClientPortalContextValue>({

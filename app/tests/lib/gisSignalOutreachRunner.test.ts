@@ -155,11 +155,15 @@ async function completeNextBaseJob(data: string[][], minJobs = 1): Promise<void>
   throw new Error('base job was not created');
 }
 
-function seed(config: Record<string, unknown> = {}, blockedEmails: string[] = []) {
+function seed(
+  config: Record<string, unknown> = {},
+  blockedEmails: string[] = [],
+  segments: Array<Record<string, unknown>> = segmentRows(),
+) {
   mockDb = createMockSupabase({
     tables: {
       gis_signal_pipeline_config: [configRow(config)],
-      gis_signal_segments: segmentRows(),
+      gis_signal_segments: segments,
     },
   });
   mockInstantlyDb = createMockSupabase({
@@ -250,17 +254,21 @@ describe('runGisSignalPipeline — live режим', () => {
       perSegment: Record<string, Record<string, number>>;
       total: Record<string, number>;
     };
+    // Сегменты без require_online → onlineOk === signalsOk.
     expect(funnel.perSegment['seg-a']).toEqual({
-      pulled: 2, signalsOk: 1, bcIn: 1, validContacts: 2, appended: 1,
+      pulled: 2, signalsOk: 1, onlineOk: 1, bcIn: 1, validContacts: 2, appended: 1,
     });
     expect(funnel.perSegment['seg-b']).toEqual({
-      pulled: 1, signalsOk: 1, bcIn: 1, validContacts: 1, appended: 0,
+      pulled: 1, signalsOk: 1, onlineOk: 1, bcIn: 1, validContacts: 1, appended: 0,
     });
     expect(funnel.total).toEqual({
-      pulled: 3, signalsOk: 2, bcIn: 2, validContacts: 3, appended: 1,
+      pulled: 3, signalsOk: 2, onlineOk: 2, bcIn: 2, validContacts: 3, appended: 1,
     });
+    expect(result.onlineOk).toBe(2);
     expect(result.validContacts).toBe(3);
     expect(result.appended).toBe(1);
+    // Без require_online детектор зовётся без online-чека (лишних regex'ов нет).
+    expect(detectMock.mock.calls[0][0].checkOnlineFormat).toBe(false);
   });
 
   it('сбой append → seen НЕ пишется, run завершается со status=failed', async () => {
@@ -465,5 +473,108 @@ describe('runGisSignalPipeline — гарды', () => {
     expect(boomRow).toMatchObject({ signals_count: 0 });
     expect(String(boomRow!.note)).toContain('Signal check failed');
     expect(result.signalsOk).toBe(1);
+  });
+});
+
+describe('runGisSignalPipeline — require_online (edu)', () => {
+  function eduSegmentRows() {
+    return [
+      {
+        key: 'edu', label: 'Онлайн-школы', instantly_campaign_id: 'camp-edu',
+        rubric_groups: [{ category: 'Дополнительное образование' }],
+        priority: 10, enabled: true, require_online: true,
+      },
+    ];
+  }
+
+  it('офлайн-only компания архивируется (evidence.online_format), но в конструктор НЕ идёт; onlineOk в воронке', async () => {
+    seed({}, [], eduSegmentRows());
+    pullMock.mockResolvedValue([cand('on1', 'edu'), cand('off1', 'edu'), cand('ns1', 'edu')]);
+    // on1: сигнал + онлайн; off1: сигнал, но офлайн; ns1: вообще без сигналов.
+    detectMock.mockImplementation(async ({ siteUrl }: { siteUrl: string }) => {
+      const r = signalResult(!siteUrl.includes('ns1'));
+      r.onlineFormat = siteUrl.includes('on1')
+        ? { hit: true, evidence: 'Онлайн-школа программирования' }
+        : { hit: false, evidence: '' };
+      return r;
+    });
+
+    const grid = finalGrid([{ id: 'on1', name: 'Компания on1', email: 'info@on1.ru' }]);
+    const runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
+    await completeNextBaseJob(grid);
+    const result = await runPromise;
+
+    expect(result.status).toBe('completed');
+    // Детектор вызван с checkOnlineFormat=true для всех кандидатов сегмента.
+    for (const call of detectMock.mock.calls) {
+      expect(call[0].checkOnlineFormat).toBe(true);
+    }
+
+    // В конструкторе — ТОЛЬКО on1 (off1 отсеяна online-гейтом, ns1 — сигналами).
+    const jobInsert = mockDb.inserts.find((c) => c.table === 'base_constructor_jobs');
+    const jobData = jobInsert!.rows[0].data as string[][];
+    expect(jobData).toHaveLength(2); // header + on1
+    expect(jobData[1][0]).toBe('on1');
+
+    // Архив: все 3 проверенные; у off1/ns1 вердикт online_format=false.
+    const archiveRows = mockDb.upserts
+      .filter((c) => c.table === 'gis_signal_company_signals')
+      .flatMap((c) => c.rows);
+    expect(archiveRows).toHaveLength(3);
+    const offRow = archiveRows.find((r) => r.twogis_id === 'off1');
+    expect(offRow).toMatchObject({ signals_count: 1 }); // сигнал есть, онлайна нет
+    expect((offRow!.evidence as Record<string, unknown>).online_format).toEqual({
+      hit: false, evidence: '',
+    });
+    const onRow = archiveRows.find((r) => r.twogis_id === 'on1');
+    expect((onRow!.evidence as Record<string, unknown>).online_format).toEqual({
+      hit: true, evidence: 'Онлайн-школа программирования',
+    });
+
+    // Воронка: pulled 3 → signalsOk 2 → onlineOk 1 → bcIn 1 → valid 1 → appended 1.
+    const runRow = mockDb.getRows('gis_signal_runs')[0];
+    const funnel = runRow.funnel as {
+      perSegment: Record<string, Record<string, number>>;
+      total: Record<string, number>;
+    };
+    expect(funnel.perSegment['edu']).toEqual({
+      pulled: 3, signalsOk: 2, onlineOk: 1, bcIn: 1, validContacts: 1, appended: 1,
+    });
+    expect(funnel.total).toEqual({
+      pulled: 3, signalsOk: 2, onlineOk: 1, bcIn: 1, validContacts: 1, appended: 1,
+    });
+    expect(result.onlineOk).toBe(1);
+
+    // seen — только on1 (единственная залитая).
+    const seenUpserts = mockDb.upserts.filter((c) => c.table === 'gis_signal_seen_companies');
+    expect(seenUpserts.flatMap((c) => c.rows).map((r) => r.twogis_id)).toEqual(['on1']);
+  });
+
+  it('require_online, но ни одна компания не онлайн → конструктор не создаётся, прогон completed', async () => {
+    seed({}, [], eduSegmentRows());
+    pullMock.mockResolvedValue([cand('off1', 'edu'), cand('off2', 'edu')]);
+    detectMock.mockImplementation(async () => {
+      const r = signalResult(true);
+      r.onlineFormat = { hit: false, evidence: '' };
+      return r;
+    });
+
+    const result = await runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
+
+    expect(result.status).toBe('completed');
+    expect(result.signalsOk).toBe(2);
+    expect(result.onlineOk).toBe(0);
+    expect(mockDb.inserts.filter((c) => c.table === 'base_constructor_jobs')).toHaveLength(0);
+    expect(appendMock).not.toHaveBeenCalled();
+    // Архив всё равно написан (аналитический срез).
+    const archiveRows = mockDb.upserts
+      .filter((c) => c.table === 'gis_signal_company_signals')
+      .flatMap((c) => c.rows);
+    expect(archiveRows).toHaveLength(2);
+    const runRow = mockDb.getRows('gis_signal_runs')[0];
+    expect(runRow.status).toBe('completed');
+    expect((runRow.funnel as { total: Record<string, number> }).total).toMatchObject({
+      pulled: 2, signalsOk: 2, onlineOk: 0, bcIn: 0, appended: 0,
+    });
   });
 });

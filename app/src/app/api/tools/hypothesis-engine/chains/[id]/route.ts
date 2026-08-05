@@ -4,6 +4,12 @@ import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError } from '@/lib/loggerServer';
+import {
+  isHeLetterVariant,
+  normalizeHeChainLetters,
+  type HeChainLetterRow,
+  type HeLetterVariantRow,
+} from '@/lib/hypothesisEngine/chainLetters';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -13,144 +19,12 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-/** A/B-вариант письма по контракту данных (генерацию делает отдельная стадия). */
-interface LetterVariant {
-  subject: string | null;
-  body: string;
-}
-
-/** Форма jsonb-письма he_chains.letters: основной вариант = «A», рядом variants. */
-interface ChainLetterRow {
-  subject: string | null;
-  body: string;
-  wait_days?: number;
-  variants?: LetterVariant[];
-  segment_variants?: unknown[];
-}
-
-function isVariant(v: unknown): v is LetterVariant {
-  return (
-    typeof v === 'object' &&
-    v !== null &&
-    typeof (v as LetterVariant).body === 'string' &&
-    ((v as LetterVariant).subject === null || typeof (v as LetterVariant).subject === 'string')
-  );
-}
-
-/* ── Полная замена letters (инлайн-редактор шага 3) ── */
-
-const MAX_LETTERS = 6;
-const MAX_BODY_LEN = 50_000;
-const MAX_SUBJECT_LEN = 500;
-const MAX_WAIT_DAYS = 90;
-
-interface SegmentVariantRow {
-  when: string;
-  text: string;
-}
-
-/** wait_days: приводим к целому и клампим в 0..90; нечисловое → 0. */
-function clampWaitDays(value: unknown): number {
-  const n = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(n)) return 0;
-  return Math.min(MAX_WAIT_DAYS, Math.max(0, Math.trunc(n)));
-}
-
-/** subject: null или строка ≤500 символов. */
-function normalizeSubject(value: unknown): { ok: boolean; subject: string | null } {
-  if (value === null || value === undefined) return { ok: true, subject: null };
-  if (typeof value !== 'string' || value.length > MAX_SUBJECT_LEN) {
-    return { ok: false, subject: null };
-  }
-  return { ok: true, subject: value };
-}
-
-/** body: непустая строка ≤50000 символов. */
-function isValidBody(value: unknown): value is string {
-  return typeof value === 'string' && value.trim() !== '' && value.length <= MAX_BODY_LEN;
-}
-
-function normalizeVariant(v: unknown): LetterVariant | null {
-  if (typeof v !== 'object' || v === null) return null;
-  const { subject, body } = v as { subject?: unknown; body?: unknown };
-  if (!isValidBody(body)) return null;
-  const s = normalizeSubject(subject);
-  if (!s.ok) return null;
-  return { subject: s.subject, body };
-}
-
-function normalizeSegmentVariant(v: unknown): SegmentVariantRow | null {
-  if (typeof v !== 'object' || v === null) return null;
-  const { when, text } = v as { when?: unknown; text?: unknown };
-  if (typeof when !== 'string' || when.trim() === '' || typeof text !== 'string') return null;
-  return { when, text };
-}
-
-/**
- * Валидация + нормализация полной замены letters: 1..6 писем, у первого
- * wait_days всегда 0. Неизвестные поля письма ОТБРАСЫВАЕМ (не отклоняем),
- * невалидные значения — 400 по всему запросу.
- */
-function normalizeLetters(input: unknown[]): { letters?: ChainLetterRow[]; error?: string } {
-  if (input.length < 1 || input.length > MAX_LETTERS) {
-    return { error: `Писем в цепочке должно быть от 1 до ${MAX_LETTERS}` };
-  }
-  const out: ChainLetterRow[] = [];
-  for (let i = 0; i < input.length; i += 1) {
-    const raw = input[i];
-    if (typeof raw !== 'object' || raw === null) {
-      return { error: `Письмо ${i + 1} имеет неверный формат` };
-    }
-    const { subject, body, wait_days, variants, segment_variants } = raw as Record<
-      string,
-      unknown
-    >;
-    if (!isValidBody(body)) {
-      return { error: `Тело письма ${i + 1} пустое или длиннее ${MAX_BODY_LEN} символов` };
-    }
-    const s = normalizeSubject(subject);
-    if (!s.ok) {
-      return {
-        error: `Тема письма ${i + 1} должна быть строкой до ${MAX_SUBJECT_LEN} символов или null`,
-      };
-    }
-    const letter: ChainLetterRow = {
-      subject: s.subject,
-      body,
-      wait_days: i === 0 ? 0 : clampWaitDays(wait_days),
-    };
-    if (variants !== undefined) {
-      if (!Array.isArray(variants)) {
-        return { error: `variants письма ${i + 1} должен быть массивом` };
-      }
-      const norm: LetterVariant[] = [];
-      for (const v of variants) {
-        const nv = normalizeVariant(v);
-        if (!nv) return { error: `A/B-вариант письма ${i + 1} имеет неверный формат` };
-        norm.push(nv);
-      }
-      letter.variants = norm;
-    }
-    if (segment_variants !== undefined) {
-      if (!Array.isArray(segment_variants)) {
-        return { error: `segment_variants письма ${i + 1} должен быть массивом` };
-      }
-      const norm: SegmentVariantRow[] = [];
-      for (const v of segment_variants) {
-        const nv = normalizeSegmentVariant(v);
-        if (!nv) return { error: `Сегментный вариант письма ${i + 1} имеет неверный формат` };
-        norm.push(nv);
-      }
-      letter.segment_variants = norm;
-    }
-    out.push(letter);
-  }
-  return { letters: out };
-}
+// Валидация/нормализация писем — в lib/hypothesisEngine/chainLetters.ts
+// (ею же пользуется клиентский ENG-контур).
 
 // PATCH — два контракта:
 // 1) { letters: [...] } — полная замена массива писем цепочки (инлайн-редактор
-//    шага 3): валидация + нормализация через normalizeLetters, ответ { letters }.
+//    шага 3): валидация + нормализация через normalizeHeChainLetters, ответ { letters }.
 // 2) { letter_index, variant_index } — сделать A/B-вариант письма основным:
 //    меняет местами subject/body письма letters[letter_index] с
 //    letters[letter_index].variants[variant_index] (прежний основной уходит в
@@ -180,7 +54,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
       // Контракт 1: полная замена массива писем.
       if (Array.isArray(body?.letters)) {
-        const { letters: nextLetters, error: normError } = normalizeLetters(body.letters);
+        const { letters: nextLetters, error: normError } = normalizeHeChainLetters(body.letters);
         if (!nextLetters) return jsonError(normError ?? 'Неверный формат писем', 400);
 
         const { error: fetchError } = await supabaseAdmin
@@ -236,7 +110,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       }
 
       const letters = Array.isArray(chain.letters)
-        ? (chain.letters as ChainLetterRow[])
+        ? (chain.letters as HeChainLetterRow[])
         : [];
       const letter = letters[letterIndex];
       if (!letter || typeof letter !== 'object') {
@@ -247,11 +121,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       if (!variant) {
         return jsonError('variant_index вне диапазона вариантов письма', 400);
       }
-      if (!isVariant(variant)) {
+      if (!isHeLetterVariant(variant)) {
         return jsonError('Вариант письма имеет неверный формат', 400);
       }
 
-      const nextVariants = variants.slice();
+      const nextVariants: HeLetterVariantRow[] = variants.slice();
       nextVariants[variantIndex] = { subject: letter.subject ?? null, body: letter.body };
       const nextLetters = letters.slice();
       nextLetters[letterIndex] = {

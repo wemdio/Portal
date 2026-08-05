@@ -4,6 +4,7 @@ import { logAudit, logError } from '@/lib/loggerServer';
 import { sendDemoLeadTelegramAlert } from '@/lib/demoLead/notify';
 import { CLIENT_LOCALE_COOKIE, normalizeClientLocale } from '@/lib/clientI18n';
 import { TARIFF_LAUNCH } from '@/lib/tariffPricing';
+import { marketFromRequestHeaders } from '@/lib/engMarket';
 
 export const dynamic = 'force-dynamic';
 
@@ -79,6 +80,10 @@ export async function POST(req: NextRequest) {
   const telegram = (body.telegram ?? '').trim();
   const utm = readSignupUtm(req);
   const locale = normalizeClientLocale(req.cookies.get(CLIENT_LOCALE_COOKIE)?.value);
+  // Рынок по хосту запроса (ENG-кабинет на app.outreachos.xyz): Origin → Host →
+  // Referer, см. lib/engMarket. На RU-хостах market не передаём — колонка
+  // profiles.market уйдёт в default 'ru'.
+  const market = marketFromRequestHeaders(req.headers);
 
   if (!email || !isEmailLike(email)) {
     return NextResponse.json({ error: 'Введите корректный email' }, { status: 400 });
@@ -95,16 +100,20 @@ export async function POST(req: NextRequest) {
   if (phone.length > 50) return NextResponse.json({ error: 'Слишком длинный телефон' }, { status: 400 });
   if (telegram.length > 100) return NextResponse.json({ error: 'Слишком длинный telegram' }, { status: 400 });
 
-  // Триггер public.handle_new_user (см. supabase/migrations/20260204_0002_*)
-  // автоматически создаёт строку в profiles при INSERT в auth.users.
-  // Он читает role из raw_user_meta_data — поэтому передаём user_metadata,
-  // а сами в profiles не лезем (иначе primary key conflict — что и было
-  // в проде 23.06: «Ошибка создания профиля», 500).
+  // Триггер public.handle_new_user (последняя версия — 20260804_0004_*,
+  // поверх hardening'а 20260730_0001) автоматически создаёт строку в profiles
+  // при INSERT в auth.users: роль захардкожена 'client' (metadata не доверяем),
+  // market копируется из raw_user_meta_data->>'market' с fallback 'ru'.
+  // Поэтому передаём user_metadata, а сами в profiles не лезем (иначе
+  // primary key conflict — что и было в проде 23.06: «Ошибка создания
+  // профиля», 500).
   const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
     email,
     password,
     email_confirm: true,
-    user_metadata: { role: 'client' },
+    user_metadata: market === 'eng'
+      ? { role: 'client', market: 'eng' }
+      : { role: 'client' },
   });
 
   if (createErr || !created?.user) {
@@ -119,8 +128,9 @@ export async function POST(req: NextRequest) {
   const userId = created.user.id;
 
   // Defense-in-depth: если триггер по какой-то причине не сработал или
-  // сработал с role='technician' (старый формат raw_user_meta_data) — добиваем
-  // нужную роль через update. Идемпотентно: если уже client — no-op.
+  // сработал без наших полей — добиваем через update. Идемпотентно: если
+  // значения уже стоят — no-op. market пишем только для ENG-хоста (на RU
+  // остаётся default 'ru' из колонки).
   const { error: profileErr } = await supabaseAdmin
     .from('profiles')
     .update({
@@ -131,6 +141,7 @@ export async function POST(req: NextRequest) {
       phone: phone || null,
       telegram: telegram || null,
       signup_utm: utm,
+      ...(market === 'eng' ? { market: 'eng' } : {}),
     })
     .eq('id', userId);
   if (profileErr) {

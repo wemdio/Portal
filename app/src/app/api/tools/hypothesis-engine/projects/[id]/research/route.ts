@@ -4,6 +4,7 @@ import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { enqueueHeResearchJob } from '@/lib/hypothesisEngine/researchJob';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -13,19 +14,10 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-// Research-пайплайн целиком: воркер сам выстраивает цепочку стадий,
-// роут ставит только первую (site_profile).
-const RESEARCH_STAGES = [
-  'site_profile',
-  'competitors',
-  'brand_cloud',
-  'hypotheses',
-  'evidence',
-  'clustering',
-];
-
 // POST — запустить research-пайплайн по проекту. Одновременно может идти
 // только один research-прогон: при активной research-стадии → 409.
+// Дедуп + постановка первой стадии (site_profile) — в
+// lib/hypothesisEngine/researchJob.ts (ею же пользуется клиентский ENG-контур).
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.hypothesis-engine.research.post' },
@@ -50,44 +42,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         );
       }
 
-      const { data: active, error: activeErr } = await supabaseAdmin
-        .from('he_jobs')
-        .select('id')
-        .eq('project_id', id)
-        .in('stage', RESEARCH_STAGES)
-        .in('status', ['pending', 'running'])
-        .limit(1);
-      if (activeErr) return jsonError(activeErr.message, 500);
-      if ((active ?? []).length > 0) {
-        return jsonError('Research уже выполняется для этого проекта', 409);
-      }
-
-      const { data: job, error: jobErr } = await supabaseAdmin
-        .from('he_jobs')
-        .insert({ project_id: id, stage: 'site_profile', status: 'pending', payload: {} })
-        .select()
-        .single();
-      if (jobErr || !job) {
-        await logError('tools.hypothesis-engine.research.enqueue_failed', jobErr, { userId, projectId: id });
-        return jsonError(jobErr?.message ?? 'Не удалось поставить задачу', 500);
-      }
-
-      const { error: updErr } = await supabaseAdmin
-        .from('he_projects')
-        .update({ status: 'researching', error: null })
-        .eq('id', id);
-      if (updErr) {
-        await logError('tools.hypothesis-engine.research.status_failed', updErr, { userId, projectId: id });
-        return jsonError(updErr.message, 500);
+      const result = await enqueueHeResearchJob(supabaseAdmin, id);
+      if (!result.ok) {
+        if (result.reason === 'conflict') {
+          return jsonError('Research уже выполняется для этого проекта', 409);
+        }
+        await logError('tools.hypothesis-engine.research.enqueue_failed', new Error(result.message), {
+          userId,
+          projectId: id,
+        });
+        return jsonError(result.message ?? 'Не удалось поставить задачу', 500);
       }
 
       void logAudit('tools.hypothesis-engine.research.started', 'Hypothesis engine research started', {
         userId,
         projectId: id,
-        jobId: job.id,
+        jobId: result.job.id,
       });
 
-      return NextResponse.json({ ok: true, job });
+      return NextResponse.json({ ok: true, job: result.job });
     },
   );
 }

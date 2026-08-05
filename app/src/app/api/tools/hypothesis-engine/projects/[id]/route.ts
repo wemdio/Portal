@@ -3,6 +3,11 @@ import type { NextRequest } from 'next/server';
 import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { loadHeProjectDetail } from '@/lib/hypothesisEngine/projectDetail';
+import {
+  patchHeProjectBrief,
+  type HeBriefPatchBody,
+} from '@/lib/hypothesisEngine/projectBriefPatch';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -12,56 +17,10 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-// Без data — тяжёлое jsonb-поле, деталка проекта его не тянет. sample_rows
-// (≤30 строк, серверный кап при записи) и columns лёгкие: шаг «База» рисует
-// по ним превью первых строк на карточке. source/collect_info — прогресс-карта
-// авто-сборки, бейдж «авто» и состояние retry.
-const BASE_LIST_COLUMNS =
-  'id, vertical_id, filename, row_count, status, analysis, source, collect_info, columns, sample_rows, created_at';
-// payload нужен клиенту, чтобы привязать джобу к вертикали (payload.vertical_id) —
-// иначе чужая dossier-джоба показывала бы busy/error на карточке другой вертикали.
-const JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload, progress';
-// Досье вертикалей: data — объективные счётчики сегмента, нужна на карточке.
-const DOSSIER_LIST_COLUMNS = 'id, vertical_id, status, data, error';
-// Банк кейсов: БЕЗ text — полный текст кейса тяжёлый, списку хватает карточки.
-const CASE_LIST_COLUMNS = 'id, source, filename, industry, client_type, task, metrics, result, created_at';
-
-// Максимум символов эталона стиля (brief.style_override) — после trim.
-const STYLE_OVERRIDE_MAX_LENGTH = 8000;
-
-// Максимум символов подписи отправителя (brief.signature_override) — после trim.
-const SIGNATURE_OVERRIDE_MAX_LENGTH = 500;
-
-// collect_info.tasks[].harvest — полный предмерж-харвест задачи (до 50k строк
-// на задачу): рабочее состояние воркера для cross-requeue, клиенту не нужен.
-// Деталка проекта поллится каждые 4с, поэтому вырезаем harvest из ответа —
-// иначе каждая база тащит десятки МБ на каждый опрос. Остальное в tasks[]
-// (source/status/rows/…) оставляем как есть: по нему рисуется прогресс-карта.
-function stripTaskHarvest(base: Record<string, unknown>): Record<string, unknown> {
-  const info = base.collect_info as { tasks?: unknown } | null | undefined;
-  if (!info || !Array.isArray(info.tasks)) return base;
-  const hasHarvest = info.tasks.some(
-    (t) => t !== null && typeof t === 'object' && 'harvest' in (t as Record<string, unknown>),
-  );
-  if (!hasHarvest) return base;
-  return {
-    ...base,
-    collect_info: {
-      ...info,
-      tasks: info.tasks.map((t) => {
-        if (t === null || typeof t !== 'object' || !('harvest' in t)) return t;
-        const clone = { ...(t as Record<string, unknown>) };
-        delete clone.harvest;
-        return clone;
-      }),
-    },
-  };
-}
-
 // GET — деталка проекта: гипотезы, вертикали, цепочки, вокабуляр, базы,
-// шаблоны, досье вертикалей, банк кейсов и последние jobs. Чейн/вокаб/шаблоны
-// привязаны к вертикалям/базам, поэтому догружаются второй волной по id
-// вертикалей; досье и кейсы имеют project_id и идут первой волной.
+// шаблоны, досье вертикалей, банк кейсов и последние jobs. Сборка — в
+// lib/hypothesisEngine/projectDetail.ts (её же использует клиентский
+// ENG-контур со скоупом владельца).
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.hypothesis-engine.projects.detail' },
@@ -73,115 +32,24 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       const { id } = await params;
       if (!id) return jsonError('Missing id', 400);
 
-      const { data: project, error: projErr } = await supabaseAdmin
-        .from('he_projects')
-        .select('*')
-        .eq('id', id)
-        .single();
-      if (projErr) {
+      const result = await loadHeProjectDetail(supabaseAdmin, id);
+      if (!result.ok) {
         return jsonError(
-          projErr.code === 'PGRST116' ? 'Проект не найден' : projErr.message,
-          projErr.code === 'PGRST116' ? 404 : 500,
+          result.reason === 'not_found' ? 'Проект не найден' : (result.message ?? 'Ошибка чтения проекта'),
+          result.reason === 'not_found' ? 404 : 500,
         );
       }
 
-      const [hypothesesRes, verticalsRes, basesRes, jobsRes, dossiersRes, casesRes] = await Promise.all([
-        supabaseAdmin
-          .from('he_hypotheses')
-          .select('*')
-          .eq('project_id', id)
-          .order('tier', { ascending: true })
-          .order('potential_pct', { ascending: false }),
-        supabaseAdmin
-          .from('he_verticals')
-          .select('*')
-          .eq('project_id', id)
-          .order('rank', { ascending: true }),
-        supabaseAdmin
-          .from('he_bases')
-          .select(BASE_LIST_COLUMNS)
-          .eq('project_id', id)
-          .order('created_at', { ascending: false }),
-        supabaseAdmin
-          .from('he_jobs')
-          .select(JOB_LIST_COLUMNS)
-          .eq('project_id', id)
-          .order('created_at', { ascending: false })
-          .limit(30),
-        supabaseAdmin
-          .from('he_vertical_dossiers')
-          .select(DOSSIER_LIST_COLUMNS)
-          .eq('project_id', id)
-          .order('created_at', { ascending: false }),
-        supabaseAdmin
-          .from('he_cases')
-          .select(CASE_LIST_COLUMNS)
-          .eq('project_id', id)
-          .order('created_at', { ascending: false }),
-      ]);
-
-      for (const res of [hypothesesRes, verticalsRes, basesRes, jobsRes, dossiersRes, casesRes]) {
-        if (res.error) return jsonError(res.error.message, 500);
-      }
-
-      const verticals = verticalsRes.data ?? [];
-      const verticalIds = verticals.map((v) => v.id as string);
-
-      let chains: unknown[] = [];
-      let vocabs: unknown[] = [];
-      let templates: unknown[] = [];
-      if (verticalIds.length > 0) {
-        const [chainsRes, vocabsRes, templatesRes] = await Promise.all([
-          supabaseAdmin
-            .from('he_chains')
-            .select('*')
-            .in('vertical_id', verticalIds)
-            .order('created_at', { ascending: false }),
-          supabaseAdmin
-            .from('he_vocab')
-            .select('*')
-            .in('vertical_id', verticalIds)
-            .order('created_at', { ascending: false }),
-          supabaseAdmin
-            .from('he_templates')
-            .select('*')
-            .in('vertical_id', verticalIds)
-            .order('created_at', { ascending: false }),
-        ]);
-        for (const res of [chainsRes, vocabsRes, templatesRes]) {
-          if (res.error) return jsonError(res.error.message, 500);
-        }
-        chains = chainsRes.data ?? [];
-        vocabs = vocabsRes.data ?? [];
-        templates = templatesRes.data ?? [];
-      }
-
-      return NextResponse.json({
-        project,
-        hypotheses: hypothesesRes.data ?? [],
-        verticals,
-        chains,
-        vocabs,
-        bases: (basesRes.data ?? []).map(stripTaskHarvest),
-        templates,
-        jobs: jobsRes.data ?? [],
-        dossiers: dossiersRes.data ?? [],
-        cases: casesRes.data ?? [],
-      });
+      return NextResponse.json(result.detail);
     },
   );
 }
 
-// PATCH — точечное обновление проекта. Поддерживаются три необязательных
-// поля (хотя бы одно обязано присутствовать): offer_override — пользовательская
-// формулировка оффера, style_override — эталон стиля (1–2 «идеальных» письма,
-// чью манеру имитирует генерация) и signature_override — подпись отправителя,
-// которую генерация ставит в конце каждого письма дословно (без неё модель
-// подписывается командой компании и не выдумывает имя человека). Все ложатся
-// в he_projects.brief и уточняют генерацию цепочек. Пустая (или состоящая из
-// пробелов) строка удаляет соответствующий ключ из brief, остальные ключи
-// brief не трогаем — мержим поверх текущего значения. Незнакомые поля
-// верхнего уровня игнорируем.
+// PATCH — точечное обновление проекта: offer_override / style_override /
+// signature_override (хотя бы одно обязано присутствовать) мержатся в
+// he_projects.brief и уточняют генерацию цепочек. Логика — в
+// lib/hypothesisEngine/projectBriefPatch.ts (её же использует клиентский
+// ENG-контур); здесь — auth и RU-тексты ошибок.
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.hypothesis-engine.projects.patch' },
@@ -193,77 +61,31 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       const { id } = await params;
       if (!id) return jsonError('Missing id', 400);
 
-      let body: { offer_override?: unknown; style_override?: unknown; signature_override?: unknown };
+      let body: HeBriefPatchBody;
       try {
-        body = (await req.json()) as {
-          offer_override?: unknown;
-          style_override?: unknown;
-          signature_override?: unknown;
-        };
+        body = (await req.json()) as HeBriefPatchBody;
       } catch {
         return jsonError('Invalid body', 400);
       }
 
-      const offerRaw = body?.offer_override;
-      const styleRaw = body?.style_override;
-      const signatureRaw = body?.signature_override;
-      if (offerRaw === undefined && styleRaw === undefined && signatureRaw === undefined) {
-        return jsonError('Нужен offer_override, style_override или signature_override', 400);
-      }
-      if (offerRaw !== undefined && typeof offerRaw !== 'string') {
-        return jsonError('offer_override должен быть строкой', 400);
-      }
-      if (styleRaw !== undefined && typeof styleRaw !== 'string') {
-        return jsonError('style_override должен быть строкой', 400);
-      }
-      if (signatureRaw !== undefined && typeof signatureRaw !== 'string') {
-        return jsonError('signature_override должен быть строкой', 400);
-      }
-      if (typeof styleRaw === 'string' && styleRaw.trim().length > STYLE_OVERRIDE_MAX_LENGTH) {
-        return jsonError(`style_override: максимум ${STYLE_OVERRIDE_MAX_LENGTH} символов`, 413);
-      }
-      if (typeof signatureRaw === 'string' && signatureRaw.trim().length > SIGNATURE_OVERRIDE_MAX_LENGTH) {
-        return jsonError(`signature_override: максимум ${SIGNATURE_OVERRIDE_MAX_LENGTH} символов`, 413);
+      const result = await patchHeProjectBrief(supabaseAdmin, id, body);
+      if (!result.ok) {
+        const err = result.error;
+        switch (err.code) {
+          case 'no_fields':
+            return jsonError('Нужен offer_override, style_override или signature_override', 400);
+          case 'bad_type':
+            return jsonError(`${err.field} должен быть строкой`, 400);
+          case 'too_long':
+            return jsonError(`${err.field}: максимум ${err.max} символов`, 413);
+          case 'not_found':
+            return jsonError('Проект не найден', 404);
+          default:
+            return jsonError(err.message, 500);
+        }
       }
 
-      const { data: current, error: loadErr } = await supabaseAdmin
-        .from('he_projects')
-        .select('brief')
-        .eq('id', id)
-        .single();
-      if (loadErr) {
-        return jsonError(
-          loadErr.code === 'PGRST116' ? 'Проект не найден' : loadErr.message,
-          loadErr.code === 'PGRST116' ? 404 : 500,
-        );
-      }
-
-      const brief = { ...((current?.brief as Record<string, unknown> | null) ?? {}) };
-      if (typeof offerRaw === 'string') {
-        const offer = offerRaw.trim();
-        if (offer) brief.offer_override = offer;
-        else delete brief.offer_override;
-      }
-      if (typeof styleRaw === 'string') {
-        const style = styleRaw.trim();
-        if (style) brief.style_override = style;
-        else delete brief.style_override;
-      }
-      if (typeof signatureRaw === 'string') {
-        const signature = signatureRaw.trim();
-        if (signature) brief.signature_override = signature;
-        else delete brief.signature_override;
-      }
-
-      const { data: project, error } = await supabaseAdmin
-        .from('he_projects')
-        .update({ brief })
-        .eq('id', id)
-        .select()
-        .single();
-      if (error) return jsonError(error.message, 500);
-
-      return NextResponse.json({ project });
+      return NextResponse.json({ project: result.project });
     },
   );
 }

@@ -4,6 +4,7 @@ import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { enqueueHeBaseCollect } from '@/lib/hypothesisEngine/baseCollectEnqueue';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -23,14 +24,10 @@ function jsonError(message: string, status: number) {
 // отсутствию поля. Лимит и непустой hypothesis_ids едут в payload джобы (их
 // читают totalRowsCap и buildPlan в стадии) и в he_bases.collect_info (его
 // показывает UI).
-// Дедуп: активная (pending/running) base_collect-задача этой вертикали или
-// собирающаяся auto-база уже есть → возвращаем её со статусом 200 и флагом
-// existing: true (UI показывает «уже собирается», а не молча продолжает;
-// collect_info в выборке — ради collect_info.limit в этом уведомлении).
-// Гонку двух параллельных POST (оба прошли проверки до insert) закрывает
-// partial unique index he_bases_one_collecting_per_vertical: проигравший
-// insert получает 23505 и тоже отвечает 200 + existing с чужой
-// collecting-базой.
+// Дедуп и вставки — в lib/hypothesisEngine/baseCollectEnqueue.ts (им же
+// пользуется клиентский ENG-контур): активная сборка этой вертикали →
+// 200 + existing, иначе 201; гонку параллельных запусков закрывает
+// partial unique index he_bases_one_collecting_per_vertical.
 /** Допустимые лимиты строк авто-сборки (см. UI Step4Base). */
 const ALLOWED_LIMITS: readonly number[] = [2000, 10000, 50000];
 const DEFAULT_LIMIT = 10000;
@@ -95,113 +92,31 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         );
       }
 
-      // Дедуп 1: уже собирающаяся auto-база этой вертикали.
-      const { data: collecting, error: collErr } = await supabaseAdmin
-        .from('he_bases')
-        .select('id, status, collect_info')
-        .eq('vertical_id', id)
-        .eq('source', 'auto')
-        .eq('status', 'collecting')
-        .limit(1)
-        .maybeSingle();
-      if (collErr) return jsonError(collErr.message, 500);
-      if (collecting) return NextResponse.json({ ok: true, existing: true, base: collecting });
-
-      // Дедуп 2: pending/running base_collect-задача на базу этой вертикали
-      // (база могла уже выйти из collecting, пока джоба ещё активна).
-      const { data: active, error: activeErr } = await supabaseAdmin
-        .from('he_jobs')
-        .select('id, payload')
-        .eq('project_id', vertical.project_id)
-        .eq('stage', 'base_collect')
-        .in('status', ['pending', 'running']);
-      if (activeErr) return jsonError(activeErr.message, 500);
-      const baseIds = (active ?? [])
-        .map((j) => (j.payload as { base_id?: string } | null)?.base_id)
-        .filter((v): v is string => typeof v === 'string' && v.length > 0);
-      if (baseIds.length > 0) {
-        const { data: existingBase, error: baseErr } = await supabaseAdmin
-          .from('he_bases')
-          .select('id, status, collect_info')
-          .eq('vertical_id', id)
-          .in('id', baseIds)
-          // Упавшая сборка не блокирует повторный запуск: failed-базу
-          // не считаем конфликтом, даём создать новую.
-          .neq('status', 'failed')
-          .limit(1)
-          .maybeSingle();
-        if (baseErr) return jsonError(baseErr.message, 500);
-        if (existingBase) return NextResponse.json({ ok: true, existing: true, base: existingBase });
-      }
-
-      const { data: base, error: baseInsertErr } = await supabaseAdmin
-        .from('he_bases')
-        .insert({
-          project_id: vertical.project_id,
-          vertical_id: id,
-          source: 'auto',
-          status: 'collecting',
-          filename: `auto: ${vertical.name}`,
-          row_count: 0,
-          columns: [],
-          data: [],
-          // Лимит и выбранные гипотезы — сразу в collect_info: прогресс-карта
-          // показывает лимит, пока стадия ещё не перезаписала collect_info
-          // планом (поля живут дальше — стадия мержит collect_info, а не
-          // заменяет).
-          collect_info: hypothesisIds ? { limit, hypothesis_ids: hypothesisIds } : { limit },
-        })
-        .select('id, status')
-        .single();
-      if (baseInsertErr || !base) {
-        // 23505 = unique_violation на he_bases_one_collecting_per_vertical:
-        // параллельный POST успел вставить collecting-базу раньше. Это тот же
-        // дедуп, только пойманный индексом, — отвечаем 200 + existing с чужой базой.
-        if (baseInsertErr?.code === '23505') {
-          const { data: conflict, error: conflictErr } = await supabaseAdmin
-            .from('he_bases')
-            .select('id, status, collect_info')
-            .eq('vertical_id', id)
-            .eq('source', 'auto')
-            .eq('status', 'collecting')
-            .limit(1)
-            .maybeSingle();
-          if (conflictErr) return jsonError(conflictErr.message, 500);
-          if (conflict) return NextResponse.json({ ok: true, existing: true, base: conflict });
-        }
-        await logError('tools.hypothesis-engine.collect.insert_failed', baseInsertErr, {
+      const result = await enqueueHeBaseCollect(supabaseAdmin, {
+        verticalId: id,
+        projectId: vertical.project_id,
+        verticalName: vertical.name,
+        limit,
+        hypothesisIds,
+      });
+      if (!result.ok) {
+        await logError('tools.hypothesis-engine.collect.enqueue_failed', new Error(result.message), {
           userId,
           verticalId: id,
         });
-        return jsonError(baseInsertErr?.message ?? 'Не удалось создать базу', 500);
+        return jsonError(result.message, 500);
       }
-
-      const { error: jobErr } = await supabaseAdmin
-        .from('he_jobs')
-        .insert({
-          project_id: vertical.project_id,
-          stage: 'base_collect',
-          status: 'pending',
-          payload: hypothesisIds
-            ? { base_id: base.id, limit, hypothesis_ids: hypothesisIds }
-            : { base_id: base.id, limit },
-        });
-      if (jobErr) {
-        await logError('tools.hypothesis-engine.collect.enqueue_failed', jobErr, {
-          userId,
-          verticalId: id,
-          baseId: base.id,
-        });
-        return jsonError(jobErr.message, 500);
+      if (!result.created) {
+        return NextResponse.json({ ok: true, existing: true, base: result.base });
       }
 
       void logAudit('tools.hypothesis-engine.collect.enqueued', 'Hypothesis engine auto-collect enqueued', {
         userId,
         verticalId: id,
-        baseId: base.id,
+        baseId: result.base.id,
       });
 
-      return NextResponse.json({ ok: true, base }, { status: 201 });
+      return NextResponse.json({ ok: true, base: result.base }, { status: 201 });
     },
   );
 }
