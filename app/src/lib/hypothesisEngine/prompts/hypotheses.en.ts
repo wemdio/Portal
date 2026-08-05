@@ -74,7 +74,10 @@ This is a strong signal of the client's taste: topics similar to rejected ones �
 
   const user = `CLIENT PROFILE (website ${input.websiteUrl}):
 ${JSON.stringify(input.profile, null, 2)}
-
+${input.businessOverride?.trim() ? `
+MANUAL BUSINESS DESCRIPTION FROM THE SPECIALIST (takes priority over the site profile — written by a person who knows the client; trust it over the profile on conflicts):
+${input.businessOverride.trim()}
+` : ''}
 CLIENT'S COMPETITORS:
 ${input.competitors.length ? input.competitors.map((c) => `- ${c.name} (${c.url}, ${c.geo}) — ${c.why}`).join('\n') : '(none found)'}
 

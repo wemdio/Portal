@@ -4,10 +4,12 @@
  * (1–2 «идеальных» письма, чью манеру имитирует генерация) и
  * signature_override — подпись отправителя, которую генерация ставит в конце
  * каждого письма дословно (без неё модель подписывается командой компании и
- * не выдумывает имя человека). Все ложатся в he_projects.brief и уточняют
- * генерацию цепочек. Пустая (или состоящая из пробелов) строка удаляет
- * соответствующий ключ из brief, остальные ключи brief не трогаем — мержим
- * поверх текущего значения. Незнакомые поля верхнего уровня игнорируем.
+ * не выдумывает имя человека) и business_override — ручное описание бизнеса
+ * (спасение слабого/JS-сайта: идёт в промпт гипотез поверх профиля сайта).
+ * Все ложатся в he_projects.brief и уточняют генерацию. Пустая (или
+ * состоящая из пробелов) строка удаляет соответствующий ключ из brief,
+ * остальные ключи brief не трогаем — мержим поверх текущего значения.
+ * Незнакомые поля верхнего уровня игнорируем.
  *
  * Вынесено из PATCH api/tools/hypothesis-engine/projects/[id] — клиентский
  * ENG-контур патчит те же поля (api/client/eng/projects/[id]). Ошибки
@@ -22,15 +24,18 @@ export const STYLE_OVERRIDE_MAX_LENGTH = 8000;
 // Максимум символов подписи отправителя (brief.signature_override) — после trim.
 export const SIGNATURE_OVERRIDE_MAX_LENGTH = 500;
 
-export type HeBriefField = 'offer_override' | 'style_override' | 'signature_override';
+// Максимум символов ручного описания бизнеса (brief.business_override) — после trim.
+export const BUSINESS_OVERRIDE_MAX_LENGTH = 3000;
+
+export type HeBriefField = 'offer_override' | 'style_override' | 'signature_override' | 'business_override';
 
 export type HeBriefPatchError =
-  /** Ни одного из трёх полей в теле. */
+  /** Ни одного из четырёх полей в теле. */
   | { code: 'no_fields' }
   /** Поле передано не строкой. */
   | { code: 'bad_type'; field: HeBriefField }
-  /** style/signature длиннее лимита после trim. */
-  | { code: 'too_long'; field: 'style_override' | 'signature_override'; max: number }
+  /** style/signature/business длиннее лимита после trim. */
+  | { code: 'too_long'; field: 'style_override' | 'signature_override' | 'business_override'; max: number }
   | { code: 'not_found' }
   | { code: 'db'; message: string };
 
@@ -42,6 +47,7 @@ export interface HeBriefPatchBody {
   offer_override?: unknown;
   style_override?: unknown;
   signature_override?: unknown;
+  business_override?: unknown;
 }
 
 /** Хотя бы одно поле обязано присутствовать; применяются только строковые. */
@@ -53,7 +59,13 @@ export async function patchHeProjectBrief(
   const offerRaw = body?.offer_override;
   const styleRaw = body?.style_override;
   const signatureRaw = body?.signature_override;
-  if (offerRaw === undefined && styleRaw === undefined && signatureRaw === undefined) {
+  const businessRaw = body?.business_override;
+  if (
+    offerRaw === undefined &&
+    styleRaw === undefined &&
+    signatureRaw === undefined &&
+    businessRaw === undefined
+  ) {
     return { ok: false, error: { code: 'no_fields' } };
   }
   if (offerRaw !== undefined && typeof offerRaw !== 'string') {
@@ -65,11 +77,17 @@ export async function patchHeProjectBrief(
   if (signatureRaw !== undefined && typeof signatureRaw !== 'string') {
     return { ok: false, error: { code: 'bad_type', field: 'signature_override' } };
   }
+  if (businessRaw !== undefined && typeof businessRaw !== 'string') {
+    return { ok: false, error: { code: 'bad_type', field: 'business_override' } };
+  }
   if (typeof styleRaw === 'string' && styleRaw.trim().length > STYLE_OVERRIDE_MAX_LENGTH) {
     return { ok: false, error: { code: 'too_long', field: 'style_override', max: STYLE_OVERRIDE_MAX_LENGTH } };
   }
   if (typeof signatureRaw === 'string' && signatureRaw.trim().length > SIGNATURE_OVERRIDE_MAX_LENGTH) {
     return { ok: false, error: { code: 'too_long', field: 'signature_override', max: SIGNATURE_OVERRIDE_MAX_LENGTH } };
+  }
+  if (typeof businessRaw === 'string' && businessRaw.trim().length > BUSINESS_OVERRIDE_MAX_LENGTH) {
+    return { ok: false, error: { code: 'too_long', field: 'business_override', max: BUSINESS_OVERRIDE_MAX_LENGTH } };
   }
 
   const { data: current, error: loadErr } = await supabase
@@ -102,6 +120,11 @@ export async function patchHeProjectBrief(
     const signature = signatureRaw.trim();
     if (signature) brief.signature_override = signature;
     else delete brief.signature_override;
+  }
+  if (typeof businessRaw === 'string') {
+    const business = businessRaw.trim();
+    if (business) brief.business_override = business;
+    else delete brief.business_override;
   }
 
   const { data: project, error } = await supabase

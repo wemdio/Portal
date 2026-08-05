@@ -155,6 +155,10 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
     competitors,
     ...(portfolioProfile ? { portfolioProfile } : {}),
     ...(markupHistory ? { markupHistory } : {}),
+    // Ручное описание бизнеса (спасение тонких сайтов) — поверх профиля.
+    ...(typeof project.brief?.business_override === 'string' && project.brief.business_override.trim()
+      ? { businessOverride: project.brief.business_override.trim() }
+      : {}),
   };
   const llm = await callLLMWithSchema(
     (market === 'us' ? buildHypothesesInstantMessagesEn : buildHypothesesInstantMessages)(promptInput),

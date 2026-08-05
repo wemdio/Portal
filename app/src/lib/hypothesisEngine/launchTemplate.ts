@@ -14,6 +14,14 @@
  *
  * Тарифных гейтов и журнала client_campaign_launches тут нет осознанно (см.
  * launchHandoff.ts): запуск HE-шаблона billing клиента не меняет.
+ *
+ * Материализация 15% (сегментные варианты): если у писем шаблона есть
+ * segment_variants, строки базы классифицируются по условиям сегментов
+ * (segmentClassify, bulk-модель) и запуск сплитится — одна paused-кампания
+ * на сегмент с текстами его вариантов + основная с дефолтными текстами.
+ * Системный сбой классификатора → легаси-путь: одна кампания, варианты
+ * выкинуты с явным предупреждением. launch_info.campaigns хранит весь
+ * список; скалярные поля — основная кампания (их читает refill-долив).
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -24,6 +32,7 @@ import { createCampaign, createLeads, updateCampaign } from '@/lib/instantly/cli
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { logAudit, logError } from '@/lib/loggerServer';
 import type { HeBase, HeTemplate } from './types';
+import { classifyBaseRowsIntoSegments, detectSegmentLanguage } from './segmentClassify';
 import {
   HE_LAUNCH_MAX_LEADS,
   buildLaunchCampaignName,
@@ -32,6 +41,7 @@ import {
   mapBaseRowsToLeads,
   parseLaunchInfo,
   segmentVariantsWarning,
+  type HeTemplateLaunchCampaign,
   type HeTemplateLaunchInfo,
 } from './launchHandoff';
 
@@ -48,7 +58,7 @@ interface HeLaunchMessages {
   noEmailColumn: string;
   noValidEmails: string;
   tooManyLeads: (count: number) => string;
-  instantlyFailedSuffix: (campaignId: string) => string;
+  segmentSplitInfo: (campaignsCount: number) => string;
   instantlyFailedFallback: string;
   zeroAccepted: string;
   launchInfoSaveWarning: string;
@@ -68,8 +78,8 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     noValidEmails: 'В базе нет валидных email-адресов',
     tooManyLeads: (count) =>
       `Слишком много лидов для запуска из мастера: ${count.toLocaleString('ru-RU')}. Максимум — ${HE_LAUNCH_MAX_LEADS.toLocaleString('ru-RU')}`,
-    instantlyFailedSuffix: (campaignId) =>
-      ` (кампания ${campaignId} уже создана в Instantly и осталась на паузе)`,
+    segmentSplitInfo: (campaignsCount) =>
+      `Сегментные варианты материализованы: запуск разбит на ${campaignsCount} кампании по сегментам базы (у каждой сегментной — свои тексты писем). Все кампании на паузе.`,
     instantlyFailedFallback: 'Не удалось создать кампанию',
     zeroAccepted: 'Система рассылки не приняла ни одного контакта. Кампания оставлена на паузе.',
     launchInfoSaveWarning:
@@ -90,8 +100,8 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     noValidEmails: 'The base contains no valid email addresses',
     tooManyLeads: (count) =>
       `Too many leads for a wizard launch: ${count.toLocaleString('en-US')}. Maximum is ${HE_LAUNCH_MAX_LEADS.toLocaleString('en-US')}.`,
-    instantlyFailedSuffix: (campaignId) =>
-      ` (campaign ${campaignId} has already been created in the mailing system and left paused)`,
+    segmentSplitInfo: (campaignsCount) =>
+      `Segment variants materialized: the launch was split into ${campaignsCount} campaigns by base segment (each segment campaign carries its own letter texts). All campaigns are paused.`,
     instantlyFailedFallback: 'Failed to create the campaign',
     zeroAccepted: 'The mailing system did not accept any contacts. The campaign was left paused.',
     launchInfoSaveWarning:
@@ -180,16 +190,23 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   if (!presetRow) return { status: 404, body: { error: t.presetNotFound } };
   const preset = presetRow as ClientCampaignPreset;
 
-  // 4. Sequence из писем шаблона (segment_variants выкидываем — см. warning).
-  const sequence = buildLaunchSequence(template.letters);
-  if (!sequence) return { status: 400, body: { error: t.noLetters } };
+  // 4. Письма шаблона + условия сегментных вариантов (when) для сплита запуска.
+  const templateLetters = Array.isArray(template.letters) ? template.letters : [];
+  if (!buildLaunchSequence(templateLetters)) return { status: 400, body: { error: t.noLetters } };
+  const segmentWhens = [
+    ...new Set(
+      templateLetters.flatMap((l) =>
+        (l.segment_variants ?? []).map((v) => (v.when ?? '').trim()).filter(Boolean),
+      ),
+    ),
+  ];
 
   // 5. Лиды из базы. Все проверки — ДО любого вызова Instantly.
   const rows = Array.isArray(base.data) ? (base.data as Array<Record<string, unknown>>) : [];
   const columns = Array.isArray(base.columns)
     ? base.columns.filter((c): c is string => typeof c === 'string')
     : [];
-  const { leads, emailColumn } = mapBaseRowsToLeads({
+  const { leads, emailColumn, leadRowIndices } = mapBaseRowsToLeads({
     rows,
     columns,
     operatorMapping: template.personalization_plan?.operator_mapping,
@@ -200,80 +217,155 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     return { status: 413, body: { error: t.tooManyLeads(leads.length) } };
   }
 
+  // 5b. Материализация 15%: сплит лидов по сегментам базы. Классификатор —
+  //     LLM (bulk-модель, батчами); системный сбой → null → легаси-путь:
+  //     одна кампания, сегментные варианты выкинуты с предупреждением.
+  interface LeadGroup {
+    segment: string | null;
+    leadIdx: number[];
+  }
+  let groups: LeadGroup[] = [{ segment: null, leadIdx: leads.map((_, i) => i) }];
+  let segmentsMaterialized = false;
+  if (segmentWhens.length > 0) {
+    let assignments: Map<number, string> | null = null;
+    try {
+      assignments = await classifyBaseRowsIntoSegments({
+        rows: leadRowIndices.map((ri) => rows[ri] ?? {}),
+        segments: segmentWhens,
+        language: detectSegmentLanguage(segmentWhens),
+      });
+    } catch {
+      assignments = null;
+    }
+    if (assignments) {
+      const defaultIdx: number[] = [];
+      const bySegment = new Map<string, number[]>();
+      leadRowIndices.forEach((_rowIndex, leadPos) => {
+        const seg = assignments.get(leadPos);
+        if (!seg) {
+          defaultIdx.push(leadPos);
+          return;
+        }
+        const list = bySegment.get(seg) ?? [];
+        list.push(leadPos);
+        bySegment.set(seg, list);
+      });
+      const next: LeadGroup[] = [];
+      if (defaultIdx.length > 0) next.push({ segment: null, leadIdx: defaultIdx });
+      for (const when of segmentWhens) {
+        const idxs = bySegment.get(when);
+        if (idxs && idxs.length > 0) next.push({ segment: when, leadIdx: idxs });
+      }
+      if (next.length > 0) groups = next;
+      segmentsMaterialized = segmentWhens.some((w) => (bySegment.get(w) ?? []).length > 0);
+    }
+  }
+
   const instantlyRequestOptions = { accountId: resolveInstantlyAccountId(preset.instantly_account_id) };
-  const campaignName = buildLaunchCampaignName(base.filename);
 
-  // 6. Instantly: кампания (НЕ активируем!) + лиды. Текст ошибки идёт без
-  //    scrubBrand — staff-UI нужна точная формулировка API; клиентский роут
-  //    скрабит бренд на своей стороне.
-  let instantlyCampaignId: string | null = null;
+  // 6. Instantly: по кампании на группу (НЕ активируем!) + лиды группы. Текст
+  //    ошибки идёт без scrubBrand — staff-UI нужна точная формулировка API;
+  //    клиентский роут скрабит бренд на своей стороне. Основная кампания
+  //    (segment=null) создаётся первой — её id уходит в скалярные поля
+  //    launch_info (их читает refill-долив и старый UI).
+  const campaigns: HeTemplateLaunchCampaign[] = [];
+  const groupErrors: string[] = [];
   let accepted = 0;
-  try {
-    const payload = buildCampaignPayloadFromPreset({
-      preset,
-      sequence: { name: campaignName, steps: sequence.steps },
-    });
-    const created = await createCampaign(payload, instantlyRequestOptions);
-    instantlyCampaignId = (created as { id?: string }).id ?? null;
-    if (!instantlyCampaignId) {
-      throw new Error('Instantly вернул кампанию без идентификатора');
-    }
+  for (const group of groups) {
+    const sequence = buildLaunchSequence(templateLetters, { segmentWhen: group.segment });
+    if (!sequence) return { status: 400, body: { error: t.noLetters } };
+    const campaignName = buildLaunchCampaignName(base.filename, new Date(), group.segment);
+    try {
+      const payload = buildCampaignPayloadFromPreset({
+        preset,
+        sequence: { name: campaignName, steps: sequence.steps },
+      });
+      const created = await createCampaign(payload, instantlyRequestOptions);
+      const campaignId = (created as { id?: string }).id ?? null;
+      if (!campaignId) {
+        throw new Error('Instantly вернул кампанию без идентификатора');
+      }
 
-    // Как в клиентском запуске: если Instantly не сохранил sequences при
-    // создании — досылаем PATCH'ем.
-    if (!hasUsableCampaignSequences(created.sequences)) {
-      await updateCampaign(instantlyCampaignId, { sequences: payload.sequences }, instantlyRequestOptions);
-    }
+      // Как в клиентском запуске: если Instantly не сохранил sequences при
+      // создании — досылаем PATCH'ем.
+      if (!hasUsableCampaignSequences(created.sequences)) {
+        await updateCampaign(campaignId, { sequences: payload.sequences }, instantlyRequestOptions);
+      }
 
-    const leadResult = await createLeads(
-      leads,
-      {
-        campaign_id: instantlyCampaignId,
-        skip_if_in_workspace: false,
-        skip_if_in_campaign: false,
-        skip_if_in_list: false,
-      },
-      instantlyRequestOptions,
-    );
-    accepted = leadResult.leads_uploaded;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : t.instantlyFailedFallback;
-    await logError(`${eventPrefix}.failed`, err, {
-      userId,
-      templateId,
-      instantlyCampaignId,
-    });
-    // Если кампания уже создана — говорим об этом явно, чтобы слепой ретрай
-    // не плодил дубли (лиды можно долить в Instantly вручную).
-    return {
-      status: 500,
-      body: {
-        error: `${message.slice(0, 300)}${instantlyCampaignId ? t.instantlyFailedSuffix(instantlyCampaignId) : ''}`,
-      },
-    };
+      const leadResult = await createLeads(
+        group.leadIdx.map((i) => leads[i]),
+        {
+          campaign_id: campaignId,
+          skip_if_in_workspace: false,
+          skip_if_in_campaign: false,
+          skip_if_in_list: false,
+        },
+        instantlyRequestOptions,
+      );
+      accepted += leadResult.leads_uploaded;
+      campaigns.push({
+        campaign_id: campaignId,
+        campaign_name: campaignName,
+        campaign_url: instantlyCampaignUrl(campaignId),
+        segment: group.segment,
+        leads_count: leadResult.leads_uploaded,
+      });
+    } catch (err) {
+      // Первая кампания — как раньше: весь запуск считается failed (ни одной
+      // кампании ещё нет, ретрай безопасен). Поздние группы — частичный
+      // успех: фиксируем в warnings, созданные кампании не трогаем.
+      if (campaigns.length === 0) {
+        const message = err instanceof Error ? err.message : t.instantlyFailedFallback;
+        await logError(`${eventPrefix}.failed`, err, { userId, templateId });
+        return { status: 500, body: { error: message.slice(0, 300) } };
+      }
+      const message = err instanceof Error ? err.message : t.instantlyFailedFallback;
+      groupErrors.push(`${group.segment ?? 'default'}: ${message.slice(0, 200)}`);
+      await logError(`${eventPrefix}.group_failed`, err, {
+        userId,
+        templateId,
+        segment: group.segment,
+      });
+    }
   }
 
   if (accepted === 0) {
-    return { status: 500, body: { error: t.zeroAccepted, campaign_id: instantlyCampaignId } };
+    return { status: 500, body: { error: t.zeroAccepted, campaign_id: campaigns[0]?.campaign_id ?? null } };
   }
 
-  // 7. Запись о запуске в шаблон.
+  // 7. Запись о запуске в шаблон. Скалярные поля — первая (основная) кампания;
+  //    полный список — campaigns[].
+  const primary = campaigns[0];
   const launchInfo: HeTemplateLaunchInfo = {
-    campaign_id: instantlyCampaignId,
-    campaign_name: campaignName,
-    campaign_url: instantlyCampaignUrl(instantlyCampaignId),
+    campaign_id: primary.campaign_id,
+    campaign_name: primary.campaign_name,
+    campaign_url: primary.campaign_url,
     leads_count: accepted,
     preset_id: presetId,
     created_at: new Date().toISOString(),
+    campaigns,
   };
   const warnings: string[] = [];
-  const segWarning =
-    locale === 'en'
-      ? (sequence.droppedSegmentVariants > 0
-          ? t.segmentVariantsWarning(sequence.droppedSegmentVariants, sequence.lettersWithSegmentVariants)
-          : null)
-      : segmentVariantsWarning(sequence);
-  if (segWarning) warnings.push(segWarning);
+  if (segmentWhens.length > 0 && !segmentsMaterialized) {
+    const legacy = buildLaunchSequence(templateLetters);
+    const segWarning =
+      locale === 'en'
+        ? legacy && legacy.droppedSegmentVariants > 0
+          ? t.segmentVariantsWarning(legacy.droppedSegmentVariants, legacy.lettersWithSegmentVariants)
+          : null
+        : legacy
+          ? segmentVariantsWarning(legacy)
+          : null;
+    if (segWarning) warnings.push(segWarning);
+  }
+  if (segmentsMaterialized && campaigns.length > 1) {
+    warnings.push(t.segmentSplitInfo(campaigns.length));
+  }
+  for (const ge of groupErrors) {
+    warnings.push(
+      locale === 'en' ? `Segment campaign failed: ${ge}` : `Кампания сегмента не создана: ${ge}`,
+    );
+  }
 
   const { error: updErr } = await portalDb
     .from('he_templates')
@@ -285,7 +377,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     await logError(`${eventPrefix}.info_save_failed`, updErr, {
       userId,
       templateId,
-      instantlyCampaignId,
+      instantlyCampaignId: primary.campaign_id,
     });
     warnings.push(t.launchInfoSaveWarning);
   }
@@ -298,7 +390,9 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       templateId,
       baseId: base.id,
       presetId,
-      instantlyCampaignId,
+      instantlyCampaignId: primary.campaign_id,
+      campaigns: campaigns.length,
+      segmentsMaterialized,
       accepted,
       totalLeads: leads.length,
       force,
