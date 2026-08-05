@@ -7,6 +7,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { readSqliteSession } from '@/lib/telegram/sessionUtils';
 import { HttpConnectSocket } from './httpProxySocket';
 import type { OutreachAccount, OutreachProxy } from './types';
+import { handleProxyError } from './proxyHealth';
 
 /**
  * Threshold for auto-disabling an account that keeps getting
@@ -228,6 +229,23 @@ export async function reconnectClient(
   return createGramClient(account, proxy, downloadSessionFile);
 }
 
+/**
+ * Похоже ли на сбой связи через прокси, а не на проблему самой сессии.
+ *
+ * Тот же набор, по которому ниже решается, делать ли TCP-проверку прокси:
+ * ошибки сетевого уровня. Всё остальное (AUTH_KEY_DUPLICATED, битая сессия)
+ * сменой IP не лечится, и гонять из-за него автосвап — жечь живые прокси.
+ */
+export function looksLikeProxyFailure(errMsg: string): boolean {
+  const m = errMsg.toLowerCase();
+  return m.includes('connect timeout')
+    || m.includes('timeout')
+    || m.includes('econnrefused')
+    || m.includes('econnreset')
+    || m.includes('ehostunreach')
+    || m.includes('socket hang up');
+}
+
 export async function buildClients(
   accounts: OutreachAccount[],
   proxies: OutreachProxy[],
@@ -260,6 +278,8 @@ export async function buildClients(
     let lastErr: unknown = null;
     let probeNote = '';
     let retried = false;
+    /** null — TCP-проверку не делали; false — прокси не отвечает даже по TCP. */
+    let probeAlive: boolean | null = null;
 
     try {
       client = await createGramClient(acc, proxy, downloadSessionFile);
@@ -275,6 +295,7 @@ export async function buildClients(
       // TCP-проверка прокси отделяет «прокси мёртвая» от «Telegram временно недоступен».
       if (proxy && looksLikeConnectIssue) {
         const probe = await probeProxyTcp(proxy);
+        probeAlive = probe.alive;
         if (probe.alive) {
           probeNote = ` (TCP-проверка прокси прошла за ${probe.latencyMs}мс — похоже временная проблема Telegram, делаю повторную попытку)`;
           log('warning', `Аккаунт ${acc.session_name}: первая попытка подключения упала — ${humanizeConnectError(errMsg)}.${probeNote} Прокси: ${proxyLabel}.`);
@@ -312,6 +333,43 @@ export async function buildClients(
     } else {
       const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
       log('error', `Аккаунт ${acc.session_name}: не удалось подключиться к Telegram${retried ? ' (даже после повторной попытки)' : ''} — ${humanizeConnectError(errMsg)}.${probeNote} Прокси: ${proxyLabel}. [${accountLabel}]`);
+
+      // Автосвап на падении подключения. До 05.08.2026 здоровье прокси
+      // считалось только по ошибкам внутри круга боевого цикла, а самый частый
+      // и самый заметный сбой — «модем в пуле умер, аккаунт вообще не зашёл» —
+      // не учитывался нигде. Оператору приходилось каждый день глазами искать
+      // повторяющийся порт в логах и менять его руками; прогрев к автосвапу не
+      // был подключён вовсе.
+      //
+      // AUTH_KEY_DUPLICATED сюда не попадает намеренно: это про сессию, а не
+      // про прокси, и смена IP её не лечит — ниже свой обработчик.
+      if (db && proxy && looksLikeProxyFailure(errMsg)) {
+        const swap = await handleProxyError({
+          db,
+          account: acc,
+          reason: probeAlive === false ? 'tcp_dead' : 'connect_timeout',
+          log,
+        }).catch((e: unknown) => {
+          log('warning', `Аккаунт ${acc.session_name}: не смог обновить здоровье прокси — ${e instanceof Error ? e.message : String(e)}`);
+          return { swappedTo: null };
+        });
+
+        // Свап уже записан в БД, но без немедленной попытки аккаунт до
+        // следующего круга остаётся не подключённым — а у прогрева круг теперь
+        // может не наступить сутками.
+        if (swap.swappedTo) {
+          const fresh: OutreachProxy = { ...(proxy as OutreachProxy), id: swap.swappedTo.id, url: swap.swappedTo.url };
+          proxyMap.set(fresh.id, fresh);
+          try {
+            const swapped = await createGramClient(acc, fresh, downloadSessionFile);
+            clients.push({ client: swapped, account: acc });
+            log('info', `Аккаунт ${acc.session_name}: подключён после автосвапа прокси на ${fresh.url}`);
+            continue;
+          } catch (e) {
+            log('error', `Аккаунт ${acc.session_name}: не зашёл и на новом прокси ${fresh.url} — ${humanizeConnectError(e instanceof Error ? e.message : String(e))}`);
+          }
+        }
+      }
 
       // AUTH_KEY_DUPLICATED means Telegram sees a parallel login on this
       // session. It will never recover from retries — the user has to
