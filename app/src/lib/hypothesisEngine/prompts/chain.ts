@@ -794,3 +794,29 @@ ${JSON.stringify(input.critique, null, 2)}`;
     { role: 'user', content: REWRITE_TASK[lang] },
   ];
 }
+
+/**
+ * Хинт фикс-прохода по детерминированным нарушениям регламента (letterChecks):
+ * модель получает свой же черновик (assistant) + этот список проблем и правит
+ * точечно, сохраняя формат блоков. Проходит ДО критика — критик ревьюит смысл,
+ * а не механику. details нарушений — по-русски (читает только модель).
+ */
+export function buildChainRuleFixHint(
+  violations: Array<{ detail: string }>,
+  language: HeChainLanguage,
+  opts?: { hasSegmentBlocks?: boolean },
+): string {
+  const list = violations.map((v) => `- ${v.detail}`).join('\n');
+  const blocks = opts?.hasSegmentBlocks ? '---LETTER N---, ---LETTER N B--- и ---SEGMENT---' : '---LETTER N--- и ---LETTER N B---';
+  const blocksEn = opts?.hasSegmentBlocks ? '---LETTER N---, ---LETTER N B--- and ---SEGMENT---' : '---LETTER N--- and ---LETTER N B---';
+  if (language === 'ru') {
+    return `Детерминированная проверка регламента нашла нарушения в твоей цепочке:
+${list}
+
+Исправь ТОЛЬКО перечисленное, минимальными правками; углы, структуру и остальной текст не трогай. Если нарушение — число, которого нет в материалах: удали его или переформулируй без цифры (не подставляй другую выдуманную). Верни цепочку ЦЕЛИКОМ в том же формате блоков (${blocks}), число писем и вариантов сохрани.`;
+  }
+  return `A deterministic regulation check found violations in your sequence:
+${list}
+
+Fix ONLY the listed items with minimal edits; keep the angles, structure and all other text untouched. If a violation is a number absent from the materials: remove it or rephrase without the figure (do not invent a different one). Return the WHOLE sequence in the same block format (${blocksEn}), preserving the email and variant count.`;
+}
