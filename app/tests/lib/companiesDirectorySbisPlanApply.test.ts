@@ -34,6 +34,7 @@ import {
 } from '@/lib/companiesDirectory/sbisPostgresApply';
 import frozenSbisV4Manifest from '../../scripts/sbis-directory-v4.manifest.json';
 import frozenPolzaRegistryManifest from '../../scripts/polza-registry-v1.manifest.json';
+import frozenPolzaRegistryV2Manifest from '../../scripts/polza-registry-v2.manifest.json';
 
 const MANIFEST: SbisPlanManifest = {
   version: 1,
@@ -206,6 +207,9 @@ function hash(value: string): string {
 }
 
 const POLZA_REGISTRY_PLAN = 'polza-registry-v1';
+const POLZA_REGISTRY_V2_PLAN = 'polza-registry-v2';
+const POLZA_REGISTRY_V1_FINGERPRINT =
+  '5d2b2691b2e914f3ba854f60789055a45064aad167cfd5f3295182ac1cf77606';
 
 interface VersionedSbisPlanTrustContract {
   TRUSTED_SBIS_PLAN_FINGERPRINTS: Readonly<Record<string, string>>;
@@ -841,6 +845,7 @@ describe('Polza registry SBIS import contract', () => {
     );
     expect(registryFingerprint).toMatch(/^[a-f0-9]{64}$/);
     expect(registryFingerprint).not.toBe(v4Fingerprint);
+    expect(registryFingerprint).toBe(POLZA_REGISTRY_V1_FINGERPRINT);
     expect(registryFingerprint).toBe(buildSbisPlanFingerprint(
       frozenPolzaRegistryManifest as SbisPlanManifest,
     ));
@@ -869,6 +874,49 @@ describe('Polza registry SBIS import contract', () => {
         registryFingerprint,
       ),
     ).toThrow(/plan|trusted|pinned/i);
+  });
+
+  it('pins registry v2 independently and rejects cross-version or tampered fingerprints', () => {
+    const contract = sbisPlanApplyModule as unknown as
+      VersionedSbisPlanTrustContract;
+    const v1Fingerprint =
+      contract.TRUSTED_SBIS_PLAN_FINGERPRINTS[POLZA_REGISTRY_PLAN];
+    const v2Fingerprint =
+      contract.TRUSTED_SBIS_PLAN_FINGERPRINTS[POLZA_REGISTRY_V2_PLAN];
+
+    expect(v1Fingerprint).toBe(POLZA_REGISTRY_V1_FINGERPRINT);
+    expect(v2Fingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(v2Fingerprint).not.toBe(v1Fingerprint);
+    expect(v2Fingerprint).toBe(buildSbisPlanFingerprint(
+      frozenPolzaRegistryV2Manifest as SbisPlanManifest,
+    ));
+    expect(() =>
+      contract.assertTrustedSbisPlanFingerprint(
+        POLZA_REGISTRY_V2_PLAN,
+        v2Fingerprint,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      contract.assertTrustedSbisPlanFingerprint(
+        POLZA_REGISTRY_V2_PLAN,
+        v1Fingerprint,
+      ),
+    ).toThrow(/fingerprint|trusted|pinned/i);
+    expect(() =>
+      contract.assertTrustedSbisPlanFingerprint(
+        POLZA_REGISTRY_PLAN,
+        v2Fingerprint,
+      ),
+    ).toThrow(/fingerprint|trusted|pinned/i);
+
+    const tamperedFingerprint =
+      `${v2Fingerprint.slice(0, -1)}${v2Fingerprint.endsWith('0') ? '1' : '0'}`;
+    expect(() =>
+      contract.assertTrustedSbisPlanFingerprint(
+        POLZA_REGISTRY_V2_PLAN,
+        tamperedFingerprint,
+      ),
+    ).toThrow(/fingerprint|trusted|pinned/i);
   });
 
   it('allows only website and email updates for the registry plan', () => {
@@ -930,6 +978,158 @@ describe('Polza registry SBIS import contract', () => {
         okved_code: '00',
       }, POLZA_REGISTRY_PLAN),
     ).toThrow(/OKVED|ОКВЭД|parent/i);
+  });
+
+  it('allows only canonical contacts in registry v2 patches and digital inserts', () => {
+    const validateUpdateForPlan = validateSbisUpdateRow as unknown as (
+      value: unknown,
+      plan: string,
+    ) => Record<string, unknown>;
+    const validateInsertForPlan = validateSbisInsertRow as unknown as (
+      value: unknown,
+      plan: string,
+    ) => Record<string, unknown>;
+    const update = {
+      id: '10',
+      inn: '7704414297',
+      patch: {
+        email: 'hello@alpha.ru',
+        website: 'alpha.ru',
+        phones: '+74951112233',
+      },
+    };
+    const insert = {
+      ...INSERT_62,
+      phones: '+74951112233',
+      okved_code: '62',
+      okved_code_exact: null,
+      okved_exact_source: null,
+    };
+
+    expect(validateUpdateForPlan(update, POLZA_REGISTRY_V2_PLAN)).toEqual(update);
+    expect(validateInsertForPlan(insert, POLZA_REGISTRY_V2_PLAN)).toEqual(insert);
+
+    for (const forbiddenPatch of [
+      { okved_code: '62' },
+      { name: 'ООО БЕТА' },
+    ]) {
+      expect(() =>
+        validateUpdateForPlan({
+          ...update,
+          patch: forbiddenPatch,
+        }, POLZA_REGISTRY_V2_PLAN),
+      ).toThrow(/forbidden|okved_code|name/i);
+    }
+
+    for (const nonCanonicalPhone of [
+      '8 (495) 111-22-33',
+      '+12345678901',
+    ]) {
+      expect(() =>
+        validateUpdateForPlan({
+          ...update,
+          patch: { phones: nonCanonicalPhone },
+        }, POLZA_REGISTRY_V2_PLAN),
+      ).toThrow(/phone|canonical|invalid/i);
+      expect(() =>
+        validateInsertForPlan({
+          ...insert,
+          phones: nonCanonicalPhone,
+        }, POLZA_REGISTRY_V2_PLAN),
+      ).toThrow(/phone|canonical|invalid/i);
+    }
+
+    for (const { field, value } of [
+      { field: 'email', value: 'HELLO@ALPHA.RU' },
+      { field: 'email', value: 'not-an-email' },
+      { field: 'website', value: 'https://www.alpha.ru/path' },
+      { field: 'website', value: 'not a website' },
+    ] as const) {
+      expect(() =>
+        validateUpdateForPlan({
+          ...update,
+          patch: { [field]: value },
+        }, POLZA_REGISTRY_V2_PLAN),
+      ).toThrow(new RegExp(`${field}|canonical|invalid`, 'i'));
+      expect(() =>
+        validateInsertForPlan({
+          ...insert,
+          [field]: value,
+        }, POLZA_REGISTRY_V2_PLAN),
+      ).toThrow(new RegExp(`${field}|canonical|invalid`, 'i'));
+    }
+
+    expect(() =>
+      validateInsertForPlan({
+        ...insert,
+        email: null,
+        website: null,
+      }, POLZA_REGISTRY_V2_PLAN),
+    ).toThrow(/website|email/i);
+    expect(() =>
+      validateInsertForPlan({
+        ...insert,
+        okved_code_exact: '62.01',
+        okved_exact_source: 'registry-file',
+      }, POLZA_REGISTRY_V2_PLAN),
+    ).toThrow(/exact OKVED|точн/i);
+  });
+
+  it('requires every registry v2 audit artifact in the frozen manifest', () => {
+    const requiredAuditArtifacts = [
+      'skipped.jsonl',
+      'conflicts.jsonl',
+      'provenance.jsonl',
+      'source-locations.jsonl',
+      'source-archives.jsonl',
+      'filtered-status.jsonl',
+      'rollback.jsonl',
+    ];
+    const artifacts = {
+      ...MANIFEST.artifacts,
+      ...Object.fromEntries(requiredAuditArtifacts.map((name) => [
+        name,
+        { sha256: 'd'.repeat(64), rows: 0 },
+      ])),
+    };
+    const manifest = {
+      ...MANIFEST,
+      plan: POLZA_REGISTRY_V2_PLAN,
+      artifacts,
+    } as SbisPlanManifest;
+    const summary = {
+      ...SUMMARY,
+      mode: 'registry-v2',
+    };
+    const artifactHashes = Object.fromEntries(
+      Object.entries(artifacts).map(([name, artifact]) => [name, artifact.sha256]),
+    );
+    const artifactRows = Object.fromEntries(
+      Object.entries(artifacts).flatMap(([name, artifact]) =>
+        'rows' in artifact ? [[name, artifact.rows]] : []
+      ),
+    );
+
+    expect(() => validateSbisPlanManifest({
+      manifest,
+      summary,
+      artifactHashes,
+      artifactRows,
+      approximateOkvedCounts: MANIFEST.expected.approximateOkvedCounts,
+    })).not.toThrow();
+
+    const withoutSourceArchives = {
+      ...manifest,
+      artifacts: { ...artifacts },
+    } as SbisPlanManifest;
+    delete withoutSourceArchives.artifacts['source-archives.jsonl'];
+    expect(() => validateSbisPlanManifest({
+      manifest: withoutSourceArchives,
+      summary,
+      artifactHashes,
+      artifactRows,
+      approximateOkvedCounts: MANIFEST.expected.approximateOkvedCounts,
+    })).toThrow(/source-archives/i);
   });
 
   it('keeps the original receipt on a no-op repeat and captures every mutable v4 field', () => {

@@ -2,6 +2,11 @@ import {
   SBIS_APPROXIMATE_OKVED_BY_ACTIVITY,
   normalizeSbisInn,
 } from '@/lib/companiesDirectory/sbisImportPlan';
+import {
+  normalizeStrictEmailList,
+  normalizeStrictRussianPhoneList,
+  normalizeStrictWebsiteList,
+} from '@/lib/companiesDirectory/contactPolicy';
 import { getOkvedByCode } from '@/lib/companiesSearch/okved2';
 import {
   assertPortalProductionTarget,
@@ -19,11 +24,14 @@ export const TRUSTED_SBIS_V4_PLAN_FINGERPRINT =
 
 const SBIS_V4_PLAN = 'sbis-directory-v4';
 const POLZA_REGISTRY_PLAN = 'polza-registry-v1';
+export const POLZA_REGISTRY_V2_PLAN = 'polza-registry-v2';
 
 export const TRUSTED_SBIS_PLAN_FINGERPRINTS = Object.freeze({
   [SBIS_V4_PLAN]: TRUSTED_SBIS_V4_PLAN_FINGERPRINT,
   [POLZA_REGISTRY_PLAN]:
     '5d2b2691b2e914f3ba854f60789055a45064aad167cfd5f3295182ac1cf77606',
+  [POLZA_REGISTRY_V2_PLAN]:
+    '57fc796806dc70ec9dff666a245ec61d3327daa3e2e9da019dc706d57339b41d',
 });
 
 type TrustedSbisPlan = keyof typeof TRUSTED_SBIS_PLAN_FINGERPRINTS;
@@ -73,6 +81,22 @@ const POLZA_REGISTRY_FILL_EMPTY_FIELDS = [
   'email',
 ] as const;
 
+const POLZA_REGISTRY_V2_FILL_EMPTY_FIELDS = [
+  'phones',
+  'website',
+  'email',
+] as const;
+
+export const POLZA_REGISTRY_V2_REQUIRED_AUDIT_ARTIFACTS = [
+  'skipped.jsonl',
+  'conflicts.jsonl',
+  'provenance.jsonl',
+  'source-locations.jsonl',
+  'source-archives.jsonl',
+  'filtered-status.jsonl',
+  'rollback.jsonl',
+] as const;
+
 type SbisFillEmptyField = typeof SBIS_FILL_EMPTY_FIELDS[number];
 type JsonRecord = Record<string, unknown>;
 
@@ -107,6 +131,8 @@ export interface SbisPlanManifest {
     'conflicts.jsonl'?: SbisHashedRowsArtifact;
     'provenance.jsonl'?: SbisHashedRowsArtifact;
     'source-locations.jsonl'?: SbisHashedRowsArtifact;
+    'source-archives.jsonl'?: SbisHashedRowsArtifact;
+    'filtered-status.jsonl'?: SbisHashedRowsArtifact;
     'rollback.jsonl'?: SbisHashedRowsArtifact;
   };
   expected: {
@@ -221,6 +247,29 @@ function isBlank(value: unknown): boolean {
   );
 }
 
+const REGISTRY_V2_CONTACT_NORMALIZERS = {
+  email: normalizeStrictEmailList,
+  website: normalizeStrictWebsiteList,
+  phones: normalizeStrictRussianPhoneList,
+} as const;
+
+type RegistryV2ContactField = keyof typeof REGISTRY_V2_CONTACT_NORMALIZERS;
+
+function assertCanonicalRegistryV2Contact(
+  value: unknown,
+  label: string,
+  field: RegistryV2ContactField,
+): void {
+  if (value === null) return;
+  if (typeof value !== 'string' || isBlank(value)) {
+    throw new Error(`${label} contains an invalid ${field} list`);
+  }
+  const normalized = REGISTRY_V2_CONTACT_NORMALIZERS[field](value).join(', ');
+  if (!normalized || normalized !== value) {
+    throw new Error(`${label} ${field} must use canonical strict format`);
+  }
+}
+
 function assertExactKeys(
   value: JsonRecord,
   expected: readonly string[],
@@ -258,8 +307,11 @@ function readSummaryShape(summary: unknown): {
   if (
     summary.mode !== 'contact-only'
     && summary.mode !== 'strict-contact'
+    && summary.mode !== 'registry-v2'
   ) {
-    throw new Error('summary.json mode must be contact-only or strict-contact');
+    throw new Error(
+      'summary.json mode must be contact-only, strict-contact or registry-v2',
+    );
   }
   assertRecord(summary.input, 'summary.input');
   if (!Array.isArray(summary.input.files)) {
@@ -335,6 +387,15 @@ export function validateSbisPlanManifest(
   }
   if (!manifest.plan.trim()) {
     throw new Error('SBIS manifest plan name is empty');
+  }
+  if (manifest.plan === POLZA_REGISTRY_V2_PLAN) {
+    for (const artifactName of POLZA_REGISTRY_V2_REQUIRED_AUDIT_ARTIFACTS) {
+      if (!(artifactName in manifest.artifacts)) {
+        throw new Error(
+          `Registry v2 manifest is missing required artifact ${artifactName}`,
+        );
+      }
+    }
   }
   assertEqual(
     manifest.target,
@@ -435,6 +496,15 @@ export function validateSbisInsertRow(
       `SBIS insert ${normalizedInn} contains forbidden phones`,
     );
   }
+  if (plan === POLZA_REGISTRY_V2_PLAN) {
+    for (const field of POLZA_REGISTRY_V2_FILL_EMPTY_FIELDS) {
+      assertCanonicalRegistryV2Contact(
+        value[field],
+        `SBIS insert ${normalizedInn}`,
+        field,
+      );
+    }
+  }
   if (
     value.okved_code_exact !== null
     || value.okved_exact_source !== null
@@ -447,7 +517,10 @@ export function validateSbisInsertRow(
   ) {
     throw new Error(`SBIS insert ${normalizedInn} has no approximate OKVED mapping`);
   }
-  if (plan === POLZA_REGISTRY_PLAN) {
+  if (
+    plan === POLZA_REGISTRY_PLAN
+    || plan === POLZA_REGISTRY_V2_PLAN
+  ) {
     if (
       isBlank(value.activity_type)
       || !/^\d{2}$/.test(value.okved_code)
@@ -525,7 +598,9 @@ export function validateSbisUpdateRow(
   const allowed = new Set<string>(
     plan === POLZA_REGISTRY_PLAN
       ? POLZA_REGISTRY_FILL_EMPTY_FIELDS
-      : SBIS_FILL_EMPTY_FIELDS,
+      : plan === POLZA_REGISTRY_V2_PLAN
+        ? POLZA_REGISTRY_V2_FILL_EMPTY_FIELDS
+        : SBIS_FILL_EMPTY_FIELDS,
   );
   for (const field of patchKeys) {
     if (!allowed.has(field)) {
@@ -536,6 +611,15 @@ export function validateSbisUpdateRow(
     if (typeof value.patch[field] !== 'string' || isBlank(value.patch[field])) {
       throw new Error(
         `SBIS update ${normalizedInn} contains an empty ${field}`,
+      );
+    }
+  }
+  if (plan === POLZA_REGISTRY_V2_PLAN) {
+    for (const field of patchKeys as RegistryV2ContactField[]) {
+      assertCanonicalRegistryV2Contact(
+        value.patch[field],
+        `SBIS update ${normalizedInn}`,
+        field,
       );
     }
   }
