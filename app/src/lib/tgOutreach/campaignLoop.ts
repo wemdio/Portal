@@ -17,6 +17,7 @@ import type {
 } from './types';
 import { DEFAULT_FOLLOW_UP } from './types';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient } from './gramClient';
+import type { LoopControl } from './watchdog';
 import { openaiGenerate, detectTrigger } from './openaiChat';
 import { loadBlockedUserIds } from './blockedUsers';
 import {
@@ -1276,6 +1277,7 @@ export async function runCampaignLoop(
   shouldStop: () => boolean,
   traceContext?: TraceContext,
   onProgress?: () => void,
+  control?: LoopControl,
 ) {
   // Called from every loop hot-spot so the worker-level watchdog can detect
   // a stuck campaign (e.g. gramJS recvLoop blocked, infinite proxy reconnect)
@@ -1348,6 +1350,10 @@ export async function runCampaignLoop(
   const proxyMap = new Map((proxies ?? []).map((proxy: OutreachProxy) => [proxy.id, proxy]));
   const downloadSessionFile = (storagePath: string) => downloadSessionToTemp(db, storagePath);
   let clients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db);
+  // Ручка для сторожевого таймера: порвать сокеты этой кампании, не трогая
+  // соседние. Замыкание читает `clients` в момент вызова, поэтому переживает
+  // переподключение ниже.
+  if (control) control.forceDisconnect = () => disconnectAll(clients);
   log('info', `Подключились ${clients.length} из ${accounts.length} аккаунтов${clients.length < accounts.length ? ` (остальные с ошибками подключения, смотри строки выше)` : ''}`);
 
   if (clients.length === 0) {
