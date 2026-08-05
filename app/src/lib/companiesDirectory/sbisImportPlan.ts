@@ -2,6 +2,7 @@ import { FEDERAL_DISTRICTS } from '@/lib/companiesSearch/regions';
 import { getOkvedByCode } from '@/lib/companiesSearch/okved2';
 import {
   normalizeStrictEmailList,
+  normalizeStrictRussianPhoneList,
   normalizeStrictWebsiteList,
 } from '@/lib/companiesDirectory/contactPolicy';
 
@@ -120,7 +121,11 @@ export interface ImportConflict {
 
 export interface SkippedSbisCompany {
   inn: string;
-  reason: 'missing_website_or_email';
+  reason:
+    | 'missing_website_or_email'
+    | 'missing_parent_okved'
+    | 'conflicting_parent_okved'
+    | 'missing_activity_type';
   rowNumbers: number[];
 }
 
@@ -176,12 +181,17 @@ export interface SbisImportOptions {
     activityType: string | null,
     company?: NormalizedSbisCompany,
   ) => string | null;
-  eligibility?: 'all' | 'website_or_email';
+  eligibility?:
+    | 'all'
+    | 'website_or_email'
+    | 'website_or_email_for_new';
   sourceFile: string;
+  sourceFileResolver?: (company: NormalizedSbisCompany) => string | null;
 }
 
 export interface SbisContactImportOptions {
   sourceFile: string;
+  sourceFileResolver?: (company: NormalizedSbisCompany) => string | null;
 }
 
 export const SBIS_APPROXIMATE_OKVED_BY_ACTIVITY = {
@@ -520,7 +530,10 @@ function normalizeEmailList(value: unknown): string | null {
   return emails.length ? emails.join(', ') : null;
 }
 
-type ContactNormalizationMode = 'legacy' | 'strict';
+type ContactNormalizationMode =
+  | 'legacy'
+  | 'strict'
+  | 'strict-with-phone';
 
 function normalizeSbisWebsite(
   value: unknown,
@@ -538,6 +551,15 @@ function normalizeSbisEmail(
   if (mode === 'legacy') return normalizeEmailList(value);
   const emails = normalizeStrictEmailList(normalizeText(value));
   return emails.length ? emails.join(', ') : null;
+}
+
+function normalizeSbisPhones(
+  value: unknown,
+  mode: ContactNormalizationMode,
+): string | null {
+  if (mode !== 'strict-with-phone') return normalizePhoneList(value);
+  const phones = normalizeStrictRussianPhoneList(normalizeText(value));
+  return phones.length ? phones.join(', ') : null;
 }
 
 function normalizePhonePart(value: string): string | null {
@@ -601,7 +623,7 @@ function normalizeSbisRow(
     activity_type: normalizeText(input.activity_type),
     source_activity: normalizeText(input.source_activity),
     employees_count: normalizeInteger(input.employees_count),
-    phones: normalizePhoneList(input.phones),
+    phones: normalizeSbisPhones(input.phones, contactNormalization),
     email: normalizeSbisEmail(input.email, contactNormalization),
     revenue: normalizeInteger(input.revenue),
     cost: normalizeInteger(input.cost),
@@ -786,6 +808,19 @@ function valuesEqual(
   return normalizeComparable(field, left) === normalizeComparable(field, right);
 }
 
+function compareDirectoryIds(
+  left: number | string,
+  right: number | string,
+): number {
+  const leftText = String(left);
+  const rightText = String(right);
+  if (/^\d+$/.test(leftText) && /^\d+$/.test(rightText)) {
+    const lengthDelta = leftText.length - rightText.length;
+    if (lengthDelta !== 0) return lengthDelta;
+  }
+  return leftText < rightText ? -1 : leftText > rightText ? 1 : 0;
+}
+
 function resolveApproximateOkved(
   company: NormalizedSbisCompany,
   options: SbisImportOptions,
@@ -811,7 +846,7 @@ function insertFromCompany(
     okved_code: resolveApproximateOkved(company, options),
     okved_code_exact: null,
     okved_exact_source: null,
-    source_file: options.sourceFile,
+    source_file: options.sourceFileResolver?.(company) ?? options.sourceFile,
   };
 }
 
@@ -843,10 +878,10 @@ function buildSbisImportPlan(
   let blockedExistingDuplicates = 0;
 
   for (const company of collapsed.companies) {
+    const hasWebsiteOrEmail = Boolean(company.website || company.email);
     if (
       options.eligibility === 'website_or_email'
-      && !company.website
-      && !company.email
+      && !hasWebsiteOrEmail
     ) {
       skipped.push({
         inn: company.inn,
@@ -858,6 +893,17 @@ function buildSbisImportPlan(
 
     const matches = existingByInn.get(company.inn) ?? [];
     if (matches.length === 0) {
+      if (
+        options.eligibility === 'website_or_email_for_new'
+        && !hasWebsiteOrEmail
+      ) {
+        skipped.push({
+          inn: company.inn,
+          reason: 'missing_website_or_email',
+          rowNumbers: company.rowNumbers,
+        });
+        continue;
+      }
       inserts.push(insertFromCompany(company, options));
       continue;
     }
@@ -866,7 +912,9 @@ function buildSbisImportPlan(
       conflicts.push({
         inn: company.inn,
         kind: 'duplicate_existing_inn',
-        existingIds: matches.map((row) => row.id),
+        existingIds: matches
+          .map((row) => row.id)
+          .sort(compareDirectoryIds),
       });
       continue;
     }
@@ -979,6 +1027,97 @@ export function buildStrictSbisContactImportPlan(
       ...insert,
       phones: null,
     })),
+  };
+}
+
+function collectSourceParentOkvedCandidates(
+  inputs: SbisDirectoryInputRow[],
+): {
+  candidatesByInn: Map<string, Set<string>>;
+  rowNumbersByInn: Map<string, number[]>;
+} {
+  const candidatesByInn = new Map<string, Set<string>>();
+  const rowNumbersByInn = new Map<string, number[]>();
+  for (const input of inputs) {
+    const inn = normalizeSbisInn(input.inn);
+    if (!inn) continue;
+    const parent = resolveSourceParentApproximateOkved(
+      normalizeText(input.source_activity),
+    );
+    const candidates = candidatesByInn.get(inn) ?? new Set<string>();
+    if (parent) candidates.add(parent);
+    candidatesByInn.set(inn, candidates);
+    const rowNumbers = rowNumbersByInn.get(inn) ?? [];
+    rowNumbers.push(input.rowNumber);
+    rowNumbersByInn.set(inn, rowNumbers);
+  }
+  for (const rowNumbers of rowNumbersByInn.values()) {
+    rowNumbers.sort((left, right) => left - right);
+  }
+  return { candidatesByInn, rowNumbersByInn };
+}
+
+export function buildStrictSbisContactImportPlanV2(
+  inputs: SbisDirectoryInputRow[],
+  existingRows: ExistingDirectoryRow[],
+  options: SbisContactImportOptions,
+): SbisImportPlan {
+  const plan = buildSbisImportPlan(
+    inputs,
+    existingRows,
+    {
+      ...options,
+      approximateOkvedResolver: (_activityType, company) =>
+        resolveSourceParentApproximateOkved(company?.source_activity ?? null),
+      eligibility: 'website_or_email_for_new',
+    },
+    ['phones', 'email', 'website'],
+    'strict-with-phone',
+  );
+  const { candidatesByInn, rowNumbersByInn } =
+    collectSourceParentOkvedCandidates(inputs);
+  const inserts: DirectoryInsert[] = [];
+  const skipped = [...plan.skipped];
+
+  for (const insert of plan.inserts) {
+    const candidates = candidatesByInn.get(insert.inn) ?? new Set<string>();
+    const rowNumbers = rowNumbersByInn.get(insert.inn) ?? [];
+    if (candidates.size > 1) {
+      skipped.push({
+        inn: insert.inn,
+        reason: 'conflicting_parent_okved',
+        rowNumbers,
+      });
+      continue;
+    }
+    if (isBlank(insert.activity_type)) {
+      skipped.push({
+        inn: insert.inn,
+        reason: 'missing_activity_type',
+        rowNumbers,
+      });
+      continue;
+    }
+    const parent = [...candidates][0] ?? null;
+    if (!parent) {
+      skipped.push({
+        inn: insert.inn,
+        reason: 'missing_parent_okved',
+        rowNumbers,
+      });
+      continue;
+    }
+    inserts.push({ ...insert, okved_code: parent });
+  }
+
+  return {
+    ...plan,
+    inserts,
+    skipped,
+    metrics: {
+      ...plan.metrics,
+      inserts: inserts.length,
+    },
   };
 }
 

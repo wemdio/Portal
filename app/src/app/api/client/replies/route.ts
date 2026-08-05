@@ -5,11 +5,12 @@ import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { filterAllowedIds, getResourceInstantlyAccountId, type ClientAccessRow } from '@/lib/clientAccess';
-import { listEmails } from '@/lib/instantly/client';
 import { InstantlyApiError } from '@/lib/instantly/errors';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
 import { getReadEmailIds, getRepliedEmailIds, getAnsweredLeadKeys } from '@/lib/clientCampaignReplies/clientEmailReads';
 import { partitionForeignEmails, resolveClientMailboxes } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
+import { fetchReceivedEmailsWindow, fetchLeadInboundEmails, looksLikeEmail } from '@/lib/clientCampaignReplies/repliesWindow';
+import type { Email } from '@/lib/instantly/types';
 import { readCampaignAnalyticsFromDb } from '@/lib/tools/instantlyCampaignCatalog';
 import { cached } from '@/lib/clientCache';
 import { withDeadline } from '@/lib/withDeadline';
@@ -19,7 +20,6 @@ export const dynamic = 'force-dynamic';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
-const REPLIES_PER_CAMPAIGN = 100;
 
 // Каждая кампания тянется ОТДЕЛЬНЫМ live-вызовом в Instantly. У клиента с
 // большим числом кампаний это раньше вешало всю страницу «Ответы»: один
@@ -33,6 +33,10 @@ const REPLIES_PER_CAMPAIGN = 100;
 // 8с→успех ≈ на 13-14с. С 12с он не успевал и падал в DeadlineError (→ 502 у
 // клиента с малым числом кампаний, все упали разом). 15с даёт ему дойти, но всё
 // ещё далеко от прокси-таймаута. Клиент вдобавок прозрачно ретраит (см. page.tsx).
+// Окно до 300 = до 3 последовательных вызовов в том же бюджете: цикл в
+// fetchReceivedEmailsWindow time-aware (не стартует страницу без запаса времени)
+// и отдаёт частичное окно при сбое страницы 2/3 — кампания деградирует до
+// 100-200 писем вместо полного выпадения.
 const REPLIES_CAMPAIGN_DEADLINE_MS = 15_000;
 const REPLIES_CAMPAIGN_TTL_MS = 120_000;
 
@@ -207,6 +211,97 @@ async function readCampaignNames(campaignIds: string[]): Promise<Map<string, str
   return names;
 }
 
+/** Сырой Email Instantly → строка фида (общий маппер для окна и глубокого поиска). */
+function mapEmailToReplyItem(
+  campaignId: string,
+  campaignName: string | null,
+  email: Email,
+): LeadListItem {
+  const reply = mapInstantlyEmailToReply(email);
+  const timestamp = reply.timestamp;
+  const createdAt = timestamp ?? new Date(0).toISOString();
+
+  return {
+    id: `reply:${campaignId}:${reply.id}`,
+    source: 'reply' as const,
+    qualification_id: null,
+    campaign_id: campaignId,
+    campaign_name: campaignName,
+    lead_email: reply.from_email ?? '',
+    lead_name: reply.from_name,
+    company_name: null,
+    phone: null,
+    website: null,
+    linkedin_url: null,
+    reply_subject: reply.subject,
+    reply_body: reply.body_text,
+    last_outbound_preview: null,
+    reply_timestamp: timestamp,
+    status: reply.is_unread ? 'unread' : 'reply',
+    ai_reason: reply.ai_interest_value == null
+      ? null
+      : `Interest: ${reply.ai_interest_value}`,
+    created_at: createdAt,
+    client_lead_comments: [],
+    email_id: reply.id,
+    lead_id: reply.lead_id,
+    thread_id: reply.thread_id,
+    is_unread: reply.is_unread,
+    ai_interest_value: reply.ai_interest_value,
+    // Только для пост-фильтра чужих ящиков ниже, в ответ не уходит.
+    eaccount: email.eaccount ?? null,
+  };
+}
+
+/**
+ * Кросс-клиентская гигиена: скрываем письма, полученные ящиком ДРУГОГО клиента
+ * воркспейса (Instantly клеит входящее к кампании по адресу отправителя, не
+ * проверяя получателя — кейс 26.07, warmup-письмо на aleksey@it-ls.ru в треде
+ * OutreachOS). Применяется ПОД конкретного юзера и ПОСЛЕ кэша (кэш общий на
+ * аккаунт+кампанию, принадлежность ящиков — свойство клиента). Из item'ов
+ * удаляет служебное поле eaccount, чтобы оно не ушло в ответ.
+ */
+async function applyForeignFilter(
+  userId: string,
+  items: LeadListItem[],
+  accessRows: ClientAccessRow[],
+): Promise<LeadListItem[]> {
+  const presentCampaignIds = [...new Set(items.map((it) => it.campaign_id).filter(Boolean))];
+  const mailboxSets = new Map<string, Set<string> | null>();
+  await Promise.all(
+    presentCampaignIds.map(async (campaignId) => {
+      const accountId = getResourceInstantlyAccountId(campaignId, accessRows, 'campaign');
+      mailboxSets.set(campaignId, await resolveClientMailboxes(userId, campaignId, accountId));
+    }),
+  );
+  const visibleItems: LeadListItem[] = [];
+  const hiddenByCampaign = new Map<string, { count: number; samples: Array<{ id?: string | null; eaccount?: string | null }> }>();
+  for (const item of items) {
+    const mailboxes = mailboxSets.get(item.campaign_id) ?? null;
+    const { visible, hidden } = partitionForeignEmails([item], mailboxes);
+    if (visible.length > 0) {
+      delete item.eaccount;
+      visibleItems.push(item);
+    } else if (hidden.length > 0) {
+      const agg = hiddenByCampaign.get(item.campaign_id) ?? { count: 0, samples: [] };
+      agg.count += 1;
+      if (agg.samples.length < 5) agg.samples.push({ id: item.email_id, eaccount: item.eaccount });
+      hiddenByCampaign.set(item.campaign_id, agg);
+    }
+  }
+  if (hiddenByCampaign.size > 0) {
+    await logInfo('client.replies.foreign_mailbox_hidden', 'Скрыты ответы, полученные чужими ящиками', {
+      userId,
+      campaigns: [...hiddenByCampaign.entries()].map(([campaignId, agg]) => ({
+        campaignId,
+        count: agg.count,
+        samples: agg.samples,
+      })),
+    });
+  }
+  return visibleItems;
+}
+
 async function readReplyItems(
   campaignIds: string[],
   campaignNames: Map<string, string>,
@@ -226,15 +321,12 @@ async function readReplyItems(
         cacheKey,
         () =>
           withDeadline(campaignId, REPLIES_CAMPAIGN_DEADLINE_MS, async () => {
-            let data: Awaited<ReturnType<typeof listEmails>>;
+            let emails: Email[];
             try {
-              data = await listEmails({
-                campaign_id: campaignId,
-                // См. комментарий в /campaigns/[id]/replies/route.ts: правильный
-                // параметр — `email_type`, не `ue_type`.
-                email_type: 'received',
-                limit: REPLIES_PER_CAMPAIGN,
-              }, { accountId });
+              // Окно до 300 писем ленивой пагинацией (потолок Instantly — 100 на
+              // запрос, проверено живьём 05.08): иначе при потоке ~50/день лента
+              // покрывала 2-3 дня, и недельные переписки «пропадали» из кабинета.
+              emails = await fetchReceivedEmailsWindow({ campaignId, accountId });
             } catch (err) {
               // Кампания удалена в Instantly (404 Campaign not found), но осталась
               // в доступах клиента — у неё ноль ответов. Возвращаем пусто, а НЕ
@@ -250,43 +342,9 @@ async function readReplyItems(
               throw err;
             }
 
-            return (data.items ?? []).map((email) => {
-              const reply = mapInstantlyEmailToReply(email);
-              const timestamp = reply.timestamp;
-              const createdAt = timestamp ?? new Date(0).toISOString();
-
-              return {
-                id: `reply:${campaignId}:${reply.id}`,
-                source: 'reply' as const,
-                qualification_id: null,
-                campaign_id: campaignId,
-                campaign_name: campaignNames.get(campaignId) ?? null,
-                lead_email: reply.from_email ?? '',
-                lead_name: reply.from_name,
-                company_name: null,
-                phone: null,
-                website: null,
-                linkedin_url: null,
-                reply_subject: reply.subject,
-                reply_body: reply.body_text,
-                last_outbound_preview: null,
-                reply_timestamp: timestamp,
-                status: reply.is_unread ? 'unread' : 'reply',
-                ai_reason: reply.ai_interest_value == null
-                  ? null
-                  : `Interest: ${reply.ai_interest_value}`,
-                created_at: createdAt,
-                client_lead_comments: [],
-                email_id: reply.id,
-                lead_id: reply.lead_id,
-                thread_id: reply.thread_id,
-                is_unread: reply.is_unread,
-                ai_interest_value: reply.ai_interest_value,
-                // См. комментарий у поля в LeadListItem: только для пост-фильтра
-                // чужих ящиков ниже, из кэша клонируется, в ответ не уходит.
-                eaccount: email.eaccount ?? null,
-              } satisfies LeadListItem;
-            });
+            return emails.map((email) =>
+              mapEmailToReplyItem(campaignId, campaignNames.get(campaignId) ?? null, email),
+            );
           }),
         REPLIES_CAMPAIGN_TTL_MS,
       );
@@ -313,49 +371,64 @@ async function readReplyItems(
     });
   }
 
-  // Кросс-клиентская гигиена — ПОСЛЕ кэша и ПОД конкретного юзера: кэш общий
-  // на (аккаунт, кампания), а принадлежность ящиков — свойство клиента.
-  // Instantly клеит входящее к кампании по адресу отправителя, не проверяя
-  // получателя — письма, пришедшие на ящик ДРУГОГО клиента воркспейса,
-  // всплывают в ответах этой кампании (живой кейс 26.07: warmup-письмо лида
-  // на aleksey@it-ls.ru отобразилось в треде OutreachOS). Показываем только
-  // письма, полученные ящиками этого клиента; чужие скрываем и логируем.
-  const presentCampaignIds = [...new Set(items.map((it) => it.campaign_id).filter(Boolean))];
-  const mailboxSets = new Map<string, Set<string> | null>();
-  await Promise.all(
-    presentCampaignIds.map(async (campaignId) => {
+  return { items: await applyForeignFilter(userId, items, accessRows), failures };
+}
+
+/**
+ * Глубокий поиск по email лида: тянет входящие этого лида напрямую из
+ * Instantly (фильтр `lead` работает на всю историю, не только на окно фида).
+ * Best-effort: упавшая кампания пропускается (это дополнение к выдаче, а не
+ * основной путь). Применяется, когда поисковый терм похож на email — см. GET.
+ */
+async function fetchLeadReplyItems(
+  campaignIds: string[],
+  campaignNames: Map<string, string>,
+  accessRows: ClientAccessRow[],
+  userId: string,
+  leadEmail: string,
+): Promise<LeadListItem[]> {
+  const settled = await Promise.allSettled(
+    campaignIds.map((campaignId) => {
       const accountId = getResourceInstantlyAccountId(campaignId, accessRows, 'campaign');
-      mailboxSets.set(campaignId, await resolveClientMailboxes(userId, campaignId, accountId));
+      // Дедлайн и кэш как у окна: залипший вызов не должен держать весь GET,
+      // а набор email с дебаунсом на клиенте не должен плодить fan-out
+      // (ревью 05.08).
+      const cacheKey = `replies-lead:${accountId}:${campaignId}:${leadEmail.toLowerCase()}`;
+      return cached(
+        cacheKey,
+        () =>
+          withDeadline(campaignId, REPLIES_CAMPAIGN_DEADLINE_MS, async () => {
+            try {
+              const emails = await fetchLeadInboundEmails({ campaignId, leadEmail, accountId });
+              return emails.map((email) =>
+                mapEmailToReplyItem(campaignId, campaignNames.get(campaignId) ?? null, email),
+              );
+            } catch (err) {
+              // Удалённая кампания — тихо ноль (как в окне), без шума в логах.
+              if (err instanceof InstantlyApiError && err.status === 404) {
+                return [] as LeadListItem[];
+              }
+              throw err;
+            }
+          }),
+        REPLIES_CAMPAIGN_TTL_MS,
+      );
     }),
   );
-  const visibleItems: LeadListItem[] = [];
-  const hiddenByCampaign = new Map<string, { count: number; samples: Array<{ id?: string | null; eaccount?: string | null }> }>();
-  for (const item of items) {
-    const mailboxes = mailboxSets.get(item.campaign_id) ?? null;
-    const { visible, hidden } = partitionForeignEmails([item], mailboxes);
-    if (visible.length > 0) {
-      // eaccount — внутреннее поле фильтрации, в ответ клиенту не отдаём.
-      delete item.eaccount;
-      visibleItems.push(item);
-    } else if (hidden.length > 0) {
-      const agg = hiddenByCampaign.get(item.campaign_id) ?? { count: 0, samples: [] };
-      agg.count += 1;
-      if (agg.samples.length < 5) agg.samples.push({ id: item.email_id, eaccount: item.eaccount });
-      hiddenByCampaign.set(item.campaign_id, agg);
+
+  const items: LeadListItem[] = [];
+  for (let i = 0; i < settled.length; i += 1) {
+    const result = settled[i];
+    if (result.status === 'fulfilled') {
+      items.push(...result.value.map((it) => ({ ...it })));
+    } else {
+      await logError('client.leads.deep_search_failed', result.reason, {
+        campaignId: campaignIds[i],
+        leadEmail,
+      });
     }
   }
-  if (hiddenByCampaign.size > 0) {
-    await logInfo('client.replies.foreign_mailbox_hidden', 'Скрыты ответы, полученные чужими ящиками', {
-      userId,
-      campaigns: [...hiddenByCampaign.entries()].map(([campaignId, agg]) => ({
-        campaignId,
-        count: agg.count,
-        samples: agg.samples,
-      })),
-    });
-  }
-
-  return { items: visibleItems, failures };
+  return applyForeignFilter(userId, items, accessRows);
 }
 
 /**
@@ -514,6 +587,21 @@ export async function GET(req: NextRequest) {
     failures === allowedCampaignIds.length
   ) {
     return jsonError('Не удалось загрузить ответы', 502);
+  }
+
+  // Глубокий поиск по email: если терм похож на адрес, подмешиваем переписку
+  // с этим лидом напрямую из Instantly — окно фида (последние ~300 на кампанию)
+  // могло её уже вытеснить, и локальный поиск по окну её бы не нашёл (кейс
+  // 05.08: менеджер не находил недельные треды двух лидов).
+  if (search && looksLikeEmail(search)) {
+    const extra = await fetchLeadReplyItems(
+      allowedCampaignIds,
+      campaignNames,
+      accessRows,
+      userId,
+      search,
+    );
+    if (extra.length > 0) replyItems.push(...extra);
   }
 
   const merged = mergeAndSortItems(replyItems);

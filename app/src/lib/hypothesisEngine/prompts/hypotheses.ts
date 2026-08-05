@@ -71,6 +71,9 @@ export interface HypothesesPromptInput {
   }>;
   /** Названия гипотез из прошлых проектов, размеченные специалистом. */
   markupHistory?: { accepted: string[]; rejected: string[] };
+  /** Ручное описание бизнеса от специалиста (brief.business_override) —
+   *  высший приоритет поверх профиля сайта; спасение «тонких» сайтов. */
+  businessOverride?: string;
 }
 
 export function buildHypothesesInstantMessages(input: HypothesesPromptInput): LLMMessage[] {
@@ -96,7 +99,10 @@ ${input.portfolioProfile.map((p) => `- ${p.segment} — ${p.clients} клиен�
 
   const user = `ПРОФИЛЬ КЛИЕНТА (сайт ${input.websiteUrl}):
 ${JSON.stringify(input.profile, null, 2)}
-
+${input.businessOverride?.trim() ? `
+РУЧНОЕ ОПИСАНИЕ БИЗНЕСА ОТ СПЕЦИАЛИСТА (приоритет над профилем сайта — написано человеком, который знает клиента; при расхождениях верь ему):
+${input.businessOverride.trim()}
+` : ''}
 КОНКУРЕНТЫ КЛИЕНТА:
 ${input.competitors.length ? input.competitors.map((c) => `- ${c.name} (${c.url}, ${c.geo}) — ${c.why}`).join('\n') : '(не найдены)'}
 

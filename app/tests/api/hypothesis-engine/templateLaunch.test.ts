@@ -63,6 +63,14 @@ jest.mock('@/lib/instantly/client', () => ({
   activateCampaign: (...args: unknown[]) => mockActivateCampaign(...args),
 }));
 
+// Классификатор сегментов — LLM-зависимость; в этих тестах всегда «системный
+// сбой» (null) → легаси-путь: одна кампания, варианты выкинуты с warning.
+// Сплит-путь покрыт в templateLaunchSegments.test.ts.
+jest.mock('@/lib/hypothesisEngine/segmentClassify', () => ({
+  classifyBaseRowsIntoSegments: jest.fn(async () => null),
+  detectSegmentLanguage: jest.fn(() => 'ru'),
+}));
+
 import { GET, POST } from '@/app/api/tools/hypothesis-engine/templates/[id]/launch/route';
 
 const LETTERS = [
@@ -250,8 +258,9 @@ describe('POST launch — happy path', () => {
     expect(mockUpdateCampaign).toHaveBeenCalledTimes(1);
     expect(mockUpdateCampaign.mock.calls[0][0]).toBe('camp-1');
 
-    // Лиды: email lowercase+дедуп+валидация; operator_mapping только для имён
-    // переменных; прочие колонки — custom vars под своими именами.
+    // Лиды: email lowercase+дедуп+валидация; matched-операторы эмитятся всегда
+    // (пустая ячейка → '' — parity с превью, никаких литералов {{var}}),
+    // unmatched с fallback → fallback у всех лидов.
     expect(mockCreateLeads).toHaveBeenCalledTimes(1);
     const [leads, leadOptions] = mockCreateLeads.mock.calls[0] as [
       Array<{ email: string; custom_variables?: Record<string, string> }>,
@@ -262,8 +271,13 @@ describe('POST launch — happy path', () => {
       firstName: 'Ada',
       companyName: 'Acme',
       Сайт: 'acme.test',
+      city: 'в вашем городе',
     });
-    expect(leads[1].custom_variables).toEqual({ firstName: 'Bob' });
+    expect(leads[1].custom_variables).toEqual({
+      firstName: 'Bob',
+      companyName: '',
+      city: 'в вашем городе',
+    });
     expect(leadOptions).toEqual({
       campaign_id: 'camp-1',
       skip_if_in_workspace: false,

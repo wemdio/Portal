@@ -92,3 +92,23 @@ export function normalizeStrictEmailList(
   });
   return [...new Set(emails)].sort();
 }
+
+function normalizeStrictRussianPhonePart(value: string): string | null {
+  let digits = value.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('8')) {
+    digits = `7${digits.slice(1)}`;
+  } else if (digits.length === 10) {
+    digits = `7${digits}`;
+  }
+  return /^7[3489]\d{9}$/.test(digits) ? `+${digits}` : null;
+}
+
+export function normalizeStrictRussianPhoneList(
+  value: string | null | undefined,
+): string[] {
+  const phones = String(value ?? '')
+    .split(/[,;\r\n]+/)
+    .map((part) => normalizeStrictRussianPhonePart(part.trim()))
+    .filter((phone): phone is string => Boolean(phone));
+  return [...new Set(phones)].sort();
+}

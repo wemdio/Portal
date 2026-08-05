@@ -334,15 +334,17 @@ type TemplateLaunchState = ReturnType<typeof useTemplateLaunch>;
 function LaunchSection({ launch }: { launch: TemplateLaunchState }) {
   if (launch.recorded) {
     const info = launch.recorded;
+    const campaigns = info.campaigns && info.campaigns.length > 0 ? info.campaigns : null;
     return (
       <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3">
         <p className="flex items-center gap-2 text-sm font-medium text-emerald-800">
           <StatusDot tone="ok" />
-          Кампания создана (на паузе): {info.campaign_name} · {info.leads_count.toLocaleString('ru-RU')}{' '}
-          лидов
+          {campaigns && campaigns.length > 1
+            ? `Кампании созданы (на паузе): ${campaigns.length} по сегментам · ${info.leads_count.toLocaleString('ru-RU')} лидов`
+            : `Кампания создана (на паузе): ${info.campaign_name} · ${info.leads_count.toLocaleString('ru-RU')} лидов`}
         </p>
         <p className="mt-1 text-xs text-emerald-700">
-          {info.campaign_url ? (
+          {info.campaign_url && !campaigns ? (
             <a href={info.campaign_url} target="_blank" rel="noreferrer" className="underline">
               Открыть в Instantly
             </a>
@@ -350,6 +352,18 @@ function LaunchSection({ launch }: { launch: TemplateLaunchState }) {
           {info.created_at ? <span> · {formatDate(info.created_at)}</span> : null}
           <span> · Активация — вручную в Instantly после проверки</span>
         </p>
+        {campaigns && campaigns.length > 1 ? (
+          <ul className="mt-1.5 space-y-0.5 text-xs text-emerald-700">
+            {campaigns.map((c) => (
+              <li key={c.campaign_id}>
+                <a href={c.campaign_url} target="_blank" rel="noreferrer" className="underline">
+                  {c.segment ?? 'Основная (дефолтный текст)'}
+                </a>
+                <span> · {c.leads_count.toLocaleString('ru-RU')} лидов</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
         {launch.warnings.map((w) => (
           <p key={w} className="mt-1 text-xs text-amber-700">
             {w}
