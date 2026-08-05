@@ -58,6 +58,15 @@
  *     если он есть, иначе переход к analyzing без обогащения. Далее —
  *     he_bases → status='analyzing' и ставится стадия base_analyze.
  *
+ * Refill-режим (ENG auto-pipeline, payload.refill=true; постановка — крон
+ * app/worker/heAutoPipelineCron.ts через enqueueHeBaseCollect): PLAN →
+ * DISPATCH → WAIT → HARVEST → CONSTRUCT идут как обычно, но вместо финала
+ * «analyzing + base_analyze» собранные строки доливаются лидами в уже
+ * запущенную кампанию Instantly, база уходит в терминальный 'analyzed',
+ * итог пишется в collect_info.refill_result и he_auto_pipeline_runs.
+ * Пустой harvest — штатный 'no_new' (база НЕ failed). Вся механика —
+ * stages/baseCollectRefill.ts.
+ *
  * Продолжение сбора больших сегментов (>50k — больше одного капа limit):
  * повторная сборка той же вертикали исключает компании других he_bases
  * проекта ещё НА ВЫБОРКЕ реестра (fetchDirectoryRows листает дальше, пока не
@@ -91,6 +100,11 @@ import { buildSourcePlanMessagesEn } from '../prompts/sourcePlan.en';
 import { HeSourcePlanSchema } from '../schemas';
 import type { HeBase, HeJob, HeProject, HeVertical } from '../types';
 import {
+  completeHeRefillNoNew,
+  runHeRefillAppend,
+  type HeRefillResult,
+} from './baseCollectRefill';
+import {
   addUsage,
   newUsage,
   payloadString,
@@ -123,7 +137,7 @@ const DIRECTORY_PAGE_SIZE = 1000;
  */
 const MAX_DIRECTORY_PAGES = 200;
 /** Строк в he_bases.sample_rows — как у ручной загрузки. */
-const SAMPLE_ROWS = 30;
+export const SAMPLE_ROWS = 30;
 /** Яндекс.Карты: max_results в воркере трактуется НА ОДИН поисковый URL, а не на задачу. */
 const YANDEX_RESULTS_PER_URL = 500;
 
@@ -492,6 +506,15 @@ export interface HeConstructInfo {
 export interface HeCollectInfo {
   /** Лимит строк, выбранный при запуске сборки (route пишет при создании базы). */
   limit?: number;
+  /**
+   * Refill-режим ENG auto-pipeline (payload.refill джобы): после CONSTRUCT —
+   * долив лидов в запущенную кампанию вместо analyzing/base_analyze.
+   */
+  refill?: boolean;
+  /** Кампания Instantly для долива (снапшот launch_info на момент постановки). */
+  campaign_id?: string;
+  /** Итог refill-ветки (stages/baseCollectRefill.ts). */
+  refill_result?: HeRefillResult;
   plan?: HeSourcePlan;
   /** Гипотезы, по которым реально строился план (accepted-дефолт или выбор специалиста). */
   hypotheses?: Array<{ id: string; title: string; status: string | null }>;
@@ -653,10 +676,9 @@ async function insertChildJob(
 
 /**
  * Реестр постранично (страница = DIRECTORY_PAGE_SIZE) до limit НОВЫХ строк.
- * Каждая строка сверяется с excludedKeys — нормализованными компаниями
- * других баз проекта (формат loadOtherBaseCompanyKeys: матч только по
- * компании через normalizeCompanyForDedup, как и на финальном мёрдже —
- * website в одном из источников может отсутствовать). Известные строки
+ * Каждая строка сверяется с excludedKeys — ключами компаний других баз
+ * проекта (формат loadOtherBaseExclusionKeys: имя с ИНН-уточнением или
+ * точный ИНН, см. matchesExclusion — как и на финальном мёрдже). Известные строки
  * пропускаются и НЕ считаются в limit, но offset двигается по ВСЕМ
  * просканированным — так повторная сборка того же сегмента перелистывает
  * уже собранное в других базах и добирает новое (продолжение сегментов,
@@ -673,7 +695,7 @@ async function fetchDirectoryRows(
   ctx: HeStageContext,
   filters: CompaniesSearchFilters,
   limit: number,
-  excludedKeys: Set<string>,
+  excludedKeys: HeBaseExclusionKeys,
 ): Promise<{
   rows: Record<string, unknown>[];
   excludedDuringFetch: number;
@@ -692,8 +714,8 @@ async function fetchDirectoryRows(
     }
     offset += res.rows.length;
     for (const r of res.rows) {
-      const key = normalizeCompanyForDedup(cell(r.name));
-      if (key && excludedKeys.has(key)) {
+      // Дубль другой базы: по имени (с ИНН-уточнением) или точно по ИНН.
+      if (matchesExclusion(excludedKeys, cell(r.name), r.inn)) {
         excludedDuringFetch += 1;
         continue;
       }
@@ -875,7 +897,7 @@ async function dispatchTask(
   state: HeCollectTaskState,
   project: HeProject,
   limit: number,
-  getExcludedKeys: () => Promise<Set<string>>,
+  getExcludedKeys: () => Promise<HeBaseExclusionKeys>,
 ): Promise<void> {
   const { task } = state;
 
@@ -1095,22 +1117,56 @@ async function requeueSelf(ctx: HeStageContext, job: HeJob, cooldownMs = 30_000)
 
 /* ─────────────────────────── Исключение чужих баз проекта ─────────────────────────── */
 
+/** Нормализация ИНН для дедупа: только цифры, валидная длина 10/12. */
+function normalizeInnForDedup(value: unknown): string {
+  const digits = String(value ?? '').replace(/\D/g, '');
+  return digits.length === 10 || digits.length === 12 ? digits : '';
+}
+
 /**
- * Нормализованные ключи компаний из ДРУГИХ he_bases того же проекта (любой
+ * Ключи исключения по другим базам проекта. Два канала матча:
+ *  - ИНН: то же юрлицо под другим написанием имени («ООО Ромашка» vs
+ *    «РОМАШКА ООО») ловится по множеству всех ИНН;
+ *  - имя: если под этим именем в других базах есть ИНН и у входящей строки
+ *    тоже — сравниваем юрлица точно (одноимённые компании разных регионов
+ *    с разными ИНН больше НЕ вымываются); если ИНН пуст хотя бы с одной
+ *    стороны — консервативный матч по имени, как раньше.
+ */
+export interface HeBaseExclusionKeys {
+  /** нормализованное имя → ИНН'ы, встреченные под ним в других базах. */
+  nameInns: Map<string, Set<string>>;
+  /** Все ИНН других баз (матч «то же юрлицо, другое написание»). */
+  inns: Set<string>;
+}
+
+/** Строка исключена: совпал непустой ИНН или имя (с ИНН-уточнением, см. выше). */
+function matchesExclusion(keys: HeBaseExclusionKeys, company: string, inn: unknown): boolean {
+  const innKey = normalizeInnForDedup(inn);
+  if (innKey && keys.inns.has(innKey)) return true;
+  const nameKey = normalizeCompanyForDedup(company);
+  if (!nameKey) return false;
+  const knownInns = keys.nameInns.get(nameKey);
+  if (knownInns === undefined) return false;
+  // Точное сравнение юрлиц только когда ИНН есть с обеих сторон.
+  if (innKey && knownInns.size > 0) return knownInns.has(innKey);
+  return true;
+}
+
+/**
+ * Ключи компаний из ДРУГИХ he_bases того же проекта (любой
  * source, любой статус кроме failed; текущая база исключена). Без этого одна
  * и та же компания копилась в нескольких базах проекта через повторные
- * сборки. Матч только по компании — website в одном из источников может
- * отсутствовать; компания — из колонки 'company'. data jsonb чужой базы и так читается целиком (одно поле
+ * сборки. Компания — из колонки 'company', ИНН — из 'inn'. data jsonb чужой базы и так читается целиком (одно поле
  * строки), поэтому slice до MAX_ROWS_LIMIT — лишь JS-предохранитель; он
  * обязан быть не меньше максимального размера базы: кап 10k при лимите
  * сборки до 50k отрезал хвост чужой базы из исключений, и вторая сборка
  * собирала компании 10001–50000 первой заново как «новые».
  */
-async function loadOtherBaseCompanyKeys(
+async function loadOtherBaseExclusionKeys(
   ctx: HeStageContext,
   projectId: string,
   baseId: string,
-): Promise<Set<string>> {
+): Promise<HeBaseExclusionKeys> {
   const { data, error } = await ctx.supabase
     .from('he_bases')
     .select('data')
@@ -1119,14 +1175,23 @@ async function loadOtherBaseCompanyKeys(
     .neq('id', baseId);
   if (error) throw new Error(`he_bases exclusion read: ${error.message}`);
 
-  const keys = new Set<string>();
+  const keys: HeBaseExclusionKeys = { nameInns: new Map<string, Set<string>>(), inns: new Set<string>() };
   for (const row of (data ?? []) as Array<{ data?: unknown }>) {
     const rows = Array.isArray(row.data) ? row.data.slice(0, MAX_ROWS_LIMIT) : [];
     for (const item of rows) {
-      const company = (item as Record<string, unknown> | null)?.company;
+      const rec = item as Record<string, unknown> | null;
+      const innKey = normalizeInnForDedup(rec?.inn);
+      if (innKey) keys.inns.add(innKey);
+      const company = rec?.company;
       if (typeof company !== 'string') continue;
-      const key = normalizeCompanyForDedup(company);
-      if (key) keys.add(key);
+      const nameKey = normalizeCompanyForDedup(company);
+      if (!nameKey) continue;
+      let bucket = keys.nameInns.get(nameKey);
+      if (!bucket) {
+        bucket = new Set<string>();
+        keys.nameInns.set(nameKey, bucket);
+      }
+      if (innKey) bucket.add(innKey);
     }
   }
   return keys;
@@ -1218,6 +1283,12 @@ async function readConstructJobStatus(
 
 export interface HeConstructImport {
   rows: Array<HeUnifiedRow & { description: string }>;
+  /**
+   * Вердикт валидации (колонка «Email Статус») по каждой строке rows,
+   * lowercase; null — колонки статуса в сетке не было / у строки пусто.
+   * Нужен refill-ветке (ENG auto-pipeline): в лиды идут только 'ok'.
+   */
+  emailStatuses: Array<string | null>;
   /** Почт найдено (result_stats.emails_found; фолбэк — строки с email). */
   emailsFound: number;
   /** Почт с вердиктом ok (колонка «Email Статус»; 0, если валидация не дошла). */
@@ -1252,6 +1323,7 @@ async function importConstructRows(ctx: HeStageContext, bcJobId: string): Promis
   const statusIdx = header.indexOf('email статус');
 
   const rows: Array<HeUnifiedRow & { description: string }> = [];
+  const emailStatuses: Array<string | null> = [];
   let validCount = 0;
   for (const bodyRow of grid.slice(1) as unknown[][]) {
     const get = (key: keyof HeUnifiedRow | 'description'): string => {
@@ -1261,7 +1333,9 @@ async function importConstructRows(ctx: HeStageContext, bcJobId: string): Promis
     const company = get('company');
     // Мусорные строки (пустая/схлопнутая компания) — как на HARVEST: выбросить.
     if (!normalizeCompanyForDedup(company)) continue;
-    if (statusIdx >= 0 && String(bodyRow[statusIdx] ?? '').trim() === 'ok') validCount += 1;
+    const emailStatus = statusIdx >= 0 ? String(bodyRow[statusIdx] ?? '').trim().toLowerCase() : '';
+    if (emailStatus === 'ok') validCount += 1;
+    emailStatuses.push(emailStatus || null);
     rows.push({
       ...unifiedRow({
         company,
@@ -1288,7 +1362,7 @@ async function importConstructRows(ctx: HeStageContext, bcJobId: string): Promis
     typeof stats?.emails_found === 'number' && Number.isFinite(stats.emails_found)
       ? stats.emails_found
       : rows.filter((r) => r.email !== '').length;
-  return { rows, emailsFound, validCount, hasDescription: idxByKey.has('description') };
+  return { rows, emailStatuses, emailsFound, validCount, hasDescription: idxByKey.has('description') };
 }
 
 /* ─────────────────────────── Стадия ─────────────────────────── */
@@ -1299,6 +1373,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // Лимит сборки из payload (route кладёт туда выбор пользователя): один на
   // всё — пагинация реестра, чтение дочерних джоб, итоговый кап базы.
   const limit = totalRowsCap(job);
+  // Refill-режим ENG auto-pipeline: финал — долив в запущенную кампанию
+  // (stages/baseCollectRefill.ts), а не analyzing + base_analyze.
+  const isRefill = job.payload?.refill === true;
 
   const { data: baseRow, error: bError } = await ctx.supabase
     .from('he_bases')
@@ -1354,10 +1431,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // (исключение на выборке — продолжение больших сегментов) и повторно на
   // HARVEST (страховка для строк hh/карт). Лениво + мемоизация: на тиках
   // чистого ожидания дочерних парсеров лишнего чтения he_bases нет.
-  let excludedKeysCache: Set<string> | null = null;
-  const getExcludedKeys = async (): Promise<Set<string>> => {
+  let excludedKeysCache: HeBaseExclusionKeys | null = null;
+  const getExcludedKeys = async (): Promise<HeBaseExclusionKeys> => {
     if (!excludedKeysCache) {
-      excludedKeysCache = await loadOtherBaseCompanyKeys(ctx, job.project_id, baseId);
+      excludedKeysCache = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId);
     }
     return excludedKeysCache;
   };
@@ -1433,7 +1510,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // реестра это страховка (основное исключение прошло на выборке), для
   // hh/карт — единственная точка исключения.
   const existingKeys = await getExcludedKeys();
-  const kept = interleaved.filter((r) => !existingKeys.has(normalizeCompanyForDedup(r.company)));
+  const kept = interleaved.filter((r) => !matchesExclusion(existingKeys, r.company, r.inn));
   const excludedExisting = interleaved.length - kept.length;
   if (excludedExisting > 0) {
     stageLog(ctx, `[base_collect] исключено ${excludedExisting} строк — компании уже есть в других базах проекта`);
@@ -1453,6 +1530,25 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   };
 
   if (merged.length === 0) {
+    // Refill-сборка ENG auto-pipeline: «новых компаний нет» — ШТАТНЫЙ исход
+    // добора (сегмент под вертикаль уже выбран прошлыми сборками), а не сбой:
+    // база уходит в терминальный 'analyzed' (НЕ failed), прогон журналируется
+    // 'no_new', джоба завершается успешно.
+    if (isRefill) {
+      const refillResult = await completeHeRefillNoNew({
+        ctx,
+        job,
+        baseId,
+        verticalId: base.vertical_id,
+        info,
+        stats,
+      });
+      return {
+        result: { base_id: baseId, rows: 0, refill: refillResult },
+        tokensUsed: usage.tokensUsed,
+        costUsd: usage.costUsd,
+      };
+    }
     // Сегмент исчерпан: все задачи исчерпаны/пусты (стоп по потолку
     // сканирования — НЕ исчерпание, hit_ceiling сбрасывает признак), база
     // пуста, нет упавших задач (упавшая задача важнее: показываем её разбор,
@@ -1497,6 +1593,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // только после импорта (или решения failed/cancelled BC-джобы).
   let finalRows: HeUnifiedRow[] = merged;
   let finalColumns: string[] = [...HE_AUTO_COLLECT_COLUMNS];
+  // Вердикты валидации по строкам (из импорта конструктора) — нужны только
+  // refill-ветке: null, когда конструктор не запускался / вернул пусто.
+  let finalEmailStatuses: Array<string | null> | null = null;
   const construct = info.construct;
   if ((!construct || construct.status === 'dispatched') && needsConstruct(merged)) {
     if (!construct?.bc_job_id) {
@@ -1542,6 +1641,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           : `конструктор завершился со статусом ${bcStatus}${bc?.error_message ? `: ${bc.error_message}` : ''}`;
       if (imported) {
         finalRows = imported.rows;
+        finalEmailStatuses = imported.emailStatuses;
         if (imported.hasDescription) finalColumns = [...HE_AUTO_COLLECT_COLUMNS, 'description'];
         info.construct = {
           ...construct,
@@ -1593,6 +1693,24 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         costUsd: usage.costUsd,
       };
     }
+  }
+
+  // ─── REFILL (ENG auto-pipeline) ───
+  // Вместо финала «analyzing + base_analyze»: долив валидных строк лидами в
+  // уже запущенную кампанию, база → терминальный 'analyzed', итог — в
+  // collect_info.refill_result и he_auto_pipeline_runs.
+  if (isRefill) {
+    return await runHeRefillAppend({
+      ctx,
+      job,
+      base: { id: baseId, project_id: job.project_id, vertical_id: base.vertical_id },
+      info,
+      stats,
+      finalRows,
+      finalColumns,
+      emailStatuses: finalEmailStatuses,
+      usage,
+    });
   }
 
   const { error: updError } = await ctx.supabase

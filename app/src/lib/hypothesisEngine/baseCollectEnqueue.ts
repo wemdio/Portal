@@ -32,6 +32,19 @@ export interface HeBaseCollectInput {
   limit: number;
   /** Выбранные в UI гипотезы; null — собирать по всем. */
   hypothesisIds: string[] | null;
+  /**
+   * Переопределение filename авто-базы (по умолчанию «auto: <name>»).
+   * ENG auto-pipeline пишет «auto-refill: <name> · <дата>».
+   */
+  filename?: string;
+  /**
+   * Refill-режим (ENG auto-pipeline): после сборки и конструктора стадия
+   * НЕ ставит base_analyze/template, а доливает валидные строки лидaми в
+   * уже запущенную кампанию campaignId (см. stages/baseCollectRefill.ts).
+   * campaign_id дублируется в collect_info — на момент постановки это
+   * снапшот launch_info, стадия умеет и фолбэк на последний launched шаблон.
+   */
+  refill?: { campaignId: string };
 }
 
 export type HeBaseCollectResult =
@@ -45,7 +58,7 @@ export async function enqueueHeBaseCollect(
   supabase: SupabaseClient,
   input: HeBaseCollectInput,
 ): Promise<HeBaseCollectResult> {
-  const { verticalId, projectId, verticalName, limit, hypothesisIds } = input;
+  const { verticalId, projectId, verticalName, limit, hypothesisIds, filename, refill } = input;
 
   // Дедуп 1: уже собирающаяся auto-база этой вертикали.
   const { data: collecting, error: collErr } = await supabase
@@ -86,6 +99,20 @@ export async function enqueueHeBaseCollect(
     if (existingBase) return { ok: true, created: false, base: existingBase as Record<string, unknown> };
   }
 
+  // collect_info/payload джобы: у refill-сборки свой снапшот полей (кампания
+  // долива), hypothesis_ids в нём не используется — план строится по
+  // неотклонённым гипотезам, как без явного выбора.
+  const collectInfo: Record<string, unknown> = refill
+    ? { limit, refill: true, campaign_id: refill.campaignId }
+    : hypothesisIds
+      ? { limit, hypothesis_ids: hypothesisIds }
+      : { limit };
+  const jobPayload: Record<string, unknown> = refill
+    ? { limit, refill: true }
+    : hypothesisIds
+      ? { limit, hypothesis_ids: hypothesisIds }
+      : { limit };
+
   const { data: base, error: baseInsertErr } = await supabase
     .from('he_bases')
     .insert({
@@ -93,7 +120,7 @@ export async function enqueueHeBaseCollect(
       vertical_id: verticalId,
       source: 'auto',
       status: 'collecting',
-      filename: `auto: ${verticalName}`,
+      filename: filename ?? `auto: ${verticalName}`,
       row_count: 0,
       columns: [],
       data: [],
@@ -101,7 +128,7 @@ export async function enqueueHeBaseCollect(
       // показывает лимит, пока стадия ещё не перезаписала collect_info
       // планом (поля живут дальше — стадия мержит collect_info, а не
       // заменяет).
-      collect_info: hypothesisIds ? { limit, hypothesis_ids: hypothesisIds } : { limit },
+      collect_info: collectInfo,
     })
     .select('id, status')
     .single();
@@ -130,9 +157,7 @@ export async function enqueueHeBaseCollect(
       project_id: projectId,
       stage: 'base_collect',
       status: 'pending',
-      payload: hypothesisIds
-        ? { base_id: base.id, limit, hypothesis_ids: hypothesisIds }
-        : { base_id: base.id, limit },
+      payload: { base_id: base.id, ...jobPayload },
     });
   if (jobErr) {
     return { ok: false, message: jobErr.message };
