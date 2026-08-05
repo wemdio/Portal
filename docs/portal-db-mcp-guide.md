@@ -158,6 +158,8 @@ amo_leads.ym_client_id ─── metrika_visits.ym_client_id  ← Метрика
 ### `profiles` — пользователи (~62)
 - Роли: `client` (21), `manager` (20), `technician` (8), `admin` (5), `lead` (4), `marketer` (2), `sales` (2).
 - Тут `email`, `full_name`, `role` — для расшифровки `manager`/`specialist` строк в `projects`.
+- `market` ('ru'|'eng', default 'ru', миграция 20260804_0004) — рынок клиента:
+  'eng' = ENG-кабинет app.outreachos.xyz (middleware/signup/навигация разводят по нему).
 
 ### `project_notes` / `project_periods` / `project_contacts_history`
 - 72 / 15 / 5006 записей соответственно.

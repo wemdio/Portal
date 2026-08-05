@@ -340,9 +340,10 @@ export const CLIENT_NAV_GIS_SIGNALS: ClientNavItem = {
 /**
  * Клиентский ENG-кабинет «Движка вертикалей» (research → вертикали → письма →
  * база → запуск, рынок us, EN-UI). Top-level пункт после Dashboard, как
- * GIS-сигналы. TODO(eng-gate): сейчас виден всем клиентам — завести флаг
- * видимости (тариф/allowlist по аналогии с mailboxes/gis-signals) вместе с
- * тарифной обвязкой ENG-продукта.
+ * GIS-сигналы. Виден ТОЛЬКО eng-маркет клиентам (profiles.market='eng'):
+ * гейт в ClientNavList через ClientPortalProvider (там же eng-клиенту
+ * скрываются все RU-разделы) плюс market-гейты в middleware. Тарифная
+ * обвязка ENG-продукта — отдельная задача.
  */
 export const CLIENT_NAV_ENG: ClientNavItem = {
   id: 'eng',
