@@ -22,6 +22,11 @@ import { SIGNALS_LLM_MODEL } from '@/lib/enrich/extractors/signalsModel';
  *
  * 2GIS-поля (телефон с карточки, число филиалов сети) — вспомогательные
  * доказательства для S1/S6, когда сайт ничего не дал.
+ *
+ * Опционально (input.checkOnlineFormat) — седьмой, отдельный вердикт
+ * onlineFormat: regex-маркеры онлайн-формата по уже скачанным страницам
+ * (без доп. fetch'ей). В 6 сигналов и в signalsCount НЕ входит; нужен
+ * сегментам с require_online (напр. edu — только онлайн-школы).
  */
 
 const MAX_SUBPAGES = 4; // главная + до 4 подстраниц = ~5 страниц на компанию
@@ -55,6 +60,12 @@ export interface OutreachSignalsResult {
   note: string;
   /** Сайт был доступен и распарсен. */
   ok: boolean;
+  /**
+   * Признак онлайн-формата (НЕ входит в 6 сигналов и в signalsCount).
+   * Считается только когда входной флаг checkOnlineFormat=true; при выключенном
+   * флаге поле отсутствует — остальные вызовы не затронуты.
+   */
+  onlineFormat?: SignalVerdict;
 }
 
 /** Вердикты LLM по запрошенным сигналам (hit + опциональная цитата). */
@@ -78,6 +89,11 @@ export interface DetectOutreachSignalsInput {
   twogisPhone?: string | null;
   /** Число филиалов сети в 2GIS — вспомогательное доказательство для S6. */
   twogisBranchCount?: number | null;
+  /**
+   * Дополнительно определить признак онлайн-формата (regex по УЖЕ скачанным
+   * страницам, без лишних fetch'ей). Результат — в result.onlineFormat.
+   */
+  checkOnlineFormat?: boolean;
   /** Инжектируется в тестах; по умолчанию — fetchHtmlWithRetry из websiteParser. */
   fetchPage?: FetchPageFn;
   /** Инжектируется в тестах; по умолчанию — один вызов gpt-4o-mini через Requesty. */
@@ -179,6 +195,22 @@ const MULTI_OFFICE_MARKER_RES = [
   /офисы\s+(?:в|по)\s/i,
 ];
 
+// ─── Онлайн-формат (опциональный чек, НЕ один из 6 сигналов) ─────────────────
+//
+// Канонические regex'ы — единственный источник: их же импортирует batch-скрипт
+// scripts/test-gis-signals-batch.ts (стадия 1.5). Менять только синхронно.
+//
+// «Онлайн» само по себе слишком рыхлое («онлайн-запись» в навигации офлайн-
+// школ), поэтому — только составные формы + вебинар/зум/skype. \b работает
+// только для латиницы (zoom/skype), кириллица идёт без границ.
+export const ONLINE_FORMAT_RE =
+  /онлайн[- ]?(?:школ|курс|обучен|формат|занят|урок)|дистанцион|вебинар|\bzoom\b|skype/i;
+// Стоп-фразы: кнопки записи/заявок — НЕ признак онлайн-формата обучения.
+// Вырезаются из текста ДО матчинга ONLINE_FORMAT_RE.
+export const ONLINE_NEGATIVE_RE =
+  /онлайн[- ]?запис[а-яё]*|записаться\s+онлайн|онлайн[- ]?заявк[а-яё]*/gi;
+export const ONLINE_EVIDENCE_MAX = 120;
+
 // ─── Внутренние утилиты ──────────────────────────────────────────────────────
 
 type PageKind = 'home' | 'contacts' | 'careers' | 'about' | 'external_careers';
@@ -210,21 +242,21 @@ function pageText(html: string): string {
   return $('body').text().replace(/\s+/g, ' ').trim();
 }
 
-function clip(value: string): string {
+function clip(value: string, max = MAX_EVIDENCE): string {
   const t = value.replace(/\s+/g, ' ').trim();
-  if (t.length <= MAX_EVIDENCE) return t;
-  return `${t.slice(0, MAX_EVIDENCE - 1).trimEnd()}…`;
+  if (t.length <= max) return t;
+  return `${t.slice(0, max - 1).trimEnd()}…`;
 }
 
-/** Сниппет вокруг совпадения с контекстом, гарантированно ≤200 символов. */
-function snippetAround(text: string, index: number, matchLen: number): string {
-  const room = Math.max(20, Math.floor((MAX_EVIDENCE - matchLen) / 2));
+/** Сниппет вокруг совпадения с контекстом, гарантированно ≤max символов. */
+function snippetAround(text: string, index: number, matchLen: number, max = MAX_EVIDENCE): string {
+  const room = Math.max(20, Math.floor((max - matchLen) / 2));
   const start = Math.max(0, index - room);
   const end = Math.min(text.length, index + matchLen + room);
   let s = text.slice(start, end).replace(/\s+/g, ' ').trim();
   if (start > 0) s = `…${s}`;
   if (end < text.length) s = `${s}…`;
-  return clip(s);
+  return clip(s, max);
 }
 
 function findInText(text: string, res: RegExp[]): { index: number; length: number } | null {
@@ -461,6 +493,23 @@ function detectMultiOffice(pages: FetchedPage[], twogisBranchCount?: number | nu
     return { hit: true, evidence: clip(`2GIS: ${twogisBranchCount} филиалов в сети`) };
   }
 
+  return { hit: false, evidence: '' };
+}
+
+/**
+ * Признак онлайн-формата по УЖЕ скачанным страницам (без доп. fetch'ей).
+ * Стоп-фразы («онлайн-запись», «записаться онлайн», «онлайн-заявка») вырезаем
+ * из текста ДО матчинга — это booking-CTA офлайн-бизнесов, а не формат обучения.
+ * Evidence — сниппет ≤ONLINE_EVIDENCE_MAX символов вокруг первого совпадения.
+ */
+function detectOnlineFormat(pages: FetchedPage[]): SignalVerdict {
+  for (const page of pages) {
+    const cleaned = page.text.replace(ONLINE_NEGATIVE_RE, ' ');
+    const hit = findInText(cleaned, [ONLINE_FORMAT_RE]);
+    if (hit) {
+      return { hit: true, evidence: snippetAround(cleaned, hit.index, hit.length, ONLINE_EVIDENCE_MAX) };
+    }
+  }
   return { hit: false, evidence: '' };
 }
 
@@ -713,5 +762,10 @@ export async function detectOutreachSignals(
   }
 
   const signalsCount = Object.values(signals).filter((v) => v.hit).length;
-  return { signals, signalsCount, note, ok: true };
+  const result: OutreachSignalsResult = { signals, signalsCount, note, ok: true };
+  // Опциональный чек онлайн-формата — только по уже скачанным страницам.
+  if (input.checkOnlineFormat === true) {
+    result.onlineFormat = detectOnlineFormat(pages);
+  }
+  return result;
 }

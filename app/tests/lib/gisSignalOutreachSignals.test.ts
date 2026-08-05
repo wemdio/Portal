@@ -744,3 +744,56 @@ describe('фиксы ревью 04.08.2026 (S1 телефон-only, S4 окно,
     expect(result.signals.multiOffice.hit).toBe(false);
   });
 });
+
+describe('onlineFormat (checkOnlineFormat)', () => {
+  const run = (html: string, checkOnlineFormat = true) =>
+    detectOutreachSignals({
+      siteUrl: 'https://fmt.example',
+      fetchPage: makeFetchRouter({ 'https://fmt.example/': html }),
+      llmExtract: makeLlm(),
+      checkOnlineFormat,
+    });
+
+  it.each<[string, string]>([
+    ['<html><body><main><h1>Онлайн-школа программирования</h1><p>Курсы для детей и взрослых.</p></main></body></html>', 'онлайн-школа'],
+    ['<html><body><main><p>Обучение дистанционно, из любого города.</p></main></body></html>', 'дистанционно'],
+    ['<html><body><main><p>Регулярные вебинары для учеников.</p></main></body></html>', 'вебинар'],
+    ['<html><body><main><p>Занятия проходят в Zoom по расписанию.</p></main></body></html>', 'zoom'],
+    ['<html><body><main><p>Онлайн курсы английского языка.</p></main></body></html>', 'онлайн + пробел + курсы'],
+  ])('позитив: %s', async (html) => {
+    const result = await run(html);
+    expect(result.onlineFormat).toBeDefined();
+    expect(result.onlineFormat!.hit).toBe(true);
+    expect(result.onlineFormat!.evidence.length).toBeGreaterThan(0);
+    expect(result.onlineFormat!.evidence.length).toBeLessThanOrEqual(120);
+  });
+
+  it.each<[string, string]>([
+    ['<html><body><main><p>Онлайн-запись на приём в салон красоты «Лотос».</p></main></body></html>', 'онлайн-запись — booking-CTA офлайн-салона'],
+    ['<html><body><main><p>Записаться онлайн на стрижку. Ждём вас по адресу: ул. Ленина, 5.</p></main></body></html>', 'записаться онлайн'],
+    ['<html><body><main><p>Оставьте онлайн-заявку на расчёт стоматологии.</p></main></body></html>', 'онлайн-заявка'],
+    ['<html><body><main><p>Автошкола «Вперёд». Учебные классы в Москве, вождение на наших автомобилях.</p></main></body></html>', 'просто офлайн-сайт'],
+    ['<html><body><main><p>Мы онлайн с 9 до 21.</p></main></body></html>', 'голое «онлайн» без составной формы'],
+  ])('негатив: %s', async (html) => {
+    const result = await run(html);
+    expect(result.onlineFormat).toBeDefined();
+    expect(result.onlineFormat!.hit).toBe(false);
+    expect(result.onlineFormat!.evidence).toBe('');
+  });
+
+  it('флаг выключен → поле onlineFormat отсутствует в результате', async () => {
+    const result = await run(
+      '<html><body><main><h1>Онлайн-школа программирования</h1></main></body></html>',
+      false,
+    );
+    expect('onlineFormat' in result).toBe(false);
+  });
+
+  it('onlineFormat НЕ влияет на signalsCount (это не 7-й сигнал)', async () => {
+    const result = await run(
+      '<html><body><main><h1>Онлайн-школа программирования</h1><p>Курсы для детей.</p></main></body></html>',
+    );
+    expect(result.onlineFormat!.hit).toBe(true);
+    expect(result.signalsCount).toBe(0); // сигналов S1-S6 на этой странице нет
+  });
+});

@@ -108,6 +108,13 @@ const JUNK_DOMAIN_PATTERNS = [
   /sentry\.io$/,
   /wixpress\.com$/,
   /cloudflare\.com$/,
+  // Парковки/хостинги: их служебные почты (support@beget.com и т.п.) оседают
+  // на заглушках припаркованных доменов и попадают в базы как «живые».
+  /^beget\.(com|ru|net|pro)$/,
+  /^timeweb\.(ru|com)$/,
+  /^(reg|nic|jino|sprinthost|hostiman|activeby|valuehost|setup|names|1gb|hc)\.(ru|com|net)$/,
+  /^hosting\./,
+  /^park(ing)?\./,
   /googleapis\.com$/,
   /gstatic\.com$/,
   /wpengine\.com$/,

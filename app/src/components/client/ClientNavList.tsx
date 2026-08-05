@@ -7,6 +7,7 @@ import {
   CLIENT_NAV_MANUAL_SCORING,
   CLIENT_NAV_MAILBOXES,
   CLIENT_NAV_GIS_SIGNALS,
+  CLIENT_NAV_ENG,
   CLIENT_NAV_DASHBOARD,
   CLIENT_NAV_GROUPS,
   CLIENT_NAV_OFFER,
@@ -95,11 +96,28 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
   // грузит /mailboxes/enabled один раз, вместо дублирования в каждом из двух
   // инстансов навигации (десктоп-сайдбар + мобильный drawer). Оптимистичное
   // обнуление счётчика при открытии «Поддержки» тоже живёт в layout.
-  const { supportUnread, mailboxesEnabled, gisSignalsEnabled } = useClientPortalContext();
+  const { supportUnread, mailboxesEnabled, gisSignalsEnabled, market } = useClientPortalContext();
 
   // Пока клиент находится на странице поддержки, бейдж не показываем вовсе:
   // он по определению читает тред (а новые ответы видны прямо в нём).
   const supportBadge = activeId === CLIENT_NAV_SUPPORT.id ? 0 : supportUnread;
+
+  // ENG-рынок: клиент живёт только в ENG-кабинете — остальные разделы для
+  // него всё равно закрыты middleware (редирект на /client/eng), поэтому
+  // мёртвые ссылки не показываем. RU-рендер ниже не меняется (ENG-пункт
+  // в нём теперь скрыт — его место занимает этот early return).
+  if (market === 'eng') {
+    return (
+      <nav aria-label={locale === 'en' ? 'Main navigation' : 'Главное меню'} className="flex flex-col gap-1.5">
+        <NavItemRow
+          item={CLIENT_NAV_ENG}
+          active={activeId === CLIENT_NAV_ENG.id}
+          locale={locale}
+          onItemClick={onItemClick}
+        />
+      </nav>
+    );
+  }
 
   return (
     <nav aria-label={locale === 'en' ? 'Main navigation' : 'Главное меню'} className="flex flex-col gap-1.5">
@@ -137,6 +155,10 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
           onItemClick={onItemClick}
         />
       )}
+
+      {/* ENG-кабинет «Движка вертикалей» рендерится отдельным early return
+          выше — и только для eng-маркет клиентов (profiles.market='eng',
+          приезжает через ClientPortalProvider). В RU-рендере пункта нет. */}
 
       {/* Auto-mode-only: настройка цепочек под скоры endpoint'а. В manual
           этого пункта не существует — manual-клиент пишет цепочки прямо

@@ -25,7 +25,7 @@ jest.mock('next/link', () => {
 // So the badge behavior is driven purely by the context value.
 function renderNav(
   activeId: string,
-  ctx: { supportUnread?: number; mailboxesEnabled?: boolean } = {},
+  ctx: { supportUnread?: number; mailboxesEnabled?: boolean; market?: 'ru' | 'eng' } = {},
 ) {
   return render(
     <ClientPortalProvider
@@ -34,6 +34,7 @@ function renderNav(
         supportUnread: ctx.supportUnread ?? 0,
         mailboxesEnabled: ctx.mailboxesEnabled ?? false,
         gisSignalsEnabled: false,
+        ...(ctx.market ? { market: ctx.market } : {}),
       }}
     >
       <ClientNavList activeId={activeId} locale="ru" mode="manual" />
@@ -70,5 +71,28 @@ describe('ClientNavList — support unread badge', () => {
     // the active support page must hide the badge regardless of the count.
     renderNav('support', { supportUnread: 3 });
     expect(screen.queryByLabelText(/новых сообщений/)).not.toBeInTheDocument();
+  });
+});
+
+describe('ClientNavList — видимость ENG-пункта по market', () => {
+  it('ru-market: ENG-пункт скрыт, RU-группы на месте', () => {
+    renderNav('dashboard', { market: 'ru' });
+    expect(screen.queryByRole('link', { name: 'ENG Outreach' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Бриф' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Кампании' })).toBeInTheDocument();
+  });
+
+  it('market не задан (старый провайдер/демо) — ENG скрыт, рендер как у ru', () => {
+    renderNav('dashboard');
+    expect(screen.queryByRole('link', { name: 'ENG Outreach' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Бриф' })).toBeInTheDocument();
+  });
+
+  it('eng-market: виден ТОЛЬКО ENG-пункт (middleware всё равно уводит с RU-путей)', () => {
+    renderNav('eng', { market: 'eng' });
+    const links = screen.getAllByRole('link');
+    expect(links).toHaveLength(1);
+    expect(links[0]).toHaveAttribute('href', '/client/eng');
+    expect(links[0]).toHaveTextContent('ENG Outreach');
   });
 });
