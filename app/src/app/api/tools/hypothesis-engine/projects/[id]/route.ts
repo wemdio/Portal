@@ -73,7 +73,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         const err = result.error;
         switch (err.code) {
           case 'no_fields':
-            return jsonError('Нужен offer_override, style_override или signature_override', 400);
+            return jsonError('Нужен offer_override, style_override, signature_override или business_override', 400);
           case 'bad_type':
             return jsonError(`${err.field} должен быть строкой`, 400);
           case 'too_long':
