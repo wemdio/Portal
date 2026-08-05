@@ -33,6 +33,10 @@ const MAX_LIMIT = 200;
 // 8с→успех ≈ на 13-14с. С 12с он не успевал и падал в DeadlineError (→ 502 у
 // клиента с малым числом кампаний, все упали разом). 15с даёт ему дойти, но всё
 // ещё далеко от прокси-таймаута. Клиент вдобавок прозрачно ретраит (см. page.tsx).
+// Окно до 300 = до 3 последовательных вызовов в том же бюджете: цикл в
+// fetchReceivedEmailsWindow time-aware (не стартует страницу без запаса времени)
+// и отдаёт частичное окно при сбое страницы 2/3 — кампания деградирует до
+// 100-200 писем вместо полного выпадения.
 const REPLIES_CAMPAIGN_DEADLINE_MS = 15_000;
 const REPLIES_CAMPAIGN_TTL_MS = 120_000;
 
@@ -384,11 +388,30 @@ async function fetchLeadReplyItems(
   leadEmail: string,
 ): Promise<LeadListItem[]> {
   const settled = await Promise.allSettled(
-    campaignIds.map(async (campaignId) => {
+    campaignIds.map((campaignId) => {
       const accountId = getResourceInstantlyAccountId(campaignId, accessRows, 'campaign');
-      const emails = await fetchLeadInboundEmails({ campaignId, leadEmail, accountId });
-      return emails.map((email) =>
-        mapEmailToReplyItem(campaignId, campaignNames.get(campaignId) ?? null, email),
+      // Дедлайн и кэш как у окна: залипший вызов не должен держать весь GET,
+      // а набор email с дебаунсом на клиенте не должен плодить fan-out
+      // (ревью 05.08).
+      const cacheKey = `replies-lead:${accountId}:${campaignId}:${leadEmail.toLowerCase()}`;
+      return cached(
+        cacheKey,
+        () =>
+          withDeadline(campaignId, REPLIES_CAMPAIGN_DEADLINE_MS, async () => {
+            try {
+              const emails = await fetchLeadInboundEmails({ campaignId, leadEmail, accountId });
+              return emails.map((email) =>
+                mapEmailToReplyItem(campaignId, campaignNames.get(campaignId) ?? null, email),
+              );
+            } catch (err) {
+              // Удалённая кампания — тихо ноль (как в окне), без шума в логах.
+              if (err instanceof InstantlyApiError && err.status === 404) {
+                return [] as LeadListItem[];
+              }
+              throw err;
+            }
+          }),
+        REPLIES_CAMPAIGN_TTL_MS,
       );
     }),
   );
@@ -397,7 +420,7 @@ async function fetchLeadReplyItems(
   for (let i = 0; i < settled.length; i += 1) {
     const result = settled[i];
     if (result.status === 'fulfilled') {
-      items.push(...result.value);
+      items.push(...result.value.map((it) => ({ ...it })));
     } else {
       await logError('client.leads.deep_search_failed', result.reason, {
         campaignId: campaignIds[i],
