@@ -7,21 +7,36 @@
  * docs/superpowers/specs/2026-08-03-tg-outreach-warmup-design.md.
  */
 
+/**
+ * За сколько дней нагрузка доходит от первого дня до потолка.
+ *
+ * Кривая привязана к календарю прогрева, а НЕ к выбранному числу дней. Раньше
+ * она растягивалась под `days`, и прогрев на 4 дня выходил втрое агрессивнее
+ * недельного: аккаунт получал 6 сообщений в первый день и 80 в четвёртый.
+ * Просьба «поставить меньше дней» на деле означает «пусть суммарно уйдёт
+ * меньше», а не «пусть разгон будет резче» — потолок для свежего номера один и
+ * тот же независимо от того, сколько дней его греют.
+ *
+ * Теперь день N всегда даёт одну и ту же нагрузку, а `days` решает только, на
+ * каком дне остановиться. Дни сверх RAMP_DAYS идут на потолке.
+ */
+export const RAMP_DAYS = Number(process.env.TG_WARMUP_RAMP_DAYS ?? '7');
+
 /** Переписок на аккаунт в первый день прогрева. */
 export const CONVERSATIONS_FIRST_DAY = Number(
   process.env.TG_WARMUP_CONVERSATIONS_FIRST_DAY ?? '2',
 );
 
-/** Переписок на аккаунт в последний день прогрева. */
-export const CONVERSATIONS_LAST_DAY = Number(
-  process.env.TG_WARMUP_CONVERSATIONS_LAST_DAY ?? '8',
+/** Потолок переписок на аккаунт в день — достигается на дне RAMP_DAYS. */
+export const CONVERSATIONS_PEAK = Number(
+  process.env.TG_WARMUP_CONVERSATIONS_PEAK ?? '8',
 );
 
 /** Сообщений в одной переписке в первый день. */
 export const MESSAGES_FIRST_DAY = Number(process.env.TG_WARMUP_MESSAGES_FIRST_DAY ?? '3');
 
-/** Сообщений в одной переписке в последний день. */
-export const MESSAGES_LAST_DAY = Number(process.env.TG_WARMUP_MESSAGES_LAST_DAY ?? '10');
+/** Потолок сообщений в одной переписке — достигается на дне RAMP_DAYS. */
+export const MESSAGES_PEAK = Number(process.env.TG_WARMUP_MESSAGES_PEAK ?? '10');
 
 /** Пауза между репликами внутри переписки, секунды. */
 export const REPLY_DELAY_RANGE_SEC: [number, number] = [
@@ -80,6 +95,17 @@ export interface WarmupMessage {
   account_id: string;
   content: string;
   timestamp: string;
+}
+
+export interface WarmupLog {
+  id: number;
+  run_id: string;
+  campaign_id: string;
+  /** NULL = событие всего прогрева, иначе конкретного аккаунта. */
+  account_id: string | null;
+  level: 'info' | 'warning' | 'error';
+  message: string;
+  created_at: string;
 }
 
 export interface WarmupConversation {

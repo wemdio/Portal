@@ -7,26 +7,35 @@
  */
 import {
   CONVERSATIONS_FIRST_DAY,
-  CONVERSATIONS_LAST_DAY,
+  CONVERSATIONS_PEAK,
   MESSAGES_FIRST_DAY,
-  MESSAGES_LAST_DAY,
+  MESSAGES_PEAK,
+  RAMP_DAYS,
 } from './types';
 
-function rampValue(day: number, totalDays: number, from: number, to: number): number {
-  if (totalDays <= 1) return to;
-  const clamped = Math.min(Math.max(day, 1), totalDays);
-  const t = (clamped - 1) / (totalDays - 1);
+/**
+ * Значение кривой на дне `day`.
+ *
+ * Разгон считается от RAMP_DAYS, а не от выбранной длины прогрева: день N даёт
+ * одну и ту же нагрузку и в трёхдневном прогреве, и в недельном. Короткий
+ * прогрев просто обрывается раньше и суммарно отправляет меньше — он не
+ * разгоняется быстрее. Дни за пределами разгона держатся на потолке.
+ */
+function rampValue(day: number, from: number, to: number): number {
+  if (RAMP_DAYS <= 1) return to;
+  const clamped = Math.min(Math.max(day, 1), RAMP_DAYS);
+  const t = (clamped - 1) / (RAMP_DAYS - 1);
   return Math.round(from + (to - from) * t);
 }
 
-/** Сколько переписок должен провести один аккаунт в день `day` из `totalDays`. */
-export function conversationsPerAccount(day: number, totalDays: number): number {
-  return rampValue(day, totalDays, CONVERSATIONS_FIRST_DAY, CONVERSATIONS_LAST_DAY);
+/** Сколько переписок должен провести один аккаунт в день `day`. */
+export function conversationsPerAccount(day: number): number {
+  return rampValue(day, CONVERSATIONS_FIRST_DAY, CONVERSATIONS_PEAK);
 }
 
-/** Сколько сообщений содержит одна переписка в день `day` из `totalDays`. */
-export function messagesPerConversation(day: number, totalDays: number): number {
-  return rampValue(day, totalDays, MESSAGES_FIRST_DAY, MESSAGES_LAST_DAY);
+/** Сколько сообщений содержит одна переписка в день `day`. */
+export function messagesPerConversation(day: number): number {
+  return rampValue(day, MESSAGES_FIRST_DAY, MESSAGES_PEAK);
 }
 
 export interface PlannedConversation {
@@ -41,7 +50,6 @@ export interface PlannedConversation {
 export interface PlanDayParams {
   accountIds: string[];
   day: number;
-  totalDays: number;
   /** Пары, уже общавшиеся в этом прогреве (порядок внутри пары не важен). */
   previousPairs: Array<[string, string]>;
   /** Активное окно суток: ночью аккаунты молчат. */
@@ -68,11 +76,11 @@ function pairKey(x: string, y: string): string {
  * когда незнакомые кончились.
  */
 export function planDay(params: PlanDayParams): PlannedConversation[] {
-  const { accountIds, day, totalDays, previousPairs, window, random } = params;
+  const { accountIds, day, previousPairs, window, random } = params;
   if (accountIds.length < 2) return [];
 
-  const target = params.targetOverride ?? conversationsPerAccount(day, totalDays);
-  const plannedMessages = messagesPerConversation(day, totalDays);
+  const target = params.targetOverride ?? conversationsPerAccount(day);
+  const plannedMessages = messagesPerConversation(day);
   const seen = new Set(previousPairs.map(([x, y]) => pairKey(x, y)));
   const usedToday = new Set<string>();
   const remaining = new Map(accountIds.map((id) => [id, target]));

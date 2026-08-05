@@ -4,8 +4,9 @@
  * Планировщик прогрева — единственное место, где живёт вся арифметика фичи,
  * поэтому покрытие здесь плотное. Проверяем три вещи:
  *
- * 1. Кривая нагрузки: переписок на аккаунт и длина переписки растут от первого
- *    дня к последнему, границы держатся при любом числе дней.
+ * 1. Кривая нагрузки: разгон привязан к календарю прогрева, а не к выбранной
+ *    длине — день N даёт одну и ту же нагрузку и в коротком прогреве, и в
+ *    длинном, а за пределами разгона держится потолок.
  * 2. Подбор пар: каждый аккаунт получает свою дневную норму, пара не
  *    повторяется внутри дня, незнакомые партнёры имеют приоритет.
  * 3. Времена: попадают в активное окно суток и идут по возрастанию.
@@ -31,30 +32,53 @@ const seq = (vals: number[]) => {
 };
 
 describe('warmup schedule — кривая нагрузки', () => {
-  it('4 дня: переписок на аккаунт растёт 2 → 4 → 6 → 8', () => {
-    expect([1, 2, 3, 4].map((d) => conversationsPerAccount(d, 4))).toEqual([2, 4, 6, 8]);
+  it('разгон идёт по календарю: 2 → 8 переписок за 7 дней', () => {
+    expect([1, 2, 3, 4, 5, 6, 7].map(conversationsPerAccount)).toEqual([2, 3, 4, 5, 6, 7, 8]);
   });
 
-  it('4 дня: длина переписки растёт от 3 до 10 сообщений', () => {
-    const lens = [1, 2, 3, 4].map((d) => messagesPerConversation(d, 4));
+  it('длина переписки растёт от 3 до 10 сообщений за те же 7 дней', () => {
+    const lens = [1, 2, 3, 4, 5, 6, 7].map(messagesPerConversation);
     expect(lens[0]).toBe(3);
-    expect(lens[3]).toBe(10);
-    expect(lens[1]).toBeLessThan(lens[2]);
+    expect(lens[6]).toBe(10);
+    for (let i = 1; i < lens.length; i++) expect(lens[i]).toBeGreaterThanOrEqual(lens[i - 1]);
   });
 
-  it('3 дня: границы те же, кривая сжимается', () => {
-    expect(conversationsPerAccount(1, 3)).toBe(2);
-    expect(conversationsPerAccount(3, 3)).toBe(8);
+  /**
+   * Главное свойство фичи. Короткий прогрев обязан быть обрезанным началом
+   * длинного, а не тем же подъёмом на ускоренной перемотке: оператор,
+   * ставящий 3 дня, просит «отправить меньше», а не «разогнаться резче».
+   */
+  it('день N даёт одну и ту же нагрузку независимо от длины прогрева', () => {
+    for (const day of [1, 2, 3]) {
+      expect(conversationsPerAccount(day)).toBe([2, 3, 4][day - 1]);
+      expect(messagesPerConversation(day)).toBe([3, 4, 5][day - 1]);
+    }
+  });
+
+  it('прогрев в один день идёт по минимуму, а не сразу на потолке', () => {
+    expect(conversationsPerAccount(1)).toBe(2);
+    expect(messagesPerConversation(1)).toBe(3);
+  });
+
+  it('дни за пределами разгона держатся на потолке, а не растут дальше', () => {
+    expect(conversationsPerAccount(8)).toBe(8);
+    expect(conversationsPerAccount(99)).toBe(8);
+    expect(messagesPerConversation(99)).toBe(10);
   });
 
   it('день вне диапазона зажимается в границы', () => {
-    expect(conversationsPerAccount(0, 4)).toBe(2);
-    expect(conversationsPerAccount(99, 4)).toBe(8);
+    expect(conversationsPerAccount(0)).toBe(2);
+    expect(messagesPerConversation(-5)).toBe(3);
   });
 
-  it('прогрев в один день сразу идёт на полную мощность', () => {
-    expect(conversationsPerAccount(1, 1)).toBe(8);
-    expect(messagesPerConversation(1, 1)).toBe(10);
+  it('нагрузка на аккаунт за день растёт без скачков кратнее двух', () => {
+    const perDay = [1, 2, 3, 4, 5, 6, 7].map(
+      (d) => conversationsPerAccount(d) * messagesPerConversation(d),
+    );
+    for (let i = 1; i < perDay.length; i++) {
+      expect(perDay[i]).toBeGreaterThan(perDay[i - 1]);
+      expect(perDay[i] / perDay[i - 1]).toBeLessThanOrEqual(2);
+    }
   });
 });
 
@@ -72,7 +96,7 @@ describe('warmup schedule — подбор пар', () => {
 
   it('каждый аккаунт получает свою дневную норму переписок', () => {
     const plan = planDay({
-      accountIds: ids, day: 1, totalDays: 4,
+      accountIds: ids, day: 1,
       previousPairs: [], window: WINDOW, random: seq([0.5]),
     });
     const count = countPerAccount(plan);
@@ -81,7 +105,7 @@ describe('warmup schedule — подбор пар', () => {
 
   it('одна и та же пара не встречается дважды за день', () => {
     const plan = planDay({
-      accountIds: ids, day: 4, totalDays: 4,
+      accountIds: ids, day: 4,
       previousPairs: [], window: WINDOW, random: seq([0.5]),
     });
     const keys = plan.map((c) => `${c.accountAId}|${c.accountBId}`);
@@ -90,7 +114,7 @@ describe('warmup schedule — подбор пар', () => {
 
   it('пара нормализована: accountAId всегда меньше accountBId', () => {
     const plan = planDay({
-      accountIds: ids, day: 2, totalDays: 4,
+      accountIds: ids, day: 2,
       previousPairs: [], window: WINDOW, random: seq([0.5]),
     });
     expect(plan.length).toBeGreaterThan(0);
@@ -100,7 +124,7 @@ describe('warmup schedule — подбор пар', () => {
   it('незнакомые партнёры имеют приоритет над уже знакомыми', () => {
     // a уже говорил с b и c; при норме в одну переписку он должен выбрать d.
     const plan = planDay({
-      accountIds: ids, day: 1, totalDays: 1,
+      accountIds: ids, day: 1,
       previousPairs: [['a', 'b'], ['a', 'c']],
       window: WINDOW, random: seq([0.5]), targetOverride: 1,
     });
@@ -116,7 +140,7 @@ describe('warmup schedule — подбор пар', () => {
       ['a', 'b'], ['a', 'c'], ['a', 'd'], ['b', 'c'], ['b', 'd'], ['c', 'd'],
     ];
     const plan = planDay({
-      accountIds: ids, day: 1, totalDays: 4,
+      accountIds: ids, day: 1,
       previousPairs, window: WINDOW, random: seq([0.5]),
     });
     const count = countPerAccount(plan);
@@ -125,7 +149,7 @@ describe('warmup schedule — подбор пар', () => {
 
   it('нечётное число аккаунтов не роняет планировщик', () => {
     const plan = planDay({
-      accountIds: ['a', 'b', 'c'], day: 1, totalDays: 4,
+      accountIds: ['a', 'b', 'c'], day: 1,
       previousPairs: [], window: WINDOW, random: seq([0.5]),
     });
     expect(plan.length).toBeGreaterThan(0);
@@ -134,19 +158,20 @@ describe('warmup schedule — подбор пар', () => {
 
   it('меньше двух аккаунтов — пустой план, без исключения', () => {
     expect(planDay({
-      accountIds: ['a'], day: 1, totalDays: 4,
+      accountIds: ['a'], day: 1,
       previousPairs: [], window: WINDOW, random: seq([0.5]),
     })).toEqual([]);
     expect(planDay({
-      accountIds: [], day: 1, totalDays: 4,
+      accountIds: [], day: 1,
       previousPairs: [], window: WINDOW, random: seq([0.5]),
     })).toEqual([]);
   });
 
   it('норма больше, чем есть партнёров: план конечен, зацикливания нет', () => {
-    // Три аккаунта, норма 8 — каждый может поговорить максимум с двумя.
+    // Три аккаунта, норма седьмого дня (8) — каждый может поговорить максимум
+    // с двумя, значит пар всего три и планировщик обязан на этом остановиться.
     const plan = planDay({
-      accountIds: ['a', 'b', 'c'], day: 4, totalDays: 4,
+      accountIds: ['a', 'b', 'c'], day: 7,
       previousPairs: [], window: WINDOW, random: seq([0.5]),
     });
     expect(plan).toHaveLength(3);
@@ -154,15 +179,16 @@ describe('warmup schedule — подбор пар', () => {
 
   it('длина переписки в плане соответствует дню', () => {
     const plan = planDay({
-      accountIds: ids, day: 4, totalDays: 4,
+      accountIds: ids, day: 7,
       previousPairs: [], window: WINDOW, random: seq([0.5]),
     });
+    expect(plan.length).toBeGreaterThan(0);
     for (const c of plan) expect(c.plannedMessages).toBe(10);
   });
 
   it('времена попадают в окно и идут по возрастанию', () => {
     const plan = planDay({
-      accountIds: ids, day: 3, totalDays: 4,
+      accountIds: ids, day: 3,
       previousPairs: [], window: WINDOW,
       random: seq([0.1, 0.4, 0.7, 0.9, 0.2, 0.6, 0.35]),
     });
@@ -176,7 +202,7 @@ describe('warmup schedule — подбор пар', () => {
 
   it('инициатор — один из участников пары', () => {
     const plan = planDay({
-      accountIds: ids, day: 1, totalDays: 4,
+      accountIds: ids, day: 1,
       previousPairs: [], window: WINDOW, random: seq([0.9, 0.1]),
     });
     for (const c of plan) {

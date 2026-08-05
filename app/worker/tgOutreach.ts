@@ -2,6 +2,7 @@ import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLo
 import { runCampaignLoop, refetchEmptyDialogs } from '@/lib/tgOutreach/campaignLoop';
 import { runWarmupLoop } from '@/lib/tgOutreach/warmup/loop';
 import { writeHeartbeat } from '@/lib/tgOutreach/gramClient';
+import { planWatchdogActions, staleKillRequests, type LoopControl } from '@/lib/tgOutreach/watchdog';
 import { startTrace } from '@/lib/tracer';
 
 const WORKER_ID = `tg-outreach-${process.pid}`;
@@ -25,6 +26,24 @@ const runningCampaigns = new Map<string, { stop: () => void; promise: Promise<vo
 const campaignLastProgressAt = new Map<string, number>();
 const WATCHDOG_THRESHOLD_MS = Number(process.env.TG_OUTREACH_WATCHDOG_MS) || 15 * 60_000;
 const WATCHDOG_CHECK_INTERVAL_MS = 60_000;
+
+// Сколько ждать, пока кампания умрёт по-хорошему, прежде чем ронять процесс.
+// Разрыв сокетов будит зависший await почти мгновенно, но циклу нужно ещё
+// доразмотать текущий шаг и дописать статус в БД.
+const WATCHDOG_KILL_GRACE_MS = Number(process.env.TG_OUTREACH_WATCHDOG_GRACE_MS) || 3 * 60_000;
+
+// Ручки, которыми сторожевой таймер гасит конкретную кампанию, не трогая
+// соседние: до 05.08.2026 единственным лечением был process.exit(1), и одна
+// залипшая кампания уносила все остальные вместе с прогревом.
+const campaignControls = new Map<string, LoopControl>();
+const campaignKillRequestedAt = new Map<string, number>();
+
+function forgetCampaign(campaignId: string) {
+  runningCampaigns.delete(campaignId);
+  campaignLastProgressAt.delete(campaignId);
+  campaignControls.delete(campaignId);
+  campaignKillRequestedAt.delete(campaignId);
+}
 
 async function resetStuckJobs() {
   const { data } = await db
@@ -126,7 +145,10 @@ async function handleStartJob(job: { id: string; campaign_id: string }) {
   campaignLastProgressAt.set(campaignId, Date.now());
   const onProgress = () => { campaignLastProgressAt.set(campaignId, Date.now()); };
 
-  const promise = runCampaignLoop(campaignId, db, () => shouldStop() || stopRequested, traceContext, onProgress)
+  const control: LoopControl = {};
+  campaignControls.set(campaignId, control);
+
+  const promise = runCampaignLoop(campaignId, db, () => shouldStop() || stopRequested, traceContext, onProgress, control)
     .then(() => {
       log('info', `Campaign ${campaignId} loop finished`);
       void trace?.end({ status: 'stopped' });
@@ -139,8 +161,7 @@ async function handleStartJob(job: { id: string; campaign_id: string }) {
       void trace?.fail(err);
     })
     .finally(() => {
-      runningCampaigns.delete(campaignId);
-      campaignLastProgressAt.delete(campaignId);
+      forgetCampaign(campaignId);
       db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id).then(({ error }) => {
         if (error) log('error', `Failed to mark tg job ${job.id} as completed: ${error.message}`);
       }, () => {});
@@ -222,7 +243,10 @@ async function handleWarmupStartJob(job: { id: string; campaign_id: string }) {
   campaignLastProgressAt.set(campaignId, Date.now());
   const onProgress = () => { campaignLastProgressAt.set(campaignId, Date.now()); };
 
-  const promise = runWarmupLoop(campaignId, db, () => shouldStop() || stopRequested, onProgress)
+  const control: LoopControl = {};
+  campaignControls.set(campaignId, control);
+
+  const promise = runWarmupLoop(campaignId, db, () => shouldStop() || stopRequested, onProgress, control)
     .then(() => {
       log('info', `Warmup for campaign ${campaignId} finished`);
     })
@@ -236,10 +260,16 @@ async function handleWarmupStartJob(job: { id: string; campaign_id: string }) {
         .then(({ error }) => {
           if (error) log('error', `Failed to mark warmup run failed for ${campaignId}: ${error.message}`);
         }, () => {});
+      // Иначе кампания застрянет в статусе «прогрев», из которого нельзя
+      // запустить аутрич.
+      db.from('tg_outreach_campaigns')
+        .update({ status: 'stopped', updated_at: new Date().toISOString() })
+        .eq('id', campaignId)
+        .eq('status', 'warming')
+        .then(() => {}, () => {});
     })
     .finally(() => {
-      runningCampaigns.delete(campaignId);
-      campaignLastProgressAt.delete(campaignId);
+      forgetCampaign(campaignId);
       db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id).then(({ error }) => {
         if (error) log('error', `Failed to mark tg job ${job.id} as completed: ${error.message}`);
       }, () => {});
@@ -266,6 +296,15 @@ async function handleWarmupStopJob(job: { id: string; campaign_id: string }) {
     log('info', `Signaled warmup stop for campaign ${campaignId}`);
     await running.promise;
   }
+
+  // Возвращаем кампанию в «остановлена»: прогрев кончился, аутрич снова можно
+  // запустить. Условие на warming — чтобы не затереть статус, если кампанию
+  // тем временем уже перевели во что-то другое.
+  await db
+    .from('tg_outreach_campaigns')
+    .update({ status: 'stopped', updated_at: new Date().toISOString() })
+    .eq('id', campaignId)
+    .eq('status', 'warming');
 
   await db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
 }
@@ -491,16 +530,52 @@ async function main() {
   const watchdogTimer = setInterval(() => {
     if (shouldStop()) return;
     const now = Date.now();
-    for (const [campaignId, lastAt] of campaignLastProgressAt) {
-      const stallMs = now - lastAt;
-      if (stallMs > WATCHDOG_THRESHOLD_MS) {
+    const snapshot = {
+      now,
+      lastProgressAt: campaignLastProgressAt,
+      killRequestedAt: campaignKillRequestedAt,
+      running: new Set(runningCampaigns.keys()),
+      stallMs: WATCHDOG_THRESHOLD_MS,
+      graceMs: WATCHDOG_KILL_GRACE_MS,
+    };
+
+    for (const campaignId of staleKillRequests(snapshot)) {
+      campaignKillRequestedAt.delete(campaignId);
+    }
+
+    for (const { campaignId, action, stallMin } of planWatchdogActions(snapshot)) {
+      if (action === 'exit') {
         log(
           'error',
-          `Watchdog: campaign ${campaignId} no progress for ${Math.round(stallMs / 60_000)} min ` +
-            `(threshold ${Math.round(WATCHDOG_THRESHOLD_MS / 60_000)} min). Exiting for restart.`,
+          `Watchdog: campaign ${campaignId} no progress for ${stallMin} min and survived force-disconnect ` +
+            `for ${Math.round(WATCHDOG_KILL_GRACE_MS / 60_000)} min. Exiting for restart.`,
         );
         process.exit(1);
       }
+
+      // Гасим одну кампанию: просим остановиться и рвём её сокеты, чтобы
+      // разбудить зависший await. Остальные кампании продолжают работать,
+      // а эту поднимет auto-resume, когда цикл размотается.
+      log(
+        'error',
+        `Watchdog: campaign ${campaignId} no progress for ${stallMin} min ` +
+          `(threshold ${Math.round(WATCHDOG_THRESHOLD_MS / 60_000)} min). Stopping just this campaign.`,
+      );
+      campaignKillRequestedAt.set(campaignId, now);
+      try {
+        runningCampaigns.get(campaignId)?.stop();
+      } catch (err) {
+        log('error', `Watchdog: stop() failed for ${campaignId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      void campaignControls
+        .get(campaignId)
+        ?.forceDisconnect?.()
+        .catch((err: unknown) => {
+          log(
+            'error',
+            `Watchdog: force-disconnect failed for ${campaignId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
     }
   }, WATCHDOG_CHECK_INTERVAL_MS);
   if (typeof watchdogTimer.unref === 'function') watchdogTimer.unref();

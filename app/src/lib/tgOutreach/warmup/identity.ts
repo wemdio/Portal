@@ -18,6 +18,35 @@ export interface AccountIdentity {
 }
 
 /**
+ * Сколько ждать ответа Telegram на getMe.
+ *
+ * Мобильный прокси меняет IP в любой момент, в том числе сразу после успешного
+ * connect. Сокет при этом остаётся «живым» с точки зрения gramJS, запрос уходит
+ * в никуда и не таймаутится — 05.08.2026 это вешало запуск прогрева намертво:
+ * getMe по одному аккаунту не отвечал, а остальные 15 ждали своей очереди.
+ * Сторожевой таймер воркера через 15 минут убивал процесс, после рестарта всё
+ * повторялось; за ночь — 14 перезапусков. Connect уже прикрыт таймаутом
+ * (TG_OUTREACH_CONNECT_TIMEOUT_MS), а первый запрос после него — нет.
+ *
+ * Читаем env при вызове, а не при импорте: так тест может подставить своё
+ * значение, не пересобирая модуль.
+ */
+function identityTimeoutMs(): number {
+  return Number(process.env.TG_WARMUP_IDENTITY_TIMEOUT_MS) || 30_000;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${what}: нет ответа за ${Math.round(ms / 1000)}с`)),
+      ms,
+    );
+  });
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
+}
+
+/**
  * Спросить у Telegram, кто мы, и сохранить в БД.
  *
  * Телефон записываем только если в БД его ещё нет: в загруженных аккаунтах поле
@@ -29,7 +58,11 @@ export async function bootstrapAccountIdentity(
   client: TelegramClient,
   account: Pick<OutreachAccount, 'id' | 'phone'>,
 ): Promise<AccountIdentity> {
-  const me = (await client.getMe()) as Api.User | undefined;
+  const me = (await withTimeout(
+    client.getMe() as Promise<Api.User | undefined>,
+    identityTimeoutMs(),
+    'getMe',
+  )) as Api.User | undefined;
 
   const identity: AccountIdentity = {
     tg_user_id: me?.id != null ? Number(me.id) : null,

@@ -18,6 +18,7 @@ import type {
   TelegramSettings,
 } from '../types';
 import { buildClients, disconnectAll, type ActiveClient } from '../gramClient';
+import type { LoopControl } from '../watchdog';
 import { downloadSessionToTemp } from '../campaignLoop';
 import { openaiGenerate } from '../openaiChat';
 import { planDay } from './schedule';
@@ -72,13 +73,56 @@ export function activeWindowForDay(
   return { start, end };
 }
 
-/** Какой день прогрева идёт сейчас (1-based). */
-export function dayNumber(run: Pick<WarmupRun, 'started_at' | 'days'>, now: Date): number {
+/**
+ * Час по времени кампании, с которого начинается новый день прогрева.
+ *
+ * Раньше день отсчитывался ровно 24 часа от момента запуска. Прогрев, начатый в
+ * 20:20, менял день в 20:20 — то есть посреди вечера, и «день прогрева» ехал по
+ * суткам вместе со случайным временем нажатия кнопки. Оператор мыслит
+ * календарём: новый день начинается утром.
+ */
+const DAY_START_HOUR = Number(process.env.TG_WARMUP_DAY_START_HOUR ?? '8');
+
+/** Номер календарных суток прогрева для момента `t` (сутки начинаются в DAY_START_HOUR). */
+function warmupDayIndex(t: Date, timezoneOffset: number): number {
+  const localMs = t.getTime() + timezoneOffset * 3600_000 - DAY_START_HOUR * 3600_000;
+  return Math.floor(localMs / 86_400_000);
+}
+
+/**
+ * Какой день прогрева идёт сейчас (1-based).
+ *
+ * День меняется в DAY_START_HOUR, а не через 24 часа после старта. Побочный
+ * эффект осознанный: прогрев, запущенный вечером, проживёт первый день
+ * укороченным — до утра. Это ровно то, что значит «меньше дней = меньше
+ * отправок», и лучше, чем ползающая по суткам граница.
+ */
+export function dayNumber(
+  run: Pick<WarmupRun, 'started_at' | 'days'>,
+  now: Date,
+  timezoneOffset = 3,
+): number {
   if (!run.started_at) return 1;
-  const elapsedDays = Math.floor(
-    (now.getTime() - new Date(run.started_at).getTime()) / (24 * 3600 * 1000),
-  );
-  return Math.max(elapsedDays + 1, 1);
+  const elapsed =
+    warmupDayIndex(now, timezoneOffset) - warmupDayIndex(new Date(run.started_at), timezoneOffset);
+  return Math.max(elapsed + 1, 1);
+}
+
+/**
+ * Окно, по которому раскидываются переписки дня.
+ *
+ * Если день планируется уже после начала активного окна (воркер перезапустился
+ * днём, прогрев только сейчас дошёл до нового дня), брать окно целиком нельзя:
+ * прошедшие времена окажутся просроченными и все переписки уедут одной пачкой —
+ * ровно та резкость, от которой уходили в кривой нагрузки.
+ */
+export function planningWindow(
+  now: Date,
+  tg: Pick<TelegramSettings, 'sleep_periods' | 'timezone_offset'>,
+): { start: Date; end: Date } {
+  const w = activeWindowForDay(now, tg);
+  if (now > w.start && now < w.end) return { start: now, end: w.end };
+  return w;
 }
 
 export async function runWarmupLoop(
@@ -86,19 +130,25 @@ export async function runWarmupLoop(
   db: SupabaseClient,
   shouldStop: () => boolean,
   onProgress?: () => void,
+  control?: LoopControl,
 ): Promise<void> {
-  const log: LogFn = (level, message, accountId) => {
-    void db
-      .from('tg_outreach_logs')
-      .insert({ campaign_id: campaignId, level, message, account_id: accountId ?? null })
-      .then(() => {});
-  };
-
   const run = await wdb.getActiveRun(db, campaignId);
   if (!run) {
-    log('warning', 'Прогрев: активного запуска нет — нечего выполнять.');
+    // Логировать некуда — записи прогрева привязаны к запуску, а его нет.
+    // Кампанию на всякий случай возвращаем из «прогрева» в «остановлена»:
+    // иначе она застрянет в статусе, из которого нельзя запустить аутрич.
+    await wdb.setCampaignWarming(db, campaignId, false);
     return;
   }
+
+  const log: LogFn = (level, message, accountId) => {
+    void wdb
+      .logWarmup(db, { runId: run.id, campaignId, accountId, level, message })
+      .catch(() => {
+        // Логи прогрева — диагностика, а не бизнес-логика: сбой записи не
+        // должен ронять сам прогрев.
+      });
+  };
 
   const { data: campaignRow } = await db
     .from('tg_outreach_campaigns')
@@ -110,6 +160,7 @@ export async function runWarmupLoop(
     await wdb.setRunStatus(db, run.id, { status: 'failed', error_message: 'campaign_not_found' });
     return;
   }
+  await wdb.setCampaignWarming(db, campaignId, true);
   const tg = campaign.telegram_settings as TelegramSettings;
 
   const { data: accountRows } = await db
@@ -124,6 +175,7 @@ export async function runWarmupLoop(
       error_message: 'need_at_least_two_accounts',
     });
     log('error', 'Прогрев: нужно минимум два активных аккаунта — греть не с кем.');
+    await wdb.setCampaignWarming(db, campaignId, false);
     return;
   }
 
@@ -134,10 +186,13 @@ export async function runWarmupLoop(
     .eq('is_active', true);
   const proxies = (proxyRows ?? []) as OutreachProxy[];
 
+  // onProgress на каждую строку лога подключения: 16 аккаунтов по 30с таймаута
+  // (а с ретраем и все 60с) — это до четверти часа, за которые сторожевой
+  // таймер воркера успевает счесть кампанию зависшей и убить процесс.
   const clients = await buildClients(
     accounts,
     proxies,
-    (lvl, msg) => log(lvl, msg),
+    (lvl, msg) => { onProgress?.(); log(lvl, msg); },
     (storagePath) => downloadSessionToTemp(db, storagePath),
     db,
   );
@@ -151,8 +206,13 @@ export async function runWarmupLoop(
       'error',
       `Прогрев: подключились только ${clients.length} аккаунтов из ${accounts.length} — прогревать не с кем. Проверьте прокси.`,
     );
+    await wdb.setCampaignWarming(db, campaignId, false);
     return;
   }
+
+  // Ручка для сторожевого таймера: погасить только эту кампанию, не роняя
+  // воркер с остальными.
+  if (control) control.forceDisconnect = () => disconnectAll(clients);
 
   const byAccountId = new Map<string, ActiveClient>(clients.map((c) => [c.account.id, c]));
 
@@ -170,8 +230,14 @@ export async function runWarmupLoop(
 
   // Личность нужна до первой переписки: без tg_username/phone аккаунт нечем
   // адресовать, и все его переписки провалятся на резолве.
+  //
+  // onProgress на каждом аккаунте обязателен: этот цикл идёт последовательно по
+  // всем клиентам и до 05.08.2026 был самым длинным участком без единого
+  // признака жизни — от последнего «подключён» до входа в главный цикл. Именно
+  // здесь прогрев и вставал, а сторожевой таймер убивал воркер целиком.
   for (const c of clients) {
     if (shouldStop()) break;
+    onProgress?.();
     try {
       const identity = await bootstrapAccountIdentity(db, c.client, c.account);
       c.account.tg_user_id = identity.tg_user_id;
@@ -185,6 +251,7 @@ export async function runWarmupLoop(
       );
     }
   }
+  onProgress?.();
 
   try {
     while (!shouldStop()) {
@@ -194,7 +261,7 @@ export async function runWarmupLoop(
       if (!fresh) break;
 
       const now = new Date();
-      const day = dayNumber(run, now);
+      const day = dayNumber(run, now, tg.timezone_offset ?? 3);
 
       if (day > run.days) {
         const summary = await wdb.buildSummary(
@@ -213,6 +280,8 @@ export async function runWarmupLoop(
           'info',
           `Прогрев завершён: ${summary.conversations_done} переписок, ${summary.messages_sent} сообщений, аккаунтов с проблемами — ${summary.accounts_failed}. Боевой аутрич запускается вручную.`,
         );
+        // Кампания снова доступна для запуска аутрича — решение за оператором.
+        await wdb.setCampaignWarming(db, campaignId, false);
         break;
       }
 
@@ -225,9 +294,8 @@ export async function runWarmupLoop(
         const plan = planDay({
           accountIds: [...byAccountId.keys()],
           day,
-          totalDays: run.days,
           previousPairs: await wdb.loadPreviousPairs(db, run.id),
-          window: activeWindowForDay(now, tg),
+          window: planningWindow(now, tg),
           random: Math.random,
         });
         await wdb.saveDayPlan(db, run, day, plan);
