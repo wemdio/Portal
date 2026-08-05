@@ -4,8 +4,9 @@
  *
  * Кластеризация (stages/clustering.ts) считает эти поля один раз по всем
  * верифицированным гипотезам; здесь они подстраиваются под разметку:
- *  - если в вертикали есть принятые гипотезы — % считается только по ним;
- *  - иначе — по всем неотклонённым (proposed);
+ *  - рейтинг считается по всем неотклонённым гипотезам (proposed + accepted);
+ *    accepted НЕ сужает пул — иначе принятие слабой гипотезы («тоже стоит
+ *    теста») обнуляло вклад сильных proposed и топило вертикаль в рейтинге;
  *  - все участники отклонены → potential_pct = 0, вертикаль уходит в конец
  *    рейтинга (у всех остальных % > 0 либо больше участников).
  * Rank 1..N по проекту — как при кластеризации: % desc → больше участников →
@@ -56,9 +57,9 @@ export async function recomputeProjectVerticalPcts(
 
   const scored: Scored[] = verticals.map((v) => {
     const members = hypotheses.filter((h) => h.vertical_id === v.id);
-    const accepted = members.filter((m) => m.status === 'accepted');
-    // Есть принятые → рейтинг по ним; иначе — по всем неотклонённым.
-    const eligible = accepted.length ? accepted : members.filter((m) => m.status !== 'rejected');
+    // Пул — все неотклонённые (proposed + accepted): accept подтверждает
+    // гипотезу, но не выкидывает из рейтинга остальные сильные proposed.
+    const eligible = members.filter((m) => m.status !== 'rejected');
     return {
       id: v.id,
       name: v.name,
