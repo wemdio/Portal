@@ -17,6 +17,8 @@ export interface GisSignalFunnelRow {
   segmentKey: string;
   pulled: number;
   signalsOk: number;
+  /** Прошли online-гейт. У старых прогонов (до require_online) поля нет → fallback на signalsOk. */
+  onlineOk: number;
   bcIn: number;
   validContacts: number;
   appended: number;
@@ -49,7 +51,7 @@ const PAGE = 1000;
 interface RunFunnelRow {
   started_at: string;
   funnel: {
-    perSegment?: Record<string, Partial<Record<'pulled' | 'signalsOk' | 'bcIn' | 'validContacts' | 'appended', number>>>;
+    perSegment?: Record<string, Partial<Record<'pulled' | 'signalsOk' | 'onlineOk' | 'bcIn' | 'validContacts' | 'appended', number>>>;
   } | null;
 }
 
@@ -86,12 +88,16 @@ function addFunnel(
     segmentKey,
     pulled: 0,
     signalsOk: 0,
+    onlineOk: 0,
     bcIn: 0,
     validContacts: 0,
     appended: 0,
   };
   existing.pulled += Number(counts.pulled ?? 0);
   existing.signalsOk += Number(counts.signalsOk ?? 0);
+  // Старые прогоны (до require_online) не писали onlineOk — для них
+  // online-гейта не существовало, честный эквивалент = signalsOk.
+  existing.onlineOk += Number(counts.onlineOk ?? counts.signalsOk ?? 0);
   existing.bcIn += Number(counts.bcIn ?? 0);
   existing.validContacts += Number(counts.validContacts ?? 0);
   existing.appended += Number(counts.appended ?? 0);

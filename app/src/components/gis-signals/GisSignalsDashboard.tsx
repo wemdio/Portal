@@ -24,6 +24,8 @@ interface GisSignalFunnelRow {
   segmentKey: string;
   pulled: number;
   signalsOk: number;
+  /** Прошли online-гейт. Может отсутствовать в старых прогонах → fallback на signalsOk. */
+  onlineOk?: number;
   bcIn: number;
   validContacts: number;
   appended: number;
@@ -93,17 +95,23 @@ const SIGNAL_ROWS: Array<{ key: GisSignalKey; label: string }> = [
 interface FunnelTotals {
   pulled: number;
   signalsOk: number;
+  onlineOk: number;
   bcIn: number;
   validContacts: number;
   appended: number;
 }
 
-const EMPTY_TOTALS: FunnelTotals = { pulled: 0, signalsOk: 0, bcIn: 0, validContacts: 0, appended: 0 };
+const EMPTY_TOTALS: FunnelTotals = { pulled: 0, signalsOk: 0, onlineOk: 0, bcIn: 0, validContacts: 0, appended: 0 };
 
 // ───────────────────────── helpers ─────────────────────────
 
 function fmt(n: number): string {
   return n.toLocaleString('ru-RU');
+}
+
+/** onlineOk с fallback на signalsOk для старых прогонов без online-гейта. */
+function onlineOkOf(row: GisSignalFunnelRow): number {
+  return Number(row.onlineOk ?? row.signalsOk) || 0;
 }
 
 function sumFunnel(rows: GisSignalFunnelRow[], segmentKey: string): FunnelTotals {
@@ -112,6 +120,7 @@ function sumFunnel(rows: GisSignalFunnelRow[], segmentKey: string): FunnelTotals
     if (r.segmentKey !== segmentKey) continue;
     totals.pulled += Number(r.pulled) || 0;
     totals.signalsOk += Number(r.signalsOk) || 0;
+    totals.onlineOk += onlineOkOf(r);
     totals.bcIn += Number(r.bcIn) || 0;
     totals.validContacts += Number(r.validContacts) || 0;
     totals.appended += Number(r.appended) || 0;
@@ -124,6 +133,7 @@ function sumFunnelAll(rows: GisSignalFunnelRow[]): FunnelTotals {
   for (const r of rows) {
     totals.pulled += Number(r.pulled) || 0;
     totals.signalsOk += Number(r.signalsOk) || 0;
+    totals.onlineOk += onlineOkOf(r);
     totals.bcIn += Number(r.bcIn) || 0;
     totals.validContacts += Number(r.validContacts) || 0;
     totals.appended += Number(r.appended) || 0;
@@ -266,7 +276,7 @@ export function GisSignalsDashboard() {
             <table className="w-full text-sm">
               <thead>
                 <tr>
-                  {['Сегмент', 'Отобрано', 'С сигналами', 'В конструктор', 'Валидных контактов', 'Залито в Instantly'].map(
+                  {['Сегмент', 'Отобрано', 'С сигналами', 'Онлайн', 'В конструктор', 'Валидных контактов', 'Залито в Instantly'].map(
                     (h, i) => (
                       <th
                         key={h}
@@ -291,6 +301,7 @@ export function GisSignalsDashboard() {
                       </td>
                       <NumCell value={t.pulled} />
                       <NumCell value={t.signalsOk} />
+                      <NumCell value={t.onlineOk} />
                       <NumCell value={t.bcIn} />
                       <NumCell value={t.validContacts} />
                       <NumCell value={t.appended} />
@@ -308,6 +319,8 @@ export function GisSignalsDashboard() {
             <Mono>{fmt(totalAllTime.pulled)}</Mono>
             {' · с сигналами '}
             <Mono>{fmt(totalAllTime.signalsOk)}</Mono>
+            {' · онлайн '}
+            <Mono>{fmt(totalAllTime.onlineOk)}</Mono>
             {' · в конструктор '}
             <Mono>{fmt(totalAllTime.bcIn)}</Mono>
             {' · валидных контактов '}
