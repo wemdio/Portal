@@ -73,13 +73,56 @@ export function activeWindowForDay(
   return { start, end };
 }
 
-/** Какой день прогрева идёт сейчас (1-based). */
-export function dayNumber(run: Pick<WarmupRun, 'started_at' | 'days'>, now: Date): number {
+/**
+ * Час по времени кампании, с которого начинается новый день прогрева.
+ *
+ * Раньше день отсчитывался ровно 24 часа от момента запуска. Прогрев, начатый в
+ * 20:20, менял день в 20:20 — то есть посреди вечера, и «день прогрева» ехал по
+ * суткам вместе со случайным временем нажатия кнопки. Оператор мыслит
+ * календарём: новый день начинается утром.
+ */
+const DAY_START_HOUR = Number(process.env.TG_WARMUP_DAY_START_HOUR ?? '8');
+
+/** Номер календарных суток прогрева для момента `t` (сутки начинаются в DAY_START_HOUR). */
+function warmupDayIndex(t: Date, timezoneOffset: number): number {
+  const localMs = t.getTime() + timezoneOffset * 3600_000 - DAY_START_HOUR * 3600_000;
+  return Math.floor(localMs / 86_400_000);
+}
+
+/**
+ * Какой день прогрева идёт сейчас (1-based).
+ *
+ * День меняется в DAY_START_HOUR, а не через 24 часа после старта. Побочный
+ * эффект осознанный: прогрев, запущенный вечером, проживёт первый день
+ * укороченным — до утра. Это ровно то, что значит «меньше дней = меньше
+ * отправок», и лучше, чем ползающая по суткам граница.
+ */
+export function dayNumber(
+  run: Pick<WarmupRun, 'started_at' | 'days'>,
+  now: Date,
+  timezoneOffset = 3,
+): number {
   if (!run.started_at) return 1;
-  const elapsedDays = Math.floor(
-    (now.getTime() - new Date(run.started_at).getTime()) / (24 * 3600 * 1000),
-  );
-  return Math.max(elapsedDays + 1, 1);
+  const elapsed =
+    warmupDayIndex(now, timezoneOffset) - warmupDayIndex(new Date(run.started_at), timezoneOffset);
+  return Math.max(elapsed + 1, 1);
+}
+
+/**
+ * Окно, по которому раскидываются переписки дня.
+ *
+ * Если день планируется уже после начала активного окна (воркер перезапустился
+ * днём, прогрев только сейчас дошёл до нового дня), брать окно целиком нельзя:
+ * прошедшие времена окажутся просроченными и все переписки уедут одной пачкой —
+ * ровно та резкость, от которой уходили в кривой нагрузки.
+ */
+export function planningWindow(
+  now: Date,
+  tg: Pick<TelegramSettings, 'sleep_periods' | 'timezone_offset'>,
+): { start: Date; end: Date } {
+  const w = activeWindowForDay(now, tg);
+  if (now > w.start && now < w.end) return { start: now, end: w.end };
+  return w;
 }
 
 export async function runWarmupLoop(
@@ -218,7 +261,7 @@ export async function runWarmupLoop(
       if (!fresh) break;
 
       const now = new Date();
-      const day = dayNumber(run, now);
+      const day = dayNumber(run, now, tg.timezone_offset ?? 3);
 
       if (day > run.days) {
         const summary = await wdb.buildSummary(
@@ -252,7 +295,7 @@ export async function runWarmupLoop(
           accountIds: [...byAccountId.keys()],
           day,
           previousPairs: await wdb.loadPreviousPairs(db, run.id),
-          window: activeWindowForDay(now, tg),
+          window: planningWindow(now, tg),
           random: Math.random,
         });
         await wdb.saveDayPlan(db, run, day, plan);
