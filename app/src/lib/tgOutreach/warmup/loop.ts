@@ -18,6 +18,7 @@ import type {
   TelegramSettings,
 } from '../types';
 import { buildClients, disconnectAll, type ActiveClient } from '../gramClient';
+import type { LoopControl } from '../watchdog';
 import { downloadSessionToTemp } from '../campaignLoop';
 import { openaiGenerate } from '../openaiChat';
 import { planDay } from './schedule';
@@ -86,6 +87,7 @@ export async function runWarmupLoop(
   db: SupabaseClient,
   shouldStop: () => boolean,
   onProgress?: () => void,
+  control?: LoopControl,
 ): Promise<void> {
   const run = await wdb.getActiveRun(db, campaignId);
   if (!run) {
@@ -164,6 +166,10 @@ export async function runWarmupLoop(
     await wdb.setCampaignWarming(db, campaignId, false);
     return;
   }
+
+  // Ручка для сторожевого таймера: погасить только эту кампанию, не роняя
+  // воркер с остальными.
+  if (control) control.forceDisconnect = () => disconnectAll(clients);
 
   const byAccountId = new Map<string, ActiveClient>(clients.map((c) => [c.account.id, c]));
 
