@@ -51,8 +51,8 @@ function formatKey(key: string, groupBy: GroupBy): string {
 interface TooltipItem {
   seriesName?: string;
   value?: number;
-  color?: string;
   dataIndex?: number;
+  seriesIndex?: number;
 }
 
 /**
@@ -86,6 +86,12 @@ function buildOption(
 
   const contractsColor = seriesColor(theme, 3);
 
+  // Квадратики в подсказке красим по своему списку, а не по `params.color`.
+  // У столбцов заливка — объект-градиент, и `params.color` возвращает именно
+  // его; подставленный в CSS, он даёт `background:[object Object]`, то есть
+  // пустоту. Строкой остаётся только линия, поэтому цвет был ровно у одного ряда.
+  const swatches = [seriesColor(theme, 0), seriesColor(theme, 1), seriesColor(theme, 2), contractsColor];
+
   return {
     animation: animate,
     animationDuration: 700,
@@ -112,7 +118,9 @@ function buildOption(
           .map(
             (item) =>
               `<div style="display:flex;align-items:center;gap:8px;margin-top:4px">
-                 <span style="width:10px;height:10px;border-radius:3px;background:${item.color};flex:none"></span>
+                 <span style="width:10px;height:10px;border-radius:3px;background:${
+                   swatches[item.seriesIndex ?? 0] ?? 'transparent'
+                 };flex:none"></span>
                  <span style="opacity:.75">${item.seriesName ?? ''}</span>
                  <span style="margin-left:auto;font-variant-numeric:tabular-nums;font-weight:600">${item.value ?? 0}</span>
                </div>`,

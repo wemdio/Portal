@@ -116,8 +116,8 @@ function orderKeys(keys: Set<string>, canonical: readonly string[]): string[] {
 interface TooltipItem {
   seriesName?: string;
   value?: number;
-  color?: string;
   dataIndex?: number;
+  seriesIndex?: number;
 }
 
 function buildOption({
@@ -150,6 +150,11 @@ function buildOption({
     if (present.length > 0) topKeyByBucket.set(point.bucket, present[present.length - 1]);
   }
 
+  // Квадратики в подсказке — по своему списку, а не по `params.color`: заливка
+  // сегмента объект-градиент, и в CSS он превратился бы в `[object Object]`,
+  // то есть в пустое место вместо цвета.
+  const swatches = keys.map(colorAt);
+
   return {
     animation: animate,
     animationDuration: 320,
@@ -176,7 +181,9 @@ function buildOption({
           .map(
             (item) =>
               `<div style="display:flex;align-items:center;gap:8px;margin-top:4px">
-                 <span style="width:10px;height:10px;border-radius:3px;background:${item.color};flex:none"></span>
+                 <span style="width:10px;height:10px;border-radius:3px;background:${
+                   swatches[item.seriesIndex ?? 0] ?? 'transparent'
+                 };flex:none"></span>
                  <span style="opacity:.75">${item.seriesName ?? ''}</span>
                  <span style="margin-left:auto;font-variant-numeric:tabular-nums;font-weight:600">${formatRub(
                    Number(item.value ?? 0),

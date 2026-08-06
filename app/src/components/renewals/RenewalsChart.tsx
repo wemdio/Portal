@@ -62,8 +62,8 @@ function axisAmount(value: number): string {
 interface TooltipItem {
   seriesName?: string;
   value?: number;
-  color?: string;
   dataIndex?: number;
+  seriesIndex?: number;
 }
 
 /**
@@ -87,6 +87,10 @@ function buildOption(
   const keys = data.map((b) => b.key);
   const countColor = seriesColor(theme, 0);
   const revenueColor = seriesColor(theme, 2);
+
+  // Квадратики в подсказке — по своему списку: у столбца заливка объект-градиент,
+  // и `params.color` вернул бы его, а не строку (см. TimeSeriesChart).
+  const swatches = [countColor, revenueColor];
 
   const axisLabel = { color: AXIS_TEXT, fontSize: AXIS_FONT_SIZE, fontFamily: CHART_FONT };
 
@@ -128,7 +132,9 @@ function buildOption(
             const isMoney = item.seriesName === 'Оборот, ₽';
             const value = Number(item.value ?? 0);
             return `<div style="display:flex;align-items:center;gap:8px;margin-top:4px">
-                      <span style="width:10px;height:10px;border-radius:3px;background:${item.color};flex:none"></span>
+                      <span style="width:10px;height:10px;border-radius:3px;background:${
+                        swatches[item.seriesIndex ?? 0] ?? 'transparent'
+                      };flex:none"></span>
                       <span style="opacity:.75">${item.seriesName ?? ''}</span>
                       <span style="margin-left:auto;font-variant-numeric:tabular-nums;font-weight:600">${
                         isMoney ? `${formatRub(value)} ₽` : value
