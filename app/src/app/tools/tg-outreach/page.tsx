@@ -27,6 +27,7 @@ import {
   RefreshCw,
   AlertCircle,
   Flame,
+  Database,
 } from 'lucide-react';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
 import type {
@@ -283,6 +284,20 @@ function SettingsTab({ campaign, onSave }: {
           <FieldNum label="Лимит истории" value={telegram.history_limit} onChange={v => setTG('history_limit', v)} />
           <FieldNum label="Смещение часового пояса" value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
           <FieldNum label="Пауза аккаунта (часов)" value={telegram.account_cooldown_hours} onChange={v => setTG('account_cooldown_hours', v)} />
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-1">
+            <FieldNum
+              label="Первых сообщений на аккаунт в сутки"
+              value={telegram.first_touch_per_account_per_day ?? 0}
+              onChange={v => setTG('first_touch_per_account_per_day', v)}
+            />
+            <p className="text-[10px] text-gray-400">
+              Ноль — рассылка первых сообщений выключена. Считайте от числа аккаунтов:
+              16 аккаунтов по 20 — это 320 сообщений в день, база на 300 контактов уйдёт за сутки.
+              Начинайте с малого.
+            </p>
+          </div>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <RangeField label="Задержка до прочтения" value={telegram.pre_read_delay_range} onChange={v => setTG('pre_read_delay_range', v)} />
@@ -1301,6 +1316,7 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
   const [editingProxyFor, setEditingProxyFor] = useState<string | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<OutreachAccount | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [profileAccount, setProfileAccount] = useState<OutreachAccount | null>(null);
 
   const accountIds = useMemo(() => accounts.map(a => a.id), [accounts]);
   const { selectedIds, isSelected, toggle, setAll, clear } = useRowSelection(accountIds);
@@ -1506,7 +1522,7 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
         </div>
       ) : (
         <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[32px_1fr_120px_150px_80px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_1fr_120px_150px_80px_72px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <SelectAllCheckbox total={accounts.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span>Аккаунт</span><span>Телефон</span><span>Прокси</span><span>Активен</span><span />
           </div>
@@ -1518,7 +1534,7 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
             return (
               <div
                 key={a.id}
-                className={`grid grid-cols-[32px_1fr_120px_150px_80px_40px] gap-4 items-center px-4 py-2.5 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
+                className={`grid grid-cols-[32px_1fr_120px_150px_80px_72px] gap-4 items-center px-4 py-2.5 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
               >
                 <input
                   type="checkbox"
@@ -1579,10 +1595,16 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
                   className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${a.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
                   {a.is_active ? 'Да' : 'Нет'}
                 </button>
-                <button type="button" onClick={() => { void deleteAccount(a.id); }}
-                  className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer">
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
+                <div className="flex items-center gap-0.5">
+                  <button type="button" onClick={() => setProfileAccount(a)} title="Профиль в Telegram"
+                    className="p-1.5 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer">
+                    <UserCheck className="h-3.5 w-3.5" />
+                  </button>
+                  <button type="button" onClick={() => { void deleteAccount(a.id); }} title="Удалить аккаунт"
+                    className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
             );
           })}
@@ -1596,6 +1618,119 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
           onClose={() => setSelectedAccount(null)}
         />
       )}
+
+      {profileAccount && (
+        <AccountProfileModal
+          account={profileAccount}
+          onClose={() => setProfileAccount(null)}
+          onSaved={() => { void load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* =================== ACCOUNT PROFILE MODAL =================== */
+/**
+ * Правка настоящего профиля в Telegram: ФИО, описание, аватарка.
+ *
+ * Не путать с аватаркой у аккаунтов пула — та косметическая, лежит в хранилище
+ * портала и в Telegram не уходит. Здесь меняется сам аккаунт, поэтому и
+ * предупреждение, и требование остановленной кампании.
+ */
+function AccountProfileModal({
+  account,
+  onClose,
+  onSaved,
+}: {
+  account: OutreachAccount & { first_name?: string; last_name?: string; bio?: string };
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [firstName, setFirstName] = useState(account.first_name ?? '');
+  const [lastName, setLastName] = useState(account.last_name ?? '');
+  const [bio, setBio] = useState(account.bio ?? '');
+  const [avatar, setAvatar] = useState<File | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const token = await getAccessToken();
+      const form = new FormData();
+      form.append('first_name', firstName);
+      form.append('last_name', lastName);
+      form.append('bio', bio);
+      if (avatar) form.append('avatar', avatar);
+
+      const res = await fetch(`${API_BASE}/accounts/${account.id}/profile`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(d?.error ?? `Ошибка ${res.status}`);
+        return;
+      }
+      onSaved();
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose} role="dialog" aria-modal="true">
+      <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
+          <h2 className="text-lg font-semibold text-gray-900">Профиль в Telegram</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="h-5 w-5" /></button>
+        </div>
+
+        <div className="space-y-4 px-6 py-5">
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            Меняется настоящий профиль аккаунта в Telegram. Частая смена имени и особенно аватарки — сигнал для
+            антиспама: настраивайте один раз перед запуском. Кампания должна быть остановлена.
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <label className="space-y-1">
+              <span className="text-[11px] font-medium text-gray-500">Имя</span>
+              <input value={firstName} onChange={(e) => setFirstName(e.target.value)} maxLength={64}
+                className="block w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
+            </label>
+            <label className="space-y-1">
+              <span className="text-[11px] font-medium text-gray-500">Фамилия</span>
+              <input value={lastName} onChange={(e) => setLastName(e.target.value)} maxLength={64}
+                className="block w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
+            </label>
+          </div>
+
+          <label className="space-y-1 block">
+            <span className="text-[11px] font-medium text-gray-500">Описание ({bio.length}/70)</span>
+            <textarea value={bio} onChange={(e) => setBio(e.target.value)} maxLength={70} rows={2}
+              className="block w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y" />
+          </label>
+
+          <label className="space-y-1 block">
+            <span className="text-[11px] font-medium text-gray-500">Аватарка (квадратный JPEG до 1 МБ)</span>
+            <input type="file" accept="image/jpeg,image/png" onChange={(e) => setAvatar(e.target.files?.[0] ?? null)}
+              className="block w-full text-xs" />
+          </label>
+
+          {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div>}
+        </div>
+
+        <div className="border-t border-gray-100 px-6 py-4">
+          <button type="button" onClick={() => { void save(); }} disabled={saving || !firstName.trim()}
+            className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition cursor-pointer">
+            {saving ? 'Применяю в Telegram...' : 'Применить'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1819,6 +1954,186 @@ function AccountLogsModal({
           <div ref={bottomRef} />
         </div>
       </div>
+    </div>
+  );
+}
+
+/* =================== CAMPAIGN BASES TAB =================== */
+interface OutreachBase {
+  id: string;
+  name: string;
+  notes: string;
+  counts: { total: number; pending: number; sent: number; replied: number; failed: number; skipped: number };
+}
+
+/**
+ * Базы контактов для первого касания.
+ *
+ * База живёт сама по себе, а не внутри кампании: одну и ту же можно запустить
+ * на разных кампаниях и сравнить результат. Здесь — список всех баз с
+ * галочками «использовать в этой кампании».
+ */
+function CampaignBasesTab({ campaignId }: { campaignId: string }) {
+  const [bases, setBases] = useState<OutreachBase[]>([]);
+  const [linked, setLinked] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(true);
+  const [newName, setNewName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const [basesRes, linkRes] = await Promise.all([
+      authFetch(`${API_BASE}/bases`),
+      authFetch(`${API_BASE}/campaigns/${campaignId}/bases`),
+    ]);
+    if (basesRes.ok) setBases(((await basesRes.json()) as { items: OutreachBase[] }).items);
+    if (linkRes.ok) {
+      const d = (await linkRes.json()) as { items: Array<{ base_id: string }> };
+      setLinked(new Set(d.items.map((i) => i.base_id)));
+    }
+    setLoading(false);
+  }, [campaignId]);
+
+  useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
+
+  const createBase = async () => {
+    if (!newName.trim()) return;
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases`, {
+        method: 'POST',
+        body: JSON.stringify({ name: newName.trim() }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(d?.error ?? `Ошибка ${res.status}`);
+        return;
+      }
+      setNewName('');
+      void load();
+    } finally { setBusy(false); }
+  };
+
+  const toggleLink = async (baseId: string) => {
+    const next = new Set(linked);
+    if (next.has(baseId)) next.delete(baseId); else next.add(baseId);
+    setLinked(next);
+    setError(null);
+    const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/bases`, {
+      method: 'PUT',
+      body: JSON.stringify({ base_ids: [...next] }),
+    });
+    if (!res.ok) {
+      const d = (await res.json().catch(() => null)) as { error?: string } | null;
+      setError(d?.error ?? `Не удалось сохранить выбор баз (${res.status})`);
+      // Возвращаем список к состоянию сервера: иначе галочка останется стоять,
+      // а на сервере ничего не изменилось.
+      void load();
+    }
+  };
+
+  const uploadContacts = async (baseId: string, e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const token = await getAccessToken();
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch(`${API_BASE}/bases/${baseId}/upload`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+      const d = (await res.json().catch(() => null)) as {
+        error?: string;
+        stats?: { total: number; accepted: number; noUsername: number; noMessage: number; duplicates: number };
+      } | null;
+      if (!res.ok) {
+        setError(d?.error ?? `Ошибка загрузки (${res.status})`);
+        return;
+      }
+      const s = d?.stats;
+      if (s) {
+        setNotice(
+          `Загружено ${s.accepted} из ${s.total}. Без юзернейма — ${s.noUsername}, без текста — ${s.noMessage}, дублей — ${s.duplicates}.`,
+        );
+      }
+      void load();
+    } finally {
+      setBusy(false);
+      e.target.value = '';
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <span className="text-sm font-medium text-gray-700">
+          Базы контактов <span className="text-gray-400 font-normal">({bases.length})</span>
+        </span>
+        <div className="flex items-center gap-2">
+          <input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            placeholder="Гипотеза 1"
+            className="rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400"
+          />
+          <button type="button" onClick={() => { void createBase(); }} disabled={busy || !newName.trim()}
+            className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+            <Plus className="h-3.5 w-3.5" /> Создать базу
+          </button>
+        </div>
+      </div>
+
+      {notice && (
+        <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-900">{notice}</div>
+      )}
+      {error && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div>
+      )}
+
+      {loading ? (
+        <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
+      ) : bases.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
+          <Database className="mx-auto h-8 w-8 text-gray-300 mb-2" />
+          <p className="text-xs text-gray-400">
+            Баз пока нет. Создайте базу и загрузите файл: юзернейм в первой колонке, текст сообщения во второй.
+          </p>
+        </div>
+      ) : (
+        <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
+          <div className="grid grid-cols-[32px_1fr_repeat(4,80px)_120px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+            <span />
+            <span>База</span><span>Всего</span><span>Ждут</span><span>Отправлено</span><span>Пропущено</span><span />
+          </div>
+          {bases.map((b) => (
+            <div key={b.id} className={`grid grid-cols-[32px_1fr_repeat(4,80px)_120px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
+              <input
+                type="checkbox"
+                checked={linked.has(b.id)}
+                onChange={() => { void toggleLink(b.id); }}
+                title="Использовать эту базу в кампании"
+                aria-label={`Использовать базу ${b.name}`}
+                className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+              />
+              <span className="text-xs font-medium text-gray-800 truncate">{b.name}</span>
+              <span className="text-xs text-gray-600">{b.counts.total}</span>
+              <span className="text-xs text-gray-600">{b.counts.pending}</span>
+              <span className="text-xs text-gray-600">{b.counts.sent}</span>
+              <span className="text-xs text-gray-600">{b.counts.skipped}</span>
+              <label className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer w-fit">
+                <Upload className="h-3 w-3" /> Загрузить
+                <input type="file" accept=".xlsx,.xls,.csv" className="hidden" disabled={busy}
+                  onChange={(e) => { void uploadContacts(b.id, e); }} />
+              </label>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -2060,6 +2375,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
 const TABS = [
   { id: 'settings', label: 'Настройки', icon: Settings },
   { id: 'accounts', label: 'Аккаунты', icon: Users },
+  { id: 'bases', label: 'Базы', icon: Database },
   { id: 'warmup', label: 'Прогрев', icon: Flame },
   { id: 'proxies', label: 'Прокси', icon: Network },
   { id: 'logs', label: 'Логи', icon: ScrollText },
@@ -2268,6 +2584,7 @@ function CampaignView({ campaign, isOwn, onUpdate, onDelete }: {
       <div>
         {tab === 'settings' && <SettingsTab campaign={campaign} onSave={saveSettings} />}
         {tab === 'accounts' && <CampaignAccountsTab campaignId={campaign.id} />}
+        {tab === 'bases' && <CampaignBasesTab campaignId={campaign.id} />}
         {tab === 'proxies' && <CampaignProxiesTab campaignId={campaign.id} />}
         {tab === 'warmup' && (
           <WarmupTab campaignId={campaign.id} isOwn={isOwn} campaignStatus={campaign.status} />
