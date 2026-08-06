@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
+import { bucketRange } from '@/lib/firstSales/buckets';
 import type { RenewalsResult } from '@/lib/renewals/metrics';
 import type { RenewalTableRow } from '@/lib/renewals/tableRows';
 import FiltersBar, { getDefaultFilters, type FiltersState } from '@/components/renewals/FiltersBar';
@@ -13,11 +14,20 @@ import RenewalsChart from '@/components/renewals/RenewalsChart';
 
 type SummaryResponse = RenewalsResult & { tableRows: RenewalTableRow[]; undatedRows: RenewalTableRow[] };
 
+/** `YYYY-MM-DD` → `ДД.ММ.ГГГГ` строкой, без `new Date`: разбор ISO-даты
+ *  подставил бы часовой пояс браузера и мог бы съехать на день. */
+function formatDay(key: string): string {
+  const [y, m, d] = key.split('-');
+  return y && m && d ? `${d}.${m}.${y}` : key;
+}
+
 export default function RenewalsView() {
   const [filters, setFilters] = useState<FiltersState>(() => getDefaultFilters());
   const [data, setData] = useState<SummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /** Корзина, выбранная кликом по графику; null — показываем весь период. */
+  const [selectedBucket, setSelectedBucket] = useState<string | null>(null);
 
   // Тот же приём, что в FirstSalesView: AbortController реально обрывает
   // устаревший запрос при быстрой смене фильтров, флаг `active` подстраховывает
@@ -61,6 +71,28 @@ export default function RenewalsView() {
     };
   }, [filters]);
 
+  // Границы выбранной корзины. Ключ корзины и `paymentDate` строки — оба
+  // `YYYY-MM-DD`, поэтому сравниваем строками: для этого формата
+  // лексикографический порядок совпадает с хронологическим.
+  const selection = useMemo(
+    () => (selectedBucket ? bucketRange(selectedBucket, filters.groupBy) : null),
+    [selectedBucket, filters.groupBy],
+  );
+
+  const visibleRows = useMemo(() => {
+    const rows = data?.tableRows ?? [];
+    if (!selection) return rows;
+    return rows.filter(
+      (row) => row.paymentDate !== null && row.paymentDate >= selection.from && row.paymentDate <= selection.to,
+    );
+  }, [data, selection]);
+
+  const selectionLabel = selection
+    ? selection.from === selection.to
+      ? formatDay(selection.from)
+      : `${formatDay(selection.from)} — ${formatDay(selection.to)}`
+    : null;
+
   return (
     <div className="space-y-4">
       <div>
@@ -70,7 +102,16 @@ export default function RenewalsView() {
         </p>
       </div>
 
-      <FiltersBar value={filters} onChange={setFilters} />
+      {/* Сброс выбранной корзины — здесь, а не эффектом на смену фильтров:
+          после смены периода прежней корзины в ряду может не быть вовсе, и
+          таблица молча оказалась бы пустой. */}
+      <FiltersBar
+        value={filters}
+        onChange={(next) => {
+          setFilters(next);
+          setSelectedBucket(null);
+        }}
+      />
 
       {loading && <div className="py-10 text-center text-sm text-zinc-400">Загрузка…</div>}
       {error && !loading && (
@@ -86,9 +127,32 @@ export default function RenewalsView() {
           {/* Порядок: сначала динамика, потом расшифровка. График отвечает на
               «как идут дела», таблица — на «а из чего это сложилось». Второй
               вопрос возникает после первого, а не до. */}
-          <RenewalsChart series={data.series} groupBy={filters.groupBy} />
+          <RenewalsChart
+            series={data.series}
+            groupBy={filters.groupBy}
+            selectedKey={selectedBucket}
+            onSelectKey={setSelectedBucket}
+          />
 
-          <RenewalsTable rows={data.tableRows} />
+          {selectionLabel ? (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50/60 px-3 py-2 text-xs text-zinc-600">
+              <span>
+                В таблице только продления за <span className="font-semibold text-zinc-900">{selectionLabel}</span> —{' '}
+                {visibleRows.length}
+                {visibleRows.length === 1 ? ' штука' : ' шт.'} из {data.tableRows.length}. Карточки и график сверху
+                по-прежнему за весь период.
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectedBucket(null)}
+                className="ml-auto rounded-full border border-zinc-300 px-2.5 py-1 text-xs text-zinc-600 hover:bg-white"
+              >
+                Показать весь период
+              </button>
+            </div>
+          ) : null}
+
+          <RenewalsTable rows={visibleRows} />
 
           <RenewalsUndatedSection rows={data.undatedRows} />
 

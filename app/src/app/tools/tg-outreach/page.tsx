@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
 import type {
+  CampaignStatus,
   OutreachCampaign,
   OutreachAccount,
   OutreachProxy,
@@ -1296,8 +1297,66 @@ function useRowSelection(allIds: string[]) {
   return { selectedIds, isSelected, toggle, setAll, clear };
 }
 
+/** Результат чтения профиля из Telegram: ошибка либо обновлённые поля. */
+type SyncResult = { error: string | null; patch?: Partial<OutreachAccount> };
+
+/* =================== ACCOUNT AVATAR =================== */
+/**
+ * Аватарка аккаунта. Пока профиль не читали из Telegram, показываем инициалы —
+ * пустой серый кружок ничем не отличался бы от «фото нет».
+ */
+function AccountAvatar({
+  account,
+  size = 36,
+}: {
+  account: OutreachAccount;
+  size?: number;
+}) {
+  const [broken, setBroken] = useState(false);
+  const label = (account.first_name || account.session_name || '?').trim();
+  const initials = label
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase() ?? '')
+    .join('');
+  const url = account.avatar_url?.trim();
+
+  if (url && !broken) {
+    // Аватарки лежат в публичном бакете Supabase; next/image потребовал бы
+    // прописывать домен хранилища в конфиг ради картинки 36×36.
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={url}
+        alt=""
+        width={size}
+        height={size}
+        onError={() => setBroken(true)}
+        style={{ width: size, height: size }}
+        className="rounded-full object-cover bg-gray-100 shrink-0"
+      />
+    );
+  }
+
+  return (
+    <span
+      style={{ width: size, height: size, fontSize: Math.round(size / 2.8) }}
+      className="flex items-center justify-center rounded-full bg-gray-100 font-medium text-gray-400 shrink-0"
+      title={account.profile_synced_at ? 'В Telegram нет аватарки' : 'Профиль ещё не читали из Telegram'}
+    >
+      {initials || '?'}
+    </span>
+  );
+}
+
 /* =================== CAMPAIGN ACCOUNTS TAB =================== */
-function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
+function CampaignAccountsTab({
+  campaignId,
+  campaignStatus,
+}: {
+  campaignId: string;
+  campaignStatus: CampaignStatus;
+}) {
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   const [proxies, setProxies] = useState<OutreachProxy[]>([]);
   const [errorCounts, setErrorCounts] = useState<
@@ -1317,6 +1376,13 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
   const [selectedAccount, setSelectedAccount] = useState<OutreachAccount | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [profileAccount, setProfileAccount] = useState<OutreachAccount | null>(null);
+  /** id аккаунтов, чей профиль сейчас читается из Telegram. */
+  const [syncingIds, setSyncingIds] = useState<string[]>([]);
+  const [syncSummary, setSyncSummary] = useState<string | null>(null);
+
+  // Профиль читается через то же соединение, что и работа кампании, поэтому
+  // на запущенной кампании в Telegram не ходим — см. гейт в API.
+  const profileReadable = campaignStatus === 'stopped' || campaignStatus === 'error';
 
   const accountIds = useMemo(() => accounts.map(a => a.id), [accounts]);
   const { selectedIds, isSelected, toggle, setAll, clear } = useRowSelection(accountIds);
@@ -1368,6 +1434,61 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
     setShowAdd(false);
     void load();
   };
+
+  /**
+   * Прочитать профиль одного аккаунта из Telegram и обновить строку списка.
+   * Возвращает текст ошибки или null, если всё получилось.
+   */
+  const syncProfile = useCallback(async (id: string): Promise<SyncResult> => {
+    setSyncingIds(prev => [...prev, id]);
+    try {
+      const res = await authFetch(`${API_BASE}/accounts/${id}/profile`);
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        return { error: d?.error ?? `Ошибка ${res.status}` };
+      }
+      const patch = (await res.json()) as Partial<OutreachAccount>;
+      setAccounts(prev => prev.map(a => (a.id === id ? { ...a, ...patch } : a)));
+      return { error: null, patch };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : String(e) };
+    } finally {
+      setSyncingIds(prev => prev.filter(x => x !== id));
+    }
+  }, []);
+
+  /**
+   * Обновить профили всех аккаунтов кампании.
+   *
+   * Идём пачками по четыре: каждое чтение — это подключение через мобильный
+   * прокси на десятки секунд. Шестнадцать подряд оператор ждать не станет, а все
+   * разом — это шестнадцать одновременных соединений в один пул, который и так
+   * бракует часть портов.
+   */
+  const syncAllProfiles = useCallback(async () => {
+    const targets = accounts.map(a => ({ id: a.id, name: a.session_name }));
+    if (!targets.length) return;
+    setSyncSummary(null);
+
+    const failures: string[] = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < targets.length) {
+        const t = targets[next++];
+        const { error } = await syncProfile(t.id);
+        if (error) failures.push(`${t.name}: ${error}`);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(4, targets.length) }, () => worker()),
+    );
+
+    setSyncSummary(
+      failures.length
+        ? `Обновлено ${targets.length - failures.length} из ${targets.length}. Не получилось — ${failures.slice(0, 3).join('; ')}${failures.length > 3 ? ` и ещё ${failures.length - 3}` : ''}`
+        : `Профили обновлены: ${targets.length}`,
+    );
+  }, [accounts, syncProfile]);
 
   const toggleActive = async (id: string, current: boolean) => {
     await authFetch(`${API_BASE}/accounts/${id}`, {
@@ -1447,6 +1568,18 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
           Аккаунты кампании <span className="text-gray-400 font-normal">({accounts.length})</span>
         </span>
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={!profileReadable || syncingIds.length > 0 || accounts.length === 0}
+            onClick={() => { void syncAllProfiles(); }}
+            title={profileReadable
+              ? 'Прочитать имя, описание и аватарку каждого аккаунта из Telegram'
+              : 'Сначала остановите кампанию: во время работы аккаунты заняты'}
+            className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {syncingIds.length ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            {syncingIds.length ? `Читаю профили (${syncingIds.length})…` : 'Обновить профили'}
+          </button>
           <label className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
             {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
             Загрузить файлы
@@ -1461,6 +1594,15 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
 
       {uploadError && (
         <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{uploadError}</div>
+      )}
+
+      {syncSummary && (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+          <span>{syncSummary}</span>
+          <button type="button" onClick={() => setSyncSummary(null)} className="text-gray-400 hover:text-gray-600 cursor-pointer">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
       )}
 
       {showAdd && (
@@ -1522,8 +1664,9 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
         </div>
       ) : (
         <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[32px_1fr_120px_150px_80px_72px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_44px_1fr_120px_150px_80px_72px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <SelectAllCheckbox total={accounts.length} selectedCount={selectedIds.length} onChange={setAll} />
+            <span />
             <span>Аккаунт</span><span>Телефон</span><span>Прокси</span><span>Активен</span><span />
           </div>
           {accounts.map(a => {
@@ -1534,7 +1677,7 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
             return (
               <div
                 key={a.id}
-                className={`grid grid-cols-[32px_1fr_120px_150px_80px_72px] gap-4 items-center px-4 py-2.5 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
+                className={`grid grid-cols-[32px_44px_1fr_120px_150px_80px_72px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
               >
                 <input
                   type="checkbox"
@@ -1543,7 +1686,21 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
                   aria-label={`Выбрать ${a.session_name}`}
                   className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
                 />
-                <div className="min-w-0 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setProfileAccount(a)}
+                  title="Профиль в Telegram"
+                  className="relative cursor-pointer rounded-full transition hover:opacity-80"
+                >
+                  <AccountAvatar account={a} />
+                  {syncingIds.includes(a.id) && (
+                    <span className="absolute inset-0 flex items-center justify-center rounded-full bg-white/70">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-500" />
+                    </span>
+                  )}
+                </button>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => setSelectedAccount(a)}
@@ -1568,6 +1725,14 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
                       Кулдаун до {new Date(a.cooldown_until!).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}
                     </span>
                   )}
+                  </div>
+                  {/* Имя из самого Telegram — не путать с session_name, под
+                      которым аккаунт загружен в портал. */}
+                  <div className="truncate text-[10px] text-gray-400">
+                    {[a.first_name, a.last_name].filter(Boolean).join(' ') ||
+                      (a.profile_synced_at ? 'без имени в Telegram' : 'профиль не прочитан')}
+                    {a.tg_username ? ` · @${a.tg_username}` : ''}
+                  </div>
                 </div>
                 <span className="text-xs text-gray-500 truncate">{a.phone || '—'}</span>
                 {editingProxyFor === a.id ? (
@@ -1621,7 +1786,10 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
 
       {profileAccount && (
         <AccountProfileModal
-          account={profileAccount}
+          account={accounts.find(a => a.id === profileAccount.id) ?? profileAccount}
+          canRead={profileReadable}
+          syncing={syncingIds.includes(profileAccount.id)}
+          onSync={() => syncProfile(profileAccount.id)}
           onClose={() => setProfileAccount(null)}
           onSaved={() => { void load(); }}
         />
@@ -1640,19 +1808,61 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
  */
 function AccountProfileModal({
   account,
+  canRead,
+  syncing,
+  onSync,
   onClose,
   onSaved,
 }: {
-  account: OutreachAccount & { first_name?: string; last_name?: string; bio?: string };
+  account: OutreachAccount;
+  /** Можно ли сейчас ходить в Telegram (кампания остановлена). */
+  canRead: boolean;
+  syncing: boolean;
+  onSync: () => Promise<SyncResult>;
   onClose: () => void;
   onSaved: () => void;
 }) {
   const [firstName, setFirstName] = useState(account.first_name ?? '');
   const [lastName, setLastName] = useState(account.last_name ?? '');
   const [bio, setBio] = useState(account.bio ?? '');
-  const [avatar, setAvatar] = useState<File | null>(null);
+  // Превью держим рядом с файлом: ссылку на blob создаём в момент выбора, а не
+  // эффектом на каждый рендер.
+  const [avatar, setAvatar] = useState<{ file: File; url: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const pickAvatar = (file: File | null) => {
+    setAvatar((prev) => {
+      if (prev) URL.revokeObjectURL(prev.url);
+      return file ? { file, url: URL.createObjectURL(file) } : null;
+    });
+  };
+
+  /**
+   * Прочитать профиль из Telegram и подставить в поля.
+   *
+   * Уже начатую правку не затираем: оператор мог открыть карточку, начать
+   * печатать имя и только потом дождаться ответа Telegram.
+   */
+  const syncNow = useCallback(async () => {
+    setError(null);
+    const { error: err, patch } = await onSync();
+    if (err) { setError(err); return; }
+    if (!patch) return;
+    setFirstName((v) => (v ? v : patch.first_name ?? ''));
+    setLastName((v) => (v ? v : patch.last_name ?? ''));
+    setBio((v) => (v ? v : patch.bio ?? ''));
+  }, [onSync]);
+
+  // Профиль, который ни разу не читали, подтягиваем сразу при открытии: иначе
+  // карточка выглядит пустой, хотя в самом Telegram всё заполнено.
+  const neverSynced = !account.profile_synced_at;
+  useEffect(() => {
+    if (neverSynced && canRead) queueMicrotask(() => { void syncNow(); });
+    // Только на открытии карточки: повторные автопопытки при обрыве связи
+    // превратились бы в бесконечный цикл подключений через прокси.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const save = async () => {
     setSaving(true);
@@ -1663,7 +1873,7 @@ function AccountProfileModal({
       form.append('first_name', firstName);
       form.append('last_name', lastName);
       form.append('bio', bio);
-      if (avatar) form.append('avatar', avatar);
+      if (avatar) form.append('avatar', avatar.file);
 
       const res = await fetch(`${API_BASE}/accounts/${account.id}/profile`, {
         method: 'PUT',
@@ -1696,6 +1906,87 @@ function AccountProfileModal({
             антиспама: настраивайте один раз перед запуском. Кампания должна быть остановлена.
           </div>
 
+          {/* Текущая аватарка и загрузка новой: кликабельно всё — и картинка,
+              и подпись под ней. */}
+          <div className="flex items-center gap-4">
+            <label
+              className="group relative cursor-pointer"
+              title="Выбрать новую аватарку"
+            >
+              {avatar ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={avatar.url} alt="" className="h-20 w-20 rounded-full object-cover" />
+              ) : (
+                <AccountAvatar account={account} size={80} />
+              )}
+              <span className="absolute inset-0 flex items-center justify-center rounded-full bg-black/45 text-[10px] font-medium text-white opacity-0 transition group-hover:opacity-100">
+                {syncing ? '' : 'Изменить'}
+              </span>
+              {syncing && (
+                <span className="absolute inset-0 flex items-center justify-center rounded-full bg-white/70">
+                  <Loader2 className="h-5 w-5 animate-spin text-indigo-500" />
+                </span>
+              )}
+              <input
+                type="file"
+                accept="image/jpeg,image/png"
+                className="hidden"
+                onChange={(e) => pickAvatar(e.target.files?.[0] ?? null)}
+              />
+            </label>
+
+            <div className="min-w-0 space-y-1.5">
+              <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700">
+                <Upload className="h-3.5 w-3.5" />
+                {avatar ? 'Выбрать другую' : 'Загрузить аватарку'}
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png"
+                  className="hidden"
+                  onChange={(e) => pickAvatar(e.target.files?.[0] ?? null)}
+                />
+              </label>
+              <div className="truncate text-[11px] text-gray-400">
+                {avatar
+                  ? `${avatar.file.name} · ${Math.round(avatar.file.size / 1024)} КБ`
+                  : 'Квадратный JPEG до 1 МБ'}
+              </div>
+              {avatar && (
+                <button
+                  type="button"
+                  onClick={() => pickAvatar(null)}
+                  className="text-[11px] text-gray-400 underline hover:text-gray-600 cursor-pointer"
+                >
+                  Отменить выбор
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Откуда взяты значения полей. Без этой строки пустая карточка
+              читается как «в Telegram ничего не заполнено». */}
+          <div className="flex items-center justify-between gap-2 text-[11px] text-gray-400">
+            <span>
+              {syncing
+                ? 'Читаю профиль из Telegram…'
+                : account.profile_synced_at
+                  ? `Профиль прочитан ${new Date(account.profile_synced_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`
+                  : canRead
+                    ? 'Профиль ещё не читали из Telegram'
+                    : 'Профиль не прочитан: кампания работает, аккаунт занят'}
+            </span>
+            <button
+              type="button"
+              disabled={!canRead || syncing}
+              onClick={() => { void syncNow(); }}
+              title={canRead ? 'Перечитать профиль из Telegram' : 'Сначала остановите кампанию'}
+              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-[11px] text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+            >
+              <RefreshCw className={`h-3 w-3 ${syncing ? 'animate-spin' : ''}`} />
+              Обновить
+            </button>
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <label className="space-y-1">
               <span className="text-[11px] font-medium text-gray-500">Имя</span>
@@ -1713,12 +2004,6 @@ function AccountProfileModal({
             <span className="text-[11px] font-medium text-gray-500">Описание ({bio.length}/70)</span>
             <textarea value={bio} onChange={(e) => setBio(e.target.value)} maxLength={70} rows={2}
               className="block w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y" />
-          </label>
-
-          <label className="space-y-1 block">
-            <span className="text-[11px] font-medium text-gray-500">Аватарка (квадратный JPEG до 1 МБ)</span>
-            <input type="file" accept="image/jpeg,image/png" onChange={(e) => setAvatar(e.target.files?.[0] ?? null)}
-              className="block w-full text-xs" />
           </label>
 
           {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div>}
@@ -2034,6 +2319,26 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
     }
   };
 
+  const deleteBase = async (base: OutreachBase) => {
+    // Предупреждаем про отправленных отдельно: контакты уйдут каскадом, и
+    // история «кому мы уже писали по этой гипотезе» пропадёт вместе с базой.
+    const sentNote = base.counts.sent > 0
+      ? ` По ней уже отправлено ${base.counts.sent} сообщений — эта история будет потеряна.`
+      : '';
+    if (!confirm(`Удалить базу «${base.name}» и все ${base.counts.total} контактов?${sentNote}`)) return;
+
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases/${base.id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(d?.error ?? `Не удалось удалить базу (${res.status})`);
+        return;
+      }
+      void load();
+    } finally { setBusy(false); }
+  };
+
   const uploadContacts = async (baseId: string, e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -2125,11 +2430,18 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
               <span className="text-xs text-gray-600">{b.counts.pending}</span>
               <span className="text-xs text-gray-600">{b.counts.sent}</span>
               <span className="text-xs text-gray-600">{b.counts.skipped}</span>
+              <div className="flex items-center gap-1">
               <label className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer w-fit">
                 <Upload className="h-3 w-3" /> Загрузить
                 <input type="file" accept=".xlsx,.xls,.csv" className="hidden" disabled={busy}
                   onChange={(e) => { void uploadContacts(b.id, e); }} />
               </label>
+                <button type="button" onClick={() => { void deleteBase(b); }} disabled={busy}
+                  title="Удалить базу вместе с контактами"
+                  className="p-1 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer disabled:opacity-50">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
           ))}
         </div>
@@ -2583,7 +2895,9 @@ function CampaignView({ campaign, isOwn, onUpdate, onDelete }: {
 
       <div>
         {tab === 'settings' && <SettingsTab campaign={campaign} onSave={saveSettings} />}
-        {tab === 'accounts' && <CampaignAccountsTab campaignId={campaign.id} />}
+        {tab === 'accounts' && (
+          <CampaignAccountsTab campaignId={campaign.id} campaignStatus={campaign.status} />
+        )}
         {tab === 'bases' && <CampaignBasesTab campaignId={campaign.id} />}
         {tab === 'proxies' && <CampaignProxiesTab campaignId={campaign.id} />}
         {tab === 'warmup' && (

@@ -78,6 +78,26 @@ export function formatMoney(value: number, currency: string): string {
   return `${AMOUNT_FORMAT.format(value)} ${currency}`;
 }
 
+const SHARE_FORMAT = new Intl.NumberFormat('ru-RU', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+/**
+ * Доля в процентах с двумя знаками: `0.4412` → `44,12%`.
+ *
+ * Два знака, а не целые проценты, потому что округление до целого схлопывало
+ * весь хвост разбивки в одинаковый «0%»: строка на 530 ₽ и строка на 49 ₽
+ * выглядели одинаково, хотя различаются на порядок. Знаков ровно два и всегда:
+ * колонка выровнена по разряду, и прыгающая длина числа ломала бы столбик.
+ *
+ * На вход доля (0…1), а не проценты — так же, как хранится `item.share`.
+ */
+export function formatShare(fraction: number): string {
+  if (!Number.isFinite(fraction)) return '—';
+  return `${SHARE_FORMAT.format(fraction * 100)}%`;
+}
+
 export function formatDelta(delta: number | null): string {
   if (delta === null) return '—';
   const sign = delta > 0 ? '+' : '';

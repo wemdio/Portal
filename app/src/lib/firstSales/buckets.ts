@@ -52,6 +52,33 @@ export function bucketKey(date: Date, groupBy: GroupBy): string {
   return isoDate(msk);
 }
 
+/**
+ * Границы корзины по её ключу — обратная операция к `bucketKey`.
+ *
+ * Нужна, когда пользователь ткнул в столбец графика и мы хотим показать
+ * содержимое именно этой корзины: у дня это один и тот же день, у недели —
+ * плюс шесть дней, у месяца — до последнего числа. Обе границы включительны,
+ * как и везде в дашборде.
+ *
+ * Арифметика в UTC без сдвига на МСК: ключ уже пришёл из `bucketKey`, то есть
+ * это календарная дата в московском времени, а не момент времени. Повторный
+ * сдвиг увёл бы её на день.
+ */
+export function bucketRange(key: string, groupBy: GroupBy): { from: string; to: string } {
+  const [y, m, d] = key.split('-').map(Number);
+  if (!y || !m || !d) return { from: key, to: key };
+
+  if (groupBy === 'day') return { from: key, to: key };
+
+  if (groupBy === 'week') {
+    const end = new Date(Date.UTC(y, m - 1, d + 6));
+    return { from: key, to: isoDate(end) };
+  }
+
+  // Нулевой день следующего месяца — это последний день текущего.
+  return { from: key, to: isoDate(new Date(Date.UTC(y, m, 0))) };
+}
+
 /** Непрерывный ряд ключей от начала до конца включительно. Пустые корзины нужны:
  *  без них график молча схлопывает провалы, и «ноль встреч в среду» выглядит как
  *  «среды не было». */

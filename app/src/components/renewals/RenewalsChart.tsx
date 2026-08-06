@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useRef } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import type { EChartsCoreOption } from 'echarts/core';
 
 import EChart from '@/components/charts/EChart';
@@ -62,8 +62,8 @@ function axisAmount(value: number): string {
 interface TooltipItem {
   seriesName?: string;
   value?: number;
-  color?: string;
   dataIndex?: number;
+  seriesIndex?: number;
 }
 
 /**
@@ -77,16 +77,32 @@ interface TooltipItem {
  * «отстаёт». Две отдельные панели с общей осью X показывают ровно ту же связь,
  * но ни к чему не подталкивают: сравниваются формы, а не высоты.
  */
+/** Подсветка выбранной корзины: вертикальная полоса на всю высоту панели. */
+function selectionMark(index: number) {
+  return {
+    silent: true,
+    itemStyle: { color: HOVER_BAND },
+    // Границы полуцелые: на категориальной оси число — это индекс категории,
+    // и ±0.5 даёт ровно её полосу, от середины промежутка до середины следующего.
+    data: [[{ xAxis: index - 0.5 }, { xAxis: index + 0.5 }]],
+  };
+}
+
 function buildOption(
   data: RenewalSeriesBucket[],
   groupBy: GroupBy,
   theme: ChartTheme,
   animate: boolean,
+  selectedIndex: number,
 ): EChartsCoreOption {
   const labels = data.map((b) => formatKey(b.key, groupBy));
   const keys = data.map((b) => b.key);
   const countColor = seriesColor(theme, 0);
   const revenueColor = seriesColor(theme, 2);
+
+  // Квадратики в подсказке — по своему списку: у столбца заливка объект-градиент,
+  // и `params.color` вернул бы его, а не строку (см. TimeSeriesChart).
+  const swatches = [countColor, revenueColor];
 
   const axisLabel = { color: AXIS_TEXT, fontSize: AXIS_FONT_SIZE, fontFamily: CHART_FONT };
 
@@ -128,7 +144,9 @@ function buildOption(
             const isMoney = item.seriesName === 'Оборот, ₽';
             const value = Number(item.value ?? 0);
             return `<div style="display:flex;align-items:center;gap:8px;margin-top:4px">
-                      <span style="width:10px;height:10px;border-radius:3px;background:${item.color};flex:none"></span>
+                      <span style="width:10px;height:10px;border-radius:3px;background:${
+                        swatches[item.seriesIndex ?? 0] ?? 'transparent'
+                      };flex:none"></span>
                       <span style="opacity:.75">${item.seriesName ?? ''}</span>
                       <span style="margin-left:auto;font-variant-numeric:tabular-nums;font-weight:600">${
                         isMoney ? `${formatRub(value)} ₽` : value
@@ -187,6 +205,7 @@ function buildOption(
           color: verticalGradient(countColor),
           borderRadius: [4, 4, 0, 0] as [number, number, number, number],
         },
+        ...(selectedIndex >= 0 ? { markArea: selectionMark(selectedIndex) } : {}),
       },
       {
         name: 'Оборот, ₽',
@@ -204,6 +223,7 @@ function buildOption(
         symbolSize: 7,
         lineStyle: { width: 2.5, color: revenueColor },
         itemStyle: { color: revenueColor, borderColor: theme.surface, borderWidth: 2 },
+        ...(selectedIndex >= 0 ? { markArea: selectionMark(selectedIndex) } : {}),
       },
     ],
   };
@@ -216,20 +236,50 @@ function buildOption(
  * видно каждое продление (см. план дашборда). Оставлен для быстрого взгляда
  * на динамику, а не как основной инструмент анализа.
  */
-export default function RenewalsChart({ series, groupBy }: { series: RenewalSeriesBucket[]; groupBy: GroupBy }) {
+export default function RenewalsChart({
+  series,
+  groupBy,
+  selectedKey = null,
+  onSelectKey,
+}: {
+  series: RenewalSeriesBucket[];
+  groupBy: GroupBy;
+  /** Выбранная корзина — подсвечивается полосой. */
+  selectedKey?: string | null;
+  /** Клик по корзине. Повторный клик по той же снимает выбор. */
+  onSelectKey?: (key: string | null) => void;
+}) {
   const rootRef = useRef<HTMLDivElement>(null);
   const theme = useChartTheme(rootRef);
   const reducedMotion = usePrefersReducedMotion();
 
+  const selectedIndex = selectedKey ? series.findIndex((b) => b.key === selectedKey) : -1;
+
   const option = useMemo(
-    () => (theme ? buildOption(series, groupBy, theme, !reducedMotion) : null),
-    [series, groupBy, theme, reducedMotion],
+    () => (theme ? buildOption(series, groupBy, theme, !reducedMotion, selectedIndex) : null),
+    [series, groupBy, theme, reducedMotion, selectedIndex],
+  );
+
+  const handleSelect = useCallback(
+    (index: number) => {
+      if (!onSelectKey) return;
+      const bucket = series[index];
+      if (!bucket) return;
+      onSelectKey(bucket.key === selectedKey ? null : bucket.key);
+    },
+    [onSelectKey, series, selectedKey],
   );
 
   return (
     <div ref={rootRef} className="rounded-xl border border-zinc-200 bg-white p-3">
       {option ? (
-        <EChart option={option} height={330} ariaLabel="Количество продлений и оборот по периодам" />
+        <EChart
+          option={option}
+          height={330}
+          ariaLabel="Количество продлений и оборот по периодам"
+          onSelectIndex={onSelectKey ? handleSelect : undefined}
+          className={onSelectKey ? 'cursor-pointer' : undefined}
+        />
       ) : (
         <div style={{ height: 330 }} />
       )}
