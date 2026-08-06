@@ -32,6 +32,8 @@ function payload(overrides: Partial<EngDashboardResponse> = {}): EngDashboardRes
           campaign_url: 'https://app.instantly.ai/app/campaign/cmp-9',
           campaign_name: 'Banks US · Aug 6',
         },
+        forecast: { pct: 42 },
+        actual: { reply_pct: 3.1, sent: 1200, measured_at: '2026-08-06T01:00:00.000Z' },
       },
       {
         id: 'v2',
@@ -42,6 +44,8 @@ function payload(overrides: Partial<EngDashboardResponse> = {}): EngDashboardRes
         dots: [true, true, false, false, false],
         stats: { companies: 0, emails_found: 147, valid_count: 87, appended_today: 0, leads_launched: 0 },
         launch: null,
+        forecast: null,
+        actual: null,
       },
     ],
     today: { appended: 38, valid: 40, collected: 50 },
