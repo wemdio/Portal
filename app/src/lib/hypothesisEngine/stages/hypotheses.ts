@@ -111,6 +111,45 @@ export async function loadMarkupHistory(
   }
 }
 
+/** Элемент фактического замера: прогноз вертикали против фактического reply%. */
+export interface HeActualsHistoryItem {
+  name: string;
+  predicted_pct: number;
+  actual_reply_pct: number;
+  actual_sent: number | null;
+}
+
+/**
+ * Фактические замеры прошлых запусков (петля сверки, he_verticals.actual_*)
+ * — якоря шкалы potential_pct для промпта. До применения миграции
+ * 20260806_0001 колонок нет → ошибка чтения → undefined (без них промпт
+ * работает как раньше). Best-effort, как остальная калибровка.
+ */
+export async function loadActualsHistory(ctx: HeStageContext): Promise<HeActualsHistoryItem[] | undefined> {
+  try {
+    const { data, error } = await ctx.supabase
+      .from('he_verticals')
+      .select('name, potential_pct, actual_reply_pct, actual_sent')
+      .not('actual_reply_pct', 'is', null)
+      .order('actual_measured_at', { ascending: false })
+      .limit(5);
+    if (error) throw new Error(error.message);
+    const items = ((data ?? []) as Array<Record<string, unknown>>)
+      .filter((r) => typeof r.actual_reply_pct === 'number')
+      .map((r) => ({
+        name: String(r.name ?? ''),
+        predicted_pct: typeof r.potential_pct === 'number' ? r.potential_pct : 0,
+        actual_reply_pct: r.actual_reply_pct as number,
+        actual_sent: typeof r.actual_sent === 'number' ? r.actual_sent : null,
+      }))
+      .filter((r) => r.name);
+    return items.length ? items : undefined;
+  } catch (e) {
+    stageLog(ctx, `[hypotheses] фактические замеры недоступны: ${e instanceof Error ? e.message : String(e)}`);
+    return undefined;
+  }
+}
+
 export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
   const usage = newUsage();
   const project = await readProject(ctx.supabase, job.project_id);
@@ -139,9 +178,10 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
 
   // Калибровочные данные — best-effort: сбой любого источника → undefined,
   // мгновенный проход продолжается без калибровки.
-  const [portfolioProfile, markupHistory] = await Promise.all([
+  const [portfolioProfile, markupHistory, actualsHistory] = await Promise.all([
     loadPortfolioProfile(ctx, market),
     loadMarkupHistory(ctx, job.project_id),
+    loadActualsHistory(ctx),
   ]);
 
   stageLog(ctx, '[hypotheses] мгновенный проход: 25–40 кандидатов…');
@@ -155,6 +195,7 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
     competitors,
     ...(portfolioProfile ? { portfolioProfile } : {}),
     ...(markupHistory ? { markupHistory } : {}),
+    ...(actualsHistory ? { actualsHistory } : {}),
     // Ручное описание бизнеса (спасение тонких сайтов) — поверх профиля.
     ...(typeof project.brief?.business_override === 'string' && project.brief.business_override.trim()
       ? { businessOverride: project.brief.business_override.trim() }

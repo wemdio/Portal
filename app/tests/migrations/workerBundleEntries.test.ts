@@ -36,4 +36,17 @@ describe('worker bundle entry lists point at real files', () => {
       expect(missing).toEqual([]);
     }
   });
+
+  // Крон-воркеры запускаются на проде через `docker exec … node /app/workers/<name>.js`,
+  // поэтому КАЖДЫЙ *Cron.ts из build:workers обязан быть и в esbuild-списке
+  // Dockerfile.worker — иначе бандл просто не попадёт в образ (gisSignalOutreachCron,
+  // 06.08.2026: в package.json был, в образе отсутствовал, пайплайн молча не стартовал).
+  it('every *Cron.ts in build:workers is also bundled in Dockerfile.worker', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'app', 'package.json'), 'utf8'));
+    const dockerEntries = workerEntriesFrom(fs.readFileSync(path.join(REPO_ROOT, 'Dockerfile.worker'), 'utf8'));
+    const pkgCrons = workerEntriesFrom(pkg.scripts['build:workers'] ?? '').filter((e) => /Cron\.ts$/.test(e));
+    expect(pkgCrons.length).toBeGreaterThan(0);
+    const missing = pkgCrons.filter((e) => !dockerEntries.includes(e));
+    expect(missing).toEqual([]);
+  });
 });

@@ -1672,10 +1672,11 @@ async def check_pipeline_runs() -> list[str]:
         print(f"[health] pipeline-runs connect error: {_normalize_network_error(e)}")
         return []
     try:
-        out, auto = await asyncio.gather(
-            _check_outreachos_pipeline(conn),
-            _check_autopipeline(conn),
-        )
+        # Последовательно, НЕ gather: asyncpg-соединение не поддерживает
+        # параллельные операции («another operation is in progress» — вторая
+        # проверка молча пропускалась каждый тик, инцидент 06.08).
+        out = await _check_outreachos_pipeline(conn)
+        auto = await _check_autopipeline(conn)
         return [*out, *auto]
     finally:
         await conn.close()
