@@ -72,6 +72,13 @@ rejected: ${input.markupHistory.rejected.join('; ') || '(empty)'}
 This is a strong signal of the client's taste: topics similar to rejected ones — lower their potential_pct and mark "RISK: …" in the rationale, but do NOT discard them automatically (this client's context is different). Topics similar to accepted ones — raise.`
       : '';
 
+  const actualsBlock =
+    input.actualsHistory?.length
+      ? `ACTUAL RESULTS OF PAST LAUNCHES (our forecast-vs-reality reconciliation):
+${input.actualsHistory.map((a) => `- "${a.name}": forecast ${a.predicted_pct}% → actual reply ${a.actual_reply_pct}%${a.actual_sent ? ` (${a.actual_sent.toLocaleString('en-US')} sent)` : ''}`).join('\n')}
+How to read: potential_pct is the vertical's potential, NOT a reply% forecast. But use these pairs as a scale: verticals with high actual replies received high forecasts. If your estimate for a similar segment diverges strongly from the fact — double-check it.`
+      : '';
+
   const user = `CLIENT PROFILE (website ${input.websiteUrl}):
 ${JSON.stringify(input.profile, null, 2)}
 ${input.businessOverride?.trim() ? `
@@ -86,7 +93,7 @@ ${potential.length ? potential.map((e) => `- ${e.name} (${e.potential_pct}%): ${
 
 BRAND CLOUD — "noise" (typical clients, background):
 ${noise.length ? noise.map((e) => `- ${e.name}`).join('\n') : '(empty)'}
-${portfolioBlock ? `\n${portfolioBlock}\n` : ''}${markupBlock ? `\n${markupBlock}\n` : ''}
+${portfolioBlock ? `\n${portfolioBlock}\n` : ''}${markupBlock ? `\n${markupBlock}\n` : ''}${actualsBlock ? `\n${actualsBlock}\n` : ''}
 TASK: produce 25–40 market hypotheses following the system prompt rules.
 
 FORMAT — JSON ONLY:

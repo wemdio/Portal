@@ -23,6 +23,7 @@ import {
   type HeSiteProfileOutput,
 } from '../schemas';
 import { projectMarket } from '../market';
+import { anchorPotentialPct } from '../scoreAnchor';
 import { verifyEvidenceItems } from '../verifyEvidence';
 import { buildEvidenceMessages } from '../prompts/evidence';
 import { buildEvidenceMessagesEn } from '../prompts/evidence.en';
@@ -189,11 +190,20 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
       const verifiedPct =
         check.valid.length === 0 ? Math.min(v.potential_pct, 20) : v.potential_pct;
 
+      // Дата-якорь: программный матч сегмента датасета + факт reply% →
+      // ограниченная поправка (0.7×LLM + 0.3×datasetScore). Без честного
+      // матча/объёма — оценка LLM без изменений (см. scoreAnchor.ts).
+      const anchor = await anchorPotentialPct(verifiedPct, candidate.title, market);
+      if (anchor.applied && anchor.pct !== verifiedPct) {
+        stageLog(ctx, `[evidence] «${candidate.title}»: ${verifiedPct}% → ${anchor.pct}% (${anchor.note})`);
+      }
+      const finalPct = anchor.pct;
+
       if (v.verdict === 'merge' && v.merge_with_title) {
         const target = accepted.find((a) => normTitle(a.title) === normTitle(v.merge_with_title as string));
         if (target) {
           target.evidence = [...target.evidence, ...check.valid].slice(0, MAX_EVIDENCE_PER_HYPOTHESIS);
-          target.potential_pct = Math.max(target.potential_pct, verifiedPct);
+          target.potential_pct = Math.max(target.potential_pct, finalPct);
           merged += 1;
           continue;
         }
@@ -209,7 +219,7 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
         // пустое поле — откат к исходной цепочке кандидата.
         fit_rationale: v.fit_rationale || candidate.fit_rationale,
         evidence: check.valid.slice(0, MAX_EVIDENCE_PER_HYPOTHESIS),
-        potential_pct: verifiedPct,
+        potential_pct: finalPct,
       });
     } catch (e) {
       dropped += 1;

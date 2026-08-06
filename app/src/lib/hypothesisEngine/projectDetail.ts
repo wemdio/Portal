@@ -11,6 +11,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { reconcileProjectVerticals } from './actualsReconcile';
 
 // Без data — тяжёлое jsonb-поле, деталка проекта его не тянет. sample_rows
 // (≤30 строк, серверный кап при записи) и columns лёгкие: шаг «База» рисует
@@ -165,6 +166,10 @@ export async function loadHeProjectDetail(
     vocabs = vocabsRes.data ?? [];
     templates = templatesRes.data ?? [];
   }
+
+  // Петля сверки прогноз↔факт: fire-and-forget (best-effort; свежесть
+  // замеров и объёмы проверяются внутри, деталку не тормозит).
+  void reconcileProjectVerticals(supabase, projectId).catch(() => {});
 
   return {
     ok: true,
