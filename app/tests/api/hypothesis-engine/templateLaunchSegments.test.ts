@@ -129,6 +129,7 @@ function seed() {
           id: BASE_ID,
           filename: 'leads.csv',
           columns: ['Email', 'Имя', 'Компания', 'Город'],
+          source: 'auto',
           data: BASE_ROWS,
         },
       ],

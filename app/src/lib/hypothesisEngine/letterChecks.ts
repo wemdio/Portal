@@ -22,7 +22,7 @@ export interface HeLetterRuleViolation {
   detail: string;
 }
 
-const GREETING_RE = /^(здравствуйте|добрый\s+день|доброе\s+утро|добрый\s+вечер|привет|hi\b|hello\b|dear\b|good\s+(morning|afternoon)|dzień\s+dobry|cześć)/i;
+const GREETING_RE = /^(здравствуйте|здравствуй|добрый\s+день|доброе\s+утро|добрый\s+вечер|доброго\s+(дня|времени)|привет|hi\b|hello\b|hey\b|dear\b|good\s+(morning|afternoon|day)|dzień\s+dobry|cześć|witam)/i;
 
 /** Стоп-фразы регламента (RU): точные формулировки + рекламные клише. */
 const STOP_PHRASES_RU = [
@@ -38,7 +38,13 @@ const STOP_PHRASES_RU = [
   'выгодн',
 ];
 
-const CLICHE_WORDS_RU = [/\bлидер(ом|ы|а)?\b/i, /\bлучши[йх]?\b/i, /\bэффективн(ый|ого|ым|ые)?\b/i];
+// \b в JS не работает с кириллицей — границы задаём lookaround'ами.
+const CYR = 'А-Яа-яЁёA-Za-z0-9_';
+const CLICHE_WORDS_RU = [
+  new RegExp(`(^|[^${CYR}])лидер(ом|ы|а)?($|[^${CYR}])`, 'i'),
+  new RegExp(`(^|[^${CYR}])лучши[йх]($|[^${CYR}])`, 'i'),
+  new RegExp(`(^|[^${CYR}])эффективн(ый|ого|ым|ые|ая|ой|ую)?($|[^${CYR}])`, 'i'),
+];
 
 /** Числа для фактчека: с «%», многозначные (≥10), десятичные с запятой/точкой. */
 const NUMBER_RE = /\d[\d\s]*(?:[.,]\d+)?\s*%|\d{2,}(?:[.,]\d+)?|\d+[.,]\d+/g;
@@ -49,8 +55,14 @@ function normalizeNumberToken(raw: string): string {
 
 /** Множество нормализованных чисел из корпуса материалов. */
 export function extractNumberFacts(corpus: string): Set<string> {
+  // Шум, который иначе покрывает фактчек ложно-положительно: uuid кейсов/
+  // проектов (цифровые группы) и ISO-даты/таймстампы (дни/минуты/секунды
+  // дают почти все двузначные числа).
+  const clean = corpus
+    .replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi, ' ')
+    .replace(/\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?(?:[+-]\d{2}:?\d{2})?)?/g, ' ');
   const out = new Set<string>();
-  for (const m of corpus.matchAll(NUMBER_RE)) {
+  for (const m of clean.matchAll(NUMBER_RE)) {
     const norm = normalizeNumberToken(m[0]);
     if (norm) out.add(norm);
     // «11,8%» покрывает и целое «12» не должно — но «в 2 раза» из «2,0» должно.

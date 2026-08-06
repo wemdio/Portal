@@ -108,34 +108,48 @@ const JS_STUB_MARK = 'требует JavaScript';
 
 /**
  * Дотянуть контентные + кейс-страницы тем же fetchText, что и главная.
+ * Бюджеты РАЗДЕЛЬНЫЕ: контентные пути (12 шт) не съедают попытки кейс-путей —
+ * иначе кейс-страницы недостижимы вообще (8 попыток < 12 контентных путей).
  * Каждая страница best-effort: 404/ошибка парсера — норма.
  */
 async function fetchExtraPages(
   fetchText: HeFetchTextFn,
   websiteUrl: string,
-): Promise<Array<{ url: string; text: string }>> {
+): Promise<{ content: Array<{ url: string; text: string }>; cases: Array<{ url: string; text: string }> }> {
   let origin: string;
   try {
     origin = new URL(websiteUrl).origin;
   } catch {
-    return [];
+    return { content: [], cases: [] };
   }
-  const pages: Array<{ url: string; text: string }> = [];
-  let attempts = 0;
-  for (const path of [...CONTENT_PAGE_PATHS, ...CASE_PAGE_PATHS]) {
-    if (attempts >= MAX_CONTENT_ATTEMPTS) break;
-    attempts++;
+  const fetchPath = async (path: string): Promise<{ url: string; text: string } | null> => {
     try {
       const text = await fetchText(origin + path);
-      if (text && text.trim().length >= MIN_PAGE_CHARS) {
-        pages.push({ url: origin + path, text });
-      }
+      if (text && text.trim().length >= MIN_PAGE_CHARS) return { url: origin + path, text };
     } catch {
       /* страницы может не существовать — это ожидаемо */
     }
-    if (pages.length >= MAX_CONTENT_PAGES + MAX_EXTRA_PAGES) break;
+    return null;
+  };
+
+  const content: Array<{ url: string; text: string }> = [];
+  let contentAttempts = 0;
+  for (const path of CONTENT_PAGE_PATHS) {
+    if (content.length >= MAX_CONTENT_PAGES || contentAttempts >= MAX_CONTENT_ATTEMPTS) break;
+    contentAttempts++;
+    const page = await fetchPath(path);
+    if (page) content.push(page);
   }
-  return pages;
+
+  const cases: Array<{ url: string; text: string }> = [];
+  let caseAttempts = 0;
+  for (const path of CASE_PAGE_PATHS) {
+    if (cases.length >= MAX_EXTRA_PAGES || caseAttempts >= MAX_PAGE_ATTEMPTS) break;
+    caseAttempts++;
+    const page = await fetchPath(path);
+    if (page) cases.push(page);
+  }
+  return { content, cases };
 }
 
 /** Корпус профиля: главная + контентные страницы с маркерами URL, с капом. */
@@ -193,13 +207,9 @@ async function refreshSiteCases(
   market: HeMarket,
   prefetchedPages?: Array<{ url: string; text: string }>,
 ): Promise<{ extracted: number; tokensUsed: number; costUsd: number }> {
-  // Страницы уже скачанных контентных+кейс-путей переиспользуем (стадия
-  // качала их для корпуса профиля); иначе — старый слепой перебор.
-  const extraPages = prefetchedPages
-    ? prefetchedPages
-        .filter((p) => CASE_PAGE_PATHS.some((path) => p.url.endsWith(path)))
-        .slice(0, MAX_EXTRA_PAGES)
-    : await fetchCasePages(fetchText, websiteUrl);
+  // Страницы уже скачанных кейс-путей переиспользуем (стадия качала их для
+  // корпуса профиля); не переданы — старый слепой перебор.
+  const extraPages = prefetchedPages ?? (await fetchCasePages(fetchText, websiteUrl));
   stageLog(ctx, `[site_profile] кейс-страницы: ${extraPages.length}`);
 
   const casesInput = { websiteUrl, siteText, extraPages };
@@ -278,8 +288,12 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
   // — уровень «прочитал билборд» и даёт усреднённые гипотезы. Кейс-страницы
   // из этой же пачки уходят в refreshSiteCases (без повторных фетчей).
   const extraPages = await fetchExtraPages(fetchText, project.website_url);
-  stageLog(ctx, `[site_profile] главная ${siteText.length} символов + ${extraPages.length} доп. страниц, профиль…`);
-  const corpus = buildProfileCorpus(siteText, extraPages);
+  const corpusPages = [...extraPages.content, ...extraPages.cases];
+  stageLog(
+    ctx,
+    `[site_profile] главная ${siteText.length} символов + ${corpusPages.length} доп. страниц (кейс: ${extraPages.cases.length}), профиль…`,
+  );
+  const corpus = buildProfileCorpus(siteText, corpusPages);
 
   // Гейт «тонкого» сайта: текста мало или пришла JS-заглушка парсера →
   // помечаем в brief (UI просит ручное описание бизнеса, business_override).
@@ -296,8 +310,16 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
   );
   addUsage(usage, llm);
 
+  // Brief перечитываем прямо перед записью: за минуты LLM-вызовов пользователь
+  // мог сохранить overrides (offer/style/signature/business) через PATCH —
+  // спред от протухшего снапшота их бы затёр.
+  const { data: freshProject } = await ctx.supabase
+    .from('he_projects')
+    .select('brief')
+    .eq('id', project.id)
+    .single();
   const brief = {
-    ...(project.brief ?? {}),
+    ...(((freshProject as { brief?: Record<string, unknown> } | null)?.brief) ?? project.brief ?? {}),
     website_url: project.website_url,
     site_profile: llm.data,
     site_thin: siteThin,
@@ -320,7 +342,7 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
       siteText,
       fetchText,
       market,
-      extraPages,
+      extraPages.cases,
     );
     usage.tokensUsed += casesResult.tokensUsed;
     usage.costUsd += casesResult.costUsd;

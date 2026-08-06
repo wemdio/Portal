@@ -83,4 +83,26 @@ describe('numbers fact-check', () => {
   it('normalizes comma decimals and percent/space forms', () => {
     expect(findUnverifiedNumbers('выросла в 1.7 раза и +12 %', facts)).toEqual([]);
   });
+
+  it('uuid/timestamps in the corpus do not whitelist hallucinated numbers', () => {
+    const dirty = extractNumberFacts(
+      'Кейс id 019f7b03-2673-7841-a189-f30fa7007db1 создан 2024-05-12T10:20:30.123Z. Результат: 34 встречи.',
+    );
+    expect(findUnverifiedNumbers('12 клиентов и 30% роста', dirty)).toEqual(['12', '30%']);
+    expect(findUnverifiedNumbers('34 встречи', dirty)).toEqual([]);
+  });
+});
+
+describe('cliché boundaries (Cyrillic \\b workaround)', () => {
+  it('flags «лидер/лучший/эффективный» in Russian text', () => {
+    const body = 'Здравствуйте!\n\nМы лидеры рынка, самый лучший и эффективный подход. Поговорим?\n\nКоманда';
+    const v = checkLetterRules([{ subject: 't', body }], 'ru', new Set());
+    expect(v.filter((x) => x.rule === 'stop_phrase').length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('does not misfire on lookalike substrings', () => {
+    const body = 'Здравствуйте!\n\nНаша эффективность выросла, блок «Эффективность» внутри. Поговорим?\n\nКоманда';
+    const v = checkLetterRules([{ subject: 't', body }], 'ru', new Set());
+    expect(v.filter((x) => x.rule === 'stop_phrase')).toEqual([]);
+  });
 });
