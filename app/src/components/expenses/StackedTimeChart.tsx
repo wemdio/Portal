@@ -1,8 +1,20 @@
 'use client';
 
-import { useMemo, useSyncExternalStore, type ReactElement, type ReactNode } from 'react';
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { useMemo, useRef, type ReactNode } from 'react';
+import type { EChartsCoreOption } from 'echarts/core';
 
+import EChart from '@/components/charts/EChart';
+import {
+  AXIS_LINE,
+  AXIS_TEXT,
+  CHART_FONT,
+  GRID_LINE,
+  HOVER_BAND,
+  tooltipSkin,
+  useChartTheme,
+  usePrefersReducedMotion,
+  type ChartTheme,
+} from '@/components/charts/theme';
 import { formatRub } from '@/lib/expenses/client';
 import type { GroupBy } from '@/lib/expenses/period';
 
@@ -16,7 +28,7 @@ import type { GroupBy } from '@/lib/expenses/period';
  * приходит пропсами-листьями, а разрезом управляет вызывающий (у расхода —
  * переключателем в `toolbar`, у дохода его нет вовсе).
  *
- * Оформление собрано вручную, а не оставлено на дефолты recharts: столбцы со
+ * Оформление собрано вручную, а не оставлено на дефолты: столбцы со
  * скруглённой вершиной, зазор между сегментами стека, только горизонтальная
  * сетка, свой тултип поверхностью как у карточек портала. Цвета рядов приходят
  * из `colorOf` как `var(--chart-series-N)` — значения живут в `globals.css`,
@@ -40,57 +52,11 @@ const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн'
 /** Скругление свободного конца столбца. У основания угол остаётся прямым. */
 const BAR_RADIUS = 4;
 
-/** Зазор между сегментами стека — стек должен читаться как набор частей. */
-const STACK_GAP = 2;
-
-/** Ниже этого сегмент не режем: у тонкой полоски зазор съел бы её целиком. */
-const MIN_SEGMENT_HEIGHT = 1.5;
-
 /** Столбец не должен разъезжаться в плиту, когда бакетов в периоде два-три. */
 const MAX_BAR_WIDTH = 44;
 
-/**
- * Оси, сетка и подсветка наведения заданы нейтральным серым с прозрачностью, а
- * не переменной темы: полупрозрачный серый одинаково спокойно ложится и на
- * белую карточку, и на тёмную поверхность, и не требует второго набора
- * значений. Цвета рядов — другое дело, они в CSS-переменных.
- */
-const GRID_LINE = 'rgba(127, 127, 133, 0.22)';
-const AXIS_LINE = 'rgba(127, 127, 133, 0.35)';
-const AXIS_TEXT = 'rgba(127, 127, 133, 0.95)';
-const HOVER_BAND = 'rgba(127, 127, 133, 0.1)';
-
-/**
- * Размер подписи продублирован в `style`, и именно строкой с единицами.
- *
- * Чтобы решить, переносить ли подпись, recharts меряет её ширину скрытым
- * span-ом, а стиль для замера копирует через `Object.assign(el.style, …)` —
- * туда доезжает только `style`, и только валидным CSS. С размером в одном лишь
- * атрибуте (или числом) замер идёт по 16px: «550 тыс» не влезает в ширину оси
- * и рвётся на две строки, хотя нарисовано будет одиннадцатым кеглем.
- */
-const AXIS_TICK = { fontSize: 11, fill: AXIS_TEXT, style: { fontSize: '11px' } };
-
-const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
-
-function subscribeToMotionPreference(onChange: () => void): () => void {
-  const query = window.matchMedia(REDUCED_MOTION_QUERY);
-  query.addEventListener('change', onChange);
-  return () => query.removeEventListener('change', onChange);
-}
-
-/**
- * Появление столбцов — украшение, и пользователь вправе от него отказаться.
- * `useSyncExternalStore`, а не эффект со `setState`: на сервере значение
- * неизвестно, и честнее отдать «анимация разрешена», чем моргнуть состоянием.
- */
-function usePrefersReducedMotion(): boolean {
-  return useSyncExternalStore(
-    subscribeToMotionPreference,
-    () => window.matchMedia(REDUCED_MOTION_QUERY).matches,
-    () => false,
-  );
-}
+/** Непрозрачность неполного бакета — он не «провал», а незаконченный отрезок. */
+const PARTIAL_OPACITY = 0.45;
 
 /** Ключ бакета — всегда YYYY-MM-DD (начало бакета в МСК). Разбираем строкой:
  *  `new Date(key)` подставил бы часовой пояс браузера и мог бы съехать на день. */
@@ -138,148 +104,145 @@ function axisAmount(value: number): string {
   return formatRub(value);
 }
 
-interface ChartRow {
-  bucket: string;
-  label: string;
-  partial: boolean;
-  total: number;
-  [key: string]: string | number | boolean;
-}
-
-/** Края стека столбца: у нижнего сегмента не режем низ, у верхнего скругляем верх. */
-interface StackEdges {
-  bottom: string;
-  top: string;
-}
-
-/** Геометрия сегмента, которую recharts передаёт в `shape`. */
-interface SegmentGeometry {
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  fill?: string;
-  payload?: ChartRow;
-}
-
-/**
- * Прямоугольник со скруглением только сверху.
- *
- * Своя `path`, а не `radius` у `Bar`: `radius` скруглил бы каждый сегмент
- * стека, и столбец распался бы на плавающие таблетки. Скругляется только
- * свободный конец — у основания угол прямой, потому что там столбец стоит на
- * оси, а не заканчивается.
- */
-function segmentPath(x: number, y: number, width: number, height: number, radius: number): string {
-  if (radius <= 0) return `M${x},${y}h${width}v${height}h${-width}Z`;
-  const r = Math.min(radius, width / 2, height);
-  return [
-    `M${x},${y + r}`,
-    `a${r},${r} 0 0 1 ${r},${-r}`,
-    `h${width - 2 * r}`,
-    `a${r},${r} 0 0 1 ${r},${r}`,
-    `v${height - r}`,
-    `h${-width}`,
-    'Z',
-  ].join('');
-}
-
-function renderSegment(geometry: SegmentGeometry, seriesKey: string, edges: Map<string, StackEdges>): ReactElement {
-  const { x = 0, y = 0, width = 0, height = 0, fill, payload } = geometry;
-  if (!(width > 0) || !(height > 0)) return <g />;
-
-  const bucketEdges = payload ? edges.get(payload.bucket) : undefined;
-  // Зазор режется снизу сегмента, поэтому нижнему он не положен: иначе столбец
-  // повис бы над осью.
-  const gap = bucketEdges && bucketEdges.bottom === seriesKey ? 0 : STACK_GAP;
-  const drawnHeight = height - gap >= MIN_SEGMENT_HEIGHT ? height - gap : height;
-  const radius = bucketEdges && bucketEdges.top === seriesKey ? BAR_RADIUS : 0;
-
-  return (
-    <path
-      d={segmentPath(x, y, width, drawnHeight, radius)}
-      // Цвет через `style`, а не через атрибут `fill`: значение приходит как
-      // `var(--chart-series-N)`, а в презентационном атрибуте `var()`
-      // поддерживается неровно.
-      style={{ fill }}
-      // Неполный бакет рисуется полупрозрачным: календарно он выходит за
-      // границы периода, и без пометки низкий столбец читается как провал,
-      // хотя данные полные.
-      fillOpacity={payload?.partial ? 0.45 : 1}
-    />
-  );
-}
-
-interface TooltipPayloadItem {
-  dataKey?: string | number;
-  value?: number;
-  color?: string;
-  payload?: ChartRow;
-}
-
-function ChartTooltip({
-  active,
-  payload,
-  groupBy,
-  labelOf,
-  zeroText,
-  partialNote,
-}: {
-  active?: boolean;
-  payload?: TooltipPayloadItem[];
-  groupBy: GroupBy;
-  labelOf: (key: string) => string;
-  zeroText: string;
-  partialNote: string;
-}) {
-  const row = payload?.[0]?.payload;
-  if (!active || !row) return null;
-
-  // Ряды перечислены снизу вверх (порядок объявления `Bar`), а глазом столбец
-  // читается сверху вниз — разворачиваем, чтобы список совпал с картинкой.
-  const parts = (payload ?? []).filter((item) => Number(item.value ?? 0) !== 0).reverse();
-
-  return (
-    <div className="min-w-[200px] rounded-xl border border-zinc-200 bg-white px-3 py-2 shadow-lg">
-      <div className="text-xs font-semibold text-zinc-900">{fullLabel(row.bucket, groupBy)}</div>
-      <div className="mt-1.5 space-y-1">
-        {parts.map((item) => (
-          <div key={String(item.dataKey)} className="flex items-center gap-2">
-            {/* Квадратик — подсказка, а не единственный ключ: рядом всегда стоит
-                название ряда словом, иначе свёрнутая легенда стоила бы смысла. */}
-            <span
-              className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
-              style={{ background: item.color }}
-              aria-hidden="true"
-            />
-            <span className="text-[11px] text-zinc-600">{labelOf(String(item.dataKey))}</span>
-            <span className="ml-auto font-mono text-[11px] tabular-nums text-zinc-900">
-              {formatRub(Number(item.value ?? 0))} ₽
-            </span>
-          </div>
-        ))}
-        {parts.length === 0 ? <div className="text-[11px] text-zinc-400">{zeroText}</div> : null}
-      </div>
-      <div className="mt-1.5 flex items-center gap-2 border-t border-zinc-100 pt-1.5">
-        <span className="text-[11px] text-zinc-500">Итого</span>
-        <span className="ml-auto font-mono text-[11px] font-semibold tabular-nums text-zinc-900">
-          {formatRub(row.total)} ₽
-        </span>
-      </div>
-      {row.partial ? (
-        <p className="mt-1.5 max-w-[240px] border-t border-amber-200 pt-1.5 text-[11px] text-amber-700">
-          {partialNote}
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
 /** Порядок рядов фиксирован, чтобы цвета не прыгали между перерисовками. */
 function orderKeys(keys: Set<string>, canonical: readonly string[]): string[] {
   const known = canonical.filter((key) => keys.has(key));
   const unknown = [...keys].filter((key) => !canonical.includes(key)).sort();
   return [...known, ...unknown];
+}
+
+interface TooltipItem {
+  seriesName?: string;
+  value?: number;
+  color?: string;
+  dataIndex?: number;
+}
+
+function buildOption({
+  points,
+  keys,
+  groupBy,
+  labelOf,
+  colorAt,
+  theme,
+  animate,
+  zeroBucketText,
+  partialTooltip,
+}: {
+  points: StackedPoint[];
+  keys: string[];
+  groupBy: GroupBy;
+  labelOf: (key: string) => string;
+  colorAt: (key: string) => string;
+  theme: ChartTheme;
+  animate: boolean;
+  zeroBucketText: string;
+  partialTooltip: string;
+}): EChartsCoreOption {
+  // Верхний непустой сегмент каждого столбца считаем один раз: скругляется
+  // только свободный конец стека, у основания и в середине угол прямой, иначе
+  // столбец распался бы на плавающие таблетки.
+  const topKeyByBucket = new Map<string, string>();
+  for (const point of points) {
+    const present = keys.filter((key) => Number(point.parts[key] ?? 0) > 0);
+    if (present.length > 0) topKeyByBucket.set(point.bucket, present[present.length - 1]);
+  }
+
+  return {
+    animation: animate,
+    animationDuration: 320,
+    textStyle: { fontFamily: CHART_FONT },
+    grid: { left: 4, right: 8, top: 12, bottom: 4, containLabel: true },
+    tooltip: {
+      trigger: 'axis',
+      // Подсветка идёт на всю категорию, а не на ширину столбца: попадать мышью
+      // в узкую полоску не нужно, достаточно навести на её вертикальную зону.
+      axisPointer: { type: 'shadow', shadowStyle: { color: HOVER_BAND } },
+      ...tooltipSkin(theme),
+      formatter: (params: unknown) => {
+        const items = (Array.isArray(params) ? params : [params]) as TooltipItem[];
+        const index = items[0]?.dataIndex ?? 0;
+        const point = points[index];
+        if (!point) return '';
+
+        // Ряды перечислены снизу вверх (порядок объявления серий), а глазом
+        // столбец читается сверху вниз — разворачиваем, чтобы список совпал
+        // с картинкой.
+        const rows = items
+          .filter((item) => Number(item.value ?? 0) !== 0)
+          .reverse()
+          .map(
+            (item) =>
+              `<div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+                 <span style="width:10px;height:10px;border-radius:3px;background:${item.color};flex:none"></span>
+                 <span style="opacity:.75">${item.seriesName ?? ''}</span>
+                 <span style="margin-left:auto;font-variant-numeric:tabular-nums;font-weight:600">${formatRub(
+                   Number(item.value ?? 0),
+                 )} ₽</span>
+               </div>`,
+          )
+          .join('');
+
+        const empty = rows ? '' : `<div style="margin-top:4px;opacity:.6">${zeroBucketText}</div>`;
+        const total = `<div style="display:flex;gap:8px;margin-top:8px;padding-top:6px;border-top:1px solid ${GRID_LINE}">
+                         <span style="opacity:.6">Итого</span>
+                         <span style="margin-left:auto;font-variant-numeric:tabular-nums;font-weight:700">${formatRub(
+                           point.total,
+                         )} ₽</span>
+                       </div>`;
+        const partial = point.partial
+          ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid ${GRID_LINE};max-width:240px;white-space:normal;color:#b45309">${partialTooltip}</div>`
+          : '';
+
+        return `<div style="font-weight:600">${fullLabel(point.bucket, groupBy)}</div>${rows}${empty}${total}${partial}`;
+      },
+    },
+    xAxis: {
+      type: 'category',
+      data: points.map((point) => axisLabel(point.bucket, groupBy)),
+      axisLine: { lineStyle: { color: AXIS_LINE } },
+      axisTick: { show: false },
+      axisLabel: { color: AXIS_TEXT, fontSize: 11, fontFamily: CHART_FONT, margin: 10 },
+    },
+    yAxis: {
+      type: 'value',
+      splitLine: { lineStyle: { color: GRID_LINE } },
+      axisLabel: {
+        color: AXIS_TEXT,
+        fontSize: 11,
+        fontFamily: CHART_FONT,
+        formatter: (value: number) => axisAmount(value),
+      },
+    },
+    series: keys.map((key) => ({
+      name: labelOf(key),
+      type: 'bar' as const,
+      stack: 'total',
+      barMaxWidth: MAX_BAR_WIDTH,
+      barCategoryGap: '24%',
+      itemStyle: {
+        color: colorAt(key),
+        // Зазора между сегментами стека в echarts нет, поэтому рисуем рамку
+        // цветом карточки: у двух соседних сегментов она складывается в
+        // двухпиксельный просвет, и стек читается как набор частей.
+        borderColor: theme.surface,
+        borderWidth: 1,
+      },
+      data: points.map((point) => ({
+        value: point.parts[key] ?? 0,
+        itemStyle: {
+          borderRadius:
+            topKeyByBucket.get(point.bucket) === key
+              ? ([BAR_RADIUS, BAR_RADIUS, 0, 0] as [number, number, number, number])
+              : ([0, 0, 0, 0] as [number, number, number, number]),
+          // Неполный бакет рисуется полупрозрачным: календарно он выходит за
+          // границы периода, и без пометки низкий столбец читается как провал,
+          // хотя данные полные.
+          opacity: point.partial ? PARTIAL_OPACITY : 1,
+        },
+      })),
+    })),
+  };
 }
 
 export default function StackedTimeChart({
@@ -313,49 +276,48 @@ export default function StackedTimeChart({
   /** Управление разрезом, если оно у стороны есть. */
   toolbar?: ReactNode;
 }) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const theme = useChartTheme(rootRef);
   const reducedMotion = usePrefersReducedMotion();
 
-  const { data, keys, edges, partialLabels } = useMemo(() => {
+  const { keys, partialLabels } = useMemo(() => {
     const seen = new Set<string>();
-    const rows: ChartRow[] = points.map((point) => {
+    for (const point of points) {
       for (const key of Object.keys(point.parts)) seen.add(key);
-      return {
-        ...point.parts,
-        bucket: point.bucket,
-        label: axisLabel(point.bucket, groupBy),
-        partial: point.partial,
-        total: point.total,
-      };
-    });
-
-    const ordered = orderKeys(seen, canonicalOrder);
-
-    // Края стека считаем один раз на перерисовку: `shape` вызывается для
-    // каждого сегмента каждого столбца, и искать их там заново — лишняя работа
-    // в горячем месте.
-    const stackEdges = new Map<string, StackEdges>();
-    for (const row of rows) {
-      const present = ordered.filter((key) => Number(row[key] ?? 0) > 0);
-      if (present.length === 0) continue;
-      stackEdges.set(row.bucket, { bottom: present[0], top: present[present.length - 1] });
     }
-
     return {
-      data: rows,
-      keys: ordered,
-      edges: stackEdges,
-      partialLabels: rows.filter((row) => row.partial).map((row) => row.label),
+      keys: orderKeys(seen, canonicalOrder),
+      partialLabels: points.filter((p) => p.partial).map((p) => axisLabel(p.bucket, groupBy)),
     };
   }, [points, groupBy, canonicalOrder]);
 
+  const option = useMemo(() => {
+    if (!theme || points.length === 0) return null;
+    // `theme.resolveColor` привязан к элементу, от которого тема прочитана, —
+    // так `var(--chart-series-N)` разворачивается без обращения к ref во время
+    // рендера, а `theme` в зависимостях даёт пересчёт при переключении темы.
+    const colorAt = (key: string) => theme.resolveColor(colorOf(key));
+    return buildOption({
+      points,
+      keys,
+      groupBy,
+      labelOf,
+      colorAt,
+      theme,
+      animate: !reducedMotion,
+      zeroBucketText,
+      partialTooltip,
+    });
+  }, [points, keys, groupBy, labelOf, colorOf, theme, reducedMotion, zeroBucketText, partialTooltip]);
+
   return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-3">
+    <div ref={rootRef} className="rounded-xl border border-zinc-200 bg-white p-3">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-zinc-900">{title}</h3>
         <div className="flex flex-wrap items-center gap-2">{toolbar}</div>
       </div>
 
-      {data.length === 0 ? (
+      {points.length === 0 ? (
         <div className="px-3 py-10 text-center text-sm text-zinc-400">{emptyText}</div>
       ) : (
         // Легенда — вертикальным блоком СПРАВА от графика, а не полосой над
@@ -367,55 +329,12 @@ export default function StackedTimeChart({
         // На узком экране (`flex-col`) блок возвращается под график: колонка
         // легенды съела бы там половину ширины, а график важнее справочника.
         <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
-          <div className="min-w-0 flex-1" style={{ height: 288 }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={data} margin={{ top: 12, right: 12, left: 0, bottom: 0 }} barCategoryGap="24%">
-              <CartesianGrid vertical={false} stroke={GRID_LINE} />
-              <XAxis
-                dataKey="label"
-                tick={AXIS_TICK}
-                axisLine={{ stroke: AXIS_LINE }}
-                tickLine={false}
-                tickMargin={8}
-              />
-              <YAxis
-                tick={AXIS_TICK}
-                axisLine={false}
-                tickLine={false}
-                width={60}
-                tickMargin={6}
-                tickFormatter={axisAmount}
-              />
-              <Tooltip
-                // Подсветка идёт на всю категорию, а не на ширину столбца:
-                // попадать мышью в узкую полоску не нужно, достаточно навести
-                // на её вертикальную зону.
-                cursor={{ fill: HOVER_BAND }}
-                isAnimationActive={!reducedMotion}
-                content={
-                  <ChartTooltip
-                    groupBy={groupBy}
-                    labelOf={labelOf}
-                    zeroText={zeroBucketText}
-                    partialNote={partialTooltip}
-                  />
-                }
-              />
-              {keys.map((key) => (
-                <Bar
-                  key={key}
-                  dataKey={key}
-                  name={labelOf(key)}
-                  stackId="a"
-                  fill={colorOf(key)}
-                  maxBarSize={MAX_BAR_WIDTH}
-                  isAnimationActive={!reducedMotion}
-                  animationDuration={320}
-                  shape={(geometry: unknown) => renderSegment(geometry as SegmentGeometry, key, edges)}
-                />
-              ))}
-            </BarChart>
-          </ResponsiveContainer>
+          <div className="min-w-0 flex-1">
+            {option ? (
+              <EChart option={option} height={288} ariaLabel={title} />
+            ) : (
+              <div style={{ height: 288 }} />
+            )}
           </div>
 
           {/* Легенда видна всегда — без кнопки и без сворачивания. Прятать
