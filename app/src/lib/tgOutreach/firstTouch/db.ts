@@ -13,7 +13,8 @@ export async function loadCampaignBaseIds(
   const { data } = await db
     .from('tg_outreach_campaign_bases')
     .select('base_id')
-    .eq('campaign_id', campaignId);
+    .eq('campaign_id', campaignId)
+    .limit(500);
   return (data ?? []).map((r) => (r as { base_id: string }).base_id);
 }
 
