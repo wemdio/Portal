@@ -202,3 +202,72 @@ export async function launchEngTemplate(
     body: JSON.stringify(body),
   });
 }
+
+/* ── ENG Command Center (GET /eng/dashboard) ── */
+
+/** Этап вертикали на дашборде (порядок конвейера research → … → launched). */
+export type EngDashStage =
+  | 'research'
+  | 'letters'
+  | 'collecting'
+  | 'construct'
+  | 'analyzing'
+  | 'analyzed'
+  | 'template'
+  | 'launched';
+
+export interface EngDashboardVertical {
+  id: string;
+  project_id: string;
+  name: string;
+  stage: EngDashStage;
+  /** Короткая живой строки этапа ('constructor: 87/147 valid'). */
+  stageDetail: string;
+  /** Пять точек прогресса: research → letters → base → template → launched. */
+  dots: boolean[];
+  stats: {
+    companies: number;
+    emails_found: number;
+    valid_count: number;
+    appended_today: number;
+    leads_launched: number;
+  };
+  launch: { campaign_url: string; campaign_name: string } | null;
+}
+
+export interface EngDashboardEvent {
+  type:
+    | 'letters_ready'
+    | 'base_collected'
+    | 'base_analyzed'
+    | 'template_ready'
+    | 'launched'
+    | 'refill_appended'
+    | 'refill_empty'
+    | 'failed';
+  text: string;
+  at: string;
+}
+
+export interface EngDashboardActiveJob {
+  id: string;
+  project_id: string;
+  stage: string;
+  status: string;
+  vertical_id: string | null;
+  progress: { done?: number; total?: number; label?: string } | null;
+}
+
+export interface EngDashboardResponse {
+  projects?: Array<{ id: string; name: string; status: string }>;
+  verticals?: EngDashboardVertical[];
+  today?: { appended: number; valid: number; collected: number };
+  autoRefill?: { enabled: boolean; next_run_at: string; daily_cap: number };
+  events?: EngDashboardEvent[];
+  activeJobs?: EngDashboardActiveJob[];
+  error?: string;
+}
+
+export async function fetchEngDashboard(): Promise<EngDashboardResponse> {
+  return clientApiFetch<EngDashboardResponse>('/eng/dashboard');
+}

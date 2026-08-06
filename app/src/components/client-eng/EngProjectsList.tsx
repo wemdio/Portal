@@ -5,13 +5,17 @@
  * Данные — GET/POST /api/client/eng/projects (роут сам скоупит: только свои).
  * После создания — переход на мастер проекта (research стартует сразу на
  * бэкенде, мастер его поллит).
+ *
+ * Дефолтная точка ENG-кабинета — Command Center (/client/eng/dashboard):
+ * если проекты уже есть, список перенаправляет туда (обратно — «All projects»
+ * с дашборда, он же ?list=1, который редирект отключает).
  */
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
-import { useRouter } from 'next/navigation';
-import { ArrowRight, Globe } from 'lucide-react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { ArrowRight, Globe, LayoutDashboard } from 'lucide-react';
 import {
   createEngProject,
   fetchEngProjects,
@@ -21,6 +25,10 @@ import { EngBadge, EngCard, EngSpinner, fmtDate, projectStatusTone } from './ui'
 
 export function EngProjectsList() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // ?list=1 — явный заход на список (кнопка «All projects» с дашборда):
+  // авто-редирект на Command Center отключён, иначе кнопка зациклится.
+  const forceList = searchParams?.get('list') === '1';
   const [projects, setProjects] = useState<EngProjectListItem[] | null>(null);
   const [error, setError] = useState('');
   const [website, setWebsite] = useState('');
@@ -39,6 +47,15 @@ export function EngProjectsList() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Дефолтная точка после логина: с проектами — сразу Command Center.
+  useEffect(() => {
+    if (!forceList && projects && projects.length > 0) {
+      router.replace('/client/eng/dashboard' as Route);
+    }
+  }, [forceList, projects, router]);
+
+  const redirecting = !forceList && projects !== null && projects.length > 0;
 
   const onCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -118,6 +135,10 @@ export function EngProjectsList() {
         <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--cp-text-m)' }}>
           <EngSpinner /> Loading projects…
         </div>
+      ) : redirecting ? (
+        <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--cp-text-m)' }}>
+          <EngSpinner /> Opening the Command Center…
+        </div>
       ) : projects && projects.length === 0 ? (
         <EngCard>
           <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
@@ -125,6 +146,20 @@ export function EngProjectsList() {
           </p>
         </EngCard>
       ) : (
+        <div className="flex flex-col gap-3">
+          {forceList && (
+            <div className="flex justify-end">
+              <Link
+                href={'/client/eng/dashboard' as Route}
+                prefetch={false}
+                className="neu-pill px-3 py-1.5 text-xs font-semibold inline-flex items-center gap-1.5"
+                style={{ color: 'var(--cp-paper)' }}
+              >
+                <LayoutDashboard className="h-3.5 w-3.5" />
+                Command Center
+              </Link>
+            </div>
+          )}
         <div className="grid gap-3 md:grid-cols-2">
           {(projects ?? []).map((p) => (
             <Link
@@ -163,6 +198,7 @@ export function EngProjectsList() {
               )}
             </Link>
           ))}
+        </div>
         </div>
       )}
     </div>
