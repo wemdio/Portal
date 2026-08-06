@@ -91,6 +91,7 @@ import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { extractEmail } from '@/lib/tools/dfybUtils';
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { projectMarket, type HeMarket } from '../market';
+import { findIrrelevantRows } from '../relevanceGate';
 import {
   buildSourcePlanMessages,
   type HeCollectTask,
@@ -1200,11 +1201,23 @@ async function loadOtherBaseExclusionKeys(
 /* ─────────────────────────── Фаза CONSTRUCT ─────────────────────────── */
 
 /**
- * Шаги конструктора для авто-базы HE: дедуп почт → поиск на сайтах → валидация
- * → кап на компанию → описания. AI-шагов (ta_scoring/personalization) нет —
- * генерация и скоринг остаются в Движке вертикалей.
+ * Шаги конструктора для авто-базы HE: дедуп почт → (поиск на сайтах, если
+ * база бедная) → ВАЛИДАЦИЯ → кап на компанию → описания. AI-шагов
+ * (ta_scoring/personalization) нет — генерация и скоринг остаются в Движке.
+ *
+ * validate_emails — ВСЕГДА: раньше конструктор запускался только при бедных
+ * почтах, и базы реестра/карт (email уже есть, но это протухшие info@ из
+ * ЕГРЮЛ-источников) уходили в рассылку без валидации — баунсы ложились на
+ * домен клиента. find_emails — только когда email есть у ≤50% строк
+ * (ENG-базы pdl/funded/eng_hiring, бедные hh-сборки).
  */
-const CONSTRUCT_STEPS = ['dedup_email', 'find_emails', 'validate_emails', 'cap_emails_per_company', 'enrich_descriptions'];
+const CONSTRUCT_STEPS_TAIL = ['validate_emails', 'cap_emails_per_company', 'enrich_descriptions'];
+
+function constructStepsFor(merged: HeUnifiedRow[]): string[] {
+  const withEmail = merged.filter((r) => r.email.trim() !== '').length;
+  const poor = withEmail * 2 <= merged.length;
+  return ['dedup_email', ...(poor ? ['find_emails'] : []), ...CONSTRUCT_STEPS_TAIL];
+}
 /** Канонические заголовки сетки конструктора (порядок — как HE_AUTO_COLLECT_COLUMNS). */
 const CONSTRUCT_HEADERS_RU = ['Компания', 'Сайт', 'Email', 'Телефон', 'Вакансия', 'Адрес', 'Категория', 'Сотрудники', 'Выручка', 'ИНН', 'Источник'];
 const CONSTRUCT_HEADERS_EN = ['Company', 'Site', 'Email', 'Phone', 'Vacancy', 'Address', 'Category', 'Employees', 'Revenue', 'INN', 'Source'];
@@ -1241,13 +1254,11 @@ const CONSTRUCT_HEADER_MAP: Record<string, keyof HeUnifiedRow | 'description'> =
 };
 
 /**
- * Нужен ли конструктор: email есть у ≤50% строк. RU-источники (реестр, карты)
- * богаты почтами и проходят мимо; ENG-базы (pdl/funded/eng_hiring, почти все
- * email пустые) и бедные RU-сборки (hh) уходят на поиск/валидацию почт.
+ * Конструктор нужен всегда (см. constructStepsFor): валидация почт обязательна
+ * для любых источников; поиск почт — только для бедных баз.
  */
 function needsConstruct(merged: HeUnifiedRow[]): boolean {
-  const withEmail = merged.filter((r) => r.email.trim() !== '').length;
-  return withEmail * 2 <= merged.length;
+  return merged.length > 0;
 }
 
 /** merged-строки → сетка string[][] конструктора (заголовок по локали рынка). */
@@ -1587,14 +1598,16 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   }
 
   // ─── CONSTRUCT ───
-  // Обогащение собранных строк конструктором баз (почты/описания). Пропуск —
-  // когда email уже есть у >50% строк (RU-источники) или фаза завершалась
-  // ранее (construct.status='done' в collect_info). База в analyzing уходит
-  // только после импорта (или решения failed/cancelled BC-джобы).
+  // Обогащение собранных строк конструктором баз (валидация почт ВСЕГДА,
+  // поиск — для бедных баз, см. constructStepsFor). Пропуск — только когда
+  // фаза завершалась ранее (construct.status='done' в collect_info). База в
+  // analyzing уходит только после импорта (или решения failed/cancelled
+  // BC-джобы).
   let finalRows: HeUnifiedRow[] = merged;
   let finalColumns: string[] = [...HE_AUTO_COLLECT_COLUMNS];
-  // Вердикты валидации по строкам (из импорта конструктора) — нужны только
-  // refill-ветке: null, когда конструктор не запускался / вернул пусто.
+  // Вердикты валидации по строкам (из импорта конструктора) — refill-ветке и
+  // пометке строк (_email_status) при финальной записи: null, когда
+  // конструктор не запускался / вернул пусто.
   let finalEmailStatuses: Array<string | null> | null = null;
   const construct = info.construct;
   if ((!construct || construct.status === 'dispatched') && needsConstruct(merged)) {
@@ -1605,17 +1618,18 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         throw new Error('he_projects.created_by пуст — джобе конструктора некому принадлежать');
       }
       const locale = market === 'us' ? 'en' : 'ru';
+      const steps = constructStepsFor(merged);
       const bcJobId = await insertChildJob(ctx, 'base_constructor_jobs', {
         user_id: project.created_by,
         file_name: `HE · ${base.filename ?? baseId}`,
         status: 'pending',
         locale,
-        selected_steps: CONSTRUCT_STEPS,
+        selected_steps: steps,
         // Кап «до 5 почт на компанию» — ключ max, как читает STEP_RUNNERS воркера.
         step_config: { cap_emails_per_company: { max: 5 } },
         data: buildConstructGrid(merged, market),
         initial_row_count: merged.length,
-        total_steps: CONSTRUCT_STEPS.length,
+        total_steps: steps.length,
       });
       info.construct = { bc_job_id: bcJobId, status: 'dispatched', dispatched_at: new Date().toISOString() };
       await persistCollectInfo(ctx, baseId, info);
@@ -1713,15 +1727,58 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     });
   }
 
+  // ─── QUALITY GATE (обычный путь; refill фильтрует строки сам) ───
+  // 1) вердикты валидации почт → _email_status на строках (запуск пропускает
+  //    не-'ok' — баунсы не ложатся на домен клиента);
+  // 2) релевант-гейт LLM → _low_relevance на строках вне вертикали (шум
+  //    hh/карт/реестра). Пометки живут только в jsonb-строках: в columns не
+  //    попадают, поэтому сетки UI и маппинг операторов их не видят.
+  type StoredRow = HeUnifiedRow & { _email_status?: string; _low_relevance?: boolean };
+  let storedRows: StoredRow[] = finalRows;
+  if (finalEmailStatuses) {
+    storedRows = storedRows.map((r, i) => {
+      const st = finalEmailStatuses[i];
+      return st ? { ...r, _email_status: st } : r;
+    });
+  }
+  let lowRelevanceCount = 0;
+  try {
+    const { data: vrow } = await ctx.supabase
+      .from('he_verticals')
+      .select('name, summary')
+      .eq('id', base.vertical_id)
+      .maybeSingle();
+    const verticalName = (vrow as { name?: string } | null)?.name ?? '';
+    const gate = await findIrrelevantRows({
+      rows: storedRows,
+      verticalName,
+      verticalSummary: (vrow as { summary?: string | null } | null)?.summary ?? '',
+      language: market === 'us' ? 'en' : 'ru',
+      log: (m) => stageLog(ctx, m),
+    });
+    usage.tokensUsed += gate.tokensUsed;
+    usage.costUsd += gate.costUsd;
+    if (gate.flagged.size > 0) {
+      lowRelevanceCount = gate.flagged.size;
+      storedRows = storedRows.map((r, i) =>
+        gate.flagged.has(i) ? { ...r, _low_relevance: true } : r,
+      );
+      stageLog(ctx, `[base_collect] релевант-гейт: помечено ${lowRelevanceCount} строк вне вертикали`);
+    }
+  } catch (e) {
+    stageLog(ctx, `[base_collect] релевант-гейт пропущен: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const statsWithQuality = { ...stats, low_relevance: lowRelevanceCount };
+
   const { error: updError } = await ctx.supabase
     .from('he_bases')
     .update({
       columns: finalColumns,
-      sample_rows: finalRows.slice(0, SAMPLE_ROWS),
-      data: finalRows,
-      row_count: finalRows.length,
+      sample_rows: storedRows.slice(0, SAMPLE_ROWS),
+      data: storedRows,
+      row_count: storedRows.length,
       status: 'analyzing',
-      collect_info: { ...info, stats },
+      collect_info: { ...info, stats: statsWithQuality },
       updated_at: new Date().toISOString(),
     })
     .eq('id', baseId);
@@ -1738,7 +1795,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   return {
     result: {
       base_id: baseId,
-      rows: finalRows.length,
+      rows: storedRows.length,
+      low_relevance: lowRelevanceCount,
       tasks_done: done.length,
       tasks_failed: failed.length,
       failed_sources: failed.map((f) => f.source),

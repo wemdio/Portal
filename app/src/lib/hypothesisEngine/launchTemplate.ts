@@ -59,6 +59,7 @@ interface HeLaunchMessages {
   noValidEmails: string;
   tooManyLeads: (count: number) => string;
   segmentSplitInfo: (campaignsCount: number) => string;
+  rowsSkippedNote: (invalid: number, irrelevant: number) => string;
   instantlyFailedFallback: string;
   zeroAccepted: string;
   launchInfoSaveWarning: string;
@@ -80,6 +81,8 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       `Слишком много лидов для запуска из мастера: ${count.toLocaleString('ru-RU')}. Максимум — ${HE_LAUNCH_MAX_LEADS.toLocaleString('ru-RU')}`,
     segmentSplitInfo: (campaignsCount) =>
       `Сегментные варианты материализованы: запуск разбит на ${campaignsCount} кампании по сегментам базы (у каждой сегментной — свои тексты писем). Все кампании на паузе.`,
+    rowsSkippedNote: (invalid, irrelevant) =>
+      `Пропущено строк базы: ${invalid.toLocaleString('ru-RU')} с невалидным email (верификация) и ${irrelevant.toLocaleString('ru-RU')} нерелевантных вертикали.`,
     instantlyFailedFallback: 'Не удалось создать кампанию',
     zeroAccepted: 'Система рассылки не приняла ни одного контакта. Кампания оставлена на паузе.',
     launchInfoSaveWarning:
@@ -102,6 +105,8 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       `Too many leads for a wizard launch: ${count.toLocaleString('en-US')}. Maximum is ${HE_LAUNCH_MAX_LEADS.toLocaleString('en-US')}.`,
     segmentSplitInfo: (campaignsCount) =>
       `Segment variants materialized: the launch was split into ${campaignsCount} campaigns by base segment (each segment campaign carries its own letter texts). All campaigns are paused.`,
+    rowsSkippedNote: (invalid, irrelevant) =>
+      `Base rows skipped: ${invalid.toLocaleString('en-US')} with an invalid email (verification) and ${irrelevant.toLocaleString('en-US')} irrelevant to the vertical.`,
     instantlyFailedFallback: 'Failed to create the campaign',
     zeroAccepted: 'The mailing system did not accept any contacts. The campaign was left paused.',
     launchInfoSaveWarning:
@@ -202,7 +207,24 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   ];
 
   // 5. Лиды из базы. Все проверки — ДО любого вызова Instantly.
-  const rows = Array.isArray(base.data) ? (base.data as Array<Record<string, unknown>>) : [];
+  //    Качественные пометки автосборки (base_collect): _email_status !== 'ok'
+  //    (баунс-риск на домен клиента) и _low_relevance (шум источников вне
+  //    вертикали) в запуск не идут — считаем и показываем в warnings.
+  const allRows = Array.isArray(base.data) ? (base.data as Array<Record<string, unknown>>) : [];
+  let skippedInvalid = 0;
+  let skippedIrrelevant = 0;
+  const rows = allRows.filter((r) => {
+    if (r._low_relevance === true) {
+      skippedIrrelevant += 1;
+      return false;
+    }
+    const status = typeof r._email_status === 'string' ? r._email_status : null;
+    if (status && status !== 'ok') {
+      skippedInvalid += 1;
+      return false;
+    }
+    return true;
+  });
   const columns = Array.isArray(base.columns)
     ? base.columns.filter((c): c is string => typeof c === 'string')
     : [];
@@ -346,6 +368,9 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     campaigns,
   };
   const warnings: string[] = [];
+  if (skippedInvalid > 0 || skippedIrrelevant > 0) {
+    warnings.push(t.rowsSkippedNote(skippedInvalid, skippedIrrelevant));
+  }
   if (segmentWhens.length > 0 && !segmentsMaterialized) {
     const legacy = buildLaunchSequence(templateLetters);
     const segWarning =

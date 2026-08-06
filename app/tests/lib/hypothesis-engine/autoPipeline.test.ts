@@ -592,22 +592,27 @@ describe('base_collect refill-ветка', () => {
     expect(appendInput.leads.map((l: { email: string }) => l.email)).toEqual(['found@acme.com']);
   });
 
-  it('CONSTRUCT пропущен (>50% строк с email) — лиды из всех строк с email', async () => {
+  it('email-rich harvest → CONSTRUCT всё равно идёт (валидация обязательна), без find_emails', async () => {
     const richHarvest = [
       row({ company: 'Acme', website: 'acme.com', email: 'a@acme.com' }),
       row({ company: 'Globex', website: 'globex.com', email: 'g@globex.com' }),
     ];
     seedRefillTables(refillInfo(richHarvest));
-    appendLeadsMock.mockResolvedValue({ accepted: 2, skipped: 0 });
 
     const res = await runBaseCollectStage(makeRefillJob(), ctx());
-    expect((res.result as { refill: { status: string } }).refill.status).toBe('appended');
+    expect((res.result as { waiting: boolean }).waiting).toBe(true);
 
-    // Конструктор не вызывался.
-    expect(mockDb.inserts.find((i) => i.table === 'base_constructor_jobs')).toBeUndefined();
-    const appendInput = appendLeadsMock.mock.calls[0][0];
-    expect(appendInput.leads.map((l: { email: string }) => l.email)).toEqual(['a@acme.com', 'g@globex.com']);
-    expect(lastRunPatch()?.stats).toMatchObject({ collected: 2, with_email: 2, valid: 2, appended: 2 });
+    // Конструктор вызван даже на богатой базе: validate_emails обязателен,
+    // find_emails пропущен. Долив произойдёт после завершения конструктора.
+    const bcInsert = mockDb.inserts.find((i) => i.table === 'base_constructor_jobs');
+    expect(bcInsert).toBeDefined();
+    expect(bcInsert?.rows[0].selected_steps).toEqual([
+      'dedup_email',
+      'validate_emails',
+      'cap_emails_per_company',
+      'enrich_descriptions',
+    ]);
+    expect(appendLeadsMock).not.toHaveBeenCalled();
   });
 
   it('campaign_id из collect_info отсутствует → фолбэк на последний launched шаблон вертикали', async () => {
