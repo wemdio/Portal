@@ -88,8 +88,12 @@ function latestCampaignByVertical(templateRows: Array<Record<string, unknown>>):
       Date.parse(launch.created_at) ||
       Date.parse(asString(row.created_at)) ||
       0;
+    // При сплите запуска по сегментам долив идёт в ОСНОВНУЮ кампанию
+    // (segment=null) — новые лиды refill по сегментам не классифицированы.
+    const campaignId =
+      launch.campaigns?.find((c) => c.segment === null)?.campaign_id ?? launch.campaign_id;
     const current = best.get(verticalId);
-    if (!current || ts >= current.ts) best.set(verticalId, { campaignId: launch.campaign_id, ts });
+    if (!current || ts >= current.ts) best.set(verticalId, { campaignId, ts });
   }
   return new Map([...best.entries()].map(([k, v]) => [k, v.campaignId]));
 }

@@ -139,6 +139,7 @@ function seed(overrides: { template?: Record<string, unknown>; baseRows?: Array<
           id: BASE_ID,
           filename: 'leads.csv',
           columns: ['Email', 'Имя', 'Компания', 'Сайт'],
+          source: 'auto',
           data: overrides.baseRows ?? BASE_ROWS,
         },
       ],

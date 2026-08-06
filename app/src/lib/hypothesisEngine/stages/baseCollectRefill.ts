@@ -223,14 +223,25 @@ export function pickRefillTemplate(
     .filter((t): t is NonNullable<typeof t> => t !== null);
   if (launched.length === 0) return null;
 
-  const toPick = (t: (typeof launched)[number]): RefillTemplatePick => ({
-    campaignId: t.launch.campaign_id,
-    presetId: t.launch.preset_id,
-    operatorMapping: t.operatorMapping,
-  });
+  const toPick = (t: (typeof launched)[number]): RefillTemplatePick => {
+    // При сплите запуска по сегментам доливаем в ОСНОВНУЮ кампанию
+    // (segment=null): новые лиды refill не классифицированы по сегментам,
+    // в сегментную кампанию лить их нельзя. Без основной — скаляр (легаси).
+    const main =
+      t.launch.campaigns?.find((c) => c.segment === null) ?? null;
+    return {
+      campaignId: main?.campaign_id ?? t.launch.campaign_id,
+      presetId: t.launch.preset_id,
+      operatorMapping: t.operatorMapping,
+    };
+  };
 
   if (preferredCampaignId) {
-    const exact = launched.find((t) => t.launch.campaign_id === preferredCampaignId);
+    const exact = launched.find(
+      (t) =>
+        t.launch.campaign_id === preferredCampaignId ||
+        (t.launch.campaigns ?? []).some((c) => c.campaign_id === preferredCampaignId),
+    );
     if (exact) return toPick(exact);
   }
   return toPick(launched.slice().sort((a, b) => b.ts - a.ts)[0]);
@@ -250,6 +261,8 @@ export function selectRefillLeadRows(
   for (let i = 0; i < rows.length; i += 1) {
     const row = rows[i];
     if (row.email.trim() === '') continue;
+    // Строки вне вертикали (релевант-гейт base_collect) в долив не идут.
+    if ((row as { _low_relevance?: boolean })._low_relevance === true) continue;
     withEmail += 1;
     const status = emailStatuses?.[i] ?? null;
     // TODO(catch_all): catch_all-домены частично рабочие — пока не шлём (риск баунсов).

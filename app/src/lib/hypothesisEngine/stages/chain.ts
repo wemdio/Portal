@@ -335,9 +335,15 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
         ].join('\n'),
       )
       .join('\n'),
+    // Вертикаль, кейс, стиль и ПОДПИСЬ — санкционированные источники: подпись
+    // идёт в письма дословно (её телефон/цифры не должны флагаться фактчеком).
+    vertical.name,
+    vertical.summary ?? '',
     clientCase ? JSON.stringify(clientCase) : '',
     JSON.stringify(briefRest),
     typeof brief.offer_override === 'string' ? brief.offer_override : '',
+    styleExample ?? '',
+    signatureOverride ?? '',
     JSON.stringify(winnerPatterns),
   ].join('\n');
   const facts = extractNumberFacts(factCorpus);
@@ -349,6 +355,9 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   const ruleViolations = checkLetterRules(lettersForCheck(letters), language, facts);
   if (ruleViolations.length > 0) {
     stageLog(ctx, `[chain] детерминированный контроль: ${ruleViolations.length} нарушений — фикс-проход`);
+    // Принятие фикса: то же число писем и НЕ меньше B-вариантов (модель могла
+    // молча выкинуть блоки ---LETTER N B--- — принять такое нельзя).
+    const countB = (ls: HeChainLetterAB[]) => ls.reduce((acc, l) => acc + (l.variants?.length ?? 0), 0);
     try {
       const fixMessages: LLMMessage[] = [
         ...messages,
@@ -358,7 +367,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       const fix = await callLLMText(fixMessages, { model, maxTokens: 16384 });
       addUsage(usage, fix);
       const fixed = buildChainLetters(fix.text);
-      if (fixed.parsed.length >= 3 && fixed.letters.length === letters.length) {
+      if (fixed.parsed.length >= 3 && fixed.letters.length === letters.length && countB(fixed.letters) >= countB(letters)) {
         letters = fixed.letters;
         const remaining = checkLetterRules(lettersForCheck(letters), language, facts);
         if (remaining.length > 0) {
@@ -373,7 +382,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       } else {
         stageLog(
           ctx,
-          `[chain] фикс-проход: распарсилось ${fixed.parsed.length} писем вместо ${letters.length} — оставляем исходные`,
+          `[chain] фикс-проход: ${fixed.parsed.length} писем/${countB(fixed.letters)} B-вариантов вместо ${letters.length}/${countB(letters)} — оставляем исходные`,
         );
       }
     } catch (e) {

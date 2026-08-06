@@ -187,17 +187,16 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
           `[evidence] «${candidate.title}»: отброшено ${check.dropped} недоказанных пунктов (URL/цитата не из скачанного)`,
         );
       }
-      const verifiedPct =
-        check.valid.length === 0 ? Math.min(v.potential_pct, 20) : v.potential_pct;
-
       // Дата-якорь: программный матч сегмента датасета + факт reply% →
       // ограниченная поправка (0.7×LLM + 0.3×datasetScore). Без честного
       // матча/объёма — оценка LLM без изменений (см. scoreAnchor.ts).
-      const anchor = await anchorPotentialPct(verifiedPct, candidate.title, market);
-      if (anchor.applied && anchor.pct !== verifiedPct) {
-        stageLog(ctx, `[evidence] «${candidate.title}»: ${verifiedPct}% → ${anchor.pct}% (${anchor.note})`);
+      const anchor = await anchorPotentialPct(v.potential_pct, candidate.title, market);
+      if (anchor.applied && anchor.pct !== v.potential_pct) {
+        stageLog(ctx, `[evidence] «${candidate.title}»: ${v.potential_pct}% → ${anchor.pct}% (${anchor.note})`);
       }
-      const finalPct = anchor.pct;
+      // Кап «нет проверенных доказательств» — ПОСЛЕ якоря: иначе горячий
+      // сегмент датасета поднимал бы неверифицированную гипотезу до ~43%.
+      const finalPct = check.valid.length === 0 ? Math.min(anchor.pct, 20) : anchor.pct;
 
       if (v.verdict === 'merge' && v.merge_with_title) {
         const target = accepted.find((a) => normTitle(a.title) === normTitle(v.merge_with_title as string));

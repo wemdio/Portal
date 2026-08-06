@@ -16,9 +16,16 @@ export interface HeFetchedSource {
   text: string;
 }
 
-/** Нормализация для подстрочного матча: регистр + любые пробельные серии. */
+/** Нормализация для подстрочного матча: регистр, пробелы, типографика
+ *  (модель при цитировании часто меняет «ёлочки»/тире/апострофы). */
 function normalizeForMatch(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, ' ').trim();
+  return s
+    .toLowerCase()
+    .replace(/[«»„“”«»]/g, '"')
+    .replace(/[‘’`]/g, "'")
+    .replace(/[—–]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /** URL-ключ: регистр хоста, без trailing slash и якоря. */
@@ -37,6 +44,21 @@ function normalizeUrl(u: string): string {
 
 /** Цитата короче порога — не доказательство (слишком легко «угадать»). */
 const MIN_QUOTE_CHARS = 12;
+
+/**
+ * Цитата найдена в тексте источника? Промпт разрешает сокращение многоточием
+ * («начало … конец») — такие цитаты проверяем по фрагментам: каждый фрагмент
+ * (≥8 символов) обязан быть подстрокой текста.
+ */
+function quoteMatchesSource(quoteNorm: string, sourceNorm: string): boolean {
+  if (sourceNorm.includes(quoteNorm)) return true;
+  if (!quoteNorm.includes('…') && !quoteNorm.includes('...')) return false;
+  const fragments = quoteNorm
+    .split(/…|\.\.\./)
+    .map((f) => f.trim())
+    .filter((f) => f.length >= 8);
+  return fragments.length > 0 && fragments.every((f) => sourceNorm.includes(f));
+}
 
 export interface HeEvidenceVerification {
   valid: HeEvidenceItem[];
@@ -61,7 +83,7 @@ export function verifyEvidenceItems(
   for (const item of items ?? []) {
     const sourceText = textByUrl.get(normalizeUrl(item?.source_url ?? ''));
     const quote = normalizeForMatch(item?.quote ?? '');
-    if (!sourceText || quote.length < MIN_QUOTE_CHARS || !sourceText.includes(quote)) {
+    if (!sourceText || quote.length < MIN_QUOTE_CHARS || !quoteMatchesSource(quote, sourceText)) {
       dropped += 1;
       continue;
     }
