@@ -66,4 +66,24 @@ describe('pickRefillTemplate — segment-split launches', () => {
     );
     expect(pick?.campaignId).toBe('camp-main');
   });
+
+  it('split launch WITHOUT a main campaign is not refillable (no segment fallback)', () => {
+    const pick = pickRefillTemplate(
+      [
+        tpl({
+          campaign_id: 'camp-segment',
+          campaign_name: '',
+          campaign_url: '',
+          leads_count: 10,
+          preset_id: 'p',
+          created_at: '2026-08-01T00:00:00Z',
+          campaigns: [
+            { campaign_id: 'camp-segment', campaign_name: '', campaign_url: '', segment: 'вне Москвы', leads_count: 10 },
+          ],
+        }),
+      ],
+      null,
+    );
+    expect(pick).toBeNull();
+  });
 });

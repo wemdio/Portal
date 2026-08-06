@@ -223,14 +223,18 @@ export function pickRefillTemplate(
     .filter((t): t is NonNullable<typeof t> => t !== null);
   if (launched.length === 0) return null;
 
-  const toPick = (t: (typeof launched)[number]): RefillTemplatePick => {
-    // При сплите запуска по сегментам доливаем в ОСНОВНУЮ кампанию
-    // (segment=null): новые лиды refill не классифицированы по сегментам,
-    // в сегментную кампанию лить их нельзя. Без основной — скаляр (легаси).
-    const main =
-      t.launch.campaigns?.find((c) => c.segment === null) ?? null;
+  const toPick = (t: (typeof launched)[number]): RefillTemplatePick | null => {
+    // При сплите запуска по сегментам доливаем ТОЛЬКО в основную кампанию
+    // (segment=null): новые лиды refill не классифицированы по сегментам.
+    // Сплит без основной кампании (все лиды попали в сегменты) → доливать
+    // некуда: null, а не фолбэк на сегментную.
+    if (t.launch.campaigns?.length) {
+      const main = t.launch.campaigns.find((c) => c.segment === null);
+      if (!main) return null;
+      return { campaignId: main.campaign_id, presetId: t.launch.preset_id, operatorMapping: t.operatorMapping };
+    }
     return {
-      campaignId: main?.campaign_id ?? t.launch.campaign_id,
+      campaignId: t.launch.campaign_id,
       presetId: t.launch.preset_id,
       operatorMapping: t.operatorMapping,
     };
@@ -242,9 +246,16 @@ export function pickRefillTemplate(
         t.launch.campaign_id === preferredCampaignId ||
         (t.launch.campaigns ?? []).some((c) => c.campaign_id === preferredCampaignId),
     );
-    if (exact) return toPick(exact);
+    if (exact) {
+      const picked = toPick(exact);
+      if (picked) return picked;
+    }
   }
-  return toPick(launched.slice().sort((a, b) => b.ts - a.ts)[0]);
+  for (const t of launched.slice().sort((a, b) => b.ts - a.ts)) {
+    const picked = toPick(t);
+    if (picked) return picked;
+  }
+  return null;
 }
 
 /**
