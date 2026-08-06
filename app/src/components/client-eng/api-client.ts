@@ -131,7 +131,7 @@ export async function fetchEngProjectDetail(projectId: string): Promise<HeProjec
 
 export async function patchEngProject(
   projectId: string,
-  body: { offer_override?: string; style_override?: string; signature_override?: string },
+  body: { offer_override?: string; style_override?: string; signature_override?: string; business_override?: string },
 ): Promise<EngPatchResponse> {
   return clientApiFetch<EngPatchResponse>(`/eng/projects/${projectId}`, {
     method: 'PATCH',

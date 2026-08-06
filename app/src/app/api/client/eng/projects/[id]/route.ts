@@ -34,7 +34,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   return NextResponse.json(detail.detail);
 }
 
-// PATCH — offer_override / style_override / signature_override мержатся в
+// PATCH — offer_override / style_override / signature_override / business_override мержатся в
 // he_projects.brief (та же логика, что у staff, со скоупом владельца до записи).
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const result = await requireClientAuth(req);
@@ -59,7 +59,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     const err = patch.error;
     switch (err.code) {
       case 'no_fields':
-        return jsonError('Provide offer_override, style_override or signature_override', 400);
+        return jsonError('Provide offer_override, style_override, signature_override or business_override', 400);
       case 'bad_type':
         return jsonError(`${err.field} must be a string`, 400);
       case 'too_long':
