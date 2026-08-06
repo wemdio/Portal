@@ -398,6 +398,14 @@ function VerticalCard({
         {vertical.rank != null ? <span className={HE.rankNum}>{vertical.rank}</span> : null}
         <h3 className="text-[15px] font-semibold text-gray-900">{vertical.name}</h3>
         <PctPill pct={vertical.potential_pct} />
+        {typeof vertical.actual_reply_pct === 'number' ? (
+          <span
+            className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700"
+            title="Фактический reply rate запущенных кампаний вертикали (сверка прогноза с реальностью)"
+          >
+            факт reply {vertical.actual_reply_pct}%{vertical.actual_sent ? ` · ${vertical.actual_sent.toLocaleString('ru-RU')} отправок` : ''}
+          </span>
+        ) : null}
         {selected ? (
           <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600">
             <StatusDot tone="ok" />

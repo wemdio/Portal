@@ -74,6 +74,13 @@ export interface HypothesesPromptInput {
   /** Ручное описание бизнеса от специалиста (brief.business_override) —
    *  высший приоритет поверх профиля сайта; спасение «тонких» сайтов. */
   businessOverride?: string;
+  /** Фактические замеры прошлых запусков (петля сверки): прогноз vs reply%. */
+  actualsHistory?: Array<{
+    name: string;
+    predicted_pct: number;
+    actual_reply_pct: number;
+    actual_sent: number | null;
+  }>;
 }
 
 export function buildHypothesesInstantMessages(input: HypothesesPromptInput): LLMMessage[] {
@@ -97,6 +104,13 @@ ${input.portfolioProfile.map((p) => `- ${p.segment} — ${p.clients} клиен�
 Это сильный сигнал вкуса клиента: темы, похожие на отклонённые, понижай по potential_pct и помечай «РИСК: …» в rationale, но НЕ выбрасывай автоматически (контекст этого клиента другой). Темы, похожие на принятые, — повышай.`
       : '';
 
+  const actualsBlock =
+    input.actualsHistory?.length
+      ? `ФАКТИЧЕСКИЕ РЕЗУЛЬТАТЫ ПРОШЛЫХ ЗАПУСКОВ (наша сверка прогноза с реальностью):
+${input.actualsHistory.map((a) => `- «${a.name}»: прогноз ${a.predicted_pct}% → фактический reply ${a.actual_reply_pct}%${a.actual_sent ? ` (${a.actual_sent.toLocaleString('ru-RU')} отправок)` : ''}`).join('\n')}
+Как читать: potential_pct — потенциал вертикали, а НЕ прогноз reply%. Но используй эти пары как масштаб: вертикали с высоким фактическим reply получали высокий прогноз. Если твоя оценка похожего сегмента сильно расходится с фактом — перепроверь её.`
+      : '';
+
   const user = `ПРОФИЛЬ КЛИЕНТА (сайт ${input.websiteUrl}):
 ${JSON.stringify(input.profile, null, 2)}
 ${input.businessOverride?.trim() ? `
@@ -111,7 +125,7 @@ ${potential.length ? potential.map((e) => `- ${e.name} (${e.potential_pct}%): ${
 
 BRAND CLOUD — "noise" (типичные клиенты, фон):
 ${noise.length ? noise.map((e) => `- ${e.name}`).join('\n') : '(пусто)'}
-${portfolioBlock ? `\n${portfolioBlock}\n` : ''}${markupBlock ? `\n${markupBlock}\n` : ''}
+${portfolioBlock ? `\n${portfolioBlock}\n` : ''}${markupBlock ? `\n${markupBlock}\n` : ''}${actualsBlock ? `\n${actualsBlock}\n` : ''}
 ЗАДАЧА: выдай 25–40 гипотез рынков по правилам из системного промпта.
 
 ФОРМАТ — ТОЛЬКО JSON:
