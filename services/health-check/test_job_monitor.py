@@ -280,3 +280,40 @@ class PipelineRunsMonitorTests(unittest.IsolatedAsyncioTestCase):
         ):
             alerts = await health._check_autopipeline(conn)
         self.assertEqual(alerts, [])
+
+
+class PipelineRunsCombinedTests(unittest.IsolatedAsyncioTestCase):
+    """Регрессия 06.08: gather на одном asyncpg-коннекте молча пропускал
+    autopipeline-проверку каждый тик. Обе проверки обязаны исполняться."""
+
+    def setUp(self):
+        health.DATABASE_URL = "postgres://test"
+
+    async def test_both_pipeline_checks_run(self):
+        started = datetime.now(timezone.utc) - timedelta(hours=1)
+        out_rows = [{
+            "id": "run-ok-9", "status": "completed", "parsed": 100,
+            "new_employers": 10, "valid_contacts": 5, "appended": 2,
+            "appended_b": 3, "error_message": None,
+            "started_at": started, "finished_at": started,
+        }]
+        auto_rows = [{
+            "id": "auto-fail-9", "status": "failed", "parsed_count": 1,
+            "new_count": 1, "routed_count": 0, "stored_count": 0, "failed_count": 1,
+            "error_message": "boom", "started_at": started,
+            "finished_at": started, "heartbeat_at": started, "owner": "Клиент",
+        }]
+        conn = _RoutingConnection({
+            "outreachos_pipeline_runs": out_rows,
+            "client_auto_pipeline_runs": auto_rows,
+        })
+        with (
+            patch.object(health.asyncpg, "connect", AsyncMock(return_value=conn)),
+            patch.object(health, "_baseline_autopipe_failures", AsyncMock(return_value=True)),
+        ):
+            alerts = await health.check_pipeline_runs()
+        tables_hit = " ".join(conn.queries)
+        self.assertIn("outreachos_pipeline_runs", tables_hit)
+        self.assertIn("client_auto_pipeline_runs", tables_hit)
+        self.assertTrue(any("завершён" in a for a in alerts))
+        self.assertTrue(any("boom" in a for a in alerts))
