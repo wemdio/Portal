@@ -3083,7 +3083,14 @@ function CampaignsSection() {
         )}
 
         {selected && (
+          // key на id кампании: без него React переиспускает то же поддерево
+          // при переключении, и локальный стейт вкладок (черновики настроек,
+          // выбранный аккаунт, подгруженные логи, номер вкладки) остаётся от
+          // предыдущей кампании — видно только новое название и статус, а
+          // «внутренности» показывают чужие данные. Пересоздание поддерева при
+          // смене id — самый честный сброс.
           <CampaignView
+            key={selected.id}
             campaign={selected}
             isOwn={currentUserId != null && selected.user_id === currentUserId}
             onUpdate={() => void fetchCampaigns()}
