@@ -233,6 +233,10 @@ export interface EngDashboardVertical {
     leads_launched: number;
   };
   launch: { campaign_url: string; campaign_name: string } | null;
+  /** Прогноз движка (potential_pct), если был выставлен. */
+  forecast: { pct: number } | null;
+  /** Факт по запущенной кампании (петля actualsReconcile, свежесть 24ч). */
+  actual: { reply_pct: number; sent: number; measured_at: string } | null;
 }
 
 export interface EngDashboardEvent {
