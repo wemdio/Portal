@@ -5,11 +5,13 @@ import type { EChartsCoreOption } from 'echarts/core';
 
 import EChart from '@/components/charts/EChart';
 import {
+  AXIS_FONT_SIZE,
   AXIS_LINE,
   AXIS_TEXT,
   CHART_FONT,
   GRID_LINE,
   HOVER_BAND,
+  LEGEND_FONT_SIZE,
   seriesColor,
   tooltipSkin,
   useChartTheme,
@@ -21,6 +23,14 @@ import type { RenewalSeriesBucket } from '@/lib/renewals/metrics';
 import type { GroupBy } from '@/lib/firstSales/buckets';
 
 const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+
+/**
+ * Поля панелей заданы числами, а не `containLabel`, и обязаны совпадать у обеих:
+ * от этого зависит, что один и тот же период стоит на одной вертикали сверху и
+ * снизу. Слева заложено под самую широкую денежную подпись вида «1,5 млн».
+ */
+const GRID_LEFT = 68;
+const GRID_RIGHT = 16;
 
 // Ключ корзины всегда YYYY-MM-DD (начало корзины в МСК, см. bucketKey в
 // buckets.ts). Разбираем строку вручную, а не через `new Date(key)` — Date +
@@ -78,18 +88,24 @@ function buildOption(
   const countColor = seriesColor(theme, 0);
   const revenueColor = seriesColor(theme, 2);
 
-  const axisLabel = { color: AXIS_TEXT, fontSize: 11, fontFamily: CHART_FONT };
+  const axisLabel = { color: AXIS_TEXT, fontSize: AXIS_FONT_SIZE, fontFamily: CHART_FONT };
 
   return {
     animation: animate,
     animationDuration: 700,
     animationEasing: 'cubicOut',
     textStyle: { fontFamily: CHART_FONT },
-    // Две панели: верхняя под количество, нижняя под деньги. Отступы подобраны
-    // так, чтобы подписи периодов стояли один раз — под нижней.
+    // Две панели: верхняя под количество, нижняя под деньги. Подписи периодов
+    // стоят один раз — под нижней.
+    //
+    // Отступ слева задан числом и ОДИНАКОВЫЙ у обеих панелей. С `containLabel`
+    // каждая панель считала бы его сама по ширине своих подписей — а они
+    // разные («7» против «1,5 млн»), — и области построения разъезжались бы по
+    // горизонтали на пару десятков пикселей. Тогда один и тот же день оказывался
+    // бы в разных местах верхней и нижней панели, что и ломало чтение.
     grid: [
-      { left: 8, right: 8, top: 28, height: 128, containLabel: true },
-      { left: 8, right: 8, top: 196, height: 96, containLabel: true },
+      { left: GRID_LEFT, right: GRID_RIGHT, top: 30, height: 122 },
+      { left: GRID_LEFT, right: GRID_RIGHT, top: 190, height: 96 },
     ],
     legend: {
       top: 0,
@@ -98,7 +114,7 @@ function buildOption(
       icon: 'roundRect',
       itemWidth: 10,
       itemHeight: 10,
-      textStyle: { color: AXIS_TEXT, fontSize: 11, fontFamily: CHART_FONT },
+      textStyle: { color: AXIS_TEXT, fontSize: LEGEND_FONT_SIZE, fontFamily: CHART_FONT },
     },
     tooltip: {
       trigger: 'axis',
@@ -213,9 +229,9 @@ export default function RenewalsChart({ series, groupBy }: { series: RenewalSeri
   return (
     <div ref={rootRef} className="rounded-xl border border-zinc-200 bg-white p-3">
       {option ? (
-        <EChart option={option} height={304} ariaLabel="Количество продлений и оборот по периодам" />
+        <EChart option={option} height={330} ariaLabel="Количество продлений и оборот по периодам" />
       ) : (
-        <div style={{ height: 304 }} />
+        <div style={{ height: 330 }} />
       )}
     </div>
   );
