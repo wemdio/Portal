@@ -7,7 +7,8 @@
  * след в аккаунте, а неверная нормализация телефона просто не найдёт человека.
  */
 
-import { chooseResolutionStrategy, normalizePhone } from '@/lib/tgOutreach/warmup/peer';
+import { Api } from 'telegram';
+import { chooseResolutionStrategy, normalizePhone, resolveWarmupPeer } from '@/lib/tgOutreach/warmup/peer';
 
 describe('warmup peer — нормализация телефона', () => {
   it('оставляет только цифры', () => {
@@ -52,5 +53,80 @@ describe('warmup peer — выбор стратегии', () => {
   it('битый телефон без username даёт none, а не попытку импорта', () => {
     expect(chooseResolutionStrategy({ tg_username: null, phone: '123' }))
       .toEqual({ kind: 'none' });
+  });
+});
+
+/**
+ * Регрессия 06.08.2026: резолв по @username упал внутри gramJS с «Cannot read
+ * properties of undefined (reading 'classType')» — неполный кэш сущностей в
+ * загруженной сессии. Переписка ушла в failed, хотя телефон собеседника был
+ * известен и импорт контакта сработал бы.
+ */
+describe('warmup peer — резолв собеседника', () => {
+  const fakeUser = Object.create(Api.User.prototype) as Api.User;
+
+  function fakeClient(handlers: {
+    resolve?: () => Promise<unknown>;
+    importContacts?: () => Promise<unknown>;
+  }) {
+    return {
+      invoke: (request: unknown) => {
+        if (request instanceof Api.contacts.ResolveUsername) {
+          return handlers.resolve
+            ? handlers.resolve()
+            : Promise.reject(new Error('resolve не ожидался'));
+        }
+        if (request instanceof Api.contacts.ImportContacts) {
+          return handlers.importContacts
+            ? handlers.importContacts()
+            : Promise.reject(new Error('импорт не ожидался'));
+        }
+        return Promise.reject(new Error('неизвестный запрос'));
+      },
+    } as never;
+  }
+
+  it('username резолвится без импорта контакта', async () => {
+    const peer = await resolveWarmupPeer(
+      fakeClient({ resolve: async () => ({ users: [fakeUser] }) }),
+      { tg_username: 'ivan', phone: '998901112233' },
+    );
+    expect(peer).toEqual({ entity: fakeUser, imported: false });
+  });
+
+  it('сбой резолва по username не теряет переписку: идём через телефон', async () => {
+    const peer = await resolveWarmupPeer(
+      fakeClient({
+        resolve: async () => { throw new Error("Cannot read properties of undefined (reading 'classType')"); },
+        importContacts: async () => ({ users: [fakeUser] }),
+      }),
+      { tg_username: 'ivan', phone: '998901112233' },
+    );
+    expect(peer).toEqual({ entity: fakeUser, imported: true });
+  });
+
+  it('пустой ответ на username тоже уводит на телефон', async () => {
+    const peer = await resolveWarmupPeer(
+      fakeClient({
+        resolve: async () => ({ users: [] }),
+        importContacts: async () => ({ users: [fakeUser] }),
+      }),
+      { tg_username: 'ivan', phone: '998901112233' },
+    );
+    expect(peer?.imported).toBe(true);
+  });
+
+  it('без телефона сбой резолва пробрасывается наверх — прятать нечего', async () => {
+    await expect(
+      resolveWarmupPeer(
+        fakeClient({ resolve: async () => { throw new Error('USERNAME_NOT_OCCUPIED'); } }),
+        { tg_username: 'ivan', phone: null },
+      ),
+    ).rejects.toThrow('USERNAME_NOT_OCCUPIED');
+  });
+
+  it('адресовать нечем — null без единого запроса', async () => {
+    const peer = await resolveWarmupPeer(fakeClient({}), { tg_username: null, phone: null });
+    expect(peer).toBeNull();
   });
 });
