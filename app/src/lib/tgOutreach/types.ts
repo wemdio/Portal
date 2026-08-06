@@ -124,6 +124,12 @@ export interface TelegramSettings {
   ignore_no_username: boolean;
   blocked_usernames: string[];
   account_cooldown_hours: number;
+  /**
+   * Сколько первых сообщений аккаунт отправляет в сутки. Ноль или отсутствие
+   * поля = первое касание выключено; отдельного переключателя не нужно.
+   * Кампании, заведённые до этой фичи, поля не имеют — отсюда `?`.
+   */
+  first_touch_per_account_per_day?: number;
   follow_up: FollowUpSettings;
 }
 
