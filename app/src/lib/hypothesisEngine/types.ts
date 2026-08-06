@@ -108,6 +108,12 @@ export interface HeVertical {
   synonyms: string[];
   potential_pct: number;
   rank: number | null;
+  /** Фактический reply% запущенных кампаний вертикали (петля сверки, null — не измерено). */
+  actual_reply_pct?: number | null;
+  /** Отправок в запущенных кампаниях на момент замера. */
+  actual_sent?: number | null;
+  /** Штамп последнего замера фактических метрик. */
+  actual_measured_at?: string | null;
   created_at: string;
   updated_at: string;
 }

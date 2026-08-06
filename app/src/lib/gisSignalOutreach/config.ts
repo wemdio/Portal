@@ -74,6 +74,12 @@ export interface GisSignalSegment {
   /** Кампания Instantly сегмента. NULL = сегмент меряется, но не заливается. */
   instantly_campaign_id: string | null;
   rubric_groups: GisSignalRubricGroup[];
+  /**
+   * true → в конструктор идут только компании с признаком онлайн-формата
+   * на сайте (detectOutreachSignals с checkOnlineFormat). false/отсутствует
+   * в старых строках → фильтр выключен.
+   */
+  require_online: boolean;
   priority: number;
   enabled: boolean;
 }
@@ -143,6 +149,8 @@ export async function loadGisSignalSegments(): Promise<GisSignalSegment[]> {
   return (data as GisSignalSegment[])
     .map((s) => ({
       ...s,
+      // Колонка появилась позже остальных: у старых строк её может не быть.
+      require_online: s.require_online === true,
       rubric_groups: (s.rubric_groups ?? []) as GisSignalRubricGroup[],
     }))
     .sort((a, b) => a.priority - b.priority);

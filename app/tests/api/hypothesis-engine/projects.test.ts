@@ -451,6 +451,38 @@ describe('PATCH /api/tools/hypothesis-engine/projects/[id] — signature_overrid
     expect(mockDb.updates).toHaveLength(0);
   });
 
+  it('merges business_override (manual business description) into brief', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_projects: [
+          {
+            id: 'p1',
+            name: 'One',
+            website_url: 'https://one.example/',
+            status: 'draft',
+            brief: { site_profile: { usp: 'seo' } },
+          },
+        ],
+      },
+    });
+
+    const res = await PATCH(
+      makePatchReq({ business_override: 'Продаём корпоративное обучение по продажам' }),
+      patchParams,
+    );
+    expect(res.status).toBe(200);
+    expect(mockDb.getRows('he_projects')[0].brief).toEqual({
+      site_profile: { usp: 'seo' },
+      business_override: 'Продаём корпоративное обучение по продажам',
+    });
+  });
+
+  it('returns 413 when business_override exceeds 3000 chars after trim', async () => {
+    const res = await PATCH(makePatchReq({ business_override: 'д'.repeat(3001) }), patchParams);
+    expect(res.status).toBe(413);
+    expect(mockDb.updates).toHaveLength(0);
+  });
+
   it('returns 413 when signature_override exceeds 500 chars after trim', async () => {
     const res = await PATCH(makePatchReq({ signature_override: `  ${'д'.repeat(501)}  ` }), patchParams);
     expect(res.status).toBe(413);

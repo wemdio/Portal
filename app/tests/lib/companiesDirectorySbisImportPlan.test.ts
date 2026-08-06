@@ -5,6 +5,7 @@ import {
   buildSbisContactImportPlan,
   buildSbisIndustryImportPlan,
   buildStrictSbisContactImportPlan,
+  buildStrictSbisContactImportPlanV2,
   collapseSbisRowsByInn,
   mapSbisWorksheetRecord,
   normalizeSbisInn,
@@ -25,6 +26,10 @@ const CONTACT_OPTIONS = {
 
 const STRICT_CONTACT_OPTIONS = {
   sourceFile: 'strict-contacts.xlsx',
+};
+
+const STRICT_CONTACT_V2_OPTIONS = {
+  sourceFile: 'selecom-2026-08-03',
 };
 
 type StrictSbisDirectoryInputRow = SbisDirectoryInputRow & {
@@ -56,7 +61,7 @@ function strictSourceRow(
 ): StrictSbisDirectoryInputRow {
   return {
     ...sourceRow(),
-    activity_type: null,
+    activity_type: 'Agriculture',
     source_activity: '01.00 - Agriculture',
     ...overrides,
   };
@@ -836,5 +841,253 @@ describe('strict SBIS contact import contract', () => {
       STRICT_CONTACT_OPTIONS,
     );
     expect(invalidParent.inserts[0]?.okved_code).toBeNull();
+  });
+});
+
+describe('strict registry contact import v2 contract', () => {
+  it('keeps v1 frozen while v2 retains only strict Russian phones for a digital insert', () => {
+    const row = strictSourceRow({
+      email: 'sales@alpha.ru',
+      website: null,
+      phones: [
+        '+7 (495) 111-22-33',
+        '+7 (123) 111-22-33',
+        '+375 (29) 111-22-33',
+        '12345',
+      ].join(', '),
+    });
+
+    const v1 = buildStrictSbisContactImportPlan(
+      [row],
+      [],
+      STRICT_CONTACT_OPTIONS,
+    );
+    const v2 = buildStrictSbisContactImportPlanV2(
+      [row],
+      [],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+
+    expect(v1.inserts[0].phones).toBeNull();
+    expect(v2.inserts[0]).toMatchObject({
+      inn: '7704414297',
+      email: 'sales@alpha.ru',
+      phones: '+74951112233',
+    });
+  });
+
+  it('still skips a new company when its only usable contact is a phone', () => {
+    const plan = buildStrictSbisContactImportPlanV2(
+      [strictSourceRow({ email: null, website: null, phones: '8 495 111-22-33' })],
+      [],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+
+    expect(plan.inserts).toHaveLength(0);
+    expect(plan.updates).toHaveLength(0);
+    expect(plan.skipped).toContainEqual(
+      expect.objectContaining({
+        inn: '7704414297',
+        reason: 'missing_website_or_email',
+      }),
+    );
+  });
+
+  it('allows phone-only enrichment for an existing unique INN with a blank phone', () => {
+    const existing: ExistingDirectoryRow = {
+      id: 80,
+      inn: '7704414297',
+      email: null,
+      website: null,
+      phones: null,
+      okved_code: null,
+      okved_code_exact: null,
+      okved_exact_source: null,
+    };
+    const plan = buildStrictSbisContactImportPlanV2(
+      [strictSourceRow({ email: null, website: null, phones: '8 495 111-22-33' })],
+      [existing],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+
+    expect(plan.skipped).toHaveLength(0);
+    expect(plan.updates).toEqual([
+      {
+        id: 80,
+        inn: '7704414297',
+        patch: { phones: '+74951112233' },
+      },
+    ]);
+  });
+
+  it('preserves populated contacts and records conflicts instead of overwriting them', () => {
+    const existing: ExistingDirectoryRow = {
+      id: 81,
+      inn: '7704414297',
+      email: 'current@alpha.ru',
+      website: 'current-alpha.ru',
+      phones: '+74950000000',
+      okved_code: '62',
+      okved_code_exact: '62.01',
+      okved_exact_source: 'fns',
+    };
+    const plan = buildStrictSbisContactImportPlanV2(
+      [
+        strictSourceRow({
+          email: 'incoming@alpha.ru',
+          website: 'incoming-alpha.ru',
+          phones: '+7 495 111-22-33',
+          source_activity: '01.00 - Agriculture',
+        }),
+      ],
+      [existing],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+
+    expect(plan.updates).toHaveLength(0);
+    expect(plan.noops).toEqual(['7704414297']);
+    expect(plan.conflicts).toEqual(
+      expect.arrayContaining(
+        ['email', 'website', 'phones'].map((field) =>
+          expect.objectContaining({
+            inn: '7704414297',
+            kind: 'existing_value_preserved',
+            field,
+          })),
+      ),
+    );
+    expect(applySbisImportPlan([existing], plan)[0]).toEqual(existing);
+  });
+
+  it('blocks enrichment when the target already has duplicate rows for the INN', () => {
+    const plan = buildStrictSbisContactImportPlanV2(
+      [strictSourceRow({ email: null, website: null, phones: '+7 495 111-22-33' })],
+      [
+        { id: 83, inn: '7704414297', phones: null },
+        { id: 82, inn: '7704414297', phones: null },
+      ],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+
+    expect(plan.inserts).toHaveLength(0);
+    expect(plan.updates).toHaveLength(0);
+    expect(plan.metrics.blockedExistingDuplicates).toBe(1);
+    expect(plan.conflicts).toContainEqual(
+      expect.objectContaining({
+        inn: '7704414297',
+        kind: 'duplicate_existing_inn',
+        existingIds: [82, 83],
+      }),
+    );
+  });
+
+  it('stores only a two-digit approximate parent and leaves exact OKVED provenance empty', () => {
+    const plan = buildStrictSbisContactImportPlanV2(
+      [
+        strictSourceRow({
+          source_activity: '62.02.3 - IT consulting',
+          email: 'sales@alpha.ru',
+          website: null,
+        }),
+      ],
+      [],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+
+    expect(plan.inserts[0]).toMatchObject({
+      inn: '7704414297',
+      okved_code: '62',
+      okved_code_exact: null,
+      okved_exact_source: null,
+    });
+  });
+
+  it('quarantines new rows with a missing or conflicting parent OKVED', () => {
+    const missing = buildStrictSbisContactImportPlanV2(
+      [strictSourceRow({ source_activity: null, email: 'sales@alpha.ru' })],
+      [],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+    const conflicting = buildStrictSbisContactImportPlanV2(
+      [
+        strictSourceRow({
+          rowNumber: 2,
+          source_activity: '62.01 - Software development',
+          email: 'sales@alpha.ru',
+        }),
+        strictSourceRow({
+          rowNumber: 3,
+          source_activity: '46.51 - Wholesale of computers',
+          email: 'hello@alpha.ru',
+        }),
+      ],
+      [],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+    const missingActivity = buildStrictSbisContactImportPlanV2(
+      [strictSourceRow({ activity_type: null, email: 'sales@alpha.ru' })],
+      [],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+
+    expect(missing.inserts).toHaveLength(0);
+    expect(missing.skipped).toContainEqual(expect.objectContaining({
+      inn: '7704414297',
+      reason: 'missing_parent_okved',
+    }));
+    expect(conflicting.inserts).toHaveLength(0);
+    expect(conflicting.skipped).toContainEqual(expect.objectContaining({
+      inn: '7704414297',
+      reason: 'conflicting_parent_okved',
+    }));
+    expect(missingActivity.inserts).toHaveLength(0);
+    expect(missingActivity.skipped).toContainEqual(expect.objectContaining({
+      inn: '7704414297',
+      reason: 'missing_activity_type',
+    }));
+    expect(missing.metrics.skippedMissingContact).toBe(0);
+    expect(conflicting.metrics.skippedMissingContact).toBe(0);
+    expect(missingActivity.metrics.skippedMissingContact).toBe(0);
+  });
+
+  it('deduplicates repeated source rows deterministically regardless of input order', () => {
+    const rows = [
+      strictSourceRow({
+        rowNumber: 2,
+        email: 'zeta@alpha.ru',
+        website: 'https://zeta.alpha.ru/about',
+        phones: '+7 495 999-88-77',
+      }),
+      strictSourceRow({
+        rowNumber: 3,
+        email: 'alpha@alpha.ru',
+        website: 'https://www.alpha.ru/about',
+        phones: '8 495 111-22-33',
+      }),
+    ];
+
+    const forward = buildStrictSbisContactImportPlanV2(
+      rows,
+      [],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+    const reversed = buildStrictSbisContactImportPlanV2(
+      [...rows].reverse(),
+      [],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+
+    expect(forward).toEqual(reversed);
+    expect(forward.metrics).toMatchObject({
+      inputRows: 2,
+      uniqueIncomingInns: 1,
+      duplicateIncomingRows: 1,
+      inserts: 1,
+    });
+    expect(forward.inserts[0]).toMatchObject({
+      email: 'alpha@alpha.ru, zeta@alpha.ru',
+      website: 'alpha.ru, zeta.alpha.ru',
+      phones: '+74951112233, +74959998877',
+    });
   });
 });

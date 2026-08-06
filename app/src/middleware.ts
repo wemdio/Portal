@@ -3,21 +3,41 @@ import { NextResponse, type NextRequest } from 'next/server'
 import { DEFAULT_LOCALE, LOCALE_COOKIE, normalizeLocale } from '@/lib/i18n'
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient'
 import { isInternalRole } from '@/lib/roles'
+import { MAIN_APP_HOST, isEngAppHost, type ClientMarket } from '@/lib/engMarket'
 import type { UserRole } from '@/types'
 
 const ROLE_COOKIE = 'x-portal-role'
 const ROLE_COOKIE_MAX_AGE = 30 * 60
 const LOCALE_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
-function encodeRoleCache(userId: string, role: string): string {
-  return `${userId}:${role}`
+// Формат куки: userId:role:market. Сегмент market добавлен позже — старые
+// куки userId:role остаются валидными: роль извлекается, market считается
+// неизвестным и дочитывается из profiles точечно (см. decodeMarketCache).
+function encodeRoleCache(userId: string, role: string, market?: ClientMarket | null): string {
+  return market ? `${userId}:${role}:${market}` : `${userId}:${role}`
 }
 
 function decodeRoleCache(raw: string, currentUserId: string): string | null {
   const sep = raw.indexOf(':')
   if (sep === -1) return null
   if (raw.substring(0, sep) !== currentUserId) return null
-  return raw.substring(sep + 1) || null
+  const rest = raw.substring(sep + 1)
+  const sep2 = rest.indexOf(':')
+  const role = sep2 === -1 ? rest : rest.substring(0, sep2)
+  return role || null
+}
+
+// Третий сегмент куки роли. null = market в куке нет (старый формат) или
+// значение мусорное — тогда читаем profiles.
+function decodeMarketCache(raw: string, currentUserId: string): ClientMarket | null {
+  const sep = raw.indexOf(':')
+  if (sep === -1) return null
+  if (raw.substring(0, sep) !== currentUserId) return null
+  const rest = raw.substring(sep + 1)
+  const sep2 = rest.indexOf(':')
+  if (sep2 === -1) return null
+  const market = rest.substring(sep2 + 1)
+  return market === 'eng' || market === 'ru' ? market : null
 }
 
 // Public / external API: authenticate with their OWN secret/signature or are
@@ -323,9 +343,11 @@ export async function middleware(request: NextRequest) {
 
     let userRole: string | null = null
     let userLocale = DEFAULT_LOCALE
+    // Сырое значение куки роли — ниже нужно и для market-сегмента.
+    const roleCookieRaw = request.cookies.get(ROLE_COOKIE)?.value ?? ''
 
     if (user) {
-      const raw = request.cookies.get(ROLE_COOKIE)?.value ?? ''
+      const raw = roleCookieRaw
       const cached = authoritativeTeamProfile
         ? authoritativeTeamProfile.role
         : (raw ? decodeRoleCache(raw, user.id) : null)
@@ -389,6 +411,67 @@ export async function middleware(request: NextRequest) {
         path: '/',
         maxAge: LOCALE_COOKIE_MAX_AGE,
       })
+    }
+
+    // --- Продуктовое разделение по хосту: ENG-кабинет (app.outreachos.xyz) ---
+    // Маркет профиля нужен далеко не на каждом запросе: только на ENG-хосте
+    // (кого вообще пускаем) и у клиентов на /client/* (гейты ENG-раздела).
+    // Читаем точечно по образцу is_demo ниже; кэш — третий сегмент ROLE_COOKIE.
+    const isEngHost = isEngAppHost(request.headers.get('host'))
+    const isEngCabinetPath = pathname === '/client/eng' || pathname.startsWith('/client/eng/')
+    let userMarket: ClientMarket | null = null
+    if (user && (isEngHost || (userRole === 'client' && pathname.startsWith('/client')))) {
+      userMarket = roleCookieRaw ? decodeMarketCache(roleCookieRaw, user.id) : null
+      if (!userMarket) {
+        // Колонка profiles.market появилась в 20260804_0004; до её наката
+        // select вернёт ошибку (не throw) → marketProfile=null → 'ru',
+        // т.е. прежнее поведение. Куку в этом случае не трогаем.
+        const { data: marketProfile } = await supabase
+          .from('profiles')
+          .select('market')
+          .eq('id', user.id)
+          .single()
+        userMarket = marketProfile?.market === 'eng' ? 'eng' : 'ru'
+        if (userRole && marketProfile) {
+          response.cookies.set({
+            name: ROLE_COOKIE,
+            value: encodeRoleCache(user.id, userRole, userMarket),
+            httpOnly: true,
+            sameSite: 'lax',
+            path: '/',
+            maxAge: ROLE_COOKIE_MAX_AGE,
+          })
+        }
+      }
+    }
+
+    // (г) ENG-хост — только ENG-мир: стаффа там быть не должно.
+    if (isEngHost && user && userRole && userRole !== 'client') {
+      return NextResponse.redirect(`https://${MAIN_APP_HOST}/`)
+    }
+    // (в) ru-клиент на ENG-хосте — его кабинет на основном хосте (сессия
+    // per-domain, там он залогинится заново).
+    if (isEngHost && user && userRole === 'client' && userMarket === 'ru') {
+      return NextResponse.redirect(`https://${MAIN_APP_HOST}/`)
+    }
+    // Корень ENG-хоста: залогиненного eng-клиента — сразу в ENG-кабинет
+    // (гостя на /login уже уводит общий guard выше).
+    if (isEngHost && user && pathname === '/') {
+      return NextResponse.redirect(new URL('/client/eng', request.url))
+    }
+    // (а) eng-клиент вне ENG-раздела → в ENG-кабинет (на любом хосте).
+    if (
+      user
+      && userRole === 'client'
+      && userMarket === 'eng'
+      && pathname.startsWith('/client')
+      && !isEngCabinetPath
+    ) {
+      return NextResponse.redirect(new URL('/client/eng', request.url))
+    }
+    // (б) ru-клиент в ENG-разделе → обратно в RU-кабинет.
+    if (user && userRole === 'client' && userMarket === 'ru' && isEngCabinetPath) {
+      return NextResponse.redirect(new URL('/client', request.url))
     }
 
     // Demo accounts (role=client + is_demo) must be able to reach BOTH /signup (to

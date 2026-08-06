@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
+  POLZA_REGISTRY_V2_REQUIRED_AUDIT_ARTIFACTS,
   validateSbisInsertRow,
   validateSbisPlanManifest,
   validateSbisUpdateRow,
@@ -14,11 +15,7 @@ import {
 } from '@/lib/companiesDirectory/planFileIO';
 
 const OPTIONAL_AUDIT_ARTIFACTS = [
-  'skipped.jsonl',
-  'conflicts.jsonl',
-  'provenance.jsonl',
-  'source-locations.jsonl',
-  'rollback.jsonl',
+  ...POLZA_REGISTRY_V2_REQUIRED_AUDIT_ARTIFACTS,
 ] as const;
 
 const KNOWN_ARTIFACTS = new Set<string>([

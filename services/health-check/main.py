@@ -73,6 +73,18 @@ JOB_STUCK_MINUTES = max(
 PROXY_CHECK_INTERVAL_SEC = max(60, int(os.environ.get("PROXY_CHECK_INTERVAL_SEC", "300")))
 HEARTBEAT_INTERVAL_SEC = max(60, int(os.environ.get("HEARTBEAT_INTERVAL_SEC", "1800")))
 DEADMAN_GRACE_SEC = max(120, int(os.environ.get("HEALTH_DEADMAN_GRACE_SEC", str(HEALTH_INTERVAL_SEC * 3))))
+
+# Суточные пайплайны (OutreachOS + Mailganer auto-pipeline). Отдельные пороги от
+# JOB_STUCK_MINUTES: прогоны идут часами, «завис» — только когда даже самый
+# длинный легитимный прогон уже не мог бы идти.
+# Самый долгий завершившийся прогон OutreachOS — ~117 мин, берём 180 с запасом.
+OUTREACHOS_STUCK_MINUTES = max(30, int(os.environ.get("HEALTH_OUTREACHOS_STUCK_MIN", "180")))
+# Прогон стартует кроном в 02:00 UTC (05:00 МСК); если к этому часу (UTC) строки
+# за сегодня нет — крон не отработал (ребут, зомби-лок, падение докера).
+OUTREACHOS_MISSING_AFTER_UTC_HOUR = max(0, int(os.environ.get("HEALTH_OUTREACHOS_MISSING_AFTER_UTC_HOUR", "4")))
+# Auto-pipeline обновляет heartbeat_at по ходу прогона; 30 мин без heartbeat —
+# завис (воркер умер / БД-коннект ушёл).
+AUTOPIPELINE_STUCK_MINUTES = max(15, int(os.environ.get("HEALTH_AUTOPIPELINE_STUCK_MIN", "30")))
 HEALTH_CRITICAL_ENDPOINTS_RAW = os.environ.get(
     "HEALTH_CRITICAL_ENDPOINTS",
     "/,/tools,/api/user/tools",
@@ -1459,14 +1471,226 @@ async def check_failed_jobs() -> list[str]:
     return problems
 
 
+# ── Суточные пайплайны: OutreachOS и Mailganer auto-pipeline ────────────────
+#
+# Отдельный монитор от парсеров: здесь важна не очередь джобов, а суточный цикл.
+# Для каждого пайплайна ловим четыре состояния: завис/упал/не стартовал/OK-стат.
+# Дедуп алертов — через JOB_ALERTS_TABLE (переживает рестарт контейнера).
+
+_AUTOPIPE_FAILURE_BASELINE_KEY = "pipeline-monitor:v1:initialized"
+
+
+def _msk(ts) -> str:
+    if ts is None:
+        return "—"
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone(timedelta(hours=3))).strftime("%d.%m %H:%M МСК")
+
+
+async def _check_outreachos_pipeline(conn) -> list[str]:
+    """Монитор outreachos_pipeline_runs (крон 02:00 UTC ежедневно)."""
+    problems: list[str] = []
+    try:
+        rows = await conn.fetch(
+            "SELECT id::text AS id, status, parsed, new_employers, valid_contacts, "
+            "       appended, appended_b, error_message, started_at, finished_at "
+            "FROM public.outreachos_pipeline_runs "
+            "WHERE started_at >= now() - interval '36 hours' "
+            "ORDER BY started_at DESC"
+        )
+    except Exception as e:
+        print(f"[health] outreachos-pipeline query skipped: {e}")
+        return []
+
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    log_hint = (
+        "Проверьте логи: <code>tail -100 /var/log/portal/outreachos-cron.log</code> · "
+        "<code>docker logs portal-worker-hh --tail 100</code>"
+    )
+
+    started_today = False
+    for row in rows:
+        started = row["started_at"]
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        if started.date() == today:
+            started_today = True
+        age_min = int((now - started).total_seconds() // 60)
+        status = str(row["status"])
+        run_no = f"#{str(row['id'])[:8]}"
+
+        if status == "running" and age_min >= OUTREACHOS_STUCK_MINUTES:
+            if not await _claim_job_alert(conn, f"outreachos:stuck:{row['id']}"):
+                continue
+            problems.append(
+                f"🔴 <b>OutreachOS: прогон завис {run_no}</b>\n"
+                f"Старт {_msk(started)}, статус <code>running</code> уже {age_min // 60}ч {age_min % 60}м "
+                f"(порог {OUTREACHOS_STUCK_MINUTES}м). Лог молчит — процесс, скорее всего, умер, "
+                f"а строка в БД осталась «running».\n"
+                f"{log_hint}"
+            )
+        elif status == "failed":
+            if not await _claim_job_alert(conn, f"outreachos:failed:{row['id']}"):
+                continue
+            error_text = html.escape(str(row["error_message"] or "без текста ошибки")[:400])
+            problems.append(
+                f"🔴 <b>OutreachOS: прогон упал {run_no}</b>\n"
+                f"Старт {_msk(started)}, финиш {_msk(row['finished_at'])}\n"
+                f"Ошибка: <code>{error_text}</code>\n"
+                f"{log_hint}"
+            )
+        elif status == "completed" and started.date() == today:
+            # Дневной OK-стат: чтобы по одному сообщению было видно, что прогон
+            # прошёл и сколько залил (без него «тихий» день неотличим от тихой поломки).
+            if not await _claim_job_alert(conn, f"outreachos:ok:{row['id']}"):
+                continue
+            a, b = int(row["appended"] or 0), int(row["appended_b"] or 0)
+            problems.append(
+                f"🟢 <b>OutreachOS: прогон завершён {run_no}</b>\n"
+                f"parsed={row['parsed']} · новых компаний={row['new_employers']} · "
+                f"валидных контактов={row['valid_contacts']} · залито A={a} B={b} (всего {a + b})"
+            )
+
+    # Крон не отработал сегодня вообще.
+    if (
+        not started_today
+        and now.hour >= OUTREACHOS_MISSING_AFTER_UTC_HOUR
+        and await _claim_job_alert(conn, f"outreachos:missing:{today.isoformat()}")
+    ):
+        problems.append(
+            f"🟠 <b>OutreachOS: сегодняшний прогон не стартовал</b>\n"
+            f"Крон 02:00 UTC (05:00 МСК) не оставил строки в outreachos_pipeline_runs за сегодня. "
+            f"Проверьте crontab и докер: <code>crontab -l | grep outreachos</code> · {log_hint}"
+        )
+
+    return problems
+
+
+async def _baseline_autopipe_failures(conn) -> bool:
+    """Пометить исторические failed-прогоны как виденные (один раз после деплоя)."""
+    exists = await conn.fetchval(
+        f"SELECT 1 FROM {JOB_ALERTS_TABLE} WHERE alert_key = $1",
+        _AUTOPIPE_FAILURE_BASELINE_KEY,
+    )
+    if exists:
+        return True
+    rows = await conn.fetch(
+        "SELECT id::text AS id FROM public.client_auto_pipeline_runs WHERE status = 'failed'"
+    )
+    if rows:
+        await conn.executemany(
+            f"INSERT INTO {JOB_ALERTS_TABLE} (alert_key) VALUES ($1) "
+            "ON CONFLICT (alert_key) DO NOTHING",
+            [(f"autopipeline:failed:{row['id']}",) for row in rows],
+        )
+    await conn.execute(
+        f"INSERT INTO {JOB_ALERTS_TABLE} (alert_key) VALUES ($1) "
+        "ON CONFLICT (alert_key) DO NOTHING",
+        _AUTOPIPE_FAILURE_BASELINE_KEY,
+    )
+    return False
+
+
+async def _check_autopipeline(conn) -> list[str]:
+    """Монитор client_auto_pipeline_runs (Mailganer: HH → скоринг → маршрутизация)."""
+    problems: list[str] = []
+    try:
+        if not await _baseline_autopipe_failures(conn):
+            print("[health] autopipeline failures baseline initialized")
+            return []
+        rows = await conn.fetch(
+            "SELECT r.id::text AS id, r.status, r.parsed_count, r.new_count, "
+            "       r.routed_count, r.stored_count, r.failed_count, r.error_message, "
+            "       r.started_at, r.finished_at, r.heartbeat_at, "
+            "       coalesce(p.full_name, p.email, r.client_user_id::text) AS owner "
+            "FROM public.client_auto_pipeline_runs r "
+            "LEFT JOIN public.profiles p ON p.id = r.client_user_id "
+            "WHERE r.started_at >= now() - interval '36 hours' "
+            "ORDER BY r.started_at DESC"
+        )
+    except Exception as e:
+        print(f"[health] autopipeline query skipped: {e}")
+        return []
+
+    now = datetime.now(timezone.utc)
+    log_hint = "Проверьте логи: <code>docker logs portal-worker-autopipeline --tail 100</code>"
+
+    for row in rows:
+        status = str(row["status"])
+        owner = html.escape(str(row["owner"] or "клиент"))
+        run_no = f"#{str(row['id'])[:8]}"
+
+        if status == "failed":
+            error_message = str(row["error_message"] or "")
+            if _is_manual_stop_error(error_message):
+                continue
+            if not await _claim_job_alert(conn, f"autopipeline:failed:{row['id']}"):
+                continue
+            problems.append(
+                f"🔴 <b>Mailganer auto-pipeline: прогон упал {run_no}</b>\n"
+                f"{owner} · старт {_msk(row['started_at'])}\n"
+                f"Ошибка: <code>{html.escape(error_message[:400] or 'без текста')}</code>\n"
+                f"{log_hint}"
+            )
+            continue
+
+        # Активный прогон: heartbeat (или старт, если heartbeat ещё не было) не
+        # должен замирать дольше порога.
+        if status in ("completed",):
+            continue
+        heartbeat = row["heartbeat_at"] or row["started_at"]
+        if heartbeat is None:
+            continue
+        if heartbeat.tzinfo is None:
+            heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+        stale_min = int((now - heartbeat).total_seconds() // 60)
+        if stale_min < AUTOPIPELINE_STUCK_MINUTES:
+            continue
+        if not await _claim_job_alert(conn, f"autopipeline:stuck:{row['id']}"):
+            continue
+        problems.append(
+            f"🟠 <b>Mailganer auto-pipeline: прогон завис {run_no}</b>\n"
+            f"{owner} · статус <code>{html.escape(status)}</code> · "
+            f"нет heartbeat {stale_min}м (порог {AUTOPIPELINE_STUCK_MINUTES}м)\n"
+            f"Прогресс: parsed={row['parsed_count']} new={row['new_count']} "
+            f"routed={row['routed_count']} stored={row['stored_count']} failed={row['failed_count']}\n"
+            f"{log_hint}"
+        )
+
+    return problems
+
+
+async def check_pipeline_runs() -> list[str]:
+    """Монитор суточных пайплайнов (OutreachOS + Mailganer) — см. run_job_monitor."""
+    if not DATABASE_URL:
+        return []
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+    except Exception as e:
+        print(f"[health] pipeline-runs connect error: {_normalize_network_error(e)}")
+        return []
+    try:
+        # Последовательно, НЕ gather: asyncpg-соединение не поддерживает
+        # параллельные операции («another operation is in progress» — вторая
+        # проверка молча пропускалась каждый тик, инцидент 06.08).
+        out = await _check_outreachos_pipeline(conn)
+        auto = await _check_autopipeline(conn)
+        return [*out, *auto]
+    finally:
+        await conn.close()
+
+
 async def run_job_monitor() -> None:
     """Run parser queue/failure checks independently from general health."""
     try:
-        stuck, failed = await asyncio.gather(
+        stuck, failed, pipelines = await asyncio.gather(
             check_stuck_jobs(),
             check_failed_jobs(),
+            check_pipeline_runs(),
         )
-        problems = [*stuck, *failed]
+        problems = [*pipelines, *stuck, *failed]
         if not problems:
             print(f"[health] job monitor OK at {_now_msk()}")
             return

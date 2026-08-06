@@ -84,6 +84,11 @@ export function Step1Research({
   // Подпись отправителя — тем же паттерном из brief (signature_override).
   const briefSignature = project?.brief?.signature_override;
   const resolvedSignatureValue = typeof briefSignature === 'string' ? briefSignature : '';
+  // Ручное описание бизнеса (business_override) + флаг «тонкого» сайта:
+  // site_profile помечает brief.site_thin, когда текст сайта не извлечь.
+  const briefBusiness = project?.brief?.business_override;
+  const resolvedBusinessValue = typeof briefBusiness === 'string' ? briefBusiness : '';
+  const siteThin = (project?.brief as { site_thin?: unknown } | null | undefined)?.site_thin === true;
   const researchJobs = jobs.filter((j) => RESEARCH_STAGE_SET.has(j.stage));
   const hasActiveResearch = researchJobs.some((j) => j.status === 'pending' || j.status === 'running');
   const failedStages = RESEARCH_STAGES.filter(({ stage }) => latestJobOf(jobs, stage)?.status === 'failed');
@@ -135,6 +140,15 @@ export function Step1Research({
             </p>
           </div>
         </div>
+        {siteThin ? (
+          <div className="mt-4">
+            <BusinessBlock
+              projectId={project?.id ?? null}
+              businessValue={resolvedBusinessValue}
+              emphasized
+            />
+          </div>
+        ) : null}
         <div className="mt-4 text-center">
           <button
             type="button"
@@ -166,6 +180,8 @@ export function Step1Research({
       styleValue={resolvedStyleValue}
       onStyleSaved={onStyleSaved}
       signatureValue={resolvedSignatureValue}
+      businessValue={resolvedBusinessValue}
+      siteThin={siteThin}
       projectId={project?.id ?? null}
       cases={cases ?? []}
       onCasesChanged={onCasesChanged}
@@ -183,6 +199,8 @@ function NotStarted({
   styleValue,
   onStyleSaved,
   signatureValue,
+  businessValue = '',
+  siteThin = false,
   projectId,
   cases,
   onCasesChanged,
@@ -194,6 +212,8 @@ function NotStarted({
   styleValue: string;
   onStyleSaved?: () => void;
   signatureValue: string;
+  businessValue?: string;
+  siteThin?: boolean;
   projectId: string | null;
   cases: HeCaseEntry[];
   onCasesChanged?: () => void;
@@ -213,6 +233,7 @@ function NotStarted({
         Запустить исследование
       </button>
       <OfferBlock offerValue={offerValue} onSaveOffer={onSaveOffer} />
+      <BusinessBlock projectId={projectId} businessValue={businessValue} emphasized={siteThin} />
       <SignatureBlock projectId={projectId} signatureValue={signatureValue} />
       <StyleBlock projectId={projectId} styleValue={styleValue} onSaved={onStyleSaved} />
       <CasesBlock projectId={projectId} cases={cases} onCasesChanged={onCasesChanged} />
@@ -338,6 +359,88 @@ function SignatureBlock({
           setSaved(false);
         }}
         placeholder="Иван Иванов, руководитель направления, Polza, polzaagency.ru"
+        className={`mt-2 resize-y ${HE.input}`}
+      />
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => void handleSave()}
+          disabled={saving || !dirty}
+          className={HE.btnSmall}
+        >
+          {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
+          Сохранить
+        </button>
+        {saved ? <span className="text-xs text-emerald-500">Сохранено ✓</span> : null}
+      </div>
+      {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
+    </div>
+  );
+}
+
+/** Ручное описание бизнеса: спасение, когда сайт слабый/на JS (site_thin). Сохраняет сам через PATCH. */
+function BusinessBlock({
+  projectId,
+  businessValue,
+  emphasized,
+}: {
+  projectId: string | null;
+  businessValue: string;
+  emphasized?: boolean;
+}) {
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleSave = async () => {
+    if (saving || !projectId) return;
+    setSaving(true);
+    setError('');
+    try {
+      const { ok, data } = await hePatch<HeProjectResponse>(`${HE_API}/projects/${projectId}`, {
+        business_override: taRef.current?.value ?? '',
+      });
+      if (!ok) {
+        setError(data.error || 'Не удалось сохранить описание');
+        return;
+      }
+      setSaved(true);
+      setDirty(false);
+      window.setTimeout(() => setSaved(false), 2000);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      className={`mt-4 rounded-xl border p-4 text-left ${
+        emphasized ? 'border-amber-300 bg-amber-50/60' : 'border-gray-200 bg-gray-50/50'
+      }`}
+    >
+      <label
+        htmlFor="he-step1-business"
+        className="text-xs font-semibold uppercase tracking-widest text-gray-400"
+      >
+        Описание бизнеса (если сайт не раскрывает)
+      </label>
+      <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
+        {emphasized
+          ? 'Сайт прочитался слабо (мало текста или нужен JavaScript). Заполните описание сами и перезапустите исследование — иначе вертикали будут догадками.'
+          : 'Что продаём, кому и чем сильны — своими словами. Идёт в генерацию вертикалей поверх профиля сайта; особенно важно, если сайт лаконичный или на JavaScript.'}
+      </p>
+      <textarea
+        id="he-step1-business"
+        ref={taRef}
+        rows={3}
+        defaultValue={businessValue}
+        onChange={() => {
+          setDirty(true);
+          setSaved(false);
+        }}
+        placeholder="Например: продаём корпоративное обучение по продажам для производственных компаний, сильны программами для В2Г-сектора…"
         className={`mt-2 resize-y ${HE.input}`}
       />
       <div className="mt-2 flex items-center gap-2">

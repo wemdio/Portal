@@ -15,6 +15,7 @@ create table if not exists public.gis_signal_segments (
   instantly_campaign_id text,                    -- NULL пока кампания не создана в Instantly
   rubric_groups jsonb not null default '[]'::jsonb,
   -- TwoGisRubricGroup[]: [{category, includedSubcategories[], excludedSubcategories[]}]
+  require_online boolean not null default false, -- true → в запуск идут только сайты с явным онлайн-форматом
   priority int not null default 100,             -- порядок обхода; компания попадает в ОДИН сегмент
   enabled boolean not null default true,
   created_at timestamptz not null default now(),
@@ -33,7 +34,7 @@ create table if not exists public.gis_signal_pipeline_config (
   measure_only boolean not null default true,
   client_user_id uuid references public.profiles(id) on delete cascade,
   monthly_target_companies int not null default 20000, -- цель ТЗ: ~20k компаний/мес
-  daily_limit int not null default 1000,               -- потолок компаний за прогон (этап отбора)
+  daily_limit int not null default 1600,               -- потолок кандидатов за прогон (≈1000 контактов/день по конверсии тест-прогона)
   signal_min_count int not null default 1,             -- порог сигналов (ТЗ: 1; в будущем 2-3)
   selected_steps jsonb not null default
     '["remove_empty","dedup_full","find_emails","split_emails","dedup_email","validate_emails","cap_emails_per_company","clean_names"]'::jsonb,
@@ -148,8 +149,10 @@ on conflict (id) do nothing;
 -- ── Сиды: 5 сегментов. Маппинг подобран по facet_categories/facet_subcategories
 -- снапшота 2gis_dataset 2026-07-26. instantly_campaign_id заполняет клиент/мы
 -- после создания кампаний — до этого прогон работает в measure_only.
-insert into public.gis_signal_segments (key, label, priority, rubric_groups) values
-('edu', 'Онлайн-образование', 10, '[
+-- Запуск 06.08.2026: только edu (онлайн-образование), остальные сегменты выключены
+-- до отдельного решения (enabled=false) — включить = один UPDATE без деплоя.
+insert into public.gis_signal_segments (key, label, priority, require_online, enabled, rubric_groups) values
+('edu', 'Онлайн-образование', 10, true, true, '[
   {"category":"Образование / Работа / Карьера","includedSubcategories":[
     "Языковые школы",
     "Профессиональная переподготовка / Повышение квалификации",
@@ -163,7 +166,7 @@ insert into public.gis_signal_segments (key, label, priority, rubric_groups) val
     "Обучение по охране труда"
   ],"excludedSubcategories":[]}
 ]'::jsonb),
-('remont', 'Ремонт / мебель', 20, '[
+('remont', 'Ремонт / мебель', 20, false, false, '[
   {"category":"Мебель / Материалы / Фурнитура","includedSubcategories":[
     "Корпусная мебель",
     "Мебель для кухни",
@@ -185,7 +188,7 @@ insert into public.gis_signal_segments (key, label, priority, rubric_groups) val
     "Фасадные работы"
   ],"excludedSubcategories":[]}
 ]'::jsonb),
-('legal', 'Юридические услуги', 30, '[
+('legal', 'Юридические услуги', 30, false, false, '[
   {"category":"Юридические / финансовые / бизнес-услуги","includedSubcategories":[
     "Юридические услуги",
     "Ведение дел в судах",
@@ -196,13 +199,13 @@ insert into public.gis_signal_segments (key, label, priority, rubric_groups) val
     "Защита авторских прав"
   ],"excludedSubcategories":[]}
 ]'::jsonb),
-('accounting', 'Бухгалтерские услуги', 40, '[
+('accounting', 'Бухгалтерские услуги', 40, false, false, '[
   {"category":"Юридические / финансовые / бизнес-услуги","includedSubcategories":[
     "Бухгалтерские услуги",
     "Аудиторские услуги"
   ],"excludedSubcategories":[]}
 ]'::jsonb),
-('consulting', 'Консалтинговые услуги', 50, '[
+('consulting', 'Консалтинговые услуги', 50, false, false, '[
   {"category":"Юридические / финансовые / бизнес-услуги","includedSubcategories":[
     "Управленческий консалтинг",
     "Финансовый консалтинг"

@@ -481,6 +481,57 @@ export async function getPortfolioProfile(opts?: { limit?: number; market?: HeMa
   }
 }
 
+/**
+ * Фактические отправки/ответы по КОНКРЕТНЫМ кампаниям (петля сверки прогноза
+ * «Движка вертикалей» с реальностью): per-campaign latest, отфильтрованный по
+ * переданным id. Гейт по объёму мягче сегментного (100 vs 1000): одна-две
+ * кампании вертикали редко набирают тысячи отправок в первые дни.
+ */
+const SQL_CAMPAIGNS_AGG = `${SQL_LATEST_OVERVIEW}
+SELECT count(*)::int AS campaigns,
+       COALESCE(sum(l.emails_sent_count), 0)::bigint AS sent,
+       COALESCE(sum(l.reply_count), 0)::bigint AS replies
+FROM latest l
+WHERE l.campaign_id::text = ANY($1)`;
+
+export interface HeCampaignActuals {
+  /** Сколько из переданных кампаний вообще есть в датасете (снапшоты ещё могли не доехать). */
+  campaigns_with_data: number;
+  sent: number;
+  replies: number;
+  /** reply% при sent >= 100; null — данных пока мало для честного числа. */
+  reply_pct: number | null;
+}
+
+/**
+ * Факт по кампаниям запуска (he_templates.launch_info.campaigns). null —
+ * датасет не сконфигурирован/упал или ни одна кампания ещё не синкнулась.
+ * Never-throw по контракту модуля.
+ */
+export async function getCampaignActuals(campaignIds: string[]): Promise<HeCampaignActuals | null> {
+  const ids = [...new Set(campaignIds.map((c) => (c ?? '').trim()).filter(Boolean))];
+  if (!ids.length || !isDatasetConfigured()) return null;
+  try {
+    const rows = await datasetQuery<{ campaigns: number | string; sent: number | string; replies: number | string }>(
+      SQL_CAMPAIGNS_AGG,
+      [ids],
+    );
+    const row = rows[0];
+    if (!row || num(row.campaigns) === 0) return null;
+    const sent = num(row.sent);
+    const replies = num(row.replies);
+    return {
+      campaigns_with_data: num(row.campaigns),
+      sent,
+      replies,
+      reply_pct: sent >= 100 ? Math.round((replies / sent) * 10000) / 100 : null,
+    };
+  } catch (e) {
+    console.error('[datasetStats] campaign actuals query failed:', errMsg(e));
+    return null;
+  }
+}
+
 function joinNotes(a: string | undefined, b: string): string {
   return a ? `${a}; ${b}` : b;
 }

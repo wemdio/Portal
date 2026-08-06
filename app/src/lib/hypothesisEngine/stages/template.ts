@@ -32,6 +32,14 @@ import {
   buildTemplatePlanMessages,
   buildTemplateRewriteMessages,
 } from '../prompts/template';
+import { buildChainRuleFixHint } from '../prompts/chain';
+import {
+  checkLetterRules,
+  extractNumberFacts,
+  findUnverifiedNumbers,
+  type HeLetterForCheck,
+  type HeLetterRuleViolation,
+} from '../letterChecks';
 import { selectCaseForVertical, type HeCase } from '../caseBank';
 import { getWinnerPatterns, matchSegmentLabels, type HeWinnerPattern } from '../datasetStats';
 import type {
@@ -567,14 +575,199 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     }
   }
 
-  // Шаг 2c: критик-луп — одна оценка финальных писем той же моделью, что и
+  // Шаг 2c: детерминированный контроль регламента + фактчек цифр (letterChecks).
+  // Тире/приветствие/один CTA/стоп-фразы + числа только из материалов (анализ
+  // базы, цепочка, кейс, бриф, winner-паттерны, fixed_block). Варианты A и B
+  // проверяются полностью; сегментные варианты — только по числам (это
+  // фрагменты, без приветствия/CTA). Нарушения → один фикс-проход ДО маппинга
+  // операторов и критика: критик должен ревьюить финальную механику текста.
+  const factCorpus = [
+    JSON.stringify(analysis),
+    chainLetters.map((l) => `${l.subject ?? ''}\n${l.body}`).join('\n'),
+    vertical.name,
+    vertical.summary ?? '',
+    clientCase ? JSON.stringify(clientCase) : '',
+    JSON.stringify(brief),
+    JSON.stringify(winnerPatterns),
+    plan.data.fixed_block,
+  ].join('\n');
+  const facts = extractNumberFacts(factCorpus);
+  const lettersForCheck = (ls: HeChainLetterAB[]): HeLetterForCheck[] =>
+    ls.flatMap((l) => [
+      { subject: l.subject ?? '', body: l.body, variant: 'A' },
+      ...(l.variants ?? []).map((v) => ({ subject: v.subject ?? '', body: v.body, variant: 'B' })),
+    ]);
+  const segmentNumberViolations = (ls: HeChainLetterAB[]): HeLetterRuleViolation[] =>
+    ls.flatMap((l, i) =>
+      (l.segment_variants ?? []).flatMap((sv) =>
+        findUnverifiedNumbers(sv.text, facts).map((token) => ({
+          letter: i + 1,
+          rule: 'unverified_number' as const,
+          detail: `письмо ${i + 1}, сегментный вариант: число «${token}» отсутствует в материалах — удали или замени фактом из материалов`,
+        })),
+      ),
+    );
+  const collectRuleViolations = (ls: HeChainLetterAB[]) => [
+    ...checkLetterRules(lettersForCheck(ls), language, facts),
+    ...segmentNumberViolations(ls),
+  ];
+  const ruleViolations = collectRuleViolations(letters);
+  if (ruleViolations.length > 0) {
+    stageLog(ctx, `[template] детерминированный контроль: ${ruleViolations.length} нарушений — фикс-проход`);
+    // Принятие фикса: то же число писем и не меньше B/сегментных вариантов
+    // (модель могла молча выкинуть блоки ---LETTER N B--- / ---SEGMENT---).
+    const countVariants = (ls: HeChainLetterAB[]) => ({
+      b: ls.reduce((acc, l) => acc + (l.variants?.length ?? 0), 0),
+      seg: ls.reduce((acc, l) => acc + (l.segment_variants?.length ?? 0), 0),
+    });
+    const before = countVariants(letters);
+    try {
+      const fix = await callLLMText(
+        [
+          ...messages,
+          { role: 'assistant', content: llm.text },
+          { role: 'user', content: buildChainRuleFixHint(ruleViolations, language, { hasSegmentBlocks: true }) },
+        ],
+        { model, maxTokens: 16384 },
+      );
+      addUsage(usage, fix);
+      const rebuilt = buildLetters(fix.text);
+      const after = countVariants(rebuilt.letters);
+      if (
+        rebuilt.parsed.length >= 3 &&
+        rebuilt.letters.length === letters.length &&
+        after.b >= before.b &&
+        after.seg >= before.seg
+      ) {
+        llm = fix;
+        parsed = rebuilt.parsed;
+        letters = rebuilt.letters;
+        const remaining = collectRuleViolations(letters);
+        if (remaining.length > 0) {
+          stageLog(
+            ctx,
+            `[template] после фикс-прохода осталось ${remaining.length} нарушений: ${remaining
+              .slice(0, 3)
+              .map((v) => v.detail)
+              .join('; ')}`,
+          );
+        }
+      } else {
+        stageLog(
+          ctx,
+          `[template] фикс-проход: ${rebuilt.parsed.length} писем, варианты ${after.b}B/${after.seg}seg вместо ${before.b}B/${before.seg}seg — оставляем исходные`,
+        );
+      }
+    } catch (e) {
+      stageLog(ctx, `[template] фикс-проход недоступен: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // Шаг 2d: операторы финальных писем → колонки базы (pure) + консистентность.
+  // Операторы собираются из основного текста (A), B-вариантов и сегментных
+  // вариантов: B — полноценное письмо и тоже может нести {{var}}.
+  const collectOperators = (ls: HeChainLetterAB[]) => {
+    const variantTexts = (l: HeChainLetterAB) => (l.variants ?? []).flatMap((v) => [v.subject ?? '', v.body]);
+    const subjectOperators = extractPersonalizationOperators(
+      ls.map((l) => [l.subject ?? '', ...variantTexts(l)].join('\n')).join('\n'),
+    );
+    const allOperators = extractPersonalizationOperators(
+      ls
+        .map((l) =>
+          [
+            l.subject ?? '',
+            l.body,
+            ...variantTexts(l),
+            ...(l.segment_variants ?? []).map((v) => v.text),
+          ].join('\n'),
+        )
+        .join('\n'),
+    );
+    return { subjectOperators, allOperators };
+  };
+
+  // Операторы плана обязаны попасть в маппинг: отсутствующие в финальных
+  // письмах добавляем явно unmatched (с fallback из плана) — дыра видна специалисту.
+  const buildMapping = (ops: string[]): HeOperatorMapping[] => {
+    const mapped = mapOperatorsToColumns(ops, columns);
+    const present = new Set(mapped.map((m) => m.operator.toLowerCase()));
+    const fallbackByVar = new Map<string, string>();
+    for (const lp of plan.data.personalization_plan) {
+      for (const op of lp.operators) {
+        const key = op.var.toLowerCase();
+        if (op.fallback && !fallbackByVar.has(key)) fallbackByVar.set(key, op.fallback);
+        if (!present.has(key)) {
+          mapped.push({
+            operator: op.var,
+            column: null,
+            matched: false,
+            ...(op.fallback ? { fallback: op.fallback } : {}),
+          });
+          present.add(key);
+        }
+      }
+    }
+    return mapped.map((m) =>
+      !m.matched && !m.fallback && fallbackByVar.has(m.operator.toLowerCase())
+        ? { ...m, fallback: fallbackByVar.get(m.operator.toLowerCase()) }
+        : m,
+    );
+  };
+
+  let ops = collectOperators(letters);
+  let operatorMapping = buildMapping(ops.allOperators);
+  let mappingIssues = validateOperatorMapping(operatorMapping, columns, plan.data, {
+    subjectOperators: ops.subjectOperators,
+  });
+
+  if (mappingIssues.length) {
+    stageLog(ctx, `[template] operator_mapping: ${mappingIssues.length} проблем — retry с фидбэком`);
+    // Принимаем регенерацию только с тем же числом писем и без НОВЫХ
+    // нарушений детерминированного контроля: retry переписывает шаблон
+    // целиком и мог вернуть тире/лишние CTA уже после фикс-прохода.
+    const preRetryViolations = collectRuleViolations(letters).length;
+    const preRetry = { letters, ops, operatorMapping, mappingIssues };
+    const retryLlm = await callLLMText(
+      [
+        ...messages,
+        { role: 'assistant', content: llm.text.slice(0, 2000) },
+        { role: 'user', content: operatorIssuesHint(mappingIssues) },
+      ],
+      { model, maxTokens: 16384 },
+    );
+    addUsage(usage, retryLlm);
+    const rebuilt = buildLetters(retryLlm.text);
+    if (rebuilt.parsed.length >= 3 && rebuilt.letters.length === letters.length) {
+      const newViolations = collectRuleViolations(rebuilt.letters).length;
+      if (newViolations > preRetryViolations) {
+        stageLog(
+          ctx,
+          `[template] retry по операторам вернул ${newViolations} нарушений регламента (было ${preRetryViolations}) — оставляем прежние письма`,
+        );
+        ({ letters, ops, operatorMapping, mappingIssues } = preRetry);
+      } else {
+        llm = retryLlm;
+        letters = rebuilt.letters;
+        ops = collectOperators(letters);
+        operatorMapping = buildMapping(ops.allOperators);
+        mappingIssues = validateOperatorMapping(operatorMapping, columns, plan.data, {
+          subjectOperators: ops.subjectOperators,
+        });
+      }
+    } else {
+      stageLog(ctx, '[template] retry по операторам не распарсился/сменил число писем — оставляем предыдущие письма');
+    }
+  }
+
+  // Шаг 2e: критик-луп — одна оценка финальных писем той же моделью, что и
   // генерация (getHeModel('chain')), + максимум один rewrite по её замечаниям.
   // Критик работает ТОЛЬКО по основному варианту A (B-вариант и сегментные
   // варианты в разбор не идут — стоимость). Rewrite не содержит ---SEGMENT---
   // и ---LETTER N B--- блоков: варианты после его принятия восстанавливаются
   // из исходных писем по индексу. Без цикла; сбой критика, нечитаемый,
-  // урезанный или раздутый rewrite → остаются исходные письма. Операторы
-  // (шаг 3) считаются уже по финальному тексту.
+  // урезанный или раздутый rewrite → остаются исходные письма. Критик идёт
+  // ПОСЛЕ фикс-прохода и маппинга операторов — он ревюит финальную механику
+  // текста; маппинг после рерайта пересобирается детерминированно (ниже).
   let critiqueInfo: { verdict: string; issues_count: number; rewritten: boolean } | null = null;
   try {
     const criticLetters = letters.map((l) => ({ subject: l.subject ?? '', body: l.body }));
@@ -639,87 +832,13 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     stageLog(ctx, `[template] критик-луп недоступен: ${e instanceof Error ? e.message : String(e)} — оставляем исходные письма`);
   }
 
-  // Шаг 3: операторы финальных писем → колонки базы (pure) + консистентность.
-  // Операторы собираются из основного текста (A), B-вариантов и сегментных
-  // вариантов: B — полноценное письмо и тоже может нести {{var}}.
-  const collectOperators = (ls: HeChainLetterAB[]) => {
-    const variantTexts = (l: HeChainLetterAB) => (l.variants ?? []).flatMap((v) => [v.subject ?? '', v.body]);
-    const subjectOperators = extractPersonalizationOperators(
-      ls.map((l) => [l.subject ?? '', ...variantTexts(l)].join('\n')).join('\n'),
-    );
-    const allOperators = extractPersonalizationOperators(
-      ls
-        .map((l) =>
-          [
-            l.subject ?? '',
-            l.body,
-            ...variantTexts(l),
-            ...(l.segment_variants ?? []).map((v) => v.text),
-          ].join('\n'),
-        )
-        .join('\n'),
-    );
-    return { subjectOperators, allOperators };
-  };
-
-  // Операторы плана обязаны попасть в маппинг: отсутствующие в финальных
-  // письмах добавляем явно unmatched (с fallback из плана) — дыра видна специалисту.
-  const buildMapping = (ops: string[]): HeOperatorMapping[] => {
-    const mapped = mapOperatorsToColumns(ops, columns);
-    const present = new Set(mapped.map((m) => m.operator.toLowerCase()));
-    const fallbackByVar = new Map<string, string>();
-    for (const lp of plan.data.personalization_plan) {
-      for (const op of lp.operators) {
-        const key = op.var.toLowerCase();
-        if (op.fallback && !fallbackByVar.has(key)) fallbackByVar.set(key, op.fallback);
-        if (!present.has(key)) {
-          mapped.push({
-            operator: op.var,
-            column: null,
-            matched: false,
-            ...(op.fallback ? { fallback: op.fallback } : {}),
-          });
-          present.add(key);
-        }
-      }
-    }
-    return mapped.map((m) =>
-      !m.matched && !m.fallback && fallbackByVar.has(m.operator.toLowerCase())
-        ? { ...m, fallback: fallbackByVar.get(m.operator.toLowerCase()) }
-        : m,
-    );
-  };
-
-  let ops = collectOperators(letters);
-  let operatorMapping = buildMapping(ops.allOperators);
-  let mappingIssues = validateOperatorMapping(operatorMapping, columns, plan.data, {
+  // Шаг 3: после рерайта критика текст мог изменить {{var}} — пересобираем
+  // маппинг детерминированно (pure, без LLM-retry: критик уже закрыл смысл).
+  ops = collectOperators(letters);
+  operatorMapping = buildMapping(ops.allOperators);
+  mappingIssues = validateOperatorMapping(operatorMapping, columns, plan.data, {
     subjectOperators: ops.subjectOperators,
   });
-
-  if (mappingIssues.length) {
-    stageLog(ctx, `[template] operator_mapping: ${mappingIssues.length} проблем — retry с фидбэком`);
-    const retryLlm = await callLLMText(
-      [
-        ...messages,
-        { role: 'assistant', content: llm.text.slice(0, 2000) },
-        { role: 'user', content: operatorIssuesHint(mappingIssues) },
-      ],
-      { model, maxTokens: 16384 },
-    );
-    addUsage(usage, retryLlm);
-    const rebuilt = buildLetters(retryLlm.text);
-    if (rebuilt.parsed.length >= 3) {
-      llm = retryLlm;
-      letters = rebuilt.letters;
-      ops = collectOperators(letters);
-      operatorMapping = buildMapping(ops.allOperators);
-      mappingIssues = validateOperatorMapping(operatorMapping, columns, plan.data, {
-        subjectOperators: ops.subjectOperators,
-      });
-    } else {
-      stageLog(ctx, '[template] retry по операторам не распарсился — оставляем предыдущие письма');
-    }
-  }
   if (mappingIssues.length) {
     stageLog(ctx, `[template] operator_mapping issues (best effort): ${mappingIssues.join(' | ')}`);
   }

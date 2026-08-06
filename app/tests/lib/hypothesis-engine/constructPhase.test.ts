@@ -157,7 +157,7 @@ beforeEach(() => {
 /* ─────────────────────────── Gate ─────────────────────────── */
 
 describe('construct gate', () => {
-  it('email у >50% строк → CONSTRUCT пропускается, база сразу analyzing (RU-поток)', async () => {
+  it('email у >50% строк → CONSTRUCT всё равно идёт (валидация!), но БЕЗ find_emails', async () => {
     const info = doneInfo([
       row({ company: 'ООО Код', website: 'code.ru', email: 'hi@code.ru', source_detail: 'реестр' }),
       row({ company: 'ООО Два', website: 'two.ru', email: 'a@two.ru', source_detail: 'реестр' }),
@@ -166,18 +166,19 @@ describe('construct gate', () => {
     seedTables(info, PROJECT_RU);
 
     const res = await runBaseCollectStage(makeJob(), ctx());
-    expect((res.result as { rows: number }).rows).toBe(3);
+    expect((res.result as { waiting: boolean }).waiting).toBe(true);
 
-    // Конструктор не вызывался: ни BC-джобы, ни рекью.
-    expect(mockDb.inserts.find((i) => i.table === 'base_constructor_jobs')).toBeUndefined();
-    expect(mockDb.updates.find((u) => u.table === 'he_jobs')).toBeUndefined();
-
-    const patch = lastBasePatch();
-    expect(patch?.status).toBe('analyzing');
-    expect(patch?.columns).toEqual([...HE_AUTO_COLLECT_COLUMNS]);
-    expect(mockDb.inserts.find((i) => i.table === 'he_jobs')?.rows[0]).toEqual(
-      expect.objectContaining({ stage: 'base_analyze' }),
-    );
+    // Конструктор вызван, но без поиска почт: dedup → validate → cap → описания.
+    const bcInsert = mockDb.inserts.find((i) => i.table === 'base_constructor_jobs');
+    expect(bcInsert).toBeDefined();
+    expect(bcInsert?.rows[0].selected_steps).toEqual([
+      'dedup_email',
+      'validate_emails',
+      'cap_emails_per_company',
+      'enrich_descriptions',
+    ]);
+    // base_analyze ещё не ставится — ждём конструктор.
+    expect(mockDb.inserts.find((i) => i.table === 'he_jobs')).toBeUndefined();
   });
 
   it('ровно 50% строк с email → CONSTRUCT выполняется (граница — «больше 50%»)', async () => {
@@ -337,26 +338,33 @@ describe('import construct result', () => {
     // description — В КОНЦЕ массива существующих заголовков.
     expect(patch?.columns).toEqual([...HE_AUTO_COLLECT_COLUMNS, 'description']);
     expect(patch?.data).toEqual([
-      enrichedRow({
-        company: 'Acme Inc',
-        website: 'acme.com',
-        email: 'found@acme.com',
-        vacancy_title: 'Account Executive',
-        address: 'austin, tx, united states',
-        category: 'software',
-        employees: '51-200',
-        source_detail: 'pdl',
-        description: 'Acme builds staffing software',
-      }),
+      {
+        ...enrichedRow({
+          company: 'Acme Inc',
+          website: 'acme.com',
+          email: 'found@acme.com',
+          vacancy_title: 'Account Executive',
+          address: 'austin, tx, united states',
+          category: 'software',
+          employees: '51-200',
+          source_detail: 'pdl',
+          description: 'Acme builds staffing software',
+        }),
+        // Вердикт валидации хранится на строке — запуск пропускает не-'ok'.
+        _email_status: 'ok',
+      },
       // Мульти-email ячейка: в he_bases уходит первый адрес (единый email на строку).
-      enrichedRow({
-        company: 'Globex',
-        website: 'globex.com',
-        email: 'orig@globex.com',
-        category: 'staffing and recruiting',
-        source_detail: 'pdl',
-        description: 'Globex recruits',
-      }),
+      {
+        ...enrichedRow({
+          company: 'Globex',
+          website: 'globex.com',
+          email: 'orig@globex.com',
+          category: 'staffing and recruiting',
+          source_detail: 'pdl',
+          description: 'Globex recruits',
+        }),
+        _email_status: 'invalid',
+      },
     ]);
 
     // Статистика конструктора — в collect_info.construct.
@@ -395,19 +403,22 @@ describe('import construct result', () => {
     const patch = lastBasePatch();
     expect(patch?.columns).toEqual([...HE_AUTO_COLLECT_COLUMNS, 'description']);
     expect(patch?.data).toEqual([
-      enrichedRow({
-        company: 'ООО Код',
-        website: 'code.ru',
-        email: 'found@code.ru',
-        phone: '+7999',
-        address: 'Мск',
-        category: '62.01',
-        employees: '50',
-        revenue: '10000000',
-        inn: '7700000001',
-        source_detail: 'реестр',
-        description: 'Пишет код',
-      }),
+      {
+        ...enrichedRow({
+          company: 'ООО Код',
+          website: 'code.ru',
+          email: 'found@code.ru',
+          phone: '+7999',
+          address: 'Мск',
+          category: '62.01',
+          employees: '50',
+          revenue: '10000000',
+          inn: '7700000001',
+          source_detail: 'реестр',
+          description: 'Пишет код',
+        }),
+        _email_status: 'ok',
+      },
     ]);
   });
 

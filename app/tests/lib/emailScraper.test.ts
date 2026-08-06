@@ -172,6 +172,21 @@ describe('emailScraper — advanced extraction', () => {
       expect(filterJunkEmails(['x@sentry.io', 'x@wixpress.com'])).toEqual([]);
     });
 
+    it('removes hosting/parking placeholder domains (beget, timeweb, reg.ru…)', () => {
+      expect(
+        filterJunkEmails([
+          'support@beget.com',
+          'bills@beget.ru',
+          'manager@timeweb.ru',
+          'info@reg.ru',
+          'admin@nic.ru',
+          'sale@jino.ru',
+          'x@sprinthost.ru',
+          'real@company.ru',
+        ]),
+      ).toEqual(['real@company.ru']);
+    });
+
     it('keeps valid business emails', () => {
       const input = ['sales@company.com', 'hr@firm.ru', 'ceo@startup.io'];
       expect(filterJunkEmails(input)).toEqual(input);

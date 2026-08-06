@@ -9,6 +9,11 @@
  * сбой фетча источника → источник пропускается; сбой LLM по одному
  * кандидату → кандидат отбрасывается с reason='stage_error', остальные
  * продолжаются.
+ *
+ * Кодовая верификация (verifyEvidence.ts): каждый evidence-пункт проверяется
+ * против реально скачанных источников (URL ∈ fetched, цитата — подстрока
+ * текста). Сфабрикованные пункты отбрасываются; гипотеза без проверенных
+ * доказательств капается по % (≤ 20) — см. evidence_dropped в result.
  */
 
 import { callLLMWithSchema, getHeModel } from '../llm';
@@ -18,6 +23,8 @@ import {
   type HeSiteProfileOutput,
 } from '../schemas';
 import { projectMarket } from '../market';
+import { anchorPotentialPct } from '../scoreAnchor';
+import { verifyEvidenceItems } from '../verifyEvidence';
 import { buildEvidenceMessages } from '../prompts/evidence';
 import { buildEvidenceMessagesEn } from '../prompts/evidence.en';
 import type { HeEvidenceItem, HeHypothesisTier, HeJob } from '../types';
@@ -106,6 +113,7 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
   const accepted: AcceptedHypothesis[] = [];
   let merged = 0;
   let dropped = 0;
+  let evidenceDropped = 0;
 
   for (let i = 0; i < candidates.length; i += 1) {
     const candidate = candidates[i];
@@ -167,11 +175,34 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
         continue;
       }
 
+      // Кодовая пост-верификация: URL обязан быть среди скачанных источников,
+      // цитата — подстрокой его текста. Сфабрикованное выкидываем; гипотеза
+      // без единого проверенного доказательства капается по % (свои же правила
+      // промпта: «нет доказательного пути» → низкий потенциал).
+      const check = verifyEvidenceItems(v.evidence, sources);
+      if (check.dropped > 0) {
+        evidenceDropped += check.dropped;
+        stageLog(
+          ctx,
+          `[evidence] «${candidate.title}»: отброшено ${check.dropped} недоказанных пунктов (URL/цитата не из скачанного)`,
+        );
+      }
+      // Дата-якорь: программный матч сегмента датасета + факт reply% →
+      // ограниченная поправка (0.7×LLM + 0.3×datasetScore). Без честного
+      // матча/объёма — оценка LLM без изменений (см. scoreAnchor.ts).
+      const anchor = await anchorPotentialPct(v.potential_pct, candidate.title, market);
+      if (anchor.applied && anchor.pct !== v.potential_pct) {
+        stageLog(ctx, `[evidence] «${candidate.title}»: ${v.potential_pct}% → ${anchor.pct}% (${anchor.note})`);
+      }
+      // Кап «нет проверенных доказательств» — ПОСЛЕ якоря: иначе горячий
+      // сегмент датасета поднимал бы неверифицированную гипотезу до ~43%.
+      const finalPct = check.valid.length === 0 ? Math.min(anchor.pct, 20) : anchor.pct;
+
       if (v.verdict === 'merge' && v.merge_with_title) {
         const target = accepted.find((a) => normTitle(a.title) === normTitle(v.merge_with_title as string));
         if (target) {
-          target.evidence = [...target.evidence, ...v.evidence].slice(0, MAX_EVIDENCE_PER_HYPOTHESIS);
-          target.potential_pct = Math.max(target.potential_pct, v.potential_pct);
+          target.evidence = [...target.evidence, ...check.valid].slice(0, MAX_EVIDENCE_PER_HYPOTHESIS);
+          target.potential_pct = Math.max(target.potential_pct, finalPct);
           merged += 1;
           continue;
         }
@@ -186,8 +217,8 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
         // Вердикт обязан пронести fit_rationale (возможно, уточнив по фактам);
         // пустое поле — откат к исходной цепочке кандидата.
         fit_rationale: v.fit_rationale || candidate.fit_rationale,
-        evidence: v.evidence.slice(0, MAX_EVIDENCE_PER_HYPOTHESIS),
-        potential_pct: v.potential_pct,
+        evidence: check.valid.slice(0, MAX_EVIDENCE_PER_HYPOTHESIS),
+        potential_pct: finalPct,
       });
     } catch (e) {
       dropped += 1;
@@ -225,6 +256,7 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
     kept: accepted.length,
     merged,
     dropped,
+    evidence_dropped: evidenceDropped,
   };
   stageLog(ctx, `[evidence] итог: ${JSON.stringify(result)}`);
   return { result, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };

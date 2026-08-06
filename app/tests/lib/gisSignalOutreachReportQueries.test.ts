@@ -104,9 +104,48 @@ describe('getWeeklyFunnel', () => {
     const rows = await getWeeklyFunnel();
     expect(rows).toHaveLength(2);
     const day = today.slice(0, 10);
+    // В фикстурах onlineOk нет (старые прогоны) → fallback на signalsOk.
     expect(rows).toEqual([
-      { runDate: day, segmentKey: 'edu', pulled: 16, signalsOk: 8, bcIn: 6, validContacts: 5, appended: 3 },
-      { runDate: day, segmentKey: 'legal', pulled: 4, signalsOk: 1, bcIn: 1, validContacts: 1, appended: 0 },
+      { runDate: day, segmentKey: 'edu', pulled: 16, signalsOk: 8, onlineOk: 8, bcIn: 6, validContacts: 5, appended: 3 },
+      { runDate: day, segmentKey: 'legal', pulled: 4, signalsOk: 1, onlineOk: 1, bcIn: 1, validContacts: 1, appended: 0 },
+    ]);
+  });
+
+  it('onlineOk из funnel jsonb имеет приоритет над fallback на signalsOk', async () => {
+    const today = new Date().toISOString();
+    mockDb = createMockSupabase({
+      tables: {
+        gis_signal_runs: [
+          {
+            id: 'r1',
+            started_at: today,
+            funnel: {
+              perSegment: {
+                // Новый прогон: online-гейт отрезал 3 из 5 сигнальных.
+                edu: { pulled: 10, signalsOk: 5, onlineOk: 2, bcIn: 2, validContacts: 1, appended: 1 },
+              },
+            },
+          },
+          {
+            id: 'r2',
+            started_at: today,
+            funnel: {
+              perSegment: {
+                // Старый прогон (до require_online): поля нет → fallback = signalsOk.
+                edu: { pulled: 4, signalsOk: 3, bcIn: 3, validContacts: 2, appended: 1 },
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    const rows = await getWeeklyFunnel();
+    expect(rows).toEqual([
+      {
+        runDate: today.slice(0, 10), segmentKey: 'edu',
+        pulled: 14, signalsOk: 8, onlineOk: 5, bcIn: 5, validContacts: 3, appended: 2,
+      },
     ]);
   });
 
@@ -131,7 +170,7 @@ describe('getTotalFunnel', () => {
     });
     const rows = await getTotalFunnel();
     expect(rows).toEqual([
-      { runDate: 'all', segmentKey: 'edu', pulled: 10, signalsOk: 5, bcIn: 4, validContacts: 3, appended: 2 },
+      { runDate: 'all', segmentKey: 'edu', pulled: 10, signalsOk: 5, onlineOk: 5, bcIn: 4, validContacts: 3, appended: 2 },
     ]);
   });
 

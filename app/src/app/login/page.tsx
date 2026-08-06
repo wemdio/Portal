@@ -6,8 +6,12 @@ import type { Route } from 'next';
 import { supabase } from '@/lib/supabaseClient';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { AuthShell, AuthField } from '@/components/auth/AuthShell';
+import { isEngAppHost } from '@/lib/engMarket';
 
 function isSignupHost(host: string): boolean {
+  // ENG-кабинет принимает саморегистрацию всегда (см. lib/engMarket) — иначе
+  // на app.outreachos.xyz некуда попасть новому клиенту.
+  if (isEngAppHost(host)) return true;
   const hosts = (process.env.NEXT_PUBLIC_SIGNUP_HOSTS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   if (hosts.length === 0) return false;
   return hosts.includes(host);

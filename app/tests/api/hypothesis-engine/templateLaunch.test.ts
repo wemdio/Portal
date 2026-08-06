@@ -63,6 +63,14 @@ jest.mock('@/lib/instantly/client', () => ({
   activateCampaign: (...args: unknown[]) => mockActivateCampaign(...args),
 }));
 
+// Классификатор сегментов — LLM-зависимость; в этих тестах всегда «системный
+// сбой» (null) → легаси-путь: одна кампания, варианты выкинуты с warning.
+// Сплит-путь покрыт в templateLaunchSegments.test.ts.
+jest.mock('@/lib/hypothesisEngine/segmentClassify', () => ({
+  classifyBaseRowsIntoSegments: jest.fn(async () => null),
+  detectSegmentLanguage: jest.fn(() => 'ru'),
+}));
+
 import { GET, POST } from '@/app/api/tools/hypothesis-engine/templates/[id]/launch/route';
 
 const LETTERS = [
@@ -131,6 +139,7 @@ function seed(overrides: { template?: Record<string, unknown>; baseRows?: Array<
           id: BASE_ID,
           filename: 'leads.csv',
           columns: ['Email', 'Имя', 'Компания', 'Сайт'],
+          source: 'auto',
           data: overrides.baseRows ?? BASE_ROWS,
         },
       ],
@@ -212,6 +221,25 @@ describe('POST launch — отказы до вызова Instantly', () => {
 });
 
 describe('POST launch — happy path', () => {
+  it('пропускает строки с невалидным email и нерелевантные вертикали (quality-гейты сборки)', async () => {
+    seed({
+      baseRows: [
+        { Email: 'ok@x.test', Имя: 'Ok', Компания: 'Good', Сайт: '' },
+        { Email: 'bad@x.test', Имя: 'Bad', Компания: 'BadCo', Сайт: '', _email_status: 'invalid' },
+        { Email: 'risky@x.test', Имя: 'Risky', Компания: 'RiskyCo', Сайт: '', _email_status: 'risky' },
+        { Email: 'noise@x.test', Имя: 'Noise', Компания: 'NoiseCo', Сайт: '', _low_relevance: true },
+      ],
+    });
+    const res = await POST(makeReq({ preset_id: PRESET_ID }), params);
+    expect(res.status).toBe(200);
+
+    const [leads] = mockCreateLeads.mock.calls[0] as [Array<{ email: string }>, unknown];
+    expect(leads.map((l) => l.email)).toEqual(['ok@x.test']);
+
+    const body = (await res.json()) as { warnings: string[] };
+    expect(body.warnings.some((w) => w.includes('Пропущено строк'))).toBe(true);
+  });
+
   it('создаёт кампанию НА ПАУЗЕ, грузит лидов и пишет launch_info', async () => {
     const res = await POST(makeReq({ preset_id: PRESET_ID }), params);
     expect(res.status).toBe(200);
@@ -250,8 +278,9 @@ describe('POST launch — happy path', () => {
     expect(mockUpdateCampaign).toHaveBeenCalledTimes(1);
     expect(mockUpdateCampaign.mock.calls[0][0]).toBe('camp-1');
 
-    // Лиды: email lowercase+дедуп+валидация; operator_mapping только для имён
-    // переменных; прочие колонки — custom vars под своими именами.
+    // Лиды: email lowercase+дедуп+валидация; matched-операторы эмитятся всегда
+    // (пустая ячейка → '' — parity с превью, никаких литералов {{var}}),
+    // unmatched с fallback → fallback у всех лидов.
     expect(mockCreateLeads).toHaveBeenCalledTimes(1);
     const [leads, leadOptions] = mockCreateLeads.mock.calls[0] as [
       Array<{ email: string; custom_variables?: Record<string, string> }>,
@@ -262,8 +291,13 @@ describe('POST launch — happy path', () => {
       firstName: 'Ada',
       companyName: 'Acme',
       Сайт: 'acme.test',
+      city: 'в вашем городе',
     });
-    expect(leads[1].custom_variables).toEqual({ firstName: 'Bob' });
+    expect(leads[1].custom_variables).toEqual({
+      firstName: 'Bob',
+      companyName: '',
+      city: 'в вашем городе',
+    });
     expect(leadOptions).toEqual({
       campaign_id: 'camp-1',
       skip_if_in_workspace: false,

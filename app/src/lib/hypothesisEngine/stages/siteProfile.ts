@@ -1,7 +1,12 @@
 /**
  * Стадия site_profile: фетч сайта клиента (SSRF-гейт + websiteParser) →
+ * докачка контентных страниц (/about, /uslugi, /prices, …, корпус до ~12k
+ * символов — профиль по одной главной давал усреднённые гипотезы) →
  * LLM-профиль → снапшот в he_projects.brief.site_profile, статус проекта
- * переводится в 'researching'.
+ * переводится в 'researching'. Тонкий/JS-сайт (мало текста или заглушка
+ * парсера) помечается brief.site_thin — UI просит ручное описание бизнеса
+ * (business_override), которое стадия hypotheses кладёт в промпт поверх
+ * профиля.
  *
  * Дополнительно — наполнение кейс-банка (he_cases, source='site'): по тексту
  * сайта + до 3 очевидных кейс-страниц (/cases, /case-studies, /otzyvy, …)
@@ -72,6 +77,92 @@ const MAX_PAGE_ATTEMPTS = 6;
 const MIN_PAGE_CHARS = 100;
 
 /**
+ * Контентные страницы для профиля бизнеса: «о компании», услуги, цены,
+ * продукты. Профиль, построенный на одной главной (≤3000 символов), даёт
+ * усреднённые гипотезы из приоров модели — докачиваем до 4 страниц в корпус.
+ */
+export const CONTENT_PAGE_PATHS = [
+  '/about',
+  '/o-nas',
+  '/company',
+  '/about-us',
+  '/o-kompanii',
+  '/uslugi',
+  '/services',
+  '/prices',
+  '/tseny',
+  '/products',
+  '/solutions',
+  '/resheniya',
+];
+
+/** Капы контентной докачки: ≤4 успешных страниц, ≤8 попыток (оба списка). */
+const MAX_CONTENT_PAGES = 4;
+const MAX_CONTENT_ATTEMPTS = 8;
+/** Символов на доп. страницу в корпусе профиля; общий кап корпуса. */
+const EXTRA_PAGE_EXCERPT = 2500;
+const MAX_PROFILE_CORPUS = 12000;
+/** Корпус короче порога (или JS-заглушка) → сайт «тонкий», нужен ручной бриф. */
+const THIN_SITE_CHARS = 800;
+const JS_STUB_MARK = 'требует JavaScript';
+
+/**
+ * Дотянуть контентные + кейс-страницы тем же fetchText, что и главная.
+ * Бюджеты РАЗДЕЛЬНЫЕ: контентные пути (12 шт) не съедают попытки кейс-путей —
+ * иначе кейс-страницы недостижимы вообще (8 попыток < 12 контентных путей).
+ * Каждая страница best-effort: 404/ошибка парсера — норма.
+ */
+async function fetchExtraPages(
+  fetchText: HeFetchTextFn,
+  websiteUrl: string,
+): Promise<{ content: Array<{ url: string; text: string }>; cases: Array<{ url: string; text: string }> }> {
+  let origin: string;
+  try {
+    origin = new URL(websiteUrl).origin;
+  } catch {
+    return { content: [], cases: [] };
+  }
+  const fetchPath = async (path: string): Promise<{ url: string; text: string } | null> => {
+    try {
+      const text = await fetchText(origin + path);
+      if (text && text.trim().length >= MIN_PAGE_CHARS) return { url: origin + path, text };
+    } catch {
+      /* страницы может не существовать — это ожидаемо */
+    }
+    return null;
+  };
+
+  const content: Array<{ url: string; text: string }> = [];
+  let contentAttempts = 0;
+  for (const path of CONTENT_PAGE_PATHS) {
+    if (content.length >= MAX_CONTENT_PAGES || contentAttempts >= MAX_CONTENT_ATTEMPTS) break;
+    contentAttempts++;
+    const page = await fetchPath(path);
+    if (page) content.push(page);
+  }
+
+  const cases: Array<{ url: string; text: string }> = [];
+  let caseAttempts = 0;
+  for (const path of CASE_PAGE_PATHS) {
+    if (cases.length >= MAX_EXTRA_PAGES || caseAttempts >= MAX_PAGE_ATTEMPTS) break;
+    caseAttempts++;
+    const page = await fetchPath(path);
+    if (page) cases.push(page);
+  }
+  return { content, cases };
+}
+
+/** Корпус профиля: главная + контентные страницы с маркерами URL, с капом. */
+function buildProfileCorpus(siteText: string, extraPages: Array<{ url: string; text: string }>): string {
+  let corpus = siteText;
+  for (const page of extraPages) {
+    if (corpus.length >= MAX_PROFILE_CORPUS) break;
+    corpus += `\n\n=== ${page.url} ===\n${page.text.slice(0, EXTRA_PAGE_EXCERPT)}`;
+  }
+  return corpus.slice(0, MAX_PROFILE_CORPUS);
+}
+
+/**
  * Дотянуть очевидные кейс-страницы (/cases, /projects, …) тем же fetchText,
  * что и главная. Каждая страница best-effort: 404/ошибка парсера — норма.
  */
@@ -114,8 +205,11 @@ async function refreshSiteCases(
   siteText: string,
   fetchText: HeFetchTextFn,
   market: HeMarket,
+  prefetchedPages?: Array<{ url: string; text: string }>,
 ): Promise<{ extracted: number; tokensUsed: number; costUsd: number }> {
-  const extraPages = await fetchCasePages(fetchText, websiteUrl);
+  // Страницы уже скачанных кейс-путей переиспользуем (стадия качала их для
+  // корпуса профиля); не переданы — старый слепой перебор.
+  const extraPages = prefetchedPages ?? (await fetchCasePages(fetchText, websiteUrl));
   stageLog(ctx, `[site_profile] кейс-страницы: ${extraPages.length}`);
 
   const casesInput = { websiteUrl, siteText, extraPages };
@@ -190,9 +284,25 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
   const fetchText = resolveFetchText(ctx);
   stageLog(ctx, `[site_profile] фетч ${project.website_url}`);
   const siteText = await fetchText(project.website_url);
-  stageLog(ctx, `[site_profile] получено ${siteText.length} символов, профиль…`);
+  // Докачка контентных/кейс-страниц: профиль по одной главной (≤3000 символов)
+  // — уровень «прочитал билборд» и даёт усреднённые гипотезы. Кейс-страницы
+  // из этой же пачки уходят в refreshSiteCases (без повторных фетчей).
+  const extraPages = await fetchExtraPages(fetchText, project.website_url);
+  const corpusPages = [...extraPages.content, ...extraPages.cases];
+  stageLog(
+    ctx,
+    `[site_profile] главная ${siteText.length} символов + ${corpusPages.length} доп. страниц (кейс: ${extraPages.cases.length}), профиль…`,
+  );
+  const corpus = buildProfileCorpus(siteText, corpusPages);
 
-  const profileInput = { websiteUrl: project.website_url, siteText };
+  // Гейт «тонкого» сайта: текста мало или пришла JS-заглушка парсера →
+  // помечаем в brief (UI просит ручное описание бизнеса, business_override).
+  const siteThin = corpus.length < THIN_SITE_CHARS || siteText.includes(JS_STUB_MARK);
+  if (siteThin) {
+    stageLog(ctx, `[site_profile] сайт тонкий (${corpus.length} символов) — помечен site_thin`);
+  }
+
+  const profileInput = { websiteUrl: project.website_url, siteText: corpus };
   const llm = await callLLMWithSchema(
     market === 'us' ? buildSiteProfileMessagesEn(profileInput) : buildSiteProfileMessages(profileInput),
     HeSiteProfileSchema,
@@ -200,10 +310,20 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
   );
   addUsage(usage, llm);
 
+  // Brief перечитываем прямо перед записью: за минуты LLM-вызовов пользователь
+  // мог сохранить overrides (offer/style/signature/business) через PATCH —
+  // спред от протухшего снапшота их бы затёр.
+  const { data: freshProject } = await ctx.supabase
+    .from('he_projects')
+    .select('brief')
+    .eq('id', project.id)
+    .single();
   const brief = {
-    ...(project.brief ?? {}),
+    ...(((freshProject as { brief?: Record<string, unknown> } | null)?.brief) ?? project.brief ?? {}),
     website_url: project.website_url,
     site_profile: llm.data,
+    site_thin: siteThin,
+    site_text_chars: corpus.length,
     captured_at: new Date().toISOString(),
   };
   const { error } = await ctx.supabase
@@ -215,7 +335,15 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
   // Кейс-банк: best-effort — сбой не должен ронять основную стадию
   // (бриф уже сохранён; he_cases может ещё не существовать на роллауте).
   try {
-    const casesResult = await refreshSiteCases(ctx, project.id, project.website_url, siteText, fetchText, market);
+    const casesResult = await refreshSiteCases(
+      ctx,
+      project.id,
+      project.website_url,
+      siteText,
+      fetchText,
+      market,
+      extraPages.cases,
+    );
     usage.tokensUsed += casesResult.tokensUsed;
     usage.costUsd += casesResult.costUsd;
     stageLog(ctx, `[site_profile] кейсов извлечено: ${casesResult.extracted}`);

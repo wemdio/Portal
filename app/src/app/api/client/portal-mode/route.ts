@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import type { ClientNavMode } from '@/lib/clientNav';
+import type { ClientMarket } from '@/lib/engMarket';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,6 +19,9 @@ export const dynamic = 'force-dynamic';
  * client_auto_pipeline_configs.enabled = true. Оба источника должны
  * совпадать — иначе режим manual (защита от рассинхрона админских флагов).
  *
+ * Помимо mode отдаёт profiles.market ('ru'|'eng') — layout разводит по нему
+ * навигацию: eng-клиент видит только ENG-кабинет, ru — всё кроме ENG.
+ *
  * Используется /client/layout.tsx один раз при загрузке.
  */
 export async function GET(req: NextRequest) {
@@ -32,10 +36,10 @@ export async function GET(req: NextRequest) {
 
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-    // 1) Флаг на profile.
+    // 1) Флаг на profile + рынок профиля.
     const { data: profile, error: profileErr } = await supabase
       .from('profiles')
-      .select('auto_pipeline_enabled')
+      .select('auto_pipeline_enabled, market')
       .eq('id', user.id)
       .single();
 
@@ -46,16 +50,20 @@ export async function GET(req: NextRequest) {
     const profileEnabled = Boolean(
       (profile as { auto_pipeline_enabled?: boolean } | null)?.auto_pipeline_enabled,
     );
+    // Только 'eng' — маркер ENG-мира; всё остальное (включая старые строки
+    // без колонки) — 'ru'.
+    const market: ClientMarket =
+      (profile as { market?: string } | null)?.market === 'eng' ? 'eng' : 'ru';
 
     if (!profileEnabled) {
-      return NextResponse.json({ mode: 'manual' satisfies ClientNavMode });
+      return NextResponse.json({ mode: 'manual' satisfies ClientNavMode, market });
     }
 
     // 2) Конфиг enabled. Идём через supabaseAdmin, т.к. у клиента read-only
     //    доступ к собственной строке (через RLS), но это всё равно требует
     //    отдельного запроса; держим логику симметрично admin-проверке.
     if (!supabaseAdmin) {
-      return NextResponse.json({ mode: 'manual' satisfies ClientNavMode });
+      return NextResponse.json({ mode: 'manual' satisfies ClientNavMode, market });
     }
 
     const { data: config } = await supabaseAdmin
@@ -68,6 +76,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       mode: (profileEnabled && configEnabled ? 'auto' : 'manual') satisfies ClientNavMode,
+      market,
     });
   } catch (err) {
     return NextResponse.json(

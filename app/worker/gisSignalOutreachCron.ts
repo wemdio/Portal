@@ -56,7 +56,7 @@ async function main(): Promise<number> {
       log(
         'info',
         `Completed in ${elapsedSec}s: pulled=${summary.pulled} signalsOk=${summary.signalsOk} ` +
-          `valid=${summary.validContacts} appended=${summary.appended}`,
+          `onlineOk=${summary.onlineOk} valid=${summary.validContacts} appended=${summary.appended}`,
       );
       return 0;
     }

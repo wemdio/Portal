@@ -25,6 +25,7 @@ import {
 import { ChevronDown } from 'lucide-react';
 import { GlobalTextTranslator, LanguageLoadingOverlay } from '@/components/GlobalTextTranslator';
 import { resolveActiveNavId, CLIENT_NAV_SUPPORT, type ClientNavMode } from '@/lib/clientNav';
+import { isEngAppHost, type ClientMarket } from '@/lib/engMarket';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ClientSidebar } from '@/components/client/ClientSidebar';
 import { ClientMobileDrawer } from '@/components/client/ClientMobileDrawer';
@@ -52,6 +53,13 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   const router = useRouter();
   const [locale, setLocale] = useState<ClientLocale>('ru');
   const [navMode, setNavMode] = useState<ClientNavMode>('manual');
+  // Рынок профиля для навигации (ENG-клиент видит только ENG-кабинет).
+  // Начальное значение вычисляем СИНХРОННО по хосту: на app.outreachos.xyz
+  // сразу 'eng' — иначе RU-навигация мыргала на первый кадр до ответа
+  // /api/client/portal-mode (репорт 2026-08-06).
+  const [market, setMarket] = useState<ClientMarket>(() =>
+    typeof window !== 'undefined' && isEngAppHost(window.location.hostname) ? 'eng' : 'ru',
+  );
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef<HTMLDivElement | null>(null);
@@ -130,9 +138,12 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
       }
 
       if (modeRes.ok) {
-        const body = (await modeRes.json()) as { mode?: ClientNavMode };
+        const body = (await modeRes.json()) as { mode?: ClientNavMode; market?: ClientMarket };
         if (body.mode === 'auto' || body.mode === 'manual') {
           setNavMode(body.mode);
+        }
+        if (body.market === 'eng' || body.market === 'ru') {
+          setMarket(body.market);
         }
       }
     })();
@@ -286,8 +297,8 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   }
 
   const portalContextValue = useMemo(
-    () => ({ portalMode: navMode, supportUnread, mailboxesEnabled, gisSignalsEnabled }),
-    [navMode, supportUnread, mailboxesEnabled, gisSignalsEnabled],
+    () => ({ portalMode: navMode, supportUnread, mailboxesEnabled, gisSignalsEnabled, market }),
+    [navMode, supportUnread, mailboxesEnabled, gisSignalsEnabled, market],
   );
 
   const currentLocaleDesc = LOCALE_DESCRIPTORS[locale];

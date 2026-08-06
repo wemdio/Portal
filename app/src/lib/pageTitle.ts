@@ -49,6 +49,7 @@ const CLIENT_SECTION_TITLES: ReadonlyArray<{
   { prefix: '/client/build', ru: 'Сбор базы', en: 'Build a list', es: 'Crear una lista' },
   { prefix: '/client/parsers', ru: 'Парсеры', en: 'Parsers', es: 'Extractores' },
   { prefix: '/client/offer', ru: 'Договор оферты', en: 'Terms of service', es: 'Términos del servicio' },
+  { prefix: '/client/eng', ru: 'ENG Outreach', en: 'ENG Outreach', es: 'ENG Outreach' },
 ];
 
 function getClientPortalSectionTitle(pathname: string, locale: Locale): string {

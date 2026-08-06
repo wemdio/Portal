@@ -57,6 +57,7 @@ function segment(key: string, category: string, priority: number): GisSignalSegm
     label: key,
     instantly_campaign_id: null,
     rubric_groups: [{ category }],
+    require_online: false,
     priority,
     enabled: true,
   };

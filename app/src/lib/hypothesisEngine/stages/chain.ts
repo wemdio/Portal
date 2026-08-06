@@ -10,7 +10,9 @@
  * selectPromptHypotheses: rejected исключаются, accepted — первыми.
  * В промпт подмешиваются style_override из брифа (styleExample),
  * signature_override (дословная подпись отправителя) и winner-паттерны
- * датасета (best-effort). После генерации — критик-луп:
+ * датасета (best-effort). Перед критиком — детерминированный контроль
+ * (letterChecks): тире/приветствие/один CTA/стоп-фразы + числа только из
+ * материалов; нарушения чинятся одним фикс-проходом. После — критик-луп:
  * одна оценка цепочки (только основной вариант A) + максимум один rewrite
  * по её замечаниям; B-варианты после рерайта восстанавливаются из исходных.
  */
@@ -19,7 +21,8 @@ import { z } from 'zod';
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
 import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
-import { buildChainCriticMessages, buildChainMessages, buildChainRewriteMessages } from '../prompts/chain';
+import { buildChainCriticMessages, buildChainMessages, buildChainRewriteMessages, buildChainRuleFixHint } from '../prompts/chain';
+import { checkLetterRules, extractNumberFacts, type HeLetterForCheck } from '../letterChecks';
 import { getWinnerPatterns, matchSegmentLabels, type HeWinnerPattern } from '../datasetStats';
 import { selectCaseForVertical, type HeCase } from '../caseBank';
 import type { HeChainLanguage, HeChainLetter, HeEvidenceItem, HeHypothesis, HeJob, HeVertical } from '../types';
@@ -312,6 +315,79 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       ? ` Модель, похоже, отклонила генерацию по контентной политике (finish=${llm.finishReason ?? 'n/a'}): чувствительная ниша клиента — попробуйте переписать оффер/бриф нейтральнее или другую модель (HE_MODEL_CHAIN/HE_MODEL_CHAIN_FALLBACK).`
       : '';
     throw new Error(`Цепочка не распарсилась: ${parsed.length} писем после retry.${refusal} Ответ модели: ${debug}`);
+  }
+
+  // ── Детерминированный контроль регламента + фактчек цифр (letterChecks) ──
+  // Что машина проверяет надёжнее модели: тире, приветствие, ровно один CTA,
+  // стоп-фразы; числа с %/многозначные/десятичные — только из материалов.
+  // Нарушения → один фикс-проход со списком проблем ДО критика (критик
+  // ревьюит смысл, а не механику). Проверяются оба варианта (A и B) — B несёт
+  // «самую острую цифру», его фактчек важнее всего.
+  const factCorpus = [
+    hypotheses
+      .map((h) =>
+        [
+          h.title,
+          h.description ?? '',
+          ...((Array.isArray(h.evidence) ? h.evidence : []) as HeEvidenceItem[]).map(
+            (e) => `${e.claim} ${e.quote}`,
+          ),
+        ].join('\n'),
+      )
+      .join('\n'),
+    // Вертикаль, кейс, стиль и ПОДПИСЬ — санкционированные источники: подпись
+    // идёт в письма дословно (её телефон/цифры не должны флагаться фактчеком).
+    vertical.name,
+    vertical.summary ?? '',
+    clientCase ? JSON.stringify(clientCase) : '',
+    JSON.stringify(briefRest),
+    typeof brief.offer_override === 'string' ? brief.offer_override : '',
+    styleExample ?? '',
+    signatureOverride ?? '',
+    JSON.stringify(winnerPatterns),
+  ].join('\n');
+  const facts = extractNumberFacts(factCorpus);
+  const lettersForCheck = (ls: HeChainLetterAB[]): HeLetterForCheck[] =>
+    ls.flatMap((l) => [
+      { subject: l.subject ?? '', body: l.body, variant: 'A' },
+      ...(l.variants ?? []).map((v) => ({ subject: v.subject ?? '', body: v.body, variant: 'B' })),
+    ]);
+  const ruleViolations = checkLetterRules(lettersForCheck(letters), language, facts);
+  if (ruleViolations.length > 0) {
+    stageLog(ctx, `[chain] детерминированный контроль: ${ruleViolations.length} нарушений — фикс-проход`);
+    // Принятие фикса: то же число писем и НЕ меньше B-вариантов (модель могла
+    // молча выкинуть блоки ---LETTER N B--- — принять такое нельзя).
+    const countB = (ls: HeChainLetterAB[]) => ls.reduce((acc, l) => acc + (l.variants?.length ?? 0), 0);
+    try {
+      const fixMessages: LLMMessage[] = [
+        ...messages,
+        { role: 'assistant', content: llm.text },
+        { role: 'user', content: buildChainRuleFixHint(ruleViolations, language) },
+      ];
+      const fix = await callLLMText(fixMessages, { model, maxTokens: 16384 });
+      addUsage(usage, fix);
+      const fixed = buildChainLetters(fix.text);
+      if (fixed.parsed.length >= 3 && fixed.letters.length === letters.length && countB(fixed.letters) >= countB(letters)) {
+        letters = fixed.letters;
+        const remaining = checkLetterRules(lettersForCheck(letters), language, facts);
+        if (remaining.length > 0) {
+          stageLog(
+            ctx,
+            `[chain] после фикс-прохода осталось ${remaining.length} нарушений: ${remaining
+              .slice(0, 3)
+              .map((v) => v.detail)
+              .join('; ')}`,
+          );
+        }
+      } else {
+        stageLog(
+          ctx,
+          `[chain] фикс-проход: ${fixed.parsed.length} писем/${countB(fixed.letters)} B-вариантов вместо ${letters.length}/${countB(letters)} — оставляем исходные`,
+        );
+      }
+    } catch (e) {
+      stageLog(ctx, `[chain] фикс-проход недоступен: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   // Критик-луп: одна оценка цепочки той же моделью, что и генерация

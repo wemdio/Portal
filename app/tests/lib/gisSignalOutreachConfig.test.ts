@@ -141,6 +141,27 @@ describe('loadGisSignalSegments', () => {
     mockDb = createMockSupabase({ tables: { gis_signal_segments: [] } });
     await expect(loadGisSignalSegments()).resolves.toEqual([]);
   });
+
+  it('require_online: true проходит как есть, отсутствующая колонка → false', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        gis_signal_segments: [
+          {
+            key: 'edu', label: 'Онлайн-школы', instantly_campaign_id: 'camp-edu',
+            rubric_groups: [], priority: 10, enabled: true, require_online: true,
+          },
+          {
+            key: 'legacy', label: 'Старый сегмент', instantly_campaign_id: null,
+            rubric_groups: [], priority: 20, enabled: true,
+            // require_online нет — строка до миграции с колонкой.
+          },
+        ],
+      },
+    });
+    const segments = await loadGisSignalSegments();
+    expect(segments.find((s) => s.key === 'edu')!.require_online).toBe(true);
+    expect(segments.find((s) => s.key === 'legacy')!.require_online).toBe(false);
+  });
 });
 
 describe('toTwoGisRubricGroups', () => {

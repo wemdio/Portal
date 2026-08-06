@@ -19,6 +19,7 @@ import { z } from 'zod';
 
 import { collectDossierCounters, type HeDossierCounters } from '../dossierData';
 import { getSegmentStats, type HeDatasetStats } from '../datasetStats';
+import { projectMarket } from '../market';
 import { callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
 import type { HeJob, HeJobTitle, HeVertical } from '../types';
 import {
@@ -203,7 +204,9 @@ export async function runDossierStage(job: HeJob, ctx: HeStageContext): Promise<
   let datasetStats: HeDatasetStats | null = null;
   let datasetStatsError: string | null = null;
   try {
-    datasetStats = await getSegmentStats(vertical.name, synonyms);
+    datasetStats = await getSegmentStats(vertical.name, synonyms, {
+      market: projectMarket(project),
+    });
   } catch (e) {
     datasetStatsError = e instanceof Error ? e.message : String(e);
     stageLog(ctx, `[dossier] getSegmentStats упал: ${datasetStatsError}`);
