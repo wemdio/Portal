@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useRef } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import type { EChartsCoreOption } from 'echarts/core';
 
 import EChart from '@/components/charts/EChart';
@@ -51,8 +51,8 @@ function formatKey(key: string, groupBy: GroupBy): string {
 interface TooltipItem {
   seriesName?: string;
   value?: number;
-  color?: string;
   dataIndex?: number;
+  seriesIndex?: number;
 }
 
 /**
@@ -64,11 +64,23 @@ interface TooltipItem {
  * при этом на ОДНОЙ шкале — второй оси справа здесь нет и быть не должно,
  * иначе «линия выше столбцов» переставало бы что-либо значить.
  */
+/** Подсветка выбранной корзины: вертикальная полоса на всю высоту панели. */
+function selectionMark(index: number) {
+  return {
+    silent: true,
+    itemStyle: { color: HOVER_BAND },
+    // Границы полуцелые: на категориальной оси число — это индекс категории,
+    // и ±0.5 даёт ровно её полосу, от середины промежутка до середины следующего.
+    data: [[{ xAxis: index - 0.5 }, { xAxis: index + 0.5 }]],
+  };
+}
+
 function buildOption(
   data: SeriesBucket[],
   groupBy: GroupBy,
   theme: ChartTheme,
   animate: boolean,
+  selectedIndex: number,
 ): EChartsCoreOption {
   const labels = data.map((b) => formatKey(b.key, groupBy));
   const keys = data.map((b) => b.key);
@@ -82,9 +94,18 @@ function buildOption(
       color: verticalGradient(seriesColor(theme, slot)),
       borderRadius: [4, 4, 0, 0] as [number, number, number, number],
     },
+    // Полоса выбора висит на первом ряду — рисовать её на каждом значило бы
+    // класть одну и ту же заливку в четыре слоя.
+    ...(slot === 0 && selectedIndex >= 0 ? { markArea: selectionMark(selectedIndex) } : {}),
   });
 
   const contractsColor = seriesColor(theme, 3);
+
+  // Квадратики в подсказке красим по своему списку, а не по `params.color`.
+  // У столбцов заливка — объект-градиент, и `params.color` возвращает именно
+  // его; подставленный в CSS, он даёт `background:[object Object]`, то есть
+  // пустоту. Строкой остаётся только линия, поэтому цвет был ровно у одного ряда.
+  const swatches = [seriesColor(theme, 0), seriesColor(theme, 1), seriesColor(theme, 2), contractsColor];
 
   return {
     animation: animate,
@@ -112,7 +133,9 @@ function buildOption(
           .map(
             (item) =>
               `<div style="display:flex;align-items:center;gap:8px;margin-top:4px">
-                 <span style="width:10px;height:10px;border-radius:3px;background:${item.color};flex:none"></span>
+                 <span style="width:10px;height:10px;border-radius:3px;background:${
+                   swatches[item.seriesIndex ?? 0] ?? 'transparent'
+                 };flex:none"></span>
                  <span style="opacity:.75">${item.seriesName ?? ''}</span>
                  <span style="margin-left:auto;font-variant-numeric:tabular-nums;font-weight:600">${item.value ?? 0}</span>
                </div>`,
@@ -166,20 +189,50 @@ function buildOption(
   };
 }
 
-export default function TimeSeriesChart({ series, groupBy }: { series: SeriesBucket[]; groupBy: GroupBy }) {
+export default function TimeSeriesChart({
+  series,
+  groupBy,
+  selectedKey = null,
+  onSelectKey,
+}: {
+  series: SeriesBucket[];
+  groupBy: GroupBy;
+  /** Выбранная корзина — подсвечивается полосой. */
+  selectedKey?: string | null;
+  /** Клик по корзине. Повторный клик по той же снимает выбор. */
+  onSelectKey?: (key: string | null) => void;
+}) {
   const rootRef = useRef<HTMLDivElement>(null);
   const theme = useChartTheme(rootRef);
   const reducedMotion = usePrefersReducedMotion();
 
+  const selectedIndex = selectedKey ? series.findIndex((b) => b.key === selectedKey) : -1;
+
   const option = useMemo(
-    () => (theme ? buildOption(series, groupBy, theme, !reducedMotion) : null),
-    [series, groupBy, theme, reducedMotion],
+    () => (theme ? buildOption(series, groupBy, theme, !reducedMotion, selectedIndex) : null),
+    [series, groupBy, theme, reducedMotion, selectedIndex],
+  );
+
+  const handleSelect = useCallback(
+    (index: number) => {
+      if (!onSelectKey) return;
+      const bucket = series[index];
+      if (!bucket) return;
+      onSelectKey(bucket.key === selectedKey ? null : bucket.key);
+    },
+    [onSelectKey, series, selectedKey],
   );
 
   return (
     <div ref={rootRef} className="rounded-xl border border-zinc-200 bg-white p-3">
       {option ? (
-        <EChart option={option} height={288} ariaLabel="Лиды, квалификация, встречи и договоры по периодам" />
+        <EChart
+          option={option}
+          height={288}
+          ariaLabel="Лиды, квалификация, встречи и договоры по периодам"
+          onSelectIndex={onSelectKey ? handleSelect : undefined}
+          className={onSelectKey ? 'cursor-pointer' : undefined}
+        />
       ) : (
         <div style={{ height: 288 }} />
       )}

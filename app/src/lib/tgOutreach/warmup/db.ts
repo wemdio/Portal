@@ -247,6 +247,29 @@ export async function finishConversation(
     .eq('id', id);
 }
 
+/**
+ * Вернуть в очередь переписки, зависшие в `running` от прошлого процесса.
+ *
+ * Вызывается один раз на старте цикла: процесс только что поднялся, значит ни
+ * одна переписка физически не может идти. Без этого такая запись лежала бы
+ * `running` до истечения CONVERSATION_STALE_MINUTES — 45 минут простоя на
+ * каждый перезапуск воркера, а их за 06.08.2026 набралось восемь.
+ *
+ * Возвращает, сколько записей вернули — вызывающий код пишет это в журнал.
+ */
+export async function requeueStuckConversations(
+  db: SupabaseClient,
+  runId: string,
+): Promise<number> {
+  const { data } = await db
+    .from('tg_outreach_warmup_conversations')
+    .update({ status: 'pending', started_at: null })
+    .eq('run_id', runId)
+    .eq('status', 'running')
+    .select('id');
+  return (data ?? []).length;
+}
+
 /** Закрыть день: всё, что не успело начаться, помечаем пропущенным. */
 export async function skipRemainingForDay(
   db: SupabaseClient,

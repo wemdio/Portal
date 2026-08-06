@@ -9,6 +9,7 @@ import type { TelegramClient } from 'telegram';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { Api } from 'telegram';
 import type { OutreachAccount } from '../types';
+import { withTimeout } from '../withTimeout';
 import { normalizePhone } from './peer';
 
 export interface AccountIdentity {
@@ -33,17 +34,6 @@ export interface AccountIdentity {
  */
 function identityTimeoutMs(): number {
   return Number(process.env.TG_WARMUP_IDENTITY_TIMEOUT_MS) || 30_000;
-}
-
-function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const guard = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`${what}: нет ответа за ${Math.round(ms / 1000)}с`)),
-      ms,
-    );
-  });
-  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
 }
 
 /**

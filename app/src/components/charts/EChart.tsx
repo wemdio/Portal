@@ -19,15 +19,31 @@ export default function EChart({
   height,
   className,
   ariaLabel,
+  onSelectIndex,
 }: {
   option: EChartsCoreOption;
   height: number;
   className?: string;
   /** Описание для скринридера: холст canvas сам по себе нечитаем. */
   ariaLabel: string;
+  /**
+   * Клик по вертикальной полосе категории: отдаёт индекс корзины по оси X.
+   *
+   * Именно полосы, а не самого столбца. Событие `click` серии срабатывает
+   * только по закрашенным пикселям, а столбец в дневной раскладке бывает
+   * шириной в несколько точек — попасть в него мышью тяжело, а в пустой день
+   * невозможно вовсе.
+   */
+  onSelectIndex?: (index: number) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<ReturnType<typeof echarts.init> | null>(null);
+  // Обработчик вешается один раз на весь срок жизни инстанса, поэтому свежий
+  // колбэк держим в ref: иначе замыкание запомнило бы состояние первого рендера.
+  const selectRef = useRef(onSelectIndex);
+  useEffect(() => {
+    selectRef.current = onSelectIndex;
+  }, [onSelectIndex]);
 
   useEffect(() => {
     const el = hostRef.current;
@@ -41,7 +57,19 @@ export default function EChart({
     const observer = new ResizeObserver(() => chart.resize());
     observer.observe(el);
 
+    const zr = chart.getZr();
+    const onClick = (event: { offsetX: number; offsetY: number }) => {
+      const notify = selectRef.current;
+      if (!notify) return;
+      const point: [number, number] = [event.offsetX, event.offsetY];
+      if (!chart.containPixel('grid', point)) return;
+      const index = chart.convertFromPixel({ xAxisIndex: 0 }, point[0]);
+      if (typeof index === 'number' && Number.isFinite(index)) notify(Math.round(index));
+    };
+    zr.on('click', onClick);
+
     return () => {
+      zr.off('click', onClick);
       observer.disconnect();
       chart.dispose();
       chartRef.current = null;

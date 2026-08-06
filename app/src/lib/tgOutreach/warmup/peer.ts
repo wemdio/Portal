@@ -47,7 +47,47 @@ export interface ResolvedPeer {
   imported: boolean;
 }
 
-/** Найти peer нашего же аккаунта, чтобы можно было ему написать. */
+/**
+ * Резолв по @username отдельным RPC, а не через client.getEntity.
+ *
+ * getEntity сначала лезет в кэш сущностей сессии и достраивает InputUser из
+ * него. На загруженных чужих сессиях кэш бывает неполным: gramJS получает
+ * undefined и падает внутри себя с «Cannot read properties of undefined
+ * (reading 'classType')» — ровно это словил прогрев 06.08.2026, и переписка
+ * ушла в failed. Явный ResolveUsername ходит в Telegram и кэш не спрашивает.
+ */
+async function resolveByUsername(
+  client: TelegramClient,
+  username: string,
+): Promise<ResolvedPeer | null> {
+  const res = await client.invoke(new Api.contacts.ResolveUsername({ username }));
+  const user = res.users.find((u): u is Api.User => u instanceof Api.User);
+  return user ? { entity: user, imported: false } : null;
+}
+
+async function resolveByPhone(
+  client: TelegramClient,
+  phone: string,
+): Promise<ResolvedPeer | null> {
+  const res = await client.invoke(new Api.contacts.ImportContacts({
+    contacts: [new Api.InputPhoneContact({
+      clientId: bigInt(Date.now()) as unknown as never,
+      phone,
+      firstName: 'Kolya',
+      lastName: '',
+    })],
+  }));
+  const user = res.users.find((u): u is Api.User => u instanceof Api.User);
+  return user ? { entity: user, imported: true } : null;
+}
+
+/**
+ * Найти peer нашего же аккаунта, чтобы можно было ему написать.
+ *
+ * Если username не сработал, а телефон известен — пробуем импорт контакта.
+ * Способы независимы: сбой одного не повод терять переписку, ради которой
+ * шестнадцать аккаунтов уже подключились.
+ */
 export async function resolveWarmupPeer(
   client: TelegramClient,
   target: { tg_username: string | null; phone: string | null },
@@ -55,21 +95,20 @@ export async function resolveWarmupPeer(
   const strategy = chooseResolutionStrategy(target);
   if (strategy.kind === 'none') return null;
 
+  const phone = normalizePhone(target.phone);
+
   if (strategy.kind === 'username') {
-    const entity = await client.getEntity(strategy.username);
-    return entity instanceof Api.User ? { entity, imported: false } : null;
+    try {
+      const peer = await resolveByUsername(client, strategy.username);
+      if (peer) return peer;
+    } catch (e) {
+      // Телефона нет — рассказать о проблеме больше некому, пробрасываем.
+      if (!phone) throw e;
+    }
+    return phone ? resolveByPhone(client, phone) : null;
   }
 
-  const res = await client.invoke(new Api.contacts.ImportContacts({
-    contacts: [new Api.InputPhoneContact({
-      clientId: bigInt(Date.now()) as unknown as never,
-      phone: strategy.phone,
-      firstName: 'Kolya',
-      lastName: '',
-    })],
-  }));
-  const user = res.users.find((u): u is Api.User => u instanceof Api.User);
-  return user ? { entity: user, imported: true } : null;
+  return resolveByPhone(client, strategy.phone);
 }
 
 /** Убрать импортированный контакт. Диалог при этом остаётся доступным. */

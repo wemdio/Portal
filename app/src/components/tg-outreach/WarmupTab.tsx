@@ -19,6 +19,7 @@ import {
   ChevronRight,
   ChevronDown,
   AlertCircle,
+  Download,
 } from 'lucide-react';
 import type { CampaignStatus, OutreachAccount } from '@/lib/tgOutreach/types';
 import type {
@@ -97,6 +98,7 @@ export default function WarmupTab({
   const [expandedConvId, setExpandedConvId] = useState<number | null>(null);
   const [days, setDays] = useState(4);
   const [errorsOnly, setErrorsOnly] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [allAccountsLogs, setAllAccountsLogs] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -127,6 +129,41 @@ export default function WarmupTab({
   }, [campaignId, selectedAccountId]);
 
   const LOGS_PAGE = 300;
+
+  /**
+   * Выгрузка логов за весь период.
+   *
+   * Обычной ссылкой не обойтись: роут требует токен в заголовке, а <a download>
+   * его не отправит. Поэтому тянем ответ как blob и отдаём браузеру ссылку на
+   * него; имя файла берём из Content-Disposition, которое сформировал сервер.
+   */
+  const exportLogs = useCallback(async () => {
+    setExporting(true);
+    try {
+      const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup/logs/export`);
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        alert(d?.error ?? `Не удалось выгрузить логи (${res.status})`);
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get('Content-Disposition') ?? '';
+      const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+      const plain = /filename="([^"]+)"/i.exec(disposition);
+      const name = utf8 ? decodeURIComponent(utf8[1]) : (plain?.[1] ?? 'tg-warmup-logs.txt');
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } finally {
+      setExporting(false);
+    }
+  }, [campaignId]);
 
   const loadLogs = useCallback(async () => {
     const params = new URLSearchParams({ limit: String(LOGS_PAGE) });
@@ -503,6 +540,16 @@ export default function WarmupTab({
             }`}
           >
             Все события
+          </button>
+          <button
+            type="button"
+            onClick={() => { void exportLogs(); }}
+            disabled={exporting}
+            title="Скачать логи прогрева за весь период одним файлом"
+            className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] text-gray-600 transition hover:bg-gray-50 disabled:opacity-50"
+          >
+            {exporting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+            Выгрузить всё
           </button>
           <button
             type="button"

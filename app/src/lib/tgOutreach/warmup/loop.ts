@@ -26,11 +26,23 @@ import { warmupOpenAISettings } from './prompt';
 import { runWarmupConversation, WarmupSendError, type WarmupSide } from './conversation';
 import { resolveWarmupPeer, dropImportedContact, type ResolvedPeer } from './peer';
 import { bootstrapAccountIdentity } from './identity';
+import { withTimeout } from '../withTimeout';
 import * as wdb from './db';
 import type { WarmupConversation, WarmupMessage, WarmupRun } from './types';
 
 /** Как часто цикл просыпается посмотреть, не пора ли провести переписку. */
 const POLL_INTERVAL_MS = 60_000;
+
+/**
+ * Сколько ждать ответа Telegram на один вызов внутри переписки.
+ *
+ * Минуты хватает с запасом на отправку сообщения и на поиск собеседника. Всё,
+ * что дольше, — это не медленный ответ, а запрос, ушедший в сменившийся IP
+ * мобильного прокси: он не вернётся никогда. Держать его нельзя — цикл
+ * перестаёт отчитываться, и сторожевой таймер воркера через 15 минут роняет
+ * весь процесс со всеми кампаниями (инцидент 06.08.2026, прогрев ATOL-1).
+ */
+const TELEGRAM_CALL_TIMEOUT_MS = Number(process.env.TG_WARMUP_CALL_TIMEOUT_MS) || 60_000;
 
 type LogFn = (
   level: 'info' | 'warning' | 'error',
@@ -219,6 +231,17 @@ export async function runWarmupLoop(
   // «не подключён» должен называть виновника по имени, а не по uuid.
   const accountNames = new Map<string, string>(accounts.map((a) => [a.id, a.session_name]));
 
+  // Процесс только что поднялся: то, что числится «идёт», осталось от прошлого
+  // воркера и никуда уже не едет. Возвращаем в очередь сразу, а не ждём 45 минут
+  // до признания переписки брошенной.
+  const requeued = await wdb.requeueStuckConversations(db, run.id);
+  if (requeued > 0) {
+    log(
+      'info',
+      `Прогрев: возвращено в очередь ${requeued} переписок, прерванных перезапуском воркера.`,
+    );
+  }
+
   if (run.status === 'pending') {
     const startedAt = new Date().toISOString();
     await wdb.setRunStatus(db, run.id, {
@@ -309,7 +332,7 @@ export async function runWarmupLoop(
       for (const conv of due) {
         if (shouldStop()) break;
         onProgress?.();
-        await runOneConversation(db, conv, byAccountId, accountNames, log);
+        await runOneConversation(db, conv, byAccountId, accountNames, log, onProgress);
       }
 
       await interruptibleSleep(POLL_INTERVAL_MS, shouldStop);
@@ -332,6 +355,11 @@ async function runOneConversation(
   byAccountId: Map<string, ActiveClient>,
   accountNames: Map<string, string>,
   log: LogFn,
+  /**
+   * Признак жизни для сторожевого таймера воркера. Переписка идёт минутами, и
+   * без отметок на каждом шаге здоровый разговор выглядит зависшим циклом.
+   */
+  onProgress?: () => void,
 ): Promise<void> {
   const nameOf = (id: string) => accountNames.get(id) ?? id.slice(0, 8);
   const a = byAccountId.get(conv.account_a_id);
@@ -358,14 +386,24 @@ async function runOneConversation(
   let peerForA: ResolvedPeer | null = null;
   let peerForB: ResolvedPeer | null = null;
   try {
-    peerForA = await resolveWarmupPeer(a.client, {
-      tg_username: b.account.tg_username ?? null,
-      phone: b.account.phone ?? null,
-    });
-    peerForB = await resolveWarmupPeer(b.client, {
-      tg_username: a.account.tg_username ?? null,
-      phone: a.account.phone ?? null,
-    });
+    peerForA = await withTimeout(
+      resolveWarmupPeer(a.client, {
+        tg_username: b.account.tg_username ?? null,
+        phone: b.account.phone ?? null,
+      }),
+      TELEGRAM_CALL_TIMEOUT_MS,
+      'поиск собеседника',
+    );
+    onProgress?.();
+    peerForB = await withTimeout(
+      resolveWarmupPeer(b.client, {
+        tg_username: a.account.tg_username ?? null,
+        phone: a.account.phone ?? null,
+      }),
+      TELEGRAM_CALL_TIMEOUT_MS,
+      'поиск собеседника',
+    );
+    onProgress?.();
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
     await wdb.finishConversation(db, conv.id, {
@@ -391,13 +429,27 @@ async function runOneConversation(
 
   const resolvedA = peerForA;
   const resolvedB = peerForB;
+  // Отправка под таймаутом: без него один запрос, ушедший в сменившийся IP
+  // прокси, вешает переписку навсегда — и вместе с ней весь воркер.
   const sideA: WarmupSide = {
     accountId: a.account.id,
-    send: async (text) => { await a.client.sendMessage(resolvedA.entity, { message: text }); },
+    send: async (text) => {
+      await withTimeout(
+        a.client.sendMessage(resolvedA.entity, { message: text }),
+        TELEGRAM_CALL_TIMEOUT_MS,
+        'отправка сообщения',
+      );
+    },
   };
   const sideB: WarmupSide = {
     accountId: b.account.id,
-    send: async (text) => { await b.client.sendMessage(resolvedB.entity, { message: text }); },
+    send: async (text) => {
+      await withTimeout(
+        b.client.sendMessage(resolvedB.entity, { message: text }),
+        TELEGRAM_CALL_TIMEOUT_MS,
+        'отправка сообщения',
+      );
+    },
   };
 
   const settings = warmupOpenAISettings();
@@ -415,10 +467,21 @@ async function runOneConversation(
       sideB,
       initiatorAccountId: conv.initiator_account_id,
       plannedMessages: conv.planned_messages,
-      generate: (history) => openaiGenerate(settings, history),
+      // Зависший запрос к модели тоже останавливает цикл; сбой генерации
+      // переписка переживает — вместо реплики подставляется банальная фраза.
+      generate: (history) =>
+        withTimeout(
+          openaiGenerate(settings, history),
+          TELEGRAM_CALL_TIMEOUT_MS,
+          'генерация реплики',
+        ),
       sleep,
       random: Math.random,
       onMessage: async (msg, index, total) => {
+        // Отметка жизни на каждой реплике: переписка из десяти сообщений с
+        // паузами до 90 секунд идёт дольше порога сторожевого таймера, и без
+        // этого здоровый разговор выглядел бы зависанием.
+        onProgress?.();
         const sender = msg.account_id === a.account.id ? a.account : b.account;
         const receiver = msg.account_id === a.account.id ? b.account : a.account;
         log(
