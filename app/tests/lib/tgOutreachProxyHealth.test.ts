@@ -285,6 +285,48 @@ describe('proxyHealth — canAutoSwap guards', () => {
     if (!res.ok) expect(res.reason).toMatch(/account_too_fresh/);
   });
 
+  it('fullOutage: свежесть не блокирует — сидеть на мёртвом прокси хуже смены IP', () => {
+    const fresh = new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString();
+    const res = canAutoSwap(
+      {
+        created_at: fresh,
+        degraded: false,
+        last_proxy_swap_at: null,
+        proxy_swaps_today: 0,
+      },
+      { fullOutage: true },
+    );
+    expect(res).toEqual({ ok: true });
+  });
+
+  it('fullOutage: degraded всё равно отказ', () => {
+    const fresh = new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString();
+    const res = canAutoSwap(
+      {
+        created_at: fresh,
+        degraded: true,
+        last_proxy_swap_at: null,
+        proxy_swaps_today: 0,
+      },
+      { fullOutage: true },
+    );
+    expect(res).toEqual({ ok: false, reason: 'account_degraded' });
+  });
+
+  it('fullOutage: дневной лимит всё равно отказ', () => {
+    const fresh = new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString();
+    const res = canAutoSwap(
+      {
+        created_at: fresh,
+        degraded: false,
+        last_proxy_swap_at: new Date().toISOString(),
+        proxy_swaps_today: MAX_SWAPS_PER_ACCOUNT_PER_DAY,
+      },
+      { fullOutage: true },
+    );
+    expect(res).toEqual({ ok: false, reason: 'daily_limit_reached' });
+  });
+
   it('refuses when daily limit reached today', () => {
     const res = canAutoSwap({
       created_at: oldEnough,

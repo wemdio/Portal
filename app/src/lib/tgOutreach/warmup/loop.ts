@@ -23,11 +23,11 @@ import { downloadSessionToTemp } from '../campaignLoop';
 import { openaiGenerate } from '../openaiChat';
 import { planDay } from './schedule';
 import { warmupOpenAISettings } from './prompt';
-import { runWarmupConversation, type WarmupSide } from './conversation';
+import { runWarmupConversation, WarmupSendError, type WarmupSide } from './conversation';
 import { resolveWarmupPeer, dropImportedContact, type ResolvedPeer } from './peer';
 import { bootstrapAccountIdentity } from './identity';
 import * as wdb from './db';
-import type { WarmupConversation, WarmupRun } from './types';
+import type { WarmupConversation, WarmupMessage, WarmupRun } from './types';
 
 /** Как часто цикл просыпается посмотреть, не пора ли провести переписку. */
 const POLL_INTERVAL_MS = 60_000;
@@ -215,6 +215,9 @@ export async function runWarmupLoop(
   if (control) control.forceDisconnect = () => disconnectAll(clients);
 
   const byAccountId = new Map<string, ActiveClient>(clients.map((c) => [c.account.id, c]));
+  // Имена всех аккаунтов кампании, включая не подключившихся: сбой
+  // «не подключён» должен называть виновника по имени, а не по uuid.
+  const accountNames = new Map<string, string>(accounts.map((a) => [a.id, a.session_name]));
 
   if (run.status === 'pending') {
     const startedAt = new Date().toISOString();
@@ -306,7 +309,7 @@ export async function runWarmupLoop(
       for (const conv of due) {
         if (shouldStop()) break;
         onProgress?.();
-        await runOneConversation(db, conv, byAccountId, log);
+        await runOneConversation(db, conv, byAccountId, accountNames, log);
       }
 
       await interruptibleSleep(POLL_INTERVAL_MS, shouldStop);
@@ -327,15 +330,26 @@ async function runOneConversation(
   db: SupabaseClient,
   conv: WarmupConversation,
   byAccountId: Map<string, ActiveClient>,
+  accountNames: Map<string, string>,
   log: LogFn,
 ): Promise<void> {
+  const nameOf = (id: string) => accountNames.get(id) ?? id.slice(0, 8);
   const a = byAccountId.get(conv.account_a_id);
   const b = byAccountId.get(conv.account_b_id);
   if (!a || !b) {
+    // Виновник — по имени, и только он: раньше немой «account_not_connected»
+    // помечал обоих участников, и жертва выглядела сломанной наравне с виновником.
+    const missing = [conv.account_a_id, conv.account_b_id].filter((id) => !byAccountId.has(id));
+    const missingNames = missing.map(nameOf).join(', ');
     await wdb.finishConversation(db, conv.id, {
       status: 'failed',
-      errorReason: 'account_not_connected',
+      errorReason: `account_not_connected: ${missingNames}`,
     });
+    log(
+      'warning',
+      `Прогрев: переписка ${nameOf(conv.account_a_id)} ↔ ${nameOf(conv.account_b_id)} не состоялась — не подключён к Telegram: ${missingNames} (причина в ошибках подключения выше).`,
+      missing.length === 1 ? missing[0] : undefined,
+    );
     return;
   }
 
@@ -387,6 +401,14 @@ async function runOneConversation(
   };
 
   const settings = warmupOpenAISettings();
+  const preview = (s: string) => {
+    const flat = s.replace(/\s+/g, ' ').trim();
+    return flat.length > 120 ? `${flat.slice(0, 120)}…` : flat;
+  };
+  // Копим отправленное и после каждой реплики пишем в журнал и в строку
+  // переписки: сообщение, ушедшее в Telegram, обязано пережить смерть процесса
+  // и быть видимым в UI сразу, а не после финиша всей переписки.
+  const sentSoFar: WarmupMessage[] = [];
   try {
     const messages = await runWarmupConversation({
       sideA,
@@ -396,12 +418,36 @@ async function runOneConversation(
       generate: (history) => openaiGenerate(settings, history),
       sleep,
       random: Math.random,
+      onMessage: async (msg, index, total) => {
+        const sender = msg.account_id === a.account.id ? a.account : b.account;
+        const receiver = msg.account_id === a.account.id ? b.account : a.account;
+        log(
+          'info',
+          `${sender.session_name} → ${receiver.session_name} (${index + 1}/${total}): «${preview(msg.content)}»`,
+          sender.id,
+        );
+        sentSoFar.push(msg);
+        await wdb.updateConversationMessages(db, conv.id, [...sentSoFar]);
+      },
     });
     await wdb.finishConversation(db, conv.id, { status: 'done', messages });
   } catch (e) {
-    const reason = e instanceof Error ? e.message : String(e);
-    await wdb.finishConversation(db, conv.id, { status: 'failed', errorReason: reason });
-    log('warning', `Прогрев: переписка не состоялась — ${reason}`, a.account.id);
+    if (e instanceof WarmupSendError) {
+      await wdb.finishConversation(db, conv.id, {
+        status: 'failed',
+        messages: e.sent,
+        errorReason: `отправка не удалась (${nameOf(e.failedAccountId)}): ${e.message}`,
+      });
+      log(
+        'warning',
+        `Прогрев: переписка ${a.account.session_name} ↔ ${b.account.session_name} оборвалась на отправке от ${nameOf(e.failedAccountId)} (ушло ${e.sent.length} из ${conv.planned_messages}) — ${e.message}`,
+        e.failedAccountId,
+      );
+    } else {
+      const reason = e instanceof Error ? e.message : String(e);
+      await wdb.finishConversation(db, conv.id, { status: 'failed', errorReason: reason });
+      log('warning', `Прогрев: переписка не состоялась — ${reason}`, a.account.id);
+    }
   } finally {
     // Импортированные контакты убираем всегда: постоянная взаимная сеть из всех
     // аккаунтов партии — легко вычисляемый след.

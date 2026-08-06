@@ -209,6 +209,24 @@ export async function markConversationRunning(
     .eq('id', id);
 }
 
+/**
+ * Инкрементально сохранить сообщения идущей переписки — после каждой отправки.
+ *
+ * Сообщение, реально ушедшее в Telegram, должно пережить смерть процесса:
+ * до 06.08.2026 messages писались только при успешном финише, и оборванная
+ * переписка выглядела пустой, хотя половина реплик дошла до адресата.
+ */
+export async function updateConversationMessages(
+  db: SupabaseClient,
+  id: number,
+  messages: WarmupMessage[],
+): Promise<void> {
+  await db
+    .from('tg_outreach_warmup_conversations')
+    .update({ messages })
+    .eq('id', id);
+}
+
 export async function finishConversation(
   db: SupabaseClient,
   id: number,
