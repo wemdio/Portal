@@ -2034,6 +2034,26 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
     }
   };
 
+  const deleteBase = async (base: OutreachBase) => {
+    // Предупреждаем про отправленных отдельно: контакты уйдут каскадом, и
+    // история «кому мы уже писали по этой гипотезе» пропадёт вместе с базой.
+    const sentNote = base.counts.sent > 0
+      ? ` По ней уже отправлено ${base.counts.sent} сообщений — эта история будет потеряна.`
+      : '';
+    if (!confirm(`Удалить базу «${base.name}» и все ${base.counts.total} контактов?${sentNote}`)) return;
+
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases/${base.id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(d?.error ?? `Не удалось удалить базу (${res.status})`);
+        return;
+      }
+      void load();
+    } finally { setBusy(false); }
+  };
+
   const uploadContacts = async (baseId: string, e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -2125,11 +2145,18 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
               <span className="text-xs text-gray-600">{b.counts.pending}</span>
               <span className="text-xs text-gray-600">{b.counts.sent}</span>
               <span className="text-xs text-gray-600">{b.counts.skipped}</span>
+              <div className="flex items-center gap-1">
               <label className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer w-fit">
                 <Upload className="h-3 w-3" /> Загрузить
                 <input type="file" accept=".xlsx,.xls,.csv" className="hidden" disabled={busy}
                   onChange={(e) => { void uploadContacts(b.id, e); }} />
               </label>
+                <button type="button" onClick={() => { void deleteBase(b); }} disabled={busy}
+                  title="Удалить базу вместе с контактами"
+                  className="p-1 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer disabled:opacity-50">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
           ))}
         </div>
