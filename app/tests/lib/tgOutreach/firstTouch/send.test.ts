@@ -133,4 +133,24 @@ describe('sendFirstTouchBatch', () => {
     expect(res.sent).toBe(0);
     expect((client as unknown as { getEntity: jest.Mock }).getEntity).not.toHaveBeenCalled();
   });
+
+  /**
+   * Выключенная фича не должна стоить вообще ничего. Круг кампании идёт по
+   * каждому аккаунту каждые несколько минут, и у всех кампаний, заведённых до
+   * первого касания, нормы нет вовсе: один лишний запрос здесь превращается в
+   * постоянный поток запросов от кампаний, которым эта фича не нужна.
+   */
+  it.each([
+    ['норма не задана', undefined],
+    ['норма ноль', 0],
+  ])('%s — в базу тоже не ходим', async (_name, perDay) => {
+    const db = fakeDb([contact()]);
+    const client = fakeClient();
+    const fromSpy = jest.spyOn(db as unknown as { from: () => unknown }, 'from');
+
+    const res = await sendFirstTouchBatch({ ...baseArgs, perDay, db, client } as never);
+
+    expect(res).toEqual({ sent: 0, skipped: 0, postponed: 0 });
+    expect(fromSpy).not.toHaveBeenCalled();
+  });
 });

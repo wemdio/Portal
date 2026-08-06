@@ -52,6 +52,12 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
   const { db, client, campaignId, account, perDay, log } = args;
   const result: SendBatchResult = { sent: 0, skipped: 0, postponed: 0 };
 
+  // Выходим до любого запроса в базу. У всех кампаний, заведённых до этой
+  // фичи, поля нет вовсе, а круг идёт по каждому аккаунту каждые несколько
+  // минут: проверка нормы после countSentToday означала бы постоянный поток
+  // бессмысленных запросов от кампаний, которым первое касание не включали.
+  if (!perDay || perDay <= 0) return result;
+
   const sentToday = await fdb.countSentToday(db, account.id, startOfToday());
   const quota = remainingDailyQuota({ perDay, sentToday });
   if (quota <= 0) return result;
