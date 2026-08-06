@@ -1,5 +1,5 @@
 import * as echarts from 'echarts/core';
-import { BarChart, FunnelChart, LineChart } from 'echarts/charts';
+import { BarChart, FunnelChart, LineChart, PieChart } from 'echarts/charts';
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components';
 import { LabelLayout } from 'echarts/features';
 import { CanvasRenderer } from 'echarts/renderers';
@@ -17,6 +17,7 @@ echarts.use([
   BarChart,
   LineChart,
   FunnelChart,
+  PieChart,
   GridComponent,
   TooltipComponent,
   LegendComponent,

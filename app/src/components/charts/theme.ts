@@ -31,6 +31,18 @@ export const HOVER_BAND = 'rgba(127, 127, 133, 0.1)';
 export const CHART_FONT =
   'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
 
+/**
+ * Кегли внутри графика намеренно крупнее, чем у мелкого текста портала (11px).
+ *
+ * Подпись на карточке читают вплотную и по одной, а подписи осей — боковым
+ * зрением, по всей ширине экрана и не глядя прямо. На широком мониторе
+ * одиннадцатый кегль на холсте превращается в нечитаемую сыпь, хотя в вёрстке
+ * рядом смотрится нормально.
+ */
+export const AXIS_FONT_SIZE = 12;
+export const LEGEND_FONT_SIZE = 12;
+export const TOOLTIP_FONT_SIZE = 13;
+
 export interface ChartTheme {
   dark: boolean;
   /** Слоты палитры по порядку; назначаются ряду по индексу, без зацикливания. */
@@ -193,7 +205,7 @@ export function tooltipSkin(theme: ChartTheme) {
     borderColor: GRID_LINE,
     borderWidth: 1,
     padding: [10, 12] as [number, number],
-    textStyle: { color: theme.ink, fontSize: 12, fontFamily: CHART_FONT },
+    textStyle: { color: theme.ink, fontSize: TOOLTIP_FONT_SIZE, fontFamily: CHART_FONT },
     extraCssText: 'border-radius:12px;box-shadow:0 10px 30px -12px rgba(0,0,0,.35);',
   };
 }

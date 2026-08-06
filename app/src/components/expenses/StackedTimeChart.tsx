@@ -5,6 +5,7 @@ import type { EChartsCoreOption } from 'echarts/core';
 
 import EChart from '@/components/charts/EChart';
 import {
+  AXIS_FONT_SIZE,
   AXIS_LINE,
   AXIS_TEXT,
   CHART_FONT,
@@ -13,6 +14,7 @@ import {
   tooltipSkin,
   useChartTheme,
   usePrefersReducedMotion,
+  verticalGradient,
   type ChartTheme,
 } from '@/components/charts/theme';
 import { formatRub } from '@/lib/expenses/client';
@@ -202,14 +204,14 @@ function buildOption({
       data: points.map((point) => axisLabel(point.bucket, groupBy)),
       axisLine: { lineStyle: { color: AXIS_LINE } },
       axisTick: { show: false },
-      axisLabel: { color: AXIS_TEXT, fontSize: 11, fontFamily: CHART_FONT, margin: 10 },
+      axisLabel: { color: AXIS_TEXT, fontSize: AXIS_FONT_SIZE, fontFamily: CHART_FONT, margin: 10 },
     },
     yAxis: {
       type: 'value',
       splitLine: { lineStyle: { color: GRID_LINE } },
       axisLabel: {
         color: AXIS_TEXT,
-        fontSize: 11,
+        fontSize: AXIS_FONT_SIZE,
         fontFamily: CHART_FONT,
         formatter: (value: number) => axisAmount(value),
       },
@@ -221,7 +223,10 @@ function buildOption({
       barMaxWidth: MAX_BAR_WIDTH,
       barCategoryGap: '24%',
       itemStyle: {
-        color: colorAt(key),
+        // Градиент внутри сегмента мягкий (до 0.78, а не до 0.4 как у одиночных
+        // столбцов): у стека соседние сегменты стоят вплотную, и сильная
+        // растяжка по светлоте начала бы спорить с границей между рядами.
+        color: verticalGradient(colorAt(key), 0.78),
         // Зазора между сегментами стека в echarts нет, поэтому рисуем рамку
         // цветом карточки: у двух соседних сегментов она складывается в
         // двухпиксельный просвет, и стек читается как набор частей.
@@ -242,6 +247,65 @@ function buildOption({
         },
       })),
     })),
+  };
+}
+
+/**
+ * Кольцо долей за весь период — рядом со столбцами по времени.
+ *
+ * Столбцы отвечают на вопрос «как менялось», кольцо — «из чего состоит». По
+ * стеку долю на глаз не взять: сегменты стоят на разной высоте и сравнивать
+ * их приходится длинами отрезков, а не углами.
+ *
+ * Подписи на самих секторах не рисуются: при десятке разрезов они наезжают
+ * друг на друга. Расшифровка — в легенде под кольцом, она и так всегда видна.
+ */
+function buildDonutOption({
+  totals,
+  labelOf,
+  colorAt,
+  theme,
+  animate,
+  grandTotal,
+}: {
+  totals: { key: string; value: number }[];
+  labelOf: (key: string) => string;
+  colorAt: (key: string) => string;
+  theme: ChartTheme;
+  animate: boolean;
+  grandTotal: number;
+}): EChartsCoreOption {
+  return {
+    animation: animate,
+    animationDuration: 320,
+    textStyle: { fontFamily: CHART_FONT },
+    tooltip: {
+      trigger: 'item',
+      ...tooltipSkin(theme),
+      formatter: (params: unknown) => {
+        const item = params as { name?: string; value?: number };
+        const value = Number(item.value ?? 0);
+        const share = grandTotal > 0 ? Math.round((value / grandTotal) * 100) : 0;
+        return `<div style="font-weight:600">${item.name ?? ''}</div>
+                <div style="margin-top:4px;font-variant-numeric:tabular-nums">${formatRub(value)} ₽ · ${share}%</div>`;
+      },
+    },
+    series: [
+      {
+        type: 'pie',
+        radius: ['52%', '82%'],
+        center: ['50%', '50%'],
+        avoidLabelOverlap: false,
+        label: { show: false },
+        labelLine: { show: false },
+        itemStyle: { borderColor: theme.surface, borderWidth: 2, borderRadius: 4 },
+        data: totals.map((entry) => ({
+          name: labelOf(entry.key),
+          value: entry.value,
+          itemStyle: { color: colorAt(entry.key) },
+        })),
+      },
+    ],
   };
 }
 
@@ -280,14 +344,27 @@ export default function StackedTimeChart({
   const theme = useChartTheme(rootRef);
   const reducedMotion = usePrefersReducedMotion();
 
-  const { keys, partialLabels } = useMemo(() => {
+  const { keys, partialLabels, seriesTotals, grandTotal } = useMemo(() => {
     const seen = new Set<string>();
+    const sums = new Map<string, number>();
     for (const point of points) {
-      for (const key of Object.keys(point.parts)) seen.add(key);
+      for (const [key, value] of Object.entries(point.parts)) {
+        seen.add(key);
+        sums.set(key, (sums.get(key) ?? 0) + Number(value ?? 0));
+      }
     }
+    const ordered = orderKeys(seen, canonicalOrder);
+    // Нули в кольцо не кладём: сектор нулевой ширины не рисуется, но забирает
+    // себе место в подсказках и делает обводку рваной.
+    const totals = ordered
+      .map((key) => ({ key, value: sums.get(key) ?? 0 }))
+      .filter((entry) => entry.value > 0);
+
     return {
-      keys: orderKeys(seen, canonicalOrder),
+      keys: ordered,
       partialLabels: points.filter((p) => p.partial).map((p) => axisLabel(p.bucket, groupBy)),
+      seriesTotals: totals,
+      grandTotal: totals.reduce((acc, entry) => acc + entry.value, 0),
     };
   }, [points, groupBy, canonicalOrder]);
 
@@ -310,6 +387,18 @@ export default function StackedTimeChart({
     });
   }, [points, keys, groupBy, labelOf, colorOf, theme, reducedMotion, zeroBucketText, partialTooltip]);
 
+  const donutOption = useMemo(() => {
+    if (!theme || seriesTotals.length === 0) return null;
+    return buildDonutOption({
+      totals: seriesTotals,
+      labelOf,
+      colorAt: (key: string) => theme.resolveColor(colorOf(key)),
+      theme,
+      animate: !reducedMotion,
+      grandTotal,
+    });
+  }, [seriesTotals, grandTotal, labelOf, colorOf, theme, reducedMotion]);
+
   return (
     <div ref={rootRef} className="rounded-xl border border-zinc-200 bg-white p-3">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -328,7 +417,7 @@ export default function StackedTimeChart({
         //
         // На узком экране (`flex-col`) блок возвращается под график: колонка
         // легенды съела бы там половину ширины, а график важнее справочника.
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-stretch">
           <div className="min-w-0 flex-1">
             {option ? (
               <EChart option={option} height={288} ariaLabel={title} />
@@ -337,26 +426,33 @@ export default function StackedTimeChart({
             )}
           </div>
 
-          {/* Легенда видна всегда — без кнопки и без сворачивания. Прятать
-              расшифровку цветов за кликом значит требовать этот клик каждый
-              раз: цвет сегмента сам по себе ничего не говорит, а тултип
-              появляется только при наведении на конкретный столбец. */}
-          {keys.length > 0 ? (
-            <div className="flex shrink-0 flex-row flex-wrap gap-x-4 gap-y-1.5 self-start rounded-xl border border-zinc-200 bg-zinc-50/60 px-3 py-2 sm:max-w-[190px] sm:flex-col sm:flex-nowrap">
-              {keys.map((key) => (
-                <span key={key} className="flex items-center gap-1.5">
-                  <span
-                    className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
-                    style={{ background: colorOf(key) }}
-                    aria-hidden="true"
-                  />
-                  <span className="truncate text-[11px] text-zinc-600" title={labelOf(key)}>
-                    {labelOf(key)}
+          <div className="flex shrink-0 flex-col gap-2 sm:w-[210px]">
+            {/* Кольцо отвечает на «из чего состоит», столбцы слева — на «как
+                менялось». Долю по стеку на глаз не взять: сегменты стоят на
+                разной высоте, и сравнивать пришлось бы длины отрезков. */}
+            {donutOption ? <EChart option={donutOption} height={150} ariaLabel={`${title}: доли за период`} /> : null}
+
+            {/* Легенда видна всегда — без кнопки и без сворачивания. Прятать
+                расшифровку цветов за кликом значит требовать этот клик каждый
+                раз: цвет сегмента сам по себе ничего не говорит, а тултип
+                появляется только при наведении на конкретный столбец. */}
+            {keys.length > 0 ? (
+              <div className="flex flex-row flex-wrap gap-x-4 gap-y-1.5 self-start rounded-xl border border-zinc-200 bg-zinc-50/60 px-3 py-2 sm:w-full sm:flex-col sm:flex-nowrap">
+                {keys.map((key) => (
+                  <span key={key} className="flex items-center gap-1.5">
+                    <span
+                      className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
+                      style={{ background: colorOf(key) }}
+                      aria-hidden="true"
+                    />
+                    <span className="truncate text-[11px] text-zinc-600" title={labelOf(key)}>
+                      {labelOf(key)}
+                    </span>
                   </span>
-                </span>
-              ))}
-            </div>
-          ) : null}
+                ))}
+              </div>
+            ) : null}
+          </div>
         </div>
       )}
 

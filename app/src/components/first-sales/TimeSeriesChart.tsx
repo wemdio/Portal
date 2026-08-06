@@ -5,11 +5,13 @@ import type { EChartsCoreOption } from 'echarts/core';
 
 import EChart from '@/components/charts/EChart';
 import {
+  AXIS_FONT_SIZE,
   AXIS_LINE,
   AXIS_TEXT,
   CHART_FONT,
   GRID_LINE,
   HOVER_BAND,
+  LEGEND_FONT_SIZE,
   seriesColor,
   tooltipSkin,
   useChartTheme,
@@ -97,7 +99,7 @@ function buildOption(
       icon: 'roundRect',
       itemWidth: 10,
       itemHeight: 10,
-      textStyle: { color: AXIS_TEXT, fontSize: 11, fontFamily: CHART_FONT },
+      textStyle: { color: AXIS_TEXT, fontSize: LEGEND_FONT_SIZE, fontFamily: CHART_FONT },
     },
     tooltip: {
       trigger: 'axis',
@@ -124,13 +126,13 @@ function buildOption(
       data: labels,
       axisLine: { lineStyle: { color: AXIS_LINE } },
       axisTick: { show: false },
-      axisLabel: { color: AXIS_TEXT, fontSize: 11, fontFamily: CHART_FONT },
+      axisLabel: { color: AXIS_TEXT, fontSize: AXIS_FONT_SIZE, fontFamily: CHART_FONT },
     },
     yAxis: {
       type: 'value',
       minInterval: 1,
       splitLine: { lineStyle: { color: GRID_LINE } },
-      axisLabel: { color: AXIS_TEXT, fontSize: 11, fontFamily: CHART_FONT },
+      axisLabel: { color: AXIS_TEXT, fontSize: AXIS_FONT_SIZE, fontFamily: CHART_FONT },
     },
     series: [
       bar(LABELS.leads, data.map((b) => b.leads), 0),

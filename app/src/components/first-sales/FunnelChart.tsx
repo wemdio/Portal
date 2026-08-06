@@ -43,6 +43,10 @@ function formatSince(iso: string): string {
 
 function buildOption(stages: Stage[], theme: ChartTheme, animate: boolean): EChartsCoreOption {
   const top = stages[0]?.value ?? 0;
+  const prevByName = new Map<string, Stage>();
+  stages.forEach((stage, i) => {
+    if (i > 0) prevByName.set(stage.name, stages[i - 1]);
+  });
 
   return {
     animation: animate,
@@ -53,35 +57,47 @@ function buildOption(stages: Stage[], theme: ChartTheme, animate: boolean): ECha
       trigger: 'item',
       ...tooltipSkin(theme),
       formatter: (params: unknown) => {
-        const item = params as { name?: string; value?: number; color?: string };
+        const item = params as { name?: string; value?: number };
         const value = item.value ?? 0;
         const share = top > 0 ? Math.round((value / top) * 100) : 0;
+        const prev = item.name ? prevByName.get(item.name) : undefined;
+        const step =
+          prev && prev.value > 0
+            ? `<div style="margin-top:2px;opacity:.7">из «${prev.name}» — ${Math.round(
+                (value / prev.value) * 100,
+              )}%</div>`
+            : '';
         return `<div style="font-weight:600">${item.name ?? ''}</div>
-                <div style="margin-top:4px;font-variant-numeric:tabular-nums">${value} · ${share}% от лидов</div>`;
+                <div style="margin-top:4px;font-variant-numeric:tabular-nums">${value} · ${share}% от лидов</div>${step}`;
       },
     },
     series: [
       {
         type: 'funnel',
-        left: 8,
-        right: 8,
-        top: 12,
-        bottom: 12,
-        minSize: '32%',
-        maxSize: '100%',
-        gap: 3,
-        sort: 'descending',
+        left: 0,
+        right: 0,
+        top: 10,
+        bottom: 10,
+        minSize: '38%',
+        maxSize: '92%',
+        gap: 4,
+        // `none`, а не `descending`. Сортировка по величине переставляет
+        // ступени местами, как только более поздний этап оказывается больше
+        // раннего, — и воронка перестаёт быть воронкой: порядок этапов сделки
+        // подменяется рейтингом чисел. Порядок здесь задаётся смыслом.
+        sort: 'none',
+        funnelAlign: 'center',
         label: {
           position: 'inside',
           color: '#ffffff',
-          fontSize: 12,
+          fontSize: 14,
           fontWeight: 600,
           fontFamily: CHART_FONT,
           formatter: (params: unknown) => {
             const item = params as { name?: string; value?: number };
             const value = item.value ?? 0;
             const share = top > 0 ? Math.round((value / top) * 100) : 0;
-            return `${item.name ?? ''}  ${value}  ·  ${share}%`;
+            return `${item.name ?? ''} — ${value} · ${share}%`;
           },
         },
         labelLine: { show: false },
@@ -120,16 +136,36 @@ export default function FunnelChart({ totals }: { totals: FirstSalesTotals }) {
   if (!totals.meetingsReliable) hidden.push(`встречи считаются с ${formatSince(totals.meetingsSince)}`);
   if (!totals.contractsReliable) hidden.push(`договоры считаются с ${formatSince(totals.contractsSince)}`);
 
+  // Ступень шире предыдущей — не ошибка отрисовки, а разная логика подсчёта:
+  // «квал» кладётся когортно, по дате прихода лида, а встречи и договоры — по
+  // дате самого события. В одном окне встреч может оказаться больше, чем
+  // квалификаций. Без объяснения такой выступ читается как баг.
+  const widened = stages
+    .filter((stage, i) => i > 0 && stage.value > stages[i - 1].value)
+    .map((stage) => `«${stage.name}»`);
+
   return (
     <div ref={rootRef} className="rounded-xl border border-zinc-200 bg-white p-3">
       <h3 className="mb-1 text-sm font-semibold text-zinc-900">Воронка за период</h3>
       {totals.leads === 0 ? (
         <div className="px-3 py-10 text-center text-sm text-zinc-400">Лидов за выбранный период нет.</div>
       ) : option ? (
-        <EChart option={option} height={260} ariaLabel="Воронка: лиды, квалификация, встречи, договоры" />
+        // Ширина ограничена и отцентрована: на всю ширину экрана воронка
+        // вырождается в почти горизонтальные полосы, а верхняя ступень — в
+        // острый клин от края до края.
+        <div className="mx-auto w-full max-w-[680px]">
+          <EChart option={option} height={320} ariaLabel="Воронка: лиды, квалификация, встречи, договоры" />
+        </div>
       ) : (
-        <div style={{ height: 260 }} />
+        <div style={{ height: 320 }} />
       )}
+      {widened.length > 0 ? (
+        <p className="mt-2 text-[11px] text-zinc-400">
+          {widened.join(', ')} шире предыдущей ступени: «Квал» считается когортно — из лидов, пришедших в этот период,
+          — а встречи и договоры по дате самого события. Поэтому в одном окне встреча может быть у лида, пришедшего
+          раньше, и ступень оказывается шире. Это не ошибка графика.
+        </p>
+      ) : null}
       {hidden.length > 0 ? (
         <p className="mt-2 text-[11px] text-amber-700">
           Часть ступеней не показана, потому что за это окно они недостоверны: {hidden.join('; ')}. Ноль вместо
