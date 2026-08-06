@@ -4,7 +4,7 @@ import { useState } from 'react';
 
 import IncomeOperations from '@/components/expenses/IncomeOperations';
 import { UnconvertedNote } from '@/components/expenses/KpiTile';
-import { formatDelta, formatRub } from '@/lib/expenses/client';
+import { formatDelta, formatRub, formatShare } from '@/lib/expenses/client';
 import type { PayerBreakdownItem } from '@/lib/expenses/types';
 import { useSortableRows, type SortColumns } from '@/components/ui/useSortableRows';
 import { SortableTh } from '@/components/ui/SortableTh';
@@ -212,7 +212,7 @@ function PayerRow({
           {formatRub(item.total)} ₽
           <UnconvertedNote count={item.unconvertedCount} byCurrency={item.unconvertedByCurrency} />
         </td>
-        <td className="py-2 text-right tabular-nums text-zinc-600">{Math.round(item.share * 100)}%</td>
+        <td className="py-2 text-right tabular-nums text-zinc-600">{formatShare(item.share)}</td>
         <td className="py-2 text-right tabular-nums text-zinc-600">{item.ops}</td>
         <td className={`py-2 text-right tabular-nums ${deltaColor}`}>{formatDelta(item.deltaPrev)}</td>
       </tr>

@@ -17,7 +17,7 @@ import {
   verticalGradient,
   type ChartTheme,
 } from '@/components/charts/theme';
-import { formatRub } from '@/lib/expenses/client';
+import { formatRub, formatShare } from '@/lib/expenses/client';
 import type { GroupBy } from '@/lib/expenses/period';
 
 /**
@@ -292,9 +292,9 @@ function buildDonutOption({
       formatter: (params: unknown) => {
         const item = params as { name?: string; value?: number };
         const value = Number(item.value ?? 0);
-        const share = grandTotal > 0 ? Math.round((value / grandTotal) * 100) : 0;
+        const share = grandTotal > 0 ? formatShare(value / grandTotal) : '—';
         return `<div style="font-weight:600">${item.name ?? ''}</div>
-                <div style="margin-top:4px;font-variant-numeric:tabular-nums">${formatRub(value)} ₽ · ${share}%</div>`;
+                <div style="margin-top:4px;font-variant-numeric:tabular-nums">${formatRub(value)} ₽ · ${share}</div>`;
       },
     },
     series: [
