@@ -104,4 +104,49 @@ describe('verifyEvidenceItems', () => {
     expect(none.valid).toHaveLength(0);
     expect(none.dropped).toBe(1);
   });
+
+  it('accepts prompt-sanctioned ellipsis-shortened quotes when every fragment matches', () => {
+    const { valid, dropped } = verifyEvidenceItems(
+      [
+        {
+          claim: 'Рост рынка',
+          source_url: 'https://example.com/report-2026',
+          quote: 'Рынок логистики вырос … в 1,7 раза.',
+        },
+      ],
+      SOURCES,
+    );
+    expect(valid).toHaveLength(1);
+    expect(dropped).toBe(0);
+  });
+
+  it('rejects ellipsis quotes whose fragment was never said', () => {
+    const { valid, dropped } = verifyEvidenceItems(
+      [
+        {
+          claim: 'x',
+          source_url: 'https://example.com/report-2026',
+          quote: 'Рынок логистики вырос … на 99% за неделю.',
+        },
+      ],
+      SOURCES,
+    );
+    expect(valid).toHaveLength(0);
+    expect(dropped).toBe(1);
+  });
+
+  it('normalizes typography (ёлочки/тире/апострофы) between quote and source', () => {
+    const { valid, dropped } = verifyEvidenceItems(
+      [
+        {
+          claim: 'x',
+          source_url: 'https://other.io/article/',
+          quote: 'Он сказал: "каждый третий оператор складов внедряет WMS" - отчёт.',
+        },
+      ],
+      [{ url: 'https://other.io/article', text: 'Он сказал: «каждый третий оператор складов внедряет WMS» — отчёт.' }],
+    );
+    expect(valid).toHaveLength(1);
+    expect(dropped).toBe(0);
+  });
 });

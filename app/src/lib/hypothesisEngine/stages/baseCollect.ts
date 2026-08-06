@@ -1213,10 +1213,18 @@ async function loadOtherBaseExclusionKeys(
  */
 const CONSTRUCT_STEPS_TAIL = ['validate_emails', 'cap_emails_per_company', 'enrich_descriptions'];
 
+/** Свыше этого размера enrich_descriptions (per-site фетчи) не укладывается в
+ *  6-часовой таймаут конструктора — для больших баз шаг пропускаем. */
+const CONSTRUCT_ENRICH_MAX_ROWS = 5000;
+
 function constructStepsFor(merged: HeUnifiedRow[]): string[] {
   const withEmail = merged.filter((r) => r.email.trim() !== '').length;
   const poor = withEmail * 2 <= merged.length;
-  return ['dedup_email', ...(poor ? ['find_emails'] : []), ...CONSTRUCT_STEPS_TAIL];
+  const tail =
+    merged.length > CONSTRUCT_ENRICH_MAX_ROWS
+      ? CONSTRUCT_STEPS_TAIL.filter((s) => s !== 'enrich_descriptions')
+      : CONSTRUCT_STEPS_TAIL;
+  return ['dedup_email', ...(poor ? ['find_emails'] : []), ...tail];
 }
 /** Канонические заголовки сетки конструктора (порядок — как HE_AUTO_COLLECT_COLUMNS). */
 const CONSTRUCT_HEADERS_RU = ['Компания', 'Сайт', 'Email', 'Телефон', 'Вакансия', 'Адрес', 'Категория', 'Сотрудники', 'Выручка', 'ИНН', 'Источник'];
@@ -1709,30 +1717,13 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     }
   }
 
-  // ─── REFILL (ENG auto-pipeline) ───
-  // Вместо финала «analyzing + base_analyze»: долив валидных строк лидами в
-  // уже запущенную кампанию, база → терминальный 'analyzed', итог — в
-  // collect_info.refill_result и he_auto_pipeline_runs.
-  if (isRefill) {
-    return await runHeRefillAppend({
-      ctx,
-      job,
-      base: { id: baseId, project_id: job.project_id, vertical_id: base.vertical_id },
-      info,
-      stats,
-      finalRows,
-      finalColumns,
-      emailStatuses: finalEmailStatuses,
-      usage,
-    });
-  }
-
-  // ─── QUALITY GATE (обычный путь; refill фильтрует строки сам) ───
+  // ─── QUALITY GATE (до refill/финала: пометки нужны обоим путям) ───
   // 1) вердикты валидации почт → _email_status на строках (запуск пропускает
   //    не-'ok' — баунсы не ложатся на домен клиента);
   // 2) релевант-гейт LLM → _low_relevance на строках вне вертикали (шум
-  //    hh/карт/реестра). Пометки живут только в jsonb-строках: в columns не
-  //    попадают, поэтому сетки UI и маппинг операторов их не видят.
+  //    hh/карт/реестра): запуск фильтрует их в launchTemplate, refill — в
+  //    selectRefillLeadRows. Пометки живут только в jsonb-строках: в columns
+  //    не попадают, сетки UI и маппинг операторов их не видят.
   type StoredRow = HeUnifiedRow & { _email_status?: string; _low_relevance?: boolean };
   let storedRows: StoredRow[] = finalRows;
   if (finalEmailStatuses) {
@@ -1769,6 +1760,24 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     stageLog(ctx, `[base_collect] релевант-гейт пропущен: ${e instanceof Error ? e.message : String(e)}`);
   }
   const statsWithQuality = { ...stats, low_relevance: lowRelevanceCount };
+
+  // ─── REFILL (ENG auto-pipeline) ───
+  // Вместо финала «analyzing + base_analyze»: долив валидных строк лидами в
+  // уже запущенную кампанию, база → терминальный 'analyzed', итог — в
+  // collect_info.refill_result и he_auto_pipeline_runs.
+  if (isRefill) {
+    return await runHeRefillAppend({
+      ctx,
+      job,
+      base: { id: baseId, project_id: job.project_id, vertical_id: base.vertical_id },
+      info,
+      stats: statsWithQuality,
+      finalRows: storedRows,
+      finalColumns,
+      emailStatuses: finalEmailStatuses,
+      usage,
+    });
+  }
 
   const { error: updError } = await ctx.supabase
     .from('he_bases')

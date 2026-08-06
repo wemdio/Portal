@@ -584,6 +584,8 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   const factCorpus = [
     JSON.stringify(analysis),
     chainLetters.map((l) => `${l.subject ?? ''}\n${l.body}`).join('\n'),
+    vertical.name,
+    vertical.summary ?? '',
     clientCase ? JSON.stringify(clientCase) : '',
     JSON.stringify(brief),
     JSON.stringify(winnerPatterns),
@@ -612,6 +614,13 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   const ruleViolations = collectRuleViolations(letters);
   if (ruleViolations.length > 0) {
     stageLog(ctx, `[template] детерминированный контроль: ${ruleViolations.length} нарушений — фикс-проход`);
+    // Принятие фикса: то же число писем и не меньше B/сегментных вариантов
+    // (модель могла молча выкинуть блоки ---LETTER N B--- / ---SEGMENT---).
+    const countVariants = (ls: HeChainLetterAB[]) => ({
+      b: ls.reduce((acc, l) => acc + (l.variants?.length ?? 0), 0),
+      seg: ls.reduce((acc, l) => acc + (l.segment_variants?.length ?? 0), 0),
+    });
+    const before = countVariants(letters);
     try {
       const fix = await callLLMText(
         [
@@ -623,7 +632,13 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       );
       addUsage(usage, fix);
       const rebuilt = buildLetters(fix.text);
-      if (rebuilt.parsed.length >= 3 && rebuilt.letters.length === letters.length) {
+      const after = countVariants(rebuilt.letters);
+      if (
+        rebuilt.parsed.length >= 3 &&
+        rebuilt.letters.length === letters.length &&
+        after.b >= before.b &&
+        after.seg >= before.seg
+      ) {
         llm = fix;
         parsed = rebuilt.parsed;
         letters = rebuilt.letters;
@@ -640,7 +655,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       } else {
         stageLog(
           ctx,
-          `[template] фикс-проход: распарсилось ${rebuilt.parsed.length} писем вместо ${letters.length} — оставляем исходные`,
+          `[template] фикс-проход: ${rebuilt.parsed.length} писем, варианты ${after.b}B/${after.seg}seg вместо ${before.b}B/${before.seg}seg — оставляем исходные`,
         );
       }
     } catch (e) {
@@ -707,6 +722,11 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
 
   if (mappingIssues.length) {
     stageLog(ctx, `[template] operator_mapping: ${mappingIssues.length} проблем — retry с фидбэком`);
+    // Принимаем регенерацию только с тем же числом писем и без НОВЫХ
+    // нарушений детерминированного контроля: retry переписывает шаблон
+    // целиком и мог вернуть тире/лишние CTA уже после фикс-прохода.
+    const preRetryViolations = collectRuleViolations(letters).length;
+    const preRetry = { letters, ops, operatorMapping, mappingIssues };
     const retryLlm = await callLLMText(
       [
         ...messages,
@@ -717,16 +737,25 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     );
     addUsage(usage, retryLlm);
     const rebuilt = buildLetters(retryLlm.text);
-    if (rebuilt.parsed.length >= 3) {
-      llm = retryLlm;
-      letters = rebuilt.letters;
-      ops = collectOperators(letters);
-      operatorMapping = buildMapping(ops.allOperators);
-      mappingIssues = validateOperatorMapping(operatorMapping, columns, plan.data, {
-        subjectOperators: ops.subjectOperators,
-      });
+    if (rebuilt.parsed.length >= 3 && rebuilt.letters.length === letters.length) {
+      const newViolations = collectRuleViolations(rebuilt.letters).length;
+      if (newViolations > preRetryViolations) {
+        stageLog(
+          ctx,
+          `[template] retry по операторам вернул ${newViolations} нарушений регламента (было ${preRetryViolations}) — оставляем прежние письма`,
+        );
+        ({ letters, ops, operatorMapping, mappingIssues } = preRetry);
+      } else {
+        llm = retryLlm;
+        letters = rebuilt.letters;
+        ops = collectOperators(letters);
+        operatorMapping = buildMapping(ops.allOperators);
+        mappingIssues = validateOperatorMapping(operatorMapping, columns, plan.data, {
+          subjectOperators: ops.subjectOperators,
+        });
+      }
     } else {
-      stageLog(ctx, '[template] retry по операторам не распарсился — оставляем предыдущие письма');
+      stageLog(ctx, '[template] retry по операторам не распарсился/сменил число писем — оставляем предыдущие письма');
     }
   }
 

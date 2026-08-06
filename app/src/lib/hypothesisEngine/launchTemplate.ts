@@ -167,7 +167,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   // 2. База шаблона.
   const { data: baseRow, error: baseErr } = await portalDb
     .from('he_bases')
-    .select('id, filename, columns, data')
+    .select('id, filename, columns, data, source')
     .eq('id', template.base_id)
     .single();
   if (baseErr) {
@@ -176,7 +176,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       body: { error: baseErr.code === 'PGRST116' ? t.baseNotFound : baseErr.message },
     };
   }
-  const base = baseRow as Pick<HeBase, 'id' | 'filename' | 'columns' | 'data'>;
+  const base = baseRow as Pick<HeBase, 'id' | 'filename' | 'columns' | 'data'> & { source?: string };
 
   // 3. Пресет — service-level read по id (у staff); в клиентском контуре —
   //    со скоупом владельца (чужой пресет = «не найден»).
@@ -207,24 +207,28 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   ];
 
   // 5. Лиды из базы. Все проверки — ДО любого вызова Instantly.
-  //    Качественные пометки автосборки (base_collect): _email_status !== 'ok'
-  //    (баунс-риск на домен клиента) и _low_relevance (шум источников вне
-  //    вертикали) в запуск не идут — считаем и показываем в warnings.
+  //    Качественные пометки АВТОсборки (base_collect, source='auto'):
+  //    _email_status !== 'ok' (баунс-риск на домен клиента) и _low_relevance
+  //    (шум источников вне вертикали) в запуск не идут. Ручные базы (upload)
+  //    не фильтруем — там эти ключи, если есть, принадлежат пользователю.
   const allRows = Array.isArray(base.data) ? (base.data as Array<Record<string, unknown>>) : [];
+  const isAutoBase = base.source === 'auto';
   let skippedInvalid = 0;
   let skippedIrrelevant = 0;
-  const rows = allRows.filter((r) => {
-    if (r._low_relevance === true) {
-      skippedIrrelevant += 1;
-      return false;
-    }
-    const status = typeof r._email_status === 'string' ? r._email_status : null;
-    if (status && status !== 'ok') {
-      skippedInvalid += 1;
-      return false;
-    }
-    return true;
-  });
+  const rows = isAutoBase
+    ? allRows.filter((r) => {
+        if (r._low_relevance === true) {
+          skippedIrrelevant += 1;
+          return false;
+        }
+        const status = typeof r._email_status === 'string' ? r._email_status : null;
+        if (status && status !== 'ok') {
+          skippedInvalid += 1;
+          return false;
+        }
+        return true;
+      })
+    : allRows;
   const columns = Array.isArray(base.columns)
     ? base.columns.filter((c): c is string => typeof c === 'string')
     : [];
