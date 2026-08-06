@@ -1,16 +1,23 @@
 'use client';
 
+import { useMemo, useRef } from 'react';
+import type { EChartsCoreOption } from 'echarts/core';
+
+import EChart from '@/components/charts/EChart';
 import {
-  Bar,
-  CartesianGrid,
-  ComposedChart,
-  Legend,
-  Line,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
+  AXIS_LINE,
+  AXIS_TEXT,
+  CHART_FONT,
+  GRID_LINE,
+  HOVER_BAND,
+  seriesColor,
+  tooltipSkin,
+  useChartTheme,
+  usePrefersReducedMotion,
+  verticalGradient,
+  withAlpha,
+  type ChartTheme,
+} from '@/components/charts/theme';
 import type { SeriesBucket } from '@/lib/firstSales/metrics';
 import type { GroupBy } from '@/lib/firstSales/buckets';
 
@@ -39,60 +46,141 @@ function formatKey(key: string, groupBy: GroupBy): string {
   return `${d}.${m}`;
 }
 
+interface TooltipItem {
+  seriesName?: string;
+  value?: number;
+  color?: string;
+  dataIndex?: number;
+}
+
+/**
+ * Столбцы для трёх верхних этапов и линия для договоров.
+ *
+ * Договоры вынесены в линию не ради разнообразия: их на порядок меньше лидов,
+ * и четвёртый столбец в группе выродился бы в полоску в пару пикселей. Линия
+ * поверх столбцов читается при любом соотношении величин. Все четыре ряда
+ * при этом на ОДНОЙ шкале — второй оси справа здесь нет и быть не должно,
+ * иначе «линия выше столбцов» переставало бы что-либо значить.
+ */
+function buildOption(
+  data: SeriesBucket[],
+  groupBy: GroupBy,
+  theme: ChartTheme,
+  animate: boolean,
+): EChartsCoreOption {
+  const labels = data.map((b) => formatKey(b.key, groupBy));
+  const keys = data.map((b) => b.key);
+
+  const bar = (name: string, values: number[], slot: number) => ({
+    name,
+    type: 'bar' as const,
+    data: values,
+    barMaxWidth: 26,
+    itemStyle: {
+      color: verticalGradient(seriesColor(theme, slot)),
+      borderRadius: [4, 4, 0, 0] as [number, number, number, number],
+    },
+  });
+
+  const contractsColor = seriesColor(theme, 3);
+
+  return {
+    animation: animate,
+    animationDuration: 700,
+    animationEasing: 'cubicOut',
+    textStyle: { fontFamily: CHART_FONT },
+    grid: { left: 4, right: 8, top: 40, bottom: 4, containLabel: true },
+    legend: {
+      top: 0,
+      left: 0,
+      itemGap: 16,
+      icon: 'roundRect',
+      itemWidth: 10,
+      itemHeight: 10,
+      textStyle: { color: AXIS_TEXT, fontSize: 11, fontFamily: CHART_FONT },
+    },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow', shadowStyle: { color: HOVER_BAND } },
+      ...tooltipSkin(theme),
+      formatter: (params: unknown) => {
+        const items = (Array.isArray(params) ? params : [params]) as TooltipItem[];
+        const index = items[0]?.dataIndex ?? 0;
+        const rows = items
+          .map(
+            (item) =>
+              `<div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+                 <span style="width:10px;height:10px;border-radius:3px;background:${item.color};flex:none"></span>
+                 <span style="opacity:.75">${item.seriesName ?? ''}</span>
+                 <span style="margin-left:auto;font-variant-numeric:tabular-nums;font-weight:600">${item.value ?? 0}</span>
+               </div>`,
+          )
+          .join('');
+        return `<div style="font-weight:600">${keys[index] ?? ''}</div>${rows}`;
+      },
+    },
+    xAxis: {
+      type: 'category',
+      data: labels,
+      axisLine: { lineStyle: { color: AXIS_LINE } },
+      axisTick: { show: false },
+      axisLabel: { color: AXIS_TEXT, fontSize: 11, fontFamily: CHART_FONT },
+    },
+    yAxis: {
+      type: 'value',
+      minInterval: 1,
+      splitLine: { lineStyle: { color: GRID_LINE } },
+      axisLabel: { color: AXIS_TEXT, fontSize: 11, fontFamily: CHART_FONT },
+    },
+    series: [
+      bar(LABELS.leads, data.map((b) => b.leads), 0),
+      bar(LABELS.qualified, data.map((b) => b.qualified), 1),
+      bar(LABELS.meetings, data.map((b) => b.meetings), 2),
+      {
+        name: LABELS.contracts,
+        type: 'line',
+        data: data.map((b) => b.contracts),
+        smooth: true,
+        symbol: 'circle',
+        symbolSize: 8,
+        z: 3,
+        lineStyle: { width: 3, color: contractsColor },
+        itemStyle: { color: contractsColor, borderColor: theme.surface, borderWidth: 2 },
+        areaStyle: {
+          color: {
+            type: 'linear',
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 1,
+            colorStops: [
+              { offset: 0, color: withAlpha(contractsColor, 0.28) },
+              { offset: 1, color: withAlpha(contractsColor, 0) },
+            ],
+          },
+        },
+      },
+    ],
+  };
+}
+
 export default function TimeSeriesChart({ series, groupBy }: { series: SeriesBucket[]; groupBy: GroupBy }) {
-  const data = series.map((b) => ({ ...b, label: formatKey(b.key, groupBy) }));
+  const rootRef = useRef<HTMLDivElement>(null);
+  const theme = useChartTheme(rootRef);
+  const reducedMotion = usePrefersReducedMotion();
+
+  const option = useMemo(
+    () => (theme ? buildOption(series, groupBy, theme, !reducedMotion) : null),
+    [series, groupBy, theme, reducedMotion],
+  );
 
   return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-3">
-      <div style={{ height: 288 }}>
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#f4f4f5" vertical={false} />
-            <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#a1a1aa' }} axisLine={{ stroke: '#e4e4e7' }} tickLine={false} />
-            <YAxis tick={{ fontSize: 11, fill: '#a1a1aa' }} axisLine={false} tickLine={false} allowDecimals={false} width={32} />
-            <Tooltip
-              contentStyle={{ fontSize: 12, borderRadius: 8, borderColor: '#e4e4e7' }}
-              labelFormatter={(_, payload) => payload?.[0]?.payload?.key ?? ''}
-            />
-            {/* Легенда вертикальным блоком справа: горизонтальная снизу
-                отъедала высоту у графика, а с четырьмя рядами и длинной
-                подписью «Квал (из пришедших)» переносилась на вторую строку,
-                сдвигая ось. Справа она стоит на месте независимо от числа
-                рядов и длины подписей. */}
-            <Legend
-              layout="vertical"
-              align="right"
-              verticalAlign="middle"
-              wrapperStyle={{ fontSize: 11, paddingLeft: 12, lineHeight: '20px' }}
-            />
-            <Bar dataKey="leads" name={LABELS.leads} fill="#d4d4d8" radius={[3, 3, 0, 0]} barSize={18} />
-            <Line
-              type="monotone"
-              dataKey="qualified"
-              name={LABELS.qualified}
-              stroke="#8b5cf6"
-              strokeWidth={2}
-              dot={false}
-            />
-            <Line
-              type="monotone"
-              dataKey="meetings"
-              name={LABELS.meetings}
-              stroke="#3b82f6"
-              strokeWidth={2}
-              dot={false}
-            />
-            <Line
-              type="monotone"
-              dataKey="contracts"
-              name={LABELS.contracts}
-              stroke="#059669"
-              strokeWidth={2}
-              dot={false}
-            />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
+    <div ref={rootRef} className="rounded-xl border border-zinc-200 bg-white p-3">
+      {option ? (
+        <EChart option={option} height={288} ariaLabel="Лиды, квалификация, встречи и договоры по периодам" />
+      ) : (
+        <div style={{ height: 288 }} />
+      )}
       <p className="mt-2 text-[11px] text-zinc-400">
         «Квал (из пришедших)» — когорта: из лидов, пришедших в эту корзину, сколько в итоге дошли до квалификации
         (независимо от даты самого перехода). «Встречи» и «Договоры» — по дате самого события, а не даты прихода лида.

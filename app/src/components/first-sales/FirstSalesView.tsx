@@ -7,6 +7,7 @@ import type { FirstSalesSeries } from '@/lib/firstSales/metrics';
 import FiltersBar, { getDefaultFilters, type FiltersState } from '@/components/first-sales/FiltersBar';
 import KpiRow from '@/components/first-sales/KpiRow';
 import TimeSeriesChart from '@/components/first-sales/TimeSeriesChart';
+import FunnelChart from '@/components/first-sales/FunnelChart';
 import SourceTable, { drillKey } from '@/components/first-sales/SourceTable';
 import SourceMapEditor from '@/components/first-sales/SourceMapEditor';
 import MeetingLinksEditor from '@/components/first-sales/MeetingLinksEditor';
@@ -136,6 +137,10 @@ export default function FirstSalesView() {
             </div>
           ) : (
             <>
+              {/* Воронка перед графиком по времени: она отвечает на первый
+                  вопрос («сколько доходит от этапа к этапу»), а динамика по
+                  корзинам — уже на второй. */}
+              <FunnelChart totals={data.totals} />
               <TimeSeriesChart series={data.series} groupBy={filters.groupBy} />
               {/* key на from/to/channels: смена периода или каналов размонтирует и
                   заново монтирует таблицу, сбрасывая раскрытую drill-down строку
