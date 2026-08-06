@@ -142,6 +142,18 @@ describe('PATCH /api/client/eng/projects/[id]', () => {
     });
   });
 
+  it('accepts business_override (manual business description, thin-site escape hatch)', async () => {
+    const res = await PATCH(
+      makeReq('PATCH', { business_override: 'We sell SEO retainers to US clinic groups.' }),
+      params,
+    );
+    expect(res.status).toBe(200);
+    expect(mockDb.getRows('he_projects')[0].brief).toEqual({
+      site_profile: { usp: 'seo' },
+      business_override: 'We sell SEO retainers to US clinic groups.',
+    });
+  });
+
   it('removes an override on an empty string', async () => {
     mockDb = createMockSupabase({
       tables: {

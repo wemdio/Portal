@@ -355,6 +355,22 @@ function VerticalCard({
         );
       })()}
 
+      {(vertical.forecast || vertical.actual) && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] ds-mono" style={{ color: 'var(--cp-text-l)' }}>
+          {vertical.forecast && (
+            <span>
+              forecast <b style={{ color: 'var(--cp-text-m)' }}>{vertical.forecast.pct}%</b>
+            </span>
+          )}
+          {vertical.actual && (
+            <span>
+              actual <b style={{ color: vertical.actual.reply_pct > 0 ? 'var(--cp-green)' : 'var(--cp-text-m)' }}>{vertical.actual.reply_pct}%</b>
+              {' '}replies · {vertical.actual.sent.toLocaleString('en-US')} sent
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="mt-auto flex items-center gap-2 pt-1">
         {vertical.launch?.campaign_url && (
           <a

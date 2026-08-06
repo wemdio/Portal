@@ -131,7 +131,7 @@ export async function fetchEngProjectDetail(projectId: string): Promise<HeProjec
 
 export async function patchEngProject(
   projectId: string,
-  body: { offer_override?: string; style_override?: string; signature_override?: string },
+  body: { offer_override?: string; style_override?: string; signature_override?: string; business_override?: string },
 ): Promise<EngPatchResponse> {
   return clientApiFetch<EngPatchResponse>(`/eng/projects/${projectId}`, {
     method: 'PATCH',
@@ -233,6 +233,10 @@ export interface EngDashboardVertical {
     leads_launched: number;
   };
   launch: { campaign_url: string; campaign_name: string } | null;
+  /** Прогноз движка (potential_pct), если был выставлен. */
+  forecast: { pct: number } | null;
+  /** Факт по запущенной кампании (петля actualsReconcile, свежесть 24ч). */
+  actual: { reply_pct: number; sent: number; measured_at: string } | null;
 }
 
 export interface EngDashboardEvent {
