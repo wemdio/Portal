@@ -8,9 +8,10 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Ban } from 'lucide-react';
+import { ArrowLeft, Ban, LayoutDashboard } from 'lucide-react';
 import Link from 'next/link';
 import type { Route } from 'next';
+import { useSearchParams } from 'next/navigation';
 import type { HeProject } from '@/lib/hypothesisEngine/types';
 import { cancelEngProject, fetchEngProjectDetail, type HeProjectDetailResponse } from './api-client';
 import { EngBadge, EngSpinner, fmtDate, projectStatusTone } from './ui';
@@ -31,9 +32,15 @@ const STEPS = [
 export type EngDetail = HeProjectDetailResponse & { project: HeProject };
 
 export function EngProjectWizard({ projectId }: { projectId: string }) {
+  const searchParams = useSearchParams();
   const [detail, setDetail] = useState<EngDetail | null>(null);
   const [error, setError] = useState('');
-  const [step, setStep] = useState<number>(1);
+  // Глубокая ссылка вида ?step=3 (дашборд ведёт на нужный шаг по этапу
+  // вертикали); вне диапазона — стартовый шаг 1.
+  const [step, setStep] = useState<number>(() => {
+    const raw = Number(searchParams?.get('step'));
+    return Number.isInteger(raw) && raw >= 1 && raw <= STEPS.length ? raw : 1;
+  });
   const [cancelling, setCancelling] = useState(false);
   const loadingRef = useRef(false);
 
@@ -100,6 +107,13 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
           className="inline-flex items-center gap-1 hover:underline"
         >
           <ArrowLeft className="h-3 w-3" /> ENG Outreach
+        </Link>
+        <Link
+          href={'/client/eng/dashboard' as Route}
+          prefetch={false}
+          className="inline-flex items-center gap-1 hover:underline"
+        >
+          <LayoutDashboard className="h-3 w-3" /> Command Center
         </Link>
       </div>
 

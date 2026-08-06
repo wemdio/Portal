@@ -55,7 +55,19 @@ export interface OutreachOsConfig {
   selected_steps: string[];
   extra_exclude: string[];
   job_poll_timeout_minutes: number;
+  /**
+   * Второй источник работодателей — SuperJob (app/src/lib/outreachos/
+   * superjobSource.ts). false → только HH. Ключ — env SUPERJOB_APP_KEY на
+   * воркере; без него источник пропускается с предупреждением.
+   */
+  superjob_enabled: boolean;
+  /** Каталоги (профобласти) SJ: IT=33, пром/производство=327, стройка=306,
+   *  логистика=86, маркетинг=234, HR=76, консалтинг=426. */
+  superjob_catalogues: number[];
 }
+
+/** Дефолтный набор каталогов SJ — подстраховка до миграции колонки. */
+const SUPERJOB_DEFAULT_CATALOGUES = [33, 327, 306, 86, 234, 76, 426];
 
 /**
  * Читает конфиг id=1. Возвращает null, если строки нет или БД недоступна.
@@ -79,5 +91,14 @@ export async function loadOutreachOsConfig(): Promise<OutreachOsConfig | null> {
       (s) => !FORBIDDEN_STEPS.includes(s as (typeof FORBIDDEN_STEPS)[number]),
     ),
   );
-  return { ...row, selected_steps: cleanedSteps };
+  return {
+    ...row,
+    selected_steps: cleanedSteps,
+    // До миграции колонок — безопасные дефолты (источник выключен).
+    superjob_enabled: row.superjob_enabled === true,
+    superjob_catalogues:
+      Array.isArray(row.superjob_catalogues) && row.superjob_catalogues.length > 0
+        ? row.superjob_catalogues
+        : SUPERJOB_DEFAULT_CATALOGUES,
+  };
 }
