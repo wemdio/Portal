@@ -220,6 +220,25 @@ describe('POST launch — отказы до вызова Instantly', () => {
 });
 
 describe('POST launch — happy path', () => {
+  it('пропускает строки с невалидным email и нерелевантные вертикали (quality-гейты сборки)', async () => {
+    seed({
+      baseRows: [
+        { Email: 'ok@x.test', Имя: 'Ok', Компания: 'Good', Сайт: '' },
+        { Email: 'bad@x.test', Имя: 'Bad', Компания: 'BadCo', Сайт: '', _email_status: 'invalid' },
+        { Email: 'risky@x.test', Имя: 'Risky', Компания: 'RiskyCo', Сайт: '', _email_status: 'risky' },
+        { Email: 'noise@x.test', Имя: 'Noise', Компания: 'NoiseCo', Сайт: '', _low_relevance: true },
+      ],
+    });
+    const res = await POST(makeReq({ preset_id: PRESET_ID }), params);
+    expect(res.status).toBe(200);
+
+    const [leads] = mockCreateLeads.mock.calls[0] as [Array<{ email: string }>, unknown];
+    expect(leads.map((l) => l.email)).toEqual(['ok@x.test']);
+
+    const body = (await res.json()) as { warnings: string[] };
+    expect(body.warnings.some((w) => w.includes('Пропущено строк'))).toBe(true);
+  });
+
   it('создаёт кампанию НА ПАУЗЕ, грузит лидов и пишет launch_info', async () => {
     const res = await POST(makeReq({ preset_id: PRESET_ID }), params);
     expect(res.status).toBe(200);

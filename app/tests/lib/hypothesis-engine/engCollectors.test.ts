@@ -440,7 +440,8 @@ describe('plan phase — market=us зовёт EN-промпт', () => {
     const res = await runBaseCollectStage(makeJob(), ctx('us'));
     expect((res.result as { rows: number }).rows).toBe(1);
 
-    expect(callLLMMock).toHaveBeenCalledTimes(1);
+    // Первый вызов — план источников (EN-промпт); второй — релевант-гейт финала.
+    expect(callLLMMock).toHaveBeenCalledTimes(2);
     expect(systemPromptOf()).toContain('Answer strictly in English');
     expect(systemPromptOf()).not.toContain('Отвечай строго на русском');
 
