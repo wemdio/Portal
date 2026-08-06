@@ -15,6 +15,23 @@ export interface WarmupSide {
   send(text: string): Promise<void>;
 }
 
+/**
+ * Ошибка отправки с частичным прогрессом: до неё часть сообщений уже реально
+ * ушла в Telegram, и терять их нельзя — caller сохраняет `sent` и знает,
+ * на чьей стороне оборвалось.
+ */
+export class WarmupSendError extends Error {
+  readonly sent: WarmupMessage[];
+  readonly failedAccountId: string;
+
+  constructor(cause: unknown, sent: WarmupMessage[], failedAccountId: string) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'WarmupSendError';
+    this.sent = sent;
+    this.failedAccountId = failedAccountId;
+  }
+}
+
 export interface RunWarmupConversationParams {
   sideA: WarmupSide;
   sideB: WarmupSide;
@@ -24,6 +41,11 @@ export interface RunWarmupConversationParams {
   sleep: (ms: number) => Promise<void>;
   random: () => number;
   delayRangeSec?: [number, number];
+  /**
+   * Вызывается после каждой успешной отправки — для журнала и инкрементального
+   * сохранения. Диагностика, а не бизнес-логика: его сбой глотается.
+   */
+  onMessage?: (msg: WarmupMessage, index: number, total: number) => void | Promise<void>;
 }
 
 /**
@@ -64,12 +86,22 @@ export async function runWarmupConversation(
       text = fallbackReply(i);
     }
 
-    await speaker.send(text);
-    out.push({
+    try {
+      await speaker.send(text);
+    } catch (e) {
+      throw new WarmupSendError(e, out, speaker.accountId);
+    }
+    const msg: WarmupMessage = {
       account_id: speaker.accountId,
       content: text,
       timestamp: new Date().toISOString(),
-    });
+    };
+    out.push(msg);
+    try {
+      await params.onMessage?.(msg, i, plannedMessages);
+    } catch {
+      // Журнал и инкрементальное сохранение не должны ронять живую переписку.
+    }
   }
 
   return out;

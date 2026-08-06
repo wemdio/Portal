@@ -12,6 +12,7 @@
 
 import {
   runWarmupConversation,
+  WarmupSendError,
   type WarmupSide,
 } from '@/lib/tgOutreach/warmup/conversation';
 
@@ -118,6 +119,59 @@ describe('warmup conversation', () => {
     })).rejects.toThrow('PEER_FLOOD');
     // Первая реплика ушла, на второй сломались — дальше не пошли.
     expect(sent).toHaveLength(1);
+  });
+
+  it('ошибка отправки доносит частичный прогресс и виновника', async () => {
+    const sent: Sent[] = [];
+    const brokenB: WarmupSide = {
+      accountId: 'b',
+      send: async () => { throw new Error('PEER_FLOOD'); },
+    };
+    let err: unknown;
+    try {
+      await runWarmupConversation({
+        sideA: fakeSide('a', sent), sideB: brokenB,
+        initiatorAccountId: 'a', plannedMessages: 4,
+        generate: async () => 'привет', sleep: noSleep, random: () => 0.5,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(WarmupSendError);
+    const sendErr = err as WarmupSendError;
+    // Уже отправленное не теряется: первая реплика A дошла и сохранена.
+    expect(sendErr.sent).toHaveLength(1);
+    expect(sendErr.sent[0].account_id).toBe('a');
+    expect(sendErr.failedAccountId).toBe('b');
+  });
+
+  it('onMessage вызывается на каждую отправку с номером и итогом', async () => {
+    const sent: Sent[] = [];
+    const seen: Array<{ from: string; index: number; total: number }> = [];
+    await runWarmupConversation({
+      sideA: fakeSide('a', sent), sideB: fakeSide('b', sent),
+      initiatorAccountId: 'a', plannedMessages: 3,
+      generate: async () => 'ок', sleep: noSleep, random: () => 0.5,
+      onMessage: async (msg, index, total) => {
+        seen.push({ from: msg.account_id, index, total });
+      },
+    });
+    expect(seen).toEqual([
+      { from: 'a', index: 0, total: 3 },
+      { from: 'b', index: 1, total: 3 },
+      { from: 'a', index: 2, total: 3 },
+    ]);
+  });
+
+  it('сбой onMessage не роняет переписку', async () => {
+    const sent: Sent[] = [];
+    const messages = await runWarmupConversation({
+      sideA: fakeSide('a', sent), sideB: fakeSide('b', sent),
+      initiatorAccountId: 'a', plannedMessages: 2,
+      generate: async () => 'ок', sleep: noSleep, random: () => 0.5,
+      onMessage: async () => { throw new Error('db down'); },
+    });
+    expect(messages).toHaveLength(2);
   });
 
   it('между репликами выдерживается пауза из диапазона, перед первой — нет', async () => {

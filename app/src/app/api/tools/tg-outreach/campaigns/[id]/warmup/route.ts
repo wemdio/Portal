@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { DEFAULT_WARMUP_DAYS } from '@/lib/tgOutreach/warmup/types';
+import { isCulprit } from '@/lib/tgOutreach/warmup/errorAttribution';
 import {
   CONVERSATIONS_FIRST_DAY,
   CONVERSATIONS_PEAK,
@@ -38,22 +39,35 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
       const { data: convs } = await supabase
         .from('tg_outreach_warmup_conversations')
-        .select('account_a_id, account_b_id, day_no, status, messages, error_reason')
+        .select('account_a_id, account_b_id, day_no, status, messages, error_reason, finished_at')
         .eq('run_id', run.id);
 
       const rows = (convs ?? []) as Array<{
         account_a_id: string; account_b_id: string; day_no: number;
         status: string; messages: unknown[] | null; error_reason: string | null;
+        finished_at: string | null;
       }>;
 
+      // Имена нужны, чтобы отличить виновника сорванной переписки от её
+      // собеседника: сообщение о сбое называет виновника по session_name.
+      const { data: accountRows } = await supabase
+        .from('tg_outreach_accounts')
+        .select('id, session_name')
+        .eq('campaign_id', id);
+      const nameById = new Map(
+        ((accountRows ?? []) as Array<{ id: string; session_name: string }>)
+          .map((a) => [a.id, a.session_name] as const),
+      );
+
       const perAccount = new Map<string, {
-        account_id: string; done: number; failed: number; planned: number;
-        done_today: number; planned_today: number; last_error: string | null;
+        account_id: string; done: number; failed: number; failed_own: number; planned: number;
+        done_today: number; planned_today: number;
+        last_error: string | null; last_error_at: string | null;
       }>();
       const bump = (accountId: string, row: typeof rows[number]) => {
         const slot = perAccount.get(accountId) ?? {
-          account_id: accountId, done: 0, failed: 0, planned: 0,
-          done_today: 0, planned_today: 0, last_error: null,
+          account_id: accountId, done: 0, failed: 0, failed_own: 0, planned: 0,
+          done_today: 0, planned_today: 0, last_error: null, last_error_at: null,
         };
         slot.planned++;
         if (row.day_no === run.current_day) slot.planned_today++;
@@ -62,7 +76,13 @@ export async function GET(req: NextRequest, ctx: Ctx) {
           if (row.day_no === run.current_day) slot.done_today++;
         } else if (row.status === 'failed') {
           slot.failed++;
-          if (row.error_reason) slot.last_error = row.error_reason;
+          // Причину показываем только виновнику. failed считаем обоим: переписка
+          // действительно не состоялась у пары, и это честная статистика дня.
+          if (row.error_reason && isCulprit(row.error_reason, nameById.get(accountId))) {
+            slot.failed_own++;
+            slot.last_error = row.error_reason;
+            slot.last_error_at = row.finished_at;
+          }
         }
         perAccount.set(accountId, slot);
       };
