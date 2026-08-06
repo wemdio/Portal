@@ -4,6 +4,7 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { stripTaskHarvest } from '@/lib/hypothesisEngine/projectDetail';
+import { reconcileProjectVerticals } from '@/lib/hypothesisEngine/actualsReconcile';
 import {
   buildEngDashboardEvents,
   deriveEngVerticalStage,
@@ -82,12 +83,19 @@ export async function GET(req: NextRequest) {
 
   const projectIds = projectRows.map((p) => p.id as string);
 
+  // Петля сверки прогноза с реальностью (actualsReconcile): best-effort,
+  // fire-and-forget — дашборд от неё не зависит; свежие цифры подъедут к
+  // следующему поллу (окно свежести 24ч внутри модуля).
+  for (const pid of projectIds) {
+    void reconcileProjectVerticals(supabaseAdmin, pid);
+  }
+
   // Первая волна: всё по project_id (индексы на месте — см. миграции he_*).
   const [verticalsRes, basesRes, activeJobsRes, finishedJobsRes, configsRes, runsRes] =
     await Promise.all([
       supabaseAdmin
         .from('he_verticals')
-        .select('id, project_id, name, created_at')
+        .select('id, project_id, name, created_at, potential_pct, actual_reply_pct, actual_sent, actual_measured_at')
         .in('project_id', projectIds),
       supabaseAdmin
         .from('he_bases')
@@ -230,6 +238,16 @@ export async function GET(req: NextRequest) {
               campaign_name: derived.launch.campaign_name,
             }
           : null,
+        // Прогноз vs факт (петля actualsReconcile, 24ч свежесть).
+        forecast: typeof v.potential_pct === 'number' ? { pct: v.potential_pct } : null,
+        actual:
+          typeof v.actual_reply_pct === 'number'
+            ? {
+                reply_pct: v.actual_reply_pct,
+                sent: num(v.actual_sent),
+                measured_at: str(v.actual_measured_at),
+              }
+            : null,
       };
     });
 

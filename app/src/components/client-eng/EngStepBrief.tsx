@@ -51,6 +51,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
   const [offer, setOffer] = useState('');
   const [style, setStyle] = useState('');
   const [signature, setSignature] = useState('');
+  const [business, setBusiness] = useState('');
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(0);
   const [researchBusy, setResearchBusy] = useState(false);
@@ -65,6 +66,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
     setOffer(typeof brief.offer_override === 'string' ? brief.offer_override : '');
     setStyle(typeof brief.style_override === 'string' ? brief.style_override : '');
     setSignature(typeof brief.signature_override === 'string' ? brief.signature_override : '');
+    setBusiness(typeof brief.business_override === 'string' ? brief.business_override : '');
   }
 
   const researchActive = useMemo(() => isResearchActive(jobs), [jobs]);
@@ -78,6 +80,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
         offer_override: offer,
         style_override: style,
         signature_override: signature,
+        business_override: business,
       });
       setSavedAt(Date.now());
       onChanged();
@@ -164,6 +167,21 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
           These notes steer letter generation. Leave empty to use what the research inferred.
         </p>
         <div className="flex flex-col gap-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] font-semibold" style={{ color: brief.site_thin === true ? 'var(--cp-amber)' : 'var(--cp-text-m)' }}>
+              Business description (manual, max 3000 chars)
+              {brief.site_thin === true ? ' — recommended: your site gave us very little to read' : ''}
+            </span>
+            <textarea
+              value={business}
+              onChange={(e) => setBusiness(e.target.value)}
+              rows={4}
+              maxLength={3000}
+              placeholder="What you sell, to whom, and why clients pick you. Used above the site profile when the site is thin or JS-heavy."
+              className="neu-pill w-full px-3 py-2 text-sm bg-transparent outline-none resize-y"
+              style={{ color: 'var(--cp-paper)' }}
+            />
+          </label>
           <label className="flex flex-col gap-1">
             <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
               Offer override

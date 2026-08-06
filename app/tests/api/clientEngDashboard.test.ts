@@ -75,6 +75,8 @@ interface DashVertical {
     leads_launched: number;
   };
   launch: { campaign_url: string; campaign_name: string } | null;
+  forecast: { pct: number } | null;
+  actual: { reply_pct: number; sent: number; measured_at: string } | null;
 }
 
 interface DashBody {
@@ -397,6 +399,34 @@ describe('GET /api/client/eng/dashboard — stage derivation', () => {
     const body = (await res.json()) as DashBody;
     expect(body.verticals[0].stage).toBe('research');
     expect(body.verticals[0].dots).toEqual([false, false, false, false, false]);
+  });
+
+  it('passes forecast (potential_pct) and actual (reply_pct/sent) through, null when unset', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_projects: [{ id: 'p1', created_by: USER_ID, name: 'Mine', status: 'researched', created_at: `${YESTERDAY}T09:00:00.000Z` }],
+        he_verticals: [
+          {
+            id: 'v1', project_id: 'p1', name: 'Measured', created_at: `${YESTERDAY}T10:00:00.000Z`,
+            potential_pct: 42, actual_reply_pct: 3.1, actual_sent: 1200, actual_measured_at: `${TODAY}T01:00:00.000Z`,
+          },
+          { id: 'v2', project_id: 'p1', name: 'Unmeasured', created_at: `${YESTERDAY}T10:01:00.000Z` },
+        ],
+        he_chains: [],
+        he_bases: [],
+        he_templates: [],
+        he_jobs: [],
+        he_auto_pipeline_configs: [],
+        he_auto_pipeline_runs: [],
+      },
+    });
+    const res = await GET(makeReq());
+    const body = (await res.json()) as DashBody;
+    const byId = Object.fromEntries(body.verticals.map((v) => [v.name, v]));
+    expect(byId['Measured'].forecast).toEqual({ pct: 42 });
+    expect(byId['Measured'].actual).toEqual({ reply_pct: 3.1, sent: 1200, measured_at: `${TODAY}T01:00:00.000Z` });
+    expect(byId['Unmeasured'].forecast).toBeNull();
+    expect(byId['Unmeasured'].actual).toBeNull();
   });
 });
 
