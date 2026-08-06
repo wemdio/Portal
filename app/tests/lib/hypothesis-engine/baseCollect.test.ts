@@ -972,33 +972,29 @@ describe('harvest', () => {
     });
 
     const res = await runBaseCollectStage(makeJob(), ctx());
-    expect((res.result as { rows: number }).rows).toBe(1);
+    // Строка богата email'ом, но конструктор всё равно идёт: валидация
+    // обязательна (без find_emails). Финала пока нет — ждём BC-джобу.
+    expect((res.result as { waiting: boolean }).waiting).toBe(true);
 
     expect(searchRowsMock).toHaveBeenCalledWith(
       { okvedCodes: ['62'], hasEmail: true, includeIp: false },
       1000,
       0,
     );
-    // Без дочерних джоб парсеров.
-    expect(mockDb.inserts.filter((i) => i.table !== 'he_jobs')).toHaveLength(0);
+    // Без дочерних джоб парсеров — только джоба конструктора.
+    const bcInsert = mockDb.inserts.find((i) => i.table === 'base_constructor_jobs');
+    expect(bcInsert?.rows[0].selected_steps).toEqual([
+      'dedup_email',
+      'validate_emails',
+      'cap_emails_per_company',
+      'enrich_descriptions',
+    ]);
+    expect(mockDb.inserts.filter((i) => i.table !== 'he_jobs' && i.table !== 'base_constructor_jobs')).toHaveLength(0);
 
-    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
-    expect(harvest?.status).toBe('analyzing');
-    const data = harvest?.data as HeUnifiedRow[];
-    expect(data[0]).toEqual(
-      row({
-        company: 'ООО Код',
-        website: 'code.ru',
-        email: 'hi@code.ru',
-        phone: '+7999',
-        address: 'Мск',
-        category: '62.01',
-        employees: '50',
-        revenue: '10000000',
-        inn: '7700000001',
-        source_detail: 'реестр',
-      }),
-    );
+    // Финального analyzing-апдейта ещё нет — только персист collect_info с конструктором.
+    const lastPatch = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(lastPatch?.status).not.toBe('analyzing');
+    expect((lastPatch?.collect_info as { construct?: { status?: string } })?.construct?.status).toBe('dispatched');
   });
 
   it('paginates the directory in 1000-row pages until a short page', async () => {
@@ -1553,8 +1549,9 @@ describe('plan phase', () => {
     expect((res.result as { rows: number }).rows).toBe(1);
     expect(res.tokensUsed).toBe(100);
 
-    // Один LLM-вызов, в контексте — вертикаль и ТОЛЬКО неотклонённые гипотезы.
-    expect(callLLMMock).toHaveBeenCalledTimes(1);
+    // Первый LLM-вызов — план источников, в контексте вертикаль и ТОЛЬКО
+    // неотклонённые гипотезы (второй вызов — релевант-гейт на финале).
+    expect(callLLMMock).toHaveBeenCalledTimes(2);
     const [messages, , llmOpts] = callLLMMock.mock.calls[0] as [
       Array<{ role: string; content: string }>,
       unknown,
@@ -1613,7 +1610,8 @@ describe('plan phase', () => {
 
     // В промпт попала ТОЛЬКО выбранная неотклонённая гипотеза: ни невыбранной,
     // ни отклонённой — даже отмеченной (пересечение с неотклонёнными).
-    expect(callLLMMock).toHaveBeenCalledTimes(1);
+    // Второй вызов — релевант-гейт на финале (план уже отдан первым).
+    expect(callLLMMock).toHaveBeenCalledTimes(2);
     const [messages] = callLLMMock.mock.calls[0] as [Array<{ role: string; content: string }>];
     const user = messages.find((m) => m.role === 'user')!.content;
     expect(user).toContain('Выбранная гипотеза');
