@@ -25,6 +25,7 @@ import {
   recordAccountSuccess,
   recordProxySuccess,
 } from './proxyHealth';
+import { sendFirstTouchBatch } from './firstTouch/send';
 import { truncateMessage } from '@/lib/logger';
 import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
 
@@ -1693,6 +1694,36 @@ export async function runCampaignLoop(
             log('error', `Аккаунт ${account.session_name}: непредвиденная ошибка — ${errMsg}`);
           }
         }
+
+        // Первое касание — после разбора входящих и только этим же аккаунтом:
+        // отвечать на ответ обязан тот, кто написал первым.
+        try {
+          const ft = await sendFirstTouchBatch({
+            db,
+            client,
+            campaignId,
+            account,
+            perDay: tg.first_touch_per_account_per_day,
+            log,
+            shouldStop,
+            onProgress: tick,
+            gapMs: randomRange(tg.read_reply_delay_range) * 1000,
+          });
+          if (ft.sent || ft.skipped || ft.postponed) {
+            log(
+              'info',
+              `Аккаунт ${account.session_name}: первое касание — отправлено ${ft.sent}, пропущено ${ft.skipped}, отложено ${ft.postponed}`,
+            );
+          }
+        } catch (err) {
+          // Первое касание не должно ронять круг: аутрич по существующим
+          // диалогам важнее и уже отработал выше.
+          log(
+            'warning',
+            `Аккаунт ${account.session_name}: первое касание не отработало — ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        tick();
 
         const accountDelay = randomRange(tg.account_loop_delay_range) * 1000;
         log('info', `Пауза ${Math.round(accountDelay / 1000)} секунд перед переходом к следующему аккаунту (анти-флуд)`);

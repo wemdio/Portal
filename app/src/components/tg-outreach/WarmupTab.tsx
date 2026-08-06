@@ -33,10 +33,13 @@ interface PerAccountStat {
   account_id: string;
   done: number;
   failed: number;
+  /** Сорвавшиеся переписки, где виноват именно этот аккаунт (а не собеседник). */
+  failed_own?: number;
   planned: number;
   done_today: number;
   planned_today: number;
   last_error: string | null;
+  last_error_at?: string | null;
 }
 
 interface WarmupStatus {
@@ -50,6 +53,21 @@ interface WarmupStatus {
 
 function timeOf(iso: string) {
   return new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+}
+
+/** «6 августа», «5 августа» — заголовок группы записей журнала. */
+function dayKey(iso: string) {
+  return new Date(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+}
+
+/** «вчера 21:53» — когда именно у аккаунта был последний сбой. */
+function whenOf(iso: string) {
+  const d = new Date(iso);
+  const today = dayKey(new Date().toISOString());
+  const yesterday = dayKey(new Date(Date.now() - 86_400_000).toISOString());
+  const key = dayKey(iso);
+  const prefix = key === today ? '' : key === yesterday ? 'вчера ' : `${key} `;
+  return `${prefix}${timeOf(d.toISOString())}`;
 }
 
 const RUN_LABEL: Record<string, string> = {
@@ -73,6 +91,8 @@ export default function WarmupTab({
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   const [conversations, setConversations] = useState<WarmupConversation[]>([]);
   const [logs, setLogs] = useState<WarmupLog[]>([]);
+  const [logsHasMore, setLogsHasMore] = useState(false);
+  const [logsLoadingMore, setLogsLoadingMore] = useState(false);
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [expandedConvId, setExpandedConvId] = useState<number | null>(null);
   const [days, setDays] = useState(4);
@@ -106,15 +126,62 @@ export default function WarmupTab({
     setConversations((data.items ?? []) as WarmupConversation[]);
   }, [campaignId, selectedAccountId]);
 
+  const LOGS_PAGE = 300;
+
   const loadLogs = useCallback(async () => {
-    const params = new URLSearchParams({ limit: '300' });
+    const params = new URLSearchParams({ limit: String(LOGS_PAGE) });
     if (selectedAccountId && !allAccountsLogs) params.set('account_id', selectedAccountId);
     if (errorsOnly) params.set('errors_only', '1');
     const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup/logs?${params}`);
     if (!res.ok) return;
     const data = await res.json();
     setLogs((data.items ?? []) as WarmupLog[]);
+    setLogsHasMore(Boolean(data.has_more));
   }, [campaignId, selectedAccountId, allAccountsLogs, errorsOnly]);
+
+  /**
+   * Автообновление журнала: доливаем только новые записи сверху, не сбрасывая
+   * уже подгруженную историю — иначе каждые 10 секунд «Показать ещё» откатывался
+   * бы к первой странице прямо под руками у оператора.
+   */
+  const refreshLogs = useCallback(async () => {
+    const params = new URLSearchParams({ limit: String(LOGS_PAGE) });
+    if (selectedAccountId && !allAccountsLogs) params.set('account_id', selectedAccountId);
+    if (errorsOnly) params.set('errors_only', '1');
+    const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup/logs?${params}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const fresh = (data.items ?? []) as WarmupLog[];
+    setLogs((prev) => {
+      if (!prev.length) return fresh;
+      const seen = new Set(prev.map((l) => l.id));
+      const added = fresh.filter((l) => !seen.has(l.id));
+      return added.length ? [...added, ...prev] : prev;
+    });
+  }, [campaignId, selectedAccountId, allAccountsLogs, errorsOnly]);
+
+  /**
+   * Подгрузить страницу постарше. Прогрев идёт несколько суток, а с записью
+   * каждой отправки одна страница не покрывает даже вчерашний день — «что было
+   * в первый день» иначе не посмотреть.
+   */
+  const loadOlderLogs = useCallback(async () => {
+    const oldest = logs[logs.length - 1];
+    if (!oldest) return;
+    setLogsLoadingMore(true);
+    try {
+      const params = new URLSearchParams({ limit: String(LOGS_PAGE), before_id: String(oldest.id) });
+      if (selectedAccountId && !allAccountsLogs) params.set('account_id', selectedAccountId);
+      if (errorsOnly) params.set('errors_only', '1');
+      const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup/logs?${params}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setLogs((prev) => [...prev, ...((data.items ?? []) as WarmupLog[])]);
+      setLogsHasMore(Boolean(data.has_more));
+    } finally {
+      setLogsLoadingMore(false);
+    }
+  }, [campaignId, logs, selectedAccountId, allAccountsLogs, errorsOnly]);
 
   useEffect(() => {
     void (async () => {
@@ -139,10 +206,10 @@ export default function WarmupTab({
     const t = setInterval(() => {
       void loadStatus();
       void loadConversations();
-      void loadLogs();
+      void refreshLogs();
     }, 10_000);
     return () => clearInterval(t);
-  }, [status?.run?.status, loadStatus, loadConversations, loadLogs]);
+  }, [status?.run?.status, loadStatus, loadConversations, refreshLogs]);
 
   const act = async (method: 'POST' | 'DELETE') => {
     setBusy(true);
@@ -178,7 +245,7 @@ export default function WarmupTab({
   const statByAccount = new Map((status?.per_account ?? []).map((s) => [s.account_id, s]));
   const accountName = (id: string) =>
     accounts.find((a) => a.id === id)?.session_name ?? id.slice(0, 8);
-  const problemAccounts = (status?.per_account ?? []).filter((s) => s.failed > 0).length;
+  const problemAccounts = (status?.per_account ?? []).filter((s) => (s.failed_own ?? 0) > 0).length;
   // Прогрев и боевой аутрич взаимоисключающие — на запущенной кампании кнопка
   // всё равно получит отказ от сервера, поэтому предупреждаем заранее.
   const blockedByCampaign = campaignStatus === 'running' || campaignStatus === 'paused';
@@ -313,7 +380,9 @@ export default function WarmupTab({
           <div className="max-h-[420px] overflow-y-auto">
             {accounts.map((a) => {
               const s = statByAccount.get(a.id);
-              const failed = (s?.failed ?? 0) > 0;
+              // Жёлтым помечаем только виновника сбоя. Собеседник по сорванной
+              // переписке ни при чём: раньше 2 сбоя окрашивали 4 аккаунта.
+              const failed = (s?.failed_own ?? 0) > 0;
               const dot = failed ? 'bg-amber-500' : (s?.done ?? 0) > 0 ? 'bg-emerald-500' : 'bg-gray-300';
               return (
                 <button
@@ -334,7 +403,11 @@ export default function WarmupTab({
                     {s
                       ? `${s.done_today} из ${s.planned_today} сегодня · ${s.done} всего`
                       : 'ещё не участвовал'}
-                    {s?.last_error ? ` · ${s.last_error.slice(0, 40)}` : ''}
+                    {/* Со временем сбоя: без него вчерашняя ошибка читается как
+                        «аккаунт сломан прямо сейчас». */}
+                    {failed && s?.last_error
+                      ? ` · ${s.last_error_at ? `${whenOf(s.last_error_at)} ` : ''}${s.last_error.slice(0, 60)}`
+                      : ''}
                   </div>
                 </button>
               );
@@ -445,14 +518,41 @@ export default function WarmupTab({
           {logs.length === 0 ? (
             <div className="py-4 text-center text-gray-400">Событий нет</div>
           ) : (
-            logs.map((l) => (
-              <div key={l.id} className="flex gap-2">
-                <span className="shrink-0 text-gray-400">{timeOf(l.created_at)}</span>
-                <span className={l.level === 'error' ? 'text-rose-600' : l.level === 'warning' ? 'text-amber-600' : 'text-gray-600'}>
-                  {l.message}
-                </span>
-              </div>
-            ))
+            <>
+              {logs.map((l, i) => {
+                // Записи идут от новых к старым, поэтому заголовок даты рисуем
+                // там, где день сменился относительно предыдущей строки.
+                const showDay = i === 0 || dayKey(l.created_at) !== dayKey(logs[i - 1].created_at);
+                return (
+                  <React.Fragment key={l.id}>
+                    {showDay && (
+                      <div className="mt-2 mb-1 flex items-center gap-2 first:mt-0">
+                        <span className="text-[10px] font-medium uppercase tracking-wide text-gray-400">
+                          {dayKey(l.created_at)}
+                        </span>
+                        <span className="h-px flex-1 bg-gray-100" />
+                      </div>
+                    )}
+                    <div className="flex gap-2">
+                      <span className="shrink-0 text-gray-400">{timeOf(l.created_at)}</span>
+                      <span className={l.level === 'error' ? 'text-rose-600' : l.level === 'warning' ? 'text-amber-600' : 'text-gray-600'}>
+                        {l.message}
+                      </span>
+                    </div>
+                  </React.Fragment>
+                );
+              })}
+              {logsHasMore && (
+                <button
+                  type="button"
+                  disabled={logsLoadingMore}
+                  onClick={() => void loadOlderLogs()}
+                  className="mt-2 w-full rounded-lg border border-gray-200 py-1.5 text-[11px] text-gray-600 transition hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {logsLoadingMore ? 'Загружаю…' : 'Показать более ранние'}
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>

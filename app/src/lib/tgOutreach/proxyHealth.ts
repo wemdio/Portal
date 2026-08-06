@@ -325,17 +325,24 @@ export async function swapAccountProxy(
  * здесь pre-check, чтобы не делать лишний поиск свободного прокси и не
  * писать INFO-лог про bестолковый «попытка свапа».
  */
-export function canAutoSwap(account: {
-  created_at: string;
-  degraded: boolean;
-  last_proxy_swap_at: string | null;
-  proxy_swaps_today: number;
-}): { ok: true } | { ok: false; reason: string } {
+export function canAutoSwap(
+  account: {
+    created_at: string;
+    degraded: boolean;
+    last_proxy_swap_at: string | null;
+    proxy_swaps_today: number;
+  },
+  opts?: { fullOutage?: boolean },
+): { ok: true } | { ok: false; reason: string } {
   if (account.degraded) return { ok: false, reason: 'account_degraded' };
 
+  // Правило «свежим не меняем IP» защищает от лишнего повода для антифрода, но
+  // при полном отвале подключения защищать уже нечего: аккаунт вообще не в
+  // Telegram и не греется. Инцидент 05.08.2026 — вся партия, залитая накануне,
+  // просидела сутки на мёртвых портах пула при 24 свободных живых.
   const createdMs = new Date(account.created_at).getTime();
   const ageDays = (Date.now() - createdMs) / (24 * 3600 * 1000);
-  if (ageDays < ACCOUNT_FRESH_DAYS) {
+  if (ageDays < ACCOUNT_FRESH_DAYS && !opts?.fullOutage) {
     return { ok: false, reason: `account_too_fresh_${ageDays.toFixed(1)}d` };
   }
 
@@ -522,12 +529,19 @@ export async function handleProxyError(args: {
   //    (а не разовый flake) и аккаунт прошёл guard'ы
   if (!cooldownSet || degradedMarked) return { swappedTo: null };
 
-  const swapGate = canAutoSwap({
-    created_at: account.created_at,
-    degraded: degradedMarked,
-    last_proxy_swap_at: (account as { last_proxy_swap_at?: string | null }).last_proxy_swap_at ?? null,
-    proxy_swaps_today: (account as { proxy_swaps_today?: number }).proxy_swaps_today ?? 0,
-  });
+  // Полный отвал: аккаунт вообще не смог войти в Telegram (эти reason приходят
+  // только из buildClients). В этом состоянии запрет на свап свежему аккаунту
+  // не защищает его, а держит на мёртвом прокси — см. canAutoSwap.
+  const fullOutage = reason === 'connect_timeout' || reason === 'tcp_dead';
+  const swapGate = canAutoSwap(
+    {
+      created_at: account.created_at,
+      degraded: degradedMarked,
+      last_proxy_swap_at: (account as { last_proxy_swap_at?: string | null }).last_proxy_swap_at ?? null,
+      proxy_swaps_today: (account as { proxy_swaps_today?: number }).proxy_swaps_today ?? 0,
+    },
+    { fullOutage },
+  );
   if (!swapGate.ok) {
     log('info', `Автосвап прокси для аккаунта ${account.session_name} пропущен: ${swapGate.reason}.`);
     return { swappedTo: null };
@@ -562,7 +576,7 @@ export async function handleProxyError(args: {
       await setAccountAfterSwapCooldown(db, account.id);
       log(
         'warning',
-        `Автосвап прокси: аккаунт ${account.session_name} переведён на ${free.url} (${res.swapsToday}-й свап сегодня). Аккаунт на 30-мин паузе, чтобы Telegram стабилизировался на новом IP.`,
+        `Автосвап прокси: аккаунт ${account.session_name} переведён на ${free.url} (${res.swapsToday}-й свап сегодня, причина ${reason}${fullOutage ? ', полный отвал подключения' : ''}). Аккаунт на 30-мин паузе, чтобы Telegram стабилизировался на новом IP.`,
       );
       // Обновляем in-memory state, чтобы следующие итерации видели новый proxy_id
       // и не повторили цикл «свап → ещё ошибка → ещё свап».
