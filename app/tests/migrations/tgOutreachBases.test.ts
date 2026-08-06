@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const SQL = fs.readFileSync(
-  path.resolve(process.cwd(), '../supabase/migrations/20260806_0002_tg_outreach_bases.sql'),
+  path.resolve(process.cwd(), '../supabase/migrations/20260806_0003_tg_outreach_bases.sql'),
   'utf8',
 );
 
