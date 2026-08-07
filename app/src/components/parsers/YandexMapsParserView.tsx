@@ -138,19 +138,12 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     }
   }, [activeJob, activeJobId, refreshJobs, refreshQueueStatus, loadLinks, loadResults]);
 
+  // Запуск — это поиск по нашему каталогу. Живой парсинг с прокси и ручными
+  // ссылками из формы убран: URL по-прежнему умеет обрабатывать воркер, но
+  // приходят они не отсюда (reputation-finder, гипотезы).
   const handleCreate = useCallback(async (payload: {
-    search_urls: string[];
-    catalog_filters?: { cities?: string[]; categories?: string[]; countries?: string[] };
-    max_results: number;
-    headless: boolean;
-    proxy: {
-      enabled: boolean;
-      protocol: 'http' | 'https' | 'socks5';
-      host: string;
-      port: string;
-      username: string;
-      password: string;
-    };
+    catalog_filters: { cities?: string[]; categories?: string[]; countries?: string[] };
+    max_results?: number;
   }) => {
     setBusy(true);
     setError(null);

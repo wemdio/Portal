@@ -55,19 +55,18 @@ describe('YandexMapsParserForm', () => {
 
     CITIES.forEach((city) => clickInPicker('city-picker', city));
     clickInPicker('rubric-picker', 'Доставка еды');
-    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '5000' } });
     fireEvent.click(screen.getByRole('button', { name: 'Запустить парсинг' }));
 
     expect(onCreate).toHaveBeenCalledTimes(1);
     const payload = onCreate.mock.calls[0][0];
-    expect(payload.max_results).toBe(5000);
-    // Главное: прямых обращений к Яндексу нет.
-    expect(payload.search_urls).toEqual([]);
     expect(payload.catalog_filters).toEqual({
       cities: CITIES,
       categories: ['Доставка еды'],
       countries: ['Россия'],
     });
+    // Ни ссылок, ни объёма: запуск идёт в свою базу, потолок ставит сервер.
+    expect(payload.search_urls).toBeUndefined();
+    expect(payload.max_results).toBeUndefined();
   });
 
   it('регион берётся целиком одним значением, а не списком его городов', async () => {
@@ -120,21 +119,6 @@ describe('YandexMapsParserForm', () => {
     await waitFor(() => expect(within(cities).queryByRole('button', { name: 'Убрать Москва' })).toBeNull());
   });
 
-  it('вставленная руками ссылка по-прежнему парсит Яндекс напрямую', async () => {
-    const onCreate = jest.fn();
-    render(<YandexMapsParserForm onCreate={onCreate} />);
-    await within(await screen.findByTestId('rubric-picker')).findByText('Доставка еды');
-
-    const url = 'https://yandex.ru/maps/?text=Москва%20Кафе';
-    fireEvent.change(screen.getByPlaceholderText(/yandex\.ru\/maps/), { target: { value: url } });
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить парсинг' }));
-
-    expect(onCreate).toHaveBeenCalledTimes(1);
-    const payload = onCreate.mock.calls[0][0];
-    expect(payload.search_urls).toEqual([url]);
-    expect(payload.catalog_filters).toBeUndefined();
-  });
-
   it('страны берутся из каталога и переключаются', async () => {
     mockedFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
       if (init?.method === 'POST') return { total: 0, capped: false } as never;
@@ -156,6 +140,32 @@ describe('YandexMapsParserForm', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Казахстан/ }));
     await waitFor(() => expect(within(cities).getAllByText('Алматы').length).toBeGreaterThan(0));
+  });
+
+  it('у оператора нет ни поля ссылок, ни лимита на запрос', async () => {
+    render(<YandexMapsParserForm onCreate={jest.fn()} />);
+    await within(await screen.findByTestId('rubric-picker')).findByText('Доставка еды');
+
+    expect(screen.queryByPlaceholderText(/yandex\.ru\/maps/)).toBeNull();
+    expect(screen.queryByRole('spinbutton')).toBeNull();
+  });
+
+  it('кабинет присылает объём: он списывается с тарифа', async () => {
+    const onCreate = jest.fn();
+    render(<YandexMapsParserForm clientMode onCreate={onCreate} />);
+    await within(await screen.findByTestId('city-picker')).findByText('Москва');
+
+    clickInPicker('city-picker', 'Москва');
+    clickInPicker('rubric-picker', 'Кафе');
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '500' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить поиск' }));
+
+    expect(onCreate.mock.calls[0][0]).toEqual({
+      catalog_filters: { cities: ['Москва'], categories: ['Кафе'], countries: ['Россия'] },
+      max_results: 500,
+    });
+    // Ручных ссылок нет и в кабинете.
+    expect(screen.queryByText(/Вставить ссылки вручную/)).toBeNull();
   });
 
   it('без справочника форма откатывается на прежние списки', async () => {
