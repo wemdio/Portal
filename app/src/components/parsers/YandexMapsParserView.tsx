@@ -158,6 +158,10 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
       setJobs((prev) => [data.job, ...prev.filter((job) => job.id !== jobId)]);
       setActiveJobId(jobId);
 
+      // Поиск по каталогу уже выполнен внутри запроса — будить воркера нечем и
+      // незачем, результаты доступны сразу.
+      if (data.job.status === 'completed' || data.job.status === 'failed') return;
+
       try {
         await authFetchJson(`/api/parsers/yandexmaps/${jobId}/collect-links`, { method: 'POST' });
         await refreshJobs();

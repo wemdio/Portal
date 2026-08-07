@@ -5,7 +5,11 @@ import { blockDemo } from '@/lib/auth/blockDemo';
 import { encryptJsonAes256Gcm } from '@/lib/cryptoGcm';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getClientTariffUsage, isClientToolAccessAllowed, isAwaitingFirstPayment, TOOL_ACCESS_DENIED_MESSAGE, AWAITING_PAYMENT_MESSAGE } from '@/lib/tariffs';
-import { CATALOG_MAX_RESULTS, normalizeYandexMapsCatalogFilters } from '@/lib/parsers/yandexMapsCatalog';
+import {
+  CATALOG_MAX_RESULTS,
+  fillJobFromYandexMapsCatalog,
+  normalizeYandexMapsCatalogFilters,
+} from '@/lib/parsers/yandexMapsCatalog';
 
 export const dynamic = 'force-dynamic';
 
@@ -75,6 +79,54 @@ export async function POST(req: NextRequest) {
             400,
           );
         }
+      }
+    }
+
+    // Поиск по каталогу выполняется прямо здесь: очередь и воркер ему не нужны,
+    // это один запрос к соседней таблице той же базы. Задача заводится сразу
+    // «выполненной» и возвращается с готовыми результатами.
+    if (catalog_filters) {
+      const { data: job, error } = await supabase
+        .from('yandex_maps_jobs')
+        .insert({
+          user_id: user.id,
+          status: 'running',
+          config: { search_urls: [], catalog_filters, max_results, headless },
+          progress_stage: 'catalog_search',
+          started_at: new Date().toISOString(),
+        })
+        .select()
+        .single();
+      if (error || !job) throw new Error(error?.message || 'Failed to create job');
+
+      try {
+        const filled = await fillJobFromYandexMapsCatalog(job.id, catalog_filters, max_results);
+        const { data: completed } = await supabase
+          .from('yandex_maps_jobs')
+          .update({
+            status: 'completed',
+            progress_stage: filled.organizations ? 'catalog_completed' : 'catalog_empty',
+            completed_at: new Date().toISOString(),
+            total_links: filled.links,
+            processed_links: filled.links,
+            total_organizations: filled.organizations,
+            processed_organizations: filled.organizations,
+            error_message: null,
+          })
+          .eq('id', job.id)
+          .select()
+          .single();
+        return NextResponse.json({ job: completed ?? job, tariff_usage: tariffUsage });
+      } catch (e) {
+        // Задача остаётся в истории с причиной: молча удалять её хуже — человек
+        // не поймёт, почему запуск исчез.
+        const message = e instanceof Error ? e.message : 'Поиск по каталогу не удался';
+        await supabase
+          .from('yandex_maps_jobs')
+          .update({ status: 'failed', error_message: message, completed_at: new Date().toISOString() })
+          .eq('id', job.id);
+        console.error('Yandex maps catalog search error:', e);
+        return jsonError(message, 500);
       }
     }
 

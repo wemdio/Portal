@@ -55,7 +55,7 @@ describe('YandexMapsParserForm', () => {
 
     CITIES.forEach((city) => clickInPicker('city-picker', city));
     clickInPicker('rubric-picker', 'Доставка еды');
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить парсинг' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Собрать базу' }));
 
     expect(onCreate).toHaveBeenCalledTimes(1);
     const payload = onCreate.mock.calls[0][0];
@@ -76,7 +76,7 @@ describe('YandexMapsParserForm', () => {
 
     fireEvent.click(within(screen.getByTestId('city-picker')).getByRole('button', { name: 'весь регион' }));
     clickInPicker('rubric-picker', 'Кафе');
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить парсинг' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Собрать базу' }));
 
     const payload = onCreate.mock.calls[0][0];
     // Регион, а не восемь городов: поиск сверяет выбранное и с city, и с region,
@@ -91,7 +91,7 @@ describe('YandexMapsParserForm', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Выбрать все' }));
     clickInPicker('rubric-picker', 'Кафе');
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить парсинг' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Собрать базу' }));
 
     expect(onCreate.mock.calls[0][0].catalog_filters.cities).toEqual([REGION]);
   });

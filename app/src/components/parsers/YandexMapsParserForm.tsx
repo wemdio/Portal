@@ -937,7 +937,7 @@ export function YandexMapsParserForm(props: {
                 </h3>
               </div>
               <div className="px-6 py-4 space-y-3 text-xs leading-relaxed" style={{ color: 'var(--cp-paper-mute)' }}>
-                <p>Вы выбираете города и категорию бизнеса — мы ищем организации в своей базе Яндекс.Карт, поэтому выдача готова за секунды.</p>
+                <p>Вы выбираете города и категорию бизнеса — мы ищем организации в своей базе Яндекс.Карт: результат готов через пару секунд, ждать очереди не нужно.</p>
                 <p>Регион можно взять целиком — кнопкой в заголовке группы: так в выборку попадут и организации, привязанные к региону без города.</p>
                 <p>Для каждой организации собираем карточку: название, адрес, сайт, контакты. Дубли по одному домену объединяем.</p>
                 <p>Поиск идёт по нашей базе, а не по сайту Яндекса: результат готов сразу и не зависит от того, сколько городов выбрано.</p>
@@ -1094,7 +1094,7 @@ export function YandexMapsParserForm(props: {
           disabled={props.busy || !canSubmit}
           className="inline-flex items-center justify-center rounded-lg bg-emerald-600 px-6 py-3 text-base font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all transform active:scale-95"
         >
-          {props.busy ? 'Запуск...' : clientMode ? 'Запустить поиск' : 'Запустить парсинг'}
+          {props.busy ? 'Собираем…' : 'Собрать базу'}
         </button>
       </div>
 
@@ -1107,7 +1107,8 @@ export function YandexMapsParserForm(props: {
             <div className="px-6 py-4 space-y-3 text-sm text-gray-700">
               <p>
                 Выбор <span className="font-semibold">страны, города и рубрики</span> ищет по нашей внутренней базе
-                организаций Яндекс.Карт. Это выдача за секунды, без обращений к Яндексу и без прокси.
+                организаций Яндекс.Карт. Отбор идёт прямо в запросе — без очереди и воркеров: нажали «Собрать базу» и
+                через пару секунд смотрите результаты.
               </p>
               <p>
                 Списки городов и рубрик <span className="font-semibold">построены из самой базы</span>, а цифра рядом с
