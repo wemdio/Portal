@@ -160,6 +160,25 @@ function TemplateLaunchPanel({
             Open the campaign <ExternalLink className="h-3 w-3" />
           </a>
         )}
+        {Array.isArray(launch.campaigns) && launch.campaigns.length > 1 ? (
+          <div className="flex flex-col gap-1 mt-1">
+            <span className="text-[10px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
+              Segment campaigns ({launch.campaigns.length})
+            </span>
+            {launch.campaigns.map((c) => (
+              <a
+                key={`${c.campaign_url}-${c.segment ?? 'main'}`}
+                href={c.campaign_url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 hover:underline"
+                style={{ color: 'var(--cp-paper)' }}
+              >
+                {c.segment ?? 'Default texts'} <ExternalLink className="h-3 w-3" />
+              </a>
+            ))}
+          </div>
+        ) : null}
         <span className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
           The campaign stays paused — the team reviews and starts it manually.
         </span>
