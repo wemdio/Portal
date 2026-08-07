@@ -2,10 +2,8 @@
 Changelog-bot: ежедневный дайджест обновлений портала в Telegram.
 
 Расписание:
-  - Будни (Пн–Пт) в 8:30 МСК (05:30 UTC).
-  - Понедельник → окно с Пт 8:30 МСК до Пн 8:30 МСК.
-  - Вт–Пт → окно за последние 24 ч (со вчера 8:30 до сегодня 8:30 МСК).
-  - Выходные — бот молчит.
+  - Каждый день в 9:00 МСК (06:00 UTC), включая выходные.
+  - Окно всегда за последние 24 ч (со вчера 9:00 до сегодня 9:00 МСК).
   - Если коммитов за период не было — бот ничего не пишет.
 
 Переменные окружения:
@@ -125,15 +123,13 @@ async def save_digest(since: datetime, until: datetime, summary: str) -> None:
 # ── Time window helpers ───────────────────────────────────────────────────────
 
 def _compute_window(now_msk: datetime) -> tuple[datetime, datetime]:
-    """Return (since, until) in UTC for the reporting window."""
+    """Return (since, until) in UTC for the reporting window.
+
+    Бот ходит каждый день, поэтому окно всегда ровно сутки: со вчерашних
+    9:00 МСК до сегодняшних. Раньше понедельник забирал Пт+Сб+Вс одним куском —
+    это давало дайджест на пару тысяч коммитов, который нечитаем."""
     boundary = now_msk.replace(hour=9, minute=0, second=0, microsecond=0)
-    weekday = now_msk.weekday()  # 0=Mon … 6=Sun
-
-    if weekday == 0:  # Monday → since Friday 08:30 MSK
-        since_msk = boundary - timedelta(days=3)
-    else:
-        since_msk = boundary - timedelta(days=1)
-
+    since_msk = boundary - timedelta(days=1)
     return since_msk.astimezone(timezone.utc), boundary.astimezone(timezone.utc)
 
 
@@ -305,10 +301,12 @@ SYSTEM_PROMPT = """\
 
 - Пиши на русском языке.
 - Каждый пункт начинается с «- » (тире и пробел). Без эмодзи.
+- Максимум два уровня вложенности: пункт и подпункт с отступом в 2 пробела. Третий уровень запрещён — если материала много, сворачивай его в перечисление внутри подпункта через точку с запятой.
 - Используй глагол действия: «добавлен», «обновлён», «исправлен», «улучшен».
 - Между блоками — одна пустая строка.
 - Название инструмента в начале пункта оборачивай в двойные звёздочки для жирного шрифта: `- **Парсер 2ГИС:** описание изменений.`. Это единственный разрешённый markdown.
 - Другой markdown НЕ используй: никаких бэктиков (`), одиночных звёздочек (*курсив*), подчёркиваний (_), решёток (#).
+- НЕ ставь горизонтальных разделителей между блоками (--- или *** или ___). Блоки разделяются только пустой строкой.
 - Пиши простым языком без технических терминов («идемпотентность», «upsert», «миграция», «рефакторинг» и т.п.).
 - Не включай: SHA, имена файлов, названия веток, номера PR.
 - Игнорируй коммиты: Merge branch, Merge pull request, а также любые упоминания об удалении файлов, скриптов, секретов, ключей.
@@ -319,6 +317,10 @@ SYSTEM_PROMPT = """\
 
 MAX_MESSAGES = 2000
 MAX_USER_CONTENT_CHARS = 400_000
+
+# Markdown-разделитель («---», «***», «___», в т.ч. с пробелами между знаками).
+# Отдельно от списка: пункт «- текст» под это не подпадает, там после знака идёт текст.
+_HR_RE = re.compile(r"^(?:[-*_]\s*){3,}$")
 
 
 async def summarize_with_ai(
@@ -392,6 +394,84 @@ async def summarize_with_ai(
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 
+# Пункт списка: отступ + маркер + текст. Маркером модель пишет дефис,
+# но иногда проскакивает звёздочка или уже готовая «•».
+_BULLET_RE = re.compile(r"^(\s*)[-*•]\s+(.*)$")
+
+# Уровня ровно два. Первый — нумерованный (1. 2. 3.), второй — дефис с
+# отступом. Один и тот же дефис на всех уровнях сливался в сплошную стену:
+# глубину не видно, читать тяжело. Номера дают верхнему уровню опору для глаза.
+# Всё, что модель вложит глубже второго уровня, прижимается ко второму —
+# третий уровень в мессенджере нечитаем при любых маркерах.
+_SUB_BULLET = "   - "
+
+
+def _render_telegram(summary: str) -> str:
+    """Превратить markdown-ответ модели в текст для Telegram (parse_mode=HTML)."""
+    escaped = summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Модель по-прежнему любит писать markdown-жирный **Название**; Telegram с
+    # parse_mode=HTML показывает звёздочки как есть. Конвертируем после escape,
+    # чтобы <b>…</b> не попали под замену & < >.
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+    raw_lines = escaped.splitlines()
+
+    lines: list[str] = []
+    prev_is_header = False
+    # Глубину считаем стеком отступов, а не делением ширины на 4: модель
+    # отбивает подпункты то двумя пробелами, то четырьмя, и мешает их в одном
+    # ответе. Важна не абсолютная ширина, а «шире/уже предыдущего».
+    indent_stack: list[int] = []
+    # Нумерация верхнего уровня идёт внутри блока и обнуляется на каждом
+    # заголовке — иначе «Прочие технические обновления» продолжали бы счёт
+    # с середины предыдущего блока.
+    top_number = 0
+    for line in raw_lines:
+        stripped = line.strip()
+        is_header = stripped.endswith(":") and not stripped.startswith("-")
+        is_empty = stripped == ""
+
+        # Модель иногда ставит между блоками markdown-разделитель (--- / *** / ___).
+        # Telegram в HTML-режиме рисует его как есть — три голых минуса посреди
+        # дайджеста. Блоки и так разделены пустой строкой, так что просто выкидываем.
+        if _HR_RE.match(stripped):
+            continue
+
+        if is_empty and prev_is_header:
+            prev_is_header = False
+            continue
+
+        # Разделитель мог унести с собой соседнюю пустую строку — не оставляем
+        # двойных пустых строк (и пустой строки в самом начале) на его месте.
+        if is_empty and (not lines or lines[-1].strip() == ""):
+            continue
+
+        if is_header:
+            lines.append(f"<b>{stripped}</b>")
+            prev_is_header = True
+            top_number = 0
+            indent_stack = []
+            continue
+
+        prev_is_header = False
+        bullet = _BULLET_RE.match(line)
+        if bullet:
+            width = len(bullet.group(1).expandtabs(4))
+            while indent_stack and width < indent_stack[-1]:
+                indent_stack.pop()
+            if not indent_stack or width > indent_stack[-1]:
+                indent_stack.append(width)
+            text_part = bullet.group(2).strip()
+            if len(indent_stack) == 1:
+                top_number += 1
+                lines.append(f"{top_number}. {text_part}")
+            else:
+                lines.append(f"{_SUB_BULLET}{text_part}")
+        else:
+            lines.append(line)
+
+    return "\n".join(lines)
+
+
 async def _send_single(text: str) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload: dict[str, Any] = {
@@ -446,18 +526,12 @@ async def send_message(text: str) -> bool:
 
 async def run_digest(
     *,
-    force: bool = False,
     days_override: int | None = None,
     model_override: str | None = None,
     skip_already_sent_check: bool = False,
 ) -> None:
     now_msk = datetime.now(MSK)
-    weekday = now_msk.weekday()
-    print(f"[changelog] run_digest triggered: {now_msk.strftime('%d.%m.%Y %H:%M MSK')} weekday={weekday}", flush=True)
-
-    if weekday >= 5 and not force:
-        print("[changelog] Weekend — skip.", flush=True)
-        return
+    print(f"[changelog] run_digest triggered: {now_msk.strftime('%d.%m.%Y %H:%M MSK')} weekday={now_msk.weekday()}", flush=True)
 
     if days_override is not None:
         until_utc = datetime.now(timezone.utc)
@@ -465,7 +539,7 @@ async def run_digest(
         period_label = f"за последние {days_override} дн."
     else:
         since_utc, until_utc = _compute_window(now_msk)
-        period_label = "за прошедшие выходные и пятницу" if weekday == 0 else "за прошедшие сутки"
+        period_label = "за прошедшие сутки"
 
     print(f"[changelog] Window: {since_utc.strftime('%Y-%m-%dT%H:%M:%SZ')} → {until_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}", flush=True)
 
@@ -495,31 +569,7 @@ async def run_digest(
         print("[changelog] AI returned empty summary — nothing to send.", flush=True)
         return
 
-    escaped = summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    # Модель по-прежнему любит писать markdown-жирный **Название**; Telegram с
-    # parse_mode=HTML показывает звёздочки как есть. Конвертируем после escape,
-    # чтобы <b>…</b> не попали под замену & < >.
-    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
-    raw_lines = escaped.splitlines()
-    lines = []
-    prev_is_header = False
-    for line in raw_lines:
-        stripped = line.strip()
-        is_header = stripped.endswith(":") and not stripped.startswith("-")
-        is_empty = stripped == ""
-
-        if is_empty and prev_is_header:
-            prev_is_header = False
-            continue
-
-        if is_header:
-            lines.append(f"<b>{stripped}</b>")
-            prev_is_header = True
-        else:
-            lines.append(line)
-            prev_is_header = False
-
-    text = "\n".join(lines)
+    text = _render_telegram(summary)
     print(f"[changelog] Sending message ({len(text)} chars)...", flush=True)
     ok = await send_message(text)
     print(f"[changelog] Message sent: {ok}", flush=True)
@@ -536,12 +586,9 @@ async def handle_health(_request: web.Request) -> web.Response:
 # ── Catchup on startup ────────────────────────────────────────────────────────
 
 async def _run_catchup() -> None:
-    """При старте проверяем: если сегодня будний день, уже после 9:00 МСК
-    и саммари за текущее окно ещё не отправлялось — запускаем дайджест."""
+    """При старте проверяем: если уже после 9:00 МСК и саммари за текущее
+    окно ещё не отправлялось — запускаем дайджест."""
     now_msk = datetime.now(MSK)
-    weekday = now_msk.weekday()
-    if weekday >= 5:
-        return
 
     nine_am = now_msk.replace(hour=9, minute=0, second=0, microsecond=0)
     if now_msk < nine_am:
@@ -586,7 +633,6 @@ async def run_once(days: int | None, model: str | None) -> None:
     _require("REQUESTY_CHANGELOG_API_KEY", OPENROUTER_API_KEY)
     await ensure_table()
     await run_digest(
-        force=True,
         days_override=days,
         model_override=model,
         skip_already_sent_check=True,
@@ -617,12 +663,12 @@ async def main() -> None:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         run_digest,
-        CronTrigger(day_of_week="mon-fri", hour=6, minute=0, timezone="UTC"),
+        CronTrigger(hour=6, minute=0, timezone="UTC"),
         id="daily_digest",
         max_instances=1,
     )
     scheduler.start()
-    print(f"[changelog] Scheduled: Mon–Fri at 09:00 MSK (06:00 UTC). Repo: {GITHUB_REPO}, model: {AI_MODEL}", flush=True)
+    print(f"[changelog] Scheduled: daily at 09:00 MSK (06:00 UTC). Repo: {GITHUB_REPO}, model: {AI_MODEL}", flush=True)
 
     while True:
         await asyncio.sleep(3600)

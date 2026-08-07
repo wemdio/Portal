@@ -386,23 +386,18 @@ async function runOneConversation(
   let peerForA: ResolvedPeer | null = null;
   let peerForB: ResolvedPeer | null = null;
   try {
-    peerForA = await withTimeout(
-      resolveWarmupPeer(a.client, {
-        tg_username: b.account.tg_username ?? null,
-        phone: b.account.phone ?? null,
-      }),
-      TELEGRAM_CALL_TIMEOUT_MS,
-      'поиск собеседника',
-    );
+    // Таймауты стоят внутри resolveWarmupPeer — по одному на каждую попытку,
+    // иначе внешний общий таймаут гасит функцию до перехода на запасной путь
+    // через телефон, и переписка падает целиком вместо fallback.
+    peerForA = await resolveWarmupPeer(a.client, {
+      tg_username: b.account.tg_username ?? null,
+      phone: b.account.phone ?? null,
+    });
     onProgress?.();
-    peerForB = await withTimeout(
-      resolveWarmupPeer(b.client, {
-        tg_username: a.account.tg_username ?? null,
-        phone: a.account.phone ?? null,
-      }),
-      TELEGRAM_CALL_TIMEOUT_MS,
-      'поиск собеседника',
-    );
+    peerForB = await resolveWarmupPeer(b.client, {
+      tg_username: a.account.tg_username ?? null,
+      phone: a.account.phone ?? null,
+    });
     onProgress?.();
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);

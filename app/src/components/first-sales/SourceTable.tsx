@@ -146,7 +146,10 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
   return (
     <tr>
       <td colSpan={7} className="bg-zinc-50/60 px-3 py-3">
-        <div className="overflow-x-auto rounded-lg border border-zinc-200 bg-white">
+        {/* Раскрытая строка живёт внутри таблицы, которая сама уже стеклянная.
+            Второй `.glass-frame` дал бы размытие внутри размытия — именно
+            вложенность роняет плавность прокрутки. Плотная подложка строк. */}
+        <div className="overflow-x-auto rounded-lg border border-zinc-200 bg-[var(--glass-rows)]">
           <table className="w-full min-w-[560px] text-[11px]">
             <thead>
               <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400">
@@ -269,7 +272,7 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
   };
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-zinc-200 bg-white">
+    <div className="glass-frame overflow-x-auto">
       <table className="w-full min-w-[640px] text-xs">
         <thead>
           <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400">

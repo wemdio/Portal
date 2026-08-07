@@ -41,7 +41,7 @@ export default function NonRevenueBreakdown({
   const max = reasons[0]?.total ?? 0;
 
   return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-3">
+    <div className="glass-tile p-3">
       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="text-sm font-semibold text-zinc-900">Почему приход не стал доходом</h3>
         <span className="text-[11px] text-zinc-400">

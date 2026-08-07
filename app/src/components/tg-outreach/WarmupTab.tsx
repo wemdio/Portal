@@ -79,13 +79,13 @@ const RUN_LABEL: Record<string, string> = {
   failed: 'сорвался',
 };
 
+// Флага «своя/чужая кампания» здесь больше нет: 20260807_0004 открыла запись
+// в кампанию любому сотруднику, аутрич ведут несколько человек.
 export default function WarmupTab({
   campaignId,
-  isOwn,
   campaignStatus,
 }: {
   campaignId: string;
-  isOwn: boolean;
   campaignStatus: CampaignStatus;
 }) {
   const [status, setStatus] = useState<WarmupStatus | null>(null);
@@ -325,7 +325,7 @@ export default function WarmupTab({
               min={1}
               max={14}
               value={days}
-              disabled={isRunning || !isOwn}
+              disabled={isRunning}
               onChange={(e) => setDays(Number(e.target.value))}
               className="w-16 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 disabled:opacity-50"
             />
@@ -333,7 +333,7 @@ export default function WarmupTab({
           {isRunning ? (
             <button
               type="button"
-              disabled={busy || !isOwn}
+              disabled={busy}
               onClick={() => void act('DELETE')}
               className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-100 disabled:opacity-50"
             >
@@ -343,7 +343,7 @@ export default function WarmupTab({
           ) : (
             <button
               type="button"
-              disabled={busy || !isOwn || blockedByCampaign}
+              disabled={busy || blockedByCampaign}
               title={blockedByCampaign ? 'Сначала остановите кампанию' : undefined}
               onClick={() => void act('POST')}
               className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"

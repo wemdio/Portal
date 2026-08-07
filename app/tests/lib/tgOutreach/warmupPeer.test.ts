@@ -105,6 +105,29 @@ describe('warmup peer — резолв собеседника', () => {
     expect(peer).toEqual({ entity: fakeUser, imported: true });
   });
 
+  /**
+   * Регрессия 07.08.2026: username-запрос завис в мобильном прокси, внешний
+   * общий таймаут гасил всю функцию до перехода на телефон, и 7 переписок
+   * подряд ушли в failed вместо fallback.
+   */
+  it('зависший username падает по своему таймауту и переключается на телефон', async () => {
+    const OLD = process.env.TG_WARMUP_RESOLVE_USERNAME_TIMEOUT_MS;
+    process.env.TG_WARMUP_RESOLVE_USERNAME_TIMEOUT_MS = '50';
+    try {
+      const peer = await resolveWarmupPeer(
+        fakeClient({
+          resolve: () => new Promise(() => { /* никогда */ }),
+          importContacts: async () => ({ users: [fakeUser] }),
+        }),
+        { tg_username: 'ivan', phone: '998901112233' },
+      );
+      expect(peer).toEqual({ entity: fakeUser, imported: true });
+    } finally {
+      if (OLD === undefined) delete process.env.TG_WARMUP_RESOLVE_USERNAME_TIMEOUT_MS;
+      else process.env.TG_WARMUP_RESOLVE_USERNAME_TIMEOUT_MS = OLD;
+    }
+  });
+
   it('пустой ответ на username тоже уводит на телефон', async () => {
     const peer = await resolveWarmupPeer(
       fakeClient({

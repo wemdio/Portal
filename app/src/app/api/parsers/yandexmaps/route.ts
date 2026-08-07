@@ -5,6 +5,7 @@ import { blockDemo } from '@/lib/auth/blockDemo';
 import { encryptJsonAes256Gcm } from '@/lib/cryptoGcm';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getClientTariffUsage, isClientToolAccessAllowed, isAwaitingFirstPayment, TOOL_ACCESS_DENIED_MESSAGE, AWAITING_PAYMENT_MESSAGE } from '@/lib/tariffs';
+import { CATALOG_MAX_RESULTS, normalizeYandexMapsCatalogFilters } from '@/lib/parsers/yandexMapsCatalog';
 
 export const dynamic = 'force-dynamic';
 
@@ -43,9 +44,13 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const search_urls = Array.isArray(body?.search_urls) ? body.search_urls.filter((x: unknown) => typeof x === 'string').map((s: string) => s.trim()).filter(Boolean) : [];
-    if (!search_urls.length) return jsonError('Missing or empty search_urls', 400);
+    const catalog_filters = normalizeYandexMapsCatalogFilters(body?.catalog_filters);
+    if (!search_urls.length && !catalog_filters) return jsonError('Missing search URLs or catalog filters', 400);
 
-    const max_results = Math.max(1, Math.min(5000, Number(body?.max_results ?? 5000) || 5000));
+    // Поиск по своей базе — один SELECT, а не тысячи заходов в Яндекс, поэтому
+    // потолок выдачи там сильно выше, чем у живого парсинга.
+    const max_results_cap = catalog_filters ? CATALOG_MAX_RESULTS : 5000;
+    const max_results = Math.max(1, Math.min(max_results_cap, Number(body?.max_results ?? max_results_cap) || max_results_cap));
     const headless = body?.headless !== false;
 
     let tariffUsage: Awaited<ReturnType<typeof getClientTariffUsage>> | null = null;
@@ -91,7 +96,7 @@ export async function POST(req: NextRequest) {
       .insert({
         user_id: user.id,
         status: 'pending',
-        config: { search_urls, max_results, headless },
+        config: { search_urls, catalog_filters, max_results, headless },
         progress_stage: 'pending',
         proxy_enabled,
         proxy_protocol: proxy_enabled ? proxy_protocol : null,

@@ -30,9 +30,7 @@ export function Tile({
   return (
     <div
       title={title}
-      className={`h-full rounded-xl border px-4 py-3 text-left ${
-        warning ? 'border-amber-200 bg-amber-50' : 'border-zinc-200 bg-white'
-      }`}
+      className={`glass-tile h-full px-4 py-3 text-left ${warning ? 'glass-tint-amber' : ''}`}
     >
       <p
         className={`text-[10px] font-medium uppercase tracking-wider ${
@@ -84,7 +82,7 @@ export function DeltaTile({
           : good;
 
   return (
-    <div className="h-full rounded-xl border border-zinc-200 bg-white px-4 py-3">
+    <div className="glass-tile h-full px-4 py-3">
       <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">К прошлому периоду</p>
       <p className={`mt-1 text-xl font-semibold tabular-nums ${color}`}>{formatDelta(delta)}</p>
       <p className="mt-0.5 text-[11px] text-zinc-400">
