@@ -51,10 +51,21 @@ export interface FunnelOutcome {
 
 export interface RenewalsFunnel {
   pipelineId: number;
-  /** Всего сделок в воронке — знаменатель для долей. */
+  /** Сделок, участвующих в воронке, — знаменатель для долей. */
   totalDeals: number;
   stages: FunnelStage[];
   outcomes: FunnelOutcome[];
+  /**
+   * Карточки, заведённые задним числом по портальным проектам: продления,
+   * случившиеся до появления воронки.
+   *
+   * В ступени они не входят и это не придирка. Их создали сразу на «Продлено»,
+   * они не проходили ни онбординг, ни обсуждение — а расчёт «дошло до этапа»
+   * засчитал бы им все предыдущие ступени, и воронка выродилась бы в
+   * прямоугольник со стопроцентной конверсией на каждом шаге. Продлены они при
+   * этом по-настоящему, поэтому показываются отдельным числом, а не прячутся.
+   */
+  backfilledCount: number;
 }
 
 interface StatusRow {
@@ -87,7 +98,23 @@ export async function fetchRenewalsFunnel(db: SupabaseClient): Promise<RenewalsF
     .eq('pipeline_id', SECONDARY_PIPELINE_ID);
   if (leadError) throw new Error(`amo_leads: ${leadError.message}`);
 
-  const leads = (leadData ?? []) as LeadRow[];
+  const allLeads = (leadData ?? []) as LeadRow[];
+
+  // Карточки, заведённые задним числом скриптом бэкфилла, помечены в таблице
+  // связей — по ней их и отличаем. Отдельного признака в самой сделке нет и
+  // заводить его в AMO не нужно: пометка и так живёт на нашей стороне.
+  const { data: backfillData, error: backfillError } = await db
+    .from('attribution_amo_project')
+    .select('amo_deal_id')
+    .eq('method', 'renewal_backfill');
+  if (backfillError) throw new Error(`attribution_amo_project: ${backfillError.message}`);
+
+  const backfilled = new Set(
+    ((backfillData ?? []) as { amo_deal_id: number }[]).map((r) => Number(r.amo_deal_id)),
+  );
+
+  const leads = allLeads.filter((l) => !backfilled.has(l.amo_id));
+  const backfilledCount = allLeads.length - leads.length;
 
   // Максимальный `sort` прямого пути, которого сделка достигала. Стартуем с
   // текущего этапа: событий может не быть вовсе (сделка создалась сразу на
@@ -154,5 +181,6 @@ export async function fetchRenewalsFunnel(db: SupabaseClient): Promise<RenewalsF
     totalDeals: leads.length,
     stages,
     outcomes,
+    backfilledCount,
   };
 }

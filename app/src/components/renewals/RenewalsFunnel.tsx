@@ -158,9 +158,8 @@ export default function RenewalsFunnel() {
 
       {!loading && !error && data && data.totalDeals === 0 ? (
         <p className="px-3 py-8 text-center text-sm text-zinc-400">
-          В воронке AMO «Вторичные (и не только) продажи» пока нет сделок. Она создана 06.08.2026, и старые сделки в
-          неё намеренно не заводили — проекты будут попадать сюда автоматически, когда сделка закрывается успешно в
-          основной воронке.
+          Сделок, прошедших по этапам, пока нет. Проекты попадают в воронку автоматически, когда сделка закрывается
+          успешно в основной воронке, — и двигаются по ней дальше.
         </p>
       ) : null}
 
@@ -181,6 +180,21 @@ export default function RenewalsFunnel() {
               {outcome.name} — <span className="font-semibold text-zinc-700">{outcome.count}</span>
             </span>
           ))}
+        </div>
+      ) : null}
+
+      {data && data.backfilledCount > 0 ? (
+        // Продлены по-настоящему, но пути не проходили: карточки заведены сразу
+        // на «Продлено» по портальным проектам. В ступенях они дали бы 100% на
+        // каждом шаге, поэтому стоят отдельным числом.
+        <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 border-t border-zinc-100 pt-2 text-[11px] text-zinc-500">
+          <span>
+            Продлено раньше воронки —{' '}
+            <span className="font-semibold text-zinc-700">{data.backfilledCount}</span>
+          </span>
+          <span className="text-zinc-400">
+            заведены по проектам портала задним числом, поэтому в конверсию по этапам не входят
+          </span>
         </div>
       ) : null}
     </div>
