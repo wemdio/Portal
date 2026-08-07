@@ -24,8 +24,15 @@ const filterUnseenIdsMock = jest.fn(async (ids: string[]) => {
   return new Set(ids.filter((id) => !seenIds.has(id)));
 });
 
+// Архив проверок под контролем теста: «свежие» (недавно проверенные) id из recentIds.
+let recentIds = new Set<string>();
+const filterRecentlyCheckedIdsMock = jest.fn(async (ids: string[]) => {
+  return new Set(ids.filter((id) => !recentIds.has(id)));
+});
+
 jest.mock('@/lib/gisSignalOutreach/seenCompanies', () => ({
   filterUnseenIds: (ids: string[]) => filterUnseenIdsMock(ids),
+  filterRecentlyCheckedIds: (ids: string[]) => filterRecentlyCheckedIdsMock(ids),
   markSeen: jest.fn(async () => {}),
 }));
 
@@ -66,7 +73,9 @@ function segment(key: string, category: string, priority: number): GisSignalSegm
 beforeEach(() => {
   cardsByCategory = {};
   seenIds = new Set();
+  recentIds = new Set();
   filterUnseenIdsMock.mockClear();
+  filterRecentlyCheckedIdsMock.mockClear();
 });
 
 describe('computeSegmentQuotas', () => {
@@ -140,5 +149,39 @@ describe('pullSegmentCandidates', () => {
       snapshotId: 1,
     });
     expect(out.map((c) => c.twogisId)).toEqual(['ok']);
+  });
+
+  it('недавно проверенные пропускаются и НЕ жгут квоту сегмента', async () => {
+    cardsByCategory = {
+      'Медицина': [[card('r1'), card('f1'), card('f2'), card('f3')]],
+    };
+    recentIds = new Set(['r1']);
+
+    const out = await pullSegmentCandidates([segment('clinics', 'Медицина', 10)], {
+      dailyLimit: 2,
+      snapshotId: 1,
+    });
+
+    // r1 отсеян архивом, квоту 2 добирают свежие f1/f2.
+    expect(out.map((c) => c.twogisId)).toEqual(['f1', 'f2']);
+    expect(filterRecentlyCheckedIdsMock).toHaveBeenCalledWith(['r1', 'f1', 'f2', 'f3']);
+  });
+
+  it('оба фильтра применяются: архив получает только выживших после seen-фильтра', async () => {
+    cardsByCategory = {
+      'Медицина': [[card('s1'), card('r1'), card('f1')]],
+    };
+    seenIds = new Set(['s1']);
+    recentIds = new Set(['r1']);
+
+    const out = await pullSegmentCandidates([segment('clinics', 'Медицина', 10)], {
+      dailyLimit: 100,
+      snapshotId: 1,
+    });
+
+    expect(filterUnseenIdsMock).toHaveBeenCalledWith(['s1', 'r1', 'f1']);
+    // s1 уже отсеян seen-журналом — в архивный lookup не уходит.
+    expect(filterRecentlyCheckedIdsMock).toHaveBeenCalledWith(['r1', 'f1']);
+    expect(out.map((c) => c.twogisId)).toEqual(['f1']);
   });
 });
