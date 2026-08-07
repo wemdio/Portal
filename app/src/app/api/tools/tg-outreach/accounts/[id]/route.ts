@@ -52,12 +52,22 @@ export async function DELETE(req: NextRequest, ctx: Ctx) {
         if ('error' in auth) return auth.error;
         const { id } = await ctx.params;
       
-        const { error } = await auth.supabase
+        // `.select()` здесь не ради данных, а ради честного ответа. Без него
+        // supabase-js отдаёт 204 и error=null независимо от того, сколько строк
+        // удалилось: строка, скрытая RLS, просто не попадает под DELETE. Роут
+        // рапортовал {ok:true}, UI перезагружал список — и «удалённая» строка
+        // оставалась на месте без единого сообщения. Именно так владельческие
+        // политики (сняты в 20260807_0004) прятали отказ.
+        const { data, error } = await auth.supabase
           .from('tg_outreach_accounts')
           .delete()
-          .eq('id', id);
-      
+          .eq('id', id)
+          .select('id');
+
         if (error) return jsonError(error.message, 500);
+        if (!data || data.length === 0) {
+          return jsonError('Аккаунт не найден или недоступен для удаления', 404);
+        }
         return NextResponse.json({ ok: true });
     },
   );
