@@ -138,19 +138,12 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     }
   }, [activeJob, activeJobId, refreshJobs, refreshQueueStatus, loadLinks, loadResults]);
 
+  // Запуск — это поиск по нашему каталогу. Живой парсинг с прокси и ручными
+  // ссылками из формы убран: URL по-прежнему умеет обрабатывать воркер, но
+  // приходят они не отсюда (reputation-finder, гипотезы).
   const handleCreate = useCallback(async (payload: {
-    search_urls: string[];
-    catalog_filters?: { cities?: string[]; categories?: string[]; countries?: string[] };
-    max_results: number;
-    headless: boolean;
-    proxy: {
-      enabled: boolean;
-      protocol: 'http' | 'https' | 'socks5';
-      host: string;
-      port: string;
-      username: string;
-      password: string;
-    };
+    catalog_filters: { cities?: string[]; categories?: string[]; countries?: string[] };
+    max_results?: number;
   }) => {
     setBusy(true);
     setError(null);
@@ -164,6 +157,10 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
       // best-effort and must not make a successfully created job look lost.
       setJobs((prev) => [data.job, ...prev.filter((job) => job.id !== jobId)]);
       setActiveJobId(jobId);
+
+      // Поиск по каталогу уже выполнен внутри запроса — будить воркера нечем и
+      // незачем, результаты доступны сразу.
+      if (data.job.status === 'completed' || data.job.status === 'failed') return;
 
       try {
         await authFetchJson(`/api/parsers/yandexmaps/${jobId}/collect-links`, { method: 'POST' });

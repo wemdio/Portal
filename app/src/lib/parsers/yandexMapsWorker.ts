@@ -10,8 +10,7 @@ import {
   markYandexMapsCatalogSeen,
   normalizeYandexMapsCatalogFilters,
   recordYandexMapsCatalogRefreshCompleted,
-  searchYandexMapsCatalog,
-  catalogRowToJobOrganization,
+  fillJobFromYandexMapsCatalog,
   upsertYandexMapsCatalogOrganizations,
   yandexIdFromCardUrl,
 } from '@/lib/parsers/yandexMapsCatalog';
@@ -292,68 +291,27 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     const catalogFilters = normalizeYandexMapsCatalogFilters((cfg as { catalog_filters?: unknown }).catalog_filters);
 
     if (catalogFilters) {
-      // Выдача из каталога доходит до 50 тыс. строк — одним запросом PostgREST
-      // такое не принимает, поэтому и читаем, и пишем страницами, попутно
-      // двигая прогресс, чтобы watchdog не счёл задачу зависшей.
-      const CATALOG_PAGE = 2000;
-      let fetched = 0;
-      let stored = 0;
-      let cursor: string | null = null;
-      const seenLinks = new Set<string>();
-
-      while (fetched < maxResults) {
-        const pageSize = Math.min(CATALOG_PAGE, maxResults - fetched);
-        const page = await searchYandexMapsCatalog(catalogFilters, pageSize, cursor);
-        if (!page.length) break;
-        fetched += page.length;
-        cursor = page[page.length - 1]?.yandex_id ?? null;
-
-        const organizations = page.map((row) => catalogRowToJobOrganization(jobId, row));
-        const links = organizations
-          .map((row) => row.card_url)
-          .filter((link) => link && !seenLinks.has(link));
-        links.forEach((link) => seenLinks.add(link));
-
-        if (links.length) {
-          const { error: linksError } = await supabaseAdmin.from('yandex_maps_links').upsert(
-            links.map((link) => ({ job_id: jobId, link })),
-            { onConflict: 'job_id,link' },
-          );
-          if (linksError) throw new Error(linksError.message);
-        }
-        const { error: organizationsError } = await supabaseAdmin
-          .from('yandex_maps_organizations')
-          .upsert(organizations, { onConflict: 'job_id,card_url' });
-        if (organizationsError) throw new Error(organizationsError.message);
-        stored += organizations.length;
-
-        await setJobPatch(jobId, {
-          progress_stage: 'catalog_search',
-          total_links: seenLinks.size,
-          processed_links: seenLinks.size,
-          total_organizations: stored,
-          processed_organizations: stored,
-        });
-
-        // Короче страницы — значит каталог кончился раньше лимита.
-        if (page.length < pageSize) break;
-      }
+      // Обычно сюда уже не заходят: поиск по каталогу выполняется в самом
+      // запросе создания задачи и возвращается готовым. Ветка осталась для
+      // задач, которые успели встать в очередь до этого перехода, и делает то
+      // же самое — один `insert ... select` внутри базы.
+      const filled = await fillJobFromYandexMapsCatalog(jobId, catalogFilters, maxResults);
 
       await setJobPatch(jobId, {
         status: 'completed',
-        progress_stage: stored ? 'catalog_completed' : 'catalog_empty',
+        progress_stage: filled.organizations ? 'catalog_completed' : 'catalog_empty',
         completed_at: new Date().toISOString(),
-        total_links: seenLinks.size,
-        processed_links: seenLinks.size,
-        total_organizations: stored,
-        processed_organizations: stored,
+        total_links: filled.links,
+        processed_links: filled.links,
+        total_organizations: filled.organizations,
+        processed_organizations: filled.organizations,
         error_message: null,
       });
-      await trace?.end({ source: 'catalog', total_organizations: stored });
+      await trace?.end({ source: 'catalog', total_organizations: filled.organizations });
       void logInfo('parser.yandexmaps.catalog.complete', 'YandexMaps catalog search completed', {
         jobId,
-        totalOrganizations: stored,
-        totalLinks: seenLinks.size,
+        totalOrganizations: filled.organizations,
+        totalLinks: filled.links,
       }, logMeta);
       return;
     }

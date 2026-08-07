@@ -56,7 +56,8 @@ export function catalogHasFilters(input: unknown): boolean {
 }
 
 export type CatalogPlace = { country: string; region: string; city: string; companies: number };
-export type CatalogRubric = { rubric: string; companies: number };
+/** with_contacts — у скольких организаций рубрики есть телефон, сайт или почта. */
+export type CatalogRubric = { rubric: string; companies: number; with_contacts: number };
 export type CatalogDictionaries = { places: CatalogPlace[]; rubrics: CatalogRubric[] };
 
 /**
@@ -74,7 +75,10 @@ export async function fetchYandexMapsCatalogDictionaries(): Promise<CatalogDicti
       .limit(50000),
     supabaseAdmin
       .from('yandex_maps_catalog_rubrics')
-      .select('rubric, companies')
+      // Доля организаций с контактами отделяет рабочие рубрики от объектов
+      // карты: «Скамейки» — вторая по размеру рубрика каталога, но телефон
+      // есть у 20 записей из 554 тысяч, и для аутрича она пуста.
+      .select('rubric, companies, with_contacts')
       .order('companies', { ascending: false })
       .limit(20000),
   ]);
@@ -112,27 +116,31 @@ export async function countYandexMapsCatalog(
 }
 
 /**
- * Страница выдачи каталога. Для перехода к следующей передавайте `after` —
- * yandex_id последней полученной строки (курсор по первичному ключу).
+ * Складывает выдачу каталога прямо в результаты запуска — одним запросом
+ * внутри базы, без чтения строк в Node.
+ *
+ * Раньше это делал воркер: читал каталог страницами по 2000 строк через
+ * PostgREST и теми же страницами писал обратно, из-за чего данные дважды шли
+ * по сети, а человек ждал очереди. Искать при этом нечего — всё уже лежит в
+ * соседней таблице той же базы, и `insert ... select` укладывается в запрос
+ * API: 50 тыс. строк за ~3 с на замере.
  */
-export async function searchYandexMapsCatalog(
+export async function fillJobFromYandexMapsCatalog(
+  jobId: string,
   filters: YandexMapsCatalogFilters,
-  limit: number,
-  after: string | null = null,
-): Promise<YandexMapsCatalogRow[]> {
-  if (!supabaseAdmin) return [];
-  const { data, error } = await supabaseAdmin.rpc('yandex_maps_catalog_search', {
+  limit: number = CATALOG_MAX_RESULTS,
+): Promise<{ organizations: number; links: number }> {
+  if (!supabaseAdmin) return { organizations: 0, links: 0 };
+  const { data, error } = await supabaseAdmin.rpc('yandex_maps_catalog_fill_job', {
+    p_job_id: jobId,
     p_cities: cleanList(filters.cities),
     p_categories: cleanList(filters.categories),
     p_countries: cleanList(filters.countries),
-    // Из своей базы не жалко отдать больше, чем позволял живой парсер:
-    // это один SELECT, а не тысячи запросов в Яндекс.
     p_limit: Math.max(0, Math.min(CATALOG_MAX_RESULTS, Math.floor(limit))),
-    p_offset: 0,
-    p_after: after,
   });
-  if (error) throw new Error(`Каталог Яндекс.Карт недоступен: ${error.message}`);
-  return (Array.isArray(data) ? data : []) as YandexMapsCatalogRow[];
+  if (error) throw new Error(`Не удалось собрать выдачу из каталога: ${error.message}`);
+  const row = (Array.isArray(data) ? data[0] : data) as { organizations?: number; links?: number } | null;
+  return { organizations: Number(row?.organizations ?? 0), links: Number(row?.links ?? 0) };
 }
 
 function text(value: unknown): string {
@@ -165,11 +173,6 @@ export function catalogRowToOrganization(row: YandexMapsCatalogRow): YandexMapsO
     working_hours: text(row.working_hours),
     categories: [text(row.categories), text(row.subcategories)].filter(Boolean).join(' | '),
   };
-}
-
-export function catalogRowToJobOrganization(jobId: string, row: YandexMapsCatalogRow) {
-  const organization = catalogRowToOrganization(row);
-  return { job_id: jobId, ...organization };
 }
 
 export function yandexIdFromCardUrl(cardUrl: string): string | null {
