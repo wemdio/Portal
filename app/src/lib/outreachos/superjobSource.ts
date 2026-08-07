@@ -27,6 +27,17 @@ const PAGE_SIZE = 40;
 const MAX_PAGES_PER_CATALOGUE = 13;
 const CLIENTS_CONCURRENCY = 5;
 
+/** Названия каталогов SJ — идут в LLM-контекст классификатора (вместо голых id). */
+const SJ_CATALOGUE_TITLES: Record<number, string> = {
+  33: 'IT, Интернет, связь, телеком',
+  327: 'Промышленность, производство',
+  306: 'Строительство, проектирование, недвижимость',
+  86: 'Транспорт, логистика, ВЭД',
+  234: 'Маркетинг, реклама, PR',
+  76: 'Кадры, управление персоналом',
+  426: 'Консалтинг, стратегическое развитие',
+};
+
 export interface SuperjobSourceOptions {
   apiKey: string;
   windowHours: number;
@@ -134,7 +145,9 @@ export async function fetchSuperjobEmployers(
           siteUrl: c.url?.trim() || null,
           hhUrl: `https://www.superjob.ru/clients/${id}`,
           area: c.town?.title ?? null,
-          industries: [`superjob:${meta.catalogue}`],
+          industries: [
+            SJ_CATALOGUE_TITLES[meta.catalogue] ?? `superjob:${meta.catalogue}`,
+          ],
           employeeCount: null,
           vacancyTitle: meta.vacancyTitle || undefined,
           description: description || undefined,
