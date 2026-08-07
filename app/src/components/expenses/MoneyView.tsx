@@ -74,7 +74,7 @@ export default function MoneyView() {
   );
 
   return (
-    <div className="space-y-4">
+    <div className="glass-stage space-y-4">
       {/* Переключатель стоит выше фильтров и отделён линией: он не сужает
           выборку, как они, а меняет то, на что вообще смотрим.
 

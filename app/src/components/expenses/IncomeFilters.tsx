@@ -32,7 +32,7 @@ export default function IncomeFilters({
   onChange: (next: IncomeFiltersValue) => void;
 }) {
   return (
-    <div className="space-y-2 rounded-xl border border-zinc-200 bg-white px-3 py-2.5">
+    <div className="glass-panel space-y-2 px-3 py-2.5">
       <PeriodBar value={period} onChange={onPeriodChange} />
 
       <div className="flex flex-wrap items-center gap-2">
