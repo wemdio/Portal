@@ -78,7 +78,7 @@ export default function PayerBreakdown({
   const { sortedRows, sort, toggleSort } = useSortableRows(items, payerSortColumns);
 
   return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-3">
+    <div className="glass-tile p-3">
       <h3 className="mb-2 text-sm font-semibold text-zinc-900">Разбивка по плательщикам</h3>
 
       {items.length === 0 ? (
@@ -106,7 +106,9 @@ export default function PayerBreakdown({
             ))}
           </div>
 
-          <div className="mt-4 overflow-x-auto">
+          {/* Плотная подложка под таблицей: на стекле строки просвечивают
+              друг через друга. Размытия здесь нет — плитка уже стеклянная. */}
+          <div className="mt-4 overflow-x-auto rounded-lg bg-[var(--glass-rows)]">
             <table className="w-full min-w-[680px] text-sm">
               <thead>
                 <tr className="text-left text-[10px] uppercase tracking-wider text-zinc-400">

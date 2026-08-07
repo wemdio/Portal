@@ -407,7 +407,7 @@ export default function StackedTimeChart({
   }, [seriesTotals, grandTotal, labelOf, colorOf, theme, reducedMotion]);
 
   return (
-    <div ref={rootRef} className="rounded-xl border border-zinc-200 bg-white p-3">
+    <div ref={rootRef} className="glass-tile p-3">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-zinc-900">{title}</h3>
         <div className="flex flex-wrap items-center gap-2">{toolbar}</div>

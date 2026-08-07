@@ -105,16 +105,21 @@ export async function fetchMeetingLinks(
   if (inWindow.length === 0) return [];
 
   // Сузить до сделок нужной воронки — см. комментарий к функции.
+  //
+  // Воронка берётся из `amo_lead_stage_dates_v`, а не из `amo_leads`: там
+  // `pipeline_id` — воронка, где сделка РОДИЛАСЬ. У `amo_leads` он текущий, и
+  // перенесённая сделка не прошла бы этот фильтр — её встреча пропала бы из
+  // подсчёта вслед за самой сделкой (см. 20260807_0002).
   const dealIds = [...new Set(inWindow.map((l) => l.amo_deal_id))];
   const validDealIds = new Set<number>();
   for (const chunk of chunkArray(dealIds, IN_CHUNK_SIZE)) {
     const { data: leadsChunk, error: leadsError } = await db
-      .from('amo_leads')
-      .select('amo_id')
+      .from('amo_lead_stage_dates_v')
+      .select('amo_deal_id')
       .eq('pipeline_id', pipelineId)
-      .in('amo_id', chunk);
+      .in('amo_deal_id', chunk);
     if (leadsError) throw leadsError;
-    for (const l of (leadsChunk ?? []) as Array<{ amo_id: number }>) validDealIds.add(l.amo_id);
+    for (const l of (leadsChunk ?? []) as Array<{ amo_deal_id: number }>) validDealIds.add(l.amo_deal_id);
   }
 
   return inWindow

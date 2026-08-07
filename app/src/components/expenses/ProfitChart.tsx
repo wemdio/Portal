@@ -51,6 +51,9 @@ const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн'
 const GRID_LEFT = 68;
 const GRID_RIGHT = 16;
 
+/** Ширина столбца верхней панели. Их там два на категорию, поэтому узкие. */
+const BAR_WIDTH = 16;
+
 function splitKey(key: string): [string, string, string] | null {
   const [y, m, d] = key.split('-');
   if (!y || !m || !d) return null;
@@ -121,7 +124,7 @@ function buildOption(
     textStyle: { fontFamily: CHART_FONT },
     grid: [
       { left: GRID_LEFT, right: GRID_RIGHT, top: 32, height: 150 },
-      { left: GRID_LEFT, right: GRID_RIGHT, top: 224, height: 84 },
+      { left: GRID_LEFT, right: GRID_RIGHT, top: 226, height: 110 },
     ],
     legend: {
       top: 0,
@@ -192,6 +195,9 @@ function buildOption(
       {
         type: 'value',
         gridIndex: 1,
+        // Делений мало намеренно: панель низкая, и на автоматических семи
+        // подписи налезали друг на друга. Точные числа всё равно в подсказке.
+        splitNumber: 3,
         splitLine: { lineStyle: { color: GRID_LINE } },
         axisLabel: { ...axis, formatter: (value: number) => axisAmount(value) },
       },
@@ -202,8 +208,18 @@ function buildOption(
         type: 'bar',
         xAxisIndex: 0,
         yAxisIndex: 0,
-        barMaxWidth: 26,
+        barMaxWidth: BAR_WIDTH,
+        // Пара столбцов стоит вплотную: чем она уже, тем ближе каждый из них к
+        // центру категории — а по этому центру выровнен столбец разницы снизу.
+        // При широком зазоре день, у которого одна из сторон нулевая, выглядел
+        // съехавшим относительно нижней панели и подписи под ней.
+        barGap: '0%',
+        barCategoryGap: '45%',
         data: bar(points.map((p) => p.income), incomeColor),
+        // Цвет ряда обязателен, хотя каждый столбец красится сам: легенда
+        // берёт квадратик именно отсюда, а не из данных, и без этой строки
+        // подставляла цвет из палитры по умолчанию — синий вместо зелёного.
+        color: incomeColor,
         itemStyle: { borderRadius: [4, 4, 0, 0] as [number, number, number, number] },
       },
       {
@@ -211,8 +227,11 @@ function buildOption(
         type: 'bar',
         xAxisIndex: 0,
         yAxisIndex: 0,
-        barMaxWidth: 26,
+        barMaxWidth: BAR_WIDTH,
+        barGap: '0%',
+        barCategoryGap: '45%',
         data: bar(points.map((p) => p.expense), expenseColor),
+        color: expenseColor,
         itemStyle: { borderRadius: [4, 4, 0, 0] as [number, number, number, number] },
       },
       {
@@ -220,7 +239,10 @@ function buildOption(
         type: 'bar',
         xAxisIndex: 1,
         yAxisIndex: 1,
-        barMaxWidth: 26,
+        // Вдвое шире столбцов сверху: там их два на категорию, здесь один, и
+        // при равной ширине нижняя панель выглядела бы вдвое реже верхней.
+        barMaxWidth: BAR_WIDTH * 2,
+        barCategoryGap: '45%',
         // В легенду не выносим: цвета уже объяснены рядами выше, а третий
         // пункт «Разница» с двумя цветами сразу только запутал бы.
         data: points.map((point) => {
@@ -252,14 +274,14 @@ export default function ProfitChart({ points, groupBy }: { points: ProfitPoint[]
   );
 
   return (
-    <div ref={rootRef} className="rounded-xl border border-zinc-200 bg-white p-3">
+    <div ref={rootRef} className="glass-tile p-3">
       <h3 className="mb-2 text-sm font-semibold text-zinc-900">Доход и расход по времени</h3>
       {points.length === 0 ? (
         <div className="px-3 py-10 text-center text-sm text-zinc-400">За выбранный период движения нет.</div>
       ) : option ? (
-        <EChart option={option} height={340} ariaLabel="Доход, расход и разница по периодам" />
+        <EChart option={option} height={370} ariaLabel="Доход, расход и разница по периодам" />
       ) : (
-        <div style={{ height: 340 }} />
+        <div style={{ height: 370 }} />
       )}
     </div>
   );

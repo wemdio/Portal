@@ -145,7 +145,7 @@ export default function FunnelChart({ totals }: { totals: FirstSalesTotals }) {
     .map((stage) => `«${stage.name}»`);
 
   return (
-    <div ref={rootRef} className="rounded-xl border border-zinc-200 bg-white p-3">
+    <div ref={rootRef} className="glass-tile p-3">
       <h3 className="mb-1 text-sm font-semibold text-zinc-900">Воронка за период</h3>
       {totals.leads === 0 ? (
         <div className="px-3 py-10 text-center text-sm text-zinc-400">Лидов за выбранный период нет.</div>

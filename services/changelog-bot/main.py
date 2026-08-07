@@ -2,10 +2,8 @@
 Changelog-bot: ежедневный дайджест обновлений портала в Telegram.
 
 Расписание:
-  - Будни (Пн–Пт) в 8:30 МСК (05:30 UTC).
-  - Понедельник → окно с Пт 8:30 МСК до Пн 8:30 МСК.
-  - Вт–Пт → окно за последние 24 ч (со вчера 8:30 до сегодня 8:30 МСК).
-  - Выходные — бот молчит.
+  - Каждый день в 9:00 МСК (06:00 UTC), включая выходные.
+  - Окно всегда за последние 24 ч (со вчера 9:00 до сегодня 9:00 МСК).
   - Если коммитов за период не было — бот ничего не пишет.
 
 Переменные окружения:
@@ -125,15 +123,13 @@ async def save_digest(since: datetime, until: datetime, summary: str) -> None:
 # ── Time window helpers ───────────────────────────────────────────────────────
 
 def _compute_window(now_msk: datetime) -> tuple[datetime, datetime]:
-    """Return (since, until) in UTC for the reporting window."""
+    """Return (since, until) in UTC for the reporting window.
+
+    Бот ходит каждый день, поэтому окно всегда ровно сутки: со вчерашних
+    9:00 МСК до сегодняшних. Раньше понедельник забирал Пт+Сб+Вс одним куском —
+    это давало дайджест на пару тысяч коммитов, который нечитаем."""
     boundary = now_msk.replace(hour=9, minute=0, second=0, microsecond=0)
-    weekday = now_msk.weekday()  # 0=Mon … 6=Sun
-
-    if weekday == 0:  # Monday → since Friday 08:30 MSK
-        since_msk = boundary - timedelta(days=3)
-    else:
-        since_msk = boundary - timedelta(days=1)
-
+    since_msk = boundary - timedelta(days=1)
     return since_msk.astimezone(timezone.utc), boundary.astimezone(timezone.utc)
 
 
@@ -446,18 +442,12 @@ async def send_message(text: str) -> bool:
 
 async def run_digest(
     *,
-    force: bool = False,
     days_override: int | None = None,
     model_override: str | None = None,
     skip_already_sent_check: bool = False,
 ) -> None:
     now_msk = datetime.now(MSK)
-    weekday = now_msk.weekday()
-    print(f"[changelog] run_digest triggered: {now_msk.strftime('%d.%m.%Y %H:%M MSK')} weekday={weekday}", flush=True)
-
-    if weekday >= 5 and not force:
-        print("[changelog] Weekend — skip.", flush=True)
-        return
+    print(f"[changelog] run_digest triggered: {now_msk.strftime('%d.%m.%Y %H:%M MSK')} weekday={now_msk.weekday()}", flush=True)
 
     if days_override is not None:
         until_utc = datetime.now(timezone.utc)
@@ -465,7 +455,7 @@ async def run_digest(
         period_label = f"за последние {days_override} дн."
     else:
         since_utc, until_utc = _compute_window(now_msk)
-        period_label = "за прошедшие выходные и пятницу" if weekday == 0 else "за прошедшие сутки"
+        period_label = "за прошедшие сутки"
 
     print(f"[changelog] Window: {since_utc.strftime('%Y-%m-%dT%H:%M:%SZ')} → {until_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}", flush=True)
 
@@ -536,12 +526,9 @@ async def handle_health(_request: web.Request) -> web.Response:
 # ── Catchup on startup ────────────────────────────────────────────────────────
 
 async def _run_catchup() -> None:
-    """При старте проверяем: если сегодня будний день, уже после 9:00 МСК
-    и саммари за текущее окно ещё не отправлялось — запускаем дайджест."""
+    """При старте проверяем: если уже после 9:00 МСК и саммари за текущее
+    окно ещё не отправлялось — запускаем дайджест."""
     now_msk = datetime.now(MSK)
-    weekday = now_msk.weekday()
-    if weekday >= 5:
-        return
 
     nine_am = now_msk.replace(hour=9, minute=0, second=0, microsecond=0)
     if now_msk < nine_am:
@@ -586,7 +573,6 @@ async def run_once(days: int | None, model: str | None) -> None:
     _require("REQUESTY_CHANGELOG_API_KEY", OPENROUTER_API_KEY)
     await ensure_table()
     await run_digest(
-        force=True,
         days_override=days,
         model_override=model,
         skip_already_sent_check=True,
@@ -617,12 +603,12 @@ async def main() -> None:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         run_digest,
-        CronTrigger(day_of_week="mon-fri", hour=6, minute=0, timezone="UTC"),
+        CronTrigger(hour=6, minute=0, timezone="UTC"),
         id="daily_digest",
         max_instances=1,
     )
     scheduler.start()
-    print(f"[changelog] Scheduled: Mon–Fri at 09:00 MSK (06:00 UTC). Repo: {GITHUB_REPO}, model: {AI_MODEL}", flush=True)
+    print(f"[changelog] Scheduled: daily at 09:00 MSK (06:00 UTC). Repo: {GITHUB_REPO}, model: {AI_MODEL}", flush=True)
 
     while True:
         await asyncio.sleep(3600)

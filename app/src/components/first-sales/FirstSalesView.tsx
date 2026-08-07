@@ -196,7 +196,7 @@ export default function FirstSalesView() {
   const isEmpty = !!data && data.totals.leads === 0 && data.bySource.length === 0;
 
   return (
-    <div className="space-y-4">
+    <div className="glass-stage space-y-4">
       <div>
         <h1 className="text-lg font-semibold text-zinc-900">Первичка</h1>
         <p className="text-xs text-zinc-500">Воронка первичных продаж: лиды, квалификация, встречи и договоры.</p>

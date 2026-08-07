@@ -1,8 +1,9 @@
 'use client';
 
-import { useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Info, Globe, Layers, Play, Loader2 } from 'lucide-react';
 import { CITIES, RUBRICS, generateSearchUrls } from '@/lib/parsers/yandexMapsData';
+import { authFetchJson } from '@/lib/authFetch';
 
 type ProxyForm = {
   enabled: boolean;
@@ -15,6 +16,53 @@ type ProxyForm = {
 
 // ... (imports remain the same)
 
+/** Пункт списка: значение и, если известно, сколько организаций за ним стоит. */
+export type SelectOption = { value: string; count?: number };
+export type SelectGroups = Record<string, SelectOption[]>;
+
+function formatCount(count: number): string {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1).replace('.0', '')} млн`;
+  if (count >= 1_000) return `${Math.round(count / 1_000)}к`;
+  return String(count);
+}
+
+/**
+ * Больше этого числа пунктов разом не рисуем. В одной России около 2800
+ * городов, и отрисовка всех сразу заметно тормозит форму; списки отсортированы
+ * по охвату, так что в лимит попадает самое крупное, а остальное ищется полем.
+ */
+const RENDER_LIMIT = 400;
+
+/** Списки выросли со 145 городов до нескольких тысяч — без поиска не найти. */
+function filterGroups(groups: SelectGroups, query: string): SelectGroups {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return groups;
+  const out: SelectGroups = {};
+  for (const [group, items] of Object.entries(groups)) {
+    // Совпадение по названию группы показывает её целиком: «Татарстан» должен
+    // открывать все города республики, а не только одноимённый.
+    const groupHit = group.toLowerCase().includes(needle);
+    const matched = groupHit ? items : items.filter((item) => item.value.toLowerCase().includes(needle));
+    if (matched.length) out[group] = matched;
+  }
+  return out;
+}
+
+/** Обрезает список до лимита, сохраняя порядок групп. */
+function capGroups(groups: SelectGroups, limit: number): { groups: SelectGroups; shown: number; total: number } {
+  const total = Object.values(groups).reduce((sum, items) => sum + items.length, 0);
+  if (total <= limit) return { groups, shown: total, total };
+  const out: SelectGroups = {};
+  let shown = 0;
+  for (const [group, items] of Object.entries(groups)) {
+    if (shown >= limit) break;
+    const slice = items.slice(0, limit - shown);
+    out[group] = slice;
+    shown += slice.length;
+  }
+  return { groups: out, shown, total };
+}
+
 // Custom MultiSelect Component
 function MultiSelect({
   options,
@@ -23,14 +71,25 @@ function MultiSelect({
   disabled,
   className,
   clientMode,
+  searchPlaceholder,
+  emptyHint,
 }: {
-  options: Record<string, string[]>;
+  options: SelectGroups;
   value: string[];
   onChange: (value: string[]) => void;
   disabled?: boolean;
   className?: string;
   clientMode?: boolean;
+  searchPlaceholder?: string;
+  emptyHint?: string;
 }) {
+  const [query, setQuery] = useState('');
+  const matched = useMemo(() => filterGroups(options, query), [options, query]);
+  const { groups: visible, shown: visibleCount, total: matchedCount } = useMemo(
+    () => capGroups(matched, RENDER_LIMIT),
+    [matched],
+  );
+
   const toggleOption = (option: string) => {
     if (disabled) return;
     const next = value.includes(option)
@@ -39,13 +98,48 @@ function MultiSelect({
     onChange(next);
   };
 
+  // Выбираем всё, что нашлось по запросу, а не только отрисованную часть —
+  // иначе кнопка молча теряла бы то, что не поместилось в лимит отрисовки.
+  const selectMatched = () => {
+    if (disabled) return;
+    const all = Object.values(matched).flatMap((items) => items.map((item) => item.value));
+    onChange([...new Set([...value, ...all])]);
+  };
+
   return (
     <div
       className={`rounded-lg overflow-hidden flex flex-col ${clientMode ? '' : 'border border-gray-300 bg-white'} ${className ?? ''}`}
       style={clientMode ? { background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider-strong)' } : undefined}
     >
+      <div
+        className={`flex items-center gap-2 px-2 py-1.5 ${clientMode ? '' : 'border-b border-gray-200 bg-gray-50/70'}`}
+        style={clientMode ? { borderBottom: '1px solid var(--cp-divider)' } : undefined}
+      >
+        <input
+          type="text"
+          value={query}
+          disabled={disabled}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={searchPlaceholder ?? 'Поиск…'}
+          className={clientMode ? 'ds-input w-full text-xs' : 'block w-full rounded-md border-gray-300 text-xs px-2 py-1 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none'}
+        />
+        {query.trim() && matchedCount > 0 && (
+          <button
+            type="button"
+            onClick={selectMatched}
+            className={clientMode ? 'ds-btn-ghost shrink-0 text-[11px]' : 'shrink-0 text-[11px] px-2 py-1 rounded-md border border-gray-200 bg-white text-gray-700 hover:bg-gray-100'}
+          >
+            выбрать {matchedCount}
+          </button>
+        )}
+      </div>
       <div className="flex-1 overflow-y-auto custom-scrollbar my-1 mr-1">
-        {Object.entries(options).map(([group, items]) => (
+        {visibleCount === 0 && (
+          <div className="px-3 py-4 text-xs" style={{ color: clientMode ? 'var(--cp-paper-faint)' : 'rgb(107 114 128)' }}>
+            {emptyHint ?? 'Ничего не найдено.'}
+          </div>
+        )}
+        {Object.entries(visible).map(([group, items]) => (
           <div key={group}>
             <div
               className={`sticky top-0 z-10 py-2 px-3 ${clientMode ? '' : 'bg-gray-100 border-b border-gray-200 shadow-sm'}`}
@@ -59,7 +153,7 @@ function MultiSelect({
               </div>
             </div>
             <div className="p-2 space-y-1">
-              {items.map((item) => {
+              {items.map(({ value: item, count }) => {
                 const isSelected = value.includes(item);
                 return (
                   <div
@@ -81,6 +175,14 @@ function MultiSelect({
                     }
                   >
                     <span className="font-medium">{item}</span>
+                    {typeof count === 'number' && !isSelected && (
+                      <span
+                        className="ml-2 shrink-0 text-[11px] tabular-nums"
+                        style={{ color: clientMode ? 'var(--cp-paper-faint)' : 'rgb(156 163 175)' }}
+                      >
+                        {formatCount(count)}
+                      </span>
+                    )}
                     {isSelected && (
                       <span
                         className={clientMode ? '' : 'text-blue-600 bg-blue-100 rounded-full p-0.5'}
@@ -97,9 +199,55 @@ function MultiSelect({
             </div>
           </div>
         ))}
+        {matchedCount > visibleCount && (
+          <div
+            className="px-3 py-2 text-[11px]"
+            style={{ color: clientMode ? 'var(--cp-paper-faint)' : 'rgb(107 114 128)' }}
+          >
+            Показаны {visibleCount} самых крупных из {matchedCount.toLocaleString('ru-RU')} — остальное найдётся поиском.
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+type CatalogPlace = { country: string; region: string; city: string; companies: number };
+type CatalogRubric = { rubric: string; companies: number };
+
+/** Пока справочник не пересчитан, форма работает на прежних списках. */
+function staticGroups(source: Record<string, string[]>): SelectGroups {
+  return Object.fromEntries(
+    Object.entries(source).map(([group, items]) => [group, items.map((value) => ({ value }))]),
+  );
+}
+
+function useCatalogDictionaries() {
+  const [places, setPlaces] = useState<CatalogPlace[]>([]);
+  const [rubrics, setRubrics] = useState<CatalogRubric[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await authFetchJson<{ places: CatalogPlace[]; rubrics: CatalogRubric[] }>(
+          '/api/parsers/yandexmaps/catalog',
+        );
+        if (cancelled) return;
+        setPlaces(Array.isArray(data?.places) ? data.places : []);
+        setRubrics(Array.isArray(data?.rubrics) ? data.rubrics : []);
+      } catch {
+        // Каталог недоступен — форма откатится на прежние статические списки.
+        if (!cancelled) { setPlaces([]); setRubrics([]); }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  return { places, rubrics, loading };
 }
 
 export function YandexMapsParserForm(props: {
@@ -108,6 +256,7 @@ export function YandexMapsParserForm(props: {
   clientMode?: boolean;
   onCreate: (payload: {
     search_urls: string[];
+    catalog_filters?: { cities?: string[]; categories?: string[]; countries?: string[] };
     max_results: number;
     headless: boolean;
     proxy: ProxyForm;
@@ -138,9 +287,75 @@ export function YandexMapsParserForm(props: {
   // pick city × category; pasting raw Yandex URLs is the rare power path).
   const [showManualUrls, setShowManualUrls] = useState(false);
 
+  const { places, rubrics: catalogRubrics, loading: dictLoading } = useCatalogDictionaries();
+  const [selectedCountries, setSelectedCountries] = useState<string[]>([]);
+
+  // Страны берутся из каталога: сколько стран залито — столько и покажем.
+  const countries = useMemo(() => {
+    const totals = new Map<string, number>();
+    for (const place of places) {
+      totals.set(place.country, (totals.get(place.country) ?? 0) + place.companies);
+    }
+    return [...totals]
+      .filter(([country]) => country)
+      .sort((a, b) => b[1] - a[1])
+      .map(([country, companies]) => ({ country, companies }));
+  }, [places]);
+
+  // Показывать сразу города всех стран — это тысячи пунктов. Пока пользователь
+  // не выбрал сам, подразумеваем Россию (или самую крупную из залитых стран).
+  // Значение выводится, а не записывается в состояние: запись через эффект
+  // давала лишнюю перерисовку на каждой загрузке справочника.
+  const activeCountries = useMemo(() => {
+    if (selectedCountries.length) return selectedCountries;
+    if (!countries.length) return [];
+    return [(countries.find((item) => item.country === 'Россия') ?? countries[0]).country];
+  }, [countries, selectedCountries]);
+
+  // Места. Если у организаций заполнен только регион (Баку, сводные листы
+  // регионов), выбираемым пунктом становится сам регион — поиск умеет
+  // сопоставлять и по городу, и по региону.
+  const cityGroups = useMemo<SelectGroups>(() => {
+    if (!places.length) return staticGroups(CITIES);
+    const active = new Set(activeCountries);
+    const multiCountry = active.size > 1;
+    const grouped = new Map<string, Map<string, number>>();
+    for (const place of places) {
+      if (!active.has(place.country)) continue;
+      const value = place.city || place.region;
+      if (!value) continue;
+      const base = place.region || place.country;
+      const label = multiCountry ? `${place.country} · ${base}` : base;
+      const bucket = grouped.get(label) ?? new Map<string, number>();
+      bucket.set(value, (bucket.get(value) ?? 0) + place.companies);
+      grouped.set(label, bucket);
+    }
+    const groupTotal = (items: Map<string, number>) => [...items.values()].reduce((a, b) => a + b, 0);
+    return Object.fromEntries(
+      [...grouped]
+        .sort((a, b) => groupTotal(b[1]) - groupTotal(a[1]))
+        .map(([label, items]) => [
+          label,
+          [...items]
+            .sort((a, b) => b[1] - a[1])
+            .map(([value, count]) => ({ value, count })),
+        ]),
+    );
+  }, [places, activeCountries]);
+
+  // Рубрики — плоским списком по убыванию охвата: у Яндекса своя таксономия,
+  // и раскладывать её по нашим темам значило бы снова показывать пункты,
+  // которых в базе нет.
+  const rubricGroups = useMemo<SelectGroups>(() => {
+    if (!catalogRubrics.length) return staticGroups(RUBRICS);
+    return {
+      'рубрики Яндекс.Карт': catalogRubrics.map((item) => ({ value: item.rubric, count: item.companies })),
+    };
+  }, [catalogRubrics]);
+
   const allCities = useMemo(
-    () => Object.values(CITIES).flat().map((city) => city.trim()).filter(Boolean),
-    []
+    () => Object.values(cityGroups).flatMap((items) => items.map((item) => item.value)),
+    [cityGroups],
   );
 
   const searchUrls = useMemo(() => {
@@ -190,14 +405,114 @@ export function YandexMapsParserForm(props: {
   // 50 URL = 4-8 часов max, укладываемся в разумное окно и watchdog.
   const MAX_SEARCH_URLS = 50;
   const totalUrlCount = collectAllUrls().length;
-  const canSubmit = totalUrlCount > 0;
+  const catalogFilters = useMemo(() => {
+    // Вставленная руками ссылка — единственный случай, когда мы всё ещё идём
+    // в Яндекс напрямую. Выбор из списков всегда обслуживается своей базой.
+    if (searchUrls.length) return undefined;
+    const cities = selectedCities.map((city) => city.trim()).filter(Boolean);
+    const categories = (customKeyword.trim() ? [customKeyword.trim()] : selectedRubrics)
+      .map((category) => category.trim())
+      .filter(Boolean);
+    // Одни только страны — это не запрос, а состояние формы по умолчанию.
+    if (!cities.length && !categories.length) return undefined;
+    return { cities, categories, countries: activeCountries };
+  }, [activeCountries, customKeyword, searchUrls.length, selectedCities, selectedRubrics]);
+
+  // Сколько найдётся — считаем до запуска, чтобы пустой результат был виден
+  // сразу, а не через минуту в списке задач.
+  const [preview, setPreview] = useState<{ total: number; capped: boolean } | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const previewToken = useRef(0);
+
+  useEffect(() => {
+    if (!catalogFilters) { setPreview(null); setPreviewBusy(false); return; }
+    const token = ++previewToken.current;
+    setPreviewBusy(true);
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const data = await authFetchJson<{ total: number; capped: boolean }>(
+            '/api/parsers/yandexmaps/catalog',
+            { method: 'POST', body: JSON.stringify({ catalog_filters: catalogFilters }) },
+          );
+          if (token === previewToken.current) setPreview({ total: Number(data?.total ?? 0), capped: Boolean(data?.capped) });
+        } catch {
+          if (token === previewToken.current) setPreview(null);
+        } finally {
+          if (token === previewToken.current) setPreviewBusy(false);
+        }
+      })();
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [catalogFilters]);
+
+  const previewLabel = !catalogFilters
+    ? null
+    : previewBusy
+      ? 'считаем, сколько найдётся…'
+      : preview === null
+        ? null
+        : preview.total === 0
+          ? 'по этим условиям в базе ничего нет — измените город или рубрику'
+          : `в базе найдётся ${preview.capped ? 'более ' : ''}${preview.total.toLocaleString('ru-RU')} организаций`;
+
+  const canSubmit = totalUrlCount > 0 || Boolean(catalogFilters);
+
+  const toggleCountry = useCallback((country: string) => {
+    setSelectedCountries((prev) => {
+      // Пока пользователь не выбирал сам, отталкиваемся от страны по умолчанию,
+      // иначе клик по уже подсвеченной России добавлял бы её второй раз.
+      const base = prev.length ? prev : activeCountries;
+      const next = base.includes(country) ? base.filter((item) => item !== country) : [...base, country];
+      // Пустой выбор означал бы «города всех стран разом» — оставляем как было.
+      return next.length ? next : base;
+    });
+    // Города прошлой страны в выборе только мешают.
+    setSelectedCities([]);
+  }, [activeCountries]);
+
+  /** Ряд стран. Рисуется только когда каталог отдал больше одной страны. */
+  const countryPicker = countries.length > 1 ? (
+    <div className="flex flex-wrap gap-1.5">
+      {countries.map(({ country, companies }) => {
+        const active = activeCountries.includes(country);
+        return (
+          <button
+            key={country}
+            type="button"
+            onClick={() => toggleCountry(country)}
+            className={
+              clientMode
+                ? 'ds-btn-ghost text-[11px]'
+                : `text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                    active
+                      ? 'border-blue-200 bg-blue-50 text-blue-700'
+                      : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50'
+                  }`
+            }
+            style={
+              clientMode
+                ? active
+                  ? { background: 'var(--cp-surface-active)', color: 'var(--cp-paper)' }
+                  : { color: 'var(--cp-paper-mute)' }
+                : undefined
+            }
+          >
+            {country}
+            <span className="ml-1.5 opacity-60 tabular-nums">{formatCount(companies)}</span>
+          </button>
+        );
+      })}
+    </div>
+  ) : null;
 
   const onSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const urls = collectAllUrls().slice(0, MAX_SEARCH_URLS);
-    if (!urls.length) return;
+    const urls = catalogFilters ? [] : collectAllUrls().slice(0, MAX_SEARCH_URLS);
+    if (!urls.length && !catalogFilters) return;
     await props.onCreate({
       search_urls: urls,
+      catalog_filters: catalogFilters,
       max_results: maxResults,
       headless,
       proxy,
@@ -209,11 +524,13 @@ export function YandexMapsParserForm(props: {
   if (clientMode) {
     const total = totalUrlCount;
     const countLabel =
-      total > MAX_SEARCH_URLS
-        ? `${total} запросов — возьмём первые ${MAX_SEARCH_URLS}`
-        : total > 0
-          ? `${total} запросов`
-          : 'Выберите города и категорию';
+      previewLabel
+        ? previewLabel
+        : total > MAX_SEARCH_URLS
+          ? `${total} запросов — возьмём первые ${MAX_SEARCH_URLS}`
+          : total > 0
+            ? `${total} запросов`
+            : 'Выберите города и категорию';
     return (
       <form onSubmit={onSubmit} className="neu-card p-5 sm:p-6 space-y-5">
         <div className="flex items-start justify-between gap-3">
@@ -230,6 +547,13 @@ export function YandexMapsParserForm(props: {
           </button>
         </div>
 
+        {countryPicker && (
+          <div>
+            <label className="ds-eyebrow mb-1.5 block">страна</label>
+            {countryPicker}
+          </div>
+        )}
+
         <div>
           <div className="mb-1.5 flex items-center justify-between">
             <label className="ds-eyebrow">города</label>
@@ -242,7 +566,15 @@ export function YandexMapsParserForm(props: {
               </button>
             </div>
           </div>
-          <MultiSelect options={CITIES} value={selectedCities} onChange={setSelectedCities} clientMode className="h-56" />
+          <MultiSelect
+            options={cityGroups}
+            value={selectedCities}
+            onChange={setSelectedCities}
+            clientMode
+            className="h-56"
+            searchPlaceholder="Поиск города или региона…"
+            emptyHint={dictLoading ? 'Загружаем список…' : 'Ничего не найдено.'}
+          />
           <p className="mt-1.5 text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
             {selectedCities.length > 0 ? `Выбрано городов: ${selectedCities.length}` : 'Нажмите на города, чтобы выбрать.'}
           </p>
@@ -261,12 +593,14 @@ export function YandexMapsParserForm(props: {
           </p>
           <div className="mt-2" style={customKeyword.trim() ? { opacity: 0.5, pointerEvents: 'none' } : undefined}>
             <MultiSelect
-              options={RUBRICS}
+              options={rubricGroups}
               value={selectedRubrics}
               onChange={setSelectedRubrics}
               disabled={Boolean(customKeyword.trim())}
               clientMode
               className="h-44"
+              searchPlaceholder="Поиск категории…"
+              emptyHint={dictLoading ? 'Загружаем список…' : 'Ничего не найдено.'}
             />
           </div>
         </div>
@@ -424,8 +758,14 @@ export function YandexMapsParserForm(props: {
         
         <div className="p-5 grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="space-y-2">
+            {countryPicker && (
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-gray-700">Страна</label>
+                {countryPicker}
+              </div>
+            )}
             <div className="flex items-center justify-between gap-3">
-              <label className="block text-sm font-medium text-gray-700">Города</label>
+              <label className="block text-sm font-medium text-gray-700">Города и регионы</label>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
@@ -444,12 +784,14 @@ export function YandexMapsParserForm(props: {
               </div>
             </div>
             <MultiSelect
-              options={CITIES}
+              options={cityGroups}
               value={selectedCities}
               onChange={setSelectedCities}
               className="h-87 shadow-sm focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500"
+              searchPlaceholder="Поиск города или региона…"
+              emptyHint={dictLoading ? 'Загружаем список…' : 'Ничего не найдено.'}
             />
-            <p className="text-xs text-gray-500">Нажмите для выбора.</p>
+            <p className="text-xs text-gray-500">Нажмите для выбора. Цифра справа — сколько организаций в базе.</p>
           </div>
 
           <div className="space-y-5">
@@ -467,11 +809,13 @@ export function YandexMapsParserForm(props: {
             <div className="space-y-2">
               <label className="block text-sm font-medium text-gray-700">Рубрики</label>
               <MultiSelect
-                options={RUBRICS}
+                options={rubricGroups}
                 value={selectedRubrics}
                 onChange={setSelectedRubrics}
                 disabled={Boolean(customKeyword.trim())}
                 className={`h-60 shadow-sm focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500 ${Boolean(customKeyword.trim()) ? 'bg-gray-50 opacity-60' : ''}`}
+                searchPlaceholder="Поиск категории…"
+                emptyHint={dictLoading ? 'Загружаем список…' : 'Ничего не найдено.'}
               />
             </div>
 
@@ -482,12 +826,14 @@ export function YandexMapsParserForm(props: {
       {/* Settings Section */}
       <div className="flex items-center justify-between pt-4">
         <div className="text-sm text-gray-500">
-          {totalUrlCount > MAX_SEARCH_URLS ? (
+          {previewLabel ? (
+            <span className={preview?.total === 0 ? 'text-amber-600 font-medium' : undefined}>{previewLabel}</span>
+          ) : totalUrlCount > MAX_SEARCH_URLS ? (
             <span className="text-amber-600 font-medium">
               {totalUrlCount} URL — будут обработаны первые {MAX_SEARCH_URLS}
             </span>
           ) : totalUrlCount > 0 ? (
-            <span>Итого: {totalUrlCount} URL</span>
+            <span>Итого: {totalUrlCount} URL — живой парсинг Яндекса</span>
           ) : null}
         </div>
         <button
@@ -507,30 +853,29 @@ export function YandexMapsParserForm(props: {
             </div>
             <div className="px-6 py-4 space-y-3 text-sm text-gray-700">
               <p>
-                Парсер берёт <span className="font-semibold">список поисковых URL</span> Яндекс.Карт и по каждому урлу
-                проходит выдачу организаций.
+                Выбор <span className="font-semibold">страны, города и рубрики</span> ищет по нашей внутренней базе
+                организаций Яндекс.Карт. Это выдача за секунды, без обращений к Яндексу и без прокси.
               </p>
               <p>
-                URL можно <span className="font-semibold">вставить руками</span> или
-                сгенерировать через блок «Генератор ссылок» по комбинации&nbsp;
-                <span className="font-semibold">город × рубрика/ключевое слово</span>.
+                Списки городов и рубрик <span className="font-semibold">построены из самой базы</span>, а цифра рядом с
+                пунктом — сколько за ним организаций. Перед запуском видно, сколько всего найдётся.
               </p>
               <p>
-                Для каждой найденной организации инструмент пытается вытащить карточку компании: название, адрес, сайт
-                и контактные данные. Если одна и та же компания встретилась в нескольких урлах, она будет
-                <span className="font-semibold">объединена</span> по домену и названию.
+                Живой парсинг Яндекса остаётся только для <span className="font-semibold">вставленных вручную ссылок</span>:
+                он нужен, когда организации ещё нет в базе. Такой запуск идёт через прокси и занимает часы.
+              </p>
+              <p>
+                Сама база <span className="font-semibold">пополняется фоном</span> — понемногу каждый день, поэтому
+                карточки постепенно освежаются без нагрузки на Яндекс.
               </p>
               <p>
                 Чтобы получить <span className="font-semibold">качественную выдачу</span>:
               </p>
               <ul className="list-disc list-inside space-y-1 text-sm text-gray-700">
-                <li>используйте осмысленные сочетания городов и рубрик (не выбирайте сразу все города без необходимости);</li>
-                <li>ограничивайте число URL — лишний мусор только замедляет парсинг и даёт больше дублей;</li>
+                <li>если по выбранным условиям показано «ничего нет» — поменяйте рубрику: у Яндекса своя формулировка;</li>
+                <li>крупные города частью привязаны к региону, поэтому в списке есть и города, и регионы;</li>
                 <li>после выгрузки проверьте дубли и отсейте нерелевантные рубрики.</li>
               </ul>
-              <p className="text-xs text-gray-500 pt-1">
-                Чем больше URL и городов, тем дольше будет идти парсинг. Если задача большая — запускайте её партиями.
-              </p>
             </div>
             <div className="flex items-center justify-end gap-3 border-t border-gray-100 px-6 py-4">
               <button

@@ -1,4 +1,4 @@
-import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
+import { runYandexMapsCatalogDiscoveryBatch, runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep, startWorkerHeartbeat } from './_shared';
 
 /**
@@ -35,6 +35,7 @@ const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000;
 // потом добивал вместо восстановления. 30 мин с запасом покрывает любой
 // нормальный деплой; всё старше — реально зомби (см. cutoffZombie ниже).
 const RECOVERY_FRESH_WINDOW_MINUTES = Number(process.env.YANDEXMAPS_RECOVERY_FRESH_WINDOW_MINUTES ?? '30');
+const CATALOG_DISCOVERY_STALE_MINUTES = Number(process.env.YANDEXMAPS_CATALOG_DISCOVERY_STALE_MINUTES ?? '120');
 
 async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
@@ -68,6 +69,22 @@ async function startupRecovery(): Promise<void> {
     .select('id');
   if (zombieErr) log('warn', 'Startup recovery: zombie cleanup failed', zombieErr);
   else if (zombies?.length) log('warn', `Startup recovery: ${zombies.length} зомби переведены в failed (${ZOMBIE_THRESHOLD_MINUTES}+ мин без updates)`);
+
+  // Задание обхода, взятое в работу перед остановкой воркера, иначе ждало бы
+  // своей отложенной даты неделю. Возвращаем такие в очередь сразу.
+  const catalogCutoff = new Date(Date.now() - CATALOG_DISCOVERY_STALE_MINUTES * 60 * 1000).toISOString();
+  const { data: staleScans, error: staleScanError } = await db
+    .from('yandex_maps_catalog_discovery_queue')
+    .update({
+      status: 'pending',
+      next_scan_at: new Date().toISOString(),
+      last_error: 'Восстановлено после остановки yandexmaps worker',
+    })
+    .eq('status', 'running')
+    .lt('claimed_at', catalogCutoff)
+    .select('id');
+  if (staleScanError) log('warn', 'Startup recovery: stale catalog discovery cleanup failed', staleScanError);
+  else if (staleScans?.length) log('warn', `Startup recovery: ${staleScans.length} зависших заданий обхода возвращены в очередь`);
 }
 
 /**
@@ -144,7 +161,9 @@ async function pollOnce(): Promise<boolean> {
     return true;
   }
   const job = await claimYandexMapsJob();
-  if (!job) return false;
+  // Пользовательские задачи в приоритете; фоновый поиск новых организаций
+  // берётся за работу только когда очередь пуста.
+  if (!job) return runYandexMapsCatalogDiscoveryBatch();
   const task = (async () => {
     if (job.stage === 'collect') {
       log('info', `Running YandexMaps collect-links job ${job.id}`);

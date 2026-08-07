@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { createGramClient } from '@/lib/tgOutreach/gramClient';
+import { downloadSessionToTemp } from '@/lib/tgOutreach/campaignLoop';
 import { validateProfile } from '@/lib/tgOutreach/profile/validateProfile';
 import { applyProfile, describeTelegramError } from '@/lib/tgOutreach/profile/applyProfile';
 import { readProfile } from '@/lib/tgOutreach/profile/readProfile';
@@ -53,12 +54,23 @@ async function loadAccountForProfile(
   return { account };
 }
 
-/** Подключиться аккаунтом через его прокси. */
+/**
+ * Подключиться аккаунтом через его прокси.
+ *
+ * downloadSessionFile обязателен: у аккаунтов, залитых парами `.json`+`.session`
+ * без успешной конверсии SQLite в StringSession, `session_data` пустой, а
+ * `session_file_path` заполнен. Без функции скачивания createGramClient падает
+ * ещё до подключения — «Нет session_data или session_file_path».
+ */
 async function connectAccount(supabase: SupabaseClient, account: OutreachAccount) {
   const { data: proxyRow } = account.proxy_id
     ? await supabase.from('tg_outreach_proxies').select('*').eq('id', account.proxy_id).maybeSingle()
     : { data: null };
-  return createGramClient(account, (proxyRow as OutreachProxy) ?? null);
+  return createGramClient(
+    account,
+    (proxyRow as OutreachProxy) ?? null,
+    (storagePath) => downloadSessionToTemp(supabase, storagePath),
+  );
 }
 
 /**

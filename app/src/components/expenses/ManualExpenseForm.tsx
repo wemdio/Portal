@@ -236,7 +236,7 @@ export default function ManualExpenseForm({
   const visible = items.filter((item) => matchesSearch(item, search));
 
   return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-3">
+    <div className="glass-panel p-3">
       <h3 className="text-sm font-semibold text-zinc-900">Ручная трата</h3>
       <p className="mt-0.5 text-xs text-zinc-500">
         Личная карта и всё, чего нет в банковских выгрузках.
@@ -383,7 +383,9 @@ export default function ManualExpenseForm({
         </span>
       </div>
 
-      <div className="mt-1.5 overflow-x-auto">
+      {/* Плотная подложка под таблицей: на стекле строки просвечивают друг
+          через друга. Размытия здесь нет — панель уже стеклянная. */}
+      <div className="mt-1.5 overflow-x-auto rounded-lg bg-[var(--glass-rows)]">
         <table className="w-full min-w-[560px] text-xs">
           <tbody>
             {loading ? (

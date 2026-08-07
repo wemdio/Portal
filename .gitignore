@@ -180,3 +180,6 @@ app/scripts/build-instantly-docx*.mjs
 app/scripts/check-traffic.mjs
 app/scripts/collect-inn*.mjs
 .gstack/
+
+# Логи локальных импортов каталога Яндекс.Карт
+app/logs/

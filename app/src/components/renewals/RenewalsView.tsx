@@ -11,6 +11,7 @@ import KpiRow from '@/components/renewals/KpiRow';
 import RenewalsTable from '@/components/renewals/RenewalsTable';
 import RenewalsUndatedSection from '@/components/renewals/RenewalsUndatedSection';
 import RenewalsChart from '@/components/renewals/RenewalsChart';
+import RenewalsFunnel from '@/components/renewals/RenewalsFunnel';
 
 type SummaryResponse = RenewalsResult & { tableRows: RenewalTableRow[]; undatedRows: RenewalTableRow[] };
 
@@ -94,7 +95,7 @@ export default function RenewalsView() {
     : null;
 
   return (
-    <div className="space-y-4">
+    <div className="glass-stage space-y-4">
       <div>
         <h1 className="text-lg font-semibold text-zinc-900">Продления</h1>
         <p className="text-xs text-zinc-500">
@@ -123,6 +124,13 @@ export default function RenewalsView() {
       {!loading && !error && data && (
         <>
           <KpiRow totals={data.totals} />
+
+          {/* Воронка выше динамики: она отвечает на «где сейчас проекты и
+              сколько доходит до продления», и это первый вопрос. Периодом она
+              не режется — иначе из неё выпали бы проекты, которые ещё в работе.
+              Источник у неё другой (воронка AMO, не портальные проекты), и это
+              сказано в подписи внутри компонента. */}
+          <RenewalsFunnel />
 
           {/* Порядок: сначала динамика, потом расшифровка. График отвечает на
               «как идут дела», таблица — на «а из чего это сложилось». Второй

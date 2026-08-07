@@ -224,7 +224,7 @@ export default function TimeSeriesChart({
   );
 
   return (
-    <div ref={rootRef} className="rounded-xl border border-zinc-200 bg-white p-3">
+    <div ref={rootRef} className="glass-tile p-3">
       {option ? (
         <EChart
           option={option}

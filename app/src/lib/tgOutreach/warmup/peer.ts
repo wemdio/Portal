@@ -18,6 +18,29 @@
 import { Api } from 'telegram';
 import type { TelegramClient } from 'telegram';
 import bigInt from 'big-integer';
+import { withTimeout } from '../withTimeout';
+
+/**
+ * Отдельные лимиты на каждый способ найти собеседника.
+ *
+ * Раньше таймаут в 60 секунд стоял снаружи всего resolveWarmupPeer — из-за
+ * этого запасной путь через телефон никогда не срабатывал: если username
+ * зависал в мобильном прокси, внешний таймер убивал функцию до перехода к
+ * телефону, и переписка падала целиком (07.08.2026 — 7 подряд провалов дня 4).
+ *
+ * Теперь каждая попытка под своим таймером. Username-резолв в норме отвечает
+ * за секунды; 20 секунд — с запасом на медленный прокси, но не столько, чтобы
+ * съесть всё окно. Оставшихся 40 секунд хватает импорту контакта, который
+ * возит по MTProto больше данных.
+ */
+// Функции, а не константы: тестам нужно подставить своё значение, а константа
+// читается один раз при импорте модуля и уже не меняется.
+function usernameTimeoutMs(): number {
+  return Number(process.env.TG_WARMUP_RESOLVE_USERNAME_TIMEOUT_MS) || 20_000;
+}
+function phoneTimeoutMs(): number {
+  return Number(process.env.TG_WARMUP_RESOLVE_PHONE_TIMEOUT_MS) || 40_000;
+}
 
 export type ResolutionStrategy =
   | { kind: 'username'; username: string }
@@ -60,7 +83,11 @@ async function resolveByUsername(
   client: TelegramClient,
   username: string,
 ): Promise<ResolvedPeer | null> {
-  const res = await client.invoke(new Api.contacts.ResolveUsername({ username }));
+  const res = await withTimeout(
+    client.invoke(new Api.contacts.ResolveUsername({ username })),
+    usernameTimeoutMs(),
+    'резолв @username',
+  );
   const user = res.users.find((u): u is Api.User => u instanceof Api.User);
   return user ? { entity: user, imported: false } : null;
 }
@@ -69,14 +96,18 @@ async function resolveByPhone(
   client: TelegramClient,
   phone: string,
 ): Promise<ResolvedPeer | null> {
-  const res = await client.invoke(new Api.contacts.ImportContacts({
-    contacts: [new Api.InputPhoneContact({
-      clientId: bigInt(Date.now()) as unknown as never,
-      phone,
-      firstName: 'Kolya',
-      lastName: '',
-    })],
-  }));
+  const res = await withTimeout(
+    client.invoke(new Api.contacts.ImportContacts({
+      contacts: [new Api.InputPhoneContact({
+        clientId: bigInt(Date.now()) as unknown as never,
+        phone,
+        firstName: 'Kolya',
+        lastName: '',
+      })],
+    })),
+    phoneTimeoutMs(),
+    'импорт телефона',
+  );
   const user = res.users.find((u): u is Api.User => u instanceof Api.User);
   return user ? { entity: user, imported: true } : null;
 }

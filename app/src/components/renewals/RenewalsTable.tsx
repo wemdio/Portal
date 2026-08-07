@@ -21,7 +21,7 @@ import RenewalsRowsTable from '@/components/renewals/RenewalsRowsTable';
  */
 export default function RenewalsTable({ rows }: { rows: RenewalTableRow[] }) {
   return (
-    <div className="overflow-x-auto rounded-xl border border-zinc-200 bg-white">
+    <div className="glass-frame overflow-x-auto">
       <RenewalsRowsTable rows={rows} emptyMessage="Нет продлений, подходящих под фильтр." />
     </div>
   );

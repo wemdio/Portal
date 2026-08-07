@@ -140,6 +140,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
 
   const handleCreate = useCallback(async (payload: {
     search_urls: string[];
+    catalog_filters?: { cities?: string[]; categories?: string[]; countries?: string[] };
     max_results: number;
     headless: boolean;
     proxy: {
