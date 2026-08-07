@@ -95,7 +95,7 @@ export default function RenewalsView() {
     : null;
 
   return (
-    <div className="space-y-4">
+    <div className="glass-stage space-y-4">
       <div>
         <h1 className="text-lg font-semibold text-zinc-900">Продления</h1>
         <p className="text-xs text-zinc-500">

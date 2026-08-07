@@ -27,7 +27,7 @@ export default function RenewalsUndatedSection({ rows }: { rows: RenewalTableRow
   if (rows.length === 0) return null;
 
   return (
-    <div className="overflow-hidden rounded-xl border border-amber-200 bg-amber-50/40">
+    <div className="glass-tile glass-tint-amber overflow-hidden">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -44,8 +44,10 @@ export default function RenewalsUndatedSection({ rows }: { rows: RenewalTableRow
           — не учтены в обороте и количестве выше: привязать ко времени нечем, период на них не действует.
         </span>
       </button>
+      {/* Внутренность раскрытого блока — плотная подложка, а не второе стекло:
+          размытие внутри размытия роняет плавность прокрутки. */}
       {open && (
-        <div className="overflow-x-auto border-t border-amber-200 bg-white">
+        <div className="overflow-x-auto border-t border-amber-200 bg-[var(--glass-rows)]">
           <RenewalsRowsTable rows={rows} emptyMessage="Нет продлений без даты оплаты." />
         </div>
       )}

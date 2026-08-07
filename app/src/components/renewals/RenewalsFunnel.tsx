@@ -145,7 +145,7 @@ export default function RenewalsFunnel() {
   const outcomes = data?.outcomes.filter((o) => o.count > 0) ?? [];
 
   return (
-    <div ref={rootRef} className="rounded-xl border border-zinc-200 bg-white p-3">
+    <div ref={rootRef} className="glass-tile p-3">
       <h3 className="mb-1 text-sm font-semibold text-zinc-900">Воронка вторичных продаж</h3>
 
       {loading ? <div className="px-3 py-10 text-center text-sm text-zinc-400">Загружаю…</div> : null}
