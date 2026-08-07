@@ -56,7 +56,8 @@ export function catalogHasFilters(input: unknown): boolean {
 }
 
 export type CatalogPlace = { country: string; region: string; city: string; companies: number };
-export type CatalogRubric = { rubric: string; companies: number };
+/** with_contacts — у скольких организаций рубрики есть телефон, сайт или почта. */
+export type CatalogRubric = { rubric: string; companies: number; with_contacts: number };
 export type CatalogDictionaries = { places: CatalogPlace[]; rubrics: CatalogRubric[] };
 
 /**
@@ -74,7 +75,10 @@ export async function fetchYandexMapsCatalogDictionaries(): Promise<CatalogDicti
       .limit(50000),
     supabaseAdmin
       .from('yandex_maps_catalog_rubrics')
-      .select('rubric, companies')
+      // Доля организаций с контактами отделяет рабочие рубрики от объектов
+      // карты: «Скамейки» — вторая по размеру рубрика каталога, но телефон
+      // есть у 20 записей из 554 тысяч, и для аутрича она пуста.
+      .select('rubric, companies, with_contacts')
       .order('companies', { ascending: false })
       .limit(20000),
   ]);

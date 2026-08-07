@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { YandexMapsParserForm } from '@/components/parsers/YandexMapsParserForm';
 import { authFetchJson } from '@/lib/authFetch';
 
@@ -8,16 +8,20 @@ const mockedFetch = authFetchJson as jest.MockedFunction<typeof authFetchJson>;
 
 const CITIES = ['Москва', 'Королёв', 'Люберцы', 'Воскресенск', 'Чехов', 'Клин', 'Лобня', 'Дубна'];
 
+const REGION = 'Москва и Московская область';
+
 const PLACES = CITIES.map((city, index) => ({
   country: 'Россия',
-  region: 'Москва и Московская область',
+  region: REGION,
   city,
   companies: 100000 - index,
 }));
 
 const RUBRICS = [
-  { rubric: 'Доставка еды', companies: 54321 },
-  { rubric: 'Кафе', companies: 12345 },
+  { rubric: 'Доставка еды', companies: 54321, with_contacts: 48000 },
+  { rubric: 'Кафе', companies: 12345, with_contacts: 10000 },
+  // Объект карты: в каталоге таких сотни тысяч, но звонить там некому.
+  { rubric: 'Скамейки', companies: 554000, with_contacts: 20 },
 ];
 
 /** Справочник отдаётся GET-ом, предпросчёт «сколько найдётся» — POST-ом. */
@@ -26,6 +30,13 @@ function mockCatalogApi() {
     if (init?.method === 'POST') return { total: 4200, capped: false } as never;
     return { places: PLACES, rubrics: RUBRICS } as never;
   });
+}
+
+/** Клик по пункту именно в списке: то же название есть в чипах и быстрых кнопках. */
+function clickInPicker(testId: string, text: string) {
+  const picker = screen.getByTestId(testId);
+  const options = within(picker).getAllByText(text);
+  fireEvent.click(options[options.length - 1]);
 }
 
 beforeEach(() => {
@@ -39,10 +50,11 @@ describe('YandexMapsParserForm', () => {
     render(<YandexMapsParserForm onCreate={onCreate} />);
 
     // Ждём справочник: до его загрузки форма показывает прежние статические списки.
-    await screen.findByText('Доставка еды');
+    await screen.findByTestId('rubric-picker');
+    await within(screen.getByTestId('rubric-picker')).findByText('Доставка еды');
 
-    CITIES.forEach((city) => fireEvent.click(screen.getByText(city)));
-    fireEvent.click(screen.getByText('Доставка еды'));
+    CITIES.forEach((city) => clickInPicker('city-picker', city));
+    clickInPicker('rubric-picker', 'Доставка еды');
     fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '5000' } });
     fireEvent.click(screen.getByRole('button', { name: 'Запустить парсинг' }));
 
@@ -58,10 +70,60 @@ describe('YandexMapsParserForm', () => {
     });
   });
 
+  it('регион берётся целиком одним значением, а не списком его городов', async () => {
+    const onCreate = jest.fn();
+    render(<YandexMapsParserForm onCreate={onCreate} />);
+    await within(await screen.findByTestId('city-picker')).findByText(REGION);
+
+    fireEvent.click(within(screen.getByTestId('city-picker')).getByRole('button', { name: 'весь регион' }));
+    clickInPicker('rubric-picker', 'Кафе');
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить парсинг' }));
+
+    const payload = onCreate.mock.calls[0][0];
+    // Регион, а не восемь городов: поиск сверяет выбранное и с city, и с region,
+    // поэтому организации региона без города тоже попадают в выборку.
+    expect(payload.catalog_filters.cities).toEqual([REGION]);
+  });
+
+  it('«выбрать все» отдаёт регионы, а не тысячи городов', async () => {
+    const onCreate = jest.fn();
+    render(<YandexMapsParserForm onCreate={onCreate} />);
+    await within(await screen.findByTestId('city-picker')).findByText(REGION);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Выбрать все' }));
+    clickInPicker('rubric-picker', 'Кафе');
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить парсинг' }));
+
+    expect(onCreate.mock.calls[0][0].catalog_filters.cities).toEqual([REGION]);
+  });
+
+  it('рубрики без контактов спрятаны, пока фильтр включён', async () => {
+    render(<YandexMapsParserForm onCreate={jest.fn()} />);
+    const rubrics = await screen.findByTestId('rubric-picker');
+    await within(rubrics).findByText('Доставка еды');
+
+    // «Скамейки» — крупнейшая рубрика набора, но телефон есть у 0%.
+    expect(within(rubrics).queryByText('Скамейки')).toBeNull();
+
+    fireEvent.click(within(rubrics).getByRole('button', { name: /только с контактами/ }));
+    await waitFor(() => expect(within(rubrics).getByText('Скамейки')).toBeTruthy());
+  });
+
+  it('выбранное видно чипами и снимается по одному', async () => {
+    render(<YandexMapsParserForm onCreate={jest.fn()} />);
+    const cities = await screen.findByTestId('city-picker');
+    await within(cities).findByText('Москва');
+
+    clickInPicker('city-picker', 'Москва');
+    const chip = within(cities).getByRole('button', { name: 'Убрать Москва' });
+    fireEvent.click(chip);
+    await waitFor(() => expect(within(cities).queryByRole('button', { name: 'Убрать Москва' })).toBeNull());
+  });
+
   it('вставленная руками ссылка по-прежнему парсит Яндекс напрямую', async () => {
     const onCreate = jest.fn();
     render(<YandexMapsParserForm onCreate={onCreate} />);
-    await screen.findByText('Доставка еды');
+    await within(await screen.findByTestId('rubric-picker')).findByText('Доставка еды');
 
     const url = 'https://yandex.ru/maps/?text=Москва%20Кафе';
     fireEvent.change(screen.getByPlaceholderText(/yandex\.ru\/maps/), { target: { value: url } });
@@ -88,11 +150,12 @@ describe('YandexMapsParserForm', () => {
     render(<YandexMapsParserForm onCreate={jest.fn()} />);
 
     // По умолчанию показывается Россия, поэтому казахстанских городов не видно.
-    await screen.findByText('Москва');
-    expect(screen.queryByText('Алматы')).toBeNull();
+    const cities = await screen.findByTestId('city-picker');
+    await within(cities).findByText('Москва');
+    expect(within(cities).queryByText('Алматы')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /Казахстан/ }));
-    await waitFor(() => expect(screen.getByText('Алматы')).toBeTruthy());
+    await waitFor(() => expect(within(cities).getAllByText('Алматы').length).toBeGreaterThan(0));
   });
 
   it('без справочника форма откатывается на прежние списки', async () => {
