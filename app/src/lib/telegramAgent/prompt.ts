@@ -71,7 +71,7 @@ telegram_links(id uuid, user_id, telegram_id bigint, created_at)
 
 -- HH парсер
 parser_jobs(id uuid, user_id, parser_type, status, config jsonb, total_found int, total_parsed int, progress_percent int, created_at, completed_at, error_message)
-hh_vacancies(id uuid, job_id, vacancy_id, name, url, salary_from int, salary_to int, company_name, company_url, company_site_url, company_description, area, industries text[], created_at)
+hh_vacancies(id uuid, job_id, vacancy_id, name, url, salary_from int, salary_to int, company_name, company_url, employer_id, company_site_url, company_description, area, industries text[], created_at)
 
 -- Поисковый парсер
 search_parser_jobs(id uuid, user_id, status, config jsonb, total_queries int, processed_queries int, total_results int, created_at, completed_at)

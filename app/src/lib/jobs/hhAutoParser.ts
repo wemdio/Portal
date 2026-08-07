@@ -226,6 +226,7 @@ export interface HhArchiveSinkVacancy {
   salary_currency: string | null;
   company_name: string;
   company_url: string | null;
+  employer_id: string | null;
   area: string;
   published_at: string | null;
 }
@@ -308,6 +309,7 @@ async function searchVacancyPages(
           salary_currency: sal?.currency ?? null,
           company_name: emp.name,
           company_url: emp.alternate_url ?? null,
+          employer_id: emp.id ?? null,
           area: vac.area?.name ?? '',
           published_at: vac.published_at ?? null,
         });
