@@ -325,9 +325,12 @@ function mergeSql(): string {
 
 async function copyBatch(client: Client, rows: CatalogRow[]): Promise<void> {
   const copyFrom = (await import('pg-copy-streams')).from;
+  // Типы pg не знают про COPY-потоки: client.query объявлен под обычные запросы
+  // и возвращает Promise, а pg-copy-streams отдаёт Writable. Приведение точечное
+  // и описывает фактическое поведение драйвера.
   const copy = client.query(copyFrom(
     `copy yandex_maps_catalog_import_stage (${TARGET_COLUMNS.join(', ')}) from stdin with (format csv, null '\\N')`,
-  ));
+  ) as unknown as string) as unknown as NodeJS.WritableStream;
   await pipeline(
     Readable.from((function* copyRows() {
       for (const row of rows) yield rowToCopy(row);
@@ -338,7 +341,11 @@ async function copyBatch(client: Client, rows: CatalogRow[]): Promise<void> {
   await client.query('truncate yandex_maps_catalog_import_stage');
 }
 
-async function readCsv(filePath: string, onRow: (row: CatalogRow) => Promise<void>, startRow = 0): Promise<number> {
+// null означает строку без ID организации: обработчик считает такие
+// отброшенными, поэтому передаём их, а не молча пропускаем.
+type RowHandler = (row: CatalogRow | null) => Promise<void>;
+
+async function readCsv(filePath: string, onRow: RowHandler, startRow = 0): Promise<number> {
   const parser = Papa.parse(Papa.NODE_STREAM_INPUT, {
     header: false,
     delimiter: ';',
@@ -374,7 +381,7 @@ async function readCsv(filePath: string, onRow: (row: CatalogRow) => Promise<voi
   return Math.max(0, rowNumber - 1);
 }
 
-async function readXlsx(filePath: string, onRow: (row: CatalogRow) => Promise<void>, startRow = 0): Promise<number> {
+async function readXlsx(filePath: string, onRow: RowHandler, startRow = 0): Promise<number> {
   const workbook = new (ExcelJS as any).stream.xlsx.WorkbookReader(filePath, {
     worksheets: 'emit', sharedStrings: 'cache', hyperlinks: 'ignore', styles: 'ignore',
   });
