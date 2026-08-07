@@ -287,6 +287,8 @@ const LETTERS_TASK: Record<HeChainLanguage, string> = {
 ...и так далее до последнего письма. Блок «---LETTER 1 B---» — только у письма 1, сразу после его сегментных блоков. Блок «---SEGMENT: ...---» добавляй ТОЛЬКО если для этого письма есть сегментный вариант в плане, сразу после соответствующего письма (вариантов может быть несколько — по блоку на каждый). Никаких пояснений до/после блоков. Маркеры «---LETTER N---», «---LETTER 1 B---», «---SEGMENT: ...---» и слово «Тема:» не меняй. Пиши на русском.`,
   en: `Write the final sequence emails strictly following the plan above. The number of emails must match the source chain. Email 1 has two variants (A and B, different reasons per the plan); the rest have variant A only.
 
+PLAIN VOICE — THE READ-ALOUD TEST. Write like a person emailing a colleague: short uneven sentences, concrete nouns, plain verbs. Banned LLM tells: filler intensifiers ("really", "truly", "actually", "genuinely", "literally"), throat-clearing openers ("I hope this email finds you well", "I hope you're doing well"), hedges ("just wanted to", "just checking in", "just reaching out"), the "not only ... but also" construction, and corporate-register words ("leverage", "underscore", "delve into", "landscape", "synergy", "empower", "elevate", "supercharge", "game-changer", "cutting-edge", "seamless", "streamline", "unlock"). If a sentence would sound polished on a company blog, rewrite it the way you'd say it to a person.
+
 OUTPUT FORMAT (MANDATORY — otherwise the response will fail parsing):
 ---LETTER 1---
 Subject: <subject of email 1, variant A>
