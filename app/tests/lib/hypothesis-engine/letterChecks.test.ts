@@ -106,3 +106,55 @@ describe('cliché boundaries (Cyrillic \\b workaround)', () => {
     expect(v.filter((x) => x.rule === 'stop_phrase')).toEqual([]);
   });
 });
+
+describe('EN tells (LLM-cliché detector, language=en)', () => {
+  const CLEAN_EN = `Hi {{firstName}},
+
+Your site gives each location its own page and phone number, which usually splits acquisition cost across clinics.
+
+We run SEO and paid search for multi-location healthcare groups and tie spend to booked patients in the CRM.
+
+Worth a look, or who owns patient growth on your side?
+
+The WebFX team`;
+
+  const check = (body: string) => checkLetterRules([{ subject: 't', body }], 'en', new Set());
+
+  it('flags filler intensifiers (really/truly/actually/genuinely)', () => {
+    for (const w of ['really', 'truly', 'actually', 'genuinely']) {
+      const v = check(CLEAN_EN.replace('usually', w));
+      expect(v.some((x) => x.rule === 'tell')).toBe(true);
+    }
+  });
+
+  it('flags throat-clearing openers', () => {
+    expect(check(CLEAN_EN.replace('Your site', 'I hope this email finds you well. Your site')).some((x) => x.rule === 'tell')).toBe(true);
+    expect(check(CLEAN_EN.replace('Your site', "I hope you're doing well. Your site")).some((x) => x.rule === 'tell')).toBe(true);
+  });
+
+  it('flags the not-only/but-also construction', () => {
+    const v = check(CLEAN_EN.replace('We run SEO and paid search for multi-location healthcare groups and tie spend to booked patients in the CRM.', 'We not only run SEO but also tie spend to booked patients.'));
+    expect(v.some((x) => x.rule === 'tell')).toBe(true);
+  });
+
+  it('flags corporate-register words (leverage/underscore/seamless/delve)', () => {
+    for (const w of ['leverage', 'underscore', 'seamless', 'delve into', 'unlock']) {
+      const v = check(CLEAN_EN.replace('run SEO', `run SEO to ${w}`));
+      expect(v.some((x) => x.rule === 'tell')).toBe(true);
+    }
+  });
+
+  it('flags hedging fillers (just wanted to / just checking in / just reaching out)', () => {
+    const v = check(CLEAN_EN.replace('Worth a look', 'Just wanted to ask: worth a look'));
+    expect(v.some((x) => x.rule === 'tell')).toBe(true);
+  });
+
+  it('clean EN letter passes all rules', () => {
+    expect(check(CLEAN_EN)).toEqual([]);
+  });
+
+  it('does not run tell rules for ru letters', () => {
+    const v = checkLetterRules([{ subject: 't', body: GOOD_BODY }], 'ru', new Set());
+    expect(v.some((x) => x.rule === 'tell')).toBe(false);
+  });
+});

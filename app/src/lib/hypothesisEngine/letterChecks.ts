@@ -18,9 +18,23 @@
 export interface HeLetterRuleViolation {
   /** Номер письма (1-based), вариант в detail ('A'/'B'). */
   letter: number;
-  rule: 'dash' | 'greeting' | 'cta' | 'stop_phrase' | 'unverified_number';
+  rule: 'dash' | 'greeting' | 'cta' | 'stop_phrase' | 'unverified_number' | 'tell';
   detail: string;
 }
+
+/**
+ * EN «tells» — частотные маркеры LLM-стиля в аутрич-письмах (см. обсуждение
+ * 2026-08-07: запреты в промпте снижают, но не устраняют их; устраняет
+ * детерминированная проверка + перепись). Детали на английском — этот текст
+ * уходит обратно в LLM на перепись.
+ */
+const TELLS_EN: Array<{ re: RegExp; label: string }> = [
+  { re: /\b(really|truly|actually|genuinely|literally)\b/i, label: 'filler intensifier' },
+  { re: /\bi hope (this (email|message|note) finds you well|you(?:'re| are) (?:doing )?well)\b/i, label: 'throat-clearing opener' },
+  { re: /\bnot only\b[^.!?;]{0,80}\bbut also\b/i, label: 'not-only/but-also construction' },
+  { re: /\b(leverage|underscore|delve(?:\s+into)?|landscape|synergy|synergies|empower|elevate|supercharge|game[- ]changer|cutting[- ]edge|seamless|streamline|unlock)\b/i, label: 'corporate-register word' },
+  { re: /\bjust (wanted to|checking in|following up|reaching out)\b/i, label: 'hedging filler' },
+];
 
 const GREETING_RE = /^(здравствуйте|здравствуй|добрый\s+день|доброе\s+утро|добрый\s+вечер|доброго\s+(дня|времени)|привет|hi\b|hello\b|hey\b|dear\b|good\s+(morning|afternoon|day)|dzień\s+dobry|cześć|witam)/i;
 
@@ -126,6 +140,14 @@ export function checkLetterRules(
         const m = letter.body.match(re);
         if (m) {
           violations.push({ letter: i + 1, rule: 'stop_phrase', detail: `письмо ${tag}: рекламное клише «${m[0]}»` });
+        }
+      }
+    }
+    if (language === 'en') {
+      for (const tell of TELLS_EN) {
+        const m = letter.body.match(tell.re);
+        if (m) {
+          violations.push({ letter: i + 1, rule: 'tell', detail: `letter ${tag}: LLM tell "${m[0]}" (${tell.label}) — rewrite that part plainly` });
         }
       }
     }

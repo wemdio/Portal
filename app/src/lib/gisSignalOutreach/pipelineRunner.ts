@@ -7,6 +7,7 @@
  *      measure_only=true → полная воронка, но БЕЗ заливки в Instantly и БЕЗ
  *      записи seen (замер неразрушающий и повторяемый).
  *   2. Кандидаты из 2GIS по рубрикам сегментов (segments.ts): seen-дедуп,
+ *      дедуп свежих проверок по архиву (окно RECHECK_AFTER_DAYS=30),
  *      cross-segment дедуп (первый по приоритету забирает), квота = daily_limit
  *      поровну на сегмент.
  *   3. 6-сигнальная квалификация сайта (signals.ts, конкурентность 5). КАЖДАЯ
@@ -216,7 +217,7 @@ export async function runGisSignalPipeline(
     });
     for (const c of candidates) funnel.perSegment[c.segmentKey].pulled += 1;
     funnel.total.pulled = candidates.length;
-    log(`Кандидатов после seen/cross-segment дедупа: ${candidates.length}`);
+    log(`Кандидатов после seen/архив/cross-segment дедупа: ${candidates.length}`);
 
     if (candidates.length === 0) {
       await finishRun({ status: 'completed', funnel });

@@ -6,6 +6,12 @@
  * пока append не случился, компания остаётся eligible на следующих прогонах).
  * Окна ре-контакта нет: 2GIS-карточка, однажды залитая, больше не трогается.
  *
+ * Второй фильтр дедупа — архив проверок gis_signal_company_signals: туда
+ * пишется КАЖДАЯ проверенная компания (и pass, и fail). Чтобы дневной прогон
+ * не перепроверял вчерашних отсеянных (нет сигналов/не онлайн/нет email),
+ * pull дополнительно отсекает checked_at свежее RECHECK_AFTER_DAYS; старше —
+ * компания снова eligible (сайт мог восстановиться).
+ *
  * Паттерн повторяет lib/outreachos/seenEmployers.ts.
  */
 
@@ -57,6 +63,49 @@ export async function filterUnseenIds(ids: string[]): Promise<Set<string>> {
     }
   }
   return new Set(unique.filter((id) => !seen.has(id)));
+}
+
+/** Окно повторной проверки отсеянных (дней). Залитые (seen) не трогаем никогда,
+ *  отсеянные получают шанс на retry через RECHECK_AFTER_DAYS+ дней. */
+export const RECHECK_AFTER_DAYS = 30;
+
+/**
+ * Из переданных twogis_id возвращает те, которых НЕТ в архиве проверок
+ * (gis_signal_company_signals) со свежим checked_at (> now() - days). Архив
+ * пишется на КАЖДУЮ проверку (upsert по twogis_id — checked_at последней), так
+ * что свежая строка = компания недавно отсеяна и перепроверять её рано.
+ * Тот же чанкинг SELECT_CHUNK (длинные id в .in() → лимит URL nginx) и тот же
+ * fail-closed: сбой БД → пустой Set (прогон пропускает день, а не жжёт квоту
+ * на перепроверку вчерашних reject'ов).
+ */
+export async function filterRecentlyCheckedIds(
+  ids: string[],
+  days: number = RECHECK_AFTER_DAYS,
+): Promise<Set<string>> {
+  const unique = Array.from(new Set(ids.filter(Boolean)));
+  if (unique.length === 0) return new Set();
+  if (!supabaseAdmin) return new Set(); // fail-closed, см. шапку
+
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const recent = new Set<string>();
+  for (let i = 0; i < unique.length; i += SELECT_CHUNK) {
+    const slice = unique.slice(i, i + SELECT_CHUNK);
+    const { data, error } = await supabaseAdmin
+      .from('gis_signal_company_signals')
+      .select('twogis_id')
+      .in('twogis_id', slice)
+      .gt('checked_at', cutoff);
+    if (error) {
+      console.warn(
+        `[gis-signal][signals-archive] lookup failed (chunk ${i / SELECT_CHUNK + 1}, ${slice.length} ids): ${error.message} — fail-closed, весь батч отсеян`,
+      );
+      return new Set(); // fail-closed, см. шапку
+    }
+    for (const r of (data ?? []) as { twogis_id: string }[]) {
+      if (r.twogis_id) recent.add(r.twogis_id);
+    }
+  }
+  return new Set(unique.filter((id) => !recent.has(id)));
 }
 
 /**
