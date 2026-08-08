@@ -1,11 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
-import {
-  countYandexMapsCatalog,
-  fetchYandexMapsCatalogDictionaries,
-  normalizeYandexMapsCatalogFilters,
-} from '@/lib/parsers/yandexMapsCatalog';
+import { fetchYandexMapsCatalogDictionaries } from '@/lib/parsers/yandexMapsCatalog';
 
 export const dynamic = 'force-dynamic';
 
@@ -36,15 +32,12 @@ export async function GET(req: NextRequest) {
   }
 }
 
-/** Сколько организаций найдётся по выбранным фильтрам — до запуска. */
-export async function POST(req: NextRequest) {
-  if (!await requireUser(req)) return jsonError('Unauthorized', 401);
-  try {
-    const body = await req.json();
-    const filters = normalizeYandexMapsCatalogFilters(body?.catalog_filters ?? body);
-    if (!filters) return NextResponse.json({ total: 0, capped: false });
-    return NextResponse.json(await countYandexMapsCatalog(filters));
-  } catch (error) {
-    return jsonError(error instanceof Error ? error.message : 'Не удалось посчитать организации', 500);
-  }
-}
+// Предпросчёта «сколько найдётся» здесь больше нет. Он уходил на каждое
+// изменение фильтра, а стоил полного прохода по всем подходящим строкам: счёт
+// обязан досмотреть выборку до конца, в отличие от самого сбора, который
+// останавливается, набрав нужное количество. Оператор теперь просто указывает,
+// сколько организаций забрать, и получает их — считать наперёд незачем.
+//
+// Объём каждой рубрики и каждого места по-прежнему виден в форме: он берётся из
+// справочников, посчитанных заранее (`yandex_maps_catalog_places` и
+// `yandex_maps_catalog_rubrics`), и ничего не стоит.
