@@ -77,14 +77,14 @@ describe('ClientNavList — support unread badge', () => {
 describe('ClientNavList — видимость ENG-пункта по market', () => {
   it('ru-market: ENG-пункт скрыт, RU-группы на месте', () => {
     renderNav('dashboard', { market: 'ru' });
-    expect(screen.queryByRole('link', { name: 'ENG Outreach' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Outreach' })).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Бриф' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Кампании' })).toBeInTheDocument();
   });
 
   it('market не задан (старый провайдер/демо) — ENG скрыт, рендер как у ru', () => {
     renderNav('dashboard');
-    expect(screen.queryByRole('link', { name: 'ENG Outreach' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Outreach' })).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Бриф' })).toBeInTheDocument();
   });
 
@@ -93,6 +93,6 @@ describe('ClientNavList — видимость ENG-пункта по market', ()
     const links = screen.getAllByRole('link');
     expect(links).toHaveLength(1);
     expect(links[0]).toHaveAttribute('href', '/client/eng');
-    expect(links[0]).toHaveTextContent('ENG Outreach');
+    expect(links[0]).toHaveTextContent('Outreach');
   });
 });

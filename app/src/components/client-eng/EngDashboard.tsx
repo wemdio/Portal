@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * ENG Command Center (/client/eng/dashboard): общий экран по всем ENG-проектам
+ * Command Center (/client/eng/dashboard): общий экран по всем ENG-проектам
  * клиента — этап каждой вертикали, статистика за сегодня, следующий авто-добор
  * (countdown до 03:20 UTC, тикает локально), активные джобы и лента событий.
  *
@@ -37,16 +37,17 @@ import { EngCard, EngSpinner } from './ui';
 
 const POLL_INTERVAL_MS = 15000;
 
-/* ── Визуальная модель этапов: серый → синий → фиолетовый → зелёный ── */
+/* ── Визуальная модель этапов по статусному словарю системы: amber — работа
+   идёт (пульс), paper-mute — этап ждёт следующего шага, green — вертикаль live ── */
 
 const STAGE_META: Record<EngDashStage, { color: string; pulse: boolean }> = {
-  research: { color: '#84848c', pulse: true },
-  letters: { color: '#4f9cf9', pulse: false },
-  collecting: { color: '#8b5cf6', pulse: true },
-  construct: { color: '#8b5cf6', pulse: true },
-  analyzing: { color: '#8b5cf6', pulse: true },
-  analyzed: { color: '#8b5cf6', pulse: false },
-  template: { color: '#c084fc', pulse: false },
+  research: { color: 'var(--cp-amber)', pulse: true },
+  letters: { color: 'var(--cp-paper-mute)', pulse: false },
+  collecting: { color: 'var(--cp-amber)', pulse: true },
+  construct: { color: 'var(--cp-amber)', pulse: true },
+  analyzing: { color: 'var(--cp-amber)', pulse: true },
+  analyzed: { color: 'var(--cp-paper-mute)', pulse: false },
+  template: { color: 'var(--cp-paper-mute)', pulse: false },
   launched: { color: 'var(--cp-green)', pulse: false },
 };
 
@@ -88,8 +89,15 @@ function CountUp({ value, style }: { value: number; style?: React.CSSProperties 
   useEffect(() => {
     const from = fromRef.current;
     const to = value;
-    if (from === to) {
+    // prefers-reduced-motion: без нарастания — сразу финальное значение
+    // (matchMedia может отсутствовать в jsdom — тогда анимируем как обычно).
+    const reduceMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (from === to || reduceMotion) {
       setDisplay(to);
+      fromRef.current = to;
       return;
     }
     let raf = 0;
@@ -129,7 +137,7 @@ function RefillCountdown({ nextRunAt }: { nextRunAt: string }) {
   const leftMs = Math.max(0, target - nowTs);
   if (leftMs <= 0) {
     return (
-      <span className="ds-mono text-2xl font-bold" style={{ color: 'var(--cp-amber)' }}>
+      <span className="ds-mono text-xl font-semibold" style={{ color: 'var(--cp-amber)' }}>
         starting…
       </span>
     );
@@ -140,7 +148,7 @@ function RefillCountdown({ nextRunAt }: { nextRunAt: string }) {
   const s = totalSec % 60;
   const pad = (n: number) => String(n).padStart(2, '0');
   return (
-    <span className="ds-mono text-2xl font-bold tabular-nums" style={{ color: 'var(--cp-paper)' }}>
+    <span className="ds-mono text-xl font-semibold tabular-nums" style={{ color: 'var(--cp-paper)' }}>
       {pad(h)}:{pad(m)}:{pad(s)}
     </span>
   );
@@ -171,19 +179,23 @@ function StagePill({ stage }: { stage: EngDashStage }) {
 
 function DotsProgress({ dots, stage }: { dots: boolean[]; stage: EngDashStage }) {
   const activeIdx = dots.findIndex((d) => !d);
-  const color = STAGE_META[stage].color;
+  // Пройденные точки — paper (у live-вертикали — green), текущая — amber
+  // (пульс только у этапов с живой работой), будущие — hairline-серые.
+  const doneColor = stage === 'launched' ? 'var(--cp-green)' : 'var(--cp-paper)';
+  const activeColor = stage === 'launched' ? 'var(--cp-green)' : 'var(--cp-amber)';
+  const pulse = STAGE_META[stage].pulse;
   return (
     <div className="flex items-start gap-0" role="img" aria-label={`Stage: ${stage}`}>
       {DOT_LABELS.map((label, i) => {
         const done = dots[i] === true;
         const active = i === activeIdx;
-        const dotColor = done || active ? color : 'var(--cp-divider-strong)';
+        const dotColor = done ? doneColor : active ? activeColor : 'var(--cp-divider-strong)';
         return (
           <div key={label} className="flex items-start">
             {i > 0 && (
               <span
                 className="mt-[5px] inline-block h-px w-3 sm:w-4"
-                style={{ background: dots[i - 1] ? color : 'var(--cp-divider-strong)' }}
+                style={{ background: dots[i - 1] ? doneColor : 'var(--cp-divider-strong)' }}
               />
             )}
             <span className="flex flex-col items-center gap-1">
@@ -192,7 +204,7 @@ function DotsProgress({ dots, stage }: { dots: boolean[]; stage: EngDashStage })
                 title={label}
                 style={{
                   background: dotColor,
-                  animation: active ? 'eng-dash-pulse 1.6s ease-in-out infinite' : undefined,
+                  animation: active && pulse ? 'eng-dash-pulse 1.6s ease-in-out infinite' : undefined,
                 }}
               />
               <span
@@ -222,11 +234,14 @@ function relTime(iso: string): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+/* Иконки ленты — lucide фиксированного размера; цвет только со смыслом:
+   green — запуск/долив (заработанный плюс), red — сбой, остальное — спокойный
+   paper-faint. Никакой «радуги» по типам событий. */
 const EVENT_ICON: Record<EngDashboardEvent['type'], { Icon: typeof Mail; color: string }> = {
-  letters_ready: { Icon: Mail, color: '#4f9cf9' },
-  base_collected: { Icon: Database, color: '#8b5cf6' },
-  base_analyzed: { Icon: CheckCircle2, color: '#8b5cf6' },
-  template_ready: { Icon: Wand2, color: '#c084fc' },
+  letters_ready: { Icon: Mail, color: 'var(--cp-paper-faint)' },
+  base_collected: { Icon: Database, color: 'var(--cp-paper-faint)' },
+  base_analyzed: { Icon: CheckCircle2, color: 'var(--cp-paper-faint)' },
+  template_ready: { Icon: Wand2, color: 'var(--cp-paper-faint)' },
   launched: { Icon: Rocket, color: 'var(--cp-green)' },
   refill_appended: { Icon: RefreshCw, color: 'var(--cp-green)' },
   refill_empty: { Icon: RefreshCw, color: 'var(--cp-text-l)' },
@@ -444,16 +459,19 @@ export function EngDashboard() {
   const verticalNames = new Map(verticals.map((v) => [v.id, v.name]));
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="eng-dash flex flex-col gap-5">
       <style>{`
         @keyframes eng-dash-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
         @keyframes eng-dash-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+        @media (prefers-reduced-motion: reduce) {
+          .eng-dash, .eng-dash * { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+        }
       `}</style>
 
       <header className="flex flex-wrap items-end gap-3">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold m-0" style={{ color: 'var(--cp-paper)' }}>
-            ENG Command Center
+            Command Center
           </h1>
           <p className="mt-1 text-sm" style={{ color: 'var(--cp-text-m)' }}>
             Live view across all your verticals — refreshed every 15s.
@@ -484,9 +502,11 @@ export function EngDashboard() {
           <section className="grid grid-cols-2 gap-3 xl:grid-cols-4" aria-label="Today">
             {(
               [
+                // Цвет — только со смыслом: долив в кампании — заработанный
+                // плюс (green); валидация и сбор — нейтральные счётчики (paper).
                 { label: 'Appended today', value: today.appended, color: 'var(--cp-green)', hint: 'leads added to campaigns' },
-                { label: 'Valid today', value: today.valid, color: '#8b5cf6', hint: 'emails passed validation' },
-                { label: 'Collected today', value: today.collected, color: '#4f9cf9', hint: 'new companies harvested' },
+                { label: 'Valid today', value: today.valid, color: 'var(--cp-paper)', hint: 'emails passed validation' },
+                { label: 'Collected today', value: today.collected, color: 'var(--cp-paper)', hint: 'new companies harvested' },
               ] as const
             ).map((card, i) => (
               <div
@@ -495,7 +515,7 @@ export function EngDashboard() {
                 style={{ animation: `eng-dash-in 0.5s ease-out ${i * 70}ms both` }}
               >
                 <span className="ds-eyebrow">{card.label}</span>
-                <CountUp value={card.value} style={{ fontSize: '1.75rem', fontWeight: 700, color: card.color }} />
+                <CountUp value={card.value} style={{ fontSize: '1.25rem', fontWeight: 600, color: card.color }} />
                 <span className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
                   {card.hint}
                 </span>

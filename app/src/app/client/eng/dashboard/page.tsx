@@ -3,7 +3,7 @@
 import { EngDashboard } from '@/components/client-eng/EngDashboard';
 
 /**
- * /client/eng/dashboard — ENG Command Center: общий живой экран по всем
+ * /client/eng/dashboard — Command Center: общий живой экран по всем
  * проектам клиента (этапы вертикалей, статистика дня, авто-добор, события).
  * Дефолтная точка входа в ENG-кабинет, когда проекты уже есть (список
  * проектов сам перенаправляет сюда); тексты страницы — английские.
