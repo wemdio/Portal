@@ -57,6 +57,15 @@ import { fetchTopUpFromBaseOfBases } from './baseOfBasesSource';
 import { fetchTopUpFromCache } from './baseOfBasesFromCache';
 import { cleanCompanyNames } from '@/lib/companyNameCleanupBatch';
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
+import {
+  buildAutoPipelineDomainSnapshot,
+  persistDomainSnapshots,
+} from '@/lib/clientReports/domainSnapshots';
+import {
+  partialAppendOutcome,
+  selectAcceptedItems,
+  type ExactAppendOutcome,
+} from '@/lib/clientReports/appendOutcome';
 import type { ClientLaunchSequence } from '@/lib/clientLaunch/types';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
 
@@ -162,6 +171,19 @@ export interface AutoPipelineRunResult {
   error?: string;
 }
 
+export function acceptedAutoRouteDomains(
+  leads: readonly LeadCreatePayload[],
+  outcome: ExactAppendOutcome,
+): Set<string> | null {
+  const acceptedLeads = selectAcceptedItems(leads, outcome);
+  if (acceptedLeads === null) return null;
+  return new Set(acceptedLeads.flatMap((lead) => {
+    const raw = lead.custom_variables?.domain;
+    const domain = raw === null || raw === undefined ? '' : String(raw).trim().toLowerCase();
+    return domain ? [domain] : [];
+  }));
+}
+
 // ── Built-in excludes ────────────────────────────────────────────────────
 //
 // Жирные федеральные бренды, которым нельзя слать холодные письма ни одному
@@ -201,13 +223,14 @@ async function loadConfig(clientUserId: string): Promise<AutoPipelineConfig | nu
   return data as AutoPipelineConfig;
 }
 
-async function loadSeenEmployerIds(clientUserId: string): Promise<Set<string>> {
-  if (!supabaseAdmin) return new Set();
+export async function loadSeenEmployerIds(clientUserId: string): Promise<Set<string>> {
+  if (!supabaseAdmin) throw new Error('supabaseAdmin not initialized');
   const { data, error } = await supabaseAdmin
     .from('client_auto_pipeline_seen_employers')
     .select('hh_employer_id')
     .eq('client_user_id', clientUserId);
-  if (error || !data) return new Set();
+  if (error) throw new Error(`Failed to load seen employer ids: ${error.message}`);
+  if (!data) return new Set();
   return new Set(data.map((r) => (r as { hh_employer_id: string }).hh_employer_id));
 }
 
@@ -216,8 +239,8 @@ async function loadSeenEmployerIds(clientUserId: string): Promise<Set<string>> {
  * dedup'ится по hh_employer_id (числовой), BoB-домены другие. Поэтому BoB
  * нуждается в separate domain-based dedup.
  */
-async function loadSeenDomains(clientUserId: string): Promise<Set<string>> {
-  if (!supabaseAdmin) return new Set();
+export async function loadSeenDomains(clientUserId: string): Promise<Set<string>> {
+  if (!supabaseAdmin) throw new Error('supabaseAdmin not initialized');
   const { data, error } = await supabaseAdmin
     .from('client_auto_pipeline_seen_employers')
     .select('domain')
@@ -227,7 +250,8 @@ async function loadSeenDomains(clientUserId: string): Promise<Set<string>> {
     // идут только реально обработанные (routed/stored/skipped/failed).
     .neq('status', 'dry_run')
     .not('domain', 'is', null);
-  if (error || !data) return new Set();
+  if (error) throw new Error(`Failed to load seen domains: ${error.message}`);
+  if (!data) return new Set();
   const set = new Set<string>();
   for (const r of data) {
     const d = (r as { domain: string | null }).domain;
@@ -638,15 +662,17 @@ function detectSource(employerId: string): 'hh' | 'base_of_bases' {
   return employerId.startsWith('bob:') ? 'base_of_bases' : 'hh';
 }
 
-async function upsertSeenEmployers(rows: SeenEmployerUpsert[]): Promise<void> {
-  if (!supabaseAdmin || rows.length === 0) return;
+export async function upsertSeenEmployers(rows: SeenEmployerUpsert[]): Promise<void> {
+  if (rows.length === 0) return;
+  if (!supabaseAdmin) throw new Error('supabaseAdmin not initialized');
   // Чанками по 500, чтобы не упереться в payload limit.
   const CHUNK = 500;
   for (let i = 0; i < rows.length; i += CHUNK) {
     const slice = rows.slice(i, i + CHUNK);
-    await supabaseAdmin
+    const { error } = await supabaseAdmin
       .from('client_auto_pipeline_seen_employers')
       .upsert(slice, { onConflict: 'client_user_id,hh_employer_id' });
+    if (error) throw new Error(`Failed to persist seen employers: ${error.message}`);
   }
 }
 
@@ -1119,6 +1145,7 @@ export async function runAutoPipelineForClient(
             score: String(enr.score),
             source: detectSource(enr.employer.id),
             domain: enr.domain ?? '',
+            source_row_id: enr.employer.id,
           };
           // В работу — только ВАЛИДНЫЕ почты (valid/role/free/catch_all):
           // правило «готовый = почта валидная или catch-all + название».
@@ -1168,7 +1195,6 @@ export async function runAutoPipelineForClient(
             routed_bucket_id: bucket.id,
             routed_campaign_id: bucket.instantly_campaign_id,
           });
-          routedCount += leadEmails.length;
         }
       } // конец for (enr of enrichments)
 
@@ -1181,13 +1207,43 @@ export async function runAutoPipelineForClient(
         const readyLeads = group.leads.filter((l) => l.email && l.company_name && l.website);
         droppedIncomplete += group.leads.length - readyLeads.length;
         if (readyLeads.length === 0) continue;
+
+        const applyAppendOutcome = (
+          outcome: ExactAppendOutcome,
+          unresolvedStatus: 'skipped' | 'failed',
+          unresolvedMessage: string,
+        ) => {
+          const acceptedDomains = acceptedAutoRouteDomains(readyLeads, outcome);
+          routedCount += outcome.accepted;
+          for (const seen of seenUpserts) {
+            if (seen.routed_bucket_id !== group.bucket.id || seen.status !== 'routed') continue;
+            const domain = seen.domain?.trim().toLowerCase() ?? '';
+            if (acceptedDomains?.has(domain)) continue;
+            seen.status = acceptedDomains === null ? 'failed' : unresolvedStatus;
+            seen.skip_reason = acceptedDomains === null && outcome.accepted > 0
+              ? 'accepted_identity_unknown'
+              : unresolvedStatus === 'skipped' ? 'provider_not_accepted' : null;
+            seen.error_message = acceptedDomains === null && outcome.accepted > 0
+              ? 'Provider confirmed only an aggregate accepted count'
+              : unresolvedStatus === 'failed' ? unresolvedMessage.slice(0, 500) : null;
+            seen.routed_bucket_id = null;
+            seen.routed_campaign_id = null;
+          }
+        };
+
         try {
-          await appendLeadsToClientCampaign({
+          const result = await appendLeadsToClientCampaign({
             userId: clientUserId,
             campaignId: group.bucket.instantly_campaign_id!,
             leads: readyLeads,
             contextLabel: group.bucket.label,
+            ledgerSource: {
+              kind: 'auto_pipeline',
+              runId,
+              campaignName: group.bucket.label,
+            },
           });
+          applyAppendOutcome(result, 'skipped', 'Provider did not accept the contact');
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'append failed';
           await logError(
@@ -1195,18 +1251,66 @@ export async function runAutoPipelineForClient(
             err,
             { ...logCtx, bucket: group.bucket.label, leadCount: readyLeads.length },
           );
-          // Помечаем seen-строки этого bucket'а (в памяти, ДО upsert) как failed —
-          // не отдельным DB-запросом, т.к. seen ещё не записаны.
-          for (const s of seenUpserts) {
-            if (s.routed_bucket_id === group.bucket.id && s.status === 'routed') {
-              s.status = 'failed';
-              s.error_message = msg.slice(0, 500);
+          const partial = partialAppendOutcome(err);
+          if (partial) applyAppendOutcome(partial, 'failed', msg);
+          else {
+            for (const seen of seenUpserts) {
+              if (seen.routed_bucket_id === group.bucket.id && seen.status === 'routed') {
+                seen.status = 'failed';
+                seen.error_message = msg.slice(0, 500);
+                seen.routed_bucket_id = null;
+                seen.routed_campaign_id = null;
+              }
             }
           }
-          failedCount += readyLeads.length;
-          routedCount -= readyLeads.length;
+          failedCount += Math.max(0, readyLeads.length - (partial?.accepted ?? 0));
         }
       }
+
+      // Независимый от провайдера append-only снимок по каждому реально
+      // обработанному домену. Пишем до legacy seen-upsert: при сбое чанк
+      // останется доступным для retry, а стабильный id не создаст дубль.
+      const seenByEmployerId = new Map(
+        seenUpserts.map((seen) => [seen.hh_employer_id, seen] as const),
+      );
+      const campaignLabelById = new Map(
+        config.score_buckets
+          .filter((bucket) => bucket.instantly_campaign_id)
+          .map((bucket) => [bucket.instantly_campaign_id!, bucket.label] as const),
+      );
+      const snapshotScoredAt = new Date().toISOString();
+      await persistDomainSnapshots(
+        supabaseAdmin!,
+        enrichments.map((enrichment) => {
+          const seen = seenByEmployerId.get(enrichment.employer.id);
+          const routedCampaignId =
+            seen?.status === 'routed' ? seen.routed_campaign_id : null;
+          return buildAutoPipelineDomainSnapshot({
+            clientUserId,
+            runId,
+            employerId: enrichment.employer.id,
+            domain: enrichment.domain,
+            companyName: seen?.company_name ?? null,
+            score: enrichment.score,
+            spf: enrichment.spf,
+            raw: enrichment.endpointRaw,
+            primaryEmail: {
+              address: enrichment.email,
+              validationStatus: enrichment.emailValidation?.status ?? null,
+            },
+            additionalEmails: enrichment.additionalEmails.map((email) => ({
+              address: email.address,
+              validationStatus: email.validation?.status ?? null,
+            })),
+            scoredAt: snapshotScoredAt,
+            routedCampaignId,
+            routedCampaignName: routedCampaignId
+              ? campaignLabelById.get(routedCampaignId) ?? null
+              : null,
+            routedAt: routedCampaignId ? snapshotScoredAt : null,
+          });
+        }),
+      );
 
       // Upsert seen ЭТОГО чанка (статусы уже финальные после append) —
       // освобождаем память перед следующим. chunk + enrichments + seenUpserts +
@@ -1239,7 +1343,6 @@ export async function runAutoPipelineForClient(
     //  ВНУТРЬ чанк-цикла — инкрементально, см. блок «Заливаем лиды ЭТОГО чанка»
     //  выше. Чистка названий — тоже внутри цикла, шаг 5.1.)
     if (droppedIncomplete > 0) {
-      routedCount -= droppedIncomplete;
       await logAudit(
         'auto-pipeline.dropped-incomplete',
         `Отброшено неполных лидов (нет email/названия/сайта): ${droppedIncomplete}`,

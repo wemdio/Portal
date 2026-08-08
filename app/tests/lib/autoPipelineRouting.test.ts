@@ -8,6 +8,7 @@
  */
 
 import {
+  acceptedAutoRouteDomains,
   buildExcludePatterns,
   decideRoute,
   shouldDoEmailWork,
@@ -283,5 +284,25 @@ describe('buildExcludePatterns', () => {
     const baseLen = buildExcludePatterns([]).length;
     const patternsWithEmpties = buildExcludePatterns(['', '   ', '\t']);
     expect(patternsWithEmpties.length).toBe(baseLen);
+  });
+});
+
+describe('acceptedAutoRouteDomains', () => {
+  const leads = [
+    { email: 'one@one.test', custom_variables: { domain: 'one.test' } },
+    { email: 'sales@one.test', custom_variables: { domain: 'one.test' } },
+    { email: 'two@two.test', custom_variables: { domain: 'two.test' } },
+  ];
+
+  it('routes only domains backed by exact accepted lead identities', () => {
+    expect(acceptedAutoRouteDomains(leads, {
+      accepted: 1, acceptedIndexes: [1], identityComplete: true,
+    })).toEqual(new Set(['one.test']));
+  });
+
+  it('does not guess routed domains from an aggregate-only partial result', () => {
+    expect(acceptedAutoRouteDomains(leads, {
+      accepted: 1, acceptedIndexes: null, identityComplete: false,
+    })).toBeNull();
   });
 });
