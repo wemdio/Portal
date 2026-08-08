@@ -27,6 +27,14 @@ services:
     image: supabase/postgres:15.8.1.060
     container_name: main-postgres
     restart: unless-stopped
+    # Для Postgres SIGTERM — это «smart shutdown»: он ждёт, пока клиенты сами
+    # отключатся. Портал, воркеры и PostgREST не отключаются никогда, поэтому
+    # docker через 10 секунд бьёт SIGKILL, и база каждый раз поднимается через
+    # восстановление по WAL. 08.08.2026 это стоило нескольких минут простоя
+    # после безобидного рестарта — WAL был большой после vacuum freeze.
+    # SIGINT — это «fast shutdown»: обрыв клиентов, контрольная точка, выход.
+    stop_signal: SIGINT
+    stop_grace_period: 60s
     command:
       - postgres
       - -c
