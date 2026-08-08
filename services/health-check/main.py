@@ -281,6 +281,23 @@ JOB_ALERTS_TABLE = "health_check_job_alerts"
 _CONNECT_KWARGS: dict = {"statement_cache_size": 0, "timeout": 15, "command_timeout": 15}
 
 
+def _connect_kwargs(command_timeout: int) -> dict:
+    """Те же параметры подключения, но со своим потолком на длительность запроса.
+
+    Пятнадцать секунд рассчитаны на проверки здоровья: они ходят часто, и
+    зависший запрос там надо обрывать быстро. Ежедневным отчётам этот потолок не
+    подходит — они считают агрегаты по всей таблице, их никто не ждёт, и обрыв
+    оставляет команду вообще без отчёта.
+    """
+    return {**_CONNECT_KWARGS, "command_timeout": command_timeout}
+
+
+# Отчёт по LinkedIn-аутричу считает агрегаты по всей переписке всех лидов. Он
+# уходит раз в сутки в 19:00 МСК, никто его не ждёт, поэтому потолок щедрый:
+# 08.08.2026 отчёт упал с «TimeoutError: no details», не уложившись в 15 секунд.
+LI_REPORT_COMMAND_TIMEOUT_SEC = 180
+
+
 async def _ensure_settings_table() -> None:
     """Create health-check state tables."""
     conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
@@ -2471,7 +2488,9 @@ async def run_li_outreach_report() -> None:
     быть 0; пункты GPT и «ошибки» — информационный контекст, не фейл.
     """
     try:
-        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        conn = await asyncpg.connect(
+            DATABASE_URL, **_connect_kwargs(LI_REPORT_COMMAND_TIMEOUT_SEC)
+        )
     except Exception as e:
         await send_telegram(
             f"🔗 <b>LinkedIn outreach</b>\nНе смог подключиться к БД для отчёта: "
@@ -2480,20 +2499,37 @@ async def run_li_outreach_report() -> None:
         )
         return
     try:
-        raw_ph = await conn.fetchval(r"""
-            SELECT COUNT(*) FROM li_leads l
-            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(l.conversation_history,'[]'::jsonb)) m
-            WHERE m->>'role'='assistant' AND (m->>'content') ~ '\{\{.*\}\}'
-        """) or 0
-        dups = await conn.fetchval("""
-            SELECT COUNT(*) FROM (
-              SELECT l.id, m->>'content' AS content, COUNT(*) AS n
+        # Плейсхолдеры и дубли считаются одним проходом.
+        #
+        # Раньше это были два отдельных запроса, и каждый разворачивал всю
+        # переписку всех лидов: `jsonb_array_elements` по li_leads — это полный
+        # проход с распаковкой TOAST, самое дорогое, что есть в отчёте. Первый
+        # из них 08.08.2026 не уложился в потолок и уронил весь отчёт.
+        #
+        # Группировка по (лид, текст) делается один раз, а обе цифры снимаются
+        # с неё: raw_ph — сумма повторов у текстов с плейсхолдером (это ровно то
+        # же число сообщений, что считал COUNT(*) раньше), dups — сколько групп
+        # встретилось больше одного раза. Регулярка теперь проверяет уникальные
+        # тексты, а не каждое сообщение.
+        #
+        # Замер на 240 тыс. сообщений: 3,7 с двумя запросами против 0,21 с одним.
+        counts = await conn.fetchrow(r"""
+            WITH per_message AS (
+              SELECT l.id AS lead_id, m->>'content' AS content
               FROM li_leads l
               CROSS JOIN LATERAL jsonb_array_elements(COALESCE(l.conversation_history,'[]'::jsonb)) m
-              WHERE m->>'role'='assistant' AND length(m->>'content')>20
-              GROUP BY l.id, m->>'content' HAVING COUNT(*)>1
-            ) d
-        """) or 0
+              WHERE m->>'role'='assistant'
+            ),
+            grouped AS (
+              SELECT lead_id, content, COUNT(*) AS n FROM per_message GROUP BY lead_id, content
+            )
+            SELECT
+              COALESCE(SUM(n) FILTER (WHERE content ~ '\{\{.*\}\}'), 0) AS raw_ph,
+              COUNT(*) FILTER (WHERE n > 1 AND length(content) > 20) AS dups
+            FROM grouped
+        """)
+        raw_ph = (counts["raw_ph"] or 0) if counts else 0
+        dups = (counts["dups"] or 0) if counts else 0
         replied_not_stopped = await conn.fetchval("""
             SELECT COUNT(*) FROM li_campaign_leads cl
             JOIN li_campaigns c ON c.id=cl.campaign_id
@@ -2535,9 +2571,16 @@ async def run_li_outreach_report() -> None:
             WHERE created_at >= CURRENT_DATE AND message ILIKE '%Инвайт отправлен%'
         """) or 0
     except Exception as e:
+        # У asyncpg таймаут команды приходит пустым TimeoutError, и в телеграм
+        # уезжало бесполезное «TimeoutError: no details». Говорим, что именно
+        # случилось и во что не уложились.
+        detail = (
+            f"запрос не уложился в {LI_REPORT_COMMAND_TIMEOUT_SEC} с"
+            if isinstance(e, asyncio.TimeoutError)
+            else _format_exception_message(e)
+        )
         await send_telegram(
-            f"🔗 <b>LinkedIn outreach</b>\nОшибка при сборе отчёта: "
-            f"{_format_exception_message(e)}",
+            f"🔗 <b>LinkedIn outreach</b>\nОшибка при сборе отчёта: {detail}",
             force=True,
         )
         return

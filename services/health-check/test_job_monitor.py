@@ -317,3 +317,72 @@ class PipelineRunsCombinedTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("client_auto_pipeline_runs", tables_hit)
         self.assertTrue(any("завершён" in a for a in alerts))
         self.assertTrue(any("boom" in a for a in alerts))
+
+
+class LiOutreachReportTests(unittest.IsolatedAsyncioTestCase):
+    """Отчёт по LinkedIn-аутричу: потолок запроса и внятная ошибка при таймауте.
+
+    08.08.2026 отчёт свалился с «TimeoutError: no details» — asyncpg отдаёт
+    таймаут команды пустым исключением, а пятнадцати секунд агрегатам по всей
+    переписке перестало хватать.
+    """
+
+    def setUp(self):
+        health.DATABASE_URL = "postgres://test"
+
+    def test_report_gets_its_own_generous_command_timeout(self):
+        # Пятнадцать секунд — потолок для частых проверок здоровья. Суточному
+        # отчёту он не подходит: его никто не ждёт, а обрыв оставляет команду
+        # вообще без отчёта.
+        self.assertGreater(
+            health.LI_REPORT_COMMAND_TIMEOUT_SEC,
+            health._CONNECT_KWARGS["command_timeout"],
+        )
+        kwargs = health._connect_kwargs(health.LI_REPORT_COMMAND_TIMEOUT_SEC)
+        self.assertEqual(kwargs["command_timeout"], health.LI_REPORT_COMMAND_TIMEOUT_SEC)
+        # Остальное подключение не меняется: без этого на pgbouncer посыплется
+        # «prepared statement already exists».
+        self.assertEqual(kwargs["statement_cache_size"], 0)
+        self.assertEqual(health._CONNECT_KWARGS["command_timeout"], 15)
+
+    async def test_timeout_says_what_happened_instead_of_no_details(self):
+        conn = FakeConnection()
+        conn.fetchval = AsyncMock(side_effect=asyncio.TimeoutError())
+        conn.fetchrow = AsyncMock(side_effect=asyncio.TimeoutError())
+        sent = AsyncMock()
+        with (
+            patch.object(health.asyncpg, "connect", AsyncMock(return_value=conn)),
+            patch.object(health, "send_telegram", sent),
+        ):
+            await health.run_li_outreach_report()
+
+        message = sent.await_args.args[0]
+        self.assertIn("не уложился", message)
+        self.assertIn(str(health.LI_REPORT_COMMAND_TIMEOUT_SEC), message)
+        self.assertNotIn("no details", message)
+
+    async def test_placeholders_and_duplicates_are_counted_in_one_pass(self):
+        # Два прохода по jsonb_array_elements всей таблицы — самое дорогое, что
+        # было в отчёте; теперь группировка одна, и обе цифры снимаются с неё.
+        async def fetchrow(query, *args):
+            # Отчёт спрашивает fetchrow трижды; отвечаем по существу запроса.
+            if "per_message" in query:
+                return {"raw_ph": 0, "dups": 0}
+            if "GPT персонализировал" in query:
+                return {"ok": 1, "noop": 0, "err": 0}
+            return {"camp": 0}
+
+        conn = FakeConnection()
+        conn.fetchrow = AsyncMock(side_effect=fetchrow)
+        conn.fetchval = AsyncMock(return_value=0)
+        with (
+            patch.object(health.asyncpg, "connect", AsyncMock(return_value=conn)),
+            patch.object(health, "send_telegram", AsyncMock()),
+        ):
+            await health.run_li_outreach_report()
+
+        unnests = sum(
+            call.args[0].count("jsonb_array_elements")
+            for call in list(conn.fetchrow.await_args_list) + list(conn.fetchval.await_args_list)
+        )
+        self.assertEqual(unnests, 1)
