@@ -9,7 +9,11 @@ import Papa from 'papaparse';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
-import { deletePendingDbImport, readPendingDbImport } from '@/lib/databases/pendingImport';
+import {
+  deletePendingDbImport,
+  listPendingDbImports,
+  readPendingDbImport,
+} from '@/lib/databases/pendingImport';
 import { parseXlsxInWorker } from '@/lib/databases/xlsxWorker';
 import { readXlsxRows } from '@/lib/spreadsheet/parseCSV';
 import { backgroundSave, cancelBackgroundSave } from '@/lib/databases/backgroundSave';
@@ -578,6 +582,12 @@ const LARGE_DATASET_ROW_THRESHOLD = 500;
 // не сохранялась, хотя пользователь был на странице минутами. С потолком
 // сохранение принудительно срабатывает не реже, чем раз в MAX_SAVE_WAIT.
 const MAX_SAVE_WAIT = 25_000;
+// Окно после импорта из парсера, в котором автосейв идёт без дебаунса.
+// Свежая вкладка обязана попасть в БД сразу: до этого она живёт только в
+// памяти + localStorage, а при загрузке страницы состояние из БД всегда
+// приоритетнее localStorage — перезагрузка внутри окна дебаунса (до 10 сек
+// на больших базах) молча уносила импорт.
+const IMPORT_FLUSH_WINDOW_MS = 5_000;
 const REMOTE_SAVE_BACKOFF_MS = 15_000;
 const ENRICHMENT_STORAGE_KEY_PREFIX = 'portal:website-enrichment';
 const ENRICHMENT_STORAGE_VERSION = 1;
@@ -1156,6 +1166,7 @@ export function DatabaseSpreadsheet() {
   const importId = searchParams.get('import');
   const constructorJobId = searchParams.get('constructorJobId');
   const importHandledRef = useRef<string | null>(null);
+  const handledImportsRef = useRef<Set<string>>(new Set());
 
   const { userRole } = useUser();
   const isAdminUser = isAdmin(userRole);
@@ -1249,6 +1260,8 @@ export function DatabaseSpreadsheet() {
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Время первого несохранённого изменения — для потолка дебаунса (MAX_SAVE_WAIT).
   const firstPendingSaveAtRef = useRef<number | null>(null);
+  // До этого момента (timestamp) сохраняем без дебаунса — см. IMPORT_FLUSH_WINDOW_MS.
+  const importFlushUntilRef = useRef(0);
   const accessTokenRef = useRef<string | null>(null);
   const hydratedStateRef = useRef<string | null>(null);
   const remoteSaveInFlightRef = useRef(false);
@@ -2808,13 +2821,15 @@ export function DatabaseSpreadsheet() {
     }
   }, [tabCounter]);
 
+  // Импорты из парсеров. Забираем и то, что пришло ссылкой (?import=<id>),
+  // и всё, что лежит непотреблённым в очереди: кнопка «в базу» в парсере
+  // должна довозить данные сюда сама, даже если юзер не успел кликнуть
+  // «Перейти» в тосте (он гаснет через 3.5 сек).
   useEffect(() => {
     if (!isHydrated) return;
-    if (!importId) return;
-    if (importHandledRef.current === importId) return;
-    importHandledRef.current = importId;
 
     const cleanUrl = () => {
+      if (!importId) return;
       try {
         window.history.replaceState(null, '', window.location.pathname);
       } catch {
@@ -2822,41 +2837,70 @@ export function DatabaseSpreadsheet() {
       }
     };
 
+    const queuedIds = listPendingDbImports().map((entry) => entry.id);
+    const ids = [...new Set([...queuedIds, ...(importId ? [importId] : [])])].filter(
+      (id) => !handledImportsRef.current.has(id),
+    );
+    if (ids.length === 0) {
+      cleanUrl();
+      return;
+    }
+    ids.forEach((id) => handledImportsRef.current.add(id));
+
     (async () => {
+      const MAX_ROWS = 10_000;
+      const MAX_COLS = 80;
+      let importedTabs = 0;
+      let importedRows = 0;
+      let trimmedAny = false;
+      let missing = 0;
+
       try {
-        const payload = await readPendingDbImport(importId);
-        if (!payload) {
+        for (const id of ids) {
+          const payload = await readPendingDbImport(id);
+          if (!payload) {
+            await deletePendingDbImport(id);
+            // Ругаемся только если юзер пришёл по ссылке и ждёт результат.
+            // Протухшая запись очереди чистится молча.
+            if (id === importId) missing += 1;
+            continue;
+          }
+
+          const rawRows = Array.isArray(payload.rows) ? payload.rows : [];
+          const limitedRows = rawRows.slice(0, MAX_ROWS).map((row) => {
+            const cells = Array.isArray(row) ? row : [];
+            return cells.slice(0, MAX_COLS).map((cell) => String(cell ?? ''));
+          });
+
+          if (limitedRows.length === 0) {
+            await deletePendingDbImport(id);
+            continue;
+          }
+
+          // Пока идёт импорт и ещё несколько секунд после — автосейв
+          // работает без дебаунса (см. importFlushUntilRef). Иначе новая
+          // вкладка до 10 сек живёт только в памяти, и перезагрузка
+          // страницы в этом окне теряла её: при следующей загрузке
+          // состояние из БД (ещё без вкладки) приоритетнее localStorage.
+          importFlushUntilRef.current = Date.now() + IMPORT_FLUSH_WINDOW_MS;
+          await applyRowsToNewTab(limitedRows, `${payload.title || 'import'}.csv`);
+          importFlushUntilRef.current = Date.now() + IMPORT_FLUSH_WINDOW_MS;
+
+          await deletePendingDbImport(id);
+          importedTabs += 1;
+          importedRows += limitedRows.length;
+          trimmedAny = trimmedAny || limitedRows.length < rawRows.length;
+        }
+
+        if (importedTabs > 0) {
+          const base =
+            importedTabs === 1
+              ? `Импортировано: ${importedRows} строк`
+              : `Импортировано баз: ${importedTabs} (${importedRows} строк)`;
+          showCopyNotice(trimmedAny ? `${base} (обрезано до лимита)` : base, 'success');
+        } else if (missing > 0) {
           showCopyNotice('Импорт не найден (возможно, устарел или был очищен браузером)', 'error');
-          cleanUrl();
-          return;
         }
-
-        const MAX_ROWS = 10_000;
-        const MAX_COLS = 80;
-
-        const rawRows = Array.isArray(payload.rows) ? payload.rows : [];
-        const limitedRows = rawRows.slice(0, MAX_ROWS).map((row) => {
-          const cells = Array.isArray(row) ? row : [];
-          return cells.slice(0, MAX_COLS).map((cell) => String(cell ?? ''));
-        });
-
-        if (limitedRows.length === 0) {
-          showCopyNotice('Импорт пустой (0 строк)', 'error');
-          await deletePendingDbImport(importId);
-          cleanUrl();
-          return;
-        }
-
-        applyRowsToNewTab(limitedRows, `${payload.title || 'import'}.csv`);
-        const trimmed = limitedRows.length < rawRows.length;
-        showCopyNotice(
-          trimmed
-            ? `Импортировано: ${limitedRows.length} строк (обрезано до лимита)`
-            : `Импортировано: ${limitedRows.length} строк`,
-          'success',
-        );
-
-        await deletePendingDbImport(importId);
         cleanUrl();
       } catch (e) {
         showCopyNotice(e instanceof Error ? e.message : 'Ошибка импорта', 'error');
@@ -9409,10 +9453,9 @@ export function DatabaseSpreadsheet() {
       firstPendingSaveAtRef.current = now;
     }
     const elapsedSinceFirstChange = now - firstPendingSaveAtRef.current;
-    const effectiveDelay = Math.max(
-      0,
-      Math.min(delay, MAX_SAVE_WAIT - elapsedSinceFirstChange),
-    );
+    const effectiveDelay = now < importFlushUntilRef.current
+      ? 0
+      : Math.max(0, Math.min(delay, MAX_SAVE_WAIT - elapsedSinceFirstChange));
 
     saveTimeoutRef.current = setTimeout(() => {
       if (!userIdSnapshot) return;
