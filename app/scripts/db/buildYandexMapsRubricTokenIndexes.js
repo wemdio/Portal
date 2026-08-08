@@ -62,6 +62,7 @@ as $$
         from unnest(string_to_array(coalesce(p_subcategories, ''), ', ')) t
     ) tokens
    where token <> ''
+     and octet_length(token) <= 2000
 $$;`;
 
 /** Имена и `using`-часть — дословно как в миграции; сверяется тестом. */
