@@ -1,5 +1,5 @@
 /**
- * Render-smoke для <EngDashboard /> (ENG Command Center): компонент монтируется
+ * Render-smoke для <EngDashboard /> (Command Center): компонент монтируется
  * на реалистичном пэйлоаде GET /api/client/eng/dashboard и показывает ключевые
  * блоки (today-карточки, карточку вертикали с этапом, ссылку в Instantly,
  * ленту событий, полоску «Right now», countdown авто-добора), плюс пустое
@@ -78,7 +78,7 @@ describe('<EngDashboard />', () => {
 
     // Ждём именно дата-зависимый блок: шапка статична и не маркирует загрузку.
     expect(await screen.findByText('Appended today')).toBeInTheDocument();
-    expect(screen.getByText('ENG Command Center')).toBeInTheDocument();
+    expect(screen.getByText('Command Center')).toBeInTheDocument();
     expect(screen.getByText('Valid today')).toBeInTheDocument();
     expect(screen.getByText('Collected today')).toBeInTheDocument();
     // Авто-добор включён: подпись расписания на месте.

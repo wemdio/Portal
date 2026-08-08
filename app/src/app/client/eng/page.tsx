@@ -12,7 +12,7 @@ export default function ClientEngPage() {
     <div className="mx-auto max-w-4xl xl:max-w-6xl">
       <header className="mb-6 sm:mb-8">
         <h1 className="text-xl sm:text-2xl font-bold m-0" style={{ color: 'var(--cp-paper)' }}>
-          ENG Outreach
+          Outreach
         </h1>
         <p className="mt-1 text-sm" style={{ color: 'var(--cp-text-m)' }}>
           Verticals engine: research your market, review verticals, edit letters, collect a base and launch — all in English.

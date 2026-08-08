@@ -7,11 +7,14 @@
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { HeBaseAnalysisSchema } from '../schemas';
 import { buildBaseAnalysisMessages } from '../prompts/baseAnalyze';
+import { buildBaseAnalysisMessagesEn } from '../prompts/baseAnalyze.en';
+import { projectMarket } from '../market';
 import type { HeBase, HeJob } from '../types';
 import {
   addUsage,
   newUsage,
   payloadString,
+  readProject,
   truncate,
   type HeStageContext,
   type HeStageResult,
@@ -62,8 +65,12 @@ export async function runBaseAnalyzeStage(job: HeJob, ctx: HeStageContext): Prom
     verticalName = (vRow as { name?: string } | null)?.name ?? '';
   }
 
+  // Рынок: ctx.market (воркер), фолбэк — колонка he_projects.market (лениво,
+  // только когда воркер рынок не прокинул). Определяет язык промпта анализа.
+  const market = ctx.market ?? projectMarket(await readProject(ctx.supabase, job.project_id));
+
   const llm = await callLLMWithSchema(
-    buildBaseAnalysisMessages({
+    (market === 'us' ? buildBaseAnalysisMessagesEn : buildBaseAnalysisMessages)({
       filename: base.filename,
       rowCount: base.row_count,
       columns,
