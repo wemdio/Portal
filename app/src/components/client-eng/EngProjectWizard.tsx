@@ -106,7 +106,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
           prefetch={false}
           className="inline-flex items-center gap-1 hover:underline"
         >
-          <ArrowLeft className="h-3 w-3" /> ENG Outreach
+          <ArrowLeft className="h-3 w-3" /> Outreach
         </Link>
         <Link
           href={'/client/eng/dashboard' as Route}

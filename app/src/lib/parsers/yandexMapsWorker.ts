@@ -9,8 +9,8 @@ import {
   finishYandexMapsCatalogDiscovery,
   markYandexMapsCatalogSeen,
   normalizeYandexMapsCatalogFilters,
-  materializeCatalogSearch,
   recordYandexMapsCatalogRefreshCompleted,
+  fillJobFromYandexMapsCatalog,
   upsertYandexMapsCatalogOrganizations,
   yandexIdFromCardUrl,
 } from '@/lib/parsers/yandexMapsCatalog';
@@ -291,23 +291,27 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     const catalogFilters = normalizeYandexMapsCatalogFilters((cfg as { catalog_filters?: unknown }).catalog_filters);
 
     if (catalogFilters) {
-      // Обычно сюда не попадаем: сбор из каталога выполняется прямо в API-роуте
-      // и задача создаётся уже завершённой. Ветка остаётся страховкой для
-      // задач, поставленных в очередь старой вкладкой до деплоя.
-      const { stored, links } = await materializeCatalogSearch(jobId, catalogFilters, maxResults);
+      // Обычно сюда уже не заходят: поиск по каталогу выполняется в самом
+      // запросе создания задачи и возвращается готовым. Ветка осталась для
+      // задач, которые успели встать в очередь до этого перехода, и делает то
+      // же самое — один `insert ... select` внутри базы.
+      const filled = await fillJobFromYandexMapsCatalog(jobId, catalogFilters, maxResults);
+
       await setJobPatch(jobId, {
         status: 'completed',
-        progress_stage: stored ? 'catalog_completed' : 'catalog_empty',
+        progress_stage: filled.organizations ? 'catalog_completed' : 'catalog_empty',
         completed_at: new Date().toISOString(),
-        total_links: links,
-        processed_links: links,
-        total_organizations: stored,
-        processed_organizations: stored,
+        total_links: filled.links,
+        processed_links: filled.links,
+        total_organizations: filled.organizations,
+        processed_organizations: filled.organizations,
         error_message: null,
       });
-      await trace?.end({ source: 'catalog', total_organizations: stored });
+      await trace?.end({ source: 'catalog', total_organizations: filled.organizations });
       void logInfo('parser.yandexmaps.catalog.complete', 'YandexMaps catalog search completed', {
-        jobId, totalOrganizations: stored, totalLinks: links,
+        jobId,
+        totalOrganizations: filled.organizations,
+        totalLinks: filled.links,
       }, logMeta);
       return;
     }

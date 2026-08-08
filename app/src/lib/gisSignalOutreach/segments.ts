@@ -4,7 +4,11 @@
  * Для каждого активного сегмента (уже отсортированы по priority) стримим
  * карточки iterateTwoGisCards({ rubricGroups, hasWebsite: true }) и набираем
  * per-сегментную квоту, пропуская:
- *   - twogis_id из seen-журнала (батчевый lookup filterUnseenIds, чанк 500);
+ *   - twogis_id из seen-журнала (батчевый lookup filterUnseenIds, чанк 100 —
+ *     длинные 2GIS id в .in() упираются в 8K-лимит URL nginx, см. seenCompanies);
+ *   - twogis_id со свежей проверкой в архиве gis_signal_company_signals
+ *     (filterRecentlyCheckedIds, окно RECHECK_AFTER_DAYS=30: отсеянные вчера
+ *     reject'ы не перепроверяем, через 30+ дней сайт мог восстановиться);
  *   - id, уже взятые РАНЕЕ в этом прогоне другим сегментом (cross-segment
  *     дедуп: рубрики сегментов пересекаются, компанию забирает ПЕРВЫЙ по
  *     приоритету сегмент — порядок массива segments решает).
@@ -21,7 +25,7 @@ import { iterateTwoGisCards } from '@/lib/twoGis/repository';
 import { twoGisDatasetQuery } from '@/lib/twoGisDataset';
 import type { TwoGisCard } from '@/lib/twoGis/types';
 import { toTwoGisRubricGroups, type GisSignalSegment } from './config';
-import { filterUnseenIds } from './seenCompanies';
+import { filterUnseenIds, filterRecentlyCheckedIds } from './seenCompanies';
 
 export interface SegmentCandidate {
   twogisId: string;
@@ -107,15 +111,25 @@ export async function pullSegmentCandidates(
     };
     let pulled = 0;
     let scanned = 0;
+    let seenDropped = 0;
+    let recentDropped = 0;
 
     for await (const batch of iterateTwoGisCards(filters, { snapshotId: opts.snapshotId })) {
       scanned += batch.length;
       // Дедуп внутри батча + против уже взятых в этом прогоне.
       const fresh = batch.filter((c) => c.id && c.website && !takenIds.has(c.id));
+      // Сначала seen-журнал (залитые — навсегда)…
       const unseen = await filterUnseenIds(fresh.map((c) => c.id));
-      for (const card of fresh) {
+      const survivors = fresh.filter((c) => unseen.has(c.id));
+      seenDropped += fresh.length - survivors.length;
+      // …потом архив проверок (отсеянные за последние RECHECK_AFTER_DAYS дней).
+      const notCheckedRecently = await filterRecentlyCheckedIds(survivors.map((c) => c.id));
+      for (const card of survivors) {
         if (pulled >= quota) break;
-        if (!unseen.has(card.id)) continue;
+        if (!notCheckedRecently.has(card.id)) {
+          recentDropped += 1;
+          continue;
+        }
         takenIds.add(card.id);
         out.push(cardToCandidate(card, segment.key));
         pulled += 1;
@@ -124,7 +138,7 @@ export async function pullSegmentCandidates(
     }
     log(
       `[segments] ${segment.key}: pulled=${pulled}/${quota} ` +
-        `(scanned=${scanned}, seen/cross-segment отсев=${scanned - pulled})`,
+        `(scanned=${scanned}, seen-отсев=${seenDropped}, недавние-проверки-отсев=${recentDropped})`,
     );
   }
 

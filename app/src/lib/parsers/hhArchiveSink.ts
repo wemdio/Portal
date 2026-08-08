@@ -87,6 +87,7 @@ export function buildHhArchiveSinkCallback(
       salary_currency: v.salary_currency,
       company_name: v.company_name,
       company_url: v.company_url,
+      employer_id: v.employer_id ?? null,
       area: v.area,
       industries: [] as string[],
       published_at: v.published_at,

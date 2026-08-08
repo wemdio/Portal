@@ -347,8 +347,8 @@ export const CLIENT_NAV_GIS_SIGNALS: ClientNavItem = {
  */
 export const CLIENT_NAV_ENG: ClientNavItem = {
   id: 'eng',
-  label: 'ENG Outreach',
-  labelEn: 'ENG Outreach',
+  label: 'Outreach',
+  labelEn: 'Outreach',
   href: '/client/eng',
   description: 'Движок вертикалей для ENG-рынка (EN-интерфейс)',
   descriptionEn: 'Verticals engine for the US market (English UI)',

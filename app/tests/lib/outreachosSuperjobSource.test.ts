@@ -54,7 +54,7 @@ describe('fetchSuperjobEmployers', () => {
     expect(out[0].siteUrl).toBe('https://os-company.ru');
     expect(out[0].description).toBe('Производим станки');
     expect(out[0].vacancyTitle).toBe('Разработчик');
-    expect(out[0].industries).toEqual(['superjob:33']);
+    expect(out[0].industries).toEqual(['IT, Интернет, связь, телеком']);
     expect(out[1].siteUrl).toBeNull();
   });
 
