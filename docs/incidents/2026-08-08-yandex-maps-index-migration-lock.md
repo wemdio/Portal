@@ -120,6 +120,57 @@ select yandex_id, octet_length(categories) as cat, octet_length(subcategories) a
 принял бы его за готовый — поэтому перед повтором обязателен
 `drop index concurrently if exists`.
 
+## Третья находка: база жила на дефолтах Postgres
+
+После деплоя форма всё равно отдавала `The upstream server is timing out`. План
+показал, что индексы работают ровно как задумано, — и что дело не в них:
+
+```
+Bitmap Heap Scan  (actual time=333..30518 rows=14699)
+  Heap Blocks: exact=11350
+  Buffers: shared hit=450 read=12290 written=6770
+  ->  BitmapOr  (actual time=255.280..255.282)        ← 255 мс на поиск
+        ->  Bitmap Index Scan on idx_ymc_tokens_city    rows=20211 (204 мс)
+        ->  Bitmap Index Scan on idx_ymc_tokens_region  rows=0     (51 мс)
+Execution Time: 30522 ms
+```
+
+Индекс находит 14 699 организаций за 255 мс. Остальные 30 секунд — сходить за
+ними в таблицу.
+
+**`written=6770` у `select`, который ничего не пишет.** Это hint bits: при первом
+чтении страницы после массовой заливки Postgres проставляет отметку «транзакция,
+создавшая строку, закоммичена», страница становится грязной и её надо записать,
+чтобы освободить буфер. Второй прогон того же запроса — 9 с вместо 44 с. Лечится
+разовым `vacuum (freeze, analyze)` по каталогу.
+
+Дальше выяснилось, что конфиг Postgres в репозитории не задавался вовсе —
+`deploy/main-db-prod/docker-compose.yml` брал его из образа. При 62 ГБ на машине
+и лимите контейнера 12 ГБ:
+
+| Параметр | Было | Стало | Почему |
+|---|---|---|---|
+| `shared_buffers` | 128 МБ | 3 ГБ | 25% лимита контейнера |
+| `effective_cache_size` | 128 МБ | 8 ГБ | Планировщик считал, что кэша нет, и занижал ценность индексов. Память не занимает |
+| `random_page_cost` | 4 | 1.1 | Четвёрка описывает вращающийся диск |
+| `effective_io_concurrency` | 1 | 200 | Сколько страниц Bitmap Heap Scan читает наперёд. Единица = строго по одной, без перекрытия ожиданий |
+| `maintenance_work_mem` | 64 МБ | 1 ГБ | vacuum, analyze, построение индексов |
+| `work_mem` | 4 МБ | 16 МБ | Сортировки и хэши |
+| `shm_size` контейнера | 64 МБ | 1 ГБ | Параллельные воркеры обмениваются через `/dev/shm` |
+
+`effective_io_concurrency` здесь важнее прочего: запрос формы — всегда
+`Bitmap Heap Scan`, а это именно тот план, который умеет читать страницы пачками
+наперёд и при единице не читает.
+
+Применяется пересозданием контейнера (минута недоступности портала):
+
+```bash
+cd /home/Portal/prod/deploy/main-db-prod
+docker compose -p main-supabase -f docker-compose.yml up -d --force-recreate --no-deps main-postgres
+```
+
+`--force-recreate` обязателен — см. правило в `CLAUDE.md`.
+
 ## На будущее
 
 Правило простое: **индекс на большой таблице не строится в миграции.** Раннер
