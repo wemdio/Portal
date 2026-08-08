@@ -5,6 +5,7 @@
   "scripts": {
     "postinstall": "patch-package && playwright install chromium",
     "db:migrate": "node scripts/db/ensureDatabase.js",
+    "db:ymc-token-indexes": "node scripts/db/buildYandexMapsRubricTokenIndexes.js",
     "predev": "node scripts/db/ensureDatabase.js && node scripts/ensureTgBotApi.js",
     "dev": "concurrently \"next dev\" \"cd ../services/yandexmaps && uvicorn server:app --reload --port 8010\" \"npm run dev:workers\"",
     "dev:next": "next dev",
