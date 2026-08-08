@@ -43,12 +43,10 @@ describe('YandexMapsParserForm', () => {
 
     CITIES.forEach((city) => fireEvent.click(screen.getByText(city)));
     fireEvent.click(screen.getByText('Доставка еды'));
-    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '5000' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить парсинг' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Собрать' }));
 
     expect(onCreate).toHaveBeenCalledTimes(1);
     const payload = onCreate.mock.calls[0][0];
-    expect(payload.max_results).toBe(5000);
     // Главное: прямых обращений к Яндексу нет.
     expect(payload.search_urls).toEqual([]);
     expect(payload.catalog_filters).toEqual({
@@ -56,21 +54,21 @@ describe('YandexMapsParserForm', () => {
       categories: ['Доставка еды'],
       countries: ['Россия'],
     });
+    // Лимит убран из формы — отдаём всё, что нашлось, до потолка выдачи.
+    expect(payload.max_results).toBe(50000);
   });
 
-  it('вставленная руками ссылка по-прежнему парсит Яндекс напрямую', async () => {
-    const onCreate = jest.fn();
-    render(<YandexMapsParserForm onCreate={onCreate} />);
+  it('без выбранных фильтров кнопка не активна', async () => {
+    render(<YandexMapsParserForm onCreate={jest.fn()} />);
     await screen.findByText('Доставка еды');
+    expect(screen.getByRole('button', { name: 'Собрать' })).toBeDisabled();
+  });
 
-    const url = 'https://yandex.ru/maps/?text=Москва%20Кафе';
-    fireEvent.change(screen.getByPlaceholderText(/yandex\.ru\/maps/), { target: { value: url } });
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить парсинг' }));
-
-    expect(onCreate).toHaveBeenCalledTimes(1);
-    const payload = onCreate.mock.calls[0][0];
-    expect(payload.search_urls).toEqual([url]);
-    expect(payload.catalog_filters).toBeUndefined();
+  it('в форме больше нет ни ссылок вручную, ни лимита на запрос', async () => {
+    render(<YandexMapsParserForm onCreate={jest.fn()} />);
+    await screen.findByText('Доставка еды');
+    expect(screen.queryByPlaceholderText(/yandex\.ru\/maps/)).toBeNull();
+    expect(screen.queryByRole('spinbutton')).toBeNull();
   });
 
   it('страны берутся из каталога и переключаются', async () => {

@@ -1,8 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { Info, Globe, Layers, Play, Loader2 } from 'lucide-react';
-import { CITIES, RUBRICS, generateSearchUrls } from '@/lib/parsers/yandexMapsData';
+import { Info, Layers, Play, Loader2 } from 'lucide-react';
+import { CATALOG_MAX_RESULTS, CITIES, RUBRICS } from '@/lib/parsers/yandexMapsData';
 import { authFetchJson } from '@/lib/authFetch';
 
 type ProxyForm = {
@@ -263,8 +263,8 @@ export function YandexMapsParserForm(props: {
   }) => Promise<void> | void;
 }) {
   const clientMode = props.clientMode;
-  const [searchUrlsText, setSearchUrlsText] = useState('');
-  const [maxResults, setMaxResults] = useState(250);
+  // Прокси и headless остаются в запросе ради совместимости API: сбор идёт из
+  // своей базы и ни того, ни другого не использует.
   const [headless, _setHeadless] = useState(true);
 
   const [proxy, _setProxy] = useState<ProxyForm>({
@@ -276,16 +276,10 @@ export function YandexMapsParserForm(props: {
     password: '',
   });
 
-  const [singleCity, _setSingleCity] = useState('');
-  const [singleKeyword, _setSingleKeyword] = useState('');
-
   const [selectedCities, setSelectedCities] = useState<string[]>([]);
   const [selectedRubrics, setSelectedRubrics] = useState<string[]>([]);
   const [customKeyword, setCustomKeyword] = useState('');
   const [showHowItWorks, setShowHowItWorks] = useState(false);
-  // clientMode only: optional manual-URL block, hidden by default (clients
-  // pick city × category; pasting raw Yandex URLs is the rare power path).
-  const [showManualUrls, setShowManualUrls] = useState(false);
 
   const { places, rubrics: catalogRubrics, loading: dictLoading } = useCatalogDictionaries();
   const [selectedCountries, setSelectedCountries] = useState<string[]>([]);
@@ -358,57 +352,7 @@ export function YandexMapsParserForm(props: {
     [cityGroups],
   );
 
-  const searchUrls = useMemo(() => {
-    return searchUrlsText
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }, [searchUrlsText]);
-
-  const appendUrls = (urls: string[]) => {
-    const next = [...searchUrls, ...urls].filter(Boolean);
-    setSearchUrlsText(next.join('\n'));
-  };
-
-  const _handleGenerateSingle = () => {
-    const city = singleCity.trim();
-    const keyword = singleKeyword.trim();
-    if (!keyword) return;
-    const query = `${city} ${keyword}`.trim();
-    const url = `https://yandex.ru/maps/?text=${encodeURIComponent(query)}`;
-    appendUrls([url]);
-  };
-
-  const _handleGenerateBulk = () => {
-    const cities = selectedCities.map((s) => s.trim()).filter(Boolean);
-    const rubrics = (customKeyword.trim() ? [customKeyword.trim()] : selectedRubrics).map((s) => s.trim()).filter(Boolean);
-    if (!cities.length || !rubrics.length) return;
-    appendUrls(generateSearchUrls(cities, rubrics));
-  };
-
-  const canGenerateBulk = selectedCities.length > 0 && (customKeyword.trim() || selectedRubrics.length > 0);
-
-  const collectAllUrls = (): string[] => {
-    let urls = [...searchUrls];
-    if (canGenerateBulk) {
-      const cities = selectedCities.map((s) => s.trim()).filter(Boolean);
-      const rubrics = (customKeyword.trim() ? [customKeyword.trim()] : selectedRubrics).map((s) => s.trim()).filter(Boolean);
-      const generated = generateSearchUrls(cities, rubrics);
-      urls = [...urls, ...generated];
-    }
-    return [...new Set(urls.filter(Boolean))];
-  };
-
-  // Хард-кап URL за задачу. Один URL занимает 1-12 мин через мобильный
-  // прокси, при concurrency=2 145 URL = 12+ часов на задачу и почти
-  // гарантированное зависание где-то в середине (был инцидент 14.07.2026).
-  // 50 URL = 4-8 часов max, укладываемся в разумное окно и watchdog.
-  const MAX_SEARCH_URLS = 50;
-  const totalUrlCount = collectAllUrls().length;
   const catalogFilters = useMemo(() => {
-    // Вставленная руками ссылка — единственный случай, когда мы всё ещё идём
-    // в Яндекс напрямую. Выбор из списков всегда обслуживается своей базой.
-    if (searchUrls.length) return undefined;
     const cities = selectedCities.map((city) => city.trim()).filter(Boolean);
     const categories = (customKeyword.trim() ? [customKeyword.trim()] : selectedRubrics)
       .map((category) => category.trim())
@@ -416,7 +360,7 @@ export function YandexMapsParserForm(props: {
     // Одни только страны — это не запрос, а состояние формы по умолчанию.
     if (!cities.length && !categories.length) return undefined;
     return { cities, categories, countries: activeCountries };
-  }, [activeCountries, customKeyword, searchUrls.length, selectedCities, selectedRubrics]);
+  }, [activeCountries, customKeyword, selectedCities, selectedRubrics]);
 
   // Сколько найдётся — считаем до запуска, чтобы пустой результат был виден
   // сразу, а не через минуту в списке задач.
@@ -424,39 +368,52 @@ export function YandexMapsParserForm(props: {
   const [previewBusy, setPreviewBusy] = useState(false);
   const previewToken = useRef(0);
 
+  const [previewFailed, setPreviewFailed] = useState(false);
+
   useEffect(() => {
-    if (!catalogFilters) { setPreview(null); setPreviewBusy(false); return; }
+    if (!catalogFilters) { setPreview(null); setPreviewBusy(false); setPreviewFailed(false); return; }
     const token = ++previewToken.current;
     setPreviewBusy(true);
+    setPreviewFailed(false);
+    // Жёсткий предел: без него запрос мог висеть минутами (у supabase-клиента
+    // свой таймаут в 2 минуты и три повтора), а в форме всё это время
+    // оставалось «считаем…», и было непонятно, сломалось или считается.
+    const abort = new AbortController();
+    const deadline = setTimeout(() => abort.abort(), 15_000);
     const timer = setTimeout(() => {
       void (async () => {
         try {
           const data = await authFetchJson<{ total: number; capped: boolean }>(
             '/api/parsers/yandexmaps/catalog',
-            { method: 'POST', body: JSON.stringify({ catalog_filters: catalogFilters }) },
+            { method: 'POST', body: JSON.stringify({ catalog_filters: catalogFilters }), signal: abort.signal },
           );
-          if (token === previewToken.current) setPreview({ total: Number(data?.total ?? 0), capped: Boolean(data?.capped) });
+          if (token === previewToken.current) {
+            setPreview({ total: Number(data?.total ?? 0), capped: Boolean(data?.capped) });
+          }
         } catch {
-          if (token === previewToken.current) setPreview(null);
+          if (token === previewToken.current) { setPreview(null); setPreviewFailed(true); }
         } finally {
+          clearTimeout(deadline);
           if (token === previewToken.current) setPreviewBusy(false);
         }
       })();
     }, 400);
-    return () => clearTimeout(timer);
+    return () => { clearTimeout(timer); clearTimeout(deadline); abort.abort(); };
   }, [catalogFilters]);
 
   const previewLabel = !catalogFilters
     ? null
     : previewBusy
       ? 'считаем, сколько найдётся…'
-      : preview === null
-        ? null
-        : preview.total === 0
-          ? 'по этим условиям в базе ничего нет — измените город или рубрику'
-          : `в базе найдётся ${preview.capped ? 'более ' : ''}${preview.total.toLocaleString('ru-RU')} организаций`;
+      : previewFailed
+        ? 'не удалось посчитать — собрать всё равно можно'
+        : preview === null
+          ? null
+          : preview.total === 0
+            ? 'по этим условиям в базе ничего нет — измените город или рубрику'
+            : `в базе найдётся ${preview.capped ? 'более ' : ''}${preview.total.toLocaleString('ru-RU')} организаций`;
 
-  const canSubmit = totalUrlCount > 0 || Boolean(catalogFilters);
+  const canSubmit = Boolean(catalogFilters);
 
   const toggleCountry = useCallback((country: string) => {
     setSelectedCountries((prev) => {
@@ -508,29 +465,20 @@ export function YandexMapsParserForm(props: {
 
   const onSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const urls = catalogFilters ? [] : collectAllUrls().slice(0, MAX_SEARCH_URLS);
-    if (!urls.length && !catalogFilters) return;
+    if (!catalogFilters) return;
     await props.onCreate({
-      search_urls: urls,
+      search_urls: [],
       catalog_filters: catalogFilters,
-      max_results: maxResults,
+      // Лимит убран из формы: отдаём всё, что нашлось, до потолка выдачи.
+      max_results: CATALOG_MAX_RESULTS,
       headless,
       proxy,
     });
   };
 
-  // ── Client portal: purpose-built editorial form (city × category first,
-  // manual URLs collapsed). Operators fall through to the full form below.
+  // ── Client portal: purpose-built editorial form (city × category first).
   if (clientMode) {
-    const total = totalUrlCount;
-    const countLabel =
-      previewLabel
-        ? previewLabel
-        : total > MAX_SEARCH_URLS
-          ? `${total} запросов — возьмём первые ${MAX_SEARCH_URLS}`
-          : total > 0
-            ? `${total} запросов`
-            : 'Выберите города и категорию';
+    const countLabel = previewLabel ?? 'Выберите города и категорию';
     return (
       <form onSubmit={onSubmit} className="neu-card p-5 sm:p-6 space-y-5">
         <div className="flex items-start justify-between gap-3">
@@ -605,36 +553,6 @@ export function YandexMapsParserForm(props: {
           </div>
         </div>
 
-        <div>
-          <label className="ds-eyebrow mb-1.5 block">организаций на 1 запрос</label>
-          <input
-            type="number"
-            min={10}
-            max={1000}
-            step={10}
-            className="ds-input w-full"
-            value={maxResults}
-            onChange={(e) => setMaxResults(Math.max(10, Math.min(1000, Number(e.target.value) || 250)))}
-          />
-          <p className="mt-1.5 text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
-            Сколько карточек собирать с каждого поискового запроса. По умолчанию 250 — золотая середина. Больше = дольше парсинг, но и больше данных.
-          </p>
-        </div>
-
-        <div>
-          <button type="button" onClick={() => setShowManualUrls((v) => !v)} className="ds-btn-ghost text-xs">
-            {showManualUrls ? '− Скрыть ссылки вручную' : '+ Вставить ссылки вручную'}
-          </button>
-          {showManualUrls && (
-            <textarea
-              className="ds-input ds-mono w-full min-h-[100px] mt-2 leading-relaxed"
-              placeholder="https://yandex.ru/maps/?text=Москва%20Кафе"
-              value={searchUrlsText}
-              onChange={(e) => setSearchUrlsText(e.target.value)}
-            />
-          )}
-        </div>
-
         <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
           <span className="text-xs" style={{ color: 'var(--cp-paper-faint)' }}>{countLabel}</span>
           <button
@@ -674,88 +592,34 @@ export function YandexMapsParserForm(props: {
 
   return (
     <form onSubmit={onSubmit} className="space-y-6">
-      {/* URL Search + Настройки лимита — в одном ряду.
-          На lg (1024+) URL поиска занимает основную ширину, лимит —
-          компактная колонка справа (280px). Ниже lg — стакаются
-          вертикально. items-start чтобы карточки не растягивались до
-          равной высоты. */}
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_280px] gap-6 items-start">
-        {/* URL Search Section */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="p-5 border-b border-gray-100 bg-gray-50/50">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
-                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-100 text-blue-600">
-                    <Globe className="h-3.5 w-3.5" />
-                  </span>
-                  {clientMode ? 'Поиск по городам и категориям' : 'URL поиска'}
-                </h3>
-                <p className="text-sm text-gray-500 mt-1">
-                  {clientMode
-                    ? 'Выберите города и категории бизнеса — соберём организации с Яндекс.Карт. Можно и вставить ссылки на поиск вручную.'
-                    : 'Добавьте ссылки на поиск в Яндекс.Картах вручную или сгенерируйте их по городам и рубрикам.'}
-                </p>
-              </div>
-              <div className="flex flex-col items-end gap-1">
-                <span className="inline-flex items-center rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-medium text-blue-700 ring-1 ring-inset ring-blue-700/10">
-                  {searchUrls.length} {clientMode ? 'запросов' : 'URL'}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setShowHowItWorks(true)}
-                  className="mt-1 inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 border border-amber-200 hover:bg-amber-100 hover:border-amber-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-1"
-                >
-                  <Info className="h-3.5 w-3.5 mr-1" />
-                  <span>{clientMode ? 'Как это работает' : 'Как работает парсер'}</span>
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className="p-5 space-y-5">
-            <textarea
-              className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none text-sm font-mono min-h-[120px] p-3"
-              placeholder="https://yandex.ru/maps/?text=Москва%20Кафе"
-              value={searchUrlsText}
-              onChange={(e) => setSearchUrlsText(e.target.value)}
-            />
-
-          </div>
-        </div>
-
-        {/* Настройки лимита — теперь в правой колонке рядом с URL поиска */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-          <label className="block text-sm font-medium text-gray-700 mb-1.5">
-            Организаций на 1 запрос
-          </label>
-          <input
-            type="number"
-            min={10}
-            max={5000}
-            step={10}
-            className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
-            value={maxResults}
-            onChange={(e) => setMaxResults(Math.max(10, Math.min(5000, Number(e.target.value) || 250)))}
-          />
-          <p className="mt-1.5 text-xs text-gray-500">
-            Сколько карточек собирать с каждого поискового URL. По умолчанию 250. Больше = дольше парсинг и больше трафика прокси, но и больше данных.
-          </p>
-        </div>
-      </div>
-
-      {/* Generator Section */}
+      {/* Фильтры — единственный блок формы. Ввод ссылок вручную и «организаций
+          на 1 запрос» убраны: сбор идёт из своей базы, поисковых URL там нет,
+          а лимит на запрос потерял смысл — отдаём всё, что нашлось. */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         <div className="p-5 border-b border-gray-100 bg-gray-50/50">
-          <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
-            <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-violet-100 text-violet-600">
-              <Layers className="h-3.5 w-3.5" />
-            </span>
-            Генератор ссылок
-          </h3>
-          <p className="text-sm text-gray-500 mt-1">Массовая генерация ссылок по городам и рубрикам.</p>
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-violet-100 text-violet-600">
+                  <Layers className="h-3.5 w-3.5" />
+                </span>
+                Фильтры
+              </h3>
+              <p className="text-sm text-gray-500 mt-1">
+                Страна, города и рубрики. Сбор идёт из нашей базы организаций Яндекс.Карт.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowHowItWorks(true)}
+              className="shrink-0 inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 border border-amber-200 hover:bg-amber-100 hover:border-amber-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-1"
+            >
+              <Info className="h-3.5 w-3.5 mr-1" />
+              <span>Как это работает</span>
+            </button>
+          </div>
         </div>
-        
+
         <div className="p-5 grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="space-y-2">
             {countryPicker && (
@@ -787,7 +651,7 @@ export function YandexMapsParserForm(props: {
               options={cityGroups}
               value={selectedCities}
               onChange={setSelectedCities}
-              className="h-87 shadow-sm focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500"
+              className="h-[28rem] shadow-sm focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500"
               searchPlaceholder="Поиск города или региона…"
               emptyHint={dictLoading ? 'Загружаем список…' : 'Ничего не найдено.'}
             />
@@ -813,7 +677,7 @@ export function YandexMapsParserForm(props: {
                 value={selectedRubrics}
                 onChange={setSelectedRubrics}
                 disabled={Boolean(customKeyword.trim())}
-                className={`h-60 shadow-sm focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500 ${Boolean(customKeyword.trim()) ? 'bg-gray-50 opacity-60' : ''}`}
+                className={`h-[22rem] shadow-sm focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500 ${Boolean(customKeyword.trim()) ? 'bg-gray-50 opacity-60' : ''}`}
                 searchPlaceholder="Поиск категории…"
                 emptyHint={dictLoading ? 'Загружаем список…' : 'Ничего не найдено.'}
               />
@@ -828,12 +692,6 @@ export function YandexMapsParserForm(props: {
         <div className="text-sm text-gray-500">
           {previewLabel ? (
             <span className={preview?.total === 0 ? 'text-amber-600 font-medium' : undefined}>{previewLabel}</span>
-          ) : totalUrlCount > MAX_SEARCH_URLS ? (
-            <span className="text-amber-600 font-medium">
-              {totalUrlCount} URL — будут обработаны первые {MAX_SEARCH_URLS}
-            </span>
-          ) : totalUrlCount > 0 ? (
-            <span>Итого: {totalUrlCount} URL — живой парсинг Яндекса</span>
           ) : null}
         </div>
         <button
@@ -841,7 +699,7 @@ export function YandexMapsParserForm(props: {
           disabled={props.busy || !canSubmit}
           className="inline-flex items-center justify-center rounded-lg bg-emerald-600 px-6 py-3 text-base font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all transform active:scale-95"
         >
-          {props.busy ? 'Запуск...' : clientMode ? 'Запустить поиск' : 'Запустить парсинг'}
+          {props.busy ? 'Собираем…' : 'Собрать'}
         </button>
       </div>
 

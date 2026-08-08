@@ -1,8 +1,12 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import type { YandexMapsOrganization } from '@/lib/parsers/yandexMapsServiceClient';
+// Константа объявлена в yandexMapsData: этот модуль тянет supabaseAdmin
+// ('server-only'), и импорт из него в клиентскую форму ронял сборку.
+// Импортируем и реэкспортируем: чистый `export ... from` не вводит имя
+// в область видимости модуля, а оно нужно здесь же для обрезки лимита.
+import { CATALOG_MAX_RESULTS } from '@/lib/parsers/yandexMapsData';
 
-/** Потолок выдачи за один запуск поиска по каталогу. Совпадает с limit в RPC. */
-export const CATALOG_MAX_RESULTS = 50000;
+export { CATALOG_MAX_RESULTS };
 
 export type YandexMapsCatalogFilters = {
   /** Выбранные места. Совпадение проверяется и по городу, и по региону. */
@@ -170,6 +174,61 @@ export function catalogRowToOrganization(row: YandexMapsCatalogRow): YandexMapsO
 export function catalogRowToJobOrganization(jobId: string, row: YandexMapsCatalogRow) {
   const organization = catalogRowToOrganization(row);
   return { job_id: jobId, ...organization };
+}
+
+/**
+ * Переносит выдачу каталога в результаты запуска.
+ *
+ * Выполняется прямо в HTTP-запросе, а не в фоновом воркере: поиск по своей
+ * базе — это обычный SELECT, и ставить его в очередь наравне с многочасовым
+ * парсингом Яндекса было ошибкой. Задача создавалась, ждала свободного воркера
+ * и только потом делала запрос к базе.
+ *
+ * Читаем и пишем страницами: выдача доходит до 50 тыс. строк, одним запросом
+ * PostgREST столько не принимает.
+ */
+export async function materializeCatalogSearch(
+  jobId: string,
+  filters: YandexMapsCatalogFilters,
+  maxResults: number,
+): Promise<{ stored: number; links: number }> {
+  if (!supabaseAdmin) return { stored: 0, links: 0 };
+  const PAGE = 2000;
+  const limit = Math.max(0, Math.min(CATALOG_MAX_RESULTS, Math.floor(maxResults)));
+
+  let fetched = 0;
+  let stored = 0;
+  let cursor: string | null = null;
+  const seenLinks = new Set<string>();
+
+  while (fetched < limit) {
+    const pageSize = Math.min(PAGE, limit - fetched);
+    const page = await searchYandexMapsCatalog(filters, pageSize, cursor);
+    if (!page.length) break;
+    fetched += page.length;
+    cursor = page[page.length - 1]?.yandex_id ?? null;
+
+    const organizations = page.map((row) => catalogRowToJobOrganization(jobId, row));
+    const links = organizations.map((row) => row.card_url).filter((link) => link && !seenLinks.has(link));
+    links.forEach((link) => seenLinks.add(link));
+
+    if (links.length) {
+      const { error } = await supabaseAdmin
+        .from('yandex_maps_links')
+        .upsert(links.map((link) => ({ job_id: jobId, link })), { onConflict: 'job_id,link' });
+      if (error) throw new Error(error.message);
+    }
+    const { error: organizationsError } = await supabaseAdmin
+      .from('yandex_maps_organizations')
+      .upsert(organizations, { onConflict: 'job_id,card_url' });
+    if (organizationsError) throw new Error(organizationsError.message);
+    stored += organizations.length;
+
+    // Страница короче запрошенной — каталог кончился раньше лимита.
+    if (page.length < pageSize) break;
+  }
+
+  return { stored, links: seenLinks.size };
 }
 
 export function yandexIdFromCardUrl(cardUrl: string): string | null {
