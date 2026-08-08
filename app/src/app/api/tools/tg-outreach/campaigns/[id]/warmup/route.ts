@@ -108,12 +108,35 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         perDay.set(r.day_no, slot);
       }
 
+      // Метрики этапа публичных чатов. Считаем всегда: если этап был включён в
+      // прошлом прогоне, а в этом нет, цифры за сегодня просто нулевые.
+      const { data: activityRows } = await supabase
+        .from('tg_outreach_warmup_activities')
+        .select('kind, status, day_no')
+        .eq('run_id', run.id);
+      const activities = (activityRows ?? []) as Array<{
+        kind: string; status: string; day_no: number;
+      }>;
+      const chatStage = {
+        enabled: Boolean((run.settings as { public_chats?: boolean } | null)?.public_chats),
+        replies_today: activities.filter(
+          (a) => a.kind === 'reply' && a.status === 'done' && a.day_no === run.current_day,
+        ).length,
+        reactions_today: activities.filter(
+          (a) => a.kind === 'reaction' && a.status === 'done' && a.day_no === run.current_day,
+        ).length,
+        replies_total: activities.filter((a) => a.kind === 'reply' && a.status === 'done').length,
+        reactions_total: activities.filter((a) => a.kind === 'reaction' && a.status === 'done').length,
+        planned_today: activities.filter((a) => a.day_no === run.current_day).length,
+      };
+
       return NextResponse.json({
         run,
         per_account: [...perAccount.values()],
         per_day: [...perDay.values()].sort((a, b) => a.day - b.day),
         today: { planned: plannedToday, done: doneToday },
         messages_total: messagesTotal,
+        chat_stage: chatStage,
         defaults: defaults(),
       });
     },
@@ -130,8 +153,12 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       const { supabase, user } = auth;
       const { id } = await ctx.params;
 
-      const body = (await req.json().catch(() => ({}))) as { days?: number };
+      const body = (await req.json().catch(() => ({}))) as {
+        days?: number;
+        public_chats?: boolean;
+      };
       const days = Math.min(Math.max(Math.round(body.days ?? DEFAULT_WARMUP_DAYS), 1), 14);
+      const publicChats = Boolean(body.public_chats);
 
       const { data: campaign } = await supabase
         .from('tg_outreach_campaigns')
@@ -164,9 +191,16 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         return jsonError('Нужно минимум два активных аккаунта — греть не с кем.', 400);
       }
 
+      // Флаг этапа кладём в снимок настроек прогона: перезапуск воркера посреди
+      // прогрева должен видеть то же решение, что принял оператор при старте.
       const { data: run, error: runError } = await supabase
         .from('tg_outreach_warmup_runs')
-        .insert({ campaign_id: id, days, status: 'pending', settings: defaults() })
+        .insert({
+          campaign_id: id,
+          days,
+          status: 'pending',
+          settings: { ...defaults(), public_chats: publicChats },
+        })
         .select('*')
         .single();
       if (runError) return jsonError(runError.message, 500);

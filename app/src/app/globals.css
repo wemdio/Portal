@@ -3532,6 +3532,17 @@ html[data-portal-theme='dark'] .portal-shell .focus\:ring-red-500:focus {
   /* Плотный аналог поверхности — для тултипов ECharts, см. resolveSurface(). */
   --chart-surface: #f4f6fa;
 
+  /* Стекло обязано преломлять сцену, а НЕ страницу за ней.
+     `isolation: isolate` делает сцену backdrop root: `backdrop-filter` у плиток
+     начинает брать только то, что нарисовано внутри сцены.
+
+     Без этого он забирает всё, что лежит на странице ниже по стеку, включая
+     собственный `backdrop-blur-md` липкой шапки (TopNav.tsx:36) и слой
+     выпадающего меню — а оно анимирует transform и поднимается в отдельный
+     композиторный слой при открытии. Отсюда светлая область на плитках при
+     наведении на пункт меню: плитка подмешивала себе чужие слои. */
+  isolation: isolate;
+
   padding: 1rem;
   border-radius: 1rem;
   background-color: #f0f2f6;
