@@ -3,18 +3,24 @@
 import type { NextRequest } from 'next/server';
 
 /**
- * Запуск поиска по каталогу выполняется прямо в запросе: очереди и воркера
- * для него больше нет. Тест закрепляет именно это — задача возвращается
- * готовой, а не «pending».
+ * Запуск поиска по каталогу забирает всё, что нашлось: потолка в 50 000 больше
+ * нет. Небольшая выборка собирается прямо в запросе и возвращается готовой,
+ * крупная уходит в очередь к воркеру — в HTTP-запрос она не помещается, шлюз
+ * рвёт соединение через 60 секунд.
  */
 
 const mockFill = jest.fn();
+const mockCount = jest.fn();
 const mockGetUser = jest.fn();
 const jobs: Array<Record<string, unknown>> = [];
 
 jest.mock('@/lib/parsers/yandexMapsCatalog', () => {
   const actual = jest.requireActual('@/lib/parsers/yandexMapsCatalog');
-  return { ...actual, fillJobFromYandexMapsCatalog: (...args: unknown[]) => mockFill(...args) };
+  return {
+    ...actual,
+    fillJobFromYandexMapsCatalog: (...args: unknown[]) => mockFill(...args),
+    countYandexMapsCatalog: (...args: unknown[]) => mockCount(...args),
+  };
 });
 
 jest.mock('@/lib/supabaseAdmin', () => ({ supabaseAdmin: null }));
@@ -67,6 +73,7 @@ beforeEach(() => {
   jobs.length = 0;
   mockGetUser.mockResolvedValue({ data: { user: { id: 'user-1' } } });
   mockFill.mockResolvedValue({ organizations: 1200, links: 1200 });
+  mockCount.mockResolvedValue({ total: 1200, capped: false });
 });
 
 describe('POST /api/parsers/yandexmaps', () => {
@@ -83,12 +90,32 @@ describe('POST /api/parsers/yandexmaps', () => {
     expect(job.processed_organizations).toBe(1200);
     expect(job.completed_at).toBeTruthy();
 
-    // Выдача собрана одним вызовом внутри базы, с потолком по умолчанию.
+    // Выдача собрана одним вызовом внутри базы и без потолка: null означает
+    // «забрать всё, что нашлось».
     expect(mockFill).toHaveBeenCalledTimes(1);
     expect(mockFill.mock.calls[0][0]).toBe('job-1');
-    expect(mockFill.mock.calls[0][2]).toBe(50000);
+    expect(mockFill.mock.calls[0][2]).toBeNull();
     // В очереди задача не оставалась ни на миг.
     expect(jobs[0].status).not.toBe('pending');
+  });
+
+  it('крупная выборка уходит в очередь, а не собирается в запросе', async () => {
+    // Порог проверяется счётом с потолком INLINE_LIMIT + 1, поэтому «больше
+    // порога» выглядит именно так.
+    mockCount.mockResolvedValue({ total: 20001, capped: true });
+    const { POST } = await import('@/app/api/parsers/yandexmaps/route');
+    const response = await POST(request({
+      catalog_filters: { cities: ['Москва'], categories: ['Магазин продуктов'] },
+    }));
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.queued).toBe(true);
+    expect(body.job.status).toBe('pending');
+    // Ничего не собирали в запросе — это работа воркера.
+    expect(mockFill).not.toHaveBeenCalled();
+    // Потолок в конфиг не подставляли: воркер должен забрать всё.
+    expect((body.job.config as { max_results: unknown }).max_results).toBeNull();
   });
 
   it('объём из кабинета передаётся в отбор', async () => {

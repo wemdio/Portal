@@ -1,8 +1,26 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import type { YandexMapsOrganization } from '@/lib/parsers/yandexMapsServiceClient';
 
-/** Потолок выдачи за один запуск поиска по каталогу. Совпадает с limit в RPC. */
-export const CATALOG_MAX_RESULTS = 50000;
+/**
+ * Потолка на выдачу нет: оператор выбрал места и сферы — значит ему нужны все
+ * организации, а не произвольные 50 000 из них (столько забирали раньше).
+ *
+ * Ограничение осталось только на то, что выполняется **внутри HTTP-запроса**.
+ * Сбор идёт через Kong, а тот рвёт соединение через 60 секунд, поэтому крупные
+ * выборки уходят в очередь: задача заводится `pending`, и её доделывает воркер,
+ * которому шлюз не указ. Порог — по числу организаций, а не по времени: 20 тыс.
+ * строк вставляются за считанные секунды даже на холодном кэше.
+ */
+export const CATALOG_INLINE_LIMIT = 20000;
+
+/**
+ * Потолок предпросчёта «сколько найдётся». Нужен потому, что предпросчёт уходит
+ * на каждое изменение фильтра: точный счёт по выборке в полмиллиона организаций
+ * — это чтение сотен тысяч страниц кучи, и на каждый клик так ходить нельзя.
+ * Выше потолка показываем «более N» — точная цифра там оператору и не нужна,
+ * собраны всё равно будут все.
+ */
+export const CATALOG_PREVIEW_CAP = 100000;
 
 export type YandexMapsCatalogFilters = {
   /** Выбранные места. Совпадение проверяется и по городу, и по региону. */
@@ -93,15 +111,17 @@ export async function fetchYandexMapsCatalogDictionaries(): Promise<CatalogDicti
 /**
  * Сколько организаций найдётся по выбранным фильтрам.
  *
- * Считается с потолком, и потолок низкий намеренно: замер на боевых данных
- * показал 59 с на «Москва + Кафе» и 3,9 мин на «вся Россия + Кафе» при потолке
- * 200 тыс. — запрос честно добирал строки до упора. Пользователю в форме нужен
- * порядок величины, а не точное число, поэтому считаем до 20 тыс. и дальше
- * показываем «более 20 000».
+ * Потолок был 20 тыс., потому что на боевых данных предпросчёт «Москва + Кафе»
+ * шёл 59 секунд. После индексов по токенам и настройки базы тот же запрос —
+ * 0,79 с, поэтому потолок поднят до CATALOG_PREVIEW_CAP. Совсем убрать его
+ * нельзя: предпросчёт уходит на каждое изменение фильтра.
+ *
+ * `cap = null` считает точно, без потолка — так спрашивает API, когда решает,
+ * выполнять сбор в запросе или отдать воркеру.
  */
 export async function countYandexMapsCatalog(
   filters: YandexMapsCatalogFilters,
-  cap = 20000,
+  cap: number | null = CATALOG_PREVIEW_CAP,
 ): Promise<{ total: number; capped: boolean }> {
   if (!supabaseAdmin) return { total: 0, capped: false };
   const { data, error } = await supabaseAdmin.rpc('yandex_maps_catalog_count', {
@@ -112,7 +132,7 @@ export async function countYandexMapsCatalog(
   });
   if (error) throw new Error(`Не удалось посчитать организации: ${error.message}`);
   const total = Number(data ?? 0);
-  return { total, capped: total >= cap };
+  return { total, capped: cap !== null && total >= cap };
 }
 
 /**
@@ -124,11 +144,15 @@ export async function countYandexMapsCatalog(
  * по сети, а человек ждал очереди. Искать при этом нечего — всё уже лежит в
  * соседней таблице той же базы, и `insert ... select` укладывается в запрос
  * API: 50 тыс. строк за ~3 с на замере.
+ *
+ * Вызывается из двух мест: из API, когда выборка небольшая и её быстрее сделать
+ * прямо в запросе, и из воркера — для всего остального.
  */
 export async function fillJobFromYandexMapsCatalog(
   jobId: string,
   filters: YandexMapsCatalogFilters,
-  limit: number = CATALOG_MAX_RESULTS,
+  /** null — забрать всё, что нашлось. Число — потолок (кабинет клиента, тариф). */
+  limit: number | null = null,
 ): Promise<{ organizations: number; links: number }> {
   if (!supabaseAdmin) return { organizations: 0, links: 0 };
   const { data, error } = await supabaseAdmin.rpc('yandex_maps_catalog_fill_job', {
@@ -136,7 +160,7 @@ export async function fillJobFromYandexMapsCatalog(
     p_cities: cleanList(filters.cities),
     p_categories: cleanList(filters.categories),
     p_countries: cleanList(filters.countries),
-    p_limit: Math.max(0, Math.min(CATALOG_MAX_RESULTS, Math.floor(limit))),
+    p_limit: limit === null ? null : Math.max(0, Math.floor(limit)),
   });
   if (error) throw new Error(`Не удалось собрать выдачу из каталога: ${error.message}`);
   const row = (Array.isArray(data) ? data[0] : data) as { organizations?: number; links?: number } | null;

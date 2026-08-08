@@ -500,11 +500,13 @@ const QUICK_RUBRICS = 14;
  */
 const MAX_RUBRIC_BULK = 50;
 /**
- * Потолок строк за один запуск — тот же CATALOG_MAX_RESULTS, что стоит на
- * сервере. Отдельной константой, а не импортом: модуль каталога тянет за собой
- * supabaseAdmin и в клиентский бандл ему нельзя.
+ * Потолка на выдачу больше нет — забираем всё, что нашлось. Это число лишь
+ * говорит, где сбор перестаёт помещаться в HTTP-запрос и уходит в очередь к
+ * воркеру: тот же CATALOG_INLINE_LIMIT, что и на сервере. Отдельной константой,
+ * а не импортом: модуль каталога тянет за собой supabaseAdmin, и в клиентский
+ * бандл ему нельзя.
  */
-const CATALOG_JOB_LIMIT = 50000;
+const CATALOG_INLINE_LIMIT = 20000;
 
 export function YandexMapsParserForm(props: {
   busy?: boolean;
@@ -682,9 +684,11 @@ export function YandexMapsParserForm(props: {
         ? null
         : preview.total === 0
           ? 'по этим условиям в базе ничего нет — измените город или рубрику'
-          : `в базе найдётся ${preview.capped ? 'более ' : ''}${preview.total.toLocaleString('ru-RU')} организаций${
-              preview.capped || preview.total > CATALOG_JOB_LIMIT
-                ? ` — заберём первые ${CATALOG_JOB_LIMIT.toLocaleString('ru-RU')}`
+          : `в базе найдётся ${preview.capped ? 'более ' : ''}${preview.total.toLocaleString('ru-RU')} организаций — заберём все${
+              // Всё, что не влезает в один HTTP-запрос, докладывает воркер:
+              // задача уходит в очередь и появляется в истории как выполняющаяся.
+              preview.capped || preview.total > CATALOG_INLINE_LIMIT
+                ? ', сбор пойдёт в фоне'
                 : ''
             }`;
 
@@ -794,9 +798,10 @@ export function YandexMapsParserForm(props: {
   const onSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!catalogFilters) return;
-    // Объём передаёт только кабинет: там он списывается с тарифа. У оператора
-    // потолок ставит сервер (CATALOG_MAX_RESULTS), и урезать выдачу незачем —
-    // это один SELECT по своей базе, а не тысячи заходов в Яндекс.
+    // Объём передаёт только кабинет: там он списывается с тарифа. Оператор не
+    // передаёт ничего, и сервер понимает это как «забрать всё, что нашлось» —
+    // урезать выдачу незачем, это один SELECT по своей базе, а не тысячи
+    // заходов в Яндекс.
     await props.onCreate(clientMode
       ? { catalog_filters: catalogFilters, max_results: maxResults }
       : { catalog_filters: catalogFilters });
