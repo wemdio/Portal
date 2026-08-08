@@ -356,4 +356,14 @@ if (require.main === module) {
     });
 }
 
-module.exports = { ensureDatabase, notifyPostgrestReload };
+// Хелперы подключения переиспользуют разовые обслуживающие скрипты (например
+// buildYandexMapsRubricTokenIndexes.js): им нужны те же .env-файлы, тот же
+// порядок переменных с URL и тот же обход IPv6 на серверах без IPv6.
+module.exports = {
+  ensureDatabase,
+  notifyPostgrestReload,
+  loadEnvFiles,
+  resolveDbUrl,
+  shouldUseSsl,
+  connectionConfigWithIPv4,
+};

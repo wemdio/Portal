@@ -44,38 +44,110 @@ as $$
    where token <> ''
 $$;
 
--- Индексы по выражению, а не по новой колонке: колонка потребовала бы переписать
--- таблицу на 9,9 млн строк с удвоением её размера до вакуума, индексы — нет.
---
--- ВНИМАНИЕ: построение занимает минуты и держит блокировку записи. Применять,
--- когда снапшот-импорт не идёт (как и остальные индексы каталога). Замер на
--- синтетике в 9,9 млн строк: 1,9 мин на первый индекс и 4,6 мин на пару
--- составных; размеры 65, 106 и 86 МБ.
+-- ── Индексы: строятся ОТДЕЛЬНО, до деплоя ────────────────────────────────
 
--- Рубрика без места: выбор «вся страна × рубрика».
-create index if not exists idx_ymc_rubric_tokens
-  on public.yandex_maps_company_catalog
-  using gin (public.yandex_maps_rubric_tokens(categories, subcategories));
-
--- Рубрика вместе с местом. Главные индексы: обычный запрос формы — это всегда
--- «место × сфера», и по ним он обслуживается ОДНИМ проходом, а не пересечением
--- двух огромных битмапов. На замере «Москва+МО+СПб × Кафе» набор кандидатов
--- падает с 2 млн строк до 63 тыс., чтение кучи — с 23 тыс. блоков до 6,7 тыс.
--- Это и есть разница между «висит» и «отвечает»: на проде диск сетевой, и
--- платим мы именно за случайные чтения страниц.
+-- Нужны три индекса по выражению (по выражению, а не по новой колонке: колонка
+-- потребовала бы переписать таблицу на 9,9 млн строк с удвоением её размера до
+-- вакуума):
 --
--- Два индекса, а не один: место сверяется и с городом, и с регионом (города
+--   idx_ymc_rubric_tokens  — рубрика без места, выбор «вся страна × рубрика»;
+--   idx_ymc_tokens_city    — рубрика × город;
+--   idx_ymc_tokens_region  — рубрика × регион.
+--
+-- Составных два, а не один: место сверяется и с городом, и с регионом (города
 -- федерального значения часть организаций держат на уровне региона с пустым
--- городом), и это «или» планировщик разбирает как BitmapOr двух сканов.
+-- городом), и это «или» планировщик разбирает как BitmapOr двух сканов. Они и
+-- дают основной выигрыш: обычный запрос формы — всегда «место × сфера», и по
+-- ним он идёт ОДНИМ проходом вместо пересечения двух огромных битмапов. На
+-- замере «Москва+МО+СПб × Кафе» кандидатов 63 тыс. вместо 2 млн, чтение кучи —
+-- 6,7 тыс. блоков вместо 23 тыс.
+--
+-- ПОЧЕМУ ИХ ЗДЕСЬ НЕ СТРОЯТ. Обычный `create index` держит на таблице SHARE:
+-- запись в неё запрещена на всё время постройки, а это минуты на 9,9 млн строк.
+-- В каталог непрерывно пишет фоновый обход (`yandex_maps_catalog_discovery_queue`),
+-- миграции идут в транзакции с `lock_timeout = 30s` — и 08.08.2026 деплой на
+-- этом встал: `55P03 canceling statement due to lock timeout`, откат всей
+-- миграции, прод остался на старой сборке. Повтор деплоя упёрся бы в то же
+-- самое: обход работает всегда, окна без записи не бывает.
+--
+-- Поэтому индексы строятся заранее и отдельно, через `create index concurrently`
+-- (запись не блокирует, идёт дольше):
+--
+--   docker run --rm --network host --env-file .env <образ portal> \
+--     node scripts/db/buildYandexMapsRubricTokenIndexes.js
+--
+-- Скрипт идемпотентный: готовые индексы пропускает, недостроенные (после обрыва
+-- concurrently остаётся invalid-индекс) сносит и строит заново.
 create extension if not exists btree_gin;
 
-create index if not exists idx_ymc_tokens_city
-  on public.yandex_maps_company_catalog
-  using gin (public.yandex_maps_rubric_tokens(categories, subcategories), city);
+-- Дальше — проверка, а не постройка.
+--
+-- Без этих индексов `tokens && array[...]` не индексируется ничем: и поиск, и
+-- предпросчёт уходят в seq scan по 13 ГБ на каждое изменение фильтра. Это хуже,
+-- чем было до миграции, поэтому пускать функции вперёд индексов нельзя —
+-- миграция останавливается с внятным текстом вместо того, чтобы молча положить
+-- форму.
+--
+-- На маленьком каталоге (локальная разработка, свежая база) ждать нечего:
+-- постройка занимает секунды и блокировать некого — строим прямо здесь.
+do $ymc$
+declare
+  missing text[];
+  table_bytes bigint;
+  rec record;
+begin
+  select coalesce(array_agg(want.index_name order by want.index_name), '{}'::text[])
+    into missing
+    from (values ('idx_ymc_rubric_tokens'), ('idx_ymc_tokens_city'), ('idx_ymc_tokens_region'))
+           as want(index_name)
+   where not exists (
+           select 1
+             from pg_index x
+             join pg_class i on i.oid = x.indexrelid
+            where i.relname = want.index_name
+              and i.relnamespace = 'public'::regnamespace
+              and x.indrelid = 'public.yandex_maps_company_catalog'::regclass
+              -- indisvalid: обрыв concurrently оставляет индекс с тем же именем,
+              -- которым планировщик не пользуется. Он не считается готовым.
+              and x.indisvalid
+         );
 
-create index if not exists idx_ymc_tokens_region
-  on public.yandex_maps_company_catalog
-  using gin (public.yandex_maps_rubric_tokens(categories, subcategories), region);
+  if cardinality(missing) = 0 then
+    return;
+  end if;
+
+  -- Порог по размеру, а не по reltuples: на свежей базе статистики ещё нет
+  -- (reltuples = -1), и «строк мало» пришлось бы угадывать. Боевой каталог —
+  -- 13 ГБ, любой стенд с осмысленным объёмом далеко под гигабайтом.
+  table_bytes := pg_table_size('public.yandex_maps_company_catalog'::regclass);
+
+  if table_bytes > 1073741824 then
+    raise exception
+      -- В RAISE «%» — единственный placeholder, формата у него нет: округляем сами.
+      'yandex_maps_company_catalog (% ГБ): не построены индексы %. Построй их, не блокируя запись: docker run --rm --network host --env-file .env <образ portal> node scripts/db/buildYandexMapsRubricTokenIndexes.js — и повтори деплой. Подробности: docs/yandex-maps-catalog-search-performance.md',
+      round(table_bytes / 1073741824.0, 1),
+      array_to_string(missing, ', ')
+      using errcode = 'object_not_in_prerequisite_state';
+  end if;
+
+  for rec in
+    select *
+      from (values
+        ('idx_ymc_rubric_tokens', 'gin (public.yandex_maps_rubric_tokens(categories, subcategories))'),
+        ('idx_ymc_tokens_city',   'gin (public.yandex_maps_rubric_tokens(categories, subcategories), city)'),
+        ('idx_ymc_tokens_region', 'gin (public.yandex_maps_rubric_tokens(categories, subcategories), region)')
+      ) as t(index_name, using_clause)
+     where t.index_name = any(missing)
+  loop
+    -- Недостроенный индекс носит то же имя, и `if not exists` его бы пропустил,
+    -- оставив каталог без рабочего индекса навсегда.
+    execute format('drop index if exists public.%I', rec.index_name);
+    execute format(
+      'create index %I on public.yandex_maps_company_catalog using %s',
+      rec.index_name, rec.using_clause);
+  end loop;
+end
+$ymc$;
 
 -- ── Условия отбора ───────────────────────────────────────────────────────
 
