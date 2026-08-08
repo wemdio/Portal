@@ -7,7 +7,6 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getClientTariffUsage, isClientToolAccessAllowed, isAwaitingFirstPayment, TOOL_ACCESS_DENIED_MESSAGE, AWAITING_PAYMENT_MESSAGE } from '@/lib/tariffs';
 import {
   CATALOG_INLINE_LIMIT,
-  countYandexMapsCatalog,
   fillJobFromYandexMapsCatalog,
   normalizeYandexMapsCatalogFilters,
 } from '@/lib/parsers/yandexMapsCatalog';
@@ -98,13 +97,14 @@ export async function POST(req: NextRequest) {
 
     // Поиск по каталогу — один запрос к соседней таблице той же базы, и обычно
     // его быстрее выполнить прямо здесь, чем гонять через очередь. Но «здесь» —
-    // это внутри HTTP-запроса, а Kong рвёт соединение через 60 секунд. Поэтому
-    // сначала спрашиваем объём (счёт останавливается на пороге, так что стоит он
-    // дёшево) и крупные сборы отдаём воркеру — ему шлюз не указ.
+    // это внутри HTTP-запроса, а Kong рвёт соединение через 60 секунд.
+    //
+    // Решаем по запрошенному объёму, ничего предварительно не считая: сбор
+    // с `limit N` останавливается, набрав N строк, поэтому небольшое N всегда
+    // быстрое. А когда потолка нет, объём заранее неизвестен — там может быть и
+    // миллион организаций, и закладываться на HTTP-запрос нельзя.
     if (catalog_filters) {
-      const inline_probe = await countYandexMapsCatalog(catalog_filters, CATALOG_INLINE_LIMIT + 1);
-      const inline = inline_probe.total <= CATALOG_INLINE_LIMIT
-        && (effective_max_results === null || effective_max_results <= CATALOG_INLINE_LIMIT);
+      const inline = effective_max_results !== null && effective_max_results <= CATALOG_INLINE_LIMIT;
 
       if (!inline) {
         // Задача встаёт в очередь; воркер вызовет ту же функцию и допишет

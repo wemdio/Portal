@@ -142,12 +142,40 @@ describe('YandexMapsParserForm', () => {
     await waitFor(() => expect(within(cities).getAllByText('Алматы').length).toBeGreaterThan(0));
   });
 
-  it('у оператора нет ни поля ссылок, ни лимита на запрос', async () => {
-    render(<YandexMapsParserForm onCreate={jest.fn()} />);
+  it('у оператора нет поля ссылок, а объём необязателен и по умолчанию пуст', async () => {
+    const onCreate = jest.fn();
+    render(<YandexMapsParserForm onCreate={onCreate} />);
     await within(await screen.findByTestId('rubric-picker')).findByText('Доставка еды');
 
     expect(screen.queryByPlaceholderText(/yandex\.ru\/maps/)).toBeNull();
-    expect(screen.queryByRole('spinbutton')).toBeNull();
+    // Поле объёма есть, но пустое: пусто означает «забрать всё, что найдётся».
+    expect(screen.getByPlaceholderText('все')).toHaveValue(null);
+
+    clickInPicker('city-picker', 'Москва');
+    clickInPicker('rubric-picker', 'Кафе');
+    fireEvent.click(screen.getByRole('button', { name: 'Собрать базу' }));
+
+    // max_results не уходит вовсе — сервер понимает это как «все».
+    expect(onCreate.mock.calls[0][0]).toEqual({
+      catalog_filters: { cities: ['Москва'], categories: ['Кафе'], countries: ['Россия'] },
+    });
+  });
+
+  it('оператор может ограничить объём — тогда он уходит в запрос', async () => {
+    const onCreate = jest.fn();
+    render(<YandexMapsParserForm onCreate={onCreate} />);
+    await within(await screen.findByTestId('city-picker')).findByText('Москва');
+    await within(await screen.findByTestId('rubric-picker')).findByText('Кафе');
+
+    clickInPicker('city-picker', 'Москва');
+    clickInPicker('rubric-picker', 'Кафе');
+    fireEvent.change(screen.getByPlaceholderText('все'), { target: { value: '3000' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Собрать базу' }));
+
+    expect(onCreate.mock.calls[0][0]).toEqual({
+      catalog_filters: { cities: ['Москва'], categories: ['Кафе'], countries: ['Россия'] },
+      max_results: 3000,
+    });
   });
 
   it('кабинет присылает объём: он списывается с тарифа', async () => {
