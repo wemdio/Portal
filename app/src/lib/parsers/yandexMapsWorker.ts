@@ -291,11 +291,18 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     const catalogFilters = normalizeYandexMapsCatalogFilters((cfg as { catalog_filters?: unknown }).catalog_filters);
 
     if (catalogFilters) {
-      // Обычно сюда уже не заходят: поиск по каталогу выполняется в самом
-      // запросе создания задачи и возвращается готовым. Ветка осталась для
-      // задач, которые успели встать в очередь до этого перехода, и делает то
-      // же самое — один `insert ... select` внутри базы.
-      const filled = await fillJobFromYandexMapsCatalog(jobId, catalogFilters, maxResults);
+      // Сюда попадают крупные сборы: API выполняет в самом запросе только то,
+      // что укладывается в CATALOG_INLINE_LIMIT, остальное отдаёт нам, потому
+      // что шлюз рвёт HTTP-соединение через 60 секунд. Работа та же — один
+      // `insert ... select` внутри базы.
+      //
+      // Потолок берётся из конфига как есть: отсутствующий или нулевой означает
+      // «забрать всё, что нашлось», и подставлять сюда дефолтные 5000 нельзя —
+      // это молча обрезало бы выдачу.
+      const catalogLimit = typeof maxResultsRaw === 'number' || typeof maxResultsRaw === 'string'
+        ? (Number(maxResultsRaw) > 0 ? Math.floor(Number(maxResultsRaw)) : null)
+        : null;
+      const filled = await fillJobFromYandexMapsCatalog(jobId, catalogFilters, catalogLimit);
 
       await setJobPatch(jobId, {
         status: 'completed',

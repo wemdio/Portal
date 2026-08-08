@@ -6,7 +6,7 @@ import { encryptJsonAes256Gcm } from '@/lib/cryptoGcm';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getClientTariffUsage, isClientToolAccessAllowed, isAwaitingFirstPayment, TOOL_ACCESS_DENIED_MESSAGE, AWAITING_PAYMENT_MESSAGE } from '@/lib/tariffs';
 import {
-  CATALOG_MAX_RESULTS,
+  CATALOG_INLINE_LIMIT,
   fillJobFromYandexMapsCatalog,
   normalizeYandexMapsCatalogFilters,
 } from '@/lib/parsers/yandexMapsCatalog';
@@ -52,11 +52,18 @@ export async function POST(req: NextRequest) {
     if (!search_urls.length && !catalog_filters) return jsonError('Missing search URLs or catalog filters', 400);
 
     // Поиск по своей базе — один SELECT, а не тысячи заходов в Яндекс, поэтому
-    // потолок выдачи там сильно выше, чем у живого парсинга.
-    const max_results_cap = catalog_filters ? CATALOG_MAX_RESULTS : 5000;
-    const max_results = Math.max(1, Math.min(max_results_cap, Number(body?.max_results ?? max_results_cap) || max_results_cap));
+    // потолка выдачи у него нет вовсе: `null` означает «забрать всё, что
+    // нашлось». Число приходит только из кабинета клиента, где объём списывается
+    // с тарифа. У живого парсинга потолок остаётся — там каждая строка это заход
+    // в выдачу Яндекса.
+    const requested_max_results = Number(body?.max_results);
+    const has_requested_max = Number.isFinite(requested_max_results) && requested_max_results > 0;
+    const max_results: number | null = catalog_filters
+      ? (has_requested_max ? Math.floor(requested_max_results) : null)
+      : Math.max(1, Math.min(5000, has_requested_max ? Math.floor(requested_max_results) : 5000));
     const headless = body?.headless !== false;
 
+    let effective_max_results = max_results;
     let tariffUsage: Awaited<ReturnType<typeof getClientTariffUsage>> | null = null;
     if (supabaseAdmin) {
       const { data: profile } = await supabaseAdmin
@@ -73,7 +80,13 @@ export async function POST(req: NextRequest) {
         if (isAwaitingFirstPayment(tariffUsage)) {
           return jsonError(AWAITING_PAYMENT_MESSAGE, 403);
         }
-        if (max_results > tariffUsage.usage.max_rows.remaining) {
+        // «Забрать всё» — это про оператора. У клиента объём списывается с
+        // тарифа, поэтому безлимит здесь превращается в остаток по тарифу, а не
+        // в отсутствие потолка.
+        if (effective_max_results === null) {
+          effective_max_results = tariffUsage.usage.max_rows.remaining;
+        }
+        if (effective_max_results > tariffUsage.usage.max_rows.remaining) {
           return jsonError(
             `Осталось ${tariffUsage.usage.max_rows.remaining.toLocaleString('ru-RU')} запросов по вашему тарифу. Уменьшите максимум результатов.`,
             400,
@@ -82,16 +95,40 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Поиск по каталогу выполняется прямо здесь: очередь и воркер ему не нужны,
-    // это один запрос к соседней таблице той же базы. Задача заводится сразу
-    // «выполненной» и возвращается с готовыми результатами.
+    // Поиск по каталогу — один запрос к соседней таблице той же базы, и обычно
+    // его быстрее выполнить прямо здесь, чем гонять через очередь. Но «здесь» —
+    // это внутри HTTP-запроса, а Kong рвёт соединение через 60 секунд.
+    //
+    // Решаем по запрошенному объёму, ничего предварительно не считая: сбор
+    // с `limit N` останавливается, набрав N строк, поэтому небольшое N всегда
+    // быстрое. А когда потолка нет, объём заранее неизвестен — там может быть и
+    // миллион организаций, и закладываться на HTTP-запрос нельзя.
     if (catalog_filters) {
+      const inline = effective_max_results !== null && effective_max_results <= CATALOG_INLINE_LIMIT;
+
+      if (!inline) {
+        // Задача встаёт в очередь; воркер вызовет ту же функцию и допишет
+        // результаты. Форма покажет её в истории как выполняющуюся.
+        const { data: queued, error: queueError } = await supabase
+          .from('yandex_maps_jobs')
+          .insert({
+            user_id: user.id,
+            status: 'pending',
+            config: { search_urls: [], catalog_filters, max_results: effective_max_results, headless },
+            progress_stage: 'pending',
+          })
+          .select()
+          .single();
+        if (queueError || !queued) throw new Error(queueError?.message || 'Failed to create job');
+        return NextResponse.json({ job: queued, tariff_usage: tariffUsage, queued: true });
+      }
+
       const { data: job, error } = await supabase
         .from('yandex_maps_jobs')
         .insert({
           user_id: user.id,
           status: 'running',
-          config: { search_urls: [], catalog_filters, max_results, headless },
+          config: { search_urls: [], catalog_filters, max_results: effective_max_results, headless },
           progress_stage: 'catalog_search',
           started_at: new Date().toISOString(),
         })
@@ -100,7 +137,7 @@ export async function POST(req: NextRequest) {
       if (error || !job) throw new Error(error?.message || 'Failed to create job');
 
       try {
-        const filled = await fillJobFromYandexMapsCatalog(job.id, catalog_filters, max_results);
+        const filled = await fillJobFromYandexMapsCatalog(job.id, catalog_filters, effective_max_results);
         const { data: completed } = await supabase
           .from('yandex_maps_jobs')
           .update({
@@ -148,7 +185,7 @@ export async function POST(req: NextRequest) {
       .insert({
         user_id: user.id,
         status: 'pending',
-        config: { search_urls, catalog_filters, max_results, headless },
+        config: { search_urls, catalog_filters, max_results: effective_max_results, headless },
         progress_stage: 'pending',
         proxy_enabled,
         proxy_protocol: proxy_enabled ? proxy_protocol : null,
