@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react';
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
@@ -11,6 +11,7 @@ import { useUser } from '@/lib/UserProvider';
 import { isLead } from '@/lib/roles';
 import TeamStatisticsPanel from '@/components/team/TeamStatisticsPanel';
 import TeamReviewsPanel from '@/components/team/TeamReviewsPanel';
+import TeamActivityPlanPanel from '@/components/team/TeamActivityPlanPanel';
 
 interface ProjectData {
   id: string;
@@ -44,11 +45,12 @@ const DEFAULT_CAPACITY = 4;
 const LEAD_ROLES = new Set<UserRole>(['lead']);
 const NO_SPEC = '— без специалиста';
 
-type TeamWorkspaceView = 'load' | 'statistics' | 'reviews';
+type TeamWorkspaceView = 'load' | 'statistics' | 'reviews' | 'activities';
 const TEAM_WORKSPACE_VIEWS = [
   ['load', 'Загрузка'],
   ['statistics', 'Статистика'],
   ['reviews', 'Ревью'],
+  ['activities', 'Активности'],
 ] as const satisfies ReadonlyArray<readonly [TeamWorkspaceView, string]>;
 type Segment = 'leads' | 'specs' | 'projects';
 type SortKey = 'projects' | 'load' | 'result' | 'name';
@@ -251,9 +253,13 @@ function Caret({ open, hidden }: { open: boolean; hidden?: boolean }) {
 
 export default function TeamPage() {
   const isTma = useIsTma();
-  const { userRole } = useUser();
+  const { userRole, isHr } = useUser();
   const canViewPrivateWorkspaces = isLead(userRole);
+  const canViewWorkspaceNavigation = canViewPrivateWorkspaces || isHr;
   const [workspaceView, setWorkspaceView] = useState<TeamWorkspaceView>('load');
+  const previousIsHrRef = useRef(isHr);
+  const loadWorkspaceTabRef = useRef<HTMLButtonElement>(null);
+  const pageHeadingRef = useRef<HTMLHeadingElement>(null);
   const [projects, setProjects] = useState<ProjectData[]>([]);
   const [profiles, setProfiles] = useState<ProfileData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -268,7 +274,25 @@ export default function TeamPage() {
   const [openLeads, setOpenLeads] = useState<Set<string>>(new Set());
   const [openSpecInLead, setOpenSpecInLead] = useState<Set<string>>(new Set());
   const [openSpecs, setOpenSpecs] = useState<Set<string>>(new Set());
-  const activeWorkspaceView = canViewPrivateWorkspaces ? workspaceView : 'load';
+  const activeWorkspaceView: TeamWorkspaceView = workspaceView === 'activities'
+    ? isHr ? 'activities' : 'load'
+    : canViewPrivateWorkspaces ? workspaceView : 'load';
+  const visibleWorkspaceViews = TEAM_WORKSPACE_VIEWS.filter(([key]) => (
+    key === 'load'
+    || (key === 'activities' ? isHr : canViewPrivateWorkspaces)
+  ));
+
+  useEffect(() => {
+    const capabilityRevoked = previousIsHrRef.current && !isHr;
+    previousIsHrRef.current = isHr;
+    if (!capabilityRevoked || workspaceView !== 'activities') return;
+
+    setWorkspaceView('load');
+    queueMicrotask(() => {
+      if (canViewPrivateWorkspaces) loadWorkspaceTabRef.current?.focus();
+      else pageHeadingRef.current?.focus();
+    });
+  }, [canViewPrivateWorkspaces, isHr, workspaceView]);
 
   const nameToAvatarUrl = useMemo(() => {
     const map = new Map<string, string>();
@@ -735,20 +759,29 @@ export default function TeamPage() {
     <div className={`${isTma ? 'space-y-5' : 'space-y-6'} max-w-[1600px] mx-auto`}>
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className={`${isTma ? 'text-2xl' : 'text-3xl'} font-bold tracking-tight text-gray-900`}>Команда</h1>
+          <h1
+            ref={pageHeadingRef}
+            tabIndex={-1}
+            className={`${isTma ? 'text-2xl' : 'text-3xl'} font-bold tracking-tight text-gray-900`}
+          >
+            Команда
+          </h1>
           <p className="mt-1 text-sm text-gray-500">
             {activeWorkspaceView === 'load'
               ? 'Текущая загрузка, распределение по проектам и результаты'
               : activeWorkspaceView === 'statistics'
                 ? 'Показатели команды за выбранный календарный период'
-                : 'Итоги встреч и рекомендации по развитию сотрудников'}
+                : activeWorkspaceView === 'reviews'
+                  ? 'Итоги встреч и рекомендации по развитию сотрудников'
+                  : 'План внутренних событий, регулярных встреч и бюджета'}
           </p>
         </div>
-        {canViewPrivateWorkspaces && (
+        {canViewWorkspaceNavigation && (
           <div role="group" aria-label="Разделы команды" className="inline-flex min-h-11 w-fit gap-1 rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
-            {TEAM_WORKSPACE_VIEWS.map(([key, label]) => (
+            {visibleWorkspaceViews.map(([key, label]) => (
               <button
                 key={key}
+                ref={key === 'load' ? loadWorkspaceTabRef : undefined}
                 type="button"
                 aria-pressed={activeWorkspaceView === key}
                 onClick={() => setWorkspaceView(key)}
@@ -864,8 +897,10 @@ export default function TeamPage() {
         )
       ) : activeWorkspaceView === 'statistics' ? (
         <TeamStatisticsPanel />
-      ) : (
+      ) : activeWorkspaceView === 'reviews' ? (
         <TeamReviewsPanel />
+      ) : (
+        <TeamActivityPlanPanel />
       )}
     </div>
   );
