@@ -662,8 +662,8 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
       setToast({
         tone: 'success',
         message: trimmed
-          ? `Добавлено в “Базы” (${MAX_ROWS} из ${items.length} вакансий, лимит на импорт). Можете перейти и проверить.`
-          : `Добавлено в “Базы” (${items.length} вакансий). Можете перейти и проверить импорт.`,
+          ? `Добавлено в “Базы” (${MAX_ROWS} из ${items.length} вакансий, лимит на импорт). Ждёт новой вкладкой в «Работе с базами».`
+          : `Добавлено в “Базы” (${items.length} вакансий). Ждёт новой вкладкой в «Работе с базами».`,
         href: url,
       });
     } catch (e) {
