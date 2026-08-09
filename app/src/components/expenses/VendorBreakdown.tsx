@@ -3,7 +3,7 @@
 import { useRef, useState } from 'react';
 
 import { UnconvertedNote } from '@/components/expenses/KpiTile';
-import { expensesFetch, formatDelta, formatMoney, formatRub } from '@/lib/expenses/client';
+import { expensesFetch, formatDelta, formatMoney, formatRub, formatShare } from '@/lib/expenses/client';
 import { categoryLabel, sourceLabel } from '@/lib/expenses/labels';
 import type { ExpenseRow, VendorBreakdownItem } from '@/lib/expenses/types';
 import { useSortableRows, type SortColumns } from '@/components/ui/useSortableRows';
@@ -129,7 +129,7 @@ export default function VendorBreakdown({
   }
 
   return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-3">
+    <div className="glass-tile p-3">
       <h3 className="mb-2 text-sm font-semibold text-zinc-900">Разбивка по сервисам</h3>
 
       {items.length === 0 ? (
@@ -155,7 +155,9 @@ export default function VendorBreakdown({
             ))}
           </div>
 
-          <div className="mt-4 overflow-x-auto">
+          {/* Плотная подложка под таблицей: на стекле строки просвечивают
+              друг через друга. Размытия здесь нет — плитка уже стеклянная. */}
+          <div className="mt-4 overflow-x-auto rounded-lg bg-[var(--glass-rows)]">
             <table className="w-full min-w-[680px] text-sm">
               <thead>
                 <tr className="text-left text-[10px] uppercase tracking-wider text-zinc-400">
@@ -265,7 +267,7 @@ function RowGroup({
           {formatRub(item.total)} ₽
           <UnconvertedNote count={item.unconvertedCount} byCurrency={item.unconvertedByCurrency} />
         </td>
-        <td className="py-2 text-right tabular-nums text-zinc-600">{Math.round(item.share * 100)}%</td>
+        <td className="py-2 text-right tabular-nums text-zinc-600">{formatShare(item.share)}</td>
         <td className="py-2 text-right tabular-nums text-zinc-600">{item.ops}</td>
         <td className={`py-2 text-right tabular-nums ${deltaColor}`}>{formatDelta(item.deltaPrev)}</td>
       </tr>

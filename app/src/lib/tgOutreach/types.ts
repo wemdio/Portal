@@ -124,6 +124,12 @@ export interface TelegramSettings {
   ignore_no_username: boolean;
   blocked_usernames: string[];
   account_cooldown_hours: number;
+  /**
+   * Сколько первых сообщений аккаунт отправляет в сутки. Ноль или отсутствие
+   * поля = первое касание выключено; отдельного переключателя не нужно.
+   * Кампании, заведённые до этой фичи, поля не имеют — отсюда `?`.
+   */
+  first_touch_per_account_per_day?: number;
   follow_up: FollowUpSettings;
 }
 
@@ -172,6 +178,17 @@ export interface OutreachAccount {
   tg_user_id?: number | null;
   tg_username?: string | null;
   identity_checked_at?: string | null;
+  /**
+   * Профиль, который реально стоит в Telegram (миграция 20260806_0002).
+   * Заполняется при правке профиля и при чтении из Telegram; `avatar_url` —
+   * копия фото в хранилище портала, чтобы список не ходил за картинками в
+   * Telegram. `profile_synced_at` = NULL — профиль ещё ни разу не читали.
+   */
+  first_name?: string;
+  last_name?: string;
+  bio?: string;
+  avatar_url?: string;
+  profile_synced_at?: string | null;
   created_at: string;
 }
 

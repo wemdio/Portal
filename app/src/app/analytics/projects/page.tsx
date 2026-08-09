@@ -332,7 +332,7 @@ export default function ProjectsAnalyticsPage() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="glass-stage space-y-8">
       <div>
         <h1 className="text-2xl font-semibold text-gray-900">Аналитика проектов</h1>
         <p className="mt-1 text-sm text-gray-500">
@@ -341,33 +341,33 @@ export default function ProjectsAnalyticsPage() {
       </div>
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-        <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-5 shadow-sm">
+        <div className="glass-tile glass-tint-blue p-5">
           <p className="text-sm text-blue-700">Всего проектов</p>
           <p className="text-2xl font-semibold text-blue-900">{projects.length}</p>
         </div>
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-5 shadow-sm">
+        <div className="glass-tile glass-tint-emerald p-5">
           <p className="text-sm text-emerald-700">Активных</p>
           <p className="text-2xl font-semibold text-emerald-900">{activeProjects.length}</p>
         </div>
-        <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-5 shadow-sm">
+        <div className="glass-tile glass-tint-amber p-5">
           <p className="text-sm text-amber-700">Продления (30 дней)</p>
           <p className="text-2xl font-semibold text-amber-900">{renewals.length}</p>
         </div>
-        <div className="rounded-xl border border-red-200 bg-red-50/50 p-5 shadow-sm">
+        <div className="glass-tile glass-tint-red p-5">
           <p className="text-sm text-red-700">Просроченных</p>
           <p className="text-2xl font-semibold text-red-900">{overdueProjects.length}</p>
         </div>
       </div>
 
       {/* Renewals — main block */}
-      <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
-        <div className="border-b border-gray-200 bg-gray-50 px-6 py-4">
+      <div className="glass-frame">
+        <div className="border-b border-gray-200 bg-[var(--glass-fill-soft)] px-6 py-4">
           <h2 className="text-lg font-semibold text-gray-900">Продления</h2>
           <p className="text-sm text-gray-500">
             Проекты с дедлайном в ближайшие 30 дней · нажмите на строку чтобы раскрыть детали
           </p>
         </div>
-        <div>
+        <div className="bg-[var(--glass-rows)]">
           {renewals.map((project) => (
             <ProjectRow key={project.id} project={project} today={today} />
           ))}
@@ -379,12 +379,12 @@ export default function ProjectsAnalyticsPage() {
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         {/* By specialist */}
-        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
-          <div className="border-b border-gray-200 bg-gray-50 px-6 py-4">
+        <div className="glass-frame">
+          <div className="border-b border-gray-200 bg-[var(--glass-fill-soft)] px-6 py-4">
             <h2 className="text-lg font-semibold text-gray-900">Продления по специалистам</h2>
             <p className="text-sm text-gray-500">Сколько проектов требует внимания</p>
           </div>
-          <div className="divide-y divide-gray-100">
+          <div className="divide-y divide-gray-100 bg-[var(--glass-rows)]">
             {renewalsBySpecialist.map(([name, count]) => (
               <div key={name} className="flex items-center justify-between px-6 py-4">
                 <span className="text-sm font-medium text-gray-900">{name}</span>
@@ -400,12 +400,12 @@ export default function ProjectsAnalyticsPage() {
         </div>
 
         {/* Overdue projects */}
-        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="glass-frame">
           <div className="border-b border-red-200 bg-red-100/80 px-6 py-4">
             <h2 className="text-lg font-semibold text-red-900">Просроченные проекты</h2>
             <p className="text-sm text-red-700/80">Дедлайн уже прошёл, но проект не завершён</p>
           </div>
-          <div className="divide-y divide-gray-100">
+          <div className="divide-y divide-gray-100 bg-[var(--glass-rows)]">
             {overdueProjects.map((project) => {
               const days = project.deadlineDate ? diffDaysFrom(project.deadlineDate, today) : null;
               return (
@@ -438,12 +438,12 @@ export default function ProjectsAnalyticsPage() {
 
       {/* Overdue tasks */}
       {overdueTasks.length > 0 && (
-        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
-          <div className="border-b border-gray-200 bg-gray-50 px-6 py-4">
+        <div className="glass-frame">
+          <div className="border-b border-gray-200 bg-[var(--glass-fill-soft)] px-6 py-4">
             <h2 className="text-lg font-semibold text-gray-900">Проблемы по задачам</h2>
             <p className="text-sm text-gray-500">Просроченные задачи по проектам</p>
           </div>
-          <div className="divide-y divide-gray-100">
+          <div className="divide-y divide-gray-100 bg-[var(--glass-rows)]">
             {overdueTasks.map((task) => (
               <div key={task.id} className="px-6 py-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">

@@ -3,6 +3,17 @@ import { logError, logInfo, logWarn } from '@/lib/loggerServer';
 import { decryptJsonAes256Gcm } from '@/lib/cryptoGcm';
 import { normalizeYandexOrgUrls } from '@/lib/parsers/yandexMapsUrlUtils';
 import { YandexMapsBlockedError, yandexMapsCollectLinksStream, yandexMapsHealth, yandexMapsParseOrgs, yandexMapsProxyCheck } from '@/lib/parsers/yandexMapsServiceClient';
+import {
+  claimYandexMapsCatalogDiscovery,
+  filterUnknownYandexIds,
+  finishYandexMapsCatalogDiscovery,
+  markYandexMapsCatalogSeen,
+  normalizeYandexMapsCatalogFilters,
+  recordYandexMapsCatalogRefreshCompleted,
+  fillJobFromYandexMapsCatalog,
+  upsertYandexMapsCatalogOrganizations,
+  yandexIdFromCardUrl,
+} from '@/lib/parsers/yandexMapsCatalog';
 import { startTrace } from '@/lib/tracer';
 
 type ProxyCreds = { username: string; password: string };
@@ -277,6 +288,41 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       ? (Number(maxResultsRaw) || 5000)
       : 5000;
     const headless = (cfg as { headless?: unknown }).headless !== false;
+    const catalogFilters = normalizeYandexMapsCatalogFilters((cfg as { catalog_filters?: unknown }).catalog_filters);
+
+    if (catalogFilters) {
+      // Сюда попадают крупные сборы: API выполняет в самом запросе только то,
+      // что укладывается в CATALOG_INLINE_LIMIT, остальное отдаёт нам. Работа
+      // та же — один `insert ... select` внутри базы, но здесь её никто не
+      // торопит: браузер ответа не ждёт, а в Postgres мы ходим напрямую, мимо
+      // шлюза с его шестьюдесятью секундами (см. yandexMapsCatalog.ts).
+      //
+      // Потолок берётся из конфига как есть: отсутствующий или нулевой означает
+      // «забрать всё, что нашлось», и подставлять сюда дефолтные 5000 нельзя —
+      // это молча обрезало бы выдачу.
+      const catalogLimit = typeof maxResultsRaw === 'number' || typeof maxResultsRaw === 'string'
+        ? (Number(maxResultsRaw) > 0 ? Math.floor(Number(maxResultsRaw)) : null)
+        : null;
+      const filled = await fillJobFromYandexMapsCatalog(jobId, catalogFilters, catalogLimit);
+
+      await setJobPatch(jobId, {
+        status: 'completed',
+        progress_stage: filled.organizations ? 'catalog_completed' : 'catalog_empty',
+        completed_at: new Date().toISOString(),
+        total_links: filled.links,
+        processed_links: filled.links,
+        total_organizations: filled.organizations,
+        processed_organizations: filled.organizations,
+        error_message: null,
+      });
+      await trace?.end({ source: 'catalog', total_organizations: filled.organizations });
+      void logInfo('parser.yandexmaps.catalog.complete', 'YandexMaps catalog search completed', {
+        jobId,
+        totalOrganizations: filled.organizations,
+        totalLinks: filled.links,
+      }, logMeta);
+      return;
+    }
 
     if (!searchUrls.length) {
       await setJobPatch(jobId, { status: 'failed', error_message: 'Нет URL для поиска' });
@@ -727,6 +773,17 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
             await supabaseAdmin!.from('yandex_maps_organizations').upsert(rows, { onConflict: 'job_id,card_url' });
           }
 
+          if (orgs.length) {
+            try {
+              await upsertYandexMapsCatalogOrganizations(orgs, 'parser');
+            } catch (catalogError) {
+              void logWarn('parser.yandexmaps.catalog.upsert_failed', 'Catalog upsert failed; job results were preserved', {
+                jobId,
+                error: catalogError instanceof Error ? catalogError.message : String(catalogError),
+              }, logMeta);
+            }
+          }
+
           processed += rows.length;
           // Прогресс теперь по числу ЗАВЕРШЁННЫХ чанков — с параллелизмом
           // «i-й в порядке индекса» уже не отражает реальный прогресс.
@@ -839,4 +896,82 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
     void logError('parser.yandexmaps.parse.failed', e, { jobId }, logMeta);
   }
 }
+
+/**
+ * Фоновый поиск НОВЫХ организаций.
+ *
+ * Берёт из очереди пару «место × рубрика», делает обычный поиск по Яндекс.
+ * Картам и собирает ссылки. Идентификатор организации виден прямо в ссылке,
+ * поэтому известные отсеиваются без единого обращения к Яндексу, а карточки
+ * открываются только у новых — на этом механизм и держится.
+ *
+ * Возвращает true, если задание было взято (воркеру есть чем заняться).
+ */
+export async function runYandexMapsCatalogDiscoveryBatch(): Promise<boolean> {
+  const dailyLimit = Number(process.env.YANDEXMAPS_CATALOG_DISCOVERY_DAILY_LIMIT ?? '15000');
+  const maxLinks = Number(process.env.YANDEXMAPS_CATALOG_DISCOVERY_MAX_LINKS ?? '250');
+  const parseChunkSize = Number(process.env.YANDEXMAPS_CATALOG_DISCOVERY_CHUNK_SIZE ?? '5');
+
+  const [task] = await claimYandexMapsCatalogDiscovery(1, dailyLimit);
+  if (!task) return false;
+
+  let seenLinks = 0;
+  let foundNew = 0;
+  let exhaustive = false;
+
+  try {
+    if (!await waitForYandexMapsHealth(2, 2_000)) throw new Error('Сервис yandexmaps недоступен');
+
+    const pool = getYandexMapsProxyPool();
+    const searchUrl = `https://yandex.ru/maps/?text=${encodeURIComponent(`${task.place} ${task.rubric}`.trim())}`;
+
+    const collected: string[] = [];
+    const { total } = await yandexMapsCollectLinksStream(
+      { search_url: searchUrl, max_results: maxLinks, headless: true, proxy: pool[0] ?? NO_PROXY },
+      (chunk) => { collected.push(...(chunk.links ?? [])); },
+    );
+
+    const links = normalizeYandexOrgUrls([...new Set(collected)]);
+    seenLinks = links.length;
+    // Выдача не упёрлась в запрошенный предел — значит по этому запросу мы
+    // видели всё, что есть у Яндекса, и отсутствие в списке о чём-то говорит.
+    exhaustive = seenLinks < maxLinks && total < maxLinks;
+
+    const byId = new Map<string, string>();
+    for (const link of links) {
+      const id = yandexIdFromCardUrl(link);
+      if (id) byId.set(id, link);
+    }
+
+    await markYandexMapsCatalogSeen([...byId.keys()], task, exhaustive);
+
+    const unknown = await filterUnknownYandexIds([...byId.keys()]);
+    const toParse = [...unknown].map((id) => byId.get(id)!).filter(Boolean);
+
+    for (const [chunkIndex, batch] of chunk(toParse, parseChunkSize).entries()) {
+      const result = await yandexMapsParseOrgs({
+        links: batch,
+        headless: true,
+        proxy: pool[chunkIndex % Math.max(pool.length, 1)] ?? NO_PROXY,
+      });
+      foundNew += await upsertYandexMapsCatalogOrganizations(result.organizations ?? [], 'discovery');
+    }
+
+    await finishYandexMapsCatalogDiscovery(task.id, { seenLinks, foundNew, exhaustive });
+    await recordYandexMapsCatalogRefreshCompleted(Math.max(toParse.length, 1));
+    void logInfo('parser.yandexmaps.catalog.discovery', 'Catalog discovery scan finished', {
+      place: task.place, rubric: task.rubric, seenLinks, known: byId.size - unknown.size, foundNew, exhaustive,
+    });
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await finishYandexMapsCatalogDiscovery(task.id, { seenLinks, foundNew, exhaustive, error: message })
+      .catch(() => undefined);
+    void logWarn('parser.yandexmaps.catalog.discovery_failed', 'Catalog discovery scan failed', {
+      place: task.place, rubric: task.rubric, error: message,
+    });
+    return true;
+  }
+}
+
 

@@ -19,9 +19,12 @@ import {
   ChevronRight,
   ChevronDown,
   AlertCircle,
+  Download,
 } from 'lucide-react';
 import type { CampaignStatus, OutreachAccount } from '@/lib/tgOutreach/types';
 import type {
+  WarmupActivity,
+  WarmupChat,
   WarmupConversation,
   WarmupLog,
   WarmupRun,
@@ -33,10 +36,22 @@ interface PerAccountStat {
   account_id: string;
   done: number;
   failed: number;
+  /** Сорвавшиеся переписки, где виноват именно этот аккаунт (а не собеседник). */
+  failed_own?: number;
   planned: number;
   done_today: number;
   planned_today: number;
   last_error: string | null;
+  last_error_at?: string | null;
+}
+
+interface ChatStageStatus {
+  enabled: boolean;
+  replies_today: number;
+  reactions_today: number;
+  replies_total: number;
+  reactions_total: number;
+  planned_today: number;
 }
 
 interface WarmupStatus {
@@ -45,11 +60,27 @@ interface WarmupStatus {
   per_day?: Array<{ day: number; planned: number; done: number }>;
   today: { planned: number; done: number } | null;
   messages_total?: number;
+  chat_stage?: ChatStageStatus;
   defaults: { default_days: number };
 }
 
 function timeOf(iso: string) {
   return new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+}
+
+/** «6 августа», «5 августа» — заголовок группы записей журнала. */
+function dayKey(iso: string) {
+  return new Date(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+}
+
+/** «вчера 21:53» — когда именно у аккаунта был последний сбой. */
+function whenOf(iso: string) {
+  const d = new Date(iso);
+  const today = dayKey(new Date().toISOString());
+  const yesterday = dayKey(new Date(Date.now() - 86_400_000).toISOString());
+  const key = dayKey(iso);
+  const prefix = key === today ? '' : key === yesterday ? 'вчера ' : `${key} `;
+  return `${prefix}${timeOf(d.toISOString())}`;
 }
 
 const RUN_LABEL: Record<string, string> = {
@@ -60,23 +91,31 @@ const RUN_LABEL: Record<string, string> = {
   failed: 'сорвался',
 };
 
+// Флага «своя/чужая кампания» здесь больше нет: 20260807_0004 открыла запись
+// в кампанию любому сотруднику, аутрич ведут несколько человек.
 export default function WarmupTab({
   campaignId,
-  isOwn,
   campaignStatus,
 }: {
   campaignId: string;
-  isOwn: boolean;
   campaignStatus: CampaignStatus;
 }) {
   const [status, setStatus] = useState<WarmupStatus | null>(null);
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   const [conversations, setConversations] = useState<WarmupConversation[]>([]);
   const [logs, setLogs] = useState<WarmupLog[]>([]);
+  const [logsHasMore, setLogsHasMore] = useState(false);
+  const [logsLoadingMore, setLogsLoadingMore] = useState(false);
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [expandedConvId, setExpandedConvId] = useState<number | null>(null);
   const [days, setDays] = useState(4);
+  const [publicChats, setPublicChats] = useState(false);
+  const [chats, setChats] = useState<WarmupChat[]>([]);
+  const [activities, setActivities] = useState<WarmupActivity[]>([]);
+  /** Что показывать в правой панели: переписки между своими или чаты. */
+  const [rightPanel, setRightPanel] = useState<'conversations' | 'activities'>('conversations');
   const [errorsOnly, setErrorsOnly] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [allAccountsLogs, setAllAccountsLogs] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -98,6 +137,23 @@ export default function WarmupTab({
     setAccounts((Array.isArray(data) ? data : data.items ?? []) as OutreachAccount[]);
   }, [campaignId]);
 
+  // Чаты нужны и для галочки (без проверенных её незачем включать), и для
+  // подписей в ленте активностей.
+  const loadChats = useCallback(async () => {
+    const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup/chats`);
+    if (!res.ok) return;
+    const data = await res.json();
+    setChats((data.items ?? []) as WarmupChat[]);
+  }, [campaignId]);
+
+  const loadActivities = useCallback(async () => {
+    const qs = selectedAccountId ? `?account_id=${selectedAccountId}` : '';
+    const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup/activities${qs}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    setActivities((data.items ?? []) as WarmupActivity[]);
+  }, [campaignId, selectedAccountId]);
+
   const loadConversations = useCallback(async () => {
     const qs = selectedAccountId ? `?account_id=${selectedAccountId}` : '';
     const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup/conversations${qs}`);
@@ -106,27 +162,113 @@ export default function WarmupTab({
     setConversations((data.items ?? []) as WarmupConversation[]);
   }, [campaignId, selectedAccountId]);
 
+  const LOGS_PAGE = 300;
+
+  /**
+   * Выгрузка логов за весь период.
+   *
+   * Обычной ссылкой не обойтись: роут требует токен в заголовке, а <a download>
+   * его не отправит. Поэтому тянем ответ как blob и отдаём браузеру ссылку на
+   * него; имя файла берём из Content-Disposition, которое сформировал сервер.
+   */
+  const exportLogs = useCallback(async () => {
+    setExporting(true);
+    try {
+      const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup/logs/export`);
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        alert(d?.error ?? `Не удалось выгрузить логи (${res.status})`);
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get('Content-Disposition') ?? '';
+      const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+      const plain = /filename="([^"]+)"/i.exec(disposition);
+      const name = utf8 ? decodeURIComponent(utf8[1]) : (plain?.[1] ?? 'tg-warmup-logs.txt');
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } finally {
+      setExporting(false);
+    }
+  }, [campaignId]);
+
   const loadLogs = useCallback(async () => {
-    const params = new URLSearchParams({ limit: '300' });
+    const params = new URLSearchParams({ limit: String(LOGS_PAGE) });
     if (selectedAccountId && !allAccountsLogs) params.set('account_id', selectedAccountId);
     if (errorsOnly) params.set('errors_only', '1');
     const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup/logs?${params}`);
     if (!res.ok) return;
     const data = await res.json();
     setLogs((data.items ?? []) as WarmupLog[]);
+    setLogsHasMore(Boolean(data.has_more));
   }, [campaignId, selectedAccountId, allAccountsLogs, errorsOnly]);
+
+  /**
+   * Автообновление журнала: доливаем только новые записи сверху, не сбрасывая
+   * уже подгруженную историю — иначе каждые 10 секунд «Показать ещё» откатывался
+   * бы к первой странице прямо под руками у оператора.
+   */
+  const refreshLogs = useCallback(async () => {
+    const params = new URLSearchParams({ limit: String(LOGS_PAGE) });
+    if (selectedAccountId && !allAccountsLogs) params.set('account_id', selectedAccountId);
+    if (errorsOnly) params.set('errors_only', '1');
+    const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup/logs?${params}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const fresh = (data.items ?? []) as WarmupLog[];
+    setLogs((prev) => {
+      if (!prev.length) return fresh;
+      const seen = new Set(prev.map((l) => l.id));
+      const added = fresh.filter((l) => !seen.has(l.id));
+      return added.length ? [...added, ...prev] : prev;
+    });
+  }, [campaignId, selectedAccountId, allAccountsLogs, errorsOnly]);
+
+  /**
+   * Подгрузить страницу постарше. Прогрев идёт несколько суток, а с записью
+   * каждой отправки одна страница не покрывает даже вчерашний день — «что было
+   * в первый день» иначе не посмотреть.
+   */
+  const loadOlderLogs = useCallback(async () => {
+    const oldest = logs[logs.length - 1];
+    if (!oldest) return;
+    setLogsLoadingMore(true);
+    try {
+      const params = new URLSearchParams({ limit: String(LOGS_PAGE), before_id: String(oldest.id) });
+      if (selectedAccountId && !allAccountsLogs) params.set('account_id', selectedAccountId);
+      if (errorsOnly) params.set('errors_only', '1');
+      const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup/logs?${params}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setLogs((prev) => [...prev, ...((data.items ?? []) as WarmupLog[])]);
+      setLogsHasMore(Boolean(data.has_more));
+    } finally {
+      setLogsLoadingMore(false);
+    }
+  }, [campaignId, logs, selectedAccountId, allAccountsLogs, errorsOnly]);
 
   useEffect(() => {
     void (async () => {
       setLoading(true);
-      await Promise.all([loadStatus(), loadAccounts()]);
+      await Promise.all([loadStatus(), loadAccounts(), loadChats()]);
       setLoading(false);
     })();
-  }, [loadStatus, loadAccounts]);
+  }, [loadStatus, loadAccounts, loadChats]);
 
   useEffect(() => {
     void (async () => { await loadConversations(); })();
   }, [loadConversations]);
+
+  useEffect(() => {
+    void (async () => { await loadActivities(); })();
+  }, [loadActivities]);
 
   useEffect(() => {
     void (async () => { await loadLogs(); })();
@@ -139,10 +281,11 @@ export default function WarmupTab({
     const t = setInterval(() => {
       void loadStatus();
       void loadConversations();
-      void loadLogs();
+      void loadActivities();
+      void refreshLogs();
     }, 10_000);
     return () => clearInterval(t);
-  }, [status?.run?.status, loadStatus, loadConversations, loadLogs]);
+  }, [status?.run?.status, loadStatus, loadConversations, loadActivities, refreshLogs]);
 
   const act = async (method: 'POST' | 'DELETE') => {
     setBusy(true);
@@ -151,7 +294,10 @@ export default function WarmupTab({
       const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup`, {
         method,
         ...(method === 'POST'
-          ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ days }) }
+          ? {
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ days, public_chats: publicChats }),
+            }
           : {}),
       });
       if (!res.ok) {
@@ -178,7 +324,13 @@ export default function WarmupTab({
   const statByAccount = new Map((status?.per_account ?? []).map((s) => [s.account_id, s]));
   const accountName = (id: string) =>
     accounts.find((a) => a.id === id)?.session_name ?? id.slice(0, 8);
-  const problemAccounts = (status?.per_account ?? []).filter((s) => s.failed > 0).length;
+  const problemAccounts = (status?.per_account ?? []).filter((s) => (s.failed_own ?? 0) > 0).length;
+  const chatById = new Map(chats.map((c) => [c.id, c]));
+  const usableChats = chats.filter((c) => c.status === 'resolved' && c.is_active).length;
+  const chatStage = status?.chat_stage;
+  // Этап показываем, если он включён в текущем прогоне либо если прогрев ещё не
+  // запускали, но чаты уже готовы — оператору надо видеть, что галочка живая.
+  const chatStageVisible = Boolean(chatStage?.enabled) || (!run && usableChats > 0);
   // Прогрев и боевой аутрич взаимоисключающие — на запущенной кампании кнопка
   // всё равно получит отказ от сервера, поэтому предупреждаем заранее.
   const blockedByCampaign = campaignStatus === 'running' || campaignStatus === 'paused';
@@ -221,15 +373,36 @@ export default function WarmupTab({
               min={1}
               max={14}
               value={days}
-              disabled={isRunning || !isOwn}
+              disabled={isRunning}
               onChange={(e) => setDays(Number(e.target.value))}
               className="w-16 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 disabled:opacity-50"
             />
           </label>
+
+          {/* Необязательный этап. Без проверенных чатов включать нечего —
+              блокируем с объяснением, а не молча. */}
+          <label
+            title={
+              usableChats
+                ? 'Аккаунты вступят в чаты из вкладки «Чаты» и будут понемногу отвечать людям'
+                : 'Сначала добавьте и проверьте чаты во вкладке «Чаты»'
+            }
+            className={`flex items-center gap-2 text-[11px] ${usableChats && !isRunning ? 'cursor-pointer text-gray-600' : 'cursor-not-allowed text-gray-400'}`}
+          >
+            <input
+              type="checkbox"
+              checked={isRunning ? Boolean(chatStage?.enabled) : publicChats}
+              disabled={isRunning || !usableChats}
+              onChange={(e) => setPublicChats(e.target.checked)}
+              className="h-3.5 w-3.5 accent-indigo-600"
+            />
+            Активность в чатах
+            {usableChats > 0 && <span className="text-gray-400">({usableChats})</span>}
+          </label>
           {isRunning ? (
             <button
               type="button"
-              disabled={busy || !isOwn}
+              disabled={busy}
               onClick={() => void act('DELETE')}
               className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-100 disabled:opacity-50"
             >
@@ -239,7 +412,7 @@ export default function WarmupTab({
           ) : (
             <button
               type="button"
-              disabled={busy || !isOwn || blockedByCampaign}
+              disabled={busy || blockedByCampaign}
               title={blockedByCampaign ? 'Сначала остановите кампанию' : undefined}
               onClick={() => void act('POST')}
               className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
@@ -297,6 +470,15 @@ export default function WarmupTab({
         <Metric label="С проблемами" value={problemAccounts} tone={problemAccounts ? 'warn' : undefined} />
       </div>
 
+      {chatStageVisible && (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Metric label="Ответов в чатах сегодня" value={chatStage?.replies_today ?? 0} />
+          <Metric label="Реакций сегодня" value={chatStage?.reactions_today ?? 0} />
+          <Metric label="Ответов за прогрев" value={chatStage?.replies_total ?? 0} />
+          <Metric label="Чатов в работе" value={usableChats} />
+        </div>
+      )}
+
       {/* Аккаунты + переписки */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-[230px_minmax(0,1fr)]">
         <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
@@ -313,7 +495,9 @@ export default function WarmupTab({
           <div className="max-h-[420px] overflow-y-auto">
             {accounts.map((a) => {
               const s = statByAccount.get(a.id);
-              const failed = (s?.failed ?? 0) > 0;
+              // Жёлтым помечаем только виновника сбоя. Собеседник по сорванной
+              // переписке ни при чём: раньше 2 сбоя окрашивали 4 аккаунта.
+              const failed = (s?.failed_own ?? 0) > 0;
               const dot = failed ? 'bg-amber-500' : (s?.done ?? 0) > 0 ? 'bg-emerald-500' : 'bg-gray-300';
               return (
                 <button
@@ -334,7 +518,11 @@ export default function WarmupTab({
                     {s
                       ? `${s.done_today} из ${s.planned_today} сегодня · ${s.done} всего`
                       : 'ещё не участвовал'}
-                    {s?.last_error ? ` · ${s.last_error.slice(0, 40)}` : ''}
+                    {/* Со временем сбоя: без него вчерашняя ошибка читается как
+                        «аккаунт сломан прямо сейчас». */}
+                    {failed && s?.last_error
+                      ? ` · ${s.last_error_at ? `${whenOf(s.last_error_at)} ` : ''}${s.last_error.slice(0, 60)}`
+                      : ''}
                   </div>
                 </button>
               );
@@ -343,11 +531,81 @@ export default function WarmupTab({
         </div>
 
         <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
-          <div className="border-b border-gray-200 px-3 py-2 text-xs font-medium text-gray-700">
-            {selectedAccountId ? `Переписки ${accountName(selectedAccountId)}` : 'Все переписки прогрева'}
-            <span className="ml-2 text-[11px] font-normal text-gray-400">{conversations.length}</span>
+          <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-3 py-2">
+            <span className="text-xs font-medium text-gray-700">
+              {rightPanel === 'conversations'
+                ? (selectedAccountId ? `Переписки ${accountName(selectedAccountId)}` : 'Все переписки прогрева')
+                : (selectedAccountId ? `Активность ${accountName(selectedAccountId)}` : 'Активность в чатах')}
+              <span className="ml-2 text-[11px] font-normal text-gray-400">
+                {rightPanel === 'conversations' ? conversations.length : activities.length}
+              </span>
+            </span>
+            {/* Переключатель, а не третья колонка: вкладка и так плотная. */}
+            {chatStageVisible && (
+              <div className="ml-auto flex gap-1">
+                {([
+                  ['conversations', 'Переписки'],
+                  ['activities', 'В чатах'],
+                ] as const).map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setRightPanel(id)}
+                    className={`rounded-lg border px-2.5 py-1 text-[11px] transition ${
+                      rightPanel === id
+                        ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                        : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
-          {conversations.length === 0 ? (
+
+          {rightPanel === 'activities' ? (
+            activities.length === 0 ? (
+              <div className="px-3 py-6 text-center text-[11px] text-gray-400">
+                Действий в чатах пока нет
+              </div>
+            ) : (
+              <div className="max-h-[420px] overflow-y-auto">
+                {activities.map((a) => {
+                  const chat = chatById.get(a.chat_id);
+                  return (
+                    <div key={a.id} className="border-b border-gray-100 px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="shrink-0 text-xs">{a.kind === 'reaction' ? '👍' : '💬'}</span>
+                        <span className="flex-1 truncate text-xs text-gray-700">
+                          {accountName(a.account_id)}
+                          <span className="text-gray-400"> → </span>
+                          {chat?.title ?? chat?.link ?? 'чат'}
+                        </span>
+                        <span className="shrink-0 text-[10px] text-gray-400">
+                          день {a.day_no} · {timeOf(a.planned_at)}
+                        </span>
+                        <ConvBadge status={a.status} />
+                      </div>
+                      {a.target_excerpt && (
+                        <div className="mt-1 truncate pl-6 text-[10px] text-gray-400">
+                          на «{a.target_excerpt}»
+                        </div>
+                      )}
+                      {a.content && (
+                        <div className="mt-0.5 pl-6 text-[11px] text-gray-600">
+                          {a.kind === 'reaction' ? `поставил ${a.content}` : `«${a.content}»`}
+                        </div>
+                      )}
+                      {a.error_reason && a.status !== 'done' && (
+                        <div className="mt-0.5 pl-6 text-[10px] text-amber-600">{a.error_reason}</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )
+          ) : conversations.length === 0 ? (
             <div className="px-3 py-6 text-center text-[11px] text-gray-400">
               Переписок пока нет
             </div>
@@ -433,6 +691,16 @@ export default function WarmupTab({
           </button>
           <button
             type="button"
+            onClick={() => { void exportLogs(); }}
+            disabled={exporting}
+            title="Скачать логи прогрева за весь период одним файлом"
+            className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] text-gray-600 transition hover:bg-gray-50 disabled:opacity-50"
+          >
+            {exporting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+            Выгрузить всё
+          </button>
+          <button
+            type="button"
             onClick={() => setErrorsOnly((v) => !v)}
             className={`rounded-lg border px-2.5 py-1 text-[11px] transition ${
               errorsOnly ? 'border-amber-200 bg-amber-50 text-amber-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'
@@ -445,14 +713,41 @@ export default function WarmupTab({
           {logs.length === 0 ? (
             <div className="py-4 text-center text-gray-400">Событий нет</div>
           ) : (
-            logs.map((l) => (
-              <div key={l.id} className="flex gap-2">
-                <span className="shrink-0 text-gray-400">{timeOf(l.created_at)}</span>
-                <span className={l.level === 'error' ? 'text-rose-600' : l.level === 'warning' ? 'text-amber-600' : 'text-gray-600'}>
-                  {l.message}
-                </span>
-              </div>
-            ))
+            <>
+              {logs.map((l, i) => {
+                // Записи идут от новых к старым, поэтому заголовок даты рисуем
+                // там, где день сменился относительно предыдущей строки.
+                const showDay = i === 0 || dayKey(l.created_at) !== dayKey(logs[i - 1].created_at);
+                return (
+                  <React.Fragment key={l.id}>
+                    {showDay && (
+                      <div className="mt-2 mb-1 flex items-center gap-2 first:mt-0">
+                        <span className="text-[10px] font-medium uppercase tracking-wide text-gray-400">
+                          {dayKey(l.created_at)}
+                        </span>
+                        <span className="h-px flex-1 bg-gray-100" />
+                      </div>
+                    )}
+                    <div className="flex gap-2">
+                      <span className="shrink-0 text-gray-400">{timeOf(l.created_at)}</span>
+                      <span className={l.level === 'error' ? 'text-rose-600' : l.level === 'warning' ? 'text-amber-600' : 'text-gray-600'}>
+                        {l.message}
+                      </span>
+                    </div>
+                  </React.Fragment>
+                );
+              })}
+              {logsHasMore && (
+                <button
+                  type="button"
+                  disabled={logsLoadingMore}
+                  onClick={() => void loadOlderLogs()}
+                  className="mt-2 w-full rounded-lg border border-gray-200 py-1.5 text-[11px] text-gray-600 transition hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {logsLoadingMore ? 'Загружаю…' : 'Показать более ранние'}
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>

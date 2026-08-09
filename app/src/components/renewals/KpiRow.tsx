@@ -18,11 +18,7 @@ function Tile({
   amber?: boolean;
 }) {
   return (
-    <div
-      className={`rounded-xl border px-4 py-3 ${
-        amber ? 'border-amber-200 bg-amber-50' : 'border-zinc-200 bg-white'
-      }`}
-    >
+    <div className={`glass-tile px-4 py-3 ${amber ? 'glass-tint-amber' : ''}`}>
       <p className={`text-[10px] font-medium uppercase tracking-wider ${amber ? 'text-amber-600' : 'text-zinc-400'}`}>
         {label}
       </p>

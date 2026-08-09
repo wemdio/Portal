@@ -10,6 +10,7 @@
  * реестр запущенных кампаний в воркере), поэтому оба свободно пишут в общий
  * cooldown_until без конфликта и им не нужен отдельный счётчик пауз.
  */
+import { Api } from 'telegram';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type {
   OutreachAccount,
@@ -17,20 +18,49 @@ import type {
   OutreachProxy,
   TelegramSettings,
 } from '../types';
-import { buildClients, disconnectAll, type ActiveClient } from '../gramClient';
+import {
+  buildClients,
+  disconnectAll,
+  getUpdatedSessionString,
+  type ActiveClient,
+} from '../gramClient';
 import type { LoopControl } from '../watchdog';
 import { downloadSessionToTemp } from '../campaignLoop';
 import { openaiGenerate } from '../openaiChat';
 import { planDay } from './schedule';
 import { warmupOpenAISettings } from './prompt';
-import { runWarmupConversation, type WarmupSide } from './conversation';
+import { runWarmupConversation, WarmupSendError, type WarmupSide } from './conversation';
 import { resolveWarmupPeer, dropImportedContact, type ResolvedPeer } from './peer';
 import { bootstrapAccountIdentity } from './identity';
+import { withTimeout } from '../withTimeout';
+import * as cdb from './chatDb';
+import {
+  loadPeerCache,
+  peerIdentity,
+  peerKey,
+  savePeer,
+  toInputPeer,
+  type CachedPeer,
+} from './peerCache';
+import { assignChats, planChatActivities } from './chatSchedule';
+import { runActivity, runJoin } from './chatRunner';
 import * as wdb from './db';
-import type { WarmupConversation, WarmupRun } from './types';
+import type { WarmupChat, WarmupConversation, WarmupMessage, WarmupRun } from './types';
+import { CONVERSATION_STALE_MINUTES } from './types';
 
 /** Как часто цикл просыпается посмотреть, не пора ли провести переписку. */
 const POLL_INTERVAL_MS = 60_000;
+
+/**
+ * Сколько ждать ответа Telegram на один вызов внутри переписки.
+ *
+ * Минуты хватает с запасом на отправку сообщения и на поиск собеседника. Всё,
+ * что дольше, — это не медленный ответ, а запрос, ушедший в сменившийся IP
+ * мобильного прокси: он не вернётся никогда. Держать его нельзя — цикл
+ * перестаёт отчитываться, и сторожевой таймер воркера через 15 минут роняет
+ * весь процесс со всеми кампаниями (инцидент 06.08.2026, прогрев ATOL-1).
+ */
+const TELEGRAM_CALL_TIMEOUT_MS = Number(process.env.TG_WARMUP_CALL_TIMEOUT_MS) || 60_000;
 
 type LogFn = (
   level: 'info' | 'warning' | 'error',
@@ -215,6 +245,28 @@ export async function runWarmupLoop(
   if (control) control.forceDisconnect = () => disconnectAll(clients);
 
   const byAccountId = new Map<string, ActiveClient>(clients.map((c) => [c.account.id, c]));
+  // Имена всех аккаунтов кампании, включая не подключившихся: сбой
+  // «не подключён» должен называть виновника по имени, а не по uuid.
+  const accountNames = new Map<string, string>(accounts.map((a) => [a.id, a.session_name]));
+
+  // Процесс только что поднялся: то, что числится «идёт», осталось от прошлого
+  // воркера и никуда уже не едет. Возвращаем в очередь сразу, а не ждём 45 минут
+  // до признания переписки брошенной.
+  // Собеседники, найденные в прошлые дни и прошлые прогоны. Загружаем один раз:
+  // без этого каждая переписка начиналась бы с импорта контакта, а по этому
+  // счётчику Telegram и придушил прогрев 07.08.2026 на четвёртом дне.
+  const peerCache = await loadPeerCache(db, campaignId);
+  if (peerCache.size) {
+    log('info', `Прогрев: ${peerCache.size} собеседников взято из памяти, искать заново не нужно.`);
+  }
+
+  const requeued = await wdb.requeueStuckConversations(db, run.id);
+  if (requeued > 0) {
+    log(
+      'info',
+      `Прогрев: возвращено в очередь ${requeued} переписок, прерванных перезапуском воркера.`,
+    );
+  }
 
   if (run.status === 'pending') {
     const startedAt = new Date().toISOString();
@@ -253,6 +305,52 @@ export async function runWarmupLoop(
   }
   onProgress?.();
 
+  // Необязательный этап: активность в публичных чатах. Флаг снят на момент
+  // старта, поэтому уже идущий прогрев не подхватит его при перезапуске
+  // воркера — как и остальные настройки прогона.
+  const publicChatsEnabled = Boolean(
+    (run.settings as { public_chats?: boolean } | null)?.public_chats,
+  );
+  const chatsById = new Map<string, WarmupChat>();
+  /** Свои tg_user_id: на публике аккаунты не должны отвечать друг другу. */
+  const ownUserIds = new Set<number>();
+
+  if (publicChatsEnabled) {
+    for (const a of accounts) if (a.tg_user_id) ownUserIds.add(Number(a.tg_user_id));
+
+    const chats = await cdb.loadUsableChats(db, campaignId);
+    for (const c of chats) chatsById.set(c.id, c);
+
+    if (!chats.length) {
+      log('warning', 'Активность в чатах включена, но в списке нет ни одного проверенного чата — этап пропущен.');
+    } else if (!(await cdb.hasChatAssignments(db, run.id))) {
+      // Раскладка делается один раз на прогон: состав чатов у аккаунта должен
+      // быть постоянным, иначе он весь прогрев мигрирует по чатам — само по
+      // себе заметный след.
+      const assignments = assignChats([...byAccountId.keys()], chats.map((c) => c.id));
+      const w = planningWindow(new Date(), tg);
+      const span = Math.max(w.end.getTime() - w.start.getTime(), 1);
+      const plannedAt = new Map<string, string>(
+        assignments.map((a) => [
+          `${a.accountId}|${a.chatId}`,
+          // Вступления растянуты по окну: шестнадцать аккаунтов, зашедших в
+          // один чат за минуту, — очевидный след.
+          new Date(w.start.getTime() + Math.floor(Math.random() * span)).toISOString(),
+        ]),
+      );
+      await cdb.saveChatAssignments(db, run, assignments, plannedAt);
+      log(
+        'info',
+        `Активность в чатах: ${chats.length} чатов, каждому аккаунту назначено до ${Math.min(3, chats.length)}. Вступление растянуто на сегодня.`,
+      );
+    }
+
+    const requeuedActivities = await cdb.requeueStuckActivities(db, run.id);
+    if (requeuedActivities > 0) {
+      log('info', `Активность в чатах: возвращено в очередь ${requeuedActivities} действий после перезапуска.`);
+    }
+  }
+
   try {
     while (!shouldStop()) {
       onProgress?.();
@@ -270,6 +368,9 @@ export async function runWarmupLoop(
           accounts.map((a) => ({ id: a.id, session_name: a.session_name })),
         );
         await wdb.skipRemainingForDay(db, run.id, run.days, 'run_finished');
+        if (publicChatsEnabled) {
+          await cdb.skipRemainingActivities(db, run.id, run.days, 'прогрев завершён');
+        }
         await wdb.setRunStatus(db, run.id, {
           status: 'finished',
           finished_at: new Date().toISOString(),
@@ -287,7 +388,14 @@ export async function runWarmupLoop(
 
       if (fresh.current_day !== day) {
         await wdb.setRunStatus(db, run.id, { current_day: day });
-        if (day > 1) await wdb.skipRemainingForDay(db, run.id, day - 1, 'day_over');
+        if (day > 1) {
+          await wdb.skipRemainingForDay(db, run.id, day - 1, 'day_over');
+          // Вчерашние активности тоже закрываем: не выполненная вечером реакция
+          // сегодня уже не нужна, а «в плане» из позавчера в ленте путает.
+          if (publicChatsEnabled) {
+            await cdb.skipRemainingActivities(db, run.id, day - 1, 'день закончился');
+          }
+        }
       }
 
       if (!(await wdb.isDayPlanned(db, run.id, day))) {
@@ -306,13 +414,172 @@ export async function runWarmupLoop(
       for (const conv of due) {
         if (shouldStop()) break;
         onProgress?.();
-        await runOneConversation(db, conv, byAccountId, log);
+        await runOneConversation(db, conv, byAccountId, accountNames, peerCache, log, onProgress);
       }
+
+      if (publicChatsEnabled && chatsById.size) {
+        await runChatStage({
+          db, run, day, now, tg,
+          byAccountId, accountNames, chatsById, ownUserIds,
+          shouldStop, log, onProgress,
+        });
+      }
+
+      await persistSessions(db, clients, log);
 
       await interruptibleSleep(POLL_INTERVAL_MS, shouldStop);
     }
   } finally {
+    // Перед разрывом соединений — последний раз: цикл мог выйти сразу после
+    // переселения на другой дата-центр, и без этого ключ уехал бы вместе с
+    // процессом.
+    await persistSessions(db, clients, log);
     await disconnectAll(clients);
+  }
+}
+
+/**
+ * Сохранить ключи сессий, если Telegram их обновил.
+ *
+ * Ключ меняется, когда Telegram переселяет аккаунт на другой дата-центр. Боевой
+ * цикл сохраняет его после каждого круга, а прогрев до 09.08.2026 не сохранял
+ * вовсе — притом что живёт он несколько суток и переживает по десятку
+ * перезапусков воркера. Потерянный ключ означает, что после рестарта аккаунт в
+ * Telegram уже не войдёт и сессию придётся выпускать заново руками.
+ *
+ * Сбой записи не должен ронять прогрев: в худшем случае ключ сохранится на
+ * следующем проходе, они идут раз в минуту.
+ */
+async function persistSessions(
+  db: SupabaseClient,
+  clients: ActiveClient[],
+  log: LogFn,
+): Promise<void> {
+  for (const { client, account } of clients) {
+    try {
+      const updated = await getUpdatedSessionString(client);
+      if (!updated || updated === account.session_data) continue;
+
+      const { error } = await db
+        .from('tg_outreach_accounts')
+        .update({ session_data: updated })
+        .eq('id', account.id);
+      if (error) {
+        log(
+          'warning',
+          `Аккаунт ${account.session_name}: не смог сохранить обновлённый ключ сессии — ${error.message}.`,
+          account.id,
+        );
+        continue;
+      }
+      // Обновляем и в памяти, иначе на каждом проходе будем видеть расхождение
+      // и переписывать одно и то же.
+      account.session_data = updated;
+      log('info', `Аккаунт ${account.session_name}: ключ сессии обновился, сохранил.`, account.id);
+    } catch {
+      // Клиент мог уже отвалиться — не повод прерывать проход по остальным.
+    }
+  }
+}
+
+/**
+ * Один проход этапа публичных чатов: вступления и активности, которым пора.
+ *
+ * Вынесено из главного цикла отдельной функцией: тело цикла и так ведёт день,
+ * план и переписки, а этап добавляет к нему вторую очередь работ со своими
+ * правилами. Ни одна ошибка здесь не поднимается наверх — этап необязательный
+ * и не должен ронять прогрев, ради которого всё и запускалось.
+ */
+async function runChatStage(args: {
+  db: SupabaseClient;
+  run: WarmupRun;
+  day: number;
+  now: Date;
+  tg: TelegramSettings;
+  byAccountId: Map<string, ActiveClient>;
+  accountNames: Map<string, string>;
+  chatsById: Map<string, WarmupChat>;
+  ownUserIds: Set<number>;
+  shouldStop: () => boolean;
+  log: LogFn;
+  onProgress?: () => void;
+}): Promise<void> {
+  const {
+    db, run, day, now, tg, byAccountId, accountNames, chatsById, ownUserIds,
+    shouldStop, log, onProgress,
+  } = args;
+
+  const nameOf = (id: string) => accountNames.get(id) ?? id.slice(0, 8);
+
+  // Вступления: у каждого своё время внутри дня, поэтому проверяем на каждом
+  // проходе, а не разом при старте.
+  const dueJoins = await cdb.loadDueJoins(db, run.id, now);
+  for (const member of dueJoins) {
+    if (shouldStop()) return;
+    onProgress?.();
+    const chat = chatsById.get(member.chat_id);
+    const client = byAccountId.get(member.account_id);
+    if (!chat || !client) continue;
+    await runJoin({
+      db,
+      member: {
+        id: member.id,
+        account_id: member.account_id,
+        chat_id: member.chat_id,
+        campaign_id: member.campaign_id,
+      },
+      chat,
+      client: client.client,
+      accountName: nameOf(member.account_id),
+      log,
+    });
+  }
+
+  // План дня строим только по тем парам, где вступление уже состоялось: писать
+  // в чат, куда не вошёл, всё равно нельзя.
+  if (!(await cdb.isActivityDayPlanned(db, run.id, day))) {
+    const joined = await cdb.loadJoinedAssignments(db, run.id);
+    if (joined.length) {
+      const plan = planChatActivities({
+        assignments: joined,
+        day,
+        window: planningWindow(now, tg),
+        random: Math.random,
+      });
+      await cdb.saveActivityPlan(db, run, day, plan);
+      const replies = plan.filter((p) => p.kind === 'reply').length;
+      log(
+        'info',
+        `Активность в чатах: день ${day}, запланировано ${replies} ответов и ${plan.length - replies} реакций.`,
+      );
+    }
+  }
+
+  const dueActivities = await cdb.loadDueActivities(
+    db, run.id, day, now, CONVERSATION_STALE_MINUTES,
+  );
+  for (const activity of dueActivities) {
+    if (shouldStop()) return;
+    onProgress?.();
+    const chat = chatsById.get(activity.chat_id);
+    const client = byAccountId.get(activity.account_id);
+    if (!chat || !client) {
+      await cdb.finishActivity(db, activity.id, {
+        status: 'skipped',
+        errorReason: client ? 'чат недоступен' : 'аккаунт не подключён',
+      });
+      continue;
+    }
+    await runActivity({
+      db,
+      activity,
+      chat,
+      client,
+      ownUserIds,
+      accountName: nameOf(activity.account_id),
+      log,
+      onProgress,
+    });
   }
 }
 
@@ -327,31 +594,85 @@ async function runOneConversation(
   db: SupabaseClient,
   conv: WarmupConversation,
   byAccountId: Map<string, ActiveClient>,
+  accountNames: Map<string, string>,
+  /** Запомненные собеседники: переживают перезапуск воркера, живут в БД. */
+  peerCache: Map<string, CachedPeer>,
   log: LogFn,
+  /**
+   * Признак жизни для сторожевого таймера воркера. Переписка идёт минутами, и
+   * без отметок на каждом шаге здоровый разговор выглядит зависшим циклом.
+   */
+  onProgress?: () => void,
 ): Promise<void> {
+  const nameOf = (id: string) => accountNames.get(id) ?? id.slice(0, 8);
   const a = byAccountId.get(conv.account_a_id);
   const b = byAccountId.get(conv.account_b_id);
   if (!a || !b) {
+    // Виновник — по имени, и только он: раньше немой «account_not_connected»
+    // помечал обоих участников, и жертва выглядела сломанной наравне с виновником.
+    const missing = [conv.account_a_id, conv.account_b_id].filter((id) => !byAccountId.has(id));
+    const missingNames = missing.map(nameOf).join(', ');
     await wdb.finishConversation(db, conv.id, {
       status: 'failed',
-      errorReason: 'account_not_connected',
+      errorReason: `account_not_connected: ${missingNames}`,
     });
+    log(
+      'warning',
+      `Прогрев: переписка ${nameOf(conv.account_a_id)} ↔ ${nameOf(conv.account_b_id)} не состоялась — не подключён к Telegram: ${missingNames} (причина в ошибках подключения выше).`,
+      missing.length === 1 ? missing[0] : undefined,
+    );
     return;
   }
 
   await wdb.markConversationRunning(db, conv.id);
 
+  /**
+   * Найти собеседника — или взять запомненного.
+   *
+   * Каждый поиск это либо резолв @username, либо импорт телефона в контакты, а
+   * второе Telegram считает по жёсткому счётчику: 07.08.2026 прогрев упёрся в
+   * него на четвёртом дне, и 32 переписки из 37 сорвались здесь же. Состав
+   * аккаунтов постоянный, поэтому каждую пару ищем один раз за кампанию.
+   */
+  const resolveCached = async (
+    viewer: ActiveClient,
+    target: ActiveClient,
+  ): Promise<ResolvedPeer | null> => {
+    const key = peerKey(viewer.account.id, target.account.id);
+    const cached = peerCache.get(key);
+    if (cached) return { entity: toInputPeer(cached), imported: false };
+
+    const found = await resolveWarmupPeer(viewer.client, {
+      tg_username: target.account.tg_username ?? null,
+      phone: target.account.phone ?? null,
+    });
+    if (!found) return null;
+
+    if (found.entity instanceof Api.User) {
+      const identity = peerIdentity(found.entity);
+      if (identity) {
+        peerCache.set(key, identity);
+        await savePeer(db, {
+          campaignId: conv.campaign_id,
+          viewerAccountId: viewer.account.id,
+          targetAccountId: target.account.id,
+          peer: identity,
+        });
+      }
+    }
+    return found;
+  };
+
   let peerForA: ResolvedPeer | null = null;
   let peerForB: ResolvedPeer | null = null;
   try {
-    peerForA = await resolveWarmupPeer(a.client, {
-      tg_username: b.account.tg_username ?? null,
-      phone: b.account.phone ?? null,
-    });
-    peerForB = await resolveWarmupPeer(b.client, {
-      tg_username: a.account.tg_username ?? null,
-      phone: a.account.phone ?? null,
-    });
+    // Таймауты стоят внутри resolveWarmupPeer — по одному на каждую попытку,
+    // иначе внешний общий таймаут гасит функцию до перехода на запасной путь
+    // через телефон, и переписка падает целиком вместо fallback.
+    peerForA = await resolveCached(a, b);
+    onProgress?.();
+    peerForB = await resolveCached(b, a);
+    onProgress?.();
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
     await wdb.finishConversation(db, conv.id, {
@@ -377,31 +698,88 @@ async function runOneConversation(
 
   const resolvedA = peerForA;
   const resolvedB = peerForB;
+  // Отправка под таймаутом: без него один запрос, ушедший в сменившийся IP
+  // прокси, вешает переписку навсегда — и вместе с ней весь воркер.
   const sideA: WarmupSide = {
     accountId: a.account.id,
-    send: async (text) => { await a.client.sendMessage(resolvedA.entity, { message: text }); },
+    send: async (text) => {
+      await withTimeout(
+        a.client.sendMessage(resolvedA.entity, { message: text }),
+        TELEGRAM_CALL_TIMEOUT_MS,
+        'отправка сообщения',
+      );
+    },
   };
   const sideB: WarmupSide = {
     accountId: b.account.id,
-    send: async (text) => { await b.client.sendMessage(resolvedB.entity, { message: text }); },
+    send: async (text) => {
+      await withTimeout(
+        b.client.sendMessage(resolvedB.entity, { message: text }),
+        TELEGRAM_CALL_TIMEOUT_MS,
+        'отправка сообщения',
+      );
+    },
   };
 
   const settings = warmupOpenAISettings();
+  const preview = (s: string) => {
+    const flat = s.replace(/\s+/g, ' ').trim();
+    return flat.length > 120 ? `${flat.slice(0, 120)}…` : flat;
+  };
+  // Копим отправленное и после каждой реплики пишем в журнал и в строку
+  // переписки: сообщение, ушедшее в Telegram, обязано пережить смерть процесса
+  // и быть видимым в UI сразу, а не после финиша всей переписки.
+  const sentSoFar: WarmupMessage[] = [];
   try {
     const messages = await runWarmupConversation({
       sideA,
       sideB,
       initiatorAccountId: conv.initiator_account_id,
       plannedMessages: conv.planned_messages,
-      generate: (history) => openaiGenerate(settings, history),
+      // Зависший запрос к модели тоже останавливает цикл; сбой генерации
+      // переписка переживает — вместо реплики подставляется банальная фраза.
+      generate: (history) =>
+        withTimeout(
+          openaiGenerate(settings, history),
+          TELEGRAM_CALL_TIMEOUT_MS,
+          'генерация реплики',
+        ),
       sleep,
       random: Math.random,
+      onMessage: async (msg, index, total) => {
+        // Отметка жизни на каждой реплике: переписка из десяти сообщений с
+        // паузами до 90 секунд идёт дольше порога сторожевого таймера, и без
+        // этого здоровый разговор выглядел бы зависанием.
+        onProgress?.();
+        const sender = msg.account_id === a.account.id ? a.account : b.account;
+        const receiver = msg.account_id === a.account.id ? b.account : a.account;
+        log(
+          'info',
+          `${sender.session_name} → ${receiver.session_name} (${index + 1}/${total}): «${preview(msg.content)}»`,
+          sender.id,
+        );
+        sentSoFar.push(msg);
+        await wdb.updateConversationMessages(db, conv.id, [...sentSoFar]);
+      },
     });
     await wdb.finishConversation(db, conv.id, { status: 'done', messages });
   } catch (e) {
-    const reason = e instanceof Error ? e.message : String(e);
-    await wdb.finishConversation(db, conv.id, { status: 'failed', errorReason: reason });
-    log('warning', `Прогрев: переписка не состоялась — ${reason}`, a.account.id);
+    if (e instanceof WarmupSendError) {
+      await wdb.finishConversation(db, conv.id, {
+        status: 'failed',
+        messages: e.sent,
+        errorReason: `отправка не удалась (${nameOf(e.failedAccountId)}): ${e.message}`,
+      });
+      log(
+        'warning',
+        `Прогрев: переписка ${a.account.session_name} ↔ ${b.account.session_name} оборвалась на отправке от ${nameOf(e.failedAccountId)} (ушло ${e.sent.length} из ${conv.planned_messages}) — ${e.message}`,
+        e.failedAccountId,
+      );
+    } else {
+      const reason = e instanceof Error ? e.message : String(e);
+      await wdb.finishConversation(db, conv.id, { status: 'failed', errorReason: reason });
+      log('warning', `Прогрев: переписка не состоялась — ${reason}`, a.account.id);
+    }
   } finally {
     // Импортированные контакты убираем всегда: постоянная взаимная сеть из всех
     // аккаунтов партии — легко вычисляемый след.

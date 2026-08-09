@@ -136,7 +136,7 @@ export default function ClassifyQueue({
   const shownTotal = items.reduce((acc, row) => acc + (row.amount_rub ?? 0), 0);
 
   return (
-    <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3">
+    <div className="glass-tile glass-tint-amber p-3">
       <h3 className="text-sm font-semibold text-zinc-900">Очередь разметки</h3>
       <p className="mt-0.5 text-xs text-zinc-600">
         {total > 0
@@ -192,7 +192,7 @@ function QueueRow({
   const rule = deriveRule(row);
 
   return (
-    <div className="rounded-lg border border-zinc-200 bg-white p-2.5">
+    <div className="rounded-lg border border-zinc-200 bg-[var(--glass-rows)] p-2.5">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs text-zinc-700">
         <span className="tabular-nums text-zinc-500">{row.occurred_on_msk}</span>
         <span className="text-zinc-400">{sourceLabel(row.source)}</span>

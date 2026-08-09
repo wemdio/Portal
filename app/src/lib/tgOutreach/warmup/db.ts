@@ -209,6 +209,24 @@ export async function markConversationRunning(
     .eq('id', id);
 }
 
+/**
+ * Инкрементально сохранить сообщения идущей переписки — после каждой отправки.
+ *
+ * Сообщение, реально ушедшее в Telegram, должно пережить смерть процесса:
+ * до 06.08.2026 messages писались только при успешном финише, и оборванная
+ * переписка выглядела пустой, хотя половина реплик дошла до адресата.
+ */
+export async function updateConversationMessages(
+  db: SupabaseClient,
+  id: number,
+  messages: WarmupMessage[],
+): Promise<void> {
+  await db
+    .from('tg_outreach_warmup_conversations')
+    .update({ messages })
+    .eq('id', id);
+}
+
 export async function finishConversation(
   db: SupabaseClient,
   id: number,
@@ -227,6 +245,29 @@ export async function finishConversation(
       ...(result.errorReason ? { error_reason: result.errorReason.slice(0, 500) } : {}),
     })
     .eq('id', id);
+}
+
+/**
+ * Вернуть в очередь переписки, зависшие в `running` от прошлого процесса.
+ *
+ * Вызывается один раз на старте цикла: процесс только что поднялся, значит ни
+ * одна переписка физически не может идти. Без этого такая запись лежала бы
+ * `running` до истечения CONVERSATION_STALE_MINUTES — 45 минут простоя на
+ * каждый перезапуск воркера, а их за 06.08.2026 набралось восемь.
+ *
+ * Возвращает, сколько записей вернули — вызывающий код пишет это в журнал.
+ */
+export async function requeueStuckConversations(
+  db: SupabaseClient,
+  runId: string,
+): Promise<number> {
+  const { data } = await db
+    .from('tg_outreach_warmup_conversations')
+    .update({ status: 'pending', started_at: null })
+    .eq('run_id', runId)
+    .eq('status', 'running')
+    .select('id');
+  return (data ?? []).length;
 }
 
 /** Закрыть день: всё, что не успело начаться, помечаем пропущенным. */

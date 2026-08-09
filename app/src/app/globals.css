@@ -3500,3 +3500,195 @@ html[data-portal-theme='dark'] .portal-shell .ring-red-500,
 html[data-portal-theme='dark'] .portal-shell .focus\:ring-red-500:focus {
   --tw-ring-color: rgba(248, 113, 113, 0.4) !important;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   СТЕКЛЯННЫЕ ДАШБОРДЫ
+   Спека: docs/superpowers/specs/2026-08-07-glass-dashboards-design.md
+
+   Материалы намеренно названы собственными классами, а не собраны из утилит
+   Tailwind. Слой тёмной темы выше по файлу перекрашивает `.bg-white` и
+   родственные утилиты через `!important`; карточка, собранная на них, в тёмной
+   теме потеряла бы прозрачность. Свои имена этот слой не ловит, и совместимость
+   держится по построению, а не отладкой.
+
+   Секция стоит в конце файла: правила материалов должны выигрывать у утилит
+   Tailwind при равной специфичности (один класс против одного класса — решает
+   порядок в стилевом файле).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ─── Сцена ───
+   Надевается на корневой блок экрана. Даёт фон, под которым размытие вообще
+   имеет смысл, и объявляет переменные, которые читают материалы.
+
+   Пятна заданы в процентах от размеров элемента, а не в пикселях: на странице
+   с таблицей на несколько сотен строк пиксельные пятна остались бы вверху, и
+   низ страницы стал бы плоско-серым — стекло там перестало бы читаться. */
+.glass-stage {
+  --glass-fill: rgba(255, 255, 255, 0.55);
+  --glass-fill-soft: rgba(255, 255, 255, 0.4);
+  --glass-edge: rgba(255, 255, 255, 0.85);
+  --glass-shadow: 0 8px 24px -12px rgba(23, 31, 51, 0.28);
+  --glass-rows: rgba(255, 255, 255, 0.92);
+  /* Плотный аналог поверхности — для тултипов ECharts, см. resolveSurface(). */
+  --chart-surface: #f4f6fa;
+
+  /* Стекло обязано преломлять сцену, а НЕ страницу за ней.
+     `isolation: isolate` делает сцену backdrop root: `backdrop-filter` у плиток
+     начинает брать только то, что нарисовано внутри сцены.
+
+     Без этого он забирает всё, что лежит на странице ниже по стеку, включая
+     собственный `backdrop-blur-md` липкой шапки (TopNav.tsx:36) и слой
+     выпадающего меню — а оно анимирует transform и поднимается в отдельный
+     композиторный слой при открытии. Отсюда светлая область на плитках при
+     наведении на пункт меню: плитка подмешивала себе чужие слои. */
+  isolation: isolate;
+
+  padding: 1rem;
+  border-radius: 1rem;
+  background-color: #f0f2f6;
+  background-image:
+    radial-gradient(58% 26% at 16% 4%, #dbe1ea 0%, rgba(219, 225, 234, 0) 100%),
+    radial-gradient(52% 22% at 86% 30%, #e5e8ee 0%, rgba(229, 232, 238, 0) 100%),
+    radial-gradient(66% 28% at 42% 72%, #e0e5ee 0%, rgba(224, 229, 238, 0) 100%),
+    radial-gradient(58% 24% at 78% 96%, #dfe4ec 0%, rgba(223, 228, 236, 0) 100%);
+  background-repeat: no-repeat;
+}
+
+html[data-portal-theme='dark'] .glass-stage {
+  /* В тёмной теме стекло — это светлый слой поверх тёмного, а не белый с
+     прозрачностью: прямое переиспользование светлых значений даёт мутный
+     серый блок. */
+  --glass-fill: rgba(255, 255, 255, 0.07);
+  --glass-fill-soft: rgba(255, 255, 255, 0.05);
+  --glass-edge: rgba(255, 255, 255, 0.14);
+  --glass-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.55);
+  --glass-rows: rgba(22, 23, 27, 0.82);
+  --chart-surface: #16171b;
+
+  background-color: #131519;
+  background-image:
+    radial-gradient(58% 26% at 16% 4%, #262b36 0%, rgba(38, 43, 54, 0) 100%),
+    radial-gradient(52% 22% at 86% 30%, #1e222b 0%, rgba(30, 34, 43, 0) 100%),
+    radial-gradient(66% 28% at 42% 72%, #232833 0%, rgba(35, 40, 51, 0) 100%),
+    radial-gradient(58% 24% at 78% 96%, #1d212a 0%, rgba(29, 33, 42, 0) 100%);
+}
+
+/* ─── Материалы ───
+   Общая формула одна, различаются заливка и скругление. Скругление плитки
+   совпадает с прежним `rounded-xl` (0.75rem), чтобы геометрия экранов не
+   поехала при замене классов. */
+.glass-tile,
+.glass-panel,
+.glass-frame {
+  background-color: var(--glass-fill);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  backdrop-filter: blur(16px) saturate(1.3);
+  border: 1px solid var(--glass-edge);
+  box-shadow: var(--glass-shadow);
+}
+
+.glass-tile {
+  border-radius: 0.75rem;
+}
+
+/* Служебный слой: фильтры и заголовки. Прозрачнее и с меньшим скруглением,
+   чтобы не конкурировать с плитками данных. */
+.glass-panel {
+  background-color: var(--glass-fill-soft);
+  border-radius: 0.625rem;
+}
+
+/* Рамка таблицы. Скругление и клиппинг — на самом элементе; `overflow` здесь
+   НЕ задаётся: на этих блоках уже висит `overflow-x-auto`, и перебивать его
+   значило бы отрезать горизонтальную прокрутку широких таблиц. */
+.glass-frame {
+  border-radius: 0.75rem;
+}
+
+/* Строки данных лежат на плотной подложке: под стеклом плотная таблица
+   начинает просвечивать соседними строками и перестаёт читаться. Размытия
+   здесь нет намеренно — blur внутри blur роняет прокрутку. */
+.glass-frame tbody {
+  background-color: var(--glass-rows);
+}
+
+.glass-frame thead {
+  background-color: var(--glass-fill-soft);
+}
+
+/* ─── Тонированные плитки ───
+   Для дашборда проектов и «жёлтых» плиток продлений: цвет там несёт смысл
+   (норма / внимание / просрочено), монохромное стекло его бы стёрло. */
+.glass-tile.glass-tint-blue {
+  background-color: rgba(59, 130, 246, 0.14);
+  border-color: rgba(59, 130, 246, 0.32);
+}
+.glass-tile.glass-tint-emerald {
+  background-color: rgba(16, 185, 129, 0.14);
+  border-color: rgba(16, 185, 129, 0.32);
+}
+.glass-tile.glass-tint-amber {
+  background-color: rgba(245, 158, 11, 0.16);
+  border-color: rgba(245, 158, 11, 0.34);
+}
+.glass-tile.glass-tint-red {
+  background-color: rgba(220, 38, 38, 0.14);
+  border-color: rgba(220, 38, 38, 0.32);
+}
+
+html[data-portal-theme='dark'] .glass-tile.glass-tint-blue {
+  background-color: rgba(96, 165, 250, 0.16);
+  border-color: rgba(96, 165, 250, 0.3);
+}
+html[data-portal-theme='dark'] .glass-tile.glass-tint-emerald {
+  background-color: rgba(52, 211, 153, 0.14);
+  border-color: rgba(52, 211, 153, 0.28);
+}
+html[data-portal-theme='dark'] .glass-tile.glass-tint-amber {
+  background-color: rgba(251, 191, 36, 0.16);
+  border-color: rgba(251, 191, 36, 0.3);
+}
+html[data-portal-theme='dark'] .glass-tile.glass-tint-red {
+  background-color: rgba(248, 113, 113, 0.16);
+  border-color: rgba(248, 113, 113, 0.3);
+}
+
+/* ─── Системная настройка «уменьшить прозрачность» ───
+   Windows и macOS умеют её выставлять. Отдаём непрозрачные варианты тех же
+   материалов: экран остаётся полностью рабочим, теряется только эффект.
+   Firefox медиа-запрос не поддерживает — там останется стеклянный вариант,
+   это осознанно принято. */
+@media (prefers-reduced-transparency: reduce) {
+  .glass-stage {
+    background-image: none;
+    background-color: var(--app-bg);
+    --chart-surface: #ffffff;
+  }
+  .glass-tile,
+  .glass-panel,
+  .glass-frame {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: #ffffff;
+    border-color: #e2e4e9;
+    box-shadow: none;
+  }
+  .glass-frame tbody,
+  .glass-frame thead {
+    background-color: #ffffff;
+  }
+
+  html[data-portal-theme='dark'] .glass-stage {
+    background-image: none;
+    background-color: var(--pd-bg);
+    --chart-surface: #16171b;
+  }
+  html[data-portal-theme='dark'] .glass-tile,
+  html[data-portal-theme='dark'] .glass-panel,
+  html[data-portal-theme='dark'] .glass-frame,
+  html[data-portal-theme='dark'] .glass-frame tbody,
+  html[data-portal-theme='dark'] .glass-frame thead {
+    background-color: var(--pd-surface);
+    border-color: var(--pd-divider-strong);
+  }
+}

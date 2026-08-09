@@ -41,7 +41,7 @@ export default function Filters({
   const set = (patch: Partial<FiltersValue>) => onChange({ ...value, ...patch });
 
   return (
-    <div className="space-y-2 rounded-xl border border-zinc-200 bg-white px-3 py-2.5">
+    <div className="glass-panel space-y-2 px-3 py-2.5">
       <PeriodBar value={period} onChange={onPeriodChange} />
 
       <div className="flex flex-wrap items-center gap-2">

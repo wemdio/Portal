@@ -7,6 +7,7 @@ import { useCallback, useState } from 'react';
 
 import ExpensesView from '@/components/expenses/ExpensesView';
 import IncomesView from '@/components/expenses/IncomesView';
+import ProfitView from '@/components/expenses/ProfitView';
 import { getDefaultPeriod, type PeriodValue } from '@/components/expenses/PeriodBar';
 
 /**
@@ -34,19 +35,26 @@ import { getDefaultPeriod, type PeriodValue } from '@/components/expenses/Period
  * сторону нечем и незачем.
  */
 
-type Mode = 'expenses' | 'incomes';
+type Mode = 'expenses' | 'incomes' | 'profit';
 
 const MODES: Array<{ id: Mode; label: string }> = [
   { id: 'expenses', label: 'Расходы' },
   { id: 'incomes', label: 'Доходы' },
+  // «Итог» стоит последним, а не первым: он выводится из двух предыдущих, и
+  // порядок вкладок повторяет порядок вычисления.
+  { id: 'profit', label: 'Итог' },
 ];
+
+function parseMode(value: string | null): Mode {
+  return value === 'incomes' || value === 'profit' ? value : 'expenses';
+}
 
 export default function MoneyView() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
   // Незнакомое значение — расходы: вкладка по умолчанию, а не пустой экран.
-  const mode: Mode = searchParams.get('tab') === 'incomes' ? 'incomes' : 'expenses';
+  const mode: Mode = parseMode(searchParams.get('tab'));
 
   const [period, setPeriod] = useState<PeriodValue>(() => getDefaultPeriod());
 
@@ -66,7 +74,7 @@ export default function MoneyView() {
   );
 
   return (
-    <div className="space-y-4">
+    <div className="glass-stage space-y-4">
       {/* Переключатель стоит выше фильтров и отделён линией: он не сужает
           выборку, как они, а меняет то, на что вообще смотрим.
 
@@ -103,6 +111,8 @@ export default function MoneyView() {
       <div id="money-tabpanel" role="tabpanel" aria-labelledby={`money-tab-${mode}`}>
         {mode === 'incomes' ? (
           <IncomesView period={period} onPeriodChange={setPeriod} />
+        ) : mode === 'profit' ? (
+          <ProfitView period={period} onPeriodChange={setPeriod} />
         ) : (
           <ExpensesView period={period} onPeriodChange={setPeriod} />
         )}

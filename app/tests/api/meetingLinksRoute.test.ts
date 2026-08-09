@@ -30,6 +30,9 @@ function makeChain(result: ChainResult) {
   return chain;
 }
 
+// Ключи — имена того, что роут реально спрашивает у базы. Сделка берётся из
+// представления amo_leads_with_origin_v, а не из таблицы amo_leads: поиск идёт
+// по ИСХОДНОЙ воронке, иначе перенесённая сделка не находится (см. 20260807_0003).
 const state: { byTable: Record<string, ChainResult> } = { byTable: {} };
 
 function makeDb() {
@@ -63,7 +66,7 @@ describe('PUT /meeting-links — гонка при параллельной ра
   it('запись существует, сделка из воронки первички — 200 и manual-инсерт', async () => {
     state.byTable = {
       tg_video_transcripts: { data: { id: 't-1' }, error: null },
-      amo_leads: { data: { amo_id: 42 }, error: null },
+      amo_leads_with_origin_v: { data: { amo_id: 42 }, error: null },
       meeting_deal_links: { data: null, error: null },
     };
     const res = await PUT(putReq({ transcript_id: 't-1', amo_deal_id: 42 }));
@@ -73,7 +76,7 @@ describe('PUT /meeting-links — гонка при параллельной ра
   it('уникальный индекс (23505) — второй сохраняющий получает явный 409, а не тихий успех', async () => {
     state.byTable = {
       tg_video_transcripts: { data: { id: 't-1' }, error: null },
-      amo_leads: { data: { amo_id: 42 }, error: null },
+      amo_leads_with_origin_v: { data: { amo_id: 42 }, error: null },
       meeting_deal_links: { data: null, error: { code: '23505', message: 'duplicate key' } },
     };
     const res = await PUT(putReq({ transcript_id: 't-1', amo_deal_id: 42 }));
@@ -105,7 +108,7 @@ describe('PUT /meeting-links — гонка при параллельной ра
   it('сделка не из воронки первички — 400, привязка не создаётся', async () => {
     state.byTable = {
       tg_video_transcripts: { data: { id: 't-1' }, error: null },
-      amo_leads: { data: null, error: null },
+      amo_leads_with_origin_v: { data: null, error: null },
     };
     const res = await PUT(putReq({ transcript_id: 't-1', amo_deal_id: 999 }));
     expect(res.status).toBe(400);
@@ -122,7 +125,7 @@ describe('GET /meeting-links?q= — поиск сделки', () => {
 
   it('запрос из 2+ символов уходит в поиск', async () => {
     state.byTable = {
-      amo_leads: {
+      amo_leads_with_origin_v: {
         data: [{ amo_id: 1, name: 'ООО Ромашка', company_name: 'Ромашка', company_website: 'romashka.ru', created_at: '2026-07-01T00:00:00Z', status_name: 'В работе' }],
         error: null,
       },

@@ -90,7 +90,12 @@ export interface YandexMapsJob {
   id: string;
   user_id: string;
   status: ParserJobStatus;
-  config: { search_urls: string[]; max_results?: number; headless?: boolean };
+  config: {
+    search_urls?: string[];
+    catalog_filters?: { cities?: string[]; categories?: string[]; countries?: string[] } | null;
+    max_results?: number;
+    headless?: boolean;
+  };
   progress_stage?: string | null;
   total_links: number;
   processed_links: number;

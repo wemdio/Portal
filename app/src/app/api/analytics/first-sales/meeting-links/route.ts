@@ -143,10 +143,13 @@ async function handleDealSearch(db: SupabaseClient, qRaw: string) {
   if (safe.length < SEARCH_MIN_CHARS) return NextResponse.json({ rows: [], truncated: false });
   const like = `%${safe}%`;
 
+  // Ищем по ИСХОДНОЙ воронке: у сделки, перенесённой в другую воронку,
+  // `pipeline_id` уже чужой, и в поиске она бы не находилась — привязать к ней
+  // запись встречи стало бы невозможно (см. 20260807_0003).
   const { data, error } = await db
-    .from('amo_leads')
+    .from('amo_leads_with_origin_v')
     .select('amo_id, name, company_name, company_website, created_at, status_name')
-    .eq('pipeline_id', PIPELINE_ID)
+    .eq('origin_pipeline_id', PIPELINE_ID)
     .or(`company_name.ilike.${like},company_website.ilike.${like},name.ilike.${like}`)
     .order('created_at', { ascending: false })
     .limit(SEARCH_MAX_ROWS);
@@ -217,13 +220,17 @@ export async function PUT(req: NextRequest) {
   } else {
     // Сделка обязана быть из воронки первички — иначе привязка потащит в
     // метрику встречу чужой воронки. fetchMeetingLinks() ниже по цепочке уже
-    // сужает по pipeline_id, но лучше не заводить в таблице мусор у
-    // источника, чем полагаться на фильтр в другом файле.
+    // сужает по воронке, но лучше не заводить в таблице мусор у источника, чем
+    // полагаться на фильтр в другом файле.
+    //
+    // Проверяем ИСХОДНУЮ воронку, а не текущую: перенесённая сделка родом из
+    // первички, и запрещать привязку к ней нет причин — её встречи по-прежнему
+    // считаются в первичке (см. 20260807_0002).
     const { data: deal, error: dealError } = await db
-      .from('amo_leads')
+      .from('amo_leads_with_origin_v')
       .select('amo_id')
       .eq('amo_id', dealId as number)
-      .eq('pipeline_id', PIPELINE_ID)
+      .eq('origin_pipeline_id', PIPELINE_ID)
       .maybeSingle();
     if (dealError) return NextResponse.json({ error: dealError.message }, { status: 500 });
     if (!deal) {

@@ -18,6 +18,29 @@
 import { Api } from 'telegram';
 import type { TelegramClient } from 'telegram';
 import bigInt from 'big-integer';
+import { withTimeout } from '../withTimeout';
+
+/**
+ * Отдельные лимиты на каждый способ найти собеседника.
+ *
+ * Раньше таймаут в 60 секунд стоял снаружи всего resolveWarmupPeer — из-за
+ * этого запасной путь через телефон никогда не срабатывал: если username
+ * зависал в мобильном прокси, внешний таймер убивал функцию до перехода к
+ * телефону, и переписка падала целиком (07.08.2026 — 7 подряд провалов дня 4).
+ *
+ * Теперь каждая попытка под своим таймером. Username-резолв в норме отвечает
+ * за секунды; 20 секунд — с запасом на медленный прокси, но не столько, чтобы
+ * съесть всё окно. Оставшихся 40 секунд хватает импорту контакта, который
+ * возит по MTProto больше данных.
+ */
+// Функции, а не константы: тестам нужно подставить своё значение, а константа
+// читается один раз при импорте модуля и уже не меняется.
+function usernameTimeoutMs(): number {
+  return Number(process.env.TG_WARMUP_RESOLVE_USERNAME_TIMEOUT_MS) || 20_000;
+}
+function phoneTimeoutMs(): number {
+  return Number(process.env.TG_WARMUP_RESOLVE_PHONE_TIMEOUT_MS) || 40_000;
+}
 
 export type ResolutionStrategy =
   | { kind: 'username'; username: string }
@@ -41,13 +64,69 @@ export function chooseResolutionStrategy(target: {
   return { kind: 'none' };
 }
 
+/**
+ * Кому можно отправлять.
+ *
+ * `Api.User` приходит от свежего резолва, `Api.InputPeerUser` — собранный из
+ * запомненных `tg_user_id` и `access_hash` (см. `peerCache.ts`). Для отправки
+ * годятся оба, а вот удалять контакт есть смысл только у первого: запомненный
+ * peer означает, что контакт давно убран.
+ */
 export interface ResolvedPeer {
-  entity: Api.User;
+  entity: Api.User | Api.InputPeerUser;
   /** true, если пришлось импортировать контакт — его надо удалить после переписки. */
   imported: boolean;
 }
 
-/** Найти peer нашего же аккаунта, чтобы можно было ему написать. */
+/**
+ * Резолв по @username отдельным RPC, а не через client.getEntity.
+ *
+ * getEntity сначала лезет в кэш сущностей сессии и достраивает InputUser из
+ * него. На загруженных чужих сессиях кэш бывает неполным: gramJS получает
+ * undefined и падает внутри себя с «Cannot read properties of undefined
+ * (reading 'classType')» — ровно это словил прогрев 06.08.2026, и переписка
+ * ушла в failed. Явный ResolveUsername ходит в Telegram и кэш не спрашивает.
+ */
+async function resolveByUsername(
+  client: TelegramClient,
+  username: string,
+): Promise<ResolvedPeer | null> {
+  const res = await withTimeout(
+    client.invoke(new Api.contacts.ResolveUsername({ username })),
+    usernameTimeoutMs(),
+    'резолв @username',
+  );
+  const user = res.users.find((u): u is Api.User => u instanceof Api.User);
+  return user ? { entity: user, imported: false } : null;
+}
+
+async function resolveByPhone(
+  client: TelegramClient,
+  phone: string,
+): Promise<ResolvedPeer | null> {
+  const res = await withTimeout(
+    client.invoke(new Api.contacts.ImportContacts({
+      contacts: [new Api.InputPhoneContact({
+        clientId: bigInt(Date.now()) as unknown as never,
+        phone,
+        firstName: 'Kolya',
+        lastName: '',
+      })],
+    })),
+    phoneTimeoutMs(),
+    'импорт телефона',
+  );
+  const user = res.users.find((u): u is Api.User => u instanceof Api.User);
+  return user ? { entity: user, imported: true } : null;
+}
+
+/**
+ * Найти peer нашего же аккаунта, чтобы можно было ему написать.
+ *
+ * Если username не сработал, а телефон известен — пробуем импорт контакта.
+ * Способы независимы: сбой одного не повод терять переписку, ради которой
+ * шестнадцать аккаунтов уже подключились.
+ */
 export async function resolveWarmupPeer(
   client: TelegramClient,
   target: { tg_username: string | null; phone: string | null },
@@ -55,27 +134,29 @@ export async function resolveWarmupPeer(
   const strategy = chooseResolutionStrategy(target);
   if (strategy.kind === 'none') return null;
 
+  const phone = normalizePhone(target.phone);
+
   if (strategy.kind === 'username') {
-    const entity = await client.getEntity(strategy.username);
-    return entity instanceof Api.User ? { entity, imported: false } : null;
+    try {
+      const peer = await resolveByUsername(client, strategy.username);
+      if (peer) return peer;
+    } catch (e) {
+      // Телефона нет — рассказать о проблеме больше некому, пробрасываем.
+      if (!phone) throw e;
+    }
+    return phone ? resolveByPhone(client, phone) : null;
   }
 
-  const res = await client.invoke(new Api.contacts.ImportContacts({
-    contacts: [new Api.InputPhoneContact({
-      clientId: bigInt(Date.now()) as unknown as never,
-      phone: strategy.phone,
-      firstName: 'Kolya',
-      lastName: '',
-    })],
-  }));
-  const user = res.users.find((u): u is Api.User => u instanceof Api.User);
-  return user ? { entity: user, imported: true } : null;
+  return resolveByPhone(client, strategy.phone);
 }
 
 /** Убрать импортированный контакт. Диалог при этом остаётся доступным. */
 export async function dropImportedContact(
   client: TelegramClient,
-  entity: Api.User,
+  entity: Api.User | Api.InputPeerUser,
 ): Promise<void> {
+  // Удалять есть что только у свежего резолва: запомненный peer собран из чисел
+  // и контактом никогда не был.
+  if (!(entity instanceof Api.User)) return;
   await client.invoke(new Api.contacts.DeleteContacts({ id: [entity] }));
 }
