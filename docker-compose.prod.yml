@@ -603,6 +603,14 @@ services:
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - OPENROUTER_HYPOTHESIS_ENGINE_API_KEY=${OPENROUTER_HYPOTHESIS_ENGINE_API_KEY}
       - OPENROUTER_BRIEF_API_KEY=${OPENROUTER_BRIEF_API_KEY}
+      # Модельный роутинг HE по итогам A/B eval (scripts/he-model-eval.mjs,
+      # 2026-08-09): gpt-5.5 дал вдвое шире research-скан, чище письма,
+      # ~3x быстрее и ~4x дешевле claude-opus-5. Фолбэк-модель не задаём
+      # осознанно (HE_MODEL_CHAIN_FALLBACK пуст): честная ошибка вместо
+      # тихой подмены — иначе метрики сравнения моделей смешаются.
+      - HE_MODEL_RESEARCH=openai/gpt-5.5
+      - HE_MODEL_CHAIN=openai/gpt-5.5
+      - HE_MODEL_BULK=openai/gpt-5.5
       - SERPER_API_KEY=${SERPER_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=hypothesis-engine
@@ -739,6 +747,38 @@ services:
           memory: 1024M
           cpus: '0.5'
           pids: 512
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  # Large report exports use PostgreSQL COPY -> gzip -> private S3 without
+  # buffering the CSV in application memory. A dedicated single replica keeps
+  # million-row exports away from interactive and enrichment worker queues.
+  worker-client-report-exports:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-client-report-exports
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
+      - MAIN_S3_ENDPOINT=${MAIN_S3_ENDPOINT}
+      - MAIN_S3_REGION=${MAIN_S3_REGION:-ru-1}
+      - MAIN_S3_BUCKET=${MAIN_S3_BUCKET}
+      - MAIN_S3_ACCESS_KEY_ID=${MAIN_S3_ACCESS_KEY_ID}
+      - MAIN_S3_SECRET_ACCESS_KEY=${MAIN_S3_SECRET_ACCESS_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_KIND=clientreportexports
+    # A long COPY finishes gracefully during a rolling deploy. Memory remains
+    # bounded to stream buffers and S3 multipart parts.
+    stop_grace_period: 2h
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: '0.35'
+          pids: 128
     restart: unless-stopped
     networks:
       - portal-network

@@ -28,6 +28,11 @@ import readline from 'node:readline';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getMainS3ObjectStream } from '@/lib/mainS3Server';
 import { getOrFetchScore, getCachedScores, normalizeDomain, emptyCacheStats } from './mailganerScoreCache';
+import {
+  buildLargeFileDomainSnapshot,
+  persistDomainSnapshots,
+  type ClientPipelineDomainSnapshot,
+} from '@/lib/clientReports/domainSnapshots';
 
 interface ScoreEndpointConfig {
   url: string;
@@ -38,7 +43,9 @@ interface ScoreEndpointConfig {
 
 interface LargeScoreJob {
   id: string;
+  client_user_id: string;
   s3_key: string;
+  source_filename: string | null;
   status: string;
   parse_offset: number | null;
   parsed_domains: number | null;
@@ -93,7 +100,7 @@ export async function processNextLargeScoreWork(
   // 1. Парсинг имеет приоритет (быстро довести файл до очереди).
   const { data: parsing } = await supabaseAdmin
     .from('large_score_jobs')
-    .select('id, s3_key, status, parse_offset, parsed_domains, junk_domains, scored_domains, active_domains, cached_domains')
+    .select('id, client_user_id, s3_key, source_filename, status, parse_offset, parsed_domains, junk_domains, scored_domains, active_domains, cached_domains')
     .eq('status', 'parsing')
     .order('created_at', { ascending: true })
     .limit(1)
@@ -106,7 +113,7 @@ export async function processNextLargeScoreWork(
   // 2. Скоринг очереди.
   const { data: scoring } = await supabaseAdmin
     .from('large_score_jobs')
-    .select('id, s3_key, status, parse_offset, parsed_domains, junk_domains, scored_domains, active_domains, cached_domains')
+    .select('id, client_user_id, s3_key, source_filename, status, parse_offset, parsed_domains, junk_domains, scored_domains, active_domains, cached_domains')
     .eq('status', 'scoring')
     .order('created_at', { ascending: true })
     .limit(1)
@@ -238,6 +245,8 @@ async function drainJobBatch(
   // умрёт до записи — строки останутся pending и переобработаются (no-op
   // по кэшу), это штатный resume-путь движка.
   const marks: Record<'scored' | 'error', number[]> = { scored: [], error: [] };
+  const snapshots: ClientPipelineDomainSnapshot[] = [];
+  const snapshotScoredAt = nowIso();
 
   async function worker(): Promise<void> {
     while (true) {
@@ -261,6 +270,18 @@ async function drainJobBatch(
             rateLimited = true;
             return;
           }
+          snapshots.push(buildLargeFileDomainSnapshot({
+            clientUserId: job.client_user_id,
+            jobId: job.id,
+            rowId: r.id,
+            domain,
+            score: res.score,
+            spf: res.spf,
+            raw: res.raw,
+            scoreOrigin: pre ? 'cache' : 'api',
+            sourceFilename: job.source_filename,
+            scoredAt: snapshotScoredAt,
+          }));
           marks.error.push(r.id);
           continue;
         }
@@ -275,8 +296,32 @@ async function drainJobBatch(
             .eq('domain', domain)
             .is('company_name', null);
         }
+        snapshots.push(buildLargeFileDomainSnapshot({
+          clientUserId: job.client_user_id,
+          jobId: job.id,
+          rowId: r.id,
+          domain,
+          score: res.score,
+          spf: res.spf,
+          raw: res.raw,
+          scoreOrigin: pre ? 'cache' : 'api',
+          sourceFilename: job.source_filename,
+          scoredAt: snapshotScoredAt,
+        }));
         marks.scored.push(r.id);
       } catch {
+        snapshots.push(buildLargeFileDomainSnapshot({
+          clientUserId: job.client_user_id,
+          jobId: job.id,
+          rowId: r.id,
+          domain,
+          score: null,
+          spf: null,
+          raw: null,
+          scoreOrigin: cached.has(domain) ? 'cache' : 'api',
+          sourceFilename: job.source_filename,
+          scoredAt: snapshotScoredAt,
+        }));
         marks.error.push(r.id);
       }
     }
@@ -288,8 +333,12 @@ async function drainJobBatch(
     log(`large-score: Mailganer daily limit reached — ${marks.scored.length} scored this tick, остальные остаются pending (добьём по мере пополнения бюджета)`);
   }
 
+  // Fail closed: статусы очереди меняем только после независимого snapshot-
+  // журнала. При retry стабильный id превратит повторную запись в no-op.
+  await persistDomainSnapshots(supabaseAdmin, snapshots);
+
   // Один UPDATE на статус (чанками — id уходят в URL фильтра).
-  const markedAt = nowIso();
+  const markedAt = snapshotScoredAt;
   for (const status of ['scored', 'error'] as const) {
     const ids = marks[status];
     for (let i = 0; i < ids.length; i += MARK_CHUNK) {

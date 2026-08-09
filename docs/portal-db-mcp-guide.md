@@ -97,6 +97,7 @@ amo_leads.ym_client_id ─── metrika_visits.ym_client_id  ← Метрика
 Отозваны на уровне роли (SELECT вернёт «permission denied»):
 - `sales_chat_accounts` — session_sealed для TG-сессий Егора и Саши.
 - `tg_outreach_accounts` — сессии outreach-аккаунтов.
+- `team_activity_plan_items` — закрытый рабочий план HR, включая внутренние примечания и бюджет.
 
 ## Ключевые таблицы (полей и семантики достаточно для 90% вопросов)
 

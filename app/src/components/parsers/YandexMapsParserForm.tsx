@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { Info, Layers, Play, Loader2, ChevronDown, ChevronRight, X } from 'lucide-react';
 import { CITIES, RUBRICS } from '@/lib/parsers/yandexMapsData';
 import { authFetchJson } from '@/lib/authFetch';
@@ -500,11 +500,13 @@ const QUICK_RUBRICS = 14;
  */
 const MAX_RUBRIC_BULK = 50;
 /**
- * Потолок строк за один запуск — тот же CATALOG_MAX_RESULTS, что стоит на
- * сервере. Отдельной константой, а не импортом: модуль каталога тянет за собой
- * supabaseAdmin и в клиентский бандл ему нельзя.
+ * Потолка на выдачу больше нет — забираем всё, что нашлось. Это число лишь
+ * говорит, где сбор перестаёт помещаться в HTTP-запрос и уходит в очередь к
+ * воркеру: тот же CATALOG_INLINE_LIMIT, что и на сервере. Отдельной константой,
+ * а не импортом: модуль каталога тянет за собой supabaseAdmin, и в клиентский
+ * бандл ему нельзя.
  */
-const CATALOG_JOB_LIMIT = 50000;
+const CATALOG_INLINE_LIMIT = 20000;
 
 export function YandexMapsParserForm(props: {
   busy?: boolean;
@@ -518,6 +520,13 @@ export function YandexMapsParserForm(props: {
 }) {
   const clientMode = props.clientMode;
   const [maxResults, setMaxResults] = useState(250);
+  /**
+   * Сколько организаций забрать — необязательное ограничение. `null` (пустое
+   * поле) означает «все, сколько найдётся», и это поведение по умолчанию:
+   * выбрал фильтры — забрал всё, хоть миллион. Число нужно только тогда, когда
+   * человек сознательно хочет меньше.
+   */
+  const [amount, setAmount] = useState<number | null>(null);
 
   const [selectedCities, setSelectedCities] = useState<string[]>([]);
   const [selectedRubrics, setSelectedRubrics] = useState<string[]>([]);
@@ -646,47 +655,20 @@ export function YandexMapsParserForm(props: {
     return { cities, categories, countries: activeCountries };
   }, [activeCountries, customKeyword, selectedCities, selectedRubrics]);
 
-  // Сколько найдётся — считаем до запуска, чтобы пустой результат был виден
-  // сразу, а не через минуту в списке задач.
-  const [preview, setPreview] = useState<{ total: number; capped: boolean } | null>(null);
-  const [previewBusy, setPreviewBusy] = useState(false);
-  const previewToken = useRef(0);
-
-  useEffect(() => {
-    if (!catalogFilters) { setPreview(null); setPreviewBusy(false); return; }
-    const token = ++previewToken.current;
-    setPreviewBusy(true);
-    const timer = setTimeout(() => {
-      void (async () => {
-        try {
-          const data = await authFetchJson<{ total: number; capped: boolean }>(
-            '/api/parsers/yandexmaps/catalog',
-            { method: 'POST', body: JSON.stringify({ catalog_filters: catalogFilters }) },
-          );
-          if (token === previewToken.current) setPreview({ total: Number(data?.total ?? 0), capped: Boolean(data?.capped) });
-        } catch {
-          if (token === previewToken.current) setPreview(null);
-        } finally {
-          if (token === previewToken.current) setPreviewBusy(false);
-        }
-      })();
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [catalogFilters]);
-
-  const previewLabel = !catalogFilters
-    ? null
-    : previewBusy
-      ? 'считаем, сколько найдётся…'
-      : preview === null
-        ? null
-        : preview.total === 0
-          ? 'по этим условиям в базе ничего нет — измените город или рубрику'
-          : `в базе найдётся ${preview.capped ? 'более ' : ''}${preview.total.toLocaleString('ru-RU')} организаций${
-              preview.capped || preview.total > CATALOG_JOB_LIMIT
-                ? ` — заберём первые ${CATALOG_JOB_LIMIT.toLocaleString('ru-RU')}`
-                : ''
-            }`;
+  // Предпросчёта «сколько найдётся» здесь больше нет: он уходил на каждое
+  // изменение фильтра и стоил полного прохода по всем подходящим строкам —
+  // счёт обязан досмотреть выборку до конца, в отличие от самого сбора, который
+  // останавливается, набрав нужное. Объём каждой рубрики и места по-прежнему
+  // виден в списках: он берётся из заранее посчитанных справочников.
+  const runLabel = !catalogFilters
+    ? 'Выберите места и сферы'
+    : amount === null
+      // Сколько найдётся, мы не знаем, поэтому такой сбор всегда уходит в
+      // очередь: миллион строк в HTTP-запрос не поместится.
+      ? 'заберём всё, что найдётся — сбор пойдёт в фоне'
+      : `заберём до ${amount.toLocaleString('ru-RU')} организаций${
+          amount > CATALOG_INLINE_LIMIT ? ' — сбор пойдёт в фоне' : ''
+        }`;
 
   const canSubmit = Boolean(catalogFilters);
 
@@ -794,18 +776,23 @@ export function YandexMapsParserForm(props: {
   const onSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!catalogFilters) return;
-    // Объём передаёт только кабинет: там он списывается с тарифа. У оператора
-    // потолок ставит сервер (CATALOG_MAX_RESULTS), и урезать выдачу незачем —
-    // это один SELECT по своей базе, а не тысячи заходов в Яндекс.
+    // В кабинете объём обязателен — он списывается с тарифа. У оператора это
+    // необязательное ограничение: не указал — сервер понимает как «забрать всё,
+    // что нашлось». Урезать выдачу по умолчанию незачем, это один SELECT по
+    // своей базе, а не тысячи заходов в Яндекс.
     await props.onCreate(clientMode
       ? { catalog_filters: catalogFilters, max_results: maxResults }
-      : { catalog_filters: catalogFilters });
+      : { catalog_filters: catalogFilters, ...(amount === null ? {} : { max_results: amount }) });
   };
 
   // ── Client portal: purpose-built editorial form (city × category first).
   // Operators fall through to the full form below.
   if (clientMode) {
-    const countLabel = previewLabel ?? 'Выберите города и категорию';
+    // В кабинете объём задаёт сам клиент (списывается с тарифа), поэтому и до
+    // запуска говорить нечего, кроме как что выбрать.
+    const countLabel = catalogFilters
+      ? `заберём до ${maxResults.toLocaleString('ru-RU')} организаций`
+      : 'Выберите города и категорию';
     return (
       <form onSubmit={onSubmit} className="neu-card p-5 sm:p-6 space-y-5">
         <div className="flex items-start justify-between gap-3">
@@ -1081,13 +1068,33 @@ export function YandexMapsParserForm(props: {
         </div>
       </div>
 
-      <div className="flex items-center justify-between pt-4">
-        <div className="text-sm text-gray-500">
-          {previewLabel ? (
-            <span className={preview?.total === 0 ? 'text-amber-600 font-medium' : undefined}>{previewLabel}</span>
-          ) : (
-            <span>Выберите места и сферы — посчитаем, сколько найдётся в базе.</span>
-          )}
+      <div className="flex flex-wrap items-end justify-between gap-3 pt-4">
+        <div className="min-w-0">
+          {/* Необязательное ограничение. Пустое поле — забрать всё. */}
+          <label className="flex items-center gap-2 text-sm text-gray-600">
+            <span className="whitespace-nowrap">Сколько забрать</span>
+            <input
+              type="number"
+              min={1}
+              // Без step: он отсчитывается от min, и «3000» при min=1, step=100
+              // становится недопустимым значением — браузер молча отказывается
+              // отправлять форму.
+              step={1}
+              placeholder="все"
+              value={amount ?? ''}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                setAmount(e.target.value.trim() && Number.isFinite(next) && next > 0 ? Math.floor(next) : null);
+              }}
+              className="w-28 rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+            />
+            <span className="text-xs text-gray-400">необязательно</span>
+          </label>
+          <p className="mt-1 text-xs text-gray-500">
+            Укажете число — заберём столько организаций. Оставите пустым — заберём все, сколько найдётся в базе,
+            хоть миллион.
+          </p>
+          <p className="mt-0.5 text-sm text-gray-500">{runLabel}</p>
         </div>
         <button
           type="submit"
@@ -1107,17 +1114,24 @@ export function YandexMapsParserForm(props: {
             <div className="px-6 py-4 space-y-3 text-sm text-gray-700">
               <p>
                 Выбор <span className="font-semibold">страны, города и рубрики</span> ищет по нашей внутренней базе
-                организаций Яндекс.Карт. Отбор идёт прямо в запросе — без очереди и воркеров: нажали «Собрать базу» и
-                через пару секунд смотрите результаты.
+                организаций Яндекс.Карт — один запрос к своей базе, а не заходы в Яндекс.
+              </p>
+              <p>
+                Поле <span className="font-semibold">«сколько забрать» — необязательное</span>. Укажете число —
+                заберём столько организаций. Оставите пустым — заберём все, сколько найдётся по выбранным условиям,
+                хоть миллион.
+              </p>
+              <p>
+                Небольшой объём собирается сразу: нажали «Собрать базу» и через пару секунд смотрите результаты.
+                Крупный уходит в фон — задача появится в истории и закроется сама, страницу можно не держать открытой.
               </p>
               <p>
                 Списки городов и рубрик <span className="font-semibold">построены из самой базы</span>, а цифра рядом с
-                пунктом — сколько за ним организаций. Перед запуском видно, сколько всего найдётся.
+                пунктом — сколько за ним организаций. По ней и видно, какой объём вас ждёт.
               </p>
               <p>
-                Живого парсинга Яндекса в форме больше нет: запуск — это один запрос к своей базе, поэтому нет ни
-                прокси, ни часов ожидания, ни лимита «организаций за запрос». Забираем всё, что нашлось, но не больше
-                50 000 строк за запуск.
+                Живого парсинга Яндекса в форме больше нет: нет ни прокси, ни часов ожидания, ни лимита «организаций за
+                запрос».
               </p>
               <p>
                 Сама база <span className="font-semibold">пополняется фоном</span> — понемногу каждый день, поэтому
