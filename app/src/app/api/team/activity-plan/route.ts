@@ -20,7 +20,7 @@ import {
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
-  const auth = await authenticateActivityPlanRequest(req);
+  const auth = await authenticateActivityPlanRequest(req, 'view');
   if ('error' in auth) return auth.error;
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
@@ -55,7 +55,7 @@ export async function GET(req: NextRequest) {
     period: activityPlanPeriod(month),
     items: rows.map(activityPlanItemToApi),
     summary: activityPlanSummary(rows, asOf),
-    canManage: true,
+    canManage: actor.canManage,
   });
 }
 
