@@ -46,3 +46,13 @@ export function marketFromRequestHeaders(headers: Headers): ClientMarket {
   if (hostOfUrlHeader(headers.get('referer')) === ENG_APP_HOST) return 'eng';
   return 'ru';
 }
+
+/**
+ * Рынок для РЕНДЕРА навигации: на ENG-хосте — всегда 'eng' (host выигрывает
+ * у profiles.market, иначе nav мыргала RU-пунктами до ответа portal-mode —
+ * репорт 2026-08-06/08). Вне ENG-хоста решает профиль (дефолт 'ru').
+ */
+export function resolveNavMarket(hostname: string | null | undefined, profileMarket?: string | null): ClientMarket {
+  if (isEngAppHost(hostname)) return 'eng';
+  return profileMarket === 'eng' ? 'eng' : 'ru';
+}
