@@ -478,14 +478,14 @@
   ],
   "artifacts": {
     "summary.json": {
-      "sha256": "3dfb7311f8959e1eb30f87efa6c19f561103e2c09a1aaa1c635b513d322fa086"
+      "sha256": "e92c9516ceb2bc7640ab031474778fae9d4988ff2405e35803361fbab6e3ba35"
     },
     "inserts.jsonl": {
-      "sha256": "280db35f1bdff63789356415cc5a178e73b764f5e95b91962a83c265c7d46824",
+      "sha256": "aaec02c766b0f4ce8892810e4106266e01a2b222191d206f868b9e0425bde798",
       "rows": 24729
     },
     "updates.jsonl": {
-      "sha256": "a14c818fd1356e170070dcbcfbe97d29a0b6eb8a2c4ae0cb7611c6ea4ec88274",
+      "sha256": "2fe6f2dd870c37ddfe1539cb2d850966dac6c51bcc183b34dd2c781d9cb8813f",
       "rows": 46770
     },
     "rejected.jsonl": {
@@ -497,11 +497,11 @@
       "rows": 12885
     },
     "conflicts.jsonl": {
-      "sha256": "5ef0540dd6b40043199f795d0d50407b82458961c6b2c1a79105c36ae8d7336c",
+      "sha256": "4d965d5d603c23e3c81e578d31b977025a9c9451731fc093118f09cbf853c692",
       "rows": 154113
     },
     "provenance.jsonl": {
-      "sha256": "70d07b8957ebacb8349dc0d14c6142d1a9fd93db67c4b620f5029b7ffe997f3a",
+      "sha256": "bf5db9effdce18f88e2cedfc6ea46157fcd52c8506f876df43ab936fd7dff7ea",
       "rows": 71499
     },
     "source-locations.jsonl": {
@@ -517,7 +517,7 @@
       "rows": 7860
     },
     "rollback.jsonl": {
-      "sha256": "916ecf8e1ecfdf5a76f2d2ae1739958b0999bb6a6d2e38b61aa3eee02f231f63",
+      "sha256": "dd084805569db0588dcb80ced5bfbf8d6a15dbd8b121ad0333f8bd3ebd3e60ae",
       "rows": 71499
     }
   },
