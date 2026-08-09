@@ -45,6 +45,7 @@ function isRetryableDbError(err) {
     code === 'ETIMEDOUT' ||
     code === 'ENOTFOUND' ||
     code === 'ENETUNREACH' ||
+    code === '55P03' ||
     msg.includes('Connection terminated') ||
     msg.includes('MaxClientsInSessionMode') ||
     msg.includes('max clients reached') ||
@@ -356,4 +357,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { ensureDatabase, notifyPostgrestReload };
+module.exports = { ensureDatabase, isRetryableDbError, notifyPostgrestReload };
