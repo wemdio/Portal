@@ -18,7 +18,12 @@ import type {
   OutreachProxy,
   TelegramSettings,
 } from '../types';
-import { buildClients, disconnectAll, type ActiveClient } from '../gramClient';
+import {
+  buildClients,
+  disconnectAll,
+  getUpdatedSessionString,
+  type ActiveClient,
+} from '../gramClient';
 import type { LoopControl } from '../watchdog';
 import { downloadSessionToTemp } from '../campaignLoop';
 import { openaiGenerate } from '../openaiChat';
@@ -420,10 +425,60 @@ export async function runWarmupLoop(
         });
       }
 
+      await persistSessions(db, clients, log);
+
       await interruptibleSleep(POLL_INTERVAL_MS, shouldStop);
     }
   } finally {
+    // Перед разрывом соединений — последний раз: цикл мог выйти сразу после
+    // переселения на другой дата-центр, и без этого ключ уехал бы вместе с
+    // процессом.
+    await persistSessions(db, clients, log);
     await disconnectAll(clients);
+  }
+}
+
+/**
+ * Сохранить ключи сессий, если Telegram их обновил.
+ *
+ * Ключ меняется, когда Telegram переселяет аккаунт на другой дата-центр. Боевой
+ * цикл сохраняет его после каждого круга, а прогрев до 09.08.2026 не сохранял
+ * вовсе — притом что живёт он несколько суток и переживает по десятку
+ * перезапусков воркера. Потерянный ключ означает, что после рестарта аккаунт в
+ * Telegram уже не войдёт и сессию придётся выпускать заново руками.
+ *
+ * Сбой записи не должен ронять прогрев: в худшем случае ключ сохранится на
+ * следующем проходе, они идут раз в минуту.
+ */
+async function persistSessions(
+  db: SupabaseClient,
+  clients: ActiveClient[],
+  log: LogFn,
+): Promise<void> {
+  for (const { client, account } of clients) {
+    try {
+      const updated = await getUpdatedSessionString(client);
+      if (!updated || updated === account.session_data) continue;
+
+      const { error } = await db
+        .from('tg_outreach_accounts')
+        .update({ session_data: updated })
+        .eq('id', account.id);
+      if (error) {
+        log(
+          'warning',
+          `Аккаунт ${account.session_name}: не смог сохранить обновлённый ключ сессии — ${error.message}.`,
+          account.id,
+        );
+        continue;
+      }
+      // Обновляем и в памяти, иначе на каждом проходе будем видеть расхождение
+      // и переписывать одно и то же.
+      account.session_data = updated;
+      log('info', `Аккаунт ${account.session_name}: ключ сессии обновился, сохранил.`, account.id);
+    } catch {
+      // Клиент мог уже отвалиться — не повод прерывать проход по остальным.
+    }
   }
 }
 
