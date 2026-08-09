@@ -1,15 +1,56 @@
+import { Pool } from 'pg';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import type { YandexMapsOrganization } from '@/lib/parsers/yandexMapsServiceClient';
+
+/**
+ * Прямое подключение к Postgres для сбора выдачи, в обход PostgREST и Kong.
+ *
+ * `supabaseAdmin` ходит по HTTP через шлюз, а тот рвёт соединение через 60
+ * секунд — и неважно, кто зовёт, API или воркер. Сбор «Москва и область ×
+ * Товары для дома и дачи» это сотни тысяч строк, он в минуту не укладывается, и
+ * 09.08.2026 задача упала с `The upstream server is timing out` уже из воркера.
+ *
+ * Гонять такую операцию через REST нечего: это один `insert ... select` внутри
+ * базы, ни одна строка не покидает Postgres. Прямое соединение снимает потолок
+ * по времени и заодно убирает лишний слой.
+ *
+ * Если переменной нет (например, в окружении без прямого доступа), молча
+ * работаем через RPC как раньше — просто с прежним ограничением по времени.
+ */
+const CATALOG_DB_URL = (process.env.SUPABASE_DB_URL || process.env.DATABASE_URL || '').trim();
+let catalogPool: Pool | null = null;
+
+function getCatalogPool(): Pool | null {
+  if (!CATALOG_DB_URL) return null;
+  if (!catalogPool) {
+    catalogPool = new Pool({
+      connectionString: CATALOG_DB_URL,
+      // Соединений нужно мало: сбор идёт по одному на задачу.
+      max: 2,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 10_000,
+      // Ноль — намеренно: миллион широких строк пишется минутами, и обрывать
+      // это по таймауту значит никогда не собрать крупную базу.
+      statement_timeout: 0,
+      application_name: 'portal-yandexmaps-catalog-fill',
+    });
+    catalogPool.on('error', (error) => {
+      console.error('[yandexmaps-catalog] idle pool error:', error.message);
+    });
+  }
+  return catalogPool;
+}
 
 /**
  * Потолка на выдачу нет: оператор выбрал места и сферы — значит ему нужны все
  * организации, а не произвольные 50 000 из них (столько забирали раньше).
  *
- * Ограничение осталось только на то, что выполняется **внутри HTTP-запроса**.
- * Сбор идёт через Kong, а тот рвёт соединение через 60 секунд, поэтому крупные
- * выборки уходят в очередь: задача заводится `pending`, и её доделывает воркер,
- * которому шлюз не указ. Порог — по числу организаций, а не по времени: 20 тыс.
- * строк вставляются за считанные секунды даже на холодном кэше.
+ * Ограничение осталось только на то, что выполняется **внутри HTTP-запроса**
+ * от браузера: ответа там ждёт человек, и минутами держать его нельзя. Крупные
+ * выборки уходят в очередь — задача заводится `pending`, и её доделывает
+ * воркер, который никуда не спешит и ходит в Postgres напрямую. Порог — по
+ * числу организаций, а не по времени: 20 тыс. строк вставляются за считанные
+ * секунды даже на холодном кэше.
  */
 export const CATALOG_INLINE_LIMIT = 20000;
 
@@ -154,13 +195,37 @@ export async function fillJobFromYandexMapsCatalog(
   /** null — забрать всё, что нашлось. Число — потолок (кабинет клиента, тариф). */
   limit: number | null = null,
 ): Promise<{ organizations: number; links: number }> {
+  const params = [
+    jobId,
+    cleanList(filters.cities),
+    cleanList(filters.categories),
+    cleanList(filters.countries),
+    limit === null ? null : Math.max(0, Math.floor(limit)),
+  ];
+
+  const pool = getCatalogPool();
+  if (pool) {
+    try {
+      const { rows } = await pool.query(
+        'select organizations, links from public.yandex_maps_catalog_fill_job($1::uuid, $2::text[], $3::text[], $4::text[], $5::integer)',
+        params,
+      );
+      const row = rows[0] as { organizations?: number; links?: number } | undefined;
+      return { organizations: Number(row?.organizations ?? 0), links: Number(row?.links ?? 0) };
+    } catch (error) {
+      throw new Error(
+        `Не удалось собрать выдачу из каталога: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   if (!supabaseAdmin) return { organizations: 0, links: 0 };
   const { data, error } = await supabaseAdmin.rpc('yandex_maps_catalog_fill_job', {
-    p_job_id: jobId,
-    p_cities: cleanList(filters.cities),
-    p_categories: cleanList(filters.categories),
-    p_countries: cleanList(filters.countries),
-    p_limit: limit === null ? null : Math.max(0, Math.floor(limit)),
+    p_job_id: params[0],
+    p_cities: params[1],
+    p_categories: params[2],
+    p_countries: params[3],
+    p_limit: params[4],
   });
   if (error) throw new Error(`Не удалось собрать выдачу из каталога: ${error.message}`);
   const row = (Array.isArray(data) ? data[0] : data) as { organizations?: number; links?: number } | null;

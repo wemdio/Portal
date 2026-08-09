@@ -10,6 +10,7 @@
  * реестр запущенных кампаний в воркере), поэтому оба свободно пишут в общий
  * cooldown_until без конфликта и им не нужен отдельный счётчик пауз.
  */
+import { Api } from 'telegram';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type {
   OutreachAccount,
@@ -17,7 +18,12 @@ import type {
   OutreachProxy,
   TelegramSettings,
 } from '../types';
-import { buildClients, disconnectAll, type ActiveClient } from '../gramClient';
+import {
+  buildClients,
+  disconnectAll,
+  getUpdatedSessionString,
+  type ActiveClient,
+} from '../gramClient';
 import type { LoopControl } from '../watchdog';
 import { downloadSessionToTemp } from '../campaignLoop';
 import { openaiGenerate } from '../openaiChat';
@@ -28,6 +34,14 @@ import { resolveWarmupPeer, dropImportedContact, type ResolvedPeer } from './pee
 import { bootstrapAccountIdentity } from './identity';
 import { withTimeout } from '../withTimeout';
 import * as cdb from './chatDb';
+import {
+  loadPeerCache,
+  peerIdentity,
+  peerKey,
+  savePeer,
+  toInputPeer,
+  type CachedPeer,
+} from './peerCache';
 import { assignChats, planChatActivities } from './chatSchedule';
 import { runActivity, runJoin } from './chatRunner';
 import * as wdb from './db';
@@ -238,6 +252,14 @@ export async function runWarmupLoop(
   // Процесс только что поднялся: то, что числится «идёт», осталось от прошлого
   // воркера и никуда уже не едет. Возвращаем в очередь сразу, а не ждём 45 минут
   // до признания переписки брошенной.
+  // Собеседники, найденные в прошлые дни и прошлые прогоны. Загружаем один раз:
+  // без этого каждая переписка начиналась бы с импорта контакта, а по этому
+  // счётчику Telegram и придушил прогрев 07.08.2026 на четвёртом дне.
+  const peerCache = await loadPeerCache(db, campaignId);
+  if (peerCache.size) {
+    log('info', `Прогрев: ${peerCache.size} собеседников взято из памяти, искать заново не нужно.`);
+  }
+
   const requeued = await wdb.requeueStuckConversations(db, run.id);
   if (requeued > 0) {
     log(
@@ -392,7 +414,7 @@ export async function runWarmupLoop(
       for (const conv of due) {
         if (shouldStop()) break;
         onProgress?.();
-        await runOneConversation(db, conv, byAccountId, accountNames, log, onProgress);
+        await runOneConversation(db, conv, byAccountId, accountNames, peerCache, log, onProgress);
       }
 
       if (publicChatsEnabled && chatsById.size) {
@@ -403,10 +425,60 @@ export async function runWarmupLoop(
         });
       }
 
+      await persistSessions(db, clients, log);
+
       await interruptibleSleep(POLL_INTERVAL_MS, shouldStop);
     }
   } finally {
+    // Перед разрывом соединений — последний раз: цикл мог выйти сразу после
+    // переселения на другой дата-центр, и без этого ключ уехал бы вместе с
+    // процессом.
+    await persistSessions(db, clients, log);
     await disconnectAll(clients);
+  }
+}
+
+/**
+ * Сохранить ключи сессий, если Telegram их обновил.
+ *
+ * Ключ меняется, когда Telegram переселяет аккаунт на другой дата-центр. Боевой
+ * цикл сохраняет его после каждого круга, а прогрев до 09.08.2026 не сохранял
+ * вовсе — притом что живёт он несколько суток и переживает по десятку
+ * перезапусков воркера. Потерянный ключ означает, что после рестарта аккаунт в
+ * Telegram уже не войдёт и сессию придётся выпускать заново руками.
+ *
+ * Сбой записи не должен ронять прогрев: в худшем случае ключ сохранится на
+ * следующем проходе, они идут раз в минуту.
+ */
+async function persistSessions(
+  db: SupabaseClient,
+  clients: ActiveClient[],
+  log: LogFn,
+): Promise<void> {
+  for (const { client, account } of clients) {
+    try {
+      const updated = await getUpdatedSessionString(client);
+      if (!updated || updated === account.session_data) continue;
+
+      const { error } = await db
+        .from('tg_outreach_accounts')
+        .update({ session_data: updated })
+        .eq('id', account.id);
+      if (error) {
+        log(
+          'warning',
+          `Аккаунт ${account.session_name}: не смог сохранить обновлённый ключ сессии — ${error.message}.`,
+          account.id,
+        );
+        continue;
+      }
+      // Обновляем и в памяти, иначе на каждом проходе будем видеть расхождение
+      // и переписывать одно и то же.
+      account.session_data = updated;
+      log('info', `Аккаунт ${account.session_name}: ключ сессии обновился, сохранил.`, account.id);
+    } catch {
+      // Клиент мог уже отвалиться — не повод прерывать проход по остальным.
+    }
   }
 }
 
@@ -523,6 +595,8 @@ async function runOneConversation(
   conv: WarmupConversation,
   byAccountId: Map<string, ActiveClient>,
   accountNames: Map<string, string>,
+  /** Запомненные собеседники: переживают перезапуск воркера, живут в БД. */
+  peerCache: Map<string, CachedPeer>,
   log: LogFn,
   /**
    * Признак жизни для сторожевого таймера воркера. Переписка идёт минутами, и
@@ -552,21 +626,52 @@ async function runOneConversation(
 
   await wdb.markConversationRunning(db, conv.id);
 
+  /**
+   * Найти собеседника — или взять запомненного.
+   *
+   * Каждый поиск это либо резолв @username, либо импорт телефона в контакты, а
+   * второе Telegram считает по жёсткому счётчику: 07.08.2026 прогрев упёрся в
+   * него на четвёртом дне, и 32 переписки из 37 сорвались здесь же. Состав
+   * аккаунтов постоянный, поэтому каждую пару ищем один раз за кампанию.
+   */
+  const resolveCached = async (
+    viewer: ActiveClient,
+    target: ActiveClient,
+  ): Promise<ResolvedPeer | null> => {
+    const key = peerKey(viewer.account.id, target.account.id);
+    const cached = peerCache.get(key);
+    if (cached) return { entity: toInputPeer(cached), imported: false };
+
+    const found = await resolveWarmupPeer(viewer.client, {
+      tg_username: target.account.tg_username ?? null,
+      phone: target.account.phone ?? null,
+    });
+    if (!found) return null;
+
+    if (found.entity instanceof Api.User) {
+      const identity = peerIdentity(found.entity);
+      if (identity) {
+        peerCache.set(key, identity);
+        await savePeer(db, {
+          campaignId: conv.campaign_id,
+          viewerAccountId: viewer.account.id,
+          targetAccountId: target.account.id,
+          peer: identity,
+        });
+      }
+    }
+    return found;
+  };
+
   let peerForA: ResolvedPeer | null = null;
   let peerForB: ResolvedPeer | null = null;
   try {
     // Таймауты стоят внутри resolveWarmupPeer — по одному на каждую попытку,
     // иначе внешний общий таймаут гасит функцию до перехода на запасной путь
     // через телефон, и переписка падает целиком вместо fallback.
-    peerForA = await resolveWarmupPeer(a.client, {
-      tg_username: b.account.tg_username ?? null,
-      phone: b.account.phone ?? null,
-    });
+    peerForA = await resolveCached(a, b);
     onProgress?.();
-    peerForB = await resolveWarmupPeer(b.client, {
-      tg_username: a.account.tg_username ?? null,
-      phone: a.account.phone ?? null,
-    });
+    peerForB = await resolveCached(b, a);
     onProgress?.();
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);

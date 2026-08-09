@@ -64,8 +64,16 @@ export function chooseResolutionStrategy(target: {
   return { kind: 'none' };
 }
 
+/**
+ * Кому можно отправлять.
+ *
+ * `Api.User` приходит от свежего резолва, `Api.InputPeerUser` — собранный из
+ * запомненных `tg_user_id` и `access_hash` (см. `peerCache.ts`). Для отправки
+ * годятся оба, а вот удалять контакт есть смысл только у первого: запомненный
+ * peer означает, что контакт давно убран.
+ */
 export interface ResolvedPeer {
-  entity: Api.User;
+  entity: Api.User | Api.InputPeerUser;
   /** true, если пришлось импортировать контакт — его надо удалить после переписки. */
   imported: boolean;
 }
@@ -145,7 +153,10 @@ export async function resolveWarmupPeer(
 /** Убрать импортированный контакт. Диалог при этом остаётся доступным. */
 export async function dropImportedContact(
   client: TelegramClient,
-  entity: Api.User,
+  entity: Api.User | Api.InputPeerUser,
 ): Promise<void> {
+  // Удалять есть что только у свежего резолва: запомненный peer собран из чисел
+  // и контактом никогда не был.
+  if (!(entity instanceof Api.User)) return;
   await client.invoke(new Api.contacts.DeleteContacts({ id: [entity] }));
 }
