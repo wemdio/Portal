@@ -9,19 +9,23 @@ import { checkLetterRules, extractNumberFacts } from '../src/lib/hypothesisEngin
 const key = process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY || process.env.OPENROUTER_BRIEF_API_KEY;
 const MODELS = [
   { id: 'anthropic/claude-opus-5', label: 'opus-5 (control)', extra: {} },
-  { id: 'openai/gpt-5.6-sol', label: 'gpt-5.6-sol low', extra: { reasoning_effort: 'low' } },
   { id: 'openai/gpt-5.6-sol', label: 'gpt-5.6-sol high', extra: { reasoning_effort: 'high' } },
   { id: 'openai/gpt-5.6-sol', label: 'gpt-5.6-sol max', extra: { reasoning_effort: 'max' } },
   { id: 'openai/gpt-5.5', label: 'gpt-5.5', extra: {} },
+  { id: 'openai/gpt-5.5', label: 'gpt-5.5 high (xhigh)', extra: { reasoning_effort: 'high' } },
+  { id: 'openai/gpt-5.5', label: 'gpt-5.5 max', extra: { reasoning_effort: 'max' } },
   { id: 'fireworks/kimi-k3', label: 'kimi-k3', extra: {} },
   { id: 'alibaba/qwen3.8-max', label: 'qwen3.8-max', extra: {} },
 ];
 
-const BRIEF = `Client: WebFX — a US digital marketing agency selling SEO and paid search to mid-market companies. We write cold B2B outreach for them. Target vertical: US multi-location healthcare groups (dental groups, DSOs, clinic chains) with 51-1000 employees. Their pain: marketing spend is fine group-wide but heavy and untracked at individual clinics; no tie from ad spend to booked patients in the CRM.`;
+const BRIEF = `Client: WebFX — a US digital marketing agency selling SEO and paid search to mid-market companies. We write cold B2B outreach for them. One proven target vertical: US multi-location healthcare groups (dental groups, DSOs, clinic chains) with 51-1000 employees, whose pain is untracked marketing spend at individual clinics (no tie from ad spend to booked patients in the CRM).`;
 
-const HYP_TASK = `${BRIEF}
+// Ресёрч-задача на ШИРОТУ карты (главный тест этого прогона): перечислить
+// соседние B2B-вертикали с болью и проверяемым факт-углом. Чем шире и
+// конкретнее, тем лучше для нашей hypotheses-стадии.
+const SCAN_TASK = `${BRIEF}
 
-Draft 6 distinct cold-outreach hypothesis candidates for this vertical (each: title, one-sentence pain hypothesis, one verifiable market fact angle). Strict JSON: {"hypotheses":[{"title":"...","pain":"...","fact_angle":"..."}]}. Write in English.`;
+Market scan: enumerate 8-12 ADJACENT US B2B verticals where the same pain plausibly holds (multi-location or franchise-like operators whose local branches burn untracked marketing spend). For each: {"vertical": "...", "pain": "one sentence, specific", "fact_angle": "a concrete, checkable market fact or number angle"}. Cover diverse sectors (healthcare-adjacent, home services, finance, education, automotive, hospitality, etc.). Strict JSON: {"verticals":[...]}. Write in English.`;
 
 const LETTER_TASK = `${BRIEF}
 
@@ -46,11 +50,12 @@ async function llm(model, extra, prompt) {
 function scoreHypotheses(text) {
   try {
     const j = JSON.parse(text.replace(/^```json|```$/gm, '').trim());
-    const list = Array.isArray(j.hypotheses) ? j.hypotheses : [];
-    const full = list.filter((h) => h?.title && h?.pain && h?.fact_angle).length;
-    return { parse: true, count: list.length, full };
+    const list = Array.isArray(j.verticals) ? j.verticals : (Array.isArray(j.hypotheses) ? j.hypotheses : []);
+    const names = new Set(list.map((h) => String(h?.vertical ?? h?.title ?? '').toLowerCase().trim()).filter(Boolean));
+    const full = list.filter((h) => (h?.vertical || h?.title) && h?.pain && h?.fact_angle).length;
+    return { parse: true, count: list.length, unique: names.size, full };
   } catch {
-    return { parse: false, count: 0, full: 0 };
+    return { parse: false, count: 0, unique: 0, full: 0 };
   }
 }
 
@@ -60,21 +65,32 @@ function scoreLetter(text) {
   return { words, violations: violations.length, details: violations.map((v) => v.rule) };
 }
 
+const SAMPLES = 2;
 const out = [];
 for (const m of MODELS) {
-  const h = await llm(m.id, m.extra, HYP_TASK);
-  const hs = scoreHypotheses(h.text);
-  const l = await llm(m.id, m.extra, LETTER_TASK);
-  const ls = scoreLetter(l.text);
+  let scanSum = { count: 0, unique: 0, full: 0, secs: 0, tokens: 0, parseFails: 0 };
+  let letterSum = { words: 0, violations: 0, secs: 0, tokens: 0, clean: 0 };
+  for (let s = 0; s < SAMPLES; s++) {
+    const h = await llm(m.id, m.extra, SCAN_TASK);
+    const hs = scoreHypotheses(h.text);
+    scanSum.count += hs.count; scanSum.unique += hs.unique; scanSum.full += hs.full;
+    scanSum.secs += h.secs; scanSum.tokens += h.tokens; scanSum.parseFails += hs.parse ? 0 : 1;
+    const l = await llm(m.id, m.extra, LETTER_TASK);
+    const ls = scoreLetter(l.text);
+    letterSum.words += ls.words; letterSum.violations += ls.violations; letterSum.secs += l.secs; letterSum.tokens += l.tokens;
+    letterSum.clean += ls.violations === 0 ? 1 : 0;
+  }
   out.push({
     model: m.label,
-    hyp: `${hs.full}/${hs.count}${hs.parse ? '' : ' PARSE-FAIL'}`,
-    letter_words: ls.words,
-    letter_violations: `${ls.violations} (${ls.details.join(',') || 'clean'})`,
-    secs: `${h.secs.toFixed(0)}+${l.secs.toFixed(0)}`,
-    tokens: h.tokens + l.tokens,
+    scan_segments: (scanSum.count / SAMPLES).toFixed(1),
+    scan_unique_full: `${(scanSum.unique / SAMPLES).toFixed(1)}/${(scanSum.full / SAMPLES).toFixed(1)}`,
+    scan_secs: (scanSum.secs / SAMPLES).toFixed(0),
+    letter_clean: `${letterSum.clean}/${SAMPLES}`,
+    letter_words: (letterSum.words / SAMPLES).toFixed(0),
+    letter_secs: (letterSum.secs / SAMPLES).toFixed(0),
+    tokens: Math.round((scanSum.tokens + letterSum.tokens) / SAMPLES),
   });
-  console.log(`${m.label}: hyp ${hs.full}/${hs.count} | letter ${ls.words}w viol ${ls.violations} [${ls.details.join(',') || 'clean'}] | ${h.secs.toFixed(0)}s+${l.secs.toFixed(0)}s | ${h.tokens + l.tokens} tok`);
+  console.log(`${m.label}: scan ${out[out.length - 1].scan_segments} seg (${out[out.length - 1].scan_unique_full} uniq/full) ${out[out.length - 1].scan_secs}s | letter clean ${letterSum.clean}/${SAMPLES} ${out[out.length - 1].letter_words}w ${out[out.length - 1].letter_secs}s`);
 }
 console.log('\nSUMMARY');
 console.table(out);
