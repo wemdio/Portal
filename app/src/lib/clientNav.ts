@@ -86,8 +86,8 @@ export const CLIENT_NAV_OFFER: ClientNavItem = {
   label: 'Договор оферты',
   labelEn: 'Terms of service',
   href: '/client/offer',
-  description: 'Публичная оферта — правила использования платформы',
-  descriptionEn: 'Public offer — platform terms of service',
+  description: 'Публичная оферта — порядок предоставления платных услуг',
+  descriptionEn: 'Public offer — paid services terms',
 };
 
 /**
