@@ -112,3 +112,17 @@ export function normalizeStrictRussianPhoneList(
     .filter((phone): phone is string => Boolean(phone));
   return [...new Set(phones)].sort();
 }
+
+export type StrictContactField = 'phones' | 'email' | 'website';
+
+export function normalizeStrictContactList(
+  field: StrictContactField,
+  value: string | null | undefined,
+): string | null {
+  const values = field === 'phones'
+    ? normalizeStrictRussianPhoneList(value)
+    : field === 'email'
+      ? normalizeStrictEmailList(value)
+      : normalizeStrictWebsiteList(value);
+  return values.length ? values.join(', ') : null;
+}

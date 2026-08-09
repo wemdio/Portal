@@ -3,9 +3,8 @@ import {
   normalizeSbisInn,
 } from '@/lib/companiesDirectory/sbisImportPlan';
 import {
-  normalizeStrictEmailList,
-  normalizeStrictRussianPhoneList,
-  normalizeStrictWebsiteList,
+  normalizeStrictContactList,
+  type StrictContactField,
 } from '@/lib/companiesDirectory/contactPolicy';
 import { getOkvedByCode } from '@/lib/companiesSearch/okved2';
 import {
@@ -31,7 +30,7 @@ export const TRUSTED_SBIS_PLAN_FINGERPRINTS = Object.freeze({
   [POLZA_REGISTRY_PLAN]:
     '5d2b2691b2e914f3ba854f60789055a45064aad167cfd5f3295182ac1cf77606',
   [POLZA_REGISTRY_V2_PLAN]:
-    '57fc796806dc70ec9dff666a245ec61d3327daa3e2e9da019dc706d57339b41d',
+    'ae5064cd70dbb29c023bc34572211e0b6d69ef171c03704c7fba57cafba4fb00',
 });
 
 type TrustedSbisPlan = keyof typeof TRUSTED_SBIS_PLAN_FINGERPRINTS;
@@ -247,24 +246,16 @@ function isBlank(value: unknown): boolean {
   );
 }
 
-const REGISTRY_V2_CONTACT_NORMALIZERS = {
-  email: normalizeStrictEmailList,
-  website: normalizeStrictWebsiteList,
-  phones: normalizeStrictRussianPhoneList,
-} as const;
-
-type RegistryV2ContactField = keyof typeof REGISTRY_V2_CONTACT_NORMALIZERS;
-
 function assertCanonicalRegistryV2Contact(
   value: unknown,
   label: string,
-  field: RegistryV2ContactField,
+  field: StrictContactField,
 ): void {
   if (value === null) return;
   if (typeof value !== 'string' || isBlank(value)) {
     throw new Error(`${label} contains an invalid ${field} list`);
   }
-  const normalized = REGISTRY_V2_CONTACT_NORMALIZERS[field](value).join(', ');
+  const normalized = normalizeStrictContactList(field, value);
   if (!normalized || normalized !== value) {
     throw new Error(`${label} ${field} must use canonical strict format`);
   }
