@@ -606,7 +606,7 @@ export function validateSbisUpdateRow(
     }
   }
   if (plan === POLZA_REGISTRY_V2_PLAN) {
-    for (const field of patchKeys as RegistryV2ContactField[]) {
+    for (const field of patchKeys as StrictContactField[]) {
       assertCanonicalRegistryV2Contact(
         value.patch[field],
         `SBIS update ${normalizedInn}`,
