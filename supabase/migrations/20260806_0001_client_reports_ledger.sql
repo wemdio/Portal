@@ -106,10 +106,70 @@ CREATE TABLE IF NOT EXISTS public.client_campaign_append_batches (
   )
 );
 
-ALTER TABLE public.client_campaign_contact_ledger
-  ADD CONSTRAINT client_campaign_contact_ledger_append_batch_id_fkey
-  FOREIGN KEY (append_batch_id)
-  REFERENCES public.client_campaign_append_batches(id);
+DO $$
+DECLARE
+  existing_constraint record;
+  source_column_attnum smallint;
+  target_column_attnum smallint;
+BEGIN
+  SELECT attribute.attnum::smallint
+    INTO source_column_attnum
+    FROM pg_catalog.pg_attribute AS attribute
+   WHERE attribute.attrelid = 'public.client_campaign_contact_ledger'::regclass
+     AND attribute.attname = 'append_batch_id'
+     AND NOT attribute.attisdropped;
+
+  SELECT attribute.attnum::smallint
+    INTO target_column_attnum
+    FROM pg_catalog.pg_attribute AS attribute
+   WHERE attribute.attrelid = 'public.client_campaign_append_batches'::regclass
+     AND attribute.attname = 'id'
+     AND NOT attribute.attisdropped;
+
+  IF source_column_attnum IS NULL OR target_column_attnum IS NULL THEN
+    RAISE EXCEPTION
+      'required columns for client_campaign_contact_ledger_append_batch_id_fkey are missing'
+      USING ERRCODE = '55000';
+  END IF;
+
+  SELECT
+    c.contype,
+    c.confrelid,
+    c.conkey,
+    c.confkey,
+    c.confupdtype,
+    c.confdeltype,
+    c.confmatchtype,
+    c.condeferrable,
+    c.condeferred,
+    c.convalidated
+    INTO existing_constraint
+    FROM pg_catalog.pg_constraint AS c
+   WHERE c.conrelid = 'public.client_campaign_contact_ledger'::regclass
+     AND c.conname = 'client_campaign_contact_ledger_append_batch_id_fkey';
+
+  IF NOT FOUND THEN
+    ALTER TABLE public.client_campaign_contact_ledger
+      ADD CONSTRAINT client_campaign_contact_ledger_append_batch_id_fkey
+      FOREIGN KEY (append_batch_id)
+      REFERENCES public.client_campaign_append_batches(id);
+  ELSIF existing_constraint.contype <> 'f'
+      OR existing_constraint.confrelid
+        <> 'public.client_campaign_append_batches'::regclass
+      OR existing_constraint.conkey <> ARRAY[source_column_attnum]
+      OR existing_constraint.confkey <> ARRAY[target_column_attnum]
+      OR existing_constraint.confupdtype <> 'a'
+      OR existing_constraint.confdeltype <> 'a'
+      OR existing_constraint.confmatchtype <> 's'
+      OR existing_constraint.condeferrable
+      OR existing_constraint.condeferred
+      OR NOT existing_constraint.convalidated THEN
+    RAISE EXCEPTION
+      'existing constraint client_campaign_contact_ledger_append_batch_id_fkey does not match the required foreign key'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$$;
 
 COMMENT ON COLUMN public.client_campaign_append_batches.identity_complete IS
   'True when accepted_identities contains every accepted contact. False preserves an exact accepted aggregate without inventing partial identities.';

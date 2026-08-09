@@ -130,6 +130,32 @@ describe('client reports immutable ledger migration', () => {
     );
   });
 
+  it('replays the append-batch foreign key safely and fails closed on a conflicting constraint', () => {
+    const guard = sql.match(
+      /do \$\$(.*?)client_campaign_contact_ledger_append_batch_id_fkey(.*?)\$\$;/,
+    )?.[0] ?? '';
+
+    expect(guard).toContain(
+      "where c.conrelid = 'public.client_campaign_contact_ledger'::regclass",
+    );
+    expect(guard).toContain(
+      "c.conname = 'client_campaign_contact_ledger_append_batch_id_fkey'",
+    );
+    expect(guard).toMatch(
+      /if not found then alter table public\.client_campaign_contact_ledger add constraint client_campaign_contact_ledger_append_batch_id_fkey/,
+    );
+    expect(guard).toContain("existing_constraint.contype <> 'f'");
+    expect(guard).toContain(
+      "existing_constraint.confrelid <> 'public.client_campaign_append_batches'::regclass",
+    );
+    expect(guard).toContain("attname = 'append_batch_id'");
+    expect(guard).toContain("attname = 'id'");
+    expect(guard).toContain('not existing_constraint.convalidated');
+    expect(guard).toContain(
+      "raise exception 'existing constraint client_campaign_contact_ledger_append_batch_id_fkey does not match the required foreign key'",
+    );
+  });
+
   it('models asynchronous exports with filters, storage integrity and lifecycle timestamps', () => {
     const table = sql.match(
       /create table if not exists public\.client_report_export_jobs \((.*?)\);/,
