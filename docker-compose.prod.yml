@@ -603,6 +603,14 @@ services:
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - OPENROUTER_HYPOTHESIS_ENGINE_API_KEY=${OPENROUTER_HYPOTHESIS_ENGINE_API_KEY}
       - OPENROUTER_BRIEF_API_KEY=${OPENROUTER_BRIEF_API_KEY}
+      # Модельный роутинг HE по итогам A/B eval (scripts/he-model-eval.mjs,
+      # 2026-08-09): gpt-5.5 дал вдвое шире research-скан, чище письма,
+      # ~3x быстрее и ~4x дешевле claude-opus-5. Фолбэк-модель не задаём
+      # осознанно (HE_MODEL_CHAIN_FALLBACK пуст): честная ошибка вместо
+      # тихой подмены — иначе метрики сравнения моделей смешаются.
+      - HE_MODEL_RESEARCH=openai/gpt-5.5
+      - HE_MODEL_CHAIN=openai/gpt-5.5
+      - HE_MODEL_BULK=openai/gpt-5.5
       - SERPER_API_KEY=${SERPER_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=hypothesis-engine
