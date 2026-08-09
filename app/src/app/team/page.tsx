@@ -255,9 +255,10 @@ export default function TeamPage() {
   const isTma = useIsTma();
   const { userRole, isHr } = useUser();
   const canViewPrivateWorkspaces = isLead(userRole);
-  const canViewWorkspaceNavigation = canViewPrivateWorkspaces || isHr;
+  const canViewActivities = isHr || userRole === 'admin';
+  const canViewWorkspaceNavigation = canViewPrivateWorkspaces || canViewActivities;
   const [workspaceView, setWorkspaceView] = useState<TeamWorkspaceView>('load');
-  const previousIsHrRef = useRef(isHr);
+  const previousCanViewActivitiesRef = useRef(canViewActivities);
   const loadWorkspaceTabRef = useRef<HTMLButtonElement>(null);
   const pageHeadingRef = useRef<HTMLHeadingElement>(null);
   const [projects, setProjects] = useState<ProjectData[]>([]);
@@ -275,24 +276,24 @@ export default function TeamPage() {
   const [openSpecInLead, setOpenSpecInLead] = useState<Set<string>>(new Set());
   const [openSpecs, setOpenSpecs] = useState<Set<string>>(new Set());
   const activeWorkspaceView: TeamWorkspaceView = workspaceView === 'activities'
-    ? isHr ? 'activities' : 'load'
+    ? canViewActivities ? 'activities' : 'load'
     : canViewPrivateWorkspaces ? workspaceView : 'load';
   const visibleWorkspaceViews = TEAM_WORKSPACE_VIEWS.filter(([key]) => (
     key === 'load'
-    || (key === 'activities' ? isHr : canViewPrivateWorkspaces)
+    || (key === 'activities' ? canViewActivities : canViewPrivateWorkspaces)
   ));
 
   useEffect(() => {
-    const capabilityRevoked = previousIsHrRef.current && !isHr;
-    previousIsHrRef.current = isHr;
-    if (!capabilityRevoked || workspaceView !== 'activities') return;
+    const activityAccessRevoked = previousCanViewActivitiesRef.current && !canViewActivities;
+    previousCanViewActivitiesRef.current = canViewActivities;
+    if (!activityAccessRevoked || workspaceView !== 'activities') return;
 
     setWorkspaceView('load');
     queueMicrotask(() => {
       if (canViewPrivateWorkspaces) loadWorkspaceTabRef.current?.focus();
       else pageHeadingRef.current?.focus();
     });
-  }, [canViewPrivateWorkspaces, isHr, workspaceView]);
+  }, [canViewActivities, canViewPrivateWorkspaces, workspaceView]);
 
   const nameToAvatarUrl = useMemo(() => {
     const map = new Map<string, string>();

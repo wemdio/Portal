@@ -90,7 +90,7 @@ describe('<TeamPage /> access', () => {
     },
   );
 
-  it.each<UserRole>(['lead', 'director', 'admin'])(
+  it.each<UserRole>(['lead', 'director'])(
     'lets leadership role %s open statistics and reviews',
     async (role) => {
       mockUserRole = role;
@@ -151,8 +151,24 @@ describe('<TeamPage /> access', () => {
     expect(await screen.findByRole('heading', { name: 'Лиды' })).toBeInTheDocument();
   });
 
-  it('lets an HR admin open the private activity plan', async () => {
+  it('lets an admin open the activity plan without an explicit HR capability', async () => {
     mockUserRole = 'admin';
+    const user = userEvent.setup();
+
+    await renderLoadedTeamPage();
+
+    expect(screen.getByRole('button', { name: 'Статистика' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Ревью' })).toBeVisible();
+    const activitiesTab = screen.getByRole('button', { name: 'Активности' });
+    expect(activitiesTab).toBeVisible();
+    await user.click(activitiesTab);
+
+    expect(screen.getByText('Activity plan panel mounted')).toBeInTheDocument();
+    expect(mockActivityPlanPanel).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps activity access for an explicitly HR-capable non-admin', async () => {
+    mockUserRole = 'technician';
     mockIsHr = true;
     const user = userEvent.setup();
 
@@ -163,11 +179,10 @@ describe('<TeamPage /> access', () => {
     await user.click(activitiesTab);
 
     expect(screen.getByText('Activity plan panel mounted')).toBeInTheDocument();
-    expect(mockActivityPlanPanel).toHaveBeenCalledTimes(1);
   });
 
-  it('unmounts the activity plan immediately when the HR capability is revoked', async () => {
-    mockUserRole = 'admin';
+  it('unmounts the activity plan immediately when a non-admin HR capability is revoked', async () => {
+    mockUserRole = 'technician';
     mockIsHr = true;
     const user = userEvent.setup();
     const view = await renderLoadedTeamPage();
@@ -180,24 +195,6 @@ describe('<TeamPage /> access', () => {
 
     expect(screen.queryByRole('button', { name: 'Активности' })).not.toBeInTheDocument();
     expect(screen.queryByText('Activity plan panel mounted')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Статистика' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Ревью' })).toBeVisible();
-    expect(await screen.findByRole('heading', { name: 'Лиды' })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Загрузка' })).toHaveFocus());
-  });
-
-  it('moves focus to the page heading when a non-lead loses HR capability', async () => {
-    mockUserRole = 'technician';
-    mockIsHr = true;
-    const user = userEvent.setup();
-    const view = await renderLoadedTeamPage();
-
-    await user.click(screen.getByRole('button', { name: 'Активности' }));
-    expect(screen.getByText('Activity plan panel mounted')).toBeInTheDocument();
-
-    mockIsHr = false;
-    view.rerender(<TeamPage />);
-
     const heading = screen.getByRole('heading', { name: 'Команда' });
     await waitFor(() => expect(heading).toHaveFocus());
     expect(screen.queryByRole('group', { name: 'Разделы команды' })).not.toBeInTheDocument();
