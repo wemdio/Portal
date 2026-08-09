@@ -25,7 +25,7 @@ import {
 import { ChevronDown } from 'lucide-react';
 import { GlobalTextTranslator, LanguageLoadingOverlay } from '@/components/GlobalTextTranslator';
 import { resolveActiveNavId, CLIENT_NAV_SUPPORT, type ClientNavMode } from '@/lib/clientNav';
-import { isEngAppHost, type ClientMarket } from '@/lib/engMarket';
+import { resolveNavMarket, type ClientMarket } from '@/lib/engMarket';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ClientSidebar } from '@/components/client/ClientSidebar';
 import { ClientMobileDrawer } from '@/components/client/ClientMobileDrawer';
@@ -56,9 +56,11 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   // Рынок профиля для навигации (ENG-клиент видит только ENG-кабинет).
   // Начальное значение вычисляем СИНХРОННО по хосту: на app.outreachos.xyz
   // сразу 'eng' — иначе RU-навигация мыргала на первый кадр до ответа
-  // /api/client/portal-mode (репорт 2026-08-06).
+  // /api/client/portal-mode (репорт 2026-08-06). Host всегда выигрывает у
+  // профиля для рендера (см. resolveNavMarket) — второй мыр не возникает
+  // и после ответа portal-mode (репорт 2026-08-08).
   const [market, setMarket] = useState<ClientMarket>(() =>
-    typeof window !== 'undefined' && isEngAppHost(window.location.hostname) ? 'eng' : 'ru',
+    resolveNavMarket(typeof window !== 'undefined' ? window.location.hostname : null),
   );
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
@@ -142,8 +144,11 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
         if (body.mode === 'auto' || body.mode === 'manual') {
           setNavMode(body.mode);
         }
+        // Market из профиля применяем ТОЛЬКО вне ENG-хоста: на нём host уже
+        // решил рынок для рендера (см. resolveNavMarket), иначе nav мыргал
+        // при смене ответа portal-mode.
         if (body.market === 'eng' || body.market === 'ru') {
-          setMarket(body.market);
+          setMarket(resolveNavMarket(window.location.hostname, body.market));
         }
       }
     })();

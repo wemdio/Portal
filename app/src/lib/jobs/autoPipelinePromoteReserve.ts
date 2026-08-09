@@ -1,6 +1,12 @@
 import 'server-only';
+import { createHash } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
+import {
+  partialAppendOutcome,
+  selectAcceptedItems,
+  type ExactAppendOutcome,
+} from '@/lib/clientReports/appendOutcome';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
 
 /**
@@ -40,6 +46,53 @@ interface SeenRow {
   email_validation_status: string | null;
   email2: string | null;
   email2_validation_status: string | null;
+}
+
+export function buildReservePromotionRunId(
+  clientUserId: string,
+  campaignId: string,
+  sourceRowIds: readonly string[],
+): string {
+  const canonicalRows = [...new Set(sourceRowIds)].sort();
+  const digest = createHash('sha256')
+    .update(JSON.stringify([clientUserId, campaignId, canonicalRows]))
+    .digest('hex')
+    .slice(0, 32);
+  return `reserve:${digest}`;
+}
+
+function acceptedReserveRowIds(
+  leadRowIds: readonly string[],
+  outcome: ExactAppendOutcome,
+): string[] {
+  const accepted = selectAcceptedItems(leadRowIds, outcome);
+  if (accepted === null) {
+    if (outcome.accepted === 0) return [];
+    throw new Error('Reserve append returned accepted contacts without exact identities');
+  }
+  return [...new Set(accepted)];
+}
+
+async function markReserveRowsRouted(input: {
+  clientUserId: string;
+  bucketId: string;
+  campaignId: string;
+  rowIds: readonly string[];
+}): Promise<void> {
+  if (!supabaseAdmin) throw new Error('supabaseAdmin not initialized');
+  for (let i = 0; i < input.rowIds.length; i += 200) {
+    const slice = input.rowIds.slice(i, i + 200);
+    const { error } = await supabaseAdmin
+      .from('client_auto_pipeline_seen_employers')
+      .update({
+        status: 'routed',
+        routed_bucket_id: input.bucketId,
+        routed_campaign_id: input.campaignId,
+      })
+      .eq('client_user_id', input.clientUserId)
+      .in('hh_employer_id', slice);
+    if (error) throw new Error(`Failed to persist promoted reserve rows: ${error.message}`);
+  }
 }
 
 export async function runPromoteReserve(
@@ -100,8 +153,50 @@ export async function runPromoteReserve(
   const rows = (data ?? []) as SeenRow[];
   console.log(`[promote] ${rows.length} готовых dry-run строк к промоуту`);
 
+  // A reserve promotion is not a new scoring cohort. Reuse the immutable
+  // snapshot provenance created by the original auto run so accepted contacts
+  // join that cohort instead of being counted as an unattributed legacy route.
+  const snapshotByRowId = new Map<string, {
+    id: string;
+    sourceKind: string;
+    sourceRunId: string | null;
+    sourceJobId: string | null;
+  }>();
+  const rowIds = [...new Set(rows.map((row) => row.hh_employer_id))];
+  for (let offset = 0; offset < rowIds.length; offset += 500) {
+    const { data: snapshots, error: snapshotsError } = await supabaseAdmin
+      .from('client_pipeline_domain_snapshots')
+      .select('id, source_kind, source_run_id, source_job_id, source_row_id, scored_at')
+      .eq('client_user_id', clientUserId)
+      .eq('source_kind', 'auto_pipeline')
+      .eq('legacy_inferred', false)
+      .in('source_row_id', rowIds.slice(offset, offset + 500))
+      .order('scored_at', { ascending: false });
+    if (snapshotsError) throw new Error(`Failed to load reserve provenance: ${snapshotsError.message}`);
+    for (const snapshot of (snapshots ?? []) as Array<{
+      id: string;
+      source_kind: string;
+      source_run_id: string | null;
+      source_job_id: string | null;
+      source_row_id: string | null;
+    }>) {
+      if (!snapshot.source_row_id || snapshotByRowId.has(snapshot.source_row_id)) continue;
+      snapshotByRowId.set(snapshot.source_row_id, {
+        id: snapshot.id,
+        sourceKind: snapshot.source_kind,
+        sourceRunId: snapshot.source_run_id,
+        sourceJobId: snapshot.source_job_id,
+      });
+    }
+  }
+
   // 3. Группируем лиды по кампании.
-  const byCampaign = new Map<string, { bucket: CfgBucket; leads: LeadCreatePayload[]; rowIds: string[] }>();
+  const byCampaign = new Map<string, {
+    bucket: CfgBucket;
+    leads: LeadCreatePayload[];
+    leadRowIds: string[];
+    rowIds: string[];
+  }>();
   let skippedNoBucket = 0;
   for (const r of rows) {
     const b = pickBucket(r.endpoint_score);
@@ -109,7 +204,19 @@ export async function runPromoteReserve(
       skippedNoBucket++;
       continue;
     }
-    const cv = { score: String(r.endpoint_score ?? ''), source: r.source, domain: r.domain ?? '' };
+    const snapshot = snapshotByRowId.get(r.hh_employer_id);
+    const cv = {
+      score: String(r.endpoint_score ?? ''),
+      source: r.source,
+      domain: r.domain ?? '',
+      source_row_id: r.hh_employer_id,
+      ...(snapshot ? {
+        domain_snapshot_id: snapshot.id,
+        source_kind: snapshot.sourceKind,
+        ...(snapshot.sourceRunId ? { source_run_id: snapshot.sourceRunId } : {}),
+        ...(snapshot.sourceJobId ? { source_job_id: snapshot.sourceJobId } : {}),
+      } : {}),
+    };
     const leads: LeadCreatePayload[] = [];
     if (r.resolved_email && READY.includes(r.email_validation_status ?? '')) {
       leads.push({ email: r.resolved_email, company_name: r.company_name!, website: r.site_url ?? undefined, custom_variables: cv });
@@ -120,10 +227,11 @@ export async function runPromoteReserve(
     if (leads.length === 0) continue;
     let g = byCampaign.get(b.instantly_campaign_id);
     if (!g) {
-      g = { bucket: b, leads: [], rowIds: [] };
+      g = { bucket: b, leads: [], leadRowIds: [], rowIds: [] };
       byCampaign.set(b.instantly_campaign_id, g);
     }
     g.leads.push(...leads);
+    g.leadRowIds.push(...leads.map(() => r.hh_employer_id));
     g.rowIds.push(r.hh_employer_id);
   }
 
@@ -131,21 +239,39 @@ export async function runPromoteReserve(
   const results: Array<{ label: string; campaign: string; domains: number; leads: number; accepted: number }> = [];
   for (const [campaignId, g] of byCampaign) {
     console.log(`[promote] → ${g.bucket.label}: ${g.leads.length} лидов (${g.rowIds.length} доменов) в ${campaignId}`);
-    const res = await appendLeadsToClientCampaign({
-      userId: clientUserId,
-      campaignId,
-      leads: g.leads,
-      contextLabel: `promote:${g.bucket.label}`,
-    });
-    // mark routed чанками (in() имеет лимит длины URL).
-    for (let i = 0; i < g.rowIds.length; i += 200) {
-      const slice = g.rowIds.slice(i, i + 200);
-      await supabaseAdmin
-        .from('client_auto_pipeline_seen_employers')
-        .update({ status: 'routed', routed_bucket_id: g.bucket.id, routed_campaign_id: campaignId })
-        .eq('client_user_id', clientUserId)
-        .in('hh_employer_id', slice);
+    const runId = buildReservePromotionRunId(clientUserId, campaignId, g.rowIds);
+    let res: Awaited<ReturnType<typeof appendLeadsToClientCampaign>>;
+    try {
+      res = await appendLeadsToClientCampaign({
+        userId: clientUserId,
+        campaignId,
+        leads: g.leads,
+        contextLabel: `promote:${g.bucket.label}`,
+        ledgerSource: {
+          kind: 'auto_pipeline',
+          runId,
+          campaignName: g.bucket.label,
+        },
+      });
+    } catch (error) {
+      const partial = partialAppendOutcome(error);
+      if (partial) {
+        await markReserveRowsRouted({
+          clientUserId,
+          bucketId: g.bucket.id,
+          campaignId,
+          rowIds: acceptedReserveRowIds(g.leadRowIds, partial),
+        });
+      }
+      throw error;
     }
+    // mark routed чанками (in() имеет лимит длины URL).
+    await markReserveRowsRouted({
+      clientUserId,
+      bucketId: g.bucket.id,
+      campaignId,
+      rowIds: acceptedReserveRowIds(g.leadRowIds, res),
+    });
     results.push({ label: g.bucket.label, campaign: campaignId, domains: g.rowIds.length, leads: g.leads.length, accepted: res.accepted });
   }
 

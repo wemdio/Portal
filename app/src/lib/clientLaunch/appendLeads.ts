@@ -22,6 +22,13 @@ import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { resolveClientInstantlyRequestOptions } from '@/lib/instantly/clientAccountOptions';
 import { getBlockedEmailSet, filterBlockedLeads } from '@/lib/clientBlocklist/blockedContacts';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import {
+  completeAppendLedgerBatch,
+  failAppendLedgerBatch,
+  startAppendLedgerBatch,
+} from '@/lib/clientReports/ledgerStore';
+import { buildAcceptedIdentitySnapshot } from '@/lib/clientReports/ledger';
 import type { ClientCampaignPreset } from './types';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
 import {
@@ -59,12 +66,34 @@ export interface AppendLeadsToClientCampaignInput {
    * должен грузить всё подготовленное, не отсеивая по пересечению с клиентами.
    */
   skipIfInCampaign?: boolean;
+  /** Durable reporting provenance for this append operation. */
+  ledgerSource?: {
+    kind: string;
+    runId?: string | null;
+    jobId?: string | null;
+    campaignName?: string | null;
+  };
 }
 
 export interface AppendLeadsResult {
   accepted: number;
   skipped: number;
+  /** Exact positions in input.leads, or null when the provider only returned an aggregate. */
+  acceptedIndexes: number[] | null;
+  identityComplete: boolean;
 }
+
+export class AppendLeadsPartialError extends ClientLaunchError {
+  readonly partialResult: AppendLeadsResult;
+
+  constructor(message: string, partialResult: AppendLeadsResult) {
+    super(message, 500);
+    this.name = 'AppendLeadsPartialError';
+    this.partialResult = partialResult;
+  }
+}
+
+const PROVIDER_APPEND_BATCH_SIZE = 1_000;
 
 /**
  * Собирает email всех лидов, уже лежащих в указанных кампаниях клиента.
@@ -106,7 +135,7 @@ export async function appendLeadsToClientCampaign(
     throw new ClientLaunchError('Server misconfigured: supabaseInstantly is not available', 500);
   }
   if (input.leads.length === 0) {
-    return { accepted: 0, skipped: 0 };
+    return { accepted: 0, skipped: 0, acceptedIndexes: [], identityComplete: true };
   }
 
   const { userId, campaignId, leads, contextLabel } = input;
@@ -144,7 +173,12 @@ export async function appendLeadsToClientCampaign(
       { campaignId, contextLabel, blocked: blockedCount },
       logMeta,
     );
-    return { accepted: 0, skipped: blockedCount };
+    return {
+      accepted: 0,
+      skipped: blockedCount,
+      acceptedIndexes: [],
+      identityComplete: true,
+    };
   }
 
   // 2. Tariff / status — те же проверки, что в полном runClientLaunch.
@@ -188,39 +222,152 @@ export async function appendLeadsToClientCampaign(
 
   const instantlyAccountId = resolveInstantlyAccountId(preset.instantly_account_id);
   const instantlyRequestOptions = { accountId: instantlyAccountId };
-
-  try {
-    const leadResult = await createLeads(
-      leadsToSend,
-      { campaign_id: campaignId, skip_if_in_campaign: skipIfInCampaign },
-      instantlyRequestOptions,
-    );
-
-    const accepted = leadResult.leads_uploaded;
-    // В skipped входят и отсев Instantly, и срез по чёрному списку.
-    const skipped = Math.max(0, leadsToSend.length - accepted) + blockedCount;
-
-    await logAudit(
-      'client.appendLeads.success',
-      'Appended leads to existing campaign',
-      {
-        campaignId,
-        contextLabel,
-        accepted,
-        skipped,
-        blocked: blockedCount,
-        requested: leadsToSend.length,
-      },
-      logMeta,
-    );
-
-    return { accepted, skipped };
-  } catch (err) {
-    await logError('client.appendLeads.failed', err, { campaignId }, logMeta);
-    if (err instanceof ClientLaunchError) throw err;
-    throw new ClientLaunchError(
-      err instanceof Error ? err.message : 'Не удалось загрузить лидов в кампанию',
-      500,
-    );
+  if (!supabaseAdmin) {
+    throw new ClientLaunchError('Server misconfigured: reporting ledger is not available', 500);
   }
+
+  const inputIndexQueues = new Map<LeadCreatePayload, number[]>();
+  leads.forEach((lead, index) => {
+    const queue = inputIndexQueues.get(lead) ?? [];
+    queue.push(index);
+    inputIndexQueues.set(lead, queue);
+  });
+  const allowedInputIndexes = allowedLeads.map((lead) => {
+    const index = inputIndexQueues.get(lead)?.shift();
+    if (index === undefined) throw new Error('Blocked-contact filter changed lead identity');
+    return index;
+  });
+  const sentInputIndexes = allowedInputIndexes.slice(0, leadsToSend.length);
+
+  const source = input.ledgerSource ?? { kind: 'campaign_append' };
+  let accepted = 0;
+  let externalSkipped = 0;
+  let identityComplete = true;
+  const acceptedIndexes: number[] = [];
+  const batchIds: string[] = [];
+
+  const currentResult = (): AppendLeadsResult => ({
+    accepted,
+    skipped: externalSkipped + blockedCount,
+    acceptedIndexes: identityComplete ? [...acceptedIndexes].sort((a, b) => a - b) : null,
+    identityComplete,
+  });
+
+  for (let offset = 0; offset < leadsToSend.length; offset += PROVIDER_APPEND_BATCH_SIZE) {
+    const chunk = leadsToSend.slice(offset, offset + PROVIDER_APPEND_BATCH_SIZE);
+    const ledgerContext = {
+      clientUserId: userId,
+      campaignId,
+      campaignName: source.campaignName ?? contextLabel ?? null,
+      sourceKind: source.kind,
+      sourceRunId: source.runId ?? null,
+      sourceJobId: source.jobId ?? null,
+      leads: chunk,
+    };
+
+    let batchId: string;
+    try {
+      ({ batchId } = await startAppendLedgerBatch(supabaseAdmin, {
+        ...ledgerContext,
+        blockedCount: offset === 0 ? blockedCount : 0,
+        tariffSkippedCount: offset === 0
+          ? Math.max(0, allowedLeads.length - leadsToSend.length)
+          : 0,
+        startedAt: new Date().toISOString(),
+      }));
+      batchIds.push(batchId);
+    } catch (ledgerError) {
+      await logError('client.appendLeads.ledger_start_failed', ledgerError, { campaignId, offset }, logMeta);
+      throw new AppendLeadsPartialError(
+        ledgerError instanceof Error ? ledgerError.message : 'Reporting ledger write failed',
+        currentResult(),
+      );
+    }
+
+    let chunkAccepted: number;
+    let createdLeads: Array<{ id: string; email: string; index: number }> = [];
+    try {
+      const leadResult = await createLeads(
+        chunk,
+        { campaign_id: campaignId, skip_if_in_campaign: skipIfInCampaign },
+        instantlyRequestOptions,
+      );
+      chunkAccepted = leadResult.leads_uploaded;
+      createdLeads = leadResult.created_leads ?? [];
+    } catch (err) {
+      try {
+        await failAppendLedgerBatch(supabaseAdmin, {
+          ...ledgerContext,
+          batchId,
+          error: err,
+          finishedAt: new Date().toISOString(),
+        });
+      } catch (ledgerError) {
+        await logError('client.appendLeads.ledger_failure_write_failed', ledgerError, { campaignId, batchId }, logMeta);
+      }
+      await logError('client.appendLeads.failed', err, { campaignId, batchId, offset }, logMeta);
+      throw new AppendLeadsPartialError(
+        err instanceof Error ? err.message : 'Не удалось загрузить лидов в кампанию',
+        currentResult(),
+      );
+    }
+
+    const chunkSkipped = Math.max(0, chunk.length - chunkAccepted);
+    const identity = buildAcceptedIdentitySnapshot({
+      requested: chunk,
+      accepted: chunkAccepted,
+      createdLeads,
+    });
+    // The provider side effect has already happened. Reflect it in any partial
+    // result even if the terminal journal write below is temporarily unavailable,
+    // so callers never mistake a delivered chunk for an untouched one.
+    accepted += chunkAccepted;
+    externalSkipped += chunkSkipped;
+    if (identity.identityComplete) {
+      for (const acceptedIdentity of identity.acceptedIdentities) {
+        const inputIndex = sentInputIndexes[offset + acceptedIdentity.index];
+        if (inputIndex !== undefined) acceptedIndexes.push(inputIndex);
+      }
+    } else {
+      identityComplete = false;
+    }
+    try {
+      await completeAppendLedgerBatch(supabaseAdmin, {
+        ...ledgerContext,
+        batchId,
+        accepted: chunkAccepted,
+        skipped: chunkSkipped,
+        createdLeads,
+        finishedAt: new Date().toISOString(),
+      });
+    } catch (ledgerError) {
+      await logError('client.appendLeads.ledger_completion_failed', ledgerError, {
+        campaignId, batchId, accepted: chunkAccepted, offset,
+      }, logMeta);
+      throw new AppendLeadsPartialError(
+        'Contacts were delivered, but the reporting confirmation journal could not be finalized',
+        currentResult(),
+      );
+    }
+
+  }
+
+  // `skipped` remains backward compatible for callers: provider skips plus blocklist cuts.
+  const result = currentResult();
+  await logAudit(
+    'client.appendLeads.success',
+    'Appended leads to existing campaign',
+    {
+      campaignId,
+      contextLabel,
+      batchIds,
+      accepted,
+      skipped: result.skipped,
+      blocked: blockedCount,
+      requested: leadsToSend.length,
+    },
+    logMeta,
+  );
+
+  return result;
 }

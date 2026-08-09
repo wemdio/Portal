@@ -48,3 +48,20 @@ describe('defaultSearch geo wiring', () => {
     expect(mockSerperSearch).toHaveBeenCalledWith('crm для стоматологий', expect.objectContaining({ gl: 'ru', hl: 'ru' }));
   });
 });
+
+describe('resolveNavMarket (host precedence over profile)', () => {
+  it('eng host always wins, regardless of profile market', async () => {
+    const { resolveNavMarket } = await import('@/lib/engMarket');
+    expect(resolveNavMarket('app.outreachos.xyz', 'ru')).toBe('eng');
+    expect(resolveNavMarket('app.outreachos.xyz', undefined)).toBe('eng');
+    expect(resolveNavMarket('app.outreachos.xyz', 'eng')).toBe('eng');
+  });
+
+  it('off the eng host the profile decides (default ru)', async () => {
+    const { resolveNavMarket } = await import('@/lib/engMarket');
+    expect(resolveNavMarket('polza-portal.ru', 'eng')).toBe('eng');
+    expect(resolveNavMarket('polza-portal.ru', 'ru')).toBe('ru');
+    expect(resolveNavMarket('polza-portal.ru', null)).toBe('ru');
+    expect(resolveNavMarket(null, null)).toBe('ru');
+  });
+});

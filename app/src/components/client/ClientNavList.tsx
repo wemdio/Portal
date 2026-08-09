@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { useEffect, useState } from 'react';
 import type { Route } from 'next';
 import {
   CLIENT_NAV_AUTO_PIPELINE_SETUP,
@@ -89,6 +90,12 @@ function NavItemRow({
 }
 
 export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }: ClientNavListProps) {
+  // SSR/первая краска не знает market (host виден только на клиенте) — до
+  // маунта рисуем скелет вместо пунктов, иначе на ENG-хосте мыргал RU-набор
+  // до гидрации (репорт 2026-08-08).
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
   const groups = filterClientNavGroupsForMode(CLIENT_NAV_GROUPS, mode);
 
   // Бейдж непрочитанных сообщений поддержки и флаг BYO-почт приходят из layout
@@ -101,6 +108,18 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
   // Пока клиент находится на странице поддержки, бейдж не показываем вовсе:
   // он по определению читает тред (а новые ответы видны прямо в нём).
   const supportBadge = activeId === CLIENT_NAV_SUPPORT.id ? 0 : supportUnread;
+
+  if (!mounted) {
+    // Скелет первым кадром: набор пунктов ещё неизвестен (host/market решаются
+    // на клиенте) — пустая область вместо мыргания чужих разделов.
+    return (
+      <nav aria-hidden className="flex flex-col gap-1.5">
+        <div className="neu-pill h-8 w-full animate-pulse opacity-40" />
+        <div className="neu-pill h-8 w-3/4 animate-pulse opacity-30" />
+        <div className="neu-pill h-8 w-2/3 animate-pulse opacity-20" />
+      </nav>
+    );
+  }
 
   // ENG-рынок: клиент живёт только в ENG-кабинете — остальные разделы для
   // него всё равно закрыты middleware (редирект на /client/eng), поэтому

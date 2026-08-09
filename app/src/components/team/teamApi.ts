@@ -94,6 +94,79 @@ export interface TeamReviewsResponse {
   currentUserId: string | null;
 }
 
+export type TeamActivityPlanStatus = 'planned' | 'completed' | 'cancelled';
+export type TeamActivityPlanTimingType = 'date' | 'schedule' | 'none';
+
+export interface TeamActivityPlanItem {
+  id: string;
+  planMonth: string;
+  periodicity: string;
+  activity: string;
+  format: string | null;
+  plannedDate: string | null;
+  plannedTime: string | null;
+  scheduleNote: string | null;
+  note: string | null;
+  budgetAmount: number | null;
+  budgetNote: string | null;
+  status: TeamActivityPlanStatus;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TeamActivityPlanResponse {
+  period: {
+    month: string;
+    label: string;
+    previousMonth: string;
+    nextMonth: string;
+  };
+  items: TeamActivityPlanItem[];
+  summary: {
+    total: number;
+    planned: number;
+    completed: number;
+    cancelled: number;
+    overdue: number;
+    budgetAmount: number;
+    budgetUnspecified: number;
+  };
+  asOf: string;
+  canManage: boolean;
+}
+
+export interface TeamActivityPlanInput {
+  timingType: TeamActivityPlanTimingType;
+  planMonth: string;
+  periodicity: string;
+  activity: string;
+  format?: string | null;
+  plannedDate?: string | null;
+  plannedTime?: string | null;
+  scheduleNote?: string | null;
+  note?: string | null;
+  budgetAmount?: string | number | null;
+  budgetNote?: string | null;
+  status: TeamActivityPlanStatus;
+  position: number;
+}
+
+export interface TeamActivityPlanWrite {
+  planMonth: string;
+  periodicity: string;
+  activity: string;
+  format: string | null;
+  plannedDate: string | null;
+  plannedTime: string | null;
+  scheduleNote: string | null;
+  note: string | null;
+  budgetAmount: number | null;
+  budgetNote: string | null;
+  status: TeamActivityPlanStatus;
+  position: number;
+}
+
 interface TeamReviewScheduleInputBase {
   reviewDate: string;
   reason?: string | null;
@@ -162,6 +235,61 @@ export function buildTeamReviewCompletionWrite(
     problems: trimmedOrNull(values.problems),
     recommendations: trimmedOrNull(values.recommendations),
   };
+}
+
+export function buildTeamActivityPlanWrite(
+  values: TeamActivityPlanInput,
+): TeamActivityPlanWrite {
+  const rawBudget = typeof values.budgetAmount === 'string'
+    ? values.budgetAmount.trim()
+    : values.budgetAmount;
+  const parsedBudget = rawBudget === '' || rawBudget === null || rawBudget === undefined
+    ? null
+    : Number(rawBudget);
+  const exactDate = values.timingType === 'date';
+  const recurringSchedule = values.timingType === 'schedule';
+
+  return {
+    planMonth: values.planMonth,
+    periodicity: values.periodicity.trim(),
+    activity: values.activity.trim(),
+    format: trimmedOrNull(values.format),
+    plannedDate: exactDate ? trimmedOrNull(values.plannedDate) : null,
+    plannedTime: exactDate ? trimmedOrNull(values.plannedTime) : null,
+    scheduleNote: recurringSchedule ? trimmedOrNull(values.scheduleNote) : null,
+    note: trimmedOrNull(values.note),
+    budgetAmount: parsedBudget !== null && Number.isFinite(parsedBudget) ? parsedBudget : null,
+    budgetNote: trimmedOrNull(values.budgetNote),
+    status: values.status,
+    position: Math.max(0, Math.trunc(values.position)),
+  };
+}
+
+function activityPlanMonthDate(month: string): Date | null {
+  const match = /^(\d{4})-(\d{2})$/.exec(month);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  if (!Number.isInteger(year) || monthIndex < 0 || monthIndex > 11) return null;
+  return new Date(Date.UTC(year, monthIndex, 1));
+}
+
+export function formatTeamActivityPlanMonth(month: string): string {
+  const date = activityPlanMonthDate(month);
+  if (!date) return month;
+  const formatted = new Intl.DateTimeFormat('ru-RU', {
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  }).format(date).replace(/\s*г\.$/, '');
+  return formatted.charAt(0).toUpperCase() + formatted.slice(1);
+}
+
+export function shiftTeamActivityPlanMonth(month: string, offset: number): string {
+  const date = activityPlanMonthDate(month);
+  if (!date) return month;
+  date.setUTCMonth(date.getUTCMonth() + offset);
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
 
@@ -326,6 +454,61 @@ export function normalizeReviews(payload: unknown): TeamReviewsResponse {
     employees: Array.isArray(root.employees) ? root.employees.map(normalizeEmployee) : [],
     canManage: root.canManage === true,
     currentUserId: nullableText(root.currentUserId),
+  };
+}
+
+function normalizeActivityPlanItem(value: unknown): TeamActivityPlanItem {
+  const item = record(value);
+  const rawStatus = text(item.status);
+  const status: TeamActivityPlanStatus = rawStatus === 'completed' || rawStatus === 'cancelled'
+    ? rawStatus
+    : 'planned';
+  const planMonth = text(item.planMonth ?? item.plan_month);
+  const plannedDate = nullableText(item.plannedDate ?? item.planned_date);
+
+  return {
+    id: text(item.id),
+    planMonth: planMonth.length >= 7 ? planMonth.slice(0, 7) : planMonth,
+    periodicity: text(item.periodicity),
+    activity: text(item.activity),
+    format: nullableText(item.format),
+    plannedDate,
+    plannedTime: plannedDate ? nullableText(item.plannedTime ?? item.planned_time) : null,
+    scheduleNote: plannedDate ? null : nullableText(item.scheduleNote ?? item.schedule_note),
+    note: nullableText(item.note),
+    budgetAmount: nullableNumber(item.budgetAmount ?? item.budget_amount),
+    budgetNote: nullableText(item.budgetNote ?? item.budget_note),
+    status,
+    position: number(item.position),
+    createdAt: text(item.createdAt ?? item.created_at),
+    updatedAt: text(item.updatedAt ?? item.updated_at),
+  };
+}
+
+export function normalizeActivityPlan(payload: unknown): TeamActivityPlanResponse {
+  const root = unwrap(payload);
+  const period = record(root.period);
+  const summary = record(root.summary);
+
+  return {
+    period: {
+      month: text(period.month),
+      label: text(period.label),
+      previousMonth: text(period.previousMonth ?? period.previous_month),
+      nextMonth: text(period.nextMonth ?? period.next_month),
+    },
+    items: Array.isArray(root.items) ? root.items.map(normalizeActivityPlanItem) : [],
+    summary: {
+      total: number(summary.total),
+      planned: number(summary.planned),
+      completed: number(summary.completed),
+      cancelled: number(summary.cancelled),
+      overdue: number(summary.overdue),
+      budgetAmount: number(summary.budgetAmount ?? summary.budget_amount),
+      budgetUnspecified: number(summary.budgetUnspecified ?? summary.budget_unspecified),
+    },
+    asOf: text(root.asOf ?? root.as_of),
+    canManage: root.canManage === true || root.can_manage === true,
   };
 }
 
