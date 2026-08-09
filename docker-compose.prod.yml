@@ -284,6 +284,13 @@ services:
       - NODE_ENV=production
       - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      # Прямое подключение к Postgres — только для сбора базы по каталогу.
+      # Это один `insert ... select` внутри базы, и гонять его через PostgREST
+      # незачем: Kong рвёт соединение через 60 секунд, а сотни тысяч строк в
+      # минуту не укладываются (09.08.2026 задача так и упала с
+      # «The upstream server is timing out»). Остальное воркер по-прежнему
+      # делает через supabaseAdmin.
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
       - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
       - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
       # Пулы прокси для ротации (JSON-массив в .env). YANDEXMAPS_PROXY_URLS

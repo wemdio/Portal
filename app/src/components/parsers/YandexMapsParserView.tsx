@@ -3,12 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetchJson } from '@/lib/authFetch';
-import type { YandexMapsJob, YandexMapsLinkRow, YandexMapsOrganizationRow } from '@/types/parsers';
+import type { YandexMapsJob, YandexMapsOrganizationRow } from '@/types/parsers';
 import type { QueueStatusResponse } from '@/app/api/parsers/yandexmaps/queue-status/route';
 import { YandexMapsParserForm } from '@/components/parsers/YandexMapsParserForm';
 import { JobStatus, isStoppedByUser } from '@/components/parsers/JobStatus';
-import { normalizeYandexOrgUrls } from '@/lib/parsers/yandexMapsUrlUtils';
-import { Download, RefreshCw, FileSpreadsheet, Database, MapPin, Clock, Link2, Table2 } from 'lucide-react';
+import { Download, RefreshCw, FileSpreadsheet, Database, MapPin, Clock, Table2 } from 'lucide-react';
 
 import { saveAs } from 'file-saver';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
@@ -53,7 +52,6 @@ type YandexMapsParserViewProps = {
 export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps = {}) {
   const [jobs, setJobs] = useState<YandexMapsJob[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const [linksText, setLinksText] = useState('');
   const [results, setResults] = useState<YandexMapsOrganizationRow[]>([]);
   const [busy, setBusy] = useState(false);
   const [jobActionId, setJobActionId] = useState<string | null>(null);
@@ -81,12 +79,6 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     } catch {
       // non-critical, ignore
     }
-  }, []);
-
-  const loadLinks = useCallback(async (jobId: string) => {
-    const data = await authFetchJson<{ links: YandexMapsLinkRow[] }>(`/api/parsers/yandexmaps/${jobId}/links`);
-    const lines = (data.links ?? []).map((l) => l.link).filter(Boolean);
-    setLinksText(lines.join('\n'));
   }, []);
 
   const loadResults = useCallback(async (jobId: string) => {
@@ -117,13 +109,11 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
 
   useEffect(() => {
     if (!activeJobId) {
-      setLinksText('');
       setResults([]);
       return;
     }
-    void loadLinks(activeJobId);
     void loadResults(activeJobId);
-  }, [activeJobId, loadLinks, loadResults]);
+  }, [activeJobId, loadResults]);
 
   useEffect(() => {
     if (!activeJobId || !activeJob) return;
@@ -131,12 +121,11 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
       const interval = window.setInterval(() => {
         void refreshJobs();
         void refreshQueueStatus();
-        void loadLinks(activeJobId);
         void loadResults(activeJobId);
       }, 5000);
       return () => window.clearInterval(interval);
     }
-  }, [activeJob, activeJobId, refreshJobs, refreshQueueStatus, loadLinks, loadResults]);
+  }, [activeJob, activeJobId, refreshJobs, refreshQueueStatus, loadResults]);
 
   // Запуск — это поиск по нашему каталогу. Живой парсинг с прокси и ручными
   // ссылками из формы убран: URL по-прежнему умеет обрабатывать воркер, но
@@ -184,36 +173,13 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     try {
       await authFetchJson(`/api/parsers/yandexmaps/${activeJobId}/collect-links`, { method: 'POST' });
       await refreshJobs();
-      await loadLinks(activeJobId);
     } catch (e) {
       console.error(e);
       setError('Не удалось запустить парсинг');
     } finally {
       setJobActionId(null);
     }
-  }, [activeJobId, refreshJobs, loadLinks]);
-
-  const handleSaveLinks = useCallback(async () => {
-    if (!activeJobId) return;
-    setJobActionId(activeJobId);
-    setError(null);
-    try {
-      const raw = linksText.split('\n').map((s) => s.trim()).filter(Boolean);
-      const links = normalizeYandexOrgUrls(raw);
-      await authFetchJson(`/api/parsers/yandexmaps/${activeJobId}/links`, {
-        method: 'PUT',
-        body: JSON.stringify({ links }),
-      });
-      await refreshJobs();
-      await loadLinks(activeJobId);
-      triggerRefreshed();
-    } catch (e) {
-      console.error(e);
-      setError('Не удалось сохранить ссылки');
-    } finally {
-      setJobActionId(null);
-    }
-  }, [activeJobId, linksText, loadLinks, refreshJobs, triggerRefreshed]);
+  }, [activeJobId, refreshJobs]);
 
   const handleParse = useCallback(async () => {
     if (!activeJobId) return;
@@ -398,6 +364,13 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
   const processedOrgs = activeJob?.processed_organizations ?? 0;
   const getStageLabel = (stage: string) => {
     if (!stage) return '—';
+    // Этапы сбора по каталогу. Раньше они утекали на экран как есть — человек
+    // видел «pending» и «catalog_search» латиницей.
+    if (stage === 'pending') return 'В очереди';
+    if (stage === 'catalog_search') return 'Собираем из базы';
+    if (stage === 'catalog_completed') return 'Готово';
+    if (stage === 'catalog_empty') return 'Ничего не нашлось';
+    if (stage === 'yandex_blocked') return 'Яндекс заблокировал запросы';
     if (stage === 'collecting_links') return 'Сбор ссылок';
     if (stage.startsWith('collecting_links:')) return `Сбор ссылок (URL ${stage.split(':')[1]})`;
     if (stage === 'links_collected') return 'Ссылки собраны, запуск парсинга...';
@@ -409,6 +382,16 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
 
   const stageStr = activeJob?.progress_stage?.toString() ?? '';
   const stage = getStageLabel(stageStr);
+
+  // Что именно собирали. Номер запуска ни о чём не говорит, а в истории их
+  // десятки — отличать их надо по сферам и местам.
+  const activeFilters = activeJob?.config?.catalog_filters ?? null;
+  const activeRubrics = (activeFilters?.categories ?? []).filter(Boolean);
+  const activePlaces = (activeFilters?.cities ?? []).filter(Boolean);
+  const activeCountries = (activeFilters?.countries ?? []).filter(Boolean);
+  const jobTitle = activeRubrics.length
+    ? activeRubrics.join(', ')
+    : `Запуск #${activeJob?.id.slice(0, 8) ?? ''}`;
   const _isCollecting = stageStr.includes('collecting_links') || stageStr === 'links_collected';
   const isParsing = stageStr.includes('parsing_organizations');
 
@@ -586,7 +569,9 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                   <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
                     <div>
                       <div className="flex items-center gap-3 mb-1">
-                        <h2 className="text-xl font-bold text-gray-900">Запуск #{activeJob.id.slice(0, 8)}</h2>
+                        <h2 className="text-xl font-bold text-gray-900" title={`Запуск #${activeJob.id.slice(0, 8)}`}>
+                          {jobTitle}
+                        </h2>
                         <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ring-1 ring-inset ${
                           activeJob.status === 'completed' ? 'bg-green-50 text-green-700 ring-green-600/20' :
                           activeJob.status === 'failed' ? 'bg-red-50 text-red-700 ring-red-600/20' :
@@ -602,10 +587,6 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                           <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
                           Этап: <span className="font-medium text-gray-900">{stage || '—'}</span>
                         </div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
-                          Ссылок: <span className="font-medium text-gray-900">{totalLinks}</span>
-                        </div>
                         {(isParsing || activeJob.status === 'completed') && (
                           <div className="flex items-center gap-1.5">
                             <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
@@ -613,6 +594,31 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                           </div>
                         )}
                       </div>
+
+                      {/* Условия запуска целиком, без «и ещё N»: через неделю
+                          вспомнить, что именно собирали, иначе неоткуда. */}
+                      {activeFilters && (
+                        <dl className="mt-3 space-y-1.5 text-sm">
+                          {activePlaces.length > 0 && (
+                            <div className="flex gap-2">
+                              <dt className="shrink-0 text-gray-500">Места:</dt>
+                              <dd className="text-gray-900">{activePlaces.join(', ')}</dd>
+                            </div>
+                          )}
+                          {activeRubrics.length > 0 && (
+                            <div className="flex gap-2">
+                              <dt className="shrink-0 text-gray-500">Сферы:</dt>
+                              <dd className="text-gray-900">{activeRubrics.join(', ')}</dd>
+                            </div>
+                          )}
+                          {activeCountries.length > 0 && (
+                            <div className="flex gap-2">
+                              <dt className="shrink-0 text-gray-500">Страны:</dt>
+                              <dd className="text-gray-900">{activeCountries.join(', ')}</dd>
+                            </div>
+                          )}
+                        </dl>
+                      )}
 
                       {activeJob.status === 'running' ? (
                         <div className="mt-3 rounded-md border border-blue-100 bg-blue-50/60 px-3 py-2 text-xs text-blue-900">
@@ -782,42 +788,6 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                   </div>
                 </div>
               </div>
-
-              {/* Links Editor — operator-only: clients never curate the raw org-link
-                  list; the pipeline auto-proceeds collect → parse. */}
-              {!clientMode && (
-              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-                <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-                  <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
-                    <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-100 text-blue-600">
-                      <Link2 className="h-3.5 w-3.5" />
-                    </span>
-                    Ссылки организаций
-                  </h3>
-                  <div className="flex items-center gap-3">
-                    <span className="text-xs text-gray-500">
-                      {linksText.split('\n').map((s) => s.trim()).filter(Boolean).length} шт.
-                    </span>
-                    <button
-                      type="button"
-                      onClick={handleSaveLinks}
-                      disabled={jobActionId === activeJob.id}
-                      className="inline-flex items-center justify-center rounded-lg bg-white border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50"
-                    >
-                      Сохранить
-                    </button>
-                  </div>
-                </div>
-                <div className="p-0">
-                  <textarea
-                    className="block w-full h-48 border-0 p-4 text-sm font-mono focus:ring-0 resize-y"
-                    value={linksText}
-                    onChange={(e) => setLinksText(e.target.value)}
-                    placeholder="https://yandex.ru/maps/org/.../12345/"
-                  />
-                </div>
-              </div>
-              )}
 
               {/* Results Table */}
               <div className={`${clientMode ? 'neu-card' : 'bg-white rounded-xl border border-gray-200 shadow-sm'} overflow-hidden flex flex-col h-[600px]`}>
