@@ -34,4 +34,23 @@ describe('detectSummaryChannel', () => {
   ])('classifies %p as %s', (fields, expected) => {
     expect(detectSummaryChannel(raw(fields))).toBe(expected);
   });
+
+  it('источник «портал (outreachos)» сознательно вне отчёта', () => {
+    const raw = {
+      custom_fields_values: [
+        { field_name: 'Источник', values: [{ value: 'портал (outreachos)' }] },
+      ],
+    };
+    expect(detectSummaryChannel(raw)).toBeNull();
+  });
+
+  it('исключённый источник сильнее пометки «Контур»=«Маркетинг»', () => {
+    const raw = {
+      custom_fields_values: [
+        { field_name: 'Контур', values: [{ value: 'Маркетинг' }] },
+        { field_name: 'Источник', values: [{ value: 'Портал (OutreachOS)' }] },
+      ],
+    };
+    expect(detectSummaryChannel(raw)).toBeNull();
+  });
 });
