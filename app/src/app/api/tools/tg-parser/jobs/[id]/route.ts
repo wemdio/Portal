@@ -139,6 +139,28 @@ export async function PATCH(
 
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
       if (!updated) {
+        // Ноль строк — это два разных случая, и раньше мы оба называли
+        // «задача уже завершилась». Второй случай врал: 10.08.2026 у таблицы
+        // не было политики на update, обновление молча не проходило, а
+        // оператор читал, что задача закончилась, — и видел её работающей.
+        const { data: after } = await supabase
+          .from('tg_parser_jobs')
+          .select('status, user_id')
+          .eq('id', id)
+          .maybeSingle();
+
+        if (after && (after.status === 'pending' || after.status === 'running')) {
+          const foreign = after.user_id !== user.id;
+          return NextResponse.json(
+            {
+              error: foreign
+                ? 'Остановить можно только свой запуск'
+                : 'Не удалось остановить задачу: нет прав на изменение. Сообщите разработчику.',
+            },
+            { status: foreign ? 403 : 500 },
+          );
+        }
+
         return NextResponse.json({ error: 'Задача уже завершилась' }, { status: 409 });
       }
 
