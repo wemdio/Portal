@@ -193,11 +193,11 @@ const monitoringGroup: ClientNavGroup = {
     },
     {
       id: 'reports',
-      label: 'Отчёты',
-      labelEn: 'Reports',
+      label: 'Воронка базы',
+      labelEn: 'List funnel',
       href: '/client/reports',
-      description: 'Сводный отчёт по выбранным кампаниям',
-      descriptionEn: 'Aggregated report across selected campaigns',
+      description: 'Скоринг, передача и выгрузки базы',
+      descriptionEn: 'Scoring, routing, and list exports',
     },
     {
       id: 'tariff',

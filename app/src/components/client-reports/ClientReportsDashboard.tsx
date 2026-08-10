@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Download, RefreshCw } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
@@ -9,59 +10,23 @@ import {
   CLIENT_REPORT_EXPORT_POLL_TIMEOUT_MS,
   isActiveClientReportExportStatus,
 } from '@/lib/clientReports/exportLifecycle';
-import type { ClientReportExportStatus } from '@/lib/clientReports/types';
+import type {
+  ClientReportAnalyticsResponse,
+  ClientReportExportStatus,
+} from '@/lib/clientReports/types';
 
 export type PeriodPreset = '7d' | '30d' | 'current' | 'previous' | 'custom';
 type ScoreFilter = 'all' | 'A' | 'B' | 'C';
 type ExportKind = 'rejected' | 'working' | 'submitted';
 
-interface ReportFilters {
+interface ReportQueryFilters {
   from: string;
   to: string;
   score: ScoreFilter;
   campaign: string;
 }
 
-interface CampaignOption {
-  id: string;
-  name: string;
-  scoreCode?: 'A' | 'B' | 'C' | null;
-}
-
-interface AnalyticsResponse {
-  campaigns: CampaignOption[];
-  filters: ReportFilters;
-  metrics: {
-    contactsAddedConfirmed: number;
-    contactsSubmittedLegacy: number;
-    uniqueRecipients: number;
-    emailsSent: number;
-    liveReplies: number;
-    processedReplies: number;
-    targetLeads: number;
-  };
-  funnel: {
-    scoredCompanies: number;
-    workingScoreCompanies: number;
-    emailFoundCompanies: number;
-    validatedEmails: number;
-    submittedContacts: number;
-    confirmedContacts: number;
-    byCampaign: Array<{
-      campaignId: string;
-      campaignName: string;
-      scoreCode: 'A' | 'B' | 'C' | 'rejected' | 'error' | null;
-      submitted: number;
-      confirmed: number;
-    }>;
-  };
-  freshness: {
-    analyticsAt: string | null;
-    pipelineAt: string | null;
-  };
-  legacyNotice: string | null;
-  qualityNotices?: string[];
-}
+type AnalyticsResponse = ClientReportAnalyticsResponse;
 
 interface ExportJob {
   id: string;
@@ -271,7 +236,7 @@ export function ClientReportsDashboard() {
   );
   const from = preset === 'custom' && validCustomRange ? requestedFrom : presetRange.from;
   const to = preset === 'custom' && validCustomRange ? requestedTo : presetRange.to;
-  const filters = useMemo<ReportFilters>(() => ({ from, to, score, campaign }), [from, to, score, campaign]);
+  const filters = useMemo<ReportQueryFilters>(() => ({ from, to, score, campaign }), [from, to, score, campaign]);
 
   const [draftFrom, setDraftFrom] = useState(from);
   const [draftTo, setDraftTo] = useState(to);
@@ -295,7 +260,7 @@ export function ClientReportsDashboard() {
     setDateError('');
   }, [from, to]);
 
-  const replaceFilters = useCallback((next: ReportFilters & { period: PeriodPreset }) => {
+  const replaceFilters = useCallback((next: ReportQueryFilters & { period: PeriodPreset }) => {
     const query = new URLSearchParams({
       period: next.period,
       from: next.from,
@@ -352,7 +317,7 @@ export function ClientReportsDashboard() {
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted || sequence !== requestSequence.current) return;
-        setRequestError(errorMessage(error, 'Не удалось загрузить статистику'));
+        setRequestError(errorMessage(error, 'Не удалось загрузить воронку базы'));
         setRequestStatus('error');
       });
 
@@ -433,28 +398,13 @@ export function ClientReportsDashboard() {
     }
   }, [filters, preset]);
 
-  const metrics = data ? [
-    {
-      label: 'Добавлено в рассылку',
-      value: data.metrics.contactsAddedConfirmed,
-      detail: data.metrics.contactsSubmittedLegacy > 0 && data.legacyNotice
-        ? `${formatCount(data.metrics.contactsSubmittedLegacy)} — по старому журналу передачи`
-        : 'подтверждено кампаниями',
-    },
-    { label: 'Уникальных получателей', value: data.metrics.uniqueRecipients, detail: 'без повторов между шагами' },
-    { label: 'Писем отправлено', value: data.metrics.emailsSent, detail: 'все фактически отправленные шаги' },
-    { label: 'Живых ответов', value: data.metrics.liveReplies, detail: 'известные автоответы исключены' },
-    { label: 'Ответов обработано', value: data.metrics.processedReplies, detail: 'есть результат обработки' },
-    { label: 'Целевых лидов', value: data.metrics.targetLeads, detail: 'подтверждены как целевые' },
-  ] : [];
-
   const funnelRows = data ? [
     { label: 'Отскорено компаний', value: data.funnel.scoredCompanies, unit: 'компаний' },
     { label: 'Получили рабочий скор', value: data.funnel.workingScoreCompanies, unit: 'компаний' },
     { label: 'Найдена почта', value: data.funnel.emailFoundCompanies, unit: 'компаний' },
     { label: 'Почта прошла валидацию', value: data.funnel.validatedEmails, unit: 'email' },
-    { label: 'Передано в кампании', value: data.funnel.submittedContacts, unit: 'контактов' },
-    { label: 'Подтверждённо добавлено', value: data.funnel.confirmedContacts, unit: 'контактов' },
+    { label: 'Передано из этой когорты', value: data.funnel.submittedContacts, unit: 'контактов' },
+    { label: 'Принято из этой когорты', value: data.funnel.confirmedContacts, unit: 'контактов' },
   ] : [];
   const qualityNotices = data?.qualityNotices?.length
     ? data.qualityNotices
@@ -462,10 +412,9 @@ export function ClientReportsDashboard() {
       ? [data.legacyNotice]
       : [];
 
-  const empty = Boolean(data) && [
-    ...metrics.map((metric) => normalizeCount(metric.value)),
-    ...funnelRows.map((row) => normalizeCount(row.value)),
-  ].every((value) => value === 0) && (data?.funnel.byCampaign.length ?? 0) === 0;
+  const empty = Boolean(data)
+    && funnelRows.every((row) => normalizeCount(row.value) === 0)
+    && (data?.funnel.byCampaign.length ?? 0) === 0;
 
   return (
     <main className="mx-auto max-w-6xl pb-10" aria-busy={requestStatus === 'loading' || requestStatus === 'refreshing'}>
@@ -474,16 +423,22 @@ export function ClientReportsDashboard() {
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <h1 className="m-0 text-2xl font-semibold tracking-tight sm:text-3xl" style={{ color: 'var(--cp-paper)' }}>
-              Статистика
+              Воронка базы
             </h1>
             <p className="mt-2 max-w-2xl text-sm leading-6" style={{ color: 'var(--cp-paper-mute)' }}>
-              Путь компаний от скоринга до подтверждённой загрузки, отправок и целевых ответов.
+              Путь компаний от скоринга до подтверждённой передачи контактов в кампании.
+            </p>
+            <p className="mt-2 max-w-2xl text-xs leading-5" style={{ color: 'var(--cp-paper-faint)' }}>
+              Отправки, открытия, ответы и лиды смотрите в разделе{' '}
+              <Link className="underline underline-offset-2" href="/client">
+                Кампании
+              </Link>
+              .
             </p>
           </div>
           {data && (
             <p className="ds-mono text-[11px] leading-5" style={{ color: 'var(--cp-paper-faint)' }}>
-              Аналитика: {formatFreshness(data.freshness.analyticsAt)}<br />
-              Пайплайн: {formatFreshness(data.freshness.pipelineAt)}
+              Воронка: {formatFreshness(data.freshness.pipelineAt)}
             </p>
           )}
         </div>
@@ -572,11 +527,11 @@ export function ClientReportsDashboard() {
           </div>
 
           <label className="text-xs font-medium" style={{ color: 'var(--cp-paper-mute)' }}>
-            <span className="mb-2 block">Кампания</span>
+            <span className="mb-2 block">Кампания после передачи</span>
             <select
               className="ds-input w-full"
               value={campaign}
-              aria-label="Кампания"
+              aria-label="Кампания после передачи"
               onChange={(event) => replaceFilters({ ...filters, period: preset, campaign: event.target.value })}
             >
               <option value="all">Все кампании</option>
@@ -585,10 +540,13 @@ export function ClientReportsDashboard() {
               )}
               {(data?.campaigns ?? []).map((item) => (
                 <option key={item.id} value={item.id}>
-                  {item.name}{item.scoreCode ? ` · ${item.scoreCode}` : ''}
+                  {item.name}
                 </option>
               ))}
             </select>
+            <span className="mt-2 block text-[11px] font-normal leading-4" style={{ color: 'var(--cp-paper-faint)' }}>
+              Фильтр кампании действует с этапа передачи контактов.
+            </span>
           </label>
         </div>
       </section>
@@ -598,7 +556,7 @@ export function ClientReportsDashboard() {
           <div className="flex items-start gap-3">
             <span className="ds-status-dot mt-1.5" aria-hidden style={{ background: 'var(--cp-red)' }} />
             <div>
-              <p className="text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>Не удалось обновить статистику</p>
+              <p className="text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>Не удалось обновить воронку базы</p>
               <p className="mt-1 text-xs" style={{ color: 'var(--cp-paper-mute)' }}>{requestError}</p>
             </div>
           </div>
@@ -614,9 +572,9 @@ export function ClientReportsDashboard() {
       )}
 
       {requestStatus === 'loading' && !data && (
-        <div className="ds-card mb-6 px-5 py-12 text-center" role="status" aria-label="Загрузка статистики">
-          <p className="text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>Загружаем подтверждённые данные…</p>
-          <p className="mt-2 text-xs" style={{ color: 'var(--cp-paper-faint)' }}>Сводим аналитику рассылок и журнал пайплайна.</p>
+        <div className="ds-card mb-6 px-5 py-12 text-center" role="status" aria-label="Загрузка воронки базы">
+          <p className="text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>Загружаем воронку базы…</p>
+          <p className="mt-2 text-xs" style={{ color: 'var(--cp-paper-faint)' }}>Сводим скоринг, поиск почт и передачу в кампании.</p>
         </div>
       )}
 
@@ -641,41 +599,11 @@ export function ClientReportsDashboard() {
             </div>
           )}
 
-          <section className="mb-6" role="region" aria-labelledby="report-metrics-title">
-            <div className="mb-3 flex items-end justify-between gap-4">
-              <div>
-                <p className="ds-eyebrow mb-1">01 → Результат</p>
-                <h2 id="report-metrics-title" className="text-base font-semibold" style={{ color: 'var(--cp-paper)' }}>
-                  Общая статистика
-                </h2>
-              </div>
-              <p className="hidden text-xs sm:block" style={{ color: 'var(--cp-paper-faint)' }}>за выбранный период</p>
-            </div>
-            <dl className="ds-card grid overflow-hidden md:grid-cols-2">
-              {metrics.map((metric, index) => (
-                <div
-                  key={metric.label}
-                  className={`flex min-h-20 items-center justify-between gap-4 border-[var(--cp-divider)] px-4 py-3.5 sm:px-5 ${
-                    index > 0 ? 'border-t' : ''
-                  } ${index === 1 ? 'md:border-t-0' : ''} ${index % 2 === 1 ? 'md:border-l' : ''}`}
-                >
-                  <div className="min-w-0">
-                    <dt className="text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>{metric.label}</dt>
-                    <p className="mt-1 text-[11px] leading-4" style={{ color: 'var(--cp-paper-faint)' }}>{metric.detail}</p>
-                  </div>
-                  <dd className="ds-mono shrink-0 text-xl font-semibold tabular-nums" style={{ color: 'var(--cp-paper)' }}>
-                    {formatCount(metric.value)}
-                  </dd>
-                </div>
-              ))}
-            </dl>
-          </section>
-
           <section className="mb-6" role="region" aria-labelledby="report-funnel-title">
             <div className="mb-3">
-              <p className="ds-eyebrow mb-1">02 → Конверсия</p>
+              <p className="ds-eyebrow mb-1">01 → Обработка</p>
               <h2 id="report-funnel-title" className="text-base font-semibold" style={{ color: 'var(--cp-paper)' }}>
-                Воронка обработки
+                Воронка компаний, отскоренных в период
               </h2>
             </div>
             <div className="ds-card overflow-x-auto">
@@ -711,9 +639,9 @@ export function ClientReportsDashboard() {
 
           <section className="mb-6" role="region" aria-labelledby="report-campaigns-title">
             <div className="mb-3">
-              <p className="ds-eyebrow mb-1">03 → Распределение</p>
+              <p className="ds-eyebrow mb-1">02 → Передача</p>
               <h2 id="report-campaigns-title" className="text-base font-semibold" style={{ color: 'var(--cp-paper)' }}>
-                По кампаниям
+                По кампаниям и скору
               </h2>
             </div>
             <div className="ds-card overflow-x-auto">
@@ -743,10 +671,12 @@ export function ClientReportsDashboard() {
               )}
             </div>
           </section>
+        </>
+      )}
 
-          <section aria-labelledby="report-exports-title">
+      <section aria-labelledby="report-exports-title">
             <div className="mb-3">
-              <p className="ds-eyebrow mb-1">04 → Данные</p>
+              <p className="ds-eyebrow mb-1">03 → Данные</p>
               <h2 id="report-exports-title" className="text-base font-semibold" style={{ color: 'var(--cp-paper)' }}>
                 Выгрузки баз
               </h2>
@@ -786,9 +716,7 @@ export function ClientReportsDashboard() {
                 );
               })}
             </div>
-          </section>
-        </>
-      )}
+      </section>
     </main>
   );
 }

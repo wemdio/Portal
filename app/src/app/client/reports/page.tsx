@@ -6,10 +6,10 @@ function ReportsFallback() {
     <main className="mx-auto max-w-6xl pb-10">
       <p className="ds-eyebrow mb-2">02 → Мониторинг</p>
       <h1 className="m-0 text-2xl font-semibold tracking-tight sm:text-3xl" style={{ color: 'var(--cp-paper)' }}>
-        Статистика
+        Воронка базы
       </h1>
       <div className="ds-card mt-6 px-5 py-12 text-center" role="status">
-        <p className="text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>Загружаем статистику…</p>
+        <p className="text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>Загружаем воронку…</p>
       </div>
     </main>
   );

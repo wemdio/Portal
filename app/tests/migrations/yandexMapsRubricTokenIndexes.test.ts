@@ -24,6 +24,10 @@ const MIGRATION_PATH = path.resolve(
   __dirname,
   '../../../supabase/migrations/20260807_0004_yandex_maps_catalog_rubric_tokens.sql',
 );
+const BOUNDED_MARK_SEEN_MIGRATION_PATH = path.resolve(
+  __dirname,
+  '../../../supabase/migrations/20260810_0003_yandex_maps_catalog_mark_seen_bounded.sql',
+);
 const SCRIPT_RELATIVE_PATH = 'scripts/db/buildYandexMapsRubricTokenIndexes.js';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -85,5 +89,24 @@ describe('индексы по токенам рубрик каталога Ян�
     // деплоя (в Telegram уходит хвост вывода миграций).
     expect(migrationSql).toContain(SCRIPT_RELATIVE_PATH);
     expect(fs.existsSync(path.resolve(__dirname, '../../', SCRIPT_RELATIVE_PATH))).toBe(true);
+  });
+});
+
+describe('bounded Yandex Maps catalog missing streak', () => {
+  it('stops rewriting rows after the closure threshold is reached', () => {
+    const migrationExists = fs.existsSync(BOUNDED_MARK_SEEN_MIGRATION_PATH);
+    expect(migrationExists).toBe(true);
+    if (!migrationExists) return;
+
+    const sql = stripSqlComments(
+      fs.readFileSync(BOUNDED_MARK_SEEN_MIGRATION_PATH, 'utf8'),
+    );
+    expect(sql).toMatch(
+      /create\s+or\s+replace\s+function\s+public\.yandex_maps_catalog_mark_seen/i,
+    );
+    expect(sql.match(/c\.missing_streak\s*<\s*2/gi)).toHaveLength(2);
+    expect(sql).toMatch(
+      /update\s+public\.yandex_maps_company_catalog\s+c[\s\S]*?from\s+candidates[\s\S]*?where\s+c\.yandex_id\s*=\s*candidates\.yandex_id\s+and\s+c\.missing_streak\s*<\s*2/i,
+    );
   });
 });

@@ -42,6 +42,7 @@ export async function POST(req: NextRequest) {
   const allowed = new Set(result.auth.accessRows
     .filter((row) => row.resource_type === 'campaign')
     .map((row) => row.resource_id));
+  if (allowed.size === 0) return jsonError('Нет доступных кампаний', 400);
   if (filters.campaignId && !allowed.has(filters.campaignId)) return jsonError('Кампания недоступна', 403);
 
   const id = crypto.randomUUID();
