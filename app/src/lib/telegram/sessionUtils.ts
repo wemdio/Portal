@@ -1,6 +1,39 @@
 import { StringSession } from 'telegram/sessions';
 
 /**
+ * Собрать строку сессии GramJS из адреса DC и ключа авторизации.
+ *
+ * Расклад — «телетоновский»: dc_id, IP четырьмя байтами, порт, 256 байт ключа.
+ * Установленный GramJS выбирает эту ветку разбора по длине строки (352 символа
+ * после префикса версии), поэтому менять расклад нельзя: строка перестанет
+ * читаться как IP-адрес.
+ */
+export function buildGramJsSessionString(
+  dcId: number,
+  serverAddress: string,
+  port: number,
+  authKey: Uint8Array,
+): string {
+  const isIPv6 = serverAddress.includes(':');
+  const addressBuf = isIPv6
+    ? Buffer.from(
+        serverAddress.split(':').flatMap((p) => {
+          const n = parseInt(p, 16);
+          return [(n >> 8) & 255, n & 255];
+        }),
+      )
+    : Buffer.from(serverAddress.split('.').map((p) => parseInt(p, 10)));
+
+  const dcBuf = Buffer.from([dcId]);
+  const portBuf = Buffer.alloc(2);
+  portBuf.writeInt16BE(port, 0);
+  const keyBuf = Buffer.from(authKey);
+
+  const result = Buffer.concat([dcBuf, addressBuf, portBuf, keyBuf.subarray(0, 256)]);
+  return '1' + result.toString('base64');
+}
+
+/**
  * Read a Telethon/GramJS .session SQLite file and return a StringSession.
  * Avoids gramjs-sqlitesession which is incompatible with newer GramJS versions.
  */
@@ -19,23 +52,11 @@ export function readSqliteSession(filePath: string): Promise<StringSession> {
           if (err2) return reject(err2);
           if (!row?.auth_key) return reject(new Error('Пустая сессия в SQLite файле'));
 
-          const isIPv6 = row.server_address.includes(':');
-          const addressBuf = isIPv6
-            ? Buffer.from(
-                row.server_address.split(':').flatMap((p) => {
-                  const n = parseInt(p, 16);
-                  return [(n >> 8) & 255, n & 255];
-                }),
-              )
-            : Buffer.from(row.server_address.split('.').map((p) => parseInt(p, 10)));
-
-          const dcBuf = Buffer.from([row.dc_id]);
-          const portBuf = Buffer.alloc(2);
-          portBuf.writeInt16BE(row.port, 0);
-          const keyBuf = Buffer.isBuffer(row.auth_key) ? row.auth_key : Buffer.from(row.auth_key);
-
-          const result = Buffer.concat([dcBuf, addressBuf, portBuf, keyBuf.subarray(0, 256)]);
-          resolve(new StringSession('1' + result.toString('base64')));
+          resolve(
+            new StringSession(
+              buildGramJsSessionString(row.dc_id, row.server_address, row.port, row.auth_key),
+            ),
+          );
         },
       );
     });
