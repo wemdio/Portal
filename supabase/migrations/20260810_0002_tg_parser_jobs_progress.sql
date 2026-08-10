@@ -18,6 +18,11 @@ comment on column public.tg_parser_jobs.progress_note is
 
 -- Список задач отдаётся этой функцией, а не прямым select: она не тянет тяжёлый
 -- result_users. Добавляем в неё поля прогресса, иначе интерфейс их не увидит.
+--
+-- Сначала drop: набор возвращаемых колонок меняется, а create or replace такого
+-- не допускает (ERROR 42P13, «Row type defined by OUT parameters is different»).
+drop function if exists public.tg_parser_jobs_list(int);
+
 create or replace function public.tg_parser_jobs_list(row_limit int default 50)
 returns table (
   id uuid,
@@ -56,3 +61,9 @@ as $$
   order by j.created_at desc
   limit row_limit;
 $$;
+
+-- Пересоздание сбрасывает выданные права. На боевой базе у функции были права
+-- на выполнение у postgres, anon, authenticated и service_role — возвращаем их
+-- явно, чтобы не зависеть от того, какой ролью прогоняются миграции.
+grant execute on function public.tg_parser_jobs_list(int)
+  to postgres, anon, authenticated, service_role;
