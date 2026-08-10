@@ -155,15 +155,47 @@ async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'p
   return { id: claimed.id as string, stage };
 }
 
+/**
+ * Фоновый обход каталога, запущенный в фоне, а не внутри итерации цикла.
+ *
+ * Раньше он шёл под `await` прямо в `pollOnce`, и цикл в него упирался: обход
+ * это живой поиск по Яндексу — до 250 ссылок выдачи плюс карточки всех новых
+ * организаций, то есть минуты. Пользовательская задача, пришедшая через
+ * секунду после начала обхода, столько же и ждала: realtime исправно будил
+ * цикл, а цикл был занят. 10.08.2026 это вылилось в две минуты ожидания на
+ * пустой очереди.
+ *
+ * Обход не отменяется на полпути: он помечает задание в очереди как взятое, и
+ * прерванное вернётся в работу само через YANDEXMAPS_CATALOG_DISCOVERY_STALE_MINUTES.
+ */
+let discoveryTask: Promise<void> | null = null;
+
+function startCatalogDiscovery(): void {
+  if (discoveryTask) return;
+  discoveryTask = runYandexMapsCatalogDiscoveryBatch()
+    .then(() => undefined)
+    .catch((error) => { log('warn', 'Catalog discovery batch failed', error); })
+    .finally(() => { discoveryTask = null; });
+}
+
 async function pollOnce(): Promise<boolean> {
   if (runningJobs.size >= MAX_CONCURRENCY) {
     await sleep(500);
     return true;
   }
   const job = await claimYandexMapsJob();
-  // Пользовательские задачи в приоритете; фоновый поиск новых организаций
-  // берётся за работу только когда очередь пуста.
-  if (!job) return runYandexMapsCatalogDiscoveryBatch();
+  // Пользовательские задачи в приоритете: новый обход не начинаем, пока хоть
+  // одна из них выполняется. Уже начатый при этом доживает свой круг — рвать
+  // его на полпути дороже, чем потерпеть одну лишнюю параллельную задачу.
+  //
+  // Возвращаем false, а не результат обхода: цикл уходит ждать realtime и
+  // проснётся на первой же пользовательской задаче. Плата — до 30 секунд
+  // (fallback цикла) простоя между кругами обхода; для механизма, который
+  // приносит сотни организаций в сутки, это ничто.
+  if (!job) {
+    if (runningJobs.size === 0) startCatalogDiscovery();
+    return false;
+  }
   const task = (async () => {
     if (job.stage === 'collect') {
       log('info', `Running YandexMaps collect-links job ${job.id}`);
