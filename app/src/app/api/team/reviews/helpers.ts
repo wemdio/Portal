@@ -2,7 +2,8 @@ import 'server-only';
 
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
-import { INTERNAL_ROLES, isInternalRole, isLead } from '@/lib/roles';
+import { INTERNAL_ROLES, isInternalRole } from '@/lib/roles';
+import { checkTeamAccess } from '@/lib/auth/teamAccess';
 import { logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
@@ -31,7 +32,6 @@ type JsonError = NextResponse<{ error: string }>;
 
 export type ReviewActor = {
   userId: string;
-  role: UserRole;
   canManage: boolean;
 };
 
@@ -104,32 +104,23 @@ export async function authenticateReviewRequest(
   if (!user) return { error: jsonError('Unauthorized', 401) };
   if (!supabaseAdmin) return { error: jsonError('Server misconfigured', 500) };
 
-  const { data, error } = await supabaseAdmin
-    .from('profiles')
-    .select('role, is_demo')
-    .eq('id', user.id)
-    .single();
-
-  if (error) {
-    if (error.code === 'PGRST116') return { error: jsonError('Forbidden', 403) };
+  const access = await checkTeamAccess(authedClient);
+  if (access.error !== null) {
     await logError(
       'team.reviews.auth.failed',
-      error,
+      access.error,
       {},
       logMeta(req, user.id),
     );
     return { error: jsonError('Failed to verify access', 500) };
   }
-
-  const role = (data?.role ?? null) as UserRole | null;
-  if (!isLead(role) || data?.is_demo === true) {
+  if (!access.allowed) {
     return { error: jsonError('Forbidden', 403) };
   }
 
   return {
     actor: {
       userId: user.id,
-      role: role as UserRole,
       canManage: true,
     },
   };

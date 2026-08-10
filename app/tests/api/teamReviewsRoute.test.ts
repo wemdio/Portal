@@ -3,12 +3,17 @@
 import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
 import { NextRequest } from 'next/server';
 
-const LEAD_ID = '00000000-0000-4000-8000-000000000001';
+const ALINA_ID = '33dec504-e6e0-4b0a-bc59-dcf570c6ecc9';
+const SERGEY_ID = '66873c8c-ae56-4ab2-afa5-5e77dcda391d';
+const LEAD_ID = SERGEY_ID;
 const EMPLOYEE_ID = '00000000-0000-4000-8000-000000000002';
 const OTHER_EMPLOYEE_ID = '00000000-0000-4000-8000-000000000003';
 const CLIENT_ID = '00000000-0000-4000-8000-000000000004';
 const DEMO_LEAD_ID = '00000000-0000-4000-8000-000000000005';
 const UNKNOWN_ROLE_ID = '00000000-0000-4000-8000-000000000006';
+const OTHER_LEAD_ID = '00000000-0000-4000-8000-000000000007';
+const OTHER_DIRECTOR_ID = '00000000-0000-4000-8000-000000000008';
+const OTHER_ADMIN_ID = '00000000-0000-4000-8000-000000000009';
 const REVIEW_ID = '00000000-0000-4000-8000-000000000010';
 const SCHEDULED_REVIEW_ID = '00000000-0000-4000-8000-000000000012';
 const CANDIDATE_REVIEW_ID = '00000000-0000-4000-8000-000000000013';
@@ -19,6 +24,11 @@ const CANDIDATE_REVIEW_UPDATED_AT = '2026-08-01T12:00:00.000Z';
 
 let mockMainDb: MockSupabaseClient = createMockSupabase();
 let mockCurrentUser: { id: string } | null = { id: LEAD_ID };
+const PRIVATE_TEAM_USERS = new Set([ALINA_ID, SERGEY_ID]);
+const mockTeamAccessCapability = jest.fn(async (_functionName: string) => ({
+  data: Boolean(mockCurrentUser && PRIVATE_TEAM_USERS.has(mockCurrentUser.id)),
+  error: null as { message: string } | null,
+}));
 const mockLogAudit = jest.fn(async (..._args: unknown[]) => {});
 const mockLogError = jest.fn(async (..._args: unknown[]) => {});
 
@@ -34,6 +44,7 @@ jest.mock('@/lib/supabaseRouteClient', () => ({
     auth: {
       getUser: jest.fn(async () => ({ data: { user: mockCurrentUser } })),
     },
+    rpc: (functionName: string) => mockTeamAccessCapability(functionName),
   }),
 }));
 
@@ -158,9 +169,30 @@ function request(
   });
 }
 
+function setCurrentUser(userId: string | null) {
+  mockCurrentUser = userId ? { id: userId } : null;
+}
+
+async function addProfileForAccessCheck(
+  id: string,
+  role: string,
+  options: { isDemo?: boolean } = {},
+) {
+  await mockMainDb.from('profiles').insert(
+    profile(id, role, `Access ${role}`, `${id}@example.com`, null, options.isDemo ?? false),
+  );
+  mockMainDb.inserts.length = 0;
+  mockMainDb.mutations.length = 0;
+}
+
 beforeEach(() => {
   jest.resetModules();
   mockCurrentUser = { id: LEAD_ID };
+  mockTeamAccessCapability.mockClear();
+  mockTeamAccessCapability.mockImplementation(async (_functionName: string) => ({
+    data: Boolean(mockCurrentUser && PRIVATE_TEAM_USERS.has(mockCurrentUser.id)),
+    error: null,
+  }));
   mockLogAudit.mockClear();
   mockLogError.mockClear();
   seedDatabase();
@@ -174,6 +206,7 @@ describe('GET /api/team/reviews', () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
+    expect(mockTeamAccessCapability).toHaveBeenCalledWith('can_access_team');
     expect(body).toEqual(
       expect.objectContaining({
         canManage: true,
@@ -311,13 +344,91 @@ describe('GET /api/team/reviews', () => {
     expect(body.reviews).toHaveLength(1001);
     expect(ranges).toEqual([[0, 999], [1000, 1999]]);
   });
-  it('denies non-leadership employees instead of exposing their own reviews', async () => {
+  it('gives Alina full read/create/update access through the canonical capability', async () => {
+    setCurrentUser(ALINA_ID);
+    const reviewsRoute = await import('@/app/api/team/reviews/route');
+    const reviewRoute = await import('@/app/api/team/reviews/[id]/route');
+
+    const getResponse = await reviewsRoute.GET(request('/api/team/reviews'));
+    const postResponse = await reviewsRoute.POST(request('/api/team/reviews', {
+      method: 'POST',
+      body: {
+        reviewDate: '2026-08-20',
+        candidateName: 'Private candidate',
+        reason: 'Private review',
+      },
+    }));
+    const patchResponse = await reviewRoute.PATCH(
+      request(`/api/team/reviews/${REVIEW_ID}`, {
+        method: 'PATCH',
+        body: { expectedUpdatedAt: REVIEW_UPDATED_AT, reason: 'Updated privately' },
+      }),
+      { params: Promise.resolve({ id: REVIEW_ID }) },
+    );
+
+    expect([getResponse.status, postResponse.status, patchResponse.status]).toEqual([200, 201, 200]);
+    expect(mockTeamAccessCapability.mock.calls).toEqual([
+      ['can_access_team'],
+      ['can_access_team'],
+      ['can_access_team'],
+    ]);
+  });
+
+  it.each([
+    ['lead', OTHER_LEAD_ID],
+    ['director', OTHER_DIRECTOR_ID],
+    ['admin', OTHER_ADMIN_ID],
+  ])('denies an unapproved %s before service-role data access', async (_label, userId) => {
+    await addProfileForAccessCheck(userId, _label);
+    setCurrentUser(userId);
+    const { GET } = await import('@/app/api/team/reviews/route');
+
+    const response = await GET(request('/api/team/reviews'));
+
+    expect(response.status).toBe(403);
+    expect(mockTeamAccessCapability).toHaveBeenCalledWith('can_access_team');
+    expect(mockMainDb.selects).toHaveLength(0);
+  });
+
+  it('denies an unapproved admin on both review write routes before service-role access', async () => {
+    await addProfileForAccessCheck(OTHER_ADMIN_ID, 'admin');
+    setCurrentUser(OTHER_ADMIN_ID);
+    const reviewsRoute = await import('@/app/api/team/reviews/route');
+    const reviewRoute = await import('@/app/api/team/reviews/[id]/route');
+
+    const postResponse = await reviewsRoute.POST(request('/api/team/reviews', {
+      method: 'POST',
+      body: {
+        reviewDate: '2026-08-20',
+        candidateName: 'Must stay private',
+      },
+    }));
+    const patchResponse = await reviewRoute.PATCH(
+      request(`/api/team/reviews/${REVIEW_ID}`, {
+        method: 'PATCH',
+        body: { expectedUpdatedAt: REVIEW_UPDATED_AT, reason: 'Forbidden update' },
+      }),
+      { params: Promise.resolve({ id: REVIEW_ID }) },
+    );
+
+    expect([postResponse.status, patchResponse.status]).toEqual([403, 403]);
+    expect(mockTeamAccessCapability.mock.calls).toEqual([
+      ['can_access_team'],
+      ['can_access_team'],
+    ]);
+    expect(mockMainDb.selects).toHaveLength(0);
+    expect(mockMainDb.mutations).toHaveLength(0);
+  });
+
+  it('denies unapproved staff before service-role data access', async () => {
     mockCurrentUser = { id: EMPLOYEE_ID };
     const { GET } = await import('@/app/api/team/reviews/route');
 
     const response = await GET(request('/api/team/reviews'));
 
     expect(response.status).toBe(403);
+    expect(mockTeamAccessCapability).toHaveBeenCalledWith('can_access_team');
+    expect(mockMainDb.selects).toHaveLength(0);
   });
 
   it('rejects a demo account even if its stored role is leadership', async () => {
@@ -327,6 +438,8 @@ describe('GET /api/team/reviews', () => {
     const response = await GET(request('/api/team/reviews'));
 
     expect(response.status).toBe(403);
+    expect(mockTeamAccessCapability).toHaveBeenCalledWith('can_access_team');
+    expect(mockMainDb.selects).toHaveLength(0);
   });
 
   it('rejects profiles with an unknown non-client role', async () => {
@@ -336,6 +449,8 @@ describe('GET /api/team/reviews', () => {
     const response = await GET(request('/api/team/reviews'));
 
     expect(response.status).toBe(403);
+    expect(mockTeamAccessCapability).toHaveBeenCalledWith('can_access_team');
+    expect(mockMainDb.selects).toHaveLength(0);
   });
 
   it('rejects clients and anonymous callers', async () => {
@@ -344,12 +459,27 @@ describe('GET /api/team/reviews', () => {
 
     const clientResponse = await GET(request('/api/team/reviews'));
     expect(clientResponse.status).toBe(403);
+    expect(mockTeamAccessCapability).toHaveBeenCalledWith('can_access_team');
+    expect(mockMainDb.selects).toHaveLength(0);
 
     mockCurrentUser = null;
     const anonymousResponse = await GET(
       request('/api/team/reviews', { authenticated: false }),
     );
     expect(anonymousResponse.status).toBe(401);
+  });
+
+  it('fails closed before service-role data access when the capability RPC fails', async () => {
+    mockTeamAccessCapability.mockResolvedValueOnce({
+      data: null,
+      error: { message: 'private Team capability unavailable' },
+    });
+    const { GET } = await import('@/app/api/team/reviews/route');
+
+    const response = await GET(request('/api/team/reviews'));
+
+    expect(response.status).toBe(500);
+    expect(mockMainDb.selects).toHaveLength(0);
   });
 });
 

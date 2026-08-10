@@ -6,6 +6,7 @@ type AuthCallback = (event: string, session: Session | null) => void;
 
 const mockAuthFetch = jest.fn();
 const mockFrom = jest.fn();
+const mockRpc = jest.fn();
 let mockAuthCallback: AuthCallback | null = null;
 
 jest.mock('@/lib/authFetch', () => ({
@@ -15,6 +16,7 @@ jest.mock('@/lib/authFetch', () => ({
 jest.mock('@/lib/supabaseClient', () => ({
   supabase: {
     from: (...args: unknown[]) => mockFrom(...args),
+    rpc: (...args: unknown[]) => mockRpc(...args),
     auth: {
       onAuthStateChange: (callback: AuthCallback) => {
         mockAuthCallback = callback;
@@ -38,10 +40,26 @@ function session(id: string, email: string): Session {
 }
 
 function ContextProbe() {
-  const { userId, userRole, isHr, userFullName, locale } = useUser();
+  const {
+    userId,
+    userRole,
+    isHr,
+    canAccessTeamPrivate,
+    userEmail,
+    userFullName,
+    locale,
+  } = useUser();
   return (
     <output aria-label="user-context">
-      {JSON.stringify({ userId, userRole, isHr, userFullName, locale })}
+      {JSON.stringify({
+        userId,
+        userRole,
+        isHr,
+        canAccessTeamPrivate,
+        userEmail,
+        userFullName,
+        locale,
+      })}
     </output>
   );
 }
@@ -51,6 +69,8 @@ function contextValue() {
     userId: string | null;
     userRole: string | null;
     isHr: boolean;
+    canAccessTeamPrivate: boolean;
+    userEmail: string | null;
     userFullName: string | null;
     locale: string;
   };
@@ -64,6 +84,8 @@ describe('<UserProvider /> HR capability lifecycle', () => {
     jest.clearAllMocks();
     jest.spyOn(console, 'error').mockImplementation(() => undefined);
     mockAuthCallback = null;
+    mockRpc.mockReset();
+    mockRpc.mockResolvedValue({ data: false, error: null });
     Object.keys(profiles).forEach((key) => delete profiles[key]);
     capabilityRequests.clear();
     mockAuthFetch.mockResolvedValue({
@@ -121,6 +143,8 @@ describe('<UserProvider /> HR capability lifecycle', () => {
       userId: 'user-a',
       userRole: 'admin',
       isHr: false,
+      canAccessTeamPrivate: false,
+      userEmail: 'alina@example.com',
       userFullName: 'Алина Ким',
       locale: 'ru',
     });
@@ -200,5 +224,353 @@ describe('<UserProvider /> HR capability lifecycle', () => {
       await thirdCapability.promise;
     });
     expect(contextValue().isHr).toBe(false);
+  });
+
+  it('loads private-team access from the canonical RPC independently from the HR flag', async () => {
+    profiles['user-a'] = {
+      role: 'technician',
+      full_name: 'Алина Ким',
+      avatar_url: null,
+      locale: 'ru',
+    };
+    const hrCapability = deferred<{ data: unknown; error: unknown }>();
+    const teamCapability = deferred<{ data: unknown; error: unknown }>();
+    capabilityRequests.set('user-a', hrCapability);
+    mockRpc.mockImplementationOnce((functionName: string) => {
+      if (functionName !== 'can_access_team') {
+        throw new Error(`Unexpected RPC: ${functionName}`);
+      }
+      return teamCapability.promise;
+    });
+    render(<UserProvider><ContextProbe /></UserProvider>);
+
+    await act(async () => {
+      mockAuthCallback?.('SIGNED_IN', session('user-a', 'alina@example.com'));
+    });
+    await waitFor(() => expect(contextValue()).toMatchObject({
+      userId: 'user-a',
+      userRole: 'technician',
+      isHr: false,
+      canAccessTeamPrivate: false,
+    }));
+
+    await act(async () => {
+      teamCapability.resolve({ data: true, error: null });
+      await teamCapability.promise;
+    });
+
+    await waitFor(() => expect(contextValue()).toMatchObject({
+      isHr: false,
+      canAccessTeamPrivate: true,
+    }));
+    expect(mockRpc).toHaveBeenCalledWith('can_access_team');
+
+    await act(async () => {
+      hrCapability.resolve({ data: { is_hr: false }, error: null });
+      await hrCapability.promise;
+    });
+    expect(contextValue()).toMatchObject({ isHr: false, canAccessTeamPrivate: true });
+  });
+
+  it('keeps profile identity when the independent private-team capability RPC fails', async () => {
+    profiles['user-a'] = {
+      role: 'admin',
+      full_name: 'Сергей Лазуткин',
+      avatar_url: null,
+      locale: 'ru',
+    };
+    const hrCapability = deferred<{ data: unknown; error: unknown }>();
+    capabilityRequests.set('user-a', hrCapability);
+    mockRpc.mockResolvedValueOnce({ data: null, error: { message: 'RPC unavailable' } });
+    render(<UserProvider><ContextProbe /></UserProvider>);
+
+    await act(async () => {
+      mockAuthCallback?.('SIGNED_IN', session('user-a', 'vaver1954@mail.ru'));
+    });
+    await waitFor(() => expect(contextValue()).toMatchObject({
+      userId: 'user-a',
+      userRole: 'admin',
+      userEmail: 'vaver1954@mail.ru',
+      userFullName: 'Сергей Лазуткин',
+      locale: 'ru',
+      canAccessTeamPrivate: false,
+    }));
+
+    await act(async () => {
+      hrCapability.resolve({ data: { is_hr: false }, error: null });
+      await hrCapability.promise;
+    });
+
+    expect(contextValue()).toMatchObject({
+      userRole: 'admin',
+      userEmail: 'vaver1954@mail.ru',
+      userFullName: 'Сергей Лазуткин',
+      canAccessTeamPrivate: false,
+    });
+    expect(console.error).toHaveBeenCalledWith(
+      '[UserProvider] Failed to load private Team capability:',
+      expect.anything(),
+    );
+  });
+
+  it('resets private-team access on session change and ignores stale RPC responses', async () => {
+    profiles['user-a'] = {
+      role: 'technician',
+      full_name: 'Алина Ким',
+      avatar_url: null,
+      locale: 'ru',
+    };
+    profiles['user-b'] = {
+      role: 'admin',
+      full_name: 'Другой администратор',
+      avatar_url: null,
+      locale: 'ru',
+    };
+    profiles['user-c'] = {
+      role: 'manager',
+      full_name: 'Текущий пользователь',
+      avatar_url: null,
+      locale: 'en',
+    };
+
+    const firstHrCapability = deferred<{ data: unknown; error: unknown }>();
+    const secondHrCapability = deferred<{ data: unknown; error: unknown }>();
+    const thirdHrCapability = deferred<{ data: unknown; error: unknown }>();
+    capabilityRequests.set('user-a', firstHrCapability);
+    capabilityRequests.set('user-b', secondHrCapability);
+    capabilityRequests.set('user-c', thirdHrCapability);
+    firstHrCapability.resolve({ data: { is_hr: false }, error: null });
+    secondHrCapability.resolve({ data: { is_hr: false }, error: null });
+    thirdHrCapability.resolve({ data: { is_hr: false }, error: null });
+
+    const firstTeamCapability = deferred<{ data: unknown; error: unknown }>();
+    const secondTeamCapability = deferred<{ data: unknown; error: unknown }>();
+    const thirdTeamCapability = deferred<{ data: unknown; error: unknown }>();
+    mockRpc
+      .mockImplementationOnce(() => firstTeamCapability.promise)
+      .mockImplementationOnce(() => secondTeamCapability.promise)
+      .mockImplementationOnce(() => thirdTeamCapability.promise);
+
+    render(<UserProvider><ContextProbe /></UserProvider>);
+
+    await act(async () => {
+      mockAuthCallback?.('SIGNED_IN', session('user-a', 'alina@example.com'));
+    });
+    await waitFor(() => expect(contextValue().userRole).toBe('technician'));
+
+    await act(async () => {
+      firstTeamCapability.resolve({ data: true, error: null });
+      await firstTeamCapability.promise;
+    });
+    await waitFor(() => expect(contextValue().canAccessTeamPrivate).toBe(true));
+
+    act(() => {
+      mockAuthCallback?.('SIGNED_IN', session('user-b', 'other-admin@example.com'));
+    });
+    expect(contextValue()).toMatchObject({
+      userId: 'user-b',
+      userEmail: 'other-admin@example.com',
+      canAccessTeamPrivate: false,
+    });
+    await waitFor(() => expect(contextValue().userRole).toBe('admin'));
+
+    act(() => {
+      mockAuthCallback?.('SIGNED_IN', session('user-c', 'current@example.com'));
+    });
+    expect(contextValue()).toMatchObject({
+      userId: 'user-c',
+      userEmail: 'current@example.com',
+      canAccessTeamPrivate: false,
+    });
+    await waitFor(() => expect(contextValue().userRole).toBe('manager'));
+
+    await act(async () => {
+      secondTeamCapability.resolve({ data: true, error: null });
+      await secondTeamCapability.promise;
+    });
+    expect(contextValue()).toMatchObject({
+      userId: 'user-c',
+      canAccessTeamPrivate: false,
+    });
+
+    await act(async () => {
+      thirdTeamCapability.resolve({ data: false, error: null });
+      await thirdTeamCapability.promise;
+    });
+    expect(contextValue()).toMatchObject({
+      userId: 'user-c',
+      canAccessTeamPrivate: false,
+    });
+
+    act(() => {
+      mockAuthCallback?.('SIGNED_OUT', null);
+    });
+    expect(contextValue()).toMatchObject({
+      userId: null,
+      userEmail: null,
+      canAccessTeamPrivate: false,
+    });
+  });
+
+  it.each(['focus', 'visibilitychange'] as const)(
+    'revalidates private-team access without destructive flicker when the current session receives %s',
+    async (eventName) => {
+      profiles['user-a'] = {
+        role: 'technician',
+        full_name: 'Алина Ким',
+        avatar_url: null,
+        locale: 'ru',
+      };
+      const hrCapability = deferred<{ data: unknown; error: unknown }>();
+      capabilityRequests.set('user-a', hrCapability);
+      hrCapability.resolve({ data: { is_hr: false }, error: null });
+
+      const initialTeamCapability = deferred<{ data: unknown; error: unknown }>();
+      const refreshedTeamCapability = deferred<{ data: unknown; error: unknown }>();
+      mockRpc
+        .mockImplementationOnce(() => initialTeamCapability.promise)
+        .mockImplementationOnce(() => refreshedTeamCapability.promise);
+
+      const view = render(<UserProvider><ContextProbe /></UserProvider>);
+      await act(async () => {
+        mockAuthCallback?.('SIGNED_IN', session('user-a', 'alina@example.com'));
+      });
+      await waitFor(() => expect(contextValue().userRole).toBe('technician'));
+
+      await act(async () => {
+        initialTeamCapability.resolve({ data: true, error: null });
+        await initialTeamCapability.promise;
+      });
+      await waitFor(() => expect(contextValue().canAccessTeamPrivate).toBe(true));
+
+      let visibilityState: DocumentVisibilityState = 'visible';
+      const visibilitySpy = jest
+        .spyOn(document, 'visibilityState', 'get')
+        .mockImplementation(() => visibilityState);
+
+      if (eventName === 'visibilitychange') {
+        visibilityState = 'hidden';
+        act(() => document.dispatchEvent(new Event('visibilitychange')));
+        expect(mockRpc).toHaveBeenCalledTimes(1);
+        expect(contextValue().canAccessTeamPrivate).toBe(true);
+        visibilityState = 'visible';
+      }
+
+      act(() => {
+        if (eventName === 'focus') window.dispatchEvent(new Event('focus'));
+        else document.dispatchEvent(new Event('visibilitychange'));
+      });
+
+      expect(contextValue().canAccessTeamPrivate).toBe(true);
+      expect(mockRpc).toHaveBeenCalledTimes(2);
+      expect(mockRpc).toHaveBeenLastCalledWith('can_access_team');
+
+      await act(async () => {
+        refreshedTeamCapability.resolve({ data: false, error: null });
+        await refreshedTeamCapability.promise;
+      });
+      expect(contextValue().canAccessTeamPrivate).toBe(false);
+
+      view.unmount();
+      act(() => {
+        if (eventName === 'focus') window.dispatchEvent(new Event('focus'));
+        else document.dispatchEvent(new Event('visibilitychange'));
+      });
+      expect(mockRpc).toHaveBeenCalledTimes(2);
+      visibilitySpy.mockRestore();
+    },
+  );
+
+  it('ignores an older overlapping private-team refresh for the same session', async () => {
+    profiles['user-a'] = {
+      role: 'technician',
+      full_name: 'Алина Ким',
+      avatar_url: null,
+      locale: 'ru',
+    };
+    const hrCapability = deferred<{ data: unknown; error: unknown }>();
+    capabilityRequests.set('user-a', hrCapability);
+    hrCapability.resolve({ data: { is_hr: false }, error: null });
+
+    const initialTeamCapability = deferred<{ data: unknown; error: unknown }>();
+    const olderRefresh = deferred<{ data: unknown; error: unknown }>();
+    const latestRefresh = deferred<{ data: unknown; error: unknown }>();
+    mockRpc
+      .mockImplementationOnce(() => initialTeamCapability.promise)
+      .mockImplementationOnce(() => olderRefresh.promise)
+      .mockImplementationOnce(() => latestRefresh.promise);
+
+    render(<UserProvider><ContextProbe /></UserProvider>);
+    await act(async () => {
+      mockAuthCallback?.('SIGNED_IN', session('user-a', 'alina@example.com'));
+    });
+    await waitFor(() => expect(contextValue().userRole).toBe('technician'));
+
+    await act(async () => {
+      initialTeamCapability.resolve({ data: true, error: null });
+      await initialTeamCapability.promise;
+    });
+    await waitFor(() => expect(contextValue().canAccessTeamPrivate).toBe(true));
+
+    act(() => window.dispatchEvent(new Event('focus')));
+    act(() => window.dispatchEvent(new Event('focus')));
+    expect(mockRpc).toHaveBeenCalledTimes(3);
+    expect(contextValue().canAccessTeamPrivate).toBe(true);
+
+    await act(async () => {
+      olderRefresh.resolve({ data: false, error: null });
+      await olderRefresh.promise;
+    });
+    expect(contextValue().canAccessTeamPrivate).toBe(true);
+
+    await act(async () => {
+      latestRefresh.resolve({ data: true, error: null });
+      await latestRefresh.promise;
+    });
+    await waitFor(() => expect(contextValue().canAccessTeamPrivate).toBe(true));
+  });
+
+  it('revokes private-team access when same-session revalidation fails', async () => {
+    profiles['user-a'] = {
+      role: 'technician',
+      full_name: 'Алина Ким',
+      avatar_url: null,
+      locale: 'ru',
+    };
+    const hrCapability = deferred<{ data: unknown; error: unknown }>();
+    capabilityRequests.set('user-a', hrCapability);
+    hrCapability.resolve({ data: { is_hr: false }, error: null });
+
+    const initialTeamCapability = deferred<{ data: unknown; error: unknown }>();
+    const failedRefresh = deferred<{ data: unknown; error: unknown }>();
+    mockRpc
+      .mockImplementationOnce(() => initialTeamCapability.promise)
+      .mockImplementationOnce(() => failedRefresh.promise);
+
+    render(<UserProvider><ContextProbe /></UserProvider>);
+    await act(async () => {
+      mockAuthCallback?.('SIGNED_IN', session('user-a', 'alina@example.com'));
+    });
+    await waitFor(() => expect(contextValue().userRole).toBe('technician'));
+
+    await act(async () => {
+      initialTeamCapability.resolve({ data: true, error: null });
+      await initialTeamCapability.promise;
+    });
+    await waitFor(() => expect(contextValue().canAccessTeamPrivate).toBe(true));
+
+    act(() => window.dispatchEvent(new Event('focus')));
+    expect(contextValue().canAccessTeamPrivate).toBe(true);
+
+    await act(async () => {
+      failedRefresh.resolve({ data: null, error: { message: 'RPC unavailable' } });
+      await failedRefresh.promise;
+    });
+
+    await waitFor(() => expect(contextValue().canAccessTeamPrivate).toBe(false));
+    expect(console.error).toHaveBeenCalledWith(
+      '[UserProvider] Failed to load private Team capability:',
+      expect.anything(),
+    );
   });
 });

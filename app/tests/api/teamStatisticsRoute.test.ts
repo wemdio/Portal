@@ -4,8 +4,23 @@ import type { NextRequest } from 'next/server';
 import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
 
 let mockMainDb: MockSupabaseClient | null = null;
+const ALINA_ID = '33dec504-e6e0-4b0a-bc59-dcf570c6ecc9';
+const SERGEY_ID = '66873c8c-ae56-4ab2-afa5-5e77dcda391d';
+const OTHER_LEAD_ID = '00000000-0000-4000-8000-000000000001';
+const OTHER_DIRECTOR_ID = '00000000-0000-4000-8000-000000000002';
+const OTHER_ADMIN_ID = '00000000-0000-4000-8000-000000000003';
+const STAFF_ID = '00000000-0000-4000-8000-000000000004';
+const CLIENT_ID = '00000000-0000-4000-8000-000000000005';
+const DEMO_ID = '00000000-0000-4000-8000-000000000006';
+const PRIVATE_TEAM_USERS = new Set([ALINA_ID, SERGEY_ID]);
+
+let mockCurrentUser: { id: string } | null = { id: SERGEY_ID };
 const mockGetUser = jest.fn();
 const mockIsLeadershipUser = jest.fn();
+const mockTeamAccessCapability = jest.fn(async (_functionName: string) => ({
+  data: Boolean(mockCurrentUser && PRIVATE_TEAM_USERS.has(mockCurrentUser.id)),
+  error: null as { message: string } | null,
+}));
 
 jest.mock('@/lib/auth/internalGuard', () => ({
   isInternalUser: () => {
@@ -18,6 +33,7 @@ jest.mock('@/lib/supabaseRouteClient', () => ({
   getBearerToken: jest.requireActual('@/lib/supabaseRouteClient').getBearerToken,
   createAuthedSupabaseClient: jest.fn(() => ({
     auth: { getUser: mockGetUser },
+    rpc: (functionName: string) => mockTeamAccessCapability(functionName),
   })),
 }));
 
@@ -33,16 +49,29 @@ function makeReq(query: string, auth = 'Bearer test-token'): NextRequest {
   }) as unknown as NextRequest;
 }
 
+function setCurrentUser(userId: string | null) {
+  mockCurrentUser = userId ? { id: userId } : null;
+  mockGetUser.mockResolvedValue({ data: { user: mockCurrentUser }, error: null });
+}
+
 describe('GET /api/team/statistics', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2026-07-29T12:00:00.000Z'));
     jest.resetModules();
+    mockCurrentUser = { id: SERGEY_ID };
     mockGetUser.mockReset();
     mockIsLeadershipUser.mockReset();
-    mockIsLeadershipUser.mockResolvedValue(true);
+    mockIsLeadershipUser.mockImplementation(
+      async (_client: unknown, userId: string) => PRIVATE_TEAM_USERS.has(userId),
+    );
+    mockTeamAccessCapability.mockClear();
+    mockTeamAccessCapability.mockImplementation(async (_functionName: string) => ({
+      data: Boolean(mockCurrentUser && PRIVATE_TEAM_USERS.has(mockCurrentUser.id)),
+      error: null,
+    }));
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'lead-a' } },
+      data: { user: mockCurrentUser },
       error: null,
     });
     mockMainDb = createMockSupabase({
@@ -94,7 +123,8 @@ describe('GET /api/team/statistics', () => {
     const res = await GET(makeReq('period=month&anchor=2026-07-29'));
 
     expect(res.status).toBe(200);
-    expect(mockIsLeadershipUser).toHaveBeenCalledWith(expect.anything(), 'lead-a');
+    expect(mockTeamAccessCapability).toHaveBeenCalledWith('can_access_team');
+    expect(mockIsLeadershipUser).not.toHaveBeenCalled();
     const body = await res.json();
     expect(body).toEqual({
       period: {
@@ -303,14 +333,51 @@ describe('GET /api/team/statistics', () => {
     expect((await GET(makeReq('period=month&anchor=2026-07-29'))).status).toBe(401);
   });
 
-  it('denies callers without leadership access before the admin history read', async () => {
-    mockIsLeadershipUser.mockResolvedValueOnce(false);
+  it.each([ALINA_ID, SERGEY_ID])(
+    'allows an explicitly approved private-Team user %s',
+    async (userId) => {
+      setCurrentUser(userId);
+      const { GET } = await import('@/app/api/team/statistics/route');
+
+      const res = await GET(makeReq('period=month&anchor=2026-07-29'));
+
+      expect(res.status).toBe(200);
+      expect(mockTeamAccessCapability).toHaveBeenCalledWith('can_access_team');
+      expect(mockIsLeadershipUser).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['lead', OTHER_LEAD_ID],
+    ['director', OTHER_DIRECTOR_ID],
+    ['admin', OTHER_ADMIN_ID],
+    ['staff', STAFF_ID],
+    ['client', CLIENT_ID],
+    ['demo', DEMO_ID],
+  ])('denies an unapproved %s before the admin history read', async (_label, userId) => {
+    setCurrentUser(userId);
     const { GET } = await import('@/app/api/team/statistics/route');
+
     const res = await GET(makeReq('period=month&anchor=2026-07-29'));
 
     expect(res.status).toBe(403);
+    expect(mockTeamAccessCapability).toHaveBeenCalledWith('can_access_team');
     expect(mockMainDb!.selects).toHaveLength(0);
   });
+
+  it('fails closed before the admin history read when the capability RPC fails', async () => {
+    mockTeamAccessCapability.mockResolvedValueOnce({
+      data: null,
+      error: { message: 'private Team capability unavailable' },
+    });
+    const { GET } = await import('@/app/api/team/statistics/route');
+
+    const res = await GET(makeReq('period=month&anchor=2026-07-29'));
+
+    expect(res.status).toBe(500);
+    expect(mockMainDb!.selects).toHaveLength(0);
+  });
+
   it('surfaces database failures instead of returning misleading empty statistics', async () => {
     mockMainDb = createMockSupabase({
       tables: { team_project_history: mockMainDb!.getRows('team_project_history') },

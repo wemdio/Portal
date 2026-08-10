@@ -13,6 +13,7 @@ interface UserContextValue {
   userId: string | null;
   userRole: UserRole | null;
   isHr: boolean;
+  canAccessTeamPrivate: boolean;
   userEmail: string | null;
   userFullName: string | null;
   userAvatarUrl: string | null;
@@ -46,6 +47,7 @@ export function UserProvider({
   const [userId, setUserId] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [isHr, setIsHr] = useState(false);
+  const [canAccessTeamPrivate, setCanAccessTeamPrivate] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userFullName, setUserFullName] = useState<string | null>(null);
   const [userAvatarUrl, setUserAvatarUrl] = useState<string | null>(null);
@@ -60,19 +62,52 @@ export function UserProvider({
   const localeUserIdRef = useRef<string | null>(null);
   const sessionRequestSequenceRef = useRef(0);
   const sessionUserIdRef = useRef<string | null>(null);
+  const teamCapabilityRequestSequenceRef = useRef(0);
 
   useEffect(() => {
     let isMounted = true;
+
+    const refreshTeamPrivateAccess = async (
+      expectedUserId: string,
+      expectedSessionRequestId: number,
+    ) => {
+      if (
+        !isMounted
+        || sessionUserIdRef.current !== expectedUserId
+        || sessionRequestSequenceRef.current !== expectedSessionRequestId
+      ) return;
+
+      const capabilityRequestId = ++teamCapabilityRequestSequenceRef.current;
+
+      const isCurrentCapabilityRequest = () => (
+        isMounted
+        && capabilityRequestId === teamCapabilityRequestSequenceRef.current
+        && sessionUserIdRef.current === expectedUserId
+        && sessionRequestSequenceRef.current === expectedSessionRequestId
+      );
+
+      try {
+        const { data, error } = await supabase.rpc('can_access_team');
+        if (error) throw error;
+        if (isCurrentCapabilityRequest()) setCanAccessTeamPrivate(data === true);
+      } catch (error) {
+        if (!isCurrentCapabilityRequest()) return;
+        console.error('[UserProvider] Failed to load private Team capability:', error);
+        setCanAccessTeamPrivate(false);
+      }
+    };
 
     const applySession = async (session: Session | null) => {
       const requestId = ++sessionRequestSequenceRef.current;
       if (!isMounted) return;
       if (!session) {
+        ++teamCapabilityRequestSequenceRef.current;
         sessionUserIdRef.current = null;
         setUserId(null);
         setUserEmail(null);
         setUserRole(null);
         setIsHr(false);
+        setCanAccessTeamPrivate(false);
         setUserFullName(null);
         setUserAvatarUrl(null);
         setNavTabVisibility({});
@@ -94,7 +129,11 @@ export function UserProvider({
       sessionUserIdRef.current = sessionUserId;
       setUserId(sessionUserId);
       setUserEmail(session.user.email ?? null);
-      if (userChanged) setIsHr(false);
+      if (userChanged) {
+        ++teamCapabilityRequestSequenceRef.current;
+        setIsHr(false);
+        setCanAccessTeamPrivate(false);
+      }
 
       try {
         const [profile, navRows] = await Promise.all([
@@ -149,6 +188,8 @@ export function UserProvider({
             if (isCurrentSession()) setIsHr(false);
           }
         })();
+
+        void refreshTeamPrivateAccess(sessionUserId, requestId);
       } catch (err) {
         // If Supabase tables/RLS are misconfigured, we must not crash the whole app.
         // Degrade gracefully: keep the user logged in, but hide gated tabs/values.
@@ -156,6 +197,7 @@ export function UserProvider({
         if (!isCurrentSession()) return;
         setUserRole(null);
         setIsHr(false);
+        setCanAccessTeamPrivate(false);
         setUserFullName(null);
         setUserAvatarUrl(null);
         setNavTabVisibility({});
@@ -168,8 +210,27 @@ export function UserProvider({
       void applySession(session);
     });
 
+    const refreshCurrentTeamPrivateAccess = () => {
+      const currentUserId = sessionUserIdRef.current;
+      if (!currentUserId) {
+        ++teamCapabilityRequestSequenceRef.current;
+        setCanAccessTeamPrivate(false);
+        return;
+      }
+      void refreshTeamPrivateAccess(currentUserId, sessionRequestSequenceRef.current);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') refreshCurrentTeamPrivateAccess();
+    };
+
+    window.addEventListener('focus', refreshCurrentTeamPrivateAccess);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
     return () => {
       isMounted = false;
+      window.removeEventListener('focus', refreshCurrentTeamPrivateAccess);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       subscription?.unsubscribe();
     };
   }, [initialLocale]);
@@ -264,6 +325,7 @@ export function UserProvider({
     userId,
     userRole,
     isHr,
+    canAccessTeamPrivate,
     userEmail,
     userFullName,
     userAvatarUrl,
@@ -277,7 +339,7 @@ export function UserProvider({
     handleSignOut,
     setLocale,
     refreshNotifications,
-  }), [userId, userRole, isHr, userEmail, userFullName, userAvatarUrl, navTabVisibility, visibleTools, badges, unreadNotifications, locale, localeSaving, handleAvatarError, handleSignOut, setLocale, refreshNotifications]);
+  }), [userId, userRole, isHr, canAccessTeamPrivate, userEmail, userFullName, userAvatarUrl, navTabVisibility, visibleTools, badges, unreadNotifications, locale, localeSaving, handleAvatarError, handleSignOut, setLocale, refreshNotifications]);
 
   return <UserContext.Provider value={value}>{children}</UserContext.Provider>;
 }
