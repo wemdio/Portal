@@ -3,6 +3,7 @@ import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { createGramClient } from '@/lib/tgOutreach/gramClient';
 import { downloadSessionToTemp } from '@/lib/tgOutreach/campaignLoop';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { validateProfile } from '@/lib/tgOutreach/profile/validateProfile';
 import { applyProfile, describeTelegramError } from '@/lib/tgOutreach/profile/applyProfile';
 import { readProfile } from '@/lib/tgOutreach/profile/readProfile';
@@ -61,15 +62,22 @@ async function loadAccountForProfile(
  * без успешной конверсии SQLite в StringSession, `session_data` пустой, а
  * `session_file_path` заполнен. Без функции скачивания createGramClient падает
  * ещё до подключения — «Нет session_data или session_file_path».
+ *
+ * Скачивать нужно служебным ключом, а не пользовательским: бакет с сессиями
+ * приватный, и обычному пользователю хранилище отвечает «Object not found» —
+ * ту же фразу, что и на действительно отсутствующий файл. 10.08.2026 из-за
+ * этого чтение профиля падало на всех аккаунтах разом с сообщением про прокси.
  */
 async function connectAccount(supabase: SupabaseClient, account: OutreachAccount) {
   const { data: proxyRow } = account.proxy_id
     ? await supabase.from('tg_outreach_proxies').select('*').eq('id', account.proxy_id).maybeSingle()
     : { data: null };
+
+  const storage = supabaseAdmin ?? supabase;
   return createGramClient(
     account,
     (proxyRow as OutreachProxy) ?? null,
-    (storagePath) => downloadSessionToTemp(supabase, storagePath),
+    (storagePath) => downloadSessionToTemp(storage, storagePath),
   );
 }
 
