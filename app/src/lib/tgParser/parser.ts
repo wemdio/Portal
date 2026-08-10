@@ -5,6 +5,7 @@
 import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions';
 import type { ParsedUser, ParseOptions, ParseSource, OnlineStatus, TgParserAccount } from './types';
+import { withTimeout } from '@/lib/tgOutreach/withTimeout';
 
 function _getEnvCredentials(): { apiId: number; apiHash: string; proxyUrl: string } {
   return {
@@ -143,48 +144,82 @@ function extractPublicChatRefFromMessageLink(link: string): string | null {
   return m?.[1] ?? null;
 }
 
+/**
+ * Сколько ждать ответа Telegram на один запрос парсера.
+ *
+ * До 10.08.2026 таймаутов здесь не было вовсе, и зависший запрос вешал задачу
+ * навсегда: gramJS сам вызовы не таймаутит, а мобильный прокси меняет IP под
+ * живым соединением — запрос уходит в никуда и не возвращается. Ровно этот
+ * класс проблем всю неделю ронял прогрев, там лечение то же.
+ */
+function callTimeoutMs(): number {
+  return Number(process.env.TG_PARSER_CALL_TIMEOUT_MS) || 90_000;
+}
+
+/**
+ * Потолок на один этап обхода одного источника.
+ *
+ * Отдельный от таймаута запроса: обход идёт через асинхронный итератор gramJS,
+ * внутри которого свои запросы, и обернуть их поштучно нельзя. Общий потолок
+ * гарантирует, что застрявший источник не удержит задачу целиком — уже
+ * собранные контакты к этому моменту сохранены, и парсер идёт к следующему.
+ */
+function stageBudgetMs(): number {
+  return Number(process.env.TG_PARSER_STAGE_BUDGET_MS) || 20 * 60_000;
+}
+
 async function resolveEntityByLink(client: TelegramClient, rawLink: string): Promise<Api.TypeEntityLike> {
   const link = normalizeTelegramLink(rawLink);
   const internalChatId = getChatIdFromInternalMessageLink(link);
+  const t = callTimeoutMs();
+
   if (internalChatId) {
     const peerId = Number(`-100${internalChatId}`);
     try {
-      return await client.getEntity(peerId);
+      return await withTimeout(client.getEntity(peerId), t, 'поиск чата');
     } catch {
       // In some sessions GramJS has no local entity cache yet, so warm it up first.
-      await client.getDialogs({ limit: 200 });
-      return await client.getEntity(peerId);
+      await withTimeout(client.getDialogs({ limit: 200 }), t, 'загрузка диалогов');
+      return await withTimeout(client.getEntity(peerId), t, 'поиск чата');
     }
   }
 
   const publicRef = extractPublicChatRefFromMessageLink(link);
-  if (publicRef) return client.getEntity(publicRef);
+  if (publicRef) return withTimeout(client.getEntity(publicRef), t, 'поиск чата');
 
   // Private invite links: t.me/+hash or t.me/joinchat/hash
   const privateInviteMatch = link.match(/^https?:\/\/(?:t\.me|telegram\.me)\/(?:joinchat\/|\+)([A-Za-z0-9_-]+)/i);
   if (privateInviteMatch) {
     const hash = privateInviteMatch[1];
     try {
-      const info = await client.invoke(new Api.messages.CheckChatInvite({ hash }));
+      const info = await withTimeout(
+        client.invoke(new Api.messages.CheckChatInvite({ hash })),
+        t,
+        'проверка приглашения',
+      );
       if (info instanceof Api.ChatInviteAlready) {
         // Already a member — entity is directly available
         return info.chat;
       }
       // Not yet a member — join the chat
-      const joined = await client.invoke(new Api.messages.ImportChatInvite({ hash }));
+      const joined = await withTimeout(
+        client.invoke(new Api.messages.ImportChatInvite({ hash })),
+        t,
+        'вступление по приглашению',
+      );
       const chats = (joined as { chats?: Api.TypeChat[] }).chats;
       if (chats?.length) return chats[0];
     } catch (e) {
       if (String(e).includes('USER_ALREADY_PARTICIPANT')) {
         // Joined via another path — warm cache and retry
-        await client.getDialogs({ limit: 500 });
-        return client.getEntity(link);
+        await withTimeout(client.getDialogs({ limit: 500 }), t, 'загрузка диалогов');
+        return withTimeout(client.getEntity(link), t, 'поиск чата');
       }
       throw e;
     }
   }
 
-  return client.getEntity(link);
+  return withTimeout(client.getEntity(link), t, 'поиск чата');
 }
 
 async function userToParsed(
@@ -450,16 +485,39 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
       // отчёта в карте уже не то количество, что было на входе.
       const totalSoFar = () => allUsers.size;
 
+      /**
+       * Этап под общим потолком времени.
+       *
+       * Превышение — не ошибка задачи: контакты, собранные до этого момента,
+       * уже в allUsers, а источник, который не укладывается в двадцать минут,
+       * не должен забирать остальные. Пишем в отчёт и идём дальше.
+       */
+      const runStage = async (
+        stage: 'messages' | 'members' | 'comments',
+        fn: () => Promise<void>,
+      ): Promise<void> => {
+        try {
+          await withTimeout(fn(), stageBudgetMs(), `обход источника (${stage})`);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (!msg.includes('нет ответа за')) throw e;
+          await report(opts, { link: trimmed, stage, phase: 'done', total: totalSoFar() });
+        }
+      };
+
       if (opts.parse_chat_messages) {
-        await parseChatMessages(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar);
+        await runStage('messages', () =>
+          parseChatMessages(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar));
         if (stopRef.reason) break;
       }
       if (opts.parse_chat_members) {
-        await parseChatMembers(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar);
+        await runStage('members', () =>
+          parseChatMembers(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar));
         if (stopRef.reason) break;
       }
       if (opts.parse_post_comments) {
-        await parsePostComments(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar);
+        await runStage('comments', () =>
+          parsePostComments(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar));
         if (stopRef.reason) break;
       }
     }
