@@ -59,6 +59,11 @@ export function looksThrottled(errMsg: string): boolean {
 export function describeChatError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
 
+  // Не Telegram, а хранилище портала — иначе фраза про прокси уводит не туда.
+  if (/Object not found|The resource was not found/i.test(msg)) {
+    return 'файл сессии не найден в хранилище портала — перезалейте аккаунт';
+  }
+
   if (/USERNAME_NOT_OCCUPIED|USERNAME_INVALID/i.test(msg)) return 'чата с таким адресом нет';
   if (/CHANNEL_PRIVATE/i.test(msg)) return 'чат закрытый — вступить по ссылке нельзя';
   if (/CHAT_WRITE_FORBIDDEN|CHAT_SEND_PLAIN_FORBIDDEN/i.test(msg)) return 'в чате запрещено писать';

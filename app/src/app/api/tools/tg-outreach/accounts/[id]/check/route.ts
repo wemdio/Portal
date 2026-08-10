@@ -4,6 +4,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { createGramClient } from '@/lib/tgOutreach/gramClient';
 import { downloadSessionToTemp } from '@/lib/tgOutreach/campaignLoop';
 import { checkAccount, classifyCheckError } from '@/lib/tgOutreach/accountCheck';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import type { OutreachAccount, OutreachProxy } from '@/lib/tgOutreach/types';
 
 export const dynamic = 'force-dynamic';
@@ -85,7 +86,10 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         client = await createGramClient(
           account,
           (proxyRow as OutreachProxy) ?? null,
-          (storagePath) => downloadSessionToTemp(auth.supabase, storagePath),
+          // Служебным ключом: бакет с сессиями приватный, и пользовательскому
+          // клиенту хранилище отвечает «Object not found» — тем же текстом, что
+          // и на реально отсутствующий файл.
+          (storagePath) => downloadSessionToTemp(supabaseAdmin ?? auth.supabase, storagePath),
         );
       } catch (e) {
         // Не дошли до Telegram — разбор ошибки тот же, что и внутри проверки:

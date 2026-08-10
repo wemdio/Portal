@@ -67,6 +67,13 @@ export async function applyProfile({
 export function describeTelegramError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
 
+  // Не Telegram, а хранилище портала: файл сессии не скачался. Отдельная ветка
+  // нужна потому, что вызывающий код оборачивает ответ во фразу про прокси, и
+  // оператор шёл проверять прокси вместо перезаливки сессии.
+  if (/Object not found|The resource was not found/i.test(msg)) {
+    return 'файл сессии не найден в хранилище портала — перезалейте аккаунт';
+  }
+
   const flood = /FLOOD_WAIT_(\d+)|wait of (\d+) seconds/i.exec(msg);
   if (flood) {
     const seconds = flood[1] ?? flood[2];
