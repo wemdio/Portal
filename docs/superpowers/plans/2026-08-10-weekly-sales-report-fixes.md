@@ -1147,6 +1147,14 @@ export async function computeAllChannelMetrics(
   // этапу, а не по текущему этапу карточки. Тянем чанками по `IN_CHUNK_SIZE` —
   // тот же приём, что в `firstSales/meetings.ts`: у PostgREST есть предел длины
   // URL. Сделок в окне порядка семидесяти, так что чанк обычно один.
+  //
+  // Фильтра по `changed_at` здесь намеренно НЕТ, и это не забывчивость. Окно
+  // режет `computePeak`, потому что этап создания берётся из `from_value`
+  // самого раннего перехода — а у заявки, созданной в пятницу вечером и
+  // впервые сдвинутой в понедельник, ВСЯ история лежит после конца окна.
+  // Запрос с фильтром вернул бы ноль строк, `computePeak` откатился бы на
+  // текущий этап карточки, и понедельничная встреча попала бы в пятничный
+  // отчёт задним числом.
   const dealIds = [...new Set(leads.map((lead) => lead.amo_id))];
   const eventChunks = await Promise.all(
     chunkArray(dealIds, IN_CHUNK_SIZE).map(async (chunk) => {
@@ -1154,8 +1162,7 @@ export async function computeAllChannelMetrics(
         .from('amo_events')
         .select('amo_deal_id, changed_at, from_value, to_value')
         .eq('event_type', 'lead_status_changed')
-        .in('amo_deal_id', chunk)
-        .lt('changed_at', endIso);
+        .in('amo_deal_id', chunk);
       if (error) throw error;
       return (data ?? []) as AmoStatusEventRow[];
     }),
