@@ -578,7 +578,9 @@ git commit -m "feat(tg-outreach): чтение аккаунтов из папк�
 
 Из архива берутся только служебные файлы `tdata`: `key_data*`, `<16 hex>*` и `map*`. Они весят единицы килобайт, так что полная папка Telegram Desktop с кэшем и медиа не загрузит память.
 
-Важная деталь: `stat` в этом слое **возвращает `undefined` для отсутствующего файла, а не бросает**. Библиотека так выбирает между «современным» файлом `key_datas` и старой парой `key_data0`/`key_data1` — если `stat` бросит, до второй ветки дело не дойдёт.
+Важная деталь: `stat` в этом слое **возвращает `undefined` для отсутствующего файла, а не бросает**. Библиотека так выбирает между «современным» файлом `key_datas` и старой парой `key_data0`/`key_data1` — если `stat` бросит, до второй ветки дело не дойдёт. На дисковом пути (`nodeFsLike` из Task 3) `stat` бросает, как это делает `node:fs/promises`, поэтому старую пару читает только этот слой — так и задумано.
+
+Ещё одна деталь, выясненная в Task 3: библиотека внутри делает `await import('node:fs/promises')`, если файловую систему не передать явно, а Jest в этом проекте запускается без `--experimental-vm-modules` и на таком импорте падает. Поэтому **везде, включая тестовые фикстуры**, файловую систему передаём явно: в `convertToTdata` — `fs: nodeFsLike` (экспортируется из `@/lib/telegram/tdata`), в чтении архива — свою реализацию поверх памяти.
 
 **Files:**
 - Create: `app/src/lib/telegram/tdataArchive.ts`
@@ -598,9 +600,12 @@ import path from 'path';
 import archiver from 'archiver';
 import { convertToTdata } from '@mtcute/convert';
 import { createTdataCrypto } from '@/lib/telegram/tdataCrypto';
+import { nodeFsLike } from '@/lib/telegram/tdata';
 import { readTdataArchive } from '@/lib/telegram/tdataArchive';
 
-const DC = { id: 2, ipAddress: '149.154.167.51', port: 443 };
+// Адрес не хранится в tdata: библиотека восстанавливает его по номеру DC из
+// своей таблицы, поэтому здесь он должен совпадать с DC_MAPPING_PROD.
+const DC = { id: 2, ipAddress: '149.154.167.41', port: 443 };
 
 async function makeTdataDir(userId: number): Promise<string> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tdata-arch-'));
@@ -611,7 +616,9 @@ async function makeTdataDir(userId: number): Promise<string> {
       authKey: new Uint8Array(256).fill(userId % 250),
       self: { userId, isBot: false, isPremium: false, usernames: [] },
     }],
-    { path: dir, crypto: createTdataCrypto() },
+    // fs передаём явно: без него библиотека делает динамический import,
+    // на котором падает Jest (см. Task 3).
+    { path: dir, crypto: createTdataCrypto(), fs: nodeFsLike },
   );
   return dir;
 }
