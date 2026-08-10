@@ -898,6 +898,12 @@ export function computeMetricsFromRows(
     statusId: number | null;
   };
 
+  // `identity` — кастомное поле AMO «Telegram Chat ID», точный признак «тот
+  // же человек» для заявок бота. Заполнено примерно у половины из них; где
+  // пусто, `dedupeLeadMagnets` откатывается на имя. Без него под именем
+  // «Бот: Георгий» схлопнулись бы три разных телеграм-аккаунта.
+  const TELEGRAM_CHAT_ID_FIELD = 'Telegram Chat ID';
+
   const prepared: PreparedLead[] = [];
   for (const lead of leads) {
     if (lead.pipeline_id !== thresholds.pipelineId) continue;
@@ -918,6 +924,7 @@ export function computeMetricsFromRows(
     prepared.push({
       amoId: lead.amo_id,
       name: lead.name,
+      identity: extractCustomField(lead.raw, TELEGRAM_CHAT_ID_FIELD),
       channel,
       createdAt: lead.created_at,
       statusId: lead.status_id,
@@ -1072,7 +1079,12 @@ describe('computeAllChannelMetrics', () => {
     const eventsCall = calls[2];
     expect(eventsCall.filters['eq:event_type']).toBe('lead_status_changed');
     expect(eventsCall.filters['in:amo_deal_id']).toEqual([700]);
-    expect(eventsCall.filters['lt:changed_at']).toBe(WINDOW_END.toISOString());
+    // Окно по времени режет `computePeak`, а не запрос. Фильтр `.lt` здесь был
+    // бы багом: у сделки, созданной в пятницу вечером и сдвинутой в
+    // понедельник, ВСЯ история лежит после конца окна. Запрос вернул бы ноль
+    // строк, `computePeak` откатился бы на текущий этап карточки — и понедельничная
+    // встреча попала бы в пятничный отчёт задним числом.
+    expect(eventsCall.filters['lt:changed_at']).toBeUndefined();
 
     // Сделка в «Переносе», встречи не было — «Было» должно остаться нулём.
     expect(result.find((r) => r.channel.name === 'outreach')).toMatchObject({
