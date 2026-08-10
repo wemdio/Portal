@@ -9,6 +9,8 @@ const unzipper = require('unzipper') as {
       files: Array<{
         path: string;
         type: string;
+        flags: number;
+        compressedSize: number;
         uncompressedSize: number;
         lastModifiedDateTime: Date;
         buffer(): Promise<Buffer>;
@@ -18,17 +20,58 @@ const unzipper = require('unzipper') as {
 };
 
 /**
- * Служебные файлы tdata: сам ключ (`key_data*`), блок авторизации аккаунта
- * (`<16 hex>*`) и карта (`map*`). Суффикс `s` — «современный» вариант,
- * `0`/`1` — старая пара, из которой библиотека берёт свежую по дате.
+ * Служебные файлы tdata: сам ключ (`key_data*`) и блок авторизации аккаунта
+ * (`<16 hex>*`). Суффикс `s` — «современный» вариант, `0`/`1` — старая пара,
+ * из которой библиотека берёт свежую по дате.
  *
  * Всё остальное из архива не читаем вовсе: в полной папке Telegram Desktop
  * лежат гигабайты кэша и медиа, а нужные файлы весят единицы килобайт.
+ * `map` в этот список не входит намеренно: его пишет `convertToTdata`, но
+ * обратно не читает никто (`Tdata.open` берёт `key_data*`, `convertFromTdata` —
+ * `<16 hex>*`), а `<16 hex>/map*` — это карта медиафайлов, единственная
+ * по-настоящему тяжёлая запись настоящей tdata.
  */
-const TDATA_FILE = /^(key_data|map|[0-9A-F]{16})(s|0|1)$/;
+const TDATA_FILE = /^(key_data|[0-9A-F]{16})(s|0|1)$/;
 
-/** Потолок на служебный файл tdata: настоящие весят меньше килобайта. */
-const MAX_TDATA_FILE_BYTES = 1024 * 1024;
+/**
+ * Пределы на распаковку. Значения по умолчанию взяты с огромным запасом:
+ * настоящий служебный файл весит меньше килобайта, а вся папка — около 740
+ * байт, так что даже партия в тысячи аккаунтов не подходит к границе.
+ *
+ * Границы нужны потому, что архивы приходят от продавцов, то есть это
+ * недоверенный ввод: 2000 записей по мегабайту нулей укладываются в 9 МБ zip и
+ * заявляют 2 ГБ распаковки. Потолок на файл такую запись пропускает — она
+ * ровно в мегабайт и влезает, — а ловит её именно предел раздутия. Один этот
+ * сервер уже ложился от исчерпания ресурсов, см. post-mortem 23.07 в CLAUDE.md.
+ */
+export interface TdataArchiveLimits {
+  /** Потолок на один служебный файл. */
+  maxFileBytes?: number;
+  /** Потолок на все служебные файлы архива вместе — единственная жёсткая граница памяти. */
+  maxTotalBytes?: number;
+  /** Во сколько раз записи позволено раздуться при распаковке. */
+  maxCompressionRatio?: number;
+}
+
+const DEFAULT_MAX_FILE_BYTES = 1024 * 1024;
+const DEFAULT_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
+const DEFAULT_MAX_COMPRESSION_RATIO = 200;
+
+/** Пароль оператор снимает сам, поэтому у этого случая свой текст. */
+const PASSWORD_MESSAGE = 'архив под паролем — распакуйте и переупакуйте без пароля';
+
+/**
+ * Ошибку zip-библиотеки перевести в текст для оператора.
+ *
+ * Наружу голые английские коды вроде `FILE_ENDED` не выпускаем: отчёт о
+ * загрузке читает не разработчик. Оригинал оставляем в скобках — по нему
+ * разбираются, если дойдёт до разбора.
+ */
+function describeArchiveError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/MISSING_PASSWORD|BAD_PASSWORD/i.test(msg)) return PASSWORD_MESSAGE;
+  return `не удалось открыть архив: файл повреждён или это не zip (${msg})`;
+}
 
 export interface TdataArchiveItem {
   /** Имя, под которым аккаунты попадут в список кампании. */
@@ -81,9 +124,19 @@ function dirname(p: string): string {
   return cut === -1 ? '' : p.slice(0, cut);
 }
 
-/** Имя аккаунта — папка, в которой лежит tdata; если tdata в корне — имя архива. */
+/**
+ * Имя аккаунта — та папка пути, которая его называет.
+ *
+ * Обычно это владелец папки `tdata`, но часть продавцов кладёт служебные файлы
+ * прямо в папку аккаунта. Слепо брать родителя нельзя: тогда `246630983/` и
+ * `246210089/` из одного архива оба назвались бы именем архива и стали в списке
+ * неразличимы. У tdata-строки пустой `phone`, а имя пользователя неизвестно до
+ * «Проверить», так что имя — единственная зацепка оператора.
+ */
 function accountName(tdataDir: string, archiveName: string): string {
-  const own = dirname(tdataDir).split('/').pop() ?? '';
+  const parts = tdataDir.split('/').filter(Boolean);
+  const last = parts[parts.length - 1] ?? '';
+  const own = last === 'tdata' ? parts[parts.length - 2] ?? '' : last;
   return own || archiveName.replace(/\.zip$/i, '') || 'tdata';
 }
 
@@ -96,18 +149,59 @@ function accountName(tdataDir: string, archiveName: string): string {
 export async function readTdataArchive(
   buffer: Buffer,
   archiveName: string,
+  limits: TdataArchiveLimits = {},
 ): Promise<TdataArchiveItem[]> {
-  const directory = await unzipper.Open.buffer(buffer);
+  const maxFileBytes = limits.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
+  const maxTotalBytes = limits.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
+  const maxRatio = limits.maxCompressionRatio ?? DEFAULT_MAX_COMPRESSION_RATIO;
+
+  let directory: Awaited<ReturnType<typeof unzipper.Open.buffer>>;
+  try {
+    directory = await unzipper.Open.buffer(buffer);
+  } catch (err) {
+    throw new Error(describeArchiveError(err));
+  }
 
   const files = new Map<string, { data: Buffer; lastModified: number }>();
+  let totalBytes = 0;
   for (const entry of directory.files) {
     if (entry.type !== 'File') continue;
     const p = normalize(entry.path);
     const base = p.slice(p.lastIndexOf('/') + 1);
     if (!TDATA_FILE.test(base)) continue;
-    if (entry.uncompressedSize > MAX_TDATA_FILE_BYTES) continue;
+
+    // Про пароль говорим до того, как записи отсеются: иначе зашифрованный
+    // архив выглядел бы как «без tdata», и оператор не понял бы, что чинить.
+    if (entry.flags & 0x1) throw new Error(PASSWORD_MESSAGE);
+
+    if (entry.uncompressedSize > maxFileBytes) continue;
+    // Запись, раздувающаяся сверх меры, — это zip-бомба: её просто не читаем,
+    // так что в память она не попадает вовсе.
+    if (entry.compressedSize >= 1 && entry.uncompressedSize / entry.compressedSize > maxRatio) {
+      continue;
+    }
+
+    let data: Buffer;
+    try {
+      data = await entry.buffer();
+    } catch {
+      // Нераспаковываемая запись выпадает так же, как слишком большая:
+      // папка, которой она нужна, ниже сама скажет, чего ей не хватило.
+      continue;
+    }
+
+    // Заголовок zip — это заявление, а не факт: unzipper не обрезает поток
+    // распаковки по `uncompressedSize`, поэтому меряем то, что реально пришло.
+    if (data.length > maxFileBytes) continue;
+    totalBytes += data.length;
+    if (totalBytes > maxTotalBytes) {
+      throw new Error(
+        `в архиве слишком много служебных файлов tdata: распаковка вышла за ${maxTotalBytes} байт`,
+      );
+    }
+
     files.set(p, {
-      data: await entry.buffer(),
+      data,
       lastModified: entry.lastModifiedDateTime?.getTime() ?? 0,
     });
   }

@@ -47,6 +47,24 @@ export type TdataArchiveReader = (
 ) => Promise<TdataArchiveItem[]>;
 
 /**
+ * Сделать имя уникальным в пределах загрузки.
+ *
+ * Слой архива называет папки честно, но одинаковые имена он отдаёт законно:
+ * `лот1/acc/tdata` и `лот2/acc/tdata` — обычная раскладка продавца, и обе
+ * папки называются `acc`. Ниже по цепочке это никто не заметит — дубли ищутся
+ * по телеграм-id, а на `session_name` в базе нет уникального индекса, так что
+ * строки лягут неразличимыми. Для tdata это больнее обычного: телефон пуст, а
+ * имя пользователя неизвестно, пока по строке не сходит «Проверить», — имя
+ * остаётся единственной зацепкой оператора.
+ */
+function uniqueName(name: string, used: Set<string>): string {
+  let unique = name;
+  for (let n = 2; used.has(unique); n++) unique = `${name}_${n}`;
+  used.add(unique);
+  return unique;
+}
+
+/**
  * Разобрать загруженные архивы в кандидатов на вставку.
  *
  * Дубли внутри самой загрузки отсекаются здесь; сверка с базой — на уровне
@@ -66,6 +84,7 @@ export async function collectTdataCandidates(
   const skipped: TdataSkip[] = [];
   const errors: TdataError[] = [];
   const seen = new Map<number, string>();
+  const usedNames = new Set<string>();
 
   for await (const upload of uploads) {
     let items: TdataArchiveItem[];
@@ -86,7 +105,7 @@ export async function collectTdataCandidates(
 
       for (let i = 0; i < item.accounts.length; i++) {
         const account = item.accounts[i];
-        const name = i === 0 ? item.name : `${item.name}_${i + 1}`;
+        const name = uniqueName(i === 0 ? item.name : `${item.name}_${i + 1}`, usedNames);
 
         const already = seen.get(account.tgUserId);
         if (already) {

@@ -56,6 +56,56 @@ function makeZip(
   });
 }
 
+/** Файлы папки как записи архива под произвольным префиксом. */
+function tdataEntries(dir: string, prefix: string): Array<{ name: string; content: Buffer }> {
+  return listFiles(dir).map((rel) => ({
+    name: prefix ? `${prefix}/${rel}` : rel,
+    content: fs.readFileSync(path.join(dir, rel)),
+  }));
+}
+
+/**
+ * Имя файла с данными аккаунта внутри tdata. Оно выводится из служебного имени
+ * `data`, а не из ключей, поэтому одинаково у всех папок в этих тестах.
+ */
+const ACCOUNT_FILE = 'D877F783D5D3EF8Cs';
+
+/** Байты, которые deflate реально жмёт: на испорченном потоке inflate падает. */
+function compressible(): Buffer {
+  return Buffer.from(Array.from({ length: 6000 }, (_, i) => (i * 7 + (i % 13)) & 0xff));
+}
+
+/**
+ * Испортить сжатый поток одной записи так, чтобы inflate по нему не прошёл.
+ *
+ * Смещение данных считаем от локального заголовка: длины имени и extra-поля
+ * лежат на 26-м и 28-м байтах, сами данные идут сразу за ними.
+ */
+function breakEntry(zip: Buffer, entryPath: string): Buffer {
+  const out = Buffer.from(zip);
+  const header = out.indexOf(Buffer.from(entryPath)) - 30;
+  const data = header + 30 + out.readUInt16LE(header + 26) + out.readUInt16LE(header + 28);
+  out.fill(0xa5, data + 40, data + 64);
+  return out;
+}
+
+/**
+ * Пометить записи архива как зашифрованные.
+ *
+ * `archiver` не умеет ставить пароль, а нам нужен ровно тот бит, по которому
+ * это видно снаружи: младший бит поля флагов в заголовке центрального каталога
+ * (сигнатура `PK\x01\x02`, флаги на 8-м байте).
+ */
+function markEncrypted(zip: Buffer): Buffer {
+  const out = Buffer.from(zip);
+  for (let i = 0; i + 10 <= out.length; i++) {
+    if (out.readUInt32LE(i) === 0x02014b50) {
+      out.writeUInt16LE(out.readUInt16LE(i + 8) | 0x1, i + 8);
+    }
+  }
+  return out;
+}
+
 describe('readTdataArchive', () => {
   const dirs: string[] = [];
   afterAll(() => dirs.forEach((d) => fs.rmSync(d, { recursive: true, force: true })));
@@ -176,11 +226,100 @@ describe('readTdataArchive', () => {
     expect(byName.acc_bad.error).toMatch(/повреждена/);
   });
 
+  it('различает папки, в которых служебные файлы лежат без вложенной tdata', async () => {
+    const first = await makeTdataDir(1111);
+    const second = await makeTdataDir(2222);
+    dirs.push(first, second);
+    // Часть продавцов кладёт содержимое tdata прямо в папку аккаунта. Если
+    // всегда брать родителя, обе такие папки получат имя архива и станут в
+    // списке неразличимы — а `phone` у tdata-строки пуст, имя тут единственная
+    // зацепка.
+    const zip = await makeZip([
+      ...tdataEntries(first, '246630983'),
+      ...tdataEntries(second, '246210089'),
+    ]);
+
+    const found = await readTdataArchive(zip, 'партия.zip');
+
+    expect(found.map((f) => f.name).sort()).toEqual(['246210089', '246630983']);
+  });
+
   it('на архиве без tdata объясняет, чего не хватает', async () => {
     const zip = await makeZip([{ name: 'session.json', content: '{}' }]);
 
     await expect(readTdataArchive(zip, 'аккаунты.zip')).rejects.toThrow(
       /не найдена папка tdata/,
     );
+  });
+
+  it('на файле, который вовсе не zip, объясняется по-русски', async () => {
+    const notZip = Buffer.from('это не архив, а просто текст');
+
+    await expect(readTdataArchive(notZip, 'мусор.zip')).rejects.toThrow(
+      /не удалось открыть архив/,
+    );
+  });
+
+  it('на архиве под паролем отдельно говорит про пароль', async () => {
+    const dir = await makeTdataDir(1212);
+    dirs.push(dir);
+    const zip = markEncrypted(await makeZip(tdataEntries(dir, 'acc/tdata')));
+
+    // Пароль оператор снимает сам, поэтому это не общее «архив не открылся».
+    await expect(readTdataArchive(zip, 'под-паролем.zip')).rejects.toThrow(
+      /под паролем/,
+    );
+  });
+
+  it('отбивает архив, служебные файлы которого не влезают в лимит памяти', async () => {
+    const dir = await makeTdataDir(1313);
+    dirs.push(dir);
+    const zip = await makeZip(tdataEntries(dir, 'acc/tdata'));
+
+    // Настоящая папка весит меньше килобайта, так что лимит ниже неё отбивает
+    // архив на втором же файле — не дожидаясь, пока в памяти окажется всё.
+    await expect(readTdataArchive(zip, 'жирный.zip', { maxTotalBytes: 512 }))
+      .rejects.toThrow(/слишком много|512/);
+  });
+
+  it('не разворачивает zip-бомбу: раздутые записи не читаются вовсе', async () => {
+    // Записи названы как файл аккаунта и по заголовку весят ровно по мегабайту,
+    // то есть в потолок на файл укладываются — ловит их только предел раздутия.
+    const oneMb = Buffer.alloc(1024 * 1024, 0);
+    const zip = await makeZip(
+      Array.from({ length: 200 }, (_, i) => ({
+        name: `f${i}/tdata/AAAAAAAAAAAAAAAA0`,
+        content: oneMb,
+      })),
+    );
+    expect(zip.length).toBeLessThan(4 * 1024 * 1024);
+
+    // 200 МБ по заголовкам — но ни одна запись не распаковывается, поэтому
+    // архив просто оказывается «без tdata», а не съедает память.
+    await expect(readTdataArchive(zip, 'бомба.zip')).rejects.toThrow(/не найдена папка tdata/);
+  });
+
+  it('нераспаковываемая запись не роняет архив, а валит только свою папку', async () => {
+    const good = await makeTdataDir(1414);
+    const bad = await makeTdataDir(1515);
+    dirs.push(good, bad);
+    // У битой папки ключ цел (папка опознаётся как tdata), а файл самого
+    // аккаунта не распакуется. Настоящий файл аккаунта зашифрован и правку
+    // байтов переживает молча, поэтому кладём под его именем сжимаемый
+    // мусор — на нём inflate спотыкается по-настоящему.
+    const zip = await makeZip([
+      ...tdataEntries(good, 'acc_good/tdata'),
+      { name: `acc_bad/tdata/${ACCOUNT_FILE}`, content: compressible() },
+      {
+        name: 'acc_bad/tdata/key_datas',
+        content: fs.readFileSync(path.join(bad, 'key_datas')),
+      },
+    ]);
+
+    const found = await readTdataArchive(breakEntry(zip, `acc_bad/tdata/${ACCOUNT_FILE}`), 'партия.zip');
+
+    const byName = Object.fromEntries(found.map((f) => [f.name, f]));
+    expect(byName.acc_good.accounts[0].tgUserId).toBe(1414);
+    expect(byName.acc_bad.error).toMatch(/не найден файл с данными аккаунта/);
   });
 });

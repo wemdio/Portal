@@ -16,6 +16,29 @@ const reader: TdataArchiveReader = async (_buffer, archiveName) => {
       { name: 'bad_acc', accounts: [], error: 'папка под локальным паролем Telegram либо повреждена' },
     ];
   }
+  // Продавец разложил партию по лотам: `лот1/acc/tdata` и `лот2/acc/tdata`.
+  // Слой архива честно отдаёт две папки с одним именем — развести их может
+  // только эта сборка.
+  if (archiveName === 'два-лота.zip') {
+    return [
+      { name: 'acc', accounts: [{ index: 0, tgUserId: 51, sessionString: 'sess-51' }] },
+      { name: 'acc', accounts: [{ index: 0, tgUserId: 52, sessionString: 'sess-52' }] },
+    ];
+  }
+  // Папка `acc` на два аккаунта даёт `acc_2`, и рядом лежит папка, которую
+  // продавец и правда назвал `acc_2`.
+  if (archiveName === 'сосед.zip') {
+    return [
+      {
+        name: 'acc',
+        accounts: [
+          { index: 0, tgUserId: 61, sessionString: 'sess-61' },
+          { index: 1, tgUserId: 62, sessionString: 'sess-62' },
+        ],
+      },
+      { name: 'acc_2', accounts: [{ index: 0, tgUserId: 63, sessionString: 'sess-63' }] },
+    ];
+  }
   if (archiveName === 'мульти.zip') {
     return [{
       name: 'multi',
@@ -63,6 +86,20 @@ describe('collectTdataCandidates', () => {
     expect(result.skipped).toEqual([
       { name: 'копия2', reason: 'этот же аккаунт уже есть в загрузке (копия1)' },
     ]);
+  });
+
+  it('разводит папки, которые пришли из архива под одним именем', async () => {
+    const result = await collectTdataCandidates([file('два-лота.zip')], reader);
+
+    // Имя — единственное, чем оператор различает свежие tdata-строки: телефон
+    // пуст, а имя пользователя неизвестно до «Проверить».
+    expect(result.candidates.map((c) => c.name)).toEqual(['acc', 'acc_2']);
+  });
+
+  it('разводит имя папки и номер аккаунта, если они совпали', async () => {
+    const result = await collectTdataCandidates([file('сосед.zip')], reader);
+
+    expect(result.candidates.map((c) => c.name)).toEqual(['acc', 'acc_2', 'acc_2_2']);
   });
 
   it('битый архив не отменяет остальные', async () => {
