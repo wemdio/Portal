@@ -5,6 +5,7 @@
 import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions';
 import type { ParsedUser, ParseOptions, ParseSource, OnlineStatus, TgParserAccount } from './types';
+import { withTimeout } from '@/lib/tgOutreach/withTimeout';
 
 function _getEnvCredentials(): { apiId: number; apiHash: string; proxyUrl: string } {
   return {
@@ -143,48 +144,84 @@ function extractPublicChatRefFromMessageLink(link: string): string | null {
   return m?.[1] ?? null;
 }
 
+/**
+ * Сколько ждать ответа Telegram на один запрос парсера.
+ *
+ * До 10.08.2026 таймаутов здесь не было вовсе, и зависший запрос вешал задачу
+ * навсегда: gramJS сам вызовы не таймаутит, а мобильный прокси меняет IP под
+ * живым соединением — запрос уходит в никуда и не возвращается. Ровно этот
+ * класс проблем всю неделю ронял прогрев, там лечение то же.
+ */
+function callTimeoutMs(): number {
+  return Number(process.env.TG_PARSER_CALL_TIMEOUT_MS) || 90_000;
+}
+
+/**
+ * Сколько этап может не подавать признаков жизни, прежде чем его бросить.
+ *
+ * Именно простой, а не общее время: с включённым расширенным профилем Telegram
+ * душит users.GetFullUser флуд-лимитом по 24-28 секунд на вызов, и обход идёт
+ * со скоростью пользователь в полминуты. 10.08.2026 такая задача честно
+ * работала полтора часа — фиксированный потолок на этап зарубил бы её вместе с
+ * результатом. Здоровый медленный обход отличается от зависшего тем, что в нём
+ * что-то происходит.
+ */
+function stageIdleMs(): number {
+  return Number(process.env.TG_PARSER_STAGE_IDLE_MS) || 15 * 60_000;
+}
+
 async function resolveEntityByLink(client: TelegramClient, rawLink: string): Promise<Api.TypeEntityLike> {
   const link = normalizeTelegramLink(rawLink);
   const internalChatId = getChatIdFromInternalMessageLink(link);
+  const t = callTimeoutMs();
+
   if (internalChatId) {
     const peerId = Number(`-100${internalChatId}`);
     try {
-      return await client.getEntity(peerId);
+      return await withTimeout(client.getEntity(peerId), t, 'поиск чата');
     } catch {
       // In some sessions GramJS has no local entity cache yet, so warm it up first.
-      await client.getDialogs({ limit: 200 });
-      return await client.getEntity(peerId);
+      await withTimeout(client.getDialogs({ limit: 200 }), t, 'загрузка диалогов');
+      return await withTimeout(client.getEntity(peerId), t, 'поиск чата');
     }
   }
 
   const publicRef = extractPublicChatRefFromMessageLink(link);
-  if (publicRef) return client.getEntity(publicRef);
+  if (publicRef) return withTimeout(client.getEntity(publicRef), t, 'поиск чата');
 
   // Private invite links: t.me/+hash or t.me/joinchat/hash
   const privateInviteMatch = link.match(/^https?:\/\/(?:t\.me|telegram\.me)\/(?:joinchat\/|\+)([A-Za-z0-9_-]+)/i);
   if (privateInviteMatch) {
     const hash = privateInviteMatch[1];
     try {
-      const info = await client.invoke(new Api.messages.CheckChatInvite({ hash }));
+      const info = await withTimeout(
+        client.invoke(new Api.messages.CheckChatInvite({ hash })),
+        t,
+        'проверка приглашения',
+      );
       if (info instanceof Api.ChatInviteAlready) {
         // Already a member — entity is directly available
         return info.chat;
       }
       // Not yet a member — join the chat
-      const joined = await client.invoke(new Api.messages.ImportChatInvite({ hash }));
+      const joined = await withTimeout(
+        client.invoke(new Api.messages.ImportChatInvite({ hash })),
+        t,
+        'вступление по приглашению',
+      );
       const chats = (joined as { chats?: Api.TypeChat[] }).chats;
       if (chats?.length) return chats[0];
     } catch (e) {
       if (String(e).includes('USER_ALREADY_PARTICIPANT')) {
         // Joined via another path — warm cache and retry
-        await client.getDialogs({ limit: 500 });
-        return client.getEntity(link);
+        await withTimeout(client.getDialogs({ limit: 500 }), t, 'загрузка диалогов');
+        return withTimeout(client.getEntity(link), t, 'поиск чата');
       }
       throw e;
     }
   }
 
-  return client.getEntity(link);
+  return withTimeout(client.getEntity(link), t, 'поиск чата');
 }
 
 async function userToParsed(
@@ -280,6 +317,8 @@ async function parseChatMessages(
   mergeUser: (u: ParsedUser) => Promise<boolean>,
   enrichProfile: boolean,
   totalSoFar: () => number,
+  /** Признак жизни для сторожевого таймера простоя — на каждом шаге. */
+  beat: () => void,
 ): Promise<void> {
   const entity = await resolveEntityByLink(client, link);
   const title = (entity as Api.Channel).title ?? (entity as Api.User).username ?? String((entity as Api.User).id);
@@ -287,6 +326,7 @@ async function parseChatMessages(
   const usersMap = new Map<number, { user: Api.User; messages: string[] }>();
 
   for await (const msg of client.iterMessages(entity, { limit: opts.message_limit })) {
+    beat();
     if (!msg?.senderId || !msg.message) continue;
     const sender = await msg.getSender();
     if (!sender || (sender as Api.User).className !== 'User' || (sender as Api.User).bot) continue;
@@ -303,6 +343,7 @@ async function parseChatMessages(
 
   let done = 0;
   for (const [, { user, messages }] of usersMap) {
+    beat();
     const { status, lastSeen } = getOnlineStatus(user.status);
     if (!filterByOnline(status, lastSeen, opts)) continue;
     const parsed = await userToParsed(client, user, link, title, 'chat_messages', messages, enrichProfile);
@@ -323,6 +364,8 @@ async function parseChatMembers(
   mergeUser: (u: ParsedUser) => Promise<boolean>,
   enrichProfile: boolean,
   totalSoFar: () => number,
+  /** Признак жизни для сторожевого таймера простоя — на каждом шаге. */
+  beat: () => void,
 ): Promise<void> {
   const entity = await resolveEntityByLink(client, link);
   const title = (entity as Api.Channel).title ?? (entity as Api.User).username ?? String((entity as Api.User).id);
@@ -330,6 +373,7 @@ async function parseChatMembers(
   let count = 0;
   try {
     for await (const participant of client.iterParticipants(entity, { limit: opts.message_limit })) {
+      beat();
       const u = participant as Api.User;
       if (!u || u.className !== 'User' || u.bot) continue;
       const { status, lastSeen } = getOnlineStatus(u.status);
@@ -361,6 +405,8 @@ async function parsePostComments(
   mergeUser: (u: ParsedUser) => Promise<boolean>,
   enrichProfile: boolean,
   totalSoFar: () => number,
+  /** Признак жизни для сторожевого таймера простоя — на каждом шаге. */
+  beat: () => void,
 ): Promise<void> {
   const entity = await resolveEntityByLink(client, link);
   const ch = entity as Api.Channel;
@@ -370,6 +416,7 @@ async function parsePostComments(
   await report(opts, { link, title, stage: 'comments', phase: 'start', total: totalSoFar() });
   const usersMap = new Map<number, { user: Api.User; messages: string[] }>();
   for await (const post of client.iterMessages(entity, { limit: opts.message_limit })) {
+    beat();
     if (!post?.replies?.comments) continue;
     try {
       for await (const reply of client.iterMessages(entity, { replyTo: post.id, limit: 100 })) {
@@ -392,6 +439,7 @@ async function parsePostComments(
 
   let done = 0;
   for (const [, { user, messages }] of usersMap) {
+    beat();
     const { status, lastSeen } = getOnlineStatus(user.status);
     if (!filterByOnline(status, lastSeen, opts)) continue;
     const parsed = await userToParsed(client, user, link, title, 'post_comments', messages, enrichProfile);
@@ -450,16 +498,55 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
       // отчёта в карте уже не то количество, что было на входе.
       const totalSoFar = () => allUsers.size;
 
+      /**
+       * Этап под сторожевым таймером простоя.
+       *
+       * Считаем не длительность, а тишину: обход с расширенным профилем идёт
+       * часами и это нормально, а вот пятнадцать минут без единого обработанного
+       * пользователя означают, что этап встал. Брошенный этап — не ошибка
+       * задачи: собранное уже в allUsers, парсер отчитывается и берёт следующий
+       * источник.
+       */
+      const runStage = async (
+        stage: 'messages' | 'members' | 'comments',
+        fn: (beat: () => void) => Promise<void>,
+      ): Promise<void> => {
+        let lastBeat = Date.now();
+        const idleMs = stageIdleMs();
+        let timer: ReturnType<typeof setInterval> | undefined;
+
+        const idleGuard = new Promise<never>((_, reject) => {
+          timer = setInterval(() => {
+            if (Date.now() - lastBeat > idleMs) {
+              reject(new Error(`обход источника (${stage}): нет движения ${Math.round(idleMs / 60_000)} мин`));
+            }
+          }, 30_000);
+        });
+
+        try {
+          await Promise.race([fn(() => { lastBeat = Date.now(); }), idleGuard]);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (!msg.includes('нет движения')) throw e;
+          await report(opts, { link: trimmed, stage, phase: 'done', total: totalSoFar() });
+        } finally {
+          if (timer) clearInterval(timer);
+        }
+      };
+
       if (opts.parse_chat_messages) {
-        await parseChatMessages(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar);
+        await runStage('messages', (beat) =>
+          parseChatMessages(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar, beat));
         if (stopRef.reason) break;
       }
       if (opts.parse_chat_members) {
-        await parseChatMembers(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar);
+        await runStage('members', (beat) =>
+          parseChatMembers(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar, beat));
         if (stopRef.reason) break;
       }
       if (opts.parse_post_comments) {
-        await parsePostComments(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar);
+        await runStage('comments', (beat) =>
+          parsePostComments(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar, beat));
         if (stopRef.reason) break;
       }
     }

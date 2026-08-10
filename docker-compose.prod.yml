@@ -1124,8 +1124,8 @@ services:
       - PROXY_URLS=${PROXY_URLS}
       - S3_ENDPOINT=${S3_ENDPOINT}
       - S3_BUCKET=${S3_BUCKET}
-      - HEALTH_DISK_TOTAL_GB=${HEALTH_DISK_TOTAL_GB:-50}
-      - HEALTH_DISK_WARN_GB=${HEALTH_DISK_WARN_GB:-45}
+      - HEALTH_DISK_TOTAL_GB=${HEALTH_DISK_TOTAL_GB:-80}
+      - HEALTH_DISK_WARN_GB=${HEALTH_DISK_WARN_GB:-72}
       # Порог для нового per-container watchdog (см. check_container_resources
       # в main.py). Кидает жёлтый алерт когда контейнер съел >= X% cgroup-лимита
       # по памяти ИЛИ CPU-quota. 0 отключает проверку.
