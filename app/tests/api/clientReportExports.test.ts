@@ -73,6 +73,21 @@ describe('client report export jobs', () => {
     expect(mockDb.getRows('client_report_export_jobs')).toHaveLength(0);
   });
 
+  it('fails before enqueueing when the client has no campaign access', async () => {
+    requireClientAuthMock.mockResolvedValue({
+      auth: { userId: 'client-1', accessRows: [], isDemo: false },
+    });
+
+    const response = await POST(post({
+      kind: 'working',
+      filters: { preset: 'last_30_days' },
+    }));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: 'Нет доступных кампаний' });
+    expect(mockDb.getRows('client_report_export_jobs')).toHaveLength(0);
+  });
+
   it('does not enqueue durable exports for the read-only demo account', async () => {
     requireClientAuthMock.mockResolvedValue({
       auth: { userId: 'demo', accessRows: [], isDemo: true },

@@ -36,7 +36,7 @@ const CLIENT_SECTION_TITLES: ReadonlyArray<{
   { prefix: '/client/projects', ru: 'Проекты', en: 'Projects', es: 'Proyectos' },
   { prefix: '/client/replies', ru: 'Ответы', en: 'Replies', es: 'Respuestas' },
   { prefix: '/client/blocklist', ru: 'Чёрный список', en: 'Blocklist', es: 'Lista de bloqueo' },
-  { prefix: '/client/reports', ru: 'Отчёты', en: 'Reports', es: 'Informes' },
+  { prefix: '/client/reports', ru: 'Воронка базы', en: 'List funnel', es: 'Embudo de listas' },
   { prefix: '/client/tariff', ru: 'Тариф', en: 'Plan', es: 'Plan' },
   { prefix: '/client/mailboxes', ru: 'Мои почты', en: 'My mailboxes', es: 'Mis buzones' },
   { prefix: '/client/settings', ru: 'Настройки', en: 'Settings', es: 'Configuración' },

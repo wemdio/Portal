@@ -2,6 +2,7 @@
 
 const datasetQueryMock = jest.fn();
 const pipelineRpcMock = jest.fn();
+const readCampaignAnalyticsFromDbMock = jest.fn();
 
 jest.mock('@/lib/instantlyDataset', () => ({
   datasetQuery: (...args: unknown[]) => datasetQueryMock(...args),
@@ -9,221 +10,216 @@ jest.mock('@/lib/instantlyDataset', () => ({
 jest.mock('@/lib/supabaseAdmin', () => ({
   supabaseAdmin: { rpc: (...args: unknown[]) => pipelineRpcMock(...args) },
 }));
+jest.mock('@/lib/tools/instantlyCampaignCatalog', () => ({
+  readCampaignAnalyticsFromDb: (...args: unknown[]) => readCampaignAnalyticsFromDbMock(...args),
+}));
 
 import {
   buildReportQualityNotices,
-  buildOutreachMetricsQuery,
+  ClientReportPipelineUnavailableError,
   loadClientReportAnalytics,
-  mapOutreachMetricsRow,
   resolvePipelineCampaignNames,
 } from '@/lib/clientReports/analytics';
 
-describe('client reports outreach analytics', () => {
-  const input = {
-    campaignIds: ['campaign-a', 'campaign-b'],
-    fromUtc: '2026-07-01T00:00:00.000Z',
-    toExclusiveUtc: '2026-08-01T00:00:00.000Z',
-    score: 'B' as const,
-  };
+const filters = {
+  period: {
+    preset: 'custom' as const,
+    from: '2026-07-01',
+    to: '2026-07-31',
+    fromUtc: new Date('2026-06-30T21:00:00.000Z'),
+    toExclusiveUtc: new Date('2026-07-31T21:00:00.000Z'),
+  },
+  score: 'B' as const,
+  campaignId: 'campaign-a',
+};
 
+const pipelineRow = {
+  scored_companies: 100,
+  working_score_companies: 30,
+  email_found_companies: 20,
+  validated_emails: 18,
+  submitted_contacts: 10,
+  confirmed_contacts: 7,
+  event_confirmed_contacts: 9,
+  event_legacy_submitted_contacts: 2,
+  legacy_scored_companies: 5,
+  unattributed_confirmed_contacts: 1,
+  pipeline_at: '2026-07-31T11:00:00.000Z',
+  by_campaign: [{
+    campaign_id: 'campaign-a',
+    campaign_name: 'campaign-a',
+    score_code: 'B',
+    submitted: 10,
+    confirmed: 7,
+  }],
+};
+
+function loadAnalytics(overrides: Partial<Parameters<typeof loadClientReportAnalytics>[0]> = {}) {
+  return loadClientReportAnalytics({
+    clientUserId: 'client-1',
+    allowedCampaignIds: ['campaign-a', 'campaign-b'],
+    filters,
+    ...overrides,
+  });
+}
+
+describe('client reports pipeline analytics', () => {
   beforeEach(() => {
-    datasetQueryMock.mockReset();
-    pipelineRpcMock.mockReset();
-  });
-
-  it('builds one parameterized query for the allowed campaigns and period', () => {
-    const query = buildOutreachMetricsQuery(input);
-
-    expect(query.params).toEqual([
-      input.campaignIds,
-      input.fromUtc,
-      input.toExclusiveUtc,
-      input.score,
-    ]);
-    expect(query.text).toContain('campaign_id = ANY($1::text[])');
-    expect(query.text).toContain('timestamp_email >= $2::timestamptz');
-    expect(query.text).toContain('timestamp_email < $3::timestamptz');
-    expect(query.text).toContain("score_code = $4::text");
-  });
-
-  it('counts every outbound step and deduplicates normalized recipients', () => {
-    const { text } = buildOutreachMetricsQuery(input);
-
-    expect(text).toMatch(/ue_type\s*=\s*1/);
-    expect(text).toMatch(/count\(\*\)[\s\S]*emails_sent/i);
-    expect(text).toMatch(/count\(distinct\s+lower\(/i);
-  });
-
-  it('reports score-attribution coverage before applying the score filter', () => {
-    const { text } = buildOutreachMetricsQuery(input);
-
-    expect(text).toContain('outbound_base AS');
-    expect(text).toContain('outbound_coverage AS');
-    expect(text).toMatch(/count\(\*\)[\s\S]*score_total_emails/i);
-    expect(text).toMatch(/count\(\*\)\s+filter\s*\(where\s+score_code\s+is\s+not\s+null\)[\s\S]*score_mapped_emails/i);
-  });
-
-  it('counts canonical reply facts but excludes automatic replies', () => {
-    const { text } = buildOutreachMetricsQuery(input);
-
-    expect(text).toContain('v_reply_facts');
-    expect(text).toContain('reply_outcome_labels');
-    expect(text).toMatch(/auto_reply/i);
-    expect(text).toMatch(/<>\s*'auto_reply'/i);
-    expect(text).toContain('unclassified_replies');
-  });
-
-  it('treats only final qualifications as processed and unions manual target leads', () => {
-    const { text } = buildOutreachMetricsQuery(input);
-
-    expect(text).toContain('portal_lead_qualifications');
-    expect(text).toContain('portal_forwarded_leads');
-    expect(text).toContain("'lead','not_lead','needs_review','objection'");
-    expect(text).not.toMatch(/status\s+in\s*\([^)]*'pending'/i);
-    expect(text).toMatch(/count\(distinct\s+target_key\)/i);
-  });
-
-  it('uses the latest qualification and counts a recipient only once as processed', () => {
-    const { text } = buildOutreachMetricsQuery(input);
-
-    expect(text).toMatch(/distinct\s+on\s*\(reply_key\)/i);
-    expect(text).toMatch(/order\s+by\s+reply_key,\s*qualified_at\s+desc/i);
-    expect(text).toMatch(/count\(distinct\s+reply_key\)[\s\S]*processed_replies/i);
-  });
-
-  it('maps nullable database aggregates to stable zero-valued metrics', () => {
-    expect(mapOutreachMetricsRow({})).toEqual({
-      uniqueRecipients: 0,
-      emailsSent: 0,
-      liveReplies: 0,
-      processedReplies: 0,
-      targetLeads: 0,
-      scoreMappedEmails: 0,
-      scoreTotalEmails: 0,
-      unclassifiedReplies: 0,
-      analyticsAt: null,
+    jest.clearAllMocks();
+    datasetQueryMock.mockRejectedValue(new Error('canceling statement due to statement timeout'));
+    readCampaignAnalyticsFromDbMock.mockResolvedValue({
+      campaigns: [{ id: 'campaign-a', name: 'Campaign A' }],
+      lastSyncedAt: '2026-07-31T12:00:00.000Z',
     });
+    pipelineRpcMock.mockResolvedValue({ data: [pipelineRow], error: null });
   });
 
-  it('explains every material limitation without hiding exact counters', () => {
+  it('explains pipeline limitations without outreach-only counters', () => {
     expect(buildReportQualityNotices({
       campaignId: 'campaign-a',
-      score: 'B',
       legacyScoredCompanies: 125,
       legacySubmittedContacts: 9,
       unattributedConfirmedContacts: 4,
-      scoreMappedEmails: 80,
-      scoreTotalEmails: 100,
-      unclassifiedReplies: 3,
     })).toEqual(expect.arrayContaining([
       expect.stringMatching(/историческ/i),
       expect.stringMatching(/этапа передачи/i),
-      expect.stringMatching(/80 из 100/i),
-      expect.stringMatching(/3 ответ/i),
       expect.stringMatching(/4 подтвержд/i),
     ]));
   });
 
-  it('does not show quality warnings for a fully covered exact report', () => {
+  it('does not show quality warnings for a fully covered exact pipeline report', () => {
     expect(buildReportQualityNotices({
       campaignId: null,
-      score: 'all',
       legacyScoredCompanies: 0,
       legacySubmittedContacts: 0,
       unattributedConfirmedContacts: 0,
-      scoreMappedEmails: 100,
-      scoreTotalEmails: 100,
-      unclassifiedReplies: 0,
     })).toEqual([]);
   });
 
-  it('replaces legacy campaign-id labels with the current accessible campaign name', () => {
-    expect(resolvePipelineCampaignNames([
-      {
-        campaignId: 'campaign-a',
-        campaignName: 'campaign-a',
-        scoreCode: 'A',
-        submitted: 12,
-        confirmed: 0,
-      },
-    ], [
+  it('replaces legacy campaign-id labels with the operational catalog name', () => {
+    expect(resolvePipelineCampaignNames([{
+      campaignId: 'campaign-a',
+      campaignName: 'campaign-a',
+      scoreCode: 'A',
+      submitted: 12,
+      confirmed: 0,
+    }], [
       { id: 'campaign-a', name: 'Mailganer — высокий скор' },
     ])).toEqual([
       expect.objectContaining({ campaignName: 'Mailganer — высокий скор' }),
     ]);
   });
 
-  it('separates event-period additions from cohort conversion and scopes the RPC to allowed campaigns', async () => {
-    datasetQueryMock
-      .mockResolvedValueOnce([{
-        unique_recipients: 8,
-        emails_sent: 15,
-        live_replies: 3,
-        processed_replies: 2,
-        target_leads: 1,
-        score_mapped_emails: 12,
-        score_total_emails: 15,
-        unclassified_replies: 1,
-        analytics_at: '2026-07-31T12:00:00.000Z',
-      }])
-      .mockResolvedValueOnce([{ id: 'campaign-a', name: 'Кампания A' }]);
-    pipelineRpcMock.mockResolvedValue({
-      data: [{
-        scored_companies: 100,
-        working_score_companies: 30,
-        email_found_companies: 20,
-        validated_emails: 18,
-        submitted_contacts: 10,
-        confirmed_contacts: 7,
-        event_confirmed_contacts: 9,
-        event_legacy_submitted_contacts: 2,
-        legacy_scored_companies: 5,
-        unattributed_confirmed_contacts: 1,
-        pipeline_at: '2026-07-31T11:00:00.000Z',
-        by_campaign: [],
-      }],
-      error: null,
-    });
+  it('loads a pipeline-only payload without querying instantly_dataset', async () => {
+    const result = await loadAnalytics();
 
-    const result = await loadClientReportAnalytics({
-      clientUserId: 'client-1',
-      allowedCampaignIds: ['campaign-a', 'campaign-b'],
-      campaignIds: ['campaign-a'],
-      filters: {
-        period: {
-          preset: 'custom',
-          from: '2026-07-01',
-          to: '2026-07-31',
-          fromUtc: new Date('2026-06-30T21:00:00.000Z'),
-          toExclusiveUtc: new Date('2026-07-31T21:00:00.000Z'),
-        },
-        score: 'B',
-        campaignId: 'campaign-a',
-      },
-    });
-
-    expect(datasetQueryMock.mock.calls[0]?.[1]?.[0]).toEqual(['campaign-a']);
-    expect(datasetQueryMock.mock.calls[1]?.[1]).toEqual([
-      ['campaign-a', 'campaign-b'],
+    expect(datasetQueryMock).not.toHaveBeenCalled();
+    expect(readCampaignAnalyticsFromDbMock).toHaveBeenCalledWith([
+      'campaign-a',
+      'campaign-b',
     ]);
-
     expect(pipelineRpcMock).toHaveBeenCalledWith(
       'client_report_pipeline_summary',
-      expect.objectContaining({
-        p_allowed_campaign_ids: ['campaign-a', 'campaign-b'],
-        p_campaign_id: 'campaign-a',
+      {
+        p_client_user_id: 'client-1',
+        p_from: '2026-06-30T21:00:00.000Z',
+        p_to: '2026-07-31T21:00:00.000Z',
         p_score_code: 'B',
-      }),
+        p_campaign_id: 'campaign-a',
+        p_allowed_campaign_ids: ['campaign-a', 'campaign-b'],
+      },
     );
-    expect(result.metrics.contactsAddedConfirmed).toBe(9);
-    expect(result.metrics.contactsSubmittedLegacy).toBe(2);
-    expect(result.funnel.confirmedContacts).toBe(7);
-    expect(result.qualityNotices).toEqual(expect.arrayContaining([
-      expect.stringMatching(/историческ/i),
-      expect.stringMatching(/этапа передачи/i),
-      expect.stringMatching(/12 из 15/i),
-      expect.stringMatching(/1 ответ/i),
-      expect.stringMatching(/1 подтвержд/i),
-    ]));
+
+    expect(result).not.toHaveProperty('metrics');
+    expect(result.freshness).toEqual({ pipelineAt: '2026-07-31T11:00:00.000Z' });
+    expect(result.freshness).not.toHaveProperty('analyticsAt');
+    expect(result.campaigns).toEqual([
+      { id: 'campaign-a', name: 'Campaign A' },
+      { id: 'campaign-b', name: 'campaign-b' },
+    ]);
+    expect(result.funnel).toEqual(expect.objectContaining({
+      scoredCompanies: 100,
+      workingScoreCompanies: 30,
+      emailFoundCompanies: 20,
+      validatedEmails: 18,
+      submittedContacts: 10,
+      confirmedContacts: 7,
+      byCampaign: [expect.objectContaining({
+        campaignId: 'campaign-a',
+        campaignName: 'Campaign A',
+        scoreCode: 'B',
+        submitted: 10,
+        confirmed: 7,
+      })],
+    }));
+    expect(result.qualityNotices).toHaveLength(3);
+  });
+
+  it('keeps pipeline analytics available when the campaign catalog lookup fails', async () => {
+    readCampaignAnalyticsFromDbMock.mockRejectedValueOnce(new Error('catalog unavailable'));
+
+    const result = await loadAnalytics();
+
+    expect(result.campaigns).toEqual([
+      { id: 'campaign-a', name: 'campaign-a' },
+      { id: 'campaign-b', name: 'campaign-b' },
+    ]);
+    expect(result.funnel.byCampaign).toEqual([
+      expect.objectContaining({ campaignId: 'campaign-a', campaignName: 'campaign-a' }),
+    ]);
+    expect(datasetQueryMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      caseName: 'empty',
+      catalogCampaigns: [],
+      expectedCampaigns: [
+        { id: 'campaign-a', name: 'campaign-a' },
+        { id: 'campaign-b', name: 'campaign-b' },
+      ],
+    },
+    {
+      caseName: 'partial with an out-of-scope row',
+      catalogCampaigns: [
+        { id: 'campaign-a', name: 'Campaign A' },
+        { id: 'foreign-campaign', name: 'Must not leak' },
+      ],
+      expectedCampaigns: [
+        { id: 'campaign-a', name: 'Campaign A' },
+        { id: 'campaign-b', name: 'campaign-b' },
+      ],
+    },
+  ])('keeps the complete allowlist for a $caseName catalog result', async ({
+    catalogCampaigns,
+    expectedCampaigns,
+  }) => {
+    readCampaignAnalyticsFromDbMock.mockResolvedValueOnce({
+      campaigns: catalogCampaigns,
+      lastSyncedAt: null,
+    });
+
+    const result = await loadAnalytics();
+
+    expect(result.campaigns).toEqual(expectedCampaigns);
+    expect(result.campaigns).not.toContainEqual(expect.objectContaining({
+      id: 'foreign-campaign',
+    }));
+  });
+
+  it('turns a pipeline RPC failure into a typed client-safe error', async () => {
+    pipelineRpcMock.mockResolvedValueOnce({
+      data: null,
+      error: { message: 'canceling statement due to statement timeout' },
+    });
+
+    const error = await loadAnalytics().catch((caught: unknown) => caught);
+
+    expect(error).toEqual(expect.objectContaining({
+      name: 'ClientReportPipelineUnavailableError',
+      message: 'Воронка базы временно недоступна. Повторите попытку позже.',
+    }));
+    expect(error).toBeInstanceOf(ClientReportPipelineUnavailableError);
+    expect(error).not.toHaveProperty('message', expect.stringMatching(/statement timeout/i));
   });
 });

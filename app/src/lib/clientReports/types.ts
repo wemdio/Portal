@@ -3,6 +3,9 @@ import type {
   ClientReportScoreFilter,
 } from './filters';
 
+export const CLIENT_REPORT_PIPELINE_UNAVAILABLE_MESSAGE =
+  'Воронка базы временно недоступна. Повторите попытку позже.';
+
 export type ClientReportExportKind = 'rejected' | 'working' | 'submitted';
 export const CLIENT_REPORT_EXPORT_STATUSES = [
   'pending',
@@ -27,15 +30,6 @@ export interface ClientReportAnalyticsResponse {
     score: ClientReportScoreFilter;
     campaignId: string | null;
   };
-  metrics: {
-    contactsAddedConfirmed: number;
-    contactsSubmittedLegacy: number;
-    uniqueRecipients: number;
-    emailsSent: number;
-    liveReplies: number;
-    processedReplies: number;
-    targetLeads: number;
-  };
   funnel: {
     scoredCompanies: number;
     workingScoreCompanies: number;
@@ -52,7 +46,6 @@ export interface ClientReportAnalyticsResponse {
     }>;
   };
   freshness: {
-    analyticsAt: string | null;
     pipelineAt: string | null;
   };
   legacyNotice: string | null;

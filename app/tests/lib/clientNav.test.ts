@@ -221,6 +221,15 @@ describe('client nav IA', () => {
     expect(campaigns?.href).toBe('/client');
   });
 
+  it('позиционирует reports как воронку базы, а не вторую статистику кампаний', () => {
+    const reports = allItems.find((i) => i.id === 'reports');
+    expect(reports).toEqual(expect.objectContaining({
+      href: '/client/reports',
+      label: 'Воронка базы',
+      labelEn: 'List funnel',
+    }));
+  });
+
   it('label rename: «Запуск кампаний» → «Создать кампанию»', () => {
     const launch = allItems.find((i) => i.id === 'launch');
     expect(launch?.label).toBe('Создать кампанию');
