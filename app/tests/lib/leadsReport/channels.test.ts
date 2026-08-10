@@ -36,21 +36,12 @@ describe('detectSummaryChannel', () => {
   });
 
   it('источник «портал (outreachos)» сознательно вне отчёта', () => {
-    const raw = {
-      custom_fields_values: [
-        { field_name: 'Источник', values: [{ value: 'портал (outreachos)' }] },
-      ],
-    };
-    expect(detectSummaryChannel(raw)).toBeNull();
+    expect(detectSummaryChannel(raw({ Источник: 'портал (outreachos)' }))).toBeNull();
   });
 
   it('исключённый источник сильнее пометки «Контур»=«Маркетинг»', () => {
-    const raw = {
-      custom_fields_values: [
-        { field_name: 'Контур', values: [{ value: 'Маркетинг' }] },
-        { field_name: 'Источник', values: [{ value: 'Портал (OutreachOS)' }] },
-      ],
-    };
-    expect(detectSummaryChannel(raw)).toBeNull();
+    expect(
+      detectSummaryChannel(raw({ Контур: 'Маркетинг', Источник: 'Портал (OutreachOS)' })),
+    ).toBeNull();
   });
 });
