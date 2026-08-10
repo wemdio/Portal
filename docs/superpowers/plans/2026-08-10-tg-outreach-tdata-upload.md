@@ -1536,7 +1536,10 @@ limit 25;
 
 - [ ] **Step 4: Коммит, если что-то поправилось по итогам прогона**
 
+Добавлять только свои файлы поимённо. В рабочей копии параллельно идут чужие
+правки (`app/src/lib/leadsReport/`), `git add -A` утащил бы их в этот коммит.
+
 ```bash
-git add -A app/src app/tests
+git add app/src/lib/telegram app/src/lib/tgOutreach/tdataImport.ts app/tests/lib/telegram app/tests/lib/tgOutreach
 git commit -m "fix(tg-outreach): правки по итогам прогона загрузки tdata"
 ```
