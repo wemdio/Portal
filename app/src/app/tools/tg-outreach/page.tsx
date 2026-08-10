@@ -1630,13 +1630,25 @@ function CampaignAccountsTab({
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
       });
-      const body = await res.json() as {
+      // Тело читаем бережно, как в deleteSelected выше. Партия tdata-архивов
+      // весит мегабайты, и до приложения запрос может не доехать: прокси
+      // отвечает 413 обычной HTML-страницей, на которой res.json() падает.
+      // Раньше такое падение выглядело как «нажал и ничего не произошло».
+      const body = await res.json().catch(() => null) as {
         error?: string;
         count?: number;
         skipped?: Array<{ name: string; reason: string }>;
         errors?: Array<{ name: string; error: string }>;
-      };
-      if (!res.ok) {
+      } | null;
+      if (!body) {
+        // 413 называем словами: с «слишком большая загрузка» оператор может
+        // что-то сделать сам, с голым номером статуса — нет.
+        setUploadError(
+          res.status === 413
+            ? 'Загрузка слишком большая. Залейте архивы меньшими партиями.'
+            : `Не удалось прочитать ответ сервера (HTTP ${res.status})`,
+        );
+      } else if (!res.ok) {
         setUploadError(body.error ?? 'Ошибка загрузки');
       } else {
         const count = body.count ?? 0;
@@ -1653,9 +1665,12 @@ function CampaignAccountsTab({
       }
     } finally {
       setUploading(false);
+      // Сбрасываем всегда, а не после try: иначе после сбоя input сохраняет
+      // прежнее значение, повторный выбор тех же файлов не даёт события
+      // change — и оператор остаётся без единого способа повторить загрузку.
+      e.target.value = '';
       void load();
     }
-    e.target.value = '';
   };
 
   return (
