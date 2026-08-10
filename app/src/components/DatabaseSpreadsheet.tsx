@@ -2848,14 +2848,14 @@ export function DatabaseSpreadsheet() {
     ids.forEach((id) => handledImportsRef.current.add(id));
 
     (async () => {
-      // Потолок импорта. Был 10 000 и молча резал: парсеры отдают до 50 000, и
-      // сбор по Яндекс.Картам на 26 612 организаций приезжал сюда как 9 999
-      // строк — расхождение замечали уже в готовой базе. Теперь потолок тот же,
-      // что у отправителя, а об обрезании говорим с числами.
-      const MAX_ROWS = 50_000;
+      // Потолка на строки нет. Был 10 000 и молча резал: сбор по Яндекс.Картам
+      // на 26 612 организаций приезжал сюда как 9 999 строк, и расхождение
+      // замечали уже в готовой базе. Сколько прислали — столько и кладём.
+      //
+      // Колонки по-прежнему ограничены MAX_COLS: лишние столбцы это порча
+      // структуры листа, а лишние строки — просто много строк.
       const MAX_COLS = 80;
       let importedTabs = 0;
-      let sourceRows = 0;
       let importedRows = 0;
       let trimmedAny = false;
       let missing = 0;
@@ -2872,7 +2872,7 @@ export function DatabaseSpreadsheet() {
           }
 
           const rawRows = Array.isArray(payload.rows) ? payload.rows : [];
-          const limitedRows = rawRows.slice(0, MAX_ROWS).map((row) => {
+          const limitedRows = rawRows.map((row) => {
             const cells = Array.isArray(row) ? row : [];
             return cells.slice(0, MAX_COLS).map((cell) => String(cell ?? ''));
           });
@@ -2894,8 +2894,7 @@ export function DatabaseSpreadsheet() {
           await deletePendingDbImport(id);
           importedTabs += 1;
           importedRows += limitedRows.length;
-          sourceRows += rawRows.length;
-          trimmedAny = trimmedAny || limitedRows.length < rawRows.length;
+          trimmedAny = trimmedAny || rawRows.some((row) => Array.isArray(row) && row.length > MAX_COLS);
         }
 
         if (importedTabs > 0) {
@@ -2905,7 +2904,7 @@ export function DatabaseSpreadsheet() {
               : `Импортировано баз: ${importedTabs} (${importedRows} строк)`;
           showCopyNotice(
             trimmedAny
-              ? `${base} — обрезано до ${MAX_ROWS.toLocaleString('ru-RU')}, в источнике было ${sourceRows.toLocaleString('ru-RU')}`
+              ? `${base} — часть столбцов не поместилась (потолок ${MAX_COLS})`
               : base,
             trimmedAny ? 'error' : 'success',
           );

@@ -331,7 +331,8 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
         return;
       }
 
-      const MAX_ROWS = 50_000;
+      // Обрезания нет: сколько собрали, столько и кладём. Потолок в 50 000 стоял
+      // здесь молча, и на крупной выдаче человек узнавал о нём уже в готовой базе.
       const rows: string[][] = [
         [
           'Name',
@@ -351,7 +352,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
           'JobId',
           'Parser',
         ],
-        ...results.slice(0, MAX_ROWS).map((r) => [
+        ...results.map((r) => [
           r.name ?? '',
           r.website ?? '',
           r.email ?? '',
@@ -374,7 +375,16 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
       const title = `Яндекс.Карты #${activeJobId.slice(0, 8)}`;
       const { id } = await writePendingDbImport({ title, rows });
       const url = buildDatabasesImportUrl(id);
-      setToast({ tone: 'success', message: 'Добавлено в “Базы”. Можете перейти и проверить импорт.', href: url });
+      // Число в сообщении не для красоты: молчаливое расхождение между выдачей и
+      // базой мы уже ловили, и увидеть его лучше сразу, а не в готовой базе.
+      const count = results.length.toLocaleString('ru-RU');
+      setToast({
+        tone: 'success',
+        message: results.length > 100_000
+          ? `Добавлено в «Базы»: ${count} строк. Столько строк вкладка открывает небыстро — дайте ей время.`
+          : `Добавлено в «Базы»: ${count} строк. Можете перейти и проверить импорт.`,
+        href: url,
+      });
     } catch (e) {
       setToast({ tone: 'error', message: e instanceof Error ? e.message : 'Ошибка добавления в базу' });
     }
@@ -443,11 +453,12 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     <div className="space-y-8">
       {toast ? (
         <div
-          className={`fixed bottom-4 right-4 z-50 max-w-[92vw] rounded-xl border px-4 py-3 text-sm shadow-lg ${
-            toast.tone === 'success'
-              ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
-              : 'border-red-200 bg-red-50 text-red-900'
+          // Сплошной фон, а не светлая заливка: на тёмной теме она просвечивала
+          // и текст было не прочитать.
+          className={`fixed bottom-4 right-4 z-50 max-w-[92vw] rounded-xl px-4 py-3 text-sm font-medium text-white shadow-xl ring-1 ring-black/10 ${
+            toast.tone === 'success' ? 'bg-emerald-700' : 'bg-red-700'
           }`}
+          style={{ opacity: 1 }}
           role="status"
           aria-live="polite"
         >
@@ -456,7 +467,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
             {toast.href ? (
               <a
                 href={toast.href}
-                className="shrink-0 inline-flex items-center rounded-lg border border-emerald-200 bg-white px-2.5 py-1 text-xs font-medium text-emerald-900 shadow-sm hover:bg-emerald-50"
+                className="shrink-0 inline-flex items-center rounded-lg bg-white px-2.5 py-1 text-xs font-semibold text-emerald-900 shadow-sm hover:bg-emerald-50"
               >
                 Перейти
               </a>
