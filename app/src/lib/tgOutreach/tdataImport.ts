@@ -103,3 +103,40 @@ export async function collectTdataCandidates(
 
   return { candidates, skipped, errors };
 }
+
+export interface ExistingAccountRow {
+  tg_user_id: number;
+  campaign_name: string | null;
+}
+
+/**
+ * Развести кандидатов на новых и уже загруженных.
+ *
+ * Сверка идёт по всей базе, а не по текущей кампании: один ключ авторизации в
+ * двух кампаниях — это два параллельных подключения и `AUTH_KEY_DUPLICATED`,
+ * после которого Telegram рвёт сессию.
+ */
+export function splitExistingAccounts(
+  candidates: TdataCandidate[],
+  existing: ExistingAccountRow[],
+): { fresh: TdataCandidate[]; skipped: TdataSkip[] } {
+  const byUserId = new Map(existing.map((row) => [row.tg_user_id, row.campaign_name]));
+  const fresh: TdataCandidate[] = [];
+  const skipped: TdataSkip[] = [];
+
+  for (const candidate of candidates) {
+    if (!byUserId.has(candidate.tgUserId)) {
+      fresh.push(candidate);
+      continue;
+    }
+    const campaignName = byUserId.get(candidate.tgUserId);
+    skipped.push({
+      name: candidate.name,
+      reason: campaignName
+        ? `уже загружен в кампанию «${campaignName}»`
+        : 'уже загружен в другую кампанию',
+    });
+  }
+
+  return { fresh, skipped };
+}
