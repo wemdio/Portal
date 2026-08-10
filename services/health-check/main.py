@@ -121,8 +121,8 @@ _FAIL_COUNT: dict[str, int] = {}
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 
-DISK_TOTAL_GB = float(os.environ.get("HEALTH_DISK_TOTAL_GB", "50"))
-DISK_WARN_GB = float(os.environ.get("HEALTH_DISK_WARN_GB", "45"))
+DISK_TOTAL_GB = float(os.environ.get("HEALTH_DISK_TOTAL_GB", "80"))
+DISK_WARN_GB = float(os.environ.get("HEALTH_DISK_WARN_GB", "72"))
 
 # ── Per-container resource watchdog ──────────────────────────────────────────
 # Alert when a container uses >= HEALTH_CONTAINER_USAGE_PCT of ITS OWN cgroup
@@ -1955,13 +1955,20 @@ def _extract_chart_series(
     return timestamps, rates, conns
 
 
-def _apply_xticks(ax, timestamps: list[datetime], n: int) -> None:
-    if n <= 1:
+def _apply_xticks(ax, timestamps: list[datetime], n: int, max_ticks: int = 6) -> None:
+    """Evenly spread up to max_ticks labels between the first and last point.
+
+    Spacing the ticks by linear interpolation (instead of a fixed step plus a
+    forced last tick) guarantees the final label never lands next to its
+    neighbour, which used to make the two right-most times overlap.
+    """
+    if n <= 0:
         return
-    step = max(1, n // 5)
-    ticks = list(range(0, n, step))
-    if ticks[-1] != n - 1:
-        ticks.append(n - 1)
+    if n == 1:
+        ticks = [0]
+    else:
+        count = min(max_ticks, n)
+        ticks = sorted({round(i * (n - 1) / (count - 1)) for i in range(count)})
     ax.set_xticks(ticks)
     ax.set_xticklabels(
         [timestamps[i].strftime("%H:%M") for i in ticks],
