@@ -7,6 +7,12 @@ import { StringSession } from 'telegram/sessions';
  * Установленный GramJS выбирает эту ветку разбора по длине строки (352 символа
  * после префикса версии), поэтому менять расклад нельзя: строка перестанет
  * читаться как IP-адрес.
+ *
+ * `authKey` обязан быть ровно 256 байт — это предусловие, а не удобство.
+ * Более короткий или длинный ключ раньше молча обрезался и давал строку
+ * другой длины: она уезжала в другую ветку разбора GramJS и собирала рабочую
+ * на вид сессию с адресом из мусора вместо ошибки. Дешевле упасть здесь, чем
+ * записать такую сессию в таблицу аккаунтов.
  */
 export function buildGramJsSessionString(
   dcId: number,
@@ -14,6 +20,12 @@ export function buildGramJsSessionString(
   port: number,
   authKey: Uint8Array,
 ): string {
+  if (authKey.length !== 256) {
+    throw new Error(
+      `buildGramJsSessionString: ключ авторизации должен быть 256 байт, получено ${authKey.length}`,
+    );
+  }
+
   const isIPv6 = serverAddress.includes(':');
   const addressBuf = isIPv6
     ? Buffer.from(
@@ -29,7 +41,10 @@ export function buildGramJsSessionString(
   portBuf.writeInt16BE(port, 0);
   const keyBuf = Buffer.from(authKey);
 
-  const result = Buffer.concat([dcBuf, addressBuf, portBuf, keyBuf.subarray(0, 256)]);
+  // Длина уже проверена выше, поэтому здесь keyBuf ровно 256 байт — обрезка
+  // subarray() больше не нужна, она маскировала бы ту самую ошибку, которую
+  // теперь бросаем явно.
+  const result = Buffer.concat([dcBuf, addressBuf, portBuf, keyBuf]);
   return '1' + result.toString('base64');
 }
 
