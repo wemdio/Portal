@@ -42,10 +42,8 @@ export type AmoLeadMetricRow = {
   amo_id: number;
   pipeline_id: number | null;
   status_id: number | null;
-  status_name: string | null;
   name: string | null;
   created_at: string | null;
-  updated_at: string | null;
   raw: unknown;
 };
 
@@ -321,9 +319,7 @@ export async function computeAllChannelMetrics(
 
   const { data: leadsData, error: leadsError } = await db
     .from('amo_leads')
-    .select(
-      'amo_id, pipeline_id, status_id, status_name, name, created_at, updated_at, raw',
-    )
+    .select('amo_id, pipeline_id, status_id, name, created_at, raw')
     .eq('pipeline_id', thresholds.pipelineId)
     .gte('created_at', startIso)
     .lt('created_at', endIso);
@@ -358,12 +354,57 @@ export async function computeAllChannelMetrics(
     }),
   );
 
+  const statusEvents = eventChunks.flat();
+  warnOnUnknownStatuses(statusEvents, thresholds);
+
   return computeMetricsFromRows(
     channels,
     statuses,
     leads,
-    eventChunks.flat(),
+    statusEvents,
     start,
     end,
+  );
+}
+
+/**
+ * Ругается в лог на переходы в этапы, которых нет в `amo_statuses`.
+ *
+ * `computePeak` оценивает такой этап в 0 (см. `sortOf`), то есть сделка, чей
+ * максимум пришёлся на него, молча выпадает из «Лидов» и обеих метрик встреч.
+ * В боевых данных такие есть: 16 событий указывают на 63384134 и 63432998 —
+ * этапы, удалённые из AMO. Сейчас безвредно (все старше 25.06, и у каждой из
+ * тех сделок был другой путь), но «молча неверная цифра» — ровно то, что этот
+ * отчёт уже дважды заставляло расследовать вручную.
+ *
+ * Здесь `warn`, а не `throw`, в отличие от `buildThresholds`. Разница в том,
+ * чего именно не хватает: `buildThresholds` падает на пропаже ОПОРНОГО этапа
+ * («Квалифицированный лид», «Назначена встреча», «Встреча проведена»,
+ * «Перенос») — без него порогов нет и считать нечего, любая цифра будет
+ * выдумкой. А удалить рядовой этап из воронки — законная операция продаж, и
+ * ронять из-за неё пятничный отчёт нельзя: отчёт с одной сомнительной сделкой
+ * полезнее, чем неотправленный отчёт.
+ */
+function warnOnUnknownStatuses(
+  statusEvents: AmoStatusEventRow[],
+  thresholds: Thresholds,
+): void {
+  const unknownStatusIds = new Set<number>();
+  const affectedDeals = new Set<number>();
+
+  for (const event of statusEvents) {
+    const statusId = toStatusId(event.to_value);
+    if (statusId === null || thresholds.sortByStatusId.has(statusId)) continue;
+    unknownStatusIds.add(statusId);
+    affectedDeals.add(event.amo_deal_id);
+  }
+
+  if (unknownStatusIds.size === 0) return;
+
+  console.warn(
+    '[leads-report] переходы в этапы, которых нет в amo_statuses:'
+    + ` ${[...unknownStatusIds].sort((a, b) => a - b).join(', ')}.`
+    + ` Затронуто сделок: ${affectedDeals.size}.`
+    + ' Их максимальный этап считается как 0 — метрики по ним занижены.',
   );
 }

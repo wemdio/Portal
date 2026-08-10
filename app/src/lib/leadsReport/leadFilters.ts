@@ -102,6 +102,15 @@ export type DedupCandidate = {
   identity: string | null;
   /** Максимальный достигнутый этап — считается в `metrics.ts`. */
   peak: number;
+  /**
+   * Сделка выиграна к концу отчётного окна — считается в `metrics.ts`.
+   *
+   * В тай-брейке стоит ВЫШЕ `peak`, потому что «Успешно» намеренно не входит
+   * в `peak` (его sort — признак закрытия, а не позиция в воронке). Без этого
+   * выигранный дубль с раннего этапа проиграл бы невыигранному собрату с более
+   * высоким `peak`, и вся группа перестала бы считаться лидом.
+   */
+  wonByEnd: boolean;
   channel: string;
   createdAt: string | null;
 };
@@ -126,9 +135,10 @@ export type DedupCandidate = {
  * «Дмитрия», а под именем «Заявка с сайта» за неделю 19.06 сидели 27 разных
  * компаний. Дедуп по всем именам съел бы живые лиды.
  *
- * Из группы остаётся сделка с наибольшим `peak`; при равенстве — самая ранняя
- * по `createdAt`; при равенстве — с меньшим `amoId`. Последнее нужно, чтобы
- * результат не зависел от порядка строк, в котором их отдала БД.
+ * Из группы остаётся выигранная сделка; при равенстве — с наибольшим `peak`;
+ * при равенстве — самая ранняя по `createdAt`; при равенстве — с меньшим
+ * `amoId`. Последнее нужно, чтобы результат не зависел от порядка строк, в
+ * котором их отдала БД.
  *
  * Победитель хранится как индекс во входном массиве, а не сам объект: индекс
  * инъективен по построению (`forEach` не повторяет индекс дважды), поэтому
@@ -156,8 +166,11 @@ export function dedupeLeadMagnets<T extends DedupCandidate>(candidates: T[]): T[
 }
 
 /**
- * Тай-брейк между двумя заявками одной группы: этап → время создания →
- * amoId.
+ * Тай-брейк между двумя заявками одной группы: выигрыш → этап → время
+ * создания → amoId.
+ *
+ * Выигрыш идёт первым — почему, см. комментарий к полю
+ * `DedupCandidate.wonByEnd`.
  *
  * Между этапом и временем есть неочевидная ступень — валидность даты.
  * `createdAt` может не распарситься (пустая строка, кривой формат из БД);
@@ -169,6 +182,7 @@ export function dedupeLeadMagnets<T extends DedupCandidate>(candidates: T[]): T[
  * «как получится».
  */
 function isBetterCandidate(candidate: DedupCandidate, current: DedupCandidate): boolean {
+  if (candidate.wonByEnd !== current.wonByEnd) return candidate.wonByEnd;
   if (candidate.peak !== current.peak) return candidate.peak > current.peak;
 
   const candidateTime = Date.parse(candidate.createdAt ?? '');

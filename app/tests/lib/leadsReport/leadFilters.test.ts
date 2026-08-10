@@ -58,7 +58,8 @@ describe('dedupeLeadMagnets', () => {
     channel = 'smm',
     createdAt = '2026-08-03T10:00:00.000Z',
     identity: string | null = null,
-  ) => ({ amoId, name, peak, channel, createdAt, identity });
+    wonByEnd = false,
+  ) => ({ amoId, name, peak, channel, createdAt, identity, wonByEnd });
 
   it('из двух заявок бота с одним именем оставляет дошедшую дальше', () => {
     const result = dedupeLeadMagnets([
@@ -120,6 +121,18 @@ describe('dedupeLeadMagnets', () => {
     const result = dedupeLeadMagnets([
       candidate(1, 'Бот: Евгения', 30, 'marketing', '2026-08-04T18:10:46.000Z', '5091587914'),
       candidate(2, 'Бот: Евгения ', 70, 'marketing', '2026-08-04T18:18:38.000Z', '5091587914'),
+    ]);
+
+    expect(result.map((item) => item.amoId)).toEqual([2]);
+  });
+
+  it('выигранная заявка побеждает дубль, ушедший дальше по воронке', () => {
+    // «Успешно» намеренно не входит в peak, поэтому у выигранной заявки этап
+    // может быть НИЖЕ, чем у проигравшего дубля. Считать группу нужно по
+    // выигранной, иначе группа перестанет быть лидом.
+    const result = dedupeLeadMagnets([
+      candidate(1, 'Бот: Пётр', 70, 'marketing', '2026-08-04T10:00:00.000Z', '777'),
+      candidate(2, 'Бот: Пётр', 20, 'marketing', '2026-08-04T11:00:00.000Z', '777', true),
     ]);
 
     expect(result.map((item) => item.amoId)).toEqual([2]);
