@@ -18,6 +18,10 @@ export type TgParserJobApiRow = {
   error_message: string | null;
   started_at: string | null;
   completed_at: string | null;
+  /** Прогресс идущей задачи: заполняется по ходу обхода, не только в конце. */
+  found_count?: number | null;
+  progress_note?: string | null;
+  progress_at?: string | null;
 };
 
 export type ParseJobStatus = 'running' | 'done' | 'error';
@@ -36,6 +40,11 @@ export type ParseJobUi = {
   warning?: string;
   startedAt: number;
   isTarget?: boolean;
+  /** Сколько собрано на текущий момент у идущей задачи. */
+  foundCount?: number;
+  /** Чем задача занята прямо сейчас: источник и этап обхода. */
+  progressNote?: string;
+  progressAt?: number;
 };
 
 /** Совместимо с прежним именем в UI страницы tg-parser */
@@ -70,5 +79,8 @@ export function tgParserApiRowToUi(row: TgParserJobApiRow): ParseJobUi {
     warning,
     startedAt: new Date(row.started_at ?? row.created_at).getTime(),
     isTarget: (cfg as Record<string, unknown>).is_target as boolean | undefined,
+    foundCount: row.found_count ?? undefined,
+    progressNote: row.progress_note ?? undefined,
+    progressAt: row.progress_at ? new Date(row.progress_at).getTime() : undefined,
   };
 }
