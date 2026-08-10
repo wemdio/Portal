@@ -2848,9 +2848,14 @@ export function DatabaseSpreadsheet() {
     ids.forEach((id) => handledImportsRef.current.add(id));
 
     (async () => {
-      const MAX_ROWS = 10_000;
+      // Потолок импорта. Был 10 000 и молча резал: парсеры отдают до 50 000, и
+      // сбор по Яндекс.Картам на 26 612 организаций приезжал сюда как 9 999
+      // строк — расхождение замечали уже в готовой базе. Теперь потолок тот же,
+      // что у отправителя, а об обрезании говорим с числами.
+      const MAX_ROWS = 50_000;
       const MAX_COLS = 80;
       let importedTabs = 0;
+      let sourceRows = 0;
       let importedRows = 0;
       let trimmedAny = false;
       let missing = 0;
@@ -2889,6 +2894,7 @@ export function DatabaseSpreadsheet() {
           await deletePendingDbImport(id);
           importedTabs += 1;
           importedRows += limitedRows.length;
+          sourceRows += rawRows.length;
           trimmedAny = trimmedAny || limitedRows.length < rawRows.length;
         }
 
@@ -2897,7 +2903,12 @@ export function DatabaseSpreadsheet() {
             importedTabs === 1
               ? `Импортировано: ${importedRows} строк`
               : `Импортировано баз: ${importedTabs} (${importedRows} строк)`;
-          showCopyNotice(trimmedAny ? `${base} (обрезано до лимита)` : base, 'success');
+          showCopyNotice(
+            trimmedAny
+              ? `${base} — обрезано до ${MAX_ROWS.toLocaleString('ru-RU')}, в источнике было ${sourceRows.toLocaleString('ru-RU')}`
+              : base,
+            trimmedAny ? 'error' : 'success',
+          );
         } else if (missing > 0) {
           showCopyNotice('Импорт не найден (возможно, устарел или был очищен браузером)', 'error');
         }

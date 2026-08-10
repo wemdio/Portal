@@ -81,7 +81,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     }
   }, []);
 
-  const loadResults = useCallback(async (jobId: string) => {
+  const loadResults = useCallback(async (jobId: string, previewOnly = false) => {
     setLoadingResults(true);
     try {
       const PAGE = 5000;
@@ -94,6 +94,10 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
         const page = data.results ?? [];
         all = all.concat(page);
         if (!data.hasMore || page.length === 0) break;
+        // Пока задача идёт, тянуть всю выдачу незачем: в таблице видно первые
+        // 500, а полный список нужен только «В базу» и экспорту — то и другое
+        // доступно по завершении.
+        if (previewOnly) break;
         offset += page.length;
       }
       setResults(all);
@@ -115,15 +119,32 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     void loadResults(activeJobId);
   }, [activeJobId, loadResults]);
 
+  // Сколько строк было в прошлый раз, когда перечитывали результаты. Раньше
+  // опрос дёргал loadResults каждые пять секунд безусловно: на выдаче в 26 тысяч
+  // это шесть запросов по 5000 строк каждые пять секунд, полная замена массива и
+  // прыгающая таблица — читать её было невозможно. Теперь перечитываем, только
+  // когда счётчик собранного реально сдвинулся.
+  const loadedAtCount = useRef<number | null>(null);
+
   useEffect(() => {
     if (!activeJobId || !activeJob) return;
     if (activeJob.status === 'running' || activeJob.status === 'pending') {
       const interval = window.setInterval(() => {
         void refreshJobs();
         void refreshQueueStatus();
-        void loadResults(activeJobId);
+        const collected = activeJob.processed_organizations ?? 0;
+        if (loadedAtCount.current !== collected) {
+          loadedAtCount.current = collected;
+          void loadResults(activeJobId, true);
+        }
       }, 5000);
       return () => window.clearInterval(interval);
+    }
+    // Задача закрылась — один раз забираем выдачу целиком: она нужна кнопке
+    // «В базу» и подсчёту в подписи под таблицей.
+    if (loadedAtCount.current !== null) {
+      loadedAtCount.current = null;
+      void loadResults(activeJobId);
     }
   }, [activeJob, activeJobId, refreshJobs, refreshQueueStatus, loadResults]);
 
@@ -903,7 +924,9 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                 </div>
                 {results.length > 500 && (
                   <div className="p-2 border-t border-gray-200 bg-gray-50 text-center text-xs text-gray-500">
-                    Показано 500 из {results.length} записей. В экспорт (Excel / CSV) попадут все {results.length}.
+                    {activeJob.status === 'running'
+                      ? `Показано ${Math.min(results.length, 500)} из ${processedOrgs.toLocaleString('ru-RU')} собранных. Сбор продолжается.`
+                      : `Показано ${Math.min(results.length, 500)} из ${results.length.toLocaleString('ru-RU')} записей. В экспорт (Excel / CSV) попадут все ${results.length.toLocaleString('ru-RU')}.`}
                   </div>
                 )}
               </div>
