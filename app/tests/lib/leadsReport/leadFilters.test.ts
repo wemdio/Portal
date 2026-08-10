@@ -1,4 +1,8 @@
-import { isExcludedLeadName } from '@/lib/leadsReport/leadFilters';
+import {
+  dedupeLeadMagnets,
+  isExcludedLeadName,
+  isLeadMagnet,
+} from '@/lib/leadsReport/leadFilters';
 
 describe('isExcludedLeadName', () => {
   it('ловит сотрудников, тестирующих бота, в любом написании', () => {
@@ -34,5 +38,71 @@ describe('isExcludedLeadName', () => {
   it('ловит составное имя при неровных пробелах', () => {
     expect(isExcludedLeadName('Бот: Юлия  Миронова')).toBe(true);
     expect(isExcludedLeadName('Бот: Юлия\tМиронова')).toBe(true);
+  });
+});
+
+describe('isLeadMagnet', () => {
+  it('лид-магнит — это заявка бота по префиксу имени', () => {
+    expect(isLeadMagnet('Бот: Third Child')).toBe(true);
+    expect(isLeadMagnet('  Бот: Third Child')).toBe(true);
+    expect(isLeadMagnet('Заявка: onelabgames.ru')).toBe(false);
+    expect(isLeadMagnet(null)).toBe(false);
+  });
+});
+
+describe('dedupeLeadMagnets', () => {
+  const candidate = (
+    amoId: number,
+    name: string,
+    peak: number,
+    channel = 'smm',
+    createdAt = '2026-08-03T10:00:00.000Z',
+  ) => ({ amoId, name, peak, channel, createdAt });
+
+  it('из двух заявок бота с одним именем оставляет дошедшую дальше', () => {
+    const result = dedupeLeadMagnets([
+      candidate(34518579, 'Бот: Aleksei Brazhnikov', 30),
+      candidate(34518593, 'Бот: Aleksei Brazhnikov', 70),
+    ]);
+
+    expect(result.map((item) => item.amoId)).toEqual([34518593]);
+  });
+
+  it('при равном этапе оставляет самую раннюю заявку', () => {
+    const result = dedupeLeadMagnets([
+      candidate(34550051, 'Бот: Михаил Маркетолог', 20, 'marketing', '2026-08-05T08:38:39.000Z'),
+      candidate(34549993, 'Бот: Михаил Маркетолог', 20, 'marketing', '2026-08-05T08:35:06.000Z'),
+    ]);
+
+    expect(result.map((item) => item.amoId)).toEqual([34549993]);
+  });
+
+  it('не трогает не-лид-магниты: два разных «Дмитрия» остаются двумя', () => {
+    const result = dedupeLeadMagnets([
+      candidate(34510495, 'Дмитрий', 30, 'outreach'),
+      candidate(34512057, 'Дмитрий', 80, 'outreach'),
+    ]);
+
+    expect(result).toHaveLength(2);
+  });
+
+  it('дедуп идёт внутри канала: одно имя в разных каналах — разные заявки', () => {
+    const result = dedupeLeadMagnets([
+      candidate(1, 'Бот: Евгения', 30, 'marketing'),
+      candidate(2, 'Бот: Евгения', 30, 'smm'),
+    ]);
+
+    expect(result).toHaveLength(2);
+  });
+
+  it('сохраняет исходный порядок оставшихся заявок', () => {
+    const result = dedupeLeadMagnets([
+      candidate(10, 'Бот: Первый', 30),
+      candidate(20, 'Бот: Дубль', 30),
+      candidate(30, 'Бот: Дубль', 30),
+      candidate(40, 'Бот: Третий', 30),
+    ]);
+
+    expect(result.map((item) => item.amoId)).toEqual([10, 20, 40]);
   });
 });

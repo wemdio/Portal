@@ -80,3 +80,70 @@ const EXCLUDED_NAME_PATTERN = new RegExp(
 export function isExcludedLeadName(name: string | null): boolean {
   return EXCLUDED_NAME_PATTERN.test(normalizeName(name));
 }
+
+/**
+ * Признак «лид-магнит»: сделка автоматически создана TG-ботом «Polza Site
+ * Feedback» — имя всегда с префиксом «Бот:» (см. Telegram-канал заявок).
+ */
+export const LEAD_MAGNET_NAME_PREFIX = 'Бот:';
+
+export function isLeadMagnet(name: string | null): boolean {
+  return typeof name === 'string' && name.trimStart().startsWith(LEAD_MAGNET_NAME_PREFIX);
+}
+
+export type DedupCandidate = {
+  amoId: number;
+  name: string | null;
+  /** Максимальный достигнутый этап — считается в `metrics.ts`. */
+  peak: number;
+  channel: string;
+  createdAt: string | null;
+};
+
+/**
+ * Схлопывает повторные заявки лид-магнита: одно имя внутри одного канала за
+ * отчётное окно — одна сделка.
+ *
+ * Только лид-магнит. У заявок бота имя — это телеграм-аккаунт, совпадение
+ * означает того же человека, ткнувшего бота дважды (за неделю 24.07 таких было
+ * 11). У остальных сделок имя не гарантирует ничего: в Аутриче за неделю
+ * 31.07–07.08 было два разных «Дмитрия», а под именем «Заявка с сайта» за
+ * неделю 19.06 сидели 27 разных компаний. Дедуп по всем именам съел бы живые
+ * лиды.
+ *
+ * Из группы остаётся сделка с наибольшим `peak`; при равенстве — самая ранняя
+ * по `createdAt`; при равенстве — с меньшим `amoId`. Последнее нужно, чтобы
+ * результат не зависел от порядка строк, в котором их отдала БД.
+ */
+export function dedupeLeadMagnets<T extends DedupCandidate>(candidates: T[]): T[] {
+  const winnerByKey = new Map<string, T>();
+
+  for (const candidate of candidates) {
+    if (!isLeadMagnet(candidate.name)) continue;
+    const key = `${candidate.channel} ${normalizeName(candidate.name)}`;
+    const current = winnerByKey.get(key);
+    if (!current || isBetterCandidate(candidate, current)) {
+      winnerByKey.set(key, candidate);
+    }
+  }
+
+  const winners = new Set(winnerByKey.values());
+  return candidates.filter(
+    (candidate) => !isLeadMagnet(candidate.name) || winners.has(candidate),
+  );
+}
+
+function isBetterCandidate(candidate: DedupCandidate, current: DedupCandidate): boolean {
+  if (candidate.peak !== current.peak) return candidate.peak > current.peak;
+
+  const candidateTime = Date.parse(candidate.createdAt ?? '');
+  const currentTime = Date.parse(current.createdAt ?? '');
+  const candidateValid = Number.isFinite(candidateTime);
+  const currentValid = Number.isFinite(currentTime);
+  if (candidateValid && currentValid && candidateTime !== currentTime) {
+    return candidateTime < currentTime;
+  }
+  if (candidateValid !== currentValid) return candidateValid;
+
+  return candidate.amoId < current.amoId;
+}
