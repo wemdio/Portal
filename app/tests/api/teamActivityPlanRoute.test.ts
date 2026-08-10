@@ -5,7 +5,8 @@ import { NextRequest } from 'next/server';
 
 const HR_ID = '33dec504-e6e0-4b0a-bc59-dcf570c6ecc9';
 const LEAD_ID = '00000000-0000-4000-8000-000000000001';
-const ADMIN_ID = '00000000-0000-4000-8000-000000000002';
+const SERGEY_ID = '66873c8c-ae56-4ab2-afa5-5e77dcda391d';
+const OTHER_ADMIN_ID = '00000000-0000-4000-8000-000000000002';
 const STAFF_ID = '00000000-0000-4000-8000-000000000003';
 const CLIENT_ID = '00000000-0000-4000-8000-000000000004';
 const DEMO_HR_ID = '00000000-0000-4000-8000-000000000005';
@@ -18,8 +19,8 @@ type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 let mockMainDb: MockSupabaseClient = createMockSupabase();
 let mockCurrentUser: { id: string } | null = { id: HR_ID };
-const ACTIVITY_PLAN_VIEWERS = new Set([HR_ID, ADMIN_ID]);
-const ACTIVITY_PLAN_MANAGERS = new Set([HR_ID]);
+const ACTIVITY_PLAN_VIEWERS = new Set([HR_ID, SERGEY_ID]);
+const ACTIVITY_PLAN_MANAGERS = new Set([HR_ID, SERGEY_ID]);
 const mockGetUser = jest.fn(async () => ({ data: { user: mockCurrentUser } }));
 const mockActivityPlanCapability = jest.fn(
   async (_functionName: string): Promise<{
@@ -109,7 +110,8 @@ function seedDatabase() {
         // Preserve explicit is_hr access for a non-admin internal employee.
         profile(HR_ID, 'technician', { isHr: true }),
         profile(LEAD_ID, 'lead'),
-        profile(ADMIN_ID, 'admin'),
+        profile(SERGEY_ID, 'admin'),
+        profile(OTHER_ADMIN_ID, 'admin'),
         profile(STAFF_ID, 'manager'),
         profile(CLIENT_ID, 'client'),
         profile(DEMO_HR_ID, 'technician', { isHr: true, isDemo: true }),
@@ -312,14 +314,14 @@ describe('team activity plan authorization', () => {
     expect(mockMainDb.mutations).toHaveLength(0);
   });
 
-  it('allows a non-demo admin to view the plan without management controls', async () => {
-    mockCurrentUser = { id: ADMIN_ID };
+  it('gives Sergey full management access to the plan', async () => {
+    mockCurrentUser = { id: SERGEY_ID };
 
     const response = await invoke('GET');
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body.canManage).toBe(false);
+    expect(body.canManage).toBe(true);
     expect(mockActivityPlanCapability.mock.calls).toEqual([
       ['can_view_team_activity_plan'],
       ['can_manage_team_activity_plan'],
@@ -327,16 +329,28 @@ describe('team activity plan authorization', () => {
   });
 
   it.each<Method>(['POST', 'PATCH', 'DELETE'])(
-    'denies a non-demo admin write through %s',
+    'allows Sergey to write through %s',
     async (method) => {
-      mockCurrentUser = { id: ADMIN_ID };
+      mockCurrentUser = { id: SERGEY_ID };
+
+      const response = await invoke(method);
+
+      expect(response.status).toBe(method === 'POST' ? 201 : method === 'DELETE' ? 204 : 200);
+      expect(mockActivityPlanCapability.mock.calls).toEqual([
+        ['can_manage_team_activity_plan'],
+      ]);
+    },
+  );
+
+  it.each<Method>(['GET', 'POST', 'PATCH', 'DELETE'])(
+    'denies another non-demo admin through %s before service-role access',
+    async (method) => {
+      mockCurrentUser = { id: OTHER_ADMIN_ID };
 
       const response = await invoke(method);
 
       expect(response.status).toBe(403);
-      expect(mockActivityPlanCapability.mock.calls).toEqual([
-        ['can_manage_team_activity_plan'],
-      ]);
+      expect(mockMainDb.selects).toHaveLength(0);
       expect(mockMainDb.mutations).toHaveLength(0);
       expect(successAuditEvents()).toHaveLength(0);
     },
@@ -601,7 +615,7 @@ describe('PATCH /api/team/activity-plan/[id]', () => {
         position: 20,
         createdAt: '2000-01-01T00:00:00.000Z',
         updatedAt: '2000-01-01T00:00:00.000Z',
-        createdBy: ADMIN_ID,
+        createdBy: OTHER_ADMIN_ID,
       },
     });
     const body = await response.json();

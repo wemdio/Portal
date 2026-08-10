@@ -8,7 +8,6 @@ import { UserProfile, UserRole } from '@/types';
 import { getAssigneeDisplayName } from '@/lib/projectAssignees';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 import { useUser } from '@/lib/UserProvider';
-import { isLead } from '@/lib/roles';
 import TeamStatisticsPanel from '@/components/team/TeamStatisticsPanel';
 import TeamReviewsPanel from '@/components/team/TeamReviewsPanel';
 import TeamActivityPlanPanel from '@/components/team/TeamActivityPlanPanel';
@@ -253,13 +252,10 @@ function Caret({ open, hidden }: { open: boolean; hidden?: boolean }) {
 
 export default function TeamPage() {
   const isTma = useIsTma();
-  const { userRole, isHr } = useUser();
-  const canViewPrivateWorkspaces = isLead(userRole);
-  const canViewActivities = isHr || userRole === 'admin';
-  const canViewWorkspaceNavigation = canViewPrivateWorkspaces || canViewActivities;
+  const { canAccessTeamPrivate } = useUser();
+  const canViewWorkspaceNavigation = canAccessTeamPrivate;
   const [workspaceView, setWorkspaceView] = useState<TeamWorkspaceView>('load');
-  const previousCanViewActivitiesRef = useRef(canViewActivities);
-  const loadWorkspaceTabRef = useRef<HTMLButtonElement>(null);
+  const previousCanAccessTeamPrivateRef = useRef(canAccessTeamPrivate);
   const pageHeadingRef = useRef<HTMLHeadingElement>(null);
   const [projects, setProjects] = useState<ProjectData[]>([]);
   const [profiles, setProfiles] = useState<ProfileData[]>([]);
@@ -275,25 +271,23 @@ export default function TeamPage() {
   const [openLeads, setOpenLeads] = useState<Set<string>>(new Set());
   const [openSpecInLead, setOpenSpecInLead] = useState<Set<string>>(new Set());
   const [openSpecs, setOpenSpecs] = useState<Set<string>>(new Set());
-  const activeWorkspaceView: TeamWorkspaceView = workspaceView === 'activities'
-    ? canViewActivities ? 'activities' : 'load'
-    : canViewPrivateWorkspaces ? workspaceView : 'load';
+  const activeWorkspaceView: TeamWorkspaceView = (
+    workspaceView === 'load' || canAccessTeamPrivate
+  ) ? workspaceView : 'load';
   const visibleWorkspaceViews = TEAM_WORKSPACE_VIEWS.filter(([key]) => (
-    key === 'load'
-    || (key === 'activities' ? canViewActivities : canViewPrivateWorkspaces)
+    key === 'load' || canAccessTeamPrivate
   ));
 
   useEffect(() => {
-    const activityAccessRevoked = previousCanViewActivitiesRef.current && !canViewActivities;
-    previousCanViewActivitiesRef.current = canViewActivities;
-    if (!activityAccessRevoked || workspaceView !== 'activities') return;
+    const privateAccessRevoked = previousCanAccessTeamPrivateRef.current && !canAccessTeamPrivate;
+    previousCanAccessTeamPrivateRef.current = canAccessTeamPrivate;
+    if (!privateAccessRevoked || workspaceView === 'load') return;
 
     setWorkspaceView('load');
     queueMicrotask(() => {
-      if (canViewPrivateWorkspaces) loadWorkspaceTabRef.current?.focus();
-      else pageHeadingRef.current?.focus();
+      pageHeadingRef.current?.focus();
     });
-  }, [canViewActivities, canViewPrivateWorkspaces, workspaceView]);
+  }, [canAccessTeamPrivate, workspaceView]);
 
   const nameToAvatarUrl = useMemo(() => {
     const map = new Map<string, string>();
@@ -778,15 +772,14 @@ export default function TeamPage() {
           </p>
         </div>
         {canViewWorkspaceNavigation && (
-          <div role="group" aria-label="Разделы команды" className="inline-flex min-h-11 w-fit gap-1 rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
+          <div role="group" aria-label="Разделы команды" className="inline-flex min-h-11 max-w-full w-fit gap-1 overflow-x-auto overscroll-x-contain rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
             {visibleWorkspaceViews.map(([key, label]) => (
               <button
                 key={key}
-                ref={key === 'load' ? loadWorkspaceTabRef : undefined}
                 type="button"
                 aria-pressed={activeWorkspaceView === key}
                 onClick={() => setWorkspaceView(key)}
-                className={`min-h-11 rounded-lg px-4 text-sm font-semibold transition-colors ${activeWorkspaceView === key ? 'bg-gray-900 text-white' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'}`}
+                className={`min-h-11 shrink-0 whitespace-nowrap rounded-lg px-4 text-sm font-semibold transition-colors ${activeWorkspaceView === key ? 'bg-gray-900 text-white' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'}`}
               >
                 {label}
               </button>

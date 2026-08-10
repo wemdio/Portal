@@ -97,7 +97,7 @@ amo_leads.ym_client_id ─── metrika_visits.ym_client_id  ← Метрика
 Отозваны на уровне роли (SELECT вернёт «permission denied»):
 - `sales_chat_accounts` — session_sealed для TG-сессий Егора и Саши.
 - `tg_outreach_accounts` — сессии outreach-аккаунтов.
-- `team_activity_plan_items` — закрытый рабочий план HR, включая внутренние примечания и бюджет.
+- `team_activity_plan_items` — закрытый рабочий план команды, включая внутренние примечания и бюджет.
 
 ## Ключевые таблицы (полей и семантики достаточно для 90% вопросов)
 
@@ -159,6 +159,7 @@ amo_leads.ym_client_id ─── metrika_visits.ym_client_id  ← Метрика
 ### `profiles` — пользователи (~62)
 - Роли: `client` (21), `manager` (20), `technician` (8), `admin` (5), `lead` (4), `marketer` (2), `sales` (2).
 - Тут `email`, `full_name`, `role` — для расшифровки `manager`/`specialist` строк в `projects`.
+- `can_access_team_private` — отдельное fail-closed полномочие на закрытые вкладки «Статистика», «Ревью» и «Активности» страницы «Команда». Роль сама по себе доступа не даёт; на 10.08.2026 полномочие выдано только Алине и Сергею Лазуткину.
 - `market` ('ru'|'eng', default 'ru', миграция 20260804_0004) — рынок клиента:
   'eng' = ENG-кабинет app.outreachos.xyz (middleware/signup/навигация разводят по нему).
 

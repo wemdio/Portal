@@ -38,7 +38,7 @@ const testUser: AgentUser = {
 
 function createMockQuery(resolvedValue: { data: unknown; error: unknown; count?: number }) {
   const query: Record<string, jest.Mock> = {};
-  const methods = ['select', 'eq', 'single', 'maybeSingle', 'insert', 'update', 'delete', 'in', 'ilike', 'order', 'limit', 'gte', 'lt', 'not'];
+  const methods = ['select', 'eq', 'single', 'maybeSingle', 'insert', 'upsert', 'update', 'delete', 'in', 'ilike', 'order', 'limit', 'gte', 'lt', 'not'];
   for (const m of methods) {
     query[m] = jest.fn().mockReturnValue(query);
   }
