@@ -394,6 +394,8 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     : `Запуск #${activeJob?.id.slice(0, 8) ?? ''}`;
   const _isCollecting = stageStr.includes('collecting_links') || stageStr === 'links_collected';
   const isParsing = stageStr.includes('parsing_organizations');
+  // Сбор по каталогу: строки появляются порциями, задача ещё выполняется.
+  const isCollectingCatalog = stageStr === 'catalog_search' && activeJob?.status === 'running';
 
   // Antispam: после блокировки Яндексом даём прокси ~15 мин на смену IP.
   // Пока не прошло — кнопка "Продолжить парсинг" disabled с обратным
@@ -583,10 +585,16 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                           <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
                           Этап: <span className="font-medium text-gray-900">{stage || '—'}</span>
                         </div>
-                        {(isParsing || activeJob.status === 'completed') && (
+                        {/* Сбор по каталогу идёт порциями и по ходу дела двигает
+                            счётчик, поэтому показываем его и во время сбора, а не
+                            только на парсинге и по завершении. */}
+                        {(isParsing || isCollectingCatalog || activeJob.status === 'completed') && (
                           <div className="flex items-center gap-1.5">
                             <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
-                            Организаций: <span className="font-medium text-gray-900">{processedOrgs} / {totalOrgs}</span>
+                            Организаций:{' '}
+                            <span className="font-medium text-gray-900">
+                              {isCollectingCatalog ? `${processedOrgs} и собираем дальше…` : `${processedOrgs} / ${totalOrgs}`}
+                            </span>
                           </div>
                         )}
                       </div>
