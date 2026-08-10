@@ -2,6 +2,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { findBrokenSearchQueries, splitSearchQueries } from '@/lib/parsers/searchQueryList';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getClientTariffUsage, isClientToolAccessAllowed, isAwaitingFirstPayment, TOOL_ACCESS_DENIED_MESSAGE, AWAITING_PAYMENT_MESSAGE } from '@/lib/tariffs';
 
@@ -70,16 +71,28 @@ export async function POST(req: NextRequest) {
 
     const queriesText = typeof payload?.queries_text === 'string' ? payload.queries_text.trim() : '';
     if (queriesText) {
-      queries = queriesText
-        .split(/[\n,]+/)
-        .map((s) => s.trim())
-        .filter(Boolean);
+      queries = splitSearchQueries(queriesText);
     }
 
     const hasQueries = queries.length > 0;
 
     if (!hasQueries && !brief) {
       return jsonError('Missing brief or queries', 400);
+    }
+
+    // Обрывок запроса даёт пустую выдачу, и без проверки человек видит только
+    // «найдено 0» — без единой подсказки, что именно не так.
+    const broken = findBrokenSearchQueries(queries);
+    if (broken.length) {
+      const details = broken
+        .slice(0, 3)
+        .map((issue) => `«${issue.query.slice(0, 80)}» — ${issue.reason}`)
+        .join('; ');
+      return jsonError(
+        `Такие запросы ничего не найдут: ${details}. ` +
+        'Каждый запрос — одной строкой; если он длинный, не переносите его на несколько строк.',
+        400,
+      );
     }
 
     const rawDepth = Number(payload?.search_depth);
