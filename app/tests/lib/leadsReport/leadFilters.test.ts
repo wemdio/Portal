@@ -57,7 +57,8 @@ describe('dedupeLeadMagnets', () => {
     peak: number,
     channel = 'smm',
     createdAt = '2026-08-03T10:00:00.000Z',
-  ) => ({ amoId, name, peak, channel, createdAt });
+    identity: string | null = null,
+  ) => ({ amoId, name, peak, channel, createdAt, identity });
 
   it('из двух заявок бота с одним именем оставляет дошедшую дальше', () => {
     const result = dedupeLeadMagnets([
@@ -104,5 +105,29 @@ describe('dedupeLeadMagnets', () => {
     ]);
 
     expect(result.map((item) => item.amoId)).toEqual([10, 20, 40]);
+  });
+
+  it('разные телеграм-аккаунты под одним именем — разные люди', () => {
+    const result = dedupeLeadMagnets([
+      candidate(34334595, 'Бот: Георгий', 30, 'marketing', '2026-07-23T11:50:28.000Z', '623731424'),
+      candidate(34345909, 'Бот: Георгий', 30, 'marketing', '2026-07-24T06:25:30.000Z', '182456774'),
+    ]);
+
+    expect(result).toHaveLength(2);
+  });
+
+  it('один телеграм-аккаунт — одна заявка, даже если имена написаны по-разному', () => {
+    const result = dedupeLeadMagnets([
+      candidate(1, 'Бот: Евгения', 30, 'marketing', '2026-08-04T18:10:46.000Z', '5091587914'),
+      candidate(2, 'Бот: Евгения ', 70, 'marketing', '2026-08-04T18:18:38.000Z', '5091587914'),
+    ]);
+
+    expect(result.map((item) => item.amoId)).toEqual([2]);
+  });
+
+  it('при равном этапе и времени порядок строк из БД ничего не решает', () => {
+    const rows = [candidate(99, 'Бот: X', 30), candidate(11, 'Бот: X', 30)];
+    expect(dedupeLeadMagnets(rows).map((i) => i.amoId)).toEqual([11]);
+    expect(dedupeLeadMagnets([...rows].reverse()).map((i) => i.amoId)).toEqual([11]);
   });
 });

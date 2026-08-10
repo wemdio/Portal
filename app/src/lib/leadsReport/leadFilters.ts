@@ -94,6 +94,12 @@ export function isLeadMagnet(name: string | null): boolean {
 export type DedupCandidate = {
   amoId: number;
   name: string | null;
+  /**
+   * Телеграм-аккаунт заявителя (кастомное поле AMO «Telegram Chat ID») —
+   * точный признак «тот же человек». Заполнен у половины заявок бота; где
+   * его нет, ключом становится имя.
+   */
+  identity: string | null;
   /** Максимальный достигнутый этап — считается в `metrics.ts`. */
   peak: number;
   channel: string;
@@ -101,38 +107,67 @@ export type DedupCandidate = {
 };
 
 /**
- * Схлопывает повторные заявки лид-магнита: одно имя внутри одного канала за
- * отчётное окно — одна сделка.
+ * Схлопывает повторные заявки лид-магнита: один телеграм-аккаунт внутри
+ * одного канала за отчётное окно — одна сделка.
  *
- * Только лид-магнит. У заявок бота имя — это телеграм-аккаунт, совпадение
- * означает того же человека, ткнувшего бота дважды (за неделю 24.07 таких было
- * 11). У остальных сделок имя не гарантирует ничего: в Аутриче за неделю
- * 31.07–07.08 было два разных «Дмитрия», а под именем «Заявка с сайта» за
- * неделю 19.06 сидели 27 разных компаний. Дедуп по всем именам съел бы живые
- * лиды.
+ * Только лид-магнит. Ключ группировки — `identity` (телеграм-аккаунт), а не
+ * имя: посылка «одно имя бота = один человек» оказалась неверна. Под именем
+ * «Бот: Георгий» в базе три разных телеграм-аккаунта — 623731424 (23.07),
+ * 182456774 (24.07), 497607670 (03.08), — и первые два попадают в одну
+ * отчётную неделю и канал. Дедуп по имени схлопнул бы их в одну сделку и
+ * тихо украл живого лида: минус единица в «Пришло» и «Лидов», неотличимая от
+ * обычной недели. Имя остаётся запасным ключом только там, где `identity` не
+ * заполнен (см. комментарий на поле `DedupCandidate.identity`) — так дедуп
+ * продолжает ловить честные повторы вроде трёх заявок «Бот: Юлия Миронова» за
+ * 31.07–07.08, у которых телеграм-аккаунта в кастомном поле нет.
+ *
+ * У остальных сделок (не лид-магнита) не гарантирует ничего ни имя, ни тем
+ * более этот ключ: в Аутриче за неделю 31.07–07.08 было два разных
+ * «Дмитрия», а под именем «Заявка с сайта» за неделю 19.06 сидели 27 разных
+ * компаний. Дедуп по всем именам съел бы живые лиды.
  *
  * Из группы остаётся сделка с наибольшим `peak`; при равенстве — самая ранняя
  * по `createdAt`; при равенстве — с меньшим `amoId`. Последнее нужно, чтобы
  * результат не зависел от порядка строк, в котором их отдала БД.
+ *
+ * Победитель хранится как индекс во входном массиве, а не сам объект: индекс
+ * инъективен по построению (`forEach` не повторяет индекс дважды), поэтому
+ * `winners.has(index)` не зависит от того, оказались ли в `candidates` две
+ * разные заявки с совпадающими полями или дважды одна и та же ссылка —
+ * дубль ссылки схлопнется корректно в обоих случаях.
  */
 export function dedupeLeadMagnets<T extends DedupCandidate>(candidates: T[]): T[] {
-  const winnerByKey = new Map<string, T>();
+  const winnerIndexByKey = new Map<string, number>();
 
-  for (const candidate of candidates) {
-    if (!isLeadMagnet(candidate.name)) continue;
-    const key = `${candidate.channel} ${normalizeName(candidate.name)}`;
-    const current = winnerByKey.get(key);
-    if (!current || isBetterCandidate(candidate, current)) {
-      winnerByKey.set(key, candidate);
+  candidates.forEach((candidate, index) => {
+    if (!isLeadMagnet(candidate.name)) return;
+    const key = `${candidate.channel} ${candidate.identity ?? normalizeName(candidate.name)}`;
+    const currentIndex = winnerIndexByKey.get(key);
+    if (currentIndex === undefined
+      || isBetterCandidate(candidate, candidates[currentIndex])) {
+      winnerIndexByKey.set(key, index);
     }
-  }
+  });
 
-  const winners = new Set(winnerByKey.values());
+  const winners = new Set(winnerIndexByKey.values());
   return candidates.filter(
-    (candidate) => !isLeadMagnet(candidate.name) || winners.has(candidate),
+    (candidate, index) => !isLeadMagnet(candidate.name) || winners.has(index),
   );
 }
 
+/**
+ * Тай-брейк между двумя заявками одной группы: этап → время создания →
+ * amoId.
+ *
+ * Между этапом и временем есть неочевидная ступень — валидность даты.
+ * `createdAt` может не распарситься (пустая строка, кривой формат из БД);
+ * `Date.parse` на такой строке даёт `NaN`, и `NaN`-сравнение (`<`/`>`) всегда
+ * `false` в обе стороны, то есть молча ведёт себя как «равны» и проваливается
+ * в amoId, будто у обеих заявок время нормальное. Явная проверка
+ * `candidateValid !== currentValid` защищает от этого: заявка с рабочей
+ * датой побеждает заявку с битой или отсутствующей, а не наоборот и не
+ * «как получится».
+ */
 function isBetterCandidate(candidate: DedupCandidate, current: DedupCandidate): boolean {
   if (candidate.peak !== current.peak) return candidate.peak > current.peak;
 
