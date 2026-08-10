@@ -38,6 +38,9 @@ describe('private Team workspace access migration', () => {
     expect(assignments).toHaveLength(1);
 
     const assignment = assignments[0];
+    if (!assignment) {
+      throw new Error('Expected exactly one private Team capability assignment');
+    }
     expect(assignment).toContain(`'${ALINA_ID}'::uuid`);
     expect(assignment).toContain(`'${SERGEY_ID}'::uuid`);
     expect(assignment.match(/[0-9a-f]{8}-[0-9a-f-]{27}/g)?.sort()).toEqual(

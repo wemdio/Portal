@@ -25,10 +25,14 @@ const CANDIDATE_REVIEW_UPDATED_AT = '2026-08-01T12:00:00.000Z';
 let mockMainDb: MockSupabaseClient = createMockSupabase();
 let mockCurrentUser: { id: string } | null = { id: LEAD_ID };
 const PRIVATE_TEAM_USERS = new Set([ALINA_ID, SERGEY_ID]);
-const mockTeamAccessCapability = jest.fn(async (_functionName: string) => ({
-  data: Boolean(mockCurrentUser && PRIVATE_TEAM_USERS.has(mockCurrentUser.id)),
-  error: null as { message: string } | null,
-}));
+const mockTeamAccessCapability = jest.fn(
+  async (
+    _functionName: string,
+  ): Promise<{ data: boolean | null; error: { message: string } | null }> => ({
+    data: Boolean(mockCurrentUser && PRIVATE_TEAM_USERS.has(mockCurrentUser.id)),
+    error: null,
+  }),
+);
 const mockLogAudit = jest.fn(async (..._args: unknown[]) => {});
 const mockLogError = jest.fn(async (..._args: unknown[]) => {});
 

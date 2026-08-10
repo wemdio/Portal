@@ -17,10 +17,14 @@ const PRIVATE_TEAM_USERS = new Set([ALINA_ID, SERGEY_ID]);
 let mockCurrentUser: { id: string } | null = { id: SERGEY_ID };
 const mockGetUser = jest.fn();
 const mockIsLeadershipUser = jest.fn();
-const mockTeamAccessCapability = jest.fn(async (_functionName: string) => ({
-  data: Boolean(mockCurrentUser && PRIVATE_TEAM_USERS.has(mockCurrentUser.id)),
-  error: null as { message: string } | null,
-}));
+const mockTeamAccessCapability = jest.fn(
+  async (
+    _functionName: string,
+  ): Promise<{ data: boolean | null; error: { message: string } | null }> => ({
+    data: Boolean(mockCurrentUser && PRIVATE_TEAM_USERS.has(mockCurrentUser.id)),
+    error: null,
+  }),
+);
 
 jest.mock('@/lib/auth/internalGuard', () => ({
   isInternalUser: () => {
