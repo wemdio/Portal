@@ -22,4 +22,14 @@ describe('isExcludedLeadName', () => {
     expect(isExcludedLeadName('Дмитрий')).toBe(false);
     expect(isExcludedLeadName(null)).toBe(false);
   });
+
+  it('ловит имя, склеенное с цифрами', () => {
+    expect(isExcludedLeadName('Бот: ТЕСТ2026')).toBe(true);
+    expect(isExcludedLeadName('Заявка: test123.ru')).toBe(true);
+  });
+
+  it('ловит составное имя при неровных пробелах', () => {
+    expect(isExcludedLeadName('Бот: Юлия  Миронова')).toBe(true);
+    expect(isExcludedLeadName('Бот: Юлия\tМиронова')).toBe(true);
+  });
 });
