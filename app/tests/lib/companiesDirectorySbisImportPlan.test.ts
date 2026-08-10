@@ -1050,6 +1050,84 @@ describe('strict registry contact import v2 contract', () => {
     expect(missingActivity.metrics.skippedMissingContact).toBe(0);
   });
 
+  it('keeps v1 ordering frozen while v2 emits the strict canonical email order', () => {
+    const rows = [
+      strictSourceRow({
+        rowNumber: 2,
+        email: 'martin-ufa@mail.ru',
+        website: null,
+      }),
+      strictSourceRow({
+        rowNumber: 3,
+        email: 'martin-ufa2013@mail.ru',
+        website: null,
+      }),
+    ];
+
+    const v1 = buildStrictSbisContactImportPlan(
+      rows,
+      [],
+      STRICT_CONTACT_OPTIONS,
+    );
+    const v2 = buildStrictSbisContactImportPlanV2(
+      rows,
+      [],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+
+    expect(v1.inserts[0]?.email).toBe(
+      'martin-ufa@mail.ru, martin-ufa2013@mail.ru',
+    );
+    expect(v2.inserts[0]?.email).toBe(
+      'martin-ufa2013@mail.ru, martin-ufa@mail.ru',
+    );
+  });
+
+  it('removes malformed websites before freezing a v2 insert', () => {
+    const plan = buildStrictSbisContactImportPlanV2(
+      [strictSourceRow({
+        email: 'sales@alpha.ru',
+        website: 'https://moltransavto..ru, moltransavto.su',
+      })],
+      [],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+
+    expect(plan.inserts[0]?.website).toBe('moltransavto.su');
+  });
+
+  it('checks v2 insert eligibility after removing malformed websites', () => {
+    const plan = buildStrictSbisContactImportPlanV2(
+      [strictSourceRow({
+        email: null,
+        website: 'https://moltransavto..ru',
+        phones: '+7 495 111-22-33',
+      })],
+      [],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+
+    expect(plan.inserts).toHaveLength(0);
+    expect(plan.updates).toHaveLength(0);
+    expect(plan.skipped).toContainEqual(expect.objectContaining({
+      inn: '7704414297',
+      reason: 'missing_website_or_email',
+    }));
+  });
+
+  it('does not strip valid leading punctuation from a v2 email local part', () => {
+    const plan = buildStrictSbisContactImportPlanV2(
+      [strictSourceRow({
+        email: "'sales@alpha.ru",
+        website: null,
+      })],
+      [],
+      STRICT_CONTACT_V2_OPTIONS,
+    );
+
+    expect(plan.inserts[0]?.email).toBe("'sales@alpha.ru");
+  });
+
   it('deduplicates repeated source rows deterministically regardless of input order', () => {
     const rows = [
       strictSourceRow({

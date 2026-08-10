@@ -1009,6 +1009,31 @@ describe('Polza registry SBIS import contract', () => {
     expect(validateUpdateForPlan(update, POLZA_REGISTRY_V2_PLAN)).toEqual(update);
     expect(validateInsertForPlan(insert, POLZA_REGISTRY_V2_PLAN)).toEqual(insert);
 
+    const canonicalEmails = 'martin-ufa2013@mail.ru, martin-ufa@mail.ru';
+    const nonCanonicalEmails = 'martin-ufa@mail.ru, martin-ufa2013@mail.ru';
+    expect(validateUpdateForPlan({
+      ...update,
+      patch: { email: canonicalEmails },
+    }, POLZA_REGISTRY_V2_PLAN)).toEqual({
+      ...update,
+      patch: { email: canonicalEmails },
+    });
+    expect(validateInsertForPlan({
+      ...insert,
+      email: canonicalEmails,
+    }, POLZA_REGISTRY_V2_PLAN)).toEqual({
+      ...insert,
+      email: canonicalEmails,
+    });
+    expect(() => validateUpdateForPlan({
+      ...update,
+      patch: { email: nonCanonicalEmails },
+    }, POLZA_REGISTRY_V2_PLAN)).toThrow(/email|canonical/i);
+    expect(() => validateInsertForPlan({
+      ...insert,
+      email: nonCanonicalEmails,
+    }, POLZA_REGISTRY_V2_PLAN)).toThrow(/email|canonical/i);
+
     for (const forbiddenPatch of [
       { okved_code: '62' },
       { name: 'ООО БЕТА' },

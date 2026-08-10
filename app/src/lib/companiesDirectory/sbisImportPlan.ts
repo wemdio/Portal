@@ -1,6 +1,7 @@
 import { FEDERAL_DISTRICTS } from '@/lib/companiesSearch/regions';
 import { getOkvedByCode } from '@/lib/companiesSearch/okved2';
 import {
+  normalizeStrictContactList,
   normalizeStrictEmailList,
   normalizeStrictRussianPhoneList,
   normalizeStrictWebsiteList,
@@ -688,7 +689,14 @@ function distinctValues(
 function unionNormalizedLists(
   rows: NormalizedSbisRow[],
   field: 'phones' | 'email' | 'website',
+  contactNormalization: ContactNormalizationMode,
 ): string | null {
+  if (contactNormalization === 'strict-with-phone') {
+    const normalizedRows = rows.flatMap((row) =>
+      row[field] ? [row[field]] : []
+    );
+    return normalizeStrictContactList(field, normalizedRows.join(', '));
+  }
   const values = sortedUnique(
     rows.flatMap((row) => splitList(row[field])),
   );
@@ -749,15 +757,15 @@ function collapseSbisRowsByInnWithMode(
         activity_type: canonical.activity_type,
         source_activity: canonical.source_activity,
         employees_count: canonical.employees_count,
-        phones: unionNormalizedLists(rows, 'phones'),
-        email: unionNormalizedLists(rows, 'email'),
+        phones: unionNormalizedLists(rows, 'phones', contactNormalization),
+        email: unionNormalizedLists(rows, 'email', contactNormalization),
         revenue: canonical.revenue,
         cost: canonical.cost,
         edo_id: canonical.edo_id,
         okpo: canonical.okpo,
         pf_reg_number: canonical.pf_reg_number,
         branch_code: canonical.branch_code,
-        website: unionNormalizedLists(rows, 'website'),
+        website: unionNormalizedLists(rows, 'website', contactNormalization),
         egais: canonical.egais,
         gln: canonical.gln,
         ogrn: canonical.ogrn,

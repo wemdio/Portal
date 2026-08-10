@@ -7,8 +7,10 @@ jest.mock('@/lib/supabaseClient', () => ({
 import { supabase } from '@/lib/supabaseClient';
 import * as teamApiModule from '@/components/team/teamApi';
 import {
+  buildTeamActivityPlanWrite,
   buildTeamReviewCompletionWrite,
   buildTeamReviewScheduleWrite,
+  normalizeActivityPlan,
   normalizeReviews,
   normalizeStatistics,
   teamApiFetch,
@@ -68,6 +70,219 @@ describe('team review write payloads', () => {
       problems: null,
       recommendations: 'Продолжить еженедельные разборы',
     });
+  });
+});
+
+describe('team activity plan write payloads', () => {
+  const common = {
+    planMonth: '2026-08',
+    periodicity: '  Ежемесячно  ',
+    activity: '  Профессиональный конкурс  ',
+    format: '  Анонс в общем чате  ',
+    note: '  Итоги и награждение  ',
+    budgetAmount: '1400.50',
+    budgetNote: '  Две премии по 700 ₽  ',
+    status: 'planned' as const,
+    position: 3,
+  };
+
+  it('builds an exact-date activity with optional time and clears schedule text', () => {
+    expect(buildTeamActivityPlanWrite({
+      ...common,
+      timingType: 'date',
+      plannedDate: '2026-09-01',
+      plannedTime: '16:30',
+      scheduleNote: '  каждую среду  ',
+    })).toEqual({
+      planMonth: '2026-08',
+      periodicity: 'Ежемесячно',
+      activity: 'Профессиональный конкурс',
+      format: 'Анонс в общем чате',
+      plannedDate: '2026-09-01',
+      plannedTime: '16:30',
+      scheduleNote: null,
+      note: 'Итоги и награждение',
+      budgetAmount: 1400.5,
+      budgetNote: 'Две премии по 700 ₽',
+      status: 'planned',
+      position: 3,
+    });
+  });
+
+  it('builds a recurring activity and clears exact date fields', () => {
+    expect(buildTeamActivityPlanWrite({
+      ...common,
+      timingType: 'schedule',
+      plannedDate: '2026-08-12',
+      plannedTime: '14:00',
+      scheduleNote: '  каждую среду, 14:00  ',
+      format: '   ',
+      note: '',
+      budgetAmount: '',
+      budgetNote: '  Размер премии уточнить  ',
+    })).toEqual({
+      planMonth: '2026-08',
+      periodicity: 'Ежемесячно',
+      activity: 'Профессиональный конкурс',
+      format: null,
+      plannedDate: null,
+      plannedTime: null,
+      scheduleNote: 'каждую среду, 14:00',
+      note: null,
+      budgetAmount: null,
+      budgetNote: 'Размер премии уточнить',
+      status: 'planned',
+      position: 3,
+    });
+  });
+
+  it('builds an activity without a date and clears all hidden timing fields', () => {
+    expect(buildTeamActivityPlanWrite({
+      ...common,
+      timingType: 'none',
+      plannedDate: '2026-08-12',
+      plannedTime: '14:00',
+      scheduleNote: '  каждую среду, 14:00  ',
+    })).toEqual({
+      planMonth: '2026-08',
+      periodicity: 'Ежемесячно',
+      activity: 'Профессиональный конкурс',
+      format: 'Анонс в общем чате',
+      plannedDate: null,
+      plannedTime: null,
+      scheduleNote: null,
+      note: 'Итоги и награждение',
+      budgetAmount: 1400.5,
+      budgetNote: 'Две премии по 700 ₽',
+      status: 'planned',
+      position: 3,
+    });
+  });
+});
+
+describe('normalizeActivityPlan', () => {
+  it('normalizes snake_case rows, nullable planning fields and numeric summary values', () => {
+    expect(normalizeActivityPlan({
+      period: {
+        month: '2026-08',
+        label: 'Август 2026',
+        previous_month: '2026-07',
+        next_month: '2026-09',
+      },
+      items: [{
+        id: 'activity-1',
+        plan_month: '2026-08',
+        periodicity: 'Еженедельно',
+        activity: 'Обучающий созвон',
+        format: null,
+        planned_date: null,
+        planned_time: null,
+        schedule_note: 'Каждую среду, 14:00',
+        note: '',
+        budget_amount: '700.50',
+        budget_note: null,
+        status: 'completed',
+        position: '2',
+        created_at: '2026-08-01T10:00:00.000Z',
+        updated_at: '2026-08-02T10:00:00.000Z',
+      }],
+      summary: {
+        total: '1',
+        planned: 0,
+        completed: '1',
+        cancelled: 0,
+        overdue: 0,
+        budget_amount: '700.50',
+        budget_unspecified: '0',
+      },
+      as_of: '2026-08-08',
+      can_manage: true,
+    })).toEqual({
+      period: {
+        month: '2026-08',
+        label: 'Август 2026',
+        previousMonth: '2026-07',
+        nextMonth: '2026-09',
+      },
+      items: [{
+        id: 'activity-1',
+        planMonth: '2026-08',
+        periodicity: 'Еженедельно',
+        activity: 'Обучающий созвон',
+        format: null,
+        plannedDate: null,
+        plannedTime: null,
+        scheduleNote: 'Каждую среду, 14:00',
+        note: null,
+        budgetAmount: 700.5,
+        budgetNote: null,
+        status: 'completed',
+        position: 2,
+        createdAt: '2026-08-01T10:00:00.000Z',
+        updatedAt: '2026-08-02T10:00:00.000Z',
+      }],
+      summary: {
+        total: 1,
+        planned: 0,
+        completed: 1,
+        cancelled: 0,
+        overdue: 0,
+        budgetAmount: 700.5,
+        budgetUnspecified: 0,
+      },
+      asOf: '2026-08-08',
+      canManage: true,
+    });
+  });
+
+  it('keeps one timing mode for legacy rows by preferring an exact date', () => {
+    const normalized = normalizeActivityPlan({
+      period: {
+        month: '2026-08',
+        label: 'Август 2026',
+        previousMonth: '2026-07',
+        nextMonth: '2026-09',
+      },
+      items: [{
+        id: 'legacy-both',
+        planMonth: '2026-08',
+        periodicity: 'Ситуативно',
+        activity: 'Встреча с командой',
+        plannedDate: '2026-08-12',
+        plannedTime: '14:00',
+        scheduleNote: 'Каждую среду, 14:00',
+        status: 'planned',
+        position: 0,
+        createdAt: '2026-08-01T10:00:00.000Z',
+        updatedAt: '2026-08-01T10:00:00.000Z',
+      }, {
+        id: 'legacy-time-only',
+        planMonth: '2026-08',
+        periodicity: 'По возможности',
+        activity: 'Публикация',
+        plannedDate: null,
+        plannedTime: '16:00',
+        scheduleNote: null,
+        status: 'planned',
+        position: 1,
+        createdAt: '2026-08-01T10:00:00.000Z',
+        updatedAt: '2026-08-01T10:00:00.000Z',
+      }],
+      summary: {},
+      asOf: '2026-08-08',
+      canManage: true,
+    });
+
+    expect(normalized.items[0]).toEqual(expect.objectContaining({
+      plannedDate: '2026-08-12',
+      plannedTime: '14:00',
+      scheduleNote: null,
+    }));
+    expect(normalized.items[1]).toEqual(expect.objectContaining({
+      plannedDate: null,
+      plannedTime: null,
+      scheduleNote: null,
+    }));
   });
 });
 

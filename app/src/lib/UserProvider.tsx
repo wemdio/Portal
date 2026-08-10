@@ -12,6 +12,7 @@ import { DEFAULT_LOCALE, type Locale, normalizeLocale } from '@/lib/i18n';
 interface UserContextValue {
   userId: string | null;
   userRole: UserRole | null;
+  isHr: boolean;
   userEmail: string | null;
   userFullName: string | null;
   userAvatarUrl: string | null;
@@ -44,6 +45,7 @@ export function UserProvider({
 }) {
   const [userId, setUserId] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
+  const [isHr, setIsHr] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userFullName, setUserFullName] = useState<string | null>(null);
   const [userAvatarUrl, setUserAvatarUrl] = useState<string | null>(null);
@@ -56,16 +58,21 @@ export function UserProvider({
   const [localeSaving, setLocaleSaving] = useState(false);
   const localeHydratedRef = useRef(false);
   const localeUserIdRef = useRef<string | null>(null);
+  const sessionRequestSequenceRef = useRef(0);
+  const sessionUserIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
 
     const applySession = async (session: Session | null) => {
+      const requestId = ++sessionRequestSequenceRef.current;
       if (!isMounted) return;
       if (!session) {
+        sessionUserIdRef.current = null;
         setUserId(null);
         setUserEmail(null);
         setUserRole(null);
+        setIsHr(false);
         setUserFullName(null);
         setUserAvatarUrl(null);
         setNavTabVisibility({});
@@ -77,15 +84,24 @@ export function UserProvider({
         return;
       }
 
-      try {
-        setUserId(session.user.id);
-        setUserEmail(session.user.email ?? null);
+      const sessionUserId = session.user.id;
+      const isCurrentSession = () => (
+        isMounted
+        && requestId === sessionRequestSequenceRef.current
+        && sessionUserIdRef.current === sessionUserId
+      );
+      const userChanged = sessionUserIdRef.current !== sessionUserId;
+      sessionUserIdRef.current = sessionUserId;
+      setUserId(sessionUserId);
+      setUserEmail(session.user.email ?? null);
+      if (userChanged) setIsHr(false);
 
+      try {
         const [profile, navRows] = await Promise.all([
           supabase
             .from('profiles')
             .select('role, full_name, avatar_url, locale')
-            .eq('id', session.user.id)
+            .eq('id', sessionUserId)
             .single()
             .then(({ data }) => ({
               role: (data?.role as UserRole | null) ?? null,
@@ -96,20 +112,20 @@ export function UserProvider({
           supabase
             .from('user_tool_visibility')
             .select('tool_id, enabled')
-            .eq('user_id', session.user.id)
+            .eq('user_id', sessionUserId)
             .in('tool_id', ALL_NAV_TAB_IDS as unknown as string[])
             .then(({ data }) => data),
         ]);
 
-        if (!isMounted) return;
+        if (!isCurrentSession()) return;
         setUserRole(profile.role);
         setUserFullName(profile.full_name);
         setUserAvatarUrl(normalizePublicAvatarUrl(profile.avatar_url));
-        const isSameUser = localeUserIdRef.current === session.user.id;
+        const isSameUser = localeUserIdRef.current === sessionUserId;
         if (!localeHydratedRef.current || !isSameUser) {
           setLocaleState(profile.locale);
           localeHydratedRef.current = true;
-          localeUserIdRef.current = session.user.id;
+          localeUserIdRef.current = sessionUserId;
         }
 
         const vis: Record<string, boolean> = {};
@@ -118,12 +134,28 @@ export function UserProvider({
           vis[id] = row?.enabled ?? false;
         }
         setNavTabVisibility(vis);
+
+        void (async () => {
+          try {
+            const { data, error } = await supabase
+              .from('profiles')
+              .select('is_hr')
+              .eq('id', sessionUserId)
+              .single();
+            if (error) throw error;
+            if (isCurrentSession()) setIsHr(data?.is_hr === true);
+          } catch (error) {
+            console.error('[UserProvider] Failed to load HR capability:', error);
+            if (isCurrentSession()) setIsHr(false);
+          }
+        })();
       } catch (err) {
         // If Supabase tables/RLS are misconfigured, we must not crash the whole app.
         // Degrade gracefully: keep the user logged in, but hide gated tabs/values.
         console.error('[UserProvider] Failed to load user session data:', err);
-        if (!isMounted) return;
+        if (!isCurrentSession()) return;
         setUserRole(null);
+        setIsHr(false);
         setUserFullName(null);
         setUserAvatarUrl(null);
         setNavTabVisibility({});
@@ -231,6 +263,7 @@ export function UserProvider({
   const value = useMemo<UserContextValue>(() => ({
     userId,
     userRole,
+    isHr,
     userEmail,
     userFullName,
     userAvatarUrl,
@@ -244,7 +277,7 @@ export function UserProvider({
     handleSignOut,
     setLocale,
     refreshNotifications,
-  }), [userId, userRole, userEmail, userFullName, userAvatarUrl, navTabVisibility, visibleTools, badges, unreadNotifications, locale, localeSaving, handleAvatarError, handleSignOut, setLocale, refreshNotifications]);
+  }), [userId, userRole, isHr, userEmail, userFullName, userAvatarUrl, navTabVisibility, visibleTools, badges, unreadNotifications, locale, localeSaving, handleAvatarError, handleSignOut, setLocale, refreshNotifications]);
 
   return <UserContext.Provider value={value}>{children}</UserContext.Provider>;
 }

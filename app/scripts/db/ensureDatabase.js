@@ -45,6 +45,7 @@ function isRetryableDbError(err) {
     code === 'ETIMEDOUT' ||
     code === 'ENOTFOUND' ||
     code === 'ENETUNREACH' ||
+    code === '55P03' ||
     msg.includes('Connection terminated') ||
     msg.includes('MaxClientsInSessionMode') ||
     msg.includes('max clients reached') ||
@@ -361,6 +362,7 @@ if (require.main === module) {
 // порядок переменных с URL и тот же обход IPv6 на серверах без IPv6.
 module.exports = {
   ensureDatabase,
+  isRetryableDbError,
   notifyPostgrestReload,
   loadEnvFiles,
   resolveDbUrl,

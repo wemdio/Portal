@@ -94,6 +94,10 @@ switch (kind) {
   case 'saleschatarchive':
     run('./salesChatArchive');
     break;
+  case 'clientreportexports':
+  case 'client-report-exports':
+    run('./clientReportExports');
+    break;
   case 'all':
   default:
     run('./index');
