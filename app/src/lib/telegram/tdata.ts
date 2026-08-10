@@ -19,15 +19,29 @@ export const nodeFsLike: INodeFsLike = {
     await fsp.mkdir(path, options);
   },
   /**
-   * `stat` на несуществующем файле бросает ENOENT — на это опирается разбор
-   * ошибок ниже. `mtimeMs` отдаём под именем `lastModified`: по нему библиотека
-   * выбирает более свежий файл из пары key_data0/key_data1, которую Telegram
-   * Desktop держит на случай обрыва записи.
+   * Отсутствующий файл — это `undefined`, а не исключение: библиотека проверяет
+   * результат `stat` на истинность, чтобы выбрать между современным `key_datas`
+   * и старой парой `key_data0`/`key_data1`. Если бросать, перебор обрывается на
+   * первом же промахе и папка старого формата выглядит как «не tdata». Тот же
+   * контракт у файловой системы поверх архива (Task 4) — оба пути ведут себя
+   * одинаково именно там, где решается, читается папка или нет.
+   *
+   * Ошибку прав доступа при этом пропускаем наружу: она не должна выглядеть
+   * как отсутствующий файл.
+   *
+   * `mtimeMs` отдаём под именем `lastModified`: по нему библиотека выбирает
+   * более свежий файл из пары, которую Telegram Desktop держит на случай
+   * обрыва записи.
    */
-  stat: async (path) => {
-    const stats = await fsp.stat(path);
-    return { size: stats.size, lastModified: stats.mtimeMs };
-  },
+  stat: (async (path: string) => {
+    try {
+      const stats = await fsp.stat(path);
+      return { size: stats.size, lastModified: stats.mtimeMs };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw err;
+    }
+  }) as INodeFsLike['stat'],
 };
 
 export interface TdataAccount {
@@ -41,11 +55,18 @@ export interface TdataAccount {
  * Перевести ошибку библиотеки в текст, по которому оператор поймёт, что делать.
  *
  * `Failed to decrypt` прилетает и на локальном пароле Telegram, и на битом
- * `key_data`, отличить их снаружи нельзя — называем обе причины.
+ * `key_data`, отличить их снаружи нельзя — называем обе причины. Туда же
+ * относим порчу на уровне файла (`invalid magic`, `md5 mismatch`): для
+ * оператора это тот же случай «папка испорчена», а у кривого архива от
+ * продавца он даже вероятнее, чем сбой расшифровки.
+ *
+ * Наружу английский текст библиотеки не выпускаем: отчёт о загрузке читает не
+ * разработчик. Непонятную ошибку заворачиваем в русскую рамку, оригинал
+ * оставляем в скобках — по нему разбираются, если дойдёт до разбора.
  */
-function describeTdataError(err: unknown): string {
+export function describeTdataError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
-  if (/invalid password|failed to decrypt/i.test(msg)) {
+  if (/invalid password|failed to decrypt|invalid magic|md5 mismatch/i.test(msg)) {
     return 'папка под локальным паролем Telegram либо повреждена — снимите пароль в Telegram Desktop и переупакуйте';
   }
   if (/ENOENT|file not found/i.test(msg)) {
@@ -54,7 +75,21 @@ function describeTdataError(err: unknown): string {
   if (/Unsupported version/i.test(msg)) {
     return `папка от более новой версии Telegram Desktop, чем понимает портал (${msg})`;
   }
-  return msg;
+  return `папку не удалось прочитать (${msg})`;
+}
+
+/**
+ * То же, но для ошибки на конкретном аккаунте внутри папки.
+ *
+ * `key_data` тут уже прочитан, поэтому пропавший файл — это файл самого
+ * аккаунта, и общий текст про `key_data` указывал бы не на тот файл.
+ */
+function describeAccountError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/ENOENT|file not found/i.test(msg)) {
+    return 'не найден файл с данными аккаунта';
+  }
+  return describeTdataError(err);
 }
 
 /**
@@ -86,17 +121,40 @@ export async function readTdataAccounts(
   const accounts: TdataAccount[] = [];
 
   for (const index of order) {
-    try {
-      const session = await convertFromTdata(tdata, index);
-      const dc = session.primaryDcs.main;
-      accounts.push({
-        index,
-        tgUserId: Number(session.self?.userId ?? 0),
-        sessionString: buildGramJsSessionString(dc.id, dc.ipAddress, dc.port, session.authKey),
-      });
-    } catch (err) {
-      throw new Error(`аккаунт №${index + 1} в папке: ${describeTdataError(err)}`);
+    const where = `аккаунт №${index + 1} в папке`;
+
+    // Оборачиваем только вызов библиотеки: у проверок ниже уже свой русский
+    // текст, и заворачивать его ещё раз как «непонятную ошибку» незачем.
+    const session = await convertFromTdata(tdata, index).catch((err: unknown) => {
+      throw new Error(`${where}: ${describeAccountError(err)}`);
+    });
+
+    /**
+     * Аккаунт без идентификатора не берём. Дальше по цепочке аккаунты
+     * сравниваются между собой именно по `tgUserId`, и подставленный ноль
+     * склеил бы два разных аккаунта в «дубль»: один молча потерялся бы, а
+     * записанный в базу ноль отбивал бы все следующие такие загрузки.
+     */
+    const tgUserId = session.self?.userId;
+    if (!tgUserId) {
+      throw new Error(`${where}: не авторизован — Telegram Desktop не сохранил идентификатор пользователя`);
     }
+
+    /**
+     * Таблица дата-центров в библиотеке покрывает номера 1-5 и объявлена как
+     * всегда заполненная, поэтому на незнакомом номере `primaryDcs` молча
+     * приходит `undefined` — без этой проверки была бы не ошибка, а TypeError.
+     */
+    const dc = session.primaryDcs?.main;
+    if (!dc) {
+      throw new Error(`${where}: портал не знает дата-центр Telegram, на который ссылается аккаунт`);
+    }
+
+    accounts.push({
+      index,
+      tgUserId,
+      sessionString: buildGramJsSessionString(dc.id, dc.ipAddress, dc.port, session.authKey),
+    });
   }
 
   return accounts;
