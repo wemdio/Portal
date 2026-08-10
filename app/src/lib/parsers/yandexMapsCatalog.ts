@@ -237,6 +237,67 @@ export async function fillJobFromYandexMapsCatalog(
   return { organizations: Number(row?.organizations ?? 0), links: Number(row?.links ?? 0) };
 }
 
+/**
+ * Порции сбора: сколько строк забираем на каждом шаге.
+ *
+ * Смысл лестницы — не в скорости, а в том, чтобы результаты появились сразу.
+ * Замер на бою: 14 699 организаций собираются 7 с, 83 466 — 52 с, то есть около
+ * 1650 строк в секунду, и время пропорционально объёму. Одним запросом человек
+ * всё это время смотрит на пустой экран и не знает, живо ли оно.
+ *
+ * С лестницей первые 5 000 ложатся за пару секунд, задача сразу показывает
+ * результаты, а дальше счётчик растёт на глазах. Шаг вчетверо: порций мало
+ * (значит мало лишних проходов), но каждая заметно двигает счётчик.
+ */
+const FILL_CHUNKS = [5_000, 20_000, 80_000, 320_000] as const;
+
+/**
+ * Собирает выдачу порциями, сообщая прогресс после каждой.
+ *
+ * Каждый шаг — тот же `fill_job` с `limit`, а `on conflict do nothing` делает
+ * повторы бесплатными: шаг видит уже вставленное и добавляет только новое,
+ * возвращая размер прибавки.
+ *
+ * Последним всегда идёт вызов с настоящим потолком задачи, даже если лестница
+ * закончилась. Он ничего не добавит, если всё уже собрано, но гарантирует
+ * полноту: полагаться на «прибавка меньше порции — значит всё» нельзя, потому
+ * что одна карточка может встретиться в каталоге дважды и вставиться один раз.
+ */
+export async function fillYandexMapsCatalogJobInChunks(
+  jobId: string,
+  filters: YandexMapsCatalogFilters,
+  limit: number | null,
+  onProgress?: (collected: number) => Promise<void> | void,
+  /**
+   * Шаг порции. Параметром, а не прямым вызовом: иначе интересное здесь — из
+   * каких порций складывается лесенка, когда она обрывается и почему финальный
+   * вызов обязателен — проверялось бы только против живой базы.
+   */
+  runStep: (
+    jobId: string,
+    filters: YandexMapsCatalogFilters,
+    stepLimit: number | null,
+  ) => Promise<{ organizations: number }> = fillJobFromYandexMapsCatalog,
+): Promise<{ organizations: number }> {
+  let collected = 0;
+
+  for (const chunk of FILL_CHUNKS) {
+    // Порция больше запрошенного объёма — доделает финальный вызов.
+    if (limit !== null && chunk >= limit) break;
+    const step = await runStep(jobId, filters, chunk);
+    collected += step.organizations;
+    await onProgress?.(collected);
+    // Порция не набралась до потолка — выдача исчерпана, дальше по лестнице
+    // идти незачем. Полноту всё равно подтвердит финальный вызов.
+    if (collected < chunk) break;
+  }
+
+  const final = await runStep(jobId, filters, limit);
+  collected += final.organizations;
+  await onProgress?.(collected);
+  return { organizations: collected };
+}
+
 function text(value: unknown): string {
   return value === null || value === undefined ? '' : String(value).trim();
 }
