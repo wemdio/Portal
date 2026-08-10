@@ -62,8 +62,15 @@ export type ActivityPlanInput = {
 type JsonError = NextResponse<{ error: string }>;
 
 export type ActivityPlanAuthResult =
-  | { actor: { userId: string; canManage: true } }
+  | { actor: { userId: string; canManage: boolean } }
   | { error: JsonError };
+
+type ActivityPlanAccess = 'view' | 'manage';
+
+const ACTIVITY_PLAN_CAPABILITY_FUNCTION = {
+  view: 'can_view_team_activity_plan',
+  manage: 'can_manage_team_activity_plan',
+} as const;
 
 export function jsonError(message: string, status: number): JsonError {
   return NextResponse.json({ error: message }, { status });
@@ -80,6 +87,7 @@ export function logMeta(req: NextRequest, userId: string | null) {
 
 export async function authenticateActivityPlanRequest(
   req: NextRequest,
+  requiredAccess: ActivityPlanAccess = 'manage',
 ): Promise<ActivityPlanAuthResult> {
   const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return { error: jsonError('Unauthorized', 401) };
@@ -92,8 +100,14 @@ export async function authenticateActivityPlanRequest(
     if (!user) return { error: jsonError('Unauthorized', 401) };
     userId = user.id;
 
-    const { data, error } = await authedClient.rpc('can_manage_team_activity_plan');
-    if (error) {
+    const checkCapability = async (
+      access: ActivityPlanAccess,
+    ): Promise<{ allowed: boolean } | { error: JsonError }> => {
+      const { data, error } = await authedClient.rpc(
+        ACTIVITY_PLAN_CAPABILITY_FUNCTION[access],
+      );
+      if (!error) return { allowed: data === true };
+
       await logError(
         'team.activity_plan.auth.failed',
         error,
@@ -101,10 +115,20 @@ export async function authenticateActivityPlanRequest(
         logMeta(req, userId),
       );
       return { error: jsonError('Failed to verify access', 500) };
-    }
-    if (data !== true) return { error: jsonError('Forbidden', 403) };
+    };
 
-    return { actor: { userId, canManage: true } };
+    const required = await checkCapability(requiredAccess);
+    if ('error' in required) return required;
+    if (!required.allowed) return { error: jsonError('Forbidden', 403) };
+
+    if (requiredAccess === 'manage') {
+      return { actor: { userId, canManage: true } };
+    }
+
+    const management = await checkCapability('manage');
+    if ('error' in management) return management;
+
+    return { actor: { userId, canManage: management.allowed } };
   } catch (error) {
     await logError(
       'team.activity_plan.auth.failed',

@@ -9,6 +9,7 @@ const ADMIN_ID = '00000000-0000-4000-8000-000000000002';
 const STAFF_ID = '00000000-0000-4000-8000-000000000003';
 const CLIENT_ID = '00000000-0000-4000-8000-000000000004';
 const DEMO_HR_ID = '00000000-0000-4000-8000-000000000005';
+const DEMO_ADMIN_ID = '00000000-0000-4000-8000-000000000006';
 const ITEM_ID = '00000000-0000-4000-8000-000000000010';
 const OTHER_MONTH_ITEM_ID = '00000000-0000-4000-8000-000000000011';
 const ITEM_UPDATED_AT = '2026-08-06T09:00:00.000Z';
@@ -17,13 +18,15 @@ type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 let mockMainDb: MockSupabaseClient = createMockSupabase();
 let mockCurrentUser: { id: string } | null = { id: HR_ID };
+const ACTIVITY_PLAN_VIEWERS = new Set([HR_ID, ADMIN_ID]);
+const ACTIVITY_PLAN_MANAGERS = new Set([HR_ID]);
 const mockGetUser = jest.fn(async () => ({ data: { user: mockCurrentUser } }));
-const mockCanManageActivityPlan = jest.fn(
+const mockActivityPlanCapability = jest.fn(
   async (_functionName: string): Promise<{
     data: boolean | null;
     error: { message: string } | null;
   }> => ({
-    data: mockCurrentUser?.id === HR_ID,
+    data: currentUserHasActivityPlanCapability(_functionName),
     error: null,
   }),
 );
@@ -42,7 +45,7 @@ jest.mock('@/lib/supabaseRouteClient', () => ({
     auth: {
       getUser: () => mockGetUser(),
     },
-    rpc: (functionName: string) => mockCanManageActivityPlan(functionName),
+    rpc: (functionName: string) => mockActivityPlanCapability(functionName),
   }),
 }));
 
@@ -64,6 +67,17 @@ function profile(
     is_hr: options.isHr ?? false,
     is_demo: options.isDemo ?? false,
   };
+}
+
+function currentUserHasActivityPlanCapability(functionName: string): boolean {
+  if (!mockCurrentUser) return false;
+  if (functionName === 'can_view_team_activity_plan') {
+    return ACTIVITY_PLAN_VIEWERS.has(mockCurrentUser.id);
+  }
+  if (functionName === 'can_manage_team_activity_plan') {
+    return ACTIVITY_PLAN_MANAGERS.has(mockCurrentUser.id);
+  }
+  return false;
 }
 
 function activityRow(overrides: Record<string, unknown> = {}) {
@@ -92,13 +106,14 @@ function seedDatabase() {
   mockMainDb = createMockSupabase({
     tables: {
       profiles: [
-        // HR is deliberately not a leadership role: access is the exact is_hr capability.
+        // Preserve explicit is_hr access for a non-admin internal employee.
         profile(HR_ID, 'technician', { isHr: true }),
         profile(LEAD_ID, 'lead'),
         profile(ADMIN_ID, 'admin'),
         profile(STAFF_ID, 'manager'),
         profile(CLIENT_ID, 'client'),
         profile(DEMO_HR_ID, 'technician', { isHr: true, isDemo: true }),
+        profile(DEMO_ADMIN_ID, 'admin', { isDemo: true }),
       ],
       team_activity_plan_items: [
         activityRow(),
@@ -200,9 +215,9 @@ beforeEach(() => {
   mockCurrentUser = { id: HR_ID };
   mockGetUser.mockReset();
   mockGetUser.mockImplementation(async () => ({ data: { user: mockCurrentUser } }));
-  mockCanManageActivityPlan.mockReset();
-  mockCanManageActivityPlan.mockImplementation(async (_functionName: string) => ({
-    data: mockCurrentUser?.id === HR_ID,
+  mockActivityPlanCapability.mockReset();
+  mockActivityPlanCapability.mockImplementation(async (functionName: string) => ({
+    data: currentUserHasActivityPlanCapability(functionName),
     error: null,
   }));
   mockLogAudit.mockClear();
@@ -222,7 +237,7 @@ describe('team activity plan authorization', () => {
 
       expect(response.status).toBe(401);
       expect(mockGetUser).not.toHaveBeenCalled();
-      expect(mockCanManageActivityPlan).not.toHaveBeenCalled();
+      expect(mockActivityPlanCapability).not.toHaveBeenCalled();
       expect(mockMainDb.selects).toHaveLength(0);
       expect(mockMainDb.mutations).toHaveLength(0);
       expect(successAuditEvents()).toHaveLength(0);
@@ -236,7 +251,7 @@ describe('team activity plan authorization', () => {
 
     expect(response.status).toBe(401);
     expect(mockGetUser).toHaveBeenCalledTimes(1);
-    expect(mockCanManageActivityPlan).not.toHaveBeenCalled();
+    expect(mockActivityPlanCapability).not.toHaveBeenCalled();
     expect(mockMainDb.selects).toHaveLength(0);
   });
 
@@ -247,7 +262,7 @@ describe('team activity plan authorization', () => {
     const response = await invoke('GET');
 
     expect(response.status).toBe(500);
-    expect(mockCanManageActivityPlan).not.toHaveBeenCalled();
+    expect(mockActivityPlanCapability).not.toHaveBeenCalled();
     expect(mockMainDb.selects).toHaveLength(0);
     expect(mockMainDb.mutations).toHaveLength(0);
     expect(mockLogError).toHaveBeenCalledWith(
@@ -263,13 +278,13 @@ describe('team activity plan authorization', () => {
 
   it('returns 500 and logs a capability RPC failure before any service-role query', async () => {
     const rpcError = { message: 'authorization predicate unavailable' };
-    mockCanManageActivityPlan.mockResolvedValueOnce({ data: null, error: rpcError });
+    mockActivityPlanCapability.mockResolvedValueOnce({ data: null, error: rpcError });
 
     const response = await invoke('GET');
 
     expect(response.status).toBe(500);
-    expect(mockCanManageActivityPlan)
-      .toHaveBeenCalledWith('can_manage_team_activity_plan');
+    expect(mockActivityPlanCapability)
+      .toHaveBeenCalledWith('can_view_team_activity_plan');
     expect(mockMainDb.selects).toHaveLength(0);
     expect(mockMainDb.mutations).toHaveLength(0);
     expect(mockLogError).toHaveBeenCalledWith(
@@ -282,7 +297,6 @@ describe('team activity plan authorization', () => {
 
   it.each([
     ['leadership', LEAD_ID],
-    ['administrator', ADMIN_ID],
     ['ordinary staff', STAFF_ID],
     ['client', CLIENT_ID],
   ])('does not substitute the %s role for the is_hr capability', async (_label, userId) => {
@@ -291,23 +305,71 @@ describe('team activity plan authorization', () => {
     const response = await invoke('GET');
 
     expect(response.status).toBe(403);
-    expect(mockCanManageActivityPlan)
-      .toHaveBeenCalledWith('can_manage_team_activity_plan');
+    expect(mockActivityPlanCapability)
+      .toHaveBeenCalledWith('can_view_team_activity_plan');
     expect(mockMainDb.selects).toHaveLength(0);
     expect(planSelects()).toHaveLength(0);
     expect(mockMainDb.mutations).toHaveLength(0);
   });
 
-  it.each<Method>(['GET', 'POST', 'PATCH', 'DELETE'])(
-    'denies authenticated non-HR %s after only the caller-JWT capability RPC',
+  it('allows a non-demo admin to view the plan without management controls', async () => {
+    mockCurrentUser = { id: ADMIN_ID };
+
+    const response = await invoke('GET');
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.canManage).toBe(false);
+    expect(mockActivityPlanCapability.mock.calls).toEqual([
+      ['can_view_team_activity_plan'],
+      ['can_manage_team_activity_plan'],
+    ]);
+  });
+
+  it.each<Method>(['POST', 'PATCH', 'DELETE'])(
+    'denies a non-demo admin write through %s',
     async (method) => {
       mockCurrentUser = { id: ADMIN_ID };
 
       const response = await invoke(method);
 
       expect(response.status).toBe(403);
-      expect(mockCanManageActivityPlan)
-        .toHaveBeenCalledWith('can_manage_team_activity_plan');
+      expect(mockActivityPlanCapability.mock.calls).toEqual([
+        ['can_manage_team_activity_plan'],
+      ]);
+      expect(mockMainDb.mutations).toHaveLength(0);
+      expect(successAuditEvents()).toHaveLength(0);
+    },
+  );
+
+  it.each<[Method, number]>([
+    ['GET', 200],
+    ['POST', 201],
+    ['PATCH', 200],
+    ['DELETE', 204],
+  ])('preserves explicit HR management through %s', async (method, expectedStatus) => {
+    mockCurrentUser = { id: HR_ID };
+
+    const response = await invoke(method);
+
+    expect(response.status).toBe(expectedStatus);
+  });
+
+  it.each<[Method, string]>([
+    ['GET', 'can_view_team_activity_plan'],
+    ['POST', 'can_manage_team_activity_plan'],
+    ['PATCH', 'can_manage_team_activity_plan'],
+    ['DELETE', 'can_manage_team_activity_plan'],
+  ])(
+    'denies a non-admin without is_hr on %s after only the caller-JWT capability RPC',
+    async (method, expectedCapability) => {
+      mockCurrentUser = { id: STAFF_ID };
+
+      const response = await invoke(method);
+
+      expect(response.status).toBe(403);
+      expect(mockActivityPlanCapability)
+        .toHaveBeenCalledWith(expectedCapability);
       expect(mockMainDb.selects).toHaveLength(0);
       expect(planSelects()).toHaveLength(0);
       expect(mockMainDb.mutations).toHaveLength(0);
@@ -315,14 +377,17 @@ describe('team activity plan authorization', () => {
     },
   );
 
-  it('rejects demo users even when is_hr is true', async () => {
-    mockCurrentUser = { id: DEMO_HR_ID };
+  it.each([
+    ['explicit HR', DEMO_HR_ID],
+    ['admin', DEMO_ADMIN_ID],
+  ])('rejects a demo %s', async (_label, userId) => {
+    mockCurrentUser = { id: userId };
 
     const response = await invoke('GET');
 
     expect(response.status).toBe(403);
-    expect(mockCanManageActivityPlan)
-      .toHaveBeenCalledWith('can_manage_team_activity_plan');
+    expect(mockActivityPlanCapability)
+      .toHaveBeenCalledWith('can_view_team_activity_plan');
     expect(mockMainDb.selects).toHaveLength(0);
     expect(planSelects()).toHaveLength(0);
   });

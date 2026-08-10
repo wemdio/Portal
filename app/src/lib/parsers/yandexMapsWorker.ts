@@ -10,7 +10,7 @@ import {
   markYandexMapsCatalogSeen,
   normalizeYandexMapsCatalogFilters,
   recordYandexMapsCatalogRefreshCompleted,
-  fillJobFromYandexMapsCatalog,
+  fillYandexMapsCatalogJobInChunks,
   upsertYandexMapsCatalogOrganizations,
   yandexIdFromCardUrl,
 } from '@/lib/parsers/yandexMapsCatalog';
@@ -303,14 +303,29 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       const catalogLimit = typeof maxResultsRaw === 'number' || typeof maxResultsRaw === 'string'
         ? (Number(maxResultsRaw) > 0 ? Math.floor(Number(maxResultsRaw)) : null)
         : null;
-      const filled = await fillJobFromYandexMapsCatalog(jobId, catalogFilters, catalogLimit);
+
+      // Порциями, а не одним запросом: время сбора пропорционально объёму
+      // (около 1650 строк в секунду на бою), и на крупной выборке человек
+      // иначе несколько минут смотрит на пустой экран. Первые тысячи ложатся за
+      // пару секунд, дальше счётчик растёт после каждой порции — форма опрашивает
+      // задачу раз в пять секунд и подтягивает уже собранное.
+      await setJobPatch(jobId, { progress_stage: 'catalog_search' });
+      const filled = await fillYandexMapsCatalogJobInChunks(
+        jobId,
+        catalogFilters,
+        catalogLimit,
+        async (collected) => {
+          await setJobPatch(jobId, {
+            total_organizations: collected,
+            processed_organizations: collected,
+          });
+        },
+      );
 
       await setJobPatch(jobId, {
         status: 'completed',
         progress_stage: filled.organizations ? 'catalog_completed' : 'catalog_empty',
         completed_at: new Date().toISOString(),
-        total_links: filled.links,
-        processed_links: filled.links,
         total_organizations: filled.organizations,
         processed_organizations: filled.organizations,
         error_message: null,
@@ -319,7 +334,6 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       void logInfo('parser.yandexmaps.catalog.complete', 'YandexMaps catalog search completed', {
         jobId,
         totalOrganizations: filled.organizations,
-        totalLinks: filled.links,
       }, logMeta);
       return;
     }

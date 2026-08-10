@@ -24,4 +24,22 @@ describe('client report export worker wiring', () => {
     expect(compose).toContain('SUPABASE_DB_URL=${SUPABASE_DB_URL}');
     expect(compose).toContain('MAIN_S3_BUCKET=${MAIN_S3_BUCKET}');
   });
+
+  it('includes the export worker in every shared-worker production deploy', () => {
+    const compose = fs.readFileSync(path.join(repoRoot, 'docker-compose.prod.yml'), 'utf8');
+    const deployTargets = fs.readFileSync(
+      path.join(repoRoot, '.semaphore/select-deploy-targets.sh'),
+      'utf8',
+    );
+    const composeWorkerServices = [...compose.matchAll(/^  (worker-[a-z0-9-]+):(?:\s|$)/gm)]
+      .map((match) => match[1])
+      .sort();
+    const allWorkerServices = deployTargets
+      .match(/^ALL_WORKER_SERVICES="([^"]+)"$/m)?.[1]
+      .split(/\s+/)
+      .sort() ?? [];
+
+    expect(composeWorkerServices).toContain('worker-client-report-exports');
+    expect(allWorkerServices).toEqual(composeWorkerServices);
+  });
 });

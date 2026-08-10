@@ -144,5 +144,8 @@ describe('YandexMapsParserView', () => {
     expect(screen.getByText('Россия')).toBeInTheDocument();
     // Редактора ссылок больше нет: нужны только результаты.
     expect(screen.queryByText('Ссылки организаций')).toBeNull();
+    // Статус — по-русски: раньше в шапке карточки печаталось «running».
+    expect(screen.getAllByText('Выполняется').length).toBeGreaterThan(0);
+    expect(screen.queryByText('running')).toBeNull();
   });
 });

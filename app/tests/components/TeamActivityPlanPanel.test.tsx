@@ -218,6 +218,21 @@ describe('<TeamActivityPlanPanel />', () => {
     expect(panel.querySelector('[class*="dark:"]')).toBeNull();
   });
 
+  it('keeps a read-only response free of create, edit, and delete controls', async () => {
+    mockTeamApiFetch.mockReset();
+    mockTeamApiFetch.mockResolvedValue({
+      ...planResponse(initialItems()),
+      canManage: false,
+    });
+
+    render(<TeamActivityPlanPanel />);
+
+    expect(await screen.findByText('Обучающий созвон')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Добавить активность' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Редактировать активность/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Удалить' })).not.toBeInTheDocument();
+  });
+
   it('navigates between calendar months and reloads only the selected month', async () => {
     const user = userEvent.setup();
     render(<TeamActivityPlanPanel />);
