@@ -390,18 +390,25 @@ export async function fetchFirstSalesLeads(
   // воронка и конкретные id.
   const seenIds = new Set(stageRows.map((r) => r.amo_deal_id));
   const missingExtraIds = extraDealIds.filter((id) => !seenIds.has(id));
-  for (const chunk of chunkArray(missingExtraIds, IN_CHUNK_SIZE)) {
-    const { data: extraData, error: extraError } = await db
-      .from('amo_lead_stage_dates_v')
-      .select(STAGE_DATE_COLUMNS)
-      .eq('pipeline_id', pipelineId)
-      .in('amo_deal_id', chunk);
-    if (extraError) throw extraError;
-    for (const row of (extraData ?? []) as StageDateRow[]) {
-      if (seenIds.has(row.amo_deal_id)) continue;
-      stageRows.push(row);
-      seenIds.add(row.amo_deal_id);
-    }
+  const extraChunks = await Promise.all(
+    chunkArray(missingExtraIds, IN_CHUNK_SIZE).map(async (chunk) => {
+      const { data: extraData, error: extraError } = await db
+        .from('amo_lead_stage_dates_v')
+        .select(STAGE_DATE_COLUMNS)
+        .eq('pipeline_id', pipelineId)
+        .in('amo_deal_id', chunk);
+      if (extraError) throw extraError;
+      return (extraData ?? []) as StageDateRow[];
+    }),
+  );
+  // Дедуп после сбора, а не по ходу цикла: чанки теперь идут параллельно, и
+  // «уже видели» нельзя проверять внутри чанка — только когда пришли все.
+  // Чанки не пересекаются по id, но `seenIds` сюда приходит уже непустым
+  // (сделки из оконной выборки), так что проверка нужна.
+  for (const row of extraChunks.flat()) {
+    if (seenIds.has(row.amo_deal_id)) continue;
+    stageRows.push(row);
+    seenIds.add(row.amo_deal_id);
   }
 
   if (stageRows.length === 0) return [];
@@ -413,20 +420,19 @@ export async function fetchFirstSalesLeads(
   // проблему — `cisLeads/batchedQuery.ts` — используем его: бьём id на чанки
   // по IN_CHUNK_SIZE и мержим результаты.
   const ids = stageRows.map((r) => r.amo_deal_id);
+  const leadChunks = await Promise.all(
+    chunkArray(ids, IN_CHUNK_SIZE).map(async (chunk) => {
+      const { data: leadsChunk, error: leadsError } = await db
+        .from('amo_leads')
+        .select('amo_id, name, raw')
+        .in('amo_id', chunk);
+      if (leadsError) throw leadsError;
+      return (leadsChunk ?? []) as Array<{ amo_id: number; name: string | null; raw: unknown }>;
+    }),
+  );
   const leadsById = new Map<number, { name: string | null; raw: unknown }>();
-  for (const chunk of chunkArray(ids, IN_CHUNK_SIZE)) {
-    const { data: leadsChunk, error: leadsError } = await db
-      .from('amo_leads')
-      .select('amo_id, name, raw')
-      .in('amo_id', chunk);
-    if (leadsError) throw leadsError;
-    for (const l of (leadsChunk ?? []) as Array<{
-      amo_id: number;
-      name: string | null;
-      raw: unknown;
-    }>) {
-      leadsById.set(l.amo_id, { name: l.name, raw: l.raw });
-    }
+  for (const l of leadChunks.flat()) {
+    leadsById.set(l.amo_id, { name: l.name, raw: l.raw });
   }
 
   return stageRows.map((r) => ({
