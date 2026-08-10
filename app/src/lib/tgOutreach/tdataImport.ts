@@ -1,4 +1,5 @@
 import { readTdataArchive, type TdataArchiveItem } from '@/lib/telegram/tdataArchive';
+import { authKeyFingerprint } from '@/lib/telegram/sessionUtils';
 
 /**
  * Официальные ключи Telegram Desktop.
@@ -52,9 +53,13 @@ export type TdataArchiveReader = (
  * ручки, ей нужен доступ к Supabase. Ошибка одного архива не отменяет
  * остальные: оператор грузит партию целиком и должен увидеть, что именно
  * не прочиталось.
+ *
+ * Принимает и готовый массив, и асинхронную последовательность. Второе нужно
+ * ручке: она подаёт архивы по одному, чтобы в памяти лежал текущий, а не вся
+ * партия — в полной папке Telegram Desktop гигабайты кэша.
  */
 export async function collectTdataCandidates(
-  uploads: TdataUpload[],
+  uploads: Iterable<TdataUpload> | AsyncIterable<TdataUpload>,
   read: TdataArchiveReader = readTdataArchive,
 ): Promise<TdataCollectResult> {
   const candidates: TdataCandidate[] = [];
@@ -62,7 +67,7 @@ export async function collectTdataCandidates(
   const errors: TdataError[] = [];
   const seen = new Map<number, string>();
 
-  for (const upload of uploads) {
+  for await (const upload of uploads) {
     let items: TdataArchiveItem[];
     try {
       items = await read(upload.buffer, upload.name);
@@ -105,8 +110,11 @@ export async function collectTdataCandidates(
 }
 
 export interface ExistingAccountRow {
-  tg_user_id: number;
+  /** Пуст у всех строк, по которым ещё не ходил getMe() — например у залитых `.session`. */
+  tg_user_id: number | null;
   campaign_name: string | null;
+  /** Пуст там, где конвертация в строку сессии не удалась. */
+  session_data?: string | null;
 }
 
 /**
@@ -115,27 +123,60 @@ export interface ExistingAccountRow {
  * Сверка идёт по всей базе, а не по текущей кампании: один ключ авторизации в
  * двух кампаниях — это два параллельных подключения и `AUTH_KEY_DUPLICATED`,
  * после которого Telegram рвёт сессию.
+ *
+ * Ключей сверки два, и второй обязателен. По `tg_user_id` не найдётся ничего
+ * из того, что залито старым путём (`.session`): там колонка пуста, пока по
+ * аккаунту не сходил getMe(). Именно эти строки оператор и перезальёт первым
+ * делом — те же аккаунты, уже сконвертированные руками. Поэтому вторым ключом
+ * идёт сам ключ авторизации: он есть в `session_data` у обоих путей загрузки и
+ * одинаков у одной и той же сессии, какой бы адрес DC ни лежал перед ним.
  */
 export function splitExistingAccounts(
   candidates: TdataCandidate[],
   existing: ExistingAccountRow[],
 ): { fresh: TdataCandidate[]; skipped: TdataSkip[] } {
-  const byUserId = new Map(existing.map((row) => [row.tg_user_id, row.campaign_name]));
+  const byUserId = new Map<number, string | null>();
+  const byAuthKey = new Map<string, string | null>();
+
+  for (const row of existing) {
+    if (row.tg_user_id !== null && row.tg_user_id !== undefined) {
+      byUserId.set(row.tg_user_id, row.campaign_name);
+    }
+    const fingerprint = authKeyFingerprint(row.session_data);
+    if (fingerprint) byAuthKey.set(fingerprint, row.campaign_name);
+  }
+
   const fresh: TdataCandidate[] = [];
   const skipped: TdataSkip[] = [];
 
   for (const candidate of candidates) {
-    if (!byUserId.has(candidate.tgUserId)) {
-      fresh.push(candidate);
+    if (byUserId.has(candidate.tgUserId)) {
+      const campaignName = byUserId.get(candidate.tgUserId);
+      skipped.push({
+        name: candidate.name,
+        reason: campaignName
+          ? `уже загружен в кампанию «${campaignName}»`
+          : 'уже загружен в другую кампанию',
+      });
       continue;
     }
-    const campaignName = byUserId.get(candidate.tgUserId);
-    skipped.push({
-      name: candidate.name,
-      reason: campaignName
-        ? `уже загружен в кампанию «${campaignName}»`
-        : 'уже загружен в другую кампанию',
-    });
+
+    // Совпал только ключ: та же сессия лежит в базе под другим (или ещё не
+    // выясненным) телеграм-id. Формулировка отличается намеренно — оператор
+    // ищет её в списке по имени и не найдёт.
+    const fingerprint = authKeyFingerprint(candidate.sessionString);
+    if (fingerprint && byAuthKey.has(fingerprint)) {
+      const campaignName = byAuthKey.get(fingerprint);
+      skipped.push({
+        name: candidate.name,
+        reason: campaignName
+          ? `эта же сессия уже загружена в кампанию «${campaignName}» — совпал ключ входа`
+          : 'эта же сессия уже загружена в другую кампанию — совпал ключ входа',
+      });
+      continue;
+    }
+
+    fresh.push(candidate);
   }
 
   return { fresh, skipped };

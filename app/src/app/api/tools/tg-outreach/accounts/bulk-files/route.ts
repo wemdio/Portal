@@ -8,6 +8,7 @@ import {
   splitExistingAccounts,
   type TdataSkip,
   type TdataError,
+  type TdataUpload,
 } from '@/lib/tgOutreach/tdataImport';
 
 export const dynamic = 'force-dynamic';
@@ -44,6 +45,20 @@ function parseAccountJson(text: string): { session_name: string; api_id: number;
     });
   }
   return [parseAccountObj(data as Record<string, unknown>)];
+}
+
+/**
+ * Отдавать архивы по одному, а не складывать всю партию в память.
+ *
+ * Настоящий архив продавца весит килобайты, но оператор выбирает пачку
+ * целиком, а в полной папке Telegram Desktop лежат гигабайты кэша — и
+ * `unzipper` берёт архив только целым буфером. Читая по одному, держим в
+ * памяти текущий архив, а не сумму всех.
+ */
+async function* bufferOneByOne(files: File[]): AsyncGenerator<TdataUpload> {
+  for (const file of files) {
+    yield { name: file.name, buffer: Buffer.from(await file.arrayBuffer()) };
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -117,21 +132,20 @@ export async function POST(req: NextRequest) {
       let tdataRows: Array<Record<string, unknown>> = [];
 
       if (zipFiles.length) {
-        const uploads = await Promise.all(
-          zipFiles.map(async (file) => ({
-            name: file.name,
-            buffer: Buffer.from(await file.arrayBuffer()),
-          })),
-        );
-        const collected = await collectTdataCandidates(uploads);
+        const collected = await collectTdataCandidates(bufferOneByOne(zipFiles));
         tdataSkipped.push(...collected.skipped);
         tdataErrors.push(...collected.errors);
 
         if (collected.candidates.length) {
+          // Читаем всю таблицу, а не только строки с нужными tg_user_id.
+          // Фильтр по id вырезал бы ровно то, ради чего сверка и делается:
+          // у аккаунтов, залитых старым путём (.session), tg_user_id пуст,
+          // и найти их можно только по ключу авторизации из session_data.
+          // Колонки узкие, таблица — внутренний список аккаунтов, так что
+          // выборка целиком дешевле пропущенного AUTH_KEY_DUPLICATED.
           const { data: existing, error: existingError } = await db
             .from('tg_outreach_accounts')
-            .select('tg_user_id, tg_outreach_campaigns(name)')
-            .in('tg_user_id', collected.candidates.map((c) => c.tgUserId));
+            .select('tg_user_id, session_data, tg_outreach_campaigns(name)');
 
           // Провалившуюся сверку нельзя трактовать как «дублей нет»: тогда тот
           // же ключ авторизации уедет в базу вторым аккаунтом, оба подключения
@@ -144,9 +158,13 @@ export async function POST(req: NextRequest) {
           const existingRows = (existing ?? []).map((row) => {
             const rowCampaign = (row as { tg_outreach_campaigns?: { name?: string } | null })
               .tg_outreach_campaigns;
+            // Пустой tg_user_id обязан остаться null: Number(null) даёт 0, и в
+            // сверке появился бы несуществующий аккаунт с id 0.
+            const rawUserId = (row as { tg_user_id: number | string | null }).tg_user_id;
             return {
-              tg_user_id: Number((row as { tg_user_id: number }).tg_user_id),
+              tg_user_id: rawUserId === null || rawUserId === undefined ? null : Number(rawUserId),
               campaign_name: rowCampaign?.name ?? null,
+              session_data: (row as { session_data?: string | null }).session_data ?? null,
             };
           });
 
