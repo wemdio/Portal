@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { isTransientError, withRetry } from '@/lib/supabaseRetry';
 
 export type WebsiteEnrichmentDb = Pick<SupabaseClient, 'from'>;
 
@@ -23,6 +24,15 @@ export type WebsiteEnrichmentQueuePayload = {
 };
 
 const QUEUE_BATCH_SIZE = 500;
+const PUBLISH_RETRY_OPTIONS = {
+  retries: 2,
+  baseDelayMs: 250,
+  maxDelayMs: 1_000,
+} as const;
+
+function retryTransientDbOperation<T>(operation: () => Promise<T>): Promise<T> {
+  return withRetry(operation, PUBLISH_RETRY_OPTIONS);
+}
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -37,30 +47,35 @@ async function markPreparingJobFailed(
   jobId: string,
   message: string,
 ): Promise<void> {
-  const { error } = await db
-    .from('website_enrichment_jobs')
-    .update({
-      status: 'failed',
-      error_message: message,
-      completed_at: new Date().toISOString(),
-    })
-    .eq('id', jobId)
-    .eq('status', 'preparing');
-  if (error) throw new Error(error.message);
+  await retryTransientDbOperation(async () => {
+    const { error } = await db
+      .from('website_enrichment_jobs')
+      .update({
+        status: 'failed',
+        error_message: message,
+        completed_at: new Date().toISOString(),
+      })
+      .eq('id', jobId)
+      .eq('status', 'preparing');
+    if (error) throw error;
+  });
 }
 
 async function refreshPreparingJobHeartbeat(
   db: WebsiteEnrichmentDb,
   jobId: string,
 ): Promise<void> {
-  const { data, error } = await db
-    .from('website_enrichment_jobs')
-    .update({ preparing_heartbeat_at: new Date().toISOString() })
-    .eq('id', jobId)
-    .eq('status', 'preparing')
-    .select('id')
-    .maybeSingle<{ id: string }>();
-  if (error) throw new Error(error.message);
+  const { data } = await retryTransientDbOperation(async () => {
+    const result = await db
+      .from('website_enrichment_jobs')
+      .update({ preparing_heartbeat_at: new Date().toISOString() })
+      .eq('id', jobId)
+      .eq('status', 'preparing')
+      .select('id')
+      .maybeSingle<{ id: string }>();
+    if (result.error) throw result.error;
+    return result;
+  });
   if (!data) throw new Error('Website enrichment job is no longer preparing');
 }
 
@@ -93,35 +108,59 @@ export async function publishWebsiteEnrichmentJob(
     const rows = queuePayloads.map((item) => ({ ...item, job_id: job.id }));
     for (let index = 0; index < rows.length; index += QUEUE_BATCH_SIZE) {
       if (index > 0) await refreshPreparingJobHeartbeat(db, job.id);
-      const { error } = await db
-        .from('website_enrichment_queue')
-        .insert(rows.slice(index, index + QUEUE_BATCH_SIZE));
-      if (error) throw new Error(error.message);
+      const batch = rows.slice(index, index + QUEUE_BATCH_SIZE);
+      await retryTransientDbOperation(async () => {
+        const { error } = await db
+          .from('website_enrichment_queue')
+          .upsert(batch, {
+            onConflict: 'job_id,row_index',
+            ignoreDuplicates: true,
+          });
+        if (error) throw error;
+      });
     }
 
-    const { count, error: countError } = await db
-      .from('website_enrichment_queue')
-      .select('id', { count: 'exact', head: true })
-      .eq('job_id', job.id);
-    if (countError) throw new Error(countError.message);
+    const { count } = await retryTransientDbOperation(async () => {
+      const result = await db
+        .from('website_enrichment_queue')
+        .select('id', { count: 'exact', head: true })
+        .eq('job_id', job.id);
+      if (result.error) throw result.error;
+      return result;
+    });
     if (count !== jobPayload.total) {
       throw new Error(`Website enrichment queue incomplete: ${count ?? 0}/${jobPayload.total}`);
     }
     await refreshPreparingJobHeartbeat(db, job.id);
 
-    const { data: published, error: publishError } = await db
-      .from('website_enrichment_jobs')
-      .update({ status: 'pending' })
-      .eq('id', job.id)
-      .eq('status', 'preparing')
-      .select('id')
-      .maybeSingle<{ id: string }>();
-    if (publishError) throw new Error(publishError.message);
-    if (!published) throw new Error('Website enrichment job is no longer preparing');
+    await retryTransientDbOperation(async () => {
+      const { data: published, error: publishError } = await db
+        .from('website_enrichment_jobs')
+        .update({ status: 'pending' })
+        .eq('id', job.id)
+        .eq('status', 'preparing')
+        .select('id')
+        .maybeSingle<{ id: string }>();
+      if (publishError) throw publishError;
+      if (published) return;
+
+      const { data: current, error: currentError } = await db
+        .from('website_enrichment_jobs')
+        .select('status')
+        .eq('id', job.id)
+        .maybeSingle<{ status: string }>();
+      if (currentError) throw currentError;
+      if (current && ['pending', 'running', 'completed'].includes(current.status)) return;
+
+      throw new Error('Website enrichment job is no longer preparing');
+    });
 
     return job.id;
   } catch (error) {
     const message = errorMessage(error);
+    if (isTransientError(error)) {
+      throw new Error(message);
+    }
     try {
       await markPreparingJobFailed(db, job.id, message);
     } catch (markError) {

@@ -10,22 +10,34 @@ const DEFAULT_RETRIES = 3;
 const DEFAULT_BASE_DELAY_MS = 300;
 const DEFAULT_MAX_DELAY_MS = 5000;
 
-function isTransientError(err: unknown): boolean {
+const TRANSIENT_CODES = new Set([
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'EPIPE',
+  'EAI_AGAIN',
+  'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
+
+const TRANSIENT_HTTP_STATUSES = new Set([502, 503, 504, 520, 522, 524]);
+
+export function isTransientError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
-  const msg = String((err as { message?: string }).message ?? '');
-  const code = (err as { code?: string }).code;
+  const retryable = err as { message?: unknown; code?: unknown; status?: unknown };
+  const message = String(retryable.message ?? '');
+  const code = String(retryable.code ?? '').toUpperCase();
+  const status = Number(retryable.status);
+
   return (
-    code === 'ECONNREFUSED' ||
-    code === 'ETIMEDOUT' ||
-    code === 'ECONNRESET' ||
-    code === 'EPIPE' ||
-    msg.includes('fetch failed') ||
-    msg.includes('network') ||
-    msg.includes('ECONNREFUSED') ||
-    msg.includes('socket hang up') ||
-    msg.includes('503') ||
-    msg.includes('502') ||
-    msg.includes('timeout')
+    TRANSIENT_CODES.has(code) ||
+    TRANSIENT_HTTP_STATUSES.has(status) ||
+    /\b(?:502|503|504|520|522|524)\b|abort|tim(?:ed|ing)?\s*out|timeout|fetch failed|socket hang up|econnreset|epipe|eai_again|enetunreach|network|service unavailable/i.test(
+      message,
+    )
   );
 }
 
