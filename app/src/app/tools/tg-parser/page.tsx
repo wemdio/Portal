@@ -21,7 +21,6 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import { saveAs } from 'file-saver';
-import { useVirtualizer } from '@tanstack/react-virtual';
 
 import type { ParsedUser } from '@/lib/tgParser/types';
 import {
@@ -50,6 +49,43 @@ const COLUMNS: (keyof ParsedUser)[] = [
   'Ссылка на источник',
   'Название источника',
 ];
+
+/**
+ * Ширина колонок результата, пиксели.
+ *
+ * Заданы явно и одинаково для шапки и строк. Иначе колонки разъезжаются: строки
+ * виртуализированного списка вынуты из табличной раскладки (absolute + flex), и
+ * автоширина ячеек шапки к ним уже не применяется — заголовки подгонялись под
+ * длину своего текста, а данные шли ровными блоками.
+ *
+ * Размеры не равные: длинным полям вроде биографии и сообщений нужно больше
+ * места, а «Пол» и «ID» читаются и в узкой колонке.
+ */
+const DEFAULT_COL_WIDTH = 190;
+const COLUMN_WIDTH: Partial<Record<keyof ParsedUser, number>> = {
+  'ID/Username': 190,
+  ID: 120,
+  Username: 170,
+  Имя: 140,
+  Фамилия: 140,
+  'Полное имя': 210,
+  Пол: 110,
+  Биография: 360,
+  'Личный канал': 240,
+  'Статус онлайн': 130,
+  'Последний раз в сети': 170,
+  Сообщения: 360,
+  'Количество сообщений': 150,
+  'Тип источника': 160,
+  'Ссылка на источник': 260,
+  'Название источника': 220,
+};
+
+function colWidth(col: keyof ParsedUser): number {
+  return COLUMN_WIDTH[col] ?? DEFAULT_COL_WIDTH;
+}
+
+const TABLE_WIDTH = COLUMNS.reduce((sum, col) => sum + colWidth(col), 0);
 
 function cellValue(v: unknown): string {
   return String(v ?? '').replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
@@ -87,73 +123,130 @@ const API_ACCOUNTS = '/api/tools/tg-parser/accounts';
 
 /* ── Virtualized user table ── */
 
-function VirtualUserTable({ users }: { users: ParsedUser[] }) {
-  const parentRef = useRef<HTMLDivElement>(null);
-  const ROW_HEIGHT = 40;
+const PAGE_SIZE = 10;
 
-  const virtualizer = useVirtualizer({
-    count: users.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => ROW_HEIGHT,
-    overscan: 20,
-  });
+/**
+ * Таблица результатов — страницами по десять.
+ *
+ * Раньше здесь был виртуализированный список на полторы тысячи строк, и он
+ * ломал раскладку: строки вынимались из таблицы (absolute + flex), а шапка
+ * оставалась обычной и подгоняла колонки под длину заголовков. Совпасть они не
+ * могли, данные уезжали относительно шапки.
+ *
+ * С десятью строками виртуализация не нужна, а обычная таблица выравнивает
+ * колонки сама — та же правка чинит и раскладку, и читаемость: значения теперь
+ * переносятся в две строки вместо обрезки.
+ */
+function UserTable({ users }: { users: ParsedUser[] }) {
+  const [page, setPage] = useState(0);
+  const pageCount = Math.max(1, Math.ceil(users.length / PAGE_SIZE));
+  // Список мог смениться под руками (другая задача, перезагрузка) — держим
+  // страницу в границах, иначе окажемся на пустой.
+  const safePage = Math.min(page, pageCount - 1);
+  const rows = users.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
 
   return (
-    <div ref={parentRef} className="overflow-x-auto max-h-[50vh] overflow-y-auto">
-      <table className="min-w-full divide-y divide-gray-200 text-sm">
-        <thead className="bg-gray-50 sticky top-0 z-10">
-          <tr>
+    <div className="space-y-2">
+      <div className="overflow-x-auto">
+        <table className="text-sm" style={{ width: TABLE_WIDTH, tableLayout: 'fixed' }}>
+          <colgroup>
             {COLUMNS.map((col) => (
-              <th
-                key={col}
-                className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap"
-              >
-                {col}
-              </th>
+              <col key={col} style={{ width: colWidth(col) }} />
             ))}
-          </tr>
-        </thead>
-        <tbody className="bg-white relative" style={{ height: virtualizer.getTotalSize() }}>
-          {virtualizer.getVirtualItems().map((vRow) => {
-            const u = users[vRow.index];
-            return (
-              <tr
-                key={vRow.index}
-                className="hover:bg-gray-50 absolute w-full flex"
-                style={{
-                  height: ROW_HEIGHT,
-                  transform: `translateY(${vRow.start}px)`,
-                }}
-              >
+          </colgroup>
+          <thead className="bg-gray-50">
+            <tr>
+              {COLUMNS.map((col) => (
+                <th
+                  key={col}
+                  className="border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500"
+                >
+                  {col}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="bg-white">
+            {rows.map((u, i) => (
+              <tr key={safePage * PAGE_SIZE + i} className="border-b border-gray-100 hover:bg-gray-50">
                 {COLUMNS.map((col) => {
                   const val = u[col];
+                  const text = cellValue(val);
                   const isLink = col === 'Ссылка на источник' || col === 'Личный канал';
                   return (
                     <td
                       key={col}
-                      className="px-4 py-2 text-gray-700 max-w-[200px] truncate flex-none"
-                      style={{ width: 200, minWidth: 200 }}
+                      title={text || undefined}
+                      className="px-4 py-2.5 align-top text-gray-700"
                     >
                       {isLink && typeof val === 'string' && val.startsWith('http') ? (
                         <a
                           href={val}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-blue-600 hover:underline truncate block"
+                          className="block truncate text-blue-600 hover:underline"
                         >
                           {val}
                         </a>
                       ) : (
-                        cellValue(val)
+                        // Две строки вместо обрезки в одну: биографию и
+                        // сообщения в 190 пикселей одной строкой не прочитать.
+                        <span className="line-clamp-2 break-words">{text}</span>
                       )}
                     </td>
                   );
                 })}
               </tr>
-            );
-          })}
-        </tbody>
-      </table>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">
+        <span>
+          {(safePage * PAGE_SIZE + 1).toLocaleString('ru-RU')}–
+          {Math.min((safePage + 1) * PAGE_SIZE, users.length).toLocaleString('ru-RU')}
+          {' из '}
+          {users.length.toLocaleString('ru-RU')}
+        </span>
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setPage(0)}
+            disabled={safePage === 0}
+            className="rounded-lg border border-gray-200 px-2 py-1 transition hover:bg-gray-50 disabled:opacity-40"
+          >
+            «
+          </button>
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.max(0, Math.min(p, pageCount - 1) - 1))}
+            disabled={safePage === 0}
+            className="rounded-lg border border-gray-200 px-2.5 py-1 transition hover:bg-gray-50 disabled:opacity-40"
+          >
+            Назад
+          </button>
+          <span className="px-1 tabular-nums">
+            {safePage + 1} / {pageCount}
+          </span>
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+            disabled={safePage >= pageCount - 1}
+            className="rounded-lg border border-gray-200 px-2.5 py-1 transition hover:bg-gray-50 disabled:opacity-40"
+          >
+            Вперёд
+          </button>
+          <button
+            type="button"
+            onClick={() => setPage(pageCount - 1)}
+            disabled={safePage >= pageCount - 1}
+            className="rounded-lg border border-gray-200 px-2 py-1 transition hover:bg-gray-50 disabled:opacity-40"
+          >
+            »
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -257,7 +350,26 @@ function JobCard({
                 · {job.userCount.toLocaleString('ru-RU')} пользователей
               </span>
             )}
+            {/* Идущая задача показывает, сколько уже собрано: обход трёх чатов
+                занимает до сорока минут, и раньше всё это время счётчик был
+                пуст, а отличить работу от зависания было нельзя. */}
+            {job.status === 'running' && (job.foundCount ?? 0) > 0 && (
+              <span className="text-xs font-medium text-blue-700">
+                · уже {job.foundCount!.toLocaleString('ru-RU')}
+              </span>
+            )}
           </div>
+          {job.status === 'running' && job.progressNote && (
+            <p className="text-xs text-gray-500">
+              {job.progressNote}
+              {job.progressAt && (
+                <span className="text-gray-400">
+                  {' · '}
+                  {new Date(job.progressAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+                </span>
+              )}
+            </p>
+          )}
           {job.status === 'error' && job.error && (
             <p className="text-sm text-red-700">{job.error}</p>
           )}
@@ -359,7 +471,7 @@ function JobCard({
               Загрузка данных…
             </div>
           )}
-          {loadedUsers && loadedUsers.length > 0 && <VirtualUserTable users={loadedUsers} />}
+          {loadedUsers && loadedUsers.length > 0 && <UserTable users={loadedUsers} />}
           {loadedUsers && loadedUsers.length === 0 && (
             <div className="p-4 text-sm text-gray-600">Контакты не найдены по заданным условиям.</div>
           )}

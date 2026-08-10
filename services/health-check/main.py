@@ -1192,8 +1192,13 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
         updated_column="updated_at", started_column=None,
     ),
     JobMonitorSpec(
+        # found_count/progress_note/progress_at обязательны в этом списке:
+        # stop_reason и result_users заполняются только в самом конце задачи, и
+        # по ним любой обход длиннее 15 минут выглядел зависшим. 10.08.2026 это
+        # дало ложную тревогу на живой задаче, которая нормально работала.
         "tg_parser_jobs", "Telegram-парсер", ("pending", "running"),
-        ("stop_reason", "result_users"), "portal-worker-tg-parser",
+        ("found_count", "progress_note", "progress_at", "stop_reason", "result_users"),
+        "portal-worker-tg-parser",
     ),
     JobMonitorSpec(
         "tg_scan_jobs", "Telegram-сканер", ("pending", "running"),

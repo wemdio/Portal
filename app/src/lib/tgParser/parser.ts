@@ -253,15 +253,37 @@ export type ParseResult =
   | { status: 'partial'; users: ParsedUser[]; stop_reason: ParseStopReason; error?: string }
   | { status: 'error'; error: string };
 
+/**
+ * Отчёт о ходе работы, который не может навредить сбору.
+ *
+ * Колбэк приходит снаружи (воркер пишет из него в журнал и в БД), и его сбой —
+ * не повод терять уже собранные контакты. Поэтому глотаем всё.
+ */
+async function report(
+  opts: ParseOptions,
+  p: Parameters<NonNullable<ParseOptions['onProgress']>>[0],
+): Promise<void> {
+  try {
+    await opts.onProgress?.(p);
+  } catch {
+    /* отчётность не должна ронять сбор */
+  }
+}
+
+/** Как часто отчитываться внутри длинного обхода. */
+const PROGRESS_TICK_EVERY = 25;
+
 async function parseChatMessages(
   client: TelegramClient,
   link: string,
   opts: ParseOptions,
   mergeUser: (u: ParsedUser) => Promise<boolean>,
   enrichProfile: boolean,
+  totalSoFar: () => number,
 ): Promise<void> {
   const entity = await resolveEntityByLink(client, link);
   const title = (entity as Api.Channel).title ?? (entity as Api.User).username ?? String((entity as Api.User).id);
+  await report(opts, { link, title, stage: 'messages', phase: 'start', total: totalSoFar() });
   const usersMap = new Map<number, { user: Api.User; messages: string[] }>();
 
   for await (const msg of client.iterMessages(entity, { limit: opts.message_limit })) {
@@ -279,13 +301,19 @@ async function parseChatMessages(
     }
   }
 
+  let done = 0;
   for (const [, { user, messages }] of usersMap) {
     const { status, lastSeen } = getOnlineStatus(user.status);
     if (!filterByOnline(status, lastSeen, opts)) continue;
     const parsed = await userToParsed(client, user, link, title, 'chat_messages', messages, enrichProfile);
     if (!(await mergeUser(parsed))) return;
+    done += 1;
+    if (done % PROGRESS_TICK_EVERY === 0) {
+      await report(opts, { link, title, stage: 'messages', phase: 'tick', total: totalSoFar() });
+    }
     await new Promise((r) => setTimeout(r, 100)); // rate limit
   }
+  await report(opts, { link, title, stage: 'messages', phase: 'done', total: totalSoFar() });
 }
 
 async function parseChatMembers(
@@ -294,9 +322,11 @@ async function parseChatMembers(
   opts: ParseOptions,
   mergeUser: (u: ParsedUser) => Promise<boolean>,
   enrichProfile: boolean,
+  totalSoFar: () => number,
 ): Promise<void> {
   const entity = await resolveEntityByLink(client, link);
   const title = (entity as Api.Channel).title ?? (entity as Api.User).username ?? String((entity as Api.User).id);
+  await report(opts, { link, title, stage: 'members', phase: 'start', total: totalSoFar() });
   let count = 0;
   try {
     for await (const participant of client.iterParticipants(entity, { limit: opts.message_limit })) {
@@ -307,14 +337,21 @@ async function parseChatMembers(
       const parsed = await userToParsed(client, u, link, title, 'chat_members', [], enrichProfile);
       if (!(await mergeUser(parsed))) return;
       count++;
+      if (count % PROGRESS_TICK_EVERY === 0) {
+        await report(opts, { link, title, stage: 'members', phase: 'tick', total: totalSoFar() });
+      }
       if (count % 50 === 0) await new Promise((r) => setTimeout(r, 100));
     }
   } catch (e) {
     if (String(e).includes('CHAT_ADMIN_REQUIRED') || String(e).includes('CHANNEL_PRIVATE')) {
+      // Закрытый чат или нужны права админа — не ошибка задачи, просто этот
+      // источник не отдаёт список участников. Отчитываемся и идём дальше.
+      await report(opts, { link, title, stage: 'members', phase: 'done', total: totalSoFar() });
       return;
     }
     throw e;
   }
+  await report(opts, { link, title, stage: 'members', phase: 'done', total: totalSoFar() });
 }
 
 async function parsePostComments(
@@ -323,11 +360,14 @@ async function parsePostComments(
   opts: ParseOptions,
   mergeUser: (u: ParsedUser) => Promise<boolean>,
   enrichProfile: boolean,
+  totalSoFar: () => number,
 ): Promise<void> {
   const entity = await resolveEntityByLink(client, link);
   const ch = entity as Api.Channel;
+  // Не канал — комментировать нечего, и это нормальный случай, а не сбой.
   if (!ch || ch.className !== 'Channel' || !ch.broadcast) return;
   const title = ch.title ?? ch.username ?? String(ch.id);
+  await report(opts, { link, title, stage: 'comments', phase: 'start', total: totalSoFar() });
   const usersMap = new Map<number, { user: Api.User; messages: string[] }>();
   for await (const post of client.iterMessages(entity, { limit: opts.message_limit })) {
     if (!post?.replies?.comments) continue;
@@ -350,13 +390,19 @@ async function parsePostComments(
     }
   }
 
+  let done = 0;
   for (const [, { user, messages }] of usersMap) {
     const { status, lastSeen } = getOnlineStatus(user.status);
     if (!filterByOnline(status, lastSeen, opts)) continue;
     const parsed = await userToParsed(client, user, link, title, 'post_comments', messages, enrichProfile);
     if (!(await mergeUser(parsed))) return;
+    done += 1;
+    if (done % PROGRESS_TICK_EVERY === 0) {
+      await report(opts, { link, title, stage: 'comments', phase: 'tick', total: totalSoFar() });
+    }
     await new Promise((r) => setTimeout(r, 100));
   }
+  await report(opts, { link, title, stage: 'comments', phase: 'done', total: totalSoFar() });
 }
 
 function buildMergeUser(
@@ -400,16 +446,20 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
       const trimmed = String(link).trim();
       if (!trimmed) continue;
 
+      // Счётчик отдаём функцией, а не числом: этапы длинные, и к моменту
+      // отчёта в карте уже не то количество, что было на входе.
+      const totalSoFar = () => allUsers.size;
+
       if (opts.parse_chat_messages) {
-        await parseChatMessages(client, trimmed, opts, mergeUser, enrichProfile);
+        await parseChatMessages(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar);
         if (stopRef.reason) break;
       }
       if (opts.parse_chat_members) {
-        await parseChatMembers(client, trimmed, opts, mergeUser, enrichProfile);
+        await parseChatMembers(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar);
         if (stopRef.reason) break;
       }
       if (opts.parse_post_comments) {
-        await parsePostComments(client, trimmed, opts, mergeUser, enrichProfile);
+        await parsePostComments(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar);
         if (stopRef.reason) break;
       }
     }
