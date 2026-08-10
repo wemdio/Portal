@@ -106,12 +106,14 @@ export default function FirstSalesView() {
     let active = true;
     const run = async () => {
       try {
-        const qs = new URLSearchParams({ from: filters.from, to: filters.to });
+        // countOnly=1 — роут не тянет расшифровки записей (мегабайты текста
+        // ради одного числа), а отдаёт сразу размер очереди.
+        const qs = new URLSearchParams({ from: filters.from, to: filters.to, countOnly: '1' });
         const res = await authFetch(`/api/analytics/first-sales/meeting-links?${qs.toString()}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json = (await res.json()) as { rows: unknown[]; truncated: boolean };
+        const json = (await res.json()) as { count: number; truncated: boolean };
         if (!active) return;
-        setMeetingQueueCount({ count: json.rows.length, truncated: json.truncated });
+        setMeetingQueueCount({ count: json.count, truncated: json.truncated });
       } catch (e) {
         if (!active) return;
         // Не роняем весь дашборд из-за счётчика на второстепенной кнопке —
