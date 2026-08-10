@@ -111,13 +111,13 @@ describe('readTdataArchive', () => {
     expect(found[0].accounts[0].tgUserId).toBe(303);
   });
 
-  it('читает старую пару key_data0/key_data1, которую с диска не открыть', async () => {
+  it('читает старую пару key_data0/key_data1', async () => {
     const dir = await makeTdataDir(404);
     dirs.push(dir);
     // Telegram Desktop писал служебные файлы парами `<имя>0`/`<имя>1` до того,
     // как перешёл на одиночный `<имя>s`. Библиотека доходит до старой пары,
-    // только если `stat` на промахе вернёт undefined, а не бросит: на диске
-    // (nodeFsLike) он бросает ENOENT, поэтому такую папку читает лишь этот слой.
+    // только если `stat` на промахе вернёт undefined, а не бросит: иначе перебор
+    // обрывается на первом же промахе и папка выглядит как «не tdata».
     const zip = await makeZip(
       listFiles(dir).map((rel) => ({
         name: `acc/tdata/${rel.replace(/s$/, '0')}`,
@@ -128,6 +128,52 @@ describe('readTdataArchive', () => {
     const found = await readTdataArchive(zip, 'старый.zip');
 
     expect(found[0].accounts[0].tgUserId).toBe(404);
+  });
+
+  it('читает архив, в котором служебные файлы лежат в корне без папки', async () => {
+    const dir = await makeTdataDir(909);
+    dirs.push(dir);
+    // Оператор запаковал не саму папку tdata, а её содержимое: папки-владельца
+    // нет, поэтому имя берётся от архива.
+    const zip = await makeZip(
+      listFiles(dir).map((rel) => ({
+        name: rel,
+        content: fs.readFileSync(path.join(dir, rel)),
+      })),
+    );
+
+    const found = await readTdataArchive(zip, '246630983.zip');
+
+    expect(found).toHaveLength(1);
+    expect(found[0].name).toBe('246630983');
+    expect(found[0].accounts[0].tgUserId).toBe(909);
+  });
+
+  it('битая папка не отменяет соседнюю: обе в ответе, но с разной судьбой', async () => {
+    const good = await makeTdataDir(707);
+    const bad = await makeTdataDir(808);
+    dirs.push(good, bad);
+    // Портим ключ второй папки: библиотека не узнает свой формат и откажется
+    // открывать её целиком. Оператор грузит партию, и отказ одной папки не
+    // должен стоить ему остальных — поэтому это элемент с `error`, а не отказ
+    // всего архива.
+    const zip = await makeZip([
+      { name: 'acc_good/tdata', dir: good },
+      ...listFiles(bad).map((rel) => ({
+        name: `acc_bad/tdata/${rel}`,
+        content: rel === 'key_datas'
+          ? Buffer.from('не tdata, а мусор')
+          : fs.readFileSync(path.join(bad, rel)),
+      })),
+    ]);
+
+    const found = await readTdataArchive(zip, 'партия.zip');
+
+    const byName = Object.fromEntries(found.map((f) => [f.name, f]));
+    expect(byName.acc_good.accounts[0].tgUserId).toBe(707);
+    expect(byName.acc_good.error).toBeUndefined();
+    expect(byName.acc_bad.accounts).toEqual([]);
+    expect(byName.acc_bad.error).toMatch(/повреждена/);
   });
 
   it('на архиве без tdata объясняет, чего не хватает', async () => {
