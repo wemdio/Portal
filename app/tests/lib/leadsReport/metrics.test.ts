@@ -1,5 +1,6 @@
 import { SUMMARY_CHANNELS } from '@/lib/leadsReport/channels';
 import {
+  computeAllChannelMetrics,
   computeMetricsFromRows,
   type AmoLeadMetricRow,
   type AmoStatusEventRow,
@@ -354,6 +355,84 @@ describe('computeMetricsFromRows', () => {
 
     expect(result.find((r) => r.channel.name === 'partners')).toMatchObject({
       qualifiedLeads: 0,
+    });
+  });
+});
+
+describe('computeAllChannelMetrics', () => {
+  function dataFor(table: string) {
+    if (table === 'amo_statuses') return statuses;
+    if (table === 'amo_leads') {
+      return [
+        lead({ Источник: 'Аутрич' }, 50, 'Перенос', {
+          amoId: 700,
+          createdAt: '2026-07-21T10:00:00.000Z',
+        }),
+      ];
+    }
+    return [move(700, 10, 50, '2026-07-22T09:00:00.000Z')];
+  }
+
+  function fakeDb(calls: Array<{ table: string; filters: Record<string, unknown> }>) {
+    return {
+      from(table: string) {
+        const filters: Record<string, unknown> = {};
+        calls.push({ table, filters });
+        const builder: Record<string, unknown> = {
+          select: () => builder,
+          eq: (column: string, value: unknown) => {
+            filters[`eq:${column}`] = value;
+            return builder;
+          },
+          gte: (column: string, value: unknown) => {
+            filters[`gte:${column}`] = value;
+            return builder;
+          },
+          lt: (column: string, value: unknown) => {
+            filters[`lt:${column}`] = value;
+            return builder;
+          },
+          in: (column: string, value: unknown) => {
+            filters[`in:${column}`] = value;
+            return builder;
+          },
+          then: (resolve: (result: unknown) => unknown) =>
+            resolve({ data: dataFor(table), error: null }),
+        };
+        return builder;
+      },
+    };
+  }
+
+  it('тянет историю переходов и считает по ней, а не по текущему этапу', async () => {
+    const calls: Array<{ table: string; filters: Record<string, unknown> }> = [];
+    const result = await computeAllChannelMetrics(
+      fakeDb(calls) as never,
+      SUMMARY_CHANNELS,
+      WINDOW_START,
+      WINDOW_END,
+    );
+
+    expect(calls.map((call) => call.table)).toEqual([
+      'amo_statuses',
+      'amo_leads',
+      'amo_events',
+    ]);
+
+    const eventsCall = calls[2];
+    expect(eventsCall.filters['eq:event_type']).toBe('lead_status_changed');
+    expect(eventsCall.filters['in:amo_deal_id']).toEqual([700]);
+    // Окно по времени режет `computePeak`, а не запрос. Фильтр `.lt` здесь был
+    // бы багом: у сделки, созданной в пятницу вечером и сдвинутой в
+    // понедельник, ВСЯ история лежит после конца окна. Запрос вернул бы ноль
+    // строк, `computePeak` откатился бы на текущий этап карточки — и
+    // понедельничная встреча попала бы в пятничный отчёт задним числом.
+    expect(eventsCall.filters['lt:changed_at']).toBeUndefined();
+
+    // Сделка в «Переносе», встречи не было — «Было» должно остаться нулём.
+    expect(result.find((r) => r.channel.name === 'outreach')).toMatchObject({
+      arrived: 1,
+      meetingsHeld: 0,
     });
   });
 });
