@@ -17,6 +17,19 @@ function xorBlock(a: Uint8Array, b: Uint8Array): Buffer {
 }
 
 /**
+ * Настоящая tdata всегда кратна 16 байтам, но Task 4 пропускает через этот
+ * код байты, извлечённые из .zip-архива, загруженного оператором. Без этой
+ * проверки битый архив не упал бы с ошибкой: xorBlock тихо читает за конец
+ * буфера (там undefined, `undefined ^ x` даёт 0), а Buffer.copy молча
+ * обрезает лишнее — на выходе был бы не сбой, а необъяснимый мусор.
+ */
+function assertBlockAligned(data: Uint8Array): void {
+  if (data.length % 16 !== 0) {
+    throw new Error(`AES-IGE: длина данных должна быть кратна 16 байтам, получено ${data.length}`);
+  }
+}
+
+/**
  * AES-IGE поверх `aes-*-ecb`: режима IGE в Node нет, но он выражается через
  * ECB двумя цепочками XOR — по шифротексту и по открытому тексту.
  * iv здесь 32 байта: первая половина продолжает цепочку шифротекста,
@@ -36,6 +49,7 @@ function createAesIge(key: Uint8Array, iv: Uint8Array) {
 
   return {
     encrypt(data: Uint8Array): Uint8Array {
+      assertBlockAligned(data);
       // Явно широкий тип Buffer (= Buffer<ArrayBufferLike>): без аннотации TS
       // сужает его по Buffer.from() до Buffer<ArrayBuffer>, а xorBlock() ниже
       // возвращает Buffer<ArrayBufferLike> — переменная цикла должна принимать оба.
@@ -52,6 +66,7 @@ function createAesIge(key: Uint8Array, iv: Uint8Array) {
       return new Uint8Array(out);
     },
     decrypt(data: Uint8Array): Uint8Array {
+      assertBlockAligned(data);
       let prevCipher: Buffer = Buffer.from(iv.subarray(0, 16));
       let prevPlain: Buffer = Buffer.from(iv.subarray(16, 32));
       const out = Buffer.allocUnsafe(data.length);
@@ -73,8 +88,7 @@ const notNeeded = (name: string) => (): never => {
 
 /**
  * Реализуем не весь интерфейс библиотеки, а только то, что вызывает чтение
- * tdata: остальное бросает понятную ошибку, если однажды понадобится. Отсюда
- * приведение типа — объект намеренно уже интерфейса.
+ * tdata: остальное бросает понятную ошибку, если однажды понадобится.
  */
 export function createTdataCrypto(): TdataCrypto {
   return {
@@ -109,5 +123,5 @@ export function createTdataCrypto(): TdataCrypto {
         digest: () => new Uint8Array(hash.digest()),
       };
     },
-  } as unknown as TdataCrypto;
+  };
 }

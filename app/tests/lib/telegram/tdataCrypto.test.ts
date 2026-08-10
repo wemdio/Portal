@@ -19,6 +19,19 @@ describe('createTdataCrypto', () => {
     expect(Buffer.from(decrypted).equals(plain)).toBe(true);
   });
 
+  it('AES-IGE бросает ошибку на данных не кратных 16 байтам', () => {
+    const crypto = createTdataCrypto();
+    const key = Buffer.alloc(32, 3);
+    const iv = Buffer.alloc(32, 5);
+    const ige = crypto.createAesIge(key, iv);
+
+    // Task 4 пропускает через этот код байты из архива, который загрузил
+    // оператор: битый .zip должен упасть с понятной ошибкой, а не тихо
+    // отдать мусор.
+    expect(() => ige.encrypt(Buffer.alloc(15))).toThrow('15');
+    expect(() => ige.decrypt(Buffer.alloc(17))).toThrow('17');
+  });
+
   it('считает sha1, sha256 и md5 как node:crypto', async () => {
     const crypto = createTdataCrypto();
     const data = Buffer.from('portal');
