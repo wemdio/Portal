@@ -1625,11 +1625,19 @@ function CampaignAccountsTab({
       const token = await getAccessToken();
       const formData = new FormData();
       Array.from(files).forEach(f => formData.append('files', f));
+      // fetch отклоняется, только когда ответа нет вовсе: обрыв связи,
+      // соединение, разорванное на середине многомегабайтной партии. Это не то
+      // же, что отказ сервера — там ответ есть, и он объясняет причину. Здесь
+      // же неизвестно даже, доехало что-нибудь или нет, поэтому и текст другой.
       const res = await fetch(`${API_BASE}/accounts/bulk-files?campaign_id=${campaignId}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
-      });
+      }).catch(() => null);
+      if (!res) {
+        setUploadError('Файлы не дошли до сервера: связь оборвалась. Проверьте интернет и попробуйте ещё раз.');
+        return;
+      }
       // Тело читаем бережно, как в deleteSelected выше. Партия tdata-архивов
       // весит мегабайты, и до приложения запрос может не доехать: прокси
       // отвечает 413 обычной HTML-страницей, на которой res.json() падает.
@@ -1663,6 +1671,11 @@ function CampaignAccountsTab({
             : 'Ни одного аккаунта не добавлено: в этих файлах их не нашлось';
         setUploadSummary({ headline, skipped, errors });
       }
+    } catch (err) {
+      // Всё остальное: отказ авторизации или наша собственная ошибка. Молчать
+      // нельзя и здесь — оператор смотрит на остановившийся спиннер и не знает,
+      // уехали его двадцать аккаунтов или нет.
+      setUploadError(`Загрузка сорвалась: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setUploading(false);
       // Сбрасываем всегда, а не после try: иначе после сбоя input сохраняет
