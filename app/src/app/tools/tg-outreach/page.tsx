@@ -1352,6 +1352,19 @@ function AccountAvatar({
   );
 }
 
+/**
+ * Итог загрузки файлов аккаунтов.
+ *
+ * Пропущенные и нечитаемые хранятся списками, а не одной строкой: реальная
+ * партия — это два десятка архивов, и склеенный в абзац перечень имён оператор
+ * не читает. Ни одно имя при этом не прячем — по нему продавцу возвращают брак.
+ */
+interface AccountsUploadSummary {
+  headline: string;
+  skipped: Array<{ name: string; reason: string }>;
+  errors: Array<{ name: string; error: string }>;
+}
+
 /* =================== CAMPAIGN ACCOUNTS TAB =================== */
 function CampaignAccountsTab({
   campaignId,
@@ -1369,6 +1382,7 @@ function CampaignAccountsTab({
   const [showAdd, setShowAdd] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadSummary, setUploadSummary] = useState<AccountsUploadSummary | null>(null);
   const [sessionName, setSessionName] = useState('');
   const [apiId, setApiId] = useState('');
   const [apiHash, setApiHash] = useState('');
@@ -1606,6 +1620,7 @@ function CampaignAccountsTab({
     if (!files?.length) return;
     setUploading(true);
     setUploadError(null);
+    setUploadSummary(null);
     try {
       const token = await getAccessToken();
       const formData = new FormData();
@@ -1615,9 +1630,26 @@ function CampaignAccountsTab({
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
       });
+      const body = await res.json() as {
+        error?: string;
+        count?: number;
+        skipped?: Array<{ name: string; reason: string }>;
+        errors?: Array<{ name: string; error: string }>;
+      };
       if (!res.ok) {
-        const d = await res.json() as { error?: string };
-        setUploadError(d.error ?? 'Ошибка загрузки');
+        setUploadError(body.error ?? 'Ошибка загрузки');
+      } else {
+        const count = body.count ?? 0;
+        const skipped = body.skipped ?? [];
+        const errors = body.errors ?? [];
+        // «Добавлено аккаунтов: 0» само по себе ничего не объясняет, поэтому
+        // пустой результат проговариваем словами.
+        const headline = count > 0
+          ? `Добавлено аккаунтов: ${count}`
+          : skipped.length || errors.length
+            ? 'Ни одного аккаунта не добавлено — почему, ниже'
+            : 'Ни одного аккаунта не добавлено: в этих файлах их не нашлось';
+        setUploadSummary({ headline, skipped, errors });
       }
     } finally {
       setUploading(false);
@@ -1645,10 +1677,13 @@ function CampaignAccountsTab({
             {syncingIds.length ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
             {syncingIds.length ? `Читаю профили (${syncingIds.length})…` : 'Обновить профили'}
           </button>
-          <label className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
+          <label
+            title="tdata — zip-архивами (можно сразу несколько), старый формат — парами .session и .json"
+            className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer"
+          >
             {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
             Загрузить файлы
-            <input type="file" multiple accept=".json,.session" className="hidden" onChange={e => { void handleFiles(e); }} />
+            <input type="file" multiple accept=".json,.session,.zip" className="hidden" onChange={e => { void handleFiles(e); }} />
           </label>
           <button type="button" onClick={() => setShowAdd(!showAdd)}
             className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">
@@ -1659,6 +1694,37 @@ function CampaignAccountsTab({
 
       {uploadError && (
         <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{uploadError}</div>
+      )}
+
+      {uploadSummary && (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+          <div className="space-y-1.5">
+            <div>{uploadSummary.headline}</div>
+            {uploadSummary.skipped.length > 0 && (
+              <div>
+                <div className="text-gray-500">Пропущено {uploadSummary.skipped.length}:</div>
+                <ul className="list-disc pl-4">
+                  {uploadSummary.skipped.map((s, i) => (
+                    <li key={`skip-${i}-${s.name}`}><span className="font-medium">{s.name}</span> — {s.reason}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {uploadSummary.errors.length > 0 && (
+              <div>
+                <div className="text-gray-500">Не прочиталось {uploadSummary.errors.length}:</div>
+                <ul className="list-disc pl-4">
+                  {uploadSummary.errors.map((x, i) => (
+                    <li key={`err-${i}-${x.name}`}><span className="font-medium">{x.name}</span> — {x.error}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+          <button type="button" onClick={() => setUploadSummary(null)} className="text-gray-400 hover:text-gray-600 cursor-pointer">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
       )}
 
       {syncSummary && (
