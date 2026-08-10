@@ -104,6 +104,9 @@ describe('bounded Yandex Maps catalog missing streak', () => {
     expect(sql).toMatch(
       /create\s+or\s+replace\s+function\s+public\.yandex_maps_catalog_mark_seen/i,
     );
-    expect(sql).toMatch(/and\s+c\.missing_streak\s*<\s*2/i);
+    expect(sql.match(/c\.missing_streak\s*<\s*2/gi)).toHaveLength(2);
+    expect(sql).toMatch(
+      /update\s+public\.yandex_maps_company_catalog\s+c[\s\S]*?from\s+candidates[\s\S]*?where\s+c\.yandex_id\s*=\s*candidates\.yandex_id\s+and\s+c\.missing_streak\s*<\s*2/i,
+    );
   });
 });

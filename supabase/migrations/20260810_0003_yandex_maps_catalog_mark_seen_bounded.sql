@@ -45,7 +45,9 @@ begin
            else c.closed_suspected_at
          end
     from candidates
-   where c.yandex_id = candidates.yandex_id;
+   where c.yandex_id = candidates.yandex_id
+     -- Rechecked after a concurrent updater releases its row lock.
+     and c.missing_streak < 2;
 
   get diagnostics suspected = row_count;
   return suspected;
