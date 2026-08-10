@@ -21,6 +21,9 @@ describe('isExcludedLeadName', () => {
     expect(isExcludedLeadName('Бот: Александр')).toBe(false);
     expect(isExcludedLeadName('Дмитрий')).toBe(false);
     expect(isExcludedLeadName(null)).toBe(false);
+    // «тесть» — это не «тест»: реальная сделка с таким именем в базе есть.
+    expect(isExcludedLeadName('Бот: тесть')).toBe(false);
+    expect(isExcludedLeadName('')).toBe(false);
   });
 
   it('ловит имя, склеенное с цифрами', () => {
