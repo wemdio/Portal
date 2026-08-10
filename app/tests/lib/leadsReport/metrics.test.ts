@@ -319,4 +319,41 @@ describe('computeMetricsFromRows', () => {
       meetingsHeld: 0,
     });
   });
+
+  it('сделка, вся история которой после конца окна, считается по этапу создания', () => {
+    // Заявка вечера пятницы, разобранная в понедельник: события есть, но все
+    // они позже отчёта. Этап создания берётся из from_value первого перехода.
+    const deal = lead({ Источник: 'Аутрич' }, 30, 'Назначена встреча', { amoId: 906 });
+    const result = computeMetricsFromRows(
+      SUMMARY_CHANNELS,
+      statuses,
+      [deal],
+      [move(906, 10, 30, '2026-07-28T09:00:00.000Z')],
+      WINDOW_START,
+      WINDOW_END,
+    );
+
+    expect(result.find((r) => r.channel.name === 'outreach')).toMatchObject({
+      arrived: 1,
+      qualifiedLeads: 0,
+      meetingsScheduled: 0,
+      meetingsHeld: 0,
+    });
+  });
+
+  it('успешно закрытая ПОСЛЕ окна не считается лидом этой недели', () => {
+    const deal = lead({ Источник: 'Партнер' }, 142, 'Успешно', { amoId: 907 });
+    const result = computeMetricsFromRows(
+      SUMMARY_CHANNELS,
+      statuses,
+      [deal],
+      [move(907, 10, 142, '2026-07-28T09:00:00.000Z')],
+      WINDOW_START,
+      WINDOW_END,
+    );
+
+    expect(result.find((r) => r.channel.name === 'partners')).toMatchObject({
+      qualifiedLeads: 0,
+    });
+  });
 });

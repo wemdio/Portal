@@ -175,6 +175,30 @@ function toStatusId(value: string | null): number | null {
   return Number.isInteger(parsed) ? parsed : null;
 }
 
+/**
+ * Успешно закрыта к концу окна.
+ *
+ * Отдельно от `peak`, потому что «Успешно» (142) намеренно исключён из
+ * максимума: его sort — признак закрытия, а не позиция в воронке. Но лидом
+ * выигранная сделка является всегда, до «Успешно» иначе не доходят.
+ *
+ * Карточка без единого перехода — это карточка, которую с момента создания не
+ * двигали: её текущий статус и есть статус на конец окна.
+ */
+function isWonByEnd(
+  lead: AmoLeadMetricRow,
+  events: AmoStatusEventRow[],
+  end: Date,
+): boolean {
+  if (events.length === 0) return lead.status_id === WON_STATUS_ID;
+  return events.some((event) => {
+    const changedAt = Date.parse(event.changed_at);
+    return Number.isFinite(changedAt)
+      && changedAt < end.getTime()
+      && toStatusId(event.to_value) === WON_STATUS_ID;
+  });
+}
+
 /** Чистая часть расчёта — используется тестами и DB-оркестратором. */
 export function computeMetricsFromRows(
   channels: ChannelSummaryConfig[],
@@ -205,8 +229,9 @@ export function computeMetricsFromRows(
     else eventsByDeal.set(event.amo_deal_id, [event]);
   }
 
-  type PreparedLead = DedupCandidate & {
-    statusId: number | null;
+  type PreparedLead = Omit<DedupCandidate, 'channel'> & {
+    channel: ChannelSummaryConfig['name'];
+    wonByEnd: boolean;
   };
 
   const prepared: PreparedLead[] = [];
@@ -226,30 +251,25 @@ export function computeMetricsFromRows(
     // канале — см. EXCLUDED_LEAD_NAMES.
     if (isExcludedLeadName(lead.name)) continue;
 
+    const leadEvents = eventsByDeal.get(lead.amo_id) ?? [];
     prepared.push({
       amoId: lead.amo_id,
       name: lead.name,
       identity: extractCustomField(lead.raw, TELEGRAM_CHAT_ID_FIELD),
       channel,
       createdAt: lead.created_at,
-      statusId: lead.status_id,
-      peak: computePeak(
-        lead,
-        eventsByDeal.get(lead.amo_id) ?? [],
-        thresholds,
-        end,
-      ),
+      wonByEnd: isWonByEnd(lead, leadEvents, end),
+      peak: computePeak(lead, leadEvents, thresholds, end),
     });
   }
 
   for (const item of dedupeLeadMagnets(prepared)) {
-    const bucket = metrics.get(item.channel as ChannelSummaryConfig['name']);
+    const bucket = metrics.get(item.channel);
     if (!bucket) continue;
 
     // Лидом считается сделка, дошедшая до «Квалифицированный лид» или дальше.
     // Успешно закрытая — лид всегда: до «Успешно» иначе не доходят.
-    const qualified =
-      item.peak >= thresholds.qualifiedSort || item.statusId === WON_STATUS_ID;
+    const qualified = item.peak >= thresholds.qualifiedSort || item.wonByEnd;
 
     // Лид-магниты («Бот:...») попадают в «Пришло» только когда прошли
     // квалификацию — иначе они раздувают воронку, ведь бот создаёт много
@@ -315,6 +335,16 @@ export async function computeAllChannelMetrics(
   // этапу, а не по текущему этапу карточки. Тянем чанками по `IN_CHUNK_SIZE` —
   // тот же приём, что в `firstSales/meetings.ts`: у PostgREST есть предел длины
   // URL. Сделок в окне порядка семидесяти, так что чанк обычно один.
+  //
+  // Фильтра `changed_at < end` здесь намеренно НЕТ, и это не забытая
+  // оптимизация. Окно по времени режет `computePeak`, и только он: этап
+  // создания сделки он берёт из `from_value` самого раннего перехода, а тот
+  // может лежать как угодно поздно. У заявки вечера пятницы, которую разобрали
+  // в понедельник, ВСЯ история позже конца окна — с фильтром запрос вернул бы
+  // ноль строк, `computePeak` откатился бы на `lead.status_id`, то есть на
+  // сегодняшний этап, и понедельничная встреча задним числом попала бы в
+  // пятничный отчёт. Ровно то, от чего защищает `changedAt >= end` в
+  // `computePeak`. Строк на сделку единицы, экономить тут нечего.
   const dealIds = [...new Set(leads.map((lead) => lead.amo_id))];
   const eventChunks = await Promise.all(
     chunkArray(dealIds, IN_CHUNK_SIZE).map(async (chunk) => {
@@ -322,8 +352,7 @@ export async function computeAllChannelMetrics(
         .from('amo_events')
         .select('amo_deal_id, changed_at, from_value, to_value')
         .eq('event_type', 'lead_status_changed')
-        .in('amo_deal_id', chunk)
-        .lt('changed_at', endIso);
+        .in('amo_deal_id', chunk);
       if (error) throw error;
       return (data ?? []) as AmoStatusEventRow[];
     }),
