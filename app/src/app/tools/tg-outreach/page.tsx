@@ -27,6 +27,7 @@ import {
   AlertCircle,
   Flame,
   Database,
+  ShieldCheck,
 } from 'lucide-react';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
 import WarmupChatsTab from '@/components/tg-outreach/WarmupChatsTab';
@@ -1200,16 +1201,37 @@ function BulkActionsBar({
   deleting,
   onClear,
   onDelete,
+  /** Проверка живости — только у аккаунтов, у прокси и баз её нет. */
+  checking,
+  canCheck,
+  onCheck,
 }: {
   selectedCount: number;
   deleting: boolean;
   onClear: () => void;
   onDelete: () => void;
+  checking?: boolean;
+  canCheck?: boolean;
+  onCheck?: () => void;
 }) {
   if (selectedCount === 0) return null;
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2">
+    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2">
       <span className="text-xs font-medium text-indigo-900">Выбрано: {selectedCount}</span>
+      {onCheck && (
+        <button
+          type="button"
+          onClick={onCheck}
+          disabled={checking || deleting || !canCheck}
+          title={canCheck
+            ? 'Зайти в каждый аккаунт и проверить, жив ли он и кто ещё в нём сидит'
+            : 'Сначала остановите кампанию: во время работы аккаунты заняты'}
+          className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+          Проверить аккаунты
+        </button>
+      )}
       <button
         type="button"
         onClick={onDelete}
@@ -1261,6 +1283,25 @@ function useRowSelection(allIds: string[]) {
 
 /** Результат чтения профиля из Telegram: ошибка либо обновлённые поля. */
 type SyncResult = { error: string | null; patch?: Partial<OutreachAccount> };
+
+/**
+ * Итоги проверки аккаунта человеческим языком.
+ *
+ * Разделение по цвету неслучайно: жёлтое — то, что чинится нашими руками
+ * (перезалить сессию, поменять прокси), красное — то, что уже не вернуть.
+ * «Чужой вход» жёлтый намеренно: аккаунт жив, но в нём кто-то есть, и это
+ * требует разбирательства, а не списания.
+ */
+const CHECK_LABEL: Record<string, { text: string; cls: string }> = {
+  ok: { text: 'жив', cls: 'bg-emerald-50 text-emerald-700' },
+  session_revoked: { text: 'разлогинен', cls: 'bg-amber-50 text-amber-700' },
+  session_duplicate: { text: 'чужой вход', cls: 'bg-amber-50 text-amber-700' },
+  no_session: { text: 'нет сессии', cls: 'bg-amber-50 text-amber-700' },
+  proxy_dead: { text: 'прокси молчит', cls: 'bg-amber-50 text-amber-700' },
+  restricted: { text: 'ограничен', cls: 'bg-rose-50 text-rose-700' },
+  banned: { text: 'забанен', cls: 'bg-rose-50 text-rose-700' },
+  error: { text: 'ошибка', cls: 'bg-gray-100 text-gray-500' },
+};
 
 /* =================== ACCOUNT AVATAR =================== */
 /**
@@ -1341,6 +1382,9 @@ function CampaignAccountsTab({
   /** id аккаунтов, чей профиль сейчас читается из Telegram. */
   const [syncingIds, setSyncingIds] = useState<string[]>([]);
   const [syncSummary, setSyncSummary] = useState<string | null>(null);
+  /** id аккаунтов, которые сейчас проверяются на живость. */
+  const [checkingIds, setCheckingIds] = useState<string[]>([]);
+  const [checkSummary, setCheckSummary] = useState<string | null>(null);
 
   // Профиль читается через то же соединение, что и работа кампании, поэтому
   // на запущенной кампании в Telegram не ходим — см. гейт в API.
@@ -1451,6 +1495,58 @@ function CampaignAccountsTab({
         : `Профили обновлены: ${targets.length}`,
     );
   }, [accounts, syncProfile]);
+
+  /**
+   * Проверить выбранные аккаунты.
+   *
+   * Идём пачками по четыре — как и чтение профилей: каждая проверка это
+   * подключение через мобильный прокси на десятки секунд, а полсотни
+   * одновременных соединений в один пул он не переживёт.
+   */
+  const checkSelected = useCallback(async () => {
+    const targets = accounts
+      .filter((a) => selectedIds.includes(a.id))
+      .map((a) => ({ id: a.id, name: a.session_name }));
+    if (!targets.length) return;
+    setCheckSummary(null);
+
+    const byStatus = new Map<string, number>();
+    let next = 0;
+    const worker = async () => {
+      while (next < targets.length) {
+        const t = targets[next++];
+        setCheckingIds((prev) => [...prev, t.id]);
+        try {
+          const res = await authFetch(`${API_BASE}/accounts/${t.id}/check`, { method: 'POST' });
+          const data = (await res.json().catch(() => ({}))) as {
+            status?: string; detail?: string; error?: string;
+          };
+          const status = res.ok ? (data.status ?? 'error') : 'error';
+          byStatus.set(status, (byStatus.get(status) ?? 0) + 1);
+          setAccounts((prev) => prev.map((a) => (a.id === t.id
+            ? {
+                ...a,
+                check_status: status,
+                check_detail: data.detail ?? data.error ?? null,
+                checked_at: new Date().toISOString(),
+              }
+            : a)));
+        } catch {
+          byStatus.set('error', (byStatus.get('error') ?? 0) + 1);
+        } finally {
+          setCheckingIds((prev) => prev.filter((x) => x !== t.id));
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, targets.length) }, () => worker()));
+
+    const parts = [...byStatus.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([status, n]) => `${CHECK_LABEL[status]?.text ?? status} — ${n}`);
+    setCheckSummary(`Проверено ${targets.length}: ${parts.join(', ')}.`);
+    // Чужие сеансы приходят только с сервера, поэтому дочитываем список целиком.
+    void load();
+  }, [accounts, selectedIds, load]);
 
   const toggleActive = async (id: string, current: boolean) => {
     await authFetch(`${API_BASE}/accounts/${id}`, {
@@ -1622,7 +1718,19 @@ function CampaignAccountsTab({
         deleting={bulkDeleting}
         onClear={clear}
         onDelete={() => { void deleteSelected(); }}
+        checking={checkingIds.length > 0}
+        canCheck={profileReadable}
+        onCheck={() => { void checkSelected(); }}
       />
+
+      {checkSummary && (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+          <span>{checkSummary}</span>
+          <button type="button" onClick={() => setCheckSummary(null)} className="cursor-pointer text-gray-400 hover:text-gray-600">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       {loading ? (
         <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
@@ -1662,7 +1770,7 @@ function CampaignAccountsTab({
                   className="relative cursor-pointer rounded-full transition hover:opacity-80"
                 >
                   <AccountAvatar account={a} />
-                  {syncingIds.includes(a.id) && (
+                  {(syncingIds.includes(a.id) || checkingIds.includes(a.id)) && (
                     <span className="absolute inset-0 flex items-center justify-center rounded-full bg-white/70">
                       <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-500" />
                     </span>
@@ -1702,6 +1810,33 @@ function CampaignAccountsTab({
                       (a.profile_synced_at ? 'без имени в Telegram' : 'профиль не прочитан')}
                     {a.tg_username ? ` · @${a.tg_username}` : ''}
                   </div>
+                  {/* Итог проверки. Чужие сеансы выносим отдельно: это ответ на
+                      вопрос, почему аккаунты теряют сессии пачками. */}
+                  {a.check_status && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                      <span
+                        title={a.check_detail ?? undefined}
+                        className={`rounded-md px-1.5 py-0.5 text-[10px] ${CHECK_LABEL[a.check_status]?.cls ?? 'bg-gray-100 text-gray-500'}`}
+                      >
+                        {CHECK_LABEL[a.check_status]?.text ?? a.check_status}
+                      </span>
+                      {(a.other_sessions?.length ?? 0) > 0 && (
+                        <span
+                          title={a.other_sessions!
+                            .map((s) => `${s.device} · ${s.app} · ${s.country} · ${new Date(s.last_active).toLocaleString('ru-RU')}`)
+                            .join('\n')}
+                          className="cursor-help rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-700"
+                        >
+                          чужих сеансов: {a.other_sessions!.length}
+                        </span>
+                      )}
+                      {a.checked_at && (
+                        <span className="text-[10px] text-gray-400">
+                          {new Date(a.checked_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <span className="text-xs text-gray-500 truncate">{a.phone || '—'}</span>
                 {editingProxyFor === a.id ? (

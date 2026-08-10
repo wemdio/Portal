@@ -189,6 +189,23 @@ export interface OutreachAccount {
   bio?: string;
   avatar_url?: string;
   profile_synced_at?: string | null;
+  /**
+   * Итог последней проверки аккаунта (миграция 20260810_0001). `other_sessions`
+   * — чужие активные сеансы Telegram: по ним видно, что в аккаунт заходит
+   * кто-то ещё, а это главный подозреваемый в массовых потерях сессий.
+   */
+  check_status?: string | null;
+  check_detail?: string | null;
+  checked_at?: string | null;
+  other_sessions?: Array<{
+    device: string;
+    platform: string;
+    app: string;
+    country: string;
+    ip: string;
+    last_active: string;
+    created: string;
+  }> | null;
   created_at: string;
 }
 
