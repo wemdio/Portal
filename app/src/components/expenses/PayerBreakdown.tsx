@@ -122,7 +122,7 @@ export default function PayerBreakdown({
                     align="right"
                     className="py-2"
                   />
-                  <th className="py-2 text-right font-medium">Доля</th>
+                  <th className="px-3 py-2 text-right font-medium">Доля</th>
                   <SortableTh
                     label="Операций"
                     sortKey="ops"
@@ -185,8 +185,12 @@ function PayerRow({
 
   return (
     <>
+      {/* px-3 на ячейках — то же, что у заголовков (SortableTh ставит его сам).
+          Без него столбцы тела съезжали относительно шапки на 12 px, а крайняя
+          правая колонка «Δ» упиралась в скруглённый край подложки и выглядела
+          обрезанной. */}
       <tr className="border-t border-zinc-100 align-top">
-        <td className="py-2">
+        <td className="px-3 py-2">
           {drill ? (
             <button
               type="button"
@@ -209,14 +213,14 @@ function PayerRow({
             <span className="ml-1.5 text-[10px] text-zinc-400">в этом периоде не платил</span>
           ) : null}
         </td>
-        <td className="py-2 tabular-nums text-zinc-600">{item.payerInn ?? '—'}</td>
-        <td className="py-2 text-right tabular-nums text-zinc-900">
+        <td className="px-3 py-2 tabular-nums text-zinc-600">{item.payerInn ?? '—'}</td>
+        <td className="px-3 py-2 text-right tabular-nums text-zinc-900">
           {formatRub(item.total)} ₽
           <UnconvertedNote count={item.unconvertedCount} byCurrency={item.unconvertedByCurrency} />
         </td>
-        <td className="py-2 text-right tabular-nums text-zinc-600">{formatShare(item.share)}</td>
-        <td className="py-2 text-right tabular-nums text-zinc-600">{item.ops}</td>
-        <td className={`py-2 text-right tabular-nums ${deltaColor}`}>{formatDelta(item.deltaPrev)}</td>
+        <td className="px-3 py-2 text-right tabular-nums text-zinc-600">{formatShare(item.share)}</td>
+        <td className="px-3 py-2 text-right tabular-nums text-zinc-600">{item.ops}</td>
+        <td className={`px-3 py-2 text-right tabular-nums ${deltaColor}`}>{formatDelta(item.deltaPrev)}</td>
       </tr>
 
       {open && drill ? (

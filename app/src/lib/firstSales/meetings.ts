@@ -81,17 +81,26 @@ export async function fetchMeetingLinks(
   if (links.length === 0) return [];
 
   // Дата встречи лежит на самой транскрипции, не на привязке.
+  //
+  // Чанки идут параллельно, а не в цикле с await: они независимы друг от друга,
+  // и последовательный цикл превращал разбиение «чтобы не упереться в лимит
+  // длины URL» в лишние round-trip'ы на ровном месте (сотни привязок — это
+  // три-четыре запроса подряд, и так дважды за запрос сводки: текущее окно и
+  // предыдущее).
   const transcriptIds = [...new Set(links.map((l) => l.transcript_id))];
+  const transcriptChunks = await Promise.all(
+    chunkArray(transcriptIds, IN_CHUNK_SIZE).map(async (chunk) => {
+      const { data: trChunk, error: trError } = await db
+        .from('tg_video_transcripts')
+        .select('id, tg_message_date')
+        .in('id', chunk);
+      if (trError) throw trError;
+      return (trChunk ?? []) as Array<{ id: string; tg_message_date: string | null }>;
+    }),
+  );
   const dateByTranscript = new Map<string, string | null>();
-  for (const chunk of chunkArray(transcriptIds, IN_CHUNK_SIZE)) {
-    const { data: trChunk, error: trError } = await db
-      .from('tg_video_transcripts')
-      .select('id, tg_message_date')
-      .in('id', chunk);
-    if (trError) throw trError;
-    for (const t of (trChunk ?? []) as Array<{ id: string; tg_message_date: string | null }>) {
-      dateByTranscript.set(t.id, t.tg_message_date);
-    }
+  for (const t of transcriptChunks.flat()) {
+    dateByTranscript.set(t.id, t.tg_message_date);
   }
 
   const fromMs = from.getTime();
@@ -111,16 +120,18 @@ export async function fetchMeetingLinks(
   // перенесённая сделка не прошла бы этот фильтр — её встреча пропала бы из
   // подсчёта вслед за самой сделкой (см. 20260807_0002).
   const dealIds = [...new Set(inWindow.map((l) => l.amo_deal_id))];
-  const validDealIds = new Set<number>();
-  for (const chunk of chunkArray(dealIds, IN_CHUNK_SIZE)) {
-    const { data: leadsChunk, error: leadsError } = await db
-      .from('amo_lead_stage_dates_v')
-      .select('amo_deal_id')
-      .eq('pipeline_id', pipelineId)
-      .in('amo_deal_id', chunk);
-    if (leadsError) throw leadsError;
-    for (const l of (leadsChunk ?? []) as Array<{ amo_deal_id: number }>) validDealIds.add(l.amo_deal_id);
-  }
+  const dealChunks = await Promise.all(
+    chunkArray(dealIds, IN_CHUNK_SIZE).map(async (chunk) => {
+      const { data: leadsChunk, error: leadsError } = await db
+        .from('amo_lead_stage_dates_v')
+        .select('amo_deal_id')
+        .eq('pipeline_id', pipelineId)
+        .in('amo_deal_id', chunk);
+      if (leadsError) throw leadsError;
+      return (leadsChunk ?? []) as Array<{ amo_deal_id: number }>;
+    }),
+  );
+  const validDealIds = new Set<number>(dealChunks.flat().map((l) => l.amo_deal_id));
 
   return inWindow
     .filter((l) => validDealIds.has(l.amo_deal_id))

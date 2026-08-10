@@ -14,12 +14,19 @@ import { NextRequest } from 'next/server';
 
 type ChainResult = { data?: unknown; error?: unknown };
 
-function makeChain(result: ChainResult) {
+function makeChain(result: ChainResult, table: string) {
   const chain: Record<string, unknown> = {};
-  const passthrough = ['select', 'eq', 'gte', 'lte', 'order', 'limit', 'in', 'or'];
+  const passthrough = ['eq', 'gte', 'lte', 'order', 'limit', 'in', 'or'];
   for (const m of passthrough) {
     chain[m] = jest.fn(() => chain);
   }
+  // Список колонок запоминаем: у режима countOnly весь смысл в том, ЧТО роут
+  // не спрашивает у базы (расшифровки), а по одному лишь телу ответа этого не
+  // видно — цифра в нём та же самая.
+  chain.select = jest.fn((columns: string) => {
+    state.selects.push({ table, columns });
+    return chain;
+  });
   chain.maybeSingle = jest.fn(async () => result);
   chain.insert = jest.fn(async () => result);
   // Большинство вызовов в роуте awaits сам билдер без терминального метода
@@ -33,11 +40,14 @@ function makeChain(result: ChainResult) {
 // Ключи — имена того, что роут реально спрашивает у базы. Сделка берётся из
 // представления amo_leads_with_origin_v, а не из таблицы amo_leads: поиск идёт
 // по ИСХОДНОЙ воронке, иначе перенесённая сделка не находится (см. 20260807_0003).
-const state: { byTable: Record<string, ChainResult> } = { byTable: {} };
+const state: {
+  byTable: Record<string, ChainResult>;
+  selects: Array<{ table: string; columns: string }>;
+} = { byTable: {}, selects: [] };
 
 function makeDb() {
   return {
-    from: (table: string) => makeChain(state.byTable[table] ?? { data: [], error: null }),
+    from: (table: string) => makeChain(state.byTable[table] ?? { data: [], error: null }, table),
   };
 }
 
@@ -49,6 +59,7 @@ import { GET, PUT } from '@/app/api/analytics/first-sales/meeting-links/route';
 
 beforeEach(() => {
   state.byTable = {};
+  state.selects = [];
 });
 
 function putReq(body: unknown) {
@@ -154,5 +165,30 @@ describe('GET /meeting-links — очередь', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { rows: Array<{ id: string }> };
     expect(body.rows.map((r) => r.id)).toEqual(['t-2']);
+  });
+
+  it('countOnly=1 — та же цифра, но расшифровки из базы не читаются', async () => {
+    // Счётчик рядом с кнопкой «Записи без сделки» грузится на КАЖДОМ открытии
+    // дашборда. Пока он ходил в полную очередь, ради одного числа из базы
+    // поднимались расшифровки разговоров целиком (за тридцатидневное окно на
+    // боевых — больше мегабайта текста).
+    state.byTable = {
+      tg_video_transcripts: {
+        data: [{ id: 't-1' }, { id: 't-2' }],
+        error: null,
+      },
+      meeting_deal_links: { data: [{ transcript_id: 't-1' }], error: null },
+    };
+    const res = await GET(getReq('from=2026-07-01&to=2026-07-31&countOnly=1'));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ count: 1, truncated: false });
+
+    const transcriptSelect = state.selects.find((s) => s.table === 'tg_video_transcripts');
+    expect(transcriptSelect?.columns).toBe('id');
+  });
+
+  it('countOnly=1 на пустом окне — ноль, а не пустой список строк', async () => {
+    const res = await GET(getReq('from=2026-07-01&to=2026-07-31&countOnly=1'));
+    expect(await res.json()).toEqual({ count: 0, truncated: false });
   });
 });

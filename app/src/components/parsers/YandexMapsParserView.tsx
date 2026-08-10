@@ -394,6 +394,8 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     : `Запуск #${activeJob?.id.slice(0, 8) ?? ''}`;
   const _isCollecting = stageStr.includes('collecting_links') || stageStr === 'links_collected';
   const isParsing = stageStr.includes('parsing_organizations');
+  // Сбор по каталогу: строки появляются порциями, задача ещё выполняется.
+  const isCollectingCatalog = stageStr === 'catalog_search' && activeJob?.status === 'running';
 
   // Antispam: после блокировки Яндексом даём прокси ~15 мин на смену IP.
   // Пока не прошло — кнопка "Продолжить парсинг" disabled с обратным
@@ -572,14 +574,10 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                         <h2 className="text-xl font-bold text-gray-900" title={`Запуск #${activeJob.id.slice(0, 8)}`}>
                           {jobTitle}
                         </h2>
-                        <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ring-1 ring-inset ${
-                          activeJob.status === 'completed' ? 'bg-green-50 text-green-700 ring-green-600/20' :
-                          activeJob.status === 'failed' ? 'bg-red-50 text-red-700 ring-red-600/20' :
-                          activeJob.status === 'running' ? 'bg-blue-50 text-blue-700 ring-blue-600/20' :
-                          'bg-gray-50 text-gray-600 ring-gray-500/10'
-                        }`}>
-                          {activeJob.status}
-                        </span>
+                        {/* Тот же значок, что и в истории слева. Раньше здесь
+                            была своя вёрстка, печатавшая статус как есть, —
+                            отсюда «completed» латиницей на видном месте. */}
+                        <JobStatus status={activeJob.status} errorMessage={activeJob.error_message ?? null} />
                       </div>
                       
                       <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-gray-500 mt-2">
@@ -587,10 +585,16 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                           <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
                           Этап: <span className="font-medium text-gray-900">{stage || '—'}</span>
                         </div>
-                        {(isParsing || activeJob.status === 'completed') && (
+                        {/* Сбор по каталогу идёт порциями и по ходу дела двигает
+                            счётчик, поэтому показываем его и во время сбора, а не
+                            только на парсинге и по завершении. */}
+                        {(isParsing || isCollectingCatalog || activeJob.status === 'completed') && (
                           <div className="flex items-center gap-1.5">
                             <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
-                            Организаций: <span className="font-medium text-gray-900">{processedOrgs} / {totalOrgs}</span>
+                            Организаций:{' '}
+                            <span className="font-medium text-gray-900">
+                              {isCollectingCatalog ? `${processedOrgs} и собираем дальше…` : `${processedOrgs} / ${totalOrgs}`}
+                            </span>
                           </div>
                         )}
                       </div>
