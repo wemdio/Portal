@@ -429,6 +429,62 @@ describe('computeMetricsFromRows', () => {
       qualifiedLeads: 1,
     });
   });
+
+  it('сделка, пришедшая до начала окна, не считается', () => {
+    const result = computeMetricsFromRows(
+      SUMMARY_CHANNELS,
+      statuses,
+      [lead({ Источник: 'Аутрич' }, 40, {
+        amoId: 920,
+        createdAt: '2026-07-18T10:00:00.000Z',
+      })],
+      [],
+      WINDOW_START,
+      WINDOW_END,
+    );
+
+    expect(result.find((r) => r.channel.name === 'outreach')).toMatchObject({
+      arrived: 0,
+      qualifiedLeads: 0,
+      meetingsHeld: 0,
+    });
+  });
+
+  it('сделка, пришедшая после конца окна, не считается', () => {
+    const result = computeMetricsFromRows(
+      SUMMARY_CHANNELS,
+      statuses,
+      [lead({ Источник: 'Аутрич' }, 40, {
+        amoId: 921,
+        createdAt: '2026-07-25T10:00:00.000Z',
+      })],
+      [],
+      WINDOW_START,
+      WINDOW_END,
+    );
+
+    expect(result.find((r) => r.channel.name === 'outreach')).toMatchObject({
+      arrived: 0,
+      qualifiedLeads: 0,
+      meetingsHeld: 0,
+    });
+  });
+
+  it('сделка чужой воронки не считается', () => {
+    const foreign = lead({ Источник: 'Аутрич' }, 40, { amoId: 922 });
+    const result = computeMetricsFromRows(
+      SUMMARY_CHANNELS,
+      statuses,
+      [{ ...foreign, pipeline_id: 999 }],
+      [],
+      WINDOW_START,
+      WINDOW_END,
+    );
+
+    expect(result.find((r) => r.channel.name === 'outreach')).toMatchObject({
+      arrived: 0,
+    });
+  });
 });
 
 describe('computeAllChannelMetrics', () => {
@@ -490,6 +546,11 @@ describe('computeAllChannelMetrics', () => {
       'amo_leads',
       'amo_events',
     ]);
+
+    const leadsCall = calls[1];
+    expect(leadsCall.filters['gte:created_at']).toBe(WINDOW_START.toISOString());
+    expect(leadsCall.filters['lt:created_at']).toBe(WINDOW_END.toISOString());
+    expect(leadsCall.filters['eq:pipeline_id']).toBe(1);
 
     const eventsCall = calls[2];
     expect(eventsCall.filters['eq:event_type']).toBe('lead_status_changed');

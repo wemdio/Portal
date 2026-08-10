@@ -229,7 +229,6 @@ export function computeMetricsFromRows(
 
   type PreparedLead = Omit<DedupCandidate, 'channel'> & {
     channel: ChannelSummaryConfig['name'];
-    wonByEnd: boolean;
   };
 
   const prepared: PreparedLead[] = [];
