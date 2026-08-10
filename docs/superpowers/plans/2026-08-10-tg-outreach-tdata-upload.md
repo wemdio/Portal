@@ -753,6 +753,12 @@ export interface TdataArchiveItem {
   /** Имя, под которым аккаунты попадут в список кампании. */
   name: string;
   accounts: TdataAccount[];
+  /**
+   * Заполнено, если прочитать удалось не эту папку: `accounts` тогда пуст.
+   * Соседние папки архива при этом загружаются — оператор грузит партию
+   * целиком, и одна битая папка не должна отменять остальные.
+   */
+  error?: string;
 }
 
 function normalize(p: string): string {
@@ -784,10 +790,19 @@ function memoryFs(files: Map<string, { data: Buffer; lastModified: number }>): I
   };
 }
 
+/**
+ * Папка, в которой лежит файл. Для файла в корне архива — пустая строка:
+ * `lastIndexOf` вернул бы -1, и `slice(0, -1)` откусил бы последний символ,
+ * превратив `key_datas` в несуществующую папку `key_data`.
+ */
+function dirname(p: string): string {
+  const cut = p.lastIndexOf('/');
+  return cut === -1 ? '' : p.slice(0, cut);
+}
+
 /** Имя аккаунта — папка, в которой лежит tdata; если tdata в корне — имя архива. */
 function accountName(tdataDir: string, archiveName: string): string {
-  const parent = tdataDir.includes('/') ? tdataDir.slice(0, tdataDir.lastIndexOf('/')) : '';
-  const own = parent ? parent.slice(parent.lastIndexOf('/') + 1) : '';
+  const own = dirname(tdataDir).split('/').pop() ?? '';
   return own || archiveName.replace(/\.zip$/i, '') || 'tdata';
 }
 
@@ -818,7 +833,7 @@ export async function readTdataArchive(
 
   const tdataDirs = [...files.keys()]
     .filter((p) => /(^|\/)key_data(s|0|1)$/.test(p))
-    .map((p) => p.slice(0, p.lastIndexOf('/')))
+    .map(dirname)
     .filter((dir, i, all) => all.indexOf(dir) === i)
     .sort();
 
@@ -829,10 +844,14 @@ export async function readTdataArchive(
   const fsLike = memoryFs(files);
   const items: TdataArchiveItem[] = [];
   for (const dir of tdataDirs) {
-    items.push({
-      name: accountName(dir, archiveName),
-      accounts: await readTdataAccounts(dir, fsLike),
-    });
+    const name = accountName(dir, archiveName);
+    try {
+      items.push({ name, accounts: await readTdataAccounts(dir, fsLike) });
+    } catch (err) {
+      // Битая папка не отменяет соседние: в партии из двадцати аккаунтов
+      // отказ седьмого не должен стоить оператору остальных девятнадцати.
+      items.push({ name, accounts: [], error: err instanceof Error ? err.message : String(err) });
+    }
   }
   return items;
 }
@@ -880,6 +899,12 @@ import {
 
 const reader: TdataArchiveReader = async (_buffer, archiveName) => {
   if (archiveName === 'битый.zip') throw new Error('в архиве не найдена папка tdata');
+  if (archiveName === 'частично-битый.zip') {
+    return [
+      { name: 'ok_acc', accounts: [{ index: 0, tgUserId: 42, sessionString: 'sess-42' }] },
+      { name: 'bad_acc', accounts: [], error: 'папка под локальным паролем Telegram либо повреждена' },
+    ];
+  }
   if (archiveName === 'мульти.zip') {
     return [{
       name: 'multi',
@@ -938,6 +963,15 @@ describe('collectTdataCandidates', () => {
     expect(result.candidates.map((c) => c.name)).toEqual(['живой']);
     expect(result.errors).toEqual([
       { name: 'битый.zip', error: 'в архиве не найдена папка tdata' },
+    ]);
+  });
+
+  it('битая папка внутри архива не отменяет соседние', async () => {
+    const result = await collectTdataCandidates([file('частично-битый.zip')], reader);
+
+    expect(result.candidates.map((c) => c.name)).toEqual(['ok_acc']);
+    expect(result.errors).toEqual([
+      { name: 'bad_acc', error: 'папка под локальным паролем Telegram либо повреждена' },
     ]);
   });
 });
@@ -1030,6 +1064,13 @@ export async function collectTdataCandidates(
     }
 
     for (const item of items) {
+      // Папка, которую не удалось прочитать: соседние папки того же архива
+      // при этом загружаются — оператор грузит партию целиком.
+      if (item.error) {
+        errors.push({ name: item.name, error: item.error });
+        continue;
+      }
+
       for (let i = 0; i < item.accounts.length; i++) {
         const account = item.accounts[i];
         const name = i === 0 ? item.name : `${item.name}_${i + 1}`;
