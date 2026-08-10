@@ -572,14 +572,10 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                         <h2 className="text-xl font-bold text-gray-900" title={`Запуск #${activeJob.id.slice(0, 8)}`}>
                           {jobTitle}
                         </h2>
-                        <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ring-1 ring-inset ${
-                          activeJob.status === 'completed' ? 'bg-green-50 text-green-700 ring-green-600/20' :
-                          activeJob.status === 'failed' ? 'bg-red-50 text-red-700 ring-red-600/20' :
-                          activeJob.status === 'running' ? 'bg-blue-50 text-blue-700 ring-blue-600/20' :
-                          'bg-gray-50 text-gray-600 ring-gray-500/10'
-                        }`}>
-                          {activeJob.status}
-                        </span>
+                        {/* Тот же значок, что и в истории слева. Раньше здесь
+                            была своя вёрстка, печатавшая статус как есть, —
+                            отсюда «completed» латиницей на видном месте. */}
+                        <JobStatus status={activeJob.status} errorMessage={activeJob.error_message ?? null} />
                       </div>
                       
                       <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-gray-500 mt-2">
