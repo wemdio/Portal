@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, Play, Sparkles, Trash2, Search } from 'lucide-react';
 import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
+import { findBrokenSearchQueries, splitSearchQueries } from '@/lib/parsers/searchQueryList';
 
 export type SearchParserStartPayload = {
   brief?: string;
@@ -26,6 +27,10 @@ export function SearchParserForm({ onStart, busy, clientMode }: Props) {
   const [brief, setBrief] = useState('');
   const [queries, setQueries] = useState<string[]>([]);
   const [queriesText, setQueriesText] = useState('');
+  // Теми же правилами, что и на сервере, — иначе предпросмотр обещал бы одно,
+  // а запускалось бы другое.
+  const parsedQueries = useMemo(() => splitSearchQueries(queriesText), [queriesText]);
+  const brokenQueries = useMemo(() => findBrokenSearchQueries(parsedQueries), [parsedQueries]);
   const [generatingQueries, setGeneratingQueries] = useState(false);
   const [pdfUploading, setPdfUploading] = useState(false);
   const [pdfStatus, setPdfStatus] = useState<string | null>(null);
@@ -597,8 +602,28 @@ export function SearchParserForm({ onStart, busy, clientMode }: Props) {
                 : 'веб-студия B2B портфолио site:ru\ndigital агентство корпоративные сайты B2B\nагентство разработки сайтов для производственных компаний'}
               className="w-full min-h-[10rem] resize-y rounded-lg border border-gray-300 py-2 px-3 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none focus-visible:outline-none font-mono placeholder:font-sans"
             />
+            {/* Что именно уйдёт в поиск — видно до запуска. Без этого длинный
+                булев запрос, случайно разбитый на строки, молча превращался в
+                несколько обрывков, и человек видел только «найдено 0». */}
+            {parsedQueries.length > 0 && (
+              <div className="mt-1 text-xs">
+                <span className={brokenQueries.length ? 'text-red-600 font-medium' : 'text-gray-600'}>
+                  Будет запущено запросов: {parsedQueries.length}
+                </span>
+                {brokenQueries.length > 0 && (
+                  <ul className="mt-1 space-y-0.5 text-red-600">
+                    {brokenQueries.slice(0, 3).map((issue) => (
+                      <li key={issue.query}>
+                        «{issue.query.slice(0, 60)}{issue.query.length > 60 ? '…' : ''}» — {issue.reason}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
             <p className="text-xs text-gray-500 mt-1">
               Вставьте список запросов: каждый с новой строки или через запятую. Пустые строки игнорируются.
+              Длинный запрос не переносите на несколько строк — каждая строка уходит в поиск отдельно.
             </p>
           </div>
         </div>

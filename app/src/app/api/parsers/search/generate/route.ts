@@ -26,7 +26,11 @@ export async function POST(req: NextRequest) {
     const { queries } = await generateSearchQueries(brief, { allowFallback: false });
     return NextResponse.json({ queries });
   } catch (err) {
+    // Настоящую причину показываем человеку. Раньше здесь было глухое «Failed to
+    // generate queries», и по нему нельзя было отличить отсутствующий ключ от
+    // ошибки провайдера или таймаута — на экране просто «не работает».
     console.error('Generate queries error:', err);
-    return jsonError('Failed to generate queries', 500);
+    const reason = err instanceof Error && err.message ? err.message : 'неизвестная ошибка';
+    return jsonError(`Не удалось сгенерировать запросы: ${reason.slice(0, 300)}`, 500);
   }
 }
