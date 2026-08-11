@@ -108,6 +108,40 @@ describe('sendFirstTouchBatch', () => {
     expect(db.updates.some((u) => u.patch.attempts === 1)).toBe(true);
   });
 
+  /**
+   * Реальный случай: база на 300 контактов, тексты 430–461 знак. При зашитом
+   * пороге 400 не уходило ни одно сообщение — база вставала целиком. Порог
+   * приходит из настроек кампании и обязан доезжать до самой проверки.
+   */
+  it('порог длины из настроек кампании доезжает до проверки', async () => {
+    const long = 'я'.repeat(440);
+
+    const blocked = fakeDb([contact({ message: long })]);
+    const blockedClient = fakeClient();
+    const noSetting = await sendFirstTouchBatch({ ...baseArgs, db: blocked, client: blockedClient } as never);
+    expect(noSetting).toMatchObject({ sent: 0, postponed: 1 });
+
+    const allowed = fakeDb([contact({ message: long })]);
+    const allowedClient = fakeClient();
+    const raised = await sendFirstTouchBatch({
+      ...baseArgs, maxChars: 500, db: allowed, client: allowedClient,
+    } as never);
+
+    expect(raised.sent).toBe(1);
+    expect((allowedClient as unknown as { sendMessage: jest.Mock }).sendMessage)
+      .toHaveBeenCalledWith('@ivanov', { message: long });
+  });
+
+  it('в причине отложенного контакта стоит порог кампании, а не дефолтные 400', async () => {
+    const db = fakeDb([contact({ message: 'я'.repeat(700) })]);
+    const client = fakeClient();
+
+    await sendFirstTouchBatch({ ...baseArgs, maxChars: 600, db, client } as never);
+
+    const postponed = db.updates.find((u) => u.patch.attempts === 1);
+    expect(String(postponed?.patch.skip_reason)).toBe('текст длиннее 600 знаков');
+  });
+
   it('юзернейм не найден — пропуск с причиной, без повторов', async () => {
     const db = fakeDb([contact()]);
     const client = fakeClient({

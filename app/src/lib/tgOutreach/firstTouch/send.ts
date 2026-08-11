@@ -7,7 +7,7 @@
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { TelegramClient } from 'telegram';
-import { validateFirstTouch, describeFailure } from './validateMessage';
+import { validateFirstTouch, describeFailure, resolveMaxChars } from './validateMessage';
 import { selectNextContacts, remainingDailyQuota, type PendingContact } from './selectContacts';
 import * as fdb from './db';
 
@@ -25,6 +25,11 @@ export interface SendBatchArgs {
   onProgress?: () => void;
   /** Пауза между отправками внутри порции, мс. */
   gapMs?: number;
+  /**
+   * Порог длины первого сообщения из настроек кампании. Ноль или отсутствие =
+   * дефолт из `validateMessage`.
+   */
+  maxChars?: number;
 }
 
 export interface SendBatchResult {
@@ -51,6 +56,7 @@ function isUsernameNotFound(err: unknown): boolean {
 export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatchResult> {
   const { db, client, campaignId, account, perDay, log } = args;
   const result: SendBatchResult = { sent: 0, skipped: 0, postponed: 0 };
+  const maxChars = resolveMaxChars(args.maxChars);
 
   // Выходим до любого запроса в базу. У всех кампаний, заведённых до этой
   // фичи, поля нет вовсе, а круг идёт по каждому аккаунту каждые несколько
@@ -77,10 +83,11 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
 
     const attempts = Number((contact as PendingContact & { attempts?: number }).attempts ?? 0);
 
-    const check = validateFirstTouch(contact.message);
+    const check = validateFirstTouch(contact.message, maxChars);
     if (!check.ok) {
-      await fdb.recordContactFailure(db, contact.id, attempts, describeFailure(check.reason));
-      log('warning', `Первое касание: @${contact.username} отложен — ${describeFailure(check.reason)}`);
+      const why = describeFailure(check.reason, maxChars);
+      await fdb.recordContactFailure(db, contact.id, attempts, why);
+      log('warning', `Первое касание: @${contact.username} отложен — ${why}`);
       result.postponed++;
       continue;
     }

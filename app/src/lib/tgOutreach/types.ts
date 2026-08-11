@@ -1,3 +1,5 @@
+import { DEFAULT_MAX_MESSAGE_CHARS } from './firstTouch/validateMessage';
+
 export interface TgOutreachTag {
   id: string;
   name: string;
@@ -145,6 +147,15 @@ export interface TelegramSettings {
    * Кампании, заведённые до этой фичи, поля не имеют — отсюда `?`.
    */
   first_touch_per_account_per_day?: number;
+  /**
+   * Максимальная длина первого сообщения. Длиннее — контакт откладывается, а не
+   * отправляется. Это фильтр мусора в файле (съехавшая колонка, обрезанная
+   * строка), а не правило Telegram, поэтому порог должен быть под рукой у
+   * оператора: база с ровными текстами по 430–460 знаков при пороге 400 не
+   * отправляется вообще никогда. Ноль или отсутствие поля = дефолт 400,
+   * потолок — предел Telegram в 4096.
+   */
+  first_touch_max_chars?: number;
   follow_up: FollowUpSettings;
 }
 
@@ -341,5 +352,6 @@ export const DEFAULT_TELEGRAM_SETTINGS: TelegramSettings = {
   ignore_no_username: true,
   blocked_usernames: ['SpamBot'],
   account_cooldown_hours: 5,
+  first_touch_max_chars: DEFAULT_MAX_MESSAGE_CHARS,
   follow_up: DEFAULT_FOLLOW_UP,
 };
