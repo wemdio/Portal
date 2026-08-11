@@ -54,6 +54,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         other_sessions?: unknown[];
         tg_user_id?: number | null;
         tg_username?: string | null;
+        phone?: string | null;
       }) => {
         await auth.supabase
           .from('tg_outreach_accounts')
@@ -64,6 +65,9 @@ export async function POST(req: NextRequest, ctx: Ctx) {
             other_sessions: result.other_sessions ?? [],
             ...(result.tg_user_id != null ? { tg_user_id: result.tg_user_id } : {}),
             ...(result.tg_username != null ? { tg_username: result.tg_username } : {}),
+            // Телефона в tdata нет — он приходит только от Telegram, и это
+            // единственное место, где портал его узнаёт.
+            ...(result.phone ? { phone: result.phone } : {}),
           })
           .eq('id', id);
       };
