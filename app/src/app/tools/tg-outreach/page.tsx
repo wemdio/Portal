@@ -1436,6 +1436,9 @@ function CampaignAccountsTab({
   const [syncSummary, setSyncSummary] = useState<string | null>(null);
   /** id аккаунтов, которые сейчас проверяются на живость. */
   const [checkingIds, setCheckingIds] = useState<string[]>([]);
+  const [resettingIds, setResettingIds] = useState<string[]>([]);
+  /** Отказ на сбросе сеансов показываем в самой строке — рядом с кнопкой. */
+  const [resetError, setResetError] = useState<{ id: string; message: string } | null>(null);
   /** Ответ Telegram по каждому проверенному аккаунту; висит, пока не закроют. */
   const [checkResults, setCheckResults] = useState<CheckRow[] | null>(null);
 
@@ -1673,6 +1676,41 @@ function CampaignAccountsTab({
 
     setCheckResults(rows);
   }, [accounts, selectedIds]);
+
+  /**
+   * Завершить чужие сеансы аккаунта.
+   *
+   * Ответ ручки — это уже перечитанное состояние аккаунта, поэтому строку
+   * обновляем им же: счётчик чужих сеансов должен обнулиться на глазах, иначе
+   * непонятно, сработало или нет.
+   */
+  const resetSessions = async (id: string) => {
+    setResettingIds((prev) => [...prev, id]);
+    try {
+      const res = await authFetch(`${API_BASE}/accounts/${id}/sessions`, { method: 'DELETE' });
+      const data = (await res.json().catch(() => null)) as
+        | (Partial<AccountCheckResult> & { error?: string })
+        | null;
+      if (!res.ok) {
+        setResetError({ id, message: data?.error ?? `Сервер ответил ${res.status}` });
+        return;
+      }
+      setResetError(null);
+      setAccounts((prev) => prev.map((a) => (a.id === id
+        ? {
+            ...a,
+            check_status: data?.status ?? a.check_status,
+            check_detail: data?.detail ?? a.check_detail,
+            checked_at: new Date().toISOString(),
+            other_sessions: data?.other_sessions ?? [],
+          }
+        : a)));
+    } catch (e) {
+      setResetError({ id, message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setResettingIds((prev) => prev.filter((x) => x !== id));
+    }
+  };
 
   const toggleActive = async (id: string, current: boolean) => {
     await authFetch(`${API_BASE}/accounts/${id}`, {
@@ -2102,6 +2140,24 @@ function CampaignAccountsTab({
                         >
                           чужих сеансов: {a.other_sessions!.length}
                         </span>
+                      )}
+                      {/* Кнопка стоит рядом с плашкой, а не в общем ряду
+                          действий: чужие сеансы — редкая находка, и убирать их
+                          логично там же, где их увидели. */}
+                      {(a.other_sessions?.length ?? 0) > 0 && (
+                        <button
+                          type="button"
+                          disabled={resettingIds.includes(a.id)}
+                          onClick={() => { void resetSessions(a.id); }}
+                          title="Завершить все сеансы, кроме портального. Аккаунт останется подключённым к порталу."
+                          className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-amber-700 transition hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+                        >
+                          {resettingIds.includes(a.id) && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
+                          {resettingIds.includes(a.id) ? 'Завершаю…' : 'Завершить чужие'}
+                        </button>
+                      )}
+                      {resetError?.id === a.id && (
+                        <span className="text-[10px] text-rose-600">{resetError.message}</span>
                       )}
                       {a.checked_at && (
                         <span className="text-[10px] text-gray-400">

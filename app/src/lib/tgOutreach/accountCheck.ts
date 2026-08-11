@@ -164,3 +164,41 @@ export async function checkAccount(client: TelegramClient): Promise<AccountCheck
     ...identity,
   };
 }
+
+/**
+ * Завершить все сеансы аккаунта, кроме нашего.
+ *
+ * Чужой сеанс — это не «след прошлого владельца», а действующий доступ:
+ * продавец читает переписку с клиентами, видит коды входа и в любой момент
+ * может выкинуть нас из аккаунта. Одна кнопка на партию дешевле, чем заходить
+ * в каждый аккаунт руками.
+ *
+ * `auth.ResetAuthorizations` рубит именно чужие — наш сеанс остаётся живым,
+ * поэтому переподключаться после вызова не нужно.
+ */
+export async function resetOtherSessions(client: TelegramClient): Promise<void> {
+  await withTimeout(
+    client.invoke(new Api.auth.ResetAuthorizations()) as Promise<unknown>,
+    30_000,
+    'Telegram не ответил на сброс сеансов',
+  );
+}
+
+/** Отказ на сбросе сеансов — в понятную оператору фразу. */
+export function describeResetError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+
+  // Свежая сессия не имеет права выкидывать остальные — защита Telegram от
+  // угона. Для только что залитых аккаунтов это штатный ответ, а не поломка.
+  if (/FRESH_RESET_AUTHORISATION_FORBIDDEN/i.test(msg)) {
+    return 'Telegram запрещает сбрасывать чужие сеансы с сессии моложе суток. Повторите через 24 часа после первого входа в аккаунт.';
+  }
+  const flood = /FLOOD_WAIT_(\d+)/i.exec(msg);
+  if (flood) {
+    return `Telegram просит подождать ${flood[1]} секунд — слишком часто.`;
+  }
+  if (/SESSION_REVOKED|AUTH_KEY_UNREGISTERED|AUTH_KEY_INVALID/i.test(msg)) {
+    return 'Сессия отозвана — аккаунт уже разлогинили, сбрасывать нечего.';
+  }
+  return msg.slice(0, 300);
+}
