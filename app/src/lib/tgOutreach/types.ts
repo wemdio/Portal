@@ -1,3 +1,5 @@
+import { DEFAULT_MAX_MESSAGE_CHARS } from './firstTouch/validateMessage';
+
 export interface TgOutreachTag {
   id: string;
   name: string;
@@ -104,6 +106,15 @@ export interface FollowUpSettings {
 export interface TelegramSettings {
   forward_limit: number;
   reply_only_if_previously_wrote: boolean;
+  /**
+   * Отвечать только тем, кому мы писали по базе этой кампании.
+   *
+   * Без этого бот отвечает в любом диалоге, где есть наше исходящее, — а в
+   * купленном аккаунте это ещё и чаты прогрева между своими же аккаунтами.
+   * Кампании, заведённые до настройки, поля не имеют: `?` означает «выключено»,
+   * чтобы не менять молча поведение уже идущих рассылок.
+   */
+  reply_only_to_base_contacts?: boolean;
   auto_allow_new_dialogs: boolean;
   history_limit: number;
   pre_read_delay_range: [number, number];
@@ -117,6 +128,12 @@ export interface TelegramSettings {
    * с дефолтом [300, 600] (5-10 минут рандом).
    */
   cycle_delay_range: [number, number];
+  /**
+   * НЕ ИСПОЛЬЗУЕТСЯ. Ни одна строка кода не читает это значение, поэтому поле
+   * убрано с экрана настроек: оператор крутил ручку, которая ни на что не
+   * влияет. Ключ оставлен, чтобы не переписывать сохранённые кампании —
+   * удалять его вместе с миграцией, если решим, что окно ожидания не нужно.
+   */
   dialog_wait_window_range: [number, number];
   sleep_periods: string[];
   timezone_offset: number;
@@ -130,6 +147,15 @@ export interface TelegramSettings {
    * Кампании, заведённые до этой фичи, поля не имеют — отсюда `?`.
    */
   first_touch_per_account_per_day?: number;
+  /**
+   * Максимальная длина первого сообщения. Длиннее — контакт откладывается, а не
+   * отправляется. Это фильтр мусора в файле (съехавшая колонка, обрезанная
+   * строка), а не правило Telegram, поэтому порог должен быть под рукой у
+   * оператора: база с ровными текстами по 430–460 знаков при пороге 400 не
+   * отправляется вообще никогда. Ноль или отсутствие поля = дефолт 400,
+   * потолок — предел Telegram в 4096.
+   */
+  first_touch_max_chars?: number;
   follow_up: FollowUpSettings;
 }
 
@@ -189,6 +215,23 @@ export interface OutreachAccount {
   bio?: string;
   avatar_url?: string;
   profile_synced_at?: string | null;
+  /**
+   * Итог последней проверки аккаунта (миграция 20260810_0001). `other_sessions`
+   * — чужие активные сеансы Telegram: по ним видно, что в аккаунт заходит
+   * кто-то ещё, а это главный подозреваемый в массовых потерях сессий.
+   */
+  check_status?: string | null;
+  check_detail?: string | null;
+  checked_at?: string | null;
+  other_sessions?: Array<{
+    device: string;
+    platform: string;
+    app: string;
+    country: string;
+    ip: string;
+    last_active: string;
+    created: string;
+  }> | null;
   created_at: string;
 }
 
@@ -292,6 +335,10 @@ export const DEFAULT_FOLLOW_UP: FollowUpSettings = {
 export const DEFAULT_TELEGRAM_SETTINGS: TelegramSettings = {
   forward_limit: 5,
   reply_only_if_previously_wrote: true,
+  // Новым кампаниям — включено: почти всегда нужно именно это, а обратное
+  // (отвечать всем подряд из старых чатов аккаунта) приходится осознанно
+  // разрешать.
+  reply_only_to_base_contacts: true,
   auto_allow_new_dialogs: true,
   history_limit: 20,
   pre_read_delay_range: [5, 10],
@@ -305,5 +352,6 @@ export const DEFAULT_TELEGRAM_SETTINGS: TelegramSettings = {
   ignore_no_username: true,
   blocked_usernames: ['SpamBot'],
   account_cooldown_hours: 5,
+  first_touch_max_chars: DEFAULT_MAX_MESSAGE_CHARS,
   follow_up: DEFAULT_FOLLOW_UP,
 };

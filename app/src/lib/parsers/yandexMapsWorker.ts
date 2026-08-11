@@ -10,7 +10,7 @@ import {
   markYandexMapsCatalogSeen,
   normalizeYandexMapsCatalogFilters,
   recordYandexMapsCatalogRefreshCompleted,
-  fillJobFromYandexMapsCatalog,
+  fillYandexMapsCatalogJobInChunks,
   upsertYandexMapsCatalogOrganizations,
   yandexIdFromCardUrl,
 } from '@/lib/parsers/yandexMapsCatalog';
@@ -303,14 +303,29 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       const catalogLimit = typeof maxResultsRaw === 'number' || typeof maxResultsRaw === 'string'
         ? (Number(maxResultsRaw) > 0 ? Math.floor(Number(maxResultsRaw)) : null)
         : null;
-      const filled = await fillJobFromYandexMapsCatalog(jobId, catalogFilters, catalogLimit);
+
+      // Порциями, а не одним запросом: время сбора пропорционально объёму
+      // (около 1650 строк в секунду на бою), и на крупной выборке человек
+      // иначе несколько минут смотрит на пустой экран. Первые тысячи ложатся за
+      // пару секунд, дальше счётчик растёт после каждой порции — форма опрашивает
+      // задачу раз в пять секунд и подтягивает уже собранное.
+      await setJobPatch(jobId, { progress_stage: 'catalog_search' });
+      const filled = await fillYandexMapsCatalogJobInChunks(
+        jobId,
+        catalogFilters,
+        catalogLimit,
+        async (collected) => {
+          await setJobPatch(jobId, {
+            total_organizations: collected,
+            processed_organizations: collected,
+          });
+        },
+      );
 
       await setJobPatch(jobId, {
         status: 'completed',
         progress_stage: filled.organizations ? 'catalog_completed' : 'catalog_empty',
         completed_at: new Date().toISOString(),
-        total_links: filled.links,
-        processed_links: filled.links,
         total_organizations: filled.organizations,
         processed_organizations: filled.organizations,
         error_message: null,
@@ -319,7 +334,6 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       void logInfo('parser.yandexmaps.catalog.complete', 'YandexMaps catalog search completed', {
         jobId,
         totalOrganizations: filled.organizations,
-        totalLinks: filled.links,
       }, logMeta);
       return;
     }
@@ -943,8 +957,6 @@ export async function runYandexMapsCatalogDiscoveryBatch(): Promise<boolean> {
       if (id) byId.set(id, link);
     }
 
-    await markYandexMapsCatalogSeen([...byId.keys()], task, exhaustive);
-
     const unknown = await filterUnknownYandexIds([...byId.keys()]);
     const toParse = [...unknown].map((id) => byId.get(id)!).filter(Boolean);
 
@@ -955,6 +967,23 @@ export async function runYandexMapsCatalogDiscoveryBatch(): Promise<boolean> {
         proxy: pool[chunkIndex % Math.max(pool.length, 1)] ?? NO_PROXY,
       });
       foundNew += await upsertYandexMapsCatalogOrganizations(result.organizations ?? [], 'discovery');
+    }
+
+    // Уборка — последней и в стороне от результата обхода.
+    //
+    // Пометка «видели» и «кажется, закрылась» полезна, но это не то, ради чего
+    // обход запускают. Она стояла первой и роняла всё задание, когда не
+    // удавалась: 11.08.2026 на бою так висели 343 пары, включая всю Москву, —
+    // четвёртые сутки подряд, с нулём новых организаций по ним. Теперь её
+    // неудача стоит только самой пометки: найденное уже в каталоге, а пара
+    // вернётся в очередь по обычному расписанию, а не через сутки как упавшая.
+    try {
+      await markYandexMapsCatalogSeen([...byId.keys()], task, exhaustive);
+    } catch (error) {
+      void logWarn('parser.yandexmaps.catalog.mark_seen_failed', 'Catalog mark-seen failed', {
+        place: task.place, rubric: task.rubric, foundNew,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
 
     await finishYandexMapsCatalogDiscovery(task.id, { seenLinks, foundNew, exhaustive });

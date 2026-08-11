@@ -19,6 +19,7 @@ class FakeUser {
     readonly firstName: string,
     readonly lastName: string,
     readonly username: string,
+    readonly phone?: string,
   ) {}
 }
 
@@ -40,6 +41,7 @@ function fakeClient(opts: {
   photo?: Buffer | undefined;
   hangInvoke?: boolean;
   photoThrows?: boolean;
+  phone?: string;
 }) {
   return {
     invoke: () =>
@@ -47,7 +49,7 @@ function fakeClient(opts: {
         ? new Promise(() => { /* никогда */ })
         : Promise.resolve({
             fullUser: { about: opts.about },
-            users: [new FakeUser(777, 'Иван', 'Петров', 'ivan_p')],
+            users: [new FakeUser(777, 'Иван', 'Петров', 'ivan_p', opts.phone)],
           }),
     downloadProfilePhoto: () =>
       opts.photoThrows
@@ -75,6 +77,18 @@ describe('readProfile', () => {
       tg_user_id: 777,
     });
     expect(p.avatar).toEqual(jpeg);
+  });
+
+  // Телефона в tdata нет: если его не заберёт чтение профиля, колонка «Телефон»
+  // так и останется пустой у аккаунтов, залитых архивами.
+  it('отдаёт телефон, когда Telegram его сказал', async () => {
+    const p = await readProfile(fakeClient({ phone: '79001234567' }));
+    expect(p.phone).toBe('79001234567');
+  });
+
+  it('без телефона отдаёт пустую строку, а не падает', async () => {
+    const p = await readProfile(fakeClient({}));
+    expect(p.phone).toBe('');
   });
 
   it('профиль без описания и фото — рабочий случай, а не ошибка', async () => {

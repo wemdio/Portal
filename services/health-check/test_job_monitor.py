@@ -78,8 +78,10 @@ class JobMonitorTests(unittest.IsolatedAsyncioTestCase):
             "status": "pending",
             "progress": "0",
             "activity_secs": None,
-            "active_secs": 901,
-            "age_secs": 901,
+            # Just past the alert threshold, expressed relative to it so the
+            # test keeps testing the boundary when the threshold moves.
+            "active_secs": health.JOB_STUCK_MINUTES * 60 + 1,
+            "age_secs": health.JOB_STUCK_MINUTES * 60 + 1,
             "owner_name": "Ксения Хохлова",
             "owner_email": "x@example.com",
         }

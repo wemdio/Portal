@@ -180,6 +180,11 @@ export async function countYandexMapsCatalog(
  * Складывает выдачу каталога прямо в результаты запуска — одним запросом
  * внутри базы, без чтения строк в Node.
  *
+ * `links` в ответе всегда 0: сбор по каталогу не заполняет yandex_maps_links.
+ * Та таблица нужна живому парсингу, где ссылки собирают отдельным этапом и
+ * правят руками; здесь она получала бы точную копию card_url каждой строки —
+ * треть времени сбора и треть занятого места за копию одной колонки.
+ *
  * Раньше это делал воркер: читал каталог страницами по 2000 строк через
  * PostgREST и теми же страницами писал обратно, из-за чего данные дважды шли
  * по сети, а человек ждал очереди. Искать при этом нечего — всё уже лежит в
@@ -230,6 +235,74 @@ export async function fillJobFromYandexMapsCatalog(
   if (error) throw new Error(`Не удалось собрать выдачу из каталога: ${error.message}`);
   const row = (Array.isArray(data) ? data[0] : data) as { organizations?: number; links?: number } | null;
   return { organizations: Number(row?.organizations ?? 0), links: Number(row?.links ?? 0) };
+}
+
+/**
+ * Порции сбора: сколько строк забираем на каждом шаге.
+ *
+ * Смысл лестницы — не в скорости, а в том, чтобы результаты появились сразу.
+ * Замер на бою: 14 699 организаций собираются 7 с, 83 466 — 52 с, то есть около
+ * 1650 строк в секунду, и время пропорционально объёму. Одним запросом человек
+ * всё это время смотрит на пустой экран и не знает, живо ли оно.
+ *
+ * С лестницей первые 5 000 ложатся за пару секунд, задача сразу показывает
+ * результаты, а дальше счётчик растёт на глазах.
+ *
+ * Шаг вдвое, а не вчетверо: с четырёхкратным счётчик на выдаче в 26 тысяч
+ * двигался всего трижды, и между движениями были долгие паузы, в которые
+ * казалось, что всё встало. Цена удвоения — шаги перечитывают уже вставленное:
+ * суммарно примерно вдвое больше прочитанных строк, но записанных ровно
+ * столько же, а чтение — около десятой части стоимости сбора.
+ */
+const FILL_CHUNKS = [
+  5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 320_000, 640_000,
+] as const;
+
+/**
+ * Собирает выдачу порциями, сообщая прогресс после каждой.
+ *
+ * Каждый шаг — тот же `fill_job` с `limit`, а `on conflict do nothing` делает
+ * повторы бесплатными: шаг видит уже вставленное и добавляет только новое,
+ * возвращая размер прибавки.
+ *
+ * Последним всегда идёт вызов с настоящим потолком задачи, даже если лестница
+ * закончилась. Он ничего не добавит, если всё уже собрано, но гарантирует
+ * полноту: полагаться на «прибавка меньше порции — значит всё» нельзя, потому
+ * что одна карточка может встретиться в каталоге дважды и вставиться один раз.
+ */
+export async function fillYandexMapsCatalogJobInChunks(
+  jobId: string,
+  filters: YandexMapsCatalogFilters,
+  limit: number | null,
+  onProgress?: (collected: number) => Promise<void> | void,
+  /**
+   * Шаг порции. Параметром, а не прямым вызовом: иначе интересное здесь — из
+   * каких порций складывается лесенка, когда она обрывается и почему финальный
+   * вызов обязателен — проверялось бы только против живой базы.
+   */
+  runStep: (
+    jobId: string,
+    filters: YandexMapsCatalogFilters,
+    stepLimit: number | null,
+  ) => Promise<{ organizations: number }> = fillJobFromYandexMapsCatalog,
+): Promise<{ organizations: number }> {
+  let collected = 0;
+
+  for (const chunk of FILL_CHUNKS) {
+    // Порция больше запрошенного объёма — доделает финальный вызов.
+    if (limit !== null && chunk >= limit) break;
+    const step = await runStep(jobId, filters, chunk);
+    collected += step.organizations;
+    await onProgress?.(collected);
+    // Порция не набралась до потолка — выдача исчерпана, дальше по лестнице
+    // идти незачем. Полноту всё равно подтвердит финальный вызов.
+    if (collected < chunk) break;
+  }
+
+  const final = await runStep(jobId, filters, limit);
+  collected += final.organizations;
+  await onProgress?.(collected);
+  return { organizations: collected };
 }
 
 function text(value: unknown): string {
@@ -353,18 +426,66 @@ export async function filterUnknownYandexIds(ids: string[]): Promise<Set<string>
   return new Set(unique.filter((id) => !known.has(id)));
 }
 
+/**
+ * Сколько организаций уборке позволено записать в пропавшие за один обход.
+ *
+ * Потолок держится на размере выдачи, и это не про скорость, а про правду.
+ * Обход считает выдачу исчерпывающей, если Яндекс вернул меньше, чем у него
+ * просили, — но «меньше» бывает и когда поиск оборвался. На бою 11.08.2026
+ * «Москва × Бизнес» вернула 20 ссылок при 65 321 организации в каталоге, а
+ * «Воронежская область × Услуги» — ноль при 3 343. По первой же букве правил
+ * все они пошли бы в пропавшие, а после второго такого обхода — в «закрылась».
+ *
+ * Поэтому: показал Яндекс N организаций — уборка вправе усомниться максимум в
+ * 2N + 20. Не сошлось — выдача была неполной, и трогать нечего. Двойной запас
+ * оставляет место настоящему закрытию (половина точки могла съехать), а +20
+ * позволяет отработать по-настоящему опустевшим парам, где выдача пуста
+ * законно.
+ */
+export function missingMarkBudget(seenCount: number): number {
+  return Math.max(0, Math.floor(seenCount)) * 2 + 20;
+}
+
+/**
+ * Отмечает, кого выдача показала, а кого в ней не оказалось.
+ *
+ * Ходит в Postgres напрямую по той же причине, что и сбор: уборка переписывает
+ * десятки тысяч строк каталога (одна «Москва × Бизнес» — 65 тыс.), а Kong рвёт
+ * соединение на 60 секундах. 11.08.2026 из-за этого 343 пары очереди висели в
+ * «упало» с `The upstream server is timing out` и HTML-страницами шлюза вместо
+ * ответа. Строки при этом никуда из базы не идут — гонять вызов через REST
+ * незачем.
+ */
 export async function markYandexMapsCatalogSeen(
   seen: string[],
   task: DiscoveryTask,
   exhaustive: boolean,
 ): Promise<number> {
+  const ids = [...new Set(seen.filter(Boolean))];
+
+  const pool = getCatalogPool();
+  if (pool) {
+    try {
+      const { rows } = await pool.query(
+        'select public.yandex_maps_catalog_mark_seen($1::text[], $2::text, $3::text, $4::text, $5::boolean, $6::integer) as suspected',
+        [ids, task.country, task.place, task.rubric, exhaustive, missingMarkBudget(ids.length)],
+      );
+      return Number((rows[0] as { suspected?: number } | undefined)?.suspected ?? 0);
+    } catch (error) {
+      throw new Error(
+        `Не удалось отметить организации: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   if (!supabaseAdmin) return 0;
   const { data, error } = await supabaseAdmin.rpc('yandex_maps_catalog_mark_seen', {
-    p_seen: [...new Set(seen.filter(Boolean))],
+    p_seen: ids,
     p_country: task.country,
     p_place: task.place,
     p_rubric: task.rubric,
     p_exhaustive: exhaustive,
+    p_max_missing: missingMarkBudget(ids.length),
   });
   if (error) throw new Error(`Не удалось отметить организации: ${error.message}`);
   return Number(data ?? 0);

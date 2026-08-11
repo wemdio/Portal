@@ -81,7 +81,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     }
   }, []);
 
-  const loadResults = useCallback(async (jobId: string) => {
+  const loadResults = useCallback(async (jobId: string, previewOnly = false) => {
     setLoadingResults(true);
     try {
       const PAGE = 5000;
@@ -94,6 +94,10 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
         const page = data.results ?? [];
         all = all.concat(page);
         if (!data.hasMore || page.length === 0) break;
+        // Пока задача идёт, тянуть всю выдачу незачем: в таблице видно первые
+        // 500, а полный список нужен только «В базу» и экспорту — то и другое
+        // доступно по завершении.
+        if (previewOnly) break;
         offset += page.length;
       }
       setResults(all);
@@ -115,15 +119,32 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     void loadResults(activeJobId);
   }, [activeJobId, loadResults]);
 
+  // Сколько строк было в прошлый раз, когда перечитывали результаты. Раньше
+  // опрос дёргал loadResults каждые пять секунд безусловно: на выдаче в 26 тысяч
+  // это шесть запросов по 5000 строк каждые пять секунд, полная замена массива и
+  // прыгающая таблица — читать её было невозможно. Теперь перечитываем, только
+  // когда счётчик собранного реально сдвинулся.
+  const loadedAtCount = useRef<number | null>(null);
+
   useEffect(() => {
     if (!activeJobId || !activeJob) return;
     if (activeJob.status === 'running' || activeJob.status === 'pending') {
       const interval = window.setInterval(() => {
         void refreshJobs();
         void refreshQueueStatus();
-        void loadResults(activeJobId);
+        const collected = activeJob.processed_organizations ?? 0;
+        if (loadedAtCount.current !== collected) {
+          loadedAtCount.current = collected;
+          void loadResults(activeJobId, true);
+        }
       }, 5000);
       return () => window.clearInterval(interval);
+    }
+    // Задача закрылась — один раз забираем выдачу целиком: она нужна кнопке
+    // «В базу» и подсчёту в подписи под таблицей.
+    if (loadedAtCount.current !== null) {
+      loadedAtCount.current = null;
+      void loadResults(activeJobId);
     }
   }, [activeJob, activeJobId, refreshJobs, refreshQueueStatus, loadResults]);
 
@@ -310,7 +331,8 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
         return;
       }
 
-      const MAX_ROWS = 50_000;
+      // Обрезания нет: сколько собрали, столько и кладём. Потолок в 50 000 стоял
+      // здесь молча, и на крупной выдаче человек узнавал о нём уже в готовой базе.
       const rows: string[][] = [
         [
           'Name',
@@ -330,7 +352,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
           'JobId',
           'Parser',
         ],
-        ...results.slice(0, MAX_ROWS).map((r) => [
+        ...results.map((r) => [
           r.name ?? '',
           r.website ?? '',
           r.email ?? '',
@@ -353,7 +375,16 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
       const title = `Яндекс.Карты #${activeJobId.slice(0, 8)}`;
       const { id } = await writePendingDbImport({ title, rows });
       const url = buildDatabasesImportUrl(id);
-      setToast({ tone: 'success', message: 'Добавлено в “Базы”. Можете перейти и проверить импорт.', href: url });
+      // Число в сообщении не для красоты: молчаливое расхождение между выдачей и
+      // базой мы уже ловили, и увидеть его лучше сразу, а не в готовой базе.
+      const count = results.length.toLocaleString('ru-RU');
+      setToast({
+        tone: 'success',
+        message: results.length > 100_000
+          ? `Добавлено в «Базы»: ${count} строк. Столько строк вкладка открывает небыстро — дайте ей время.`
+          : `Добавлено в «Базы»: ${count} строк. Можете перейти и проверить импорт.`,
+        href: url,
+      });
     } catch (e) {
       setToast({ tone: 'error', message: e instanceof Error ? e.message : 'Ошибка добавления в базу' });
     }
@@ -394,6 +425,8 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     : `Запуск #${activeJob?.id.slice(0, 8) ?? ''}`;
   const _isCollecting = stageStr.includes('collecting_links') || stageStr === 'links_collected';
   const isParsing = stageStr.includes('parsing_organizations');
+  // Сбор по каталогу: строки появляются порциями, задача ещё выполняется.
+  const isCollectingCatalog = stageStr === 'catalog_search' && activeJob?.status === 'running';
 
   // Antispam: после блокировки Яндексом даём прокси ~15 мин на смену IP.
   // Пока не прошло — кнопка "Продолжить парсинг" disabled с обратным
@@ -420,11 +453,12 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     <div className="space-y-8">
       {toast ? (
         <div
-          className={`fixed bottom-4 right-4 z-50 max-w-[92vw] rounded-xl border px-4 py-3 text-sm shadow-lg ${
-            toast.tone === 'success'
-              ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
-              : 'border-red-200 bg-red-50 text-red-900'
+          // Сплошной фон, а не светлая заливка: на тёмной теме она просвечивала
+          // и текст было не прочитать.
+          className={`fixed bottom-4 right-4 z-50 max-w-[92vw] rounded-xl px-4 py-3 text-sm font-medium text-white shadow-xl ring-1 ring-black/10 ${
+            toast.tone === 'success' ? 'bg-emerald-700' : 'bg-red-700'
           }`}
+          style={{ opacity: 1 }}
           role="status"
           aria-live="polite"
         >
@@ -433,7 +467,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
             {toast.href ? (
               <a
                 href={toast.href}
-                className="shrink-0 inline-flex items-center rounded-lg border border-emerald-200 bg-white px-2.5 py-1 text-xs font-medium text-emerald-900 shadow-sm hover:bg-emerald-50"
+                className="shrink-0 inline-flex items-center rounded-lg bg-white px-2.5 py-1 text-xs font-semibold text-emerald-900 shadow-sm hover:bg-emerald-50"
               >
                 Перейти
               </a>
@@ -572,14 +606,10 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                         <h2 className="text-xl font-bold text-gray-900" title={`Запуск #${activeJob.id.slice(0, 8)}`}>
                           {jobTitle}
                         </h2>
-                        <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ring-1 ring-inset ${
-                          activeJob.status === 'completed' ? 'bg-green-50 text-green-700 ring-green-600/20' :
-                          activeJob.status === 'failed' ? 'bg-red-50 text-red-700 ring-red-600/20' :
-                          activeJob.status === 'running' ? 'bg-blue-50 text-blue-700 ring-blue-600/20' :
-                          'bg-gray-50 text-gray-600 ring-gray-500/10'
-                        }`}>
-                          {activeJob.status}
-                        </span>
+                        {/* Тот же значок, что и в истории слева. Раньше здесь
+                            была своя вёрстка, печатавшая статус как есть, —
+                            отсюда «completed» латиницей на видном месте. */}
+                        <JobStatus status={activeJob.status} errorMessage={activeJob.error_message ?? null} />
                       </div>
                       
                       <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-gray-500 mt-2">
@@ -587,10 +617,16 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                           <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
                           Этап: <span className="font-medium text-gray-900">{stage || '—'}</span>
                         </div>
-                        {(isParsing || activeJob.status === 'completed') && (
+                        {/* Сбор по каталогу идёт порциями и по ходу дела двигает
+                            счётчик, поэтому показываем его и во время сбора, а не
+                            только на парсинге и по завершении. */}
+                        {(isParsing || isCollectingCatalog || activeJob.status === 'completed') && (
                           <div className="flex items-center gap-1.5">
                             <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
-                            Организаций: <span className="font-medium text-gray-900">{processedOrgs} / {totalOrgs}</span>
+                            Организаций:{' '}
+                            <span className="font-medium text-gray-900">
+                              {isCollectingCatalog ? `${processedOrgs} и собираем дальше…` : `${processedOrgs} / ${totalOrgs}`}
+                            </span>
                           </div>
                         )}
                       </div>
@@ -899,7 +935,9 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                 </div>
                 {results.length > 500 && (
                   <div className="p-2 border-t border-gray-200 bg-gray-50 text-center text-xs text-gray-500">
-                    Показано 500 из {results.length} записей. В экспорт (Excel / CSV) попадут все {results.length}.
+                    {activeJob.status === 'running'
+                      ? `Показано ${Math.min(results.length, 500)} из ${processedOrgs.toLocaleString('ru-RU')} собранных. Сбор продолжается.`
+                      : `Показано ${Math.min(results.length, 500)} из ${results.length.toLocaleString('ru-RU')} записей. В экспорт (Excel / CSV) попадут все ${results.length.toLocaleString('ru-RU')}.`}
                   </div>
                 )}
               </div>

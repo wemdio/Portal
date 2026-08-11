@@ -31,7 +31,7 @@ export async function GET(req: NextRequest) {
       const { data, error } = await supabase
         .from('tg_parser_jobs')
         .select(
-          'id, user_id, created_at, status, config, account_id, result_users, stop_reason, error_message, started_at, completed_at',
+          'id, user_id, created_at, status, config, account_id, result_users, stop_reason, error_message, started_at, completed_at, found_count, progress_note, progress_at',
         )
         .order('created_at', { ascending: false })
         .limit(limit);

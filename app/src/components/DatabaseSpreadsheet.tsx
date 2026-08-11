@@ -2848,7 +2848,12 @@ export function DatabaseSpreadsheet() {
     ids.forEach((id) => handledImportsRef.current.add(id));
 
     (async () => {
-      const MAX_ROWS = 10_000;
+      // Потолка на строки нет. Был 10 000 и молча резал: сбор по Яндекс.Картам
+      // на 26 612 организаций приезжал сюда как 9 999 строк, и расхождение
+      // замечали уже в готовой базе. Сколько прислали — столько и кладём.
+      //
+      // Колонки по-прежнему ограничены MAX_COLS: лишние столбцы это порча
+      // структуры листа, а лишние строки — просто много строк.
       const MAX_COLS = 80;
       let importedTabs = 0;
       let importedRows = 0;
@@ -2867,7 +2872,7 @@ export function DatabaseSpreadsheet() {
           }
 
           const rawRows = Array.isArray(payload.rows) ? payload.rows : [];
-          const limitedRows = rawRows.slice(0, MAX_ROWS).map((row) => {
+          const limitedRows = rawRows.map((row) => {
             const cells = Array.isArray(row) ? row : [];
             return cells.slice(0, MAX_COLS).map((cell) => String(cell ?? ''));
           });
@@ -2889,7 +2894,7 @@ export function DatabaseSpreadsheet() {
           await deletePendingDbImport(id);
           importedTabs += 1;
           importedRows += limitedRows.length;
-          trimmedAny = trimmedAny || limitedRows.length < rawRows.length;
+          trimmedAny = trimmedAny || rawRows.some((row) => Array.isArray(row) && row.length > MAX_COLS);
         }
 
         if (importedTabs > 0) {
@@ -2897,7 +2902,12 @@ export function DatabaseSpreadsheet() {
             importedTabs === 1
               ? `Импортировано: ${importedRows} строк`
               : `Импортировано баз: ${importedTabs} (${importedRows} строк)`;
-          showCopyNotice(trimmedAny ? `${base} (обрезано до лимита)` : base, 'success');
+          showCopyNotice(
+            trimmedAny
+              ? `${base} — часть столбцов не поместилась (потолок ${MAX_COLS})`
+              : base,
+            trimmedAny ? 'error' : 'success',
+          );
         } else if (missing > 0) {
           showCopyNotice('Импорт не найден (возможно, устарел или был очищен браузером)', 'error');
         }

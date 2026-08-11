@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import type { Locale } from '@/lib/i18n';
 import { Project, ProjectNote, ProjectStatus, Task, TaskStatus, UserProfile } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
@@ -486,6 +486,9 @@ function getCommentValue(project: Project) {
 type PopoverItem = { id: string; title: string; status?: string; deadline?: string | null };
 type TaskDeadlineDefaultMode = 'tomorrow' | 'fixed';
 
+/** Сколько живёт кнопка «Отменить» после удаления заметки. */
+const UNDO_NOTE_WINDOW_MS = 8000;
+
 type ItemPopoverProps = {
   items: PopoverItem[];
   title: string;
@@ -503,6 +506,22 @@ type ItemPopoverProps = {
   showStatusDot?: boolean;
   onDeadlineChange?: (id: string, deadline: string | null) => void;
   onItemClick?: (item: PopoverItem) => void;
+  /**
+   * Курсор сразу в поле ввода. Включено только для заметок: там попап
+   * открывают, чтобы что-то быстро записать, и лишний клик в поле —
+   * половина всей работы. У задач попап чаще открывают почитать, поэтому
+   * автофокус там не нужен (и мешал бы прокрутке длинного списка).
+   */
+  autoFocusInput?: boolean;
+  /**
+   * Удаление одним кликом, без «Да/Нет». Включено только для заметок:
+   * заметка живёт двое суток и восстанавливается кнопкой «Отменить»
+   * (см. `renderUndo`), так что подтверждение — лишний шаг. У задач
+   * подтверждение остаётся: их удаление необратимо и видно специалистам.
+   */
+  instantDelete?: boolean;
+  /** Полоска «Заметка удалена — Отменить» над списком. */
+  renderUndo?: React.ReactNode;
 };
 
 function formatDeadlineLabel(deadline: string): { text: string; color: string } {
@@ -556,8 +575,13 @@ function getTaskStatusLabel(status: TaskStatus, locale: Locale): string {
   return locale === 'en' ? 'Pending' : 'Ожидает';
 }
 
-function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, setDeleteConfirmId, onDelete, onClose, newValue, setNewValue, onAdd, placeholder, showStatusDot, onDeadlineChange, onItemClick }: ItemPopoverProps) {
+export function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, setDeleteConfirmId, onDelete, onClose, newValue, setNewValue, onAdd, placeholder, showStatusDot, onDeadlineChange, onItemClick, autoFocusInput, instantDelete, renderUndo }: ItemPopoverProps) {
   const { locale } = useUser();
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (autoFocusInput && canEdit) inputRef.current?.focus();
+  }, [autoFocusInput, canEdit]);
 
   // Закрытие по ESC — обязательная страховка для случая, когда попап
   // визуально улетел за экран (рамка задач у проекта с большим списком).
@@ -599,6 +623,7 @@ function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, 
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M10.5 3.5L3.5 10.5M3.5 3.5l7 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
         </button>
       </div>
+      {renderUndo}
       <div className="flex-1 overflow-y-auto overscroll-contain px-2 py-2 space-y-1" style={{ minHeight: 0 }}>
         {items.map((item) => {
           const isDone = item.status === 'done';
@@ -658,13 +683,13 @@ function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, 
                 </div>
               </div>
               {inlineActionsEnabled && (
-                deleteConfirmId === item.id ? (
+                deleteConfirmId === item.id && !instantDelete ? (
                   <div className="flex items-center gap-1 flex-shrink-0">
                     <button type="button" onClick={() => { onDelete(item.id); setDeleteConfirmId(null); }} className="text-[11px] text-red-600 hover:text-red-700 font-medium px-1.5 py-0.5 rounded bg-red-50 hover:bg-red-100 transition-colors">{locale === 'en' ? 'Yes' : 'Да'}</button>
                     <button type="button" onClick={() => setDeleteConfirmId(null)} className="text-[11px] text-zinc-500 hover:text-zinc-700 font-medium px-1.5 py-0.5 rounded hover:bg-zinc-100 transition-colors">{locale === 'en' ? 'No' : 'Нет'}</button>
                   </div>
                 ) : (
-                  <button type="button" onClick={() => setDeleteConfirmId(item.id)} className="flex-shrink-0 flex items-center justify-center w-5 h-5 rounded text-zinc-300 hover:text-red-500 hover:bg-red-50 transition-colors" title={locale === 'en' ? 'Delete' : 'Удалить'}>
+                  <button type="button" onClick={() => (instantDelete ? onDelete(item.id) : setDeleteConfirmId(item.id))} className="flex-shrink-0 flex items-center justify-center w-5 h-5 rounded text-zinc-300 hover:text-red-500 hover:bg-red-50 transition-colors" title={locale === 'en' ? 'Delete' : 'Удалить'}>
                     <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2.5 3.5h7M4.5 3.5V2.5a1 1 0 011-1h1a1 1 0 011 1v1M5 5.5v3M7 5.5v3M3.5 3.5l.5 6a1 1 0 001 1h2a1 1 0 001-1l.5-6" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round"/></svg>
                   </button>
                 )
@@ -677,6 +702,7 @@ function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, 
       {canEdit && (
         <div className="flex gap-1.5 px-3 py-2.5 border-t border-zinc-100">
           <input
+            ref={inputRef}
             type="text"
             value={newValue}
             onChange={(e) => setNewValue(e.target.value)}
@@ -767,6 +793,23 @@ export function ProjectList() {
   const [newNoteTitle, setNewNoteTitle] = useState('');
   const [deleteConfirmNoteId, setDeleteConfirmNoteId] = useState<string | null>(null);
   const notePopoverRef = useRef<HTMLDivElement>(null);
+  // Удалённая заметка ждёт «Отменить». Держим и позицию в списке: восстановленная
+  // заметка должна вернуться на своё место, а не всплыть наверх.
+  const [undoNote, setUndoNote] = useState<{ note: ProjectNote; index: number } | null>(null);
+  const undoNoteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (undoNoteTimer.current) clearTimeout(undoNoteTimer.current); }, []);
+
+  const forgetUndoNote = useCallback(() => {
+    if (undoNoteTimer.current) clearTimeout(undoNoteTimer.current);
+    undoNoteTimer.current = null;
+    setUndoNote(null);
+  }, []);
+
+  const closeNotePopover = useCallback(() => {
+    setNotePopoverId(null);
+    setNotePopoverPos(null);
+    forgetUndoNote();
+  }, [forgetUndoNote]);
 
   const taskModalTask = taskModalContext
     ? (projectTasks[taskModalContext.projectId] ?? []).find((t) => t.id === taskModalContext.taskId) ?? null
@@ -860,12 +903,13 @@ export function ProjectList() {
     if (!notePopoverId) return;
     const close = (e: Event) => {
       if (notePopoverRef.current?.contains(e.target as Node)) return;
-      setNotePopoverId(null);
-      setNotePopoverPos(null);
+      // Вместе с попапом уезжает и «Отменить»: предлагать вернуть заметку
+      // в уже закрытом окне некуда.
+      closeNotePopover();
     };
     window.addEventListener('scroll', close, true);
     return () => window.removeEventListener('scroll', close, true);
-  }, [notePopoverId]);
+  }, [notePopoverId, closeNotePopover]);
 
   useEffect(() => {
     setCanCreate(canCreateProjects(userRole));
@@ -1307,12 +1351,45 @@ export function ProjectList() {
     setNewNoteTitle('');
   }
 
+  /**
+   * Заметку удаляем сразу, без «Да/Нет»: подтверждение стоило столько же
+   * действий, сколько сама запись. Страховка — «Отменить» на несколько секунд.
+   */
   async function deleteNote(noteId: string, projectId: string) {
-    await supabase.from('project_notes').delete().eq('id', noteId);
+    const index = (projectNotes[projectId] ?? []).findIndex((n) => n.id === noteId);
+    const note = index >= 0 ? projectNotes[projectId][index] : null;
     setProjectNotes((prev) => ({
       ...prev,
       [projectId]: (prev[projectId] ?? []).filter((n) => n.id !== noteId),
     }));
+    const { error } = await supabase.from('project_notes').delete().eq('id', noteId);
+    if (error || !note) return;
+    forgetUndoNote();
+    setUndoNote({ note, index });
+    undoNoteTimer.current = setTimeout(() => setUndoNote(null), UNDO_NOTE_WINDOW_MS);
+  }
+
+  /**
+   * Возвращаем заметку тем же id и created_at: она встаёт на своё место в
+   * списке и не начинает жизнь заново (заметки чистятся через двое суток).
+   */
+  async function restoreNote() {
+    const pending = undoNote;
+    if (!pending) return;
+    forgetUndoNote();
+    const { note, index } = pending;
+    const { error } = await supabase.from('project_notes').insert({
+      id: note.id,
+      project_id: note.project_id,
+      title: note.title,
+      ...(note.created_at ? { created_at: note.created_at } : {}),
+    });
+    if (error) return;
+    setProjectNotes((prev) => {
+      const list = [...(prev[note.project_id] ?? [])];
+      list.splice(Math.min(index, list.length), 0, note);
+      return { ...prev, [note.project_id]: list };
+    });
   }
 
   async function updateProjectStatus(id: string, newStatus: string) {
@@ -2396,7 +2473,7 @@ export function ProjectList() {
                               <div
                                 className={`cursor-pointer rounded-md px-2 py-1 -mx-1 transition-colors ${isOpen ? 'bg-amber-50' : 'hover:bg-zinc-100'}`}
                                 onClick={(e) => {
-                                  if (isOpen) { setNotePopoverId(null); setNotePopoverPos(null); } else {
+                                  if (isOpen) { closeNotePopover(); } else {
                                     const rect = e.currentTarget.getBoundingClientRect();
                                     const popoverW = 480;
                                     const openUp = rect.bottom + 300 > window.innerHeight;
@@ -2427,11 +2504,27 @@ export function ProjectList() {
                                   deleteConfirmId={deleteConfirmNoteId}
                                   setDeleteConfirmId={setDeleteConfirmNoteId}
                                   onDelete={(id) => void deleteNote(id, project.id)}
-                                  onClose={() => { setNotePopoverId(null); setNotePopoverPos(null); }}
+                                  onClose={closeNotePopover}
                                   newValue={newNoteTitle}
                                   setNewValue={setNewNoteTitle}
                                   onAdd={() => void addNote(project.id, newNoteTitle)}
                                   placeholder="Новая заметка..."
+                                  autoFocusInput
+                                  instantDelete
+                                  renderUndo={undoNote?.note.project_id === project.id ? (
+                                    <div className="flex items-center justify-between gap-2 px-3.5 py-2 bg-amber-50 border-b border-amber-100">
+                                      <span className="text-[12px] text-amber-900">
+                                        {locale === 'en' ? 'Note deleted' : 'Заметка удалена'}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => void restoreNote()}
+                                        className="text-[12px] font-medium text-amber-900 underline underline-offset-2 hover:text-amber-950"
+                                      >
+                                        {locale === 'en' ? 'Undo' : 'Отменить'}
+                                      </button>
+                                    </div>
+                                  ) : null}
                                 />
                               )}
                             </>

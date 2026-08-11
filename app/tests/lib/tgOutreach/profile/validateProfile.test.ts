@@ -6,7 +6,7 @@
  * подключения через мобильный прокси.
  */
 
-import { validateProfile, PROFILE_LIMITS } from '@/lib/tgOutreach/profile/validateProfile';
+import { validateProfile, normalizeUsername, PROFILE_LIMITS } from '@/lib/tgOutreach/profile/validateProfile';
 
 describe('validateProfile', () => {
   it('обычный профиль проходит', () => {
@@ -41,5 +41,39 @@ describe('validateProfile', () => {
 
   it('фамилия и описание могут быть пустыми', () => {
     expect(validateProfile({ first_name: 'Иван', last_name: '', bio: '' })).toEqual({ ok: true });
+  });
+});
+
+describe('юзернейм', () => {
+  const base = { first_name: 'Иван', last_name: '', bio: '' };
+  const check = (username: string) => validateProfile({ ...base, username });
+
+  it('приводит к виду, который ждёт Telegram: @ и ссылку отрезает', () => {
+    expect(normalizeUsername('@ivan_petrov')).toBe('ivan_petrov');
+    expect(normalizeUsername('https://t.me/ivan_petrov')).toBe('ivan_petrov');
+    expect(normalizeUsername('  ivan_petrov  ')).toBe('ivan_petrov');
+    expect(normalizeUsername(undefined)).toBe('');
+  });
+
+  it('пустой юзернейм допустим — это снятие, а не ошибка', () => {
+    expect(check('')).toEqual({ ok: true });
+    expect(validateProfile(base)).toEqual({ ok: true });
+  });
+
+  it('отсекает то, что Telegram не примет, до похода в сеть', () => {
+    expect(check('abcd')).toMatchObject({ ok: false, field: 'username' });
+    expect(check('a'.repeat(33))).toMatchObject({ ok: false, field: 'username' });
+    expect(check('1ivanov')).toMatchObject({ ok: false, field: 'username' });
+    expect(check('иван_петров')).toMatchObject({ ok: false, field: 'username' });
+    expect(check('ivan-petrov')).toMatchObject({ ok: false, field: 'username' });
+    expect(check('ivan_')).toMatchObject({ ok: false, field: 'username' });
+    expect(check('ivan__petrov')).toMatchObject({ ok: false, field: 'username' });
+  });
+
+  it('пропускает нормальный юзернейм, в том числе с @ и в 5 знаков', () => {
+    expect(check('ivan_petrov')).toEqual({ ok: true });
+    expect(check('@ivan_petrov')).toEqual({ ok: true });
+    expect(check('ivan1')).toEqual({ ok: true });
+    expect(check('a'.repeat(32))).toEqual({ ok: true });
   });
 });

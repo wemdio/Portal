@@ -5,7 +5,14 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { startTrace } from '@/lib/tracer';
 import { parseTgUsers } from '@/lib/tgParser/parser';
 import { clampTgParserMaxContactsPerRun } from '@/lib/tgParser/constants';
-import type { ParsedUser, TgParserAccount } from '@/lib/tgParser/types';
+import type { ParsedUser, ParseProgress, TgParserAccount } from '@/lib/tgParser/types';
+
+/** Этапы обхода человеческим языком — они попадают прямо в журнал оператору. */
+const STAGE_LABEL: Record<ParseProgress['stage'], string> = {
+  messages: 'авторы сообщений',
+  members: 'участники',
+  comments: 'комментарии под постами',
+};
 
 export type TgParserJobConfig = {
   links: string[];
@@ -338,6 +345,46 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       message: 'Начинаем парсинг Telegram источников',
     });
 
+    // Прогресс: в журнал — только границы этапов, в БД — счётчик найденных.
+    // Промежуточные тики (каждые 25 контактов) в журнал не пишем, иначе он
+    // превратится в ленту из сотен одинаковых строк и станет нечитаемым.
+    let lastProgressWriteAt = 0;
+    const onProgress = async (p: ParseProgress) => {
+      const source = p.title || p.link;
+      if (p.phase !== 'tick') {
+        await writeJobLog({
+          jobId,
+          jobUserId,
+          isTarget,
+          accountLabel,
+          level: 'info',
+          message: p.phase === 'start'
+            ? `${source}: ${STAGE_LABEL[p.stage]} — начал`
+            : `${source}: ${STAGE_LABEL[p.stage]} — готово, всего собрано ${p.total}`,
+        });
+      }
+
+      // Счётчик в БД трогаем не чаще раза в 10 секунд: обновление на каждый
+      // тик — это лишние сотни записей за длинный обход.
+      const now = Date.now();
+      if (p.phase === 'tick' && now - lastProgressWriteAt < 10_000) return;
+      lastProgressWriteAt = now;
+      try {
+        await db
+          .from('tg_parser_jobs')
+          .update({
+            found_count: p.total,
+            progress_note: `${source} · ${STAGE_LABEL[p.stage]}`,
+            progress_at: new Date().toISOString(),
+          })
+          .eq('id', jobId)
+          .eq('status', 'running');
+      } catch {
+        // Прогресс — диагностика, а не результат: сбой записи не должен
+        // прерывать сбор, ради которого всё и запускалось.
+      }
+    };
+
     const result = await parseTgUsers({
       links,
       parse_chat_messages: cfg.parse_chat_messages ?? true,
@@ -350,6 +397,7 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       max_offline_days: cfg.max_offline_days != null ? Number(cfg.max_offline_days) : null,
       account,
       max_contacts,
+      onProgress,
     });
     const safeUsers = result.status === 'error' ? null : sanitizeUsersForJson(result.users);
 

@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { isShuttingDown } from '@/lib/workerShutdown';
 import {
   stepRemoveEmpty,
   stepFullDedup,
@@ -328,20 +329,31 @@ export async function updateJobProgress(
   stepKey: string,
   progress: number,
 ) {
+  const patch: Record<string, unknown> = {
+    current_step: stepIndex + 1,
+    current_step_key: stepKey,
+    current_step_progress: Math.min(100, Math.max(0, Math.round(progress))),
+    status: 'processing',
+  };
+  // Heartbeat: каждое обновление прогресса bumps started_at. Семантика
+  // меняется с «когда началось» на «когда была последняя активность».
+  // Нужно для resume-логики в autoCompleteIfStuck: если started_at
+  // свежий — worker реально работает; если устарел >15 мин — умер,
+  // безопасно пере-запустить с этого места.
+  //
+  // Исключение — shutdown (инцидент 11.08.2026): после SIGTERM воркер уже
+  // backdate'ил started_at, чтобы соседняя реплика подхватила job за ~5с
+  // вместо BASE_CONSTRUCTOR_STALE_MINUTES. Job доигрывает свои последние
+  // секунды до SIGKILL, и её heartbeat затирал этот backdate обратно на
+  // now() — handoff не срабатывал ни разу. Прогресс продолжаем писать
+  // (resume стартует с него), «я жив» — больше нет.
+  if (!isShuttingDown()) {
+    patch.started_at = new Date().toISOString();
+  }
+
   await admin
     .from('base_constructor_jobs')
-    .update({
-      current_step: stepIndex + 1,
-      current_step_key: stepKey,
-      current_step_progress: Math.min(100, Math.max(0, Math.round(progress))),
-      status: 'processing',
-      // Heartbeat: каждое обновление прогресса bumps started_at. Семантика
-      // меняется с «когда началось» на «когда была последняя активность».
-      // Нужно для resume-логики в autoCompleteIfStuck: если started_at
-      // свежий — worker реально работает; если устарел >15 мин — умер,
-      // безопасно пере-запустить с этого места.
-      started_at: new Date().toISOString(),
-    })
+    .update(patch)
     .eq('id', jobId)
     // Guard: не воскрешать отменённую задачу. Heartbeat пишет status='processing'
     // на каждом тике прогресса; без этого условия он гонкой затирал
@@ -794,12 +806,15 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
     // otherwise emits no started_at bump, so autoCompleteIfStuck (2 min stale)
     // or a stale-reclaim could early-complete/reclaim the job mid-block and race
     // a stale artifact onto storage. Status-guarded so a mid-run cancel is not
-    // resurrected to processing.
-    await admin
-      .from('base_constructor_jobs')
-      .update({ started_at: new Date().toISOString() })
-      .eq('id', jobId)
-      .eq('status', 'processing');
+    // resurrected to processing, и молчит на shutdown — иначе затрёт
+    // fast-handoff backdate (см. updateJobProgress).
+    if (!isShuttingDown()) {
+      await admin
+        .from('base_constructor_jobs')
+        .update({ started_at: new Date().toISOString() })
+        .eq('id', jobId)
+        .eq('status', 'processing');
+    }
 
     const exportArtifact = await uploadExportArtifact(admin, jobId, finalSanitized);
     if (!exportArtifact) {

@@ -69,12 +69,19 @@ export async function GET(req: NextRequest) {
   if (parsed.value === null) return NextResponse.json({ error: parsed.error }, { status: 400 });
   const { from, to } = parsed.value;
 
+  // `countOnly=1` — дашборд рисует число рядом с кнопкой «Записи без сделки»
+  // ещё до того, как панель открыта, и сама очередь ему при этом не нужна.
+  // Разница не косметическая: `text` — полная расшифровка разговора, за
+  // тридцатидневное окно это больше мегабайта, который читался из базы на
+  // каждую загрузку дашборда ради одной цифры в скобках.
+  const countOnly = url.searchParams.get('countOnly') === '1';
+
   try {
     // Очередь работы: чем старше запись, тем дольше она не разобрана —
     // разбираем от старых к новым, а не наоборот, чтобы хвост не рос вечно.
     const { data, error } = await db
       .from('tg_video_transcripts')
-      .select('id, tg_message_date, caption, filename, text')
+      .select(countOnly ? 'id' : 'id, tg_message_date, caption, filename, text')
       .eq('tg_chat_id', MEETING_CHAT_ID)
       .gte('tg_message_date', from.toISOString())
       .lte('tg_message_date', to.toISOString())
@@ -82,8 +89,12 @@ export async function GET(req: NextRequest) {
       .limit(QUEUE_MAX_ROWS);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-    const transcripts = (data ?? []) as TranscriptRow[];
-    if (transcripts.length === 0) return NextResponse.json({ rows: [], truncated: false });
+    const transcripts = (data ?? []) as unknown as TranscriptRow[];
+    if (transcripts.length === 0) {
+      return countOnly
+        ? NextResponse.json({ count: 0, truncated: false })
+        : NextResponse.json({ rows: [], truncated: false });
+    }
 
     // Исключить записи, уже присутствующие в meeting_deal_links С ЛЮБЫМ
     // method — включая not_a_meeting: это и есть механизм, которым отметка
@@ -99,6 +110,15 @@ export async function GET(req: NextRequest) {
       for (const l of (linkedChunk ?? []) as Array<{ transcript_id: string }>) {
         linkedIds.add(l.transcript_id);
       }
+    }
+
+    // `truncated` относится к ЗАПРОСУ к tg_video_transcripts — см. комментарий
+    // у полной ветки ниже, смысл флага в обоих режимах один и тот же.
+    if (countOnly) {
+      return NextResponse.json({
+        count: transcripts.filter((t) => !linkedIds.has(t.id)).length,
+        truncated: transcripts.length === QUEUE_MAX_ROWS,
+      });
     }
 
     const rows = transcripts

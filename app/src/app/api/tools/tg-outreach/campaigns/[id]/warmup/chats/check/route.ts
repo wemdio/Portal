@@ -4,6 +4,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { createGramClient } from '@/lib/tgOutreach/gramClient';
 import { downloadSessionToTemp } from '@/lib/tgOutreach/campaignLoop';
 import { describeChatError, resolveChat } from '@/lib/tgOutreach/warmup/chatOps';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import type { OutreachAccount, OutreachProxy } from '@/lib/tgOutreach/types';
 import type { WarmupChat } from '@/lib/tgOutreach/warmup/types';
 
@@ -68,7 +69,9 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         client = await createGramClient(
           account,
           (proxyRow as OutreachProxy) ?? null,
-          (storagePath) => downloadSessionToTemp(auth.supabase, storagePath),
+          // Служебным ключом: бакет с сессиями приватный, пользовательскому
+          // клиенту хранилище отвечает «Object not found».
+          (storagePath) => downloadSessionToTemp(supabaseAdmin ?? auth.supabase, storagePath),
         );
       } catch (e) {
         return jsonError(`Аккаунт не подключился через свой прокси: ${describeChatError(e)}`, 502);

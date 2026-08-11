@@ -64,8 +64,13 @@ HEALTH_INTERVAL_SEC = int(os.environ.get("HEALTH_INTERVAL_SEC", "900"))
 JOB_MONITOR_INTERVAL_SEC = max(
     60, int(os.environ.get("HEALTH_JOB_MONITOR_INTERVAL_SEC", "300"))
 )
+# 20, а не 15: baseConstructor-воркер сам резюмит осиротевшую задачу через
+# BASE_CONSTRUCTOR_STALE_MINUTES=15 (docker-compose.prod.yml). Пока пороги были
+# равны, каждый деплой, заставший работающие задачи, давал ложную тревогу за
+# секунды до самоподбора — инцидент 11.08.2026, три задачи конструктора баз.
+# Порог монитора обязан быть заметно больше порога автоподбора.
 JOB_STUCK_MINUTES = max(
-    2, int(os.environ.get("HEALTH_JOB_STUCK_MIN", "15"))
+    2, int(os.environ.get("HEALTH_JOB_STUCK_MIN", "20"))
 )
 # Proxies are checked on their own slower cadence (default 5 min) so a flaky
 # test target can't spam the chat, and so we don't hammer the proxy pool every
@@ -121,8 +126,8 @@ _FAIL_COUNT: dict[str, int] = {}
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 
-DISK_TOTAL_GB = float(os.environ.get("HEALTH_DISK_TOTAL_GB", "50"))
-DISK_WARN_GB = float(os.environ.get("HEALTH_DISK_WARN_GB", "45"))
+DISK_TOTAL_GB = float(os.environ.get("HEALTH_DISK_TOTAL_GB", "80"))
+DISK_WARN_GB = float(os.environ.get("HEALTH_DISK_WARN_GB", "72"))
 
 # ── Per-container resource watchdog ──────────────────────────────────────────
 # Alert when a container uses >= HEALTH_CONTAINER_USAGE_PCT of ITS OWN cgroup
@@ -1076,7 +1081,8 @@ def _track(key: str, failed: bool) -> tuple[bool, bool]:
 #
 # One registry covers user-facing parsers and processing tools. Every five
 # minutes we look for:
-#   1) an active job whose DB heartbeat/progress has not moved for 15 minutes;
+#   1) an active job whose DB heartbeat/progress has not moved for
+#      JOB_STUCK_MINUTES (20 min — see the constant for why not 15);
 #   2) a newly failed job with a real error.
 #
 # Alerts are claimed in health_check_job_alerts, so a container restart or the
@@ -1192,8 +1198,13 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
         updated_column="updated_at", started_column=None,
     ),
     JobMonitorSpec(
+        # found_count/progress_note/progress_at обязательны в этом списке:
+        # stop_reason и result_users заполняются только в самом конце задачи, и
+        # по ним любой обход длиннее 15 минут выглядел зависшим. 10.08.2026 это
+        # дало ложную тревогу на живой задаче, которая нормально работала.
         "tg_parser_jobs", "Telegram-парсер", ("pending", "running"),
-        ("stop_reason", "result_users"), "portal-worker-tg-parser",
+        ("found_count", "progress_note", "progress_at", "stop_reason", "result_users"),
+        "portal-worker-tg-parser",
     ),
     JobMonitorSpec(
         "tg_scan_jobs", "Telegram-сканер", ("pending", "running"),
@@ -1315,7 +1326,7 @@ async def _fetch_active_job_rows(conn, spec: JobMonitorSpec):
 
 
 async def check_stuck_jobs() -> list[str]:
-    """Return one alert per parser job with no DB progress for 15 minutes."""
+    """Return one alert per parser job with no DB progress for JOB_STUCK_MINUTES."""
     if not DATABASE_URL:
         return []
     loop_now = asyncio.get_running_loop().time()
@@ -1353,7 +1364,7 @@ async def check_stuck_jobs() -> list[str]:
                 stalled_secs: int | None = None
 
                 # Queue/preparation states have no meaningful progress yet:
-                # created_at is the heartbeat and 15 minutes is enough to alert.
+                # created_at is the heartbeat and JOB_STUCK_MINUTES is enough.
                 if status in ("pending", "queued", "preparing", "planning", "uploading"):
                     stalled_secs = int(row["age_secs"] or 0)
                 elif spec.updated_column:
@@ -1950,13 +1961,20 @@ def _extract_chart_series(
     return timestamps, rates, conns
 
 
-def _apply_xticks(ax, timestamps: list[datetime], n: int) -> None:
-    if n <= 1:
+def _apply_xticks(ax, timestamps: list[datetime], n: int, max_ticks: int = 6) -> None:
+    """Evenly spread up to max_ticks labels between the first and last point.
+
+    Spacing the ticks by linear interpolation (instead of a fixed step plus a
+    forced last tick) guarantees the final label never lands next to its
+    neighbour, which used to make the two right-most times overlap.
+    """
+    if n <= 0:
         return
-    step = max(1, n // 5)
-    ticks = list(range(0, n, step))
-    if ticks[-1] != n - 1:
-        ticks.append(n - 1)
+    if n == 1:
+        ticks = [0]
+    else:
+        count = min(max_ticks, n)
+        ticks = sorted({round(i * (n - 1) / (count - 1)) for i in range(count)})
     ax.set_xticks(ticks)
     ax.set_xticklabels(
         [timestamps[i].strftime("%H:%M") for i in ticks],

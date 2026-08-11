@@ -2,7 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { sqliteBufferToSessionString } from '@/lib/telegram/sessionUtils';
+import { sqliteBufferToSessionString, authKeyFingerprint } from '@/lib/telegram/sessionUtils';
+import {
+  collectTdataCandidates,
+  splitExistingAccounts,
+  type TdataSkip,
+  type TdataError,
+  type TdataUpload,
+} from '@/lib/tgOutreach/tdataImport';
+import { loadAccountsForDedupe } from '@/lib/tgOutreach/existingAccounts';
 
 export const dynamic = 'force-dynamic';
 
@@ -40,6 +48,20 @@ function parseAccountJson(text: string): { session_name: string; api_id: number;
   return [parseAccountObj(data as Record<string, unknown>)];
 }
 
+/**
+ * Отдавать архивы по одному, а не складывать всю партию в память.
+ *
+ * Настоящий архив продавца весит килобайты, но оператор выбирает пачку
+ * целиком, а в полной папке Telegram Desktop лежат гигабайты кэша — и
+ * `unzipper` берёт архив только целым буфером. Читая по одному, держим в
+ * памяти текущий архив, а не сумму всех.
+ */
+async function* bufferOneByOne(files: File[]): AsyncGenerator<TdataUpload> {
+  for (const file of files) {
+    yield { name: file.name, buffer: Buffer.from(await file.arrayBuffer()) };
+  }
+}
+
 export async function POST(req: NextRequest) {
   return withToolTrace(
     { request: req, operation: 'tools.tg-outreach.accounts.bulk-files.post' },
@@ -54,8 +76,11 @@ export async function POST(req: NextRequest) {
       const files = formData.getAll('files') as File[];
       if (!files?.length) return jsonError('Добавьте файлы (JSON и/или .session)', 400);
 
+      const zipFiles = files.filter((f) => f.name.toLowerCase().endsWith('.zip'));
+      const plainFiles = files.filter((f) => !f.name.toLowerCase().endsWith('.zip'));
+
       const byBase = new Map<string, { json?: string; session?: ArrayBuffer }>();
-      for (const file of files) {
+      for (const file of plainFiles) {
         const name = file.name.trim();
         const base = basename(name);
         if (!base) continue;
@@ -85,44 +110,145 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      if (ordered.length === 0) return jsonError('Нет валидных JSON-файлов с аккаунтами', 400);
+      if (ordered.length === 0 && zipFiles.length === 0) {
+        return jsonError('Нет валидных JSON-файлов с аккаунтами', 400);
+      }
 
-      // Verify campaign belongs to the authenticated user before inserting
-      const { data: campaign, error: campaignError } = await auth.supabase
+      // Клиент для записи объявляем один раз здесь: ниже он же используется
+      // при проверке кампании, при вставке и при загрузке .session в хранилище.
+      const db = supabaseAdmin ?? auth.supabase;
+
+      // Кампания должна существовать — иначе вставка упадёт на внешнем ключе.
+      //
+      // Проверяем тем же клиентом, которым пишем. Раньше проверка шла под
+      // пользовательской ролью, а запись — под service_role: инструмент
+      // командный (20260807_0004 открыла запись всем сотрудникам), но если
+      // на окружении политики чтения отстают, аплоад упирался в отказ там,
+      // где сама вставка прошла бы. Доступ сотрудника уже проверен выше в
+      // authenticateRequest (isInternalUser), второй раз через RLS не нужен.
+      const { data: campaign } = await db
         .from('tg_outreach_campaigns')
         .select('id')
         .eq('id', campaignId)
-        .single();
+        .maybeSingle();
 
-      if (campaignError || !campaign) return jsonError('Кампания не найдена или нет доступа', 403);
+      // Прежний текст «не найдена или нет доступа» смешивал две разные
+      // причины, и по скриншоту нельзя было понять, какая из них сработала.
+      if (!campaign) {
+        return jsonError(
+          `Кампания ${campaignId} не найдена — возможно, её удалили. Обновите страницу и выберите кампанию заново.`,
+          404,
+        );
+      }
 
-      const insertRows = ordered.map(({ acc }) => ({
-        campaign_id: campaignId,
-        session_name: acc.session_name,
-        api_id: acc.api_id,
-        api_hash: acc.api_hash,
-        phone: acc.phone ?? '',
-        proxy_id: null,
-        session_data: '',
-        is_active: true,
-      }));
+      // Аккаунты из tdata: архив читается в память, к Telegram не подключаемся.
+      const tdataSkipped: TdataSkip[] = [];
+      const tdataErrors: TdataError[] = [];
+      let tdataRows: Array<Record<string, unknown>> = [];
+      let uncheckedExisting = 0;
 
-      const db = supabaseAdmin ?? auth.supabase;
-      const { data: inserted, error: insertError } = await db
-        .from('tg_outreach_accounts')
-        .insert(insertRows)
-        .select('id, session_name');
+      if (zipFiles.length) {
+        const collected = await collectTdataCandidates(bufferOneByOne(zipFiles));
+        tdataSkipped.push(...collected.skipped);
+        tdataErrors.push(...collected.errors);
 
-      if (insertError) return jsonError(insertError.message, 500);
+        if (collected.candidates.length) {
+          // Читаем всю таблицу, а не только строки с нужными tg_user_id.
+          // Фильтр по id вырезал бы ровно то, ради чего сверка и делается:
+          // у аккаунтов, залитых старым путём (.session), tg_user_id пуст,
+          // и найти их можно только по ключу авторизации из session_data.
+          const loaded = await loadAccountsForDedupe(db);
 
-      const ids = inserted ?? [];
+          // Провалившуюся сверку нельзя трактовать как «дублей нет»: тогда тот
+          // же ключ авторизации уедет в базу вторым аккаунтом, оба подключения
+          // получат AUTH_KEY_DUPLICATED, и Telegram отзовёт сессию — ровно то,
+          // от чего эта сверка защищает.
+          if ('error' in loaded) {
+            return jsonError(`Не удалось сверить аккаунты с базой: ${loaded.error}`, 500);
+          }
+          const existingRows = loaded.rows;
+
+          // Строки, невидимые обоим ключам сверки: telegram-id не выяснен, а
+          // строка сессии пуста — так остаётся после неудачной конвертации.
+          // Без этого числа «Пропущено 0» читается одинаково и когда дублей
+          // нет, и когда проверить было нечем.
+          uncheckedExisting = existingRows.filter(
+            (row) => row.tg_user_id === null && !authKeyFingerprint(row.session_data),
+          ).length;
+
+          const { fresh, skipped } = splitExistingAccounts(collected.candidates, existingRows);
+          tdataSkipped.push(...skipped);
+
+          tdataRows = fresh.map((candidate) => ({
+            campaign_id: campaignId,
+            session_name: candidate.name,
+            api_id: candidate.apiId,
+            api_hash: candidate.apiHash,
+            phone: '',
+            proxy_id: null,
+            session_data: candidate.sessionString,
+            tg_user_id: candidate.tgUserId,
+            is_active: true,
+          }));
+        }
+      }
+
+      // Порядок важен: строки из tdata идут в конец, поэтому первые
+      // ordered.length вставленных строк по-прежнему соответствуют парам
+      // .session/.json — по ним ниже раскладываются файлы в хранилище.
+      const insertRows = [
+        ...ordered.map(({ acc }) => ({
+          campaign_id: campaignId,
+          session_name: acc.session_name,
+          api_id: acc.api_id,
+          api_hash: acc.api_hash,
+          phone: acc.phone ?? '',
+          proxy_id: null,
+          session_data: '',
+          is_active: true,
+        })),
+        ...tdataRows,
+      ];
+
+      let inserted: Array<{ id: string; session_name: string }> = [];
+      if (insertRows.length) {
+        const { data, error: insertError } = await db
+          .from('tg_outreach_accounts')
+          .insert(insertRows)
+          .select('id, session_name');
+        if (insertError) return jsonError(insertError.message, 500);
+        inserted = data ?? [];
+      }
+
+      // Возврат строк в порядке вставки — поведение PostgreSQL, а не обещание
+      // API. Если он однажды разъедется, цикл ниже запишет session_file_path и
+      // результат конвертации .session поверх строки из tdata — и затрёт
+      // только что импортированный ключ, показав оператору успешную загрузку.
+      // Поэтому дальше идём, только если сходится и число строк, и имя каждой.
+      if (inserted.length !== insertRows.length) {
+        return jsonError(
+          `Вставлено ${inserted.length} строк из ${insertRows.length}; файлы сессий не разложены — проверьте список аккаунтов кампании`,
+          500,
+        );
+      }
+
       const sessionConvertErrors: Array<{ base: string; error: string }> = [];
       if (supabaseAdmin) {
         for (let i = 0; i < ordered.length; i++) {
-          const { base, sessionBuf } = ordered[i];
+          const { base, sessionBuf, acc } = ordered[i];
           if (!sessionBuf) continue;
-          const row = ids[i];
+          const row = inserted[i];
           if (!row) continue;
+          // Пишем .session только в ту строку, для которой этот файл и
+          // предназначен: update ниже затирает session_data, и промах по
+          // строке из tdata стоил бы импортированного ключа.
+          if (row.session_name !== acc.session_name) {
+            return jsonError(
+              `Порядок вставленных аккаунтов разошёлся с загруженными файлами (${base}): ` +
+              `ожидался «${acc.session_name}», в строке «${row.session_name}». Файлы сессий не разложены.`,
+              500,
+            );
+          }
           const path = `${campaignId}/${row.id}.session`;
           const { error: uploadErr } = await supabaseAdmin.storage
             .from(BUCKET)
@@ -158,8 +284,11 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json(
         {
-          items: inserted ?? [],
-          count: ids.length,
+          items: inserted,
+          count: inserted.length,
+          ...(tdataSkipped.length ? { skipped: tdataSkipped } : {}),
+          ...(tdataErrors.length ? { errors: tdataErrors } : {}),
+          ...(uncheckedExisting ? { unchecked_existing_accounts: uncheckedExisting } : {}),
           ...(sessionConvertErrors.length
             ? { session_convert_errors: sessionConvertErrors }
             : {}),

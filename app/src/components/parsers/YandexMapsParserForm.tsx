@@ -986,9 +986,15 @@ export function YandexMapsParserForm(props: {
 
           {/* Два высоких списка в ряд. На широком экране каждый рисует пункты
               в две колонки — на месте прежнего окошка на 400 пунктов видно
-              разом в несколько раз больше. */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div className="space-y-2">
+              разом в несколько раз больше.
+
+              Высота задаётся здесь, на ряду, а списки её добирают через
+              flex-1. Раньше высота стояла на каждом списке отдельно (34rem и
+              28rem) и подгонялась руками под то, что над ним: у сфер сверху
+              ещё поле ключевого слова. Любая правка сверху ломала выравнивание
+              — колонки переставали совпадать по нижней границе. */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 lg:h-[38rem] 2xl:h-[48rem]">
+            <div className="flex min-h-0 flex-col gap-2">
               <div className="flex items-center justify-between gap-3">
                 <label className="block text-sm font-medium text-gray-700">Города и регионы</label>
                 <div className="flex items-center gap-2">
@@ -1014,18 +1020,18 @@ export function YandexMapsParserForm(props: {
                 onChange={setSelectedCities}
                 groupValues={cityGroupValues}
                 columns={2}
-                className="h-[34rem] 2xl:h-[44rem] shadow-sm focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500"
+                className="min-h-[24rem] lg:min-h-0 lg:flex-1 shadow-sm focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500"
                 testId="city-picker"
                 searchPlaceholder="Поиск города или региона…"
                 emptyHint={dictLoading ? 'Загружаем список…' : 'Ничего не найдено.'}
               />
-              <p className="text-xs text-gray-500">
+              <p className="mt-auto text-xs text-gray-500">
                 Цифра справа — сколько организаций в базе. «Весь регион» в заголовке группы берёт регион одним значением:
                 так в выборку попадают и организации, привязанные к региону без города.
               </p>
             </div>
 
-            <div className="space-y-2">
+            <div className="flex min-h-0 flex-col gap-2">
               <div className="flex items-center justify-between gap-3">
                 <label className="block text-sm font-medium text-gray-700">Сфера (рубрики Яндекса)</label>
                 {selectedRubrics.length > 0 && (
@@ -1044,7 +1050,11 @@ export function YandexMapsParserForm(props: {
                 value={customKeyword}
                 onChange={(e) => setCustomKeyword(e.target.value)}
               />
-              {quickRubricRow}
+              {/* Быстрого выбора сферы здесь нет: те же четырнадцать рубрик
+                  стоят первыми в самом списке (он отсортирован по охвату), и
+                  плашки над ним только дублировали их, отъедая высоту. В
+                  кабинете клиента они остаются — там список короче и без них
+                  выбирать не с чего. */}
               <MultiSelect
                 options={rubricGroups}
                 value={selectedRubrics}
@@ -1054,12 +1064,12 @@ export function YandexMapsParserForm(props: {
                 sortModes={hasContactStats ? ['count', 'alpha', 'share'] : ['count', 'alpha']}
                 toolbarExtra={contactToggle}
                 maxBulkSelect={MAX_RUBRIC_BULK}
-                className={`h-[28rem] 2xl:h-[38rem] shadow-sm focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500 ${Boolean(customKeyword.trim()) ? 'bg-gray-50 opacity-60' : ''}`}
+                className={`min-h-[24rem] lg:min-h-0 lg:flex-1 shadow-sm focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500 ${Boolean(customKeyword.trim()) ? 'bg-gray-50 opacity-60' : ''}`}
                 testId="rubric-picker"
                 searchPlaceholder="Поиск сферы или рубрики…"
                 emptyHint={dictLoading ? 'Загружаем список…' : 'Ничего не найдено.'}
               />
-              <p className="text-xs text-gray-500">
+              <p className="mt-auto text-xs text-gray-500">
                 Своё ключевое слово отменяет выбор рубрик. Процент — доля организаций с телефоном, сайтом или почтой:
                 «только с контактами» убирает скамейки, площадки и парковки, которых в каталоге сотни тысяч.
               </p>

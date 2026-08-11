@@ -34,4 +34,14 @@ describe('detectSummaryChannel', () => {
   ])('classifies %p as %s', (fields, expected) => {
     expect(detectSummaryChannel(raw(fields))).toBe(expected);
   });
+
+  it('источник «портал (outreachos)» сознательно вне отчёта', () => {
+    expect(detectSummaryChannel(raw({ Источник: 'портал (outreachos)' }))).toBeNull();
+  });
+
+  it('исключённый источник сильнее пометки «Контур»=«Маркетинг»', () => {
+    expect(
+      detectSummaryChannel(raw({ Контур: 'Маркетинг', Источник: 'Портал (OutreachOS)' })),
+    ).toBeNull();
+  });
 });

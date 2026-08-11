@@ -32,41 +32,50 @@ export async function GET(req: NextRequest) {
   if (parsed.value === null) return NextResponse.json({ error: parsed.error }, { status: 400 });
   const { from, to, groupBy, channels } = parsed.value;
 
-  try {
-    // Привязки встреч тянем раньше сделок: список задействованных amo_deal_id
-    // идёт в fetchFirstSalesLeads как extraDealIds — иначе сделка, пришедшая
-    // раньше окна (встреча в июле у мартовской сделки), не попадёт в `leads`,
-    // и computeFirstSalesSeries не сможет резолвнуть её канал для встречи.
-    const meetingLinks = await fetchMeetingLinks(db, PIPELINE_ID, from, to);
-    const meetingDealIds = [...new Set(meetingLinks.map((m) => m.amo_deal_id))];
+  // Предыдущее окно считается отдельной выборкой: расширять текущее нельзя —
+  // ряд по времени раздуется вдвое и график покажет лишнее.
+  const prev = previousWindow(from, to);
 
-    const [leads, sourceMap] = await Promise.all([
-      fetchFirstSalesLeads(db, PIPELINE_ID, from, to, meetingDealIds),
+  // Привязки встреч тянутся раньше сделок: список задействованных amo_deal_id
+  // идёт в fetchFirstSalesLeads как extraDealIds — иначе сделка, пришедшая
+  // раньше окна (встреча в июле у мартовской сделки), не попадёт в `leads`,
+  // и computeFirstSalesSeries не сможет резолвнуть её канал для встречи.
+  // Внутри окна эта пара запросов последовательна по существу; два окна между
+  // собой — нет, и раньше они всё равно шли друг за другом (см. Promise.all
+  // ниже). Цена была заметной: каждое чтение `amo_lead_stage_dates_v`
+  // материализует историю событий целиком, фильтр туда не проваливается.
+  const loadWindow = async (windowFrom: Date, windowTo: Date) => {
+    const meetingLinks = await fetchMeetingLinks(db, PIPELINE_ID, windowFrom, windowTo);
+    const meetingDealIds = [...new Set(meetingLinks.map((m) => m.amo_deal_id))];
+    const leads = await fetchFirstSalesLeads(db, PIPELINE_ID, windowFrom, windowTo, meetingDealIds);
+    return { meetingLinks, leads };
+  };
+
+  try {
+    const [current, previous, sourceMap, lastRunRes] = await Promise.all([
+      loadWindow(from, to),
+      loadWindow(prev.from, prev.to),
       fetchSourceMap(db),
+      // Дата последнего успешного синка — на дашборд. Тихо устаревшие цифры
+      // хуже отсутствующих: пользователь должен видеть, что данные вчерашние.
+      db
+        .from('external_sync_runs')
+        .select('finished_at')
+        .eq('source', 'amo_events')
+        .eq('status', 'success')
+        .order('finished_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
     ]);
 
-    const result = computeFirstSalesSeries(leads, meetingLinks, sourceMap, from, to, groupBy, channels);
-
-    // Предыдущее окно тянем отдельным запросом: расширять текущее нельзя —
-    // ряд по времени раздуется вдвое и график покажет лишнее.
-    const prev = previousWindow(from, to);
-    const prevMeetingLinks = await fetchMeetingLinks(db, PIPELINE_ID, prev.from, prev.to);
-    const prevMeetingDealIds = [...new Set(prevMeetingLinks.map((m) => m.amo_deal_id))];
-    const prevLeads = await fetchFirstSalesLeads(db, PIPELINE_ID, prev.from, prev.to, prevMeetingDealIds);
+    const result = computeFirstSalesSeries(
+      current.leads, current.meetingLinks, sourceMap, from, to, groupBy, channels,
+    );
     const prevResult = computeFirstSalesSeries(
-      prevLeads, prevMeetingLinks, sourceMap, prev.from, prev.to, groupBy, channels,
+      previous.leads, previous.meetingLinks, sourceMap, prev.from, prev.to, groupBy, channels,
     );
 
-    // Дата последнего успешного синка — на дашборд. Тихо устаревшие цифры хуже
-    // отсутствующих: пользователь должен видеть, что данные вчерашние.
-    const { data: lastRun } = await db
-      .from('external_sync_runs')
-      .select('finished_at')
-      .eq('source', 'amo_events')
-      .eq('status', 'success')
-      .order('finished_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    const lastRun = lastRunRes.data;
 
     return NextResponse.json({
       ...result,

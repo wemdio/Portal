@@ -241,17 +241,6 @@ else
   echo "[drain] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — skipping Supabase pause flow"
 fi
 
-base_constructor_containers=(
-  "portal-worker-baseconstructor"
-  "portal-worker-baseconstructor-2"
-  "portal-worker-baseconstructor-3"
-)
-
-# Signal every replica before waiting on any one of them. Each replica stops
-# claiming jobs immediately, so its fast-handoff heartbeat cannot be reclaimed
-# by another old replica while the drain is still in progress.
-sudo -n docker kill --signal=SIGTERM "${base_constructor_containers[@]}" 2>/dev/null || true
-
 containers=(
   "portal-worker"
   "portal-worker-hh"
@@ -264,7 +253,6 @@ containers=(
   "portal-worker-aicaller"
   "portal-worker-tg-transcribe"
   "portal-worker-outreach"
-  "${base_constructor_containers[@]}"
 )
 
 echo "[drain] Stopping worker containers (timeout 15s each)..."
@@ -272,9 +260,36 @@ for c in "${containers[@]}"; do
   sudo -n docker stop -t 15 "$c" 2>/dev/null || true
 done
 
-# A progress callback may write one final fresh heartbeat after SIGTERM. Once
-# every BaseConstructor replica is stopped, age all remaining processing rows
-# so the new replicas resume them on their first poll instead of 15 minutes later.
+# BaseConstructor-реплики останавливаем отдельно и с коротким таймаутом.
+#
+# Зачем вообще (инцидент 11.08.2026, деплой 15:10): всё, чего нет в этом
+# скрипте, деплой убивает через force_rm_svc → `docker rm -f`, то есть
+# SIGKILL'ом без сигнала. Обработчик SIGTERM в app/worker/baseConstructor.ts
+# (ageRunningJobsForFastHandoff) при этом не выполняется, in-flight job'ы не
+# помечаются осиротевшими, и соседняя реплика подбирает их только по
+# BASE_CONSTRUCTOR_STALE_MINUTES — 15 минут простоя на ровном месте плюс
+# ложная тревога «Долго висит» в мониторе.
+#
+# Почему не в общий список выше: 15-секундный таймаут × 3 реплики = +45с к
+# каждому деплою, а ждать тут нечего. Задача НЕ должна доиграть до конца —
+# она резюмится с чекпоинта в другой реплике; хэндлеру нужно ~2 секунды
+# (UPDATE + повторный UPDATE через секунду). Останавливаем параллельно,
+# так весь шаг стоит ~5 секунд.
+bc_containers=(
+  "portal-worker-baseconstructor"
+  "portal-worker-baseconstructor-2"
+  "portal-worker-baseconstructor-3"
+)
+
+echo "[drain] Stopping base-constructor replicas (timeout 5s, in parallel)..."
+for c in "${bc_containers[@]}"; do
+  sudo -n docker stop -t 5 "$c" 2>/dev/null || true &
+done
+wait
+
+# The worker-side shutdown guard normally ages each processing job before exit.
+# Keep a deployment-side backstop after every replica has stopped so a failed
+# signal handler or database request cannot leave a fresh heartbeat behind.
 if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
   base_constructor_handoff_code="$(patch_rows "base_constructor_jobs" "status=eq.processing" '{"started_at":"1970-01-01T00:00:00Z"}')"
   if [[ "$base_constructor_handoff_code" =~ ^(200|204)$ ]]; then
