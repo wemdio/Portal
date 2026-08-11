@@ -132,6 +132,34 @@ describe('readTdataArchive', () => {
     expect(found[0].name).toBe('246210089');
   });
 
+  it.each([
+    ['tdata (2)', 'копия от windows со скобками'],
+    ['tdata(3)', 'без пробела'],
+    ['tdata 2', 'без скобок'],
+    ['tdata_2', 'через подчёркивание'],
+  ])('берёт имя от архива, если папка названа «%s» (%s)', async (folder) => {
+    // Windows приписывает дубликату « (2)», и папка перестаёт быть «просто
+    // tdata». Оператору такое имя не говорит ничего: в отчёте о пропуске он
+    // видел «tdata (2)» и не мог найти аккаунт в списке.
+    const dir = await makeTdataDir(777);
+    dirs.push(dir);
+    const zip = await makeZip([{ name: folder, dir }]);
+
+    const found = await readTdataArchive(zip, '246210089.zip');
+
+    expect(found[0].name).toBe('246210089');
+  });
+
+  it('не принимает осмысленное имя за копию tdata', async () => {
+    const dir = await makeTdataDir(888);
+    dirs.push(dir);
+    const zip = await makeZip([{ name: 'tdata_backup_ivan/tdata', dir }]);
+
+    const found = await readTdataArchive(zip, 'партия.zip');
+
+    expect(found[0].name).toBe('tdata_backup_ivan');
+  });
+
   it('разбирает архив сразу с несколькими аккаунтами', async () => {
     const first = await makeTdataDir(101);
     const second = await makeTdataDir(202);
