@@ -21,8 +21,6 @@ export const MAX_POSITION = 2_147_483_647;
 export const ACTIVITY_PLAN_PROJECTION =
   'id, plan_month, periodicity, activity, format, planned_date, planned_time, schedule_note, note, budget_amount, budget_note, status, position, created_by, created_at, updated_at';
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
 export type ActivityPlanStatus = 'planned' | 'completed' | 'cancelled';
 
 export type ActivityPlanRow = {
@@ -140,9 +138,8 @@ export async function authenticateActivityPlanRequest(
   }
 }
 
-export function isValidUuid(value: string): boolean {
-  return UUID_RE.test(value);
-}
+export { isValidUuid } from '@/lib/apiValidation';
+export { currentMoscowDate } from '@/lib/calendarDate';
 
 export function isValidPlanMonth(value: string): boolean {
   if (!/^\d{4}-\d{2}$/.test(value)) return false;
@@ -440,17 +437,6 @@ export function activityPlanPeriod(month: string) {
     previousMonth: shiftPlanMonth(month, -1),
     nextMonth: shiftPlanMonth(month, 1),
   };
-}
-
-export function currentMoscowDate(): string {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Europe/Moscow',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(new Date());
-  const values = new Map(parts.map((part) => [part.type, part.value]));
-  return `${values.get('year')}-${values.get('month')}-${values.get('day')}`;
 }
 
 export function activityPlanSummary(rows: ActivityPlanRow[], asOf: string) {
