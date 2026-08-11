@@ -22,11 +22,98 @@ function proxyLog(msg: string) {
   console.log(`[HttpConnectSocket] ${msg}`);
 }
 
-interface HttpProxy {
+export interface HttpProxy {
   ip: string;
   port: number;
   username?: string;
   password?: string;
+}
+
+/**
+ * Прокси ответил по HTTP, но туннель открывать отказался.
+ *
+ * Отдельный класс нужен проверке прокси: код ответа — единственное, что
+ * отличает «прокси не пускает нас» (407 — учётка или белый список) от «прокси
+ * работает, но до Telegram не дотянулся» (502/504). Для оператора это два
+ * разных вывода, и путать их нельзя.
+ */
+export class HttpConnectRejectedError extends Error {
+  constructor(public readonly statusCode: number, public readonly statusLine: string) {
+    super(`HTTP CONNECT failed: ${statusLine}`);
+    this.name = 'HttpConnectRejectedError';
+  }
+}
+
+/**
+ * Открыть TCP-туннель до destIp:destPort через HTTP CONNECT.
+ *
+ * Вынесено из HttpConnectSocket без изменений поведения: тем же кодом
+ * пользуется проверка прокси, только со своим (коротким) таймаутом — оператор
+ * ждёт ответа на экране, а не держит долгоживущее соединение аккаунта.
+ */
+export function openHttpConnectTunnel(
+  proxy: HttpProxy,
+  destIp: string,
+  destPort: number,
+  timeoutMs: number = CONNECT_TIMEOUT_MS,
+): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(proxy.port, proxy.ip, () => {
+      let connectReq = `CONNECT ${destIp}:${destPort} HTTP/1.1\r\nHost: ${destIp}:${destPort}\r\n`;
+      if (proxy.username) {
+        const creds = Buffer.from(`${proxy.username}:${proxy.password ?? ''}`).toString('base64');
+        connectReq += `Proxy-Authorization: Basic ${creds}\r\n`;
+      }
+      connectReq += '\r\n';
+      proxyLog(`sending CONNECT ${destIp}:${destPort} to ${proxy.ip}:${proxy.port}`);
+      socket.write(connectReq);
+    });
+
+    let responseBuffer = '';
+    const onData = (chunk: Buffer) => {
+      responseBuffer += chunk.toString();
+      const headerEnd = responseBuffer.indexOf('\r\n\r\n');
+      if (headerEnd === -1) return;
+
+      socket.removeListener('data', onData);
+
+      const statusLine = responseBuffer.split('\r\n')[0];
+      const allHeaders = responseBuffer.slice(0, headerEnd);
+      const statusCode = parseInt(statusLine.split(' ')[1], 10);
+
+      proxyLog(`CONNECT response: ${statusCode} | headers: ${allHeaders.replace(/\r\n/g, ' | ')}`);
+
+      if (statusCode === 200) {
+        // Снимаем idle-таймаут: он должен покрывать ТОЛЬКО фазу установки
+        // туннеля. Дальше сокет уходит в gramJS под долгоживущее
+        // MTProto-соединение, где паузы без трафика 15-60с (между пингами
+        // и апдейтами) — норма. Если таймаут оставить, он убивал бы живое
+        // соединение каждые N секунд → постоянные реконнекты в логах.
+        socket.setTimeout(0);
+        const remaining = Buffer.from(responseBuffer.slice(headerEnd + 4));
+        if (remaining.length > 0) {
+          proxyLog(`CONNECT had ${remaining.length} trailing bytes`);
+          socket.unshift(remaining);
+        }
+        resolve(socket);
+      } else {
+        proxyLog(`CONNECT FAILED: ${allHeaders}`);
+        socket.destroy();
+        reject(new HttpConnectRejectedError(statusCode, statusLine));
+      }
+    };
+
+    socket.on('data', onData);
+    socket.on('error', (err) => {
+      proxyLog(`CONNECT socket error: ${err.message}`);
+      reject(err);
+    });
+    socket.setTimeout(timeoutMs, () => {
+      proxyLog(`CONNECT timeout after ${timeoutMs}ms to ${destIp}:${destPort}`);
+      socket.destroy();
+      reject(new Error('HTTP CONNECT timeout'));
+    });
+  });
 }
 
 export class HttpConnectSocket {
@@ -87,7 +174,7 @@ export class HttpConnectSocket {
 
     if (this.proxy) {
       proxyLog(`connecting via CONNECT to ${ip}:${targetPort} (gramJS asked :${port}) through ${this.proxy.ip}:${this.proxy.port}`);
-      this.client = await this._httpConnect(this.proxy, ip, targetPort);
+      this.client = await openHttpConnectTunnel(this.proxy, ip, targetPort);
       proxyLog(`CONNECT tunnel established to ${ip}:${targetPort}`);
     } else {
       this.client = new net.Socket();
@@ -139,65 +226,5 @@ export class HttpConnectSocket {
 
   toString(): string {
     return 'HttpConnectSocket';
-  }
-
-  private _httpConnect(proxy: HttpProxy, destIp: string, destPort: number): Promise<net.Socket> {
-    return new Promise((resolve, reject) => {
-      const socket = net.createConnection(proxy.port, proxy.ip, () => {
-        let connectReq = `CONNECT ${destIp}:${destPort} HTTP/1.1\r\nHost: ${destIp}:${destPort}\r\n`;
-        if (proxy.username) {
-          const creds = Buffer.from(`${proxy.username}:${proxy.password ?? ''}`).toString('base64');
-          connectReq += `Proxy-Authorization: Basic ${creds}\r\n`;
-        }
-        connectReq += '\r\n';
-        proxyLog(`sending CONNECT ${destIp}:${destPort} to ${proxy.ip}:${proxy.port}`);
-        socket.write(connectReq);
-      });
-
-      let responseBuffer = '';
-      const onData = (chunk: Buffer) => {
-        responseBuffer += chunk.toString();
-        const headerEnd = responseBuffer.indexOf('\r\n\r\n');
-        if (headerEnd === -1) return;
-
-        socket.removeListener('data', onData);
-
-        const statusLine = responseBuffer.split('\r\n')[0];
-        const allHeaders = responseBuffer.slice(0, headerEnd);
-        const statusCode = parseInt(statusLine.split(' ')[1], 10);
-
-        proxyLog(`CONNECT response: ${statusCode} | headers: ${allHeaders.replace(/\r\n/g, ' | ')}`);
-
-        if (statusCode === 200) {
-          // Снимаем idle-таймаут: он должен покрывать ТОЛЬКО фазу установки
-          // туннеля. Дальше сокет уходит в gramJS под долгоживущее
-          // MTProto-соединение, где паузы без трафика 15-60с (между пингами
-          // и апдейтами) — норма. Если таймаут оставить, он убивал бы живое
-          // соединение каждые N секунд → постоянные реконнекты в логах.
-          socket.setTimeout(0);
-          const remaining = Buffer.from(responseBuffer.slice(headerEnd + 4));
-          if (remaining.length > 0) {
-            proxyLog(`CONNECT had ${remaining.length} trailing bytes`);
-            socket.unshift(remaining);
-          }
-          resolve(socket);
-        } else {
-          proxyLog(`CONNECT FAILED: ${allHeaders}`);
-          socket.destroy();
-          reject(new Error(`HTTP CONNECT failed: ${statusLine}`));
-        }
-      };
-
-      socket.on('data', onData);
-      socket.on('error', (err) => {
-        proxyLog(`CONNECT socket error: ${err.message}`);
-        reject(err);
-      });
-      socket.setTimeout(CONNECT_TIMEOUT_MS, () => {
-        proxyLog(`CONNECT timeout after ${CONNECT_TIMEOUT_MS}ms to ${destIp}:${destPort}`);
-        socket.destroy();
-        reject(new Error('HTTP CONNECT timeout'));
-      });
-    });
   }
 }
