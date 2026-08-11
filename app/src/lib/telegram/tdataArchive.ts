@@ -125,6 +125,15 @@ function dirname(p: string): string {
 }
 
 /**
+ * Папка, которая ничего не говорит об аккаунте: сама `tdata` и её копии,
+ * которым Windows приписал номер — `tdata (2)`, `tdata(3)`, `tdata 2`.
+ *
+ * Раньше отсекалась только точная `tdata`, и оператор получил в отчёте
+ * «tdata (2)» — имя, по которому аккаунт в списке не найти.
+ */
+const UNINFORMATIVE_DIR = /^tdata(?:[\s_-]*\(?\d+\)?)?$/i;
+
+/**
  * Имя аккаунта — та папка пути, которая его называет.
  *
  * Обычно это владелец папки `tdata`, но часть продавцов кладёт служебные файлы
@@ -132,11 +141,13 @@ function dirname(p: string): string {
  * `246210089/` из одного архива оба назвались бы именем архива и стали в списке
  * неразличимы. У tdata-строки пустой `phone`, а имя пользователя неизвестно до
  * «Проверить», так что имя — единственная зацепка оператора.
+ *
+ * Идём от самой глубокой папки наружу и пропускаем служебные: так `tdata (2)`
+ * и `tdata (2)/tdata` одинаково дотягиваются до имени архива.
  */
 function accountName(tdataDir: string, archiveName: string): string {
   const parts = tdataDir.split('/').filter(Boolean);
-  const last = parts[parts.length - 1] ?? '';
-  const own = last === 'tdata' ? parts[parts.length - 2] ?? '' : last;
+  const own = parts.reverse().find((part) => !UNINFORMATIVE_DIR.test(part)) ?? '';
   return own || archiveName.replace(/\.zip$/i, '') || 'tdata';
 }
 

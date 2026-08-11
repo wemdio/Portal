@@ -153,8 +153,52 @@ describe('loadAccountsForDedupe', () => {
     ]);
 
     expect(expectRows(await loadAccountsForDedupe(reader))).toEqual([
-      { tg_user_id: null, campaign_name: null, session_data: 'sess-a' },
-      { tg_user_id: 777, campaign_name: 'ATOL', session_data: null },
+      {
+        tg_user_id: null,
+        campaign_name: null,
+        session_data: 'sess-a',
+        session_name: null,
+        phone: null,
+        tg_username: null,
+        first_name: null,
+        last_name: null,
+      },
+      {
+        tg_user_id: 777,
+        campaign_name: 'ATOL',
+        session_data: null,
+        session_name: null,
+        phone: null,
+        tg_username: null,
+        first_name: null,
+        last_name: null,
+      },
     ]);
+  });
+
+  it('доносит опознавательные поля до сверки', async () => {
+    // Без них сообщение о пропуске называет кампанию, но не аккаунт, и
+    // оператору нечего искать в списке.
+    const { reader } = makeReader([{
+      tg_user_id: 111,
+      session_data: 'sess-a',
+      session_name: 'acc_17',
+      phone: '+79991234567',
+      tg_username: 'ivanp',
+      first_name: 'Иван',
+      last_name: 'Петров',
+      tg_outreach_campaigns: { name: 'Profitsol 3.0' },
+    }]);
+
+    expect(expectRows(await loadAccountsForDedupe(reader))[0]).toEqual({
+      tg_user_id: 111,
+      campaign_name: 'Profitsol 3.0',
+      session_data: 'sess-a',
+      session_name: 'acc_17',
+      phone: '+79991234567',
+      tg_username: 'ivanp',
+      first_name: 'Иван',
+      last_name: 'Петров',
+    });
   });
 });

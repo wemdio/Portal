@@ -31,8 +31,70 @@ describe('splitExistingAccounts', () => {
 
     expect(result.fresh.map((c) => c.name)).toEqual(['b']);
     expect(result.skipped).toEqual([
-      { name: 'a', reason: 'уже загружен в кампанию «ATOL»' },
+      { name: 'a', reason: 'уже загружен в кампанию «ATOL» (совпал telegram-id)' },
     ]);
+  });
+
+  it('называет аккаунт, а не только кампанию', () => {
+    // Оператор ищет строку в списке кампании: без имени и телефона искать не
+    // по чему, а строк там десятки.
+    const result = splitExistingAccounts(
+      [candidate('из-архива', 111)],
+      [{
+        tg_user_id: 111,
+        campaign_name: 'Profitsol 3.0',
+        session_name: 'acc_17',
+        first_name: 'Иван',
+        last_name: 'Петров',
+        tg_username: 'ivanp',
+        phone: '+79991234567',
+      }],
+    );
+
+    expect(result.skipped[0].reason).toBe(
+      'уже загружен в кампанию «Profitsol 3.0» — acc_17, Иван Петров, @ivanp, +79991234567 '
+      + '(совпал telegram-id)',
+    );
+  });
+
+  it('не оставляет пустых запятых, когда полей нет', () => {
+    // У строки из tdata телефона нет до первой проверки, имени — до «Проверить».
+    const result = splitExistingAccounts(
+      [candidate('из-архива', 111)],
+      [{
+        tg_user_id: 111,
+        campaign_name: 'ATOL',
+        session_name: 'acc_17',
+        phone: '',
+        first_name: '',
+        last_name: '',
+        tg_username: null,
+      }],
+    );
+
+    expect(result.skipped[0].reason).toBe(
+      'уже загружен в кампанию «ATOL» — acc_17 (совпал telegram-id)',
+    );
+  });
+
+  it('не оставляет висящего тире, когда об аккаунте ничего не известно', () => {
+    const result = splitExistingAccounts(
+      [candidate('из-архива', 111)],
+      [{ tg_user_id: 111, campaign_name: 'ATOL' }],
+    );
+
+    expect(result.skipped[0].reason).toBe('уже загружен в кампанию «ATOL» (совпал telegram-id)');
+  });
+
+  it('не задваивает собачку в имени пользователя', () => {
+    const result = splitExistingAccounts(
+      [candidate('из-архива', 111)],
+      [{ tg_user_id: 111, campaign_name: null, tg_username: '@ivanp' }],
+    );
+
+    expect(result.skipped[0].reason).toBe(
+      'уже загружен в другую кампанию — @ivanp (совпал telegram-id)',
+    );
   });
 
   it('без названия кампании всё равно не пускает дубль', () => {
@@ -42,7 +104,7 @@ describe('splitExistingAccounts', () => {
     );
 
     expect(result.fresh).toEqual([]);
-    expect(result.skipped[0].reason).toBe('уже загружен в другую кампанию');
+    expect(result.skipped[0].reason).toBe('уже загружен в другую кампанию (совпал telegram-id)');
   });
 
   it('на пустой базе пропускает всех вперёд', () => {
@@ -58,12 +120,21 @@ describe('splitExistingAccounts', () => {
     // Тот же аккаунт из tdata несёт другой адрес DC, но тот же ключ.
     const result = splitExistingAccounts(
       [withSession('из-архива', 777, session(5))],
-      [{ tg_user_id: null, campaign_name: 'ATOL', session_data: session(5, '149.154.167.50') }],
+      [{
+        tg_user_id: null,
+        campaign_name: 'ATOL',
+        session_data: session(5, '149.154.167.50'),
+        session_name: 'acc_04',
+        phone: '+79990000004',
+      }],
     );
 
     expect(result.fresh).toEqual([]);
     expect(result.skipped).toEqual([
-      { name: 'из-архива', reason: 'эта же сессия уже загружена в кампанию «ATOL» — совпал ключ входа' },
+      {
+        name: 'из-архива',
+        reason: 'уже загружен в кампанию «ATOL» — acc_04, +79990000004 (совпал ключ входа)',
+      },
     ]);
   });
 
@@ -74,9 +145,7 @@ describe('splitExistingAccounts', () => {
     );
 
     expect(result.fresh).toEqual([]);
-    expect(result.skipped[0].reason).toBe(
-      'эта же сессия уже загружена в другую кампанию — совпал ключ входа',
-    );
+    expect(result.skipped[0].reason).toBe('уже загружен в другую кампанию (совпал ключ входа)');
   });
 
   it('пустой session_data ничего не проглатывает', () => {
@@ -99,6 +168,6 @@ describe('splitExistingAccounts', () => {
     );
 
     expect(result.fresh).toEqual([]);
-    expect(result.skipped[0].reason).toBe('уже загружен в кампанию «ATOL»');
+    expect(result.skipped[0].reason).toBe('уже загружен в кампанию «ATOL» (совпал telegram-id)');
   });
 });
