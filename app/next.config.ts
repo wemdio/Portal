@@ -39,8 +39,22 @@ const nextConfig: NextConfig = {
       './node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs',
       './node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs',
     ],
+    // Пакет внешний (см. serverExternalPackages), и трассировщик утаскивает в
+    // образ только ESM-половину — CJS-точки входа не оказывается, а сервер
+    // standalone грузит модули через require. Забираем пакеты целиком, иначе
+    // загрузка архивов падает не на сборке, а в рантайме на проде.
+    '/api/tools/tg-outreach/accounts/bulk-files': [
+      './node_modules/@mtcute/**/*',
+      './node_modules/@fuman/**/*',
+    ],
   },
-  serverExternalPackages: ['pdf-parse', 'pdfjs-dist', 'dockerode', 'sqlite3'],
+  // @mtcute/convert читает tdata (загрузка TG-аккаунтов архивами). Его модуль
+  // крипты делает `await import('@mtcute/node/utils.js')` в ветке «крипта не
+  // передана» — мы её не используем, всегда передаём свою реализацию на
+  // node:crypto, чтобы не тащить в образ нативный better-sqlite3. Но сборщик
+  // разрешает импорты статически и падает на ненайденном пакете, поэтому
+  // пакет оставляем внешним: он подключается из node_modules в рантайме.
+  serverExternalPackages: ['pdf-parse', 'pdfjs-dist', 'dockerode', 'sqlite3', '@mtcute/convert'],
 };
 
 export default nextConfig;
