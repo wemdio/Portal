@@ -11,6 +11,7 @@
 
 import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { toTwoGisRubricGroups as toTwoGisRubricGroupsShared } from '@/lib/twoGis/rubricGroups';
 import type { TwoGisRubricGroup } from '@/lib/twoGis/types';
 
 /** Шаги конструктора баз, которые НИКОГДА не допускаем в прогон этого пайплайна. */
@@ -86,20 +87,12 @@ export interface GisSignalSegment {
 
 /**
  * Конвертация рубрикатора сегмента (jsonb-форма из БД) в TwoGisRubricGroup
- * для фильтров iterateTwoGisCards.
+ * для фильтров iterateTwoGisCards. Реализация — общая (twoGis/rubricGroups),
+ * её же использует OutreachOS top-up; здесь сохранён экспорт с прежней
+ * сигнатурой (GisSignalRubricGroup[]) для существующих потребителей.
  */
 export function toTwoGisRubricGroups(groups: GisSignalRubricGroup[]): TwoGisRubricGroup[] {
-  return (groups ?? []).map((g) => {
-    const included = (g.includedSubcategories ?? []).filter(Boolean);
-    if (included.length > 0) {
-      return { category: g.category, mode: 'some', subcategories: included };
-    }
-    const excluded = (g.excludedSubcategories ?? []).filter(Boolean);
-    if (excluded.length > 0) {
-      return { category: g.category, mode: 'allExcept', excludedSubcategories: excluded };
-    }
-    return { category: g.category, mode: 'all' };
-  });
+  return toTwoGisRubricGroupsShared(groups);
 }
 
 /**
