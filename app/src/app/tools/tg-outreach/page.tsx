@@ -286,11 +286,39 @@ function SettingsTab({ campaign, onSave }: {
       {/* Telegram */}
       <section className="space-y-4">
         <h3 className="text-sm font-semibold text-gray-800">Telegram</h3>
+        {/* Названия сверены с кодом: каждое поле подписано тем, что оно делает
+            на самом деле, а не тем, как называется переменная. Три подписи были
+            неверны и вводили в заблуждение — история в комментариях ниже. */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <FieldNum label="Лимит пересылки" value={telegram.forward_limit} onChange={v => setTG('forward_limit', v)} />
-          <FieldNum label="Лимит истории" value={telegram.history_limit} onChange={v => setTG('history_limit', v)} />
-          <FieldNum label="Смещение часового пояса" value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
-          <FieldNum label="Пауза аккаунта (часов)" value={telegram.account_cooldown_hours} onChange={v => setTG('account_cooldown_hours', v)} />
+          <div className="space-y-1">
+            <FieldNum label="Сообщений в пересылке" value={telegram.forward_limit} onChange={v => setTG('forward_limit', v)} />
+            <p className="text-[10px] text-gray-400">
+              Сколько последних сообщений диалога уйдёт в чат-приёмник при пересылке лида.
+            </p>
+          </div>
+          <div className="space-y-1">
+            <FieldNum label="Сообщений в контексте GPT" value={telegram.history_limit} onChange={v => setTG('history_limit', v)} />
+            <p className="text-[10px] text-gray-400">
+              Сколько последних сообщений диалога читает модель, прежде чем ответить.
+            </p>
+          </div>
+          <div className="space-y-1">
+            <FieldNum label="Часовой пояс (UTC±)" value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
+            <p className="text-[10px] text-gray-400">
+              Влияет только на «Периоды сна». 3 — Москва.
+            </p>
+          </div>
+          {/* Было «Пауза аккаунта (часов)» — читалось как штатная пауза между
+              заходами и создавало ложное чувство, что нагрузка размазана по
+              суткам. На деле пауза включается ТОЛЬКО после того, как Telegram
+              ограничил аккаунт (FloodError/Frozen), см. campaignLoop:1507. */}
+          <div className="space-y-1">
+            <FieldNum label="Пауза после ограничения (часов)" value={telegram.account_cooldown_hours} onChange={v => setTG('account_cooldown_hours', v)} />
+            <p className="text-[10px] text-gray-400">
+              Сколько аккаунт отдыхает после того, как Telegram ограничил его. Это наказание
+              постфактум, а не размеренная работа — отправки по дню оно не разносит.
+            </p>
+          </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="space-y-1">
@@ -299,24 +327,60 @@ function SettingsTab({ campaign, onSave }: {
               value={telegram.first_touch_per_account_per_day ?? 0}
               onChange={v => setTG('first_touch_per_account_per_day', v)}
             />
+            {/* Прежняя подсказка предлагала «16 аккаунтов по 20» как пример.
+                В связке с паузой между действиями в 5–10 сек это означает 20
+                новых чатов с незнакомыми людьми за три минуты — на молодом
+                аккаунте почти верное ограничение. Пример заменён на лестницу. */}
             <p className="text-[10px] text-gray-400">
-              Ноль — рассылка первых сообщений выключена. Считайте от числа аккаунтов:
-              16 аккаунтов по 20 — это 320 сообщений в день, база на 300 контактов уйдёт за сутки.
-              Начинайте с малого.
+              Ноль — рассылка первых сообщений выключена. Норма считается на каждый аккаунт:
+              18 аккаунтов по 3 — это 54 сообщения в день. Свежие аккаунты начинайте с 2–3 и
+              поднимайте на ступень раз в 2–3 дня, только если в логах не было ограничений.
+              Всю норму аккаунт отправляет одной очередью — разносите её полем
+              «Пауза между действиями».
             </p>
           </div>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <RangeField label="Задержка до прочтения" value={telegram.pre_read_delay_range} onChange={v => setTG('pre_read_delay_range', v)} />
-          <RangeField label="Задержка до ответа" value={telegram.read_reply_delay_range} onChange={v => setTG('read_reply_delay_range', v)} />
-          <RangeField label="Задержка между аккаунтами" value={telegram.account_loop_delay_range} onChange={v => setTG('account_loop_delay_range', v)} />
-          <RangeField label="Окно ожидания диалога" value={telegram.dialog_wait_window_range} onChange={v => setTG('dialog_wait_window_range', v)} />
+          <div className="space-y-1">
+            <RangeField label="Пауза перед прочтением (сек)" value={telegram.pre_read_delay_range} onChange={v => setTG('pre_read_delay_range', v)} />
+            <p className="text-[10px] text-gray-400">
+              Сколько ждём, прежде чем отметить входящее прочитанным.
+            </p>
+          </div>
+          {/* Было «Задержка до ответа» — подпись покрывала лишь одно из четырёх
+              применений. Тот же диапазон задаёт паузу между ПЕРВЫМИ сообщениями
+              внутри дневной нормы (firstTouch/send.ts, gapMs), а при 5–10 сек
+              аккаунт пишет всю норму незнакомым людям за полминуты — самый
+              короткий путь к ограничению. Об этом обязана говорить подпись. */}
+          <div className="space-y-1">
+            <RangeField label="Пауза между действиями (сек)" value={telegram.read_reply_delay_range} onChange={v => setTG('read_reply_delay_range', v)} />
+            <p className="text-[10px] text-gray-400">
+              Перед ответом, перед follow-up и <span className="text-amber-600">между первыми сообщениями</span>.
+              5–10 сек означает, что вся дневная норма уйдёт очередью за полминуты. Для холодной
+              рассылки ставьте 60–300.
+            </p>
+          </div>
+          <div className="space-y-1">
+            <RangeField label="Пауза между аккаунтами (сек)" value={telegram.account_loop_delay_range} onChange={v => setTG('account_loop_delay_range', v)} />
+            <p className="text-[10px] text-gray-400">
+              Разбежка между заходами разных аккаунтов, чтобы они не работали гурьбой.
+            </p>
+          </div>
           {/* Пауза между полными кругами по всем аккаунтам. Раньше была
               захардкожена в 30 секунд, что на «горячих» mobile-pool IP
               слишком быстро (Telegram продолжал отвечать silent throttle).
               Сейчас вынесено в настройки с дефолтом [300, 600] сек. */}
-          <RangeField label="Пауза между кругами" value={telegram.cycle_delay_range ?? [300, 600]} onChange={v => setTG('cycle_delay_range', v)} />
+          <div className="space-y-1">
+            <RangeField label="Пауза между кругами (сек)" value={telegram.cycle_delay_range ?? [300, 600]} onChange={v => setTG('cycle_delay_range', v)} />
+            <p className="text-[10px] text-gray-400">
+              Между полными обходами всех аккаунтов.
+            </p>
+          </div>
         </div>
+        {/* «Окно ожидания диалога» (dialog_wait_window_range) убрано с экрана:
+            ключ есть в TelegramSettings и в дефолтах, но НИ ОДНА строка кода его
+            не читает — поле ничего не делало, а операторы его крутили. Значение
+            в БД оставлено как есть, чтобы не трогать сохранённые кампании. */}
         <Field label="Периоды сна" value={telegram.sleep_periods.join(', ')} onChange={v => setTG('sleep_periods', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="00:00-08:00, 19:00-00:00" />
         <div className="flex flex-wrap items-center gap-4">
           <label className="flex items-center gap-2 text-xs text-gray-700">
