@@ -123,8 +123,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
             type="button"
             onClick={() => void onResearch()}
             disabled={researchBusy || researchActive}
-            className="neu-pill ml-auto mb-2 px-3 py-1 text-[11px] font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
-            style={{ color: 'var(--cp-paper-mute)' }}
+            className="ds-btn-ghost ml-auto mb-2 inline-flex items-center gap-1.5 text-[11px]"
           >
             {researchBusy ? <EngSpinner className="h-3 w-3" /> : <RefreshCw className="h-3 w-3" />}
             Re-run research
@@ -139,8 +138,8 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
               return (
                 <div
                   key={key}
-                  className="rounded-lg p-3"
-                  style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)' }}
+                  className="rounded-md p-3"
+                  style={{ border: '1px solid var(--cp-divider)' }}
                 >
                   <dt className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--cp-text-l)' }}>
                     {label}
@@ -178,8 +177,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
               rows={4}
               maxLength={3000}
               placeholder="What you sell, to whom, and why clients pick you. Used above the site profile when the site is thin or JS-heavy."
-              className="neu-pill w-full px-3 py-2 text-sm bg-transparent outline-none resize-y"
-              style={{ color: 'var(--cp-paper)' }}
+              className="ds-input w-full resize-y"
             />
           </label>
           <label className="flex flex-col gap-1">
@@ -191,8 +189,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
               onChange={(e) => setOffer(e.target.value)}
               rows={2}
               placeholder="e.g. 4–6 qualified meetings per month with US clinic owners, pay-per-meeting"
-              className="neu-pill w-full px-3 py-2 text-sm bg-transparent outline-none resize-y"
-              style={{ color: 'var(--cp-paper)' }}
+              className="ds-input w-full resize-y"
             />
           </label>
           <label className="flex flex-col gap-1">
@@ -204,8 +201,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
               onChange={(e) => setStyle(e.target.value)}
               rows={4}
               placeholder="Paste an email whose tone the generator should copy"
-              className="neu-pill w-full px-3 py-2 text-sm bg-transparent outline-none resize-y"
-              style={{ color: 'var(--cp-paper)' }}
+              className="ds-input w-full resize-y"
             />
           </label>
           <label className="flex flex-col gap-1">
@@ -217,8 +213,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
               onChange={(e) => setSignature(e.target.value)}
               rows={2}
               placeholder="Jane Doe, Acme, acme.com"
-              className="neu-pill w-full px-3 py-2 text-sm bg-transparent outline-none resize-y"
-              style={{ color: 'var(--cp-paper)' }}
+              className="ds-input w-full resize-y"
             />
           </label>
           <div className="flex items-center gap-2">
@@ -226,8 +221,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
               type="button"
               onClick={() => void onSave()}
               disabled={saving}
-              className="neu-pill active px-4 py-2 text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
-              style={{ color: 'var(--cp-paper)' }}
+              className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
             >
               {saving ? <EngSpinner className="h-3 w-3" /> : <Save className="h-3 w-3" />}
               Save overrides

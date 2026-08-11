@@ -122,7 +122,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
       </div>
 
       {error && !detail ? (
-        <div className="neu-card p-5 text-sm" style={{ color: 'var(--cp-red)' }}>
+        <div className="ds-card p-5 text-sm" style={{ color: 'var(--cp-red)' }}>
           {error}
         </div>
       ) : !detail ? (
@@ -149,7 +149,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
                 type="button"
                 onClick={() => void onCancel()}
                 disabled={cancelling}
-                className="neu-pill ml-auto px-3 py-1.5 text-[11px] font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
+                className="ds-btn-secondary ml-auto inline-flex items-center gap-1.5 text-[11px]"
                 style={{ color: 'var(--cp-red)' }}
                 title="Stop all active project jobs (research, chains, base collect, templates)"
               >
@@ -160,7 +160,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
           </header>
 
           {project?.error && (
-            <div className="neu-card p-3 text-xs" style={{ color: 'var(--cp-red)' }}>
+            <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-red)' }}>
               Last error: {project.error}
             </div>
           )}
@@ -171,8 +171,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
                 key={s.id}
                 type="button"
                 onClick={() => setStep(s.id)}
-                className={`neu-pill px-3 py-1.5 text-xs font-semibold ${step === s.id ? 'active' : ''}`}
-                style={{ color: step === s.id ? 'var(--cp-paper)' : 'var(--cp-text-m)' }}
+                className={`ds-nav-item ${step === s.id ? 'active' : ''}`}
                 aria-current={step === s.id ? 'step' : undefined}
               >
                 {String(s.id).padStart(2, '0')} · {s.label}

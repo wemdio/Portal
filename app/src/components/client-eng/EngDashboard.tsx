@@ -2,8 +2,11 @@
 
 /**
  * Command Center (/client/eng/dashboard): общий экран по всем ENG-проектам
- * клиента — этап каждой вертикали, статистика за сегодня, следующий авто-добор
- * (countdown до 03:20 UTC, тикает локально), активные джобы и лента событий.
+ * клиента. IA карточки вертикали — «карта пайплайна»: вертикальный список
+ * стадий человеческими именами (Research → Letters → Lead base → Email
+ * enrichment → Analysis → Template → Launch, у live-вертикали + Daily refill)
+ * с маркерами done/current/future и короткими доказательствами цифрами из
+ * агрегата; строка «next: …» внизу — следующий шаг конвейера.
  *
  * Данные — один агрегат GET /api/client/eng/dashboard, опрос раз в 15с
  * (в скрытой вкладке сервер не дёргаем); countdown и анимации — чисто
@@ -16,6 +19,7 @@ import type { Route } from 'next';
 import {
   AlertTriangle,
   ArrowRight,
+  Check,
   CheckCircle2,
   Database,
   ExternalLink,
@@ -37,21 +41,20 @@ import { EngCard, EngSpinner } from './ui';
 
 const POLL_INTERVAL_MS = 15000;
 
-/* ── Визуальная модель этапов по статусному словарю системы: amber — работа
-   идёт (пульс), paper-mute — этап ждёт следующего шага, green — вертикаль live ── */
+/* ── Статус вертикали: dot + uppercase mono-tag (status-tag из DESIGN.md).
+   Цвет — только как данные: amber — работа идёт или нужен шаг клиента,
+   grey — этап пройден, конвейер ждёт следующего, green — вертикаль live. ── */
 
-const STAGE_META: Record<EngDashStage, { color: string; pulse: boolean }> = {
-  research: { color: 'var(--cp-amber)', pulse: true },
-  letters: { color: 'var(--cp-paper-mute)', pulse: false },
-  collecting: { color: 'var(--cp-amber)', pulse: true },
-  construct: { color: 'var(--cp-amber)', pulse: true },
-  analyzing: { color: 'var(--cp-amber)', pulse: true },
-  analyzed: { color: 'var(--cp-paper-mute)', pulse: false },
-  template: { color: 'var(--cp-paper-mute)', pulse: false },
-  launched: { color: 'var(--cp-green)', pulse: false },
+const STAGE_STATUS: Record<EngDashStage, { tag: string; dot: string; text: string }> = {
+  research: { tag: 'research', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
+  letters: { tag: 'letters', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
+  collecting: { tag: 'collecting', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
+  construct: { tag: 'enrichment', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
+  analyzing: { tag: 'analysis', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
+  analyzed: { tag: 'analyzed', dot: 'var(--cp-grey)', text: 'var(--cp-paper-mute)' },
+  template: { tag: 'ready to launch', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
+  launched: { tag: 'live', dot: 'var(--cp-green)', text: 'var(--cp-green)' },
 };
-
-const DOT_LABELS = ['research', 'letters', 'base', 'template', 'launched'] as const;
 
 const JOB_STAGE_LABELS: Record<string, string> = {
   site_profile: 'profiling the site',
@@ -137,7 +140,7 @@ function RefillCountdown({ nextRunAt }: { nextRunAt: string }) {
   const leftMs = Math.max(0, target - nowTs);
   if (leftMs <= 0) {
     return (
-      <span className="ds-mono text-xl font-semibold" style={{ color: 'var(--cp-amber)' }}>
+      <span className="ds-mono text-base font-medium" style={{ color: 'var(--cp-amber)' }}>
         starting…
       </span>
     );
@@ -148,76 +151,257 @@ function RefillCountdown({ nextRunAt }: { nextRunAt: string }) {
   const s = totalSec % 60;
   const pad = (n: number) => String(n).padStart(2, '0');
   return (
-    <span className="ds-mono text-xl font-semibold tabular-nums" style={{ color: 'var(--cp-paper)' }}>
+    <span className="ds-mono text-base font-medium tabular-nums" style={{ color: 'var(--cp-paper)' }}>
       {pad(h)}:{pad(m)}:{pad(s)}
     </span>
   );
 }
 
-/* ── Пилюля этапа с цветом и пульсом активных ── */
+/* ── Карта пайплайна вертикали ── */
 
-function StagePill({ stage }: { stage: EngDashStage }) {
-  const meta = STAGE_META[stage];
-  return (
-    <span
-      className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-      style={{ color: meta.color, border: `1px solid ${meta.color}` }}
-    >
-      <span
-        className="inline-block h-1.5 w-1.5 rounded-full"
-        style={{
-          background: meta.color,
-          animation: meta.pulse ? 'eng-dash-pulse 1.6s ease-in-out infinite' : undefined,
-        }}
-      />
-      {stage}
-    </span>
-  );
+/** Человеческие имена стадий конвейера (без внутреннего жаргона этапов). */
+interface PipeRow {
+  key: string;
+  label: string;
+  state: 'done' | 'current' | 'future';
+  /** Маркер текущей строки: amber — работа идёт, green — живой цикл (refill). */
+  marker?: 'amber' | 'green';
+  /** Короткое доказательство цифрами; только то, что есть в агрегате. */
+  evidence?: React.ReactNode;
 }
 
-/* ── Мини-прогресс из 5 точек ── */
+/** Индекс текущей стадии в пайплайне (0 Research … 6 Launch). */
+function currentIndexFor(vertical: EngDashboardVertical): number {
+  switch (vertical.stage) {
+    case 'research':
+      return 0;
+    case 'letters':
+      // Цепочка уже готова (вторая точка агрегата) — фронт работы сместился
+      // на сбор базы; сами письма при этом показываем пройденными.
+      return vertical.dots[1] === true ? 2 : 1;
+    case 'collecting':
+      return 2;
+    case 'construct':
+      return 3;
+    case 'analyzing':
+      return 4;
+    case 'analyzed':
+      return 5;
+    case 'template':
+      return 6;
+    case 'launched':
+      return 6;
+  }
+}
 
-function DotsProgress({ dots, stage }: { dots: boolean[]; stage: EngDashStage }) {
-  const activeIdx = dots.findIndex((d) => !d);
-  // Пройденные точки — paper (у live-вертикали — green), текущая — amber
-  // (пульс только у этапов с живой работой), будущие — hairline-серые.
-  const doneColor = stage === 'launched' ? 'var(--cp-green)' : 'var(--cp-paper)';
-  const activeColor = stage === 'launched' ? 'var(--cp-green)' : 'var(--cp-amber)';
-  const pulse = STAGE_META[stage].pulse;
+/** Строка «next: …» — следующий шаг конвейера из текущей стадии. */
+function nextLineFor(stage: EngDashStage, refillEnabled: boolean): string {
+  switch (stage) {
+    case 'research':
+      return 'next: verticals review';
+    case 'letters':
+      return 'next: base collection';
+    case 'collecting':
+      return 'next: email enrichment (after collection)';
+    case 'construct':
+      return 'next: analysis (after enrichment)';
+    case 'analyzing':
+      return 'next: template';
+    case 'analyzed':
+      return 'next: 85/15 template';
+    case 'template':
+      return 'next: launch from Review & Launch';
+    case 'launched':
+      return refillEnabled ? 'next: daily refill 03:20 UTC' : 'next: daily refill — not configured';
+  }
+}
+
+function buildPipelineRows(
+  vertical: EngDashboardVertical,
+  job: EngDashboardActiveJob | undefined,
+  refillEnabled: boolean,
+): PipeRow[] {
+  const s = vertical.stats;
+  const fmt = (n: number) => n.toLocaleString('en-US');
+  const launched = vertical.stage === 'launched';
+  const cur = currentIndexFor(vertical);
+  const stateOf = (i: number): PipeRow['state'] =>
+    launched || i < cur ? 'done' : i === cur ? 'current' : 'future';
+
+  // ETA — только из данных: done/total активной джобы → «~N% done». Если
+  // stageDetail уже несёт дробь («task 1/2», «87/147 valid»), не дублируем.
+  const pct =
+    job?.progress && (job.progress.total ?? 0) > 0
+      ? Math.round(((job.progress.done ?? 0) / (job.progress.total ?? 1)) * 100)
+      : null;
+  const withEta = (text: string): string =>
+    pct !== null && !text.includes('/') ? `${text} · ~${pct}% done` : text;
+
+  const rows: PipeRow[] = [
+    {
+      key: 'research',
+      label: 'Research',
+      state: stateOf(0),
+      // У research почти нет своих цифр — done-строка честно остаётся пустой.
+      evidence: vertical.stage === 'research' ? withEta(vertical.stageDetail) : '',
+    },
+    {
+      key: 'letters',
+      label: 'Letters',
+      state: stateOf(1),
+      // Счётчика писем в агрегате нет — показываем только живую строку этапа.
+      evidence:
+        vertical.stage === 'letters' && vertical.dots[1] !== true
+          ? withEta(vertical.stageDetail)
+          : '',
+    },
+    {
+      key: 'lead-base',
+      label: 'Lead base',
+      state: stateOf(2),
+      evidence:
+        vertical.stage === 'collecting'
+          ? withEta(vertical.stageDetail)
+          : stateOf(2) === 'done' && s.companies > 0
+            ? `${fmt(s.companies)} companies`
+            : '',
+    },
+    {
+      key: 'enrichment',
+      label: 'Email enrichment',
+      state: stateOf(3),
+      evidence:
+        stateOf(3) !== 'future' && s.emails_found > 0
+          ? `${fmt(s.valid_count)} / ${fmt(s.emails_found)} valid`
+          : vertical.stage === 'construct'
+            ? 'finding & validating emails…'
+            : '',
+    },
+    {
+      key: 'analysis',
+      label: 'Analysis',
+      state: stateOf(4),
+      evidence:
+        vertical.stage === 'analyzing'
+          ? withEta(vertical.stageDetail)
+          : stateOf(4) === 'done' && s.companies > 0
+            ? `analyzed ${fmt(s.companies)} companies`
+            : '',
+    },
+    {
+      key: 'template',
+      label: 'Template',
+      state: stateOf(5),
+      evidence:
+        stateOf(5) === 'done'
+          ? 'template ready'
+          : vertical.stage === 'analyzed' && job?.stage === 'template'
+            ? withEta('building template…')
+            : '',
+    },
+    {
+      key: 'launch',
+      label: 'Launch',
+      state: stateOf(6),
+      evidence: launched ? (
+        <>
+          {s.leads_launched > 0 ? `${fmt(s.leads_launched)} leads` : ''}
+          {s.leads_launched > 0 && vertical.launch?.campaign_url ? ' · ' : ''}
+          {vertical.launch?.campaign_url && (
+            <a
+              href={vertical.launch.campaign_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 hover:underline"
+              style={{ color: 'var(--cp-paper)' }}
+            >
+              {vertical.launch.campaign_name || 'campaign'}
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
+        </>
+      ) : (
+        ''
+      ),
+    },
+  ];
+
+  if (launched) {
+    const refillRunning = job?.stage === 'base_collect';
+    rows.push({
+      key: 'refill',
+      label: 'Daily refill',
+      state: 'current',
+      marker: refillRunning ? 'amber' : 'green',
+      evidence: refillRunning
+        ? withEta('collecting refill…')
+        : `${s.appended_today > 0 ? `+${fmt(s.appended_today)} today · ` : ''}${
+            refillEnabled ? 'next 03:20 UTC' : 'not configured'
+          }`,
+    });
+  }
+
+  return rows;
+}
+
+function PipelineRows({ rows }: { rows: PipeRow[] }) {
   return (
-    <div className="flex items-start gap-0" role="img" aria-label={`Stage: ${stage}`}>
-      {DOT_LABELS.map((label, i) => {
-        const done = dots[i] === true;
-        const active = i === activeIdx;
-        const dotColor = done ? doneColor : active ? activeColor : 'var(--cp-divider-strong)';
-        return (
-          <div key={label} className="flex items-start">
-            {i > 0 && (
-              <span
-                className="mt-[5px] inline-block h-px w-3 sm:w-4"
-                style={{ background: dots[i - 1] ? doneColor : 'var(--cp-divider-strong)' }}
-              />
-            )}
-            <span className="flex flex-col items-center gap-1">
-              <span
-                className="inline-block h-2 w-2 rounded-full"
-                title={label}
-                style={{
-                  background: dotColor,
-                  animation: active && pulse ? 'eng-dash-pulse 1.6s ease-in-out infinite' : undefined,
-                }}
-              />
-              <span
-                className="text-[8px] uppercase tracking-wide"
-                style={{ color: done || active ? 'var(--cp-text-m)' : 'var(--cp-text-l)' }}
-              >
-                {label}
-              </span>
+    <ol className="flex flex-col">
+      {rows.map((row, i) => (
+        <li key={row.key} className="flex items-stretch gap-2.5">
+          {/* Маркер стадии + hairline-коннектор к следующей строке */}
+          <span className="flex w-3 shrink-0 flex-col items-center">
+            <span className="mt-[4px] flex h-3 w-3 items-center justify-center">
+              {row.state === 'done' ? (
+                <Check className="h-3 w-3" style={{ color: 'var(--cp-paper-mute)' }} aria-hidden />
+              ) : row.state === 'current' ? (
+                <span
+                  className="inline-block h-1.5 w-1.5 rounded-full"
+                  style={{
+                    background: row.marker === 'green' ? 'var(--cp-green)' : 'var(--cp-amber)',
+                    animation:
+                      row.marker === 'green' ? undefined : 'eng-dash-pulse 1.6s ease-in-out infinite',
+                  }}
+                />
+              ) : (
+                <span
+                  className="inline-block h-1.5 w-1.5 rounded-full"
+                  style={{ border: '1px solid var(--cp-divider-strong)' }}
+                />
+              )}
             </span>
-          </div>
-        );
-      })}
-    </div>
+            {i < rows.length - 1 && (
+              <span className="w-px flex-1" style={{ background: 'var(--cp-divider)' }} />
+            )}
+          </span>
+          <span className="flex min-w-0 flex-1 items-baseline justify-between gap-3 pb-2">
+            <span
+              className={`text-xs ${row.state === 'current' ? 'font-medium' : ''}`}
+              style={{
+                color:
+                  row.state === 'done'
+                    ? 'var(--cp-paper-mute)'
+                    : row.state === 'current'
+                      ? 'var(--cp-paper)'
+                      : 'var(--cp-paper-faint)',
+              }}
+            >
+              {row.label}
+            </span>
+            {row.evidence ? (
+              <span
+                className="ds-mono text-right text-[11px]"
+                style={{
+                  color: row.state === 'current' ? 'var(--cp-paper-mute)' : 'var(--cp-paper-faint)',
+                }}
+              >
+                {row.evidence}
+              </span>
+            ) : null}
+          </span>
+        </li>
+      ))}
+    </ol>
   );
 }
 
@@ -244,7 +428,7 @@ const EVENT_ICON: Record<EngDashboardEvent['type'], { Icon: typeof Mail; color: 
   template_ready: { Icon: Wand2, color: 'var(--cp-paper-faint)' },
   launched: { Icon: Rocket, color: 'var(--cp-green)' },
   refill_appended: { Icon: RefreshCw, color: 'var(--cp-green)' },
-  refill_empty: { Icon: RefreshCw, color: 'var(--cp-text-l)' },
+  refill_empty: { Icon: RefreshCw, color: 'var(--cp-paper-faint)' },
   failed: { Icon: AlertTriangle, color: 'var(--cp-red)' },
 };
 
@@ -259,27 +443,16 @@ function EventRow({ event, withBorder }: { event: EngDashboardEvent; withBorder:
       <span className="min-w-0 flex-1 truncate text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
         {event.text}
       </span>
-      <span className="shrink-0 text-[10px] ds-mono" style={{ color: 'var(--cp-text-l)' }}>
+      <span className="shrink-0 text-[10px] ds-mono" style={{ color: 'var(--cp-paper-faint)' }}>
         {relTime(event.at)}
       </span>
     </li>
   );
 }
 
-/* ── Полоска «Right now»: активные джобы ── */
+/* ── «Right now»: активные джобы строками в ds-card ── */
 
-function activeJobText(job: EngDashboardActiveJob, verticalName: string): string {
-  const label = JOB_STAGE_LABELS[job.stage] ?? job.stage;
-  const progress =
-    job.progress && (job.progress.total ?? 0) > 0
-      ? ` ${job.progress.done ?? 0}/${job.progress.total}${job.progress.label ? ` · ${job.progress.label}` : ''}`
-      : job.progress?.label
-        ? ` · ${job.progress.label}`
-        : '';
-  return `${label}${progress}${verticalName ? ` · ${verticalName}` : ''}`;
-}
-
-function ActiveJobsStrip({
+function ActiveJobsCard({
   jobs,
   verticalNames,
 }: {
@@ -287,113 +460,132 @@ function ActiveJobsStrip({
   verticalNames: Map<string, string>;
 }) {
   return (
-    <div
-      className="neu-card px-4 py-2.5 flex items-center gap-2.5 text-xs"
-      style={{ animation: 'eng-dash-in 0.5s ease-out both' }}
-    >
-      <span
-        className="inline-block h-2 w-2 shrink-0 rounded-full"
-        style={{
-          background: 'var(--cp-amber)',
-          animation: 'eng-dash-pulse 1.2s ease-in-out infinite',
-        }}
-      />
-      <span className="font-semibold shrink-0" style={{ color: 'var(--cp-amber)' }}>
-        Right now
-      </span>
-      <span className="min-w-0 truncate" style={{ color: 'var(--cp-text-m)' }}>
-        {jobs.map((j) => activeJobText(j, j.vertical_id ? (verticalNames.get(j.vertical_id) ?? '') : '')).join('  ·  ')}
-      </span>
-    </div>
+    <section aria-label="Right now">
+      <div className="ds-card px-4 py-3" style={{ animation: 'eng-dash-in 0.5s ease-out both' }}>
+        <div className="flex items-center gap-2">
+          <span
+            className="inline-block h-1.5 w-1.5 shrink-0 rounded-full"
+            style={{ background: 'var(--cp-amber)', animation: 'eng-dash-pulse 1.2s ease-in-out infinite' }}
+          />
+          <span className="ds-eyebrow" style={{ color: 'var(--cp-amber)' }}>
+            Right now
+          </span>
+        </div>
+        <ul className="mt-1 flex flex-col">
+          {jobs.map((job, i) => {
+            const label = JOB_STAGE_LABELS[job.stage] ?? job.stage;
+            const verticalName = job.vertical_id ? (verticalNames.get(job.vertical_id) ?? '') : '';
+            const progress =
+              job.progress && (job.progress.total ?? 0) > 0
+                ? `${job.progress.done ?? 0}/${job.progress.total}${job.progress.label ? ` · ${job.progress.label}` : ''}`
+                : (job.progress?.label ?? '');
+            return (
+              <li
+                key={job.id}
+                className="flex items-baseline gap-3 py-1.5"
+                style={i > 0 ? { borderTop: '1px solid var(--cp-divider)' } : undefined}
+              >
+                <span className="min-w-0 truncate text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
+                  {label}
+                  {verticalName ? ` · ${verticalName}` : ''}
+                </span>
+                {progress && (
+                  <span
+                    className="ml-auto shrink-0 ds-mono text-[11px]"
+                    style={{ color: 'var(--cp-paper-faint)' }}
+                  >
+                    {progress}
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    </section>
   );
 }
 
-/* ── Карточка вертикали ── */
+/* ── Карточка вертикали: заголовок + карта пайплайна + next + действия ── */
 
 function VerticalCard({
   vertical,
   index,
   showProject,
   projectName,
+  activeJob,
+  refillEnabled,
 }: {
   vertical: EngDashboardVertical;
   index: number;
   showProject: boolean;
   projectName: string;
+  activeJob: EngDashboardActiveJob | undefined;
+  refillEnabled: boolean;
 }) {
   const step = wizardStepFor(vertical.stage);
   const launched = vertical.stage === 'launched';
+  const status = STAGE_STATUS[vertical.stage];
+  const rows = buildPipelineRows(vertical, activeJob, refillEnabled);
+
   return (
     <div
-      className="neu-card p-4 flex flex-col gap-2.5 transition-colors hover:border-[var(--cp-divider-strong)]"
+      data-testid="vertical-card"
+      className="ds-card p-4 sm:p-5 flex flex-col gap-3"
       style={{ animation: `eng-dash-in 0.5s ease-out ${index * 70}ms both` }}
     >
       <div className="flex items-center gap-2">
         <span className="truncate text-sm font-semibold" style={{ color: 'var(--cp-paper)' }}>
           {vertical.name}
         </span>
-        <span className="ml-auto shrink-0">
-          <StagePill stage={vertical.stage} />
+        <span className="ds-status-tag ml-auto shrink-0" style={{ color: status.text }}>
+          <span className="ds-status-dot" style={{ background: status.dot }} />
+          {status.tag}
         </span>
       </div>
-      {showProject && (
-        <div className="truncate text-[10px] uppercase tracking-wide" style={{ color: 'var(--cp-text-l)' }}>
-          {projectName}
-        </div>
-      )}
+      {showProject && <div className="ds-eyebrow truncate">{projectName}</div>}
 
-      <DotsProgress dots={vertical.dots} stage={vertical.stage} />
-
-      <div className="text-[11px]" style={{ color: STAGE_META[vertical.stage].color }}>
-        {vertical.stageDetail}
-      </div>
-
-      {(() => {
-        const s = vertical.stats;
-        const hasAny =
-          s.companies > 0 || s.emails_found > 0 || s.valid_count > 0 ||
-          s.appended_today > 0 || s.leads_launched > 0;
-        // Все нули (ранняя вертикаль) — строка статистики только шумит.
-        if (!hasAny) return null;
-        return (
-          <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] ds-mono" style={{ color: 'var(--cp-text-m)' }}>
-            <span>{s.companies.toLocaleString('en-US')} companies</span>
-            <span>{s.emails_found.toLocaleString('en-US')} emails</span>
-            <span>{s.valid_count.toLocaleString('en-US')} valid</span>
-            {s.appended_today > 0 && (
-              <span style={{ color: 'var(--cp-green)' }}>+{s.appended_today.toLocaleString('en-US')} today</span>
-            )}
-            {s.leads_launched > 0 && (
-              <span>{s.leads_launched.toLocaleString('en-US')} launched</span>
-            )}
-          </div>
-        );
-      })()}
+      <PipelineRows rows={rows} />
 
       {(vertical.forecast || vertical.actual) && (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] ds-mono" style={{ color: 'var(--cp-text-l)' }}>
+        <div
+          className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] ds-mono"
+          style={{ color: 'var(--cp-paper-faint)' }}
+        >
           {vertical.forecast && (
             <span>
-              forecast <b style={{ color: 'var(--cp-text-m)' }}>{vertical.forecast.pct}%</b>
+              forecast <b style={{ color: 'var(--cp-paper-mute)' }}>{vertical.forecast.pct}%</b>
             </span>
           )}
           {vertical.actual && (
             <span>
-              actual <b style={{ color: vertical.actual.reply_pct > 0 ? 'var(--cp-green)' : 'var(--cp-text-m)' }}>{vertical.actual.reply_pct}%</b>
-              {' '}replies · {vertical.actual.sent.toLocaleString('en-US')} sent
+              actual{' '}
+              <b
+                style={{
+                  color: vertical.actual.reply_pct > 0 ? 'var(--cp-green)' : 'var(--cp-paper-mute)',
+                }}
+              >
+                {vertical.actual.reply_pct}%
+              </b>{' '}
+              replies · {vertical.actual.sent.toLocaleString('en-US')} sent
             </span>
           )}
         </div>
       )}
 
-      <div className="mt-auto flex items-center gap-2 pt-1">
+      <div className="pt-2.5" style={{ borderTop: '1px solid var(--cp-divider)' }}>
+        <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
+          {nextLineFor(vertical.stage, refillEnabled)}
+        </span>
+      </div>
+
+      <div className="mt-auto flex items-center gap-2">
         {vertical.launch?.campaign_url && (
           <a
             href={vertical.launch.campaign_url}
             target="_blank"
             rel="noopener noreferrer"
-            className="neu-pill px-3 py-1.5 text-[11px] font-semibold inline-flex items-center gap-1.5"
-            style={{ color: 'var(--cp-green)' }}
+            className="ds-btn-ghost inline-flex items-center gap-1.5"
           >
             <ExternalLink className="h-3 w-3" />
             Open in Instantly
@@ -402,8 +594,7 @@ function VerticalCard({
         <Link
           href={`/client/eng/projects/${vertical.project_id}?step=${step}` as Route}
           prefetch={false}
-          className="neu-pill px-3 py-1.5 text-[11px] font-semibold inline-flex items-center gap-1.5 ml-auto"
-          style={{ color: 'var(--cp-paper)' }}
+          className="ds-btn-secondary ml-auto inline-flex items-center gap-1.5"
         >
           {launched ? 'View' : 'Continue'}
           <ArrowRight className="h-3 w-3" />
@@ -455,8 +646,16 @@ export function EngDashboard() {
   const activeJobs = data?.activeJobs ?? [];
   const today = data?.today ?? { appended: 0, valid: 0, collected: 0 };
   const autoRefill = data?.autoRefill;
+  const refillEnabled = autoRefill?.enabled === true;
   const projectNames = new Map(projects.map((p) => [p.id, p.name]));
   const verticalNames = new Map(verticals.map((v) => [v.id, v.name]));
+  // Джоба вертикали для ETA/живых подписей (свежие первыми — берём первую).
+  const jobByVertical = new Map<string, EngDashboardActiveJob>();
+  for (const job of activeJobs) {
+    if (job.vertical_id && !jobByVertical.has(job.vertical_id)) {
+      jobByVertical.set(job.vertical_id, job);
+    }
+  }
 
   return (
     <div className="eng-dash flex flex-col gap-5">
@@ -473,15 +672,14 @@ export function EngDashboard() {
           <h1 className="text-xl sm:text-2xl font-bold m-0" style={{ color: 'var(--cp-paper)' }}>
             Command Center
           </h1>
-          <p className="mt-1 text-sm" style={{ color: 'var(--cp-text-m)' }}>
+          <p className="mt-1 text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
             Live view across all your verticals — refreshed every 15s.
           </p>
         </div>
         <Link
           href={'/client/eng?list=1' as Route}
           prefetch={false}
-          className="neu-pill ml-auto px-3 py-1.5 text-xs font-semibold inline-flex items-center gap-1.5"
-          style={{ color: 'var(--cp-paper)' }}
+          className="ds-btn-ghost ml-auto inline-flex items-center gap-1.5"
         >
           <LayoutGrid className="h-3.5 w-3.5" />
           All projects
@@ -489,81 +687,86 @@ export function EngDashboard() {
       </header>
 
       {error && !data ? (
-        <div className="neu-card p-5 text-sm" style={{ color: 'var(--cp-red)' }}>
+        <div className="ds-card p-5 text-sm" style={{ color: 'var(--cp-red)' }}>
           {error}
         </div>
       ) : !data ? (
-        <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--cp-text-m)' }}>
+        <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
           <EngSpinner /> Loading the command center…
         </div>
       ) : (
         <>
-          {/* Статистика за сегодня + авто-добор */}
-          <section className="grid grid-cols-2 gap-3 xl:grid-cols-4" aria-label="Today">
-            {(
-              [
-                // Цвет — только со смыслом: долив в кампании — заработанный
-                // плюс (green); валидация и сбор — нейтральные счётчики (paper).
-                { label: 'Appended today', value: today.appended, color: 'var(--cp-green)', hint: 'leads added to campaigns' },
-                { label: 'Valid today', value: today.valid, color: 'var(--cp-paper)', hint: 'emails passed validation' },
-                { label: 'Collected today', value: today.collected, color: 'var(--cp-paper)', hint: 'new companies harvested' },
-              ] as const
-            ).map((card, i) => (
+          {/* 01 → Today: три тихих счётчика + авто-добор */}
+          <section aria-label="Today">
+            <h2 className="ds-eyebrow mb-2">01 → Today</h2>
+            <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+              {(
+                [
+                  // Счётчики — тихие mono-числа + label, без hero-метрик;
+                  // цвет только paper, статусной окраски у агрегатов дня нет.
+                  { label: 'Collected today', value: today.collected, hint: 'new companies harvested' },
+                  { label: 'Valid today', value: today.valid, hint: 'emails passed validation' },
+                  { label: 'Appended today', value: today.appended, hint: 'leads added to campaigns' },
+                ] as const
+              ).map((card, i) => (
+                <div
+                  key={card.label}
+                  className="ds-card p-4 flex flex-col gap-1"
+                  style={{ animation: `eng-dash-in 0.5s ease-out ${i * 70}ms both` }}
+                >
+                  <span className="ds-eyebrow">{card.label}</span>
+                  <CountUp
+                    value={card.value}
+                    style={{ fontSize: '1.125rem', fontWeight: 500, color: 'var(--cp-paper)' }}
+                  />
+                  <span className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
+                    {card.hint}
+                  </span>
+                </div>
+              ))}
               <div
-                key={card.label}
-                className="neu-card p-4 sm:p-5 flex flex-col gap-1"
-                style={{ animation: `eng-dash-in 0.5s ease-out ${i * 70}ms both` }}
+                className="ds-card p-4 flex flex-col gap-1"
+                style={{ animation: 'eng-dash-in 0.5s ease-out 210ms both' }}
               >
-                <span className="ds-eyebrow">{card.label}</span>
-                <CountUp value={card.value} style={{ fontSize: '1.25rem', fontWeight: 600, color: card.color }} />
-                <span className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
-                  {card.hint}
-                </span>
+                <span className="ds-eyebrow">Auto-refill</span>
+                {autoRefill?.enabled ? (
+                  <>
+                    <RefillCountdown nextRunAt={autoRefill.next_run_at} />
+                    <span className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
+                      next run 03:20 UTC · daily cap {autoRefill.daily_cap.toLocaleString('en-US')}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="ds-mono text-base font-medium" style={{ color: 'var(--cp-paper-faint)' }}>
+                      off
+                    </span>
+                    <span className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
+                      daily refill is not configured
+                    </span>
+                  </>
+                )}
               </div>
-            ))}
-            <div
-              className="neu-card p-4 sm:p-5 flex flex-col gap-1"
-              style={{ animation: 'eng-dash-in 0.5s ease-out 210ms both' }}
-            >
-              <span className="ds-eyebrow">Auto-refill</span>
-              {autoRefill?.enabled ? (
-                <>
-                  <RefillCountdown nextRunAt={autoRefill.next_run_at} />
-                  <span className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
-                    until the next run · daily cap {autoRefill.daily_cap.toLocaleString('en-US')} · 03:20 UTC
-                  </span>
-                </>
-              ) : (
-                <>
-                  <span className="text-sm font-semibold" style={{ color: 'var(--cp-text-l)' }}>
-                    Off
-                  </span>
-                  <span className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
-                    daily refill is not configured yet
-                  </span>
-                </>
-              )}
             </div>
           </section>
 
-          {activeJobs.length > 0 && <ActiveJobsStrip jobs={activeJobs} verticalNames={verticalNames} />}
+          {activeJobs.length > 0 && <ActiveJobsCard jobs={activeJobs} verticalNames={verticalNames} />}
 
-          {/* Вертикали */}
+          {/* 02 → Verticals */}
           {verticals.length === 0 ? (
             <EngCard className="flex flex-col items-center gap-3 py-10 text-center">
-              <Rocket className="h-8 w-8" style={{ color: 'var(--cp-text-l)' }} />
+              <Rocket className="h-8 w-8" style={{ color: 'var(--cp-paper-faint)' }} />
               <p className="text-sm font-semibold m-0" style={{ color: 'var(--cp-paper)' }}>
                 No verticals yet — create a project
               </p>
-              <p className="text-xs m-0 max-w-md" style={{ color: 'var(--cp-text-m)' }}>
+              <p className="text-xs m-0 max-w-md" style={{ color: 'var(--cp-paper-mute)' }}>
                 The engine researches your market, drafts letters, collects a base and launches
                 campaigns — every vertical shows up here live.
               </p>
               <Link
                 href={'/client/eng?list=1' as Route}
                 prefetch={false}
-                className="neu-pill active px-4 py-2 text-sm font-semibold inline-flex items-center gap-2"
-                style={{ color: 'var(--cp-paper)' }}
+                className="ds-btn-primary inline-flex items-center gap-2"
               >
                 Create a project
                 <ArrowRight className="h-3.5 w-3.5" />
@@ -571,6 +774,7 @@ export function EngDashboard() {
             </EngCard>
           ) : (
             <section aria-label="Verticals" className="flex flex-col gap-4">
+              <h2 className="ds-eyebrow">02 → Verticals</h2>
               {(projects.length > 1 ? projects : [{ id: '', name: '' }]).map((p) => {
                 const list = projects.length > 1 ? verticals.filter((v) => v.project_id === p.id) : verticals;
                 if (list.length === 0) return null;
@@ -585,6 +789,8 @@ export function EngDashboard() {
                           index={i}
                           showProject={projects.length > 1}
                           projectName={projectNames.get(v.project_id) ?? ''}
+                          activeJob={v.id ? jobByVertical.get(v.id) : undefined}
+                          refillEnabled={refillEnabled}
                         />
                       ))}
                     </div>
@@ -594,16 +800,18 @@ export function EngDashboard() {
             </section>
           )}
 
-          {/* Лента событий */}
+          {/* 03 → Recent activity */}
           {events.length > 0 && (
-            <EngCard>
-              <h3 className="ds-eyebrow mb-2">Recent events</h3>
-              <ul className="flex flex-col">
-                {events.map((e, i) => (
-                  <EventRow key={`${e.at}-${i}`} event={e} withBorder={i > 0} />
-                ))}
-              </ul>
-            </EngCard>
+            <section aria-label="Recent activity">
+              <h2 className="ds-eyebrow mb-2">03 → Recent activity</h2>
+              <EngCard>
+                <ul className="flex flex-col">
+                  {events.map((e, i) => (
+                    <EventRow key={`${e.at}-${i}`} event={e} withBorder={i > 0} />
+                  ))}
+                </ul>
+              </EngCard>
+            </section>
           )}
         </>
       )}
