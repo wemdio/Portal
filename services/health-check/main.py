@@ -64,8 +64,13 @@ HEALTH_INTERVAL_SEC = int(os.environ.get("HEALTH_INTERVAL_SEC", "900"))
 JOB_MONITOR_INTERVAL_SEC = max(
     60, int(os.environ.get("HEALTH_JOB_MONITOR_INTERVAL_SEC", "300"))
 )
+# 20, а не 15: baseConstructor-воркер сам резюмит осиротевшую задачу через
+# BASE_CONSTRUCTOR_STALE_MINUTES=15 (docker-compose.prod.yml). Пока пороги были
+# равны, каждый деплой, заставший работающие задачи, давал ложную тревогу за
+# секунды до самоподбора — инцидент 11.08.2026, три задачи конструктора баз.
+# Порог монитора обязан быть заметно больше порога автоподбора.
 JOB_STUCK_MINUTES = max(
-    2, int(os.environ.get("HEALTH_JOB_STUCK_MIN", "15"))
+    2, int(os.environ.get("HEALTH_JOB_STUCK_MIN", "20"))
 )
 # Proxies are checked on their own slower cadence (default 5 min) so a flaky
 # test target can't spam the chat, and so we don't hammer the proxy pool every
@@ -1076,7 +1081,8 @@ def _track(key: str, failed: bool) -> tuple[bool, bool]:
 #
 # One registry covers user-facing parsers and processing tools. Every five
 # minutes we look for:
-#   1) an active job whose DB heartbeat/progress has not moved for 15 minutes;
+#   1) an active job whose DB heartbeat/progress has not moved for
+#      JOB_STUCK_MINUTES (20 min — see the constant for why not 15);
 #   2) a newly failed job with a real error.
 #
 # Alerts are claimed in health_check_job_alerts, so a container restart or the
@@ -1320,7 +1326,7 @@ async def _fetch_active_job_rows(conn, spec: JobMonitorSpec):
 
 
 async def check_stuck_jobs() -> list[str]:
-    """Return one alert per parser job with no DB progress for 15 minutes."""
+    """Return one alert per parser job with no DB progress for JOB_STUCK_MINUTES."""
     if not DATABASE_URL:
         return []
     loop_now = asyncio.get_running_loop().time()
@@ -1358,7 +1364,7 @@ async def check_stuck_jobs() -> list[str]:
                 stalled_secs: int | None = None
 
                 # Queue/preparation states have no meaningful progress yet:
-                # created_at is the heartbeat and 15 minutes is enough to alert.
+                # created_at is the heartbeat and JOB_STUCK_MINUTES is enough.
                 if status in ("pending", "queued", "preparing", "planning", "uploading"):
                     stalled_secs = int(row["age_secs"] or 0)
                 elif spec.updated_column:
