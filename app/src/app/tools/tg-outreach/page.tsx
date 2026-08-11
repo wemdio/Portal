@@ -2010,7 +2010,7 @@ function CampaignAccountsTab({
         </div>
       ) : (
         <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[32px_44px_1fr_120px_150px_80px_72px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_44px_minmax(0,1fr)_130px_minmax(340px,1.4fr)_72px_72px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <SelectAllCheckbox total={accounts.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span />
             <span>Аккаунт</span><span>Телефон</span><span>Прокси</span><span>Активен</span><span />
@@ -2023,7 +2023,7 @@ function CampaignAccountsTab({
             return (
               <div
                 key={a.id}
-                className={`grid grid-cols-[32px_44px_1fr_120px_150px_80px_72px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
+                className={`grid grid-cols-[32px_44px_minmax(0,1fr)_130px_minmax(340px,1.4fr)_72px_72px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
               >
                 <input
                   type="checkbox"
@@ -2047,10 +2047,14 @@ function CampaignAccountsTab({
                 </button>
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
+                  {/* Клик по имени открывает профиль — то же, что и клик по
+                      аватарке рядом. Логи переехали на кнопку со свитком
+                      справа: к профилю обращаются постоянно, к логам — когда
+                      что-то сломалось. */}
                   <button
                     type="button"
-                    onClick={() => setSelectedAccount(a)}
-                    title="Открыть логи и информацию"
+                    onClick={() => setProfileAccount(a)}
+                    title="Профиль в Telegram"
                     className="min-w-0 text-left text-xs font-medium text-gray-800 truncate hover:text-indigo-600 hover:underline transition cursor-pointer"
                   >
                     {a.session_name}
@@ -2127,7 +2131,10 @@ function CampaignAccountsTab({
                 ) : (
                   <button
                     type="button"
-                    title="Назначить прокси"
+                    // Колонка рассчитана на всю строку прокси (55 знаков — это
+                    // весь пул), но на узком экране она всё же подрежется.
+                    // Подсказка при наведении показывает адрес целиком.
+                    title={proxy ? `${proxy.name || proxy.url} — нажмите, чтобы сменить` : 'Назначить прокси'}
                     onClick={() => setEditingProxyFor(a.id)}
                     className="w-full text-left text-xs truncate rounded px-1 py-0.5 hover:bg-indigo-50 hover:text-indigo-700 transition cursor-pointer group"
                   >
@@ -2139,9 +2146,9 @@ function CampaignAccountsTab({
                   {a.is_active ? 'Да' : 'Нет'}
                 </button>
                 <div className="flex items-center gap-0.5">
-                  <button type="button" onClick={() => setProfileAccount(a)} title="Профиль в Telegram"
+                  <button type="button" onClick={() => setSelectedAccount(a)} title="Логи и информация"
                     className="p-1.5 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer">
-                    <UserCheck className="h-3.5 w-3.5" />
+                    <ScrollText className="h-3.5 w-3.5" />
                   </button>
                   <button type="button" onClick={() => { void deleteAccount(a.id); }} title="Удалить аккаунт"
                     className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer">
@@ -2203,6 +2210,7 @@ function AccountProfileModal({
   const [firstName, setFirstName] = useState(account.first_name ?? '');
   const [lastName, setLastName] = useState(account.last_name ?? '');
   const [bio, setBio] = useState(account.bio ?? '');
+  const [username, setUsername] = useState(account.tg_username ?? '');
   // Превью держим рядом с файлом: ссылку на blob создаём в момент выбора, а не
   // эффектом на каждый рендер.
   const [avatar, setAvatar] = useState<{ file: File; url: string } | null>(null);
@@ -2237,6 +2245,7 @@ function AccountProfileModal({
     setFirstName((v) => (v ? v : patch.first_name ?? ''));
     setLastName((v) => (v ? v : patch.last_name ?? ''));
     setBio((v) => (v ? v : patch.bio ?? ''));
+    setUsername((v) => (v ? v : patch.tg_username ?? ''));
   }, [onSync]);
 
   // Профиль, который ни разу не читали, подтягиваем сразу при открытии: иначе
@@ -2258,6 +2267,9 @@ function AccountProfileModal({
       form.append('first_name', firstName);
       form.append('last_name', lastName);
       form.append('bio', bio);
+      // Шлём всегда, в том числе пустым: пустое поле означает «снять юзернейм».
+      // Отсутствие поля роут читает как «не трогать» — это разные намерения.
+      form.append('username', username);
       if (avatar) form.append('avatar', avatar.file);
 
       const res = await fetch(`${API_BASE}/accounts/${account.id}/profile`, {
@@ -2391,6 +2403,24 @@ function AccountProfileModal({
                 className="block w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
             </label>
           </div>
+
+          <label className="space-y-1 block">
+            <span className="text-[11px] font-medium text-gray-500">Юзернейм</span>
+            <div className="relative">
+              <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-gray-400">@</span>
+              <input
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                maxLength={32}
+                placeholder="без юзернейма"
+                className="block w-full rounded-lg border border-gray-200 py-1.5 pl-6 pr-2.5 text-xs outline-none focus:border-indigo-400"
+              />
+            </div>
+            <span className="block text-[10px] text-gray-400">
+              5–32 знака, латиница, цифры и подчёркивание. Пустое поле снимет юзернейм.
+              Telegram ограничивает частоту смен — не меняйте у рассылающих аккаунтов без нужды.
+            </span>
+          </label>
 
           <label className="space-y-1 block">
             <span className="text-[11px] font-medium text-gray-500">Описание ({bio.length}/70)</span>
