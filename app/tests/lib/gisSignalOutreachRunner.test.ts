@@ -112,6 +112,8 @@ function signalResult(hit: boolean): OutreachSignalsResult {
       targetVacancy: v(false),
       highVolume: v(false),
       multiOffice: v(false),
+      legalRelevance: v(false),
+      crmCalltracking: v(false),
     },
     signalsCount: hit ? 1 : 0,
     note: 'Homepage checked',
@@ -120,7 +122,9 @@ function signalResult(hit: boolean): OutreachSignalsResult {
 }
 
 /** Финальная сетка конструктора: заголовок + 'Email Статус', строки по spec. */
-function finalGrid(rows: Array<{ id: string; segment?: string; name: string; email: string }>): string[][] {
+function finalGrid(
+  rows: Array<{ id: string; segment?: string; name: string; email: string; score?: string; grade?: string }>,
+): string[][] {
   const header = [...GRID_HEADER, 'Email Статус'];
   const signalCells = SIGNAL_COLUMNS.flatMap((_, i) =>
     i === 0 ? ['Да', 'какое-то evidence'] : ['Нет', 'Not found on checked pages'],
@@ -129,7 +133,7 @@ function finalGrid(rows: Array<{ id: string; segment?: string; name: string; ema
     header,
     ...rows.map((r) => [
       r.id, r.name, 'Москва', '+7 495 000-00-00', r.email, `https://${r.id}.ru`,
-      'Медицина', 'Стоматологии', ...signalCells, 'Homepage checked', 'ok',
+      'Медицина', 'Стоматологии', ...signalCells, r.score ?? '', r.grade ?? '', 'Homepage checked', 'ok',
     ]),
   ];
 }
@@ -576,5 +580,122 @@ describe('runGisSignalPipeline — require_online (edu)', () => {
     expect((runRow.funnel as { total: Record<string, number> }).total).toMatchObject({
       pulled: 2, signalsOk: 2, onlineOk: 0, bcIn: 0, appended: 0,
     });
+  });
+});
+
+describe('runGisSignalPipeline — legal-скоринг (сегмент со скоринг-профилем)', () => {
+  function legalSegmentRows() {
+    return [
+      {
+        key: 'legal', label: 'Юридические услуги', instantly_campaign_id: 'camp-legal',
+        rubric_groups: [{ category: 'Юридические / финансовые / бизнес-услуги' }],
+        priority: 10, enabled: true, require_online: false,
+      },
+    ];
+  }
+
+  /** Сигнальный результат с заданным набором сработавших сигналов. */
+  function scoredResult(hits: Array<keyof OutreachSignalsResult['signals']>): OutreachSignalsResult {
+    const v = (key: keyof OutreachSignalsResult['signals']) => ({
+      hit: hits.includes(key),
+      evidence: hits.includes(key) ? 'какое-то evidence' : '',
+    });
+    const signals = {
+      generalPhone: v('generalPhone'),
+      contactForm: v('contactForm'),
+      salesDept: v('salesDept'),
+      targetVacancy: v('targetVacancy'),
+      highVolume: v('highVolume'),
+      multiOffice: v('multiOffice'),
+      legalRelevance: v('legalRelevance'),
+      crmCalltracking: v('crmCalltracking'),
+    };
+    return {
+      signals,
+      signalsCount: ['generalPhone', 'contactForm', 'salesDept', 'targetVacancy', 'highVolume', 'multiOffice']
+        .filter((k) => hits.includes(k as keyof OutreachSignalsResult['signals'])).length,
+      note: 'Homepage checked',
+      ok: true,
+    };
+  }
+
+  it('фильтр по скору: >=35 проходит (грейды A/B/C), <35 отсев; скор в архиве, сетке и лидах', async () => {
+    seed({}, [], legalSegmentRows());
+    pullMock.mockResolvedValue([cand('leg-hi', 'legal'), cand('leg-mid', 'legal'), cand('leg-lo', 'legal')]);
+    detectMock.mockImplementation(async ({ siteUrl }: { siteUrl: string }) => {
+      // leg-hi: 25+20+15+10+5 = 75 → A; leg-mid: 25+20+10 = 55 → B; leg-lo: 25+5 = 30 → отсев.
+      if (siteUrl.includes('leg-hi')) {
+        return scoredResult(['legalRelevance', 'salesDept', 'targetVacancy', 'generalPhone', 'crmCalltracking']);
+      }
+      if (siteUrl.includes('leg-mid')) return scoredResult(['legalRelevance', 'salesDept', 'generalPhone']);
+      return scoredResult(['legalRelevance', 'multiOffice']);
+    });
+
+    const grid = finalGrid([
+      { id: 'leg-hi', name: 'Юристы Хай', email: 'info@leg-hi.ru', score: '75', grade: 'A' },
+      { id: 'leg-mid', name: 'Юристы Мид', email: 'info@leg-mid.ru', score: '55', grade: 'B' },
+    ]);
+    const runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
+    await completeNextBaseJob(grid);
+    const result = await runPromise;
+
+    expect(result.status).toBe('completed');
+    expect(result.pulled).toBe(3);
+    expect(result.signalsOk).toBe(2); // leg-lo отсеян скором <35
+
+    // В конструкторе — только прошедшие порог.
+    const jobInsert = mockDb.inserts.find((c) => c.table === 'base_constructor_jobs');
+    const jobData = jobInsert!.rows[0].data as string[][];
+    expect(jobData).toHaveLength(3); // header + leg-hi + leg-mid
+    const scoreIdx = jobData[0].findIndex((h) => h === 'score');
+    const gradeIdx = jobData[0].findIndex((h) => h === 'grade');
+    expect(scoreIdx).toBeGreaterThan(0);
+    expect(jobData[1][scoreIdx]).toBe('75');
+    expect(jobData[1][gradeIdx]).toBe('A');
+    expect(jobData[2][scoreIdx]).toBe('55');
+    expect(jobData[2][gradeIdx]).toBe('B');
+
+    // Архив: все 3 проверенные; скор/грейд у всех (сегмент scored), у leg-lo grade null.
+    const archiveRows = mockDb.upserts
+      .filter((c) => c.table === 'gis_signal_company_signals')
+      .flatMap((c) => c.rows);
+    expect(archiveRows).toHaveLength(3);
+    expect(archiveRows.find((r) => r.twogis_id === 'leg-hi')).toMatchObject({
+      score: 75, grade: 'A', signal_legal_relevance: true, signal_crm_calltracking: true,
+    });
+    expect(archiveRows.find((r) => r.twogis_id === 'leg-mid')).toMatchObject({ score: 55, grade: 'B' });
+    expect(archiveRows.find((r) => r.twogis_id === 'leg-lo')).toMatchObject({ score: 30, grade: null });
+
+    // Лиды несут score/grade в custom_variables.
+    const appendArgs = appendMock.mock.calls[0][0];
+    expect(appendArgs.campaignId).toBe('camp-legal');
+    const byEmail = Object.fromEntries(
+      appendArgs.leads.map((l: { email: string; custom_variables?: Record<string, string> }) =>
+        [l.email, l.custom_variables]),
+    ) as Record<string, Record<string, string>>;
+    expect(byEmail['info@leg-hi.ru']).toMatchObject({ segment: 'legal', score: '75', grade: 'A' });
+    expect(byEmail['info@leg-mid.ru']).toMatchObject({ segment: 'legal', score: '55', grade: 'B' });
+  });
+
+  it('сегмент без профиля (seg-a): скор/грейд не считаются, архив пишет null', async () => {
+    seed();
+    pullMock.mockResolvedValue([cand('a1', 'seg-a')]);
+
+    const grid = finalGrid([{ id: 'a1', name: 'Компания a1', email: 'info@a1.ru' }]);
+    const runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
+    await completeNextBaseJob(grid);
+    const result = await runPromise;
+
+    expect(result.status).toBe('completed');
+    const archiveRows = mockDb.upserts
+      .filter((c) => c.table === 'gis_signal_company_signals')
+      .flatMap((c) => c.rows);
+    expect(archiveRows[0]).toMatchObject({ twogis_id: 'a1', score: null, grade: null });
+    // Новые булевы колонки при этом пишутся всегда (здесь — false от фикстуры).
+    expect(archiveRows[0]).toMatchObject({ signal_legal_relevance: false, signal_crm_calltracking: false });
+    // В лидах score/grade отсутствуют.
+    const appendArgs = appendMock.mock.calls[0][0];
+    expect(appendArgs.leads[0].custom_variables).not.toHaveProperty('score');
+    expect(appendArgs.leads[0].custom_variables).not.toHaveProperty('grade');
   });
 });

@@ -21,6 +21,29 @@ import { TWO_GIS_MAX_EXPORT_ROWS } from './types';
 
 const EXPORT_TICKET_TTL_MINUTES = 15;
 
+/**
+ * Id текущего снапшота 2GIS-датасета — iterateTwoGisCards требует его явно
+ * (стрим привязан к снапшоту, чтобы импорт нового среза не ломал курсор).
+ * null → датасет недоступен, прогон пропускаем.
+ *
+ * Общая точка для обоих пайплайнов-потребителей (gisSignalOutreach и
+ * OutreachOS top-up) — не дублировать.
+ */
+export async function getLatestTwoGisSnapshotId(): Promise<number | null> {
+  try {
+    const rows = await twoGisDatasetQuery<{ id: string | number }>(
+      `SELECT id
+       FROM public.dataset_snapshots
+       ORDER BY imported_at DESC
+       LIMIT 1`,
+    );
+    const id = Number(rows[0]?.id);
+    return Number.isSafeInteger(id) && id > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function countTwoGisCards(filters: TwoGisFilters): Promise<number> {
   const query = buildTwoGisCountQuery(filters);
   const rows = await twoGisDatasetQuery<{ count: string | number }>(query.text, query.params);

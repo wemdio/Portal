@@ -1,10 +1,12 @@
 'use client';
 
 /**
- * Мастер проекта клиентского ENG-кабинета: 4 шага (Brief → Verticals →
- * Letters → Bases & Launch) поверх деталки GET /api/client/eng/projects/[id].
- * Поллинг каждые 4с, пока есть активные джобы (research, chain, base_collect,
- * template); «Cancel all jobs» останавливает прогоны проекта.
+ * Мастер проекта клиентского ENG-кабинета: 5 шагов (Brief → Verticals →
+ * Letters → Bases & Launch → Review & Launch) поверх деталки
+ * GET /api/client/eng/projects/[id]. Шаг 5 — единое окно приёмки автопилота
+ * («Start outreach» на шаге 2). Поллинг каждые 4с, пока есть активные джобы
+ * (research, chain, base_collect, template); «Cancel all jobs» останавливает
+ * прогоны проекта.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -19,6 +21,7 @@ import { EngStepBrief } from './EngStepBrief';
 import { EngStepVerticals } from './EngStepVerticals';
 import { EngStepLetters } from './EngStepLetters';
 import { EngStepBases } from './EngStepBases';
+import { EngStepReview } from './EngStepReview';
 
 const POLL_INTERVAL_MS = 4000;
 
@@ -27,6 +30,7 @@ const STEPS = [
   { id: 2, label: 'Verticals' },
   { id: 3, label: 'Letters' },
   { id: 4, label: 'Bases & Launch' },
+  { id: 5, label: 'Review & Launch' },
 ] as const;
 
 export type EngDetail = HeProjectDetailResponse & { project: HeProject };
@@ -180,6 +184,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
           {step === 2 && <EngStepVerticals detail={detail} onChanged={() => void load({ silent: true })} />}
           {step === 3 && <EngStepLetters detail={detail} onChanged={() => void load({ silent: true })} />}
           {step === 4 && <EngStepBases detail={detail} onChanged={() => void load({ silent: true })} />}
+          {step === 5 && <EngStepReview detail={detail} onChanged={() => void load({ silent: true })} />}
 
           <div className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
             Updated {fmtDate(project?.updated_at)}

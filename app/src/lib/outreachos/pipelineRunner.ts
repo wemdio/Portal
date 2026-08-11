@@ -14,10 +14,18 @@
  *      Иначе: готовую сетку → лиды → appendLeadsToClientCampaign в ОДНУ кампанию.
  *   6. Журналируем seen + run.
  *
+ * 2GIS TOP-UP (gis_topup_enabled): между шагом 7b (LLM) и шагом 8 (markSeen)
+ * вставлены фазы 8t.1–8t.5 — добор из 2gis_dataset при недоборе HH+SJ до
+ * gis_topup_target_appended. GIS-лиды объединяются с HH keptLeads ПЕРЕД общим
+ * markSeen, общим дедупом против своих кампаний и общим A/B-сплитом — отдельная
+ * кампания C не заводится (решение §7.2 дизайн-дока
+ * docs/design/2026-08-11-outreachos-2gis-topup.md).
+ *
  * ИЗОЛЯЦИЯ: ни одного импорта из autoPipelineRunner / mailganerScore* /
  * clientEndpointClient / bobScoringRunner и ни одного обращения к
  * mailganer_domain_scores / background_scorer_state / client_auto_pipeline_*.
- * Скоринга нет вовсе.
+ * Из gisSignalOutreach — тоже ничего (кросс-дедупы идут через таблицы и
+ * twoGis/*). Скоринга нет вовсе.
  */
 
 import 'server-only';
@@ -27,6 +35,9 @@ import { findNewHhEmployers, deriveDomain, type HhEmployer } from '@/lib/jobs/hh
 import { fetchSuperjobEmployers } from '@/lib/outreachos/superjobSource';
 import { ensureArchiveSinkJob, buildHhArchiveSinkCallback, getUserIdByEmail } from '@/lib/parsers/hhArchiveSink';
 import { appendLeadsToClientCampaign, fetchExistingCampaignEmails } from '@/lib/clientLaunch/appendLeads';
+import type { LeadCreatePayload } from '@/lib/instantly/types';
+import { getLatestTwoGisSnapshotId } from '@/lib/twoGis/repository';
+import { toTwoGisRubricGroups } from '@/lib/twoGis/rubricGroups';
 import { loadOutreachOsConfig } from './config';
 import { buildExcludePatterns } from './excludePatterns';
 import { isOutreachOsB2cCompany } from './excludeB2c';
@@ -38,6 +49,16 @@ import {
 import { llmClassifyNoise, type CompanyForClassify } from './classifyCompanies';
 import { loadRecentlySeen, markSeen, RECONTACT_AFTER_DAYS, type SeenEmployerUpsert } from './seenEmployers';
 import { employersToGrid, gridToLeadPayloads } from './gridMapping';
+import {
+  buildGisClassifyIndustries,
+  computeGisPullLimit,
+  computeGisTopupDeficit,
+  gisCandidatesToGrid,
+  loadGisSignalSeenDomains,
+  markGisSignalSeen,
+  pullGisTopupCandidates,
+  type GisTopupCandidate,
+} from './gisTopup';
 
 const POLL_INTERVAL_MS = 10_000;
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
@@ -50,7 +71,20 @@ export interface OutreachOsRunResult {
   validContacts: number;
   appended: number;
   skipped: number;
+  /** Счётчики 2GIS top-up'а; отсутствует, если топ-ап в прогоне не запускался. */
+  gisTopup?: {
+    pulled: number;
+    afterDedup: number;
+    validContacts: number;
+    llmKept: number;
+    appended: number;
+  };
   error?: string;
+}
+
+export interface RunOptions {
+  /** Тесты подставляют ~0, чтобы не ждать реальный poll-интервал. */
+  pollIntervalMs?: number;
 }
 
 type Logger = (msg: string) => void;
@@ -59,7 +93,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promise<OutreachOsRunResult> {
+export async function runOutreachOsDailyPipeline(
+  log: Logger = () => {},
+  opts: RunOptions = {},
+): Promise<OutreachOsRunResult> {
+  const pollIntervalMs = opts.pollIntervalMs ?? POLL_INTERVAL_MS;
   const empty: OutreachOsRunResult = {
     runId: null,
     status: 'skipped',
@@ -112,6 +150,21 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       .update({ ...patch, finished_at: new Date().toISOString() })
       .eq('id', runId);
   };
+
+  // Состояние 2GIS top-up'а (фазы 8t.*): объявлено ДО try, чтобы catch мог
+  // записать частичные счётчики в run-строку при сбое (напр. упал GIS-джоб).
+  const gisCounters = { pulled: 0, afterDedup: 0, validContacts: 0, llmKept: 0, appended: 0 };
+  let gisExecuted = false;
+  const gisRunPatch = (): Record<string, unknown> =>
+    gisExecuted
+      ? {
+          gis_pulled: gisCounters.pulled,
+          gis_after_dedup: gisCounters.afterDedup,
+          gis_valid_contacts: gisCounters.validContacts,
+          gis_llm_kept: gisCounters.llmKept,
+          gis_appended: gisCounters.appended,
+        }
+      : {};
 
   try {
     // 3. HH-парс + ICP-фильтр.
@@ -230,59 +283,19 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     }
 
     // 5. Сетка → base_constructor_jobs (чистка/валидация без ta_scoring/persona).
+    //    Вставка + poll-цикл вынесены в runBaseConstructorJob — тот же helper
+    //    обслуживает второй (GIS top-up) джоб в фазе 8t.3.
     const grid = employersToGrid(fresh);
     const today = new Date().toISOString().slice(0, 10);
-    const { data: jobRow, error: jobErr } = await db
-      .from('base_constructor_jobs')
-      .insert({
-        user_id: config.client_user_id,
-        file_name: `outreachos-${today}`,
-        data: grid,
-        selected_steps: config.selected_steps,
-        // find_emails пишет прямо в колонку Email (а не в отдельную «Найденный
-        // Email» с последующим merge) — убираем неявную зависимость от порядка
-        // шагов: даже без промежуточных шагов почты сразу в Email.
-        step_config: { find_emails_target: 'same' },
-        initial_row_count: grid.length - 1,
-        total_steps: config.selected_steps.length,
-      })
-      .select('id')
-      .single();
-    if (jobErr || !jobRow) {
-      throw new Error(`base job insert failed: ${jobErr?.message}`);
-    }
-    const baseJobId = (jobRow as { id: string }).id;
-    log(`Создан base_constructor_job ${baseJobId} (${grid.length - 1} строк, шаги: ${config.selected_steps.join(',')})`);
-
-    // 6. Ждём, пока worker-baseconstructor доработает. В цикле тянем ТОЛЬКО
-    //    status (не весь data-блоб — он может быть мегабайтами), а финальную
-    //    сетку забираем один раз по завершении.
-    const deadline = Date.now() + config.job_poll_timeout_minutes * 60_000;
-    let finalGrid: string[][] | null = null;
-    for (;;) {
-      if (Date.now() > deadline) {
-        throw new Error(`base job ${baseJobId} не завершился за ${config.job_poll_timeout_minutes} мин`);
-      }
-      await sleep(POLL_INTERVAL_MS);
-      const { data: js } = await db
-        .from('base_constructor_jobs')
-        .select('status, error_message')
-        .eq('id', baseJobId)
-        .maybeSingle();
-      const status = (js as { status?: string } | null)?.status;
-      if (!status || !TERMINAL_STATUSES.has(status)) continue;
-      if (status !== 'completed') {
-        const em = (js as { error_message?: string } | null)?.error_message;
-        throw new Error(`base job ${baseJobId} завершился со status=${status}: ${em ?? 'no message'}`);
-      }
-      const { data: full } = await db
-        .from('base_constructor_jobs')
-        .select('data')
-        .eq('id', baseJobId)
-        .maybeSingle();
-      finalGrid = ((full as { data?: string[][] } | null)?.data ?? null);
-      break;
-    }
+    const { jobId: baseJobId, finalGrid } = await runBaseConstructorJob(db, {
+      userId: config.client_user_id,
+      fileName: `outreachos-${today}`,
+      grid,
+      selectedSteps: config.selected_steps,
+      pollTimeoutMinutes: config.job_poll_timeout_minutes,
+      pollIntervalMs,
+      log,
+    });
 
     // 7. Сетка → лиды (с suppression-рубежом по почте/домену внутри).
     const leads = gridToLeadPayloads(finalGrid ?? [], suppression);
@@ -385,7 +398,8 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       leadCompanyIdx.push(idx);
     }
     const llm = await llmClassifyNoise(uniqueCompanies, (m) => log(`[llm] ${m}`));
-    const keptLeads = leads.filter((_, i) => !llm.noise.has(leadCompanyIdx[i]));
+    // let: в live-режиме топ-апа к HH keptLeads добавляются GIS keptLeads (8t.5).
+    let keptLeads = leads.filter((_, i) => !llm.noise.has(leadCompanyIdx[i]));
     log(
       `LLM-отсев: компаний ${uniqueCompanies.length}, вердиктов ${llm.classified}, ` +
         `шум ${llm.noise.size} (рефьют спас ${llm.refuted}), лидов ${leads.length} → ${keptLeads.length}` +
@@ -405,6 +419,163 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       if (d) noiseDomains.add(d);
     }
 
+    // ── 8t. 2GIS TOP-UP (дизайн-док 2026-08-11-outreachos-2gis-topup §3.2) ──
+    // Добор из 2gis_dataset, когда HH+SJ не достаёт до цели. Точка решения —
+    // ПОСЛЕ LLM (дефицит считается точно по keptLeads, а не прогнозно). В
+    // «сытые» дни (deficit=0) и при выключенном флаге топ-ап не запускается
+    // вовсе (второй конструктор-джоб не создаётся).
+    // gis_topup_measure_only=true: фазы 8t.1–8t.4 выполняются, счётчики пишутся
+    // в run, но GIS-лиды НЕ объединяются, seen по ним НЕ пишется (HH-ветка
+    // работает как обычно — замер относится только к топ-апу).
+    const gisMeasureOnly = config.gis_topup_measure_only;
+    const gisQualified: GisTopupCandidate[] = []; // кандидаты, ушедшие в конструктор (аналог fresh)
+    let gisKeptLeads: LeadCreatePayload[] = [];   // GIS-лиды после LLM (аналог keptLeads)
+    const gisNoiseDomains = new Set<string>();
+    const gisDeficit = computeGisTopupDeficit(config.gis_topup_target_appended, keptLeads.length);
+
+    if (!config.gis_topup_enabled) {
+      log('[gis-topup] выключен (gis_topup_enabled=false) — пропускаем');
+    } else if (gisDeficit <= 0) {
+      log(`[gis-topup] дефицита нет (kept=${keptLeads.length} ≥ target=${config.gis_topup_target_appended}) — пропускаем`);
+    } else if (config.gis_topup_rubric_groups.length === 0) {
+      log('[gis-topup] пустой gis_topup_rubric_groups — нечего тянуть, пропускаем');
+    } else {
+      gisExecuted = true;
+      // 8t.1 PULL: latest snapshot, rubric_groups, hasWebsite=true,
+      // лимит = min(cap, ceil(deficit / 0.45 * 1.3)).
+      const pullLimit = computeGisPullLimit(gisDeficit, config.gis_topup_daily_cap);
+      const snapshotId = await getLatestTwoGisSnapshotId();
+      // §4.1.2: домены gis_signal_seen_companies — fail-closed (null): сбой
+      // чтения кросс-журнала = топ-ап пропускаем, повторное письмо компании
+      // GIS-пайплайна недопустимо. HH-ветка от этого не зависит.
+      const gisSignalSeenDomains = await loadGisSignalSeenDomains();
+      if (!snapshotId) {
+        log('[gis-topup] снапшот 2gis_dataset недоступен (TWOGIS_DATASET_DB_URL?) — топ-ап пропущен, HH-ветка продолжается');
+        gisExecuted = false;
+      } else if (!gisSignalSeenDomains) {
+        log('[gis-topup] не удалось прочитать gis_signal_seen_companies (fail-closed) — топ-ап пропущен, HH-ветка продолжается');
+        gisExecuted = false;
+      } else {
+        // Дедуп-матрица §4.1: (а) seen OutreachOS 45д + (б) gis_signal seen +
+        // (в) домены сегодняшнего HH+SJ батча; (г) внутренний — в pull'е.
+        const batchDomains = new Set(
+          employers.map((e) => deriveDomain(e.siteUrl)).filter((d): d is string => Boolean(d)),
+        );
+        const excludeDomains = new Set<string>([
+          ...seen.domains,
+          ...gisSignalSeenDomains,
+          ...batchDomains,
+        ]);
+        const pull = await pullGisTopupCandidates({
+          rubricGroups: toTwoGisRubricGroups(config.gis_topup_rubric_groups),
+          limit: pullLimit,
+          snapshotId,
+          excludeDomains,
+          log: (m) => log(`[gis-topup] ${m}`),
+        });
+        gisCounters.pulled = pull.pulled;
+        log(
+          `[gis-topup] 8t.1 pull: дефицит=${gisDeficit}, лимит=${pullLimit}, ` +
+            `взято=${pull.pulled} (кросс-дедуп -${pull.excludedDropped}, scanned=${pull.scanned}) → кандидатов ${pull.candidates.length}`,
+        );
+
+        // 8t.2 Структурный B2C-отсев (тот же isOutreachOsB2cCompany, что шаг
+        //     3b) → suppression (тот же сет шага 3c; fail-closed уже обеспечен
+        //     загрузкой выше — здесь чистая фильтрация).
+        const gisAfterB2c = pull.candidates.filter((c) => !isOutreachOsB2cCompany(c.name, c.site));
+        if (gisAfterB2c.length < pull.candidates.length) {
+          log(`[gis-topup] B2C/ИП-отсев: -${pull.candidates.length - gisAfterB2c.length} → ${gisAfterB2c.length}`);
+        }
+        gisQualified.push(
+          ...gisAfterB2c.filter((c) => !isSuppressedCompany(c.site, suppression)),
+        );
+        if (gisQualified.length < gisAfterB2c.length) {
+          log(`[gis-topup] Suppression-отсев клиентов: -${gisAfterB2c.length - gisQualified.length} → ${gisQualified.length}`);
+        }
+        gisCounters.afterDedup = gisQualified.length;
+
+        if (gisQualified.length === 0) {
+          log('[gis-topup] после дедупов/B2C/suppression кандидатов нет — топ-ап завершён');
+        } else {
+          // 8t.3 Второй base_constructor_job: те же selected_steps/step_config,
+          //      тот же poll-цикл и терминальные статусы. Ошибка джоба = ошибка
+          //      прогона (throw — как у основного джоба): seen к этому моменту
+          //      ещё не писался → HH- и GIS-компании корректно ретраятся.
+          const gisGrid = gisCandidatesToGrid(gisQualified);
+          const { jobId: gisJobId, finalGrid: gisFinalGrid } = await runBaseConstructorJob(db, {
+            userId: config.client_user_id,
+            fileName: `outreachos-${today}-gis-topup`,
+            grid: gisGrid,
+            selectedSteps: config.selected_steps,
+            pollTimeoutMinutes: config.job_poll_timeout_minutes,
+            pollIntervalMs,
+            log,
+          });
+          log(`[gis-topup] 8t.3 конструктор ${gisJobId} завершён`);
+
+          // 8t.4 Сетка → лиды (тот же gridToLeadPayloads) → ОТДЕЛЬНЫЙ LLM-отсев
+          //      (тот же вызов llmClassifyNoise, но свои компании/счётчики —
+          //      объединять с HH-компаниями по ключу name|website не нужно).
+          //      Контекст компании: industries = [category, subcategory] рубрик
+          //      2GIS (description/vacancyTitle у 2GIS нет). Предохранитель
+          //      guard логируем отдельно.
+          const gisLeads = gridToLeadPayloads(gisFinalGrid ?? [], suppression);
+          gisCounters.validContacts = gisLeads.length;
+          log(`[gis-topup] 8t.4 валидных контактов на выходе конструктора: ${gisLeads.length}`);
+
+          if (gisLeads.length > 0) {
+            const gisIndustries = buildGisClassifyIndustries(gisQualified);
+            const gisCompanies: CompanyForClassify[] = [];
+            const gisCompanyIdxByKey = new Map<string, number>();
+            const gisLeadCompanyIdx: number[] = [];
+            for (const l of gisLeads) {
+              const key = `${(l.company_name ?? '').trim().toLowerCase()}|${(l.website ?? '').trim().toLowerCase()}`;
+              let idx = gisCompanyIdxByKey.get(key);
+              if (idx === undefined) {
+                idx = gisCompanies.length;
+                gisCompanyIdxByKey.set(key, idx);
+                gisCompanies.push({
+                  name: l.company_name ?? '',
+                  website: l.website ?? '',
+                  industries: gisIndustries.get(deriveDomain(l.website ?? null) ?? ''),
+                });
+              }
+              gisLeadCompanyIdx.push(idx);
+            }
+            const gisLlm = await llmClassifyNoise(gisCompanies, (m) => log(`[gis-topup][llm] ${m}`));
+            gisKeptLeads = gisLeads.filter((_, i) => !gisLlm.noise.has(gisLeadCompanyIdx[i]));
+            gisCounters.llmKept = gisKeptLeads.length;
+            log(
+              `[gis-topup] LLM-отсев: компаний ${gisCompanies.length}, вердиктов ${gisLlm.classified}, ` +
+                `шум ${gisLlm.noise.size} (рефьют спас ${gisLlm.refuted}), лидов ${gisLeads.length} → ${gisKeptLeads.length}` +
+                (gisLlm.failedBatches > 0 ? ` (батчей без фильтра: ${gisLlm.failedBatches})` : '') +
+                (gisLlm.guardTripped ? ' [ПРЕДОХРАНИТЕЛЬ: фильтр отключён на этот прогон]' : ''),
+            );
+            for (const idx of gisLlm.noise) {
+              const d = deriveDomain(gisCompanies[idx].website || null);
+              if (d) gisNoiseDomains.add(d);
+            }
+          }
+        }
+      }
+    }
+
+    // 8t.5 Объединение с HH keptLeads ПЕРЕД шагом 8 (только live-режим топ-апа):
+    //     дальше — общий markSeen (§4.3), общий дедуп против своих кампаний (8b),
+    //     общий A/B-сплит по домену компании и append — без изменений в этих шагах.
+    //     В measure_only-режиме топ-апа GIS-лиды НЕ объединяются (замер без заливки).
+    //     hhKeptCount фиксирует HH-only счётчик ДО объединения — колонка llm_kept
+    //     в runs исторически означает HH-ветку (GIS имеет свои колонки gis_*).
+    const hhKeptCount = keptLeads.length;
+    if (gisExecuted && gisKeptLeads.length > 0) {
+      if (gisMeasureOnly) {
+        log(`[gis-topup] MEASURE: GIS-лиды (${gisKeptLeads.length}) НЕ объединяем — замер без заливки и seen`);
+      } else {
+        keptLeads = keptLeads.concat(gisKeptLeads);
+        log(`[gis-topup] 8t.5 объединено: HH ${hhKeptCount} + GIS ${gisKeptLeads.length} → ${keptLeads.length}`);
+      }
+    }
+
     // 8. ФИКСИРУЕМ seen-окно ДО append. append необратим (лиды улетают в
     //    Instantly, возможно несколькими chunk'ами по 1000); если он затем
     //    частично/полностью упадёт, эти компании НЕЛЬЗЯ пере-залить на следующем
@@ -418,7 +589,12 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     const leadDomains = new Set(
       keptLeads.map((l) => deriveDomain(l.website ?? null)).filter((d): d is string => !!d),
     );
-    await markSeen(fresh.map(toSeen(leadDomains, noiseDomains, 'no_email')));
+    // §4.3: GIS-компании пишем в тот же журнал с hh_employer_id=NULL (дедуп-ось
+    // — domain), статусы по тем же правилам, что HH-ветка (appended/skipped/
+    // no_email). markSeen строго ДО append — как у HH.
+    const gisSeenRows =
+      gisExecuted && !gisMeasureOnly ? gisQualified.map(toGisSeen(leadDomains, gisNoiseDomains)) : [];
+    await markSeen(fresh.map(toSeen(leadDomains, noiseDomains, 'no_email')).concat(gisSeenRows));
 
     // 8b. ДЕДУП ПРОТИВ СВОИХ КАМПАНИЙ (до Instantly). Мы шлём с
     //     skip_if_in_campaign=false, потому что этот флаг у Instantly работает
@@ -445,17 +621,18 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     //    офферов: лиды делятся 50/50 детерминированно по домену КОМПАНИИ
     //    (hash%2), чтобы все почты одной компании попали в ОДНУ кампанию (одна
     //    фирма не должна получить два разных оффера) и чтобы при ретраях лид не
-    //    мигрировал между кампаниями.
-    const batches: { campaign: string; label: 'A' | 'B'; leads: typeof sendLeads }[] = [];
+    //    мигрировал между кампаниями. GIS-лиды top-up'а идут тем же сплитом —
+    //    отдельная кампания C не заводится (решение §7.2 дизайн-дока).
+    const batches: { campaign: string; label: 'A' | 'B'; leads: typeof sendLeads; accepted: number }[] = [];
     if (campaignIdB) {
       const a: typeof sendLeads = [];
       const b: typeof sendLeads = [];
       for (const l of sendLeads) (splitBucket(l.website ?? '', l.email) === 0 ? a : b).push(l);
-      batches.push({ campaign: campaignId, label: 'A', leads: a });
-      batches.push({ campaign: campaignIdB, label: 'B', leads: b });
+      batches.push({ campaign: campaignId, label: 'A', leads: a, accepted: 0 });
+      batches.push({ campaign: campaignIdB, label: 'B', leads: b, accepted: 0 });
       log(`A/B-сплит по домену компании: A=${a.length} B=${b.length}`);
     } else {
-      batches.push({ campaign: campaignId, label: 'A', leads: sendLeads });
+      batches.push({ campaign: campaignId, label: 'A', leads: sendLeads, accepted: 0 });
     }
 
     let acceptedA = 0;
@@ -474,6 +651,7 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
           // кампаниями (флаг у него воркспейс-широкий). Свой дедуп — шаг 8b.
           skipIfInCampaign: false,
         });
+        batch.accepted = res.accepted;
         if (batch.label === 'A') acceptedA = res.accepted;
         else acceptedB = res.accepted;
         skippedTotal += res.skipped;
@@ -488,6 +666,46 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     const totalAccepted = acceptedA + acceptedB;
     const runStatus: 'completed' | 'failed' = appendErrors.length > 0 ? 'failed' : 'completed';
 
+    // §4.3: gis_signal_seen_companies («залитые навсегда») — пишем ТОЛЬКО
+    //    GIS-компании, чей ≥1 контакт реально ушёл в Instantly, ПОСЛЕ успешного
+    //    append (зеркально gisSignalOutreach/pipelineRunner шагу 5; at-least-once:
+    //    append упал → журнал не пишем → компания ретраится). append режет хвост
+    //    по тарифному остатку (slice-префикс) — залиты ровно первые accepted
+    //    лидов каждого батча. Если append GIS-лидов упал (appendErrors), их нет
+    //    в этом журнале (ретрай), НО в outreachos_seen_employers они уже записаны
+    //    шагом 8 — осознанная цена, как в HH-ветке (компания будет пропущена 45д,
+    //    а GIS-пайплайн её не тронет благодаря обратному кросс-дедупу §4.2).
+    if (gisExecuted && !gisMeasureOnly && gisKeptLeads.length > 0) {
+      const gisKeptDomains = new Set(
+        gisKeptLeads.map((l) => deriveDomain(l.website ?? null)).filter((d): d is string => !!d),
+      );
+      const appendedGisDomains = new Set<string>();
+      for (const batch of batches) {
+        if (batch.accepted <= 0) continue;
+        for (const l of batch.leads.slice(0, batch.accepted)) {
+          const d = deriveDomain(l.website ?? null);
+          if (d && gisKeptDomains.has(d)) {
+            appendedGisDomains.add(d);
+            gisCounters.appended += 1;
+          }
+        }
+      }
+      const gisSeenCompanyRows = gisQualified
+        .filter((c) => {
+          const d = deriveDomain(c.site);
+          return d !== null && appendedGisDomains.has(d);
+        })
+        .map((c) => ({
+          twogis_id: c.twogisId,
+          domain: deriveDomain(c.site),
+          company_name: c.name || null,
+        }));
+      if (gisSeenCompanyRows.length > 0) {
+        await markGisSignalSeen(gisSeenCompanyRows);
+      }
+      log(`[gis-topup] appended=${gisCounters.appended}, в gis_signal_seen_companies записано компаний: ${gisSeenCompanyRows.length}`);
+    }
+
     await finishRun({
       status: runStatus,
       parsed: employers.length,
@@ -498,13 +716,16 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       // LLM-отсев персистится (миграция 20260706_0001): без этого разница
       // valid_contacts↔appended в БД неотличима от отказов Instantly, а
       // деградация модели (шум 90%) незаметна до ручного чтения логов.
+      // llm_kept — HH-only счётчик ДО объединения с GIS (у GIS свои gis_* колонки).
       llm_noise: llm.noise.size,
-      llm_kept: keptLeads.length,
+      llm_kept: hhKeptCount,
       llm_failed_batches: llm.failedBatches,
       llm_guard_tripped: llm.guardTripped,
       appended: acceptedA,
       appended_b: acceptedB,
       skipped: skippedTotal,
+      // Телеметрия 2GIS top-up'а (миграция 20260811_0001); NULL, если топ-ап не запускался.
+      ...gisRunPatch(),
       ...(appendErrors.length > 0 ? { error_message: appendErrors.join('; ') } : {}),
     });
 
@@ -514,12 +735,22 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       newEmployers: fresh.length,
       validContacts: leads.length,
       llmNoise: llm.noise.size,
-      llmKept: keptLeads.length,
+      llmKept: hhKeptCount,
       llmFailedBatches: llm.failedBatches,
       llmGuardTripped: llm.guardTripped,
       appendedA: acceptedA,
       appendedB: acceptedB,
       appendErrors: appendErrors.length,
+      ...(gisExecuted
+        ? {
+            gisPulled: gisCounters.pulled,
+            gisAfterDedup: gisCounters.afterDedup,
+            gisValidContacts: gisCounters.validContacts,
+            gisLlmKept: gisCounters.llmKept,
+            gisAppended: gisCounters.appended,
+            gisMeasureOnly,
+          }
+        : {}),
     });
 
     return {
@@ -530,16 +761,29 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       validContacts: leads.length,
       appended: totalAccepted,
       skipped: skippedTotal,
+      ...(gisExecuted
+        ? {
+            gisTopup: {
+              pulled: gisCounters.pulled,
+              afterDedup: gisCounters.afterDedup,
+              validContacts: gisCounters.validContacts,
+              llmKept: gisCounters.llmKept,
+              appended: gisCounters.appended,
+            },
+          }
+        : {}),
       ...(appendErrors.length > 0 ? { error: appendErrors.join('; ') } : {}),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // Здесь seen НЕ трогаем. Сбои ДО шага 8 (HH/конструктор) seen не писали →
-    // компании корректно ретраятся на следующем прогоне. Сбои НА/ПОСЛЕ шага 8
-    // (append) уже прошли markSeen (шаг 8 выше append) → компании зафиксированы
-    // в окне и НЕ будут пере-залиты, даже если append упал частично. Так блокер
-    // «залито в Instantly, но не записано в seen → дубль в окне» закрыт.
-    await finishRun({ status: 'failed', error_message: message });
+    // Здесь seen НЕ трогаем. Сбои ДО шага 8 (HH/конструктор, в т.ч. GIS-джоб
+    // 8t.3) seen не писали → компании корректно ретраятся на следующем прогоне.
+    // Сбои НА/ПОСЛЕ шага 8 (append) уже прошли markSeen (шаг 8 выше append) →
+    // компании зафиксированы в окне и НЕ будут пере-залиты, даже если append
+    // упал частично. Так блокер «залито в Instantly, но не записано в seen →
+    // дубль в окне» закрыт. Частичные gis_* счётчики пишем — сбой GIS-джоба
+    // иначе был бы невидим в run-строке.
+    await finishRun({ status: 'failed', error_message: message, ...gisRunPatch() });
     await logError('outreachos.run.failed', err, { runId });
     return { ...empty, runId, status: 'failed', error: message };
   }
@@ -626,4 +870,100 @@ function toSeen(
       status,
     };
   };
+}
+
+/**
+ * Фабрика маппера GisTopupCandidate → SeenEmployerUpsert (§4.3 дизайн-дока).
+ * Те же правила статусов, что toSeen для HH-ветки; hh_employer_id = NULL (у
+ * карточки 2GIS нет hh id — дедуп-ось domain). Вызывается только в live-режиме
+ * топ-апа, markSeen строго ДО append — как у HH.
+ */
+function toGisSeen(
+  leadDomains: Set<string>,
+  gisNoiseDomains: Set<string>,
+): (c: GisTopupCandidate) => SeenEmployerUpsert {
+  return (c) => {
+    const domain = deriveDomain(c.site);
+    const status: SeenEmployerUpsert['status'] = !domain
+      ? 'no_email'
+      : leadDomains.has(domain)
+        ? 'appended'
+        : gisNoiseDomains.has(domain)
+          ? 'skipped'
+          : 'no_email';
+    return {
+      hh_employer_id: null,
+      hh_employer_name: c.name || null,
+      domain,
+      site_url: c.site || null,
+      status,
+    };
+  };
+}
+
+/**
+ * Вставка base_constructor_jobs + poll-цикл ожидания (общий для HH-джоба шага 5
+ * и GIS top-up джоба 8t.3 — одинаковые selected_steps/step_config, терминальные
+ * статусы и семантика ошибок: не-completed или таймаут = throw = ошибка прогона).
+ * В цикле тянем ТОЛЬКО status (data-блоб может быть мегабайтами), финальную
+ * сетку забираем один раз по завершении.
+ */
+async function runBaseConstructorJob(
+  db: NonNullable<typeof supabaseAdmin>,
+  opts: {
+    userId: string;
+    fileName: string;
+    grid: string[][];
+    selectedSteps: string[];
+    pollTimeoutMinutes: number;
+    pollIntervalMs: number;
+    log: Logger;
+  },
+): Promise<{ jobId: string; finalGrid: string[][] | null }> {
+  const { data: jobRow, error: jobErr } = await db
+    .from('base_constructor_jobs')
+    .insert({
+      user_id: opts.userId,
+      file_name: opts.fileName,
+      data: opts.grid,
+      selected_steps: opts.selectedSteps,
+      // find_emails пишет прямо в колонку Email (а не в отдельную «Найденный
+      // Email» с последующим merge) — убираем неявную зависимость от порядка
+      // шагов: даже без промежуточных шагов почты сразу в Email.
+      step_config: { find_emails_target: 'same' },
+      initial_row_count: opts.grid.length - 1,
+      total_steps: opts.selectedSteps.length,
+    })
+    .select('id')
+    .single();
+  if (jobErr || !jobRow) {
+    throw new Error(`base job insert failed: ${jobErr?.message}`);
+  }
+  const jobId = (jobRow as { id: string }).id;
+  opts.log(`Создан base_constructor_job ${jobId} (${opts.grid.length - 1} строк, шаги: ${opts.selectedSteps.join(',')})`);
+
+  const deadline = Date.now() + opts.pollTimeoutMinutes * 60_000;
+  for (;;) {
+    if (Date.now() > deadline) {
+      throw new Error(`base job ${jobId} не завершился за ${opts.pollTimeoutMinutes} мин`);
+    }
+    await sleep(opts.pollIntervalMs);
+    const { data: js } = await db
+      .from('base_constructor_jobs')
+      .select('status, error_message')
+      .eq('id', jobId)
+      .maybeSingle();
+    const status = (js as { status?: string } | null)?.status;
+    if (!status || !TERMINAL_STATUSES.has(status)) continue;
+    if (status !== 'completed') {
+      const em = (js as { error_message?: string } | null)?.error_message;
+      throw new Error(`base job ${jobId} завершился со status=${status}: ${em ?? 'no message'}`);
+    }
+    const { data: full } = await db
+      .from('base_constructor_jobs')
+      .select('data')
+      .eq('id', jobId)
+      .maybeSingle();
+    return { jobId, finalGrid: (full as { data?: string[][] } | null)?.data ?? null };
+  }
 }

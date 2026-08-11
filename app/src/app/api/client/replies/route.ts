@@ -8,7 +8,7 @@ import { filterAllowedIds, getResourceInstantlyAccountId, type ClientAccessRow }
 import { InstantlyApiError } from '@/lib/instantly/errors';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
 import { getReadEmailIds, getRepliedEmailIds, getAnsweredLeadKeys } from '@/lib/clientCampaignReplies/clientEmailReads';
-import { partitionForeignEmails, resolveClientMailboxes } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
+import { partitionForeignEmails, resolveClientMailboxes, normalizeMailbox } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
 import { fetchReceivedEmailsWindow, fetchLeadInboundEmails, looksLikeEmail } from '@/lib/clientCampaignReplies/repliesWindow';
 import type { Email } from '@/lib/instantly/types';
 import { readCampaignAnalyticsFromDb } from '@/lib/tools/instantlyCampaignCatalog';
@@ -74,9 +74,24 @@ type LeadListItem = {
   is_answered?: boolean;
   message_count?: number;
   /**
-   * ТОЛЬКО для внутренней фильтрации чужих ящиков (см. readReplyItems): ящик,
-   * принявший письмо. В ответ клиенту НЕ отдаём — у фантомных писем это ящик
-   * другого клиента, который мы как раз скрываем.
+   * «Сирота» (ответ вне треда кампании): Instantly НЕ привязал письмо к
+   * кампании — атрибуция НАША, по цитируемому домену (othersWatchdog →
+   * instantly_lead_qualifications.reply_out_of_campaign). campaign_name у
+   * такого элемента — «похоже на лид кампании X», а не факт привязки: фронт
+   * показывает бейдж «вне треда» и НЕ даёт thread-действий (reply/forward) —
+   * письма в кампании нет.
+   */
+  out_of_campaign?: boolean;
+  /**
+   * ДВА разных режима:
+   * - live-окно (mapEmailToReplyItem): ТОЛЬКО для внутренней фильтрации чужих
+   *   ящиков (см. applyForeignFilter, где поле удаляется). В ответ клиенту НЕ
+   *   отдаём — у фантомных писем это ящик другого клиента, который мы как раз
+   *   скрываем.
+   * - элементы-сироты (readStrayReplyItems): наоборот, отдаём клиенту как
+   *   «Ящик:», но ТОЛЬКО когда он резолвится как собственный ящик клиента
+   *   (resolveClientMailboxes). Чужой ящик никогда не показываем (фантомная
+   *   приватность).
    */
   eaccount?: string | null;
 };
@@ -374,6 +389,141 @@ async function readReplyItems(
   return { items: await applyForeignFilter(userId, items, accessRows), failures };
 }
 
+// ─── «Ответы вне кампании» (сироты из Others) ────────────────────────────────
+
+const STRAY_REPLIES_WINDOW_DAYS = 30;
+const STRAY_REPLIES_LIMIT = 200;
+
+type StrayQualificationRow = {
+  id: string;
+  campaign_id: string | null;
+  campaign_name: string | null;
+  lead_email: string | null;
+  lead_name: string | null;
+  company_name: string | null;
+  thread_id: string | null;
+  reply_subject: string | null;
+  reply_preview: string | null;
+  reply_body: string | null;
+  status: string | null;
+  ai_reason: string | null;
+  instantly_email_id: string | null;
+  reply_timestamp: string | null;
+  created_at: string | null;
+  eaccount: string | null;
+};
+
+/**
+ * Строка instantly_lead_qualifications (сирота) → элемент фида. Кампания
+ * НЕ подменяется молча: флаг out_of_campaign говорит фронту показать её как
+ * «похоже на лид кампании X» (атрибуция по домену), а не как факт привязки.
+ * eaccount приходит сюда уже проверенным (свой ящик) или null.
+ */
+function mapStrayQualificationToItem(
+  row: StrayQualificationRow,
+  campaignName: string | null,
+  ownMailbox: string | null,
+): LeadListItem {
+  const timestamp = row.reply_timestamp ?? row.created_at;
+  return {
+    id: `stray:${row.id}`,
+    source: 'reply' as const,
+    qualification_id: row.id,
+    campaign_id: row.campaign_id ?? '',
+    campaign_name: row.campaign_name ?? campaignName,
+    lead_email: row.lead_email ?? '',
+    lead_name: row.lead_name,
+    company_name: row.company_name,
+    phone: null,
+    website: null,
+    linkedin_url: null,
+    reply_subject: row.reply_subject,
+    reply_body: row.reply_body ?? row.reply_preview,
+    last_outbound_preview: null,
+    reply_timestamp: row.reply_timestamp,
+    status: 'reply',
+    ai_reason: row.ai_reason,
+    created_at: row.created_at ?? timestamp ?? new Date(0).toISOString(),
+    client_lead_comments: [],
+    email_id: row.instantly_email_id,
+    lead_id: null,
+    thread_id: row.thread_id,
+    out_of_campaign: true,
+    // В ответ отдаём — в отличие от live-окна, но ТОЛЬКО свой ящик.
+    ...(ownMailbox ? { eaccount: ownMailbox } : {}),
+  };
+}
+
+/**
+ * Блок «Ответы вне кампании»: письма, которые Instantly НЕ привязал к кампании
+ * (лид ответил с другого адреса своей компании, сломанные заголовки треда).
+ * Их подхватывает othersWatchdog, атрибутует по цитируемому домену и пишет в
+ * instantly_lead_qualifications с reply_out_of_campaign=true — live-окно из
+ * Instantly таких писем не содержит (там только кампанийные).
+ *
+ * Доступ — тот же, что у кампаний фида: campaign_id ∈ разрешённых клиенту
+ * (filterAllowedIds по client_instantly_access / project links — сюда уже
+ * приходит отфильтрованный список). Дедуп против live-элементов — общий, по
+ * instantly_email_id (dedupeKey в mergeAndSortItems; live идёт первым и
+ * выигрывает). Сбой чтения НЕ валит фид: сироты — дополнение к live-окну.
+ */
+async function readStrayReplyItems(
+  campaignIds: string[],
+  campaignNames: Map<string, string>,
+  accessRows: ClientAccessRow[],
+  userId: string,
+): Promise<LeadListItem[]> {
+  if (!supabaseInstantly || campaignIds.length === 0) return [];
+
+  const sinceIso = new Date(
+    Date.now() - STRAY_REPLIES_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const { data, error } = await supabaseInstantly
+    .from('instantly_lead_qualifications')
+    .select(
+      'id, campaign_id, campaign_name, lead_email, lead_name, company_name, thread_id, reply_subject, reply_preview, reply_body, status, ai_reason, instantly_email_id, reply_timestamp, created_at, eaccount',
+    )
+    .eq('reply_out_of_campaign', true)
+    .in('campaign_id', campaignIds)
+    .or(`reply_timestamp.gte.${sinceIso},created_at.gte.${sinceIso}`)
+    .order('created_at', { ascending: false })
+    .limit(STRAY_REPLIES_LIMIT);
+
+  if (error) {
+    await logError('client.replies.strays_read_failed', error, { userId });
+    return [];
+  }
+
+  const rows = (data ?? []) as StrayQualificationRow[];
+  if (rows.length === 0) return [];
+
+  // Приватность ящика: eaccount показываем, только если это СОБСТВЕННЫЙ ящик
+  // клиента (resolveClientMailboxes = email_list кампании ∪ пул пресетов и
+  // запусков — те же механизмы, что у фильтра чужих ящиков live-окна). Чужой
+  // ящик (кросс-клиентский фантом) НЕ показываем. Здесь fail-CLOSED (резолв
+  // не удался → без ящика): утекает адрес, а не видимость письма — обратная
+  // логика fail-open у applyForeignFilter.
+  const presentCampaignIds = [...new Set(rows.map((r) => r.campaign_id).filter(Boolean))] as string[];
+  const mailboxSets = new Map<string, Set<string> | null>();
+  await Promise.all(
+    presentCampaignIds.map(async (campaignId) => {
+      const accountId = getResourceInstantlyAccountId(campaignId, accessRows, 'campaign');
+      mailboxSets.set(campaignId, await resolveClientMailboxes(userId, campaignId, accountId));
+    }),
+  );
+
+  return rows.map((row) => {
+    const mailboxes = mailboxSets.get(row.campaign_id ?? '') ?? null;
+    const box = normalizeMailbox(row.eaccount);
+    const ownMailbox = box && mailboxes && mailboxes.has(box) ? box : null;
+    return mapStrayQualificationToItem(
+      row,
+      campaignNames.get(row.campaign_id ?? '') ?? null,
+      ownMailbox,
+    );
+  });
+}
+
 /**
  * Глубокий поиск по email лида: тянет входящие этого лида напрямую из
  * Instantly (фильтр `lead` работает на всю историю, не только на окно фида).
@@ -581,6 +731,13 @@ export async function GET(req: NextRequest) {
     accessRows,
     userId,
   );
+
+  // Блок «Ответы вне кампании»: сироты из instantly_lead_qualifications
+  // (othersWatchdog). Live-окно их не содержит — Instantly эти письма к
+  // кампаниям не привязал. Дедуп против live-элементов по instantly_email_id
+  // делает mergeAndSortItems ниже (live идёт первым и выигрывает).
+  const strayItems = await readStrayReplyItems(allowedCampaignIds, campaignNames, accessRows, userId);
+  if (strayItems.length > 0) replyItems.push(...strayItems);
 
   if (
     allowedCampaignIds.length > 0 &&

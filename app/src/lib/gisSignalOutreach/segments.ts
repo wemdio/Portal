@@ -18,14 +18,24 @@
  * простая схема — пропорционально размеру рубрики считать нечем, а равные
  * доли предсказуемы и документируемы. Недобранная квота одного сегмента
  * другим НЕ передаётся (сегменты — независимые воронки).
+ *
+ * ИЗОЛЯЦИЯ: единственный санкционированный импорт из outreachos —
+ * seenEmployers (обратный кросс-дедуп §4.2 дизайн-дока top-up'а: не писать
+ * компаниям, которым OutreachOS писал за последние 45 дней). Mailganer-стек
+ * по-прежнему не импортируется нигде.
  */
 
 import 'server-only';
-import { iterateTwoGisCards } from '@/lib/twoGis/repository';
-import { twoGisDatasetQuery } from '@/lib/twoGisDataset';
+import { deriveDomain } from '@/lib/jobs/hhAutoParser';
+import { RECONTACT_AFTER_DAYS, loadRecentlySeenDomains } from '@/lib/outreachos/seenEmployers';
+import { getLatestTwoGisSnapshotId, iterateTwoGisCards } from '@/lib/twoGis/repository';
 import type { TwoGisCard } from '@/lib/twoGis/types';
 import { toTwoGisRubricGroups, type GisSignalSegment } from './config';
 import { filterUnseenIds, filterRecentlyCheckedIds } from './seenCompanies';
+
+// Переэкспорт для существующих потребителей (pipelineRunner): каноническое
+// определение теперь в twoGis/repository (общая точка с OutreachOS top-up).
+export { getLatestTwoGisSnapshotId } from '@/lib/twoGis/repository';
 
 export interface SegmentCandidate {
   twogisId: string;
@@ -50,26 +60,6 @@ export function computeSegmentQuotas(dailyLimit: number, segmentCount: number): 
   const base = Math.floor(dailyLimit / segmentCount);
   const remainder = dailyLimit - base * segmentCount;
   return Array.from({ length: segmentCount }, (_, i) => base + (i < remainder ? 1 : 0));
-}
-
-/**
- * Id текущего снапшота 2GIS-датасета — iterateTwoGisCards требует его явно
- * (стрим привязан к снапшоту, чтобы импорт нового среза не ломал курсор).
- * null → датасет недоступен, прогон пропускаем.
- */
-export async function getLatestTwoGisSnapshotId(): Promise<number | null> {
-  try {
-    const rows = await twoGisDatasetQuery<{ id: string | number }>(
-      `SELECT id
-       FROM public.dataset_snapshots
-       ORDER BY imported_at DESC
-       LIMIT 1`,
-    );
-    const id = Number(rows[0]?.id);
-    return Number.isSafeInteger(id) && id > 0 ? id : null;
-  } catch {
-    return null;
-  }
 }
 
 function cardToCandidate(card: TwoGisCard, segmentKey: string): SegmentCandidate {
@@ -100,6 +90,12 @@ export async function pullSegmentCandidates(
   const takenIds = new Set<string>(); // cross-segment дедуп этого прогона
   const out: SegmentCandidate[] = [];
 
+  // Обратный кросс-дедуп (§4.2 дизайн-дока 2026-08-11-outreachos-2gis-topup):
+  // компании, которым OutreachOS (HH+SJ или 2GIS top-up) писал за последние
+  // RECONTACT_AFTER_DAYS дней, этот пайплайн не трогает — общий ключ миров =
+  // домен сайта. Единое окно ре-контакта 45д (решение §7.3 дока).
+  const outreachosSeenDomains = await loadRecentlySeenDomains(RECONTACT_AFTER_DAYS);
+
   for (let s = 0; s < segments.length; s++) {
     const segment = segments[s];
     const quota = quotas[s];
@@ -113,6 +109,7 @@ export async function pullSegmentCandidates(
     let scanned = 0;
     let seenDropped = 0;
     let recentDropped = 0;
+    let outreachosDropped = 0;
 
     for await (const batch of iterateTwoGisCards(filters, { snapshotId: opts.snapshotId })) {
       scanned += batch.length;
@@ -130,6 +127,13 @@ export async function pullSegmentCandidates(
           recentDropped += 1;
           continue;
         }
+        // Домен в seen-журнале OutreachOS (45д) — пропускаем: компания уже
+        // получила письмо от основного пайплайна (или его 2GIS top-up'а).
+        const domain = deriveDomain(card.website);
+        if (domain && outreachosSeenDomains.has(domain)) {
+          outreachosDropped += 1;
+          continue;
+        }
         takenIds.add(card.id);
         out.push(cardToCandidate(card, segment.key));
         pulled += 1;
@@ -138,7 +142,8 @@ export async function pullSegmentCandidates(
     }
     log(
       `[segments] ${segment.key}: pulled=${pulled}/${quota} ` +
-        `(scanned=${scanned}, seen-отсев=${seenDropped}, недавние-проверки-отсев=${recentDropped})`,
+        `(scanned=${scanned}, seen-отсев=${seenDropped}, недавние-проверки-отсев=${recentDropped}, ` +
+        `outreachos-${RECONTACT_AFTER_DAYS}д-отсев=${outreachosDropped})`,
     );
   }
 

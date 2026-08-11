@@ -30,7 +30,8 @@ function chainJobFor(jobs: HeJobSummary[], verticalId: string): HeJobSummary | u
   );
 }
 
-function ChainEditor({
+/** Инлайн-редактор писем цепочки; переиспользуется шагом 5 «Review & Launch». */
+export function ChainEditor({
   chain,
   onSaved,
 }: {

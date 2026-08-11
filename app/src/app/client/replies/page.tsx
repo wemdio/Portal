@@ -57,6 +57,10 @@ type ForwardedLead = {
   lead_entry_id?: string | null;
   is_answered?: boolean;
   message_count?: number;
+  /** «Сирота»: Instantly не привязал письмо к кампании (атрибуция по домену) — бейдж «вне треда», read-only показ. */
+  out_of_campaign?: boolean;
+  /** Ящик, принявший письмо (только свой, чужой сервер не отдаёт) — для сирот. */
+  eaccount?: string | null;
 };
 
 type LeadsResponse = {
@@ -126,7 +130,23 @@ function LeadDetail({
   const [blockError, setBlockError] = useState('');
   const [markingUnread, setMarkingUnread] = useState(false);
   const canComment = lead.source !== 'reply';
-  const canReplyByEmail = Boolean(lead.campaign_id && lead.email_id);
+  // Сирота (ответ вне треда кампании): письма в кампании НЕТ (Instantly его не
+  // привязал), поэтому тред/ответ/forward через портал невозможны — read-only.
+  const isOutOfCampaign = Boolean(lead.out_of_campaign);
+  const canReplyByEmail = Boolean(lead.campaign_id && lead.email_id && !isOutOfCampaign);
+
+  // У сироты нет /thread (он читает кампанийные письма Instantly), поэтому
+  // прочтение при открытии помечаем явно — иначе «непрочитано» не гаснет.
+  useEffect(() => {
+    if (!isOutOfCampaign || !lead.campaign_id || !lead.email_id) return;
+    void clientApiFetch(`/campaigns/${lead.campaign_id}/replies/${lead.email_id}/read`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ read: true }),
+    }).catch(() => {
+      // статус прочтения не критичен — молча игнорируем сбой
+    });
+  }, [isOutOfCampaign, lead.campaign_id, lead.email_id]);
 
   const loadComments = useCallback(async () => {
     if (!canComment) {
@@ -282,6 +302,15 @@ function LeadDetail({
               <span aria-hidden className="ds-status-dot" style={{ background: statusBadge.dotColor }} />
               {statusBadge.label}
             </span>
+            {isOutOfCampaign && (
+              <span
+                className="ds-status-tag"
+                style={{ color: 'var(--cp-paper-mute)' }}
+                title="Instantly не привязал это письмо к кампании — атрибуция по домену"
+              >
+                вне треда
+              </span>
+            )}
             <span
               className="neu-pill px-3 py-1.5 text-[11px] font-bold"
               style={{ color: 'var(--cp-accent)' }}
@@ -308,8 +337,38 @@ function LeadDetail({
           {lead.phone && <InfoRow label="Телефон" value={lead.phone} />}
           {lead.website && <InfoRow label="Сайт" value={lead.website} />}
           {lead.linkedin_url && <InfoRow label="LinkedIn" value={lead.linkedin_url} />}
-          {lead.campaign_name && <InfoRow label="Кампания" value={lead.campaign_name} />}
+          {lead.campaign_name && (
+            <InfoRow
+              label={isOutOfCampaign ? 'Похоже на лид кампании' : 'Кампания'}
+              value={lead.campaign_name}
+            />
+          )}
+          {isOutOfCampaign && lead.eaccount && <InfoRow label="Ящик" value={lead.eaccount} />}
         </div>
+
+        {/* Сирота: письмо не привязано Instantly к кампании — треда в портале
+            нет. Показываем сам ответ статично (read-only), без действий. */}
+        {isOutOfCampaign && (
+          <div className="mb-2">
+            <p className="ds-eyebrow mb-2">
+              02<span aria-hidden> → </span>ответ вне треда кампании
+            </p>
+            <div className="neu-sm rounded-xl p-4">
+              {lead.reply_subject && (
+                <p className="text-sm font-semibold mb-1" style={{ color: 'var(--cp-paper)' }}>
+                  {lead.reply_subject}
+                </p>
+              )}
+              <p className="text-sm whitespace-pre-wrap" style={{ color: 'var(--cp-text)' }}>
+                {lead.reply_body ?? ''}
+              </p>
+              <p className="text-xs mt-3" style={{ color: 'var(--cp-text-l)' }}>
+                Instantly не привязал это письмо к кампании — переписка и ответ через портал
+                недоступны. Ответьте из почты{lead.eaccount ? ` ящика ${lead.eaccount}` : ' вашего ящика'}.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Переписка — единой лентой (новые сверху, как в Instantly), сразу под
             шапкой. Раньше тут были закреплённые «наше последнее письмо» + «ответ
@@ -523,6 +582,15 @@ function LeadCard({
           <span aria-hidden className="ds-status-dot" style={{ background: statusColor }} />
           {statusLabel}
         </span>
+        {lead.out_of_campaign && (
+          <span
+            className="ds-status-tag"
+            style={{ color: 'var(--cp-paper-mute)' }}
+            title="Instantly не привязал это письмо к кампании — атрибуция по домену"
+          >
+            вне треда
+          </span>
+        )}
         {(lead.message_count ?? 0) > 1 && (
           <span className="text-[10px] font-semibold shrink-0" style={{ color: 'var(--cp-paper-faint)' }} title="Ответов лида в переписке">
             <span className="ds-mono tabular-nums">{lead.message_count}</span>{' '}
@@ -531,7 +599,14 @@ function LeadCard({
         )}
         <p className="text-xs truncate min-w-0" style={{ color: 'var(--cp-paper-mute)' }}>
           {lead.lead_email}
-          {lead.campaign_name && <span style={{ color: 'var(--cp-paper-faint)' }}> · {lead.campaign_name}</span>}
+          {lead.campaign_name && (
+            <span style={{ color: 'var(--cp-paper-faint)' }}>
+              {' · '}{lead.out_of_campaign ? `похоже на лид: ${lead.campaign_name}` : lead.campaign_name}
+            </span>
+          )}
+          {lead.out_of_campaign && lead.eaccount && (
+            <span style={{ color: 'var(--cp-paper-faint)' }}>{' · '}ящик {lead.eaccount}</span>
+          )}
         </p>
       </div>
 
