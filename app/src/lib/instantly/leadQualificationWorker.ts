@@ -608,6 +608,19 @@ export async function qualifyOneReply(
      * не меняется.
      */
     clientDmOnlyOnLead?: boolean;
+    /**
+     * «Сирота»: Instantly НЕ привязал письмо к кампании (лид ответил с
+     * другого адреса своей компании, сломанные заголовки треда) — атрибуция
+     * сделана НАМИ по цитируемому домену (othersWatchdog; детектор там — у
+     * исходного письма campaign_id пуст/не совпадает с атрибутированным).
+     * Main-poll контур сюда не попадает (фильтр !!campaign_id в
+     * fetchRecentLinkedReplies), поэтому дефолт — false. Влияет на:
+     *  - честность DM («Ответ вне треда кампании», а не «по вашей кампании»);
+     *  - колонку reply_out_of_campaign во всех upsert'ах ниже (единообразно:
+     *    lead / needs_review / cross-client / stray / client-echo), по которой
+     *    кабинет собирает блок «Ответы вне кампании».
+     */
+    outOfCampaign?: boolean;
   },
 ): Promise<void> {
   const campaignId = reply.campaign_id;
@@ -617,6 +630,12 @@ export async function qualifyOneReply(
     '';
 
   if (!campaignId || !leadEmail) return;
+
+  const outOfCampaign = opts?.outOfCampaign === true;
+  // Ящик, физически принявший письмо. Пишем в квалификацию и (для сирот)
+  // показываем в DM — «в каком ящике искать ответ». Пустую строку схлопываем
+  // в null, чтобы не плодить два представления отсутствия.
+  const replyEaccount = (reply.eaccount ?? '').trim() || null;
 
   // Пост-handoff эхо: письмо от нашего клиента (он отвечает лиду со своей
   // почты, мы в копии) — не квалифицируем как лида. Строку всё равно пишем:
@@ -647,6 +666,8 @@ export async function qualifyOneReply(
         instantly_email_id: reply.id,
         instantly_lead_id: null,
         reply_timestamp: reply.timestamp_email ?? null,
+        reply_out_of_campaign: outOfCampaign,
+        eaccount: replyEaccount,
       },
       { onConflict: 'instantly_email_id', ignoreDuplicates: true },
     );
@@ -700,6 +721,8 @@ export async function qualifyOneReply(
           instantly_email_id: reply.id,
           instantly_lead_id: null,
           reply_timestamp: reply.timestamp_email ?? null,
+          reply_out_of_campaign: outOfCampaign,
+          eaccount: replyEaccount,
         },
         { onConflict: 'instantly_email_id', ignoreDuplicates: true },
       );
@@ -792,6 +815,8 @@ export async function qualifyOneReply(
           instantly_email_id: reply.id,
           instantly_lead_id: null,
           reply_timestamp: reply.timestamp_email ?? null,
+          reply_out_of_campaign: outOfCampaign,
+          eaccount: replyEaccount,
         },
         { onConflict: 'instantly_email_id', ignoreDuplicates: true },
       );
@@ -929,6 +954,8 @@ export async function qualifyOneReply(
         reply_timestamp: reply.timestamp_email ?? null,
         objection_handleable: result.objectionHandleable,
         objection_draft: result.objectionDraft,
+        reply_out_of_campaign: outOfCampaign,
+        eaccount: replyEaccount,
       },
       { onConflict: 'instantly_email_id', ignoreDuplicates: true },
     )
@@ -1047,6 +1074,11 @@ export async function qualifyOneReply(
       // Атрибуция бейджа «Лид по вашим критериям»: бейдж получает ТОЛЬКО
       // клиент, чей промпт дал вердикт (per-link в notifyClientOfReply).
       criteriaClientUserId: status === 'lead' && criteriaSource === 'client' ? criteriaClientId : null,
+      // Сирота (Others-контур): DM скажет «Ответ вне треда кампании» и покажет
+      // ящик, где искать письмо — иначе клиент ищет его в кампании, где его
+      // нет и быть не может (инцидент 11.08.2026).
+      outOfCampaign,
+      eaccount: replyEaccount,
     });
   }
 }
@@ -1232,6 +1264,10 @@ async function notifyClientOfReply(
     isLead?: boolean;
     /** Чей «свой промпт» дал вердикт lead — бейдж в DM только этому клиенту. */
     criteriaClientUserId?: string | null;
+    /** Письмо не привязано Instantly к кампании (сирота из Others) — честный заголовок DM. */
+    outOfCampaign?: boolean;
+    /** Ящик, физически принявший письмо — «Ящик:» в DM при сироте. */
+    eaccount?: string | null;
   },
 ): Promise<void> {
   try {

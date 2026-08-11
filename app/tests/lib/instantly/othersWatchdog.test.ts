@@ -233,6 +233,44 @@ describe('pollOthersOnce', () => {
     expect(opts).toMatchObject({ clientDmOnlyOnLead: true });
   });
 
+  it('помечает сироту: у Others-письма нет campaign_id → opts.outOfCampaign=true (инцидент 11.08)', async () => {
+    // Детектор из брифа: исходное письмо НЕ привязано Instantly (campaign_id
+    // пуст — проверено живьём 500/500), атрибуция сделана нами по домену →
+    // честный DM «Ответ вне треда кампании» + колонка reply_out_of_campaign.
+    const { pollOthersOnce } = await importWatchdog();
+    await pollOthersOnce();
+
+    expect(qualifyOneReply).toHaveBeenCalledTimes(1);
+    const [, reply, , , , opts] = qualifyOneReply.mock.calls[0];
+    // Воркеру передаём атрибутированную кампанию (для guard'ов/upsert'ов)…
+    expect((reply as Email).campaign_id).toBe('camp-velar');
+    // …но сироту помечаем отдельным флагом, НЕ подменяя факт привязки.
+    expect(opts).toMatchObject({ clientDmOnlyOnLead: true, outOfCampaign: true });
+  });
+
+  it('НЕ сирота, если у Others-письма campaign_id совпал с атрибутированным → outOfCampaign=false', async () => {
+    // Гипотетический случай (вживую Instantly Others без campaign_id): письмо
+    // уже привязано к той же кампании — детектор молчит.
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return {
+          items: [makeOthersEmail({ campaign_id: 'camp-velar' } as Partial<Email>)],
+          next_starting_after: null,
+        };
+      }
+      if (params.email_type === 'sent') {
+        return { items: [SENT_MATCH], next_starting_after: null };
+      }
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    await pollOthersOnce();
+
+    expect(qualifyOneReply).toHaveBeenCalledTimes(1);
+    const [, , , , , opts] = qualifyOneReply.mock.calls[0];
+    expect(opts).toMatchObject({ outOfCampaign: false });
+  });
+
   it('ЛИД С ЛИЧНОЙ ПОЧТЫ (слали на корпоративный): тема совпала → берём, адрес не важен', async () => {
     // Ровно кейс, ради которого фича: человек отвечает с личного mail.ru, мы на
     // этот адрес не слали — но тема ответа = тема кампании.
