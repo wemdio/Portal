@@ -65,6 +65,10 @@ function makeMockDb(opts?: { dialogExists?: boolean; isProcessed?: boolean; canS
       delete: () => { ctx.op = 'delete'; calls.push({ ...ctx }); return builder; },
       eq: (col: string, val: unknown) => { ctx.filter = { ...ctx.filter, [col]: val }; return builder; },
       maybeSingle: jest.fn().mockImplementation(() => {
+        // Списки «кому мы писали по базе» — источник для isCampaignContact.
+        if (table === 'tg_outreach_processed' && ctx.op === 'select') {
+          return Promise.resolve({ data: isProcessed ? { tg_user_id: ctx.filter?.tg_user_id } : null, error: null });
+        }
         if (table === 'tg_outreach_dialogs' && ctx.op === 'select') {
           if (dialogExists) {
             return Promise.resolve({ data: { id: 'dlg-1', messages: [], status: 'none', can_send: canSend, tg_is_bot: false }, error: null });
@@ -340,5 +344,60 @@ describe('tgOutreach handleChat', () => {
       expect(result.replied).toBe(false);
       expect(client.invoke).toHaveBeenCalled();
     });
+  });
+});
+
+/**
+ * Прогрев оставляет в купленном аккаунте чаты со своими же аккаунтами, и наше
+ * исходящее там есть — значит «отвечать только если ранее писали» их пропускает.
+ * Бот отвечал партнёру по прогреву боевым скриптом, а его ответ мог уехать в чат
+ * менеджера как лид. Настройка «писать только контактам из баз» это закрывает.
+ */
+describe('tgOutreach handleChat — писать только контактам из баз', () => {
+  const log = jest.fn();
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (openaiGenerate as jest.Mock).mockResolvedValue('Здравствуйте!');
+  });
+
+  const settings = (over: Record<string, unknown>) => makeCampaign({
+    telegram_settings: {
+      ...DEFAULT_TELEGRAM_SETTINGS,
+      reply_only_if_previously_wrote: false,
+      pre_read_delay_range: [0, 0],
+      read_reply_delay_range: [0, 0],
+      ...over,
+    },
+  });
+
+  const run = async (campaign: OutreachCampaign, isProcessed: boolean) => {
+    const client = makeMockClient(USER_MESSAGES);
+    const { db } = makeMockDb({ dialogExists: true, canSend: true, isProcessed });
+    const entity = makeUser({ id: 12345, username: 'warmup_partner' });
+    const dialog = { entity, unreadCount: 1 } as unknown as import('telegram/tl/custom/dialog').Dialog;
+    const result = await handleChat(client as never, ACCOUNT, dialog, campaign, db as never, log);
+    return { result, client };
+  };
+
+  it('молчит в чате прогрева: собеседника нет среди контактов баз', async () => {
+    const { result, client } = await run(settings({ reply_only_to_base_contacts: true }), false);
+
+    expect(result.replied).toBe(false);
+    expect(client.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('отвечает тому, кому писали по базе', async () => {
+    const { result, client } = await run(settings({ reply_only_to_base_contacts: true }), true);
+
+    expect(result.replied).toBe(true);
+    expect(client.sendMessage).toHaveBeenCalled();
+  });
+
+  it('с выключенной настройкой поведение прежнее — отвечает всем', async () => {
+    const { result, client } = await run(settings({ reply_only_to_base_contacts: false }), false);
+
+    expect(result.replied).toBe(true);
+    expect(client.sendMessage).toHaveBeenCalled();
   });
 });

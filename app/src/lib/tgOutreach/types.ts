@@ -104,6 +104,15 @@ export interface FollowUpSettings {
 export interface TelegramSettings {
   forward_limit: number;
   reply_only_if_previously_wrote: boolean;
+  /**
+   * Отвечать только тем, кому мы писали по базе этой кампании.
+   *
+   * Без этого бот отвечает в любом диалоге, где есть наше исходящее, — а в
+   * купленном аккаунте это ещё и чаты прогрева между своими же аккаунтами.
+   * Кампании, заведённые до настройки, поля не имеют: `?` означает «выключено»,
+   * чтобы не менять молча поведение уже идущих рассылок.
+   */
+  reply_only_to_base_contacts?: boolean;
   auto_allow_new_dialogs: boolean;
   history_limit: number;
   pre_read_delay_range: [number, number];
@@ -315,6 +324,10 @@ export const DEFAULT_FOLLOW_UP: FollowUpSettings = {
 export const DEFAULT_TELEGRAM_SETTINGS: TelegramSettings = {
   forward_limit: 5,
   reply_only_if_previously_wrote: true,
+  // Новым кампаниям — включено: почти всегда нужно именно это, а обратное
+  // (отвечать всем подряд из старых чатов аккаунта) приходится осознанно
+  // разрешать.
+  reply_only_to_base_contacts: true,
   auto_allow_new_dialogs: true,
   history_limit: 20,
   pre_read_delay_range: [5, 10],
