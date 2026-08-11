@@ -48,6 +48,11 @@ import {
   DEFAULT_TELEGRAM_SETTINGS,
   DEFAULT_FOLLOW_UP,
 } from '@/lib/tgOutreach/types';
+// Только тип: сам модуль серверный (тянет gramJS), в клиентский бандл он не
+// попадает — import type стирается при сборке. Берём его, чтобы набор статусов
+// проверки был один на портал, а не переписанный руками на экране.
+import type { AccountCheckResult, OtherSession } from '@/lib/tgOutreach/accountCheck';
+import type { ProxyCheckResult } from '@/lib/tgOutreach/proxyCheck';
 
 const API_BASE = '/api/tools/tg-outreach';
 
@@ -1201,10 +1206,13 @@ function BulkActionsBar({
   deleting,
   onClear,
   onDelete,
-  /** Проверка живости — только у аккаунтов, у прокси и баз её нет. */
+  /** Проверка живости — у аккаунтов и у прокси; у баз её нет. */
   checking,
   canCheck,
   onCheck,
+  /** Что именно проверяем — по умолчанию аккаунты, у прокси свои слова. */
+  checkLabel,
+  checkTitle,
 }: {
   selectedCount: number;
   deleting: boolean;
@@ -1213,6 +1221,8 @@ function BulkActionsBar({
   checking?: boolean;
   canCheck?: boolean;
   onCheck?: () => void;
+  checkLabel?: string;
+  checkTitle?: string;
 }) {
   if (selectedCount === 0) return null;
   return (
@@ -1224,12 +1234,12 @@ function BulkActionsBar({
           onClick={onCheck}
           disabled={checking || deleting || !canCheck}
           title={canCheck
-            ? 'Зайти в каждый аккаунт и проверить, жив ли он и кто ещё в нём сидит'
+            ? checkTitle ?? 'Зайти в каждый аккаунт и проверить, жив ли он и кто ещё в нём сидит'
             : 'Сначала остановите кампанию: во время работы аккаунты заняты'}
           className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
-          Проверить аккаунты
+          {checkLabel ?? 'Проверить аккаунты'}
         </button>
       )}
       <button
@@ -1282,7 +1292,33 @@ function useRowSelection(allIds: string[]) {
 }
 
 /** Результат чтения профиля из Telegram: ошибка либо обновлённые поля. */
-type SyncResult = { error: string | null; patch?: Partial<OutreachAccount> };
+type SyncResult = {
+  error: string | null;
+  patch?: Partial<OutreachAccount>;
+  /**
+   * Профиль прочитан, а аватарку не удалось положить в хранилище портала.
+   * Не ошибка чтения: имя и описание приехали, поэтому и не error.
+   */
+  avatarError?: string;
+};
+
+/**
+ * Ответ проверки по одному аккаунту.
+ *
+ * Общий счёт вида «Проверено 3: жив — 2» отвечал на вопрос «сколько», а
+ * оператору нужен ответ на вопрос «какой»: заливали партию, а разбираться нужно
+ * с конкретным аккаунтом. Чужие сеансы держим рядом со статусом — именно ими
+ * «в аккаунт кто-то зашёл» отличается от «номер забанен».
+ */
+interface CheckRow {
+  id: string;
+  /** session_name — под ним аккаунт лежит в портале и в списке. */
+  name: string;
+  /** Из набора check_status: ok | session_revoked | banned | … */
+  status: string;
+  detail: string;
+  otherSessions: OtherSession[];
+}
 
 /**
  * Итоги проверки аккаунта человеческим языком.
@@ -1400,7 +1436,8 @@ function CampaignAccountsTab({
   const [syncSummary, setSyncSummary] = useState<string | null>(null);
   /** id аккаунтов, которые сейчас проверяются на живость. */
   const [checkingIds, setCheckingIds] = useState<string[]>([]);
-  const [checkSummary, setCheckSummary] = useState<string | null>(null);
+  /** Ответ Telegram по каждому проверенному аккаунту; висит, пока не закроют. */
+  const [checkResults, setCheckResults] = useState<CheckRow[] | null>(null);
 
   // Профиль читается через то же соединение, что и работа кампании, поэтому
   // на запущенной кампании в Telegram не ходим — см. гейт в API.
@@ -1408,6 +1445,37 @@ function CampaignAccountsTab({
 
   const accountIds = useMemo(() => accounts.map(a => a.id), [accounts]);
   const { selectedIds, isSelected, toggle, setAll, clear } = useRowSelection(accountIds);
+
+  /**
+   * Прокси, которые ещё никому не назначены.
+   *
+   * Занятость по экрану не читается, и один и тот же мобильный прокси легко
+   * уходил двум аккаунтам — для Telegram это одно устройство с двумя аккаунтами,
+   * то есть прямой повод для блокировки. Поэтому занятых в выпадающем списке
+   * просто нет. Считаем в пределах кампании: прокси заводятся ей же, и список
+   * аккаунтов на экране — тоже её; сверять весь портал значило бы тянуть с
+   * сервера чужие кампании ради подсказки.
+   */
+  const freeProxies = useMemo(() => {
+    const taken = new Set(accounts.map(a => a.proxy_id).filter((v): v is string => Boolean(v)));
+    return proxies.filter(p => !taken.has(p.id));
+  }, [accounts, proxies]);
+
+  /**
+   * Варианты для строки аккаунта: свободные плюс его собственный прокси.
+   *
+   * Без своего оператор не увидел бы, что вообще стоит в строке, и открытая
+   * выпадашка выглядела бы как «прокси сбросился».
+   */
+  const proxyOptions = useCallback(
+    (currentId: string | null) => {
+      const current = currentId ? proxies.find(p => p.id === currentId) : null;
+      return current && !freeProxies.some(p => p.id === current.id)
+        ? [current, ...freeProxies]
+        : freeProxies;
+    },
+    [freeProxies, proxies],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1469,9 +1537,12 @@ function CampaignAccountsTab({
         const d = (await res.json().catch(() => null)) as { error?: string } | null;
         return { error: d?.error ?? `Ошибка ${res.status}` };
       }
-      const patch = (await res.json()) as Partial<OutreachAccount>;
+      // avatar_error — не поле аккаунта, а объяснение от сервера, поэтому в
+      // строку списка его не подмешиваем.
+      const { avatar_error: avatarError, ...patch } =
+        (await res.json()) as Partial<OutreachAccount> & { avatar_error?: string };
       setAccounts(prev => prev.map(a => (a.id === id ? { ...a, ...patch } : a)));
-      return { error: null, patch };
+      return { error: null, patch, ...(avatarError ? { avatarError } : {}) };
     } catch (e) {
       return { error: e instanceof Error ? e.message : String(e) };
     } finally {
@@ -1480,37 +1551,54 @@ function CampaignAccountsTab({
   }, []);
 
   /**
-   * Обновить профили всех аккаунтов кампании.
+   * Аккаунты, чьи профили обновит кнопка: выбранные, а если ничего не выбрано —
+   * все. Чтение одного профиля занимает десятки секунд, и на кампании из
+   * семнадцати аккаунтов ждать полный круг ради одной строки оператору незачем.
+   */
+  const syncTargets = useMemo(
+    () => (selectedIds.length ? accounts.filter(a => selectedIds.includes(a.id)) : accounts),
+    [accounts, selectedIds],
+  );
+
+  /**
+   * Обновить профили выбранных аккаунтов (или всех, если выбора нет).
    *
    * Идём пачками по четыре: каждое чтение — это подключение через мобильный
    * прокси на десятки секунд. Шестнадцать подряд оператор ждать не станет, а все
    * разом — это шестнадцать одновременных соединений в один пул, который и так
    * бракует часть портов.
    */
-  const syncAllProfiles = useCallback(async () => {
-    const targets = accounts.map(a => ({ id: a.id, name: a.session_name }));
+  const syncProfiles = useCallback(async () => {
+    const targets = syncTargets.map(a => ({ id: a.id, name: a.session_name }));
     if (!targets.length) return;
     setSyncSummary(null);
 
     const failures: string[] = [];
+    // Причина у всех аккаунтов одна и та же (хранилище портала), поэтому в
+    // отчёте показываем её один раз, а не семнадцать.
+    const avatarProblems = new Set<string>();
     let next = 0;
     const worker = async () => {
       while (next < targets.length) {
         const t = targets[next++];
-        const { error } = await syncProfile(t.id);
+        const { error, avatarError } = await syncProfile(t.id);
         if (error) failures.push(`${t.name}: ${error}`);
+        if (avatarError) avatarProblems.add(avatarError);
       }
     };
     await Promise.all(
       Array.from({ length: Math.min(4, targets.length) }, () => worker()),
     );
 
+    const headline = failures.length
+      ? `Обновлено ${targets.length - failures.length} из ${targets.length}. Не получилось — ${failures.slice(0, 3).join('; ')}${failures.length > 3 ? ` и ещё ${failures.length - 3}` : ''}`
+      : `Профили обновлены: ${targets.length}`;
     setSyncSummary(
-      failures.length
-        ? `Обновлено ${targets.length - failures.length} из ${targets.length}. Не получилось — ${failures.slice(0, 3).join('; ')}${failures.length > 3 ? ` и ещё ${failures.length - 3}` : ''}`
-        : `Профили обновлены: ${targets.length}`,
+      avatarProblems.size
+        ? `${headline}. Аватарки не сохранились: ${[...avatarProblems].join('; ')}`
+        : headline,
     );
-  }, [accounts, syncProfile]);
+  }, [syncTargets, syncProfile]);
 
   /**
    * Проверить выбранные аккаунты.
@@ -1518,37 +1606,64 @@ function CampaignAccountsTab({
    * Идём пачками по четыре — как и чтение профилей: каждая проверка это
    * подключение через мобильный прокси на десятки секунд, а полсотни
    * одновременных соединений в один пул он не переживёт.
+   *
+   * Ответ проверки — это и есть результат: статус, объяснение и чужие сеансы
+   * приходят от самого Telegram, и ровно их же ручка кладёт в аккаунт. Поэтому
+   * список после проверки не перечитываем: строку обновляем тем, что ответило
+   * Telegram по этому аккаунту.
    */
   const checkSelected = useCallback(async () => {
     const targets = accounts
       .filter((a) => selectedIds.includes(a.id))
       .map((a) => ({ id: a.id, name: a.session_name }));
     if (!targets.length) return;
-    setCheckSummary(null);
+    setCheckResults(null);
 
-    const byStatus = new Map<string, number>();
+    // По месту в targets, а не в порядке ответов: четыре воркера заканчивают
+    // вразнобой, а оператор ищет строку там, где выделял.
+    const rows: CheckRow[] = new Array<CheckRow>(targets.length);
     let next = 0;
     const worker = async () => {
       while (next < targets.length) {
-        const t = targets[next++];
+        const i = next++;
+        const t = targets[i];
         setCheckingIds((prev) => [...prev, t.id]);
         try {
           const res = await authFetch(`${API_BASE}/accounts/${t.id}/check`, { method: 'POST' });
-          const data = (await res.json().catch(() => ({}))) as {
-            status?: string; detail?: string; error?: string;
-          };
-          const status = res.ok ? (data.status ?? 'error') : 'error';
-          byStatus.set(status, (byStatus.get(status) ?? 0) + 1);
+          const data = (await res.json().catch(() => null)) as
+            | (Partial<AccountCheckResult> & { error?: string })
+            | null;
+
+          // Отказ ручки (кампания работает, аккаунта нет) — это не ответ
+          // Telegram, поэтому и статуса из его набора у него нет: error.
+          const status = res.ok && data?.status ? data.status : 'error';
+          const detail = (res.ok ? data?.detail : data?.error)
+            ?? (res.ok ? 'Telegram ничего не объяснил' : `сервер ответил ${res.status}`);
+          const otherSessions = (res.ok && data?.other_sessions) || [];
+          rows[i] = { id: t.id, name: t.name, status, detail, otherSessions };
+
           setAccounts((prev) => prev.map((a) => (a.id === t.id
             ? {
                 ...a,
                 check_status: status,
-                check_detail: data.detail ?? data.error ?? null,
+                check_detail: detail,
                 checked_at: new Date().toISOString(),
+                other_sessions: otherSessions,
+                // Личность и телефон проверка узнаёт заодно — их ручка тоже
+                // записала, и в строке они должны появиться без перезагрузки.
+                ...(data?.tg_user_id != null ? { tg_user_id: data.tg_user_id } : {}),
+                ...(data?.tg_username ? { tg_username: data.tg_username } : {}),
+                ...(data?.phone ? { phone: data.phone } : {}),
               }
             : a)));
-        } catch {
-          byStatus.set('error', (byStatus.get('error') ?? 0) + 1);
+        } catch (e) {
+          rows[i] = {
+            id: t.id,
+            name: t.name,
+            status: 'error',
+            detail: e instanceof Error ? e.message : String(e),
+            otherSessions: [],
+          };
         } finally {
           setCheckingIds((prev) => prev.filter((x) => x !== t.id));
         }
@@ -1556,13 +1671,8 @@ function CampaignAccountsTab({
     };
     await Promise.all(Array.from({ length: Math.min(4, targets.length) }, () => worker()));
 
-    const parts = [...byStatus.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .map(([status, n]) => `${CHECK_LABEL[status]?.text ?? status} — ${n}`);
-    setCheckSummary(`Проверено ${targets.length}: ${parts.join(', ')}.`);
-    // Чужие сеансы приходят только с сервера, поэтому дочитываем список целиком.
-    void load();
-  }, [accounts, selectedIds, load]);
+    setCheckResults(rows);
+  }, [accounts, selectedIds]);
 
   const toggleActive = async (id: string, current: boolean) => {
     await authFetch(`${API_BASE}/accounts/${id}`, {
@@ -1703,15 +1813,23 @@ function CampaignAccountsTab({
         <div className="flex items-center gap-2">
           <button
             type="button"
-            disabled={!profileReadable || syncingIds.length > 0 || accounts.length === 0}
-            onClick={() => { void syncAllProfiles(); }}
+            disabled={!profileReadable || syncingIds.length > 0 || syncTargets.length === 0}
+            onClick={() => { void syncProfiles(); }}
             title={profileReadable
-              ? 'Прочитать имя, описание и аватарку каждого аккаунта из Telegram'
+              ? selectedIds.length
+                ? `Прочитать из Telegram профили выбранных аккаунтов: ${syncTargets.length}`
+                : 'Прочитать имя, телефон, описание и аватарку каждого аккаунта из Telegram. Выделите строки, чтобы обновить только их'
               : 'Сначала остановите кампанию: во время работы аккаунты заняты'}
             className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
           >
             {syncingIds.length ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            {syncingIds.length ? `Читаю профили (${syncingIds.length})…` : 'Обновить профили'}
+            {/* Что именно нажимается, видно до нажатия: «выбранных» и «всех» —
+                это минуты ожидания разницы. */}
+            {syncingIds.length
+              ? `Читаю профили (${syncingIds.length})…`
+              : selectedIds.length
+                ? `Обновить профили выбранных (${syncTargets.length})`
+                : `Обновить профили всех (${syncTargets.length})`}
           </button>
           <label
             title="tdata — zip-архивами (можно сразу несколько), старый формат — парами .session и .json"
@@ -1808,7 +1926,8 @@ function CampaignAccountsTab({
               <select value={proxyId} onChange={e => setProxyId(e.target.value)}
                 className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400">
                 <option value="">Без прокси</option>
-                {proxies.map(p => <option key={p.id} value={p.id}>{p.name || p.url}</option>)}
+                {freeProxies.map(p => <option key={p.id} value={p.id}>{p.name || p.url}</option>)}
+                {freeProxies.length === 0 && <option disabled>Свободных прокси нет</option>}
               </select>
             </label>
           </div>
@@ -1833,12 +1952,52 @@ function CampaignAccountsTab({
         onCheck={() => { void checkSelected(); }}
       />
 
-      {checkSummary && (
-        <div className="flex items-start justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
-          <span>{checkSummary}</span>
-          <button type="button" onClick={() => setCheckSummary(null)} className="cursor-pointer text-gray-400 hover:text-gray-600">
-            <X className="h-3.5 w-3.5" />
-          </button>
+      {checkResults && checkResults.length > 0 && (
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+          <div className="flex items-start justify-between gap-3">
+            <span>Проверено аккаунтов: {checkResults.length}. Что ответил Telegram по каждому:</span>
+            <button type="button" onClick={() => setCheckResults(null)} className="cursor-pointer text-gray-400 hover:text-gray-600">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <ul className="mt-2 space-y-2">
+            {checkResults.map((r) => (
+              <li key={r.id} className="space-y-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-medium text-gray-800">{r.name}</span>
+                  {/* Технический код статуса рядом с человеческим словом: по
+                      нему инженер ищет причину в логах, продавцу хватает слова. */}
+                  <span className={`rounded-md px-1.5 py-0.5 ${CHECK_LABEL[r.status]?.cls ?? 'bg-gray-100 text-gray-500'}`}>
+                    {CHECK_LABEL[r.status]?.text ?? r.status} ({r.status})
+                  </span>
+                  <span className="text-gray-500">{r.detail}</span>
+                </div>
+                {/* Главная находка проверки: аккаунт жив, но в нём сидит кто-то
+                    ещё — именно так «нас разлогинили» отличается от «бан». */}
+                {r.otherSessions.length > 0 && (
+                  <div className="rounded-md bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
+                    <div>В аккаунт заходит кто-то ещё, чужих сеансов: {r.otherSessions.length}</div>
+                    <ul className="mt-0.5 space-y-0.5 text-amber-700">
+                      {r.otherSessions.slice(0, 3).map((s, i) => (
+                        <li key={`${r.id}-s${i}`}>
+                          {s.device} · {s.app} · {s.country} · был{' '}
+                          {new Date(s.last_active).toLocaleString('ru-RU', {
+                            day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+                          })}
+                        </li>
+                      ))}
+                      {r.otherSessions.length > 3 && (
+                        <li>
+                          и ещё {r.otherSessions.length - 3} — весь список под курсором на пометке
+                          «чужих сеансов» в строке аккаунта
+                        </li>
+                      )}
+                    </ul>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
@@ -1958,7 +2117,12 @@ function CampaignAccountsTab({
                     className="w-full rounded border border-indigo-300 bg-white px-1.5 py-0.5 text-xs outline-none focus:border-indigo-500 cursor-pointer"
                   >
                     <option value="">Без прокси</option>
-                    {proxies.map(p => <option key={p.id} value={p.id}>{p.name || p.url}</option>)}
+                    {proxyOptions(a.proxy_id).map(p => (
+                      <option key={p.id} value={p.id}>{p.name || p.url}</option>
+                    ))}
+                    {proxyOptions(a.proxy_id).length === 0 && (
+                      <option disabled>Свободных прокси нет</option>
+                    )}
                   </select>
                 ) : (
                   <button
@@ -2044,6 +2208,12 @@ function AccountProfileModal({
   const [avatar, setAvatar] = useState<{ file: File; url: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Аватарка не доехала до хранилища портала. Не ошибка: в самом Telegram всё
+   * применилось, а вот в списке аккаунтов картинки не будет — и молчать об этом
+   * нельзя, иначе это выглядит как «у аккаунта нет фото».
+   */
+  const [avatarWarning, setAvatarWarning] = useState<string | null>(null);
 
   const pickAvatar = (file: File | null) => {
     setAvatar((prev) => {
@@ -2060,7 +2230,8 @@ function AccountProfileModal({
    */
   const syncNow = useCallback(async () => {
     setError(null);
-    const { error: err, patch } = await onSync();
+    const { error: err, patch, avatarError } = await onSync();
+    setAvatarWarning(avatarError ?? null);
     if (err) { setError(err); return; }
     if (!patch) return;
     setFirstName((v) => (v ? v : patch.first_name ?? ''));
@@ -2094,12 +2265,19 @@ function AccountProfileModal({
         headers: { Authorization: `Bearer ${token}` },
         body: form,
       });
+      const body = (await res.json().catch(() => null)) as
+        { error?: string; avatar_error?: string } | null;
       if (!res.ok) {
-        const d = (await res.json().catch(() => null)) as { error?: string } | null;
-        setError(d?.error ?? `Ошибка ${res.status}`);
+        setError(body?.error ?? `Ошибка ${res.status}`);
         return;
       }
       onSaved();
+      // Профиль в Telegram уже изменён, поэтому не откатываем и не считаем это
+      // ошибкой — но карточку не закрываем, иначе предупреждение никто не увидит.
+      if (body?.avatar_error) {
+        setAvatarWarning(body.avatar_error);
+        return;
+      }
       onClose();
     } finally {
       setSaving(false);
@@ -2221,6 +2399,12 @@ function AccountProfileModal({
           </label>
 
           {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div>}
+          {avatarWarning && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              Аватарка не сохранилась в портале: {avatarWarning}. В Telegram она при этом на месте —
+              не видно только в списке аккаунтов.
+            </div>
+          )}
         </div>
 
         <div className="border-t border-gray-100 px-6 py-4">
@@ -2665,6 +2849,68 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
 }
 
 /* =================== CAMPAIGN PROXIES TAB =================== */
+
+/**
+ * Прокси отвечает дольше этого — формально жив, практически бесполезен: на
+ * таких аккаунт получает таймауты уже в боевом цикле. Поэтому «жив за 9 секунд»
+ * красим не зелёным, а жёлтым.
+ */
+const SLOW_PROXY_MS = 3000;
+
+/** Задержка человеческим языком: до секунды — миллисекунды, дальше — секунды. */
+function formatLatency(ms: number | null): string {
+  if (ms == null) return '—';
+  return ms < 1000 ? `${ms} мс` : `${(ms / 1000).toFixed(1)} с`;
+}
+
+/** Что случилось с самим прокси — словом, по статусу проверки. */
+function proxyVerdictWord(r: ProxyCheckResult): string {
+  if (r.proxy_ok) return 'жив';
+  if (r.status === 'bad_url') return 'строку не разобрать';
+  if (r.status === 'proxy_rejected') return 'не пускает';
+  if (r.status === 'proxy_dead') return 'не отвечает';
+  return 'проверка сорвалась';
+}
+
+/**
+ * Один из двух вердиктов проверки прокси.
+ *
+ * Вердикта именно два, и они стоят рядом не для симметрии: «прокси мёртв» и
+ * «прокси жив, но Telegram через него не проходит» — это разные действия.
+ * Первое лечится заменой у поставщика, второе значит, что прокси заблокирован
+ * в Telegram, и аккаунты на нём тихо перестанут работать.
+ */
+function ProxyVerdict({
+  label,
+  verdict,
+  ok,
+  latencyMs,
+  skipped,
+}: {
+  label: string;
+  verdict: string;
+  ok: boolean;
+  latencyMs: number | null;
+  /** До этой проверки не дошли — например, туннель не пробовали на мёртвом прокси. */
+  skipped?: boolean;
+}) {
+  const slow = ok && latencyMs != null && latencyMs >= SLOW_PROXY_MS;
+  const cls = skipped
+    ? 'bg-gray-100 text-gray-500'
+    : ok
+      ? slow ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'
+      : 'bg-rose-50 text-rose-700';
+  return (
+    <span
+      className={`rounded-md px-1.5 py-0.5 ${cls}`}
+      title={slow ? 'Отвечает, но слишком медленно для боевой рассылки' : undefined}
+    >
+      {label}: {verdict}
+      {latencyMs != null && ` · ${formatLatency(latencyMs)}`}
+    </span>
+  );
+}
+
 function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   const [proxies, setProxies] = useState<OutreachProxy[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2677,9 +2923,36 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   /** Previously errors were ignored — authFetch does not throw on 4xx/5xx, so users saw "nothing happened". */
   const [proxyError, setProxyError] = useState<string | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [checking, setChecking] = useState(false);
+  /**
+   * Секунды с начала проверки. Проверка идёт одним запросом на сервере, и
+   * прогресса по одному прокси у нас нет — но сорок штук занимают до минуты, и
+   * без бегущего счётчика экран выглядит зависшим.
+   */
+  const [checkElapsed, setCheckElapsed] = useState(0);
+  /** Ответ проверки: по строке на прокси плюс те, что не нашлись в кампании. */
+  const [checkRun, setCheckRun] = useState<
+    { rows: ProxyCheckResult[]; missing: number; checkedAt: string } | null
+  >(null);
 
   const proxyIds = useMemo(() => proxies.map(p => p.id), [proxies]);
   const { selectedIds, isSelected, toggle, setAll, clear } = useRowSelection(proxyIds);
+
+  /** Итог по каждому прокси — чтобы строка списка показала его без перезагрузки. */
+  const checkById = useMemo(() => {
+    const map = new Map<string, ProxyCheckResult>();
+    checkRun?.rows.forEach((r) => map.set(r.id, r));
+    return map;
+  }, [checkRun]);
+
+  // Счётчик заводим таймером, а не сразу в эффекте: обнуление делает сама
+  // проверка перед стартом, чтобы не дёргать состояние синхронно в эффекте.
+  useEffect(() => {
+    if (!checking) return;
+    const started = Date.now();
+    const timer = setInterval(() => setCheckElapsed(Math.round((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [checking]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -2737,6 +3010,49 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
       void load();
     } finally {
       setSaving(false);
+    }
+  };
+
+  /**
+   * Проверить выбранные прокси: жив ли сам прокси и доходит ли через него
+   * Telegram.
+   *
+   * Одним запросом на всю пачку: проверка сетевая, сервер гоняет её пачками сам,
+   * а сорок отдельных запросов из браузера только растянули бы то же самое.
+   * Список после проверки не перечитываем — ответ и есть результат.
+   */
+  const checkSelected = async () => {
+    const ids = selectedIds;
+    if (!ids.length) return;
+    setProxyError(null);
+    setCheckRun(null);
+    setCheckElapsed(0);
+    setChecking(true);
+    try {
+      const res = await authFetch(`${API_BASE}/proxies/check`, {
+        method: 'POST',
+        body: JSON.stringify({ campaign_id: campaignId, proxy_ids: ids }),
+      });
+      const body = (await res.json().catch(() => null)) as
+        | { items?: ProxyCheckResult[]; checked_at?: string; missing_ids?: string[]; error?: string }
+        | null;
+      // Отказ ручки — не вердикт по прокси: он ничего не говорит ни о прокси, ни
+      // о Telegram, поэтому едет в общую красную плашку вкладки, а не в итоги.
+      if (!res.ok || !body?.items) {
+        setProxyError(body?.error ?? `Не удалось проверить прокси (HTTP ${res.status})`);
+        return;
+      }
+      // Порядок ответа нам не обещан, а оператор ищет строки там, где выделял.
+      const byId = new Map(body.items.map((r) => [r.id, r]));
+      setCheckRun({
+        rows: ids.map((id) => byId.get(id)).filter((r): r is ProxyCheckResult => Boolean(r)),
+        missing: body.missing_ids?.length ?? 0,
+        checkedAt: body.checked_at ?? new Date().toISOString(),
+      });
+    } catch (e) {
+      setProxyError(`Проверка не дошла до сервера: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -2850,7 +3166,70 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         deleting={bulkDeleting}
         onClear={clear}
         onDelete={() => { void deleteSelected(); }}
+        checking={checking}
+        canCheck
+        onCheck={() => { void checkSelected(); }}
+        checkLabel={checking
+          ? `Проверяю прокси (${selectedIds.length})… ${checkElapsed} с`
+          : `Проверить прокси (${selectedIds.length})`}
+        checkTitle="Проверить два раза подряд: отвечает ли сам прокси и открывается ли через него туннель до Telegram"
       />
+
+      {/* Проверка сетевая и небыстрая: сорок прокси — около минуты. Молчащая
+          кнопка со спиннером на минуту читается как «всё зависло». */}
+      {checking && (
+        <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-500" />
+          Проверяю прокси: {selectedIds.length}. Идёт {checkElapsed} с — на сорок прокси уходит около
+          минуты, вкладку можно не трогать.
+        </div>
+      )}
+
+      {checkRun && checkRun.rows.length > 0 && (
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+          <div className="flex items-start justify-between gap-3">
+            <span>
+              Проверено прокси: {checkRun.rows.length} в{' '}
+              {new Date(checkRun.checkedAt).toLocaleString('ru-RU', {
+                day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+              })}
+              . Слева — отвечает ли сам прокси, справа — доходит ли через него Telegram:
+            </span>
+            <button type="button" onClick={() => setCheckRun(null)} className="cursor-pointer text-gray-400 hover:text-gray-600">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <ul className="mt-2 space-y-1.5">
+            {checkRun.rows.map((r) => (
+              <li key={r.id} className="flex flex-wrap items-center gap-1.5">
+                <span className="font-medium text-gray-800">{r.name || 'без названия'}</span>
+                <ProxyVerdict
+                  label="прокси"
+                  verdict={proxyVerdictWord(r)}
+                  ok={r.proxy_ok}
+                  latencyMs={r.proxy_latency_ms}
+                />
+                <ProxyVerdict
+                  label="Telegram"
+                  verdict={r.telegram_ok ? 'доходит' : r.proxy_ok ? 'не доходит' : 'не проверяли'}
+                  ok={r.telegram_ok}
+                  latencyMs={r.telegram_latency_ms}
+                  skipped={!r.proxy_ok && !r.telegram_ok}
+                />
+                {/* Технический код — для инженера в логах, словами — оператору. */}
+                <span className="text-gray-400">({r.status})</span>
+                {r.reason && <span className="text-gray-500">{r.reason}</span>}
+              </li>
+            ))}
+          </ul>
+          {/* Прокси удалили в другой вкладке, пока оператор выбирал строки. */}
+          {checkRun.missing > 0 && (
+            <div className="mt-2 text-gray-500">
+              Не нашлись в кампании: {checkRun.missing} — список на экране устарел, обновите страницу.
+            </div>
+          )}
+        </div>
+      )}
 
       {loading ? (
         <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
@@ -2865,7 +3244,9 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
             <SelectAllCheckbox total={proxies.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span>URL / Название</span><span>Активен</span><span />
           </div>
-          {proxies.map(p => (
+          {proxies.map(p => {
+            const check = checkById.get(p.id);
+            return (
             <div
               key={p.id}
               className={`grid grid-cols-[32px_1fr_80px_40px] gap-4 items-center px-4 py-2.5 ${isSelected(p.id) ? 'bg-indigo-50/60' : ''}`}
@@ -2880,6 +3261,25 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
               <div className="min-w-0">
                 {p.name && <p className="text-xs font-medium text-gray-800">{p.name}</p>}
                 <p className="text-xs text-gray-500 truncate font-mono">{p.url}</p>
+                {/* Итог последней проверки прямо в строке: список не
+                    перечитываем, показываем то, что ответила проверка. */}
+                {check && (
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px]">
+                    <ProxyVerdict
+                      label="прокси"
+                      verdict={proxyVerdictWord(check)}
+                      ok={check.proxy_ok}
+                      latencyMs={check.proxy_latency_ms}
+                    />
+                    <ProxyVerdict
+                      label="Telegram"
+                      verdict={check.telegram_ok ? 'доходит' : check.proxy_ok ? 'не доходит' : 'не проверяли'}
+                      ok={check.telegram_ok}
+                      latencyMs={check.telegram_latency_ms}
+                      skipped={!check.proxy_ok && !check.telegram_ok}
+                    />
+                  </div>
+                )}
               </div>
               <button type="button" onClick={() => { void toggleActive(p.id, p.is_active); }}
                 className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${p.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
@@ -2890,7 +3290,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

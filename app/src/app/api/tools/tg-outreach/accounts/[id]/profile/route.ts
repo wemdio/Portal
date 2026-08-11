@@ -108,9 +108,12 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
       try {
         const current = await readProfile(client);
-        const avatarUrl = current.avatar
-          ? await storeAccountAvatar(id, current.avatar)
-          : null;
+        const stored = current.avatar ? await storeAccountAvatar(id, current.avatar) : null;
+        if (stored?.error) {
+          // В лог — чтобы причину было видно и без открытого экрана: оператор
+          // читает профили пачкой и на каждую строку не смотрит.
+          console.error(`[tg-outreach] аватарка аккаунта ${id} не сохранена: ${stored.error}`);
+        }
 
         const patch = {
           first_name: current.first_name,
@@ -118,14 +121,21 @@ export async function GET(req: NextRequest, ctx: Ctx) {
           bio: current.bio,
           tg_username: current.tg_username,
           ...(current.tg_user_id != null ? { tg_user_id: current.tg_user_id } : {}),
-          // Фото нет — чистим ссылку: иначе в списке осталась бы картинка от
-          // профиля, который в Telegram уже без аватарки.
-          avatar_url: avatarUrl ?? '',
+          // Телефона в tdata нет, он приходит только от Telegram. Пустой ответ
+          // не повод затирать номер, который портал уже знает.
+          ...(current.phone ? { phone: current.phone } : {}),
+          // Ссылку трогаем, только когда точно знаем, что показывать: фото нет —
+          // чистим (иначе в списке осталась бы картинка от профиля, который в
+          // Telegram уже без аватарки), хранилище сбойнуло — оставляем прежнюю,
+          // потому что про сам Telegram это ничего не говорит.
+          ...(stored?.error ? {} : { avatar_url: stored?.url ?? '' }),
           profile_synced_at: new Date().toISOString(),
         };
         await auth.supabase.from('tg_outreach_accounts').update(patch).eq('id', id);
 
-        return NextResponse.json(patch);
+        // avatar_error — не колонка аккаунта, а объяснение для экрана, поэтому
+        // едет отдельно от того, что записали в БД.
+        return NextResponse.json(stored?.error ? { ...patch, avatar_error: stored.error } : patch);
       } catch (e) {
         return jsonError(describeTelegramError(e), 400);
       } finally {
@@ -182,7 +192,11 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
 
         // Ту же картинку кладём в хранилище портала, чтобы список показал новую
         // аватарку сразу — без отдельного похода в Telegram за ней.
-        const avatarUrl = avatar ? await storeAccountAvatar(id, avatar.buffer) : null;
+        const stored = avatar ? await storeAccountAvatar(id, avatar.buffer) : null;
+        if (stored?.error) {
+          console.error(`[tg-outreach] аватарка аккаунта ${id} не сохранена: ${stored.error}`);
+        }
+        const avatarUrl = stored?.url ?? null;
 
         await auth.supabase
           .from('tg_outreach_accounts')
@@ -197,7 +211,13 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
           })
           .eq('id', id);
 
-        return NextResponse.json({ ...applied, avatar_url: avatarUrl ?? undefined });
+        // Аватарка в Telegram уже уехала: если её не принял портал, это касается
+        // только картинки в списке — так и говорим, а не молчим.
+        return NextResponse.json({
+          ...applied,
+          avatar_url: avatarUrl ?? undefined,
+          ...(stored?.error ? { avatar_error: stored.error } : {}),
+        });
       } catch (e) {
         return jsonError(describeTelegramError(e), 400);
       } finally {

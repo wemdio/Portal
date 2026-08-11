@@ -21,6 +21,13 @@ export interface CurrentProfile {
   bio: string;
   tg_username: string;
   tg_user_id: number | null;
+  /**
+   * Номер как его отдаёт Telegram — без плюса, «79001234567».
+   *
+   * В tdata телефона нет, узнать его портал может только у Telegram: пустая
+   * строка здесь означает «Telegram не сказал», а не «номера нет».
+   */
+  phone: string;
   /** JPEG аватарки; null — фото нет или скачать не удалось. */
   avatar: Buffer | null;
 }
@@ -61,6 +68,7 @@ export async function readProfile(client: TelegramClient): Promise<CurrentProfil
     bio: full.fullUser.about ?? '',
     tg_username: me?.username ?? '',
     tg_user_id: me?.id != null ? Number(me.id) : null,
+    phone: me?.phone ?? '',
     avatar,
   };
 }

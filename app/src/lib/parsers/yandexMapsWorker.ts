@@ -957,8 +957,6 @@ export async function runYandexMapsCatalogDiscoveryBatch(): Promise<boolean> {
       if (id) byId.set(id, link);
     }
 
-    await markYandexMapsCatalogSeen([...byId.keys()], task, exhaustive);
-
     const unknown = await filterUnknownYandexIds([...byId.keys()]);
     const toParse = [...unknown].map((id) => byId.get(id)!).filter(Boolean);
 
@@ -969,6 +967,23 @@ export async function runYandexMapsCatalogDiscoveryBatch(): Promise<boolean> {
         proxy: pool[chunkIndex % Math.max(pool.length, 1)] ?? NO_PROXY,
       });
       foundNew += await upsertYandexMapsCatalogOrganizations(result.organizations ?? [], 'discovery');
+    }
+
+    // Уборка — последней и в стороне от результата обхода.
+    //
+    // Пометка «видели» и «кажется, закрылась» полезна, но это не то, ради чего
+    // обход запускают. Она стояла первой и роняла всё задание, когда не
+    // удавалась: 11.08.2026 на бою так висели 343 пары, включая всю Москву, —
+    // четвёртые сутки подряд, с нулём новых организаций по ним. Теперь её
+    // неудача стоит только самой пометки: найденное уже в каталоге, а пара
+    // вернётся в очередь по обычному расписанию, а не через сутки как упавшая.
+    try {
+      await markYandexMapsCatalogSeen([...byId.keys()], task, exhaustive);
+    } catch (error) {
+      void logWarn('parser.yandexmaps.catalog.mark_seen_failed', 'Catalog mark-seen failed', {
+        place: task.place, rubric: task.rubric, foundNew,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
 
     await finishYandexMapsCatalogDiscovery(task.id, { seenLinks, foundNew, exhaustive });
