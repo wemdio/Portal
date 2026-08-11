@@ -115,7 +115,8 @@ export async function classifyBaseRowsIntoSegments(
           const llm = await callLLMWithSchema(
             buildClassifyMessages(cleaned, batch.items, language),
             AssignmentsSchema,
-            { model: getHeModel('bulk'), maxTokens: 4096 },
+            // Роль gate: присвоение сегмента — классификация, мини-модель.
+            { model: getHeModel('gate'), maxTokens: 4096 },
           );
           const validRows = new Set(batch.items.map((it) => it.index));
           for (const a of llm.data.assignments) {

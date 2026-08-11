@@ -26,8 +26,8 @@ function CollectProgress({ base }: { base: EngBaseSummary }) {
   const construct = info?.construct;
   return (
     <div
-      className="rounded-lg p-3 mt-2 flex flex-col gap-1.5"
-      style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)' }}
+      className="rounded-md p-3 mt-2 flex flex-col gap-1.5"
+      style={{ border: '1px solid var(--cp-divider)' }}
     >
       <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--cp-amber)' }}>
         <EngSpinner className="h-3 w-3" />
@@ -81,7 +81,7 @@ function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
 
   if (!launch) {
     return (
-      <div className="mt-2 rounded-lg p-3 text-[11px]" style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)', color: 'var(--cp-text-m)' }}>
+      <div className="mt-2 rounded-md p-3 text-[11px]" style={{ border: '1px solid var(--cp-divider)', color: 'var(--cp-text-m)' }}>
         {template.status === 'ready'
           ? 'Template is ready — launch it from step 5 «Review & Launch».'
           : 'Template is being built…'}
@@ -90,7 +90,7 @@ function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
   }
 
   return (
-    <div className="mt-2 rounded-lg p-3 text-xs flex flex-col gap-1" style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)' }}>
+    <div className="mt-2 rounded-md p-3 text-xs flex flex-col gap-1" style={{ border: '1px solid var(--cp-divider)' }}>
       <div className="flex items-center gap-2">
         <EngBadge label="launched (paused)" tone="green" />
         <span className="font-semibold" style={{ color: 'var(--cp-paper)' }}>{launch.campaign_name}</span>
@@ -183,8 +183,8 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
               return (
                 <div
                   key={b.id}
-                  className="mt-2 rounded-lg p-3"
-                  style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)' }}
+                  className="mt-2 rounded-md p-3"
+                  style={{ border: '1px solid var(--cp-divider)' }}
                 >
                   <div className="flex items-center gap-2">
                     <span className="truncate text-xs font-semibold" style={{ color: 'var(--cp-paper)' }}>

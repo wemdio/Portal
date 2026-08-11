@@ -31,8 +31,8 @@ function HypothesisCard({
 }) {
   return (
     <div
-      className="rounded-lg p-3 flex flex-col gap-2"
-      style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)' }}
+      className="rounded-md p-3 flex flex-col gap-2"
+      style={{ border: '1px solid var(--cp-divider)' }}
     >
       <div className="flex items-center gap-2">
         <span className="text-sm font-semibold" style={{ color: 'var(--cp-paper)' }}>
@@ -60,8 +60,7 @@ function HypothesisCard({
             type="button"
             onClick={() => onVerdict(hypothesis.id, 'accept')}
             disabled={busy}
-            className="neu-pill px-3 py-1 text-[11px] font-semibold inline-flex items-center gap-1 disabled:opacity-50"
-            style={{ color: 'var(--cp-green)' }}
+            className="ds-btn-secondary inline-flex items-center gap-1 text-[11px]"
           >
             {busy ? <EngSpinner className="h-3 w-3" /> : <Check className="h-3 w-3" />}
             Accept
@@ -70,8 +69,7 @@ function HypothesisCard({
             type="button"
             onClick={() => onVerdict(hypothesis.id, 'reject')}
             disabled={busy}
-            className="neu-pill px-3 py-1 text-[11px] font-semibold inline-flex items-center gap-1 disabled:opacity-50"
-            style={{ color: 'var(--cp-red)' }}
+            className="ds-btn-ghost inline-flex items-center gap-1 text-[11px]"
           >
             <X className="h-3 w-3" />
             Reject
@@ -168,8 +166,7 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
             type="button"
             onClick={() => void onStartOutreach()}
             disabled={autopilotBusy || autopilotRunning}
-            className="neu-pill active ml-auto px-3 py-1.5 text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
-            style={{ color: 'var(--cp-paper)' }}
+            className="ds-btn-primary ml-auto inline-flex items-center gap-1.5 text-xs"
             title="Generate letters, collect bases and build templates for every vertical automatically"
           >
             {autopilotBusy || autopilotRunning ? <EngSpinner className="h-3 w-3" /> : <Rocket className="h-3 w-3" />}
@@ -179,7 +176,7 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
       </div>
 
       {autopilotSummary && (
-        <div className="neu-card p-3 text-xs" style={{ color: 'var(--cp-green)' }}>
+        <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-green)' }}>
           {autopilotSummary}
         </div>
       )}

@@ -69,8 +69,7 @@ function BasePreview({ base }: { base: EngBaseSummary }) {
       <button
         type="button"
         onClick={() => void onToggle()}
-        className="neu-pill px-3 py-1.5 text-[11px] font-semibold inline-flex items-center gap-1.5"
-        style={{ color: 'var(--cp-paper)' }}
+        className="ds-btn-secondary inline-flex items-center gap-1.5 text-[11px]"
       >
         {loading ? <EngSpinner className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
         {open ? 'Hide preview' : 'Preview base'}
@@ -82,8 +81,8 @@ function BasePreview({ base }: { base: EngBaseSummary }) {
       )}
       {open && preview && (
         <div
-          className="mt-2 overflow-x-auto rounded-lg"
-          style={{ border: '1px solid var(--cp-divider)', background: 'var(--cp-surface-rest)' }}
+          className="mt-2 overflow-x-auto rounded-md"
+          style={{ border: '1px solid var(--cp-divider)' }}
         >
           <table className="w-full text-[11px]">
             <thead>
@@ -189,8 +188,8 @@ function VerticalReviewCard({
 
       {base && (
         <div
-          className="mt-3 rounded-lg p-3"
-          style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)' }}
+          className="mt-3 rounded-md p-3"
+          style={{ border: '1px solid var(--cp-divider)' }}
         >
           <div className="flex items-center gap-2">
             <span className="truncate text-xs font-semibold" style={{ color: 'var(--cp-paper)' }}>
@@ -284,8 +283,7 @@ function LaunchAllPanel({
             <select
               value={presetId}
               onChange={(e) => setPresetId(e.target.value)}
-              className="neu-pill px-3 py-1.5 text-xs bg-transparent outline-none"
-              style={{ color: 'var(--cp-paper)' }}
+              className="ds-input text-xs"
               aria-label="Sending preset"
             >
               {(presets ?? []).map((p) => (
@@ -298,8 +296,7 @@ function LaunchAllPanel({
               type="button"
               onClick={() => void onLaunchAll()}
               disabled={state.running || !presetId}
-              className="neu-pill active px-3 py-1.5 text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
-              style={{ color: 'var(--cp-paper)' }}
+              className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
             >
               {state.running ? <EngSpinner className="h-3 w-3" /> : <Rocket className="h-3 w-3" />}
               Launch all (paused)
