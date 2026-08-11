@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import type { SupabaseClient } from '@supabase/supabase-js';
 import { sqliteBufferToSessionString, authKeyFingerprint } from '@/lib/telegram/sessionUtils';
 import {
   collectTdataCandidates,
@@ -10,8 +9,8 @@ import {
   type TdataSkip,
   type TdataError,
   type TdataUpload,
-  type ExistingAccountRow,
 } from '@/lib/tgOutreach/tdataImport';
+import { loadAccountsForDedupe } from '@/lib/tgOutreach/existingAccounts';
 
 export const dynamic = 'force-dynamic';
 
@@ -61,76 +60,6 @@ async function* bufferOneByOne(files: File[]): AsyncGenerator<TdataUpload> {
   for (const file of files) {
     yield { name: file.name, buffer: Buffer.from(await file.arrayBuffer()) };
   }
-}
-
-/**
- * Страница выборки для сверки. Не больше PostgREST max-rows, иначе хвост
- * обрежется молча.
- */
-const DEDUPE_PAGE = 1000;
-
-/** Потолок на случай неожиданно разросшейся таблицы: упёрлись — отказываем. */
-const DEDUPE_MAX_ROWS = 200_000;
-
-/**
- * Прочитать все аккаунты портала, по которым идёт сверка дублей.
- *
- * Страницами через `.range()`: на голом `select` PostgREST отдал бы только
- * первые max-rows строк и никак об этом не сообщил. Недочитанная сверка
- * опасна ровно так же, как упавшая, — оба случая выглядят как «дублей нет» и
- * пропускают в базу второй аккаунт с тем же ключом авторизации.
- *
- * Полноту проверяем не по длине последней страницы, а сравнением с COUNT на
- * сервере: короткая страница означает и «данные кончились», и «PostgREST
- * обрезал ответ своим max-rows», а на глаз эти случаи неразличимы. Любое
- * расхождение, обрыв и упор в потолок возвращают ошибку, а не короткий список.
- *
- * Порядок фиксируем по `id`: без ORDER BY страницы могут перекрываться и
- * терять строки между запросами.
- */
-async function loadAccountsForDedupe(
-  db: SupabaseClient,
-): Promise<{ rows: ExistingAccountRow[] } | { error: string }> {
-  const rows: ExistingAccountRow[] = [];
-  let total: number | null = null;
-
-  for (let from = 0; from < DEDUPE_MAX_ROWS; from += DEDUPE_PAGE) {
-    const { data, error, count } = await db
-      .from('tg_outreach_accounts')
-      .select('tg_user_id, session_data, tg_outreach_campaigns(name)', { count: 'exact' })
-      .order('id', { ascending: true })
-      .range(from, from + DEDUPE_PAGE - 1);
-
-    if (error) return { error: error.message };
-    if (typeof count === 'number') total = count;
-
-    const page = data ?? [];
-    for (const row of page) {
-      const rowCampaign = (row as { tg_outreach_campaigns?: { name?: string } | null })
-        .tg_outreach_campaigns;
-      // Пустой tg_user_id обязан остаться null: Number(null) даёт 0, и в
-      // сверке появился бы несуществующий аккаунт с id 0.
-      const rawUserId = (row as { tg_user_id: number | string | null }).tg_user_id;
-      rows.push({
-        tg_user_id: rawUserId === null || rawUserId === undefined ? null : Number(rawUserId),
-        campaign_name: rowCampaign?.name ?? null,
-        session_data: (row as { session_data?: string | null }).session_data ?? null,
-      });
-    }
-
-    // Дочитали ровно до конца — не запрашиваем страницу за последней строкой:
-    // на диапазон целиком за пределами таблицы PostgREST отвечает 416, и
-    // здоровое чтение выглядело бы как сбой.
-    if (total !== null && rows.length >= total) break;
-    if (page.length < DEDUPE_PAGE) break;
-  }
-
-  if (total === null) return { error: 'база не сообщила, сколько всего аккаунтов' };
-  if (rows.length !== total) {
-    return { error: `прочитано ${rows.length} аккаунтов из ${total} — сверка неполная` };
-  }
-
-  return { rows };
 }
 
 export async function POST(req: NextRequest) {
