@@ -23,6 +23,7 @@ import { useIsTma } from '@/lib/useIsTma';
 import { isLead as checkIsLead } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
 import type { Locale } from '@/lib/i18n';
+import { NativePickerField, openNativePicker } from '@/components/tasks/NativePickerField';
 
 const DEFAULT_BOARD_ID = '00000000-0000-0000-0000-000000000001';
 const COLUMN_DRAG_PREFIX = 'column-';
@@ -144,87 +145,6 @@ function toDatetimeLocalValue(iso: string | null | undefined): string {
   if (Number.isNaN(d.getTime())) return '';
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-function openNativePicker(input: HTMLInputElement): void {
-  const pickerInput = input as HTMLInputElement & { showPicker?: () => void };
-  if (typeof pickerInput.showPicker !== 'function') return;
-  try {
-    pickerInput.showPicker();
-  } catch {
-    // Ignore browser/security restrictions and keep native behavior.
-  }
-}
-
-function formatDateTimeLocalDisplay(value: string, locale: Locale): string {
-  if (!value) return '';
-  const [datePart, timePart] = value.split('T');
-  if (!datePart) return value;
-  const [year, month, day] = datePart.split('-');
-  if (!year || !month || !day) return value;
-  const time = (timePart ?? '').slice(0, 5);
-  if (locale === 'en') {
-    return `${month}/${day}/${year}${time ? ` ${time}` : ''}`;
-  }
-  return `${day}.${month}.${year}${time ? ` ${time}` : ''}`;
-}
-
-function NativePickerField({
-  type,
-  locale,
-  value,
-  onChange,
-  className,
-  placeholderRu,
-  placeholderEn,
-}: {
-  type: 'datetime-local' | 'time';
-  locale: Locale;
-  value: string;
-  onChange: (nextValue: string) => void;
-  className: string;
-  placeholderRu: string;
-  placeholderEn: string;
-}) {
-  const hiddenRef = useRef<HTMLInputElement>(null);
-  const isEn = locale === 'en';
-  const displayValue = type === 'time' ? value : formatDateTimeLocalDisplay(value, locale);
-
-  const openPicker = useCallback(() => {
-    if (!hiddenRef.current) return;
-    hiddenRef.current.focus();
-    openNativePicker(hiddenRef.current);
-  }, []);
-
-  return (
-    <div className="relative">
-      <input
-        type="text"
-        readOnly
-        value={displayValue}
-        placeholder={isEn ? placeholderEn : placeholderRu}
-        onClick={openPicker}
-        onFocus={openPicker}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            openPicker();
-          }
-        }}
-        className={className}
-      />
-      <input
-        ref={hiddenRef}
-        type={type}
-        lang={isEn ? 'en-GB' : 'ru-RU'}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="absolute inset-0 opacity-0 pointer-events-none"
-        tabIndex={-1}
-        aria-hidden="true"
-      />
-    </div>
-  );
 }
 
 function ProjectCombobox({
@@ -2821,8 +2741,10 @@ export default function TasksPage() {
                       lang={isEn ? 'en-GB' : 'ru-RU'}
                       value={editingDeadlineValue}
                       onChange={(e) => setEditingDeadlineValue(e.target.value)}
+                      // Только по клику — см. комментарий в NativePickerField:
+                      // пара onFocus+onClick открывала календарь дважды подряд
+                      // и второй вызов гасил первый.
                       onClick={(e) => openNativePicker(e.currentTarget)}
-                      onFocus={(e) => openNativePicker(e.currentTarget)}
                       className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
                       style={{ colorScheme: 'light' }}
                     />
