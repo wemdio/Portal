@@ -91,7 +91,10 @@ export async function findIrrelevantRows(input: {
       const llm = await callLLMWithSchema(
         buildRelevanceMessages(verticalName, verticalSummary, batch, language),
         RelevanceSchema,
-        { model: getHeModel('bulk'), maxTokens: 2048 },
+        // Роль gate: мини-модель — бинарная классификация строк не требует
+        // reasoning; на нём только тратились выходные токены и ловились
+        // усечения max_tokens (finish_reason='length').
+        { model: getHeModel('gate'), maxTokens: 2048 },
       );
       // Защита от мусорного ответа (моки/обрезка): без массива irrelevant
       // батч пропускаем, расход не считаем.

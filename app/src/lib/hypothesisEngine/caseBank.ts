@@ -12,7 +12,7 @@
  *  - heCaseDraftSchema — zod-схема структурированного кейса (локальная для
  *    кейс-банка, НЕ из schemas.ts): industry/client_type/task/metrics/result/text;
  *  - structureCaseText — LLM-структуризация вставленного текста кейса
- *    (общий хелпер для API-роута загрузки; модель getHeModel('bulk'));
+ *    (общий хелпер для API-роута загрузки; модель getHeModel('gate'));
  *  - scoreCaseForVertical / selectCaseForVertical — подбор кейса под вертикаль
  *    (взвешенный токен-оверлап названия+синонимов вертикали по полям
  *    industry/client_type/task, порог MIN_CASE_SCORE, tie-break upload);
@@ -100,12 +100,12 @@ ${rawText}
 }
 
 /**
- * Структурировать вставленный текст кейса через LLM (bulk-модель).
+ * Структурировать вставленный текст кейса через LLM (роль gate — мини-модель).
  * Бросает LLMValidationError при двойном невалидном ответе — роут маппит в 502.
  */
 export async function structureCaseText(rawText: string): Promise<HeCaseDraft> {
   const llm = await callLLMWithSchema(buildCaseStructuringMessages(rawText), heCaseDraftSchema, {
-    model: getHeModel('bulk'),
+    model: getHeModel('gate'),
     maxTokens: 2048,
   });
   return llm.data;
