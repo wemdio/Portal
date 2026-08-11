@@ -392,6 +392,10 @@ function SettingsTab({ campaign, onSave }: {
             Новым диалогам разрешать отправку автоматически
           </label>
           <label className="flex items-center gap-2 text-xs text-gray-700">
+            <input type="checkbox" checked={telegram.reply_only_to_base_contacts ?? false} onChange={e => setTG('reply_only_to_base_contacts', e.target.checked)} className="rounded border-gray-300" />
+            Писать только контактам из баз
+          </label>
+          <label className="flex items-center gap-2 text-xs text-gray-700">
             <input type="checkbox" checked={telegram.ignore_bot_usernames} onChange={e => setTG('ignore_bot_usernames', e.target.checked)} className="rounded border-gray-300" />
             Игнорировать ботов
           </label>
@@ -400,6 +404,13 @@ function SettingsTab({ campaign, onSave }: {
             Игнорировать без имени пользователя
           </label>
         </div>
+        <p className="text-[10px] text-gray-400 -mt-2">
+          «Писать только контактам из баз» — бот отвечает лишь тем, кому мы сами написали по базе
+          этой кампании. Без неё он отвечает в любом чате, где есть наше исходящее, включая
+          переписку прогрева между своими же аккаунтами: партнёр по прогреву получал боевой скрипт,
+          а его ответ мог уехать в чат менеджера как лид. Обратная сторона: тот, кто написал первым
+          сам, без первого касания, ответа не получит.
+        </p>
         <Field
           label="Чёрный список username (через запятую)"
           value={blockedRaw}

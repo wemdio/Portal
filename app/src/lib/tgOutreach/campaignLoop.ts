@@ -507,6 +507,28 @@ async function upsertDialog(
   }
 }
 
+/**
+ * Этот собеседник — из тех, кому мы писали сами по базе кампании?
+ *
+ * `tg_outreach_processed` пополняется ровно в момент первого касания (и вручную
+ * со вкладки «Обработанные»), поэтому отвечает на вопрос «мы начинали этот
+ * разговор?» точнее, чем история переписки: в купленном аккаунте наши
+ * исходящие есть и в чатах прогрева, к базе отношения не имеющих.
+ */
+async function isCampaignContact(
+  db: SupabaseClient,
+  campaignId: string,
+  tgUserId: number,
+): Promise<boolean> {
+  const { data } = await db
+    .from('tg_outreach_processed')
+    .select('tg_user_id')
+    .eq('campaign_id', campaignId)
+    .eq('tg_user_id', tgUserId)
+    .maybeSingle();
+  return Boolean(data);
+}
+
 async function canSendToDialog(
   db: SupabaseClient,
   campaignId: string,
@@ -734,6 +756,18 @@ export async function handleChat(
   if (!(await canSendToDialog(db, campaign.id, account.id, tgUserId))) {
     log('info', `${displayName}: отправка в этот диалог отключена вручную в UI — пропускаю`);
     return { replied: false, triggerType: null };
+  }
+
+  // Сильнее, чем «отвечать только если ранее писали»: та проверка смотрит на
+  // наличие нашего исходящего в переписке, а в купленном аккаунте оно есть и в
+  // чатах прогрева — аккаунты писали друг другу. Из-за этого бот отвечал
+  // боевым скриптом партнёрам по прогреву и слал фальшивые лиды в чат
+  // менеджера. Здесь берём только тех, кому писали по базе кампании.
+  if (tg.reply_only_to_base_contacts) {
+    if (!(await isCampaignContact(db, campaign.id, tgUserId))) {
+      log('info', `${displayName}: не из баз кампании — пропускаю (включена настройка «писать только контактам из баз»)`);
+      return { replied: false, triggerType: null };
+    }
   }
 
   if (tg.reply_only_if_previously_wrote) {
