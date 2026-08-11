@@ -9,7 +9,7 @@
  * Перепутать их — значит списать живой аккаунт или искать несуществующий бан.
  */
 
-import { classifyCheckError, describeSessions } from '@/lib/tgOutreach/accountCheck';
+import { classifyCheckError, describeSessions, resetOtherSessions, describeResetError } from '@/lib/tgOutreach/accountCheck';
 
 describe('разбор ошибок проверки', () => {
   it('бан номера отличается от отзыва сессии', () => {
@@ -94,5 +94,32 @@ describe('список чужих сеансов', () => {
     expect(s.device).toBe('—');
     expect(s.country).toBe('—');
     expect(s.app).toBe('—');
+  });
+});
+
+describe('сброс чужих сеансов', () => {
+  it('зовёт Telegram один раз и не переподключается', async () => {
+    const invoke = jest.fn(async () => ({}));
+    await resetOtherSessions({ invoke } as never);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('пробрасывает отказ наверх, а не глотает его', async () => {
+    const invoke = jest.fn(async () => { throw new Error('FRESH_RESET_AUTHORISATION_FORBIDDEN'); });
+    await expect(resetOtherSessions({ invoke } as never)).rejects.toThrow(/FRESH_RESET/);
+  });
+
+  it('объясняет защиту Telegram для свежей сессии', () => {
+    // Самый частый исход на только что залитой партии: сбросить чужие сеансы
+    // можно лишь через сутки после первого входа.
+    expect(describeResetError(new Error('FRESH_RESET_AUTHORISATION_FORBIDDEN'))).toMatch(/24 часа/);
+  });
+
+  it('называет срок ожидания при FLOOD_WAIT', () => {
+    expect(describeResetError(new Error('FLOOD_WAIT_600'))).toMatch(/600 секунд/);
+  });
+
+  it('про отозванную сессию говорит, что сбрасывать нечего', () => {
+    expect(describeResetError(new Error('AUTH_KEY_UNREGISTERED'))).toMatch(/нечего/);
   });
 });

@@ -8,12 +8,18 @@
 import { Api } from 'telegram';
 import type { TelegramClient } from 'telegram';
 import { CustomFile } from 'telegram/client/uploads';
-import type { ProfileInput } from './validateProfile';
+import { normalizeUsername, type ProfileInput } from './validateProfile';
 
 export interface ApplyProfileArgs {
   client: TelegramClient;
   profile: ProfileInput;
   avatar?: { buffer: Buffer; name: string };
+  /**
+   * Юзернейм, который портал знает за аккаунтом. Нужен, чтобы не дёргать
+   * Telegram, когда поле не меняли: смена юзернейма ограничена по частоте, и
+   * лишний запрос приближает «подождите N часов» без всякой пользы.
+   */
+  currentUsername?: string;
 }
 
 export interface AppliedProfile {
@@ -28,6 +34,7 @@ export async function applyProfile({
   client,
   profile,
   avatar,
+  currentUsername,
 }: ApplyProfileArgs): Promise<AppliedProfile> {
   await client.invoke(
     new Api.account.UpdateProfile({
@@ -36,6 +43,21 @@ export async function applyProfile({
       about: profile.bio.trim(),
     }),
   );
+
+  // Юзернейм — отдельный метод, UpdateProfile его не трогает. Пустая строка
+  // здесь означает «снять юзернейм»: Telegram это умеет и ждёт именно её.
+  const wanted = normalizeUsername(profile.username);
+  if (profile.username !== undefined && wanted !== normalizeUsername(currentUsername)) {
+    try {
+      await client.invoke(new Api.account.UpdateUsername({ username: wanted }));
+    } catch (err) {
+      // «Не изменилось» — не отказ: значит в Telegram уже стоит то, что просим,
+      // а разошлась лишь наша копия. Всё остальное поднимаем наверх.
+      if (!/USERNAME_NOT_MODIFIED/i.test(err instanceof Error ? err.message : String(err))) {
+        throw err;
+      }
+    }
+  }
 
   if (avatar) {
     const file = await client.uploadFile({
@@ -82,6 +104,21 @@ export function describeTelegramError(err: unknown): string {
 
   if (/PHOTO_|IMAGE_|FILE_PART|MEDIA_/i.test(msg)) {
     return `Telegram не принял картинку: ${msg}. Попробуйте квадратный JPEG до 1 МБ.`;
+  }
+
+  // Юзернеймы глобально уникальны, поэтому «занят» — штатный исход, а не сбой.
+  // Без перевода оператор видел бы голое USERNAME_OCCUPIED и шёл спрашивать.
+  if (/USERNAME_OCCUPIED/i.test(msg)) {
+    return 'Такой юзернейм уже занят — придумайте другой.';
+  }
+  if (/USERNAME_PURCHASE_AVAILABLE/i.test(msg)) {
+    return 'Этот юзернейм свободен, но Telegram отдаёт его только за деньги на аукционе — возьмите другой.';
+  }
+  if (/USERNAME_INVALID/i.test(msg)) {
+    return 'Telegram не принял юзернейм: допустимы латиница, цифры и подчёркивание, 5–32 знака, начинается с буквы.';
+  }
+  if (/USERNAMES_(ACTIVE|UNAVAILABLE)_TOO_MUCH/i.test(msg)) {
+    return 'У аккаунта уже максимум юзернеймов — освободите один в самом Telegram.';
   }
 
   if (/FIRSTNAME_INVALID|LASTNAME_INVALID|ABOUT_TOO_LONG/i.test(msg)) {

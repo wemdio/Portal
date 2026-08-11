@@ -75,3 +75,57 @@ describe('describeTelegramError', () => {
     expect(describeTelegramError(new Error('SOMETHING_ODD'))).toContain('SOMETHING_ODD');
   });
 });
+
+describe('юзернейм', () => {
+  const base = { first_name: 'Иван', last_name: '', bio: '' };
+  const invokeOf = (c: unknown) => (c as { invoke: jest.Mock }).invoke;
+
+  it('не трогает Telegram, когда поле не редактировали', async () => {
+    const client = fakeClient();
+    await applyProfile({ client, profile: base, currentUsername: 'ivan' });
+    // Только UpdateProfile: смена юзернейма ограничена по частоте, и лишний
+    // запрос приближает «подождите N часов» без всякой пользы.
+    expect(invokeOf(client)).toHaveBeenCalledTimes(1);
+  });
+
+  it('не трогает Telegram, когда юзернейм не изменился', async () => {
+    const client = fakeClient();
+    await applyProfile({ client, profile: { ...base, username: '@ivan' }, currentUsername: 'ivan' });
+    expect(invokeOf(client)).toHaveBeenCalledTimes(1);
+  });
+
+  it('отправляет новый юзернейм отдельным вызовом', async () => {
+    const client = fakeClient();
+    await applyProfile({ client, profile: { ...base, username: 'ivan_petrov' }, currentUsername: 'ivan' });
+    expect(invokeOf(client)).toHaveBeenCalledTimes(2);
+  });
+
+  it('пустое поле снимает юзернейм, а не пропускает шаг', async () => {
+    const client = fakeClient();
+    await applyProfile({ client, profile: { ...base, username: '' }, currentUsername: 'ivan' });
+    expect(invokeOf(client)).toHaveBeenCalledTimes(2);
+  });
+
+  it('«не изменилось» не считаем отказом', async () => {
+    // Второй invoke — это и есть UpdateUsername (первый всегда UpdateProfile).
+    // Считаем вызовы, а не разбираем объект запроса: так тест не зависит от
+    // внутреннего устройства GramJS и точно бьёт по нужной ветке.
+    let calls = 0;
+    const client = fakeClient({
+      invoke: jest.fn(async () => {
+        calls += 1;
+        if (calls === 2) throw new Error('USERNAME_NOT_MODIFIED');
+        return {};
+      }),
+    });
+    await expect(
+      applyProfile({ client, profile: { ...base, username: 'ivan_petrov' }, currentUsername: 'ivan' }),
+    ).resolves.toBeDefined();
+  });
+
+  it('объясняет занятый юзернейм по-человечески', () => {
+    expect(describeTelegramError(new Error('USERNAME_OCCUPIED'))).toMatch(/занят/i);
+    expect(describeTelegramError(new Error('USERNAME_INVALID'))).toMatch(/латиница/i);
+    expect(describeTelegramError(new Error('USERNAME_PURCHASE_AVAILABLE'))).toMatch(/аукцион/i);
+  });
+});

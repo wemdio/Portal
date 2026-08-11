@@ -1122,7 +1122,11 @@ services:
       - HEALTH_PORTAL_URL=${HEALTH_PORTAL_URL:-https://polza-portal.ru}
       - HEALTH_INTERVAL_SEC=${HEALTH_INTERVAL_SEC:-900}
       - HEALTH_JOB_MONITOR_INTERVAL_SEC=${HEALTH_JOB_MONITOR_INTERVAL_SEC:-300}
-      - HEALTH_JOB_STUCK_MIN=${HEALTH_JOB_STUCK_MIN:-15}
+      # Держать строго выше BASE_CONSTRUCTOR_STALE_MINUTES (15): воркер сам
+      # резюмит осиротевшую задачу на этом пороге, и при равных значениях
+      # каждый деплой давал ложную тревогу за секунды до самоподбора
+      # (инцидент 11.08.2026).
+      - HEALTH_JOB_STUCK_MIN=${HEALTH_JOB_STUCK_MIN:-20}
       - HEALTH_SERVER_IP=${HEALTH_SERVER_IP:-139.60.162.12}
       - PROXY_URLS=${PROXY_URLS}
       - S3_ENDPOINT=${S3_ENDPOINT}
