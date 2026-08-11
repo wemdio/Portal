@@ -98,7 +98,11 @@ function BasePreview({ base }: { base: EngBaseSummary }) {
             </thead>
             <tbody>
               {preview.rows.map((row, i) => (
-                <tr key={i} title={JSON.stringify(row)} style={{ borderTop: '1px solid var(--cp-divider)' }}>
+                <tr
+                  key={i}
+                  title={JSON.stringify(row).slice(0, 600)}
+                  style={{ borderTop: '1px solid var(--cp-divider)' }}
+                >
                   {columns.map((c) => (
                     <td key={c} className="px-3 py-1.5 truncate max-w-[220px]" style={{ color: 'var(--cp-paper)' }}>
                       {typeof row[c] === 'string' || typeof row[c] === 'number' ? String(row[c]) : ''}

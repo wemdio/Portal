@@ -78,7 +78,12 @@ function seed(opts: SeedOpts = {}) {
         { id: 'v1', project_id: 'p1', name: 'Banks' },
         { id: 'v2', project_id: 'p1', name: 'Fintech' },
       ],
-      he_hypotheses: opts.hypotheses ?? [],
+      // Дефолт: у обеих вертикалей есть accepted-гипотеза (иначе вертикаль
+      // не клиент-выбрана и автопилот её пропускает).
+      he_hypotheses: opts.hypotheses ?? [
+        { id: 'h1', project_id: 'p1', vertical_id: 'v1', status: 'accepted' },
+        { id: 'h2', project_id: 'p1', vertical_id: 'v2', status: 'accepted' },
+      ],
       he_chains: opts.chains ?? [],
       he_bases: opts.bases ?? [],
       he_templates: opts.templates ?? [],
@@ -249,5 +254,56 @@ describe('POST /api/client/eng/projects/[id]/autopilot — resolver', () => {
     expect(mockDb.getRows('he_jobs')).toHaveLength(0);
     // Флаг ставится и на «всё уже готово» — воркер подхватит следующие стадии.
     expect(mockDb.getRows('he_projects')[0].autopilot).toBe(true);
+  });
+
+  it('drives only client-chosen verticals: 0 accepted hypotheses → skip', async () => {
+    seed({
+      hypotheses: [
+        { id: 'h1', project_id: 'p1', vertical_id: 'v1', status: 'accepted' },
+        { id: 'h2', project_id: 'p1', vertical_id: 'v2', status: 'rejected' },
+        { id: 'h3', project_id: 'p1', vertical_id: 'v2', status: 'proposed' },
+      ],
+    });
+    const res = await POST(makeReq(), params);
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as { chains_enqueued: number; verticals_skipped: number };
+    // Только v1 (accepted) получает chain; v2 (0 accepted) — пропуск.
+    expect(body.chains_enqueued).toBe(1);
+    expect(body.verticals_skipped).toBe(1);
+
+    const jobs = mockDb.getRows('he_jobs');
+    expect(jobs).toHaveLength(1);
+    expect((jobs[0].payload as { vertical_id?: string }).vertical_id).toBe('v1');
+  });
+
+  it('ignores refill bases: an auto-refill base is not the vertical main base', async () => {
+    seed({
+      verticals: [{ id: 'v1', project_id: 'p1', name: 'Banks' }],
+      chains: [{ id: 'c1', vertical_id: 'v1', status: 'ready' }],
+      // Refill-база auto-pipeline: analyzed, но это НЕ основная база вертикали —
+      // шаблон по ней строить нельзя, сборку основной базы она не блокирует.
+      bases: [
+        {
+          id: 'b-refill',
+          project_id: 'p1',
+          vertical_id: 'v1',
+          source: 'auto',
+          status: 'analyzed',
+          filename: 'auto-refill: Banks · 2026-08-12',
+        },
+      ],
+    });
+    const res = await POST(makeReq(), params);
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as { collects_enqueued: number; templates_enqueued: number };
+    // Основной базы нет → ставим сборку; шаблон по refill-базе НЕ ставим.
+    expect(body.collects_enqueued).toBe(1);
+    expect(body.templates_enqueued).toBe(0);
+
+    const jobs = mockDb.getRows('he_jobs');
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toEqual(expect.objectContaining({ stage: 'base_collect' }));
   });
 });

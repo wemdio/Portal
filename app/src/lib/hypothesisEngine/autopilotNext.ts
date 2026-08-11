@@ -13,9 +13,12 @@
  * Правила:
  *  - chain done        → сборка базы вертикали (enqueueHeBaseCollect, лимит
  *                        AUTOPILOT_BASE_LIMIT, accepted-гипотезы вертикали;
- *                        пустой список → null = по всем). Сама base_collect в
- *                        не-refill режиме завершает базу в 'analyzing' и ставит
- *                        base_analyze — это звено конвейера уже автоматично;
+ *                        пустой список → null = по всем). Повторный chain при
+ *                        уже готовой/анализируемой auto-базе НИЧЕГО не ставит:
+ *                        re-chain — про письма, а не про новую базу. Сама
+ *                        base_collect в не-refill режиме завершает базу в
+ *                        'analyzing' и ставит base_analyze — это звено
+ *                        конвейера уже автоматично;
  *  - base_analyze done → генерация 85/15 шаблона (he_jobs stage='template',
  *                        дедуп активных template-джоб этой базы), база обязана
  *                        быть 'analyzed';
@@ -59,6 +62,20 @@ async function afterChainDone(supabase: SupabaseClient, job: HeJob): Promise<Aut
   const hypothesisIds = (hypothesesRes.data ?? [])
     .map((h) => (h as { id?: string }).id)
     .filter((v): v is string => typeof v === 'string' && v.length > 0);
+
+  // Re-chain (перегенерация/правка писем) не должен запускать новую сборку:
+  // готовая или анализируемая auto-база вертикали остаётся основной. Иначе
+  // каждая регенерация цепочки жгла бы часы конструктора на дубль базы.
+  const { data: doneBase, error: doneBaseErr } = await supabase
+    .from('he_bases')
+    .select('id')
+    .eq('vertical_id', verticalId)
+    .eq('source', 'auto')
+    .in('status', ['analyzing', 'analyzed'])
+    .limit(1)
+    .maybeSingle();
+  if (doneBaseErr) throw new Error(`autopilot done-base read: ${doneBaseErr.message}`);
+  if (doneBase) return 'skipped';
 
   const res = await enqueueHeBaseCollect(supabase, {
     verticalId,

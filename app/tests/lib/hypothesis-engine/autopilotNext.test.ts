@@ -118,6 +118,21 @@ describe('enqueueAutopilotFollowups — chain done', () => {
     expect(mockDb.getRows('he_jobs')).toHaveLength(0);
   });
 
+  it('skips a re-collect when the vertical already has an analyzed/analyzing auto base', async () => {
+    // Re-chain (редактура/перегенерация писем) не должен жечь часы конструктора
+    // на новую сборку: готовая база вертикали остаётся основной.
+    for (const status of ['analyzing', 'analyzed'] as const) {
+      seed(true, {
+        he_bases: [{ id: 'b-done', project_id: 'p1', vertical_id: 'v1', source: 'auto', status }],
+      });
+      const res = await enqueueAutopilotFollowups(db(), makeJob('chain', { vertical_id: 'v1' }));
+
+      expect(res).toEqual({ collect: 'skipped' });
+      expect(mockDb.getRows('he_bases')).toHaveLength(1);
+      expect(mockDb.getRows('he_jobs')).toHaveLength(0);
+    }
+  });
+
   it('skips when the payload has no vertical_id', async () => {
     seed(true);
     const res = await enqueueAutopilotFollowups(db(), makeJob('chain', {}));

@@ -11,9 +11,12 @@ import { defaultChainLanguageForMarket, projectMarket } from '@/lib/hypothesisEn
 export const dynamic = 'force-dynamic';
 
 // POST — «Start outreach»: включает автопилот проекта (he_projects.autopilot=true)
-// и идемпотентно доставляет недостающие стадии конвейера по каждой вертикали:
+// и идемпотентно доставляет недостающие стадии конвейера по каждой
+// КЛИЕНТ-ВЫБРАННОЙ вертикали (есть хотя бы одна accepted-гипотеза; остальные
+// вертикали пропускаются):
 //   нет ready-цепочки и нет активной chain-джобы → chain (язык по market);
-//   цепочка ready и нет auto-базы (collecting/analyzing/analyzed) → base_collect
+//   цепочка ready и нет основной auto-базы (collecting/analyzing/analyzed;
+//   refill-базы «auto-refill: …» не в счёт) → base_collect
 //     (лимит AUTOPILOT_BASE_LIMIT, accepted-гипотезы; дедупы внутри
 //     enqueueHeBaseCollect);
 //   база analyzed и нет шаблона/активной template-джобы → template.
@@ -63,7 +66,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     supabaseAdmin.from('he_hypotheses').select('id, vertical_id, status').eq('project_id', id),
     supabaseAdmin
       .from('he_bases')
-      .select('id, vertical_id, source, status')
+      .select('id, vertical_id, source, status, filename')
       .eq('project_id', id)
       .order('created_at', { ascending: false }),
     supabaseAdmin.from('he_templates').select('id, vertical_id, base_id').in('vertical_id', verticalIds),
@@ -100,6 +103,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
   for (const vertical of verticals) {
     const verticalId = vertical.id as string;
+
+    // Автопилот гонит только клиент-выбранные вертикали: без единой accepted
+    // гипотезы вертикаль пропускаем (клиент её не выбирал — сборки/письма/
+    // шаблоны по ней не нужны, а стоили бы часы конструктора).
+    const accepted = hypotheses
+      .filter((h) => h.vertical_id === verticalId && h.status === 'accepted')
+      .map((h) => h.id as string);
+    if (accepted.length === 0) {
+      verticalsSkipped += 1;
+      continue;
+    }
+
     const readyChain = chains.some((c) => c.vertical_id === verticalId && c.status === 'ready');
     const activeChain = activeJobs.some(
       (j) => j.stage === 'chain' && (j.payload as { vertical_id?: string } | null)?.vertical_id === verticalId,
@@ -124,22 +139,26 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       chainsEnqueued += 1;
       enqueued = true;
     } else if (readyChain) {
-      // Auto-базы вертикали: живая (collecting/analyzing) или готовая (analyzed).
-      // Свежее — первой (выборка created_at desc).
-      const autoBases = bases.filter((b) => b.vertical_id === verticalId && b.source === 'auto');
+      // Auto-базы вертикали БЕЗ refill-баз auto-pipeline («auto-refill: …»):
+      // refill — дочерний долив кампании, он ни основной базой не считается,
+      // ни шаблон по себе не требует. Живая (collecting/analyzing) или готовая
+      // (analyzed). Свежее — первой (выборка created_at desc).
+      const autoBases = bases.filter(
+        (b) =>
+          b.vertical_id === verticalId &&
+          b.source === 'auto' &&
+          !String((b as { filename?: string }).filename ?? '').startsWith('auto-refill'),
+      );
       const liveBase = autoBases.some((b) => b.status === 'collecting' || b.status === 'analyzing');
       const analyzedBase = autoBases.find((b) => b.status === 'analyzed');
 
       if (!liveBase && !analyzedBase) {
-        const accepted = hypotheses
-          .filter((h) => h.vertical_id === verticalId && h.status === 'accepted')
-          .map((h) => h.id as string);
         const collect = await enqueueHeBaseCollect(supabaseAdmin, {
           verticalId,
           projectId: id,
           verticalName: (vertical.name as string) ?? 'vertical',
           limit: AUTOPILOT_BASE_LIMIT,
-          hypothesisIds: accepted.length > 0 ? accepted : null,
+          hypothesisIds: accepted,
         });
         if (!collect.ok) {
           await logError('client.eng.autopilot.collect_enqueue_failed', new Error(collect.message), {
