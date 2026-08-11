@@ -2,13 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { sqliteBufferToSessionString } from '@/lib/telegram/sessionUtils';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { sqliteBufferToSessionString, authKeyFingerprint } from '@/lib/telegram/sessionUtils';
 import {
   collectTdataCandidates,
   splitExistingAccounts,
   type TdataSkip,
   type TdataError,
   type TdataUpload,
+  type ExistingAccountRow,
 } from '@/lib/tgOutreach/tdataImport';
 
 export const dynamic = 'force-dynamic';
@@ -59,6 +61,76 @@ async function* bufferOneByOne(files: File[]): AsyncGenerator<TdataUpload> {
   for (const file of files) {
     yield { name: file.name, buffer: Buffer.from(await file.arrayBuffer()) };
   }
+}
+
+/**
+ * Страница выборки для сверки. Не больше PostgREST max-rows, иначе хвост
+ * обрежется молча.
+ */
+const DEDUPE_PAGE = 1000;
+
+/** Потолок на случай неожиданно разросшейся таблицы: упёрлись — отказываем. */
+const DEDUPE_MAX_ROWS = 200_000;
+
+/**
+ * Прочитать все аккаунты портала, по которым идёт сверка дублей.
+ *
+ * Страницами через `.range()`: на голом `select` PostgREST отдал бы только
+ * первые max-rows строк и никак об этом не сообщил. Недочитанная сверка
+ * опасна ровно так же, как упавшая, — оба случая выглядят как «дублей нет» и
+ * пропускают в базу второй аккаунт с тем же ключом авторизации.
+ *
+ * Полноту проверяем не по длине последней страницы, а сравнением с COUNT на
+ * сервере: короткая страница означает и «данные кончились», и «PostgREST
+ * обрезал ответ своим max-rows», а на глаз эти случаи неразличимы. Любое
+ * расхождение, обрыв и упор в потолок возвращают ошибку, а не короткий список.
+ *
+ * Порядок фиксируем по `id`: без ORDER BY страницы могут перекрываться и
+ * терять строки между запросами.
+ */
+async function loadAccountsForDedupe(
+  db: SupabaseClient,
+): Promise<{ rows: ExistingAccountRow[] } | { error: string }> {
+  const rows: ExistingAccountRow[] = [];
+  let total: number | null = null;
+
+  for (let from = 0; from < DEDUPE_MAX_ROWS; from += DEDUPE_PAGE) {
+    const { data, error, count } = await db
+      .from('tg_outreach_accounts')
+      .select('tg_user_id, session_data, tg_outreach_campaigns(name)', { count: 'exact' })
+      .order('id', { ascending: true })
+      .range(from, from + DEDUPE_PAGE - 1);
+
+    if (error) return { error: error.message };
+    if (typeof count === 'number') total = count;
+
+    const page = data ?? [];
+    for (const row of page) {
+      const rowCampaign = (row as { tg_outreach_campaigns?: { name?: string } | null })
+        .tg_outreach_campaigns;
+      // Пустой tg_user_id обязан остаться null: Number(null) даёт 0, и в
+      // сверке появился бы несуществующий аккаунт с id 0.
+      const rawUserId = (row as { tg_user_id: number | string | null }).tg_user_id;
+      rows.push({
+        tg_user_id: rawUserId === null || rawUserId === undefined ? null : Number(rawUserId),
+        campaign_name: rowCampaign?.name ?? null,
+        session_data: (row as { session_data?: string | null }).session_data ?? null,
+      });
+    }
+
+    // Дочитали ровно до конца — не запрашиваем страницу за последней строкой:
+    // на диапазон целиком за пределами таблицы PostgREST отвечает 416, и
+    // здоровое чтение выглядело бы как сбой.
+    if (total !== null && rows.length >= total) break;
+    if (page.length < DEDUPE_PAGE) break;
+  }
+
+  if (total === null) return { error: 'база не сообщила, сколько всего аккаунтов' };
+  if (rows.length !== total) {
+    return { error: `прочитано ${rows.length} аккаунтов из ${total} — сверка неполная` };
+  }
+
+  return { rows };
 }
 
 export async function POST(req: NextRequest) {
@@ -130,6 +202,7 @@ export async function POST(req: NextRequest) {
       const tdataSkipped: TdataSkip[] = [];
       const tdataErrors: TdataError[] = [];
       let tdataRows: Array<Record<string, unknown>> = [];
+      let uncheckedExisting = 0;
 
       if (zipFiles.length) {
         const collected = await collectTdataCandidates(bufferOneByOne(zipFiles));
@@ -141,32 +214,24 @@ export async function POST(req: NextRequest) {
           // Фильтр по id вырезал бы ровно то, ради чего сверка и делается:
           // у аккаунтов, залитых старым путём (.session), tg_user_id пуст,
           // и найти их можно только по ключу авторизации из session_data.
-          // Колонки узкие, таблица — внутренний список аккаунтов, так что
-          // выборка целиком дешевле пропущенного AUTH_KEY_DUPLICATED.
-          const { data: existing, error: existingError } = await db
-            .from('tg_outreach_accounts')
-            .select('tg_user_id, session_data, tg_outreach_campaigns(name)');
+          const loaded = await loadAccountsForDedupe(db);
 
           // Провалившуюся сверку нельзя трактовать как «дублей нет»: тогда тот
           // же ключ авторизации уедет в базу вторым аккаунтом, оба подключения
           // получат AUTH_KEY_DUPLICATED, и Telegram отзовёт сессию — ровно то,
           // от чего эта сверка защищает.
-          if (existingError) {
-            return jsonError(`Не удалось сверить аккаунты с базой: ${existingError.message}`, 500);
+          if ('error' in loaded) {
+            return jsonError(`Не удалось сверить аккаунты с базой: ${loaded.error}`, 500);
           }
+          const existingRows = loaded.rows;
 
-          const existingRows = (existing ?? []).map((row) => {
-            const rowCampaign = (row as { tg_outreach_campaigns?: { name?: string } | null })
-              .tg_outreach_campaigns;
-            // Пустой tg_user_id обязан остаться null: Number(null) даёт 0, и в
-            // сверке появился бы несуществующий аккаунт с id 0.
-            const rawUserId = (row as { tg_user_id: number | string | null }).tg_user_id;
-            return {
-              tg_user_id: rawUserId === null || rawUserId === undefined ? null : Number(rawUserId),
-              campaign_name: rowCampaign?.name ?? null,
-              session_data: (row as { session_data?: string | null }).session_data ?? null,
-            };
-          });
+          // Строки, невидимые обоим ключам сверки: telegram-id не выяснен, а
+          // строка сессии пуста — так остаётся после неудачной конвертации.
+          // Без этого числа «Пропущено 0» читается одинаково и когда дублей
+          // нет, и когда проверить было нечем.
+          uncheckedExisting = existingRows.filter(
+            (row) => row.tg_user_id === null && !authKeyFingerprint(row.session_data),
+          ).length;
 
           const { fresh, skipped } = splitExistingAccounts(collected.candidates, existingRows);
           tdataSkipped.push(...skipped);
@@ -212,13 +277,35 @@ export async function POST(req: NextRequest) {
         inserted = data ?? [];
       }
 
+      // Возврат строк в порядке вставки — поведение PostgreSQL, а не обещание
+      // API. Если он однажды разъедется, цикл ниже запишет session_file_path и
+      // результат конвертации .session поверх строки из tdata — и затрёт
+      // только что импортированный ключ, показав оператору успешную загрузку.
+      // Поэтому дальше идём, только если сходится и число строк, и имя каждой.
+      if (inserted.length !== insertRows.length) {
+        return jsonError(
+          `Вставлено ${inserted.length} строк из ${insertRows.length}; файлы сессий не разложены — проверьте список аккаунтов кампании`,
+          500,
+        );
+      }
+
       const sessionConvertErrors: Array<{ base: string; error: string }> = [];
       if (supabaseAdmin) {
         for (let i = 0; i < ordered.length; i++) {
-          const { base, sessionBuf } = ordered[i];
+          const { base, sessionBuf, acc } = ordered[i];
           if (!sessionBuf) continue;
           const row = inserted[i];
           if (!row) continue;
+          // Пишем .session только в ту строку, для которой этот файл и
+          // предназначен: update ниже затирает session_data, и промах по
+          // строке из tdata стоил бы импортированного ключа.
+          if (row.session_name !== acc.session_name) {
+            return jsonError(
+              `Порядок вставленных аккаунтов разошёлся с загруженными файлами (${base}): ` +
+              `ожидался «${acc.session_name}», в строке «${row.session_name}». Файлы сессий не разложены.`,
+              500,
+            );
+          }
           const path = `${campaignId}/${row.id}.session`;
           const { error: uploadErr } = await supabaseAdmin.storage
             .from(BUCKET)
@@ -258,6 +345,7 @@ export async function POST(req: NextRequest) {
           count: inserted.length,
           ...(tdataSkipped.length ? { skipped: tdataSkipped } : {}),
           ...(tdataErrors.length ? { errors: tdataErrors } : {}),
+          ...(uncheckedExisting ? { unchecked_existing_accounts: uncheckedExisting } : {}),
           ...(sessionConvertErrors.length
             ? { session_convert_errors: sessionConvertErrors }
             : {}),
