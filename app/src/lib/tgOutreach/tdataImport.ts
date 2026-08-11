@@ -134,6 +134,53 @@ export interface ExistingAccountRow {
   campaign_name: string | null;
   /** Пуст там, где конвертация в строку сессии не удалась. */
   session_data?: string | null;
+  /** Под этим именем аккаунт лежит в списке кампании — по нему оператор его и ищет. */
+  session_name?: string | null;
+  phone?: string | null;
+  tg_username?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+}
+
+/**
+ * Как назвать оператору уже загруженный аккаунт, чтобы он нашёл его в списке.
+ *
+ * Порядок от самого полезного: `session_name` — это то, что видно в колонке
+ * списка. Пустые поля пропускаем: у строк из tdata нет телефона до первой
+ * проверки, у старых может не быть имени, и «— , , +7» читалось бы хуже, чем
+ * одно название кампании.
+ */
+function describeExistingAccount(row: ExistingAccountRow): string {
+  const username = (row.tg_username ?? '').trim().replace(/^@/, '');
+  const fullName = [row.first_name, row.last_name]
+    .map((part) => (part ?? '').trim())
+    .filter(Boolean)
+    .join(' ');
+
+  return [
+    (row.session_name ?? '').trim(),
+    fullName,
+    username ? `@${username}` : '',
+    (row.phone ?? '').trim(),
+  ]
+    .filter(Boolean)
+    .join(', ');
+}
+
+/**
+ * Причина пропуска: куда загружен, кто это и по какому признаку совпал.
+ *
+ * Названия кампании оператору мало — в ней десятки строк, и искать не по чему.
+ * Признак совпадения оставляем в скобках: по `telegram-id` аккаунт видно в
+ * списке сразу, а совпадение по ключу означает, что там он лежит под другим
+ * или ещё не выясненным id.
+ */
+function skipReason(row: ExistingAccountRow, matched: 'id' | 'key'): string {
+  const where = row.campaign_name ? `в кампанию «${row.campaign_name}»` : 'в другую кампанию';
+  const who = describeExistingAccount(row);
+  const why = matched === 'id' ? 'совпал telegram-id' : 'совпал ключ входа';
+
+  return who ? `уже загружен ${where} — ${who} (${why})` : `уже загружен ${where} (${why})`;
 }
 
 /**
@@ -154,44 +201,33 @@ export function splitExistingAccounts(
   candidates: TdataCandidate[],
   existing: ExistingAccountRow[],
 ): { fresh: TdataCandidate[]; skipped: TdataSkip[] } {
-  const byUserId = new Map<number, string | null>();
-  const byAuthKey = new Map<string, string | null>();
+  const byUserId = new Map<number, ExistingAccountRow>();
+  const byAuthKey = new Map<string, ExistingAccountRow>();
 
   for (const row of existing) {
     if (row.tg_user_id !== null && row.tg_user_id !== undefined) {
-      byUserId.set(row.tg_user_id, row.campaign_name);
+      byUserId.set(row.tg_user_id, row);
     }
     const fingerprint = authKeyFingerprint(row.session_data);
-    if (fingerprint) byAuthKey.set(fingerprint, row.campaign_name);
+    if (fingerprint) byAuthKey.set(fingerprint, row);
   }
 
   const fresh: TdataCandidate[] = [];
   const skipped: TdataSkip[] = [];
 
   for (const candidate of candidates) {
-    if (byUserId.has(candidate.tgUserId)) {
-      const campaignName = byUserId.get(candidate.tgUserId);
-      skipped.push({
-        name: candidate.name,
-        reason: campaignName
-          ? `уже загружен в кампанию «${campaignName}»`
-          : 'уже загружен в другую кампанию',
-      });
+    const byId = byUserId.get(candidate.tgUserId);
+    if (byId) {
+      skipped.push({ name: candidate.name, reason: skipReason(byId, 'id') });
       continue;
     }
 
-    // Совпал только ключ: та же сессия лежит в базе под другим (или ещё не
-    // выясненным) телеграм-id. Формулировка отличается намеренно — оператор
-    // ищет её в списке по имени и не найдёт.
+    // Совпал только ключ: та же сессия лежит в базе под другим или ещё не
+    // выясненным телеграм-id, поэтому по id её найти было нельзя.
     const fingerprint = authKeyFingerprint(candidate.sessionString);
-    if (fingerprint && byAuthKey.has(fingerprint)) {
-      const campaignName = byAuthKey.get(fingerprint);
-      skipped.push({
-        name: candidate.name,
-        reason: campaignName
-          ? `эта же сессия уже загружена в кампанию «${campaignName}» — совпал ключ входа`
-          : 'эта же сессия уже загружена в другую кампанию — совпал ключ входа',
-      });
+    const byKey = fingerprint ? byAuthKey.get(fingerprint) : undefined;
+    if (byKey) {
+      skipped.push({ name: candidate.name, reason: skipReason(byKey, 'key') });
       continue;
     }
 
