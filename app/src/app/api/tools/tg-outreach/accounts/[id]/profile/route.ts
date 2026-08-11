@@ -158,10 +158,15 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
       const { id } = await ctx.params;
 
       const form = await req.formData();
+      // username отсутствует в форме — поле не редактировали, трогать нельзя.
+      // Пустая строка, наоборот, значит «снять юзернейм»: разница существенная,
+      // поэтому здесь не подставляем '' по умолчанию, как остальным полям.
+      const rawUsername = form.get('username');
       const profile = {
         first_name: String(form.get('first_name') ?? ''),
         last_name: String(form.get('last_name') ?? ''),
         bio: String(form.get('bio') ?? ''),
+        ...(rawUsername === null ? {} : { username: String(rawUsername) }),
       };
 
       const check = validateProfile(profile);
@@ -188,7 +193,12 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
       }
 
       try {
-        const applied = await applyProfile({ client, profile, avatar });
+        const applied = await applyProfile({
+          client,
+          profile,
+          avatar,
+          currentUsername: account.tg_username ?? '',
+        });
 
         // Ту же картинку кладём в хранилище портала, чтобы список показал новую
         // аватарку сразу — без отдельного похода в Telegram за ней.
