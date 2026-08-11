@@ -48,6 +48,7 @@ import {
   DEFAULT_TELEGRAM_SETTINGS,
   DEFAULT_FOLLOW_UP,
 } from '@/lib/tgOutreach/types';
+import { DEFAULT_MAX_MESSAGE_CHARS } from '@/lib/tgOutreach/firstTouch/validateMessage';
 // Только тип: сам модуль серверный (тянет gramJS), в клиентский бандл он не
 // попадает — import type стирается при сборке. Берём его, чтобы набор статусов
 // проверки был один на портал, а не переписанный руками на экране.
@@ -337,6 +338,25 @@ function SettingsTab({ campaign, onSave }: {
               поднимайте на ступень раз в 2–3 дня, только если в логах не было ограничений.
               Всю норму аккаунт отправляет одной очередью — разносите её полем
               «Пауза между действиями».
+            </p>
+          </div>
+          {/* Порог был захардкожен в 400 знаков — число из статистики прошлых
+              кампаний (медиана 260, 99% в 400), а не правило Telegram. На базе
+              с ровными текстами по 430–460 знаков он останавливал рассылку
+              целиком: каждый контакт откладывался, за три круга уходил в
+              «отложенные», и не отправлялось ни одно сообщение. Ручка нужна
+              оператору под рукой. */}
+          <div className="space-y-1">
+            <FieldNum
+              label="Максимум знаков в первом сообщении"
+              value={telegram.first_touch_max_chars ?? DEFAULT_MAX_MESSAGE_CHARS}
+              onChange={v => setTG('first_touch_max_chars', v)}
+            />
+            <p className="text-[10px] text-gray-400">
+              Длиннее — контакт откладывается, а не отправляется. Это фильтр мусора в файле
+              (съехавшая колонка, обрезанная строка), а не ограничение Telegram: у него предел
+              4096 знаков, выше него значение не поднимется. Ноль вернёт значение по умолчанию — 400.
+              Если подняли порог уже после запуска, верните отложенные контакты в очередь на вкладке «Базы».
             </p>
           </div>
         </div>
@@ -2898,6 +2918,32 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
     } finally { setBusy(false); }
   };
 
+  /**
+   * Контакт, трижды не прошедший отправку, уходит в «отложенные» и больше не
+   * выбирается — иначе мусорная строка в начале файла заткнула бы всю базу.
+   * Но часть причин снимается настройкой, а не правкой файла: подняли порог
+   * длины первого сообщения — контакты обязаны вернуться в работу.
+   */
+  const requeueBase = async (base: OutreachBase) => {
+    if (!confirm(
+      `Вернуть в очередь ${base.counts.failed} отложенных контактов базы «${base.name}»?`
+      + ' Они снова пойдут в отправку — сначала убедитесь, что причина устранена'
+      + ' (например, поднят порог длины первого сообщения в настройках кампании).',
+    )) return;
+
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases/${base.id}/requeue`, { method: 'POST' });
+      const d = (await res.json().catch(() => null)) as { error?: string; requeued?: number } | null;
+      if (!res.ok) {
+        setError(d?.error ?? `Не удалось вернуть контакты в очередь (${res.status})`);
+        return;
+      }
+      setNotice(`Возвращено в очередь: ${d?.requeued ?? 0}.`);
+      void load();
+    } finally { setBusy(false); }
+  };
+
   const uploadContacts = async (baseId: string, e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -2970,12 +3016,15 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
         </div>
       ) : (
         <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[32px_1fr_repeat(4,80px)_120px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          {/* «Отложено» (status=failed) раньше не показывали вовсе: контакты
+              копились в невидимой колонке, и база, вставшая на пороге длины,
+              выглядела просто пустеющей. */}
+          <div className="grid grid-cols-[32px_1fr_repeat(5,80px)_150px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <span />
-            <span>База</span><span>Всего</span><span>Ждут</span><span>Отправлено</span><span>Пропущено</span><span />
+            <span>База</span><span>Всего</span><span>Ждут</span><span>Отправлено</span><span>Пропущено</span><span>Отложено</span><span />
           </div>
           {bases.map((b) => (
-            <div key={b.id} className={`grid grid-cols-[32px_1fr_repeat(4,80px)_120px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
+            <div key={b.id} className={`grid grid-cols-[32px_1fr_repeat(5,80px)_150px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
               <input
                 type="checkbox"
                 checked={linked.has(b.id)}
@@ -2989,12 +3038,20 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
               <span className="text-xs text-gray-600">{b.counts.pending}</span>
               <span className="text-xs text-gray-600">{b.counts.sent}</span>
               <span className="text-xs text-gray-600">{b.counts.skipped}</span>
+              <span className={`text-xs ${b.counts.failed > 0 ? 'text-amber-600 font-medium' : 'text-gray-600'}`}>
+                {b.counts.failed}
+              </span>
               <div className="flex items-center gap-1">
               <label className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer w-fit">
                 <Upload className="h-3 w-3" /> Загрузить
                 <input type="file" accept=".xlsx,.xls,.csv" className="hidden" disabled={busy}
                   onChange={(e) => { void uploadContacts(b.id, e); }} />
               </label>
+                <button type="button" onClick={() => { void requeueBase(b); }} disabled={busy || b.counts.failed === 0}
+                  title="Вернуть отложенные контакты в очередь — например, после того как подняли порог длины первого сообщения"
+                  className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent">
+                  <RefreshCw className="h-3.5 w-3.5" />
+                </button>
                 <button type="button" onClick={() => { void deleteBase(b); }} disabled={busy}
                   title="Удалить базу вместе с контактами"
                   className="p-1 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer disabled:opacity-50">

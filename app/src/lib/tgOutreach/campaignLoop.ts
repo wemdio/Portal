@@ -1738,6 +1738,7 @@ export async function runCampaignLoop(
             campaignId,
             account,
             perDay: tg.first_touch_per_account_per_day,
+            maxChars: tg.first_touch_max_chars,
             log,
             shouldStop,
             onProgress: tick,
