@@ -48,6 +48,10 @@ import {
   DEFAULT_TELEGRAM_SETTINGS,
   DEFAULT_FOLLOW_UP,
 } from '@/lib/tgOutreach/types';
+// Только тип: сам модуль серверный (тянет gramJS), в клиентский бандл он не
+// попадает — import type стирается при сборке. Берём его, чтобы набор статусов
+// проверки был один на портал, а не переписанный руками на экране.
+import type { AccountCheckResult, OtherSession } from '@/lib/tgOutreach/accountCheck';
 
 const API_BASE = '/api/tools/tg-outreach';
 
@@ -1293,6 +1297,24 @@ type SyncResult = {
 };
 
 /**
+ * Ответ проверки по одному аккаунту.
+ *
+ * Общий счёт вида «Проверено 3: жив — 2» отвечал на вопрос «сколько», а
+ * оператору нужен ответ на вопрос «какой»: заливали партию, а разбираться нужно
+ * с конкретным аккаунтом. Чужие сеансы держим рядом со статусом — именно ими
+ * «в аккаунт кто-то зашёл» отличается от «номер забанен».
+ */
+interface CheckRow {
+  id: string;
+  /** session_name — под ним аккаунт лежит в портале и в списке. */
+  name: string;
+  /** Из набора check_status: ok | session_revoked | banned | … */
+  status: string;
+  detail: string;
+  otherSessions: OtherSession[];
+}
+
+/**
  * Итоги проверки аккаунта человеческим языком.
  *
  * Разделение по цвету неслучайно: жёлтое — то, что чинится нашими руками
@@ -1408,7 +1430,8 @@ function CampaignAccountsTab({
   const [syncSummary, setSyncSummary] = useState<string | null>(null);
   /** id аккаунтов, которые сейчас проверяются на живость. */
   const [checkingIds, setCheckingIds] = useState<string[]>([]);
-  const [checkSummary, setCheckSummary] = useState<string | null>(null);
+  /** Ответ Telegram по каждому проверенному аккаунту; висит, пока не закроют. */
+  const [checkResults, setCheckResults] = useState<CheckRow[] | null>(null);
 
   // Профиль читается через то же соединение, что и работа кампании, поэтому
   // на запущенной кампании в Telegram не ходим — см. гейт в API.
@@ -1577,37 +1600,64 @@ function CampaignAccountsTab({
    * Идём пачками по четыре — как и чтение профилей: каждая проверка это
    * подключение через мобильный прокси на десятки секунд, а полсотни
    * одновременных соединений в один пул он не переживёт.
+   *
+   * Ответ проверки — это и есть результат: статус, объяснение и чужие сеансы
+   * приходят от самого Telegram, и ровно их же ручка кладёт в аккаунт. Поэтому
+   * список после проверки не перечитываем: строку обновляем тем, что ответило
+   * Telegram по этому аккаунту.
    */
   const checkSelected = useCallback(async () => {
     const targets = accounts
       .filter((a) => selectedIds.includes(a.id))
       .map((a) => ({ id: a.id, name: a.session_name }));
     if (!targets.length) return;
-    setCheckSummary(null);
+    setCheckResults(null);
 
-    const byStatus = new Map<string, number>();
+    // По месту в targets, а не в порядке ответов: четыре воркера заканчивают
+    // вразнобой, а оператор ищет строку там, где выделял.
+    const rows: CheckRow[] = new Array<CheckRow>(targets.length);
     let next = 0;
     const worker = async () => {
       while (next < targets.length) {
-        const t = targets[next++];
+        const i = next++;
+        const t = targets[i];
         setCheckingIds((prev) => [...prev, t.id]);
         try {
           const res = await authFetch(`${API_BASE}/accounts/${t.id}/check`, { method: 'POST' });
-          const data = (await res.json().catch(() => ({}))) as {
-            status?: string; detail?: string; error?: string;
-          };
-          const status = res.ok ? (data.status ?? 'error') : 'error';
-          byStatus.set(status, (byStatus.get(status) ?? 0) + 1);
+          const data = (await res.json().catch(() => null)) as
+            | (Partial<AccountCheckResult> & { error?: string })
+            | null;
+
+          // Отказ ручки (кампания работает, аккаунта нет) — это не ответ
+          // Telegram, поэтому и статуса из его набора у него нет: error.
+          const status = res.ok && data?.status ? data.status : 'error';
+          const detail = (res.ok ? data?.detail : data?.error)
+            ?? (res.ok ? 'Telegram ничего не объяснил' : `сервер ответил ${res.status}`);
+          const otherSessions = (res.ok && data?.other_sessions) || [];
+          rows[i] = { id: t.id, name: t.name, status, detail, otherSessions };
+
           setAccounts((prev) => prev.map((a) => (a.id === t.id
             ? {
                 ...a,
                 check_status: status,
-                check_detail: data.detail ?? data.error ?? null,
+                check_detail: detail,
                 checked_at: new Date().toISOString(),
+                other_sessions: otherSessions,
+                // Личность и телефон проверка узнаёт заодно — их ручка тоже
+                // записала, и в строке они должны появиться без перезагрузки.
+                ...(data?.tg_user_id != null ? { tg_user_id: data.tg_user_id } : {}),
+                ...(data?.tg_username ? { tg_username: data.tg_username } : {}),
+                ...(data?.phone ? { phone: data.phone } : {}),
               }
             : a)));
-        } catch {
-          byStatus.set('error', (byStatus.get('error') ?? 0) + 1);
+        } catch (e) {
+          rows[i] = {
+            id: t.id,
+            name: t.name,
+            status: 'error',
+            detail: e instanceof Error ? e.message : String(e),
+            otherSessions: [],
+          };
         } finally {
           setCheckingIds((prev) => prev.filter((x) => x !== t.id));
         }
@@ -1615,13 +1665,8 @@ function CampaignAccountsTab({
     };
     await Promise.all(Array.from({ length: Math.min(4, targets.length) }, () => worker()));
 
-    const parts = [...byStatus.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .map(([status, n]) => `${CHECK_LABEL[status]?.text ?? status} — ${n}`);
-    setCheckSummary(`Проверено ${targets.length}: ${parts.join(', ')}.`);
-    // Чужие сеансы приходят только с сервера, поэтому дочитываем список целиком.
-    void load();
-  }, [accounts, selectedIds, load]);
+    setCheckResults(rows);
+  }, [accounts, selectedIds]);
 
   const toggleActive = async (id: string, current: boolean) => {
     await authFetch(`${API_BASE}/accounts/${id}`, {
@@ -1901,12 +1946,52 @@ function CampaignAccountsTab({
         onCheck={() => { void checkSelected(); }}
       />
 
-      {checkSummary && (
-        <div className="flex items-start justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
-          <span>{checkSummary}</span>
-          <button type="button" onClick={() => setCheckSummary(null)} className="cursor-pointer text-gray-400 hover:text-gray-600">
-            <X className="h-3.5 w-3.5" />
-          </button>
+      {checkResults && checkResults.length > 0 && (
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+          <div className="flex items-start justify-between gap-3">
+            <span>Проверено аккаунтов: {checkResults.length}. Что ответил Telegram по каждому:</span>
+            <button type="button" onClick={() => setCheckResults(null)} className="cursor-pointer text-gray-400 hover:text-gray-600">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <ul className="mt-2 space-y-2">
+            {checkResults.map((r) => (
+              <li key={r.id} className="space-y-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-medium text-gray-800">{r.name}</span>
+                  {/* Технический код статуса рядом с человеческим словом: по
+                      нему инженер ищет причину в логах, продавцу хватает слова. */}
+                  <span className={`rounded-md px-1.5 py-0.5 ${CHECK_LABEL[r.status]?.cls ?? 'bg-gray-100 text-gray-500'}`}>
+                    {CHECK_LABEL[r.status]?.text ?? r.status} ({r.status})
+                  </span>
+                  <span className="text-gray-500">{r.detail}</span>
+                </div>
+                {/* Главная находка проверки: аккаунт жив, но в нём сидит кто-то
+                    ещё — именно так «нас разлогинили» отличается от «бан». */}
+                {r.otherSessions.length > 0 && (
+                  <div className="rounded-md bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
+                    <div>В аккаунт заходит кто-то ещё, чужих сеансов: {r.otherSessions.length}</div>
+                    <ul className="mt-0.5 space-y-0.5 text-amber-700">
+                      {r.otherSessions.slice(0, 3).map((s, i) => (
+                        <li key={`${r.id}-s${i}`}>
+                          {s.device} · {s.app} · {s.country} · был{' '}
+                          {new Date(s.last_active).toLocaleString('ru-RU', {
+                            day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+                          })}
+                        </li>
+                      ))}
+                      {r.otherSessions.length > 3 && (
+                        <li>
+                          и ещё {r.otherSessions.length - 3} — весь список под курсором на пометке
+                          «чужих сеансов» в строке аккаунта
+                        </li>
+                      )}
+                    </ul>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
