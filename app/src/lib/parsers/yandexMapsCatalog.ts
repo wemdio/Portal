@@ -426,18 +426,66 @@ export async function filterUnknownYandexIds(ids: string[]): Promise<Set<string>
   return new Set(unique.filter((id) => !known.has(id)));
 }
 
+/**
+ * Сколько организаций уборке позволено записать в пропавшие за один обход.
+ *
+ * Потолок держится на размере выдачи, и это не про скорость, а про правду.
+ * Обход считает выдачу исчерпывающей, если Яндекс вернул меньше, чем у него
+ * просили, — но «меньше» бывает и когда поиск оборвался. На бою 11.08.2026
+ * «Москва × Бизнес» вернула 20 ссылок при 65 321 организации в каталоге, а
+ * «Воронежская область × Услуги» — ноль при 3 343. По первой же букве правил
+ * все они пошли бы в пропавшие, а после второго такого обхода — в «закрылась».
+ *
+ * Поэтому: показал Яндекс N организаций — уборка вправе усомниться максимум в
+ * 2N + 20. Не сошлось — выдача была неполной, и трогать нечего. Двойной запас
+ * оставляет место настоящему закрытию (половина точки могла съехать), а +20
+ * позволяет отработать по-настоящему опустевшим парам, где выдача пуста
+ * законно.
+ */
+export function missingMarkBudget(seenCount: number): number {
+  return Math.max(0, Math.floor(seenCount)) * 2 + 20;
+}
+
+/**
+ * Отмечает, кого выдача показала, а кого в ней не оказалось.
+ *
+ * Ходит в Postgres напрямую по той же причине, что и сбор: уборка переписывает
+ * десятки тысяч строк каталога (одна «Москва × Бизнес» — 65 тыс.), а Kong рвёт
+ * соединение на 60 секундах. 11.08.2026 из-за этого 343 пары очереди висели в
+ * «упало» с `The upstream server is timing out` и HTML-страницами шлюза вместо
+ * ответа. Строки при этом никуда из базы не идут — гонять вызов через REST
+ * незачем.
+ */
 export async function markYandexMapsCatalogSeen(
   seen: string[],
   task: DiscoveryTask,
   exhaustive: boolean,
 ): Promise<number> {
+  const ids = [...new Set(seen.filter(Boolean))];
+
+  const pool = getCatalogPool();
+  if (pool) {
+    try {
+      const { rows } = await pool.query(
+        'select public.yandex_maps_catalog_mark_seen($1::text[], $2::text, $3::text, $4::text, $5::boolean, $6::integer) as suspected',
+        [ids, task.country, task.place, task.rubric, exhaustive, missingMarkBudget(ids.length)],
+      );
+      return Number((rows[0] as { suspected?: number } | undefined)?.suspected ?? 0);
+    } catch (error) {
+      throw new Error(
+        `Не удалось отметить организации: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   if (!supabaseAdmin) return 0;
   const { data, error } = await supabaseAdmin.rpc('yandex_maps_catalog_mark_seen', {
-    p_seen: [...new Set(seen.filter(Boolean))],
+    p_seen: ids,
     p_country: task.country,
     p_place: task.place,
     p_rubric: task.rubric,
     p_exhaustive: exhaustive,
+    p_max_missing: missingMarkBudget(ids.length),
   });
   if (error) throw new Error(`Не удалось отметить организации: ${error.message}`);
   return Number(data ?? 0);

@@ -62,7 +62,7 @@ export interface ActiveClient {
   account: OutreachAccount;
 }
 
-interface ParsedProxy {
+export interface ParsedProxy {
   ip: string;
   port: number;
   username?: string;
@@ -71,7 +71,14 @@ interface ParsedProxy {
   protocol: 'http' | 'https' | 'socks4' | 'socks5';
 }
 
-function parseProxyUrl(url: string): ParsedProxy | undefined {
+/**
+ * Экспортируется, потому что разбор строки прокси нужен не только при
+ * подключении аккаунта: проверка прокси (proxyCheck.ts) обязана понимать тот же
+ * набор схем, что и боевой путь. Две разные трактовки одной и той же строки
+ * означали бы, что оператор видит «прокси работает» там, где воркер её даже не
+ * разберёт.
+ */
+export function parseProxyUrl(url: string): ParsedProxy | undefined {
   try {
     const u = new URL(url);
     const protocol = u.protocol.replace(':', '') as ParsedProxy['protocol'];
@@ -113,7 +120,9 @@ export function describeProxyForLog(proxy: OutreachProxy): string {
  * (TCP жив, но Telegram не пускает / тормозит).
  */
 export async function probeProxyTcp(
-  proxy: OutreachProxy,
+  // Только url: проверке прокси (proxyCheck.ts) неоткуда взять полную строку
+  // из БД, а больше эта функция ничего из прокси не читает.
+  proxy: Pick<OutreachProxy, 'url'>,
   timeoutMs = 5_000,
 ): Promise<{ alive: boolean; latencyMs: number; error?: string }> {
   const parsed = parseProxyUrl(proxy.url);
