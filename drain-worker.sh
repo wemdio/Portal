@@ -252,4 +252,31 @@ for c in "${containers[@]}"; do
   sudo -n docker stop -t 15 "$c" 2>/dev/null || true
 done
 
+# BaseConstructor-реплики останавливаем отдельно и с коротким таймаутом.
+#
+# Зачем вообще (инцидент 11.08.2026, деплой 15:10): всё, чего нет в этом
+# скрипте, деплой убивает через force_rm_svc → `docker rm -f`, то есть
+# SIGKILL'ом без сигнала. Обработчик SIGTERM в app/worker/baseConstructor.ts
+# (ageRunningJobsForFastHandoff) при этом не выполняется, in-flight job'ы не
+# помечаются осиротевшими, и соседняя реплика подбирает их только по
+# BASE_CONSTRUCTOR_STALE_MINUTES — 15 минут простоя на ровном месте плюс
+# ложная тревога «Долго висит» в мониторе.
+#
+# Почему не в общий список выше: 15-секундный таймаут × 3 реплики = +45с к
+# каждому деплою, а ждать тут нечего. Задача НЕ должна доиграть до конца —
+# она резюмится с чекпоинта в другой реплике; хэндлеру нужно ~2 секунды
+# (UPDATE + повторный UPDATE через секунду). Останавливаем параллельно,
+# так весь шаг стоит ~5 секунд.
+bc_containers=(
+  "portal-worker-baseconstructor"
+  "portal-worker-baseconstructor-2"
+  "portal-worker-baseconstructor-3"
+)
+
+echo "[drain] Stopping base-constructor replicas (timeout 5s, in parallel)..."
+for c in "${bc_containers[@]}"; do
+  sudo -n docker stop -t 5 "$c" 2>/dev/null || true &
+done
+wait
+
 echo "[drain] Workers stopped (jobs are paused and will auto-resume after restart)"

@@ -24,6 +24,7 @@
  */
 
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
+import { markShuttingDown } from '@/lib/workerShutdown';
 import {
   createWorkerLogger,
   pollLoop,
@@ -79,16 +80,24 @@ async function ageRunningJobsForFastHandoff(): Promise<void> {
   // Far enough past that any STALE_JOB_MINUTES setting < 60min instantly
   // counts these as stale. The next polling worker's claimStaleResumable()
   // CAS will pick them up within ~5s.
-  const farPast = new Date(Date.now() - 60 * 60_000).toISOString();
+  const age = () =>
+    db
+      .from('base_constructor_jobs')
+      .update({ started_at: new Date(Date.now() - 60 * 60_000).toISOString() })
+      .in('id', ids)
+      .eq('status', 'processing');
   log(
     'info',
     `marking ${ids.length} in-flight job(s) for fast handoff after shutdown: ${ids.join(', ')}`,
   );
-  await db
-    .from('base_constructor_jobs')
-    .update({ started_at: farPast })
-    .in('id', ids)
-    .eq('status', 'processing');
+  await age();
+  // Второй проход. markShuttingDown() глушит будущие heartbeat'ы, но UPDATE,
+  // улетевший в PostgREST за миллисекунды ДО сигнала, может приземлиться уже
+  // после нашего backdate и снова сделать started_at свежим. Повтор через
+  // секунду оставляет последнее слово за нами и укладывается в docker
+  // stop-timeout (10s).
+  await sleep(1000);
+  await age();
 }
 
 /**
@@ -268,6 +277,11 @@ async function main(): Promise<void> {
   const onShutdownSignal = (sig: string) => {
     if (bumpFired) return; // дубль-сигнал — без работы
     bumpFired = true;
+    // ПЕРВЫМ делом, синхронно: глушим heartbeat'ы. Иначе job'ы, которые
+    // доигрывают свои последние секунды до SIGKILL, перепишут started_at
+    // обратно на now() и отменят backdate ниже (инцидент 11.08.2026 —
+    // три job'а прождали полные STALE_JOB_MINUTES вместо ~5 секунд).
+    markShuttingDown();
     log('info', `${sig} received — ageing in-flight job(s) for fast handoff`);
     void ageRunningJobsForFastHandoff().catch((err) => {
       log('error', 'failed to age in-flight jobs during shutdown', err);

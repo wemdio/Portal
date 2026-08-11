@@ -286,11 +286,39 @@ function SettingsTab({ campaign, onSave }: {
       {/* Telegram */}
       <section className="space-y-4">
         <h3 className="text-sm font-semibold text-gray-800">Telegram</h3>
+        {/* Названия сверены с кодом: каждое поле подписано тем, что оно делает
+            на самом деле, а не тем, как называется переменная. Три подписи были
+            неверны и вводили в заблуждение — история в комментариях ниже. */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <FieldNum label="Лимит пересылки" value={telegram.forward_limit} onChange={v => setTG('forward_limit', v)} />
-          <FieldNum label="Лимит истории" value={telegram.history_limit} onChange={v => setTG('history_limit', v)} />
-          <FieldNum label="Смещение часового пояса" value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
-          <FieldNum label="Пауза аккаунта (часов)" value={telegram.account_cooldown_hours} onChange={v => setTG('account_cooldown_hours', v)} />
+          <div className="space-y-1">
+            <FieldNum label="Сообщений в пересылке" value={telegram.forward_limit} onChange={v => setTG('forward_limit', v)} />
+            <p className="text-[10px] text-gray-400">
+              Сколько последних сообщений диалога уйдёт в чат-приёмник при пересылке лида.
+            </p>
+          </div>
+          <div className="space-y-1">
+            <FieldNum label="Сообщений в контексте GPT" value={telegram.history_limit} onChange={v => setTG('history_limit', v)} />
+            <p className="text-[10px] text-gray-400">
+              Сколько последних сообщений диалога читает модель, прежде чем ответить.
+            </p>
+          </div>
+          <div className="space-y-1">
+            <FieldNum label="Часовой пояс (UTC±)" value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
+            <p className="text-[10px] text-gray-400">
+              Влияет только на «Периоды сна». 3 — Москва.
+            </p>
+          </div>
+          {/* Было «Пауза аккаунта (часов)» — читалось как штатная пауза между
+              заходами и создавало ложное чувство, что нагрузка размазана по
+              суткам. На деле пауза включается ТОЛЬКО после того, как Telegram
+              ограничил аккаунт (FloodError/Frozen), см. campaignLoop:1507. */}
+          <div className="space-y-1">
+            <FieldNum label="Пауза после ограничения (часов)" value={telegram.account_cooldown_hours} onChange={v => setTG('account_cooldown_hours', v)} />
+            <p className="text-[10px] text-gray-400">
+              Сколько аккаунт отдыхает после того, как Telegram ограничил его. Это наказание
+              постфактум, а не размеренная работа — отправки по дню оно не разносит.
+            </p>
+          </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="space-y-1">
@@ -299,24 +327,60 @@ function SettingsTab({ campaign, onSave }: {
               value={telegram.first_touch_per_account_per_day ?? 0}
               onChange={v => setTG('first_touch_per_account_per_day', v)}
             />
+            {/* Прежняя подсказка предлагала «16 аккаунтов по 20» как пример.
+                В связке с паузой между действиями в 5–10 сек это означает 20
+                новых чатов с незнакомыми людьми за три минуты — на молодом
+                аккаунте почти верное ограничение. Пример заменён на лестницу. */}
             <p className="text-[10px] text-gray-400">
-              Ноль — рассылка первых сообщений выключена. Считайте от числа аккаунтов:
-              16 аккаунтов по 20 — это 320 сообщений в день, база на 300 контактов уйдёт за сутки.
-              Начинайте с малого.
+              Ноль — рассылка первых сообщений выключена. Норма считается на каждый аккаунт:
+              18 аккаунтов по 3 — это 54 сообщения в день. Свежие аккаунты начинайте с 2–3 и
+              поднимайте на ступень раз в 2–3 дня, только если в логах не было ограничений.
+              Всю норму аккаунт отправляет одной очередью — разносите её полем
+              «Пауза между действиями».
             </p>
           </div>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <RangeField label="Задержка до прочтения" value={telegram.pre_read_delay_range} onChange={v => setTG('pre_read_delay_range', v)} />
-          <RangeField label="Задержка до ответа" value={telegram.read_reply_delay_range} onChange={v => setTG('read_reply_delay_range', v)} />
-          <RangeField label="Задержка между аккаунтами" value={telegram.account_loop_delay_range} onChange={v => setTG('account_loop_delay_range', v)} />
-          <RangeField label="Окно ожидания диалога" value={telegram.dialog_wait_window_range} onChange={v => setTG('dialog_wait_window_range', v)} />
+          <div className="space-y-1">
+            <RangeField label="Пауза перед прочтением (сек)" value={telegram.pre_read_delay_range} onChange={v => setTG('pre_read_delay_range', v)} />
+            <p className="text-[10px] text-gray-400">
+              Сколько ждём, прежде чем отметить входящее прочитанным.
+            </p>
+          </div>
+          {/* Было «Задержка до ответа» — подпись покрывала лишь одно из четырёх
+              применений. Тот же диапазон задаёт паузу между ПЕРВЫМИ сообщениями
+              внутри дневной нормы (firstTouch/send.ts, gapMs), а при 5–10 сек
+              аккаунт пишет всю норму незнакомым людям за полминуты — самый
+              короткий путь к ограничению. Об этом обязана говорить подпись. */}
+          <div className="space-y-1">
+            <RangeField label="Пауза между действиями (сек)" value={telegram.read_reply_delay_range} onChange={v => setTG('read_reply_delay_range', v)} />
+            <p className="text-[10px] text-gray-400">
+              Перед ответом, перед follow-up и <span className="text-amber-600">между первыми сообщениями</span>.
+              5–10 сек означает, что вся дневная норма уйдёт очередью за полминуты. Для холодной
+              рассылки ставьте 60–300.
+            </p>
+          </div>
+          <div className="space-y-1">
+            <RangeField label="Пауза между аккаунтами (сек)" value={telegram.account_loop_delay_range} onChange={v => setTG('account_loop_delay_range', v)} />
+            <p className="text-[10px] text-gray-400">
+              Разбежка между заходами разных аккаунтов, чтобы они не работали гурьбой.
+            </p>
+          </div>
           {/* Пауза между полными кругами по всем аккаунтам. Раньше была
               захардкожена в 30 секунд, что на «горячих» mobile-pool IP
               слишком быстро (Telegram продолжал отвечать silent throttle).
               Сейчас вынесено в настройки с дефолтом [300, 600] сек. */}
-          <RangeField label="Пауза между кругами" value={telegram.cycle_delay_range ?? [300, 600]} onChange={v => setTG('cycle_delay_range', v)} />
+          <div className="space-y-1">
+            <RangeField label="Пауза между кругами (сек)" value={telegram.cycle_delay_range ?? [300, 600]} onChange={v => setTG('cycle_delay_range', v)} />
+            <p className="text-[10px] text-gray-400">
+              Между полными обходами всех аккаунтов.
+            </p>
+          </div>
         </div>
+        {/* «Окно ожидания диалога» (dialog_wait_window_range) убрано с экрана:
+            ключ есть в TelegramSettings и в дефолтах, но НИ ОДНА строка кода его
+            не читает — поле ничего не делало, а операторы его крутили. Значение
+            в БД оставлено как есть, чтобы не трогать сохранённые кампании. */}
         <Field label="Периоды сна" value={telegram.sleep_periods.join(', ')} onChange={v => setTG('sleep_periods', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="00:00-08:00, 19:00-00:00" />
         <div className="flex flex-wrap items-center gap-4">
           <label className="flex items-center gap-2 text-xs text-gray-700">
@@ -1436,6 +1500,9 @@ function CampaignAccountsTab({
   const [syncSummary, setSyncSummary] = useState<string | null>(null);
   /** id аккаунтов, которые сейчас проверяются на живость. */
   const [checkingIds, setCheckingIds] = useState<string[]>([]);
+  const [resettingIds, setResettingIds] = useState<string[]>([]);
+  /** Отказ на сбросе сеансов показываем в самой строке — рядом с кнопкой. */
+  const [resetError, setResetError] = useState<{ id: string; message: string } | null>(null);
   /** Ответ Telegram по каждому проверенному аккаунту; висит, пока не закроют. */
   const [checkResults, setCheckResults] = useState<CheckRow[] | null>(null);
 
@@ -1673,6 +1740,41 @@ function CampaignAccountsTab({
 
     setCheckResults(rows);
   }, [accounts, selectedIds]);
+
+  /**
+   * Завершить чужие сеансы аккаунта.
+   *
+   * Ответ ручки — это уже перечитанное состояние аккаунта, поэтому строку
+   * обновляем им же: счётчик чужих сеансов должен обнулиться на глазах, иначе
+   * непонятно, сработало или нет.
+   */
+  const resetSessions = async (id: string) => {
+    setResettingIds((prev) => [...prev, id]);
+    try {
+      const res = await authFetch(`${API_BASE}/accounts/${id}/sessions`, { method: 'DELETE' });
+      const data = (await res.json().catch(() => null)) as
+        | (Partial<AccountCheckResult> & { error?: string })
+        | null;
+      if (!res.ok) {
+        setResetError({ id, message: data?.error ?? `Сервер ответил ${res.status}` });
+        return;
+      }
+      setResetError(null);
+      setAccounts((prev) => prev.map((a) => (a.id === id
+        ? {
+            ...a,
+            check_status: data?.status ?? a.check_status,
+            check_detail: data?.detail ?? a.check_detail,
+            checked_at: new Date().toISOString(),
+            other_sessions: data?.other_sessions ?? [],
+          }
+        : a)));
+    } catch (e) {
+      setResetError({ id, message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setResettingIds((prev) => prev.filter((x) => x !== id));
+    }
+  };
 
   const toggleActive = async (id: string, current: boolean) => {
     await authFetch(`${API_BASE}/accounts/${id}`, {
@@ -2010,7 +2112,7 @@ function CampaignAccountsTab({
         </div>
       ) : (
         <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[32px_44px_1fr_120px_150px_80px_72px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_44px_minmax(0,1fr)_130px_minmax(340px,1.4fr)_72px_72px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <SelectAllCheckbox total={accounts.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span />
             <span>Аккаунт</span><span>Телефон</span><span>Прокси</span><span>Активен</span><span />
@@ -2023,7 +2125,7 @@ function CampaignAccountsTab({
             return (
               <div
                 key={a.id}
-                className={`grid grid-cols-[32px_44px_1fr_120px_150px_80px_72px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
+                className={`grid grid-cols-[32px_44px_minmax(0,1fr)_130px_minmax(340px,1.4fr)_72px_72px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
               >
                 <input
                   type="checkbox"
@@ -2047,10 +2149,14 @@ function CampaignAccountsTab({
                 </button>
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
+                  {/* Клик по имени открывает профиль — то же, что и клик по
+                      аватарке рядом. Логи переехали на кнопку со свитком
+                      справа: к профилю обращаются постоянно, к логам — когда
+                      что-то сломалось. */}
                   <button
                     type="button"
-                    onClick={() => setSelectedAccount(a)}
-                    title="Открыть логи и информацию"
+                    onClick={() => setProfileAccount(a)}
+                    title="Профиль в Telegram"
                     className="min-w-0 text-left text-xs font-medium text-gray-800 truncate hover:text-indigo-600 hover:underline transition cursor-pointer"
                   >
                     {a.session_name}
@@ -2099,6 +2205,24 @@ function CampaignAccountsTab({
                           чужих сеансов: {a.other_sessions!.length}
                         </span>
                       )}
+                      {/* Кнопка стоит рядом с плашкой, а не в общем ряду
+                          действий: чужие сеансы — редкая находка, и убирать их
+                          логично там же, где их увидели. */}
+                      {(a.other_sessions?.length ?? 0) > 0 && (
+                        <button
+                          type="button"
+                          disabled={resettingIds.includes(a.id)}
+                          onClick={() => { void resetSessions(a.id); }}
+                          title="Завершить все сеансы, кроме портального. Аккаунт останется подключённым к порталу."
+                          className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-amber-700 transition hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+                        >
+                          {resettingIds.includes(a.id) && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
+                          {resettingIds.includes(a.id) ? 'Завершаю…' : 'Завершить чужие'}
+                        </button>
+                      )}
+                      {resetError?.id === a.id && (
+                        <span className="text-[10px] text-rose-600">{resetError.message}</span>
+                      )}
                       {a.checked_at && (
                         <span className="text-[10px] text-gray-400">
                           {new Date(a.checked_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
@@ -2127,7 +2251,10 @@ function CampaignAccountsTab({
                 ) : (
                   <button
                     type="button"
-                    title="Назначить прокси"
+                    // Колонка рассчитана на всю строку прокси (55 знаков — это
+                    // весь пул), но на узком экране она всё же подрежется.
+                    // Подсказка при наведении показывает адрес целиком.
+                    title={proxy ? `${proxy.name || proxy.url} — нажмите, чтобы сменить` : 'Назначить прокси'}
                     onClick={() => setEditingProxyFor(a.id)}
                     className="w-full text-left text-xs truncate rounded px-1 py-0.5 hover:bg-indigo-50 hover:text-indigo-700 transition cursor-pointer group"
                   >
@@ -2139,9 +2266,9 @@ function CampaignAccountsTab({
                   {a.is_active ? 'Да' : 'Нет'}
                 </button>
                 <div className="flex items-center gap-0.5">
-                  <button type="button" onClick={() => setProfileAccount(a)} title="Профиль в Telegram"
+                  <button type="button" onClick={() => setSelectedAccount(a)} title="Логи и информация"
                     className="p-1.5 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer">
-                    <UserCheck className="h-3.5 w-3.5" />
+                    <ScrollText className="h-3.5 w-3.5" />
                   </button>
                   <button type="button" onClick={() => { void deleteAccount(a.id); }} title="Удалить аккаунт"
                     className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer">
@@ -2203,6 +2330,7 @@ function AccountProfileModal({
   const [firstName, setFirstName] = useState(account.first_name ?? '');
   const [lastName, setLastName] = useState(account.last_name ?? '');
   const [bio, setBio] = useState(account.bio ?? '');
+  const [username, setUsername] = useState(account.tg_username ?? '');
   // Превью держим рядом с файлом: ссылку на blob создаём в момент выбора, а не
   // эффектом на каждый рендер.
   const [avatar, setAvatar] = useState<{ file: File; url: string } | null>(null);
@@ -2237,6 +2365,7 @@ function AccountProfileModal({
     setFirstName((v) => (v ? v : patch.first_name ?? ''));
     setLastName((v) => (v ? v : patch.last_name ?? ''));
     setBio((v) => (v ? v : patch.bio ?? ''));
+    setUsername((v) => (v ? v : patch.tg_username ?? ''));
   }, [onSync]);
 
   // Профиль, который ни разу не читали, подтягиваем сразу при открытии: иначе
@@ -2258,6 +2387,9 @@ function AccountProfileModal({
       form.append('first_name', firstName);
       form.append('last_name', lastName);
       form.append('bio', bio);
+      // Шлём всегда, в том числе пустым: пустое поле означает «снять юзернейм».
+      // Отсутствие поля роут читает как «не трогать» — это разные намерения.
+      form.append('username', username);
       if (avatar) form.append('avatar', avatar.file);
 
       const res = await fetch(`${API_BASE}/accounts/${account.id}/profile`, {
@@ -2391,6 +2523,24 @@ function AccountProfileModal({
                 className="block w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
             </label>
           </div>
+
+          <label className="space-y-1 block">
+            <span className="text-[11px] font-medium text-gray-500">Юзернейм</span>
+            <div className="relative">
+              <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-gray-400">@</span>
+              <input
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                maxLength={32}
+                placeholder="без юзернейма"
+                className="block w-full rounded-lg border border-gray-200 py-1.5 pl-6 pr-2.5 text-xs outline-none focus:border-indigo-400"
+              />
+            </div>
+            <span className="block text-[10px] text-gray-400">
+              5–32 знака, латиница, цифры и подчёркивание. Пустое поле снимет юзернейм.
+              Telegram ограничивает частоту смен — не меняйте у рассылающих аккаунтов без нужды.
+            </span>
+          </label>
 
           <label className="space-y-1 block">
             <span className="text-[11px] font-medium text-gray-500">Описание ({bio.length}/70)</span>
