@@ -28,15 +28,6 @@ const analyticsFixture = {
     score: 'all',
     campaign: 'all',
   },
-  metrics: {
-    contactsAddedConfirmed: 4_203,
-    contactsSubmittedLegacy: 4_500,
-    uniqueRecipients: 3_991,
-    emailsSent: 12_322,
-    liveReplies: 102,
-    processedReplies: 86,
-    targetLeads: 19,
-  },
   funnel: {
     scoredCompanies: 5_112_878,
     workingScoreCompanies: 61_350,
@@ -62,7 +53,6 @@ const analyticsFixture = {
     ],
   },
   freshness: {
-    analyticsAt: '2026-08-06T07:00:00.000Z',
     pipelineAt: '2026-08-06T06:45:00.000Z',
   },
   legacyNotice: null,
@@ -106,10 +96,10 @@ describe('ClientReportsDashboard', () => {
     });
   });
 
-  it('loads the default 30-day slice and renders the six metrics and pipeline funnel', async () => {
+  it('loads the default 30-day slice and renders the base funnel without outreach metrics', async () => {
     render(<ClientReportsDashboard />);
 
-    expect(await screen.findByRole('heading', { name: 'Статистика' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Воронка базы' })).toBeInTheDocument();
     await waitFor(() => expect(mockClientApiFetch).toHaveBeenCalledTimes(1));
 
     const [path, init] = mockClientApiFetch.mock.calls[0];
@@ -123,31 +113,31 @@ describe('ClientReportsDashboard', () => {
     expect(init).toEqual(expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(screen.getByRole('button', { name: '30 дней' })).toHaveAttribute('aria-pressed', 'true');
 
-    const metrics = screen.getByRole('region', { name: 'Общая статистика' });
-    expect(within(metrics).getByText('4 203')).toBeInTheDocument();
-    expect(within(metrics).getByText('3 991')).toBeInTheDocument();
-    expect(within(metrics).getByText('12 322')).toBeInTheDocument();
-    expect(within(metrics).getByText('102')).toBeInTheDocument();
-    expect(within(metrics).getByText('86')).toBeInTheDocument();
-    expect(within(metrics).getByText('19')).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Общая статистика' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Добавлено в рассылку')).not.toBeInTheDocument();
+    expect(screen.queryByText('Писем отправлено')).not.toBeInTheDocument();
+    expect(screen.queryByText('Живых ответов')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Кампании/ })).toHaveAttribute('href', '/client');
 
-    const funnel = screen.getByRole('region', { name: 'Воронка обработки' });
+    const funnel = screen.getByRole('region', { name: 'Воронка компаний, отскоренных в период' });
     const scoredRow = within(funnel).getByRole('row', { name: /Отскорено компаний/ });
     expect(within(scoredRow).getByText('5 112 878')).toBeInTheDocument();
     expect(within(scoredRow).getByText('компаний')).toBeInTheDocument();
     const validatedRow = within(funnel).getByRole('row', { name: /Почта прошла валидацию/ });
-    const submittedRow = within(funnel).getByRole('row', { name: /Передано в кампании/ });
+    const submittedRow = within(funnel).getByRole('row', { name: /Передано из этой когорты/ });
+    expect(within(funnel).getByRole('row', { name: /Принято из этой когорты/ })).toBeInTheDocument();
     expect(within(validatedRow).getByText('—')).toBeInTheDocument();
     expect(within(submittedRow).getByText('—')).toBeInTheDocument();
 
-    const breakdown = screen.getByRole('region', { name: 'По кампаниям' });
+    const breakdown = screen.getByRole('region', { name: 'По кампаниям и скору' });
     expect(within(breakdown).getByRole('row', { name: /Высокий скор A 12.100 12.094/ })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Выгрузки баз' })).toBeInTheDocument();
   });
 
   it('writes period, score, campaign and custom date changes to the URL', async () => {
     const user = userEvent.setup();
     render(<ClientReportsDashboard />);
-    await screen.findByText('12 322');
+    await screen.findByText('30 194');
 
     await user.click(screen.getByRole('button', { name: '7 дней' }));
     expect(mockReplace).toHaveBeenLastCalledWith(expect.stringMatching(/period=7d.*score=all.*campaign=all/));
@@ -155,8 +145,9 @@ describe('ClientReportsDashboard', () => {
     await user.click(screen.getByRole('button', { name: 'A' }));
     expect(mockReplace).toHaveBeenLastCalledWith(expect.stringMatching(/score=A/));
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Кампания' }), 'campaign-c');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Кампания после передачи' }), 'campaign-c');
     expect(mockReplace).toHaveBeenLastCalledWith(expect.stringMatching(/campaign=campaign-c/));
+    expect(screen.getByText(/Фильтр кампании действует с этапа передачи контактов/)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('С'), { target: { value: '2026-08-02' } });
     fireEvent.change(screen.getByLabelText('По'), { target: { value: '2026-08-05' } });
@@ -180,7 +171,7 @@ describe('ClientReportsDashboard', () => {
     await act(async () => {
       second.resolve({
         ...analyticsFixture,
-        metrics: { ...analyticsFixture.metrics, targetLeads: 33 },
+        funnel: { ...analyticsFixture.funnel, confirmedContacts: 33 },
       });
     });
     expect(await screen.findByText('33')).toBeInTheDocument();
@@ -189,7 +180,7 @@ describe('ClientReportsDashboard', () => {
       first.resolve(analyticsFixture);
     });
     expect(screen.getByText('33')).toBeInTheDocument();
-    expect(screen.queryByText('19')).not.toBeInTheDocument();
+    expect(screen.queryByText('30 194')).not.toBeInTheDocument();
   });
 
   it('shows an error with retry and a clear empty state', async () => {
@@ -199,9 +190,6 @@ describe('ClientReportsDashboard', () => {
       .mockResolvedValueOnce({
         ...analyticsFixture,
         campaigns: [],
-        metrics: Object.fromEntries(
-          Object.keys(analyticsFixture.metrics).map((key) => [key, 0]),
-        ),
         funnel: {
           ...analyticsFixture.funnel,
           scoredCompanies: 0,
@@ -217,13 +205,14 @@ describe('ClientReportsDashboard', () => {
     render(<ClientReportsDashboard />);
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('Сервис статистики временно недоступен');
+    expect(screen.getByRole('region', { name: 'Выгрузки баз' })).toBeInTheDocument();
 
     await user.click(within(alert).getByRole('button', { name: 'Повторить' }));
     expect(await screen.findByText('За выбранный период данных нет')).toBeInTheDocument();
     expect(mockClientApiFetch).toHaveBeenCalledTimes(2);
   });
 
-  it('shows data-quality notices and does not claim unclassified replies are excluded', async () => {
+  it('shows data-quality notices without restoring the removed outreach metrics', async () => {
     mockClientApiFetch.mockResolvedValueOnce({
       ...analyticsFixture,
       qualityNotices: [
@@ -237,7 +226,31 @@ describe('ClientReportsDashboard', () => {
     const notice = await screen.findByRole('region', { name: 'Ограничения данных' });
     expect(notice).toHaveTextContent('Фильтр кампании применяется с этапа передачи контактов.');
     expect(notice).toHaveTextContent('3 ответа ещё не классифицированы.');
-    expect(screen.getByText('известные автоответы исключены')).toBeInTheDocument();
+    expect(screen.queryByText('известные автоответы исключены')).not.toBeInTheDocument();
+  });
+
+  it('keeps exports available and working when analytics fails', async () => {
+    const user = userEvent.setup();
+    mockClientApiFetch.mockImplementation((path, init) => {
+      if (path === '/reports/exports' && init?.method === 'POST') {
+        return Promise.resolve({ job: { id: 'export-without-analytics', status: 'cancelled' } });
+      }
+      return Promise.reject(new Error('Аналитика недоступна'));
+    });
+
+    render(<ClientReportsDashboard />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Аналитика недоступна');
+
+    const exportsRegion = screen.getByRole('region', { name: 'Выгрузки баз' });
+    await user.click(within(exportsRegion).getByRole('button', { name: 'Выгрузить рабочий скор' }));
+
+    await waitFor(() => {
+      expect(mockClientApiFetch).toHaveBeenCalledWith(
+        '/reports/exports',
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+    expect(await within(exportsRegion).findByText(/Выгрузка отменена/)).toBeInTheDocument();
   });
 
   it('explains that rejected export ignores score and campaign filters', async () => {
@@ -268,7 +281,7 @@ describe('ClientReportsDashboard', () => {
     });
 
     render(<ClientReportsDashboard />);
-    await screen.findByText('12 322');
+    await screen.findByText('30 194');
     await user.click(screen.getByRole('button', { name: 'Выгрузить неподходящие' }));
 
     await waitFor(() => expect(clickSpy).toHaveBeenCalledTimes(1));
@@ -297,7 +310,7 @@ describe('ClientReportsDashboard', () => {
     });
 
     render(<ClientReportsDashboard />);
-    await screen.findByText('12 322');
+    await screen.findByText('30 194');
     const button = screen.getByRole('button', { name: 'Выгрузить неподходящие' });
     await user.click(button);
 

@@ -71,6 +71,14 @@ describe('clientI18n', () => {
     ['es', 'Кампании', 'Campañas'],
     ['en', 'Смотреть демо', 'View demo'],
     ['es', 'Смотреть демо', 'Ver demo'],
+    ['en', 'Воронка базы', 'List funnel'],
+    ['es', 'Воронка базы', 'Embudo de listas'],
+    ['en', 'Кампания после передачи', 'Campaign after handoff'],
+    ['es', 'Кампания после передачи', 'Campaña después de la entrega'],
+    ['en', 'Этапы обработки базы', 'List processing stages'],
+    ['es', 'Этапы обработки базы', 'Etapas de procesamiento de la lista'],
+    ['en', 'Воронка компаний, отскоренных в период', 'Funnel for companies scored during the period'],
+    ['es', 'Воронка компаний, отскоренных в период', 'Embudo de empresas puntuadas durante el período'],
   ] as const)('translates known UI copy to %s', (locale, source, expected) => {
     expect(getClientTranslation(source, locale)).toBe(expected);
   });
@@ -116,6 +124,9 @@ describe('clientI18n', () => {
     ['/client', 'es', 'Campañas'],
     ['/client/dashboard', 'es', 'Panel'],
     ['/client/auto-pipeline/setup', 'es', 'Configurar secuencias'],
+    ['/client/reports', 'ru', 'Воронка базы'],
+    ['/client/reports', 'en', 'List funnel'],
+    ['/client/reports', 'es', 'Embudo de listas'],
   ] as const)('localizes the browser title for %s in %s', (pathname, locale, title) => {
     expect(getPortalPageSectionTitle(pathname, locale)).toBe(title);
   });

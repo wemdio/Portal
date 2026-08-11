@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { resolveClientReportFilters, ClientReportFilterError } from '@/lib/clientReports/filters';
 import { loadClientReportAnalytics } from '@/lib/clientReports/analytics';
+import { CLIENT_REPORT_PIPELINE_UNAVAILABLE_MESSAGE } from '@/lib/clientReports/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,15 +12,11 @@ function demoResponse() {
   return NextResponse.json({
     campaigns: [],
     filters: { preset: 'last_30_days', from: today, to: today, score: 'all', campaignId: null },
-    metrics: {
-      contactsAddedConfirmed: 0, contactsSubmittedLegacy: 0, uniqueRecipients: 0,
-      emailsSent: 0, liveReplies: 0, processedReplies: 0, targetLeads: 0,
-    },
     funnel: {
       scoredCompanies: 0, workingScoreCompanies: 0, emailFoundCompanies: 0,
       validatedEmails: 0, submittedContacts: 0, confirmedContacts: 0, byCampaign: [],
     },
-    freshness: { analyticsAt: null, pipelineAt: null },
+    freshness: { pipelineAt: null },
     legacyNotice: null,
     qualityNotices: [],
   }, { headers: { 'Cache-Control': 'private, no-store' } });
@@ -50,18 +47,17 @@ export async function GET(req: NextRequest) {
   if (filters.campaignId && !allowedCampaignIds.includes(filters.campaignId)) {
     return jsonError('Кампания недоступна', 403);
   }
-  const campaignIds = filters.campaignId ? [filters.campaignId] : allowedCampaignIds;
-  if (campaignIds.length === 0) return jsonError('Нет доступных кампаний', 400);
+  if (allowedCampaignIds.length === 0) return jsonError('Нет доступных кампаний', 400);
 
   try {
     const payload = await loadClientReportAnalytics({
       clientUserId: result.auth.userId,
       allowedCampaignIds,
-      campaignIds,
       filters,
     });
     return NextResponse.json(payload, { headers: { 'Cache-Control': 'private, no-store' } });
   } catch (error) {
-    return jsonError(error instanceof Error ? error.message : 'Не удалось собрать статистику', 500);
+    console.error('[client-reports] Analytics request failed', error);
+    return jsonError(CLIENT_REPORT_PIPELINE_UNAVAILABLE_MESSAGE, 503);
   }
 }
