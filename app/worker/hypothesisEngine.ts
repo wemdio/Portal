@@ -26,6 +26,7 @@ import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLo
 import { runHeStage } from '@/lib/hypothesisEngine/stages';
 import { setHeActiveJobSignal } from '@/lib/hypothesisEngine/llm';
 import { normalizeHeMarket } from '@/lib/hypothesisEngine/market';
+import { enqueueAutopilotFollowups } from '@/lib/hypothesisEngine/autopilotNext';
 import type { HeJob, HeStage } from '@/lib/hypothesisEngine/types';
 
 const WORKER_ID = `hypothesis-engine-${process.pid}`;
@@ -250,6 +251,14 @@ async function handleJob(job: HeJob) {
 
   await accumulateProjectUsage(job.project_id, tokensUsed, costUsd);
   await enqueueNextResearchStage(job);
+  // Автопилот ENG-кабинета (только при he_projects.autopilot=true): дочейн
+  // chain → base_collect → (base_analyze уже авто) → template. Сбой постановки
+  // followup не должен ронять уже завершённую джобу — логируем и идём дальше.
+  try {
+    await enqueueAutopilotFollowups(db, job);
+  } catch (e) {
+    log('error', `Job ${job.id} (${job.stage}) autopilot followups failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
   log('info', `Job ${job.id} (${job.stage}) → done (+${tokensUsed} tok, $${costUsd.toFixed(6)})`);
 }
 

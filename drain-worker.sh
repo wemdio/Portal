@@ -4,7 +4,8 @@
 # Мягкая "пауза перед деплоем":
 # 1) Снимаем снимок активных задач (running) по таблицам очередей.
 # 2) Переводим running -> pending, чтобы задачи автоматически возобновились после рестарта.
-# 3) Останавливаем worker-контейнеры.
+# 3) Сигнализируем и останавливаем worker-контейнеры.
+# 4) Для BaseConstructor помечаем processing-задачи для немедленного resume.
 #
 # Важно: задача не должна уходить в failed из-за самого деплоя.
 
@@ -65,16 +66,23 @@ fetch_running_rows() {
   curl -sS "${SUPABASE_URL}/rest/v1/${table}?status=eq.running&select=${select_clause}" "${auth_headers[@]}"
 }
 
-patch_running_to_pending() {
+patch_rows() {
   local table="$1"
-  local body="${2:-{\"status\":\"pending\"}}"
+  local filter="$2"
+  local body="$3"
   curl -sS -X PATCH \
-    "${SUPABASE_URL}/rest/v1/${table}?status=eq.running" \
+    "${SUPABASE_URL}/rest/v1/${table}?${filter}" \
     "${auth_headers[@]}" \
     -H "Content-Type: application/json" \
     -H "Prefer: return=minimal" \
     -d "${body}" \
     --write-out '%{http_code}' -o /dev/null 2>/dev/null || echo "000"
+}
+
+patch_running_to_pending() {
+  local table="$1"
+  local body="${2:-{\"status\":\"pending\"}}"
+  patch_rows "$table" "status=eq.running" "$body"
 }
 
 if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
@@ -279,4 +287,16 @@ for c in "${bc_containers[@]}"; do
 done
 wait
 
-echo "[drain] Workers stopped (jobs are paused and will auto-resume after restart)"
+# The worker-side shutdown guard normally ages each processing job before exit.
+# Keep a deployment-side backstop after every replica has stopped so a failed
+# signal handler or database request cannot leave a fresh heartbeat behind.
+if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
+  base_constructor_handoff_code="$(patch_rows "base_constructor_jobs" "status=eq.processing" '{"started_at":"1970-01-01T00:00:00Z"}')"
+  if [[ "$base_constructor_handoff_code" =~ ^(200|204)$ ]]; then
+    echo "[drain] base_constructor_jobs: processing jobs marked for immediate resume"
+  else
+    echo "[drain] base_constructor_jobs: handoff request returned http ${base_constructor_handoff_code}"
+  fi
+fi
+
+echo "[drain] Workers stopped (jobs are paused or marked for immediate resume)"

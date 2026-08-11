@@ -345,13 +345,17 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
       if (mode === 'update' && pendingUpdate) {
         const matching = rowsForRead();
         const matched = new Set(matching);
-        const next = (tables[table] ?? []).map((r) =>
-          matched.has(r) ? { ...r, ...pendingUpdate } : r,
-        );
+        const returnedRows: Row[] = [];
+        const next = (tables[table] ?? []).map((r) => {
+          if (!matched.has(r)) return r;
+          const updated = { ...r, ...pendingUpdate };
+          returnedRows.push(updated);
+          return updated;
+        });
         tables[table] = next;
         updates.push({ table, patch: pendingUpdate, filters: filters.slice() });
         mutations.push({ kind: 'update', table, patch: pendingUpdate, filters: filters.slice() });
-        return { data: matching, error: null, count: matching.length };
+        return { data: returnedRows, error: null, count: returnedRows.length };
       }
       if (mode === 'delete') {
         const matching = rowsForRead();

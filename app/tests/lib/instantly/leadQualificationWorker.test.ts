@@ -1222,3 +1222,231 @@ describe('pollAndQualifyReplies', () => {
     expect(String(rows[0]?.ai_reason ?? '')).not.toContain('привязал его по домену');
   });
 });
+
+/**
+ * Сироты (инцидент 11.08.2026): письмо пришло через Others-контур вотчдога,
+ * Instantly его к кампании НЕ привязал. qualifyOneReply получает
+ * opts.outOfCampaign и обязан: (а) прокинуть флаг + eaccount в DM клиенту
+ * (buildClientReplyMessage замокан как JSON.stringify(data) — видим сырой
+ * payload), (б) записать новые колонки reply_out_of_campaign/eaccount во ВСЕХ
+ * upsert'ах (lead / needs_review — единообразно).
+ */
+describe('qualifyOneReply — сирота (outOfCampaign) из Others-контура', () => {
+  beforeEach(() => {
+    jest.resetModules();
+    getLeadsByEmail.mockReset().mockResolvedValue([]);
+    getCampaign.mockReset().mockResolvedValue({
+      id: 'self-serve-campaign',
+      name: 'OutreachOS Автоаутрич 2',
+    });
+    getEmail.mockReset();
+    postHandoffMessage.mockReset().mockResolvedValue(555);
+    editHandoffMessage.mockReset().mockResolvedValue(undefined);
+    delete process.env.LEAD_HANDOFF_ENABLED;
+    sendLeadTelegramAlert.mockReset().mockResolvedValue({ sent: true, messageId: 42 });
+    sendClientReplyTelegram.mockReset().mockResolvedValue({ messageId: 7 });
+    fetchBriefByCampaign.mockReset().mockResolvedValue(null);
+    fetchThreadContext.mockReset().mockResolvedValue(null);
+    qualifyReply.mockReset().mockResolvedValue({
+      isLead: true,
+      proposalSeen: true,
+      interestSignals: ['asked_for_call'],
+      reason: 'Просит созвон',
+      confidence: 0.92,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: replyEmail({ id: 'stray-email-1', body: { text: 'Давайте созвонимся' } }),
+        threadEmails: [],
+        lastOutbound: null,
+      },
+    });
+
+    process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY = 'test-ai-key';
+
+    mockMainDb = createMockSupabase({
+      tables: { projects: [], profiles: [], telegram_links: [], notifications: [], deadline_notification_log: [] },
+    });
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          {
+            client_user_id: 'client-7',
+            resource_type: 'campaign',
+            resource_id: 'self-serve-campaign',
+            instantly_account_id: 'main',
+          },
+        ],
+        client_reply_telegram_links: [
+          { client_user_id: 'client-7', chat_id: 111, enabled: true },
+        ],
+      },
+    });
+  });
+
+  it('пробрасывает outOfCampaign + eaccount в DM и пишет новые колонки в lead-upsert', async () => {
+    const { qualifyOneReply } = await import('@/lib/instantly/leadQualificationWorker');
+    await qualifyOneReply(
+      mockInstantlyDb! as unknown as Parameters<typeof qualifyOneReply>[0],
+      replyEmail({
+        id: 'stray-email-1',
+        campaign_id: 'self-serve-campaign',
+        eaccount: 'sales@clientmail.ru',
+        body: { text: 'Давайте созвонимся' },
+      }),
+      'test-ai-key',
+      'main',
+      null,
+      { clientDmOnlyOnLead: true, outOfCampaign: true },
+    );
+
+    // DM ушёл (вердикт lead), и в payload — честный флаг сироты + ящик.
+    expect(sendClientReplyTelegram).toHaveBeenCalledTimes(1);
+    const html = String(sendClientReplyTelegram.mock.calls[0][1]);
+    expect(html).toContain('"outOfCampaign":true');
+    expect(html).toContain('"eaccount":"sales@clientmail.ru"');
+
+    // Основной upsert пишет новые колонки.
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual(
+      expect.objectContaining({
+        instantly_email_id: 'stray-email-1',
+        status: 'lead',
+        reply_out_of_campaign: true,
+        eaccount: 'sales@clientmail.ru',
+      }),
+    );
+  });
+
+  it('без opts (main-poll контур) → reply_out_of_campaign=false, eaccount из письма', async () => {
+    const { qualifyOneReply } = await import('@/lib/instantly/leadQualificationWorker');
+    await qualifyOneReply(
+      mockInstantlyDb! as unknown as Parameters<typeof qualifyOneReply>[0],
+      replyEmail({ id: 'linked-1', campaign_id: 'self-serve-campaign', eaccount: 'sales@clientmail.ru' }),
+      'test-ai-key',
+      'main',
+      null,
+    );
+
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual(
+      expect.objectContaining({
+        reply_out_of_campaign: false,
+        eaccount: 'sales@clientmail.ru',
+      }),
+    );
+    // DM — прежний формат данных: сироты нет.
+    expect(sendClientReplyTelegram).toHaveBeenCalledTimes(1);
+    const html = String(sendClientReplyTelegram.mock.calls[0][1]);
+    expect(html).toContain('"outOfCampaign":false');
+  });
+
+  it('письмо без eaccount → колонка eaccount=null (не пустая строка)', async () => {
+    const { qualifyOneReply } = await import('@/lib/instantly/leadQualificationWorker');
+    await qualifyOneReply(
+      mockInstantlyDb! as unknown as Parameters<typeof qualifyOneReply>[0],
+      replyEmail({ id: 'no-eaccount', campaign_id: 'self-serve-campaign', eaccount: undefined }),
+      'test-ai-key',
+      'main',
+      null,
+    );
+
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].eaccount).toBeNull();
+  });
+
+  it('guard-upsert («слепое» письмо → needs_review) тоже пишет новые колонки (единообразно)', async () => {
+    const { qualifyOneReply } = await import('@/lib/instantly/leadQualificationWorker');
+    await qualifyOneReply(
+      mockInstantlyDb! as unknown as Parameters<typeof qualifyOneReply>[0],
+      replyEmail({
+        id: 'stray-bcc',
+        campaign_id: 'self-serve-campaign',
+        from_address_email: 'head_market@nais.ru',
+        eaccount: 'sales@clientmail.ru',
+        // Нашего ящика нет в To → stray-guard ДО ИИ.
+        to_address_email_list: 'someone@else.ru',
+      }),
+      'test-ai-key',
+      'main',
+      null,
+      { clientDmOnlyOnLead: true, outOfCampaign: true },
+    );
+
+    expect(qualifyReply).not.toHaveBeenCalled();
+    expect(sendClientReplyTelegram).not.toHaveBeenCalled();
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual(
+      expect.objectContaining({
+        status: 'needs_review',
+        reply_out_of_campaign: true,
+        eaccount: 'sales@clientmail.ru',
+      }),
+    );
+  });
+
+  it('окно «код без миграции»: проба колонок упала → пишем БЕЗ новых колонок, DM уходит честным', async () => {
+    // Пересобираем instantly-мок: ЛЮБОЙ select по instantly_lead_qualifications
+    // падает (как PostgREST 42703 до применения миграции 20260812_0001). Проба
+    // strayColumnsSupported видит ошибку → колонки из payload'ов вырезаются.
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          {
+            client_user_id: 'client-7',
+            resource_type: 'campaign',
+            resource_id: 'self-serve-campaign',
+            instantly_account_id: 'main',
+          },
+        ],
+        client_reply_telegram_links: [
+          { client_user_id: 'client-7', chat_id: 111, enabled: true },
+        ],
+      },
+      errorSelects: {
+        instantly_lead_qualifications: {
+          columnsInclude: 'reply_out_of_campaign',
+          message: 'column instantly_lead_qualifications.reply_out_of_campaign does not exist',
+        },
+      },
+    });
+
+    const { qualifyOneReply } = await import('@/lib/instantly/leadQualificationWorker');
+    await qualifyOneReply(
+      mockInstantlyDb! as unknown as Parameters<typeof qualifyOneReply>[0],
+      replyEmail({
+        id: 'stray-pre-migration',
+        campaign_id: 'self-serve-campaign',
+        eaccount: 'team@outreach-contact.ru',
+        body: { text: 'Давайте созвонимся' },
+      }),
+      'test-ai-key',
+      'main',
+      null,
+      { clientDmOnlyOnLead: true, outOfCampaign: true },
+    );
+
+    // Письмо обработано штатно (status=lead, НЕ error-строка — дедуп не
+    // заблокирован навсегда), и в строке нет новых колонок — иначе upsert бы упал.
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('lead');
+    expect(rows[0]).not.toHaveProperty('reply_out_of_campaign');
+    expect(rows[0]).not.toHaveProperty('eaccount');
+
+    // DM при этом уходит честным: флаг/ящик едут из памяти, не из БД.
+    expect(sendClientReplyTelegram).toHaveBeenCalledTimes(1);
+    const html = String(sendClientReplyTelegram.mock.calls[0][1]);
+    expect(html).toContain('"outOfCampaign":true');
+    expect(html).toContain('"eaccount":"team@outreach-contact.ru"');
+  });
+});

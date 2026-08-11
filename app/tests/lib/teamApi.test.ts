@@ -8,11 +8,18 @@ import { supabase } from '@/lib/supabaseClient';
 import * as teamApiModule from '@/components/team/teamApi';
 import {
   buildTeamActivityPlanWrite,
+  buildTeamReviewRequestActionWrite,
+  buildTeamReviewRequestConversionWrite,
+  buildTeamReviewRequestWrite,
   buildTeamReviewCompletionWrite,
   buildTeamReviewScheduleWrite,
+  buildTeamTalentReserveWrite,
   normalizeActivityPlan,
+  normalizeReviewRequestSummary,
+  normalizeReviewRequests,
   normalizeReviews,
   normalizeStatistics,
+  normalizeTalentReserve,
   teamApiFetch,
   teamStatisticsIsoDate,
 } from '@/components/team/teamApi';
@@ -376,6 +383,255 @@ describe('normalizeStatistics', () => {
     expect(normalizeStatistics({
       coverage: { status: 'unavailable', startsAt: null },
     }).coverage.startsAt).toBeNull();
+  });
+});
+
+describe('team talent reserve payloads and normalization', () => {
+  it('builds the exact approved candidate payload and trims nullable values', () => {
+    expect(buildTeamTalentReserveWrite({
+      contact: '  @candidate  ',
+      candidateName: '  Мария Кандидатова  ',
+      vacancyDirection: '  Аккаунт-менеджер  ',
+      testAssignment: '  Подготовить разбор кейса  ',
+      testResult: '  Хороший результат  ',
+      testSentOn: '2026-08-05',
+      interviewOn: '2026-08-10',
+      comment: '  Сильная коммуникация  ',
+      revisitOn: '2026-09-01',
+      revisitNote: '  Вернуться после отпуска  ',
+      stage: 'return_later',
+    })).toEqual({
+      contact: '@candidate',
+      candidateName: 'Мария Кандидатова',
+      vacancyDirection: 'Аккаунт-менеджер',
+      testAssignment: 'Подготовить разбор кейса',
+      testResult: 'Хороший результат',
+      testSentOn: '2026-08-05',
+      interviewOn: '2026-08-10',
+      comment: 'Сильная коммуникация',
+      revisitOn: '2026-09-01',
+      revisitNote: 'Вернуться после отпуска',
+      stage: 'return_later',
+    });
+  });
+
+  it('clears hidden return fields outside return_later and normalizes blank optional fields', () => {
+    expect(buildTeamTalentReserveWrite({
+      contact: 'candidate@example.com',
+      candidateName: 'Иван Смирнов',
+      vacancyDirection: 'Аутрич',
+      testAssignment: '   ',
+      testResult: '',
+      testSentOn: '',
+      interviewOn: '',
+      comment: '   ',
+      revisitOn: '2026-09-01',
+      revisitNote: 'Скрытый старый черновик',
+      stage: 'new',
+    })).toEqual({
+      contact: 'candidate@example.com',
+      candidateName: 'Иван Смирнов',
+      vacancyDirection: 'Аутрич',
+      testAssignment: null,
+      testResult: null,
+      testSentOn: null,
+      interviewOn: null,
+      comment: null,
+      revisitOn: null,
+      revisitNote: null,
+      stage: 'new',
+    });
+  });
+
+  it('normalizes canonical rows, numeric summaries and the server as-of date', () => {
+    expect(normalizeTalentReserve({
+      entries: [{
+        id: 'talent-1',
+        contact: '@candidate',
+        candidate_name: 'Мария Кандидатова',
+        vacancy_direction: 'Аккаунт-менеджер',
+        test_assignment: null,
+        test_result: 'Хорошо',
+        test_sent_on: '2026-08-05',
+        interview_on: '2026-08-11',
+        comment: '',
+        revisit_on: null,
+        revisit_note: null,
+        stage: 'interview',
+        created_by: 'user-1',
+        updated_by: 'user-2',
+        created_at: '2026-08-01T10:00:00.000Z',
+        updated_at: '2026-08-02T10:00:00.000Z',
+      }],
+      summary: {
+        total: '1',
+        attention_count: '1',
+        active_count: '1',
+        history_count: '0',
+      },
+      as_of: '2026-08-11',
+      can_manage: true,
+    })).toEqual({
+      entries: [{
+        id: 'talent-1',
+        contact: '@candidate',
+        candidateName: 'Мария Кандидатова',
+        vacancyDirection: 'Аккаунт-менеджер',
+        testAssignment: null,
+        testResult: 'Хорошо',
+        testSentOn: '2026-08-05',
+        interviewOn: '2026-08-11',
+        comment: null,
+        revisitOn: null,
+        revisitNote: null,
+        stage: 'interview',
+        createdBy: 'user-1',
+        updatedBy: 'user-2',
+        createdAt: '2026-08-01T10:00:00.000Z',
+        updatedAt: '2026-08-02T10:00:00.000Z',
+      }],
+      summary: {
+        total: 1,
+        attentionCount: 1,
+        activeCount: 1,
+        historyCount: 0,
+      },
+      asOf: '2026-08-11',
+      canManage: true,
+    });
+  });
+});
+
+describe('team review request payloads and normalization', () => {
+  it('builds a staff request without any client-controlled initiator field', () => {
+    const payload = buildTeamReviewRequestWrite({
+      employeeUserId: 'employee-1',
+      projectId: 'project-1',
+      problem: '  Не хватает контекста  ',
+      examples: '  https://t.me/c/123/456  ',
+      desiredOutcome: '  Зафиксировать следующий шаг  ',
+    });
+
+    expect(payload).toEqual({
+      employeeUserId: 'employee-1',
+      projectId: 'project-1',
+      problem: 'Не хватает контекста',
+      examples: 'https://t.me/c/123/456',
+      desiredOutcome: 'Зафиксировать следующий шаг',
+    });
+    expect(payload).not.toHaveProperty('initiator');
+    expect(payload).not.toHaveProperty('initiatorUserId');
+    expect(payload).not.toHaveProperty('createdBy');
+
+    expect(buildTeamReviewRequestWrite({
+      employeeUserId: 'employee-1',
+      projectId: '',
+      problem: 'Проблема',
+      examples: '   ',
+      desiredOutcome: 'Результат',
+    })).toEqual({
+      employeeUserId: 'employee-1',
+      projectId: null,
+      problem: 'Проблема',
+      examples: null,
+      desiredOutcome: 'Результат',
+    });
+  });
+
+  it('builds explicit claim/decline and atomic conversion payloads with CAS', () => {
+    expect(buildTeamReviewRequestActionWrite({
+      action: 'claim',
+      expectedUpdatedAt: '2026-08-11T08:00:00.000Z',
+    })).toEqual({
+      action: 'claim',
+      expectedUpdatedAt: '2026-08-11T08:00:00.000Z',
+    });
+    expect(buildTeamReviewRequestActionWrite({
+      action: 'decline',
+      decisionNote: '  Сначала обсудить внутри команды  ',
+      expectedUpdatedAt: '2026-08-11T08:00:00.000Z',
+    })).toEqual({
+      action: 'decline',
+      decisionNote: 'Сначала обсудить внутри команды',
+      expectedUpdatedAt: '2026-08-11T08:00:00.000Z',
+    });
+    expect(buildTeamReviewRequestConversionWrite({
+      reviewDate: '2026-08-15',
+      reviewReason: '  Обсудить приоритеты  ',
+      expectedUpdatedAt: '2026-08-11T08:00:00.000Z',
+    })).toEqual({
+      reviewDate: '2026-08-15',
+      reviewReason: 'Обсудить приоритеты',
+      expectedUpdatedAt: '2026-08-11T08:00:00.000Z',
+    });
+  });
+
+  it('normalizes four stable groups even when the server payload is sparse and unordered', () => {
+    const normalized = normalizeReviewRequests({
+      groups: [
+        {
+          state: 'converted',
+          requests: [{
+            id: 'request-converted',
+            state: 'converted',
+            employee: { id: 'employee-1', name: 'Анна Ким', email: null, avatar_url: null },
+            initiator: { id: 'lead-1', name: 'Иван', email: 'lead@example.com', avatar_url: null },
+            project: { id: 'project-1', name: 'Acme · Аутрич' },
+            problem: 'Ревью запланировано',
+            examples: null,
+            desired_outcome: 'План действий',
+            claimed_by: { id: 'hr-1', name: 'Алина' },
+            linked_review_id: 'review-1',
+            decision_note: null,
+            created_at: '2026-08-11T08:00:00.000Z',
+            updated_at: '2026-08-11T09:00:00.000Z',
+          }],
+        },
+        { state: 'new', requests: [] },
+      ],
+      summary: {
+        total: '1',
+        new_count: '0',
+        in_progress_count: '0',
+        converted_count: '1',
+        declined_count: '0',
+      },
+      employees: [],
+      projects: [],
+      can_manage: true,
+    });
+
+    expect(normalized.groups.map((group) => group.state)).toEqual([
+      'new',
+      'in_progress',
+      'converted',
+      'declined',
+    ]);
+    expect(normalized.groups.map((group) => group.requests.length)).toEqual([0, 0, 1, 0]);
+    expect(normalized.groups[2].requests[0]).toEqual(expect.objectContaining({
+      id: 'request-converted',
+      state: 'converted',
+      desiredOutcome: 'План действий',
+      claimedBy: expect.objectContaining({ id: 'hr-1', name: 'Алина' }),
+      linkedReviewId: 'review-1',
+      decisionNote: null,
+      createdAt: '2026-08-11T08:00:00.000Z',
+      updatedAt: '2026-08-11T09:00:00.000Z',
+    }));
+    expect(normalized.summary).toEqual({
+      total: 1,
+      newCount: 0,
+      inProgressCount: 0,
+      convertedCount: 1,
+      declinedCount: 0,
+    });
+    expect(normalized.canManage).toBe(true);
+  });
+
+  it('normalizes the lightweight badge count and fails closed for invalid values', () => {
+    expect(normalizeReviewRequestSummary({ new_count: '12' })).toEqual({ newCount: 12 });
+    expect(normalizeReviewRequestSummary({ newCount: -3 })).toEqual({ newCount: 0 });
+    expect(normalizeReviewRequestSummary({ newCount: 'not-a-number' })).toEqual({ newCount: 0 });
   });
 });
 

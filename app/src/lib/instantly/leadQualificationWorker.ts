@@ -54,6 +54,41 @@ export function isTransientQualifyError(message: string): boolean {
   return TRANSIENT_QUALIFY_ERROR_RE.test(message);
 }
 
+/** Кэш пробы колонок сирот (reply_out_of_campaign/eaccount), TTL 60с. */
+let strayColumnsProbe: { at: number; ok: boolean } | null = null;
+const STRAY_COLUMNS_PROBE_TTL_MS = 60_000;
+
+/**
+ * Есть ли в instantly_lead_qualifications колонки сирот (миграция
+ * 20260812_0001). Нужно для окна деплоя «код выкачен — миграция ещё нет»:
+ * upsert с неизвестной колонкой падает, и классификатор НЕ считает это
+ * транзиентом → error-строка → дедуп блокирует письмо НАВСЕГДА (catch в
+ * pollAndQualifyReplies). Пока колонок нет — пишем БЕЗ них: строка теряет
+ * только stray-флаг для кабинета, а DM уходит честным (флаг едет в памяти,
+ * не из БД). После применения миграции следующий проб сам восстановит запись.
+ * Экспорт — othersWatchdog гейтит тем же пробой свой error-insert.
+ * Ошибка пробы = «колонок нет» (консервативно).
+ */
+export async function strayColumnsSupported(
+  db: NonNullable<typeof supabaseAdmin>,
+): Promise<boolean> {
+  if (strayColumnsProbe && Date.now() - strayColumnsProbe.at < STRAY_COLUMNS_PROBE_TTL_MS) {
+    return strayColumnsProbe.ok;
+  }
+  const { error } = await db
+    .from('instantly_lead_qualifications')
+    .select('reply_out_of_campaign, eaccount')
+    .limit(1);
+  strayColumnsProbe = { at: Date.now(), ok: !error };
+  if (error) {
+    workerLog(
+      'warn',
+      `stray-columns probe failed (${error.message}) — пишем квалификации БЕЗ reply_out_of_campaign/eaccount до следующего пробы`,
+    );
+  }
+  return strayColumnsProbe.ok;
+}
+
 /** email_id → сколько раз подряд падал транзиентно (в памяти процесса). */
 const transientRetryCount = new Map<string, number>();
 const MAX_TRANSIENT_RETRIES = 5;
@@ -608,6 +643,19 @@ export async function qualifyOneReply(
      * не меняется.
      */
     clientDmOnlyOnLead?: boolean;
+    /**
+     * «Сирота»: Instantly НЕ привязал письмо к кампании (лид ответил с
+     * другого адреса своей компании, сломанные заголовки треда) — атрибуция
+     * сделана НАМИ по цитируемому домену (othersWatchdog; детектор там — у
+     * исходного письма campaign_id пуст/не совпадает с атрибутированным).
+     * Main-poll контур сюда не попадает (фильтр !!campaign_id в
+     * fetchRecentLinkedReplies), поэтому дефолт — false. Влияет на:
+     *  - честность DM («Ответ вне треда кампании», а не «по вашей кампании»);
+     *  - колонку reply_out_of_campaign во всех upsert'ах ниже (единообразно:
+     *    lead / needs_review / cross-client / stray / client-echo), по которой
+     *    кабинет собирает блок «Ответы вне кампании».
+     */
+    outOfCampaign?: boolean;
   },
 ): Promise<void> {
   const campaignId = reply.campaign_id;
@@ -617,6 +665,19 @@ export async function qualifyOneReply(
     '';
 
   if (!campaignId || !leadEmail) return;
+
+  const outOfCampaign = opts?.outOfCampaign === true;
+  // Ящик, физически принявший письмо. Пишем в квалификацию и (для сирот)
+  // показываем в DM — «в каком ящике искать ответ». Пустую строку схлопываем
+  // в null, чтобы не плодить два представления отсутствия.
+  const replyEaccount = (reply.eaccount ?? '').trim() || null;
+
+  // Окно деплоя «код без миграции»: пока колонок сирот нет (миграция
+  // 20260812_0001 не применена), пишем квалификации БЕЗ них — иначе upsert
+  // падает нетранзиентно и письмо навсегда уходит в error+дедуп (см.
+  // strayColumnsSupported). Флаг/ящик при этом в DM едут из памяти — честность
+  // уведомления от БД не зависит.
+  const strayColsOk = await strayColumnsSupported(db);
 
   // Пост-handoff эхо: письмо от нашего клиента (он отвечает лиду со своей
   // почты, мы в копии) — не квалифицируем как лида. Строку всё равно пишем:
@@ -647,6 +708,7 @@ export async function qualifyOneReply(
         instantly_email_id: reply.id,
         instantly_lead_id: null,
         reply_timestamp: reply.timestamp_email ?? null,
+        ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
       },
       { onConflict: 'instantly_email_id', ignoreDuplicates: true },
     );
@@ -700,6 +762,7 @@ export async function qualifyOneReply(
           instantly_email_id: reply.id,
           instantly_lead_id: null,
           reply_timestamp: reply.timestamp_email ?? null,
+          ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
         },
         { onConflict: 'instantly_email_id', ignoreDuplicates: true },
       );
@@ -792,6 +855,7 @@ export async function qualifyOneReply(
           instantly_email_id: reply.id,
           instantly_lead_id: null,
           reply_timestamp: reply.timestamp_email ?? null,
+          ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
         },
         { onConflict: 'instantly_email_id', ignoreDuplicates: true },
       );
@@ -929,6 +993,7 @@ export async function qualifyOneReply(
         reply_timestamp: reply.timestamp_email ?? null,
         objection_handleable: result.objectionHandleable,
         objection_draft: result.objectionDraft,
+        ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
       },
       { onConflict: 'instantly_email_id', ignoreDuplicates: true },
     )
@@ -1047,6 +1112,11 @@ export async function qualifyOneReply(
       // Атрибуция бейджа «Лид по вашим критериям»: бейдж получает ТОЛЬКО
       // клиент, чей промпт дал вердикт (per-link в notifyClientOfReply).
       criteriaClientUserId: status === 'lead' && criteriaSource === 'client' ? criteriaClientId : null,
+      // Сирота (Others-контур): DM скажет «Ответ вне треда кампании» и покажет
+      // ящик, где искать письмо — иначе клиент ищет его в кампании, где его
+      // нет и быть не может (инцидент 11.08.2026).
+      outOfCampaign,
+      eaccount: replyEaccount,
     });
   }
 }
@@ -1232,6 +1302,10 @@ async function notifyClientOfReply(
     isLead?: boolean;
     /** Чей «свой промпт» дал вердикт lead — бейдж в DM только этому клиенту. */
     criteriaClientUserId?: string | null;
+    /** Письмо не привязано Instantly к кампании (сирота из Others) — честный заголовок DM. */
+    outOfCampaign?: boolean;
+    /** Ящик, физически принявший письмо — «Ящик:» в DM при сироте. */
+    eaccount?: string | null;
   },
 ): Promise<void> {
   try {

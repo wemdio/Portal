@@ -40,6 +40,8 @@ function signalsResult(hits: Partial<Record<keyof OutreachSignalsResult['signals
       targetVacancy: v('targetVacancy'),
       highVolume: v('highVolume'),
       multiOffice: v('multiOffice'),
+      legalRelevance: v('legalRelevance'),
+      crmCalltracking: v('crmCalltracking'),
     },
     signalsCount: Object.keys(hits).length,
     note: 'Homepage + 2 subpages checked',
@@ -59,10 +61,11 @@ describe('GRID_HEADER', () => {
     expect(GRID_HEADER).toEqual([
       'id', 'компания', 'city_name', 'phone', 'email', 'сайт', 'category', 'subcategory',
       ...SIGNAL_COLUMNS.flatMap((c) => [c.title, c.clarification]),
+      'score', 'grade',
       'Проверка — примечание',
     ]);
-    // 8 базовых + 6 пар сигналов + примечание.
-    expect(GRID_HEADER).toHaveLength(8 + 12 + 1);
+    // 8 базовых + 8 пар сигналов + score/grade + примечание.
+    expect(GRID_HEADER).toHaveLength(8 + 16 + 2 + 1);
   });
 });
 
@@ -86,23 +89,26 @@ describe('companiesToGrid', () => {
     ]);
 
     // Пары «сигнал/уточнение» идут в порядке SIGNAL_COLUMNS.
-    const cells = row.slice(8, 20);
+    const cells = row.slice(8, 24);
     expect(cells[0]).toBe('Да'); // generalPhone
     expect(cells[1]).toBe('8 800 555-06-65 в шапке сайта');
     expect(cells[2]).toBe('Да'); // contactForm
     expect(cells[3]).toBe('Кнопка: «Заказать звонок»');
     // Остальные сигналы не сработали → Нет + Not found on checked pages.
-    for (let i = 4; i < 12; i += 2) {
+    for (let i = 4; i < 16; i += 2) {
       expect(cells[i]).toBe('Нет');
       expect(cells[i + 1]).toBe(CLARIFICATION_NOT_FOUND);
     }
-    expect(row[20]).toBe('Homepage + 2 subpages checked');
+    // Без скоринга: score/grade пустые.
+    expect(row[24]).toBe('');
+    expect(row[25]).toBe('');
+    expect(row[26]).toBe('Homepage + 2 subpages checked');
   });
 
   it('компания без единого сигнала: все ячейки Нет + Not found', () => {
     const grid = companiesToGrid([qualified({ hits: {} })]);
-    const cells = grid[1].slice(8, 20);
-    for (let i = 0; i < 12; i += 2) {
+    const cells = grid[1].slice(8, 24);
+    for (let i = 0; i < 16; i += 2) {
       expect(cells[i]).toBe('Нет');
       expect(cells[i + 1]).toBe(CLARIFICATION_NOT_FOUND);
     }
@@ -115,8 +121,9 @@ describe('gridToLeadPayloads', () => {
   function finalRow(overrides: {
     id?: string; company?: string; email?: string; signals?: ('Да' | 'Нет')[];
     status?: string; city?: string; site?: string; phone?: string;
+    score?: string; grade?: string;
   } = {}): string[] {
-    const signalCells = (overrides.signals ?? ['Да', 'Нет', 'Да', 'Нет', 'Нет', 'Нет'])
+    const signalCells = (overrides.signals ?? ['Да', 'Нет', 'Да', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет'])
       .flatMap((v) => [v, v === 'Да' ? 'какое-то evidence' : CLARIFICATION_NOT_FOUND]);
     return [
       overrides.id ?? '70000001000000001',
@@ -127,6 +134,8 @@ describe('gridToLeadPayloads', () => {
       overrides.site ?? 'https://ulybka.ru',
       'Медицина', 'Стоматологии',
       ...signalCells,
+      overrides.score ?? '',
+      overrides.grade ?? '',
       'Homepage checked',
       overrides.status ?? 'ok',
     ];
@@ -166,7 +175,7 @@ describe('gridToLeadPayloads', () => {
   });
 
   it('без колонки статуса email_status пустой; пустая сетка → пусто', () => {
-    const noStatusGrid = [GRID_HEADER, finalRow().slice(0, 21)];
+    const noStatusGrid = [GRID_HEADER, finalRow().slice(0, 27)];
     const leads = gridToLeadPayloads(noStatusGrid, 'clinics');
     expect(leads[0].custom_variables?.email_status).toBe('');
 
@@ -176,9 +185,57 @@ describe('gridToLeadPayloads', () => {
 
   it('все сигналы Нет → signals пустая строка', () => {
     const leads = gridToLeadPayloads(
-      [header, finalRow({ signals: ['Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет'] })],
+      [header, finalRow({ signals: ['Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет'] })],
       'clinics',
     );
     expect(leads[0].custom_variables?.signals).toBe('');
+  });
+});
+
+describe('score/grade (скоринговые сегменты, legal)', () => {
+  it('companiesToGrid пишет score/grade в отдельные колонки перед примечанием', () => {
+    const grid = companiesToGrid([
+      { ...qualified({ hits: { legalRelevance: 'Юридические услуги' } }), score: 60, grade: 'B' },
+    ]);
+    const row = grid[1];
+    expect(row[24]).toBe('60');
+    expect(row[25]).toBe('B');
+    expect(row[26]).toBe('Homepage + 2 subpages checked');
+    // Новый скоринговый сигнал попадает в свою пару колонок (7-я пара).
+    expect(row[20]).toBe('Да'); // legalRelevance
+    expect(row[21]).toBe('Юридические услуги');
+  });
+
+  it('gridToLeadPayloads прокидывает score/grade в custom_variables, когда они есть', () => {
+    const header = [...GRID_HEADER, 'Email Статус'];
+    const signalCells = ['Да', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Да', 'Нет']
+      .flatMap((v) => [v, v === 'Да' ? 'какое-то evidence' : CLARIFICATION_NOT_FOUND]);
+    const row = [
+      '70000001000000002', 'Юристы и Ко', 'Москва', '+7 495 111-22-33',
+      'info@uristy.ru', 'https://uristy.ru', 'Юр. услуги', 'Юридические услуги',
+      ...signalCells, '80', 'A', 'Homepage checked', 'ok',
+    ];
+    const leads = gridToLeadPayloads([header, row], 'legal');
+    expect(leads).toHaveLength(1);
+    expect(leads[0].custom_variables).toMatchObject({
+      segment: 'legal',
+      score: '80',
+      grade: 'A',
+      // 1-й и 7-й заголовки SIGNAL_COLUMNS (generalPhone + legalRelevance).
+      signals: `${SIGNAL_COLUMNS[0].title}, ${SIGNAL_COLUMNS[6].title}`,
+    });
+  });
+
+  it('пустые score/grade (сегмент без профиля) → переменных нет вовсе', () => {
+    const header = [...GRID_HEADER, 'Email Статус'];
+    const signalCells = ['Да', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет']
+      .flatMap((v) => [v, v === 'Да' ? 'какое-то evidence' : CLARIFICATION_NOT_FOUND]);
+    const row = [
+      '70000001000000003', 'Школа', 'Москва', '', 'info@school.ru', 'https://school.ru',
+      'Образование', 'Курсы', ...signalCells, '', '', 'Homepage checked', 'ok',
+    ];
+    const leads = gridToLeadPayloads([header, row], 'edu');
+    expect(leads[0].custom_variables).not.toHaveProperty('score');
+    expect(leads[0].custom_variables).not.toHaveProperty('grade');
   });
 });

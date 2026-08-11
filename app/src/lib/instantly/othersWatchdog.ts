@@ -5,6 +5,7 @@ import {
   qualifyOneReply,
   getCampaignsByAccountCached,
   isTransientQualifyError,
+  strayColumnsSupported,
 } from './leadQualificationWorker';
 import type { Email } from './types';
 
@@ -733,10 +734,18 @@ export async function pollOthersOnce(): Promise<number> {
     if (attempts > 1) await sleep(interDelay);
 
     const reply: Email = { ...email, campaign_id: chosen.campaignId };
+    // Детектор сироты: у Others-письма campaign_id пуст (проверено живьём:
+    // 500/500) или не совпадает с атрибутированным — Instantly письмо НЕ
+    // привязал (ответ с другого адреса лида, сломанные заголовки треда), и
+    // атрибуция сделана НАМИ по цитируемому домену. Помечаем честно: DM
+    // скажет «Ответ вне треда кампании» (а не «по вашей кампании»), а кабинет
+    // покажет его в блоке «Ответы вне кампании» по reply_out_of_campaign.
+    const outOfCampaign = !email.campaign_id || email.campaign_id !== chosen.campaignId;
     try {
       const ctx = buildOthersThreadContext(reply, matchedOutreach, campaignMailboxes);
       await qualifyOneReply(db, reply, apiKey, chosen.accountId, ctx, {
         clientDmOnlyOnLead: true,
+        outOfCampaign,
       });
       processed++;
       if (email.id) transientRetryCount.delete(email.id);
@@ -773,6 +782,11 @@ export async function pollOthersOnce(): Promise<number> {
         instantly_email_id: email.id,
         status: 'error',
         error_message: message.slice(0, 500),
+        // Окно «код без миграции»: без колонок — иначе error-insert упадёт и
+        // видимость сбоя потеряется (тот же гейт, что в qualifyOneReply).
+        ...((await strayColumnsSupported(db))
+          ? { reply_out_of_campaign: outOfCampaign, eaccount: (email.eaccount ?? '').trim() || null }
+          : {}),
       });
       if (insErr) workerLog('warn', `error-row insert failed for ${email.id}: ${insErr.message}`);
     }
