@@ -54,6 +54,41 @@ export function isTransientQualifyError(message: string): boolean {
   return TRANSIENT_QUALIFY_ERROR_RE.test(message);
 }
 
+/** Кэш пробы колонок сирот (reply_out_of_campaign/eaccount), TTL 60с. */
+let strayColumnsProbe: { at: number; ok: boolean } | null = null;
+const STRAY_COLUMNS_PROBE_TTL_MS = 60_000;
+
+/**
+ * Есть ли в instantly_lead_qualifications колонки сирот (миграция
+ * 20260812_0001). Нужно для окна деплоя «код выкачен — миграция ещё нет»:
+ * upsert с неизвестной колонкой падает, и классификатор НЕ считает это
+ * транзиентом → error-строка → дедуп блокирует письмо НАВСЕГДА (catch в
+ * pollAndQualifyReplies). Пока колонок нет — пишем БЕЗ них: строка теряет
+ * только stray-флаг для кабинета, а DM уходит честным (флаг едет в памяти,
+ * не из БД). После применения миграции следующий проб сам восстановит запись.
+ * Экспорт — othersWatchdog гейтит тем же пробой свой error-insert.
+ * Ошибка пробы = «колонок нет» (консервативно).
+ */
+export async function strayColumnsSupported(
+  db: NonNullable<typeof supabaseAdmin>,
+): Promise<boolean> {
+  if (strayColumnsProbe && Date.now() - strayColumnsProbe.at < STRAY_COLUMNS_PROBE_TTL_MS) {
+    return strayColumnsProbe.ok;
+  }
+  const { error } = await db
+    .from('instantly_lead_qualifications')
+    .select('reply_out_of_campaign, eaccount')
+    .limit(1);
+  strayColumnsProbe = { at: Date.now(), ok: !error };
+  if (error) {
+    workerLog(
+      'warn',
+      `stray-columns probe failed (${error.message}) — пишем квалификации БЕЗ reply_out_of_campaign/eaccount до следующего пробы`,
+    );
+  }
+  return strayColumnsProbe.ok;
+}
+
 /** email_id → сколько раз подряд падал транзиентно (в памяти процесса). */
 const transientRetryCount = new Map<string, number>();
 const MAX_TRANSIENT_RETRIES = 5;
@@ -637,6 +672,13 @@ export async function qualifyOneReply(
   // в null, чтобы не плодить два представления отсутствия.
   const replyEaccount = (reply.eaccount ?? '').trim() || null;
 
+  // Окно деплоя «код без миграции»: пока колонок сирот нет (миграция
+  // 20260812_0001 не применена), пишем квалификации БЕЗ них — иначе upsert
+  // падает нетранзиентно и письмо навсегда уходит в error+дедуп (см.
+  // strayColumnsSupported). Флаг/ящик при этом в DM едут из памяти — честность
+  // уведомления от БД не зависит.
+  const strayColsOk = await strayColumnsSupported(db);
+
   // Пост-handoff эхо: письмо от нашего клиента (он отвечает лиду со своей
   // почты, мы в копии) — не квалифицируем как лида. Строку всё равно пишем:
   // дедуп по instantly_email_id иначе будет пытаться заново каждый тик.
@@ -666,8 +708,7 @@ export async function qualifyOneReply(
         instantly_email_id: reply.id,
         instantly_lead_id: null,
         reply_timestamp: reply.timestamp_email ?? null,
-        reply_out_of_campaign: outOfCampaign,
-        eaccount: replyEaccount,
+        ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
       },
       { onConflict: 'instantly_email_id', ignoreDuplicates: true },
     );
@@ -721,8 +762,7 @@ export async function qualifyOneReply(
           instantly_email_id: reply.id,
           instantly_lead_id: null,
           reply_timestamp: reply.timestamp_email ?? null,
-          reply_out_of_campaign: outOfCampaign,
-          eaccount: replyEaccount,
+          ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
         },
         { onConflict: 'instantly_email_id', ignoreDuplicates: true },
       );
@@ -815,8 +855,7 @@ export async function qualifyOneReply(
           instantly_email_id: reply.id,
           instantly_lead_id: null,
           reply_timestamp: reply.timestamp_email ?? null,
-          reply_out_of_campaign: outOfCampaign,
-          eaccount: replyEaccount,
+          ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
         },
         { onConflict: 'instantly_email_id', ignoreDuplicates: true },
       );
@@ -954,8 +993,7 @@ export async function qualifyOneReply(
         reply_timestamp: reply.timestamp_email ?? null,
         objection_handleable: result.objectionHandleable,
         objection_draft: result.objectionDraft,
-        reply_out_of_campaign: outOfCampaign,
-        eaccount: replyEaccount,
+        ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
       },
       { onConflict: 'instantly_email_id', ignoreDuplicates: true },
     )

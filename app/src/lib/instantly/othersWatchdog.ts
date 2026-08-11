@@ -5,6 +5,7 @@ import {
   qualifyOneReply,
   getCampaignsByAccountCached,
   isTransientQualifyError,
+  strayColumnsSupported,
 } from './leadQualificationWorker';
 import type { Email } from './types';
 
@@ -781,8 +782,11 @@ export async function pollOthersOnce(): Promise<number> {
         instantly_email_id: email.id,
         status: 'error',
         error_message: message.slice(0, 500),
-        reply_out_of_campaign: outOfCampaign,
-        eaccount: (email.eaccount ?? '').trim() || null,
+        // Окно «код без миграции»: без колонок — иначе error-insert упадёт и
+        // видимость сбоя потеряется (тот же гейт, что в qualifyOneReply).
+        ...((await strayColumnsSupported(db))
+          ? { reply_out_of_campaign: outOfCampaign, eaccount: (email.eaccount ?? '').trim() || null }
+          : {}),
       });
       if (insErr) workerLog('warn', `error-row insert failed for ${email.id}: ${insErr.message}`);
     }

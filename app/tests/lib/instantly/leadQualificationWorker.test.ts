@@ -1391,4 +1391,62 @@ describe('qualifyOneReply — сирота (outOfCampaign) из Others-конт�
       }),
     );
   });
+
+  it('окно «код без миграции»: проба колонок упала → пишем БЕЗ новых колонок, DM уходит честным', async () => {
+    // Пересобираем instantly-мок: ЛЮБОЙ select по instantly_lead_qualifications
+    // падает (как PostgREST 42703 до применения миграции 20260812_0001). Проба
+    // strayColumnsSupported видит ошибку → колонки из payload'ов вырезаются.
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          {
+            client_user_id: 'client-7',
+            resource_type: 'campaign',
+            resource_id: 'self-serve-campaign',
+            instantly_account_id: 'main',
+          },
+        ],
+        client_reply_telegram_links: [
+          { client_user_id: 'client-7', chat_id: 111, enabled: true },
+        ],
+      },
+      errorSelects: {
+        instantly_lead_qualifications: {
+          columnsInclude: 'reply_out_of_campaign',
+          message: 'column instantly_lead_qualifications.reply_out_of_campaign does not exist',
+        },
+      },
+    });
+
+    const { qualifyOneReply } = await import('@/lib/instantly/leadQualificationWorker');
+    await qualifyOneReply(
+      mockInstantlyDb! as unknown as Parameters<typeof qualifyOneReply>[0],
+      replyEmail({
+        id: 'stray-pre-migration',
+        campaign_id: 'self-serve-campaign',
+        eaccount: 'team@outreach-contact.ru',
+        body: { text: 'Давайте созвонимся' },
+      }),
+      'test-ai-key',
+      'main',
+      null,
+      { clientDmOnlyOnLead: true, outOfCampaign: true },
+    );
+
+    // Письмо обработано штатно (status=lead, НЕ error-строка — дедуп не
+    // заблокирован навсегда), и в строке нет новых колонок — иначе upsert бы упал.
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('lead');
+    expect(rows[0]).not.toHaveProperty('reply_out_of_campaign');
+    expect(rows[0]).not.toHaveProperty('eaccount');
+
+    // DM при этом уходит честным: флаг/ящик едут из памяти, не из БД.
+    expect(sendClientReplyTelegram).toHaveBeenCalledTimes(1);
+    const html = String(sendClientReplyTelegram.mock.calls[0][1]);
+    expect(html).toContain('"outOfCampaign":true');
+    expect(html).toContain('"eaccount":"team@outreach-contact.ru"');
+  });
 });

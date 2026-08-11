@@ -34,6 +34,10 @@ jest.mock('@/lib/instantly/leadQualificationWorker', () => {
     qualifyOneReply: (...args: unknown[]) => qualifyOneReply(...args),
     getCampaignsByAccountCached: (...args: unknown[]) => getCampaignsByAccountCached(...args),
     isTransientQualifyError: actual.isTransientQualifyError,
+    // Гейт колонок сирот для error-insert'а: в тестах вотчдога «миграция
+    // применена» — true (проверку самого окна «код без миграции» см. в
+    // leadQualificationWorker.test.ts).
+    strayColumnsSupported: async () => true,
   };
 });
 
