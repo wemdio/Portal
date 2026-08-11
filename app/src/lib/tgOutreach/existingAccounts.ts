@@ -64,7 +64,11 @@ export async function loadAccountsForDedupe(db: DedupeReader): Promise<LoadAccou
   for (let from = 0; from < DEDUPE_MAX_ROWS; from += DEDUPE_PAGE) {
     const { data, error, count } = await db
       .from('tg_outreach_accounts')
-      .select('tg_user_id, session_data, tg_outreach_campaigns(name)', { count: 'exact' })
+      .select(
+        'tg_user_id, session_data, session_name, phone, tg_username, first_name, last_name, ' +
+        'tg_outreach_campaigns(name)',
+        { count: 'exact' },
+      )
       .order('id', { ascending: true })
       .range(from, from + DEDUPE_PAGE - 1);
 
@@ -78,10 +82,18 @@ export async function loadAccountsForDedupe(db: DedupeReader): Promise<LoadAccou
       // Пустой tg_user_id обязан остаться null: Number(null) даёт 0, и в
       // сверке появился бы несуществующий аккаунт с id 0.
       const rawUserId = (row as { tg_user_id?: number | string | null }).tg_user_id;
+      // Опознавательные поля тянем сюда же: без них сообщение о пропуске
+      // называет кампанию, но не аккаунт, и оператору нечего искать в списке.
+      const text = (key: string) => (row as Record<string, unknown>)[key] as string | null ?? null;
       rows.push({
         tg_user_id: rawUserId === null || rawUserId === undefined ? null : Number(rawUserId),
         campaign_name: rowCampaign?.name ?? null,
-        session_data: (row as { session_data?: string | null }).session_data ?? null,
+        session_data: text('session_data'),
+        session_name: text('session_name'),
+        phone: text('phone'),
+        tg_username: text('tg_username'),
+        first_name: text('first_name'),
+        last_name: text('last_name'),
       });
     }
 

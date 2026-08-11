@@ -114,18 +114,32 @@ export async function POST(req: NextRequest) {
         return jsonError('Нет валидных JSON-файлов с аккаунтами', 400);
       }
 
-      // Verify campaign belongs to the authenticated user before inserting
-      const { data: campaign, error: campaignError } = await auth.supabase
+      // Клиент для записи объявляем один раз здесь: ниже он же используется
+      // при проверке кампании, при вставке и при загрузке .session в хранилище.
+      const db = supabaseAdmin ?? auth.supabase;
+
+      // Кампания должна существовать — иначе вставка упадёт на внешнем ключе.
+      //
+      // Проверяем тем же клиентом, которым пишем. Раньше проверка шла под
+      // пользовательской ролью, а запись — под service_role: инструмент
+      // командный (20260807_0004 открыла запись всем сотрудникам), но если
+      // на окружении политики чтения отстают, аплоад упирался в отказ там,
+      // где сама вставка прошла бы. Доступ сотрудника уже проверен выше в
+      // authenticateRequest (isInternalUser), второй раз через RLS не нужен.
+      const { data: campaign } = await db
         .from('tg_outreach_campaigns')
         .select('id')
         .eq('id', campaignId)
-        .single();
+        .maybeSingle();
 
-      if (campaignError || !campaign) return jsonError('Кампания не найдена или нет доступа', 403);
-
-      // Клиент для записи объявляем один раз здесь: ниже он же используется
-      // при вставке и при загрузке .session в хранилище.
-      const db = supabaseAdmin ?? auth.supabase;
+      // Прежний текст «не найдена или нет доступа» смешивал две разные
+      // причины, и по скриншоту нельзя было понять, какая из них сработала.
+      if (!campaign) {
+        return jsonError(
+          `Кампания ${campaignId} не найдена — возможно, её удалили. Обновите страницу и выберите кампанию заново.`,
+          404,
+        );
+      }
 
       // Аккаунты из tdata: архив читается в память, к Telegram не подключаемся.
       const tdataSkipped: TdataSkip[] = [];

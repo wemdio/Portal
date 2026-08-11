@@ -13,7 +13,14 @@ type GenerateOptions = {
   timeoutMs?: number;
 };
 
-const DEFAULT_TIMEOUT_MS = 20_000;
+const DEFAULT_TIMEOUT_MS = 45_000;
+
+/**
+ * Промпт требует РОВНО 30 запросов на русском — это ~1000–1600 токенов ответа.
+ * Прежние 400 не хватало даже на честный ответ без рассуждений: модель упиралась
+ * в лимит (`finish_reason: length`) и отдавала обрезанный или пустой JSON.
+ */
+const MAX_TOKENS = 1800;
 
 export async function generateSearchQueries(
   brief: string,
@@ -55,7 +62,7 @@ export async function generateSearchQueries(
           { role: 'user', content: `Бриф клиента:\n${trimmedBrief.slice(0, 4000)}` },
         ],
         temperature: 0.6,
-        max_tokens: 400,
+        max_tokens: MAX_TOKENS,
       }),
       signal: controller.signal,
     });
@@ -70,7 +77,16 @@ export async function generateSearchQueries(
     const data = await response.json();
     const content = data?.choices?.[0]?.message?.content;
     if (typeof content !== 'string' || !content.trim()) {
-      throw new Error('Empty AI response');
+      // Без этих деталей пустой ответ неотличим от сбоя провайдера. Именно так
+      // выглядела поломка августа 2026: модель за алиасом сожгла весь лимит на
+      // reasoning и вернула пустоту, а в интерфейсе было глухое «не работает».
+      const finish = data?.choices?.[0]?.finish_reason ?? 'unknown';
+      const reasoningTokens = data?.usage?.completion_tokens_details?.reasoning_tokens;
+      const spentOnReasoning = reasoningTokens ? `, из них на reasoning ${reasoningTokens}` : '';
+      throw new Error(
+        `модель ${data?.model ?? OPENROUTER_MODEL} вернула пустой ответ ` +
+        `(finish_reason: ${finish}, лимит ${MAX_TOKENS} токенов${spentOnReasoning})`,
+      );
     }
 
     return {
