@@ -4,7 +4,8 @@
  *
  * Пайплайн: 2GIS → 6-сигнальная квалификация сайта → конструктор баз →
  * добор в per-сегментные кампании Instantly. Изолирован от OutreachOS и
- * Mailganer-стека. Скоринга нет — есть сигнальная квалификация (signals.ts).
+ * Mailganer-стека. Базовая квалификация — сигнальная (signals.ts); сегменты
+ * со скоринг-профилем (legal) фильтруются взвешенным скором 0–100 (scoring.ts).
  *
  * Паттерн повторяет lib/outreachos/config.ts.
  */
@@ -13,6 +14,10 @@ import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { toTwoGisRubricGroups as toTwoGisRubricGroupsShared } from '@/lib/twoGis/rubricGroups';
 import type { TwoGisRubricGroup } from '@/lib/twoGis/types';
+
+// Реестр скоринг-профилей сегментов живёт в scoring.ts (чистые функции);
+// реэкспорт — чтобы конфиг пайплайна оставался единой точкой обнаружения.
+export { SEGMENT_SCORING_PROFILES } from './scoring';
 
 /** Шаги конструктора баз, которые НИКОГДА не допускаем в прогон этого пайплайна. */
 export const FORBIDDEN_STEPS = ['ta_scoring', 'personalization', 'remove_support_emails'] as const;
