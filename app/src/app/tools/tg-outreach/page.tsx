@@ -1363,6 +1363,8 @@ interface AccountsUploadSummary {
   headline: string;
   skipped: Array<{ name: string; reason: string }>;
   errors: Array<{ name: string; error: string }>;
+  /** Аккаунты портала, которые сверить на дубль было нечем. */
+  unchecked: number;
 }
 
 /* =================== CAMPAIGN ACCOUNTS TAB =================== */
@@ -1647,6 +1649,7 @@ function CampaignAccountsTab({
         count?: number;
         skipped?: Array<{ name: string; reason: string }>;
         errors?: Array<{ name: string; error: string }>;
+        unchecked_existing_accounts?: number;
       } | null;
       if (!body) {
         // 413 называем словами: с «слишком большая загрузка» оператор может
@@ -1669,7 +1672,12 @@ function CampaignAccountsTab({
           : skipped.length || errors.length
             ? 'Ни одного аккаунта не добавлено — почему, ниже'
             : 'Ни одного аккаунта не добавлено: в этих файлах их не нашлось';
-        setUploadSummary({ headline, skipped, errors });
+        setUploadSummary({
+          headline,
+          skipped,
+          errors,
+          unchecked: body.unchecked_existing_accounts ?? 0,
+        });
       }
     } catch (err) {
       // Всё остальное: отказ авторизации или наша собственная ошибка. Молчать
@@ -1746,6 +1754,14 @@ function CampaignAccountsTab({
                     <li key={`err-${i}-${x.name}`}><span className="font-medium">{x.name}</span> — {x.error}</li>
                   ))}
                 </ul>
+              </div>
+            )}
+            {/* Оговорка к отчёту, а не ошибка: часть аккаунтов портала сверить
+                было нечем, и «Пропущено 0» по ним ничего не доказывает. */}
+            {uploadSummary.unchecked > 0 && (
+              <div className="text-gray-500">
+                Не удалось проверить на дубли аккаунтов портала: {uploadSummary.unchecked} — среди
+                загруженных мог оказаться повтор.
               </div>
             )}
           </div>
