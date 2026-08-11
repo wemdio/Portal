@@ -10,13 +10,19 @@ COPY app/patches ./patches
 # package-lock currently contains only gnu flavor, which breaks Next/Turbopack on musl.
 #
 # --ignore-scripts: sqlite3 (через gramjs-sqlitesession) тянет node-gyp rebuild,
-# который требует Python + make + g++. С npm install (не npm ci) deps стали
-# tucking новые версии sqlite3 → build падает в чистом node:22-alpine, потому
-# что там нет Python. В main-app sqlite используется только telegram/sessionUtils.ts,
-# воркеры тянут свой собственный образ (Dockerfile.worker) который ставит Python
-# и rebuild'ит — поэтому в main-app достаточно --ignore-scripts (sqlite3 не
-# работает в main API/SSR контексте, но native sqlite-биндинги там и не нужны).
+# который требует Python + make + g++, а их в чистом node:22-alpine нет.
+#
+# Раньше здесь считалось, что main-app биндинги не нужны. Это неверно:
+# gramClient.ts берёт сессию из файла .session через readSqliteSession, когда у
+# аккаунта пуст session_data, и без биндингов такой аккаунт не подключается
+# вовсе — «Could not locate the bindings file» на каждой проверке профиля.
+# Поэтому пересобираем sqlite3 так же, как это делает Dockerfile.worker:
+# ставим инструменты во временный пакет и удаляем сразу после сборки, чтобы
+# образ не потолстел.
 RUN npm install --include=optional --ignore-scripts \
+  && apk add --no-cache --virtual .native-build-deps python3 make g++ \
+  && npm rebuild sqlite3 \
+  && apk del .native-build-deps \
   && LIGHTNINGCSS_VERSION=$(node -p "require('./node_modules/lightningcss/package.json').version") \
   && npm install --no-save --ignore-scripts "lightningcss-linux-x64-musl@${LIGHTNINGCSS_VERSION}"
 
