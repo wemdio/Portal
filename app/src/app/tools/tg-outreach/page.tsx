@@ -52,6 +52,7 @@ import {
 // попадает — import type стирается при сборке. Берём его, чтобы набор статусов
 // проверки был один на портал, а не переписанный руками на экране.
 import type { AccountCheckResult, OtherSession } from '@/lib/tgOutreach/accountCheck';
+import type { ProxyCheckResult } from '@/lib/tgOutreach/proxyCheck';
 
 const API_BASE = '/api/tools/tg-outreach';
 
@@ -1205,10 +1206,13 @@ function BulkActionsBar({
   deleting,
   onClear,
   onDelete,
-  /** Проверка живости — только у аккаунтов, у прокси и баз её нет. */
+  /** Проверка живости — у аккаунтов и у прокси; у баз её нет. */
   checking,
   canCheck,
   onCheck,
+  /** Что именно проверяем — по умолчанию аккаунты, у прокси свои слова. */
+  checkLabel,
+  checkTitle,
 }: {
   selectedCount: number;
   deleting: boolean;
@@ -1217,6 +1221,8 @@ function BulkActionsBar({
   checking?: boolean;
   canCheck?: boolean;
   onCheck?: () => void;
+  checkLabel?: string;
+  checkTitle?: string;
 }) {
   if (selectedCount === 0) return null;
   return (
@@ -1228,12 +1234,12 @@ function BulkActionsBar({
           onClick={onCheck}
           disabled={checking || deleting || !canCheck}
           title={canCheck
-            ? 'Зайти в каждый аккаунт и проверить, жив ли он и кто ещё в нём сидит'
+            ? checkTitle ?? 'Зайти в каждый аккаунт и проверить, жив ли он и кто ещё в нём сидит'
             : 'Сначала остановите кампанию: во время работы аккаунты заняты'}
           className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
-          Проверить аккаунты
+          {checkLabel ?? 'Проверить аккаунты'}
         </button>
       )}
       <button
@@ -2843,6 +2849,68 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
 }
 
 /* =================== CAMPAIGN PROXIES TAB =================== */
+
+/**
+ * Прокси отвечает дольше этого — формально жив, практически бесполезен: на
+ * таких аккаунт получает таймауты уже в боевом цикле. Поэтому «жив за 9 секунд»
+ * красим не зелёным, а жёлтым.
+ */
+const SLOW_PROXY_MS = 3000;
+
+/** Задержка человеческим языком: до секунды — миллисекунды, дальше — секунды. */
+function formatLatency(ms: number | null): string {
+  if (ms == null) return '—';
+  return ms < 1000 ? `${ms} мс` : `${(ms / 1000).toFixed(1)} с`;
+}
+
+/** Что случилось с самим прокси — словом, по статусу проверки. */
+function proxyVerdictWord(r: ProxyCheckResult): string {
+  if (r.proxy_ok) return 'жив';
+  if (r.status === 'bad_url') return 'строку не разобрать';
+  if (r.status === 'proxy_rejected') return 'не пускает';
+  if (r.status === 'proxy_dead') return 'не отвечает';
+  return 'проверка сорвалась';
+}
+
+/**
+ * Один из двух вердиктов проверки прокси.
+ *
+ * Вердикта именно два, и они стоят рядом не для симметрии: «прокси мёртв» и
+ * «прокси жив, но Telegram через него не проходит» — это разные действия.
+ * Первое лечится заменой у поставщика, второе значит, что прокси заблокирован
+ * в Telegram, и аккаунты на нём тихо перестанут работать.
+ */
+function ProxyVerdict({
+  label,
+  verdict,
+  ok,
+  latencyMs,
+  skipped,
+}: {
+  label: string;
+  verdict: string;
+  ok: boolean;
+  latencyMs: number | null;
+  /** До этой проверки не дошли — например, туннель не пробовали на мёртвом прокси. */
+  skipped?: boolean;
+}) {
+  const slow = ok && latencyMs != null && latencyMs >= SLOW_PROXY_MS;
+  const cls = skipped
+    ? 'bg-gray-100 text-gray-500'
+    : ok
+      ? slow ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'
+      : 'bg-rose-50 text-rose-700';
+  return (
+    <span
+      className={`rounded-md px-1.5 py-0.5 ${cls}`}
+      title={slow ? 'Отвечает, но слишком медленно для боевой рассылки' : undefined}
+    >
+      {label}: {verdict}
+      {latencyMs != null && ` · ${formatLatency(latencyMs)}`}
+    </span>
+  );
+}
+
 function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   const [proxies, setProxies] = useState<OutreachProxy[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2855,9 +2923,36 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   /** Previously errors were ignored — authFetch does not throw on 4xx/5xx, so users saw "nothing happened". */
   const [proxyError, setProxyError] = useState<string | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [checking, setChecking] = useState(false);
+  /**
+   * Секунды с начала проверки. Проверка идёт одним запросом на сервере, и
+   * прогресса по одному прокси у нас нет — но сорок штук занимают до минуты, и
+   * без бегущего счётчика экран выглядит зависшим.
+   */
+  const [checkElapsed, setCheckElapsed] = useState(0);
+  /** Ответ проверки: по строке на прокси плюс те, что не нашлись в кампании. */
+  const [checkRun, setCheckRun] = useState<
+    { rows: ProxyCheckResult[]; missing: number; checkedAt: string } | null
+  >(null);
 
   const proxyIds = useMemo(() => proxies.map(p => p.id), [proxies]);
   const { selectedIds, isSelected, toggle, setAll, clear } = useRowSelection(proxyIds);
+
+  /** Итог по каждому прокси — чтобы строка списка показала его без перезагрузки. */
+  const checkById = useMemo(() => {
+    const map = new Map<string, ProxyCheckResult>();
+    checkRun?.rows.forEach((r) => map.set(r.id, r));
+    return map;
+  }, [checkRun]);
+
+  // Счётчик заводим таймером, а не сразу в эффекте: обнуление делает сама
+  // проверка перед стартом, чтобы не дёргать состояние синхронно в эффекте.
+  useEffect(() => {
+    if (!checking) return;
+    const started = Date.now();
+    const timer = setInterval(() => setCheckElapsed(Math.round((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [checking]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -2915,6 +3010,49 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
       void load();
     } finally {
       setSaving(false);
+    }
+  };
+
+  /**
+   * Проверить выбранные прокси: жив ли сам прокси и доходит ли через него
+   * Telegram.
+   *
+   * Одним запросом на всю пачку: проверка сетевая, сервер гоняет её пачками сам,
+   * а сорок отдельных запросов из браузера только растянули бы то же самое.
+   * Список после проверки не перечитываем — ответ и есть результат.
+   */
+  const checkSelected = async () => {
+    const ids = selectedIds;
+    if (!ids.length) return;
+    setProxyError(null);
+    setCheckRun(null);
+    setCheckElapsed(0);
+    setChecking(true);
+    try {
+      const res = await authFetch(`${API_BASE}/proxies/check`, {
+        method: 'POST',
+        body: JSON.stringify({ campaign_id: campaignId, proxy_ids: ids }),
+      });
+      const body = (await res.json().catch(() => null)) as
+        | { items?: ProxyCheckResult[]; checked_at?: string; missing_ids?: string[]; error?: string }
+        | null;
+      // Отказ ручки — не вердикт по прокси: он ничего не говорит ни о прокси, ни
+      // о Telegram, поэтому едет в общую красную плашку вкладки, а не в итоги.
+      if (!res.ok || !body?.items) {
+        setProxyError(body?.error ?? `Не удалось проверить прокси (HTTP ${res.status})`);
+        return;
+      }
+      // Порядок ответа нам не обещан, а оператор ищет строки там, где выделял.
+      const byId = new Map(body.items.map((r) => [r.id, r]));
+      setCheckRun({
+        rows: ids.map((id) => byId.get(id)).filter((r): r is ProxyCheckResult => Boolean(r)),
+        missing: body.missing_ids?.length ?? 0,
+        checkedAt: body.checked_at ?? new Date().toISOString(),
+      });
+    } catch (e) {
+      setProxyError(`Проверка не дошла до сервера: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -3028,7 +3166,70 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         deleting={bulkDeleting}
         onClear={clear}
         onDelete={() => { void deleteSelected(); }}
+        checking={checking}
+        canCheck
+        onCheck={() => { void checkSelected(); }}
+        checkLabel={checking
+          ? `Проверяю прокси (${selectedIds.length})… ${checkElapsed} с`
+          : `Проверить прокси (${selectedIds.length})`}
+        checkTitle="Проверить два раза подряд: отвечает ли сам прокси и открывается ли через него туннель до Telegram"
       />
+
+      {/* Проверка сетевая и небыстрая: сорок прокси — около минуты. Молчащая
+          кнопка со спиннером на минуту читается как «всё зависло». */}
+      {checking && (
+        <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-500" />
+          Проверяю прокси: {selectedIds.length}. Идёт {checkElapsed} с — на сорок прокси уходит около
+          минуты, вкладку можно не трогать.
+        </div>
+      )}
+
+      {checkRun && checkRun.rows.length > 0 && (
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+          <div className="flex items-start justify-between gap-3">
+            <span>
+              Проверено прокси: {checkRun.rows.length} в{' '}
+              {new Date(checkRun.checkedAt).toLocaleString('ru-RU', {
+                day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+              })}
+              . Слева — отвечает ли сам прокси, справа — доходит ли через него Telegram:
+            </span>
+            <button type="button" onClick={() => setCheckRun(null)} className="cursor-pointer text-gray-400 hover:text-gray-600">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <ul className="mt-2 space-y-1.5">
+            {checkRun.rows.map((r) => (
+              <li key={r.id} className="flex flex-wrap items-center gap-1.5">
+                <span className="font-medium text-gray-800">{r.name || 'без названия'}</span>
+                <ProxyVerdict
+                  label="прокси"
+                  verdict={proxyVerdictWord(r)}
+                  ok={r.proxy_ok}
+                  latencyMs={r.proxy_latency_ms}
+                />
+                <ProxyVerdict
+                  label="Telegram"
+                  verdict={r.telegram_ok ? 'доходит' : r.proxy_ok ? 'не доходит' : 'не проверяли'}
+                  ok={r.telegram_ok}
+                  latencyMs={r.telegram_latency_ms}
+                  skipped={!r.proxy_ok && !r.telegram_ok}
+                />
+                {/* Технический код — для инженера в логах, словами — оператору. */}
+                <span className="text-gray-400">({r.status})</span>
+                {r.reason && <span className="text-gray-500">{r.reason}</span>}
+              </li>
+            ))}
+          </ul>
+          {/* Прокси удалили в другой вкладке, пока оператор выбирал строки. */}
+          {checkRun.missing > 0 && (
+            <div className="mt-2 text-gray-500">
+              Не нашлись в кампании: {checkRun.missing} — список на экране устарел, обновите страницу.
+            </div>
+          )}
+        </div>
+      )}
 
       {loading ? (
         <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
@@ -3043,7 +3244,9 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
             <SelectAllCheckbox total={proxies.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span>URL / Название</span><span>Активен</span><span />
           </div>
-          {proxies.map(p => (
+          {proxies.map(p => {
+            const check = checkById.get(p.id);
+            return (
             <div
               key={p.id}
               className={`grid grid-cols-[32px_1fr_80px_40px] gap-4 items-center px-4 py-2.5 ${isSelected(p.id) ? 'bg-indigo-50/60' : ''}`}
@@ -3058,6 +3261,25 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
               <div className="min-w-0">
                 {p.name && <p className="text-xs font-medium text-gray-800">{p.name}</p>}
                 <p className="text-xs text-gray-500 truncate font-mono">{p.url}</p>
+                {/* Итог последней проверки прямо в строке: список не
+                    перечитываем, показываем то, что ответила проверка. */}
+                {check && (
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px]">
+                    <ProxyVerdict
+                      label="прокси"
+                      verdict={proxyVerdictWord(check)}
+                      ok={check.proxy_ok}
+                      latencyMs={check.proxy_latency_ms}
+                    />
+                    <ProxyVerdict
+                      label="Telegram"
+                      verdict={check.telegram_ok ? 'доходит' : check.proxy_ok ? 'не доходит' : 'не проверяли'}
+                      ok={check.telegram_ok}
+                      latencyMs={check.telegram_latency_ms}
+                      skipped={!check.proxy_ok && !check.telegram_ok}
+                    />
+                  </div>
+                )}
               </div>
               <button type="button" onClick={() => { void toggleActive(p.id, p.is_active); }}
                 className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${p.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
@@ -3068,7 +3290,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
