@@ -1282,7 +1282,15 @@ function useRowSelection(allIds: string[]) {
 }
 
 /** Результат чтения профиля из Telegram: ошибка либо обновлённые поля. */
-type SyncResult = { error: string | null; patch?: Partial<OutreachAccount> };
+type SyncResult = {
+  error: string | null;
+  patch?: Partial<OutreachAccount>;
+  /**
+   * Профиль прочитан, а аватарку не удалось положить в хранилище портала.
+   * Не ошибка чтения: имя и описание приехали, поэтому и не error.
+   */
+  avatarError?: string;
+};
 
 /**
  * Итоги проверки аккаунта человеческим языком.
@@ -1409,6 +1417,37 @@ function CampaignAccountsTab({
   const accountIds = useMemo(() => accounts.map(a => a.id), [accounts]);
   const { selectedIds, isSelected, toggle, setAll, clear } = useRowSelection(accountIds);
 
+  /**
+   * Прокси, которые ещё никому не назначены.
+   *
+   * Занятость по экрану не читается, и один и тот же мобильный прокси легко
+   * уходил двум аккаунтам — для Telegram это одно устройство с двумя аккаунтами,
+   * то есть прямой повод для блокировки. Поэтому занятых в выпадающем списке
+   * просто нет. Считаем в пределах кампании: прокси заводятся ей же, и список
+   * аккаунтов на экране — тоже её; сверять весь портал значило бы тянуть с
+   * сервера чужие кампании ради подсказки.
+   */
+  const freeProxies = useMemo(() => {
+    const taken = new Set(accounts.map(a => a.proxy_id).filter((v): v is string => Boolean(v)));
+    return proxies.filter(p => !taken.has(p.id));
+  }, [accounts, proxies]);
+
+  /**
+   * Варианты для строки аккаунта: свободные плюс его собственный прокси.
+   *
+   * Без своего оператор не увидел бы, что вообще стоит в строке, и открытая
+   * выпадашка выглядела бы как «прокси сбросился».
+   */
+  const proxyOptions = useCallback(
+    (currentId: string | null) => {
+      const current = currentId ? proxies.find(p => p.id === currentId) : null;
+      return current && !freeProxies.some(p => p.id === current.id)
+        ? [current, ...freeProxies]
+        : freeProxies;
+    },
+    [freeProxies, proxies],
+  );
+
   const load = useCallback(async () => {
     setLoading(true);
     const [accRes, proxRes, errRes] = await Promise.all([
@@ -1469,9 +1508,12 @@ function CampaignAccountsTab({
         const d = (await res.json().catch(() => null)) as { error?: string } | null;
         return { error: d?.error ?? `Ошибка ${res.status}` };
       }
-      const patch = (await res.json()) as Partial<OutreachAccount>;
+      // avatar_error — не поле аккаунта, а объяснение от сервера, поэтому в
+      // строку списка его не подмешиваем.
+      const { avatar_error: avatarError, ...patch } =
+        (await res.json()) as Partial<OutreachAccount> & { avatar_error?: string };
       setAccounts(prev => prev.map(a => (a.id === id ? { ...a, ...patch } : a)));
-      return { error: null, patch };
+      return { error: null, patch, ...(avatarError ? { avatarError } : {}) };
     } catch (e) {
       return { error: e instanceof Error ? e.message : String(e) };
     } finally {
@@ -1480,37 +1522,54 @@ function CampaignAccountsTab({
   }, []);
 
   /**
-   * Обновить профили всех аккаунтов кампании.
+   * Аккаунты, чьи профили обновит кнопка: выбранные, а если ничего не выбрано —
+   * все. Чтение одного профиля занимает десятки секунд, и на кампании из
+   * семнадцати аккаунтов ждать полный круг ради одной строки оператору незачем.
+   */
+  const syncTargets = useMemo(
+    () => (selectedIds.length ? accounts.filter(a => selectedIds.includes(a.id)) : accounts),
+    [accounts, selectedIds],
+  );
+
+  /**
+   * Обновить профили выбранных аккаунтов (или всех, если выбора нет).
    *
    * Идём пачками по четыре: каждое чтение — это подключение через мобильный
    * прокси на десятки секунд. Шестнадцать подряд оператор ждать не станет, а все
    * разом — это шестнадцать одновременных соединений в один пул, который и так
    * бракует часть портов.
    */
-  const syncAllProfiles = useCallback(async () => {
-    const targets = accounts.map(a => ({ id: a.id, name: a.session_name }));
+  const syncProfiles = useCallback(async () => {
+    const targets = syncTargets.map(a => ({ id: a.id, name: a.session_name }));
     if (!targets.length) return;
     setSyncSummary(null);
 
     const failures: string[] = [];
+    // Причина у всех аккаунтов одна и та же (хранилище портала), поэтому в
+    // отчёте показываем её один раз, а не семнадцать.
+    const avatarProblems = new Set<string>();
     let next = 0;
     const worker = async () => {
       while (next < targets.length) {
         const t = targets[next++];
-        const { error } = await syncProfile(t.id);
+        const { error, avatarError } = await syncProfile(t.id);
         if (error) failures.push(`${t.name}: ${error}`);
+        if (avatarError) avatarProblems.add(avatarError);
       }
     };
     await Promise.all(
       Array.from({ length: Math.min(4, targets.length) }, () => worker()),
     );
 
+    const headline = failures.length
+      ? `Обновлено ${targets.length - failures.length} из ${targets.length}. Не получилось — ${failures.slice(0, 3).join('; ')}${failures.length > 3 ? ` и ещё ${failures.length - 3}` : ''}`
+      : `Профили обновлены: ${targets.length}`;
     setSyncSummary(
-      failures.length
-        ? `Обновлено ${targets.length - failures.length} из ${targets.length}. Не получилось — ${failures.slice(0, 3).join('; ')}${failures.length > 3 ? ` и ещё ${failures.length - 3}` : ''}`
-        : `Профили обновлены: ${targets.length}`,
+      avatarProblems.size
+        ? `${headline}. Аватарки не сохранились: ${[...avatarProblems].join('; ')}`
+        : headline,
     );
-  }, [accounts, syncProfile]);
+  }, [syncTargets, syncProfile]);
 
   /**
    * Проверить выбранные аккаунты.
@@ -1703,15 +1762,23 @@ function CampaignAccountsTab({
         <div className="flex items-center gap-2">
           <button
             type="button"
-            disabled={!profileReadable || syncingIds.length > 0 || accounts.length === 0}
-            onClick={() => { void syncAllProfiles(); }}
+            disabled={!profileReadable || syncingIds.length > 0 || syncTargets.length === 0}
+            onClick={() => { void syncProfiles(); }}
             title={profileReadable
-              ? 'Прочитать имя, описание и аватарку каждого аккаунта из Telegram'
+              ? selectedIds.length
+                ? `Прочитать из Telegram профили выбранных аккаунтов: ${syncTargets.length}`
+                : 'Прочитать имя, телефон, описание и аватарку каждого аккаунта из Telegram. Выделите строки, чтобы обновить только их'
               : 'Сначала остановите кампанию: во время работы аккаунты заняты'}
             className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
           >
             {syncingIds.length ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            {syncingIds.length ? `Читаю профили (${syncingIds.length})…` : 'Обновить профили'}
+            {/* Что именно нажимается, видно до нажатия: «выбранных» и «всех» —
+                это минуты ожидания разницы. */}
+            {syncingIds.length
+              ? `Читаю профили (${syncingIds.length})…`
+              : selectedIds.length
+                ? `Обновить профили выбранных (${syncTargets.length})`
+                : `Обновить профили всех (${syncTargets.length})`}
           </button>
           <label
             title="tdata — zip-архивами (можно сразу несколько), старый формат — парами .session и .json"
@@ -1808,7 +1875,8 @@ function CampaignAccountsTab({
               <select value={proxyId} onChange={e => setProxyId(e.target.value)}
                 className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400">
                 <option value="">Без прокси</option>
-                {proxies.map(p => <option key={p.id} value={p.id}>{p.name || p.url}</option>)}
+                {freeProxies.map(p => <option key={p.id} value={p.id}>{p.name || p.url}</option>)}
+                {freeProxies.length === 0 && <option disabled>Свободных прокси нет</option>}
               </select>
             </label>
           </div>
@@ -1958,7 +2026,12 @@ function CampaignAccountsTab({
                     className="w-full rounded border border-indigo-300 bg-white px-1.5 py-0.5 text-xs outline-none focus:border-indigo-500 cursor-pointer"
                   >
                     <option value="">Без прокси</option>
-                    {proxies.map(p => <option key={p.id} value={p.id}>{p.name || p.url}</option>)}
+                    {proxyOptions(a.proxy_id).map(p => (
+                      <option key={p.id} value={p.id}>{p.name || p.url}</option>
+                    ))}
+                    {proxyOptions(a.proxy_id).length === 0 && (
+                      <option disabled>Свободных прокси нет</option>
+                    )}
                   </select>
                 ) : (
                   <button
@@ -2044,6 +2117,12 @@ function AccountProfileModal({
   const [avatar, setAvatar] = useState<{ file: File; url: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Аватарка не доехала до хранилища портала. Не ошибка: в самом Telegram всё
+   * применилось, а вот в списке аккаунтов картинки не будет — и молчать об этом
+   * нельзя, иначе это выглядит как «у аккаунта нет фото».
+   */
+  const [avatarWarning, setAvatarWarning] = useState<string | null>(null);
 
   const pickAvatar = (file: File | null) => {
     setAvatar((prev) => {
@@ -2060,7 +2139,8 @@ function AccountProfileModal({
    */
   const syncNow = useCallback(async () => {
     setError(null);
-    const { error: err, patch } = await onSync();
+    const { error: err, patch, avatarError } = await onSync();
+    setAvatarWarning(avatarError ?? null);
     if (err) { setError(err); return; }
     if (!patch) return;
     setFirstName((v) => (v ? v : patch.first_name ?? ''));
@@ -2094,12 +2174,19 @@ function AccountProfileModal({
         headers: { Authorization: `Bearer ${token}` },
         body: form,
       });
+      const body = (await res.json().catch(() => null)) as
+        { error?: string; avatar_error?: string } | null;
       if (!res.ok) {
-        const d = (await res.json().catch(() => null)) as { error?: string } | null;
-        setError(d?.error ?? `Ошибка ${res.status}`);
+        setError(body?.error ?? `Ошибка ${res.status}`);
         return;
       }
       onSaved();
+      // Профиль в Telegram уже изменён, поэтому не откатываем и не считаем это
+      // ошибкой — но карточку не закрываем, иначе предупреждение никто не увидит.
+      if (body?.avatar_error) {
+        setAvatarWarning(body.avatar_error);
+        return;
+      }
       onClose();
     } finally {
       setSaving(false);
@@ -2221,6 +2308,12 @@ function AccountProfileModal({
           </label>
 
           {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div>}
+          {avatarWarning && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              Аватарка не сохранилась в портале: {avatarWarning}. В Telegram она при этом на месте —
+              не видно только в списке аккаунтов.
+            </div>
+          )}
         </div>
 
         <div className="border-t border-gray-100 px-6 py-4">
