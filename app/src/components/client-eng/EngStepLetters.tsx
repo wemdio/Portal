@@ -78,8 +78,7 @@ export function ChainEditor({
             type="button"
             onClick={() => void onSave()}
             disabled={saving}
-            className="neu-pill active ml-auto px-3 py-1 text-[11px] font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
-            style={{ color: 'var(--cp-paper)' }}
+            className="ds-btn-primary ml-auto inline-flex items-center gap-1.5 text-[11px]"
           >
             {saving ? <EngSpinner className="h-3 w-3" /> : <Save className="h-3 w-3" />}
             Save changes
@@ -90,8 +89,8 @@ export function ChainEditor({
       {draft.map((letter, i) => (
         <div
           key={i}
-          className="rounded-lg p-3 flex flex-col gap-2"
-          style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)' }}
+          className="rounded-md p-3 flex flex-col gap-2"
+          style={{ border: '1px solid var(--cp-divider)' }}
         >
           <div className="flex items-center gap-2">
             <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
@@ -106,8 +105,7 @@ export function ChainEditor({
                   max={90}
                   value={letter.wait_days ?? 0}
                   onChange={(e) => updateLetter(i, { wait_days: Number(e.target.value) })}
-                  className="neu-pill w-16 px-2 py-0.5 text-[11px] bg-transparent outline-none ds-mono"
-                  style={{ color: 'var(--cp-paper)' }}
+                  className="ds-input w-16 text-[11px] ds-mono"
                 />
                 days
               </label>
@@ -118,15 +116,13 @@ export function ChainEditor({
             value={letter.subject ?? ''}
             onChange={(e) => updateLetter(i, { subject: e.target.value })}
             placeholder={i === 0 ? 'Subject' : 'Subject (usually empty — same thread)'}
-            className="neu-pill w-full px-3 py-1.5 text-xs bg-transparent outline-none"
-            style={{ color: 'var(--cp-paper)' }}
+            className="ds-input w-full text-xs"
           />
           <textarea
             value={letter.body}
             onChange={(e) => updateLetter(i, { body: e.target.value })}
             rows={6}
-            className="neu-pill w-full px-3 py-2 text-xs bg-transparent outline-none resize-y"
-            style={{ color: 'var(--cp-paper)' }}
+            className="ds-input w-full text-xs resize-y"
           />
           {(letter.variants?.length ?? 0) > 0 && (
             <span className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>

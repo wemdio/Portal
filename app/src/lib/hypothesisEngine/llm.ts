@@ -5,7 +5,7 @@
  *
  * Отличия от salesAiAnalysis:
  *  - свой ключ: OPENROUTER_HYPOTHESIS_ENGINE_API_KEY (fallback OPENROUTER_BRIEF_API_KEY);
- *  - три роли моделей (см. getHeModel): research / chain / bulk;
+ *  - четыре роли моделей (см. getHeModel): research / chain / bulk / gate;
  *  - дополнительный callLLMText — свободный текст без json_object
  *    (цепочки писем парсятся маркерами ---LETTER N---, а не схемой).
  *
@@ -59,21 +59,26 @@ function estimateCost(model: string, promptTokens: number, completionTokens: num
 
 /* ─────────────────────── Роли моделей ─────────────────────── */
 
-export type HeModelKind = 'research' | 'chain' | 'bulk';
+export type HeModelKind = 'research' | 'chain' | 'bulk' | 'gate';
 
 const HE_MODEL_DEFAULTS: Record<HeModelKind, string> = {
   research: 'anthropic/claude-opus-5',
   chain: 'anthropic/claude-opus-5',
   bulk: 'anthropic/claude-sonnet-4-6',
+  // Дешёвые классификационные задачи (relevance-gate, сегмент-классификатор,
+  // case-bank): мини-модели хватает, reasoning-расходы и усечения max_tokens
+  // на reasoning-моделях (finish_reason='length') здесь не нужны вовсе.
+  gate: 'openai/gpt-4o-mini',
 };
 
 const HE_MODEL_ENV: Record<HeModelKind, string> = {
   research: 'HE_MODEL_RESEARCH',
   chain: 'HE_MODEL_CHAIN',
   bulk: 'HE_MODEL_BULK',
+  gate: 'HE_MODEL_GATE',
 };
 
-/** Модель для роли движка; переопределяется env HE_MODEL_RESEARCH/CHAIN/BULK. */
+/** Модель для роли движка; переопределяется env HE_MODEL_RESEARCH/CHAIN/BULK/GATE. */
 export function getHeModel(kind: HeModelKind): string {
   return (process.env[HE_MODEL_ENV[kind]] ?? '').trim() || HE_MODEL_DEFAULTS[kind];
 }

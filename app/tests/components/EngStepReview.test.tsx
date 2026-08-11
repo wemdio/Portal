@@ -144,10 +144,15 @@ describe('<EngStepReview />', () => {
     // Письма цепочки на месте (инлайн-редактор шага Letters).
     expect(screen.getByText('Banks')).toBeInTheDocument();
     expect(screen.getByDisplayValue('Hi there')).toBeInTheDocument();
-    // Статус шаблона и пресеты подъехали по первому ready-шаблону.
-    expect(screen.getByText(/template: ready/i)).toBeInTheDocument();
+    // Статус шаблона — status-tag (dot + mono-tag), не пилюля с бордером.
+    expect(screen.getByText(/template: ready/i)).toHaveClass('ds-status-tag');
+    // Хром кнопок по системе: secondary у превью.
+    expect(screen.getByRole('button', { name: /preview base/i })).toHaveClass('ds-btn-secondary');
+    // Пресеты подъехали по первому ready-шаблону.
     expect(await screen.findByText('sender@x.com')).toBeInTheDocument();
     expect(mockPresets).toHaveBeenCalledWith('t1');
+    // Primary у главного CTA панели запуска (появляется после пресетов).
+    expect(screen.getByRole('button', { name: /launch all \(paused\)/i })).toHaveClass('ds-btn-primary');
 
     // Ленивое превью базы — только по кнопке.
     expect(mockRows).not.toHaveBeenCalled();
