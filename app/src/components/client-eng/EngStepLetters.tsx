@@ -1,22 +1,17 @@
 'use client';
 
 /**
- * Шаг 3 «Letters»: генерация цепочки писем по вертикали (дефолтный язык
- * кабинета — EN) и просмотр/инлайн-редактирование писем по шагам.
- * Сохранение — полная замена letters (PATCH /api/client/eng/chains/[id],
- * сервер клампит wait_days и валидирует тем же контрактом, что staff).
+ * Шаг 3 «Letters» — ВИТРИНА писем (без ручных кнопок генерации): цепочки
+ * генерирует автопилот («Start outreach», шаг 2), здесь клиент смотрит и
+ * инлайн-правит письма по шагам (ChainEditor, сохранение — полная замена
+ * letters через PATCH /api/client/eng/chains/[id], сервер клампит wait_days
+ * и валидирует тем же контрактом, что staff).
  */
 
 import { useMemo, useState } from 'react';
 import { Mail, Save } from 'lucide-react';
 import type { HeVertical } from '@/lib/hypothesisEngine/types';
-import {
-  generateEngChain,
-  patchEngChain,
-  type HeChainDto,
-  type HeChainLetterDto,
-  type HeJobSummary,
-} from './api-client';
+import { patchEngChain, type HeChainDto, type HeChainLetterDto, type HeJobSummary } from './api-client';
 import { EngBadge, EngCard, EngSpinner } from './ui';
 import type { EngDetail } from './EngProjectWizard';
 
@@ -154,22 +149,6 @@ export function EngStepLetters({ detail, onChanged }: { detail: EngDetail; onCha
   const verticals = useMemo(() => (detail.verticals ?? []) as HeVertical[], [detail]);
   const chains = useMemo(() => (detail.chains ?? []) as HeChainDto[], [detail]);
   const jobs = useMemo(() => detail.jobs ?? [], [detail]);
-  const [busyVerticalId, setBusyVerticalId] = useState<string | null>(null);
-  const [error, setError] = useState('');
-
-  const onGenerate = async (verticalId: string) => {
-    if (busyVerticalId) return;
-    setBusyVerticalId(verticalId);
-    setError('');
-    try {
-      await generateEngChain(verticalId);
-      onChanged();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to start letter generation');
-    } finally {
-      setBusyVerticalId(null);
-    }
-  };
 
   if (verticals.length === 0) {
     return (
@@ -187,7 +166,6 @@ export function EngStepLetters({ detail, onChanged }: { detail: EngDetail; onCha
         // Деталка отдаёт цепочки свежие-первыми — берём последнюю по вертикали.
         const chain = chains.find((c) => c.vertical_id === v.id);
         const activeJob = chainJobFor(jobs, v.id);
-        const busy = busyVerticalId === v.id || !!activeJob;
         return (
           <EngCard key={v.id}>
             <div className="flex items-center gap-2">
@@ -195,42 +173,25 @@ export function EngStepLetters({ detail, onChanged }: { detail: EngDetail; onCha
               <h4 className="text-sm font-bold m-0" style={{ color: 'var(--cp-paper)' }}>
                 {v.name}
               </h4>
-              <button
-                type="button"
-                onClick={() => void onGenerate(v.id)}
-                disabled={busy}
-                className="neu-pill ml-auto px-3 py-1.5 text-[11px] font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
-                style={{ color: 'var(--cp-paper)' }}
-              >
-                {busy && <EngSpinner className="h-3 w-3" />}
-                {chain ? 'Regenerate letters (EN)' : 'Generate letters (EN)'}
-              </button>
+              {activeJob && (
+                <span className="ml-auto inline-flex items-center gap-1.5 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+                  <EngSpinner className="h-3 w-3" /> generation in progress…
+                </span>
+              )}
             </div>
-
-            {activeJob && (
-              <p className="mt-2 text-[11px] inline-flex items-center gap-1.5" style={{ color: 'var(--cp-amber)' }}>
-                <EngSpinner className="h-3 w-3" /> generation in progress…
-              </p>
-            )}
 
             {chain ? (
               <ChainEditor chain={chain} onSaved={onChanged} />
             ) : (
               !activeJob && (
                 <p className="mt-2 text-xs" style={{ color: 'var(--cp-text-l)' }}>
-                  No letters yet for this vertical.
+                  No letters yet — the autopilot generates them after «Start outreach» on step 2.
                 </p>
               )
             )}
           </EngCard>
         );
       })}
-
-      {error && (
-        <div className="text-sm" style={{ color: 'var(--cp-red)' }}>
-          {error}
-        </div>
-      )}
     </div>
   );
 }
