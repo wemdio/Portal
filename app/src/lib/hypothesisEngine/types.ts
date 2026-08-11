@@ -60,6 +60,8 @@ export interface HeProject {
   status: HeProjectStatus;
   /** Рынок проекта: ru (дефолт) | us — geo поиска и язык промптов/писем. */
   market: string;
+  /** Автопилот ENG-кабинета: воркер сам дочейнит chain → base_collect → template. */
+  autopilot?: boolean;
   error: string | null;
   llm_model: string | null;
   tokens_used: number;
