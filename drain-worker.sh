@@ -4,7 +4,8 @@
 # Мягкая "пауза перед деплоем":
 # 1) Снимаем снимок активных задач (running) по таблицам очередей.
 # 2) Переводим running -> pending, чтобы задачи автоматически возобновились после рестарта.
-# 3) Останавливаем worker-контейнеры.
+# 3) Сигнализируем и останавливаем worker-контейнеры.
+# 4) Для BaseConstructor помечаем processing-задачи для немедленного resume.
 #
 # Важно: задача не должна уходить в failed из-за самого деплоя.
 
@@ -65,16 +66,23 @@ fetch_running_rows() {
   curl -sS "${SUPABASE_URL}/rest/v1/${table}?status=eq.running&select=${select_clause}" "${auth_headers[@]}"
 }
 
-patch_running_to_pending() {
+patch_rows() {
   local table="$1"
-  local body="${2:-{\"status\":\"pending\"}}"
+  local filter="$2"
+  local body="$3"
   curl -sS -X PATCH \
-    "${SUPABASE_URL}/rest/v1/${table}?status=eq.running" \
+    "${SUPABASE_URL}/rest/v1/${table}?${filter}" \
     "${auth_headers[@]}" \
     -H "Content-Type: application/json" \
     -H "Prefer: return=minimal" \
     -d "${body}" \
     --write-out '%{http_code}' -o /dev/null 2>/dev/null || echo "000"
+}
+
+patch_running_to_pending() {
+  local table="$1"
+  local body="${2:-{\"status\":\"pending\"}}"
+  patch_rows "$table" "status=eq.running" "$body"
 }
 
 if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
@@ -233,6 +241,17 @@ else
   echo "[drain] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — skipping Supabase pause flow"
 fi
 
+base_constructor_containers=(
+  "portal-worker-baseconstructor"
+  "portal-worker-baseconstructor-2"
+  "portal-worker-baseconstructor-3"
+)
+
+# Signal every replica before waiting on any one of them. Each replica stops
+# claiming jobs immediately, so its fast-handoff heartbeat cannot be reclaimed
+# by another old replica while the drain is still in progress.
+sudo -n docker kill --signal=SIGTERM "${base_constructor_containers[@]}" 2>/dev/null || true
+
 containers=(
   "portal-worker"
   "portal-worker-hh"
@@ -245,6 +264,7 @@ containers=(
   "portal-worker-aicaller"
   "portal-worker-tg-transcribe"
   "portal-worker-outreach"
+  "${base_constructor_containers[@]}"
 )
 
 echo "[drain] Stopping worker containers (timeout 15s each)..."
@@ -252,4 +272,16 @@ for c in "${containers[@]}"; do
   sudo -n docker stop -t 15 "$c" 2>/dev/null || true
 done
 
-echo "[drain] Workers stopped (jobs are paused and will auto-resume after restart)"
+# A progress callback may write one final fresh heartbeat after SIGTERM. Once
+# every BaseConstructor replica is stopped, age all remaining processing rows
+# so the new replicas resume them on their first poll instead of 15 minutes later.
+if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
+  base_constructor_handoff_code="$(patch_rows "base_constructor_jobs" "status=eq.processing" '{"started_at":"1970-01-01T00:00:00Z"}')"
+  if [[ "$base_constructor_handoff_code" =~ ^(200|204)$ ]]; then
+    echo "[drain] base_constructor_jobs: processing jobs marked for immediate resume"
+  else
+    echo "[drain] base_constructor_jobs: handoff request returned http ${base_constructor_handoff_code}"
+  fi
+fi
+
+echo "[drain] Workers stopped (jobs are paused or marked for immediate resume)"
