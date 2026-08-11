@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { StringSession } from 'telegram/sessions';
+import { readFirstRow } from './sqliteReader';
 
 /**
  * Собрать строку сессии GramJS из адреса DC и ключа авторизации.
@@ -88,50 +89,50 @@ export function authKeyFingerprint(sessionString: string | null | undefined): st
 }
 
 /**
+ * Собрать строку сессии из содержимого .session-файла Telethon.
+ *
+ * Разбираем файл своим читателем SQLite (`sqliteReader`), а не пакетом
+ * `sqlite3`: у пакета нативные биндинги, которых в образе приложения нет и не
+ * будет — зависимости там ставятся с `--ignore-scripts`. Раньше эта ветка
+ * падала на `Could not locate the bindings file` для каждого аккаунта, у
+ * которого пустая `session_data`.
+ */
+function sessionStringFromSqliteBuffer(fileBuffer: Buffer): string {
+  const row = readFirstRow(fileBuffer, 'sessions');
+  // `auth_key` пустой у сессии, которую Telethon завёл, но не авторизовал.
+  if (!row?.auth_key || !(row.auth_key instanceof Buffer) || row.auth_key.length === 0) {
+    throw new Error('Пустая сессия в SQLite файле');
+  }
+
+  return buildGramJsSessionString(
+    Number(row.dc_id),
+    String(row.server_address),
+    Number(row.port),
+    row.auth_key,
+  );
+}
+
+/**
  * Read a Telethon/GramJS .session SQLite file and return a StringSession.
  * Avoids gramjs-sqlitesession which is incompatible with newer GramJS versions.
  */
-export function readSqliteSession(filePath: string): Promise<StringSession> {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const sqlite3Module = require('sqlite3') as typeof import('sqlite3');
-
-  return new Promise((resolve, reject) => {
-    const db = new sqlite3Module.Database(filePath, sqlite3Module.OPEN_READONLY, (err) => {
-      if (err) return reject(err);
-
-      db.get(
-        'SELECT dc_id, server_address, port, auth_key FROM sessions LIMIT 1',
-        (err2: Error | null, row?: { dc_id: number; server_address: string; port: number; auth_key: Buffer }) => {
-          db.close();
-          if (err2) return reject(err2);
-          if (!row?.auth_key) return reject(new Error('Пустая сессия в SQLite файле'));
-
-          resolve(
-            new StringSession(
-              buildGramJsSessionString(row.dc_id, row.server_address, row.port, row.auth_key),
-            ),
-          );
-        },
-      );
-    });
-  });
+export async function readSqliteSession(filePath: string): Promise<StringSession> {
+  const fs = await import('fs');
+  try {
+    return new StringSession(sessionStringFromSqliteBuffer(fs.readFileSync(filePath)));
+  } catch (err) {
+    // Имя функции в тексте ошибки — не украшение: по нему цикл кампании
+    // отличает порчу файла сессии от точно так же звучащих ошибок разбора
+    // сетевых пакетов GramJS (campaignLoop.ts, ветка «offset out of range»).
+    throw new Error(`readSqliteSession(${filePath}): ${(err as Error).message}`);
+  }
 }
 
 /**
  * Convert a .session SQLite buffer to a GramJS StringSession string.
- * Writes the buffer to a temp file, reads it with readSqliteSession, then cleans up.
  */
 export async function sqliteBufferToSessionString(buffer: ArrayBuffer): Promise<string> {
-  const fs = await import('fs');
-  const os = await import('os');
-  const path = await import('path');
-  const tmpPath = path.join(os.tmpdir(), `tg-session-import-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  try {
-    fs.writeFileSync(tmpPath, Buffer.from(buffer));
-    const session = await readSqliteSession(tmpPath);
-    await session.load();
-    return session.save();
-  } finally {
-    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-  }
+  const session = new StringSession(sessionStringFromSqliteBuffer(Buffer.from(buffer)));
+  await session.load();
+  return session.save();
 }
