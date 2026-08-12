@@ -220,6 +220,7 @@ function emptySignals(): Record<SignalKey, SignalVerdict> {
   return {
     generalPhone: v(), contactForm: v(), salesDept: v(),
     targetVacancy: v(), highVolume: v(), multiOffice: v(),
+    legalRelevance: v(), crmCalltracking: v(),
   };
 }
 

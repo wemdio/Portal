@@ -1,12 +1,13 @@
 /**
  * Render-smoke для <EngDashboard /> (Command Center): компонент монтируется
  * на реалистичном пэйлоаде GET /api/client/eng/dashboard и показывает ключевые
- * блоки (today-карточки, карточку вертикали с этапом, ссылку в Instantly,
- * ленту событий, полоску «Right now», countdown авто-добора), плюс пустое
- * состояние без вертикалей. Сеть замокана на уровне api-client.
+ * блоки (01 → Today счётчики, карточки вертикалей с картой пайплайна и строкой
+ * «next: …», ссылку в Instantly, ленту событий, карточку «Right now», countdown
+ * авто-добора), плюс пустое состояние без вертикалей. Сеть замокана на уровне
+ * api-client.
  */
 
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { EngDashboard } from '@/components/client-eng/EngDashboard';
 import { fetchEngDashboard, type EngDashboardResponse } from '@/components/client-eng/api-client';
 
@@ -72,7 +73,7 @@ beforeEach(() => {
 });
 
 describe('<EngDashboard />', () => {
-  it('renders the aggregate: stats, vertical cards, events, active jobs', async () => {
+  it('renders the aggregate: today counters, vertical cards, events, active jobs', async () => {
     mockFetch.mockResolvedValue(payload());
     render(<EngDashboard />);
 
@@ -81,23 +82,57 @@ describe('<EngDashboard />', () => {
     expect(screen.getByText('Command Center')).toBeInTheDocument();
     expect(screen.getByText('Valid today')).toBeInTheDocument();
     expect(screen.getByText('Collected today')).toBeInTheDocument();
-    // Авто-добор включён: подпись расписания на месте.
-    expect(screen.getByText(/03:20 UTC/)).toBeInTheDocument();
-    // Карточки вертикалей с этапами и деталями.
+    // Секции подписаны editorial eyebrows.
+    expect(screen.getByText('01 → Today')).toBeInTheDocument();
+    expect(screen.getByText('02 → Verticals')).toBeInTheDocument();
+    expect(screen.getByText('03 → Recent activity')).toBeInTheDocument();
+    // Авто-добор включён: расписание и в тайле, и в строке next live-вертикали.
+    expect(screen.getAllByText(/03:20 UTC/).length).toBeGreaterThan(0);
+    // Карточки вертикалей: статус-теги dot+mono вместо пилюль.
     expect(screen.getByText('Banks')).toBeInTheDocument();
-    expect(screen.getAllByText('launched').length).toBeGreaterThan(0);
+    expect(screen.getByText('live')).toBeInTheDocument();
     expect(screen.getByText('Fintech')).toBeInTheDocument();
-    expect(screen.getByText('constructor: 87/147 valid')).toBeInTheDocument();
+    expect(screen.getByText('enrichment')).toBeInTheDocument();
     // Ссылка на кампанию Instantly у launched-вертикали.
     const instantly = screen.getByRole('link', { name: /open in instantly/i });
     expect(instantly).toHaveAttribute('href', 'https://app.instantly.ai/app/campaign/cmp-9');
     // Кнопка перехода в мастер на нужный шаг.
     const view = screen.getAllByRole('link', { name: /view|continue/i })[0];
     expect(view).toHaveAttribute('href', expect.stringContaining('/client/eng/projects/p1?step='));
-    // Лента событий и полоска «Right now».
+    // Лента событий и карточка «Right now» (джоба — строкой с вертикалью).
     expect(screen.getByText('refill: +38 leads · Banks')).toBeInTheDocument();
     expect(screen.getByText('Right now')).toBeInTheDocument();
-    expect(screen.getByText(/collecting the base 1\/2 · harvest · Fintech/)).toBeInTheDocument();
+    expect(screen.getByText('collecting the base · Fintech')).toBeInTheDocument();
+    expect(screen.getByText('1/2 · harvest')).toBeInTheDocument();
+  });
+
+  it('pipeline map: current stage with numeric evidence and a next line', async () => {
+    mockFetch.mockResolvedValue(payload());
+    render(<EngDashboard />);
+
+    const cards = await screen.findAllByTestId('vertical-card');
+    expect(cards).toHaveLength(2);
+    const [banks, fintech] = cards;
+
+    // Live-вертикаль: весь пайплайн пройден, Daily refill — отдельная строка.
+    expect(within(banks).getByText('Launch')).toBeInTheDocument();
+    expect(within(banks).getByText(/210 leads/)).toBeInTheDocument();
+    expect(within(banks).getByRole('link', { name: /Banks US · Aug 6/ })).toHaveAttribute(
+      'href',
+      'https://app.instantly.ai/app/campaign/cmp-9',
+    );
+    expect(within(banks).getByText('template ready')).toBeInTheDocument();
+    expect(within(banks).getByText('Daily refill')).toBeInTheDocument();
+    expect(within(banks).getByText('+38 today · next 03:20 UTC')).toBeInTheDocument();
+    expect(within(banks).getByText('next: daily refill 03:20 UTC')).toBeInTheDocument();
+
+    // Вертикаль в работе: текущая стадия Email enrichment с доказательством
+    // из stats (valid/emails), прошлые стадии с цифрами, будущие — без.
+    expect(within(fintech).getByText('Email enrichment')).toBeInTheDocument();
+    expect(within(fintech).getByText('87 / 147 valid')).toBeInTheDocument();
+    expect(within(fintech).getByText('Lead base')).toBeInTheDocument();
+    expect(within(fintech).getByText('Analysis')).toBeInTheDocument();
+    expect(within(fintech).getByText('next: analysis (after enrichment)')).toBeInTheDocument();
   });
 
   it('shows the empty state when there are no verticals', async () => {
@@ -108,7 +143,7 @@ describe('<EngDashboard />', () => {
 
     expect(await screen.findByText('No verticals yet — create a project')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /create a project/i })).toBeInTheDocument();
-    expect(screen.getByText('Off')).toBeInTheDocument();
+    expect(screen.getByText('off')).toBeInTheDocument();
   });
 
   it('renders the load error when the aggregate fetch fails', async () => {

@@ -761,10 +761,28 @@ function lowerList(values: string[]): string[] {
 
 /**
  * Каталог PDL (компании EU/US) keyset-пагинацией по id до limit строк.
- * Фильтры — серверные: industry/size/country точным совпадением (значения в
- * таблице в нижнем регистре), name — подстрокой (ilike, как в /api/company-base).
- * Исключения чужих баз на выборке нет (как у hh/карт) — только на мёрдже.
+ * Чтение — через RPC search_pdl_companies (миграция 20260812_0001): внутри
+ * принудительный план «фильтр → сортировка», иначе плоский PostgREST-запрос
+ * на широких фильтрах уходит pkey-scan'ом в 58s+ → 504 у Kong → задача
+ * падала maintenance-страницей. Фильтры — серверные: industry/size/country
+ * точным совпадением (значения в таблице в нижнем регистре), name — подстрокой
+ * (ilike, как в /api/company-base). Исключения чужих баз на выборке нет
+ * (как у hh/карт) — только на мёрдже.
  */
+
+/** Одна повторная попытка чтения страницы: рестарт/блип Kong не должен валить сбор. */
+const PDL_READ_RETRY_MS = 3000;
+
+/** Ошибки чтения: HTML maintenance-страницы Kong (504/рестарт) — не в error задачи. */
+function cleanPdlReadError(message: string): string {
+  if (message.includes('<html') || message.includes('<!doctype')) {
+    return 'pdl_companies read: non-JSON response (gateway timeout/restart)';
+  }
+  return `pdl_companies read: ${message}`;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function fetchPdlRows(
   ctx: HeStageContext,
   filters: HeCollectTask['pdl_filters'],
@@ -773,18 +791,26 @@ async function fetchPdlRows(
   const rows: Record<string, unknown>[] = [];
   let lastId = '';
   for (;;) {
-    let query = ctx.supabase
-      .from('pdl_companies')
-      .select('id, name, website, industry, size, country, region, locality')
-      .gt('id', lastId)
-      .order('id')
-      .limit(ENG_CATALOG_PAGE_SIZE);
-    if (filters?.industries?.length) query = query.in('industry', lowerList(filters.industries));
-    if (filters?.sizes?.length) query = query.in('size', lowerList(filters.sizes));
-    if (filters?.countries?.length) query = query.in('country', lowerList(filters.countries));
-    if (filters?.name) query = query.ilike('name', `%${filters.name.replace(/[%_]/g, '')}%`);
-    const { data, error } = await query;
-    if (error) throw new Error(`pdl_companies read: ${error.message}`);
+    const params = {
+      p_industries: filters?.industries?.length ? lowerList(filters.industries) : null,
+      p_sizes: filters?.sizes?.length ? lowerList(filters.sizes) : null,
+      p_countries: filters?.countries?.length ? lowerList(filters.countries) : null,
+      p_name: filters?.name ? filters.name.replace(/[%_]/g, '') : null,
+      p_after_id: lastId || null,
+      p_limit: ENG_CATALOG_PAGE_SIZE,
+    };
+    // Одна повторная попытка при сбое чтения (блип/рестарт Kong): страница
+    // идемпотентна, удвоенного трафика на happy-path нет.
+    let data: unknown = null;
+    let error: { message: string } | null = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const res = await ctx.supabase.rpc('search_pdl_companies', params);
+      data = res.data;
+      error = res.error ? { message: res.error.message } : null;
+      if (!error) break;
+      if (attempt < 2) await sleep(PDL_READ_RETRY_MS);
+    }
+    if (error) throw new Error(cleanPdlReadError(error.message));
     const page = (data ?? []) as Record<string, unknown>[];
     for (const r of page) {
       if (rows.length < limit) rows.push(r);

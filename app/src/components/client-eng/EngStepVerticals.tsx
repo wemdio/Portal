@@ -8,9 +8,9 @@
  */
 
 import { useMemo, useState } from 'react';
-import { Check, X } from 'lucide-react';
+import { Check, Rocket, X } from 'lucide-react';
 import type { HeHypothesis, HeVertical } from '@/lib/hypothesisEngine/types';
-import { patchEngHypothesis } from './api-client';
+import { patchEngHypothesis, startEngAutopilot } from './api-client';
 import { EngBadge, EngCard, EngSpinner, hypothesisStatusTone } from './ui';
 import type { EngDetail } from './EngProjectWizard';
 
@@ -31,8 +31,8 @@ function HypothesisCard({
 }) {
   return (
     <div
-      className="rounded-lg p-3 flex flex-col gap-2"
-      style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)' }}
+      className="rounded-md p-3 flex flex-col gap-2"
+      style={{ border: '1px solid var(--cp-divider)' }}
     >
       <div className="flex items-center gap-2">
         <span className="text-sm font-semibold" style={{ color: 'var(--cp-paper)' }}>
@@ -60,8 +60,7 @@ function HypothesisCard({
             type="button"
             onClick={() => onVerdict(hypothesis.id, 'accept')}
             disabled={busy}
-            className="neu-pill px-3 py-1 text-[11px] font-semibold inline-flex items-center gap-1 disabled:opacity-50"
-            style={{ color: 'var(--cp-green)' }}
+            className="ds-btn-secondary inline-flex items-center gap-1 text-[11px]"
           >
             {busy ? <EngSpinner className="h-3 w-3" /> : <Check className="h-3 w-3" />}
             Accept
@@ -70,8 +69,7 @@ function HypothesisCard({
             type="button"
             onClick={() => onVerdict(hypothesis.id, 'reject')}
             disabled={busy}
-            className="neu-pill px-3 py-1 text-[11px] font-semibold inline-flex items-center gap-1 disabled:opacity-50"
-            style={{ color: 'var(--cp-red)' }}
+            className="ds-btn-ghost inline-flex items-center gap-1 text-[11px]"
           >
             <X className="h-3 w-3" />
             Reject
@@ -85,8 +83,45 @@ function HypothesisCard({
 export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onChanged: () => void }) {
   const verticals = useMemo(() => (detail.verticals ?? []) as HeVertical[], [detail]);
   const hypotheses = useMemo(() => (detail.hypotheses ?? []) as HeHypothesis[], [detail]);
+  const jobs = useMemo(() => detail.jobs ?? [], [detail]);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [autopilotBusy, setAutopilotBusy] = useState(false);
+  const [autopilotSummary, setAutopilotSummary] = useState('');
+
+  // Автопилот уже гонит конвейер, пока жива хотя бы одна его джоба.
+  const AUTOPILOT_STAGES = useMemo(() => new Set(['chain', 'base_collect', 'base_analyze', 'template']), []);
+  const autopilotRunning = jobs.some(
+    (j) => (j.status === 'pending' || j.status === 'running') && AUTOPILOT_STAGES.has(j.stage),
+  );
+
+  const onStartOutreach = async () => {
+    if (autopilotBusy || autopilotRunning) return;
+    setAutopilotBusy(true);
+    setError('');
+    setAutopilotSummary('');
+    try {
+      const res = await startEngAutopilot(detail.project.id);
+      if (res.ok) {
+        const parts: string[] = [];
+        if (res.chains_enqueued) parts.push(`${res.chains_enqueued} chain${res.chains_enqueued === 1 ? '' : 's'}`);
+        if (res.collects_enqueued) parts.push(`${res.collects_enqueued} base collect${res.collects_enqueued === 1 ? '' : 's'}`);
+        if (res.templates_enqueued) parts.push(`${res.templates_enqueued} template${res.templates_enqueued === 1 ? '' : 's'}`);
+        setAutopilotSummary(
+          parts.length > 0
+            ? `Autopilot started — queued ${parts.join(' · ')}. Review & Launch fills in as stages finish.`
+            : 'Autopilot is on — everything is already queued or done. See Review & Launch.',
+        );
+      } else {
+        setError(res.error ?? 'Failed to start the autopilot');
+      }
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to start the autopilot');
+    } finally {
+      setAutopilotBusy(false);
+    }
+  };
 
   const onVerdict = async (id: string, verdict: 'accept' | 'reject') => {
     if (busyId) return;
@@ -113,15 +148,38 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
   }
 
   const acceptedTotal = hypotheses.filter((h) => h.status === 'accepted').length;
+  // «Start outreach» — одна кнопка вместо ручного прогона каждой стадии:
+  // доступна на researched-проекте с принятыми гипотезами.
+  const canStartOutreach = detail.project?.status === 'researched' && acceptedTotal > 0;
   const ungrouped = hypotheses.filter(
     (h) => !h.vertical_id || !verticals.some((v) => v.id === h.vertical_id),
   );
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="text-xs" style={{ color: 'var(--cp-text-m)' }}>
-        {acceptedTotal} of {hypotheses.length} hypotheses accepted — accepted ones drive the base collection on step 4.
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="text-xs" style={{ color: 'var(--cp-text-m)' }}>
+          {acceptedTotal} of {hypotheses.length} hypotheses accepted — accepted ones drive the base collection on step 4.
+        </div>
+        {canStartOutreach && (
+          <button
+            type="button"
+            onClick={() => void onStartOutreach()}
+            disabled={autopilotBusy || autopilotRunning}
+            className="ds-btn-primary ml-auto inline-flex items-center gap-1.5 text-xs"
+            title="Generate letters, collect bases and build templates for every vertical automatically"
+          >
+            {autopilotBusy || autopilotRunning ? <EngSpinner className="h-3 w-3" /> : <Rocket className="h-3 w-3" />}
+            {autopilotRunning ? 'Autopilot running…' : 'Start outreach'}
+          </button>
+        )}
       </div>
+
+      {autopilotSummary && (
+        <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-green)' }}>
+          {autopilotSummary}
+        </div>
+      )}
 
       {verticals.map((v) => {
         const own = hypotheses.filter((h) => h.vertical_id === v.id);

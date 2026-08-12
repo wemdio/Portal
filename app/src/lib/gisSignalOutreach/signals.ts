@@ -12,7 +12,10 @@ import { SIGNALS_LLM_MODEL } from '@/lib/enrich/extractors/signalsModel';
  * 6 признаков входящего потока заявок: общий телефон/колл-центр (S1),
  * форма заявки (S2), отдел продаж (S3), целевые вакансии (S4), признаки
  * большого потока (S5), сеть офисов/филиалов (S6). Компания квалифицируется
- * при >=1 сигнале.
+ * при >=1 сигнале. Поверх — 2 скоринговых сигнала (legalRelevance,
+ * crmCalltracking): гоняются для ВСЕХ сегментов ради архива и сетки, но в
+ * signalsCount и порог signal_min_count НЕ входят — их использует скоринг
+ * сегментов с профилем (scoring.ts, сегмент legal).
  *
  * Паттерн повторяет websiteSignalProcessor: скачиваем главную + найденные
  * подстраницы (контакты/вакансии/о компании/внешний hh.ru, всего ~5 страниц),
@@ -50,7 +53,26 @@ export interface OutreachSignalSet {
   targetVacancy: SignalVerdict;
   highVolume: SignalVerdict;
   multiOffice: SignalVerdict;
+  /** Скоринговый сигнал (legal): сайт действительно юридической тематики. */
+  legalRelevance: SignalVerdict;
+  /** Скоринговый сигнал (legal): CRM / коллтрекинг / речевая аналитика. */
+  crmCalltracking: SignalVerdict;
 }
+
+/**
+ * Ключи исходных 6 «потоковых» сигналов. signalsCount считается ТОЛЬКО по ним:
+ * скоринговые сигналы (legalRelevance/crmCalltracking) гоняются для всех
+ * сегментов ради архива и сетки, но НЕ должны менять поведение фильтра
+ * signal_min_count сегментов без скоринг-профиля (edu/remont и т.д.).
+ */
+export const CORE_SIGNAL_KEYS: Array<keyof OutreachSignalSet> = [
+  'generalPhone',
+  'contactForm',
+  'salesDept',
+  'targetVacancy',
+  'highVolume',
+  'multiOffice',
+];
 
 export interface OutreachSignalsResult {
   signals: OutreachSignalSet;
@@ -111,6 +133,8 @@ export const SIGNAL_COLUMNS: Array<{ key: keyof OutreachSignalSet; title: string
   { key: 'targetVacancy', title: 'Вакансии: менеджер продаж или оператор call-центра', clarification: 'Вакансии: менеджер продаж или оператор call-центра — уточнение' },
   { key: 'highVolume', title: 'Признак большого потока', clarification: 'Признак большого потока — уточнение' },
   { key: 'multiOffice', title: 'Несколько офисов / филиалов', clarification: 'Несколько офисов / филиалов — уточнение' },
+  { key: 'legalRelevance', title: 'Юридическая релевантность сайта', clarification: 'Юридическая релевантность сайта — уточнение' },
+  { key: 'crmCalltracking', title: 'CRM / коллтрекинг / речевая аналитика', clarification: 'CRM / коллтрекинг / речевая аналитика — уточнение' },
 ];
 
 // ─── Regex-банк эвристик ─────────────────────────────────────────────────────
@@ -144,7 +168,7 @@ const CTA_KEYWORDS_RE =
 // свяжутся с вами») сигналом НЕ являются — калибровка 03.08.2026 показала
 // систематический over-fire S3 на таких фразах (в т.ч. через LLM-добор).
 const SALES_DEPT_RE =
-  /отдел\s+продаж|департамент\s+продаж|клиентский\s+отдел|отдел\s+заявок|при[её]мная\s+комисси[яию]|call[-\s]?центр|колл[-\s]?центр|контакт[-\s]?центр/i;
+  /отдел\s+продаж|департамент\s+продаж|клиентский\s+отдел|отдел\s+заявок|при[её]мная\s+комисси[яию]|call[-\s]?центр|колл[-\s]?центр|контакт[-\s]?центр|intake[-\s]?(?:отдел|команда|специалист|менеджер|отдела|команды)/i;
 
 // S4: целевые роли — продажи, работа с клиентами, операторы call-центра.
 const TARGET_ROLE_RES = [
@@ -195,6 +219,49 @@ const MULTI_OFFICE_MARKER_RES = [
   /офисы\s+(?:в|по)\s/i,
 ];
 
+// ─── Скоринговые сигналы legal (гоняются для всех сегментов ради архива) ────
+
+// legal_relevance: сайт юридической тематики. «регистрация ООО/ИП/предприятий»
+// — только составная форма (голое «регистрация» — форма на сайте чего угодно).
+const LEGAL_RELEVANCE_RES: RegExp[] = [
+  /юрист/i,
+  /юридическ/i,
+  /адвокат/i,
+  /правов/i,
+  /судебн/i,
+  /банкротств/i,
+  /регистраци[яию]\s+(?:ооо|ип|предприяти)/i,
+  /ликвидац/i,
+  /патентн/i,
+  /авторски[ех]\s+прав/i,
+  /налоговы[ех]\s+спор/i,
+  /арбитраж/i,
+];
+
+// Стоп-фразы-шаблоны: реквизитный и бессмысленный юр. булочкрож любого сайта
+// («юридический адрес», «правовая информация» в подвале) — НЕ юр. тематика.
+// Вырезаются из текста ДО матчинга LEGAL_RELEVANCE_RES.
+export const LEGAL_NEGATIVE_RE =
+  /юридическ(?:ий|ого|ему)\s+адрес[а-яё]*|юр\.?\s*адрес[а-яё]*|правов(?:ая|ой)\s+информаци[яию]|правовые\s+услови[яю]/gi;
+
+// crm_calltracking: виджеты этих категорий из signalDetector (Calltouch,
+// CoMagic, Mango, UIS, Callibri, amoCRM, Битрикс24 и т.п.).
+const CRM_WIDGET_CATEGORIES = new Set(['call_tracking', 'crm']);
+
+// crm_calltracking: текстовые маркеры (в т.ч. когда виджет не детектится).
+const CRM_CALLTRACKING_RES: RegExp[] = [
+  /calltouch/i,
+  /comagic/i,
+  /callibri|каллибри/i,
+  /mango[-\s]?(?:office|телеком)|манго[-\s]?(?:офис|телеком)/i,
+  /uiscom|\buis\b/i,
+  /колл?[-\s]?трекинг|call[-\s]?tracking/i,
+  /amocrm|амосрм/i,
+  /bitrix24|битрикс[-\s]?24/i,
+  /речев(?:ая|ой)\s+аналитик/i,
+  /виртуальн(?:ая|ой)\s+атс/i,
+];
+
 // ─── Онлайн-формат (опциональный чек, НЕ один из 6 сигналов) ─────────────────
 //
 // Канонические regex'ы — единственный источник: их же импортирует batch-скрипт
@@ -232,6 +299,8 @@ function emptySignals(): OutreachSignalSet {
     targetVacancy: empty(),
     highVolume: empty(),
     multiOffice: empty(),
+    legalRelevance: empty(),
+    crmCalltracking: empty(),
   };
 }
 
@@ -497,6 +566,38 @@ function detectMultiOffice(pages: FetchedPage[], twogisBranchCount?: number | nu
 }
 
 /**
+ * legal_relevance: юридическая тематика сайта. Реквизитные стоп-фразы
+ * («юридический адрес», «правовая информация») вырезаем ДО матчинга — иначе
+ * сигнал стрелял бы на любом сайте с подвалом реквизитов.
+ */
+function detectLegalRelevance(pages: FetchedPage[]): SignalVerdict {
+  for (const page of pages) {
+    const cleaned = page.text.replace(LEGAL_NEGATIVE_RE, ' ');
+    const hit = findInText(cleaned, LEGAL_RELEVANCE_RES);
+    if (hit) return { hit: true, evidence: snippetAround(cleaned, hit.index, hit.length) };
+  }
+  return { hit: false, evidence: '' };
+}
+
+/** crm_calltracking: CRM/коллтрекинг — виджеты (script-разметка) + текст. */
+function detectCrmCalltracking(pages: FetchedPage[]): SignalVerdict {
+  // 1. Виджеты коллтрекинга/CRM из signalDetector (Calltouch, CoMagic, Mango,
+  //    UIS, Callibri, amoCRM, Битрикс24...). Скрипты в видимый текст не попадают,
+  //    поэтому без widget-проверки скрипт-only внедрения были бы невидимы.
+  for (const page of pages) {
+    const widgets = detectSignals(page.html)
+      .filter((s) => CRM_WIDGET_CATEGORIES.has(s.category))
+      .map((s) => s.name);
+    if (widgets.length > 0) {
+      return { hit: true, evidence: clip(`Виджеты на сайте: ${widgets.join(', ')}`) };
+    }
+  }
+
+  // 2. Текстовые маркеры («коллтрекинг», «речевая аналитика», «виртуальная АТС»).
+  return detectTextSignal(pages, CRM_CALLTRACKING_RES);
+}
+
+/**
  * Признак онлайн-формата по УЖЕ скачанным страницам (без доп. fetch'ей).
  * Стоп-фразы («онлайн-запись», «записаться онлайн», «онлайн-заявка») вырезаем
  * из текста ДО матчинга — это booking-CTA офлайн-бизнесов, а не формат обучения.
@@ -515,7 +616,7 @@ function detectOnlineFormat(pages: FetchedPage[]): SignalVerdict {
 
 // ─── LLM-добор (один вызов на все незакрытые сигналы) ────────────────────────
 
-const LLM_SYSTEM_PROMPT = `Ты — детектор признаков входящего потока заявок на сайте компании (B2B, РФ). По тексту страниц сайта определи наличие каждого из 6 сигналов. Извлекай ТОЛЬКО то, что явно указано. Не додумывай.
+const LLM_SYSTEM_PROMPT = `Ты — детектор признаков входящего потока заявок на сайте компании (B2B, РФ). По тексту страниц сайта определи наличие каждого из 8 сигналов. Извлекай ТОЛЬКО то, что явно указано. Не додумывай.
 
 Верни JSON (и только JSON, без markdown):
 {
@@ -524,16 +625,20 @@ const LLM_SYSTEM_PROMPT = `Ты — детектор признаков вход
   "salesDept": {"hit": true|false, "evidence": "..."},
   "targetVacancy": {"hit": true|false, "evidence": "..."},
   "highVolume": {"hit": true|false, "evidence": "..."},
-  "multiOffice": {"hit": true|false, "evidence": "..."}
+  "multiOffice": {"hit": true|false, "evidence": "..."},
+  "legalRelevance": {"hit": true|false, "evidence": "..."},
+  "crmCalltracking": {"hit": true|false, "evidence": "..."}
 }
 
 Определения сигналов:
 - generalPhone: общий телефон / колл-центр — ТОЛЬКО телефонные доказательства: номер 8-800, «многоканальный телефон», «звонок бесплатный», «бесплатно по России», «горячая линия», «единый номер». Кнопка или виджет обратного звонка («Заказать звонок», «перезвоните мне») БЕЗ общего номера телефона — НЕ сигнал generalPhone (это contactForm).
 - contactForm: форма заявки/обратной связи, кнопка «Оставить заявку»/«Заказать звонок», онлайн-чат с оператором.
-- salesDept: ЯВНОЕ упоминание отдела продаж, приёмной комиссии, call-центра/колл-центра/контакт-центра, клиентского отдела, отдела заявок. НЕ считай сигналом простое упоминание менеджеров или специалистов («наши менеджеры свяжутся с вами», «цены уточняйте у менеджеров», «менеджер по продажам» как должность) — без явного отдела/центра это не отдел продаж.
+- salesDept: ЯВНОЕ упоминание отдела продаж, приёмной комиссии, call-центра/колл-центра/контакт-центра, клиентского отдела, отдела заявок, intake-отдела/команды. НЕ считай сигналом простое упоминание менеджеров или специалистов («наши менеджеры свяжутся с вами», «цены уточняйте у менеджеров», «менеджер по продажам» как должность) — без явного отдела/центра это не отдел продаж.
 - targetVacancy: открытая вакансия менеджера по продажам, менеджера по работе с клиентами, оператора call-центра.
 - highVolume: признаки большого ВХОДЯЩЕГО ПОТОКА обращений. Доказательства — только объём клиентского потока: «сотни/тысячи заявок (в день/в месяц)», «более N клиентов/заявок/студентов/учеников/пациентов/звонков/обращений/консультаций/заказов», «консультации ежедневно»; а также режим работы: «работаем без выходных», «24/7», «круглосуточно», «ежедневно». НЕ является доказательством каталожный/товарный объём и репутационные числа: «1300+ товаров», «более 5000 моделей», «200+ позиций/наименований», «10000 отзывов» — это склад/каталог/отзывы, а не поток обращений.
 - multiOffice: ДВА И БОЛЕЕ РАЗНЫХ физических адреса или филиала: список адресов, «наши офисы/салоны/магазины/филиалы» в нескольких локациях или городах. Один адрес, один офис/салон/магазин — НЕ сигнал. Общие фразы без перечисленных локаций («работаем по всей России», «доставка по всей стране», «дилеры в регионах») — НЕ сигнал.
+- legalRelevance: сайт ЯВНО юридической тематики — юридические услуги, адвокаты/юристы, правовая помощь, судебные споры, банкротство, регистрация/ликвидация ООО или ИП, патентные услуги, защита авторских прав, налоговые споры, арбитраж. Реквизитные формулировки любого сайта («юридический адрес», «правовая информация», «политика конфиденциальности») — НЕ сигнал.
+- crmCalltracking: на сайте явно используются CRM, коллтрекинг или речевая аналитика: Calltouch, CoMagic, Callibri, Mango Office, UIS, amoCRM, Битрикс24, упоминания «коллтрекинг», «речевая аналитика», «виртуальная АТС».
 
 Правила: hit=true только если сигнал ЯВНО есть на страницах; evidence — короткая цитата с сайта (до 200 символов); если сигнала нет — hit=false и evidence="".`;
 
@@ -734,6 +839,8 @@ export async function detectOutreachSignals(
     targetVacancy: detectTargetVacancy(pages),
     highVolume: detectTextSignal(pages, HIGH_VOLUME_RES),
     multiOffice: detectMultiOffice(pages, input.twogisBranchCount),
+    legalRelevance: detectLegalRelevance(pages),
+    crmCalltracking: detectCrmCalltracking(pages),
   };
 
   // 4. ОДИН LLM-вызов на сигналы, которые эвристики не закрыли.
@@ -761,7 +868,7 @@ export async function detectOutreachSignals(
     }
   }
 
-  const signalsCount = Object.values(signals).filter((v) => v.hit).length;
+  const signalsCount = CORE_SIGNAL_KEYS.filter((key) => signals[key].hit).length;
   const result: OutreachSignalsResult = { signals, signalsCount, note, ok: true };
   // Опциональный чек онлайн-формата — только по уже скачанным страницам.
   if (input.checkOnlineFormat === true) {

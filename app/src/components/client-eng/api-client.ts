@@ -147,6 +147,43 @@ export async function cancelEngProject(projectId: string): Promise<EngCancelResp
   return clientApiFetch<EngCancelResponse>(`/eng/projects/${projectId}/cancel`, { method: 'POST' });
 }
 
+/* ── Автопилот (POST /eng/projects/[id]/autopilot) ── */
+
+export interface EngAutopilotResponse {
+  ok?: boolean;
+  chains_enqueued?: number;
+  collects_enqueued?: number;
+  templates_enqueued?: number;
+  verticals_skipped?: number;
+  error?: string;
+}
+
+export async function startEngAutopilot(projectId: string): Promise<EngAutopilotResponse> {
+  return clientApiFetch<EngAutopilotResponse>(`/eng/projects/${projectId}/autopilot`, { method: 'POST' });
+}
+
+/* ── Превью строк базы (GET /eng/bases/[id]/rows) ── */
+
+export interface EngBaseRowsResponse {
+  columns?: string[];
+  rows?: Array<Record<string, unknown>>;
+  total?: number;
+  status?: string;
+  row_count?: number;
+  error?: string;
+}
+
+export async function fetchEngBaseRows(
+  baseId: string,
+  opts: { offset?: number; limit?: number } = {},
+): Promise<EngBaseRowsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.offset) qs.set('offset', String(opts.offset));
+  if (opts.limit) qs.set('limit', String(opts.limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return clientApiFetch<EngBaseRowsResponse>(`/eng/bases/${baseId}/rows${suffix}`);
+}
+
 export async function patchEngHypothesis(
   hypothesisId: string,
   verdict: 'accept' | 'reject',

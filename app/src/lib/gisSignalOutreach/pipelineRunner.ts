@@ -32,7 +32,8 @@
  *      ({ perSegment: {...}, total: {...} }) для дашборда.
  *
  * ИЗОЛЯЦИЯ: ни одного импорта из autoPipelineRunner / mailganer* / outreachos.
- * Скоринга нет вовсе — есть сигнальная квалификация.
+ * Базовая квалификация сигнальная; сегменты со скоринг-профилем (legal)
+ * фильтруются взвешенным скором 0–100 с грейдами A/B/C (scoring.ts).
  */
 
 import 'server-only';
@@ -47,6 +48,7 @@ import { getLatestTwoGisSnapshotId, pullSegmentCandidates, type SegmentCandidate
 import { markSeen } from './seenCompanies';
 import { detectOutreachSignals, type OutreachSignalsResult } from './signals';
 import { companiesToGrid, gridToLeadPayloads } from './gridMapping';
+import { computeSegmentScore, getSegmentScoringProfile } from './scoring';
 
 /** Конкурентность проверки сайтов детектором сигналов. */
 export const SIGNAL_CHECK_CONCURRENCY = 5;
@@ -250,6 +252,8 @@ export async function runGisSignalPipeline(
               targetVacancy: { hit: false, evidence: '' },
               highVolume: { hit: false, evidence: '' },
               multiOffice: { hit: false, evidence: '' },
+              legalRelevance: { hit: false, evidence: '' },
+              crmCalltracking: { hit: false, evidence: '' },
             },
             signalsCount: 0,
             note: `Signal check failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -259,10 +263,18 @@ export async function runGisSignalPipeline(
       },
     );
 
+    // 4a. СКОРИНГ: у сегментов с профилем (legal) считаем взвешенный скор
+    //     0–100 и грейд по каждой компании — до архива, чтобы записать туда.
+    const scoreInfos = candidates.map((cand, i) => {
+      const profile = getSegmentScoringProfile(cand.segmentKey);
+      return profile ? computeSegmentScore(profile, signalResults[i].signals) : null;
+    });
+
     // 4b. АРХИВ: каждая проверенная компания (и pass, и fail) — аналитический
     //     срез. Пишем и в measure_only: замер как раз строит этот срез.
     const archiveRows = candidates.map((cand, i) => {
       const r = signalResults[i];
+      const scoring = scoreInfos[i];
       const evidence: Record<string, unknown> = {};
       for (const [key, verdict] of Object.entries(r.signals)) {
         if (verdict.hit && verdict.evidence) evidence[key] = verdict.evidence;
@@ -282,6 +294,12 @@ export async function runGisSignalPipeline(
         signal_target_vacancy: r.signals.targetVacancy.hit,
         signal_high_volume: r.signals.highVolume.hit,
         signal_multi_office: r.signals.multiOffice.hit,
+        // Скоринговые булевы — для всех сегментов (архив копит данные).
+        signal_legal_relevance: r.signals.legalRelevance.hit,
+        signal_crm_calltracking: r.signals.crmCalltracking.hit,
+        // Скор/грейд — только scored-сегменты; у остальных NULL.
+        score: scoring ? scoring.score : null,
+        grade: scoring ? scoring.grade : null,
         evidence,
         signals_count: r.signalsCount,
         note: r.note,
@@ -299,12 +317,26 @@ export async function runGisSignalPipeline(
       if (error) throw new Error(`signal archive upsert failed: ${error.message}`);
     }
 
+    // Квалификационный фильтр: сегмент со скоринг-профилем — score >= threshold
+    // (скор ниже = нерелевантна, grade=null); остальные — signalsCount >=
+    // signal_min_count, как раньше. scoring.ts считает оба скора заранее.
     const signalOkPairs = candidates
-      .map((cand, i) => ({ cand, signals: signalResults[i] }))
-      .filter((p) => p.signals.signalsCount >= config.signal_min_count);
+      .map((cand, i) => ({ cand, signals: signalResults[i], scoring: scoreInfos[i] }))
+      .filter((p) =>
+        p.scoring
+          ? p.scoring.grade !== null
+          : p.signals.signalsCount >= config.signal_min_count,
+      );
     for (const p of signalOkPairs) funnel.perSegment[p.cand.segmentKey].signalsOk += 1;
     funnel.total.signalsOk = signalOkPairs.length;
-    log(`Прошли сигнальный фильтр (>=${config.signal_min_count}): ${signalOkPairs.length}/${candidates.length}`);
+    const scoredSegments = Array.from(
+      new Set(signalOkPairs.map((p) => p.cand.segmentKey).filter((k) => getSegmentScoringProfile(k))),
+    );
+    log(
+      `Прошли сигнальный фильтр (>=${config.signal_min_count}` +
+        `${scoredSegments.length > 0 ? `; скоринг >= порога профиля для: ${scoredSegments.join(', ')}` : ''}` +
+        `): ${signalOkPairs.length}/${candidates.length}`,
+    );
 
     // 4c. ONLINE-гейт: сегменты с require_online пропускают только компании с
     //     onlineFormat.hit. У сегментов без флага onlineOk === signalsOk.
@@ -338,7 +370,12 @@ export async function runGisSignalPipeline(
       qualifiedById.set(p.cand.twogisId, p);
     }
     const grid = companiesToGrid(
-      qualifiedPairs.map((p) => ({ candidate: p.cand, signals: p.signals })),
+      qualifiedPairs.map((p) => ({
+        candidate: p.cand,
+        signals: p.signals,
+        score: p.scoring?.score ?? null,
+        grade: p.scoring?.grade ?? null,
+      })),
     );
     for (const c of qualified) funnel.perSegment[c.segmentKey].bcIn += 1;
     funnel.total.bcIn = qualified.length;

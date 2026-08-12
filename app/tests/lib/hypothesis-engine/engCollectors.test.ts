@@ -108,6 +108,34 @@ function ctx(market?: HeMarket) {
   return { supabase: mockDb as unknown as SupabaseClient, ...(market ? { market } : {}) };
 }
 
+/**
+ * Хендлер RPC search_pdl_companies для мока: та же семантика, что у
+ * SQL-функции (in-фильтры, ilike по имени, keyset id > p_after_id, order id,
+ * limit) поверх посеянной таблицы pdl_companies.
+ */
+function pdlRpcHandler(params: Record<string, unknown>, db: MockSupabaseClient): { data: unknown } {
+  const asList = (v: unknown) => (Array.isArray(v) ? (v as string[]) : null);
+  const industries = asList(params.p_industries);
+  const sizes = asList(params.p_sizes);
+  const countries = asList(params.p_countries);
+  const name = typeof params.p_name === 'string' ? params.p_name.toLowerCase() : null;
+  const afterId = typeof params.p_after_id === 'string' && params.p_after_id ? params.p_after_id : null;
+  const limit = typeof params.p_limit === 'number' ? params.p_limit : 1000;
+  const rows = db
+    .getRows('pdl_companies')
+    .filter((r) => !industries || industries.includes(String(r.industry)))
+    .filter((r) => !sizes || sizes.includes(String(r.size)))
+    .filter((r) => !countries || countries.includes(String(r.country)))
+    .filter((r) => !name || String(r.name ?? '').toLowerCase().includes(name))
+    .filter((r) => !afterId || String(r.id) > afterId)
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+    .slice(0, limit);
+  return { data: rows };
+}
+
+/** Опция посева для тестов, читающих каталог PDL через RPC. */
+const PDL_RPC = { search_pdl_companies: pdlRpcHandler };
+
 function row(partial: Partial<HeUnifiedRow>): HeUnifiedRow {
   const full = {} as HeUnifiedRow;
   for (const col of HE_AUTO_COLLECT_COLUMNS) full[col] = partial[col] ?? '';
@@ -419,6 +447,7 @@ describe('plan phase — market=us зовёт EN-промпт', () => {
           { id: 'pdl-1', name: 'Acme Inc', website: 'acme.com', industry: 'software', size: '51-200', country: 'united states', region: 'ca', locality: 'san francisco' },
         ],
       },
+      rpcHandlers: PDL_RPC,
     });
     callLLMMock.mockResolvedValue({
       data: {
@@ -539,6 +568,7 @@ describe('dispatch — pdl (прямое чтение pdl_companies)', () => {
           { id: '4', name: 'Delta Soft DE', website: 'delta.de', industry: 'software', size: '51-200', country: 'germany' },
         ],
       },
+      rpcHandlers: PDL_RPC,
     });
 
     const res = await runBaseCollectStage(makeJob(), ctx('us'));
@@ -594,6 +624,7 @@ describe('dispatch — pdl (прямое чтение pdl_companies)', () => {
           { id: '3', name: 'Beta Industries', website: 'beta.com', country: 'united states' },
         ],
       },
+      rpcHandlers: PDL_RPC,
     });
 
     const res = await runBaseCollectStage(makeJob(), ctx('us'));
@@ -630,6 +661,7 @@ describe('dispatch — pdl (прямое чтение pdl_companies)', () => {
           country: 'united states',
         })),
       },
+      rpcHandlers: PDL_RPC,
     });
 
     const res = await runBaseCollectStage(makeJob({ payload: { base_id: 'b1', limit: 120 } }), ctx('us'));
@@ -637,6 +669,88 @@ describe('dispatch — pdl (прямое чтение pdl_companies)', () => {
     const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
     expect(harvest?.row_count).toBe(120);
   });
+
+  it('повторная попытка чтения при транзиентной ошибке: страница перечитывается, сбор не падает', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
+      tasks: [
+        {
+          source: 'pdl',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: { source: 'pdl', rationale: 'r', pdl_filters: { industries: ['software'] } },
+        },
+      ],
+    };
+    let calls = 0;
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT_US],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        pdl_companies: [
+          { id: '1', name: 'Acme Software', website: 'acme.com', industry: 'software', country: 'united states' },
+        ],
+      },
+      rpcHandlers: {
+        search_pdl_companies: (params, db) => {
+          calls += 1;
+          if (calls === 1) return { data: null, error: { message: 'gateway blip' } };
+          return pdlRpcHandler(params, db);
+        },
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx('us'));
+    expect((res.result as { rows: number }).rows).toBe(1);
+    expect(calls).toBe(2);
+    const savedInfo = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch?.collect_info as HeCollectInfo;
+    expect(savedInfo.tasks?.[0]).toMatchObject({ status: 'done', rows: 1 });
+  }, 15000);
+
+  it('HTML maintenance-страница Kong в ошибке чтения режется до чистого текста', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
+      tasks: [
+        {
+          source: 'pdl',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: { source: 'pdl', rationale: 'r', pdl_filters: { industries: ['software'] } },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT_US],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        pdl_companies: [],
+      },
+      rpcHandlers: {
+        search_pdl_companies: () => ({
+          data: null,
+          error: { message: '<!doctype html>\n<html lang="ru"><head><title>Портал обновляется</title></head></html>' },
+        }),
+      },
+    });
+
+    await expect(runBaseCollectStage(makeJob(), ctx('us'))).rejects.toThrow(/Авто-сборка не дала строк/);
+    // Финальный fail базы — с чистой ошибкой, без HTML-простыни Kong.
+    const failPatch = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(failPatch?.status).toBe('failed');
+    expect(String(failPatch?.error ?? '')).toContain('non-JSON response (gateway timeout/restart)');
+    expect(String(failPatch?.error ?? '')).not.toContain('<html');
+    const savedInfo = failPatch?.collect_info as HeCollectInfo | undefined;
+    expect(savedInfo?.tasks?.[0]?.status).toBe('failed');
+    expect(String(savedInfo?.tasks?.[0]?.error ?? '')).toContain('non-JSON response (gateway timeout/restart)');
+  }, 15000);
 });
 
 /* ─────────────────────── DISPATCH: funded ─────────────────────── */
