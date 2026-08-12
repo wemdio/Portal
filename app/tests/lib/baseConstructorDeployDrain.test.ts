@@ -39,7 +39,9 @@ describe('BaseConstructor deploy drain', () => {
     expect(waitIndex).toBeGreaterThan(stopIndex);
     expect(handoffIndex).toBeGreaterThan(waitIndex);
 
-    const drainIndex = scheduledDeploy.indexOf('sudo -n bash drain-worker.sh;');
+    const drainIndex = scheduledDeploy.indexOf(
+      'sudo -n bash drain-worker.sh \\${WORKER_TARGETS};',
+    );
     const forceRemoveIndex = scheduledDeploy.indexOf(
       'for svc in \\${WORKER_TARGETS}; do force_rm_svc',
     );

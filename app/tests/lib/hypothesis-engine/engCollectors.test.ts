@@ -39,6 +39,7 @@ import { buildSourcePlanMessagesEn } from '@/lib/hypothesisEngine/prompts/source
 import { buildVocabMessagesEn } from '@/lib/hypothesisEngine/prompts/vocab.en';
 import { HeSourcePlanSchema } from '@/lib/hypothesisEngine/schemas';
 import {
+  buildRolesIlikeFilter,
   dedupUnifiedRows,
   HE_AUTO_COLLECT_COLUMNS,
   mapEngHiringRow,
@@ -501,6 +502,156 @@ describe('plan phase — market=us зовёт EN-промпт', () => {
     expect(systemPromptOf()).toContain('Answer strictly in English');
   });
 
+  /**
+   * Регрессия 12.08.2026: планировщик отдал Franchise Brands план без каталога
+   * (eng_hiring + google_maps) — база вышла на 6 строк при лимите 2000.
+   * У вертикали нет отраслевой метки в каталоге, поэтому модель штатно
+   * пропускает pdl; каталожный срез добирается отдельным вызовом.
+   */
+  describe('ENG-план без каталожного источника чинится pdl-срезом', () => {
+    // Форма плана — как у боевой базы 23a449d8 (12.08): два среза eng_hiring
+    // и ни одного каталожного источника.
+    const NO_CATALOG_PLAN = {
+      tasks: [
+        { source: 'eng_hiring', rationale: 'hiring signal', eng_hiring_query: { roles: ['franchise development'] } },
+        { source: 'eng_hiring', rationale: 'ops roles', eng_hiring_query: { roles: ['franchise operations'] } },
+      ],
+    };
+    const REPAIR = {
+      rationale: 'Franchisors carry the word in their names',
+      pdl_filters: { name: 'franchise', countries: ['united states'] },
+    };
+    const llmResult = (data: unknown) => ({
+      data,
+      tokensUsed: 10,
+      promptTokens: 8,
+      completionTokens: 2,
+      costUsd: 0.0001,
+      rawResponse: {},
+    });
+
+    function seedNoCatalog() {
+      mockDb = createMockSupabase({
+        tables: {
+          he_bases: [makeBase({ construct: CONSTRUCT_DONE })],
+          he_verticals: [{ ...VERTICAL, name: 'Franchise Brands' }],
+          he_projects: [PROJECT_US],
+          he_jobs: [makeJob() as unknown as Record<string, unknown>],
+          he_hypotheses: [
+            { project_id: 'p1', vertical_id: 'v1', title: 'Franchisors scaling', description: 'd', tier: 1, status: 'accepted', potential_pct: 80 },
+          ],
+          pdl_companies: [
+            { id: 'pdl-1', name: 'United Franchise Group', website: 'ufgcorp.com', industry: 'consumer services', size: '201-500', country: 'united states', region: 'fl', locality: 'west palm beach' },
+          ],
+          eng_hiring_cache: [],
+        },
+        rpcHandlers: PDL_RPC,
+      });
+    }
+
+    it('добавляет pdl-задачу, пишет провенанс в collect_info и собирает по ней строки', async () => {
+      seedNoCatalog();
+      callLLMMock
+        .mockResolvedValueOnce(llmResult(NO_CATALOG_PLAN)) // план источников
+        .mockResolvedValueOnce(llmResult(REPAIR)) // починка: фильтры каталога
+        .mockResolvedValue(llmResult({ irrelevant: [] })); // релевант-гейт
+
+      const res = await runBaseCollectStage(makeJob(), ctx('us'));
+
+      // Промпт починки — отдельный, и он про недостающий каталожный срез.
+      expect(systemPromptOf(1)).toContain('WITHOUT any company-catalog task');
+
+      const patches = mockDb.updates.filter((u) => u.table === 'he_bases');
+      const info = patches[0].patch.collect_info as HeCollectInfo;
+      expect(info.plan?.tasks.map((t) => t.source)).toEqual(['eng_hiring', 'eng_hiring', 'pdl']);
+      expect(info.plan?.tasks.at(-1)?.pdl_filters).toEqual(REPAIR.pdl_filters);
+      expect(info.plan_repair).toEqual({
+        reason: 'no_catalog_source',
+        outcome: 'repaired',
+        pdl_filters: REPAIR.pdl_filters,
+      });
+
+      // Добавленный срез реально исполняется: строка каталога попала в базу.
+      expect((res.result as { rows: number }).rows).toBe(1);
+      const harvest = patches.at(-1)?.patch;
+      expect((harvest?.data as HeUnifiedRow[])[0].company).toBe('United Franchise Group');
+    });
+
+    it('план с каталогом не чинится: лишнего вызова модели нет', async () => {
+      seedPlanTables(PROJECT_US); // план из одной pdl-задачи
+
+      await runBaseCollectStage(makeJob(), ctx('us'));
+
+      // Ровно два вызова: план + релевант-гейт. Третий означал бы починку.
+      expect(callLLMMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('провал починки не маскируется: план идёт как есть, причина остаётся в collect_info', async () => {
+      seedNoCatalog();
+      callLLMMock
+        .mockResolvedValueOnce(llmResult(NO_CATALOG_PLAN))
+        .mockRejectedValueOnce(new Error('LLM 503'))
+        .mockResolvedValue(llmResult({ irrelevant: [] }));
+
+      // Сбор без каталога честно падает нулём строк (боевая база 23a449d8),
+      // а не отдаёт тонкую базу молча.
+      await expect(runBaseCollectStage(makeJob(), ctx('us'))).rejects.toThrow(/не дала строк/);
+
+      const info = mockDb.updates.filter((u) => u.table === 'he_bases')[0].patch.collect_info as HeCollectInfo;
+      expect(info.plan?.tasks.map((t) => t.source)).toEqual(['eng_hiring', 'eng_hiring']);
+      expect(info.plan_repair).toEqual({
+        reason: 'no_catalog_source',
+        outcome: 'failed',
+        error: 'LLM 503',
+      });
+    });
+
+    it('полный план из 4 задач: каталожный срез вытесняет последнюю, задач остаётся 4', async () => {
+      seedNoCatalog();
+      const fourTasks = {
+        tasks: [
+          ...NO_CATALOG_PLAN.tasks,
+          { source: 'google_maps', rationale: 'geo', maps_query: { queries: ['franchise'], geo: 'United States' } },
+          { source: 'google_maps', rationale: 'geo 2', maps_query: { queries: ['franchise hq'], geo: 'Canada' } },
+        ],
+      };
+      callLLMMock
+        .mockResolvedValueOnce(llmResult(fourTasks))
+        .mockResolvedValueOnce(llmResult(REPAIR))
+        .mockResolvedValue(llmResult({ irrelevant: [] }));
+
+      await runBaseCollectStage(makeJob(), ctx('us'));
+
+      const info = mockDb.updates.filter((u) => u.table === 'he_bases')[0].patch.collect_info as HeCollectInfo;
+      expect(info.plan?.tasks.map((t) => t.source)).toEqual(['eng_hiring', 'eng_hiring', 'google_maps', 'pdl']);
+    });
+
+    it("market='ru' не чинится: у RU-плана свой каталог (companies_directory)", async () => {
+      mockDb = createMockSupabase({
+        tables: {
+          he_bases: [makeBase({ construct: CONSTRUCT_DONE })],
+          he_verticals: [{ ...VERTICAL, name: 'HR-агентства' }],
+          he_projects: [{ ...PROJECT_RU, market: 'ru' }],
+          he_jobs: [makeJob() as unknown as Record<string, unknown>],
+          he_hypotheses: [
+            { project_id: 'p1', vertical_id: 'v1', title: 'Кадровые бутики', description: null, tier: 1, status: 'accepted', potential_pct: 80 },
+          ],
+        },
+      });
+      callLLMMock
+        .mockResolvedValueOnce(
+          llmResult({ tasks: [{ source: 'hh_live', rationale: 'найм', hh_query: { text: 'рекрутер' } }] }),
+        )
+        .mockResolvedValue(llmResult({ irrelevant: [] }));
+
+      await runBaseCollectStage(makeJob(), ctx('ru'));
+
+      const info = mockDb.updates.filter((u) => u.table === 'he_bases')[0].patch.collect_info as HeCollectInfo;
+      expect(info.plan?.tasks.map((t) => t.source)).toEqual(['hh_live']);
+      expect(info.plan_repair).toBeUndefined();
+    });
+  });
+
   it("market='ru' → RU-промпт планировщика (поведение не изменилось)", async () => {
     mockDb = createMockSupabase({
       tables: {
@@ -815,6 +966,46 @@ describe('dispatch — funded (прямое чтение funded_companies)', () 
   });
 });
 
+/* ─────────────────────── eng_hiring: SQL-предфильтр роли ─────────────────────── */
+
+/**
+ * Контракт предфильтра: выражение обязано быть НАДМНОЖЕСТВОМ совпадений
+ * buildRolesRegex. Точность добирает regex в JS, а вот сузить выборку
+ * предфильтр не имеет права — иначе молча теряются валидные вакансии.
+ */
+describe('buildRolesIlikeFilter — предфильтр роли для eng_hiring_cache', () => {
+  it('роли → or-выражение ilike по vacancy_title', () => {
+    expect(buildRolesIlikeFilter(['franchise development', 'vp franchise'])).toBe(
+      'vacancy_title.ilike.%franchise development%,vacancy_title.ilike.%vp franchise%',
+    );
+  });
+
+  it('запятая внутри роли режет её на термы — как в buildRolesRegex', () => {
+    expect(buildRolesIlikeFilter(['head of sales, cro'])).toBe(
+      'vacancy_title.ilike.%head of sales%,vacancy_title.ilike.%cro%',
+    );
+  });
+
+  it('терм со спецсимволом обрезается до префикса — ilike по префиксу шире точного совпадения', () => {
+    expect(buildRolesIlikeFilter(['vp franchise (us)'])).toBe('vacancy_title.ilike.%vp franchise%');
+    expect(buildRolesIlikeFilter(['sr. account executive'])).toBe('vacancy_title.ilike.%sr%');
+  });
+
+  it('b2b-роль → предфильтра нет: regex раскрывает её в ~30 альтернатив, ilike их не выразит', () => {
+    expect(buildRolesIlikeFilter(['b2b sales'])).toBeNull();
+    expect(buildRolesIlikeFilter(['account executive', 'b2b sales'])).toBeNull();
+  });
+
+  it('терм, начинающийся со спецсимвола, → предфильтра нет (пустой префикс матчил бы всё)', () => {
+    expect(buildRolesIlikeFilter(['(interim) head of sales'])).toBeNull();
+  });
+
+  it('пустой список ролей → предфильтра нет', () => {
+    expect(buildRolesIlikeFilter([])).toBeNull();
+    expect(buildRolesIlikeFilter(['   '])).toBeNull();
+  });
+});
+
 /* ─────────────────────── DISPATCH: eng_hiring ─────────────────────── */
 
 describe('dispatch — eng_hiring (прямое чтение eng_hiring_cache)', () => {
@@ -872,6 +1063,72 @@ describe('dispatch — eng_hiring (прямое чтение eng_hiring_cache)',
         source_detail: 'eng_hiring:greenhouse',
       }),
     ]);
+  });
+
+  it('роль уходит в SQL-предфильтр: узкая роль собирается, хотя в кэше полно свежего мусора', async () => {
+    // Регрессия 12.08.2026: роль отбиралась только в JS — после усечения выборки
+    // потолком страниц по свежести. На проде под «страна + 90 дней» подходило
+    // 336k строк, сканировались первые 20k, и узкие роли давали ровно 0.
+    // Здесь предфильтр обязан отобрать вакансию по роли и не срезать её сам.
+    const now = Date.now();
+    const fresh = (d: number) => new Date(now - d * 86_400_000).toISOString();
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
+      tasks: [
+        {
+          source: 'eng_hiring',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: {
+            source: 'eng_hiring',
+            rationale: 'r',
+            eng_hiring_query: {
+              roles: ['franchise development', 'director of franchise'],
+              countries: ['us'],
+              posted_within_days: 90,
+            },
+          },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT_US],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        eng_hiring_cache: [
+          // Свежий нерелевантный шум — на проде именно он забивал окно сканирования.
+          ...Array.from({ length: 30 }, (_, i) => ({
+            id: `noise-${i}`,
+            source: 'greenhouse',
+            company_name: `Noise ${i}`,
+            company_site_url: `https://noise${i}.com`,
+            vacancy_title: 'Software Engineer',
+            location: 'Austin, TX',
+            country_code: 'us',
+            published_at: fresh(1),
+          })),
+          {
+            id: 'target',
+            source: 'lever',
+            company_name: 'Franchise Group',
+            company_site_url: 'https://franchisegroup.com',
+            vacancy_title: 'Director of Franchise Development',
+            location: 'Dallas, TX',
+            country_code: 'us',
+            published_at: fresh(40),
+          },
+        ],
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx('us'));
+    expect((res.result as { rows: number }).rows).toBe(1);
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect((harvest?.data as HeUnifiedRow[])[0].company).toBe('Franchise Group');
   });
 
   it('несколько ролей матчатся как альтернативы (keywords через запятую)', async () => {
