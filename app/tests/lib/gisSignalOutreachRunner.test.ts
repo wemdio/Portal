@@ -2,7 +2,7 @@
 
 jest.mock('server-only', () => ({}));
 
-import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
+import { createMockSupabase, type MockSupabaseClient, type Row } from '@/../tests/helpers/mockSupabase';
 import type { SegmentCandidate } from '@/lib/gisSignalOutreach/segments';
 import type { OutreachSignalsResult } from '@/lib/gisSignalOutreach/signals';
 import { SIGNAL_COLUMNS } from '@/lib/gisSignalOutreach/signals';
@@ -43,6 +43,10 @@ jest.mock('@/lib/clientLaunch/appendLeads', () => ({
   fetchExistingCampaignEmails: jest.fn(async () => new Set<string>()),
 }));
 
+jest.mock('@/lib/telegram/workerAlert', () => ({
+  sendWorkerAlert: jest.fn(async () => {}),
+}));
+
 import { runGisSignalPipeline } from '@/lib/gisSignalOutreach/pipelineRunner';
 import { pullSegmentCandidates } from '@/lib/gisSignalOutreach/segments';
 import { detectOutreachSignals } from '@/lib/gisSignalOutreach/signals';
@@ -50,11 +54,20 @@ import {
   appendLeadsToClientCampaign,
   fetchExistingCampaignEmails,
 } from '@/lib/clientLaunch/appendLeads';
+import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
+import {
+  createStallWatchdog,
+  guardAgainstConcurrentRun,
+  partitionRunningRuns,
+  STALE_RUNNING_THRESHOLD_MS,
+  type GisSignalAdminDb,
+} from '@/lib/gisSignalOutreach/runGuards';
 
 const pullMock = pullSegmentCandidates as jest.Mock;
 const detectMock = detectOutreachSignals as jest.Mock;
 const appendMock = appendLeadsToClientCampaign as jest.Mock;
 const existingEmailsMock = fetchExistingCampaignEmails as jest.Mock;
+const alertMock = sendWorkerAlert as jest.Mock;
 
 const USER_ID = '00000000-0000-4000-8000-000000000009';
 
@@ -697,5 +710,328 @@ describe('runGisSignalPipeline — legal-скоринг (сегмент со с�
     const appendArgs = appendMock.mock.calls[0][0];
     expect(appendArgs.leads[0].custom_variables).not.toHaveProperty('score');
     expect(appendArgs.leads[0].custom_variables).not.toHaveProperty('grade');
+  });
+});
+
+// ── Hardening (инцидент 12.08.2026): таймауты, watchdog, overlap, алерты ─────
+
+describe('runGisSignalPipeline — per-candidate hard timeout', () => {
+  it('зависший detectOutreachSignals → fail-row «Signal check timeout», прогон продолжается', async () => {
+    seed();
+    pullMock.mockResolvedValue([cand('a1', 'seg-a'), cand('hang', 'seg-a')]);
+    detectMock.mockImplementation(async ({ siteUrl }: { siteUrl: string }) => {
+      // Мёртвое ожидание promise — ровно сценарий инцидента 12.08.
+      if (siteUrl.includes('hang')) return new Promise(() => {});
+      return signalResult(true);
+    });
+
+    const grid = finalGrid([{ id: 'a1', name: 'Компания a1', email: 'info@a1.ru' }]);
+    const runPromise = runGisSignalPipeline(() => {}, {
+      pollIntervalMs: 1,
+      signalCheckHardTimeoutMs: 1100,
+    });
+    await completeNextBaseJob(grid);
+    const result = await runPromise;
+
+    expect(result.status).toBe('completed');
+    expect(result.pulled).toBe(2);
+    expect(result.signalsOk).toBe(1); // hang отсеялся таймаутом, a1 прошла
+
+    const archiveRows = mockDb.upserts
+      .filter((c) => c.table === 'gis_signal_company_signals')
+      .flatMap((c) => c.rows);
+    expect(archiveRows).toHaveLength(2);
+    const hangRow = archiveRows.find((r) => r.twogis_id === 'hang');
+    expect(hangRow).toMatchObject({ signals_count: 0, signal_general_phone: false });
+    expect(String(hangRow!.note)).toContain('Signal check timeout');
+    // Здоровая компания не пострадала.
+    expect(archiveRows.find((r) => r.twogis_id === 'a1')).toMatchObject({ signals_count: 1 });
+
+    // seen/append отработали как обычно — прогон не просто «не упал», а дошёл до конца.
+    expect(appendMock).toHaveBeenCalledTimes(1);
+    const seenUpserts = mockDb.upserts.filter((c) => c.table === 'gis_signal_seen_companies');
+    expect(seenUpserts.flatMap((c) => c.rows).map((r) => r.twogis_id)).toEqual(['a1']);
+  });
+});
+
+describe('runGisSignalPipeline — archive upsert timeout', () => {
+  /**
+   * Патчим мок-БД: upsert в gis_signal_company_signals на заданных попытках
+   * возвращает builder, чей await никогда не резолвится (мёртвый upsert 12.08).
+   */
+  function hangArchiveUpsert(attemptsToHang: number[]): { upsertCalls: () => number } {
+    let calls = 0;
+    const realFrom = mockDb.from.bind(mockDb);
+    mockDb.from = ((table: string) => {
+      const builder = realFrom(table);
+      if (table !== 'gis_signal_company_signals') return builder;
+      const realUpsert = builder.upsert.bind(builder);
+      builder.upsert = ((rows: Row | Row[], opts?: { onConflict?: string }) => {
+        calls += 1;
+        const inner = realUpsert(rows, opts);
+        if (attemptsToHang.includes(calls)) {
+          (inner as { then: unknown }).then = () => new Promise(() => {});
+        }
+        return inner;
+      }) as typeof builder.upsert;
+      return builder;
+    }) as typeof mockDb.from;
+    return { upsertCalls: () => calls };
+  }
+
+  it('таймаут → ОДИН ретрай → повторный таймаут → run failed + TG-алерт', async () => {
+    seed();
+    pullMock.mockResolvedValue([cand('a1', 'seg-a')]);
+    const hang = hangArchiveUpsert([1, 2]); // молчат обе попытки
+
+    const result = await runGisSignalPipeline(() => {}, {
+      pollIntervalMs: 1,
+      archiveUpsertTimeoutMs: 100,
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('archive upsert timeout');
+    expect(hang.upsertCalls()).toBe(2); // исходная попытка + ровно один ретрай
+    const runRow = mockDb.getRows('gis_signal_runs')[0];
+    expect(runRow.status).toBe('failed');
+    expect(String(runRow.error)).toContain('archive upsert timeout');
+    // До конструктора/append не дошли.
+    expect(mockDb.inserts.filter((c) => c.table === 'base_constructor_jobs')).toHaveLength(0);
+    expect(appendMock).not.toHaveBeenCalled();
+    // TG-алерт с этапом и воронкой.
+    expect(alertMock).toHaveBeenCalledTimes(1);
+    const alert = alertMock.mock.calls[0][0];
+    expect(alert.workerId).toBe('gis-signal-cron');
+    expect(String(alert.subject)).toContain('archive');
+    expect(alert.context).toMatchObject({ stage: 'archive', pulled: 1, signals_ok: 0 });
+  });
+
+  it('таймаут → ретрай успешен → прогон завершается штатно', async () => {
+    seed();
+    pullMock.mockResolvedValue([cand('a1', 'seg-a')]);
+    const hang = hangArchiveUpsert([1]); // молчит только первая попытка
+
+    const grid = finalGrid([{ id: 'a1', name: 'Компания a1', email: 'info@a1.ru' }]);
+    const runPromise = runGisSignalPipeline(() => {}, {
+      pollIntervalMs: 1,
+      archiveUpsertTimeoutMs: 100,
+    });
+    await completeNextBaseJob(grid);
+    const result = await runPromise;
+
+    expect(result.status).toBe('completed');
+    expect(hang.upsertCalls()).toBe(2);
+    // Ретрай реально записал архив (upsert идемпотентен по twogis_id).
+    const rows = mockDb.getRows('gis_signal_company_signals');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].twogis_id).toBe('a1');
+  });
+
+  it('не-timeout ошибка upsert → БЕЗ ретрая, сразу failed', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        gis_signal_pipeline_config: [configRow()],
+        gis_signal_segments: segmentRows(),
+      },
+      errorTables: { gis_signal_company_signals: 'db read-only' },
+    });
+    pullMock.mockResolvedValue([cand('a1', 'seg-a')]);
+    const hang = hangArchiveUpsert([]); // считаем попытки, ничего не вешаем
+
+    const result = await runGisSignalPipeline(() => {}, {
+      pollIntervalMs: 1,
+      archiveUpsertTimeoutMs: 100,
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('signal archive upsert failed');
+    expect(hang.upsertCalls()).toBe(1); // ретрай только для таймаута
+  });
+});
+
+describe('runGisSignalPipeline — stall watchdog', () => {
+  it('мёртвое ожидание на этапе pull → onStall вызван с stage=pull', async () => {
+    seed();
+    pullMock.mockImplementation(() => new Promise(() => {})); // никогда не отвечает
+    const onStall = jest.fn();
+
+    // Прогон намеренно НЕ await'им: он остаётся висеть (имитация инцидента);
+    // dangling promise без таймеров/хендлов jest-процесс не держит.
+    void runGisSignalPipeline(() => {}, { pollIntervalMs: 1, stallTimeoutMs: 150, onStall });
+
+    for (let i = 0; i < 200 && onStall.mock.calls.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(onStall).toHaveBeenCalledTimes(1);
+    expect(onStall.mock.calls[0][0]).toBe('pull');
+  });
+});
+
+describe('runGisSignalPipeline — TG-алерты', () => {
+  it('падение прогона → sendWorkerAlert с этапом и цифрами воронки', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        gis_signal_pipeline_config: [configRow()],
+        gis_signal_segments: segmentRows(),
+      },
+      errorTables: { gis_signal_company_signals: 'db read-only' },
+    });
+    pullMock.mockResolvedValue([cand('a1', 'seg-a')]);
+
+    const result = await runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
+
+    expect(result.status).toBe('failed');
+    expect(alertMock).toHaveBeenCalledTimes(1);
+    const alert = alertMock.mock.calls[0][0];
+    expect(alert.workerId).toBe('gis-signal-cron');
+    expect(String(alert.subject)).toContain('run failed at stage archive');
+    expect(String(alert.error)).toContain('signal archive upsert failed');
+    expect(alert.context).toMatchObject({
+      stage: 'archive',
+      pulled: 1,
+      signals_ok: 0,
+      appended: 0,
+    });
+    expect(String(alert.context.date)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('measure_only: падение НЕ шлёт TG-алерт', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        gis_signal_pipeline_config: [configRow({ measure_only: true })],
+        gis_signal_segments: segmentRows(),
+      },
+      errorTables: { gis_signal_company_signals: 'db read-only' },
+    });
+    pullMock.mockResolvedValue([cand('a1', 'seg-a')]);
+
+    const result = await runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('signal archive upsert failed');
+    expect(alertMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── runGuards: overlap-защита + stale-reaper (cron-обёртка) ─────────────────
+
+describe('guardAgainstConcurrentRun (overlap + stale reaper)', () => {
+  const NOW = new Date('2026-08-13T06:07:00.000Z'); // время дневного крона
+
+  function runsDb(rows: Array<Record<string, unknown>>, errorMessage?: string) {
+    return createMockSupabase({
+      tables: { gis_signal_runs: rows },
+      ...(errorMessage ? { errorTables: { gis_signal_runs: errorMessage } } : {}),
+    });
+  }
+
+  it('свежий running (<5ч) → пропуск запуска, строку не трогаем', async () => {
+    const db = runsDb([{ id: 'r-fresh', started_at: '2026-08-13T05:07:00.000Z', status: 'running' }]);
+    const logs: string[] = [];
+    const res = await guardAgainstConcurrentRun(
+      db as unknown as GisSignalAdminDb, (m) => logs.push(m), { now: NOW },
+    );
+    expect(res).toEqual({ proceed: false, reapedStale: 0 });
+    expect(logs.join('\n')).toContain('overlap-check');
+    const row = db.getRows('gis_signal_runs')[0];
+    expect(row.status).toBe('running'); // активный прогон не задет
+    expect(db.updates).toHaveLength(0);
+  });
+
+  it('stale running (>5ч) → помечаем failed и продолжаем', async () => {
+    const db = runsDb([{ id: 'r-stale', started_at: '2026-08-13T00:30:00.000Z', status: 'running' }]);
+    const logs: string[] = [];
+    const res = await guardAgainstConcurrentRun(
+      db as unknown as GisSignalAdminDb, (m) => logs.push(m), { now: NOW },
+    );
+    expect(res).toEqual({ proceed: true, reapedStale: 1 });
+    expect(logs.join('\n')).toContain('stale-reaper');
+    const row = db.getRows('gis_signal_runs')[0];
+    expect(row.status).toBe('failed');
+    expect(row.error).toBe('stale reaped at cron start');
+    expect(row.finished_at).toBe(NOW.toISOString());
+  });
+
+  it('fresh + stale одновременно → пропуск, stale НЕ реапим (живой прогон важнее)', async () => {
+    const db = runsDb([
+      { id: 'r-stale', started_at: '2026-08-13T00:30:00.000Z', status: 'running' },
+      { id: 'r-fresh', started_at: '2026-08-13T05:07:00.000Z', status: 'running' },
+    ]);
+    const res = await guardAgainstConcurrentRun(
+      db as unknown as GisSignalAdminDb, () => {}, { now: NOW },
+    );
+    expect(res.proceed).toBe(false);
+    const rows = db.getRows('gis_signal_runs');
+    expect(rows.find((r) => r.id === 'r-stale')!.status).toBe('running'); // не тронули
+    expect(db.updates).toHaveLength(0);
+  });
+
+  it('нет running-строк → proceed, ничего не происходит', async () => {
+    const db = runsDb([{ id: 'r-done', started_at: '2026-08-12T06:07:00.000Z', status: 'completed' }]);
+    const res = await guardAgainstConcurrentRun(
+      db as unknown as GisSignalAdminDb, () => {}, { now: NOW },
+    );
+    expect(res).toEqual({ proceed: true, reapedStale: 0 });
+    expect(db.updates).toHaveLength(0);
+  });
+
+  it('ошибка чтения → fail-open proceed=true (прогон не блокируем)', async () => {
+    const db = runsDb([], 'db unreachable');
+    const logs: string[] = [];
+    const res = await guardAgainstConcurrentRun(
+      db as unknown as GisSignalAdminDb, (m) => logs.push(m), { now: NOW },
+    );
+    expect(res).toEqual({ proceed: true, reapedStale: 0 });
+    expect(logs.join('\n')).toContain('db unreachable');
+  });
+
+  it('partitionRunningRuns: граница ровно 5ч → stale; битый started_at → fresh', () => {
+    const rows = [
+      { id: 'exact', started_at: '2026-08-13T01:07:00.000Z' }, // age ровно 5ч
+      { id: 'younger', started_at: '2026-08-13T01:07:00.001Z' },
+      { id: 'broken', started_at: 'not-a-date' },
+    ];
+    const { fresh, stale } = partitionRunningRuns(rows, NOW.getTime(), STALE_RUNNING_THRESHOLD_MS);
+    expect(stale.map((r) => r.id)).toEqual(['exact']);
+    expect(fresh.map((r) => r.id)).toEqual(['younger', 'broken']);
+  });
+});
+
+// ── runGuards: stall watchdog — чистая таймер-логика на fake timers ─────────
+
+describe('createStallWatchdog', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  it('тишина дольше таймаута → onStall ровно один раз', () => {
+    const onStall = jest.fn();
+    createStallWatchdog(1000, onStall);
+    jest.advanceTimersByTime(999);
+    expect(onStall).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(1);
+    expect(onStall).toHaveBeenCalledTimes(1);
+    // One-shot: дальше таймер не перевзводится сам.
+    jest.advanceTimersByTime(10_000);
+    expect(onStall).toHaveBeenCalledTimes(1);
+  });
+
+  it('touch сбрасывает отсчёт (heartbeat продлевает жизнь)', () => {
+    const onStall = jest.fn();
+    const w = createStallWatchdog(1000, onStall);
+    jest.advanceTimersByTime(900);
+    w.touch();
+    jest.advanceTimersByTime(900);
+    expect(onStall).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(100);
+    expect(onStall).toHaveBeenCalledTimes(1);
+  });
+
+  it('stop гасит таймер — нормальное завершение без stall', () => {
+    const onStall = jest.fn();
+    const w = createStallWatchdog(1000, onStall);
+    jest.advanceTimersByTime(500);
+    w.stop();
+    jest.advanceTimersByTime(10_000);
+    expect(onStall).not.toHaveBeenCalled();
   });
 });

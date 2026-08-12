@@ -16,6 +16,11 @@
  * Instantly и журналирует seen + воронку (gis_signal_runs.funnel).
  * measure_only=true → воронка без заливки и без seen.
  *
+ * До запуска runner'а — overlap-защита (runGuards.guardAgainstConcurrentRun):
+ * активный прогон младше 5ч → пропуск (exit 0); running-строки старше 5ч
+ * помечаются failed ('stale reaped at cron start'). Внутри runner'а —
+ * hard-timeout'ы, heartbeat-логи и stall-watchdog (см. pipelineRunner.ts).
+ *
  * Деплой:
  *   1. Один раз: worker/gisSignalOutreachCron.ts уже в build:workers
  *      (package.json) → бандл в dist/workers/gisSignalOutreachCron.js.
@@ -40,6 +45,9 @@
 
 import { createWorkerLogger } from './_shared';
 import { runGisSignalPipeline } from '@/lib/gisSignalOutreach/pipelineRunner';
+import { guardAgainstConcurrentRun } from '@/lib/gisSignalOutreach/runGuards';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
 
 const WORKER_ID = 'gis-signal-cron';
 
@@ -49,6 +57,20 @@ async function main(): Promise<number> {
   log('info', 'Starting gisSignalOutreach daily pipeline…');
 
   try {
+    // Overlap-защита + stale-reaper (инцидент 12.08.2026): параллельный прогон
+    // не запускаем; running-строки старше 5ч — трупы зависших прогонов, их
+    // помечаем failed и идём дальше.
+    if (supabaseAdmin) {
+      const guard = await guardAgainstConcurrentRun(supabaseAdmin, (m) => log('info', m));
+      if (!guard.proceed) {
+        const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+        log('info', `Skipped (overlap: another run still in progress) in ${elapsedSec}s`);
+        return 0;
+      }
+    } else {
+      log('warn', 'supabaseAdmin unavailable — overlap-check пропущен (runner ответит failed)');
+    }
+
     const summary = await runGisSignalPipeline((m) => log('info', m));
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
 
@@ -67,7 +89,12 @@ async function main(): Promise<number> {
     log('error', `Failed in ${elapsedSec}s: ${summary.error ?? 'unknown'}`);
     return 1;
   } catch (err) {
+    // Сюда попадают только сбои ДО try runner'а (конфиг, overlap-check) и
+    // непредвиденные исключения — runner сам алертит из своего catch/stall.
     log('error', 'Crashed', err);
+    try {
+      await sendWorkerAlert({ workerId: WORKER_ID, subject: 'fatal (main crashed)', error: err });
+    } catch { /* алерт best-effort */ }
     return 1;
   }
 }
