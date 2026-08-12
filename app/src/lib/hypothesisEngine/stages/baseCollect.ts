@@ -748,9 +748,11 @@ const ENG_CATALOG_PAGE_SIZE = 1000;
 /** Страница офсетной пагинации eng_hiring_cache. */
 const ENG_HIRING_PAGE_SIZE = 1000;
 /**
- * Потолок страниц eng_hiring_cache за задачу (20 × 1000 = 20k просканированных
- * строк) — предохранитель: роль-фильтр в JS, и при пустом матче без потолка
- * задача листала бы весь кэш.
+ * Потолок страниц eng_hiring_cache за задачу (20 × 1000). При активном
+ * SQL-предфильтре роли (buildRolesIlikeFilter) страницы состоят из совпадений,
+ * и цикл почти всегда останавливается раньше — по limit. Потолок остаётся
+ * предохранителем для задач без предфильтра (b2b-расширение), где роль
+ * по-прежнему отбирается только в JS.
  */
 const ENG_HIRING_MAX_PAGES = 20;
 
@@ -868,10 +870,48 @@ function publishedTime(value: unknown): number {
 }
 
 /**
+ * SQL-предфильтр роли для eng_hiring_cache: PostgREST-выражение
+ * `or=(vacancy_title.ilike.%a%,vacancy_title.ilike.%b%)` по тем же кускам, на
+ * которые buildRolesRegex режет строку ролей. null — предфильтр невозможен,
+ * читаем как раньше (роль отберёт regex в JS).
+ *
+ * Зачем: без него роль отбиралась ТОЛЬКО в JS — уже после того, как выборка
+ * усечена потолком страниц по свежести. Узкая роль в большой кэш просто не
+ * попадала: на проде 12.08 под фильтры «страна + 90 дней» подходило 336k строк,
+ * сканировались первые 20k (5.9%), и из 78 franchise-вакансий в окно попадала
+ * одна — все девять ENG-сборок получили от eng_hiring ровно 0 строк.
+ *
+ * Контракт: выражение обязано быть НАДМНОЖЕСТВОМ regex-совпадений, иначе
+ * предфильтр молча срежет валидные строки. Отсюда два правила:
+ *  - терм обрезается по первому символу, ломающему синтаксис or=(...) — остаётся
+ *    префикс терма, а ilike по префиксу шире точного совпадения;
+ *  - терм с 'b2b' раскрывается в buildRolesRegex в ~30 альтернатив (часть —
+ *    regex-фрагменты вроде \bae\b, ilike их не выразит) → предфильтра нет вовсе.
+ */
+export function buildRolesIlikeFilter(roles: string[]): string | null {
+  const terms = roles
+    .join(', ')
+    .split(/[,;\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (terms.length === 0) return null;
+
+  const patterns: string[] = [];
+  for (const term of terms) {
+    if (/\bb2b\b/i.test(term)) return null;
+    const prefix = term.split(/[,.()"'\\]/)[0].trim();
+    if (!prefix) return null;
+    patterns.push(`vacancy_title.ilike.%${prefix}%`);
+  }
+  return patterns.join(',');
+}
+
+/**
  * eng_hiring_cache (компании, нанимающие ENG-роли): SQL сужает выборку по
- * стране (country_code) и свежести (published_at >= now - posted_within_days),
- * роль — regex по vacancy_title в JS (buildRolesRegex из ATS-фильтров, как в
- * engHiring). Дедуп по компании внутри задачи: выживает самая свежая вакансия.
+ * стране (country_code), свежести (published_at >= now - posted_within_days) и
+ * роли (buildRolesIlikeFilter — надмножество), точность роли добирает regex по
+ * vacancy_title в JS (buildRolesRegex из ATS-фильтров, как в engHiring).
+ * Дедуп по компании внутри задачи: выживает самая свежая вакансия.
  * Пагинация офсетная (order по published_at с keyset несовместим), с потолком
  * ENG_HIRING_MAX_PAGES.
  */
@@ -880,7 +920,9 @@ async function fetchEngHiringRows(
   query: HeCollectTask['eng_hiring_query'],
   limit: number,
 ): Promise<Record<string, unknown>[]> {
-  const rolesRegex = buildRolesRegex((query?.roles ?? []).join(', '));
+  const roles = query?.roles ?? [];
+  const rolesRegex = buildRolesRegex(roles.join(', '));
+  const rolesFilter = buildRolesIlikeFilter(roles);
   const days = query?.posted_within_days ?? 0;
   const cutoff = days > 0 ? new Date(Date.now() - days * 86_400_000).toISOString() : null;
   const countries = query?.countries?.length ? lowerList(query.countries) : null;
@@ -893,6 +935,7 @@ async function fetchEngHiringRows(
       .select('company_name, company_site_url, vacancy_title, location, country, country_code, source, published_at');
     if (countries) q = q.in('country_code', countries);
     if (cutoff) q = q.gte('published_at', cutoff);
+    if (rolesFilter) q = q.or(rolesFilter);
     const { data, error } = await q
       .order('published_at', { ascending: false })
       .range(offset, offset + ENG_HIRING_PAGE_SIZE - 1);

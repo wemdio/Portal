@@ -39,6 +39,7 @@ import { buildSourcePlanMessagesEn } from '@/lib/hypothesisEngine/prompts/source
 import { buildVocabMessagesEn } from '@/lib/hypothesisEngine/prompts/vocab.en';
 import { HeSourcePlanSchema } from '@/lib/hypothesisEngine/schemas';
 import {
+  buildRolesIlikeFilter,
   dedupUnifiedRows,
   HE_AUTO_COLLECT_COLUMNS,
   mapEngHiringRow,
@@ -815,6 +816,46 @@ describe('dispatch — funded (прямое чтение funded_companies)', () 
   });
 });
 
+/* ─────────────────────── eng_hiring: SQL-предфильтр роли ─────────────────────── */
+
+/**
+ * Контракт предфильтра: выражение обязано быть НАДМНОЖЕСТВОМ совпадений
+ * buildRolesRegex. Точность добирает regex в JS, а вот сузить выборку
+ * предфильтр не имеет права — иначе молча теряются валидные вакансии.
+ */
+describe('buildRolesIlikeFilter — предфильтр роли для eng_hiring_cache', () => {
+  it('роли → or-выражение ilike по vacancy_title', () => {
+    expect(buildRolesIlikeFilter(['franchise development', 'vp franchise'])).toBe(
+      'vacancy_title.ilike.%franchise development%,vacancy_title.ilike.%vp franchise%',
+    );
+  });
+
+  it('запятая внутри роли режет её на термы — как в buildRolesRegex', () => {
+    expect(buildRolesIlikeFilter(['head of sales, cro'])).toBe(
+      'vacancy_title.ilike.%head of sales%,vacancy_title.ilike.%cro%',
+    );
+  });
+
+  it('терм со спецсимволом обрезается до префикса — ilike по префиксу шире точного совпадения', () => {
+    expect(buildRolesIlikeFilter(['vp franchise (us)'])).toBe('vacancy_title.ilike.%vp franchise%');
+    expect(buildRolesIlikeFilter(['sr. account executive'])).toBe('vacancy_title.ilike.%sr%');
+  });
+
+  it('b2b-роль → предфильтра нет: regex раскрывает её в ~30 альтернатив, ilike их не выразит', () => {
+    expect(buildRolesIlikeFilter(['b2b sales'])).toBeNull();
+    expect(buildRolesIlikeFilter(['account executive', 'b2b sales'])).toBeNull();
+  });
+
+  it('терм, начинающийся со спецсимвола, → предфильтра нет (пустой префикс матчил бы всё)', () => {
+    expect(buildRolesIlikeFilter(['(interim) head of sales'])).toBeNull();
+  });
+
+  it('пустой список ролей → предфильтра нет', () => {
+    expect(buildRolesIlikeFilter([])).toBeNull();
+    expect(buildRolesIlikeFilter(['   '])).toBeNull();
+  });
+});
+
 /* ─────────────────────── DISPATCH: eng_hiring ─────────────────────── */
 
 describe('dispatch — eng_hiring (прямое чтение eng_hiring_cache)', () => {
@@ -872,6 +913,72 @@ describe('dispatch — eng_hiring (прямое чтение eng_hiring_cache)',
         source_detail: 'eng_hiring:greenhouse',
       }),
     ]);
+  });
+
+  it('роль уходит в SQL-предфильтр: узкая роль собирается, хотя в кэше полно свежего мусора', async () => {
+    // Регрессия 12.08.2026: роль отбиралась только в JS — после усечения выборки
+    // потолком страниц по свежести. На проде под «страна + 90 дней» подходило
+    // 336k строк, сканировались первые 20k, и узкие роли давали ровно 0.
+    // Здесь предфильтр обязан отобрать вакансию по роли и не срезать её сам.
+    const now = Date.now();
+    const fresh = (d: number) => new Date(now - d * 86_400_000).toISOString();
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
+      tasks: [
+        {
+          source: 'eng_hiring',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: {
+            source: 'eng_hiring',
+            rationale: 'r',
+            eng_hiring_query: {
+              roles: ['franchise development', 'director of franchise'],
+              countries: ['us'],
+              posted_within_days: 90,
+            },
+          },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT_US],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        eng_hiring_cache: [
+          // Свежий нерелевантный шум — на проде именно он забивал окно сканирования.
+          ...Array.from({ length: 30 }, (_, i) => ({
+            id: `noise-${i}`,
+            source: 'greenhouse',
+            company_name: `Noise ${i}`,
+            company_site_url: `https://noise${i}.com`,
+            vacancy_title: 'Software Engineer',
+            location: 'Austin, TX',
+            country_code: 'us',
+            published_at: fresh(1),
+          })),
+          {
+            id: 'target',
+            source: 'lever',
+            company_name: 'Franchise Group',
+            company_site_url: 'https://franchisegroup.com',
+            vacancy_title: 'Director of Franchise Development',
+            location: 'Dallas, TX',
+            country_code: 'us',
+            published_at: fresh(40),
+          },
+        ],
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx('us'));
+    expect((res.result as { rows: number }).rows).toBe(1);
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect((harvest?.data as HeUnifiedRow[])[0].company).toBe('Franchise Group');
   });
 
   it('несколько ролей матчатся как альтернативы (keywords через запятую)', async () => {
