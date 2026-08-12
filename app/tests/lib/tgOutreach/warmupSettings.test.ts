@@ -174,6 +174,37 @@ describe('нормализация того, что пришло из БД', () 
     expect(normalizeWarmupSettings({ mode: 'что-то' }).mode).toBe('curve');
     expect(normalizeWarmupSettings({ mode: 'manual' }).mode).toBe('manual');
   });
+
+  /**
+   * Оператор, понизивший нагрузку, не должен получить заводское число обратно
+   * из-за битого поля: пропущенное значение добирается из ЕГО кривой.
+   */
+  it('пропущенное поле строки берётся из кривой оператора, а не из дефолтов', () => {
+    const s = normalizeWarmupSettings({
+      mode: 'manual',
+      curve: { conversations: { first: 1, peak: 1 } },
+      per_day: [{ messages: 4 }],
+    });
+    expect(s.per_day[0].conversations).toBe(1);
+  });
+});
+
+/**
+ * Смысл задачи в том, что нормы стали настройкой, а не константой. Если бы
+ * разгон втихую читал RAMP_DAYS вместо переданного значения, все остальные
+ * тесты остались бы зелёными — этот нет.
+ */
+describe('разгон слушается настройки, а не константы', () => {
+  it('ramp_days: 3 выводит на потолок к третьему дню', () => {
+    const s = { ...defaultWarmupSettings(), ramp_days: 3 };
+    expect([1, 2, 3, 4].map((d) => dailyLimits(s, d).conversations)).toEqual([2, 5, 8, 8]);
+  });
+
+  it('ramp_days: 14 растягивает тот же подъём вдвое', () => {
+    const s = { ...defaultWarmupSettings(), ramp_days: 14 };
+    expect(dailyLimits(s, 7).conversations).toBeLessThan(8);
+    expect(dailyLimits(s, 14).conversations).toBe(8);
+  });
 });
 
 describe('раскладка для интерфейса', () => {
@@ -199,6 +230,18 @@ describe('раскладка для интерфейса', () => {
     expect(rows[0].conversations).toBe(9);
     expect(rows[1].conversations).toBe(3);
     expect(rows[2].conversations).toBe(4);
+  });
+
+  /** Таблицу правят в React-стейте: отдавать ссылки на исходные строки нельзя. */
+  it('строки таблицы отдаются копиями, а не ссылками', () => {
+    const filled: WarmupSettings = {
+      ...s,
+      mode: 'manual',
+      per_day: [{ conversations: 9, messages: 9, chat_messages: 9, chat_reactions: 9 }],
+    };
+    const rows = perDayForEditing(filled, 1);
+    rows[0].conversations = 1;
+    expect(filled.per_day[0].conversations).toBe(9);
   });
 
   it('лишние строки таблицы не мешают, если дней стало меньше', () => {

@@ -130,12 +130,20 @@ export function defaultWarmupSettings(): WarmupSettings {
   };
 }
 
-function normalizeRow(raw: unknown, base: WarmupSettings): WarmupPerDayRow {
+/**
+ * Строка таблицы из сырого JSON.
+ *
+ * `fallback` — та же строка, посчитанная по кривой оператора на этот день.
+ * Подставлять сюда стоковые дефолты нельзя: у оператора, понизившего нагрузку,
+ * битое поле подскочило бы обратно к заводскому числу — то есть выше, чем он
+ * сохранил.
+ */
+function normalizeRow(raw: unknown, fallback: WarmupPerDayRow): WarmupPerDayRow {
   const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   const out = {} as WarmupPerDayRow;
   for (const key of PARAM_KEYS) {
     const bounds = FIELD_BOUNDS[key];
-    out[key] = clamp(num(src[key], base.curve[key].first), bounds.min, bounds.max);
+    out[key] = clamp(num(src[key], fallback[key]), bounds.min, bounds.max);
   }
   return out;
 }
@@ -165,7 +173,7 @@ export function normalizeWarmupSettings(raw: unknown): WarmupSettings {
     };
   }
 
-  return {
+  const settings: WarmupSettings = {
     mode: src.mode === 'manual' ? 'manual' : 'curve',
     ramp_days: clamp(
       num(src.ramp_days, base.ramp_days),
@@ -179,8 +187,16 @@ export function normalizeWarmupSettings(raw: unknown): WarmupSettings {
       FIELD_BOUNDS.chats_per_account.max,
     ),
     curve,
-    per_day: (Array.isArray(src.per_day) ? src.per_day : []).map((row) => normalizeRow(row, base)),
+    per_day: [],
   };
+
+  // Таблицу добираем после того, как готова кривая: пропущенное поле строки
+  // берётся из кривой этого же дня.
+  settings.per_day = (Array.isArray(src.per_day) ? src.per_day : []).map((row, i) =>
+    normalizeRow(row, curveRow(settings, i + 1)),
+  );
+
+  return settings;
 }
 
 /**
@@ -192,6 +208,8 @@ export function normalizeWarmupSettings(raw: unknown): WarmupSettings {
  * резче. Дни за пределами разгона держатся на потолке.
  */
 function rampValue(day: number, point: WarmupCurvePoint, rampDays: number): number {
+  // Защита от деления на ноль, а не продуктовое решение: разгона длиной в один
+  // день не бывает. В интерфейсе `ramp_days` не редактируется.
   if (rampDays <= 1) return point.peak;
   const clamped = Math.min(Math.max(day, 1), rampDays);
   const t = (clamped - 1) / (rampDays - 1);
@@ -239,8 +257,10 @@ export function curveToPerDay(settings: WarmupSettings, days: number): WarmupPer
  * «дней» с 4 на 7 не должна стирать работу оператора.
  */
 export function perDayForEditing(settings: WarmupSettings, days: number): WarmupPerDayRow[] {
-  return Array.from(
-    { length: Math.max(days, 0) },
-    (_, i) => settings.per_day[i] ?? curveRow(settings, i + 1),
-  );
+  // Копии, а не ссылки: правка ячейки в таблице иначе молча мутировала бы
+  // состояние, из которого её же и построили.
+  return Array.from({ length: Math.max(days, 0) }, (_, i) => {
+    const saved = settings.per_day[i];
+    return saved ? { ...saved } : curveRow(settings, i + 1);
+  });
 }

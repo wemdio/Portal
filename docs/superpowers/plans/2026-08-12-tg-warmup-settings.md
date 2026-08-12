@@ -428,8 +428,17 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(Math.round(value), min), max);
 }
 
+/**
+ * Число из сырого JSON или из поля формы.
+ *
+ * Проверка типа до `Number()` не лишняя: `Number(null)` и `Number('')` дают 0,
+ * то есть «пусто» тихо обнулило бы параметр вместо отката к дефолту. Ноль —
+ * допустимое значение, и отличить осознанный ноль от пропущенного поля потом
+ * уже нельзя.
+ */
 function num(raw: unknown, fallback: number): number {
-  const parsed = typeof raw === 'number' ? raw : Number(raw);
+  if (typeof raw !== 'number' && (typeof raw !== 'string' || !raw.trim())) return fallback;
+  const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
