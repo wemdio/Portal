@@ -5,6 +5,7 @@ import { discoverSubpaths } from '@/lib/enrich/subpathDiscovery';
 import { extractHiring, findExternalCareerLinks } from '@/lib/enrich/extractors/hiringExtractor';
 import { detectSignals } from '@/lib/enrich/signalDetector';
 import { SIGNALS_LLM_MODEL } from '@/lib/enrich/extractors/signalsModel';
+import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 
 /**
  * Детектор «outreach-сигналов» сайта компании для холодного пайплайна по 2GIS.
@@ -311,10 +312,20 @@ function pageText(html: string): string {
   return $('body').text().replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Обрезка evidence до max символов.
+ *
+ * ЕДИНСТВЕННАЯ точка выхода evidence — и эвристик, и LLM, — поэтому здесь же
+ * стоит защита от того, что Postgres не примет в jsonb: срез посередине
+ * surrogate pair (эмодзи на сайте) и одиночные суррогаты из HTML-энтити или
+ * оборванного по max_tokens ответа модели. Такой символ роняет ВЕСЬ пакет
+ * upsert'а архива с «invalid input syntax for type json» — инцидент 12.08.2026,
+ * 2000 строк и потерянный день аутрича.
+ */
 function clip(value: string, max = MAX_EVIDENCE): string {
-  const t = value.replace(/\s+/g, ' ').trim();
+  const t = stripUnstorableJsonChars(value).replace(/\s+/g, ' ').trim();
   if (t.length <= max) return t;
-  return `${t.slice(0, max - 1).trimEnd()}…`;
+  return `${sliceWholeChars(t, 0, max - 1).trimEnd()}…`;
 }
 
 /** Сниппет вокруг совпадения с контекстом, гарантированно ≤max символов. */
@@ -322,7 +333,7 @@ function snippetAround(text: string, index: number, matchLen: number, max = MAX_
   const room = Math.max(20, Math.floor((max - matchLen) / 2));
   const start = Math.max(0, index - room);
   const end = Math.min(text.length, index + matchLen + room);
-  let s = text.slice(start, end).replace(/\s+/g, ' ').trim();
+  let s = sliceWholeChars(text, start, end).replace(/\s+/g, ' ').trim();
   if (start > 0) s = `…${s}`;
   if (end < text.length) s = `${s}…`;
   return clip(s, max);

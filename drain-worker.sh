@@ -11,6 +11,21 @@
 
 set -euo pipefail
 
+# Scheduled deploy passes the selected compose worker services. No arguments
+# means an explicit/manual full drain for backward compatibility.
+requested_worker_targets="$*"
+
+should_drain_worker() {
+  local service="$1"
+  if [ -z "$requested_worker_targets" ]; then
+    return 0
+  fi
+  case " $requested_worker_targets " in
+    *" $service "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 if [ -f .env ]; then
   set -o allexport
   source <(tr -d '\r' < .env)
@@ -239,6 +254,16 @@ PY
   fi
 else
   echo "[drain] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — skipping Supabase pause flow"
+fi
+
+if should_drain_worker "worker-autopipeline"; then
+  echo "[drain] Gracefully stopping auto-pipeline (Compose grace period: 20m)..."
+  # The worker stops assigning new domains after SIGTERM, persists its
+  # completed prefix, and marks the run for resume. Override the generic
+  # five-minute Docker client timeout so Compose can honor stop_grace_period.
+  COMPOSE_HTTP_TIMEOUT=1500 DOCKER_CLIENT_TIMEOUT=1500 \
+    docker compose --env-file .env -p portal -f docker-compose.prod.yml stop worker-autopipeline
+  echo "[drain] Auto-pipeline stopped cleanly"
 fi
 
 containers=(

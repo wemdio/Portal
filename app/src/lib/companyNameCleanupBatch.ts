@@ -15,6 +15,7 @@ import 'server-only';
  */
 export async function cleanCompanyNames(
   entries: Array<{ name: string | null | undefined; domain?: string | null }>,
+  isCancelled?: () => Promise<boolean>,
 ): Promise<string[]> {
   if (entries.length === 0) return [];
   const original = entries.map((e) => (e.name ?? '').toString());
@@ -29,7 +30,7 @@ export async function cleanCompanyNames(
       ['name', 'domain'],
       ...entries.map((e, i) => [original[i], (e.domain ?? '').toString()]),
     ];
-    const cleaned = await stepNameCleanup(sheet, async () => {});
+    const cleaned = await stepNameCleanup(sheet, async () => {}, isCancelled);
     // cleaned = [header, ...body]; body[i][0] — очищенное имя для entries[i]
     // (или исходное, если батч упал). Подстраховка fallback на original.
     return entries.map((_, i) => {

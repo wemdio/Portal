@@ -914,3 +914,67 @@ describe('salesDept: intake-команда (расширение для legal-с
     expect(result.signals.salesDept.evidence).toMatch(/intake/i);
   });
 });
+
+/**
+ * Инцидент 12.08.2026: evidence с одиночным (непарным) UTF-16 суррогатом
+ * доезжал до upsert'а архива, и Postgres отвергал ВЕСЬ пакет из 2000 строк —
+ * «invalid input syntax for type json». Источник — срез сниппета/обрезка по
+ * 200 символов ровно посередине surrogate pair эмодзи с сайта.
+ */
+describe('evidence: битый UTF-16 не выходит наружу', () => {
+  const EMOJI = '\u{1F4A1}'; // валидная пара D83D DCA1
+  const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+  // Две набивки: сдвиг на один символ меняет чётность позиций эмодзи, поэтому
+  // хотя бы одна из них гарантированно кладёт границу среза внутрь пары —
+  // тест ловит регрессию независимо от точной длины совпадения телефона.
+  it.each([0, 1])('сниппет вокруг совпадения не режет эмодзи пополам (набивка %i)', async (pad) => {
+    const html = `<html><body><main>8 800 555-06-65 ${'x'.repeat(pad)}${EMOJI.repeat(120)}</main></body></html>`;
+    const result = await detectOutreachSignals({
+      siteUrl: 'https://emoji.example',
+      fetchPage: makeFetchRouter({ 'https://emoji.example/': html }),
+      llmExtract: makeLlm(),
+    });
+
+    expect(result.signals.generalPhone.hit).toBe(true);
+    for (const verdict of Object.values(result.signals)) {
+      expect(LONE_SURROGATE_RE.test(verdict.evidence)).toBe(false);
+    }
+    // Сериализация результата не содержит escape'ов, которые PG не примет.
+    expect(/\\u(d[89ab][0-9a-f]{2})/i.test(JSON.stringify(result))).toBe(false);
+  });
+
+  it('обрезка длинного evidence по 200 символов не оставляет половинку эмодзи', async () => {
+    // 198 символов + эмодзи: обрезка приходится ровно между его половинами.
+    const llm = makeLlm({
+      salesDept: { hit: true, evidence: `${'а'.repeat(198)}${EMOJI}${'б'.repeat(50)}` },
+    });
+    const result = await detectOutreachSignals({
+      siteUrl: 'https://buro.example',
+      fetchPage: makeFetchRouter({ 'https://buro.example/': HTML_CLEAN }),
+      llmExtract: llm,
+    });
+
+    const { evidence } = result.signals.salesDept;
+    expect(result.signals.salesDept.hit).toBe(true);
+    expect(evidence.length).toBeLessThanOrEqual(200);
+    expect(evidence.startsWith('а'.repeat(198))).toBe(true);
+    expect(LONE_SURROGATE_RE.test(evidence)).toBe(false);
+  });
+
+  it('одиночный суррогат и NUL из ответа LLM вычищаются, текст сохраняется', async () => {
+    const llm = makeLlm({
+      salesDept: {
+        hit: true,
+        evidence: `отдел${String.fromCharCode(0xd83d)} продаж${String.fromCharCode(0)}`,
+      },
+    });
+    const result = await detectOutreachSignals({
+      siteUrl: 'https://buro.example',
+      fetchPage: makeFetchRouter({ 'https://buro.example/': HTML_CLEAN }),
+      llmExtract: llm,
+    });
+
+    expect(result.signals.salesDept.evidence).toBe('отдел продаж');
+  });
+});

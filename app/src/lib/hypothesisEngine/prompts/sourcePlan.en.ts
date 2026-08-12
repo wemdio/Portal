@@ -39,6 +39,50 @@ RULES:
 - roles and maps queries — non-empty strings up to 300 characters.
 - Answer strictly in English, ONLY JSON, no markdown fences.`;
 
+const SYSTEM_CATALOG_REPAIR_EN = `You are a head of lead research at Polza agency planning lead sources for B2B outreach on the US/EU market.
+
+A collection plan for a vertical came back WITHOUT any company-catalog task, so the base would be built from hiring signals and map listings alone — a few dozen rows at best. Your job is to add the missing catalog slice: ONE task over pdl (People Data Labs company catalog, ~19.5M companies).
+
+CHOOSE THE FILTER THAT ACTUALLY DESCRIBES THIS VERTICAL:
+- industries — when the vertical maps to real LinkedIn industry labels (lowercased, e.g. "hospital & health care", "staffing and recruiting", "restaurants"). Best precision; use it whenever it honestly fits.
+- name — a company-name substring, when the vertical is a business MODEL rather than an industry and its companies carry the word in their names ("franchise", "staffing", "logistics"). Use it when no industry label describes the vertical: a franchisor is not a LinkedIn industry, but "United Franchise Group" and "Childrens Lighthouse Franchise Company" are findable by name.
+- sizes — headcount buckets ("1-10", "11-50", "51-200", "201-500", "501-1000", "1001-5000", "5001-10000", "10001+"); add only when the hypotheses are explicit about company size.
+- countries — lowercased English country names ("united states", "united kingdom"); omit when the whole market is targeted.
+
+RULES:
+- Prefer a precise slice over a big one: a broad industry that mostly misses the vertical is worse than a narrow name match, because the relevance gate will discard the bulk of it anyway.
+- Never invent industry labels you are unsure about.
+- rationale — one concrete line: WHAT we collect and WHY.
+- Answer in English, ONLY JSON, no markdown fences.`;
+
+/**
+ * Промпт починки плана: вертикаль без каталожной задачи → ровно один
+ * pdl-срез. Источник задаётся кодом (всегда pdl), модель отвечает только за
+ * фильтры — отсюда узкая схема HeCatalogRepairSchema вместо полного плана.
+ */
+export function buildCatalogRepairMessagesEn(input: SourcePlanPromptInput): LLMMessage[] {
+  const user = `VERTICAL: ${input.verticalName}
+${input.verticalSummary ?? ''}
+Vertical synonyms: ${input.synonyms?.length ? input.synonyms.join(', ') : '—'}
+
+VERTICAL HYPOTHESES (non-rejected):
+${input.hypotheses.map((h) => `- ${h.tier != null ? `[tier ${h.tier}] ` : ''}${h.title}${h.description ? `: ${h.description}` : ''}`).join('\n')}
+
+COMPANY TYPES FROM VOCABULARY: ${input.companyTypes?.length ? input.companyTypes.join(', ') : '—'}
+
+Return ONLY JSON, strictly in this shape:
+{
+  "rationale": string,
+  "pdl_filters": { "industries"?: string[], "sizes"?: string[], "countries"?: string[], "name"?: string }
+}
+At least one filter is required.`;
+
+  return [
+    { role: 'system', content: SYSTEM_CATALOG_REPAIR_EN },
+    { role: 'user', content: user },
+  ];
+}
+
 export function buildSourcePlanMessagesEn(input: SourcePlanPromptInput): LLMMessage[] {
   const user = `VERTICAL: ${input.verticalName}
 ${input.verticalSummary ?? ''}
