@@ -2920,18 +2920,31 @@ interface OutreachBase {
   id: string;
   name: string;
   notes: string;
+  /** Кампания-владелец. null — база осталась без владельца от старой модели. */
+  campaign_id: string | null;
   counts: { total: number; pending: number; sent: number; replied: number; failed: number; skipped: number };
 }
 
 /**
  * Базы контактов для первого касания.
  *
- * База живёт сама по себе, а не внутри кампании: одну и ту же можно запустить
- * на разных кампаниях и сравнить результат. Здесь — список всех баз с
- * галочками «использовать в этой кампании».
+ * База принадлежит кампании. Раньше она жила сама по себе — «одну и ту же можно
+ * запустить на разных кампаниях и сравнить результат», — и вкладка показывала
+ * все базы портала: оператор открывал свою кампанию и видел чужую базу на 2206
+ * контактов, в одной галочке от запуска, да ещё и с её собственными счётчиками.
+ * Сравнивать гипотезы это не помогало, а путало.
+ *
+ * Галочка теперь означает не «чья база», а «участвует в рассылке» — выключатель,
+ * которым базу ставят на паузу, не удаляя.
  */
 function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   const [bases, setBases] = useState<OutreachBase[]>([]);
+  /**
+   * Базы без кампании — наследство старой модели: кнопка «Создать базу» не
+   * спрашивала кампанию. Показываем отдельно, чтобы они не пропали молча, а
+   * оператор перенёс их руками.
+   */
+  const [orphans, setOrphans] = useState<OutreachBase[]>([]);
   const [linked, setLinked] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState('');
@@ -2942,10 +2955,14 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   const load = useCallback(async () => {
     setLoading(true);
     const [basesRes, linkRes] = await Promise.all([
-      authFetch(`${API_BASE}/bases`),
+      authFetch(`${API_BASE}/bases?campaign_id=${campaignId}`),
       authFetch(`${API_BASE}/campaigns/${campaignId}/bases`),
     ]);
-    if (basesRes.ok) setBases(((await basesRes.json()) as { items: OutreachBase[] }).items);
+    if (basesRes.ok) {
+      const d = (await basesRes.json()) as { items: OutreachBase[]; orphans?: OutreachBase[] };
+      setBases(d.items);
+      setOrphans(d.orphans ?? []);
+    }
     if (linkRes.ok) {
       const d = (await linkRes.json()) as { items: Array<{ base_id: string }> };
       setLinked(new Set(d.items.map((i) => i.base_id)));
@@ -2961,7 +2978,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
     try {
       const res = await authFetch(`${API_BASE}/bases`, {
         method: 'POST',
-        body: JSON.stringify({ name: newName.trim() }),
+        body: JSON.stringify({ name: newName.trim(), campaign_id: campaignId }),
       });
       if (!res.ok) {
         const d = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -2989,6 +3006,30 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       // а на сервере ничего не изменилось.
       void load();
     }
+  };
+
+  /** Забрать базу без владельца в эту кампанию. */
+  const adoptBase = async (base: OutreachBase) => {
+    if (!confirm(
+      `Перенести базу «${base.name}» (${base.counts.total} контактов) в эту кампанию?`
+      + ' После переноса она будет видна только здесь. Рассылка не начнётся сама —'
+      + ' для этого нужно отметить базу галочкой.',
+    )) return;
+
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases/${base.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ campaign_id: campaignId }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(d?.error ?? `Не удалось перенести базу (${res.status})`);
+        return;
+      }
+      setNotice(`База «${base.name}» перенесена в кампанию.`);
+      void load();
+    } finally { setBusy(false); }
   };
 
   const deleteBase = async (base: OutreachBase) => {
@@ -3122,8 +3163,8 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
                 type="checkbox"
                 checked={linked.has(b.id)}
                 onChange={() => { void toggleLink(b.id); }}
-                title="Использовать эту базу в кампании"
-                aria-label={`Использовать базу ${b.name}`}
+                title="Участвует в рассылке. Снятая галочка ставит базу на паузу, контакты и счётчики сохраняются"
+                aria-label={`Участвует в рассылке: база ${b.name}`}
                 className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
               />
               <span className="text-xs font-medium text-gray-800 truncate">{b.name}</span>
@@ -3153,6 +3194,43 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Наследство старой модели: кнопка «Создать базу» кампанию не спрашивала,
+          и такие базы висели во вкладке каждой кампании портала. Прятать их
+          молча нельзя — это чьи-то загруженные контакты; показываем отдельно и
+          просим перенести. Когда таких не останется, блок исчезнет сам. */}
+      {!loading && orphans.length > 0 && (
+        <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50/50 p-3">
+          <div className="text-xs font-medium text-amber-900">
+            Базы без кампании ({orphans.length})
+          </div>
+          <p className="text-[10px] text-amber-800">
+            Заведены до того, как базы стали принадлежать кампании, и не подключены ни к одной.
+            Они не участвуют ни в одной рассылке. Перенесите нужные сюда, остальные удалите —
+            после этого блок пропадёт.
+          </p>
+          <div className="divide-y divide-amber-100 rounded-lg border border-amber-200 bg-white overflow-hidden">
+            {orphans.map((b) => (
+              <div key={b.id} className="grid grid-cols-[1fr_80px_80px_190px] gap-3 items-center px-3 py-2">
+                <span className="text-xs font-medium text-gray-800 truncate">{b.name}</span>
+                <span className="text-xs text-gray-500">{b.counts.total} всего</span>
+                <span className="text-xs text-gray-500">{b.counts.sent} отправлено</span>
+                <div className="flex items-center justify-end gap-1">
+                  <button type="button" onClick={() => { void adoptBase(b); }} disabled={busy}
+                    className="rounded-lg border border-amber-300 px-2 py-1 text-[11px] text-amber-900 hover:bg-amber-100 transition cursor-pointer disabled:opacity-50">
+                    Перенести в эту кампанию
+                  </button>
+                  <button type="button" onClick={() => { void deleteBase(b); }} disabled={busy}
+                    title="Удалить базу вместе с контактами"
+                    className="p-1 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer disabled:opacity-50">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -3932,7 +4010,13 @@ function CampaignsSection() {
   };
 
   const deleteCampaign = async (id: string) => {
-    if (!confirm('Удалить кампанию? Это действие необратимо.')) return;
+    // С 12.08.2026 базы принадлежат кампании и уходят вместе с ней по cascade.
+    // Раньше они переживали удаление, поэтому прежний текст «это действие
+    // необратимо» больше не описывает масштаб потери.
+    if (!confirm(
+      'Удалить кампанию? Вместе с ней будут удалены её базы контактов и вся история отправок по ним.'
+      + ' Это действие необратимо.',
+    )) return;
     await authFetch(`${API_BASE}/campaigns/${id}`, { method: 'DELETE' });
     if (selectedId === id) setSelectedId(null);
     void fetchCampaigns();
