@@ -14,6 +14,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { TelegramClient } from 'telegram';
 import { splitTelegramMessage } from './leadMessage';
+import { forwardKindLabel, forwardWho } from './campaignLog';
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
@@ -23,6 +24,9 @@ export interface PendingForward {
   target_chat: string;
   message_text: string;
   dialog_id: string;
+  /** Кто поставил задачу — чтобы журнал связывал нажатие и отправку. */
+  requested_by_name: string | null;
+  requested_at: string | null;
 }
 
 export interface ForwardDialogRef {
@@ -32,11 +36,6 @@ export interface ForwardDialogRef {
 
 /** Сколько сообщений диалога тянем для нативной пересылки. */
 const HISTORY_LIMIT = 200;
-
-const KIND_LABEL: Record<string, string> = {
-  lead: 'лид',
-  partner: 'кандидат в партнёры',
-};
 
 function targetPeer(target: string): string {
   return target.startsWith('@') ? target.slice(1) : target;
@@ -61,7 +60,7 @@ export async function processLeadForwards(args: {
 
   const { data: rows } = await db
     .from('tg_outreach_lead_forwards')
-    .select('id, kind, target_chat, message_text, dialog_id')
+    .select('id, kind, target_chat, message_text, dialog_id, requested_by_name, requested_at')
     .eq('account_id', accountId)
     .eq('status', 'pending')
     .order('requested_at', { ascending: true })
@@ -73,7 +72,8 @@ export async function processLeadForwards(args: {
   for (const task of pending) {
     if (args.shouldStop?.()) break;
 
-    const label = KIND_LABEL[task.kind] ?? task.kind;
+    const label = forwardKindLabel(task.kind);
+    let who = 'диалог';
     try {
       const { data: dialogRow } = await db
         .from('tg_outreach_dialogs')
@@ -81,12 +81,17 @@ export async function processLeadForwards(args: {
         .eq('id', task.dialog_id)
         .maybeSingle();
       const dialog = dialogRow as ForwardDialogRef | null;
-      if (!dialog) throw new Error('диалог удалён');
+      if (!dialog) throw new Error('диалог удалён из портала');
+      who = forwardWho(dialog.tg_username, dialog.tg_user_id);
 
       const peer = dialog.tg_username ? `@${dialog.tg_username}` : dialog.tg_user_id;
-      if (!peer) throw new Error('у диалога нет ни юзернейма, ни id');
+      if (!peer) throw new Error('у диалога нет ни юзернейма, ни числового id — некого пересылать');
 
       const target = targetPeer(task.target_chat);
+
+      // Между постановкой и отправкой проходят часы: без этой строки в журнале
+      // не видно, что задачу вообще взяли, и сбой не отличить от простоя.
+      log('info', `Передача (${label}) ${who}: взял в работу, получатель ${task.target_chat}, поставил ${task.requested_by_name || '—'}`);
 
       // Карточка идёт первой: менеджер сначала понимает, что перед ним, и
       // только потом читает переписку.
@@ -106,7 +111,7 @@ export async function processLeadForwards(args: {
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        log('warning', `Передача (${label}) ушла карточкой, но оригиналы переписки переслать не удалось — ${msg}`);
+        log('warning', `Передача (${label}) ${who}: карточка ушла, но оригиналы переписки переслать не удалось — ${msg}`);
       }
 
       await db
@@ -114,7 +119,7 @@ export async function processLeadForwards(args: {
         .update({ status: 'sent', sent_at: new Date().toISOString(), error_message: null })
         .eq('id', task.id);
 
-      log('info', `Аккаунт ${accountName}: передан ${label} в ${task.target_chat}`);
+      log('info', `Передача (${label}) ${who}: отправлена в ${task.target_chat} аккаунтом ${accountName}`);
       result.sent++;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -122,7 +127,10 @@ export async function processLeadForwards(args: {
         .from('tg_outreach_lead_forwards')
         .update({ status: 'failed', error_message: msg.slice(0, 500) })
         .eq('id', task.id);
-      log('error', `Аккаунт ${accountName}: не смог передать ${label} в ${task.target_chat} — ${msg}`);
+      // Причина целиком, без сокращений: по ней оператор и чинит — то ли
+      // менеджер не принимает сообщения от незнакомого аккаунта, то ли чат
+      // указан с опечаткой, то ли аккаунт под ограничением.
+      log('error', `Передача (${label}) ${who}: НЕ отправлена в ${task.target_chat} аккаунтом ${accountName} — ${msg}`);
       result.failed++;
     }
   }

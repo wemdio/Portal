@@ -51,19 +51,37 @@ export async function GET(req: NextRequest) {
       const rows = (data ?? []) as Array<Record<string, unknown>>;
       const ids = rows.map((r) => r.id as string);
       if (ids.length) {
+        // Берём и упавшие: причина сбоя нужна оператору прямо в строке
+        // человека — по ней он и чинит. Уходить за ней в общий журнал, где она
+        // тонет среди сотен строк круга, — плохой обмен.
         const { data: forwards } = await auth.supabase
           .from('tg_outreach_lead_forwards')
-          .select('dialog_id, kind, status, sent_at')
+          .select('dialog_id, kind, status, sent_at, error_message, requested_at')
           .in('dialog_id', ids)
-          .in('status', ['pending', 'sent']);
+          .order('requested_at', { ascending: false });
 
+        /**
+         * На диалог может быть несколько записей: упавшие попытки и одна живая.
+         * Живая важнее — она определяет, можно ли передавать. Если живой нет,
+         * показываем последнюю упавшую с её причиной.
+         */
         const byDialog = new Map<string, Record<string, unknown>>();
         for (const f of (forwards ?? []) as Array<Record<string, unknown>>) {
-          byDialog.set(f.dialog_id as string, f);
+          const key = f.dialog_id as string;
+          const current = byDialog.get(key);
+          const isActive = f.status === 'pending' || f.status === 'sent';
+          if (!current || (isActive && current.status === 'failed')) byDialog.set(key, f);
         }
         for (const row of rows) {
           const f = byDialog.get(row.id as string);
-          if (f) row.forward = { kind: f.kind, status: f.status, sent_at: f.sent_at };
+          if (f) {
+            row.forward = {
+              kind: f.kind,
+              status: f.status,
+              sent_at: f.sent_at,
+              error_message: f.error_message ?? null,
+            };
+          }
         }
       }
 

@@ -16,6 +16,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { buildLeadMessage, type ForwardKind } from '@/lib/tgOutreach/leadMessage';
 import { checkForwardConflict, type ExistingForward } from '@/lib/tgOutreach/forwardConflict';
 import { usernameKey } from '@/lib/tgOutreach/report';
+import { logCampaign, forwardKindLabel, forwardWho } from '@/lib/tgOutreach/campaignLog';
 import type { OpenAISettings } from '@/lib/tgOutreach/types';
 
 export const dynamic = 'force-dynamic';
@@ -32,6 +33,8 @@ interface Prepared {
   campaignId: string;
   accountId: string;
   requestedByName: string;
+  /** Кого передаём — в журнал и в сообщения об ошибках. */
+  who: string;
 }
 
 /** Собрать сообщение и получателя. Общая часть предпросмотра и постановки. */
@@ -136,7 +139,23 @@ async function prepare(
     campaignId: dialog.campaign_id,
     accountId: dialog.account_id,
     requestedByName,
+    who: forwardWho(dialog.tg_username, dialog.tg_user_id),
   };
+}
+
+/**
+ * Кампания и собеседник диалога — чтобы записать в журнал даже отказ, когда до
+ * сборки сообщения дело не дошло.
+ */
+async function dialogRef(db: SupabaseClient, dialogId: string): Promise<{ campaignId: string; who: string } | null> {
+  const { data } = await db
+    .from('tg_outreach_dialogs')
+    .select('campaign_id, tg_user_id, tg_username')
+    .eq('id', dialogId)
+    .maybeSingle();
+  if (!data) return null;
+  const row = data as { campaign_id: string; tg_user_id: number | null; tg_username: string | null };
+  return { campaignId: row.campaign_id, who: forwardWho(row.tg_username, row.tg_user_id) };
 }
 
 /**
@@ -175,13 +194,34 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       const kind = parseKind(new URL(req.url).searchParams.get('kind'));
       if (!kind) return jsonError('kind должен быть lead или partner', 400);
 
+      const who = operatorName(auth.user);
+      const ref = await dialogRef(auth.supabase, id);
+
       // Проверяем и в предпросмотре: показать текст, а потом отказать на
       // подтверждении — это обмануть ожидание оператора.
       const conflict = checkForwardConflict(await loadForwards(auth.supabase, id), kind);
-      if (conflict) return jsonError(conflict, 409);
+      if (conflict) {
+        if (ref) {
+          await logCampaign(auth.supabase, ref.campaignId, 'warning',
+            `Передача (${forwardKindLabel(kind)}) ${ref.who}: отказ — ${conflict} (нажал ${who})`);
+        }
+        return jsonError(conflict, 409);
+      }
 
-      const prepared = await prepare(auth.supabase, id, kind, operatorName(auth.user));
-      if ('error' in prepared) return jsonError(prepared.error, prepared.status);
+      const prepared = await prepare(auth.supabase, id, kind, who);
+      if ('error' in prepared) {
+        if (ref) {
+          await logCampaign(auth.supabase, ref.campaignId, 'warning',
+            `Передача (${forwardKindLabel(kind)}) ${ref.who}: не смог собрать сообщение — ${prepared.error} (нажал ${who})`);
+        }
+        return jsonError(prepared.error, prepared.status);
+      }
+
+      // Нажатие на кнопку — уже действие: если оператор передумает на
+      // подтверждении, в журнале останется только эта строка, и по ней видно,
+      // что решение принимали и отменили.
+      await logCampaign(auth.supabase, prepared.campaignId, 'info',
+        `Передача (${forwardKindLabel(kind)}) ${prepared.who}: открыт предпросмотр, получатель ${prepared.targetChat} (нажал ${who})`);
 
       return NextResponse.json({ text: prepared.text, target_chat: prepared.targetChat });
     },
@@ -200,12 +240,26 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       const kind = parseKind(body?.kind ?? null);
       if (!kind) return jsonError('kind должен быть lead или partner', 400);
 
-      const conflict = checkForwardConflict(await loadForwards(auth.supabase, id), kind);
-      if (conflict) return jsonError(conflict, 409);
-
       const name = operatorName(auth.user);
+      const ref = await dialogRef(auth.supabase, id);
+
+      const conflict = checkForwardConflict(await loadForwards(auth.supabase, id), kind);
+      if (conflict) {
+        if (ref) {
+          await logCampaign(auth.supabase, ref.campaignId, 'warning',
+            `Передача (${forwardKindLabel(kind)}) ${ref.who}: отказ — ${conflict} (нажал ${name})`);
+        }
+        return jsonError(conflict, 409);
+      }
+
       const prepared = await prepare(auth.supabase, id, kind, name);
-      if ('error' in prepared) return jsonError(prepared.error, prepared.status);
+      if ('error' in prepared) {
+        if (ref) {
+          await logCampaign(auth.supabase, ref.campaignId, 'warning',
+            `Передача (${forwardKindLabel(kind)}) ${ref.who}: не смог собрать сообщение — ${prepared.error} (нажал ${name})`);
+        }
+        return jsonError(prepared.error, prepared.status);
+      }
 
       const { data, error } = await auth.supabase
         .from('tg_outreach_lead_forwards')
@@ -225,11 +279,18 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       if (error) {
         // Частичный уникальный индекс — последняя защита от гонки: два клика
         // могли пройти проверку выше одновременно. Отвечаем тем же языком.
-        if (String(error.code) === '23505') {
+        const duplicate = String(error.code) === '23505';
+        const reason = duplicate ? 'этот диалог уже передан или стоит в очереди' : error.message;
+        await logCampaign(auth.supabase, prepared.campaignId, 'warning',
+          `Передача (${forwardKindLabel(kind)}) ${prepared.who}: не поставлена в очередь — ${reason} (нажал ${name})`);
+        if (duplicate) {
           return jsonError('Этот диалог уже передан или стоит в очереди на передачу', 409);
         }
         return jsonError(error.message, 500);
       }
+
+      await logCampaign(auth.supabase, prepared.campaignId, 'info',
+        `Передача (${forwardKindLabel(kind)}) ${prepared.who}: поставлена в очередь, получатель ${prepared.targetChat} (нажал ${name})`);
 
       return NextResponse.json({ ok: true, id: (data as { id: string }).id, target_chat: prepared.targetChat }, { status: 201 });
     },
