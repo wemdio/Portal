@@ -96,9 +96,10 @@ import {
   buildSourcePlanMessages,
   type HeCollectTask,
   type HeSourcePlan,
+  type SourcePlanPromptInput,
 } from '../prompts/sourcePlan';
-import { buildSourcePlanMessagesEn } from '../prompts/sourcePlan.en';
-import { HeSourcePlanSchema } from '../schemas';
+import { buildCatalogRepairMessagesEn, buildSourcePlanMessagesEn } from '../prompts/sourcePlan.en';
+import { HeCatalogRepairSchema, HeSourcePlanSchema } from '../schemas';
 import type { HeBase, HeJob, HeProject, HeVertical } from '../types';
 import {
   completeHeRefillNoNew,
@@ -504,6 +505,16 @@ export interface HeConstructInfo {
   note?: string;
 }
 
+/** Провенанс починки плана: почему её запускали и чем кончилось. */
+export interface HePlanRepair {
+  reason: 'no_catalog_source';
+  outcome: 'repaired' | 'failed';
+  /** Срез, которым добрали каталог (outcome='repaired'). */
+  pdl_filters?: HeCollectTask['pdl_filters'];
+  /** Причина провала починки (outcome='failed'). */
+  error?: string;
+}
+
 export interface HeCollectInfo {
   /** Лимит строк, выбранный при запуске сборки (route пишет при создании базы). */
   limit?: number;
@@ -517,6 +528,12 @@ export interface HeCollectInfo {
   /** Итог refill-ветки (stages/baseCollectRefill.ts). */
   refill_result?: HeRefillResult;
   plan?: HeSourcePlan;
+  /**
+   * Починка плана без каталожного источника (ensureCatalogSource, market='us').
+   * Ключа нет — план пришёл от планировщика как есть. outcome='failed' объясняет
+   * тонкую базу: каталога не было и добавить его не вышло.
+   */
+  plan_repair?: HePlanRepair;
   /** Гипотезы, по которым реально строился план (accepted-дефолт или выбор специалиста). */
   hypotheses?: Array<{ id: string; title: string; status: string | null }>;
   tasks?: HeCollectTaskState[];
@@ -576,7 +593,11 @@ async function buildPlan(
   vertical: HeVertical,
   usage: HeUsage,
   market: HeMarket,
-): Promise<{ plan: HeSourcePlan; usedHypotheses: Array<{ id: string; title: string; status: string | null }> }> {
+): Promise<{
+  plan: HeSourcePlan;
+  planRepair?: HePlanRepair;
+  usedHypotheses: Array<{ id: string; title: string; status: string | null }>;
+}> {
   // Гипотезы вертикали для плана. Семантика разметки: если специалист что-то
   // ПРИНЯЛ (accepted) — план строим только по принятым; предложенные (proposed)
   // идут в работу, только когда принятых нет (как в пересчёте % вертикали).
@@ -639,24 +660,89 @@ async function buildPlan(
       .filter(Boolean);
   }
 
+  const promptInput = {
+    verticalName: vertical.name,
+    verticalSummary: vertical.summary,
+    synonyms: Array.isArray(vertical.synonyms) ? vertical.synonyms : [],
+    hypotheses,
+    companyTypes,
+  };
+
   const llm = await callLLMWithSchema(
     // Рынок 'us' — EN-промпт с ENG-источниками (pdl/funded/eng_hiring/google_maps).
-    (market === 'us' ? buildSourcePlanMessagesEn : buildSourcePlanMessages)({
-      verticalName: vertical.name,
-      verticalSummary: vertical.summary,
-      synonyms: Array.isArray(vertical.synonyms) ? vertical.synonyms : [],
-      hypotheses,
-      companyTypes,
-    }),
+    (market === 'us' ? buildSourcePlanMessagesEn : buildSourcePlanMessages)(promptInput),
     HeSourcePlanSchema,
     { model: getHeModel('bulk') },
   );
   addUsage(usage, llm);
+
+  const { plan, planRepair } = await ensureCatalogSource(ctx, llm.data, promptInput, usage, market);
   return {
-    plan: llm.data,
+    plan,
+    planRepair,
     // Провенанс плана: по каким гипотезам реально строили (для collect_info и UI —
     // иначе на вопрос «точно все верно?» ответа нет ни в БД, ни на экране).
     usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, status: h.status })),
+  };
+}
+
+/**
+ * ENG-план без каталожного источника (pdl/funded) — потолок сборки в пару
+ * десятков строк: eng_hiring и google_maps дают единицы компаний. Планировщик
+ * сваливается в такой план не случайно: у вертикали может не быть индустрии в
+ * каталоге (у «Franchise Brands» её нет — франчайзинг не отраслевая метка
+ * LinkedIn), и модель просто пропускает pdl. Итог 12.08: база на 6 строк при
+ * лимите 2000.
+ *
+ * Починка: один дополнительный вызов модели, который отвечает ТОЛЬКО за фильтры
+ * pdl-среза (source ставит код). Модель выбирает между industries и name —
+ * name-подстрока и вытаскивает бизнес-модели, у которых нет индустрии
+ * («franchise» → 1279 компаний США в каталоге).
+ *
+ * Границы: только market='us' (у RU-плана каталог — companies_directory со
+ * своей семантикой), только когда каталожной задачи НЕТ вовсе. Провал починки
+ * не роняет сбор: план уходит как есть, а причина ложится в collect_info —
+ * тонкая база должна быть объяснимой, а не молчаливой.
+ */
+async function ensureCatalogSource(
+  ctx: HeStageContext,
+  plan: HeSourcePlan,
+  promptInput: SourcePlanPromptInput,
+  usage: HeUsage,
+  market: HeMarket,
+): Promise<{ plan: HeSourcePlan; planRepair?: HePlanRepair }> {
+  if (market !== 'us') return { plan };
+  if (plan.tasks.some((t) => t.source === 'pdl' || t.source === 'funded')) return { plan };
+
+  let repair;
+  try {
+    repair = await callLLMWithSchema(buildCatalogRepairMessagesEn(promptInput), HeCatalogRepairSchema, {
+      model: getHeModel('bulk'),
+    });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    stageLog(ctx, `[base_collect] починка плана (нет каталога) не удалась: ${message}`);
+    return { plan, planRepair: { reason: 'no_catalog_source', outcome: 'failed', error: message } };
+  }
+  addUsage(usage, repair);
+
+  const task: HeCollectTask = {
+    source: 'pdl',
+    rationale: repair.data.rationale,
+    pdl_filters: repair.data.pdl_filters,
+  };
+  // Потолок плана — 4 задачи (HeSourcePlanSchema). Если модель уже выбрала
+  // четыре, каталожный срез вытесняет последнюю: без каталога база всё равно
+  // не наберёт объём, а порядок задач у планировщика — от важного к частному.
+  const tasks = plan.tasks.length >= 4 ? plan.tasks.slice(0, 3) : plan.tasks.slice();
+  tasks.push(task);
+  stageLog(
+    ctx,
+    `[base_collect] в плане не было каталога — добавлен pdl-срез: ${JSON.stringify(repair.data.pdl_filters)}`,
+  );
+  return {
+    plan: { tasks },
+    planRepair: { reason: 'no_catalog_source', outcome: 'repaired', pdl_filters: repair.data.pdl_filters },
   };
 }
 
@@ -1500,8 +1586,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
 
   // ─── PLAN ───
   if (!info.plan) {
-    const { plan, usedHypotheses } = await buildPlan(job, ctx, vertical, usage, market);
+    const { plan, planRepair, usedHypotheses } = await buildPlan(job, ctx, vertical, usage, market);
     info.plan = plan;
+    if (planRepair) info.plan_repair = planRepair;
     info.hypotheses = usedHypotheses;
     info.tasks = info.plan.tasks.map((task) => ({
       source: task.source,

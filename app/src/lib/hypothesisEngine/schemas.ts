@@ -376,3 +376,14 @@ export const HeSourcePlanSchema = z.object({
   tasks: z.array(HeCollectTaskSchema).min(1).max(4),
 });
 export type HeSourcePlanOutput = z.infer<typeof HeSourcePlanSchema>;
+
+/**
+ * Починка ENG-плана без каталожного источника: модель отдаёт ТОЛЬКО фильтры
+ * pdl-среза, source='pdl' проставляет код (buildPlan). Узкая схема вместо
+ * полного плана — чтобы починка не могла вернуть ещё одну задачу без каталога.
+ */
+export const HeCatalogRepairSchema = z.object({
+  rationale: z.string().min(1),
+  pdl_filters: HePdlFiltersSchema,
+});
+export type HeCatalogRepairOutput = z.infer<typeof HeCatalogRepairSchema>;
