@@ -20,7 +20,7 @@ blocks:
       jobs:
         - name: Pull and deploy
           execution_time_limit:
-            minutes: 30
+            minutes: 60
           commands:
             - |
               set -e
@@ -422,7 +422,7 @@ blocks:
                 fi;
                 if [ -n \"\${WORKER_TARGETS}\" ]; then
                   echo '--- Step 3: drain workers ---';
-                  sudo -n bash drain-worker.sh;
+                  sudo -n bash drain-worker.sh \${WORKER_TARGETS};
                 fi;
                 force_rm_svc() {
                   local svc=\"\$1\";

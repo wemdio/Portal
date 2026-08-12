@@ -8,10 +8,11 @@
  * stop_grace_period и авто-resume.
  *
  * Resilience:
- *   - SIGTERM (редеплой): передаём shouldStop в runAutoPipelineForClient — прогон
- *     останавливается ПОСЛЕ текущего чанка (чанк = заливка в Instantly + seen
- *     закоммичены), помечает run 'failed (interrupted)'. Никакого зомби.
- *   - Hard kill (OOM/SIGKILL): heartbeat прогона протухает → closeStaleRuns
+ *   - SIGTERM (редеплой): передаём shouldStop в runAutoPipelineForClient — новые
+ *     домены больше не назначаются, уже начатые завершаются и их префикс
+ *     фиксируется (Instantly + snapshots + seen). Run получает failed/interrupted,
+ *     остаток подбирается следующим запуском. Никакого зомби.
+ *   - Hard kill (OOM/SIGKILL): heartbeat прогона протухает → closeStaleAutoPipelineRuns
  *     закрывает строку → следующий тик перезапускает.
  *   - Resume: повторный прогон дедупит уже обработанных (seen_employers) и
  *     дозаливает остаток; createLeads(skip_if_in_campaign) идемпотентен → без
@@ -33,7 +34,10 @@
  */
 
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
-import { runAutoPipelineForClient } from '@/lib/jobs/autoPipelineRunner';
+import {
+  closeStaleAutoPipelineRuns,
+  runAutoPipelineForClient,
+} from '@/lib/jobs/autoPipelineRunner';
 import { isInsideWindow } from '@/lib/jobs/autoPipelinePacing';
 
 const WORKER_ID = 'auto-pipeline';
@@ -129,6 +133,17 @@ async function main(): Promise<void> {
       const eligible = await loadEligibleClients(db);
       for (const client of eligible) {
         if (isShuttingDown()) break;
+        try {
+          // Reconcile abandoned runs even outside the client's execution
+          // window. Otherwise a hard-killed night run can look active in the
+          // dashboard until the next night.
+          await closeStaleAutoPipelineRuns(client.clientUserId);
+        } catch (err) {
+          // Fail closed for this client: do not start another run while its
+          // current state cannot be reconciled reliably.
+          log('error', `Stale-run reconciliation failed for ${client.clientUserId}`, err);
+          continue;
+        }
         const { due, reason } = await decideDue(db, client, new Date());
         if (!due) continue;
 

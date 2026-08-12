@@ -53,6 +53,11 @@ import { getOrFetchScore, emptyCacheStats } from './mailganerScoreCache';
 import { resolveMailganerScoringConcurrency } from './mailganerScoringThrottle';
 import { validateEmailForAutoPipeline, type AutoPipelineEmailValidation } from './autoPipelineEmailValidation';
 import { calcPacing } from './autoPipelinePacing';
+import {
+  mapAutoPipelineChunkUntilStopped,
+  retainRowsSafeAfterInterruptedAppend,
+  waitForAutoPipelineDelay,
+} from './autoPipelineChunk';
 import { fetchTopUpFromBaseOfBases } from './baseOfBasesSource';
 import { fetchTopUpFromCache } from './baseOfBasesFromCache';
 import { cleanCompanyNames } from '@/lib/companyNameCleanupBatch';
@@ -261,50 +266,66 @@ export async function loadSeenDomains(clientUserId: string): Promise<Set<string>
 }
 
 /**
- * Закрывает «протухшие» running-прогоны клиента перед стартом нового.
+ * Закрывает «протухшие» running-прогоны клиента.
  *
  * Зачем: если прогон убили на полпути (редеплой пересоздал контейнер, OOM,
  * SIGKILL) — finishRunRow не вызывается, и запись навечно висит в running.
  * Дашборд тогда видит «сейчас идёт прогон» от мёртвого процесса, а сами
  * zombie засоряют журнал.
  *
- * Burst-прогон укладывается в ~2 часа, поэтому порог 4 часа гарантированно
- * не заденет легитимный текущий прогон, но поймает любой брошенный.
- * Вызывается в начале runAutoPipelineForClient (до startRunRow).
+ * Для новых строк используем heartbeat с запасом относительно 90-секундного
+ * интервала. Четырёхчасовой fallback применяется только к старым строкам без
+ * heartbeat. Демон вызывает cleanup каждый tick, в том числе вне окна запуска;
+ * startRunRow повторяет его как fail-closed защиту ручных запусков.
  */
-async function closeStaleRuns(clientUserId: string, staleMinutes = 8): Promise<void> {
+export async function closeStaleAutoPipelineRuns(
+  clientUserId: string,
+  {
+    staleMinutes = 8,
+    now = new Date(),
+  }: {
+    staleMinutes?: number;
+    now?: Date;
+  } = {},
+): Promise<void> {
   if (!supabaseAdmin) return;
   // Живой прогон бьёт heartbeat_at раз в ~90с. Мёртвый (OOM/SIGKILL/редеплой
   // пересоздал контейнер) перестаёт → закрываем как failed, чтобы воркер тут же
   // перезапустил прогон (resume). Две ветки вместо .or() — проще и без риска
   // PostgREST or-синтаксиса:
-  const heartbeatCutoff = new Date(Date.now() - staleMinutes * 60 * 1000).toISOString();
+  const heartbeatCutoff = new Date(now.getTime() - staleMinutes * 60 * 1000).toISOString();
   // 1. Есть heartbeat, но он протух.
-  await supabaseAdmin
+  const { error: heartbeatError } = await supabaseAdmin
     .from('client_auto_pipeline_runs')
     .update({
       status: 'failed',
       error_message: 'stale — auto-closed (heartbeat протух, процесс прерван)',
-      finished_at: new Date().toISOString(),
+      finished_at: now.toISOString(),
     })
     .eq('client_user_id', clientUserId)
     .eq('status', 'running')
     .lt('heartbeat_at', heartbeatCutoff);
+  if (heartbeatError) {
+    throw new Error(`Failed to close stale auto-pipeline runs: ${heartbeatError.message}`);
+  }
   // 2. heartbeat отсутствует (старые строки до миграции / процесс умер до
   //    первого тика) — fallback по started_at (4ч, гарантированно не заденет
   //    легитимный текущий прогон ≤2ч44м).
-  const startedCutoff = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
-  await supabaseAdmin
+  const startedCutoff = new Date(now.getTime() - 4 * 60 * 60 * 1000).toISOString();
+  const { error: missingHeartbeatError } = await supabaseAdmin
     .from('client_auto_pipeline_runs')
     .update({
       status: 'failed',
       error_message: 'stale — auto-closed (нет heartbeat, процесс прерван)',
-      finished_at: new Date().toISOString(),
+      finished_at: now.toISOString(),
     })
     .eq('client_user_id', clientUserId)
     .eq('status', 'running')
     .is('heartbeat_at', null)
     .lt('started_at', startedCutoff);
+  if (missingHeartbeatError) {
+    throw new Error(`Failed to close stale auto-pipeline runs: ${missingHeartbeatError.message}`);
+  }
 }
 
 /** ISO начала текущего окна добора: самое позднее наступление startHourUtc:00 UTC <= now. */
@@ -334,7 +355,7 @@ async function startRunRow(clientUserId: string): Promise<StartRunResult> {
   // Сначала подчищаем брошенные running-записи — чтобы дашборд не показывал
   // вечный «идёт прогон» от убитого процесса И чтобы lock ниже не считал
   // зомби активным прогоном.
-  await closeStaleRuns(clientUserId);
+  await closeStaleAutoPipelineRuns(clientUserId);
   const { data, error } = await supabaseAdmin
     .from('client_auto_pipeline_runs')
     .insert({ client_user_id: clientUserId, status: 'running', heartbeat_at: new Date().toISOString() })
@@ -435,24 +456,24 @@ async function enrichEmployers(
    * в финальный лог прогона).
    */
   mailganerStats?: import('./mailganerScoreCache').MailganerCacheStats,
-): Promise<EnrichmentResult[]> {
-  const results: EnrichmentResult[] = new Array(employers.length);
-  let cursor = 0;
+  shouldStop?: () => boolean,
+): Promise<{ results: EnrichmentResult[]; interrupted: boolean }> {
   // Shared MX cache по всему прогону — domains часто повторяются между
   // employers одного score-bucket'а, не хотим резолвить MX для google.com
   // несколько раз.
   const domainCache = new Map<string, import('@/lib/emailValidation/shared').DomainInfo>();
 
-  async function worker() {
-    while (true) {
-      const i = cursor++;
-      if (i >= employers.length) return;
-      const emp = employers[i];
+  const outcome = await mapAutoPipelineChunkUntilStopped({
+    items: employers,
+    concurrency,
+    shouldStop,
+    process: async (emp): Promise<EnrichmentResult> => {
       const domain = deriveDomain(emp.siteUrl);
+      let itemTimeout: ReturnType<typeof setTimeout> | null = null;
       try {
         // Таймаут на ОДИН домен (Promise.race) — зависший scrape/SMTP не должен
         // застопорить весь worker-пул (это была причина «зомби»-прогонов).
-        results[i] = await Promise.race<EnrichmentResult>([
+        return await Promise.race<EnrichmentResult>([
           (async (): Promise<EnrichmentResult> => {
         // Шаг 1: получаем score. Сначала смотрим в БД-кэш — если домен
         // скорили в любом прошлом прогоне, возьмём оттуда мгновенно (один
@@ -509,15 +530,15 @@ async function enrichEmployers(
           enrichError: endpoint.ok ? null : (endpoint.error ?? 'endpoint failed'),
         };
           })(),
-          new Promise<EnrichmentResult>((_, reject) =>
-            setTimeout(
+          new Promise<EnrichmentResult>((_, reject) => {
+            itemTimeout = setTimeout(
               () => reject(new Error(`enrich item timeout ${ENRICH_ITEM_TIMEOUT_MS}ms`)),
               ENRICH_ITEM_TIMEOUT_MS,
-            ),
-          ),
+            );
+          }),
         ]);
       } catch (err) {
-        results[i] = {
+        return {
           employer: emp,
           domain,
           email: null,
@@ -528,20 +549,21 @@ async function enrichEmployers(
           endpointRaw: null,
           enrichError: err instanceof Error ? err.message : 'enrich error',
         };
+      } finally {
+        if (itemTimeout) clearTimeout(itemTimeout);
+        // Nightly pacing is cooperative too: once SIGTERM is observed, do not
+        // add an artificial pause before the worker can return and shut down.
+        if (perItemPauseMs > 0) {
+          await waitForAutoPipelineDelay({ delayMs: perItemPauseMs, shouldStop });
+        }
       }
-      // Nightly-pacing: каждый worker spit'нул один item — паузим, чтобы
-      // распределить общий поток по окну [start..end] UTC. При burst=0 этот
-      // sleep no-op.
-      if (perItemPauseMs > 0) {
-        await new Promise<void>((resolve) => setTimeout(resolve, perItemPauseMs));
-      }
-    }
-  }
+    },
+  });
 
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, employers.length) }, worker),
-  );
-  return results;
+  return {
+    results: outcome.completed.map(({ value }) => value),
+    interrupted: outcome.interrupted,
+  };
 }
 
 // ── Routing ──────────────────────────────────────────────────────────────
@@ -1019,7 +1041,7 @@ export async function runAutoPipelineForClient(
       const chunk = fresh.slice(chunkStart, chunkStart + CHUNK_SIZE);
       logPhase('chunk', { from: chunkStart, of: fresh.length });
 
-      const enrichments = await enrichEmployers(
+      const enrichmentBatch = await enrichEmployers(
         chunk,
         {
           url: config.endpoint_url,
@@ -1031,7 +1053,22 @@ export async function runAutoPipelineForClient(
         ENRICH_CONCURRENCY,
         pacing.perItemPauseMs,
         mailganerStats,
+        opts.shouldStop,
       );
+      const enrichments = enrichmentBatch.results;
+
+      // No provider side effect has started yet. If shutdown was observed while
+      // enriching, leave this partial chunk out of seen/snapshots entirely so
+      // the next run can retry it without any attribution ambiguity.
+      if (enrichmentBatch.interrupted || opts.shouldStop?.()) {
+        interrupted = true;
+        logPhase('graceful-stop', {
+          processedUpTo: chunkStart,
+          of: fresh.length,
+          phase: 'enrichment',
+        });
+        break;
+      }
 
       // 5.1. Чистка названий would-be-ready строк ЭТОГО чанка — ТЕМ ЖЕ AI, что
       //      кнопка «Очистить названия» (cleanCompanyNames → stepNameCleanup).
@@ -1050,6 +1087,7 @@ export async function runAutoPipelineForClient(
       if (readyEnrichments.length > 0) {
         const cleaned = await cleanCompanyNames(
           readyEnrichments.map((enr) => ({ name: enr.employer.name, domain: enr.domain })),
+          async () => Boolean(opts.shouldStop?.()),
         );
         readyEnrichments.forEach((enr, i) => {
           if (cleaned[i]) cleanedById.set(enr.employer.id, cleaned[i]);
@@ -1057,24 +1095,29 @@ export async function runAutoPipelineForClient(
         logPhase('names-cleaned', { from: chunkStart, ready: readyEnrichments.length });
       }
 
+      // Name cleanup is cancellation-aware between its bounded AI batches. It
+      // has no provider side effect, so an interrupted chunk remains resumable.
+      if (opts.shouldStop?.()) {
+        interrupted = true;
+        logPhase('graceful-stop', {
+          processedUpTo: chunkStart,
+          of: fresh.length,
+          phase: 'name-cleanup',
+        });
+        break;
+      }
+
       const seenUpserts: SeenEmployerUpsert[] = [];
       // Лиды ЭТОГО чанка по bucket'ам — заливаем сразу после чанка
       // (инкрементально), не копим до конца прогона. Так обрыв (редеплой/OOM)
       // теряет максимум 1 чанк, а не весь прогон.
-      const groupedLeads = new Map<string, { bucket: ScoreBucket; leads: LeadCreatePayload[] }>();
+      const groupedLeads = new Map<string, {
+        bucket: ScoreBucket;
+        leads: LeadCreatePayload[];
+        employerIds: Set<string>;
+      }>();
 
       for (const enr of enrichments) {
-        // Воронка — считаем по каждому enrichment независимо от routing'а.
-        if (enr.employer.siteUrl) withSiteCount++;
-        if (enr.score !== null) withScoreCount++;
-        if (enr.email) withEmailCount++;
-        // «Готовых контактов» = валидные адреса (до 2 на домен), т.к. каждый
-        // станет отдельным лидом. with_email остаётся «доменов с ≥1 почтой».
-        if (enr.emailValidation?.isValid) emailValidCount++;
-        for (const extra of enr.additionalEmails) {
-          if (extra.validation?.isValid) emailValidCount++;
-        }
-
         const decision = decideRoute(enr, config);
         const base: Omit<SeenEmployerUpsert, 'status' | 'skip_reason' | 'error_message' | 'routed_bucket_id' | 'routed_campaign_id'> = {
           client_user_id: clientUserId,
@@ -1172,9 +1215,10 @@ export async function runAutoPipelineForClient(
 
           let group = groupedLeads.get(bucket.id);
           if (!group) {
-            group = { bucket, leads: [] };
+            group = { bucket, leads: [], employerIds: new Set<string>() };
             groupedLeads.set(bucket.id, group);
           }
+          group.employerIds.add(enr.employer.id);
           for (const addr of leadEmails) {
             group.leads.push({
               email: addr,
@@ -1198,72 +1242,114 @@ export async function runAutoPipelineForClient(
         }
       } // конец for (enr of enrichments)
 
-      // Заливаем лиды ЭТОГО чанка в Instantly ДО upsert'а seen. Если процесс
-      // умрёт до append — employer'ы НЕ помечены seen → следующий прогон их
-      // переобработает и дозальёт. Дубли исключены: createLeads идёт с
-      // skip_if_in_campaign=true (идемпотентно). В dry-run groupedLeads пуст
-      // (routing делает continue до groupedLeads.set), поэтому цикл — no-op.
-      for (const group of groupedLeads.values()) {
-        const readyLeads = group.leads.filter((l) => l.email && l.company_name && l.website);
-        droppedIncomplete += group.leads.length - readyLeads.length;
-        if (readyLeads.length === 0) continue;
+      // Заливаем группы последовательно. После SIGTERM уже начатый provider-call
+      // обязательно доводим до terminal ledger + локального snapshot/seen, но
+      // следующую кампанию не начинаем. Её строки остаются невидимыми для seen и
+      // безопасно попадут в resume следующего прогона.
+      const appendGroups = [...groupedLeads.values()];
+      const appendCandidateEmployerIds = new Set(
+        appendGroups.flatMap((group) => [...group.employerIds]),
+      );
+      const appendOutcome = await mapAutoPipelineChunkUntilStopped({
+        items: appendGroups,
+        concurrency: 1,
+        shouldStop: opts.shouldStop,
+        process: async (group): Promise<string[]> => {
+          const readyLeads = group.leads.filter((l) => l.email && l.company_name && l.website);
+          droppedIncomplete += group.leads.length - readyLeads.length;
+          if (readyLeads.length === 0) return [...group.employerIds];
 
-        const applyAppendOutcome = (
-          outcome: ExactAppendOutcome,
-          unresolvedStatus: 'skipped' | 'failed',
-          unresolvedMessage: string,
-        ) => {
-          const acceptedDomains = acceptedAutoRouteDomains(readyLeads, outcome);
-          routedCount += outcome.accepted;
-          for (const seen of seenUpserts) {
-            if (seen.routed_bucket_id !== group.bucket.id || seen.status !== 'routed') continue;
-            const domain = seen.domain?.trim().toLowerCase() ?? '';
-            if (acceptedDomains?.has(domain)) continue;
-            seen.status = acceptedDomains === null ? 'failed' : unresolvedStatus;
-            seen.skip_reason = acceptedDomains === null && outcome.accepted > 0
-              ? 'accepted_identity_unknown'
-              : unresolvedStatus === 'skipped' ? 'provider_not_accepted' : null;
-            seen.error_message = acceptedDomains === null && outcome.accepted > 0
-              ? 'Provider confirmed only an aggregate accepted count'
-              : unresolvedStatus === 'failed' ? unresolvedMessage.slice(0, 500) : null;
-            seen.routed_bucket_id = null;
-            seen.routed_campaign_id = null;
-          }
-        };
-
-        try {
-          const result = await appendLeadsToClientCampaign({
-            userId: clientUserId,
-            campaignId: group.bucket.instantly_campaign_id!,
-            leads: readyLeads,
-            contextLabel: group.bucket.label,
-            ledgerSource: {
-              kind: 'auto_pipeline',
-              runId,
-              campaignName: group.bucket.label,
-            },
-          });
-          applyAppendOutcome(result, 'skipped', 'Provider did not accept the contact');
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : 'append failed';
-          await logError(
-            'auto-pipeline.append.failed',
-            err,
-            { ...logCtx, bucket: group.bucket.label, leadCount: readyLeads.length },
-          );
-          const partial = partialAppendOutcome(err);
-          if (partial) applyAppendOutcome(partial, 'failed', msg);
-          else {
+          const applyAppendOutcome = (
+            outcome: ExactAppendOutcome,
+            unresolvedStatus: 'skipped' | 'failed',
+            unresolvedMessage: string,
+          ) => {
+            const acceptedDomains = acceptedAutoRouteDomains(readyLeads, outcome);
+            routedCount += outcome.accepted;
             for (const seen of seenUpserts) {
-              if (seen.routed_bucket_id === group.bucket.id && seen.status === 'routed') {
-                seen.status = 'failed';
-                seen.error_message = msg.slice(0, 500);
-                seen.routed_bucket_id = null;
-                seen.routed_campaign_id = null;
+              if (seen.routed_bucket_id !== group.bucket.id || seen.status !== 'routed') continue;
+              const domain = seen.domain?.trim().toLowerCase() ?? '';
+              if (acceptedDomains?.has(domain)) continue;
+              seen.status = acceptedDomains === null ? 'failed' : unresolvedStatus;
+              seen.skip_reason = acceptedDomains === null && outcome.accepted > 0
+                ? 'accepted_identity_unknown'
+                : unresolvedStatus === 'skipped' ? 'provider_not_accepted' : null;
+              seen.error_message = acceptedDomains === null && outcome.accepted > 0
+                ? 'Provider confirmed only an aggregate accepted count'
+                : unresolvedStatus === 'failed' ? unresolvedMessage.slice(0, 500) : null;
+              seen.routed_bucket_id = null;
+              seen.routed_campaign_id = null;
+            }
+          };
+
+          try {
+            const result = await appendLeadsToClientCampaign({
+              userId: clientUserId,
+              campaignId: group.bucket.instantly_campaign_id!,
+              leads: readyLeads,
+              contextLabel: group.bucket.label,
+              ledgerSource: {
+                kind: 'auto_pipeline',
+                runId,
+                campaignName: group.bucket.label,
+              },
+            });
+            applyAppendOutcome(result, 'skipped', 'Provider did not accept the contact');
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : 'append failed';
+            await logError(
+              'auto-pipeline.append.failed',
+              err,
+              { ...logCtx, bucket: group.bucket.label, leadCount: readyLeads.length },
+            );
+            const partial = partialAppendOutcome(err);
+            if (partial) applyAppendOutcome(partial, 'failed', msg);
+            else {
+              for (const seen of seenUpserts) {
+                if (seen.routed_bucket_id === group.bucket.id && seen.status === 'routed') {
+                  seen.status = 'failed';
+                  seen.error_message = msg.slice(0, 500);
+                  seen.routed_bucket_id = null;
+                  seen.routed_campaign_id = null;
+                }
               }
             }
+            failedCount += Math.max(0, readyLeads.length - (partial?.accepted ?? 0));
           }
-          failedCount += Math.max(0, readyLeads.length - (partial?.accepted ?? 0));
+
+          return [...group.employerIds];
+        },
+      });
+      const completedAppendEmployerIds = new Set(
+        appendOutcome.completed.flatMap(({ value }) => value),
+      );
+      const appendWasInterrupted = appendOutcome.interrupted;
+      const persistedSeenUpserts = appendWasInterrupted
+        ? retainRowsSafeAfterInterruptedAppend({
+            rows: seenUpserts,
+            getEmployerId: (seen) => seen.hh_employer_id,
+            appendCandidateEmployerIds,
+            completedAppendEmployerIds,
+          })
+        : seenUpserts;
+      const persistedEnrichments = appendWasInterrupted
+        ? retainRowsSafeAfterInterruptedAppend({
+            rows: enrichments,
+            getEmployerId: (enrichment) => enrichment.employer.id,
+            appendCandidateEmployerIds,
+            completedAppendEmployerIds,
+          })
+        : enrichments;
+
+      // Воронка учитывает только durable rows этого запуска. Отложенные после
+      // SIGTERM campaign-группы будут учтены в следующем resume, а не дважды.
+      for (const enrichment of persistedEnrichments) {
+        if (enrichment.employer.siteUrl) withSiteCount++;
+        if (enrichment.score !== null) withScoreCount++;
+        if (enrichment.email) withEmailCount++;
+        if (enrichment.emailValidation?.isValid) emailValidCount++;
+        for (const extra of enrichment.additionalEmails) {
+          if (extra.validation?.isValid) emailValidCount++;
         }
       }
 
@@ -1271,7 +1357,7 @@ export async function runAutoPipelineForClient(
       // обработанному домену. Пишем до legacy seen-upsert: при сбое чанк
       // останется доступным для retry, а стабильный id не создаст дубль.
       const seenByEmployerId = new Map(
-        seenUpserts.map((seen) => [seen.hh_employer_id, seen] as const),
+        persistedSeenUpserts.map((seen) => [seen.hh_employer_id, seen] as const),
       );
       const campaignLabelById = new Map(
         config.score_buckets
@@ -1281,7 +1367,7 @@ export async function runAutoPipelineForClient(
       const snapshotScoredAt = new Date().toISOString();
       await persistDomainSnapshots(
         supabaseAdmin!,
-        enrichments.map((enrichment) => {
+        persistedEnrichments.map((enrichment) => {
           const seen = seenByEmployerId.get(enrichment.employer.id);
           const routedCampaignId =
             seen?.status === 'routed' ? seen.routed_campaign_id : null;
@@ -1315,7 +1401,21 @@ export async function runAutoPipelineForClient(
       // Upsert seen ЭТОГО чанка (статусы уже финальные после append) —
       // освобождаем память перед следующим. chunk + enrichments + seenUpserts +
       // groupedLeads выходят из scope на след. итерации, GC их собирает (фикс OOM).
-      await upsertSeenEmployers(seenUpserts);
+      await upsertSeenEmployers(persistedSeenUpserts);
+
+      // A signal during an append lets that one campaign finish and become
+      // durable; untouched campaign groups remain outside seen/snapshots. A
+      // signal during the short local persistence tail is also honored here.
+      if (appendWasInterrupted || opts.shouldStop?.()) {
+        interrupted = true;
+        logPhase('graceful-stop', {
+          persistedThisChunk: persistedEnrichments.length,
+          deferredThisChunk: enrichments.length - persistedEnrichments.length,
+          of: fresh.length,
+          phase: appendWasInterrupted ? 'campaign-append' : 'persistence',
+        });
+        break;
+      }
 
       // Дневной кап: как только суммарно за сегодня (прошлые прогоны + текущий)
       // набрали target контактов — стопаем enrichment. Это УСПЕШНЫЙ стоп (не

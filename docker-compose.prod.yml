@@ -1512,8 +1512,8 @@ services:
 
   # Авто-пайплайн (добор HH + база-баз → score-bucket → лиды в Instantly).
   # Вынесен из HTTP-крона в portal в отдельный демон, чтобы переживать редеплои:
-  # на SIGTERM прогон останавливается между чанками (текущий чанк закоммичен:
-  # append + seen), а остаток докатывается на следующем тике (resume через дедуп
+  # на SIGTERM воркер перестаёт назначать новые домены, сохраняет завершённый
+  # префикс (append + snapshots + seen), а остаток докатывается на следующем тике (resume через дедуп
   # seen_employers + идемпотентный createLeads). Расписание — внутри воркера
   # (окно parse_window_*_utc), отдельный cron не нужен. См. worker/autoPipeline.ts.
   # ВАЖНО: после деплоя отключить старый внешний крон на /api/cron/auto-hh-pipeline.
@@ -1530,9 +1530,9 @@ services:
       - AUTOPIPELINE_TICK_MS=${AUTOPIPELINE_TICK_MS:-600000}
       - AUTOPIPELINE_MAX_ATTEMPTS=${AUTOPIPELINE_MAX_ATTEMPTS:-6}
       - MAILGANER_SCORING_CONCURRENCY=${MAILGANER_SCORING_CONCURRENCY:-}
-    # Прогон идёт чанками по 500. На SIGTERM (редеплой) даём текущему чанку
-    # доделать enrichment + append + seen, затем воркер останавливается
-    # (interrupted → resume на след. тике). 20 мин — с запасом на один чанк.
+    # Прогон идёт чанками по 500, но enrichment внутри чанка cooperative: после
+    # SIGTERM новые домены не назначаются, уже начатые завершаются, готовый
+    # префикс проходит append + snapshots + seen. 20 минут — аварийный предел.
     stop_grace_period: 20m
     deploy:
       resources:
