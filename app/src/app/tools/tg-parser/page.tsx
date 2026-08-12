@@ -30,6 +30,7 @@ import {
 } from '@/lib/tgParser/constants';
 import type { ParseJob, TgParserJobApiRow } from '@/lib/tgParser/mapJobRow';
 import { tgParserApiRowToUi } from '@/lib/tgParser/mapJobRow';
+import { formatJobStart, formatElapsed } from '@/lib/tgParser/jobDisplay';
 
 const COLUMNS: (keyof ParsedUser)[] = [
   'ID/Username',
@@ -120,6 +121,9 @@ type TgParserLog = {
 };
 
 const API_ACCOUNTS = '/api/tools/tg-parser/accounts';
+
+/** Задач на странице списка. */
+const JOBS_PAGE_SIZE = 10;
 
 /* ── Virtualized user table ── */
 
@@ -258,6 +262,7 @@ function JobCard({
   currentUserId,
   exportingJobId,
   stoppingJobId,
+  now,
   onExportCsv,
   onExportExcel,
   onRemove,
@@ -267,6 +272,8 @@ function JobCard({
   currentUserId: string | null;
   exportingJobId: string | null;
   stoppingJobId: string | null;
+  /** Момент последнего опроса — точка отсчёта для «идёт N мин». */
+  now: number;
   onExportCsv: (job: ParseJob) => void;
   onExportExcel: (job: ParseJob) => void;
   onRemove: (id: string) => void;
@@ -350,12 +357,23 @@ function JobCard({
                 · {job.userCount.toLocaleString('ru-RU')} пользователей
               </span>
             )}
-            {/* Идущая задача показывает, сколько уже собрано: обход трёх чатов
-                занимает до сорока минут, и раньше всё это время счётчик был
-                пуст, а отличить работу от зависания было нельзя. */}
-            {job.status === 'running' && (job.foundCount ?? 0) > 0 && (
+            {/* Идущая задача показывает, сколько уже собрано. Показываем и ноль:
+                раньше счётчик появлялся только после первого пользователя, и
+                всё время до него задача выглядела одинаково что при работе, что
+                при зависании — а до первого контакта проходят минуты. */}
+            {job.status === 'running' && (
               <span className="text-xs font-medium text-blue-700">
-                · уже {job.foundCount!.toLocaleString('ru-RU')}
+                · спарсилось: {(job.foundCount ?? 0).toLocaleString('ru-RU')}
+              </span>
+            )}
+            {/* Дата запуска: в списке лежат задачи за несколько дней, и понять,
+                вчерашняя это или сегодняшняя, было не по чему. */}
+            <span className="text-gray-400 text-xs" title={new Date(job.startedAt).toLocaleString('ru-RU')}>
+              · {formatJobStart(job.startedAt)}
+            </span>
+            {job.status === 'running' && (
+              <span className="text-gray-400 text-xs">
+                · идёт {formatElapsed(job.startedAt, now)}
               </span>
             )}
           </div>
@@ -500,6 +518,24 @@ export default function TgParserPage() {
   const [maxOfflineDays, setMaxOfflineDays] = useState<string>('');
 
   const [parseJobs, setParseJobs] = useState<ParseJob[]>([]);
+  /** Страница списка задач, с нуля. */
+  const [jobsPage, setJobsPage] = useState(0);
+  /** Сколько задач всего — для «стр. 2 из 7» и блокировки «вперёд». */
+  const [jobsTotal, setJobsTotal] = useState(0);
+  /**
+   * Все идущие задачи, независимо от страницы. По ним живёт опрос и подсказка
+   * «этот аккаунт уже парсит» — оба вопроса про всю очередь, а не про то, что
+   * сейчас видно на экране.
+   */
+  const [runningJobs, setRunningJobs] = useState<ParseJob[]>([]);
+  const lastJobsPage = Math.max(0, Math.ceil(jobsTotal / JOBS_PAGE_SIZE) - 1);
+  /**
+   * Задачи заканчиваются и удаляются, поэтому выбранная страница может
+   * оказаться за концом списка — тогда экран пуст, и выглядит это как поломка.
+   * Зажимаем при рендере, а не правим состояние в эффекте: лишняя перерисовка
+   * и гонка «поехали за страницей, которой нет» тут ни к чему.
+   */
+  const currentJobsPage = Math.min(jobsPage, lastJobsPage);
   const [jobsPanelTab, setJobsPanelTab] = useState<'jobs' | 'logs'>('jobs');
   const [parseLogs, setParseLogs] = useState<TgParserLog[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
@@ -556,25 +592,40 @@ export default function TgParserPage() {
     };
   }, []);
 
+  /**
+   * Точка отсчёта для «идёт N мин». Отдельным состоянием, а не `Date.now()` в
+   * разметке: вызов часов во время рендера нечист и ломает предсказуемость
+   * перерисовок. Обновляется тем же тиком, что и опрос задач.
+   */
+  const [nowTs, setNowTs] = useState(() => Date.now());
+
   const loadParseJobs = useCallback(async () => {
     try {
-      const res = await authFetch('/api/tools/tg-parser/jobs?limit=50');
+      const res = await authFetch(
+        `/api/tools/tg-parser/jobs?limit=${JOBS_PAGE_SIZE}&offset=${currentJobsPage * JOBS_PAGE_SIZE}`,
+      );
       if (!res.ok) return;
-      const { items } = (await res.json()) as { items: TgParserJobApiRow[] };
-      const rows = items ?? [];
-      const uiRows = rows.map(tgParserApiRowToUi);
-      setParseJobs(uiRows);
+      const { items, total, running } = (await res.json()) as {
+        items: TgParserJobApiRow[];
+        total?: number;
+        running?: TgParserJobApiRow[];
+      };
+      setParseJobs((items ?? []).map(tgParserApiRowToUi));
+      setJobsTotal(total ?? (items ?? []).length);
+
+      // Очередь считаем по всем идущим задачам, а не по текущей странице:
+      // задача со второй страницы всё так же занимает свой аккаунт.
+      const runningUi = (running ?? []).map(tgParserApiRowToUi);
+      setRunningJobs(runningUi);
       runningAccountKeysRef.current.clear();
-      for (const row of uiRows) {
-        if (row.status === 'running') {
-          const key = row.isTarget ? '__target__' : jobAccountKey(row.accountId);
-          runningAccountKeysRef.current.add(key);
-        }
+      for (const row of runningUi) {
+        const key = row.isTarget ? '__target__' : jobAccountKey(row.accountId);
+        runningAccountKeysRef.current.add(key);
       }
     } catch {
       /* ignore */
     }
-  }, []);
+  }, [currentJobsPage]);
 
   useEffect(() => { void loadParseJobs(); }, [loadParseJobs]);
 
@@ -593,11 +644,22 @@ export default function TgParserPage() {
     }
   }, [activeTab]);
 
+  /**
+   * Опрос идущих задач.
+   *
+   * Было 3 секунды, стало 15: воркер и так пишет прогресс не чаще раза в 10
+   * секунд (`lastProgressWriteAt` в tgParserJobWorker), поэтому четыре из
+   * каждых пяти запросов возвращали ровно то же самое. Пятнадцать секунд —
+   * это одно обновление на одну запись прогресса.
+   */
   useEffect(() => {
-    if (!parseJobs.some((j) => j.status === 'running')) return;
-    const t = setInterval(() => { void loadParseJobs(); }, 3000);
+    if (runningJobs.length === 0) return;
+    const t = setInterval(() => {
+      setNowTs(Date.now());
+      void loadParseJobs();
+    }, 15_000);
     return () => clearInterval(t);
-  }, [parseJobs, loadParseJobs]);
+  }, [runningJobs, loadParseJobs]);
 
   useEffect(() => {
     if (jobsPanelTab !== 'logs') return;
@@ -1484,7 +1546,22 @@ export default function TgParserPage() {
 
         {jobsPanelTab === 'jobs' && parseJobs.length > 0 && (
           <div className="space-y-4">
-            <h2 className="text-sm font-semibold text-gray-800">Задачи парсинга</h2>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold text-gray-800">
+                Задачи парсинга{' '}
+                <span className="font-normal text-gray-400">
+                  ({jobsTotal.toLocaleString('ru-RU')})
+                </span>
+              </h2>
+              {/* Идущие задачи считаем по всей очереди: со страницей по десять
+                  работающая задача легко оказывается не на этом экране, и без
+                  этой строки казалось бы, что не запущено ничего. */}
+              {runningJobs.length > 0 && (
+                <span className="text-xs text-blue-700">
+                  выполняется: {runningJobs.length}
+                </span>
+              )}
+            </div>
             {parseJobs.map((job) => (
               <JobCard
                 key={job.id}
@@ -1492,12 +1569,37 @@ export default function TgParserPage() {
                 currentUserId={currentUserId}
                 exportingJobId={exportingJobId}
                 stoppingJobId={stoppingJobId}
+                now={nowTs}
                 onExportCsv={exportJobCsv}
                 onExportExcel={exportJobExcel}
                 onRemove={removeParseJob}
                 onStop={stopParseJob}
               />
             ))}
+
+            {jobsTotal > JOBS_PAGE_SIZE && (
+              <div className="flex items-center justify-center gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setJobsPage(Math.max(0, currentJobsPage - 1))}
+                  disabled={currentJobsPage === 0}
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Назад
+                </button>
+                <span className="text-xs text-gray-500">
+                  стр. {currentJobsPage + 1} из {lastJobsPage + 1}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setJobsPage(currentJobsPage + 1)}
+                  disabled={currentJobsPage >= lastJobsPage}
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Вперёд
+                </button>
+              </div>
+            )}
           </div>
         )}
 

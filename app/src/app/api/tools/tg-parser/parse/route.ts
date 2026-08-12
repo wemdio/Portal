@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
+import { normalizeTgLinks } from '@/lib/tgParser/normalizeLinks';
 
 export const dynamic = 'force-dynamic';
 
@@ -44,7 +45,9 @@ export async function POST(req: NextRequest) {
         return jsonError('Invalid JSON body', 400);
       }
 
-      const links = Array.isArray(body?.links) ? body.links.filter((l): l is string => typeof l === 'string') : [];
+      // Расклеиваем здесь, а не на экране: экран это и так делает, а до Telegram
+      // склейка доезжала со всех остальных входов — см. normalizeTgLinks.
+      const { links } = normalizeTgLinks(body?.links);
       const parse_chat_messages = body?.parse_chat_messages ?? true;
       const parse_chat_members = body?.parse_chat_members ?? true;
       const parse_post_comments = body?.parse_post_comments ?? true;
