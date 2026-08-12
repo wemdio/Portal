@@ -6,6 +6,8 @@ const STALE_SYNC_MS = 36 * 60 * 60 * 1000;
 
 const fmt = (n: number) => n.toLocaleString('ru-RU');
 const fmtDays = (n: number) => n.toLocaleString('ru-RU', { maximumFractionDigits: 1 });
+/** Копейки в плитке не нужны — округляем до рубля. */
+const fmtMoney = (n: number) => `${Math.round(n).toLocaleString('ru-RU')} ₽`;
 
 /** Вынесено из компонента: `Date.now()` внутри тела компонента — импьюрный
  *  вызов, react-compiler-плагин линтера ругается на него в теле рендера.
@@ -19,7 +21,16 @@ function isSyncStale(syncedDate: Date | null): boolean {
 /** Абсолютная и (если есть с чем сравнивать) процентная дельта к прошлому
  *  периоду. Прошлый период пустой → делить на ноль бессмысленно, показываем
  *  только абсолютную разницу — как и просили в задаче. */
-function Delta({ current, previous }: { current: number; previous: number }) {
+function Delta({
+  current,
+  previous,
+  format = fmt,
+}: {
+  current: number;
+  previous: number;
+  /** Деньги показываются рублями, остальное — штуками. */
+  format?: (n: number) => string;
+}) {
   const diff = current - previous;
   const color = diff > 0 ? 'text-emerald-600' : diff < 0 ? 'text-red-600' : 'text-zinc-400';
   const sign = diff > 0 ? '+' : '';
@@ -27,7 +38,7 @@ function Delta({ current, previous }: { current: number; previous: number }) {
   const pctSign = pct !== null && pct > 0 ? '+' : '';
   return (
     <span className={`text-[11px] font-medium tabular-nums ${color}`}>
-      {sign}{fmt(diff)}{pct !== null ? ` (${pctSign}${pct}%)` : ''}
+      {sign}{format(diff)}{pct !== null ? ` (${pctSign}${pct}%)` : ''}
     </span>
   );
 }
@@ -74,8 +85,22 @@ export default function KpiRow({
   const syncedValid = !!syncedDate && Number.isFinite(syncedDate.getTime());
   const syncStale = isSyncStale(syncedDate);
 
+  // Деньги — единственная цифра дашборда, чья неполнота структурная: связка с
+  // банком идёт через ИНН, а ИНН заполнен у меньшинства сделок. Пока покрытие
+  // не полное, плитка жёлтая и подписана долей — читать её как «столько мы
+  // заработали» нельзя, только как «столько смогли связать».
+  const money = totals.money;
+  const coverageKnown = totals.contractsReliable && totals.contracts > 0;
+  const moneyPartial = !coverageKnown || money.contractsWithInn < totals.contracts;
+  const moneySub = [
+    `платежей: ${fmt(money.payments)}`,
+    coverageKnown ? `ИНН у ${fmt(money.contractsWithInn)} из ${fmt(totals.contracts)} договоров` : null,
+    money.pendingPayments > 0 ? `ждут разбора: ${fmtMoney(money.pending)}` : null,
+    money.ambiguousPayments > 0 ? `спорных: ${fmtMoney(money.ambiguous)}` : null,
+  ].filter(Boolean).join(' · ');
+
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
       <Tile
         label="Лиды"
         value={fmt(totals.leads)}
@@ -122,6 +147,19 @@ export default function KpiRow({
             ? <Delta current={totals.contracts} previous={previousTotals.contracts} />
             : undefined
         }
+      />
+      <Tile
+        label="Деньги"
+        value={fmtMoney(money.received)}
+        sub={moneySub}
+        delta={
+          <Delta
+            current={money.received}
+            previous={previousTotals.money.received}
+            format={fmtMoney}
+          />
+        }
+        amber={moneyPartial}
       />
       <Tile
         label="Средний цикл"

@@ -11,6 +11,7 @@ import { useSortableRows, type SortColumns } from '@/components/ui/useSortableRo
 import { SortableTh } from '@/components/ui/SortableTh';
 
 const fmt = (n: number) => n.toLocaleString('ru-RU');
+const fmtMoney = (n: number) => (n > 0 ? `${Math.round(n).toLocaleString('ru-RU')} ₽` : '—');
 const pct = (part: number, total: number) => (total > 0 ? `${Math.round((part / total) * 100)}%` : '—');
 const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('ru-RU') : '—');
 
@@ -116,7 +117,7 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
   if (loading) {
     return (
       <tr>
-        <td colSpan={7} className="bg-zinc-50/60 px-3 py-4 text-center text-zinc-400">
+        <td colSpan={8} className="bg-zinc-50/60 px-3 py-4 text-center text-zinc-400">
           Загрузка сделок…
         </td>
       </tr>
@@ -126,7 +127,7 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
   if (error) {
     return (
       <tr>
-        <td colSpan={7} className="bg-zinc-50/60 px-3 py-4 text-center text-red-600">
+        <td colSpan={8} className="bg-zinc-50/60 px-3 py-4 text-center text-red-600">
           Ошибка загрузки сделок: {error}
         </td>
       </tr>
@@ -136,7 +137,7 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
   if (rows.length === 0) {
     return (
       <tr>
-        <td colSpan={7} className="bg-zinc-50/60 px-3 py-4 text-center text-zinc-400">
+        <td colSpan={8} className="bg-zinc-50/60 px-3 py-4 text-center text-zinc-400">
           Сделок за выбранный период не найдено.
         </td>
       </tr>
@@ -145,7 +146,7 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
 
   return (
     <tr>
-      <td colSpan={7} className="bg-zinc-50/60 px-3 py-3">
+      <td colSpan={8} className="bg-zinc-50/60 px-3 py-3">
         {/* Раскрытая строка живёт внутри таблицы, которая сама уже стеклянная.
             Второй `.glass-frame` дал бы размытие внутри размытия — именно
             вложенность роняет плавность прокрутки. Плотная подложка строк. */}
@@ -260,6 +261,7 @@ const sourceSortColumns: SortColumns<SourceBreakdown> = {
   qualified: { type: 'number', getValue: (r) => r.qualified },
   meetings: { type: 'number', getValue: (r) => r.meetings },
   contracts: { type: 'number', getValue: (r) => r.contracts },
+  money: { type: 'number', getValue: (r) => r.money },
 };
 
 export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]; filters: FiltersState }) {
@@ -283,6 +285,20 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
             <SortableTh label="Квал" sortKey="qualified" sort={sort} onSort={toggleSort} align="right" />
             <SortableTh label="Встречи" sortKey="meetings" sort={sort} onSort={toggleSort} align="right" />
             <SortableTh label="Договоры" sortKey="contracts" sort={sort} onSort={toggleSort} align="right" />
+            {/* Деньги, связанные со сделкой по ИНН плательщика. Прочерк —
+                «связать не смогли», а не «денег не было»; доля покрытия стоит
+                на карточке «Деньги» вверху дашборда. */}
+            <SortableTh
+              label={
+                <span title="Банковские приходы, связанные со сделкой по ИНН плательщика. Прочерк значит «связать не смогли» — ИНН заполнен не у всех сделок.">
+                  Деньги
+                </span>
+              }
+              sortKey="money"
+              sort={sort}
+              onSort={toggleSort}
+              align="right"
+            />
           </tr>
         </thead>
         <tbody>
@@ -316,6 +332,7 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(row.qualified)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(row.meetings)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(row.contracts)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmtMoney(row.money)}</td>
                 </tr>
                 {isOpen && <DrillDownRows source={row.source} filters={filters} />}
               </Fragment>
@@ -323,7 +340,7 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
           })}
           {rows.length === 0 && (
             <tr>
-              <td colSpan={7} className="px-3 py-8 text-center text-zinc-400">
+              <td colSpan={8} className="px-3 py-8 text-center text-zinc-400">
                 Нет данных за выбранный период.
               </td>
             </tr>

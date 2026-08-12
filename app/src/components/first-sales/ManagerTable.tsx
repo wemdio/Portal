@@ -1,7 +1,8 @@
 'use client';
 
-import { useMemo, useState } from 'react';
 import type { ManagerBreakdown } from '@/lib/firstSales/metrics';
+import { useSortableRows, type SortColumns } from '@/components/ui/useSortableRows';
+import { SortableTh } from '@/components/ui/SortableTh';
 
 /**
  * Разбивка первички по ответственным менеджерам.
@@ -15,97 +16,90 @@ import type { ManagerBreakdown } from '@/lib/firstSales/metrics';
  * встречи и договоры — по дате самого события), поэтому «встреч к квалам»
  * складывало бы разные вопросы в одну дробь. «Из лидов» честна: и числитель, и
  * знаменатель — про один и тот же набор сделок в окне.
+ *
+ * Столбец «Деньги» — банковские приходы, связанные со сделкой менеджера по ИНН
+ * плательщика. Он заведомо неполон (ИНН заполнен у меньшинства сделок), и
+ * пустая клетка здесь значит «связать не смогли», а не «денег не было»; общая
+ * оговорка с долей покрытия стоит на карточке «Деньги» вверху дашборда.
  */
 
-type SortKey = 'manager' | 'leads' | 'qualified' | 'meetings' | 'contracts';
+const fmt = (n: number) => n.toLocaleString('ru-RU');
+const fmtMoney = (n: number) => (n > 0 ? `${Math.round(n).toLocaleString('ru-RU')} ₽` : '—');
 
 const pct = (part: number, whole: number): string =>
   whole > 0 ? `${Math.round((part / whole) * 100)}%` : '—';
 
+/**
+ * Конверсии не сортируются по той же причине, что «Доля» в таблице источников
+ * (см. `SourceTable`): при фиксированном знаменателе строки они монотонны по
+ * числителю — но здесь знаменатель у каждой строки СВОЙ (лиды менеджера),
+ * поэтому порядок мог бы и отличаться. Причина другая: доля от трёх лидов
+ * («33%») и доля от трёхсот — величины разной надёжности, и сортировка по ним
+ * ставит наверх тех, у кого просто мало лидов. Это не тот вопрос, ради
+ * которого таблицу открывают.
+ */
+const managerSortColumns: SortColumns<ManagerBreakdown> = {
+  manager: { type: 'string', getValue: (r) => r.manager },
+  leads: { type: 'number', getValue: (r) => r.leads },
+  qualified: { type: 'number', getValue: (r) => r.qualified },
+  meetings: { type: 'number', getValue: (r) => r.meetings },
+  contracts: { type: 'number', getValue: (r) => r.contracts },
+  money: { type: 'number', getValue: (r) => r.money },
+};
+
 export default function ManagerTable({ rows }: { rows: ManagerBreakdown[] }) {
-  const [sortKey, setSortKey] = useState<SortKey>('leads');
-  const [asc, setAsc] = useState(false);
+  const { sortedRows, sort, toggleSort } = useSortableRows(rows, managerSortColumns);
 
-  const sorted = useMemo(() => {
-    const sign = asc ? 1 : -1;
-    return [...rows].sort((a, b) => {
-      if (sortKey === 'manager') return sign * a.manager.localeCompare(b.manager, 'ru');
-      return sign * (a[sortKey] - b[sortKey]) || a.manager.localeCompare(b.manager, 'ru');
-    });
-  }, [rows, sortKey, asc]);
-
-  const totals = useMemo(
-    () => rows.reduce(
-      (acc, r) => ({
-        leads: acc.leads + r.leads,
-        qualified: acc.qualified + r.qualified,
-        meetings: acc.meetings + r.meetings,
-        contracts: acc.contracts + r.contracts,
-      }),
-      { leads: 0, qualified: 0, meetings: 0, contracts: 0 },
-    ),
-    [rows],
+  const totals = rows.reduce(
+    (acc, r) => ({
+      leads: acc.leads + r.leads,
+      qualified: acc.qualified + r.qualified,
+      meetings: acc.meetings + r.meetings,
+      contracts: acc.contracts + r.contracts,
+      money: acc.money + r.money,
+    }),
+    { leads: 0, qualified: 0, meetings: 0, contracts: 0, money: 0 },
   );
 
   if (rows.length === 0) return null;
-
-  const onSort = (key: SortKey) => {
-    if (key === sortKey) { setAsc((v) => !v); return; }
-    setSortKey(key);
-    setAsc(key === 'manager');
-  };
-
-  const th = (label: string, key: SortKey, right = true) => (
-    <th className={`px-3 py-2 font-medium ${right ? 'text-right' : ''}`}>
-      <button
-        type="button"
-        onClick={() => onSort(key)}
-        className={`inline-flex items-center gap-1 uppercase tracking-wider hover:text-zinc-700 cursor-pointer ${
-          sortKey === key ? 'text-zinc-700' : ''
-        }`}
-      >
-        {label}
-        <span className={`text-[9px] ${sortKey === key ? 'opacity-100' : 'opacity-0'}`} aria-hidden>
-          {asc ? '▲' : '▼'}
-        </span>
-      </button>
-    </th>
-  );
 
   return (
     <section className="space-y-2">
       <h2 className="text-sm font-semibold text-zinc-800">По менеджерам</h2>
       <div className="overflow-x-auto rounded-xl border border-zinc-200 bg-white">
-        <table className="w-full min-w-[640px] text-xs">
+        <table className="w-full min-w-[720px] text-xs">
           <thead>
             <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400">
-              {th('Менеджер', 'manager', false)}
-              {th('Лиды', 'leads')}
-              {th('Квалы', 'qualified')}
-              {th('Встречи', 'meetings')}
-              {th('Договоры', 'contracts')}
-              <th className="px-3 py-2 font-medium text-right">Квал / лид</th>
-              <th className="px-3 py-2 font-medium text-right">Договор / лид</th>
+              <SortableTh label="Менеджер" sortKey="manager" sort={sort} onSort={toggleSort} />
+              <SortableTh label="Лиды" sortKey="leads" sort={sort} onSort={toggleSort} align="right" />
+              <SortableTh label="Квалы" sortKey="qualified" sort={sort} onSort={toggleSort} align="right" />
+              <SortableTh label="Встречи" sortKey="meetings" sort={sort} onSort={toggleSort} align="right" />
+              <SortableTh label="Договоры" sortKey="contracts" sort={sort} onSort={toggleSort} align="right" />
+              <SortableTh label="Деньги" sortKey="money" sort={sort} onSort={toggleSort} align="right" />
+              <th className="px-3 py-2 text-right font-medium">Квал / лид</th>
+              <th className="px-3 py-2 text-right font-medium">Договор / лид</th>
             </tr>
           </thead>
           <tbody>
-            {sorted.map((r) => (
+            {sortedRows.map((r) => (
               <tr key={r.manager} className="border-b border-zinc-50 last:border-0">
                 <td className="px-3 py-2 text-zinc-800">{r.manager}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{r.leads}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{r.qualified}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{r.meetings}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{r.contracts}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(r.leads)}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(r.qualified)}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(r.meetings)}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(r.contracts)}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmtMoney(r.money)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-500">{pct(r.qualified, r.leads)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-500">{pct(r.contracts, r.leads)}</td>
               </tr>
             ))}
             <tr className="bg-zinc-50 font-medium">
               <td className="px-3 py-2 text-zinc-700">Итого</td>
-              <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{totals.leads}</td>
-              <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{totals.qualified}</td>
-              <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{totals.meetings}</td>
-              <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{totals.contracts}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(totals.leads)}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(totals.qualified)}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(totals.meetings)}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(totals.contracts)}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmtMoney(totals.money)}</td>
               <td className="px-3 py-2 text-right tabular-nums text-zinc-500">{pct(totals.qualified, totals.leads)}</td>
               <td className="px-3 py-2 text-right tabular-nums text-zinc-500">{pct(totals.contracts, totals.leads)}</td>
             </tr>
@@ -117,6 +111,8 @@ export default function ManagerTable({ rows }: { rows: ManagerBreakdown[] }) {
       <p className="text-[11px] text-zinc-400">
         Разбивка по ответственному в AMO на момент синка. «Без ответственного» — сделки, за
         которыми в CRM никто не закреплён. Встречи относятся к тому, за кем закреплена сделка.
+        Деньги — банковские приходы, которые удалось связать со сделкой по ИНН плательщика:
+        прочерк значит «связать не смогли», а не «денег не было».
       </p>
     </section>
   );
