@@ -50,13 +50,19 @@ create index if not exists tg_outreach_lead_forwards_pending_idx
 create index if not exists tg_outreach_lead_forwards_dialog_idx
   on public.tg_outreach_lead_forwards (dialog_id, requested_at desc);
 
--- Одна задача в очереди на диалог и вид. Двойной клик по кнопке не должен слать
--- два одинаковых сообщения; повторить передачу можно после того, как первая
--- ушла или упала. Вид в ключе: один и тот же человек может быть и клиентом, и
--- кандидатом в партнёры, и уходят эти сообщения разным людям.
-create unique index if not exists tg_outreach_lead_forwards_one_pending_idx
-  on public.tg_outreach_lead_forwards (dialog_id, kind)
-  where status = 'pending';
+-- Одна передача на диалог — живая или уже ушедшая, любого вида.
+--
+-- Человек либо клиент, либо кандидат в партнёры: отправить его обоим значит
+-- посадить двух менеджеров на один контакт. Повтор того же вида тоже не нужен —
+-- сообщение уже у адресата, отозвать его нельзя, а второй экземпляр только
+-- задвоит контакт в чате.
+--
+-- Упавшая передача не блокирует ничего: до адресата она не дошла, и повтор —
+-- единственный способ довести дело до конца. Поэтому 'failed' вне индекса.
+drop index if exists public.tg_outreach_lead_forwards_one_pending_idx;
+create unique index if not exists tg_outreach_lead_forwards_one_active_idx
+  on public.tg_outreach_lead_forwards (dialog_id)
+  where status in ('pending', 'sent');
 
 comment on table public.tg_outreach_lead_forwards is
   'Очередь ручной передачи лида или кандидата в партнёры. Выполняет воркер аккаунтом кампании.';

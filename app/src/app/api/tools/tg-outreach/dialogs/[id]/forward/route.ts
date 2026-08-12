@@ -14,6 +14,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { buildLeadMessage, type ForwardKind } from '@/lib/tgOutreach/leadMessage';
+import { checkForwardConflict, type ExistingForward } from '@/lib/tgOutreach/forwardConflict';
 import { usernameKey } from '@/lib/tgOutreach/report';
 import type { OpenAISettings } from '@/lib/tgOutreach/types';
 
@@ -138,6 +139,22 @@ async function prepare(
   };
 }
 
+/**
+ * Уже переданные и ожидающие передачи этого диалога.
+ *
+ * Отдельным запросом до сборки сообщения: собирать текст ради того, чтобы
+ * отказать, — лишняя работа, а оператору нужен ответ сразу.
+ */
+async function loadForwards(db: SupabaseClient, dialogId: string): Promise<ExistingForward[]> {
+  const { data } = await db
+    .from('tg_outreach_lead_forwards')
+    .select('kind, status, requested_at, sent_at')
+    .eq('dialog_id', dialogId)
+    .order('requested_at', { ascending: false })
+    .limit(20);
+  return (data ?? []) as ExistingForward[];
+}
+
 /** Человеческое имя того, кто нажал кнопку — для строки «передал». */
 function operatorName(user: { email?: string | null; user_metadata?: Record<string, unknown> | null }): string {
   const meta = user.user_metadata ?? {};
@@ -157,6 +174,11 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
       const kind = parseKind(new URL(req.url).searchParams.get('kind'));
       if (!kind) return jsonError('kind должен быть lead или partner', 400);
+
+      // Проверяем и в предпросмотре: показать текст, а потом отказать на
+      // подтверждении — это обмануть ожидание оператора.
+      const conflict = checkForwardConflict(await loadForwards(auth.supabase, id), kind);
+      if (conflict) return jsonError(conflict, 409);
 
       const prepared = await prepare(auth.supabase, id, kind, operatorName(auth.user));
       if ('error' in prepared) return jsonError(prepared.error, prepared.status);
@@ -178,6 +200,9 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       const kind = parseKind(body?.kind ?? null);
       if (!kind) return jsonError('kind должен быть lead или partner', 400);
 
+      const conflict = checkForwardConflict(await loadForwards(auth.supabase, id), kind);
+      if (conflict) return jsonError(conflict, 409);
+
       const name = operatorName(auth.user);
       const prepared = await prepare(auth.supabase, id, kind, name);
       if ('error' in prepared) return jsonError(prepared.error, prepared.status);
@@ -198,10 +223,10 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         .single();
 
       if (error) {
-        // Частичный уникальный индекс: такая задача уже ждёт отправки. Это не
-        // сбой, а ответ на двойной клик — и оператору нужно сказать именно это.
+        // Частичный уникальный индекс — последняя защита от гонки: два клика
+        // могли пройти проверку выше одновременно. Отвечаем тем же языком.
         if (String(error.code) === '23505') {
-          return jsonError('Эта передача уже стоит в очереди и ждёт отправки', 409);
+          return jsonError('Этот диалог уже передан или стоит в очереди на передачу', 409);
         }
         return jsonError(error.message, 500);
       }

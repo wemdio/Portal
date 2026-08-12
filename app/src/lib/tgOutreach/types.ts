@@ -282,6 +282,13 @@ export interface OutreachDialog {
   status: DialogStatus;
   last_message_at: string | null;
   created_at: string;
+  /**
+   * Живая или уже ушедшая передача этого диалога — приклеивается роутом списка,
+   * в самой таблице диалогов такого поля нет. Нужна экрану, чтобы кнопки
+   * «передать лида/партнёра» гасли до клика: передача на диалог одна, и узнать
+   * об этом из ошибки после подтверждения — плохой способ.
+   */
+  forward?: { kind: 'lead' | 'partner'; status: 'pending' | 'sent'; sent_at: string | null } | null;
 }
 
 export interface OutreachProcessed {

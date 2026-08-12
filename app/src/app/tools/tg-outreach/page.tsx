@@ -991,6 +991,9 @@ function DialogsTab({ campaignId }: {
         return;
       }
       alert(`Поставлено в очередь. Уйдёт в ${body?.target_chat} с аккаунта, который вёл переписку.`);
+      // Перечитываем список: иначе кнопки остались бы на экране, приглашая
+      // поставить в очередь то же самое ещё раз.
+      void fetchDialogs();
     } finally {
       setForwarding(null);
     }
@@ -1152,30 +1155,53 @@ function DialogsTab({ campaignId }: {
                           переписки. Отправляет тот же аккаунт кампании, но не
                           сейчас — живое соединение только у воркера, поэтому
                           кнопка ставит задачу в очередь. */}
-                      <button
-                        type="button"
-                        disabled={forwarding === `${d.id}:lead`}
-                        onClick={() => void forwardDialog(d, 'lead')}
-                        title="Передать как лида в чат из настроек кампании"
-                        className="ml-2 inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100 hover:border-emerald-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {forwarding === `${d.id}:lead`
-                          ? <Loader2 className="h-3 w-3 animate-spin" />
-                          : <Send className="h-3 w-3" />}
-                        Передать лида
-                      </button>
-                      <button
-                        type="button"
-                        disabled={forwarding === `${d.id}:partner`}
-                        onClick={() => void forwardDialog(d, 'partner')}
-                        title="Передать как кандидата в партнёры"
-                        className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-[10px] font-medium text-indigo-700 hover:bg-indigo-100 hover:border-indigo-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {forwarding === `${d.id}:partner`
-                          ? <Loader2 className="h-3 w-3 animate-spin" />
-                          : <Send className="h-3 w-3" />}
-                        Передать партнёра
-                      </button>
+                      {/* Передача одна на диалог, поэтому уже переданный
+                          показывает плашку вместо пары кнопок: гасить их и
+                          оставлять на экране — приглашать кликать в
+                          недоступное. */}
+                      {d.forward ? (
+                        <span
+                          title={d.forward.status === 'pending'
+                            ? 'Стоит в очереди — уйдёт, когда воркер дойдёт до этого аккаунта'
+                            : 'Уже отправлено. Передать ещё раз, в том числе другим видом, нельзя'}
+                          className={`ml-2 inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[10px] font-medium ${
+                            d.forward.status === 'pending'
+                              ? 'border-amber-200 bg-amber-50 text-amber-700'
+                              : 'border-gray-200 bg-gray-50 text-gray-600'
+                          }`}
+                        >
+                          <Send className="h-3 w-3" />
+                          {d.forward.status === 'pending' ? 'В очереди: ' : 'Передан: '}
+                          {d.forward.kind === 'lead' ? 'лид' : 'партнёр'}
+                        </span>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            disabled={forwarding === `${d.id}:lead`}
+                            onClick={() => void forwardDialog(d, 'lead')}
+                            title="Передать как лида в чат из настроек кампании"
+                            className="ml-2 inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100 hover:border-emerald-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {forwarding === `${d.id}:lead`
+                              ? <Loader2 className="h-3 w-3 animate-spin" />
+                              : <Send className="h-3 w-3" />}
+                            Передать лида
+                          </button>
+                          <button
+                            type="button"
+                            disabled={forwarding === `${d.id}:partner`}
+                            onClick={() => void forwardDialog(d, 'partner')}
+                            title="Передать как кандидата в партнёры"
+                            className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-[10px] font-medium text-indigo-700 hover:bg-indigo-100 hover:border-indigo-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {forwarding === `${d.id}:partner`
+                              ? <Loader2 className="h-3 w-3 animate-spin" />
+                              : <Send className="h-3 w-3" />}
+                            Передать партнёра
+                          </button>
+                        </>
+                      )}
                       <button
                         type="button"
                         onClick={() => void addToBlacklist(d)}

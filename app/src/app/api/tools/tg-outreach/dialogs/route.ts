@@ -40,7 +40,34 @@ export async function GET(req: NextRequest) {
 
       const { data, error, count } = await query;
       if (error) return jsonError(error.message, 500);
-      return NextResponse.json({ items: data ?? [], total: count ?? 0 });
+
+      /**
+       * Состояние передачи для каждого диалога на странице.
+       *
+       * Кнопки «передать лида/партнёра» взаимоисключающие, и оператор должен
+       * видеть это до клика: узнавать о запрете из ошибки после подтверждения —
+       * значит каждый раз собирать предпросмотр впустую.
+       */
+      const rows = (data ?? []) as Array<Record<string, unknown>>;
+      const ids = rows.map((r) => r.id as string);
+      if (ids.length) {
+        const { data: forwards } = await auth.supabase
+          .from('tg_outreach_lead_forwards')
+          .select('dialog_id, kind, status, sent_at')
+          .in('dialog_id', ids)
+          .in('status', ['pending', 'sent']);
+
+        const byDialog = new Map<string, Record<string, unknown>>();
+        for (const f of (forwards ?? []) as Array<Record<string, unknown>>) {
+          byDialog.set(f.dialog_id as string, f);
+        }
+        for (const row of rows) {
+          const f = byDialog.get(row.id as string);
+          if (f) row.forward = { kind: f.kind, status: f.status, sent_at: f.sent_at };
+        }
+      }
+
+      return NextResponse.json({ items: rows, total: count ?? 0 });
     },
   );
 }
