@@ -29,5 +29,8 @@ blocks:
             - sem-version node 22
             - cd app
             - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json), node-modules'
-            - npm install
+            # Те же ретраи, что в semaphore.yml: postinstall тянет бинарники со
+            # сторонних хостов, и ECONNRESET на них — не повод будить команду
+            # ночным красным аудитом.
+            - 'i=1; until npm install; do if [ $i -ge 3 ]; then echo "npm install не прошёл 3 раза подряд — это не флап сети, разбираться руками"; exit 1; fi; echo "npm install упал (попытка $i из 3), повтор через $((i*15))с"; sleep $((i*15)); i=$((i+1)); done'
             - npm audit --audit-level=critical

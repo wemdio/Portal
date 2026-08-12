@@ -44,7 +44,22 @@ blocks:
           - echo "APP_PATH=$APP_PATH" >> /tmp/env_vars
           - cd $APP_PATH
           - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json), node-modules'
-          - npm install
+          # npm install с ретраями. Установка ходит в сеть не только за
+          # тарболами npm: postinstall тянет бинарники со сторонних хостов —
+          # ffmpeg-static качает ~80 МБ с GitHub Releases, `playwright install
+          # chromium` ещё ~150 МБ. Любой ECONNRESET на этой загрузке валит весь
+          # блок «Run tests» целиком (prologue общий у обеих джоб), и красный
+          # билд выглядит как ошибка в коде, хотя код не при чём —
+          # 12.08.2026 так упали два прогона подряд на ffmpeg-static.
+          #
+          # Ретрай, а не --ignore-scripts: без скриптов не применится
+          # patch-package (патч TL-схемы GramJS) и не соберутся биндинги
+          # sqlite3, а они нужны tests/lib/telegram/sqliteReader.test.ts.
+          # Кэш node_modules снимает вопрос совсем — ffmpeg-static видит
+          # готовый бинарник и выходит сразу, — но на промахе кэша (новая
+          # ветка, смена package-lock.json) загрузка случается, и она обязана
+          # переживать разрыв соединения.
+          - 'i=1; until npm install; do if [ $i -ge 3 ]; then echo "npm install не прошёл 3 раза подряд — это не флап сети, разбираться руками"; exit 1; fi; echo "npm install упал (попытка $i из 3), повтор через $((i*15))с"; sleep $((i*15)); i=$((i+1)); done'
           - cache store node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json) node_modules
       # Две параллельные джобы вместо паровозика: сборка (самый долгий шаг,
       # ~2-2.5 мин) идёт одновременно с линтом/типами/тестами. Время блока =
