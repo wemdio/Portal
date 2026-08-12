@@ -3,6 +3,7 @@ import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { DEFAULT_WARMUP_DAYS } from '@/lib/tgOutreach/warmup/types';
 import { isCulprit } from '@/lib/tgOutreach/warmup/errorAttribution';
+import { normalizeWarmupSettings } from '@/lib/tgOutreach/warmup/settings';
 import {
   CONVERSATIONS_FIRST_DAY,
   CONVERSATIONS_PEAK,
@@ -25,6 +26,12 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       const { supabase } = auth;
       const { id } = await ctx.params;
 
+      const { data: campaignRow } = await supabase
+        .from('tg_outreach_campaigns')
+        .select('warmup_settings')
+        .eq('id', id)
+        .maybeSingle();
+
       const { data: run } = await supabase
         .from('tg_outreach_warmup_runs')
         .select('*')
@@ -34,7 +41,13 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         .maybeSingle();
 
       if (!run) {
-        return NextResponse.json({ run: null, per_account: [], today: null, defaults: defaults() });
+        return NextResponse.json({
+          run: null,
+          per_account: [],
+          today: null,
+          settings: normalizeWarmupSettings(campaignRow?.warmup_settings),
+          defaults: defaults(),
+        });
       }
 
       const { data: convs } = await supabase
@@ -130,6 +143,15 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         planned_today: activities.filter((a) => a.day_no === run.current_day).length,
       };
 
+      // Пока прогрев идёт, показываем снимок прогона: именно по нему он
+      // работает. Для завершённого — настройки кампании: это то, что применится
+      // к следующему запуску.
+      const settings = normalizeWarmupSettings(
+        run.status === 'pending' || run.status === 'running'
+          ? run.settings
+          : campaignRow?.warmup_settings,
+      );
+
       return NextResponse.json({
         run,
         per_account: [...perAccount.values()],
@@ -137,6 +159,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         today: { planned: plannedToday, done: doneToday },
         messages_total: messagesTotal,
         chat_stage: chatStage,
+        settings,
         defaults: defaults(),
       });
     },
@@ -153,16 +176,12 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       const { supabase, user } = auth;
       const { id } = await ctx.params;
 
-      const body = (await req.json().catch(() => ({}))) as {
-        days?: number;
-        public_chats?: boolean;
-      };
+      const body = (await req.json().catch(() => ({}))) as { days?: number };
       const days = Math.min(Math.max(Math.round(body.days ?? DEFAULT_WARMUP_DAYS), 1), 14);
-      const publicChats = Boolean(body.public_chats);
 
       const { data: campaign } = await supabase
         .from('tg_outreach_campaigns')
-        .select('id, status')
+        .select('id, status, warmup_settings')
         .eq('id', id)
         .single();
       if (!campaign) return jsonError('Кампания не найдена', 404);
@@ -191,15 +210,16 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         return jsonError('Нужно минимум два активных аккаунта — греть не с кем.', 400);
       }
 
-      // Флаг этапа кладём в снимок настроек прогона: перезапуск воркера посреди
-      // прогрева должен видеть то же решение, что принял оператор при старте.
+      // Настройки кладём в снимок прогона: перезапуск воркера посреди прогрева
+      // должен видеть то же решение, что принял оператор при старте.
+      const settings = normalizeWarmupSettings(campaign.warmup_settings);
       const { data: run, error: runError } = await supabase
         .from('tg_outreach_warmup_runs')
         .insert({
           campaign_id: id,
           days,
           status: 'pending',
-          settings: { ...defaults(), public_chats: publicChats },
+          settings: { ...defaults(), ...settings },
         })
         .select('*')
         .single();
