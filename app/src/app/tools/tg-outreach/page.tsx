@@ -114,6 +114,44 @@ const DIALOG_STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   later: { label: 'Потом', cls: 'bg-amber-100 text-amber-700' },
 };
 
+/**
+ * Плашка передачи диалога человеку.
+ *
+ * Одна и та же в свёрнутой строке списка и в раскрытой карточке. В списке она
+ * нужна больше: «кого уже отдали менеджеру» — вопрос про весь список сразу, а
+ * раскрывать ради ответа каждый диалог по очереди оператор не станет.
+ *
+ * «Передан» показываем наравне с «в очереди»: если бы метка жила только до
+ * отправки, она исчезала бы ровно в тот момент, когда передача удалась, и это
+ * читалось бы как отмена.
+ */
+function ForwardBadge({
+  forward,
+  compact = false,
+}: {
+  forward: NonNullable<NonNullable<OutreachDialog['forward']>>;
+  /** Компактный размер — под остальные бейджи в строке списка. */
+  compact?: boolean;
+}) {
+  const pending = forward.status === 'pending';
+  const size = compact ? 'gap-1 px-2 py-0.5' : 'ml-2 gap-1.5 px-3 py-1';
+  const tone = pending
+    ? 'border-amber-200 bg-amber-50 text-amber-700'
+    : 'border-gray-200 bg-gray-50 text-gray-600';
+  return (
+    <span
+      title={pending
+        ? 'Стоит в очереди — уйдёт, когда воркер дойдёт до этого аккаунта'
+        : 'Уже отправлено. Передать ещё раз, в том числе другим видом, нельзя'}
+      className={`inline-flex items-center rounded-full border text-[10px] font-medium ${size} ${tone}`}
+    >
+      <Send className="h-3 w-3" />
+      {pending ? 'В очереди: ' : 'Передан: '}
+      {forward.kind === 'lead' ? 'лид' : 'партнёр'}
+    </span>
+  );
+}
+
 /* =================== GLOBAL BLOCKLIST SECTION =================== */
 function GlobalBlocklistSection() {
   const [items, setItems] = useState<OutreachBlockedUser[]>([]);
@@ -1134,6 +1172,9 @@ function DialogsTab({ campaignId }: {
                       >
                         {d.can_send === false ? 'Не писать' : 'Можно писать'}
                       </span>
+                      {d.forward && d.forward.status !== 'failed' && (
+                        <ForwardBadge forward={d.forward} compact />
+                      )}
                       <span className="text-[10px] text-gray-400">{d.messages.length} сообщ.</span>
                     </div>
                     <span className="text-[11px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : '—'}</span>
@@ -1160,20 +1201,7 @@ function DialogsTab({ campaignId }: {
                           оставлять на экране — приглашать кликать в
                           недоступное. */}
                       {d.forward && d.forward.status !== 'failed' ? (
-                        <span
-                          title={d.forward.status === 'pending'
-                            ? 'Стоит в очереди — уйдёт, когда воркер дойдёт до этого аккаунта'
-                            : 'Уже отправлено. Передать ещё раз, в том числе другим видом, нельзя'}
-                          className={`ml-2 inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[10px] font-medium ${
-                            d.forward.status === 'pending'
-                              ? 'border-amber-200 bg-amber-50 text-amber-700'
-                              : 'border-gray-200 bg-gray-50 text-gray-600'
-                          }`}
-                        >
-                          <Send className="h-3 w-3" />
-                          {d.forward.status === 'pending' ? 'В очереди: ' : 'Передан: '}
-                          {d.forward.kind === 'lead' ? 'лид' : 'партнёр'}
-                        </span>
+                        <ForwardBadge forward={d.forward} />
                       ) : (
                         <>
                           <button
