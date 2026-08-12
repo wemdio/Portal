@@ -29,6 +29,12 @@ import type {
   WarmupLog,
   WarmupRun,
 } from '@/lib/tgOutreach/warmup/types';
+import {
+  defaultWarmupSettings,
+  normalizeWarmupSettings,
+  type WarmupSettings,
+} from '@/lib/tgOutreach/warmup/settings';
+import WarmupSettingsPanel from './WarmupSettingsPanel';
 
 const API_BASE = '/api/tools/tg-outreach';
 
@@ -61,6 +67,8 @@ interface WarmupStatus {
   today: { planned: number; done: number } | null;
   messages_total?: number;
   chat_stage?: ChatStageStatus;
+  /** Настройки нагрузки: снимок идущего прогона либо то, что применится к следующему. */
+  settings?: WarmupSettings;
   defaults: { default_days: number };
 }
 
@@ -109,7 +117,7 @@ export default function WarmupTab({
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [expandedConvId, setExpandedConvId] = useState<number | null>(null);
   const [days, setDays] = useState(4);
-  const [publicChats, setPublicChats] = useState(false);
+  const [settings, setSettings] = useState<WarmupSettings>(defaultWarmupSettings());
   const [chats, setChats] = useState<WarmupChat[]>([]);
   const [activities, setActivities] = useState<WarmupActivity[]>([]);
   /** Что показывать в правой панели: переписки между своими или чаты. */
@@ -126,6 +134,7 @@ export default function WarmupTab({
     if (!res.ok) return;
     const data = (await res.json()) as WarmupStatus;
     setStatus(data);
+    setSettings(normalizeWarmupSettings(data.settings));
     if (data.run) setDays(data.run.days);
     else if (data.defaults?.default_days) setDays(data.defaults.default_days);
   }, [campaignId]);
@@ -296,7 +305,7 @@ export default function WarmupTab({
         ...(method === 'POST'
           ? {
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ days, public_chats: publicChats }),
+              body: JSON.stringify({ days }),
             }
           : {}),
       });
@@ -328,9 +337,9 @@ export default function WarmupTab({
   const chatById = new Map(chats.map((c) => [c.id, c]));
   const usableChats = chats.filter((c) => c.status === 'resolved' && c.is_active).length;
   const chatStage = status?.chat_stage;
-  // Этап показываем, если он включён в текущем прогоне либо если прогрев ещё не
-  // запускали, но чаты уже готовы — оператору надо видеть, что галочка живая.
-  const chatStageVisible = Boolean(chatStage?.enabled) || (!run && usableChats > 0);
+  // Ленту активностей показываем, если этап включён в прогоне либо включён в
+  // настройках — оператор должен видеть, что переключатель живой.
+  const chatStageVisible = Boolean(chatStage?.enabled) || settings.public_chats;
   // Прогрев и боевой аутрич взаимоисключающие — на запущенной кампании кнопка
   // всё равно получит отказ от сервера, поэтому предупреждаем заранее.
   const blockedByCampaign = campaignStatus === 'running' || campaignStatus === 'paused';
@@ -379,26 +388,6 @@ export default function WarmupTab({
             />
           </label>
 
-          {/* Необязательный этап. Без проверенных чатов включать нечего —
-              блокируем с объяснением, а не молча. */}
-          <label
-            title={
-              usableChats
-                ? 'Аккаунты вступят в чаты из вкладки «Чаты» и будут понемногу отвечать людям'
-                : 'Сначала добавьте и проверьте чаты во вкладке «Чаты»'
-            }
-            className={`flex items-center gap-2 text-[11px] ${usableChats && !isRunning ? 'cursor-pointer text-gray-600' : 'cursor-not-allowed text-gray-400'}`}
-          >
-            <input
-              type="checkbox"
-              checked={isRunning ? Boolean(chatStage?.enabled) : publicChats}
-              disabled={isRunning || !usableChats}
-              onChange={(e) => setPublicChats(e.target.checked)}
-              className="h-3.5 w-3.5 accent-indigo-600"
-            />
-            Активность в чатах
-            {usableChats > 0 && <span className="text-gray-400">({usableChats})</span>}
-          </label>
           {isRunning ? (
             <button
               type="button"
@@ -461,6 +450,16 @@ export default function WarmupTab({
           </div>
         )}
       </div>
+
+      <WarmupSettingsPanel
+        campaignId={campaignId}
+        campaignStatus={campaignStatus}
+        settings={settings}
+        days={days}
+        currentDay={isRunning && run ? run.current_day : null}
+        runActive={isRunning}
+        onSaved={() => { void loadStatus(); void loadChats(); }}
+      />
 
       {/* Метрики */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
