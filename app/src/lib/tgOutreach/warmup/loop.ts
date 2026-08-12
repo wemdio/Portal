@@ -331,6 +331,23 @@ export async function runWarmupLoop(
   const ownUserIds = new Set<number>();
   for (const a of accounts) if (a.tg_user_id) ownUserIds.add(Number(a.tg_user_id));
 
+  /*
+   * Уборка после мёртвого процесса — ровно один раз, до первого круга.
+   *
+   * `requeueStuckActivities` не смотрит на возраст: она возвращает в очередь
+   * ЛЮБУЮ активность в статусе «выполняется». Здесь это верно — воркер только
+   * что стартовал, своих активностей у него ещё нет, а всё найденное осталось
+   * от процесса, который умер, не закрыв их. Позвать её на каждом круге значило
+   * бы сбрасывать те, что идут прямо сейчас.
+   *
+   * Зовём независимо от того, включён ли этап чатов: если выключен, активностей
+   * нет и апдейт не заденет ни строки.
+   */
+  const requeuedOnStart = await cdb.requeueStuckActivities(db, run.id);
+  if (requeuedOnStart > 0) {
+    log('info', `Активность в чатах: возвращено в очередь ${requeuedOnStart} действий после перезапуска.`);
+  }
+
   try {
     while (!shouldStop()) {
       onProgress?.();
@@ -529,11 +546,6 @@ async function ensureChatStageReady(params: {
       'info',
       `Активность в чатах: ${chats.length} чатов, каждому аккаунту назначено до ${perAccount}. Вступление растянуто на сегодня.`,
     );
-  }
-
-  const requeued = await cdb.requeueStuckActivities(db, run.id);
-  if (requeued > 0) {
-    log('info', `Активность в чатах: возвращено в очередь ${requeued} действий после перезапуска.`);
   }
 }
 
