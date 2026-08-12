@@ -170,6 +170,24 @@ function stageIdleMs(): number {
   return Number(process.env.TG_PARSER_STAGE_IDLE_MS) || 15 * 60_000;
 }
 
+/**
+ * Сбой аккаунта, а не источника.
+ *
+ * Такую ошибку пропускать дальше по списку ссылок бессмысленно: сессия одна на
+ * всю задачу, и следующий источник упрётся в то же самое. На флуд-лимите
+ * перебор источников ещё и усугубляет — каждый следующий resolve добавляет
+ * запрос к тому, из-за чего нас уже придушили.
+ */
+function isAccountLevelFailure(e: unknown): boolean {
+  const msg = (e instanceof Error ? e.message : String(e)).toUpperCase();
+  return msg.includes('AUTH_KEY')
+    || msg.includes('SESSION_REVOKED')
+    || msg.includes('SESSION_EXPIRED')
+    || msg.includes('USER_DEACTIVATED')
+    || msg.includes('PHONE_NUMBER_BANNED')
+    || msg.includes('FLOOD_WAIT');
+}
+
 async function resolveEntityByLink(client: TelegramClient, rawLink: string): Promise<Api.TypeEntityLike> {
   const link = normalizeTelegramLink(rawLink);
   const internalChatId = getChatIdFromInternalMessageLink(link);
@@ -487,6 +505,8 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
   const allUsers = new Map<number, ParsedUser>();
   const stopRef: { reason: ParseStopReason | null } = { reason: null };
   const mergeUser = buildMergeUser(opts, allUsers, stopRef);
+  /** Источники, которые не открылись. Задачу валят только все разом. */
+  const linkFailures: Array<{ link: string; error: string }> = [];
 
   try {
     for (const link of opts.links) {
@@ -534,20 +554,32 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
         }
       };
 
-      if (opts.parse_chat_messages) {
-        await runStage('messages', (beat) =>
-          parseChatMessages(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar, beat));
-        if (stopRef.reason) break;
-      }
-      if (opts.parse_chat_members) {
-        await runStage('members', (beat) =>
-          parseChatMembers(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar, beat));
-        if (stopRef.reason) break;
-      }
-      if (opts.parse_post_comments) {
-        await runStage('comments', (beat) =>
-          parsePostComments(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar, beat));
-        if (stopRef.reason) break;
+      // Источник, который не открылся, — не повод бросать остальные. Раньше
+      // весь цикл стоял под одним try: 12.08.2026 первая же ссылка не
+      // зарезолвилась, и задача упала целиком, не попробовав ни одной другой.
+      try {
+        if (opts.parse_chat_messages) {
+          await runStage('messages', (beat) =>
+            parseChatMessages(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar, beat));
+          if (stopRef.reason) break;
+        }
+        if (opts.parse_chat_members) {
+          await runStage('members', (beat) =>
+            parseChatMembers(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar, beat));
+          if (stopRef.reason) break;
+        }
+        if (opts.parse_post_comments) {
+          await runStage('comments', (beat) =>
+            parsePostComments(client, trimmed, opts, mergeUser, enrichProfile, totalSoFar, beat));
+          if (stopRef.reason) break;
+        }
+      } catch (e) {
+        // Беда с аккаунтом, а не со ссылкой: следующий источник упрётся в то же
+        // самое, а на флуд-лимите перебор источников его только усугубит.
+        if (isAccountLevelFailure(e)) throw e;
+        const msg = e instanceof Error ? e.message : String(e);
+        linkFailures.push({ link: trimmed, error: msg });
+        await report(opts, { link: trimmed, stage: 'messages', phase: 'done', total: totalSoFar() });
       }
     }
     await client.disconnect();
@@ -569,5 +601,21 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
   if (stopRef.reason) {
     return { status: 'partial', users, stop_reason: stopRef.reason };
   }
+
+  if (linkFailures.length) {
+    const detail = linkFailures.map((f) => `${f.link} — ${f.error}`).join('; ');
+    // Ни один источник не открылся и собирать нечего — это провал задачи, а не
+    // частичный результат: оператору нечего смотреть, кроме причины.
+    if (users.length === 0) {
+      return { status: 'error', error: `не удалось открыть ни один источник: ${detail}` };
+    }
+    return {
+      status: 'partial',
+      users,
+      stop_reason: 'error',
+      error: `пропущены источники (${linkFailures.length} из ${opts.links.length}): ${detail}`,
+    };
+  }
+
   return { status: 'ok', users };
 }
