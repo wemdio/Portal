@@ -18,6 +18,8 @@ const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString(
 type DrillLeadRow = {
   amo_id: number;
   name: string | null;
+  /** Ответственный в AMO. null — за сделкой никто не закреплён. */
+  responsible_name: string | null;
   created_at: string | null;
   first_meeting_at: string | null;
   first_contract_at: string | null;
@@ -38,6 +40,10 @@ type LeadsResponse = { rows: DrillLeadRow[]; truncated: boolean };
  */
 const drillSortColumns: SortColumns<DrillLeadRow> = {
   name: { type: 'string', getValue: (r) => r.name },
+  // Сделки без ответственного уедут в конец списка при любом направлении —
+  // общее правило хука для пустых значений, и здесь оно как раз кстати: это
+  // не «менеджер по имени пусто», а отсутствие данных.
+  responsible_name: { type: 'string', getValue: (r) => r.responsible_name },
   created_at: { type: 'date', getValue: (r) => r.created_at },
   first_meeting_at: { type: 'date', getValue: (r) => r.first_meeting_at },
   first_contract_at: { type: 'date', getValue: (r) => r.first_contract_at },
@@ -151,12 +157,19 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
             Второй `.glass-frame` дал бы размытие внутри размытия — именно
             вложенность роняет плавность прокрутки. Плотная подложка строк. */}
         <div className="overflow-x-auto rounded-lg border border-zinc-200 bg-[var(--glass-rows)]">
-          <table className="w-full min-w-[560px] text-[11px]">
+          <table className="w-full min-w-[660px] text-[11px]">
             <thead>
               <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400">
                 <SortableTh
                   label="Сделка"
                   sortKey="name"
+                  sort={sort}
+                  onSort={toggleSort}
+                  className="px-2.5 py-1.5"
+                />
+                <SortableTh
+                  label="Менеджер"
+                  sortKey="responsible_name"
                   sort={sort}
                   onSort={toggleSort}
                   className="px-2.5 py-1.5"
@@ -221,6 +234,14 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
                         </span>
                       )}
                     </div>
+                  </td>
+                  {/* Пусто, а не прочерк: у соседних колонок прочерк значит
+                      «этап не достигнут», а тут — «в CRM не закреплён», и
+                      путать эти два состояния одним символом не стоит. */}
+                  <td className="px-2.5 py-1.5 text-zinc-600">
+                    {lead.responsible_name || (
+                      <span className="text-zinc-400">не закреплён</span>
+                    )}
                   </td>
                   <td className="px-2.5 py-1.5 tabular-nums text-zinc-600">{fmtDate(lead.created_at)}</td>
                   <td className="px-2.5 py-1.5 tabular-nums text-zinc-600">{fmtDate(lead.first_meeting_at)}</td>
