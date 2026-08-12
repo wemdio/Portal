@@ -92,6 +92,15 @@ export interface OpenAISettings {
   trigger_phrases_negative: string;
   target_chats_positive: string;
   target_chats_negative: string;
+  /**
+   * Куда уходит кандидат в партнёры по кнопке «Передать партнёра».
+   *
+   * Отдельно от `target_chats_positive`: заинтересованного клиента и человека,
+   * который хочет стать партнёром программы, разбирают разные люди. Пусто —
+   * используем чат положительного триггера, чтобы кнопка работала сразу, а не
+   * молча упиралась в незаполненную настройку.
+   */
+  target_chats_partner?: string;
   use_fallback_on_fail: boolean;
   fallback_text: string;
 }
@@ -273,6 +282,22 @@ export interface OutreachDialog {
   status: DialogStatus;
   last_message_at: string | null;
   created_at: string;
+  /**
+   * Последняя передача этого диалога — приклеивается роутом списка, в самой
+   * таблице диалогов такого поля нет.
+   *
+   * Живая (pending/sent) гасит кнопки: передача на диалог одна, и узнавать об
+   * этом из ошибки после подтверждения — плохой способ. Упавшая кнопок не
+   * гасит, но показывает причину прямо в строке человека: повторить можно
+   * только зная, что именно сломалось.
+   */
+  forward?: {
+    kind: 'lead' | 'partner';
+    status: 'pending' | 'sent' | 'failed';
+    sent_at: string | null;
+    /** Причина сбоя целиком — по ней оператор чинит и повторяет. */
+    error_message: string | null;
+  } | null;
 }
 
 export interface OutreachProcessed {
@@ -319,6 +344,7 @@ export const DEFAULT_OPENAI_SETTINGS: OpenAISettings = {
   trigger_phrases_negative: '',
   target_chats_positive: '',
   target_chats_negative: '',
+  target_chats_partner: '',
   use_fallback_on_fail: false,
   fallback_text: '',
 };
