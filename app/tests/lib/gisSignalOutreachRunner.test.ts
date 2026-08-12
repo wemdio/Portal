@@ -451,6 +451,49 @@ describe('runGisSignalPipeline — measure_only', () => {
     expect(archiveUpserts).toHaveLength(2);
     for (const call of archiveUpserts) expect(call.onConflict).toBe('twogis_id');
   });
+
+  // Регрессия инцидента 12.08.2026: одиночный UTF-16 суррогат из текста сайта
+  // (эмодзи, разрезанное срезом сниппета) доезжал до upsert'а архива, и Postgres
+  // отвергал ВЕСЬ пакет — «invalid input syntax for type json». Прогон падал на
+  // «Архив: upsert 2000 строк» уже ПОСЛЕ проверки всех сайтов: день потерян.
+  it('битый UTF-16 в evidence/note не доезжает до jsonb (архив + сетка конструктора)', async () => {
+    const LONE_HIGH = String.fromCharCode(0xd83d); // половинка эмодзи
+    const LONE_LOW = String.fromCharCode(0xde00);
+    const NUL = String.fromCharCode(0);
+    seed();
+    pullMock.mockResolvedValue([cand('a1', 'seg-a')]);
+    detectMock.mockImplementation(async () => {
+      const r = signalResult(true);
+      r.signals.generalPhone = { hit: true, evidence: `звоните${LONE_HIGH} 8-800` };
+      r.signals.contactForm = { hit: true, evidence: `форма${LONE_LOW} заявки \u{1F4A1}` };
+      r.signalsCount = 2;
+      r.note = `Homepage checked${NUL}`;
+      return r;
+    });
+
+    const grid = finalGrid([{ id: 'a1', name: 'Компания a1', email: 'info@a1.ru' }]);
+    const runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
+    await completeNextBaseJob(grid);
+    const result = await runPromise;
+
+    expect(result.status).toBe('completed');
+
+    const archiveRows = mockDb.upserts
+      .filter((c) => c.table === 'gis_signal_company_signals')
+      .flatMap((c) => c.rows);
+    const jobRows = mockDb.inserts.find((c) => c.table === 'base_constructor_jobs')!.rows;
+    // Payload обеих jsonb-записей сериализуется без escape'ов, которые PG не примет.
+    for (const payload of [archiveRows, jobRows]) {
+      const json = JSON.stringify(payload);
+      expect(/\\u(d[89ab][0-9a-f]{2})/i.test(json)).toBe(false);
+      expect(json).not.toContain('\\u0000');
+    }
+    // Данные при этом сохранены: текст остался, валидная пара эмодзи выжила.
+    const evidence = archiveRows[0].evidence as Record<string, string>;
+    expect(evidence.generalPhone).toBe('звоните 8-800');
+    expect(evidence.contactForm).toBe('форма заявки \u{1F4A1}');
+    expect(archiveRows[0].note).toBe('Homepage checked');
+  });
 });
 
 describe('runGisSignalPipeline — гарды', () => {

@@ -39,7 +39,11 @@
  *   - таймаут upsert архива (ARCHIVE_UPSERT_TIMEOUT_MS) с одним ретраем;
  *   - stall-watchdog (STALL_TIMEOUT_MS, runGuards.ts): тишина дольше порога →
  *     run помечается failed и процесс умирает (exit 2) вместо потери дня;
- *   - TG-алерт при падении (кроме measure_only).
+ *   - TG-алерт при падении (кроме measure_only);
+ *   - санитизация всего, что уходит в jsonb (stripUnstorableJsonChars): архив,
+ *     сетка конструктора, патч run-строки. Непарный UTF-16 суррогат из текста
+ *     сайта ронял ВЕСЬ пакет upsert'а — «invalid input syntax for type json»
+ *     (вечер 12.08.2026, 2000 строк).
  *
  * ИЗОЛЯЦИЯ: ни одного импорта из autoPipelineRunner / mailganer* / outreachos.
  * Базовая квалификация сигнальная; сегменты со скоринг-профилем (legal)
@@ -61,6 +65,7 @@ import { detectOutreachSignals, type OutreachSignalsResult } from './signals';
 import { companiesToGrid, gridToLeadPayloads } from './gridMapping';
 import { computeSegmentScore, getSegmentScoringProfile } from './scoring';
 import { createStallWatchdog } from './runGuards';
+import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 
 /** Конкурентность проверки сайтов детектором сигналов. */
 export const SIGNAL_CHECK_CONCURRENCY = 5;
@@ -304,10 +309,14 @@ export async function runGisSignalPipeline(
   }
   const runId = (runRow as { id: string | number }).id;
 
+  // Санитизация патча обязательна: текст ошибки может нести кусок payload'а
+  // (PostgREST эхом возвращает битую строку), и тогда запись «прогон упал»
+  // упала бы сама — run навсегда завис бы в running, а это ровно та слепота,
+  // от которой лечит watchdog.
   const finishRun = async (patch: Record<string, unknown>): Promise<void> => {
     await db
       .from('gis_signal_runs')
-      .update({ ...patch, finished_at: new Date().toISOString() })
+      .update({ ...stripUnstorableJsonChars(patch), finished_at: new Date().toISOString() })
       .eq('id', runId);
   };
 
@@ -473,7 +482,13 @@ export async function runGisSignalPipeline(
 
     // 4b. АРХИВ: каждая проверенная компания (и pass, и fail) — аналитический
     //     срез. Пишем и в measure_only: замер как раз строит этот срез.
-    const archiveRows = candidates.map((cand, i) => {
+    //     stripUnstorableJsonChars — рубеж перед jsonb: ОДИН непарный суррогат
+    //     (эмодзи с сайта, разрезанное срезом сниппета) или NUL в любом поле
+    //     роняет ВЕСЬ пакет с «invalid input syntax for type json». Так 12.08.2026
+    //     умер прогон на «Архив: upsert 2000 строк» и день аутрича был потерян.
+    //     Evidence чистится ещё в clip() (signals.ts) — здесь страховка для
+    //     note/site и любого поля, которое добавят позже.
+    const archiveRows = stripUnstorableJsonChars(candidates.map((cand, i) => {
       const r = signalResults[i];
       const scoring = scoreInfos[i];
       const evidence: Record<string, unknown> = {};
@@ -506,7 +521,7 @@ export async function runGisSignalPipeline(
         note: r.note,
         checked_at: new Date().toISOString(),
       };
-    });
+    }));
     // UPSERT по twogis_id: карточка может проверяться повторно (второй
     // measure_only-замер, re-pull ещё не seen компании), а на колонке UNIQUE-
     // индекс — plain insert убивал бы весь прогон конфликтом. Последняя
@@ -574,13 +589,18 @@ export async function runGisSignalPipeline(
     for (const p of qualifiedPairs) {
       qualifiedById.set(p.cand.twogisId, p);
     }
-    const grid = companiesToGrid(
-      qualifiedPairs.map((p) => ({
-        candidate: p.cand,
-        signals: p.signals,
-        score: p.scoring?.score ?? null,
-        grade: p.scoring?.grade ?? null,
-      })),
+    // base_constructor_jobs.data — тоже jsonb: та же санитизация, что у архива
+    // (иначе битый evidence убил бы прогон на шаг позже, уже после проверки
+    // всех сайтов).
+    const grid = stripUnstorableJsonChars(
+      companiesToGrid(
+        qualifiedPairs.map((p) => ({
+          candidate: p.cand,
+          signals: p.signals,
+          score: p.scoring?.score ?? null,
+          grade: p.scoring?.grade ?? null,
+        })),
+      ),
     );
     for (const c of qualified) funnel.perSegment[c.segmentKey].bcIn += 1;
     funnel.total.bcIn = qualified.length;
