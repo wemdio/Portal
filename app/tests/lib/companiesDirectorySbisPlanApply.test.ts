@@ -759,13 +759,53 @@ describe('SBIS production import guardrails', () => {
     expect(query.mock.calls.filter(([sql]) =>
       sql.includes('INSERT INTO sbis_directory_import_stage')
     ).every(([, values]) => Array.isArray(values))).toBe(true);
+    const statements = query.mock.calls.map(([sql]) => sql);
+    const stageIndexes = statements
+      .map((sql, index) => (
+        sql.startsWith('INSERT INTO sbis_directory_import_stage') ? index : -1
+      ))
+      .filter((index) => index >= 0);
+    const analyzeIndexes = statements
+      .map((sql, index) => (
+        sql === 'ANALYZE pg_temp.sbis_directory_import_stage' ? index : -1
+      ))
+      .filter((index) => index >= 0);
+    const lockIndex = statements.indexOf(
+      'LOCK TABLE public.companies_directory IN SHARE ROW EXCLUSIVE MODE'
+    );
+    const previewIndex = statements.findIndex((sql) =>
+      sql.includes('AS staged_inserts')
+    );
+    expect(stageIndexes).toHaveLength(2);
+    expect(analyzeIndexes).toHaveLength(1);
+    expect(analyzeIndexes[0]).toBeGreaterThan(Math.max(...stageIndexes));
+    expect(analyzeIndexes[0]).toBeLessThan(lockIndex);
+    expect(analyzeIndexes[0]).toBeLessThan(previewIndex);
   });
 
-  it('creates only a session-local temp table before entering read-only check mode', async () => {
+  it('analyzes only the session-local staging table before the read-only preview', async () => {
     const query = jest.fn(async (sql: string, values?: unknown[]) => {
       if (sql.includes('INSERT INTO sbis_directory_import_stage')) {
         const staged = JSON.parse(String(values?.[0])) as unknown[];
         return { rows: [], rowCount: staged.length };
+      }
+      if (sql.includes('AS staged_inserts')) {
+        return {
+          rows: [{
+            staged_inserts: '1',
+            staged_updates: '0',
+            missing_inserts: '1',
+            already_present_inserts: '0',
+            rows_to_update: '0',
+            missing_update_targets: '0',
+            duplicate_target_inns: '0',
+            conflicting_present_inserts: '0',
+            mismatched_update_targets: '0',
+            conflicting_update_values: '0',
+            state_digest: 'a'.repeat(32),
+          }],
+          rowCount: 1,
+        };
       }
       return { rows: [], rowCount: null };
     });
@@ -780,8 +820,7 @@ describe('SBIS production import guardrails', () => {
       },
     });
 
-    await session.beginReadOnly();
-    await session.stageArtifacts();
+    await executeSbisCheck(session);
 
     const statements = query.mock.calls.map(([sql]) => sql);
     const createIndex = statements.findIndex((sql) =>
@@ -791,10 +830,30 @@ describe('SBIS production import guardrails', () => {
     const stageIndex = statements.findIndex((sql) =>
       sql.startsWith('INSERT INTO sbis_directory_import_stage')
     );
+    const analyzeIndex = statements.indexOf(
+      'ANALYZE pg_temp.sbis_directory_import_stage'
+    );
+    const previewIndex = statements.findIndex((sql) =>
+      sql.includes('AS staged_inserts')
+    );
+    const rollbackIndex = statements.indexOf('ROLLBACK');
     expect(createIndex).toBeGreaterThanOrEqual(0);
     expect(createIndex).toBeLessThan(beginIndex);
     expect(stageIndex).toBeGreaterThan(beginIndex);
-    expect(statements.some((sql) => sql.startsWith('ANALYZE'))).toBe(false);
+    expect(analyzeIndex).toBeGreaterThan(stageIndex);
+    expect(analyzeIndex).toBeLessThan(previewIndex);
+    expect(previewIndex).toBeLessThan(rollbackIndex);
+    expect(statements.filter((sql) => sql.startsWith('ANALYZE'))).toEqual([
+      'ANALYZE pg_temp.sbis_directory_import_stage',
+    ]);
+    expect(statements).not.toContain('COMMIT');
+    expect(statements.some((sql) => sql.includes('pg_advisory_xact_lock')))
+      .toBe(false);
+    expect(statements.some((sql) => sql.startsWith('LOCK TABLE'))).toBe(false);
+    expect(statements.some((sql) =>
+      /^(?:INSERT|UPDATE|DELETE|MERGE|TRUNCATE)\s+(?:INTO\s+|FROM\s+)?public\.companies_directory/i
+        .test(sql)
+    )).toBe(false);
   });
 
   it('verifies the connected database identity without exposing credentials', async () => {

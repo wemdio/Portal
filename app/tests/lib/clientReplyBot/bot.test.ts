@@ -63,3 +63,73 @@ describe('buildClientReplyMessage — время всегда в МСК', () => 
     expect(html).not.toContain('Invalid Date');
   });
 });
+
+/**
+ * Сироты (инцидент 11.08.2026): Instantly НЕ привязал письмо к кампании —
+ * DM не должен говорить «по вашей кампании» (это отправляло клиента искать
+ * ответ в кампании, где его нет и быть не может).
+ */
+describe('buildClientReplyMessage — сирота (ответ вне треда кампании)', () => {
+  const base = {
+    campaignName: 'OutreachOS Автоаутрич 2',
+    leadEmail: 'director@leadscorp.ru',
+    leadName: 'Ольга',
+    companyName: 'Лидскорп',
+    replySubject: 'Re: По вопросу клиентов',
+    replyBody: 'Давайте обсудим, удобно завтра.',
+    replyTimestamp: '2026-08-11T09:00:00Z',
+  };
+
+  it('outOfCampaign=true → честный заголовок + ящик + «похоже на лид кампании»', () => {
+    const html = buildClientReplyMessage({
+      ...base,
+      outOfCampaign: true,
+      eaccount: 'sales@clientmail.ru',
+    });
+    expect(html).toContain('📩 <b>Ответ вне треда кампании</b>');
+    expect(html).not.toContain('Новый ответ по вашей кампании');
+    expect(html).toContain('📬 <b>Ящик:</b> sales@clientmail.ru');
+    // Кампания остаётся как контекст атрибуции, а не как факт привязки.
+    expect(html).toContain('🔎 <b>Похоже на лид кампании:</b> OutreachOS Автоаутрич 2');
+    expect(html).not.toContain('📨 <b>Кампания:</b>');
+  });
+
+  it('outOfCampaign=false → прежний формат (заголовок, кампания, без ящика)', () => {
+    const html = buildClientReplyMessage({
+      ...base,
+      outOfCampaign: false,
+      eaccount: 'sales@clientmail.ru',
+    });
+    expect(html).toContain('📩 <b>Новый ответ по вашей кампании</b>');
+    expect(html).toContain('📨 <b>Кампания:</b> OutreachOS Автоаутрич 2');
+    expect(html).not.toContain('Ящик:');
+    expect(html).not.toContain('Похоже на лид кампании');
+  });
+
+  it('outOfCampaign без eaccount → строки «Ящик:» нет', () => {
+    const html = buildClientReplyMessage({ ...base, outOfCampaign: true, eaccount: null });
+    expect(html).toContain('📩 <b>Ответ вне треда кампании</b>');
+    expect(html).not.toContain('Ящик:');
+  });
+
+  it('outOfCampaign + лид по критериям клиента → заголовок сироты, бейдж сохранён', () => {
+    const html = buildClientReplyMessage({
+      ...base,
+      outOfCampaign: true,
+      eaccount: 'sales@clientmail.ru',
+      isLeadByClientCriteria: true,
+    });
+    expect(html).toContain('📩 <b>Ответ вне треда кампании</b>');
+    expect(html).toContain('🔥 <b>Лид по вашим критериям</b>');
+    expect(html).not.toContain('Новый ответ по вашей кампании');
+  });
+
+  it('eaccount экранируется (HTML в адресе не ломает разметку)', () => {
+    const html = buildClientReplyMessage({
+      ...base,
+      outOfCampaign: true,
+      eaccount: 'x<b>@clientmail.ru',
+    });
+    expect(html).toContain('📬 <b>Ящик:</b> x&lt;b&gt;@clientmail.ru');
+  });
+});

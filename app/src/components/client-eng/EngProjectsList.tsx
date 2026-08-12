@@ -92,8 +92,7 @@ export function EngProjectsList() {
               onChange={(e) => setWebsite(e.target.value)}
               placeholder="acme.com"
               required
-              className="neu-pill w-full px-3 py-2 text-sm bg-transparent outline-none"
-              style={{ color: 'var(--cp-paper)' }}
+              className="ds-input w-full"
             />
           </label>
           <label className="flex-1 flex flex-col gap-1">
@@ -105,15 +104,13 @@ export function EngProjectsList() {
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="Acme outbound"
-              className="neu-pill w-full px-3 py-2 text-sm bg-transparent outline-none"
-              style={{ color: 'var(--cp-paper)' }}
+              className="ds-input w-full"
             />
           </label>
           <button
             type="submit"
             disabled={creating || !website.trim()}
-            className="neu-pill active px-4 py-2 text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
-            style={{ color: 'var(--cp-paper)' }}
+            className="ds-btn-primary inline-flex items-center gap-2"
           >
             {creating && <EngSpinner />}
             Create &amp; start research
@@ -152,8 +149,7 @@ export function EngProjectsList() {
               <Link
                 href={'/client/eng/dashboard' as Route}
                 prefetch={false}
-                className="neu-pill px-3 py-1.5 text-xs font-semibold inline-flex items-center gap-1.5"
-                style={{ color: 'var(--cp-paper)' }}
+                className="ds-btn-secondary inline-flex items-center gap-1.5 text-xs"
               >
                 <LayoutDashboard className="h-3.5 w-3.5" />
                 Command Center
@@ -166,7 +162,7 @@ export function EngProjectsList() {
               key={p.id}
               href={`/client/eng/projects/${p.id}` as Route}
               prefetch={false}
-              className="neu-card p-4 flex flex-col gap-2 transition-colors hover:border-[var(--cp-divider-strong)]"
+              className="ds-card ds-card-pressable p-4 flex flex-col gap-2"
             >
               <div className="flex items-center gap-2">
                 <Globe className="h-4 w-4 shrink-0" style={{ color: 'var(--cp-text-l)' }} />

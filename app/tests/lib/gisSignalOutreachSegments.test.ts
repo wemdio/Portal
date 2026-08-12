@@ -30,6 +30,15 @@ const filterRecentlyCheckedIdsMock = jest.fn(async (ids: string[]) => {
   return new Set(ids.filter((id) => !recentIds.has(id)));
 });
 
+// Обратный кросс-дедуп §4.2: домены seen-окна OutreachOS под контролем теста.
+let outreachosDomains = new Set<string>();
+const loadRecentlySeenDomainsMock = jest.fn(async () => outreachosDomains);
+
+jest.mock('@/lib/outreachos/seenEmployers', () => ({
+  RECONTACT_AFTER_DAYS: 45,
+  loadRecentlySeenDomains: () => loadRecentlySeenDomainsMock(),
+}));
+
 jest.mock('@/lib/gisSignalOutreach/seenCompanies', () => ({
   filterUnseenIds: (ids: string[]) => filterUnseenIdsMock(ids),
   filterRecentlyCheckedIds: (ids: string[]) => filterRecentlyCheckedIdsMock(ids),
@@ -74,8 +83,10 @@ beforeEach(() => {
   cardsByCategory = {};
   seenIds = new Set();
   recentIds = new Set();
+  outreachosDomains = new Set();
   filterUnseenIdsMock.mockClear();
   filterRecentlyCheckedIdsMock.mockClear();
+  loadRecentlySeenDomainsMock.mockClear();
 });
 
 describe('computeSegmentQuotas', () => {
@@ -183,5 +194,35 @@ describe('pullSegmentCandidates', () => {
     // s1 уже отсеян seen-журналом — в архивный lookup не уходит.
     expect(filterRecentlyCheckedIdsMock).toHaveBeenCalledWith(['r1', 'f1']);
     expect(out.map((c) => c.twogisId)).toEqual(['f1']);
+  });
+
+  it('обратный кросс-дедуп §4.2: домены seen-окна OutreachOS (45д) отсекаются', async () => {
+    cardsByCategory = {
+      'Медицина': [[card('o1'), card('o2'), card('f1')]],
+    };
+    // o1 и o2 — домены site-o1.ru / site-o2.ru из seen-окна OutreachOS.
+    outreachosDomains = new Set(['site-o1.ru', 'site-o2.ru']);
+
+    const out = await pullSegmentCandidates([segment('clinics', 'Медицина', 10)], {
+      dailyLimit: 100,
+      snapshotId: 1,
+    });
+
+    expect(out.map((c) => c.twogisId)).toEqual(['f1']);
+    expect(loadRecentlySeenDomainsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('кросс-дедуп не жжёт квоту сегмента', async () => {
+    cardsByCategory = {
+      'Медицина': [[card('o1'), card('f1'), card('f2')]],
+    };
+    outreachosDomains = new Set(['site-o1.ru']);
+
+    const out = await pullSegmentCandidates([segment('clinics', 'Медицина', 10)], {
+      dailyLimit: 2,
+      snapshotId: 1,
+    });
+
+    expect(out.map((c) => c.twogisId)).toEqual(['f1', 'f2']);
   });
 });

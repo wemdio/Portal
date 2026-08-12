@@ -550,6 +550,14 @@ export async function handleProxyError(args: {
         'warning',
         `Прокси аккаунта ${account.session_name}: ${r.consecutiveErrors} ошибок подряд (${reason}) — ставлю cooldown до ${new Date(r.cooldownUntil ?? '').toLocaleTimeString('ru-RU')}.`,
       );
+    } else {
+      // До порога эта ветка молчала совсем: аккаунт не подключился, свап не
+      // сделан, и в логе после ошибки — тишина. Читалось как «дальше всё
+      // само», хотя аккаунт до следующего запуска кампании просто выпал.
+      log(
+        'info',
+        `Прокси аккаунта ${account.session_name}: ошибка ${r.consecutiveErrors} из ${CONSECUTIVE_ERROR_THRESHOLD} подряд (${reason}) — свап пока не делаю, жду подтверждения, что это не разовый сбой.`,
+      );
     }
   } catch (e) {
     log('warning', `Не смог записать ошибку прокси в БД (${e instanceof Error ? e.message : String(e)}) — продолжаю.`);

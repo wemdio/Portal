@@ -19,28 +19,55 @@ export async function GET(req: NextRequest) {
       if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
       const limit = Math.min(100, Math.max(1, Number(req.nextUrl.searchParams.get('limit')) || 50));
+      const offset = Math.max(0, Number(req.nextUrl.searchParams.get('offset')) || 0);
 
-      // Try lightweight RPC (no result_users payload) — falls back to full select if RPC not deployed yet
-      const { data: rpcData, error: rpcError } = await supabase.rpc('tg_parser_jobs_list', { row_limit: limit });
+      /**
+       * Идущие задачи отдаём отдельно от страницы.
+       *
+       * Две вещи в интерфейсе смотрят не на страницу, а на всю очередь: опрос
+       * (обновляем список, только пока что-то работает) и подсказка «этот
+       * аккаунт уже парсит». Со страницей по десять задача, уехавшая на вторую
+       * страницу, выпала бы из обеих — опрос бы встал, а подсказка бы врала.
+       * Строк тут единицы: параллельные задачи ограничены одной на аккаунт.
+       */
+      const runningQuery = supabase
+        .from('tg_parser_jobs')
+        .select(
+          'id, user_id, created_at, status, config, account_id, stop_reason, error_message, started_at, completed_at, found_count, progress_note, progress_at',
+        )
+        .in('status', ['pending', 'running'])
+        .order('created_at', { ascending: false })
+        .limit(100);
+
+      // Лёгкий RPC (без тяжёлого result_users); откат на прямой select, пока
+      // миграция не применена.
+      const [{ data: rpcData, error: rpcError }, { data: runningRows }] = await Promise.all([
+        supabase.rpc('tg_parser_jobs_list', { row_limit: limit, row_offset: offset }),
+        runningQuery,
+      ]);
 
       if (!rpcError) {
-        return NextResponse.json({ items: rpcData ?? [] });
+        const items = (rpcData ?? []) as Array<{ total_count?: number }>;
+        // total_count одинаков во всех строках — это оконный счётчик. Пустая
+        // страница означает, что до конца списка уже долистали.
+        const total = items.length > 0 ? Number(items[0].total_count ?? items.length) : 0;
+        return NextResponse.json({ items, total, running: runningRows ?? [] });
       }
 
-      // Fallback: full select (before migration is applied)
-      const { data, error } = await supabase
+      const { data, error, count } = await supabase
         .from('tg_parser_jobs')
         .select(
           'id, user_id, created_at, status, config, account_id, result_users, stop_reason, error_message, started_at, completed_at, found_count, progress_note, progress_at',
+          { count: 'exact' },
         )
         .order('created_at', { ascending: false })
-        .limit(limit);
+        .range(offset, offset + limit - 1);
 
       if (error) {
         return NextResponse.json({ error: error.message }, { status: 500 });
       }
 
-      return NextResponse.json({ items: data ?? [] });
+      return NextResponse.json({ items: data ?? [], total: count ?? 0, running: runningRows ?? [] });
     },
   );
 }

@@ -6,6 +6,7 @@
 
 import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import type { TwoGisRubricGroupConfig } from '@/lib/twoGis/rubricGroups';
 
 /** Шаги конструктора баз, которые НИКОГДА не допускаем в OutreachOS-прогон. */
 export const FORBIDDEN_STEPS = ['ta_scoring', 'personalization'] as const;
@@ -64,10 +65,41 @@ export interface OutreachOsConfig {
   /** Каталоги (профобласти) SJ: IT=33, пром/производство=327, стройка=306,
    *  логистика=86, маркетинг=234, HR=76, консалтинг=426. */
   superjob_catalogues: number[];
+  /**
+   * 2GIS top-up (миграция 20260811_0001, дизайн-док 2026-08-11): добор из
+   * 2gis_dataset в дни недобора HH+SJ до gis_topup_target_appended. false →
+   * топ-ап не запускается (фазы 8t.* пропускаются целиком).
+   */
+  gis_topup_enabled: boolean;
+  /** Цель: суммарно залито A+B за прогон. Дефицит = target − keptLeads после LLM. */
+  gis_topup_target_appended: number;
+  /** Рубрикатор 2GIS (jsonb, формат gis_signal_segments.rubric_groups). */
+  gis_topup_rubric_groups: TwoGisRubricGroupConfig[];
+  /** Потолок кандидатов 2GIS за прогон (защита конструктора и бюджета валидации). */
+  gis_topup_daily_cap: number;
+  /**
+   * Замер воронки ТОП-АПА (отдельно от measure_only HH-ветки): фазы 8t.1–8t.4
+   * выполняются, счётчики пишутся в run, но GIS-лиды НЕ заливаются и seen по
+   * ним НЕ пишется. HH-ветка при этом работает как обычно.
+   */
+  gis_topup_measure_only: boolean;
 }
 
 /** Дефолтный набор каталогов SJ — подстраховка до миграции колонки. */
 const SUPERJOB_DEFAULT_CATALOGUES = [33, 327, 306, 86, 234, 76, 426];
+
+/** Дефолты top-up'а до миграции 20260811_0001 (источник выключен, замер-only). */
+const GIS_TOPUP_DEFAULTS = {
+  enabled: false,
+  targetAppended: 200,
+  dailyCap: 500,
+  measureOnly: true,
+} as const;
+
+function positiveIntOr(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : fallback;
+}
 
 /**
  * Читает конфиг id=1. Возвращает null, если строки нет или БД недоступна.
@@ -100,5 +132,18 @@ export async function loadOutreachOsConfig(): Promise<OutreachOsConfig | null> {
       Array.isArray(row.superjob_catalogues) && row.superjob_catalogues.length > 0
         ? row.superjob_catalogues
         : SUPERJOB_DEFAULT_CATALOGUES,
+    // 2GIS top-up: до миграции колонок — выключен; measure_only по умолчанию
+    // true (замер без заливки/seen), даже если колонка появилась, но флаг
+    // никто не трогал.
+    gis_topup_enabled: row.gis_topup_enabled === true,
+    gis_topup_target_appended: positiveIntOr(
+      row.gis_topup_target_appended,
+      GIS_TOPUP_DEFAULTS.targetAppended,
+    ),
+    gis_topup_rubric_groups: Array.isArray(row.gis_topup_rubric_groups)
+      ? (row.gis_topup_rubric_groups as TwoGisRubricGroupConfig[])
+      : [],
+    gis_topup_daily_cap: positiveIntOr(row.gis_topup_daily_cap, GIS_TOPUP_DEFAULTS.dailyCap),
+    gis_topup_measure_only: row.gis_topup_measure_only !== false,
   };
 }

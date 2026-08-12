@@ -125,6 +125,17 @@ export interface ClientReplyMessageData {
    * критериев не ставится — DM остаётся обычным уведомлением.
    */
   isLeadByClientCriteria?: boolean;
+  /**
+   * true — Instantly НЕ привязал письмо к кампании («сирота»: лид ответил с
+   * другого адреса своей компании, сломанные заголовки треда), кампания
+   * атрибутирована НАМИ по цитируемому домену (othersWatchdog). DM обязан
+   * сказать об этом честно — «Ответ вне треда кампании»: формулировка «по
+   * вашей кампании» отправляла клиента искать письмо в кампании, где его нет
+   * и быть не может (ложная атрибуция, инцидент 11.08.2026).
+   */
+  outOfCampaign?: boolean;
+  /** Ящик, физически принявший письмо — показываем в DM при outOfCampaign. */
+  eaccount?: string | null;
 }
 
 /**
@@ -150,14 +161,33 @@ export function buildClientReplyMessage(data: ClientReplyMessageData): string {
       })} (МСК)`;
 
   const lines: string[] = [];
-  lines.push(
-    data.isLeadByClientCriteria
-      ? '🔥 <b>Лид по вашим критериям</b>'
-      : '📩 <b>Новый ответ по вашей кампании</b>',
-  );
+  if (data.outOfCampaign) {
+    // Сирота: заголовок НЕ «по вашей кампании» — честно, что Instantly письмо
+    // не привязал. Бейдж «по вашим критериям» (если промпт клиента дал lead)
+    // сохраняем второй строкой — он про вердикт, а не про привязку.
+    lines.push('📩 <b>Ответ вне треда кампании</b>');
+    if (data.isLeadByClientCriteria) lines.push('🔥 <b>Лид по вашим критериям</b>');
+  } else {
+    lines.push(
+      data.isLeadByClientCriteria
+        ? '🔥 <b>Лид по вашим критериям</b>'
+        : '📩 <b>Новый ответ по вашей кампании</b>',
+    );
+  }
   lines.push('');
 
-  if (data.campaignName) lines.push(`📨 <b>Кампания:</b> ${escapeHtml(data.campaignName)}`);
+  if (data.outOfCampaign && data.eaccount) {
+    lines.push(`📬 <b>Ящик:</b> ${escapeHtml(data.eaccount)}`);
+  }
+  if (data.campaignName) {
+    // У сироты кампания — наша атрибуция по домену («похоже на лид кампании»),
+    // а не факт привязки. Полезно как контекст, но не как утверждение.
+    lines.push(
+      data.outOfCampaign
+        ? `🔎 <b>Похоже на лид кампании:</b> ${escapeHtml(data.campaignName)}`
+        : `📨 <b>Кампания:</b> ${escapeHtml(data.campaignName)}`,
+    );
+  }
   if (data.leadName) lines.push(`👤 <b>От:</b> ${escapeHtml(data.leadName)}`);
   lines.push(`✉️ <b>Email:</b> ${escapeHtml(data.leadEmail)}`);
   if (data.companyName) lines.push(`🏢 <b>Компания:</b> ${escapeHtml(data.companyName)}`);

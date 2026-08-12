@@ -1,3 +1,5 @@
+import { DEFAULT_MAX_MESSAGE_CHARS } from './firstTouch/validateMessage';
+
 export interface TgOutreachTag {
   id: string;
   name: string;
@@ -90,6 +92,15 @@ export interface OpenAISettings {
   trigger_phrases_negative: string;
   target_chats_positive: string;
   target_chats_negative: string;
+  /**
+   * Куда уходит кандидат в партнёры по кнопке «Передать партнёра».
+   *
+   * Отдельно от `target_chats_positive`: заинтересованного клиента и человека,
+   * который хочет стать партнёром программы, разбирают разные люди. Пусто —
+   * используем чат положительного триггера, чтобы кнопка работала сразу, а не
+   * молча упиралась в незаполненную настройку.
+   */
+  target_chats_partner?: string;
   use_fallback_on_fail: boolean;
   fallback_text: string;
 }
@@ -145,6 +156,15 @@ export interface TelegramSettings {
    * Кампании, заведённые до этой фичи, поля не имеют — отсюда `?`.
    */
   first_touch_per_account_per_day?: number;
+  /**
+   * Максимальная длина первого сообщения. Длиннее — контакт откладывается, а не
+   * отправляется. Это фильтр мусора в файле (съехавшая колонка, обрезанная
+   * строка), а не правило Telegram, поэтому порог должен быть под рукой у
+   * оператора: база с ровными текстами по 430–460 знаков при пороге 400 не
+   * отправляется вообще никогда. Ноль или отсутствие поля = дефолт 400,
+   * потолок — предел Telegram в 4096.
+   */
+  first_touch_max_chars?: number;
   follow_up: FollowUpSettings;
 }
 
@@ -262,6 +282,22 @@ export interface OutreachDialog {
   status: DialogStatus;
   last_message_at: string | null;
   created_at: string;
+  /**
+   * Последняя передача этого диалога — приклеивается роутом списка, в самой
+   * таблице диалогов такого поля нет.
+   *
+   * Живая (pending/sent) гасит кнопки: передача на диалог одна, и узнавать об
+   * этом из ошибки после подтверждения — плохой способ. Упавшая кнопок не
+   * гасит, но показывает причину прямо в строке человека: повторить можно
+   * только зная, что именно сломалось.
+   */
+  forward?: {
+    kind: 'lead' | 'partner';
+    status: 'pending' | 'sent' | 'failed';
+    sent_at: string | null;
+    /** Причина сбоя целиком — по ней оператор чинит и повторяет. */
+    error_message: string | null;
+  } | null;
 }
 
 export interface OutreachProcessed {
@@ -308,6 +344,7 @@ export const DEFAULT_OPENAI_SETTINGS: OpenAISettings = {
   trigger_phrases_negative: '',
   target_chats_positive: '',
   target_chats_negative: '',
+  target_chats_partner: '',
   use_fallback_on_fail: false,
   fallback_text: '',
 };
@@ -341,5 +378,6 @@ export const DEFAULT_TELEGRAM_SETTINGS: TelegramSettings = {
   ignore_no_username: true,
   blocked_usernames: ['SpamBot'],
   account_cooldown_hours: 5,
+  first_touch_max_chars: DEFAULT_MAX_MESSAGE_CHARS,
   follow_up: DEFAULT_FOLLOW_UP,
 };

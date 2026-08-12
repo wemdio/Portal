@@ -340,7 +340,6 @@ export class SbisPostgresApplySession implements SbisApplySession {
     callbacks: SbisStageCallbacks,
   ) => Promise<{ planFingerprint: string }>;
   private stageTablePrepared = false;
-  private readOnly = false;
 
   constructor(options: SbisPostgresApplySessionOptions) {
     this.client = options.client;
@@ -359,7 +358,6 @@ export class SbisPostgresApplySession implements SbisApplySession {
 
   async beginReadOnly(): Promise<void> {
     await this.prepareStageTable();
-    this.readOnly = true;
     await beginImportTransaction(this.client, 'BEGIN READ ONLY', {
       lockTimeout: '30s',
       statementTimeout: '30min',
@@ -369,7 +367,6 @@ export class SbisPostgresApplySession implements SbisApplySession {
 
   async beginReadWrite(): Promise<void> {
     await this.prepareStageTable();
-    this.readOnly = false;
     await beginImportTransaction(this.client, 'BEGIN READ WRITE', {
       lockTimeout: '30s',
       statementTimeout: '30min',
@@ -422,9 +419,7 @@ SELECT pg_advisory_xact_lock(
         'SBIS plan fingerprint changed while staging; refusing to continue',
       );
     }
-    if (!this.readOnly) {
-      await this.client.query(`ANALYZE ${STAGE_TABLE}`);
-    }
+    await this.client.query(`ANALYZE pg_temp.${STAGE_TABLE}`);
   }
 
   async lockTargetTable(): Promise<void> {

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import TeamPage from '@/app/team/page';
 import type { UserRole } from '@/types';
@@ -7,16 +7,37 @@ let mockUserRole: UserRole | null | 'unknown' = 'technician';
 let mockIsHr = false;
 let mockCanAccessTeamPrivate = false;
 let mockUserEmail = 'team-member@example.com';
+let mockNewReviewRequestCount = 0;
+let mockProjectsData: Array<Record<string, unknown>> = [];
+let mockProfilesData: Array<Record<string, unknown>> = [];
 
 const mockSupabaseFrom = jest.fn((table: string) => ({
   select: jest.fn().mockResolvedValue({
-    data: table === 'projects' ? [] : [],
+    data: table === 'projects' ? mockProjectsData : mockProfilesData,
     error: null,
   }),
 }));
 const mockStatisticsPanel = jest.fn(() => <div>Statistics panel mounted</div>);
 const mockReviewsPanel = jest.fn(() => <div>Reviews panel mounted</div>);
 const mockActivityPlanPanel = jest.fn(() => <div>Activity plan panel mounted</div>);
+const mockRefreshReviewRequestSummary = jest.fn();
+const mockUseTeamReviewRequestSummary = jest.fn((_enabled: boolean) => ({
+  newCount: mockNewReviewRequestCount,
+  refresh: mockRefreshReviewRequestSummary,
+}));
+const mockHrPanel = jest.fn(({
+  newRequestCount,
+  onReviewRequestsChanged,
+}: {
+  newRequestCount: number;
+  onReviewRequestsChanged: () => void;
+}) => (
+  <div>
+    <span>HR panel mounted</span>
+    <span>Nested requests count: {newRequestCount}</span>
+    <button type="button" onClick={onReviewRequestsChanged}>Mock request mutation</button>
+  </div>
+));
 
 jest.mock('@/lib/UserProvider', () => ({
   useUser: () => ({
@@ -62,6 +83,18 @@ jest.mock('@/components/team/TeamActivityPlanPanel', () => ({
   default: () => mockActivityPlanPanel(),
 }), { virtual: true });
 
+jest.mock('../../src/components/team/TeamHrPanel', () => ({
+  __esModule: true,
+  default: (props: {
+    newRequestCount: number;
+    onReviewRequestsChanged: () => void;
+  }) => mockHrPanel(props),
+}), { virtual: true });
+
+jest.mock('../../src/components/team/useTeamReviewRequestSummary', () => ({
+  useTeamReviewRequestSummary: (enabled: boolean) => mockUseTeamReviewRequestSummary(enabled),
+}), { virtual: true });
+
 async function renderLoadedTeamPage() {
   const view = render(<TeamPage />);
   expect(await screen.findByRole('heading', { name: 'Лиды' })).toBeInTheDocument();
@@ -74,6 +107,9 @@ describe('<TeamPage /> access', () => {
     mockIsHr = false;
     mockCanAccessTeamPrivate = false;
     mockUserEmail = 'team-member@example.com';
+    mockNewReviewRequestCount = 0;
+    mockProjectsData = [];
+    mockProfilesData = [];
     jest.clearAllMocks();
     window.localStorage.clear();
   });
@@ -89,9 +125,11 @@ describe('<TeamPage /> access', () => {
       expect(screen.queryByRole('button', { name: 'Статистика' })).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Ревью' })).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Активности' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^HR(?:,|$)/ })).not.toBeInTheDocument();
       expect(mockStatisticsPanel).not.toHaveBeenCalled();
       expect(mockReviewsPanel).not.toHaveBeenCalled();
       expect(mockActivityPlanPanel).not.toHaveBeenCalled();
+      expect(mockHrPanel).not.toHaveBeenCalled();
     },
   );
 
@@ -106,9 +144,11 @@ describe('<TeamPage /> access', () => {
       expect(screen.queryByRole('button', { name: 'Статистика' })).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Ревью' })).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Активности' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^HR(?:,|$)/ })).not.toBeInTheDocument();
       expect(mockStatisticsPanel).not.toHaveBeenCalled();
       expect(mockReviewsPanel).not.toHaveBeenCalled();
       expect(mockActivityPlanPanel).not.toHaveBeenCalled();
+      expect(mockHrPanel).not.toHaveBeenCalled();
     },
   );
 
@@ -127,6 +167,7 @@ describe('<TeamPage /> access', () => {
     const statisticsTab = screen.getByRole('button', { name: 'Статистика' });
     const reviewsTab = screen.getByRole('button', { name: 'Ревью' });
     const activitiesTab = screen.getByRole('button', { name: 'Активности' });
+    const hrTab = screen.getByRole('button', { name: 'HR' });
 
     await user.click(statisticsTab);
     expect(screen.getByText('Statistics panel mounted')).toBeInTheDocument();
@@ -136,6 +177,10 @@ describe('<TeamPage /> access', () => {
 
     await user.click(activitiesTab);
     expect(screen.getByText('Activity plan panel mounted')).toBeInTheDocument();
+
+    await user.click(hrTab);
+    expect(screen.getByText('HR panel mounted')).toBeInTheDocument();
+    expect(screen.getByText('Nested requests count: 0')).toBeInTheDocument();
   });
 
   it.each([
@@ -156,12 +201,14 @@ describe('<TeamPage /> access', () => {
     expect(screen.queryByRole('button', { name: 'Статистика' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Ревью' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Активности' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^HR(?:,|$)/ })).not.toBeInTheDocument();
   });
 
   it.each([
     ['Статистика', 'Statistics panel mounted'],
     ['Ревью', 'Reviews panel mounted'],
     ['Активности', 'Activity plan panel mounted'],
+    ['HR', 'HR panel mounted'],
   ])('immediately leaves %s when the private-team capability is revoked', async (tabName, panelText) => {
     mockUserRole = 'technician';
     mockCanAccessTeamPrivate = true;
@@ -185,5 +232,93 @@ describe('<TeamPage /> access', () => {
 
     expect(screen.getByRole('button', { name: 'Загрузка' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.queryByText(panelText)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['lead', true],
+    ['director', true],
+    ['manager', false],
+    ['admin', false],
+    ['technician', false],
+    ['sales', false],
+    ['marketer', false],
+  ] as const)('shows the inline review-request entry point to %s on Load: %s', async (role, visible) => {
+    mockUserRole = role;
+
+    await renderLoadedTeamPage();
+
+    const trigger = screen.queryByRole('button', { name: 'Запросить ревью' });
+    if (visible) expect(trigger).toBeInTheDocument();
+    else expect(trigger).not.toBeInTheDocument();
+    expect(screen.queryByText('HR panel mounted')).not.toBeInTheDocument();
+  });
+
+  it('offers only real internal employees and composes clean project labels in the lead request form', async () => {
+    mockUserRole = 'lead';
+    mockProfilesData = [
+      { id: 'real-specialist', email: 'real@example.com', full_name: 'Анна Ким', role: 'technician', avatar_url: null, is_demo: false },
+      { id: 'demo-specialist', email: 'demo@example.com', full_name: 'Демо Специалист', role: 'technician', avatar_url: null, is_demo: true },
+      { id: 'client', email: 'client@example.com', full_name: 'Клиент', role: 'client', avatar_url: null, is_demo: false },
+    ];
+    mockProjectsData = [
+      { id: 'named', client: ' Acme ', name: ' Аутрич ', status: 'В работе', manager: null, specialist: null, kpi_plan: null, kpi_fact: null },
+      { id: 'client-only', client: ' Solo ', name: '   ', status: 'Подготовка', manager: null, specialist: null, kpi_plan: null, kpi_fact: null },
+      { id: 'equal', client: ' Polza ', name: 'polZa', status: 'В работе', manager: null, specialist: null, kpi_plan: null, kpi_fact: null },
+      { id: 'blank', client: '   ', name: '   ', status: 'В работе', manager: null, specialist: null, kpi_plan: null, kpi_fact: null },
+    ];
+    const user = userEvent.setup();
+
+    await renderLoadedTeamPage();
+    await user.click(screen.getByRole('button', { name: 'Запросить ревью' }));
+
+    const employeeSelect = screen.getByLabelText('Специалист');
+    expect(employeeSelect).toHaveTextContent('Анна Ким · real@example.com');
+    expect(employeeSelect).not.toHaveTextContent('Демо Специалист');
+    expect(employeeSelect).not.toHaveTextContent('Клиент');
+    const projectSelect = screen.getByLabelText('Проект, необязательно');
+    expect(projectSelect).toHaveTextContent('Acme · Аутрич');
+    expect(projectSelect).toHaveTextContent('Solo');
+    expect(projectSelect).not.toHaveTextContent('Solo ·');
+    expect(within(projectSelect).getByRole('option', { name: 'Polza' })).toBeInTheDocument();
+    expect(projectSelect).not.toHaveTextContent('Polza · polZa');
+    expect(within(projectSelect).getByRole('option', { name: 'Проект' })).toBeInTheDocument();
+  });
+
+  it('shows a private new-request badge on HR, caps its visual value and refreshes after a queue mutation', async () => {
+    mockCanAccessTeamPrivate = true;
+    mockNewReviewRequestCount = 128;
+    const user = userEvent.setup();
+
+    await renderLoadedTeamPage();
+
+    const hrTab = screen.getByRole('button', {
+      name: 'HR, 128 новых запросов на ревью',
+    });
+    expect(hrTab).toHaveTextContent('99+');
+    expect(mockUseTeamReviewRequestSummary).toHaveBeenCalledWith(true);
+
+    await user.click(hrTab);
+    expect(screen.getByText('Nested requests count: 128')).toBeInTheDocument();
+    expect(screen.getByRole('button', {
+      name: 'HR, 128 новых запросов на ревью',
+    })).toHaveTextContent('99+');
+
+    await user.click(screen.getByRole('button', { name: 'Mock request mutation' }));
+    expect(mockRefreshReviewRequestSummary).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides a zero badge and does not mark requests processed merely by opening HR', async () => {
+    mockCanAccessTeamPrivate = true;
+    mockNewReviewRequestCount = 0;
+    const user = userEvent.setup();
+
+    await renderLoadedTeamPage();
+
+    const hrTab = screen.getByRole('button', { name: 'HR' });
+    expect(hrTab).not.toHaveTextContent('0');
+    await user.click(hrTab);
+
+    expect(mockRefreshReviewRequestSummary).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'HR' })).not.toHaveTextContent('0');
   });
 });

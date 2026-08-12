@@ -5,6 +5,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { startTrace } from '@/lib/tracer';
 import { parseTgUsers } from '@/lib/tgParser/parser';
 import { clampTgParserMaxContactsPerRun } from '@/lib/tgParser/constants';
+import { normalizeTgLinks } from '@/lib/tgParser/normalizeLinks';
 import type { ParsedUser, ParseProgress, TgParserAccount } from '@/lib/tgParser/types';
 
 /** Этапы обхода человеческим языком — они попадают прямо в журнал оператору. */
@@ -234,7 +235,9 @@ export async function runTgParserJob(jobId: string): Promise<void> {
   const isTarget = Boolean(cfg.is_target);
   const accountLabel = cfg.account_label ?? null;
   const jobUserId = job.user_id;
-  const links = Array.isArray(cfg.links) ? cfg.links.filter((l): l is string => typeof l === 'string') : [];
+  // Второй раз, уже над сохранённым cfg: задачи, заведённые до расклейки на
+  // роуте, лежат в базе со склеенными ссылками и при повторе упали бы так же.
+  const { links } = normalizeTgLinks(cfg.links);
 
   await writeJobLog({
     jobId,

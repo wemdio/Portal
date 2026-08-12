@@ -115,7 +115,7 @@ const HTML_CLEAN = `
   </main>
 </body></html>`;
 
-// Все 6 сигналов на одной странице (LLM при этом вызываться не должна).
+// Все 8 сигналов на одной странице (LLM при этом вызываться не должна).
 const HTML_ALL_SIGNALS = `
 <html><body>
   <header>
@@ -123,11 +123,12 @@ const HTML_ALL_SIGNALS = `
     <button>Заказать звонок</button>
   </header>
   <main>
-    <h1>Учебный центр Практика</h1>
+    <h1>Юридический центр Практика</h1>
     <p>Отдел продаж работает ежедневно с 9 до 21.</p>
     <p>Мы ищем менеджера по продажам в команду.</p>
-    <p>Более 5000 студентов обучились у нас.</p>
+    <p>Более 5000 клиентов обратились к нам за юридической помощью.</p>
     <p>Наши офисы: ул. Тверская, д. 1 и ул. Арбат, д. 25.</p>
+    <p>В работе используем amoCRM и коллтрекинг.</p>
   </main>
 </body></html>`;
 
@@ -275,9 +276,9 @@ describe('detectOutreachSignals', () => {
       expect(verdict.hit).toBe(false);
       expect(verdict.evidence).toBe('');
     }
-    // Все 6 не закрыты эвристиками — LLM позвали ровно один раз.
+    // Все 8 не закрыты эвристиками — LLM позвали ровно один раз.
     expect(llm).toHaveBeenCalledTimes(1);
-    expect(llm.mock.calls[0][0].needed).toHaveLength(6);
+    expect(llm.mock.calls[0][0].needed).toHaveLength(8);
   });
 
   it('сайт недоступен: ok=false, note "Site unreachable", все сигналы false', async () => {
@@ -328,7 +329,7 @@ describe('detectOutreachSignals', () => {
     expect(result.note).toContain('LLM fallback failed');
   });
 
-  it('все 6 сигналов эвристиками: LLM не вызывается', async () => {
+  it('все 8 сигналов эвристиками: LLM не вызывается, signalsCount — только 6 core', async () => {
     const llm = makeLlm();
     const result = await detectOutreachSignals({
       siteUrl: 'https://praktika.example',
@@ -337,6 +338,9 @@ describe('detectOutreachSignals', () => {
     });
 
     expect(result.ok).toBe(true);
+    // Скоринговые сигналы сработали, но в signalsCount входят только 6 core.
+    expect(result.signals.legalRelevance.hit).toBe(true);
+    expect(result.signals.crmCalltracking.hit).toBe(true);
     expect(result.signalsCount).toBe(6);
     expect(llm).not.toHaveBeenCalled();
   });
@@ -439,6 +443,8 @@ describe('SIGNAL_COLUMNS', () => {
       'targetVacancy',
       'highVolume',
       'multiOffice',
+      'legalRelevance',
+      'crmCalltracking',
     ]);
     expect(SIGNAL_COLUMNS.map((c) => c.title)).toEqual([
       'Общий телефон / колл-центр',
@@ -447,6 +453,8 @@ describe('SIGNAL_COLUMNS', () => {
       'Вакансии: менеджер продаж или оператор call-центра',
       'Признак большого потока',
       'Несколько офисов / филиалов',
+      'Юридическая релевантность сайта',
+      'CRM / коллтрекинг / речевая аналитика',
     ]);
     for (const col of SIGNAL_COLUMNS) {
       expect(col.clarification).toBe(`${col.title} — уточнение`);
@@ -795,5 +803,114 @@ describe('onlineFormat (checkOnlineFormat)', () => {
     );
     expect(result.onlineFormat!.hit).toBe(true);
     expect(result.signalsCount).toBe(0); // сигналов S1-S6 на этой странице нет
+  });
+});
+
+describe('legalRelevance (скоринговый сигнал legal)', () => {
+  const run = (html: string) =>
+    detectOutreachSignals({
+      siteUrl: 'https://legal.example',
+      fetchPage: makeFetchRouter({ 'https://legal.example/': html }),
+      llmExtract: makeLlm(),
+    });
+
+  it.each<[string, RegExp]>([
+    ['<html><body><main><h1>Юридические услуги для бизнеса</h1></main></body></html>', /юридическ/i],
+    ['<html><body><main><p>Адвокаты коллегии представят ваши интересы.</p></main></body></html>', /адвокат/i],
+    ['<html><body><main><p>Помощь в банкротстве физических лиц.</p></main></body></html>', /банкротств/i],
+    ['<html><body><main><p>Регистрация ООО и ИП под ключ за 3 дня.</p></main></body></html>', /регистраци[яию]\s+ооо/i],
+    ['<html><body><main><p>Ликвидация предприятий и налоговые споры.</p></main></body></html>', /ликвидац|налоговы[ех]\s+спор/i],
+    ['<html><body><main><p>Патентные услуги и защита авторских прав.</p></main></body></html>', /патентн|авторски[ех]\s+прав/i],
+    ['<html><body><main><p>Представительство в арбитражном суде, судебные споры.</p></main></body></html>', /арбитраж|судебн/i],
+  ])('позитив: %s', async (html, expected) => {
+    const result = await run(html);
+    expect(result.signals.legalRelevance.hit).toBe(true);
+    expect(result.signals.legalRelevance.evidence).toMatch(expected);
+    expect(result.signals.legalRelevance.evidence.length).toBeLessThanOrEqual(200);
+  });
+
+  it.each<[string, string]>([
+    ['<html><body><footer><p>Юридический адрес: г. Москва, ул. Ленина, д. 1. ООО «Ромашка».</p></footer></body></html>', 'юридический адрес — реквизиты, не тематика'],
+    ['<html><body><footer><p>Правовая информация. Политика конфиденциальности.</p></footer></body></html>', 'правовая информация — подвальный булочкрож'],
+    ['<html><body><main><h1>Стоматология Улыбка</h1><p>Лечение зубов.</p></main></body></html>', 'неюридический сайт'],
+  ])('негатив: %s', async (html) => {
+    const result = await run(html);
+    expect(result.signals.legalRelevance.hit).toBe(false);
+    expect(result.signals.legalRelevance.evidence).toBe('');
+  });
+
+  it('не входит в signalsCount (скоринговый, не core-сигнал)', async () => {
+    const result = await run(
+      '<html><body><main><h1>Юридические услуги</h1></main></body></html>',
+    );
+    expect(result.signals.legalRelevance.hit).toBe(true);
+    expect(result.signalsCount).toBe(0);
+  });
+});
+
+describe('crmCalltracking (скоринговый сигнал legal)', () => {
+  const run = (html: string) =>
+    detectOutreachSignals({
+      siteUrl: 'https://crm.example',
+      fetchPage: makeFetchRouter({ 'https://crm.example/': html }),
+      llmExtract: makeLlm(),
+    });
+
+  it('позитив: скрипт Calltouch (виджет call_tracking) без текста', async () => {
+    const result = await run(
+      '<html><body><main><h1>Юристы</h1></main><script src="//mod.calltouch.ru/init.js?id=1"></script></body></html>',
+    );
+    expect(result.signals.crmCalltracking.hit).toBe(true);
+    expect(result.signals.crmCalltracking.evidence).toContain('Calltouch');
+  });
+
+  it('позитив: скрипт amoCRM (виджет crm)', async () => {
+    const result = await run(
+      '<html><body><main><h1>Юристы</h1></main><script src="https://cdn.amocrm.ru/widget.js"></script></body></html>',
+    );
+    expect(result.signals.crmCalltracking.hit).toBe(true);
+    expect(result.signals.crmCalltracking.evidence).toContain('amoCRM');
+  });
+
+  it.each<[string, RegExp]>([
+    ['<html><body><main><p>Мы используем коллтрекинг и речевую аналитику.</p></main></body></html>', /коллтрекинг|речев/i],
+    ['<html><body><main><p>Отдел работает в Битрикс24, виртуальная АТС подключена.</p></main></body></html>', /битрикс|виртуальн/i],
+    ['<html><body><main><p>Внедрили calltracking от CoMagic.</p></main></body></html>', /calltracking|comagic/i],
+  ])('позитив текстом: %s', async (html, expected) => {
+    const result = await run(html);
+    expect(result.signals.crmCalltracking.hit).toBe(true);
+    expect(result.signals.crmCalltracking.evidence).toMatch(expected);
+  });
+
+  it('негатив: сайт без CRM/коллтрекинга', async () => {
+    const result = await run(
+      '<html><body><main><h1>Бюро переводов</h1><p>Переводим документы.</p></main></body></html>',
+    );
+    expect(result.signals.crmCalltracking.hit).toBe(false);
+    expect(result.signals.crmCalltracking.evidence).toBe('');
+  });
+
+  it('не входит в signalsCount (скоринговый, не core-сигнал)', async () => {
+    const result = await run(
+      '<html><body><main><p>Мы используем коллтрекинг.</p></main></body></html>',
+    );
+    expect(result.signals.crmCalltracking.hit).toBe(true);
+    expect(result.signalsCount).toBe(0);
+  });
+});
+
+describe('salesDept: intake-команда (расширение для legal-скоринга)', () => {
+  it('«intake-отдел» — срабатывает', async () => {
+    const html = `
+      <html><body><main>
+        <p>Intake-отдел принимает входящие обращения клиентов ежедневно.</p>
+      </main></body></html>`;
+    const result = await detectOutreachSignals({
+      siteUrl: 'https://intake.example',
+      fetchPage: makeFetchRouter({ 'https://intake.example/': html }),
+      llmExtract: makeLlm(),
+    });
+    expect(result.signals.salesDept.hit).toBe(true);
+    expect(result.signals.salesDept.evidence).toMatch(/intake/i);
   });
 });

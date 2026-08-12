@@ -94,6 +94,167 @@ export interface TeamReviewsResponse {
   currentUserId: string | null;
 }
 
+export type TeamTalentReserveStage =
+  | 'new'
+  | 'test'
+  | 'interview'
+  | 'reserve'
+  | 'return_later'
+  | 'hired'
+  | 'rejected'
+  | 'archived';
+
+export interface TeamTalentReserveEntry {
+  id: string;
+  contact: string;
+  candidateName: string;
+  vacancyDirection: string;
+  testAssignment: string | null;
+  testResult: string | null;
+  testSentOn: string | null;
+  interviewOn: string | null;
+  comment: string | null;
+  revisitOn: string | null;
+  revisitNote: string | null;
+  stage: TeamTalentReserveStage;
+  createdBy: string | null;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TeamTalentReserveResponse {
+  entries: TeamTalentReserveEntry[];
+  summary: {
+    total: number;
+    attentionCount: number;
+    activeCount: number;
+    historyCount: number;
+  };
+  asOf: string;
+  canManage: boolean;
+}
+
+export interface TeamTalentReserveInput {
+  contact: string;
+  candidateName: string;
+  vacancyDirection: string;
+  testAssignment?: string | null;
+  testResult?: string | null;
+  testSentOn?: string | null;
+  interviewOn?: string | null;
+  comment?: string | null;
+  revisitOn?: string | null;
+  revisitNote?: string | null;
+  stage: TeamTalentReserveStage;
+}
+
+export interface TeamTalentReserveWrite {
+  contact: string;
+  candidateName: string;
+  vacancyDirection: string;
+  testAssignment: string | null;
+  testResult: string | null;
+  testSentOn: string | null;
+  interviewOn: string | null;
+  comment: string | null;
+  revisitOn: string | null;
+  revisitNote: string | null;
+  stage: TeamTalentReserveStage;
+}
+
+export type TeamReviewRequestState = 'new' | 'in_progress' | 'converted' | 'declined';
+
+export interface TeamReviewRequestPerson {
+  id: string;
+  name: string;
+  email: string | null;
+  avatarUrl: string | null;
+}
+
+export interface TeamReviewRequestProject {
+  id: string;
+  name: string;
+}
+
+export interface TeamReviewRequest {
+  id: string;
+  state: TeamReviewRequestState;
+  employee: TeamReviewRequestPerson | null;
+  initiator: TeamReviewRequestPerson | null;
+  project: TeamReviewRequestProject | null;
+  problem: string;
+  examples: string | null;
+  desiredOutcome: string;
+  claimedBy: TeamReviewRequestPerson | null;
+  claimedAt: string | null;
+  linkedReviewId: string | null;
+  decisionNote: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TeamReviewRequestGroup {
+  state: TeamReviewRequestState;
+  requests: TeamReviewRequest[];
+}
+
+export interface TeamReviewRequestSummary {
+  total: number;
+  newCount: number;
+  inProgressCount: number;
+  convertedCount: number;
+  declinedCount: number;
+}
+
+export interface TeamReviewRequestsResponse {
+  groups: TeamReviewRequestGroup[];
+  summary: TeamReviewRequestSummary;
+  employees: TeamReviewRequestPerson[];
+  projects: TeamReviewRequestProject[];
+  canManage: boolean;
+}
+
+export interface TeamReviewRequestInput {
+  employeeUserId: string;
+  projectId?: string | null;
+  problem: string;
+  examples?: string | null;
+  desiredOutcome: string;
+}
+
+export interface TeamReviewRequestWrite {
+  employeeUserId: string;
+  projectId: string | null;
+  problem: string;
+  examples: string | null;
+  desiredOutcome: string;
+}
+
+export interface TeamReviewRequestActionInput {
+  action: 'claim' | 'decline';
+  decisionNote?: string | null;
+  expectedUpdatedAt: string;
+}
+
+export interface TeamReviewRequestActionWrite {
+  action: 'claim' | 'decline';
+  decisionNote?: string | null;
+  expectedUpdatedAt: string;
+}
+
+export interface TeamReviewRequestConversionInput {
+  reviewDate: string;
+  reviewReason: string;
+  expectedUpdatedAt: string;
+}
+
+export interface TeamReviewRequestConversionWrite {
+  reviewDate: string;
+  reviewReason: string;
+  expectedUpdatedAt: string;
+}
+
 export type TeamActivityPlanStatus = 'planned' | 'completed' | 'cancelled';
 export type TeamActivityPlanTimingType = 'date' | 'schedule' | 'none';
 
@@ -234,6 +395,62 @@ export function buildTeamReviewCompletionWrite(
     outcomes: values.outcomes.trim(),
     problems: trimmedOrNull(values.problems),
     recommendations: trimmedOrNull(values.recommendations),
+  };
+}
+
+export function buildTeamTalentReserveWrite(
+  values: TeamTalentReserveInput,
+): TeamTalentReserveWrite {
+  const keepsReturnReminder = values.stage === 'return_later';
+  return {
+    contact: values.contact.trim(),
+    candidateName: values.candidateName.trim(),
+    vacancyDirection: values.vacancyDirection.trim(),
+    testAssignment: trimmedOrNull(values.testAssignment),
+    testResult: trimmedOrNull(values.testResult),
+    testSentOn: trimmedOrNull(values.testSentOn),
+    interviewOn: trimmedOrNull(values.interviewOn),
+    comment: trimmedOrNull(values.comment),
+    revisitOn: keepsReturnReminder ? trimmedOrNull(values.revisitOn) : null,
+    revisitNote: keepsReturnReminder ? trimmedOrNull(values.revisitNote) : null,
+    stage: values.stage,
+  };
+}
+
+export function buildTeamReviewRequestWrite(
+  values: TeamReviewRequestInput,
+): TeamReviewRequestWrite {
+  return {
+    employeeUserId: values.employeeUserId,
+    projectId: trimmedOrNull(values.projectId),
+    problem: values.problem.trim(),
+    examples: trimmedOrNull(values.examples),
+    desiredOutcome: values.desiredOutcome.trim(),
+  };
+}
+
+export function buildTeamReviewRequestActionWrite(
+  values: TeamReviewRequestActionInput,
+): TeamReviewRequestActionWrite {
+  return values.action === 'decline'
+    ? {
+        action: 'decline',
+        decisionNote: trimmedOrNull(values.decisionNote),
+        expectedUpdatedAt: values.expectedUpdatedAt,
+      }
+    : {
+        action: 'claim',
+        expectedUpdatedAt: values.expectedUpdatedAt,
+      };
+}
+
+export function buildTeamReviewRequestConversionWrite(
+  values: TeamReviewRequestConversionInput,
+): TeamReviewRequestConversionWrite {
+  return {
+    reviewDate: values.reviewDate,
+    reviewReason: values.reviewReason.trim(),
+    expectedUpdatedAt: values.expectedUpdatedAt,
   };
 }
 
@@ -454,6 +671,154 @@ export function normalizeReviews(payload: unknown): TeamReviewsResponse {
     employees: Array.isArray(root.employees) ? root.employees.map(normalizeEmployee) : [],
     canManage: root.canManage === true,
     currentUserId: nullableText(root.currentUserId),
+  };
+}
+
+const TEAM_TALENT_RESERVE_STAGES = new Set<TeamTalentReserveStage>([
+  'new',
+  'test',
+  'interview',
+  'reserve',
+  'return_later',
+  'hired',
+  'rejected',
+  'archived',
+]);
+
+function normalizeTalentReserveEntry(value: unknown): TeamTalentReserveEntry {
+  const entry = record(value);
+  const rawStage = text(entry.stage) as TeamTalentReserveStage;
+  return {
+    id: text(entry.id),
+    contact: text(entry.contact),
+    candidateName: text(entry.candidateName ?? entry.candidate_name, 'Без имени'),
+    vacancyDirection: text(entry.vacancyDirection ?? entry.vacancy_direction),
+    testAssignment: nullableText(entry.testAssignment ?? entry.test_assignment),
+    testResult: nullableText(entry.testResult ?? entry.test_result),
+    testSentOn: nullableText(entry.testSentOn ?? entry.test_sent_on),
+    interviewOn: nullableText(entry.interviewOn ?? entry.interview_on),
+    comment: nullableText(entry.comment),
+    revisitOn: nullableText(entry.revisitOn ?? entry.revisit_on),
+    revisitNote: nullableText(entry.revisitNote ?? entry.revisit_note),
+    stage: TEAM_TALENT_RESERVE_STAGES.has(rawStage) ? rawStage : 'new',
+    createdBy: nullableText(entry.createdBy ?? entry.created_by),
+    updatedBy: nullableText(entry.updatedBy ?? entry.updated_by),
+    createdAt: text(entry.createdAt ?? entry.created_at),
+    updatedAt: text(entry.updatedAt ?? entry.updated_at),
+  };
+}
+
+export function normalizeTalentReserve(payload: unknown): TeamTalentReserveResponse {
+  const root = unwrap(payload);
+  const summary = record(root.summary);
+  return {
+    entries: Array.isArray(root.entries) ? root.entries.map(normalizeTalentReserveEntry) : [],
+    summary: {
+      total: number(summary.total),
+      attentionCount: number(summary.attentionCount ?? summary.attention_count),
+      activeCount: number(summary.activeCount ?? summary.active_count),
+      historyCount: number(summary.historyCount ?? summary.history_count),
+    },
+    asOf: text(root.asOf ?? root.as_of),
+    canManage: root.canManage === true || root.can_manage === true,
+  };
+}
+
+function normalizeReviewRequestPerson(value: unknown): TeamReviewRequestPerson | null {
+  if (!value) return null;
+  const person = record(value);
+  const id = text(person.id);
+  if (!id) return null;
+  return {
+    id,
+    name: text(person.name ?? person.fullName ?? person.full_name, 'Без имени'),
+    email: nullableText(person.email),
+    avatarUrl: nullableText(person.avatarUrl ?? person.avatar_url),
+  };
+}
+
+function normalizeReviewRequestProject(value: unknown): TeamReviewRequestProject | null {
+  if (!value) return null;
+  const project = record(value);
+  const id = text(project.id);
+  if (!id) return null;
+  return {
+    id,
+    name: text(project.name ?? project.client, 'Без названия'),
+  };
+}
+
+function normalizeReviewRequest(value: unknown): TeamReviewRequest {
+  const request = record(value);
+  const rawState = text(request.state);
+  const state: TeamReviewRequestState = rawState === 'in_progress'
+    || rawState === 'converted'
+    || rawState === 'declined'
+    ? rawState
+    : 'new';
+  return {
+    id: text(request.id),
+    state,
+    employee: normalizeReviewRequestPerson(request.employee),
+    initiator: normalizeReviewRequestPerson(request.initiator),
+    project: normalizeReviewRequestProject(request.project),
+    problem: text(request.problem),
+    examples: nullableText(request.examples),
+    desiredOutcome: text(request.desiredOutcome ?? request.desired_outcome),
+    claimedBy: normalizeReviewRequestPerson(request.claimedBy ?? request.claimed_by),
+    claimedAt: nullableText(request.claimedAt ?? request.claimed_at),
+    linkedReviewId: nullableText(request.linkedReviewId ?? request.linked_review_id),
+    decisionNote: nullableText(request.decisionNote ?? request.decision_note),
+    createdAt: text(request.createdAt ?? request.created_at),
+    updatedAt: text(request.updatedAt ?? request.updated_at),
+  };
+}
+
+const REVIEW_REQUEST_STATES: readonly TeamReviewRequestState[] = [
+  'new',
+  'in_progress',
+  'converted',
+  'declined',
+];
+
+export function normalizeReviewRequestSummary(payload: unknown): { newCount: number } {
+  const root = unwrap(payload);
+  return {
+    newCount: Math.max(0, Math.trunc(number(root.newCount ?? root.new_count))),
+  };
+}
+
+export function normalizeReviewRequests(payload: unknown): TeamReviewRequestsResponse {
+  const root = unwrap(payload);
+  const rawGroups = Array.isArray(root.groups) ? root.groups : [];
+  const grouped = new Map<TeamReviewRequestState, TeamReviewRequest[]>();
+  for (const state of REVIEW_REQUEST_STATES) grouped.set(state, []);
+  for (const rawGroup of rawGroups) {
+    const group = record(rawGroup);
+    const state = text(group.state) as TeamReviewRequestState;
+    if (!REVIEW_REQUEST_STATES.includes(state) || !Array.isArray(group.requests)) continue;
+    grouped.set(state, group.requests.map(normalizeReviewRequest));
+  }
+  const summary = record(root.summary);
+  return {
+    groups: REVIEW_REQUEST_STATES.map((state) => ({
+      state,
+      requests: grouped.get(state) || [],
+    })),
+    summary: {
+      total: number(summary.total),
+      newCount: number(summary.newCount ?? summary.new_count),
+      inProgressCount: number(summary.inProgressCount ?? summary.in_progress_count),
+      convertedCount: number(summary.convertedCount ?? summary.converted_count),
+      declinedCount: number(summary.declinedCount ?? summary.declined_count),
+    },
+    employees: Array.isArray(root.employees)
+      ? root.employees.map(normalizeReviewRequestPerson).filter((person): person is TeamReviewRequestPerson => person !== null)
+      : [],
+    projects: Array.isArray(root.projects)
+      ? root.projects.map(normalizeReviewRequestProject).filter((project): project is TeamReviewRequestProject => project !== null)
+      : [],
+    canManage: root.canManage === true || root.can_manage === true,
   };
 }
 

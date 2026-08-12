@@ -5,12 +5,18 @@ import { supabase } from '@/lib/supabaseClient';
 import { logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { UserProfile, UserRole } from '@/types';
+import { isInternalRole } from '@/lib/roles';
 import { getAssigneeDisplayName } from '@/lib/projectAssignees';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
+import { formatTeamProjectLabel } from '@/lib/teamProjectLabel';
 import { useUser } from '@/lib/UserProvider';
 import TeamStatisticsPanel from '@/components/team/TeamStatisticsPanel';
 import TeamReviewsPanel from '@/components/team/TeamReviewsPanel';
 import TeamActivityPlanPanel from '@/components/team/TeamActivityPlanPanel';
+import TeamHrPanel from '@/components/team/TeamHrPanel';
+import TeamReviewRequestForm from '@/components/team/TeamReviewRequestForm';
+import { useTeamReviewRequestSummary } from '@/components/team/useTeamReviewRequestSummary';
+import type { TeamReviewRequestPerson, TeamReviewRequestProject } from '@/components/team/teamApi';
 
 interface ProjectData {
   id: string;
@@ -37,20 +43,36 @@ function isPausedStatus(status: string | null | undefined): boolean {
   return (status || '').toLowerCase().includes('пауз');
 }
 
-type ProfileData = Pick<UserProfile, 'id' | 'email' | 'full_name' | 'role' | 'avatar_url'>;
+type ProfileData = Pick<UserProfile, 'id' | 'email' | 'full_name' | 'role' | 'avatar_url'> & {
+  is_demo?: boolean | null;
+};
 
 const STORAGE_KEY_CAPACITY = 'portal:team-capacity';
 const DEFAULT_CAPACITY = 4;
 const LEAD_ROLES = new Set<UserRole>(['lead']);
 const NO_SPEC = '— без специалиста';
 
-type TeamWorkspaceView = 'load' | 'statistics' | 'reviews' | 'activities';
+type TeamWorkspaceView = 'load' | 'statistics' | 'reviews' | 'activities' | 'hr';
 const TEAM_WORKSPACE_VIEWS = [
   ['load', 'Загрузка'],
   ['statistics', 'Статистика'],
   ['reviews', 'Ревью'],
   ['activities', 'Активности'],
+  ['hr', 'HR'],
 ] as const satisfies ReadonlyArray<readonly [TeamWorkspaceView, string]>;
+const TEAM_WORKSPACE_DESCRIPTIONS: Record<TeamWorkspaceView, string> = {
+  load: 'Текущая загрузка, распределение по проектам и результаты',
+  statistics: 'Показатели команды за выбранный календарный период',
+  reviews: 'Итоги встреч и рекомендации по развитию сотрудников',
+  activities: 'План внутренних событий, регулярных встреч и бюджета',
+  hr: 'Кадровый резерв и очередь запросов на ревью',
+};
+
+function teamHrTabLabel(newRequestCount: number): string {
+  if (newRequestCount <= 0) return 'HR';
+  return `HR, ${newRequestCount} ${pluralRu(newRequestCount, 'новый запрос', 'новых запроса', 'новых запросов')} на ревью`;
+}
+
 type Segment = 'leads' | 'specs' | 'projects';
 type SortKey = 'projects' | 'load' | 'result' | 'name';
 type StatusFilter = 'all' | 'Перегруз' | 'Норма' | 'Свободен';
@@ -252,8 +274,10 @@ function Caret({ open, hidden }: { open: boolean; hidden?: boolean }) {
 
 export default function TeamPage() {
   const isTma = useIsTma();
-  const { canAccessTeamPrivate } = useUser();
+  const { canAccessTeamPrivate, userRole } = useUser();
   const canViewWorkspaceNavigation = canAccessTeamPrivate;
+  const canSubmitReviewRequest = userRole === 'lead' || userRole === 'director';
+  const reviewRequestSummary = useTeamReviewRequestSummary(canAccessTeamPrivate);
   const [workspaceView, setWorkspaceView] = useState<TeamWorkspaceView>('load');
   const previousCanAccessTeamPrivateRef = useRef(canAccessTeamPrivate);
   const pageHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -352,7 +376,7 @@ export default function TeamPage() {
     try {
       const [projectsResult, profilesResult] = await Promise.all([
         supabase.from('projects').select('id, client, name, status, manager, specialist, kpi_plan, kpi_fact'),
-        supabase.from('profiles').select('id, email, full_name, role, avatar_url'),
+        supabase.from('profiles').select('id, email, full_name, role, avatar_url, is_demo'),
       ]);
       if (projectsResult.error) throw projectsResult.error;
       if (profilesResult.error) throw profilesResult.error;
@@ -432,6 +456,30 @@ export default function TeamPage() {
     );
     return { occupied, totalPlan, free, load, delivered: r.delivered, missed: r.missed, totalLeads };
   }, [projects, model.specialists]);
+
+  const reviewRequestEmployees = useMemo<TeamReviewRequestPerson[]>(() => (
+    profiles
+      .filter((profile) => (
+        profile.is_demo !== true
+        && isInternalRole(profile.role)
+      ))
+      .map((profile) => ({
+        id: profile.id,
+        name: getAssigneeDisplayName(profile),
+        email: profile.email || null,
+        avatarUrl: profile.avatar_url || null,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'ru-RU'))
+  ), [profiles]);
+
+  const reviewRequestProjects = useMemo<TeamReviewRequestProject[]>(() => (
+    projects
+      .map((project) => ({
+        id: project.id,
+        name: formatTeamProjectLabel(project.client, project.name),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'ru-RU'))
+  ), [projects]);
 
   const q = query.trim().toLowerCase();
   const matchProject = (p: ProjectData) =>
@@ -750,6 +798,27 @@ export default function TeamPage() {
       ? `${model.specialists.filter((s) => s.projects.length > 0).length} с проектами`
       : `${projects.length} всего`;
 
+  const renderPrivateWorkspace = () => {
+    switch (activeWorkspaceView) {
+      case 'statistics':
+        return <TeamStatisticsPanel />;
+      case 'reviews':
+        return <TeamReviewsPanel />;
+      case 'activities':
+        return <TeamActivityPlanPanel />;
+      case 'hr':
+        return (
+          <TeamHrPanel
+            newRequestCount={reviewRequestSummary.newCount}
+            onReviewRequestsChanged={reviewRequestSummary.refresh}
+          />
+        );
+      case 'load':
+      default:
+        return null;
+    }
+  };
+
   return (
     <div className={`${isTma ? 'space-y-5' : 'space-y-6'} max-w-[1600px] mx-auto`}>
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -762,13 +831,7 @@ export default function TeamPage() {
             Команда
           </h1>
           <p className="mt-1 text-sm text-gray-500">
-            {activeWorkspaceView === 'load'
-              ? 'Текущая загрузка, распределение по проектам и результаты'
-              : activeWorkspaceView === 'statistics'
-                ? 'Показатели команды за выбранный календарный период'
-                : activeWorkspaceView === 'reviews'
-                  ? 'Итоги встреч и рекомендации по развитию сотрудников'
-                  : 'План внутренних событий, регулярных встреч и бюджета'}
+            {TEAM_WORKSPACE_DESCRIPTIONS[activeWorkspaceView]}
           </p>
         </div>
         {canViewWorkspaceNavigation && (
@@ -778,10 +841,16 @@ export default function TeamPage() {
                 key={key}
                 type="button"
                 aria-pressed={activeWorkspaceView === key}
+                aria-label={key === 'hr' ? teamHrTabLabel(reviewRequestSummary.newCount) : undefined}
                 onClick={() => setWorkspaceView(key)}
                 className={`min-h-11 shrink-0 whitespace-nowrap rounded-lg px-4 text-sm font-semibold transition-colors ${activeWorkspaceView === key ? 'bg-gray-900 text-white' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'}`}
               >
                 {label}
+                {key === 'hr' && reviewRequestSummary.newCount > 0 && (
+                  <span aria-hidden="true" className={`ml-2 inline-flex min-w-5 items-center justify-center rounded-md px-1.5 py-0.5 text-[11px] font-bold tabular-nums ${activeWorkspaceView === 'hr' ? 'bg-amber-400 text-gray-950' : 'bg-amber-100 text-amber-800'}`}>
+                    {reviewRequestSummary.newCount > 99 ? '99+' : reviewRequestSummary.newCount}
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -795,6 +864,14 @@ export default function TeamPage() {
           </div>
         ) : (
           <div className={isTma ? 'space-y-5' : 'space-y-6'}>
+      {canSubmitReviewRequest && (
+        <TeamReviewRequestForm
+          employees={reviewRequestEmployees}
+          projects={reviewRequestProjects}
+          onSubmitted={reviewRequestSummary.refresh}
+        />
+      )}
+
       {/* KPI cards */}
       <div className={`grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 ${isTma ? 'gap-3' : 'gap-4'}`}>
         {kpiCards.map((c) => (
@@ -889,13 +966,7 @@ export default function TeamPage() {
       </div>
           </div>
         )
-      ) : activeWorkspaceView === 'statistics' ? (
-        <TeamStatisticsPanel />
-      ) : activeWorkspaceView === 'reviews' ? (
-        <TeamReviewsPanel />
-      ) : (
-        <TeamActivityPlanPanel />
-      )}
+      ) : renderPrivateWorkspace()}
     </div>
   );
 }

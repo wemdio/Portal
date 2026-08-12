@@ -89,7 +89,9 @@ describe('миграция — сигнал продлений по коммен
   });
 
   it('resolved объединяет три сигнала через union all с method note_text первым', () => {
-    const resolvedMatch = SQL.match(/resolved as \(([\s\S]*?)\)\n\n\s*insert into/);
+    const resolvedMatch = SQL.match(
+      /resolved as \(([\s\S]*?)\)\r?\n\r?\n\s*insert into/,
+    );
     expect(resolvedMatch).not.toBeNull();
     const resolvedBody = resolvedMatch![1];
     const noteIdx = resolvedBody.indexOf("'note_text'");

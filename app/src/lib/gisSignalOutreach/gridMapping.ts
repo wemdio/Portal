@@ -5,10 +5,11 @@
  *
  * Заголовок сетки ТОЧНО повторяет референсный CSV ручной выгрузки:
  *   id,компания,city_name,phone,email,сайт,category,subcategory,
- *   <6 пар «сигнал»/«сигнал — уточнение»>, Проверка — примечание
+ *   <8 пар «сигнал»/«сигнал — уточнение»>, score, grade, Проверка — примечание
  *
  * Сигнальные колонки — 'Да'/'Нет'; уточнение — evidence, а когда сигнал не
  * сработал — 'Not found on checked pages' (конвенция референсного CSV).
+ * score/grade заполнены только у сегментов со скоринг-профилем (legal).
  *
  * Колонка email на входе чаще всего пустая (у 2GIS-карточек с сайтом почты
  * редки) — её заполняет find_emails конструктора (step_config.find_emails_target
@@ -29,18 +30,25 @@ import type { SegmentCandidate } from './segments';
 export const CLARIFICATION_NOT_FOUND = 'Not found on checked pages';
 
 const BASE_HEADER = ['id', 'компания', 'city_name', 'phone', 'email', 'сайт', 'category', 'subcategory'] as const;
+const SCORE_HEADER = 'score';
+const GRADE_HEADER = 'grade';
 const NOTE_HEADER = 'Проверка — примечание';
 
 /** Заголовок сетки, которую кормим конструктору баз (точный, не переупорядочивать). */
 export const GRID_HEADER: string[] = [
   ...BASE_HEADER,
   ...SIGNAL_COLUMNS.flatMap((c) => [c.title, c.clarification]),
+  SCORE_HEADER,
+  GRADE_HEADER,
   NOTE_HEADER,
 ];
 
 export interface QualifiedCompany {
   candidate: SegmentCandidate;
   signals: OutreachSignalsResult;
+  /** Взвешенный скор/грейд — только у сегментов со скоринг-профилем (legal). */
+  score?: number | null;
+  grade?: string | null;
 }
 
 /**
@@ -48,7 +56,7 @@ export interface QualifiedCompany {
  * base_constructor_jobs.data. Первая строка — GRID_HEADER.
  */
 export function companiesToGrid(companies: QualifiedCompany[]): string[][] {
-  const rows = companies.map(({ candidate, signals }) => {
+  const rows = companies.map(({ candidate, signals, score, grade }) => {
     const signalCells = SIGNAL_COLUMNS.flatMap((col) => {
       const verdict = signals.signals[col.key];
       return [
@@ -66,6 +74,9 @@ export function companiesToGrid(companies: QualifiedCompany[]): string[][] {
       candidate.category,
       candidate.subcategory,
       ...signalCells,
+      // Скор/грейд — только scored-сегменты; у остальных ячейки пустые.
+      typeof score === 'number' ? String(score) : '',
+      grade ?? '',
       signals.note,
     ];
   });
@@ -99,6 +110,9 @@ export function gridToLeadPayloads(grid: string[][], segmentKey: string): LeadCr
   const signalTitleIdxs = SIGNAL_COLUMNS.map((col) =>
     header.findIndex((h) => (h ?? '').trim() === col.title),
   );
+  // Колонки скоринга (есть только у scored-сегментов; -1 → переменные не пишем).
+  const scoreIdx = header.findIndex((h) => (h ?? '').trim().toLowerCase() === 'score');
+  const gradeIdx = header.findIndex((h) => (h ?? '').trim().toLowerCase() === 'grade');
 
   const leads: LeadCreatePayload[] = [];
   const seenEmails = new Set<string>();
@@ -132,6 +146,12 @@ export function gridToLeadPayloads(grid: string[][], segmentKey: string): LeadCr
       signals: hitSignals,
       email_status: emailStatus,
     };
+    // Скоринг: score/grade прокидываем в шаблоны писем только когда они есть
+    // (scored-сегменты, напр. legal); у остальных переменных нет вообще.
+    const score = scoreIdx >= 0 ? (row[scoreIdx] ?? '').trim() : '';
+    const grade = gradeIdx >= 0 ? (row[gradeIdx] ?? '').trim() : '';
+    if (score) lead.custom_variables.score = score;
+    if (grade) lead.custom_variables.grade = grade;
     leads.push(lead);
   }
 
