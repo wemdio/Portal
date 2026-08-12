@@ -49,6 +49,7 @@ import {
   DEFAULT_FOLLOW_UP,
 } from '@/lib/tgOutreach/types';
 import { DEFAULT_MAX_MESSAGE_CHARS } from '@/lib/tgOutreach/firstTouch/validateMessage';
+import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
 // Только тип: сам модуль серверный (тянет gramJS), в клиентский бандл он не
 // попадает — import type стирается при сборке. Берём его, чтобы набор статусов
 // проверки был один на портал, а не переписанный руками на экране.
@@ -1536,6 +1537,12 @@ function CampaignAccountsTab({
   const [resetError, setResetError] = useState<{ id: string; message: string } | null>(null);
   /** Ответ Telegram по каждому проверенному аккаунту; висит, пока не закроют. */
   const [checkResults, setCheckResults] = useState<CheckRow[] | null>(null);
+  /**
+   * Когда список последний раз пришёл с сервера. Точка отсчёта для «данным
+   * больше суток»: `Date.now()` во время рендера — нечистый вызов, да и возраст
+   * честнее мерить от момента загрузки данных, а не от момента перерисовки.
+   */
+  const [loadedAt, setLoadedAt] = useState<number | null>(null);
 
   // Профиль читается через то же соединение, что и работа кампании, поэтому
   // на запущенной кампании в Telegram не ходим — см. гейт в API.
@@ -1598,6 +1605,7 @@ function CampaignAccountsTab({
       };
       setErrorCounts(d.counts ?? {});
     }
+    setLoadedAt(Date.now());
     setLoading(false);
   }, [campaignId]);
 
@@ -1937,6 +1945,21 @@ function CampaignAccountsTab({
     }
   };
 
+  /** Сводка по партии; сам счёт — в `lib/tgOutreach/accountsSummary` под тестами. */
+  const accountStats = useMemo(
+    () => summarizeAccounts(accounts, errorCounts, loadedAt),
+    [accounts, errorCounts, loadedAt],
+  );
+
+  /** Разбивка мёртвых по причине — человеческими ярлыками, для подсказки. */
+  const deadBreakdown = useMemo(
+    () => Object.entries(accountStats.byStatus)
+      .sort((a, b) => b[1] - a[1])
+      .map(([st, n]) => `${CHECK_LABEL[st]?.text ?? st} — ${n}`)
+      .join(', '),
+    [accountStats.byStatus],
+  );
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -1978,6 +2001,76 @@ function CampaignAccountsTab({
           </button>
         </div>
       </div>
+
+      {/* Сводка идёт до таблицы: вопрос «сколько из партии рабочих» встаёт
+          раньше, чем вопрос про конкретную строку. Возраст проверки стоит
+          рядом с числами намеренно — зелёное «жив 20» на позавчерашней
+          проверке читается как «сейчас всё хорошо», а это не так. */}
+      {!loading && accounts.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-[11px]">
+          <span
+            className="rounded-md bg-emerald-50 px-2 py-1 font-medium text-emerald-700"
+            title="Последняя проверка вернула «жив». Это снимок на момент проверки, а не состояние прямо сейчас: проверка ходит в Telegram по кнопке и только на остановленной кампании."
+          >
+            жив {accountStats.alive}
+          </span>
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.dead > 0 ? 'bg-rose-50 text-rose-700' : 'bg-gray-100 text-gray-500'}`}
+            title={deadBreakdown
+              ? `По причинам: ${deadBreakdown}`
+              : 'Аккаунтов с неудачной проверкой нет'}
+          >
+            не жив {accountStats.dead}
+          </span>
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.unchecked > 0 ? 'bg-gray-100 text-gray-600' : 'bg-gray-50 text-gray-400'}`}
+            title="Проверка ни разу не запускалась. Эти аккаунты не входят ни в «жив», ни в «не жив» — про них просто ничего не известно."
+          >
+            не проверялись {accountStats.unchecked}
+          </span>
+          {accountStats.disabled > 0 && (
+            <span
+              className="rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-700"
+              title="Выключены в портале — воркер их не берёт в работу вообще. Аккаунт выключается сам после трёх AUTH_KEY_DUPLICATED подряд; чинится завершением чужих сеансов и перевыпуском session_data."
+            >
+              выключены {accountStats.disabled}
+            </span>
+          )}
+
+          <span className="mx-1 h-4 w-px bg-gray-200" aria-hidden />
+
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.withErrors > 0 ? 'bg-rose-50 text-rose-700' : 'bg-gray-50 text-gray-400'}`}
+            title={`Аккаунты, у которых за сутки в логах были строки уровня «ошибка». Всего таких строк: ${accountStats.errorTotal}.`}
+          >
+            с ошибками за 24ч {accountStats.withErrors}
+          </span>
+          {accountStats.withWarningsOnly > 0 && (
+            <span
+              className="rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-700"
+              title="За сутки были только предупреждения, ошибок не было. Обычно это подключение со второй попытки или отложенный контакт."
+            >
+              только предупреждения {accountStats.withWarningsOnly}
+            </span>
+          )}
+
+          <span className="ml-auto text-[10px] text-gray-400">
+            {accountStats.newestCheck === null ? (
+              'проверок ещё не было — «жив» и «не жив» показывать не из чего'
+            ) : (
+              <>
+                проверка от{' '}
+                {new Date(accountStats.newestCheck).toLocaleString('ru-RU', {
+                  day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+                })}
+                {accountStats.ageHours !== null && accountStats.ageHours >= 24 && (
+                  <span className="text-amber-600"> — данным больше суток</span>
+                )}
+              </>
+            )}
+          </span>
+        </div>
+      )}
 
       {uploadError && (
         <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{uploadError}</div>
@@ -2827,18 +2920,31 @@ interface OutreachBase {
   id: string;
   name: string;
   notes: string;
+  /** Кампания-владелец. null — база осталась без владельца от старой модели. */
+  campaign_id: string | null;
   counts: { total: number; pending: number; sent: number; replied: number; failed: number; skipped: number };
 }
 
 /**
  * Базы контактов для первого касания.
  *
- * База живёт сама по себе, а не внутри кампании: одну и ту же можно запустить
- * на разных кампаниях и сравнить результат. Здесь — список всех баз с
- * галочками «использовать в этой кампании».
+ * База принадлежит кампании. Раньше она жила сама по себе — «одну и ту же можно
+ * запустить на разных кампаниях и сравнить результат», — и вкладка показывала
+ * все базы портала: оператор открывал свою кампанию и видел чужую базу на 2206
+ * контактов, в одной галочке от запуска, да ещё и с её собственными счётчиками.
+ * Сравнивать гипотезы это не помогало, а путало.
+ *
+ * Галочка теперь означает не «чья база», а «участвует в рассылке» — выключатель,
+ * которым базу ставят на паузу, не удаляя.
  */
 function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   const [bases, setBases] = useState<OutreachBase[]>([]);
+  /**
+   * Базы без кампании — наследство старой модели: кнопка «Создать базу» не
+   * спрашивала кампанию. Показываем отдельно, чтобы они не пропали молча, а
+   * оператор перенёс их руками.
+   */
+  const [orphans, setOrphans] = useState<OutreachBase[]>([]);
   const [linked, setLinked] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState('');
@@ -2849,10 +2955,14 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   const load = useCallback(async () => {
     setLoading(true);
     const [basesRes, linkRes] = await Promise.all([
-      authFetch(`${API_BASE}/bases`),
+      authFetch(`${API_BASE}/bases?campaign_id=${campaignId}`),
       authFetch(`${API_BASE}/campaigns/${campaignId}/bases`),
     ]);
-    if (basesRes.ok) setBases(((await basesRes.json()) as { items: OutreachBase[] }).items);
+    if (basesRes.ok) {
+      const d = (await basesRes.json()) as { items: OutreachBase[]; orphans?: OutreachBase[] };
+      setBases(d.items);
+      setOrphans(d.orphans ?? []);
+    }
     if (linkRes.ok) {
       const d = (await linkRes.json()) as { items: Array<{ base_id: string }> };
       setLinked(new Set(d.items.map((i) => i.base_id)));
@@ -2868,7 +2978,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
     try {
       const res = await authFetch(`${API_BASE}/bases`, {
         method: 'POST',
-        body: JSON.stringify({ name: newName.trim() }),
+        body: JSON.stringify({ name: newName.trim(), campaign_id: campaignId }),
       });
       if (!res.ok) {
         const d = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -2896,6 +3006,30 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       // а на сервере ничего не изменилось.
       void load();
     }
+  };
+
+  /** Забрать базу без владельца в эту кампанию. */
+  const adoptBase = async (base: OutreachBase) => {
+    if (!confirm(
+      `Перенести базу «${base.name}» (${base.counts.total} контактов) в эту кампанию?`
+      + ' После переноса она будет видна только здесь. Рассылка не начнётся сама —'
+      + ' для этого нужно отметить базу галочкой.',
+    )) return;
+
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases/${base.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ campaign_id: campaignId }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(d?.error ?? `Не удалось перенести базу (${res.status})`);
+        return;
+      }
+      setNotice(`База «${base.name}» перенесена в кампанию.`);
+      void load();
+    } finally { setBusy(false); }
   };
 
   const deleteBase = async (base: OutreachBase) => {
@@ -3029,8 +3163,8 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
                 type="checkbox"
                 checked={linked.has(b.id)}
                 onChange={() => { void toggleLink(b.id); }}
-                title="Использовать эту базу в кампании"
-                aria-label={`Использовать базу ${b.name}`}
+                title="Участвует в рассылке. Снятая галочка ставит базу на паузу, контакты и счётчики сохраняются"
+                aria-label={`Участвует в рассылке: база ${b.name}`}
                 className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
               />
               <span className="text-xs font-medium text-gray-800 truncate">{b.name}</span>
@@ -3060,6 +3194,43 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Наследство старой модели: кнопка «Создать базу» кампанию не спрашивала,
+          и такие базы висели во вкладке каждой кампании портала. Прятать их
+          молча нельзя — это чьи-то загруженные контакты; показываем отдельно и
+          просим перенести. Когда таких не останется, блок исчезнет сам. */}
+      {!loading && orphans.length > 0 && (
+        <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50/50 p-3">
+          <div className="text-xs font-medium text-amber-900">
+            Базы без кампании ({orphans.length})
+          </div>
+          <p className="text-[10px] text-amber-800">
+            Заведены до того, как базы стали принадлежать кампании, и не подключены ни к одной.
+            Они не участвуют ни в одной рассылке. Перенесите нужные сюда, остальные удалите —
+            после этого блок пропадёт.
+          </p>
+          <div className="divide-y divide-amber-100 rounded-lg border border-amber-200 bg-white overflow-hidden">
+            {orphans.map((b) => (
+              <div key={b.id} className="grid grid-cols-[1fr_80px_80px_190px] gap-3 items-center px-3 py-2">
+                <span className="text-xs font-medium text-gray-800 truncate">{b.name}</span>
+                <span className="text-xs text-gray-500">{b.counts.total} всего</span>
+                <span className="text-xs text-gray-500">{b.counts.sent} отправлено</span>
+                <div className="flex items-center justify-end gap-1">
+                  <button type="button" onClick={() => { void adoptBase(b); }} disabled={busy}
+                    className="rounded-lg border border-amber-300 px-2 py-1 text-[11px] text-amber-900 hover:bg-amber-100 transition cursor-pointer disabled:opacity-50">
+                    Перенести в эту кампанию
+                  </button>
+                  <button type="button" onClick={() => { void deleteBase(b); }} disabled={busy}
+                    title="Удалить базу вместе с контактами"
+                    className="p-1 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer disabled:opacity-50">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -3839,7 +4010,13 @@ function CampaignsSection() {
   };
 
   const deleteCampaign = async (id: string) => {
-    if (!confirm('Удалить кампанию? Это действие необратимо.')) return;
+    // С 12.08.2026 базы принадлежат кампании и уходят вместе с ней по cascade.
+    // Раньше они переживали удаление, поэтому прежний текст «это действие
+    // необратимо» больше не описывает масштаб потери.
+    if (!confirm(
+      'Удалить кампанию? Вместе с ней будут удалены её базы контактов и вся история отправок по ним.'
+      + ' Это действие необратимо.',
+    )) return;
     await authFetch(`${API_BASE}/campaigns/${id}`, { method: 'DELETE' });
     if (selectedId === id) setSelectedId(null);
     void fetchCampaigns();
