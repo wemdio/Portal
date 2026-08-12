@@ -15,6 +15,7 @@ function lead(over: Partial<FirstSalesLeadRow> = {}): FirstSalesLeadRow {
   return {
     amo_id: 1,
     name: 'Обычная сделка',
+    responsible_name: 'Менеджер А',
     created_at: '2026-07-15T09:00:00.000Z',
     first_qualified_at: null,
     first_meeting_at: null,
@@ -300,5 +301,67 @@ describe('встречи считаются по привязкам записе
       map, from, to, 'day', null,
     );
     expect(res.totals.meetings).toBe(1);
+  });
+});
+
+
+/**
+ * Разбивка по менеджерам. Считается теми же правилами, что и разбивка по
+ * источникам, — иначе два среза одного дашборда давали бы разные суммы, и
+ * объяснить это было бы нечем.
+ */
+describe('разбивка по ответственным менеджерам', () => {
+  it('складывает лидов, квалы и договоры по ответственному', () => {
+    const res = computeFirstSalesSeries(
+      [
+        lead({ amo_id: 1, responsible_name: 'Иванов' }),
+        lead({ amo_id: 2, responsible_name: 'Иванов', first_qualified_at: '2026-07-16T09:00:00.000Z' }),
+        lead({ amo_id: 3, responsible_name: 'Петров' }),
+      ],
+      [], map, from, to, 'day', null,
+    );
+
+    const ivanov = res.byManager.find((m) => m.manager === 'Иванов');
+    expect(ivanov).toMatchObject({ leads: 2, qualified: 1 });
+    expect(res.byManager.find((m) => m.manager === 'Петров')?.leads).toBe(1);
+  });
+
+  it('сумма по менеджерам совпадает с общим числом лидов', () => {
+    const res = computeFirstSalesSeries(
+      [
+        lead({ amo_id: 1, responsible_name: 'Иванов' }),
+        lead({ amo_id: 2, responsible_name: 'Петров' }),
+        lead({ amo_id: 3, responsible_name: null }),
+      ],
+      [], map, from, to, 'day', null,
+    );
+    expect(res.byManager.reduce((sum, m) => sum + m.leads, 0)).toBe(res.totals.leads);
+  });
+
+  /** Сделку без ответственного нельзя терять — это дыра в распределении. */
+  it('сделки без ответственного идут отдельной строкой, а не пропадают', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1, responsible_name: null }), lead({ amo_id: 2, responsible_name: '   ' })],
+      [], map, from, to, 'day', null,
+    );
+    expect(res.byManager.find((m) => m.manager === 'Без ответственного')?.leads).toBe(2);
+  });
+
+  it('встречи попадают тому, за кем закреплена сделка', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1, responsible_name: 'Иванов' })],
+      [meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T09:00:00.000Z' })],
+      map, from, to, 'day', null,
+    );
+    expect(res.byManager.find((m) => m.manager === 'Иванов')?.meetings).toBe(1);
+    expect(res.totals.meetings).toBe(1);
+  });
+
+  it('пустые строки не показываем: менеджер без событий в окне не нужен', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1, responsible_name: 'Тихий', created_at: '2026-01-01T09:00:00.000Z' })],
+      [], map, from, to, 'day', null,
+    );
+    expect(res.byManager).toHaveLength(0);
   });
 });

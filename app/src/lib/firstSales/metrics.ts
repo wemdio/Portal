@@ -26,6 +26,8 @@ import {
 export type FirstSalesLeadRow = {
   amo_id: number;
   name: string | null;
+  /** Ответственный в AMO. Заполняется синком; null — сделка без ответственного. */
+  responsible_name: string | null;
   created_at: string | null;
   first_qualified_at: string | null;
   first_meeting_at: string | null;
@@ -37,6 +39,22 @@ export type FirstSalesLeadRow = {
 
 export type SeriesBucket = {
   key: string;
+  leads: number;
+  qualified: number;
+  meetings: number;
+  contracts: number;
+};
+
+/**
+ * Разбивка по ответственному менеджеру.
+ *
+ * Считается ровно теми же правилами, что и разбивка по источникам: лиды по
+ * дате создания, договоры по дате этапа, встречи по записям разговоров. Иначе
+ * два среза одного дашборда давали бы разные суммы, и объяснить это было бы
+ * нечем.
+ */
+export type ManagerBreakdown = {
+  manager: string;
   leads: number;
   qualified: number;
   meetings: number;
@@ -86,8 +104,17 @@ export type FirstSalesTotals = {
 export type FirstSalesSeries = {
   series: SeriesBucket[];
   bySource: SourceBreakdown[];
+  byManager: ManagerBreakdown[];
   totals: FirstSalesTotals;
 };
+
+/** Сделка без ответственного — отдельная строка, а не выброшенная. */
+export const NO_MANAGER = 'Без ответственного';
+
+function managerKey(name: string | null): string {
+  const clean = (name ?? '').trim();
+  return clean || NO_MANAGER;
+}
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -146,6 +173,17 @@ export function computeFirstSalesSeries(
     keys.map((key) => [key, { key, leads: 0, qualified: 0, meetings: 0, contracts: 0 }]),
   );
   const bySource = new Map<string, SourceBreakdown>();
+  const byManager = new Map<string, ManagerBreakdown>();
+
+  const managerRow = (name: string | null): ManagerBreakdown => {
+    const key = managerKey(name);
+    let row = byManager.get(key);
+    if (!row) {
+      row = { manager: key, leads: 0, qualified: 0, meetings: 0, contracts: 0 };
+      byManager.set(key, row);
+    }
+    return row;
+  };
 
   const totals: FirstSalesTotals = {
     leads: 0, qualified: 0, meetings: 0, contracts: 0,
@@ -165,6 +203,9 @@ export function computeFirstSalesSeries(
   // выбран в фильтре — фильтрация встреч по каналу применяется отдельно,
   // при их собственной обработке.
   const dealChannelMap = new Map<number, ResolvedChannel>();
+  /** Сделка → ответственный: встречи считаются отдельным проходом, где самой
+   *  сделки под рукой уже нет. */
+  const dealManagerMap = new Map<number, string | null>();
 
   // Тип поля сужен до счётчиков: `keyof SeriesBucket` включал бы `key: string`,
   // и `bucket[field] += 1` не прошёл бы проверку типов.
@@ -178,7 +219,10 @@ export function computeFirstSalesSeries(
   for (const lead of leads) {
     const resolved = resolveChannel(lead.raw, index);
     dealChannelMap.set(lead.amo_id, resolved);
+    dealManagerMap.set(lead.amo_id, lead.responsible_name);
     if (allowed && !allowed.has(resolved.channel)) continue;
+
+    const manager = managerRow(lead.responsible_name);
 
     const sourceKey = resolved.source || '(не указан)';
     let breakdown = bySource.get(sourceKey);
@@ -206,6 +250,7 @@ export function computeFirstSalesSeries(
     if (inWindow(lead.created_at, from, to)) {
       totals.leads += 1;
       breakdown.leads += 1;
+      manager.leads += 1;
       bump(bucketKey(new Date(lead.created_at as string), groupBy), 'leads');
       if (isLeadMagnet(lead.name)) totals.leadMagnets += 1;
       if (resolved.channel === 'unassigned') totals.unassignedLeads += 1;
@@ -223,6 +268,7 @@ export function computeFirstSalesSeries(
       if (lead.first_qualified_at && lead.history_complete) {
         totals.qualified += 1;
         breakdown.qualified += 1;
+        manager.qualified += 1;
         bump(bucketKey(new Date(lead.created_at as string), groupBy), 'qualified');
       }
     }
@@ -249,6 +295,7 @@ export function computeFirstSalesSeries(
       ) {
         totals.contracts += 1;
         breakdown.contracts += 1;
+        manager.contracts += 1;
         bump(bucketKey(new Date(lead.first_contract_at as string), groupBy), 'contracts');
       }
     }
@@ -322,6 +369,7 @@ export function computeFirstSalesSeries(
       bySource.set(sourceKey, breakdown);
     }
     breakdown.meetings += 1;
+    managerRow(dealManagerMap.get(link.amo_deal_id) ?? null).meetings += 1;
   }
 
   return {
@@ -335,6 +383,12 @@ export function computeFirstSalesSeries(
     bySource: [...bySource.values()]
       .filter((s) => s.leads + s.qualified + s.meetings + s.contracts > 0)
       .sort((a, b) => b.leads - a.leads),
+    // Пустые строки отбрасываем по той же причине, что и у источников: сделка
+    // могла попасть в выборку оплатой старой сделки и дать менеджеру строку из
+    // одних нулей.
+    byManager: [...byManager.values()]
+      .filter((m) => m.leads + m.qualified + m.meetings + m.contracts > 0)
+      .sort((a, b) => b.leads - a.leads || a.manager.localeCompare(b.manager, 'ru')),
     totals,
   };
 }
@@ -342,7 +396,7 @@ export function computeFirstSalesSeries(
 const STAGE_DATE_COLUMNS =
   'amo_deal_id, created_at, first_qualified_at, first_meeting_at, first_contract_at, won_at, history_complete';
 
-type StageDateRow = Omit<FirstSalesLeadRow, 'amo_id' | 'name' | 'raw'> & { amo_deal_id: number };
+type StageDateRow = Omit<FirstSalesLeadRow, 'amo_id' | 'name' | 'responsible_name' | 'raw'> & { amo_deal_id: number };
 
 /**
  * Тянет сделки воронки первички вместе с датами этапов из view.
@@ -424,20 +478,23 @@ export async function fetchFirstSalesLeads(
     chunkArray(ids, IN_CHUNK_SIZE).map(async (chunk) => {
       const { data: leadsChunk, error: leadsError } = await db
         .from('amo_leads')
-        .select('amo_id, name, raw')
+        .select('amo_id, name, responsible_name, raw')
         .in('amo_id', chunk);
       if (leadsError) throw leadsError;
-      return (leadsChunk ?? []) as Array<{ amo_id: number; name: string | null; raw: unknown }>;
+      return (leadsChunk ?? []) as Array<{
+        amo_id: number; name: string | null; responsible_name: string | null; raw: unknown;
+      }>;
     }),
   );
-  const leadsById = new Map<number, { name: string | null; raw: unknown }>();
+  const leadsById = new Map<number, { name: string | null; responsible_name: string | null; raw: unknown }>();
   for (const l of leadChunks.flat()) {
-    leadsById.set(l.amo_id, { name: l.name, raw: l.raw });
+    leadsById.set(l.amo_id, { name: l.name, responsible_name: l.responsible_name, raw: l.raw });
   }
 
   return stageRows.map((r) => ({
     amo_id: r.amo_deal_id,
     name: leadsById.get(r.amo_deal_id)?.name ?? null,
+    responsible_name: leadsById.get(r.amo_deal_id)?.responsible_name ?? null,
     raw: leadsById.get(r.amo_deal_id)?.raw ?? null,
     created_at: r.created_at,
     first_qualified_at: r.first_qualified_at,
