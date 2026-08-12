@@ -88,9 +88,12 @@ export default function MailboxLoadPage() {
         const res = await authFetch(`/api/analytics/mailbox-load${qs}`);
         if (!res.ok) {
           // тело несёт код причины (dataset_not_configured / build_failed /
-          // role_check_failed) — показываем его, а не голый HTTP-статус
-          const body = (await res.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(body?.error || `HTTP ${res.status}`);
+          // role_check_failed) и, для build_failed, текст самой ошибки. Код без
+          // текста отвечал на вопрос «что-то сломалось», но не на «что именно»,
+          // и разбор начинался с похода в логи сервера.
+          const body = (await res.json().catch(() => null)) as { error?: string; detail?: string } | null;
+          const code = body?.error || `HTTP ${res.status}`;
+          throw new Error(body?.detail ? `${code} — ${body.detail}` : code);
         }
         const json = (await res.json()) as { data: MailboxLoad | null; error?: string };
         if (!active) return;
@@ -129,8 +132,11 @@ export default function MailboxLoadPage() {
         const qs = currentDay ? `?day=${encodeURIComponent(currentDay)}` : '';
         const res = await authFetch(`/api/analytics/mailbox-load/${encodeURIComponent(tagId)}${qs}`);
         if (!res.ok) {
-          const body = (await res.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(body?.error || `HTTP ${res.status}`);
+          // Раскрытие тега показывает лишь «не удалось», поэтому причина обязана
+          // хотя бы доехать до клиентского лога — иначе её негде взять.
+          const body = (await res.json().catch(() => null)) as { error?: string; detail?: string } | null;
+          const code = body?.error || `HTTP ${res.status}`;
+          throw new Error(body?.detail ? `${code} — ${body.detail}` : code);
         }
         const json = (await res.json()) as { tag: string | null; mailboxes: MailboxRow[]; error?: string };
         if (json.error) throw new Error(json.error);
