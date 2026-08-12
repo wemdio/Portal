@@ -28,6 +28,7 @@ import {
   Flame,
   Database,
   ShieldCheck,
+  FileSpreadsheet,
 } from 'lucide-react';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
 import WarmupChatsTab from '@/components/tg-outreach/WarmupChatsTab';
@@ -3687,6 +3688,267 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   );
 }
 
+/* =================== CAMPAIGN REPORT TAB =================== */
+
+interface ReportResponse {
+  report: {
+    weeks: Array<{
+      period: string; chats: number; contacts: number; delivered: number;
+      anyReplies: number; targetReplies: number; blocks: number; conversion: number | null;
+    }>;
+    total: ReportResponse['report']['weeks'][number];
+    leads: Array<{
+      sourceChat: string; criterion: string; nickname: string; offerSentAt: string;
+      offerNumber: string; quality: string; handedOverAt: string;
+    }>;
+    offers: Array<{
+      offerNumber: string; offer: string; channel: string; language: string;
+      status: string; deadline: string; comment: string; conclusions: string;
+    }>;
+  };
+}
+
+/** `YYYY-MM-DD` для <input type="date"> в московском времени. */
+function toDateInput(ms: number): string {
+  const d = new Date(ms + 3 * 3_600_000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Отчёт к договору: три раздела формы, выгрузка в XLSX.
+ *
+ * По умолчанию — прошедшая неделя с понедельника по воскресенье: отчёт сдаётся
+ * по понедельникам и именно за неё. Даты можно менять — форма допускает и
+ * длинный период с накоплением недельных строк.
+ *
+ * Колонки, которых в данных нет (номер оффера, критерий отбора, качество лида,
+ * дата передачи клиенту), отдаются пустыми и заполняются руками уже в файле.
+ * Показывать вместо них догадку было бы хуже пустоты: цифры уходят клиенту.
+ */
+function CampaignReportTab({ campaignId }: { campaignId: string }) {
+  const [{ from, to }, setPeriod] = useState(() => {
+    const now = Date.now();
+    const msk = now + 3 * 3_600_000;
+    const dayIndex = Math.floor(msk / 86_400_000);
+    const weekday = ((dayIndex + 3) % 7 + 7) % 7;
+    const thisMonday = (dayIndex - weekday) * 86_400_000 - 3 * 3_600_000;
+    return {
+      from: toDateInput(thisMonday - 7 * 86_400_000),
+      to: toDateInput(thisMonday - 86_400_000),
+    };
+  });
+  const [data, setData] = useState<ReportResponse['report'] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  /** Границы запроса: `to` в поле включительный, в API — исключающий. */
+  const range = useCallback(() => {
+    const fromIso = `${from}T00:00:00+03:00`;
+    const toIso = new Date(new Date(`${to}T00:00:00+03:00`).getTime() + 86_400_000).toISOString();
+    return `from=${encodeURIComponent(fromIso)}&to=${encodeURIComponent(toIso)}`;
+  }, [from, to]);
+
+  const load = useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/report?${range()}`);
+      const body = (await res.json().catch(() => null)) as (ReportResponse & { error?: string }) | null;
+      if (!res.ok) {
+        setError(body?.error ?? `Не удалось собрать отчёт (${res.status})`);
+        return;
+      }
+      setData(body?.report ?? null);
+    } finally { setLoading(false); }
+  }, [campaignId, range]);
+
+  const download = async () => {
+    setDownloading(true); setError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/report?${range()}&format=xlsx`);
+      if (!res.ok) {
+        setError(`Не удалось выгрузить файл (${res.status})`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `otchet-${from}_${to}.xlsx`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } finally { setDownloading(false); }
+  };
+
+  const cell = 'px-2 py-1.5 text-xs text-gray-700 border border-gray-200';
+  const head = 'px-2 py-1.5 text-[11px] font-medium text-gray-500 border border-gray-200 bg-gray-50 text-left';
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="space-y-1">
+          <span className="block text-[11px] font-medium text-gray-500">Период с</span>
+          <input type="date" value={from} onChange={(e) => setPeriod((p) => ({ ...p, from: e.target.value }))}
+            className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400" />
+        </label>
+        <label className="space-y-1">
+          <span className="block text-[11px] font-medium text-gray-500">по (включительно)</span>
+          <input type="date" value={to} onChange={(e) => setPeriod((p) => ({ ...p, to: e.target.value }))}
+            className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400" />
+        </label>
+        <button type="button" onClick={() => { void load(); }} disabled={loading}
+          className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 cursor-pointer">
+          {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileSpreadsheet className="h-3.5 w-3.5" />}
+          Собрать отчёт
+        </button>
+        <button type="button" onClick={() => { void download(); }} disabled={downloading || !data}
+          title={data ? 'Скачать в форме договора' : 'Сначала соберите отчёт'}
+          className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-50 cursor-pointer">
+          {downloading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+          Скачать XLSX
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div>
+      )}
+
+      {!data && !loading && (
+        <p className="text-xs text-gray-400">
+          По умолчанию стоит прошедшая неделя, с понедельника по воскресенье. Нажмите «Собрать отчёт».
+        </p>
+      )}
+
+      {data && (
+        <div className="space-y-6">
+          <div className="space-y-2">
+            <h3 className="text-sm font-medium text-gray-800">1. Рассылка и реакция</h3>
+            <div className="overflow-x-auto">
+              <table className="min-w-full border-collapse">
+                <thead>
+                  <tr>
+                    <th className={head}>Период</th>
+                    <th className={head}>Обработано чатов</th>
+                    <th className={head}>Подобрано контактов</th>
+                    <th className={head}>Доставлено</th>
+                    <th className={head}>Любых ответов</th>
+                    <th className={head}>Целевых ответов</th>
+                    <th className={head}>Блокировок</th>
+                    <th className={head}>Конверсия, %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...data.weeks, data.total].map((w, i) => (
+                    <tr key={w.period + i} className={w.period === 'Итого' ? 'font-medium bg-gray-50' : ''}>
+                      <td className={cell}>{w.period}</td>
+                      <td className={cell}>{w.chats}</td>
+                      <td className={cell}>{w.contacts}</td>
+                      <td className={cell}>{w.delivered}</td>
+                      <td className={cell}>{w.anyReplies}</td>
+                      <td className={cell}>{w.targetReplies}</td>
+                      <td className={cell}>{w.blocks}</td>
+                      <td className={cell}>{w.conversion === null ? '—' : w.conversion}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {/* Оговорки, без которых цифрам нельзя доверять вслепую. Уходят
+                клиенту — лучше знать заранее, что именно они означают. */}
+            <p className="text-[10px] text-gray-400">
+              Блокировки — только выявленные: мы узнаём о них, когда пытаемся написать
+              повторно, поэтому заблокировавшие сразу после первого касания сюда не попадают.
+              Обработанные чаты считаются по всем задачам парсера за период — парсер к кампании
+              не привязан. Целевые ответы отнесены к неделе последнего сообщения диалога:
+              момент срабатывания триггера в базе не хранится.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <h3 className="text-sm font-medium text-gray-800">
+              2. Лиды <span className="font-normal text-gray-400">({data.leads.length})</span>
+            </h3>
+            {data.leads.length === 0 ? (
+              <p className="text-xs text-gray-400">За период целевых ответов не было.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full border-collapse">
+                  <thead>
+                    <tr>
+                      <th className={head}>Чат/группа</th>
+                      <th className={head}>Критерий отбора</th>
+                      <th className={head}>Никнейм</th>
+                      <th className={head}>Дата оффера</th>
+                      <th className={head}>№ оффера</th>
+                      <th className={head}>Качество лида</th>
+                      <th className={head}>Передан клиенту</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.leads.map((l, i) => (
+                      <tr key={l.nickname + i}>
+                        <td className={cell}>{l.sourceChat || <span className="text-gray-300">—</span>}</td>
+                        <td className={cell} />
+                        <td className={cell}>{l.nickname}</td>
+                        <td className={cell}>{l.offerSentAt}</td>
+                        <td className={cell} />
+                        <td className={cell} />
+                        <td className={cell} />
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p className="text-[10px] text-gray-400">
+              Пустые колонки портал не заполняет — их дописывают руками в выгруженном файле.
+              Чат-источник берётся из колонки «Ссылка на источник» загруженного файла базы;
+              если её при загрузке не было, останется пусто.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <h3 className="text-sm font-medium text-gray-800">3. План работ и офферы</h3>
+            <div className="overflow-x-auto">
+              <table className="min-w-full border-collapse">
+                <thead>
+                  <tr>
+                    <th className={head}>№</th>
+                    <th className={head}>Оффер</th>
+                    <th className={head}>Канал/чат</th>
+                    <th className={head}>Язык</th>
+                    <th className={head}>Статус</th>
+                    <th className={head}>Дедлайн</th>
+                    <th className={head}>Комментарий</th>
+                    <th className={head}>Выводы с цифрами</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.offers.map((o, i) => (
+                    <tr key={o.offer + i}>
+                      <td className={cell} />
+                      <td className={cell}>{o.offer}</td>
+                      <td className={cell} />
+                      <td className={cell} />
+                      <td className={cell} />
+                      <td className={cell} />
+                      <td className={cell} />
+                      <td className={cell}>{o.conclusions}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[10px] text-gray-400">
+              Строка на каждую базу кампании. Цифры считает портал, остальное — из плана работ.
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* =================== CAMPAIGN VIEW (5 tabs) =================== */
 const TABS = [
   { id: 'settings', label: 'Настройки', icon: Settings },
@@ -3698,6 +3960,7 @@ const TABS = [
   { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
   { id: 'processed', label: 'Обработанные', icon: UserCheck },
+  { id: 'report', label: 'Отчёт', icon: FileSpreadsheet },
 ] as const;
 
 function CampaignView({ campaign, onUpdate, onDelete }: {
@@ -3913,6 +4176,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
         {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} />}
         {tab === 'processed' && <ProcessedTab campaignId={campaign.id} />}
+        {tab === 'report' && <CampaignReportTab campaignId={campaign.id} />}
       </div>
     </div>
   );
