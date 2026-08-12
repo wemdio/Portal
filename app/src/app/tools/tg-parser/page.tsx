@@ -30,6 +30,7 @@ import {
 } from '@/lib/tgParser/constants';
 import type { ParseJob, TgParserJobApiRow } from '@/lib/tgParser/mapJobRow';
 import { tgParserApiRowToUi } from '@/lib/tgParser/mapJobRow';
+import { formatJobStart, formatElapsed } from '@/lib/tgParser/jobDisplay';
 
 const COLUMNS: (keyof ParsedUser)[] = [
   'ID/Username',
@@ -258,6 +259,7 @@ function JobCard({
   currentUserId,
   exportingJobId,
   stoppingJobId,
+  now,
   onExportCsv,
   onExportExcel,
   onRemove,
@@ -267,6 +269,8 @@ function JobCard({
   currentUserId: string | null;
   exportingJobId: string | null;
   stoppingJobId: string | null;
+  /** Момент последнего опроса — точка отсчёта для «идёт N мин». */
+  now: number;
   onExportCsv: (job: ParseJob) => void;
   onExportExcel: (job: ParseJob) => void;
   onRemove: (id: string) => void;
@@ -350,12 +354,23 @@ function JobCard({
                 · {job.userCount.toLocaleString('ru-RU')} пользователей
               </span>
             )}
-            {/* Идущая задача показывает, сколько уже собрано: обход трёх чатов
-                занимает до сорока минут, и раньше всё это время счётчик был
-                пуст, а отличить работу от зависания было нельзя. */}
-            {job.status === 'running' && (job.foundCount ?? 0) > 0 && (
+            {/* Идущая задача показывает, сколько уже собрано. Показываем и ноль:
+                раньше счётчик появлялся только после первого пользователя, и
+                всё время до него задача выглядела одинаково что при работе, что
+                при зависании — а до первого контакта проходят минуты. */}
+            {job.status === 'running' && (
               <span className="text-xs font-medium text-blue-700">
-                · уже {job.foundCount!.toLocaleString('ru-RU')}
+                · спарсилось: {(job.foundCount ?? 0).toLocaleString('ru-RU')}
+              </span>
+            )}
+            {/* Дата запуска: в списке лежат задачи за несколько дней, и понять,
+                вчерашняя это или сегодняшняя, было не по чему. */}
+            <span className="text-gray-400 text-xs" title={new Date(job.startedAt).toLocaleString('ru-RU')}>
+              · {formatJobStart(job.startedAt)}
+            </span>
+            {job.status === 'running' && (
+              <span className="text-gray-400 text-xs">
+                · идёт {formatElapsed(job.startedAt, now)}
               </span>
             )}
           </div>
@@ -556,6 +571,13 @@ export default function TgParserPage() {
     };
   }, []);
 
+  /**
+   * Точка отсчёта для «идёт N мин». Отдельным состоянием, а не `Date.now()` в
+   * разметке: вызов часов во время рендера нечист и ломает предсказуемость
+   * перерисовок. Обновляется тем же тиком, что и опрос задач.
+   */
+  const [nowTs, setNowTs] = useState(() => Date.now());
+
   const loadParseJobs = useCallback(async () => {
     try {
       const res = await authFetch('/api/tools/tg-parser/jobs?limit=50');
@@ -593,9 +615,20 @@ export default function TgParserPage() {
     }
   }, [activeTab]);
 
+  /**
+   * Опрос идущих задач.
+   *
+   * Было 3 секунды, стало 15: воркер и так пишет прогресс не чаще раза в 10
+   * секунд (`lastProgressWriteAt` в tgParserJobWorker), поэтому четыре из
+   * каждых пяти запросов возвращали ровно то же самое. Пятнадцать секунд —
+   * это одно обновление на одну запись прогресса.
+   */
   useEffect(() => {
     if (!parseJobs.some((j) => j.status === 'running')) return;
-    const t = setInterval(() => { void loadParseJobs(); }, 3000);
+    const t = setInterval(() => {
+      setNowTs(Date.now());
+      void loadParseJobs();
+    }, 15_000);
     return () => clearInterval(t);
   }, [parseJobs, loadParseJobs]);
 
@@ -1492,6 +1525,7 @@ export default function TgParserPage() {
                 currentUserId={currentUserId}
                 exportingJobId={exportingJobId}
                 stoppingJobId={stoppingJobId}
+                now={nowTs}
                 onExportCsv={exportJobCsv}
                 onExportExcel={exportJobExcel}
                 onRemove={removeParseJob}
