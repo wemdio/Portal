@@ -26,6 +26,7 @@ import {
   recordProxySuccess,
 } from './proxyHealth';
 import { sendFirstTouchBatch } from './firstTouch/send';
+import { pickForwardIds } from './forwardSelection';
 import { truncateMessage } from '@/lib/logger';
 import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
 
@@ -830,10 +831,7 @@ export async function handleChat(
       : oai.target_chats_negative;
 
     if (targetChat) {
-      const messageIdsToForward = history
-        .slice(-tg.forward_limit)
-        .map(m => m.id)
-        .concat(sent.id);
+      const messageIdsToForward = pickForwardIds(history, tg.forward_limit, sent.id);
       await forwardToTargetChat(client, entity, messageIdsToForward, targetChat, log);
     } else {
       log('info', `${displayName}: триггер "${triggerLabel}" сработал, но чат для пересылки не указан в настройках кампании — пересылка пропущена`);
