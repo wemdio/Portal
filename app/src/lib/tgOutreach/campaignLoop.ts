@@ -26,6 +26,8 @@ import {
   recordProxySuccess,
 } from './proxyHealth';
 import { sendFirstTouchBatch } from './firstTouch/send';
+import { pickForwardIds } from './forwardSelection';
+import { processLeadForwards } from './leadForward';
 import { truncateMessage } from '@/lib/logger';
 import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
 
@@ -830,10 +832,7 @@ export async function handleChat(
       : oai.target_chats_negative;
 
     if (targetChat) {
-      const messageIdsToForward = history
-        .slice(-tg.forward_limit)
-        .map(m => m.id)
-        .concat(sent.id);
+      const messageIdsToForward = pickForwardIds(history, tg.forward_limit, sent.id);
       await forwardToTargetChat(client, entity, messageIdsToForward, targetChat, log);
     } else {
       log('info', `${displayName}: триггер "${triggerLabel}" сработал, но чат для пересылки не указан в настройках кампании — пересылка пропущена`);
@@ -1727,6 +1726,25 @@ export async function runCampaignLoop(
           } else {
             log('error', `Аккаунт ${account.session_name}: непредвиденная ошибка — ${errMsg}`);
           }
+        }
+
+        // Ручные передачи лидов и партнёров: оператор поставил их из интерфейса,
+        // отправить может только живое соединение — оно здесь.
+        try {
+          await processLeadForwards({
+            db,
+            client,
+            accountId: account.id,
+            accountName: account.session_name,
+            log,
+            shouldStop,
+          });
+        } catch (err) {
+          // Передача лида не должна ронять круг: аутрич важнее и уже отработал.
+          log(
+            'warning',
+            `Аккаунт ${account.session_name}: очередь передач не отработала — ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
 
         // Первое касание — после разбора входящих и только этим же аккаунтом:
