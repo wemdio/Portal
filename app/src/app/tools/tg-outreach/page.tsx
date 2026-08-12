@@ -274,7 +274,28 @@ function SettingsTab({ campaign, onSave }: {
           <FieldArea label="Триггер (отрицательный)" value={openai.trigger_phrases_negative} onChange={v => setOAI('trigger_phrases_negative', v)} rows={2} />
           <Field label="Чат для пересылки (+)" value={openai.target_chats_positive} onChange={v => setOAI('target_chats_positive', v)} placeholder="@username" />
           <Field label="Чат для пересылки (−)" value={openai.target_chats_negative} onChange={v => setOAI('target_chats_negative', v)} placeholder="@username" />
+          <div className="space-y-1 md:col-span-2">
+            <Field
+              label="Чат для партнёров"
+              value={openai.target_chats_partner ?? ''}
+              onChange={v => setOAI('target_chats_partner', v)}
+              placeholder="@username или оставьте пустым"
+            />
+            <p className="text-[10px] text-gray-400">
+              Куда уходит кнопка «Передать партнёра» на вкладке «Диалоги». Заинтересованного клиента
+              и человека, который хочет стать партнёром, обычно разбирают разные люди. Пусто —
+              уйдёт в «Чат для пересылки (+)».
+            </p>
+          </div>
         </div>
+        {/* Два верхних поля наполняет автоматика по триггерным фразам, нижнее —
+            только ручная кнопка. Сказать об этом стоит здесь: иначе разница
+            между «чатом пересылки» и «чатом партнёров» выглядит произвольной. */}
+        <p className="text-[10px] text-gray-400 -mt-2">
+          В чаты пересылки (+) и (−) бот отправляет сам, когда в его ответе встречается триггерная
+          фраза. Передача лида и партнёра с вкладки «Диалоги» — всегда ручная, по кнопке и с
+          подтверждением.
+        </p>
         <div className="flex items-center gap-4">
           <label className="flex items-center gap-2 text-xs text-gray-700">
             <input type="checkbox" checked={openai.use_fallback_on_fail} onChange={e => setOAI('use_fallback_on_fail', e.target.checked)} className="rounded border-gray-300" />
@@ -878,6 +899,8 @@ function DialogsTab({ campaignId }: {
   const [sendText, setSendText] = useState('');
   const [sending, setSending] = useState(false);
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
+  /** `<dialogId>:<kind>` пока собирается предпросмотр и ставится задача. */
+  const [forwarding, setForwarding] = useState<string | null>(null);
   const limit = 30;
 
   const fetchAccounts = useCallback(async () => {
@@ -928,6 +951,49 @@ function DialogsTab({ campaignId }: {
   const deleteDialog = async (id: string) => {
     await authFetch(`${API_BASE}/dialogs/${id}`, { method: 'DELETE' });
     void fetchDialogs();
+  };
+
+  /**
+   * Передать человека менеджеру: лидом или кандидатом в партнёры.
+   *
+   * Сначала показываем ровно тот текст, который уйдёт, — подтверждать вслепую
+   * нечестно: сообщение уходит наружу, живому человеку, и отозвать его нельзя.
+   * Дальше кнопка только ставит задачу: отправляет воркер тем же аккаунтом,
+   * что вёл переписку, когда дойдёт до него в круге.
+   */
+  const forwardDialog = async (dialog: OutreachDialog, kind: 'lead' | 'partner') => {
+    const key = `${dialog.id}:${kind}`;
+    setForwarding(key);
+    try {
+      const previewRes = await authFetch(`${API_BASE}/dialogs/${dialog.id}/forward?kind=${kind}`);
+      const preview = (await previewRes.json().catch(() => null)) as
+        { text?: string; target_chat?: string; error?: string } | null;
+      if (!previewRes.ok) {
+        alert(preview?.error ?? `Не удалось собрать сообщение (${previewRes.status})`);
+        return;
+      }
+
+      const what = kind === 'lead' ? 'лида' : 'кандидата в партнёры';
+      if (!confirm(
+        `Передать ${what} в ${preview?.target_chat}?\n\n`
+        + 'Отправит аккаунт кампании, когда воркер дойдёт до него в круге.\n'
+        + 'Отменить отправку после этого будет нельзя.\n\n'
+        + `——— Текст сообщения ———\n${preview?.text ?? ''}`,
+      )) return;
+
+      const res = await authFetch(`${API_BASE}/dialogs/${dialog.id}/forward`, {
+        method: 'POST',
+        body: JSON.stringify({ kind }),
+      });
+      const body = (await res.json().catch(() => null)) as { error?: string; target_chat?: string } | null;
+      if (!res.ok) {
+        alert(body?.error ?? `Не удалось поставить передачу в очередь (${res.status})`);
+        return;
+      }
+      alert(`Поставлено в очередь. Уйдёт в ${body?.target_chat} с аккаунта, который вёл переписку.`);
+    } finally {
+      setForwarding(null);
+    }
   };
 
   const addToBlacklist = async (dialog: OutreachDialog) => {
@@ -1082,10 +1148,38 @@ function DialogsTab({ campaignId }: {
                           {DIALOG_STATUS_LABELS[s]?.label}
                         </button>
                       ))}
+                      {/* Передача человеку: карточка по шаблону плюс пересылка
+                          переписки. Отправляет тот же аккаунт кампании, но не
+                          сейчас — живое соединение только у воркера, поэтому
+                          кнопка ставит задачу в очередь. */}
+                      <button
+                        type="button"
+                        disabled={forwarding === `${d.id}:lead`}
+                        onClick={() => void forwardDialog(d, 'lead')}
+                        title="Передать как лида в чат из настроек кампании"
+                        className="ml-2 inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100 hover:border-emerald-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {forwarding === `${d.id}:lead`
+                          ? <Loader2 className="h-3 w-3 animate-spin" />
+                          : <Send className="h-3 w-3" />}
+                        Передать лида
+                      </button>
+                      <button
+                        type="button"
+                        disabled={forwarding === `${d.id}:partner`}
+                        onClick={() => void forwardDialog(d, 'partner')}
+                        title="Передать как кандидата в партнёры"
+                        className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-[10px] font-medium text-indigo-700 hover:bg-indigo-100 hover:border-indigo-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {forwarding === `${d.id}:partner`
+                          ? <Loader2 className="h-3 w-3 animate-spin" />
+                          : <Send className="h-3 w-3" />}
+                        Передать партнёра
+                      </button>
                       <button
                         type="button"
                         onClick={() => void addToBlacklist(d)}
-                        className="ml-2 inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[10px] font-medium text-rose-700 hover:bg-rose-100 hover:border-rose-300 transition"
+                        className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[10px] font-medium text-rose-700 hover:bg-rose-100 hover:border-rose-300 transition"
                       >
                         <Ban className="h-3 w-3" />
                         В черный список

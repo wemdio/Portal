@@ -92,6 +92,15 @@ export interface OpenAISettings {
   trigger_phrases_negative: string;
   target_chats_positive: string;
   target_chats_negative: string;
+  /**
+   * Куда уходит кандидат в партнёры по кнопке «Передать партнёра».
+   *
+   * Отдельно от `target_chats_positive`: заинтересованного клиента и человека,
+   * который хочет стать партнёром программы, разбирают разные люди. Пусто —
+   * используем чат положительного триггера, чтобы кнопка работала сразу, а не
+   * молча упиралась в незаполненную настройку.
+   */
+  target_chats_partner?: string;
   use_fallback_on_fail: boolean;
   fallback_text: string;
 }
@@ -319,6 +328,7 @@ export const DEFAULT_OPENAI_SETTINGS: OpenAISettings = {
   trigger_phrases_negative: '',
   target_chats_positive: '',
   target_chats_negative: '',
+  target_chats_partner: '',
   use_fallback_on_fail: false,
   fallback_text: '',
 };
