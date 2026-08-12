@@ -62,6 +62,14 @@ export interface MockSupabaseSeed {
    * COMMIT'а), и последующие SELECT'ы её видят.
    */
   errorInserts?: Record<string, { code: string; message: string; commitRow?: boolean }>;
+  /**
+   * Обработчики RPC-функций (`db.rpc('search_pdl_companies', params)`):
+   * имя функции → (params, db) → { data, error? }. Хендлер получает сам мок,
+   * чтобы читать посеянные таблицы (getRows) и воспроизводить семантику
+   * SQL-функции поверх них. Функции без хендлера отвечают ошибкой —
+   * забытый мок виден сразу, а не «пустым успехом».
+   */
+  rpcHandlers?: Record<string, (params: Row, db: MockSupabaseClient) => { data: unknown; error?: { message: string } }>;
 }
 
 export interface InsertCall {
@@ -95,6 +103,10 @@ export type MutationCall =
 
 export interface MockSupabaseClient {
   from: (table: string) => Builder;
+  /** RPC-вызовы: записываются в rpcCalls, ответ — из seed.rpcHandlers. */
+  rpc: (fn: string, params?: Row) => Promise<{ data: unknown; error: { message: string } | null }>;
+  /** Recorded rpc calls in chronological order. */
+  rpcCalls: Array<{ fn: string; params: Row }>;
 
   /** Snapshot of all rows currently stored (after inserts/updates). */
   getRows: (table: string) => Row[];
@@ -258,6 +270,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
 
   const inserts: InsertCall[] = [];
   const upserts: UpsertCall[] = [];
+  const rpcCalls: Array<{ fn: string; params: Row }> = [];
   const updates: UpdateCall[] = [];
   const mutations: MutationCall[] = [];
   const selects: SelectCall[] = [];
@@ -458,13 +471,22 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
     return builder;
   }
 
-  return {
+  const api: MockSupabaseClient = {
     from: makeBuilder,
+    rpc: async (fn: string, params: Row = {}) => {
+      rpcCalls.push({ fn, params });
+      const handler = seed.rpcHandlers?.[fn];
+      if (!handler) return { data: null, error: { message: `no rpc handler mocked for ${fn}` } };
+      const out = handler(params, api);
+      return { data: out.data ?? null, error: out.error ?? null };
+    },
     getRows: (table: string) => (tables[table] ?? []).map((r) => ({ ...r })),
     inserts,
     upserts,
     updates,
     mutations,
     selects,
+    rpcCalls,
   };
+  return api;
 }
