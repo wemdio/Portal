@@ -22,6 +22,7 @@ import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { fetchAndExtract } from '@/lib/enrich/websiteParser';
 import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator';
 import { isSupportEmail } from './supportEmails';
+import { makeCheckpointGate } from './checkpointGate';
 import {
   CLEANUP_JSON_SYSTEM_PROMPT,
   CLEANUP_BATCH,
@@ -503,11 +504,12 @@ export async function stepFindEmails(
   if (toProcess.length === 0) { await onProgress(100); return [header, ...body]; }
 
   let done = 0;
-  // checkpoint каждые 250 строк — мерж между «свежими данными при resume»
-  // и «не флудим DB на каждой строке». На 4297-строчной базе это ~17
-  // запросов общим объёмом ~70MB (один update jsonb ~4MB).
-  const checkpointEvery = 250;
+  // Чекпоинт по строкам И по времени, что раньше. Один счётчик строк давал
+  // вечный цикл: база в 6602 строки, падение на 3% — это 198-я строка, до
+  // 250-й дело не доходило ни разу, resume каждый раз начинал шаг с нуля.
+  // См. checkpointGate.
   const onCheckpoint = options?.onCheckpoint;
+  const shouldCheckpoint = makeCheckpointGate();
   await processInPool(toProcess, EMAIL_CONCURRENCY, async (item) => {
     if (isCancelled && await isCancelled()) return;
     try {
@@ -531,7 +533,7 @@ export async function stepFindEmails(
     if (done % 10 === 0 || done === toProcess.length) {
       await onProgress(Math.round((done / toProcess.length) * 100));
     }
-    if (onCheckpoint && (done % checkpointEvery === 0 || done === toProcess.length)) {
+    if (onCheckpoint && shouldCheckpoint(done, done === toProcess.length)) {
       await onCheckpoint([header, ...body]);
     }
   });
@@ -782,7 +784,7 @@ export async function stepEnrich(
 
   let done = 0;
   let timedOut = 0;
-  const checkpointEvery = 250;
+  const shouldCheckpoint = makeCheckpointGate();
   const settledIndexes = new Set<number>();
   const markSettled = async (index: number, didTimeOut: boolean) => {
     // The watchdog can release the pool slot before the aborted fetch promise
@@ -794,7 +796,7 @@ export async function stepEnrich(
     if (done % 10 === 0 || done === toProcess.length) {
       await onProgress(Math.round((done / toProcess.length) * 100));
     }
-    if (onCheckpoint && (done % checkpointEvery === 0 || done === toProcess.length)) {
+    if (onCheckpoint && shouldCheckpoint(done, done === toProcess.length)) {
       await onCheckpoint([newHeader, ...newBody]);
     }
   };
@@ -1439,8 +1441,8 @@ export async function stepValidateEmails(
   // checkpoint каждые 250 валидаций. Validate медленнее scrape'а (SMTP+DNS
   // round-trip может быть 1-3s), так что 250 ≈ 5-10 мин работы — окно
   // потенциальной потери прогресса на redeploy не больше.
-  const checkpointEvery = 250;
   const onCheckpoint = options?.onCheckpoint;
+  const shouldCheckpoint = makeCheckpointGate();
   let cancelled = false;
   const mainPassStartedAt = Date.now();
 
@@ -1459,7 +1461,7 @@ export async function stepValidateEmails(
       // Финальный onProgress(100) — в конце шага после фильтра.
       await onProgress(Math.min(99, Math.round((done / toValidate.length) * 100)));
     }
-    if (onCheckpoint && (done % checkpointEvery === 0 || done === toValidate.length)) {
+    if (onCheckpoint && shouldCheckpoint(done, done === toValidate.length)) {
       await onCheckpoint([newHeader, ...newBody]);
     }
   });
