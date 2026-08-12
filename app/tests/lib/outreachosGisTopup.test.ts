@@ -87,20 +87,20 @@ describe('computeGisPullLimit', () => {
   });
 
   it('формула ceil(deficit / yield * overshoot)', () => {
-    // 100 / 0.45 * 1.3 = 288.88… → 289
-    expect(computeGisPullLimit(100, 500)).toBe(
-      Math.ceil((100 / GIS_CONSTRUCTOR_YIELD) * GIS_PULL_OVERSHOOT),
+    // 50 / 0.28 * 1.4 = 250 (константы по замеру 12.08: yield 0.28, overshoot 1.4)
+    expect(computeGisPullLimit(50, 500)).toBe(
+      Math.ceil((50 / GIS_CONSTRUCTOR_YIELD) * GIS_PULL_OVERSHOOT),
     );
-    expect(computeGisPullLimit(100, 500)).toBe(289);
+    expect(computeGisPullLimit(50, 500)).toBe(250);
   });
 
-  it('дробный результат округляется вверх (не теряем одного кандидата)', () => {
-    // 1 / 0.45 * 1.3 = 2.888… → 3
-    expect(computeGisPullLimit(1, 500)).toBe(3);
+  it('минимальный дефицит тоже масштабируется (не теряем кандидатов)', () => {
+    // 1 / 0.28 * 1.4 = 5
+    expect(computeGisPullLimit(1, 500)).toBe(5);
   });
 
   it('cap зажимает расчётный лимит', () => {
-    // 400 / 0.45 * 1.3 = 1155.5… → 1156, но cap=500
+    // 400 / 0.28 * 1.4 = 2000, но cap=500
     expect(computeGisPullLimit(400, 500)).toBe(500);
   });
 });
