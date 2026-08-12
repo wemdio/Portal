@@ -49,6 +49,7 @@ import {
   DEFAULT_FOLLOW_UP,
 } from '@/lib/tgOutreach/types';
 import { DEFAULT_MAX_MESSAGE_CHARS } from '@/lib/tgOutreach/firstTouch/validateMessage';
+import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
 // Только тип: сам модуль серверный (тянет gramJS), в клиентский бандл он не
 // попадает — import type стирается при сборке. Берём его, чтобы набор статусов
 // проверки был один на портал, а не переписанный руками на экране.
@@ -1536,6 +1537,12 @@ function CampaignAccountsTab({
   const [resetError, setResetError] = useState<{ id: string; message: string } | null>(null);
   /** Ответ Telegram по каждому проверенному аккаунту; висит, пока не закроют. */
   const [checkResults, setCheckResults] = useState<CheckRow[] | null>(null);
+  /**
+   * Когда список последний раз пришёл с сервера. Точка отсчёта для «данным
+   * больше суток»: `Date.now()` во время рендера — нечистый вызов, да и возраст
+   * честнее мерить от момента загрузки данных, а не от момента перерисовки.
+   */
+  const [loadedAt, setLoadedAt] = useState<number | null>(null);
 
   // Профиль читается через то же соединение, что и работа кампании, поэтому
   // на запущенной кампании в Telegram не ходим — см. гейт в API.
@@ -1598,6 +1605,7 @@ function CampaignAccountsTab({
       };
       setErrorCounts(d.counts ?? {});
     }
+    setLoadedAt(Date.now());
     setLoading(false);
   }, [campaignId]);
 
@@ -1937,6 +1945,21 @@ function CampaignAccountsTab({
     }
   };
 
+  /** Сводка по партии; сам счёт — в `lib/tgOutreach/accountsSummary` под тестами. */
+  const accountStats = useMemo(
+    () => summarizeAccounts(accounts, errorCounts, loadedAt),
+    [accounts, errorCounts, loadedAt],
+  );
+
+  /** Разбивка мёртвых по причине — человеческими ярлыками, для подсказки. */
+  const deadBreakdown = useMemo(
+    () => Object.entries(accountStats.byStatus)
+      .sort((a, b) => b[1] - a[1])
+      .map(([st, n]) => `${CHECK_LABEL[st]?.text ?? st} — ${n}`)
+      .join(', '),
+    [accountStats.byStatus],
+  );
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -1978,6 +2001,76 @@ function CampaignAccountsTab({
           </button>
         </div>
       </div>
+
+      {/* Сводка идёт до таблицы: вопрос «сколько из партии рабочих» встаёт
+          раньше, чем вопрос про конкретную строку. Возраст проверки стоит
+          рядом с числами намеренно — зелёное «жив 20» на позавчерашней
+          проверке читается как «сейчас всё хорошо», а это не так. */}
+      {!loading && accounts.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-[11px]">
+          <span
+            className="rounded-md bg-emerald-50 px-2 py-1 font-medium text-emerald-700"
+            title="Последняя проверка вернула «жив». Это снимок на момент проверки, а не состояние прямо сейчас: проверка ходит в Telegram по кнопке и только на остановленной кампании."
+          >
+            жив {accountStats.alive}
+          </span>
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.dead > 0 ? 'bg-rose-50 text-rose-700' : 'bg-gray-100 text-gray-500'}`}
+            title={deadBreakdown
+              ? `По причинам: ${deadBreakdown}`
+              : 'Аккаунтов с неудачной проверкой нет'}
+          >
+            не жив {accountStats.dead}
+          </span>
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.unchecked > 0 ? 'bg-gray-100 text-gray-600' : 'bg-gray-50 text-gray-400'}`}
+            title="Проверка ни разу не запускалась. Эти аккаунты не входят ни в «жив», ни в «не жив» — про них просто ничего не известно."
+          >
+            не проверялись {accountStats.unchecked}
+          </span>
+          {accountStats.disabled > 0 && (
+            <span
+              className="rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-700"
+              title="Выключены в портале — воркер их не берёт в работу вообще. Аккаунт выключается сам после трёх AUTH_KEY_DUPLICATED подряд; чинится завершением чужих сеансов и перевыпуском session_data."
+            >
+              выключены {accountStats.disabled}
+            </span>
+          )}
+
+          <span className="mx-1 h-4 w-px bg-gray-200" aria-hidden />
+
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.withErrors > 0 ? 'bg-rose-50 text-rose-700' : 'bg-gray-50 text-gray-400'}`}
+            title={`Аккаунты, у которых за сутки в логах были строки уровня «ошибка». Всего таких строк: ${accountStats.errorTotal}.`}
+          >
+            с ошибками за 24ч {accountStats.withErrors}
+          </span>
+          {accountStats.withWarningsOnly > 0 && (
+            <span
+              className="rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-700"
+              title="За сутки были только предупреждения, ошибок не было. Обычно это подключение со второй попытки или отложенный контакт."
+            >
+              только предупреждения {accountStats.withWarningsOnly}
+            </span>
+          )}
+
+          <span className="ml-auto text-[10px] text-gray-400">
+            {accountStats.newestCheck === null ? (
+              'проверок ещё не было — «жив» и «не жив» показывать не из чего'
+            ) : (
+              <>
+                проверка от{' '}
+                {new Date(accountStats.newestCheck).toLocaleString('ru-RU', {
+                  day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+                })}
+                {accountStats.ageHours !== null && accountStats.ageHours >= 24 && (
+                  <span className="text-amber-600"> — данным больше суток</span>
+                )}
+              </>
+            )}
+          </span>
+        </div>
+      )}
 
       {uploadError && (
         <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{uploadError}</div>
