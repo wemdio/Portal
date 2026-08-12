@@ -235,12 +235,29 @@ export default function MailboxLoadPage() {
         </div>
       </div>
 
-      {/* freshness banner (скрыт при ошибке — иначе рядом с ошибкой висят старые цифры) */}
+      {/* Плашка свежести (скрыта при ошибке — иначе рядом с ошибкой висят старые
+          цифры). Жёлтая всегда: за какой день таблица и когда был синк — не
+          украшение, а условие, при котором её вообще можно читать; серым это
+          терялось между шапкой и плитками.
+
+          Рамка по содержимому (`w-fit`), а не во всю страницу: пустая полоса до
+          правого края читается как отдельный блок, хотя внутри две короткие
+          строки. Именно `flex w-fit`, а не `inline-flex`: контейнер страницы
+          разносит блоки через `space-y`, то есть `margin-top` — а на строчном
+          элементе он не работает, и плашка слиплась бы с шапкой.
+
+          Устаревший синк уходит в красное — раньше он был единственным жёлтым
+          на экране, и с пожелтевшей нормой предупреждение перестало бы
+          отличаться от обычного состояния. */}
       {data && !error && (
-        <div className={`flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border px-3 py-2 text-[11px] ${
-          data.stale ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-zinc-200 bg-zinc-50 text-zinc-500'
+        <div className={`flex w-fit max-w-full flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border px-3 py-2 text-[11px] ${
+          data.stale
+            ? 'border-red-300 bg-red-50 text-red-800'
+            : 'border-amber-300 bg-amber-50 text-amber-900'
         }`}>
-          <span>Данные за <b className="text-zinc-700">{data.asOfDay || '—'}</b> (UTC-день)</span>
+          <span>
+            Данные за <b className={data.stale ? 'text-red-900' : 'text-amber-950'}>{data.asOfDay || '—'}</b> (UTC-день)
+          </span>
           {data.lastSync && <span>Последний синк: {new Date(data.lastSync).toLocaleString('ru-RU')}</span>}
           {data.stale && <span className="font-semibold">⚠️ Синк устарел — цифры могут быть неактуальны</span>}
         </div>
