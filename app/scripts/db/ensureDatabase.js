@@ -145,6 +145,123 @@ async function connectionConfigWithIPv4(dbUrl, ssl) {
 }
 
 /**
+ * Опт-ин на применение миграции ВНЕ транзакции.
+ *
+ * По умолчанию каждая миграция идёт в begin/commit, и это правильно: половина
+ * применённой миграции хуже, чем ни одной. Но `create index concurrently`
+ * Postgres внутри транзакции запрещает, а без него индекс на горячей таблице
+ * строится под SHARE-блокировкой и на всё время сборки блокирует запись.
+ * Прецедент: `idx_amo_leads_inn` на `amo_leads` (145k чтений, 23k записей от
+ * синка AMO) — обычный `create index` там упирается в lock_timeout и роняет
+ * деплой.
+ *
+ * Маркер — отдельная строка-комментарий в самом файле миграции:
+ *
+ *   -- migrate:no-transaction
+ *
+ * ЦЕНА, которую платит автор такой миграции: атомарности нет. Упавший на
+ * середине файл оставит применённой первую половину, а в tracking-таблицу не
+ * запишется — значит при следующем деплое файл пойдёт заново с начала.
+ * Поэтому каждый statement обязан быть идемпотентным (`if not exists`).
+ *
+ * Отдельная ловушка `create index concurrently`: упавшая сборка оставляет
+ * невалидный индекс, и повторный `if not exists` увидит имя занятым и молча
+ * ничего не сделает — в базе навсегда останется индекс, которым планировщик
+ * не пользуется. Лечится строкой `drop index concurrently if exists` перед
+ * созданием: на первом прогоне это no-op, на повторном — уборка за собой.
+ */
+function isNoTransactionMigration(sql) {
+  return /^[ \t]*--[ \t]*migrate:no-transaction[ \t]*$/im.test(sql);
+}
+
+/**
+ * Разбить SQL на отдельные statements для применения вне транзакции.
+ *
+ * Нужно именно поштучно: node-pg отправляет многооператорный запрос простым
+ * протоколом, а Postgres оборачивает такой запрос в неявную транзакцию — и
+ * `create index concurrently` в нём падает ровно так же, как в явной. То есть
+ * без разбиения весь смысл нетранзакционного режима теряется.
+ *
+ * Сканер понимает строковые литералы (включая удвоенную кавычку), кавычки
+ * идентификаторов и оба вида комментариев. Долларовые кавычки (тела функций)
+ * он НЕ понимает и отвергает явной ошибкой: молча разрезать функцию пополам —
+ * худший исход из возможных. Миграциям с функциями нетранзакционный режим и не
+ * нужен: они уходят в Postgres целиком одним запросом, где парсер не требуется.
+ */
+function splitSqlStatements(sql) {
+  if (/\$[A-Za-z_0-9]*\$/.test(sql)) {
+    throw new Error(
+      'Миграция вне транзакции не может содержать долларовые кавычки ($$ ... $$): ' +
+        'разбить такой файл на statements надёжно нельзя. Уберите маркер ' +
+        '-- migrate:no-transaction либо вынесите функции в отдельную миграцию.',
+    );
+  }
+
+  const out = [];
+  let current = '';
+  let i = 0;
+
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+
+    if (ch === "'" || ch === '"') {
+      const quote = ch;
+      current += ch;
+      i += 1;
+      while (i < sql.length) {
+        current += sql[i];
+        if (sql[i] === quote) {
+          // Удвоенная кавычка — экранированная, литерал продолжается.
+          if (sql[i + 1] === quote) {
+            current += sql[i + 1];
+            i += 2;
+            continue;
+          }
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+
+    if (ch === '-' && next === '-') {
+      while (i < sql.length && sql[i] !== '\n') {
+        current += sql[i];
+        i += 1;
+      }
+      continue;
+    }
+
+    if (ch === '/' && next === '*') {
+      current += '/*';
+      i += 2;
+      while (i < sql.length && !(sql[i] === '*' && sql[i + 1] === '/')) {
+        current += sql[i];
+        i += 1;
+      }
+      current += '*/';
+      i += 2;
+      continue;
+    }
+
+    if (ch === ';') {
+      if (current.trim()) out.push(current.trim());
+      current = '';
+      i += 1;
+      continue;
+    }
+
+    current += ch;
+    i += 1;
+  }
+
+  if (current.trim()) out.push(current.trim());
+  return out;
+}
+
+/**
  * Применяет все непримененные SQL-файлы из migrationsDir к указанной БД.
  * Состояние применённых миграций хранится в таблице trackingTable.
  *
@@ -223,21 +340,42 @@ async function runMigrations(dbUrl, migrationsDir, trackingTable) {
         const sql = await fs.readFile(path.join(migrationsDir, file), 'utf8');
         const trimmed = sql.trim();
 
-        console.log(`[db] Применяем миграцию (${trackingTable}): ${file}`);
-        await client.query('begin');
-        try {
-          if (trimmed) {
-            await client.query(sql);
+        const noTransaction = isNoTransactionMigration(sql);
+        console.log(
+          `[db] Применяем миграцию (${trackingTable}): ${file}` +
+            (noTransaction ? ' [вне транзакции]' : ''),
+        );
+
+        if (noTransaction) {
+          // Без begin/commit и без отката: атомарности здесь нет by design,
+          // см. isNoTransactionMigration. Запись в tracking-таблицу идёт
+          // последней — если упадём на середине, файл останется непринятым и
+          // при следующем деплое пойдёт заново, поэтому его statements обязаны
+          // быть идемпотентными.
+          for (const statement of splitSqlStatements(sql)) {
+            await client.query(statement);
           }
           await client.query(
             `insert into public.${trackingTable} (name) values ($1)`,
             [file],
           );
-          await client.query('commit');
           appliedCount += 1;
-        } catch (err) {
-          await client.query('rollback');
-          throw err;
+        } else {
+          await client.query('begin');
+          try {
+            if (trimmed) {
+              await client.query(sql);
+            }
+            await client.query(
+              `insert into public.${trackingTable} (name) values ($1)`,
+              [file],
+            );
+            await client.query('commit');
+            appliedCount += 1;
+          } catch (err) {
+            await client.query('rollback');
+            throw err;
+          }
         }
       }
 
@@ -363,6 +501,8 @@ if (require.main === module) {
 module.exports = {
   ensureDatabase,
   isRetryableDbError,
+  isNoTransactionMigration,
+  splitSqlStatements,
   notifyPostgrestReload,
   loadEnvFiles,
   resolveDbUrl,
