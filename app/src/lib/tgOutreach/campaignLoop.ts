@@ -16,6 +16,7 @@ import type {
   OutreachProxy,
 } from './types';
 import { DEFAULT_FOLLOW_UP } from './types';
+import { isRepeatOfOurs } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient } from './gramClient';
 import type { LoopControl } from './watchdog';
 import { openaiGenerate, detectTrigger } from './openaiChat';
@@ -808,6 +809,15 @@ export async function handleChat(
     log('warning', `${displayName}: ${usedFallback ? 'fallback' : 'GPT'} вернул бессмысленный ответ "${replyText}" — НЕ отправляю`);
     return { replied: false, triggerType: null };
   }
+  // Молча промолчать лучше, чем повторить себя же: в тупике разговора модели
+  // нечего сказать, и она слово в слово шлёт свою прощальную реплику. Человек
+  // видит сломанного бота, а Telegram — одинаковые сообщения, то есть признак
+  // спам-рассылки. Пересоздавать ответ не пытаемся: истории с прошлого раза не
+  // прибавилось, второй заход дал бы тот же текст.
+  if (isRepeatOfOurs(replyText, chatMessages)) {
+    log('warning', `${displayName}: ответ дословно повторяет то, что мы уже писали ("${replyText}") — НЕ отправляю`);
+    return { replied: false, triggerType: null };
+  }
 
   const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;
   if (shouldStop) await interruptibleSleep(readReplyDelay, shouldStop); else await sleep(readReplyDelay);
@@ -1031,6 +1041,7 @@ async function handleMissedRepliesLastDays(
   let skipLastNotUser = 0;
   let skipOpenaiEmpty = 0;
   let skipLowValue = 0;
+  let skipRepeat = 0;
   let errorsCount = 0;
 
   for (const dialog of dialogs) {
@@ -1054,6 +1065,13 @@ async function handleMissedRepliesLastDays(
       if (isLowValueReply(reply)) {
         skipLowValue++;
         log('warning', `Catch-up: ответ для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} не отправлен — GPT вернул бессмысленный текст "${reply}"`);
+        continue;
+      }
+      // См. комментарий у той же проверки в основном цикле: дословный
+      // самоповтор — признак спам-рассылки для Telegram.
+      if (isRepeatOfOurs(reply, messages)) {
+        skipRepeat++;
+        log('warning', `Catch-up: ответ для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} дословно повторяет уже отправленное — НЕ отправляю`);
         continue;
       }
 
@@ -1094,7 +1112,7 @@ async function handleMissedRepliesLastDays(
   log(
     'info',
     `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up за 3 дня) — проверил ${processed} диалогов, отправил ${replied} ответов.` +
-      (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue
+      (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue || skipRepeat
         ? ' Не отправил по причинам:'
         : '') +
       (skipBot ? ` это боты — ${skipBot};` : '') +
@@ -1103,6 +1121,7 @@ async function handleMissedRepliesLastDays(
       (skipLastNotUser ? ` мы уже ответили последними — ${skipLastNotUser};` : '') +
       (skipOpenaiEmpty ? ` GPT не вернул ответ — ${skipOpenaiEmpty};` : '') +
       (skipLowValue ? ` GPT вернул мусор — ${skipLowValue};` : '') +
+      (skipRepeat ? ` дословный повтор нашего же ответа — ${skipRepeat};` : '') +
       (errorsCount ? ` Ошибок при отправке: ${errorsCount}.` : ''),
   );
 }
