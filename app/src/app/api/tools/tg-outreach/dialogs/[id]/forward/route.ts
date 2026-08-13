@@ -14,7 +14,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { buildLeadMessage, type ForwardKind } from '@/lib/tgOutreach/leadMessage';
-import { checkForwardConflict, type ExistingForward } from '@/lib/tgOutreach/forwardConflict';
+import { checkForwardConflict, cancelBlockReason, type ExistingForward } from '@/lib/tgOutreach/forwardConflict';
 import { usernameKey } from '@/lib/tgOutreach/report';
 import { logCampaign, forwardKindLabel, forwardWho } from '@/lib/tgOutreach/campaignLog';
 import type { OpenAISettings } from '@/lib/tgOutreach/types';
@@ -293,6 +293,80 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         `Передача (${forwardKindLabel(kind)}) ${prepared.who}: поставлена в очередь, получатель ${prepared.targetChat} (нажал ${name})`);
 
       return NextResponse.json({ ok: true, id: (data as { id: string }).id, target_chat: prepared.targetChat }, { status: 201 });
+    },
+  );
+}
+
+/**
+ * Снять передачу из очереди, пока воркер до неё не дошёл.
+ *
+ * Задача живёт часами: отправляет её не портал, а круг кампании, добравшись до
+ * нужного аккаунта. Всё это время ошибку ещё можно исправить — и это
+ * единственное окно, потому что отозвать сообщение из Telegram нельзя.
+ */
+export async function DELETE(req: NextRequest, ctx: Ctx) {
+  return withToolTrace(
+    { request: req, operation: 'tools.tg-outreach.dialogs.forward.cancel' },
+    async () => {
+      const auth = await authenticateRequest(req.headers.get('authorization'));
+      if ('error' in auth) return auth.error;
+      const { id } = await ctx.params;
+
+      const name = operatorName(auth.user);
+      const ref = await dialogRef(auth.supabase, id);
+
+      /**
+       * `status = 'pending'` стоит условием самой записи, а не только проверкой
+       * перед ней: воркер мог отправить задачу ровно между нашим чтением и
+       * записью. Тогда ноль изменённых строк — честный ответ «не успели», а
+       * проверка-до-записи в том же случае отрапортовала бы об отмене того, что
+       * уже лежит у менеджера в чате.
+       *
+       * Кого снимать, не уточняем: уникальный индекс держит на диалоге не
+       * больше одной живой передачи.
+       */
+      const { data: cancelledRows, error } = await auth.supabase
+        .from('tg_outreach_lead_forwards')
+        .update({
+          status: 'cancelled',
+          // Поле объясняет отсутствие отправки, и для снятой задачи ответ —
+          // это человек, который её снял. Он же уходит в журнал кампании.
+          error_message: `Отменил ${name}`,
+        })
+        .eq('dialog_id', id)
+        .eq('status', 'pending')
+        .select('kind');
+
+      if (error) {
+        if (ref) {
+          await logCampaign(auth.supabase, ref.campaignId, 'error',
+            `Отмена передачи ${ref.who}: не удалась — ${error.message} (нажал ${name})`);
+        }
+        return jsonError(error.message, 500);
+      }
+
+      const cancelled = (cancelledRows ?? []) as Array<{ kind: string }>;
+      if (!cancelled.length) {
+        // Ничего не сняли — объясняем почему. Последняя передача диалога и
+        // отвечает на этот вопрос: ушла, сорвалась или её вовсе не было.
+        const latest = (await loadForwards(auth.supabase, id))[0] ?? null;
+        const reason = cancelBlockReason(latest) ?? 'Эту передачу уже нельзя отменить';
+        if (ref) {
+          await logCampaign(auth.supabase, ref.campaignId, 'warning',
+            `Отмена передачи ${ref.who}: отказ — ${reason} (нажал ${name})`);
+        }
+        return jsonError(reason, 409);
+      }
+
+      const kind = cancelled[0].kind;
+      // Тем же языком, что и ручное гашение очереди 13.08.2026, — чтобы вся
+      // история отмен в журнале кампании читалась одинаково.
+      if (ref) {
+        await logCampaign(auth.supabase, ref.campaignId, 'warning',
+          `Передача (${forwardKindLabel(kind)}) ${ref.who}: отменена до отправки — снята из очереди (нажал ${name})`);
+      }
+
+      return NextResponse.json({ ok: true, kind });
     },
   );
 }
