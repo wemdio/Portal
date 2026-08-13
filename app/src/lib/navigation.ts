@@ -48,9 +48,8 @@ export const NAV_PATH_ALIASES: Record<string, string[]> = {
  *
  * Дашборды («Первичка» и «Расходы и доходы») сведены в одну группу: оба пункта
  * — это дашборды, а в шапке они занимали два места из полутора десятков.
- * Правила доступа при этом остались на самих пунктах и не изменились:
- * «Первичка» — точечная выдача через user_tool_visibility, «Расходы и доходы» —
- * только админ.
+ * Правила доступа при этом остались на самих пунктах: все три дашборда
+ * выдаются точечно через user_tool_visibility, админу видны всегда.
  */
 export const navTree: NavEntry[] = [
   { id: 'projects', name: 'Проекты', nameEn: 'Projects', href: '/' },
@@ -63,7 +62,7 @@ export const navTree: NavEntry[] = [
     children: [
       { id: 'first-sales', name: 'Первичка', nameEn: 'First sales', href: '/analytics/first-sales', navTabId: 'nav-first-sales' },
       { id: 'renewals', name: 'Продления', nameEn: 'Renewals', href: '/analytics/renewals', navTabId: 'nav-renewals' },
-      { id: 'expenses', name: 'Расходы и доходы', nameEn: 'Income & expenses', href: '/expenses', adminOnly: true },
+      { id: 'expenses', name: 'Расходы и доходы', nameEn: 'Income & expenses', href: '/expenses', navTabId: 'nav-expenses' },
     ],
   },
   { id: 'tasks', name: 'Задачи', nameEn: 'Tasks', href: '/tasks' },
