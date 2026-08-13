@@ -6,6 +6,8 @@ import type { UserRole } from '@/types';
 let mockUserRole: UserRole | null | 'unknown' = 'technician';
 let mockIsHr = false;
 let mockCanAccessTeamPrivate = false;
+let mockCanSubmitTeamReviewRequest = false;
+let mockCanViewTeamReviewRequestsShared = false;
 let mockUserEmail = 'team-member@example.com';
 let mockNewReviewRequestCount = 0;
 let mockProjectsData: Array<Record<string, unknown>> = [];
@@ -20,6 +22,7 @@ const mockSupabaseFrom = jest.fn((table: string) => ({
 const mockStatisticsPanel = jest.fn(() => <div>Statistics panel mounted</div>);
 const mockReviewsPanel = jest.fn(() => <div>Reviews panel mounted</div>);
 const mockActivityPlanPanel = jest.fn(() => <div>Activity plan panel mounted</div>);
+const mockSharedReviewRequestsPanel = jest.fn(() => <div>Shared review requests panel mounted</div>);
 const mockRefreshReviewRequestSummary = jest.fn();
 const mockUseTeamReviewRequestSummary = jest.fn((_enabled: boolean) => ({
   newCount: mockNewReviewRequestCount,
@@ -44,6 +47,8 @@ jest.mock('@/lib/UserProvider', () => ({
     userRole: mockUserRole,
     isHr: mockIsHr,
     canAccessTeamPrivate: mockCanAccessTeamPrivate,
+    canSubmitTeamReviewRequest: mockCanSubmitTeamReviewRequest,
+    canViewTeamReviewRequestsShared: mockCanViewTeamReviewRequestsShared,
     userEmail: mockUserEmail,
     userFullName: 'Team Member',
     userAvatarUrl: null,
@@ -83,6 +88,11 @@ jest.mock('@/components/team/TeamActivityPlanPanel', () => ({
   default: () => mockActivityPlanPanel(),
 }), { virtual: true });
 
+jest.mock('../../src/components/team/TeamSharedReviewRequestsPanel', () => ({
+  __esModule: true,
+  default: () => mockSharedReviewRequestsPanel(),
+}), { virtual: true });
+
 jest.mock('../../src/components/team/TeamHrPanel', () => ({
   __esModule: true,
   default: (props: {
@@ -106,6 +116,8 @@ describe('<TeamPage /> access', () => {
     mockUserRole = 'technician';
     mockIsHr = false;
     mockCanAccessTeamPrivate = false;
+    mockCanSubmitTeamReviewRequest = false;
+    mockCanViewTeamReviewRequestsShared = false;
     mockUserEmail = 'team-member@example.com';
     mockNewReviewRequestCount = 0;
     mockProjectsData = [];
@@ -159,6 +171,7 @@ describe('<TeamPage /> access', () => {
     mockUserRole = role;
     mockUserEmail = email;
     mockCanAccessTeamPrivate = true;
+    mockCanSubmitTeamReviewRequest = true;
     const user = userEvent.setup();
 
     await renderLoadedTeamPage();
@@ -168,6 +181,7 @@ describe('<TeamPage /> access', () => {
     const reviewsTab = screen.getByRole('button', { name: 'Ревью' });
     const activitiesTab = screen.getByRole('button', { name: 'Активности' });
     const hrTab = screen.getByRole('button', { name: 'HR' });
+    expect(screen.queryByRole('button', { name: 'Запросы' })).not.toBeInTheDocument();
 
     await user.click(statisticsTab);
     expect(screen.getByText('Statistics panel mounted')).toBeInTheDocument();
@@ -237,24 +251,122 @@ describe('<TeamPage /> access', () => {
   it.each([
     ['lead', true],
     ['director', true],
-    ['manager', false],
     ['admin', false],
+    ['manager', false],
     ['technician', false],
     ['sales', false],
     ['marketer', false],
-  ] as const)('shows the inline review-request entry point to %s on Load: %s', async (role, visible) => {
+  ] as const)('uses the authoritative submit capability for a %s profile: %s', async (role, allowed) => {
     mockUserRole = role;
+    mockCanSubmitTeamReviewRequest = allowed;
 
     await renderLoadedTeamPage();
 
     const trigger = screen.queryByRole('button', { name: 'Запросить ревью' });
-    if (visible) expect(trigger).toBeInTheDocument();
+    if (allowed) expect(trigger).toBeInTheDocument();
     else expect(trigger).not.toBeInTheDocument();
     expect(screen.queryByText('HR panel mounted')).not.toBeInTheDocument();
   });
 
+  it.each(['lead', 'director'] as const)(
+    'does not infer submit or shared-read access from the %s role when both server capabilities deny it',
+    async (role) => {
+      mockUserRole = role;
+      mockCanSubmitTeamReviewRequest = false;
+      mockCanViewTeamReviewRequestsShared = false;
+
+      await renderLoadedTeamPage();
+
+      expect(screen.queryByRole('button', { name: 'Запросить ревью' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Запросы' })).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    ['Grid4ina.an@gmail.com', 'admin' as UserRole],
+    ['sorichev@polzaagency.ru', 'admin' as UserRole],
+  ])('lets the approved executive %s submit a private request without exposing the shared queue', async (email, role) => {
+    mockUserRole = role;
+    mockUserEmail = email;
+    mockCanSubmitTeamReviewRequest = true;
+    mockCanViewTeamReviewRequestsShared = false;
+    const user = userEvent.setup();
+
+    await renderLoadedTeamPage();
+
+    expect(screen.getByRole('button', { name: 'Запросить ревью' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Запросы' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^HR(?:,|$)/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Запросить ревью' }));
+    expect(screen.getByRole('note')).toHaveTextContent('Запрос увидят только Алина и Сергей.');
+  });
+
+  it('does not hardcode executive email or role when the server denies submit access', async () => {
+    mockUserRole = 'admin';
+    mockUserEmail = 'Grid4ina.an@gmail.com';
+    mockCanSubmitTeamReviewRequest = false;
+
+    await renderLoadedTeamPage();
+
+    expect(screen.queryByRole('button', { name: 'Запросить ревью' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Запросы' })).not.toBeInTheDocument();
+  });
+
+  it.each(['lead', 'director'] as const)(
+    'shows %s a top-level read-only shared requests workspace without private HR tools',
+    async (role) => {
+      mockUserRole = role;
+      mockCanSubmitTeamReviewRequest = true;
+      mockCanViewTeamReviewRequestsShared = true;
+      const user = userEvent.setup();
+
+      await renderLoadedTeamPage();
+
+      const navigation = screen.getByRole('group', { name: 'Разделы команды' });
+      expect(within(navigation).getByRole('button', { name: 'Загрузка' })).toHaveAttribute('aria-pressed', 'true');
+      const requestsTab = within(navigation).getByRole('button', { name: 'Запросы' });
+      expect(screen.queryByRole('button', { name: 'Статистика' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Ревью' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Активности' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^HR(?:,|$)/ })).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: 'Запросить ревью' }));
+      expect(screen.getByRole('note')).toHaveTextContent(
+        'Запрос увидят другие лиды и директора. Обработать его смогут Алина и Сергей.',
+      );
+      await user.click(screen.getByRole('button', { name: 'Закрыть форму' }));
+
+      await user.click(requestsTab);
+
+      expect(requestsTab).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByText('Shared review requests panel mounted')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Запросить ревью' })).not.toBeInTheDocument();
+      expect(mockHrPanel).not.toHaveBeenCalled();
+    },
+  );
+
+  it('immediately leaves shared requests when its capability is revoked', async () => {
+    mockUserRole = 'lead';
+    mockCanSubmitTeamReviewRequest = true;
+    mockCanViewTeamReviewRequestsShared = true;
+    const user = userEvent.setup();
+    const view = await renderLoadedTeamPage();
+
+    await user.click(screen.getByRole('button', { name: 'Запросы' }));
+    expect(screen.getByText('Shared review requests panel mounted')).toBeInTheDocument();
+
+    mockCanViewTeamReviewRequestsShared = false;
+    view.rerender(<TeamPage />);
+
+    expect(screen.queryByText('Shared review requests panel mounted')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Запросы' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Лиды' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Команда' })).toHaveFocus());
+  });
+
   it('offers only real internal employees and composes clean project labels in the lead request form', async () => {
     mockUserRole = 'lead';
+    mockCanSubmitTeamReviewRequest = true;
     mockProfilesData = [
       { id: 'real-specialist', email: 'real@example.com', full_name: 'Анна Ким', role: 'technician', avatar_url: null, is_demo: false },
       { id: 'demo-specialist', email: 'demo@example.com', full_name: 'Демо Специалист', role: 'technician', avatar_url: null, is_demo: true },
@@ -271,7 +383,7 @@ describe('<TeamPage /> access', () => {
     await renderLoadedTeamPage();
     await user.click(screen.getByRole('button', { name: 'Запросить ревью' }));
 
-    const employeeSelect = screen.getByLabelText('Специалист');
+    const employeeSelect = screen.getByLabelText('Сотрудник, с которым нужно ревью');
     expect(employeeSelect).toHaveTextContent('Анна Ким · real@example.com');
     expect(employeeSelect).not.toHaveTextContent('Демо Специалист');
     expect(employeeSelect).not.toHaveTextContent('Клиент');
