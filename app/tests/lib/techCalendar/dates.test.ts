@@ -7,7 +7,7 @@
  * место написано именно так — здесь оно не повторяется, и тест это пинует.
  */
 
-import { addCycle, daysUntil, mskDateStr, getDaysInMonth, getFirstDayOfMonth } from '@/lib/techCalendar/dates';
+import { addCycle, addDays, daysUntil, mskDateStr, getDaysInMonth, getFirstDayOfMonth } from '@/lib/techCalendar/dates';
 
 describe('addCycle', () => {
   it('двигает месячный цикл на месяц', () => {
@@ -55,6 +55,10 @@ describe('daysUntil', () => {
   it('считает через границу месяца', () => {
     expect(daysUntil('2026-09-02', '2026-08-31')).toBe(2);
   });
+
+  it('считает через границу года', () => {
+    expect(daysUntil('2027-01-01', '2026-12-31')).toBe(1);
+  });
 });
 
 describe('mskDateStr', () => {
@@ -73,6 +77,8 @@ describe('сетка месяца', () => {
     expect(getDaysInMonth(2026, 1)).toBe(28);
     expect(getDaysInMonth(2028, 1)).toBe(29);
     expect(getDaysInMonth(2026, 7)).toBe(31);
+    // Декабрь — month+1 переполняется за пределы года (0-based 11 -> 12).
+    expect(getDaysInMonth(2026, 11)).toBe(31);
   });
 
   it('считает понедельник нулевым днём недели', () => {
@@ -80,5 +86,30 @@ describe('сетка месяца', () => {
     expect(getFirstDayOfMonth(2026, 7)).toBe(5);
     // 1 июня 2026 — понедельник.
     expect(getFirstDayOfMonth(2026, 5)).toBe(0);
+    // 1 ноября 2026 — воскресенье: ломающийся вариант без ветки для
+    // воскресенья (просто `day - 1`) отдал бы -1 и уронил бы сетку месяца.
+    expect(getFirstDayOfMonth(2026, 10)).toBe(6);
+  });
+});
+
+describe('addDays', () => {
+  it('переносит через границу года вперёд', () => {
+    expect(addDays('2026-12-31', 1)).toBe('2027-01-01');
+  });
+
+  it('переносит через границу года назад', () => {
+    expect(addDays('2026-01-01', -1)).toBe('2025-12-31');
+  });
+
+  it('учитывает високосный день', () => {
+    expect(addDays('2028-02-28', 1)).toBe('2028-02-29');
+  });
+
+  it('прижимает шаг назад к концу февраля', () => {
+    expect(addDays('2026-03-01', -1)).toBe('2026-02-28');
+  });
+
+  it('считает порог напоминания за неделю', () => {
+    expect(addDays('2026-08-13', 7)).toBe('2026-08-20');
   });
 });
