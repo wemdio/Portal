@@ -71,7 +71,12 @@ describe('client reports pipeline analytics', () => {
       campaigns: [{ id: 'campaign-a', name: 'Campaign A' }],
       lastSyncedAt: '2026-07-31T12:00:00.000Z',
     });
-    pipelineRpcMock.mockResolvedValue({ data: [pipelineRow], error: null });
+    pipelineRpcMock.mockImplementation(async (name: string) => {
+      if (name === 'client_report_large_score_rollup_active_run') {
+        return { data: null, error: null };
+      }
+      return { data: [pipelineRow], error: null };
+    });
   });
 
   it('explains pipeline limitations without outreach-only counters', () => {
@@ -118,7 +123,13 @@ describe('client reports pipeline analytics', () => {
       'campaign-a',
       'campaign-b',
     ]);
-    expect(pipelineRpcMock).toHaveBeenCalledWith(
+    expect(pipelineRpcMock).toHaveBeenNthCalledWith(
+      1,
+      'client_report_large_score_rollup_active_run',
+      { p_client_user_id: 'client-1' },
+    );
+    expect(pipelineRpcMock).toHaveBeenNthCalledWith(
+      2,
       'client_report_pipeline_summary',
       {
         p_client_user_id: 'client-1',
@@ -153,6 +164,105 @@ describe('client reports pipeline analytics', () => {
       })],
     }));
     expect(result.qualityNotices).toHaveLength(3);
+  });
+
+  it('uses the tenant-owned active rollup while preserving every report filter', async () => {
+    pipelineRpcMock.mockImplementation(async (name: string) => {
+      if (name === 'client_report_large_score_rollup_active_run') {
+        return {
+          data: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          error: null,
+        };
+      }
+      if (name === 'client_report_pipeline_summary_shadow') {
+        return { data: [pipelineRow], error: null };
+      }
+      throw new Error(`unexpected RPC ${name}`);
+    });
+
+    await loadAnalytics();
+
+    expect(pipelineRpcMock).toHaveBeenNthCalledWith(
+      2,
+      'client_report_pipeline_summary_shadow',
+      {
+        p_client_user_id: 'client-1',
+        p_rollup_run_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        p_from: '2026-06-30T21:00:00.000Z',
+        p_to: '2026-07-31T21:00:00.000Z',
+        p_score_code: 'B',
+        p_campaign_id: 'campaign-a',
+        p_allowed_campaign_ids: ['campaign-a', 'campaign-b'],
+      },
+    );
+    expect(pipelineRpcMock.mock.calls).not.toContainEqual([
+      'client_report_pipeline_summary',
+      expect.anything(),
+    ]);
+  });
+
+  it.each([
+    ['activation lookup fails', 'lookup'],
+    ['active shadow fails', 'shadow'],
+  ])('falls back to the unchanged report RPC when %s', async (_case, failure) => {
+    pipelineRpcMock.mockImplementation(async (name: string) => {
+      if (name === 'client_report_large_score_rollup_active_run') {
+        if (failure === 'lookup') {
+          return { data: null, error: { message: 'selector unavailable' } };
+        }
+        return {
+          data: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          error: null,
+        };
+      }
+      if (name === 'client_report_pipeline_summary_shadow') {
+        return { data: null, error: { message: 'shadow unavailable' } };
+      }
+      if (name === 'client_report_pipeline_summary') {
+        return { data: [pipelineRow], error: null };
+      }
+      throw new Error(`unexpected RPC ${name}`);
+    });
+
+    const result = await loadAnalytics();
+
+    expect(result.funnel.scoredCompanies).toBe(100);
+    expect(pipelineRpcMock).toHaveBeenCalledWith(
+      'client_report_pipeline_summary',
+      expect.objectContaining({
+        p_client_user_id: 'client-1',
+        p_allowed_campaign_ids: ['campaign-a', 'campaign-b'],
+      }),
+    );
+  });
+
+  it.each([
+    ['null', null],
+    ['empty array', []],
+  ])('falls back when an active shadow returns %s without an RPC error', async (
+    _case,
+    shadowData,
+  ) => {
+    pipelineRpcMock.mockImplementation(async (name: string) => {
+      if (name === 'client_report_large_score_rollup_active_run') {
+        return { data: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', error: null };
+      }
+      if (name === 'client_report_pipeline_summary_shadow') {
+        return { data: shadowData, error: null };
+      }
+      if (name === 'client_report_pipeline_summary') {
+        return { data: [pipelineRow], error: null };
+      }
+      throw new Error(`unexpected RPC ${name}`);
+    });
+
+    const result = await loadAnalytics();
+
+    expect(result.funnel.scoredCompanies).toBe(100);
+    expect(pipelineRpcMock).toHaveBeenCalledWith(
+      'client_report_pipeline_summary',
+      expect.any(Object),
+    );
   });
 
   it('keeps pipeline analytics available when the campaign catalog lookup fails', async () => {
@@ -208,9 +318,14 @@ describe('client reports pipeline analytics', () => {
   });
 
   it('turns a pipeline RPC failure into a typed client-safe error', async () => {
-    pipelineRpcMock.mockResolvedValueOnce({
-      data: null,
-      error: { message: 'canceling statement due to statement timeout' },
+    pipelineRpcMock.mockImplementation(async (name: string) => {
+      if (name === 'client_report_large_score_rollup_active_run') {
+        return { data: null, error: null };
+      }
+      return {
+        data: null,
+        error: { message: 'canceling statement due to statement timeout' },
+      };
     });
 
     const error = await loadAnalytics().catch((caught: unknown) => caught);
