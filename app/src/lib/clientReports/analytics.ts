@@ -112,6 +112,84 @@ function unwrapPipelineRpc(data: unknown): PipelineRpcRow {
   return (data ?? {}) as PipelineRpcRow;
 }
 
+function hasUsablePipelineRpcRow(data: unknown): boolean {
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row || typeof row !== 'object') return false;
+  return [
+    'scored_companies',
+    'working_score_companies',
+    'email_found_companies',
+    'validated_emails',
+    'submitted_contacts',
+    'confirmed_contacts',
+    'pipeline_at',
+    'by_campaign',
+  ].every((field) => Object.prototype.hasOwnProperty.call(row, field));
+}
+
+function unwrapUuid(data: unknown): string | null {
+  const value = Array.isArray(data) ? data[0] : data;
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (value && typeof value === 'object') {
+    const row = value as Record<string, unknown>;
+    for (const key of [
+      'client_report_large_score_rollup_active_run',
+      'rollup_run_id',
+      'id',
+    ]) {
+      if (typeof row[key] === 'string' && row[key].trim()) {
+        return row[key].trim();
+      }
+    }
+  }
+  return null;
+}
+
+async function loadPipelineSummary(input: {
+  clientUserId: string;
+  fromUtc: string;
+  toExclusiveUtc: string;
+  scoreCode: string | null;
+  campaignId: string | null;
+  allowedCampaignIds: string[];
+}) {
+  const legacyArgs = {
+    p_client_user_id: input.clientUserId,
+    p_from: input.fromUtc,
+    p_to: input.toExclusiveUtc,
+    p_score_code: input.scoreCode,
+    p_campaign_id: input.campaignId,
+    p_allowed_campaign_ids: input.allowedCampaignIds,
+  };
+
+  // Activation is deliberately an optional optimization. A missing migration,
+  // stale schema cache or broken shadow query must leave the old report usable.
+  let activeRunId: string | null = null;
+  try {
+    const selector = await supabaseAdmin!.rpc(
+      'client_report_large_score_rollup_active_run',
+      { p_client_user_id: input.clientUserId },
+    );
+    if (!selector.error) activeRunId = unwrapUuid(selector.data);
+  } catch {
+    activeRunId = null;
+  }
+
+  if (activeRunId) {
+    try {
+      const shadow = await supabaseAdmin!.rpc(
+        'client_report_pipeline_summary_shadow',
+        { ...legacyArgs, p_rollup_run_id: activeRunId },
+      );
+      if (!shadow.error && hasUsablePipelineRpcRow(shadow.data)) return shadow;
+    } catch {
+      // Fall through to the unchanged production RPC.
+    }
+  }
+
+  return supabaseAdmin!.rpc('client_report_pipeline_summary', legacyArgs);
+}
+
 async function loadAccessibleCampaigns(allowedCampaignIds: string[]): Promise<ClientReportCampaign[]> {
   const uniqueIds = [...new Set(allowedCampaignIds)];
   let catalogNames = new Map<string, string>();
@@ -141,13 +219,13 @@ export async function loadClientReportAnalytics(input: {
 
   const [campaigns, pipelineResult] = await Promise.all([
     loadAccessibleCampaigns(input.allowedCampaignIds),
-    supabaseAdmin.rpc('client_report_pipeline_summary', {
-      p_client_user_id: input.clientUserId,
-      p_from: fromUtc,
-      p_to: toExclusiveUtc,
-      p_score_code: input.filters.score === 'all' ? null : input.filters.score,
-      p_campaign_id: input.filters.campaignId,
-      p_allowed_campaign_ids: input.allowedCampaignIds,
+    loadPipelineSummary({
+      clientUserId: input.clientUserId,
+      fromUtc,
+      toExclusiveUtc,
+      scoreCode: input.filters.score === 'all' ? null : input.filters.score,
+      campaignId: input.filters.campaignId,
+      allowedCampaignIds: input.allowedCampaignIds,
     }),
   ]);
 

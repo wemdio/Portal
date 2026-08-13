@@ -257,6 +257,11 @@ function parseTerm(term: string): Filter {
   const value = valueRaw === 'null' ? null : valueRaw;
   const opMap: Record<string, Op> = {
     eq: 'eq', neq: 'neq', gte: 'gte', lte: 'lte', gt: 'gt', lt: 'lt', is: 'is',
+    // ilike внутри or(...) — идиома поиска по нескольким колонкам/значениям
+    // (`col.ilike.%x%,col.ilike.%y%`); без него терм молча падал в eq и
+    // сравнивал шаблон со значением буквально, то есть тест «ничего не нашёл»
+    // проходил бы при рабочем коде.
+    ilike: 'ilike',
   };
   return { column, op: opMap[op] ?? 'eq', value };
 }

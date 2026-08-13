@@ -32,6 +32,7 @@ import {
   setupGracefulShutdown,
   sleep,
 } from './_shared';
+import { installUndiciAssertGuard } from './_undiciAssertGuard';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 /** Сколько job'ов параллельно один воркер берёт. Память: 1 job ≈ 0.5–1.5GB JS heap (большой `data` в памяти). */
@@ -231,38 +232,12 @@ async function pollOnce(): Promise<boolean> {
  * не зарезолвится сам (видели в трейсе остановку body-stream'а), он
  * принудительно вернёт null и слот processInPool освободится.
  */
-function installUndiciAssertGuard(): void {
-  const isUndiciAssertionError = (err: unknown): boolean => {
-    if (!(err instanceof Error)) return false;
-    const code = (err as NodeJS.ErrnoException).code;
-    return code === 'ERR_ASSERTION' && (err.stack ?? '').includes('undici');
-  };
-  process.on('uncaughtException', (err) => {
-    if (isUndiciAssertionError(err)) {
-      const first = (err.message ?? '').split('\n')[0] ?? '';
-      log('warn', `Suppressed undici parser assertion (uncaught): ${first.trim()}`);
-      return;
-    }
-    log('error', `Uncaught exception: ${err instanceof Error ? err.message : String(err)}`, err);
-    process.exit(1);
-  });
-  process.on('unhandledRejection', (reason) => {
-    if (isUndiciAssertionError(reason)) {
-      const first = ((reason as Error).message ?? '').split('\n')[0] ?? '';
-      log('warn', `Suppressed undici parser assertion (rejection): ${first.trim()}`);
-      return;
-    }
-    log('error', `Unhandled rejection: ${reason instanceof Error ? reason.message : String(reason)}`, reason);
-    process.exit(1);
-  });
-}
-
 async function main(): Promise<void> {
   log(
     'info',
     `Starting BaseConstructor worker (pid=${process.pid}, concurrency=${MAX_CONCURRENCY}, stale=${STALE_JOB_MINUTES}min)`,
   );
-  installUndiciAssertGuard();
+  installUndiciAssertGuard(log);
   requireSupabaseAdmin(log);
   const shouldStop = setupGracefulShutdown(log);
 

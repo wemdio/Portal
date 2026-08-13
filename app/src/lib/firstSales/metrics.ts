@@ -16,6 +16,14 @@ import { chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
 import { bucketKey, buildBuckets, type GroupBy } from '@/lib/firstSales/buckets';
 import { MEETINGS_RELIABLE_SINCE, type MeetingLinkRow } from '@/lib/firstSales/meetings';
 import {
+  attributablePayment,
+  dealInn,
+  emptyMoneyTotals,
+  paymentAmount,
+  type FirstSalesPaymentRow,
+  type MoneyTotals,
+} from '@/lib/firstSales/money';
+import {
   buildSourceIndex,
   resolveChannel,
   type FirstSalesChannel,
@@ -26,6 +34,8 @@ import {
 export type FirstSalesLeadRow = {
   amo_id: number;
   name: string | null;
+  /** Ответственный в AMO. Заполняется синком; null — сделка без ответственного. */
+  responsible_name: string | null;
   created_at: string | null;
   first_qualified_at: string | null;
   first_meeting_at: string | null;
@@ -43,6 +53,24 @@ export type SeriesBucket = {
   contracts: number;
 };
 
+/**
+ * Разбивка по ответственному менеджеру.
+ *
+ * Считается ровно теми же правилами, что и разбивка по источникам: лиды по
+ * дате создания, договоры по дате этапа, встречи по записям разговоров. Иначе
+ * два среза одного дашборда давали бы разные суммы, и объяснить это было бы
+ * нечем.
+ */
+export type ManagerBreakdown = {
+  manager: string;
+  leads: number;
+  qualified: number;
+  meetings: number;
+  contracts: number;
+  /** Рубли, пришедшие в окне по сделкам этого менеджера. См. `money.ts`. */
+  money: number;
+};
+
 export type SourceBreakdown = {
   source: string;
   channel: FirstSalesChannel;
@@ -51,6 +79,8 @@ export type SourceBreakdown = {
   qualified: number;
   meetings: number;
   contracts: number;
+  /** Рубли, пришедшие в окне по сделкам этого источника. См. `money.ts`. */
+  money: number;
 };
 
 export type FirstSalesTotals = {
@@ -81,13 +111,30 @@ export type FirstSalesTotals = {
   meetingsReliable: boolean;
   /** Дата вступления правила в силу — чтобы UI мог назвать её пользователю. */
   meetingsSince: string;
+  /**
+   * Реальные деньги окна — банковские приходы, связанные со сделками воронки
+   * по ИНН. Отдельным объектом, а не полями в totals: у денег своя оговорка о
+   * неполноте (ИНН заполнен у меньшинства сделок), и держать её рядом с самой
+   * цифрой надёжнее, чем в соседнем поле, о котором легко забыть. См.
+   * `money.ts`.
+   */
+  money: MoneyTotals;
 };
 
 export type FirstSalesSeries = {
   series: SeriesBucket[];
   bySource: SourceBreakdown[];
+  byManager: ManagerBreakdown[];
   totals: FirstSalesTotals;
 };
+
+/** Сделка без ответственного — отдельная строка, а не выброшенная. */
+export const NO_MANAGER = 'Без ответственного';
+
+function managerKey(name: string | null): string {
+  const clean = (name ?? '').trim();
+  return clean || NO_MANAGER;
+}
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -137,6 +184,11 @@ export function computeFirstSalesSeries(
   to: Date,
   groupBy: GroupBy,
   channelFilter: FirstSalesChannel[] | null,
+  // Последним и необязательным — сознательно: деньги считаются отдельным
+  // проходом поверх уже посчитанной воронки и ничего в ней не меняют. Так все
+  // существующие вызовы (и тесты воронки) остаются валидными, а расчёт без
+  // денег — законным состоянием, а не забытым аргументом.
+  payments: FirstSalesPaymentRow[] = [],
 ): FirstSalesSeries {
   const index = buildSourceIndex(sourceMap);
   const allowed = channelFilter && channelFilter.length > 0 ? new Set(channelFilter) : null;
@@ -146,6 +198,36 @@ export function computeFirstSalesSeries(
     keys.map((key) => [key, { key, leads: 0, qualified: 0, meetings: 0, contracts: 0 }]),
   );
   const bySource = new Map<string, SourceBreakdown>();
+  const byManager = new Map<string, ManagerBreakdown>();
+
+  const managerRow = (name: string | null): ManagerBreakdown => {
+    const key = managerKey(name);
+    let row = byManager.get(key);
+    if (!row) {
+      row = { manager: key, leads: 0, qualified: 0, meetings: 0, contracts: 0, money: 0 };
+      byManager.set(key, row);
+    }
+    return row;
+  };
+
+  /** Строка разбивки по источнику. Заводится в трёх местах (лиды, встречи,
+   *  деньги) — общий конструктор, чтобы новое поле не появилось в двух из
+   *  трёх. */
+  const sourceRow = (
+    sourceKey: string,
+    channel: FirstSalesChannel,
+    known: boolean,
+  ): SourceBreakdown => {
+    let row = bySource.get(sourceKey);
+    if (!row) {
+      row = {
+        source: sourceKey, channel, known,
+        leads: 0, qualified: 0, meetings: 0, contracts: 0, money: 0,
+      };
+      bySource.set(sourceKey, row);
+    }
+    return row;
+  };
 
   const totals: FirstSalesTotals = {
     leads: 0, qualified: 0, meetings: 0, contracts: 0,
@@ -155,6 +237,7 @@ export function computeFirstSalesSeries(
     contractsSince: CONTRACT_RULE_SINCE.toISOString(),
     meetingsReliable: to.getTime() >= MEETINGS_RELIABLE_SINCE.getTime(),
     meetingsSince: MEETINGS_RELIABLE_SINCE.toISOString(),
+    money: emptyMoneyTotals(),
   };
   const cycles: number[] = [];
 
@@ -165,6 +248,9 @@ export function computeFirstSalesSeries(
   // выбран в фильтре — фильтрация встреч по каналу применяется отдельно,
   // при их собственной обработке.
   const dealChannelMap = new Map<number, ResolvedChannel>();
+  /** Сделка → ответственный: встречи считаются отдельным проходом, где самой
+   *  сделки под рукой уже нет. */
+  const dealManagerMap = new Map<number, string | null>();
 
   // Тип поля сужен до счётчиков: `keyof SeriesBucket` включал бы `key: string`,
   // и `bucket[field] += 1` не прошёл бы проверку типов.
@@ -178,19 +264,13 @@ export function computeFirstSalesSeries(
   for (const lead of leads) {
     const resolved = resolveChannel(lead.raw, index);
     dealChannelMap.set(lead.amo_id, resolved);
+    dealManagerMap.set(lead.amo_id, lead.responsible_name);
     if (allowed && !allowed.has(resolved.channel)) continue;
 
+    const manager = managerRow(lead.responsible_name);
+
     const sourceKey = resolved.source || '(не указан)';
-    let breakdown = bySource.get(sourceKey);
-    if (!breakdown) {
-      breakdown = {
-        source: sourceKey,
-        channel: resolved.channel,
-        known: resolved.known,
-        leads: 0, qualified: 0, meetings: 0, contracts: 0,
-      };
-      bySource.set(sourceKey, breakdown);
-    }
+    const breakdown = sourceRow(sourceKey, resolved.channel, resolved.known);
     // Примечание (само-ревью): channel/known в строке разбивки фиксируются по
     // ПЕРВОЙ встреченной сделке с этим sourceKey. Для непустого «Источник» это
     // безопасно — resolveChannel детерминирована по нормализованному значению
@@ -206,6 +286,7 @@ export function computeFirstSalesSeries(
     if (inWindow(lead.created_at, from, to)) {
       totals.leads += 1;
       breakdown.leads += 1;
+      manager.leads += 1;
       bump(bucketKey(new Date(lead.created_at as string), groupBy), 'leads');
       if (isLeadMagnet(lead.name)) totals.leadMagnets += 1;
       if (resolved.channel === 'unassigned') totals.unassignedLeads += 1;
@@ -223,6 +304,7 @@ export function computeFirstSalesSeries(
       if (lead.first_qualified_at && lead.history_complete) {
         totals.qualified += 1;
         breakdown.qualified += 1;
+        manager.qualified += 1;
         bump(bucketKey(new Date(lead.created_at as string), groupBy), 'qualified');
       }
     }
@@ -249,7 +331,13 @@ export function computeFirstSalesSeries(
       ) {
         totals.contracts += 1;
         breakdown.contracts += 1;
+        manager.contracts += 1;
         bump(bucketKey(new Date(lead.first_contract_at as string), groupBy), 'contracts');
+        // Покрытие ИНН считается ровно по тем договорам, что попали в метрику:
+        // знаменатель «сколько денег мы вообще могли бы увидеть» должен быть
+        // тем же числом, что показано на карточке «Договоры», иначе доля будет
+        // считаться от одного, а читаться от другого.
+        if (dealInn(lead.raw)) totals.money.contractsWithInn += 1;
       }
     }
 
@@ -311,17 +399,49 @@ export function computeFirstSalesSeries(
     bump(bucketKey(meetingDate, groupBy), 'meetings');
 
     const sourceKey = resolved?.source || '(не указан)';
-    let breakdown = bySource.get(sourceKey);
-    if (!breakdown) {
-      breakdown = {
-        source: sourceKey,
-        channel,
-        known: resolved?.known ?? false,
-        leads: 0, qualified: 0, meetings: 0, contracts: 0,
-      };
-      bySource.set(sourceKey, breakdown);
+    sourceRow(sourceKey, channel, resolved?.known ?? false).meetings += 1;
+    managerRow(dealManagerMap.get(link.amo_deal_id) ?? null).meetings += 1;
+  }
+
+  // ─── Деньги — по банковским приходам, связанным по ИНН ───────────────────
+  //
+  // Отдельным проходом и последним: деньги ничего не меняют в воронке, они
+  // ложатся поверх неё. Правила отбора (первичка vs продление, спорные) живут
+  // в `money.ts` — здесь только раскладка по срезам.
+  //
+  // Спорные и неразобранные НЕ фильтруются по каналу: канал берётся у сделки,
+  // а у этих платежей сделка либо неизвестна (несколько кандидатов), либо
+  // решение по ней ещё не принято. Показать их «ноль при выбранном канале»
+  // значило бы спрятать признание в незнании, а именно оно тут и ценно.
+  for (const p of payments) {
+    const amount = paymentAmount(p);
+    // Ноль и минус — возвраты и служебные строки: в «пришло денег» им не
+    // место, а вычитать их из выручки первички нельзя (возврат может
+    // относиться к платежу другого окна).
+    if (amount <= 0) continue;
+    if (!inWindow(p.occurred_at, from, to)) continue;
+
+    if (p.renewal_state === 'renewal') continue;
+    if (p.renewal_state === 'pending') {
+      totals.money.pending += amount;
+      totals.money.pendingPayments += 1;
+      continue;
     }
-    breakdown.meetings += 1;
+    if (!attributablePayment(p)) {
+      totals.money.ambiguous += amount;
+      totals.money.ambiguousPayments += 1;
+      continue;
+    }
+
+    const dealId = p.amo_deal_id as number;
+    const resolved = dealChannelMap.get(dealId);
+    const channel = resolved?.channel ?? 'unassigned';
+    if (allowed && !allowed.has(channel)) continue;
+
+    totals.money.received += amount;
+    totals.money.payments += 1;
+    sourceRow(resolved?.source || '(не указан)', channel, resolved?.known ?? false).money += amount;
+    managerRow(dealManagerMap.get(dealId) ?? null).money += amount;
   }
 
   return {
@@ -333,8 +453,14 @@ export function computeFirstSalesSeries(
     // теряются: фильтр только отбрасывает строки целиком по сумме счётчиков,
     // остальные поля объекта не трогает.
     bySource: [...bySource.values()]
-      .filter((s) => s.leads + s.qualified + s.meetings + s.contracts > 0)
+      .filter((s) => s.leads + s.qualified + s.meetings + s.contracts + s.money > 0)
       .sort((a, b) => b.leads - a.leads),
+    // Пустые строки отбрасываем по той же причине, что и у источников: сделка
+    // могла попасть в выборку оплатой старой сделки и дать менеджеру строку из
+    // одних нулей.
+    byManager: [...byManager.values()]
+      .filter((m) => m.leads + m.qualified + m.meetings + m.contracts + m.money > 0)
+      .sort((a, b) => b.leads - a.leads || a.manager.localeCompare(b.manager, 'ru')),
     totals,
   };
 }
@@ -342,7 +468,7 @@ export function computeFirstSalesSeries(
 const STAGE_DATE_COLUMNS =
   'amo_deal_id, created_at, first_qualified_at, first_meeting_at, first_contract_at, won_at, history_complete';
 
-type StageDateRow = Omit<FirstSalesLeadRow, 'amo_id' | 'name' | 'raw'> & { amo_deal_id: number };
+type StageDateRow = Omit<FirstSalesLeadRow, 'amo_id' | 'name' | 'responsible_name' | 'raw'> & { amo_deal_id: number };
 
 /**
  * Тянет сделки воронки первички вместе с датами этапов из view.
@@ -424,20 +550,23 @@ export async function fetchFirstSalesLeads(
     chunkArray(ids, IN_CHUNK_SIZE).map(async (chunk) => {
       const { data: leadsChunk, error: leadsError } = await db
         .from('amo_leads')
-        .select('amo_id, name, raw')
+        .select('amo_id, name, responsible_name, raw')
         .in('amo_id', chunk);
       if (leadsError) throw leadsError;
-      return (leadsChunk ?? []) as Array<{ amo_id: number; name: string | null; raw: unknown }>;
+      return (leadsChunk ?? []) as Array<{
+        amo_id: number; name: string | null; responsible_name: string | null; raw: unknown;
+      }>;
     }),
   );
-  const leadsById = new Map<number, { name: string | null; raw: unknown }>();
+  const leadsById = new Map<number, { name: string | null; responsible_name: string | null; raw: unknown }>();
   for (const l of leadChunks.flat()) {
-    leadsById.set(l.amo_id, { name: l.name, raw: l.raw });
+    leadsById.set(l.amo_id, { name: l.name, responsible_name: l.responsible_name, raw: l.raw });
   }
 
   return stageRows.map((r) => ({
     amo_id: r.amo_deal_id,
     name: leadsById.get(r.amo_deal_id)?.name ?? null,
+    responsible_name: leadsById.get(r.amo_deal_id)?.responsible_name ?? null,
     raw: leadsById.get(r.amo_deal_id)?.raw ?? null,
     created_at: r.created_at,
     first_qualified_at: r.first_qualified_at,

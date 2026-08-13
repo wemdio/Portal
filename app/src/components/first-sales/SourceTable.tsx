@@ -11,12 +11,15 @@ import { useSortableRows, type SortColumns } from '@/components/ui/useSortableRo
 import { SortableTh } from '@/components/ui/SortableTh';
 
 const fmt = (n: number) => n.toLocaleString('ru-RU');
+const fmtMoney = (n: number) => (n > 0 ? `${Math.round(n).toLocaleString('ru-RU')} ₽` : '—');
 const pct = (part: number, total: number) => (total > 0 ? `${Math.round((part / total) * 100)}%` : '—');
 const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('ru-RU') : '—');
 
 type DrillLeadRow = {
   amo_id: number;
   name: string | null;
+  /** Ответственный в AMO. null — за сделкой никто не закреплён. */
+  responsible_name: string | null;
   created_at: string | null;
   first_meeting_at: string | null;
   first_contract_at: string | null;
@@ -37,6 +40,10 @@ type LeadsResponse = { rows: DrillLeadRow[]; truncated: boolean };
  */
 const drillSortColumns: SortColumns<DrillLeadRow> = {
   name: { type: 'string', getValue: (r) => r.name },
+  // Сделки без ответственного уедут в конец списка при любом направлении —
+  // общее правило хука для пустых значений, и здесь оно как раз кстати: это
+  // не «менеджер по имени пусто», а отсутствие данных.
+  responsible_name: { type: 'string', getValue: (r) => r.responsible_name },
   created_at: { type: 'date', getValue: (r) => r.created_at },
   first_meeting_at: { type: 'date', getValue: (r) => r.first_meeting_at },
   first_contract_at: { type: 'date', getValue: (r) => r.first_contract_at },
@@ -116,7 +123,7 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
   if (loading) {
     return (
       <tr>
-        <td colSpan={7} className="bg-zinc-50/60 px-3 py-4 text-center text-zinc-400">
+        <td colSpan={8} className="bg-zinc-50/60 px-3 py-4 text-center text-zinc-400">
           Загрузка сделок…
         </td>
       </tr>
@@ -126,7 +133,7 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
   if (error) {
     return (
       <tr>
-        <td colSpan={7} className="bg-zinc-50/60 px-3 py-4 text-center text-red-600">
+        <td colSpan={8} className="bg-zinc-50/60 px-3 py-4 text-center text-red-600">
           Ошибка загрузки сделок: {error}
         </td>
       </tr>
@@ -136,7 +143,7 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
   if (rows.length === 0) {
     return (
       <tr>
-        <td colSpan={7} className="bg-zinc-50/60 px-3 py-4 text-center text-zinc-400">
+        <td colSpan={8} className="bg-zinc-50/60 px-3 py-4 text-center text-zinc-400">
           Сделок за выбранный период не найдено.
         </td>
       </tr>
@@ -145,17 +152,24 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
 
   return (
     <tr>
-      <td colSpan={7} className="bg-zinc-50/60 px-3 py-3">
+      <td colSpan={8} className="bg-zinc-50/60 px-3 py-3">
         {/* Раскрытая строка живёт внутри таблицы, которая сама уже стеклянная.
             Второй `.glass-frame` дал бы размытие внутри размытия — именно
             вложенность роняет плавность прокрутки. Плотная подложка строк. */}
         <div className="overflow-x-auto rounded-lg border border-zinc-200 bg-[var(--glass-rows)]">
-          <table className="w-full min-w-[560px] text-[11px]">
+          <table className="w-full min-w-[660px] text-[11px]">
             <thead>
               <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400">
                 <SortableTh
                   label="Сделка"
                   sortKey="name"
+                  sort={sort}
+                  onSort={toggleSort}
+                  className="px-2.5 py-1.5"
+                />
+                <SortableTh
+                  label="Менеджер"
+                  sortKey="responsible_name"
                   sort={sort}
                   onSort={toggleSort}
                   className="px-2.5 py-1.5"
@@ -221,6 +235,14 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
                       )}
                     </div>
                   </td>
+                  {/* Пусто, а не прочерк: у соседних колонок прочерк значит
+                      «этап не достигнут», а тут — «в CRM не закреплён», и
+                      путать эти два состояния одним символом не стоит. */}
+                  <td className="px-2.5 py-1.5 text-zinc-600">
+                    {lead.responsible_name || (
+                      <span className="text-zinc-400">не закреплён</span>
+                    )}
+                  </td>
                   <td className="px-2.5 py-1.5 tabular-nums text-zinc-600">{fmtDate(lead.created_at)}</td>
                   <td className="px-2.5 py-1.5 tabular-nums text-zinc-600">{fmtDate(lead.first_meeting_at)}</td>
                   <td className="px-2.5 py-1.5 tabular-nums text-zinc-600">{fmtDate(lead.first_contract_at)}</td>
@@ -260,6 +282,7 @@ const sourceSortColumns: SortColumns<SourceBreakdown> = {
   qualified: { type: 'number', getValue: (r) => r.qualified },
   meetings: { type: 'number', getValue: (r) => r.meetings },
   contracts: { type: 'number', getValue: (r) => r.contracts },
+  money: { type: 'number', getValue: (r) => r.money },
 };
 
 export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]; filters: FiltersState }) {
@@ -283,6 +306,20 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
             <SortableTh label="Квал" sortKey="qualified" sort={sort} onSort={toggleSort} align="right" />
             <SortableTh label="Встречи" sortKey="meetings" sort={sort} onSort={toggleSort} align="right" />
             <SortableTh label="Договоры" sortKey="contracts" sort={sort} onSort={toggleSort} align="right" />
+            {/* Деньги, связанные со сделкой по ИНН плательщика. Прочерк —
+                «связать не смогли», а не «денег не было»; доля покрытия стоит
+                на карточке «Деньги» вверху дашборда. */}
+            <SortableTh
+              label={
+                <span title="Банковские приходы, связанные со сделкой по ИНН плательщика. Прочерк значит «связать не смогли» — ИНН заполнен не у всех сделок.">
+                  Деньги
+                </span>
+              }
+              sortKey="money"
+              sort={sort}
+              onSort={toggleSort}
+              align="right"
+            />
           </tr>
         </thead>
         <tbody>
@@ -316,6 +353,7 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(row.qualified)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(row.meetings)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(row.contracts)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmtMoney(row.money)}</td>
                 </tr>
                 {isOpen && <DrillDownRows source={row.source} filters={filters} />}
               </Fragment>
@@ -323,7 +361,7 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
           })}
           {rows.length === 0 && (
             <tr>
-              <td colSpan={7} className="px-3 py-8 text-center text-zinc-400">
+              <td colSpan={8} className="px-3 py-8 text-center text-zinc-400">
                 Нет данных за выбранный период.
               </td>
             </tr>

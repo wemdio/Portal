@@ -25,8 +25,11 @@ export async function GET(
     const data = await getTagMailboxes(tagId, day);
     return NextResponse.json(data);
   } catch (e) {
-    console.error('[mailbox-load drill] failed:', (e as Error).message);
-    // 500, не 200 — фронт различает сбой и честно пустой тег
-    return NextResponse.json({ error: 'build_failed', mailboxes: [] }, { status: 500 });
+    const detail = (e as Error).message;
+    console.error('[mailbox-load drill] failed:', detail);
+    // 500, не 200 — фронт различает сбой и честно пустой тег. Причина уходит и
+    // в ответ: роут за тем же гейтом на руководство, а без неё раскрытие тега
+    // ломалось так же безмолвно, как и весь дашборд.
+    return NextResponse.json({ error: 'build_failed', detail, mailboxes: [] }, { status: 500 });
   }
 }
