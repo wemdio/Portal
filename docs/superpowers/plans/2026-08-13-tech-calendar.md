@@ -158,19 +158,24 @@ alter table public.tech_renewal_notification_log enable row level security;
 grant all on public.tech_renewal_notification_log to service_role;
 
 -- Новый тип уведомления и новый вид сущности, на которую оно ссылается.
+--
+-- Список пересобирается целиком, поэтому в него обязаны войти значения из
+-- 20260509_0001 (support-чат): `support_message` и `support_thread`. Взять
+-- список из исходной 20260416 и «дописать своё» — значит откатить чужое
+-- расширение и остановить уведомления support-чата.
 alter table public.notifications
   drop constraint if exists notifications_type_check;
 alter table public.notifications
   add constraint notifications_type_check
   check (type in ('deadline', 'deadline_lead', 'deadline_ceo',
                   'lead_new', 'lead_escalation', 'lead_ceo',
-                  'info', 'tech_renewal'));
+                  'info', 'support_message', 'tech_renewal'));
 
 alter table public.notifications
   drop constraint if exists notifications_entity_type_check;
 alter table public.notifications
   add constraint notifications_entity_type_check
-  check (entity_type is null or entity_type in ('project', 'task', 'lead_qualification', 'tech_subscription'));
+  check (entity_type is null or entity_type in ('project', 'task', 'lead_qualification', 'support_thread', 'tech_subscription'));
 ```
 
 - [ ] **Step 2: Проверить линт грантов**
