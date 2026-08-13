@@ -239,6 +239,101 @@ describe('findMissingServiceRoleGrants', () => {
       { file: '20260601_0001_new.sql', table: 'shiny_new' },
     ]);
   });
+
+  // Таблица, к которой никто не должен ходить напрямую: запись и чтение идут
+  // только через функции с SECURITY DEFINER, а сама она заперта явным REVOKE.
+  // Требовать для неё GRANT значило бы требовать снять замок, ради которого
+  // её и заперли. Признаём такое заявление автора вместо того, чтобы толкать
+  // его выдавать права, которые он двумя строками ниже сам отбирает.
+  describe('таблицы, намеренно закрытые от service_role', () => {
+    it('явный REVOKE ALL снимает требование GRANT', () => {
+      const files = [
+        {
+          name: '20260601_0001_locked.sql',
+          sql: `create table public.locked (id int);
+                revoke all on table public.locked from service_role;`,
+        },
+      ];
+      expect(findMissingServiceRoleGrants(files)).toEqual([]);
+    });
+
+    it('REVOKE без слова table и с PRIVILEGES тоже считается', () => {
+      const files = [
+        {
+          name: '20260601_0001_locked.sql',
+          sql: `create table public.locked (id int);
+                revoke all privileges on public.locked from service_role;`,
+        },
+      ];
+      expect(findMissingServiceRoleGrants(files)).toEqual([]);
+    });
+
+    it('REVOKE в соседней миграции тоже считается — как и GRANT', () => {
+      const files = [
+        { name: '20260601_0001_create.sql', sql: 'create table public.locked (id int);' },
+        {
+          name: '20260601_0002_lock.sql',
+          sql: 'revoke all on table public.locked from service_role;',
+        },
+      ];
+      expect(findMissingServiceRoleGrants(files)).toEqual([]);
+    });
+
+    it('REVOKE у другой роли не освобождает от GRANT', () => {
+      const files = [
+        {
+          name: '20260601_0001_locked.sql',
+          sql: `create table public.locked (id int);
+                revoke all on table public.locked from anon;`,
+        },
+      ];
+      expect(findMissingServiceRoleGrants(files)).toEqual([
+        { file: '20260601_0001_locked.sql', table: 'locked' },
+      ]);
+    });
+
+    it('REVOKE у другой таблицы не освобождает соседнюю', () => {
+      const files = [
+        {
+          name: '20260601_0001_locked.sql',
+          sql: `create table public.locked (id int);
+                create table public.forgotten (id int);
+                revoke all on table public.locked from service_role;`,
+        },
+      ];
+      expect(findMissingServiceRoleGrants(files)).toEqual([
+        { file: '20260601_0001_locked.sql', table: 'forgotten' },
+      ]);
+    });
+
+    // Оптовый REVOKE намеренно НЕ признаём: одна такая строка выключила бы
+    // проверку для всего дерева миграций. Замок должен быть заявлен поимённо.
+    it('оптовый REVOKE на всю схему не освобождает никого', () => {
+      const files = [
+        {
+          name: '20260601_0001_locked.sql',
+          sql: `create table public.locked (id int);
+                revoke all on all tables in schema public from service_role;`,
+        },
+      ];
+      expect(findMissingServiceRoleGrants(files)).toEqual([
+        { file: '20260601_0001_locked.sql', table: 'locked' },
+      ]);
+    });
+
+    it('REVOKE внутри комментария не считается', () => {
+      const files = [
+        {
+          name: '20260601_0001_locked.sql',
+          sql: `create table public.locked (id int);
+                -- revoke all on table public.locked from service_role;`,
+        },
+      ];
+      expect(findMissingServiceRoleGrants(files)).toEqual([
+        { file: '20260601_0001_locked.sql', table: 'locked' },
+      ]);
+    });
+  });
 });
 
 /**

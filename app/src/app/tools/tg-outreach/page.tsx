@@ -28,11 +28,14 @@ import {
   Flame,
   Database,
   ShieldCheck,
+  FileSpreadsheet,
+  LayoutDashboard,
 } from 'lucide-react';
+import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
-import WarmupChatsTab from '@/components/tg-outreach/WarmupChatsTab';
 import type {
   CampaignStatus,
+  DialogStatus,
   OutreachCampaign,
   OutreachAccount,
   OutreachProxy,
@@ -48,7 +51,13 @@ import {
   DEFAULT_TELEGRAM_SETTINGS,
   DEFAULT_FOLLOW_UP,
 } from '@/lib/tgOutreach/types';
+import {
+  describeAutoForward,
+  autoForwardWarning,
+  type AutoForwardMark,
+} from '@/lib/tgOutreach/autoForward';
 import { DEFAULT_MAX_MESSAGE_CHARS } from '@/lib/tgOutreach/firstTouch/validateMessage';
+import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
 // Только тип: сам модуль серверный (тянет gramJS), в клиентский бандл он не
 // попадает — import type стирается при сборке. Берём его, чтобы набор статусов
 // проверки был один на портал, а не переписанный руками на экране.
@@ -111,6 +120,91 @@ const DIALOG_STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   not_lead: { label: 'Не лид', cls: 'bg-gray-100 text-gray-600' },
   later: { label: 'Потом', cls: 'bg-amber-100 text-amber-700' },
 };
+
+/**
+ * Плашка передачи диалога человеку.
+ *
+ * Одна и та же в свёрнутой строке списка и в раскрытой карточке. В списке она
+ * нужна больше: «кого уже отдали менеджеру» — вопрос про весь список сразу, а
+ * раскрывать ради ответа каждый диалог по очереди оператор не станет.
+ *
+ * «Передан» показываем наравне с «в очереди»: если бы метка жила только до
+ * отправки, она исчезала бы ровно в тот момент, когда передача удалась, и это
+ * читалось бы как отмена.
+ */
+/**
+ * Живая передача: стоит в очереди или уже ушла.
+ *
+ * Отработавшие — сорвавшаяся и снятая оператором — до менеджера не дошли, и
+ * обращаться с ними надо одинаково: показывать причину и возвращать кнопки.
+ */
+function isActiveForward(
+  forward: OutreachDialog['forward'],
+): forward is NonNullable<NonNullable<OutreachDialog['forward']>> {
+  return !!forward && (forward.status === 'pending' || forward.status === 'sent');
+}
+
+function ForwardBadge({
+  forward,
+  compact = false,
+}: {
+  forward: NonNullable<NonNullable<OutreachDialog['forward']>>;
+  /** Компактный размер — под остальные бейджи в строке списка. */
+  compact?: boolean;
+}) {
+  const pending = forward.status === 'pending';
+  const size = compact ? 'gap-1 px-2 py-0.5' : 'ml-2 gap-1.5 px-3 py-1';
+  const tone = pending
+    ? 'border-amber-200 bg-amber-50 text-amber-700'
+    : 'border-gray-200 bg-gray-50 text-gray-600';
+  return (
+    <span
+      title={pending
+        ? 'Стоит в очереди — уйдёт, когда воркер дойдёт до этого аккаунта'
+        : 'Уже отправлено. Передать ещё раз, в том числе другим видом, нельзя'}
+      className={`inline-flex items-center rounded-full border text-[10px] font-medium ${size} ${tone}`}
+    >
+      <Send className="h-3 w-3" />
+      {pending ? 'В очереди: ' : 'Передан: '}
+      {forward.kind === 'lead' ? 'лид' : 'партнёр'}
+    </span>
+  );
+}
+
+/**
+ * Контакт ушёл менеджеру сам, по положительному триггеру.
+ *
+ * Отдельно от `ForwardBadge`: та плашка про очередь ручной передачи, эта — про
+ * то, что воркер уже сделал без оператора. Раньше от автопересылки в карточке
+ * оставался только статус «Лид», который точно так же ставится руками, и
+ * человека передавали менеджеру второй раз, не зная, что он уже там.
+ */
+function AutoForwardBadge({
+  mark,
+  compact = false,
+}: {
+  mark: AutoForwardMark;
+  /** Компактный размер — под остальные бейджи в строке списка. */
+  compact?: boolean;
+}) {
+  const sent = mark.state === 'sent';
+  const size = compact ? 'gap-1 px-2 py-0.5' : 'ml-2 gap-1.5 px-3 py-1';
+  const tone = sent
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    : 'border-rose-200 bg-rose-50 text-rose-700';
+  const where = mark.chat ? `, чат ${mark.chat}` : '';
+  return (
+    <span
+      title={sent
+        ? `Переписка ушла менеджеру автоматически, по положительному триггеру${where}. ${formatDate(mark.at)}`
+        : `Автопересылка менеджеру не удалась${where} — ${mark.reason}. Лид до менеджера не дошёл.`}
+      className={`inline-flex items-center rounded-full border text-[10px] font-medium ${size} ${tone}`}
+    >
+      <UserCheck className="h-3 w-3" />
+      {sent ? 'Ушёл менеджеру' : 'Не ушёл менеджеру'}
+    </span>
+  );
+}
 
 /* =================== GLOBAL BLOCKLIST SECTION =================== */
 function GlobalBlocklistSection() {
@@ -260,9 +354,9 @@ function SettingsTab({ campaign, onSave }: {
 
   return (
     <div className="space-y-6">
-      {/* OpenRouter */}
+      {/* Промпт, триггеры и чаты-приёмники. Заголовка нет намеренно: «OpenRouter»
+          называл поставщика модели, а не то, что оператор здесь настраивает. */}
       <section className="space-y-4">
-        <h3 className="text-sm font-semibold text-gray-800">OpenRouter</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <Field label="Название проекта" value={openai.project_name} onChange={v => setOAI('project_name', v)} />
         </div>
@@ -272,7 +366,28 @@ function SettingsTab({ campaign, onSave }: {
           <FieldArea label="Триггер (отрицательный)" value={openai.trigger_phrases_negative} onChange={v => setOAI('trigger_phrases_negative', v)} rows={2} />
           <Field label="Чат для пересылки (+)" value={openai.target_chats_positive} onChange={v => setOAI('target_chats_positive', v)} placeholder="@username" />
           <Field label="Чат для пересылки (−)" value={openai.target_chats_negative} onChange={v => setOAI('target_chats_negative', v)} placeholder="@username" />
+          <div className="space-y-1 md:col-span-2">
+            <Field
+              label="Чат для партнёров"
+              value={openai.target_chats_partner ?? ''}
+              onChange={v => setOAI('target_chats_partner', v)}
+              placeholder="@username или оставьте пустым"
+            />
+            <p className="text-[10px] text-gray-400">
+              Куда уходит кнопка «Передать партнёра» на вкладке «Диалоги». Заинтересованного клиента
+              и человека, который хочет стать партнёром, обычно разбирают разные люди. Пусто —
+              уйдёт в «Чат для пересылки (+)».
+            </p>
+          </div>
         </div>
+        {/* Два верхних поля наполняет автоматика по триггерным фразам, нижнее —
+            только ручная кнопка. Сказать об этом стоит здесь: иначе разница
+            между «чатом пересылки» и «чатом партнёров» выглядит произвольной. */}
+        <p className="text-[10px] text-gray-400 -mt-2">
+          В чаты пересылки (+) и (−) бот отправляет сам, когда в его ответе встречается триггерная
+          фраза. Передача лида и партнёра с вкладки «Диалоги» — всегда ручная, по кнопке и с
+          подтверждением.
+        </p>
         <div className="flex items-center gap-4">
           <label className="flex items-center gap-2 text-xs text-gray-700">
             <input type="checkbox" checked={openai.use_fallback_on_fail} onChange={e => setOAI('use_fallback_on_fail', e.target.checked)} className="rounded border-gray-300" />
@@ -866,6 +981,8 @@ function DialogsTab({ campaignId }: {
   campaignId: string;
 }) {
   const [dialogs, setDialogs] = useState<OutreachDialog[]>([]);
+  /** Диалог, у которого не сохранилось изменение, и причина — под его карточкой. */
+  const [dialogSaveError, setDialogSaveError] = useState<{ id: string; message: string } | null>(null);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [offset, setOffset] = useState(0);
@@ -876,6 +993,9 @@ function DialogsTab({ campaignId }: {
   const [sendText, setSendText] = useState('');
   const [sending, setSending] = useState(false);
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
+  /** `<dialogId>:<kind>` пока собирается предпросмотр и ставится задача. */
+  const [forwarding, setForwarding] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState<string | null>(null);
   const limit = 30;
 
   const fetchAccounts = useCallback(async () => {
@@ -910,22 +1030,135 @@ function DialogsTab({ campaignId }: {
 
   useEffect(() => { queueMicrotask(() => { void fetchDialogs(); void fetchAccounts(); }); }, [fetchDialogs, fetchAccounts]);
 
-  const updateDialog = async (id: string, patch: { status?: string; can_send?: boolean }) => {
-    const res = await authFetch(`${API_BASE}/dialogs/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify(patch),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => null) as { error?: string } | null;
-      alert(body?.error ?? `Не удалось обновить диалог (HTTP ${res.status})`);
-      return;
+  /**
+   * Пометка статуса и тумблер «можно писать» — оптимистично.
+   *
+   * Раньше после сохранения перезагружался весь список: раскрытая карточка
+   * схлопывалась, прокрутка уезжала, и оператор, размечающий подряд, каждый раз
+   * искал место заново. Ответ сервера при этом ничего нового не приносит — он
+   * возвращает то же значение, которое мы и отправили.
+   *
+   * Поэтому меняем состояние сразу, а запрос уходит фоном. Не сохранилось —
+   * возвращаем прежнее значение и пишем причину рядом с карточкой: молча
+   * откатить хуже, чем не откатить вовсе, оператор был бы уверен, что пометил.
+   */
+  const updateDialog = async (id: string, patch: { status?: DialogStatus; can_send?: boolean }) => {
+    const before = dialogs.find((d) => d.id === id);
+    if (!before) return;
+
+    setDialogs((cur) => cur.map((d) => (d.id === id ? { ...d, ...patch } : d)));
+    setDialogSaveError((cur) => (cur?.id === id ? null : cur));
+
+    try {
+      const res = await authFetch(`${API_BASE}/dialogs/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error ?? `сервер ответил ${res.status}`);
+      }
+    } catch (err) {
+      // Возвращаем именно прежний объект целиком: патч мог тронуть несколько
+      // полей, и откатывать их по одному — лишний способ ошибиться.
+      setDialogs((cur) => cur.map((d) => (d.id === id ? before : d)));
+      setDialogSaveError({
+        id,
+        message: err instanceof Error ? err.message : 'не удалось связаться с сервером',
+      });
     }
-    void fetchDialogs();
   };
 
   const deleteDialog = async (id: string) => {
     await authFetch(`${API_BASE}/dialogs/${id}`, { method: 'DELETE' });
     void fetchDialogs();
+  };
+
+  /**
+   * Передать человека менеджеру: лидом или кандидатом в партнёры.
+   *
+   * Сначала показываем ровно тот текст, который уйдёт, — подтверждать вслепую
+   * нечестно: сообщение уходит наружу, живому человеку, и отозвать его нельзя.
+   * Дальше кнопка только ставит задачу: отправляет воркер тем же аккаунтом,
+   * что вёл переписку, когда дойдёт до него в круге.
+   */
+  const forwardDialog = async (dialog: OutreachDialog, kind: 'lead' | 'partner') => {
+    const key = `${dialog.id}:${kind}`;
+    setForwarding(key);
+    try {
+      const previewRes = await authFetch(`${API_BASE}/dialogs/${dialog.id}/forward?kind=${kind}`);
+      const preview = (await previewRes.json().catch(() => null)) as
+        { text?: string; target_chat?: string; error?: string } | null;
+      if (!previewRes.ok) {
+        alert(preview?.error ?? `Не удалось собрать сообщение (${previewRes.status})`);
+        return;
+      }
+
+      const what = kind === 'lead' ? 'лида' : 'кандидата в партнёры';
+      // Контакт мог уйти менеджеру сам, по триггеру, — тогда ручная передача
+      // задвоит его у адресата. Запрещать не за что: автопересылка отправляет
+      // голую переписку, без карточки с контекстом, и досылать её бывает нужно.
+      // Решает оператор, но с открытыми глазами.
+      const warning = autoForwardWarning(
+        dialog,
+        dialog.auto_forwarded_at ? formatDate(dialog.auto_forwarded_at) : null,
+      );
+      if (!confirm(
+        (warning ? `⚠ ${warning}\n\n` : '')
+        + `Передать ${what} в ${preview?.target_chat}?\n\n`
+        + 'Отправит аккаунт кампании, когда воркер дойдёт до него в круге.\n'
+        + 'Пока задача ждёт в очереди, её можно снять кнопкой «Отменить отправку».\n\n'
+        + `——— Текст сообщения ———\n${preview?.text ?? ''}`,
+      )) return;
+
+      const res = await authFetch(`${API_BASE}/dialogs/${dialog.id}/forward`, {
+        method: 'POST',
+        body: JSON.stringify({ kind }),
+      });
+      const body = (await res.json().catch(() => null)) as { error?: string; target_chat?: string } | null;
+      if (!res.ok) {
+        alert(body?.error ?? `Не удалось поставить передачу в очередь (${res.status})`);
+        return;
+      }
+      alert(`Поставлено в очередь. Уйдёт в ${body?.target_chat} с аккаунта, который вёл переписку.`);
+      // Перечитываем список: иначе кнопки остались бы на экране, приглашая
+      // поставить в очередь то же самое ещё раз.
+      void fetchDialogs();
+    } finally {
+      setForwarding(null);
+    }
+  };
+
+  /**
+   * Снять передачу из очереди, пока воркер до неё не дошёл.
+   *
+   * Ошибиться кнопкой «Передать» легко, а до отправки проходят часы — всё это
+   * время исправить ещё можно. Раньше нельзя было: очередь гасили запросом в
+   * базу руками (13.08.2026 так снимали шесть лидов).
+   */
+  const cancelForward = async (dialog: OutreachDialog) => {
+    const what = dialog.forward?.kind === 'partner' ? 'кандидата в партнёры' : 'лида';
+    if (!confirm(
+      `Отменить передачу ${what}?\n\n`
+      + 'Задача снимется из очереди, менеджеру ничего не уйдёт.\n'
+      + 'Передать этого человека снова можно будет теми же кнопками.',
+    )) return;
+
+    setCancelling(dialog.id);
+    try {
+      const res = await authFetch(`${API_BASE}/dialogs/${dialog.id}/forward`, { method: 'DELETE' });
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok) {
+        // Чаще всего это «воркер успел отправить» — оператору важно узнать
+        // именно это, а не общее «не получилось»: сообщение уже у менеджера.
+        alert(body?.error ?? `Не удалось отменить передачу (${res.status})`);
+        void fetchDialogs();
+        return;
+      }
+      void fetchDialogs();
+    } finally {
+      setCancelling(null);
+    }
   };
 
   const addToBlacklist = async (dialog: OutreachDialog) => {
@@ -1022,6 +1255,7 @@ function DialogsTab({ campaignId }: {
           {dialogs.map(d => {
             const isExpanded = expandedId === d.id;
             const st = DIALOG_STATUS_LABELS[d.status] ?? DIALOG_STATUS_LABELS.none;
+            const autoMark = describeAutoForward(d);
             return (
               <div key={d.id} className="rounded-xl border border-gray-200 bg-white shadow-sm">
                 <button type="button" onClick={() => setExpandedId(isExpanded ? null : d.id)}
@@ -1063,6 +1297,10 @@ function DialogsTab({ campaignId }: {
                       >
                         {d.can_send === false ? 'Не писать' : 'Можно писать'}
                       </span>
+                      {autoMark && <AutoForwardBadge mark={autoMark} compact />}
+                      {isActiveForward(d.forward) && (
+                        <ForwardBadge forward={d.forward} compact />
+                      )}
                       <span className="text-[10px] text-gray-400">{d.messages.length} сообщ.</span>
                     </div>
                     <span className="text-[11px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : '—'}</span>
@@ -1071,19 +1309,91 @@ function DialogsTab({ campaignId }: {
                 </button>
                 {isExpanded && (
                   <div className="border-t border-gray-100 px-4 py-3 space-y-3">
+                    {dialogSaveError?.id === d.id && (
+                      <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">
+                        <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          Не сохранилось, состояние вернулось к прежнему: {dialogSaveError.message}.
+                          Попробуйте ещё раз — если повторяется, проверьте связь с сервером.
+                        </span>
+                      </div>
+                    )}
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs text-gray-500">Статус:</span>
-                      {['none', 'lead', 'not_lead', 'later'].map(s => (
+                      {(['none', 'lead', 'not_lead', 'later'] as DialogStatus[]).map(s => (
                         <button key={s} type="button"
                           onClick={() => void updateDialog(d.id, { status: s })}
                           className={`rounded-full px-3 py-1 text-[10px] font-medium transition border cursor-pointer ${d.status === s ? 'bg-indigo-100 border-indigo-300 text-indigo-700' : 'border-gray-200 text-gray-600 hover:border-indigo-200 hover:bg-indigo-50'}`}>
                           {DIALOG_STATUS_LABELS[s]?.label}
                         </button>
                       ))}
+                      {/* Передача человеку: карточка по шаблону плюс пересылка
+                          переписки. Отправляет тот же аккаунт кампании, но не
+                          сейчас — живое соединение только у воркера, поэтому
+                          кнопка ставит задачу в очередь. */}
+                      {/* Передача одна на диалог, поэтому уже переданный
+                          показывает плашку вместо пары кнопок: гасить их и
+                          оставлять на экране — приглашать кликать в
+                          недоступное. */}
+                      {/* Что произошло само, до оператора: контакт уже у
+                          менеджера. Кнопки рядом остаются рабочими — автопересылка
+                          уходит без карточки с контекстом, и досылать её иногда
+                          нужно. Про риск задвоения предупредим на подтверждении. */}
+                      {autoMark && <AutoForwardBadge mark={autoMark} />}
+                      {isActiveForward(d.forward) ? (
+                        <>
+                          <ForwardBadge forward={d.forward} />
+                          {/* Пока задача ждёт своей очереди, ошибку ещё можно
+                              исправить — и только здесь: после отправки
+                              сообщение уже в чате у менеджера. Поэтому кнопка
+                              живёт ровно столько, сколько статус «в очереди». */}
+                          {d.forward.status === 'pending' && (
+                            <button
+                              type="button"
+                              disabled={cancelling === d.id}
+                              onClick={() => void cancelForward(d)}
+                              title="Снять задачу из очереди — менеджеру ничего не уйдёт"
+                              className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[10px] font-medium text-rose-700 hover:bg-rose-100 hover:border-rose-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {cancelling === d.id
+                                ? <Loader2 className="h-3 w-3 animate-spin" />
+                                : <X className="h-3 w-3" />}
+                              Отменить отправку
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            disabled={forwarding === `${d.id}:lead`}
+                            onClick={() => void forwardDialog(d, 'lead')}
+                            title="Передать как лида в чат из настроек кампании"
+                            className="ml-2 inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100 hover:border-emerald-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {forwarding === `${d.id}:lead`
+                              ? <Loader2 className="h-3 w-3 animate-spin" />
+                              : <Send className="h-3 w-3" />}
+                            Передать лида
+                          </button>
+                          <button
+                            type="button"
+                            disabled={forwarding === `${d.id}:partner`}
+                            onClick={() => void forwardDialog(d, 'partner')}
+                            title="Передать как кандидата в партнёры"
+                            className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-[10px] font-medium text-indigo-700 hover:bg-indigo-100 hover:border-indigo-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {forwarding === `${d.id}:partner`
+                              ? <Loader2 className="h-3 w-3 animate-spin" />
+                              : <Send className="h-3 w-3" />}
+                            Передать партнёра
+                          </button>
+                        </>
+                      )}
                       <button
                         type="button"
                         onClick={() => void addToBlacklist(d)}
-                        className="ml-2 inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[10px] font-medium text-rose-700 hover:bg-rose-100 hover:border-rose-300 transition"
+                        className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[10px] font-medium text-rose-700 hover:bg-rose-100 hover:border-rose-300 transition"
                       >
                         <Ban className="h-3 w-3" />
                         В черный список
@@ -1093,6 +1403,38 @@ function DialogsTab({ campaignId }: {
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     </div>
+                    {/* Упавшая передача: причина целиком, у этого же человека.
+                        Кнопки при этом остаются — до адресата ничего не дошло,
+                        и повтор после починки это единственный путь. Гонять
+                        оператора за причиной в общий журнал, где она тонет
+                        среди сотен строк круга, — плохой обмен. */}
+                    {d.forward?.status === 'failed' && (
+                      <p className="mt-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[10px] text-rose-700">
+                        Не отправлено ({d.forward.kind === 'lead' ? 'лид' : 'партнёр'}):{' '}
+                        {d.forward.error_message || 'причина не записана'}
+                      </p>
+                    )}
+                    {/* Снятая передача — не авария, поэтому серым, а не красным:
+                        оператор сам так решил. Но след нужен: без него исчезнувшая
+                        плашка «в очереди» читается как сбой, и человека передают
+                        второй раз, гадая, куда делся первый. */}
+                    {d.forward?.status === 'cancelled' && (
+                      <p className="mt-1.5 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-[10px] text-gray-600">
+                        Передача отменена ({d.forward.kind === 'lead' ? 'лид' : 'партнёр'}) — менеджеру ничего не ушло
+                        {d.forward.error_message ? `. ${d.forward.error_message}` : ''}
+                      </p>
+                    )}
+                    {/* Сорвавшаяся автопересылка: лид, который не доехал до
+                        менеджера. Диалог при этом всё равно стал «Лидом» — без
+                        этой строки провал не отличить от успеха, а причина
+                        лежала бы только в журнале кампании. Передать руками
+                        кнопкой рядом — единственный способ довести до конца. */}
+                    {autoMark?.state === 'failed' && (
+                      <p className="mt-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[10px] text-rose-700">
+                        Автопересылка менеджеру не удалась{autoMark.chat ? ` (${autoMark.chat})` : ''}:{' '}
+                        {autoMark.reason}
+                      </p>
+                    )}
                     {/* Аудит can_send: кто/когда/почему последний раз менял.
                         Показываем, только если запись о смене есть. До первого
                         переключения поля NULL — диалог унаследовал дефолт при
@@ -1536,6 +1878,12 @@ function CampaignAccountsTab({
   const [resetError, setResetError] = useState<{ id: string; message: string } | null>(null);
   /** Ответ Telegram по каждому проверенному аккаунту; висит, пока не закроют. */
   const [checkResults, setCheckResults] = useState<CheckRow[] | null>(null);
+  /**
+   * Когда список последний раз пришёл с сервера. Точка отсчёта для «данным
+   * больше суток»: `Date.now()` во время рендера — нечистый вызов, да и возраст
+   * честнее мерить от момента загрузки данных, а не от момента перерисовки.
+   */
+  const [loadedAt, setLoadedAt] = useState<number | null>(null);
 
   // Профиль читается через то же соединение, что и работа кампании, поэтому
   // на запущенной кампании в Telegram не ходим — см. гейт в API.
@@ -1598,6 +1946,7 @@ function CampaignAccountsTab({
       };
       setErrorCounts(d.counts ?? {});
     }
+    setLoadedAt(Date.now());
     setLoading(false);
   }, [campaignId]);
 
@@ -1937,6 +2286,21 @@ function CampaignAccountsTab({
     }
   };
 
+  /** Сводка по партии; сам счёт — в `lib/tgOutreach/accountsSummary` под тестами. */
+  const accountStats = useMemo(
+    () => summarizeAccounts(accounts, errorCounts, loadedAt),
+    [accounts, errorCounts, loadedAt],
+  );
+
+  /** Разбивка мёртвых по причине — человеческими ярлыками, для подсказки. */
+  const deadBreakdown = useMemo(
+    () => Object.entries(accountStats.byStatus)
+      .sort((a, b) => b[1] - a[1])
+      .map(([st, n]) => `${CHECK_LABEL[st]?.text ?? st} — ${n}`)
+      .join(', '),
+    [accountStats.byStatus],
+  );
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -1978,6 +2342,76 @@ function CampaignAccountsTab({
           </button>
         </div>
       </div>
+
+      {/* Сводка идёт до таблицы: вопрос «сколько из партии рабочих» встаёт
+          раньше, чем вопрос про конкретную строку. Возраст проверки стоит
+          рядом с числами намеренно — зелёное «жив 20» на позавчерашней
+          проверке читается как «сейчас всё хорошо», а это не так. */}
+      {!loading && accounts.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-[11px]">
+          <span
+            className="rounded-md bg-emerald-50 px-2 py-1 font-medium text-emerald-700"
+            title="Последняя проверка вернула «жив». Это снимок на момент проверки, а не состояние прямо сейчас: проверка ходит в Telegram по кнопке и только на остановленной кампании."
+          >
+            жив {accountStats.alive}
+          </span>
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.dead > 0 ? 'bg-rose-50 text-rose-700' : 'bg-gray-100 text-gray-500'}`}
+            title={deadBreakdown
+              ? `По причинам: ${deadBreakdown}`
+              : 'Аккаунтов с неудачной проверкой нет'}
+          >
+            не жив {accountStats.dead}
+          </span>
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.unchecked > 0 ? 'bg-gray-100 text-gray-600' : 'bg-gray-50 text-gray-400'}`}
+            title="Проверка ни разу не запускалась. Эти аккаунты не входят ни в «жив», ни в «не жив» — про них просто ничего не известно."
+          >
+            не проверялись {accountStats.unchecked}
+          </span>
+          {accountStats.disabled > 0 && (
+            <span
+              className="rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-700"
+              title="Выключены в портале — воркер их не берёт в работу вообще. Аккаунт выключается сам после трёх AUTH_KEY_DUPLICATED подряд; чинится завершением чужих сеансов и перевыпуском session_data."
+            >
+              выключены {accountStats.disabled}
+            </span>
+          )}
+
+          <span className="mx-1 h-4 w-px bg-gray-200" aria-hidden />
+
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.withErrors > 0 ? 'bg-rose-50 text-rose-700' : 'bg-gray-50 text-gray-400'}`}
+            title={`Аккаунты, у которых за сутки в логах были строки уровня «ошибка». Всего таких строк: ${accountStats.errorTotal}.`}
+          >
+            с ошибками за 24ч {accountStats.withErrors}
+          </span>
+          {accountStats.withWarningsOnly > 0 && (
+            <span
+              className="rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-700"
+              title="За сутки были только предупреждения, ошибок не было. Обычно это подключение со второй попытки или отложенный контакт."
+            >
+              только предупреждения {accountStats.withWarningsOnly}
+            </span>
+          )}
+
+          <span className="ml-auto text-[10px] text-gray-400">
+            {accountStats.newestCheck === null ? (
+              'проверок ещё не было — «жив» и «не жив» показывать не из чего'
+            ) : (
+              <>
+                проверка от{' '}
+                {new Date(accountStats.newestCheck).toLocaleString('ru-RU', {
+                  day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+                })}
+                {accountStats.ageHours !== null && accountStats.ageHours >= 24 && (
+                  <span className="text-amber-600"> — данным больше суток</span>
+                )}
+              </>
+            )}
+          </span>
+        </div>
+      )}
 
       {uploadError && (
         <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{uploadError}</div>
@@ -2827,18 +3261,31 @@ interface OutreachBase {
   id: string;
   name: string;
   notes: string;
+  /** Кампания-владелец. null — база осталась без владельца от старой модели. */
+  campaign_id: string | null;
   counts: { total: number; pending: number; sent: number; replied: number; failed: number; skipped: number };
 }
 
 /**
  * Базы контактов для первого касания.
  *
- * База живёт сама по себе, а не внутри кампании: одну и ту же можно запустить
- * на разных кампаниях и сравнить результат. Здесь — список всех баз с
- * галочками «использовать в этой кампании».
+ * База принадлежит кампании. Раньше она жила сама по себе — «одну и ту же можно
+ * запустить на разных кампаниях и сравнить результат», — и вкладка показывала
+ * все базы портала: оператор открывал свою кампанию и видел чужую базу на 2206
+ * контактов, в одной галочке от запуска, да ещё и с её собственными счётчиками.
+ * Сравнивать гипотезы это не помогало, а путало.
+ *
+ * Галочка теперь означает не «чья база», а «участвует в рассылке» — выключатель,
+ * которым базу ставят на паузу, не удаляя.
  */
 function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   const [bases, setBases] = useState<OutreachBase[]>([]);
+  /**
+   * Базы без кампании — наследство старой модели: кнопка «Создать базу» не
+   * спрашивала кампанию. Показываем отдельно, чтобы они не пропали молча, а
+   * оператор перенёс их руками.
+   */
+  const [orphans, setOrphans] = useState<OutreachBase[]>([]);
   const [linked, setLinked] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState('');
@@ -2849,10 +3296,14 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   const load = useCallback(async () => {
     setLoading(true);
     const [basesRes, linkRes] = await Promise.all([
-      authFetch(`${API_BASE}/bases`),
+      authFetch(`${API_BASE}/bases?campaign_id=${campaignId}`),
       authFetch(`${API_BASE}/campaigns/${campaignId}/bases`),
     ]);
-    if (basesRes.ok) setBases(((await basesRes.json()) as { items: OutreachBase[] }).items);
+    if (basesRes.ok) {
+      const d = (await basesRes.json()) as { items: OutreachBase[]; orphans?: OutreachBase[] };
+      setBases(d.items);
+      setOrphans(d.orphans ?? []);
+    }
     if (linkRes.ok) {
       const d = (await linkRes.json()) as { items: Array<{ base_id: string }> };
       setLinked(new Set(d.items.map((i) => i.base_id)));
@@ -2868,7 +3319,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
     try {
       const res = await authFetch(`${API_BASE}/bases`, {
         method: 'POST',
-        body: JSON.stringify({ name: newName.trim() }),
+        body: JSON.stringify({ name: newName.trim(), campaign_id: campaignId }),
       });
       if (!res.ok) {
         const d = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -2896,6 +3347,30 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       // а на сервере ничего не изменилось.
       void load();
     }
+  };
+
+  /** Забрать базу без владельца в эту кампанию. */
+  const adoptBase = async (base: OutreachBase) => {
+    if (!confirm(
+      `Перенести базу «${base.name}» (${base.counts.total} контактов) в эту кампанию?`
+      + ' После переноса она будет видна только здесь. Рассылка не начнётся сама —'
+      + ' для этого нужно отметить базу галочкой.',
+    )) return;
+
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases/${base.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ campaign_id: campaignId }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(d?.error ?? `Не удалось перенести базу (${res.status})`);
+        return;
+      }
+      setNotice(`База «${base.name}» перенесена в кампанию.`);
+      void load();
+    } finally { setBusy(false); }
   };
 
   const deleteBase = async (base: OutreachBase) => {
@@ -3029,8 +3504,8 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
                 type="checkbox"
                 checked={linked.has(b.id)}
                 onChange={() => { void toggleLink(b.id); }}
-                title="Использовать эту базу в кампании"
-                aria-label={`Использовать базу ${b.name}`}
+                title="Участвует в рассылке. Снятая галочка ставит базу на паузу, контакты и счётчики сохраняются"
+                aria-label={`Участвует в рассылке: база ${b.name}`}
                 className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
               />
               <span className="text-xs font-medium text-gray-800 truncate">{b.name}</span>
@@ -3060,6 +3535,43 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Наследство старой модели: кнопка «Создать базу» кампанию не спрашивала,
+          и такие базы висели во вкладке каждой кампании портала. Прятать их
+          молча нельзя — это чьи-то загруженные контакты; показываем отдельно и
+          просим перенести. Когда таких не останется, блок исчезнет сам. */}
+      {!loading && orphans.length > 0 && (
+        <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50/50 p-3">
+          <div className="text-xs font-medium text-amber-900">
+            Базы без кампании ({orphans.length})
+          </div>
+          <p className="text-[10px] text-amber-800">
+            Заведены до того, как базы стали принадлежать кампании, и не подключены ни к одной.
+            Они не участвуют ни в одной рассылке. Перенесите нужные сюда, остальные удалите —
+            после этого блок пропадёт.
+          </p>
+          <div className="divide-y divide-amber-100 rounded-lg border border-amber-200 bg-white overflow-hidden">
+            {orphans.map((b) => (
+              <div key={b.id} className="grid grid-cols-[1fr_80px_80px_190px] gap-3 items-center px-3 py-2">
+                <span className="text-xs font-medium text-gray-800 truncate">{b.name}</span>
+                <span className="text-xs text-gray-500">{b.counts.total} всего</span>
+                <span className="text-xs text-gray-500">{b.counts.sent} отправлено</span>
+                <div className="flex items-center justify-end gap-1">
+                  <button type="button" onClick={() => { void adoptBase(b); }} disabled={busy}
+                    className="rounded-lg border border-amber-300 px-2 py-1 text-[11px] text-amber-900 hover:bg-amber-100 transition cursor-pointer disabled:opacity-50">
+                    Перенести в эту кампанию
+                  </button>
+                  <button type="button" onClick={() => { void deleteBase(b); }} disabled={busy}
+                    title="Удалить базу вместе с контактами"
+                    className="p-1 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer disabled:opacity-50">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -3516,17 +4028,285 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   );
 }
 
+/* =================== CAMPAIGN REPORT TAB =================== */
+
+interface ReportResponse {
+  report: {
+    weeks: Array<{
+      period: string; chats: number; contacts: number; delivered: number;
+      anyReplies: number; targetReplies: number; blocks: number; conversion: number | null;
+    }>;
+    total: ReportResponse['report']['weeks'][number];
+    leads: Array<{
+      sourceChat: string; criterion: string; nickname: string; offerSentAt: string;
+      offerNumber: string; quality: string; handedOverAt: string;
+    }>;
+    offers: Array<{
+      offerNumber: string; offer: string; channel: string; language: string;
+      status: string; deadline: string; comment: string; conclusions: string;
+    }>;
+  };
+}
+
+/** `YYYY-MM-DD` для <input type="date"> в московском времени. */
+function toDateInput(ms: number): string {
+  const d = new Date(ms + 3 * 3_600_000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Отчёт к договору: три раздела формы, выгрузка в XLSX.
+ *
+ * По умолчанию — текущий месяц с первого числа по сегодня включительно. Отчёт
+ * чаще всего смотрят «что накопилось в этом месяце», и открывать его на уже
+ * закрытой прошлой неделе значило бы прятать свежие дни. Даты можно менять —
+ * форма допускает и длинный период с накоплением недельных строк.
+ *
+ * Колонки, которых в данных нет (номер оффера, критерий отбора, качество лида,
+ * дата передачи клиенту), отдаются пустыми и заполняются руками уже в файле.
+ * Показывать вместо них догадку было бы хуже пустоты: цифры уходят клиенту.
+ */
+function CampaignReportTab({ campaignId }: { campaignId: string }) {
+  const [{ from, to }, setPeriod] = useState(() => {
+    // Первое число текущего месяца собираем из частей московской даты, а не
+    // арифметикой по миллисекундам: длина месяца разная, и вычитать «столько-то
+    // суток» пришлось бы с оглядкой на февраль.
+    const now = Date.now();
+    const msk = new Date(now + 3 * 3_600_000);
+    const month = String(msk.getUTCMonth() + 1).padStart(2, '0');
+    return {
+      from: `${msk.getUTCFullYear()}-${month}-01`,
+      // Сегодня — и поле, и API трактуют верхнюю границу включительно
+      // (`range()` ниже сам добавляет сутки).
+      to: toDateInput(now),
+    };
+  });
+  const [data, setData] = useState<ReportResponse['report'] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  /** Границы запроса: `to` в поле включительный, в API — исключающий. */
+  const range = useCallback(() => {
+    const fromIso = `${from}T00:00:00+03:00`;
+    const toIso = new Date(new Date(`${to}T00:00:00+03:00`).getTime() + 86_400_000).toISOString();
+    return `from=${encodeURIComponent(fromIso)}&to=${encodeURIComponent(toIso)}`;
+  }, [from, to]);
+
+  const load = useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/report?${range()}`);
+      const body = (await res.json().catch(() => null)) as (ReportResponse & { error?: string }) | null;
+      if (!res.ok) {
+        setError(body?.error ?? `Не удалось собрать отчёт (${res.status})`);
+        return;
+      }
+      setData(body?.report ?? null);
+    } finally { setLoading(false); }
+  }, [campaignId, range]);
+
+  const download = async () => {
+    setDownloading(true); setError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/report?${range()}&format=xlsx`);
+      if (!res.ok) {
+        setError(`Не удалось выгрузить файл (${res.status})`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `otchet-${from}_${to}.xlsx`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } finally { setDownloading(false); }
+  };
+
+  const cell = 'px-2 py-1.5 text-xs text-gray-700 border border-gray-200';
+  const head = 'px-2 py-1.5 text-[11px] font-medium text-gray-500 border border-gray-200 bg-gray-50 text-left';
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="space-y-1">
+          <span className="block text-[11px] font-medium text-gray-500">Период с</span>
+          <input type="date" value={from} onChange={(e) => setPeriod((p) => ({ ...p, from: e.target.value }))}
+            className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400" />
+        </label>
+        <label className="space-y-1">
+          <span className="block text-[11px] font-medium text-gray-500">по (включительно)</span>
+          <input type="date" value={to} onChange={(e) => setPeriod((p) => ({ ...p, to: e.target.value }))}
+            className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400" />
+        </label>
+        <button type="button" onClick={() => { void load(); }} disabled={loading}
+          className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 cursor-pointer">
+          {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileSpreadsheet className="h-3.5 w-3.5" />}
+          Собрать отчёт
+        </button>
+        <button type="button" onClick={() => { void download(); }} disabled={downloading || !data}
+          title={data ? 'Скачать в форме договора' : 'Сначала соберите отчёт'}
+          className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-50 cursor-pointer">
+          {downloading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+          Скачать XLSX
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div>
+      )}
+
+      {!data && !loading && (
+        <p className="text-xs text-gray-400">
+          По умолчанию стоит текущий месяц: с первого числа по сегодня включительно. Нажмите «Собрать отчёт».
+        </p>
+      )}
+
+      {data && (
+        <div className="space-y-6">
+          <div className="space-y-2">
+            <h3 className="text-sm font-medium text-gray-800">1. Рассылка и реакция</h3>
+            <div className="overflow-x-auto">
+              <table className="min-w-full border-collapse">
+                <thead>
+                  <tr>
+                    <th className={head}>Период</th>
+                    <th className={head}>Обработано чатов</th>
+                    <th className={head}>Подобрано контактов</th>
+                    <th className={head}>Доставлено</th>
+                    <th className={head}>Любых ответов</th>
+                    <th className={head}>Целевых ответов</th>
+                    <th className={head}>Блокировок</th>
+                    <th className={head}>Конверсия, %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...data.weeks, data.total].map((w, i) => (
+                    <tr key={w.period + i} className={w.period === 'Итого' ? 'font-medium bg-gray-50' : ''}>
+                      <td className={cell}>{w.period}</td>
+                      <td className={cell}>{w.chats}</td>
+                      <td className={cell}>{w.contacts}</td>
+                      <td className={cell}>{w.delivered}</td>
+                      <td className={cell}>{w.anyReplies}</td>
+                      <td className={cell}>{w.targetReplies}</td>
+                      <td className={cell}>{w.blocks}</td>
+                      <td className={cell}>{w.conversion === null ? '—' : w.conversion}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {/* Оговорки, без которых цифрам нельзя доверять вслепую. Уходят
+                клиенту — лучше знать заранее, что именно они означают. */}
+            <p className="text-[10px] text-gray-400">
+              Блокировки — только выявленные: мы узнаём о них, когда пытаемся написать
+              повторно, поэтому заблокировавшие сразу после первого касания сюда не попадают.
+              Обработанные чаты считаются по всем задачам парсера за период — парсер к кампании
+              не привязан. Целевые ответы отнесены к неделе последнего сообщения диалога:
+              момент срабатывания триггера в базе не хранится.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <h3 className="text-sm font-medium text-gray-800">
+              2. Лиды <span className="font-normal text-gray-400">({data.leads.length})</span>
+            </h3>
+            {data.leads.length === 0 ? (
+              <p className="text-xs text-gray-400">За период целевых ответов не было.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full border-collapse">
+                  <thead>
+                    <tr>
+                      <th className={head}>Чат/группа</th>
+                      <th className={head}>Критерий отбора</th>
+                      <th className={head}>Никнейм</th>
+                      <th className={head}>Дата оффера</th>
+                      <th className={head}>№ оффера</th>
+                      <th className={head}>Качество лида</th>
+                      <th className={head}>Передан клиенту</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.leads.map((l, i) => (
+                      <tr key={l.nickname + i}>
+                        <td className={cell}>{l.sourceChat || <span className="text-gray-300">—</span>}</td>
+                        <td className={cell} />
+                        <td className={cell}>{l.nickname}</td>
+                        <td className={cell}>{l.offerSentAt}</td>
+                        <td className={cell} />
+                        <td className={cell} />
+                        <td className={cell} />
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p className="text-[10px] text-gray-400">
+              Пустые колонки портал не заполняет — их дописывают руками в выгруженном файле.
+              Чат-источник берётся из колонки «Ссылка на источник» загруженного файла базы;
+              если её при загрузке не было, останется пусто.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <h3 className="text-sm font-medium text-gray-800">3. План работ и офферы</h3>
+            <div className="overflow-x-auto">
+              <table className="min-w-full border-collapse">
+                <thead>
+                  <tr>
+                    <th className={head}>№</th>
+                    <th className={head}>Оффер</th>
+                    <th className={head}>Канал/чат</th>
+                    <th className={head}>Язык</th>
+                    <th className={head}>Статус</th>
+                    <th className={head}>Дедлайн</th>
+                    <th className={head}>Комментарий</th>
+                    <th className={head}>Выводы с цифрами</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.offers.map((o, i) => (
+                    <tr key={o.offer + i}>
+                      <td className={cell} />
+                      <td className={cell}>{o.offer}</td>
+                      <td className={cell} />
+                      <td className={cell} />
+                      <td className={cell} />
+                      <td className={cell} />
+                      <td className={cell} />
+                      <td className={cell}>{o.conclusions}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[10px] text-gray-400">
+              Строка на каждую базу кампании. Цифры считает портал, остальное — из плана работ.
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* =================== CAMPAIGN VIEW (5 tabs) =================== */
 const TABS = [
+  // Сводка первой и стартовой: открывая кампанию, оператор спрашивает «как
+  // дела», а не «какие тут настройки» — их заводят один раз и больше не трогают.
+  { id: 'dashboard', label: 'Сводка', icon: LayoutDashboard },
   { id: 'settings', label: 'Настройки', icon: Settings },
   { id: 'accounts', label: 'Аккаунты', icon: Users },
   { id: 'bases', label: 'Базы', icon: Database },
   { id: 'warmup', label: 'Прогрев', icon: Flame },
-  { id: 'warmup-chats', label: 'Чаты', icon: MessageSquareMore },
   { id: 'proxies', label: 'Прокси', icon: Network },
   { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
   { id: 'processed', label: 'Обработанные', icon: UserCheck },
+  { id: 'report', label: 'Отчёт', icon: FileSpreadsheet },
 ] as const;
 
 function CampaignView({ campaign, onUpdate, onDelete }: {
@@ -3534,7 +4314,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   onUpdate: () => void;
   onDelete: (id: string) => void;
 }) {
-  const [tab, setTab] = useState<string>('settings');
+  const [tab, setTab] = useState<string>('dashboard');
   const [actionLoading, setActionLoading] = useState(false);
   const [stopping, setStopping] = useState(false);
   const stoppingRef = useRef(false);
@@ -3727,6 +4507,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
       </div>
 
       <div>
+        {tab === 'dashboard' && <DashboardTab campaignId={campaign.id} />}
         {tab === 'settings' && <SettingsTab campaign={campaign} onSave={saveSettings} />}
         {tab === 'accounts' && (
           <CampaignAccountsTab campaignId={campaign.id} campaignStatus={campaign.status} />
@@ -3736,12 +4517,10 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
         {tab === 'warmup' && (
           <WarmupTab campaignId={campaign.id} campaignStatus={campaign.status} />
         )}
-        {tab === 'warmup-chats' && (
-          <WarmupChatsTab campaignId={campaign.id} campaignStatus={campaign.status} />
-        )}
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
         {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} />}
         {tab === 'processed' && <ProcessedTab campaignId={campaign.id} />}
+        {tab === 'report' && <CampaignReportTab campaignId={campaign.id} />}
       </div>
     </div>
   );
@@ -3839,7 +4618,13 @@ function CampaignsSection() {
   };
 
   const deleteCampaign = async (id: string) => {
-    if (!confirm('Удалить кампанию? Это действие необратимо.')) return;
+    // С 12.08.2026 базы принадлежат кампании и уходят вместе с ней по cascade.
+    // Раньше они переживали удаление, поэтому прежний текст «это действие
+    // необратимо» больше не описывает масштаб потери.
+    if (!confirm(
+      'Удалить кампанию? Вместе с ней будут удалены её базы контактов и вся история отправок по ним.'
+      + ' Это действие необратимо.',
+    )) return;
     await authFetch(`${API_BASE}/campaigns/${id}`, { method: 'DELETE' });
     if (selectedId === id) setSelectedId(null);
     void fetchCampaigns();

@@ -2,9 +2,9 @@ import 'server-only';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireFirstSalesAccess } from '@/lib/firstSales/access';
 import { parseFirstSalesParams } from '@/lib/firstSales/params';
-import { fetchFirstSalesLeads, fetchSourceMap } from '@/lib/firstSales/metrics';
+import { fetchFirstSalesLeads, NO_MANAGER } from '@/lib/firstSales/metrics';
 import { fetchMeetingLinks } from '@/lib/firstSales/meetings';
-import { buildSourceIndex, resolveChannel } from '@/lib/firstSales/sourceChannels';
+import { resolveSource } from '@/lib/firstSales/sources';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
 // либо пустой ответ, либо чужой. Тот же паттерн, что у summary/route.ts.
@@ -23,45 +23,58 @@ export async function GET(req: NextRequest) {
   // `parsed.value === null`, а не `parsed.error` — то же сужение, что в
   // summary/route.ts (truthy-сужение объединения тут не работает на tsc 5.9.3).
   if (parsed.value === null) return NextResponse.json({ error: parsed.error }, { status: 400 });
-  const { from, to, channels } = parsed.value;
+  const { from, to } = parsed.value;
 
-  // Сделки без заполненного «Источник» приходят сюда под меткой «(не указан)» —
-  // именно её кладёт в разбивку metrics.ts, и именно её присылает таблица.
-  // Пустую строку слать бессмысленно: сравнение ниже подставляет «(не указан)»
-  // слева, так что `''` не совпадёт ни с чем и вернёт пустой список.
-  // Проверяем на `null`, а не на пустоту: отсутствие параметра — это ошибка
-  // вызова, а не «источник без имени».
+  // Срез, в который проваливается пользователь: либо источник, либо менеджер.
+  //
+  // `source` — это КЛЮЧ источника, а не название: `enum_id` строкой либо `none`
+  // для сделок без заполненного «Источник». `manager` — наоборот, отображаемое
+  // имя ответственного, ровно как его показывает разбивка, включая литерал
+  // `NO_MANAGER` для сделок без ответственного: своих идентификаторов у этого
+  // среза нет, группировка в metrics.ts идёт по тому же имени.
+  //
+  // Проверяем на `null`, а не на пустоту: отсутствие параметра — ошибка вызова,
+  // а пустая строка — законное (пусть и ничего не находящее) значение.
   const source = url.searchParams.get('source');
-  if (source === null) {
-    return NextResponse.json({ error: 'Нужен параметр source' }, { status: 400 });
+  const manager = url.searchParams.get('manager');
+  if ((source === null) === (manager === null)) {
+    return NextResponse.json(
+      { error: 'Нужен ровно один параметр: source или manager' },
+      { status: 400 },
+    );
   }
+
+  const matchesSlice =
+    source !== null
+      ? (lead: { raw: unknown }) => resolveSource(lead.raw).key === source
+      : (lead: { responsible_name: string | null }) =>
+          (lead.responsible_name ?? NO_MANAGER) === manager;
 
   try {
     // Та же ширина выборки, что в summary/route.ts: сделка с привязанной
     // встречей в окне может лежать вне окна по created_at/этапам (пришла
-    // раньше). Без этого расширения drill-down источника показал бы меньше
-    // сделок, чем summary насчитал встреч для того же источника.
+    // раньше). Без этого расширения drill-down показал бы меньше сделок, чем
+    // summary насчитал встреч для того же среза.
     const meetingLinks = await fetchMeetingLinks(gate.supabaseAdmin, PIPELINE_ID, from, to);
     const meetingDealIds = [...new Set(meetingLinks.map((m) => m.amo_deal_id))];
 
-    const [leads, sourceMap] = await Promise.all([
-      fetchFirstSalesLeads(gate.supabaseAdmin, PIPELINE_ID, from, to, meetingDealIds),
-      fetchSourceMap(gate.supabaseAdmin),
-    ]);
-    const index = buildSourceIndex(sourceMap);
-    const allowed = channels && channels.length > 0 ? new Set(channels) : null;
+    const leads = await fetchFirstSalesLeads(
+      gate.supabaseAdmin, PIPELINE_ID, from, to, meetingDealIds,
+    );
 
+    // Фильтр по источникам здесь НЕ применяется: строка, в которую пользователь
+    // проваливается, уже прошла его в сводке — второй раз отсеивать нечего.
     const rows = leads
-      .filter((lead) => {
-        const resolved = resolveChannel(lead.raw, index);
-        if (allowed && !allowed.has(resolved.channel)) return false;
-        return (resolved.source || '(не указан)') === source;
-      })
+      .filter(matchesSlice)
       .sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''))
       .slice(0, MAX_ROWS)
       .map((lead) => ({
         amo_id: lead.amo_id,
         name: lead.name,
+        // Ответственный отдаётся как есть, включая null: пустая клетка в
+        // списке — это «в AMO за сделкой никто не закреплён», и подменять её
+        // прочерком-«неизвестно» нельзя, состояние разное.
+        responsible_name: lead.responsible_name,
         created_at: lead.created_at,
         first_meeting_at: lead.first_meeting_at,
         first_contract_at: lead.first_contract_at,

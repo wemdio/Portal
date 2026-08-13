@@ -16,6 +16,12 @@
  * explicitly GRANTs the table to `service_role`, so the fix can't be
  * silently regressed by future schema/role changes.
  *
+ * Единственное исключение — таблицы, у которых права `service_role` отобраны
+ * явным поимённым `revoke all on public.X from service_role`. Это не забытый
+ * GRANT, а противоположное намерение: к таблице не ходят напрямую, запись и
+ * чтение идут через функции с `SECURITY DEFINER`. Требовать GRANT в таком
+ * случае значило бы требовать снять замок. См. `findServiceRoleRevokes`.
+ *
  * Used by app/tests/migrations/grants.test.ts.
  */
 
@@ -137,6 +143,32 @@ export function findGrantsToServiceRole(sql: string): Set<string> {
   return out;
 }
 
+/**
+ * Найти таблицы, у которых права `service_role` отобраны ЯВНО и поимённо:
+ * `revoke all on [table] public.X from service_role`.
+ *
+ * Это заявление автора миграции: «к таблице не ходят напрямую». Такие таблицы
+ * пишутся и читаются только через функции с `SECURITY DEFINER`, а сама таблица
+ * заперта на все роли. Требовать для неё GRANT значило бы требовать снять
+ * замок, ради которого её и заперли.
+ *
+ * Оптовый `revoke ... on all tables in schema public` СОЗНАТЕЛЬНО не
+ * распознаётся: одна такая строка выключила бы проверку для всего дерева
+ * миграций. Замок засчитывается, только если названа конкретная таблица.
+ */
+export function findServiceRoleRevokes(sql: string): Set<string> {
+  const cleaned = stripSqlComments(sql);
+  const out = new Set<string>();
+
+  const rx =
+    /revoke\s+[\s\S]+?on\s+(?:table\s+)?public\.([A-Za-z_][A-Za-z0-9_]*)\s+from\s+([^;]+);/gi;
+  for (const m of cleaned.matchAll(rx)) {
+    if (mentionsServiceRole(m[2])) out.add(m[1]);
+  }
+
+  return out;
+}
+
 function mentionsServiceRole(roleList: string): boolean {
   const normalised = roleList
     .toLowerCase()
@@ -168,9 +200,15 @@ export function findMissingServiceRoleGrants(
 
   // Aggregate every GRANT across the whole corpus.
   const globalGranted = new Set<string>();
+  // Тем же охватом собираем явные REVOKE: замок может стоять не в той же
+  // миграции, что создала таблицу, — ровно как и GRANT.
+  const globalRevoked = new Set<string>();
   for (const f of files) {
     for (const t of findGrantsToServiceRole(f.sql)) {
       globalGranted.add(t);
+    }
+    for (const t of findServiceRoleRevokes(f.sql)) {
+      globalRevoked.add(t);
     }
   }
   const hasWildcard = globalGranted.has('*');
@@ -181,6 +219,10 @@ export function findMissingServiceRoleGrants(
     for (const table of extractCreatedTables(f.sql)) {
       if (hasWildcard) continue;
       if (globalGranted.has(table)) continue;
+      // Явно заперта — см. findServiceRoleRevokes. Проверка идёт после GRANT:
+      // если права и выданы, и отобраны, таблица уже отсеяна строкой выше, и
+      // спорить с порядком выполнения этот линт всё равно не умеет.
+      if (globalRevoked.has(table)) continue;
       const key = `${f.name}::${table}`;
       if (allowlist.has(key)) continue;
       const reason = exemptions.get(table);

@@ -92,6 +92,15 @@ export interface OpenAISettings {
   trigger_phrases_negative: string;
   target_chats_positive: string;
   target_chats_negative: string;
+  /**
+   * Куда уходит кандидат в партнёры по кнопке «Передать партнёра».
+   *
+   * Отдельно от `target_chats_positive`: заинтересованного клиента и человека,
+   * который хочет стать партнёром программы, разбирают разные люди. Пусто —
+   * используем чат положительного триггера, чтобы кнопка работала сразу, а не
+   * молча упиралась в незаполненную настройку.
+   */
+  target_chats_partner?: string;
   use_fallback_on_fail: boolean;
   fallback_text: string;
 }
@@ -273,6 +282,37 @@ export interface OutreachDialog {
   status: DialogStatus;
   last_message_at: string | null;
   created_at: string;
+  /**
+   * Автоматическая передача менеджеру по положительному триггеру: ушло или нет,
+   * куда и почему не ушло. В отличие от `forward` — не задача в очереди, а факт
+   * о том, что воркер уже сделал сам. Статус «Лид» на этот вопрос не отвечает:
+   * его точно так же ставит оператор руками.
+   *
+   * Разбирает эти поля `lib/tgOutreach/autoForward.ts`.
+   */
+  auto_forwarded_at?: string | null;
+  auto_forward_chat?: string | null;
+  auto_forward_error?: string | null;
+  /**
+   * Последняя передача этого диалога — приклеивается роутом списка, в самой
+   * таблице диалогов такого поля нет.
+   *
+   * Живая (pending/sent) гасит кнопки: передача на диалог одна, и узнавать об
+   * этом из ошибки после подтверждения — плохой способ. Упавшая кнопок не
+   * гасит, но показывает причину прямо в строке человека: повторить можно
+   * только зная, что именно сломалось. Снятая оператором (`cancelled`) ведёт
+   * себя как упавшая: до менеджера не дошла, кнопки возвращает.
+   */
+  forward?: {
+    kind: 'lead' | 'partner';
+    status: 'pending' | 'sent' | 'failed' | 'cancelled';
+    sent_at: string | null;
+    /**
+     * Почему отправки не было: у сорвавшейся — причина сбоя целиком, по ней
+     * оператор чинит и повторяет; у снятой — кто её снял.
+     */
+    error_message: string | null;
+  } | null;
 }
 
 export interface OutreachProcessed {
@@ -319,6 +359,7 @@ export const DEFAULT_OPENAI_SETTINGS: OpenAISettings = {
   trigger_phrases_negative: '',
   target_chats_positive: '',
   target_chats_negative: '',
+  target_chats_partner: '',
   use_fallback_on_fail: false,
   fallback_text: '',
 };

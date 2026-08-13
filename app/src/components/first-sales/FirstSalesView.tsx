@@ -9,8 +9,9 @@ import FiltersBar, { getDefaultFilters, type FiltersState } from '@/components/f
 import KpiRow from '@/components/first-sales/KpiRow';
 import TimeSeriesChart from '@/components/first-sales/TimeSeriesChart';
 import FunnelChart from '@/components/first-sales/FunnelChart';
-import SourceTable, { drillKey } from '@/components/first-sales/SourceTable';
-import SourceMapEditor from '@/components/first-sales/SourceMapEditor';
+import SourceTable from '@/components/first-sales/SourceTable';
+import { drillKey } from '@/components/first-sales/DealDrillDown';
+import ManagerTable from '@/components/first-sales/ManagerTable';
 import MeetingLinksEditor from '@/components/first-sales/MeetingLinksEditor';
 
 type SummaryResponse = FirstSalesSeries & {
@@ -30,9 +31,8 @@ export default function FirstSalesView() {
   const [data, setData] = useState<SummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [showSourceMap, setShowSourceMap] = useState(false);
   const [showMeetingLinks, setShowMeetingLinks] = useState(false);
-  // Инкрементируется после сохранения в справочнике источников или в очереди
+  // Инкрементируется после сохранения в очереди
   // записей встреч, чтобы перезапустить фетч сводки без изменения самих
   // фильтров (эффекты ниже держат его в зависимостях ровно для этого).
   const [reloadKey, setReloadKey] = useState(0);
@@ -67,7 +67,7 @@ export default function FirstSalesView() {
       setLoading(true);
       try {
         const qs = new URLSearchParams({ from: filters.from, to: filters.to, groupBy: filters.groupBy });
-        for (const channel of filters.channels) qs.append('channel', channel);
+        for (const source of filters.sources) qs.append('source', source);
 
         const res = await authFetch(`/api/analytics/first-sales/summary?${qs.toString()}`, {
           signal: controller.signal,
@@ -100,8 +100,8 @@ export default function FirstSalesView() {
   // Отдельный лёгкий фетч только под счётчик на кнопке — не завязан на
   // showMeetingLinks: число должно быть видно ДО того, как панель открыта
   // (условие reloadKey — то же самое, чем закрывается цикл после сохранения
-  // строки в MeetingLinksEditor). Канал сюда не передаём: запись ещё не
-  // привязана к сделке, у неё нет канала, по которому можно фильтровать.
+  // строки в MeetingLinksEditor). Источник сюда не передаём: запись ещё не
+  // привязана к сделке, у неё нет источника, по которому можно фильтровать.
   useEffect(() => {
     let active = true;
     const run = async () => {
@@ -140,7 +140,7 @@ export default function FirstSalesView() {
     };
   }, [selectedBucket, filters.groupBy, filters.from, filters.to]);
 
-  const channelKey = filters.channels.join(',');
+  const sourceKey = filters.sources.join(',');
 
   useEffect(() => {
     if (!selection || !selectedBucket) return;
@@ -151,7 +151,7 @@ export default function FirstSalesView() {
       setBucketLoading(true);
       try {
         const qs = new URLSearchParams({ from: selection.from, to: selection.to, groupBy: 'day' });
-        for (const channel of filters.channels) qs.append('channel', channel);
+        for (const source of filters.sources) qs.append('source', source);
 
         const res = await authFetch(`/api/analytics/first-sales/summary?${qs.toString()}`, {
           signal: controller.signal,
@@ -177,8 +177,8 @@ export default function FirstSalesView() {
       active = false;
       controller.abort();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- каналы сравниваем строкой: массив меняет тождество на каждом рендере
-  }, [selection, selectedBucket, channelKey, reloadKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- источники сравниваем строкой: массив меняет тождество на каждом рендере
+  }, [selection, selectedBucket, sourceKey, reloadKey]);
 
   // Данные корзины показываем, только если они от ТЕКУЩЕЙ выбранной корзины.
   // Сравнение по ключу вместо сброса состояния эффектом: пока летит новый
@@ -208,22 +208,43 @@ export default function FirstSalesView() {
           после смены периода прежней корзины в ряду может не быть вовсе. */}
       <FiltersBar
         value={filters}
+        sources={data?.availableSources ?? []}
         onChange={(next) => {
           setFilters(next);
           setSelectedBucket(null);
         }}
       />
 
-      {loading && <div className="py-10 text-center text-sm text-zinc-400">Загрузка…</div>}
-      {error && !loading && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+      {/* Три состояния — три СОСЕДА в одном слоте, с постоянными ключами, а не
+          три независимых условия подряд.
+          Раньше загрузка, ошибка и содержимое стояли отдельными выражениями:
+          при смене периода React видел, что на месте второго ребёнка вместо
+          `false` появился div, а фрагмент с содержимым исчез, — и, сверяя
+          позиции, оставлял под индексом 2 узел старой таблицы источников.
+          На экране это выглядело как копия таблицы, приклеенная над карточками
+          и воронкой, с цифрами прошлого периода (13.08.2026).
+          Ключи `loading`/`error`/`content` делают ветки различимыми: React уже
+          не может принять одну за другую и переиспользовать чужой DOM. */}
+      {loading ? (
+        <div key="loading" className="py-10 text-center text-sm text-zinc-400">Загрузка…</div>
+      ) : error ? (
+        <div
+          key="error"
+          className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+        >
           Ошибка загрузки: {error}
         </div>
-      )}
-
-      {!loading && !error && data && (
-        <>
-          <KpiRow totals={data.totals} previousTotals={data.previousTotals} syncedAt={data.syncedAt} />
+      ) : data ? (
+        <div key="content" className="space-y-4">
+          <KpiRow
+            totals={data.totals}
+            previousTotals={data.previousTotals}
+            syncedAt={data.syncedAt}
+            onNoSourceClick={() => {
+              setFilters((f) => ({ ...f, sources: ['none'] }));
+              setSelectedBucket(null);
+            }}
+          />
 
           {isEmpty ? (
             <div className="rounded-xl border border-zinc-200 bg-white px-3 py-8 text-center text-sm text-zinc-400">
@@ -259,7 +280,7 @@ export default function FirstSalesView() {
                 </div>
               ) : null}
 
-              {/* key на from/to/channels: смена периода или каналов размонтирует и
+              {/* key на from/to/sources: смена периода или источников размонтирует и
                   заново монтирует таблицу, сбрасывая раскрытую drill-down строку
                   вместо того, чтобы показывать под ней сделки уже не того окна.
                   groupBy в ключ не входит — drillKey() это объясняет. */}
@@ -268,18 +289,12 @@ export default function FirstSalesView() {
                 rows={bucketRows ?? data.bySource}
                 filters={tableFilters}
               />
+
+              <ManagerTable key={drillKey(tableFilters)} rows={data.byManager} filters={tableFilters} />
             </>
           )}
 
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setShowSourceMap((v) => !v)}
-              className="rounded-full border border-zinc-200 px-2.5 py-1 text-xs text-zinc-600 hover:bg-zinc-50"
-              aria-expanded={showSourceMap}
-            >
-              {showSourceMap ? 'Скрыть справочник источников' : 'Справочник источников'}
-            </button>
             <button
               type="button"
               onClick={() => setShowMeetingLinks((v) => !v)}
@@ -297,10 +312,6 @@ export default function FirstSalesView() {
             </button>
           </div>
 
-          {showSourceMap && (
-            <SourceMapEditor onSaved={() => setReloadKey((k) => k + 1)} />
-          )}
-
           {showMeetingLinks && (
             <MeetingLinksEditor
               from={filters.from}
@@ -308,8 +319,8 @@ export default function FirstSalesView() {
               onSaved={() => setReloadKey((k) => k + 1)}
             />
           )}
-        </>
-      )}
+        </div>
+      ) : null}
     </div>
   );
 }

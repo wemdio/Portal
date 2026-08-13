@@ -3,40 +3,11 @@
  *
  * Всё здесь — чистые функции. Работа с БД, временем и случайностью остаётся
  * снаружи (`random` инжектится), поэтому поведение полностью проверяемо
- * тестами — а вся арифметика фичи живёт в одном месте.
- */
-import {
-  CONVERSATIONS_FIRST_DAY,
-  CONVERSATIONS_PEAK,
-  MESSAGES_FIRST_DAY,
-  MESSAGES_PEAK,
-  RAMP_DAYS,
-} from './types';
-
-/**
- * Значение кривой на дне `day`.
+ * тестами.
  *
- * Разгон считается от RAMP_DAYS, а не от выбранной длины прогрева: день N даёт
- * одну и ту же нагрузку и в трёхдневном прогреве, и в недельном. Короткий
- * прогрев просто обрывается раньше и суммарно отправляет меньше — он не
- * разгоняется быстрее. Дни за пределами разгона держатся на потолке.
+ * Дневные нормы приходят параметром из `settings.ts`: планировщик не знает, по
+ * кривой их посчитали или взяли из таблицы оператора, и знать не должен.
  */
-function rampValue(day: number, from: number, to: number): number {
-  if (RAMP_DAYS <= 1) return to;
-  const clamped = Math.min(Math.max(day, 1), RAMP_DAYS);
-  const t = (clamped - 1) / (RAMP_DAYS - 1);
-  return Math.round(from + (to - from) * t);
-}
-
-/** Сколько переписок должен провести один аккаунт в день `day`. */
-export function conversationsPerAccount(day: number): number {
-  return rampValue(day, CONVERSATIONS_FIRST_DAY, CONVERSATIONS_PEAK);
-}
-
-/** Сколько сообщений содержит одна переписка в день `day`. */
-export function messagesPerConversation(day: number): number {
-  return rampValue(day, MESSAGES_FIRST_DAY, MESSAGES_PEAK);
-}
 
 export interface PlannedConversation {
   /** Меньший из двух id — пара всегда нормализована. */
@@ -49,14 +20,15 @@ export interface PlannedConversation {
 
 export interface PlanDayParams {
   accountIds: string[];
-  day: number;
+  /** Сколько переписок должен провести один аккаунт за этот день. */
+  conversationsPerAccount: number;
+  /** Сколько сообщений содержит одна переписка в этот день. */
+  messagesPerConversation: number;
   /** Пары, уже общавшиеся в этом прогреве (порядок внутри пары не важен). */
   previousPairs: Array<[string, string]>;
   /** Активное окно суток: ночью аккаунты молчат. */
   window: { start: Date; end: Date };
   random: () => number;
-  /** Только для тестов: подменить дневную норму переписок на аккаунт. */
-  targetOverride?: number;
 }
 
 function pairKey(x: string, y: string): string {
@@ -76,11 +48,13 @@ function pairKey(x: string, y: string): string {
  * когда незнакомые кончились.
  */
 export function planDay(params: PlanDayParams): PlannedConversation[] {
-  const { accountIds, day, previousPairs, window, random } = params;
+  const { accountIds, previousPairs, window, random } = params;
   if (accountIds.length < 2) return [];
 
-  const target = params.targetOverride ?? conversationsPerAccount(day);
-  const plannedMessages = messagesPerConversation(day);
+  const target = Math.max(params.conversationsPerAccount, 0);
+  if (target < 1) return [];
+
+  const plannedMessages = params.messagesPerConversation;
   const seen = new Set(previousPairs.map(([x, y]) => pairKey(x, y)));
   const usedToday = new Set<string>();
   const remaining = new Map(accountIds.map((id) => [id, target]));

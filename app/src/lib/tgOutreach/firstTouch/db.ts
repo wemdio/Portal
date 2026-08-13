@@ -86,24 +86,33 @@ export async function markContactSkipped(
     .eq('id', contactId);
 }
 
+/** После скольких неудач подряд контакт перестаём пробовать. */
+export const MAX_CONTACT_ATTEMPTS = 3;
+
 /**
  * Неудачная попытка: контакт не сгорает, а откладывается до следующего круга —
  * сбой мог быть сетевым. Три подряд — сдаёмся и показываем оператору.
+ *
+ * Возвращает исход, чтобы вызывающий мог сказать в лог, какая это была попытка
+ * и не последняя ли: «отложено 3» без счёта попыток не отличает временный сбой
+ * сети от контакта, который сейчас уйдёт из очереди навсегда.
  */
 export async function recordContactFailure(
   db: SupabaseClient,
   contactId: string,
   attempts: number,
   reason: string,
-): Promise<void> {
+): Promise<{ attempts: number; exhausted: boolean }> {
   const next = attempts + 1;
+  const exhausted = next >= MAX_CONTACT_ATTEMPTS;
   await db
     .from('tg_outreach_base_contacts')
     .update({
       attempts: next,
       skip_reason: reason,
-      ...(next >= 3 ? { status: 'failed' } : {}),
+      ...(exhausted ? { status: 'failed' } : {}),
       updated_at: new Date().toISOString(),
     })
     .eq('id', contactId);
+  return { attempts: next, exhausted };
 }

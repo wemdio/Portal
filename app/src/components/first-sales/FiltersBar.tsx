@@ -1,13 +1,16 @@
 'use client';
 
-import { FIRST_SALES_CHANNELS, CHANNEL_LABELS, type FirstSalesChannel } from '@/lib/firstSales/sourceChannels';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, ChevronDown } from 'lucide-react';
+import type { AvailableSource } from '@/lib/firstSales/metrics';
 import type { GroupBy } from '@/lib/firstSales/buckets';
 
 export type FiltersState = {
   from: string;
   to: string;
   groupBy: GroupBy;
-  channels: FirstSalesChannel[];
+  /** Ключи источников (`enum_id` строкой либо `none`). Пусто — фильтра нет. */
+  sources: string[];
 };
 
 // Дашборд живёт в МСК (та же зона, что buckets.ts/params.ts на сервере), а
@@ -62,7 +65,7 @@ export function getDefaultFilters(): FiltersState {
     from: toDateInputValue(PRESETS[0]!.from(now)),
     to: toDateInputValue(now),
     groupBy: 'day',
-    channels: [],
+    sources: [],
   };
 }
 
@@ -74,26 +77,72 @@ const GROUP_BY_OPTIONS: Array<{ id: GroupBy; label: string }> = [
 
 export default function FiltersBar({
   value,
+  sources,
   onChange,
 }: {
   value: FiltersState;
+  /** Доступные источники за период. Приходят из сводки и считаются ДО фильтра —
+   *  иначе, выбрав один источник, добавить второй было бы нечем. */
+  sources: AvailableSource[];
   onChange: (value: FiltersState) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const boxRef = useRef<HTMLDivElement | null>(null);
+
+  // Закрытие по клику мимо и по Escape. Панель не модальная — фокус не
+  // забираем, чтобы не мешать работе с полями дат рядом.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLocaleLowerCase('ru-RU');
+    if (!q) return sources;
+    return sources.filter((s) => s.label.toLocaleLowerCase('ru-RU').includes(q));
+  }, [sources, query]);
+
+  const toggleSource = (key: string) => {
+    const has = value.sources.includes(key);
+    onChange({
+      ...value,
+      sources: has ? value.sources.filter((s) => s !== key) : [...value.sources, key],
+    });
+  };
+
+  // Подпись кнопки: пусто — «все», один — его название, дальше — счёт. Имя
+  // единственного выбранного полезнее, чем «выбрано 1».
+  const selectedLabel =
+    value.sources.length === 0
+      ? 'все'
+      : value.sources.length === 1
+        ? (sources.find((s) => s.key === value.sources[0])?.label ?? '1')
+        : `выбрано ${value.sources.length}`;
+
   const applyPreset = (preset: Preset) => {
     const now = mskNow();
     onChange({ ...value, from: toDateInputValue(preset.from(now)), to: toDateInputValue(now) });
   };
 
-  const toggleChannel = (channel: FirstSalesChannel) => {
-    const has = value.channels.includes(channel);
-    onChange({
-      ...value,
-      channels: has ? value.channels.filter((c) => c !== channel) : [...value.channels, channel],
-    });
-  };
-
   return (
-    <div className="glass-panel space-y-2 px-3 py-2.5">
+    // relative z-30 — чтобы выпадашка источников рисовалась поверх плиток, а не
+    // под ними. У `.glass-tile`/`.glass-panel` стоит `backdrop-filter`, а он
+    // создаёт собственный контекст наложения: z-index внутри панели действует
+    // только внутри неё, и плитки — соседи ниже по разметке — перекрывали панель
+    // целиком вместе с раскрытым списком. Поднимать надо контекст самой панели.
+    <div className="glass-panel relative z-30 space-y-2 px-3 py-2.5">
       {/* период */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex items-center gap-1">
@@ -141,30 +190,68 @@ export default function FiltersBar({
         </div>
       </div>
 
-      {/* каналы */}
-      <div className="flex flex-wrap items-center gap-1.5">
-        {FIRST_SALES_CHANNELS.map((channel) => {
-          const active = value.channels.includes(channel);
-          return (
-            <button
-              key={channel}
-              type="button"
-              onClick={() => toggleChannel(channel)}
-              aria-pressed={active}
-              className={`rounded-full border px-2.5 py-1 text-xs font-medium transition ${
-                active
-                  ? 'border-zinc-900 bg-zinc-900 text-white'
-                  : 'border-zinc-200 text-zinc-500 hover:bg-zinc-50'
-              }`}
-            >
-              {CHANNEL_LABELS[channel]}
-            </button>
-          );
-        })}
-        {value.channels.length > 0 && (
+      {/* источники */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div ref={boxRef} className="relative">
           <button
             type="button"
-            onClick={() => onChange({ ...value, channels: [] })}
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            aria-haspopup="listbox"
+            className="flex items-center gap-1.5 rounded-full border border-zinc-200 px-2.5 py-1 text-xs text-zinc-600 hover:bg-zinc-50"
+          >
+            Источники: <span className="font-medium text-zinc-900">{selectedLabel}</span>
+            <ChevronDown className="h-3.5 w-3.5 text-zinc-400" />
+          </button>
+
+          {open && (
+            <div
+              role="listbox"
+              className="absolute left-0 z-20 mt-1 w-72 rounded-lg border border-zinc-200 bg-white p-1.5 shadow-lg"
+            >
+              <input
+                type="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Поиск источника"
+                className="mb-1 w-full rounded-md border border-zinc-200 px-2 py-1 text-xs text-zinc-700"
+              />
+              <div className="max-h-64 overflow-y-auto">
+                {visible.map((s) => {
+                  const active = value.sources.includes(s.key);
+                  return (
+                    <button
+                      key={s.key}
+                      type="button"
+                      role="option"
+                      aria-selected={active}
+                      onClick={() => toggleSource(s.key)}
+                      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-50"
+                    >
+                      <span
+                        className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
+                          active ? 'border-zinc-900 bg-zinc-900 text-white' : 'border-zinc-300'
+                        }`}
+                      >
+                        {active && <Check className="h-2.5 w-2.5" />}
+                      </span>
+                      <span className="truncate">{s.label}</span>
+                      <span className="ml-auto tabular-nums text-zinc-400">{s.leads}</span>
+                    </button>
+                  );
+                })}
+                {visible.length === 0 && (
+                  <p className="px-2 py-3 text-center text-xs text-zinc-400">Ничего не найдено.</p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {value.sources.length > 0 && (
+          <button
+            type="button"
+            onClick={() => onChange({ ...value, sources: [] })}
             className="text-xs text-zinc-400 hover:text-zinc-600 hover:underline"
           >
             Сбросить

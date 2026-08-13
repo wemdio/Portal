@@ -3,9 +3,10 @@
 /**
  * Арифметика этапа публичных чатов.
  *
- * Здесь проверяется то, из-за чего этап вообще опасен: раскладка аккаунтов по
- * разным чатам, скупость на публичные ответы при щедрости на реакции и отсев
- * сообщений, отвечать на которые нельзя. Telegram в тестах не участвует.
+ * Кривая нагрузки живёт в `settings.ts` и проверяется в
+ * `warmupSettings.test.ts` — сюда нормы приходят готовым числом. Здесь
+ * остаётся то, из-за чего этап опасен: раскладка аккаунтов по разным чатам и
+ * отсев сообщений, отвечать на которые нельзя. Telegram в тестах не участвует.
  */
 
 import {
@@ -14,8 +15,6 @@ import {
   pickReactionTarget,
   pickReplyTarget,
   planChatActivities,
-  reactionsPerAccount,
-  repliesPerAccount,
   type ChatMessage,
 } from '@/lib/tgOutreach/warmup/chatSchedule';
 
@@ -23,26 +22,6 @@ const WINDOW = {
   start: new Date('2026-08-07T05:00:00.000Z'),
   end: new Date('2026-08-07T21:00:00.000Z'),
 };
-
-describe('кривая нагрузки в чатах', () => {
-  it('первый день — минимум, дальше растёт', () => {
-    expect(repliesPerAccount(1)).toBe(1);
-    expect(reactionsPerAccount(1)).toBe(3);
-    expect(repliesPerAccount(4)).toBeGreaterThan(repliesPerAccount(1));
-    expect(reactionsPerAccount(4)).toBeGreaterThan(reactionsPerAccount(1));
-  });
-
-  it('реакций всегда заметно больше ответов — дешёвый сигнал против дорогого', () => {
-    for (const day of [1, 2, 3, 4, 7]) {
-      expect(reactionsPerAccount(day)).toBeGreaterThan(repliesPerAccount(day) * 2);
-    }
-  });
-
-  it('за пределами разгона держим потолок, а не растём дальше', () => {
-    expect(repliesPerAccount(20)).toBe(repliesPerAccount(7));
-    expect(reactionsPerAccount(20)).toBe(reactionsPerAccount(7));
-  });
-});
 
 describe('раскладка аккаунтов по чатам', () => {
   const accounts = ['a1', 'a2', 'a3', 'a4'];
@@ -86,8 +65,8 @@ describe('план активностей на день', () => {
 
   it('норма считается на аккаунт, а не на чат', () => {
     const plan = planChatActivities({
-      assignments, day: 1, window: WINDOW, random: () => 0.5,
-      repliesOverride: 2, reactionsOverride: 3,
+      assignments, window: WINDOW, random: () => 0.5,
+      replies: 2, reactions: 3,
     });
     // У a1 два чата, у a2 один — но нагрузка одинаковая.
     for (const id of ['a1', 'a2']) {
@@ -99,7 +78,8 @@ describe('план активностей на день', () => {
 
   it('активности разложены внутри активного окна и упорядочены по времени', () => {
     const plan = planChatActivities({
-      assignments, day: 3, window: WINDOW, random: Math.random,
+      assignments, window: WINDOW, random: Math.random,
+      replies: 2, reactions: 6,
     });
     const times = plan.map((p) => new Date(p.plannedAt).getTime());
     expect([...times].sort((x, y) => x - y)).toEqual(times);
@@ -111,7 +91,8 @@ describe('план активностей на день', () => {
 
   it('аккаунт пишет только в назначенные ему чаты', () => {
     const plan = planChatActivities({
-      assignments, day: 2, window: WINDOW, random: Math.random,
+      assignments, window: WINDOW, random: Math.random,
+      replies: 1, reactions: 5,
     });
     for (const p of plan.filter((x) => x.accountId === 'a2')) {
       expect(p.chatId).toBe('c2');
@@ -120,7 +101,8 @@ describe('план активностей на день', () => {
 
   it('без назначенных чатов плана нет', () => {
     expect(planChatActivities({
-      assignments: [], day: 1, window: WINDOW, random: () => 0.5,
+      assignments: [], window: WINDOW, random: () => 0.5,
+      replies: 1, reactions: 3,
     })).toEqual([]);
   });
 });
@@ -213,5 +195,25 @@ describe('разбор ссылки на чат', () => {
     expect(parseChatLink('')).toBeNull();
     expect(parseChatLink('ab')).toBeNull();
     expect(parseChatLink('9lives_chat')).toBeNull();
+  });
+});
+
+describe('нулевые нормы', () => {
+  it('ноль ответов и ноль реакций дают пустой план, а не исключение', () => {
+    expect(planChatActivities({
+      assignments: [{ accountId: 'a1', chatId: 'c1' }],
+      replies: 0, reactions: 0,
+      window: WINDOW, random: () => 0.5,
+    })).toEqual([]);
+  });
+
+  it('только реакции без ответов — допустимый день', () => {
+    const plan = planChatActivities({
+      assignments: [{ accountId: 'a1', chatId: 'c1' }],
+      replies: 0, reactions: 3,
+      window: WINDOW, random: () => 0.5,
+    });
+    expect(plan).toHaveLength(3);
+    expect(plan.every((p) => p.kind === 'reaction')).toBe(true);
   });
 });

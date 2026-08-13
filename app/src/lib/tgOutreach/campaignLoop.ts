@@ -16,6 +16,7 @@ import type {
   OutreachProxy,
 } from './types';
 import { DEFAULT_FOLLOW_UP } from './types';
+import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient } from './gramClient';
 import type { LoopControl } from './watchdog';
 import { openaiGenerate, detectTrigger } from './openaiChat';
@@ -26,6 +27,8 @@ import {
   recordProxySuccess,
 } from './proxyHealth';
 import { sendFirstTouchBatch } from './firstTouch/send';
+import { pickForwardIds } from './forwardSelection';
+import { processLeadForwards } from './leadForward';
 import { truncateMessage } from '@/lib/logger';
 import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
 
@@ -450,6 +453,31 @@ async function markProcessed(db: SupabaseClient, campaignId: string, tgUserId: n
   );
 }
 
+/**
+ * Чем кончилась автопересылка переписки менеджеру.
+ *
+ * Пишется в тот же апдейт диалога, что и статус «Лид»: это одно событие, и
+ * отдельный запрос ради трёх полей только добавил бы момент, когда статус уже
+ * стоит, а отметка о передаче ещё нет.
+ */
+interface AutoForwardOutcome {
+  /** Куда пересылали. Снимок настройки на момент отправки. */
+  chat: string | null;
+  /** Когда ушло. NULL — не ушло. */
+  at: string | null;
+  /** Причина, если не ушло. */
+  error: string | null;
+}
+
+function autoForwardPayload(outcome?: AutoForwardOutcome): Record<string, unknown> {
+  if (!outcome) return {};
+  return {
+    auto_forwarded_at: outcome.at,
+    auto_forward_chat: outcome.chat,
+    auto_forward_error: outcome.error,
+  };
+}
+
 async function upsertDialog(
   db: SupabaseClient,
   campaignId: string,
@@ -458,7 +486,7 @@ async function upsertDialog(
   tgUsername: string | null,
   messages: DialogMessage[],
   status?: string,
-  opts?: { canSend?: boolean; initialCanSend?: boolean; tgIsBot?: boolean },
+  opts?: { canSend?: boolean; initialCanSend?: boolean; tgIsBot?: boolean; autoForward?: AutoForwardOutcome },
 ) {
   const { data: existing } = await db
     .from('tg_outreach_dialogs')
@@ -483,6 +511,7 @@ async function upsertDialog(
       last_message_at: lastMessageAt,
       tg_is_bot: opts?.tgIsBot ?? existing.tg_is_bot ?? false,
       ...(status ? { status } : {}),
+      ...autoForwardPayload(opts?.autoForward),
     };
     // initialCanSend применяется ТОЛЬКО при insert — иначе перезапишет ручной
     // toggle оператора в UI при следующем витке цикла.
@@ -503,6 +532,7 @@ async function upsertDialog(
       tg_is_bot: opts?.tgIsBot ?? false,
       can_send: opts?.canSend ?? opts?.initialCanSend ?? !(opts?.tgIsBot ?? false),
       last_message_at: lastMessageAt,
+      ...autoForwardPayload(opts?.autoForward),
     });
   }
 }
@@ -640,20 +670,31 @@ async function writeLog(
   }
 }
 
+/**
+ * Исход пересылки возвращаем, а не только пишем в журнал.
+ *
+ * Сбой автопересылки — это лид, который не доехал до менеджера. Пока он оседал
+ * одной строкой среди сотен строк круга, диалог снаружи выглядел как успешный:
+ * статус «Лид» ставится в той же ветке независимо от того, ушла переписка или
+ * нет. Теперь исход доезжает до карточки диалога.
+ */
 async function forwardToTargetChat(
   client: TelegramClient,
   fromPeer: Api.TypeEntityLike,
   messageIds: number[],
   targetUsername: string,
   log: LogFn,
-) {
-  if (!targetUsername) return;
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!targetUsername) return { ok: false, error: 'чат для пересылки не указан в настройках кампании' };
   const target = targetUsername.startsWith('@') ? targetUsername.slice(1) : targetUsername;
   try {
     await client.forwardMessages(target, { fromPeer, messages: messageIds });
     log('info', `Переслано в ${targetUsername}`);
+    return { ok: true };
   } catch (err) {
-    log('error', `Ошибка пересылки в ${targetUsername}: ${err instanceof Error ? err.message : String(err)}`);
+    const msg = err instanceof Error ? err.message : String(err);
+    log('error', `Ошибка пересылки в ${targetUsername}: ${msg}`);
+    return { ok: false, error: msg };
   }
 }
 
@@ -778,6 +819,18 @@ export async function handleChat(
     }
   }
 
+  // Вежливая точка ответа не требует. Проверяем ДО генерации: это ещё и
+  // сэкономленный вызов модели, но главное — на «Спасибо.» мы дописывали
+  // реплику в законченный разговор, а лишние исходящие в мёртвом диалоге для
+  // Telegram выглядят так же плохо, как дословные повторы.
+  //
+  // Согласие («Да», «Ок») сюда не попадает, если мы перед этим спросили: лид
+  // распознаётся по НАШЕМУ ответу, и промолчать значило бы его потерять.
+  if (shouldStaySilent(chatMessages)) {
+    log('info', `${displayName}: последнее сообщение — вежливая точка, отвечать не на что`);
+    return { replied: false, triggerType: null };
+  }
+
   let replyText: string | null = null;
   let usedFallback = false;
   const openaiStart = Date.now();
@@ -806,6 +859,15 @@ export async function handleChat(
     log('warning', `${displayName}: ${usedFallback ? 'fallback' : 'GPT'} вернул бессмысленный ответ "${replyText}" — НЕ отправляю`);
     return { replied: false, triggerType: null };
   }
+  // Молча промолчать лучше, чем повторить себя же: в тупике разговора модели
+  // нечего сказать, и она слово в слово шлёт свою прощальную реплику. Человек
+  // видит сломанного бота, а Telegram — одинаковые сообщения, то есть признак
+  // спам-рассылки. Пересоздавать ответ не пытаемся: истории с прошлого раза не
+  // прибавилось, второй заход дал бы тот же текст.
+  if (isRepeatOfOurs(replyText, chatMessages)) {
+    log('warning', `${displayName}: ответ дословно повторяет то, что мы уже писали ("${replyText}") — НЕ отправляю`);
+    return { replied: false, triggerType: null };
+  }
 
   const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;
   if (shouldStop) await interruptibleSleep(readReplyDelay, shouldStop); else await sleep(readReplyDelay);
@@ -829,18 +891,28 @@ export async function handleChat(
       ? oai.target_chats_positive
       : oai.target_chats_negative;
 
+    let outcome: { ok: true } | { ok: false; error: string };
     if (targetChat) {
-      const messageIdsToForward = history
-        .slice(-tg.forward_limit)
-        .map(m => m.id)
-        .concat(sent.id);
-      await forwardToTargetChat(client, entity, messageIdsToForward, targetChat, log);
+      const messageIdsToForward = pickForwardIds(history, tg.forward_limit, sent.id);
+      outcome = await forwardToTargetChat(client, entity, messageIdsToForward, targetChat, log);
     } else {
       log('info', `${displayName}: триггер "${triggerLabel}" сработал, но чат для пересылки не указан в настройках кампании — пересылка пропущена`);
+      outcome = { ok: false, error: 'чат для пересылки не указан в настройках кампании' };
     }
 
+    // Отметку ставим только положительному триггеру. Отрицательный тоже
+    // пересылает, но в другой чат и по другому поводу: «ушёл менеджеру» про
+    // человека, который отказался, — неправда.
+    const autoForward: AutoForwardOutcome | undefined = triggerType === 'positive'
+      ? {
+          chat: targetChat || null,
+          at: outcome.ok ? new Date().toISOString() : null,
+          error: outcome.ok ? null : outcome.error,
+        }
+      : undefined;
+
     await markProcessed(db, campaign.id, tgUserId, tgUsername);
-    await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, triggerType === 'positive' ? 'lead' : 'not_lead', { tgIsBot, canSend: false });
+    await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, triggerType === 'positive' ? 'lead' : 'not_lead', { tgIsBot, canSend: false, autoForward });
   } else {
     await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot });
   }
@@ -1032,6 +1104,8 @@ async function handleMissedRepliesLastDays(
   let skipLastNotUser = 0;
   let skipOpenaiEmpty = 0;
   let skipLowValue = 0;
+  let skipRepeat = 0;
+  let skipCloser = 0;
   let errorsCount = 0;
 
   for (const dialog of dialogs) {
@@ -1049,12 +1123,24 @@ async function handleMissedRepliesLastDays(
     const lastMessage = messages[messages.length - 1];
     if (lastMessage.role !== 'user') { skipLastNotUser++; continue; }
 
+    if (shouldStaySilent(messages)) {
+      skipCloser++;
+      continue;
+    }
+
     try {
       const reply = await openaiGenerate(oai, messages);
       if (!reply) { skipOpenaiEmpty++; continue; }
       if (isLowValueReply(reply)) {
         skipLowValue++;
         log('warning', `Catch-up: ответ для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} не отправлен — GPT вернул бессмысленный текст "${reply}"`);
+        continue;
+      }
+      // См. комментарий у той же проверки в основном цикле: дословный
+      // самоповтор — признак спам-рассылки для Telegram.
+      if (isRepeatOfOurs(reply, messages)) {
+        skipRepeat++;
+        log('warning', `Catch-up: ответ для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} дословно повторяет уже отправленное — НЕ отправляю`);
         continue;
       }
 
@@ -1095,7 +1181,7 @@ async function handleMissedRepliesLastDays(
   log(
     'info',
     `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up за 3 дня) — проверил ${processed} диалогов, отправил ${replied} ответов.` +
-      (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue
+      (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue || skipRepeat || skipCloser
         ? ' Не отправил по причинам:'
         : '') +
       (skipBot ? ` это боты — ${skipBot};` : '') +
@@ -1104,6 +1190,8 @@ async function handleMissedRepliesLastDays(
       (skipLastNotUser ? ` мы уже ответили последними — ${skipLastNotUser};` : '') +
       (skipOpenaiEmpty ? ` GPT не вернул ответ — ${skipOpenaiEmpty};` : '') +
       (skipLowValue ? ` GPT вернул мусор — ${skipLowValue};` : '') +
+      (skipRepeat ? ` дословный повтор нашего же ответа — ${skipRepeat};` : '') +
+      (skipCloser ? ` вежливая точка, отвечать не на что — ${skipCloser};` : '') +
       (errorsCount ? ` Ошибок при отправке: ${errorsCount}.` : ''),
   );
 }
@@ -1727,6 +1815,25 @@ export async function runCampaignLoop(
           } else {
             log('error', `Аккаунт ${account.session_name}: непредвиденная ошибка — ${errMsg}`);
           }
+        }
+
+        // Ручные передачи лидов и партнёров: оператор поставил их из интерфейса,
+        // отправить может только живое соединение — оно здесь.
+        try {
+          await processLeadForwards({
+            db,
+            client,
+            accountId: account.id,
+            accountName: account.session_name,
+            log,
+            shouldStop,
+          });
+        } catch (err) {
+          // Передача лида не должна ронять круг: аутрич важнее и уже отработал.
+          log(
+            'warning',
+            `Аккаунт ${account.session_name}: очередь передач не отработала — ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
 
         // Первое касание — после разбора входящих и только этим же аккаунтом:

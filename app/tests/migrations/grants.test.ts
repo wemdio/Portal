@@ -65,8 +65,11 @@ describe('supabase/migrations GRANT lint', () => {
         'tests/migrations/grants.allowlist.json — that snapshot is frozen.\n\n' +
         'If the table is sealed ON PURPOSE (RLS + revoke all, reached only ' +
         'through a SECURITY DEFINER function), do NOT add the grant — it would ' +
-        'open exactly the hole the migration closes. Mark it instead, next to ' +
-        'the create table, stating why:\n\n' +
+        'open exactly the hole the migration closes. Say so in one of two ways. ' +
+        'An explicit lock, picked up anywhere in the migrations tree:\n\n' +
+        '  revoke all on table public.<table> from service_role;\n\n' +
+        'or, when there is nothing to revoke, a marker in the same file that ' +
+        'creates the table — the reason after the name is mandatory:\n\n' +
         '  -- grants-lint: no-service-role-grant public.<table> — reason\n\n' +
         `Violations:\n${lines}`;
       throw new Error(msg);

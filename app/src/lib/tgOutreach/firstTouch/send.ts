@@ -45,6 +45,19 @@ function startOfToday(): Date {
   return d;
 }
 
+/**
+ * Хвост строки лога про попытки.
+ *
+ * «Отложен» звучит как «вернёмся к нему позже», и это верно только первые два
+ * раза: на третьей неудаче контакт уходит в failed и из очереди пропадает
+ * навсегда. Разницу обязан называть лог, иначе база тихо тает.
+ */
+function attemptNote(outcome: { attempts: number; exhausted: boolean }): string {
+  return outcome.exhausted
+    ? ` (попытка ${outcome.attempts} из ${fdb.MAX_CONTACT_ATTEMPTS} — больше пробовать не буду, верните в очередь на вкладке «Базы»)`
+    : ` (попытка ${outcome.attempts} из ${fdb.MAX_CONTACT_ATTEMPTS})`;
+}
+
 function isUsernameNotFound(err: unknown): boolean {
   const m = (err instanceof Error ? err.message : String(err)).toLowerCase();
   return m.includes('as username')
@@ -86,8 +99,8 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
     const check = validateFirstTouch(contact.message, maxChars);
     if (!check.ok) {
       const why = describeFailure(check.reason, maxChars);
-      await fdb.recordContactFailure(db, contact.id, attempts, why);
-      log('warning', `Первое касание: @${contact.username} отложен — ${why}`);
+      const outcome = await fdb.recordContactFailure(db, contact.id, attempts, why);
+      log('warning', `Первое касание: @${contact.username} отложен — ${why}${attemptNote(outcome)}`);
       result.postponed++;
       continue;
     }
@@ -101,8 +114,13 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         log('info', `Первое касание: @${contact.username} пропущен — юзернейм не найден`);
         result.skipped++;
       } else {
+        // Раньше эта ветка молчала: причина уходила в skip_reason контакта, а в
+        // логе оставалось только «отложено N» без единого слова почему. Показать
+        // skip_reason на экране тоже негде — оператор не мог узнать причину
+        // вообще никак.
         const msg = err instanceof Error ? err.message : String(err);
-        await fdb.recordContactFailure(db, contact.id, attempts, `не смог найти собеседника: ${msg}`);
+        const outcome = await fdb.recordContactFailure(db, contact.id, attempts, `не смог найти собеседника: ${msg}`);
+        log('warning', `Первое касание: @${contact.username} отложен — не смог найти собеседника: ${msg}${attemptNote(outcome)}`);
         result.postponed++;
       }
       continue;
@@ -127,8 +145,8 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       await client.sendMessage(`@${contact.username}`, { message: contact.message });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      await fdb.recordContactFailure(db, contact.id, attempts, `не отправилось: ${msg}`);
-      log('warning', `Первое касание: @${contact.username} не отправилось — ${msg}`);
+      const outcome = await fdb.recordContactFailure(db, contact.id, attempts, `не отправилось: ${msg}`);
+      log('warning', `Первое касание: @${contact.username} не отправилось — ${msg}${attemptNote(outcome)}`);
       result.postponed++;
       continue;
     }
