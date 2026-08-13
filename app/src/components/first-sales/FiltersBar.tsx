@@ -137,7 +137,12 @@ export default function FiltersBar({
   };
 
   return (
-    <div className="glass-panel space-y-2 px-3 py-2.5">
+    // relative z-30 — чтобы выпадашка источников рисовалась поверх плиток, а не
+    // под ними. У `.glass-tile`/`.glass-panel` стоит `backdrop-filter`, а он
+    // создаёт собственный контекст наложения: z-index внутри панели действует
+    // только внутри неё, и плитки — соседи ниже по разметке — перекрывали панель
+    // целиком вместе с раскрытым списком. Поднимать надо контекст самой панели.
+    <div className="glass-panel relative z-30 space-y-2 px-3 py-2.5">
       {/* период */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex items-center gap-1">

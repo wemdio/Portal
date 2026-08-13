@@ -12,6 +12,7 @@ import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import {
   buildCampaignDashboard,
+  customRange,
   type DashboardContact,
   type DashboardDialog,
   type DashboardForward,
@@ -51,6 +52,23 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       }
       const period = periodParam as DashboardPeriod;
 
+      // Произвольный период: обе даты или ни одной. Одна без второй — почти
+      // наверняка обрезанная ссылка, и молча достроить недостающую границу
+      // значило бы показать не тот период, о котором просили.
+      const fromParam = url.searchParams.get('from');
+      const toParam = url.searchParams.get('to');
+      let range: { fromMs: number; toMs: number } | undefined;
+      if (fromParam !== null || toParam !== null) {
+        if (fromParam === null || toParam === null) {
+          return jsonError('Нужны обе даты периода: from и to', 400);
+        }
+        const parsed = customRange(fromParam, toParam);
+        if (!parsed) {
+          return jsonError('Даты должны быть в формате ГГГГ-ММ-ДД, конец не раньше начала', 400);
+        }
+        range = parsed;
+      }
+
       const { data: campaign } = await supabase
         .from('tg_outreach_campaigns')
         .select('id')
@@ -87,12 +105,12 @@ export async function GET(req: NextRequest, ctx: Ctx) {
           : Promise.resolve({ data: [] as DashboardContact[] }),
         supabase
           .from('tg_outreach_dialogs')
-          .select('tg_user_id, tg_username, status, messages, last_message_at, can_send_changed_at, can_send_changed_reason')
+          .select('id, tg_user_id, tg_username, status, messages, last_message_at, can_send_changed_at, can_send_changed_reason')
           .eq('campaign_id', campaignId)
           .limit(20_000),
         supabase
           .from('tg_outreach_lead_forwards')
-          .select('status, requested_at')
+          .select('status, requested_at, dialog_id')
           .eq('campaign_id', campaignId),
         supabase
           .from('tg_outreach_accounts')
@@ -123,12 +141,12 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       // передачу), а не created_at — dashboard.ts принимает общее имя поля,
       // подгоняем при чтении, саму функцию не трогаем.
       const forwards: DashboardForward[] = (forwardsRes.data ?? []).map((f) => {
-        const row = f as { status: string; requested_at: string | null };
-        return { status: row.status, created_at: row.requested_at };
+        const row = f as { status: string; requested_at: string | null; dialog_id: string | null };
+        return { status: row.status, created_at: row.requested_at, dialog_id: row.dialog_id };
       });
       const accountRows = (accountsRes.data ?? []) as AccountRow[];
 
-      const dashboard = buildCampaignDashboard({ contacts, dialogs, forwards, period, now });
+      const dashboard = buildCampaignDashboard({ contacts, dialogs, forwards, period, range, now });
 
       // У боевых записей лога нет account_id (его пишет только прогрев) —
       // аккаунт распознаём по вхождению session_name в текст, как и в

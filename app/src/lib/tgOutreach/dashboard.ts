@@ -31,12 +31,18 @@ export interface DashboardContact {
   sent_at: string | null;
 }
 
-/** Диалог в том же виде, в каком его читает отчёт — предикаты общие. */
-export type DashboardDialog = ReportDialog;
+/**
+ * Диалог в том же виде, в каком его читает отчёт — предикаты общие. Плюс `id`:
+ * он нужен, чтобы связать диалог с передачей менеджеру (у отчёта такой связи
+ * нет, ему хватает счётчиков).
+ */
+export type DashboardDialog = ReportDialog & { id?: string | null };
 
 export interface DashboardForward {
   status: string;
   created_at: string | null;
+  /** Диалог, который передавали. Нужен, чтобы не звать разобранное неразобранным. */
+  dialog_id?: string | null;
 }
 
 export interface DashboardInput {
@@ -44,6 +50,11 @@ export interface DashboardInput {
   dialogs: DashboardDialog[];
   forwards: DashboardForward[];
   period: DashboardPeriod;
+  /**
+   * Произвольный период, выбранный руками. Задан — побеждает `period`: пресет
+   * в этом случае лишь подсвечивает кнопку в UI и на расчёт не влияет.
+   */
+  range?: { fromMs: number; toMs: number };
   /** Момент отсчёта. Передаётся снаружи, чтобы функция осталась чистой. */
   now: number;
   tzOffsetHours?: number;
@@ -94,6 +105,17 @@ export interface CampaignDashboard {
   to: string;
   funnel: FunnelStage[];
   blocks: number;
+  /** Недоступны по технической причине, КРОМЕ блокировок: у тех своя цифра. */
+  unreachable: number;
+  /** Написали в периоде и до сих пор молчат. */
+  awaiting: number;
+  /** Ответили, но статус не проставлен и менеджеру не передали. */
+  needsAttention: number;
+  /**
+   * Среднее время от нашего последнего сообщения до ответа, минуты.
+   * null — в периоде никто не отвечал: ноль читался бы как «отвечают мгновенно».
+   */
+  avgReplyMinutes: number | null;
   days: DashboardDay[];
   pace: DashboardPace;
   base: DashboardBase;
@@ -132,6 +154,83 @@ export function periodRange(
   return { fromMs: today - (PERIOD_DAYS[period] - 1) * DAY_MS, toMs };
 }
 
+/**
+ * Границы произвольного периода, выбранного оператором руками.
+ *
+ * Обе даты — `YYYY-MM-DD` и трактуются как календарные сутки МСК целиком: `from`
+ * с начала своих суток, `to` — по конец своих. Так же, как режутся пресеты, и
+ * это не косметика: иначе одна и та же дата давала бы разные цифры в
+ * зависимости от того, выбрали её руками или пресетом. Верхняя граница
+ * включительная — ровно то, что обещает подпись поля.
+ *
+ * `null` — некорректный ввод (не та форма, несуществующая дата, конец раньше
+ * начала). Вызывающий обязан ответить ошибкой, а не молча показать пустой
+ * период: пустая сводка и «вы ошиблись в дате» — разные сообщения.
+ */
+export function customRange(
+  from: string,
+  to: string,
+  tzOffsetHours = TZ_OFFSET_HOURS,
+): { fromMs: number; toMs: number } | null {
+  const shape = /^\d{4}-\d{2}-\d{2}$/;
+  if (!shape.test(from) || !shape.test(to)) return null;
+
+  const offset = tzOffsetHours * 3_600_000;
+  const fromUtc = Date.parse(`${from}T00:00:00.000Z`);
+  const toUtc = Date.parse(`${to}T00:00:00.000Z`);
+  // Date.parse отвергает 2026-13-99, но 2026-02-30 молча не существует —
+  // проверять всё равно приходится обоими способами.
+  if (!Number.isFinite(fromUtc) || !Number.isFinite(toUtc)) return null;
+
+  const fromMs = fromUtc - offset;
+  const toMs = toUtc - offset + DAY_MS - 1;
+  if (toMs < fromMs) return null;
+  return { fromMs, toMs };
+}
+
+/**
+ * Причины технической недоступности, кроме блокировки.
+ *
+ * Блокировка сознательно не здесь: у неё отдельная плашка и отдельный смысл —
+ * человек нас прочитал и закрылся, а это сигнал о темпе. Остальные причины
+ * говорят лишь о том, что контакт мёртв, и складывать их в одну цифру значило
+ * бы показать одного человека дважды в соседних числах.
+ */
+const UNREACHABLE_REASONS = new Set([
+  'tg_user_deactivated',
+  'tg_peer_invalid',
+  'tg_user_banned_in_channel',
+  'tg_unreachable',
+]);
+
+/** Момент первого нашего сообщения в диалоге. */
+function firstOutgoingAt(dialog: DashboardDialog): number | null {
+  for (const m of dialog.messages ?? []) {
+    if (m?.role === 'assistant') {
+      const t = ts(m.timestamp);
+      if (t !== null) return t;
+    }
+  }
+  return null;
+}
+
+/**
+ * Наше последнее сообщение перед моментом `beforeMs`.
+ *
+ * Именно последнее, а не первое: в цепочке с догоняющими сообщениями человек
+ * отвечает на то, что прочитал сейчас, и «время до ответа» осмысленно мерить
+ * от него. От первого касания получилась бы длительность всей цепочки.
+ */
+function lastOutgoingBefore(dialog: DashboardDialog, beforeMs: number): number | null {
+  let best: number | null = null;
+  for (const m of dialog.messages ?? []) {
+    if (m?.role !== 'assistant') continue;
+    const t = ts(m.timestamp);
+    if (t !== null && t < beforeMs && (best === null || t > best)) best = t;
+  }
+  return best;
+}
+
 function inRange(at: number | null, fromMs: number, toMs: number): boolean {
   return at !== null && at >= fromMs && at <= toMs;
 }
@@ -151,7 +250,7 @@ function share(value: number, base: number): number | null {
 
 export function buildCampaignDashboard(input: DashboardInput): CampaignDashboard {
   const tz = input.tzOffsetHours ?? TZ_OFFSET_HOURS;
-  const { fromMs, toMs } = periodRange(input.period, input.now, tz);
+  const { fromMs, toMs } = input.range ?? periodRange(input.period, input.now, tz);
 
   const contacts = input.contacts.filter((c) => inRange(ts(c.created_at), fromMs, toMs)).length;
   const delivered = input.contacts.filter((c) => inRange(ts(c.sent_at), fromMs, toMs)).length;
@@ -166,6 +265,41 @@ export function buildCampaignDashboard(input: DashboardInput): CampaignDashboard
   const blocks = input.dialogs
     .filter((d) => d.can_send_changed_reason === 'tg_user_blocked_bot'
       && inRange(ts(d.can_send_changed_at), fromMs, toMs)).length;
+
+  const unreachable = input.dialogs
+    .filter((d) => UNREACHABLE_REASONS.has(d.can_send_changed_reason ?? '')
+      && inRange(ts(d.can_send_changed_at), fromMs, toMs)).length;
+
+  // Молчание проверяем на «вообще ни разу», а не «не ответил в периоде»:
+  // ответивший после конца окна уже не ждёт нашего внимания.
+  const awaiting = input.dialogs
+    .filter((d) => inRange(firstOutgoingAt(d), fromMs, toMs) && firstReplyAt(d) === null).length;
+
+  // Сорвавшиеся передачи не снимают вопрос: до менеджера такой диалог не дошёл,
+  // и разобрать его всё ещё некому. Тот же предикат, что у шага воронки.
+  const forwardedDialogIds = new Set(
+    input.forwards
+      .filter((f) => (f.status === 'pending' || f.status === 'sent') && f.dialog_id)
+      .map((f) => f.dialog_id as string),
+  );
+  const needsAttention = input.dialogs
+    .filter((d) => inRange(firstReplyAt(d), fromMs, toMs)
+      && d.status === 'none'
+      && !(d.id && forwardedDialogIds.has(d.id))).length;
+
+  const replyDelays: number[] = [];
+  for (const d of input.dialogs) {
+    const reply = firstReplyAt(d);
+    if (!inRange(reply, fromMs, toMs)) continue;
+    const out = lastOutgoingBefore(d, reply as number);
+    // Человек написал первым — измерять нечего, и подставлять сюда ноль нельзя:
+    // это исказило бы среднее в сторону «отвечают мгновенно».
+    if (out === null) continue;
+    replyDelays.push(((reply as number) - out) / 60_000);
+  }
+  const avgReplyMinutes = replyDelays.length
+    ? Math.round(replyDelays.reduce((a, b) => a + b, 0) / replyDelays.length)
+    : null;
 
   const raw: Array<Omit<FunnelStage, 'fromPrev'>> = [
     { key: 'contacts', name: 'Контактов в базе', value: contacts },
@@ -184,6 +318,10 @@ export function buildCampaignDashboard(input: DashboardInput): CampaignDashboard
     to: new Date(toMs).toISOString(),
     funnel,
     blocks,
+    unreachable,
+    awaiting,
+    needsAttention,
+    avgReplyMinutes,
     days: buildDays(input, fromMs, toMs, tz),
     pace: buildPace(input, fromMs, toMs, tz),
     base: buildBase(input, fromMs, toMs, tz),

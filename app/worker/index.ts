@@ -32,6 +32,7 @@ import { syncClientLeads } from '@/lib/instantly/clientLeadsSync';
 import { runCampaignTick } from '@/lib/liOutreach/campaignRunner';
 import { runDeadlineNotifications } from '@/lib/notifications/deadlineCron';
 import { runLeadEscalation } from '@/lib/notifications/leadEscalation';
+import { runTechRenewalNotifications } from '@/lib/notifications/techRenewalCron';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const LI_CAMPAIGN_TICK_INTERVAL_MS = Number(process.env.LI_CAMPAIGN_TICK_INTERVAL_MS ?? String(5 * 60 * 1000));
@@ -755,6 +756,14 @@ async function deadlineNotificationsLoop(): Promise<void> {
       }
     } catch (err) {
       log('error', 'Lead escalation tick failed', err);
+    }
+    try {
+      const techRenewals = await runTechRenewalNotifications({ db: supabaseAdmin, now: new Date() });
+      if (techRenewals.created) {
+        log('info', `tech renewal notifications created: ${techRenewals.created}`);
+      }
+    } catch (err) {
+      log('error', 'Tech renewal notifications tick failed', err);
     }
   };
 

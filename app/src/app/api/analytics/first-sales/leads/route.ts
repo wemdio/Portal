@@ -2,7 +2,7 @@ import 'server-only';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireFirstSalesAccess } from '@/lib/firstSales/access';
 import { parseFirstSalesParams } from '@/lib/firstSales/params';
-import { fetchFirstSalesLeads } from '@/lib/firstSales/metrics';
+import { fetchFirstSalesLeads, NO_MANAGER } from '@/lib/firstSales/metrics';
 import { fetchMeetingLinks } from '@/lib/firstSales/meetings';
 import { resolveSource } from '@/lib/firstSales/sources';
 
@@ -25,21 +25,36 @@ export async function GET(req: NextRequest) {
   if (parsed.value === null) return NextResponse.json({ error: parsed.error }, { status: 400 });
   const { from, to } = parsed.value;
 
-  // Сюда приходит КЛЮЧ источника, а не название: `enum_id` строкой, либо
-  // `none` для сделок без заполненного «Источник». Именно его кладёт в
-  // разбивку metrics.ts, и именно его присылает таблица.
-  // Проверяем на `null`, а не на пустоту: отсутствие параметра — это ошибка
-  // вызова, а не «источник без имени».
+  // Срез, в который проваливается пользователь: либо источник, либо менеджер.
+  //
+  // `source` — это КЛЮЧ источника, а не название: `enum_id` строкой либо `none`
+  // для сделок без заполненного «Источник». `manager` — наоборот, отображаемое
+  // имя ответственного, ровно как его показывает разбивка, включая литерал
+  // `NO_MANAGER` для сделок без ответственного: своих идентификаторов у этого
+  // среза нет, группировка в metrics.ts идёт по тому же имени.
+  //
+  // Проверяем на `null`, а не на пустоту: отсутствие параметра — ошибка вызова,
+  // а пустая строка — законное (пусть и ничего не находящее) значение.
   const source = url.searchParams.get('source');
-  if (source === null) {
-    return NextResponse.json({ error: 'Нужен параметр source' }, { status: 400 });
+  const manager = url.searchParams.get('manager');
+  if ((source === null) === (manager === null)) {
+    return NextResponse.json(
+      { error: 'Нужен ровно один параметр: source или manager' },
+      { status: 400 },
+    );
   }
+
+  const matchesSlice =
+    source !== null
+      ? (lead: { raw: unknown }) => resolveSource(lead.raw).key === source
+      : (lead: { responsible_name: string | null }) =>
+          (lead.responsible_name ?? NO_MANAGER) === manager;
 
   try {
     // Та же ширина выборки, что в summary/route.ts: сделка с привязанной
     // встречей в окне может лежать вне окна по created_at/этапам (пришла
-    // раньше). Без этого расширения drill-down источника показал бы меньше
-    // сделок, чем summary насчитал встреч для того же источника.
+    // раньше). Без этого расширения drill-down показал бы меньше сделок, чем
+    // summary насчитал встреч для того же среза.
     const meetingLinks = await fetchMeetingLinks(gate.supabaseAdmin, PIPELINE_ID, from, to);
     const meetingDealIds = [...new Set(meetingLinks.map((m) => m.amo_deal_id))];
 
@@ -50,7 +65,7 @@ export async function GET(req: NextRequest) {
     // Фильтр по источникам здесь НЕ применяется: строка, в которую пользователь
     // проваливается, уже прошла его в сводке — второй раз отсеивать нечего.
     const rows = leads
-      .filter((lead) => resolveSource(lead.raw).key === source)
+      .filter(matchesSlice)
       .sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''))
       .slice(0, MAX_ROWS)
       .map((lead) => ({

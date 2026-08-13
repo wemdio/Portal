@@ -553,6 +553,13 @@ export async function middleware(request: NextRequest) {
       }
     }
 
+    // Календарь технички — только админ: суммы по инфраструктуре студии.
+    if (user && pathname.startsWith('/tech-calendar')) {
+      if (userRole !== 'admin') {
+        return NextResponse.redirect(new URL('/', request.url))
+      }
+    }
+
     // Дашборд нагрузки почт — только руководство (lead/director/admin, = isLead).
     // Оценка эффективности специалистов, не для рядовых ролей.
     if (user && pathname.startsWith('/analytics/mailbox-load')) {
