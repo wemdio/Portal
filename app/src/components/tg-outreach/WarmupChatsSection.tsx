@@ -1,16 +1,16 @@
 'use client';
 
 /**
- * Вкладка «Чаты» — список публичных чатов для этапа прогрева.
+ * Список публичных чатов — секция внутри настроек прогрева.
  *
- * Отдельно от вкладки «Прогрев»: список живёт долго и не привязан к запуску,
- * его собирают один раз и потом только правят. Смешивать его с наблюдением за
- * идущим прогревом — значит держать на одном экране настройку и мониторинг.
+ * Раньше это была отдельная вкладка кампании. Разносить список чатов и числа,
+ * управляющие активностью в этих чатах, по разным экранам незачем: оператор
+ * настраивает одно и то же.
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
-import { AlertCircle, Loader2, Plus, RefreshCw, Trash2, Users } from 'lucide-react';
+import { AlertCircle, Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import type { CampaignStatus } from '@/lib/tgOutreach/types';
 import type { WarmupChat } from '@/lib/tgOutreach/warmup/types';
 
@@ -27,12 +27,15 @@ const STATUS_LABEL: Record<string, { text: string; cls: string }> = {
   unresolvable: { text: 'не подошёл', cls: 'bg-rose-50 text-rose-700' },
 };
 
-export default function WarmupChatsTab({
+export default function WarmupChatsSection({
   campaignId,
   campaignStatus,
+  onChanged,
 }: {
   campaignId: string;
   campaignStatus: CampaignStatus;
+  /** Дёргается после любого изменения списка: снаружи от него зависят счётчики. */
+  onChanged?: () => void;
 }) {
   const [chats, setChats] = useState<ChatRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -61,6 +64,11 @@ export default function WarmupChatsTab({
     })();
   }, [load]);
 
+  const reload = async () => {
+    await load();
+    onChanged?.();
+  };
+
   const addChats = async () => {
     const links = bulkText.split(/[\n,;\s]+/).map((s) => s.trim()).filter(Boolean);
     if (!links.length) return;
@@ -84,7 +92,7 @@ export default function WarmupChatsTab({
           ? `Добавлено ${data.added}. Не подошли (закрытые чаты и мусор): ${rejected.slice(0, 3).join(', ')}${rejected.length > 3 ? ` и ещё ${rejected.length - 3}` : ''}`
           : `Добавлено ${data.added}. Нажмите «Проверить», чтобы портал узнал названия.`,
       );
-      await load();
+      await reload();
     } finally {
       setAdding(false);
     }
@@ -104,7 +112,7 @@ export default function WarmupChatsTab({
         return;
       }
       setNotice(`Проверено ${data.checked}, подошло ${data.resolved}.`);
-      await load();
+      await reload();
     } finally {
       setChecking(false);
     }
@@ -115,7 +123,7 @@ export default function WarmupChatsTab({
       method: 'PUT',
       body: JSON.stringify({ is_active: !chat.is_active }),
     });
-    await load();
+    await reload();
   };
 
   const removeChat = async (chat: ChatRow) => {
@@ -123,7 +131,7 @@ export default function WarmupChatsTab({
     await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup/chats/${chat.id}`, {
       method: 'DELETE',
     });
-    await load();
+    await reload();
   };
 
   const usable = chats.filter((c) => c.status === 'resolved' && c.is_active).length;
@@ -131,38 +139,36 @@ export default function WarmupChatsTab({
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 p-8 text-xs text-gray-500">
-        <Loader2 className="h-4 w-4 animate-spin" /> Загружаю чаты…
+      <div className="flex items-center gap-2 py-4 text-[11px] text-gray-500">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Загружаю чаты…
       </div>
     );
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-2.5 rounded-xl bg-gray-50 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <span className="text-sm font-medium text-gray-700">
-            Чаты для прогрева <span className="font-normal text-gray-400">({chats.length})</span>
+        <span className="text-[11px] text-gray-600">
+          Чаты <span className="text-gray-400">
+            {usable} готов{usable === 1 ? '' : 'ы'}
+            {unchecked > 0 ? ` · ${unchecked} не проверен${unchecked === 1 ? '' : 'о'}` : ''}
           </span>
-          <p className="mt-0.5 text-[11px] text-gray-400">
-            Аккаунты вступают сюда и понемногу отвечают людям, если этап включён при запуске прогрева.
-          </p>
-        </div>
+        </span>
         <button
           type="button"
           disabled={!canCheck || checking || !chats.length}
           onClick={() => { void checkChats(); }}
           title={canCheck ? 'Узнать названия чатов и отсеять неподходящие' : 'Сначала остановите кампанию'}
-          className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-[11px] text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+          {checking ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
           {checking ? 'Проверяю…' : 'Проверить'}
         </button>
       </div>
 
       {usable === 1 && (
-        <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-800">
-          <AlertCircle className="mt-px h-4 w-4 shrink-0" />
+        <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-800">
+          <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" />
           <span>
             В списке один рабочий чат — все аккаунты окажутся в нём. Это заметный след: по одному
             спалившемуся аккаунту находятся остальные. Лучше добавить хотя бы три-четыре.
@@ -170,84 +176,32 @@ export default function WarmupChatsTab({
         </div>
       )}
 
-      {unchecked > 0 && (
-        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] text-gray-600">
-          Не проверено чатов: {unchecked}. В прогреве участвуют только проверенные.
-        </div>
-      )}
-
-      <div className="space-y-2 rounded-xl border border-gray-200 bg-gray-50 p-4">
-        <span className="text-[11px] font-medium text-gray-500">
-          Ссылки на чаты — по одной в строке или через запятую
-        </span>
-        <textarea
-          value={bulkText}
-          onChange={(e) => setBulkText(e.target.value)}
-          rows={3}
-          placeholder={'t.me/chat_name\n@another_chat'}
-          className="block w-full resize-y rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 font-mono text-xs outline-none focus:border-indigo-400"
-        />
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => { void addChats(); }}
-            disabled={adding || !bulkText.trim()}
-            className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {adding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-            Добавить
-          </button>
-          <span className="text-[10px] text-gray-400">
-            Закрытые чаты по приглашениям не поддерживаются
-          </span>
-        </div>
-      </div>
-
-      {error && (
-        <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div>
-      )}
-      {notice && (
-        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">{notice}</div>
-      )}
-
-      {chats.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
-          <Users className="mx-auto mb-2 h-8 w-8 text-gray-300" />
-          <p className="text-xs text-gray-400">Список пуст. Добавьте ссылки на публичные чаты.</p>
-        </div>
-      ) : (
-        <div className="divide-y divide-gray-100 overflow-hidden rounded-xl border border-gray-200 bg-white">
-          <div className="grid grid-cols-[1fr_110px_120px_90px_44px] items-center gap-4 bg-gray-50 px-4 py-2 text-[11px] font-medium text-gray-400">
-            <span>Чат</span><span>Участников</span><span>Статус</span><span>Наших</span><span />
-          </div>
+      {chats.length > 0 && (
+        <div className="divide-y divide-gray-100 overflow-hidden rounded-lg border border-gray-200 bg-white">
           {chats.map((chat) => {
             const badge = STATUS_LABEL[chat.status] ?? STATUS_LABEL.pending;
             return (
               <div
                 key={chat.id}
-                className={`grid grid-cols-[1fr_110px_120px_90px_44px] items-center gap-4 px-4 py-3 ${chat.is_active ? '' : 'opacity-50'}`}
+                className={`grid grid-cols-[1fr_92px_86px_32px] items-center gap-2 px-2.5 py-1.5 ${chat.is_active ? '' : 'opacity-50'}`}
               >
                 <div className="min-w-0">
-                  <div className="truncate text-xs font-medium text-gray-800">
-                    {chat.title ?? chat.link}
-                  </div>
+                  <div className="truncate text-[11px] text-gray-800">{chat.title ?? chat.link}</div>
                   <div className="truncate text-[10px] text-gray-400">
                     {chat.link}
+                    {chat.participants_count ? ` · ${chat.participants_count.toLocaleString('ru-RU')}` : ''}
                     {chat.error_reason ? ` · ${chat.error_reason}` : ''}
                   </div>
                 </div>
-                <span className="text-xs text-gray-500">
-                  {chat.participants_count ? chat.participants_count.toLocaleString('ru-RU') : '—'}
-                </span>
                 <button
                   type="button"
                   onClick={() => { void toggleActive(chat); }}
                   title={chat.is_active ? 'Выключить чат' : 'Включить чат'}
-                  className={`w-fit cursor-pointer rounded-md px-1.5 py-0.5 text-[10px] transition hover:opacity-80 ${badge.cls}`}
+                  className={`w-fit cursor-pointer rounded px-1.5 py-0.5 text-[10px] transition hover:opacity-80 ${badge.cls}`}
                 >
                   {chat.is_active ? badge.text : 'выключен'}
                 </button>
-                <span className="text-[11px] text-gray-500">
+                <span className="text-[10px] text-gray-500">
                   {chat.joined_accounts > 0 ? `${chat.joined_accounts} вступило` : '—'}
                   {chat.forbidden_accounts > 0 && (
                     <span className="text-amber-600"> · {chat.forbidden_accounts} запрет</span>
@@ -257,14 +211,41 @@ export default function WarmupChatsTab({
                   type="button"
                   onClick={() => { void removeChat(chat); }}
                   title="Убрать из списка"
-                  className="cursor-pointer rounded-lg p-1.5 text-gray-400 transition hover:bg-rose-50 hover:text-rose-600"
+                  className="cursor-pointer rounded p-1 text-gray-400 transition hover:bg-rose-50 hover:text-rose-600"
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 className="h-3 w-3" />
                 </button>
               </div>
             );
           })}
         </div>
+      )}
+
+      <textarea
+        value={bulkText}
+        onChange={(e) => setBulkText(e.target.value)}
+        rows={2}
+        placeholder={'t.me/chat_name\n@another_chat'}
+        className="block w-full resize-y rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 font-mono text-[11px] outline-none focus:border-indigo-400"
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => { void addChats(); }}
+          disabled={adding || !bulkText.trim()}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-[11px] font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {adding ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
+          Добавить
+        </button>
+        <span className="text-[10px] text-gray-400">Закрытые чаты по приглашениям не поддерживаются</span>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>
+      )}
+      {notice && (
+        <div className="rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-[11px] text-gray-600">{notice}</div>
       )}
     </div>
   );

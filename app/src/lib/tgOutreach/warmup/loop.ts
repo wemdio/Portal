@@ -28,6 +28,12 @@ import type { LoopControl } from '../watchdog';
 import { downloadSessionToTemp } from '../campaignLoop';
 import { openaiGenerate } from '../openaiChat';
 import { planDay } from './schedule';
+import {
+  dailyLimits,
+  normalizeWarmupSettings,
+  type DailyLimits,
+  type WarmupSettings,
+} from './settings';
 import { warmupOpenAISettings } from './prompt';
 import { runWarmupConversation, WarmupSendError, type WarmupSide } from './conversation';
 import { resolveWarmupPeer, dropImportedContact, type ResolvedPeer } from './peer';
@@ -180,6 +186,21 @@ export async function runWarmupLoop(
       });
   };
 
+  /**
+   * Тот же лог, но одна и та же фраза пишется один раз за прогон.
+   *
+   * Для жалоб на состояние, а не на событие: «в списке нет ни одного чата» —
+   * правда на каждом круге, а круг идёт раз в минуту, и повторять её тысячу раз
+   * значит утопить журнал, который оператор читает глазами. Сказали один раз —
+   * дальше молчим, пока воркер не перезапустится.
+   */
+  const alreadySaid = new Set<string>();
+  const logOnce: LogFn = (level, message, accountId) => {
+    if (alreadySaid.has(message)) return;
+    alreadySaid.add(message);
+    log(level, message, accountId);
+  };
+
   const { data: campaignRow } = await db
     .from('tg_outreach_campaigns')
     .select('*')
@@ -305,50 +326,26 @@ export async function runWarmupLoop(
   }
   onProgress?.();
 
-  // Необязательный этап: активность в публичных чатах. Флаг снят на момент
-  // старта, поэтому уже идущий прогрев не подхватит его при перезапуске
-  // воркера — как и остальные настройки прогона.
-  const publicChatsEnabled = Boolean(
-    (run.settings as { public_chats?: boolean } | null)?.public_chats,
-  );
   const chatsById = new Map<string, WarmupChat>();
   /** Свои tg_user_id: на публике аккаунты не должны отвечать друг другу. */
   const ownUserIds = new Set<number>();
+  for (const a of accounts) if (a.tg_user_id) ownUserIds.add(Number(a.tg_user_id));
 
-  if (publicChatsEnabled) {
-    for (const a of accounts) if (a.tg_user_id) ownUserIds.add(Number(a.tg_user_id));
-
-    const chats = await cdb.loadUsableChats(db, campaignId);
-    for (const c of chats) chatsById.set(c.id, c);
-
-    if (!chats.length) {
-      log('warning', 'Активность в чатах включена, но в списке нет ни одного проверенного чата — этап пропущен.');
-    } else if (!(await cdb.hasChatAssignments(db, run.id))) {
-      // Раскладка делается один раз на прогон: состав чатов у аккаунта должен
-      // быть постоянным, иначе он весь прогрев мигрирует по чатам — само по
-      // себе заметный след.
-      const assignments = assignChats([...byAccountId.keys()], chats.map((c) => c.id));
-      const w = planningWindow(new Date(), tg);
-      const span = Math.max(w.end.getTime() - w.start.getTime(), 1);
-      const plannedAt = new Map<string, string>(
-        assignments.map((a) => [
-          `${a.accountId}|${a.chatId}`,
-          // Вступления растянуты по окну: шестнадцать аккаунтов, зашедших в
-          // один чат за минуту, — очевидный след.
-          new Date(w.start.getTime() + Math.floor(Math.random() * span)).toISOString(),
-        ]),
-      );
-      await cdb.saveChatAssignments(db, run, assignments, plannedAt);
-      log(
-        'info',
-        `Активность в чатах: ${chats.length} чатов, каждому аккаунту назначено до ${Math.min(3, chats.length)}. Вступление растянуто на сегодня.`,
-      );
-    }
-
-    const requeuedActivities = await cdb.requeueStuckActivities(db, run.id);
-    if (requeuedActivities > 0) {
-      log('info', `Активность в чатах: возвращено в очередь ${requeuedActivities} действий после перезапуска.`);
-    }
+  /*
+   * Уборка после мёртвого процесса — ровно один раз, до первого круга.
+   *
+   * `requeueStuckActivities` не смотрит на возраст: она возвращает в очередь
+   * ЛЮБУЮ активность в статусе «выполняется». Здесь это верно — воркер только
+   * что стартовал, своих активностей у него ещё нет, а всё найденное осталось
+   * от процесса, который умер, не закрыв их. Позвать её на каждом круге значило
+   * бы сбрасывать те, что идут прямо сейчас.
+   *
+   * Зовём независимо от того, включён ли этап чатов: если выключен, активностей
+   * нет и апдейт не заденет ни строки.
+   */
+  const requeuedOnStart = await cdb.requeueStuckActivities(db, run.id);
+  if (requeuedOnStart > 0) {
+    log('info', `Активность в чатах: возвращено в очередь ${requeuedOnStart} действий после перезапуска.`);
   }
 
   try {
@@ -360,6 +357,13 @@ export async function runWarmupLoop(
 
       const now = new Date();
       const day = dayNumber(run, now, tg.timezone_offset ?? 3);
+
+      // Настройки перечитываются каждый круг: оператор может понизить нагрузку,
+      // не останавливая прогрев. План дня строится один раз, поэтому правки
+      // вступают со следующего дня — так и написано в интерфейсе.
+      const settings = normalizeWarmupSettings(fresh.settings);
+      const publicChatsEnabled = settings.public_chats;
+      const limits = dailyLimits(settings, day);
 
       if (day > run.days) {
         const summary = await wdb.buildSummary(
@@ -401,7 +405,8 @@ export async function runWarmupLoop(
       if (!(await wdb.isDayPlanned(db, run.id, day))) {
         const plan = planDay({
           accountIds: [...byAccountId.keys()],
-          day,
+          conversationsPerAccount: limits.conversations,
+          messagesPerConversation: limits.messages,
           previousPairs: await wdb.loadPreviousPairs(db, run.id),
           window: planningWindow(now, tg),
           random: Math.random,
@@ -417,12 +422,18 @@ export async function runWarmupLoop(
         await runOneConversation(db, conv, byAccountId, accountNames, peerCache, log, onProgress);
       }
 
-      if (publicChatsEnabled && chatsById.size) {
-        await runChatStage({
-          db, run, day, now, tg,
-          byAccountId, accountNames, chatsById, ownUserIds,
-          shouldStop, log, onProgress,
+      if (publicChatsEnabled) {
+        await ensureChatStageReady({
+          db, run, campaignId, accountIds: [...byAccountId.keys()],
+          chatsById, settings, tg, log, logOnce,
         });
+        if (chatsById.size) {
+          await runChatStage({
+            db, run, day, now, tg, limits,
+            byAccountId, accountNames, chatsById, ownUserIds,
+            shouldStop, log, onProgress,
+          });
+        }
       }
 
       await persistSessions(db, clients, log);
@@ -483,6 +494,62 @@ async function persistSessions(
 }
 
 /**
+ * Подготовить этап публичных чатов: подтянуть список чатов и разложить по ним
+ * аккаунты.
+ *
+ * Зовётся каждый круг, а не один раз при старте: этап можно включить настройкой
+ * посреди прогрева. Раскладка защищена проверкой `hasChatAssignments` — состав
+ * чатов у аккаунта должен быть постоянным, иначе он весь прогрев мигрирует по
+ * чатам, а это само по себе заметный след.
+ */
+async function ensureChatStageReady(params: {
+  db: SupabaseClient;
+  run: WarmupRun;
+  campaignId: string;
+  accountIds: string[];
+  chatsById: Map<string, WarmupChat>;
+  settings: WarmupSettings;
+  tg: TelegramSettings;
+  log: LogFn;
+  /**
+   * Лог «один раз за прогон» — для жалобы на пустой список чатов: она верна на
+   * каждом круге, а круги идут раз в минуту.
+   */
+  logOnce: LogFn;
+}): Promise<void> {
+  const { db, run, campaignId, accountIds, chatsById, settings, tg, log, logOnce } = params;
+
+  const chats = await cdb.loadUsableChats(db, campaignId);
+  chatsById.clear();
+  for (const c of chats) chatsById.set(c.id, c);
+
+  if (!chats.length) {
+    logOnce('warning', 'Активность в чатах включена, но в списке нет ни одного проверенного чата — этап пропущен.');
+    return;
+  }
+
+  if (!(await cdb.hasChatAssignments(db, run.id))) {
+    const perAccount = Math.min(settings.chats_per_account, chats.length);
+    const assignments = assignChats(accountIds, chats.map((c) => c.id), settings.chats_per_account);
+    const w = planningWindow(new Date(), tg);
+    const span = Math.max(w.end.getTime() - w.start.getTime(), 1);
+    const plannedAt = new Map<string, string>(
+      assignments.map((a) => [
+        `${a.accountId}|${a.chatId}`,
+        // Вступления растянуты по окну: шестнадцать аккаунтов, зашедших в один
+        // чат за минуту, — очевидный след.
+        new Date(w.start.getTime() + Math.floor(Math.random() * span)).toISOString(),
+      ]),
+    );
+    await cdb.saveChatAssignments(db, run, assignments, plannedAt);
+    log(
+      'info',
+      `Активность в чатах: ${chats.length} чатов, каждому аккаунту назначено до ${perAccount}. Вступление растянуто на сегодня.`,
+    );
+  }
+}
+
+/**
  * Один проход этапа публичных чатов: вступления и активности, которым пора.
  *
  * Вынесено из главного цикла отдельной функцией: тело цикла и так ведёт день,
@@ -496,6 +563,8 @@ async function runChatStage(args: {
   day: number;
   now: Date;
   tg: TelegramSettings;
+  /** Дневные нормы прогона: сколько ответов и реакций даёт один аккаунт. */
+  limits: DailyLimits;
   byAccountId: Map<string, ActiveClient>;
   accountNames: Map<string, string>;
   chatsById: Map<string, WarmupChat>;
@@ -505,7 +574,7 @@ async function runChatStage(args: {
   onProgress?: () => void;
 }): Promise<void> {
   const {
-    db, run, day, now, tg, byAccountId, accountNames, chatsById, ownUserIds,
+    db, run, day, now, tg, limits, byAccountId, accountNames, chatsById, ownUserIds,
     shouldStop, log, onProgress,
   } = args;
 
@@ -542,7 +611,8 @@ async function runChatStage(args: {
     if (joined.length) {
       const plan = planChatActivities({
         assignments: joined,
-        day,
+        replies: limits.chatMessages,
+        reactions: limits.chatReactions,
         window: planningWindow(now, tg),
         random: Math.random,
       });

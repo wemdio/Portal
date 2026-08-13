@@ -7,36 +7,9 @@
  */
 import {
   CHATS_PER_ACCOUNT,
-  RAMP_DAYS,
-  REACTIONS_FIRST_DAY,
-  REACTIONS_PEAK,
-  REPLIES_FIRST_DAY,
-  REPLIES_PEAK,
   REPLY_TARGET_MAX_AGE_MIN,
   type WarmupActivityKind,
 } from './types';
-
-/**
- * Значение кривой на дне `day` — та же механика, что у переписок: разгон
- * привязан к RAMP_DAYS, а не к выбранной длине прогрева. День N даёт одну и ту
- * же нагрузку и в трёхдневном прогреве, и в недельном.
- */
-function rampValue(day: number, from: number, to: number): number {
-  if (RAMP_DAYS <= 1) return to;
-  const clamped = Math.min(Math.max(day, 1), RAMP_DAYS);
-  const t = (clamped - 1) / (RAMP_DAYS - 1);
-  return Math.round(from + (to - from) * t);
-}
-
-/** Сколько ответов в чатах должен дать один аккаунт в день `day`. */
-export function repliesPerAccount(day: number): number {
-  return rampValue(day, REPLIES_FIRST_DAY, REPLIES_PEAK);
-}
-
-/** Сколько реакций должен поставить один аккаунт в день `day`. */
-export function reactionsPerAccount(day: number): number {
-  return rampValue(day, REACTIONS_FIRST_DAY, REACTIONS_PEAK);
-}
 
 export interface ChatAssignment {
   accountId: string;
@@ -84,13 +57,13 @@ export interface PlannedActivity {
 export interface PlanChatActivitiesParams {
   /** Уже отфильтрованные пары: без запрещённых чатов и отвалившихся аккаунтов. */
   assignments: ChatAssignment[];
-  day: number;
+  /** Сколько ответов должен дать один аккаунт за этот день. */
+  replies: number;
+  /** Сколько реакций должен поставить один аккаунт за этот день. */
+  reactions: number;
   /** Активное окно суток: ночью аккаунты молчат. */
   window: { start: Date; end: Date };
   random: () => number;
-  /** Только для тестов: подменить дневные нормы. */
-  repliesOverride?: number;
-  reactionsOverride?: number;
 }
 
 /**
@@ -102,11 +75,12 @@ export interface PlanChatActivitiesParams {
  * размазываются, а не выстраиваются в ровную очередь по чатам.
  */
 export function planChatActivities(params: PlanChatActivitiesParams): PlannedActivity[] {
-  const { assignments, day, window, random } = params;
+  const { assignments, window, random } = params;
   if (!assignments.length) return [];
 
-  const replies = params.repliesOverride ?? repliesPerAccount(day);
-  const reactions = params.reactionsOverride ?? reactionsPerAccount(day);
+  const replies = Math.max(params.replies, 0);
+  const reactions = Math.max(params.reactions, 0);
+  if (!replies && !reactions) return [];
 
   const chatsByAccount = new Map<string, string[]>();
   for (const { accountId, chatId } of assignments) {
