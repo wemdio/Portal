@@ -114,15 +114,22 @@ export default function RenewalsView() {
         }}
       />
 
-      {loading && <div className="py-10 text-center text-sm text-zinc-400">Загрузка…</div>}
-      {error && !loading && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+      {/* Три состояния одним слотом с постоянными ключами — та же защита, что
+          на дашборде первички: тремя независимыми условиями React сверял
+          позиции детей и при смене периода оставлял над карточками узел старой
+          таблицы (инцидент 13.08.2026). Здесь набор блоков такой же, поэтому и
+          лечение одинаковое. */}
+      {loading ? (
+        <div key="loading" className="py-10 text-center text-sm text-zinc-400">Загрузка…</div>
+      ) : error ? (
+        <div
+          key="error"
+          className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+        >
           Ошибка загрузки: {error}
         </div>
-      )}
-
-      {!loading && !error && data && (
-        <>
+      ) : data ? (
+        <div key="content" className="space-y-4">
           <KpiRow totals={data.totals} />
 
           {/* Воронка выше динамики: она отвечает на «где сейчас проекты и
@@ -175,8 +182,8 @@ export default function RenewalsView() {
             Фильтров по каналу маркетинга и сфере деятельности здесь пока нет: канал заполнен только у 3 продлений из
             32, а поле сферы деятельности в базе не заведено. Добавим, когда появятся данные.
           </p>
-        </>
-      )}
+        </div>
+      ) : null}
     </div>
   );
 }
