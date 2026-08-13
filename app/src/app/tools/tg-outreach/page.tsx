@@ -29,7 +29,9 @@ import {
   Database,
   ShieldCheck,
   FileSpreadsheet,
+  LayoutDashboard,
 } from 'lucide-react';
+import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
 import type {
   CampaignStatus,
@@ -4109,6 +4111,9 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
 
 /* =================== CAMPAIGN VIEW (5 tabs) =================== */
 const TABS = [
+  // Сводка первой и стартовой: открывая кампанию, оператор спрашивает «как
+  // дела», а не «какие тут настройки» — их заводят один раз и больше не трогают.
+  { id: 'dashboard', label: 'Сводка', icon: LayoutDashboard },
   { id: 'settings', label: 'Настройки', icon: Settings },
   { id: 'accounts', label: 'Аккаунты', icon: Users },
   { id: 'bases', label: 'Базы', icon: Database },
@@ -4125,7 +4130,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   onUpdate: () => void;
   onDelete: (id: string) => void;
 }) {
-  const [tab, setTab] = useState<string>('settings');
+  const [tab, setTab] = useState<string>('dashboard');
   const [actionLoading, setActionLoading] = useState(false);
   const [stopping, setStopping] = useState(false);
   const stoppingRef = useRef(false);
@@ -4318,6 +4323,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
       </div>
 
       <div>
+        {tab === 'dashboard' && <DashboardTab campaignId={campaign.id} />}
         {tab === 'settings' && <SettingsTab campaign={campaign} onSave={saveSettings} />}
         {tab === 'accounts' && (
           <CampaignAccountsTab campaignId={campaign.id} campaignStatus={campaign.status} />
