@@ -57,7 +57,11 @@ function Tile({
   amber?: boolean;
 }) {
   return (
-    <div className={`glass-tile px-4 py-3 ${amber ? 'glass-tint-amber' : ''}`}>
+    // h-full — чтобы плашка занимала всю высоту ячейки сетки. Без него та,
+    // что обёрнута в кнопку («Без источника»), села бы по высоте своего
+    // содержимого: у неё нет ни подписи, ни дельты, и она оказалась бы ниже
+    // соседей. Сетка растягивает саму кнопку, но не вложенный в неё div.
+    <div className={`glass-tile h-full px-4 py-3 ${amber ? 'glass-tint-amber' : ''}`}>
       <p className={`text-[10px] font-medium uppercase tracking-wider ${amber ? 'text-amber-600' : 'text-zinc-400'}`}>
         {label}
       </p>

@@ -9,7 +9,8 @@ import FiltersBar, { getDefaultFilters, type FiltersState } from '@/components/f
 import KpiRow from '@/components/first-sales/KpiRow';
 import TimeSeriesChart from '@/components/first-sales/TimeSeriesChart';
 import FunnelChart from '@/components/first-sales/FunnelChart';
-import SourceTable, { drillKey } from '@/components/first-sales/SourceTable';
+import SourceTable from '@/components/first-sales/SourceTable';
+import { drillKey } from '@/components/first-sales/DealDrillDown';
 import ManagerTable from '@/components/first-sales/ManagerTable';
 import MeetingLinksEditor from '@/components/first-sales/MeetingLinksEditor';
 
@@ -277,7 +278,7 @@ export default function FirstSalesView() {
                 filters={tableFilters}
               />
 
-              <ManagerTable rows={data.byManager} />
+              <ManagerTable key={drillKey(tableFilters)} rows={data.byManager} filters={tableFilters} />
             </>
           )}
 

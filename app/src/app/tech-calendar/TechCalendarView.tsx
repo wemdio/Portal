@@ -1,0 +1,206 @@
+'use client';
+
+import { useCallback, useEffect, useMemo, useState } from 'react';
+
+import { supabase } from '@/lib/supabaseClient';
+import MonthGrid from '@/components/tech-calendar/MonthGrid';
+import StatsRow from '@/components/tech-calendar/StatsRow';
+import SubscriptionModal, { type ModalMode, type ModalPayload } from '@/components/tech-calendar/SubscriptionModal';
+import TypeBreakdown from '@/components/tech-calendar/TypeBreakdown';
+import UpcomingList from '@/components/tech-calendar/UpcomingList';
+import { mskDateStr } from '@/lib/techCalendar/dates';
+import type { ServiceType, TechSubscription } from '@/lib/techCalendar/types';
+
+const MONTH_NAMES = [
+  'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+  'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
+];
+
+async function authHeaders(): Promise<Record<string, string>> {
+  const { data: { session } } = await supabase.auth.getSession();
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${session?.access_token ?? ''}`,
+  };
+}
+
+export default function TechCalendarView() {
+  const today = mskDateStr(new Date());
+  const [subscriptions, setSubscriptions] = useState<TechSubscription[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [typeFilter, setTypeFilter] = useState<ServiceType | null>(null);
+
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth());
+
+  const [modalMode, setModalMode] = useState<ModalMode | null>(null);
+  const [modalSub, setModalSub] = useState<TechSubscription | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/tech-calendar/subscriptions', { headers: await authHeaders() });
+      const json = await res.json();
+      setSubscriptions(res.ok ? (json.subscriptions ?? []) : []);
+      if (!res.ok) setError(json.error ?? 'Не удалось загрузить список');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const visible = useMemo(
+    () => (typeFilter ? subscriptions.filter((s) => s.service_type === typeFilter) : subscriptions),
+    [subscriptions, typeFilter],
+  );
+
+  const submit = async (payload: ModalPayload) => {
+    setSaving(true);
+    setError(null);
+    try {
+      const headers = await authHeaders();
+      let res: Response;
+      if (modalMode === 'create') {
+        res = await fetch('/api/tech-calendar/subscriptions', { method: 'POST', headers, body: JSON.stringify(payload) });
+      } else if (modalMode === 'edit' && modalSub) {
+        res = await fetch(`/api/tech-calendar/subscriptions/${modalSub.id}`, { method: 'PATCH', headers, body: JSON.stringify(payload) });
+      } else if (modalMode === 'renew' && modalSub) {
+        res = await fetch(`/api/tech-calendar/subscriptions/${modalSub.id}/renew`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ next_billing_date: payload.next_billing_date, amount: payload.amount }),
+        });
+      } else {
+        return;
+      }
+
+      const json = await res.json();
+      if (!res.ok) {
+        setError(json.error ?? 'Не удалось сохранить');
+        return;
+      }
+      setModalMode(null);
+      setModalSub(null);
+      await load();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const decide = async (sub: TechSubscription, decision: 'keep' | 'cancel') => {
+    const res = await fetch(`/api/tech-calendar/subscriptions/${sub.id}/decision`, {
+      method: 'POST',
+      headers: await authHeaders(),
+      body: JSON.stringify({ decision }),
+    });
+    if (res.ok) await load();
+  };
+
+  const remove = async (sub: TechSubscription) => {
+    if (!window.confirm(`Удалить «${sub.service_name}» из календаря?`)) return;
+    const res = await fetch(`/api/tech-calendar/subscriptions/${sub.id}`, {
+      method: 'DELETE',
+      headers: await authHeaders(),
+    });
+    if (res.ok) await load();
+  };
+
+  const shiftMonth = (delta: number) => {
+    const next = month + delta;
+    setYear(year + Math.floor(next / 12));
+    setMonth(((next % 12) + 12) % 12);
+  };
+
+  return (
+    <div className="mx-auto max-w-7xl space-y-4 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold text-gray-900">Календарь технички</h1>
+          <p className="text-sm text-gray-500">Прокси, серверы, API и софт: что и когда платим</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setModalSub(null);
+            setModalMode('create');
+          }}
+          className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
+        >
+          Добавить сервис
+        </button>
+      </div>
+
+      <StatsRow subscriptions={visible} year={year} month={month} today={today} />
+      <TypeBreakdown subscriptions={subscriptions} year={year} month={month} selected={typeFilter} onSelect={setTypeFilter} />
+
+      <div className="flex items-center justify-between">
+        <button type="button" onClick={() => shiftMonth(-1)} className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm">
+          ←
+        </button>
+        <div className="text-sm font-medium text-gray-900">
+          {MONTH_NAMES[month]} {year}
+        </div>
+        <button type="button" onClick={() => shiftMonth(1)} className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm">
+          →
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="rounded-xl border border-gray-100 bg-white p-8 text-center text-sm text-gray-500">Загрузка…</div>
+      ) : (
+        <MonthGrid
+          subscriptions={visible}
+          year={year}
+          month={month}
+          today={today}
+          onSelect={(sub) => {
+            setModalSub(sub);
+            setModalMode('edit');
+          }}
+        />
+      )}
+
+      <UpcomingList
+        subscriptions={visible}
+        today={today}
+        onRenew={(sub) => {
+          setModalSub(sub);
+          setModalMode('renew');
+        }}
+        onDecide={decide}
+      />
+
+      {error && !modalMode && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{error}</div>}
+
+      {modalMode && (
+        <SubscriptionModal
+          mode={modalMode}
+          subscription={modalSub}
+          saving={saving}
+          error={error}
+          onClose={() => {
+            setModalMode(null);
+            setModalSub(null);
+            setError(null);
+          }}
+          onSubmit={submit}
+          onDelete={
+            modalMode === 'edit' && modalSub
+              ? async () => {
+                  await remove(modalSub);
+                  setModalMode(null);
+                  setModalSub(null);
+                }
+              : undefined
+          }
+        />
+      )}
+    </div>
+  );
+}

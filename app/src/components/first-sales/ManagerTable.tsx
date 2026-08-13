@@ -1,6 +1,10 @@
 'use client';
 
+import { Fragment, useState } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import type { ManagerBreakdown } from '@/lib/firstSales/metrics';
+import type { FiltersState } from '@/components/first-sales/FiltersBar';
+import DealDrillDown from '@/components/first-sales/DealDrillDown';
 import { useSortableRows, type SortColumns } from '@/components/ui/useSortableRows';
 import { SortableTh } from '@/components/ui/SortableTh';
 
@@ -47,8 +51,18 @@ const managerSortColumns: SortColumns<ManagerBreakdown> = {
   money: { type: 'number', getValue: (r) => r.money },
 };
 
-export default function ManagerTable({ rows }: { rows: ManagerBreakdown[] }) {
+export default function ManagerTable({
+  rows,
+  filters,
+}: {
+  rows: ManagerBreakdown[];
+  filters: FiltersState;
+}) {
   const { sortedRows, sort, toggleSort } = useSortableRows(rows, managerSortColumns);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const toggle = (manager: string) => {
+    setExpanded((cur) => (cur === manager ? null : manager));
+  };
 
   const totals = rows.reduce(
     (acc, r) => ({
@@ -81,9 +95,25 @@ export default function ManagerTable({ rows }: { rows: ManagerBreakdown[] }) {
             </tr>
           </thead>
           <tbody>
-            {sortedRows.map((r) => (
-              <tr key={r.manager} className="border-b border-zinc-50 last:border-0">
-                <td className="px-3 py-2 text-zinc-800">{r.manager}</td>
+            {sortedRows.map((r) => {
+              const isOpen = expanded === r.manager;
+              return (
+              <Fragment key={r.manager}>
+              <tr
+                onClick={() => toggle(r.manager)}
+                className="cursor-pointer border-b border-zinc-50 last:border-0 hover:bg-zinc-50/60"
+                aria-expanded={isOpen}
+              >
+                <td className="px-3 py-2 text-zinc-800">
+                  <div className="flex items-center gap-1.5">
+                    {isOpen ? (
+                      <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                    ) : (
+                      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                    )}
+                    <span>{r.manager}</span>
+                  </div>
+                </td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(r.leads)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(r.qualified)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(r.meetings)}</td>
@@ -92,7 +122,10 @@ export default function ManagerTable({ rows }: { rows: ManagerBreakdown[] }) {
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-500">{pct(r.qualified, r.leads)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-500">{pct(r.contracts, r.leads)}</td>
               </tr>
-            ))}
+              {isOpen && <DealDrillDown query={{ manager: r.manager }} filters={filters} colSpan={8} />}
+              </Fragment>
+              );
+            })}
             <tr className="bg-zinc-50 font-medium">
               <td className="px-3 py-2 text-zinc-700">Итого</td>
               <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(totals.leads)}</td>

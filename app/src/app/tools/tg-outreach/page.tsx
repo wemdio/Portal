@@ -35,6 +35,7 @@ import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
 import type {
   CampaignStatus,
+  DialogStatus,
   OutreachCampaign,
   OutreachAccount,
   OutreachProxy,
@@ -50,6 +51,11 @@ import {
   DEFAULT_TELEGRAM_SETTINGS,
   DEFAULT_FOLLOW_UP,
 } from '@/lib/tgOutreach/types';
+import {
+  describeAutoForward,
+  autoForwardWarning,
+  type AutoForwardMark,
+} from '@/lib/tgOutreach/autoForward';
 import { DEFAULT_MAX_MESSAGE_CHARS } from '@/lib/tgOutreach/firstTouch/validateMessage';
 import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
 // Только тип: сам модуль серверный (тянет gramJS), в клиентский бандл он не
@@ -149,6 +155,41 @@ function ForwardBadge({
       <Send className="h-3 w-3" />
       {pending ? 'В очереди: ' : 'Передан: '}
       {forward.kind === 'lead' ? 'лид' : 'партнёр'}
+    </span>
+  );
+}
+
+/**
+ * Контакт ушёл менеджеру сам, по положительному триггеру.
+ *
+ * Отдельно от `ForwardBadge`: та плашка про очередь ручной передачи, эта — про
+ * то, что воркер уже сделал без оператора. Раньше от автопересылки в карточке
+ * оставался только статус «Лид», который точно так же ставится руками, и
+ * человека передавали менеджеру второй раз, не зная, что он уже там.
+ */
+function AutoForwardBadge({
+  mark,
+  compact = false,
+}: {
+  mark: AutoForwardMark;
+  /** Компактный размер — под остальные бейджи в строке списка. */
+  compact?: boolean;
+}) {
+  const sent = mark.state === 'sent';
+  const size = compact ? 'gap-1 px-2 py-0.5' : 'ml-2 gap-1.5 px-3 py-1';
+  const tone = sent
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    : 'border-rose-200 bg-rose-50 text-rose-700';
+  const where = mark.chat ? `, чат ${mark.chat}` : '';
+  return (
+    <span
+      title={sent
+        ? `Переписка ушла менеджеру автоматически, по положительному триггеру${where}. ${formatDate(mark.at)}`
+        : `Автопересылка менеджеру не удалась${where} — ${mark.reason}. Лид до менеджера не дошёл.`}
+      className={`inline-flex items-center rounded-full border text-[10px] font-medium ${size} ${tone}`}
+    >
+      <UserCheck className="h-3 w-3" />
+      {sent ? 'Ушёл менеджеру' : 'Не ушёл менеджеру'}
     </span>
   );
 }
@@ -301,9 +342,9 @@ function SettingsTab({ campaign, onSave }: {
 
   return (
     <div className="space-y-6">
-      {/* OpenRouter */}
+      {/* Промпт, триггеры и чаты-приёмники. Заголовка нет намеренно: «OpenRouter»
+          называл поставщика модели, а не то, что оператор здесь настраивает. */}
       <section className="space-y-4">
-        <h3 className="text-sm font-semibold text-gray-800">OpenRouter</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <Field label="Название проекта" value={openai.project_name} onChange={v => setOAI('project_name', v)} />
         </div>
@@ -928,6 +969,8 @@ function DialogsTab({ campaignId }: {
   campaignId: string;
 }) {
   const [dialogs, setDialogs] = useState<OutreachDialog[]>([]);
+  /** Диалог, у которого не сохранилось изменение, и причина — под его карточкой. */
+  const [dialogSaveError, setDialogSaveError] = useState<{ id: string; message: string } | null>(null);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [offset, setOffset] = useState(0);
@@ -974,17 +1017,43 @@ function DialogsTab({ campaignId }: {
 
   useEffect(() => { queueMicrotask(() => { void fetchDialogs(); void fetchAccounts(); }); }, [fetchDialogs, fetchAccounts]);
 
-  const updateDialog = async (id: string, patch: { status?: string; can_send?: boolean }) => {
-    const res = await authFetch(`${API_BASE}/dialogs/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify(patch),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => null) as { error?: string } | null;
-      alert(body?.error ?? `Не удалось обновить диалог (HTTP ${res.status})`);
-      return;
+  /**
+   * Пометка статуса и тумблер «можно писать» — оптимистично.
+   *
+   * Раньше после сохранения перезагружался весь список: раскрытая карточка
+   * схлопывалась, прокрутка уезжала, и оператор, размечающий подряд, каждый раз
+   * искал место заново. Ответ сервера при этом ничего нового не приносит — он
+   * возвращает то же значение, которое мы и отправили.
+   *
+   * Поэтому меняем состояние сразу, а запрос уходит фоном. Не сохранилось —
+   * возвращаем прежнее значение и пишем причину рядом с карточкой: молча
+   * откатить хуже, чем не откатить вовсе, оператор был бы уверен, что пометил.
+   */
+  const updateDialog = async (id: string, patch: { status?: DialogStatus; can_send?: boolean }) => {
+    const before = dialogs.find((d) => d.id === id);
+    if (!before) return;
+
+    setDialogs((cur) => cur.map((d) => (d.id === id ? { ...d, ...patch } : d)));
+    setDialogSaveError((cur) => (cur?.id === id ? null : cur));
+
+    try {
+      const res = await authFetch(`${API_BASE}/dialogs/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error ?? `сервер ответил ${res.status}`);
+      }
+    } catch (err) {
+      // Возвращаем именно прежний объект целиком: патч мог тронуть несколько
+      // полей, и откатывать их по одному — лишний способ ошибиться.
+      setDialogs((cur) => cur.map((d) => (d.id === id ? before : d)));
+      setDialogSaveError({
+        id,
+        message: err instanceof Error ? err.message : 'не удалось связаться с сервером',
+      });
     }
-    void fetchDialogs();
   };
 
   const deleteDialog = async (id: string) => {
@@ -1013,8 +1082,17 @@ function DialogsTab({ campaignId }: {
       }
 
       const what = kind === 'lead' ? 'лида' : 'кандидата в партнёры';
+      // Контакт мог уйти менеджеру сам, по триггеру, — тогда ручная передача
+      // задвоит его у адресата. Запрещать не за что: автопересылка отправляет
+      // голую переписку, без карточки с контекстом, и досылать её бывает нужно.
+      // Решает оператор, но с открытыми глазами.
+      const warning = autoForwardWarning(
+        dialog,
+        dialog.auto_forwarded_at ? formatDate(dialog.auto_forwarded_at) : null,
+      );
       if (!confirm(
-        `Передать ${what} в ${preview?.target_chat}?\n\n`
+        (warning ? `⚠ ${warning}\n\n` : '')
+        + `Передать ${what} в ${preview?.target_chat}?\n\n`
         + 'Отправит аккаунт кампании, когда воркер дойдёт до него в круге.\n'
         + 'Отменить отправку после этого будет нельзя.\n\n'
         + `——— Текст сообщения ———\n${preview?.text ?? ''}`,
@@ -1132,6 +1210,7 @@ function DialogsTab({ campaignId }: {
           {dialogs.map(d => {
             const isExpanded = expandedId === d.id;
             const st = DIALOG_STATUS_LABELS[d.status] ?? DIALOG_STATUS_LABELS.none;
+            const autoMark = describeAutoForward(d);
             return (
               <div key={d.id} className="rounded-xl border border-gray-200 bg-white shadow-sm">
                 <button type="button" onClick={() => setExpandedId(isExpanded ? null : d.id)}
@@ -1173,6 +1252,7 @@ function DialogsTab({ campaignId }: {
                       >
                         {d.can_send === false ? 'Не писать' : 'Можно писать'}
                       </span>
+                      {autoMark && <AutoForwardBadge mark={autoMark} compact />}
                       {d.forward && d.forward.status !== 'failed' && (
                         <ForwardBadge forward={d.forward} compact />
                       )}
@@ -1184,9 +1264,18 @@ function DialogsTab({ campaignId }: {
                 </button>
                 {isExpanded && (
                   <div className="border-t border-gray-100 px-4 py-3 space-y-3">
+                    {dialogSaveError?.id === d.id && (
+                      <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">
+                        <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          Не сохранилось, состояние вернулось к прежнему: {dialogSaveError.message}.
+                          Попробуйте ещё раз — если повторяется, проверьте связь с сервером.
+                        </span>
+                      </div>
+                    )}
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs text-gray-500">Статус:</span>
-                      {['none', 'lead', 'not_lead', 'later'].map(s => (
+                      {(['none', 'lead', 'not_lead', 'later'] as DialogStatus[]).map(s => (
                         <button key={s} type="button"
                           onClick={() => void updateDialog(d.id, { status: s })}
                           className={`rounded-full px-3 py-1 text-[10px] font-medium transition border cursor-pointer ${d.status === s ? 'bg-indigo-100 border-indigo-300 text-indigo-700' : 'border-gray-200 text-gray-600 hover:border-indigo-200 hover:bg-indigo-50'}`}>
@@ -1201,6 +1290,11 @@ function DialogsTab({ campaignId }: {
                           показывает плашку вместо пары кнопок: гасить их и
                           оставлять на экране — приглашать кликать в
                           недоступное. */}
+                      {/* Что произошло само, до оператора: контакт уже у
+                          менеджера. Кнопки рядом остаются рабочими — автопересылка
+                          уходит без карточки с контекстом, и досылать её иногда
+                          нужно. Про риск задвоения предупредим на подтверждении. */}
+                      {autoMark && <AutoForwardBadge mark={autoMark} />}
                       {d.forward && d.forward.status !== 'failed' ? (
                         <ForwardBadge forward={d.forward} />
                       ) : (
@@ -1253,6 +1347,17 @@ function DialogsTab({ campaignId }: {
                       <p className="mt-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[10px] text-rose-700">
                         Не отправлено ({d.forward.kind === 'lead' ? 'лид' : 'партнёр'}):{' '}
                         {d.forward.error_message || 'причина не записана'}
+                      </p>
+                    )}
+                    {/* Сорвавшаяся автопересылка: лид, который не доехал до
+                        менеджера. Диалог при этом всё равно стал «Лидом» — без
+                        этой строки провал не отличить от успеха, а причина
+                        лежала бы только в журнале кампании. Передать руками
+                        кнопкой рядом — единственный способ довести до конца. */}
+                    {autoMark?.state === 'failed' && (
+                      <p className="mt-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[10px] text-rose-700">
+                        Автопересылка менеджеру не удалась{autoMark.chat ? ` (${autoMark.chat})` : ''}:{' '}
+                        {autoMark.reason}
                       </p>
                     )}
                     {/* Аудит can_send: кто/когда/почему последний раз менял.
@@ -3877,9 +3982,10 @@ function toDateInput(ms: number): string {
 /**
  * Отчёт к договору: три раздела формы, выгрузка в XLSX.
  *
- * По умолчанию — прошедшая неделя с понедельника по воскресенье: отчёт сдаётся
- * по понедельникам и именно за неё. Даты можно менять — форма допускает и
- * длинный период с накоплением недельных строк.
+ * По умолчанию — текущий месяц с первого числа по сегодня включительно. Отчёт
+ * чаще всего смотрят «что накопилось в этом месяце», и открывать его на уже
+ * закрытой прошлой неделе значило бы прятать свежие дни. Даты можно менять —
+ * форма допускает и длинный период с накоплением недельных строк.
  *
  * Колонки, которых в данных нет (номер оффера, критерий отбора, качество лида,
  * дата передачи клиенту), отдаются пустыми и заполняются руками уже в файле.
@@ -3887,14 +3993,17 @@ function toDateInput(ms: number): string {
  */
 function CampaignReportTab({ campaignId }: { campaignId: string }) {
   const [{ from, to }, setPeriod] = useState(() => {
+    // Первое число текущего месяца собираем из частей московской даты, а не
+    // арифметикой по миллисекундам: длина месяца разная, и вычитать «столько-то
+    // суток» пришлось бы с оглядкой на февраль.
     const now = Date.now();
-    const msk = now + 3 * 3_600_000;
-    const dayIndex = Math.floor(msk / 86_400_000);
-    const weekday = ((dayIndex + 3) % 7 + 7) % 7;
-    const thisMonday = (dayIndex - weekday) * 86_400_000 - 3 * 3_600_000;
+    const msk = new Date(now + 3 * 3_600_000);
+    const month = String(msk.getUTCMonth() + 1).padStart(2, '0');
     return {
-      from: toDateInput(thisMonday - 7 * 86_400_000),
-      to: toDateInput(thisMonday - 86_400_000),
+      from: `${msk.getUTCFullYear()}-${month}-01`,
+      // Сегодня — и поле, и API трактуют верхнюю границу включительно
+      // (`range()` ниже сам добавляет сутки).
+      to: toDateInput(now),
     };
   });
   const [data, setData] = useState<ReportResponse['report'] | null>(null);
@@ -3975,7 +4084,7 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
 
       {!data && !loading && (
         <p className="text-xs text-gray-400">
-          По умолчанию стоит прошедшая неделя, с понедельника по воскресенье. Нажмите «Собрать отчёт».
+          По умолчанию стоит текущий месяц: с первого числа по сегодня включительно. Нажмите «Собрать отчёт».
         </p>
       )}
 

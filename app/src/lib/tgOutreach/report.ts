@@ -23,7 +23,12 @@ export interface ReportDialog {
   tg_user_id: number | null;
   tg_username: string | null;
   status: string;
-  messages: Array<{ role?: string; timestamp?: string }> | null;
+  /**
+   * `content` отчётам не нужен — считают они по ролям и времени. Но в базе он
+   * есть, и тесты собирают фикстуры такими же, как реальная строка; без поля в
+   * типе литерал с текстом сообщения не компилируется.
+   */
+  messages: Array<{ role?: string; content?: string; timestamp?: string }> | null;
   last_message_at: string | null;
   can_send_changed_at: string | null;
   can_send_changed_reason: string | null;

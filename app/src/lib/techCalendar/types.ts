@@ -1,0 +1,62 @@
+/**
+ * Словарь календаря технички: значения полей и подписи к ним.
+ *
+ * Списки объявлены через `as const` и типы выведены из них, чтобы новый тип
+ * сервиса нельзя было добавить в одном месте и забыть в другом: пропущенный
+ * ключ в `SERVICE_TYPE_LABELS` — ошибка компиляции, а не пустая подпись в
+ * интерфейсе.
+ */
+
+export const SERVICE_TYPES = ['proxy', 'server', 'api', 'software', 'other'] as const;
+export type ServiceType = (typeof SERVICE_TYPES)[number];
+
+export const SERVICE_TYPE_LABELS: Record<ServiceType, string> = {
+  proxy: 'Прокси',
+  server: 'Серверы',
+  api: 'API',
+  software: 'Софт',
+  other: 'Прочее',
+};
+
+export const CURRENCIES = ['RUB', 'USD'] as const;
+export type Currency = (typeof CURRENCIES)[number];
+
+export const BILLING_CYCLES = ['monthly', 'quarterly', 'yearly'] as const;
+export type BillingCycle = (typeof BILLING_CYCLES)[number];
+
+export const CYCLE_LABELS: Record<BillingCycle, string> = {
+  monthly: 'Ежемесячно',
+  quarterly: 'Ежеквартально',
+  yearly: 'Ежегодно',
+};
+
+export const TECH_STATUSES = ['active', 'pending_review', 'keep', 'cancel'] as const;
+export type TechStatus = (typeof TECH_STATUSES)[number];
+
+export const STATUS_LABELS: Record<TechStatus, string> = {
+  active: 'Активна',
+  pending_review: 'Ожидает решения',
+  keep: 'Оставить',
+  cancel: 'Отменить',
+};
+
+export interface TechSubscription {
+  id: string;
+  service_name: string;
+  service_type: ServiceType;
+  amount: number;
+  currency: Currency;
+  billing_cycle: BillingCycle;
+  next_billing_date: string;
+  status: TechStatus;
+  decision_by: string | null;
+  decision_at: string | null;
+  decision_notes: string | null;
+  notes: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Порог жёлтого статуса в календаре. Напоминания приходят позже — см. techRenewalCron. */
+export const PENDING_REVIEW_DAYS = 7;

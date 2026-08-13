@@ -62,6 +62,19 @@ const PERIOD_OPTIONS: Array<{ id: DashboardPeriod; label: string }> = [
   { id: 'all', label: 'Всё время' },
 ];
 
+/**
+ * Стартовые даты «своего периода»: с первого числа текущего месяца по сегодня.
+ * Считаем в том же поясе (+3), в котором dashboard.ts режет сутки, иначе
+ * поздним вечером по Москве подставился бы вчерашний день.
+ */
+function defaultCustomRange(): { from: string; to: string } {
+  const msk = new Date(Date.now() + TZ_OFFSET_HOURS * 3_600_000);
+  const y = msk.getUTCFullYear();
+  const m = String(msk.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(msk.getUTCDate()).padStart(2, '0');
+  return { from: `${y}-${m}-01`, to: `${y}-${m}-${d}` };
+}
+
 /** «13.08» в том же поясе (+3), в котором dashboard.ts режет сутки. */
 function formatDayLabel(iso: string): string {
   const d = new Date(new Date(iso).getTime() + TZ_OFFSET_HOURS * 3_600_000);
@@ -185,6 +198,56 @@ function DailyActivityChart({ days }: { days: DashboardDay[] }) {
   );
 }
 
+/** «2 ч 15 мин» из минут. Прочерк — когда мерить нечего. */
+function formatMinutes(min: number | null): string {
+  if (min === null) return '—';
+  if (min < 60) return `${min} мин`;
+  const hours = Math.floor(min / 60);
+  const rest = min % 60;
+  if (hours < 24) return rest ? `${hours} ч ${rest} мин` : `${hours} ч`;
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours ? `${days} дн ${restHours} ч` : `${days} дн`;
+}
+
+/**
+ * Плашка сигнала рядом с воронкой. Цветная — только когда есть о чём тревожиться:
+ * ноль в красной рамке читается как авария, которой нет.
+ */
+function SignalTile({
+  label,
+  value,
+  caption,
+  hint,
+  alarming = false,
+  amber = false,
+}: {
+  label: string;
+  value: string | number;
+  caption: string;
+  /** Подсказка при наведении: что именно считается и чего в цифре нет. */
+  hint: string;
+  alarming?: boolean;
+  /** Жёлтый вместо красного — для «есть работа», а не «что-то сломалось». */
+  amber?: boolean;
+}) {
+  const tone = !alarming
+    ? { box: 'border-gray-200 bg-white', label: 'text-gray-500', value: 'text-gray-800', cap: 'text-gray-400' }
+    : amber
+      ? { box: 'border-amber-200 bg-amber-50', label: 'text-amber-600', value: 'text-amber-700', cap: 'text-amber-600' }
+      : { box: 'border-rose-200 bg-rose-50', label: 'text-rose-600', value: 'text-rose-700', cap: 'text-rose-500' };
+
+  return (
+    <div className={`flex flex-col gap-1 rounded-xl border p-4 ${tone.box}`}>
+      <span className={`text-xs font-medium ${tone.label}`}>{label}</span>
+      <span className={`text-2xl font-semibold ${tone.value}`}>{value}</span>
+      <span title={hint} className={`cursor-help text-[10px] leading-snug ${tone.cap}`}>
+        {caption}
+      </span>
+    </div>
+  );
+}
+
 function Metric({
   label,
   value,
@@ -217,6 +280,13 @@ function Metric({
 
 export default function DashboardTab({ campaignId }: { campaignId: string }) {
   const [period, setPeriod] = useState<DashboardPeriod>('7d');
+  /**
+   * Произвольный период. null — работает выбранный пресет. Отдельным
+   * состоянием, а не пятым значением `DashboardPeriod`: пресет и пара дат —
+   * разные по форме вещи, и объединение их в одно поле заставило бы каждого
+   * читателя выяснять, что сейчас лежит внутри.
+   */
+  const [custom, setCustom] = useState<{ from: string; to: string } | null>(null);
   const [data, setData] = useState<DashboardApiResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -229,7 +299,10 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
       setLoading(true);
       setError(null);
       try {
-        const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/dashboard?period=${period}`);
+        const qs = custom
+          ? `period=${period}&from=${custom.from}&to=${custom.to}`
+          : `period=${period}`;
+        const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/dashboard?${qs}`);
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           setError((body as { error?: string }).error ?? `Не удалось загрузить сводку (${res.status})`);
@@ -242,7 +315,7 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
         setLoading(false);
       }
     })();
-  }, [campaignId, period]);
+  }, [campaignId, period, custom]);
 
   // Разбивка мёртвых аккаунтов по причине — та же строка, что summarizeAccounts
   // уже посчитал, просто в читаемом виде под карточкой «Мертвы».
@@ -263,15 +336,54 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
               key={opt.id}
               type="button"
               disabled={loading}
-              onClick={() => setPeriod(opt.id)}
+              onClick={() => { setPeriod(opt.id); setCustom(null); }}
               className={`rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
-                period === opt.id ? 'bg-indigo-100 text-indigo-700' : 'text-gray-500 hover:bg-gray-100'
+                period === opt.id && !custom
+                  ? 'bg-indigo-100 text-indigo-700'
+                  : 'text-gray-500 hover:bg-gray-100'
               }`}
             >
               {opt.label}
             </button>
           ))}
+
+          {/* Свой период. По умолчанию — с первого числа текущего месяца по
+              сегодня: чаще всего спрашивают именно «что накопилось в этом
+              месяце», а пресета под это нет. */}
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => setCustom((cur) => (cur ? null : defaultCustomRange()))}
+            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
+              custom ? 'bg-indigo-100 text-indigo-700' : 'text-gray-500 hover:bg-gray-100'
+            }`}
+          >
+            Свой период
+          </button>
         </div>
+
+        {custom && (
+          <div className="ml-3 flex items-center gap-1.5">
+            <input
+              type="date"
+              value={custom.from}
+              max={custom.to}
+              disabled={loading}
+              onChange={(e) => setCustom({ ...custom, from: e.target.value })}
+              className="rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-700"
+            />
+            <span className="text-xs text-gray-400">—</span>
+            <input
+              type="date"
+              value={custom.to}
+              min={custom.from}
+              disabled={loading}
+              onChange={(e) => setCustom({ ...custom, to: e.target.value })}
+              className="rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-700"
+            />
+            <span className="text-[10px] text-gray-400">включительно</span>
+          </div>
+        )}
       </div>
 
       {loading ? (
@@ -285,15 +397,66 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
         </div>
       ) : data ? (
         <>
-          {/* Воронка + блокировки рядом, но не в ней: это сигнал «пережали
-              с темпом», а не полезный шаг рассылки. */}
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_180px]">
-            <DashboardFunnel funnel={data.dashboard.funnel} />
-            <div className="flex flex-col items-start justify-center gap-1 rounded-xl border border-rose-200 bg-rose-50 p-4">
-              <span className="text-xs font-medium text-rose-600">Заблокировали</span>
-              <span className="text-2xl font-semibold text-rose-700">{data.dashboard.blocks}</span>
-              <span className="text-[10px] text-rose-500">не шаг воронки — сигнал «пережали с темпом»</span>
-            </div>
+          {/* Воронка отдельной строкой, сигналы — своей. Раньше блокировки
+              жались узкой колонкой сбоку; впятером они бы там не поместились,
+              а главное — это однородный ряд, и читать его удобнее в строку. */}
+          <DashboardFunnel funnel={data.dashboard.funnel} />
+
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+            <SignalTile
+              label="Заблокировали нас"
+              value={data.dashboard.blocks}
+              alarming={data.dashboard.blocks > 0}
+              caption="закрыли доступ аккаунту, с которого писали. Растёт — снижайте темп"
+              hint={
+                'Диалоги, где Telegram отказал в отправке с кодом «пользователь заблокировал». '
+                + 'Узнаём об этом только при следующей попытке написать, поэтому число заведомо неполное: '
+                + 'кто заблокировал после последней реплики цепочки, сюда не попадёт.'
+              }
+            />
+            <SignalTile
+              label="Недоступны"
+              value={data.dashboard.unreachable}
+              alarming={data.dashboard.unreachable > 0}
+              caption="удалённые аккаунты и прочие мёртвые контакты"
+              hint={
+                'Удалённый аккаунт, невалидный peer, бан в канале и прочая недоступность. '
+                + 'Блокировки сюда НЕ входят — у них своя цифра слева, иначе один человек считался бы дважды. '
+                + 'Высокая доля обычно значит, что база старая или собрана некачественно.'
+              }
+            />
+            <SignalTile
+              label="Ждут ответа"
+              value={data.dashboard.awaiting}
+              caption="написали в этот период и пока молчат"
+              hint={
+                'Диалоги, где наше первое сообщение попало в период, а ответа нет до сих пор — '
+                + 'даже если он придёт позже конца периода. Это размер «висящего» пула: '
+                + 'из него ещё могут прийти ответы, и он же показывает, сколько касаний ушло впустую.'
+              }
+            />
+            <SignalTile
+              label="Требуют внимания"
+              value={data.dashboard.needsAttention}
+              alarming={data.dashboard.needsAttention > 0}
+              amber
+              caption="ответили, но статус не проставлен и менеджеру не передали"
+              hint={
+                'Очередь работы оператора: человек ответил в этом периоде, но диалог до сих пор без статуса '
+                + '(не «Целевой», не «Не целевой», не «Позже») и менеджеру не передан. '
+                + 'Сорвавшиеся передачи внимание не снимают — до менеджера такой диалог не дошёл.'
+              }
+            />
+            <SignalTile
+              label="Отвечают за"
+              value={formatMinutes(data.dashboard.avgReplyMinutes)}
+              caption="в среднем от нашего сообщения до ответа"
+              hint={
+                'Среднее по тем, кто ответил в этом периоде: от НАШЕГО последнего сообщения до его ответа. '
+                + 'От последнего, а не от первого касания — человек отвечает на то, что прочитал сейчас, '
+                + 'иначе получилась бы длительность всей цепочки. Прочерк значит, что в периоде никто не ответил.'
+              }
+            />
           </div>
 
           <DailyActivityChart days={data.dashboard.days} />

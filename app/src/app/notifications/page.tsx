@@ -56,6 +56,7 @@ function typeLabel(type: string, locale: Locale): string {
     case 'lead_new': return locale === 'en' ? 'New lead' : 'Новый лид';
     case 'lead_escalation': return locale === 'en' ? 'Lead unhandled' : 'Лид не обработан';
     case 'lead_ceo': return locale === 'en' ? 'Lead overdue' : 'Лид просрочен';
+    case 'tech_renewal': return locale === 'en' ? 'Service renewal' : 'Продление сервиса';
     default: return locale === 'en' ? 'Info' : 'Информация';
   }
 }
@@ -164,13 +165,8 @@ export default function NotificationsPage() {
           <ul className="divide-y divide-gray-100">
             {notifications.map((n) => {
               const cfg = TYPE_CONFIG[n.type] ?? TYPE_CONFIG.info;
-              return (
-                <li
-                  key={n.id}
-                  className={`flex items-start gap-3 px-5 py-4 transition-colors ${
-                    n.is_read ? 'bg-white' : 'bg-blue-50/40'
-                  }`}
-                >
+              const cardBody = (
+                <>
                   <div className={`flex-shrink-0 mt-0.5 flex h-9 w-9 items-center justify-center rounded-full border text-base ${cfg.bg}`}>
                     {cfg.icon}
                   </div>
@@ -191,6 +187,26 @@ export default function NotificationsPage() {
                       <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{n.body}</p>
                     )}
                   </div>
+                </>
+              );
+              return (
+                <li
+                  key={n.id}
+                  className={`flex items-start gap-3 px-5 py-4 transition-colors ${
+                    n.is_read ? 'bg-white' : 'bg-blue-50/40'
+                  }`}
+                >
+                  {n.entity_type === 'tech_subscription' ? (
+                    <a
+                      href="/tech-calendar"
+                      className="contents"
+                      onClick={() => markOneRead(n.id)}
+                    >
+                      {cardBody}
+                    </a>
+                  ) : (
+                    cardBody
+                  )}
                   {!n.is_read && (
                     <button
                       type="button"
