@@ -9,12 +9,30 @@ export const dynamic = 'force-dynamic';
 
 type Ctx = { params: Promise<{ id: string }> };
 
+/** Как в `expenses/manual/[id]/route.ts`: сначала убедиться, что строка есть, потом её менять. */
+async function loadExisting(id: string) {
+  if (!supabaseAdmin) return { error: NextResponse.json({ error: 'Server misconfigured' }, { status: 500 }) };
+
+  const { data, error } = await supabaseAdmin
+    .from('tech_subscriptions')
+    .select('id')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (error) return { error: NextResponse.json({ error: error.message }, { status: 500 }) };
+  if (!data) return { error: NextResponse.json({ error: 'Сервис не найден' }, { status: 404 }) };
+  return { error: null };
+}
+
 export async function PATCH(req: NextRequest, ctx: Ctx) {
   const guard = await requireAdmin(req);
   if ('error' in guard) return guard.error;
   if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
 
   const { id } = await ctx.params;
+
+  const existing = await loadExisting(id);
+  if (existing.error) return existing.error;
 
   let patch;
   try {
@@ -35,6 +53,10 @@ export async function DELETE(req: NextRequest, ctx: Ctx) {
   if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
 
   const { id } = await ctx.params;
+
+  const existing = await loadExisting(id);
+  if (existing.error) return existing.error;
+
   const { error } = await supabaseAdmin.from('tech_subscriptions').delete().eq('id', id);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true });

@@ -11,6 +11,25 @@ export const dynamic = 'force-dynamic';
 type Ctx = { params: Promise<{ id: string }> };
 
 /**
+ * Тело продления необязательно (пустое тело = «посчитай дату по циклу»), но
+ * это не то же самое, что СЛОМАННОЕ тело. `req.json().catch(() => ({}))`
+ * раньше не различал эти два случая: и «тела нет», и «прислали не-JSON»
+ * одинаково давали `{}`, и битый запрос тихо продлевал подписку и стирал
+ * решение вместо ответа 400. Читаем сырой текст сами и парсим JSON только
+ * когда он не пуст — тогда ошибка парсинга бьёт по конкретному запросу,
+ * а не глушится общим catch.
+ */
+async function readRenewBody(req: NextRequest): Promise<Record<string, unknown>> {
+  const raw = (await req.text()).trim();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    throw new ValidationError('Битый JSON в теле запроса');
+  }
+}
+
+/**
  * Продление — не «правка строки», а переход цикла: дата уезжает вперёд, статус
  * возвращается в «активна», решение обнуляется. Отдельная ручка нужна ровно
  * поэтому: PATCH'ем то же самое сделала бы форма редактирования, случайно
@@ -25,7 +44,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 
   let input;
   try {
-    input = parseRenewInput((await req.json().catch(() => ({}))) as Record<string, unknown>);
+    input = parseRenewInput(await readRenewBody(req));
   } catch (e) {
     if (e instanceof ValidationError) return NextResponse.json({ error: e.message }, { status: 400 });
     return NextResponse.json({ error: 'Не разобрал тело запроса' }, { status: 400 });

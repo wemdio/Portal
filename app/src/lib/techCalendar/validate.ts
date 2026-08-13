@@ -43,6 +43,9 @@ function parseCycle(value: unknown): BillingCycle {
 }
 
 function parseAmount(value: unknown): number {
+  // Number('') === 0 и Number('   ') === 0 — пустая/пробельная строка иначе
+  // тихо проезжает как нулевая сумма вместо явной ошибки 400.
+  if (typeof value === 'string' && !value.trim()) fail('Сумма должна быть числом');
   const num = typeof value === 'string' ? Number(value) : value;
   if (typeof num !== 'number' || !Number.isFinite(num)) fail('Сумма должна быть числом');
   if ((num as number) < 0) fail('Сумма не может быть отрицательной');

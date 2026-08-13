@@ -66,4 +66,54 @@ describe('refreshPendingReview', () => {
     expect(await refreshPendingReview(db as never, TODAY)).toBe(1);
     expect(await refreshPendingReview(db as never, TODAY)).toBe(0);
   });
+
+  it('без третьего аргумента продолжает работать (обратная совместимость)', async () => {
+    const db = createMockSupabase({
+      tables: { tech_subscriptions: [row({ id: 'a', next_billing_date: '2026-08-15' })] },
+    });
+
+    expect(await refreshPendingReview(db as never, TODAY)).toBe(1);
+  });
+
+  it('логирует ошибку select и не падает, а не тихо возвращает 0', async () => {
+    const db = createMockSupabase({
+      errorTables: { tech_subscriptions: 'db down' },
+    });
+    const log = jest.fn();
+
+    const changed = await refreshPendingReview(db as never, TODAY, log);
+
+    expect(changed).toBe(0);
+    expect(log).toHaveBeenCalledWith('error', expect.stringContaining('db down'));
+  });
+
+  it('логирует ошибку update по конкретной строке и продолжает по остальным', async () => {
+    const log = jest.fn();
+    // Мок createMockSupabase не умеет ронять отдельный update — раскладываем
+    // руками минимальный клиент: select отдаёт две строки-кандидата, update
+    // одной из них падает, другой — проходит.
+    const fakeDb = {
+      from: () => {
+        const builder = {
+          select: () => builder,
+          eq: () => builder,
+          lte: () => builder,
+          update: () => ({
+            eq: (_col: string, id: string) =>
+              id === 'bad'
+                ? Promise.resolve({ data: null, error: { message: 'update boom' } })
+                : Promise.resolve({ data: [{ id }], error: null }),
+          }),
+          then: (resolve: (v: { data: Array<{ id: string }>; error: null }) => unknown) =>
+            resolve({ data: [{ id: 'bad' }, { id: 'ok' }], error: null }),
+        };
+        return builder;
+      },
+    };
+
+    const changed = await refreshPendingReview(fakeDb as never, TODAY, log);
+
+    expect(changed).toBe(1);
+    expect(log).toHaveBeenCalledWith('error', expect.stringContaining('update boom'));
+  });
 });

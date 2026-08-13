@@ -67,6 +67,19 @@ describe('parseCreateInput', () => {
     ).toThrow('Сумма не может быть отрицательной');
   });
 
+  it('отвергает пустую строку в сумме вместо того, чтобы молча считать её нулём', () => {
+    // Number('') === 0 — без явной проверки пустая строка тихо проезжала бы как 0.
+    expect(() =>
+      parseCreateInput({ service_name: 'X', amount: '', next_billing_date: '2026-08-20' }),
+    ).toThrow('Сумма должна быть числом');
+  });
+
+  it('отвергает строку из одних пробелов в сумме', () => {
+    expect(() =>
+      parseCreateInput({ service_name: 'X', amount: '   ', next_billing_date: '2026-08-20' }),
+    ).toThrow('Сумма должна быть числом');
+  });
+
   it('подставляет значения по умолчанию', () => {
     expect(parseCreateInput({ service_name: 'X', next_billing_date: '2026-08-20' })).toEqual({
       service_name: 'X',

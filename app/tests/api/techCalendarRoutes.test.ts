@@ -10,6 +10,7 @@
  */
 
 import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
+import { addDays, mskDateStr } from '@/lib/techCalendar/dates';
 import type { NextRequest } from 'next/server';
 
 const ADMIN_ID = '00000000-0000-4000-8000-000000000001';
@@ -31,10 +32,27 @@ jest.mock('@/lib/supabaseRouteClient', () => ({
   }),
 }));
 
+/**
+ * `text()` — источник истины, `json()` построен поверх него, как у настоящего
+ * fetch-Request. Так ручка, которая теперь читает тело через `.text()`
+ * (чтобы отличить «тела нет» от «тело сломано»), получает от мока то же
+ * поведение, что и от Next.js в проде.
+ */
 function req(body?: unknown): NextRequest {
+  const raw = body === undefined ? '' : JSON.stringify(body);
   return {
     headers: { get: () => 'Bearer test-token' },
-    json: async () => body ?? {},
+    text: async () => raw,
+    json: async () => JSON.parse(raw || '{}'),
+  } as unknown as NextRequest;
+}
+
+/** Запрос с сырым (возможно битым) телом — для проверки обработки невалидного JSON. */
+function reqRaw(raw: string): NextRequest {
+  return {
+    headers: { get: () => 'Bearer test-token' },
+    text: async () => raw,
+    json: async () => JSON.parse(raw),
   } as unknown as NextRequest;
 }
 
@@ -87,6 +105,34 @@ describe('доступ', () => {
     const res = await POST(req(), { params: Promise.resolve({ id: 'sub-1' }) });
     expect(res.status).toBe(403);
   });
+
+  it('не пускает техника к созданию', async () => {
+    currentUserId = TECH_ID;
+    const { POST } = await import('@/app/api/tech-calendar/subscriptions/route');
+    const res = await POST(req({ service_name: 'X', next_billing_date: '2026-09-01' }));
+    expect(res.status).toBe(403);
+  });
+
+  it('не пускает техника к правке', async () => {
+    currentUserId = TECH_ID;
+    const { PATCH } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
+    const res = await PATCH(req({ amount: 100 }), { params: Promise.resolve({ id: 'sub-1' }) });
+    expect(res.status).toBe(403);
+  });
+
+  it('не пускает техника к удалению', async () => {
+    currentUserId = TECH_ID;
+    const { DELETE } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
+    const res = await DELETE(req(), { params: Promise.resolve({ id: 'sub-1' }) });
+    expect(res.status).toBe(403);
+  });
+
+  it('не пускает техника к решению', async () => {
+    currentUserId = TECH_ID;
+    const { POST } = await import('@/app/api/tech-calendar/subscriptions/[id]/decision/route');
+    const res = await POST(req({ decision: 'keep' }), { params: Promise.resolve({ id: 'sub-1' }) });
+    expect(res.status).toBe(403);
+  });
 });
 
 describe('GET списка', () => {
@@ -97,6 +143,22 @@ describe('GET списка', () => {
     const json = await res.json();
     expect(json.subscriptions).toHaveLength(1);
     expect(json.subscriptions[0].service_name).toBe('Bright Data');
+  });
+
+  it('желтит активный сервис, до списания которого пара дней', async () => {
+    const soon = addDays(mskDateStr(new Date()), 2);
+    mockDb = createMockSupabase({
+      tables: {
+        profiles: [{ id: ADMIN_ID, role: 'admin' }],
+        tech_subscriptions: [subRow({ status: 'active', next_billing_date: soon })],
+      },
+    });
+    const { GET } = await import('@/app/api/tech-calendar/subscriptions/route');
+    const res = await GET(req());
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.subscriptions[0].status).toBe('pending_review');
+    expect(mockDb.getRows('tech_subscriptions')[0].status).toBe('pending_review');
   });
 });
 
@@ -158,6 +220,21 @@ describe('POST продления', () => {
     const res = await POST(req({}), { params: Promise.resolve({ id: 'нет-такого' }) });
     expect(res.status).toBe(404);
   });
+
+  it('пустое тело — это «посчитай по циклу», а не ошибка', async () => {
+    const { POST } = await import('@/app/api/tech-calendar/subscriptions/[id]/renew/route');
+    const res = await POST(req(), { params: Promise.resolve({ id: 'sub-1' }) });
+    expect(res.status).toBe(200);
+    expect(mockDb.getRows('tech_subscriptions')[0].next_billing_date).toBe('2026-09-20');
+  });
+
+  it('отдаёт 400 на битом JSON вместо того, чтобы молча продлить по циклу', async () => {
+    const { POST } = await import('@/app/api/tech-calendar/subscriptions/[id]/renew/route');
+    const res = await POST(reqRaw('{"amount": '), { params: Promise.resolve({ id: 'sub-1' }) });
+    expect(res.status).toBe(400);
+    // Битое тело не должно было продвинуть дату — ручка обязана упасть раньше update.
+    expect(mockDb.getRows('tech_subscriptions')[0].next_billing_date).toBe('2026-08-20');
+  });
 });
 
 describe('POST решения', () => {
@@ -176,11 +253,32 @@ describe('POST решения', () => {
   });
 });
 
+describe('PATCH', () => {
+  it('правит поле', async () => {
+    const { PATCH } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
+    const res = await PATCH(req({ amount: 300 }), { params: Promise.resolve({ id: 'sub-1' }) });
+    expect(res.status).toBe(200);
+    expect(mockDb.getRows('tech_subscriptions')[0]).toMatchObject({ amount: 300 });
+  });
+
+  it('отдаёт 404 на несуществующем сервисе', async () => {
+    const { PATCH } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
+    const res = await PATCH(req({ amount: 300 }), { params: Promise.resolve({ id: 'нет-такого' }) });
+    expect(res.status).toBe(404);
+  });
+});
+
 describe('DELETE', () => {
   it('удаляет сервис', async () => {
     const { DELETE } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
     const res = await DELETE(req(), { params: Promise.resolve({ id: 'sub-1' }) });
     expect(res.status).toBe(200);
     expect(mockDb.getRows('tech_subscriptions')).toHaveLength(0);
+  });
+
+  it('отдаёт 404 на несуществующем сервисе', async () => {
+    const { DELETE } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
+    const res = await DELETE(req(), { params: Promise.resolve({ id: 'нет-такого' }) });
+    expect(res.status).toBe(404);
   });
 });
