@@ -289,10 +289,49 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
               с темпом», а не полезный шаг рассылки. */}
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_180px]">
             <DashboardFunnel funnel={data.dashboard.funnel} />
-            <div className="flex flex-col items-start justify-center gap-1 rounded-xl border border-rose-200 bg-rose-50 p-4">
-              <span className="text-xs font-medium text-rose-600">Заблокировали</span>
-              <span className="text-2xl font-semibold text-rose-700">{data.dashboard.blocks}</span>
-              <span className="text-[10px] text-rose-500">не шаг воронки — сигнал «пережали с темпом»</span>
+            {/* Красным — только когда есть о чём тревожиться. Ноль в красной
+                рамке читается как авария, которой нет. */}
+            <div
+              className={`flex flex-col items-start justify-center gap-1 rounded-xl border p-4 ${
+                data.dashboard.blocks > 0
+                  ? 'border-rose-200 bg-rose-50'
+                  : 'border-gray-200 bg-white'
+              }`}
+            >
+              <span
+                className={`text-xs font-medium ${
+                  data.dashboard.blocks > 0 ? 'text-rose-600' : 'text-gray-500'
+                }`}
+              >
+                Заблокировали нас
+              </span>
+              <span
+                className={`text-2xl font-semibold ${
+                  data.dashboard.blocks > 0 ? 'text-rose-700' : 'text-gray-800'
+                }`}
+              >
+                {data.dashboard.blocks}
+              </span>
+              {/* Прежняя подпись объясняла, чем цифра НЕ является («не шаг
+                  воронки»), и не говорила, что она значит. Читателю нужно
+                  обратное. Оговорка про занижение — в подсказке: она важна для
+                  того, кто принимает решение по цифре, но в плитке не
+                  помещается. */}
+              <span
+                title={
+                  'Считаем по диалогам, где Telegram отказал в отправке с кодом «пользователь заблокировал». '
+                  + 'Узнаём об этом только в момент следующей попытки написать, поэтому число заведомо неполное: '
+                  + 'кто заблокировал после последней реплики цепочки, сюда не попадёт. '
+                  + 'Удалённые аккаунты и прочая недоступность считаются отдельно и сюда не входят.'
+                }
+                className={`cursor-help text-[10px] leading-snug ${
+                  data.dashboard.blocks > 0 ? 'text-rose-500' : 'text-gray-400'
+                }`}
+              >
+                {data.dashboard.blocks > 0
+                  ? 'получателей закрыли доступ аккаунту, с которого им писали. Растёт — снижайте темп'
+                  : 'никто не закрыл доступ аккаунтам, с которых писали. Растёт — значит пережали с темпом'}
+              </span>
             </div>
           </div>
 
