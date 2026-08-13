@@ -4,7 +4,9 @@ import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import {
   checkTeamAccess,
+  checkTeamReviewRequestSharedViewAccess,
   checkTeamReviewRequestSubmitAccess,
+  type TeamAccessCheck,
 } from '@/lib/auth/teamAccess';
 import { collectPages } from '@/lib/collectPages';
 import {
@@ -43,11 +45,33 @@ export type ReviewRequestState = (typeof REVIEW_REQUEST_STATES)[number];
 export const REVIEW_REQUEST_PROJECTION =
   'id, employee_user_id, requested_by_user_id, project_id, problem, examples, desired_outcome, state, claimed_by, claimed_at, resolved_by, resolved_at, linked_review_id, decision_note, updated_by, created_at, updated_at';
 
+/**
+ * Проекция общей очереди. Приватные колонки рабочего процесса HR (кто взял,
+ * кто закрыл, решение, связанное ревью) не выбираются вовсе — редактирование
+ * на уровне запроса, а не маппинга: то, что не прочитано, невозможно случайно
+ * отдать наружу.
+ */
+export const SHARED_REVIEW_REQUEST_PROJECTION =
+  'id, employee_user_id, requested_by_user_id, project_id, problem, examples, desired_outcome, state, created_at, updated_at';
+
+export const REVIEW_REQUEST_VISIBILITIES = ['private', 'lead_shared'] as const;
+
+export type ReviewRequestVisibility = (typeof REVIEW_REQUEST_VISIBILITIES)[number];
+
 const PROJECT_PROJECTION = 'id, client, name';
 
 type JsonError = NextResponse<{ error: string; code?: string }>;
 type AuthedClient = ReturnType<typeof createAuthedSupabaseClient>;
-type ReviewRequestAccess = 'private' | 'submit';
+type ReviewRequestAccess = 'private' | 'submit' | 'shared';
+
+const REVIEW_REQUEST_ACCESS_CHECKS: Record<
+  ReviewRequestAccess,
+  (client: AuthedClient) => Promise<TeamAccessCheck>
+> = {
+  private: checkTeamAccess,
+  submit: checkTeamReviewRequestSubmitAccess,
+  shared: checkTeamReviewRequestSharedViewAccess,
+};
 
 export type ReviewRequestActor = {
   userId: string;
@@ -77,6 +101,20 @@ export type TeamReviewRequestRow = {
   created_at: string;
   updated_at: string;
 };
+
+export type SharedReviewRequestRow = Pick<
+  TeamReviewRequestRow,
+  | 'id'
+  | 'employee_user_id'
+  | 'requested_by_user_id'
+  | 'project_id'
+  | 'problem'
+  | 'examples'
+  | 'desired_outcome'
+  | 'state'
+  | 'created_at'
+  | 'updated_at'
+>;
 
 export type ReviewRequestCreateInput = {
   employee_user_id: string;
@@ -157,9 +195,7 @@ export async function authenticateReviewRequestInbox(
     if (!user) return { error: jsonError('Unauthorized', 401) };
     userId = user.id;
 
-    const access = requiredAccess === 'private'
-      ? await checkTeamAccess(authedClient)
-      : await checkTeamReviewRequestSubmitAccess(authedClient);
+    const access = await REVIEW_REQUEST_ACCESS_CHECKS[requiredAccess](authedClient);
 
     if (access.error !== null) {
       await logError(
@@ -360,6 +396,15 @@ export async function validateReviewRequestProject(
   return { ok: true };
 }
 
+/**
+ * Профиль без почты и роли: общей очереди хватает имени и аватара, а почта —
+ * персональные данные, которые незачем рассылать соседним лидам.
+ */
+export function redactedProfileToApi(profile: ProfileRow) {
+  const { id, name, avatarUrl } = profileToApi(profile);
+  return { id, name, avatarUrl };
+}
+
 export function projectToApi(project: ReviewRequestProjectRow) {
   return {
     id: project.id,
@@ -442,7 +487,51 @@ export function reviewRequestToApi(
   };
 }
 
-export function reviewRequestSummary(rows: TeamReviewRequestRow[]) {
+/**
+ * Видимость нового запроса выводится на сервере из способности читать общую
+ * очередь: кто её читает, тот в неё и пишет. Тело запроса не участвует —
+ * клиент не может ни спрятать свой запрос от коллег, ни подсмотреть чужие,
+ * подделав поле.
+ */
+export async function resolveReviewRequestVisibility(
+  client: AuthedClient,
+): Promise<{ value: ReviewRequestVisibility } | { error: JsonError }> {
+  const shared = await checkTeamReviewRequestSharedViewAccess(client);
+  if (shared.error !== null) {
+    return { error: jsonError('Failed to verify access', 500) };
+  }
+  return { value: shared.allowed ? 'lead_shared' : 'private' };
+}
+
+/**
+ * Карточка общей очереди: только бизнес-суть запроса и участники. Приватные
+ * поля рабочего процесса и почты сюда не попадают даже структурно.
+ */
+export function sharedReviewRequestToApi(
+  request: SharedReviewRequestRow,
+  support: Pick<ReviewRequestSupportData, 'profilesById' | 'projectsById'>,
+) {
+  const employee = support.profilesById.get(request.employee_user_id);
+  const initiator = support.profilesById.get(request.requested_by_user_id);
+  const project = request.project_id
+    ? support.projectsById.get(request.project_id)
+    : null;
+
+  return {
+    id: request.id,
+    state: request.state,
+    employee: employee ? redactedProfileToApi(employee) : null,
+    initiator: initiator ? redactedProfileToApi(initiator) : null,
+    project: project ? projectToApi(project) : null,
+    problem: request.problem,
+    examples: request.examples ?? null,
+    desiredOutcome: request.desired_outcome,
+    createdAt: request.created_at,
+    updatedAt: request.updated_at,
+  };
+}
+
+export function reviewRequestSummary(rows: Pick<TeamReviewRequestRow, 'state'>[]) {
   const count = (state: ReviewRequestState) => rows.filter((row) => row.state === state).length;
   return {
     total: rows.length,

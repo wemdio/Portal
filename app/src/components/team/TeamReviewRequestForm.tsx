@@ -13,6 +13,7 @@ import { TEAM_FORM_INPUT_CLASS, TEAM_FORM_TEXTAREA_CLASS } from './teamFormStyle
 interface TeamReviewRequestFormProps {
   employees: TeamReviewRequestPerson[];
   projects: TeamReviewRequestProject[];
+  requestVisibility: 'private' | 'lead_shared';
   onSubmitted: () => void;
 }
 
@@ -35,6 +36,7 @@ const EMPTY_FORM: FormState = {
 export default function TeamReviewRequestForm({
   employees,
   projects,
+  requestVisibility,
   onSubmitted,
 }: TeamReviewRequestFormProps) {
   const [open, setOpen] = useState(false);
@@ -68,7 +70,9 @@ export default function TeamReviewRequestForm({
       });
       setValues(EMPTY_FORM);
       setOpen(false);
-      setSuccess('Запрос отправлен. Алина и Сергей увидят его в разделе HR.');
+      setSuccess(requestVisibility === 'lead_shared'
+        ? 'Запрос отправлен. Его увидят другие лиды и директора.'
+        : 'Запрос отправлен. Его увидят только Алина и Сергей.');
       onSubmitted();
       window.requestAnimationFrame(() => triggerRef.current?.focus());
     } catch (submitError) {
@@ -111,7 +115,12 @@ export default function TeamReviewRequestForm({
             <div className="min-w-0">
               <h3 className="text-base font-bold text-gray-900">Запросить ревью</h3>
               <p className="mt-1 max-w-[70ch] text-sm text-gray-500">
-                Опишите рабочую ситуацию и результат, который поможет специалисту двигаться дальше.
+                Опишите рабочую ситуацию и результат, который поможет сотруднику двигаться дальше.
+              </p>
+              <p role="note" className="mt-2 max-w-[70ch] text-sm font-medium text-gray-700">
+                {requestVisibility === 'lead_shared'
+                  ? 'Запрос увидят другие лиды и директора. Обработать его смогут Алина и Сергей.'
+                  : 'Запрос увидят только Алина и Сергей.'}
               </p>
             </div>
             <button
@@ -127,7 +136,7 @@ export default function TeamReviewRequestForm({
 
           <div className="grid gap-4 lg:grid-cols-2">
             <label className="space-y-1.5 text-sm font-medium text-gray-700">
-              <span>Специалист</span>
+              <span>Сотрудник, с которым нужно ревью</span>
               <select
                 autoFocus
                 required
@@ -136,7 +145,7 @@ export default function TeamReviewRequestForm({
                 onChange={(event) => update('employeeUserId', event.target.value)}
                 className={TEAM_FORM_INPUT_CLASS}
               >
-                <option value="">Выберите специалиста</option>
+                <option value="">Выберите сотрудника</option>
                 {employees.map((employee) => (
                   <option key={employee.id} value={employee.id}>
                     {employee.name}{employee.email ? ` · ${employee.email}` : ''}

@@ -18,6 +18,7 @@ export interface SbisDirectoryInputRow {
   director_middle_name?: unknown;
   activity_type?: unknown;
   source_activity?: unknown;
+  okved_code_exact?: unknown;
   employees_count?: unknown;
   phones?: unknown;
   email?: unknown;
