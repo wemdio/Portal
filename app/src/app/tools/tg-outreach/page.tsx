@@ -928,6 +928,8 @@ function DialogsTab({ campaignId }: {
   campaignId: string;
 }) {
   const [dialogs, setDialogs] = useState<OutreachDialog[]>([]);
+  /** Диалог, у которого не сохранилось изменение, и причина — под его карточкой. */
+  const [dialogSaveError, setDialogSaveError] = useState<{ id: string; message: string } | null>(null);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [offset, setOffset] = useState(0);
@@ -974,17 +976,43 @@ function DialogsTab({ campaignId }: {
 
   useEffect(() => { queueMicrotask(() => { void fetchDialogs(); void fetchAccounts(); }); }, [fetchDialogs, fetchAccounts]);
 
+  /**
+   * Пометка статуса и тумблер «можно писать» — оптимистично.
+   *
+   * Раньше после сохранения перезагружался весь список: раскрытая карточка
+   * схлопывалась, прокрутка уезжала, и оператор, размечающий подряд, каждый раз
+   * искал место заново. Ответ сервера при этом ничего нового не приносит — он
+   * возвращает то же значение, которое мы и отправили.
+   *
+   * Поэтому меняем состояние сразу, а запрос уходит фоном. Не сохранилось —
+   * возвращаем прежнее значение и пишем причину рядом с карточкой: молча
+   * откатить хуже, чем не откатить вовсе, оператор был бы уверен, что пометил.
+   */
   const updateDialog = async (id: string, patch: { status?: string; can_send?: boolean }) => {
-    const res = await authFetch(`${API_BASE}/dialogs/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify(patch),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => null) as { error?: string } | null;
-      alert(body?.error ?? `Не удалось обновить диалог (HTTP ${res.status})`);
-      return;
+    const before = dialogs.find((d) => d.id === id);
+    if (!before) return;
+
+    setDialogs((cur) => cur.map((d) => (d.id === id ? { ...d, ...patch } : d)));
+    setDialogSaveError((cur) => (cur?.id === id ? null : cur));
+
+    try {
+      const res = await authFetch(`${API_BASE}/dialogs/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error ?? `сервер ответил ${res.status}`);
+      }
+    } catch (err) {
+      // Возвращаем именно прежний объект целиком: патч мог тронуть несколько
+      // полей, и откатывать их по одному — лишний способ ошибиться.
+      setDialogs((cur) => cur.map((d) => (d.id === id ? before : d)));
+      setDialogSaveError({
+        id,
+        message: err instanceof Error ? err.message : 'не удалось связаться с сервером',
+      });
     }
-    void fetchDialogs();
   };
 
   const deleteDialog = async (id: string) => {
@@ -1184,6 +1212,15 @@ function DialogsTab({ campaignId }: {
                 </button>
                 {isExpanded && (
                   <div className="border-t border-gray-100 px-4 py-3 space-y-3">
+                    {dialogSaveError?.id === d.id && (
+                      <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">
+                        <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          Не сохранилось, состояние вернулось к прежнему: {dialogSaveError.message}.
+                          Попробуйте ещё раз — если повторяется, проверьте связь с сервером.
+                        </span>
+                      </div>
+                    )}
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs text-gray-500">Статус:</span>
                       {['none', 'lead', 'not_lead', 'later'].map(s => (
