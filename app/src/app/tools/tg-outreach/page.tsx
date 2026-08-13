@@ -31,7 +31,6 @@ import {
   FileSpreadsheet,
 } from 'lucide-react';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
-import WarmupChatsTab from '@/components/tg-outreach/WarmupChatsTab';
 import type {
   CampaignStatus,
   OutreachCampaign,
@@ -4114,7 +4113,6 @@ const TABS = [
   { id: 'accounts', label: 'Аккаунты', icon: Users },
   { id: 'bases', label: 'Базы', icon: Database },
   { id: 'warmup', label: 'Прогрев', icon: Flame },
-  { id: 'warmup-chats', label: 'Чаты', icon: MessageSquareMore },
   { id: 'proxies', label: 'Прокси', icon: Network },
   { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
@@ -4328,9 +4326,6 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
         {tab === 'proxies' && <CampaignProxiesTab campaignId={campaign.id} />}
         {tab === 'warmup' && (
           <WarmupTab campaignId={campaign.id} campaignStatus={campaign.status} />
-        )}
-        {tab === 'warmup-chats' && (
-          <WarmupChatsTab campaignId={campaign.id} campaignStatus={campaign.status} />
         )}
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
         {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} />}
