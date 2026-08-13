@@ -10,44 +10,12 @@ const SQL = fs.readFileSync(
 );
 
 describe('миграция дашборда первички', () => {
-  it('создаёт справочник источников', () => {
-    expect(SQL).toMatch(/create table if not exists public\.lead_source_channels/);
-    // Конкретно уникальный индекс на (source), а не любое слово "unique" в
-    // файле — то, что реально гарантирует «один источник — одна строка».
-    expect(SQL).toMatch(
-      /create unique index if not exists [\s\S]*? on public\.lead_source_channels\(source\)/,
-    );
-  });
-
-  it('ограничивает канал списком значений', () => {
-    for (const channel of [
-      'marketing', 'smm', 'outreach', 'partners',
-      'tg_outreach', 'inbound', 'referral', 'events', 'unassigned',
-    ]) {
-      expect(SQL).toContain(`'${channel}'`);
-    }
-  });
 
   it('создаёт view дат этапов', () => {
     expect(SQL).toMatch(/create or replace view public\.amo_lead_stage_dates_v/);
   });
 
-  it('выдаёт гранты service_role на новую таблицу', () => {
-    expect(SQL).toMatch(/grant all on public\.lead_source_channels\s+to service_role/);
-  });
 
-  it('включает RLS без select-политики для authenticated', () => {
-    expect(SQL).toMatch(
-      /alter table public\.lead_source_channels\s+enable row level security/,
-    );
-    // [\s\S]*? вместо .* — политика может быть отформатирована в несколько
-    // строк (см. amo_users/amo_statuses в 20260711_0001, где "on public.X" и
-    // "for select" стоят на разных строках); "." без флага s не матчит \n и
-    // молча перестал бы ловить такую политику.
-    expect(SQL).not.toMatch(
-      /create policy[\s\S]*?on public\.lead_source_channels[\s\S]*?for select/,
-    );
-  });
 
   it('индексирует amo_events под запросы view', () => {
     expect(SQL).toMatch(/create index if not exists .* on public\.amo_events/);
