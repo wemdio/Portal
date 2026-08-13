@@ -35,6 +35,7 @@ import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
 import type {
   CampaignStatus,
+  DialogStatus,
   OutreachCampaign,
   OutreachAccount,
   OutreachProxy,
@@ -1028,7 +1029,7 @@ function DialogsTab({ campaignId }: {
    * возвращаем прежнее значение и пишем причину рядом с карточкой: молча
    * откатить хуже, чем не откатить вовсе, оператор был бы уверен, что пометил.
    */
-  const updateDialog = async (id: string, patch: { status?: string; can_send?: boolean }) => {
+  const updateDialog = async (id: string, patch: { status?: DialogStatus; can_send?: boolean }) => {
     const before = dialogs.find((d) => d.id === id);
     if (!before) return;
 
