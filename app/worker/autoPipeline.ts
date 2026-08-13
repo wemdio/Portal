@@ -34,6 +34,7 @@
  */
 
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
+import { installUndiciAssertGuard } from './_undiciAssertGuard';
 import {
   closeStaleAutoPipelineRuns,
   runAutoPipelineForClient,
@@ -41,6 +42,7 @@ import {
 import { isInsideWindow } from '@/lib/jobs/autoPipelinePacing';
 
 const WORKER_ID = 'auto-pipeline';
+const log = createWorkerLogger(WORKER_ID);
 const TICK_MS = Number(process.env.AUTOPIPELINE_TICK_MS ?? '600000'); // 10 мин
 const MAX_ATTEMPTS = Number(process.env.AUTOPIPELINE_MAX_ATTEMPTS ?? '6'); // попыток за окно
 const DEFAULT_START_HOUR_UTC = 21; // 00:00 МСК
@@ -122,7 +124,6 @@ async function decideDue(
 }
 
 async function main(): Promise<void> {
-  const log = createWorkerLogger(WORKER_ID);
   const db = requireSupabaseAdmin(log);
   const isShuttingDown = setupGracefulShutdown(log);
 
@@ -175,6 +176,7 @@ async function main(): Promise<void> {
   process.exit(0);
 }
 
+installUndiciAssertGuard(log);
 void main().catch((err) => {
   console.error('[worker][auto-pipeline][FATAL]', err);
   process.exit(1);
