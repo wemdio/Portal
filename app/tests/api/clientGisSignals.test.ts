@@ -9,6 +9,9 @@
  *
  * Успешный ответ: segments / weeklyFunnel / totalFunnel / signalSlice /
  * campaigns. Сбой Instantly по кампании → analytics: null, роут не падает.
+ * Аналитика кампаний идёт в Instantly-аккаунт КЛИЕНТА (preset), не в дефолтный.
+ * Сбой отчётных запросов (funnel/slice) → 500, а не тихий 200 с усечёнными
+ * числами.
  */
 
 jest.mock('server-only', () => ({}));
@@ -16,6 +19,7 @@ jest.mock('server-only', () => ({}));
 const AUTH_USER_ID = 'user-gis-client';
 const OTHER_USER_ID = 'user-someone-else';
 const CAMPAIGN_ID = 'camp-1';
+const CLIENT_ACCOUNT_OPTS = { accountId: 'client-acc-1' };
 
 const state = {
   user: null as { id: string } | null,
@@ -72,16 +76,20 @@ jest.mock('@/lib/supabaseAdmin', () => ({
   supabaseAdmin: { from: (table: string) => makeBuilder(table) },
 }));
 
+const getWeeklyFunnelMock = jest.fn();
+const getTotalFunnelMock = jest.fn();
+const getSignalSliceMock = jest.fn();
+
 jest.mock('@/lib/gisSignalOutreach/reportQueries', () => ({
-  getWeeklyFunnel: jest.fn(async () => [
-    { runDate: '2026-08-03', segmentKey: 'stomatologii', pulled: 10, signalsOk: 6, bcIn: 4, validContacts: 3, appended: 2 },
-  ]),
-  getTotalFunnel: jest.fn(async () => [
-    { runDate: 'all', segmentKey: 'stomatologii', pulled: 100, signalsOk: 60, bcIn: 40, validContacts: 30, appended: 20 },
-  ]),
-  getSignalSlice: jest.fn(async () => [
-    { segmentKey: 'stomatologii', signalKey: 'signal_general_phone', companies: 5 },
-  ]),
+  getWeeklyFunnel: (...args: unknown[]) => getWeeklyFunnelMock(...args),
+  getTotalFunnel: (...args: unknown[]) => getTotalFunnelMock(...args),
+  getSignalSlice: (...args: unknown[]) => getSignalSliceMock(...args),
+}));
+
+const resolveOptsMock = jest.fn();
+
+jest.mock('@/lib/instantly/clientAccountOptions', () => ({
+  resolveClientInstantlyRequestOptions: (...args: unknown[]) => resolveOptsMock(...args),
 }));
 
 const getCampaignAnalyticsMock = jest.fn();
@@ -108,6 +116,20 @@ beforeEach(() => {
   resetState();
   getUserMock.mockReset();
   getUserMock.mockImplementation(async () => ({ data: { user: state.user } }));
+  getWeeklyFunnelMock.mockReset();
+  getWeeklyFunnelMock.mockResolvedValue([
+    { runDate: '2026-08-03', segmentKey: 'stomatologii', pulled: 10, signalsOk: 6, bcIn: 4, validContacts: 3, appended: 2 },
+  ]);
+  getTotalFunnelMock.mockReset();
+  getTotalFunnelMock.mockResolvedValue([
+    { runDate: 'all', segmentKey: 'stomatologii', pulled: 100, signalsOk: 60, bcIn: 40, validContacts: 30, appended: 20 },
+  ]);
+  getSignalSliceMock.mockReset();
+  getSignalSliceMock.mockResolvedValue([
+    { segmentKey: 'stomatologii', signalKey: 'signal_general_phone', companies: 5 },
+  ]);
+  resolveOptsMock.mockReset();
+  resolveOptsMock.mockResolvedValue(CLIENT_ACCOUNT_OPTS);
   getCampaignAnalyticsMock.mockReset();
   getCampaignAnalyticsMock.mockResolvedValue([
     { campaign_id: CAMPAIGN_ID, emails_sent_count: 50, open_count: 20, reply_count: 3 },
@@ -175,12 +197,24 @@ describe('GET /api/client/gis-signals — gating', () => {
     // Кампания только у сегмента с instantly_campaign_id.
     expect(body.campaigns).toHaveLength(1);
     expect(body.campaigns[0].segmentKey).toBe('stomatologii');
-    expect(getCampaignAnalyticsMock).toHaveBeenCalledWith(
-      { campaign_id: CAMPAIGN_ID },
-      { accountId: 'main' },
-    );
+    expect(getCampaignAnalyticsMock).toHaveBeenCalledWith({ campaign_id: CAMPAIGN_ID }, CLIENT_ACCOUNT_OPTS);
     expect(body.campaigns[0].analytics?.allTime?.emails_sent_count).toBe(50);
     expect(body.campaigns[0].analytics?.last7Days?.emailsSent).toBe(5);
+  });
+
+  it('passes the resolved client Instantly account to both analytics calls', async () => {
+    const { GET } = await import('@/app/api/client/gis-signals/route');
+    const res = await GET(makeReq(ROUTE_URL));
+    expect((res as Response).status).toBe(200);
+
+    // Аккаунт резолвится от client_user_id из конфига (как appendLeads).
+    expect(resolveOptsMock).toHaveBeenCalledWith(AUTH_USER_ID);
+    expect(getCampaignAnalyticsMock).toHaveBeenCalledWith({ campaign_id: CAMPAIGN_ID }, CLIENT_ACCOUNT_OPTS);
+    const dailyArgs = getCampaignAnalyticsDailyMock.mock.calls[0];
+    expect(dailyArgs[0]).toMatchObject({ campaign_id: CAMPAIGN_ID });
+    expect(dailyArgs[0].start_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(dailyArgs[0].end_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(dailyArgs[1]).toEqual(CLIENT_ACCOUNT_OPTS);
   });
 
   it('keeps 200 with analytics: null when Instantly fails for a campaign', async () => {
@@ -212,5 +246,21 @@ describe('GET /api/client/gis-signals — gating', () => {
     expect((res as Response).status).toBe(200);
     expect(body.campaigns[0].analytics?.allTime?.emails_sent_count).toBe(50);
     expect(body.campaigns[0].analytics?.last7Days).toBeNull();
+  });
+
+  it('returns 500 (not silent 200) when a report query fails', async () => {
+    getSignalSliceMock.mockRejectedValue(new Error('PostgREST 500: relation gone'));
+    const { GET } = await import('@/app/api/client/gis-signals/route');
+    const res = await GET(makeReq(ROUTE_URL));
+    expect((res as Response).status).toBe(500);
+    const body = (await (res as Response).json()) as { error?: string };
+    expect(body.error).toContain('relation gone');
+  });
+
+  it('returns 500 when the weekly funnel query fails', async () => {
+    getWeeklyFunnelMock.mockRejectedValue(new Error('db blip'));
+    const { GET } = await import('@/app/api/client/gis-signals/route');
+    const res = await GET(makeReq(ROUTE_URL));
+    expect((res as Response).status).toBe(500);
   });
 });
