@@ -13,6 +13,7 @@ import {
 
 const PLAN_FINGERPRINT = 'a'.repeat(64);
 const FNS_SOURCE = 'fns_sme_registry';
+const SBIS_SOURCE = 'sbis_registry';
 
 interface FnsExactCopyClient {
   copyFrom(
@@ -129,6 +130,9 @@ function makeSession(input: {
   processArtifacts?: ConstructorParameters<
     typeof FnsExactPostgresApplySession
   >[0]['processArtifacts'];
+  exactSource?: ConstructorParameters<
+    typeof FnsExactPostgresApplySession
+  >[0]['exactSource'];
 }) {
   const copyFrom = input.copyFrom ?? (async (
     _sql: string,
@@ -145,6 +149,7 @@ function makeSession(input: {
   return new FnsExactPostgresApplySession({
     client,
     expectedPlanFingerprint: input.planFingerprint ?? PLAN_FINGERPRINT,
+    exactSource: input.exactSource,
     processArtifacts: input.processArtifacts ?? (async ({ onUpdateBatch }) => {
       await onUpdateBatch([...UPDATES]);
       return { planFingerprint: PLAN_FINGERPRINT };
@@ -159,6 +164,70 @@ function resumable(
 }
 
 describe('FNS exact OKVED Postgres apply session', () => {
+  it('pins an explicitly configured SBIS source through staging, preview, and update SQL', async () => {
+    const sbisUpdate = {
+      ...UPDATES[0],
+      okved_exact_source: SBIS_SOURCE,
+    };
+    let copiedPayload = '';
+    const query = makeQuery(async (sql) => {
+      if (sql.includes('AS staged_updates')) {
+        return { rows: [previewRow({ staged_updates: '1', rows_to_update: '1' })], rowCount: 1 };
+      }
+      if (/UPDATE\s+public\.companies_directory/i.test(sql)) {
+        return { rows: [], rowCount: 1 };
+      }
+      return undefined;
+    });
+    const session = makeSession({
+      query,
+      exactSource: SBIS_SOURCE,
+      copyFrom: async (_sql, rows) => {
+        for await (const chunk of rows) copiedPayload += chunk;
+        return copiedPayload.split('\n').filter(Boolean).length;
+      },
+      processArtifacts: async ({ onUpdateBatch }) => {
+        await onUpdateBatch([sbisUpdate]);
+        return { planFingerprint: PLAN_FINGERPRINT, updateRows: 1 };
+      },
+    });
+
+    await session.stageArtifacts();
+    await session.beginReadWrite();
+    await session.preview();
+    await resumable(session).updatePage({
+      fromExclusive: null,
+      toInclusive: '10',
+      rowCount: 1,
+    });
+
+    expect(copiedPayload).toContain(SBIS_SOURCE);
+    const statements = query.mock.calls.map(([sql]) => sql);
+    const create = statements.find((sql) => sql.startsWith('CREATE TEMP TABLE')) ?? '';
+    const preview = statements.find((sql) => sql.includes('AS staged_updates')) ?? '';
+    const update = statements.find((sql) => /UPDATE\s+public\.companies_directory/i.test(sql)) ?? '';
+    expect(create).toContain(SBIS_SOURCE);
+    expect(preview).toMatch(/c\.okved_exact_source\s*=\s*s\.okved_exact_source/i);
+    expect(update).toContain(`s.okved_exact_source = '${SBIS_SOURCE}'`);
+  });
+
+  it('rejects a staged source that differs from the configured exact source', async () => {
+    const query = makeQuery();
+    const session = makeSession({
+      query,
+      exactSource: SBIS_SOURCE,
+      processArtifacts: async ({ onUpdateBatch }) => {
+        await onUpdateBatch([[...UPDATES][0]]);
+        return { planFingerprint: PLAN_FINGERPRINT, updateRows: 1 };
+      },
+    });
+
+    await expect(session.stageArtifacts()).rejects.toThrow(/source.*configured|configured.*source/i);
+    expect(query.mock.calls.map(([sql]) => sql).join('\n')).not.toMatch(
+      /UPDATE\s+public\.companies_directory/i,
+    );
+  });
+
   it('streams only update rows through COPY and preserves the stage across commits', async () => {
     const query = makeQuery();
     let callbackKeys: string[] = [];

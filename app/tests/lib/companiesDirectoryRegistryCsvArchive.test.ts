@@ -105,10 +105,12 @@ describe('Polza registry v2 ZIP/CSV reader', () => {
     });
     expect(result.activeRows).toHaveLength(1);
     expect(result.activeRows[0]).toMatchObject({
+      rowNumber: 2,
       inn: '7704414297',
       phones: '8 (495) 111-22-33',
       email: 'sales@alpha.ru',
       website: 'https://alpha.ru/about',
+      okved_code_exact: '62.01',
       source_activity: '62.01 - Разработка ПО',
       revenue: '123456',
     });
@@ -139,10 +141,12 @@ describe('Polza registry v2 ZIP/CSV reader', () => {
       inputRows: 1,
     });
     expect(result.activeRows[0]).toMatchObject({
+      rowNumber: 2,
       name: 'ИП Иванов Иван Иванович',
       inn: '772138583200',
       ogrn: '322774600000001',
       email: 'owner@example.ru',
+      okved_code_exact: '47.91',
       source_activity: '47.91 - Торговля через Интернет',
     });
   });
@@ -165,7 +169,11 @@ describe('Polza registry v2 ZIP/CSV reader', () => {
       inputRows: 1,
     });
     expect(result.fileSha256).toMatch(/^[a-f0-9]{64}$/);
-    expect(result.activeRows[0]).toMatchObject({ inn: '7704414297' });
+    expect(result.activeRows[0]).toMatchObject({
+      rowNumber: 2,
+      inn: '7704414297',
+      okved_code_exact: '62.01',
+    });
   });
 
   it('rejects empty, nested, multiple-member and non-CSV archives', async () => {
