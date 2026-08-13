@@ -8,6 +8,7 @@ import {
   fetchSourceMap,
 } from '@/lib/firstSales/metrics';
 import { fetchMeetingLinks } from '@/lib/firstSales/meetings';
+import { fetchFirstSalesPayments } from '@/lib/firstSales/money';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
 // либо пустой ответ, либо чужой. Явно снимаем этот вопрос, как и соседние
@@ -44,11 +45,23 @@ export async function GET(req: NextRequest) {
   // собой — нет, и раньше они всё равно шли друг за другом (см. Promise.all
   // ниже). Цена была заметной: каждое чтение `amo_lead_stage_dates_v`
   // материализует историю событий целиком, фильтр туда не проваливается.
+  // Платежи тянутся вместе со встречами и по той же причине попадают в
+  // extraDealIds: сделка могла прийти в марте, а деньги по ней — в августе.
+  // Без неё в выборке `computeFirstSalesSeries` не сможет резолвнуть канал и
+  // менеджера сделки, и деньги ушли бы в «не распределено».
   const loadWindow = async (windowFrom: Date, windowTo: Date) => {
-    const meetingLinks = await fetchMeetingLinks(db, PIPELINE_ID, windowFrom, windowTo);
-    const meetingDealIds = [...new Set(meetingLinks.map((m) => m.amo_deal_id))];
-    const leads = await fetchFirstSalesLeads(db, PIPELINE_ID, windowFrom, windowTo, meetingDealIds);
-    return { meetingLinks, leads };
+    const [meetingLinks, payments] = await Promise.all([
+      fetchMeetingLinks(db, PIPELINE_ID, windowFrom, windowTo),
+      fetchFirstSalesPayments(db, PIPELINE_ID, windowFrom, windowTo),
+    ]);
+    const extraDealIds = [
+      ...new Set([
+        ...meetingLinks.map((m) => m.amo_deal_id),
+        ...payments.map((p) => p.amo_deal_id).filter((id): id is number => id != null),
+      ]),
+    ];
+    const leads = await fetchFirstSalesLeads(db, PIPELINE_ID, windowFrom, windowTo, extraDealIds);
+    return { meetingLinks, payments, leads };
   };
 
   try {
@@ -70,9 +83,11 @@ export async function GET(req: NextRequest) {
 
     const result = computeFirstSalesSeries(
       current.leads, current.meetingLinks, sourceMap, from, to, groupBy, channels,
+      current.payments,
     );
     const prevResult = computeFirstSalesSeries(
       previous.leads, previous.meetingLinks, sourceMap, prev.from, prev.to, groupBy, channels,
+      previous.payments,
     );
 
     const lastRun = lastRunRes.data;

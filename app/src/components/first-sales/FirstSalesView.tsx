@@ -10,6 +10,7 @@ import KpiRow from '@/components/first-sales/KpiRow';
 import TimeSeriesChart from '@/components/first-sales/TimeSeriesChart';
 import FunnelChart from '@/components/first-sales/FunnelChart';
 import SourceTable, { drillKey } from '@/components/first-sales/SourceTable';
+import ManagerTable from '@/components/first-sales/ManagerTable';
 import SourceMapEditor from '@/components/first-sales/SourceMapEditor';
 import MeetingLinksEditor from '@/components/first-sales/MeetingLinksEditor';
 
@@ -268,6 +269,8 @@ export default function FirstSalesView() {
                 rows={bucketRows ?? data.bySource}
                 filters={tableFilters}
               />
+
+              <ManagerTable rows={data.byManager} />
             </>
           )}
 

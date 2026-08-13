@@ -62,6 +62,10 @@ export async function GET(req: NextRequest) {
       .map((lead) => ({
         amo_id: lead.amo_id,
         name: lead.name,
+        // Ответственный отдаётся как есть, включая null: пустая клетка в
+        // списке — это «в AMO за сделкой никто не закреплён», и подменять её
+        // прочерком-«неизвестно» нельзя, состояние разное.
+        responsible_name: lead.responsible_name,
         created_at: lead.created_at,
         first_meeting_at: lead.first_meeting_at,
         first_contract_at: lead.first_contract_at,
