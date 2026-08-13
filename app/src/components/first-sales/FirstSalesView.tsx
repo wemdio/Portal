@@ -215,15 +215,27 @@ export default function FirstSalesView() {
         }}
       />
 
-      {loading && <div className="py-10 text-center text-sm text-zinc-400">Загрузка…</div>}
-      {error && !loading && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+      {/* Три состояния — три СОСЕДА в одном слоте, с постоянными ключами, а не
+          три независимых условия подряд.
+          Раньше загрузка, ошибка и содержимое стояли отдельными выражениями:
+          при смене периода React видел, что на месте второго ребёнка вместо
+          `false` появился div, а фрагмент с содержимым исчез, — и, сверяя
+          позиции, оставлял под индексом 2 узел старой таблицы источников.
+          На экране это выглядело как копия таблицы, приклеенная над карточками
+          и воронкой, с цифрами прошлого периода (13.08.2026).
+          Ключи `loading`/`error`/`content` делают ветки различимыми: React уже
+          не может принять одну за другую и переиспользовать чужой DOM. */}
+      {loading ? (
+        <div key="loading" className="py-10 text-center text-sm text-zinc-400">Загрузка…</div>
+      ) : error ? (
+        <div
+          key="error"
+          className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+        >
           Ошибка загрузки: {error}
         </div>
-      )}
-
-      {!loading && !error && data && (
-        <>
+      ) : data ? (
+        <div key="content" className="space-y-4">
           <KpiRow
             totals={data.totals}
             previousTotals={data.previousTotals}
@@ -307,8 +319,8 @@ export default function FirstSalesView() {
               onSaved={() => setReloadKey((k) => k + 1)}
             />
           )}
-        </>
-      )}
+        </div>
+      ) : null}
     </div>
   );
 }
