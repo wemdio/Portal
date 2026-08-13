@@ -5,7 +5,6 @@ import { parseFirstSalesParams, previousWindow } from '@/lib/firstSales/params';
 import {
   computeFirstSalesSeries,
   fetchFirstSalesLeads,
-  fetchSourceMap,
 } from '@/lib/firstSales/metrics';
 import { fetchMeetingLinks } from '@/lib/firstSales/meetings';
 import { fetchFirstSalesPayments } from '@/lib/firstSales/money';
@@ -31,7 +30,7 @@ export async function GET(req: NextRequest) {
   // ловушка с truthy-сужением, что задокументирована в firstSales/access.ts.
   // Сужаем по `parsed.value === null`, второй половине того же дискриминанта.
   if (parsed.value === null) return NextResponse.json({ error: parsed.error }, { status: 400 });
-  const { from, to, groupBy, channels } = parsed.value;
+  const { from, to, groupBy, sources } = parsed.value;
 
   // Предыдущее окно считается отдельной выборкой: расширять текущее нельзя —
   // ряд по времени раздуется вдвое и график покажет лишнее.
@@ -40,15 +39,15 @@ export async function GET(req: NextRequest) {
   // Привязки встреч тянутся раньше сделок: список задействованных amo_deal_id
   // идёт в fetchFirstSalesLeads как extraDealIds — иначе сделка, пришедшая
   // раньше окна (встреча в июле у мартовской сделки), не попадёт в `leads`,
-  // и computeFirstSalesSeries не сможет резолвнуть её канал для встречи.
+  // и computeFirstSalesSeries не сможет резолвнуть её источник для встречи.
   // Внутри окна эта пара запросов последовательна по существу; два окна между
   // собой — нет, и раньше они всё равно шли друг за другом (см. Promise.all
   // ниже). Цена была заметной: каждое чтение `amo_lead_stage_dates_v`
   // материализует историю событий целиком, фильтр туда не проваливается.
   // Платежи тянутся вместе со встречами и по той же причине попадают в
   // extraDealIds: сделка могла прийти в марте, а деньги по ней — в августе.
-  // Без неё в выборке `computeFirstSalesSeries` не сможет резолвнуть канал и
-  // менеджера сделки, и деньги ушли бы в «не распределено».
+  // Без неё в выборке `computeFirstSalesSeries` не сможет резолвнуть источник
+  // и менеджера сделки, и деньги ушли бы в «без источника».
   const loadWindow = async (windowFrom: Date, windowTo: Date) => {
     const [meetingLinks, payments] = await Promise.all([
       fetchMeetingLinks(db, PIPELINE_ID, windowFrom, windowTo),
@@ -65,10 +64,9 @@ export async function GET(req: NextRequest) {
   };
 
   try {
-    const [current, previous, sourceMap, lastRunRes] = await Promise.all([
+    const [current, previous, lastRunRes] = await Promise.all([
       loadWindow(from, to),
       loadWindow(prev.from, prev.to),
-      fetchSourceMap(db),
       // Дата последнего успешного синка — на дашборд. Тихо устаревшие цифры
       // хуже отсутствующих: пользователь должен видеть, что данные вчерашние.
       db
@@ -82,11 +80,11 @@ export async function GET(req: NextRequest) {
     ]);
 
     const result = computeFirstSalesSeries(
-      current.leads, current.meetingLinks, sourceMap, from, to, groupBy, channels,
+      current.leads, current.meetingLinks, from, to, groupBy, sources,
       current.payments,
     );
     const prevResult = computeFirstSalesSeries(
-      previous.leads, previous.meetingLinks, sourceMap, prev.from, prev.to, groupBy, channels,
+      previous.leads, previous.meetingLinks, prev.from, prev.to, groupBy, sources,
       previous.payments,
     );
 
