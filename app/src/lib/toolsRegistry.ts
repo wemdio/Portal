@@ -5,7 +5,7 @@
 import type { UserRole } from '@/types';
 
 /** Идентификаторы вкладок боковой панели, управляемых через admin */
-export const ALL_NAV_TAB_IDS = ['nav-tasks-board', 'nav-first-sales', 'nav-renewals'] as const;
+export const ALL_NAV_TAB_IDS = ['nav-tasks-board', 'nav-first-sales', 'nav-renewals', 'nav-expenses'] as const;
 export type NavTabId = (typeof ALL_NAV_TAB_IDS)[number];
 
 export interface NavTabConfig {
@@ -37,6 +37,12 @@ export const NAV_TABS_CONFIG: Record<NavTabId, NavTabConfig> = {
     id: 'nav-renewals',
     title: 'Продления',
     description: 'Дашборд продлений: количество, оборот, средний чек и цикл по проектам с типом «Продление»',
+    adminAlwaysOn: true,
+  },
+  'nav-expenses': {
+    id: 'nav-expenses',
+    title: 'Расходы и доходы',
+    description: 'Раздел «Деньги»: выписки банков, расходы по категориям и поступления. Выданный тумблер даёт полный доступ, как у админа',
     adminAlwaysOn: true,
   },
 };

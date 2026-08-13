@@ -21,7 +21,12 @@ import type { UserRole } from '@/types';
 function ctx(overrides: Partial<NavVisibilityContext> = {}): NavVisibilityContext {
   return {
     userRole: null,
-    navTabVisibility: { 'nav-tasks-board': false, 'nav-first-sales': false, 'nav-renewals': false },
+    navTabVisibility: {
+      'nav-tasks-board': false,
+      'nav-first-sales': false,
+      'nav-renewals': false,
+      'nav-expenses': false,
+    },
     visibleTools: [],
     ...overrides,
   };
@@ -56,8 +61,9 @@ describe('nav tree shape', () => {
     expect(expenses.href).toBe('/expenses');
   });
 
-  it('правила доступа детей не изменились', () => {
-    expect(expenses.adminOnly).toBe(true);
+  it('все три дашборда выдаются точечно, ни один не заперт ролью', () => {
+    expect(expenses.navTabId).toBe('nav-expenses');
+    expect(expenses.adminOnly).toBeUndefined();
     expect(firstSales.navTabId).toBe('nav-first-sales');
     expect(firstSales.adminOnly).toBeUndefined();
   });
@@ -76,10 +82,13 @@ describe('nav tree shape', () => {
 });
 
 describe('isNavTabVisible', () => {
-  it('adminOnly — только админ', () => {
+  it('«Расходы и доходы» — точечная выдача, админу видно всегда', () => {
     expect(isNavTabVisible(expenses, role('admin'))).toBe(true);
     expect(isNavTabVisible(expenses, role('manager'))).toBe(false);
     expect(isNavTabVisible(expenses, role('director'))).toBe(false);
+    expect(
+      isNavTabVisible(expenses, role('manager', { navTabVisibility: { 'nav-expenses': true } })),
+    ).toBe(true);
   });
 
   it('navTabId — точечная выдача, по умолчанию выключено', () => {
@@ -142,7 +151,7 @@ describe('видимость группы «Дашборды»', () => {
     // в navigation.ts), а override здесь заменяет объект целиком, а не
     // домерживает его с дефолтом ctx().
     const managerWithFirstSales = role('manager', {
-      navTabVisibility: { 'nav-first-sales': true, 'nav-renewals': false },
+      navTabVisibility: { 'nav-first-sales': true, 'nav-renewals': false, 'nav-expenses': false },
     });
     const group = findGroup(visibleNavEntries(managerWithFirstSales));
     expect(group?.children.map((child) => child.id)).toEqual(['first-sales']);
@@ -150,7 +159,7 @@ describe('видимость группы «Дашборды»', () => {
 
   it('«Продления» в одиночку тоже раскрывают группу', () => {
     const managerWithRenewals = role('manager', {
-      navTabVisibility: { 'nav-first-sales': false, 'nav-renewals': true },
+      navTabVisibility: { 'nav-first-sales': false, 'nav-renewals': true, 'nav-expenses': false },
     });
     const group = findGroup(visibleNavEntries(managerWithRenewals));
     expect(group?.children.map((child) => child.id)).toEqual(['renewals']);
