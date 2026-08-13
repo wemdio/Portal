@@ -62,6 +62,19 @@ const PERIOD_OPTIONS: Array<{ id: DashboardPeriod; label: string }> = [
   { id: 'all', label: 'Всё время' },
 ];
 
+/**
+ * Стартовые даты «своего периода»: с первого числа текущего месяца по сегодня.
+ * Считаем в том же поясе (+3), в котором dashboard.ts режет сутки, иначе
+ * поздним вечером по Москве подставился бы вчерашний день.
+ */
+function defaultCustomRange(): { from: string; to: string } {
+  const msk = new Date(Date.now() + TZ_OFFSET_HOURS * 3_600_000);
+  const y = msk.getUTCFullYear();
+  const m = String(msk.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(msk.getUTCDate()).padStart(2, '0');
+  return { from: `${y}-${m}-01`, to: `${y}-${m}-${d}` };
+}
+
 /** «13.08» в том же поясе (+3), в котором dashboard.ts режет сутки. */
 function formatDayLabel(iso: string): string {
   const d = new Date(new Date(iso).getTime() + TZ_OFFSET_HOURS * 3_600_000);
@@ -217,6 +230,13 @@ function Metric({
 
 export default function DashboardTab({ campaignId }: { campaignId: string }) {
   const [period, setPeriod] = useState<DashboardPeriod>('7d');
+  /**
+   * Произвольный период. null — работает выбранный пресет. Отдельным
+   * состоянием, а не пятым значением `DashboardPeriod`: пресет и пара дат —
+   * разные по форме вещи, и объединение их в одно поле заставило бы каждого
+   * читателя выяснять, что сейчас лежит внутри.
+   */
+  const [custom, setCustom] = useState<{ from: string; to: string } | null>(null);
   const [data, setData] = useState<DashboardApiResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -229,7 +249,10 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
       setLoading(true);
       setError(null);
       try {
-        const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/dashboard?period=${period}`);
+        const qs = custom
+          ? `period=${period}&from=${custom.from}&to=${custom.to}`
+          : `period=${period}`;
+        const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/dashboard?${qs}`);
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           setError((body as { error?: string }).error ?? `Не удалось загрузить сводку (${res.status})`);
@@ -242,7 +265,7 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
         setLoading(false);
       }
     })();
-  }, [campaignId, period]);
+  }, [campaignId, period, custom]);
 
   // Разбивка мёртвых аккаунтов по причине — та же строка, что summarizeAccounts
   // уже посчитал, просто в читаемом виде под карточкой «Мертвы».
@@ -263,15 +286,54 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
               key={opt.id}
               type="button"
               disabled={loading}
-              onClick={() => setPeriod(opt.id)}
+              onClick={() => { setPeriod(opt.id); setCustom(null); }}
               className={`rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
-                period === opt.id ? 'bg-indigo-100 text-indigo-700' : 'text-gray-500 hover:bg-gray-100'
+                period === opt.id && !custom
+                  ? 'bg-indigo-100 text-indigo-700'
+                  : 'text-gray-500 hover:bg-gray-100'
               }`}
             >
               {opt.label}
             </button>
           ))}
+
+          {/* Свой период. По умолчанию — с первого числа текущего месяца по
+              сегодня: чаще всего спрашивают именно «что накопилось в этом
+              месяце», а пресета под это нет. */}
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => setCustom((cur) => (cur ? null : defaultCustomRange()))}
+            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
+              custom ? 'bg-indigo-100 text-indigo-700' : 'text-gray-500 hover:bg-gray-100'
+            }`}
+          >
+            Свой период
+          </button>
         </div>
+
+        {custom && (
+          <div className="ml-3 flex items-center gap-1.5">
+            <input
+              type="date"
+              value={custom.from}
+              max={custom.to}
+              disabled={loading}
+              onChange={(e) => setCustom({ ...custom, from: e.target.value })}
+              className="rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-700"
+            />
+            <span className="text-xs text-gray-400">—</span>
+            <input
+              type="date"
+              value={custom.to}
+              min={custom.from}
+              disabled={loading}
+              onChange={(e) => setCustom({ ...custom, to: e.target.value })}
+              className="rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-700"
+            />
+            <span className="text-[10px] text-gray-400">включительно</span>
+          </div>
+        )}
       </div>
 
       {loading ? (

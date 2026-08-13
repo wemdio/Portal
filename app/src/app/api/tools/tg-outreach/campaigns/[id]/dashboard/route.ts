@@ -12,6 +12,7 @@ import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import {
   buildCampaignDashboard,
+  customRange,
   type DashboardContact,
   type DashboardDialog,
   type DashboardForward,
@@ -50,6 +51,23 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         return jsonError(`period должен быть одним из: ${PERIODS.join(', ')}`, 400);
       }
       const period = periodParam as DashboardPeriod;
+
+      // Произвольный период: обе даты или ни одной. Одна без второй — почти
+      // наверняка обрезанная ссылка, и молча достроить недостающую границу
+      // значило бы показать не тот период, о котором просили.
+      const fromParam = url.searchParams.get('from');
+      const toParam = url.searchParams.get('to');
+      let range: { fromMs: number; toMs: number } | undefined;
+      if (fromParam !== null || toParam !== null) {
+        if (fromParam === null || toParam === null) {
+          return jsonError('Нужны обе даты периода: from и to', 400);
+        }
+        const parsed = customRange(fromParam, toParam);
+        if (!parsed) {
+          return jsonError('Даты должны быть в формате ГГГГ-ММ-ДД, конец не раньше начала', 400);
+        }
+        range = parsed;
+      }
 
       const { data: campaign } = await supabase
         .from('tg_outreach_campaigns')
@@ -128,7 +146,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       });
       const accountRows = (accountsRes.data ?? []) as AccountRow[];
 
-      const dashboard = buildCampaignDashboard({ contacts, dialogs, forwards, period, now });
+      const dashboard = buildCampaignDashboard({ contacts, dialogs, forwards, period, range, now });
 
       // У боевых записей лога нет account_id (его пишет только прогрев) —
       // аккаунт распознаём по вхождению session_name в текст, как и в

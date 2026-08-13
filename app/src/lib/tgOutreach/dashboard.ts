@@ -44,6 +44,11 @@ export interface DashboardInput {
   dialogs: DashboardDialog[];
   forwards: DashboardForward[];
   period: DashboardPeriod;
+  /**
+   * Произвольный период, выбранный руками. Задан — побеждает `period`: пресет
+   * в этом случае лишь подсвечивает кнопку в UI и на расчёт не влияет.
+   */
+  range?: { fromMs: number; toMs: number };
   /** Момент отсчёта. Передаётся снаружи, чтобы функция осталась чистой. */
   now: number;
   tzOffsetHours?: number;
@@ -132,6 +137,40 @@ export function periodRange(
   return { fromMs: today - (PERIOD_DAYS[period] - 1) * DAY_MS, toMs };
 }
 
+/**
+ * Границы произвольного периода, выбранного оператором руками.
+ *
+ * Обе даты — `YYYY-MM-DD` и трактуются как календарные сутки МСК целиком: `from`
+ * с начала своих суток, `to` — по конец своих. Так же, как режутся пресеты, и
+ * это не косметика: иначе одна и та же дата давала бы разные цифры в
+ * зависимости от того, выбрали её руками или пресетом. Верхняя граница
+ * включительная — ровно то, что обещает подпись поля.
+ *
+ * `null` — некорректный ввод (не та форма, несуществующая дата, конец раньше
+ * начала). Вызывающий обязан ответить ошибкой, а не молча показать пустой
+ * период: пустая сводка и «вы ошиблись в дате» — разные сообщения.
+ */
+export function customRange(
+  from: string,
+  to: string,
+  tzOffsetHours = TZ_OFFSET_HOURS,
+): { fromMs: number; toMs: number } | null {
+  const shape = /^\d{4}-\d{2}-\d{2}$/;
+  if (!shape.test(from) || !shape.test(to)) return null;
+
+  const offset = tzOffsetHours * 3_600_000;
+  const fromUtc = Date.parse(`${from}T00:00:00.000Z`);
+  const toUtc = Date.parse(`${to}T00:00:00.000Z`);
+  // Date.parse отвергает 2026-13-99, но 2026-02-30 молча не существует —
+  // проверять всё равно приходится обоими способами.
+  if (!Number.isFinite(fromUtc) || !Number.isFinite(toUtc)) return null;
+
+  const fromMs = fromUtc - offset;
+  const toMs = toUtc - offset + DAY_MS - 1;
+  if (toMs < fromMs) return null;
+  return { fromMs, toMs };
+}
+
 function inRange(at: number | null, fromMs: number, toMs: number): boolean {
   return at !== null && at >= fromMs && at <= toMs;
 }
@@ -151,7 +190,7 @@ function share(value: number, base: number): number | null {
 
 export function buildCampaignDashboard(input: DashboardInput): CampaignDashboard {
   const tz = input.tzOffsetHours ?? TZ_OFFSET_HOURS;
-  const { fromMs, toMs } = periodRange(input.period, input.now, tz);
+  const { fromMs, toMs } = input.range ?? periodRange(input.period, input.now, tz);
 
   const contacts = input.contacts.filter((c) => inRange(ts(c.created_at), fromMs, toMs)).length;
   const delivered = input.contacts.filter((c) => inRange(ts(c.sent_at), fromMs, toMs)).length;
