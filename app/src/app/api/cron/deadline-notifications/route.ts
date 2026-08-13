@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { runDeadlineNotifications } from '@/lib/notifications/deadlineCron';
 import { runLeadEscalation } from '@/lib/notifications/leadEscalation';
+import { runTechRenewalNotifications } from '@/lib/notifications/techRenewalCron';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -29,11 +30,13 @@ async function run() {
   const now = new Date();
   const deadline = await runDeadlineNotifications({ db: supabaseAdmin, now });
   const lead = await runLeadEscalation({ db: supabaseAdmin, now });
+  const techRenewals = await runTechRenewalNotifications({ db: supabaseAdmin, now });
 
   return NextResponse.json({
     processed: deadline.processed,
     created: deadline.created,
     lead_escalated: lead.created,
+    tech_renewals: techRenewals.created,
   });
 }
 
