@@ -12,6 +12,17 @@
 
 ---
 
+## Правило коммитов (важно)
+
+В рабочем дереве ветки `dmitriy_kuladmed` лежит **незакоммиченная работа по
+другой задаче** (tg-outreach auto-forward: `app/src/lib/tgOutreach/*`,
+`app/src/app/tools/tg-outreach/page.tsx`, `supabase/migrations/20260812_0004_*`,
+`.codex/`, временные файлы в корне). Её нельзя ни коммитить, ни трогать.
+
+Поэтому: **никогда `git add -A` и `git add .` в корне репозитория.** Добавлять
+в индекс только те пути, которые перечислены в шаге коммита конкретной задачи.
+Перед каждым коммитом сверяться с `git status --short`.
+
 ## Порядок и состояние сборки
 
 Задачи идут строго по номерам. Важно про промежуточное состояние:
@@ -614,7 +625,7 @@ cd app && npx jest tests/lib/firstSales
 - [ ] **Step 10: Коммит**
 
 ```bash
-git add -A app/src/lib/firstSales app/src/app/api/analytics/first-sales app/tests/lib/firstSales
+git add app/src/lib/firstSales app/src/app/api/analytics/first-sales app/tests/lib/firstSales
 git commit -m "feat(first-sales): агрегация и API по источникам AMO вместо каналов"
 ```
 
@@ -1016,9 +1027,13 @@ cd G:/PycharmProjects/Portal && grep -rn "lead_source_channels\|sourceChannels\|
 - [ ] **Step 8: Коммит**
 
 ```bash
-git add -A app supabase/migrations/20260812_0001_drop_lead_source_channels.sql
+git add supabase/migrations/20260812_0001_drop_lead_source_channels.sql \
+        app/tests/migrations/dropLeadSourceChannels.test.ts \
+        app/tests/migrations/firstSalesDashboard.test.ts
 git commit -m "refactor(first-sales): удалить справочник источник-канал из кода и базы"
 ```
+
+(удалённые `SourceMapEditor.tsx` и `source-map/route.ts` уже в индексе после `git rm` на шаге 1.)
 
 ---
 
