@@ -132,6 +132,18 @@ const DIALOG_STATUS_LABELS: Record<string, { label: string; cls: string }> = {
  * отправки, она исчезала бы ровно в тот момент, когда передача удалась, и это
  * читалось бы как отмена.
  */
+/**
+ * Живая передача: стоит в очереди или уже ушла.
+ *
+ * Отработавшие — сорвавшаяся и снятая оператором — до менеджера не дошли, и
+ * обращаться с ними надо одинаково: показывать причину и возвращать кнопки.
+ */
+function isActiveForward(
+  forward: OutreachDialog['forward'],
+): forward is NonNullable<NonNullable<OutreachDialog['forward']>> {
+  return !!forward && (forward.status === 'pending' || forward.status === 'sent');
+}
+
 function ForwardBadge({
   forward,
   compact = false,
@@ -983,6 +995,7 @@ function DialogsTab({ campaignId }: {
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   /** `<dialogId>:<kind>` пока собирается предпросмотр и ставится задача. */
   const [forwarding, setForwarding] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState<string | null>(null);
   const limit = 30;
 
   const fetchAccounts = useCallback(async () => {
@@ -1094,7 +1107,7 @@ function DialogsTab({ campaignId }: {
         (warning ? `⚠ ${warning}\n\n` : '')
         + `Передать ${what} в ${preview?.target_chat}?\n\n`
         + 'Отправит аккаунт кампании, когда воркер дойдёт до него в круге.\n'
-        + 'Отменить отправку после этого будет нельзя.\n\n'
+        + 'Пока задача ждёт в очереди, её можно снять кнопкой «Отменить отправку».\n\n'
         + `——— Текст сообщения ———\n${preview?.text ?? ''}`,
       )) return;
 
@@ -1113,6 +1126,38 @@ function DialogsTab({ campaignId }: {
       void fetchDialogs();
     } finally {
       setForwarding(null);
+    }
+  };
+
+  /**
+   * Снять передачу из очереди, пока воркер до неё не дошёл.
+   *
+   * Ошибиться кнопкой «Передать» легко, а до отправки проходят часы — всё это
+   * время исправить ещё можно. Раньше нельзя было: очередь гасили запросом в
+   * базу руками (13.08.2026 так снимали шесть лидов).
+   */
+  const cancelForward = async (dialog: OutreachDialog) => {
+    const what = dialog.forward?.kind === 'partner' ? 'кандидата в партнёры' : 'лида';
+    if (!confirm(
+      `Отменить передачу ${what}?\n\n`
+      + 'Задача снимется из очереди, менеджеру ничего не уйдёт.\n'
+      + 'Передать этого человека снова можно будет теми же кнопками.',
+    )) return;
+
+    setCancelling(dialog.id);
+    try {
+      const res = await authFetch(`${API_BASE}/dialogs/${dialog.id}/forward`, { method: 'DELETE' });
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok) {
+        // Чаще всего это «воркер успел отправить» — оператору важно узнать
+        // именно это, а не общее «не получилось»: сообщение уже у менеджера.
+        alert(body?.error ?? `Не удалось отменить передачу (${res.status})`);
+        void fetchDialogs();
+        return;
+      }
+      void fetchDialogs();
+    } finally {
+      setCancelling(null);
     }
   };
 
@@ -1253,7 +1298,7 @@ function DialogsTab({ campaignId }: {
                         {d.can_send === false ? 'Не писать' : 'Можно писать'}
                       </span>
                       {autoMark && <AutoForwardBadge mark={autoMark} compact />}
-                      {d.forward && d.forward.status !== 'failed' && (
+                      {isActiveForward(d.forward) && (
                         <ForwardBadge forward={d.forward} compact />
                       )}
                       <span className="text-[10px] text-gray-400">{d.messages.length} сообщ.</span>
@@ -1295,8 +1340,28 @@ function DialogsTab({ campaignId }: {
                           уходит без карточки с контекстом, и досылать её иногда
                           нужно. Про риск задвоения предупредим на подтверждении. */}
                       {autoMark && <AutoForwardBadge mark={autoMark} />}
-                      {d.forward && d.forward.status !== 'failed' ? (
-                        <ForwardBadge forward={d.forward} />
+                      {isActiveForward(d.forward) ? (
+                        <>
+                          <ForwardBadge forward={d.forward} />
+                          {/* Пока задача ждёт своей очереди, ошибку ещё можно
+                              исправить — и только здесь: после отправки
+                              сообщение уже в чате у менеджера. Поэтому кнопка
+                              живёт ровно столько, сколько статус «в очереди». */}
+                          {d.forward.status === 'pending' && (
+                            <button
+                              type="button"
+                              disabled={cancelling === d.id}
+                              onClick={() => void cancelForward(d)}
+                              title="Снять задачу из очереди — менеджеру ничего не уйдёт"
+                              className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[10px] font-medium text-rose-700 hover:bg-rose-100 hover:border-rose-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {cancelling === d.id
+                                ? <Loader2 className="h-3 w-3 animate-spin" />
+                                : <X className="h-3 w-3" />}
+                              Отменить отправку
+                            </button>
+                          )}
+                        </>
                       ) : (
                         <>
                           <button
@@ -1347,6 +1412,16 @@ function DialogsTab({ campaignId }: {
                       <p className="mt-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[10px] text-rose-700">
                         Не отправлено ({d.forward.kind === 'lead' ? 'лид' : 'партнёр'}):{' '}
                         {d.forward.error_message || 'причина не записана'}
+                      </p>
+                    )}
+                    {/* Снятая передача — не авария, поэтому серым, а не красным:
+                        оператор сам так решил. Но след нужен: без него исчезнувшая
+                        плашка «в очереди» читается как сбой, и человека передают
+                        второй раз, гадая, куда делся первый. */}
+                    {d.forward?.status === 'cancelled' && (
+                      <p className="mt-1.5 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-[10px] text-gray-600">
+                        Передача отменена ({d.forward.kind === 'lead' ? 'лид' : 'партнёр'}) — менеджеру ничего не ушло
+                        {d.forward.error_message ? `. ${d.forward.error_message}` : ''}
                       </p>
                     )}
                     {/* Сорвавшаяся автопересылка: лид, который не доехал до
