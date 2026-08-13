@@ -18,6 +18,7 @@
 
 import {
   extractCreatedTables,
+  findGrantExemptions,
   findGrantsToServiceRole,
   findMissingServiceRoleGrants,
 } from '@/lib/migrationLint';
@@ -236,6 +237,102 @@ describe('findMissingServiceRoleGrants', () => {
     const allowlist = new Set(['20260101_0001_legacy.sql::legacy_one']);
     expect(findMissingServiceRoleGrants(files, { allowlist })).toEqual([
       { file: '20260601_0001_new.sql', table: 'shiny_new' },
+    ]);
+  });
+});
+
+/**
+ * A table can be sealed on purpose: RLS + `revoke all` from every role, reached
+ * only through a SECURITY DEFINER function. For those, `grant all to
+ * service_role` is not a lint fix but the hole the migration closes — so the
+ * lint takes a marker instead, and demands a stated reason for it.
+ */
+describe('findGrantExemptions', () => {
+  it('reads the marker and its reason out of a comment', () => {
+    const sql = `
+      -- grants-lint: no-service-role-grant public.sealed — reached only via SECURITY DEFINER
+      create table public.sealed (id int);
+    `;
+    expect(findGrantExemptions(sql).get('sealed')).toBe(
+      'reached only via SECURITY DEFINER',
+    );
+  });
+
+  it('marker without a reason is recorded as an empty reason, not as absent', () => {
+    const sql = `
+      -- grants-lint: no-service-role-grant public.sealed
+      create table public.sealed (id int);
+    `;
+    const found = findGrantExemptions(sql);
+    expect(found.has('sealed')).toBe(true);
+    expect(found.get('sealed')).toBe('');
+  });
+
+  it('no marker — nothing found', () => {
+    expect(findGrantExemptions('create table public.plain (id int);').size).toBe(0);
+  });
+});
+
+describe('findMissingServiceRoleGrants: intentional exemptions', () => {
+  it('a marker with a reason suppresses the violation', () => {
+    const files = [
+      {
+        name: '20260813_0001_sealed.sql',
+        sql: `
+          -- grants-lint: no-service-role-grant public.sealed — writes go through an operator-only function
+          create table public.sealed (id int);
+          revoke all on table public.sealed from service_role;
+        `,
+      },
+    ];
+    expect(findMissingServiceRoleGrants(files)).toEqual([]);
+  });
+
+  it('a marker WITHOUT a reason still fails, and says why', () => {
+    const files = [
+      {
+        name: '20260813_0001_sealed.sql',
+        sql: `
+          -- grants-lint: no-service-role-grant public.sealed
+          create table public.sealed (id int);
+        `,
+      },
+    ];
+    const violations = findMissingServiceRoleGrants(files);
+    expect(violations).toHaveLength(1);
+    expect(violations[0].table).toBe('sealed');
+    expect(violations[0].note).toMatch(/причин/);
+  });
+
+  it('a marker does not cover OTHER tables in the same file', () => {
+    const files = [
+      {
+        name: '20260813_0001_two.sql',
+        sql: `
+          -- grants-lint: no-service-role-grant public.sealed — sealed on purpose
+          create table public.sealed (id int);
+          create table public.ordinary (id int);
+        `,
+      },
+    ];
+    expect(findMissingServiceRoleGrants(files)).toEqual([
+      { file: '20260813_0001_two.sql', table: 'ordinary' },
+    ]);
+  });
+
+  it('a marker in a DIFFERENT file does not cover the table', () => {
+    const files = [
+      {
+        name: '20260813_0001_creates.sql',
+        sql: 'create table public.sealed (id int);',
+      },
+      {
+        name: '20260813_0002_elsewhere.sql',
+        sql: '-- grants-lint: no-service-role-grant public.sealed — wrong file',
+      },
+    ];
+    expect(findMissingServiceRoleGrants(files)).toEqual([
+      { file: '20260813_0001_creates.sql', table: 'sealed' },
     ]);
   });
 });

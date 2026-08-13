@@ -2,6 +2,13 @@
 -- report rollup. The legacy summary RPC remains unchanged and is the runtime
 -- fallback whenever no selector exists or the optimized call fails.
 
+-- grants-lint: no-service-role-grant public.client_report_large_score_rollup_activations — sealed on purpose: no role gets direct access
+-- Direct table access is revoked from every role below. service_role reads
+-- activations only through the SECURITY DEFINER function
+-- client_report_large_score_rollup_active_run(uuid); writes go through the
+-- operator-only activate/deactivate functions. Granting this table to
+-- service_role would let the app forge an activation without the "verified
+-- ready run" check that this migration exists to enforce.
 CREATE TABLE IF NOT EXISTS public.client_report_large_score_rollup_activations (
   client_user_id uuid NOT NULL,
   rollup_run_id uuid NOT NULL,
