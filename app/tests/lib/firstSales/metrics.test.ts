@@ -4,6 +4,7 @@ import {
   type FirstSalesLeadRow,
 } from '@/lib/firstSales/metrics';
 import { MEETINGS_RELIABLE_SINCE, type MeetingLinkRow } from '@/lib/firstSales/meetings';
+import type { FirstSalesPaymentRow } from '@/lib/firstSales/money';
 import type { SourceChannelRow } from '@/lib/firstSales/sourceChannels';
 
 const map: SourceChannelRow[] = [
@@ -15,6 +16,7 @@ function lead(over: Partial<FirstSalesLeadRow> = {}): FirstSalesLeadRow {
   return {
     amo_id: 1,
     name: 'Обычная сделка',
+    responsible_name: 'Менеджер А',
     created_at: '2026-07-15T09:00:00.000Z',
     first_qualified_at: null,
     first_meeting_at: null,
@@ -300,5 +302,181 @@ describe('встречи считаются по привязкам записе
       map, from, to, 'day', null,
     );
     expect(res.totals.meetings).toBe(1);
+  });
+});
+
+
+/**
+ * Разбивка по менеджерам. Считается теми же правилами, что и разбивка по
+ * источникам, — иначе два среза одного дашборда давали бы разные суммы, и
+ * объяснить это было бы нечем.
+ */
+describe('разбивка по ответственным менеджерам', () => {
+  it('складывает лидов, квалы и договоры по ответственному', () => {
+    const res = computeFirstSalesSeries(
+      [
+        lead({ amo_id: 1, responsible_name: 'Иванов' }),
+        lead({ amo_id: 2, responsible_name: 'Иванов', first_qualified_at: '2026-07-16T09:00:00.000Z' }),
+        lead({ amo_id: 3, responsible_name: 'Петров' }),
+      ],
+      [], map, from, to, 'day', null,
+    );
+
+    const ivanov = res.byManager.find((m) => m.manager === 'Иванов');
+    expect(ivanov).toMatchObject({ leads: 2, qualified: 1 });
+    expect(res.byManager.find((m) => m.manager === 'Петров')?.leads).toBe(1);
+  });
+
+  it('сумма по менеджерам совпадает с общим числом лидов', () => {
+    const res = computeFirstSalesSeries(
+      [
+        lead({ amo_id: 1, responsible_name: 'Иванов' }),
+        lead({ amo_id: 2, responsible_name: 'Петров' }),
+        lead({ amo_id: 3, responsible_name: null }),
+      ],
+      [], map, from, to, 'day', null,
+    );
+    expect(res.byManager.reduce((sum, m) => sum + m.leads, 0)).toBe(res.totals.leads);
+  });
+
+  /** Сделку без ответственного нельзя терять — это дыра в распределении. */
+  it('сделки без ответственного идут отдельной строкой, а не пропадают', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1, responsible_name: null }), lead({ amo_id: 2, responsible_name: '   ' })],
+      [], map, from, to, 'day', null,
+    );
+    expect(res.byManager.find((m) => m.manager === 'Без ответственного')?.leads).toBe(2);
+  });
+
+  it('встречи попадают тому, за кем закреплена сделка', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1, responsible_name: 'Иванов' })],
+      [meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T09:00:00.000Z' })],
+      map, from, to, 'day', null,
+    );
+    expect(res.byManager.find((m) => m.manager === 'Иванов')?.meetings).toBe(1);
+    expect(res.totals.meetings).toBe(1);
+  });
+
+  it('пустые строки не показываем: менеджер без событий в окне не нужен', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1, responsible_name: 'Тихий', created_at: '2026-01-01T09:00:00.000Z' })],
+      [], map, from, to, 'day', null,
+    );
+    expect(res.byManager).toHaveLength(0);
+  });
+});
+
+/**
+ * Деньги. Цифра, которую руководитель прочитает как «столько мы заработали»,
+ * поэтому всё, что мы НЕ смогли отнести, обязано быть видно отдельно, а не
+ * молча раствориться в занижении.
+ */
+describe('реальные деньги по ИНН', () => {
+  const payment = (over: Partial<FirstSalesPaymentRow> = {}): FirstSalesPaymentRow => ({
+    transaction_id: 1,
+    occurred_at: '2026-07-20T09:00:00.000Z',
+    amount: 100_000,
+    payer_inn: '7709492845',
+    payer_name: 'ООО «Ромашка»',
+    amo_deal_id: 1,
+    deal_matches: 1,
+    renewal_state: 'first',
+    ...over,
+  });
+
+  it('платёж ложится в общую сумму, к менеджеру и к источнику сделки', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1, responsible_name: 'Иванов' })],
+      [], map, from, to, 'day', null,
+      [payment({ amount: 84_000 })],
+    );
+    expect(res.totals.money.received).toBe(84_000);
+    expect(res.totals.money.payments).toBe(1);
+    expect(res.byManager.find((m) => m.manager === 'Иванов')?.money).toBe(84_000);
+    expect(res.bySource.find((s) => s.source === 'email outreach')?.money).toBe(84_000);
+  });
+
+  it('продление в первичку не идёт', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1 })], [], map, from, to, 'day', null,
+      [payment({ renewal_state: 'renewal' })],
+    );
+    expect(res.totals.money.received).toBe(0);
+    expect(res.totals.money.pending).toBe(0);
+  });
+
+  /** Занижение обязано быть видно: неразобранный кандидат — не ноль. */
+  it('неразобранный кандидат не в деньгах, но и не потерян', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1 })], [], map, from, to, 'day', null,
+      [payment({ renewal_state: 'pending', amount: 50_000 })],
+    );
+    expect(res.totals.money.received).toBe(0);
+    expect(res.totals.money.pending).toBe(50_000);
+    expect(res.totals.money.pendingPayments).toBe(1);
+  });
+
+  it('один ИНН на несколько сделок — в спорные, а не наугад к первой', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1, responsible_name: 'Иванов' })],
+      [], map, from, to, 'day', null,
+      [payment({ deal_matches: 2, amount: 30_000 })],
+    );
+    expect(res.totals.money.received).toBe(0);
+    expect(res.totals.money.ambiguous).toBe(30_000);
+    expect(res.byManager.find((m) => m.manager === 'Иванов')?.money).toBe(0);
+  });
+
+  it('возвраты и нули в «пришло денег» не попадают', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1 })], [], map, from, to, 'day', null,
+      [payment({ amount: -10_000 }), payment({ transaction_id: 2, amount: 0 })],
+    );
+    expect(res.totals.money.received).toBe(0);
+    expect(res.totals.money.payments).toBe(0);
+  });
+
+  it('платёж вне окна не считается', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1 })], [], map, from, to, 'day', null,
+      [payment({ occurred_at: '2026-06-20T09:00:00.000Z' })],
+    );
+    expect(res.totals.money.received).toBe(0);
+  });
+
+  it('фильтр по каналу режет и деньги — они берут канал у сделки', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1 })], [], map, from, to, 'day', ['inbound'],
+      [payment()],
+    );
+    expect(res.totals.money.received).toBe(0);
+  });
+
+  /** Покрытие ИНН — знаменатель честности карточки. */
+  it('считает, у скольких договоров окна вообще заполнен ИНН', () => {
+    const contractAt = new Date(CONTRACT_RULE_SINCE.getTime() + 24 * 60 * 60 * 1000).toISOString();
+    const withInn = lead({
+      amo_id: 1,
+      first_contract_at: contractAt,
+      raw: {
+        custom_fields_values: [
+          { field_name: 'Источник', values: [{ value: 'Email Outreach' }] },
+          { field_name: 'ИНН', values: [{ value: '7709492845' }] },
+        ],
+      },
+    });
+    const res = computeFirstSalesSeries(
+      [withInn, lead({ amo_id: 2, first_contract_at: contractAt })],
+      [], map, from, to, 'day', null, [],
+    );
+    expect(res.totals.contracts).toBe(2);
+    expect(res.totals.money.contractsWithInn).toBe(1);
+  });
+
+  it('без платежей деньги — ноль, а не undefined', () => {
+    const res = computeFirstSalesSeries([lead()], [], map, from, to, 'day', null);
+    expect(res.totals.money.received).toBe(0);
+    expect(res.byManager[0]?.money).toBe(0);
   });
 });

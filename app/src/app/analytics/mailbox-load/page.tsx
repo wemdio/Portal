@@ -4,6 +4,10 @@ import { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
 import type { MailboxLoad, TagLoad, SpecialistLoad, MailboxRow, TagStatus } from '@/lib/instantly/mailboxLoad';
+import {
+  sortTags, sortSpecialists, nextSort,
+  type SortState, type TagSortKey, type SpecialistSortKey,
+} from '@/lib/instantly/mailboxLoadSort';
 
 // ── визуальные пресеты статусов утилизации ────────────────────────────────────
 // Пороги и статус считает ТОЛЬКО сервер (classify в mailboxLoad.ts) — здесь
@@ -22,6 +26,42 @@ const STATUS_UI: Record<TagStatus, { label: string; badge: string; bar: string; 
   stopped: { label: 'Выключены', badge: 'text-zinc-400', bar: 'bg-zinc-200', num: 'text-zinc-400', accent: false },
   no_capacity: { label: '—', badge: 'text-zinc-300', bar: 'bg-zinc-200', num: 'text-zinc-400', accent: false },
 };
+
+/**
+ * Кликабельный заголовок столбца.
+ *
+ * Стрелка рисуется только у активного столбца: постоянные значки у всех семи
+ * заголовков — шум, из которого не видно, по чему таблица отсортирована
+ * сейчас.
+ */
+function SortTh<K extends string>({
+  label, sortKey, sort, onSort, align = 'left',
+}: {
+  label: string;
+  sortKey: K;
+  sort: SortState<K> | null;
+  onSort: (key: K) => void;
+  align?: 'left' | 'right';
+}) {
+  const active = sort?.key === sortKey;
+  return (
+    <th className={`px-3 py-2 font-medium ${align === 'right' ? 'text-right' : ''}`}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        title={`Сортировать по «${label}»`}
+        className={`inline-flex items-center gap-1 uppercase tracking-wider transition hover:text-zinc-700 cursor-pointer ${
+          active ? 'text-zinc-700' : ''
+        }`}
+      >
+        {label}
+        <span className={`text-[9px] ${active ? 'opacity-100' : 'opacity-0'}`} aria-hidden>
+          {sort?.dir === 'asc' ? '▲' : '▼'}
+        </span>
+      </button>
+    </th>
+  );
+}
 
 const fmt = (n: number) => n.toLocaleString('ru-RU');
 const pct = (u: number | null) => (u == null ? '—' : `${Math.round(u * 100)}%`);
@@ -75,6 +115,13 @@ export default function MailboxLoadPage() {
   const [view, setView] = useState<'tags' | 'specialists'>('tags');
   const [expanded, setExpanded] = useState<string | null>(null); // tagId
   const [drill, setDrill] = useState<Record<string, DrillState>>({});
+  /**
+   * Сортировка у каждой вкладки своя: столбцы разные, и переключение «по
+   * тегам ↔ по специалистам» не должно ронять выбранный порядок соседней.
+   * null — порядок сервера (по потолку), он же вид по умолчанию.
+   */
+  const [tagSort, setTagSort] = useState<SortState<TagSortKey> | null>(null);
+  const [specSort, setSpecSort] = useState<SortState<SpecialistSortKey> | null>(null);
   const [expandedSpec, setExpandedSpec] = useState<string | null>(null);
 
   // Фетч в эффекте, ключ = выбранный день + reloadKey. Инлайн-async + setState ПОСЛЕ
@@ -88,9 +135,12 @@ export default function MailboxLoadPage() {
         const res = await authFetch(`/api/analytics/mailbox-load${qs}`);
         if (!res.ok) {
           // тело несёт код причины (dataset_not_configured / build_failed /
-          // role_check_failed) — показываем его, а не голый HTTP-статус
-          const body = (await res.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(body?.error || `HTTP ${res.status}`);
+          // role_check_failed) и, для build_failed, текст самой ошибки. Код без
+          // текста отвечал на вопрос «что-то сломалось», но не на «что именно»,
+          // и разбор начинался с похода в логи сервера.
+          const body = (await res.json().catch(() => null)) as { error?: string; detail?: string } | null;
+          const code = body?.error || `HTTP ${res.status}`;
+          throw new Error(body?.detail ? `${code} — ${body.detail}` : code);
         }
         const json = (await res.json()) as { data: MailboxLoad | null; error?: string };
         if (!active) return;
@@ -129,8 +179,11 @@ export default function MailboxLoadPage() {
         const qs = currentDay ? `?day=${encodeURIComponent(currentDay)}` : '';
         const res = await authFetch(`/api/analytics/mailbox-load/${encodeURIComponent(tagId)}${qs}`);
         if (!res.ok) {
-          const body = (await res.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(body?.error || `HTTP ${res.status}`);
+          // Раскрытие тега показывает лишь «не удалось», поэтому причина обязана
+          // хотя бы доехать до клиентского лога — иначе её негде взять.
+          const body = (await res.json().catch(() => null)) as { error?: string; detail?: string } | null;
+          const code = body?.error || `HTTP ${res.status}`;
+          throw new Error(body?.detail ? `${code} — ${body.detail}` : code);
         }
         const json = (await res.json()) as { tag: string | null; mailboxes: MailboxRow[]; error?: string };
         if (json.error) throw new Error(json.error);
@@ -141,6 +194,15 @@ export default function MailboxLoadPage() {
       }
     }
   }, [data, drill, expanded]);
+
+  // Клик по заголовку. Разворачивать раскрытую строку не нужно: она привязана
+  // к id, а не к позиции, и переживает пересортировку.
+  const onTagSort = useCallback((key: TagSortKey) => {
+    setTagSort((cur) => nextSort(cur, key));
+  }, []);
+  const onSpecSort = useCallback((key: SpecialistSortKey) => {
+    setSpecSort((cur) => nextSort(cur, key));
+  }, []);
 
   const t = !error ? data?.totals : undefined;
 
@@ -173,12 +235,29 @@ export default function MailboxLoadPage() {
         </div>
       </div>
 
-      {/* freshness banner (скрыт при ошибке — иначе рядом с ошибкой висят старые цифры) */}
+      {/* Плашка свежести (скрыта при ошибке — иначе рядом с ошибкой висят старые
+          цифры). Жёлтая всегда: за какой день таблица и когда был синк — не
+          украшение, а условие, при котором её вообще можно читать; серым это
+          терялось между шапкой и плитками.
+
+          Рамка по содержимому (`w-fit`), а не во всю страницу: пустая полоса до
+          правого края читается как отдельный блок, хотя внутри две короткие
+          строки. Именно `flex w-fit`, а не `inline-flex`: контейнер страницы
+          разносит блоки через `space-y`, то есть `margin-top` — а на строчном
+          элементе он не работает, и плашка слиплась бы с шапкой.
+
+          Устаревший синк уходит в красное — раньше он был единственным жёлтым
+          на экране, и с пожелтевшей нормой предупреждение перестало бы
+          отличаться от обычного состояния. */}
       {data && !error && (
-        <div className={`flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border px-3 py-2 text-[11px] ${
-          data.stale ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-zinc-200 bg-zinc-50 text-zinc-500'
+        <div className={`flex w-fit max-w-full flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border px-3 py-2 text-[11px] ${
+          data.stale
+            ? 'border-red-300 bg-red-50 text-red-800'
+            : 'border-amber-300 bg-amber-50 text-amber-900'
         }`}>
-          <span>Данные за <b className="text-zinc-700">{data.asOfDay || '—'}</b> (UTC-день)</span>
+          <span>
+            Данные за <b className={data.stale ? 'text-red-900' : 'text-amber-950'}>{data.asOfDay || '—'}</b> (UTC-день)
+          </span>
           {data.lastSync && <span>Последний синк: {new Date(data.lastSync).toLocaleString('ru-RU')}</span>}
           {data.stale && <span className="font-semibold">⚠️ Синк устарел — цифры могут быть неактуальны</span>}
         </div>
@@ -223,17 +302,17 @@ export default function MailboxLoadPage() {
           <table className="w-full min-w-[720px] text-xs">
             <thead>
               <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400">
-                <th className="px-3 py-2 font-medium">Тег / клиент</th>
-                <th className="px-3 py-2 font-medium">Специалист</th>
-                <th className="px-3 py-2 font-medium text-right">Ящиков</th>
-                <th className="px-3 py-2 font-medium text-right">Потолок</th>
-                <th className="px-3 py-2 font-medium text-right">Отправлено</th>
-                <th className="px-3 py-2 font-medium">Утилизация</th>
-                <th className="px-3 py-2 font-medium">Статус</th>
+                <SortTh label="Тег / клиент" sortKey="tag" sort={tagSort} onSort={onTagSort} />
+                <SortTh label="Специалист" sortKey="specialist" sort={tagSort} onSort={onTagSort} />
+                <SortTh label="Ящиков" sortKey="mailboxes" sort={tagSort} onSort={onTagSort} align="right" />
+                <SortTh label="Потолок" sortKey="capacity" sort={tagSort} onSort={onTagSort} align="right" />
+                <SortTh label="Отправлено" sortKey="sent" sort={tagSort} onSort={onTagSort} align="right" />
+                <SortTh label="Утилизация" sortKey="utilization" sort={tagSort} onSort={onTagSort} />
+                <SortTh label="Статус" sortKey="status" sort={tagSort} onSort={onTagSort} />
               </tr>
             </thead>
             <tbody>
-              {data.tags.map((tag) => (
+              {sortTags(data.tags, tagSort).map((tag) => (
                 <TagRows
                   key={tag.tagId}
                   tag={tag}
@@ -256,16 +335,16 @@ export default function MailboxLoadPage() {
           <table className="w-full min-w-[720px] text-xs">
             <thead>
               <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400">
-                <th className="px-3 py-2 font-medium">Специалист</th>
-                <th className="px-3 py-2 font-medium text-right">Тегов</th>
-                <th className="px-3 py-2 font-medium text-right">Активных ящиков</th>
-                <th className="px-3 py-2 font-medium text-right">Потолок</th>
-                <th className="px-3 py-2 font-medium text-right">Отправлено</th>
-                <th className="px-3 py-2 font-medium">Утилизация</th>
+                <SortTh label="Специалист" sortKey="specialist" sort={specSort} onSort={onSpecSort} />
+                <SortTh label="Тегов" sortKey="tagCount" sort={specSort} onSort={onSpecSort} align="right" />
+                <SortTh label="Активных ящиков" sortKey="mailboxes" sort={specSort} onSort={onSpecSort} align="right" />
+                <SortTh label="Потолок" sortKey="capacity" sort={specSort} onSort={onSpecSort} align="right" />
+                <SortTh label="Отправлено" sortKey="sent" sort={specSort} onSort={onSpecSort} align="right" />
+                <SortTh label="Утилизация" sortKey="utilization" sort={specSort} onSort={onSpecSort} />
               </tr>
             </thead>
             <tbody>
-              {data.specialists.map((s) => (
+              {sortSpecialists(data.specialists, specSort).map((s) => (
                 <SpecialistRows
                   key={s.specialist}
                   spec={s}

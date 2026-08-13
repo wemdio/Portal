@@ -24,8 +24,16 @@ export async function GET(req: NextRequest) {
     const data = await buildMailboxLoad(day);
     return NextResponse.json({ data });
   } catch (e) {
-    console.error('[mailbox-load] build failed:', (e as Error).message);
-    // 500, не 200 — иначе сбой датасета невидим для мониторинга по статус-кодам
-    return NextResponse.json({ error: 'build_failed', data: null }, { status: 500 });
+    const detail = (e as Error).message;
+    console.error('[mailbox-load] build failed:', detail);
+    // 500, не 200 — иначе сбой датасета невидим для мониторинга по статус-кодам.
+    //
+    // `detail` отдаём наружу намеренно: до этого на экране был голый код
+    // `build_failed`, а настоящая причина («relation ... does not exist»,
+    // таймаут, отвалившийся пул) оставалась только в консоли сервера — и любой
+    // сбой выглядел одинаково, вплоть до похода в docker logs. Роут закрыт
+    // гейтом на руководство (см. access.ts), так что читать текст ошибки
+    // некому, кроме тех, кто и так пойдёт её чинить.
+    return NextResponse.json({ error: 'build_failed', detail, data: null }, { status: 500 });
   }
 }
