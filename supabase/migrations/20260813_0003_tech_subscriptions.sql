@@ -83,16 +83,28 @@ alter table public.tech_renewal_notification_log enable row level security;
 grant all on public.tech_renewal_notification_log to service_role;
 
 -- Новый тип уведомления и новый вид сущности, на которую оно ссылается.
+--
+-- ВАЖНО: CHECK можно только целиком дропнуть и пересоздать — ALTER не умеет
+-- "добавить одно значение" к существующему check-ограничению. Значит список
+-- ниже обязан включать вообще ВСЕ значения, накопленные предыдущими
+-- миграциями, а не только новые из этого файла: 20260509_0001_create_client_
+-- support_chat.sql уже расширяла этот же constraint значениями
+-- 'support_message' / 'support_thread' для живого support-чата
+-- (app/src/lib/clientSupport/notify.ts). Потерять их здесь — значит откатить
+-- то расширение: на боевой базе add constraint упадёт на существующих
+-- строках с type = 'support_message', а если строк ещё нет — сломается
+-- первая же вставка из support-чата. Следующая миграция, трогающая эти два
+-- constraint'а, обязана точно так же переносить полный список вперёд.
 alter table public.notifications
   drop constraint if exists notifications_type_check;
 alter table public.notifications
   add constraint notifications_type_check
   check (type in ('deadline', 'deadline_lead', 'deadline_ceo',
                   'lead_new', 'lead_escalation', 'lead_ceo',
-                  'info', 'tech_renewal'));
+                  'info', 'support_message', 'tech_renewal'));
 
 alter table public.notifications
   drop constraint if exists notifications_entity_type_check;
 alter table public.notifications
   add constraint notifications_entity_type_check
-  check (entity_type is null or entity_type in ('project', 'task', 'lead_qualification', 'tech_subscription'));
+  check (entity_type is null or entity_type in ('project', 'task', 'lead_qualification', 'support_thread', 'tech_subscription'));
