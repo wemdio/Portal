@@ -63,4 +63,31 @@ describe('resolveSource', () => {
     expect(resolveSource({ custom_fields_values: [{ field_name: 'Источник', values: [] }] }).key)
       .toBe(NO_SOURCE_KEY);
   });
+
+  it('значение не объектом — «без источника», а не падение', () => {
+    expect(resolveSource({ custom_fields_values: [{ field_name: 'Источник', values: ['мусор'] }] }).key)
+      .toBe(NO_SOURCE_KEY);
+  });
+
+  it('мусор среди полей пропускается, «Источник» дальше по массиву находится', () => {
+    const res = resolveSource({
+      custom_fields_values: [
+        null,
+        'мусор',
+        { field_name: 'Источник', values: [{ value: 'SEO', enum_id: 11382055 }] },
+      ],
+    });
+    expect(res.key).toBe('11382055');
+  });
+
+  // Ради этого свойства normalizeText и существует: два написания одного
+  // источника не должны разъехаться на две строки в разбивке. Проверяем именно
+  // совпадение ключей у двух независимых вызовов, а не текст одного из них.
+  it('два написания без enum_id дают один ключ, но каждое сохраняет своё название', () => {
+    const a = resolveSource(raw('Партнёр'));
+    const b = resolveSource(raw('  ПАРТНЕР '));
+    expect(a.key).toBe(b.key);
+    expect(a.label).toBe('Партнёр');
+    expect(b.label).toBe('ПАРТНЕР');
+  });
 });
