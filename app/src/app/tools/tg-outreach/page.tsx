@@ -29,9 +29,10 @@ import {
   Database,
   ShieldCheck,
   FileSpreadsheet,
+  LayoutDashboard,
 } from 'lucide-react';
+import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
-import WarmupChatsTab from '@/components/tg-outreach/WarmupChatsTab';
 import type {
   CampaignStatus,
   OutreachCampaign,
@@ -113,6 +114,44 @@ const DIALOG_STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   not_lead: { label: 'Не лид', cls: 'bg-gray-100 text-gray-600' },
   later: { label: 'Потом', cls: 'bg-amber-100 text-amber-700' },
 };
+
+/**
+ * Плашка передачи диалога человеку.
+ *
+ * Одна и та же в свёрнутой строке списка и в раскрытой карточке. В списке она
+ * нужна больше: «кого уже отдали менеджеру» — вопрос про весь список сразу, а
+ * раскрывать ради ответа каждый диалог по очереди оператор не станет.
+ *
+ * «Передан» показываем наравне с «в очереди»: если бы метка жила только до
+ * отправки, она исчезала бы ровно в тот момент, когда передача удалась, и это
+ * читалось бы как отмена.
+ */
+function ForwardBadge({
+  forward,
+  compact = false,
+}: {
+  forward: NonNullable<NonNullable<OutreachDialog['forward']>>;
+  /** Компактный размер — под остальные бейджи в строке списка. */
+  compact?: boolean;
+}) {
+  const pending = forward.status === 'pending';
+  const size = compact ? 'gap-1 px-2 py-0.5' : 'ml-2 gap-1.5 px-3 py-1';
+  const tone = pending
+    ? 'border-amber-200 bg-amber-50 text-amber-700'
+    : 'border-gray-200 bg-gray-50 text-gray-600';
+  return (
+    <span
+      title={pending
+        ? 'Стоит в очереди — уйдёт, когда воркер дойдёт до этого аккаунта'
+        : 'Уже отправлено. Передать ещё раз, в том числе другим видом, нельзя'}
+      className={`inline-flex items-center rounded-full border text-[10px] font-medium ${size} ${tone}`}
+    >
+      <Send className="h-3 w-3" />
+      {pending ? 'В очереди: ' : 'Передан: '}
+      {forward.kind === 'lead' ? 'лид' : 'партнёр'}
+    </span>
+  );
+}
 
 /* =================== GLOBAL BLOCKLIST SECTION =================== */
 function GlobalBlocklistSection() {
@@ -1134,6 +1173,9 @@ function DialogsTab({ campaignId }: {
                       >
                         {d.can_send === false ? 'Не писать' : 'Можно писать'}
                       </span>
+                      {d.forward && d.forward.status !== 'failed' && (
+                        <ForwardBadge forward={d.forward} compact />
+                      )}
                       <span className="text-[10px] text-gray-400">{d.messages.length} сообщ.</span>
                     </div>
                     <span className="text-[11px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : '—'}</span>
@@ -1160,20 +1202,7 @@ function DialogsTab({ campaignId }: {
                           оставлять на экране — приглашать кликать в
                           недоступное. */}
                       {d.forward && d.forward.status !== 'failed' ? (
-                        <span
-                          title={d.forward.status === 'pending'
-                            ? 'Стоит в очереди — уйдёт, когда воркер дойдёт до этого аккаунта'
-                            : 'Уже отправлено. Передать ещё раз, в том числе другим видом, нельзя'}
-                          className={`ml-2 inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[10px] font-medium ${
-                            d.forward.status === 'pending'
-                              ? 'border-amber-200 bg-amber-50 text-amber-700'
-                              : 'border-gray-200 bg-gray-50 text-gray-600'
-                          }`}
-                        >
-                          <Send className="h-3 w-3" />
-                          {d.forward.status === 'pending' ? 'В очереди: ' : 'Передан: '}
-                          {d.forward.kind === 'lead' ? 'лид' : 'партнёр'}
-                        </span>
+                        <ForwardBadge forward={d.forward} />
                       ) : (
                         <>
                           <button
@@ -4082,11 +4111,13 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
 
 /* =================== CAMPAIGN VIEW (5 tabs) =================== */
 const TABS = [
+  // Сводка первой и стартовой: открывая кампанию, оператор спрашивает «как
+  // дела», а не «какие тут настройки» — их заводят один раз и больше не трогают.
+  { id: 'dashboard', label: 'Сводка', icon: LayoutDashboard },
   { id: 'settings', label: 'Настройки', icon: Settings },
   { id: 'accounts', label: 'Аккаунты', icon: Users },
   { id: 'bases', label: 'Базы', icon: Database },
   { id: 'warmup', label: 'Прогрев', icon: Flame },
-  { id: 'warmup-chats', label: 'Чаты', icon: MessageSquareMore },
   { id: 'proxies', label: 'Прокси', icon: Network },
   { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
@@ -4099,7 +4130,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   onUpdate: () => void;
   onDelete: (id: string) => void;
 }) {
-  const [tab, setTab] = useState<string>('settings');
+  const [tab, setTab] = useState<string>('dashboard');
   const [actionLoading, setActionLoading] = useState(false);
   const [stopping, setStopping] = useState(false);
   const stoppingRef = useRef(false);
@@ -4292,6 +4323,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
       </div>
 
       <div>
+        {tab === 'dashboard' && <DashboardTab campaignId={campaign.id} />}
         {tab === 'settings' && <SettingsTab campaign={campaign} onSave={saveSettings} />}
         {tab === 'accounts' && (
           <CampaignAccountsTab campaignId={campaign.id} campaignStatus={campaign.status} />
@@ -4300,9 +4332,6 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
         {tab === 'proxies' && <CampaignProxiesTab campaignId={campaign.id} />}
         {tab === 'warmup' && (
           <WarmupTab campaignId={campaign.id} campaignStatus={campaign.status} />
-        )}
-        {tab === 'warmup-chats' && (
-          <WarmupChatsTab campaignId={campaign.id} campaignStatus={campaign.status} />
         )}
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
         {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} />}
