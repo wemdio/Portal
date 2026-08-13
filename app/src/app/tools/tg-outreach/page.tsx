@@ -50,6 +50,11 @@ import {
   DEFAULT_TELEGRAM_SETTINGS,
   DEFAULT_FOLLOW_UP,
 } from '@/lib/tgOutreach/types';
+import {
+  describeAutoForward,
+  autoForwardWarning,
+  type AutoForwardMark,
+} from '@/lib/tgOutreach/autoForward';
 import { DEFAULT_MAX_MESSAGE_CHARS } from '@/lib/tgOutreach/firstTouch/validateMessage';
 import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
 // Только тип: сам модуль серверный (тянет gramJS), в клиентский бандл он не
@@ -149,6 +154,41 @@ function ForwardBadge({
       <Send className="h-3 w-3" />
       {pending ? 'В очереди: ' : 'Передан: '}
       {forward.kind === 'lead' ? 'лид' : 'партнёр'}
+    </span>
+  );
+}
+
+/**
+ * Контакт ушёл менеджеру сам, по положительному триггеру.
+ *
+ * Отдельно от `ForwardBadge`: та плашка про очередь ручной передачи, эта — про
+ * то, что воркер уже сделал без оператора. Раньше от автопересылки в карточке
+ * оставался только статус «Лид», который точно так же ставится руками, и
+ * человека передавали менеджеру второй раз, не зная, что он уже там.
+ */
+function AutoForwardBadge({
+  mark,
+  compact = false,
+}: {
+  mark: AutoForwardMark;
+  /** Компактный размер — под остальные бейджи в строке списка. */
+  compact?: boolean;
+}) {
+  const sent = mark.state === 'sent';
+  const size = compact ? 'gap-1 px-2 py-0.5' : 'ml-2 gap-1.5 px-3 py-1';
+  const tone = sent
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    : 'border-rose-200 bg-rose-50 text-rose-700';
+  const where = mark.chat ? `, чат ${mark.chat}` : '';
+  return (
+    <span
+      title={sent
+        ? `Переписка ушла менеджеру автоматически, по положительному триггеру${where}. ${formatDate(mark.at)}`
+        : `Автопересылка менеджеру не удалась${where} — ${mark.reason}. Лид до менеджера не дошёл.`}
+      className={`inline-flex items-center rounded-full border text-[10px] font-medium ${size} ${tone}`}
+    >
+      <UserCheck className="h-3 w-3" />
+      {sent ? 'Ушёл менеджеру' : 'Не ушёл менеджеру'}
     </span>
   );
 }
@@ -301,9 +341,9 @@ function SettingsTab({ campaign, onSave }: {
 
   return (
     <div className="space-y-6">
-      {/* OpenRouter */}
+      {/* Промпт, триггеры и чаты-приёмники. Заголовка нет намеренно: «OpenRouter»
+          называл поставщика модели, а не то, что оператор здесь настраивает. */}
       <section className="space-y-4">
-        <h3 className="text-sm font-semibold text-gray-800">OpenRouter</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <Field label="Название проекта" value={openai.project_name} onChange={v => setOAI('project_name', v)} />
         </div>
@@ -1041,8 +1081,17 @@ function DialogsTab({ campaignId }: {
       }
 
       const what = kind === 'lead' ? 'лида' : 'кандидата в партнёры';
+      // Контакт мог уйти менеджеру сам, по триггеру, — тогда ручная передача
+      // задвоит его у адресата. Запрещать не за что: автопересылка отправляет
+      // голую переписку, без карточки с контекстом, и досылать её бывает нужно.
+      // Решает оператор, но с открытыми глазами.
+      const warning = autoForwardWarning(
+        dialog,
+        dialog.auto_forwarded_at ? formatDate(dialog.auto_forwarded_at) : null,
+      );
       if (!confirm(
-        `Передать ${what} в ${preview?.target_chat}?\n\n`
+        (warning ? `⚠ ${warning}\n\n` : '')
+        + `Передать ${what} в ${preview?.target_chat}?\n\n`
         + 'Отправит аккаунт кампании, когда воркер дойдёт до него в круге.\n'
         + 'Отменить отправку после этого будет нельзя.\n\n'
         + `——— Текст сообщения ———\n${preview?.text ?? ''}`,
@@ -1160,6 +1209,7 @@ function DialogsTab({ campaignId }: {
           {dialogs.map(d => {
             const isExpanded = expandedId === d.id;
             const st = DIALOG_STATUS_LABELS[d.status] ?? DIALOG_STATUS_LABELS.none;
+            const autoMark = describeAutoForward(d);
             return (
               <div key={d.id} className="rounded-xl border border-gray-200 bg-white shadow-sm">
                 <button type="button" onClick={() => setExpandedId(isExpanded ? null : d.id)}
@@ -1201,6 +1251,7 @@ function DialogsTab({ campaignId }: {
                       >
                         {d.can_send === false ? 'Не писать' : 'Можно писать'}
                       </span>
+                      {autoMark && <AutoForwardBadge mark={autoMark} compact />}
                       {d.forward && d.forward.status !== 'failed' && (
                         <ForwardBadge forward={d.forward} compact />
                       )}
@@ -1238,6 +1289,11 @@ function DialogsTab({ campaignId }: {
                           показывает плашку вместо пары кнопок: гасить их и
                           оставлять на экране — приглашать кликать в
                           недоступное. */}
+                      {/* Что произошло само, до оператора: контакт уже у
+                          менеджера. Кнопки рядом остаются рабочими — автопересылка
+                          уходит без карточки с контекстом, и досылать её иногда
+                          нужно. Про риск задвоения предупредим на подтверждении. */}
+                      {autoMark && <AutoForwardBadge mark={autoMark} />}
                       {d.forward && d.forward.status !== 'failed' ? (
                         <ForwardBadge forward={d.forward} />
                       ) : (
@@ -1290,6 +1346,17 @@ function DialogsTab({ campaignId }: {
                       <p className="mt-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[10px] text-rose-700">
                         Не отправлено ({d.forward.kind === 'lead' ? 'лид' : 'партнёр'}):{' '}
                         {d.forward.error_message || 'причина не записана'}
+                      </p>
+                    )}
+                    {/* Сорвавшаяся автопересылка: лид, который не доехал до
+                        менеджера. Диалог при этом всё равно стал «Лидом» — без
+                        этой строки провал не отличить от успеха, а причина
+                        лежала бы только в журнале кампании. Передать руками
+                        кнопкой рядом — единственный способ довести до конца. */}
+                    {autoMark?.state === 'failed' && (
+                      <p className="mt-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[10px] text-rose-700">
+                        Автопересылка менеджеру не удалась{autoMark.chat ? ` (${autoMark.chat})` : ''}:{' '}
+                        {autoMark.reason}
                       </p>
                     )}
                     {/* Аудит can_send: кто/когда/почему последний раз менял.

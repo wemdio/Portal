@@ -453,6 +453,31 @@ async function markProcessed(db: SupabaseClient, campaignId: string, tgUserId: n
   );
 }
 
+/**
+ * Чем кончилась автопересылка переписки менеджеру.
+ *
+ * Пишется в тот же апдейт диалога, что и статус «Лид»: это одно событие, и
+ * отдельный запрос ради трёх полей только добавил бы момент, когда статус уже
+ * стоит, а отметка о передаче ещё нет.
+ */
+interface AutoForwardOutcome {
+  /** Куда пересылали. Снимок настройки на момент отправки. */
+  chat: string | null;
+  /** Когда ушло. NULL — не ушло. */
+  at: string | null;
+  /** Причина, если не ушло. */
+  error: string | null;
+}
+
+function autoForwardPayload(outcome?: AutoForwardOutcome): Record<string, unknown> {
+  if (!outcome) return {};
+  return {
+    auto_forwarded_at: outcome.at,
+    auto_forward_chat: outcome.chat,
+    auto_forward_error: outcome.error,
+  };
+}
+
 async function upsertDialog(
   db: SupabaseClient,
   campaignId: string,
@@ -461,7 +486,7 @@ async function upsertDialog(
   tgUsername: string | null,
   messages: DialogMessage[],
   status?: string,
-  opts?: { canSend?: boolean; initialCanSend?: boolean; tgIsBot?: boolean },
+  opts?: { canSend?: boolean; initialCanSend?: boolean; tgIsBot?: boolean; autoForward?: AutoForwardOutcome },
 ) {
   const { data: existing } = await db
     .from('tg_outreach_dialogs')
@@ -486,6 +511,7 @@ async function upsertDialog(
       last_message_at: lastMessageAt,
       tg_is_bot: opts?.tgIsBot ?? existing.tg_is_bot ?? false,
       ...(status ? { status } : {}),
+      ...autoForwardPayload(opts?.autoForward),
     };
     // initialCanSend применяется ТОЛЬКО при insert — иначе перезапишет ручной
     // toggle оператора в UI при следующем витке цикла.
@@ -506,6 +532,7 @@ async function upsertDialog(
       tg_is_bot: opts?.tgIsBot ?? false,
       can_send: opts?.canSend ?? opts?.initialCanSend ?? !(opts?.tgIsBot ?? false),
       last_message_at: lastMessageAt,
+      ...autoForwardPayload(opts?.autoForward),
     });
   }
 }
@@ -643,20 +670,31 @@ async function writeLog(
   }
 }
 
+/**
+ * Исход пересылки возвращаем, а не только пишем в журнал.
+ *
+ * Сбой автопересылки — это лид, который не доехал до менеджера. Пока он оседал
+ * одной строкой среди сотен строк круга, диалог снаружи выглядел как успешный:
+ * статус «Лид» ставится в той же ветке независимо от того, ушла переписка или
+ * нет. Теперь исход доезжает до карточки диалога.
+ */
 async function forwardToTargetChat(
   client: TelegramClient,
   fromPeer: Api.TypeEntityLike,
   messageIds: number[],
   targetUsername: string,
   log: LogFn,
-) {
-  if (!targetUsername) return;
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!targetUsername) return { ok: false, error: 'чат для пересылки не указан в настройках кампании' };
   const target = targetUsername.startsWith('@') ? targetUsername.slice(1) : targetUsername;
   try {
     await client.forwardMessages(target, { fromPeer, messages: messageIds });
     log('info', `Переслано в ${targetUsername}`);
+    return { ok: true };
   } catch (err) {
-    log('error', `Ошибка пересылки в ${targetUsername}: ${err instanceof Error ? err.message : String(err)}`);
+    const msg = err instanceof Error ? err.message : String(err);
+    log('error', `Ошибка пересылки в ${targetUsername}: ${msg}`);
+    return { ok: false, error: msg };
   }
 }
 
@@ -853,15 +891,28 @@ export async function handleChat(
       ? oai.target_chats_positive
       : oai.target_chats_negative;
 
+    let outcome: { ok: true } | { ok: false; error: string };
     if (targetChat) {
       const messageIdsToForward = pickForwardIds(history, tg.forward_limit, sent.id);
-      await forwardToTargetChat(client, entity, messageIdsToForward, targetChat, log);
+      outcome = await forwardToTargetChat(client, entity, messageIdsToForward, targetChat, log);
     } else {
       log('info', `${displayName}: триггер "${triggerLabel}" сработал, но чат для пересылки не указан в настройках кампании — пересылка пропущена`);
+      outcome = { ok: false, error: 'чат для пересылки не указан в настройках кампании' };
     }
 
+    // Отметку ставим только положительному триггеру. Отрицательный тоже
+    // пересылает, но в другой чат и по другому поводу: «ушёл менеджеру» про
+    // человека, который отказался, — неправда.
+    const autoForward: AutoForwardOutcome | undefined = triggerType === 'positive'
+      ? {
+          chat: targetChat || null,
+          at: outcome.ok ? new Date().toISOString() : null,
+          error: outcome.ok ? null : outcome.error,
+        }
+      : undefined;
+
     await markProcessed(db, campaign.id, tgUserId, tgUsername);
-    await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, triggerType === 'positive' ? 'lead' : 'not_lead', { tgIsBot, canSend: false });
+    await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, triggerType === 'positive' ? 'lead' : 'not_lead', { tgIsBot, canSend: false, autoForward });
   } else {
     await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot });
   }

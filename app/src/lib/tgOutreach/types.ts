@@ -283,6 +283,17 @@ export interface OutreachDialog {
   last_message_at: string | null;
   created_at: string;
   /**
+   * Автоматическая передача менеджеру по положительному триггеру: ушло или нет,
+   * куда и почему не ушло. В отличие от `forward` — не задача в очереди, а факт
+   * о том, что воркер уже сделал сам. Статус «Лид» на этот вопрос не отвечает:
+   * его точно так же ставит оператор руками.
+   *
+   * Разбирает эти поля `lib/tgOutreach/autoForward.ts`.
+   */
+  auto_forwarded_at?: string | null;
+  auto_forward_chat?: string | null;
+  auto_forward_error?: string | null;
+  /**
    * Последняя передача этого диалога — приклеивается роутом списка, в самой
    * таблице диалогов такого поля нет.
    *
