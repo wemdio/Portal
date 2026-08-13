@@ -215,6 +215,31 @@ export interface TeamReviewRequestsResponse {
   canManage: boolean;
 }
 
+export interface TeamSharedReviewRequestPerson {
+  id: string;
+  name: string;
+  avatarUrl: string | null;
+}
+
+export interface TeamSharedReviewRequest {
+  id: string;
+  state: TeamReviewRequestState;
+  employee: TeamSharedReviewRequestPerson | null;
+  initiator: TeamSharedReviewRequestPerson | null;
+  project: TeamReviewRequestProject | null;
+  problem: string;
+  examples: string | null;
+  desiredOutcome: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TeamSharedReviewRequestsResponse {
+  requests: TeamSharedReviewRequest[];
+  summary: TeamReviewRequestSummary;
+  canManage: false;
+}
+
 export interface TeamReviewRequestInput {
   employeeUserId: string;
   projectId?: string | null;
@@ -819,6 +844,51 @@ export function normalizeReviewRequests(payload: unknown): TeamReviewRequestsRes
       ? root.projects.map(normalizeReviewRequestProject).filter((project): project is TeamReviewRequestProject => project !== null)
       : [],
     canManage: root.canManage === true || root.can_manage === true,
+  };
+}
+
+function normalizeSharedReviewRequestPerson(value: unknown): TeamSharedReviewRequestPerson | null {
+  const person = normalizeReviewRequestPerson(value);
+  return person ? {
+    id: person.id,
+    name: person.name,
+    avatarUrl: person.avatarUrl,
+  } : null;
+}
+
+function normalizeSharedReviewRequest(value: unknown): TeamSharedReviewRequest {
+  const request = record(value);
+  const normalized = normalizeReviewRequest(request);
+  return {
+    id: normalized.id,
+    state: normalized.state,
+    employee: normalizeSharedReviewRequestPerson(request.employee),
+    initiator: normalizeSharedReviewRequestPerson(request.initiator),
+    project: normalized.project,
+    problem: normalized.problem,
+    examples: normalized.examples,
+    desiredOutcome: normalized.desiredOutcome,
+    createdAt: normalized.createdAt,
+    updatedAt: normalized.updatedAt,
+  };
+}
+
+export function normalizeSharedReviewRequests(payload: unknown): TeamSharedReviewRequestsResponse {
+  const root = unwrap(payload);
+  const summary = record(root.summary);
+  return {
+    requests: Array.isArray(root.requests)
+      ? root.requests.map(normalizeSharedReviewRequest).filter((request) => request.id)
+      : [],
+    summary: {
+      total: number(summary.total),
+      newCount: number(summary.newCount ?? summary.new_count),
+      inProgressCount: number(summary.inProgressCount ?? summary.in_progress_count),
+      convertedCount: number(summary.convertedCount ?? summary.converted_count),
+      declinedCount: number(summary.declinedCount ?? summary.declined_count),
+    },
+    // The shared surface is intentionally read-only even if a malformed response says otherwise.
+    canManage: false,
   };
 }
 

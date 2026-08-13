@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ExternalLink, Inbox, Loader2 } from 'lucide-react';
+import { ChevronDown, Inbox, Loader2 } from 'lucide-react';
 import { currentMoscowDate } from '@/lib/calendarDate';
 import {
   buildTeamReviewRequestActionWrite,
@@ -14,54 +14,19 @@ import {
   type TeamReviewRequestsResponse,
 } from './teamApi';
 import { TEAM_FORM_INPUT_CLASS, TEAM_FORM_TEXTAREA_CLASS } from './teamFormStyles';
+import {
+  REVIEW_REQUEST_STATE_META,
+  REVIEW_REQUEST_STATES,
+  ReviewRequestDetail,
+  ReviewRequestExamples,
+  reviewRequestNewCountLabel,
+} from './reviewRequestUi';
 
-const STATE_META: Record<TeamReviewRequestState, { heading: string; label: string; dot: string }> = {
-  new: { heading: 'Новые', label: 'Новый', dot: 'bg-blue-500' },
-  in_progress: { heading: 'В работе', label: 'В работе', dot: 'bg-amber-500' },
-  converted: { heading: 'Ревью запланировано', label: 'Ревью запланировано', dot: 'bg-emerald-500' },
-  declined: { heading: 'Не требуется', label: 'Не требуется', dot: 'bg-gray-400' },
-};
-
-const STATES: readonly TeamReviewRequestState[] = ['new', 'in_progress', 'converted', 'declined'];
 const CONFLICT_MESSAGE = 'Запрос уже изменился у другого пользователя. Ваш черновик сохранён. Обновите данные запроса, чтобы продолжить.';
 
 interface RequestActionError {
   message: string;
   conflict: boolean;
-}
-
-function newCountLabel(count: number) {
-  const mod10 = count % 10;
-  const mod100 = count % 100;
-  if (mod10 === 1 && mod100 !== 11) return `${count} новый`;
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${count} новых`;
-  return `${count} новых`;
-}
-
-function examplesContent(value: string) {
-  const links = Array.from(value.matchAll(/https?:\/\/[^\s,]+/gi))
-    .map((match) => match[0].replace(/[.;!?)]*$/, ''))
-    .filter(Boolean);
-  if (!links.length) return <p className="whitespace-pre-wrap break-words text-gray-800">{value}</p>;
-  return (
-    <div className="min-w-0 space-y-2">
-      <p className="whitespace-pre-wrap break-words text-gray-800">{value}</p>
-      <div className="flex min-w-0 flex-col items-start gap-2">
-        {links.map((href, index) => (
-          <a
-            key={`${href}-${index}`}
-            href={href}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex max-w-full items-center gap-1 break-all font-medium text-gray-900 underline-offset-2 hover:underline focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-          >
-            Открыть обсуждение {links.length > 1 ? index + 1 : ''}
-            <ExternalLink aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
-          </a>
-        ))}
-      </div>
-    </div>
-  );
 }
 
 function conversionPrefill(request: TeamReviewRequest): string {
@@ -71,15 +36,6 @@ function conversionPrefill(request: TeamReviewRequest): string {
     `Что нужно выяснить: ${request.desiredOutcome}`,
   ].filter(Boolean);
   return sections.join('\n').slice(0, 500);
-}
-
-function Detail({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="min-w-0">
-      <p className="text-xs font-medium text-gray-500">{label}</p>
-      <div className="mt-1 break-words text-sm text-gray-800">{children}</div>
-    </div>
-  );
 }
 
 interface RequestRowProps {
@@ -139,7 +95,7 @@ function RequestRow({
   const declineTriggerRef = useRef<HTMLButtonElement>(null);
   const conversionTriggerRef = useRef<HTMLButtonElement>(null);
   const reviewDateRef = useRef<HTMLInputElement>(null);
-  const meta = STATE_META[request.state];
+  const meta = REVIEW_REQUEST_STATE_META[request.state];
   const employeeName = request.employee?.name || 'Сотрудник не найден';
   const projectName = request.project?.name || 'Без проекта';
 
@@ -189,14 +145,14 @@ function RequestRow({
           className="min-w-0 space-y-5 bg-gray-50/60 px-4 py-4 sm:px-5"
         >
           <div className="grid min-w-0 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            <Detail label="Инициатор">{request.initiator?.name || 'Не указан'}</Detail>
-            <Detail label="Проект">{projectName}</Detail>
-            <Detail label="Проблема / причина">{request.problem}</Detail>
-            <Detail label="Что нужно выяснить">{request.desiredOutcome}</Detail>
-            {request.examples && <Detail label="Примеры и обсуждения">{examplesContent(request.examples)}</Detail>}
-            {request.claimedBy && <Detail label="В работе у">{request.claimedBy.name}</Detail>}
-            {request.decisionNote && <Detail label="Комментарий к решению">{request.decisionNote}</Detail>}
-            {request.linkedReviewId && <Detail label="Результат"><span className="font-medium text-emerald-700">Связано с ревью</span></Detail>}
+            <ReviewRequestDetail label="Инициатор">{request.initiator?.name || 'Не указан'}</ReviewRequestDetail>
+            <ReviewRequestDetail label="Проект">{projectName}</ReviewRequestDetail>
+            <ReviewRequestDetail label="Проблема / причина">{request.problem}</ReviewRequestDetail>
+            <ReviewRequestDetail label="Что нужно выяснить">{request.desiredOutcome}</ReviewRequestDetail>
+            {request.examples && <ReviewRequestDetail label="Примеры и обсуждения"><ReviewRequestExamples value={request.examples} /></ReviewRequestDetail>}
+            {request.claimedBy && <ReviewRequestDetail label="В работе у">{request.claimedBy.name}</ReviewRequestDetail>}
+            {request.decisionNote && <ReviewRequestDetail label="Комментарий к решению">{request.decisionNote}</ReviewRequestDetail>}
+            {request.linkedReviewId && <ReviewRequestDetail label="Результат"><span className="font-medium text-emerald-700">Связано с ревью</span></ReviewRequestDetail>}
           </div>
 
           {actionError && (
@@ -343,7 +299,7 @@ export default function TeamReviewRequestsPanel({ onChanged }: { onChanged: () =
 
   const requestsByState = useMemo(() => {
     const result = new Map<TeamReviewRequestState, TeamReviewRequest[]>();
-    STATES.forEach((state) => result.set(state, []));
+    REVIEW_REQUEST_STATES.forEach((state) => result.set(state, []));
     response?.groups.forEach((group) => result.set(group.state, group.requests));
     return result;
   }, [response]);
@@ -449,7 +405,7 @@ export default function TeamReviewRequestsPanel({ onChanged }: { onChanged: () =
 
   const renderGroup = (state: TeamReviewRequestState) => {
     const requests = requestsByState.get(state) || [];
-    const meta = STATE_META[state];
+    const meta = REVIEW_REQUEST_STATE_META[state];
     return (
       <section key={state} aria-labelledby={`review-request-group-${state}`}>
         <div className="flex items-center justify-between border-b border-gray-100 bg-gray-50/60 px-4 py-2.5 sm:px-5">
@@ -518,7 +474,7 @@ export default function TeamReviewRequestsPanel({ onChanged }: { onChanged: () =
           <p className="mt-1 text-sm text-gray-500">Очередь вопросов от руководителей — открытие запроса не меняет его статус.</p>
         </div>
         {response && response.summary.newCount > 0 && (
-          <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">{newCountLabel(response.summary.newCount)}</span>
+          <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">{reviewRequestNewCountLabel(response.summary.newCount)}</span>
         )}
       </header>
 
@@ -560,7 +516,7 @@ export default function TeamReviewRequestsPanel({ onChanged }: { onChanged: () =
       ) : loadError && !response ? (
         <div className="p-5 text-sm text-red-700"><p role="alert" aria-label="Ошибка обновления списка">{loadError}</p><button type="button" onClick={() => void load()} className="mt-3 min-h-11 rounded-xl border border-red-200 px-4 font-medium outline-none focus-visible:ring-2 focus-visible:ring-red-500">Повторить</button></div>
       ) : (
-        <div>{STATES.map(renderGroup)}</div>
+        <div>{REVIEW_REQUEST_STATES.map(renderGroup)}</div>
       )}
 
       {busyId && <span className="sr-only" role="status"><Loader2 aria-hidden="true" className="animate-spin motion-reduce:animate-none" />Сохраняем изменения</span>}

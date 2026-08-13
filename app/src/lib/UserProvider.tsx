@@ -14,6 +14,8 @@ interface UserContextValue {
   userRole: UserRole | null;
   isHr: boolean;
   canAccessTeamPrivate: boolean;
+  canSubmitTeamReviewRequest: boolean;
+  canViewTeamReviewRequestsShared: boolean;
   userEmail: string | null;
   userFullName: string | null;
   userAvatarUrl: string | null;
@@ -48,6 +50,8 @@ export function UserProvider({
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [isHr, setIsHr] = useState(false);
   const [canAccessTeamPrivate, setCanAccessTeamPrivate] = useState(false);
+  const [canSubmitTeamReviewRequest, setCanSubmitTeamReviewRequest] = useState(false);
+  const [canViewTeamReviewRequestsShared, setCanViewTeamReviewRequestsShared] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userFullName, setUserFullName] = useState<string | null>(null);
   const [userAvatarUrl, setUserAvatarUrl] = useState<string | null>(null);
@@ -67,7 +71,7 @@ export function UserProvider({
   useEffect(() => {
     let isMounted = true;
 
-    const refreshTeamPrivateAccess = async (
+    const refreshTeamCapabilities = async (
       expectedUserId: string,
       expectedSessionRequestId: number,
     ) => {
@@ -86,15 +90,39 @@ export function UserProvider({
         && sessionRequestSequenceRef.current === expectedSessionRequestId
       );
 
-      try {
-        const { data, error } = await supabase.rpc('can_access_team');
-        if (error) throw error;
-        if (isCurrentCapabilityRequest()) setCanAccessTeamPrivate(data === true);
-      } catch (error) {
-        if (!isCurrentCapabilityRequest()) return;
-        console.error('[UserProvider] Failed to load private Team capability:', error);
-        setCanAccessTeamPrivate(false);
-      }
+      const loadCapability = async (
+        rpcName: string,
+        errorLabel: string,
+      ): Promise<boolean> => {
+        try {
+          const { data, error } = await supabase.rpc(rpcName);
+          if (error) throw error;
+          return data === true;
+        } catch (error) {
+          if (isCurrentCapabilityRequest()) console.error(errorLabel, error);
+          return false;
+        }
+      };
+
+      const [privateAccess, submitAccess, sharedReadAccess] = await Promise.all([
+        loadCapability(
+          'can_access_team',
+          '[UserProvider] Failed to load private Team capability:',
+        ),
+        loadCapability(
+          'can_submit_team_review_request',
+          '[UserProvider] Failed to load Team review submit capability:',
+        ),
+        loadCapability(
+          'can_view_team_review_requests_shared',
+          '[UserProvider] Failed to load shared Team review capability:',
+        ),
+      ]);
+
+      if (!isCurrentCapabilityRequest()) return;
+      setCanAccessTeamPrivate(privateAccess);
+      setCanSubmitTeamReviewRequest(submitAccess);
+      setCanViewTeamReviewRequestsShared(sharedReadAccess);
     };
 
     const applySession = async (session: Session | null) => {
@@ -108,6 +136,8 @@ export function UserProvider({
         setUserRole(null);
         setIsHr(false);
         setCanAccessTeamPrivate(false);
+        setCanSubmitTeamReviewRequest(false);
+        setCanViewTeamReviewRequestsShared(false);
         setUserFullName(null);
         setUserAvatarUrl(null);
         setNavTabVisibility({});
@@ -133,6 +163,8 @@ export function UserProvider({
         ++teamCapabilityRequestSequenceRef.current;
         setIsHr(false);
         setCanAccessTeamPrivate(false);
+        setCanSubmitTeamReviewRequest(false);
+        setCanViewTeamReviewRequestsShared(false);
       }
 
       try {
@@ -189,7 +221,7 @@ export function UserProvider({
           }
         })();
 
-        void refreshTeamPrivateAccess(sessionUserId, requestId);
+        void refreshTeamCapabilities(sessionUserId, requestId);
       } catch (err) {
         // If Supabase tables/RLS are misconfigured, we must not crash the whole app.
         // Degrade gracefully: keep the user logged in, but hide gated tabs/values.
@@ -198,6 +230,8 @@ export function UserProvider({
         setUserRole(null);
         setIsHr(false);
         setCanAccessTeamPrivate(false);
+        setCanSubmitTeamReviewRequest(false);
+        setCanViewTeamReviewRequestsShared(false);
         setUserFullName(null);
         setUserAvatarUrl(null);
         setNavTabVisibility({});
@@ -210,26 +244,28 @@ export function UserProvider({
       void applySession(session);
     });
 
-    const refreshCurrentTeamPrivateAccess = () => {
+    const refreshCurrentTeamCapabilities = () => {
       const currentUserId = sessionUserIdRef.current;
       if (!currentUserId) {
         ++teamCapabilityRequestSequenceRef.current;
         setCanAccessTeamPrivate(false);
+        setCanSubmitTeamReviewRequest(false);
+        setCanViewTeamReviewRequestsShared(false);
         return;
       }
-      void refreshTeamPrivateAccess(currentUserId, sessionRequestSequenceRef.current);
+      void refreshTeamCapabilities(currentUserId, sessionRequestSequenceRef.current);
     };
 
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') refreshCurrentTeamPrivateAccess();
+      if (document.visibilityState === 'visible') refreshCurrentTeamCapabilities();
     };
 
-    window.addEventListener('focus', refreshCurrentTeamPrivateAccess);
+    window.addEventListener('focus', refreshCurrentTeamCapabilities);
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       isMounted = false;
-      window.removeEventListener('focus', refreshCurrentTeamPrivateAccess);
+      window.removeEventListener('focus', refreshCurrentTeamCapabilities);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       subscription?.unsubscribe();
     };
@@ -326,6 +362,8 @@ export function UserProvider({
     userRole,
     isHr,
     canAccessTeamPrivate,
+    canSubmitTeamReviewRequest,
+    canViewTeamReviewRequestsShared,
     userEmail,
     userFullName,
     userAvatarUrl,
@@ -339,7 +377,7 @@ export function UserProvider({
     handleSignOut,
     setLocale,
     refreshNotifications,
-  }), [userId, userRole, isHr, canAccessTeamPrivate, userEmail, userFullName, userAvatarUrl, navTabVisibility, visibleTools, badges, unreadNotifications, locale, localeSaving, handleAvatarError, handleSignOut, setLocale, refreshNotifications]);
+  }), [userId, userRole, isHr, canAccessTeamPrivate, canSubmitTeamReviewRequest, canViewTeamReviewRequestsShared, userEmail, userFullName, userAvatarUrl, navTabVisibility, visibleTools, badges, unreadNotifications, locale, localeSaving, handleAvatarError, handleSignOut, setLocale, refreshNotifications]);
 
   return <UserContext.Provider value={value}>{children}</UserContext.Provider>;
 }

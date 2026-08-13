@@ -31,6 +31,7 @@ interface FnsExactStageCallbacks {
 interface FnsExactPostgresApplySessionOptions {
   client: FnsExactPgClient;
   expectedPlanFingerprint: string;
+  exactSource?: string;
   processArtifacts(
     callbacks: FnsExactStageCallbacks,
   ): Promise<{ planFingerprint: string; updateRows?: number }>;
@@ -44,9 +45,24 @@ export interface FnsExactBatchPage {
 
 const STAGE_TABLE = 'fns_exact_okved_import_stage';
 const FNS_SOURCE = 'fns_sme_registry';
+const SBIS_SOURCE = 'sbis_registry';
+const ALLOWED_EXACT_SOURCES = new Set([FNS_SOURCE, SBIS_SOURCE]);
 const POSTGRES_BIGINT_MAX = BigInt('9223372036854775807');
 
-const CREATE_STAGE_SQL = `
+type ConfiguredExactSource = typeof FNS_SOURCE | typeof SBIS_SOURCE;
+
+function validateConfiguredExactSource(
+  value: string | undefined,
+): ConfiguredExactSource {
+  const source = value ?? FNS_SOURCE;
+  if (!ALLOWED_EXACT_SOURCES.has(source)) {
+    throw new Error(`Unsupported configured exact OKVED source: ${source}`);
+  }
+  return source as ConfiguredExactSource;
+}
+
+function createStageSql(exactSource: ConfiguredExactSource): string {
+  return `
 CREATE TEMP TABLE ${STAGE_TABLE} (
   id bigint PRIMARY KEY,
   inn text NOT NULL,
@@ -57,7 +73,7 @@ CREATE TEMP TABLE ${STAGE_TABLE} (
   ),
   okved_code_exact text NOT NULL,
   okved_exact_source text NOT NULL CHECK (
-    okved_exact_source = '${FNS_SOURCE}'
+    okved_exact_source = '${exactSource}'
   ),
   CHECK (
     (
@@ -79,6 +95,7 @@ CREATE TEMP TABLE ${STAGE_TABLE} (
   )
 ) ON COMMIT PRESERVE ROWS
 `.trim();
+}
 
 const COPY_STAGE_SQL = `
 COPY ${STAGE_TABLE} (
@@ -99,7 +116,10 @@ const PAGE_STAGE_FILTER = `
 AND s.id <= $2::bigint
 `.trim();
 
-function previewSql(stageFilter: string): string {
+function previewSql(
+  stageFilter: string,
+  exactSource: ConfiguredExactSource,
+): string {
   return `
 WITH current_state AS (
   SELECT
@@ -122,7 +142,7 @@ WITH current_state AS (
     (
       c.id IS NOT NULL
       AND c.okved_code_exact = s.okved_code_exact
-      AND c.okved_exact_source = '${FNS_SOURCE}'
+      AND c.okved_exact_source = s.okved_exact_source
     ) AS is_applied,
     hashtextextended(
       JSONB_BUILD_ARRAY(
@@ -153,7 +173,8 @@ WITH current_state AS (
     ON c.id = s.id
    AND c.inn = s.inn
    AND c.ogrn IS NOT DISTINCT FROM s.expected_ogrn
-  WHERE ${stageFilter}
+  WHERE (${stageFilter})
+    AND s.okved_exact_source = '${exactSource}'
 ),
 classified AS (
   SELECT
@@ -200,9 +221,6 @@ FROM aggregate_state
 `.trim();
 }
 
-const PREVIEW_SQL = previewSql(GLOBAL_STAGE_FILTER);
-const PAGE_PREVIEW_SQL = previewSql(PAGE_STAGE_FILTER);
-
 const NEXT_PAGE_SQL = `
 WITH page AS (
   SELECT s.id
@@ -229,7 +247,8 @@ ORDER BY s.id
 FOR UPDATE OF c
 `.trim();
 
-const UPDATE_PAGE_SQL = `
+function updatePageSql(exactSource: ConfiguredExactSource): string {
+  return `
 UPDATE public.companies_directory c
 SET
   okved_code_exact = s.okved_code_exact,
@@ -242,8 +261,9 @@ WHERE ($1::bigint IS NULL OR s.id > $1::bigint)
   AND c.ogrn IS NOT DISTINCT FROM s.expected_ogrn
   AND c.okved_code_exact IS NULL
   AND c.okved_exact_source IS NULL
-  AND s.okved_exact_source = '${FNS_SOURCE}'
+  AND s.okved_exact_source = '${exactSource}'
 `.trim();
+}
 
 function integerFromRow(
   row: Record<string, unknown>,
@@ -298,7 +318,16 @@ function csvField(value: unknown, field: string): string {
   return `"${value.replace(/"/g, '""')}"`;
 }
 
-function encodeCopyRow(row: Record<string, unknown>): string {
+function encodeCopyRow(
+  row: Record<string, unknown>,
+  exactSource: ConfiguredExactSource,
+): string {
+  if (row.okved_exact_source !== exactSource) {
+    throw new Error(
+      `Staged exact source ${String(row.okved_exact_source)} differs from `
+      + `configured source ${exactSource}`,
+    );
+  }
   return [
     csvField(row.id, 'id'),
     csvField(row.inn, 'inn'),
@@ -353,6 +382,7 @@ function pageValues(page: FnsExactBatchPage): [string | null, string] {
 export class FnsExactPostgresApplySession implements FnsExactApplySession {
   private readonly client: FnsExactPgClient;
   private readonly expectedPlanFingerprint: string;
+  private readonly exactSource: ConfiguredExactSource;
   private readonly processArtifacts: (
     callbacks: FnsExactStageCallbacks,
   ) => Promise<{ planFingerprint: string; updateRows?: number }>;
@@ -365,12 +395,13 @@ export class FnsExactPostgresApplySession implements FnsExactApplySession {
     this.client = options.client;
     this.expectedPlanFingerprint =
       options.expectedPlanFingerprint.toLowerCase();
+    this.exactSource = validateConfiguredExactSource(options.exactSource);
     this.processArtifacts = options.processArtifacts;
   }
 
   private async prepareStageTable(): Promise<void> {
     if (this.stageTablePrepared) return;
-    await this.client.query(CREATE_STAGE_SQL);
+    await this.client.query(createStageSql(this.exactSource));
     this.stageTablePrepared = true;
   }
 
@@ -474,7 +505,7 @@ SELECT pg_advisory_unlock(
                 'FNS exact COPY stream closed before staging completed',
               );
             }
-            if (!rowStream.write(encodeCopyRow(row))) {
+            if (!rowStream.write(encodeCopyRow(row, this.exactSource))) {
               await Promise.race([
                 once(rowStream, 'drain'),
                 copyFailureSignal,
@@ -523,7 +554,9 @@ SELECT pg_advisory_unlock(
   }
 
   async preview(): Promise<FnsExactImportPreview> {
-    return previewFromResult(await this.client.query(PREVIEW_SQL));
+    return previewFromResult(await this.client.query(
+      previewSql(GLOBAL_STAGE_FILTER, this.exactSource),
+    ));
   }
 
   async nextPage(
@@ -572,7 +605,7 @@ SELECT pg_advisory_unlock(
     page: FnsExactBatchPage,
   ): Promise<FnsExactImportPreviewBody> {
     const preview = previewFromResult(await this.client.query(
-      PAGE_PREVIEW_SQL,
+      previewSql(PAGE_STAGE_FILTER, this.exactSource),
       pageValues(page),
     ));
     const { fingerprint: _fingerprint, ...body } = preview;
@@ -593,7 +626,7 @@ SELECT pg_advisory_unlock(
       );
     }
     const preview = previewFromResult(await this.client.query(
-      PAGE_PREVIEW_SQL,
+      previewSql(PAGE_STAGE_FILTER, this.exactSource),
       [null, cursorId],
     ));
     assertFnsExactPreviewIsSafe(preview);
@@ -610,7 +643,7 @@ SELECT pg_advisory_unlock(
 
   async updatePage(page: FnsExactBatchPage): Promise<number> {
     const result = await this.client.query(
-      UPDATE_PAGE_SQL,
+      updatePageSql(this.exactSource),
       pageValues(page),
     );
     return result.rowCount ?? 0;

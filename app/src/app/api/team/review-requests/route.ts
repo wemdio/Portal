@@ -10,6 +10,7 @@ import {
   logMeta,
   parseReviewRequestCreateInput,
   projectToApi,
+  resolveReviewRequestVisibility,
   REVIEW_REQUEST_PROJECTION,
   reviewRequestGroups,
   reviewRequestSummary,
@@ -91,10 +92,14 @@ export async function POST(req: NextRequest) {
   const project = await validateReviewRequestProject(parsed.value.project_id);
   if ('error' in project) return project.error;
 
+  const visibility = await resolveReviewRequestVisibility(actor.authedClient);
+  if ('error' in visibility) return visibility.error;
+
   const row = {
     ...parsed.value,
     requested_by_user_id: actor.userId,
     state: 'new' as const,
+    visibility: visibility.value,
     updated_by: actor.userId,
   };
   const { data, error } = await supabaseAdmin

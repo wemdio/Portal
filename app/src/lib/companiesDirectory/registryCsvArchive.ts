@@ -246,6 +246,7 @@ function toInput(
   rowNumber: number,
 ): SbisDirectoryInputRow {
   const activity = normalizeText(row['Основной вид деятельности']);
+  const okvedCodeExact = normalizeText(row['Код ОКВЭД-2']);
   if (schema === 'entrepreneur') {
     const type = normalizeText(row['Тип']);
     const name = normalizeText(row['ФИО']);
@@ -258,6 +259,7 @@ function toInput(
         .join(', ') || null,
       activity_type: activity,
       source_activity: sourceActivity(row),
+      okved_code_exact: okvedCodeExact,
       email: row['Email'],
       ogrn: row['ОГРНИП'],
     };
@@ -272,6 +274,7 @@ function toInput(
     ...splitPersonName(row['Руководитель']),
     activity_type: activity,
     source_activity: sourceActivity(row),
+    okved_code_exact: okvedCodeExact,
     employees_count: row['ССЧ'],
     phones: row['Телефоны'],
     email: row['Email'],

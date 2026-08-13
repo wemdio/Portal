@@ -7,6 +7,8 @@ import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/
 
 const ALINA_ID = '33dec504-e6e0-4b0a-bc59-dcf570c6ecc9';
 const SERGEY_ID = '66873c8c-ae56-4ab2-afa5-5e77dcda391d';
+const ANYA_ID = '9e2c53fe-4b86-40b1-b464-757ffe0944dd';
+const NIKITA_ID = '416b456b-83b4-48c1-9eeb-9cb6ab88e455';
 const LEAD_ID = '00000000-0000-4000-8000-000000000001';
 const DIRECTOR_ID = '00000000-0000-4000-8000-000000000002';
 const MANAGER_ID = '00000000-0000-4000-8000-000000000003';
@@ -24,6 +26,7 @@ const REQUEST_ID = '00000000-0000-4000-8000-000000000030';
 const IN_PROGRESS_ID = '00000000-0000-4000-8000-000000000031';
 const CONVERTED_ID = '00000000-0000-4000-8000-000000000032';
 const DECLINED_ID = '00000000-0000-4000-8000-000000000033';
+const PRIVATE_REQUEST_ID = '00000000-0000-4000-8000-000000000034';
 const LINKED_REVIEW_ID = '00000000-0000-4000-8000-000000000040';
 const UPDATED_AT = '2026-08-11T08:00:00.000Z';
 
@@ -35,13 +38,25 @@ const summaryRoutePath = path.resolve(
   __dirname,
   '../../src/app/api/team/review-requests/summary/route.ts',
 );
+const sharedRoutePath = path.resolve(
+  __dirname,
+  '../../src/app/api/team/review-requests/shared/route.ts',
+);
 const itemRoutePath = path.resolve(
   __dirname,
   '../../src/app/api/team/review-requests/[id]/route.ts',
 );
 
 const PRIVATE_USERS = new Set([ALINA_ID, SERGEY_ID]);
-const SUBMITTERS = new Set([ALINA_ID, SERGEY_ID, LEAD_ID, DIRECTOR_ID]);
+const SUBMITTERS = new Set([
+  ALINA_ID,
+  SERGEY_ID,
+  ANYA_ID,
+  NIKITA_ID,
+  LEAD_ID,
+  DIRECTOR_ID,
+]);
+const SHARED_VIEWERS = new Set([LEAD_ID, DIRECTOR_ID]);
 
 let mockMainDb: MockSupabaseClient = createMockSupabase();
 let mockCurrentUser: { id: string } | null = { id: ALINA_ID };
@@ -57,6 +72,8 @@ const mockRpc = jest.fn(
       ? Boolean(mockCurrentUser && PRIVATE_USERS.has(mockCurrentUser.id))
       : functionName === 'can_submit_team_review_request'
         ? Boolean(mockCurrentUser && SUBMITTERS.has(mockCurrentUser.id))
+        : functionName === 'can_view_team_review_requests_shared'
+          ? Boolean(mockCurrentUser && SHARED_VIEWERS.has(mockCurrentUser.id))
         : false,
     error: null,
   }),
@@ -108,6 +125,7 @@ function reviewRequest(overrides: Record<string, unknown> = {}) {
     problem: 'Нужна помощь с приоритизацией',
     examples: 'Две задачи сорвали срок на этой неделе',
     desired_outcome: 'Зафиксировать план развития',
+    visibility: 'lead_shared',
     state: 'new',
     claimed_by: null,
     claimed_at: null,
@@ -128,6 +146,8 @@ function seedDatabase(options: { insertError?: { code: string; message: string }
       profiles: [
         profile(ALINA_ID, 'admin', 'Алина'),
         profile(SERGEY_ID, 'admin', 'Сергей Лазуткин'),
+        profile(ANYA_ID, 'admin', 'Анна'),
+        profile(NIKITA_ID, 'admin', 'Nick Sorichev'),
         profile(LEAD_ID, 'lead', 'Лид'),
         profile(DIRECTOR_ID, 'director', 'Директор'),
         profile(MANAGER_ID, 'manager', 'Менеджер'),
@@ -166,6 +186,11 @@ function seedDatabase(options: { insertError?: { code: string; message: string }
       ],
       team_review_requests: [
         reviewRequest(),
+        reviewRequest({
+          id: PRIVATE_REQUEST_ID,
+          requested_by_user_id: ANYA_ID,
+          visibility: 'private',
+        }),
         reviewRequest({
           id: IN_PROGRESS_ID,
           employee_user_id: OTHER_EMPLOYEE_ID,
@@ -242,6 +267,11 @@ async function loadSummaryRoute() {
   return import('@/app/api/team/review-requests/summary/route');
 }
 
+async function loadSharedRoute() {
+  expectRoute(sharedRoutePath);
+  return import('@/app/api/team/review-requests/shared/route');
+}
+
 async function loadItemRoute() {
   expectRoute(itemRoutePath);
   return import('@/app/api/team/review-requests/[id]/route');
@@ -258,6 +288,8 @@ beforeEach(() => {
       ? Boolean(mockCurrentUser && PRIVATE_USERS.has(mockCurrentUser.id))
       : functionName === 'can_submit_team_review_request'
         ? Boolean(mockCurrentUser && SUBMITTERS.has(mockCurrentUser.id))
+        : functionName === 'can_view_team_review_requests_shared'
+          ? Boolean(mockCurrentUser && SHARED_VIEWERS.has(mockCurrentUser.id))
         : false,
     error: null,
   }));
@@ -286,14 +318,14 @@ describe('GET /api/team/review-requests', () => {
         'declined',
       ]);
       expect(body.groups.map((group: { requests: unknown[] }) => group.requests.length)).toEqual([
-        1,
+        2,
         1,
         1,
         1,
       ]);
       expect(body.summary).toEqual({
-        total: 4,
-        newCount: 1,
+        total: 5,
+        newCount: 2,
         inProgressCount: 1,
         convertedCount: 1,
         declinedCount: 1,
@@ -326,6 +358,8 @@ describe('GET /api/team/review-requests', () => {
   it.each([
     ['lead', LEAD_ID],
     ['director', DIRECTOR_ID],
+    ['Anya', ANYA_ID],
+    ['Nikita', NIKITA_ID],
     ['manager', MANAGER_ID],
     ['other admin', OTHER_ADMIN_ID],
     ['staff', STAFF_ID],
@@ -401,6 +435,115 @@ describe('GET /api/team/review-requests', () => {
   });
 });
 
+describe('GET /api/team/review-requests/shared', () => {
+  it.each([
+    ['lead', LEAD_ID],
+    ['director', DIRECTOR_ID],
+  ])('returns only lead-shared requests to a %s as a read-only redacted list', async (_label, userId) => {
+    setCurrentUser(userId);
+    const { GET } = await loadSharedRoute();
+
+    const response = await GET(request('/api/team/review-requests/shared'));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mockRpc).toHaveBeenCalledWith('can_view_team_review_requests_shared');
+    expect(body.canManage).toBe(false);
+    expect(body.requests.map((item: { id: string }) => item.id)).not.toContain(PRIVATE_REQUEST_ID);
+    expect(body.requests).toHaveLength(4);
+    expect(body.summary).toEqual({
+      total: 4,
+      newCount: 1,
+      inProgressCount: 1,
+      convertedCount: 1,
+      declinedCount: 1,
+    });
+
+    const item = body.requests.find((candidate: { id: string }) => candidate.id === REQUEST_ID);
+    expect(item).toEqual({
+      id: REQUEST_ID,
+      state: 'new',
+      employee: {
+        id: EMPLOYEE_ID,
+        name: 'Анна Ким',
+        avatarUrl: null,
+      },
+      initiator: {
+        id: LEAD_ID,
+        name: 'Лид',
+        avatarUrl: null,
+      },
+      project: { id: PROJECT_ID, name: 'Acme · Аутрич' },
+      problem: 'Нужна помощь с приоритизацией',
+      examples: 'Две задачи сорвали срок на этой неделе',
+      desiredOutcome: 'Зафиксировать план развития',
+      createdAt: UPDATED_AT,
+      updatedAt: UPDATED_AT,
+    });
+    expect(item).not.toHaveProperty('claimedBy');
+    expect(item).not.toHaveProperty('resolvedBy');
+    expect(item).not.toHaveProperty('linkedReviewId');
+    expect(item).not.toHaveProperty('decisionNote');
+    expect(item.employee).not.toHaveProperty('email');
+    expect(item.initiator).not.toHaveProperty('email');
+
+    const sharedSelect = mockMainDb.selects.find(
+      (call) => call.table === 'team_review_requests',
+    );
+    expect(sharedSelect?.columns).not.toMatch(
+      /claimed_by|claimed_at|resolved_by|resolved_at|linked_review_id|decision_note|updated_by/,
+    );
+    expect(fs.readFileSync(sharedRoutePath, 'utf8')).toMatch(
+      /\.eq\(\s*['"]visibility['"]\s*,\s*['"]lead_shared['"]\s*\)/,
+    );
+  });
+
+  it.each([
+    ['private HR', ALINA_ID],
+    ['private Sergey', SERGEY_ID],
+    ['Anya', ANYA_ID],
+    ['Nikita', NIKITA_ID],
+    ['manager', MANAGER_ID],
+    ['other admin', OTHER_ADMIN_ID],
+    ['staff', STAFF_ID],
+    ['client', CLIENT_ID],
+    ['demo lead', DEMO_LEAD_ID],
+  ])('denies %s before any service-role read', async (_label, userId) => {
+    setCurrentUser(userId);
+    const { GET } = await loadSharedRoute();
+
+    const response = await GET(request('/api/team/review-requests/shared'));
+
+    expect(response.status).toBe(403);
+    expect(mockRpc).toHaveBeenCalledWith('can_view_team_review_requests_shared');
+    expect(mockMainDb.selects).toHaveLength(0);
+  });
+
+  it('fails closed when the shared-view capability cannot be verified', async () => {
+    setCurrentUser(LEAD_ID);
+    mockRpc.mockResolvedValueOnce({ data: null, error: { message: 'capability unavailable' } });
+    const { GET } = await loadSharedRoute();
+
+    const response = await GET(request('/api/team/review-requests/shared'));
+
+    expect(response.status).toBe(500);
+    expect(mockMainDb.selects).toHaveLength(0);
+  });
+
+  it('returns 401 to an anonymous caller without touching the service client', async () => {
+    setCurrentUser(null);
+    const { GET } = await loadSharedRoute();
+
+    const response = await GET(request('/api/team/review-requests/shared', {
+      authenticated: false,
+    }));
+
+    expect(response.status).toBe(401);
+    expect(mockRpc).not.toHaveBeenCalled();
+    expect(mockMainDb.selects).toHaveLength(0);
+  });
+});
+
 describe('GET /api/team/review-requests/summary', () => {
   it('returns only the private new-request count for a lightweight badge', async () => {
     const { GET } = await loadSummaryRoute();
@@ -408,7 +551,7 @@ describe('GET /api/team/review-requests/summary', () => {
     const response = await GET(request('/api/team/review-requests/summary'));
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ newCount: 1 });
+    expect(await response.json()).toEqual({ newCount: 2 });
     expect(mockRpc).toHaveBeenCalledWith('can_access_team');
   });
 
@@ -425,18 +568,27 @@ describe('GET /api/team/review-requests/summary', () => {
 
 describe('POST /api/team/review-requests', () => {
   it.each([
-    ['private HR', ALINA_ID],
-    ['private Sergey', SERGEY_ID],
-    ['lead', LEAD_ID],
-    ['director', DIRECTOR_ID],
-  ])('allows %s to submit and derives the initiator from the JWT', async (_label, userId) => {
+    ['private HR', ALINA_ID, 'private'],
+    ['private Sergey', SERGEY_ID, 'private'],
+    ['executive Anya', ANYA_ID, 'private'],
+    ['executive Nikita', NIKITA_ID, 'private'],
+    ['lead', LEAD_ID, 'lead_shared'],
+    ['director', DIRECTOR_ID, 'lead_shared'],
+  ])('allows %s to submit and derives actor and visibility on the server', async (
+    _label,
+    userId,
+    expectedVisibility,
+  ) => {
     setCurrentUser(userId);
     const { POST } = await loadCollectionRoute();
     const spoofedActor = '00000000-0000-4000-8000-000000000099';
 
     const response = await POST(request('/api/team/review-requests', {
       method: 'POST',
-      body: validCreateBody({ requestedByUserId: spoofedActor }),
+      body: validCreateBody({
+        requestedByUserId: spoofedActor,
+        visibility: expectedVisibility === 'private' ? 'lead_shared' : 'private',
+      }),
     }));
 
     expect(response.status).toBe(201);
@@ -451,6 +603,7 @@ describe('POST /api/team/review-requests', () => {
       examples: 'Две задачи сорвали срок',
       desired_outcome: 'Зафиксировать план развития',
       state: 'new',
+      visibility: expectedVisibility,
       updated_by: userId,
     }));
     expect(inserted?.rows[0]?.requested_by_user_id).not.toBe(spoofedActor);
@@ -680,7 +833,7 @@ describe('PATCH /api/team/review-requests/[id]', () => {
       .toBe('new');
   });
 
-  it.each([LEAD_ID, DIRECTOR_ID, MANAGER_ID, OTHER_ADMIN_ID])(
+  it.each([LEAD_ID, DIRECTOR_ID, ANYA_ID, NIKITA_ID, MANAGER_ID, OTHER_ADMIN_ID])(
     'denies non-private caller %s before service-role reads and writes',
     async (userId) => {
       setCurrentUser(userId);

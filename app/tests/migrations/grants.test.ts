@@ -53,7 +53,7 @@ describe('supabase/migrations GRANT lint', () => {
 
     if (violations.length > 0) {
       const lines = violations
-        .map((v) => `  - ${v.file} :: public.${v.table}`)
+        .map((v) => `  - ${v.file} :: public.${v.table}${v.note ? ` (${v.note})` : ''}`)
         .join('\n');
       const msg =
         'Migration GRANT lint failed. The following tables are created in ' +
@@ -61,12 +61,16 @@ describe('supabase/migrations GRANT lint', () => {
         'in the migrations tree. Add e.g.:\n\n' +
         '  grant all on public.<table> to service_role;\n' +
         '  grant select, insert, update on public.<table> to authenticated;\n\n' +
-        'either in the same file or a companion *_grants.sql.\n\n' +
-        'If the table is meant to be unreachable directly (writes/reads only ' +
-        'through SECURITY DEFINER functions), say so explicitly instead:\n\n' +
+        'either in the same file or a companion *_grants.sql. Do NOT extend ' +
+        'tests/migrations/grants.allowlist.json — that snapshot is frozen.\n\n' +
+        'If the table is sealed ON PURPOSE (RLS + revoke all, reached only ' +
+        'through a SECURITY DEFINER function), do NOT add the grant — it would ' +
+        'open exactly the hole the migration closes. Say so in one of two ways. ' +
+        'An explicit lock, picked up anywhere in the migrations tree:\n\n' +
         '  revoke all on table public.<table> from service_role;\n\n' +
-        'Do NOT extend tests/migrations/grants.allowlist.json — that snapshot ' +
-        'is frozen.\n\n' +
+        'or, when there is nothing to revoke, a marker in the same file that ' +
+        'creates the table — the reason after the name is mandatory:\n\n' +
+        '  -- grants-lint: no-service-role-grant public.<table> — reason\n\n' +
         `Violations:\n${lines}`;
       throw new Error(msg);
     }

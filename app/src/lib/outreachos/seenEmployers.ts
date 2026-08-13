@@ -82,6 +82,52 @@ export async function loadRecentlySeenDomains(withinDays = RECONTACT_AFTER_DAYS)
   return domains;
 }
 
+const CHUNK = 500;
+
+/**
+ * Бюджет длины списка доменов в query-string одного DELETE'а (символов).
+ *
+ * GIS-ветка удаляет строки фильтром `domain=in.(…)`, а он у PostgREST целиком
+ * лежит в URL. nginx перед Kong режет строку запроса >8 КБ → 414 «URI too long».
+ * Тот же класс бага уже ловил соседний журнал — gisSignalOutreach/seenCompanies.ts
+ * (там SELECT_CHUNK=100 на 16-значные twogis_id, ~2 КБ).
+ *
+ * Здесь чанк считается по ДЛИНЕ, а не по числу строк: домены переменной длины,
+ * а punycode/UTF-8 после процентного кодирования раздувается втрое — фиксированный
+ * счётчик строк гарантий не даёт. 1800 символов ≈ 2 КБ: тот же порядок, что у
+ * соседа, с запасом на базовый URL и остальные фильтры.
+ *
+ * Инцидент 13.08.2026: 483 домена ушли одним чанком (CHUNK=500) → ~10 КБ URL →
+ * 414. Прогон упал ПОСЛЕ upsert'а HH-строк и ДО append: 261 компания сожжена в
+ * seen-окне 45 дней без единого письма, 193 готовых лида не залиты. До 12.08
+ * баг не проявлялся — топ-ап добирал десятки доменов, а не сотни.
+ */
+export const DELETE_URL_BUDGET = 1800;
+
+/**
+ * Режет список доменов на под-чанки, каждый из которых уложится в бюджет URL.
+ * Домен длиннее всего бюджета уезжает в собственный чанк (пустых чанков не
+ * бывает — иначе delete молча потерял бы строки).
+ */
+export function chunkDomainsByUrlBudget(domains: string[], budget = DELETE_URL_BUDGET): string[][] {
+  const chunks: string[][] = [];
+  let current: string[] = [];
+  let length = 0;
+  for (const domain of domains) {
+    // +3 = кавычки вокруг значения и запятая-разделитель внутри in.(…)
+    const cost = encodeURIComponent(domain).length + 3;
+    if (current.length > 0 && length + cost > budget) {
+      chunks.push(current);
+      current = [];
+      length = 0;
+    }
+    current.push(domain);
+    length += cost;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
 /**
  * Upsert статусов обработанных работодателей чанками по 500.
  *
@@ -114,7 +160,6 @@ export async function markSeen(rows: SeenEmployerUpsert[]): Promise<void> {
   }
   const gisRows = [...gisByDomain.values()];
 
-  const CHUNK = 500;
   for (let i = 0; i < hhRows.length; i += CHUNK) {
     const slice = hhRows.slice(i, i + CHUNK).map((r) => ({ ...r, last_status_at: now }));
     let lastErr: string | null = null;
@@ -133,15 +178,26 @@ export async function markSeen(rows: SeenEmployerUpsert[]): Promise<void> {
     const slice = gisRows.slice(i, i + CHUNK);
     const domains = slice.map((r) => (r.domain as string).toLowerCase());
     const payload = slice.map((r) => ({ ...r, domain: (r.domain as string).toLowerCase(), last_status_at: now }));
+    // delete идёт под-чанками по бюджету URL (см. DELETE_URL_BUDGET), insert —
+    // одним запросом: у него строки в теле POST'а, лимита длины URL там нет.
+    const domainChunks = chunkDomainsByUrlBudget(domains);
     let lastErr: string | null = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
-      const { error: delErr } = await db
-        .from('outreachos_seen_employers')
-        .delete()
-        .is('hh_employer_id', null)
-        .in('domain', domains);
-      if (delErr) {
-        lastErr = delErr.message;
+      // delete идемпотентен → повтор всей серии под-чанков после сбоя безопасен.
+      let delErrMessage: string | null = null;
+      for (const domainChunk of domainChunks) {
+        const { error: delErr } = await db
+          .from('outreachos_seen_employers')
+          .delete()
+          .is('hh_employer_id', null)
+          .in('domain', domainChunk);
+        if (delErr) {
+          delErrMessage = delErr.message;
+          break;
+        }
+      }
+      if (delErrMessage) {
+        lastErr = delErrMessage;
         if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 1000));
         continue;
       }

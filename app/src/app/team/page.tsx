@@ -15,6 +15,7 @@ import TeamReviewsPanel from '@/components/team/TeamReviewsPanel';
 import TeamActivityPlanPanel from '@/components/team/TeamActivityPlanPanel';
 import TeamHrPanel from '@/components/team/TeamHrPanel';
 import TeamReviewRequestForm from '@/components/team/TeamReviewRequestForm';
+import TeamSharedReviewRequestsPanel from '@/components/team/TeamSharedReviewRequestsPanel';
 import { useTeamReviewRequestSummary } from '@/components/team/useTeamReviewRequestSummary';
 import type { TeamReviewRequestPerson, TeamReviewRequestProject } from '@/components/team/teamApi';
 
@@ -52,9 +53,10 @@ const DEFAULT_CAPACITY = 4;
 const LEAD_ROLES = new Set<UserRole>(['lead']);
 const NO_SPEC = '— без специалиста';
 
-type TeamWorkspaceView = 'load' | 'statistics' | 'reviews' | 'activities' | 'hr';
+type TeamWorkspaceView = 'load' | 'requests' | 'statistics' | 'reviews' | 'activities' | 'hr';
 const TEAM_WORKSPACE_VIEWS = [
   ['load', 'Загрузка'],
+  ['requests', 'Запросы'],
   ['statistics', 'Статистика'],
   ['reviews', 'Ревью'],
   ['activities', 'Активности'],
@@ -62,6 +64,7 @@ const TEAM_WORKSPACE_VIEWS = [
 ] as const satisfies ReadonlyArray<readonly [TeamWorkspaceView, string]>;
 const TEAM_WORKSPACE_DESCRIPTIONS: Record<TeamWorkspaceView, string> = {
   load: 'Текущая загрузка, распределение по проектам и результаты',
+  requests: 'Общая очередь запросов лидов и директоров на отдельное ревью',
   statistics: 'Показатели команды за выбранный календарный период',
   reviews: 'Итоги встреч и рекомендации по развитию сотрудников',
   activities: 'План внутренних событий, регулярных встреч и бюджета',
@@ -274,12 +277,16 @@ function Caret({ open, hidden }: { open: boolean; hidden?: boolean }) {
 
 export default function TeamPage() {
   const isTma = useIsTma();
-  const { canAccessTeamPrivate, userRole } = useUser();
-  const canViewWorkspaceNavigation = canAccessTeamPrivate;
-  const canSubmitReviewRequest = userRole === 'lead' || userRole === 'director';
+  const {
+    canAccessTeamPrivate,
+    canSubmitTeamReviewRequest,
+    canViewTeamReviewRequestsShared,
+  } = useUser();
+  const canViewWorkspaceNavigation = canAccessTeamPrivate || canViewTeamReviewRequestsShared;
   const reviewRequestSummary = useTeamReviewRequestSummary(canAccessTeamPrivate);
   const [workspaceView, setWorkspaceView] = useState<TeamWorkspaceView>('load');
   const previousCanAccessTeamPrivateRef = useRef(canAccessTeamPrivate);
+  const previousCanViewSharedRequestsRef = useRef(canViewTeamReviewRequestsShared);
   const pageHeadingRef = useRef<HTMLHeadingElement>(null);
   const [projects, setProjects] = useState<ProjectData[]>([]);
   const [profiles, setProfiles] = useState<ProfileData[]>([]);
@@ -296,22 +303,32 @@ export default function TeamPage() {
   const [openSpecInLead, setOpenSpecInLead] = useState<Set<string>>(new Set());
   const [openSpecs, setOpenSpecs] = useState<Set<string>>(new Set());
   const activeWorkspaceView: TeamWorkspaceView = (
-    workspaceView === 'load' || canAccessTeamPrivate
+    workspaceView === 'load'
+    || (workspaceView === 'requests' && canViewTeamReviewRequestsShared && !canAccessTeamPrivate)
+    || (workspaceView !== 'requests' && canAccessTeamPrivate)
   ) ? workspaceView : 'load';
   const visibleWorkspaceViews = TEAM_WORKSPACE_VIEWS.filter(([key]) => (
-    key === 'load' || canAccessTeamPrivate
+    key === 'load'
+    || (key === 'requests' && canViewTeamReviewRequestsShared && !canAccessTeamPrivate)
+    || (key !== 'requests' && canAccessTeamPrivate)
   ));
 
   useEffect(() => {
-    const privateAccessRevoked = previousCanAccessTeamPrivateRef.current && !canAccessTeamPrivate;
+    const privateAccessRevoked = previousCanAccessTeamPrivateRef.current
+      && !canAccessTeamPrivate
+      && workspaceView !== 'requests';
+    const sharedAccessRevoked = previousCanViewSharedRequestsRef.current
+      && !canViewTeamReviewRequestsShared
+      && workspaceView === 'requests';
     previousCanAccessTeamPrivateRef.current = canAccessTeamPrivate;
-    if (!privateAccessRevoked || workspaceView === 'load') return;
+    previousCanViewSharedRequestsRef.current = canViewTeamReviewRequestsShared;
+    if ((!privateAccessRevoked && !sharedAccessRevoked) || workspaceView === 'load') return;
 
     setWorkspaceView('load');
     queueMicrotask(() => {
       pageHeadingRef.current?.focus();
     });
-  }, [canAccessTeamPrivate, workspaceView]);
+  }, [canAccessTeamPrivate, canViewTeamReviewRequestsShared, workspaceView]);
 
   const nameToAvatarUrl = useMemo(() => {
     const map = new Map<string, string>();
@@ -800,6 +817,8 @@ export default function TeamPage() {
 
   const renderPrivateWorkspace = () => {
     switch (activeWorkspaceView) {
+      case 'requests':
+        return <TeamSharedReviewRequestsPanel />;
       case 'statistics':
         return <TeamStatisticsPanel />;
       case 'reviews':
@@ -864,10 +883,11 @@ export default function TeamPage() {
           </div>
         ) : (
           <div className={isTma ? 'space-y-5' : 'space-y-6'}>
-      {canSubmitReviewRequest && (
+      {canSubmitTeamReviewRequest && (
         <TeamReviewRequestForm
           employees={reviewRequestEmployees}
           projects={reviewRequestProjects}
+          requestVisibility={canViewTeamReviewRequestsShared ? 'lead_shared' : 'private'}
           onSubmitted={reviewRequestSummary.refresh}
         />
       )}
