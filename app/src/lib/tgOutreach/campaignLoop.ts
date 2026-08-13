@@ -16,7 +16,7 @@ import type {
   OutreachProxy,
 } from './types';
 import { DEFAULT_FOLLOW_UP } from './types';
-import { isRepeatOfOurs } from './replyGuards';
+import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient } from './gramClient';
 import type { LoopControl } from './watchdog';
 import { openaiGenerate, detectTrigger } from './openaiChat';
@@ -781,6 +781,18 @@ export async function handleChat(
     }
   }
 
+  // Вежливая точка ответа не требует. Проверяем ДО генерации: это ещё и
+  // сэкономленный вызов модели, но главное — на «Спасибо.» мы дописывали
+  // реплику в законченный разговор, а лишние исходящие в мёртвом диалоге для
+  // Telegram выглядят так же плохо, как дословные повторы.
+  //
+  // Согласие («Да», «Ок») сюда не попадает, если мы перед этим спросили: лид
+  // распознаётся по НАШЕМУ ответу, и промолчать значило бы его потерять.
+  if (shouldStaySilent(chatMessages)) {
+    log('info', `${displayName}: последнее сообщение — вежливая точка, отвечать не на что`);
+    return { replied: false, triggerType: null };
+  }
+
   let replyText: string | null = null;
   let usedFallback = false;
   const openaiStart = Date.now();
@@ -1042,6 +1054,7 @@ async function handleMissedRepliesLastDays(
   let skipOpenaiEmpty = 0;
   let skipLowValue = 0;
   let skipRepeat = 0;
+  let skipCloser = 0;
   let errorsCount = 0;
 
   for (const dialog of dialogs) {
@@ -1058,6 +1071,11 @@ async function handleMissedRepliesLastDays(
     if (messages.length === 0) { skipEmpty++; continue; }
     const lastMessage = messages[messages.length - 1];
     if (lastMessage.role !== 'user') { skipLastNotUser++; continue; }
+
+    if (shouldStaySilent(messages)) {
+      skipCloser++;
+      continue;
+    }
 
     try {
       const reply = await openaiGenerate(oai, messages);
@@ -1112,7 +1130,7 @@ async function handleMissedRepliesLastDays(
   log(
     'info',
     `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up за 3 дня) — проверил ${processed} диалогов, отправил ${replied} ответов.` +
-      (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue || skipRepeat
+      (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue || skipRepeat || skipCloser
         ? ' Не отправил по причинам:'
         : '') +
       (skipBot ? ` это боты — ${skipBot};` : '') +
@@ -1122,6 +1140,7 @@ async function handleMissedRepliesLastDays(
       (skipOpenaiEmpty ? ` GPT не вернул ответ — ${skipOpenaiEmpty};` : '') +
       (skipLowValue ? ` GPT вернул мусор — ${skipLowValue};` : '') +
       (skipRepeat ? ` дословный повтор нашего же ответа — ${skipRepeat};` : '') +
+      (skipCloser ? ` вежливая точка, отвечать не на что — ${skipCloser};` : '') +
       (errorsCount ? ` Ошибок при отправке: ${errorsCount}.` : ''),
   );
 }
