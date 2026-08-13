@@ -74,6 +74,7 @@ export const navTree: NavEntry[] = [
   { id: 'tools', name: 'Инструменты', nameEn: 'Tools', href: '/tools' },
   { id: 'payments', name: 'Оплаты', nameEn: 'Payments', href: '/payments' },
   { id: 'billing-calendar', name: 'Календарь почт', nameEn: 'Mailbox calendar', href: '/billing-calendar', billingCalendarOnly: true },
+  { id: 'tech-calendar', name: 'Календарь технички', nameEn: 'Tech calendar', href: '/tech-calendar', adminOnly: true },
   { id: 'regulation', name: 'Регламент', nameEn: 'Regulation', href: '/reglament' },
   { id: 'admin', name: 'Админ', nameEn: 'Admin', href: '/admin', adminOnly: true },
   {
