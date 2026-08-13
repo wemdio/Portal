@@ -61,8 +61,12 @@ describe('supabase/migrations GRANT lint', () => {
         'in the migrations tree. Add e.g.:\n\n' +
         '  grant all on public.<table> to service_role;\n' +
         '  grant select, insert, update on public.<table> to authenticated;\n\n' +
-        'either in the same file or a companion *_grants.sql. Do NOT extend ' +
-        'tests/migrations/grants.allowlist.json — that snapshot is frozen.\n\n' +
+        'either in the same file or a companion *_grants.sql.\n\n' +
+        'If the table is meant to be unreachable directly (writes/reads only ' +
+        'through SECURITY DEFINER functions), say so explicitly instead:\n\n' +
+        '  revoke all on table public.<table> from service_role;\n\n' +
+        'Do NOT extend tests/migrations/grants.allowlist.json — that snapshot ' +
+        'is frozen.\n\n' +
         `Violations:\n${lines}`;
       throw new Error(msg);
     }
