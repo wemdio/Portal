@@ -24,12 +24,11 @@ import {
   type MoneyTotals,
 } from '@/lib/firstSales/money';
 import {
-  buildSourceIndex,
-  resolveChannel,
-  type FirstSalesChannel,
-  type ResolvedChannel,
-  type SourceChannelRow,
-} from '@/lib/firstSales/sourceChannels';
+  NO_SOURCE_KEY,
+  NO_SOURCE_LABEL,
+  resolveSource,
+  type ResolvedSource,
+} from '@/lib/firstSales/sources';
 
 export type FirstSalesLeadRow = {
   amo_id: number;
@@ -72,9 +71,10 @@ export type ManagerBreakdown = {
 };
 
 export type SourceBreakdown = {
+  /** Ключ группировки, он же значение `source` в API drill-down. */
+  key: string;
+  /** Название источника как заведено в AMO. */
   source: string;
-  channel: FirstSalesChannel;
-  known: boolean;
   leads: number;
   qualified: number;
   meetings: number;
@@ -83,13 +83,17 @@ export type SourceBreakdown = {
   money: number;
 };
 
+/** Пункт выпадашки фильтра. Считается ДО применения фильтра — см. комментарий
+ *  в computeFirstSalesSeries. */
+export type AvailableSource = { key: string; label: string; leads: number };
+
 export type FirstSalesTotals = {
   leads: number;
   qualified: number;
   meetings: number;
   contracts: number;
   leadMagnets: number;
-  unassignedLeads: number;
+  noSourceLeads: number;
   wonCount: number;
   cycleAvgDays: number | null;
   cycleMedianDays: number | null;
@@ -124,6 +128,7 @@ export type FirstSalesTotals = {
 export type FirstSalesSeries = {
   series: SeriesBucket[];
   bySource: SourceBreakdown[];
+  availableSources: AvailableSource[];
   byManager: ManagerBreakdown[];
   totals: FirstSalesTotals;
 };
@@ -179,19 +184,17 @@ function median(values: number[]): number | null {
 export function computeFirstSalesSeries(
   leads: FirstSalesLeadRow[],
   meetingLinks: MeetingLinkRow[],
-  sourceMap: SourceChannelRow[],
   from: Date,
   to: Date,
   groupBy: GroupBy,
-  channelFilter: FirstSalesChannel[] | null,
+  sourceFilter: string[] | null,
   // Последним и необязательным — сознательно: деньги считаются отдельным
   // проходом поверх уже посчитанной воронки и ничего в ней не меняют. Так все
   // существующие вызовы (и тесты воронки) остаются валидными, а расчёт без
   // денег — законным состоянием, а не забытым аргументом.
   payments: FirstSalesPaymentRow[] = [],
 ): FirstSalesSeries {
-  const index = buildSourceIndex(sourceMap);
-  const allowed = channelFilter && channelFilter.length > 0 ? new Set(channelFilter) : null;
+  const allowed = sourceFilter && sourceFilter.length > 0 ? new Set(sourceFilter) : null;
 
   const keys = buildBuckets(from, to, groupBy);
   const series = new Map<string, SeriesBucket>(
@@ -212,26 +215,22 @@ export function computeFirstSalesSeries(
 
   /** Строка разбивки по источнику. Заводится в трёх местах (лиды, встречи,
    *  деньги) — общий конструктор, чтобы новое поле не появилось в двух из
-   *  трёх. */
-  const sourceRow = (
-    sourceKey: string,
-    channel: FirstSalesChannel,
-    known: boolean,
-  ): SourceBreakdown => {
-    let row = bySource.get(sourceKey);
+   *  трёх. Название строке проставляется здесь только как временное значение
+   *  для новых строк — окончательное имя на выходе берётся из `labelPick`
+   *  (см. `return`), чтобы не зависеть от того, какая сделка встретилась
+   *  первой. */
+  const sourceRow = (key: string, label: string): SourceBreakdown => {
+    let row = bySource.get(key);
     if (!row) {
-      row = {
-        source: sourceKey, channel, known,
-        leads: 0, qualified: 0, meetings: 0, contracts: 0, money: 0,
-      };
-      bySource.set(sourceKey, row);
+      row = { key, source: label, leads: 0, qualified: 0, meetings: 0, contracts: 0, money: 0 };
+      bySource.set(key, row);
     }
     return row;
   };
 
   const totals: FirstSalesTotals = {
     leads: 0, qualified: 0, meetings: 0, contracts: 0,
-    leadMagnets: 0, unassignedLeads: 0, wonCount: 0,
+    leadMagnets: 0, noSourceLeads: 0, wonCount: 0,
     cycleAvgDays: null, cycleMedianDays: null,
     contractsReliable: to.getTime() >= CONTRACT_RULE_SINCE.getTime(),
     contractsSince: CONTRACT_RULE_SINCE.toISOString(),
@@ -241,16 +240,24 @@ export function computeFirstSalesSeries(
   };
   const cycles: number[] = [];
 
-  // Канал встречи берётся у СДЕЛКИ, не у записи разговора — иначе фильтр по
-  // каналам не работал бы для встреч. Карта заполняется ниже, в основном
-  // цикле по `leads`, ДО фильтра по каналу (см. комментарий у `continue`),
-  // чтобы в ней остались все сделки независимо от того, какой канал сейчас
-  // выбран в фильтре — фильтрация встреч по каналу применяется отдельно,
-  // при их собственной обработке.
-  const dealChannelMap = new Map<number, ResolvedChannel>();
+  // Источник СДЕЛКИ, не записи разговора — иначе фильтр не работал бы для
+  // встреч. Заполняется в основном цикле ДО фильтра, чтобы в карте остались
+  // все сделки независимо от текущего выбора.
+  const dealSourceMap = new Map<number, ResolvedSource>();
   /** Сделка → ответственный: встречи считаются отдельным проходом, где самой
    *  сделки под рукой уже нет. */
   const dealManagerMap = new Map<number, string | null>();
+
+  // Название источника берём у сделки с наибольшим created_at (при равенстве —
+  // с наибольшим amo_id, чтобы результат не зависел от порядка строк выборки).
+  // Если продажи переименуют пункт в AMO, у старых, давно не синхронизированных
+  // сделок в raw останется прежнее написание — показываем свежее.
+  const labelPick = new Map<string, { label: string; createdAt: number; amoId: number }>();
+
+  // Список для выпадашки фильтра. Считается ДО отсева по источнику: иначе,
+  // выбрав один источник, пользователь получил бы список из одного пункта и
+  // добавить второй стало бы нечем — фильтр съел бы сам себя.
+  const availableLeads = new Map<string, number>();
 
   // Тип поля сужен до счётчиков: `keyof SeriesBucket` включал бы `key: string`,
   // и `bucket[field] += 1` не прошёл бы проверку типов.
@@ -262,25 +269,28 @@ export function computeFirstSalesSeries(
   };
 
   for (const lead of leads) {
-    const resolved = resolveChannel(lead.raw, index);
-    dealChannelMap.set(lead.amo_id, resolved);
+    const resolved = resolveSource(lead.raw);
+    dealSourceMap.set(lead.amo_id, resolved);
     dealManagerMap.set(lead.amo_id, lead.responsible_name);
-    if (allowed && !allowed.has(resolved.channel)) continue;
+
+    const createdAt = lead.created_at ? new Date(lead.created_at).getTime() : Number.NEGATIVE_INFINITY;
+    const bestLabel = labelPick.get(resolved.key);
+    if (
+      !bestLabel
+      || createdAt > bestLabel.createdAt
+      || (createdAt === bestLabel.createdAt && lead.amo_id > bestLabel.amoId)
+    ) {
+      labelPick.set(resolved.key, { label: resolved.label, createdAt, amoId: lead.amo_id });
+    }
+    if (!availableLeads.has(resolved.key)) availableLeads.set(resolved.key, 0);
+    if (inWindow(lead.created_at, from, to)) {
+      availableLeads.set(resolved.key, (availableLeads.get(resolved.key) as number) + 1);
+    }
+
+    if (allowed && !allowed.has(resolved.key)) continue;
 
     const manager = managerRow(lead.responsible_name);
-
-    const sourceKey = resolved.source || '(не указан)';
-    const breakdown = sourceRow(sourceKey, resolved.channel, resolved.known);
-    // Примечание (само-ревью): channel/known в строке разбивки фиксируются по
-    // ПЕРВОЙ встреченной сделке с этим sourceKey. Для непустого «Источник» это
-    // безопасно — resolveChannel детерминирована по нормализованному значению
-    // источника. Единственное исключение — пустой источник (sourceKey
-    // «(не указан)»): resolveChannel в этом случае смотрит ещё и на «Контур»,
-    // и разные сделки без «Источник» могут получить разный channel (marketing
-    // при «Контур=Маркетинг» vs unassigned без него). В totals это не течёт —
-    // там каждая сделка бампится в свой резолвнутый канал корректно, — но
-    // строка «(не указан)» в bySource может показать канал только первой
-    // попавшейся сделки. Не критично (totals точны), но известное упрощение.
+    const breakdown = sourceRow(resolved.key, resolved.label);
 
     // Лиды — по дате создания. Без исключений по статусу.
     if (inWindow(lead.created_at, from, to)) {
@@ -289,7 +299,7 @@ export function computeFirstSalesSeries(
       manager.leads += 1;
       bump(bucketKey(new Date(lead.created_at as string), groupBy), 'leads');
       if (isLeadMagnet(lead.name)) totals.leadMagnets += 1;
-      if (resolved.channel === 'unassigned') totals.unassignedLeads += 1;
+      if (resolved.key === NO_SOURCE_KEY) totals.noSourceLeads += 1;
 
       // «Дошёл до квала» кладётся в корзину по дате СОЗДАНИЯ, а не по дате
       // достижения этапа (first_qualified_at используется только как флаг
@@ -389,17 +399,16 @@ export function computeFirstSalesSeries(
     // Сделка, на которую сослалась привязка, но которой нет в `leads`, —
     // защитный случай (см. `fetchFirstSalesLeads`, параметр `extraDealIds`:
     // в проде такая сделка должна была подтянуться именно через него). Если
-    // всё же не подтянулась — не роняем расчёт, относим встречу к «не
-    // распределено» вместо того, чтобы потерять её вовсе.
-    const resolved = dealChannelMap.get(link.amo_deal_id);
-    const channel = resolved?.channel ?? 'unassigned';
-    if (allowed && !allowed.has(channel)) continue;
+    // всё же не подтянулась — не роняем расчёт, относим встречу к «без
+    // источника» вместо того, чтобы потерять её вовсе.
+    const resolved = dealSourceMap.get(link.amo_deal_id);
+    const key = resolved?.key ?? NO_SOURCE_KEY;
+    if (allowed && !allowed.has(key)) continue;
 
     totals.meetings += 1;
     bump(bucketKey(meetingDate, groupBy), 'meetings');
 
-    const sourceKey = resolved?.source || '(не указан)';
-    sourceRow(sourceKey, channel, resolved?.known ?? false).meetings += 1;
+    sourceRow(key, resolved?.label ?? NO_SOURCE_LABEL).meetings += 1;
     managerRow(dealManagerMap.get(link.amo_deal_id) ?? null).meetings += 1;
   }
 
@@ -409,10 +418,11 @@ export function computeFirstSalesSeries(
   // ложатся поверх неё. Правила отбора (первичка vs продление, спорные) живут
   // в `money.ts` — здесь только раскладка по срезам.
   //
-  // Спорные и неразобранные НЕ фильтруются по каналу: канал берётся у сделки,
-  // а у этих платежей сделка либо неизвестна (несколько кандидатов), либо
-  // решение по ней ещё не принято. Показать их «ноль при выбранном канале»
-  // значило бы спрятать признание в незнании, а именно оно тут и ценно.
+  // Спорные и неразобранные НЕ фильтруются по источнику: источник берётся у
+  // сделки, а у этих платежей сделка либо неизвестна (несколько кандидатов),
+  // либо решение по ней ещё не принято. Показать их «ноль при выбранном
+  // источнике» значило бы спрятать признание в незнании, а именно оно тут и
+  // ценно.
   for (const p of payments) {
     const amount = paymentAmount(p);
     // Ноль и минус — возвраты и служебные строки: в «пришло денег» им не
@@ -434,13 +444,13 @@ export function computeFirstSalesSeries(
     }
 
     const dealId = p.amo_deal_id as number;
-    const resolved = dealChannelMap.get(dealId);
-    const channel = resolved?.channel ?? 'unassigned';
-    if (allowed && !allowed.has(channel)) continue;
+    const resolved = dealSourceMap.get(dealId);
+    const key = resolved?.key ?? NO_SOURCE_KEY;
+    if (allowed && !allowed.has(key)) continue;
 
     totals.money.received += amount;
     totals.money.payments += 1;
-    sourceRow(resolved?.source || '(не указан)', channel, resolved?.known ?? false).money += amount;
+    sourceRow(key, resolved?.label ?? NO_SOURCE_LABEL).money += amount;
     managerRow(dealManagerMap.get(dealId) ?? null).money += amount;
   }
 
@@ -449,12 +459,21 @@ export function computeFirstSalesSeries(
     // Пустые строки отбрасываем: выборка тянет сделки с любой активностью в
     // окне, поэтому источник может попасть в разбивку из-за оплаты старой
     // сделки и дать строку из одних нулей. Строка «источник, по которому
-    // ничего не произошло» — шум, а не факт. `known`/`channel` при этом не
-    // теряются: фильтр только отбрасывает строки целиком по сумме счётчиков,
-    // остальные поля объекта не трогает.
+    // ничего не произошло» — шум, а не факт.
+    //
+    // Название проставляется здесь, а не при создании строки: `sourceRow`
+    // кладёт имя той сделки, что встретилась первой, а показать нужно самое
+    // свежее написание (см. `labelPick`).
     bySource: [...bySource.values()]
       .filter((s) => s.leads + s.qualified + s.meetings + s.contracts + s.money > 0)
+      .map((s) => ({ ...s, source: labelPick.get(s.key)?.label ?? s.source }))
       .sort((a, b) => b.leads - a.leads),
+    // Список для выпадашки фильтра — по всем сделкам выборки, ДО отсева по
+    // источнику: иначе, выбрав один источник, пользователь получил бы список
+    // из одного пункта и добавить второй стало бы нечем.
+    availableSources: [...availableLeads.entries()]
+      .map(([key, leads]) => ({ key, label: labelPick.get(key)?.label ?? key, leads }))
+      .sort((a, b) => b.leads - a.leads || a.label.localeCompare(b.label, 'ru-RU')),
     // Пустые строки отбрасываем по той же причине, что и у источников: сделка
     // могла попасть в выборку оплатой старой сделки и дать менеджеру строку из
     // одних нулей.
@@ -575,13 +594,4 @@ export async function fetchFirstSalesLeads(
     won_at: r.won_at,
     history_complete: r.history_complete,
   }));
-}
-
-export async function fetchSourceMap(db: SupabaseClient): Promise<SourceChannelRow[]> {
-  const { data, error } = await db
-    .from('lead_source_channels')
-    .select('source, channel, display_name')
-    .order('sort_order');
-  if (error) throw error;
-  return (data ?? []) as SourceChannelRow[];
 }

@@ -1,20 +1,16 @@
 import type { GroupBy } from '@/lib/firstSales/buckets';
-import {
-  FIRST_SALES_CHANNELS,
-  type FirstSalesChannel,
-} from '@/lib/firstSales/sourceChannels';
 
 const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
 const MAX_RANGE_DAYS = 800;
+const MAX_SOURCES = 100;
 
 const GROUP_BYS: GroupBy[] = ['day', 'week', 'month'];
-const CHANNELS: readonly FirstSalesChannel[] = FIRST_SALES_CHANNELS;
 
 export type FirstSalesParams = {
   from: Date;
   to: Date;
   groupBy: GroupBy;
-  channels: FirstSalesChannel[] | null;
+  sources: string[] | null;
 };
 
 /** Границы приходят как YYYY-MM-DD и трактуются как МСК-сутки целиком:
@@ -47,11 +43,13 @@ export function parseFirstSalesParams(
     return { value: null, error: `Недопустимый groupBy: ${groupByRaw}` };
   }
 
-  const channelRaw = url.searchParams.getAll('channel');
-  for (const c of channelRaw) {
-    if (!CHANNELS.includes(c as FirstSalesChannel)) {
-      return { value: null, error: `Недопустимый channel: ${c}` };
-    }
+  // Список допустимых значений не проверяем: источники ведут продажи в AMO,
+  // портал их перечня у себя не держит и не вправе объявить чужое значение
+  // недопустимым. Ограничиваем только количество — защита от бесконечной
+  // строки запроса.
+  const sourceRaw = url.searchParams.getAll('source');
+  if (sourceRaw.length > MAX_SOURCES) {
+    return { value: null, error: `Слишком много источников в фильтре: максимум ${MAX_SOURCES}` };
   }
 
   return {
@@ -59,7 +57,7 @@ export function parseFirstSalesParams(
       from,
       to,
       groupBy: groupByRaw as GroupBy,
-      channels: channelRaw.length > 0 ? (channelRaw as FirstSalesChannel[]) : null,
+      sources: sourceRaw.length > 0 ? sourceRaw : null,
     },
     error: null,
   };
