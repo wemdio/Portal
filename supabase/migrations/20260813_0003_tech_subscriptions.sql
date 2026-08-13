@@ -61,8 +61,8 @@ begin
 end;
 $$ language plpgsql;
 
-drop trigger if exists tech_subscriptions_updated_at on public.tech_subscriptions;
-create trigger tech_subscriptions_updated_at
+drop trigger if exists trg_tech_subscriptions_updated_at on public.tech_subscriptions;
+create trigger trg_tech_subscriptions_updated_at
   before update on public.tech_subscriptions
   for each row execute function public.tech_subscriptions_touch_updated_at();
 
