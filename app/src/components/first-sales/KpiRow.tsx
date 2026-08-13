@@ -76,10 +76,13 @@ export default function KpiRow({
   totals,
   previousTotals,
   syncedAt,
+  onNoSourceClick,
 }: {
   totals: FirstSalesTotals;
   previousTotals: FirstSalesTotals;
   syncedAt: string | null;
+  /** Клик по плашке «Без источника» — поставить фильтр на неё. */
+  onNoSourceClick: () => void;
 }) {
   const syncedDate = syncedAt ? new Date(syncedAt) : null;
   const syncedValid = !!syncedDate && Number.isFinite(syncedDate.getTime());
@@ -170,11 +173,23 @@ export default function KpiRow({
             : `оплат: ${fmt(totals.wonCount)}`
         }
       />
-      <Tile
-        label="Без канала"
-        value={fmt(totals.unassignedLeads)}
-        amber={totals.unassignedLeads > 0}
-      />
+      {/* Кнопка, а не просто плашка: клик ставит фильтр на «Без источника» —
+          в таблице ниже остаётся одна строка, а её раскрытие даёт список
+          сделок со ссылками в AMO. Это и есть выгрузка для продаж, только
+          живая. Плашка без сделок кликом ничего не даст — гасим. */}
+      <button
+        type="button"
+        onClick={onNoSourceClick}
+        disabled={totals.noSourceLeads === 0}
+        title="Показать только сделки без заполненного «Источник» — со ссылками в AMO"
+        className="text-left enabled:cursor-pointer disabled:cursor-default"
+      >
+        <Tile
+          label="Без источника"
+          value={fmt(totals.noSourceLeads)}
+          amber={totals.noSourceLeads > 0}
+        />
+      </button>
       <Tile
         label="Данные на"
         value={syncedValid && syncedDate ? syncedDate.toLocaleString('ru-RU') : '—'}

@@ -2,9 +2,9 @@ import 'server-only';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireFirstSalesAccess } from '@/lib/firstSales/access';
 import { parseFirstSalesParams } from '@/lib/firstSales/params';
-import { fetchFirstSalesLeads, fetchSourceMap } from '@/lib/firstSales/metrics';
+import { fetchFirstSalesLeads } from '@/lib/firstSales/metrics';
 import { fetchMeetingLinks } from '@/lib/firstSales/meetings';
-import { buildSourceIndex, resolveChannel } from '@/lib/firstSales/sourceChannels';
+import { resolveSource } from '@/lib/firstSales/sources';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
 // либо пустой ответ, либо чужой. Тот же паттерн, что у summary/route.ts.
@@ -23,12 +23,11 @@ export async function GET(req: NextRequest) {
   // `parsed.value === null`, а не `parsed.error` — то же сужение, что в
   // summary/route.ts (truthy-сужение объединения тут не работает на tsc 5.9.3).
   if (parsed.value === null) return NextResponse.json({ error: parsed.error }, { status: 400 });
-  const { from, to, channels } = parsed.value;
+  const { from, to } = parsed.value;
 
-  // Сделки без заполненного «Источник» приходят сюда под меткой «(не указан)» —
-  // именно её кладёт в разбивку metrics.ts, и именно её присылает таблица.
-  // Пустую строку слать бессмысленно: сравнение ниже подставляет «(не указан)»
-  // слева, так что `''` не совпадёт ни с чем и вернёт пустой список.
+  // Сюда приходит КЛЮЧ источника, а не название: `enum_id` строкой, либо
+  // `none` для сделок без заполненного «Источник». Именно его кладёт в
+  // разбивку metrics.ts, и именно его присылает таблица.
   // Проверяем на `null`, а не на пустоту: отсутствие параметра — это ошибка
   // вызова, а не «источник без имени».
   const source = url.searchParams.get('source');
@@ -44,19 +43,14 @@ export async function GET(req: NextRequest) {
     const meetingLinks = await fetchMeetingLinks(gate.supabaseAdmin, PIPELINE_ID, from, to);
     const meetingDealIds = [...new Set(meetingLinks.map((m) => m.amo_deal_id))];
 
-    const [leads, sourceMap] = await Promise.all([
-      fetchFirstSalesLeads(gate.supabaseAdmin, PIPELINE_ID, from, to, meetingDealIds),
-      fetchSourceMap(gate.supabaseAdmin),
-    ]);
-    const index = buildSourceIndex(sourceMap);
-    const allowed = channels && channels.length > 0 ? new Set(channels) : null;
+    const leads = await fetchFirstSalesLeads(
+      gate.supabaseAdmin, PIPELINE_ID, from, to, meetingDealIds,
+    );
 
+    // Фильтр по источникам здесь НЕ применяется: строка, в которую пользователь
+    // проваливается, уже прошла его в сводке — второй раз отсеивать нечего.
     const rows = leads
-      .filter((lead) => {
-        const resolved = resolveChannel(lead.raw, index);
-        if (allowed && !allowed.has(resolved.channel)) return false;
-        return (resolved.source || '(не указан)') === source;
-      })
+      .filter((lead) => resolveSource(lead.raw).key === source)
       .sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''))
       .slice(0, MAX_ROWS)
       .map((lead) => ({

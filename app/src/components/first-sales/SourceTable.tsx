@@ -4,7 +4,6 @@ import { Fragment, useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
-import { CHANNEL_LABELS } from '@/lib/firstSales/sourceChannels';
 import type { SourceBreakdown } from '@/lib/firstSales/metrics';
 import type { FiltersState } from '@/components/first-sales/FiltersBar';
 import { useSortableRows, type SortColumns } from '@/components/ui/useSortableRows';
@@ -52,7 +51,7 @@ const drillSortColumns: SortColumns<DrillLeadRow> = {
 
 /**
  * Ключ, по которому раскрытая строка теряет актуальность. Только from/to/
- * channels влияют на то, какие сделки попадут в drill-down — смена groupBy
+ * sources влияют на то, какие сделки попадут в drill-down — смена groupBy
  * на сам список сделок не влияет (это только раскладка графика по корзинам),
  * поэтому в ключ не входит: иначе переключение «День/Неделя/Месяц» без
  * причины сворачивало бы открытую строку.
@@ -66,10 +65,11 @@ const drillSortColumns: SortColumns<DrillLeadRow> = {
  * ещё и словило бы правило линтера `react-hooks/set-state-in-effect`.
  */
 export function drillKey(filters: FiltersState): string {
-  return `${filters.from}|${filters.to}|${filters.channels.join(',')}`;
+  return `${filters.from}|${filters.to}|${filters.sources.join(',')}`;
 }
 
-function DrillDownRows({ source, filters }: { source: string; filters: FiltersState }) {
+/** `sourceKey` — ключ строки (`enum_id` строкой либо `none`), не название. */
+function DrillDownRows({ sourceKey, filters }: { sourceKey: string; filters: FiltersState }) {
   const [data, setData] = useState<LeadsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -81,8 +81,9 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
     const run = async () => {
       setLoading(true);
       try {
-        const qs = new URLSearchParams({ from: filters.from, to: filters.to, source });
-        for (const channel of filters.channels) qs.append('channel', channel);
+        // Фильтр по источникам не передаём: строка, в которую провалились, его
+        // уже прошла в сводке — второй раз отсеивать нечего.
+        const qs = new URLSearchParams({ from: filters.from, to: filters.to, source: sourceKey });
 
         const res = await authFetch(`/api/analytics/first-sales/leads?${qs.toString()}`, {
           signal: controller.signal,
@@ -98,7 +99,7 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
       } catch (e) {
         if (!active) return;
         if (e instanceof DOMException && e.name === 'AbortError') return;
-        logError('first-sales.leads.fetch_failed', e, { source });
+        logError('first-sales.leads.fetch_failed', e, { source: sourceKey });
         setError(e instanceof Error ? e.message : 'Не удалось загрузить сделки');
       } finally {
         if (active) setLoading(false);
@@ -110,8 +111,8 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
       active = false;
       controller.abort();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- from/to/channels уже свёрнуты в drillKey выше уровнем; source меняется вместе со строкой.
-  }, [source, filters.from, filters.to, filters.channels.join(',')]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- from/to/sources уже свёрнуты в drillKey выше уровнем; sourceKey меняется вместе со строкой.
+  }, [sourceKey, filters.from, filters.to, filters.sources.join(',')]);
 
   // `rows`/`sortedRows` объявлены до ранних return'ов ниже — хуки не могут
   // вызываться условно, а DrillDownRows размонтируется/монтируется заново при
@@ -123,7 +124,7 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
   if (loading) {
     return (
       <tr>
-        <td colSpan={8} className="bg-zinc-50/60 px-3 py-4 text-center text-zinc-400">
+        <td colSpan={7} className="bg-zinc-50/60 px-3 py-4 text-center text-zinc-400">
           Загрузка сделок…
         </td>
       </tr>
@@ -133,7 +134,7 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
   if (error) {
     return (
       <tr>
-        <td colSpan={8} className="bg-zinc-50/60 px-3 py-4 text-center text-red-600">
+        <td colSpan={7} className="bg-zinc-50/60 px-3 py-4 text-center text-red-600">
           Ошибка загрузки сделок: {error}
         </td>
       </tr>
@@ -143,7 +144,7 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
   if (rows.length === 0) {
     return (
       <tr>
-        <td colSpan={8} className="bg-zinc-50/60 px-3 py-4 text-center text-zinc-400">
+        <td colSpan={7} className="bg-zinc-50/60 px-3 py-4 text-center text-zinc-400">
           Сделок за выбранный период не найдено.
         </td>
       </tr>
@@ -152,7 +153,7 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
 
   return (
     <tr>
-      <td colSpan={8} className="bg-zinc-50/60 px-3 py-3">
+      <td colSpan={7} className="bg-zinc-50/60 px-3 py-3">
         {/* Раскрытая строка живёт внутри таблицы, которая сама уже стеклянная.
             Второй `.glass-frame` дал бы размытие внутри размытия — именно
             вложенность роняет плавность прокрутки. Плотная подложка строк. */}
@@ -277,7 +278,6 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
  */
 const sourceSortColumns: SortColumns<SourceBreakdown> = {
   source: { type: 'string', getValue: (r) => r.source },
-  channel: { type: 'string', getValue: (r) => CHANNEL_LABELS[r.channel] },
   leads: { type: 'number', getValue: (r) => r.leads },
   qualified: { type: 'number', getValue: (r) => r.qualified },
   meetings: { type: 'number', getValue: (r) => r.meetings },
@@ -290,8 +290,8 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
   const [expanded, setExpanded] = useState<string | null>(null);
   const { sortedRows, sort, toggleSort } = useSortableRows(rows, sourceSortColumns);
 
-  const toggle = (source: string) => {
-    setExpanded((cur) => (cur === source ? null : source));
+  const toggle = (key: string) => {
+    setExpanded((cur) => (cur === key ? null : key));
   };
 
   return (
@@ -300,7 +300,6 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
         <thead>
           <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400">
             <SortableTh label="Источник" sortKey="source" sort={sort} onSort={toggleSort} />
-            <SortableTh label="Канал" sortKey="channel" sort={sort} onSort={toggleSort} />
             <SortableTh label="Лиды" sortKey="leads" sort={sort} onSort={toggleSort} align="right" />
             <th className="px-3 py-2 text-right font-medium">Доля</th>
             <SortableTh label="Квал" sortKey="qualified" sort={sort} onSort={toggleSort} align="right" />
@@ -324,11 +323,11 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
         </thead>
         <tbody>
           {sortedRows.map((row) => {
-            const isOpen = expanded === row.source;
+            const isOpen = expanded === row.key;
             return (
-              <Fragment key={row.source}>
+              <Fragment key={row.key}>
                 <tr
-                  onClick={() => toggle(row.source)}
+                  onClick={() => toggle(row.key)}
                   className="cursor-pointer border-b border-zinc-50 hover:bg-zinc-50/60"
                   aria-expanded={isOpen}
                 >
@@ -339,15 +338,9 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
                       ) : (
                         <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
                       )}
-                      <span className="font-medium text-zinc-800">{row.source || '(не указан)'}</span>
-                      {!row.known && (
-                        <span className="rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
-                          нет в справочнике
-                        </span>
-                      )}
+                      <span className="font-medium text-zinc-800">{row.source}</span>
                     </div>
                   </td>
-                  <td className="px-3 py-2 text-zinc-600">{CHANNEL_LABELS[row.channel]}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(row.leads)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-500">{pct(row.leads, totalLeads)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(row.qualified)}</td>
@@ -355,13 +348,13 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(row.contracts)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmtMoney(row.money)}</td>
                 </tr>
-                {isOpen && <DrillDownRows source={row.source} filters={filters} />}
+                {isOpen && <DrillDownRows sourceKey={row.key} filters={filters} />}
               </Fragment>
             );
           })}
           {rows.length === 0 && (
             <tr>
-              <td colSpan={8} className="px-3 py-8 text-center text-zinc-400">
+              <td colSpan={7} className="px-3 py-8 text-center text-zinc-400">
                 Нет данных за выбранный период.
               </td>
             </tr>
