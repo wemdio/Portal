@@ -14,7 +14,7 @@ const COLUMNS =
 
 export async function GET(req: NextRequest) {
   const guard = await requireAdmin(req);
-  if ('error' in guard) return guard.error;
+  if (guard.error) return guard.error;
   if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
 
   // Жёлтый статус ставим перед выдачей: экран не должен показывать «активна»
@@ -33,7 +33,7 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   const guard = await requireAdmin(req);
-  if ('error' in guard) return guard.error;
+  if (guard.error) return guard.error;
   if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
 
   let input;

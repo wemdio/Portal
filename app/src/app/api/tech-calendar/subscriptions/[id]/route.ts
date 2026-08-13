@@ -26,7 +26,7 @@ async function loadExisting(id: string) {
 
 export async function PATCH(req: NextRequest, ctx: Ctx) {
   const guard = await requireAdmin(req);
-  if ('error' in guard) return guard.error;
+  if (guard.error) return guard.error;
   if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
 
   const { id } = await ctx.params;
@@ -49,7 +49,7 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
 
 export async function DELETE(req: NextRequest, ctx: Ctx) {
   const guard = await requireAdmin(req);
-  if ('error' in guard) return guard.error;
+  if (guard.error) return guard.error;
   if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
 
   const { id } = await ctx.params;

@@ -1275,7 +1275,7 @@ function DialogsTab({ campaignId }: {
                     )}
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs text-gray-500">Статус:</span>
-                      {['none', 'lead', 'not_lead', 'later'].map(s => (
+                      {(['none', 'lead', 'not_lead', 'later'] as DialogStatus[]).map(s => (
                         <button key={s} type="button"
                           onClick={() => void updateDialog(d.id, { status: s })}
                           className={`rounded-full px-3 py-1 text-[10px] font-medium transition border cursor-pointer ${d.status === s ? 'bg-indigo-100 border-indigo-300 text-indigo-700' : 'border-gray-200 text-gray-600 hover:border-indigo-200 hover:bg-indigo-50'}`}>
