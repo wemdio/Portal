@@ -198,6 +198,56 @@ function DailyActivityChart({ days }: { days: DashboardDay[] }) {
   );
 }
 
+/** «2 ч 15 мин» из минут. Прочерк — когда мерить нечего. */
+function formatMinutes(min: number | null): string {
+  if (min === null) return '—';
+  if (min < 60) return `${min} мин`;
+  const hours = Math.floor(min / 60);
+  const rest = min % 60;
+  if (hours < 24) return rest ? `${hours} ч ${rest} мин` : `${hours} ч`;
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours ? `${days} дн ${restHours} ч` : `${days} дн`;
+}
+
+/**
+ * Плашка сигнала рядом с воронкой. Цветная — только когда есть о чём тревожиться:
+ * ноль в красной рамке читается как авария, которой нет.
+ */
+function SignalTile({
+  label,
+  value,
+  caption,
+  hint,
+  alarming = false,
+  amber = false,
+}: {
+  label: string;
+  value: string | number;
+  caption: string;
+  /** Подсказка при наведении: что именно считается и чего в цифре нет. */
+  hint: string;
+  alarming?: boolean;
+  /** Жёлтый вместо красного — для «есть работа», а не «что-то сломалось». */
+  amber?: boolean;
+}) {
+  const tone = !alarming
+    ? { box: 'border-gray-200 bg-white', label: 'text-gray-500', value: 'text-gray-800', cap: 'text-gray-400' }
+    : amber
+      ? { box: 'border-amber-200 bg-amber-50', label: 'text-amber-600', value: 'text-amber-700', cap: 'text-amber-600' }
+      : { box: 'border-rose-200 bg-rose-50', label: 'text-rose-600', value: 'text-rose-700', cap: 'text-rose-500' };
+
+  return (
+    <div className={`flex flex-col gap-1 rounded-xl border p-4 ${tone.box}`}>
+      <span className={`text-xs font-medium ${tone.label}`}>{label}</span>
+      <span className={`text-2xl font-semibold ${tone.value}`}>{value}</span>
+      <span title={hint} className={`cursor-help text-[10px] leading-snug ${tone.cap}`}>
+        {caption}
+      </span>
+    </div>
+  );
+}
+
 function Metric({
   label,
   value,
@@ -347,54 +397,66 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
         </div>
       ) : data ? (
         <>
-          {/* Воронка + блокировки рядом, но не в ней: это сигнал «пережали
-              с темпом», а не полезный шаг рассылки. */}
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_180px]">
-            <DashboardFunnel funnel={data.dashboard.funnel} />
-            {/* Красным — только когда есть о чём тревожиться. Ноль в красной
-                рамке читается как авария, которой нет. */}
-            <div
-              className={`flex flex-col items-start justify-center gap-1 rounded-xl border p-4 ${
-                data.dashboard.blocks > 0
-                  ? 'border-rose-200 bg-rose-50'
-                  : 'border-gray-200 bg-white'
-              }`}
-            >
-              <span
-                className={`text-xs font-medium ${
-                  data.dashboard.blocks > 0 ? 'text-rose-600' : 'text-gray-500'
-                }`}
-              >
-                Заблокировали нас
-              </span>
-              <span
-                className={`text-2xl font-semibold ${
-                  data.dashboard.blocks > 0 ? 'text-rose-700' : 'text-gray-800'
-                }`}
-              >
-                {data.dashboard.blocks}
-              </span>
-              {/* Прежняя подпись объясняла, чем цифра НЕ является («не шаг
-                  воронки»), и не говорила, что она значит. Читателю нужно
-                  обратное. Оговорка про занижение — в подсказке: она важна для
-                  того, кто принимает решение по цифре, но в плитке не
-                  помещается. */}
-              <span
-                title={
-                  'Считаем по диалогам, где Telegram отказал в отправке с кодом «пользователь заблокировал». '
-                  + 'Узнаём об этом только в момент следующей попытки написать, поэтому число заведомо неполное: '
-                  + 'кто заблокировал после последней реплики цепочки, сюда не попадёт. '
-                  + 'Удалённые аккаунты и прочая недоступность считаются отдельно и сюда не входят.'
-                }
-                className={`cursor-help text-[10px] leading-snug ${
-                  data.dashboard.blocks > 0 ? 'text-rose-500' : 'text-gray-400'
-                }`}
-              >
-                {data.dashboard.blocks > 0
-                  ? 'получателей закрыли доступ аккаунту, с которого им писали. Растёт — снижайте темп'
-                  : 'никто не закрыл доступ аккаунтам, с которых писали. Растёт — значит пережали с темпом'}
-              </span>
-            </div>
+          {/* Воронка отдельной строкой, сигналы — своей. Раньше блокировки
+              жались узкой колонкой сбоку; впятером они бы там не поместились,
+              а главное — это однородный ряд, и читать его удобнее в строку. */}
+          <DashboardFunnel funnel={data.dashboard.funnel} />
+
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+            <SignalTile
+              label="Заблокировали нас"
+              value={data.dashboard.blocks}
+              alarming={data.dashboard.blocks > 0}
+              caption="закрыли доступ аккаунту, с которого писали. Растёт — снижайте темп"
+              hint={
+                'Диалоги, где Telegram отказал в отправке с кодом «пользователь заблокировал». '
+                + 'Узнаём об этом только при следующей попытке написать, поэтому число заведомо неполное: '
+                + 'кто заблокировал после последней реплики цепочки, сюда не попадёт.'
+              }
+            />
+            <SignalTile
+              label="Недоступны"
+              value={data.dashboard.unreachable}
+              alarming={data.dashboard.unreachable > 0}
+              caption="удалённые аккаунты и прочие мёртвые контакты"
+              hint={
+                'Удалённый аккаунт, невалидный peer, бан в канале и прочая недоступность. '
+                + 'Блокировки сюда НЕ входят — у них своя цифра слева, иначе один человек считался бы дважды. '
+                + 'Высокая доля обычно значит, что база старая или собрана некачественно.'
+              }
+            />
+            <SignalTile
+              label="Ждут ответа"
+              value={data.dashboard.awaiting}
+              caption="написали в этот период и пока молчат"
+              hint={
+                'Диалоги, где наше первое сообщение попало в период, а ответа нет до сих пор — '
+                + 'даже если он придёт позже конца периода. Это размер «висящего» пула: '
+                + 'из него ещё могут прийти ответы, и он же показывает, сколько касаний ушло впустую.'
+              }
+            />
+            <SignalTile
+              label="Требуют внимания"
+              value={data.dashboard.needsAttention}
+              alarming={data.dashboard.needsAttention > 0}
+              amber
+              caption="ответили, но статус не проставлен и менеджеру не передали"
+              hint={
+                'Очередь работы оператора: человек ответил в этом периоде, но диалог до сих пор без статуса '
+                + '(не «Целевой», не «Не целевой», не «Позже») и менеджеру не передан. '
+                + 'Сорвавшиеся передачи внимание не снимают — до менеджера такой диалог не дошёл.'
+              }
+            />
+            <SignalTile
+              label="Отвечают за"
+              value={formatMinutes(data.dashboard.avgReplyMinutes)}
+              caption="в среднем от нашего сообщения до ответа"
+              hint={
+                'Среднее по тем, кто ответил в этом периоде: от НАШЕГО последнего сообщения до его ответа. '
+                + 'От последнего, а не от первого касания — человек отвечает на то, что прочитал сейчас, '
+                + 'иначе получилась бы длительность всей цепочки. Прочерк значит, что в периоде никто не ответил.'
+              }
+            />
           </div>
 
           <DailyActivityChart days={data.dashboard.days} />

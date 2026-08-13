@@ -105,12 +105,12 @@ export async function GET(req: NextRequest, ctx: Ctx) {
           : Promise.resolve({ data: [] as DashboardContact[] }),
         supabase
           .from('tg_outreach_dialogs')
-          .select('tg_user_id, tg_username, status, messages, last_message_at, can_send_changed_at, can_send_changed_reason')
+          .select('id, tg_user_id, tg_username, status, messages, last_message_at, can_send_changed_at, can_send_changed_reason')
           .eq('campaign_id', campaignId)
           .limit(20_000),
         supabase
           .from('tg_outreach_lead_forwards')
-          .select('status, requested_at')
+          .select('status, requested_at, dialog_id')
           .eq('campaign_id', campaignId),
         supabase
           .from('tg_outreach_accounts')
@@ -141,8 +141,8 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       // передачу), а не created_at — dashboard.ts принимает общее имя поля,
       // подгоняем при чтении, саму функцию не трогаем.
       const forwards: DashboardForward[] = (forwardsRes.data ?? []).map((f) => {
-        const row = f as { status: string; requested_at: string | null };
-        return { status: row.status, created_at: row.requested_at };
+        const row = f as { status: string; requested_at: string | null; dialog_id: string | null };
+        return { status: row.status, created_at: row.requested_at, dialog_id: row.dialog_id };
       });
       const accountRows = (accountsRes.data ?? []) as AccountRow[];
 
