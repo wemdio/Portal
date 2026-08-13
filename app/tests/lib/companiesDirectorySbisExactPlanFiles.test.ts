@@ -359,13 +359,27 @@ describe('SBIS exact OKVED frozen plan files', () => {
       planDir: fixture.planDir,
       manifestPath: fixture.manifestPath,
       batchSize: 1,
-      onUpdateBatch: async (rows) => updateBatches.push(rows),
-      onNoopBatch: async (rows) => noopBatches.push(rows),
-      onConflictBatch: async (rows) => conflictBatches.push(rows),
-      onSkippedBatch: async (rows) => skippedBatches.push(rows),
-      onSourceQuarantineBatch: async (rows) => quarantineBatches.push(rows),
-      onProvenanceBatch: async (rows) => provenanceBatches.push(rows),
-      onRollbackBatch: async (rows) => rollbackBatches.push(rows),
+      onUpdateBatch: async (rows) => {
+        updateBatches.push(rows);
+      },
+      onNoopBatch: async (rows) => {
+        noopBatches.push(rows);
+      },
+      onConflictBatch: async (rows) => {
+        conflictBatches.push(rows);
+      },
+      onSkippedBatch: async (rows) => {
+        skippedBatches.push(rows);
+      },
+      onSourceQuarantineBatch: async (rows) => {
+        quarantineBatches.push(rows);
+      },
+      onProvenanceBatch: async (rows) => {
+        provenanceBatches.push(rows);
+      },
+      onRollbackBatch: async (rows) => {
+        rollbackBatches.push(rows);
+      },
     });
 
     expect(processed).toMatchObject({
@@ -417,7 +431,9 @@ describe('SBIS exact OKVED frozen plan files', () => {
     await expect(processSbisExactPlanFiles({
       planDir: tampered.planDir,
       manifestPath: tampered.manifestPath,
-      onUpdateBatch: async (rows) => staged.push(rows),
+      onUpdateBatch: async (rows) => {
+        staged.push(rows);
+      },
     })).rejects.toThrow(/updates\.jsonl|SHA|hash/i);
     expect(staged).toEqual([]);
   });
