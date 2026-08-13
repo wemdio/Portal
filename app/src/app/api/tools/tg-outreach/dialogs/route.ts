@@ -65,12 +65,15 @@ export async function GET(req: NextRequest) {
          * Живая важнее — она определяет, можно ли передавать. Если живой нет,
          * показываем последнюю упавшую с её причиной.
          */
+        const active = (status: unknown) => status === 'pending' || status === 'sent';
         const byDialog = new Map<string, Record<string, unknown>>();
         for (const f of (forwards ?? []) as Array<Record<string, unknown>>) {
           const key = f.dialog_id as string;
           const current = byDialog.get(key);
-          const isActive = f.status === 'pending' || f.status === 'sent';
-          if (!current || (isActive && current.status === 'failed')) byDialog.set(key, f);
+          // Живая побеждает любую отработавшую — не только упавшую, но и снятую
+          // оператором: иначе свежая отмена закрыла бы собой передачу, которая
+          // на этом диалоге ещё висит.
+          if (!current || (active(f.status) && !active(current.status))) byDialog.set(key, f);
         }
         for (const row of rows) {
           const f = byDialog.get(row.id as string);

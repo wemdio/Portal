@@ -8,7 +8,7 @@
  * уже ушедшее сообщение нельзя, поэтому проверка стоит до отправки, а не после.
  */
 
-import { checkForwardConflict, type ExistingForward } from '@/lib/tgOutreach/forwardConflict';
+import { checkForwardConflict, cancelBlockReason, type ExistingForward } from '@/lib/tgOutreach/forwardConflict';
 
 const forward = (over: Partial<ExistingForward> = {}): ExistingForward => ({
   kind: 'lead',
@@ -72,5 +72,45 @@ describe('checkForwardConflict', () => {
       forward({ kind: 'partner', status: 'pending', sent_at: null }),
     ];
     expect(checkForwardConflict(history, 'lead')).toContain('очереди');
+  });
+
+  /**
+   * Снятая передача до менеджера не дошла — ровно как упавшая. Держать после
+   * отмены заблокированные кнопки значило бы наказывать за исправление ошибки.
+   */
+  it('отменённая передача не блокирует новую', () => {
+    const cancelled = [forward({ kind: 'lead', status: 'cancelled', sent_at: null })];
+    expect(checkForwardConflict(cancelled, 'lead')).toBeNull();
+    expect(checkForwardConflict(cancelled, 'partner')).toBeNull();
+  });
+});
+
+describe('cancelBlockReason', () => {
+  it('ожидающую отправки — снимаем', () => {
+    expect(cancelBlockReason(forward({ status: 'pending', sent_at: null }))).toBeNull();
+  });
+
+  /**
+   * Главная защита: воркер мог отправить задачу как раз между тем, как оператор
+   * увидел «в очереди», и тем, как нажал «Отменить».
+   */
+  it('ушедшую не отменить — из Telegram не отзовёшь', () => {
+    const msg = cancelBlockReason(forward({ kind: 'lead', status: 'sent' }));
+    expect(msg).toContain('уже ушла менеджеру');
+    expect(msg).toContain('отозвать');
+  });
+
+  it('упавшую отменять нечего — она и так не в очереди', () => {
+    expect(cancelBlockReason(forward({ status: 'failed', sent_at: null })))
+      .toContain('уже не в очереди');
+  });
+
+  it('снятую повторно не снять', () => {
+    expect(cancelBlockReason(forward({ status: 'cancelled', sent_at: null })))
+      .toContain('уже не в очереди');
+  });
+
+  it('передачи вообще не было', () => {
+    expect(cancelBlockReason(null)).toContain('отменять нечего');
   });
 });

@@ -38,19 +38,33 @@ export function resolveMaxChars(configured?: number | null): number {
   return Math.min(Math.floor(n), TELEGRAM_MAX_MESSAGE_CHARS);
 }
 
-export type ValidationFailure = 'empty' | 'too_long' | 'multiline';
+export type ValidationFailure = 'empty' | 'too_long';
 
 export type ValidationResult =
   | { ok: true }
   | { ok: false; reason: ValidationFailure };
 
+/**
+ * Абзацы в тексте не проверяем.
+ *
+ * Раньше любой перенос строки откладывал контакт: перенос считали признаком
+ * развалившегося файла — той же съехавшей колонки, что ловит порог длины. Но
+ * текст пишет клиент, и «сделайте в два абзаца» — обычная просьба, а не
+ * поломка: `client.sendMessage` отправляет такой текст одним сообщением и по
+ * переносам ничего не режет. Отправлять при этом было нечего — на базе TG_VBI
+ * 13.08.2026 переносы были во всех 213 контактах, кампания не отправила ни
+ * одного холодного сообщения, а контакты за три круга уходили из очереди
+ * насовсем. Ни одна рассылка от снятия правила не меняется: то, что уходило
+ * раньше, уходит и теперь, — а застрявшее наконец едет.
+ *
+ * Мусор в файле ловят оставшиеся проверки: пустая ячейка и порог длины.
+ */
 export function validateFirstTouch(message: string, maxChars?: number | null): ValidationResult {
   if (typeof message !== 'string') return { ok: false, reason: 'empty' };
 
   const limit = resolveMaxChars(maxChars);
   const text = message.replace(/ /g, ' ').trim();
   if (!text) return { ok: false, reason: 'empty' };
-  if (/[\r\n]/.test(text)) return { ok: false, reason: 'multiline' };
   if (text.length > limit) return { ok: false, reason: 'too_long' };
 
   return { ok: true };
@@ -63,7 +77,5 @@ export function describeFailure(reason: ValidationFailure, maxChars?: number | n
       return 'пустой текст сообщения';
     case 'too_long':
       return `текст длиннее ${resolveMaxChars(maxChars)} знаков`;
-    case 'multiline':
-      return 'в тексте перенос строки — должно быть одно сообщение одним абзацем';
   }
 }
