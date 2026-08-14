@@ -26,12 +26,24 @@ const subject = (exists ? require(scriptPath) : {}) as {
     legacy: Record<string, unknown>,
     shadow: Record<string, unknown>,
   ) => void;
+  createProgressReporter?: (input: {
+    filePath?: string;
+    tmpDir?: string;
+    pid?: number;
+    now?: () => Date;
+    appendFileSync: jest.Mock;
+    writeLine: jest.Mock;
+  }) => (event: Record<string, unknown>) => void;
   PostgresRollupActivationRepository?: new (input: {
     client: { query: jest.Mock };
     clientUserId: string;
     allowedCampaignIds: string[];
+    progress?: jest.Mock;
   }) => {
-    verifyParity(runId: string): Promise<unknown>;
+    verifyParity(
+      runId: string,
+      options?: { readOnly?: boolean },
+    ): Promise<unknown>;
     activate(runId: string): Promise<unknown>;
     rollbackOpenParity(): Promise<void>;
     rollback(): Promise<unknown>;
@@ -83,6 +95,67 @@ function repository(overrides: Record<string, jest.Mock> = {}) {
   };
 }
 
+const campaignIds = ['campaign-a', 'campaign-b', 'campaign-c'];
+
+function matrixPayload(params: unknown[]) {
+  const windows = JSON.parse(String(params[2])) as Array<{
+    key: string;
+    labels: string[];
+    from_utc: string;
+    to_utc: string;
+  }>;
+  const allowedCampaignIds = params[3] as string[];
+  const cells = windows.flatMap((window) => (
+    [null, 'A', 'B', 'C'].flatMap((scoreCode) => (
+      [null, ...allowedCampaignIds].map((campaignId) => ({
+        window_key: window.key,
+        labels: window.labels,
+        from_utc: window.from_utc,
+        to_utc: window.to_utc,
+        score_code: scoreCode,
+        campaign_id: campaignId,
+        matched: true,
+      }))
+    ))
+  ));
+  return {
+    checked_cells: cells.length,
+    source_scans: 1,
+    contract_verified: true,
+    coverage_verified: true,
+    cells,
+    mismatches: [],
+  };
+}
+
+const matrixBounds = {
+  from_utc: '2026-05-14T21:00:00.000Z',
+  to_utc: '2026-08-13T21:00:00.000Z',
+  as_of_utc: '2026-08-13T12:00:00.000Z',
+};
+
+function matrixQueryMock(input: {
+  statements: string[];
+  mutate?: (result: ReturnType<typeof matrixPayload>) => unknown;
+  matrixError?: Error;
+}) {
+  return jest.fn(async (sql: string, params: unknown[] = []) => {
+    input.statements.push(sql.replace(/\s+/g, ' ').trim());
+    if (/pg_try_advisory_xact_lock/i.test(sql)) {
+      return { rows: [{ acquired: true }] };
+    }
+    if (/min\(bucket\.cohort_day\)/i.test(sql)) {
+      return { rows: [matrixBounds] };
+    }
+    if (/verify_client_report_large_score_rollup_matrix\(/i.test(sql)) {
+      if (input.matrixError) throw input.matrixError;
+      const result = matrixPayload(params);
+      return { rows: [{ result: input.mutate ? input.mutate(result) : result }] };
+    }
+    return { rows: [] };
+  });
+}
+
 describe('large-score rollup activation operator', () => {
   it('exists and defaults to a read-only activation preview', () => {
     expect(exists).toBe(true);
@@ -121,6 +194,50 @@ describe('large-score rollup activation operator', () => {
       .toThrow(/run-id|action/i);
   });
 
+  it('persists every real CLI progress event as JSONL as well as stdout', () => {
+    const appendFileSync = jest.fn();
+    const writeLine = jest.fn();
+    const report = subject.createProgressReporter?.({
+      filePath: 'activation-progress.jsonl',
+      appendFileSync,
+      writeLine,
+    });
+    const event = { stage: 'matrix_started', expected_cells: 96 };
+
+    report?.(event);
+
+    expect(appendFileSync).toHaveBeenCalledWith(
+      'activation-progress.jsonl',
+      `${JSON.stringify(event)}\n`,
+      expect.objectContaining({ encoding: 'utf8' }),
+    );
+    expect(writeLine).toHaveBeenCalledWith(
+      '[client-report-rollup-activation:progress]',
+      JSON.stringify(event),
+    );
+    expect(scriptSource).toMatch(/progress:\s*createProgressReporter\(\)/);
+  });
+
+  it('uses a unique default progress path and private append permissions', () => {
+    const appendFileSync = jest.fn();
+    const report = subject.createProgressReporter?.({
+      tmpDir: 'private-tmp',
+      pid: 4321,
+      now: () => new Date('2026-08-14T01:02:03.456Z'),
+      appendFileSync,
+      writeLine: jest.fn(),
+    });
+
+    report?.({ stage: 'matrix_started' });
+
+    expect(appendFileSync).toHaveBeenCalledTimes(1);
+    const [filePath, _line, options] = appendFileSync.mock.calls[0];
+    expect(filePath).toMatch(
+      /private-tmp[\\/]client-report-large-score-rollup-activation-4321-2026-08-14T01-02-03-456Z\.jsonl$/,
+    );
+    expect(options).toEqual({ encoding: 'utf8', flag: 'a', mode: 0o600 });
+  });
+
   it('never mutates in dry-run mode', async () => {
     const target = repository();
     await subject.executeActivation?.({
@@ -130,7 +247,9 @@ describe('large-score rollup activation operator', () => {
       repository: target,
     });
     expect(target.inspect).toHaveBeenCalledWith(runId);
-    expect(target.verifyParity).toHaveBeenCalledWith(runId);
+    expect(target.verifyParity).toHaveBeenCalledWith(runId, {
+      readOnly: true,
+    });
     expect(target.rollbackOpenParity).toHaveBeenCalledTimes(1);
     expect(target.activate).not.toHaveBeenCalled();
     expect(target.rollback).not.toHaveBeenCalled();
@@ -152,7 +271,11 @@ describe('large-score rollup activation operator', () => {
   it('keeps rollback independent from campaign parity configuration', async () => {
     if (!subject.PostgresRollupActivationRepository) return;
     const client = {
-      query: jest.fn().mockResolvedValue({ rows: [{ rollup_run_id: runId }] }),
+      query: jest.fn(async (sql: string) => (
+        /pg_try_advisory_xact_lock/i.test(sql)
+          ? { rows: [{ acquired: true }] }
+          : { rows: [{ rollup_run_id: runId }] }
+      )),
     };
     const target = new subject.PostgresRollupActivationRepository({
       client,
@@ -173,7 +296,9 @@ describe('large-score rollup activation operator', () => {
       mode: 'apply', action: 'activate', runId, repository: target,
     });
     expect(target.inspect).toHaveBeenCalledWith(runId);
-    expect(target.verifyParity).toHaveBeenCalledWith(runId);
+    expect(target.verifyParity).toHaveBeenCalledWith(runId, {
+      readOnly: false,
+    });
     expect(target.verifyParity.mock.invocationCallOrder[0]).toBeLessThan(
       target.activate.mock.invocationCallOrder[0],
     );
@@ -317,12 +442,16 @@ describe('large-score rollup activation operator', () => {
     }));
   });
 
-  it('verifies a bounded tenant-scoped score/campaign matrix with identical filters', async () => {
+  it('verifies the bounded 96-cell matrix with one set-based RPC and activates in the same snapshot', async () => {
     if (!subject.PostgresRollupActivationRepository) return;
     const statements: Array<{ sql: string; params: unknown[] }> = [];
+    const progress = jest.fn();
     const client = {
       query: jest.fn(async (sql: string, params: unknown[] = []) => {
         statements.push({ sql: sql.replace(/\s+/g, ' ').trim(), params });
+        if (/pg_try_advisory_xact_lock/i.test(sql)) {
+          return { rows: [{ acquired: true }] };
+        }
         if (/min\(bucket\.cohort_day\)/i.test(sql)) {
           return { rows: [{
             from_utc: '2026-05-14T21:00:00.000Z',
@@ -333,8 +462,8 @@ describe('large-score rollup activation operator', () => {
         if (/activate_client_report_large_score_rollup\(/i.test(sql)) {
           return { rows: [{ rollup_run_id: runId }] };
         }
-        if (/client_report_pipeline_summary(?:_shadow)?\(/i.test(sql)) {
-          return { rows: [summaryRow] };
+        if (/verify_client_report_large_score_rollup_matrix\(/i.test(sql)) {
+          return { rows: [{ result: matrixPayload(params) }] };
         }
         return { rows: [] };
       }),
@@ -342,61 +471,196 @@ describe('large-score rollup activation operator', () => {
     const target = new subject.PostgresRollupActivationRepository({
       client,
       clientUserId,
-      allowedCampaignIds: ['campaign-a', 'campaign-b'],
+      allowedCampaignIds: campaignIds,
+      progress,
     });
 
-    await target.verifyParity(runId);
+    await expect(target.verifyParity(runId)).resolves.toEqual(
+      expect.objectContaining({ comparisons: 96 }),
+    );
     await target.activate(runId);
 
-    const legacy = statements.filter(({ sql }) => (
-      /public\.client_report_pipeline_summary\(/i.test(sql)
-      && !/_shadow/i.test(sql)
+    const matrixCalls = statements.filter(({ sql }) => (
+      /verify_client_report_large_score_rollup_matrix\(/i.test(sql)
     ));
-    const shadow = statements.filter(({ sql }) => /_summary_shadow\(/i.test(sql));
-    // 1d, 7d, 30d, current/previous Moscow month and full coverage
-    // x 4 score states (all/A/B/C) x aggregate + each allowlisted campaign.
-    expect(legacy).toHaveLength(72);
-    expect(shadow).toHaveLength(72);
-    for (let index = 0; index < legacy.length; index += 1) {
-      expect(legacy[index].params.slice(0, 4)).toEqual([
-        clientUserId,
-        expect.stringMatching(/^2026-(05-14|06-30|07-(14|31)|08-(06|12))T21:00:00\.000Z$/),
-        expect.stringMatching(/^2026-(07-31|08-13)T21:00:00\.000Z$/),
-        ['campaign-a', 'campaign-b'],
-      ]);
-      expect([null, 'A', 'B', 'C']).toContain(legacy[index].params[4]);
-      expect([null, 'campaign-a', 'campaign-b']).toContain(
-        legacy[index].params[5],
-      );
-      expect(shadow[index].params).toEqual([
-        clientUserId,
-        runId,
-        ...legacy[index].params.slice(1),
-      ]);
-    }
+    expect(matrixCalls).toHaveLength(1);
+    expect(statements.some(({ sql }) => (
+      /client_report_pipeline_summary(?:_shadow)?\(/i.test(sql)
+    ))).toBe(false);
+    expect(matrixCalls[0].params.slice(0, 2)).toEqual([clientUserId, runId]);
+    expect(matrixCalls[0].params[3]).toEqual(campaignIds);
+    const matrixWindows = JSON.parse(String(matrixCalls[0].params[2]));
+    expect(matrixWindows).toHaveLength(6);
+    expect(matrixWindows).toContainEqual(expect.objectContaining({
+      labels: expect.arrayContaining(['full']),
+      from_utc: '2026-05-14T21:00:00.000Z',
+      to_utc: '2026-08-13T21:00:00.000Z',
+    }));
     expect(statements[0].sql).toMatch(/begin.*repeatable read/i);
     expect(statements[0].sql).not.toMatch(/read only/i);
+    expect(statements[1]).toEqual({
+      sql: expect.stringMatching(/pg_try_advisory_xact_lock/i),
+      params: [clientUserId],
+    });
     expect(statements).toContainEqual(expect.objectContaining({
-      sql: "SET LOCAL statement_timeout = '120s'",
+      sql: "SET LOCAL statement_timeout = '900s'",
     }));
     expect(statements.at(-1)?.sql).toBe('COMMIT');
-    expect(legacy).toContainEqual(expect.objectContaining({
-      params: [
-        clientUserId,
-        '2026-05-14T21:00:00.000Z',
-        '2026-08-13T21:00:00.000Z',
-        ['campaign-a', 'campaign-b'],
-        null,
-        null,
-      ],
-    }));
     const activationAt = statements.findIndex(({ sql }) => (
       /activate_client_report_large_score_rollup/i.test(sql)
     ));
-    const lastShadowAt = statements.map(({ sql }) => sql)
-      .lastIndexOf(shadow.at(-1)?.sql ?? '');
-    expect(activationAt).toBeGreaterThan(lastShadowAt);
+    const matrixAt = statements.findIndex(({ sql }) => (
+      /verify_client_report_large_score_rollup_matrix/i.test(sql)
+    ));
+    expect(activationAt).toBeGreaterThan(matrixAt);
     expect(activationAt).toBeLessThan(statements.length - 1);
+    expect(progress.mock.calls.map(([event]) => event.stage)).toEqual(
+      expect.arrayContaining([
+        'transaction_started',
+        'bounds_loaded',
+        'matrix_started',
+        'matrix_verified',
+        'activation_started',
+        'committed',
+      ]),
+    );
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({
+      stage: 'committed', run_id: runId,
+    }));
+  });
+
+  it('uses an explicitly READ ONLY snapshot for dry-run and always rolls it back', async () => {
+    if (!subject.PostgresRollupActivationRepository) return;
+    const statements: string[] = [];
+    const client = { query: matrixQueryMock({ statements }) };
+    const target = new subject.PostgresRollupActivationRepository({
+      client, clientUserId, allowedCampaignIds: campaignIds,
+    });
+
+    await target.verifyParity(runId, { readOnly: true });
+    await target.rollbackOpenParity();
+
+    expect(statements[0]).toMatch(/begin.*repeatable read.*read only/i);
+    expect(statements[1]).toMatch(/pg_try_advisory_xact_lock/i);
+    expect(statements.at(-1)).toBe('ROLLBACK');
+    expect(statements.some((sql) => (
+      /activate_client_report_large_score_rollup/i.test(sql)
+    ))).toBe(false);
+  });
+
+  it.each([
+    ['missing cell', (result: ReturnType<typeof matrixPayload>) => ({
+      ...result,
+      checked_cells: result.checked_cells - 1,
+      cells: result.cells.slice(1),
+    })],
+    ['duplicate context', (result: ReturnType<typeof matrixPayload>) => ({
+      ...result,
+      cells: [...result.cells.slice(0, -1), result.cells[0]],
+    })],
+    ['multiple source scans', (result: ReturnType<typeof matrixPayload>) => ({
+      ...result,
+      source_scans: 2,
+    })],
+    ['contract drift', (result: ReturnType<typeof matrixPayload>) => ({
+      ...result,
+      contract_verified: false,
+    })],
+    ['coverage drift', (result: ReturnType<typeof matrixPayload>) => ({
+      ...result,
+      coverage_verified: false,
+    })],
+  ])('rolls back and rejects an invalid matrix: %s', async (_label, mutate) => {
+    if (!subject.PostgresRollupActivationRepository) return;
+    const statements: string[] = [];
+    const client = { query: matrixQueryMock({ statements, mutate }) };
+    const target = new subject.PostgresRollupActivationRepository({
+      client, clientUserId, allowedCampaignIds: campaignIds,
+    });
+
+    await expect(target.verifyParity(runId)).rejects.toThrow(
+      /matrix|cardinality|context|scan|contract|parity/i,
+    );
+    expect(statements.at(-1)).toBe('ROLLBACK');
+    expect(statements.some((sql) => (
+      /activate_client_report_large_score_rollup/i.test(sql)
+    ))).toBe(false);
+  });
+
+  it('reports exact filter context and rolls back on a matrix mismatch', async () => {
+    if (!subject.PostgresRollupActivationRepository) return;
+    const progress = jest.fn();
+    const statements: string[] = [];
+    const client = { query: matrixQueryMock({
+      statements,
+      mutate: (result) => {
+        result.cells[95].matched = false;
+        result.mismatches = [result.cells[95]];
+        return result;
+      },
+    }) };
+    const target = new subject.PostgresRollupActivationRepository({
+      client, clientUserId, allowedCampaignIds: campaignIds, progress,
+    });
+
+    await expect(target.verifyParity(runId)).rejects.toThrow(
+      /window=.*score=C.*campaign=campaign-c/i,
+    );
+    expect(statements.at(-1)).toBe('ROLLBACK');
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({
+      stage: 'failed',
+      run_id: runId,
+      context: expect.objectContaining({
+        score_code: 'C', campaign_id: 'campaign-c',
+      }),
+    }));
+  });
+
+  it('fails closed when staged progress cannot be recorded', async () => {
+    if (!subject.PostgresRollupActivationRepository) return;
+    const statements: string[] = [];
+    const progress = jest.fn((event: { stage: string }) => {
+      if (event.stage === 'matrix_verified') throw new Error('progress sink failed');
+    });
+    const client = { query: matrixQueryMock({ statements }) };
+    const target = new subject.PostgresRollupActivationRepository({
+      client, clientUserId, allowedCampaignIds: campaignIds, progress,
+    });
+
+    await expect(target.verifyParity(runId)).rejects.toThrow(/progress sink failed/i);
+    expect(statements.at(-1)).toBe('ROLLBACK');
+    expect(statements.some((sql) => (
+      /activate_client_report_large_score_rollup/i.test(sql)
+    ))).toBe(false);
+  });
+
+  it('serializes rollback with activation using the same client advisory lock', async () => {
+    if (!subject.PostgresRollupActivationRepository) return;
+    const statements: Array<{ sql: string; params: unknown[] }> = [];
+    const client = {
+      query: jest.fn(async (sql: string, params: unknown[] = []) => {
+        statements.push({ sql: sql.replace(/\s+/g, ' ').trim(), params });
+        if (/pg_try_advisory_xact_lock/i.test(sql)) {
+          return { rows: [{ acquired: true }] };
+        }
+        if (/deactivate_client_report_large_score_rollup/i.test(sql)) {
+          return { rows: [{ rollup_run_id: runId }] };
+        }
+        return { rows: [] };
+      }),
+    };
+    const target = new subject.PostgresRollupActivationRepository({
+      client, clientUserId, allowedCampaignIds: [],
+    });
+
+    await expect(target.rollback()).resolves.toBe(runId);
+    expect(statements[0].sql).toMatch(/begin/i);
+    expect(statements[1]).toEqual({
+      sql: expect.stringMatching(/pg_try_advisory_xact_lock/i),
+      params: [clientUserId],
+    });
+    expect(statements[2].sql).toMatch(/deactivate_client_report_large_score_rollup/i);
+    expect(statements.at(-1)?.sql).toBe('COMMIT');
   });
 
   it('rejects direct activation without a verified open parity transaction', async () => {
@@ -414,33 +678,22 @@ describe('large-score rollup activation operator', () => {
     expect(client.query).not.toHaveBeenCalled();
   });
 
-  it('rolls back the read transaction when a parity query times out', async () => {
+  it('rolls back with the current stage when the set-based matrix times out', async () => {
     if (!subject.PostgresRollupActivationRepository) return;
     const statements: string[] = [];
-    const client = {
-      query: jest.fn(async (sql: string) => {
-        const normalized = sql.replace(/\s+/g, ' ').trim();
-        statements.push(normalized);
-        if (/min\(bucket\.cohort_day\)/i.test(sql)) {
-          return { rows: [{
-            from_utc: '2026-06-30T21:00:00.000Z',
-            to_utc: '2026-07-31T21:00:00.000Z',
-            as_of_utc: '2026-07-31T12:00:00.000Z',
-          }] };
-        }
-        if (/client_report_pipeline_summary\(/i.test(sql)) {
-          throw new Error('canceling statement due to statement timeout');
-        }
-        return { rows: [] };
-      }),
-    };
+    const client = { query: matrixQueryMock({
+      statements,
+      matrixError: new Error('canceling statement due to statement timeout'),
+    }) };
     const target = new subject.PostgresRollupActivationRepository({
       client,
       clientUserId,
-      allowedCampaignIds: ['campaign-a'],
+      allowedCampaignIds: campaignIds,
     });
 
-    await expect(target.verifyParity(runId)).rejects.toThrow(/timeout/i);
+    await expect(target.verifyParity(runId)).rejects.toThrow(
+      /timeout.*stage=matrix_compare|stage=matrix_compare.*timeout/i,
+    );
     expect(statements.at(-1)).toBe('ROLLBACK');
   });
 });
