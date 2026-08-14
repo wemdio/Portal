@@ -7,6 +7,8 @@ import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/
 
 const ALINA_ID = '33dec504-e6e0-4b0a-bc59-dcf570c6ecc9';
 const SERGEY_ID = '66873c8c-ae56-4ab2-afa5-5e77dcda391d';
+const ANYA_ID = '9e2c53fe-4b86-40b1-b464-757ffe0944dd';
+const NIKITA_ID = '416b456b-83b4-48c1-9eeb-9cb6ab88e455';
 const LEAD_ID = '00000000-0000-4000-8000-000000000001';
 const DIRECTOR_ID = '00000000-0000-4000-8000-000000000002';
 const EMPLOYEE_ID = '00000000-0000-4000-8000-000000000010';
@@ -239,7 +241,7 @@ describe('POST /api/team/review-requests/[id]/convert', () => {
     },
   );
 
-  it.each([LEAD_ID, DIRECTOR_ID])(
+  it.each([LEAD_ID, DIRECTOR_ID, ANYA_ID, NIKITA_ID])(
     'denies submit-only user %s before conversion or service-role access',
     async (userId) => {
       mockCurrentUser = { id: userId };

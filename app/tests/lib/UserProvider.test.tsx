@@ -35,6 +35,24 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function privateCapabilityCallCount(): number {
+  return mockRpc.mock.calls.filter(([name]) => name === 'can_access_team').length;
+}
+
+function mockPrivateCapabilities(
+  requests: Array<ReturnType<typeof deferred<{ data: unknown; error: unknown }>>>,
+) {
+  let index = 0;
+  mockRpc.mockImplementation((functionName: string) => {
+    if (functionName !== 'can_access_team') {
+      return Promise.resolve({ data: false, error: null });
+    }
+    const request = requests[index++];
+    if (!request) throw new Error('Unexpected can_access_team request');
+    return request.promise;
+  });
+}
+
 function session(id: string, email: string): Session {
   return { user: { id, email } } as Session;
 }
@@ -236,12 +254,7 @@ describe('<UserProvider /> HR capability lifecycle', () => {
     const hrCapability = deferred<{ data: unknown; error: unknown }>();
     const teamCapability = deferred<{ data: unknown; error: unknown }>();
     capabilityRequests.set('user-a', hrCapability);
-    mockRpc.mockImplementationOnce((functionName: string) => {
-      if (functionName !== 'can_access_team') {
-        throw new Error(`Unexpected RPC: ${functionName}`);
-      }
-      return teamCapability.promise;
-    });
+    mockPrivateCapabilities([teamCapability]);
     render(<UserProvider><ContextProbe /></UserProvider>);
 
     await act(async () => {
@@ -281,7 +294,11 @@ describe('<UserProvider /> HR capability lifecycle', () => {
     };
     const hrCapability = deferred<{ data: unknown; error: unknown }>();
     capabilityRequests.set('user-a', hrCapability);
-    mockRpc.mockResolvedValueOnce({ data: null, error: { message: 'RPC unavailable' } });
+    mockRpc.mockImplementation((functionName: string) => Promise.resolve(
+      functionName === 'can_access_team'
+        ? { data: null, error: { message: 'RPC unavailable' } }
+        : { data: false, error: null },
+    ));
     render(<UserProvider><ContextProbe /></UserProvider>);
 
     await act(async () => {
@@ -346,10 +363,7 @@ describe('<UserProvider /> HR capability lifecycle', () => {
     const firstTeamCapability = deferred<{ data: unknown; error: unknown }>();
     const secondTeamCapability = deferred<{ data: unknown; error: unknown }>();
     const thirdTeamCapability = deferred<{ data: unknown; error: unknown }>();
-    mockRpc
-      .mockImplementationOnce(() => firstTeamCapability.promise)
-      .mockImplementationOnce(() => secondTeamCapability.promise)
-      .mockImplementationOnce(() => thirdTeamCapability.promise);
+    mockPrivateCapabilities([firstTeamCapability, secondTeamCapability, thirdTeamCapability]);
 
     render(<UserProvider><ContextProbe /></UserProvider>);
 
@@ -427,9 +441,7 @@ describe('<UserProvider /> HR capability lifecycle', () => {
 
       const initialTeamCapability = deferred<{ data: unknown; error: unknown }>();
       const refreshedTeamCapability = deferred<{ data: unknown; error: unknown }>();
-      mockRpc
-        .mockImplementationOnce(() => initialTeamCapability.promise)
-        .mockImplementationOnce(() => refreshedTeamCapability.promise);
+      mockPrivateCapabilities([initialTeamCapability, refreshedTeamCapability]);
 
       const view = render(<UserProvider><ContextProbe /></UserProvider>);
       await act(async () => {
@@ -451,7 +463,7 @@ describe('<UserProvider /> HR capability lifecycle', () => {
       if (eventName === 'visibilitychange') {
         visibilityState = 'hidden';
         act(() => document.dispatchEvent(new Event('visibilitychange')));
-        expect(mockRpc).toHaveBeenCalledTimes(1);
+        expect(privateCapabilityCallCount()).toBe(1);
         expect(contextValue().canAccessTeamPrivate).toBe(true);
         visibilityState = 'visible';
       }
@@ -462,8 +474,8 @@ describe('<UserProvider /> HR capability lifecycle', () => {
       });
 
       expect(contextValue().canAccessTeamPrivate).toBe(true);
-      expect(mockRpc).toHaveBeenCalledTimes(2);
-      expect(mockRpc).toHaveBeenLastCalledWith('can_access_team');
+      expect(privateCapabilityCallCount()).toBe(2);
+      expect(mockRpc.mock.calls.filter(([name]) => name === 'can_access_team').at(-1)).toEqual(['can_access_team']);
 
       await act(async () => {
         refreshedTeamCapability.resolve({ data: false, error: null });
@@ -476,7 +488,7 @@ describe('<UserProvider /> HR capability lifecycle', () => {
         if (eventName === 'focus') window.dispatchEvent(new Event('focus'));
         else document.dispatchEvent(new Event('visibilitychange'));
       });
-      expect(mockRpc).toHaveBeenCalledTimes(2);
+      expect(privateCapabilityCallCount()).toBe(2);
       visibilitySpy.mockRestore();
     },
   );
@@ -495,10 +507,7 @@ describe('<UserProvider /> HR capability lifecycle', () => {
     const initialTeamCapability = deferred<{ data: unknown; error: unknown }>();
     const olderRefresh = deferred<{ data: unknown; error: unknown }>();
     const latestRefresh = deferred<{ data: unknown; error: unknown }>();
-    mockRpc
-      .mockImplementationOnce(() => initialTeamCapability.promise)
-      .mockImplementationOnce(() => olderRefresh.promise)
-      .mockImplementationOnce(() => latestRefresh.promise);
+    mockPrivateCapabilities([initialTeamCapability, olderRefresh, latestRefresh]);
 
     render(<UserProvider><ContextProbe /></UserProvider>);
     await act(async () => {
@@ -514,7 +523,7 @@ describe('<UserProvider /> HR capability lifecycle', () => {
 
     act(() => window.dispatchEvent(new Event('focus')));
     act(() => window.dispatchEvent(new Event('focus')));
-    expect(mockRpc).toHaveBeenCalledTimes(3);
+    expect(privateCapabilityCallCount()).toBe(3);
     expect(contextValue().canAccessTeamPrivate).toBe(true);
 
     await act(async () => {
@@ -543,9 +552,7 @@ describe('<UserProvider /> HR capability lifecycle', () => {
 
     const initialTeamCapability = deferred<{ data: unknown; error: unknown }>();
     const failedRefresh = deferred<{ data: unknown; error: unknown }>();
-    mockRpc
-      .mockImplementationOnce(() => initialTeamCapability.promise)
-      .mockImplementationOnce(() => failedRefresh.promise);
+    mockPrivateCapabilities([initialTeamCapability, failedRefresh]);
 
     render(<UserProvider><ContextProbe /></UserProvider>);
     await act(async () => {

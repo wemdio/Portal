@@ -35,6 +35,47 @@ export interface MigrationFile {
 export interface GrantViolation {
   file: string;
   table: string;
+  /** Set only for special cases (e.g. an exemption marker with no reason). */
+  note?: string;
+}
+
+/**
+ * Opt-out marker for tables that intentionally grant direct access to
+ * NOBODY, `service_role` included. Written next to the create table:
+ *
+ *   -- grants-lint: no-service-role-grant public.my_table — reason
+ *
+ * Why this exists: the linter assumes a new table is meant to be reached
+ * directly by the app, which holds for almost every table. Occasionally the
+ * opposite is true — the table is sealed with RLS plus `revoke all` from
+ * every role, and the app reaches it only through a SECURITY DEFINER
+ * function. That is how the client-report rollup activation works: a direct
+ * insert would bypass the "run is verified" check the migration exists to
+ * enforce. For such a table `grant all ... to service_role` is not a lint
+ * fix, it is the very hole the migration was written to close.
+ *
+ * The reason is MANDATORY and must sit on the marker line itself (following
+ * comment lines are free to elaborate): silently exempting something from a
+ * privilege check is exactly how such checks rot. A marker without a reason
+ * is not accepted and is reported separately.
+ */
+const EXEMPTION_RX =
+  /--\s*grants-lint:\s*no-service-role-grant\s+public\.([A-Za-z_][A-Za-z0-9_]*)([^\n\r]*)/gi;
+
+/**
+ * Tables this file declares an intentional exemption for. The value is the
+ * stated reason (empty string = marker present, reason missing). Reads the
+ * raw SQL: the marker lives in a comment, so it must be seen before
+ * stripSqlComments removes it.
+ */
+export function findGrantExemptions(sql: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const m of sql.matchAll(EXEMPTION_RX)) {
+    const reason = m[2].replace(/^[\s—:-]+/, '').trim();
+    // First marker wins: a duplicate without a reason must not erase the reason.
+    if (!out.has(m[1])) out.set(m[1], reason);
+  }
+  return out;
 }
 
 /**
@@ -145,6 +186,11 @@ function mentionsServiceRole(roleList: string): boolean {
  * Entries listed in `opts.allowlist` (format: `"<file>::<table>"`) are
  * suppressed — that's the May-2026 baseline of grandfathered legacy
  * tables we did not retro-fix.
+ *
+ * Separately from the allowlist (frozen at the May-2026 snapshot), a marker
+ * `-- grants-lint: no-service-role-grant public.X — reason` in the same file
+ * that creates the table also suppresses a violation; see EXEMPTION_RX. That
+ * one is for tables sealed on purpose.
  */
 export function findMissingServiceRoleGrants(
   files: MigrationFile[],
@@ -169,6 +215,7 @@ export function findMissingServiceRoleGrants(
 
   const violations: GrantViolation[] = [];
   for (const f of files) {
+    const exemptions = findGrantExemptions(f.sql);
     for (const table of extractCreatedTables(f.sql)) {
       if (hasWildcard) continue;
       if (globalGranted.has(table)) continue;
@@ -178,6 +225,16 @@ export function findMissingServiceRoleGrants(
       if (globalRevoked.has(table)) continue;
       const key = `${f.name}::${table}`;
       if (allowlist.has(key)) continue;
+      const reason = exemptions.get(table);
+      if (reason !== undefined) {
+        if (reason.length > 0) continue;
+        violations.push({
+          file: f.name,
+          table,
+          note: 'есть маркер grants-lint, но не указана причина — допишите её после имени таблицы',
+        });
+        continue;
+      }
       violations.push({ file: f.name, table });
     }
   }
