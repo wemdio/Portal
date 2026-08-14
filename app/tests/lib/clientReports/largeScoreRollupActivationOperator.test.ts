@@ -124,7 +124,7 @@ function matrixPayload(params: unknown[]) {
     contract_verified: true,
     coverage_verified: true,
     cells,
-    mismatches: [],
+    mismatches: cells.slice(0, 0),
   };
 }
 
