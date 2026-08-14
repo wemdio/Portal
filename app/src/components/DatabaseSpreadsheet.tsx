@@ -19,6 +19,7 @@ import { readXlsxRows } from '@/lib/spreadsheet/parseCSV';
 import { backgroundSave, cancelBackgroundSave } from '@/lib/databases/backgroundSave';
 import { decompressStateFromBase64 } from '@/lib/databases/stateCompression';
 import { loadStateViaWorker } from '@/lib/databases/backgroundLoad';
+import { isArrowKey, resolveJumpTarget, type ArrowKey } from '@/lib/databases/gridNavigation';
 import { SIGNAL_ERROR_MARKER, isStackCellRefillable } from '@/lib/enrich/signalConstants';
 import { removeSignalErrorRows } from '@/lib/spreadsheet/removeSignalErrorRows';
 import { deduplicateRowsByKey } from '@/lib/spreadsheet/deduplicateRowsByKey';
@@ -1096,6 +1097,8 @@ const SpreadsheetCell = memo(function SpreadsheetCell({
 }: SpreadsheetCellProps) {
   return (
     <td
+      data-row={rowIndex}
+      data-col={colIndex}
       onMouseDown={(event) => onCellMouseDown(rowIndex, colIndex, event)}
       onDoubleClick={() => onCellDoubleClick(rowIndex, colIndex)}
       onMouseOver={() => onCellMouseOver(rowIndex, colIndex)}
@@ -2081,13 +2084,23 @@ export function DatabaseSpreadsheet() {
       let nextCol = col;
       let handled = false;
 
-      const isArrow = e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight';
+      const isArrow = isArrowKey(e.key);
 
       // В edit-mode ВСЕ стрелки (включая Shift+Arrow) уходят textarea-е:
       // cursor по тексту, selection текста внутри ячейки. Расширение
       // выделения по ячейкам работает когда edit-mode выключен (просто
       // выделение, без курсора в ячейке) — Excel-pattern.
       if (inCellInput && isArrow) return;
+
+      // Ctrl/Cmd+стрелка — прыжок к краю блока данных, с Shift — прыжок
+      // с расширением выделения (Excel). Логика вынесена в jumpToDataEdge:
+      // ей нужны фильтры и список видимых строк, которые объявлены сильно
+      // ниже по файлу и в deps этого listener'а не участвуют.
+      if (isMod && !e.altKey && isArrowKey(e.key)) {
+        e.preventDefault();
+        jumpToDataEdge(e.key, e.shiftKey);
+        return;
+      }
 
       if (e.key === 'ArrowUp') {
         nextRow = Math.max(0, row - 1);
@@ -2130,6 +2143,7 @@ export function DatabaseSpreadsheet() {
         // на предыдущей ячейке — оставлять textarea там, пока ушли стрелками,
         // некорректно).
         setEditingCell(null);
+        scrollCellIntoView(nextRow, nextCol);
       }
     };
 
@@ -3873,6 +3887,93 @@ export function DatabaseSpreadsheet() {
     if (!activeTab) return [];
     return [0, ...visibleRowIndices];
   }, [activeTab, visibleRowIndices]);
+
+  /**
+   * Подскроллить сетку к ячейке. Без этого навигация с клавиатуры уводит
+   * выделение за пределы экрана и выглядит как «ничего не произошло» —
+   * особенно на Ctrl+↓, который прыгает на десятки тысяч строк вниз.
+   *
+   * Две ветки: если <td> есть в DOM — меряем его реальную геометрию (на
+   * небольших таблицах строки разной высоты из-за переноса текста); если нет
+   * (виртуализованная таблица, строка вне окна рендера) — считаем позицию
+   * арифметикой по VIRTUAL_ROW_HEIGHT. Sticky-шапка и колонка с номерами
+   * строк перекрывают часть вьюпорта, поэтому вычитаем их размеры.
+   */
+  const scrollCellIntoView = useStableCallback((row: number, col: number) => {
+    const wrapper = tableWrapperRef.current;
+    if (!wrapper) return;
+    const wrapRect = wrapper.getBoundingClientRect();
+    const headerHeight = wrapper.querySelector('thead')?.getBoundingClientRect().height ?? 0;
+    const cellEl = wrapper.querySelector<HTMLElement>(`td[data-row="${row}"][data-col="${col}"]`);
+
+    if (cellEl) {
+      const cellRect = cellEl.getBoundingClientRect();
+      if (cellRect.top < wrapRect.top + headerHeight) {
+        wrapper.scrollTop -= wrapRect.top + headerHeight - cellRect.top;
+      } else if (cellRect.bottom > wrapRect.bottom) {
+        wrapper.scrollTop += cellRect.bottom - wrapRect.bottom;
+      }
+    } else {
+      const position = hasActiveFilters ? allRowIndices.indexOf(row) : row;
+      if (position >= 0) {
+        const top = position * VIRTUAL_ROW_HEIGHT;
+        const bottom = top + VIRTUAL_ROW_HEIGHT;
+        if (top < wrapper.scrollTop) {
+          wrapper.scrollTop = top;
+        } else if (bottom + headerHeight > wrapper.scrollTop + wrapper.clientHeight) {
+          wrapper.scrollTop = bottom + headerHeight - wrapper.clientHeight;
+        }
+      }
+    }
+
+    // Колонки не виртуализуются, так что горизонтальную геометрию даёт любая
+    // отрисованная ячейка этой колонки — даже если нужной строки в DOM нет.
+    const colEl = cellEl ?? wrapper.querySelector<HTMLElement>(`td[data-col="${col}"]`);
+    if (!colEl) return;
+    const rowHeaderWidth = wrapper.querySelector('tbody th')?.getBoundingClientRect().width ?? 0;
+    const colRect = colEl.getBoundingClientRect();
+    if (colRect.left < wrapRect.left + rowHeaderWidth) {
+      wrapper.scrollLeft -= wrapRect.left + rowHeaderWidth - colRect.left;
+    } else if (colRect.right > wrapRect.right) {
+      wrapper.scrollLeft += colRect.right - wrapRect.right;
+    }
+  });
+
+  /**
+   * Ctrl+стрелка / Ctrl+Shift+стрелка — прыжок к краю блока данных (правила
+   * в resolveJumpTarget). С Shift выделение тянется от якоря — так «выделить
+   * колонку до конца базы» это одно нажатие вместо удержания Shift+↓.
+   */
+  const jumpToDataEdge = useStableCallback((key: ArrowKey, extendSelection: boolean) => {
+    if (!activeTab) return;
+    const target = resolveJumpTarget(key, {
+      data: activeTab.data,
+      // При активных фильтрах ходим только по видимым строкам — иначе прыжок
+      // приземлял бы курсор в строку, скрытую фильтром.
+      rowSequence: hasActiveFilters ? allRowIndices : null,
+      from: activeCell,
+    });
+    if (!target) return;
+    const { row: nextRow, col: nextCol } = target;
+
+    if (extendSelection) {
+      setSelection({
+        startRow: Math.min(selectionAnchor.row, nextRow),
+        endRow: Math.max(selectionAnchor.row, nextRow),
+        startCol: Math.min(selectionAnchor.col, nextCol),
+        endCol: Math.max(selectionAnchor.col, nextCol),
+      });
+    } else {
+      setSelection({ startRow: nextRow, endRow: nextRow, startCol: nextCol, endCol: nextCol });
+      setSelectionAnchor({ row: nextRow, col: nextCol });
+    }
+    // Прыжок — это работа с ячейками, а не со строками/колонками целиком.
+    // Без сброса режима Delete после Ctrl+Shift+↓ удалил бы строки целиком.
+    setSelectionMode('cell');
+    setActiveCell({ row: nextRow, col: nextCol });
+    setEditingCell(null);
+    scrollCellIntoView(nextRow, nextCol);
+  });
 
   const isLargeTable = allRowIndices.length > VIRTUALIZATION_THRESHOLD;
   // Сообщаем scroll-обработчику, нужно ли обновлять scrollMetrics
