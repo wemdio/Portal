@@ -1,5 +1,6 @@
 import type { Email } from './types';
 import * as instantly from './client';
+import { isPersonName } from '@/lib/enrich/extractors/nameQuality';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
 
@@ -242,6 +243,113 @@ export function isProposalMessage(text: string): boolean {
   return text.length >= 200;
 }
 
+// Короткий outbound «кто отвечает за X?» часто получает простой ответ с
+// контактом ЛПР. Детерминированно отсекаем только этот узкий класс; все прочие
+// ответы отправляем в AI, чтобы не перечислять бесконечным allowlist'ом варианты
+// «свяжитесь со мной», «когда поговорим», «пришлите прайс» и другие CTA.
+const CONTACT_EMAIL_OR_USERNAME_PATTERN = /(?:[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|@[a-z0-9_]{5,})/gi;
+const CONTACT_PHONE_CANDIDATE_PATTERN = /\+?\d[\d\s().-]{6,}\d/g;
+const CONTACT_PHONE_LABEL_PATTERN = /(?:телефон|тел\.|номер|phone)/i;
+const CONTACT_DESCRIPTOR_PATTERN = /^(?:директор[а-яё]*|руководител[а-яё]*|начальник[а-яё]*|менеджер[а-яё]*|специалист[а-яё]*|координатор[а-яё]*|секретар[а-яё]*|телефон|тел\.|номер|e-?mail|почта|director|head|manager|specialist|coordinator|assistant|procurement)(?:\s+[А-ЯЁа-яёA-Za-z-]+){0,4}$/i;
+const GENERIC_FOOTER_CONTACT_PATTERN = /^\s*(?:позвоните\s+мне\s+по\s+любым\s+вопросам|feel\s+free\s+to\s+(?:call|contact|reach\s+out(?:\s+to)?)\s+me(?:\s+if\s+you\s+have\s+any\s+questions)?)[.!]?\s*$/i;
+
+function stripContactArtifacts(text: string): { text: string; hadArtifact: boolean } {
+  let hadArtifact = false;
+  const hasPhoneLabel = CONTACT_PHONE_LABEL_PATTERN.test(text);
+  const withoutArtifacts = text
+    .replace(CONTACT_EMAIL_OR_USERNAME_PATTERN, () => {
+      hadArtifact = true;
+      return ' ';
+    })
+    .replace(CONTACT_PHONE_CANDIDATE_PATTERN, (candidate) => {
+      const digitsCount = (candidate.match(/\d/g) ?? []).length;
+      const separatorsCount = (candidate.match(/[\s().-]/g) ?? []).length;
+      const isPhone =
+        (digitsCount >= 10 && (candidate.trimStart().startsWith('+') || separatorsCount >= 2)) ||
+        (hasPhoneLabel && digitsCount >= 7);
+      if (!isPhone) return candidate;
+      hadArtifact = true;
+      return ' ';
+    })
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,;:.])/g, '$1')
+    .trim()
+    .replace(/[,;:.]+$/, '')
+    .trim();
+  return { text: withoutArtifacts, hadArtifact };
+}
+
+function isLikelyContactName(raw: string): boolean {
+  const name = raw.trim().replace(/[.,;:]+$/, '').trim();
+  if (isPersonName(name)) return true;
+  if (!/^[А-ЯЁ][а-яё-]+$/i.test(name)) return false;
+
+  // Простые падежные формы имени после «обратитесь к …»: Ивану, Сергею,
+  // Дмитрия. Проверяем восстановленные формы тем же общим словарём имён,
+  // поэтому CTA вроде «Напишите КП» или `Call Tomorrow` сюда не попадут.
+  const nominativeCandidates = [
+    name.replace(/у$/i, ''),
+    name.replace(/ю$/i, 'й'),
+    name.replace(/а$/i, ''),
+    name.replace(/я$/i, 'й'),
+    name.replace(/ом$/i, ''),
+    name.replace(/ем$/i, 'й'),
+  ];
+  return nominativeCandidates.some((candidate) => candidate !== name && isPersonName(candidate));
+}
+
+function endsWithContactName(match: RegExpMatchArray | null): boolean {
+  return Boolean(match?.[1] && isLikelyContactName(match[1]));
+}
+
+function isPureNamedContactRouting(text: string): boolean {
+  if (isLikelyContactName(text)) return true;
+
+  const descriptorMatch = text.match(/^(.+?)\s*[,—-]\s*(.+)$/);
+  if (
+    descriptorMatch &&
+    isLikelyContactName(descriptorMatch[1]) &&
+    CONTACT_DESCRIPTOR_PATTERN.test(descriptorMatch[2].trim())
+  ) {
+    return true;
+  }
+
+  const roleMatch = text.match(
+    /^(?:(?:офис|отдел|компания|организация|при[её]мная)[^.!?\n]{0,60},\s*)?ответственн[а-яё]*\s+(.+)$/i,
+  );
+  if (endsWithContactName(roleMatch)) return true;
+
+  const responsibilityMatch = text.match(/^за\s+[^.!?\n]{1,60}\s+отвечает\s+(.+)$/i);
+  if (endsWithContactName(responsibilityMatch)) return true;
+
+  const selfResponsibilityMatch = text.match(/^(?:я\s+ответственн[а-яё]*|ответственн[а-яё]*\s+я|ответственн[а-яё]*|i\s+am\s+responsible)$/i);
+  if (selfResponsibilityMatch) return true;
+
+  const englishResponsibilityMatch =
+    text.match(/^the\s+right\s+person\s+is\s+(.+)$/i) ??
+    text.match(/^(.+?)\s+is\s+responsible$/i);
+  if (endsWithContactName(englishResponsibilityMatch)) return true;
+
+  const russianForwardMatch = text.match(
+    /^(?:не\s+[^,.;!?\n]{1,60},\s*)?(?:по\s+[^.!?\n]{1,60}\s+)?(?:обратитесь|обращайтесь|пишите|напишите|направьте|перешлите|переадресуйте|свяжитесь\s+с)\s+(?:к\s+|с\s+)?(.+)$/i,
+  );
+  if (endsWithContactName(russianForwardMatch)) return true;
+
+  const englishForwardMatch = text.match(
+    /^(?:(?:talk|write)\s+to|reach\s+out\s+to|contact)\s+(.+)$/i,
+  );
+  return endsWithContactName(englishForwardMatch);
+}
+
+function isPlainContactRoutingReply(text: string): boolean {
+  if (GENERIC_FOOTER_CONTACT_PATTERN.test(text)) return true;
+
+  const stripped = stripContactArtifacts(text);
+  if (!stripped.text) return stripped.hadArtifact;
+  if (stripped.hadArtifact && isLikelyContactName(stripped.text)) return true;
+  return isPureNamedContactRouting(stripped.text);
+}
+
 // ─── AI Classification ──────────────────────────────────────────────────────
 
 function buildSystemPrompt(briefText?: string | null, leadCriteria?: string | null): string {
@@ -250,12 +358,14 @@ function buildSystemPrompt(briefText?: string | null, leadCriteria?: string | nu
     : '';
 
   // Пер-проектное определение лида (projects.lead_criteria): команда проекта
-  // сама решает, что считать лидом. Нужно контакт-запросным кампаниям (шаг 1 —
-  // «кто отвечает за X?»): дефолтный критерий «видел развёрнутое предложение»
-  // структурно глушит их горячие ответы («можете меня набрать в 14-15»).
-  // Блок ставится ПЕРЕД стандартными критериями и объявлен приоритетным.
+  // сама решает, что считать лидом. Блок ставится ПЕРЕД стандартными критериями
+  // и объявлен приоритетным — например, проект может считать лидом даже простую
+  // передачу контакта ЛПР, которую дефолтные правила не квалифицируют.
   const criteriaSection = leadCriteria?.trim()
     ? `\n\nОПРЕДЕЛЕНИЕ ЛИДА ДЛЯ ЭТОГО ПРОЕКТА (задано командой проекта — при ЛЮБОМ противоречии со стандартными критериями ниже ПРИОРИТЕТ у этого определения):\n---\n${leadCriteria.trim().slice(0, 2000)}\n---`
+    : '';
+  const criteriaReminder = leadCriteria?.trim()
+    ? '\n\nФИНАЛЬНАЯ ПРОВЕРКА КАСТОМНОГО КРИТЕРИЯ: перед выставлением флагов ещё раз сверь ответ с определением проекта выше. При любом противоречии ПРИОРИТЕТ у кастомного определения.'
     : '';
 
   return `Ты — эксперт по квалификации лидов в B2B email-аутриче. Тебе дан контекст переписки: наше последнее исходящее письмо и ответ потенциального клиента.${briefSection}${criteriaSection}
@@ -263,13 +373,15 @@ function buildSystemPrompt(briefText?: string | null, leadCriteria?: string | nu
 ЗАДАЧА: определить категорию ответа.
 
 КАТЕГОРИИ:
-1. КВАЛИФИЦИРОВАННЫЙ ЛИД — клиент видел предложение И проявил интерес (уточняющие вопросы, запрос цен, предложение позвонить/встретиться, обсуждение условий). ИСКЛЮЧЕНИЕ: запрос цен/стоимости/КП/материалов — ЛИД и без увиденного предложения (правило ниже). Запрос разъяснения («что вы предлагаете?») — НЕ лид (правило ниже).
+1. КВАЛИФИЦИРОВАННЫЙ ЛИД — клиент прямо выразил готовность к коммерчески значимому следующему действию: звонку, встрече, демо, тесту, пилоту, покупке, заказу, обсуждению условий или другому конкретному CTA. Также лидом является конкретный коммерческий запрос: КП или коммерческое предложение; цену, стоимость, тарифы, расчёт или смету.
 2. МОЖНО ОБРАБОТАТЬ ВОЗРАЖЕНИЕ — клиент видел предложение, но выразил сомнение, возражение или мягкий отказ, который можно обработать аргументами (например: "дорого", "не сейчас", "у нас уже есть подрядчик", "не уверен что нам это нужно"). НЕ прямой категоричный отказ.
-3. НЕ ЛИД — автоответ, отписка, прямой отказ, ответ на запрос контакта без интереса к решению (просто контактные данные), нейтральный ответ
+3. НЕ ЛИД — автоответ, отписка, прямой отказ, простая передача контакта, общий запрос ознакомительной информации без коммерческого намерения или нейтральный ответ.
 
-КРИТЕРИИ ЛИДА (все должны совпасть):
-1. Клиент ВИДЕЛ наше развёрнутое предложение (не просто запрос контакта) — ИЛИ клиент запросил цены/материалы (тогда предложение могло ещё не уйти: лид всё равно, см. исключение ниже)
-2. Клиент проявил ИНТЕРЕС: уточняющие вопросы, запрос цен, предложение позвонить/встретиться, обсуждение условий
+КРИТЕРИЙ ЛИДА:
+- В самом ответе есть прямое коммерческое намерение или готовность совершить конкретное целевое действие.
+- Наличие нашего исходящего письма или развёрнутого предложения НЕ является обязательным. Если ответ сам однозначен — например, «Давайте завтра проведём встречу», «Можете меня набрать в 14:00», «Пришлите КП» или «Сколько стоит?» — ставь is_lead=true даже при proposal_seen=false.
+- proposal_seen описывает только наличие подтверждённого контекста оффера. proposal_seen=false НЕ отменяет лид, если прямое намерение видно из самого ответа.
+- Для однозначного лида ставь needs_review=false.
 
 КРИТЕРИИ ВОЗРАЖЕНИЯ:
 - Клиент видел предложение (proposal_seen=true)
@@ -280,20 +392,32 @@ function buildSystemPrompt(briefText?: string | null, leadCriteria?: string | nu
 - Наше последнее исходящее письмо содержит развёрнутое предложение (не просто запрос контакта)
 - ИЛИ в ответе клиента ЦИТИРУЕТСЯ наше предложение (текст после ">" или ниже строки "On ... wrote:" / даты отправки)
 - ИЛИ клиент ссылается на содержание предложения (цены, услуги, условия)
-- Если клиент спрашивает "сколько стоит?", "пришлите КП/презентацию/материалы", запрашивает цены, условия, сроки, примеры/кейсы — он проявил ИНТЕРЕС, это ЛИД, даже если развёрнутое предложение ещё НЕ отправлено: ставь is_lead=true (материалы вышлет специалист). Запрос материалов в ответ на запрос контакта — тоже ЛИД, proposal_seen=false здесь НЕ отменяет лид.
-- НО: запрос РАЗЪЯСНЕНИЯ — это НЕ запрос материалов. Если клиент спрашивает "что вы предлагаете?", "о чём речь?", "что это за решение?", "расскажите, что вы делаете", "в чём суть?" — он НЕ ПОНЯЛ наше предложение. Это не интерес, а просьба объяснить заново: ставь is_lead=false, needs_review=true (клиенту лично ответит специалист). Различай интенты: запрос материалов — клиент ПОНЯЛ оффер и просит конкретику (цену, КП, кейсы, презентацию решения); запрос разъяснения — клиент НЕ ПОНЯЛ, что вообще предлагается.
 - Запрос контакта ответственного — это НЕ предложение. Но если после запроса контакта было отправлено предложение — смотри на последнее письмо
+
+КОНКРЕТНЫЙ КОММЕРЧЕСКИЙ ЗАПРОС — ЭТО ЛИД:
+- Запрос КП или коммерческого предложения.
+- Запрос цены, стоимости, тарифов, расчёта или сметы.
+- Запрос конкретных условий сделки вместе с намерением купить, протестировать, встретиться или созвониться.
+- Эти сигналы достаточны сами по себе: исходящее письмо могло не восстановиться в API.
+
+ОБЩЕЕ ЛЮБОПЫТСТВО — НЕ ЛИД:
+- «пришлите предложение» без слова «коммерческое», без расчёта/цены и без конкретного следующего шага — это лишь просьба ознакомиться.
+- «пришлите информацию/материалы/презентацию», запрос примеров или кейсов сами по себе НЕ являются лидом: ставь is_lead=false, needs_review=false.
+- «расскажите подробнее» без конкретного следующего шага — ставь is_lead=false, needs_review=true.
+- «интересно» без конкретного следующего шага — неоднозначный интерес: ставь is_lead=false, needs_review=true.
+- Запрос РАЗЪЯСНЕНИЯ («что вы предлагаете?», «о чём речь?», «что это за решение?», «в чём суть?») означает, что человек ещё не понял оффер: ставь is_lead=false, needs_review=true.
 
 НЕ является лидом и НЕ возражение:
 - Автоответ/отпуск
 - Отписка/категоричный отказ ("нас это не интересует", "не пишите больше")
 - Пересылка контакта без ознакомления с предложением
-- Ответ ТОЛЬКО на запрос контакта (без предложения) с просто контактными данными
+- Ответ на запрос контакта без интереса к решению (просто контактные данные)
 
 ВАЖНО — НЕ путай дежурные контакты с интересом:
 - Телефон/адрес/сайт в подписи или в шаблонном подтверждении ("Спасибо за сообщение", "Ваше письмо получено", "свяжемся / предоставим ответ", "звоните по любым вопросам") — это АВТООТВЕТ-подтверждение получения, а НЕ интерес. Само по себе это is_lead=false, proposal_seen=false.
-- "Предложение позвонить/встретиться" считается сигналом интереса ТОЛЬКО если клиент явно зовёт обсудить НАШЕ предложение ("давайте созвонимся по вашему КП", "наберите по поводу внедрения"), а не просто оставил дежурный контакт в подписи.
-- Вежливость ("спасибо", "благодарю за информацию") без вопросов, запроса цен или обсуждения условий — НЕ лид.
+- Явная личная просьба позвонить или встретиться ("наберите меня завтра", "давайте созвонимся") — это лид даже без найденного исходящего письма. Но телефон в подписи или дежурное "звоните по любым вопросам" — не лид.
+- Вежливость ("спасибо", "благодарю за информацию") без прямого CTA или конкретного коммерческого запроса — НЕ лид.
+${criteriaReminder}
 
 ФОРМАТ ОТВЕТА (только валидный JSON, без markdown):
 {
@@ -323,8 +447,8 @@ export interface ClassifyOptions {
   /**
    * Пер-проектное определение лида (projects.lead_criteria). Непусто →
    * в промпт вставляется приоритетный блок критериев, а детерминированный
-   * ранний выход «ответ на запрос контакта = не лид» отключается (иначе он
-   * убил бы кастомное определение до вызова ИИ).
+   * ранний выход для простой передачи контакта отключается (иначе он мог бы
+   * убить кастомное определение до вызова ИИ).
    */
   leadCriteria?: string | null;
   /**
@@ -743,19 +867,25 @@ export async function qualifyReply(
     };
   }
 
-  // При кастомном определении лида (projects.lead_criteria) ранний выход
-  // «ответ на запрос контакта = не лид» отключён: он зашивает дефолтный
-  // критерий proposal_seen и убил бы кастом до вызова ИИ (кейс ADE 13.07:
-  // «можете меня набрать в 14-15» на контакт-запросе Ritso).
+  // После contact-only opener детерминированно отсекаем только явно простую
+  // маршрутизацию на ЛПР. Любой другой содержательный ответ идёт в AI: исходящий
+  // оффер мог не сохраниться, а сам ответ уже достаточен для lead/review-решения.
+  // Кастомный критерий полностью отключает этот guard, потому что проект вправе
+  // считать лидом даже простую передачу контакта.
   if (ctx.lastOutbound && !aiOptions.leadCriteria?.trim()) {
     const outboundText = getBodyText(ctx.lastOutbound.body);
     const replyHasQuotes = replyText.includes('>') || /(?:On|В|от)\s+.+(?:wrote|написал|:$)/im.test(replyText);
-    if (isContactRequestOnly(outboundText) && !isProposalMessage(outboundText) && !replyHasQuotes) {
+    if (
+      isContactRequestOnly(outboundText) &&
+      !isProposalMessage(outboundText) &&
+      !replyHasQuotes &&
+      isPlainContactRoutingReply(replyText)
+    ) {
       return {
         isLead: false,
         proposalSeen: false,
         interestSignals: [],
-        reason: 'Ответ на запрос контакта — клиент не видел предложение',
+        reason: 'Ответ на запрос контакта без коммерческого интереса',
         confidence: 0.9,
         needsReview: false,
         objectionHandleable: false,

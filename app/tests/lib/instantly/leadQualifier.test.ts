@@ -248,25 +248,7 @@ describe('qualifyReply — пер-проектное определение ли
     body: { text: 'Можете меня набрать в 14.00-15.00.' },
     timestamp_email: '2026-07-13T09:00:00Z',
   } as Email;
-  const ctx: ThreadContext = {
-    replyEmail: callInviteReply,
-    threadEmails: [outboundContactRequest, callInviteReply],
-    lastOutbound: outboundContactRequest,
-  };
-
-  it('без кастомных критериев ответ на запрос контакта отсекается детерминированно, БЕЗ вызова ИИ', async () => {
-    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
-    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
-      apiKey: 'test-key',
-      briefText: '',
-      prefetchedContext: ctx,
-    });
-    expect(res.isLead).toBe(false);
-    expect(res.reason).toContain('запрос контакта');
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('с кастомными критериями ранний выход отключён, промпт содержит приоритетный блок, вердикт ИИ проходит', async () => {
+  function mockAiResult(overrides: Record<string, unknown> = {}) {
     fetchMock.mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -276,23 +258,190 @@ describe('qualifyReply — пер-проектное определение ли
             content: JSON.stringify({
               is_lead: true,
               proposal_seen: false,
-              interest_signals: ['предложил созвониться'],
-              reason: 'Просит звонок в конкретное окно',
+              interest_signals: ['прямой CTA'],
+              reason: 'Клиент предложил конкретный следующий шаг',
               confidence: 0.9,
               needs_review: false,
               objection_handleable: false,
               objection_draft: null,
+              ...overrides,
             }),
           },
         }],
       }),
+    });
+  }
+
+  function contextWithReply(text: string, lastOutbound: Email | null = outboundContactRequest): ThreadContext {
+    const reply = {
+      ...callInviteReply,
+      body: { text },
+    } as Email;
+    return {
+      replyEmail: reply,
+      threadEmails: lastOutbound ? [lastOutbound, reply] : [reply],
+      lastOutbound,
+    };
+  }
+
+  it.each([
+    'Можете меня набрать в 14.00-15.00.',
+    'Давайте завтра проведём встречу.',
+    'Пришлите КП',
+    'Напишите КП',
+    'Пришлите, пожалуйста, КП на этот адрес.',
+    'Пришлите КП, ivan@example.com',
+    'Позвоните +7 999 123-45-67',
+    'Свяжитесь со мной завтра после 15:00.',
+    'Когда можем поговорить?',
+    'Можно пообщаться на этой неделе?',
+    'Пришлите, пожалуйста, прайс.',
+    'Во сколько обойдётся внедрение?',
+    'Я ответственный. Какие у вас тарифы?',
+    'Я ответственный. Позвоните завтра.',
+    'Ответственный Иван просит прислать коммерческое предложение.',
+    'Я ответственный. Не готов сегодня созваниваться но пришлите КП.',
+    'Я ответственный, позвоните завтра.',
+    'Я ответственный. Сколько у вас стоит?',
+    'I am responsible. What is the price?',
+    'Ответственный я. Звоните завтра.',
+    'Я ответственный, согласен на встречу.',
+    'Я ответственный, покажите демо.',
+    'Я ответственный, запустим пилот.',
+    'Я ответственный, оформляем заказ.',
+    'John is responsible. Call tomorrow.',
+    'John is responsible. We can meet Tuesday.',
+    'John is responsible. Book a demo.',
+    'John is responsible. We need a quote.',
+    'Send Quote',
+    'Book Demo',
+    'Call Tomorrow',
+    'Заказ 1234567890 подтверждаем.',
+    'Я ответственный. Выставляйте счёт.',
+    'Я ответственный, готовы начать.',
+    'Я ответственный: присылайте договор.',
+  ])('без кастомных критериев прямой CTA после запроса контакта доходит до ИИ: %s', async (replyText) => {
+    mockAiResult();
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(replyText),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.isLead).toBe(true);
+  });
+
+  it.each([
+    'Ответственный я, мне интересно.',
+    'Ответственный я. Мне хотелось бы узнать подробнее.',
+    'Я ответственный. Что вы предлагаете?',
+    'John is responsible. Interested.',
+    'Интересно.',
+  ])('неоднозначный интерес после запроса контакта доходит до ИИ и может уйти на проверку: %s', async (replyText) => {
+    mockAiResult({
+      is_lead: false,
+      interest_signals: [],
+      reason: 'Интерес есть, но конкретного следующего шага нет',
+      needs_review: true,
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(replyText),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(true);
+  });
+
+  it.each([
+    'Ответственный Иван Петров, ivan@example.com.',
+    'За закупки отвечает Иван Куприянов, ivan@example.com.',
+    'По оценке лицензий обращайтесь к Ивану: ivan@example.com.',
+    'Офис на Набережной, ответственный Иван: ivan@example.com.',
+    'Не звоните мне, обратитесь к Ивану: ivan@example.com.',
+    'ivan@example.com',
+    'Иван, +7 999 123-45-67',
+    '@ivan_petrov',
+    'Иван Петров',
+    'Иван Петров, директор по закупкам',
+    'Иван, телефон 123-45-67',
+    'ИВАН ПЕТРОВ',
+    'John Smith, Procurement Director',
+    'The right person is John Smith',
+    'Talk to John Smith',
+    'За КП отвечает Иван',
+    'Позвоните мне по любым вопросам.',
+    'Feel free to contact me if you have any questions.',
+  ])('просто переданный контакт после contact-only opener по-прежнему не вызывает ИИ: %s', async (replyText) => {
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(replyText),
+    });
+
+    expect(res.isLead).toBe(false);
+    expect(res.reason).toContain('запрос контакта');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'Пришлите предложение.',
+    'Пришлите информацию.',
+    'Пришлите материалы.',
+    'Пришлите презентацию.',
+    'Я ответственный. Пришлите материалы.',
+  ])('общий ознакомительный запрос доходит до семантической проверки, но остаётся не лидом: %s', async (replyText) => {
+    mockAiResult({
+      is_lead: false,
+      interest_signals: [],
+      reason: 'Запрошены только ознакомительные материалы',
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(replyText),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it('прямой CTA без восстановленного исходящего письма доходит до ИИ и остаётся лидом', async () => {
+    mockAiResult();
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply('Да, давайте созвонимся завтра.', null),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.messages[1].content).toContain('(не найдено)');
+    expect(body.messages[1].content).toContain('давайте созвонимся завтра');
+    expect(body.messages[0].content).toContain('НЕ является обязательным');
+    expect(res.isLead).toBe(true);
+  });
+
+  it('с кастомными критериями ранний выход отключён, промпт содержит приоритетный блок, вердикт ИИ проходит', async () => {
+    mockAiResult({
+      interest_signals: ['предложил созвониться'],
+      reason: 'Просит звонок в конкретное окно',
     });
     const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
     const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
       apiKey: 'test-key',
       briefText: '',
       leadCriteria: 'Контакт ЛПР или предложение созвониться = лид. Развёрнутое предложение не требуется.',
-      prefetchedContext: ctx,
+      prefetchedContext: contextWithReply('Ответственный Иван Петров, ivan@example.com.'),
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);

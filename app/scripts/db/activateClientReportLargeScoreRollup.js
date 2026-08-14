@@ -5,6 +5,9 @@
  * No flags ever mutate; --apply is required for activation or rollback.
  */
 const { Client } = require('pg');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const {
   loadEnvFiles,
   resolveDbUrl,
@@ -26,6 +29,29 @@ const SUMMARY_COUNT_FIELDS = Object.freeze([
   'unattributed_confirmed_contacts',
 ]);
 const SCORE_FILTERS = Object.freeze([null, 'A', 'B', 'C']);
+
+function createProgressReporter({
+  filePath = process.env.CLIENT_REPORT_ROLLUP_PROGRESS_FILE || null,
+  tmpDir = os.tmpdir(),
+  pid = process.pid,
+  now = () => new Date(),
+  appendFileSync = fs.appendFileSync,
+  writeLine = console.log,
+} = {}) {
+  const progressPath = filePath || path.join(
+    tmpDir,
+    `client-report-large-score-rollup-activation-${pid}-${now().toISOString().replace(/[:.]/g, '-')}.jsonl`,
+  );
+  return (event) => {
+    const line = JSON.stringify(event);
+    appendFileSync(progressPath, `${line}\n`, {
+      encoding: 'utf8',
+      flag: 'a',
+      mode: 0o600,
+    });
+    writeLine('[client-report-rollup-activation:progress]', line);
+  };
+}
 
 function assertUuid(value, label) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''))) {
@@ -249,6 +275,136 @@ function assertSummaryParity(legacy, shadow, context = '') {
   }
 }
 
+function matrixWindowRows(windows) {
+  return windows.map((window, index) => ({
+    key: `window_${index + 1}`,
+    labels: [...window.labels],
+    from_utc: window.fromUtc,
+    to_utc: window.toUtc,
+  }));
+}
+
+function matrixContextKey({ window_key: windowKey, score_code: scoreCode, campaign_id: campaignId }) {
+  return JSON.stringify([
+    String(windowKey || ''),
+    scoreCode === null || scoreCode === undefined ? null : String(scoreCode),
+    campaignId === null || campaignId === undefined ? null : String(campaignId),
+  ]);
+}
+
+function mismatchContext(cell) {
+  if (!cell || typeof cell !== 'object') return null;
+  return {
+    window_key: String(cell.window_key || ''),
+    labels: Array.isArray(cell.labels) ? cell.labels.map(String) : [],
+    from_utc: cell.from_utc == null ? null : instant(cell.from_utc),
+    to_utc: cell.to_utc == null ? null : instant(cell.to_utc),
+    score_code: cell.score_code == null ? null : String(cell.score_code),
+    campaign_id: cell.campaign_id == null ? null : String(cell.campaign_id),
+    mismatch_context: cell.mismatch_context || null,
+  };
+}
+
+function assertMatrixParity(payload, { windows, allowedCampaignIds }) {
+  let result = payload;
+  if (typeof result === 'string') {
+    try {
+      result = JSON.parse(result);
+    } catch {
+      throw new Error('Parity matrix returned invalid JSON');
+    }
+  }
+  if (!result || typeof result !== 'object') {
+    throw new Error('Parity matrix result is required');
+  }
+  if (result.contract_verified !== true) {
+    throw new Error('Parity matrix function contract drift was not verified');
+  }
+  if (result.coverage_verified !== true) {
+    throw new Error('Parity matrix window/campaign coverage was not verified');
+  }
+  if (Number(result.source_scans) !== 1) {
+    throw new Error('Parity matrix must prepare the live source in exactly one scan');
+  }
+  if (!Array.isArray(result.cells) || !Array.isArray(result.mismatches)) {
+    throw new Error('Parity matrix cells and mismatches are required');
+  }
+
+  const expected = new Map();
+  for (const window of windows) {
+    for (const scoreCode of SCORE_FILTERS) {
+      for (const campaignId of [null, ...allowedCampaignIds]) {
+        const context = {
+          window_key: window.key,
+          labels: window.labels,
+          from_utc: window.from_utc,
+          to_utc: window.to_utc,
+          score_code: scoreCode,
+          campaign_id: campaignId,
+        };
+        expected.set(matrixContextKey(context), context);
+      }
+    }
+  }
+  const checkedCells = Number(result.checked_cells);
+  if (!Number.isSafeInteger(checkedCells) || checkedCells !== expected.size) {
+    throw new Error(
+      `Parity matrix cardinality mismatch: expected=${expected.size}, checked=${String(result.checked_cells)}`,
+    );
+  }
+  if (result.cells.length !== expected.size) {
+    throw new Error(
+      `Parity matrix cell count mismatch: expected=${expected.size}, actual=${result.cells.length}`,
+    );
+  }
+
+  const seen = new Set();
+  let firstMismatch = result.mismatches[0] || null;
+  for (const rawCell of result.cells) {
+    if (!rawCell || typeof rawCell !== 'object') {
+      throw new Error('Parity matrix contains an invalid cell');
+    }
+    const key = matrixContextKey(rawCell);
+    const expectedContext = expected.get(key);
+    if (!expectedContext || seen.has(key)) {
+      throw new Error(`Parity matrix contains an unexpected or duplicate context: ${key}`);
+    }
+    seen.add(key);
+    const actualContext = mismatchContext(rawCell);
+    if (
+      JSON.stringify(actualContext.labels) !== JSON.stringify(expectedContext.labels)
+      || actualContext.from_utc !== expectedContext.from_utc
+      || actualContext.to_utc !== expectedContext.to_utc
+    ) {
+      throw new Error(`Parity matrix context metadata mismatch: ${key}`);
+    }
+    if (rawCell.matched !== true && !firstMismatch) firstMismatch = rawCell;
+  }
+  if (seen.size !== expected.size) {
+    throw new Error(
+      `Parity matrix context coverage mismatch: expected=${expected.size}, actual=${seen.size}`,
+    );
+  }
+  if (result.mismatches.length > 0 || firstMismatch) {
+    const context = mismatchContext(firstMismatch);
+    const labels = context && context.labels.length > 0
+      ? context.labels.join('+')
+      : context && context.window_key;
+    const error = new Error(
+      `Client report parity mismatch (window=${labels || 'unknown'}, score=${context && context.score_code ? context.score_code : 'all'}, campaign=${context && context.campaign_id ? context.campaign_id : 'all'})`,
+    );
+    error.parityContext = context;
+    throw error;
+  }
+  return {
+    comparisons: expected.size,
+    sourceScans: 1,
+    contractVerified: true,
+    coverageVerified: true,
+    windows,
+  };
+}
+
 async function executeActivation({ mode, action, runId, repository }) {
   if (!repository || typeof repository.inspect !== 'function') {
     throw new Error('Activation repository is required');
@@ -266,7 +422,9 @@ async function executeActivation({ mode, action, runId, repository }) {
     }
     const inspection = await repository.inspect(runId);
     try {
-      const parity = await repository.verifyParity(runId);
+      const parity = await repository.verifyParity(runId, {
+        readOnly: mode === 'dry-run',
+      });
       if (mode === 'dry-run') {
         await repository.rollbackOpenParity();
         return { inspection, parity };
@@ -283,7 +441,7 @@ async function executeActivation({ mode, action, runId, repository }) {
 }
 
 class PostgresRollupActivationRepository {
-  constructor({ client, clientUserId, allowedCampaignIds }) {
+  constructor({ client, clientUserId, allowedCampaignIds, progress = null }) {
     if (!client || typeof client.query !== 'function') {
       throw new Error('A connected Postgres client is required');
     }
@@ -293,8 +451,37 @@ class PostgresRollupActivationRepository {
       && allowedCampaignIds.length > 0
       ? normalizeAllowedCampaignIds(allowedCampaignIds)
       : [];
+    if (progress !== null && typeof progress !== 'function') {
+      throw new Error('Progress reporter must be a function');
+    }
+    this.progress = progress;
     this.parityTransactionRunId = null;
     this.parityVerified = false;
+    this.parityReadOnly = false;
+    this.parityStage = null;
+  }
+
+  reportProgress(stage, details = {}) {
+    if (!this.progress) return;
+    this.progress({
+      stage,
+      client_user_id: this.clientUserId,
+      run_id: this.parityTransactionRunId,
+      at: new Date().toISOString(),
+      ...details,
+    });
+  }
+
+  async acquireClientLock() {
+    const { rows } = await this.client.query(
+      `SELECT pg_try_advisory_xact_lock(
+         hashtextextended('client-report-large-score-rollup:' || $1::text, 0)
+       ) AS acquired`,
+      [this.clientUserId],
+    );
+    if (rows.length !== 1 || rows[0].acquired !== true) {
+      throw new Error('Another client report rollup activation operation is running');
+    }
   }
 
   async inspect(runId) {
@@ -335,7 +522,7 @@ class PostgresRollupActivationRepository {
     return rows[0];
   }
 
-  async verifyParity(runId) {
+  async verifyParity(runId, { readOnly = false } = {}) {
     if (this.allowedCampaignIds.length === 0) {
       throw new Error('Allowed campaign ids are required for parity verification');
     }
@@ -343,14 +530,19 @@ class PostgresRollupActivationRepository {
     if (this.parityTransactionRunId) {
       throw new Error('A parity transaction is already open');
     }
-    await this.client.query(
-      'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ',
-    );
+    await this.client.query(readOnly
+      ? 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY'
+      : 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ');
     this.parityTransactionRunId = normalizedRunId;
     this.parityVerified = false;
+    this.parityReadOnly = readOnly;
+    this.parityStage = 'client_lock';
     try {
-      await this.client.query("SET LOCAL statement_timeout = '120s'");
+      await this.acquireClientLock();
+      this.reportProgress('transaction_started', { read_only: readOnly });
+      await this.client.query("SET LOCAL statement_timeout = '900s'");
       await this.client.query("SET LOCAL lock_timeout = '30s'");
+      this.parityStage = 'bounds';
       const boundsResult = await this.client.query(
         `SELECT
            (min(bucket.cohort_day)::timestamp
@@ -384,66 +576,90 @@ class PostgresRollupActivationRepository {
         coverageToUtc: toUtc,
         asOfUtc,
       });
-
-      let comparisons = 0;
-      const campaignFilters = [null, ...this.allowedCampaignIds];
-      for (const window of windows) {
-        for (const scoreCode of SCORE_FILTERS) {
-          for (const campaignId of campaignFilters) {
-          const sharedParams = [
-            this.clientUserId,
-            window.fromUtc,
-            window.toUtc,
-            this.allowedCampaignIds,
-            scoreCode,
-            campaignId,
-          ];
-          const legacy = await this.client.query(
-            `SELECT * FROM public.client_report_pipeline_summary(
-               $1::uuid, $2::timestamptz, $3::timestamptz,
-               $4::text[], $5::text, $6::text
-             )`,
-            sharedParams,
-          );
-          const shadow = await this.client.query(
-            `SELECT * FROM public.client_report_pipeline_summary_shadow(
-               $1::uuid, $2::uuid, $3::timestamptz, $4::timestamptz,
-               $5::text[], $6::text, $7::text
-             )`,
-            [this.clientUserId, normalizedRunId, ...sharedParams.slice(1)],
-          );
-          if (legacy.rows.length !== 1 || shadow.rows.length !== 1) {
-            throw new Error('Report parity query returned an invalid row count');
-          }
-          assertSummaryParity(
-            legacy.rows[0],
-            shadow.rows[0],
-            `windows=${window.labels.join('+')}, score=${scoreCode || 'all'}, campaign=${campaignId || 'all'}`,
-          );
-          comparisons += 1;
-          }
-        }
+      const matrixWindows = matrixWindowRows(windows);
+      const expectedCells = matrixWindows.length
+        * SCORE_FILTERS.length
+        * (this.allowedCampaignIds.length + 1);
+      this.reportProgress('bounds_loaded', {
+        coverage_from_utc: fromUtc,
+        coverage_to_utc: toUtc,
+        as_of_utc: asOfUtc,
+        windows: matrixWindows.length,
+        expected_cells: expectedCells,
+      });
+      this.parityStage = 'matrix_compare';
+      this.reportProgress('matrix_started', {
+        expected_cells: expectedCells,
+        windows: matrixWindows,
+        score_codes: SCORE_FILTERS,
+        campaign_ids: [null, ...this.allowedCampaignIds],
+      });
+      const matrixResult = await this.client.query(
+        `SELECT public.verify_client_report_large_score_rollup_matrix(
+           $1::uuid, $2::uuid, $3::jsonb, $4::text[]
+         ) AS result`,
+        [
+          this.clientUserId,
+          normalizedRunId,
+          JSON.stringify(matrixWindows),
+          this.allowedCampaignIds,
+        ],
+      );
+      if (matrixResult.rows.length !== 1) {
+        throw new Error('Parity matrix RPC returned an invalid row count');
       }
-      // The rollup stores the historical cache classification frozen at build
-      // time. Comparing it with today's legacy calculation here detects cache
-      // drift; activation remains in this same snapshot/transaction or fails.
+      const parity = assertMatrixParity(matrixResult.rows[0].result, {
+        windows: matrixWindows,
+        allowedCampaignIds: this.allowedCampaignIds,
+      });
+      this.reportProgress('matrix_verified', {
+        checked_cells: parity.comparisons,
+        source_scans: parity.sourceScans,
+        contract_verified: parity.contractVerified,
+        coverage_verified: parity.coverageVerified,
+      });
       this.parityVerified = true;
-      return { windows, comparisons };
+      this.parityStage = 'verified';
+      return parity;
     } catch (error) {
       await this.client.query('ROLLBACK').catch(() => {});
+      const stage = this.parityStage || 'unknown';
+      const context = error && error.parityContext
+        ? error.parityContext
+        : null;
       this.parityTransactionRunId = null;
       this.parityVerified = false;
-      throw error;
+      this.parityReadOnly = false;
+      this.parityStage = null;
+      try {
+        this.reportProgress('failed', {
+          run_id: normalizedRunId,
+          failed_stage: stage,
+          context,
+          error: error && error.message ? error.message : String(error),
+        });
+      } catch {
+        // Preserve the operation error after the transaction is safely closed.
+      }
+      const message = error && error.message ? error.message : String(error);
+      if (message.includes(`stage=${stage}`)) throw error;
+      const wrapped = new Error(`${message} (stage=${stage})`);
+      if (context) wrapped.parityContext = context;
+      throw wrapped;
     }
   }
 
   async rollbackOpenParity() {
     if (!this.parityTransactionRunId) return;
+    const runId = this.parityTransactionRunId;
     try {
       await this.client.query('ROLLBACK');
     } finally {
       this.parityTransactionRunId = null;
       this.parityVerified = false;
+      this.parityReadOnly = false;
+      this.parityStage = null;
+      this.reportProgress('rolled_back', { run_id: runId });
     }
   }
 
@@ -458,6 +674,11 @@ class PostgresRollupActivationRepository {
       );
     }
     try {
+      if (this.parityReadOnly) {
+        throw new Error('Activation cannot use a read-only parity transaction');
+      }
+      this.parityStage = 'activation';
+      this.reportProgress('activation_started');
       const { rows } = await this.client.query(
         `SELECT public.activate_client_report_large_score_rollup(
            $1::uuid, $2::uuid
@@ -467,26 +688,56 @@ class PostgresRollupActivationRepository {
       if (rows.length !== 1 || rows[0].rollup_run_id !== normalizedRunId) {
         throw new Error('Activation returned an invalid result');
       }
+      this.parityStage = 'commit';
+      this.reportProgress('commit_started');
       await this.client.query('COMMIT');
       this.parityTransactionRunId = null;
       this.parityVerified = false;
+      this.parityReadOnly = false;
+      this.parityStage = null;
+      try {
+        this.reportProgress('committed', {
+          run_id: normalizedRunId,
+          activated_run_id: normalizedRunId,
+        });
+      } catch {
+        // Commit is already durable; reporting must not create a false failure.
+      }
       return rows[0].rollup_run_id;
     } catch (error) {
       await this.client.query('ROLLBACK').catch(() => {});
+      const stage = this.parityStage || 'activation';
       this.parityTransactionRunId = null;
       this.parityVerified = false;
+      this.parityReadOnly = false;
+      this.parityStage = null;
+      try {
+        this.reportProgress('failed', {
+          run_id: normalizedRunId,
+          failed_stage: stage,
+          error: error && error.message ? error.message : String(error),
+        });
+      } catch {}
       throw error;
     }
   }
 
   async rollback() {
-    const { rows } = await this.client.query(
-      `SELECT public.deactivate_client_report_large_score_rollup(
-         $1::uuid
-       )::text AS rollup_run_id`,
-      [this.clientUserId],
-    );
-    return rows[0] ? rows[0].rollup_run_id : null;
+    await this.client.query('BEGIN TRANSACTION');
+    try {
+      await this.acquireClientLock();
+      const { rows } = await this.client.query(
+        `SELECT public.deactivate_client_report_large_score_rollup(
+           $1::uuid
+         )::text AS rollup_run_id`,
+        [this.clientUserId],
+      );
+      await this.client.query('COMMIT');
+      return rows[0] ? rows[0].rollup_run_id : null;
+    } catch (error) {
+      await this.client.query('ROLLBACK').catch(() => {});
+      throw error;
+    }
   }
 }
 
@@ -516,6 +767,7 @@ async function main(argv = process.argv.slice(2)) {
       client,
       clientUserId,
       allowedCampaignIds,
+      progress: createProgressReporter(),
     });
     const result = await executeActivation({ ...options, repository });
     console.log('[client-report-rollup-activation]', JSON.stringify(result));
@@ -541,6 +793,8 @@ module.exports = {
   canonicalizeSummary,
   assertSummaryParity,
   buildParityWindows,
+  assertMatrixParity,
+  createProgressReporter,
   executeActivation,
   PostgresRollupActivationRepository,
   main,
