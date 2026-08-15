@@ -158,6 +158,9 @@ function systemPromptOf(callIndex = 0): string {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // График пауз ретрая pdl тесты укорачивают через env — чтобы утечка настройки
+  // не влияла на соседние кейсы, сбрасываем на дефолт перед каждым.
+  delete process.env.HE_PDL_READ_RETRY_DELAYS_MS;
 });
 
 /* ─────────────────────────── Схема плана ─────────────────────────── */
@@ -821,7 +824,54 @@ describe('dispatch — pdl (прямое чтение pdl_companies)', () => {
     expect(harvest?.row_count).toBe(120);
   });
 
+  it('чтение каталога повторяется с РАСТУЩИМИ паузами, пока не выйдут попытки', async () => {
+    // Холодный срез pdl (19.5M строк) читается с диска десятки секунд, шлюз
+    // отдаёт 504 раньше — но неудавшаяся попытка прогревает кэш. Поэтому пауз
+    // несколько и они растут; на единственной трёхсекундной сборка Franchise
+    // Brands 12.08 легла (pdl упал, база вышла на 7 строк).
+    process.env.HE_PDL_READ_RETRY_DELAYS_MS = '0,0,0';
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
+      tasks: [
+        {
+          source: 'pdl',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: { source: 'pdl', rationale: 'r', pdl_filters: { industries: ['software'] } },
+        },
+      ],
+    };
+    let calls = 0;
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT_US],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        pdl_companies: [
+          { id: '1', name: 'Acme Software', website: 'acme.com', industry: 'software', country: 'united states' },
+        ],
+      },
+      rpcHandlers: {
+        search_pdl_companies: (params, db) => {
+          calls += 1;
+          // Три подряд отказа «холодного» чтения, успех — только с четвёртой.
+          if (calls <= 3) return { data: null, error: { message: 'canceling statement due to statement timeout' } };
+          return pdlRpcHandler(params, db);
+        },
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx('us'));
+    expect((res.result as { rows: number }).rows).toBe(1);
+    // 4 попытки = 3 паузы из графика + первая без паузы.
+    expect(calls).toBe(4);
+  }, 15000);
+
   it('повторная попытка чтения при транзиентной ошибке: страница перечитывается, сбор не падает', async () => {
+    process.env.HE_PDL_READ_RETRY_DELAYS_MS = '0,0,0';
     const info: HeCollectInfo = {
       plan: { tasks: [] },
       construct: CONSTRUCT_DONE,
@@ -863,6 +913,7 @@ describe('dispatch — pdl (прямое чтение pdl_companies)', () => {
   }, 15000);
 
   it('HTML maintenance-страница Kong в ошибке чтения режется до чистого текста', async () => {
+    process.env.HE_PDL_READ_RETRY_DELAYS_MS = '0,0,0';
     const info: HeCollectInfo = {
       plan: { tasks: [] },
       construct: CONSTRUCT_DONE,
