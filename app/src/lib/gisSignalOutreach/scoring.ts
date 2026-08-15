@@ -37,9 +37,23 @@ export interface SegmentScore {
   grade: string | null;
 }
 
+/** Общие пояса грейдов (одинаковы во всех ТЗ): A=75–100, B=55–74, C=35–54. */
+const STANDARD_BANDS: ScoreBand[] = [
+  { min: 75, grade: 'A' },
+  { min: 55, grade: 'B' },
+  { min: 35, grade: 'C' },
+];
+
 /**
- * Реестр скоринг-профилей по ключу сегмента. legal: веса ТЗ (сумма 100),
- * порог 35, грейды A=75–100, B=55–74, C=35–54.
+ * Реестр скоринг-профилей по ключу сегмента. Веса — дословно из ТЗ клиента,
+ * сумма каждого профиля = 100 (проверяется тестом), порог отсева 35.
+ *
+ * Профили accounting/consulting добавлены 15.08.2026. Их специфика — четыре
+ * новых сигнала (accountingRelevance, consultingRelevance, pricingPackages,
+ * clientSegments, см. signals.ts); остальные веса ложатся на уже существующие
+ * детекторы. Заметная разница с legal: у accounting вес вакансий ниже (10 vs 15),
+ * зато появляются «упаковка услуги» (pricingPackages 10) и «работа с ИП/ООО/МСБ»
+ * (clientSegments 5); у consulting вакансии, наоборот, весят 15.
  */
 export const SEGMENT_SCORING_PROFILES: Record<string, SegmentScoringProfile> = {
   legal: {
@@ -54,11 +68,36 @@ export const SEGMENT_SCORING_PROFILES: Record<string, SegmentScoringProfile> = {
       crmCalltracking: 5,
     },
     threshold: 35,
-    bands: [
-      { min: 75, grade: 'A' },
-      { min: 55, grade: 'B' },
-      { min: 35, grade: 'C' },
-    ],
+    bands: STANDARD_BANDS,
+  },
+  accounting: {
+    weights: {
+      accountingRelevance: 25,
+      generalPhone: 10,
+      contactForm: 10,
+      salesDept: 20,
+      targetVacancy: 10,
+      pricingPackages: 10,
+      highVolume: 5,
+      clientSegments: 5,
+      crmCalltracking: 5,
+    },
+    threshold: 35,
+    bands: STANDARD_BANDS,
+  },
+  consulting: {
+    weights: {
+      consultingRelevance: 25,
+      generalPhone: 10,
+      contactForm: 10,
+      salesDept: 20,
+      targetVacancy: 15,
+      highVolume: 10,
+      multiOffice: 5,
+      crmCalltracking: 5,
+    },
+    threshold: 35,
+    bands: STANDARD_BANDS,
   },
 };
 

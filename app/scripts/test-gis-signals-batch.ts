@@ -13,6 +13,7 @@ dotenv.config({ path: resolve(__dirname, '../../.env') });
 
 import {
   detectOutreachSignals,
+  emptySignals as emptySignalSet,
   SIGNAL_COLUMNS,
   ONLINE_FORMAT_RE,
   ONLINE_NEGATIVE_RE,
@@ -215,13 +216,10 @@ async function resolveMxStatus(domain: string): Promise<MxStatus> {
 
 // ─── Стадии пайплайна ────────────────────────────────────────────────────────
 
+// Ключи набора перечислены ТОЛЬКО в signals.ts (emptySignals) — иначе каждый
+// новый сигнал ломал бы компиляцию всех калибраторов сразу.
 function emptySignals(): Record<SignalKey, SignalVerdict> {
-  const v = (): SignalVerdict => ({ hit: false, evidence: '' });
-  return {
-    generalPhone: v(), contactForm: v(), salesDept: v(),
-    targetVacancy: v(), highVolume: v(), multiOffice: v(),
-    legalRelevance: v(), crmCalltracking: v(),
-  };
+  return emptySignalSet();
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | 'timeout'> {

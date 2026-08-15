@@ -9,7 +9,7 @@ import {
   gridToLeadPayloads,
   type QualifiedCompany,
 } from '@/lib/gisSignalOutreach/gridMapping';
-import { SIGNAL_COLUMNS, type OutreachSignalsResult } from '@/lib/gisSignalOutreach/signals';
+import { emptySignals, SIGNAL_COLUMNS, type OutreachSignalsResult } from '@/lib/gisSignalOutreach/signals';
 import type { SegmentCandidate } from '@/lib/gisSignalOutreach/segments';
 
 function candidate(overrides: Partial<SegmentCandidate> = {}): SegmentCandidate {
@@ -32,17 +32,10 @@ function signalsResult(hits: Partial<Record<keyof OutreachSignalsResult['signals
     hit: key in hits,
     evidence: hits[key] ?? '',
   });
+  const signals = emptySignals();
+  for (const key of Object.keys(signals) as Array<keyof typeof signals>) signals[key] = v(key);
   return {
-    signals: {
-      generalPhone: v('generalPhone'),
-      contactForm: v('contactForm'),
-      salesDept: v('salesDept'),
-      targetVacancy: v('targetVacancy'),
-      highVolume: v('highVolume'),
-      multiOffice: v('multiOffice'),
-      legalRelevance: v('legalRelevance'),
-      crmCalltracking: v('crmCalltracking'),
-    },
+    signals,
     signalsCount: Object.keys(hits).length,
     note: 'Homepage + 2 subpages checked',
     ok: true,
@@ -64,8 +57,8 @@ describe('GRID_HEADER', () => {
       'score', 'grade',
       'Проверка — примечание',
     ]);
-    // 8 базовых + 8 пар сигналов + score/grade + примечание.
-    expect(GRID_HEADER).toHaveLength(8 + 16 + 2 + 1);
+    // 8 базовых + 12 пар сигналов + score/grade + примечание.
+    expect(GRID_HEADER).toHaveLength(8 + 24 + 2 + 1);
   });
 });
 
@@ -89,26 +82,26 @@ describe('companiesToGrid', () => {
     ]);
 
     // Пары «сигнал/уточнение» идут в порядке SIGNAL_COLUMNS.
-    const cells = row.slice(8, 24);
+    const cells = row.slice(8, 32);
     expect(cells[0]).toBe('Да'); // generalPhone
     expect(cells[1]).toBe('8 800 555-06-65 в шапке сайта');
     expect(cells[2]).toBe('Да'); // contactForm
     expect(cells[3]).toBe('Кнопка: «Заказать звонок»');
     // Остальные сигналы не сработали → Нет + Not found on checked pages.
-    for (let i = 4; i < 16; i += 2) {
+    for (let i = 4; i < 24; i += 2) {
       expect(cells[i]).toBe('Нет');
       expect(cells[i + 1]).toBe(CLARIFICATION_NOT_FOUND);
     }
     // Без скоринга: score/grade пустые.
-    expect(row[24]).toBe('');
-    expect(row[25]).toBe('');
-    expect(row[26]).toBe('Homepage + 2 subpages checked');
+    expect(row[32]).toBe('');
+    expect(row[33]).toBe('');
+    expect(row[34]).toBe('Homepage + 2 subpages checked');
   });
 
   it('компания без единого сигнала: все ячейки Нет + Not found', () => {
     const grid = companiesToGrid([qualified({ hits: {} })]);
-    const cells = grid[1].slice(8, 24);
-    for (let i = 0; i < 16; i += 2) {
+    const cells = grid[1].slice(8, 32);
+    for (let i = 0; i < 24; i += 2) {
       expect(cells[i]).toBe('Нет');
       expect(cells[i + 1]).toBe(CLARIFICATION_NOT_FOUND);
     }
@@ -123,7 +116,7 @@ describe('gridToLeadPayloads', () => {
     status?: string; city?: string; site?: string; phone?: string;
     score?: string; grade?: string;
   } = {}): string[] {
-    const signalCells = (overrides.signals ?? ['Да', 'Нет', 'Да', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет'])
+    const signalCells = (overrides.signals ?? ['Да', 'Нет', 'Да', ...Array<'Нет'>(SIGNAL_COLUMNS.length - 3).fill('Нет')])
       .flatMap((v) => [v, v === 'Да' ? 'какое-то evidence' : CLARIFICATION_NOT_FOUND]);
     return [
       overrides.id ?? '70000001000000001',
@@ -185,7 +178,7 @@ describe('gridToLeadPayloads', () => {
 
   it('все сигналы Нет → signals пустая строка', () => {
     const leads = gridToLeadPayloads(
-      [header, finalRow({ signals: ['Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет'] })],
+      [header, finalRow({ signals: Array<'Нет'>(SIGNAL_COLUMNS.length).fill('Нет') })],
       'clinics',
     );
     expect(leads[0].custom_variables?.signals).toBe('');
@@ -198,9 +191,9 @@ describe('score/grade (скоринговые сегменты, legal)', () => {
       { ...qualified({ hits: { legalRelevance: 'Юридические услуги' } }), score: 60, grade: 'B' },
     ]);
     const row = grid[1];
-    expect(row[24]).toBe('60');
-    expect(row[25]).toBe('B');
-    expect(row[26]).toBe('Homepage + 2 subpages checked');
+    expect(row[32]).toBe('60');
+    expect(row[33]).toBe('B');
+    expect(row[34]).toBe('Homepage + 2 subpages checked');
     // Новый скоринговый сигнал попадает в свою пару колонок (7-я пара).
     expect(row[20]).toBe('Да'); // legalRelevance
     expect(row[21]).toBe('Юридические услуги');
@@ -208,7 +201,7 @@ describe('score/grade (скоринговые сегменты, legal)', () => {
 
   it('gridToLeadPayloads прокидывает score/grade в custom_variables, когда они есть', () => {
     const header = [...GRID_HEADER, 'Email Статус'];
-    const signalCells = ['Да', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Да', 'Нет']
+    const signalCells = ['Да', ...Array<'Нет'>(5).fill('Нет'), 'Да', ...Array<'Нет'>(SIGNAL_COLUMNS.length - 7).fill('Нет')]
       .flatMap((v) => [v, v === 'Да' ? 'какое-то evidence' : CLARIFICATION_NOT_FOUND]);
     const row = [
       '70000001000000002', 'Юристы и Ко', 'Москва', '+7 495 111-22-33',
