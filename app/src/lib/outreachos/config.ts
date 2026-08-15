@@ -57,17 +57,8 @@ export interface OutreachOsConfig {
   extra_exclude: string[];
   job_poll_timeout_minutes: number;
   /**
-   * Второй источник работодателей — SuperJob (app/src/lib/outreachos/
-   * superjobSource.ts). false → только HH. Ключ — env SUPERJOB_APP_KEY на
-   * воркере; без него источник пропускается с предупреждением.
-   */
-  superjob_enabled: boolean;
-  /** Каталоги (профобласти) SJ: IT=33, пром/производство=327, стройка=306,
-   *  логистика=86, маркетинг=234, HR=76, консалтинг=426. */
-  superjob_catalogues: number[];
-  /**
    * 2GIS top-up (миграция 20260811_0001, дизайн-док 2026-08-11): добор из
-   * 2gis_dataset в дни недобора HH+SJ до gis_topup_target_appended. false →
+   * 2gis_dataset в дни недобора HH до gis_topup_target_appended. false →
    * топ-ап не запускается (фазы 8t.* пропускаются целиком).
    */
   gis_topup_enabled: boolean;
@@ -84,9 +75,6 @@ export interface OutreachOsConfig {
    */
   gis_topup_measure_only: boolean;
 }
-
-/** Дефолтный набор каталогов SJ — подстраховка до миграции колонки. */
-const SUPERJOB_DEFAULT_CATALOGUES = [33, 327, 306, 86, 234, 76, 426];
 
 /** Дефолты top-up'а до миграции 20260811_0001 (источник выключен, замер-only). */
 const GIS_TOPUP_DEFAULTS = {
@@ -126,12 +114,6 @@ export async function loadOutreachOsConfig(): Promise<OutreachOsConfig | null> {
   return {
     ...row,
     selected_steps: cleanedSteps,
-    // До миграции колонок — безопасные дефолты (источник выключен).
-    superjob_enabled: row.superjob_enabled === true,
-    superjob_catalogues:
-      Array.isArray(row.superjob_catalogues) && row.superjob_catalogues.length > 0
-        ? row.superjob_catalogues
-        : SUPERJOB_DEFAULT_CATALOGUES,
     // 2GIS top-up: до миграции колонок — выключен; measure_only по умолчанию
     // true (замер без заливки/seen), даже если колонка появилась, но флаг
     // никто не трогал.
