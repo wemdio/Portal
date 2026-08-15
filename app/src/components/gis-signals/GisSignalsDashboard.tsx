@@ -50,7 +50,11 @@ type GisSignalKey =
   | 'signal_high_volume'
   | 'signal_multi_office'
   | 'signal_legal_relevance'
-  | 'signal_crm_calltracking';
+  | 'signal_crm_calltracking'
+  | 'signal_accounting_relevance'
+  | 'signal_consulting_relevance'
+  | 'signal_pricing_packages'
+  | 'signal_client_segments';
 
 interface SegmentStats {
   segmentKey: string;
@@ -139,7 +143,7 @@ interface GisSignalsReportResponse {
 
 // ───────────────────────── константы ─────────────────────────
 
-/** Порядок и русские подписи 8 сигналов — фиксированы, не зависят от выборки. */
+/** Порядок и русские подписи 12 сигналов — фиксированы, не зависят от выборки. */
 const SIGNAL_ROWS: Array<{ key: GisSignalKey; label: string }> = [
   { key: 'signal_general_phone', label: 'Общий телефон / колл-центр' },
   { key: 'signal_contact_form', label: 'Форма заявки / обратной связи' },
@@ -149,6 +153,10 @@ const SIGNAL_ROWS: Array<{ key: GisSignalKey; label: string }> = [
   { key: 'signal_multi_office', label: 'Несколько офисов / филиалов' },
   { key: 'signal_legal_relevance', label: 'Юридическая релевантность сайта' },
   { key: 'signal_crm_calltracking', label: 'CRM / коллтрекинг / речевая аналитика' },
+  { key: 'signal_accounting_relevance', label: 'Бухгалтерская релевантность сайта' },
+  { key: 'signal_consulting_relevance', label: 'Консалтинговая релевантность сайта' },
+  { key: 'signal_pricing_packages', label: 'Калькулятор / тарифы / пакеты обслуживания' },
+  { key: 'signal_client_segments', label: 'Работа с ИП / ООО / МСБ' },
 ];
 
 type PeriodPreset = '7d' | '30d' | 'all' | 'custom';

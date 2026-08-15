@@ -25,10 +25,6 @@ jest.mock('@/lib/jobs/hhAutoParser', () => {
   return { ...actual, findNewHhEmployers: jest.fn() };
 });
 
-jest.mock('@/lib/outreachos/superjobSource', () => ({
-  fetchSuperjobEmployers: jest.fn(async () => []),
-}));
-
 jest.mock('@/lib/parsers/hhArchiveSink', () => ({
   getUserIdByEmail: jest.fn(async () => null),
   ensureArchiveSinkJob: jest.fn(async () => null),
@@ -117,7 +113,6 @@ function configRow(overrides: Record<string, unknown> = {}) {
     selected_steps: ['validate_emails', 'find_emails'],
     extra_exclude: [],
     job_poll_timeout_minutes: 180,
-    superjob_enabled: false,
     gis_topup_enabled: true,
     gis_topup_target_appended: 200,
     gis_topup_rubric_groups: [{ category: 'Транспорт / Грузоперевозки' }],

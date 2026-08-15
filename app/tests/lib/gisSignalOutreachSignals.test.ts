@@ -276,9 +276,9 @@ describe('detectOutreachSignals', () => {
       expect(verdict.hit).toBe(false);
       expect(verdict.evidence).toBe('');
     }
-    // Все 8 не закрыты эвристиками — LLM позвали ровно один раз.
+    // Все 12 не закрыты эвристиками — LLM позвали ровно один раз.
     expect(llm).toHaveBeenCalledTimes(1);
-    expect(llm.mock.calls[0][0].needed).toHaveLength(8);
+    expect(llm.mock.calls[0][0].needed).toHaveLength(SIGNAL_COLUMNS.length);
   });
 
   it('сайт недоступен: ok=false, note "Site unreachable", все сигналы false', async () => {
@@ -329,7 +329,7 @@ describe('detectOutreachSignals', () => {
     expect(result.note).toContain('LLM fallback failed');
   });
 
-  it('все 8 сигналов эвристиками: LLM не вызывается, signalsCount — только 6 core', async () => {
+  it('8 сигналов эвристиками: signalsCount — только 6 core, LLM добирает лишь сегментные', async () => {
     const llm = makeLlm();
     const result = await detectOutreachSignals({
       siteUrl: 'https://praktika.example',
@@ -342,7 +342,12 @@ describe('detectOutreachSignals', () => {
     expect(result.signals.legalRelevance.hit).toBe(true);
     expect(result.signals.crmCalltracking.hit).toBe(true);
     expect(result.signalsCount).toBe(6);
-    expect(llm).not.toHaveBeenCalled();
+    // Фикстура не содержит бух/консалтинг-лексики, калькулятора и форм бизнеса,
+    // поэтому эвристики закрыли 8 сигналов, а LLM спросили ровно про 4 остальных.
+    expect(llm).toHaveBeenCalledTimes(1);
+    expect(llm.mock.calls[0][0].needed.sort()).toEqual(
+      ['accountingRelevance', 'clientSegments', 'consultingRelevance', 'pricingPackages'],
+    );
   });
 
   it('потолок страниц: главная + максимум 4 подстраницы', async () => {
@@ -445,6 +450,10 @@ describe('SIGNAL_COLUMNS', () => {
       'multiOffice',
       'legalRelevance',
       'crmCalltracking',
+      'accountingRelevance',
+      'consultingRelevance',
+      'pricingPackages',
+      'clientSegments',
     ]);
     expect(SIGNAL_COLUMNS.map((c) => c.title)).toEqual([
       'Общий телефон / колл-центр',
@@ -455,6 +464,10 @@ describe('SIGNAL_COLUMNS', () => {
       'Несколько офисов / филиалов',
       'Юридическая релевантность сайта',
       'CRM / коллтрекинг / речевая аналитика',
+      'Бухгалтерская релевантность сайта',
+      'Консалтинговая релевантность сайта',
+      'Калькулятор / тарифы / пакеты обслуживания',
+      'Работа с ИП / ООО / МСБ',
     ]);
     for (const col of SIGNAL_COLUMNS) {
       expect(col.clarification).toBe(`${col.title} — уточнение`);
@@ -976,5 +989,144 @@ describe('evidence: битый UTF-16 не выходит наружу', () => {
     });
 
     expect(result.signals.salesDept.evidence).toBe('отдел продаж');
+  });
+});
+
+/**
+ * Сегментные сигналы accounting/consulting (ТЗ 15.08.2026). Главная ловушка —
+ * соседние рубрики 2GIS: «Бухгалтерские программы» (3784 карточки) и
+ * «Бухгалтерские курсы» (694) стоят рядом с «Бухгалтерскими услугами», и без
+ * стоп-листа вендор 1С проходил бы как бухгалтерская компания.
+ */
+describe('сегментные сигналы: accounting / consulting', () => {
+  const run = async (html: string, llm = makeLlm()) =>
+    detectOutreachSignals({
+      siteUrl: 'https://seg.example',
+      fetchPage: makeFetchRouter({ 'https://seg.example/': html }),
+      llmExtract: llm,
+    });
+
+  it('accountingRelevance: бухгалтерское сопровождение и аутсорсинг — срабатывает', async () => {
+    const r = await run(`<html><body><main>
+      <h1>Компания Актив</h1>
+      <p>Бухгалтерское сопровождение бизнеса и аутсорсинг бухгалтерии под ключ.</p>
+    </main></body></html>`);
+    expect(r.signals.accountingRelevance.hit).toBe(true);
+    expect(r.signals.accountingRelevance.evidence).toMatch(/бухгалтерск/i);
+  });
+
+  it('accountingRelevance: сдача отчётности и расчёт зарплаты — срабатывает', async () => {
+    const r = await run(`<html><body><main>
+      <p>Сдача отчётности в ФНС, расчёт заработной платы, кадровый учёт.</p>
+    </main></body></html>`);
+    expect(r.signals.accountingRelevance.hit).toBe(true);
+  });
+
+  it('accountingRelevance: сайт 1С-интегратора — НЕ срабатывает, хотя пишет «бухгалтерский учёт»', async () => {
+    // Ровно та формулировка, на которой стоп-лист пробивался до 15.08.2026:
+    // позитивный паттерн ловил «бухгалтерского учёта» ВНУТРИ вендорской фразы.
+    const r = await run(`<html><body><main>
+      <h1>Бухгалтерские программы 1С</h1>
+      <p>Автоматизация бухгалтерского учёта, внедрение 1С:Бухгалтерия, продажа программ.</p>
+    </main></body></html>`);
+    expect(r.signals.accountingRelevance.hit).toBe(false);
+  });
+
+  it('accountingRelevance: настоящая бухфирма, работающая в 1С, — срабатывает', async () => {
+    // Обратная сторона стоп-листа: упоминание 1С само по себе сигнал не убивает.
+    const r = await run(`<html><body><main>
+      <p>Ведём бухгалтерский учёт в 1С для ИП и ООО, сдаём отчётность.</p>
+    </main></body></html>`);
+    expect(r.signals.accountingRelevance.hit).toBe(true);
+  });
+
+  it('accountingRelevance: учебный центр с курсами бухгалтеров — НЕ срабатывает', async () => {
+    const r = await run(`<html><body><main>
+      <h1>Учебный центр</h1>
+      <p>Курсы бухгалтеров и повышение квалификации бухгалтеров с нуля.</p>
+    </main></body></html>`);
+    expect(r.signals.accountingRelevance.hit).toBe(false);
+  });
+
+  it('consultingRelevance: управленческий консалтинг — срабатывает', async () => {
+    const r = await run(`<html><body><main>
+      <h1>Группа компаний Вектор</h1>
+      <p>Управленческий и финансовый консалтинг, оптимизация бизнес-процессов.</p>
+    </main></body></html>`);
+    expect(r.signals.consultingRelevance.hit).toBe(true);
+  });
+
+  it('consultingRelevance: «бесплатная консультация» как CTA — НЕ срабатывает', async () => {
+    const r = await run(`<html><body><main>
+      <h1>Стоматология Улыбка</h1>
+      <p>Запишитесь на бесплатную консультацию врача. Получить консультацию специалиста.</p>
+    </main></body></html>`);
+    expect(r.signals.consultingRelevance.hit).toBe(false);
+  });
+
+  it('pricingPackages: калькулятор и тарифы — срабатывает; голая цена — нет', async () => {
+    const withCalc = await run(`<html><body><main>
+      <p>Калькулятор стоимости услуг. Тарифные планы для разных объёмов документов.</p>
+    </main></body></html>`);
+    expect(withCalc.signals.pricingPackages.hit).toBe(true);
+
+    const bare = await run('<html><body><main><p>Услуга стоит 5000 рублей.</p></main></body></html>');
+    expect(bare.signals.pricingPackages.hit).toBe(false);
+  });
+
+  it('clientSegments: «для ИП и ООО» / «малый и средний бизнес» — срабатывает', async () => {
+    const a = await run('<html><body><main><p>Работаем для ИП и ООО на любой системе налогообложения.</p></main></body></html>');
+    expect(a.signals.clientSegments.hit).toBe(true);
+
+    const b = await run('<html><body><main><p>Обслуживаем малый и средний бизнес по всей России.</p></main></body></html>');
+    expect(b.signals.clientSegments.hit).toBe(true);
+  });
+
+  it('clientSegments: собственная форма в реквизитах — НЕ срабатывает', async () => {
+    const r = await run(`<html><body><footer>
+      <p>ООО «Ромашка», ИНН 7701234567. Все права защищены.</p>
+    </footer></body></html>`);
+    expect(r.signals.clientSegments.hit).toBe(false);
+  });
+
+  it('salesDept: business development и отдел по работе с обращениями (расширение ТЗ)', async () => {
+    const a = await run('<html><body><main><p>Наш business development отвечает на входящие запросы.</p></main></body></html>');
+    expect(a.signals.salesDept.hit).toBe(true);
+
+    const b = await run('<html><body><main><p>Отдел по работе с обращениями работает ежедневно.</p></main></body></html>');
+    expect(b.signals.salesDept.hit).toBe(true);
+  });
+
+  it('targetVacancy: аккаунт-менеджер в вакансиях (расширение ТЗ consulting)', async () => {
+    const r = await detectOutreachSignals({
+      siteUrl: 'https://cons.example',
+      fetchPage: makeFetchRouter({
+        'https://cons.example/': `<html><body><main><h1>Консалтинг</h1></main>
+          <footer><a href="/vacancies">Вакансии</a></footer></body></html>`,
+        'https://cons.example/vacancies': `<html><body><main>
+          <h1>Открытые вакансии</h1><div><h3>Аккаунт-менеджер</h3><p>от 120 000 ₽</p></div>
+        </main></body></html>`,
+      }),
+      llmExtract: makeLlm(),
+    });
+    expect(r.signals.targetVacancy.hit).toBe(true);
+  });
+
+  it('highVolume: «300 компаний на обслуживании» — поток; «500 проектов» у ремонта — нет', async () => {
+    const acc = await run('<html><body><main><p>Более 300 компаний на обслуживании.</p></main></body></html>');
+    expect(acc.signals.highVolume.hit).toBe(true);
+
+    const remont = await run('<html><body><main><p>Мы выполнили более 500 проектов ремонта.</p></main></body></html>');
+    expect(remont.signals.highVolume.hit).toBe(false);
+  });
+
+  it('новые сигналы не входят в signalsCount — фильтр edu/remont не меняется', async () => {
+    const r = await run(`<html><body><main>
+      <p>Бухгалтерское обслуживание, тарифы и пакеты услуг для ИП и ООО.</p>
+    </main></body></html>`);
+    expect(r.signals.accountingRelevance.hit).toBe(true);
+    expect(r.signals.pricingPackages.hit).toBe(true);
+    expect(r.signals.clientSegments.hit).toBe(true);
+    expect(r.signalsCount).toBe(0);
   });
 });

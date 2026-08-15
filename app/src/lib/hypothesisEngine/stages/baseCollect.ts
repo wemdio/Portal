@@ -858,8 +858,28 @@ function lowerList(values: string[]): string[] {
  * (как у hh/карт) — только на мёрдже.
  */
 
-/** Одна повторная попытка чтения страницы: рестарт/блип Kong не должен валить сбор. */
-const PDL_READ_RETRY_MS = 3000;
+/**
+ * Паузы перед повторными чтениями страницы каталога (по одной на попытку, всего
+ * попыток = длина + 1). Дефолт покрывает две разные причины отказа:
+ *  - блип/рестарт Kong — лечится первой короткой паузой;
+ *  - ХОЛОДНЫЙ КЭШ pdl_companies (19.5M строк) — первое касание нового среза
+ *    читает страницы с диска и стоит десятки секунд, шлюз успевает отдать 504
+ *    раньше. Замер 12.08: один и тот же срез 209с на первом прогоне и 1.1с на
+ *    повторном; узкий срез — 45с на первом касании. Ключевое: неудавшаяся
+ *    попытка не пропадает зря — она прогревает кэш, поэтому паузы растут, а не
+ *    повторяют одну и ту же трёхсекундную (на ней сборка Franchise Brands
+ *    12.08 и легла: pdl упал, база вышла на 7 строк).
+ * Переопределяется `HE_PDL_READ_RETRY_DELAYS_MS` (мс через запятую) — читается
+ * на каждом вызове, чтобы тесты не ждали реальные минуты.
+ */
+const PDL_READ_RETRY_DELAYS_DEFAULT = '3000,20000,60000';
+
+function pdlReadRetryDelays(): number[] {
+  return (process.env.HE_PDL_READ_RETRY_DELAYS_MS || PDL_READ_RETRY_DELAYS_DEFAULT)
+    .split(',')
+    .map((v) => Number(v.trim()))
+    .filter((v) => Number.isFinite(v) && v >= 0);
+}
 
 /** Ошибки чтения: HTML maintenance-страницы Kong (504/рестарт) — не в error задачи. */
 function cleanPdlReadError(message: string): string {
@@ -887,16 +907,21 @@ async function fetchPdlRows(
       p_after_id: lastId || null,
       p_limit: ENG_CATALOG_PAGE_SIZE,
     };
-    // Одна повторная попытка при сбое чтения (блип/рестарт Kong): страница
-    // идемпотентна, удвоенного трафика на happy-path нет.
+    // Повторные попытки при сбое чтения (блип Kong / холодный кэш каталога):
+    // страница идемпотентна, на happy-path лишнего трафика нет.
+    const delays = pdlReadRetryDelays();
     let data: unknown = null;
     let error: { message: string } | null = null;
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
+    for (let attempt = 0; attempt <= delays.length; attempt += 1) {
       const res = await ctx.supabase.rpc('search_pdl_companies', params);
       data = res.data;
       error = res.error ? { message: res.error.message } : null;
       if (!error) break;
-      if (attempt < 2) await sleep(PDL_READ_RETRY_MS);
+      const pause = delays[attempt];
+      if (pause !== undefined) {
+        stageLog(ctx, `[base_collect] pdl: чтение не удалось (${error.message.slice(0, 80)}), повтор через ${pause}мс`);
+        await sleep(pause);
+      }
     }
     if (error) throw new Error(cleanPdlReadError(error.message));
     const page = (data ?? []) as Record<string, unknown>[];

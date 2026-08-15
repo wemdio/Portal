@@ -15,7 +15,7 @@
  *   6. Журналируем seen + run.
  *
  * 2GIS TOP-UP (gis_topup_enabled): между шагом 7b (LLM) и шагом 8 (markSeen)
- * вставлены фазы 8t.1–8t.5 — добор из 2gis_dataset при недоборе HH+SJ до
+ * вставлены фазы 8t.1–8t.5 — добор из 2gis_dataset при недоборе HH до
  * gis_topup_target_appended. GIS-лиды объединяются с HH keptLeads ПЕРЕД общим
  * markSeen, общим дедупом против своих кампаний и общим A/B-сплитом — отдельная
  * кампания C не заводится (решение §7.2 дизайн-дока
@@ -32,7 +32,6 @@ import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { findNewHhEmployers, deriveDomain, type HhEmployer } from '@/lib/jobs/hhAutoParser';
-import { fetchSuperjobEmployers } from '@/lib/outreachos/superjobSource';
 import { ensureArchiveSinkJob, buildHhArchiveSinkCallback, getUserIdByEmail } from '@/lib/parsers/hhArchiveSink';
 import { appendLeadsToClientCampaign, fetchExistingCampaignEmails } from '@/lib/clientLaunch/appendLeads';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
@@ -190,41 +189,6 @@ export async function runOutreachOsDailyPipeline(
       onVacancies,
     });
     log(`HH вернул ${employers.length} работодателей (после ICP-фильтра)`);
-
-    // 3a-sj. Второй источник: SuperJob (superjob_enabled в конфиге, ключ в env
-    //     SUPERJOB_APP_KEY). Fail-open: любая ошибка источника — предупреждение
-    //     и продолжение только с HH, прогон не роняем. Дедуп с HH по домену
-    //     сайта (HH побеждает), чтобы одна компания не ушла в конструктор дважды
-    //     за день (seen-журнал ловит только контактированные ранее).
-    if (config.superjob_enabled) {
-      const sjKey = (process.env.SUPERJOB_APP_KEY ?? '').trim();
-      if (!sjKey) {
-        log('SuperJob включён, но SUPERJOB_APP_KEY не задан — источник пропущен');
-      } else {
-        try {
-          const sjEmployers = await fetchSuperjobEmployers({
-            apiKey: sjKey,
-            windowHours: config.window_hours,
-            catalogues: config.superjob_catalogues,
-            vacancyBudget: config.daily_limit,
-            log,
-          });
-          const hhDomains = new Set(
-            employers.map((e) => deriveDomain(e.siteUrl)).filter((d): d is string => Boolean(d)),
-          );
-          const sjFresh = sjEmployers.filter((e) => {
-            const d = deriveDomain(e.siteUrl);
-            if (d && hhDomains.has(d)) return false;
-            if (d) hhDomains.add(d); // дедуп внутри SJ-выдачи по домену
-            return true;
-          });
-          log(`SuperJob вернул ${sjEmployers.length}, после дедупа с HH по домену: +${sjFresh.length}`);
-          employers.push(...sjFresh);
-        } catch (err) {
-          log(`SuperJob источник упал, продолжаем только с HH: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-    }
 
     // 3b. Структурный B2C/ИП-отсев по названию+домену (excludeB2c.ts): школы,
     //     отели, ИП-ФИО, .shop и т.п. — ДО конструктора, чтобы не жечь скрейп

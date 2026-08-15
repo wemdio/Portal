@@ -5,7 +5,7 @@ jest.mock('server-only', () => ({}));
 import { createMockSupabase, type MockSupabaseClient, type Row } from '@/../tests/helpers/mockSupabase';
 import type { SegmentCandidate } from '@/lib/gisSignalOutreach/segments';
 import type { OutreachSignalsResult } from '@/lib/gisSignalOutreach/signals';
-import { SIGNAL_COLUMNS } from '@/lib/gisSignalOutreach/signals';
+import { emptySignals, SIGNAL_COLUMNS } from '@/lib/gisSignalOutreach/signals';
 import { GRID_HEADER } from '@/lib/gisSignalOutreach/gridMapping';
 
 let mockDb: MockSupabaseClient = createMockSupabase();
@@ -118,16 +118,7 @@ function cand(id: string, segmentKey: string): SegmentCandidate {
 function signalResult(hit: boolean): OutreachSignalsResult {
   const v = (h: boolean) => ({ hit: h, evidence: h ? 'какое-то evidence' : '' });
   return {
-    signals: {
-      generalPhone: v(hit),
-      contactForm: v(false),
-      salesDept: v(false),
-      targetVacancy: v(false),
-      highVolume: v(false),
-      multiOffice: v(false),
-      legalRelevance: v(false),
-      crmCalltracking: v(false),
-    },
+    signals: { ...emptySignals(), generalPhone: v(hit) },
     signalsCount: hit ? 1 : 0,
     note: 'Homepage checked',
     ok: true,
@@ -657,6 +648,7 @@ describe('runGisSignalPipeline — legal-скоринг (сегмент со с�
       evidence: hits.includes(key) ? 'какое-то evidence' : '',
     });
     const signals = {
+      ...emptySignals(),
       generalPhone: v('generalPhone'),
       contactForm: v('contactForm'),
       salesDept: v('salesDept'),
