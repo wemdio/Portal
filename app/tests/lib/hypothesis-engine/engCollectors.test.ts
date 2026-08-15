@@ -1182,6 +1182,155 @@ describe('dispatch — eng_hiring (прямое чтение eng_hiring_cache)',
     expect((harvest?.data as HeUnifiedRow[])[0].company).toBe('Franchise Group');
   });
 
+  it('строке без сайта досбирается домен из каталога — иначе конструктор её теряет', async () => {
+    // У ATS-фида сайт заполнен у ~13% строк. На сборке Franchise Brands 12.08
+    // из-за этого выпали ЕДИНСТВЕННЫЕ компании по вертикали (их нашли по
+    // вакансии «franchise development»), и в базе не осталось ни одной строки
+    // eng_hiring.
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
+      tasks: [
+        {
+          source: 'eng_hiring',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: {
+            source: 'eng_hiring',
+            rationale: 'r',
+            eng_hiring_query: { roles: ['franchise development'], countries: ['us'] },
+          },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT_US],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        eng_hiring_cache: [
+          {
+            id: 'v1',
+            source: 'lever',
+            company_name: 'United Franchise Group',
+            company_site_url: null,
+            vacancy_title: 'Director of Franchise Development',
+            location: 'West Palm Beach, FL',
+            country_code: 'us',
+            published_at: new Date().toISOString(),
+          },
+        ],
+        pdl_companies: [
+          {
+            id: 'pdl-1',
+            name: 'United Franchise Group',
+            website: 'ufgcorp.com',
+            country: 'united states',
+            industry: 'consumer services',
+          },
+        ],
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx('us'));
+    expect((res.result as { rows: number }).rows).toBe(1);
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    const collected = (harvest?.data as HeUnifiedRow[])[0];
+    expect(collected.company).toBe('United Franchise Group');
+    expect(collected.website).toBe('https://ufgcorp.com');
+  });
+
+  it('имеющийся сайт строки не перетирается досбором', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
+      tasks: [
+        {
+          source: 'eng_hiring',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: { source: 'eng_hiring', rationale: 'r', eng_hiring_query: { roles: ['franchise development'] } },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT_US],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        eng_hiring_cache: [
+          {
+            id: 'v1',
+            source: 'lever',
+            company_name: 'United Franchise Group',
+            company_site_url: 'https://real-site.com',
+            vacancy_title: 'Franchise Development Manager',
+            location: 'FL',
+            country_code: 'us',
+            published_at: new Date().toISOString(),
+          },
+        ],
+        // В каталоге у той же компании ДРУГОЙ домен — досбор не должен его подставить.
+        pdl_companies: [
+          { id: 'pdl-1', name: 'United Franchise Group', website: 'ufgcorp.com', country: 'united states' },
+        ],
+      },
+    });
+
+    await runBaseCollectStage(makeJob(), ctx('us'));
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect((harvest?.data as HeUnifiedRow[])[0].website).toBe('https://real-site.com');
+  });
+
+  it('коллизия имени в каталоге → сайт не подставляется (неверный домен хуже пустого)', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
+      tasks: [
+        {
+          source: 'eng_hiring',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: { source: 'eng_hiring', rationale: 'r', eng_hiring_query: { roles: ['franchise development'] } },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT_US],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        eng_hiring_cache: [
+          {
+            id: 'v1',
+            source: 'lever',
+            company_name: 'Momentum',
+            company_site_url: null,
+            vacancy_title: 'Franchise Development Lead',
+            location: 'NY',
+            country_code: 'us',
+            published_at: new Date().toISOString(),
+          },
+        ],
+        // Две РАЗНЫЕ компании с одним именем: угадывать нельзя.
+        pdl_companies: [
+          { id: 'p1', name: 'Momentum', website: 'momentum-a.com', country: 'united states' },
+          { id: 'p2', name: 'Momentum', website: 'momentum-b.com', country: 'united states' },
+        ],
+      },
+    });
+
+    await runBaseCollectStage(makeJob(), ctx('us'));
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect((harvest?.data as HeUnifiedRow[])[0].website).toBe('');
+  });
+
   it('несколько ролей матчатся как альтернативы (keywords через запятую)', async () => {
     const now = Date.now();
     const info: HeCollectInfo = {

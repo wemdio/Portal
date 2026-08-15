@@ -88,6 +88,7 @@ import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/r
 import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
+import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
 import { extractEmail } from '@/lib/tools/dfybUtils';
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { projectMarket, type HeMarket } from '../market';
@@ -1018,6 +1019,66 @@ export function buildRolesIlikeFilter(roles: string[]): string | null {
 }
 
 /**
+ * Потолок досбора сайтов за задачу и параллельность запросов к каталогу.
+ * Резолв — обогащение, а не контракт сбора: упереться в потолок значит лишь,
+ * что часть строк останется без сайта, как было до досбора.
+ */
+const ENG_HIRING_SITE_RESOLVE_MAX = 300;
+const ENG_HIRING_SITE_RESOLVE_CONCURRENCY = 8;
+
+/**
+ * Досбор сайта компании для строк eng_hiring, у которых его нет.
+ *
+ * Зачем: у ATS-фида `company_site_url` заполнен лишь у ~13% строк (замер 15.08:
+ * greenhouse 26%, smartrecruiters 2.8%, workable 0.5%). Без сайта конструктору
+ * не от чего искать почты, и строка вылетает из базы. На сборке Franchise Brands
+ * 12.08 из-за этого потерялись ЕДИНСТВЕННЫЕ компании по вертикали — United
+ * Franchise Group, Empower Brands, Mob Entertainment: их нашли по вакансии
+ * «franchise development» (сигнал намерения, точнее любой отраслевой метки),
+ * а в финальную базу не попало ни одной строки eng_hiring.
+ *
+ * Резолв идёт по локальному каталогу pdl_companies (имя → сайт, уточнение по
+ * стране) БЕЗ Clearbit-фолбэка `resolveCompanyDomainByName`: тот жёстко
+ * рейтлимитит и шеллится в curl — для пакетной сборки не годится. Резолвер сам
+ * отказывается угадывать на коллизиях имени: неверный домен хуже пустого.
+ *
+ * Never-throw: сбой резолва оставляет строку без сайта, сбор не роняет.
+ */
+async function fillMissingCompanySites(
+  ctx: HeStageContext,
+  rows: Record<string, unknown>[],
+): Promise<number> {
+  const targets = rows
+    .filter((r) => !cell(r.company_site_url) && cell(r.company_name))
+    .slice(0, ENG_HIRING_SITE_RESOLVE_MAX);
+  if (targets.length === 0) return 0;
+
+  let filled = 0;
+  for (let i = 0; i < targets.length; i += ENG_HIRING_SITE_RESOLVE_CONCURRENCY) {
+    const chunk = targets.slice(i, i + ENG_HIRING_SITE_RESOLVE_CONCURRENCY);
+    await Promise.all(
+      chunk.map(async (r) => {
+        try {
+          const domain = await resolveCompanyDomainViaPdl(
+            cell(r.company_name),
+            cell(r.country_code) || null,
+            ctx.supabase as unknown as Parameters<typeof resolveCompanyDomainViaPdl>[2],
+          );
+          const site = domainToSiteUrl(domain);
+          if (site) {
+            r.company_site_url = site;
+            filled += 1;
+          }
+        } catch {
+          /* обогащение best-effort: строка просто останется без сайта */
+        }
+      }),
+    );
+  }
+  return filled;
+}
+
+/**
  * eng_hiring_cache (компании, нанимающие ENG-роли): SQL сужает выборку по
  * стране (country_code), свежести (published_at >= now - posted_within_days) и
  * роли (buildRolesIlikeFilter — надмножество), точность роли добирает regex по
@@ -1069,6 +1130,14 @@ async function fetchEngHiringRows(
     if (!key || seen.has(key)) continue;
     seen.add(key);
     if (out.length < limit) out.push(r);
+  }
+
+  // Досбор сайтов — ПОСЛЕ дедупа: резолвим только те строки, что реально уйдут
+  // в базу, а не каждую просканированную вакансию.
+  const missing = out.filter((r) => !cell(r.company_site_url)).length;
+  if (missing > 0) {
+    const filled = await fillMissingCompanySites(ctx, out);
+    stageLog(ctx, `[base_collect] eng_hiring: сайт дособран у ${filled} из ${missing} строк без него`);
   }
   return out;
 }
