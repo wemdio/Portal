@@ -61,7 +61,7 @@ import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
 import { loadGisSignalConfig, loadGisSignalSegments, type GisSignalSegment } from './config';
 import { getLatestTwoGisSnapshotId, pullSegmentCandidates, type SegmentCandidate } from './segments';
 import { markSeen } from './seenCompanies';
-import { detectOutreachSignals, type OutreachSignalsResult } from './signals';
+import { detectOutreachSignals, emptySignals, type OutreachSignalsResult } from './signals';
 import { companiesToGrid, gridToLeadPayloads } from './gridMapping';
 import { computeSegmentScore, getSegmentScoringProfile } from './scoring';
 import { createStallWatchdog } from './runGuards';
@@ -176,16 +176,7 @@ async function mapWithConcurrency<T, R>(
 /** Единый fail-open результат проверки сайта (throw И hard-timeout идут сюда). */
 function signalFailResult(note: string): OutreachSignalsResult {
   return {
-    signals: {
-      generalPhone: { hit: false, evidence: '' },
-      contactForm: { hit: false, evidence: '' },
-      salesDept: { hit: false, evidence: '' },
-      targetVacancy: { hit: false, evidence: '' },
-      highVolume: { hit: false, evidence: '' },
-      multiOffice: { hit: false, evidence: '' },
-      legalRelevance: { hit: false, evidence: '' },
-      crmCalltracking: { hit: false, evidence: '' },
-    },
+    signals: emptySignals(),
     signalsCount: 0,
     note,
     ok: false,
@@ -513,6 +504,10 @@ export async function runGisSignalPipeline(
         // Скоринговые булевы — для всех сегментов (архив копит данные).
         signal_legal_relevance: r.signals.legalRelevance.hit,
         signal_crm_calltracking: r.signals.crmCalltracking.hit,
+        signal_accounting_relevance: r.signals.accountingRelevance.hit,
+        signal_consulting_relevance: r.signals.consultingRelevance.hit,
+        signal_pricing_packages: r.signals.pricingPackages.hit,
+        signal_client_segments: r.signals.clientSegments.hit,
         // Скор/грейд — только scored-сегменты; у остальных NULL.
         score: scoring ? scoring.score : null,
         grade: scoring ? scoring.grade : null,
