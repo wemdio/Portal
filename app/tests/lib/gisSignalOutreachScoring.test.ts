@@ -7,23 +7,13 @@ import {
   computeSegmentScore,
   getSegmentScoringProfile,
 } from '@/lib/gisSignalOutreach/scoring';
-import type { OutreachSignalSet } from '@/lib/gisSignalOutreach/signals';
+import { emptySignals, type OutreachSignalSet } from '@/lib/gisSignalOutreach/signals';
 
+/** Набор вердиктов, где сработали ровно перечисленные сигналы. */
 function signals(hits: Array<keyof OutreachSignalSet> = []): OutreachSignalSet {
-  const v = (key: keyof OutreachSignalSet) => ({
-    hit: hits.includes(key),
-    evidence: hits.includes(key) ? 'какое-то evidence' : '',
-  });
-  return {
-    generalPhone: v('generalPhone'),
-    contactForm: v('contactForm'),
-    salesDept: v('salesDept'),
-    targetVacancy: v('targetVacancy'),
-    highVolume: v('highVolume'),
-    multiOffice: v('multiOffice'),
-    legalRelevance: v('legalRelevance'),
-    crmCalltracking: v('crmCalltracking'),
-  };
+  const set = emptySignals();
+  for (const key of hits) set[key] = { hit: true, evidence: 'какое-то evidence' };
+  return set;
 }
 
 describe('SEGMENT_SCORING_PROFILES', () => {
@@ -100,5 +90,77 @@ describe('computeSegmentScore (математика legal-скоринга)', ()
     const r = computeSegmentScore(profile, signals(['legalRelevance', 'crmCalltracking']));
     expect(r.score).toBe(30);
     expect(r.grade).toBeNull();
+  });
+});
+
+describe('профили accounting / consulting (ТЗ 15.08.2026)', () => {
+  it('все профили: сумма весов ровно 100 и только существующие ключи сигналов', () => {
+    const validKeys = new Set(Object.keys(emptySignals()));
+    for (const [key, profile] of Object.entries(SEGMENT_SCORING_PROFILES)) {
+      const weights = Object.values(profile.weights) as number[];
+      expect([key, weights.reduce((a, b) => a + b, 0)]).toEqual([key, 100]);
+      for (const signalKey of Object.keys(profile.weights)) {
+        expect([key, signalKey, validKeys.has(signalKey)]).toEqual([key, signalKey, true]);
+      }
+      expect(profile.threshold).toBe(35);
+      expect(profile.bands).toEqual([
+        { min: 75, grade: 'A' },
+        { min: 55, grade: 'B' },
+        { min: 35, grade: 'C' },
+      ]);
+    }
+  });
+
+  it('accounting: релевантность 25 + отдел 20 + телефон 10 + пакеты 10 = 65 → B', () => {
+    const r = computeSegmentScore(
+      SEGMENT_SCORING_PROFILES.accounting,
+      signals(['accountingRelevance', 'salesDept', 'generalPhone', 'pricingPackages']),
+    );
+    expect(r).toEqual({ score: 65, grade: 'B' });
+  });
+
+  it('accounting: сайт без бухгалтерской релевантности не добирает порог даже с сильной оргструктурой', () => {
+    // salesDept20 + generalPhone10 + contactForm10 = 40 ≥ 35 — компания пройдёт,
+    // но без accountingRelevance это чужая ниша: фиксируем поведение осознанно.
+    const r = computeSegmentScore(
+      SEGMENT_SCORING_PROFILES.accounting,
+      signals(['salesDept', 'generalPhone', 'contactForm']),
+    );
+    expect(r).toEqual({ score: 40, grade: 'C' });
+    // А та же оргструктура без формы — уже отсев.
+    expect(
+      computeSegmentScore(SEGMENT_SCORING_PROFILES.accounting, signals(['salesDept', 'generalPhone'])),
+    ).toEqual({ score: 30, grade: null });
+  });
+
+  it('accounting: A-грейд — релевантность + отдел + телефон + форма + вакансия + пакеты = 85', () => {
+    const r = computeSegmentScore(
+      SEGMENT_SCORING_PROFILES.accounting,
+      signals(['accountingRelevance', 'salesDept', 'generalPhone', 'contactForm', 'targetVacancy', 'pricingPackages']),
+    );
+    expect(r).toEqual({ score: 85, grade: 'A' });
+  });
+
+  it('consulting: вакансии весят 15 (как в ТЗ), pricingPackages в профиль НЕ входит', () => {
+    const withVacancy = computeSegmentScore(
+      SEGMENT_SCORING_PROFILES.consulting,
+      signals(['consultingRelevance', 'salesDept', 'targetVacancy']),
+    );
+    expect(withVacancy).toEqual({ score: 60, grade: 'B' });
+    // pricingPackages сработал, но в профиле consulting веса у него нет.
+    const withPricing = computeSegmentScore(
+      SEGMENT_SCORING_PROFILES.consulting,
+      signals(['consultingRelevance', 'salesDept', 'targetVacancy', 'pricingPackages']),
+    );
+    expect(withPricing.score).toBe(60);
+  });
+
+  it('сегменты не путают свои релевантности: бухгалтерский сигнал не даёт баллов консалтингу', () => {
+    expect(
+      computeSegmentScore(SEGMENT_SCORING_PROFILES.consulting, signals(['accountingRelevance', 'salesDept'])),
+    ).toEqual({ score: 20, grade: null });
+    expect(
+      computeSegmentScore(SEGMENT_SCORING_PROFILES.accounting, signals(['consultingRelevance', 'salesDept'])),
+    ).toEqual({ score: 20, grade: null });
   });
 });

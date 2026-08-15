@@ -11,6 +11,7 @@ dotenv.config({ path: resolve(__dirname, '../../.env') });
 
 import {
   detectOutreachSignals,
+  emptySignals,
   SIGNAL_COLUMNS,
   type OutreachSignalSet,
   type SignalVerdict,
@@ -103,13 +104,10 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | 'tim
   return out;
 }
 
+// Ключи набора перечислены ТОЛЬКО в signals.ts (emptySignals) — иначе каждый
+// новый сигнал ломал бы компиляцию всех калибраторов сразу.
 function emptyOurs(): Record<SignalKey, SignalVerdict> {
-  const v = (): SignalVerdict => ({ hit: false, evidence: '' });
-  return {
-    generalPhone: v(), contactForm: v(), salesDept: v(),
-    targetVacancy: v(), highVolume: v(), multiOffice: v(),
-    legalRelevance: v(), crmCalltracking: v(),
-  };
+  return emptySignals();
 }
 
 async function processRow(row: RefRow): Promise<RowRun> {

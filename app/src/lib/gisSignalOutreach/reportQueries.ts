@@ -30,8 +30,11 @@ export interface GisSignalFunnelRow {
 }
 
 /**
- * Все 8 сигнальных булевых колонок архива: 6 базовых + 2 скоринговых
- * (миграция 20260811_0003). Срез/статы считаются по всем восьми.
+ * Все 12 сигнальных булевых колонок архива: 6 базовых + 6 скоринговых
+ * (миграции 20260811_0003 — legal, 20260815_0001 — accounting/consulting).
+ * Срез/статы считаются по всем двенадцати; у строк, проверенных до появления
+ * колонки, значение false (DEFAULT миграции) — это «сигнал не искали», и на
+ * периодных отчётах по старым датам новые сигналы будут пустыми.
  */
 const SIGNAL_BOOL_COLUMNS = [
   'signal_general_phone',
@@ -42,6 +45,10 @@ const SIGNAL_BOOL_COLUMNS = [
   'signal_multi_office',
   'signal_legal_relevance',
   'signal_crm_calltracking',
+  'signal_accounting_relevance',
+  'signal_consulting_relevance',
+  'signal_pricing_packages',
+  'signal_client_segments',
 ] as const;
 
 export type GisSignalBoolKey = (typeof SIGNAL_BOOL_COLUMNS)[number];
