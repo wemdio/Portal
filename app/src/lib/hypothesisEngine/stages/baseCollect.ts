@@ -88,10 +88,12 @@ import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/r
 import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
+import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
 import { extractEmail } from '@/lib/tools/dfybUtils';
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { projectMarket, type HeMarket } from '../market';
 import { findIrrelevantRows } from '../relevanceGate';
+import { probeSliceRelevance, SLICE_PROBE_MIN_HIT_RATE, SLICE_PROBE_SAMPLE } from '../sliceProbe';
 import {
   buildSourcePlanMessages,
   type HeCollectTask,
@@ -515,6 +517,26 @@ export interface HePlanRepair {
   error?: string;
 }
 
+/**
+ * Итог пробы каталожного среза (ensureSliceMatchesVertical). outcome='rejected'
+ * означает, что база НЕ строилась осознанно: срез не про эту вертикаль, а
+ * автопилоту честнее пропустить вертикаль, чем разослать по мусору.
+ */
+export interface HeSliceProbe {
+  outcome: 'passed' | 'repaired' | 'repair_failed' | 'rejected';
+  /** Доля строк выборки, признанных принадлежащими вертикали (0..1). */
+  hit_rate: number;
+  sampled: number;
+  /** Доля до перепланирования (у repaired/rejected) — видно, помогло ли. */
+  first_hit_rate?: number;
+  /** Компании выборки, не признанные подходящими, — объяснение решения. */
+  off_target_examples?: string[];
+  /** Срез, которым перепланировали (repaired/rejected). */
+  pdl_filters?: HeCollectTask['pdl_filters'];
+  /** Причина, по которой перепланирование не состоялось (repair_failed). */
+  error?: string;
+}
+
 export interface HeCollectInfo {
   /** Лимит строк, выбранный при запуске сборки (route пишет при создании базы). */
   limit?: number;
@@ -534,6 +556,12 @@ export interface HeCollectInfo {
    * тонкую базу: каталога не было и добавить его не вышло.
    */
   plan_repair?: HePlanRepair;
+  /**
+   * Проба каталожного среза на принадлежность вертикали
+   * (ensureSliceMatchesVertical, market='us'). Ключа нет — пробы не было
+   * (RU-план, план без каталога или проба не состоялась).
+   */
+  slice_probe?: HeSliceProbe;
   /** Гипотезы, по которым реально строился план (accepted-дефолт или выбор специалиста). */
   hypotheses?: Array<{ id: string; title: string; status: string | null }>;
   tasks?: HeCollectTaskState[];
@@ -596,6 +624,7 @@ async function buildPlan(
 ): Promise<{
   plan: HeSourcePlan;
   planRepair?: HePlanRepair;
+  sliceProbe?: HeSliceProbe;
   usedHypotheses: Array<{ id: string; title: string; status: string | null }>;
 }> {
   // Гипотезы вертикали для плана. Семантика разметки: если специалист что-то
@@ -676,10 +705,21 @@ async function buildPlan(
   );
   addUsage(usage, llm);
 
-  const { plan, planRepair } = await ensureCatalogSource(ctx, llm.data, promptInput, usage, market);
+  const withCatalog = await ensureCatalogSource(ctx, llm.data, promptInput, usage, market);
+  // Проба идёт ПОСЛЕ починки «каталога нет вовсе»: чинить нечего, пока задачи
+  // не существует, а добавленный срез проверяется на общих основаниях.
+  const { plan, sliceProbe } = await ensureSliceMatchesVertical(
+    ctx,
+    withCatalog.plan,
+    vertical,
+    promptInput,
+    usage,
+    market,
+  );
   return {
     plan,
-    planRepair,
+    planRepair: withCatalog.planRepair,
+    sliceProbe,
     // Провенанс плана: по каким гипотезам реально строили (для collect_info и UI —
     // иначе на вопрос «точно все верно?» ответа нет ни в БД, ни на экране).
     usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, status: h.status })),
@@ -743,6 +783,156 @@ async function ensureCatalogSource(
   return {
     plan: { tasks },
     planRepair: { reason: 'no_catalog_source', outcome: 'repaired', pdl_filters: repair.data.pdl_filters },
+  };
+}
+
+/** Каталожная задача плана (по ней и идёт объём сборки), либо null. */
+function findCatalogTask(plan: HeSourcePlan): { task: HeCollectTask; index: number } | null {
+  const index = plan.tasks.findIndex((t) => t.source === 'pdl' || t.source === 'funded');
+  return index >= 0 ? { task: plan.tasks[index], index } : null;
+}
+
+/** Выборка из среза для пробы: те же коллекторы, только с крошечным лимитом. */
+async function sampleCatalogSlice(
+  ctx: HeStageContext,
+  task: HeCollectTask,
+): Promise<Array<Record<string, unknown>>> {
+  if (task.source === 'funded') {
+    const rows = await fetchFundedRows(ctx, task.funded_filters, SLICE_PROBE_SAMPLE);
+    return rows.map((r) => mapFundedRow(r) as unknown as Record<string, unknown>);
+  }
+  const rows = await fetchPdlRows(ctx, task.pdl_filters, SLICE_PROBE_SAMPLE);
+  return rows.map((r) => mapPdlRow(r) as unknown as Record<string, unknown>);
+}
+
+/**
+ * Проба каталожного среза перед сбором — и право ОТКАЗАТЬСЯ строить базу.
+ *
+ * Проблема, которую это закрывает. Планировщик может выдать фирмографически
+ * валидный срез, который к вертикали отношения не имеет. 12.08 под «Franchise
+ * Brands» он взял consumer services + education management + restaurants +
+ * health & wellness: 833 строки, 557 валидных почт, 67% — цифры неотличимы от
+ * эталонной Healthcare, а в базе рестораны, школы и YMCA вместо франчайзеров.
+ * Релевант-гейт это НЕ ловит по устройству (см. sliceProbe.ts).
+ *
+ * Механика: берём из среза выборку, спрашиваем модель с обратным дефолтом,
+ * получаем долю попадания. Ниже порога — перепланируем каталожную задачу тем же
+ * ремонтным вызовом, что и при полном отсутствии каталога (модель выбирает
+ * между industries и name-подстрокой), и пробуем ещё раз. Если и после этого
+ * ниже порога — базу НЕ строим.
+ *
+ * Почему отказ, а не «соберём что есть». Это автопилот: клиент вставляет ссылку
+ * и дальше только читает ответы, промежуточную базу никто глазами не смотрит.
+ * Пропущенная вертикаль честнее вертикали с мусором — плохой сегмент жжёт общие
+ * домены отправки и репутацию, вредя тем вертикалям, которые работают.
+ *
+ * Never-reject на сбое: несостоявшаяся проба (sampled=0 — пустой срез или сбой
+ * модели) НЕ отбраковывает срез, иначе блип LLM рубил бы рабочие вертикали.
+ */
+async function ensureSliceMatchesVertical(
+  ctx: HeStageContext,
+  plan: HeSourcePlan,
+  vertical: HeVertical,
+  promptInput: SourcePlanPromptInput,
+  usage: HeUsage,
+  market: HeMarket,
+): Promise<{ plan: HeSourcePlan; sliceProbe?: HeSliceProbe }> {
+  if (market !== 'us') return { plan };
+  const found = findCatalogTask(plan);
+  if (!found) return { plan };
+
+  const probe = async (task: HeCollectTask) => {
+    const sample = await sampleCatalogSlice(ctx, task);
+    const res = await probeSliceRelevance({
+      rows: sample,
+      verticalName: vertical.name,
+      verticalSummary: vertical.summary ?? '',
+      log: (m) => stageLog(ctx, m),
+    });
+    usage.tokensUsed += res.tokensUsed;
+    usage.costUsd += res.costUsd;
+    return res;
+  };
+
+  const first = await probe(found.task);
+  const pct = (r: { hitRate: number }) => `${Math.round(r.hitRate * 100)}%`;
+  // Проба не состоялась (пустой срез или сбой модели) — не мешаем сбору.
+  if (first.sampled === 0) return { plan };
+  if (first.hitRate >= SLICE_PROBE_MIN_HIT_RATE) {
+    stageLog(ctx, `[base_collect] проба среза: ${pct(first)} по вертикали — собираем`);
+    return {
+      plan,
+      sliceProbe: { outcome: 'passed', hit_rate: first.hitRate, sampled: first.sampled },
+    };
+  }
+
+  stageLog(
+    ctx,
+    `[base_collect] проба среза: всего ${pct(first)} по вертикали (мимо: ${first.offTargetExamples.join(', ')}) — перепланируем каталог`,
+  );
+
+  let repair;
+  try {
+    repair = await callLLMWithSchema(buildCatalogRepairMessagesEn(promptInput), HeCatalogRepairSchema, {
+      model: getHeModel('bulk'),
+    });
+  } catch (e) {
+    // Перепланировать не вышло — идём с исходным срезом: он плох, но отказ
+    // из-за сбоя модели был бы хуже. Причина остаётся в collect_info.
+    const message = e instanceof Error ? e.message : String(e);
+    stageLog(ctx, `[base_collect] перепланирование среза не удалось: ${message}`);
+    return {
+      plan,
+      sliceProbe: {
+        outcome: 'repair_failed',
+        hit_rate: first.hitRate,
+        sampled: first.sampled,
+        off_target_examples: first.offTargetExamples,
+        error: message,
+      },
+    };
+  }
+  addUsage(usage, repair);
+
+  const retried: HeCollectTask = {
+    source: 'pdl',
+    rationale: repair.data.rationale,
+    pdl_filters: repair.data.pdl_filters,
+  };
+  const second = await probe(retried);
+  if (second.sampled > 0 && second.hitRate < SLICE_PROBE_MIN_HIT_RATE) {
+    stageLog(
+      ctx,
+      `[base_collect] повторная проба: ${pct(second)} — вертикаль каталогом не покрывается, базу не строим`,
+    );
+    return {
+      plan,
+      sliceProbe: {
+        outcome: 'rejected',
+        hit_rate: second.hitRate,
+        sampled: second.sampled,
+        off_target_examples: second.offTargetExamples,
+        first_hit_rate: first.hitRate,
+        pdl_filters: repair.data.pdl_filters,
+      },
+    };
+  }
+
+  const tasks = plan.tasks.slice();
+  tasks[found.index] = retried;
+  stageLog(
+    ctx,
+    `[base_collect] каталожный срез заменён (${pct(first)} → ${pct(second)}): ${JSON.stringify(repair.data.pdl_filters)}`,
+  );
+  return {
+    plan: { tasks },
+    sliceProbe: {
+      outcome: 'repaired',
+      hit_rate: second.hitRate,
+      sampled: second.sampled,
+      first_hit_rate: first.hitRate,
+      pdl_filters: repair.data.pdl_filters,
+    },
   };
 }
 
@@ -1018,6 +1208,66 @@ export function buildRolesIlikeFilter(roles: string[]): string | null {
 }
 
 /**
+ * Потолок досбора сайтов за задачу и параллельность запросов к каталогу.
+ * Резолв — обогащение, а не контракт сбора: упереться в потолок значит лишь,
+ * что часть строк останется без сайта, как было до досбора.
+ */
+const ENG_HIRING_SITE_RESOLVE_MAX = 300;
+const ENG_HIRING_SITE_RESOLVE_CONCURRENCY = 8;
+
+/**
+ * Досбор сайта компании для строк eng_hiring, у которых его нет.
+ *
+ * Зачем: у ATS-фида `company_site_url` заполнен лишь у ~13% строк (замер 15.08:
+ * greenhouse 26%, smartrecruiters 2.8%, workable 0.5%). Без сайта конструктору
+ * не от чего искать почты, и строка вылетает из базы. На сборке Franchise Brands
+ * 12.08 из-за этого потерялись ЕДИНСТВЕННЫЕ компании по вертикали — United
+ * Franchise Group, Empower Brands, Mob Entertainment: их нашли по вакансии
+ * «franchise development» (сигнал намерения, точнее любой отраслевой метки),
+ * а в финальную базу не попало ни одной строки eng_hiring.
+ *
+ * Резолв идёт по локальному каталогу pdl_companies (имя → сайт, уточнение по
+ * стране) БЕЗ Clearbit-фолбэка `resolveCompanyDomainByName`: тот жёстко
+ * рейтлимитит и шеллится в curl — для пакетной сборки не годится. Резолвер сам
+ * отказывается угадывать на коллизиях имени: неверный домен хуже пустого.
+ *
+ * Never-throw: сбой резолва оставляет строку без сайта, сбор не роняет.
+ */
+async function fillMissingCompanySites(
+  ctx: HeStageContext,
+  rows: Record<string, unknown>[],
+): Promise<number> {
+  const targets = rows
+    .filter((r) => !cell(r.company_site_url) && cell(r.company_name))
+    .slice(0, ENG_HIRING_SITE_RESOLVE_MAX);
+  if (targets.length === 0) return 0;
+
+  let filled = 0;
+  for (let i = 0; i < targets.length; i += ENG_HIRING_SITE_RESOLVE_CONCURRENCY) {
+    const chunk = targets.slice(i, i + ENG_HIRING_SITE_RESOLVE_CONCURRENCY);
+    await Promise.all(
+      chunk.map(async (r) => {
+        try {
+          const domain = await resolveCompanyDomainViaPdl(
+            cell(r.company_name),
+            cell(r.country_code) || null,
+            ctx.supabase as unknown as Parameters<typeof resolveCompanyDomainViaPdl>[2],
+          );
+          const site = domainToSiteUrl(domain);
+          if (site) {
+            r.company_site_url = site;
+            filled += 1;
+          }
+        } catch {
+          /* обогащение best-effort: строка просто останется без сайта */
+        }
+      }),
+    );
+  }
+  return filled;
+}
+
+/**
  * eng_hiring_cache (компании, нанимающие ENG-роли): SQL сужает выборку по
  * стране (country_code), свежести (published_at >= now - posted_within_days) и
  * роли (buildRolesIlikeFilter — надмножество), точность роли добирает regex по
@@ -1069,6 +1319,14 @@ async function fetchEngHiringRows(
     if (!key || seen.has(key)) continue;
     seen.add(key);
     if (out.length < limit) out.push(r);
+  }
+
+  // Досбор сайтов — ПОСЛЕ дедупа: резолвим только те строки, что реально уйдут
+  // в базу, а не каждую просканированную вакансию.
+  const missing = out.filter((r) => !cell(r.company_site_url)).length;
+  if (missing > 0) {
+    const filled = await fillMissingCompanySites(ctx, out);
+    stageLog(ctx, `[base_collect] eng_hiring: сайт дособран у ${filled} из ${missing} строк без него`);
   }
   return out;
 }
@@ -1611,10 +1869,26 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
 
   // ─── PLAN ───
   if (!info.plan) {
-    const { plan, planRepair, usedHypotheses } = await buildPlan(job, ctx, vertical, usage, market);
+    const { plan, planRepair, sliceProbe, usedHypotheses } = await buildPlan(job, ctx, vertical, usage, market);
     info.plan = plan;
     if (planRepair) info.plan_repair = planRepair;
+    if (sliceProbe) info.slice_probe = sliceProbe;
     info.hypotheses = usedHypotheses;
+
+    // Отказ пробы: срез не про эту вертикаль и перепланирование не помогло.
+    // Сохраняем провенанс и валим сбор ДО дозвона до коллекторов — час
+    // конструктора и рассылка по мусору дороже пропущенной вертикали.
+    if (sliceProbe?.outcome === 'rejected') {
+      info.tasks = [];
+      await persistCollectInfo(ctx, baseId, info);
+      const examples = sliceProbe.off_target_examples?.slice(0, 3).join(', ');
+      throw new Error(
+        `Вертикаль «${vertical.name}» не покрывается каталогом: в пробе среза подошло ` +
+          `${Math.round(sliceProbe.hit_rate * 100)}% из ${sliceProbe.sampled} компаний` +
+          (examples ? ` (мимо: ${examples})` : '') +
+          '. База не собиралась — рассылка по такому срезу навредила бы рабочим вертикалям.',
+      );
+    }
     info.tasks = info.plan.tasks.map((task) => ({
       source: task.source,
       status: 'pending' as const,

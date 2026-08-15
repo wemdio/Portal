@@ -158,6 +158,10 @@ function systemPromptOf(callIndex = 0): string {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // clearAllMocks НЕ снимает очередь mockResolvedValueOnce: недоиспользованные
+  // ответы (тест упал раньше, чем выбрал их все) утекали бы в следующий кейс и
+  // подменяли там план источников. Сбрасываем очередь явно.
+  callLLMMock.mockReset();
   // График пауз ретрая pdl тесты укорачивают через env — чтобы утечка настройки
   // не влияла на соседние кейсы, сбрасываем на дефолт перед каждым.
   delete process.env.HE_PDL_READ_RETRY_DELAYS_MS;
@@ -473,8 +477,8 @@ describe('plan phase — market=us зовёт EN-промпт', () => {
     const res = await runBaseCollectStage(makeJob(), ctx('us'));
     expect((res.result as { rows: number }).rows).toBe(1);
 
-    // Первый вызов — план источников (EN-промпт); второй — релевант-гейт финала.
-    expect(callLLMMock).toHaveBeenCalledTimes(2);
+    // План источников (EN-промпт) → проба каталожного среза → релевант-гейт финала.
+    expect(callLLMMock).toHaveBeenCalledTimes(3);
     expect(systemPromptOf()).toContain('Answer strictly in English');
     expect(systemPromptOf()).not.toContain('Отвечай строго на русском');
 
@@ -585,8 +589,8 @@ describe('plan phase — market=us зовёт EN-промпт', () => {
 
       await runBaseCollectStage(makeJob(), ctx('us'));
 
-      // Ровно два вызова: план + релевант-гейт. Третий означал бы починку.
-      expect(callLLMMock).toHaveBeenCalledTimes(2);
+      // План + проба среза + релевант-гейт. Четвёртый означал бы починку.
+      expect(callLLMMock).toHaveBeenCalledTimes(3);
     });
 
     it('провал починки не маскируется: план идёт как есть, причина остаётся в collect_info', async () => {
@@ -652,6 +656,146 @@ describe('plan phase — market=us зовёт EN-промпт', () => {
       const info = mockDb.updates.filter((u) => u.table === 'he_bases')[0].patch.collect_info as HeCollectInfo;
       expect(info.plan?.tasks.map((t) => t.source)).toEqual(['hh_live']);
       expect(info.plan_repair).toBeUndefined();
+    });
+  });
+
+  /**
+   * Проба каталожного среза. 12.08 планировщик выдал под «Franchise Brands»
+   * фирмографически валидный, но чужой срез (широкие индустрии) — 833 строки,
+   * 557 почт, цифры как у эталона, а внутри рестораны и школы. Гейт это не
+   * ловит по устройству, поэтому срез проверяется ДО сбора.
+   */
+  describe('проба каталожного среза на принадлежность вертикали', () => {
+    const PDL_PLAN = {
+      tasks: [
+        { source: 'pdl', rationale: 'catalog', pdl_filters: { industries: ['restaurants'] } },
+      ],
+    };
+    const llmResult = (data: unknown) => ({
+      data,
+      tokensUsed: 10,
+      promptTokens: 8,
+      completionTokens: 2,
+      costUsd: 0.0001,
+      rawResponse: {},
+    });
+
+    function seedWithCatalog() {
+      mockDb = createMockSupabase({
+        tables: {
+          he_bases: [makeBase({ construct: CONSTRUCT_DONE })],
+          he_verticals: [{ ...VERTICAL, name: 'Franchise Brands' }],
+          he_projects: [PROJECT_US],
+          he_jobs: [makeJob() as unknown as Record<string, unknown>],
+          he_hypotheses: [
+            { project_id: 'p1', vertical_id: 'v1', title: 'Franchisors', description: 'd', tier: 1, status: 'accepted', potential_pct: 80 },
+          ],
+          pdl_companies: [
+            // Под исходный срез (industries=restaurants) — компания мимо вертикали.
+            { id: 'pdl-1', name: 'Le Bilboquet Denver', website: 'lb.com', industry: 'restaurants', country: 'united states' },
+            // Под перепланированный срез (name=franchise) — целевая компания.
+            { id: 'pdl-2', name: 'United Franchise Group', website: 'ufg.com', industry: 'consumer services', country: 'united states' },
+          ],
+        },
+        rpcHandlers: PDL_RPC,
+      });
+    }
+
+    function infoOf(): HeCollectInfo {
+      return mockDb.updates.filter((u) => u.table === 'he_bases')[0].patch.collect_info as HeCollectInfo;
+    }
+
+    it('срез по вертикали → собираем, проба записана как passed', async () => {
+      seedWithCatalog();
+      callLLMMock
+        .mockResolvedValueOnce(llmResult(PDL_PLAN)) // план
+        .mockResolvedValueOnce(llmResult({ belongs: [0] })) // проба: строка подходит
+        .mockResolvedValue(llmResult({ irrelevant: [] })); // релевант-гейт
+
+      const res = await runBaseCollectStage(makeJob(), ctx('us'));
+      expect((res.result as { rows: number }).rows).toBe(1);
+      expect(infoOf().slice_probe).toMatchObject({ outcome: 'passed', hit_rate: 1, sampled: 1 });
+    });
+
+    it('чужой срез → перепланируется, в план идёт новый; вопрос пробы обратный гейту', async () => {
+      seedWithCatalog();
+      const REPAIR = { rationale: 'franchisors carry it in the name', pdl_filters: { name: 'franchise' } };
+      callLLMMock
+        .mockResolvedValueOnce(llmResult(PDL_PLAN))
+        .mockResolvedValueOnce(llmResult({ belongs: [] })) // проба 1: не подходит
+        .mockResolvedValueOnce(llmResult(REPAIR)) // перепланирование
+        .mockResolvedValueOnce(llmResult({ belongs: [0] })) // проба 2: подходит
+        .mockResolvedValue(llmResult({ irrelevant: [] }));
+
+      await runBaseCollectStage(makeJob(), ctx('us'));
+
+      const info = infoOf();
+      expect(info.plan?.tasks[0].pdl_filters).toEqual({ name: 'franchise' });
+      expect(info.slice_probe).toMatchObject({ outcome: 'repaired', hit_rate: 1, first_hit_rate: 0 });
+
+      // Дефолт пробы инвертирован: спрашиваем про принадлежность, а не про шум.
+      const probePrompt = systemPromptOf(1);
+      expect(probePrompt).toContain('Default to NOT belonging');
+      expect(probePrompt).not.toContain('When in doubt — keep');
+    });
+
+    it('перепланирование не помогло → база НЕ строится, причина в collect_info', async () => {
+      seedWithCatalog();
+      callLLMMock
+        .mockResolvedValueOnce(llmResult(PDL_PLAN))
+        .mockResolvedValueOnce(llmResult({ belongs: [] })) // проба 1
+        .mockResolvedValueOnce(llmResult({ rationale: 'r', pdl_filters: { name: 'franchise' } }))
+        .mockResolvedValueOnce(llmResult({ belongs: [] })) // проба 2 — снова мимо
+        .mockResolvedValue(llmResult({ irrelevant: [] }));
+
+      await expect(runBaseCollectStage(makeJob(), ctx('us'))).rejects.toThrow(
+        /не покрывается каталогом/,
+      );
+
+      const info = infoOf();
+      expect(info.slice_probe).toMatchObject({
+        outcome: 'rejected',
+        hit_rate: 0,
+        // Примеры — из ПОВТОРНОЙ пробы: показываем, на чём решение принято.
+        off_target_examples: ['United Franchise Group'],
+      });
+      // Задачи обнулены — коллекторы не дёргались вовсе.
+      expect(info.tasks).toEqual([]);
+    });
+
+    it('сбой пробы не отбраковывает срез: блип модели не должен рубить вертикаль', async () => {
+      seedWithCatalog();
+      callLLMMock
+        .mockResolvedValueOnce(llmResult(PDL_PLAN))
+        .mockRejectedValueOnce(new Error('LLM 503')) // проба не состоялась
+        .mockResolvedValue(llmResult({ irrelevant: [] }));
+
+      const res = await runBaseCollectStage(makeJob(), ctx('us'));
+      expect((res.result as { rows: number }).rows).toBe(1);
+      expect(infoOf().slice_probe).toBeUndefined();
+    });
+
+    it("market='ru' не пробуется: у RU-плана каталог свой", async () => {
+      mockDb = createMockSupabase({
+        tables: {
+          he_bases: [makeBase({ construct: CONSTRUCT_DONE })],
+          he_verticals: [{ ...VERTICAL, name: 'HR-агентства' }],
+          he_projects: [{ ...PROJECT_RU, market: 'ru' }],
+          he_jobs: [makeJob() as unknown as Record<string, unknown>],
+          he_hypotheses: [
+            { project_id: 'p1', vertical_id: 'v1', title: 'Кадровые бутики', description: null, tier: 1, status: 'accepted', potential_pct: 80 },
+          ],
+        },
+      });
+      callLLMMock
+        .mockResolvedValueOnce(
+          llmResult({ tasks: [{ source: 'companies_directory', rationale: 'р', directory_filters: { okvedCodes: ['78'] } }] }),
+        )
+        .mockResolvedValue(llmResult({ irrelevant: [] }));
+      searchRowsMock.mockResolvedValue({ rows: [{ name: 'ООО Кадры', website: 'kadry.ru' }] });
+
+      await runBaseCollectStage(makeJob(), ctx('ru'));
+      expect(infoOf().slice_probe).toBeUndefined();
     });
   });
 
@@ -1180,6 +1324,155 @@ describe('dispatch — eng_hiring (прямое чтение eng_hiring_cache)',
     expect((res.result as { rows: number }).rows).toBe(1);
     const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
     expect((harvest?.data as HeUnifiedRow[])[0].company).toBe('Franchise Group');
+  });
+
+  it('строке без сайта досбирается домен из каталога — иначе конструктор её теряет', async () => {
+    // У ATS-фида сайт заполнен у ~13% строк. На сборке Franchise Brands 12.08
+    // из-за этого выпали ЕДИНСТВЕННЫЕ компании по вертикали (их нашли по
+    // вакансии «franchise development»), и в базе не осталось ни одной строки
+    // eng_hiring.
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
+      tasks: [
+        {
+          source: 'eng_hiring',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: {
+            source: 'eng_hiring',
+            rationale: 'r',
+            eng_hiring_query: { roles: ['franchise development'], countries: ['us'] },
+          },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT_US],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        eng_hiring_cache: [
+          {
+            id: 'v1',
+            source: 'lever',
+            company_name: 'United Franchise Group',
+            company_site_url: null,
+            vacancy_title: 'Director of Franchise Development',
+            location: 'West Palm Beach, FL',
+            country_code: 'us',
+            published_at: new Date().toISOString(),
+          },
+        ],
+        pdl_companies: [
+          {
+            id: 'pdl-1',
+            name: 'United Franchise Group',
+            website: 'ufgcorp.com',
+            country: 'united states',
+            industry: 'consumer services',
+          },
+        ],
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx('us'));
+    expect((res.result as { rows: number }).rows).toBe(1);
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    const collected = (harvest?.data as HeUnifiedRow[])[0];
+    expect(collected.company).toBe('United Franchise Group');
+    expect(collected.website).toBe('https://ufgcorp.com');
+  });
+
+  it('имеющийся сайт строки не перетирается досбором', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
+      tasks: [
+        {
+          source: 'eng_hiring',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: { source: 'eng_hiring', rationale: 'r', eng_hiring_query: { roles: ['franchise development'] } },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT_US],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        eng_hiring_cache: [
+          {
+            id: 'v1',
+            source: 'lever',
+            company_name: 'United Franchise Group',
+            company_site_url: 'https://real-site.com',
+            vacancy_title: 'Franchise Development Manager',
+            location: 'FL',
+            country_code: 'us',
+            published_at: new Date().toISOString(),
+          },
+        ],
+        // В каталоге у той же компании ДРУГОЙ домен — досбор не должен его подставить.
+        pdl_companies: [
+          { id: 'pdl-1', name: 'United Franchise Group', website: 'ufgcorp.com', country: 'united states' },
+        ],
+      },
+    });
+
+    await runBaseCollectStage(makeJob(), ctx('us'));
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect((harvest?.data as HeUnifiedRow[])[0].website).toBe('https://real-site.com');
+  });
+
+  it('коллизия имени в каталоге → сайт не подставляется (неверный домен хуже пустого)', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      construct: CONSTRUCT_DONE,
+      tasks: [
+        {
+          source: 'eng_hiring',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: { source: 'eng_hiring', rationale: 'r', eng_hiring_query: { roles: ['franchise development'] } },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT_US],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        eng_hiring_cache: [
+          {
+            id: 'v1',
+            source: 'lever',
+            company_name: 'Momentum',
+            company_site_url: null,
+            vacancy_title: 'Franchise Development Lead',
+            location: 'NY',
+            country_code: 'us',
+            published_at: new Date().toISOString(),
+          },
+        ],
+        // Две РАЗНЫЕ компании с одним именем: угадывать нельзя.
+        pdl_companies: [
+          { id: 'p1', name: 'Momentum', website: 'momentum-a.com', country: 'united states' },
+          { id: 'p2', name: 'Momentum', website: 'momentum-b.com', country: 'united states' },
+        ],
+      },
+    });
+
+    await runBaseCollectStage(makeJob(), ctx('us'));
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect((harvest?.data as HeUnifiedRow[])[0].website).toBe('');
   });
 
   it('несколько ролей матчатся как альтернативы (keywords через запятую)', async () => {
