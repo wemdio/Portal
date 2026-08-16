@@ -190,3 +190,6 @@ app/logs/
 # Локальные артефакты ESP-скана (app/scripts/espScan.ts) — CSV-базы и чекпоинты
 /esp-scan-*.csv
 /.esp-scan/
+
+# Нарезанные сегменты баз (espSegment)
+/esp-segments/

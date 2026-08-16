@@ -6,6 +6,47 @@
 
 ---
 
+## 2026-08-17 — сегментация баз + инцидент с рабочей копией
+
+### Сегментация (скрипт `app/scripts/espSegment.ts`)
+
+Готовые сегменты в порядке приоритета (конкуренты отсеяны: industry
+'marketing and advertising' и/или агентские маркеры в имени — 2 142 шт / 4.4%,
+контрольный файл `excluded-competitors.csv`):
+
+| Приоритет | Сегмент | Правило | Компаний |
+|---|---|---|---|
+| P1 | `p1-email-mature.csv` | grade A (стэк 2+ систем) | 3 337 |
+| P2 | `p2-automation-crm.csv` | grade C (HubSpot/Pardot/Marketo без платформы) | 12 029 |
+| P3 | `p3-smb-platform.csv` | grade B, 1–50 чел. | 24 886 |
+| P4 | `p4-midplus-platform.csv` | grade B, 51+ чел. | 6 332 |
+
+Плюс мастер-файл `all-prioritized.csv` (46 584, колонки priority/segment).
+Сортировка внутри сегмента: score ↓, размер ↓. Всё лежит в `esp-segments/`
+(вне git). Сборка сегментера: `node_modules/.bin/esbuild scripts/espSegment.ts
+--bundle --platform=node --target=node20 --format=cjs
+--outfile=dist/scripts/espSegment.cjs` (в app/).
+
+### Инцидент: массовое удаление файлов в рабочей копии
+
+Обнаружено при сборке сегментера: из рабочей копии удалены 2 640 tracked-файлов
+(весь `app/src`, `app/package.json`, воркеры, `app/scripts/*` включая
+espScan.ts). Не влияет на данные: базы/чекпоинты/дневник — untracked, целы;
+собранный `dist/scripts/espScan.cjs` цел; вся история в git (`engSPF`,
+HEAD e97c4c4f5). Восстановление: `git restore app/`. Причина удалений
+не установлена (руками не удаляли; вероятно, внешнее воздействие/ошибка ОС).
+package.json-скрипт build:esp-segment добавить после восстановления.
+
+### Открытые вопросы / next steps
+
+- [ ] Восстановить рабочую копию (`git restore app/`) + добавить
+      «build:esp-segment» в package.json.
+- [ ] Пилот: P3 (или P1) одной страны через флоу контакты → валидация → кампания.
+- [ ] Правило для Klaviyo/e-commerce (SendGrid + retail).
+- [ ] Раунд 2: докрутка UK/CA/AU/NL, затем DE/SE/AE.
+
+---
+
 ## 2026-08-16 — запуск и первый раунд баз
 
 ### Контекст и решение
@@ -88,7 +129,7 @@ node app/dist/scripts/espScan.cjs --country="united kingdom" --limit=300000 \
 
 ### Открытые вопросы / next steps
 
-- [ ] Сегментация баз (грейд × ESP × индустрия × размер) — обсудили 2026-08-16.
+- [x] Сегментация баз (грейд × размер, с отсевом конкурентов) — сделано 2026-08-17.
 - [ ] Правило для Klaviyo/e-commerce (SendGrid + retail).
 - [ ] Пилот: одна страна через флоу контакты → валидация → кампания.
 - [ ] Раунд 2: докрутка UK/CA/AU/NL, затем DE/SE/AE.
