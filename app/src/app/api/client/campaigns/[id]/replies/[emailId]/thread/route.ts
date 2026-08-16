@@ -6,6 +6,7 @@ import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAc
 import { getEmail, listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToThreadMessage } from '@/lib/clientCampaignReplies/mapEmail';
 import { findEaccountForReply } from '@/lib/clientCampaignReplies/findEaccount';
+import { resolveStrayAccess } from '@/lib/clientCampaignReplies/strayAccess';
 import { partitionForeignEmails, resolveClientMailboxes, isInboundEmail } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
 import { computeReplyAllRecipients } from '@/lib/clientCampaignReplies/participants';
 import { recordEmailRead } from '@/lib/clientCampaignReplies/clientEmailReads';
@@ -42,8 +43,24 @@ export async function GET(
 
   try {
     const original = await getEmail(emailId, instantlyRequestOptions);
-    if (!original || original.campaign_id !== campaignId) {
+    if (!original) {
       return jsonError('Письмо не относится к кампании', 404);
+    }
+    // Сирота: у письма пуст campaign_id (провайдер не привязал его к кампании),
+    // поэтому право проверяем по ящику-получателю — см. strayAccess. Адрес лида
+    // берём из нашей записи: у сироты поле lead пустое, а без него ниже не
+    // собрать ни остальную переписку, ни «ответить всем».
+    let strayLeadEmail: string | null = null;
+    if (original.campaign_id !== campaignId) {
+      const stray = await resolveStrayAccess({
+        emailId,
+        campaignId,
+        userId,
+        accountId: instantlyRequestOptions.accountId,
+        eaccount: original.eaccount,
+      });
+      if (!stray) return jsonError('Письмо не относится к кампании', 404);
+      strayLeadEmail = stray.leadEmail;
     }
 
     // Помечаем прочитанным СРАЗУ после проверки доступа — ДО загрузки треда. Если
@@ -63,7 +80,7 @@ export async function GET(
     }
 
     const threadId = original.thread_id ?? null;
-    const leadEmail = original.lead ?? null;
+    const leadEmail = original.lead ?? strayLeadEmail;
 
     // Тянем ВСЮ переписку с лидом в этой кампании, фильтруя по `lead` (email) —
     // это рабочий фильтр Instantly. Раньше передавали `lead_id` с email-значением,
