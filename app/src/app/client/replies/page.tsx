@@ -136,8 +136,31 @@ function LeadDetail({
   // подтверждается ящиком-получателем (см. lib/clientCampaignReplies/
   // strayAccess.ts), поэтому сирота отвечается наравне с обычным ответом:
   // отдельного гейта у canReplyByEmail больше нет.
+  //
+  // Признак «ящик наш» — это ровно `eaccount`: список подставляет его ТОЛЬКО для
+  // собственного ящика клиента (route.ts, ownMailbox), а сироту с чужим ящиком
+  // всё равно показывает, просто без ящика. Поэтому гейт UI обязан совпадать с
+  // серверным: иначе на чужой сироте мы нарисовали бы форму ответа, а /thread и
+  // /reply отдали бы 404 — понятный read-only блок сменился бы на невнятную
+  // ошибку. Для обычных ответов eaccount не приходит и в условии не участвует.
   const isOutOfCampaign = Boolean(lead.out_of_campaign);
-  const canReplyByEmail = Boolean(lead.campaign_id && lead.email_id);
+  const canReplyByEmail = Boolean(
+    lead.campaign_id && lead.email_id && (!isOutOfCampaign || lead.eaccount),
+  );
+
+  // Прочтение обычно проставляет /thread при открытии переписки. Там, где треда
+  // нет (сирота с чужим ящиком — read-only), помечаем явно, иначе «непрочитано»
+  // не гаснет и счётчик врёт.
+  useEffect(() => {
+    if (!isOutOfCampaign || canReplyByEmail || !lead.campaign_id || !lead.email_id) return;
+    void clientApiFetch(`/campaigns/${lead.campaign_id}/replies/${lead.email_id}/read`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ read: true }),
+    }).catch(() => {
+      // статус прочтения не критичен — молча игнорируем сбой
+    });
+  }, [isOutOfCampaign, canReplyByEmail, lead.campaign_id, lead.email_id]);
 
   const loadComments = useCallback(async () => {
     if (!canComment) {
@@ -337,12 +360,33 @@ function LeadDetail({
           {isOutOfCampaign && lead.eaccount && <InfoRow label="Ящик" value={lead.eaccount} />}
         </div>
 
-        {/* Отдельного read-only блока для сироты больше нет: раньше он показывал
-            сам ответ и просил отвечать из почтового клиента, потому что тред и
-            ответ были закрыты. Теперь и то и другое работает (право — по
-            ящику-получателю, см. lib/clientCampaignReplies/strayAccess.ts), а
-            текст ответа и так виден в ленте: если /thread не отдаст переписку,
-            ExpandedThread покажет его из fallbackThread ниже. */}
+        {/* Read-only остаётся только там, где ответить и правда нельзя: сирота,
+            чей ящик-получатель не наш (или его не удалось определить). Тред и
+            ответ там закрыты серверной проверкой, и показать сам ответ больше
+            негде. Для сироты со своим ящиком блока нет — ответ виден в ленте
+            ниже (а если /thread не отдаст переписку, ExpandedThread покажет его
+            из fallbackThread). */}
+        {isOutOfCampaign && !canReplyByEmail && (
+          <div className="mb-2">
+            <p className="ds-eyebrow mb-2">
+              02<span aria-hidden> → </span>ответ вне треда кампании
+            </p>
+            <div className="neu-sm rounded-xl p-4">
+              {lead.reply_subject && (
+                <p className="text-sm font-semibold mb-1" style={{ color: 'var(--cp-paper)' }}>
+                  {lead.reply_subject}
+                </p>
+              )}
+              <p className="text-sm whitespace-pre-wrap" style={{ color: 'var(--cp-text)' }}>
+                {lead.reply_body ?? ''}
+              </p>
+              <p className="text-xs mt-3" style={{ color: 'var(--cp-text-l)' }}>
+                Письмо пришло вне треда кампании и получено не вашим ящиком — переписка и
+                ответ через портал по нему недоступны.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Переписка — единой лентой (новые сверху, как в Instantly), сразу под
             шапкой. Раньше тут были закреплённые «наше последнее письмо» + «ответ
