@@ -4,6 +4,7 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
 import { getEmail, listEmails, replyToEmail } from '@/lib/instantly/client';
 import { findEaccountForReply } from '@/lib/clientCampaignReplies/findEaccount';
+import { resolveStrayAccess } from '@/lib/clientCampaignReplies/strayAccess';
 import { isForeignEmail, isInboundEmail, resolveClientMailboxes } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
 import { computeReplyAllCc, mergeCcLists } from '@/lib/clientCampaignReplies/participants';
 import { validateReplyInput } from '@/lib/clientCampaignReplies/validate';
@@ -59,9 +60,26 @@ export async function POST(
 
   try {
     const original = await getEmail(emailId, instantlyRequestOptions);
-    if (!original || original.campaign_id !== campaignId) {
+    if (!original) {
       return jsonError('Письмо не относится к кампании', 404);
     }
+    // Сирота: провайдер не привязал письмо к кампании, поэтому campaign_id у него
+    // пуст и обычная проверка принадлежности не проходит. Право проверяем по
+    // ящику-получателю (strayAccess, fail-closed). Адрес лида берём из нашей
+    // записи — у сироты поле lead пустое.
+    let strayLeadEmail: string | null = null;
+    if (original.campaign_id !== campaignId) {
+      const stray = await resolveStrayAccess({
+        emailId,
+        campaignId,
+        userId,
+        accountId: instantlyRequestOptions.accountId,
+        eaccount: original.eaccount,
+      });
+      if (!stray) return jsonError('Письмо не относится к кампании', 404);
+      strayLeadEmail = stray.leadEmail;
+    }
+    const leadEmail = original.lead ?? strayLeadEmail;
 
     // Чужое входящее (получено ящиком ДРУГОГО клиента воркспейса, см.
     // foreignMailboxFilter): отвечать на него нельзя — findEaccountForReply
@@ -75,8 +93,8 @@ export async function POST(
     }
 
     let eaccount = findEaccountForReply({ originalEmail: original, threadEmails: [] });
-    if (!eaccount && original.thread_id && original.lead) {
-      const thread = await listEmails({ campaign_id: campaignId, lead_id: original.lead, limit: 100 }, instantlyRequestOptions);
+    if (!eaccount && original.thread_id && leadEmail) {
+      const thread = await listEmails({ campaign_id: campaignId, lead_id: leadEmail, limit: 100 }, instantlyRequestOptions);
       eaccount = findEaccountForReply({ originalEmail: original, threadEmails: thread.items ?? [] });
     }
     if (!eaccount) {
@@ -88,7 +106,7 @@ export async function POST(
     // reply_to_uuid), плюс то, что клиент дописал в CC руками. Иначе подключённого
     // лидом коллегу/ЛПР молча теряем (был инцидент: лид добавил линейного
     // продюсера, наш ответ ушёл без него, лид написал «вы удалили из копии»).
-    const replyAllCc = computeReplyAllCc(original, { eaccount, leadEmail: original.lead });
+    const replyAllCc = computeReplyAllCc(original, { eaccount, leadEmail });
     const manualCc = validation.cc ? validation.cc.split(',') : [];
     const mergedCc = mergeCcLists(replyAllCc, manualCc);
 
@@ -98,7 +116,7 @@ export async function POST(
     const quoteSrc = {
       bodyText: extractBodyText(original.body),
       fromName: original.from_address_json?.[0]?.name ?? null,
-      fromEmail: original.from_address_email ?? original.lead ?? null,
+      fromEmail: original.from_address_email ?? leadEmail ?? null,
       timestamp: original.timestamp_email ?? original.timestamp_created ?? null,
     };
 
@@ -124,7 +142,7 @@ export async function POST(
     try {
       // Пишем ключи переписки (campaign + lead), чтобы «Отвечено» считалось по
       // лиду и не слетало на объёмной кампании. См. applyRepliedMarks.
-      await recordEmailReplied(userId, emailId, { campaignId, leadEmail: original.lead });
+      await recordEmailReplied(userId, emailId, { campaignId, leadEmail });
       await recordEmailRead(userId, emailId);
     } catch (err) {
       await logError('client.campaign.replies.reply.record_failed', err, { campaignId, emailId, userId });
