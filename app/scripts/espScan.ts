@@ -93,7 +93,14 @@ interface PdlRow {
   size: string | null;
 }
 
-async function supabaseGet<T>(path: string, tries = 4): Promise<T[]> {
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * REST GET с терпеливыми ретраями. Ночной прогон идёт часами — один сетевой
+ * блуп до polza-portal.ru (connect timeout / VPN-флап) не должен убивать
+ * весь запуск: бэкофф растёт квадратично до 30с.
+ */
+async function supabaseGet<T>(path: string, tries = 6): Promise<T[]> {
   let lastErr: unknown = null;
   for (let attempt = 1; attempt <= tries; attempt++) {
     const controller = new AbortController();
@@ -110,7 +117,7 @@ async function supabaseGet<T>(path: string, tries = 4): Promise<T[]> {
       clearTimeout(timer);
       if (res.status === 429 || res.status >= 500) {
         lastErr = new Error(`HTTP ${res.status}`);
-        await new Promise((r) => setTimeout(r, attempt * 1500));
+        await sleepMs(Math.min(30_000, attempt * attempt * 1500));
         continue;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
@@ -118,7 +125,7 @@ async function supabaseGet<T>(path: string, tries = 4): Promise<T[]> {
     } catch (err) {
       clearTimeout(timer);
       lastErr = err;
-      await new Promise((r) => setTimeout(r, attempt * 1500));
+      await sleepMs(Math.min(30_000, attempt * attempt * 1500));
     }
   }
   throw lastErr ?? new Error('supabaseGet failed');
@@ -250,11 +257,12 @@ async function mapWithConcurrency<T, R>(
 
 async function listFilters(): Promise<void> {
   console.log('Топ стран / индустрий / размеров в pdl_companies (pdl_facets RPC)…\n');
-  const facets = await supabaseGet<{ industries: { value: string; count: number }[]; countries: { value: string; count: number }[]; sizes: { value: string; count: number }[] }>(
+  // rpc возвращает один jsonb-объект, не массив
+  const raw = await supabaseGet<{ industries?: { value: string; count: number }[]; countries?: { value: string; count: number }[]; sizes?: { value: string; count: number }[] }>(
     'rpc/pdl_facets',
-  ).catch(() => null);
-  const data = facets?.[0];
-  if (!data) {
+  );
+  const data = Array.isArray(raw) ? raw[0] : raw;
+  if (!data?.countries) {
     console.error('Не удалось получить facets (rpc/pdl_facets).');
     process.exit(1);
   }
@@ -292,7 +300,21 @@ async function main(): Promise<void> {
 
   while (true) {
     const remaining = opt.limit ? opt.limit - rowsFetched : null;
-    const batch = await supabaseGet<PdlRow>(pdlQuery(state.lastId, remaining ? Math.min(BATCH, remaining) : BATCH));
+    // Внешний слой терпения: сетевые сбои целиком (роутер/VPN/хост) —
+    // до 10 кругов по ~90с, прежде чем признать прогон упавшим.
+    let batch: PdlRow[] | null = null;
+    for (let tryIdx = 0; tryIdx < 10 && batch === null; tryIdx++) {
+      try {
+        batch = await supabaseGet<PdlRow>(pdlQuery(state.lastId, remaining ? Math.min(BATCH, remaining) : BATCH));
+      } catch (err) {
+        console.warn(`  батч не получен (попытка ${tryIdx + 1}/10): ${(err as Error).message} — жду 30с`);
+        await sleepMs(30_000);
+      }
+    }
+    if (batch === null) {
+      console.error('Сеть недоступна слишком долго — останавливаюсь. Чекпоинт сохранён, повторный запуск продолжит с того же места.');
+      process.exit(1);
+    }
     if (batch.length === 0) {
       console.log('\nДостигнут конец выборки по фильтрам.');
       break;
