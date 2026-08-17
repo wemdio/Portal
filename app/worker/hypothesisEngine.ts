@@ -304,9 +304,12 @@ async function failJob(job: HeJob, err: unknown) {
   }
 
   // Финальный фейл base_collect: без этого he_bases навсегда остаётся в
-  // 'collecting' (failed пишет только путь «ноль строк» в самой стадии), и
-  // collect-роут продолжает отдавать базу как живую. payload может не
-  // содержать base_id — тогда просто не трогаем базу.
+  // 'collecting', и collect-роут продолжает отдавать базу как живую. payload
+  // может не содержать base_id — тогда просто не трогаем базу.
+  // Только status='collecting': стадия сама валит базу с ПРИЧИНОЙ («ноль
+  // строк», отказ пробы среза), а ретраи после этого умирают в start-guard —
+  // без фильтра его текст «сборка уже завершена» перетирал осмысленную причину
+  // (так выглядели базы Franchise Brands 12.08).
   if (finalFail && job.stage === 'base_collect') {
     const baseId = typeof job.payload?.base_id === 'string' ? job.payload.base_id : null;
     if (baseId) {
@@ -317,7 +320,8 @@ async function failJob(job: HeJob, err: unknown) {
           error: msg.slice(0, 500),
           updated_at: new Date().toISOString(),
         })
-        .eq('id', baseId);
+        .eq('id', baseId)
+        .eq('status', 'collecting');
     }
   }
 }

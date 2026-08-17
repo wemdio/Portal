@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError, fetchOwnerNames, userOwnsAccount } from '@/lib/liOutreach/apiHelpers';
+import { collectUnknownPlaceholders, unknownPlaceholderError } from '@/lib/liOutreach/campaignTextCheck';
 import { normalizeTimezoneOffset, normalizeWorkingHours } from '@/lib/liOutreach/schedule';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
@@ -43,6 +44,9 @@ export async function POST(req: NextRequest) {
     if (body.account_id && !(await userOwnsAccount(auth.user.id, String(body.account_id)))) {
       return jsonError('Нельзя привязать кампанию к LinkedIn-аккаунту другого специалиста', 403);
     }
+    const unknownVars = collectUnknownPlaceholders(body);
+    if (unknownVars.length > 0) return jsonError(unknownPlaceholderError(unknownVars), 400);
+
     const workingHours = normalizeWorkingHours(body.working_hours);
     const timezoneOffset = normalizeTimezoneOffset(body.timezone_offset);
 

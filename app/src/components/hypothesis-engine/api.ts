@@ -42,6 +42,29 @@ export interface HeCollectTask {
  * Прогресс автосборки (he_bases.collect_info, jsonb). Форма толерантная:
  * все поля опциональны, на клиенте читать защитно.
  */
+/**
+ * Решения автопилота о плане источников — их обязательно показывать: машина
+ * может подменить каталожный срез или вовсе отказаться строить базу, и без
+ * объяснения это выглядит сбоем. Пишутся в stages/baseCollect.
+ */
+export interface HePlanRepairDto {
+  reason?: 'no_catalog_source';
+  outcome?: 'repaired' | 'failed';
+  error?: string | null;
+}
+
+export interface HeSliceProbeDto {
+  outcome?: 'passed' | 'repaired' | 'repair_failed' | 'rejected';
+  /** Доля строк выборки, признанных принадлежащими вертикали (0..1). */
+  hit_rate?: number;
+  sampled?: number;
+  first_hit_rate?: number;
+  off_target_examples?: string[] | null;
+  /** Сколько каталожных задач плана заменено одним срезом (repaired). */
+  replaced_tasks?: number;
+  error?: string | null;
+}
+
 export interface HeCollectInfo {
   /** Лимит строк, выбранный при запуске сборки (у старых записей поля нет). */
   limit?: number | null;
@@ -49,6 +72,10 @@ export interface HeCollectInfo {
   hypothesis_ids?: string[] | null;
   plan?: { tasks?: HeCollectPlanTask[] } | null;
   tasks?: HeCollectTask[] | null;
+  /** Каталог добавлен в план, которого в нём не было. */
+  plan_repair?: HePlanRepairDto | null;
+  /** Итог пробы каталожного среза на принадлежность вертикали. */
+  slice_probe?: HeSliceProbeDto | null;
 }
 
 /** GET /projects/[id] отдаёт усечённые строки баз (без тяжёлого data). */
@@ -56,6 +83,12 @@ export type HeBaseSummary = Pick<
   HeBase,
   'id' | 'vertical_id' | 'filename' | 'row_count' | 'analysis' | 'created_at' | 'columns' | 'sample_rows'
 > & {
+  /**
+   * Причина падения сборки. Обязательна на экране с тех пор, как автопилот
+   * умеет осознанно НЕ строить базу (проба среза): один статус 'failed'
+   * читается как поломка. Опционально — у старых записей и в фикстурах нет.
+   */
+  error?: string | null;
   /** Статус разбора + 'collecting' (идёт автосборка; появился вместе с collect-эндпоинтом). */
   status: HeBase['status'] | 'collecting';
   /** Откуда база. У записей, созданных до автосборки, поля нет — считать 'upload'. */

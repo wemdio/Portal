@@ -761,6 +761,57 @@ describe('plan phase — market=us зовёт EN-промпт', () => {
       });
       // Задачи обнулены — коллекторы не дёргались вовсе.
       expect(info.tasks).toEqual([]);
+
+      // Базу валит САМА стадия, с причиной отказа. Отдать воркеру нельзя:
+      // failJob ретраит до MAX_ATTEMPTS, и повторные попытки умерли бы в
+      // других ветках, перетерев причину на «план пуст» / start-guard.
+      const basePatch = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+      expect(basePatch).toMatchObject({ status: 'failed' });
+      expect(String(basePatch?.error)).toMatch(/не покрывается каталогом/);
+    });
+
+    it('план с НЕСКОЛЬКИМИ каталожными задачами: заменяется вся каталожная часть, не только первая', async () => {
+      // Форма боевого плана 12.08: три pdl-среза с разными индустриями. Замена
+      // только первого оставила бы два широких добивать кап нецелевыми.
+      mockDb = createMockSupabase({
+        tables: {
+          he_bases: [makeBase({ construct: CONSTRUCT_DONE })],
+          he_verticals: [{ ...VERTICAL, name: 'Franchise Brands' }],
+          he_projects: [PROJECT_US],
+          he_jobs: [makeJob() as unknown as Record<string, unknown>],
+          he_hypotheses: [
+            { project_id: 'p1', vertical_id: 'v1', title: 'Franchisors', description: 'd', tier: 1, status: 'accepted', potential_pct: 80 },
+          ],
+          pdl_companies: [
+            { id: 'pdl-1', name: 'Le Bilboquet Denver', website: 'lb.com', industry: 'restaurants', country: 'united states' },
+            { id: 'pdl-2', name: 'Collegedale Academy', website: 'ca.com', industry: 'education management', country: 'united states' },
+            { id: 'pdl-3', name: 'United Franchise Group', website: 'ufg.com', industry: 'consumer services', country: 'united states' },
+          ],
+        },
+        rpcHandlers: PDL_RPC,
+      });
+      const THREE_PDL_PLAN = {
+        tasks: [
+          { source: 'eng_hiring', rationale: 'signal', eng_hiring_query: { roles: ['franchise development'] } },
+          { source: 'pdl', rationale: 'c1', pdl_filters: { industries: ['restaurants'] } },
+          { source: 'pdl', rationale: 'c2', pdl_filters: { industries: ['education management'] } },
+          { source: 'pdl', rationale: 'c3', pdl_filters: { industries: ['consumer services'] } },
+        ],
+      };
+      callLLMMock
+        .mockResolvedValueOnce(llmResult(THREE_PDL_PLAN))
+        .mockResolvedValueOnce(llmResult({ belongs: [] })) // общая проба: всё мимо
+        .mockResolvedValueOnce(llmResult({ rationale: 'name slice', pdl_filters: { name: 'franchise' } }))
+        .mockResolvedValueOnce(llmResult({ belongs: [0] })) // проба repaired-среза
+        .mockResolvedValue(llmResult({ irrelevant: [] }));
+
+      await runBaseCollectStage(makeJob(), ctx('us'));
+
+      const info = infoOf();
+      // Все три pdl-задачи схлопнулись в один выверенный срез.
+      expect(info.plan?.tasks.map((t) => t.source)).toEqual(['eng_hiring', 'pdl']);
+      expect(info.plan?.tasks[1].pdl_filters).toEqual({ name: 'franchise' });
+      expect(info.slice_probe).toMatchObject({ outcome: 'repaired', replaced_tasks: 3 });
     });
 
     it('сбой пробы не отбраковывает срез: блип модели не должен рубить вертикаль', async () => {
