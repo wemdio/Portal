@@ -17,8 +17,11 @@ import { reconcileProjectVerticals } from './actualsReconcile';
 // (≤30 строк, серверный кап при записи) и columns лёгкие: шаг «База» рисует
 // по ним превью первых строк на карточке. source/collect_info — прогресс-карта
 // авто-сборки, бейдж «авто» и состояние retry.
+// error нужен клиенту: с появлением права автопилота НЕ строить базу (проба
+// среза, stages/baseCollect) статус 'failed' сам по себе ничего не объясняет —
+// без причины отказ выглядит поломкой, а не решением.
 export const HE_BASE_LIST_COLUMNS =
-  'id, vertical_id, filename, row_count, status, analysis, source, collect_info, columns, sample_rows, created_at';
+  'id, vertical_id, filename, row_count, status, error, analysis, source, collect_info, columns, sample_rows, created_at';
 // payload нужен клиенту, чтобы привязать джобу к вертикали (payload.vertical_id) —
 // иначе чужая dossier-джоба показывала бы busy/error на карточке другой вертикали.
 export const HE_JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload, progress';
