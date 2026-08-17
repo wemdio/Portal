@@ -27,9 +27,11 @@ REMOTE=/opt/instantly-dataset-sync
 
 "$PLINK" -batch -ssh -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" "$PROD" "mkdir -p $REMOTE && mkdir -p /var/log/instantly-dataset-sync"
 
-# 1. sync.mjs
+# 1. sync.mjs + 022 DDL (ночной захват карточек лидов — sync.mjs применяет идемпотентно при старте)
 "$PSCP" -batch -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" \
   app/scripts/instantly-dataset/sync.mjs "$PROD:$REMOTE/sync.mjs"
+"$PSCP" -batch -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" \
+  app/scripts/instantly-dataset/022_leads_capture.sql "$PROD:$REMOTE/022_leads_capture.sql"
 
 # 1b. label-new-replies.mjs (ночная авто-разметка исходов: правила + Requesty LLM)
 "$PSCP" -batch -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" \
