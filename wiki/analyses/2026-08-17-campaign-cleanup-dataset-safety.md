@@ -160,3 +160,11 @@ SELECT count(*) FILTER (WHERE p_sent IS NOT NULL) AS transitions,
 ### Решение, к которому всё сошлось
 
 Ночной захват лидов в `sync.mjs`: `/campaigns/analytics` (1 вызов) → кампании с `leads_count>0` → `/leads/list` → UPSERT в `raw_leads` без удалений, `pulled_at`. Чистка кампании оставляет у нас последний снимок карточек с открытиями/ответами/статусом/доменом/payload. ~1 ч ночью при 60 RPM, объём стабильный (~350K) из-за непрерывной чистки.
+
+## Задеплоено 18.08.2026 (~02:00 МСК)
+
+- Sergey: `5ae88e2b1` feat (фаза 5 в `sync.mjs` + `022_leads_capture.sql` + `deploy-sync.sh`), `48f7ad64e` tune (leads-rpm 20), `d8c04bfae` fix (`first_pulled_at = COALESCE`). Прод: `deploy-sync.sh` из Sergey-worktree → `/opt/instantly-dataset-sync` на 139; `.env` синка побайтно тот же (ключи и значения сверены хэшами до деплоя; локальный `.env` при этом починен: `INSTANTLY_DATASET_DB_URL` 144 → 139, иначе деплой откатил бы прод на стейл-хост).
+- Смоук: `--leads-only --leads-limit-campaigns=2` → DDL 022 применён, 203 карточки из 4 кампаний, `leads_pulled == leads_count`, статус/домен/payload 100%, встретились статусы 1/3/-1/**-3**. Слепок мая (167 729 строк) не тронут.
+- Первый полный захват запущен вручную в фоне (`instantly-dataset-leads-initial`, лог `leads-initial-2026-08-18.log`): 300 кампаний, ~3 771 страница, оценка 189 мин при 20 RPM. Дальше — ночной крон (**00:00 МСК = 21:00 UTC**, не 00:00 UTC, как в шапке скрипта), только изменившиеся кампании.
+- `agent_wiki.dataset-schema` перезагружен (`load-agent-wiki.mjs`) — у специалистов новая схема сразу.
+- Замечено по пути: пагинация `/leads/list` отдаёт `next_starting_after` и на последней неполной странице → +1 пустая страница на кампанию (~300 лишних вызовов за полный проход). Оставлено как есть ради корректности; можно оптимизировать стопом при `items.length < limit`.
