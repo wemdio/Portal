@@ -27,6 +27,7 @@ Live table of contents. AI updates this every time a new page is created or a pa
 
 _Per-question deep-dives. Format: `YYYY-MM-DD-<topic>.md`._
 
+- [analyses/2026-08-17-campaign-cleanup-dataset-safety.md](./analyses/2026-08-17-campaign-cleanup-dataset-safety.md) — чистка кампании (удаление контактов/перенос в листы) для датасета безопасна: синк только UPSERT-ит, 26 885 переходов снапшотов без единого падения счётчиков, покрытие свежих писем 100%; риск только в поздних ответах удалённых лидов (папка Others, 30 дней)
 - [analyses/2026-08-11-roistat-mailbox-underutilization.md](./analyses/2026-08-11-roistat-mailbox-underutilization.md) — почему пул Roistat грузится на ~54%: удалённый ящик навсегда замораживает лида в середине цепочки (665 из 8858), тег «Roistat» показывает 84 ящика при 60 живых
 - [analyses/2026-06-11-dataset-objectivity-audit.md](./analyses/2026-06-11-dataset-objectivity-audit.md) — аудит перед фичей campaign-insights: sent-горизонт ~90 дней, зомби-кампании, дубли автоответов 20%, метки исходов 30–38%, гейты честной фичи, приоритетные фиксы
 - [analyses/2026-06-05-instantly-top-research-questions.md](./analyses/2026-06-05-instantly-top-research-questions.md) — pass по research brief: copy features, length, CTA, follow-ups, v2 data gaps
