@@ -958,7 +958,12 @@ export async function qualifyOneReply(
     : null;
 
   let status: string;
-  if (result.needsReview) status = 'needs_review';
+  // Защита последней мили: подтверждённое совпадение с кастомным критерием
+  // всегда является лидом, даже если провайдер одновременно вернул
+  // needs_review=true. classifyWithAI уже нормализует эту пару, но worker не
+  // должен снова потерять лид при несовместимом/замоканном результате.
+  if (Boolean(cachedCriteria?.trim()) && result.customCriteriaMatched === true) status = 'lead';
+  else if (result.needsReview) status = 'needs_review';
   else if (result.isLead) status = 'lead';
   else if (result.objectionHandleable) status = 'objection';
   else status = 'not_lead';
