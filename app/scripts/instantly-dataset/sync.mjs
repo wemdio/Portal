@@ -200,9 +200,10 @@ function parseIdx(v) {
 }
 
 const BATCH = 500;
-// noUpdate: колонки, которые пишутся только при INSERT и не перетираются при
-// конфликте (например first_pulled_at — «когда впервые увидели»).
-async function upsertBatch(client, table, cols, conflictTarget, rows, { noUpdate = [] } = {}) {
+// keepFirst: колонки «когда впервые увидели» — при конфликте берём старое значение,
+// если оно есть, иначе новое (COALESCE). Иначе строки майского слепка, попавшие в
+// захват, навсегда остались бы с NULL.
+async function upsertBatch(client, table, cols, conflictTarget, rows, { keepFirst = [] } = {}) {
   if (!rows.length) return 0;
   let total = 0;
   for (let i = 0; i < rows.length; i += BATCH) {
@@ -214,8 +215,8 @@ async function upsertBatch(client, table, cols, conflictTarget, rows, { noUpdate
       for (const c of cols) params.push(r[c] === undefined ? null : r[c]);
       return `(${placeholders})`;
     });
-    const updateSet = cols.filter((c) => !conflictTarget.includes(c) && !noUpdate.includes(c))
-      .map((c) => `${c} = EXCLUDED.${c}`).join(', ');
+    const updateSet = cols.filter((c) => !conflictTarget.includes(c))
+      .map((c) => keepFirst.includes(c) ? `${c} = COALESCE(${table}.${c}, EXCLUDED.${c})` : `${c} = EXCLUDED.${c}`).join(', ');
     const sql = `INSERT INTO ${table} (${cols.join(', ')}) VALUES ${valueRows.join(', ')}
                  ON CONFLICT (${conflictTarget}) DO UPDATE SET ${updateSet}`;
     if (DRY) { total += slice.length; continue; }
@@ -667,7 +668,7 @@ async function syncLeadsCapture(client, counts) {
         pages++;
         if (items.length) {
           const rows = items.filter((l) => l?.id).map((l) => leadRow(l, c.id, pulledAt));
-          upserted += await upsertBatch(client, 'raw_leads', LEAD_COLS, 'id', rows, { noUpdate: ['first_pulled_at'] });
+          upserted += await upsertBatch(client, 'raw_leads', LEAD_COLS, 'id', rows, { keepFirst: ['first_pulled_at'] });
         }
         after = res?.next_starting_after || undefined;
       } while (after);
