@@ -65,6 +65,8 @@ const seededRows: Record<string, Record<string, unknown>[]> = {
   li_campaigns: [
     {
       id: 'camp-1',
+      status: 'running',
+      created_at: '2026-05-01T00:00:00.000Z',
       welcome_message: 'Hi {{first_name}}, thanks for accepting! Glad to connect with {{company}}.',
     },
   ],
@@ -209,6 +211,11 @@ beforeEach(() => {
   sendMessageArgs.length = 0;
   // Restore seeded chat_id to null between tests (a previous test may have written it).
   seededRows.li_leads![0]!.chat_id = null;
+  // Same for welcome_sent_at: the handler now refuses to greet a lead whose
+  // row already carries a stamp (Unipile redelivers `new_relation`), and the
+  // mock persists writes into the seed, so without this every test after the
+  // first would exercise the idempotency guard instead of the welcome path.
+  seededRows.li_campaign_leads![0]!.welcome_sent_at = null;
 });
 
 describe('webhook handleConnectionAccepted — opens chat with welcome when payload has no chat_id', () => {
@@ -251,14 +258,38 @@ describe('webhook handleConnectionAccepted — opens chat with welcome when payl
     expect(leadChatIdWrites.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('records welcome_sent_at on li_campaign_leads', async () => {
+  it('records welcome_sent_at on EVERY campaign_lead row of the lead, not one', async () => {
     await POST(makeReq(newRelationPayload));
 
     const welcomeWrites = supaCalls.updates.filter(
       (u) => u.table === 'li_campaign_leads' && typeof u.data.welcome_sent_at === 'string',
     );
     expect(welcomeWrites.length).toBeGreaterThanOrEqual(1);
-    expect(welcomeWrites[0]!.filters.id).toBe('cl-emma');
+    // Scoped by lead, not by the single row that happened to be picked — a
+    // lead in two campaigns used to keep a NULL stamp on the other row and the
+    // health digest reported the delivered welcome as missing forever.
+    expect(welcomeWrites[0]!.filters.lead_id).toBe('lead-emma');
+    expect(welcomeWrites[0]!.filters.id).toBeUndefined();
+  });
+
+  it('does not greet twice when the row already carries welcome_sent_at (webhook redelivery)', async () => {
+    seededRows.li_campaign_leads![0]!.welcome_sent_at = '2026-08-17T14:00:18.955Z';
+
+    await POST(makeReq(newRelationPayload));
+
+    expect(startChatArgs).toHaveLength(0);
+    expect(sendMessageArgs).toHaveLength(0);
+  });
+
+  it('stays silent when no running campaign carries a welcome', async () => {
+    seededRows.li_campaigns![0]!.status = 'stopped';
+    try {
+      await POST(makeReq(newRelationPayload));
+      expect(startChatArgs).toHaveLength(0);
+      expect(sendMessageArgs).toHaveLength(0);
+    } finally {
+      seededRows.li_campaigns![0]!.status = 'running';
+    }
   });
 
   it('marks li_webhook_logs.processed = true after successful handling', async () => {

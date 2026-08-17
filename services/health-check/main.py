@@ -302,6 +302,11 @@ def _connect_kwargs(command_timeout: int) -> dict:
 # 08.08.2026 отчёт упал с «TimeoutError: no details», не уложившись в 15 секунд.
 LI_REPORT_COMMAND_TIMEOUT_SEC = 180
 
+# Окно, в котором дубль сообщения считается актуальным отклонением, а не
+# историей. Инвариант должен ловить живой рецидив; без окна счётчик копит
+# события навсегда и отчёт остаётся красным даже после починки причины.
+LI_DUP_WINDOW_DAYS = 14
+
 
 async def _ensure_settings_table() -> None:
     """Create health-check state tables."""
@@ -2531,19 +2536,33 @@ async def run_li_outreach_report() -> None:
         # тексты, а не каждое сообщение.
         #
         # Замер на 240 тыс. сообщений: 3,7 с двумя запросами против 0,21 с одним.
-        counts = await conn.fetchrow(r"""
+        # Дубли считаются в окне DUP_WINDOW_DAYS, плейсхолдеры — за всё время.
+        #
+        # Разница намеренная. Сырой {{...}} в отправленном — вечный факт: он
+        # либо есть в базе, либо нет, и «состарить» его нечем. А дубль — это
+        # событие: четыре дубля 15-17.08.2026 остались бы в счётчике навсегда,
+        # отчёт горел бы красным и после фикса, и первый же настоящий рецидив
+        # утонул бы в этом фоне. Чистить conversation_history ради зелёного
+        # отчёта нельзя — это реальная история отправок.
+        counts = await conn.fetchrow(rf"""
             WITH per_message AS (
-              SELECT l.id AS lead_id, m->>'content' AS content
+              SELECT l.id AS lead_id, m->>'content' AS content,
+                     CASE WHEN m->>'ts' ~ '^\d{{4}}-\d{{2}}-\d{{2}}T'
+                          THEN (m->>'ts')::timestamptz END AS ts
               FROM li_leads l
               CROSS JOIN LATERAL jsonb_array_elements(COALESCE(l.conversation_history,'[]'::jsonb)) m
               WHERE m->>'role'='assistant'
             ),
             grouped AS (
-              SELECT lead_id, content, COUNT(*) AS n FROM per_message GROUP BY lead_id, content
+              SELECT lead_id, content, COUNT(*) AS n, MAX(ts) AS last_ts
+              FROM per_message GROUP BY lead_id, content
             )
             SELECT
-              COALESCE(SUM(n) FILTER (WHERE content ~ '\{\{.*\}\}'), 0) AS raw_ph,
-              COUNT(*) FILTER (WHERE n > 1 AND length(content) > 20) AS dups
+              COALESCE(SUM(n) FILTER (WHERE content ~ '\{{\{{.*\}}\}}'), 0) AS raw_ph,
+              COUNT(*) FILTER (
+                WHERE n > 1 AND length(content) > 20
+                  AND last_ts > NOW() - INTERVAL '{LI_DUP_WINDOW_DAYS} days'
+              ) AS dups
             FROM grouped
         """)
         raw_ph = (counts["raw_ph"] or 0) if counts else 0
@@ -2553,6 +2572,22 @@ async def run_li_outreach_report() -> None:
             JOIN li_campaigns c ON c.id=cl.campaign_id
             WHERE cl.user_replied=true AND c.stop_on_reply=true
               AND cl.status NOT IN ('completed','error','skipped')
+        """) or 0
+        # Причина дублей, а не их след. Один лид, живущий сразу в двух running
+        # кампаниях, получит каждый шаг дважды: гард от повтора есть только на
+        # инвайте (processInviteStep смотрит на lead.status), у message-шага
+        # его нет. 17.08.2026 два запуска на одном lead_list (163 из 163
+        # общих лидов) успели отправить четыре двойных сообщения, прежде чем
+        # это заметили — а вот такой счётчик показал бы 163 в первый же день.
+        leads_multi_campaign = await conn.fetchval("""
+            SELECT COUNT(*) FROM (
+              SELECT cl.lead_id FROM li_campaign_leads cl
+              JOIN li_campaigns c ON c.id = cl.campaign_id
+              WHERE c.status = 'running'
+                AND cl.status NOT IN ('completed','error','skipped')
+              GROUP BY cl.lead_id
+              HAVING COUNT(DISTINCT cl.campaign_id) > 1
+            ) x
         """) or 0
         conn_no_welcome = await conn.fetchval("""
             SELECT COUNT(*) FROM li_campaign_leads cl
@@ -2612,7 +2647,8 @@ async def run_li_outreach_report() -> None:
         return "✅" if v == 0 else "⚠️"
 
     hard_fail = any(v > 0 for v in (
-        raw_ph, dups, replied_not_stopped, conn_no_welcome, bare_total, byok, gpt_err,
+        raw_ph, dups, leads_multi_campaign, replied_not_stopped, conn_no_welcome,
+        bare_total, byok, gpt_err,
     ))
     header = (
         "🔴 LinkedIn outreach — есть отклонения"
@@ -2625,7 +2661,8 @@ async def run_li_outreach_report() -> None:
         f"<i>{_now_msk()}</i>",
         "",
         f"{mark(raw_ph)} Сырые плейсхолдеры в отправленных: {raw_ph}",
-        f"{mark(dups)} Дубли сообщений лиду: {dups}",
+        f"{mark(dups)} Дубли сообщений лиду (за {LI_DUP_WINDOW_DAYS} дн.): {dups}",
+        f"{mark(leads_multi_campaign)} Лиды сразу в двух running-кампаниях: {leads_multi_campaign}",
         f"{mark(replied_not_stopped)} Ответили, но не остановлены: {replied_not_stopped}",
         f"{mark(conn_no_welcome)} Connected без welcome (running): {conn_no_welcome}",
         f"{mark(bare_total)} Bare-модели без provider/: {bare_total}",

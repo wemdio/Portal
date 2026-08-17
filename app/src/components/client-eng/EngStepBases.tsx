@@ -74,6 +74,58 @@ function CollectProgress({ base }: { base: EngBaseSummary }) {
   );
 }
 
+/* ── Решения автопилота по плану источников ── */
+
+const pct = (v: number | undefined) => `${Math.round((v ?? 0) * 100)}%`;
+
+/**
+ * Что автопилот сделал с планом и почему. Обязательный экран: машина умеет
+ * подменить каталожный срез и вовсе ОТКАЗАТЬСЯ строить базу — без объяснения
+ * это читается как поломка. Клиент по задумке смотрит только ответы, поэтому
+ * решение должно объяснять себя само, а не лежать в collect_info для разбора.
+ */
+function AutopilotDecisions({ base }: { base: EngBaseSummary }) {
+  const probe = base.collect_info?.slice_probe;
+  const repair = base.collect_info?.plan_repair;
+  if (!probe && !repair) return null;
+
+  return (
+    <div className="mt-2 flex flex-col gap-1 text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
+      {repair?.outcome === 'repaired' && (
+        <div>The plan had no company catalog — the autopilot added one.</div>
+      )}
+      {repair?.outcome === 'failed' && (
+        <div style={{ color: 'var(--cp-amber)' }}>
+          The plan had no company catalog and one could not be added — the base stayed thin.
+        </div>
+      )}
+
+      {probe?.outcome === 'repaired' && (
+        <div>
+          Audience check: the first catalog slice matched the vertical in {pct(probe.first_hit_rate)} of
+          sampled companies, so it was replaced — the new one matches {pct(probe.hit_rate)}.
+        </div>
+      )}
+      {probe?.outcome === 'rejected' && (
+        <div style={{ color: 'var(--cp-amber)' }}>
+          Audience check failed: only {pct(probe.hit_rate)} of {probe.sampled ?? 0} sampled companies
+          belonged to this vertical
+          {probe.off_target_examples?.length
+            ? ` (off-target: ${probe.off_target_examples.slice(0, 3).join(', ')})`
+            : ''}
+          . The base was not built on purpose — mailing such a list would hurt the verticals that do work.
+        </div>
+      )}
+      {probe?.outcome === 'repair_failed' && (
+        <div style={{ color: 'var(--cp-amber)' }}>
+          Audience check flagged the catalog slice ({pct(probe.hit_rate)} match), but it could not be
+          replaced — collected as planned.
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Состояние запуска готового шаблона (только отображение; запуск — шаг 5) ── */
 
 function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
@@ -195,6 +247,15 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
                       {b.row_count.toLocaleString('en-US')} rows
                     </span>
                   </div>
+
+                  <AutopilotDecisions base={b} />
+
+                  {/* Причина падения: без неё «failed / 0 rows» ничего не объясняет. */}
+                  {b.status === 'failed' && b.error && (
+                    <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-red)' }}>
+                      {b.error}
+                    </div>
+                  )}
 
                   {b.status === 'analyzing' && (
                     <div className="mt-2 text-[11px] inline-flex items-center gap-1.5" style={{ color: 'var(--cp-amber)' }}>

@@ -533,6 +533,8 @@ export interface HeSliceProbe {
   off_target_examples?: string[];
   /** Срез, которым перепланировали (repaired/rejected). */
   pdl_filters?: HeCollectTask['pdl_filters'];
+  /** Сколько каталожных задач плана заменено одним срезом (repaired). */
+  replaced_tasks?: number;
   /** Причина, по которой перепланирование не состоялось (repair_failed). */
   error?: string;
 }
@@ -786,23 +788,46 @@ async function ensureCatalogSource(
   };
 }
 
-/** Каталожная задача плана (по ней и идёт объём сборки), либо null. */
-function findCatalogTask(plan: HeSourcePlan): { task: HeCollectTask; index: number } | null {
-  const index = plan.tasks.findIndex((t) => t.source === 'pdl' || t.source === 'funded');
-  return index >= 0 ? { task: plan.tasks[index], index } : null;
+/**
+ * ВСЕ каталожные задачи плана. Именно все: боевой план 12.08 нёс ТРИ pdl-среза
+ * с разными наборами индустрий, и проба только первого пропустила бы две трети
+ * мусора — заменённый срез дал бы ~1300 целевых строк, а два оставшихся широких
+ * добили бы кап 2000 нецелевыми.
+ */
+function findCatalogTasks(plan: HeSourcePlan): number[] {
+  return plan.tasks
+    .map((t, i) => (t.source === 'pdl' || t.source === 'funded' ? i : -1))
+    .filter((i) => i >= 0);
 }
 
-/** Выборка из среза для пробы: те же коллекторы, только с крошечным лимитом. */
+/** Выборка из среза одной задачи: те же коллекторы, только с крошечным лимитом. */
 async function sampleCatalogSlice(
   ctx: HeStageContext,
   task: HeCollectTask,
+  limit: number,
 ): Promise<Array<Record<string, unknown>>> {
   if (task.source === 'funded') {
-    const rows = await fetchFundedRows(ctx, task.funded_filters, SLICE_PROBE_SAMPLE);
+    const rows = await fetchFundedRows(ctx, task.funded_filters, limit);
     return rows.map((r) => mapFundedRow(r) as unknown as Record<string, unknown>);
   }
-  const rows = await fetchPdlRows(ctx, task.pdl_filters, SLICE_PROBE_SAMPLE);
+  const rows = await fetchPdlRows(ctx, task.pdl_filters, limit);
   return rows.map((r) => mapPdlRow(r) as unknown as Record<string, unknown>);
+}
+
+/**
+ * Общая выборка каталожной части плана: поровну из каждого среза (проба меряет
+ * «каталожную часть» целиком — решение принимается по ней одной, см. ниже).
+ */
+async function sampleCatalogTasks(
+  ctx: HeStageContext,
+  tasks: HeCollectTask[],
+): Promise<Array<Record<string, unknown>>> {
+  const quota = Math.max(1, Math.ceil(SLICE_PROBE_SAMPLE / tasks.length));
+  const parts: Array<Record<string, unknown>> = [];
+  for (const task of tasks) {
+    parts.push(...(await sampleCatalogSlice(ctx, task, quota)));
+  }
+  return parts.slice(0, SLICE_PROBE_SAMPLE);
 }
 
 /**
@@ -838,11 +863,11 @@ async function ensureSliceMatchesVertical(
   market: HeMarket,
 ): Promise<{ plan: HeSourcePlan; sliceProbe?: HeSliceProbe }> {
   if (market !== 'us') return { plan };
-  const found = findCatalogTask(plan);
-  if (!found) return { plan };
+  const catalogIdx = findCatalogTasks(plan);
+  if (catalogIdx.length === 0) return { plan };
 
-  const probe = async (task: HeCollectTask) => {
-    const sample = await sampleCatalogSlice(ctx, task);
+  const probe = async (tasks: HeCollectTask[]) => {
+    const sample = await sampleCatalogTasks(ctx, tasks);
     const res = await probeSliceRelevance({
       rows: sample,
       verticalName: vertical.name,
@@ -854,7 +879,7 @@ async function ensureSliceMatchesVertical(
     return res;
   };
 
-  const first = await probe(found.task);
+  const first = await probe(catalogIdx.map((i) => plan.tasks[i]));
   const pct = (r: { hitRate: number }) => `${Math.round(r.hitRate * 100)}%`;
   // Проба не состоялась (пустой срез или сбой модели) — не мешаем сбору.
   if (first.sampled === 0) return { plan };
@@ -899,7 +924,7 @@ async function ensureSliceMatchesVertical(
     rationale: repair.data.rationale,
     pdl_filters: repair.data.pdl_filters,
   };
-  const second = await probe(retried);
+  const second = await probe([retried]);
   if (second.sampled > 0 && second.hitRate < SLICE_PROBE_MIN_HIT_RATE) {
     stageLog(
       ctx,
@@ -918,11 +943,18 @@ async function ensureSliceMatchesVertical(
     };
   }
 
-  const tasks = plan.tasks.slice();
-  tasks[found.index] = retried;
+  // Замена ВСЕЙ каталожной части плана одним выверенным срезом, а не только
+  // первой задачи: остальные срезы — та же провалившая пробу семья широких
+  // фильтров, оставить их значит добить кап сборки нецелевыми строками.
+  // Repaired-срез встаёт на место первой каталожной задачи (порядок плана —
+  // от важного к частному), остальные каталожные выбывают.
+  const firstCatalogAt = catalogIdx[0];
+  const tasks = plan.tasks
+    .map((t, i) => (i === firstCatalogAt ? retried : t))
+    .filter((t, i) => i === firstCatalogAt || !catalogIdx.includes(i));
   stageLog(
     ctx,
-    `[base_collect] каталожный срез заменён (${pct(first)} → ${pct(second)}): ${JSON.stringify(repair.data.pdl_filters)}`,
+    `[base_collect] каталожная часть плана (${catalogIdx.length} задач) заменена одним срезом (${pct(first)} → ${pct(second)}): ${JSON.stringify(repair.data.pdl_filters)}`,
   );
   return {
     plan: { tasks },
@@ -932,6 +964,7 @@ async function ensureSliceMatchesVertical(
       sampled: second.sampled,
       first_hit_rate: first.hitRate,
       pdl_filters: repair.data.pdl_filters,
+      replaced_tasks: catalogIdx.length,
     },
   };
 }
@@ -1880,14 +1913,26 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // конструктора и рассылка по мусору дороже пропущенной вертикали.
     if (sliceProbe?.outcome === 'rejected') {
       info.tasks = [];
-      await persistCollectInfo(ctx, baseId, info);
       const examples = sliceProbe.off_target_examples?.slice(0, 3).join(', ');
-      throw new Error(
+      const note =
         `Вертикаль «${vertical.name}» не покрывается каталогом: в пробе среза подошло ` +
-          `${Math.round(sliceProbe.hit_rate * 100)}% из ${sliceProbe.sampled} компаний` +
-          (examples ? ` (мимо: ${examples})` : '') +
-          '. База не собиралась — рассылка по такому срезу навредила бы рабочим вертикалям.',
-      );
+        `${Math.round(sliceProbe.hit_rate * 100)}% из ${sliceProbe.sampled} компаний` +
+        (examples ? ` (мимо: ${examples})` : '') +
+        '. База не собиралась — рассылка по такому срезу навредила бы рабочим вертикалям.';
+      // Базу валим здесь же, с этой причиной (как путь «ноль строк»). Отдать её
+      // воркеру нельзя: отказ — решение, а не транзиент, но failJob ретраит до
+      // MAX_ATTEMPTS, и повторные попытки (план уже сохранён, tasks=[]) умерли
+      // бы в других ветках, перетерев причину на «план пуст» / start-guard.
+      await ctx.supabase
+        .from('he_bases')
+        .update({
+          status: 'failed',
+          error: note.slice(0, 500),
+          collect_info: info,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', baseId);
+      throw new Error(note);
     }
     info.tasks = info.plan.tasks.map((task) => ({
       source: task.source,

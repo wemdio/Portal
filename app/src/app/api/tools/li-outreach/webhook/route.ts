@@ -3,6 +3,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { safeEqual } from '@/lib/crypto/safeEqual';
 import { UnipileClient } from '@/lib/liOutreach/unipileClient';
 import { generateAutoReply, leadToInfo, parseMessageTemplate } from '@/lib/liOutreach/aiService';
+import { findUnknownPlaceholders, supportedVarsHint } from '@/lib/liOutreach/messageVars';
 import type { LiLead, LiCampaign } from '@/lib/liOutreach/types';
 
 export const dynamic = 'force-dynamic';
@@ -227,24 +228,57 @@ async function handleConnectionAccepted(payload: Record<string, unknown>): Promi
     .update({ invite_accepted: true, updated_at: new Date().toISOString() })
     .eq('lead_id', lead.id);
 
-  // Send welcome message if configured
-  const { data: campaignLeads } = await db
-    .from('li_campaign_leads')
-    .select('id, campaign_id')
-    .eq('lead_id', lead.id)
-    .limit(1);
-  const campaignLeadRow = campaignLeads?.[0] as { id?: string; campaign_id?: string } | undefined;
-  const campaignId = campaignLeadRow?.campaign_id;
-  const campaignLeadId = campaignLeadRow?.id;
+  // Send welcome message if configured.
+  //
   // Previously we also required `chatId` here, which silently dropped EVERY
   // `new_relation` event — Unipile doesn't include chat_id in that payload
   // because the chat doesn't exist yet (LinkedIn opens it with the first
   // message). Result: 81 leads in 14 days accepted the invite, never got the
   // welcome, then 2 days later got a duplicated follow-up from the runner's
   // startChat fallback. Now we create the chat ourselves below when missing.
-  if (!campaignId) return;
+  //
+  // The campaign-lead row used to be picked as `campaignLeads[0]` from a
+  // `.limit(1)` with no ORDER BY — a random row whenever a lead sits in more
+  // than one campaign (same list launched twice, or a later re-enrolment).
+  // Two failures followed on prod 2026-08: `welcome_sent_at` landed on that
+  // one row only, so the health digest reported "connected без welcome"
+  // forever against the other row even though the person had been greeted;
+  // and when the coin landed on a campaign with an empty `welcome_message`
+  // the handler returned early and nobody was greeted at all.
+  //
+  // Now: choose deterministically among *running* campaigns that actually
+  // carry a welcome, send exactly one (two greetings from two campaigns would
+  // be a worse bug than none), then stamp every row of this lead so no other
+  // campaign re-sends and the digest stops flagging a delivered welcome.
+  const { data: leadRows } = await db
+    .from('li_campaign_leads')
+    .select('id, campaign_id, welcome_sent_at')
+    .eq('lead_id', lead.id);
+  const rows = (leadRows ?? []) as Array<{
+    id: string;
+    campaign_id: string;
+    welcome_sent_at: string | null;
+  }>;
+  if (rows.length === 0) return;
+  // Unipile redelivers `new_relation` on non-2xx and occasionally on its own;
+  // without this an already-greeted lead gets greeted again.
+  if (rows.some((r) => r.welcome_sent_at)) return;
 
-  const { data: campaign } = await db.from('li_campaigns').select('*').eq('id', campaignId).maybeSingle<LiCampaign>();
+  const { data: campaignRows } = await db
+    .from('li_campaigns')
+    .select('*')
+    .in('id', [...new Set(rows.map((r) => r.campaign_id))]);
+  const campaign = ((campaignRows ?? []) as LiCampaign[])
+    .filter((c) => c.status === 'running' && (c.welcome_message ?? '').trim() !== '')
+    // Oldest campaign wins; id breaks ties so two runs never disagree.
+    .sort(
+      (a, b) =>
+        String(a.created_at ?? '').localeCompare(String(b.created_at ?? '')) ||
+        String(a.id).localeCompare(String(b.id)),
+    )[0];
+  // No running campaign wants to greet this lead. Deliberately no fallback to
+  // a stopped campaign: the runner already refuses to touch non-running
+  // campaigns, and "stopped" means stop contacting these people.
   if (!campaign?.welcome_message) return;
 
   // Unipile creds from shared env (see migration 20260708_0001).
@@ -254,6 +288,21 @@ async function handleConnectionAccepted(payload: Record<string, unknown>): Promi
 
   // Render template variables ({{first_name}}, {{company}}, …) before sending.
   // Without this, leads got literal "Hi {{first_name}}!" in their LinkedIn chat.
+  const unknownVars = findUnknownPlaceholders(campaign.welcome_message);
+  if (unknownVars.length > 0) {
+    // Same trace the runner writes for step texts: a tag nothing can fill is
+    // wiped to '' at send time, so without this line a nameless welcome looks
+    // identical to a correct one in every log and every monitor.
+    await db.from('li_campaign_logs').insert({
+      campaign_id: campaign.id,
+      level: 'warning',
+      message:
+        `Пустая подстановка в приветственном сообщении: ${unknownVars.map((v) => `{{${v}}}`).join(', ')} — ` +
+        `таких переменных нет, они вырезаны из текста. Доступны: ${supportedVarsHint()}`,
+      lead_name: lead.name ?? null,
+      step_index: null,
+    });
+  }
   const welcomeText = parseMessageTemplate(campaign.welcome_message, leadToInfo(lead));
   if (!welcomeText.trim()) {
     console.warn('[li-outreach] welcome_message resolved to empty string after template substitution — skipping');
@@ -287,16 +336,15 @@ async function handleConnectionAccepted(payload: Record<string, unknown>): Promi
       // back to the original path so we don't try to start an already-open chat.
       await client.sendMessage(effectiveChatId, welcomeText);
     }
-    // Record successful delivery so the campaign runner's next message step
-    // knows the welcome has already been sent and can be skipped — otherwise
-    // the lead gets the welcome plus a near-identical scheduled follow-up
-    // back-to-back when the wait step expires.
-    if (campaignLeadId) {
-      await db
-        .from('li_campaign_leads')
-        .update({ welcome_sent_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-        .eq('id', campaignLeadId);
-    }
+    // Record successful delivery on EVERY campaign-lead row of this lead, not
+    // just the campaign that sent it. The stamp is what tells a second
+    // campaign (and the health digest) that this person has already been
+    // greeted; scoping it to one row is what made the digest report a
+    // delivered welcome as missing.
+    await db
+      .from('li_campaign_leads')
+      .update({ welcome_sent_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq('lead_id', lead.id);
   } catch (e) {
     console.error('[li-outreach] webhook welcome message failed:', e instanceof Error ? e.message : e);
   }
