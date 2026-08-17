@@ -60,6 +60,8 @@ export interface HeSliceProbeDto {
   sampled?: number;
   first_hit_rate?: number;
   off_target_examples?: string[] | null;
+  /** Сколько каталожных задач плана заменено одним срезом (repaired). */
+  replaced_tasks?: number;
   error?: string | null;
 }
 
