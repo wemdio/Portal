@@ -279,6 +279,94 @@ describe('pollAndQualifyReplies', () => {
     }));
   });
 
+  it('custom criterion match wins over a conflicting needs_review flag and sends the lead alert', async () => {
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [{
+          id: 'project-1',
+          client: 'Acme',
+          specialist_user_id: 'specialist-1',
+          lead_criteria: 'Просьба связаться по переданному номеру = лид.',
+        }],
+        profiles: [
+          { id: 'specialist-1', full_name: 'Sergey Petrov', email: 'sergey@example.com' },
+        ],
+        telegram_links: [{
+          user_id: 'specialist-1',
+          telegram_id: '123456',
+          telegram_username: 'sergey_portal',
+        }],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+    });
+    qualifyReply.mockResolvedValueOnce({
+      isLead: true,
+      customCriteriaMatched: true,
+      proposalSeen: false,
+      interestSignals: ['попросили связаться по переданному телефону'],
+      reason: 'Ответ соответствует дополнительному критерию проекта.',
+      confidence: 0.9,
+      needsReview: true,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: replyEmail({
+          id: 'custom-lead-email',
+          body: { text: 'Добрый день! Узнайте по тел. 477-921' },
+        }),
+        threadEmails: [],
+        lastOutbound: null,
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'custom-lead-email', campaign_id: 'linked-campaign' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('lead');
+    expect(qualifyReply.mock.calls[0][3]).toEqual(expect.objectContaining({
+      leadCriteria: 'Просьба связаться по переданному номеру = лид.',
+    }));
+    expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores an impossible custom match flag when the campaign has no custom criteria', async () => {
+    qualifyReply.mockResolvedValueOnce({
+      isLead: false,
+      customCriteriaMatched: true,
+      proposalSeen: false,
+      interestSignals: [],
+      reason: 'Неконсистентный ответ провайдера.',
+      confidence: 0.4,
+      needsReview: true,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: replyEmail({ id: 'no-custom-email', body: { text: 'Нужно проверить' } }),
+        threadEmails: [],
+        lastOutbound: null,
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'no-custom-email', campaign_id: 'linked-campaign' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('needs_review');
+    expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+  });
+
   it('writes a lead-board row for a newly qualified lead (auto columns, enrichment, step from thread)', async () => {
     process.env.GUEST_TOKEN_SECRET = 'test-board-secret';
     getLeadsByEmail.mockResolvedValueOnce([

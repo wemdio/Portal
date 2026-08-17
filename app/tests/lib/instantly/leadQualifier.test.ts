@@ -284,6 +284,15 @@ describe('qualifyReply — пер-проектное определение ли
     };
   }
 
+  it('принимает custom_criteria_matched только как строгий JSON boolean', async () => {
+    const { _private } = await import('@/lib/instantly/leadQualifier');
+    const actualTrue = _private.parseAIResult('{"custom_criteria_matched": true}');
+    const stringFalse = _private.parseAIResult('{"custom_criteria_matched": "false"}');
+
+    expect(actualTrue.customCriteriaMatched).toBe(true);
+    expect(stringFalse.customCriteriaMatched).toBe(false);
+  });
+
   it.each([
     'Можете меня набрать в 14.00-15.00.',
     'Давайте завтра проведём встречу.',
@@ -450,5 +459,112 @@ describe('qualifyReply — пер-проектное определение ли
     expect(systemPrompt).toContain('ОПРЕДЕЛЕНИЕ ЛИДА ДЛЯ ЭТОГО ПРОЕКТА');
     expect(systemPrompt).toContain('Контакт ЛПР или предложение созвониться = лид.');
     expect(res.isLead).toBe(true);
+  });
+
+  it.each([
+    {
+      replyText: '8 953 909 6065 Мария',
+      ai: {
+        is_lead: false,
+        needs_review: true,
+        custom_criteria_matched: true,
+        interest_signals: ['переданы имя и телефон'],
+        reason: 'Ответ соответствует дополнительному критерию проекта.',
+        objection_handleable: true,
+        objection_draft: 'Лишний черновик, который должен быть очищен.',
+      },
+    },
+    {
+      replyText: 'Добрый день! Узнайте по тел. 477-921',
+      ai: {
+        is_lead: true,
+        needs_review: true,
+        custom_criteria_matched: true,
+        interest_signals: ['попросили связаться по переданному телефону'],
+        reason: 'Ответ соответствует дополнительному критерию проекта.',
+      },
+    },
+  ])('сработавший кастомный критерий жёстко даёт lead без needs_review: $replyText', async ({ replyText, ai }) => {
+    mockAiResult(ai);
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      leadCriteria: 'Имя и телефон либо просьба связаться по переданному номеру = лид.',
+      prefetchedContext: contextWithReply(replyText),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.messages[1].content).toContain(
+      'для custom_criteria_matched учитывай только основной нецитированный ответ человека',
+    );
+    expect(res.customCriteriaMatched).toBe(true);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+    expect(res.objectionHandleable).toBe(false);
+    expect(res.objectionDraft).toBeNull();
+  });
+
+  it('не повышает конфликтный вердикт до лида, когда модель явно не нашла совпадение с кастомным критерием', async () => {
+    mockAiResult({
+      is_lead: true,
+      needs_review: true,
+      custom_criteria_matched: false,
+      interest_signals: ['попросили связаться по переданному телефону'],
+      reason: 'Нужно проверить вручную; кастомный критерий не совпал.',
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      leadCriteria: 'Просьба связаться по переданному номеру = лид.',
+      prefetchedContext: contextWithReply('Добрый день! Узнайте по тел. 477-921'),
+    });
+
+    expect(res.customCriteriaMatched).toBe(false);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(true);
+  });
+
+  it('контакты только в автоответе не становятся лидом даже при кастомном критерии', async () => {
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      leadCriteria: 'Имя и телефон = лид.',
+      prefetchedContext: contextWithReply(
+        'Автоматический ответ: я в отпуске до 20 августа. Мария, +7 999 123-45-67.',
+      ),
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res.customCriteriaMatched).toBe(false);
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it('имя и телефон только в подписи не считаются совпадением с кастомным критерием', async () => {
+    mockAiResult({
+      is_lead: false,
+      needs_review: false,
+      custom_criteria_matched: false,
+      interest_signals: [],
+      reason: 'Контакты находятся только в подписи.',
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      leadCriteria: 'Имя и телефон = лид.',
+      prefetchedContext: contextWithReply(
+        'С уважением,\nМария Иванова\nМенеджер отдела продаж\n+7 999 123-45-67',
+      ),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.customCriteriaMatched).toBe(false);
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(false);
   });
 });
