@@ -12,9 +12,12 @@ FROM li_leads l
 CROSS JOIN LATERAL jsonb_array_elements(COALESCE(l.conversation_history, '[]'::jsonb)) AS m
 WHERE m->>'role' = 'assistant' AND (m->>'content') ~ '\{\{.*\}\}';
 
-\echo '=== 2. Дублирующиеся сообщения одному лиду (должно быть 0) ==='
+\echo '=== 2. Дублирующиеся сообщения одному лиду за 14 дней (должно быть 0) ==='
 -- Фикс startChat-двойной-отправки + удаление welcome-dedup: одинаковый assistant-текст
 -- не должен встречаться лиду дважды.
+-- Окно 14 дней: без него счётчик копит события навсегда (дубли 15-17.08.2026 горели
+-- бы вечно) и живой рецидив тонет в историческом фоне. Плейсхолдеры в пункте 1
+-- окна намеренно НЕ имеют — сырой {{...}} в базе не «стареет».
 SELECT COUNT(*) AS leads_with_dup_message FROM (
   SELECT l.id, m->>'content' AS content, COUNT(*) AS cnt
   FROM li_leads l
@@ -22,7 +25,23 @@ SELECT COUNT(*) AS leads_with_dup_message FROM (
   WHERE m->>'role' = 'assistant' AND length(m->>'content') > 20
   GROUP BY l.id, m->>'content'
   HAVING COUNT(*) > 1
+     AND MAX(CASE WHEN m->>'ts' ~ '^\d{4}-\d{2}-\d{2}T' THEN (m->>'ts')::timestamptz END)
+         > NOW() - INTERVAL '14 days'
 ) d;
+
+\echo '=== 2b. Лиды сразу в двух running-кампаниях — причина дублей (должно быть 0) ==='
+-- Гард от повтора есть только на шаге invite (processInviteStep смотрит на lead.status);
+-- у message-шага его нет, поэтому лид в двух активных кампаниях получит каждый текст
+-- дважды. 17.08.2026: два запуска на одном lead_list, 163 из 163 общих лидов.
+SELECT COUNT(*) AS leads_in_multiple_running_campaigns FROM (
+  SELECT cl.lead_id
+  FROM li_campaign_leads cl
+  JOIN li_campaigns c ON c.id = cl.campaign_id
+  WHERE c.status = 'running'
+    AND cl.status NOT IN ('completed', 'error', 'skipped')
+  GROUP BY cl.lead_id
+  HAVING COUNT(DISTINCT cl.campaign_id) > 1
+) x;
 
 \echo '=== 3. Ответившие лиды, не остановленные в stop_on_reply кампаниях (должно быть 0) ==='
 -- Фикс stop_on_reply: если лид ответил (user_replied) и у кампании stop_on_reply=true,

@@ -9,6 +9,7 @@ import {
   personalizeFollowUp,
 } from './aiService';
 import { extractPublicIdentifier } from './leadHelpers';
+import { findUnknownPlaceholders, supportedVarsHint } from './messageVars';
 import { isInWorkingHours } from './schedule';
 import {
   applyCooldownToAccount,
@@ -33,6 +34,33 @@ import type {
  */
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string, leadName?: string, stepIndex?: number) => void;
+
+/**
+ * Shout when a campaign text carries a merge tag no lead field can fill.
+ *
+ * The renderer wipes such tags to an empty string — it has to, otherwise raw
+ * `{{...}}` would reach the lead. The cost is that a typo'd tag is invisible:
+ * on prod 2026-08 a whole launch went out as «Здравствуйте, Обратил внимание
+ * на Kommo» and every monitoring line stayed green. This warning is the trace
+ * that makes it visible in the campaign log (and countable in the digest).
+ */
+function warnUnknownPlaceholders(
+  template: string,
+  log: LogFn,
+  leadName: string,
+  stepIdx: number,
+  what: string,
+): void {
+  const unknown = findUnknownPlaceholders(template);
+  if (unknown.length === 0) return;
+  log(
+    'warning',
+    `Пустая подстановка в тексте ${what}: ${unknown.map((v) => `{{${v}}}`).join(', ')} — ` +
+      `таких переменных нет, они будут вырезаны и текст уйдёт без них. Доступны: ${supportedVarsHint()}`,
+    leadName,
+    stepIdx,
+  );
+}
 
 /**
  * Thrown when a Unipile call indicated LinkedIn parked our account
@@ -516,6 +544,7 @@ async function processInviteStep(
     log('info', 'Использую персонализированный инвайт из CSV-колонки (AI-персонализация пропущена)', lead.name, stepIdx);
   }
   if (message) {
+    warnUnknownPlaceholders(message, log, lead.name, stepIdx, 'инвайта');
     message = parseMessageTemplate(message, leadToInfo(lead));
     if (!usedCustomInvite && campaign.use_ai && aiConfig.apiKey) {
       log('info', 'Прошу GPT персонализировать инвайт...', lead.name, stepIdx);
@@ -779,6 +808,7 @@ async function processMessageStep(
   // sendMessage. End result for the lead: two near-identical follow-ups in a
   // row, the first one un-personalized. See prod 2026-05 reports.
   let message = step.message ?? '';
+  warnUnknownPlaceholders(message, log, lead.name, stepIdx, 'сообщения');
   message = parseMessageTemplate(message, leadToInfo(lead));
   if (campaign.use_ai && campaign.use_ai_followup && aiConfig.apiKey) {
     const historyEntries = (lead.conversation_history ?? []) as Array<{ role: string; content: string }>;

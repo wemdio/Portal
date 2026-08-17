@@ -1,5 +1,10 @@
 import 'server-only';
 
+import {
+  buildTemplateVarValues,
+  resolveTemplateVar,
+  type TemplateLeadInfo,
+} from './messageVars';
 import type { LiLead } from './types';
 
 /**
@@ -9,48 +14,34 @@ import type { LiLead } from './types';
 
 // ---- Template parsing ---------------------------------------------------
 
-interface LeadInfo {
-  name?: string;
-  first_name?: string | null;
-  last_name?: string | null;
-  company?: string | null;
-  position?: string | null;
-}
+type LeadInfo = TemplateLeadInfo;
 
 export function parseMessageTemplate(template: string, lead: LeadInfo): string {
   let result = template;
 
-  const firstName = lead.first_name || (lead.name ? lead.name.split(/\s+/)[0] : '') || '';
-  const lastName = lead.last_name || (lead.name && lead.name.split(/\s+/).length > 1 ? lead.name.split(/\s+/).pop() : '') || '';
+  const values = buildTemplateVarValues(lead);
 
-  const placeholders: Record<string, string> = {
-    name: firstName,
-    first_name: firstName,
-    last_name: lastName,
-    full_name: lead.name ?? '',
-    company: lead.company ?? '',
-    position: lead.position ?? '',
-  };
+  // Replace {{placeholder}} (double braces). Lookup is case- and
+  // separator-insensitive (see messageVars), so the camelCase vocabulary the
+  // team learns from /reglament — {{firstName}}, {{companyName}} — renders the
+  // same as {{first_name}}. Before that, camelCase matched nothing and fell
+  // through to the "clean remaining" pass below, i.e. every name silently
+  // became an empty string (prod 2026-08: 145 of 160 invites went out
+  // nameless). Unknown tags still collapse to '' so raw braces can never
+  // reach a lead — findUnknownPlaceholders is what surfaces them, at save
+  // time in the campaign API and as a warning in the campaign log.
+  result = result.replace(
+    /\{\{([^{}]+)\}\}/g,
+    (_match, raw: string) => resolveTemplateVar(values, raw) ?? '',
+  );
 
-  // Replace {{placeholder}} (double braces)
-  for (const [key, value] of Object.entries(placeholders)) {
-    for (const variant of [key, key.toUpperCase(), key.charAt(0).toUpperCase() + key.slice(1)]) {
-      const pattern = `{{${variant}}}`;
-      result = result.replaceAll(pattern, value);
-    }
-  }
-  // Clean remaining {{...}}
-  result = result.replace(/\{\{[^{}]+\}\}/g, '');
-
-  // Replace {placeholder} (single braces, WITHOUT pipe)
-  for (const [key, value] of Object.entries(placeholders)) {
-    for (const variant of [key, key.toUpperCase(), key.charAt(0).toUpperCase() + key.slice(1)]) {
-      const pattern = `{${variant}}`;
-      if (result.includes(pattern)) {
-        result = result.replaceAll(pattern, value);
-      }
-    }
-  }
+  // Replace {placeholder} (single braces, WITHOUT pipe). An unknown token is
+  // left verbatim: single braces are ordinary punctuation in a chat message,
+  // unlike {{...}} which is unambiguously a merge tag.
+  result = result.replace(
+    /\{([^{}|]+)\}/g,
+    (match, raw: string) => resolveTemplateVar(values, raw) ?? match,
+  );
 
   // Handle {option1|option2} variations
   result = result.replace(/\{([^{}]+\|[^{}]+)\}/g, (_match, group: string) => {

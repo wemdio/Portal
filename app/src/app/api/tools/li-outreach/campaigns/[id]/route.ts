@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError, checkIsAdmin } from '@/lib/liOutreach/apiHelpers';
+import { collectUnknownPlaceholders, unknownPlaceholderError } from '@/lib/liOutreach/campaignTextCheck';
 import { normalizeTimezoneOffset, normalizeWorkingHours } from '@/lib/liOutreach/schedule';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
@@ -54,6 +55,11 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       'message_existing_connections', 'use_ai_welcome', 'use_ai_followup', 'ai_model',
       'use_custom_invites',
     ];
+    // Only the texts actually being submitted are checked — an edit that
+    // doesn't touch welcome/steps can't be blocked by them.
+    const unknownVars = collectUnknownPlaceholders(body);
+    if (unknownVars.length > 0) return jsonError(unknownPlaceholderError(unknownVars), 400);
+
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     for (const key of allowed) { if (key in body) patch[key] = body[key]; }
     // working_hours / timezone_offset go through the shared normalizers so
