@@ -50,7 +50,7 @@
  *   node sync.mjs --skip-leads       # debug: skip leads capture phase
  *   node sync.mjs --leads-only       # only leads capture (first full run / debug)
  *   node sync.mjs --leads-full       # ignore fingerprints, re-capture every campaign with leads
- *   node sync.mjs --leads-rpm=N      # /leads/list pace (default 30; 20 RPM measured with zero 429s)
+ *   node sync.mjs --leads-rpm=N      # /leads/list pace (default 20 — measured with zero 429s)
  *   node sync.mjs --leads-max-pages=N        # cap on /leads/list pages per night (default 6000)
  *   node sync.mjs --leads-limit-campaigns=N  # debug: capture at most N campaigns
  */
@@ -98,9 +98,10 @@ const DRY = !!flag('dry-run', false);
 // Sunday-UTC runs (night Sun→Mon, lowest send volume) auto-refresh analytics
 // for ALL campaigns. Disable with --no-weekly-full.
 const WEEKLY_FULL = !flag('no-weekly-full', false) && new Date().getUTCDay() === 0;
-// Leads capture (phase 5). 30 RPM: measured 20 RPM with zero 429s on 2026-08-17,
-// analytics endpoints run 60 — /leads/list sits between; 429 backoff in callApi.
-const LEADS_RPM = Number(flag('leads-rpm', 30));
+// Leads capture (phase 5). 20 RPM = measured with zero 429s on 2026-08-17 while
+// /emails at 10 RPM was already catching 429s that night (shared workspace budget).
+// Raise via --leads-rpm after a clean night; 429 backoff lives in callApi.
+const LEADS_RPM = Number(flag('leads-rpm', 20));
 const SKIP_LEADS = !!flag('skip-leads', false);
 const LEADS_ONLY = !!flag('leads-only', false);
 const LEADS_FULL = !!flag('leads-full', false);
