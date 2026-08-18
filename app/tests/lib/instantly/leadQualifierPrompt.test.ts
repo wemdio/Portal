@@ -42,6 +42,9 @@ describe('buildSystemPrompt — дефолтные критерии лида', (
   it('соседние правила не сломаны: контакт-ответ без интереса и автоответы — не лид', () => {
     const prompt = _private.buildSystemPrompt(null, null);
     expect(prompt).toMatch(/ответ на запрос контакта без интереса к решению/i);
+    expect(prompt).toMatch(/при[её]мную.*общему номеру/i);
+    expect(prompt).toContain('не является коммерческим CTA');
+    expect(prompt).toContain('даже если предложение процитировано');
     expect(prompt).toContain('Автоответ/отпуск');
     expect(prompt).toContain('Запрос контакта ответственного — это НЕ предложение');
   });

@@ -255,15 +255,47 @@ export function isProposalMessage(text: string): boolean {
 // ответы отправляем в AI, чтобы не перечислять бесконечным allowlist'ом варианты
 // «свяжитесь со мной», «когда поговорим», «пришлите прайс» и другие CTA.
 const CONTACT_EMAIL_OR_USERNAME_PATTERN = /(?:[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|@[a-z0-9_]{5,})/gi;
+const CONTACT_TEL_URI_PATTERN = /<?tel:\s*\+?\d[\d\s().-]{6,}\d>?/gi;
 const CONTACT_PHONE_CANDIDATE_PATTERN = /\+?\d[\d\s().-]{6,}\d/g;
 const CONTACT_PHONE_LABEL_PATTERN = /(?:телефон|тел\.|номер|phone)/i;
 const CONTACT_DESCRIPTOR_PATTERN = /^(?:директор[а-яё]*|руководител[а-яё]*|начальник[а-яё]*|менеджер[а-яё]*|специалист[а-яё]*|координатор[а-яё]*|секретар[а-яё]*|телефон|тел\.|номер|e-?mail|почта|director|head|manager|specialist|coordinator|assistant|procurement)(?:\s+[А-ЯЁа-яёA-Za-z-]+){0,4}$/i;
 const GENERIC_FOOTER_CONTACT_PATTERN = /^\s*(?:позвоните\s+мне\s+по\s+любым\s+вопросам|feel\s+free\s+to\s+(?:call|contact|reach\s+out(?:\s+to)?)\s+me(?:\s+if\s+you\s+have\s+any\s+questions)?)[.!]?\s*$/i;
+const SIGNATURE_BOUNDARY_PATTERN = /^(?:--|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:[,.!].*)?|best\s+regards(?:[,.!].*)?|kind\s+regards(?:[,.!].*)?|regards(?:[,.!].*)?)$/i;
+const QUOTED_REPLY_BOUNDARY_PATTERNS = [
+  /^>/,
+  /^On\s+.+\s+wrote:\s*$/i,
+  /^(?:От|From|Sent|Кому|To):\s+.+$/i,
+  /^-{2,}\s*(?:Original Message|Исходное сообщение|Пересланное сообщение)\s*-{2,}$/i,
+  /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}[^\n]{0,160}(?:пишет|написал(?:а)?|wrote):\s*$/i,
+];
+const ROUTING_VERB_SOURCE = String.raw`(?:обратитесь|обращайтесь|позвоните|звоните|наберите|напишите|пишите|свяжитесь)`;
+// Только известные названия подразделений. Произвольное слово после «отдел»
+// опасно: «напишите в отдел заявку/КП» — уже отдельный CTA, а не название отдела.
+const SHARED_DEPARTMENT_SOURCE = String.raw`отдел(?:\s+(?:продаж|закупок|снабжения|логистики|маркетинга|кадров|персонала|развития|бухгалтерии|информационных\s+технологий|технической\s+поддержки|по\s+работе\s+с\s+клиентами))?`;
+const INSTITUTIONAL_DESTINATION_SOURCE = String.raw`(?:при[её]мную|канцелярию|регистратуру|горячую\s+линию|${SHARED_DEPARTMENT_SOURCE})`;
+const SHARED_CONTACT_ROUTING_PATTERNS = [
+  new RegExp(
+    String.raw`^${ROUTING_VERB_SOURCE}\s+(?:в|на)\s+(?:(?:нашу|общую)\s+)?${INSTITUTIONAL_DESTINATION_SOURCE}(?:\s+(?:по|на)\s+(?:общему\s+)?(?:номеру|телефону))?$`,
+    'i',
+  ),
+  new RegExp(
+    String.raw`^${ROUTING_VERB_SOURCE}\s+(?:по|на)\s+(?:общему|единому|дежурному)\s+(?:номеру|телефону)$`,
+    'i',
+  ),
+  new RegExp(
+    String.raw`^${ROUTING_VERB_SOURCE}\s+(?:к|с)\s+(?:нашим?\s+)?(?:секретар(?:ю|ём|ем)|оператор(?:у|ом)|дежурн(?:ому|ым)\s+специалист(?:у|ом))$`,
+    'i',
+  ),
+];
 
 function stripContactArtifacts(text: string): { text: string; hadArtifact: boolean } {
   let hadArtifact = false;
   const hasPhoneLabel = CONTACT_PHONE_LABEL_PATTERN.test(text);
   const withoutArtifacts = text
+    .replace(CONTACT_TEL_URI_PATTERN, () => {
+      hadArtifact = true;
+      return ' ';
+    })
     .replace(CONTACT_EMAIL_OR_USERNAME_PATTERN, () => {
       hadArtifact = true;
       return ' ';
@@ -357,6 +389,67 @@ function isPlainContactRoutingReply(text: string): boolean {
   return isPureNamedContactRouting(stripped.text);
 }
 
+function extractAuthoredReplyText(text: string): string {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const boundaryIndex = lines.findIndex((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    return (
+      SIGNATURE_BOUNDARY_PATTERN.test(trimmed) ||
+      QUOTED_REPLY_BOUNDARY_PATTERNS.some((pattern) => pattern.test(trimmed))
+    );
+  });
+  return lines.slice(0, boundaryIndex === -1 ? lines.length : boundaryIndex).join('\n').trim();
+}
+
+function isSharedContactRoutingReply(text: string): boolean {
+  const authoredReply = extractAuthoredReplyText(text);
+  if (!authoredReply) return false;
+
+  const withoutGreeting = authoredReply.replace(
+    /^\s*(?:(?:добр(?:ый|ое|ого)\s+(?:день|утро|вечер))|здравствуйте|коллеги)\s*[,!.:\-–—]*\s*/i,
+    '',
+  );
+  const withoutFraming = withoutGreeting
+    .replace(
+      /^\s*по\s+(?:этому|данному)\s+(?:вопросу|направлению)\s*[,;:.\-–—]*\s*/i,
+      '',
+    )
+    .replace(
+      /^\s*(?:просьба|просим)\s+(?:обратиться|обращаться|связаться)(?=\s)/i,
+      'обращайтесь',
+    )
+    .replace(
+      /^\s*можете\s+(?:обратиться|обращаться|связаться)(?=\s)/i,
+      'обращайтесь',
+    );
+  const canonicalDestination = withoutFraming
+    .replace(
+      new RegExp(
+        String.raw`^(${ROUTING_VERB_SOURCE})\s+(?:с\s+(?:нашим\s+)?отделом|к\s+(?:нашему\s+)?отделу)(?=[\s,.;:!?]|$)`,
+        'i',
+      ),
+      '$1 в отдел',
+    )
+    .replace(
+      new RegExp(
+        String.raw`^(${ROUTING_VERB_SOURCE})\s+(?:с|к)\s+(?:нашей\s+)?при[её]мной(?=[\s,.;:!?]|$)`,
+        'i',
+      ),
+      '$1 в приёмную',
+    );
+  const withoutCourtesy = canonicalDestination.replace(
+    /,?\s*(?:пожалуйста|пож(?:алуйста)?-?та)\s*,?/gi,
+    ' ',
+  );
+  const normalized = stripContactArtifacts(withoutCourtesy)
+    .text.replace(/\s+/g, ' ')
+    .replace(/^[\s,;:.!?\-–—]+|[\s,;:.!?\-–—]+$/g, '')
+    .trim();
+
+  return SHARED_CONTACT_ROUTING_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 // ─── AI Classification ──────────────────────────────────────────────────────
 
 function buildSystemPrompt(briefText?: string | null, leadCriteria?: string | null): string {
@@ -429,6 +522,7 @@ function buildSystemPrompt(briefText?: string | null, leadCriteria?: string | nu
 ВАЖНО — НЕ путай дежурные контакты с интересом:
 - Телефон/адрес/сайт в подписи или в шаблонном подтверждении ("Спасибо за сообщение", "Ваше письмо получено", "свяжемся / предоставим ответ", "звоните по любым вопросам") — это АВТООТВЕТ-подтверждение получения, а НЕ интерес. Само по себе это is_lead=false, proposal_seen=false.
 - Явная личная просьба позвонить или встретиться ("наберите меня завтра", "давайте созвонимся") — это лид даже без найденного исходящего письма. Но телефон в подписи или дежурное "звоните по любым вопросам" — не лид.
+- Перенаправление в приёмную, отдел или по общему номеру без собственной готовности обсуждать предложение и без коммерческого запроса не является коммерческим CTA: ставь is_lead=false, needs_review=false, даже если предложение процитировано.
 - Вежливость ("спасибо", "благодарю за информацию") без прямого CTA или конкретного коммерческого запроса — НЕ лид.
 ${criteriaReminder}
 
@@ -766,6 +860,26 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sharedContactRoutingNonLead(
+  ctx: ThreadContext,
+  baseResult?: QualificationResult,
+): QualificationResult {
+  const outboundText = ctx.lastOutbound ? getBodyText(ctx.lastOutbound.body) : '';
+  return {
+    ...(baseResult ?? {
+      proposalSeen: isProposalMessage(outboundText),
+    }),
+    isLead: false,
+    customCriteriaMatched: false,
+    interestSignals: [],
+    reason: 'Перенаправление на общий контакт без прямого коммерческого интереса',
+    confidence: 0.95,
+    needsReview: false,
+    objectionHandleable: false,
+    objectionDraft: null,
+  };
+}
+
 /** Внутренние функции для unit-тестов парсера. Не использовать в продакшен-коде. */
 export const _private = {
   sanitizeAIJsonString,
@@ -917,6 +1031,19 @@ export async function qualifyReply(
     };
   }
 
+  // Узкий дефолтный guard для институциональной маршрутизации: «обращайтесь в
+  // приёмную/отдел/по общему номеру» не выражает интереса самого получателя.
+  // Проверяем только основной ответ до подписи и quoted history. При кастомном
+  // критерии модель должна сначала сообщить, совпало ли именно это правило.
+  const sharedContactRouting = isSharedContactRoutingReply(replyText);
+  const hasCustomCriteria = Boolean(aiOptions.leadCriteria?.trim());
+  if (sharedContactRouting && !hasCustomCriteria) {
+    return {
+      ...sharedContactRoutingNonLead(ctx),
+      threadContext: ctx,
+    };
+  }
+
   // После contact-only opener детерминированно отсекаем только явно простую
   // маршрутизацию на ЛПР. Любой другой содержательный ответ идёт в AI: исходящий
   // оффер мог не сохраниться, а сам ответ уже достаточен для lead/review-решения.
@@ -952,5 +1079,11 @@ export async function qualifyReply(
   }
 
   const aiResult = await classifyWithAI(ctx, { ...aiOptions, briefText });
+  if (sharedContactRouting && !aiResult.customCriteriaMatched) {
+    return {
+      ...sharedContactRoutingNonLead(ctx, aiResult),
+      threadContext: ctx,
+    };
+  }
   return { ...aiResult, threadContext: ctx };
 }
