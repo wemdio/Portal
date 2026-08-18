@@ -66,6 +66,8 @@ interface SegmentRow {
   rubric_groups: GisSignalRubricGroup[] | null;
   enabled: boolean | null;
   priority: number | null;
+  /** Доля сегмента в daily_limit; NULL/нет колонки (до миграции) → 1, как раньше. */
+  quota_weight: number | null;
 }
 
 interface CampaignWindowTotals {
@@ -167,9 +169,14 @@ export async function GET(req: NextRequest) {
     .filter((id): id is string => Boolean(id));
 
   // Квоты — только по enabled-сегментам (как в pullSegmentCandidates):
-  // daily_limit делится поровну, остаток — первым по priority.
+  // daily_limit делится по весам quota_weight, остаток — по наибольшей
+  // дробной части. Дашборд обязан показывать ту же квоту, по которой реально
+  // тянет прогон, иначе «остатка пула» врёт.
   const enabledSegments = segments.filter((s) => s.enabled === true);
-  const quotas = computeSegmentQuotas(config?.daily_limit ?? 0, enabledSegments.length);
+  const quotas = computeSegmentQuotas(
+    config?.daily_limit ?? 0,
+    enabledSegments.map((s) => (typeof s.quota_weight === 'number' ? s.quota_weight : 1)),
+  );
   const quotaBySegment = new Map(enabledSegments.map((s, i) => [s.key, quotas[i] ?? 0]));
 
   const periodRange = { fromUtc: period.fromUtc, toExclusiveUtc: period.toExclusiveUtc };

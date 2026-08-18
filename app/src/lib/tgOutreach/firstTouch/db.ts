@@ -33,7 +33,12 @@ export async function loadPendingByBase(
   for (const baseId of baseIds) {
     const { data } = await db
       .from('tg_outreach_base_contacts')
-      .select('id, base_id, username, message')
+      // `attempts` обязателен: send.ts читает его с контакта, чтобы понять,
+      // какая это попытка. Без колонки там всегда 0 → recordContactFailure
+      // вечно пишет 1, статус `failed` не наступает, контакт остаётся
+      // pending навсегда. Прод 18.08.2026: 114 контактов застряли на
+      // attempts=1, один username собрал 168 попыток за месяц.
+      .select('id, base_id, username, message, attempts')
       .eq('base_id', baseId)
       .eq('status', 'pending')
       .order('created_at', { ascending: true })

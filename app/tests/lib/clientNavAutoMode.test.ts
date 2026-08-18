@@ -21,9 +21,21 @@ import {
 } from '@/lib/clientNav';
 
 describe('filterClientNavGroupsForMode', () => {
-  it('returns groups unchanged for manual mode', () => {
+  it('keeps the full manual IA except auto-only items', () => {
     const manual = filterClientNavGroupsForMode(CLIENT_NAV_GROUPS, 'manual');
-    expect(manual).toBe(CLIENT_NAV_GROUPS);
+    // «Воронка базы» описывает скоринг доменов через endpoint клиента —
+    // этапа, которого у manual-клиента нет. Раньше пункт видели все 37
+    // клиентов и открывали пустую воронку из нулей (18.08.2026).
+    const manualIds = manual.flatMap((g) => g.items.map((i) => i.id));
+    expect(manualIds).not.toContain('reports');
+
+    // Всё остальное manual-меню сохраняется один-в-один, включая порядок
+    // групп и состав каждой группы.
+    const expected = CLIENT_NAV_GROUPS.map((g) => ({
+      id: g.id,
+      items: g.items.map((i) => i.id).filter((id) => id !== 'reports'),
+    })).filter((g) => g.items.length > 0);
+    expect(manual.map((g) => ({ id: g.id, items: g.items.map((i) => i.id) }))).toEqual(expected);
   });
 
   it('keeps only campaigns / replies / leads / blocklist / reports for auto mode', () => {

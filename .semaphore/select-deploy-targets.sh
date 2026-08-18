@@ -20,6 +20,7 @@ select_deploy_targets_from_files() {
   DEPLOY_WORKERS=0
   DEPLOY_IDB_STACK=0
   DEPLOY_BACKUP=0
+  DEPLOY_DATASET_SYNC=0
   CORE_SERVICES=""
   WORKER_SERVICES=""
 
@@ -28,6 +29,25 @@ select_deploy_targets_from_files() {
     case "$changed_path" in
       docker-compose.prod.yml)
         DEPLOY_ALL=1
+        ;;
+      app/scripts/instantly-dataset/wiki/*)
+        # Доки agent_wiki грузятся в БД вручную (load-agent-wiki.mjs), CI-шаг синка
+        # их не копирует → для них прежнее поведение app/* без цели dataset_sync.
+        DEPLOY_PORTAL=1
+        DEPLOY_WORKERS=1
+        ;;
+      app/scripts/instantly-dataset/*)
+        # Ночной синк instantly_dataset живёт ВНЕ compose: /opt/instantly-dataset-sync
+        # на portal host, крон запускает docker run node:22-alpine с этой папкой.
+        # До 2026-08 туда попадал только ручной deploy-sync.sh — мерж в main синк
+        # не обновлял. Теперь scheduled-deploy копирует код (*.mjs, *.sql) сам.
+        # Образы приложения тоже копируют app/, поэтому поведение app/* сохраняем.
+        # Полный деплой (DEPLOY_ALL) синк НЕ трогает: он деплоится только по
+        # явному изменению своих файлов, чтобы слепая копия не откатила хотфикс,
+        # выкаченный deploy-sync.sh раньше мержа.
+        DEPLOY_PORTAL=1
+        DEPLOY_WORKERS=1
+        DEPLOY_DATASET_SYNC=1
         ;;
       app/*)
         # Both production images copy app/. A shared app change can affect any
@@ -124,7 +144,7 @@ print_deploy_plan() {
   else
     echo "  - <none>"
   fi
-  echo "[deploy-plan] full=${DEPLOY_ALL} portal=${DEPLOY_PORTAL} workers=${DEPLOY_WORKERS} idb=${DEPLOY_IDB_STACK} backup=${DEPLOY_BACKUP}"
+  echo "[deploy-plan] full=${DEPLOY_ALL} portal=${DEPLOY_PORTAL} workers=${DEPLOY_WORKERS} idb=${DEPLOY_IDB_STACK} backup=${DEPLOY_BACKUP} dataset_sync=${DEPLOY_DATASET_SYNC}"
   echo "[deploy-plan] core services: ${CORE_SERVICES:-<none>}"
   echo "[deploy-plan] worker services: ${WORKER_SERVICES:-<none>}"
 }

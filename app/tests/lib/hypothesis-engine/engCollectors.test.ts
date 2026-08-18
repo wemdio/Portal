@@ -157,6 +157,8 @@ function systemPromptOf(callIndex = 0): string {
 }
 
 beforeEach(() => {
+  delete process.env.HE_SLICE_PROBE_REPAIR_BELOW;
+  delete process.env.HE_SLICE_PROBE_REJECT_BELOW;
   jest.clearAllMocks();
   // clearAllMocks НЕ снимает очередь mockResolvedValueOnce: недоиспользованные
   // ответы (тест упал раньше, чем выбрал их все) утекали бы в следующий кейс и
@@ -680,6 +682,14 @@ describe('plan phase — market=us зовёт EN-промпт', () => {
       rawResponse: {},
     });
 
+    // Ремонт и отказ по умолчанию ВЫКЛЮЧЕНЫ (калибровка 18.08 показала, что
+    // числа пробы ненадёжны). Кейсы ниже проверяют сам механизм, поэтому
+    // включают пороги явно; отдельный кейс проверяет поведение по умолчанию.
+    function enableProbeActions() {
+      process.env.HE_SLICE_PROBE_REPAIR_BELOW = '0.3';
+      process.env.HE_SLICE_PROBE_REJECT_BELOW = '0.3';
+    }
+
     function seedWithCatalog() {
       mockDb = createMockSupabase({
         tables: {
@@ -705,6 +715,27 @@ describe('plan phase — market=us зовёт EN-промпт', () => {
       return mockDb.updates.filter((u) => u.table === 'he_bases')[0].patch.collect_info as HeCollectInfo;
     }
 
+    it('ПО УМОЛЧАНИЮ проба только меряет: план не трогает, базу не отменяет', async () => {
+      // Порог 0.3 забраковал бы Healthcare (эталон, 23%) и рабочий срез
+      // Franchise (27%), а сильная модель переворачивала вердикт: Industrial
+      // 80% против 0%. Пока вопрос пробы не переделан, действовать нельзя.
+      seedWithCatalog();
+      callLLMMock
+        .mockResolvedValueOnce(llmResult(PDL_PLAN))
+        .mockResolvedValueOnce(llmResult({ belongs: [] }))   // 0% попадания
+        .mockResolvedValue(llmResult({ irrelevant: [] }));
+
+      const res = await runBaseCollectStage(makeJob(), ctx('us'));
+
+      // Сбор состоялся, план остался исходным, отказа не было.
+      expect((res.result as { rows: number }).rows).toBe(1);
+      const info = infoOf();
+      expect(info.plan?.tasks[0].pdl_filters).toEqual({ industries: ['restaurants'] });
+      expect(info.slice_probe).toMatchObject({ outcome: 'passed', hit_rate: 0 });
+      // Ремонтного вызова модели не было: план + проба + гейт = 3.
+      expect(callLLMMock).toHaveBeenCalledTimes(3);
+    });
+
     it('срез по вертикали → собираем, проба записана как passed', async () => {
       seedWithCatalog();
       callLLMMock
@@ -718,6 +749,7 @@ describe('plan phase — market=us зовёт EN-промпт', () => {
     });
 
     it('чужой срез → перепланируется, в план идёт новый; вопрос пробы обратный гейту', async () => {
+      enableProbeActions();
       seedWithCatalog();
       const REPAIR = { rationale: 'franchisors carry it in the name', pdl_filters: { name: 'franchise' } };
       callLLMMock
@@ -740,6 +772,7 @@ describe('plan phase — market=us зовёт EN-промпт', () => {
     });
 
     it('перепланирование не помогло → база НЕ строится, причина в collect_info', async () => {
+      enableProbeActions();
       seedWithCatalog();
       callLLMMock
         .mockResolvedValueOnce(llmResult(PDL_PLAN))
@@ -771,6 +804,7 @@ describe('plan phase — market=us зовёт EN-промпт', () => {
     });
 
     it('план с НЕСКОЛЬКИМИ каталожными задачами: заменяется вся каталожная часть, не только первая', async () => {
+      enableProbeActions();
       // Форма боевого плана 12.08: три pdl-среза с разными индустриями. Замена
       // только первого оставила бы два широких добивать кап нецелевыми.
       mockDb = createMockSupabase({

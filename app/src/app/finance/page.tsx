@@ -3,6 +3,12 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { useIsTma } from '@/lib/useIsTma';
+import { loadPayments } from '@/lib/payments/client';
+import {
+  summarizePaymentsFinanceMonth,
+  type PaymentFinanceMonth,
+} from '@/lib/payments/finance';
+import type { PaymentRequest } from '@/lib/payments/types';
 
 /* ═══════════════════════════════════════════
    TYPES
@@ -58,14 +64,6 @@ interface MonthlyExpensesSummary {
   marketing: { plan: number; fact: number };
   additional: { plan: number; fact: number };
   total: { plan: number; fact: number };
-}
-
-interface ApprovedPayment {
-  id: string;
-  department: string;
-  description: string;
-  amount: number;
-  created_at: string;
 }
 
 /* ═══════════════════════════════════════════
@@ -219,10 +217,21 @@ export default function FinancePage() {
   const [allExpenses, setAllExpenses] = useState<Record<string, MonthlyExpenses>>({});
   const [selectedMonth, setSelectedMonth] = useState<string>('');
   const [activeTab, setActiveTab] = useState<'overview' | 'revenue' | 'expenses' | 'kpi'>('overview');
-  const [approvedPayments, setApprovedPayments] = useState<ApprovedPayment[]>([]);
+  const [paymentRequests, setPaymentRequests] = useState<PaymentRequest[]>([]);
+  const [paymentsLoading, setPaymentsLoading] = useState(false);
+  const [paymentsLoadError, setPaymentsLoadError] = useState<string | null>(null);
 
   // Generate month list
   const monthRange = useMemo(() => generateMonthRange(), []);
+  const selectedYear = selectedMonth.slice(0, 4);
+  const paymentFetchMonths = useMemo(() => {
+    if (!/^\d{4}$/.test(selectedYear)) return [];
+    const previousDecember = `${Number(selectedYear) - 1}-12`;
+    return Array.from(new Set([
+      previousDecember,
+      ...monthRange.filter((month) => month.startsWith(`${selectedYear}-`)),
+    ]));
+  }, [monthRange, selectedYear]);
 
   // Initialize selected month to current
   useEffect(() => {
@@ -236,22 +245,42 @@ export default function FinancePage() {
     setAllExpenses(loadExpenses());
   }, []);
 
-  // Fetch approved payments from payment_requests
+  // Load the selected year's payment read models in parallel. The previous
+  // December is included so January MoM uses the same paid-date semantics.
   useEffect(() => {
-    async function fetchApprovedPayments() {
+    if (!selectedYear || paymentFetchMonths.length === 0) return;
+
+    const controller = new AbortController();
+    let stale = false;
+
+    async function fetchPaymentRequests() {
+      setPaymentsLoading(true);
+      setPaymentsLoadError(null);
+      setPaymentRequests([]);
+
       try {
-        const { data, error } = await supabase
-          .from('payment_requests')
-          .select('id, department, description, amount, created_at')
-          .eq('status', 'approved')
-          .order('created_at', { ascending: false });
-        if (!error && data) setApprovedPayments(data);
-      } catch {
-        // table may not exist yet
+        const responses = await Promise.all(
+          paymentFetchMonths.map((month) => loadPayments(month, controller.signal)),
+        );
+        if (!stale) {
+          setPaymentRequests(responses.flatMap((response) => response.requests));
+        }
+      } catch (error) {
+        if (!stale && !controller.signal.aborted) {
+          console.error('Error fetching payment requests for finance:', error);
+          setPaymentsLoadError('Не удалось загрузить оплаты — финансовые итоги показаны без них.');
+        }
+      } finally {
+        if (!stale) setPaymentsLoading(false);
       }
     }
-    fetchApprovedPayments();
-  }, []);
+
+    void fetchPaymentRequests();
+    return () => {
+      stale = true;
+      controller.abort();
+    };
+  }, [paymentFetchMonths, selectedYear]);
 
   // Fetch projects
   useEffect(() => {
@@ -336,6 +365,11 @@ export default function FinancePage() {
     return projects.filter((p) => p.month === prevMonth);
   }, [projects, prevMonth]);
 
+  const prevPaymentFinance = useMemo(
+    () => summarizePaymentsFinanceMonth(paymentRequests, prevMonth),
+    [paymentRequests, prevMonth],
+  );
+
   // Revenue breakdown
   const revenue = useMemo(() => {
     const renewals = monthlyProjects.filter((p) => p.isRenewal);
@@ -373,15 +407,10 @@ export default function FinancePage() {
     return allExpenses[selectedMonth] || EMPTY_EXPENSES;
   }, [allExpenses, selectedMonth]);
 
-  const additionalExpenses = useMemo(() => {
-    const monthPayments = approvedPayments.filter((p) => {
-      const d = new Date(p.created_at);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-      return key === selectedMonth;
-    });
-    const total = monthPayments.reduce((s, p) => s + Number(p.amount), 0);
-    return { total, count: monthPayments.length, items: monthPayments };
-  }, [approvedPayments, selectedMonth]);
+  const paymentFinance = useMemo(
+    () => summarizePaymentsFinanceMonth(paymentRequests, selectedMonth),
+    [paymentRequests, selectedMonth],
+  );
 
   const expenseSummary = useMemo((): MonthlyExpensesSummary => {
     const sum = (rows: ExpenseRow[]) => ({
@@ -392,7 +421,7 @@ export default function FinancePage() {
     const operations = sum(currentExpenses.operations);
     const taxes = sum(currentExpenses.taxes);
     const marketing = sum(currentExpenses.marketing);
-    const additional = { plan: additionalExpenses.total, fact: additionalExpenses.total };
+    const additional = { plan: paymentFinance.plan.total, fact: paymentFinance.fact.total };
     return {
       payroll,
       operations,
@@ -404,7 +433,7 @@ export default function FinancePage() {
         fact: payroll.fact + operations.fact + taxes.fact + marketing.fact + additional.fact,
       },
     };
-  }, [currentExpenses, additionalExpenses]);
+  }, [currentExpenses, paymentFinance]);
 
   // P&L
   const pnl = useMemo(() => {
@@ -501,11 +530,12 @@ export default function FinancePage() {
   const prevPnl = useMemo(() => {
     const rev = prevRevenue.total;
     const expData = allExpenses[prevMonth];
-    const exp = expData
+    const localExpenses = expData
       ? [...(expData.payroll || []), ...(expData.operations || []), ...(expData.taxes || []), ...(expData.marketing || [])].reduce((s, r) => s + r.fact, 0)
       : 0;
+    const exp = localExpenses + prevPaymentFinance.fact.total;
     return { revenue: rev, expenses: exp, netProfit: rev - exp, margin: rev > 0 ? ((rev - exp) / rev) * 100 : 0 };
-  }, [prevRevenue, allExpenses, prevMonth]);
+  }, [prevRevenue, allExpenses, prevMonth, prevPaymentFinance]);
 
   // Outreach-specific P&L
   const outreachPnl = useMemo(() => {
@@ -517,9 +547,10 @@ export default function FinancePage() {
     const prevOutreachItems = prevMonthProjects.filter((p) => p.leadSource === 'outreach');
     const prevOutreachRevenue = prevOutreachItems.reduce((s, p) => s + p.budget, 0);
     const prevExpData = allExpenses[prevMonth];
-    const prevExpTotal = prevExpData
+    const prevLocalExpTotal = prevExpData
       ? [...(prevExpData.payroll || []), ...(prevExpData.operations || []), ...(prevExpData.taxes || []), ...(prevExpData.marketing || [])].reduce((s, r) => s + r.fact, 0)
       : 0;
+    const prevExpTotal = prevLocalExpTotal + prevPaymentFinance.fact.total;
     const prevOutreachNetProfit = prevOutreachRevenue - prevExpTotal;
 
     const revenueGrowth = prevOutreachRevenue > 0 ? ((outreachRevenue - prevOutreachRevenue) / prevOutreachRevenue) * 100 : 0;
@@ -534,7 +565,7 @@ export default function FinancePage() {
       revenueGrowth,
       netProfitGrowth,
     };
-  }, [monthlyProjects, prevMonthProjects, expenseSummary, allExpenses, prevMonth]);
+  }, [monthlyProjects, prevMonthProjects, expenseSummary, allExpenses, prevMonth, prevPaymentFinance]);
 
   // Extended KPIs (all spreadsheet metrics)
   const extendedKpis = useMemo(() => {
@@ -610,12 +641,14 @@ export default function FinancePage() {
     return yearMonths.map((m) => {
       const mp = projects.filter((p) => p.month === m);
       const rev = mp.reduce((s, p) => s + p.budget, 0);
-      const exp = allExpenses[m]
+      const localExpenses = allExpenses[m]
         ? [...(allExpenses[m].payroll || []), ...(allExpenses[m].operations || []), ...(allExpenses[m].taxes || []), ...(allExpenses[m].marketing || [])].reduce((s, r) => s + r.fact, 0)
         : 0;
+      const paidExpenses = summarizePaymentsFinanceMonth(paymentRequests, m).fact.total;
+      const exp = localExpenses + paidExpenses;
       return { month: m, label: formatMonthLabel(m), revenue: rev, expenses: exp, profit: rev - exp };
     });
-  }, [projects, allExpenses, selectedMonth, monthRange]);
+  }, [projects, allExpenses, paymentRequests, selectedMonth, monthRange]);
 
   // ────── Expense editing ──────
 
@@ -629,7 +662,7 @@ export default function FinancePage() {
 
   // ────── Render ──────
 
-  if (loading) {
+  if (loading || paymentsLoading) {
     return (
       <div className="flex h-64 items-center justify-center">
         <div className="text-gray-400 text-sm">Загрузка финансов...</div>
@@ -680,6 +713,12 @@ export default function FinancePage() {
           </button>
         </div>
       </div>
+
+      {paymentsLoadError && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          {paymentsLoadError}
+        </div>
+      )}
 
       {/* Tabs */}
       <div className={isTma ? 'flex gap-1 bg-gray-100 p-1 rounded-xl w-full overflow-x-auto no-scrollbar' : 'flex gap-1 bg-gray-100 p-1 rounded-xl w-fit'}>
@@ -1023,7 +1062,7 @@ export default function FinancePage() {
           expenses={currentExpenses}
           summary={expenseSummary}
           onUpdate={(updated) => updateExpenses(selectedMonth, updated)}
-          additionalExpenses={additionalExpenses}
+          paymentFinance={paymentFinance}
         />
       )}
 
@@ -1247,14 +1286,15 @@ function MetricRow({ label, value, highlight }: { label: string; value: string; 
    ═══════════════════════════════════════════ */
 
 function ExpensesTab({
-  expenses, summary, onUpdate, additionalExpenses,
+  expenses, summary, onUpdate, paymentFinance,
 }: {
   expenses: MonthlyExpenses;
   summary: MonthlyExpensesSummary;
   onUpdate: (updated: MonthlyExpenses) => void;
-  additionalExpenses: { total: number; count: number; items: ApprovedPayment[] };
+  paymentFinance: PaymentFinanceMonth<PaymentRequest>;
 }) {
   const isTma = useIsTma();
+  const additionalExpenses = paymentFinance.fact;
   const categories: { key: keyof MonthlyExpenses; label: string; summaryKey: keyof MonthlyExpensesSummary }[] = [
     { key: 'payroll', label: 'ФОТ (зарплаты)', summaryKey: 'payroll' },
     { key: 'operations', label: 'Операционные расходы (подписки, инструменты)', summaryKey: 'operations' },
@@ -1290,7 +1330,11 @@ function ExpensesTab({
         <SummaryCard label="Операционные (факт)" value={summary.operations.fact > 0 ? formatCurrency(summary.operations.fact) : '—'} sub={summary.operations.plan > 0 ? `план: ${formatCurrency(summary.operations.plan)}` : undefined} />
         <SummaryCard label="Налоги (факт)" value={summary.taxes.fact > 0 ? formatCurrency(summary.taxes.fact) : '—'} sub={summary.taxes.plan > 0 ? `план: ${formatCurrency(summary.taxes.plan)}` : undefined} />
         <SummaryCard label="Маркетинг (факт)" value={summary.marketing.fact > 0 ? formatCurrency(summary.marketing.fact) : '—'} sub={summary.marketing.plan > 0 ? `план: ${formatCurrency(summary.marketing.plan)}` : undefined} />
-        <SummaryCard label="Доп. расходы (оплаты)" value={summary.additional.fact > 0 ? formatCurrency(summary.additional.fact) : '—'} sub={`${additionalExpenses.count} согласованных`} />
+        <SummaryCard
+          label="Доп. расходы (оплаты)"
+          value={summary.additional.fact > 0 ? formatCurrency(summary.additional.fact) : '—'}
+          sub={`${additionalExpenses.count} оплачено · план: ${formatCurrency(paymentFinance.plan.total)}`}
+        />
         <SummaryCard
           label="Итого расходы (факт)"
           value={summary.total.fact > 0 ? formatCurrency(summary.total.fact) : '—'}
@@ -1396,13 +1440,13 @@ function ExpensesTab({
         );
       })}
 
-      {/* Additional expenses from approved payment requests */}
+      {/* Additional expenses from paid payment requests */}
       {additionalExpenses.items.length > 0 && (
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
           <div className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} border-b border-gray-100 bg-gray-50/50`}>
-            <h3 className="text-base font-bold text-gray-900">Доп. расходы (согласованные оплаты)</h3>
+            <h3 className="text-base font-bold text-gray-900">Доп. расходы (оплаченные заявки)</h3>
             <p className="text-xs text-gray-500 mt-0.5">
-              {additionalExpenses.count} запросов на {formatCurrency(additionalExpenses.total)}
+              {additionalExpenses.count} оплат на {formatCurrency(additionalExpenses.total)}
             </p>
           </div>
           <div className="overflow-x-auto">

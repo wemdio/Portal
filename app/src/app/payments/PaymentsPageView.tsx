@@ -1,735 +1,287 @@
 'use client';
 
-import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-/* ═══════════════════════════════════════════
-   TYPES
-   ═══════════════════════════════════════════ */
+import PaymentLimitSummary from '@/components/payments/PaymentLimitSummary';
+import PaymentRequestForm from '@/components/payments/PaymentRequestForm';
+import PaymentRequestList from '@/components/payments/PaymentRequestList';
+import { formatRubles, PAYMENT_DEPARTMENT_LABELS } from '@/components/payments/format';
+import { currentMoscowDate } from '@/lib/calendarDate';
+import {
+  loadPayments,
+  newIdempotencyKey,
+  submitPaymentRequest,
+  updatePaymentRequest,
+} from '@/lib/payments/client';
+import { paymentRequestBelongsToMonth } from '@/lib/payments/monthMembership';
+import type {
+  PaymentRequest,
+  PaymentRequestActionInput,
+  PaymentRequestActionResponse,
+  PaymentsReadModel,
+  SubmitPaymentRequestInput,
+  SubmitPaymentRequestResponse,
+} from '@/lib/payments/types';
 
-interface PaymentRequest {
-  id: string;
-  user_id: string;
-  department: string;
-  description: string;
-  amount: number;
-  project_id: string | null;
-  comment: string | null;
-  status: 'pending' | 'approved' | 'rejected';
-  decided_by: string | null;
-  decided_at: string | null;
-  decision_comment: string | null;
-  created_at: string;
-  // joined
-  requester_name?: string;
-  requester_email?: string;
-  project_name?: string;
-  project_client?: string;
+type PaymentsTab = 'requests' | 'stats';
+
+function currentMonthKey(): string {
+  return currentMoscowDate().slice(0, 7);
 }
 
-interface ProjectOption {
-  id: string;
-  name: string;
-  client: string;
+function messageFromError(error: unknown): string {
+  return error instanceof Error ? error.message : 'Не удалось загрузить расходы';
 }
 
-interface ProfileMap {
-  [id: string]: { full_name: string; email: string };
-}
-
-/* ═══════════════════════════════════════════
-   CONSTANTS
-   ═══════════════════════════════════════════ */
-
-const DEPARTMENTS: { value: string; label: string }[] = [
-  { value: 'outreach', label: 'Аутрич' },
-  { value: 'paid_traffic', label: 'Платный трафик' },
-  { value: 'accounting', label: 'Аккаунтинг' },
-  { value: 'sales', label: 'Продажи' },
-];
-
-const DEPARTMENT_LABELS: Record<string, string> = Object.fromEntries(
-  DEPARTMENTS.map((d) => [d.value, d.label]),
-);
-
-const MONTH_NAMES = [
-  'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
-  'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
-];
-
-/* ═══════════════════════════════════════════
-   HELPERS
-   ═══════════════════════════════════════════ */
-
-function ruPlural(n: number, forms: [string, string, string]): string {
-  const abs = Math.abs(n) % 100;
-  const lastDigit = abs % 10;
-  if (abs > 10 && abs < 20) return forms[2];
-  if (lastDigit > 1 && lastDigit < 5) return forms[1];
-  if (lastDigit === 1) return forms[0];
-  return forms[2];
-}
-
-function formatCurrency(val: number): string {
-  return new Intl.NumberFormat('ru-RU', {
-    style: 'currency',
-    currency: 'RUB',
-    maximumFractionDigits: 0,
-  }).format(val);
-}
-
-function formatDate(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' });
-}
-
-function formatDateTime(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-}
-
-function getMonthKey(iso: string): string {
-  const d = new Date(iso);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-}
-
-function generateMonthRange(): string[] {
-  const months: string[] = [];
-  const now = new Date();
-  const start = new Date(2025, 0, 1);
-  const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-  const cursor = new Date(start);
-  while (cursor < end) {
-    months.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`);
-    cursor.setMonth(cursor.getMonth() + 1);
-  }
-  return months.reverse();
-}
-
-function formatMonthLabel(key: string): string {
-  const [year, month] = key.split('-');
-  return `${MONTH_NAMES[parseInt(month, 10) - 1]} ${year}`;
-}
-
-/* ═══════════════════════════════════════════
-   COMPONENT
-   ═══════════════════════════════════════════ */
-
-export default function PaymentsPageView() {
-  const [requests, setRequests] = useState<PaymentRequest[]>([]);
-  const [projects, setProjects] = useState<ProjectOption[]>([]);
-  const [profiles, setProfiles] = useState<ProfileMap>({});
-  const [loading, setLoading] = useState(true);
-  const [userId, setUserId] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [activeTab, setActiveTab] = useState<'requests' | 'stats'>('requests');
-
-  // Form state
-  const [form, setForm] = useState({
-    department: 'outreach',
-    description: '',
-    amount: '',
-    project_id: '',
-    comment: '',
-  });
-
-  // Combobox для поля «Проект»: пользователь вводит текст, снизу выпадает
-  // отфильтрованный список. Поиск по client + name. Пустой ввод = «Без проекта».
-  const [projectQuery, setProjectQuery] = useState('');
-  const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
-  const projectComboRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!projectDropdownOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      if (projectComboRef.current && !projectComboRef.current.contains(e.target as Node)) {
-        setProjectDropdownOpen(false);
-      }
-    };
-    const onEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setProjectDropdownOpen(false);
-    };
-    document.addEventListener('mousedown', onDoc);
-    document.addEventListener('keydown', onEsc);
-    return () => {
-      document.removeEventListener('mousedown', onDoc);
-      document.removeEventListener('keydown', onEsc);
-    };
-  }, [projectDropdownOpen]);
-
-  const selectedProject = useMemo(
-    () => (form.project_id ? projects.find((p) => p.id === form.project_id) ?? null : null),
-    [form.project_id, projects],
-  );
-  const selectedProjectLabel = selectedProject
-    ? `${selectedProject.client} — ${selectedProject.name}`
-    : '';
-
-  const filteredProjects = useMemo(() => {
-    const q = projectQuery.trim().toLowerCase();
-    if (!q) return projects;
-    return projects.filter((p) =>
-      `${p.client} ${p.name}`.toLowerCase().includes(q),
-    );
-  }, [projects, projectQuery]);
-
-  /* ─── Auth ─── */
-
-  useEffect(() => {
-    async function init() {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.user) return;
-      setUserId(session.user.id);
-
+function PaymentStatistics({ model }: { model: PaymentsReadModel }) {
+  const departmentRows = useMemo(() => {
+    const totals = new Map<string, { count: number; amount: number }>();
+    for (const request of model.requests) {
+      if (request.status !== 'paid' || request.paidOn?.slice(0, 7) !== model.period.key) continue;
+      const current = totals.get(request.department) ?? { count: 0, amount: 0 };
+      totals.set(request.department, {
+        count: current.count + 1,
+        amount: current.amount + request.amount,
+      });
     }
-    init();
-  }, []);
-
-  /* ─── Data Fetching ─── */
-
-  const fetchRequests = useCallback(async () => {
-    setLoading(true);
-    try {
-      const { data, error } = await supabase
-        .from('payment_requests')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
-      setRequests(data || []);
-    } catch (err) {
-      console.error('Error fetching payment requests:', err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const fetchProjects = useCallback(async () => {
-    try {
-      const { data, error } = await supabase
-        .from('projects')
-        .select('id, name, client')
-        .order('name');
-      if (error) throw error;
-      setProjects(data || []);
-    } catch (err) {
-      console.error('Error fetching projects:', err);
-    }
-  }, []);
-
-  const fetchProfiles = useCallback(async () => {
-    try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('id, full_name, email');
-      if (error) throw error;
-      const map: ProfileMap = {};
-      for (const p of data || []) {
-        map[p.id] = { full_name: p.full_name || p.email || 'Неизвестно', email: p.email || '' };
-      }
-      setProfiles(map);
-    } catch (err) {
-      console.error('Error fetching profiles:', err);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchRequests();
-    fetchProjects();
-    fetchProfiles();
-  }, [fetchRequests, fetchProjects, fetchProfiles]);
-
-  /* ─── Submit new request ─── */
-
-  const handleSubmit = async () => {
-    if (!userId) return;
-    const amount = parseFloat(form.amount.replace(/\s/g, '').replace(',', '.'));
-    if (!form.description.trim() || !amount || amount <= 0) return;
-
-    setSubmitting(true);
-    try {
-      const payload: Record<string, unknown> = {
-        user_id: userId,
-        department: form.department,
-        description: form.description.trim(),
-        amount,
-        project_id: form.project_id || null,
-        comment: form.comment.trim() || null,
-        status: 'approved',
-        decided_by: userId,
-        decided_at: new Date().toISOString(),
-        decision_comment: 'Занесено в расход',
-      };
-
-      const { error } = await supabase.from('payment_requests').insert(payload);
-      if (error) throw error;
-
-      setForm({ department: 'outreach', description: '', amount: '', project_id: '', comment: '' });
-      await fetchRequests();
-    } catch (err) {
-      console.error('Error submitting request:', err);
-      alert('Ошибка при отправке');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  /* ─── Stats computation ─── */
-
-  const monthRange = useMemo(() => generateMonthRange(), []);
-  const [statsMonth, setStatsMonth] = useState(() => {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  });
-
-  const approvedRequests = useMemo(
-    () => requests.filter((r) => r.status === 'approved'),
-    [requests],
-  );
-
-  const monthlyStats = useMemo(() => {
-    const monthRequests = approvedRequests.filter((r) => getMonthKey(r.created_at) === statsMonth);
-    const byDepartment: Record<string, { count: number; total: number }> = {};
-    let grandTotal = 0;
-
-    for (const r of monthRequests) {
-      if (!byDepartment[r.department]) byDepartment[r.department] = { count: 0, total: 0 };
-      byDepartment[r.department].count += 1;
-      byDepartment[r.department].total += Number(r.amount);
-      grandTotal += Number(r.amount);
-    }
-
-    return { byDepartment, grandTotal, count: monthRequests.length };
-  }, [approvedRequests, statsMonth]);
-
-  const allTimeStats = useMemo(() => {
-    let total = 0;
-    for (const r of approvedRequests) total += Number(r.amount);
-    return { count: approvedRequests.length, total };
-  }, [approvedRequests]);
-
-  /* ─── Enrich requests with profile/project names ─── */
-
-  const enrichedRequests = useMemo(() => {
-    return requests.map((r) => ({
-      ...r,
-      requester_name: profiles[r.user_id]?.full_name || 'Неизвестно',
-      requester_email: profiles[r.user_id]?.email || '',
-      project_name: r.project_id ? projects.find((p) => p.id === r.project_id)?.name : undefined,
-      project_client: r.project_id ? projects.find((p) => p.id === r.project_id)?.client : undefined,
-    }));
-  }, [requests, profiles, projects]);
-
-  const expenseRows = useMemo(
-    () => enrichedRequests.filter((r) => r.status === 'approved'),
-    [enrichedRequests],
-  );
-
-  /* ─── Filter for stats tab ─── */
-
-  const statsRequests = useMemo(
-    () => enrichedRequests.filter((r) => r.status === 'approved' && getMonthKey(r.created_at) === statsMonth),
-    [enrichedRequests, statsMonth],
-  );
-
-  /* ═══════════════════════════════════════════
-     RENDER
-     ═══════════════════════════════════════════ */
-
-  const formValid = form.description.trim().length > 0 && parseFloat(form.amount.replace(/\s/g, '').replace(',', '.')) > 0;
+    return [...totals.entries()].sort((left, right) => right[1].amount - left[1].amount);
+  }, [model.period.key, model.requests]);
 
   return (
-    <div className="min-h-screen bg-gray-50/60 px-4 py-6 sm:px-6 lg:px-8">
-      <div className="max-w-[1400px] mx-auto space-y-6">
-        {/* Header */}
-        <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+    <section role="tabpanel" id="payments-stats-panel" aria-labelledby="payments-stats-tab" className="border border-gray-200 bg-white">
+      <div className="grid grid-cols-2 divide-x divide-y divide-gray-200 sm:grid-cols-4 sm:divide-y-0">
+        <div className="px-4 py-3"><p className="text-xs text-gray-500">Оплачено всего</p><p className="mt-1 font-semibold tabular-nums">{formatRubles(model.summary.paidAll)}</p></div>
+        <div className="px-4 py-3"><p className="text-xs text-gray-500">На согласовании</p><p className="mt-1 font-semibold tabular-nums">{model.summary.pendingCount}</p></div>
+        <div className="px-4 py-3"><p className="text-xs text-gray-500">Одобрено</p><p className="mt-1 font-semibold tabular-nums">{model.summary.approvedCount}</p></div>
+        <div className="px-4 py-3"><p className="text-xs text-gray-500">Записей</p><p className="mt-1 font-semibold tabular-nums">{model.requests.length}</p></div>
+      </div>
+      <div className="max-w-full overflow-x-auto border-t border-gray-200">
+        <table className="min-w-full text-sm" aria-label={`Оплаченные расходы по отделам за ${model.period.label}`}>
+          <thead className="bg-gray-50 text-left text-xs text-gray-600"><tr><th className="px-4 py-3 font-medium">Отдел</th><th className="px-4 py-3 text-right font-medium">Оплат</th><th className="px-4 py-3 text-right font-medium">Сумма</th></tr></thead>
+          <tbody className="divide-y divide-gray-200">
+            {departmentRows.length === 0 ? (
+              <tr><td colSpan={3} className="px-4 py-8 text-center text-gray-500">В этом периоде нет оплаченных расходов</td></tr>
+            ) : departmentRows.map(([department, values]) => (
+              <tr key={department}>
+                <td className="px-4 py-3 text-gray-900">{PAYMENT_DEPARTMENT_LABELS[department] || department}</td>
+                <td className="px-4 py-3 text-right tabular-nums text-gray-700">{values.count}</td>
+                <td className="px-4 py-3 text-right font-medium tabular-nums text-gray-900">{formatRubles(values.amount)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+export default function PaymentsPageView() {
+  const [month, setMonth] = useState(currentMonthKey);
+  const [model, setModel] = useState<PaymentsReadModel | null>(null);
+  const [activeTab, setActiveTab] = useState<PaymentsTab>('requests');
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [submitFeedback, setSubmitFeedback] = useState('');
+  const [actionFeedback, setActionFeedback] = useState<{ requestId: string; message: string } | null>(null);
+  const [submittingExpense, setSubmittingExpense] = useState(false);
+  const [hasOpenActionDraft, setHasOpenActionDraft] = useState(false);
+  const activeLoadRef = useRef<AbortController | null>(null);
+  const loadErrorRef = useRef<HTMLDivElement>(null);
+  const submissionKeyRef = useRef<{ signature: string; key: string } | null>(null);
+
+  const load = useCallback(async (targetMonth: string) => {
+    activeLoadRef.current?.abort();
+    const controller = new AbortController();
+    activeLoadRef.current = controller;
+    setLoading(true);
+    setLoadError('');
+
+    try {
+      const nextModel = await loadPayments(targetMonth, controller.signal);
+      if (!controller.signal.aborted && activeLoadRef.current === controller) {
+        setModel(nextModel);
+        return nextModel;
+      }
+      return null;
+    } catch (error) {
+      if (!controller.signal.aborted && activeLoadRef.current === controller) {
+        setLoadError(messageFromError(error));
+      }
+      return null;
+    } finally {
+      if (!controller.signal.aborted && activeLoadRef.current === controller) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const start = window.setTimeout(() => void load(month), 0);
+    return () => {
+      window.clearTimeout(start);
+      activeLoadRef.current?.abort();
+    };
+  }, [load, month]);
+
+  useEffect(() => {
+    if (loadError) loadErrorRef.current?.focus();
+  }, [loadError]);
+
+  const submit = useCallback(async (
+    input: SubmitPaymentRequestInput,
+  ): Promise<SubmitPaymentRequestResponse> => {
+    setSubmitFeedback('');
+    // Повтор той же заявки (потерянный ответ, двойной клик) идёт с тем же
+    // ключом и лишь перечитывает созданный расход. Изменённый черновик —
+    // это уже другая заявка, поэтому получает новый ключ.
+    const signature = JSON.stringify(input);
+    const pending = submissionKeyRef.current;
+    const idempotencyKey = pending?.signature === signature ? pending.key : newIdempotencyKey();
+    submissionKeyRef.current = { signature, key: idempotencyKey };
+    const result = await submitPaymentRequest(input, idempotencyKey);
+    submissionKeyRef.current = null;
+    setSubmitFeedback(result.outcome === 'auto_approved'
+      ? 'Расход одобрен автоматически.'
+      : 'Расход отправлен Ане на согласование.');
+    const targetMonth = input.expectedPaymentOn.slice(0, 7);
+    if (model && targetMonth !== model.period.key) {
+      setModel(null);
+      setMonth(targetMonth);
+    } else {
+      setModel((current) => current ? {
+        ...current,
+        summary: result.summary,
+        requests: [result.request, ...current.requests.filter((request) => request.id !== result.request.id)],
+      } : current);
+    }
+    return result;
+  }, [model]);
+
+  const refreshRequest = useCallback(async (id: string): Promise<PaymentRequest | null> => {
+    const refreshed = await load(model?.period.key ?? month);
+    return refreshed?.requests.find((request) => request.id === id) ?? null;
+  }, [load, model?.period.key, month]);
+
+  const actOnRequest = useCallback(async (
+    id: string,
+    input: PaymentRequestActionInput,
+  ): Promise<PaymentRequestActionResponse> => {
+    const result = await updatePaymentRequest(id, input);
+    const feedbackByOutcome: Record<PaymentRequestActionResponse['outcome'], string> = {
+      approved: 'Расход одобрен.',
+      rejected: 'Расход отклонён.',
+      paid: 'Расход отмечен оплаченным.',
+      legacy_classified: 'Тип и дата старого расхода уточнены.',
+    };
+    setModel((current) => {
+      if (!current) return current;
+      const currentSummary = result.summaries.find(({ month: affectedMonth }) => (
+        affectedMonth === current.period.key
+      ));
+      return {
+        ...current,
+        summary: currentSummary?.summary ?? current.summary,
+        requests: paymentRequestBelongsToMonth(result.request, current.period.key)
+          ? current.requests.map((request) => (
+            request.id === result.request.id ? result.request : request
+          ))
+          : current.requests.filter((request) => request.id !== result.request.id),
+      };
+    });
+    setActionFeedback({ requestId: result.request.id, message: feedbackByOutcome[result.outcome] });
+    return result;
+  }, []);
+
+  const navigationLocked = submittingExpense || hasOpenActionDraft;
+
+  return (
+    <main
+      role="region"
+      aria-label="Оплаты"
+      aria-busy={loading}
+      className="min-h-screen bg-white px-4 py-5 text-gray-900 sm:px-6 lg:px-8"
+    >
+      <div className="mx-auto max-w-[1440px] space-y-5">
+        <header className="flex flex-col gap-4 border-b border-gray-200 pb-4 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight text-gray-900">Оплаты</h1>
-            <p className="mt-1 text-sm text-gray-500">Учёт дополнительных расходов</p>
+            <h1 className="text-2xl font-semibold tracking-tight text-gray-900">Оплаты</h1>
+            <p className="mt-1 text-sm text-gray-500">Разовые и плановые расходы компании</p>
           </div>
-          <div className="flex items-center gap-2">
+          <div role="tablist" aria-label="Разделы оплат" className="inline-flex min-h-11 max-w-full w-fit gap-1 overflow-x-auto border border-gray-200 bg-white p-1">
             <button
+              id="payments-requests-tab"
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'requests'}
+              aria-controls="payments-requests-panel"
+              disabled={navigationLocked && activeTab !== 'requests'}
               onClick={() => setActiveTab('requests')}
-              className={`px-4 py-2 text-sm font-medium rounded-lg transition ${
-                activeTab === 'requests'
-                  ? 'bg-gray-900 text-white shadow-sm'
-                  : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'
-              }`}
-            >
-              Расходы
-            </button>
+              className={`min-h-10 px-4 text-sm font-semibold outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 ${activeTab === 'requests' ? 'bg-gray-900 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+            >Расходы</button>
             <button
+              id="payments-stats-tab"
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'stats'}
+              aria-controls="payments-stats-panel"
+              disabled={navigationLocked && activeTab !== 'stats'}
               onClick={() => setActiveTab('stats')}
-              className={`px-4 py-2 text-sm font-medium rounded-lg transition ${
-                activeTab === 'stats'
-                  ? 'bg-gray-900 text-white shadow-sm'
-                  : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'
-              }`}
-            >
-              Статистика
-            </button>
+              className={`min-h-10 px-4 text-sm font-semibold outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 ${activeTab === 'stats' ? 'bg-gray-900 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+            >Статистика</button>
           </div>
-        </div>
+        </header>
 
-        {/* ═══════════ REQUESTS TAB ═══════════ */}
-        {activeTab === 'requests' && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* ── Left: Form ── */}
-            <div className="lg:col-span-1">
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden sticky top-6">
-                <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
-                  <h2 className="text-base font-bold text-gray-900">Занести в расход</h2>
-                  <p className="text-xs text-gray-500 mt-0.5">Добавится сразу в статистику</p>
-                </div>
-                <div className="px-6 py-5 space-y-4">
-                  {/* Department */}
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-1.5">Отдел</label>
-                    <select
-                      value={form.department}
-                      onChange={(e) => setForm((f) => ({ ...f, department: e.target.value }))}
-                      className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white"
-                    >
-                      {DEPARTMENTS.map((d) => (
-                        <option key={d.value} value={d.value}>{d.label}</option>
-                      ))}
-                    </select>
-                  </div>
+        {submitFeedback && <p role="status" aria-live="polite" className="sr-only">{submitFeedback}</p>}
 
-                  {/* Description */}
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-1.5">
-                      Оплата какого сервиса / базы / доп. расхода?
-                    </label>
-                    <input
-                      type="text"
-                      value={form.description}
-                      onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
-                      placeholder="Например: Instantly.ai подписка"
-                      className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white"
-                    />
-                  </div>
+        {loading && !model && (
+          <div role="status" aria-label="Загрузка расходов" className="border border-gray-200 px-4 py-12 text-center text-sm text-gray-500">Загружаем расходы…</div>
+        )}
 
-                  {/* Amount */}
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-1.5">Сумма (руб.)</label>
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      value={form.amount}
-                      onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))}
-                      placeholder="15 000"
-                      className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white"
-                    />
-                  </div>
-
-                  {/* Project (optional) — searchable combobox. Пустой ввод = «Без проекта». */}
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-1.5">
-                      Проект <span className="text-gray-400 font-normal">(необязательно)</span>
-                    </label>
-                    <div ref={projectComboRef} className="relative">
-                      <input
-                        type="text"
-                        value={projectDropdownOpen ? projectQuery : selectedProjectLabel}
-                        onFocus={() => {
-                          setProjectQuery('');
-                          setProjectDropdownOpen(true);
-                        }}
-                        onChange={(e) => {
-                          setProjectQuery(e.target.value);
-                          if (!projectDropdownOpen) setProjectDropdownOpen(true);
-                        }}
-                        placeholder="Без проекта — начните вводить название или клиента"
-                        className="w-full px-3 py-2.5 pr-9 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white"
-                        autoComplete="off"
-                      />
-                      {form.project_id && !projectDropdownOpen && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setForm((f) => ({ ...f, project_id: '' }));
-                            setProjectQuery('');
-                          }}
-                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 text-lg leading-none px-1"
-                          title="Убрать проект"
-                          aria-label="Убрать проект"
-                        >
-                          ×
-                        </button>
-                      )}
-                      {projectDropdownOpen && (
-                        <div className="absolute z-30 mt-1 w-full rounded-xl border border-gray-200 bg-white shadow-lg max-h-72 overflow-auto">
-                          <button
-                            type="button"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => {
-                              setForm((f) => ({ ...f, project_id: '' }));
-                              setProjectQuery('');
-                              setProjectDropdownOpen(false);
-                            }}
-                            className={`w-full text-left px-3 py-2 text-sm border-b border-gray-100 ${
-                              !form.project_id
-                                ? 'bg-blue-50 text-blue-700'
-                                : 'text-gray-500 hover:bg-gray-50'
-                            }`}
-                          >
-                            Без проекта
-                          </button>
-                          {filteredProjects.length === 0 ? (
-                            <div className="px-3 py-3 text-sm text-gray-400 text-center">
-                              Ничего не найдено
-                            </div>
-                          ) : (
-                            filteredProjects.map((p) => (
-                              <button
-                                key={p.id}
-                                type="button"
-                                onMouseDown={(e) => e.preventDefault()}
-                                onClick={() => {
-                                  setForm((f) => ({ ...f, project_id: p.id }));
-                                  setProjectQuery('');
-                                  setProjectDropdownOpen(false);
-                                }}
-                                className={`w-full text-left px-3 py-2 text-sm ${
-                                  form.project_id === p.id
-                                    ? 'bg-blue-50 text-blue-700'
-                                    : 'hover:bg-gray-50'
-                                }`}
-                              >
-                                <span className="text-gray-500">{p.client}</span>
-                                <span className="text-gray-300 mx-1.5">—</span>
-                                <span className="text-gray-800">{p.name}</span>
-                              </button>
-                            ))
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Comment */}
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-1.5">Комментарий</label>
-                    <textarea
-                      value={form.comment}
-                      onChange={(e) => setForm((f) => ({ ...f, comment: e.target.value }))}
-                      rows={3}
-                      placeholder="Зачем нужна эта оплата, ссылки и т.д."
-                      className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white resize-none"
-                    />
-                  </div>
-
-                  <button
-                    onClick={() => void handleSubmit()}
-                    disabled={!formValid || submitting}
-                    className="w-full py-2.5 text-sm font-medium rounded-xl bg-gray-900 text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed"
-                  >
-                    {submitting ? 'Сохранение...' : 'Занести в расход'}
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* ── Right: Request list ── */}
-            <div className="lg:col-span-2 space-y-3">
-              <div className="flex items-center justify-between">
-                <h2 className="text-base font-bold text-gray-900">
-                  Все расходы <span className="text-gray-400 font-normal text-sm">({expenseRows.length})</span>
-                </h2>
-              </div>
-
-              {loading ? (
-                <div className="text-center text-gray-400 py-16">Загрузка...</div>
-              ) : expenseRows.length === 0 ? (
-                <div className="text-center text-gray-400 py-16 bg-white rounded-2xl border border-gray-200">
-                  Нет записей о расходах
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {expenseRows.map((r) => {
-                    const sc = { label: 'Расход', bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500' };
-                    return (
-                      <div
-                        key={r.id}
-                        className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden transition hover:shadow-md"
-                      >
-                        <div className="px-5 py-4">
-                          <div className="flex items-start justify-between gap-4">
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <span className="font-semibold text-gray-900 text-sm">{r.description}</span>
-                                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${sc.bg} ${sc.text}`}>
-                                  <span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />
-                                  {sc.label}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-500 flex-wrap">
-                                <span>{r.requester_name}</span>
-                                <span className="text-gray-300">|</span>
-                                <span>{DEPARTMENT_LABELS[r.department] || r.department}</span>
-                                <span className="text-gray-300">|</span>
-                                <span>{formatDate(r.created_at)}</span>
-                                {r.project_name && (
-                                  <>
-                                    <span className="text-gray-300">|</span>
-                                    <span className="text-indigo-600">{r.project_client} — {r.project_name}</span>
-                                  </>
-                                )}
-                              </div>
-                              {r.comment && (
-                                <p className="mt-2 text-xs text-gray-500 leading-relaxed">{r.comment}</p>
-                              )}
-                              {r.decided_at && (
-                                <p className="mt-1.5 text-xs text-gray-400">
-                                  Занесено{' '}
-                                  {profiles[r.decided_by ?? '']?.full_name || ''}{' '}
-                                  {formatDateTime(r.decided_at)}
-                                </p>
-                              )}
-                            </div>
-                            <div className="text-right shrink-0">
-                              <div className="text-lg font-bold text-gray-900">{formatCurrency(Number(r.amount))}</div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+        {loadError && (
+          <div ref={loadErrorRef} role="alert" tabIndex={-1} className="border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 outline-none">
+            <p className="font-medium">{loadError}</p>
+            <button type="button" onClick={() => void load(month)} className="mt-3 min-h-11 border border-red-300 bg-white px-4 font-semibold outline-none hover:bg-red-100 focus-visible:ring-2 focus-visible:ring-red-500">Повторить</button>
           </div>
         )}
 
-        {/* ═══════════ STATS TAB ═══════════ */}
-        {activeTab === 'stats' && (
-          <div className="space-y-6">
-            {/* Month selector + summary cards */}
-            <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => {
-                    const idx = monthRange.indexOf(statsMonth);
-                    if (idx < monthRange.length - 1) setStatsMonth(monthRange[idx + 1]);
-                  }}
-                  disabled={monthRange.indexOf(statsMonth) >= monthRange.length - 1}
-                  className="px-2.5 py-1.5 text-sm rounded-lg border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-40"
-                >
-                  &larr;
-                </button>
-                <select
-                  value={statsMonth}
-                  onChange={(e) => setStatsMonth(e.target.value)}
-                  className="px-3 py-2 text-sm font-medium border border-gray-200 rounded-lg bg-white hover:bg-gray-50"
-                >
-                  {monthRange.map((m) => (
-                    <option key={m} value={m}>{formatMonthLabel(m)}</option>
-                  ))}
-                </select>
-                <button
-                  onClick={() => {
-                    const idx = monthRange.indexOf(statsMonth);
-                    if (idx > 0) setStatsMonth(monthRange[idx - 1]);
-                  }}
-                  disabled={monthRange.indexOf(statsMonth) <= 0}
-                  className="px-2.5 py-1.5 text-sm rounded-lg border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-40"
-                >
-                  &rarr;
-                </button>
-              </div>
+        {model && (
+          <>
+            <div className="flex items-center justify-between gap-3 border border-gray-200 bg-white px-3 py-2">
+              <button type="button" aria-label="Предыдущий месяц" disabled={navigationLocked} onClick={() => setMonth(model.period.previous)} className="min-h-11 min-w-11 border border-gray-200 text-lg outline-none hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50">←</button>
+              <div className="text-center"><p className="font-semibold text-gray-900">{model.period.label}</p><p className="mt-0.5 text-xs text-gray-500">Данные на {model.period.asOf}</p></div>
+              <button type="button" aria-label="Следующий месяц" disabled={navigationLocked} onClick={() => setMonth(model.period.next)} className="min-h-11 min-w-11 border border-gray-200 text-lg outline-none hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50">→</button>
             </div>
 
-            {/* Summary cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Расходы за месяц</p>
-                <p className="mt-2 text-2xl font-bold text-gray-900">{formatCurrency(monthlyStats.grandTotal)}</p>
-                <p className="text-xs text-gray-400 mt-1">{monthlyStats.count} {ruPlural(monthlyStats.count, ['расход', 'расхода', 'расходов'])}</p>
-              </div>
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Всего расходов (все время)</p>
-                <p className="mt-2 text-2xl font-bold text-emerald-600">{formatCurrency(allTimeStats.total)}</p>
-                <p className="text-xs text-gray-400 mt-1">{allTimeStats.count} {ruPlural(allTimeStats.count, ['расход', 'расхода', 'расходов'])}</p>
-              </div>
-            </div>
+            <PaymentLimitSummary summary={model.summary} canManage={model.canManage} />
 
-            {/* By department table */}
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-              <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
-                <h3 className="text-base font-bold text-gray-900">По отделам — {formatMonthLabel(statsMonth)}</h3>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-100 text-sm">
-                  <thead className="bg-gray-50/50">
-                    <tr>
-                      <th className="px-6 py-3 text-left font-semibold text-gray-500">Отдел</th>
-                      <th className="px-6 py-3 text-right font-semibold text-gray-500">Расходов</th>
-                      <th className="px-6 py-3 text-right font-semibold text-gray-500">Сумма</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-50">
-                    {DEPARTMENTS.map((d) => {
-                      const stats = monthlyStats.byDepartment[d.value];
-                      return (
-                        <tr key={d.value} className="hover:bg-gray-50/50 transition">
-                          <td className="px-6 py-3 font-medium text-gray-900">{d.label}</td>
-                          <td className="px-6 py-3 text-right text-gray-600">{stats?.count || 0}</td>
-                          <td className="px-6 py-3 text-right font-medium text-gray-900">
-                            {stats ? formatCurrency(stats.total) : '—'}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                    <tr className="bg-gray-50/80 font-bold">
-                      <td className="px-6 py-3 text-gray-900">Итого</td>
-                      <td className="px-6 py-3 text-right text-gray-900">{monthlyStats.count}</td>
-                      <td className="px-6 py-3 text-right text-gray-900">{formatCurrency(monthlyStats.grandTotal)}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+            <div
+              role="tabpanel"
+              id="payments-requests-panel"
+              aria-labelledby="payments-requests-tab"
+              hidden={activeTab !== 'requests'}
+              className="space-y-5"
+            >
+                <PaymentRequestForm
+                  projects={model.projects}
+                  summary={model.summary}
+                  periodKey={model.period.key}
+                  onSubmittingChange={setSubmittingExpense}
+                  onSubmit={submit}
+                />
+                {actionFeedback && <p role="status" aria-live="polite" className="sr-only">{actionFeedback.message}</p>}
+                <PaymentRequestList
+                  periodLabel={model.period.label}
+                  asOf={model.period.asOf}
+                  requests={model.requests}
+                  canManage={model.canManage}
+                  focusRequestId={actionFeedback?.requestId ?? null}
+                  onActionDraftOpenChange={setHasOpenActionDraft}
+                  onRefreshRequest={refreshRequest}
+                  onAction={actOnRequest}
+                />
             </div>
-
-            {/* Detailed list for the month */}
-            {statsRequests.length > 0 && (
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-                <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
-                  <h3 className="text-base font-bold text-gray-900">Детализация — {formatMonthLabel(statsMonth)}</h3>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-100 text-sm">
-                    <thead className="bg-gray-50/50">
-                      <tr>
-                        <th className="px-5 py-3 text-left font-semibold text-gray-500">Дата</th>
-                        <th className="px-5 py-3 text-left font-semibold text-gray-500">Сотрудник</th>
-                        <th className="px-5 py-3 text-left font-semibold text-gray-500">Отдел</th>
-                        <th className="px-5 py-3 text-left font-semibold text-gray-500">Описание</th>
-                        <th className="px-5 py-3 text-left font-semibold text-gray-500">Проект</th>
-                        <th className="px-5 py-3 text-right font-semibold text-gray-500">Сумма</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-50">
-                      {statsRequests.map((r) => (
-                        <tr key={r.id} className="hover:bg-gray-50/50 transition">
-                          <td className="px-5 py-3 text-gray-500 whitespace-nowrap">{formatDate(r.created_at)}</td>
-                          <td className="px-5 py-3 text-gray-900">{r.requester_name}</td>
-                          <td className="px-5 py-3 text-gray-600">{DEPARTMENT_LABELS[r.department] || r.department}</td>
-                          <td className="px-5 py-3 text-gray-900">{r.description}</td>
-                          <td className="px-5 py-3 text-gray-500">
-                            {r.project_name ? `${r.project_client} — ${r.project_name}` : '—'}
-                          </td>
-                          <td className="px-5 py-3 text-right font-medium text-gray-900">{formatCurrency(Number(r.amount))}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-          </div>
+            {activeTab === 'stats' && <PaymentStatistics model={model} />}
+          </>
         )}
       </div>
-    </div>
+    </main>
   );
 }

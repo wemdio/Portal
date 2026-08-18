@@ -88,6 +88,14 @@ export interface GisSignalSegment {
   require_online: boolean;
   priority: number;
   enabled: boolean;
+  /**
+   * Доля сегмента в дневном лимите (computeSegmentQuotas). Веса нормируются на
+   * их сумму, поэтому важна пропорция, а не абсолют: {1000, 500, 500} и
+   * {2, 1, 1} дадут одинаковое деление. 0 — пауза сегмента без выключения.
+   * Колонка появилась 18.08.2026; у строк без неё вес = 1, то есть прежнее
+   * деление поровну.
+   */
+  quota_weight: number;
 }
 
 /**
@@ -150,6 +158,12 @@ export async function loadGisSignalSegments(): Promise<GisSignalSegment[]> {
       // Колонка появилась позже остальных: у старых строк её может не быть.
       require_online: s.require_online === true,
       rubric_groups: (s.rubric_groups ?? []) as GisSignalRubricGroup[],
+      // То же самое для веса квоты: NULL/мусор/отсутствие колонки (до миграции)
+      // → 1, то есть равные доли, как было до появления весов.
+      quota_weight:
+        typeof s.quota_weight === 'number' && Number.isFinite(s.quota_weight) && s.quota_weight >= 0
+          ? s.quota_weight
+          : 1,
     }))
     .sort((a, b) => a.priority - b.priority);
 }

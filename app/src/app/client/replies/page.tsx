@@ -57,7 +57,7 @@ type ForwardedLead = {
   lead_entry_id?: string | null;
   is_answered?: boolean;
   message_count?: number;
-  /** «Сирота»: провайдер не привязал письмо к кампании (атрибуция по домену) — бейдж «вне треда»; тред и ответ работают (право по ящику, см. strayAccess). */
+  /** «Сирота»: провайдер не привязал письмо к кампании (атрибуция по домену) — бейдж «вне треда». Переписку видно (право по ящику, см. strayAccess), ОТВЕТИТЬ через портал нельзя: провайдер отказывает. */
   out_of_campaign?: boolean;
   /** Ящик, принявший письмо (только свой, чужой сервер не отдаёт) — для сирот. */
   eaccount?: string | null;
@@ -130,21 +130,26 @@ function LeadDetail({
   const [blockError, setBlockError] = useState('');
   const [markingUnread, setMarkingUnread] = useState(false);
   const canComment = lead.source !== 'reply';
-  // Сирота (ответ вне треда кампании): почтовый провайдер не привязал письмо к
-  // кампании. Раньше это закрывало и тред, и ответ — оператору предлагали
-  // отвечать вручную из почтового клиента. Теперь право на действие
-  // подтверждается ящиком-получателем (см. lib/clientCampaignReplies/
-  // strayAccess.ts), поэтому сирота отвечается наравне с обычным ответом:
-  // отдельного гейта у canReplyByEmail больше нет.
+  // Сирота (ответ вне треда кампании): провайдер не привязал письмо к кампании.
   //
-  // Признак «ящик наш» — это ровно `eaccount`: список подставляет его ТОЛЬКО для
-  // собственного ящика клиента (route.ts, ownMailbox), а сироту с чужим ящиком
-  // всё равно показывает, просто без ящика. Поэтому гейт UI обязан совпадать с
-  // серверным: иначе на чужой сироте мы нарисовали бы форму ответа, а /thread и
-  // /reply отдали бы 404 — понятный read-only блок сменился бы на невнятную
-  // ошибку. Для обычных ответов eaccount не приходит и в условии не участвует.
+  // ОТВЕТИТЬ через портал по такому письму НЕЛЬЗЯ, и это ограничение провайдера,
+  // а не наше: POST /emails/reply отвечает `400 The email you are replying to is
+  // not part of a campaign, so you cannot reply to it (missing campaign_id or
+  // list_id)`. Проверяется САМО письмо, поэтому передать campaign_id в запросе не
+  // помогает. Боевой отказ 18.08.2026 — до него мы предполагали обратное по
+  // сигнатуре API и зря открыли кнопку: специалист получил тупик вместо ответа.
+  // Поэтому canReplyByEmail для сироты — false, без исключений.
+  //
+  // ВИДЕТЬ переписку можно и полезно: /thread для сироты работает (право по
+  // ящику-получателю, см. lib/clientCampaignReplies/strayAccess.ts) и
+  // подтягивает всю прошлую переписку с лидом по кампании. Показываем её
+  // read-only при canViewThread — признак «ящик наш» это ровно наличие
+  // `eaccount`: список подставляет его ТОЛЬКО для собственного ящика клиента
+  // (route.ts, ownMailbox), а сироту с чужим ящиком показывает без него, и там
+  // /thread честно отдаёт 404.
   const isOutOfCampaign = Boolean(lead.out_of_campaign);
-  const canReplyByEmail = Boolean(
+  const canReplyByEmail = Boolean(lead.campaign_id && lead.email_id && !isOutOfCampaign);
+  const canViewThread = Boolean(
     lead.campaign_id && lead.email_id && (!isOutOfCampaign || lead.eaccount),
   );
 
@@ -152,7 +157,7 @@ function LeadDetail({
   // нет (сирота с чужим ящиком — read-only), помечаем явно, иначе «непрочитано»
   // не гаснет и счётчик врёт.
   useEffect(() => {
-    if (!isOutOfCampaign || canReplyByEmail || !lead.campaign_id || !lead.email_id) return;
+    if (!isOutOfCampaign || canViewThread || !lead.campaign_id || !lead.email_id) return;
     void clientApiFetch(`/campaigns/${lead.campaign_id}/replies/${lead.email_id}/read`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -160,7 +165,7 @@ function LeadDetail({
     }).catch(() => {
       // статус прочтения не критичен — молча игнорируем сбой
     });
-  }, [isOutOfCampaign, canReplyByEmail, lead.campaign_id, lead.email_id]);
+  }, [isOutOfCampaign, canViewThread, lead.campaign_id, lead.email_id]);
 
   const loadComments = useCallback(async () => {
     if (!canComment) {
@@ -366,7 +371,7 @@ function LeadDetail({
             негде. Для сироты со своим ящиком блока нет — ответ виден в ленте
             ниже (а если /thread не отдаст переписку, ExpandedThread покажет его
             из fallbackThread). */}
-        {isOutOfCampaign && !canReplyByEmail && (
+        {isOutOfCampaign && !canViewThread && (
           <div className="mb-2">
             <p className="ds-eyebrow mb-2">
               02<span aria-hidden> → </span>ответ вне треда кампании
@@ -393,7 +398,7 @@ function LeadDetail({
             лида», но с новым порядком треда они дублировали верхние письма ленты,
             поэтому убраны. Полный текст последнего ответа — верхний пузырь треда;
             если /thread не загрузился, ExpandedThread покажет его из fallbackThread. */}
-        {canReplyByEmail && (
+        {canViewThread && (
           <div className="mb-2">
             <p className="ds-eyebrow mb-2">
               02<span aria-hidden> → </span>переписка
@@ -404,7 +409,17 @@ function LeadDetail({
               onReplied={onReplied}
               fallbackMessages={fallbackThread}
               className="space-y-3"
+              canAct={canReplyByEmail}
             />
+            {/* Сирота: переписку видно, но кнопок нет — провайдер отказывает на
+                отправку. Говорим прямо и даём выполнимое действие (ящик наш —
+                иначе canViewThread был бы false и сюда бы не дошли). */}
+            {isOutOfCampaign && (
+              <p className="text-xs mt-3" style={{ color: 'var(--cp-text-l)' }}>
+                Письмо пришло вне треда кампании — ответить через портал по нему нельзя.
+                Ответьте из почты{lead.eaccount ? ` ящика ${lead.eaccount}` : ' вашего ящика'}.
+              </p>
+            )}
           </div>
         )}
 

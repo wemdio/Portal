@@ -355,19 +355,33 @@ export const CLIENT_NAV_ENG: ClientNavItem = {
 };
 
 /**
- * Возвращает группы, отфильтрованные под текущий mode. В 'manual' — без
- * изменений; в 'auto' — оставляем только items из AUTO_MODE_VISIBLE_ITEM_IDS
- * и группы, в которых что-то осталось.
+ * Id'шники nav-айтемов, которые существуют ТОЛЬКО в auto-режиме, хотя лежат
+ * внутри обычных групп.
+ *
+ * «Воронка базы» описывает путь домена через скоринг endpoint'а клиента —
+ * этап, которого у manual-клиента физически нет (ручная обработка доменов
+ * тоже auto-only). Без этого фильтра пункт видели ВСЕ клиенты и открывали
+ * пустую воронку со сплошными нулями: это читается как поломка портала, а не
+ * как «функция не на вашем тарифе».
+ */
+const AUTO_MODE_ONLY_ITEM_IDS: ReadonlySet<string> = new Set(['reports']);
+
+/**
+ * Возвращает группы, отфильтрованные под текущий mode. В 'manual' — убираем
+ * auto-only items (и опустевшие группы); в 'auto' — оставляем только items из
+ * AUTO_MODE_VISIBLE_ITEM_IDS и группы, в которых что-то осталось.
  */
 export function filterClientNavGroupsForMode(
   groups: readonly ClientNavGroup[],
   mode: ClientNavMode,
 ): readonly ClientNavGroup[] {
-  if (mode === 'manual') return groups;
+  const visible = mode === 'manual'
+    ? (id: string) => !AUTO_MODE_ONLY_ITEM_IDS.has(id)
+    : (id: string) => AUTO_MODE_VISIBLE_ITEM_IDS.has(id);
   return groups
     .map((g) => ({
       ...g,
-      items: g.items.filter((it) => AUTO_MODE_VISIBLE_ITEM_IDS.has(it.id)),
+      items: g.items.filter((it) => visible(it.id)),
     }))
     .filter((g) => g.items.length > 0);
 }

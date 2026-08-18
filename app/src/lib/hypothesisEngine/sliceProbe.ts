@@ -22,15 +22,47 @@
 import { z } from 'zod';
 import { callLLMWithSchema, getHeModel, type LLMMessage } from './llm';
 
-/** Сколько строк среза показываем модели. Хватает, чтобы отличить 5% от 60%. */
-export const SLICE_PROBE_SAMPLE = Number(process.env.HE_SLICE_PROBE_SAMPLE) || 30;
+/**
+ * Число из env с ЧЕСТНЫМ нулём: `Number(x) || d` роняет 0 в дефолт, потому что
+ * ноль ложен. Для порога отказа это была дыра в предохранителе — выставить 0,
+ * чтобы отключить отказ, было невозможно.
+ */
+function envNum(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const v = Number(raw);
+  return Number.isFinite(v) ? v : fallback;
+}
+
+/** Сколько строк среза показываем модели. */
+export function sliceProbeSample(): number { return envNum('HE_SLICE_PROBE_SAMPLE', 30); }
 
 /**
- * Доля попадания, ниже которой срез считаем непригодным. Не 100%: релевант-гейт
- * дальше всё равно чистит остаток, база не обязана быть идеальной. Но на 10%
- * попадания срез бесполезен — гейт столько шума не вытянет.
+ * ДВА РАЗНЫХ ПОРОГА, оба по умолчанию 0 — то есть проба МЕРЯЕТ И ПИШЕТ, но сама
+ * ничего не решает. Так вышло после калибровки 18.08 на боевых срезах:
+ *
+ *   срез                                gpt-4o-mini   gpt-5.5
+ *   Healthcare (эталон, база сдана)          23%         0%
+ *   Franchise, широкие индустрии (брак)       0%         3%
+ *   Franchise по названию (рабочий)          27%        30%
+ *   Legal (отказ был верным)                  0%         0%
+ *   Industrial Suppliers                     80%         0%
+ *
+ * При пороге 0.3 машина забраковала бы ОБА рабочих среза, включая Healthcare —
+ * лучшую базу проекта. Хуже того, сильная модель меняет вердикт на
+ * противоположный: Industrial 80% против 0%. Измерение, переворачивающееся от
+ * смены модели, измерением не является — проба в нынешнем виде меряет
+ * уверенность модели, а не пригодность среза, потому что судит компанию по
+ * названию и отраслевой метке, а дефолт стоит на «не принадлежит».
+ *
+ * Пока вопрос пробы не переделан, действовать на её числах нельзя. Провенанс
+ * при этом ценен и продолжает писаться в collect_info.slice_probe.
+ * Включается осознанно: HE_SLICE_PROBE_REPAIR_BELOW / _REJECT_BELOW.
  */
-export const SLICE_PROBE_MIN_HIT_RATE = Number(process.env.HE_SLICE_PROBE_MIN_HIT_RATE) || 0.3;
+/* Функции, а не константы: значение, прочитанное при импорте, нельзя было бы
+   поменять на проде без пересборки контейнера — а это предохранитель. */
+export function sliceProbeRepairBelow(): number { return envNum('HE_SLICE_PROBE_REPAIR_BELOW', 0); }
+export function sliceProbeRejectBelow(): number { return envNum('HE_SLICE_PROBE_REJECT_BELOW', 0); }
 
 const ProbeSchema = z.object({
   /** Индексы строк, чья компания ПРИНАДЛЕЖИТ вертикали (0-based). */
@@ -95,7 +127,7 @@ export async function probeSliceRelevance(input: {
     tokensUsed: 0,
     costUsd: 0,
   };
-  const sample = rows.slice(0, SLICE_PROBE_SAMPLE);
+  const sample = rows.slice(0, sliceProbeSample());
   if (sample.length === 0 || !verticalName.trim()) return empty;
 
   const batch = sample.map((r, i) => ({
