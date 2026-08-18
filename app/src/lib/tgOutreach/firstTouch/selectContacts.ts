@@ -10,6 +10,12 @@ export interface PendingContact {
   base_id: string;
   username: string;
   message: string;
+  /**
+   * Сколько раз этот контакт уже пробовали. Поле обязано доезжать из базы:
+   * без него отправка считает попытки с нуля каждый круг, лимит трёх попыток
+   * не наступает никогда, и один недоступный контакт крутится вечно.
+   */
+  attempts?: number;
 }
 
 export interface SelectParams {

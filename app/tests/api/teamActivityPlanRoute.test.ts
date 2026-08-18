@@ -1,6 +1,7 @@
 /** @jest-environment node */
 
 import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
+import type { ActivityPlanRow } from '@/app/api/team/activity-plan/helpers';
 import { NextRequest } from 'next/server';
 
 const HR_ID = '33dec504-e6e0-4b0a-bc59-dcf570c6ecc9';
@@ -453,6 +454,100 @@ describe('GET /api/team/activity-plan', () => {
     });
   });
 
+  it('orders activities chronologically by exact deadline and keeps undated schedules last', async () => {
+    mockMainDb = createMockSupabase({
+      tables: {
+        team_activity_plan_items: [
+          activityRow({
+            id: '00000000-0000-4000-8000-000000000021',
+            activity: 'Каждую среду',
+            planned_date: null,
+            planned_time: null,
+            schedule_note: 'Каждую среду, 14:00',
+            position: 0,
+          }),
+          activityRow({
+            id: '00000000-0000-4000-8000-000000000022',
+            activity: '31 августа',
+            planned_date: '2026-08-31',
+            planned_time: '17:00:00',
+            position: 1,
+          }),
+          activityRow({
+            id: '00000000-0000-4000-8000-000000000023',
+            activity: '5 августа без времени',
+            planned_date: '2026-08-05',
+            planned_time: null,
+            status: 'cancelled',
+            position: 2,
+          }),
+          activityRow({
+            id: '00000000-0000-4000-8000-000000000024',
+            activity: '5 августа вечером',
+            planned_date: '2026-08-05',
+            planned_time: '18:00:00',
+            position: 3,
+          }),
+          activityRow({
+            id: '00000000-0000-4000-8000-000000000025',
+            activity: '5 августа утром — вторая по позиции',
+            planned_date: '2026-08-05',
+            planned_time: '09:00:00',
+            position: 5,
+            created_at: '2026-08-01T07:00:00.000Z',
+          }),
+          activityRow({
+            id: '00000000-0000-4000-8000-000000000026',
+            activity: '5 августа утром — первая по позиции',
+            planned_date: '2026-08-05',
+            planned_time: '09:00:00',
+            position: 4,
+            created_at: '2026-08-01T09:00:00.000Z',
+          }),
+          activityRow({
+            id: '00000000-0000-4000-8000-000000000027',
+            activity: '31 июля',
+            planned_date: '2026-07-31',
+            planned_time: '12:00:00',
+            status: 'completed',
+            position: 8,
+          }),
+          activityRow({
+            id: '00000000-0000-4000-8000-000000000028',
+            activity: '1 сентября',
+            planned_date: '2026-09-01',
+            planned_time: '10:00:00',
+            position: 7,
+          }),
+          activityRow({
+            id: '00000000-0000-4000-8000-000000000029',
+            activity: 'Без даты',
+            planned_date: null,
+            planned_time: null,
+            schedule_note: null,
+            position: 1,
+          }),
+        ],
+      },
+    });
+
+    const response = await invoke('GET');
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.items.map((item: { activity: string }) => item.activity)).toEqual([
+      '31 июля',
+      '5 августа утром — первая по позиции',
+      '5 августа утром — вторая по позиции',
+      '5 августа вечером',
+      '5 августа без времени',
+      '31 августа',
+      '1 сентября',
+      'Каждую среду',
+      'Без даты',
+    ]);
+  });
+
   it.each(['0000-01', '0001-01', '2026-8', '2026-13', 'not-a-month'])(
     'rejects invalid month %s before reading plan items',
     async (month) => {
@@ -463,6 +558,46 @@ describe('GET /api/team/activity-plan', () => {
       expect(planSelects()).toHaveLength(0);
     },
   );
+});
+
+describe('activity deadline ordering', () => {
+  it('uses createdAt and id as final tie-breakers without mutating the source rows', async () => {
+    const { sortActivityPlanRowsByDeadline } = await import('@/app/api/team/activity-plan/helpers');
+    const rows = [
+      activityRow({
+        id: '00000000-0000-4000-8000-000000000043',
+        planned_date: '2026-08-05',
+        planned_time: '09:00:00',
+        position: 1,
+        created_at: '2026-08-01T08:00:00.000Z',
+      }),
+      activityRow({
+        id: '00000000-0000-4000-8000-000000000042',
+        planned_date: '2026-08-05',
+        planned_time: '09:00:00',
+        position: 1,
+        created_at: '2026-08-01T07:00:00.000Z',
+      }),
+      activityRow({
+        id: '00000000-0000-4000-8000-000000000041',
+        planned_date: '2026-08-05',
+        planned_time: '09:00:00',
+        position: 1,
+        created_at: '2026-08-01T07:00:00.000Z',
+      }),
+    ] as ActivityPlanRow[];
+    const sourceOrder = rows.map((row) => row.id);
+
+    const sorted = sortActivityPlanRowsByDeadline(rows);
+
+    expect(sorted.map((row) => row.id)).toEqual([
+      '00000000-0000-4000-8000-000000000041',
+      '00000000-0000-4000-8000-000000000042',
+      '00000000-0000-4000-8000-000000000043',
+    ]);
+    expect(rows.map((row) => row.id)).toEqual(sourceOrder);
+    expect(sorted).not.toBe(rows);
+  });
 });
 
 describe('POST /api/team/activity-plan', () => {

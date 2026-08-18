@@ -98,6 +98,8 @@ amo_leads.ym_client_id ─── metrika_visits.ym_client_id  ← Метрика
 - `sales_chat_accounts` — session_sealed для TG-сессий Егора и Саши.
 - `tg_outreach_accounts` — сессии outreach-аккаунтов.
 - `team_activity_plan_items` — закрытый рабочий план команды, включая внутренние примечания и бюджет.
+- `payment_request_managers` — закрытый список пользователей, которые согласуют и отмечают оплаты.
+- `payment_request_events` — закрытый журнал решений и изменений заявок на оплату.
 
 ## Ключевые таблицы (полей и семантики достаточно для 90% вопросов)
 
@@ -141,8 +143,19 @@ amo_leads.ym_client_id ─── metrika_visits.ym_client_id  ← Метрика
 - `id`, `company_name`, `client_user_id`, `amount` (numeric), `currency`, `description`, `status`, `yookassa_payment_id`, `paid_at`
 - Статусы: `paid` (10), `pending` (3), `cancelled` (31)
 
-### `payment_requests` — заявки на выплаты команде (~162, все approved)
-- `id`, `user_id`, `department`, `description`, `amount`, `project_id`, `comment`, `status`, `decided_by`, `decided_at`
+### `payment_requests` — заявки на расходы и выплаты команде
+- Базовые поля: `id`, `user_id`, `department`, `description`, `amount`, `project_id`, `comment`, `created_at`, `updated_at`.
+- Тип расхода: `one_time` (разовый, входит в общий месячный лимит), `planned` (плановый, не входит в лимит) или `legacy_unclassified` (старая запись с неполными данными).
+- Жизненный цикл: `pending` → `approved` → `paid`; вместо одобрения возможен `rejected`.
+- `expected_payment_on` определяет месяц резерва и финансового плана; `paid_on` — месяц фактического расхода. Для факта всегда используй `paid_on`, а не `created_at`/`decided_at`.
+- `approval_reason`: `planned` или `limit_exceeded`; `decided_by`, `decided_at`, `decision_comment` сохраняют решение; `paid_by`, `paid_at` и `paid_on_source` — фиксацию оплаты.
+- `urgency`: `normal` | `urgent` | `critical`.
+- `user_id` может быть `NULL`: при удалении профиля сотрудника заявка и журнал решений сохраняются, а автор остаётся замороженным снимком внутри таблицы (readonly-доступа к нему нет). Для отчётов по людям учитывай пустой `user_id`.
+- Старые строки мигрированы как `paid + legacy_unclassified`; их дата оплаты приближённо восстановлена из московской даты создания и помечена `paid_on_source = legacy_created_at`. До ручного уточнения они консервативно входят в лимит разовых расходов.
+
+**Лимит разовых расходов общий для компании:** 75 000 ₽ в обычный месяц и 40 000 ₽ в январе, мае и декабре. В лимите учитываются оплаченные разовые/неуточнённые расходы по `paid_on` и одобренные разовые расходы по `expected_payment_on`; `pending`, `rejected` и `planned` в лимит не входят.
+
+**Readonly-ловушка:** доступ выдан только к фиксированному безопасному набору колонок и не включает `document_url`. Используй явный список нужных колонок; `SELECT *` по этой таблице завершится ошибкой. Ссылки на счета и подтверждающие документы доступны только автору заявки и согласующему через Portal API.
 
 ### `sales_chat_dialogs` / `sales_chat_messages` — переписки менеджеров с клиентами
 - Аккаунты Егора и Саши, backfill сделан.
@@ -486,7 +499,7 @@ LIMIT 5;
 - **Проекты:** `В работе`, `Тестирование`, `На паузе`, `Подготовка`, `Завершен`, `Отменен`
 - **Задачи:** `done`, `pending`, `in_progress`, `backlog`
 - **Инвойсы:** `paid`, `pending`, `cancelled`
-- **Payment requests:** `approved`
+- **Payment requests:** `pending`, `approved`, `paid`, `rejected`
 - **Роли profiles:** `client`, `manager`, `technician`, `admin`, `lead`, `marketer`, `sales`
 - **AMO статусы (ключевые):** 142 = won, 143 = lost; остальные — рабочие.
 - **Банк:** `tochka`, `tbank`
@@ -667,6 +680,7 @@ ORDER BY bt.occurred_at DESC;
   и обязательно по `is_revenue = true` при вопросах про выручку.
 - `amo_leads.raw` — большой JSON, при выборке многих строк отдельно `SELECT raw` = много
   трафика. Выбирай конкретные пути `raw->'field'` вместо целого.
-- Некоторые таблицы (payment_requests, project_periods) маленькие — можно селектить целиком.
+- `payment_requests` обычно небольшая, но выбирай только явный безопасный набор нужных колонок: `SELECT *` запрещён, а ссылки на документы закрыты.
+- `project_periods` небольшая — её можно выбирать целиком.
 - Nolock, MVCC — параллельные апдейты от прода не блокируют чтение, но могут возвращать
   разные снапшоты между запросами.

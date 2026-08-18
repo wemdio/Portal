@@ -93,7 +93,12 @@ import { extractEmail } from '@/lib/tools/dfybUtils';
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { projectMarket, type HeMarket } from '../market';
 import { findIrrelevantRows } from '../relevanceGate';
-import { probeSliceRelevance, SLICE_PROBE_MIN_HIT_RATE, SLICE_PROBE_SAMPLE } from '../sliceProbe';
+import {
+  probeSliceRelevance,
+  sliceProbeRejectBelow,
+  sliceProbeRepairBelow,
+  sliceProbeSample,
+} from '../sliceProbe';
 import {
   buildSourcePlanMessages,
   type HeCollectTask,
@@ -822,12 +827,12 @@ async function sampleCatalogTasks(
   ctx: HeStageContext,
   tasks: HeCollectTask[],
 ): Promise<Array<Record<string, unknown>>> {
-  const quota = Math.max(1, Math.ceil(SLICE_PROBE_SAMPLE / tasks.length));
+  const quota = Math.max(1, Math.ceil(sliceProbeSample() / tasks.length));
   const parts: Array<Record<string, unknown>> = [];
   for (const task of tasks) {
     parts.push(...(await sampleCatalogSlice(ctx, task, quota)));
   }
-  return parts.slice(0, SLICE_PROBE_SAMPLE);
+  return parts.slice(0, sliceProbeSample());
 }
 
 /**
@@ -883,7 +888,10 @@ async function ensureSliceMatchesVertical(
   const pct = (r: { hitRate: number }) => `${Math.round(r.hitRate * 100)}%`;
   // Проба не состоялась (пустой срез или сбой модели) — не мешаем сбору.
   if (first.sampled === 0) return { plan };
-  if (first.hitRate >= SLICE_PROBE_MIN_HIT_RATE) {
+  // Оба порога по умолчанию 0 → условие ложно всегда: проба меряет и пишет
+  // провенанс, но плана не трогает. Числа пробы боем не подтвердились
+  // (калибровка 18.08, см. sliceProbe.ts), действовать на них нельзя.
+  if (!(first.hitRate < sliceProbeRepairBelow())) {
     stageLog(ctx, `[base_collect] проба среза: ${pct(first)} по вертикали — собираем`);
     return {
       plan,
@@ -925,7 +933,7 @@ async function ensureSliceMatchesVertical(
     pdl_filters: repair.data.pdl_filters,
   };
   const second = await probe([retried]);
-  if (second.sampled > 0 && second.hitRate < SLICE_PROBE_MIN_HIT_RATE) {
+  if (second.sampled > 0 && sliceProbeRejectBelow() > 0 && second.hitRate < sliceProbeRejectBelow()) {
     stageLog(
       ctx,
       `[base_collect] повторная проба: ${pct(second)} — вертикаль каталогом не покрывается, базу не строим`,

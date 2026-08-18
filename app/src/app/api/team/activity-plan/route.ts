@@ -14,6 +14,7 @@ import {
   logMeta,
   parseActivityPlanInput,
   planMonthToDatabase,
+  sortActivityPlanRowsByDeadline,
   type ActivityPlanRow,
 } from './helpers';
 
@@ -48,7 +49,7 @@ export async function GET(req: NextRequest) {
     return jsonError('Failed to load activity plan', 500);
   }
 
-  const rows = (data ?? []) as ActivityPlanRow[];
+  const rows = sortActivityPlanRowsByDeadline((data ?? []) as ActivityPlanRow[]);
   const asOf = currentMoscowDate();
   return NextResponse.json({
     asOf,

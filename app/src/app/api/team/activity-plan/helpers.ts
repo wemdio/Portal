@@ -388,6 +388,40 @@ function normalizeBudgetAmount(value: number | string | null): number | null {
   return Number.isFinite(number) ? number : null;
 }
 
+function compareNullableDeadlinePart(
+  left: string | null,
+  right: string | null,
+): number {
+  if (left === right) return 0;
+  if (left === null) return 1;
+  if (right === null) return -1;
+  return left < right ? -1 : 1;
+}
+
+/**
+ * Keeps the activity plan chronological without mutating the database result.
+ * Exact dates come first; free-text schedules and undated items retain their
+ * legacy manual order at the end of the list.
+ */
+export function sortActivityPlanRowsByDeadline(
+  rows: readonly ActivityPlanRow[],
+): ActivityPlanRow[] {
+  return [...rows].sort((left, right) => {
+    const dateOrder = compareNullableDeadlinePart(left.planned_date, right.planned_date);
+    if (dateOrder !== 0) return dateOrder;
+
+    if (left.planned_date !== null) {
+      const timeOrder = compareNullableDeadlinePart(left.planned_time, right.planned_time);
+      if (timeOrder !== 0) return timeOrder;
+    }
+
+    if (left.position !== right.position) return left.position - right.position;
+    if (left.created_at !== right.created_at) return left.created_at < right.created_at ? -1 : 1;
+    if (left.id === right.id) return 0;
+    return left.id < right.id ? -1 : 1;
+  });
+}
+
 export function activityPlanItemToApi(row: ActivityPlanRow) {
   return {
     id: row.id,

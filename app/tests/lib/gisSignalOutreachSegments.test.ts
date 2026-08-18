@@ -67,7 +67,12 @@ function card(id: string, overrides: Partial<TwoGisCard> = {}): TwoGisCard {
   };
 }
 
-function segment(key: string, category: string, priority: number): GisSignalSegment {
+function segment(
+  key: string,
+  category: string,
+  priority: number,
+  quotaWeight = 1,
+): GisSignalSegment {
   return {
     key,
     label: key,
@@ -76,6 +81,7 @@ function segment(key: string, category: string, priority: number): GisSignalSegm
     require_online: false,
     priority,
     enabled: true,
+    quota_weight: quotaWeight,
   };
 }
 
@@ -95,6 +101,40 @@ describe('computeSegmentQuotas', () => {
     expect(computeSegmentQuotas(10, 2)).toEqual([5, 5]);
     expect(computeSegmentQuotas(1, 4)).toEqual([1, 0, 0, 0]);
     expect(computeSegmentQuotas(50, 0)).toEqual([]);
+  });
+
+  // Веса (quota_weight) — базы ниш различаются на порядок, и при делении поровну
+  // маленькие выключались бы за две недели, пока большие простаивают.
+  it('веса задают доли; важна пропорция, а не абсолют', () => {
+    // Боевая раскладка 18.08.2026 (сумма весов = daily_limit → квота = вес).
+    expect(computeSegmentQuotas(2000, [1002, 362, 336, 150, 150]))
+      .toEqual([1002, 362, 336, 150, 150]);
+    expect(computeSegmentQuotas(100, [2, 1, 1])).toEqual([50, 25, 25]);
+    expect(computeSegmentQuotas(100, [200, 100, 100])).toEqual([50, 25, 25]);
+  });
+
+  it('сумма квот всегда равна лимиту: остаток по наибольшей дробной части', () => {
+    expect(computeSegmentQuotas(10, [1, 1, 1])).toEqual([4, 3, 3]);
+    const quotas = computeSegmentQuotas(2000, [54191, 19597, 18152, 5301, 3635]);
+    expect(quotas.reduce((sum, q) => sum + q, 0)).toBe(2000);
+    // Порядок сохранён: самой глубокой базе — самая большая квота.
+    expect(quotas[0]).toBeGreaterThan(quotas[1]);
+    expect(quotas[4]).toBeGreaterThan(0);
+  });
+
+  it('нулевой вес — пауза сегмента без выключения', () => {
+    expect(computeSegmentQuotas(100, [1, 0, 1])).toEqual([50, 0, 50]);
+  });
+
+  it('битые веса не могут оставить прогон без работы', () => {
+    // Все нули (напр. колонку добавили, значения не проставили) → делим поровну.
+    expect(computeSegmentQuotas(100, [0, 0, 0])).toEqual([34, 33, 33]);
+    // Отрицательные и нечисловые — как ноль, остальные работают.
+    expect(computeSegmentQuotas(100, [-5, Number.NaN, 3])).toEqual([0, 0, 100]);
+  });
+
+  it('нулевой лимит не роняет расчёт', () => {
+    expect(computeSegmentQuotas(0, [3, 1])).toEqual([0, 0]);
   });
 });
 

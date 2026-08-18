@@ -188,3 +188,159 @@ describe('sendFirstTouchBatch', () => {
     expect(fromSpy).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Регресс 18.08.2026: аккаунты били в одних и тех же людей десятками раз.
+ *
+ * Две независимые причины. Счётчик попыток не доезжал из базы (loadPendingByBase
+ * не выбирал колонку attempts), поэтому лимит трёх попыток не наступал никогда:
+ * один username собрал 168 заходов, 548 попыток пришлись на 18 человек. И сам
+ * PRIVACY_PREMIUM_REQUIRED попыток тратить не должен — это настройка приватности
+ * получателя, она не изменится от повторов.
+ */
+describe('sendFirstTouchBatch — недоступные контакты и ограничения аккаунта', () => {
+  const tgError = (code: string) =>
+    Object.assign(new Error(`403: ${code} (caused by messages.SendMessage)`), { code });
+
+  it('навсегда пропускает того, кто принимает только Premium — без траты попыток', async () => {
+    const db = fakeDb([contact()]);
+    const client = fakeClient({
+      sendMessage: jest.fn(async () => {
+        throw tgError('PRIVACY_PREMIUM_REQUIRED');
+      }),
+    });
+
+    const res = await sendFirstTouchBatch({ ...baseArgs, db, client } as never);
+
+    expect(res.skipped).toBe(1);
+    expect(res.postponed).toBe(0);
+    const patch = db.updates.find((u) => u.table === 'tg_outreach_base_contacts')?.patch;
+    expect(patch?.status).toBe('skipped');
+    expect(String(patch?.skip_reason)).toContain('Premium');
+    // Попытка не засчитана: контакт уходит из очереди сразу, а не через три круга.
+    expect(patch?.attempts).toBeUndefined();
+  });
+
+  it('не тратит попытку контакта, когда Telegram ограничил наш аккаунт (PEER_FLOOD)', async () => {
+    const db = fakeDb([contact()]);
+    const client = fakeClient({
+      sendMessage: jest.fn(async () => {
+        throw tgError('PEER_FLOOD');
+      }),
+    });
+
+    const res = await sendFirstTouchBatch({ ...baseArgs, db, client } as never);
+
+    expect(res.postponed).toBe(1);
+    expect(res.skipped).toBe(0);
+    // Виноват аккаунт, а не лид — контакт остаётся нетронутым в очереди.
+    expect(db.updates.filter((u) => u.table === 'tg_outreach_base_contacts')).toHaveLength(0);
+  });
+
+  it('на ограничении аккаунта прекращает порцию, а не идёт по остальным', async () => {
+    const db = fakeDb([contact({ id: 'c-1', username: 'first' }), contact({ id: 'c-2', username: 'second' })]);
+    const sendMessage = jest.fn(async () => {
+      throw tgError('PEER_FLOOD');
+    });
+    const client = fakeClient({ sendMessage });
+
+    await sendFirstTouchBatch({ ...baseArgs, db, client } as never);
+
+    // Один отказ — и хватит: PEER_FLOOD выдают именно за долбёжку по незнакомым.
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('ловит FLOOD_WAIT по тексту gramJS, а не по коду — кода в message нет', async () => {
+    // Ровно та строка, которую строит gramJS: RPCErrorList.js переписывает
+    // message на человеческий текст, подстроки FLOOD_WAIT в нём НЕТ. Проверка
+    // по коду тут мертва, и без матча по тексту флуд-вейт сжигал бы попытку
+    // живому контакту — на проде за 30 дней ни одной строки лога с «FLOOD_WAIT».
+    const db = fakeDb([contact({ attempts: 2 })]);
+    const client = fakeClient({
+      sendMessage: jest.fn(async () => {
+        throw new Error('A wait of 42 seconds is required (caused by messages.SendMessage)');
+      }),
+    });
+
+    const res = await sendFirstTouchBatch({ ...baseArgs, db, client } as never);
+
+    expect(res.postponed).toBe(1);
+    // Ни одной записи по контакту: попытка не засчитана, в failed он не ушёл.
+    expect(db.updates.filter((u) => u.table === 'tg_outreach_base_contacts')).toHaveLength(0);
+  });
+
+  it('забаненный аккаунт останавливает порцию, а не укатывает очередь в failed', async () => {
+    // Худший случай при рабочем счётчике: ошибка повторяется на КАЖДОМ контакте,
+    // поэтому «просто попытка» означала бы -1 жизнь у всей очереди за круг.
+    const db = fakeDb([
+      contact({ id: 'c-1', username: 'first', attempts: 2 }),
+      contact({ id: 'c-2', username: 'second', attempts: 2 }),
+    ]);
+    const sendMessage = jest.fn(async () => {
+      throw Object.assign(new Error('401: AUTH_KEY_UNREGISTERED (caused by messages.SendMessage)'), {
+        code: 'AUTH_KEY_UNREGISTERED',
+      });
+    });
+    const client = fakeClient({ sendMessage });
+
+    const res = await sendFirstTouchBatch({ ...baseArgs, db, client } as never);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(res.postponed).toBe(1);
+    expect(db.updates.filter((u) => u.table === 'tg_outreach_base_contacts')).toHaveLength(0);
+  });
+
+  it('ограничение аккаунта на резолве юзернейма тоже не тратит попытку', async () => {
+    // Классификация раньше висела только на sendMessage, а getEntity — такой же
+    // поход в Telegram и падает на тех же ограничениях.
+    const db = fakeDb([contact({ attempts: 2 })]);
+    const client = fakeClient({
+      getEntity: jest.fn(async () => {
+        throw Object.assign(new Error('420: PEER_FLOOD (caused by contacts.ResolveUsername)'), {
+          code: 'PEER_FLOOD',
+        });
+      }),
+    });
+
+    const res = await sendFirstTouchBatch({ ...baseArgs, db, client } as never);
+
+    expect(res.postponed).toBe(1);
+    expect(db.updates.filter((u) => u.table === 'tg_outreach_base_contacts')).toHaveLength(0);
+  });
+
+  it('закрытая личка, обнаруженная на резолве, пропускает контакт навсегда', async () => {
+    const db = fakeDb([contact()]);
+    const client = fakeClient({
+      getEntity: jest.fn(async () => {
+        throw Object.assign(new Error('403: USER_PRIVACY_RESTRICTED (caused by contacts.ResolveUsername)'), {
+          code: 'USER_PRIVACY_RESTRICTED',
+        });
+      }),
+    });
+
+    const res = await sendFirstTouchBatch({ ...baseArgs, db, client } as never);
+
+    expect(res.skipped).toBe(1);
+    const patch = db.updates.find((u) => u.table === 'tg_outreach_base_contacts')?.patch;
+    expect(patch?.status).toBe('skipped');
+    expect(patch?.attempts).toBeUndefined();
+  });
+
+  it('обычный сбой по-прежнему тратит попытку и считает её от значения из базы', async () => {
+    const db = fakeDb([contact({ attempts: 2 })]);
+    const client = fakeClient({
+      sendMessage: jest.fn(async () => {
+        throw new Error('ECONNRESET');
+      }),
+    });
+
+    const res = await sendFirstTouchBatch({ ...baseArgs, db, client } as never);
+
+    expect(res.postponed).toBe(1);
+    const patch = db.updates.find((u) => u.table === 'tg_outreach_base_contacts')?.patch;
+    // Третья попытка — контакт выбывает. Раньше attempts не доезжал и здесь
+    // всегда была «1», поэтому статус failed не наступал никогда.
+    expect(patch?.attempts).toBe(3);
+    expect(patch?.status).toBe('failed');
+  });
+});

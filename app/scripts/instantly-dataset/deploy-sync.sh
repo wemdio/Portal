@@ -1,6 +1,18 @@
 #!/bin/bash
 # Deploy sync.mjs to prod server. Run from project root.
 #
+# РАЗДЕЛЕНИЕ ОТВЕТСТВЕННОСТИ (с 2026-08-18):
+#   * КОД (*.mjs, *.sql из списка ниже) на прод катит и scheduled-deploy из main
+#     (.semaphore/scheduled-deploy.yml, шаг «Dataset sync»; цель dataset_sync
+#     в .semaphore/select-deploy-targets.sh срабатывает на изменения в
+#     app/scripts/instantly-dataset/*). Список файлов там ДОЛЖЕН совпадать с шагами 1–1d ниже.
+#   * ЭТОТ скрипт остаётся для того, чего CI не трогает: прод-.env синка (собирается из
+#     ЛОКАЛЬНОГО .env — перед запуском сверь INSTANTLY_DATASET_DB_URL: стейл-хост 144
+#     откатит прод), crontab, npm install (package.json), а также для хотфиксов до мержа.
+#   ВНИМАНИЕ (Windows): pscp копирует байты как есть — CRLF-чекаут уедет на прод как CRLF.
+#   Работает, но CI (Linux, LF) при следующем деплое перепишет файлы; прежняя версия
+#   остаётся в /opt/instantly-dataset-sync/.prev/.
+#
 # Reads SSH credentials from .env.servers (which is gitignored) — no hardcoded
 # secrets in this script. Required vars:
 #   PROD_SERVER_HOST       — e.g. 139.60.162.12
@@ -74,7 +86,7 @@ grep -E '^(INSTANTLY_EXPORT_API_KEY|INSTANTLY_PORTAL_API_KEY|INSTANTLY_DATASET_D
 "$PLINK" -batch -ssh -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" "$PROD" \
   "cd $REMOTE && docker run --rm -v \$PWD:/app -w /app node:22-alpine npm install --omit=dev --silent 2>&1 | tail -5"
 
-# 5. cron entries — idempotent. sync 00:00 UTC, portal-mirror 01:00, reply-labeler 02:00, segment-labeler 02:30.
+# 5. cron entries — idempotent. Время в crontab — ЛОКАЛЬНОЕ время сервера (МСК): sync 00:00, portal-mirror 01:00, reply-labeler 02:00, segment-labeler 02:30.
 "$PLINK" -batch -ssh -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" "$PROD" \
   "(crontab -l 2>/dev/null | grep -v instantly-dataset-sync | grep -v instantly-reply-labeler | grep -v instantly-segment-labeler | grep -v instantly-portal-mirror; echo '0 0 * * * docker run --rm -v /opt/instantly-dataset-sync:/app -w /app --env-file /opt/instantly-dataset-sync/.env --name instantly-dataset-sync node:22-alpine node sync.mjs >> /var/log/instantly-dataset-sync/\$(date -u +\\%Y-\\%m-\\%d).log 2>&1'; echo '0 1 * * * docker run --rm -v /opt/instantly-dataset-sync:/app -w /app --env-file /opt/instantly-dataset-sync/.env --name instantly-portal-mirror node:22-alpine node sync-portal-mirror.mjs >> /var/log/instantly-dataset-sync/portal-mirror-\$(date -u +\\%Y-\\%m-\\%d).log 2>&1'; echo '0 2 * * * docker run --rm -v /opt/instantly-dataset-sync:/app -w /app --env-file /opt/instantly-dataset-sync/.env --name instantly-reply-labeler node:22-alpine node label-new-replies.mjs >> /var/log/instantly-dataset-sync/labeler-\$(date -u +\\%Y-\\%m-\\%d).log 2>&1'; echo '30 2 * * * docker run --rm -v /opt/instantly-dataset-sync:/app -w /app --env-file /opt/instantly-dataset-sync/.env --name instantly-segment-labeler node:22-alpine node label-new-segments.mjs >> /var/log/instantly-dataset-sync/segments-\$(date -u +\\%Y-\\%m-\\%d).log 2>&1') | crontab -"
 
@@ -85,5 +97,5 @@ echo "=== installed files ==="
 # Cleanup local temp files
 rm -f /tmp/dataset-sync-package.json /tmp/dataset-sync.env
 echo
-echo "✓ deployed. Cron will fire next at 00:00 UTC. To test manually right now:"
+echo "✓ deployed. Cron will fire next at 00:00 МСК (21:00 UTC). To test manually right now:"
 echo "  ssh root@${PROD_SERVER_HOST} 'docker run --rm -v /opt/instantly-dataset-sync:/app -w /app --env-file /opt/instantly-dataset-sync/.env node:22-alpine node sync.mjs --dry-run'"

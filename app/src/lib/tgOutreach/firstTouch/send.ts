@@ -58,6 +58,84 @@ function attemptNote(outcome: { attempts: number; exhausted: boolean }): string 
     : ` (попытка ${outcome.attempts} из ${fdb.MAX_CONTACT_ATTEMPTS})`;
 }
 
+/**
+ * Три разных исхода неудачной отправки, которые раньше сваливались в один.
+ *
+ * Прод 18.08.2026: 548 попыток отправки пришлись на 18 человек — по 30 заходов
+ * на одного. Одна причина в том, что счётчик попыток не доезжал из базы
+ * (см. loadPendingByBase), вторая — вот здесь: PRIVACY_PREMIUM_REQUIRED вообще
+ * не должен тратить попытки. Это настройка приватности получателя («писать
+ * могут только Premium-аккаунты»), она не рассосётся ни на второй попытке, ни
+ * на тридцатой; единственный способ пробиться — Premium на нашем аккаунте.
+ *
+ * Отдельно PEER_FLOOD и FLOOD_WAIT: там ограничили НАШ аккаунт, а контакт ни
+ * при чём. Списывать за это попытку с живого лида нельзя — как только счётчик
+ * починился, такие ограничения начали бы выжигать исправную базу. И продолжать
+ * порцию тоже нельзя: PEER_FLOOD выдают ровно за долбёжку по незнакомым, так
+ * что следующая отправка только усугубит. Останавливаем порцию до следующего
+ * круга — так же, как LinkedIn-раннер паркует аккаунт при cooldown.
+ */
+type SendFailure =
+  | { kind: 'contact_permanent'; reason: string }
+  | { kind: 'account_limited'; reason: string }
+  | { kind: 'retryable' };
+
+function classifySendFailure(errMsg: string): SendFailure {
+  const m = errMsg.toUpperCase();
+
+  const permanent: Array<[string, string]> = [
+    ['PRIVACY_PREMIUM_REQUIRED', 'принимает сообщения только от Premium-аккаунтов'],
+    ['USER_PRIVACY_RESTRICTED', 'закрыл личные сообщения настройками приватности'],
+    ['USER_IS_BLOCKED', 'заблокировал наш аккаунт'],
+    ['INPUT_USER_DEACTIVATED', 'удалил аккаунт в Telegram'],
+    ['USER_BANNED_IN_CHANNEL', 'аккаунт забанен в Telegram'],
+    ['PEER_ID_INVALID', 'контакт не существует в Telegram'],
+  ];
+  for (const [code, reason] of permanent) {
+    if (m.includes(code)) return { kind: 'contact_permanent', reason };
+  }
+
+  // Ограничили НАШ аккаунт. Контакт ни при чём — попытку ему не засчитываем.
+  //
+  // PEER_FLOOD приезжает обычным RPCError, и код лежит в message как есть
+  // (в проде 737 таких строк за 30 дней). А вот FLOOD_WAIT и SLOWMODE_WAIT
+  // gramJS отдаёт типизированными ошибками, и они переписывают message на
+  // человеческий текст: `A wait of N seconds is required (caused by …)` —
+  // самого кода в строке НЕТ (node_modules/telegram/errors/RPCErrorList.js:41).
+  // Поэтому проверка по коду для них мертва, и нужен матч по тексту: за 30 дней
+  // ни одна строка лога не содержала «FLOOD_WAIT», хотя ограничения были.
+  // Без этого с починенным счётчиком любой флуд-вейт сжигал бы попытку живому
+  // контакту — ровно то, от чего эта классификация и должна защищать.
+  if (/A WAIT OF \d+ SECONDS IS REQUIRED/.test(m)) {
+    return { kind: 'account_limited', reason: 'FLOOD_WAIT' };
+  }
+  for (const code of ['PEER_FLOOD', 'FLOOD_WAIT', 'SLOWMODE_WAIT']) {
+    if (m.includes(code)) return { kind: 'account_limited', reason: code };
+  }
+
+  // Аккаунт мёртв или разлогинен: забанен, сессия отозвана, ключ не зарегистрирован.
+  // Это тоже про нас, а не про контакт, и это худший случай — такая ошибка
+  // повторится на КАЖДОМ контакте порции. Без этой ветки они все считались бы
+  // retryable, и один забаненный аккаунт за три круга укатал бы всю очередь
+  // (2803 pending на 18.08.2026) в failed.
+  //
+  // Порядок важен: `permanent` выше проверяется первым, потому что
+  // INPUT_USER_DEACTIVATED (получатель удалил аккаунт) содержит подстроку
+  // USER_DEACTIVATED и иначе читался бы как смерть нашего аккаунта.
+  for (const code of [
+    'AUTH_KEY_UNREGISTERED',
+    'AUTH_KEY_DUPLICATED',
+    'SESSION_REVOKED',
+    'SESSION_EXPIRED',
+    'USER_DEACTIVATED_BAN',
+    'USER_DEACTIVATED',
+  ]) {
+    if (m.includes(code)) return { kind: 'account_limited', reason: code };
+  }
+
+  return { kind: 'retryable' };
+}
+
 function isUsernameNotFound(err: unknown): boolean {
   const m = (err instanceof Error ? err.message : String(err)).toLowerCase();
   return m.includes('as username')
@@ -113,16 +191,41 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         await fdb.markContactSkipped(db, contact.id, 'юзернейм не найден в Telegram');
         log('info', `Первое касание: @${contact.username} пропущен — юзернейм не найден`);
         result.skipped++;
-      } else {
-        // Раньше эта ветка молчала: причина уходила в skip_reason контакта, а в
-        // логе оставалось только «отложено N» без единого слова почему. Показать
-        // skip_reason на экране тоже негде — оператор не мог узнать причину
-        // вообще никак.
-        const msg = err instanceof Error ? err.message : String(err);
-        const outcome = await fdb.recordContactFailure(db, contact.id, attempts, `не смог найти собеседника: ${msg}`);
-        log('warning', `Первое касание: @${contact.username} отложен — не смог найти собеседника: ${msg}${attemptNote(outcome)}`);
-        result.postponed++;
+        continue;
       }
+
+      // Резолв юзернейма — такой же поход в Telegram, как и отправка, и падает
+      // он на тех же ограничениях. Раньше классификация висела только на
+      // sendMessage, поэтому флуд-вейт или бан аккаунта, случившиеся на
+      // getEntity, списывали попытку живому контакту и порция продолжала
+      // ломиться в API. Разбираем ошибку тем же классификатором.
+      const msg = err instanceof Error ? err.message : String(err);
+      const failure = classifySendFailure(msg);
+
+      if (failure.kind === 'contact_permanent') {
+        await fdb.markContactSkipped(db, contact.id, failure.reason);
+        log('warning', `Первое касание: @${contact.username} пропущен — ${failure.reason}. Больше не пробуем.`);
+        result.skipped++;
+        continue;
+      }
+
+      if (failure.kind === 'account_limited') {
+        log(
+          'warning',
+          `Первое касание остановлено на резолве юзернейма: Telegram ограничил аккаунт (${failure.reason}). ` +
+            `Контакты остаются в очереди, попытки им не засчитываем — продолжим следующим кругом.`,
+        );
+        result.postponed++;
+        break;
+      }
+
+      // Раньше эта ветка молчала: причина уходила в skip_reason контакта, а в
+      // логе оставалось только «отложено N» без единого слова почему. Показать
+      // skip_reason на экране тоже негде — оператор не мог узнать причину
+      // вообще никак.
+      const outcome = await fdb.recordContactFailure(db, contact.id, attempts, `не смог найти собеседника: ${msg}`);
+      log('warning', `Первое касание: @${contact.username} отложен — не смог найти собеседника: ${msg}${attemptNote(outcome)}`);
+      result.postponed++;
       continue;
     }
 
@@ -145,6 +248,25 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       await client.sendMessage(`@${contact.username}`, { message: contact.message });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const failure = classifySendFailure(msg);
+
+      if (failure.kind === 'contact_permanent') {
+        await fdb.markContactSkipped(db, contact.id, failure.reason);
+        log('warning', `Первое касание: @${contact.username} пропущен — ${failure.reason}. Больше не пробуем.`);
+        result.skipped++;
+        continue;
+      }
+
+      if (failure.kind === 'account_limited') {
+        log(
+          'warning',
+          `Первое касание остановлено: Telegram ограничил аккаунт (${failure.reason}). ` +
+            `Контакты остаются в очереди, попытки им не засчитываем — продолжим следующим кругом.`,
+        );
+        result.postponed++;
+        break;
+      }
+
       const outcome = await fdb.recordContactFailure(db, contact.id, attempts, `не отправилось: ${msg}`);
       log('warning', `Первое касание: @${contact.username} не отправилось — ${msg}${attemptNote(outcome)}`);
       result.postponed++;

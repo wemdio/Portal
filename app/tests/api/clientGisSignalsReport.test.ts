@@ -106,12 +106,31 @@ jest.mock('@/lib/gisSignalOutreach/config', () => ({
 }));
 
 jest.mock('@/lib/gisSignalOutreach/segments', () => ({
-  // Реальная чистая функция квот (равные доли + остаток первым).
-  computeSegmentQuotas: (dailyLimit: number, segmentCount: number) => {
-    if (segmentCount <= 0) return [];
-    const base = Math.floor(dailyLimit / segmentCount);
-    const remainder = dailyLimit - base * segmentCount;
-    return Array.from({ length: segmentCount }, (_, i) => base + (i < remainder ? 1 : 0));
+  // Зеркало реальной чистой функции квот (деление по весам + остаток по
+  // наибольшей дробной части). Мокаем весь модуль ради его тяжёлых импортов
+  // (датасет 2GIS), поэтому логика повторена здесь — менять синхронно.
+  computeSegmentQuotas: (dailyLimit: number, segmentsOrWeights: number | number[]) => {
+    const weights =
+      typeof segmentsOrWeights === 'number'
+        ? Array.from({ length: Math.max(0, Math.floor(segmentsOrWeights)) }, () => 1)
+        : segmentsOrWeights.map((w) => (Number.isFinite(w) && w > 0 ? w : 0));
+    if (weights.length === 0) return [];
+    const limit = Number.isFinite(dailyLimit) && dailyLimit > 0 ? Math.floor(dailyLimit) : 0;
+    if (limit === 0) return weights.map(() => 0);
+    const weightSum = weights.reduce((sum: number, w: number) => sum + w, 0);
+    const effective = weightSum > 0 ? weights : weights.map(() => 1);
+    const effectiveSum = weightSum > 0 ? weightSum : effective.length;
+    const exact = effective.map((w: number) => (limit * w) / effectiveSum);
+    const quotas = exact.map((x: number) => Math.floor(x));
+    let rest = limit - quotas.reduce((sum: number, q: number) => sum + q, 0);
+    const byFraction = exact
+      .map((x: number, i: number) => ({ i, frac: x - Math.floor(x) }))
+      .sort((a, b) => b.frac - a.frac || a.i - b.i);
+    for (let k = 0; rest > 0; k = (k + 1) % byFraction.length) {
+      quotas[byFraction[k].i] += 1;
+      rest -= 1;
+    }
+    return quotas;
   },
 }));
 

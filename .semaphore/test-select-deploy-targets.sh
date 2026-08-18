@@ -34,6 +34,21 @@ select_deploy_targets_from_files 'app/src/lib/example.ts'
 assert_eq "$CORE_SERVICES" portal "app change selects Portal"
 assert_eq "$DEPLOY_WORKERS" 1 "app change selects shared worker image"
 assert_eq "$WORKER_SERVICES" "$ALL_WORKER_SERVICES" "app change selects every shared-image worker"
+assert_eq "$DEPLOY_DATASET_SYNC" 0 "generic app change does not deploy dataset sync"
+
+select_deploy_targets_from_files 'app/scripts/instantly-dataset/sync.mjs
+app/scripts/instantly-dataset/022_leads_capture.sql'
+assert_eq "$DEPLOY_DATASET_SYNC" 1 "dataset sync script change deploys dataset sync"
+assert_eq "$DEPLOY_PORTAL" 1 "dataset sync change still rebuilds Portal (app/ is copied into images)"
+assert_eq "$DEPLOY_WORKERS" 1 "dataset sync change still rebuilds shared worker image"
+assert_eq "$DEPLOY_ALL" 0 "dataset sync change is not a full deploy"
+
+select_deploy_targets_from_files 'app/scripts/instantly-dataset/wiki/dataset-schema.md'
+assert_eq "$DEPLOY_DATASET_SYNC" 0 "dataset wiki doc (agent_wiki, loaded manually) does not deploy dataset sync"
+assert_eq "$DEPLOY_PORTAL" 1 "dataset wiki doc keeps the old app/* behaviour"
+
+select_deploy_targets_from_files 'docker-compose.prod.yml'
+assert_eq "$DEPLOY_DATASET_SYNC" 0 "full deploy does not blindly re-copy dataset sync (explicit-change-only)"
 
 select_deploy_targets_from_files 'Dockerfile.worker'
 assert_eq "$DEPLOY_PORTAL" 0 "worker Dockerfile does not restart Portal"
