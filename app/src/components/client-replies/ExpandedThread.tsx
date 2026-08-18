@@ -442,18 +442,6 @@ export interface ExpandedThreadProps {
    * under a row with a chevron prefix.
    */
   className?: string;
-  /**
-   * Можно ли действовать (ответить/переслать). false → лента только на чтение,
-   * кнопок нет.
-   *
-   * Нужно для «сирот» — ответов, которые провайдер не привязал к кампании.
-   * Провайдер отказывает на отправку: POST /emails/reply отвечает `400 The email
-   * you are replying to is not part of a campaign, so you cannot reply to it
-   * (missing campaign_id or list_id)` — проверяется САМО письмо, поэтому передать
-   * campaign_id в запросе не помогает (боевой отказ 18.08.2026). Переписку при
-   * этом видно, и её показ полезен — а кнопки для неё рисовать нельзя.
-   */
-  canAct?: boolean;
 }
 
 export function ExpandedThread({
@@ -463,7 +451,6 @@ export function ExpandedThread({
   onReplied,
   fallbackMessages,
   className,
-  canAct = true,
 }: ExpandedThreadProps) {
   const [thread, setThread] = useState<ThreadMessage[] | null>(null);
   const [replyTo, setReplyTo] = useState<Recipient | null>(null);
@@ -547,7 +534,7 @@ export function ExpandedThread({
           рефетче (после отправки, «Повторить») лента уже отрендерена, и
           размонтирование ряда дёргало бы её вверх на высоту кнопок и обратно.
           Теперь ряд остаётся на месте. */}
-      {canAct && !(threadLoading && !thread) && (
+      {!(threadLoading && !thread) && (
         <div className="flex items-center gap-2 pt-1">
           <button
             type="button"

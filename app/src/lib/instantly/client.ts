@@ -1,27 +1,28 @@
 import type {
-  PaginationParams,
-  PaginatedResponse,
+  Account,
+  AccountWarmupConfig,
+  BackgroundJob,
+  BlockListEntry,
   Campaign,
-  CampaignCreatePayload,
-  CampaignUpdatePayload,
   CampaignAnalytics,
   CampaignAnalyticsOverview,
+  CampaignCreatePayload,
   CampaignStepAnalytics,
-  Account,
+  CampaignUpdatePayload,
+  CustomTag,
+  Email,
+  EmailTemplate,
   Lead,
   LeadCreatePayload,
+  LeadLabel,
   LeadList,
   LeadListVerificationStats,
-  CustomTag,
-  BlockListEntry,
+  PaginatedResponse,
+  PaginationParams,
   Subsequence,
-  Email,
+  WarmupAnalyticsEntry,
   Webhook,
   WebhookEventType,
-  EmailTemplate,
-  LeadLabel,
-  WarmupAnalyticsEntry,
-  BackgroundJob,
 } from './types';
 import { getInstantlyAccountApiKey, resolveInstantlyAccountId, type InstantlyRequestOptions } from './accounts';
 import { acquireInstantlyToken } from './rateLimiter';
@@ -214,6 +215,45 @@ export async function listAllAccounts(requestOptions?: InstantlyRequestOptions):
 
 export async function getAccount(email: string, requestOptions?: InstantlyRequestOptions) {
   return request<Account>(`/accounts/${encodeURIComponent(email)}`, {}, requestOptions);
+}
+
+/**
+ * Завести отправляющий ящик у провайдера по SMTP/IMAP-кредам.
+ *
+ * Это второй шаг подключения клиентской почты: сначала кабинет проверяет
+ * коннект и шифрует пароль у нас (lib/byoMailbox), затем ящик заводится здесь.
+ * Клиент провайдера не видит — вся форма и вся переписка идут от нашего имени.
+ *
+ * ВАЖНО: обновить пароль у заведённого ящика нельзя, PATCH его не принимает.
+ * Ротация пароля приложения = удалить и завести заново, и это обнуляет
+ * прогрев. Поэтому смена пароля — осознанное действие с предупреждением, а не
+ * тихий фон.
+ */
+export async function createAccount(
+  body: {
+    email: string;
+    first_name: string;
+    last_name: string;
+    provider_code: number;
+    smtp_username: string;
+    smtp_password: string;
+    smtp_host: string;
+    smtp_port: number;
+    imap_username: string;
+    imap_password: string;
+    imap_host: string;
+    imap_port: number;
+    daily_limit?: number;
+    warmup?: AccountWarmupConfig;
+  },
+  requestOptions?: InstantlyRequestOptions,
+) {
+  return request<Account>('/accounts', { method: 'POST', body }, requestOptions);
+}
+
+/** Снять ящик у провайдера (отключение клиента, ротация пароля). */
+export async function deleteAccount(email: string, requestOptions?: InstantlyRequestOptions) {
+  return request<unknown>(`/accounts/${encodeURIComponent(email)}`, { method: 'DELETE' }, requestOptions);
 }
 
 export async function enableWarmup(emails: string[], requestOptions?: InstantlyRequestOptions) {

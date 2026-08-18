@@ -1,6 +1,7 @@
 import type { supabaseInstantly } from '@/lib/supabaseInstantly';
 import * as instantly from './client';
 import { computeReplyAllCc, mergeCcLists } from '@/lib/clientCampaignReplies/participants';
+import { isNotPartOfCampaignError } from '@/lib/instantly/notPartOfCampaign';
 import { textToReplyHtml } from '@/lib/clientCampaignReplies/bodyHtml';
 import { logError } from '@/lib/loggerServer';
 
@@ -108,7 +109,7 @@ export async function sendHandoffNow(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const leadEmail = ((qual?.lead_email as string | null) ?? '').trim();
-      if (!msg.includes('not part of an Instantly campaign') || !leadEmail) throw err;
+      if (!isNotPartOfCampaignError(msg) || !leadEmail) throw err;
       await instantly.sendTestEmail({
         eaccount: pending.eaccount,
         // Дедуп: при патологическом client_email == lead_email To не дублируется.
