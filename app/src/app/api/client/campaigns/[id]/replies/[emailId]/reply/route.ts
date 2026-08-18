@@ -2,8 +2,10 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
-import { getEmail, listEmails, replyToEmail } from '@/lib/instantly/client';
+import { getEmail, listEmails, replyToEmail, sendTestEmail } from '@/lib/instantly/client';
+import { isNotPartOfCampaignError } from '@/lib/instantly/notPartOfCampaign';
 import { findEaccountForReply } from '@/lib/clientCampaignReplies/findEaccount';
+import { resolveStrayAccess } from '@/lib/clientCampaignReplies/strayAccess';
 import { isForeignEmail, isInboundEmail, resolveClientMailboxes } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
 import { computeReplyAllCc, mergeCcLists } from '@/lib/clientCampaignReplies/participants';
 import { validateReplyInput } from '@/lib/clientCampaignReplies/validate';
@@ -59,9 +61,26 @@ export async function POST(
 
   try {
     const original = await getEmail(emailId, instantlyRequestOptions);
-    if (!original || original.campaign_id !== campaignId) {
+    if (!original) {
       return jsonError('Письмо не относится к кампании', 404);
     }
+    // «Сирота»: провайдер не привязал письмо к кампании, поэтому campaign_id у
+    // него пуст и обычная проверка принадлежности не проходит. Право проверяем
+    // по ящику-получателю (strayAccess, fail-closed), а отправку ниже уводим на
+    // fallback — сам reply по такому письму провайдер отвергает.
+    let strayLeadEmail: string | null = null;
+    if (original.campaign_id !== campaignId) {
+      const stray = await resolveStrayAccess({
+        emailId,
+        campaignId,
+        userId,
+        accountId: instantlyRequestOptions.accountId,
+        eaccount: original.eaccount,
+      });
+      if (!stray) return jsonError('Письмо не относится к кампании', 404);
+      strayLeadEmail = stray.leadEmail;
+    }
+    const leadEmail = original.lead ?? strayLeadEmail;
 
     // Чужое входящее (получено ящиком ДРУГОГО клиента воркспейса, см.
     // foreignMailboxFilter): отвечать на него нельзя — findEaccountForReply
@@ -75,8 +94,8 @@ export async function POST(
     }
 
     let eaccount = findEaccountForReply({ originalEmail: original, threadEmails: [] });
-    if (!eaccount && original.thread_id && original.lead) {
-      const thread = await listEmails({ campaign_id: campaignId, lead_id: original.lead, limit: 100 }, instantlyRequestOptions);
+    if (!eaccount && original.thread_id && leadEmail) {
+      const thread = await listEmails({ campaign_id: campaignId, lead_id: leadEmail, limit: 100 }, instantlyRequestOptions);
       eaccount = findEaccountForReply({ originalEmail: original, threadEmails: thread.items ?? [] });
     }
     if (!eaccount) {
@@ -88,7 +107,7 @@ export async function POST(
     // reply_to_uuid), плюс то, что клиент дописал в CC руками. Иначе подключённого
     // лидом коллегу/ЛПР молча теряем (был инцидент: лид добавил линейного
     // продюсера, наш ответ ушёл без него, лид написал «вы удалили из копии»).
-    const replyAllCc = computeReplyAllCc(original, { eaccount, leadEmail: original.lead });
+    const replyAllCc = computeReplyAllCc(original, { eaccount, leadEmail });
     const manualCc = validation.cc ? validation.cc.split(',') : [];
     const mergedCc = mergeCcLists(replyAllCc, manualCc);
 
@@ -98,33 +117,63 @@ export async function POST(
     const quoteSrc = {
       bodyText: extractBodyText(original.body),
       fromName: original.from_address_json?.[0]?.name ?? null,
-      fromEmail: original.from_address_email ?? original.lead ?? null,
+      fromEmail: original.from_address_email ?? leadEmail ?? null,
       timestamp: original.timestamp_email ?? original.timestamp_created ?? null,
     };
 
-    await replyToEmail(
-      {
-        reply_to_uuid: emailId,
-        eaccount,
-        subject: buildReplySubject(original.subject),
-        // HTML с <br> сохраняет переносы строк (иначе письмо уходит «простынёй»);
-        // text — plain-text fallback. К обоим дописываем процитированную историю.
-        body: {
-          html: appendQuotedHistoryHtml(textToReplyHtml(validation.body_text!), quoteSrc),
-          text: appendQuotedHistoryText(validation.body_text!, quoteSrc),
+    const replyHtml = appendQuotedHistoryHtml(textToReplyHtml(validation.body_text!), quoteSrc);
+    const replySubject = buildReplySubject(original.subject);
+
+    // Отправка. Обычный путь — reply в тред. Но по письму, которое провайдер не
+    // привязал к кампании («сирота», Others), он отвечает 400 «not part of a
+    // campaign» и на reply, и на forward. Тогда — тот же обход, что уже год
+    // работает в передаче лида (handoffSender, с 27.07.2026): шлём НОВОЕ письмо
+    // тем же ящиком через тест-эндпоинт, лид и копия уходят в To (cc там нет, а
+    // видимость адресов та же). Плата: письмо не заводит сущность в Unibox
+    // провайдера, поэтому в треде оно не появится — но до адресата доходит.
+    //
+    // Клиенту предлагать «ответьте из ящика» бессмысленно: отправляющие ящики
+    // наши, доступа к ним у него нет. Поэтому обход обязателен, а не опционален.
+    let via: 'reply' | 'test' = 'reply';
+    try {
+      await replyToEmail(
+        {
+          reply_to_uuid: emailId,
+          eaccount,
+          subject: replySubject,
+          // HTML с <br> сохраняет переносы строк (иначе письмо уходит «простынёй»);
+          // text — plain-text fallback. К обоим дописываем процитированную историю.
+          body: {
+            html: replyHtml,
+            text: appendQuotedHistoryText(validation.body_text!, quoteSrc),
+          },
+          ...(mergedCc.length ? { cc_address_email_list: mergedCc.join(', ') } : {}),
+          ...(validation.bcc ? { bcc_address_email_list: validation.bcc } : {}),
         },
-        ...(mergedCc.length ? { cc_address_email_list: mergedCc.join(', ') } : {}),
-        ...(validation.bcc ? { bcc_address_email_list: validation.bcc } : {}),
-      },
-      instantlyRequestOptions,
-    );
+        instantlyRequestOptions,
+      );
+    } catch (err) {
+      // Не наш случай или некуда слать — отдаём ошибку как есть.
+      if (!isNotPartOfCampaignError(err) || !leadEmail) throw err;
+      await sendTestEmail(
+        {
+          eaccount,
+          // Дедуп на случай, если лид уже оказался в cc.
+          to_address_email_list: [...new Set([leadEmail, ...mergedCc])].join(', '),
+          subject: replySubject,
+          body: { html: replyHtml },
+        },
+        instantlyRequestOptions,
+      );
+      via = 'test';
+    }
 
     // Фиксируем «отвечено» (бейдж «Отвечено» в списке) + «прочитано» (ответил =
     // прочитал) персонально для клиента. Best-effort — не валим отправку.
     try {
       // Пишем ключи переписки (campaign + lead), чтобы «Отвечено» считалось по
       // лиду и не слетало на объёмной кампании. См. applyRepliedMarks.
-      await recordEmailReplied(userId, emailId, { campaignId, leadEmail: original.lead });
+      await recordEmailReplied(userId, emailId, { campaignId, leadEmail });
       await recordEmailRead(userId, emailId);
     } catch (err) {
       await logError('client.campaign.replies.reply.record_failed', err, { campaignId, emailId, userId });
@@ -133,6 +182,8 @@ export async function POST(
     void logAudit('client.campaign.replies.reply.sent', 'Client replied via Instantly', {
       campaignId,
       emailId,
+      via,
+      bcc_dropped: via === 'test' && Boolean(validation.bcc),
       cc_count: mergedCc.length,
       bcc_count: validation.bcc ? validation.bcc.split(',').length : 0,
       userId,
@@ -140,7 +191,7 @@ export async function POST(
 
     // eaccount в ответ не отдаём: он клиенту не нужен, а для гипотетического
     // чужого письма это был бы адрес чужого ящика.
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, in_thread: via === 'reply' });
   } catch (err) {
     await logError('client.campaign.replies.reply.failed', err, { campaignId, emailId, userId });
     return jsonError(err instanceof Error ? err.message : 'Не удалось отправить ответ', 502);
