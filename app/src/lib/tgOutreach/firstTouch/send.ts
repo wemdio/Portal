@@ -58,6 +58,50 @@ function attemptNote(outcome: { attempts: number; exhausted: boolean }): string 
     : ` (попытка ${outcome.attempts} из ${fdb.MAX_CONTACT_ATTEMPTS})`;
 }
 
+/**
+ * Три разных исхода неудачной отправки, которые раньше сваливались в один.
+ *
+ * Прод 18.08.2026: 548 попыток отправки пришлись на 18 человек — по 30 заходов
+ * на одного. Одна причина в том, что счётчик попыток не доезжал из базы
+ * (см. loadPendingByBase), вторая — вот здесь: PRIVACY_PREMIUM_REQUIRED вообще
+ * не должен тратить попытки. Это настройка приватности получателя («писать
+ * могут только Premium-аккаунты»), она не рассосётся ни на второй попытке, ни
+ * на тридцатой; единственный способ пробиться — Premium на нашем аккаунте.
+ *
+ * Отдельно PEER_FLOOD и FLOOD_WAIT: там ограничили НАШ аккаунт, а контакт ни
+ * при чём. Списывать за это попытку с живого лида нельзя — как только счётчик
+ * починился, такие ограничения начали бы выжигать исправную базу. И продолжать
+ * порцию тоже нельзя: PEER_FLOOD выдают ровно за долбёжку по незнакомым, так
+ * что следующая отправка только усугубит. Останавливаем порцию до следующего
+ * круга — так же, как LinkedIn-раннер паркует аккаунт при cooldown.
+ */
+type SendFailure =
+  | { kind: 'contact_permanent'; reason: string }
+  | { kind: 'account_limited'; reason: string }
+  | { kind: 'retryable' };
+
+function classifySendFailure(errMsg: string): SendFailure {
+  const m = errMsg.toUpperCase();
+
+  const permanent: Array<[string, string]> = [
+    ['PRIVACY_PREMIUM_REQUIRED', 'принимает сообщения только от Premium-аккаунтов'],
+    ['USER_PRIVACY_RESTRICTED', 'закрыл личные сообщения настройками приватности'],
+    ['USER_IS_BLOCKED', 'заблокировал наш аккаунт'],
+    ['INPUT_USER_DEACTIVATED', 'удалил аккаунт в Telegram'],
+    ['USER_BANNED_IN_CHANNEL', 'аккаунт забанен в Telegram'],
+    ['PEER_ID_INVALID', 'контакт не существует в Telegram'],
+  ];
+  for (const [code, reason] of permanent) {
+    if (m.includes(code)) return { kind: 'contact_permanent', reason };
+  }
+
+  for (const code of ['PEER_FLOOD', 'FLOOD_WAIT', 'SLOWMODE_WAIT']) {
+    if (m.includes(code)) return { kind: 'account_limited', reason: code };
+  }
+
+  return { kind: 'retryable' };
+}
+
 function isUsernameNotFound(err: unknown): boolean {
   const m = (err instanceof Error ? err.message : String(err)).toLowerCase();
   return m.includes('as username')
@@ -145,6 +189,25 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       await client.sendMessage(`@${contact.username}`, { message: contact.message });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const failure = classifySendFailure(msg);
+
+      if (failure.kind === 'contact_permanent') {
+        await fdb.markContactSkipped(db, contact.id, failure.reason);
+        log('warning', `Первое касание: @${contact.username} пропущен — ${failure.reason}. Больше не пробуем.`);
+        result.skipped++;
+        continue;
+      }
+
+      if (failure.kind === 'account_limited') {
+        log(
+          'warning',
+          `Первое касание остановлено: Telegram ограничил аккаунт (${failure.reason}). ` +
+            `Контакты остаются в очереди, попытки им не засчитываем — продолжим следующим кругом.`,
+        );
+        result.postponed++;
+        break;
+      }
+
       const outcome = await fdb.recordContactFailure(db, contact.id, attempts, `не отправилось: ${msg}`);
       log('warning', `Первое касание: @${contact.username} не отправилось — ${msg}${attemptNote(outcome)}`);
       result.postponed++;
