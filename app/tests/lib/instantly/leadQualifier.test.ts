@@ -284,6 +284,49 @@ describe('qualifyReply — пер-проектное определение ли
     };
   }
 
+  const outboundProposal = {
+    ...outboundContactRequest,
+    body: {
+      text: [
+        'Добрый день!',
+        'Предлагаем единую систему ТОиР для распределённых объектов.',
+        'Она помогает контролировать заявки, ремонты и запасы на всех площадках.',
+        'Подготовим план решения задач с учётом вашей структуры. Какие шаги нужны, чтобы обсудить реализацию?',
+      ].join('\n'),
+    },
+  } as Email;
+
+  function replyWithQuotedProposal(authoredReply: string): string {
+    return [
+      authoredReply,
+      '',
+      'С уважением,',
+      'Иванова Светлана Евгеньевна',
+      'начальник отдела продаж',
+      'АО «АК Корвет»',
+      '(3522) 476-748',
+      'svetlana.ivanova@korvet-jsc.ru',
+      '',
+      '18.08.2026 11:21, Dmitrij Kasilov пишет:',
+      '> Добрый день!',
+      '> Предлагаем единую систему ТОиР для распределённых объектов.',
+      '> Подготовим план решения задач. Какие шаги нужны, чтобы обсудить реализацию?',
+    ].join('\n');
+  }
+
+  async function qualifyQuotedProposalReply(authoredReply: string, leadCriteria?: string) {
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    return qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      leadCriteria,
+      prefetchedContext: contextWithReply(
+        replyWithQuotedProposal(authoredReply),
+        outboundProposal,
+      ),
+    });
+  }
+
   it('принимает custom_criteria_matched только как строгий JSON boolean', async () => {
     const { _private } = await import('@/lib/instantly/leadQualifier');
     const actualTrue = _private.parseAIResult('{"custom_criteria_matched": true}');
@@ -301,6 +344,7 @@ describe('qualifyReply — пер-проектное определение ли
     'Пришлите, пожалуйста, КП на этот адрес.',
     'Пришлите КП, ivan@example.com',
     'Позвоните +7 999 123-45-67',
+    'Позвоните по телефону +7 999 123-45-67',
     'Свяжитесь со мной завтра после 15:00.',
     'Когда можем поговорить?',
     'Можно пообщаться на этой неделе?',
@@ -421,6 +465,116 @@ describe('qualifyReply — пер-проектное определение ли
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(res.isLead).toBe(false);
     expect(res.needsReview).toBe(false);
+  });
+
+  it('Информатика: перенаправление в общую приёмную не становится лидом из-за процитированного предложения', async () => {
+    mockAiResult();
+    const res = await qualifyQuotedProposalReply(
+      'Добрый день, обращайтесь, пож-та, в приемную.\n+7 (3522) 234161 <tel:+73522234161>',
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res.isLead).toBe(false);
+    expect(res.proposalSeen).toBe(true);
+    expect(res.needsReview).toBe(false);
+    expect(res.reason).toContain('общий контакт');
+  });
+
+  it.each([
+    'По этому вопросу обратитесь в приёмную.\n+7 (3522) 234161',
+    'Просьба обращаться в приёмную.\n+7 (3522) 234161',
+    'Свяжитесь с отделом закупок.\n+7 (3522) 234161',
+    'Обращайтесь в приёмную по телефону +7 (3522) 234161',
+    'Обращайтесь в приёмную.\nС уважением, Светлана Иванова',
+    'Свяжитесь с приёмной.',
+    'Просим обратиться в приёмную.',
+    'Обратитесь к нашему отделу.',
+    'Обратитесь в отдел информационных технологий.',
+    'Свяжитесь с отделом по работе с клиентами.',
+  ])('распознаёт безопасные варианты перенаправления на общий контакт: %s', async (authoredReply) => {
+    mockAiResult();
+    const res = await qualifyQuotedProposalReply(authoredReply);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it('личная просьба позвонить и обсудить остаётся лидом даже с подписью и цитатой', async () => {
+    mockAiResult({
+      proposal_seen: true,
+      interest_signals: ['просьба позвонить и обсудить внедрение'],
+    });
+    const res = await qualifyQuotedProposalReply(
+      'Позвоните мне завтра, обсудим внедрение.\n+7 (3522) 234161',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it.each([
+    'Обратитесь в отдел закупок пришлите КП.',
+    'Обратитесь в отдел продаж обсудить внедрение.',
+    'Позвоните в отдел закупок стоимость интересует.',
+    'Напишите в отдел КП.',
+    'Напишите в отдел цену.',
+    'Позвоните в отдел обсудим.',
+    'Напишите в отдел заявку.',
+    'Напишите в отдел реквизиты.',
+    'Напишите в отдел счёт.',
+    'Позвоните в отдел согласуем.',
+    'Звоните в отдел покажем.',
+    'Напишите в отдел образец.',
+    'Позвоните в отдел оплатим.',
+  ])('упоминание отдела не скрывает отдельный коммерческий сигнал: %s', async (replyText) => {
+    mockAiResult({
+      proposal_seen: true,
+      interest_signals: ['конкретный коммерческий сигнал'],
+    });
+    const res = await qualifyQuotedProposalReply(replyText);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it('совпавший кастомный критерий может считать перенаправление в приёмную лидом', async () => {
+    mockAiResult({
+      is_lead: false,
+      needs_review: true,
+      custom_criteria_matched: true,
+      interest_signals: ['передан общий номер приёмной'],
+    });
+    const res = await qualifyQuotedProposalReply(
+      'Обращайтесь, пожалуйста, в приёмную.\n+7 (3522) 234161',
+      'Обращение в приёмную или по переданному общему номеру = лид.',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.customCriteriaMatched).toBe(true);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it('нерелевантный кастомный критерий не отключает защиту от перенаправления на общий контакт', async () => {
+    mockAiResult({
+      is_lead: true,
+      needs_review: false,
+      custom_criteria_matched: false,
+      interest_signals: ['модель ошибочно приняла приёмную за следующий шаг'],
+    });
+    const res = await qualifyQuotedProposalReply(
+      'Обращайтесь, пожалуйста, в приёмную.\n+7 (3522) 234161',
+      'Запрос цены или сметы = лид.',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.customCriteriaMatched).toBe(false);
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(false);
+    expect(res.reason).toContain('общий контакт');
   });
 
   it('прямой CTA без восстановленного исходящего письма доходит до ИИ и остаётся лидом', async () => {
