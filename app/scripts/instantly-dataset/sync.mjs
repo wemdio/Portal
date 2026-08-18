@@ -655,7 +655,7 @@ async function syncLeadsCapture(client, counts) {
 
   // 4. Захват
   const pulledAt = new Date();
-  let totalLeads = 0, totalPages = 0, done = 0, failed = 0;
+  let totalLeads = 0, totalPages = 0, done = 0, failed = 0, empty = 0;
   for (const c of selected) {
     let after, pages = 0, upserted = 0;
     try {
@@ -672,6 +672,14 @@ async function syncLeadsCapture(client, counts) {
         }
         after = res?.next_starting_after || undefined;
       } while (after);
+      // Аналитика говорит leads_count>0, а /leads/list пуст (лидов вычистили между
+      // обновлением счётчика и нашим вызовом) — отпечаток НЕ пишем, чтобы кампания
+      // перепроверилась следующей ночью (цена — одна страница).
+      if (upserted === 0 && c.leads > 0) {
+        empty++; totalPages += pages;
+        log(`  ~ leads ${c.id.slice(0, 8)}: analytics says ${c.leads}, /leads/list returned 0 — state not recorded`);
+        continue;
+      }
       if (!DRY) {
         await client.query(
           `INSERT INTO lead_capture_state (campaign_id, leads_count, emails_sent_count, open_count, reply_count, bounced_count,
@@ -693,11 +701,12 @@ async function syncLeadsCapture(client, counts) {
       log(`  ! leads ${c.id.slice(0, 8)} failed after ${pages} pages: ${e.message.slice(0, 100)}`);
     }
   }
-  log(`  ✓ leads capture: ${totalLeads} leads upserted from ${done} campaigns (${totalPages} pages, ${failed} failed)`);
+  log(`  ✓ leads capture: ${totalLeads} leads upserted from ${done} campaigns (${totalPages} pages, ${failed} failed, ${empty} empty)`);
   counts.leads_captured = totalLeads;
   counts.leads_campaigns = done;
   counts.leads_pages = totalPages;
   counts.leads_failed = failed;
+  counts.leads_empty = empty;
 }
 
 // ─── main ────────────────────────────────────────────────────────────────
