@@ -51,7 +51,7 @@ source_rows AS (
   JOIN public.large_score_jobs AS j
     ON j.id = d.job_id
    AND j.client_user_id = $1::uuid
-   AND j.status IN ('completed', 'scoring')
+   AND j.status = 'completed'
   LEFT JOIN public.mailganer_domain_scores AS cache
     ON cache.domain = lower(btrim(d.domain))
   WHERE d.status IN ('scored', 'error')
@@ -96,7 +96,7 @@ FROM public.large_score_domains AS d
 JOIN public.large_score_jobs AS j
   ON j.id = d.job_id
  AND j.client_user_id = $1::uuid
-WHERE j.status NOT IN ('completed', 'scoring')
+WHERE j.status <> 'completed'
   AND d.status IN ('scored', 'error')
   AND d.scored_at IS NOT NULL
   AND nullif(btrim(d.domain), '') IS NOT NULL
@@ -205,7 +205,7 @@ function assertPlanCoverage(plan) {
   );
   if (uncovered !== 0n) {
     throw new Error(
-      `Coverage check failed: ${uncovered} uncovered legacy rows belong to jobs outside ('completed','scoring')`,
+      `Coverage check failed: ${uncovered} uncovered legacy rows belong to non-completed jobs`,
     );
   }
 }

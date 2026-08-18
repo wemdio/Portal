@@ -426,16 +426,7 @@ describe('large-score client-report rollup operator', () => {
     expect(scriptSource).toContain('Europe/Moscow');
     expect(scriptSource).toContain('rebuild_client_report_large_score_rollup_day');
     expect(scriptSource).toContain('client_report_pipeline_summary_shadow');
-    // Джобы гейтятся по статусу: берём и завершённые, и те, что ещё скорятся,
-    // иначе строки активного файла 40 дней не попадают в воронку и роняют
-    // coverage-guard ежедневной автопересборки (18.08.2026).
-    expect(executable).toMatch(
-      /status\s+IN\s*\(\s*['"]completed['"]\s*,\s*['"]scoring['"]\s*\)/i,
-    );
-    expect(executable).toMatch(
-      /status\s+NOT\s+IN\s*\(\s*['"]completed['"]\s*,\s*['"]scoring['"]\s*\)/i,
-    );
-    expect(executable).not.toMatch(/status\s*=\s*['"]completed['"]/i);
+    expect(executable).toMatch(/status\s*=\s*['"]completed['"]/i);
   });
 
   it('contains no activation or current-RPC cutover path', () => {
