@@ -68,8 +68,9 @@ export async function POST(
     // него пуст и обычная проверка принадлежности не проходит. Право проверяем
     // по ящику-получателю (strayAccess, fail-closed), а отправку ниже уводим на
     // fallback — сам reply по такому письму провайдер отвергает.
+    const isStray = original.campaign_id !== campaignId;
     let strayLeadEmail: string | null = null;
-    if (original.campaign_id !== campaignId) {
+    if (isStray) {
       const stray = await resolveStrayAccess({
         emailId,
         campaignId,
@@ -124,48 +125,76 @@ export async function POST(
     const replyHtml = appendQuotedHistoryHtml(textToReplyHtml(validation.body_text!), quoteSrc);
     const replySubject = buildReplySubject(original.subject);
 
+    // Скрытая копия у обходного пути невозможна: тест-эндпоинт принимает только
+    // to_address_email_list. Молча выбросить bcc нельзя — отправитель считал бы,
+    // что копия ушла. Отказываем ДО отправки, пока письмо ещё можно переписать:
+    // ничего не отправлено, повторять нечего.
+    if (isStray && validation.bcc) {
+      return jsonError(
+        'По письму вне треда кампании скрытая копия недоступна. Уберите адрес из «Скрытая копия» и отправьте ещё раз.',
+        400,
+      );
+    }
+
     // Отправка. Обычный путь — reply в тред. Но по письму, которое провайдер не
     // привязал к кампании («сирота», Others), он отвечает 400 «not part of a
-    // campaign» и на reply, и на forward. Тогда — тот же обход, что уже год
-    // работает в передаче лида (handoffSender, с 27.07.2026): шлём НОВОЕ письмо
-    // тем же ящиком через тест-эндпоинт, лид и копия уходят в To (cc там нет, а
-    // видимость адресов та же). Плата: письмо не заводит сущность в Unibox
-    // провайдера, поэтому в треде оно не появится — но до адресата доходит.
+    // campaign» и на reply, и на forward. Обход — НОВОЕ письмо тем же ящиком
+    // через тест-эндпоинт: лид и копия уходят в To (cc там нет, видимость
+    // адресов та же). Тот же обход с 27.07.2026 работает в передаче лида,
+    // см. handoffSender.
     //
-    // Клиенту предлагать «ответьте из ящика» бессмысленно: отправляющие ящики
-    // наши, доступа к ним у него нет. Поэтому обход обязателен, а не опционален.
-    let via: 'reply' | 'test' = 'reply';
-    try {
-      await replyToEmail(
-        {
-          reply_to_uuid: emailId,
-          eaccount,
-          subject: replySubject,
-          // HTML с <br> сохраняет переносы строк (иначе письмо уходит «простынёй»);
-          // text — plain-text fallback. К обоим дописываем процитированную историю.
-          body: {
-            html: replyHtml,
-            text: appendQuotedHistoryText(validation.body_text!, quoteSrc),
-          },
-          ...(mergedCc.length ? { cc_address_email_list: mergedCc.join(', ') } : {}),
-          ...(validation.bcc ? { bcc_address_email_list: validation.bcc } : {}),
-        },
-        instantlyRequestOptions,
-      );
-    } catch (err) {
-      // Не наш случай или некуда слать — отдаём ошибку как есть.
-      if (!isNotPartOfCampaignError(err) || !leadEmail) throw err;
+    // Обход обязателен, а не опционален: предлагать клиенту «ответьте сами из
+    // ящика» бессмысленно — отправляющие ящики наши, доступа к ним у него нет.
+    // Плата: письмо не заводит сущность в Unibox провайдера, поэтому в треде не
+    // появится (кабинет предупреждает об этом заранее) — но до адресата доходит.
+    const sendAsNewLetter = async (recipient: string): Promise<void> => {
       await sendTestEmail(
         {
           eaccount,
           // Дедуп на случай, если лид уже оказался в cc.
-          to_address_email_list: [...new Set([leadEmail, ...mergedCc])].join(', '),
+          to_address_email_list: [...new Set([recipient, ...mergedCc])].join(', '),
           subject: replySubject,
           body: { html: replyHtml },
         },
         instantlyRequestOptions,
       );
+    };
+
+    let via: 'reply' | 'test' = 'reply';
+    if (isStray) {
+      // По сироте reply отвергается гарантированно — не тратим на него запрос:
+      // минутная квота воркспейса общая с воркерами, и заведомо провальный вызов
+      // может стоить 429 на следующем.
+      if (!leadEmail) {
+        return jsonError('Не удалось определить адрес получателя. Обновите страницу и попробуйте ещё раз.', 400);
+      }
+      await sendAsNewLetter(leadEmail);
       via = 'test';
+    } else {
+      try {
+        await replyToEmail(
+          {
+            reply_to_uuid: emailId,
+            eaccount,
+            subject: replySubject,
+            // HTML с <br> сохраняет переносы строк (иначе письмо уходит «простынёй»);
+            // text — plain-text fallback. К обоим дописываем процитированную историю.
+            body: {
+              html: replyHtml,
+              text: appendQuotedHistoryText(validation.body_text!, quoteSrc),
+            },
+            ...(mergedCc.length ? { cc_address_email_list: mergedCc.join(', ') } : {}),
+            ...(validation.bcc ? { bcc_address_email_list: validation.bcc } : {}),
+          },
+          instantlyRequestOptions,
+        );
+      } catch (err) {
+        // Страховка: письмо числится в кампании, а провайдер считает иначе. С bcc
+        // ошибку не глушим — на обходном пути копия была бы молча потеряна.
+        if (!isNotPartOfCampaignError(err) || !leadEmail || validation.bcc) throw err;
+        await sendAsNewLetter(leadEmail);
+        via = 'test';
+      }
     }
 
     // Фиксируем «отвечено» (бейдж «Отвечено» в списке) + «прочитано» (ответил =
@@ -183,7 +212,6 @@ export async function POST(
       campaignId,
       emailId,
       via,
-      bcc_dropped: via === 'test' && Boolean(validation.bcc),
       cc_count: mergedCc.length,
       bcc_count: validation.bcc ? validation.bcc.split(',').length : 0,
       userId,
@@ -191,7 +219,7 @@ export async function POST(
 
     // eaccount в ответ не отдаём: он клиенту не нужен, а для гипотетического
     // чужого письма это был бы адрес чужого ящика.
-    return NextResponse.json({ ok: true, in_thread: via === 'reply' });
+    return NextResponse.json({ ok: true });
   } catch (err) {
     await logError('client.campaign.replies.reply.failed', err, { campaignId, emailId, userId });
     return jsonError(err instanceof Error ? err.message : 'Не удалось отправить ответ', 502);
