@@ -513,6 +513,81 @@ blocks:
                 fi
               fi
 
+              # ─── Dataset sync scripts (ночной синк instantly_dataset) → /opt/instantly-dataset-sync ───
+              # Папка живёт ВНЕ compose: крон запускает `docker run node:22-alpine node sync.mjs` с ней.
+              # До 2026-08 её обновлял только ручной deploy-sync.sh (plink/pscp с рабочей машины) —
+              # мерж в main синк НЕ трогал. Здесь копируем ТОЛЬКО код (список = deploy-sync.sh, шаги 1–1d):
+              # .env, crontab и node_modules остаются за deploy-sync.sh (креды, расписание, зависимости).
+              # Порядок: scp в staging в $HOME пользователя CI → node --check в том же образе, что у крона →
+              # прежняя версия в .prev/ → sudo install. Кривой файл НЕ ставится (на проде остаётся прежняя
+              # версия). Переписать файл под работающим node безопасно: скрипт читается один раз при старте.
+              # Ошибка шага НЕ откатывает и не повторяет деплой приложения: пишем last_deploy_sha как обычно,
+              # шлём алерт в health-чат и красим прогон в красный (exit 1 в самом конце) — чинить руками:
+              # поправить main или прогнать deploy-sync.sh.
+              DATASET_SYNC_FAILED=0
+              if [ "$DEPLOY_DATASET_SYNC" = 1 ]; then
+                echo "[scheduled] Dataset sync: deploying scripts to ${USER}@${HOST}:/opt/instantly-dataset-sync"
+                DS_FILES="sync.mjs label-new-replies.mjs label-new-segments.mjs sync-portal-mirror.mjs 018_portal_mirror.sql 022_leads_capture.sql"
+                DS_STAGE=".dataset-sync-stage"
+                for f in $DS_FILES; do
+                  if [ ! -f "app/scripts/instantly-dataset/$f" ]; then
+                    echo "[scheduled] dataset-sync: app/scripts/instantly-dataset/$f отсутствует в чекауте — список DS_FILES разошёлся с репо" >&2
+                    DATASET_SYNC_FAILED=1
+                  fi
+                done
+                if [ "$DATASET_SYNC_FAILED" = 0 ]; then
+                  if ! run_ssh "dataset-sync: prepare stage" "rm -rf ~/${DS_STAGE} && mkdir -p ~/${DS_STAGE}"; then DATASET_SYNC_FAILED=1; fi
+                fi
+                if [ "$DATASET_SYNC_FAILED" = 0 ]; then
+                  if ! ( cd app/scripts/instantly-dataset && run_scp "dataset-sync: copy scripts" $DS_FILES "${USER}@${HOST}:${DS_STAGE}/" ); then DATASET_SYNC_FAILED=1; fi
+                fi
+                if [ "$DATASET_SYNC_FAILED" = 0 ]; then
+                  if ! run_ssh "dataset-sync: check + install" "set -e
+                  cd ~/${DS_STAGE}
+                  sudo -n docker image inspect node:22-alpine >/dev/null 2>&1 || sudo -n docker pull node:22-alpine
+                  echo '[dataset-sync] node --check (node:22-alpine — тот же образ, что у крона)'
+                  for f in *.mjs; do
+                    if ! sudo -n docker run --rm -v \"\$PWD:/app:ro\" -w /app node:22-alpine node --check \"\$f\"; then
+                      echo \"[dataset-sync] FATAL: node --check failed for \$f — ничего не установлено, на проде осталась прежняя версия\" >&2
+                      exit 1
+                    fi
+                  done
+                  sudo -n mkdir -p /opt/instantly-dataset-sync/.prev
+                  changed=0
+                  for f in ${DS_FILES}; do
+                    dst=/opt/instantly-dataset-sync/\$f
+                    if [ -f \"\$dst\" ] && cmp -s \"\$f\" \"\$dst\"; then
+                      echo \"[dataset-sync] = \$f (без изменений)\"
+                      continue
+                    fi
+                    if [ -f \"\$dst\" ]; then sudo -n cp -p \"\$dst\" /opt/instantly-dataset-sync/.prev/\"\$f\"; fi
+                    sudo -n install -m 644 -o root -g root \"\$f\" \"\$dst\"
+                    echo \"[dataset-sync] + \$f (обновлён; прежняя версия в .prev/)\"
+                    changed=\$((changed + 1))
+                  done
+                  cd ~ && rm -rf ~/${DS_STAGE}
+                  echo \"[dataset-sync] done: обновлено файлов: \$changed\"
+                  "; then DATASET_SYNC_FAILED=1; fi
+                fi
+                if [ "$DATASET_SYNC_FAILED" = 1 ]; then
+                  echo "[scheduled] !!! DATASET SYNC NOT DEPLOYED (commit ${COMMIT_SHA}). Приложение задеплоено штатно; на проде осталась прежняя версия синка. Починить: исправить main или прогнать app/scripts/instantly-dataset/deploy-sync.sh" >&2
+                  run_ssh "dataset-sync: health alert" "cd /home/Portal/prod 2>/dev/null || exit 0
+                  bot_token=\$(grep -E '^TELEGRAM_HEALTH_BOT_TOKEN=' .env 2>/dev/null | tail -n1 | cut -d= -f2-)
+                  [ -n \"\${bot_token}\" ] || bot_token=\$(grep -E '^TELEGRAM_BOT_TOKEN=' .env 2>/dev/null | tail -n1 | cut -d= -f2-)
+                  chat_id=\$(grep -E '^TELEGRAM_HEALTH_CHAT_ID=' .env 2>/dev/null | tail -n1 | cut -d= -f2-)
+                  if [ -z \"\${bot_token}\" ] || [ -z \"\${chat_id}\" ]; then echo '[dataset-sync] health alert skipped: no token/chat'; exit 0; fi
+                  curl -fsS -X POST \"https://api.telegram.org/bot\${bot_token}/sendMessage\" \
+                    --data-urlencode \"chat_id=\${chat_id}\" \
+                    --data-urlencode \"text=⚠️ Scheduled deploy ${COMMIT_SHA}: приложение задеплоено, но скрипты ночного синка instantly_dataset (/opt/instantly-dataset-sync) НЕ обновлены — см. лог Semaphore, шаг dataset-sync. На проде прежняя версия синка.\" >/dev/null || true" || true
+                fi
+              else
+                echo "[scheduled] Dataset sync: изменений в app/scripts/instantly-dataset нет — /opt/instantly-dataset-sync не трогаем"
+              fi
+
               run_ssh "write last_deploy_sha" \
                 "echo $COMMIT_SHA > /home/Portal/prod/last_deploy_sha"
               echo "[scheduled] Saved last_deploy_sha on server."
+              if [ "$DATASET_SYNC_FAILED" = 1 ]; then
+                echo "[scheduled] Завершаю с ошибкой из-за шага dataset-sync (приложение и last_deploy_sha — штатно, повторного деплоя не будет)." >&2
+                exit 1
+              fi

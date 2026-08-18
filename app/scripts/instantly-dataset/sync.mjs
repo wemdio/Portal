@@ -1,8 +1,9 @@
 /**
  * sync.mjs — daily incremental refresh of instantly_dataset.
  *
- * Designed for nightly cron at 00:00 UTC (= 03:00 МСК), when the qualification
- * worker is essentially idle and we have the rate-limit budget to ourselves.
+ * Designed for nightly cron at 00:00 МСК (= 21:00 UTC; crontab on the prod host runs
+ * in MSK), when the qualification worker is essentially idle and we have the
+ * rate-limit budget to ourselves.
  *
  * What it does each run:
  *   1. Re-pulls all "small list" entities and UPSERTs them (campaigns,

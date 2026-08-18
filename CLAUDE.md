@@ -30,6 +30,13 @@ Portal — внутренний инструмент студии: Next.js app, 
 - Миграции основной БД: `supabase/migrations/`, `supabase/instantly-migrations/`
 - Миграции аналитического датасета: `app/scripts/instantly-dataset/00*_*.sql`
 
+### Как деплоится ночной синк датасета (`app/scripts/instantly-dataset/`)
+
+Синк живёт **вне** compose приложения: `/opt/instantly-dataset-sync` на 139, крон `docker run node:22-alpine node sync.mjs` в 00:00 МСК. Два пути на прод:
+- **Код** (`sync.mjs`, лейблеры, `sync-portal-mirror.mjs`, `*.sql`) — автодеплой из main (`.semaphore/scheduled-deploy.yml`, шаг «Dataset sync»): триггер — изменения в `app/scripts/instantly-dataset/*` (кроме `wiki/`), `node --check` в образе крона, прежняя версия в `.prev/`, при ошибке приложение деплоится штатно, а в health-чат летит алерт и прогон красный. Список файлов в шаге должен совпадать с `deploy-sync.sh`.
+- **Конфиг** (`.env` синка, crontab, `npm install`) и хотфиксы до мержа — руками `app/scripts/instantly-dataset/deploy-sync.sh` (см. шапку: он пересобирает прод-`.env` из локального — сверь `INSTANTLY_DATASET_DB_URL`).
+- Доки для специалистов (`app/scripts/instantly-dataset/wiki/*.md`) → `node app/scripts/instantly-dataset/load-agent-wiki.mjs` (пишет в `agent_wiki` датасета).
+
 ## Что НЕ делать
 
 - Не коммитить `.env*` файлы — там креды.
