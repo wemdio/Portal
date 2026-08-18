@@ -302,6 +302,56 @@ describe('webhook handleConnectionAccepted — opens chat with welcome when payl
     expect(processedFlips[0]!.filters.id).toBe(9001);
   });
 
+  // Всё выше гоняется на фикстуре с ОДНИМ рядом campaign_lead, поэтому сама
+  // предпосылка фикса — лид, живущий в двух кампаниях, — там не проверяется:
+  // при одном ряде «первый ряд» и «все ряды лида» неразличимы. Прод 18.08.2026:
+  // один lead_list был запущен двумя кампаниями, 163 из 163 общих лида.
+  describe('лид сразу в двух running-кампаниях', () => {
+    beforeEach(() => {
+      seededRows.li_campaign_leads!.push({
+        id: 'cl-emma-2',
+        campaign_id: 'camp-2',
+        lead_id: 'lead-emma',
+        welcome_sent_at: null,
+      });
+      seededRows.li_campaigns!.push({
+        id: 'camp-2',
+        status: 'running',
+        created_at: '2026-06-01T00:00:00.000Z',
+        welcome_message: 'Второе приветствие из второй кампании, {{first_name}}.',
+      });
+    });
+
+    afterEach(() => {
+      seededRows.li_campaign_leads!.pop();
+      seededRows.li_campaigns!.pop();
+    });
+
+    it('приветствует ровно один раз, а не по разу от каждой кампании', async () => {
+      await POST(makeReq(newRelationPayload));
+
+      expect(startChatArgs).toHaveLength(1);
+      expect(sendMessageArgs).toHaveLength(0);
+    });
+
+    it('выбирает кампанию детерминированно — старшую по created_at', async () => {
+      await POST(makeReq(newRelationPayload));
+
+      // camp-1 создана 01.05, camp-2 — 01.06. Раньше ряд брался из .limit(1)
+      // без ORDER BY, то есть произвольный.
+      expect(startChatArgs[0]!.message).toContain('thanks for accepting');
+    });
+
+    it('штампует welcome_sent_at на ОБОИХ рядах лида', async () => {
+      await POST(makeReq(newRelationPayload));
+
+      const stamped = seededRows.li_campaign_leads!.filter((r) => r.welcome_sent_at);
+      // Если штамп уходит на один ряд, второй остаётся с NULL — и дайджест
+      // вечно репортит «connected без welcome» по доставленному приветствию.
+      expect(stamped).toHaveLength(2);
+    });
+  });
+
   it('still uses sendMessage (not startChat) when payload DOES carry chat_id', async () => {
     seededRows.li_leads![0]!.chat_id = null; // verify path doesn't need pre-existing chat_id either
     await POST(
