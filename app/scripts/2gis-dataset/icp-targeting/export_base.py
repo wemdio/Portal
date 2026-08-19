@@ -25,7 +25,8 @@ INBOX_RANK = [
         'kancelaria', 'secretar', 'secretary', 'sekretar', 'office', 'ofis'}),
     (90, 'общая', {
         'info', 'mail', 'general', 'main', 'common', 'company', 'post',
-        'contact', 'contacts', 'inbox', 'director'}),
+        'contact', 'contacts', 'inbox', 'director', 'hello', 'welcome',
+        'zayavka', 'clients', 'client'}),
     (85, 'руководство', {
         'dir', 'ceo', 'gd', 'genderal', 'gendir', 'boss', 'head', 'management'}),
     (80, 'финансы/бухгалтерия', {
@@ -147,6 +148,22 @@ def clean_site(website, domain):
     return w.split('?')[0] if w else ''
 
 
+def _is_junk_brand(cand):
+    """Отсев мусора из <title>: URL, голый домен, пустые кавычки, «https»."""
+    if not cand or len(cand) < 2:
+        return True
+    if not re.search(r'[a-zA-Zа-яА-Я0-9]', cand):
+        return True                                  # «»  — пустые кавычки
+    if re.match(r'^https?$', cand, re.I):
+        return True
+    if re.match(r'^(https?://|www\.)', cand, re.I):
+        return True
+    if re.match(r'^[a-z0-9.\-]+\.(ru|com|рф|net|org|life|space|group|bz)$',
+                cand, re.I):
+        return True                                  # title = сам домен
+    return False
+
+
 def brand_from_title(title):
     """Осторожно вытащить бренд из <title>. Пусто, если уверенности нет."""
     if not title:
@@ -154,15 +171,17 @@ def brand_from_title(title):
     m = QUOTED.search(title)
     if m:
         cand = m.group(1).strip()
-        if 2 <= len(cand) <= 40:
+        if 2 <= len(cand) <= 40 and not _is_junk_brand(cand):
             return cand
     parts = [p.strip() for p in SEP.split(title) if p.strip()]
     if parts:
         first = parts[0]
         # заголовок-предложение («Купить квартиру в ...») брендом не является
-        if len(first) <= 35 and len(first.split()) <= 4 and not re.search(
-                r'купить|продаж|квартир|новостро|официальн|главная|строительство'
-                r'|дома|цены|каталог|услуги', first, re.I):
+        if (len(first) <= 35 and len(first.split()) <= 4
+                and not _is_junk_brand(first)
+                and not re.search(
+                    r'купить|продаж|квартир|новостро|официальн|главная'
+                    r'|строительство|дома|цены|каталог|услуги', first, re.I)):
             return first
     return ''
 
@@ -224,12 +243,37 @@ def main():
         corporate = sorted(e for e in emails if own_domain(e))
         free = sorted(e for e in emails if e.split('@')[1] in L.FREE_MAIL)
         other = sorted(e for e in emails if e not in corporate and e not in free)
+
+        def related(email):
+            """Домен почты перекликается с сайтом или названием компании?
+
+            Холдинг вполне может писать с соседнего домена — это нормально.
+            А вот почта на постороннем домене, снятая с сайта, чаще всего
+            принадлежит веб-студии из подвала или партнёру, и слать туда
+            холодное письмо вредно.
+            """
+            lab = _slug(email.rsplit('@', 1)[-1].split('.')[0])
+            refs = [_slug(dom.split('.')[0] if dom else ''), _slug(c['name'])]
+            for ref in refs:
+                if not ref or not lab:
+                    continue
+                short, long_ = sorted((lab, ref), key=len)
+                if len(short) >= 4 and short in long_:
+                    return True
+            return False
+
         ranked = []
         for e, kind in ([(e, 'corporate') for e in corporate]
                         + [(e, 'other-domain') for e in other]
                         + [(e, 'free-mail') for e in free]):
             r, label = rank_inbox(e.split('@')[0])
-            bonus = {'corporate': 100, 'other-domain': 50, 'free-mail': 40}[kind]
+            if kind == 'other-domain':
+                # родственный домен ставим выше free-mail, посторонний — ниже
+                bonus = 60 if related(e) else 30
+            else:
+                bonus = {'corporate': 100, 'free-mail': 50}[kind]
+            if kind == 'other-domain' and not related(e):
+                kind = 'other-domain (посторонний)'
             ranked.append((bonus + r, e, kind, label))
         ranked.sort(key=lambda x: (-x[0], x[1]))
 
