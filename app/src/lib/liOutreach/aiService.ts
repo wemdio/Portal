@@ -184,9 +184,17 @@ export async function personalizeInviteMessage(
     { role: 'user', content: userPrompt },
   ];
 
-  const result = await makeOpenAiRequest(messages, config, 200);
-  if (!result) return baseMessage;
-  return result.length > 300 ? `${result.slice(0, 297)}...` : result;
+  // Возвращаем СЫРОЙ ответ модели, без обрезки до 300.
+  //
+  // Раньше здесь стояло `result.slice(0, 297) + '...'`, и проверка в раннере
+  // получала уже укороченный текст. У сочинённого письма подпись и заглушки
+  // `[Ваше имя]` всегда в хвосте — обрезка срезала ровно те маркеры, по которым
+  // проверка и опознаёт письмо, а правило длины становилось недостижимым:
+  // на выходе максимум 300 знаков при нижней границе правила 400. В итоге лиду
+  // уходило письмо, оборванное на полуслове, — то самое, что комментарий в
+  // раннере обещал не допустить. Обрезку делает раннер после проверки, а
+  // окончательный предел всё равно ставит sendInvite.
+  return (await makeOpenAiRequest(messages, config, 200)) ?? baseMessage;
 }
 
 export async function personalizeFollowUp(

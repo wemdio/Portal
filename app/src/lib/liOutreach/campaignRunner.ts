@@ -554,7 +554,10 @@ async function processInviteStep(
         const before = message;
         const generated = await personalizeInviteMessage(message, leadToInfo(lead), aiConfig, campaign.ai_prompt_invite);
         const aiSec = ((Date.now() - aiStart) / 1000).toFixed(1);
-        const problem = findAiOutputProblems(before, generated);
+        // Потолок ровно 300: столько принимает LinkedIn в приглашении. Без явного
+        // потолка правило длины на этом пути недостижимо — общая формула даёт
+        // минимум 400, а инвайт длиннее 300 всё равно не уйдёт.
+        const problem = findAiOutputProblems(before, generated, { maxChars: 300 });
         if (problem) {
           // Инвайт режется до 297 знаков, поэтому сочинённое письмо ушло бы
           // человеку оборванным на полуслове. Лучше ровный шаблон.

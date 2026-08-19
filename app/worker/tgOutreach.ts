@@ -2,7 +2,13 @@ import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLo
 import { runCampaignLoop, refetchEmptyDialogs } from '@/lib/tgOutreach/campaignLoop';
 import { runWarmupLoop } from '@/lib/tgOutreach/warmup/loop';
 import { writeHeartbeat } from '@/lib/tgOutreach/gramClient';
-import { planWatchdogActions, staleKillRequests, type LoopControl } from '@/lib/tgOutreach/watchdog';
+import {
+  planWatchdogActions,
+  selectOrphanedStartJobs,
+  staleKillRequests,
+  type LoopControl,
+  type StartJobRow,
+} from '@/lib/tgOutreach/watchdog';
 import { startTrace } from '@/lib/tracer';
 
 const WORKER_ID = `tg-outreach-${process.pid}`;
@@ -46,18 +52,91 @@ function forgetCampaign(campaignId: string) {
 }
 
 async function resetStuckJobs() {
-  const { data } = await db
+  const { data, error } = await db
     .from('tg_outreach_jobs')
     .select('id')
     .eq('status', 'running');
 
+  // Ошибку запроса раньше игнорировали: `const { data } = ...`, и при сбое
+  // связи data приходил null, условие ниже не выполнялось, функция молча
+  // выходила. А зовут её ровно один раз, на старте процесса — второго шанса
+  // нет. 18.08.2026 перезапуск в 21:20 совпал с морганием базы: пять start-джоб
+  // остались `running`, авто-резюм каждые пять минут видел «старт уже
+  // запланирован» и ничего не делал, и все кампании простояли 16 часов, показывая
+  // в интерфейсе running. Молчать здесь нельзя.
+  if (error) {
+    log('error', `Не смог проверить зависшие джобы при старте: ${error.message}. Их подберёт периодический сторож сирот.`);
+    return;
+  }
+
   if (data?.length) {
     log('info', `Resetting ${data.length} stuck running jobs to pending`);
-    await db
+    const { error: updErr } = await db
       .from('tg_outreach_jobs')
       .update({ status: 'pending', error_message: null, started_at: null, finished_at: null })
       .eq('status', 'running');
+    if (updErr) {
+      log('error', `Не смог сбросить зависшие джобы: ${updErr.message}. Их подберёт периодический сторож сирот.`);
+    }
   }
+}
+
+/**
+ * Сколько ждать, прежде чем считать `running` start-джобу сиротой.
+ *
+ * Между claimJob (статус → running) и регистрацией кампании в runningCampaigns
+ * проходит несколько асинхронных шагов: чтение кампании, старт трейса, апдейт
+ * trace_spans. Тик, попавший в это окно, увидел бы живую джобу без кампании в
+ * памяти. Секунды против двух минут — запас с избытком.
+ */
+const ORPHAN_START_JOB_GRACE_MS = 2 * 60_000;
+
+/**
+ * Периодический сторож сирот — вторая линия к resetStuckJobs.
+ *
+ * Start-джоба помечается completed только в `.finally()` цикла кампании, то есть
+ * `running` означает «цикл этой кампании жив в этом процессе». Если процесс
+ * убили на середине, finally не выполнится и джоба останется `running` навсегда,
+ * а resumeRunningCampaigns будет считать, что старт уже запланирован, и не
+ * поставит новый. Кампания при этом висит в базе как running — снаружи всё
+ * зелёное, а работы нет.
+ *
+ * Сирота определяется точно: джоба `running`, а её кампании нет среди живых в
+ * памяти процесса. У живой джобы кампания в runningCampaigns есть всегда, так
+ * что перепутать нельзя. Только action='start': прогрев живёт своей жизнью
+ * (resumeWarmupRuns), а stop/restart разбирает resumeRunningCampaigns.
+ */
+async function reclaimOrphanedStartJobs() {
+  const { data, error } = await db
+    .from('tg_outreach_jobs')
+    .select('id, campaign_id, started_at')
+    .eq('status', 'running')
+    .eq('action', 'start');
+
+  if (error) {
+    log('error', `Сторож сирот: не смог прочитать джобы — ${error.message}`);
+    return;
+  }
+
+  const orphans = selectOrphanedStartJobs({
+    jobs: (data ?? []) as StartJobRow[],
+    liveCampaignIds: new Set(runningCampaigns.keys()),
+    now: Date.now(),
+    graceMs: ORPHAN_START_JOB_GRACE_MS,
+  });
+
+  if (!orphans.length) return;
+
+  log(
+    'error',
+    `Сторож сирот: ${orphans.length} start-джоб висят в running, но их кампаний нет среди живых. ` +
+      `Возвращаю в очередь — иначе авто-резюм будет считать, что старт уже запланирован, и кампании простоят молча.`,
+  );
+  const { error: updErr } = await db
+    .from('tg_outreach_jobs')
+    .update({ status: 'pending', started_at: null, finished_at: null, error_message: null })
+    .in('id', orphans.map((j) => j.id));
+  if (updErr) log('error', `Сторож сирот: не смог вернуть джобы в очередь — ${updErr.message}`);
 }
 
 // Control-джобы (stop/restart/refetch_messages) не занимают слот в
@@ -582,9 +661,15 @@ async function main() {
 
   const resumeTimer = setInterval(() => {
     if (shouldStop()) return;
-    resumeRunningCampaigns().catch((err) =>
-      log('error', `Periodic resume check failed: ${err instanceof Error ? err.message : String(err)}`),
-    );
+    // Сироты разбираются ПЕРЕД авто-резюмом: иначе тот увидит зависшую джобу,
+    // решит, что старт уже запланирован, и снова ничего не сделает.
+    reclaimOrphanedStartJobs()
+      .catch((err) => log('error', `Сторож сирот упал: ${err instanceof Error ? err.message : String(err)}`))
+      .then(() =>
+        resumeRunningCampaigns().catch((err) =>
+          log('error', `Periodic resume check failed: ${err instanceof Error ? err.message : String(err)}`),
+        ),
+      );
     resumeWarmupRuns().catch((err) =>
       log('error', `Periodic warmup resume check failed: ${err instanceof Error ? err.message : String(err)}`),
     );

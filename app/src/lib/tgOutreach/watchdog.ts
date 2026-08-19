@@ -106,3 +106,42 @@ export function staleKillRequests(snapshot: WatchdogSnapshot): string[] {
 
   return out;
 }
+
+/** Строка джобы в том виде, в каком её читает сторож сирот. */
+export interface StartJobRow {
+  id: string;
+  campaign_id: string;
+  started_at: string | null;
+}
+
+export interface OrphanSnapshot {
+  jobs: StartJobRow[];
+  /** Кампании, чьи циклы прямо сейчас живы в этом процессе. */
+  liveCampaignIds: Set<string>;
+  now: number;
+  graceMs: number;
+}
+
+/**
+ * Осиротевшие start-джобы: висят в `running`, а цикла кампании в процессе нет.
+ *
+ * Джоба помечается completed только в `.finally()` цикла кампании, поэтому
+ * `running` означает «цикл жив здесь и сейчас». Если процесс убили на середине,
+ * finally не выполнится, джоба останется `running` навсегда, и авто-резюм будет
+ * молча считать, что старт уже запланирован. Снаружи это выглядит как «кампания
+ * running, но ничего не делает»: так 18.08.2026 пять кампаний простояли 16 часов.
+ *
+ * Живую джобу спутать нельзя: у неё кампания всегда в liveCampaignIds. Отсечка
+ * по времени закрывает единственное окно — между захватом джобы и регистрацией
+ * кампании в памяти проходит несколько асинхронных шагов.
+ */
+export function selectOrphanedStartJobs(snapshot: OrphanSnapshot): StartJobRow[] {
+  const cutoff = snapshot.now - snapshot.graceMs;
+  return snapshot.jobs.filter((job) => {
+    if (snapshot.liveCampaignIds.has(job.campaign_id)) return false;
+    if (!job.started_at) return true;
+    const startedAt = new Date(job.started_at).getTime();
+    if (!Number.isFinite(startedAt)) return true;
+    return startedAt < cutoff;
+  });
+}

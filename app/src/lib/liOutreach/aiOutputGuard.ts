@@ -64,36 +64,57 @@ export function maxAllowedLength(original: string): number {
   return Math.max(original.trim().length * 2, 400);
 }
 
+export interface AiOutputCheckOptions {
+  /**
+   * Жёсткий потолок длины вместо «двойной шаблон, но не меньше 400».
+   * Нужен инвайту: LinkedIn принимает не больше 300 знаков, и без явного
+   * потолка правило длины на этом пути недостижимо в принципе.
+   */
+  maxChars?: number;
+}
+
 /**
  * Первая найденная проблема или null, если текст можно отправлять.
+ *
  * Порядок важен: заглушки и подпись показательнее, чем длина, — по ним оператору
  * сразу понятно, что модель написала письмо вместо реплики.
+ *
+ * Правило судит не текст сам по себе, а РАЗНИЦУ с шаблоном оператора. Если
+ * оператор сам написал «[тут кейс]» или подписался в шаблоне, модель вернёт то
+ * же самое, и проверка без сравнения молча блокировала бы персонализацию у всей
+ * кампании, при этом уверяя в логе, что «модель написала письмо». Претензия
+ * может быть только к тому, что модель ДОБАВИЛА от себя.
  */
-export function findAiOutputProblems(original: string, generated: string): AiOutputProblem | null {
+export function findAiOutputProblems(
+  original: string,
+  generated: string,
+  opts: AiOutputCheckOptions = {},
+): AiOutputProblem | null {
   const text = generated.trim();
   if (!text) return { kind: 'too_long', reason: 'пустой ответ модели' };
+  const source = original.trim();
 
   const placeholder = PLACEHOLDER_RE.exec(text);
-  if (placeholder) {
+  if (placeholder && !PLACEHOLDER_RE.test(source)) {
     return {
       kind: 'placeholder',
       reason: `в тексте осталась незаполненная заглушка ${placeholder[0]}`,
     };
   }
 
-  if (SIGNATURE_RE.test(text)) {
+  if (SIGNATURE_RE.test(text) && !SIGNATURE_RE.test(source)) {
     return { kind: 'signature', reason: 'модель дописала блок подписи — это письмо, а не сообщение в LinkedIn' };
   }
 
-  if (SUBJECT_RE.test(text)) {
+  if (SUBJECT_RE.test(text) && !SUBJECT_RE.test(source)) {
     return { kind: 'subject', reason: 'модель добавила строку темы — это письмо, а не сообщение в LinkedIn' };
   }
 
-  const limit = maxAllowedLength(original);
+  const limit = opts.maxChars ?? maxAllowedLength(source);
   if (text.length > limit) {
     return {
       kind: 'too_long',
-      reason: `ответ модели ${text.length} знаков при допустимых ${limit} (шаблон — ${original.trim().length})`,
+      reason: `ответ модели ${text.length} знаков при допустимых ${limit} (шаблон — ${source.length})`,
     };
   }
 
