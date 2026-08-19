@@ -1,5 +1,6 @@
 'use client';
 
+import { ChevronLeft, ChevronRight, Plus, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import PaymentLimitSummary from '@/components/payments/PaymentLimitSummary';
@@ -48,24 +49,42 @@ function PaymentStatistics({ model }: { model: PaymentsReadModel }) {
   }, [model.period.key, model.requests]);
 
   return (
-    <section role="tabpanel" id="payments-stats-panel" aria-labelledby="payments-stats-tab" className="border border-gray-200 bg-white">
-      <div className="grid grid-cols-2 divide-x divide-y divide-gray-200 sm:grid-cols-4 sm:divide-y-0">
-        <div className="px-4 py-3"><p className="text-xs text-gray-500">Оплачено всего</p><p className="mt-1 font-semibold tabular-nums">{formatRubles(model.summary.paidAll)}</p></div>
-        <div className="px-4 py-3"><p className="text-xs text-gray-500">На согласовании</p><p className="mt-1 font-semibold tabular-nums">{model.summary.pendingCount}</p></div>
-        <div className="px-4 py-3"><p className="text-xs text-gray-500">Одобрено</p><p className="mt-1 font-semibold tabular-nums">{model.summary.approvedCount}</p></div>
-        <div className="px-4 py-3"><p className="text-xs text-gray-500">Записей</p><p className="mt-1 font-semibold tabular-nums">{model.requests.length}</p></div>
+    <section
+      role="tabpanel"
+      id="payments-stats-panel"
+      aria-labelledby="payments-stats-tab"
+      className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm"
+    >
+      <div className="flex flex-col gap-4 border-b border-gray-100 px-5 py-4 sm:flex-row sm:items-end sm:justify-between sm:px-6">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Структура расходов</p>
+          <h2 className="mt-1 text-lg font-semibold text-gray-950">Оплачено по отделам</h2>
+          <p className="mt-1 text-sm text-gray-500">Только фактические оплаты за выбранный месяц.</p>
+        </div>
+        <dl className="flex gap-6">
+          <div>
+            <dt className="text-xs text-gray-500">Всего оплачено</dt>
+            <dd className="mt-1 font-semibold tabular-nums text-gray-950">{formatRubles(model.summary.paidAll)}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-gray-500">Оплат</dt>
+            <dd className="mt-1 font-semibold tabular-nums text-gray-950">
+              {departmentRows.reduce((sum, [, values]) => sum + values.count, 0)}
+            </dd>
+          </div>
+        </dl>
       </div>
-      <div className="max-w-full overflow-x-auto border-t border-gray-200">
+      <div className="max-w-full overflow-x-auto">
         <table className="min-w-full text-sm" aria-label={`Оплаченные расходы по отделам за ${model.period.label}`}>
-          <thead className="bg-gray-50 text-left text-xs text-gray-600"><tr><th className="px-4 py-3 font-medium">Отдел</th><th className="px-4 py-3 text-right font-medium">Оплат</th><th className="px-4 py-3 text-right font-medium">Сумма</th></tr></thead>
-          <tbody className="divide-y divide-gray-200">
+          <thead className="bg-gray-50 text-left text-xs text-gray-500"><tr><th className="px-5 py-3 font-medium sm:px-6">Отдел</th><th className="px-4 py-3 text-right font-medium">Оплат</th><th className="px-5 py-3 text-right font-medium sm:px-6">Сумма</th></tr></thead>
+          <tbody className="divide-y divide-gray-100">
             {departmentRows.length === 0 ? (
               <tr><td colSpan={3} className="px-4 py-8 text-center text-gray-500">В этом периоде нет оплаченных расходов</td></tr>
             ) : departmentRows.map(([department, values]) => (
               <tr key={department}>
-                <td className="px-4 py-3 text-gray-900">{PAYMENT_DEPARTMENT_LABELS[department] || department}</td>
+                <td className="px-5 py-4 font-medium text-gray-900 sm:px-6">{PAYMENT_DEPARTMENT_LABELS[department] || department}</td>
                 <td className="px-4 py-3 text-right tabular-nums text-gray-700">{values.count}</td>
-                <td className="px-4 py-3 text-right font-medium tabular-nums text-gray-900">{formatRubles(values.amount)}</td>
+                <td className="px-5 py-4 text-right font-semibold tabular-nums text-gray-950 sm:px-6">{formatRubles(values.amount)}</td>
               </tr>
             ))}
           </tbody>
@@ -79,6 +98,7 @@ export default function PaymentsPageView() {
   const [month, setMonth] = useState(currentMonthKey);
   const [model, setModel] = useState<PaymentsReadModel | null>(null);
   const [activeTab, setActiveTab] = useState<PaymentsTab>('requests');
+  const [isFormOpen, setIsFormOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [submitFeedback, setSubmitFeedback] = useState('');
@@ -138,6 +158,7 @@ export default function PaymentsPageView() {
     submissionKeyRef.current = { signature, key: idempotencyKey };
     const result = await submitPaymentRequest(input, idempotencyKey);
     submissionKeyRef.current = null;
+    setIsFormOpen(false);
     setSubmitFeedback(result.outcome === 'auto_approved'
       ? 'Расход одобрен автоматически.'
       : 'Расход отправлен Ане на согласование.');
@@ -191,63 +212,121 @@ export default function PaymentsPageView() {
   }, []);
 
   const navigationLocked = submittingExpense || hasOpenActionDraft;
+  const formVisible = isFormOpen && activeTab === 'requests';
 
   return (
     <main
       role="region"
       aria-label="Оплаты"
       aria-busy={loading}
-      className="min-h-screen bg-white px-4 py-5 text-gray-900 sm:px-6 lg:px-8"
+      className="min-h-screen bg-gray-50 px-4 py-6 text-gray-900 sm:px-6 lg:px-8"
     >
-      <div className="mx-auto max-w-[1440px] space-y-5">
-        <header className="flex flex-col gap-4 border-b border-gray-200 pb-4 sm:flex-row sm:items-end sm:justify-between">
+      <div className="mx-auto max-w-[1280px] space-y-5">
+        <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-gray-900">Оплаты</h1>
-            <p className="mt-1 text-sm text-gray-500">Разовые и плановые расходы компании</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Финансы компании</p>
+            <h1 className="mt-1 text-3xl font-semibold tracking-tight text-gray-950">Оплаты</h1>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-500">
+              Фактические расходы, заявки на согласование и лимит разовых покупок.
+            </p>
           </div>
-          <div role="tablist" aria-label="Разделы оплат" className="inline-flex min-h-11 max-w-full w-fit gap-1 overflow-x-auto border border-gray-200 bg-white p-1">
-            <button
-              id="payments-requests-tab"
-              type="button"
-              role="tab"
-              aria-selected={activeTab === 'requests'}
-              aria-controls="payments-requests-panel"
-              disabled={navigationLocked && activeTab !== 'requests'}
-              onClick={() => setActiveTab('requests')}
-              className={`min-h-10 px-4 text-sm font-semibold outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 ${activeTab === 'requests' ? 'bg-gray-900 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
-            >Расходы</button>
-            <button
-              id="payments-stats-tab"
-              type="button"
-              role="tab"
-              aria-selected={activeTab === 'stats'}
-              aria-controls="payments-stats-panel"
-              disabled={navigationLocked && activeTab !== 'stats'}
-              onClick={() => setActiveTab('stats')}
-              className={`min-h-10 px-4 text-sm font-semibold outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 ${activeTab === 'stats' ? 'bg-gray-900 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
-            >Статистика</button>
-          </div>
+          <button
+            type="button"
+            aria-expanded={formVisible}
+            aria-controls="new-payment-form-panel"
+            disabled={!model || navigationLocked}
+            onClick={() => {
+              if (formVisible) {
+                setIsFormOpen(false);
+                return;
+              }
+              setActiveTab('requests');
+              setIsFormOpen(true);
+            }}
+            className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-semibold text-white outline-none transition-colors hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:bg-gray-300 sm:w-auto"
+          >
+            {formVisible ? <X aria-hidden="true" className="h-4 w-4" /> : <Plus aria-hidden="true" className="h-4 w-4" />}
+            {formVisible ? 'Закрыть форму' : 'Новый расход'}
+          </button>
         </header>
 
-        {submitFeedback && <p role="status" aria-live="polite" className="sr-only">{submitFeedback}</p>}
+        {submitFeedback && (
+          <p role="status" aria-live="polite" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800">
+            {submitFeedback}
+          </p>
+        )}
 
         {loading && !model && (
-          <div role="status" aria-label="Загрузка расходов" className="border border-gray-200 px-4 py-12 text-center text-sm text-gray-500">Загружаем расходы…</div>
+          <div role="status" aria-label="Загрузка расходов" className="rounded-2xl border border-gray-200 bg-white px-4 py-16 text-center text-sm text-gray-500 shadow-sm">
+            Загружаем расходы…
+          </div>
         )}
 
         {loadError && (
-          <div ref={loadErrorRef} role="alert" tabIndex={-1} className="border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 outline-none">
+          <div ref={loadErrorRef} role="alert" tabIndex={-1} className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 outline-none">
             <p className="font-medium">{loadError}</p>
-            <button type="button" onClick={() => void load(month)} className="mt-3 min-h-11 border border-red-300 bg-white px-4 font-semibold outline-none hover:bg-red-100 focus-visible:ring-2 focus-visible:ring-red-500">Повторить</button>
+            <button type="button" onClick={() => void load(month)} className="mt-3 min-h-11 rounded-lg border border-red-300 bg-white px-4 font-semibold outline-none hover:bg-red-100 focus-visible:ring-2 focus-visible:ring-red-500">Повторить</button>
           </div>
         )}
 
         {model && (
           <>
-            <div className="flex items-center justify-between gap-3 border border-gray-200 bg-white px-3 py-2">
-              <button type="button" aria-label="Предыдущий месяц" disabled={navigationLocked} onClick={() => setMonth(model.period.previous)} className="min-h-11 min-w-11 border border-gray-200 text-lg outline-none hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50">←</button>
-              <div className="text-center"><p className="font-semibold text-gray-900">{model.period.label}</p><p className="mt-0.5 text-xs text-gray-500">Данные на {model.period.asOf}</p></div>
-              <button type="button" aria-label="Следующий месяц" disabled={navigationLocked} onClick={() => setMonth(model.period.next)} className="min-h-11 min-w-11 border border-gray-200 text-lg outline-none hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50">→</button>
+            <div className="flex flex-col gap-3 rounded-xl border border-gray-200 bg-white p-2 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center justify-between gap-2 sm:justify-start">
+                <button
+                  type="button"
+                  aria-label="Предыдущий месяц"
+                  disabled={navigationLocked}
+                  onClick={() => setMonth(model.period.previous)}
+                  className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-gray-600 outline-none transition-colors hover:bg-gray-100 hover:text-gray-950 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <ChevronLeft aria-hidden="true" className="h-5 w-5" />
+                </button>
+                <div className="min-w-40 text-center">
+                  <p className="font-semibold text-gray-950">{model.period.label}</p>
+                  <p className="mt-0.5 text-xs text-gray-500">Данные на {model.period.asOf}</p>
+                </div>
+                <button
+                  type="button"
+                  aria-label="Следующий месяц"
+                  disabled={navigationLocked}
+                  onClick={() => setMonth(model.period.next)}
+                  className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-gray-600 outline-none transition-colors hover:bg-gray-100 hover:text-gray-950 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <ChevronRight aria-hidden="true" className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div role="tablist" aria-label="Разделы оплат" className="grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 sm:inline-grid">
+                <button
+                  id="payments-requests-tab"
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === 'requests'}
+                  aria-controls="payments-requests-panel"
+                  disabled={navigationLocked && activeTab !== 'requests'}
+                  onClick={() => setActiveTab('requests')}
+                  className={`min-h-10 rounded-md px-4 text-sm font-semibold outline-none transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 ${
+                    activeTab === 'requests' ? 'bg-white text-gray-950 shadow-sm' : 'text-gray-600 hover:text-gray-950'
+                  }`}
+                >
+                  Расходы
+                </button>
+                <button
+                  id="payments-stats-tab"
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === 'stats'}
+                  aria-controls="payments-stats-panel"
+                  disabled={navigationLocked && activeTab !== 'stats'}
+                  onClick={() => setActiveTab('stats')}
+                  className={`min-h-10 rounded-md px-4 text-sm font-semibold outline-none transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 ${
+                    activeTab === 'stats' ? 'bg-white text-gray-950 shadow-sm' : 'text-gray-600 hover:text-gray-950'
+                  }`}
+                >
+                  Статистика
+                </button>
+              </div>
             </div>
 
             <PaymentLimitSummary summary={model.summary} canManage={model.canManage} />
@@ -259,6 +338,7 @@ export default function PaymentsPageView() {
               hidden={activeTab !== 'requests'}
               className="space-y-5"
             >
+              <div id="new-payment-form-panel" hidden={!isFormOpen}>
                 <PaymentRequestForm
                   projects={model.projects}
                   summary={model.summary}
@@ -266,17 +346,18 @@ export default function PaymentsPageView() {
                   onSubmittingChange={setSubmittingExpense}
                   onSubmit={submit}
                 />
-                {actionFeedback && <p role="status" aria-live="polite" className="sr-only">{actionFeedback.message}</p>}
-                <PaymentRequestList
-                  periodLabel={model.period.label}
-                  asOf={model.period.asOf}
-                  requests={model.requests}
-                  canManage={model.canManage}
-                  focusRequestId={actionFeedback?.requestId ?? null}
-                  onActionDraftOpenChange={setHasOpenActionDraft}
-                  onRefreshRequest={refreshRequest}
-                  onAction={actOnRequest}
-                />
+              </div>
+              {actionFeedback && <p role="status" aria-live="polite" className="sr-only">{actionFeedback.message}</p>}
+              <PaymentRequestList
+                periodLabel={model.period.label}
+                asOf={model.period.asOf}
+                requests={model.requests}
+                canManage={model.canManage}
+                focusRequestId={actionFeedback?.requestId ?? null}
+                onActionDraftOpenChange={setHasOpenActionDraft}
+                onRefreshRequest={refreshRequest}
+                onAction={actOnRequest}
+              />
             </div>
             {activeTab === 'stats' && <PaymentStatistics model={model} />}
           </>

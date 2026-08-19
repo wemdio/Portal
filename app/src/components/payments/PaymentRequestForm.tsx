@@ -45,7 +45,7 @@ const EMPTY_DRAFT: PaymentDraft = {
   documentUrl: '',
 };
 
-const inputClass = 'min-h-11 w-full border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none transition focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-200';
+const inputClass = 'min-h-11 w-full rounded-lg border border-gray-200 bg-gray-50 px-3.5 py-2.5 text-sm text-gray-900 outline-none transition-colors hover:border-gray-300 focus-visible:border-blue-500 focus-visible:bg-white focus-visible:ring-2 focus-visible:ring-blue-100';
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Не удалось отправить расход';
@@ -108,18 +108,23 @@ export default function PaymentRequestForm({
     <form
       aria-label="Новый расход"
       onSubmit={(event) => void handleSubmit(event)}
-      className="border border-gray-200 bg-white"
+      className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm"
     >
-      <div className="border-b border-gray-200 px-4 py-3 sm:px-5">
-        <h2 className="font-semibold text-gray-900">Новый расход</h2>
-        <p className="mt-1 text-xs text-gray-500">Решение и резерв рассчитает сервер после отправки.</p>
+      <div className="border-b border-gray-100 px-5 py-4 sm:px-6">
+        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Новая заявка</p>
+        <h2 className="mt-1 text-lg font-semibold text-gray-950">Добавить расход</h2>
+        <p className="mt-1 text-sm text-gray-500">Укажите сумму и контекст. Маршрут согласования определится автоматически.</p>
       </div>
 
-      <div className="grid gap-4 px-4 py-4 sm:grid-cols-2 sm:px-5">
+      <div className="grid gap-x-5 gap-y-4 px-5 py-5 sm:grid-cols-2 sm:px-6 sm:py-6">
         <fieldset className="sm:col-span-2">
           <legend className="text-sm font-medium text-gray-800">Тип расхода</legend>
-          <div role="radiogroup" aria-label="Тип расхода" className="mt-2 grid gap-2 sm:grid-cols-2">
-            <label className="flex min-h-11 cursor-pointer items-start gap-3 border border-gray-300 px-3 py-2.5">
+          <div role="radiogroup" aria-label="Тип расхода" className="mt-2 grid gap-3 sm:grid-cols-2">
+            <label className={`flex min-h-14 cursor-pointer items-start gap-3 rounded-xl border px-4 py-3 transition-colors ${
+              draft.expenseType === 'one_time'
+                ? 'border-gray-900 bg-gray-50 ring-1 ring-gray-900'
+                : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'
+            }`}>
               <input
                 type="radio"
                 name="expenseType"
@@ -128,9 +133,13 @@ export default function PaymentRequestForm({
                 onChange={() => setDraft((current) => ({ ...current, expenseType: 'one_time' }))}
                 className="mt-0.5 h-4 w-4"
               />
-              <span><span className="block text-sm font-medium">Разовый</span><span className="block text-xs text-gray-500">Учитывается в месячном лимите</span></span>
+              <span><span className="block text-sm font-semibold text-gray-900">Разовый</span><span className="mt-0.5 block text-xs leading-5 text-gray-500">Учитывается в месячном лимите</span></span>
             </label>
-            <label className="flex min-h-11 cursor-pointer items-start gap-3 border border-gray-300 px-3 py-2.5">
+            <label className={`flex min-h-14 cursor-pointer items-start gap-3 rounded-xl border px-4 py-3 transition-colors ${
+              draft.expenseType === 'planned'
+                ? 'border-gray-900 bg-gray-50 ring-1 ring-gray-900'
+                : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'
+            }`}>
               <input
                 type="radio"
                 name="expenseType"
@@ -139,7 +148,7 @@ export default function PaymentRequestForm({
                 onChange={() => setDraft((current) => ({ ...current, expenseType: 'planned' }))}
                 className="mt-0.5 h-4 w-4"
               />
-              <span><span className="block text-sm font-medium">Плановый</span><span className="block text-xs text-gray-500">Всегда требует согласования</span></span>
+              <span><span className="block text-sm font-semibold text-gray-900">Плановый</span><span className="mt-0.5 block text-xs leading-5 text-gray-500">Не входит в лимит, тип подтверждает Аня</span></span>
             </label>
           </div>
         </fieldset>
@@ -249,7 +258,11 @@ export default function PaymentRequestForm({
         </label>
 
         {amount > 0 && (
-          <div className="border-l-2 border-gray-300 pl-3 text-sm text-gray-700 sm:col-span-2">
+          <div className={`rounded-xl border px-4 py-3 text-sm leading-5 sm:col-span-2 ${
+            needsApproval
+              ? 'border-amber-200 bg-amber-50 text-amber-950'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-900'
+          }`}>
             {draft.expenseType === 'planned' ? (
               <p>Плановый расход не уменьшает лимит разовых и будет отправлен Ане.</p>
             ) : targetsAnotherMonth ? (
@@ -263,15 +276,15 @@ export default function PaymentRequestForm({
         )}
 
         {error && (
-          <div ref={errorRef} role="alert" tabIndex={-1} className="border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 outline-none sm:col-span-2">
+          <div ref={errorRef} role="alert" tabIndex={-1} className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 outline-none sm:col-span-2">
             {error}
           </div>
         )}
-        <div className="flex justify-end sm:col-span-2">
+        <div className="flex justify-end border-t border-gray-100 pt-5 sm:col-span-2">
           <button
             type="submit"
             disabled={!valid || submitting}
-            className="min-h-11 w-full bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white outline-none hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:bg-gray-300 sm:w-auto"
+            className="min-h-11 w-full rounded-lg bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white outline-none transition-colors hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:bg-gray-300 sm:w-auto"
           >
             {submitting ? 'Отправляем…' : needsApproval ? 'Отправить Ане' : 'Добавить расход'}
           </button>
