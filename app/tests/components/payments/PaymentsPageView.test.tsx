@@ -366,9 +366,17 @@ function bodyOf(call: [unknown, RequestInit | undefined] | undefined): Record<st
 }
 
 function rowFor(description: string): HTMLElement {
-  const row = screen.getByText(description).closest('tr');
+  const row = screen.getByText(description).closest('[data-payment-row]');
   if (!row) throw new Error(`Payment row not found: ${description}`);
-  return row;
+  return row as HTMLElement;
+}
+
+async function openNewExpenseForm(user = userEvent.setup()): Promise<HTMLElement> {
+  const toggle = await screen.findByRole('button', { name: 'Новый расход' });
+  if (!screen.queryByRole('form', { name: 'Новый расход' })) {
+    await user.click(toggle);
+  }
+  return screen.getByRole('form', { name: 'Новый расход' });
 }
 
 beforeEach(() => {
@@ -427,7 +435,7 @@ describe('<PaymentsPageView /> — server contract and monthly limit', () => {
     expect(getCalls).toHaveLength(2);
   });
 
-  it('loads one server-owned model and renders the global monthly limit breakdown', async () => {
+  it('separates total paid spend from the one-time expense limit', async () => {
     render(<PaymentsPageView />);
 
     expect(await screen.findByRole('heading', { name: 'Оплаты' })).toBeVisible();
@@ -436,10 +444,13 @@ describe('<PaymentsPageView /> — server contract and monthly limit', () => {
     });
     expect(mockDirectSupabaseFrom).not.toHaveBeenCalled();
 
+    const overview = screen.getByRole('region', { name: 'Сводка расходов' });
+    expect(overview).toHaveTextContent(/Всего оплачено\s*20\s?000\s?₽/);
+    expect(overview).toHaveTextContent(/Плановые\s*0\s?₽/);
     const summary = screen.getByRole('region', { name: 'Лимит разовых расходов' });
     expect(summary).toHaveTextContent(/Лимит\s*75\s?000\s?₽/);
-    expect(summary).toHaveTextContent(/Оплачено\s*20\s?000\s?₽/);
-    expect(summary).toHaveTextContent(/Зарезервировано\s*40\s?000\s?₽/);
+    expect(summary).toHaveTextContent(/Оплачено разовых\s*20\s?000\s?₽/);
+    expect(summary).toHaveTextContent(/В резерве\s*40\s?000\s?₽/);
     expect(summary).toHaveTextContent(/Доступно\s*15\s?000\s?₽/);
     expect(summary).toHaveTextContent('Лимит общий для компании. Плановые расходы в него не входят.');
     expect(summary).toHaveTextContent(/Осталось 20% месячного лимита/);
@@ -490,11 +501,24 @@ describe('<PaymentsPageView /> — server contract and monthly limit', () => {
 });
 
 describe('<PaymentsPageView /> — new expense form', () => {
+  it('keeps the long form out of the reading flow until the user asks for it', async () => {
+    const user = userEvent.setup();
+    render(<PaymentsPageView />);
+
+    const toggle = await screen.findByRole('button', { name: 'Новый расход' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('form', { name: 'Новый расход' })).not.toBeInTheDocument();
+
+    await user.click(toggle);
+    expect(screen.getByRole('form', { name: 'Новый расход' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Закрыть форму' })).toHaveAttribute('aria-expanded', 'true');
+  });
+
   it('defaults to one-time, exposes all requested fields, and explains the resulting workflow', async () => {
     const user = userEvent.setup();
     render(<PaymentsPageView />);
 
-    const form = await screen.findByRole('form', { name: 'Новый расход' });
+    const form = await openNewExpenseForm(user);
     const type = within(form).getByRole('radiogroup', { name: 'Тип расхода' });
     expect(within(type).getByRole('radio', { name: /Разовый/ })).toBeChecked();
     expect(within(type).getByRole('radio', { name: /Плановый/ })).not.toBeChecked();
@@ -530,7 +554,7 @@ describe('<PaymentsPageView /> — new expense form', () => {
     }));
     render(<PaymentsPageView />);
 
-    const form = await screen.findByRole('form', { name: 'Новый расход' });
+    const form = await openNewExpenseForm();
     expect(within(form).getByRole('option', { name: 'Acme' })).toBeVisible();
     expect(within(form).getByRole('option', { name: 'Поддержка' })).toBeVisible();
     expect(within(form).getByRole('option', { name: 'Проект' })).toBeVisible();
@@ -542,7 +566,7 @@ describe('<PaymentsPageView /> — new expense form', () => {
     const user = userEvent.setup();
     render(<PaymentsPageView />);
 
-    const form = await screen.findByRole('form', { name: 'Новый расход' });
+    const form = await openNewExpenseForm(user);
     await user.type(within(form).getByLabelText('На что расход'), 'Не потерять черновик');
     await user.type(within(form).getByLabelText('Сумма, ₽'), '4321');
     await user.type(within(form).getByLabelText('Предполагаемая дата оплаты'), '2026-08-28');
@@ -562,7 +586,7 @@ describe('<PaymentsPageView /> — new expense form', () => {
     const user = userEvent.setup();
     render(<PaymentsPageView />);
 
-    const form = await screen.findByRole('form', { name: 'Новый расход' });
+    const form = await openNewExpenseForm(user);
     await user.type(within(form).getByLabelText('На что расход'), 'Долгая отправка');
     await user.type(within(form).getByLabelText('Сумма, ₽'), '5000');
     await user.type(within(form).getByLabelText('Предполагаемая дата оплаты'), '2026-08-28');
@@ -585,7 +609,7 @@ describe('<PaymentsPageView /> — new expense form', () => {
     const user = userEvent.setup();
     render(<PaymentsPageView />);
 
-    const form = await screen.findByRole('form', { name: 'Новый расход' });
+    const form = await openNewExpenseForm(user);
     await user.type(within(form).getByLabelText('На что расход'), 'Срочный сервис');
     await user.type(within(form).getByLabelText('Сумма, ₽'), '20000');
     await user.type(within(form).getByLabelText('Предполагаемая дата оплаты'), '2026-08-25');
@@ -611,7 +635,7 @@ describe('<PaymentsPageView /> — new expense form', () => {
     const user = userEvent.setup();
     render(<PaymentsPageView />);
 
-    const form = await screen.findByRole('form', { name: 'Новый расход' });
+    const form = await openNewExpenseForm(user);
     await user.type(within(form).getByLabelText('На что расход'), 'Сервис на сентябрь');
     await user.type(within(form).getByLabelText('Сумма, ₽'), '90000');
     await user.type(within(form).getByLabelText('Предполагаемая дата оплаты'), '2026-09-05');
@@ -646,7 +670,7 @@ describe('<PaymentsPageView /> — new expense form', () => {
     const user = userEvent.setup();
     render(<PaymentsPageView />);
 
-    const form = await screen.findByRole('form', { name: 'Новый расход' });
+    const form = await openNewExpenseForm(user);
     await user.selectOptions(within(form).getByLabelText('Отдел'), 'sales');
     await user.type(within(form).getByLabelText('На что расход'), '  Сервис поиска контактов  ');
     await user.type(within(form).getByLabelText('Сумма, ₽'), '9500');
@@ -683,7 +707,7 @@ describe('<PaymentsPageView /> — new expense form', () => {
     const user = userEvent.setup();
     render(<PaymentsPageView />);
 
-    const form = await screen.findByRole('form', { name: 'Новый расход' });
+    const form = await openNewExpenseForm(user);
     await user.type(within(form).getByLabelText('На что расход'), 'Черновик расхода');
     await user.type(within(form).getByLabelText('Сумма, ₽'), '7000');
     await user.type(within(form).getByLabelText('Предполагаемая дата оплаты'), '2026-08-29');
@@ -1100,7 +1124,7 @@ describe('<PaymentsPageView /> — list, accessibility, responsive and theme con
     expect(within(table).queryByText('Аутрич')).not.toBeInTheDocument();
   });
 
-  it('renders every status as text, keeps the table reachable on narrow screens, and exposes only returned document URLs', async () => {
+  it('renders a responsive searchable list, keeps every status textual, and exposes only returned document URLs', async () => {
     const rows = [
       payment({ id: 'pending', description: 'Ожидает решения', status: 'pending', approvalReason: 'planned', expenseType: 'planned', documentUrl: null }),
       payment({ id: 'approved', description: 'Зарезервирован', status: 'approved', documentUrl: null }),
@@ -1115,12 +1139,11 @@ describe('<PaymentsPageView /> — list, accessibility, responsive and theme con
       }),
     ];
     setupApi(paymentsResponse({ requests: rows }));
+    const user = userEvent.setup();
     render(<PaymentsPageView />);
 
     const list = await screen.findByRole('region', { name: 'Список расходов' });
-    expect(list).toHaveAttribute('tabindex', '0');
-    expect(list).toHaveClass('max-w-full', 'overflow-x-auto');
-    expect(within(list).getByRole('table', { name: 'Расходы за Август 2026' })).toBeVisible();
+    expect(within(list).getByRole('list', { name: 'Расходы за Август 2026' })).toBeVisible();
     ['На согласовании', 'Одобрено', 'Оплачено', 'Отклонено']
       .forEach((status) => expect(within(list).getAllByText(status).length).toBeGreaterThan(0));
 
@@ -1130,6 +1153,10 @@ describe('<PaymentsPageView /> — list, accessibility, responsive and theme con
     expect(documentLink.getAttribute('rel')).toEqual(expect.stringContaining('noopener'));
     expect(documentLink.getAttribute('rel')).toEqual(expect.stringContaining('noreferrer'));
     expect(within(rowFor('Документ скрыт сервером')).queryByRole('link')).not.toBeInTheDocument();
+
+    await user.type(within(list).getByRole('searchbox', { name: 'Поиск расходов' }), 'Документ доступен');
+    expect(within(list).getByText('Документ доступен')).toBeVisible();
+    expect(within(list).queryByText('Ожидает решения')).not.toBeInTheDocument();
   });
 
   it('uses the portal theme bridge and accessible tab semantics instead of component-local dark variants', async () => {
@@ -1137,9 +1164,9 @@ describe('<PaymentsPageView /> — list, accessibility, responsive and theme con
     render(<PaymentsPageView />);
 
     const page = await screen.findByRole('region', { name: 'Оплаты' });
-    expect(page).toHaveClass('bg-white', 'text-gray-900');
+    expect(page).toHaveClass('bg-gray-50', 'text-gray-900');
     expect(page.querySelector('[class*="dark:"]')).toBeNull();
-    const tabs = within(page).getByRole('tablist', { name: 'Разделы оплат' });
+    const tabs = await within(page).findByRole('tablist', { name: 'Разделы оплат' });
     expect(within(tabs).getByRole('tab', { name: 'Расходы' })).toHaveAttribute('aria-selected', 'true');
     expect(within(tabs).getByRole('tab', { name: 'Статистика' })).toHaveAttribute('aria-selected', 'false');
   });
