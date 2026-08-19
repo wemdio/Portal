@@ -78,20 +78,22 @@ export interface AiOutputCheckOptions {
   maxChars?: number;
 }
 
-/**
- * Схлопка пробелов: сравнение с шаблоном ведётся в том виде, в каком его
- * реально видит раннер, — parseMessageTemplate последним шагом схлопывает
- * шаблон в одну строку (aiService.ts). Якорные регулярки по такому шаблону
- * не совпадают никогда, поэтому «было ли это в шаблоне» проверяем включением
- * нормализованного токена, а не повторным прогоном регулярки по источнику.
- */
-function collapseWs(s: string): string {
-  return s.replace(/\s+/g, ' ').trim();
-}
+/** Тот же класс заглушек, но для перебора всех совпадений сразу. */
+const PLACEHOLDER_RE_ALL = new RegExp(PLACEHOLDER_RE.source, 'g');
 
-/** Регистр и внутренние пробелы при сравнении токенов несущественны. */
-function normalizeToken(s: string): string {
-  return collapseWs(s).toLowerCase();
+/**
+ * Вид, в котором тексты сравниваются между собой: без пробелов и регистра.
+ *
+ * Шаблон приходит в гард уже схлопнутым — parseMessageTemplate последним шагом
+ * делает `replace(/\s+/g,' ')` (aiService.ts), — а ответ модели переносы строк
+ * сохраняет. Поэтому якорные регулярки по шаблону не совпадают никогда, и
+ * «было ли это в шаблоне» надо проверять сравнением нормализованных токенов, а
+ * не повторным прогоном регулярки по источнику. Пробелы выкидываем целиком:
+ * переформатированное моделью `[ кейс ]` — та же заглушка оператора, что и
+ * `[кейс]`, и придираться к ней не за что.
+ */
+function normalize(s: string): string {
+  return s.replace(/\s+/g, '').toLowerCase();
 }
 
 /**
@@ -114,17 +116,17 @@ export function findAiOutputProblems(
   const text = generated.trim();
   if (!text) return { kind: 'too_long', reason: 'пустой ответ модели' };
   const source = original.trim();
-  const sourceNorm = normalizeToken(source);
+  const sourceNorm = normalize(source);
 
   // Претензия только к тому, чего в шаблоне НЕ было. Сравниваем конкретные
   // токены, а не сам факт наличия скобок в шаблоне: иначе одна своя заглушка
   // оператора («[кейс по вашей отрасли]») выключала правило целиком, и
   // добавленные моделью «[Ваше имя]» снова уходили лиду (аудит 20.08).
   const sourcePlaceholders = new Set(
-    Array.from(source.matchAll(new RegExp(PLACEHOLDER_RE.source, 'g')), (m) => normalizeToken(m[0])),
+    Array.from(source.matchAll(PLACEHOLDER_RE_ALL), (m) => normalize(m[0])),
   );
-  for (const m of text.matchAll(new RegExp(PLACEHOLDER_RE.source, 'g'))) {
-    if (!sourcePlaceholders.has(normalizeToken(m[0]))) {
+  for (const m of text.matchAll(PLACEHOLDER_RE_ALL)) {
+    if (!sourcePlaceholders.has(normalize(m[0]))) {
       return {
         kind: 'placeholder',
         reason: `в тексте осталась незаполненная заглушка ${m[0]}`,
@@ -133,12 +135,12 @@ export function findAiOutputProblems(
   }
 
   const signature = SIGNATURE_RE.exec(text);
-  if (signature && !sourceNorm.includes(normalizeToken(signature[0]))) {
+  if (signature && !sourceNorm.includes(normalize(signature[0]))) {
     return { kind: 'signature', reason: 'модель дописала блок подписи — это письмо, а не сообщение в LinkedIn' };
   }
 
   const subject = SUBJECT_RE.exec(text);
-  if (subject && !sourceNorm.includes(normalizeToken(subject[0]))) {
+  if (subject && !sourceNorm.includes(normalize(subject[0]))) {
     return { kind: 'subject', reason: 'модель добавила строку темы — это письмо, а не сообщение в LinkedIn' };
   }
 

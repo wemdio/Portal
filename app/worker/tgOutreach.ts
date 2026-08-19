@@ -51,10 +51,35 @@ function forgetCampaign(campaignId: string) {
   campaignKillRequestedAt.delete(campaignId);
 }
 
-async function resetStuckJobs() {
+/**
+ * Закрыть зависшие start-джобы вместо возврата в очередь.
+ *
+ * Единственная точка записи для обоих путей — сброса на старте процесса и
+ * периодического сторожа сирот: они отличаются только тем, КАК находят джобу.
+ *
+ * Почему `completed`, а не `pending`: claimJob и handleStartJob статус кампании
+ * не проверяют, а runCampaignLoop на входе безусловно пишет `running`. Поэтому
+ * start-джоба, возвращённая в очередь, воскрешала кампанию, остановленную
+ * оператором (аудит 20.08). Решение о перезапуске принимают
+ * resumeRunningCampaigns / resumeWarmupRuns — они вызываются следом и уже
+ * гейтеды по статусу кампании и по активному прогреву.
+ */
+async function closeStuckStartJobs(ids: string[], reason: string): Promise<void> {
+  if (!ids.length) return;
+  const { error } = await db
+    .from('tg_outreach_jobs')
+    .update({ status: 'completed', finished_at: new Date().toISOString(), error_message: reason })
+    .in('id', ids)
+    // Гонка с .finally() живого цикла: он помечает джобу completed параллельно,
+    // и без этого условия можно было бы переписать уже закрытую джобу.
+    .eq('status', 'running');
+  if (error) log('error', `Не смог закрыть зависшие start-джобы: ${error.message}`);
+}
+
+export async function resetStuckJobs() {
   const { data, error } = await db
     .from('tg_outreach_jobs')
-    .select('id')
+    .select('id, action')
     .eq('status', 'running');
 
   // Ошибку запроса раньше игнорировали: `const { data } = ...`, и при сбое
@@ -69,15 +94,31 @@ async function resetStuckJobs() {
     return;
   }
 
-  if (data?.length) {
-    log('info', `Resetting ${data.length} stuck running jobs to pending`);
+  const rows = (data ?? []) as Array<{ id: string; action: string }>;
+  if (!rows.length) return;
+
+  const isStart = (action: string) => (START_ACTIONS as readonly string[]).includes(action);
+  const startIds = rows.filter((r) => isStart(r.action)).map((r) => r.id);
+  const controlIds = rows.filter((r) => !isStart(r.action)).map((r) => r.id);
+
+  // Control-джобы (стоп/рестарт/refetch) — прямое действие человека, его
+  // терять нельзя: если оператор нажал «Стоп» перед падением процесса,
+  // кампанию надо остановить, а не забыть об этом.
+  if (controlIds.length) {
+    log('info', `Возвращаю в очередь ${controlIds.length} зависших control-джоб`);
     const { error: updErr } = await db
       .from('tg_outreach_jobs')
       .update({ status: 'pending', error_message: null, started_at: null, finished_at: null })
+      .in('id', controlIds)
       .eq('status', 'running');
     if (updErr) {
-      log('error', `Не смог сбросить зависшие джобы: ${updErr.message}. Их подберёт периодический сторож сирот.`);
+      log('error', `Не смог сбросить зависшие control-джобы: ${updErr.message}. Их подберёт периодический сторож сирот.`);
     }
+  }
+
+  if (startIds.length) {
+    log('info', `Закрываю ${startIds.length} зависших start-джоб — перезапуск решит авто-резюм по статусу кампании`);
+    await closeStuckStartJobs(startIds, 'Зависшая start-джоба от прошлого процесса: закрыта при старте воркера');
   }
 }
 
@@ -148,18 +189,10 @@ export async function reclaimOrphanedStartJobs() {
     `Сторож сирот: ${orphans.length} start-джоб висят в running, но их кампаний нет среди живых. ` +
       `Закрываю их — перезапуск решает авто-резюм по статусу кампании, иначе остановленная кампания воскресла бы сама.`,
   );
-  const { error: updErr } = await db
-    .from('tg_outreach_jobs')
-    .update({
-      status: 'completed',
-      finished_at: new Date().toISOString(),
-      error_message: 'Осиротевшая start-джоба: процесс умер, цикла кампании нет в живых',
-    })
-    .in('id', orphans.map((j) => j.id))
-    // Гонка с .finally() живого цикла: он помечает джобу completed параллельно
-    // с тиком сторожа, и без этого условия закрытую джобу можно воскресить.
-    .eq('status', 'running');
-  if (updErr) log('error', `Сторож сирот: не смог закрыть джобы — ${updErr.message}`);
+  await closeStuckStartJobs(
+    orphans.map((j) => j.id),
+    'Осиротевшая start-джоба: процесс умер, цикла кампании нет в живых',
+  );
 }
 
 export async function claimJob(

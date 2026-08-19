@@ -27,6 +27,7 @@ jest.mock('@/lib/tgOutreach/campaignLoop', () => ({
 
 import {
   reclaimOrphanedStartJobs,
+  resetStuckJobs,
   resumeRunningCampaigns,
   resumeWarmupRuns,
   claimJob,
@@ -195,6 +196,49 @@ describe('сторож + авто-резюм: статус кампании ре
     });
 
     await reclaimOrphanedStartJobs();
+    await resumeRunningCampaigns();
+
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].data).toMatchObject({ campaign_id: 'camp-1', action: 'start', status: 'pending' });
+  });
+
+  it('на старте процесса остановленная кампания тоже не воскресает', async () => {
+    // resetStuckJobs — второй путь к той же беде: он поднимал ВСЕ зависшие
+    // джобы в pending, включая start остановленной кампании. Периодический
+    // сторож без этого чинил только половину сценария: достаточно перезапуска
+    // воркера, и кампания оживала против воли оператора.
+    makeDb({
+      campaigns: [{ id: 'camp-1', status: 'stopped' }],
+      jobs: [orphanStart()],
+    });
+
+    await resetStuckJobs();
+    await resumeRunningCampaigns();
+
+    expect(await claimJob(START_ACTIONS)).toBeNull();
+  });
+
+  it('на старте зависшая control-джоба возвращается в очередь: воля оператора не теряется', async () => {
+    // Стоп/рестарт — прямое действие человека. Его нельзя закрывать молча:
+    // иначе оператор нажал «Стоп» перед падением процесса, а кампания поехала.
+    const { updates } = makeDb({
+      campaigns: [{ id: 'camp-1', status: 'running' }],
+      jobs: [orphanStart({ id: 'job-stop', action: 'stop' })],
+    });
+
+    await resetStuckJobs();
+
+    const upd = updates.find((u) => u.table === 'tg_outreach_jobs');
+    expect(upd!.data.status).toBe('pending');
+  });
+
+  it('на старте зависшая start-джоба running-кампании закрывается, и авто-резюм ставит свежую', async () => {
+    const { inserts } = makeDb({
+      campaigns: [{ id: 'camp-1', status: 'running', user_id: 'user-1' }],
+      jobs: [orphanStart()],
+    });
+
+    await resetStuckJobs();
     await resumeRunningCampaigns();
 
     expect(inserts).toHaveLength(1);
