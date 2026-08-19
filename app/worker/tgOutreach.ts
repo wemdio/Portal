@@ -91,6 +91,15 @@ async function resetStuckJobs() {
  */
 const ORPHAN_START_JOB_GRACE_MS = 2 * 60_000;
 
+// Control-джобы (stop/restart/refetch_messages) не занимают слот в
+// runningCampaigns и должны подхватываться независимо от concurrency-limit —
+// иначе оператор жмёт «Стоп», но при 5/5 занятых слотах джоб живёт в pending
+// до истечения (см. resumeRunningCampaigns:249 — auto-completes stale через
+// 5 мин). Инцидент 29.07.2026: 5 running кампаний → 4 стоп-клика подряд ушли
+// в stale, кампании продолжали работать.
+export const CONTROL_ACTIONS = ['stop', 'restart', 'refetch_messages', 'warmup_stop'] as const;
+export const START_ACTIONS = ['start', 'warmup_start'] as const;
+
 /**
  * Периодический сторож сирот — вторая линия к resetStuckJobs.
  *
@@ -103,15 +112,22 @@ const ORPHAN_START_JOB_GRACE_MS = 2 * 60_000;
  *
  * Сирота определяется точно: джоба `running`, а её кампании нет среди живых в
  * памяти процесса. У живой джобы кампания в runningCampaigns есть всегда, так
- * что перепутать нельзя. Только action='start': прогрев живёт своей жизнью
- * (resumeWarmupRuns), а stop/restart разбирает resumeRunningCampaigns.
+ * что перепутать нельзя. Оба стартовых action: у warmup_start та же ловушка —
+ * resumeWarmupRuns при виде активной джобы делает `continue` и прогрев бы
+ * простоял молча (аудит 20.08).
+ *
+ * Сирота ЗАКРЫВАЕТСЯ, а не возвращается в pending: claimJob/handleStartJob
+ * статус кампании не проверяют, и возвращённая в очередь джоба воскрешала бы
+ * остановленную оператором кампанию (аудит 20.08). Перезапуск решают
+ * resumeRunningCampaigns/resumeWarmupRuns — они вызываются следующими в том же
+ * тике и уже гейтеды по статусу кампании/прогрева.
  */
-async function reclaimOrphanedStartJobs() {
+export async function reclaimOrphanedStartJobs() {
   const { data, error } = await db
     .from('tg_outreach_jobs')
     .select('id, campaign_id, started_at')
     .eq('status', 'running')
-    .eq('action', 'start');
+    .in('action', START_ACTIONS);
 
   if (error) {
     log('error', `Сторож сирот: не смог прочитать джобы — ${error.message}`);
@@ -130,23 +146,21 @@ async function reclaimOrphanedStartJobs() {
   log(
     'error',
     `Сторож сирот: ${orphans.length} start-джоб висят в running, но их кампаний нет среди живых. ` +
-      `Возвращаю в очередь — иначе авто-резюм будет считать, что старт уже запланирован, и кампании простоят молча.`,
+      `Закрываю их — перезапуск решает авто-резюм по статусу кампании, иначе остановленная кампания воскресла бы сама.`,
   );
   const { error: updErr } = await db
     .from('tg_outreach_jobs')
-    .update({ status: 'pending', started_at: null, finished_at: null, error_message: null })
-    .in('id', orphans.map((j) => j.id));
-  if (updErr) log('error', `Сторож сирот: не смог вернуть джобы в очередь — ${updErr.message}`);
+    .update({
+      status: 'completed',
+      finished_at: new Date().toISOString(),
+      error_message: 'Осиротевшая start-джоба: процесс умер, цикла кампании нет в живых',
+    })
+    .in('id', orphans.map((j) => j.id))
+    // Гонка с .finally() живого цикла: он помечает джобу completed параллельно
+    // с тиком сторожа, и без этого условия закрытую джобу можно воскресить.
+    .eq('status', 'running');
+  if (updErr) log('error', `Сторож сирот: не смог закрыть джобы — ${updErr.message}`);
 }
-
-// Control-джобы (stop/restart/refetch_messages) не занимают слот в
-// runningCampaigns и должны подхватываться независимо от concurrency-limit —
-// иначе оператор жмёт «Стоп», но при 5/5 занятых слотах джоб живёт в pending
-// до истечения (см. resumeRunningCampaigns:249 — auto-completes stale через
-// 5 мин). Инцидент 29.07.2026: 5 running кампаний → 4 стоп-клика подряд ушли
-// в stale, кампании продолжали работать.
-export const CONTROL_ACTIONS = ['stop', 'restart', 'refetch_messages', 'warmup_stop'] as const;
-export const START_ACTIONS = ['start', 'warmup_start'] as const;
 
 export async function claimJob(
   actionFilter?: readonly string[],

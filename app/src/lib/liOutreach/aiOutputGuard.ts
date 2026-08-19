@@ -69,8 +69,29 @@ export interface AiOutputCheckOptions {
    * Жёсткий потолок длины вместо «двойной шаблон, но не меньше 400».
    * Нужен инвайту: LinkedIn принимает не больше 300 знаков, и без явного
    * потолка правило длины на этом пути недостижимо в принципе.
+   *
+   * Потолок никогда не опускается ниже длины самого шаблона: длина инвайта
+   * при сохранении кампании ничем не ограничена, а при падении API
+   * personalizeInviteMessage возвращает шаблон как есть — иначе гард обвинял
+   * бы модель в «слишком длинном ответе», которого не было (аудит 20.08).
    */
   maxChars?: number;
+}
+
+/**
+ * Схлопка пробелов: сравнение с шаблоном ведётся в том виде, в каком его
+ * реально видит раннер, — parseMessageTemplate последним шагом схлопывает
+ * шаблон в одну строку (aiService.ts). Якорные регулярки по такому шаблону
+ * не совпадают никогда, поэтому «было ли это в шаблоне» проверяем включением
+ * нормализованного токена, а не повторным прогоном регулярки по источнику.
+ */
+function collapseWs(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/** Регистр и внутренние пробелы при сравнении токенов несущественны. */
+function normalizeToken(s: string): string {
+  return collapseWs(s).toLowerCase();
 }
 
 /**
@@ -93,24 +114,35 @@ export function findAiOutputProblems(
   const text = generated.trim();
   if (!text) return { kind: 'too_long', reason: 'пустой ответ модели' };
   const source = original.trim();
+  const sourceNorm = normalizeToken(source);
 
-  const placeholder = PLACEHOLDER_RE.exec(text);
-  if (placeholder && !PLACEHOLDER_RE.test(source)) {
-    return {
-      kind: 'placeholder',
-      reason: `в тексте осталась незаполненная заглушка ${placeholder[0]}`,
-    };
+  // Претензия только к тому, чего в шаблоне НЕ было. Сравниваем конкретные
+  // токены, а не сам факт наличия скобок в шаблоне: иначе одна своя заглушка
+  // оператора («[кейс по вашей отрасли]») выключала правило целиком, и
+  // добавленные моделью «[Ваше имя]» снова уходили лиду (аудит 20.08).
+  const sourcePlaceholders = new Set(
+    Array.from(source.matchAll(new RegExp(PLACEHOLDER_RE.source, 'g')), (m) => normalizeToken(m[0])),
+  );
+  for (const m of text.matchAll(new RegExp(PLACEHOLDER_RE.source, 'g'))) {
+    if (!sourcePlaceholders.has(normalizeToken(m[0]))) {
+      return {
+        kind: 'placeholder',
+        reason: `в тексте осталась незаполненная заглушка ${m[0]}`,
+      };
+    }
   }
 
-  if (SIGNATURE_RE.test(text) && !SIGNATURE_RE.test(source)) {
+  const signature = SIGNATURE_RE.exec(text);
+  if (signature && !sourceNorm.includes(normalizeToken(signature[0]))) {
     return { kind: 'signature', reason: 'модель дописала блок подписи — это письмо, а не сообщение в LinkedIn' };
   }
 
-  if (SUBJECT_RE.test(text) && !SUBJECT_RE.test(source)) {
+  const subject = SUBJECT_RE.exec(text);
+  if (subject && !sourceNorm.includes(normalizeToken(subject[0]))) {
     return { kind: 'subject', reason: 'модель добавила строку темы — это письмо, а не сообщение в LinkedIn' };
   }
 
-  const limit = opts.maxChars ?? maxAllowedLength(source);
+  const limit = opts.maxChars !== undefined ? Math.max(opts.maxChars, source.length) : maxAllowedLength(source);
   if (text.length > limit) {
     return {
       kind: 'too_long',

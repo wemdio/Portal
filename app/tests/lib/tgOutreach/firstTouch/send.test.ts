@@ -343,6 +343,25 @@ describe('sendFirstTouchBatch — недоступные контакты и о�
     expect(db.updates.filter((u) => u.table === 'tg_outreach_base_contacts')).toHaveLength(0);
   });
 
+  it('обрыв связи пишет в лог про обрыв связи, а не «Telegram ограничил аккаунт»', async () => {
+    // Аудит 20.08: транспортная ветка переиспользовала kind='account_limited',
+    // а строка лога для него зашита как «Telegram ограничил аккаунт» — оператору
+    // уходил диагноз, которому сам код противоречил: умер сокет, а не аккаунт.
+    const db = fakeDb([contact()]);
+    const client = fakeClient({
+      sendMessage: jest.fn(async () => {
+        throw new Error('SOCKET HANG UP');
+      }),
+    });
+    const log = jest.fn();
+
+    await sendFirstTouchBatch({ ...baseArgs, db, client, log } as never);
+
+    const line = (log.mock.calls as unknown[][]).map((c) => String(c[1])).join('\n');
+    expect(line).toContain('обрыв');
+    expect(line).not.toContain('Telegram ограничил аккаунт');
+  });
+
   it('обычный сбой по-прежнему тратит попытку и считает её от значения из базы', async () => {
     const db = fakeDb([contact({ attempts: 2 })]);
     const client = fakeClient({

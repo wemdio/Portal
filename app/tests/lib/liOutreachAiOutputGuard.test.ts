@@ -8,6 +8,16 @@
  */
 
 import { findAiOutputProblems, maxAllowedLength } from '@/lib/liOutreach/aiOutputGuard';
+import { parseMessageTemplate } from '@/lib/liOutreach/aiService';
+
+/** Лид из инцидента 19.08 — через него шаблоны прогоняются ровно так, как это делает раннер. */
+const LEAD = {
+  name: 'Ярослав Кметь',
+  first_name: 'Ярослав',
+  last_name: 'Кметь',
+  company: 'Oracle',
+  position: 'CTO',
+};
 
 const TEMPLATE =
   '{{name}}, живой пример: у клиента было 25+ подрядчиков в 7 странах — договоры, инвойсы и выплаты ' +
@@ -93,7 +103,12 @@ describe('findAiOutputProblems — претензия только к тому, 
   });
 
   it('не ругается на подпись, если она была в шаблоне', () => {
-    const tpl = 'Показать пример?\n\nС уважением, Эльвира';
+    // Шаблон приходит в гард ПОСЛЕ parseMessageTemplate, который схлопывает
+    // его в одну строку (aiService.ts) — многострочного шаблона на реальном
+    // пути не бывает. Подаём именно то, что видит раннер: до фикса подпись
+    // оператора в таком виде никогда не совпадала с якорной регуляркой, и
+    // персонализация молча отключалась у всей кампании.
+    const tpl = parseMessageTemplate('{{firstName}}, показать пример?\n\nС уважением, Эльвира', LEAD);
     const gen = 'Ярослав, показать пример до и после?\n\nС уважением, Эльвира';
     expect(findAiOutputProblems(tpl, gen)).toBeNull();
   });
@@ -120,5 +135,54 @@ describe('findAiOutputProblems — потолок длины для инвайт
     const tpl = 'Здравствуйте, {{name}}!';
     expect(findAiOutputProblems(tpl, 'Здравствуйте, Ярослав! '.padEnd(280, 'x'), { maxChars: 300 }))
       .toBeNull();
+  });
+});
+
+describe('findAiOutputProblems — сравнение конкретных токенов, а не классов', () => {
+  // Аудит 20.08: условие вида `placeholder && !PLACEHOLDER_RE.test(source)`
+  // спрашивало «есть ли в шаблоне ХОТЬ ОДНА скобка», а не «эта ли скобка была
+  // в шаблоне». Одна своя заглушка оператора выключала правило целиком, и
+  // добавленные моделью [Ваше имя] снова уходили лиду — ровно инцидент 19.08.
+  it('своя скобка в шаблоне не выключает правило для чужих заглушек модели', () => {
+    const tpl = 'Иван, [кейс по вашей отрасли] — показать?';
+    const gen =
+      'Ярослав, [кейс по вашей отрасли] — показать, как это выглядело?\n\n[Ваше имя]\n[Ваша должность]';
+    const problem = findAiOutputProblems(tpl, gen);
+    expect(problem?.kind).toBe('placeholder');
+    expect(problem?.reason).toContain('[Ваше имя]');
+  });
+
+  it('из двух скобок в ответе ругается только на ту, которой не было в шаблоне', () => {
+    const tpl = 'Иван, [кейс по вашей отрасли] — показать?';
+    const gen = 'Ярослав, [кейс по вашей отрасли] показать? Пришлю [контакт коллеги].';
+    const problem = findAiOutputProblems(tpl, gen);
+    expect(problem?.kind).toBe('placeholder');
+    expect(problem?.reason).toContain('[контакт коллеги]');
+  });
+
+  it('своя «С уважением» в шаблоне не спасает чужую «Best regards» от модели', () => {
+    const tpl = parseMessageTemplate('{{firstName}}, показать пример?\n\nС уважением, Эльвира', LEAD);
+    const gen = 'Ярослав, показать пример?\n\nBest regards,\nElvira';
+    expect(findAiOutputProblems(tpl, gen)?.kind).toBe('signature');
+  });
+});
+
+describe('findAiOutputProblems — потолок инвайта и длинный шаблон', () => {
+  // Аудит 20.08: `limit = opts.maxChars ?? maxAllowedLength(source)` выбрасывал
+  // нижнюю границу от размера шаблона. Шаблон длиннее 300 знаков штатно
+  // существует (длина инвайта при сохранении ничем не ограничена), и для него
+  // правило срабатывало на ЛЮБОЙ ответ — включая сам шаблон, который
+  // personalizeInviteMessage возвращает при падении API. Гард обвинял модель
+  // в ответе, которого не было.
+  it('ответ, равный шаблону длиннее потолка, — не too_long: модель ничего не добавила', () => {
+    const tpl = `Здравствуйте, {{name}}! ${'Обратил внимание на вашу компанию. '.repeat(10)}`.trim();
+    expect(tpl.length).toBeGreaterThan(300);
+    expect(findAiOutputProblems(tpl, tpl, { maxChars: 300 })).toBeNull();
+  });
+
+  it('но ответ ДЛИННЕЕ такого шаблона — по-прежнему too_long', () => {
+    const tpl = 'а'.repeat(320);
+    const gen = 'а'.repeat(321);
+    expect(findAiOutputProblems(tpl, gen, { maxChars: 300 })?.kind).toBe('too_long');
   });
 });
