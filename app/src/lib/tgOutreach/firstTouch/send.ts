@@ -133,6 +133,25 @@ function classifySendFailure(errMsg: string): SendFailure {
     if (m.includes(code)) return { kind: 'account_limited', reason: code };
   }
 
+  // Транспорт: оборвался прокси или сокет. Контакт тут вообще ни при чём, и
+  // такая ошибка приходит сразу на всю порцию, а не на одного человека.
+  //
+  // Пока счётчик попыток не работал, это было безобидно. Теперь — нет: одна
+  // просадка прокси списывала бы попытку каждому контакту порции, а три
+  // просадки за трое суток увели бы в failed живую базу целиком. У нас 43%
+  // кругов и так проходят с мёртвым сокетом, так что это не гипотеза.
+  // Список намеренно узкий — только однозначные сокетные ошибки и явное
+  // «соединения нет». Голый TIMEOUT сюда НЕ входит: тест silentDecisions
+  // фиксирует продуктовое решение, что таймаут резолва попытку тратит, и
+  // переписывать его в рамках этой правки неправильно. К тому же в gramJS
+  // TIMEOUT идёт постоянным фоном и сам по себе поломки не означает.
+  for (const code of [
+    'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH',
+    'ENOTFOUND', 'EPIPE', 'SOCKET HANG UP', 'NOT CONNECTED', 'WHILE DISCONNECTED',
+  ]) {
+    if (m.includes(code)) return { kind: 'account_limited', reason: 'обрыв связи или прокси' };
+  }
+
   return { kind: 'retryable' };
 }
 

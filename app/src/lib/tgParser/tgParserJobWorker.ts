@@ -323,7 +323,10 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       const { data: runningCampaigns } = await db
         .from('tg_outreach_campaigns')
         .select('id, name')
-        .eq('status', 'running');
+        // Не только running: warming (прогрев) держит сессии сутками, а paused —
+        // транзитный статус, авто-резюм возвращает его в running за пять минут.
+        // Проверено по CHECK-ограничению таблицы: statuses = stopped/running/paused/error/warming.
+        .in('status', ['running', 'warming', 'paused']);
       const campaignById = new Map(
         ((runningCampaigns ?? []) as Array<{ id: string; name: string }>).map((c) => [c.id, c.name]),
       );

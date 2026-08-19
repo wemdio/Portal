@@ -19,7 +19,12 @@
 
 /** Только цифры: номера в двух таблицах записаны в разных форматах (+7…, 7…, 8…). */
 export function normalizePhone(raw: string | null | undefined): string {
-  return (raw ?? '').replace(/\D/g, '');
+  const digits = (raw ?? '').replace(/\D/g, '');
+  // 8XXXXXXXXXX и 7XXXXXXXXXX — один и тот же российский номер, записанный
+  // по-разному. Без приведения парсер и аутрич считали бы их разными аккаунтами
+  // и гард молча пропускал бы конфликт.
+  if (digits.length === 11 && digits.startsWith('8')) return `7${digits.slice(1)}`;
+  return digits;
 }
 
 export interface OutreachAccountRef {

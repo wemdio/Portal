@@ -326,11 +326,30 @@ describe('sendFirstTouchBatch — недоступные контакты и о�
     expect(patch?.attempts).toBeUndefined();
   });
 
+  it('обрыв связи не тратит попытку контакта и прекращает порцию', async () => {
+    // Аудит 19.08: с починенным счётчиком просадка прокси списывала бы попытку
+    // каждому контакту порции, а три просадки увели бы живую базу в failed
+    // целиком. 43% кругов и так идут с мёртвым сокетом — это не гипотеза.
+    const db = fakeDb([contact({ attempts: 2 }), contact({ id: 'c-2', username: 'second' })]);
+    const sendMessage = jest.fn(async () => {
+      throw new Error('ECONNRESET');
+    });
+    const client = fakeClient({ sendMessage });
+
+    const res = await sendFirstTouchBatch({ ...baseArgs, db, client } as never);
+
+    expect(res.postponed).toBe(1);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(db.updates.filter((u) => u.table === 'tg_outreach_base_contacts')).toHaveLength(0);
+  });
+
   it('обычный сбой по-прежнему тратит попытку и считает её от значения из базы', async () => {
     const db = fakeDb([contact({ attempts: 2 })]);
     const client = fakeClient({
       sendMessage: jest.fn(async () => {
-        throw new Error('ECONNRESET');
+        // Не транспорт и не ограничение аккаунта — именно такой сбой должен
+        // расходовать попытку.
+        throw new Error('400: MESSAGE_TOO_LONG (caused by messages.SendMessage)');
       }),
     });
 
