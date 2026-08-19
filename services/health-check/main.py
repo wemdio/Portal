@@ -2559,6 +2559,17 @@ async def run_li_outreach_report() -> None:
             )
             SELECT
               COALESCE(SUM(n) FILTER (WHERE content ~ '\{{\{{.*\}}\}}'), 0) AS raw_ph,
+              -- Заглушки вида [Ваше имя] — след того, что модель сочинила письмо
+              -- вместо реплики и не смогла заполнить подпись. 19.08.2026 такое
+              -- ушло человеку из Oracle, а мониторинг молчал: инвариант выше
+              -- ищет фигурные скобки, а тут квадратные.
+              -- Окно то же, что у дублей, и по той же причине: исторический хвост
+              -- (16 сообщений с мая на момент добавления) держал бы отчёт красным
+              -- вечно и топил бы в себе новый случай.
+              COALESCE(SUM(n) FILTER (
+                WHERE content ~ '\[[^\]]{{2,60}}\]'
+                  AND last_ts > NOW() - INTERVAL '{LI_DUP_WINDOW_DAYS} days'
+              ), 0) AS bracket_ph,
               COUNT(*) FILTER (
                 WHERE n > 1 AND length(content) > 20
                   AND last_ts > NOW() - INTERVAL '{LI_DUP_WINDOW_DAYS} days'
@@ -2566,6 +2577,7 @@ async def run_li_outreach_report() -> None:
             FROM grouped
         """)
         raw_ph = (counts["raw_ph"] or 0) if counts else 0
+        bracket_ph = (counts["bracket_ph"] or 0) if counts else 0
         dups = (counts["dups"] or 0) if counts else 0
         replied_not_stopped = await conn.fetchval("""
             SELECT COUNT(*) FROM li_campaign_leads cl
@@ -2647,8 +2659,8 @@ async def run_li_outreach_report() -> None:
         return "✅" if v == 0 else "⚠️"
 
     hard_fail = any(v > 0 for v in (
-        raw_ph, dups, leads_multi_campaign, replied_not_stopped, conn_no_welcome,
-        bare_total, byok, gpt_err,
+        raw_ph, bracket_ph, dups, leads_multi_campaign, replied_not_stopped,
+        conn_no_welcome, bare_total, byok, gpt_err,
     ))
     header = (
         "🔴 LinkedIn outreach — есть отклонения"
@@ -2661,6 +2673,7 @@ async def run_li_outreach_report() -> None:
         f"<i>{_now_msk()}</i>",
         "",
         f"{mark(raw_ph)} Сырые плейсхолдеры в отправленных: {raw_ph}",
+        f"{mark(bracket_ph)} Заглушки [в скобках] от GPT (за {LI_DUP_WINDOW_DAYS} дн.): {bracket_ph}",
         f"{mark(dups)} Дубли сообщений лиду (за {LI_DUP_WINDOW_DAYS} дн.): {dups}",
         f"{mark(leads_multi_campaign)} Лиды сразу в двух running-кампаниях: {leads_multi_campaign}",
         f"{mark(replied_not_stopped)} Ответили, но не остановлены: {replied_not_stopped}",

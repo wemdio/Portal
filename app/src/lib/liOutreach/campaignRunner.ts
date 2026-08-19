@@ -8,6 +8,7 @@ import {
   personalizeInviteMessage,
   personalizeFollowUp,
 } from './aiService';
+import { findAiOutputProblems } from './aiOutputGuard';
 import { extractPublicIdentifier } from './leadHelpers';
 import { findUnknownPlaceholders, supportedVarsHint } from './messageVars';
 import { isInWorkingHours } from './schedule';
@@ -551,11 +552,23 @@ async function processInviteStep(
       const aiStart = Date.now();
       try {
         const before = message;
-        message = await personalizeInviteMessage(message, leadToInfo(lead), aiConfig, campaign.ai_prompt_invite);
+        const generated = await personalizeInviteMessage(message, leadToInfo(lead), aiConfig, campaign.ai_prompt_invite);
         const aiSec = ((Date.now() - aiStart) / 1000).toFixed(1);
-        if (message === before) {
+        const problem = findAiOutputProblems(before, generated);
+        if (problem) {
+          // Инвайт режется до 297 знаков, поэтому сочинённое письмо ушло бы
+          // человеку оборванным на полуслове. Лучше ровный шаблон.
+          log(
+            'warning',
+            `GPT вернул не инвайт, а письмо (${problem.reason}) за ${aiSec}с — отправляю исходный шаблон.`,
+            lead.name,
+            stepIdx,
+          );
+        } else if (generated === before) {
+          message = generated;
           log('warning', `GPT вернул шаблон без изменений за ${aiSec}с — отправляю как есть (возможно, упёрлись в лимит OpenRouter)`, lead.name, stepIdx);
         } else {
+          message = generated;
           log('info', `GPT персонализировал инвайт за ${aiSec}с (${message.length} символов)`, lead.name, stepIdx);
         }
       } catch (err) {
@@ -816,11 +829,24 @@ async function processMessageStep(
     const aiStart = Date.now();
     try {
       const before = message;
-      message = await personalizeFollowUp(message, leadToInfo(lead), historyEntries, aiConfig, campaign.ai_prompt_chat);
+      const generated = await personalizeFollowUp(message, leadToInfo(lead), historyEntries, aiConfig, campaign.ai_prompt_chat);
       const aiSec = ((Date.now() - aiStart) / 1000).toFixed(1);
-      if (message === before) {
+      const problem = findAiOutputProblems(before, generated);
+      if (problem) {
+        // Отправляем шаблон оператора. Молча брать ответ модели нельзя: 19.08.2026
+        // так ушло письмо с подписью `[Ваше имя]` человеку из Oracle — см. aiOutputGuard.ts.
+        log(
+          'warning',
+          `GPT вернул не сообщение, а письмо (${problem.reason}) за ${aiSec}с — отправляю исходный шаблон. ` +
+            `Проверьте промпт кампании: для персонализации нужен промпт про правку текста, а не про ответы в диалоге.`,
+          lead.name,
+          stepIdx,
+        );
+      } else if (generated === before) {
+        message = generated;
         log('warning', `GPT вернул шаблон follow-up без изменений за ${aiSec}с — отправляю как есть`, lead.name, stepIdx);
       } else {
+        message = generated;
         log('info', `GPT персонализировал follow-up за ${aiSec}с (${message.length} символов)`, lead.name, stepIdx);
       }
     } catch (err) {
