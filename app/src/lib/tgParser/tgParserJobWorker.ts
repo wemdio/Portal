@@ -4,6 +4,7 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { startTrace } from '@/lib/tracer';
 import { parseTgUsers } from '@/lib/tgParser/parser';
+import { findOutreachConflict, outreachConflictMessage } from '@/lib/tgParser/accountConflict';
 import { clampTgParserMaxContactsPerRun } from '@/lib/tgParser/constants';
 import { normalizeTgLinks } from '@/lib/tgParser/normalizeLinks';
 import type { ParsedUser, ParseProgress, TgParserAccount } from '@/lib/tgParser/types';
@@ -310,10 +311,48 @@ export async function runTgParserJob(jobId: string): Promise<void> {
   } else if (accountId) {
     const { data: row } = await db
       .from('tg_parser_accounts')
-      .select('api_id, api_hash, session_data, proxy_url, max_contacts_per_run')
+      .select('api_id, api_hash, session_data, proxy_url, max_contacts_per_run, phone')
       .eq('id', accountId)
       .eq('is_active', true)
       .single();
+
+    // Тот же номер в работающей аутрич-кампании = гарантированный
+    // AUTH_KEY_DUPLICATED через доли секунды после подключения, а при повторах —
+    // сожжённая сессия. Проверяем ДО подключения (см. accountConflict.ts).
+    if (row?.phone) {
+      const { data: runningCampaigns } = await db
+        .from('tg_outreach_campaigns')
+        .select('id, name')
+        .eq('status', 'running');
+      const campaignById = new Map(
+        ((runningCampaigns ?? []) as Array<{ id: string; name: string }>).map((c) => [c.id, c.name]),
+      );
+      if (campaignById.size > 0) {
+        const { data: busyAccounts } = await db
+          .from('tg_outreach_accounts')
+          .select('phone, campaign_id')
+          .in('campaign_id', [...campaignById.keys()]);
+        const conflict = findOutreachConflict(
+          row.phone,
+          ((busyAccounts ?? []) as Array<{ phone: string | null; campaign_id: string }>).map((a) => ({
+            phone: a.phone,
+            campaignName: campaignById.get(a.campaign_id) ?? 'без названия',
+          })),
+        );
+        if (conflict) {
+          const msg = outreachConflictMessage(row.phone, conflict);
+          await db
+            .from('tg_parser_jobs')
+            .update({ status: 'error', error_message: msg, completed_at: new Date().toISOString() })
+            .eq('id', jobId)
+            .eq('status', 'running');
+          await writeJobLog({ jobId, jobUserId, isTarget, accountLabel, level: 'error', message: msg });
+          await trace?.fail(new Error(msg), { stage: 'account_conflict' });
+          return;
+        }
+      }
+    }
+
     if (!row?.session_data) {
       const msg = 'Аккаунт не найден или неактивен';
       await db
