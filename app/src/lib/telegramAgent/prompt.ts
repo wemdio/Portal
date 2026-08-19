@@ -100,7 +100,9 @@ database_review_requests(id uuid, owner_user_id, tab_name, project_id, specialis
 agent_pipelines(id uuid, user_id, chat_id bigint, name, status, current_step_index int, steps jsonb, context jsonb, error_message, created_at, completed_at)
 
 -- Платежи / подписки
-payment_requests(id uuid, user_id, department, description, amount numeric, project_id, status, created_at)
+payment_requests(id uuid, user_id, department, description, amount numeric, project_id, status, expense_type, expected_payment_on, paid_on, created_at)
+  -- status: pending|approved|paid|rejected. expense_type: one_time (входит в общий лимит месяца — 75 000 ₽, в январе/мае/декабре 40 000 ₽) | planned (лимит не режет) | legacy_unclassified (старая запись, тип ещё не уточнён).
+  -- ФАКТ расхода = status='paid' и считается по paid_on, НЕ по created_at; approved — это только резерв по expected_payment_on. user_id пуст, если сотрудник удалён.
 email_subscriptions(id uuid, project_id, project_name, email_provider, email_count int, billing_amount numeric, status, created_at)
 
 -- Email-цепочки (генератор писем)
