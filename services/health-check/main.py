@@ -2613,7 +2613,13 @@ async def run_li_outreach_report() -> None:
             SELECT
               COUNT(*) FILTER (WHERE message ILIKE '%GPT персонализировал%') AS ok,
               COUNT(*) FILTER (WHERE message ILIKE '%вернул шаблон без изменений%') AS noop,
-              COUNT(*) FILTER (WHERE message ILIKE '%Ошибка GPT%') AS err
+              COUNT(*) FILTER (WHERE message ILIKE '%Ошибка GPT%') AS err,
+              -- Сколько раз проверка не пустила ответ модели в отправку.
+              -- Единственный способ увидеть это на пути ИНВАЙТА: его текст
+              -- в conversation_history не попадает, поэтому инвариант по
+              -- квадратным скобкам туда не дотягивается.
+              COUNT(*) FILTER (WHERE message ILIKE '%GPT вернул не сообщение%'
+                                  OR message ILIKE '%GPT вернул не инвайт%') AS guard_blocked
             FROM li_campaign_logs WHERE created_at > NOW() - INTERVAL '24 hours'
         """)
         # Only li_campaigns.ai_model is on the live GPT path. li_settings.openai_model
@@ -2653,6 +2659,7 @@ async def run_li_outreach_report() -> None:
         await conn.close()
 
     gpt_ok, gpt_noop, gpt_err = (gpt["ok"] or 0), (gpt["noop"] or 0), (gpt["err"] or 0)
+    guard_blocked = (gpt["guard_blocked"] or 0) if gpt else 0
     bare_total = bare["camp"] or 0
 
     def mark(v: int) -> str:
@@ -2681,6 +2688,7 @@ async def run_li_outreach_report() -> None:
         f"{mark(bare_total)} Bare-модели без provider/: {bare_total}",
         f"{mark(byok)} Остаточные BYOK-ключи: {byok}",
         f"{mark(gpt_err)} GPT за 24ч: ok {gpt_ok} / шаблон {gpt_noop} / ошибок {gpt_err}",
+        f"{mark(guard_blocked)} GPT сочинил письмо, отбито проверкой: {guard_blocked}",
         "",
         f"ℹ️ Инвайтов сегодня: {invites_today} · прочих ошибок за 24ч: {errs_24h} "
         f"(обычно битые профили из импорта)",
