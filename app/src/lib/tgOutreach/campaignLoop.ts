@@ -16,6 +16,7 @@ import type {
   OutreachProxy,
 } from './types';
 import { DEFAULT_FOLLOW_UP } from './types';
+import { classifyCheckError } from './accountCheck';
 import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient } from './gramClient';
 import type { LoopControl } from './watchdog';
@@ -1692,6 +1693,36 @@ export async function runCampaignLoop(
 
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
+
+          // Диагноз аккаунта — в его карточку, а не только в ленту лога.
+          //
+          // Колонки check_status/check_detail и агрегатор в интерфейсе уже были,
+          // но заполняла их ТОЛЬКО ручная кнопка «проверить» по одному аккаунту.
+          // 19.08.2026 на проде 17 аккаунтов не работали (14 с отозванной
+          // сессией, 3 с конфликтом), и все они показывались оператору живыми:
+          // 96 аккаунтов из 178 не проверялись ни разу, у остальных проверка
+          // была двухдневной давности. Боевой цикл упирается в мёртвую сессию
+          // каждый круг — ему и писать диагноз.
+          //
+          // Пишем только терминальные состояния: сетевые и флуд-ошибки
+          // проходят сами и карточку засорять не должны.
+          const diagnosis = classifyCheckError(errMsg);
+          if (diagnosis.status === 'session_revoked'
+            || diagnosis.status === 'session_duplicate'
+            || diagnosis.status === 'banned') {
+            const { error: diagErr } = await db
+              .from('tg_outreach_accounts')
+              .update({
+                check_status: diagnosis.status,
+                check_detail: diagnosis.detail,
+                checked_at: new Date().toISOString(),
+              })
+              .eq('id', account.id);
+            if (diagErr) {
+              log('warning', `Аккаунт ${account.session_name}: не смог записать диагноз «${diagnosis.detail}» в карточку — ${diagErr.message}`);
+            }
+          }
+
           if (errMsg.includes('Constructor ID')) {
             tlSchemaErrorCount++;
             // Log every occurrence (not only the first) so the operator sees

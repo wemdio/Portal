@@ -78,6 +78,10 @@ function attemptNote(outcome: { attempts: number; exhausted: boolean }): string 
 type SendFailure =
   | { kind: 'contact_permanent'; reason: string }
   | { kind: 'account_limited'; reason: string }
+  // Обрыв прокси/сокета — НЕ ограничение аккаунта. Поведение то же (попытку не
+  // тратим, порцию прекращаем), но kind разведён, чтобы лог не врал оператору
+  // «Telegram ограничил аккаунт» там, где просто умерло соединение (аудит 20.08).
+  | { kind: 'transport_down'; reason: string }
   | { kind: 'retryable' };
 
 function classifySendFailure(errMsg: string): SendFailure {
@@ -149,7 +153,7 @@ function classifySendFailure(errMsg: string): SendFailure {
     'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH',
     'ENOTFOUND', 'EPIPE', 'SOCKET HANG UP', 'NOT CONNECTED', 'WHILE DISCONNECTED',
   ]) {
-    if (m.includes(code)) return { kind: 'account_limited', reason: 'обрыв связи или прокси' };
+    if (m.includes(code)) return { kind: 'transport_down', reason: code };
   }
 
   return { kind: 'retryable' };
@@ -228,10 +232,13 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         continue;
       }
 
-      if (failure.kind === 'account_limited') {
+      if (failure.kind === 'account_limited' || failure.kind === 'transport_down') {
+        const cause = failure.kind === 'transport_down'
+          ? `обрыв связи или прокси (${failure.reason})`
+          : `Telegram ограничил аккаунт (${failure.reason})`;
         log(
           'warning',
-          `Первое касание остановлено на резолве юзернейма: Telegram ограничил аккаунт (${failure.reason}). ` +
+          `Первое касание остановлено на резолве юзернейма: ${cause}. ` +
             `Контакты остаются в очереди, попытки им не засчитываем — продолжим следующим кругом.`,
         );
         result.postponed++;
@@ -276,10 +283,13 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         continue;
       }
 
-      if (failure.kind === 'account_limited') {
+      if (failure.kind === 'account_limited' || failure.kind === 'transport_down') {
+        const cause = failure.kind === 'transport_down'
+          ? `обрыв связи или прокси (${failure.reason})`
+          : `Telegram ограничил аккаунт (${failure.reason})`;
         log(
           'warning',
-          `Первое касание остановлено: Telegram ограничил аккаунт (${failure.reason}). ` +
+          `Первое касание остановлено: ${cause}. ` +
             `Контакты остаются в очереди, попытки им не засчитываем — продолжим следующим кругом.`,
         );
         result.postponed++;

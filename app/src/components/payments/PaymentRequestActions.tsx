@@ -25,8 +25,8 @@ interface PaymentRequestActionsProps {
 
 type ActionMode = 'idle' | 'reject' | 'paid' | 'legacy';
 
-const buttonClass = 'min-h-11 border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-800 outline-none hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50';
-const inputClass = 'min-h-11 w-full border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-200';
+const buttonClass = 'min-h-11 rounded-lg border border-gray-200 bg-white px-3.5 py-2 text-xs font-semibold text-gray-800 outline-none transition-colors hover:border-gray-300 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50';
+const inputClass = 'min-h-11 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-100';
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Не удалось изменить расход';
@@ -162,7 +162,7 @@ export default function PaymentRequestActions({
       ref={errorRef}
       role="alert"
       tabIndex={-1}
-      className="border border-red-300 bg-red-50 px-3 py-2 text-xs leading-5 text-red-800 outline-none"
+      className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs leading-5 text-red-800 outline-none"
     >
       <p>{error}</p>
       {error.startsWith('Заявка уже изменилась') && (
@@ -180,7 +180,7 @@ export default function PaymentRequestActions({
 
   if (mode === 'reject') {
     return (
-      <form aria-label="Отклонить расход" onSubmit={(event) => void reject(event)} className="min-w-64 space-y-2">
+      <form aria-label="Отклонить расход" onSubmit={(event) => void reject(event)} className="ml-auto max-w-md space-y-3 rounded-xl bg-gray-50 p-4">
         <label className="block text-xs font-medium text-gray-700">
           Причина отклонения
           <textarea
@@ -205,7 +205,7 @@ export default function PaymentRequestActions({
 
   if (mode === 'paid') {
     return (
-      <form aria-label="Отметить расход оплаченным" onSubmit={(event) => void markPaid(event)} className="min-w-64 space-y-2">
+      <form aria-label="Отметить расход оплаченным" onSubmit={(event) => void markPaid(event)} className="ml-auto max-w-md space-y-3 rounded-xl bg-gray-50 p-4">
         <label className="block text-xs font-medium text-gray-700">
           Фактическая дата оплаты
           <input
@@ -231,7 +231,7 @@ export default function PaymentRequestActions({
 
   if (mode === 'legacy') {
     return (
-      <form aria-label="Уточнение старого расхода" onSubmit={(event) => void classifyLegacy(event)} className="min-w-72 space-y-2">
+      <form aria-label="Уточнение старого расхода" onSubmit={(event) => void classifyLegacy(event)} className="ml-auto max-w-md space-y-3 rounded-xl bg-gray-50 p-4">
         <fieldset>
           <legend className="text-xs font-medium text-gray-700">Тип расхода</legend>
           <div role="radiogroup" aria-label="Тип расхода" className="mt-1 flex flex-wrap gap-3 text-xs">
@@ -266,7 +266,7 @@ export default function PaymentRequestActions({
   }
 
   return (
-    <div className="flex min-w-52 flex-wrap justify-end gap-2">
+    <div className="flex flex-wrap justify-start gap-2 sm:justify-end">
       {notice && <p role="status" className="w-full text-xs text-gray-600">{notice}</p>}
       {request.status === 'pending' && (
         <>
@@ -274,7 +274,7 @@ export default function PaymentRequestActions({
             type="button"
             disabled={busy || disabled}
             onClick={() => void run({ action: 'approve', expectedUpdatedAt: request.updatedAt })}
-            className={`${buttonClass} border-emerald-300 text-emerald-800`}
+            className={`${buttonClass} border-emerald-600 bg-emerald-600 text-white hover:border-emerald-700 hover:bg-emerald-700`}
           >
             Одобрить
           </button>
@@ -286,18 +286,18 @@ export default function PaymentRequestActions({
           type="button"
           disabled={busy || disabled}
           onClick={() => open('reject')}
-          className={`${buttonClass} border-red-300 text-red-800`}
+          className={`${buttonClass} border-red-300 text-red-800 hover:border-red-400 hover:bg-red-50`}
         >
           Отклонить
         </button>
       )}
       {request.status === 'approved' && (
-        <button ref={paidButtonRef} type="button" disabled={busy || disabled} onClick={() => open('paid')} className={buttonClass}>
+        <button ref={paidButtonRef} type="button" disabled={busy || disabled} onClick={() => open('paid')} className={`${buttonClass} border-gray-900 bg-gray-900 text-white hover:bg-gray-800`}>
           Отметить оплаченным
         </button>
       )}
       {request.expenseType === 'legacy_unclassified' && (
-        <button ref={legacyButtonRef} type="button" disabled={busy || disabled} onClick={() => open('legacy')} className={`${buttonClass} border-amber-300 text-amber-900`}>
+        <button ref={legacyButtonRef} type="button" disabled={busy || disabled} onClick={() => open('legacy')} className={`${buttonClass} border-amber-300 bg-amber-50 text-amber-900 hover:border-amber-400 hover:bg-amber-100`}>
           Уточнить тип и дату оплаты
         </button>
       )}
