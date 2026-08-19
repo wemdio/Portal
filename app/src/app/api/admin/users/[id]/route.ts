@@ -4,6 +4,7 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { isAdmin } from '@/lib/roles';
+import { purgeUserOwnedJobs } from '@/lib/admin/purgeUserOwnedJobs';
 import type { UserRole } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -37,6 +38,12 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
 
   if (targetUserId === user.id) {
     return jsonError('Нельзя удалить самого себя', 400);
+  }
+
+  const purgeErr = await purgeUserOwnedJobs(supabaseAdmin, targetUserId);
+  if (purgeErr) {
+    await logError('admin.users.delete.purge.failed', purgeErr, { targetUserId }, logMeta);
+    return jsonError('Ошибка удаления пользователя', 500);
   }
 
   const { error: authErr } = await supabaseAdmin.auth.admin.deleteUser(targetUserId);

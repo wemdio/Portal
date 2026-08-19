@@ -1,5 +1,6 @@
 import 'server-only';
 
+import { AI_FOLLOWUP_FORMAT_RULES } from './aiOutputGuard';
 import {
   buildTemplateVarValues,
   resolveTemplateVar,
@@ -176,7 +177,10 @@ export async function personalizeInviteMessage(
 
   const userPrompt = `Создай персонализированное сообщение:\n\nШАБЛОН:\n${baseMessage}\n\nДАННЫЕ О ЧЕЛОВЕКЕ:\n${leadCtx}\n\nНапиши готовое сообщение (только текст):`;
   const messages = [
-    { role: 'system', content: systemPrompt || DEFAULT_PERSONALIZE_PROMPT },
+    // Те же неотключаемые правила формата, что и у follow-up. Здесь цена ошибки
+    // даже выше: инвайт режется до 297 знаков, поэтому сочинённое письмо ушло бы
+    // человеку оборванным на полуслове.
+    { role: 'system', content: `${systemPrompt || DEFAULT_PERSONALIZE_PROMPT}\n${AI_FOLLOWUP_FORMAT_RULES}` },
     { role: 'user', content: userPrompt },
   ];
 
@@ -206,7 +210,14 @@ export async function personalizeFollowUp(
 
   const userPrompt = `ШАБЛОН:\n${baseMessage}\n\nДАННЫЕ:\n${leadCtx}\n${contextText}\nНапиши готовое сообщение:`;
   const messages = [
-    { role: 'system', content: systemPrompt || DEFAULT_PERSONALIZE_PROMPT },
+    // Правила формата дописываются ПОСЛЕ кастомного промпта и намеренно
+    // неотключаемы. Кампании передают сюда `ai_prompt_chat` — промпт для
+    // ответов в диалоге («отвечай вежливо, договаривайся о звонке»), который
+    // затирал DEFAULT_PERSONALIZE_PROMPT вместе с его ограничениями на длину и
+    // скобки. 19.08.2026 модель на пустой истории сочинила из 300-знакового
+    // шаблона деловое письмо на 691 знак с подписью `[Ваше имя]`, и оно ушло
+    // человеку в LinkedIn. См. aiOutputGuard.ts.
+    { role: 'system', content: `${systemPrompt || DEFAULT_PERSONALIZE_PROMPT}\n${AI_FOLLOWUP_FORMAT_RULES}` },
     { role: 'user', content: userPrompt },
   ];
 
