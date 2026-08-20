@@ -135,9 +135,13 @@ export default function InnEnrichPage() {
     if (rows.length === 0 || columnIndex < 0) return;
     const XLSX = await import('xlsx');
 
-    const headerRow = hasHeader
-      ? rows[0]
-      : Array.from({ length: Math.max(...rows.map((r) => r.length)) }, (_, i) => `Колонка ${i + 1}`);
+    // Ширина выгрузки — по самой длинной строке: CSV бывает «рваным», и
+    // ячейки за пределами шапки иначе молча обрезались бы. Без spread в
+    // Math.max — на 90k строк spread роняет вкладку (stack overflow).
+    const maxCols = rows.reduce((max, r) => Math.max(max, r.length), 0);
+    const headerRow = Array.from({ length: maxCols }, (_, c) =>
+      hasHeader && rows[0]?.[c] ? rows[0][c] : `Колонка ${c + 1}`,
+    );
     const outHeader = [...headerRow, 'Найдено', ...ENRICH_FIELDS.map((f) => f.label)];
     const aoa: Array<Array<string | number | null>> = [outHeader];
 
