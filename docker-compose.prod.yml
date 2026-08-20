@@ -915,10 +915,10 @@ services:
       - portal-network
 
   # Конструктор баз. Выносит «pipeline для CSV/Excel баз» из HTTP-процесса
-  # portal'a в отдельные долгоживущие контейнеры. 3 реплики (worker-
-  # baseconstructor / -2 / -3) делят одну очередь base_constructor_jobs через
+  # portal'a в отдельные долгоживущие контейнеры. 6 реплик (worker-
+  # baseconstructor / -2 ... -6) делят одну очередь base_constructor_jobs через
   # атомарный CAS-claim (UPDATE WHERE status='pending') - каждый job берёт
-  # ровно одна реплика. Параллельно: 3 x BASE_CONSTRUCTOR_CONCURRENCY = 3x4 = 12.
+  # ровно одна реплика. Параллельно: 6 реплик x 1 job = 6 job'ов.
   # Реплики дают отказоустойчивость: краш/OOM одной не уносит job'ы остальных.
   # Stale (без heartbeat 15+ мин) processing-задачи любая реплика автоматически
   # резумит с того шага, где остановились.
@@ -940,17 +940,15 @@ services:
       - SMTP_PROXY_API_KEY=${SMTP_PROXY_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=baseconstructor
-      # Сколько job'ов параллельно НА ОДНУ реплику. 1 job в памяти ~0.5-1.5GB
-      # JS heap из-за большой `data` (string[][]), поэтому memory-лимит реплики
-      # (ниже) ~ CONCURRENCY x 1.5GB + overhead. 4 на реплику x 3 реплики = 12
-      # параллельно во всей системе. Глобальный потолок дальше - НЕ железо
-      # (139 = 62GB / 32 ядра, простаивает), а внешнее: AI-роутер, скрейпинг,
-      # запись блоба в БД на 144. Поэтому per-job fan-out скрейпинга снижен (ниже).
-      # NB: прод-.env может ПЕРЕБИВАТЬ дефолт - проверь /home/Portal/prod/.env.
+      # Сколько job'ов параллельно НА ОДНУ реплику. Фиксируем ровно 1: отдельные
+      # контейнеры изолируют heap/OOM и позволяют наращивать мощность по одной
+      # реплике, не делая скачок concurrency сразу во всём пуле.
+      # 1 job в памяти обычно ~0.5-1.5GB JS heap из-за большой `data` (string[][]).
+      # Глобальный потолок — общий main-rest/Postgres, AI-роутер и скрейпинг.
       # Это НЕ то же, что per-user cap MAX_ACTIVE_JOBS_PER_USER=6 в route.ts.
-      - BASE_CONSTRUCTOR_CONCURRENCY=${BASE_CONSTRUCTOR_CONCURRENCY:-4}
-      # Per-job fan-out скрейпинга (find_emails/enrich). На 12 параллельных
-      # job'ах дефолтные 15+5 = до ~240 исходящих коннектов -> риск IP-бана.
+      - BASE_CONSTRUCTOR_CONCURRENCY=1
+      # Per-job fan-out скрейпинга (find_emails/enrich). На 6 параллельных
+      # job'ах дефолтные 15+5 = до ~120 исходящих коннектов -> риск IP-бана.
       # Снижено для base-constructor (env, тюнится без передеплоя кода). DFYB
       # эти env не ставит -> у него остаются дефолты 15/5.
       - BASE_EMAIL_SCRAPE_CONCURRENCY=${BASE_EMAIL_SCRAPE_CONCURRENCY:-10}
@@ -964,9 +962,8 @@ services:
     deploy:
       resources:
         limits:
-          # На реплику: 4 concurrency x ~1.5GB peak + ~2GB overhead = ~8GB,
-          # ставим 10GB с запасом (OOM-kill сбросил бы in-flight ta_scoring).
-          # 3 реплики x 10GB = 30GB; host 139 имеет ~56GB свободно.
+          # Первые три реплики сохраняют исторический запас 10GB для очень
+          # больших баз; concurrency=1 не позволяет одной реплике взять две.
           memory: 10240M
           cpus: '3'
           pids: 512
@@ -975,7 +972,7 @@ services:
       - portal-network
 
   # Реплики base-constructor. Делят очередь base_constructor_jobs через
-  # атомарный CAS-claim, как enrich-реплики. 3 x concurrency(4) = 12 параллельно.
+  # атомарный CAS-claim, как enrich-реплики. Всего 6 x concurrency(1) = 6.
   worker-baseconstructor-2:
     <<: *worker-baseconstructor
     container_name: portal-worker-baseconstructor-2
@@ -983,6 +980,27 @@ services:
   worker-baseconstructor-3:
     <<: *worker-baseconstructor
     container_name: portal-worker-baseconstructor-3
+
+  # Реплики 4-6 закреплены после поэтапного production-canary 20.08.2026.
+  # Ограничиваем каждую одной CPU и 4GB: это ровно те параметры, на которых
+  # временные реплики прошли проверку без OOM/restart и деградации health.
+  worker-baseconstructor-4: &worker-baseconstructor-conservative
+    <<: *worker-baseconstructor
+    container_name: portal-worker-baseconstructor-4
+    deploy:
+      resources:
+        limits:
+          memory: 4096M
+          cpus: '1'
+          pids: 512
+
+  worker-baseconstructor-5:
+    <<: *worker-baseconstructor-conservative
+    container_name: portal-worker-baseconstructor-5
+
+  worker-baseconstructor-6:
+    <<: *worker-baseconstructor-conservative
+    container_name: portal-worker-baseconstructor-6
 
   worker-instantly-leads:
     image: ${DOCKER_USERNAME}/portal-worker:prod
