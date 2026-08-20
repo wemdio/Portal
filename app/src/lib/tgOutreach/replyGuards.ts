@@ -1,3 +1,4 @@
+import { isRepeatOfOurs as isRepeatOfOursShared, normalizeForRepeatCheck } from '../outreachRepeatGuard';
 import type { DialogMessage } from './types';
 
 /**
@@ -7,19 +8,7 @@ import type { DialogMessage } from './types';
  * нужно уметь прогонять тестами, не поднимая весь цикл кампании.
  */
 
-/**
- * Нормализация для сравнения текстов: регистр, пунктуация и пробелы значения
- * не имеют. «Хорошо.» и «хорошо!» — одно и то же сообщение для получателя, и
- * для Telegram, который ищет одинаковые рассылки, тоже.
- */
-function normalize(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/ё/g, 'е')
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+const normalize = normalizeForRepeatCheck;
 
 /**
  * Мы уже отправляли этот текст в этом диалоге.
@@ -29,19 +18,11 @@ function normalize(text: string): string {
  * выглядит как сломанный бот, а для Telegram одинаковые сообщения — прямой
  * признак спам-рассылки и повод забанить аккаунт.
  *
- * Сравнение строгое, по нормализованному тексту целиком. Похожие, но не
- * совпадающие ответы («Хорошо, вернёмся» против «Хорошо, вернёмся позже») этой
- * проверкой НЕ ловятся: подобие пришлось бы мерить порогом, а неверно
- * выбранный порог глушил бы осмысленные ответы. Точное совпадение — то, что
- * действительно наблюдается в боевых диалогах, и у него нет ложных
- * срабатываний.
+ * Сама проверка — в `outreachRepeatGuard`: тот же вопрос решает LinkedIn-раннер,
+ * где два запуска на пересекающихся лидах дублировали людям абзацы.
  */
 export function isRepeatOfOurs(reply: string, history: DialogMessage[]): boolean {
-  const candidate = normalize(reply);
-  if (!candidate) return false;
-  return (history ?? []).some(
-    (m) => m?.role === 'assistant' && normalize(m.content ?? '') === candidate,
-  );
+  return isRepeatOfOursShared(reply, history);
 }
 
 /**

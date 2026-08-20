@@ -9,6 +9,7 @@ import {
   personalizeFollowUp,
 } from './aiService';
 import { findAiOutputProblems } from './aiOutputGuard';
+import { isRepeatOfOurs, type RepeatCheckMessage } from '../outreachRepeatGuard';
 import { extractPublicIdentifier } from './leadHelpers';
 import { findUnknownPlaceholders, supportedVarsHint } from './messageVars';
 import { isInWorkingHours } from './schedule';
@@ -863,6 +864,40 @@ async function processMessageStep(
     // If AI-personalization was attempted above it already hit the LLM — but
     // we still treat this as no-network for pacing purposes: an empty message
     // is operator-error, not LI traffic. The next tick will retry.
+    return false;
+  }
+
+  // Этот текст человеку уже уходил — второй раз не отправляем.
+  //
+  // Гард от повтора стоял только на шаге invite (processInviteStep смотрит на
+  // lead.status), а chat_id у лида один на человека: две running-кампании на
+  // пересекающихся лидах писали в один и тот же чат, и получатель видел, как
+  // собеседник дважды присылает один и тот же абзац. 15–17.08.2026 так вышло у
+  // четверых, один из них через пять минут ответил «Не интересно». Кампанию
+  // остановили руками, 20.08 запустили заново — пересечение вернулось на 153
+  // лидах. Договорённость «один человек — одна активная кампания» держится на
+  // внимании оператора, поэтому нужен отказ в коде.
+  //
+  // Лид снимается с кампании целиком, а не просто пропускает шаг: иначе
+  // следующий message-шаг продублирует так же. Тот, кто отправил первым,
+  // продолжает вести человека — здесь мы лишь уступаем.
+  if (isRepeatOfOurs(message, lead.conversation_history as RepeatCheckMessage[] | null)) {
+    await db
+      .from('li_campaign_leads')
+      .update({
+        status: 'skipped',
+        error_message: 'Этот текст лиду уже отправляли — снят с кампании во избежание дубля',
+        next_action_at: null,
+        updated_at: now,
+      })
+      .eq('id', cl.id);
+    log(
+      'warning',
+      `Дубль предотвращён: этот текст лиду уже отправляли, снимаю его с кампании. ` +
+        `Проверьте, не идёт ли этот человек сразу в двух активных кампаниях.`,
+      lead.name,
+      stepIdx,
+    );
     return false;
   }
 
