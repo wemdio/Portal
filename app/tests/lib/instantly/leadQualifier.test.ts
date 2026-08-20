@@ -284,6 +284,62 @@ describe('qualifyReply — пер-проектное определение ли
     };
   }
 
+  const outboundProposal = {
+    ...outboundContactRequest,
+    body: {
+      text: [
+        'Добрый день!',
+        'Предлагаем единую систему ТОиР для распределённых объектов.',
+        'Она помогает контролировать заявки, ремонты и запасы на всех площадках.',
+        'Подготовим план решения задач с учётом вашей структуры. Какие шаги нужны, чтобы обсудить реализацию?',
+      ].join('\n'),
+    },
+  } as Email;
+
+  function replyWithQuotedProposal(authoredReply: string): string {
+    return [
+      authoredReply,
+      '',
+      'С уважением,',
+      'Иванова Светлана Евгеньевна',
+      'начальник отдела продаж',
+      'АО «АК Корвет»',
+      '(3522) 476-748',
+      'svetlana.ivanova@korvet-jsc.ru',
+      '',
+      '18.08.2026 11:21, Dmitrij Kasilov пишет:',
+      '> Добрый день!',
+      '> Предлагаем единую систему ТОиР для распределённых объектов.',
+      '> Подготовим план решения задач. Какие шаги нужны, чтобы обсудить реализацию?',
+    ].join('\n');
+  }
+
+  async function qualifyQuotedProposalReply(authoredReply: string, leadCriteria?: string) {
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    return qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      leadCriteria,
+      prefetchedContext: contextWithReply(
+        replyWithQuotedProposal(authoredReply),
+        outboundProposal,
+      ),
+    });
+  }
+
+  async function qualifyInterestAfterOutbound(outboundText: string) {
+    const outbound = {
+      ...outboundProposal,
+      body: { text: outboundText },
+    } as Email;
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    return qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply('Интересно.', outbound),
+    });
+  }
+
   it('принимает custom_criteria_matched только как строгий JSON boolean', async () => {
     const { _private } = await import('@/lib/instantly/leadQualifier');
     const actualTrue = _private.parseAIResult('{"custom_criteria_matched": true}');
@@ -301,6 +357,7 @@ describe('qualifyReply — пер-проектное определение ли
     'Пришлите, пожалуйста, КП на этот адрес.',
     'Пришлите КП, ivan@example.com',
     'Позвоните +7 999 123-45-67',
+    'Позвоните по телефону +7 999 123-45-67',
     'Свяжитесь со мной завтра после 15:00.',
     'Когда можем поговорить?',
     'Можно пообщаться на этой неделе?',
@@ -368,6 +425,502 @@ describe('qualifyReply — пер-проектное определение ли
   });
 
   it.each([
+    'Интересно.',
+    'Да, интересно.',
+    'Нам интересно.',
+    'Возможно, нам это интересно.',
+    'Звучит интересно.',
+  ])('подтверждённый оффер + положительный интерес становится лидом: %s', async (replyText) => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: false,
+      interest_signals: [],
+      reason: 'Модель оставила положительный интерес на проверке',
+      needs_review: true,
+    });
+
+    const res = await qualifyQuotedProposalReply(replyText);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.proposalSeen).toBe(true);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+    expect(res.interestSignals).toContain('положительный интерес к предложению');
+  });
+
+  it.each([
+    {
+      offerStyle: 'реальный оффер АСМО-ТОиР',
+      outboundText: [
+        'Добрый день! Пишу по поводу частой проблемы производственных компаний с несколькими площадками.',
+        'Мы как раз помогаем производственным и инфраструктурным предприятиям со сложной филиальной структурой навести порядок в этих процессах с помощью АСМО-ТОиР — единой системы для управления техническим обслуживанием и ремонтом на всех объектах.',
+        'Команда видит заявки, ремонты, запасы и риски простоя в одном месте. Готовы показать план внедрения под вашу структуру.',
+      ].join('\n'),
+    },
+    {
+      offerStyle: 'реальный оффер Deep',
+      outboundText: [
+        'Добрый день! Пишу, чтобы узнать, как сейчас справляетесь с потребностью в контейнерах под ваши маршруты.',
+        'Мы в Deep можем закрыть вопрос с тарой практически в режиме реального времени и забираем на себя поиск свободной тары, простои платформ и комиссии посредникам.',
+        'Наши цены ниже рыночных за счёт эксклюзивных контрактов, а контейнеры готовы к железнодорожным и морским отправкам. Давайте обсудим ближайшие рейсы и расчёты.',
+      ].join('\n'),
+    },
+    {
+      offerStyle: '«Хотим предложить сервис»',
+      outboundText: [
+        'Добрый день! Хотим предложить сервис для автоматизации обработки заявок и контроля работы распределённой команды.',
+        'Сервис объединяет входящие обращения, сроки и ответственность сотрудников, чтобы руководитель видел узкие места и не терял заявки между филиалами.',
+        'Подготовим демонстрацию на ваших сценариях и покажем ожидаемый эффект для команды. Удобно обсудить решение на этой неделе?',
+      ].join('\n'),
+    },
+    {
+      offerStyle: '«У нас есть решение»',
+      outboundText: [
+        'Добрый день! У нас есть решение для контроля технического обслуживания, ремонтов и запасов на нескольких объектах.',
+        'Оно помогает собрать заявки в одной системе, видеть просроченные работы и заранее понимать риск простоя оборудования.',
+        'Можем подготовить план запуска с учётом вашей структуры и показать экономический эффект. Удобно будет коротко обсудить ваши текущие процессы?',
+      ].join('\n'),
+    },
+  ])('$offerStyle подтверждает оффер для ответа «Интересно»', async ({ outboundText }) => {
+    expect(outboundText.length).toBeGreaterThanOrEqual(200);
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: false,
+      interest_signals: [],
+      reason: 'Модель оставила положительный интерес на проверке',
+      needs_review: true,
+    });
+
+    const res = await qualifyInterestAfterOutbound(outboundText);
+
+    expect(res.proposalSeen).toBe(true);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it('содержательный первый оффер сохраняет контекст после короткого follow-up', async () => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: false,
+      interest_signals: [],
+      reason: 'Модель увидела только короткий follow-up',
+      needs_review: true,
+    });
+    const followUp = {
+      ...outboundProposal,
+      id: 'out-follow-up',
+      body: { text: 'Добрый день! Успели посмотреть предыдущее письмо?' },
+      timestamp_email: '2026-07-13T08:30:00Z',
+    } as Email;
+    const reply = {
+      ...callInviteReply,
+      body: { text: 'Интересно.' },
+    } as Email;
+    const context: ThreadContext = {
+      replyEmail: reply,
+      threadEmails: [outboundProposal, followUp, reply],
+      lastOutbound: followUp,
+    };
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: context,
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const requestBody = JSON.parse(String(init.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const aiUserMessage = requestBody.messages.find((message) => message.role === 'user')?.content;
+    expect(aiUserMessage).toContain('Предлагаем единую систему ТОиР');
+    expect(aiUserMessage).toContain('Успели посмотреть предыдущее письмо?');
+    expect(res.proposalSeen).toBe(true);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it.each([
+    'Мы обсудим с коллегами и сообщим Вам. Надеюсь на возможное сотрудничество.',
+    'Если честно, надеюсь на возможное сотрудничество.',
+  ])('самостоятельная надежда на сотрудничество становится лидом даже без восстановленного исходящего: %s', async (replyText) => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: false,
+      interest_signals: [],
+      reason: 'Модель оставила ответ на проверке',
+      needs_review: true,
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(replyText, null),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+    expect(res.interestSignals).toContain('готовность к сотрудничеству');
+  });
+
+  it('кириллическая граница не принимает «мне интересно» за отрицание', async () => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: false,
+      interest_signals: [],
+      reason: 'Модель оставила ответ на проверке',
+      needs_review: true,
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(
+        'Мне интересно. Надеюсь на возможное сотрудничество.',
+        null,
+      ),
+    });
+
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it('процитированный содержательный оффер подтверждает контекст для «Интересно», когда outbound не восстановился', async () => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: false,
+      interest_signals: [],
+      reason: 'Модель не восстановила контекст цитаты',
+      needs_review: true,
+    });
+    const quotedProposal = [
+      'Интересно.',
+      '',
+      '> Добрый день! Предлагаем единую систему ТОиР для распределённых объектов.',
+      '> Она помогает контролировать заявки, ремонты и запасы на всех площадках.',
+      '> Подготовим план решения задач с учётом вашей структуры и покажем, как сократить простои.',
+    ].join('\n');
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(quotedProposal, null),
+    });
+
+    expect(res.proposalSeen).toBe(true);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it.each([
+    'Мы не готовы. Надеемся на возможное сотрудничество.',
+    'Сейчас не актуально. Надеемся на сотрудничество.',
+    'Спасибо, нам это не интересно. Надеемся на возможное сотрудничество.',
+    'Мы не заинтересованы. Надеемся на сотрудничество.',
+    'Не планируем сотрудничать. Надеемся на сотрудничество.',
+    'В случае интереса коллег они свяжутся. Надеемся на сотрудничество.',
+    'We are not interested. We hope to collaborate.',
+  ])('явный отказ имеет приоритет над вежливой фразой о сотрудничестве: %s', async (replyText) => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: false,
+      interest_signals: [],
+      reason: 'Получатель явно отказался',
+      needs_review: false,
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(replyText, null),
+    });
+
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it.each([
+    'Мы не видим возможности для сотрудничества. Надеемся на сотрудничество.',
+    'Нам это не подходит. Надеемся на сотрудничество в будущем.',
+  ])('явный отказ не повышается до лида, даже если модель оставила его на проверке: %s', async (replyText) => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: false,
+      interest_signals: [],
+      reason: 'Модель увидела противоречивые сигналы',
+      needs_review: true,
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(replyText, null),
+    });
+
+    expect(res.isLead).toBe(false);
+  });
+
+  it('вежливая фраза не перебивает уверенный not_lead для неизвестной формулировки отказа', async () => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: false,
+      interest_signals: [],
+      reason: 'Получатель отказался от текущего предложения',
+      needs_review: false,
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(
+        'Для нас это тупиковый вариант. Надеемся на сотрудничество в будущем.',
+        null,
+      ),
+    });
+
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it('«Не будем скрывать» не принимается за отказ и не отменяет готовность к сотрудничеству', async () => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: false,
+      interest_signals: [],
+      reason: 'Модель оставила ответ на проверке',
+      needs_review: true,
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(
+        'Не будем скрывать: надеемся на возможное сотрудничество.',
+        null,
+      ),
+    });
+
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it.each([
+    {
+      replyText: 'Спасибо, но не интересно.',
+      reason: 'Явный отрицательный ответ',
+      needsReview: false,
+    },
+    {
+      replyText: 'Возможно, коллегам будет интересно. Если заинтересуются, они свяжутся.',
+      reason: 'Условный интерес третьих лиц',
+      needsReview: true,
+    },
+  ])('отрицание и условный интерес третьих лиц не повышаются до лида: $replyText', async ({ replyText, reason, needsReview }) => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: true,
+      interest_signals: [],
+      reason,
+      needs_review: needsReview,
+    });
+
+    const res = await qualifyQuotedProposalReply(replyText);
+
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(needsReview);
+  });
+
+  it('одиночное «Интересно» без восстановленного оффера остаётся на проверке даже при ошибочном proposal_seen от AI', async () => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: true,
+      interest_signals: [],
+      reason: 'Без контекста нельзя подтвердить, к чему относится интерес',
+      needs_review: true,
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply('Интересно.', null),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(true);
+  });
+
+  it('длинный запрос контакта не считается подтверждённым оффером только из-за длины', async () => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: true,
+      interest_signals: [],
+      reason: 'AI ошибочно принял длинное письмо за оффер',
+      needs_review: true,
+    });
+    const verboseContactRequest = {
+      ...outboundContactRequest,
+      body: {
+        text: [
+          'Добрый день! Пишу, чтобы уточнить организационный вопрос и не беспокоить неподходящего сотрудника.',
+          'Подскажите, пожалуйста, кто в вашей компании отвечает за закупки и входящие обращения от поставщиков?',
+          'Буду признателен только за имя, рабочую почту или телефон ответственного коллеги. Само предложение направим ему отдельно.',
+        ].join('\n'),
+      },
+    } as Email;
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply('Интересно.', verboseContactRequest),
+    });
+
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(true);
+  });
+
+  it('кастомное определение не переопределяется новым дефолтным правилом интереса', async () => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: true,
+      custom_criteria_matched: false,
+      interest_signals: [],
+      reason: 'Положительный ответ не соответствует более узкому критерию проекта',
+      needs_review: true,
+    });
+
+    const res = await qualifyQuotedProposalReply(
+      'Интересно.',
+      'Лидом считать только запрос цены или сметы.',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.customCriteriaMatched).toBe(false);
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(true);
+  });
+
+  it('слово «интересно» только в цитате не повышает нейтральный основной ответ', async () => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: true,
+      interest_signals: [],
+      reason: 'В основном ответе нет положительного интереса',
+      needs_review: false,
+    });
+    const quotedInterest = [
+      'Спасибо, информацию получили.',
+      '',
+      'С уважением,',
+      'Иванова Светлана',
+      '',
+      '18.08.2026 11:21, Dmitrij Kasilov пишет:',
+      '> Интересно.',
+    ].join('\n');
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(quotedInterest, outboundProposal),
+    });
+
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it('фраза о сотрудничестве только в Gmail-цитате без символа > не становится лидом', async () => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: true,
+      interest_signals: [],
+      reason: 'В основном ответе нет положительного интереса',
+      needs_review: false,
+    });
+    const gmailQuoteWithoutMarkers = [
+      'Спасибо, информацию получили.',
+      '',
+      'вт, 18 авг. 2026 г. в 11:21, Dmitrij Kasilov <sales@example.com>:',
+      'Надеюсь на возможное сотрудничество.',
+    ].join('\n');
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(gmailQuoteWithoutMarkers, outboundProposal),
+    });
+
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it('личный номер и имя в ответ на явный CTA из предложения становятся лидом', async () => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: true,
+      interest_signals: [],
+      reason: 'Модель приняла номер за простую передачу контакта',
+      needs_review: false,
+    });
+    const proposalWithPhoneCta = {
+      ...outboundProposal,
+      body: {
+        text: [
+          'Добрый день! Предлагаем решение для автоматизации продаж и обработки заявок.',
+          'Покажу подходящие сценарии и материалы в мессенджере.',
+          'Решение сокращает ручную работу команды и помогает быстрее отвечать новым клиентам.',
+          'Подскажите ваш номер? Скину материалы в мессенджер.',
+        ].join('\n'),
+      },
+    } as Email;
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply('Мой номер 89997588928, Влада', proposalWithPhoneCta),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+    expect(res.interestSignals).toContain('выполнен CTA — передан личный номер');
+  });
+
+  it.each([
+    '+79991234567',
+    '89991234567',
+  ])('только номер в ответ на явный CTA из предложения тоже становится лидом: %s', async (replyText) => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: true,
+      interest_signals: [],
+      reason: 'Модель приняла номер за нейтральный контакт',
+      needs_review: false,
+    });
+    const proposalWithPhoneCta = {
+      ...outboundProposal,
+      body: {
+        text: [
+          'Добрый день! Предлагаем решение для автоматизации продаж и обработки заявок.',
+          'Покажу подходящие сценарии и материалы в мессенджере.',
+          'Решение сокращает ручную работу команды и помогает быстрее отвечать новым клиентам.',
+          'Подскажите ваш номер? Скину материалы в мессенджер.',
+        ].join('\n'),
+      },
+    } as Email;
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(replyText, proposalWithPhoneCta),
+    });
+
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it.each([
     'Ответственный Иван Петров, ivan@example.com.',
     'За закупки отвечает Иван Куприянов, ivan@example.com.',
     'По оценке лицензий обращайтесь к Ивану: ivan@example.com.',
@@ -421,6 +974,116 @@ describe('qualifyReply — пер-проектное определение ли
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(res.isLead).toBe(false);
     expect(res.needsReview).toBe(false);
+  });
+
+  it('Информатика: перенаправление в общую приёмную не становится лидом из-за процитированного предложения', async () => {
+    mockAiResult();
+    const res = await qualifyQuotedProposalReply(
+      'Добрый день, обращайтесь, пож-та, в приемную.\n+7 (3522) 234161 <tel:+73522234161>',
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res.isLead).toBe(false);
+    expect(res.proposalSeen).toBe(true);
+    expect(res.needsReview).toBe(false);
+    expect(res.reason).toContain('общий контакт');
+  });
+
+  it.each([
+    'По этому вопросу обратитесь в приёмную.\n+7 (3522) 234161',
+    'Просьба обращаться в приёмную.\n+7 (3522) 234161',
+    'Свяжитесь с отделом закупок.\n+7 (3522) 234161',
+    'Обращайтесь в приёмную по телефону +7 (3522) 234161',
+    'Обращайтесь в приёмную.\nС уважением, Светлана Иванова',
+    'Свяжитесь с приёмной.',
+    'Просим обратиться в приёмную.',
+    'Обратитесь к нашему отделу.',
+    'Обратитесь в отдел информационных технологий.',
+    'Свяжитесь с отделом по работе с клиентами.',
+  ])('распознаёт безопасные варианты перенаправления на общий контакт: %s', async (authoredReply) => {
+    mockAiResult();
+    const res = await qualifyQuotedProposalReply(authoredReply);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it('личная просьба позвонить и обсудить остаётся лидом даже с подписью и цитатой', async () => {
+    mockAiResult({
+      proposal_seen: true,
+      interest_signals: ['просьба позвонить и обсудить внедрение'],
+    });
+    const res = await qualifyQuotedProposalReply(
+      'Позвоните мне завтра, обсудим внедрение.\n+7 (3522) 234161',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it.each([
+    'Обратитесь в отдел закупок пришлите КП.',
+    'Обратитесь в отдел продаж обсудить внедрение.',
+    'Позвоните в отдел закупок стоимость интересует.',
+    'Напишите в отдел КП.',
+    'Напишите в отдел цену.',
+    'Позвоните в отдел обсудим.',
+    'Напишите в отдел заявку.',
+    'Напишите в отдел реквизиты.',
+    'Напишите в отдел счёт.',
+    'Позвоните в отдел согласуем.',
+    'Звоните в отдел покажем.',
+    'Напишите в отдел образец.',
+    'Позвоните в отдел оплатим.',
+  ])('упоминание отдела не скрывает отдельный коммерческий сигнал: %s', async (replyText) => {
+    mockAiResult({
+      proposal_seen: true,
+      interest_signals: ['конкретный коммерческий сигнал'],
+    });
+    const res = await qualifyQuotedProposalReply(replyText);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it('совпавший кастомный критерий может считать перенаправление в приёмную лидом', async () => {
+    mockAiResult({
+      is_lead: false,
+      needs_review: true,
+      custom_criteria_matched: true,
+      interest_signals: ['передан общий номер приёмной'],
+    });
+    const res = await qualifyQuotedProposalReply(
+      'Обращайтесь, пожалуйста, в приёмную.\n+7 (3522) 234161',
+      'Обращение в приёмную или по переданному общему номеру = лид.',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.customCriteriaMatched).toBe(true);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it('нерелевантный кастомный критерий не отключает защиту от перенаправления на общий контакт', async () => {
+    mockAiResult({
+      is_lead: true,
+      needs_review: false,
+      custom_criteria_matched: false,
+      interest_signals: ['модель ошибочно приняла приёмную за следующий шаг'],
+    });
+    const res = await qualifyQuotedProposalReply(
+      'Обращайтесь, пожалуйста, в приёмную.\n+7 (3522) 234161',
+      'Запрос цены или сметы = лид.',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.customCriteriaMatched).toBe(false);
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(false);
+    expect(res.reason).toContain('общий контакт');
   });
 
   it('прямой CTA без восстановленного исходящего письма доходит до ИИ и остаётся лидом', async () => {
