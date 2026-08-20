@@ -22,9 +22,12 @@ describe('BaseConstructor deploy drain', () => {
     )?.[1];
 
     expect(baseConstructorBlock).toBeDefined();
-    expect(baseConstructorBlock).toContain('portal-worker-baseconstructor');
-    expect(baseConstructorBlock).toContain('portal-worker-baseconstructor-2');
-    expect(baseConstructorBlock).toContain('portal-worker-baseconstructor-3');
+    for (const replica of [1, 2, 3, 4, 5, 6]) {
+      const suffix = replica === 1 ? '' : `-${replica}`;
+      expect(baseConstructorBlock).toContain(
+        `portal-worker-baseconstructor${suffix}`,
+      );
+    }
     expect(genericContainerBlock).not.toContain('baseconstructor');
     expect(drainWorker).toContain('docker stop -t 5 "$c" 2>/dev/null || true &');
     expect(drainWorker).toContain(
