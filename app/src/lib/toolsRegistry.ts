@@ -78,6 +78,7 @@ export const ALL_TOOL_IDS = [
   'reputation-finder',
   '2gis-parser',
   'our-bases',
+  'inn-enrich',
   'sales-chat-analyzer',
   'hypothesis-engine',
 ] as const;
@@ -396,6 +397,15 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     href: '/tools/our-bases',
     accentColor: 'blue',
   },
+  'inn-enrich': {
+    id: 'inn-enrich',
+    title: 'Обогащение по ИНН',
+    title_en: 'INN Enrichment',
+    description: 'Загрузите файл с ИНН — получите его обратно с контактами, адресом, ОКВЭД и финансами из «Нашей базы баз».',
+    description_en: 'Upload a file with tax IDs, get it back enriched with contacts, addresses, and financials from the company directory.',
+    href: '/tools/inn-enrich',
+    accentColor: 'emerald',
+  },
   'sales-chat-analyzer': {
     id: 'sales-chat-analyzer',
     title: 'Анализатор тг-переписок',
@@ -431,7 +441,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Базы и данные',
     label_en: 'Databases and data',
-    toolIds: ['done-for-you', 'base-constructor', 'databases', 'database-review', 'our-bases'],
+    toolIds: ['done-for-you', 'base-constructor', 'databases', 'database-review', 'our-bases', 'inn-enrich'],
   },
   {
     label: 'Парсеры и поиск лидов',

@@ -30,10 +30,18 @@ describe('buildSystemPrompt — дефолтные критерии лида', (
     expect(prompt).toContain('ставь is_lead=false, needs_review=false');
   });
 
-  it('неоднозначный интерес и запрос разъяснения — НЕ лид, а needs_review', () => {
+  it('положительный интерес после оффера — лид, а интерес без контекста и запрос разъяснения — needs_review', () => {
     const prompt = _private.buildSystemPrompt(null, null);
 
-    expect(prompt).toContain('«интересно» без конкретного следующего шага');
+    expect(prompt).toContain('собственный положительный интерес к полученному офферу');
+    expect(prompt).toContain('Положительный интерес к подтверждённому офферу сам по себе является коммерческим намерением');
+    expect(prompt).toContain('Переданное исходящее письмо до ответа содержит развёрнутое предложение');
+    expect(prompt).toContain('Короткий follow-up после него не отменяет подтверждённый контекст оффера');
+    expect(prompt).toContain('После подтверждённого оффера');
+    expect(prompt).toContain('«интересно», «нам интересно»');
+    expect(prompt).toContain('«Надеюсь на возможное сотрудничество»');
+    expect(prompt).toContain('ставь is_lead=true, needs_review=false');
+    expect(prompt).toContain('Без подтверждённого оффера одиночное «интересно»');
     expect(prompt).toContain('«расскажите подробнее» без конкретного следующего шага — ставь is_lead=false, needs_review=true');
     expect(prompt).toMatch(/запрос РАЗЪЯСНЕНИЯ/i);
     expect(prompt).toContain('is_lead=false, needs_review=true');
@@ -42,6 +50,9 @@ describe('buildSystemPrompt — дефолтные критерии лида', (
   it('соседние правила не сломаны: контакт-ответ без интереса и автоответы — не лид', () => {
     const prompt = _private.buildSystemPrompt(null, null);
     expect(prompt).toMatch(/ответ на запрос контакта без интереса к решению/i);
+    expect(prompt).toMatch(/при[её]мную.*общему номеру/i);
+    expect(prompt).toContain('не является коммерческим CTA');
+    expect(prompt).toContain('даже если предложение процитировано');
     expect(prompt).toContain('Автоответ/отпуск');
     expect(prompt).toContain('Запрос контакта ответственного — это НЕ предложение');
   });
