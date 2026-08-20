@@ -107,6 +107,7 @@ const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
   'reputation-finder': ShieldAlert,
   '2gis-parser': MapPin,
   'our-bases': Database,
+  'inn-enrich': FileSpreadsheet,
   'sales-chat-analyzer': TelegramIcon,
   'hypothesis-engine': Telescope,
 };
