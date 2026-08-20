@@ -4225,7 +4225,7 @@ Here&apos;s the profile of the person you want to compliment:
                   Кто считается лидом?
                 </h3>
                 <p className="text-gray-600 leading-relaxed mb-4">
-                  Лидом считается человек, который непосредственно заинтересован в звонке / покупке / тесте и другом колл-ту-экшене, который мы закладывали в оффер.
+                  Лидом считается человек, который положительно заинтересован в нашем предложении, готов к звонку / покупке / тесту или выполнил другой колл-ту-экшен, который мы закладывали в оффер. Ответ «интересно» после конкретного предложения и выраженная готовность к сотрудничеству тоже считаются лидом.
                 </p>
 
                 <div className="grid md:grid-cols-2 gap-4">
@@ -4242,7 +4242,7 @@ Here&apos;s the profile of the person you want to compliment:
                       </li>
                       <li className="flex items-start gap-2">
                         <span className="text-red-400 mt-1">•</span>
-                        Шаблонные запросы КП от менеджеров (если это на первое сообщение — высылаем наше второе)
+                        Общую просьбу прислать информацию или материалы без запроса КП, цены и без другого CTA
                       </li>
                       <li className="flex items-start gap-2">
                         <span className="text-red-400 mt-1">•</span>
@@ -4250,7 +4250,11 @@ Here&apos;s the profile of the person you want to compliment:
                       </li>
                       <li className="flex items-start gap-2">
                         <span className="text-red-400 mt-1">•</span>
-                        Тех, кто подумает и сам свяжется
+                        «Если коллегам будет интересно — они свяжутся» без собственного интереса отправителя
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="text-red-400 mt-1">•</span>
+                        Простое перенаправление в приёмную, отдел или на общий номер без собственного интереса
                       </li>
                     </ul>
                   </div>
@@ -4276,7 +4280,11 @@ Here&apos;s the profile of the person you want to compliment:
                       </li>
                       <li className="flex items-start gap-2">
                         <span className="text-green-400 mt-1">•</span>
-                        Сказал, что интересно, но просил связаться позже
+                        Сказал, что ему интересно после нашего конкретного предложения — даже без назначенного следующего шага
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="text-green-400 mt-1">•</span>
+                        Выразил надежду или готовность к возможному сотрудничеству
                       </li>
                       <li className="flex items-start gap-2">
                         <span className="text-green-400 mt-1">•</span>
