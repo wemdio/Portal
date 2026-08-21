@@ -17,6 +17,7 @@ import { recoverStalePreparingWebsiteEnrichmentJobs } from '@/lib/enrich/website
 import { runBriefScoringJob } from '@/lib/briefScoring/briefScoringWorker';
 import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
 import { runEmailValidationJob } from '@/lib/emailValidation/emailValidationWorker';
+import { runInnEnrichJob } from '@/lib/innEnrich/runJob';
 import { runBugorSmtpValidation } from '@/lib/bugorOutreach/smtpValidationWorker';
 import { runNashSmtpValidation } from '@/lib/nashOutreach/smtpValidationWorker';
 import { collectRawSignals } from '@/lib/nashOutreach/collectLeads';
@@ -154,6 +155,14 @@ async function startupRecovery(): Promise<void> {
     .select('id');
   if (evErr) log('warn', 'Startup recovery: email_validation_jobs update failed', evErr);
   else if (evJobs?.length) log('info', `Startup recovery: reset ${evJobs.length} email_validation_jobs to pending`);
+
+  const { data: innJobs, error: innErr } = await db
+    .from('inn_enrich_jobs')
+    .update({ status: 'pending' })
+    .eq('status', 'running')
+    .select('id');
+  if (innErr) log('warn', 'Startup recovery: inn_enrich_jobs update failed', innErr);
+  else if (innJobs?.length) log('info', `Startup recovery: reset ${innJobs.length} inn_enrich_jobs to pending`);
 
   // Yandex Direct parser — сбрасываем 'processing' в 'pending'. Полный
   // повтор безопасен: дедуп по UNIQUE(job_id, domain) не даст дублей строк
@@ -324,6 +333,30 @@ async function claimEmailValidationJob(): Promise<string | null> {
   return claimed?.id as string ?? null;
 }
 
+async function claimInnEnrichJob(): Promise<string | null> {
+  const db = supabaseAdmin!;
+
+  const { data: pending } = await db
+    .from('inn_enrich_jobs')
+    .select('id')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (!pending) return null;
+
+  const { data: claimed } = await db
+    .from('inn_enrich_jobs')
+    .update({ status: 'running', started_at: new Date().toISOString() })
+    .eq('id', pending.id)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
+
+  return claimed?.id as string ?? null;
+}
+
 async function claimLeadImportJob(): Promise<string | null> {
   const db = supabaseAdmin!;
 
@@ -481,6 +514,13 @@ async function pollOnce(): Promise<boolean> {
     return true;
   }
 
+  const innJobId = await claimInnEnrichJob();
+  if (innJobId) {
+    log('info', `Running inn-enrich job ${innJobId}`);
+    await runInnEnrichJob(innJobId);
+    return true;
+  }
+
   try {
     const bugorCount = await runBugorSmtpValidation();
     if (bugorCount > 0) {
@@ -562,6 +602,7 @@ const REALTIME_TABLES = [
   'brief_scoring_jobs',
   'yandex_maps_jobs',
   'email_validation_jobs',
+  'inn_enrich_jobs',
   'lead_import_jobs',
   'yandex_direct_jobs',
 ];
