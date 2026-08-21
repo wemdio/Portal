@@ -655,6 +655,41 @@ services:
     networks:
       - portal-network
 
+  worker-vertical-engine-v2:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-vertical-engine-v2
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - OPENROUTER_HYPOTHESIS_ENGINE_API_KEY=${OPENROUTER_HYPOTHESIS_ENGINE_API_KEY}
+      - OPENROUTER_BRIEF_API_KEY=${OPENROUTER_BRIEF_API_KEY}
+      - VE_MODEL_RESEARCH=openai/gpt-5.5
+      - VE_MODEL_CHAIN=openai/gpt-5.5
+      - VE_MODEL_BULK=openai/gpt-5.5
+      - SERPER_API_KEY=${SERPER_API_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_KIND=vertical-engine-v2
+    stop_grace_period: 5m
+    labels:
+      - autoheal=true
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/vertical-engine-v2-worker-heartbeat && test $$(( $$(date +%s) - $$(cat /tmp/vertical-engine-v2-worker-heartbeat | cut -c1-10) )) -lt 300 || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   worker-byo-send:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-byo-send

@@ -59,6 +59,10 @@ switch (kind) {
   case 'hypothesis-engine':
     run('./hypothesisEngine');
     break;
+  case 'verticalenginev2':
+  case 'vertical-engine-v2':
+    run('./verticalEngineV2');
+    break;
   case 'aicaller':
     run('./aiCaller');
     break;
