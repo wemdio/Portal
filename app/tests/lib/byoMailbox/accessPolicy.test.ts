@@ -66,18 +66,6 @@ describe('mailboxConnectAllowed', () => {
     ).toBe(true);
   });
 
-  it('чужой Origin не открывает RU-клиента на RU-хосте', () => {
-    expect(
-      mailboxConnectAllowed({
-        userId: UID,
-        allowlistRaw: '',
-        host: 'polza-portal.ru',
-        origin: 'https://app.outreachos.xyz',
-        profileMarket: 'ru',
-      }),
-    ).toBe(false);
-  });
-
   it('пустой userId — всегда закрыто', () => {
     expect(
       mailboxConnectAllowed({

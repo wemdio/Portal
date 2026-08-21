@@ -1,11 +1,14 @@
 /** Колонки БД → подписи в ENG-кабинете. Имя провайдера наружу не тащим. */
 
-export function mailboxSendingView(row: {
-  instantly_status?: string | null;
-  instantly_error?: string | null;
-}): { sendingStatus: string | null; sendingError: string | null } {
+function optionalText(value: unknown): string | null {
+  if (value == null) return null;
+  return typeof value === 'string' ? value : String(value);
+}
+
+export function mailboxSendingView(row: object): { sendingStatus: string | null; sendingError: string | null } {
+  const rec = row as Record<string, unknown>;
   return {
-    sendingStatus: row.instantly_status ?? null,
-    sendingError: row.instantly_error ?? null,
+    sendingStatus: optionalText(rec.instantly_status),
+    sendingError: optionalText(rec.instantly_error),
   };
 }
