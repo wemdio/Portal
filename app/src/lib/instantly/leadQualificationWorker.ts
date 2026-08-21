@@ -50,9 +50,13 @@ const PROJECT_BATCH_SIZE = 100;
  */
 const TRANSIENT_QUALIFY_ERROR_RE =
   /\b(?:429|500|502|503|504)\b|overload|rate.?limit|fetch failed|network error|timed?.?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|aborted|failed after retries/i;
+const OWNERSHIP_DEFER_ERROR_PREFIX = 'Reply ownership deferred';
 
 export function isTransientQualifyError(message: string): boolean {
-  return TRANSIENT_QUALIFY_ERROR_RE.test(message);
+  return (
+    message.startsWith(OWNERSHIP_DEFER_ERROR_PREFIX) ||
+    TRANSIENT_QUALIFY_ERROR_RE.test(message)
+  );
 }
 
 /** Кэш пробы колонок сирот (reply_out_of_campaign/eaccount), TTL 60с. */
@@ -657,6 +661,8 @@ export async function qualifyOneReply(
      *    кабинет собирает блок «Ответы вне кампании».
      */
     outOfCampaign?: boolean;
+    /** Others watchdog already matched prefetched lastOutbound across campaigns. */
+    prefetchedParentMatched?: boolean;
   },
 ): Promise<void> {
   const providerCampaignId = reply.campaign_id;
@@ -683,13 +689,19 @@ export async function qualifyOneReply(
     leadEmail,
     accountId,
     prefetchedContext,
+    // Others reaches this function only after comparing the orphan reply with
+    // sent mail across candidate campaigns. Preserve that already-proven
+    // parent even when the reply has no provider thread id or quoted body.
+    trustPrefetchedParent: opts?.prefetchedParentMatched === true,
   });
   if (ownership.status === 'defer') {
-    workerLog(
-      'warn',
-      `reply ownership deferred for ${reply.id ?? '?'} (provider campaign ${providerCampaignId}): ${ownership.reason}`,
+    // Throw into the existing bounded retry machinery. A normal return would
+    // be counted as success by polling/Others and would permanently ACK a
+    // webhook event even though no qualification row was written.
+    throw new Error(
+      `${OWNERSHIP_DEFER_ERROR_PREFIX} for ${reply.id ?? '?'} ` +
+      `(provider campaign ${providerCampaignId}): ${ownership.reason}`,
     );
-    return;
   }
 
   const strayColsOk = await strayColumnsSupported(db);
@@ -1199,9 +1211,11 @@ export async function getCampaignsByAccountCached(): Promise<Map<string, Set<str
  * обе ветки сходятся на UNIQUE-ключе instantly_email_id, поэтому ответ,
  * обработанный здесь, поллинг молча пропускает (dedup-skip) и наоборот.
  *
- * Нагрузку на Instantly /emails НЕ увеличивает: тред дотягивается ОДИН раз (он же
- * проверка готовности + источник настоящего id письма), результат переиспользуется
- * в qualifyReply через prefetchedContext, а перед AI идёт дедуп по instantly_email_id.
+ * Основной тред дотягивается один раз (проверка готовности + настоящий id письма)
+ * и переиспользуется в qualifyReply. Только при ошибочной provider-разметке
+ * или конфликтующих mailbox mappings ownership-resolver тратит не более двух
+ * account-wide запросов на search/sent; неполная конфликтная выдача уходит на
+ * ручную проверку. Перед AI обе ветки сходятся на дедупе instantly_email_id.
  */
 export async function drainWebhookQueue(): Promise<number> {
   if (!drainEnabled() || !supabaseAdmin) return 0;
@@ -1267,6 +1281,7 @@ export async function drainWebhookQueue(): Promise<number> {
 
     if (fetched > 0) await new Promise((r) => setTimeout(r, interDelay));
     fetched++;
+    let replyForError: Email | null = null;
     try {
       // Один вызов Instantly: проверка готовности + источник настоящего id письма.
       const ctx = await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId);
@@ -1276,7 +1291,15 @@ export async function drainWebhookQueue(): Promise<number> {
           // Ответ ещё не проиндексирован Instantly → ретрай на следующем тике. НЕ
           // пишем строку квалификации, иначе её instantly_email_id отравит дедуп
           // поллинга и заморозит ответ навсегда.
-          await db.from('instantly_webhook_events').update({ processed: false }).eq('id', row.id);
+          const { error: contextRequeueError } = await db
+            .from('instantly_webhook_events')
+            .update({ processed: false })
+            .eq('id', row.id);
+          if (contextRequeueError) {
+            throw new Error(
+              `Webhook empty-context requeue failed: ${contextRequeueError.message}`,
+            );
+          }
         }
         // Старое + всё ещё нет контекста → оставляем acked; бэкап — поллинг.
         continue;
@@ -1289,6 +1312,7 @@ export async function drainWebhookQueue(): Promise<number> {
         campaign_id: ctx.replyEmail.campaign_id ?? campaignId,
       } as Email;
       if (!reply.id) continue; // без id невозможен дедуп-конвердж — пропускаем
+      replyForError = reply;
 
       // Дедуп по авторитетному id ДО AI: если поллинг (или прошлый drain) уже
       // квалифицировал — пропускаем без вызова модели.
@@ -1300,6 +1324,7 @@ export async function drainWebhookQueue(): Promise<number> {
       if (existing) continue;
 
       await qualifyOneReply(db, reply, apiKey, accountId, ctx);
+      transientRetryCount.delete(reply.id);
       qualified++;
 
       // Провенанс (best-effort): связать строку квалификации с её событием.
@@ -1309,7 +1334,82 @@ export async function drainWebhookQueue(): Promise<number> {
         .eq('instantly_email_id', reply.id)
         .is('webhook_event_id', null);
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const retryKey = replyForError?.id ?? `webhook:${row.id}`;
+      let visibleErrorMessage = message;
       workerLog('error', `drain: failed on event ${row.id} (${leadEmail})`, err);
+
+      if (isTransientQualifyError(message)) {
+        const attempts = (transientRetryCount.get(retryKey) ?? 0) + 1;
+        if (attempts < MAX_TRANSIENT_RETRIES) {
+          // The event was claimed before qualification. Put it back so the
+          // same real reply can retry instead of being silently ACKed.
+          const { error: requeueError } = await db
+            .from('instantly_webhook_events')
+            .update({ processed: false })
+            .eq('id', row.id);
+          if (!requeueError) {
+            transientRetryCount.set(retryKey, attempts);
+            workerLog(
+              'warn',
+              `drain: transient failure for ${retryKey} ` +
+              `(${attempts}/${MAX_TRANSIENT_RETRIES}) — event requeued`,
+            );
+            continue;
+          }
+
+          // Claim is still ACKed. Fall through to a visible error row instead
+          // of logging a retry that never actually reached the queue.
+          transientRetryCount.delete(retryKey);
+          visibleErrorMessage =
+            `${message}; webhook requeue failed: ${requeueError.message}`;
+          workerLog(
+            'error',
+            `drain: requeue failed for ${retryKey}: ${requeueError.message} — writing error row`,
+          );
+        }
+        if (attempts >= MAX_TRANSIENT_RETRIES) {
+          transientRetryCount.delete(retryKey);
+          workerLog(
+            'error',
+            `drain: transient failures exhausted for ${retryKey} — writing error row`,
+          );
+        }
+      }
+
+      const failedReply = replyForError;
+      const { error: insertError } = await db
+        .from('instantly_lead_qualifications')
+        .insert({
+          campaign_id: failedReply?.campaign_id ?? campaignId,
+          lead_email: failedReply?.from_address_email ?? leadEmail,
+          thread_id: failedReply?.thread_id ?? row.thread_id,
+          instantly_email_id: failedReply?.id ?? `webhook:${row.id}`,
+          reply_timestamp: failedReply?.timestamp_email ?? null,
+          status: 'error',
+          error_message: visibleErrorMessage.slice(0, 500),
+          webhook_event_id: row.id,
+        });
+      if (insertError) {
+        workerLog('warn', `drain: error-row insert failed for event ${row.id}: ${insertError.message}`);
+        // A unique conflict means another path already left a visible row.
+        // For any real write failure, reopen the event so it is not silently
+        // ACKed without either a qualification or an error record.
+        if (insertError.code !== '23505') {
+          const { error: reopenError } = await db
+            .from('instantly_webhook_events')
+            .update({ processed: false })
+            .eq('id', row.id);
+          if (reopenError) {
+            workerLog(
+              'error',
+              `drain: event ${row.id} could not be reopened after error-row failure: ${reopenError.message}`,
+            );
+          } else {
+            workerLog('warn', `drain: event ${row.id} reopened after error-row failure`);
+          }
+        }
+      }
     }
   }
   if (qualified > 0) workerLog('info', `drain: qualified ${qualified} reply(s) from webhook queue`);

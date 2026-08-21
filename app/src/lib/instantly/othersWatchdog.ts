@@ -734,6 +734,11 @@ export async function pollOthersOnce(): Promise<number> {
       await qualifyOneReply(db, reply, apiKey, chosen.accountId, ctx, {
         clientDmOnlyOnLead: true,
         outOfCampaign,
+        // A subject/body match is authoritative only when this mailbox has a
+        // single qualifiable campaign. With several candidates the first match
+        // may be a shared template, so ownership must run its cross-owner
+        // evidence checks instead of trusting probe order.
+        prefetchedParentMatched: candidates.length === 1,
       });
       processed++;
       if (email.id) transientRetryCount.delete(email.id);

@@ -63,6 +63,12 @@ export interface MockSupabaseSeed {
    */
   errorInserts?: Record<string, { code: string; message: string; commitRow?: boolean }>;
   /**
+   * Прицельная ошибка UPDATE. `patchIncludes` позволяет уронить только один
+   * переход состояния (например processed=false), не ломая claim-update той
+   * же таблицы.
+   */
+  errorUpdates?: Record<string, { message: string; patchIncludes?: Row }>;
+  /**
    * Обработчики RPC-функций (`db.rpc('search_pdl_companies', params)`):
    * имя функции → (params, db) → { data, error? }. Хендлер получает сам мок,
    * чтобы читать посеянные таблицы (getRows) и воспроизводить семантику
@@ -290,6 +296,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
     let errorMessage = seed.errorTables?.[table];
     const selectError = seed.errorSelects?.[table];
     const insertError = seed.errorInserts?.[table];
+    const updateError = seed.errorUpdates?.[table];
     const filters: Filter[] = [];
     const orGroups: Filter[][][] = []; // list of (DNF) constraints; each must hold
     let mode: 'select' | 'insert' | 'upsert' | 'update' | 'delete' = 'select';
@@ -466,6 +473,20 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
       then: <T>(onFulfilled?: (v: { data: Row[]; error: null; count: number }) => T) => {
         if (mode === 'insert' && insertError) {
           return Promise.resolve({ ...failInsert(insertError), count: 0 } as never).then(onFulfilled as never);
+        }
+        const updateShouldFail =
+          mode === 'update' &&
+          pendingUpdate &&
+          updateError &&
+          Object.entries(updateError.patchIncludes ?? {}).every(
+            ([key, value]) => pendingUpdate?.[key] === value,
+          );
+        if (updateShouldFail) {
+          return Promise.resolve({
+            data: null as never,
+            error: { message: updateError.message } as never,
+            count: 0,
+          }).then(onFulfilled as never);
         }
         return errorMessage
           ? Promise.resolve({ data: null as never, error: { message: errorMessage } as never, count: 0 }).then(onFulfilled as never)

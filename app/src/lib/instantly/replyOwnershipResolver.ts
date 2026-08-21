@@ -6,16 +6,16 @@ import {
   parseAccountCampaignMappingItems,
 } from './accountCampaignMappings';
 import { fetchThreadContext, getBodyText, type ThreadContext } from './leadQualifier';
-import type { Email } from './types';
+import { CampaignStatus, type Email } from './types';
 
 const MAPPING_POSITIVE_TTL_MS = 10 * 60 * 1000;
 const MAPPING_NEGATIVE_TTL_MS = 60 * 1000;
 const MAPPING_CACHE_MAX = 1_500;
-const MAX_PARENT_CAMPAIGN_PROBES = 8;
+const MAX_OWNERSHIP_EVIDENCE_CALLS = 2;
 
 interface MappedCampaigns {
   allCampaignIds: string[];
-  activeCampaignIds: string[];
+  currentCampaignIds: string[];
 }
 
 type MappingCacheEntry = { at: number; value: MappedCampaigns };
@@ -147,22 +147,25 @@ async function getMappedCampaigns(mailbox: string, accountId?: string): Promise<
 
   const raw = await instantly.getAccountCampaignMappings(mailbox, { accountId });
   // getAccountCampaignMappings drains every provider cursor (the live endpoint
-  // otherwise defaults to 10). Keep historical status=0/3 assignments for
-  // late replies, but prefer status=1 as the current configured pool.
+  // otherwise defaults to 10). Draft/completed (0/3) assignments are history;
+  // paused, subsequence and temporary account-health states still own replies.
   const items = parseAccountCampaignMappingItems(raw)
     .map((item) => ({
       id: mappingCampaignId(item),
-      active: item.status === 1,
+      current:
+        typeof item.status === 'number' &&
+        item.status !== CampaignStatus.Draft &&
+        item.status !== CampaignStatus.Completed,
       createdAt: Date.parse(item.timestamp_created ?? '') || 0,
     }))
-    .filter((item): item is { id: string; active: boolean; createdAt: number } =>
+    .filter((item): item is { id: string; current: boolean; createdAt: number } =>
       Boolean(item.id),
     )
-    .sort((a, b) => Number(b.active) - Number(a.active) || b.createdAt - a.createdAt);
+    .sort((a, b) => Number(b.current) - Number(a.current) || b.createdAt - a.createdAt);
   const value: MappedCampaigns = {
     allCampaignIds: [...new Set(items.map((item) => item.id))],
-    activeCampaignIds: [
-      ...new Set(items.filter((item) => item.active).map((item) => item.id)),
+    currentCampaignIds: [
+      ...new Set(items.filter((item) => item.current).map((item) => item.id)),
     ],
   };
   mappingCache.set(key, { at: Date.now(), value });
@@ -255,13 +258,31 @@ function projectIdFromOwnerKey(ownerKey: string): string | null {
   return ownerKey.startsWith('project:') ? ownerKey.slice('project:'.length) : null;
 }
 
-interface ParentCandidateSearch {
+interface CampaignEvidence {
   parents: Array<{ email: Email; score: number }>;
   contextEmails: Email[];
 }
 
+interface WorkspaceEvidenceResult {
+  evidence: Map<string, CampaignEvidence>;
+  /** Every provider page relevant to this bounded lookup was consumed. */
+  complete: boolean;
+}
+
+interface CampaignParentMatch {
+  campaignId: string;
+  parent: Email;
+  score: number;
+  campaignEmails: Email[];
+}
+
 function emailAddressTokens(value: string | null | undefined): string[] {
   return (value ?? '').toLowerCase().match(/[a-z0-9._%+\-]+@[a-z0-9.\-]+/g) ?? [];
+}
+
+function jsonAddressTokens(value: Email['from_address_json']): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => emailAddressTokens(entry?.address));
 }
 
 function emailBelongsToReply(
@@ -278,70 +299,215 @@ function emailBelongsToReply(
     ...emailAddressTokens(email.from_address_email),
     ...emailAddressTokens(email.to_address_email_list),
     ...emailAddressTokens(email.cc_address_email_list),
+    ...jsonAddressTokens(email.from_address_json),
+    ...jsonAddressTokens(email.to_address_json),
+    ...jsonAddressTokens(email.cc_address_json),
   ];
   return addresses.some((address) => identities.has(address));
 }
 
-async function fetchParentCandidates(
-  campaignId: string,
+function collectCampaignEvidence(
+  campaignIds: string[],
   reply: Email,
   mailbox: string,
   leadEmail: string,
-  accountId?: string,
-): Promise<ParentCandidateSearch> {
-  const identity = (reply.lead ?? leadEmail).trim() || leadEmail;
-  let items: Email[] = [];
-  const searched = await instantly.listEmails(
-    {
-      campaign_id: campaignId,
-      search: identity,
-      mode: 'emode_all',
-      limit: 100,
-    },
-    { accountId },
-  );
-  items = searched.items ?? [];
-
-  // Instantly search occasionally returns only inbound rows. One bounded
-  // campaign-wide sent fallback is used solely on the rare ownership-conflict
-  // path; normal replies pay no extra request.
-  const hasExactOutbound = items.some((email) => {
-    const ours = email.ue_type === 1 || email.ue_type === 3;
-    return ours && normalizeMailbox(email.eaccount) === mailbox;
-  });
-  if (!hasExactOutbound) {
-    const sent = await instantly.listEmails(
-      { campaign_id: campaignId, email_type: 'sent', limit: 100 },
-      { accountId },
-    );
-    const seen = new Set(items.map((email) => email.id));
-    for (const email of sent.items ?? []) {
-      if (!email.id || !seen.has(email.id)) items.push(email);
-    }
-  }
-
+  emails: Email[],
+  trustedParentId: string | null,
+): Map<string, CampaignEvidence> {
+  const campaignSet = new Set(campaignIds);
   const replyAt = emailTs(reply);
   const identities = new Set(
     [reply.lead, leadEmail, reply.from_address_email]
       .flatMap((value) => emailAddressTokens(value))
       .filter(Boolean),
   );
-  const contextEmails = items
-    .filter((email) => (!replyAt || emailTs(email) <= replyAt))
-    .filter((email) => emailBelongsToReply(email, reply, identities));
-  const parents = contextEmails
-    .filter((email) => {
-      const ours = email.ue_type === 1 || email.ue_type === 3;
-      return (
-        ours &&
-        normalizeMailbox(email.eaccount) === mailbox &&
-        (!replyAt || emailTs(email) < replyAt)
+  const unique = new Map<string, Email>();
+  for (const email of emails) {
+    const campaignId = email.campaign_id?.trim();
+    if (!campaignId || !campaignSet.has(campaignId)) continue;
+    if (replyAt && emailTs(email) > replyAt) continue;
+    const isTrustedParent = Boolean(trustedParentId && email.id === trustedParentId);
+    if (!isTrustedParent && !emailBelongsToReply(email, reply, identities)) continue;
+    // The same provider message id can be exposed under both the polluted and
+    // real campaign. Preserve both copies; cross-owner ties become manual.
+    const key = email.id
+      ? `${campaignId}:${email.id}`
+      : `${campaignId}:${email.thread_id ?? ''}:${emailTs(email)}`;
+    if (!unique.has(key)) unique.set(key, email);
+  }
+
+  const evidence = new Map<string, CampaignEvidence>();
+  for (const campaignId of campaignIds) {
+    const contextEmails = [...unique.values()]
+      .filter((email) => email.campaign_id === campaignId)
+      .sort((a, b) => emailTs(a) - emailTs(b));
+    const exactOutbounds = contextEmails
+      .filter((email) => {
+        const ours = email.ue_type === 1 || email.ue_type === 3;
+        return (
+          ours &&
+          normalizeMailbox(email.eaccount) === mailbox &&
+          (!replyAt || emailTs(email) < replyAt)
+        );
+      })
+      .sort((a, b) => emailTs(b) - emailTs(a));
+    evidence.set(campaignId, {
+      parents: exactOutbounds
+        .map((email) => {
+          const outboundAt = emailTs(email);
+          // Cross-owner correction must be chronologically provable. Missing
+          // timestamps otherwise let a later manual send in the same provider
+          // thread masquerade as the parent. The explicit Others trust contract
+          // is the sole exception because that caller matched the send itself.
+          const temporalOrderProven = replyAt > 0 && outboundAt > 0 && outboundAt < replyAt;
+          const inferredScore = temporalOrderProven ? parentScore(reply, email) : 0;
+          // The Others watchdog has already compared this outbound against
+          // every candidate campaign (subject/body) before handing it here.
+          // Keep a stable-thread match stronger, but do not discard that
+          // caller-proven parent merely because the orphan reply lacks quotes.
+          const score = trustedParentId && email.id === trustedParentId
+            ? Math.max(inferredScore, 90)
+            : inferredScore;
+          return { email, score };
+        })
+        .filter((candidate) => candidate.score > 0)
+        .sort((a, b) => b.score - a.score || emailTs(b.email) - emailTs(a.email)),
+      contextEmails,
+    });
+  }
+  return evidence;
+}
+
+async function fetchWorkspaceEvidence(args: {
+  campaignIds: string[];
+  reply: Email;
+  mailbox: string;
+  leadEmail: string;
+  accountId?: string;
+  prefetchedContext: ThreadContext | null;
+  providerCampaignId: string;
+  trustPrefetchedParent: boolean;
+}): Promise<WorkspaceEvidenceResult> {
+  const {
+    campaignIds,
+    reply,
+    mailbox,
+    leadEmail,
+    accountId,
+    prefetchedContext,
+    providerCampaignId,
+    trustPrefetchedParent,
+  } = args;
+  const identity = (reply.lead ?? leadEmail).trim() || leadEmail;
+  const items: Email[] = [];
+  if (prefetchedContext) {
+    for (const email of [
+      ...prefetchedContext.threadEmails,
+      ...(prefetchedContext.lastOutbound ? [prefetchedContext.lastOutbound] : []),
+    ]) {
+      items.push(
+        email.campaign_id
+          ? email
+          : { ...email, campaign_id: providerCampaignId },
       );
-    })
-    .map((email) => ({ email, score: parentScore(reply, email) }))
-    .filter((candidate) => candidate.score > 0)
-    .sort((a, b) => b.score - a.score || emailTs(b.email) - emailTs(a.email));
-  return { parents, contextEmails };
+    }
+  }
+
+  const trustedParentId = trustPrefetchedParent
+    ? prefetchedContext?.lastOutbound?.id?.trim() || null
+    : null;
+  let evidence = collectCampaignEvidence(
+    campaignIds,
+    reply,
+    mailbox,
+    leadEmail,
+    items,
+    trustedParentId,
+  );
+  const trustedParentAlreadyProven = Boolean(
+    trustedParentId &&
+    [...evidence.values()].some((entry) =>
+      entry.parents.some((candidate) => candidate.email.id === trustedParentId),
+    ),
+  );
+  if (trustedParentAlreadyProven) return { evidence, complete: true };
+
+  let calls = 0;
+  let searchCursor: string | undefined;
+  let searchComplete = false;
+  while (calls < MAX_OWNERSHIP_EVIDENCE_CALLS) {
+    const searched = await instantly.listEmails(
+      {
+        search: identity,
+        mode: 'emode_all',
+        limit: 100,
+        ...(searchCursor ? { starting_after: searchCursor } : {}),
+      },
+      { accountId },
+    );
+    calls++;
+    items.push(...(searched.items ?? []));
+    evidence = collectCampaignEvidence(
+      campaignIds,
+      reply,
+      mailbox,
+      leadEmail,
+      items,
+      trustedParentId,
+    );
+    searchCursor = searched.next_starting_after?.trim() || undefined;
+    if (!searchCursor) {
+      searchComplete = true;
+      break;
+    }
+  }
+
+  // A parent from an early page is not enough to correct ownership when later
+  // pages may contain an equally strong parent for another project.
+  if (!searchComplete) return { evidence, complete: false };
+
+  // Instantly's generic search can omit sent rows even when it returned one
+  // apparently strong outbound. Cross-owner routing therefore also verifies
+  // the dedicated sent surface. If search pagination consumed the whole call
+  // budget, fail closed instead of trusting a potentially polluted copy.
+  if (calls >= MAX_OWNERSHIP_EVIDENCE_CALLS) {
+    return { evidence, complete: false };
+  }
+  const sent = await instantly.listEmails(
+    { email_type: 'sent', mode: 'emode_all', limit: 100 },
+    { accountId },
+  );
+  items.push(...(sent.items ?? []));
+  evidence = collectCampaignEvidence(
+    campaignIds,
+    reply,
+    mailbox,
+    leadEmail,
+    items,
+    trustedParentId,
+  );
+  return {
+    evidence,
+    complete: !sent.next_starting_after?.trim(),
+  };
+}
+
+function campaignParentMatches(
+  evidence: Map<string, CampaignEvidence>,
+  campaignIds: string[],
+): CampaignParentMatch[] {
+  return campaignIds.flatMap((campaignId) => {
+    const campaignEvidence = evidence.get(campaignId);
+    const best = campaignEvidence?.parents[0];
+    return best
+      ? [{
+          campaignId,
+          parent: best.email,
+          score: best.score,
+          campaignEmails: campaignEvidence?.contextEmails ?? [],
+        }]
+      : [];
+  });
 }
 
 /**
@@ -357,6 +523,8 @@ export async function resolveEffectiveReplyOwner(args: {
   leadEmail: string;
   accountId?: string;
   prefetchedContext?: ThreadContext | null;
+  /** Caller has already matched prefetched lastOutbound across campaigns. */
+  trustPrefetchedParent?: boolean;
 }): Promise<ReplyOwnershipResolution> {
   const {
     db,
@@ -365,6 +533,7 @@ export async function resolveEffectiveReplyOwner(args: {
     leadEmail,
     accountId,
     prefetchedContext,
+    trustPrefetchedParent = false,
   } = args;
   const providerContext =
     prefetchedContext !== undefined
@@ -411,14 +580,12 @@ export async function resolveEffectiveReplyOwner(args: {
     };
   }
 
-  // A provider campaign in the active exact pool is current authoritative
-  // configuration; historical status=0/3 mappings must not make every normal
-  // reply ambiguous. When provider is absent from the active pool, include
-  // history so a late reply can still recover its original parent campaign.
-  const mappedCampaignIds = mappings.activeCampaignIds.includes(providerCampaignId)
-    ? mappings.activeCampaignIds
-    : mappings.allCampaignIds;
-  const linkIds = [...new Set([providerCampaignId, ...mappedCampaignIds])];
+  // Every exact-mailbox mapping is ownership evidence. Current mappings choose
+  // the representative campaign when all mapped campaigns belong to one owner;
+  // historical mappings remain candidates for late replies.
+  const evidenceCampaignIds = mappings.allCampaignIds;
+  const currentCampaignIds = mappings.currentCampaignIds;
+  const linkIds = [...new Set([providerCampaignId, ...evidenceCampaignIds])];
   const links = await loadOwnershipLinks(db, linkIds);
   if (links.error) {
     return {
@@ -428,21 +595,15 @@ export async function resolveEffectiveReplyOwner(args: {
     };
   }
 
-  const candidateCampaignIds = mappedCampaignIds;
   const ownerKeysByCampaign = new Map(
-    candidateCampaignIds.map((campaignId) => [
+    evidenceCampaignIds.map((campaignId) => [
       campaignId,
       campaignOwnerKeys(links, campaignId),
     ]),
   );
-  const candidateOwnerKeys = [
-    ...new Set(candidateCampaignIds.flatMap(
-      (campaignId) => ownerKeysByCampaign.get(campaignId) ?? [],
-    )),
-  ];
   const candidateProjectIds = [
     ...new Set(
-      candidateCampaignIds.flatMap((campaignId) => [
+      evidenceCampaignIds.flatMap((campaignId) => [
         ...(links.projectsByCampaign.get(campaignId) ?? []),
       ]),
     ),
@@ -453,49 +614,114 @@ export async function resolveEffectiveReplyOwner(args: {
     return {
       status: 'ambiguous',
       providerCampaignId,
-      candidateCampaignIds,
+      candidateCampaignIds: evidenceCampaignIds,
       candidateProjectIds: [...providerProjects],
       reason: `provider campaign ${providerCampaignId} is linked to multiple Portal projects`,
     };
   }
-  const providerMapped = candidateCampaignIds.includes(providerCampaignId);
-  if (providerMapped && candidateCampaignIds.length === 1) {
+
+  const allOwnerKeys = [
+    ...new Set(
+      evidenceCampaignIds.flatMap(
+        (campaignId) => ownerKeysByCampaign.get(campaignId) ?? [],
+      ),
+    ),
+  ];
+  if (allOwnerKeys.length === 1 && !allOwnerKeys[0].startsWith('unknown:')) {
+    const providerMapped = evidenceCampaignIds.includes(providerCampaignId);
+    let chosenCampaignId = providerMapped
+      ? providerCampaignId
+      : currentCampaignIds[0] ?? evidenceCampaignIds[0];
+    let context = chosenCampaignId === providerCampaignId
+      ? providerContext
+      : correctedContext(reply, chosenCampaignId, mailbox, [], null);
+    let reason = `exact mailbox mappings resolve one owner; using ${chosenCampaignId}`;
+
+    // When Instantly attached the inbound to an unrelated campaign — or to a
+    // mapped sibling whose thread contains only the reply — the exact mailbox
+    // still proves the owner. Recover the real parent to keep short answers
+    // such as "интересно" tied to the offer. Evidence errors never change the
+    // already-proven owner; qualification safely continues with known context.
+    if (!providerMapped || !providerContext?.lastOutbound) {
+      try {
+        const workspaceEvidence = await fetchWorkspaceEvidence({
+          campaignIds: evidenceCampaignIds,
+          reply,
+          mailbox,
+          leadEmail,
+          accountId,
+          prefetchedContext: providerContext,
+          providerCampaignId,
+          trustPrefetchedParent,
+        });
+        // All candidate campaigns belong to the same proven owner here, so a
+        // later global sent page cannot introduce a competing specialist.
+        // Use a strong parent already found by search even when the account-wide
+        // sent surface is larger than the bounded enrichment window.
+        const parentMatch = campaignParentMatches(
+          workspaceEvidence.evidence,
+          evidenceCampaignIds,
+        ).sort(
+          (left, right) =>
+            right.score - left.score || emailTs(right.parent) - emailTs(left.parent),
+        )[0];
+        if (parentMatch) {
+          chosenCampaignId = parentMatch.campaignId;
+          context = correctedContext(
+            reply,
+            parentMatch.campaignId,
+            mailbox,
+            parentMatch.campaignEmails,
+            parentMatch.parent,
+          );
+          reason = `exact mailbox resolves one owner and outbound parent ${parentMatch.campaignId}`;
+        }
+      } catch (error) {
+        reason += `; context enrichment unavailable: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
     return {
       status: 'resolved',
       providerCampaignId,
-      effectiveCampaignId: providerCampaignId,
-      effectiveProjectId: [...providerProjects][0] ?? null,
-      context: providerContext,
-      corrected: false,
+      effectiveCampaignId: chosenCampaignId,
+      effectiveProjectId: projectIdFromOwnerKey(allOwnerKeys[0]),
+      context,
+      corrected: chosenCampaignId !== providerCampaignId,
       mailboxVerified: true,
-      reason: 'provider campaign is the exact live mailbox mapping',
+      reason,
     };
   }
 
-  if (candidateCampaignIds.length > MAX_PARENT_CAMPAIGN_PROBES) {
-    if (candidateOwnerKeys.length === 1 && !candidateOwnerKeys[0].startsWith('unknown:')) {
-      const chosenCampaignId = providerMapped ? providerCampaignId : candidateCampaignIds[0];
-      return {
-        status: 'resolved',
-        providerCampaignId,
-        effectiveCampaignId: chosenCampaignId,
-        effectiveProjectId: projectIdFromOwnerKey(candidateOwnerKeys[0]),
-        context: chosenCampaignId === providerCampaignId
-          ? providerContext
-          : correctedContext(reply, chosenCampaignId, mailbox, [], null),
-        corrected: chosenCampaignId !== providerCampaignId,
-        mailboxVerified: true,
-        reason: `exact mailbox resolves one owner across ${candidateCampaignIds.length} campaigns`,
-      };
-    }
+  let workspaceEvidence: WorkspaceEvidenceResult;
+  try {
+    workspaceEvidence = await fetchWorkspaceEvidence({
+      campaignIds: evidenceCampaignIds,
+      reply,
+      mailbox,
+      leadEmail,
+      accountId,
+      prefetchedContext: providerContext,
+      providerCampaignId,
+      trustPrefetchedParent,
+    });
+  } catch (error) {
+    return {
+      status: 'defer',
+      providerCampaignId,
+      reason: `workspace ownership history unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+
+  if (!workspaceEvidence.complete) {
     return {
       status: 'ambiguous',
       providerCampaignId,
-      candidateCampaignIds,
+      candidateCampaignIds: evidenceCampaignIds,
       candidateProjectIds,
-      reason: `mailbox ${mailbox} has ${candidateCampaignIds.length} campaigns across multiple owners; parent probe budget is ${MAX_PARENT_CAMPAIGN_PROBES}`,
+      reason: 'workspace ownership evidence exceeded the bounded page budget',
     };
   }
+  const evidence = workspaceEvidence.evidence;
 
   const matches: Array<{
     campaignId: string;
@@ -504,65 +730,30 @@ export async function resolveEffectiveReplyOwner(args: {
     parent: Email;
     score: number;
     campaignEmails: Email[];
-  }> = [];
-  let parentFetchFailed = false;
-  for (const candidateCampaignId of candidateCampaignIds) {
-    try {
-      const search = await fetchParentCandidates(
-        candidateCampaignId,
-        reply,
-        mailbox,
-        leadEmail,
-        accountId,
-      );
-      const best = search.parents[0];
-      if (!best) continue;
-      matches.push({
-        campaignId: candidateCampaignId,
-        ownerKeys: ownerKeysByCampaign.get(candidateCampaignId) ?? [],
-        projectIds: [...(links.projectsByCampaign.get(candidateCampaignId) ?? [])],
-        parent: best.email,
-        score: best.score,
-        campaignEmails: search.contextEmails,
-      });
-    } catch {
-      parentFetchFailed = true;
-    }
-  }
-
-  // A missing candidate history can hide a competing parent. Never select the
-  // one successful probe in that situation; retry next tick without dedup row.
-  if (parentFetchFailed) {
-    return {
-      status: 'defer',
-      providerCampaignId,
-      reason: 'one or more candidate campaign histories were unavailable',
-    };
-  }
+  }> = campaignParentMatches(evidence, evidenceCampaignIds).map((match) => ({
+    ...match,
+    ownerKeys: ownerKeysByCampaign.get(match.campaignId) ?? [],
+    projectIds: [...(links.projectsByCampaign.get(match.campaignId) ?? [])],
+  }));
 
   if (matches.length === 0) {
-    if (candidateOwnerKeys.length === 1 && !candidateOwnerKeys[0].startsWith('unknown:')) {
-      // Several campaigns can intentionally share one project/client mailbox
-      // pool. With no parent match the owner is still proven; keep the provider
-      // campaign when it is itself mapped, otherwise use mapping order.
-      const chosenCampaignId = providerMapped ? providerCampaignId : candidateCampaignIds[0];
+    // Historical-only assignments are evidence, not a safe default. Without a
+    // strong parent they must stay manual instead of silently reviving an old
+    // campaign/project.
+    if (currentCampaignIds.length === 0) {
       return {
-        status: 'resolved',
+        status: 'ambiguous',
         providerCampaignId,
-        effectiveCampaignId: chosenCampaignId,
-        effectiveProjectId: projectIdFromOwnerKey(candidateOwnerKeys[0]),
-        context: chosenCampaignId === providerCampaignId
-          ? providerContext
-          : correctedContext(reply, chosenCampaignId, mailbox, [], null),
-        corrected: chosenCampaignId !== providerCampaignId,
-        mailboxVerified: true,
-        reason: `exact mailbox resolves one owner; no unique parent, using mapped campaign ${chosenCampaignId}`,
+        candidateCampaignIds: evidenceCampaignIds,
+        candidateProjectIds,
+        reason: `mailbox ${mailbox} has only historical mappings and no strong outbound parent`,
       };
     }
+
     return {
       status: 'ambiguous',
       providerCampaignId,
-      candidateCampaignIds,
+      candidateCampaignIds: evidenceCampaignIds,
       candidateProjectIds,
       reason: `mailbox ${mailbox} maps to multiple owners, but no unique outbound parent was found`,
     };
@@ -580,7 +771,7 @@ export async function resolveEffectiveReplyOwner(args: {
     return {
       status: 'ambiguous',
       providerCampaignId,
-      candidateCampaignIds,
+      candidateCampaignIds: evidenceCampaignIds,
       candidateProjectIds: [
         ...new Set(strongest.flatMap((match) => match.projectIds)),
       ],
