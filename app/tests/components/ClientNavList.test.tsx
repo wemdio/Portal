@@ -78,6 +78,7 @@ describe('ClientNavList — видимость ENG-пункта по market', ()
   it('ru-market: ENG-пункт скрыт, RU-группы на месте', () => {
     renderNav('dashboard', { market: 'ru' });
     expect(screen.queryByRole('link', { name: 'Outreach' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Sending mailboxes' })).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Бриф' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Кампании' })).toBeInTheDocument();
   });
@@ -88,11 +89,13 @@ describe('ClientNavList — видимость ENG-пункта по market', ()
     expect(screen.getByRole('link', { name: 'Бриф' })).toBeInTheDocument();
   });
 
-  it('eng-market: виден ТОЛЬКО ENG-пункт (middleware всё равно уводит с RU-путей)', () => {
+  it('eng-market: только ENG-кабинет и подключение ящиков (RU-пути скрыты)', () => {
     renderNav('eng', { market: 'eng' });
     const links = screen.getAllByRole('link');
-    expect(links).toHaveLength(1);
+    expect(links).toHaveLength(2);
     expect(links[0]).toHaveAttribute('href', '/client/eng');
     expect(links[0]).toHaveTextContent('Outreach');
+    expect(links[1]).toHaveAttribute('href', '/client/eng/mailboxes');
+    expect(links[1]).toHaveTextContent('Sending mailboxes');
   });
 });
