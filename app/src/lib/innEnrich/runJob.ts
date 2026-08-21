@@ -153,7 +153,8 @@ export async function runInnEnrichJob(jobId: string): Promise<void> {
         error_message: null,
         completed_at: new Date().toISOString(),
       })
-      .eq('id', jobId);
+      .eq('id', jobId)
+      .eq('status', 'running');
   } catch (e) {
     await failJob(jobId, e instanceof Error ? e.message : String(e));
   }

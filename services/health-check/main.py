@@ -1140,7 +1140,7 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
     JobMonitorSpec(
         "inn_enrich_jobs", "Обогащение по ИНН", ("pending", "running"),
         ("total", "processed"),
-        "portal-worker",
+        "portal-worker-inn-enrich",
     ),
     JobMonitorSpec(
         "brief_scoring_jobs", "Оценка ЦА", ("pending", "running"),

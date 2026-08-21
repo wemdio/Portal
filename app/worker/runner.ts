@@ -3,7 +3,7 @@
  *
  * Usage:
  *  WORKER_KIND=hh|enghiring|search|enrich|yandexmaps|tgparser|
- *              tgtranscribe|saleschatlogger|saleschatarchive|all (default: all)
+ *              tgtranscribe|saleschatlogger|saleschatarchive|innerenrich|all (default: all)
  */
 
 const kind = String(process.env.WORKER_KIND ?? 'all').trim().toLowerCase();
@@ -44,6 +44,10 @@ switch (kind) {
     break;
   case 'emailvalidation':
     run('./emailvalidation');
+    break;
+  case 'innerenrich':
+  case 'inn-enrich':
+    run('./innEnrich');
     break;
   case 'tgoutreach':
     run('./tgOutreach');

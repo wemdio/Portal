@@ -80,28 +80,30 @@ export default function InnEnrichPage() {
       stopPoll();
       setActiveJobId(jobId);
       setPhase('enriching');
-      pollRef.current = setInterval(() => {
-        void (async () => {
-          try {
-            const data = await authFetchJson<{ job: InnEnrichJob }>(
-              `/api/tools/inn-enrich/jobs/${jobId}`,
-            );
-            setJobs((prev) => {
-              const rest = prev.filter((j) => j.id !== data.job.id);
-              return [data.job, ...rest];
-            });
-            if (data.job.status === 'completed' || data.job.status === 'failed') {
-              stopPoll();
-              setActiveJobId(null);
-              setPhase('idle');
-              if (data.job.status === 'failed') {
-                setError(data.job.error_message ?? 'Обогащение не удалось');
-              }
+      const tick = async () => {
+        try {
+          const data = await authFetchJson<{ job: InnEnrichJob }>(
+            `/api/tools/inn-enrich/jobs/${jobId}`,
+          );
+          setJobs((prev) => {
+            const rest = prev.filter((j) => j.id !== data.job.id);
+            return [data.job, ...rest];
+          });
+          if (data.job.status === 'completed' || data.job.status === 'failed') {
+            stopPoll();
+            setActiveJobId(null);
+            setPhase('idle');
+            if (data.job.status === 'failed') {
+              setError(data.job.error_message ?? 'Обогащение не удалось');
             }
-          } catch {
-            /* сеть моргнула — следующий тик подтянет */
           }
-        })();
+        } catch {
+          /* сеть моргнула — следующий тик подтянет */
+        }
+      };
+      void tick();
+      pollRef.current = setInterval(() => {
+        void tick();
       }, 2000);
     },
     [],

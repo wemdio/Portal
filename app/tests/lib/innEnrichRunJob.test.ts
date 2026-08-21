@@ -26,9 +26,14 @@ jest.mock('@/lib/supabaseAdmin', () => ({
 function thenable(resolved: { data: unknown; error: unknown }) {
   const b: Record<string, unknown> = {};
   const self = () => b;
-  for (const m of ['select', 'eq', 'in']) b[m] = self;
+  for (const m of ['select', 'in']) b[m] = self;
+  b.eq = (...args: unknown[]) => {
+    const last = updatePayloads[updatePayloads.length - 1] as { eqs?: unknown[][] } | undefined;
+    last?.eqs?.push(args);
+    return b;
+  };
   b.update = (payload: unknown) => {
-    updatePayloads.push(payload);
+    updatePayloads.push({ payload, eqs: [] as unknown[][] });
     return b;
   };
   b.maybeSingle = async () => resolved;
@@ -82,7 +87,10 @@ describe('runInnEnrichJob', () => {
     );
     expect(updatePayloads).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ status: 'completed', result_path: 'job-1/result.xlsx' }),
+        expect.objectContaining({
+          payload: expect.objectContaining({ status: 'completed', result_path: 'job-1/result.xlsx' }),
+          eqs: expect.arrayContaining([['status', 'running']]),
+        }),
       ]),
     );
   });
@@ -94,7 +102,9 @@ describe('runInnEnrichJob', () => {
     expect(mockStorageUpload).not.toHaveBeenCalled();
     expect(updatePayloads).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ status: 'failed', error_message: 'statement timeout' }),
+        expect.objectContaining({
+          payload: expect.objectContaining({ status: 'failed', error_message: 'statement timeout' }),
+        }),
       ]),
     );
   });

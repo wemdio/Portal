@@ -395,6 +395,29 @@ services:
     networks:
       - portal-network
 
+  worker-inn-enrich:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-inn-enrich
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_DRAIN_TIMEOUT_MINUTES=${INN_ENRICH_WORKER_DRAIN_TIMEOUT_MINUTES:-30}
+      - WORKER_KIND=innerenrich
+    stop_grace_period: 30m
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+          cpus: '1'
+          pids: 512
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   worker-tg-outreach:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-tg-outreach
