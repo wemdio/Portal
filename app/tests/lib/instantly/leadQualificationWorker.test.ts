@@ -9,6 +9,7 @@ let mockMainDb: MockSupabaseClient | null;
 const listEmails = jest.fn();
 const getLeadsByEmail = jest.fn();
 const getCampaign = jest.fn();
+const getAccountCampaignMappings = jest.fn();
 const getEmail = jest.fn();
 const replyToEmail = jest.fn();
 const sendTestEmail = jest.fn();
@@ -37,6 +38,7 @@ jest.mock('@/lib/instantly/client', () => ({
   listEmails: (...args: unknown[]) => listEmails(...args),
   getLeadsByEmail: (...args: unknown[]) => getLeadsByEmail(...args),
   getCampaign: (...args: unknown[]) => getCampaign(...args),
+  getAccountCampaignMappings: (...args: unknown[]) => getAccountCampaignMappings(...args),
   getEmail: (...args: unknown[]) => getEmail(...args),
   replyToEmail: (...args: unknown[]) => replyToEmail(...args),
   sendTestEmail: (...args: unknown[]) => sendTestEmail(...args),
@@ -92,6 +94,102 @@ function replyEmail(overrides: Partial<Email>): Email {
   } as Email;
 }
 
+function installMailboxOwnershipConflictFixture(options?: { mappingError?: Error }) {
+  const providerCampaignId = 'ritso-current-campaign';
+  const candidateCampaignIds = ['mailbox-owner-campaign-a', 'mailbox-owner-campaign-b'];
+  const ownerMailbox = 'interact@outreach-contact.online';
+  const inbound = replyEmail({
+    id: options?.mappingError ? 'mapping-error-reply' : 'ambiguous-owner-reply',
+    campaign_id: providerCampaignId,
+    from_address_email: 'lead@prospect.example',
+    to_address_email_list: ownerMailbox,
+    eaccount: ownerMailbox,
+    thread_id: 'provider-thread-without-parent',
+    body: { text: 'Давайте обсудим ваше предложение.' },
+  });
+  const providerContext = {
+    replyEmail: inbound,
+    threadEmails: [inbound],
+    lastOutbound: null,
+    // Same local-part is intentional: the old heuristic treats these as one
+    // client even though the exact mailboxes belong to different projects.
+    campaignOutboundMailboxes: ['interact@ritso-project.example'],
+  };
+
+  mockInstantlyDb = createMockSupabase({
+    tables: {
+      project_instantly_campaigns: [
+        { project_id: 'project-provider', campaign_id: providerCampaignId, match_source: 'auto' },
+        { project_id: 'project-owner-a', campaign_id: candidateCampaignIds[0], match_source: 'auto' },
+        { project_id: 'project-owner-b', campaign_id: candidateCampaignIds[1], match_source: 'auto' },
+      ],
+      instantly_lead_qualifications: [],
+    },
+  });
+  mockMainDb = createMockSupabase({
+    tables: {
+      projects: [
+        { id: 'project-provider', client: 'Ritso', specialist_user_id: 'dmitry-id' },
+        { id: 'project-owner-a', client: 'Owner A', specialist_user_id: 'owner-a-id' },
+        { id: 'project-owner-b', client: 'Owner B', specialist_user_id: 'owner-b-id' },
+      ],
+      profiles: [
+        { id: 'dmitry-id', full_name: 'Дмитрий К.', email: 'dmitry@example.com' },
+        { id: 'owner-a-id', full_name: 'Owner A', email: 'owner-a@example.com' },
+        { id: 'owner-b-id', full_name: 'Owner B', email: 'owner-b@example.com' },
+      ],
+      telegram_links: [
+        { user_id: 'dmitry-id', telegram_id: '111', telegram_username: 'dmitry' },
+        { user_id: 'owner-a-id', telegram_id: '222', telegram_username: 'owner_a' },
+        { user_id: 'owner-b-id', telegram_id: '333', telegram_username: 'owner_b' },
+      ],
+      notifications: [],
+      deadline_notification_log: [],
+    },
+  });
+  getCampaign.mockImplementation(async (campaignId: string) => ({
+    id: campaignId,
+    name: campaignId,
+    email_list: campaignId === providerCampaignId
+      ? ['interact@ritso-project.example']
+      : [ownerMailbox],
+  }));
+  getAccountCampaignMappings.mockImplementation(async (mailbox: string) => {
+    if (options?.mappingError) throw options.mappingError;
+    return mailbox.toLowerCase() === ownerMailbox
+      ? candidateCampaignIds.map((campaignId) => ({
+          campaign_id: campaignId,
+          status: 1,
+          timestamp_created: '2026-07-01T00:00:00.000Z',
+        }))
+      : [];
+  });
+  fetchThreadContext.mockImplementation(async (campaignId: string) =>
+    campaignId === providerCampaignId ? providerContext : null,
+  );
+  // Neither exact-mailbox candidate contains an outbound that can be proven
+  // to be the parent of this reply.
+  listEmails.mockImplementation(async (params: { campaign_id?: string }) =>
+    !params.campaign_id
+      ? { items: [inbound], next_starting_after: null }
+      : { items: [], next_starting_after: null },
+  );
+  qualifyReply.mockResolvedValue({
+    isLead: true,
+    customCriteriaMatched: false,
+    proposalSeen: true,
+    interestSignals: ['requested_discussion'],
+    reason: 'Просит обсудить предложение.',
+    confidence: 0.95,
+    needsReview: false,
+    objectionHandleable: false,
+    objectionDraft: null,
+    threadContext: providerContext,
+  });
+
+  return { providerCampaignId, candidateCampaignIds, ownerMailbox, inbound };
+}
+
 describe('pollAndQualifyReplies', () => {
   const oldLeadKey = process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY;
   const oldBriefKey = process.env.OPENROUTER_BRIEF_API_KEY;
@@ -102,6 +200,7 @@ describe('pollAndQualifyReplies', () => {
     listEmails.mockReset();
     getLeadsByEmail.mockReset().mockResolvedValue([]);
     getCampaign.mockReset().mockResolvedValue({ id: 'linked-campaign', name: 'Кампания Новикова' });
+    getAccountCampaignMappings.mockReset().mockResolvedValue([]);
     getEmail.mockReset();
     replyToEmail.mockReset().mockResolvedValue({ id: 'sent-1' });
     sendTestEmail.mockReset().mockResolvedValue({ id: 'sent-test-1' });
@@ -1234,11 +1333,417 @@ describe('pollAndQualifyReplies', () => {
     expect(String(rows[0].ai_reason)).toContain('kirill@kira-aggregator.ru');
   });
 
-  // Ящики-двойники ОДНОГО клиента (несколько lookalike-доменов — стандарт
-  // аутрича): та же персона или та же база домена ≠ «другой клиент». 13.07
-  // guard увёл живого лида Диспы (vadim@dispa-pro.ru vs vadim@dispa-pro.online)
-  // в needs_review — пин против рецидива.
-  it('does not flag same-client mailbox twins (same persona or same domain base)', async () => {
+  it('routes a provider-mislabeled reply by the exact mailbox and parent outbound to the real project specialist', async () => {
+    const providerCampaignId = 'ritso-campaign';
+    const ownerCampaignId = 'outreachos-campaign';
+    const ownerSiblingCampaignId = 'outreachos-campaign-1';
+    const ownerMailbox = 'interact@outreach-contact.online';
+
+    const inbound = replyEmail({
+      id: 'varlamova-reply',
+      campaign_id: providerCampaignId,
+      from_address_email: 'varlamova@elma-bpm.com',
+      to_address_email_list: ownerMailbox,
+      eaccount: ownerMailbox,
+      lead: 'partners@elma365.com',
+      thread_id: '9c-lxismumVdG63WOaSlSShKCT',
+      timestamp_email: '2026-08-21T06:16:03.000Z',
+      body: { text: 'Я очень жду презентацию, которую смогу показать внутри.' },
+    });
+    const ownerOutbound = replyEmail({
+      id: 'outreachos-parent-outbound',
+      campaign_id: ownerCampaignId,
+      from_address_email: ownerMailbox,
+      to_address_email_list: 'partners@elma365.com',
+      eaccount: ownerMailbox,
+      lead: 'partners@elma365.com',
+      thread_id: '05-lxismumVdG63WOaSlSShKCT',
+      ue_type: 1,
+      timestamp_email: '2026-08-20T14:05:43.000Z',
+      body: { text: 'Мария, что должно произойти, чтобы мы продолжили разговор?' },
+    });
+    const ownerEarlierInbound = replyEmail({
+      id: 'outreachos-earlier-inbound',
+      campaign_id: ownerCampaignId,
+      from_address_email: 'varlamova@elma-bpm.com',
+      to_address_email_list: ownerMailbox,
+      eaccount: ownerMailbox,
+      lead: 'partners@elma365.com',
+      thread_id: '05-lxismumVdG63WOaSlSShKCT',
+      ue_type: 2,
+      timestamp_email: '2026-08-20T13:00:00.000Z',
+      body: { text: 'Да, пришлите презентацию.' },
+    });
+    const incidentContext = {
+      replyEmail: inbound,
+      // Live Instantly behaviour: querying the provider-assigned Ritso
+      // campaign returns only the inbound copies. The actual parent outbound
+      // remains discoverable only in the mailbox-mapped OutreachOS campaign.
+      threadEmails: [inbound],
+      lastOutbound: null,
+      // Ritso has a different exact sender. The same local-part must not make
+      // these mailboxes interchangeable across projects.
+      campaignOutboundMailboxes: ['interact@polzacontacts.ru'],
+    };
+
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [
+          { project_id: 'project-ritso', campaign_id: providerCampaignId, match_source: 'auto' },
+          { project_id: 'project-outreachos', campaign_id: ownerSiblingCampaignId, match_source: 'auto' },
+          { project_id: 'project-outreachos', campaign_id: ownerCampaignId, match_source: 'auto' },
+        ],
+        instantly_lead_qualifications: [],
+      },
+    });
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          {
+            id: 'project-ritso',
+            client: 'Ritso',
+            specialist_user_id: 'dmitry-id',
+            lead_criteria: 'Ritso: лидом считается запрос расчёта.',
+          },
+          {
+            id: 'project-outreachos',
+            client: 'OutreachOS',
+            specialist_user_id: 'sergey-id',
+            lead_criteria: 'OutreachOS: ожидание презентации считается лидом.',
+          },
+        ],
+        profiles: [
+          { id: 'dmitry-id', full_name: 'Дмитрий К.', email: 'dmitry@example.com' },
+          { id: 'sergey-id', full_name: 'Сергей Лазуткин', email: 'sergey@example.com' },
+        ],
+        telegram_links: [
+          { user_id: 'dmitry-id', telegram_id: '111', telegram_username: 'dmitry' },
+          { user_id: 'sergey-id', telegram_id: '222', telegram_username: 'jacob_brown' },
+        ],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+    });
+    getCampaign.mockImplementation(async (campaignId: string) => {
+      if (campaignId === ownerCampaignId) {
+        return { id: ownerCampaignId, name: 'OutreachOS Автоаутрич 2', email_list: [ownerMailbox] };
+      }
+      return {
+        id: providerCampaignId,
+        name: 'БазаПо1С_Ritso_hh.ru_Часть2',
+        email_list: ['interact@polzacontacts.ru'],
+      };
+    });
+    getAccountCampaignMappings.mockImplementation(async (mailbox: string) =>
+      mailbox.toLowerCase() === ownerMailbox
+        ? [
+            { campaign_id: ownerCampaignId, status: 1, timestamp_created: '2026-07-01T00:00:00.000Z' },
+            { campaign_id: ownerSiblingCampaignId, status: 1, timestamp_created: '2026-06-30T00:00:00.000Z' },
+          ]
+        : [],
+    );
+    fetchThreadContext.mockImplementation(async (campaignId: string) =>
+      campaignId === providerCampaignId ? incidentContext : null,
+    );
+    qualifyReply.mockResolvedValue({
+      isLead: true,
+      customCriteriaMatched: false,
+      proposalSeen: true,
+      interestSignals: ['requested_materials'],
+      reason: 'Ждёт обещанную презентацию.',
+      confidence: 0.98,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: incidentContext,
+    });
+    listEmails.mockImplementation(async (params: {
+      campaign_id?: string;
+      email_type?: string;
+      search?: string;
+    }) => {
+      // Main polling surface: provider mislabeled the inbound as Ritso.
+      if (!params.campaign_id) return { items: [inbound], next_starting_after: null };
+      // Ownership evidence must be recovered separately from OutreachOS.
+      if (
+        params.campaign_id === ownerCampaignId &&
+        (params.email_type === 'sent' || params.search)
+      ) {
+        return { items: [ownerOutbound, ownerEarlierInbound], next_starting_after: null };
+      }
+      return { items: [], next_starting_after: null };
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(getAccountCampaignMappings).toHaveBeenCalledWith(ownerMailbox, {
+      accountId: 'main',
+    });
+
+    const qualification = mockInstantlyDb!.getRows('instantly_lead_qualifications')[0];
+    const notificationRecipients = mockMainDb!
+      .getRows('notifications')
+      .map((row) => row.user_id);
+    const telegramPayload = sendLeadTelegramAlert.mock.calls[0]?.[0] as
+      | { campaignId?: string; specialistMentions?: Array<{ userId: string }> }
+      | undefined;
+
+    expect({
+      processed,
+      qualifiedCampaign: qualifyReply.mock.calls[0]?.[0],
+      leadCriteria: qualifyReply.mock.calls[0]?.[3]?.leadCriteria,
+      contextReplyCampaign:
+        qualifyReply.mock.calls[0]?.[3]?.prefetchedContext?.replyEmail?.campaign_id,
+      contextParentCampaign:
+        qualifyReply.mock.calls[0]?.[3]?.prefetchedContext?.lastOutbound?.campaign_id,
+      contextEmailIds:
+        qualifyReply.mock.calls[0]?.[3]?.prefetchedContext?.threadEmails?.map(
+          (email: Email) => email.id,
+        ),
+      qualificationCampaign: qualification?.campaign_id,
+      notificationRecipients,
+      telegramCampaign: telegramPayload?.campaignId,
+      telegramRecipients: telegramPayload?.specialistMentions?.map((mention) => mention.userId),
+    }).toEqual({
+      processed: 1,
+      qualifiedCampaign: ownerCampaignId,
+      leadCriteria: 'OutreachOS: ожидание презентации считается лидом.',
+      contextReplyCampaign: ownerCampaignId,
+      contextParentCampaign: ownerCampaignId,
+      contextEmailIds: [
+        'outreachos-earlier-inbound',
+        'outreachos-parent-outbound',
+        'varlamova-reply',
+      ],
+      qualificationCampaign: ownerCampaignId,
+      notificationRecipients: ['sergey-id'],
+      telegramCampaign: ownerCampaignId,
+      telegramRecipients: ['sergey-id'],
+    });
+  });
+
+  it('keeps an exact-mailbox conflict between two project campaigns in needs_review when no parent outbound matches', async () => {
+    installMailboxOwnershipConflictFixture();
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect({
+      processed,
+      statuses: mockInstantlyDb!
+        .getRows('instantly_lead_qualifications')
+        .map((row) => row.status),
+      aiCalls: qualifyReply.mock.calls.length,
+      telegramCalls: sendLeadTelegramAlert.mock.calls.length,
+      notificationRecipients: mockMainDb!
+        .getRows('notifications')
+        .map((row) => row.user_id),
+    }).toEqual({
+      processed: 1,
+      statuses: ['needs_review'],
+      aiCalls: 0,
+      telegramCalls: 0,
+      notificationRecipients: [],
+    });
+  });
+
+  it('keeps a mailbox configured in both the provider and another project in needs_review', async () => {
+    const { providerCampaignId, candidateCampaignIds } =
+      installMailboxOwnershipConflictFixture();
+    getAccountCampaignMappings.mockResolvedValue([
+      { campaign_id: providerCampaignId, status: 1 },
+      { campaign_id: candidateCampaignIds[0], status: 1 },
+    ]);
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect({
+      statuses: mockInstantlyDb!
+        .getRows('instantly_lead_qualifications')
+        .map((row) => row.status),
+      aiCalls: qualifyReply.mock.calls.length,
+      telegramCalls: sendLeadTelegramAlert.mock.calls.length,
+    }).toEqual({
+      statuses: ['needs_review'],
+      aiCalls: 0,
+      telegramCalls: 0,
+    });
+  });
+
+  it('does not use a same-subject outbound addressed to another lead as ownership proof', async () => {
+    const { candidateCampaignIds, ownerMailbox, inbound } =
+      installMailboxOwnershipConflictFixture();
+    inbound.subject = 'Re: Обсудим поставку';
+    inbound.timestamp_email = '2026-08-21T10:00:00.000Z';
+    const wrongRecipientOutbound = replyEmail({
+      id: 'wrong-recipient-outbound',
+      campaign_id: candidateCampaignIds[0],
+      ue_type: 1,
+      eaccount: ownerMailbox,
+      lead: 'another.lead@example.com',
+      to_address_email_list: 'another.lead@example.com',
+      thread_id: 'unrelated-thread',
+      subject: 'Обсудим поставку',
+      timestamp_email: '2026-08-20T10:00:00.000Z',
+    });
+    listEmails.mockImplementation(async (params: { campaign_id?: string }) => {
+      if (!params.campaign_id) return { items: [inbound], next_starting_after: null };
+      return {
+        items: params.campaign_id === candidateCampaignIds[0]
+          ? [wrongRecipientOutbound]
+          : [],
+        next_starting_after: null,
+      };
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect({
+      statuses: mockInstantlyDb!
+        .getRows('instantly_lead_qualifications')
+        .map((row) => row.status),
+      aiCalls: qualifyReply.mock.calls.length,
+      telegramCalls: sendLeadTelegramAlert.mock.calls.length,
+    }).toEqual({
+      statuses: ['needs_review'],
+      aiCalls: 0,
+      telegramCalls: 0,
+    });
+  });
+
+  it('resolves more than eight mailbox campaigns when they all belong to one project', async () => {
+    const providerCampaignId = 'provider-campaign';
+    const candidateCampaignIds = Array.from(
+      { length: 9 },
+      (_, index) => `same-project-campaign-${index + 1}`,
+    );
+    const mailbox = 'owner@single-project.example';
+    const inbound = replyEmail({
+      id: 'many-campaigns-reply',
+      campaign_id: providerCampaignId,
+      eaccount: mailbox,
+      to_address_email_list: mailbox,
+    });
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [
+          { project_id: 'provider-project', campaign_id: providerCampaignId },
+          ...candidateCampaignIds.map((campaign_id) => ({
+            project_id: 'single-owner-project',
+            campaign_id,
+          })),
+        ],
+      },
+    });
+    getAccountCampaignMappings.mockResolvedValue(
+      candidateCampaignIds.map((campaign_id) => ({ campaign_id, status: 1 })),
+    );
+    fetchThreadContext.mockResolvedValue({
+      replyEmail: inbound,
+      threadEmails: [inbound],
+      lastOutbound: null,
+    });
+    listEmails.mockResolvedValue({ items: [], next_starting_after: null });
+
+    const { resolveEffectiveReplyOwner } = await import(
+      '@/lib/instantly/replyOwnershipResolver'
+    );
+    const result = await resolveEffectiveReplyOwner({
+      db: mockInstantlyDb! as unknown as Parameters<typeof resolveEffectiveReplyOwner>[0]['db'],
+      reply: inbound,
+      providerCampaignId,
+      leadEmail: 'lead@example.com',
+      accountId: 'main',
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      status: 'resolved',
+      effectiveCampaignId: candidateCampaignIds[0],
+      effectiveProjectId: 'single-owner-project',
+    }));
+  });
+
+  it('does not ignore a competing self-serve owner when a mailbox also maps to a project', async () => {
+    const providerCampaignId = 'provider-project-campaign';
+    const projectCampaignId = 'mapped-project-campaign';
+    const selfServeCampaignId = 'mapped-self-serve-campaign';
+    const mailbox = 'shared-owner@example.com';
+    const inbound = replyEmail({
+      id: 'project-self-serve-conflict',
+      campaign_id: providerCampaignId,
+      eaccount: mailbox,
+      to_address_email_list: mailbox,
+    });
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [
+          { project_id: 'provider-project', campaign_id: providerCampaignId },
+          { project_id: 'mapped-project', campaign_id: projectCampaignId },
+        ],
+        client_instantly_access: [
+          {
+            client_user_id: 'self-serve-client',
+            resource_type: 'campaign',
+            resource_id: selfServeCampaignId,
+          },
+        ],
+      },
+    });
+    getAccountCampaignMappings.mockResolvedValue([
+      { campaign_id: projectCampaignId, status: 1 },
+      { campaign_id: selfServeCampaignId, status: 1 },
+    ]);
+    fetchThreadContext.mockResolvedValue({
+      replyEmail: inbound,
+      threadEmails: [inbound],
+      lastOutbound: null,
+    });
+    listEmails.mockResolvedValue({ items: [], next_starting_after: null });
+
+    const { resolveEffectiveReplyOwner } = await import(
+      '@/lib/instantly/replyOwnershipResolver'
+    );
+    const result = await resolveEffectiveReplyOwner({
+      db: mockInstantlyDb! as unknown as Parameters<typeof resolveEffectiveReplyOwner>[0]['db'],
+      reply: inbound,
+      providerCampaignId,
+      leadEmail: 'lead@example.com',
+      accountId: 'main',
+    });
+
+    expect(result).toEqual(expect.objectContaining({ status: 'ambiguous' }));
+  });
+
+  it('defers mailbox ownership resolution without writing a row when the exact mapping lookup fails transiently', async () => {
+    installMailboxOwnershipConflictFixture({
+      mappingError: new Error('Instantly API 503: Service Unavailable'),
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect({
+      qualificationRows: mockInstantlyDb!.getRows('instantly_lead_qualifications').length,
+      aiCalls: qualifyReply.mock.calls.length,
+      telegramCalls: sendLeadTelegramAlert.mock.calls.length,
+      notificationRecipients: mockMainDb!
+        .getRows('notifications')
+        .map((row) => row.user_id),
+    }).toEqual({
+      qualificationRows: 0,
+      aiCalls: 0,
+      telegramCalls: 0,
+      notificationRecipients: [],
+    });
+  });
+
+  // Исторический outbound может остаться на старом lookalike-ящике после
+  // ротации. Решение принимает не похожий local-part/domain, а живая exact
+  // mapping конфигурация: физически принявший ящик назначен этой кампании.
+  it('trusts an exact current mailbox mapping over a different historical lookalike mailbox', async () => {
     const cases = [
       // Диспа: та же персона, домены dispa-pro.ru / dispa-pro.online
       { arrived: 'vadim@dispa-pro.ru', mailed: 'vadim@dispa-pro.online' },
@@ -1253,6 +1758,9 @@ describe('pollAndQualifyReplies', () => {
         threadEmails: [replyEmail({ id: `twin-out-${i}`, ue_type: 1, eaccount: c.mailed })],
         lastOutbound: replyEmail({ id: `twin-out-${i}`, ue_type: 1, eaccount: c.mailed }),
       });
+      getAccountCampaignMappings.mockResolvedValue([
+        { campaign_id: 'linked-campaign', status: 1 },
+      ]);
       listEmails.mockResolvedValue({
         items: [replyEmail({ id: `twin-${i}`, eaccount: c.arrived, to_address_email_list: c.arrived })],
         next_starting_after: null,
@@ -1327,6 +1835,12 @@ describe('qualifyOneReply — сирота (outOfCampaign) из Others-конт�
       id: 'self-serve-campaign',
       name: 'OutreachOS Автоаутрич 2',
     });
+    // Self-serve campaigns intentionally have no project_* link. A live exact
+    // mapping to the provider campaign must therefore keep the provider owner,
+    // not turn every reply into an ownership ambiguity.
+    getAccountCampaignMappings.mockReset().mockResolvedValue([
+      { campaign_id: 'self-serve-campaign', status: 1 },
+    ]);
     getEmail.mockReset();
     postHandoffMessage.mockReset().mockResolvedValue(555);
     editHandoffMessage.mockReset().mockResolvedValue(undefined);
