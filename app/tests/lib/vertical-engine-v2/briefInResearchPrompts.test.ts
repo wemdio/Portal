@@ -129,6 +129,57 @@ describe('site_profile получает бриф', () => {
 });
 
 describe('hypotheses получают бриф', () => {
+  async function runHypotheses(clientBrief: Record<string, unknown>) {
+    const db = createMockSupabase({
+      tables: {
+        ve_projects: [
+          project({
+            client_brief: clientBrief,
+            site_profile: PROFILE_DATA,
+            brand_cloud: { entities: [] },
+          }),
+        ],
+        ve_jobs: [
+          {
+            id: 'j-competitors',
+            project_id: 'p1',
+            stage: 'competitors',
+            status: 'done',
+            result: { competitors: [] },
+          },
+        ],
+        ve_hypotheses: [],
+        ve_verticals: [],
+      },
+    });
+    mockCallLLM.mockResolvedValue({ data: { hypotheses: [] }, tokensUsed: 10, costUsd: 0.01 });
+    await runHypothesesStage(makeJob('hypotheses'), { supabase: db as unknown as SupabaseClient });
+  }
+
+  it('превращает рамку ЦА из брифа в ограничение, а не в пожелание', async () => {
+    await runHypotheses({
+      ...CLIENT_BRIEF,
+      icp: {
+        include: ['компании с выручкой от 300 млн ₽'],
+        exclude: ['интеграторы вместо конечных заказчиков', 'действующие клиенты'],
+        size: 'от 300 млн ₽ выручки',
+        geo: 'Россия',
+        triggers: ['новый закон по ВЭД'],
+        qualification: '',
+      },
+    });
+
+    const prompt = userOf(0);
+    expect(prompt).toContain('ИСКЛЮЧИТЬ');
+    expect(prompt).toContain('интеграторы вместо конечных заказчиков');
+    expect(prompt).toContain('новый закон по ВЭД');
+  });
+
+  it('без рамки ЦА блок ограничений не появляется', async () => {
+    await runHypotheses(CLIENT_BRIEF);
+    expect(userOf(0)).not.toContain('ИСКЛЮЧИТЬ');
+  });
+
   it('кладёт бриф в промпт гипотез рядом с профилем сайта', async () => {
     const db = createMockSupabase({
       tables: {

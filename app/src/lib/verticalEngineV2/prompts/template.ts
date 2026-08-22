@@ -29,6 +29,7 @@ import {
   CHAIN_REGULATIONS,
   buildChainCriticMessages,
   buildChainRewriteMessages,
+  renderClientBriefBlock,
   renderSignatureBlock,
   renderStyleExampleBlock,
   renderWinnerPatternsBlock,
@@ -144,10 +145,13 @@ ${input.hypotheses.map((h) => `- ${h.tier != null ? `[tier ${h.tier}] ` : ''}${h
   const signatureBlock = renderSignatureBlock(input.signatureOverride);
   const styleBlock = renderStyleExampleBlock(input.styleExample);
   const winnersBlock = renderWinnerPatternsBlock(input.winnerPatterns);
+  // Бриф нужен именно плану: fixed_block — это 85% содержания, и УТП с
+  // гарантиями клиента должны попасть туда его словами.
+  const clientBriefBlock = renderClientBriefBlock(input.clientBrief);
   const user = `ВЕРТИКАЛЬ: ${input.verticalName}
 ${input.verticalSummary}
 
-${hypothesesBlock}${clientCaseBlock}${signatureBlock}${styleBlock}${winnersBlock}ИСХОДНАЯ ЦЕПОЧКА ВЕРТИКАЛИ (базовый костяк):
+${hypothesesBlock}${clientBriefBlock}${clientCaseBlock}${signatureBlock}${styleBlock}${winnersBlock}ИСХОДНАЯ ЦЕПОЧКА ВЕРТИКАЛИ (базовый костяк):
 ${renderChainLetters(input.chainLetters)}
 
 АНАЛИЗ ЗАГРУЖЕННОЙ БАЗЫ:

@@ -6,7 +6,11 @@
  */
 
 import { callLLMWithSchema, getVeModel } from '../llm';
-import { compileClientBriefForPrompt, readClientBrief } from '../clientBriefIntake';
+import {
+  compileClientBriefForPrompt,
+  compileClientBriefIcpForPrompt,
+  readClientBrief,
+} from '../clientBriefIntake';
 import { VeHypothesesBatchSchema, type VeBrandCloudOutput, type VeSiteProfileOutput } from '../schemas';
 import { projectMarket, type VeMarket } from '../market';
 import { buildHypothesesInstantMessages } from '../prompts/hypotheses';
@@ -185,7 +189,12 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
     loadActualsHistory(ctx),
   ]);
 
-  const clientBrief = compileClientBriefForPrompt(readClientBrief(project));
+  const clientBriefRecord = readClientBrief(project);
+  const clientBrief = compileClientBriefForPrompt(clientBriefRecord);
+  // Рамка ЦА идёт отдельным блоком-ограничением: список «исключить» клиент
+  // задал прямо, и такие сегменты не должны появляться даже с низким процентом.
+  const clientBriefIcp = compileClientBriefIcpForPrompt(clientBriefRecord?.icp ?? null);
+  if (clientBriefIcp) stageLog(ctx, '[hypotheses] рамка ЦА из брифа применена как ограничение');
 
   stageLog(ctx, '[hypotheses] мгновенный проход: 25–40 кандидатов…');
   // Объект собираем переменной, а не литералом в вызове: поля portfolioProfile /
@@ -205,6 +214,7 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
       : {}),
     // Бриф клиента: ЦА, боли и возражения из первых рук — на сайте их нет.
     ...(clientBrief ? { clientBrief } : {}),
+    ...(clientBriefIcp ? { clientBriefIcp } : {}),
   };
   const llm = await callLLMWithSchema(
     (market === 'us' ? buildHypothesesInstantMessagesEn : buildHypothesesInstantMessages)(promptInput),

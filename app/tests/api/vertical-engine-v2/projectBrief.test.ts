@@ -64,6 +64,14 @@ jest.mock('@/lib/verticalEngineV2/llm', () => ({
         deal_cycle: 'от 3 до 6 недель',
         special_offer: '-',
       },
+      icp: {
+        include: ['компании с выручкой от 300 млн ₽'],
+        exclude: ['интеграторы вместо конечных заказчиков'],
+        size: 'от 300 млн ₽',
+        geo: 'Россия',
+        triggers: [],
+        qualification: '',
+      },
     },
     tokensUsed: 100,
     costUsd: 0.001,
@@ -148,6 +156,21 @@ describe('POST /api/tools/vertical-engine-v2/projects/[id]/brief', () => {
     expect(mockDb.mutations.every((m) => m.table.startsWith('ve_'))).toBe(true);
   });
 
+  it('attaches a brief before research, when the project has no brief yet', async () => {
+    seed(null);
+
+    const res = await POST(uploadRequest('amb.docx'), params);
+    expect(res.status).toBe(200);
+
+    const stored = storedBrief().client_brief as {
+      fields: Record<string, string>;
+      icp: { exclude: string[] } | null;
+    };
+    expect(stored.fields.company_description).toBe('Консалтинг по ВЭД');
+    // Рамка ЦА сохраняется вместе с полями — ею ограничивается генерация гипотез.
+    expect(stored.icp?.exclude).toContain('интеграторы вместо конечных заказчиков');
+  });
+
   it('rejects formats the extractor cannot read', async () => {
     seed();
     const res = await POST(uploadRequest('brief.doc'), params);
@@ -196,6 +219,7 @@ describe('GET/PUT /api/tools/vertical-engine-v2/projects/[id]/brief', () => {
       client_brief: {
         fields: { company_description: 'Консалтинг по ВЭД' },
         missing: ['usp', 'avg_check'],
+        icp: { include: [], exclude: ['интеграторы'], size: '', geo: '', triggers: [], qualification: '' },
         file_name: 'amb.docx',
         uploaded_at: '2026-08-22T10:00:00.000Z',
       },
@@ -207,6 +231,7 @@ describe('GET/PUT /api/tools/vertical-engine-v2/projects/[id]/brief', () => {
     const stored = storedBrief().client_brief as {
       fields: Record<string, string>;
       missing: string[];
+      icp: { exclude: string[] } | null;
       file_name: string;
     };
     expect(stored.fields.usp).toBe('Белый ВЭД под крупный бизнес');
@@ -214,9 +239,33 @@ describe('GET/PUT /api/tools/vertical-engine-v2/projects/[id]/brief', () => {
     expect(stored.missing).not.toContain('usp');
     expect(stored.missing).toContain('avg_check');
     expect(stored.file_name).toBe('amb.docx');
+    // Правка полей не должна ронять рамку ЦА: иначе ограничение гипотез тихо
+    // исчезает после первого сохранения.
+    expect(stored.icp?.exclude).toContain('интеграторы');
   });
 
-  it('rejects a body without fields', async () => {
+  it('applies a manual edit of the audience frame', async () => {
+    seed({
+      client_brief: {
+        fields: { company_description: 'Консалтинг по ВЭД' },
+        missing: [],
+        icp: { include: [], exclude: ['интеграторы'], size: '', geo: '', triggers: [], qualification: '' },
+        file_name: 'amb.docx',
+        uploaded_at: '2026-08-22T10:00:00.000Z',
+      },
+    });
+
+    const res = await PUT(
+      jsonRequest('PUT', { icp: { exclude: ['интеграторы', 'действующие клиенты'] } }),
+      params,
+    );
+    expect(res.status).toBe(200);
+
+    const stored = storedBrief().client_brief as { icp: { exclude: string[] } | null };
+    expect(stored.icp?.exclude).toEqual(['интеграторы', 'действующие клиенты']);
+  });
+
+  it('rejects a body without fields or icp', async () => {
     seed({ client_brief: { fields: {}, missing: [], file_name: null, uploaded_at: 'x' } });
     const res = await PUT(jsonRequest('PUT', {}), params);
     expect(res.status).toBe(400);
