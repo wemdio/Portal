@@ -55,6 +55,11 @@ describe('worker bundle entry lists point at real files', () => {
     expect(dockerfile).toMatch(/worker\/innEnrich\.ts/);
     const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'app', 'package.json'), 'utf8'));
     expect(pkg.scripts['build:workers']).toMatch(/worker\/innEnrich\.ts/);
+    const deployTargets = fs.readFileSync(
+      path.join(REPO_ROOT, '.semaphore', 'select-deploy-targets.sh'),
+      'utf8',
+    );
+    expect(deployTargets).toMatch(/ALL_WORKER_SERVICES="[^"]*\bworker-inn-enrich\b/);
   });
 
   it('every *Cron.ts in build:workers is also bundled in Dockerfile.worker', () => {
