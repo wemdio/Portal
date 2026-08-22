@@ -27,11 +27,38 @@ import type {
   ClientBriefSocialProofKey,
 } from '@/lib/clientBrief';
 
-import { VE_API, veEngineCall, type VeClientBriefResponse } from '../api';
+import {
+  VE_API,
+  veEngineCall,
+  type VeClientBriefIcpDto,
+  type VeClientBriefResponse,
+} from '../api';
 import { HE, Spinner } from '../design';
 import { StatusBox } from '../ui';
 
 const ACCEPT = '.pdf,.docx,.txt,.md';
+
+const EMPTY_ICP: VeClientBriefIcpDto = {
+  include: [],
+  exclude: [],
+  size: '',
+  geo: '',
+  triggers: [],
+  qualification: '',
+};
+
+/** Списки рамки правятся построчно: одна строка — один пункт. */
+const ICP_LISTS: Array<{ key: 'include' | 'exclude' | 'triggers'; label: string; hint: string }> = [
+  { key: 'include', label: 'Целевые сегменты', hint: 'одна строка — один пункт' },
+  { key: 'exclude', label: 'Исключить', hint: 'эти сегменты движок не предложит вовсе' },
+  { key: 'triggers', label: 'Рабочие триггеры для базы', hint: 'поводы, которые клиент считает рабочими' },
+];
+
+const ICP_LINES: Array<{ key: 'size' | 'geo' | 'qualification'; label: string }> = [
+  { key: 'size', label: 'Размер бизнеса' },
+  { key: 'geo', label: 'География' },
+  { key: 'qualification', label: 'Минимальная квалификация лида' },
+];
 
 type TextField = Exclude<keyof ClientBriefFields, 'social_proof' | 'price_tier'>;
 
@@ -116,6 +143,8 @@ export function ClientBriefBlock({
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [fields, setFields] = useState<ClientBriefFields>(EMPTY_BRIEF_FIELDS);
+  const [icp, setIcp] = useState<VeClientBriefIcpDto>(EMPTY_ICP);
+  const [clientTypes, setClientTypes] = useState<string[]>([]);
   const [missing, setMissing] = useState<string[]>([]);
   const [fileName, setFileName] = useState<string | null>(null);
   const [uploadedAt, setUploadedAt] = useState('');
@@ -128,6 +157,8 @@ export function ClientBriefBlock({
 
   const applyResponse = useCallback((data: VeClientBriefResponse) => {
     setFields(data.brief?.fields ?? EMPTY_BRIEF_FIELDS);
+    setIcp(data.brief?.icp ?? EMPTY_ICP);
+    setClientTypes(data.brief?.client_types ?? []);
     setMissing(data.brief?.missing ?? []);
     setFileName(data.brief?.file_name ?? null);
     setUploadedAt(data.brief?.uploaded_at ?? '');
@@ -186,7 +217,7 @@ export function ClientBriefBlock({
     try {
       const { ok, data } = await veEngineCall<VeClientBriefResponse>(
         `${VE_API}/projects/${projectId}/brief`,
-        { method: 'PUT', body: JSON.stringify({ fields }) },
+        { method: 'PUT', body: JSON.stringify({ fields, icp }) },
       );
       if (!ok) {
         setError(data.error || 'Не удалось сохранить бриф');
@@ -327,6 +358,55 @@ export function ClientBriefBlock({
               </div>
             </fieldset>
           ))}
+
+          <fieldset className={`${HE.card} ${HE.cardPad}`}>
+            <legend className={`px-1 text-xs font-semibold ${HE.muted2}`}>
+              Рамка ЦА — ограничение для гипотез
+            </legend>
+            <p className={`mt-1 text-xs ${HE.muted2}`}>
+              Сегменты из «Исключить» движок не предложит вовсе, а не понизит по проценту. Пустая
+              рамка ничего не ограничивает.
+              {clientTypes.length
+                ? ` Типы клиентов для писем: ${clientTypes.join('; ')}.`
+                : ''}
+            </p>
+            <div className="mt-3 space-y-3">
+              {ICP_LISTS.map((list) => (
+                <label key={list.key} className="block">
+                  <span className={`text-xs ${list.key === 'exclude' ? 'text-amber-600' : HE.muted2}`}>
+                    {list.label} · {list.hint}
+                  </span>
+                  <textarea
+                    value={icp[list.key].join('\n')}
+                    rows={3}
+                    onChange={(e) => {
+                      const items = e.target.value
+                        .split('\n')
+                        .map((line) => line.trim())
+                        .filter(Boolean);
+                      setIcp((prev) => ({ ...prev, [list.key]: items }));
+                      setDirty(true);
+                    }}
+                    className={`${HE.input} mt-1 w-full resize-y`}
+                  />
+                </label>
+              ))}
+              {ICP_LINES.map((line) => (
+                <label key={line.key} className="block">
+                  <span className={`text-xs ${HE.muted2}`}>{line.label}</span>
+                  <input
+                    type="text"
+                    value={icp[line.key]}
+                    onChange={(e) => {
+                      setIcp((prev) => ({ ...prev, [line.key]: e.target.value }));
+                      setDirty(true);
+                    }}
+                    className={`${HE.input} mt-1 w-full`}
+                  />
+                </label>
+              ))}
+            </div>
+          </fieldset>
 
           <fieldset className={`${HE.card} ${HE.cardPad}`}>
             <legend className={`px-1 text-xs font-semibold ${HE.muted2}`}>Social proof</legend>

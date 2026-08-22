@@ -79,6 +79,11 @@ export interface HypothesesPromptInput {
    * действующие клиенты и возражения — то, чего на сайте почти никогда нет.
    */
   clientBrief?: string;
+  /**
+   * Рамка ЦА из брифа: размерная полка, гео, список «исключить» и триггеры.
+   * Ограничение генерации, а не контекст — см. compileClientBriefIcpForPrompt.
+   */
+  clientBriefIcp?: string;
   /** Фактические замеры прошлых запусков (петля сверки): прогноз vs reply%. */
   actualsHistory?: Array<{
     name: string;
@@ -118,7 +123,9 @@ ${input.actualsHistory.map((a) => `- «${a.name}»: прогноз ${a.predicted
 
   const user = `ПРОФИЛЬ КЛИЕНТА (сайт ${input.websiteUrl}):
 ${JSON.stringify(input.profile, null, 2)}
-${input.clientBrief?.trim() ? `
+${input.clientBriefIcp?.trim() ? `
+${input.clientBriefIcp.trim()}
+` : ''}${input.clientBrief?.trim() ? `
 БРИФ КЛИЕНТА (заполнен самим клиентом — про ЦА, боли и возражения верь ему больше, чем профилю сайта; чего в брифе нет — не выдумывай):
 ${input.clientBrief.trim()}
 ` : ''}${input.businessOverride?.trim() ? `

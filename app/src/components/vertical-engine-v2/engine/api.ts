@@ -275,11 +275,25 @@ export interface VeCaseDeleteResponse {
   error?: string;
 }
 
+/** Рамка ЦА из брифа: ограничение генерации гипотез. */
+export interface VeClientBriefIcpDto {
+  include: string[];
+  exclude: string[];
+  size: string;
+  geo: string;
+  triggers: string[];
+  qualification: string;
+}
+
 /** Бриф клиента проекта (ve_projects.brief.client_brief). */
 export interface VeClientBriefDto {
   fields: ClientBriefFields;
   /** Поля, которых у клиента нет: промпты о них знают и не выдумывают. */
   missing: string[];
+  /** null — клиент рамку ЦА не задал. */
+  icp: VeClientBriefIcpDto | null;
+  /** Типы действующих клиентов без имён — в письма идут они. */
+  client_types: string[];
   file_name: string | null;
   uploaded_at: string;
 }

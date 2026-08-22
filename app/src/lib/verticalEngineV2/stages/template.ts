@@ -41,6 +41,7 @@ import {
   type VeLetterRuleViolation,
 } from '../letterChecks';
 import { selectCaseForVertical, type VeCase } from '../caseBank';
+import { compileClientBriefForLetters, splitBriefForLetterPrompt } from '../clientBriefIntake';
 import { getWinnerPatterns, matchSegmentLabels, type VeWinnerPattern } from '../datasetStats';
 import type {
   VeBase,
@@ -461,6 +462,11 @@ export async function runTemplateStage(job: VeJob, ctx: VeStageContext): Promise
   const styleExample = typeof brief.style_override === 'string' ? brief.style_override : undefined;
   const signatureOverride =
     typeof brief.signature_override === 'string' ? brief.signature_override : undefined;
+  // Ответы клиента идут в план 85/15: fixed_block обязан нести его УТП и
+  // гарантии авторскими формулировками, а не пересказом из писем цепочки.
+  const clientBriefText = compileClientBriefForLetters(
+    splitBriefForLetterPrompt(brief).clientBrief,
+  );
 
   // Winner-паттерны датасета (best-effort): метки сегментов по терминам
   // вертикали (имя + синонимы), фолбэк хинтов — имя вертикали. Любой сбой →
@@ -492,6 +498,7 @@ export async function runTemplateStage(job: VeJob, ctx: VeStageContext): Promise
       clientCase,
       styleExample,
       signatureOverride,
+      clientBrief: clientBriefText,
     }),
     VeTemplatePlanSchema,
     { model: getVeModel('chain'), maxTokens: 8192 },
@@ -588,6 +595,10 @@ export async function runTemplateStage(job: VeJob, ctx: VeStageContext): Promise
     vertical.summary ?? '',
     clientCase ? JSON.stringify(clientCase) : '',
     JSON.stringify(brief),
+    // Цифры из ответов клиента читаемым текстом: в JSON выше они есть, но
+    // фактчек сверяет по нормализованным числам, и обрезанный блок письма
+    // должен опираться на тот же корпус, что видел план.
+    clientBriefText,
     JSON.stringify(winnerPatterns),
     plan.data.fixed_block,
   ].join('\n');

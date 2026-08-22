@@ -23,6 +23,7 @@ import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSeque
 import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getVeModel, type LLMMessage } from '../llm';
 import { buildChainCriticMessages, buildChainMessages, buildChainRewriteMessages, buildChainRuleFixHint } from '../prompts/chain';
 import { checkLetterRules, extractNumberFacts, type VeLetterForCheck } from '../letterChecks';
+import { compileClientBriefForLetters, splitBriefForLetterPrompt } from '../clientBriefIntake';
 import { getWinnerPatterns, matchSegmentLabels, type VeWinnerPattern } from '../datasetStats';
 import { selectCaseForVertical, type VeCase } from '../caseBank';
 import type { VeChainLanguage, VeChainLetter, VeEvidenceItem, VeHypothesis, VeJob, VeVertical } from '../types';
@@ -228,11 +229,14 @@ export async function runChainStage(job: VeJob, ctx: VeStageContext): Promise<Ve
   const hypotheses = selection.list;
 
   const brief = (project.brief ?? {}) as Record<string, unknown>;
-  // style_override/offer_override/signature_override попадают в промпт
-  // отдельными блоками (styleExample / offerOverride / signatureOverride) —
-  // из JSON-снапшота брифа их вырезаем, чтобы не дублировать длинные тексты
-  // в материалах.
-  const { style_override: _s, offer_override: _o, signature_override: _sig, ...briefRest } = brief;
+  // style_override/offer_override/signature_override и бриф клиента попадают в
+  // промпт отдельными блоками (styleExample / offerOverride /
+  // signatureOverride / clientBrief) — из JSON-снапшота их вырезаем, чтобы не
+  // дублировать длинные тексты в материалах.
+  const { briefJson: briefRest, clientBrief: clientBriefRecord } = splitBriefForLetterPrompt(brief);
+  // Ответы клиента — читаемым блоком: УТП, гарантии и акцию письма берут
+  // дословно, из сырого JSON так не получалось.
+  const clientBriefText = compileClientBriefForLetters(clientBriefRecord);
 
   // Кейс-банк: лучший кейс клиента под вертикаль → главное доказательство
   // цепочки. Best-effort: сбой чтения ve_cases не роняет генерацию.
@@ -282,6 +286,7 @@ export async function runChainStage(job: VeJob, ctx: VeStageContext): Promise<Ve
       evidence: (Array.isArray(h.evidence) ? h.evidence : []) as VeEvidenceItem[],
     })),
     briefText: JSON.stringify(briefRest),
+    clientBrief: clientBriefText,
     offerOverride: typeof brief.offer_override === 'string' ? brief.offer_override : undefined,
     operatorsHint: typeof job.payload?.operators_hint === 'string' ? job.payload.operators_hint : undefined,
     clientCase,
@@ -341,6 +346,10 @@ export async function runChainStage(job: VeJob, ctx: VeStageContext): Promise<Ve
     vertical.summary ?? '',
     clientCase ? JSON.stringify(clientCase) : '',
     JSON.stringify(briefRest),
+    // Цифры клиента из брифа (сроки отсрочки, скидки, годы на рынке) —
+    // санкционированные факты: без этой строки фактчек пометил бы их как
+    // выдуманные, ведь из JSON-снапшота бриф теперь вырезан.
+    clientBriefText,
     typeof brief.offer_override === 'string' ? brief.offer_override : '',
     styleExample ?? '',
     signatureOverride ?? '',
