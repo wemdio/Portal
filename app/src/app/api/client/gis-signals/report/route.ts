@@ -45,7 +45,7 @@ export const dynamic = 'force-dynamic';
  *   period          — резолвнутый период { preset, from, to, days }
  *   funnel          — воронка за период per сегмент (runDate='period')
  *   funnelPrev      — воронка за предыдущий равный интервал (null у 'all')
- *   stats           — срез 8 сигналов + грейды A/B/C/отсев + медианный скор
+ *   stats           — срез 16 сигналов + грейды A/B/C/отсев + медианный скор
  *   weekly          — «Недельный отчёт»: воронка недели + дельта-ранга
  *                     прошлой, залито из client_campaign_append_batches
  *                     (не зависит от чистки Instantly), окно кампаний недели

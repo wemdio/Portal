@@ -74,6 +74,11 @@ export interface HypothesesPromptInput {
   /** Ручное описание бизнеса от специалиста (brief.business_override) —
    *  высший приоритет поверх профиля сайта; спасение «тонких» сайтов. */
   businessOverride?: string;
+  /**
+   * Бриф, заполненный клиентом (clientBriefIntake): ЦА, проблемы клиентов,
+   * действующие клиенты и возражения — то, чего на сайте почти никогда нет.
+   */
+  clientBrief?: string;
   /** Фактические замеры прошлых запусков (петля сверки): прогноз vs reply%. */
   actualsHistory?: Array<{
     name: string;
@@ -113,7 +118,10 @@ ${input.actualsHistory.map((a) => `- «${a.name}»: прогноз ${a.predicted
 
   const user = `ПРОФИЛЬ КЛИЕНТА (сайт ${input.websiteUrl}):
 ${JSON.stringify(input.profile, null, 2)}
-${input.businessOverride?.trim() ? `
+${input.clientBrief?.trim() ? `
+БРИФ КЛИЕНТА (заполнен самим клиентом — про ЦА, боли и возражения верь ему больше, чем профилю сайта; чего в брифе нет — не выдумывай):
+${input.clientBrief.trim()}
+` : ''}${input.businessOverride?.trim() ? `
 РУЧНОЕ ОПИСАНИЕ БИЗНЕСА ОТ СПЕЦИАЛИСТА (приоритет над профилем сайта — написано человеком, который знает клиента; при расхождениях верь ему):
 ${input.businessOverride.trim()}
 ` : ''}

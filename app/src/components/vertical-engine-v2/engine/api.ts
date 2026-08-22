@@ -6,6 +6,7 @@
  */
 
 import { authFetch } from '@/lib/authFetch';
+import type { ClientBriefFields } from '@/lib/clientBrief';
 import type {
   VeBase,
   VeChain,
@@ -271,6 +272,23 @@ export interface VeCaseCreateResponse {
 /** DELETE /projects/[id]/cases { id } → { ok }. */
 export interface VeCaseDeleteResponse {
   ok?: boolean;
+  error?: string;
+}
+
+/** Бриф клиента проекта (ve_projects.brief.client_brief). */
+export interface VeClientBriefDto {
+  fields: ClientBriefFields;
+  /** Поля, которых у клиента нет: промпты о них знают и не выдумывают. */
+  missing: string[];
+  file_name: string | null;
+  uploaded_at: string;
+}
+
+/** GET/POST/PUT /projects/[id]/brief. */
+export interface VeClientBriefResponse {
+  ok?: boolean;
+  brief?: VeClientBriefDto | null;
+  compiled_brief_text?: string;
   error?: string;
 }
 

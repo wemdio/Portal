@@ -19,6 +19,24 @@ const SYSTEM = `Ты — senior B2B-стратег агентства performanc
 export interface SiteProfilePromptInput {
   websiteUrl: string;
   siteText: string;
+  /**
+   * Бриф, заполненный самим клиентом (clientBriefIntake). Второй источник
+   * фактов: закрывает то, чего на сайте не бывает (цикл сделки, средний чек,
+   * возражения) и спасает клиентов без рабочего сайта.
+   */
+  clientBrief?: string;
+}
+
+/** Блок брифа для промпта профиля. Пустой бриф блок не создаёт. */
+function briefBlock(clientBrief: string | undefined): string {
+  const brief = clientBrief?.trim();
+  if (!brief) return '';
+  return `
+БРИФ КЛИЕНТА (заполнен самим клиентом — приоритет над сайтом там, где они расходятся, и единственный источник, если сайта фактически нет):
+"""
+${brief}
+"""
+`;
 }
 
 export function buildSiteProfileMessages(input: SiteProfilePromptInput): LLMMessage[] {
@@ -28,6 +46,7 @@ export function buildSiteProfileMessages(input: SiteProfilePromptInput): LLMMess
 """
 ${input.siteText}
 """
+${briefBlock(input.clientBrief)}
 
 Собери профиль компании и верни ТОЛЬКО JSON строго такого вида (без markdown-фенсов и пояснений):
 {
@@ -44,7 +63,7 @@ ${input.siteText}
 }
 
 Жёсткие правила:
-- current_clients и cases — только то, что буквально есть в тексте сайта.
+- current_clients и cases — только то, что буквально есть в тексте сайта или в брифе клиента.
 - Не перевирай оффер: если продают несколько разных продуктов, опиши основной и упомяни остальные в product_summary.
 - Никакого текста вне JSON.`;
 

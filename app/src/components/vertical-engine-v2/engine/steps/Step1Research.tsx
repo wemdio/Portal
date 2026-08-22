@@ -14,6 +14,7 @@ import { useRef, useState, type JSX } from 'react';
 import type { VeStage } from '@/lib/verticalEngineV2/types';
 import { Badge, StatusBox } from '../ui';
 import { HE, Spinner, StatusDot } from '../design';
+import { ClientBriefBlock } from './ClientBriefBlock';
 import {
   VE_API,
   veEngineDelete,
@@ -149,6 +150,9 @@ export function Step1Research({
             />
           </div>
         ) : null}
+        {/* Бриф доступен и после исследования: дозаполненные поля уходят в
+            цепочки и шаблон, а перезапуск подхватит их в гипотезы. */}
+        <ClientBriefBlock projectId={project?.id ?? null} onBriefChanged={onCasesChanged} />
         <div className="mt-4 text-center">
           <button
             type="button"
@@ -233,6 +237,7 @@ function NotStarted({
         Запустить исследование
       </button>
       <OfferBlock offerValue={offerValue} onSaveOffer={onSaveOffer} />
+      <ClientBriefBlock projectId={projectId} onBriefChanged={onCasesChanged} />
       <BusinessBlock projectId={projectId} businessValue={businessValue} emphasized={siteThin} />
       <SignatureBlock projectId={projectId} signatureValue={signatureValue} />
       <StyleBlock projectId={projectId} styleValue={styleValue} onSaved={onStyleSaved} />

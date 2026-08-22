@@ -1,11 +1,12 @@
 /**
  * Скоринг сегментов gisSignalOutreach (0–100) поверх сигнальных вердиктов.
  *
- * Сегменты со скоринг-профилем (сейчас — legal) квалифицируются НЕ по
- * signal_min_count, а по взвешенному скору: каждый сработавший сигнал даёт
- * свой вес, сумма весов профиля = 100. Скор ниже threshold — компания
- * нерелевантна и отбрасывается (архивируется, в конструктор не идёт).
- * Грейд по поясам bands (A/B/C) прокидывается в архив, сетку и лиды.
+ * Сегменты со скоринг-профилем (legal/accounting/consulting/medicine)
+ * квалифицируются НЕ по signal_min_count, а по взвешенному скору: каждый
+ * сработавший сигнал даёт свой вес, сумма весов профиля = 100. Скор ниже
+ * threshold — компания нерелевантна и отбрасывается (архивируется, в
+ * конструктор не идёт). Грейд по поясам bands (A/B/C) прокидывается в архив,
+ * сетку и лиды.
  *
  * Сегменты БЕЗ профиля — старое поведение (signalsCount >= signal_min_count).
  *
@@ -54,6 +55,13 @@ const STANDARD_BANDS: ScoreBand[] = [
  * детекторы. Заметная разница с legal: у accounting вес вакансий ниже (10 vs 15),
  * зато появляются «упаковка услуги» (pricingPackages 10) и «работа с ИП/ООО/МСБ»
  * (clientSegments 5); у consulting вакансии, наоборот, весят 15.
+ *
+ * Профиль medicine (22.08.2026) — отдельный набор: релевантность клиники,
+ * акции, премиум-услуги, форма/телефон/филиалы/МИС и маркетинговая команда.
+ * medicineRelevance не является жёстким гейтом: чужая ниша с promo+premium+form
+ * всё ещё может пройти C (как accounting без accountingRelevance). Госбольницы,
+ * фармкомпании, продавцы медоборудования и кабинет врача режет отдельный
+ * стоп-лист (medicineHardReject → applyHardReject в раннере).
  */
 export const SEGMENT_SCORING_PROFILES: Record<string, SegmentScoringProfile> = {
   legal: {
@@ -99,6 +107,20 @@ export const SEGMENT_SCORING_PROFILES: Record<string, SegmentScoringProfile> = {
     threshold: 35,
     bands: STANDARD_BANDS,
   },
+  medicine: {
+    weights: {
+      medicineRelevance: 20,
+      medicinePromo: 20,
+      medicinePremium: 15,
+      contactForm: 10,
+      generalPhone: 10,
+      multiOffice: 10,
+      crmCalltracking: 10,
+      medicineMarketingTeam: 5,
+    },
+    threshold: 35,
+    bands: STANDARD_BANDS,
+  },
 };
 
 /** Профиль сегмента или undefined — у сегментов без профиля старый фильтр. */
@@ -121,4 +143,10 @@ export function computeSegmentScore(
   if (score < profile.threshold) return { score, grade: null };
   const band = profile.bands.find((b) => score >= b.min);
   return { score, grade: band?.grade ?? null };
+}
+
+/** Обнуляет грейд (отсев), оставляя числовой скор для архива. */
+export function applyHardReject(score: SegmentScore, hardReject: boolean): SegmentScore {
+  if (!hardReject) return score;
+  return { score: score.score, grade: null };
 }

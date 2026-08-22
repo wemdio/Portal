@@ -49,7 +49,7 @@ function signalRow(id: number, segmentKey: string, flags: Partial<Record<string,
 }
 
 describe('getSignalSlice', () => {
-  it('агрегирует count компаний по сегмент × сигнал за всё время (12 сигналов)', async () => {
+  it('агрегирует count компаний по сегмент × сигнал за всё время', async () => {
     mockDb = createMockSupabase({
       tables: {
         gis_signal_company_signals: [
@@ -61,7 +61,7 @@ describe('getSignalSlice', () => {
     });
 
     const rows = await getSignalSlice();
-    expect(rows).toHaveLength(24); // 2 сегмента × 12 сигналов
+    expect(rows).toHaveLength(32); // 2 сегмента × 16 сигналов
     const at = (seg: string, sig: string) =>
       rows.find((r) => r.segmentKey === seg && r.signalKey === sig)?.companies;
     expect(at('edu', 'signal_general_phone')).toBe(2);
@@ -74,8 +74,7 @@ describe('getSignalSlice', () => {
     expect(at('edu', 'signal_legal_relevance')).toBe(0);
     // Сортировка: сегмент, затем сигнал в каноническом порядке.
     expect(rows[0]).toMatchObject({ segmentKey: 'edu', signalKey: 'signal_general_phone' });
-    // Второй сегмент начинается ровно после всех сигналов первого (12 с 15.08.2026).
-    expect(rows[12]).toMatchObject({ segmentKey: 'legal', signalKey: 'signal_general_phone' });
+    expect(rows[16]).toMatchObject({ segmentKey: 'legal', signalKey: 'signal_general_phone' });
   });
 
   it('ошибка БД → throw (не тихий пустой срез)', async () => {

@@ -748,6 +748,70 @@ describe('runGisSignalPipeline — legal-скоринг (сегмент со с�
   });
 });
 
+describe('runGisSignalPipeline — medicine hard-reject (гос/фарм/кабинет врача)', () => {
+  function medicineSegmentRows() {
+    return [
+      {
+        key: 'medicine', label: 'Медицина', instantly_campaign_id: 'camp-med',
+        rubric_groups: [{ category: 'Медицина / Здоровье / Красота' }],
+        priority: 10, enabled: true, require_online: false,
+      },
+    ];
+  }
+
+  function medicineResult(hardReject: boolean): OutreachSignalsResult {
+    const hit = (on: boolean) => ({ hit: on, evidence: on ? 'какое-то evidence' : '' });
+    return {
+      signals: {
+        ...emptySignals(),
+        medicineRelevance: hit(true),
+        medicinePromo: hit(true),
+        medicinePremium: hit(true),
+        contactForm: hit(true),
+        generalPhone: hit(true),
+      },
+      signalsCount: 2,
+      note: 'Homepage checked',
+      ok: true,
+      medicineHardReject: hardReject
+        ? { hit: true, evidence: 'ГБУЗ городская больница' }
+        : { hit: false, evidence: '' },
+    };
+  }
+
+  it('стоп-лист режет ГБУЗ даже при скоре A; частная клиника проходит', async () => {
+    seed({}, [], medicineSegmentRows());
+    pullMock.mockResolvedValue([cand('clinic', 'medicine'), cand('gbuz', 'medicine')]);
+    detectMock.mockImplementation(async ({ siteUrl }: { siteUrl: string }) =>
+      medicineResult(siteUrl.includes('gbuz')),
+    );
+
+    const grid = finalGrid([
+      { id: 'clinic', name: 'Клиника', email: 'info@clinic.ru', score: '75', grade: 'A' },
+    ]);
+    const runPromise = runGisSignalPipeline(() => {}, { pollIntervalMs: 1 });
+    await completeNextBaseJob(grid);
+    const result = await runPromise;
+
+    expect(result.status).toBe('completed');
+    expect(result.pulled).toBe(2);
+    expect(result.signalsOk).toBe(1);
+
+    const jobInsert = mockDb.inserts.find((c) => c.table === 'base_constructor_jobs');
+    const jobData = jobInsert!.rows[0].data as string[][];
+    expect(jobData).toHaveLength(2);
+    expect(jobData[1][0]).toBe('clinic');
+
+    const archiveRows = mockDb.upserts
+      .filter((c) => c.table === 'gis_signal_company_signals')
+      .flatMap((c) => c.rows);
+    expect(archiveRows.find((r) => r.twogis_id === 'clinic')).toMatchObject({ score: 75, grade: 'A' });
+    expect(archiveRows.find((r) => r.twogis_id === 'gbuz')).toMatchObject({ score: 75, grade: null });
+    expect((archiveRows.find((r) => r.twogis_id === 'gbuz')?.evidence as { medicine_hard_reject?: string })
+      .medicine_hard_reject).toMatch(/ГБУЗ/i);
+  });
+});
+
 // ── Hardening (инцидент 12.08.2026): таймауты, watchdog, overlap, алерты ─────
 
 describe('runGisSignalPipeline — per-candidate hard timeout', () => {
