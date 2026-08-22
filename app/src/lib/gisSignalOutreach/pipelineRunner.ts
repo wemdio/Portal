@@ -63,7 +63,7 @@ import { getLatestTwoGisSnapshotId, pullSegmentCandidates, type SegmentCandidate
 import { markSeen } from './seenCompanies';
 import { detectOutreachSignals, emptySignals, type OutreachSignalsResult } from './signals';
 import { companiesToGrid, gridToLeadPayloads } from './gridMapping';
-import { computeSegmentScore, getSegmentScoringProfile } from './scoring';
+import { applyHardReject, computeSegmentScore, getSegmentScoringProfile } from './scoring';
 import { createStallWatchdog } from './runGuards';
 import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 
@@ -468,7 +468,12 @@ export async function runGisSignalPipeline(
     //     0–100 и грейд по каждой компании — до архива, чтобы записать туда.
     const scoreInfos = candidates.map((cand, i) => {
       const profile = getSegmentScoringProfile(cand.segmentKey);
-      return profile ? computeSegmentScore(profile, signalResults[i].signals) : null;
+      if (!profile) return null;
+      const scored = computeSegmentScore(profile, signalResults[i].signals);
+      if (cand.segmentKey === 'medicine') {
+        return applyHardReject(scored, signalResults[i].medicineHardReject?.hit === true);
+      }
+      return scored;
     });
 
     // 4b. АРХИВ: каждая проверенная компания (и pass, и fail) — аналитический
@@ -491,6 +496,9 @@ export async function runGisSignalPipeline(
       if (r.onlineFormat) {
         evidence.online_format = { hit: r.onlineFormat.hit, evidence: r.onlineFormat.evidence };
       }
+      if (r.medicineHardReject?.hit) {
+        evidence.medicine_hard_reject = r.medicineHardReject.evidence;
+      }
       return {
         twogis_id: cand.twogisId,
         site: cand.site,
@@ -508,6 +516,10 @@ export async function runGisSignalPipeline(
         signal_consulting_relevance: r.signals.consultingRelevance.hit,
         signal_pricing_packages: r.signals.pricingPackages.hit,
         signal_client_segments: r.signals.clientSegments.hit,
+        signal_medicine_relevance: r.signals.medicineRelevance.hit,
+        signal_medicine_promo: r.signals.medicinePromo.hit,
+        signal_medicine_premium: r.signals.medicinePremium.hit,
+        signal_medicine_marketing_team: r.signals.medicineMarketingTeam.hit,
         // Скор/грейд — только scored-сегменты; у остальных NULL.
         score: scoring ? scoring.score : null,
         grade: scoring ? scoring.grade : null,

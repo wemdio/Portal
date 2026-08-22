@@ -4,6 +4,7 @@ jest.mock('server-only', () => ({}));
 
 import {
   SEGMENT_SCORING_PROFILES,
+  applyHardReject,
   computeSegmentScore,
   getSegmentScoringProfile,
 } from '@/lib/gisSignalOutreach/scoring';
@@ -162,5 +163,81 @@ describe('профили accounting / consulting (ТЗ 15.08.2026)', () => {
     expect(
       computeSegmentScore(SEGMENT_SCORING_PROFILES.accounting, signals(['consultingRelevance', 'salesDept'])),
     ).toEqual({ score: 20, grade: null });
+  });
+});
+
+describe('профиль medicine (ТЗ 22.08.2026)', () => {
+  it('веса ТЗ (сумма 100), порог 35, пояса A/B/C', () => {
+    const medicine = SEGMENT_SCORING_PROFILES.medicine;
+    expect(medicine).toBeDefined();
+    expect(medicine.weights).toEqual({
+      medicineRelevance: 20,
+      medicinePromo: 20,
+      medicinePremium: 15,
+      contactForm: 10,
+      generalPhone: 10,
+      multiOffice: 10,
+      crmCalltracking: 10,
+      medicineMarketingTeam: 5,
+    });
+    expect(Object.values(medicine.weights).reduce((a, b) => a + (b ?? 0), 0)).toBe(100);
+    expect(medicine.threshold).toBe(35);
+    expect(medicine.bands).toEqual([
+      { min: 75, grade: 'A' },
+      { min: 55, grade: 'B' },
+      { min: 35, grade: 'C' },
+    ]);
+    expect(getSegmentScoringProfile('medicine')).toBe(medicine);
+  });
+
+  it('все 8 сигналов → 100 баллов, грейд A', () => {
+    const r = computeSegmentScore(
+      SEGMENT_SCORING_PROFILES.medicine,
+      signals([
+        'medicineRelevance', 'medicinePromo', 'medicinePremium', 'contactForm',
+        'generalPhone', 'multiOffice', 'crmCalltracking', 'medicineMarketingTeam',
+      ]),
+    );
+    expect(r).toEqual({ score: 100, grade: 'A' });
+  });
+
+  it.each<[string, Array<keyof OutreachSignalSet>, number, string | null]>([
+    ['A-нижняя: клиника20+акции20+имплантация15+форма10+телефон10=75',
+      ['medicineRelevance', 'medicinePromo', 'medicinePremium', 'contactForm', 'generalPhone'], 75, 'A'],
+    ['B-нижняя: клиника20+акции20+имплантация15=55',
+      ['medicineRelevance', 'medicinePromo', 'medicinePremium'], 55, 'B'],
+    ['C: клиника20+форма10+телефон10=40',
+      ['medicineRelevance', 'contactForm', 'generalPhone'], 40, 'C'],
+    ['отсев: клиника20+телефон10=30 < 35',
+      ['medicineRelevance', 'generalPhone'], 30, 'grade-null'],
+  ])('%s', (_label, keys, expectedScore, expectedGrade) => {
+    const r = computeSegmentScore(SEGMENT_SCORING_PROFILES.medicine, signals(keys));
+    expect(r.score).toBe(expectedScore);
+    if (expectedGrade === 'grade-null') expect(r.grade).toBeNull();
+    else expect(r.grade).toBe(expectedGrade);
+  });
+
+  it('без medicineRelevance чужая ниша с формой и телефоном всё ещё может пройти C — как accounting', () => {
+    const r = computeSegmentScore(
+      SEGMENT_SCORING_PROFILES.medicine,
+      signals(['medicinePromo', 'medicinePremium', 'contactForm']),
+    );
+    expect(r).toEqual({ score: 45, grade: 'C' });
+  });
+
+  it('юридическая релевантность не даёт баллов медицине', () => {
+    expect(
+      computeSegmentScore(SEGMENT_SCORING_PROFILES.medicine, signals(['legalRelevance', 'contactForm'])),
+    ).toEqual({ score: 10, grade: null });
+  });
+
+  it('жёсткий стоп-лист (гос/фарм/кабинет врача) обнуляет грейд даже при A', () => {
+    const passed = computeSegmentScore(
+      SEGMENT_SCORING_PROFILES.medicine,
+      signals(['medicineRelevance', 'medicinePromo', 'medicinePremium', 'contactForm', 'generalPhone']),
+    );
+    expect(passed).toEqual({ score: 75, grade: 'A' });
+    expect(applyHardReject(passed, true)).toEqual({ score: 75, grade: null });
+    expect(applyHardReject(passed, false)).toEqual(passed);
   });
 });
