@@ -355,6 +355,19 @@ export const CLIENT_NAV_ENG: ClientNavItem = {
 };
 
 /**
+ * Подключение своих ящиков в ENG-кабинете. Живёт под /client/eng/*,
+ * иначе middleware уводит eng-клиента обратно в /client/eng.
+ */
+export const CLIENT_NAV_ENG_MAILBOXES: ClientNavItem = {
+  id: 'eng-mailboxes',
+  label: 'Sending mailboxes',
+  labelEn: 'Sending mailboxes',
+  href: '/client/eng/mailboxes',
+  description: 'Connect your outreach mailboxes',
+  descriptionEn: 'Connect your outreach mailboxes',
+};
+
+/**
  * Id'шники nav-айтемов, которые существуют ТОЛЬКО в auto-режиме, хотя лежат
  * внутри обычных групп.
  *
@@ -423,6 +436,9 @@ export function resolveActiveNavId(pathname: string): string | null {
     pathname.startsWith('/client/manual-scoring/')
   ) {
     return 'manual-scoring';
+  }
+  if (pathname === '/client/eng/mailboxes' || pathname.startsWith('/client/eng/mailboxes/')) {
+    return 'eng-mailboxes';
   }
   if (pathname === '/client/mailboxes' || pathname.startsWith('/client/mailboxes/')) {
     return 'mailboxes';

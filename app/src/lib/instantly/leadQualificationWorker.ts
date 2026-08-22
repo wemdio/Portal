@@ -35,6 +35,7 @@ import {
 } from './handoffTelegram';
 import { sendHandoffNow } from './handoffSender';
 import type { Email } from './types';
+import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
 
 const REPLY_EMAILS_PAGE_SIZE = 100;
 const MAX_QUALIFY_PER_TICK = 20;
@@ -49,9 +50,13 @@ const PROJECT_BATCH_SIZE = 100;
  */
 const TRANSIENT_QUALIFY_ERROR_RE =
   /\b(?:429|500|502|503|504)\b|overload|rate.?limit|fetch failed|network error|timed?.?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|aborted|failed after retries/i;
+const OWNERSHIP_DEFER_ERROR_PREFIX = 'Reply ownership deferred';
 
 export function isTransientQualifyError(message: string): boolean {
-  return TRANSIENT_QUALIFY_ERROR_RE.test(message);
+  return (
+    message.startsWith(OWNERSHIP_DEFER_ERROR_PREFIX) ||
+    TRANSIENT_QUALIFY_ERROR_RE.test(message)
+  );
 }
 
 /** Кэш пробы колонок сирот (reply_out_of_campaign/eaccount), TTL 60с. */
@@ -656,29 +661,100 @@ export async function qualifyOneReply(
      *    кабинет собирает блок «Ответы вне кампании».
      */
     outOfCampaign?: boolean;
+    /** Others watchdog already matched prefetched lastOutbound across campaigns. */
+    prefetchedParentMatched?: boolean;
   },
 ): Promise<void> {
-  const campaignId = reply.campaign_id;
+  const providerCampaignId = reply.campaign_id;
   const leadEmail =
     reply.from_address_email ??
     reply.to_address_email_list ??
     '';
 
-  if (!campaignId || !leadEmail) return;
+  if (!providerCampaignId || !leadEmail) return;
 
-  const outOfCampaign = opts?.outOfCampaign === true;
   // Ящик, физически принявший письмо. Пишем в квалификацию и (для сирот)
   // показываем в DM — «в каком ящике искать ответ». Пустую строку схлопываем
   // в null, чтобы не плодить два представления отсутствия.
   const replyEaccount = (reply.eaccount ?? '').trim() || null;
+
+  // Instantly может приклеить входящее к новой кампании того же lead, хотя
+  // письмо продолжает старый диалог другого проекта. До критериев, ИИ и любых
+  // пользовательских side effects восстанавливаем владельца по ТОЧНОМУ
+  // eaccount и реальному исходящему родителю.
+  const ownership = await resolveEffectiveReplyOwner({
+    db,
+    reply,
+    providerCampaignId,
+    leadEmail,
+    accountId,
+    prefetchedContext,
+    // Others reaches this function only after comparing the orphan reply with
+    // sent mail across candidate campaigns. Preserve that already-proven
+    // parent even when the reply has no provider thread id or quoted body.
+    trustPrefetchedParent: opts?.prefetchedParentMatched === true,
+  });
+  if (ownership.status === 'defer') {
+    // Throw into the existing bounded retry machinery. A normal return would
+    // be counted as success by polling/Others and would permanently ACK a
+    // webhook event even though no qualification row was written.
+    throw new Error(
+      `${OWNERSHIP_DEFER_ERROR_PREFIX} for ${reply.id ?? '?'} ` +
+      `(provider campaign ${providerCampaignId}): ${ownership.reason}`,
+    );
+  }
+
+  const strayColsOk = await strayColumnsSupported(db);
+  if (ownership.status === 'ambiguous') {
+    const replyText = getBodyText(reply.body);
+    const { error: ownershipUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
+      {
+        campaign_id: providerCampaignId,
+        campaign_name: await resolveCampaignName(providerCampaignId, accountId),
+        lead_email: leadEmail,
+        thread_id: reply.thread_id,
+        reply_subject: reply.subject ?? null,
+        reply_preview: replyText.slice(0, 300) || null,
+        reply_body: replyText || null,
+        status: 'needs_review',
+        proposal_seen: false,
+        interest_signals: [],
+        ai_reason: `Не удалось однозначно определить проект-владельца ответа: ${ownership.reason}. Автоматические уведомления и передача отключены до ручной проверки.`,
+        ai_confidence: 0,
+        instantly_email_id: reply.id,
+        instantly_lead_id: null,
+        reply_timestamp: reply.timestamp_email ?? null,
+        ...(strayColsOk ? { reply_out_of_campaign: true, eaccount: replyEaccount } : {}),
+      },
+      { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+    );
+    if (ownershipUpsertErr) {
+      throw new Error(`Ownership-review upsert failed: ${ownershipUpsertErr.message ?? 'unknown'}`);
+    }
+    workerLog(
+      'warn',
+      `reply ownership ambiguous for ${reply.id ?? '?'} (provider campaign ${providerCampaignId}) — needs_review, no side effects`,
+    );
+    return;
+  }
+
+  const campaignId = ownership.effectiveCampaignId;
+  const effectiveReply: Email = ownership.corrected
+    ? { ...reply, campaign_id: campaignId }
+    : reply;
+  const outOfCampaign = opts?.outOfCampaign === true || ownership.corrected;
+  if (ownership.corrected) {
+    workerLog(
+      'info',
+      `corrected reply ownership ${reply.id ?? '?'}: ${providerCampaignId} → ${campaignId} (${ownership.reason})`,
+    );
+  }
 
   // Окно деплоя «код без миграции»: пока колонок сирот нет (миграция
   // 20260812_0001 не применена), пишем квалификации БЕЗ них — иначе upsert
   // падает нетранзиентно и письмо навсегда уходит в error+дедуп (см.
   // strayColumnsSupported). Флаг/ящик при этом в DM едут из памяти — честность
   // уведомления от БД не зависит.
-  const strayColsOk = await strayColumnsSupported(db);
-
   // Пост-handoff эхо: письмо от нашего клиента (он отвечает лиду со своей
   // почты, мы в копии) — не квалифицируем как лида. Строку всё равно пишем:
   // дедуп по instantly_email_id иначе будет пытаться заново каждый тик.
@@ -732,9 +808,9 @@ export async function qualifyOneReply(
   // не глушим совсем (это всё же домен лида) — needs_review без пинга, пусть
   // человек глянет. Fail-open: без eaccount или без To/CC в данных листинга
   // проверка невозможна — идём обычным путём.
-  const ourMailbox = (reply.eaccount ?? '').trim().toLowerCase();
+  const ourMailbox = (effectiveReply.eaccount ?? '').trim().toLowerCase();
   if (ourMailbox) {
-    const { to: toRcpt, cc: ccRcpt } = getEmailRecipients(reply);
+    const { to: toRcpt, cc: ccRcpt } = getEmailRecipients(effectiveReply);
     const recipientAddrs = new Set<string>();
     for (const r of [...toRcpt, ...ccRcpt]) {
       // Токен может быть «Name <addr>» — достаём адреса регекспом, а не
@@ -781,34 +857,6 @@ export async function qualifyOneReply(
     }
   }
 
-  // «Тот же клиент, другой ящик»: у клиента несколько lookalike-доменов
-  // (dispa-pro.ru + dispa-pro.online; sands-studio.ru + sandsstudio.online) и
-  // персональные ящики на них. Ответ, прилетевший в ящик-двойник ТОГО ЖЕ
-  // клиента — НЕ кросс-клиентский страй (13.07 guard увёл живого лида Диспы
-  // «завтра удобно пообщаться?» в needs_review). Признаки того же клиента:
-  // совпадение персоны (local-part без ./-/_; generic вроде hello/info не
-  // считаются — они у всех) или базы домена (до первой точки, без дефисов).
-  const GENERIC_LOCALS = new Set([
-    'hello', 'info', 'contact', 'sales', 'office', 'mail', 'admin', 'support',
-    'team', 'connect', 'reachout', 'outreach', 'hi', 'welcome', 'partner', 'partners',
-  ]);
-  const mailboxLocalKey = (addr: string): string | null => {
-    const key = (addr.split('@')[0] ?? '').toLowerCase().replace(/[^a-z0-9а-яё]/g, '');
-    return key && !GENERIC_LOCALS.has(key) ? key : null;
-  };
-  const mailboxDomainKey = (addr: string): string | null => {
-    const key = ((addr.split('@')[1] ?? '').split('.')[0] ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    return key || null;
-  };
-  const sameClientMailboxes = (a: string, b: string): boolean => {
-    const la = mailboxLocalKey(a);
-    const lb = mailboxLocalKey(b);
-    if (la && lb && la === lb) return true;
-    const da = mailboxDomainKey(a);
-    const db = mailboxDomainKey(b);
-    return Boolean(da && db && da === db);
-  };
-
   // Кросс-клиентский доменный матч Instantly (кейс NAIS→KIRA, 10.07): лид
   // получил рассылки ДВУХ наших клиентов и написал НОВОЕ письмо (без
   // In-Reply-To) на ящик клиента A — Instantly, не найдя тред, приклеил его по
@@ -816,10 +864,8 @@ export async function qualifyOneReply(
   // физически пришло (eaccount), не совпадает ни с одним ящиком, который писал
   // лиду в этом треде. Контекст треда фетчим здесь и передаём в qualifyReply
   // как prefetchedContext — итоговое число вызовов Instantly не растёт.
-  const ctx =
-    prefetchedContext ??
-    (await fetchThreadContext(campaignId, leadEmail, reply.thread_id, accountId));
-  if (ourMailbox && ctx) {
+  const ctx = ownership.context;
+  if (ourMailbox && ctx && !ownership.mailboxVerified) {
     // Тред-исходящие ∪ ящики кампании (campaignOutboundMailboxes — из уже
     // скачанных страниц, без доп. вызовов). Только тредовых НЕДОСТАТОЧНО: для
     // «слепого» письма search идёт по адресу ОТПРАВИТЕЛЯ (кампания ему не
@@ -834,8 +880,7 @@ export async function qualifyOneReply(
     for (const m of ctx.campaignOutboundMailboxes ?? []) outboundMailboxes.add(m);
     if (
       outboundMailboxes.size > 0 &&
-      !outboundMailboxes.has(ourMailbox) &&
-      ![...outboundMailboxes].some((m) => sameClientMailboxes(ourMailbox, m))
+      !outboundMailboxes.has(ourMailbox)
     ) {
       const replyText = getBodyText(reply.body);
       const { error: crossUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
@@ -919,7 +964,7 @@ export async function qualifyOneReply(
     }
   }
 
-  const result = await qualifyReply(campaignId, leadEmail, reply.thread_id, {
+  const result = await qualifyReply(campaignId, leadEmail, effectiveReply.thread_id, {
     apiKey,
     model: MODEL,
     briefText: cachedBrief,
@@ -952,7 +997,7 @@ export async function qualifyOneReply(
 
   const replyText = result.threadContext
     ? getBodyText(result.threadContext.replyEmail.body)
-    : getBodyText(reply.body);
+    : getBodyText(effectiveReply.body);
   const lastOutText = result.threadContext?.lastOutbound
     ? getBodyText(result.threadContext.lastOutbound.body)
     : null;
@@ -982,8 +1027,8 @@ export async function qualifyOneReply(
         lead_email: leadEmail,
         lead_name: leadName,
         company_name: companyName,
-        thread_id: reply.thread_id,
-        reply_subject: reply.subject ?? null,
+        thread_id: effectiveReply.thread_id,
+        reply_subject: effectiveReply.subject ?? null,
         reply_preview: replyText.slice(0, 300) || null,
         reply_body: replyText || null,
         last_outbound_preview: lastOutText?.slice(0, 300) ?? null,
@@ -993,9 +1038,9 @@ export async function qualifyOneReply(
         interest_signals: result.interestSignals,
         ai_reason: result.reason,
         ai_confidence: result.confidence,
-        instantly_email_id: reply.id,
+        instantly_email_id: effectiveReply.id,
         instantly_lead_id: null,
-        reply_timestamp: reply.timestamp_email ?? null,
+        reply_timestamp: effectiveReply.timestamp_email ?? null,
         objection_handleable: result.objectionHandleable,
         objection_draft: result.objectionDraft,
         ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
@@ -1035,7 +1080,7 @@ export async function qualifyOneReply(
           ? result.threadContext.threadEmails.filter((e) => (e.ue_type ?? 1) === 1).length
           : null;
         let fromName: string | null = null;
-        const fromArr = reply.from_address_json;
+        const fromArr = effectiveReply.from_address_json;
         if (Array.isArray(fromArr) && fromArr.length > 0) {
           const n = fromArr[0]?.name;
           if (typeof n === 'string' && n.trim().length > 0) fromName = n.trim();
@@ -1052,7 +1097,7 @@ export async function qualifyOneReply(
           website: leadWebsite ?? null,
           requestText: replyText || null,
           stepNumber,
-          replyTimestamp: reply.timestamp_email ?? null,
+          replyTimestamp: effectiveReply.timestamp_email ?? null,
         });
       }
     } catch (err) {
@@ -1069,7 +1114,7 @@ export async function qualifyOneReply(
       leadName ?? null,
       companyName ?? null,
       campaignName,
-      reply.subject ?? null,
+      effectiveReply.subject ?? null,
       replyText || null,
       result.reason ?? null,
     );
@@ -1080,7 +1125,7 @@ export async function qualifyOneReply(
       instantlyDb: db,
       qualificationId: inserted.id,
       campaignId,
-      reply,
+      reply: effectiveReply,
       leadEmail,
       leadName: leadName ?? null,
       campaignName,
@@ -1108,9 +1153,9 @@ export async function qualifyOneReply(
       leadEmail,
       leadName: leadName ?? null,
       companyName: companyName ?? null,
-      replySubject: reply.subject ?? null,
+      replySubject: effectiveReply.subject ?? null,
       replyBody: replyText || null,
-      replyTimestamp: reply.timestamp_email ?? null,
+      replyTimestamp: effectiveReply.timestamp_email ?? null,
       // Для переключателя «только лиды»: лид по ЛЮБЫМ критериям (клиентским,
       // проектным или дефолтным).
       isLead: status === 'lead',
@@ -1166,9 +1211,11 @@ export async function getCampaignsByAccountCached(): Promise<Map<string, Set<str
  * обе ветки сходятся на UNIQUE-ключе instantly_email_id, поэтому ответ,
  * обработанный здесь, поллинг молча пропускает (dedup-skip) и наоборот.
  *
- * Нагрузку на Instantly /emails НЕ увеличивает: тред дотягивается ОДИН раз (он же
- * проверка готовности + источник настоящего id письма), результат переиспользуется
- * в qualifyReply через prefetchedContext, а перед AI идёт дедуп по instantly_email_id.
+ * Основной тред дотягивается один раз (проверка готовности + настоящий id письма)
+ * и переиспользуется в qualifyReply. Только при ошибочной provider-разметке
+ * или конфликтующих mailbox mappings ownership-resolver тратит не более двух
+ * account-wide запросов на search/sent; неполная конфликтная выдача уходит на
+ * ручную проверку. Перед AI обе ветки сходятся на дедупе instantly_email_id.
  */
 export async function drainWebhookQueue(): Promise<number> {
   if (!drainEnabled() || !supabaseAdmin) return 0;
@@ -1234,6 +1281,7 @@ export async function drainWebhookQueue(): Promise<number> {
 
     if (fetched > 0) await new Promise((r) => setTimeout(r, interDelay));
     fetched++;
+    let replyForError: Email | null = null;
     try {
       // Один вызов Instantly: проверка готовности + источник настоящего id письма.
       const ctx = await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId);
@@ -1243,7 +1291,15 @@ export async function drainWebhookQueue(): Promise<number> {
           // Ответ ещё не проиндексирован Instantly → ретрай на следующем тике. НЕ
           // пишем строку квалификации, иначе её instantly_email_id отравит дедуп
           // поллинга и заморозит ответ навсегда.
-          await db.from('instantly_webhook_events').update({ processed: false }).eq('id', row.id);
+          const { error: contextRequeueError } = await db
+            .from('instantly_webhook_events')
+            .update({ processed: false })
+            .eq('id', row.id);
+          if (contextRequeueError) {
+            throw new Error(
+              `Webhook empty-context requeue failed: ${contextRequeueError.message}`,
+            );
+          }
         }
         // Старое + всё ещё нет контекста → оставляем acked; бэкап — поллинг.
         continue;
@@ -1256,6 +1312,7 @@ export async function drainWebhookQueue(): Promise<number> {
         campaign_id: ctx.replyEmail.campaign_id ?? campaignId,
       } as Email;
       if (!reply.id) continue; // без id невозможен дедуп-конвердж — пропускаем
+      replyForError = reply;
 
       // Дедуп по авторитетному id ДО AI: если поллинг (или прошлый drain) уже
       // квалифицировал — пропускаем без вызова модели.
@@ -1267,6 +1324,7 @@ export async function drainWebhookQueue(): Promise<number> {
       if (existing) continue;
 
       await qualifyOneReply(db, reply, apiKey, accountId, ctx);
+      transientRetryCount.delete(reply.id);
       qualified++;
 
       // Провенанс (best-effort): связать строку квалификации с её событием.
@@ -1276,7 +1334,82 @@ export async function drainWebhookQueue(): Promise<number> {
         .eq('instantly_email_id', reply.id)
         .is('webhook_event_id', null);
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const retryKey = replyForError?.id ?? `webhook:${row.id}`;
+      let visibleErrorMessage = message;
       workerLog('error', `drain: failed on event ${row.id} (${leadEmail})`, err);
+
+      if (isTransientQualifyError(message)) {
+        const attempts = (transientRetryCount.get(retryKey) ?? 0) + 1;
+        if (attempts < MAX_TRANSIENT_RETRIES) {
+          // The event was claimed before qualification. Put it back so the
+          // same real reply can retry instead of being silently ACKed.
+          const { error: requeueError } = await db
+            .from('instantly_webhook_events')
+            .update({ processed: false })
+            .eq('id', row.id);
+          if (!requeueError) {
+            transientRetryCount.set(retryKey, attempts);
+            workerLog(
+              'warn',
+              `drain: transient failure for ${retryKey} ` +
+              `(${attempts}/${MAX_TRANSIENT_RETRIES}) — event requeued`,
+            );
+            continue;
+          }
+
+          // Claim is still ACKed. Fall through to a visible error row instead
+          // of logging a retry that never actually reached the queue.
+          transientRetryCount.delete(retryKey);
+          visibleErrorMessage =
+            `${message}; webhook requeue failed: ${requeueError.message}`;
+          workerLog(
+            'error',
+            `drain: requeue failed for ${retryKey}: ${requeueError.message} — writing error row`,
+          );
+        }
+        if (attempts >= MAX_TRANSIENT_RETRIES) {
+          transientRetryCount.delete(retryKey);
+          workerLog(
+            'error',
+            `drain: transient failures exhausted for ${retryKey} — writing error row`,
+          );
+        }
+      }
+
+      const failedReply = replyForError;
+      const { error: insertError } = await db
+        .from('instantly_lead_qualifications')
+        .insert({
+          campaign_id: failedReply?.campaign_id ?? campaignId,
+          lead_email: failedReply?.from_address_email ?? leadEmail,
+          thread_id: failedReply?.thread_id ?? row.thread_id,
+          instantly_email_id: failedReply?.id ?? `webhook:${row.id}`,
+          reply_timestamp: failedReply?.timestamp_email ?? null,
+          status: 'error',
+          error_message: visibleErrorMessage.slice(0, 500),
+          webhook_event_id: row.id,
+        });
+      if (insertError) {
+        workerLog('warn', `drain: error-row insert failed for event ${row.id}: ${insertError.message}`);
+        // A unique conflict means another path already left a visible row.
+        // For any real write failure, reopen the event so it is not silently
+        // ACKed without either a qualification or an error record.
+        if (insertError.code !== '23505') {
+          const { error: reopenError } = await db
+            .from('instantly_webhook_events')
+            .update({ processed: false })
+            .eq('id', row.id);
+          if (reopenError) {
+            workerLog(
+              'error',
+              `drain: event ${row.id} could not be reopened after error-row failure: ${reopenError.message}`,
+            );
+          } else {
+            workerLog('warn', `drain: event ${row.id} reopened after error-row failure`);
+          }
+        }
+      }
     }
   }
   if (qualified > 0) workerLog('info', `drain: qualified ${qualified} reply(s) from webhook queue`);

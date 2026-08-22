@@ -122,6 +122,12 @@ describe('middleware: ENG-хост app.outreachos.xyz', () => {
     expect(locationOf(res)).toBeNull();
   });
 
+  it('eng-клиент на /client/eng/mailboxes — остаётся (иначе форму не открыть)', async () => {
+    loginAs('client', 'eng');
+    const res = await middleware(req('/client/eng/mailboxes', ENG_HOST));
+    expect(locationOf(res)).toBeNull();
+  });
+
   it('eng-клиент на /client/dashboard → /client/eng', async () => {
     loginAs('client', 'eng');
     const res = await middleware(req('/client/dashboard', ENG_HOST));

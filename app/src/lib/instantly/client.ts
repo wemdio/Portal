@@ -27,6 +27,7 @@ import type {
 import { getInstantlyAccountApiKey, resolveInstantlyAccountId, type InstantlyRequestOptions } from './accounts';
 import { acquireInstantlyToken } from './rateLimiter';
 import { InstantlyApiError } from './errors';
+import { parseAccountCampaignMappingItems } from './accountCampaignMappings';
 export { InstantlyApiError } from './errors';
 
 const BASE_URL = 'https://api.instantly.ai/api/v2';
@@ -799,8 +800,39 @@ export async function getBackgroundJob(id: string) {
 
 // ─── Account-Campaign Mapping ─────────────────────────────────────────────────
 
-export async function getAccountCampaignMappings(email: string) {
-  return request<unknown>(`/account-campaign-mappings/${encodeURIComponent(email)}`);
+export async function getAccountCampaignMappings(email: string, requestOptions?: InstantlyRequestOptions) {
+  const items: unknown[] = [];
+  let startingAfter: string | undefined;
+  const seenCursors = new Set<string>();
+  // Live endpoint defaults to 10 and returns a regular cursor wrapper. Some
+  // mailboxes participate in >10 campaigns, so a single unparameterized GET
+  // silently loses ownership candidates.
+  for (let page = 0; page < 50; page++) {
+    const raw = await request<unknown>(
+      `/account-campaign-mappings/${encodeURIComponent(email)}`,
+      { params: { limit: 100, starting_after: startingAfter } },
+      requestOptions,
+    );
+    items.push(...parseAccountCampaignMappingItems(raw));
+    if (Array.isArray(raw) || !raw || typeof raw !== 'object') {
+      return { items, next_starting_after: null };
+    }
+    const next = (raw as { next_starting_after?: unknown }).next_starting_after;
+    const nextCursor = typeof next === 'string' && next.trim() ? next : undefined;
+    if (!nextCursor) return { items, next_starting_after: null };
+    if (seenCursors.has(nextCursor)) {
+      throw new InstantlyApiError(
+        'Instantly account-campaign-mappings repeated a pagination cursor',
+        502,
+      );
+    }
+    seenCursors.add(nextCursor);
+    startingAfter = nextCursor;
+  }
+  throw new InstantlyApiError(
+    'Instantly account-campaign-mappings exceeded the 50-page safety limit',
+    502,
+  );
 }
 
 // ─── Email Verification ──────────────────────────────────────────────────────

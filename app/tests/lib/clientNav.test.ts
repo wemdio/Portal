@@ -155,6 +155,13 @@ describe('client nav IA', () => {
     expect(resolveActiveNavId('/client/support/foo')).toBe('support');
   });
 
+  it('resolveActiveNavId picks eng-mailboxes under /client/eng/mailboxes, not the generic eng item', () => {
+    expect(resolveActiveNavId('/client/eng/mailboxes')).toBe('eng-mailboxes');
+    expect(resolveActiveNavId('/client/eng/mailboxes/')).toBe('eng-mailboxes');
+    expect(resolveActiveNavId('/client/eng')).toBe('eng');
+    expect(resolveActiveNavId('/client/eng/dashboard')).toBe('eng');
+  });
+
   it('Старт group orders items pedagogically (brief → collect → clean → write → launch)', () => {
     const start = CLIENT_NAV_GROUPS.find((g) => g.id === 'start') as ClientNavGroup;
     expect(start.items.map((i) => i.id)).toEqual([

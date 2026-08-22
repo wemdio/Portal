@@ -10,6 +10,15 @@
 - Connection strings and credentials remain local secrets in environment/MCP configuration and must never be committed. This map provides context; it does not grant access.
 - If an MCP server, environment file, script, or SSH profile still points a production database connection at `144.31.54.166`, treat it as stale configuration and report it instead of silently using it. Historical migration documents and explicit rollback sources are the exception.
 
+## Vertical Engine v2 / ENG boundary (critical, approved target)
+
+- Read [`docs/design/2026-08-20-vertical-engine-v2-isolation.md`](./docs/design/2026-08-20-vertical-engine-v2-isolation.md) before changing the Hypothesis Engine, ENG outreach, or the internal Vertical Engine.
+- The existing `app/src/lib/hypothesisEngine`, `app/worker/hypothesisEngine.ts`, `he_*` tables, and `HE_MODEL_*` configuration are the production backend of `/client/eng`. The current internal `/tools/hypothesis-engine` is only a legacy client of that shared backend.
+- Do not implement a redesign of the internal tool inside the existing Hypothesis Engine. Build the internal Vertical Engine v2 beside it with separate `verticalEngineV2` code, `ve_*` tables/queue, worker, API, and `VE_MODEL_*` settings.
+- Do not hide the legacy internal UI until v2 is usable and exposes verified internal legacy runs through a read-only archive. At cutover, normal specialists should see only v2; the legacy UI becomes admin-only/read-only, while its backend remains live for ENG.
+- Do not infer whether an old `he_projects` row is internal or ENG from `market`/`autopilot`. Use a reviewed v2-side legacy mapping. New v2 runs must never write to `he_*`.
+- The phase-1 v2 foundation may exist in code without being migrated or deployed. Check the actual migration/deploy state before assuming it is live. Until the cutover, any shared Hypothesis Engine change can affect both the internal tool and ENG and therefore requires both paths to be tested.
+
 ## Portal DB MCP guide
 
 - Before answering questions through the `portal-db` MCP (schema, Polza terminology, Sales AI tables, SQL templates), read `docs/portal-db-mcp-guide.md` — the full usage guide for that database. Keep it updated when the schema, Sales AI pipeline, or sync workers change.

@@ -9,6 +9,7 @@ import { presetFor, isFreeDomain, type MailboxProvider } from '@/lib/byoMailbox/
 import { registerMailboxForSending } from '@/lib/byoMailbox/sendingProvider';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError } from '@/lib/loggerServer';
+import { scrubBrand } from '@/lib/scrubBrand';
 
 export const dynamic = 'force-dynamic';
 
@@ -204,7 +205,7 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     mailbox: { ...(data as Record<string, unknown>), ...regPatch },
     sendingReady: reg.ok,
-    sendingError: reg.ok ? undefined : reg.error,
+    sendingError: reg.ok ? undefined : scrubBrand(reg.error),
     warning,
   });
 }

@@ -48,6 +48,7 @@ const JOB_TABLES: JobTableConfig[] = [
   { table: 'lpr_jobs',                label: 'LPR Discovery',    activeStatuses: ['pending', 'running'] },
   { table: 'dfyb_jobs',               label: 'DFYB',             activeStatuses: ['planning', 'parsing', 'processing'] },
   { table: 'base_constructor_jobs',   label: 'Конструктор баз',  activeStatuses: ['pending', 'processing'] },
+  { table: 'inn_enrich_jobs',         label: 'Обогащение по ИНН', activeStatuses: ['pending', 'running'] },
 ];
 
 type RawActiveRow = { user_id: string | null; status: string };

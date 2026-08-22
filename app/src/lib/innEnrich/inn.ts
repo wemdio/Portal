@@ -7,11 +7,17 @@
 /** Сколько уникальных ИНН принимает один POST /api/tools/inn-enrich/match. */
 export const MAX_INNS_PER_REQUEST = 2000;
 
-/** Размер одного вызова inn_enrich_fetch внутри match-роута. */
+/** Потолок одной джобы воркера (как email-validation). */
+export const MAX_INNS_PER_JOB = 100_000;
+
+/** Размер одного вызова inn_enrich_fetch внутри match-роута / воркера. */
 export const RPC_BATCH_SIZE = 500;
 
-/** Сколько ИНН страница шлёт за один match-запрос (прогресс = чанки). */
+/** Сколько ИНН страница шлёт за один match-запрос (legacy UI-чанк). */
 export const UI_CHUNK_SIZE = 1000;
+
+export const INN_ENRICH_BUCKET = 'inn-enrich-exports';
+export const MAX_SOURCE_FILE_BYTES = 80 * 1024 * 1024;
 
 const INN_LENGTHS = new Set([10, 12]);
 

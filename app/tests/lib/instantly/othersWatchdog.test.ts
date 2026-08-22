@@ -234,7 +234,46 @@ describe('pollOthersOnce', () => {
     // lastOutbound = ИМЕННО совпавшее по теме исходящее (точный контекст пича).
     expect(context.lastOutbound?.id).toBe('out-1');
     expect(context.campaignOutboundMailboxes).toContain('elena@velar-vr.ru');
-    expect(opts).toMatchObject({ clientDmOnlyOnLead: true });
+    expect(opts).toMatchObject({
+      clientDmOnlyOnLead: true,
+      prefetchedParentMatched: true,
+    });
+  });
+
+  it('не доверяет первому совпадению, если одна тема подходит двум кампаниям', async () => {
+    getAccountCampaignMappings.mockResolvedValue([
+      { campaign_id: 'camp-owner-a', status: 1 },
+      { campaign_id: 'camp-owner-b', status: 1 },
+    ]);
+    getCampaignsByAccountCached.mockResolvedValue(
+      new Map([['main', new Set(['camp-owner-a', 'camp-owner-b'])]]),
+    );
+    listEmails.mockImplementation(async (params: {
+      mode?: string;
+      email_type?: string;
+      campaign_id?: string;
+    }) => {
+      if (params.mode === 'emode_others') {
+        return { items: [makeOthersEmail()], next_starting_after: null };
+      }
+      if (params.email_type === 'sent') {
+        return {
+          items: [{ ...SENT_MATCH, id: `out-${params.campaign_id}` }],
+          next_starting_after: null,
+        };
+      }
+      return { items: [], next_starting_after: null };
+    });
+
+    const { pollOthersOnce } = await importWatchdog();
+    expect(await pollOthersOnce()).toBe(1);
+    expect(qualifyOneReply).toHaveBeenCalledTimes(1);
+    const [, reply, , , , opts] = qualifyOneReply.mock.calls[0];
+    expect((reply as Email).campaign_id).toBe('camp-owner-a');
+    expect(opts).toMatchObject({ prefetchedParentMatched: false });
+    expect(listEmails.mock.calls.filter(
+      ([params]) => (params as { email_type?: string }).email_type === 'sent',
+    )).toHaveLength(1);
   });
 
   it('помечает сироту: у Others-письма нет campaign_id → opts.outOfCampaign=true (инцидент 11.08)', async () => {
@@ -249,7 +288,11 @@ describe('pollOthersOnce', () => {
     // Воркеру передаём атрибутированную кампанию (для guard'ов/upsert'ов)…
     expect((reply as Email).campaign_id).toBe('camp-velar');
     // …но сироту помечаем отдельным флагом, НЕ подменяя факт привязки.
-    expect(opts).toMatchObject({ clientDmOnlyOnLead: true, outOfCampaign: true });
+    expect(opts).toMatchObject({
+      clientDmOnlyOnLead: true,
+      outOfCampaign: true,
+      prefetchedParentMatched: true,
+    });
   });
 
   it('НЕ сирота, если у Others-письма campaign_id совпал с атрибутированным → outOfCampaign=false', async () => {
@@ -272,7 +315,10 @@ describe('pollOthersOnce', () => {
 
     expect(qualifyOneReply).toHaveBeenCalledTimes(1);
     const [, , , , , opts] = qualifyOneReply.mock.calls[0];
-    expect(opts).toMatchObject({ outOfCampaign: false });
+    expect(opts).toMatchObject({
+      outOfCampaign: false,
+      prefetchedParentMatched: true,
+    });
   });
 
   it('ЛИД С ЛИЧНОЙ ПОЧТЫ (слали на корпоративный): тема совпала → берём, адрес не важен', async () => {
