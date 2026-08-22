@@ -41,6 +41,27 @@ describe('worker bundle entry lists point at real files', () => {
   // поэтому КАЖДЫЙ *Cron.ts из build:workers обязан быть и в esbuild-списке
   // Dockerfile.worker — иначе бандл просто не попадёт в образ (gisSignalOutreachCron,
   // 06.08.2026: в package.json был, в образе отсутствовал, пайплайн молча не стартовал).
+  // На проде WORKER_KIND=all / worker/index.ts не запускается — только
+  // специализированные контейнеры. Джобы inn_enrich, повешенные только на
+  // index.ts, навсегда остаются pending. Страж: dedicated worker + compose.
+  it('prod compose runs a dedicated inn-enrich worker (index.ts is not run on prod)', () => {
+    const yml = fs.readFileSync(path.join(REPO_ROOT, 'docker-compose.prod.yml'), 'utf8');
+    expect(yml).toMatch(/container_name:\s*portal-worker-inn-enrich/);
+    expect(yml).toMatch(/WORKER_KIND=innerenrich/);
+    const runner = fs.readFileSync(path.join(REPO_ROOT, 'app', 'worker', 'runner.ts'), 'utf8');
+    expect(runner).toMatch(/case 'innerenrich'/);
+    expect(fs.existsSync(path.join(REPO_ROOT, 'app', 'worker', 'innEnrich.ts'))).toBe(true);
+    const dockerfile = fs.readFileSync(path.join(REPO_ROOT, 'Dockerfile.worker'), 'utf8');
+    expect(dockerfile).toMatch(/worker\/innEnrich\.ts/);
+    const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'app', 'package.json'), 'utf8'));
+    expect(pkg.scripts['build:workers']).toMatch(/worker\/innEnrich\.ts/);
+    const deployTargets = fs.readFileSync(
+      path.join(REPO_ROOT, '.semaphore', 'select-deploy-targets.sh'),
+      'utf8',
+    );
+    expect(deployTargets).toMatch(/ALL_WORKER_SERVICES="[^"]*\bworker-inn-enrich\b/);
+  });
+
   it('every *Cron.ts in build:workers is also bundled in Dockerfile.worker', () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'app', 'package.json'), 'utf8'));
     const dockerEntries = workerEntriesFrom(fs.readFileSync(path.join(REPO_ROOT, 'Dockerfile.worker'), 'utf8'));

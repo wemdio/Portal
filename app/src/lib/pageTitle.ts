@@ -49,6 +49,7 @@ const CLIENT_SECTION_TITLES: ReadonlyArray<{
   { prefix: '/client/build', ru: 'Сбор базы', en: 'Build a list', es: 'Crear una lista' },
   { prefix: '/client/parsers', ru: 'Парсеры', en: 'Parsers', es: 'Extractores' },
   { prefix: '/client/offer', ru: 'Договор оферты', en: 'Terms of service', es: 'Términos del servicio' },
+  { prefix: '/client/eng/mailboxes', ru: 'Sending mailboxes', en: 'Sending mailboxes', es: 'Buzones' },
   { prefix: '/client/eng', ru: 'Outreach', en: 'Outreach', es: 'Outreach' },
 ];
 

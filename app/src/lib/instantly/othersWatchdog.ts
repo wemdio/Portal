@@ -2,6 +2,11 @@ import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import * as instantly from './client';
 import { getBodyText, type ThreadContext } from './leadQualifier';
 import {
+  mappingCampaignId,
+  parseAccountCampaignMappingItems,
+  type AccountCampaignMappingItem,
+} from './accountCampaignMappings';
+import {
   qualifyOneReply,
   getCampaignsByAccountCached,
   isTransientQualifyError,
@@ -237,23 +242,6 @@ const domainCandidatesCache = new Map<
   { at: number; ttl: number; value: CampaignCandidate[] }
 >();
 
-interface MappingItem {
-  campaign_id?: string;
-  id?: string;
-  status?: number;
-  timestamp_created?: string;
-}
-
-function parseMappingItems(raw: unknown): MappingItem[] {
-  if (Array.isArray(raw)) return raw as MappingItem[];
-  if (raw && typeof raw === 'object') {
-    const obj = raw as { items?: unknown; mappings?: unknown };
-    if (Array.isArray(obj.items)) return obj.items as MappingItem[];
-    if (Array.isArray(obj.mappings)) return obj.mappings as MappingItem[];
-  }
-  return [];
-}
-
 /**
  * Others-письмо не несёт campaign_id (проверено живьём: 500/500 пусто), а
  * контакт к моменту ответа часто уже удалён из Instantly (ежедневная ротация
@@ -315,16 +303,16 @@ async function getDomainCampaignCandidates(
     // неспейсенных вызовов подряд. Исчерпание — отложить, НЕ кэшировать.
     if (!(await meter.take())) return null;
     probed++;
-    let items: MappingItem[] = [];
+    let items: AccountCampaignMappingItem[] = [];
     try {
-      items = parseMappingItems(await instantly.getAccountCampaignMappings(mailbox));
+      items = parseAccountCampaignMappingItems(await instantly.getAccountCampaignMappings(mailbox));
     } catch (err) {
       workerLog('warn', `account-campaign-mappings failed for ${mailbox} — attribution deferred`, err);
       return null; // транзиентно: НЕ кэшируем, попробуем на следующем тике
     }
     const sorted = items
       .map((m) => ({
-        id: (m.campaign_id ?? m.id ?? '').trim(),
+        id: mappingCampaignId(m) ?? '',
         active: m.status === 1 ? 1 : 0,
         created: Date.parse(m.timestamp_created ?? '') || 0,
       }))
@@ -746,6 +734,11 @@ export async function pollOthersOnce(): Promise<number> {
       await qualifyOneReply(db, reply, apiKey, chosen.accountId, ctx, {
         clientDmOnlyOnLead: true,
         outOfCampaign,
+        // A subject/body match is authoritative only when this mailbox has a
+        // single qualifiable campaign. With several candidates the first match
+        // may be a shared template, so ownership must run its cross-owner
+        // evidence checks instead of trusting probe order.
+        prefetchedParentMatched: candidates.length === 1,
       });
       processed++;
       if (email.id) transientRetryCount.delete(email.id);
