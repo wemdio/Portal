@@ -6,6 +6,7 @@
  */
 
 import { callLLMWithSchema, getVeModel } from '../llm';
+import { compileClientBriefForPrompt, readClientBrief } from '../clientBriefIntake';
 import { VeHypothesesBatchSchema, type VeBrandCloudOutput, type VeSiteProfileOutput } from '../schemas';
 import { projectMarket, type VeMarket } from '../market';
 import { buildHypothesesInstantMessages } from '../prompts/hypotheses';
@@ -184,6 +185,8 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
     loadActualsHistory(ctx),
   ]);
 
+  const clientBrief = compileClientBriefForPrompt(readClientBrief(project));
+
   stageLog(ctx, '[hypotheses] мгновенный проход: 25–40 кандидатов…');
   // Объект собираем переменной, а не литералом в вызове: поля portfolioProfile /
   // markupHistory добавляются в HypothesesPromptInput параллельным изменением —
@@ -200,6 +203,8 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
     ...(typeof project.brief?.business_override === 'string' && project.brief.business_override.trim()
       ? { businessOverride: project.brief.business_override.trim() }
       : {}),
+    // Бриф клиента: ЦА, боли и возражения из первых рук — на сайте их нет.
+    ...(clientBrief ? { clientBrief } : {}),
   };
   const llm = await callLLMWithSchema(
     (market === 'us' ? buildHypothesesInstantMessagesEn : buildHypothesesInstantMessages)(promptInput),
