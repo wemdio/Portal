@@ -38,6 +38,7 @@ const BRIEF: VeClientBrief = {
   },
   missing: [],
   icp: null,
+  client_types: [],
   file_name: 'amb.docx',
   uploaded_at: '2026-08-22T10:00:00.000Z',
 };
@@ -82,6 +83,31 @@ describe('compileClientBriefForLetters', () => {
 
     expect(text).not.toContain('lead@client.ru');
     expect(text).not.toContain('+7 (988)');
+  });
+
+  it('gives the model client types instead of client names', () => {
+    const withClients: VeClientBrief = {
+      ...BRIEF,
+      fields: { ...BRIEF.fields, existing_clients: 'Детский Мир, Familia, Вотоня' },
+      client_types: ['федеральные сети детских товаров', 'региональные дистрибьюторы'],
+    };
+
+    const text = compileClientBriefForLetters(withClients);
+
+    expect(text).toContain('федеральные сети детских товаров');
+    // Имена из брифа могут быть под NDA — в письмо они не идут.
+    expect(text).not.toContain('Детский Мир');
+    expect(text).not.toContain('Familia');
+  });
+
+  it('says nothing about clients when the brief gave no types', () => {
+    const withNames: VeClientBrief = {
+      ...BRIEF,
+      fields: { ...BRIEF.fields, existing_clients: 'Детский Мир, Familia' },
+      client_types: [],
+    };
+
+    expect(compileClientBriefForLetters(withNames)).not.toContain('Детский Мир');
   });
 
   it('caps one huge field so it cannot eat the whole block', () => {

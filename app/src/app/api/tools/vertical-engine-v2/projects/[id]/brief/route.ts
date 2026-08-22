@@ -12,6 +12,7 @@ import {
   parseClientBriefText,
   readClientBrief,
   type VeClientBrief,
+  type VeClientBriefIcp,
 } from '@/lib/verticalEngineV2/clientBriefIntake';
 
 export const dynamic = 'force-dynamic';
@@ -182,14 +183,22 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
       const { id } = await params;
       if (!id) return jsonError('Missing id', 400);
 
-      let body: { fields?: unknown };
+      let body: { fields?: unknown; icp?: unknown };
       try {
-        body = (await req.json()) as { fields?: unknown };
+        body = (await req.json()) as { fields?: unknown; icp?: unknown };
       } catch {
         return jsonError('Invalid body', 400);
       }
-      if (!body?.fields || typeof body.fields !== 'object' || Array.isArray(body.fields)) {
-        return jsonError('Ожидается объект fields', 400);
+      const isObject = (value: unknown) =>
+        Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+      if (body?.fields !== undefined && !isObject(body.fields)) {
+        return jsonError('fields должен быть объектом', 400);
+      }
+      if (body?.icp !== undefined && !isObject(body.icp)) {
+        return jsonError('icp должен быть объектом', 400);
+      }
+      if (body?.fields === undefined && body?.icp === undefined) {
+        return jsonError('Ожидается fields и/или icp', 400);
       }
 
       const loaded = await loadProject(id);
@@ -197,7 +206,8 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
 
       const edited = applyClientBriefEdit(
         readClientBrief(loaded.project),
-        body.fields as Partial<ClientBriefFields>,
+        (body.fields ?? {}) as Partial<ClientBriefFields>,
+        body.icp as Partial<VeClientBriefIcp> | undefined,
       );
 
       const saveError = await saveClientBrief(id, loaded.project.brief, edited);

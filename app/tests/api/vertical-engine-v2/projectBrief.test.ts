@@ -244,7 +244,28 @@ describe('GET/PUT /api/tools/vertical-engine-v2/projects/[id]/brief', () => {
     expect(stored.icp?.exclude).toContain('интеграторы');
   });
 
-  it('rejects a body without fields', async () => {
+  it('applies a manual edit of the audience frame', async () => {
+    seed({
+      client_brief: {
+        fields: { company_description: 'Консалтинг по ВЭД' },
+        missing: [],
+        icp: { include: [], exclude: ['интеграторы'], size: '', geo: '', triggers: [], qualification: '' },
+        file_name: 'amb.docx',
+        uploaded_at: '2026-08-22T10:00:00.000Z',
+      },
+    });
+
+    const res = await PUT(
+      jsonRequest('PUT', { icp: { exclude: ['интеграторы', 'действующие клиенты'] } }),
+      params,
+    );
+    expect(res.status).toBe(200);
+
+    const stored = storedBrief().client_brief as { icp: { exclude: string[] } | null };
+    expect(stored.icp?.exclude).toEqual(['интеграторы', 'действующие клиенты']);
+  });
+
+  it('rejects a body without fields or icp', async () => {
     seed({ client_brief: { fields: {}, missing: [], file_name: null, uploaded_at: 'x' } });
     const res = await PUT(jsonRequest('PUT', {}), params);
     expect(res.status).toBe(400);

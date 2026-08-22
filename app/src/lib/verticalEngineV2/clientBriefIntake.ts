@@ -54,6 +54,13 @@ export interface VeClientBrief {
   missing: VeClientBriefField[];
   /** null — клиент рамку ЦА не задал (или бриф загружен до появления поля). */
   icp: VeClientBriefIcp | null;
+  /**
+   * Типы действующих клиентов без названий («федеральные сети детских
+   * товаров»). В письма идут они, а не имена из fields.existing_clients:
+   * названия могут быть под NDA, и клиенты просят подтверждать разрешение на
+   * упоминание. Имена остаются в брифе — для специалиста.
+   */
+  client_types: string[];
   file_name: string | null;
   uploaded_at: string;
 }
@@ -168,6 +175,7 @@ function applyGapRules(fields: ClientBriefFields): {
 const BriefExtractionSchema = z.object({
   fields: z.record(z.string(), z.unknown()).default({}),
   icp: z.record(z.string(), z.unknown()).nullish(),
+  client_types: z.array(z.unknown()).nullish(),
 });
 
 /** Максимум пунктов в списке рамки ЦА и длина одного пункта. */
@@ -280,8 +288,14 @@ ${briefText}
     "geo": string,                    // география
     "triggers": string[],             // наблюдаемые поводы для базы (тендер, вакансии, новый CIO)
     "qualification": string           // минимальная квалификация ответа/лида
-  }
+  },
+  "client_types": string[]            // типы действующих клиентов БЕЗ названий
 }
+
+client_types — обобщение строки «ваши действующие клиенты» без имён компаний:
+«федеральные сети детских товаров», «региональные дистрибьюторы одежды». Имена
+не переноси: они пойдут в отдельное поле и могут быть под NDA. Клиентов клиент не
+назвал — верни пустой массив.
 
 icp заполняй ТОЛЬКО тем, что клиент написал сам: списки «исключить», размерные
 полки и триггеры переноси дословно, ничего не добавляя от себя. Клиент рамку не
@@ -320,6 +334,7 @@ export async function parseClientBriefText(
       fields,
       missing,
       icp: normalizeIcp(llm.data.icp),
+      client_types: icpList(llm.data.client_types),
       file_name: opts.fileName?.trim() || null,
       uploaded_at: new Date().toISOString(),
     },
@@ -345,15 +360,21 @@ export function readClientBrief(
     missing,
     // Брифы, загруженные до появления рамки ЦА, читаются как рамка не задана.
     icp: normalizeIcp(stored.icp),
+    client_types: icpList(stored.client_types),
     file_name: typeof stored.file_name === 'string' ? stored.file_name : null,
     uploaded_at: typeof stored.uploaded_at === 'string' ? stored.uploaded_at : '',
   };
 }
 
-/** Ручная правка полей поверх разобранного: пробелы клиента не восстанавливаем. */
+/**
+ * Ручная правка поверх разобранного брифа: поля и/или рамка ЦА. Не переданные
+ * части остаются как были — специалист правит по одному блоку, а не пересылает
+ * бриф целиком.
+ */
 export function applyClientBriefEdit(
   current: VeClientBrief | null,
   patch: Partial<ClientBriefFields>,
+  icpPatch?: Partial<VeClientBriefIcp>,
 ): VeClientBrief {
   const merged = normalizeBriefFields({
     ...(current?.fields ?? EMPTY_BRIEF_FIELDS),
@@ -368,7 +389,8 @@ export function applyClientBriefEdit(
   return {
     fields,
     missing,
-    icp: current?.icp ?? null,
+    icp: icpPatch ? normalizeIcp({ ...(current?.icp ?? {}), ...icpPatch }) : (current?.icp ?? null),
+    client_types: current?.client_types ?? [],
     file_name: current?.file_name ?? null,
     uploaded_at: current?.uploaded_at || new Date().toISOString(),
   };
@@ -423,9 +445,12 @@ export function compileClientBriefForLetters(
   if (!brief) return '';
 
   const filled = LETTER_BRIEF_FIELDS.filter(
-    (field) => field !== 'price_tier' && ((brief.fields[field] as string) ?? '').trim().length > 0,
+    (field) =>
+      field !== 'price_tier' &&
+      field !== 'existing_clients' &&
+      ((brief.fields[field] as string) ?? '').trim().length > 0,
   );
-  if (filled.length === 0 && !brief.fields.price_tier) return '';
+  if (filled.length === 0 && !brief.fields.price_tier && brief.client_types.length === 0) return '';
 
   const budget = Math.min(
     LETTER_FIELD_MAX_CHARS,
@@ -442,6 +467,9 @@ export function compileClientBriefForLetters(
     (reduced[field] as string) =
       value.length > budget ? `${value.slice(0, budget).trimEnd()}…` : value;
   }
+  // Действующие клиенты — только типами: имена из брифа могут быть под NDA, а
+  // клиенты просят подтверждать разрешение на упоминание до запуска.
+  reduced.existing_clients = brief.client_types.join('; ').slice(0, budget);
   reduced.social_proof = brief.fields.social_proof;
 
   const compiled = compileBriefText(reduced);

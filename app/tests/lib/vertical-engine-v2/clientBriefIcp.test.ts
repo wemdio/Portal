@@ -19,6 +19,7 @@ jest.mock('@/lib/verticalEngineV2/llm', () => ({
 
 import { callLLMWithSchema } from '@/lib/verticalEngineV2/llm';
 import {
+  applyClientBriefEdit,
   compileClientBriefIcpForPrompt,
   parseClientBriefText,
   readClientBrief,
@@ -83,6 +84,59 @@ describe('parseClientBriefText — ICP', () => {
     const { brief } = await parseClientBriefText('ОПИСАНИЕ КОМПАНИИ', { fileName: null });
 
     expect(brief.icp).toBeNull();
+  });
+});
+
+describe('parseClientBriefText — типы клиентов вместо имён', () => {
+  it('keeps names in the brief but exposes anonymised types for letters', async () => {
+    mockLlmOnce({
+      fields: { ...EMPTY_BRIEF_FIELDS, existing_clients: 'Детский Мир, Familia' },
+      client_types: ['федеральные сети детских товаров', '-'],
+    });
+
+    const { brief } = await parseClientBriefText('ВАШИ ДЕЙСТВУЮЩИЕ КЛИЕНТЫ?', { fileName: null });
+
+    expect(brief.fields.existing_clients).toBe('Детский Мир, Familia');
+    expect(brief.client_types).toEqual(['федеральные сети детских товаров']);
+  });
+});
+
+describe('applyClientBriefEdit — рамка ЦА', () => {
+  it('applies a manual edit of the exclusions', () => {
+    const edited = applyClientBriefEdit(
+      {
+        fields: EMPTY_BRIEF_FIELDS,
+        missing: [],
+        icp: ICP_FROM_BRIEF,
+        client_types: [],
+        file_name: 'komma.docx',
+        uploaded_at: '2026-08-22T10:00:00.000Z',
+      },
+      {},
+      { exclude: ['интеграторы', 'действующие клиенты'], size: '500–3 000 сотрудников' },
+    );
+
+    expect(edited.icp?.exclude).toEqual(['интеграторы', 'действующие клиенты']);
+    expect(edited.icp?.size).toBe('500–3 000 сотрудников');
+    // Не переданные поля рамки остаются прежними.
+    expect(edited.icp?.triggers).toEqual(ICP_FROM_BRIEF.triggers);
+  });
+
+  it('leaves the frame untouched when only fields are edited', () => {
+    const edited = applyClientBriefEdit(
+      {
+        fields: EMPTY_BRIEF_FIELDS,
+        missing: [],
+        icp: ICP_FROM_BRIEF,
+        client_types: ['дистрибьюторы'],
+        file_name: null,
+        uploaded_at: '',
+      },
+      { usp: 'новое УТП' },
+    );
+
+    expect(edited.icp?.exclude).toEqual(ICP_FROM_BRIEF.exclude);
+    expect(edited.client_types).toEqual(['дистрибьюторы']);
   });
 });
 
