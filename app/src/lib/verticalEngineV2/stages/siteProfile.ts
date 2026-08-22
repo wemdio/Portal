@@ -25,6 +25,7 @@
 import { z } from 'zod';
 
 import { callLLMWithSchema, getVeModel } from '../llm';
+import { compileClientBriefForPrompt, readClientBrief } from '../clientBriefIntake';
 import { projectMarket, type VeMarket } from '../market';
 import { VeSiteProfileSchema } from '../schemas';
 import { heCaseDraftSchema, normalizeCaseText } from '../caseBank';
@@ -302,7 +303,13 @@ export async function runSiteProfileStage(job: VeJob, ctx: VeStageContext): Prom
     stageLog(ctx, `[site_profile] сайт тонкий (${corpus.length} символов) — помечен site_thin`);
   }
 
-  const profileInput = { websiteUrl: project.website_url, siteText: corpus };
+  // Бриф клиента — второй источник профиля: закрывает то, чего на сайте нет
+  // (цикл сделки, чек, возражения), и остаётся единственным источником, когда
+  // сайт «в разработке».
+  const clientBrief = compileClientBriefForPrompt(readClientBrief(project));
+  if (clientBrief) stageLog(ctx, '[site_profile] бриф клиента подмешан в профиль');
+
+  const profileInput = { websiteUrl: project.website_url, siteText: corpus, clientBrief };
   const llm = await callLLMWithSchema(
     market === 'us' ? buildSiteProfileMessagesEn(profileInput) : buildSiteProfileMessages(profileInput),
     VeSiteProfileSchema,

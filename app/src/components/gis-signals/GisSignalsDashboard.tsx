@@ -6,7 +6,7 @@
  * Данные — два GET-эндпоинта (оба гейтятся: чужим 404):
  *   /api/client/gis-signals         — сегменты + перформанс кампаний Instantly;
  *   /api/client/gis-signals/report  — периодная отчётность (воронка с дельтами,
- *                                     срез 8 сигналов, грейды A/B/C, недельный
+ *                                     срез 16 сигналов, грейды A/B/C, недельный
  *                                     отчёт, остаток пула).
  *
  * Блоки:
@@ -14,7 +14,7 @@
  *   02 — воронка за выбранный период по сегментам + дельты к предыдущему
  *        равному интервалу (у «всё время» дельт нет);
  *   03 — перформанс кампаний Instantly (allTime + строка «за 7 дней»);
- *   04 — срез по 8 сигналам × сегментам за период;
+ *   04 — срез по 16 сигналам × сегментам за период;
  *   05 — грейды A/B/C + hit-rate сигналов за период (скоринг-сегменты, legal);
  *   06 — недельный отчёт (пн–вс МСК, «эта/прошлая»): воронка + дельта,
  *        залито из журнала Portal, кампании недели, грейды, остаток пула, CSV;
@@ -54,7 +54,11 @@ type GisSignalKey =
   | 'signal_accounting_relevance'
   | 'signal_consulting_relevance'
   | 'signal_pricing_packages'
-  | 'signal_client_segments';
+  | 'signal_client_segments'
+  | 'signal_medicine_relevance'
+  | 'signal_medicine_promo'
+  | 'signal_medicine_premium'
+  | 'signal_medicine_marketing_team';
 
 interface SegmentStats {
   segmentKey: string;
@@ -143,7 +147,7 @@ interface GisSignalsReportResponse {
 
 // ───────────────────────── константы ─────────────────────────
 
-/** Порядок и русские подписи 12 сигналов — фиксированы, не зависят от выборки. */
+/** Порядок и русские подписи 16 сигналов — фиксированы, не зависят от выборки. */
 const SIGNAL_ROWS: Array<{ key: GisSignalKey; label: string }> = [
   { key: 'signal_general_phone', label: 'Общий телефон / колл-центр' },
   { key: 'signal_contact_form', label: 'Форма заявки / обратной связи' },
@@ -157,6 +161,10 @@ const SIGNAL_ROWS: Array<{ key: GisSignalKey; label: string }> = [
   { key: 'signal_consulting_relevance', label: 'Консалтинговая релевантность сайта' },
   { key: 'signal_pricing_packages', label: 'Калькулятор / тарифы / пакеты обслуживания' },
   { key: 'signal_client_segments', label: 'Работа с ИП / ООО / МСБ' },
+  { key: 'signal_medicine_relevance', label: 'Частная клиника / медцентр / сеть' },
+  { key: 'signal_medicine_promo', label: 'Акции / посадочные / спецпредложения' },
+  { key: 'signal_medicine_premium', label: 'Имплантация / хирургия / диагностика' },
+  { key: 'signal_medicine_marketing_team', label: 'Маркетинговая команда / агентство' },
 ];
 
 type PeriodPreset = '7d' | '30d' | 'all' | 'custom';
@@ -930,11 +938,11 @@ export function GisSignalsDashboard() {
               </table>
             </div>
             <p className="text-xs mt-2" style={{ color: 'var(--cp-text-l)' }}>
-              Скоринг ведут только сегменты с профилем (сейчас — «Юридические услуги»), у остальных — «—».
+              Скоринг ведут только сегменты с профилем (юристы, бухгалтерия, консалтинг, медицина), у остальных — «—».
               Отсев — скор ниже порога профиля (компания проверена, но нерелевантна).
             </p>
 
-            {/* Hit-rate каждого из 8 сигналов в сегментном разрезе */}
+            {/* Hit-rate каждого из 16 сигналов в сегментном разрезе */}
             <div className="neu-card overflow-x-auto mt-4">
               <table className="w-full text-sm">
                 <thead>

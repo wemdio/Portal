@@ -24,7 +24,16 @@ WEBSITE TEXT (homepage + about page, may be truncated by the parser):
 """
 ${input.siteText}
 """
-
+${
+  input.clientBrief?.trim()
+    ? `
+CLIENT BRIEF (filled in by the client — takes priority over the site where they disagree, and is the only source when the site is not live yet):
+"""
+${input.clientBrief.trim()}
+"""
+`
+    : ''
+}
 Build the company profile and return ONLY JSON of exactly this shape (no markdown fences, no explanations):
 {
   "company_name": string,      // company/brand name as stated on the site
@@ -40,7 +49,7 @@ Build the company profile and return ONLY JSON of exactly this shape (no markdow
 }
 
 Hard rules:
-- current_clients and cases — only what is literally present in the website text.
+- current_clients and cases — only what is literally present in the website text or in the client brief.
 - Do not distort the offer: if several different products are sold, describe the main one and mention the rest in product_summary.
 - No text outside the JSON.`;
 

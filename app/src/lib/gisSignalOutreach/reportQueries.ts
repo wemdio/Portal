@@ -3,7 +3,7 @@
  *
  * Источники:
  *   - gis_signal_runs.funnel (jsonb { perSegment, total }) — воронка прогонов;
- *   - gis_signal_company_signals — per-сигнальный срез (8 сигналов) и
+ *   - gis_signal_company_signals — per-сигнальный срез (16 сигналов) и
  *     скоринг-разрез (score/grade) всех проверенных компаний;
  *   - client_campaign_append_batches — durable факты заливок в Instantly
  *     (не зависят от чистки лидов у провайдера);
@@ -30,11 +30,12 @@ export interface GisSignalFunnelRow {
 }
 
 /**
- * Все 12 сигнальных булевых колонок архива: 6 базовых + 6 скоринговых
- * (миграции 20260811_0003 — legal, 20260815_0001 — accounting/consulting).
- * Срез/статы считаются по всем двенадцати; у строк, проверенных до появления
- * колонки, значение false (DEFAULT миграции) — это «сигнал не искали», и на
- * периодных отчётах по старым датам новые сигналы будут пустыми.
+ * Все 16 сигнальных булевых колонок архива: 6 базовых + 10 скоринговых
+ * (миграции 20260811_0003 — legal, 20260815_0001 — accounting/consulting,
+ * 20260822_0001 — medicine). Срез/статы считаются по всем шестнадцати;
+ * у строк, проверенных до появления колонки, значение false (DEFAULT
+ * миграции) — это «сигнал не искали», и на периодных отчётах по старым
+ * датам новые сигналы будут пустыми.
  */
 const SIGNAL_BOOL_COLUMNS = [
   'signal_general_phone',
@@ -49,6 +50,10 @@ const SIGNAL_BOOL_COLUMNS = [
   'signal_consulting_relevance',
   'signal_pricing_packages',
   'signal_client_segments',
+  'signal_medicine_relevance',
+  'signal_medicine_promo',
+  'signal_medicine_premium',
+  'signal_medicine_marketing_team',
 ] as const;
 
 export type GisSignalBoolKey = (typeof SIGNAL_BOOL_COLUMNS)[number];
@@ -67,14 +72,14 @@ export interface GisReportRange {
 
 /**
  * Статистика проверенных компаний за период (архив gis_signal_company_signals):
- * срез по 8 сигналам + скоринг-разрез (грейды A/B/C, отсев, медианный скор).
+ * срез по 16 сигналам + скоринг-разрез (грейды A/B/C, отсев, медианный скор).
  * У сегментов без скоринг-профиля scored=0 и medianScore=null (грейдов нет).
  */
 export interface GisSignalSegmentStats {
   segmentKey: string;
   /** Всего проверено компаний в периоде (все строки архива сегмента). */
   companies: number;
-  /** Хиты каждого из 8 сигналов (bool=true). */
+  /** Хиты каждого из 16 сигналов (bool=true). */
   signalHits: Record<GisSignalBoolKey, number>;
   /** Строк со score (только скоринг-сегменты, напр. legal). */
   scored: number;
@@ -270,7 +275,7 @@ export async function getPeriodFunnel(range: GisReportRange): Promise<GisSignalF
 }
 
 /**
- * Статистика проверенных компаний за период (срез по 8 сигналам + грейды).
+ * Статистика проверенных компаний за период (срез по 16 сигналам + грейды).
  * Один пагинированный проход по архиву — считает и хиты сигналов, и
  * скоринг-разрез. Ошибка БД → throw (как fetchRuns): частичные числа на
  * дашборде хуже явного 500.

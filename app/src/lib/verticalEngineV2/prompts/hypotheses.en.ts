@@ -81,7 +81,10 @@ How to read: potential_pct is the vertical's potential, NOT a reply% forecast. B
 
   const user = `CLIENT PROFILE (website ${input.websiteUrl}):
 ${JSON.stringify(input.profile, null, 2)}
-${input.businessOverride?.trim() ? `
+${input.clientBrief?.trim() ? `
+CLIENT BRIEF (filled in by the client — on audience, pains and objections trust it over the site profile; do not invent what the brief does not state):
+${input.clientBrief.trim()}
+` : ''}${input.businessOverride?.trim() ? `
 MANUAL BUSINESS DESCRIPTION FROM THE SPECIALIST (takes priority over the site profile — written by a person who knows the client; trust it over the profile on conflicts):
 ${input.businessOverride.trim()}
 ` : ''}

@@ -57,8 +57,8 @@ describe('GRID_HEADER', () => {
       'score', 'grade',
       'Проверка — примечание',
     ]);
-    // 8 базовых + 12 пар сигналов + score/grade + примечание.
-    expect(GRID_HEADER).toHaveLength(8 + 24 + 2 + 1);
+    // 8 базовых + пары сигналов + score/grade + примечание.
+    expect(GRID_HEADER).toHaveLength(8 + SIGNAL_COLUMNS.length * 2 + 2 + 1);
   });
 });
 
@@ -82,26 +82,27 @@ describe('companiesToGrid', () => {
     ]);
 
     // Пары «сигнал/уточнение» идут в порядке SIGNAL_COLUMNS.
-    const cells = row.slice(8, 32);
+    const cells = row.slice(8, 8 + SIGNAL_COLUMNS.length * 2);
     expect(cells[0]).toBe('Да'); // generalPhone
     expect(cells[1]).toBe('8 800 555-06-65 в шапке сайта');
     expect(cells[2]).toBe('Да'); // contactForm
     expect(cells[3]).toBe('Кнопка: «Заказать звонок»');
     // Остальные сигналы не сработали → Нет + Not found on checked pages.
-    for (let i = 4; i < 24; i += 2) {
+    for (let i = 4; i < cells.length; i += 2) {
       expect(cells[i]).toBe('Нет');
       expect(cells[i + 1]).toBe(CLARIFICATION_NOT_FOUND);
     }
     // Без скоринга: score/grade пустые.
-    expect(row[32]).toBe('');
-    expect(row[33]).toBe('');
-    expect(row[34]).toBe('Homepage + 2 subpages checked');
+    const scoreIdx = 8 + SIGNAL_COLUMNS.length * 2;
+    expect(row[scoreIdx]).toBe('');
+    expect(row[scoreIdx + 1]).toBe('');
+    expect(row[scoreIdx + 2]).toBe('Homepage + 2 subpages checked');
   });
 
   it('компания без единого сигнала: все ячейки Нет + Not found', () => {
     const grid = companiesToGrid([qualified({ hits: {} })]);
-    const cells = grid[1].slice(8, 32);
-    for (let i = 0; i < 24; i += 2) {
+    const cells = grid[1].slice(8, 8 + SIGNAL_COLUMNS.length * 2);
+    for (let i = 0; i < cells.length; i += 2) {
       expect(cells[i]).toBe('Нет');
       expect(cells[i + 1]).toBe(CLARIFICATION_NOT_FOUND);
     }
@@ -168,7 +169,7 @@ describe('gridToLeadPayloads', () => {
   });
 
   it('без колонки статуса email_status пустой; пустая сетка → пусто', () => {
-    const noStatusGrid = [GRID_HEADER, finalRow().slice(0, 27)];
+    const noStatusGrid = [GRID_HEADER, finalRow().slice(0, GRID_HEADER.length)];
     const leads = gridToLeadPayloads(noStatusGrid, 'clinics');
     expect(leads[0].custom_variables?.email_status).toBe('');
 
@@ -191,9 +192,10 @@ describe('score/grade (скоринговые сегменты, legal)', () => {
       { ...qualified({ hits: { legalRelevance: 'Юридические услуги' } }), score: 60, grade: 'B' },
     ]);
     const row = grid[1];
-    expect(row[32]).toBe('60');
-    expect(row[33]).toBe('B');
-    expect(row[34]).toBe('Homepage + 2 subpages checked');
+    const scoreIdx = 8 + SIGNAL_COLUMNS.length * 2;
+    expect(row[scoreIdx]).toBe('60');
+    expect(row[scoreIdx + 1]).toBe('B');
+    expect(row[scoreIdx + 2]).toBe('Homepage + 2 subpages checked');
     // Новый скоринговый сигнал попадает в свою пару колонок (7-я пара).
     expect(row[20]).toBe('Да'); // legalRelevance
     expect(row[21]).toBe('Юридические услуги');
@@ -221,7 +223,7 @@ describe('score/grade (скоринговые сегменты, legal)', () => {
 
   it('пустые score/grade (сегмент без профиля) → переменных нет вовсе', () => {
     const header = [...GRID_HEADER, 'Email Статус'];
-    const signalCells = ['Да', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет']
+    const signalCells = ['Да', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет', 'Нет', ...Array<'Нет'>(SIGNAL_COLUMNS.length - 8).fill('Нет')]
       .flatMap((v) => [v, v === 'Да' ? 'какое-то evidence' : CLARIFICATION_NOT_FOUND]);
     const row = [
       '70000001000000003', 'Школа', 'Москва', '', 'info@school.ru', 'https://school.ru',

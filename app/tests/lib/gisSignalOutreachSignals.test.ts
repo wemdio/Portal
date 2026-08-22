@@ -276,7 +276,7 @@ describe('detectOutreachSignals', () => {
       expect(verdict.hit).toBe(false);
       expect(verdict.evidence).toBe('');
     }
-    // Все 12 не закрыты эвристиками — LLM позвали ровно один раз.
+    // Все сигналы не закрыты эвристиками — LLM позвали ровно один раз.
     expect(llm).toHaveBeenCalledTimes(1);
     expect(llm.mock.calls[0][0].needed).toHaveLength(SIGNAL_COLUMNS.length);
   });
@@ -342,11 +342,15 @@ describe('detectOutreachSignals', () => {
     expect(result.signals.legalRelevance.hit).toBe(true);
     expect(result.signals.crmCalltracking.hit).toBe(true);
     expect(result.signalsCount).toBe(6);
-    // Фикстура не содержит бух/консалтинг-лексики, калькулятора и форм бизнеса,
-    // поэтому эвристики закрыли 8 сигналов, а LLM спросили ровно про 4 остальных.
+    // Фикстура не содержит бух/консалтинг/медицину, калькулятора и форм бизнеса,
+    // поэтому эвристики закрыли 8 сигналов, а LLM спросили остальные сегментные.
     expect(llm).toHaveBeenCalledTimes(1);
     expect(llm.mock.calls[0][0].needed.sort()).toEqual(
-      ['accountingRelevance', 'clientSegments', 'consultingRelevance', 'pricingPackages'],
+      [
+        'accountingRelevance', 'clientSegments', 'consultingRelevance',
+        'medicineMarketingTeam', 'medicinePremium', 'medicinePromo',
+        'medicineRelevance', 'pricingPackages',
+      ],
     );
   });
 
@@ -454,6 +458,10 @@ describe('SIGNAL_COLUMNS', () => {
       'consultingRelevance',
       'pricingPackages',
       'clientSegments',
+      'medicineRelevance',
+      'medicinePromo',
+      'medicinePremium',
+      'medicineMarketingTeam',
     ]);
     expect(SIGNAL_COLUMNS.map((c) => c.title)).toEqual([
       'Общий телефон / колл-центр',
@@ -468,6 +476,10 @@ describe('SIGNAL_COLUMNS', () => {
       'Консалтинговая релевантность сайта',
       'Калькулятор / тарифы / пакеты обслуживания',
       'Работа с ИП / ООО / МСБ',
+      'Частная клиника / медцентр / сеть',
+      'Акции / посадочные / спецпредложения',
+      'Имплантация / хирургия / диагностика',
+      'Маркетинговая команда / агентство',
     ]);
     for (const col of SIGNAL_COLUMNS) {
       expect(col.clarification).toBe(`${col.title} — уточнение`);
@@ -1128,5 +1140,127 @@ describe('сегментные сигналы: accounting / consulting', () => {
     expect(r.signals.pricingPackages.hit).toBe(true);
     expect(r.signals.clientSegments.hit).toBe(true);
     expect(r.signalsCount).toBe(0);
+  });
+});
+
+describe('сегментные сигналы: medicine (ТЗ 22.08.2026)', () => {
+  const run = async (html: string, llm = makeLlm()) =>
+    detectOutreachSignals({
+      siteUrl: 'https://med.example',
+      fetchPage: makeFetchRouter({ 'https://med.example/': html }),
+      llmExtract: llm,
+    });
+
+  it('medicineRelevance: частная клиника и медицинский центр — срабатывает', async () => {
+    const r = await run(`<html><body><main>
+      <h1>Сеть клиник «Здоровье»</h1>
+      <p>Многопрофильный медицинский центр и частная стоматология.</p>
+    </main></body></html>`);
+    expect(r.signals.medicineRelevance.hit).toBe(true);
+    expect(r.signals.medicineRelevance.evidence).toMatch(/медицинск|клиник|стоматолог/i);
+    expect(r.signalsCount).toBe(0);
+    expect(r.medicineHardReject?.hit).toBe(false);
+  });
+
+  it('medicineRelevance: ГБУЗ / городская больница — НЕ срабатывает', async () => {
+    const r = await run(`<html><body><main>
+      <h1>ГБУЗ Городская клиническая больница №1</h1>
+      <p>Государственное бюджетное учреждение здравоохранения, поликлиника.</p>
+    </main></body></html>`);
+    expect(r.signals.medicineRelevance.hit).toBe(false);
+    expect(r.medicineHardReject?.hit).toBe(true);
+  });
+
+  it('medicineRelevance: продажа медицинского оборудования — НЕ срабатывает', async () => {
+    const r = await run(`<html><body><main>
+      <h1>МедТехСнаб</h1>
+      <p>Продажа медицинского оборудования и томографов оптом. Поставка в клиники.</p>
+    </main></body></html>`);
+    expect(r.signals.medicineRelevance.hit).toBe(false);
+  });
+
+  it('medicineRelevance: кабинет частного врача без клиники — НЕ срабатывает', async () => {
+    const r = await run(`<html><body><main>
+      <h1>Кабинет врача Иванова</h1>
+      <p>Частная практика. Я врач-терапевт, принимаю по записи.</p>
+    </main></body></html>`);
+    expect(r.signals.medicineRelevance.hit).toBe(false);
+  });
+
+  it('medicinePromo: акции и спецпредложения — срабатывает', async () => {
+    const r = await run(`<html><body><main>
+      <p>Спецпредложение августа: имплантация со скидкой. Отдельная посадочная страница для рекламы.</p>
+    </main></body></html>`);
+    expect(r.signals.medicinePromo.hit).toBe(true);
+  });
+
+  it('medicinePremium: имплантация, хирургия, стоматология — срабатывает', async () => {
+    const r = await run(`<html><body><main>
+      <p>Имплантация зубов, пластическая хирургия, программы лечения и косметология.</p>
+    </main></body></html>`);
+    expect(r.signals.medicinePremium.hit).toBe(true);
+  });
+
+  it('medicineMarketingTeam: вакансия маркетолога — срабатывает', async () => {
+    const r = await run(`<html><body><main>
+      <p>Открыта вакансия маркетолога и performance-специалиста, руководитель отдела маркетинга.</p>
+    </main></body></html>`);
+    expect(r.signals.medicineMarketingTeam.hit).toBe(true);
+  });
+
+  it('contactForm: «Записаться на приём» — срабатывает', async () => {
+    const r = await run(`<html><body>
+      <button>Записаться на приём</button>
+      <main><h1>Клиника</h1></main>
+    </body></html>`);
+    expect(r.signals.contactForm.hit).toBe(true);
+  });
+
+  it('crmCalltracking: МИС и онлайн-запись — срабатывает', async () => {
+    const r = await run(`<html><body><main>
+      <p>Онлайн-запись через медицинскую информационную систему (МИС).</p>
+    </main></body></html>`);
+    expect(r.signals.crmCalltracking.hit).toBe(true);
+  });
+
+  it('жёсткий стоп-лист: госбольница с акциями и формой всё равно reject', async () => {
+    const r = await run(`<html><body>
+      <button>Записаться на приём</button>
+      <main>
+        <h1>ГБУЗ Городская клиническая больница №1</h1>
+        <p>Спецпредложение: имплантация со скидкой. Посадочная страница для рекламы.</p>
+      </main>
+    </body></html>`);
+    expect(r.signals.medicinePromo.hit).toBe(true);
+    expect(r.signals.contactForm.hit).toBe(true);
+    expect(r.medicineHardReject?.hit).toBe(true);
+    expect(r.medicineHardReject?.evidence).toMatch(/гбуз|больниц|бюджетн/i);
+  });
+
+  it('жёсткий стоп-лист: продажа медоборудования, фармпроизводитель, кабинет врача', async () => {
+    const equipment = await run(`<html><body><main>
+      <p>Продажа медицинского оборудования и томографов оптом.</p>
+    </main></body></html>`);
+    expect(equipment.medicineHardReject?.hit).toBe(true);
+
+    const pharma = await run(`<html><body><main>
+      <p>Фармацевтическая компания, производитель лекарств.</p>
+    </main></body></html>`);
+    expect(pharma.medicineHardReject?.hit).toBe(true);
+
+    const solo = await run(`<html><body><main>
+      <h1>Кабинет врача Иванова</h1>
+      <p>Частная практика. Я врач-терапевт.</p>
+    </main></body></html>`);
+    expect(solo.medicineHardReject?.hit).toBe(true);
+  });
+
+  it('жёсткий стоп-лист: частная клиника не режется; слово «аптека» рядом — не бан', async () => {
+    const clinic = await run(`<html><body><main>
+      <h1>Сеть клиник «Здоровье»</h1>
+      <p>Многопрофильный медицинский центр. Рядом аптека.</p>
+    </main></body></html>`);
+    expect(clinic.signals.medicineRelevance.hit).toBe(true);
+    expect(clinic.medicineHardReject?.hit).toBe(false);
   });
 });
