@@ -104,6 +104,11 @@ export interface VePromptInjections {
    * из брифа и НЕ выдумывает имя человека.
    */
   signatureOverride?: string | null;
+  /**
+   * Ответы клиента из его брифа (compileClientBriefForLetters): УТП, гарантии,
+   * акция, цифры. Авторские формулировки — в письмах используются дословно.
+   */
+  clientBrief?: string | null;
 }
 
 /** Максимум символов эталона стиля в промпте. */
@@ -133,6 +138,23 @@ ${text.slice(0, SIGNATURE_MAX_CHARS)}
  * но никогда не отменяет регламент, запрет выдуманных имён и структуру оффера.
  * Пустой/отсутствующий вход → пустая строка (блок не инжектится).
  */
+/**
+ * Блок «БРИФ КЛИЕНТА»: ответы, которые клиент написал сам. УТП, гарантии и
+ * акцию берём дословно — это его продукт и его обещания, пересказ их искажает.
+ * Пустой/отсутствующий вход → пустая строка (блок не инжектится).
+ */
+export function renderClientBriefBlock(clientBrief?: string | null): string {
+  const text = clientBrief?.trim() ?? '';
+  if (!text) return '';
+  return `БРИФ КЛИЕНТА — ответы, которые клиент заполнил сам:
+"""
+${text}
+"""
+Правило: формулировки УТП, гарантий, акции и цифры из этого блока используй ДОСЛОВНО (не пересказывай и не усиливай). Чего в блоке нет — не выдумывай. Регламент писем блок не отменяет.
+
+`;
+}
+
 export function renderStyleExampleBlock(styleExample?: string | null): string {
   const text = styleExample?.trim() ?? '';
   if (!text) return '';
@@ -455,12 +477,12 @@ export function buildChainMaterialsMessage(input: ChainPromptInput): string {
 
   return `Глубоко изучи материалы ниже — на их основе тебе дадут задачу написать цепочку писем.
 
-БРИФ КЛИЕНТА:
+ПРОФИЛЬ КЛИЕНТА (снапшот с сайта):
 """
 ${input.briefText}
 """
 
-${offer}${signature}${clientCase}ВЕРТИКАЛЬ: ${input.verticalName}
+${renderClientBriefBlock(input.clientBrief)}${offer}${signature}${clientCase}ВЕРТИКАЛЬ: ${input.verticalName}
 ${input.verticalSummary}
 Синонимы вертикали (как ещё называют этот сегмент): ${input.synonyms.join(', ') || '—'}
 

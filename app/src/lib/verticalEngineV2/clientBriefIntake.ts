@@ -33,11 +33,27 @@ import type { ClientBriefFields, ClientBriefSocialProofKey } from '@/lib/clientB
 
 import { callLLMWithSchema, getVeModel } from './llm';
 
+/**
+ * Рамка ЦА, заданная клиентом в брифе. В живых брифах это не пожелание, а
+ * ограничение: размерная полка, отрасли, наблюдаемые триггеры и прямой список
+ * «исключить» (интеграторы вместо конечных заказчиков, действующие клиенты).
+ */
+export interface VeClientBriefIcp {
+  include: string[];
+  exclude: string[];
+  size: string;
+  geo: string;
+  triggers: string[];
+  qualification: string;
+}
+
 /** Бриф клиента внутри ve_projects.brief.client_brief. */
 export interface VeClientBrief {
   fields: ClientBriefFields;
   /** Поля, которых у клиента нет: пустые строки и заглушки. */
   missing: VeClientBriefField[];
+  /** null — клиент рамку ЦА не задал (или бриф загружен до появления поля). */
+  icp: VeClientBriefIcp | null;
   file_name: string | null;
   uploaded_at: string;
 }
@@ -151,7 +167,55 @@ function applyGapRules(fields: ClientBriefFields): {
 // список полей стандарта.
 const BriefExtractionSchema = z.object({
   fields: z.record(z.string(), z.unknown()).default({}),
+  icp: z.record(z.string(), z.unknown()).nullish(),
 });
+
+/** Максимум пунктов в списке рамки ЦА и длина одного пункта. */
+const ICP_MAX_ITEMS = 12;
+const ICP_ITEM_MAX_CHARS = 300;
+
+function icpList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim().slice(0, ICP_ITEM_MAX_CHARS);
+    if (isPlaceholderAnswer(trimmed) || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+    if (out.length >= ICP_MAX_ITEMS) break;
+  }
+  return out;
+}
+
+function icpLine(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim().slice(0, ICP_ITEM_MAX_CHARS);
+  return isPlaceholderAnswer(trimmed) ? '' : trimmed;
+}
+
+/** Пустая рамка (всё вычистилось в заглушки) — это null, а не объект с пустотами. */
+function normalizeIcp(raw: unknown): VeClientBriefIcp | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const source = raw as Record<string, unknown>;
+  const icp: VeClientBriefIcp = {
+    include: icpList(source.include),
+    exclude: icpList(source.exclude),
+    size: icpLine(source.size),
+    geo: icpLine(source.geo),
+    triggers: icpList(source.triggers),
+    qualification: icpLine(source.qualification),
+  };
+  const empty =
+    icp.include.length === 0 &&
+    icp.exclude.length === 0 &&
+    icp.triggers.length === 0 &&
+    !icp.size &&
+    !icp.geo &&
+    !icp.qualification;
+  return empty ? null : icp;
+}
 
 const SYSTEM = `Ты — аналитик агентства performance-аутрича Polza. Тебе дают текст брифа, который клиент заполнил по шаблону агентства. Твоя задача — разложить ответы клиента по полям стандарта, ничего не придумывая.
 
@@ -208,8 +272,20 @@ ${briefText}
       "press": { "has": boolean, "comment": string },
       "presentations": { "has": boolean, "comment": string }
     }
+  },
+  "icp": {                            // рамка ЦА, если клиент задал её явно
+    "include": string[],              // кого клиент назвал целевым: размерные полки, отрасли, роли
+    "exclude": string[],              // кого клиент ПРЯМО просил исключить
+    "size": string,                   // размерная полка: выручка/численность
+    "geo": string,                    // география
+    "triggers": string[],             // наблюдаемые поводы для базы (тендер, вакансии, новый CIO)
+    "qualification": string           // минимальная квалификация ответа/лида
   }
 }
+
+icp заполняй ТОЛЬКО тем, что клиент написал сам: списки «исключить», размерные
+полки и триггеры переноси дословно, ничего не добавляя от себя. Клиент рамку не
+задал — верни пустые массивы и пустые строки.
 
 Никакого текста вне JSON.`;
 
@@ -243,6 +319,7 @@ export async function parseClientBriefText(
     brief: {
       fields,
       missing,
+      icp: normalizeIcp(llm.data.icp),
       file_name: opts.fileName?.trim() || null,
       uploaded_at: new Date().toISOString(),
     },
@@ -266,6 +343,8 @@ export function readClientBrief(
   return {
     fields,
     missing,
+    // Брифы, загруженные до появления рамки ЦА, читаются как рамка не задана.
+    icp: normalizeIcp(stored.icp),
     file_name: typeof stored.file_name === 'string' ? stored.file_name : null,
     uploaded_at: typeof stored.uploaded_at === 'string' ? stored.uploaded_at : '',
   };
@@ -289,9 +368,137 @@ export function applyClientBriefEdit(
   return {
     fields,
     missing,
+    icp: current?.icp ?? null,
     file_name: current?.file_name ?? null,
     uploaded_at: current?.uploaded_at || new Date().toISOString(),
   };
+}
+
+/**
+ * Поля брифа, которые нужны письму, в порядке важности: при обрезке первыми
+ * выживают оффер и доказательства. Контакты клиента, почта получателя тёплых
+ * лидов, ссылка на сайт и описание ЦА намеренно исключены: письму они не нужны
+ * (аудиторию задаёт вертикаль), а утечь в текст могут.
+ */
+const LETTER_BRIEF_FIELDS: VeClientBriefField[] = [
+  'usp',
+  'company_description',
+  'product_description',
+  'advantages',
+  'guarantees',
+  'special_offer',
+  'impressive_numbers',
+  'impressive_results',
+  'existing_clients',
+  'client_problems',
+  'common_questions',
+  'competitors_problems',
+  'lead_magnets',
+  'deal_cycle',
+  'avg_check',
+  'price_tier',
+  'persona_name',
+  'persona_position',
+  'additional_notes',
+];
+
+/** Верхняя и нижняя границы бюджета одного поля в письменном брифе. */
+const LETTER_FIELD_MAX_CHARS = 1200;
+const LETTER_FIELD_MIN_CHARS = 200;
+
+/** Максимум всего блока брифа в промпте письма. */
+export const LETTER_BRIEF_MAX_CHARS = 6000;
+
+/**
+ * Бриф для промптов цепочки и шаблона: только поля, нужные письму.
+ *
+ * Бюджет делится между заполненными полями, а не отдаётся первым по порядку:
+ * иначе раздутое «подробное описание товара» вытесняло из блока УТП и гарантии
+ * — то самое, что письму нужнее всего. Рендер — общий compileBriefText, поэтому
+ * пустые секции не появляются.
+ */
+export function compileClientBriefForLetters(
+  brief: VeClientBrief | null,
+  maxChars: number = LETTER_BRIEF_MAX_CHARS,
+): string {
+  if (!brief) return '';
+
+  const filled = LETTER_BRIEF_FIELDS.filter(
+    (field) => field !== 'price_tier' && ((brief.fields[field] as string) ?? '').trim().length > 0,
+  );
+  if (filled.length === 0 && !brief.fields.price_tier) return '';
+
+  const budget = Math.min(
+    LETTER_FIELD_MAX_CHARS,
+    Math.max(LETTER_FIELD_MIN_CHARS, Math.floor(maxChars / Math.max(filled.length, 1))),
+  );
+
+  const reduced: ClientBriefFields = { ...EMPTY_BRIEF_FIELDS };
+  for (const field of LETTER_BRIEF_FIELDS) {
+    if (field === 'price_tier') {
+      reduced.price_tier = brief.fields.price_tier;
+      continue;
+    }
+    const value = (brief.fields[field] as string) ?? '';
+    (reduced[field] as string) =
+      value.length > budget ? `${value.slice(0, budget).trimEnd()}…` : value;
+  }
+  reduced.social_proof = brief.fields.social_proof;
+
+  const compiled = compileBriefText(reduced);
+  if (!compiled.trim()) return '';
+  return compiled.length > maxChars ? `${compiled.slice(0, maxChars)}\n…(обрезано)` : compiled;
+}
+
+/**
+ * Делит ve_projects.brief на JSON-снапшот сайта и ответы клиента: бриф и
+ * *_override уходят в промпт отдельными блоками, поэтому в JSON им места нет —
+ * иначе те же тексты дублируются, а client_brief попадает туда сырым объектом
+ * вместе со служебным missing.
+ */
+export function splitBriefForLetterPrompt(brief: Record<string, unknown> | null | undefined): {
+  briefJson: Record<string, unknown>;
+  clientBrief: VeClientBrief | null;
+} {
+  const source = brief ?? {};
+  const {
+    client_brief: _cb,
+    style_override: _s,
+    offer_override: _o,
+    signature_override: _sig,
+    ...briefJson
+  } = source;
+
+  return { briefJson, clientBrief: readClientBrief({ brief: source }) };
+}
+
+/**
+ * Рамка ЦА для промпта гипотез. Формулировки жёсткие намеренно: список
+ * «исключить» клиент задал прямо, и гипотезы под него подпадать не должны.
+ */
+export function compileClientBriefIcpForPrompt(icp: VeClientBriefIcp | null): string {
+  if (!icp) return '';
+
+  const lines: string[] = [
+    'РАМКА ЦА ИЗ БРИФА (задана клиентом — это ОГРАНИЧЕНИЕ, а не пожелание):',
+  ];
+  if (icp.include.length) lines.push(`- Целевые: ${icp.include.join('; ')}`);
+  if (icp.size) lines.push(`- Размер бизнеса: ${icp.size}`);
+  if (icp.geo) lines.push(`- География: ${icp.geo}`);
+  if (icp.exclude.length) {
+    lines.push(`- ИСКЛЮЧИТЬ (клиент прямо запретил): ${icp.exclude.join('; ')}`);
+  }
+  if (icp.triggers.length) {
+    lines.push(`- Триггеры для базы, которые клиент считает рабочими: ${icp.triggers.join('; ')}`);
+  }
+  if (icp.qualification) lines.push(`- Минимальная квалификация лида: ${icp.qualification}`);
+
+  lines.push(
+    'Гипотезу, попадающую под «исключить», НЕ выдавай вовсе — это не понижение процента, а запрет.',
+    'Сегменты вне размерной полки и географии допустимы только как tier 3 с явной пометкой расхождения с рамкой в rationale.',
+  );
+
+  return lines.join('\n');
 }
 
 /**
