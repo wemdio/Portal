@@ -75,7 +75,7 @@ function formatDate(iso: string | null): string {
 }
 
 const CELL_INPUT =
-  'w-full min-w-[6rem] bg-transparent border-b border-transparent hover:border-[var(--cp-divider-strong)] focus:border-[var(--cp-paper)] outline-none text-[13px] text-[var(--cp-paper-mute)] focus:text-[var(--cp-paper)] py-0.5 placeholder:text-[var(--cp-paper-faint)] disabled:opacity-50 transition-colors';
+  'w-full min-w-[5rem] bg-transparent border-b border-transparent hover:border-[var(--cp-divider-strong)] focus:border-[var(--cp-paper)] outline-none text-[13px] text-[var(--cp-paper-mute)] focus:text-[var(--cp-paper)] py-0.5 placeholder:text-[var(--cp-paper-faint)] disabled:opacity-50 transition-colors';
 const CELL_INPUT_MONO = `${CELL_INPUT} ds-mono text-[12px]`;
 
 /** Редактируемая текстовая ячейка: сохранение на blur/Enter, key у родителя. */
@@ -513,10 +513,24 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                 }
                 .lb-table thead th:first-child { z-index: 20; }
                 .lb-table tbody tr:hover td:first-child { background: var(--cp-surface-elev); }
-                /* Тонкий скроллбар карточки, чтобы было видно, что есть куда листать */
-                .lb-scroll::-webkit-scrollbar { height: 8px; }
-                .lb-scroll::-webkit-scrollbar-thumb { background: var(--cp-divider-strong); border-radius: 4px; }
-                .lb-scroll::-webkit-scrollbar-track { background: transparent; }
+                /* Видимый горизонтальный скроллбар: светлый ползунок на подложке.
+                   Кросс-браузерно: Firefox — scrollbar-width/color, остальные — webkit. */
+                .lb-scroll {
+                  scrollbar-width: thin;
+                  scrollbar-color: var(--cp-paper-faint) var(--cp-surface-active);
+                }
+                .lb-scroll::-webkit-scrollbar { height: 10px; }
+                .lb-scroll::-webkit-scrollbar-track {
+                  background: var(--cp-surface-active);
+                  border-radius: 5px;
+                }
+                .lb-scroll::-webkit-scrollbar-thumb {
+                  background: var(--cp-paper-faint);
+                  border-radius: 5px;
+                }
+                .lb-scroll::-webkit-scrollbar-thumb:hover {
+                  background: var(--cp-paper-mute);
+                }
               `}</style>
             <div className="lb-scroll rounded-lg bg-[var(--cp-surface-rest)] overflow-x-auto">
               <table className="lb-table w-full text-[13px]">
@@ -525,7 +539,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                     {visibleColumns.map((c) => (
                       <th
                         key={c.key}
-                        className="ds-mono px-3 py-2.5 text-left text-[11px] font-medium tracking-[0.02em] text-[var(--cp-paper-faint)] whitespace-nowrap"
+                        className="ds-mono px-2.5 py-2 text-left text-[11px] font-medium tracking-[0.02em] text-[var(--cp-paper-faint)] whitespace-nowrap"
                       >
                         {columnLabel(c)}
                       </th>
@@ -545,7 +559,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                           switch (c.key) {
                             case 'phone':
                               return (
-                                <td key={c.key} className="px-3 py-2.5">
+                                <td key={c.key} className="px-2.5 py-2">
                                   <TextCell
                                     key={`${row.id}:${row.phone ?? ''}`}
                                     value={row.phone ?? ''}
@@ -558,7 +572,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                               );
                             case 'email':
                               return (
-                                <td key={c.key} className="px-3 py-2.5">
+                                <td key={c.key} className="px-2.5 py-2">
                                   <TextCell
                                     key={`${row.id}:${row.lead_email ?? ''}`}
                                     value={row.lead_email ?? ''}
@@ -571,7 +585,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                               );
                             case 'name':
                               return (
-                                <td key={c.key} className="px-3 py-2.5">
+                                <td key={c.key} className="px-2.5 py-2">
                                   <TextCell
                                     key={`${row.id}:${row.lead_name ?? ''}`}
                                     value={row.lead_name ?? ''}
@@ -583,7 +597,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                               );
                             case 'company':
                               return (
-                                <td key={c.key} className="px-3 py-2.5">
+                                <td key={c.key} className="px-2.5 py-2">
                                   <TextCell
                                     key={`${row.id}:${row.company_name ?? ''}`}
                                     value={row.company_name ?? ''}
@@ -595,7 +609,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                               );
                             case 'website':
                               return (
-                                <td key={c.key} className="px-3 py-2.5">
+                                <td key={c.key} className="px-2.5 py-2">
                                   <TextCell
                                     key={`${row.id}:${row.website ?? ''}`}
                                     value={row.website ?? ''}
@@ -608,7 +622,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                               );
                             case 'request':
                               return (
-                                <td key={c.key} className="px-3 py-2.5">
+                                <td key={c.key} className="px-2.5 py-2">
                                   <RequestCell
                                     key={`${row.id}:${(row.request_text ?? '').length}`}
                                     text={row.request_text}
@@ -618,7 +632,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                               );
                             case 'quality':
                               return (
-                                <td key={c.key} className="px-3 py-2.5">
+                                <td key={c.key} className="px-2.5 py-2">
                                   <span className="inline-flex items-center gap-2">
                                     <span
                                       className="w-1.5 h-1.5 rounded-full shrink-0"
@@ -641,7 +655,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                               );
                             case 'comment':
                               return (
-                                <td key={c.key} className="px-3 py-2.5">
+                                <td key={c.key} className="px-2.5 py-2">
                                   <TextCell
                                     key={`${row.id}:${row.comment ?? ''}`}
                                     value={row.comment ?? ''}
@@ -653,7 +667,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                               );
                             case 'campaign':
                               return (
-                                <td key={c.key} className="px-3 py-2.5">
+                                <td key={c.key} className="px-2.5 py-2">
                                   <TextCell
                                     key={`${row.id}:${row.campaign_name ?? ''}`}
                                     value={row.campaign_name ?? ''}
@@ -665,7 +679,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                               );
                             case 'step':
                               return (
-                                <td key={c.key} className="px-3 py-2.5 text-center">
+                                <td key={c.key} className="px-2.5 py-2 text-center">
                                   <TextCell
                                     key={`${row.id}:${row.step_number ?? ''}`}
                                     value={row.step_number?.toString() ?? ''}
@@ -682,7 +696,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                               );
                             case 'date':
                               return (
-                                <td key={c.key} className="px-3 py-2.5">
+                                <td key={c.key} className="px-2.5 py-2">
                                   <TextCell
                                     key={`${row.id}:${row.reply_timestamp ?? ''}`}
                                     value={formatDate(row.reply_timestamp)}
@@ -695,7 +709,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                               );
                             case 'taken':
                               return (
-                                <td key={c.key} className="px-3 py-2.5 text-center">
+                                <td key={c.key} className="px-2.5 py-2 text-center">
                                   <input
                                     type="checkbox"
                                     checked={row.taken}
@@ -708,7 +722,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                             default:
                               // Кастомная колонка: значение в row.custom[key]
                               return (
-                                <td key={c.key} className="px-3 py-2.5">
+                                <td key={c.key} className="px-2.5 py-2">
                                   <TextCell
                                     key={`${row.id}:${c.key}:${row.custom?.[c.key] ?? ''}`}
                                     value={row.custom?.[c.key] ?? ''}
@@ -720,7 +734,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                               );
                           }
                         })}
-                        <td className="px-3 py-2.5 text-right">
+                        <td className="px-2.5 py-2 text-right">
                           <button
                             onClick={() => void deleteRow(row.id)}
                             disabled={saving}
