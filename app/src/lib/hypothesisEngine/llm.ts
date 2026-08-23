@@ -37,6 +37,11 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
   // Цепочки/шаблоны (как emailSequenceV2)
   'gpt-5.2':                        { in: 1.25, out: 10.0 },
   'openai/gpt-5.2':                 { in: 1.25, out: 10.0 },
+  // Прод-модели после A/B eval (2026-08), прайс Requesty USD/M токенов.
+  'gpt-5.5':                        { in: 4.5, out: 27.0 },
+  'openai/gpt-5.5':                 { in: 4.5, out: 27.0 },
+  'gemini-3.1-pro-preview':         { in: 1.8, out: 10.8 },
+  'google/gemini-3.1-pro-preview':  { in: 1.8, out: 10.8 },
   // На случай downgrade через env
   'claude-haiku-4-5':               { in: 1.0, out: 5.0 },
   'anthropic/claude-haiku-4-5':     { in: 1.0, out: 5.0 },

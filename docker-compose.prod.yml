@@ -648,8 +648,10 @@ services:
       # ~3x быстрее и ~4x дешевле claude-opus-5. Фолбэк-модель не задаём
       # осознанно (HE_MODEL_CHAIN_FALLBACK пуст): честная ошибка вместо
       # тихой подмены — иначе метрики сравнения моделей смешаются.
+      # 2026-08-22: CHAIN → google/gemini-3.1-pro-preview (eval: письма 8/8 без
+      # LLM-маркеров против 5/8 у gpt-5.5); research/bulk остаются на gpt-5.5.
       - HE_MODEL_RESEARCH=openai/gpt-5.5
-      - HE_MODEL_CHAIN=openai/gpt-5.5
+      - HE_MODEL_CHAIN=google/gemini-3.1-pro-preview
       - HE_MODEL_BULK=openai/gpt-5.5
       - SERPER_API_KEY=${SERPER_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
@@ -690,7 +692,7 @@ services:
       - OPENROUTER_HYPOTHESIS_ENGINE_API_KEY=${OPENROUTER_HYPOTHESIS_ENGINE_API_KEY}
       - OPENROUTER_BRIEF_API_KEY=${OPENROUTER_BRIEF_API_KEY}
       - VE_MODEL_RESEARCH=openai/gpt-5.5
-      - VE_MODEL_CHAIN=openai/gpt-5.5
+      - VE_MODEL_CHAIN=google/gemini-3.1-pro-preview
       - VE_MODEL_BULK=openai/gpt-5.5
       - SERPER_API_KEY=${SERPER_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
