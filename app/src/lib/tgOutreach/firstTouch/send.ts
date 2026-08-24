@@ -22,7 +22,7 @@ export interface SendBatchArgs {
   db: SupabaseClient;
   client: TelegramClient;
   campaignId: string;
-  account: { id: string; session_name: string; campaign_id: string };
+  account: { id: string; session_name: string; campaign_id: string; cooldown_until?: string | null };
   /** Дневная норма первых сообщений на аккаунт. Ноль = выключено. */
   perDay: number | undefined;
   log: LogFn;
@@ -83,18 +83,19 @@ function cooldownLabel(untilIso: string): string {
  */
 async function parkIfFlood(args: {
   db: SupabaseClient;
-  accountId: string;
+  account: { id: string; cooldown_until?: string | null };
   hours: number | undefined;
   reason: string;
   log: LogFn;
 }): Promise<boolean> {
   if (!args.hours || args.hours <= 0 || !isFloodLimitReason(args.reason)) return false;
   const until = cooldownUntilIso(args.hours);
-  const err = await writeAccountCooldown(args.db, args.accountId, until);
+  const err = await writeAccountCooldown(args.db, args.account.id, until);
   if (err) {
     args.log('error', `Не смог сохранить паузу аккаунта в базе — ${err}`);
     return false;
   }
+  args.account.cooldown_until = until;
   args.log(
     'warning',
     `Первое касание остановлено: Telegram ограничил аккаунт (${args.reason}). ` +
@@ -282,7 +283,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         const parked = failure.kind === 'account_limited'
           && await parkIfFlood({
             db,
-            accountId: account.id,
+            account,
             hours: args.cooldownHours,
             reason: failure.reason,
             log,
@@ -343,7 +344,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         const parked = failure.kind === 'account_limited'
           && await parkIfFlood({
             db,
-            accountId: account.id,
+            account,
             hours: args.cooldownHours,
             reason: failure.reason,
             log,

@@ -252,13 +252,17 @@ describe('sendFirstTouchBatch — недоступные контакты и о�
     });
 
     const before = Date.now();
-    await sendFirstTouchBatch({ ...baseArgs, cooldownHours: 24, db, client } as never);
+    const account = { ...baseArgs.account, cooldown_until: null as string | null };
+    await sendFirstTouchBatch({ ...baseArgs, account, cooldownHours: 24, db, client } as never);
 
     const park = db.updates.find((u) => u.table === 'tg_outreach_accounts');
     expect(park?.id).toBe('acc-1');
     const until = new Date(String(park?.patch.cooldown_until)).getTime();
     expect(until - before).toBeGreaterThan(23 * 3600_000);
     expect(until - before).toBeLessThan(25 * 3600_000);
+    // Круг кампании не перечитывает аккаунты из БД. Без записи в этот же
+    // объект следующий обход снова возьмёт номер — как 998950879438 трижды за день.
+    expect(account.cooldown_until).toBe(park?.patch.cooldown_until);
   });
 
   it('PEER_FLOOD на резолве юзернейма тоже ставит паузу аккаунта', async () => {
