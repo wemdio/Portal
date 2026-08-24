@@ -297,6 +297,11 @@ client_types — обобщение строки «ваши действующи
 не переноси: они пойдут в отдельное поле и могут быть под NDA. Клиентов клиент не
 назвал — верни пустой массив.
 
+social_proof: has=true только там, где клиент поставил «+». comment — дословно то,
+что клиент написал напротив этого пункта (например «4.9 на Яндексе», названия СМИ,
+кейсов или наград); если напротив пункта ничего не написано — пустая строка,
+ничего не придумывай.
+
 icp заполняй ТОЛЬКО тем, что клиент написал сам: списки «исключить», размерные
 полки и триггеры переноси дословно, ничего не добавляя от себя. Клиент рамку не
 задал — верни пустые массивы и пустые строки.
@@ -315,16 +320,36 @@ export interface ParseClientBriefResult {
   costUsd: number;
 }
 
+/** Сетевой сбой fetch к LLM-роутеру — временный, стоит повторить. */
+function isNetworkFetchError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|socket hang up|network error|aborted/i.test(msg);
+}
+
+async function callBriefExtraction(briefText: string, model: string) {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await callLLMWithSchema(buildExtractionMessages(briefText), BriefExtractionSchema, {
+        model,
+        maxTokens: 16384,
+      });
+    } catch (e) {
+      lastErr = e;
+      if (!isNetworkFetchError(e) || attempt === 2) throw e;
+      await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 export async function parseClientBriefText(
   rawText: string,
   opts: { fileName?: string | null },
 ): Promise<ParseClientBriefResult> {
   const briefText = stripBriefTemplateBoilerplate(rawText).slice(0, BRIEF_TEXT_MAX_CHARS);
 
-  const llm = await callLLMWithSchema(buildExtractionMessages(briefText), BriefExtractionSchema, {
-    model: getVeModel('research'),
-    maxTokens: 16384,
-  });
+  const llm = await callBriefExtraction(briefText, getVeModel('research'));
 
   const normalized = normalizeBriefFields(llm.data.fields as Partial<ClientBriefFields>);
   const { fields, missing } = applyGapRules(normalized);
