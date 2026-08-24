@@ -1,4 +1,5 @@
 import type { Email } from './types';
+import { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
 import * as instantly from './client';
 import { isPersonName } from '@/lib/enrich/extractors/nameQuality';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
@@ -785,48 +786,60 @@ function envNumber(name: string, fallback: number): number {
 /**
  * Fetch brief text for a campaign.
  * Source: campaign → project (via project_instantly_campaigns) → projects.brief_text.
- * Falls back to old instantly_brief_campaigns → instantly_briefs if project brief not found.
+ * Falls back to old instantly_brief_campaigns → instantly_briefs only for a
+ * campaign that has no managed project owner.
  */
-export async function fetchBriefByCampaign(campaignId: string): Promise<string | null> {
+export async function fetchBriefByCampaign(
+  campaignId: string,
+  ownerProof?: { projectId: string | null; ownershipProven: true },
+): Promise<string | null> {
   if (!supabaseInstantly) return null;
 
-  // Primary: get brief from project linked to this campaign
-  if (supabaseMain) {
-    const { data: periodLink } = await supabaseInstantly
-      .from('project_period_instantly_campaigns')
-      .select('project_id')
-      .eq('campaign_id', campaignId)
-      .limit(1)
-      .maybeSingle();
+  const owner = ownerProof?.ownershipProven
+    ? ownerProof.projectId
+      ? { status: 'resolved' as const, projectId: ownerProof.projectId }
+      : { status: 'none' as const }
+    : await resolveCampaignProjectOwner(supabaseInstantly, campaignId);
 
-    const { data: legacyLink } = periodLink?.project_id
-      ? { data: null }
-      : await supabaseInstantly
-      .from('project_instantly_campaigns')
-      .select('project_id')
-      .eq('campaign_id', campaignId)
-      .limit(1)
-      .maybeSingle();
-
-    const link = periodLink?.project_id ? periodLink : legacyLink;
-    if (link?.project_id) {
-      const { data: project } = await supabaseMain
-        .from('projects')
-        .select('brief_text')
-        .eq('id', link.project_id)
-        .maybeSingle();
-
-      if (project?.brief_text) return project.brief_text as string;
-    }
+  // An ambiguous managed owner has no safe project or legacy brief. The
+  // qualification worker normally records needs_review before this call, but
+  // throwing also keeps any present/future direct caller fail-closed.
+  if (owner.status === 'ambiguous') {
+    throw new Error(
+      `Campaign brief has multiple project owners: ${owner.projectIds.join(', ')}`,
+    );
   }
 
-  // Fallback: old instantly_briefs table (for campaigns not yet linked to projects)
-  const { data } = await supabaseInstantly
+  // A managed campaign may use only its exact project's brief. Falling back
+  // to the legacy campaign brief here can leak the previous owner's context
+  // after ownership changes. A read failure is transient and must propagate so
+  // the worker retries instead of permanently qualifying with a default brief.
+  if (owner.status === 'resolved') {
+    if (!supabaseMain) {
+      throw new Error('Portal project database is unavailable while reading campaign brief');
+    }
+    const { data: project, error } = await supabaseMain
+      .from('projects')
+      .select('brief_text')
+      .eq('id', owner.projectId)
+      .maybeSingle();
+    if (error) throw new Error(`Project brief lookup failed: ${error.message}`);
+    return typeof project?.brief_text === 'string' && project.brief_text.trim()
+      ? project.brief_text
+      : null;
+  }
+
+  // Fallback: old instantly_briefs table for campaigns not linked to projects.
+  const { data, error } = await supabaseInstantly
     .from('instantly_brief_campaigns')
     .select('brief_id, instantly_briefs(brief_text)')
     .eq('campaign_id', campaignId)
     .limit(1)
     .maybeSingle();
+
+  if (error) {
+    throw new Error(`Legacy campaign brief lookup failed: ${error.message}`);
+  }
 
   if (!data) return null;
   const briefs = data.instantly_briefs as unknown as { brief_text: string } | null;

@@ -36,6 +36,10 @@ import {
 import { sendHandoffNow } from './handoffSender';
 import type { Email } from './types';
 import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
+import {
+  resolveCampaignProjectOwner,
+  resolveCampaignProjectOwners,
+} from './campaignProjectOwnerResolver';
 
 const REPLY_EMAILS_PAGE_SIZE = 100;
 const MAX_QUALIFY_PER_TICK = 20;
@@ -51,6 +55,22 @@ const PROJECT_BATCH_SIZE = 100;
 const TRANSIENT_QUALIFY_ERROR_RE =
   /\b(?:429|500|502|503|504)\b|overload|rate.?limit|fetch failed|network error|timed?.?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|aborted|failed after retries/i;
 const OWNERSHIP_DEFER_ERROR_PREFIX = 'Reply ownership deferred';
+export const OWNERSHIP_REVIEW_REASON_PREFIX =
+  'Не удалось однозначно определить проект-владельца ответа:';
+export const TRANSIENT_RETRY_REASON_PREFIX =
+  'Автоматическая повторная квалификация:';
+const TRANSIENT_OTHERS_RETRY_TAG = '[others]';
+
+const OWNERSHIP_REVIEW_RETRY_INTERVAL_MS = 15 * 60 * 1000;
+const OWNERSHIP_REVIEW_RETRY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const OWNERSHIP_REVIEW_PROCESSING_LEASE_MS = 30 * 60 * 1000;
+const LEAD_DELIVERY_RETRY_INTERVAL_MS = 15 * 60 * 1000;
+const LEAD_DELIVERY_RECENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const LEAD_DELIVERY_PENDING_LEASE_MS = 30 * 60 * 1000;
+const LEAD_DELIVERY_FAILED_BACKOFF_MS = 15 * 60 * 1000;
+const LEAD_DELIVERY_RETRYING_ERROR = 'Lead notification retry in progress';
+let lastOwnershipReviewRetryAt = 0;
+let lastLeadDeliveryRetryAt = 0;
 
 export function isTransientQualifyError(message: string): boolean {
   return (
@@ -94,9 +114,79 @@ export async function strayColumnsSupported(
   return strayColumnsProbe.ok;
 }
 
-/** email_id → сколько раз подряд падал транзиентно (в памяти процесса). */
-const transientRetryCount = new Map<string, number>();
-const MAX_TRANSIENT_RETRIES = 5;
+/**
+ * Persist a retryable qualification failure without poisoning the provider
+ * email id. The ordinary poller deliberately deduplicates every existing row,
+ * so transient failures live as a generated needs_review row and are resumed
+ * by reprocessOwnershipReviewRows instead of becoming terminal after a few
+ * fast worker ticks. The existing UNIQUE(instantly_email_id) is the concurrent
+ * poll/webhook send-once fence; no extra retry table is needed.
+ */
+export async function persistTransientQualificationRetry(
+  db: NonNullable<typeof supabaseAdmin>,
+  reply: Email,
+  message: string,
+  options?: {
+    campaignId?: string;
+    webhookEventId?: string | null;
+    outOfCampaign?: boolean;
+    eaccount?: string | null;
+    lastOutbound?: Email | null;
+  },
+): Promise<{ error: { message: string; code?: string } | null }> {
+  const emailId = reply.id?.trim();
+  const campaignId = options?.campaignId?.trim() || reply.campaign_id?.trim();
+  if (!emailId || !campaignId) {
+    return { error: { message: 'Retryable qualification requires email and campaign ids' } };
+  }
+
+  const nowIso = new Date().toISOString();
+  const replyText = getBodyText(reply.body);
+  const lastOutboundText = options?.lastOutbound
+    ? getBodyText(options.lastOutbound.body)
+    : '';
+  const includeStrayFields = options?.outOfCampaign !== undefined
+    ? await strayColumnsSupported(db)
+    : false;
+  const retrySourceTag = options?.outOfCampaign !== undefined
+    ? ` ${TRANSIENT_OTHERS_RETRY_TAG}`
+    : '';
+  const result = await db
+    .from('instantly_lead_qualifications')
+    .upsert({
+      campaign_id: campaignId,
+      lead_email: reply.from_address_email ?? 'unknown',
+      thread_id: reply.thread_id,
+      reply_subject: reply.subject ?? null,
+      reply_preview: replyText.slice(0, 300) || null,
+      reply_body: replyText || null,
+      last_outbound_preview: lastOutboundText.slice(0, 300) || null,
+      last_outbound_ue_type: options?.lastOutbound?.ue_type ?? null,
+      status: 'needs_review',
+      proposal_seen: false,
+      interest_signals: [],
+      ai_reason: `${TRANSIENT_RETRY_REASON_PREFIX}${retrySourceTag} ${message}`.slice(0, 500),
+      ai_confidence: 0,
+      instantly_email_id: emailId,
+      reply_timestamp: reply.timestamp_email ?? reply.timestamp_created ?? null,
+      error_message: message.slice(0, 500),
+      webhook_event_id: options?.webhookEventId ?? null,
+      created_at: nowIso,
+      updated_at: nowIso,
+      ...(includeStrayFields
+        ? {
+            reply_out_of_campaign: options?.outOfCampaign === true,
+            eaccount: options?.eaccount?.trim() || null,
+          }
+        : {}),
+    }, { onConflict: 'instantly_email_id', ignoreDuplicates: true })
+    .select('id')
+    .maybeSingle();
+
+  return {
+    error: result.error as { message: string; code?: string } | null,
+  };
+}
 
 const briefCache = new Map<string, string | null>();
 // campaign_id → projects.lead_criteria привязанного проекта (кастомное
@@ -104,10 +194,14 @@ const briefCache = new Map<string, string | null>();
 // критерии подкручивают итеративно — поэтому TTL: правка в настройках проекта
 // подхватывается сама в течение ~5 минут, БЕЗ редеплоя воркера.
 const LEAD_CRITERIA_TTL_MS = 5 * 60 * 1000;
-const leadCriteriaCache = new Map<
-  string,
-  { value: string | null; source: 'project' | 'client' | null; clientId: string | null; fetchedAt: number }
->();
+type LeadCriteriaCacheEntry = {
+  value: string | null;
+  source: 'project' | 'client' | null;
+  clientId: string | null;
+  ownerFingerprint: string;
+  fetchedAt: number;
+};
+const leadCriteriaCache = new Map<string, LeadCriteriaCacheEntry>();
 
 /**
  * Кастомные критерии лида для кампании: projects.lead_criteria привязанного
@@ -122,12 +216,19 @@ const leadCriteriaCache = new Map<
 async function fetchLeadCriteriaByCampaign(
   instantlyDb: NonNullable<typeof supabaseAdmin>,
   campaignId: string,
+  /** undefined = resolve now; null = caller already proved there is no project owner. */
+  provenProjectId?: string | null,
+  cached?: LeadCriteriaCacheEntry,
 ): Promise<{
   value: string | null;
   source: 'project' | 'client' | null;
   /** Владелец клиентских критериев — для атрибуции бейджа в DM. */
   clientId: string | null;
   ok: boolean;
+  /** False means project ownership itself is unsafe; stale criteria must not be used. */
+  ownershipSafe: boolean;
+  ownerFingerprint: string | null;
+  fromCache: boolean;
 }> {
   let ok = true;
   const logDegraded = (source: string, message: string | undefined) => {
@@ -141,43 +242,93 @@ async function fetchLeadCriteriaByCampaign(
   //    управляемых клиентов тоже есть client_instantly_access (так портал
   //    даёт им видимость), и без этого барьера клиентский промпт управлял бы
   //    квалификацией студийной кампании: спец-алертами и хэндоффом.
-  const { data: legacyLinks, error: legacyErr } = await instantlyDb
-    .from('project_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
-  if (legacyErr) logDegraded('project_instantly_campaigns', legacyErr.message);
-  const { data: periodLinks, error: periodErr } = await instantlyDb
-    .from('project_period_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
-  if (periodErr) logDegraded('project_period_instantly_campaigns', periodErr.message);
-  const linksDegraded = !ok;
-  const projectIds = [
-    ...new Set(
-      [...(legacyLinks ?? []), ...(periodLinks ?? [])]
-        .map((l: { project_id?: string | null }) => l.project_id)
-        .filter(Boolean) as string[],
-    ),
-  ];
+  let projectOwner;
+  if (provenProjectId !== undefined) {
+    projectOwner = provenProjectId
+      ? { status: 'resolved' as const, projectId: provenProjectId }
+      : { status: 'none' as const };
+  } else {
+    try {
+      projectOwner = await resolveCampaignProjectOwner(instantlyDb, campaignId);
+    } catch (error) {
+      logDegraded(
+        'campaign project ownership',
+        error instanceof Error ? error.message : String(error),
+      );
+      return {
+        value: null,
+        source: null,
+        clientId: null,
+        ok: false,
+        ownershipSafe: false,
+        ownerFingerprint: null,
+        fromCache: false,
+      };
+    }
+  }
+  if (projectOwner.status === 'ambiguous') {
+    workerLog(
+      'warn',
+      `lead-criteria blocked for campaign ${campaignId}: multiple project owners (${projectOwner.projectIds.join(', ')})`,
+    );
+    return {
+      value: null,
+      source: null,
+      clientId: null,
+      ok: false,
+      ownershipSafe: false,
+      ownerFingerprint: null,
+      fromCache: false,
+    };
+  }
 
-  if (projectIds.length > 0) {
+  if (projectOwner.status === 'resolved') {
+    const ownerFingerprint = `project:${projectOwner.projectId}`;
+    if (
+      cached?.ownerFingerprint === ownerFingerprint &&
+      Date.now() - cached.fetchedAt < LEAD_CRITERIA_TTL_MS
+    ) {
+      return {
+        ...cached,
+        ok: true,
+        ownershipSafe: true,
+        fromCache: true,
+      };
+    }
     if (supabaseMain) {
-      const { data: projects, error: projectsErr } = await supabaseMain
-        .from('projects').select('lead_criteria').in('id', projectIds);
+      const { data: project, error: projectsErr } = await supabaseMain
+        .from('projects')
+        .select('lead_criteria')
+        .eq('id', projectOwner.projectId)
+        .maybeSingle();
       if (projectsErr) logDegraded('projects.lead_criteria', projectsErr.message);
-      for (const p of projects ?? []) {
-        const criteria = typeof p.lead_criteria === 'string' ? p.lead_criteria.trim() : '';
-        // Критерии найдены — результат полноценный, даже если один из
-        // линк-запросов выше упал.
-        if (criteria) return { value: criteria, source: 'project', clientId: null, ok: true };
+      const criteria = typeof project?.lead_criteria === 'string'
+        ? project.lead_criteria.trim()
+        : '';
+      if (criteria) {
+        return {
+          value: criteria,
+          source: 'project',
+          clientId: null,
+          ok: true,
+          ownershipSafe: true,
+          ownerFingerprint,
+          fromCache: false,
+        };
       }
     }
     // Проектная кампания без проектных критериев = дефолтные. НЕ падаем в
     // клиентский ярус.
-    return { value: null, source: null, clientId: null, ok };
+    return {
+      value: null,
+      source: null,
+      clientId: null,
+      ok,
+      ownershipSafe: true,
+      ownerFingerprint,
+      fromCache: false,
+    };
   }
-
-  // Линк-запросы деградировали → мы НЕ знаем, проектная ли это кампания.
-  // Применять клиентские критерии вслепую нельзя (могли бы захватить
-  // «под ключ»-кампанию) — отдаём деградацию, call-site отработает
-  // stale-if-error/defer.
-  if (linksDegraded) return { value: null, source: null, clientId: null, ok: false };
 
   // 2. Чистый self-serve: критерии владельца кампании. Применяются ТОЛЬКО
   //    когда владелец ровно один — на шаренной кампании критерии одного
@@ -195,6 +346,33 @@ async function fetchLeadCriteriaByCampaign(
         .filter(Boolean) as string[],
     ),
   ];
+  if (accessErr) {
+    return {
+      value: null,
+      source: null,
+      clientId: null,
+      ok: false,
+      ownershipSafe: true,
+      ownerFingerprint: null,
+      fromCache: false,
+    };
+  }
+  const ownerFingerprint = clientIds.length === 1
+    ? `client:${clientIds[0]}`
+    : clientIds.length === 0
+      ? 'selfserve:none'
+      : `clients:${[...clientIds].sort().join(',')}`;
+  if (
+    cached?.ownerFingerprint === ownerFingerprint &&
+    Date.now() - cached.fetchedAt < LEAD_CRITERIA_TTL_MS
+  ) {
+    return {
+      ...cached,
+      ok: true,
+      ownershipSafe: true,
+      fromCache: true,
+    };
+  }
   if (clientIds.length === 1) {
     const ownerId = clientIds[0];
     const { data: rows, error: criteriaErr } = await instantlyDb
@@ -204,7 +382,17 @@ async function fetchLeadCriteriaByCampaign(
       .maybeSingle();
     if (criteriaErr) logDegraded('client_lead_criteria', criteriaErr.message);
     const criteria = typeof rows?.criteria === 'string' ? rows.criteria.trim() : '';
-    if (criteria) return { value: criteria, source: 'client', clientId: ownerId, ok };
+    if (criteria) {
+      return {
+        value: criteria,
+        source: 'client',
+        clientId: ownerId,
+        ok,
+        ownershipSafe: true,
+        ownerFingerprint,
+        fromCache: false,
+      };
+    }
   } else if (clientIds.length > 1) {
     workerLog(
       'info',
@@ -212,7 +400,15 @@ async function fetchLeadCriteriaByCampaign(
     );
   }
 
-  return { value: null, source: null, clientId: null, ok };
+  return {
+    value: null,
+    source: null,
+    clientId: null,
+    ok,
+    ownershipSafe: true,
+    ownerFingerprint,
+    fromCache: false,
+  };
 }
 const campaignNameCache = new Map<string, string | null>();
 const API_KEY = () =>
@@ -245,12 +441,17 @@ function envNumber(name: string, fallback: number): number {
  */
 async function getPortalLinkedCampaignIds(): Promise<string[]> {
   if (!supabaseAdmin) return [];
-  const { data: legacyLinks } = await supabaseAdmin
+  const { data: legacyLinks, error: legacyError } = await supabaseAdmin
     .from('project_instantly_campaigns')
     .select('project_id, campaign_id');
-  const { data: periodLinks } = await supabaseAdmin
+  const { data: periodLinks, error: periodError } = await supabaseAdmin
     .from('project_period_instantly_campaigns')
     .select('project_id, campaign_id');
+  if (legacyError || periodError) {
+    throw new Error(
+      `project campaign surface unavailable: ${legacyError?.message ?? periodError?.message ?? 'unknown'}`,
+    );
+  }
 
   const rows = [
     ...((legacyLinks ?? []) as { project_id?: string | null; campaign_id?: string | null }[]),
@@ -262,8 +463,7 @@ async function getPortalLinkedCampaignIds(): Promise<string[]> {
   // and belongs to a Portal client. Safer to skip than to classify orphaned
   // workspace campaigns.
   if (!supabaseMain) {
-    workerLog('warn', 'supabaseMain not configured — cannot verify Portal project links');
-    return [];
+    throw new Error('supabaseMain not configured — cannot verify Portal project links');
   }
 
   const projectIds = [...new Set(rows.map((r) => r.project_id).filter(Boolean) as string[])];
@@ -276,8 +476,7 @@ async function getPortalLinkedCampaignIds(): Promise<string[]> {
       .in('id', batch);
 
     if (error) {
-      workerLog('warn', 'Failed to verify Portal project links', error.message);
-      continue;
+      throw new Error(`Failed to verify Portal project links: ${error.message}`);
     }
 
     for (const project of projects ?? []) {
@@ -313,8 +512,7 @@ async function getClientCampaignsByAccount(): Promise<Map<string, Set<string>>> 
     .select('resource_id, instantly_account_id')
     .eq('resource_type', 'campaign');
   if (error) {
-    workerLog('warn', 'Failed to read client_instantly_access', error.message);
-    return byAccount;
+    throw new Error(`Failed to read client_instantly_access: ${error.message}`);
   }
   for (const row of (data ?? []) as { resource_id?: string | null; instantly_account_id?: string | null }[]) {
     if (!row.resource_id) continue;
@@ -405,6 +603,14 @@ export async function pollAndQualifyReplies(): Promise<number> {
     return 0;
   }
 
+  // Reconciliation is a low-frequency tail task: fresh inbound replies always
+  // consume the normal qualification slots first.
+  const finishPoll = async (count: number): Promise<number> => {
+    await maybeReprocessOwnershipReviews();
+    await maybeReconcileLeadNotificationDeliveries();
+    return count;
+  };
+
   // 1. Campaigns we qualify replies for, grouped by the Instantly account that
   //    owns them (each account has its own API key, so the fetch must be
   //    per-account):
@@ -412,8 +618,15 @@ export async function pollAndQualifyReplies(): Promise<number> {
   //    (b) client self-serve — launched by the client via the portal
   //        (client_instantly_access), which carries the account id. These never
   //        get a project link, so they must be added explicitly.
-  const projectCampaignIds = await getPortalLinkedCampaignIds();
-  const clientByAccount = await getClientCampaignsByAccount();
+  let projectCampaignIds: string[];
+  let clientByAccount: Map<string, Set<string>>;
+  try {
+    projectCampaignIds = await getPortalLinkedCampaignIds();
+    clientByAccount = await getClientCampaignsByAccount();
+  } catch (error) {
+    workerLog('warn', 'Campaign surface unavailable — skipping poll tick', error);
+    return finishPoll(0);
+  }
 
   const campaignsByAccount = new Map<string, Set<string>>();
   campaignsByAccount.set('main', new Set<string>(projectCampaignIds));
@@ -432,7 +645,7 @@ export async function pollAndQualifyReplies(): Promise<number> {
     'info',
     `Qualifiable campaigns: ${projectCampaignIds.length} project-linked + ${clientCampaignCount} client self-serve across ${campaignsByAccount.size} account(s) = ${totalCampaigns} total`,
   );
-  if (totalCampaigns === 0) return 0;
+  if (totalCampaigns === 0) return finishPoll(0);
 
   // 2. Fetch recent replies PER account (each = own API key + own rate limit).
   // The fetch is a workspace-global received-emails page-walk filtered locally
@@ -458,7 +671,7 @@ export async function pollAndQualifyReplies(): Promise<number> {
 
   if (replyEmails.length === 0) {
     workerLog('info', 'No linked reply emails found');
-    return 0;
+    return finishPoll(0);
   }
 
   // 3a. Deduplicate: skip reply emails that were already processed
@@ -497,7 +710,7 @@ export async function pollAndQualifyReplies(): Promise<number> {
   }
   newReplies = [...latestByLead.values()];
 
-  if (newReplies.length === 0) return 0;
+  if (newReplies.length === 0) return finishPoll(0);
 
   workerLog('info', `Found ${newReplies.length} new linked reply(s) across ${totalCampaigns} qualifiable campaign(s)`);
 
@@ -512,36 +725,33 @@ export async function pollAndQualifyReplies(): Promise<number> {
     if (i > 0) await new Promise((r) => setTimeout(r, interReplyDelay));
     try {
       await qualifyOneReply(db, reply, apiKey, accountByEmailId.get(reply.id ?? '') ?? 'main');
-      if (reply.id) transientRetryCount.delete(reply.id);
       processed++;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const emailId = reply.id ?? '';
       workerLog('error', `Failed to qualify reply ${emailId}`, err);
 
-      // Транзиентный сбой (провайдер 5xx/429, сеть, таймаут) — строку НЕ пишем.
-      // Дедуп (шаг 3a) смотрит на НАЛИЧИЕ строки, а не на статус, поэтому
-      // error-строка блокировала письмо НАВСЕГДА: одна 5-секундная икота
-      // Requesty безвозвратно теряла ответ. Инцидент 14.07 — 503 «Server
-      // Overloaded» и «fetch failed» стоили ДВУХ горячих лидов (один с уже
-      // назначенным звонком). Без строки поллер возьмёт письмо на следующем
-      // тике (~30с). Счётчик в памяти ограничивает повторы: после лимита
-      // всё-таки пишем error, чтобы сбой был виден, а не крутился вечно.
+      // A transient ownership/brief/criteria/provider outage must survive both
+      // process restarts and the provider's bounded recent-email window. Store
+      // one generated needs_review row and let the existing CAS reconciler
+      // resume it. Never write status=error with the real provider email id
+      // merely because five fast ticks happened: ordinary dedup would then
+      // suppress that reply forever.
       if (emailId && isTransientQualifyError(message)) {
-        const attempts = (transientRetryCount.get(emailId) ?? 0) + 1;
-        if (attempts < MAX_TRANSIENT_RETRIES) {
-          transientRetryCount.set(emailId, attempts);
-          workerLog(
-            'warn',
-            `Transient qualify failure for ${emailId} (${attempts}/${MAX_TRANSIENT_RETRIES}) — no row written, will retry next tick: ${message}`,
-          );
-          continue;
-        }
-        workerLog(
-          'error',
-          `Transient failures exhausted for ${emailId} (${attempts}) — writing error row for visibility`,
+        const { error: retryError } = await persistTransientQualificationRetry(
+          db,
+          reply,
+          message,
         );
-        transientRetryCount.delete(emailId);
+        if (retryError) {
+          workerLog(
+            'error',
+            `Could not persist retryable qualification ${emailId}; poll will try again while visible: ${retryError.message}`,
+          );
+        } else {
+          workerLog('warn', `Deferred ${emailId} to durable qualification retry: ${message}`);
+        }
+        continue;
       }
 
       await db.from('instantly_lead_qualifications').insert({
@@ -555,7 +765,7 @@ export async function pollAndQualifyReplies(): Promise<number> {
     }
   }
 
-  return processed;
+  return finishPoll(processed);
 }
 
 function splitEmailList(value: string | null | undefined): string[] {
@@ -581,44 +791,57 @@ function splitEmailList(value: string | null | undefined): string[] {
 async function getClientPartyAddresses(
   instantlyDb: NonNullable<typeof supabaseAdmin>,
   campaignId: string,
-): Promise<{ addresses: Set<string>; domains: Set<string> }> {
+): Promise<{ addresses: Set<string>; domains: Set<string>; ownershipSafe: boolean }> {
   const addresses = new Set<string>();
 
-  // Ошибки запросов НЕ роняют квалификацию (fail-open: письмо уйдёт в обычный
-  // AI-путь — хуже ложный алерт, чем потерянный настоящий лид), но деградацию
-  // guard'а обязаны логировать: молчаливый fail-open во время блипа БД внешне
-  // неотличим от «guard решил, что это лид».
+  // Ошибка любого ownership/project lookup делает сторону клиента недоказуемой.
+  // Caller fail-closed откладывает квалификацию до следующего тика: иначе блип
+  // БД мог бы превратить письмо клиента после handoff в новый лид и алерт.
   const logDegraded = (source: string, message: string | undefined) =>
-    workerLog('warn', `client-echo guard degraded (fail-open): ${source} query failed — ${message ?? 'unknown'}`);
+    workerLog('warn', `client-echo guard degraded (fail-closed): ${source} query failed — ${message ?? 'unknown'}`);
 
-  const { data: legacyLinks, error: legacyErr } = await instantlyDb
-    .from('project_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
-  if (legacyErr) logDegraded('project_instantly_campaigns', legacyErr.message);
-  const { data: periodLinks, error: periodErr } = await instantlyDb
-    .from('project_period_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
-  if (periodErr) logDegraded('project_period_instantly_campaigns', periodErr.message);
-  const projectIds = [
-    ...new Set(
-      [...(legacyLinks ?? []), ...(periodLinks ?? [])]
-        .map((l: { project_id?: string | null }) => l.project_id)
-        .filter(Boolean) as string[],
-    ),
-  ];
-
-  if (projectIds.length > 0 && supabaseMain) {
-    const { data: projects, error: projectsErr } = await supabaseMain
-      .from('projects').select('handoff_email').in('id', projectIds);
-    if (projectsErr) logDegraded('projects.handoff_email', projectsErr.message);
-    for (const p of projects ?? []) {
-      for (const a of splitEmailList(p.handoff_email as string | null)) addresses.add(a);
-    }
+  let projectOwner;
+  try {
+    projectOwner = await resolveCampaignProjectOwner(instantlyDb, campaignId);
+  } catch (error) {
+    logDegraded(
+      'campaign project ownership',
+      error instanceof Error ? error.message : String(error),
+    );
+    return { addresses, domains: new Set<string>(), ownershipSafe: false };
+  }
+  if (projectOwner.status === 'ambiguous') {
+    workerLog(
+      'warn',
+      `client-echo guard blocked for campaign ${campaignId}: multiple project owners (${projectOwner.projectIds.join(', ')})`,
+    );
+    return { addresses, domains: new Set<string>(), ownershipSafe: false };
   }
 
-  const { data: forwarded, error: forwardedErr } = await instantlyDb
-    .from('client_forwarded_leads').select('client_email').eq('campaign_id', campaignId);
-  if (forwardedErr) logDegraded('client_forwarded_leads', forwardedErr.message);
-  for (const f of forwarded ?? []) {
-    for (const a of splitEmailList(f.client_email as string | null)) addresses.add(a);
+  if (projectOwner.status === 'resolved' && supabaseMain) {
+    const { data: project, error: projectsErr } = await supabaseMain
+      .from('projects')
+      .select('handoff_email')
+      .eq('id', projectOwner.projectId)
+      .maybeSingle();
+    if (projectsErr) {
+      logDegraded('projects.handoff_email', projectsErr.message);
+      return { addresses, domains: new Set<string>(), ownershipSafe: false };
+    }
+    for (const a of splitEmailList(project?.handoff_email as string | null)) addresses.add(a);
+  }
+
+  // client_forwarded_leads is historical and has no project_id. Once a
+  // campaign has a managed project owner, those rows cannot prove they belong
+  // to the current owner after a transfer, so only the exact project handoff
+  // address above is safe. Pure self-serve campaigns may still use the history.
+  if (projectOwner.status === 'none') {
+    const { data: forwarded, error: forwardedErr } = await instantlyDb
+      .from('client_forwarded_leads').select('client_email').eq('campaign_id', campaignId);
+    if (forwardedErr) logDegraded('client_forwarded_leads', forwardedErr.message);
+    for (const f of forwarded ?? []) {
+      for (const a of splitEmailList(f.client_email as string | null)) addresses.add(a);
+    }
   }
 
   const domains = new Set<string>();
@@ -626,12 +849,59 @@ async function getClientPartyAddresses(
     const domain = a.split('@')[1];
     if (domain && !isFreeProvider(domain)) domains.add(domain);
   }
-  return { addresses, domains };
+  return { addresses, domains, ownershipSafe: true };
 }
 
 // Экспорт — для othersWatchdog: вкладка Others квалифицируется ТЕМ ЖЕ путём
 // (guard'ы, критерии, дедуп по instantly_email_id), различается только
 // источник письма и атрибуция кампании.
+async function persistQualificationRow(
+  db: NonNullable<typeof supabaseAdmin>,
+  payload: Record<string, unknown>,
+  existingQualificationId?: string,
+  attemptedAt?: string,
+): Promise<{
+  data: { id: string } | null;
+  error: { message: string; code?: string } | null;
+}> {
+  if (existingQualificationId) {
+    if (!attemptedAt) {
+      return {
+        data: null,
+        error: { message: 'Existing qualification update requires an ownership retry token' },
+      };
+    }
+    const result = await db
+      .from('instantly_lead_qualifications')
+      .update({
+        ...payload,
+        error_message: null,
+        updated_at: attemptedAt,
+      })
+      .eq('id', existingQualificationId)
+      .eq('status', 'processing')
+      // Fencing token: status alone is vulnerable to ABA after an expired
+      // lease is reclaimed (processing@t1 → review → processing@t2).
+      .eq('updated_at', attemptedAt)
+      .select('id')
+      .maybeSingle();
+    return {
+      data: result.data as { id: string } | null,
+      error: result.error as { message: string; code?: string } | null,
+    };
+  }
+
+  const result = await db
+    .from('instantly_lead_qualifications')
+    .upsert(payload, { onConflict: 'instantly_email_id', ignoreDuplicates: true })
+    .select('id')
+    .maybeSingle();
+  return {
+    data: result.data as { id: string } | null,
+    error: result.error as { message: string; code?: string } | null,
+  };
+}
+
 export async function qualifyOneReply(
   db: NonNullable<typeof supabaseAdmin>,
   reply: Email,
@@ -663,6 +933,10 @@ export async function qualifyOneReply(
     outOfCampaign?: boolean;
     /** Others watchdog already matched prefetched lastOutbound across campaigns. */
     prefetchedParentMatched?: boolean;
+    /** Re-qualify a previously ownership-blocked row in place after a CAS claim. */
+    existingQualificationId?: string;
+    /** Stable timestamp used for the retry lease/backoff and row update. */
+    existingQualificationAttemptedAt?: string;
   },
 ): Promise<void> {
   const providerCampaignId = reply.campaign_id;
@@ -707,7 +981,8 @@ export async function qualifyOneReply(
   const strayColsOk = await strayColumnsSupported(db);
   if (ownership.status === 'ambiguous') {
     const replyText = getBodyText(reply.body);
-    const { error: ownershipUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
+    const { error: ownershipUpsertErr } = await persistQualificationRow(
+      db,
       {
         campaign_id: providerCampaignId,
         campaign_name: await resolveCampaignName(providerCampaignId, accountId),
@@ -719,14 +994,15 @@ export async function qualifyOneReply(
         status: 'needs_review',
         proposal_seen: false,
         interest_signals: [],
-        ai_reason: `Не удалось однозначно определить проект-владельца ответа: ${ownership.reason}. Автоматические уведомления и передача отключены до ручной проверки.`,
+        ai_reason: `${OWNERSHIP_REVIEW_REASON_PREFIX} ${ownership.reason}. Автоматические уведомления и передача отключены до ручной проверки.`,
         ai_confidence: 0,
         instantly_email_id: reply.id,
         instantly_lead_id: null,
         reply_timestamp: reply.timestamp_email ?? null,
         ...(strayColsOk ? { reply_out_of_campaign: true, eaccount: replyEaccount } : {}),
       },
-      { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+      opts?.existingQualificationId,
+      opts?.existingQualificationAttemptedAt,
     );
     if (ownershipUpsertErr) {
       throw new Error(`Ownership-review upsert failed: ${ownershipUpsertErr.message ?? 'unknown'}`);
@@ -761,13 +1037,20 @@ export async function qualifyOneReply(
   const fromLower = leadEmail.trim().toLowerCase();
   const fromDomain = fromLower.split('@')[1] ?? '';
   const clientParty = await getClientPartyAddresses(db, campaignId);
+  if (!clientParty.ownershipSafe) {
+    throw new Error(
+      `${OWNERSHIP_DEFER_ERROR_PREFIX} for ${reply.id ?? '?'} ` +
+      `(campaign ${campaignId}): client-party ownership is not provable`,
+    );
+  }
   if (clientParty.addresses.has(fromLower) || (fromDomain && clientParty.domains.has(fromDomain))) {
     const replyText = getBodyText(reply.body);
     // Как и основной upsert ниже: ошибку НЕ глотаем. Молча потерянная строка =
     // нет дедупа → это же эхо переобрабатывается каждый тик, занимая слот из
     // MAX_QUALIFY_PER_TICK. throw → внешний catch запишет status='error'
     // (видимость + дедуп-строка), ровно как при сбое основного пути.
-    const { error: guardUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
+    const { error: guardUpsertErr } = await persistQualificationRow(
+      db,
       {
         campaign_id: campaignId,
         campaign_name: await resolveCampaignName(campaignId, accountId),
@@ -786,7 +1069,8 @@ export async function qualifyOneReply(
         reply_timestamp: reply.timestamp_email ?? null,
         ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
       },
-      { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+      opts?.existingQualificationId,
+      opts?.existingQualificationAttemptedAt,
     );
     if (guardUpsertErr) {
       workerLog(
@@ -821,7 +1105,8 @@ export async function qualifyOneReply(
     }
     if (recipientAddrs.size > 0 && !recipientAddrs.has(ourMailbox)) {
       const replyText = getBodyText(reply.body);
-      const { error: strayUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
+      const { error: strayUpsertErr } = await persistQualificationRow(
+        db,
         {
           campaign_id: campaignId,
           campaign_name: await resolveCampaignName(campaignId, accountId),
@@ -840,7 +1125,8 @@ export async function qualifyOneReply(
           reply_timestamp: reply.timestamp_email ?? null,
           ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
         },
-        { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+        opts?.existingQualificationId,
+        opts?.existingQualificationAttemptedAt,
       );
       if (strayUpsertErr) {
         workerLog(
@@ -883,7 +1169,8 @@ export async function qualifyOneReply(
       !outboundMailboxes.has(ourMailbox)
     ) {
       const replyText = getBodyText(reply.body);
-      const { error: crossUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
+      const { error: crossUpsertErr } = await persistQualificationRow(
+        db,
         {
           campaign_id: campaignId,
           campaign_name: await resolveCampaignName(campaignId, accountId),
@@ -902,7 +1189,8 @@ export async function qualifyOneReply(
           reply_timestamp: reply.timestamp_email ?? null,
           ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
         },
-        { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+        opts?.existingQualificationId,
+        opts?.existingQualificationAttemptedAt,
       );
       if (crossUpsertErr) {
         workerLog(
@@ -919,55 +1207,81 @@ export async function qualifyOneReply(
     }
   }
 
-  if (!briefCache.has(campaignId)) {
-    briefCache.set(campaignId, await fetchBriefByCampaign(campaignId));
+  const briefOwnerFingerprint = ownership.effectiveProjectId
+    ? `project:${ownership.effectiveProjectId}`
+    : 'selfserve';
+  const briefCacheKey = `${campaignId}:${briefOwnerFingerprint}`;
+  if (!briefCache.has(briefCacheKey)) {
+    try {
+      briefCache.set(briefCacheKey, await fetchBriefByCampaign(campaignId, {
+        projectId: ownership.effectiveProjectId,
+        ownershipProven: true,
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `${OWNERSHIP_DEFER_ERROR_PREFIX} for ${reply.id ?? '?'} ` +
+        `(campaign ${campaignId}): project brief is not readable: ${message}`,
+      );
+    }
   }
-  const cachedBrief = briefCache.get(campaignId) ?? null;
+  const cachedBrief = briefCache.get(briefCacheKey) ?? null;
 
   const criteriaEntry = leadCriteriaCache.get(campaignId);
   let cachedCriteria: string | null;
   let criteriaSource: 'project' | 'client' | null;
   let criteriaClientId: string | null;
-  if (criteriaEntry && Date.now() - criteriaEntry.fetchedAt < LEAD_CRITERIA_TTL_MS) {
-    cachedCriteria = criteriaEntry.value;
-    criteriaSource = criteriaEntry.source;
-    criteriaClientId = criteriaEntry.clientId;
-  } else {
-    const fetched = await fetchLeadCriteriaByCampaign(db, campaignId);
-    if (fetched.ok) {
-      cachedCriteria = fetched.value;
-      criteriaSource = fetched.source;
-      criteriaClientId = fetched.clientId;
+  const fetched = await fetchLeadCriteriaByCampaign(
+    db,
+    campaignId,
+    ownership.effectiveProjectId,
+    criteriaEntry,
+  );
+  if (!fetched.ownershipSafe) {
+    // Ownership changed or a link read failed after the initial resolver.
+    // Do not reuse stale criteria from a formerly valid owner: the next
+    // attempt will either prove one owner or write an ownership review row.
+    throw new Error(
+      `${OWNERSHIP_DEFER_ERROR_PREFIX} for ${reply.id ?? '?'} ` +
+      `(campaign ${campaignId}): lead-criteria ownership is not provable`,
+    );
+  }
+  if (fetched.ok) {
+    cachedCriteria = fetched.value;
+    criteriaSource = fetched.source;
+    criteriaClientId = fetched.clientId;
+    if (!fetched.fromCache && fetched.ownerFingerprint) {
       leadCriteriaCache.set(campaignId, {
         value: fetched.value,
         source: fetched.source,
         clientId: fetched.clientId,
+        ownerFingerprint: fetched.ownerFingerprint,
         fetchedAt: Date.now(),
       });
-    } else if (criteriaEntry) {
-      // Деградация НЕ кэшируется, при протухшем кэше — stale-if-error:
-      // вчерашние критерии лучше, чем молча дефолтные на время блипа БД.
-      cachedCriteria = criteriaEntry.value;
-      criteriaSource = criteriaEntry.source;
-      criteriaClientId = criteriaEntry.clientId;
-    } else {
-      // Холодный кэш (рестарт воркера) + деградация: критерии НЕИЗВЕСТНЫ.
-      // Квалифицировать с дефолтными нельзя — вердикт запишется навсегда
-      // (дедуп по instantly_email_id), и ранний выход «запрос контакта = не
-      // лид» убил бы горячий лид кампании с кастомом. Откладываем письмо БЕЗ
-      // записи: дедуп-строки нет → следующий тик (~30с) обработает заново.
-      workerLog(
-        'warn',
-        `lead-criteria unknown for campaign ${campaignId} (cold cache + degraded fetch) — deferring reply ${reply.id ?? '?'} to next tick`,
-      );
-      return;
     }
+  } else if (
+    criteriaEntry &&
+    fetched.ownerFingerprint &&
+    criteriaEntry.ownerFingerprint === fetched.ownerFingerprint
+  ) {
+    // Degradation never crosses owners. A stale value is acceptable only
+    // when the current project/client fingerprint is still exactly the same.
+    cachedCriteria = criteriaEntry.value;
+    criteriaSource = criteriaEntry.source;
+    criteriaClientId = criteriaEntry.clientId;
+  } else {
+    throw new Error(
+      `${OWNERSHIP_DEFER_ERROR_PREFIX} for ${reply.id ?? '?'} ` +
+      `(campaign ${campaignId}): lead criteria are not readable from a cold cache`,
+    );
   }
 
   const result = await qualifyReply(campaignId, leadEmail, effectiveReply.thread_id, {
     apiKey,
     model: MODEL,
-    briefText: cachedBrief,
+    // Empty string means "brief was resolved and absent"; null would make
+    // qualifyReply resolve it again without the proven owner fingerprint.
+    briefText: cachedBrief ?? '',
     leadCriteria: cachedCriteria,
     // Контекст уже зафетчен выше (кросс-клиентский guard) — не фетчим второй раз.
     prefetchedContext: ctx,
@@ -1018,9 +1332,8 @@ export async function qualifyOneReply(
   // все классификации с ~6 мая 2026 — таблица оставалась пустой, AI крутился
   // вхолостую. Миграция 20260514_0001 заменила partial UNIQUE на full UNIQUE;
   // если ON CONFLICT снова сломается — теперь сразу будет видно в логах.
-  const { data: inserted, error: upsertErr } = await db
-    .from('instantly_lead_qualifications')
-    .upsert(
+  const { data: inserted, error: upsertErr } = await persistQualificationRow(
+    db,
       {
         campaign_id: campaignId,
         campaign_name: campaignName,
@@ -1045,10 +1358,9 @@ export async function qualifyOneReply(
         objection_draft: result.objectionDraft,
         ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
       },
-      { onConflict: 'instantly_email_id', ignoreDuplicates: true },
-    )
-    .select('id')
-    .maybeSingle();
+    opts?.existingQualificationId,
+    opts?.existingQualificationAttemptedAt,
+  );
 
   if (upsertErr) {
     workerLog(
@@ -1203,6 +1515,387 @@ export async function getCampaignsByAccountCached(): Promise<Map<string, Set<str
   return byAccount;
 }
 
+export interface OwnershipReviewRetryOptions {
+  now?: Date;
+  limit?: number;
+  minRetryAgeMs?: number;
+  maxAgeMs?: number;
+  processingLeaseMs?: number;
+}
+
+/**
+ * Re-open generated retry rows (ownership ambiguity and transient
+ * qualification outages). The original row/id is retained: board, handoff and
+ * notification idempotency all key off qualification_id, so delete+reinsert
+ * would be unsafe.
+ */
+export async function reprocessOwnershipReviewRows(
+  options: OwnershipReviewRetryOptions = {},
+): Promise<number> {
+  if (!supabaseAdmin) return 0;
+  const apiKey = API_KEY();
+  if (!apiKey) return 0;
+
+  const db = supabaseAdmin;
+  const now = options.now ?? new Date();
+  const nowIso = now.toISOString();
+  const limit = Math.max(
+    1,
+    Math.min(5, options.limit ?? envNumber('INSTANTLY_OWNERSHIP_RETRY_BATCH', 2)),
+  );
+  const minRetryAgeMs = Math.max(
+    0,
+    options.minRetryAgeMs ?? envNumber(
+      'INSTANTLY_OWNERSHIP_RETRY_BACKOFF_MS',
+      OWNERSHIP_REVIEW_RETRY_INTERVAL_MS,
+    ),
+  );
+  const maxAgeMs = Math.max(
+    minRetryAgeMs,
+    options.maxAgeMs ?? envNumber(
+      'INSTANTLY_OWNERSHIP_RETRY_MAX_AGE_MS',
+      OWNERSHIP_REVIEW_RETRY_MAX_AGE_MS,
+    ),
+  );
+  const processingLeaseMs = Math.max(
+    60_000,
+    options.processingLeaseMs ?? envNumber(
+      'INSTANTLY_OWNERSHIP_RETRY_LEASE_MS',
+      OWNERSHIP_REVIEW_PROCESSING_LEASE_MS,
+    ),
+  );
+  const recentCutoffIso = new Date(now.getTime() - maxAgeMs).toISOString();
+  const retryCutoffIso = new Date(now.getTime() - minRetryAgeMs).toISOString();
+  const leaseCutoffIso = new Date(now.getTime() - processingLeaseMs).toISOString();
+  const ownershipReasonPattern = `${OWNERSHIP_REVIEW_REASON_PREFIX}%`;
+  const transientReasonPattern = `${TRANSIENT_RETRY_REASON_PREFIX}%`;
+  const retryReasonFilter =
+    `ai_reason.ilike.${ownershipReasonPattern},ai_reason.ilike.${transientReasonPattern}`;
+
+  // Backward recovery for rows written by the old five-attempt policy. Those
+  // rows used the real provider email id with status=error, so the normal poll
+  // dedup can never see them again. Reopen only recent, recognizable transient
+  // failures and fence the exact old status/timestamp; permanent parser/data
+  // errors remain terminal. Pagination covers the complete bounded max-age
+  // horizon so newer permanent errors cannot starve an older retryable row.
+  type LegacyErrorRow = {
+    id: string;
+    instantly_email_id: string | null;
+    error_message: string | null;
+    created_at: string | null;
+    updated_at: string | null;
+  };
+  const legacyErrors: LegacyErrorRow[] = [];
+  const legacyPageSize = 100;
+  let legacyScanFailed = false;
+  for (let pageStart = 0; ; pageStart += legacyPageSize) {
+    const { data: page, error: pageError } = await db
+      .from('instantly_lead_qualifications')
+      .select('id, instantly_email_id, error_message, created_at, updated_at')
+      .eq('status', 'error')
+      .not('instantly_email_id', 'is', null)
+      .gte('created_at', recentCutoffIso)
+      .order('created_at', { ascending: false })
+      .range(pageStart, pageStart + legacyPageSize - 1);
+    if (pageError) {
+      workerLog('warn', `qualification retry: legacy error scan failed: ${pageError.message}`);
+      legacyScanFailed = true;
+      break;
+    }
+    const rows = (page ?? []) as LegacyErrorRow[];
+    legacyErrors.push(...rows);
+    if (rows.length < legacyPageSize) break;
+  }
+  if (!legacyScanFailed) {
+    for (const raw of legacyErrors) {
+      const emailId = raw.instantly_email_id?.trim() ?? '';
+      const errorMessage = raw.error_message?.trim() ?? '';
+      if (!emailId || emailId.startsWith('webhook:') || !isTransientQualifyError(errorMessage)) {
+        continue;
+      }
+
+      const legacyClaimBase = db
+        .from('instantly_lead_qualifications')
+        .update({
+          status: 'needs_review',
+          ai_reason: `${TRANSIENT_RETRY_REASON_PREFIX} Recovered legacy terminal retry: ${errorMessage}`.slice(0, 500),
+          ai_confidence: 0,
+          updated_at: nowIso,
+        })
+        .eq('id', raw.id)
+        .eq('status', 'error');
+      const legacyClaim = raw.updated_at
+        ? legacyClaimBase.eq('updated_at', raw.updated_at)
+        : legacyClaimBase.is('updated_at', null);
+      const { error: reopenError } = await legacyClaim;
+      if (reopenError) {
+        workerLog('warn', `qualification retry: legacy row ${raw.id} reopen failed: ${reopenError.message}`);
+      }
+    }
+  }
+
+  const rotateSkippedCandidate = async (
+    raw: { id: string; updated_at: string },
+    reason: string,
+  ): Promise<void> => {
+    const { error } = await db
+      .from('instantly_lead_qualifications')
+      .update({ updated_at: nowIso })
+      .eq('id', raw.id)
+      .eq('status', 'needs_review')
+      .eq('ai_confidence', 0)
+      .or(retryReasonFilter)
+      // Exact old timestamp is both the skip CAS and a fairness token: a
+      // concurrent worker that already claimed/rotated the row wins.
+      .eq('updated_at', raw.updated_at);
+    if (error) {
+      workerLog('warn', `ownership retry: could not rotate ${raw.id} (${reason}): ${error.message}`);
+    }
+  };
+
+  // A hard process crash may leave the CAS claim in processing. Re-open only
+  // this code-generated review class, and only after a long lease. Keep the
+  // old updated_at so it is immediately eligible in the candidate query below.
+  const { error: leaseError } = await db
+    .from('instantly_lead_qualifications')
+    .update({ status: 'needs_review' })
+    .eq('status', 'processing')
+    .eq('ai_confidence', 0)
+    .or(retryReasonFilter)
+    .lte('updated_at', leaseCutoffIso);
+  if (leaseError) {
+    workerLog('warn', `ownership retry: stale-claim recovery failed: ${leaseError.message}`);
+  }
+
+  // Only transient infrastructure rows have an automatic DLQ horizon.
+  // Ownership ambiguity remains a manual review item after the automatic
+  // window; silently turning it into a terminal technical error would hide a
+  // real catalog conflict. Most importantly, no number of quick ticks can
+  // reach this branch: age is measured from the durable row timestamp.
+  const { error: expiredError } = await db
+    .from('instantly_lead_qualifications')
+    .update({
+      status: 'error',
+      error_message: 'Automatic qualification retry window expired',
+      updated_at: nowIso,
+    })
+    .eq('status', 'needs_review')
+    .eq('ai_confidence', 0)
+    .ilike('ai_reason', transientReasonPattern)
+    .lt('created_at', recentCutoffIso);
+  if (expiredError) {
+    workerLog('warn', `qualification retry: expired-row DLQ failed: ${expiredError.message}`);
+  }
+
+  const { data: candidates, error: candidatesError } = await db
+    .from('instantly_lead_qualifications')
+    .select('id, campaign_id, lead_email, instantly_email_id, status, ai_reason, ai_confidence, created_at, updated_at')
+    .eq('status', 'needs_review')
+    .eq('ai_confidence', 0)
+    .or(retryReasonFilter)
+    .not('instantly_email_id', 'is', null)
+    .gte('created_at', recentCutoffIso)
+    .lte('updated_at', retryCutoffIso)
+    // Oldest eligible attempt first. Skipped candidates are rotated below, so
+    // an ambiguous workspace/manual forward cannot permanently starve rows
+    // just outside this bounded window.
+    .order('updated_at', { ascending: true })
+    .limit(Math.max(limit, limit * 3));
+  if (candidatesError) {
+    workerLog('warn', `ownership retry: candidate query failed: ${candidatesError.message}`);
+    return 0;
+  }
+  if (!candidates?.length) return 0;
+
+  const campaignsByAccount = await getCampaignsByAccountCached();
+  let attempted = 0;
+  for (const raw of candidates as Array<{
+    id: string;
+    campaign_id: string;
+    lead_email: string;
+    instantly_email_id: string | null;
+    status: string;
+    ai_reason: string | null;
+    ai_confidence: number | null;
+    created_at: string;
+    updated_at: string;
+  }>) {
+    if (attempted >= limit) break;
+    const emailId = raw.instantly_email_id?.trim();
+    if (!emailId || emailId.startsWith('webhook:')) {
+      await rotateSkippedCandidate(raw, 'not a provider email id');
+      continue;
+    }
+
+    const accountIds = [...campaignsByAccount.entries()]
+      .filter(([, campaignIds]) => campaignIds.has(raw.campaign_id))
+      .map(([accountId]) => accountId);
+    // Never guess the workspace: getEmail with a wrong account can either 404
+    // or return unrelated provider data. A later catalog sync will retry it.
+    if (accountIds.length !== 1) {
+      await rotateSkippedCandidate(raw, `workspace matches=${accountIds.length}`);
+      continue;
+    }
+    const accountId = accountIds[0];
+
+    // A specialist already forwarded this exact qualification manually, so a
+    // historical automatic alert would only duplicate a handled lead.
+    const { data: forwarded, error: forwardedError } = await db
+      .from('client_forwarded_leads')
+      .select('id')
+      .eq('qualification_id', raw.id)
+      .limit(1);
+    if (forwardedError) {
+      workerLog('warn', `ownership retry: forwarded check failed for ${raw.id}: ${forwardedError.message}`);
+      await rotateSkippedCandidate(raw, 'forwarded check failed');
+      continue;
+    }
+    if (forwarded?.length) {
+      await rotateSkippedCandidate(raw, 'already forwarded');
+      continue;
+    }
+
+    // Compare-and-set claim: concurrent dedicated/monolith workers may select
+    // the same candidate, but only one can transition needs_review→processing.
+    const { data: claimed, error: claimError } = await db
+      .from('instantly_lead_qualifications')
+      .update({ status: 'processing', updated_at: nowIso })
+      .eq('id', raw.id)
+      .eq('status', 'needs_review')
+      .eq('ai_confidence', 0)
+      .or(retryReasonFilter)
+      .eq('updated_at', raw.updated_at)
+      .select('id')
+      .maybeSingle();
+    if (claimError) {
+      workerLog('warn', `ownership retry: claim failed for ${raw.id}: ${claimError.message}`);
+      continue;
+    }
+    if (!claimed) continue;
+    attempted++;
+
+    try {
+      const fullEmail = await instantly.getEmail(emailId, { accountId });
+      if (!fullEmail?.id || fullEmail.id !== emailId) {
+        throw new Error(`provider email mismatch for ${emailId}`);
+      }
+      const refreshedCampaignId = fullEmail.campaign_id?.trim() || raw.campaign_id;
+      let retryReply = { ...fullEmail, campaign_id: refreshedCampaignId } as Email;
+      const isOthersRetry = raw.ai_reason?.includes(TRANSIENT_OTHERS_RETRY_TAG) === true;
+      let retryContext: ThreadContext | undefined;
+      let retryFlowOptions: {
+        clientDmOnlyOnLead?: boolean;
+        outOfCampaign?: boolean;
+        prefetchedParentMatched?: boolean;
+      } = {};
+      if (isOthersRetry) {
+        const { data: retryMeta, error: retryMetaError } = await db
+          .from('instantly_lead_qualifications')
+          .select('reply_out_of_campaign, eaccount, last_outbound_preview')
+          .eq('id', raw.id)
+          .maybeSingle();
+        if (retryMetaError) {
+          throw new Error(
+            `${OWNERSHIP_DEFER_ERROR_PREFIX} for retry ${raw.id}: ` +
+            `Others metadata unavailable: ${retryMetaError.message}`,
+          );
+        }
+        const meta = retryMeta as {
+          reply_out_of_campaign?: boolean | null;
+          eaccount?: string | null;
+          last_outbound_preview?: string | null;
+        } | null;
+        const mailbox = meta?.eaccount?.trim() || retryReply.eaccount?.trim() || null;
+        if (mailbox && !retryReply.eaccount?.trim()) {
+          // getEmail is not guaranteed to repeat the mailbox metadata kept by
+          // the Others scan. Carry the durable value into the normal writer
+          // and client DM as well as the reconstructed ownership context.
+          retryReply = { ...retryReply, eaccount: mailbox };
+        }
+        const lastOutboundText = meta?.last_outbound_preview?.trim() ?? '';
+        const lastOutbound = lastOutboundText
+          ? ({
+              id: `retry-parent:${raw.id}`,
+              campaign_id: refreshedCampaignId,
+              ue_type: 1,
+              eaccount: mailbox,
+              from_address_email: mailbox,
+              to_address_email_list: retryReply.from_address_email,
+              lead: retryReply.from_address_email,
+              body: { text: lastOutboundText },
+            } as Email)
+          : null;
+        retryContext = {
+          replyEmail: retryReply,
+          threadEmails: lastOutbound ? [lastOutbound, retryReply] : [retryReply],
+          lastOutbound,
+          campaignOutboundMailboxes: mailbox ? [mailbox] : [],
+        };
+        retryFlowOptions = {
+          clientDmOnlyOnLead: true,
+          outOfCampaign: meta?.reply_out_of_campaign === true,
+          prefetchedParentMatched: false,
+        };
+      }
+      await qualifyOneReply(
+        db,
+        retryReply,
+        apiKey,
+        accountId,
+        retryContext,
+        {
+          ...retryFlowOptions,
+          existingQualificationId: raw.id,
+          existingQualificationAttemptedAt: nowIso,
+        },
+      );
+
+      // Cold criteria/cache degradation deliberately returns without writing.
+      // Release such a still-held claim; the exact ownership reason remains,
+      // so it is eligible again after the same backoff.
+      await db
+        .from('instantly_lead_qualifications')
+        .update({ status: 'needs_review', updated_at: nowIso })
+        .eq('id', raw.id)
+        .eq('status', 'processing')
+        .eq('updated_at', nowIso);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await db
+        .from('instantly_lead_qualifications')
+        .update({
+          status: 'needs_review',
+          updated_at: nowIso,
+          error_message: `Ownership retry failed: ${message}`.slice(0, 500),
+        })
+        .eq('id', raw.id)
+        .eq('status', 'processing')
+        .eq('updated_at', nowIso);
+      workerLog('warn', `ownership retry failed for ${raw.id}; released with backoff`, error);
+    }
+  }
+
+  return attempted;
+}
+
+async function maybeReprocessOwnershipReviews(): Promise<number> {
+  const nowMs = Date.now();
+  const intervalMs = Math.max(
+    60_000,
+    envNumber('INSTANTLY_OWNERSHIP_RETRY_INTERVAL_MS', OWNERSHIP_REVIEW_RETRY_INTERVAL_MS),
+  );
+  if (nowMs - lastOwnershipReviewRetryAt < intervalMs) return 0;
+  // Set before awaiting: concurrent calls in one process do not start a second
+  // scan. Cross-process concurrency is covered by the row CAS claim.
+  lastOwnershipReviewRetryAt = nowMs;
+  try {
+    return await reprocessOwnershipReviewRows({ now: new Date(nowMs) });
+  } catch (error) {
+    workerLog('warn', 'ownership retry cycle failed', error);
+    return 0;
+  }
+}
+
 /**
  * Real-time путь (additive, флаг INSTANTLY_WEBHOOK_DRAIN_ENABLED, default OFF):
  * разгребает reply-события, которые вебхук-приёмник положил в
@@ -1225,8 +1918,18 @@ export async function drainWebhookQueue(): Promise<number> {
 
   const batchSize = envNumber('INSTANTLY_WEBHOOK_DRAIN_BATCH', 25);
   const minAgeMs = envNumber('INSTANTLY_WEBHOOK_DRAIN_MIN_AGE_MS', 3000);
-  const youngMs = envNumber('INSTANTLY_WEBHOOK_DRAIN_YOUNG_MS', 90000);
   const olderThanIso = new Date(Date.now() - minAgeMs).toISOString();
+
+  // Build the complete campaign surface before claiming any event. A partial
+  // legacy/period/client-access read cannot distinguish "not ours" from a DB
+  // outage; claiming first would ACK valid replies forever.
+  let campaignsByAccount: Map<string, Set<string>>;
+  try {
+    campaignsByAccount = await getCampaignsByAccountCached();
+  } catch (error) {
+    workerLog('warn', 'drain: campaign surface unavailable — queue left untouched', error);
+    return 0;
+  }
 
   // 1. Берём старейшие необработанные reply-события, успевшие «отлежаться» (min-age
   //    — чтобы Instantly успел проиндексировать письмо в /emails), и атомарно их
@@ -1255,7 +1958,6 @@ export async function drainWebhookQueue(): Promise<number> {
     .select('id, campaign_id, lead_email, thread_id, created_at');
   if (!claimed || claimed.length === 0) return 0;
 
-  const campaignsByAccount = await getCampaignsByAccountCached();
   const accountForCampaign = (campaignId: string): string | null => {
     for (const [accountId, set] of campaignsByAccount) {
       if (set.has(campaignId)) return accountId;
@@ -1286,23 +1988,13 @@ export async function drainWebhookQueue(): Promise<number> {
       // Один вызов Instantly: проверка готовности + источник настоящего id письма.
       const ctx = await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId);
       if (!ctx) {
-        const ageMs = Date.now() - new Date(row.created_at ?? 0).getTime();
-        if (ageMs < youngMs) {
-          // Ответ ещё не проиндексирован Instantly → ретрай на следующем тике. НЕ
-          // пишем строку квалификации, иначе её instantly_email_id отравит дедуп
-          // поллинга и заморозит ответ навсегда.
-          const { error: contextRequeueError } = await db
-            .from('instantly_webhook_events')
-            .update({ processed: false })
-            .eq('id', row.id);
-          if (contextRequeueError) {
-            throw new Error(
-              `Webhook empty-context requeue failed: ${contextRequeueError.message}`,
-            );
-          }
-        }
-        // Старое + всё ещё нет контекста → оставляем acked; бэкап — поллинг.
-        continue;
+        // Without the authoritative provider email id we cannot create the
+        // durable qualification retry row yet. The shared transient path below
+        // reopens the event until Instantly has indexed the thread.
+        throw new Error(
+          `${OWNERSHIP_DEFER_ERROR_PREFIX} for webhook event ${row.id}: ` +
+          'provider thread context is not available yet',
+        );
       }
 
       // Берём НАСТОЯЩЕЕ письмо-ответ из треда: его id совпадёт с тем, что взял бы
@@ -1324,7 +2016,6 @@ export async function drainWebhookQueue(): Promise<number> {
       if (existing) continue;
 
       await qualifyOneReply(db, reply, apiKey, accountId, ctx);
-      transientRetryCount.delete(reply.id);
       qualified++;
 
       // Провенанс (best-effort): связать строку квалификации с её событием.
@@ -1337,44 +2028,45 @@ export async function drainWebhookQueue(): Promise<number> {
       const message = err instanceof Error ? err.message : String(err);
       const retryKey = replyForError?.id ?? `webhook:${row.id}`;
       let visibleErrorMessage = message;
+      let terminalEmailId = replyForError?.id ?? `webhook:${row.id}`;
       workerLog('error', `drain: failed on event ${row.id} (${leadEmail})`, err);
 
       if (isTransientQualifyError(message)) {
-        const attempts = (transientRetryCount.get(retryKey) ?? 0) + 1;
-        if (attempts < MAX_TRANSIENT_RETRIES) {
-          // The event was claimed before qualification. Put it back so the
-          // same real reply can retry instead of being silently ACKed.
-          const { error: requeueError } = await db
-            .from('instantly_webhook_events')
-            .update({ processed: false })
-            .eq('id', row.id);
-          if (!requeueError) {
-            transientRetryCount.set(retryKey, attempts);
-            workerLog(
-              'warn',
-              `drain: transient failure for ${retryKey} ` +
-              `(${attempts}/${MAX_TRANSIENT_RETRIES}) — event requeued`,
-            );
+        if (replyForError?.id) {
+          const { error: retryError } = await persistTransientQualificationRetry(
+            db,
+            replyForError,
+            message,
+            { campaignId, webhookEventId: row.id },
+          );
+          if (!retryError) {
+            workerLog('warn', `drain: deferred ${retryKey} to durable qualification retry`);
             continue;
           }
+          visibleErrorMessage = `${message}; retry-row write failed: ${retryError.message}`;
+          workerLog('error', `drain: retry-row write failed for ${retryKey}: ${retryError.message}`);
+        }
 
-          // Claim is still ACKed. Fall through to a visible error row instead
-          // of logging a retry that never actually reached the queue.
-          transientRetryCount.delete(retryKey);
-          visibleErrorMessage =
-            `${message}; webhook requeue failed: ${requeueError.message}`;
-          workerLog(
-            'error',
-            `drain: requeue failed for ${retryKey}: ${requeueError.message} — writing error row`,
-          );
+        // If the provider has not exposed a real email id yet (or the retry
+        // row write failed), give the durable webhook queue its claim back.
+        const { error: requeueError } = await db
+          .from('instantly_webhook_events')
+          .update({ processed: false })
+          .eq('id', row.id);
+        if (!requeueError) {
+          workerLog('warn', `drain: transient failure for ${retryKey} — event requeued`);
+          continue;
         }
-        if (attempts >= MAX_TRANSIENT_RETRIES) {
-          transientRetryCount.delete(retryKey);
-          workerLog(
-            'error',
-            `drain: transient failures exhausted for ${retryKey} — writing error row`,
-          );
-        }
+
+        // Both durable retry mechanisms failed. Keep a visible synthetic event
+        // error, never an error keyed by the real provider email id; polling
+        // can still qualify the real reply after storage recovers.
+        visibleErrorMessage = `${visibleErrorMessage}; webhook requeue failed: ${requeueError.message}`;
+        terminalEmailId = `webhook:${row.id}`;
+        workerLog(
+          'error',
+          `drain: requeue failed for ${retryKey}: ${requeueError.message} — writing synthetic error row`,
+        );
       }
 
       const failedReply = replyForError;
@@ -1384,7 +2076,7 @@ export async function drainWebhookQueue(): Promise<number> {
           campaign_id: failedReply?.campaign_id ?? campaignId,
           lead_email: failedReply?.from_address_email ?? leadEmail,
           thread_id: failedReply?.thread_id ?? row.thread_id,
-          instantly_email_id: failedReply?.id ?? `webhook:${row.id}`,
+          instantly_email_id: terminalEmailId,
           reply_timestamp: failedReply?.timestamp_email ?? null,
           status: 'error',
           error_message: visibleErrorMessage.slice(0, 500),
@@ -1425,7 +2117,7 @@ export async function drainWebhookQueue(): Promise<number> {
  * Fully self-contained and swallows all errors — lead qualification must never
  * fail because a client notification did.
  */
-async function notifyClientOfReply(
+export async function notifyClientOfReply(
   instantlyDb: NonNullable<typeof supabaseAdmin>,
   campaignId: string,
   data: {
@@ -1450,49 +2142,63 @@ async function notifyClientOfReply(
     // Bot not configured → feature is dark; skip without touching the DB.
     if (!getClientRepliesBotToken()) return;
 
-    // Union of owners from BOTH models. Kept independent so a main-DB outage
-    // can't block self-serve delivery (Path 2 is instantly-DB only).
     const clientUserIds = new Set<string>();
 
-    // Path 1 — admin / "под ключ": campaign → project link → projects.client_user_id (main DB).
-    if (supabaseMain) {
-      try {
-        const { data: legacyLinks } = await instantlyDb
-          .from('project_instantly_campaigns')
-          .select('project_id')
-          .eq('campaign_id', campaignId);
-        const { data: periodLinks } = await instantlyDb
-          .from('project_period_instantly_campaigns')
-          .select('project_id')
-          .eq('campaign_id', campaignId);
-        const projectIds = [...(periodLinks ?? []), ...(legacyLinks ?? [])]
-          .map((l: { project_id: string }) => l.project_id)
-          .filter(Boolean);
-        if (projectIds.length > 0) {
-          const { data: projects } = await supabaseMain
-            .from('projects')
-            .select('client_user_id')
-            .in('id', projectIds)
-            .not('client_user_id', 'is', null);
-          for (const p of (projects ?? []) as { client_user_id: string | null }[]) {
-            if (p.client_user_id) clientUserIds.add(p.client_user_id);
-          }
-        }
-      } catch (err) {
-        workerLog('warn', `notifyClientOfReply project-path failed (campaign ${campaignId})`, err);
-      }
+    let projectOwner;
+    try {
+      projectOwner = await resolveCampaignProjectOwner(instantlyDb, campaignId);
+    } catch (error) {
+      workerLog(
+        'warn',
+        `notifyClientOfReply ownership lookup failed (campaign ${campaignId}) — no DM`,
+        error,
+      );
+      return;
+    }
+    if (projectOwner.status === 'ambiguous') {
+      workerLog(
+        'warn',
+        `notifyClientOfReply blocked for campaign ${campaignId}: multiple project owners (${projectOwner.projectIds.join(', ')})`,
+      );
+      return;
     }
 
-    // Path 2 — client self-serve: campaign → client_instantly_access.client_user_id
-    // (instantly DB, direct ownership, no project link). Covers portal-launched
-    // client campaigns, which Path 1 can never resolve.
-    const { data: access } = await instantlyDb
-      .from('client_instantly_access')
-      .select('client_user_id')
-      .eq('resource_type', 'campaign')
-      .eq('resource_id', campaignId);
-    for (const a of (access ?? []) as { client_user_id: string | null }[]) {
-      if (a.client_user_id) clientUserIds.add(a.client_user_id);
+    if (projectOwner.status === 'resolved') {
+      // Managed campaign: only the proven project's client may receive the DM.
+      // client_instantly_access often mirrors visibility for that same client,
+      // but must never add a second recipient to a project-owned reply.
+      if (!supabaseMain) return;
+      const { data: project, error: projectError } = await supabaseMain
+        .from('projects')
+        .select('client_user_id')
+        .eq('id', projectOwner.projectId)
+        .maybeSingle();
+      if (projectError) {
+        workerLog(
+          'warn',
+          `notifyClientOfReply project lookup failed (campaign ${campaignId}) — no DM: ${projectError.message}`,
+        );
+        return;
+      }
+      const projectClientId = project?.client_user_id as string | null | undefined;
+      if (projectClientId) clientUserIds.add(projectClientId);
+    } else {
+      // Pure self-serve campaign: no managed project owner exists.
+      const { data: access, error: accessError } = await instantlyDb
+        .from('client_instantly_access')
+        .select('client_user_id')
+        .eq('resource_type', 'campaign')
+        .eq('resource_id', campaignId);
+      if (accessError) {
+        workerLog(
+          'warn',
+          `notifyClientOfReply self-serve lookup failed (campaign ${campaignId}) — no DM: ${accessError.message}`,
+        );
+        return;
+      }
+      for (const a of (access ?? []) as { client_user_id: string | null }[]) {
+        if (a.client_user_id) clientUserIds.add(a.client_user_id);
+      }
     }
 
     if (clientUserIds.size === 0) return;
@@ -1541,8 +2247,8 @@ async function notifyClientOfReply(
 
 /**
  * Create in-app notifications for specialists responsible for this campaign's project.
- * Finds specialist via: campaign → project_instantly_campaigns → projects.specialist_user_id.
- * Falls back to user_instantly_campaign_preferences if no project link exists.
+ * Finds the one proven project across legacy/period links, then routes only to
+ * that project's specialist_user_id (with the legacy free-text-name fallback).
  * Also logs the 'specialist' level in deadline_notification_log for escalation.
  */
 async function notifySpecialistsAboutLead(
@@ -1556,69 +2262,119 @@ async function notifySpecialistsAboutLead(
   replySubject: string | null,
   replyPreview: string | null,
   aiReason: string | null,
+  delivery?: {
+    /** Existing deadline_notification_log row already CAS-claimed by recovery. */
+    existingClaimId?: string;
+    /** Stable attempt timestamp used for failed-delivery backoff. */
+    attemptedAt?: string;
+  },
 ): Promise<void> {
   if (!supabaseMain) return;
+  const main = supabaseMain;
+  const deliveryAttemptAt = delivery?.attemptedAt ?? new Date().toISOString();
+  let deliveryClaimed = Boolean(delivery?.existingClaimId);
+
+  const markDelivery = async (patch: Record<string, unknown>): Promise<void> => {
+    let query = main
+      .from('deadline_notification_log')
+      .update(patch)
+      .eq('entity_type', 'lead_qualification')
+      .eq('entity_id', qualificationId)
+      .eq('level', 'specialist');
+    if (deliveryClaimed) {
+      query = query
+        .is('tg_sent', null)
+        .eq('tg_sent_at', deliveryAttemptAt);
+    }
+    await query;
+  };
 
   try {
     const userIds = new Set<string>();
     let clientName: string | null = null;
 
-    // Primary: find specialist via project link
-    const { data: legacyLinks } = await instantlyDb
-      .from('project_instantly_campaigns')
-      .select('project_id')
-      .eq('campaign_id', campaignId);
-    const { data: periodLinks } = await instantlyDb
-      .from('project_period_instantly_campaigns')
-      .select('project_id')
-      .eq('campaign_id', campaignId);
-
-    const links = [...(periodLinks ?? []), ...(legacyLinks ?? [])];
-    let boardLink: string | null = null;
-    if (links?.length) {
-      const projectIds = links.map((l: { project_id: string }) => l.project_id);
-      // Ссылка на гостевую таблицу лидов проекта — в каждой карточке (never throws).
-      boardLink = await getBoardLinkForProject(instantlyDb, projectIds[0]);
-      const { data: projects } = await supabaseMain
-        .from('projects')
-        .select('specialist_user_id, specialist, client')
-        .in('id', projectIds);
-
-      const unlinkedNames = new Set<string>();
-      if (projects) {
-        for (const p of projects) {
-          if (p.specialist_user_id) {
-            userIds.add(p.specialist_user_id as string);
-          } else if (typeof p.specialist === 'string' && p.specialist.trim()) {
-            unlinkedNames.add(p.specialist.trim());
-          }
-          const client = typeof p.client === 'string' ? p.client.trim() : '';
-          if (client && !clientName) clientName = client;
-        }
+    let projectOwner;
+    try {
+      projectOwner = await resolveCampaignProjectOwner(instantlyDb, campaignId);
+    } catch (error) {
+      const reason = `Project owner lookup failed for campaign ${campaignId}: ${error instanceof Error ? error.message : String(error)}`;
+      workerLog('warn', `${reason} — lead notification deferred`);
+      if (deliveryClaimed) {
+        await markDelivery({
+          tg_sent: false,
+          tg_error: reason.slice(0, 500),
+          tg_sent_at: deliveryAttemptAt,
+        });
       }
+      return;
+    }
+    if (projectOwner.status !== 'resolved') {
+      const reason = projectOwner.status === 'none'
+        ? `No project owner for campaign ${campaignId}`
+        : `Campaign ${campaignId} has multiple project owners (${projectOwner.projectIds.join(', ')})`;
+      workerLog('warn', `${reason} — lead notification deferred`);
+      if (deliveryClaimed) {
+        await markDelivery({
+          tg_sent: false,
+          tg_error: reason.slice(0, 500),
+          tg_sent_at: deliveryAttemptAt,
+        });
+      }
+      return;
+    }
+    const projectId = projectOwner.projectId;
 
-      // Fallback: у проекта специалист может быть задан ТОЛЬКО текстом
-      // (projects.specialist) без привязки specialist_user_id — так пишут
-      // telegram-бот (writeHandlers) и импорт/создание проекта; дропдаун в UI
-      // линкует аккаунт, а эти пути нет. Резолвим имя → profiles.id, чтобы
-      // алерт всё равно дошёл. Без этого лиды по таким проектам молча терялись
-      // (инцидент PP Prod / Илиана, 2026-06-24): лид квалифицировался, но
-      // notifySpecialistsAboutLead выходил с userIds.size === 0.
-      if (unlinkedNames.size > 0) {
-        const { data: byName } = await supabaseMain
-          .from('profiles')
-          .select('id, full_name')
-          .in('full_name', [...unlinkedNames]);
-        const matched = (byName ?? []) as Array<{ id: string; full_name: string }>;
-        for (const p of matched) {
-          if (p.id) userIds.add(p.id);
-        }
-        if (matched.length < unlinkedNames.size) {
-          workerLog(
-            'warn',
-            `Specialist set as free text without a linked account (campaign ${campaignId}): [${[...unlinkedNames].join(', ')}] — matched ${matched.length}/${unlinkedNames.size} by name. Unmatched get no alert; link the specialist via the project dropdown.`,
-          );
-        }
+    let boardLink: string | null = null;
+    // Ссылка на гостевую таблицу лидов проекта — в каждой карточке (never throws).
+    boardLink = await getBoardLinkForProject(instantlyDb, projectId);
+    const { data: project, error: projectError } = await supabaseMain
+      .from('projects')
+      .select('specialist_user_id, specialist, client')
+      .eq('id', projectId)
+      .maybeSingle();
+    if (projectError) {
+      const reason = `Project lookup failed for campaign ${campaignId}: ${projectError.message}`;
+      workerLog('warn', `${reason} — lead notification deferred`);
+      if (deliveryClaimed) {
+        await markDelivery({
+          tg_sent: false,
+          tg_error: reason.slice(0, 500),
+          tg_sent_at: deliveryAttemptAt,
+        });
+      }
+      return;
+    }
+
+    const unlinkedNames = new Set<string>();
+    if (project?.specialist_user_id) {
+      userIds.add(project.specialist_user_id as string);
+    } else if (typeof project?.specialist === 'string' && project.specialist.trim()) {
+      unlinkedNames.add(project.specialist.trim());
+    }
+    const client = typeof project?.client === 'string' ? project.client.trim() : '';
+    if (client) clientName = client;
+
+    // Fallback: у проекта специалист может быть задан ТОЛЬКО текстом
+    // (projects.specialist) без привязки specialist_user_id — так пишут
+    // telegram-бот (writeHandlers) и импорт/создание проекта; дропдаун в UI
+    // линкует аккаунт, а эти пути нет. Резолвим имя → profiles.id, чтобы
+    // алерт всё равно дошёл. Без этого лиды по таким проектам молча терялись
+    // (инцидент PP Prod / Илиана, 2026-06-24): лид квалифицировался, но
+    // notifySpecialistsAboutLead выходил с userIds.size === 0.
+    if (unlinkedNames.size > 0) {
+      const { data: byName } = await supabaseMain
+        .from('profiles')
+        .select('id, full_name')
+        .in('full_name', [...unlinkedNames]);
+      const matched = (byName ?? []) as Array<{ id: string; full_name: string }>;
+      for (const p of matched) {
+        if (p.id) userIds.add(p.id);
+      }
+      if (matched.length < unlinkedNames.size) {
+        workerLog(
+          'warn',
+          `Specialist set as free text without a linked account (campaign ${campaignId}): [${[...unlinkedNames].join(', ')}] — matched ${matched.length}/${unlinkedNames.size} by name. Unmatched get no alert; link the specialist via the project dropdown.`,
+        );
       }
     }
 
@@ -1630,14 +2386,71 @@ async function notifySpecialistsAboutLead(
 
     if (userIds.size === 0) {
       workerLog('warn', `No specialist found for campaign ${campaignId} — no lead notification sent`);
+      if (deliveryClaimed) {
+        await markDelivery({
+          tg_sent: false,
+          tg_error: `No specialist found for campaign ${campaignId}`.slice(0, 500),
+          tg_sent_at: deliveryAttemptAt,
+        });
+      }
       return;
+    }
+
+    if (!deliveryClaimed) {
+      // Atomic first-attempt claim. Recovery uses the same unique row and a
+      // separate state/lease CAS; two live workers never intentionally send
+      // the same qualification concurrently.
+      const { error: deliveryClaimError } = await main
+        .from('deadline_notification_log')
+        .insert({
+          entity_type: 'lead_qualification',
+          entity_id: qualificationId,
+          level: 'specialist',
+          tg_sent: null,
+          tg_error: LEAD_DELIVERY_RETRYING_ERROR,
+          tg_sent_at: deliveryAttemptAt,
+          created_at: deliveryAttemptAt,
+        });
+      if (deliveryClaimError) {
+        if (deliveryClaimError.code === '23505') {
+          workerLog('info', `Lead notification ${qualificationId} already claimed — duplicate send skipped`);
+        } else {
+          workerLog(
+            'error',
+            `Failed to claim lead notification ${qualificationId}`,
+            deliveryClaimError.message,
+          );
+        }
+        return;
+      }
+      deliveryClaimed = true;
     }
 
     const userIdList = [...userIds];
     const contactLabel = leadName ?? leadEmail;
     const campaignLabel = campaignName ? ` (${campaignName})` : '';
 
-    const rows = userIdList.map((uid) => ({
+    // Recovery may run after the in-app insert but before Telegram/result
+    // persistence. Insert only missing recipients; notifications has no DB
+    // uniqueness constraint of its own.
+    const { data: existingNotifications, error: existingNotificationsError } = await main
+      .from('notifications')
+      .select('user_id')
+      .eq('type', 'lead_new')
+      .eq('entity_type', 'lead_qualification')
+      .eq('entity_id', qualificationId);
+    if (existingNotificationsError) {
+      await markDelivery({
+        tg_sent: false,
+        tg_error: `In-app notification lookup failed: ${existingNotificationsError.message}`.slice(0, 500),
+        tg_sent_at: deliveryAttemptAt,
+      });
+      return;
+    }
+    const existingUserIds = new Set(
+      (existingNotifications ?? []).map((row: { user_id?: string | null }) => row.user_id).filter(Boolean),
+    );
+    const rows = userIdList.filter((uid) => !existingUserIds.has(uid)).map((uid) => ({
       user_id: uid,
       type: 'lead_new',
       title: 'Новый квалифицированный лид',
@@ -1646,25 +2459,19 @@ async function notifySpecialistsAboutLead(
       entity_id: qualificationId,
     }));
 
-    const { error: notifErr } = await supabaseMain
-      .from('notifications')
-      .insert(rows);
+    const { error: notifErr } = rows.length > 0
+      ? await main.from('notifications').insert(rows)
+      : { error: null };
 
     if (notifErr) {
       workerLog('error', 'Failed to create lead notifications', notifErr.message);
+      await markDelivery({
+        tg_sent: false,
+        tg_error: `In-app notification failed: ${notifErr.message}`.slice(0, 500),
+        tg_sent_at: deliveryAttemptAt,
+      });
       return;
     }
-
-    await supabaseMain
-      .from('deadline_notification_log')
-      .upsert(
-        {
-          entity_type: 'lead_qualification',
-          entity_id: qualificationId,
-          level: 'specialist',
-        },
-        { onConflict: 'entity_type,entity_id,level' },
-      );
 
     const tgResult = await sendTelegramLeadAlertForSpecialists({
       userIds: userIdList,
@@ -1685,17 +2492,15 @@ async function notifySpecialistsAboutLead(
     // терялся при рестарте воркера → нельзя было доказать, каким лидам алерт не
     // дошёл (инцидент 08.07, PP Prod/Илиана). Теперь tg_sent/tg_error видны в
     // deadline_notification_log — можно диагностировать и ретраить неудачные.
-    await supabaseMain
-      .from('deadline_notification_log')
-      .update({
-        tg_sent: tgResult.sent,
-        tg_message_id: tgResult.messageId,
-        tg_error: tgResult.error,
-        tg_sent_at: new Date().toISOString(),
-      })
-      .eq('entity_type', 'lead_qualification')
-      .eq('entity_id', qualificationId)
-      .eq('level', 'specialist');
+    // Telegram has no idempotency key: a crash after sendMessage succeeds but
+    // before this UPDATE can cause one rare retry duplicate. We deliberately
+    // prefer at-least-once recovery over silently losing a specialist alert.
+    await markDelivery({
+      tg_sent: tgResult.sent,
+      tg_message_id: tgResult.messageId ?? null,
+      tg_error: tgResult.error ?? null,
+      tg_sent_at: deliveryAttemptAt,
+    });
 
     workerLog(
       'info',
@@ -1704,6 +2509,285 @@ async function notifySpecialistsAboutLead(
     );
   } catch (err) {
     workerLog('error', 'Error creating lead notifications', err);
+    if (deliveryClaimed) {
+      const message = err instanceof Error ? err.message : String(err);
+      await markDelivery({
+        tg_sent: false,
+        tg_error: `Lead notification failed: ${message}`.slice(0, 500),
+        tg_sent_at: deliveryAttemptAt,
+      });
+    }
+  }
+}
+
+export interface LeadNotificationDeliveryRecoveryOptions {
+  now?: Date;
+  limit?: number;
+  scanLimit?: number;
+  maxAgeMs?: number;
+  pendingLeaseMs?: number;
+  failedBackoffMs?: number;
+}
+
+type RecoverableLeadQualification = {
+  id: string;
+  campaign_id: string;
+  lead_email: string;
+  lead_name: string | null;
+  company_name: string | null;
+  campaign_name: string | null;
+  reply_subject: string | null;
+  reply_preview: string | null;
+  ai_reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type LeadDeliveryLogRow = {
+  id: string;
+  entity_id: string;
+  created_at: string;
+  tg_sent: boolean | null;
+  tg_sent_at: string | null;
+};
+
+/**
+ * Recover recent lead alerts that were interrupted after qualification was
+ * committed, or whose Telegram call failed. No schema change is needed: the
+ * existing tg_sent/tg_sent_at fields form a small state machine and lease.
+ *
+ * This is deliberately at-least-once after a process crash. Telegram exposes
+ * no idempotency key, so a crash after sendMessage succeeds but before our DB
+ * result UPDATE can produce one duplicate; refusing to retry would lose the
+ * specialist alert instead.
+ */
+export async function reconcileLeadNotificationDeliveries(
+  options: LeadNotificationDeliveryRecoveryOptions = {},
+): Promise<number> {
+  if (!supabaseAdmin || !supabaseMain) return 0;
+  const instantlyDb = supabaseAdmin;
+  const main = supabaseMain;
+  const now = options.now ?? new Date();
+  const nowIso = now.toISOString();
+  const limit = Math.max(
+    1,
+    Math.min(5, options.limit ?? envNumber('INSTANTLY_LEAD_DELIVERY_RETRY_BATCH', 2)),
+  );
+  const scanLimit = Math.max(
+    limit,
+    Math.min(250, options.scanLimit ?? envNumber('INSTANTLY_LEAD_DELIVERY_SCAN_BATCH', 100)),
+  );
+  const maxAgeMs = Math.max(
+    60_000,
+    options.maxAgeMs ?? envNumber(
+      'INSTANTLY_LEAD_DELIVERY_RETRY_MAX_AGE_MS',
+      LEAD_DELIVERY_RECENT_MAX_AGE_MS,
+    ),
+  );
+  const pendingLeaseMs = Math.max(
+    60_000,
+    options.pendingLeaseMs ?? envNumber(
+      'INSTANTLY_LEAD_DELIVERY_PENDING_LEASE_MS',
+      LEAD_DELIVERY_PENDING_LEASE_MS,
+    ),
+  );
+  const failedBackoffMs = Math.max(
+    60_000,
+    options.failedBackoffMs ?? envNumber(
+      'INSTANTLY_LEAD_DELIVERY_FAILED_BACKOFF_MS',
+      LEAD_DELIVERY_FAILED_BACKOFF_MS,
+    ),
+  );
+  const recentCutoffIso = new Date(now.getTime() - maxAgeMs).toISOString();
+
+  const dueCandidates: Array<{
+    lead: RecoverableLeadQualification;
+    log: LeadDeliveryLogRow | null;
+    priority: number;
+    dueAtMs: number;
+  }> = [];
+  let pageStart = 0;
+  // Page through the complete bounded time horizon before claiming work. The
+  // operational and qualification databases cannot be joined, so stopping as
+  // soon as `limit` old failed rows are found would let those recurring
+  // failures consume every cycle and starve a newer qualification with no log.
+  // Each page performs one bounded log lookup; actual delivery remains capped.
+  while (true) {
+    const { data: leadRows, error: leadRowsError } = await instantlyDb
+      .from('instantly_lead_qualifications')
+      .select('id, campaign_id, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_preview, ai_reason, created_at, updated_at')
+      .eq('status', 'lead')
+      .gte('created_at', recentCutoffIso)
+      .order('updated_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(pageStart, pageStart + scanLimit - 1);
+    if (leadRowsError) {
+      workerLog('warn', `lead delivery recovery: candidate page failed: ${leadRowsError.message}`);
+      break;
+    }
+    const leads = (leadRows ?? []) as RecoverableLeadQualification[];
+    if (leads.length === 0) break;
+
+    // `.in(array)` is parameterized by supabase-js (no raw `in.(...)` string),
+    // so UUIDs never need manual interpolation/escaping. Page size bounds both
+    // the URL and the main-DB lookup.
+    const { data: existingLogs, error: existingLogsError } = await main
+      .from('deadline_notification_log')
+      .select('id, entity_id, created_at, tg_sent, tg_sent_at')
+      .eq('entity_type', 'lead_qualification')
+      .eq('level', 'specialist')
+      .in('entity_id', leads.map((lead) => lead.id));
+    if (existingLogsError) {
+      workerLog('warn', `lead delivery recovery: log page failed: ${existingLogsError.message}`);
+      break;
+    }
+    const logsByQualificationId = new Map(
+      ((existingLogs ?? []) as LeadDeliveryLogRow[]).map((log) => [log.entity_id, log]),
+    );
+
+    for (const lead of leads) {
+      const log = logsByQualificationId.get(lead.id) ?? null;
+      if (log?.tg_sent === true) continue;
+      if (!log) {
+        dueCandidates.push({
+          lead,
+          log: null,
+          // Never-attempted alerts outrank recurring provider/configuration
+          // failures. Within the class, retain oldest-first fairness.
+          priority: 0,
+          dueAtMs: new Date(lead.created_at).getTime() || 0,
+        });
+        continue;
+      }
+
+      const stateTimestamp = log.tg_sent_at ?? log.created_at;
+      const stateAtMs = new Date(stateTimestamp).getTime();
+      const requiredAgeMs = log.tg_sent === false ? failedBackoffMs : pendingLeaseMs;
+      if (!Number.isFinite(stateAtMs) || stateAtMs > now.getTime() - requiredAgeMs) continue;
+      dueCandidates.push({
+        lead,
+        log,
+        // A stale in-flight claim may represent a process crash before any
+        // alert; explicit failures rotate after it by their latest attempt.
+        priority: log.tg_sent === false ? 2 : 1,
+        dueAtMs: stateAtMs,
+      });
+    }
+
+    if (leads.length < scanLimit) break;
+    pageStart += scanLimit;
+  }
+
+  // Self-serve campaigns intentionally have no Portal specialist recipient.
+  // Do not spend the bounded managed-alert retry budget turning their missing
+  // logs into the same predictable failure every cycle. Ambiguous managed
+  // ownership remains eligible: its claimed failure/backoff is the durable
+  // signal that can recover after catalog cleanup.
+  let ownersByCampaign;
+  try {
+    ownersByCampaign = await resolveCampaignProjectOwners(
+      instantlyDb,
+      dueCandidates.map(({ lead }) => lead.campaign_id),
+    );
+  } catch (error) {
+    workerLog('warn', 'lead delivery recovery: project-owner batch unavailable', error);
+    return 0;
+  }
+  const managedDueCandidates = dueCandidates.filter(({ lead }) =>
+    ownersByCampaign.get(lead.campaign_id)?.status !== 'none',
+  );
+
+  managedDueCandidates.sort(
+    (left, right) =>
+      left.priority - right.priority ||
+      left.dueAtMs - right.dueAtMs ||
+      left.lead.id.localeCompare(right.lead.id),
+  );
+
+  let claimedCount = 0;
+  for (const { lead, log } of managedDueCandidates) {
+    if (claimedCount >= limit) break;
+    let claimId: string | null = null;
+    if (!log) {
+      const { data: insertedClaim, error: insertClaimError } = await main
+        .from('deadline_notification_log')
+        .insert({
+          entity_type: 'lead_qualification',
+          entity_id: lead.id,
+          level: 'specialist',
+          tg_sent: null,
+          tg_error: LEAD_DELIVERY_RETRYING_ERROR,
+          tg_sent_at: nowIso,
+          created_at: nowIso,
+        })
+        .select('id')
+        .maybeSingle();
+      if (insertClaimError) {
+        if (insertClaimError.code !== '23505') {
+          workerLog('warn', `lead delivery recovery: initial claim failed for ${lead.id}: ${insertClaimError.message}`);
+        }
+        continue;
+      }
+      claimId = (insertedClaim?.id as string | undefined) ?? null;
+    } else {
+      let claimQuery = main
+        .from('deadline_notification_log')
+        .update({
+          tg_sent: null,
+          tg_message_id: null,
+          tg_error: LEAD_DELIVERY_RETRYING_ERROR,
+          tg_sent_at: nowIso,
+        })
+        .eq('id', log.id);
+      claimQuery = log.tg_sent === false
+        ? claimQuery.eq('tg_sent', false)
+        : claimQuery.is('tg_sent', null);
+      claimQuery = log.tg_sent_at
+        ? claimQuery.eq('tg_sent_at', log.tg_sent_at)
+        : claimQuery.is('tg_sent_at', null);
+      const { data: reclaimed, error: reclaimError } = await claimQuery
+        .select('id')
+        .maybeSingle();
+      if (reclaimError) {
+        workerLog('warn', `lead delivery recovery: claim failed for ${lead.id}: ${reclaimError.message}`);
+        continue;
+      }
+      claimId = (reclaimed?.id as string | undefined) ?? null;
+    }
+
+    if (!claimId) continue;
+    claimedCount++;
+    await notifySpecialistsAboutLead(
+      instantlyDb,
+      lead.id,
+      lead.campaign_id,
+      lead.lead_email,
+      lead.lead_name,
+      lead.company_name,
+      lead.campaign_name,
+      lead.reply_subject,
+      lead.reply_preview,
+      lead.ai_reason,
+      { existingClaimId: claimId, attemptedAt: nowIso },
+    );
+  }
+
+  return claimedCount;
+}
+
+async function maybeReconcileLeadNotificationDeliveries(): Promise<number> {
+  const nowMs = Date.now();
+  const intervalMs = Math.max(
+    60_000,
+    envNumber('INSTANTLY_LEAD_DELIVERY_RETRY_INTERVAL_MS', LEAD_DELIVERY_RETRY_INTERVAL_MS),
+  );
+  if (nowMs - lastLeadDeliveryRetryAt < intervalMs) return 0;
+  lastLeadDeliveryRetryAt = nowMs;
+  try {
+    return await reconcileLeadNotificationDeliveries({ now: new Date(nowMs) });
+  } catch (error) {
+    workerLog('warn', 'lead delivery recovery cycle failed', error);
+    return 0;
   }
 }
 
@@ -1797,7 +2881,7 @@ function handoffEnabled(): boolean {
  * specialist may press. Gated by LEAD_HANDOFF_ENABLED; never throws into the
  * qualification flow.
  */
-async function maybePostLeadHandoff(opts: {
+export async function maybePostLeadHandoff(opts: {
   instantlyDb: NonNullable<typeof supabaseAdmin>;
   qualificationId: string;
   campaignId: string;
@@ -1816,24 +2900,40 @@ async function maybePostLeadHandoff(opts: {
     const { instantlyDb, qualificationId, campaignId } = opts;
 
     // 1. Project → handoff config + responsible specialist.
-    const { data: legacyLinks } = await instantlyDb
-      .from('project_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
-    const { data: periodLinks } = await instantlyDb
-      .from('project_period_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
-    const projectIds = [...(periodLinks ?? []), ...(legacyLinks ?? [])]
-      .map((l: { project_id: string }) => l.project_id)
-      .filter(Boolean);
-    if (projectIds.length === 0) return;
+    let projectOwner;
+    try {
+      projectOwner = await resolveCampaignProjectOwner(instantlyDb, campaignId);
+    } catch (error) {
+      workerLog(
+        'warn',
+        `Handoff: project-owner lookup failed for campaign ${campaignId} — skip all side effects`,
+        error,
+      );
+      return;
+    }
+    if (projectOwner.status !== 'resolved') {
+      workerLog(
+        'warn',
+        `Handoff: campaign ${campaignId} has ${projectOwner.status === 'ambiguous' ? projectOwner.projectIds.length : 0} distinct project owners — skip all side effects`,
+      );
+      return;
+    }
+    const projectId = projectOwner.projectId;
 
-    const { data: projects } = await main
+    const { data: projectRow, error: projectsError } = await main
       .from('projects')
       .select('handoff_email, handoff_legend, handoff_ai_adapt, handoff_auto_send, specialist_user_id')
-      .in('id', projectIds);
-    const project = (projects ?? []).find(
-      (p) =>
-        Boolean((p.handoff_email as string | null)?.trim()) &&
-        Boolean((p.handoff_legend as string | null)?.trim()),
-    ) as { handoff_email: string; handoff_legend: string; handoff_ai_adapt: boolean; handoff_auto_send: boolean; specialist_user_id: string | null } | undefined;
+      .eq('id', projectId)
+      .maybeSingle();
+    if (projectsError) {
+      workerLog('warn', `Handoff: project config lookup failed for campaign ${campaignId} — skip all side effects`);
+      return;
+    }
+    const project = projectRow &&
+      Boolean((projectRow.handoff_email as string | null)?.trim()) &&
+      Boolean((projectRow.handoff_legend as string | null)?.trim())
+      ? projectRow as { handoff_email: string; handoff_legend: string; handoff_ai_adapt: boolean; handoff_auto_send: boolean; specialist_user_id: string | null }
+      : undefined;
     if (!project) return; // handoff not configured → off for this project
 
     if (!project.specialist_user_id) {
@@ -1891,7 +2991,7 @@ async function maybePostLeadHandoff(opts: {
       workerLog('warn', 'Handoff: LEAD_ALERTS bot token/chat missing — skip post');
       return;
     }
-    const boardLink = await getBoardLinkForProject(instantlyDb, projectIds[0]);
+    const boardLink = await getBoardLinkForProject(instantlyDb, projectId);
     const contactLabel = opts.leadName ? `${opts.leadName} (${opts.leadEmail})` : opts.leadEmail;
     const autoSend = Boolean(project.handoff_auto_send);
     const text = [

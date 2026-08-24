@@ -2,13 +2,21 @@
 
 import type { Email } from '@/lib/instantly/types';
 import type { ThreadContext } from '@/lib/instantly/leadQualifier';
+import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
+
+let mockInstantlyDb: MockSupabaseClient | null = null;
+let mockMainDb: MockSupabaseClient | null = null;
 
 jest.mock('@/lib/supabaseInstantly', () => ({
-  supabaseInstantly: null,
+  get supabaseInstantly() {
+    return mockInstantlyDb;
+  },
 }));
 
 jest.mock('@/lib/supabaseAdmin', () => ({
-  supabaseAdmin: null,
+  get supabaseAdmin() {
+    return mockMainDb;
+  },
 }));
 
 const mockListEmails = jest.fn();
@@ -48,6 +56,156 @@ function threadContext(): ThreadContext {
   });
   return { replyEmail: reply, threadEmails: [outbound, reply], lastOutbound: outbound };
 }
+
+describe('fetchBriefByCampaign ownership isolation', () => {
+  afterEach(() => {
+    mockInstantlyDb = null;
+    mockMainDb = null;
+  });
+
+  it('does not select either project brief when legacy and period links disagree', async () => {
+    jest.resetModules();
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [
+          { campaign_id: 'campaign-1', project_id: 'project-a' },
+        ],
+        project_period_instantly_campaigns: [
+          { campaign_id: 'campaign-1', project_id: 'project-b' },
+        ],
+        instantly_brief_campaigns: [],
+      },
+    });
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          { id: 'project-a', brief_text: 'Чужой brief A' },
+          { id: 'project-b', brief_text: 'Чужой brief B' },
+        ],
+      },
+    });
+
+    const { fetchBriefByCampaign } = await import('@/lib/instantly/leadQualifier');
+    await expect(fetchBriefByCampaign('campaign-1')).rejects.toThrow(/multiple project owners/i);
+    expect(mockMainDb.selects.filter((call) => call.table === 'projects')).toHaveLength(0);
+  });
+
+  it('uses only the caller-proven project and never re-resolves a different link', async () => {
+    jest.resetModules();
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [
+          { campaign_id: 'campaign-1', project_id: 'stale-project' },
+        ],
+        project_period_instantly_campaigns: [],
+      },
+    });
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          { id: 'proven-project', brief_text: 'Правильный brief' },
+          { id: 'stale-project', brief_text: 'Старый brief' },
+        ],
+      },
+    });
+
+    const { fetchBriefByCampaign } = await import('@/lib/instantly/leadQualifier');
+    await expect(fetchBriefByCampaign('campaign-1', {
+      projectId: 'proven-project',
+      ownershipProven: true,
+    })).resolves.toBe('Правильный brief');
+    expect(mockInstantlyDb.selects.filter((call) =>
+      call.table === 'project_instantly_campaigns' ||
+      call.table === 'project_period_instantly_campaigns'
+    )).toHaveLength(0);
+  });
+
+  it('does not fall back to a stale legacy brief when the proven managed project has no brief', async () => {
+    jest.resetModules();
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        project_period_instantly_campaigns: [],
+        instantly_brief_campaigns: [
+          {
+            campaign_id: 'campaign-1',
+            brief_id: 'legacy-brief',
+            instantly_briefs: { brief_text: 'Старый brief предыдущего владельца' },
+          },
+        ],
+      },
+    });
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [{ id: 'proven-project', brief_text: null }],
+      },
+    });
+
+    const { fetchBriefByCampaign } = await import('@/lib/instantly/leadQualifier');
+    await expect(fetchBriefByCampaign('campaign-1', {
+      projectId: 'proven-project',
+      ownershipProven: true,
+    })).resolves.toBeNull();
+    expect(mockInstantlyDb.selects.filter((call) =>
+      call.table === 'instantly_brief_campaigns'
+    )).toHaveLength(0);
+  });
+
+  it('propagates a managed project brief read failure so qualification can retry', async () => {
+    jest.resetModules();
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        project_period_instantly_campaigns: [],
+        instantly_brief_campaigns: [],
+      },
+    });
+    mockMainDb = createMockSupabase({
+      errorSelects: {
+        projects: {
+          columnsInclude: 'brief_text',
+          message: 'project brief unavailable',
+        },
+      },
+      tables: {
+        projects: [{ id: 'proven-project', brief_text: 'Правильный brief' }],
+      },
+    });
+
+    const { fetchBriefByCampaign } = await import('@/lib/instantly/leadQualifier');
+    await expect(fetchBriefByCampaign('campaign-1', {
+      projectId: 'proven-project',
+      ownershipProven: true,
+    })).rejects.toThrow(/project brief unavailable/i);
+    expect(mockInstantlyDb.selects.filter((call) =>
+      call.table === 'instantly_brief_campaigns'
+    )).toHaveLength(0);
+  });
+
+  it('propagates a self-serve legacy brief read failure instead of caching it as absent', async () => {
+    jest.resetModules();
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        project_period_instantly_campaigns: [],
+        instantly_brief_campaigns: [],
+      },
+      errorSelects: {
+        instantly_brief_campaigns: {
+          columnsInclude: 'brief_id',
+          message: 'legacy brief storage unavailable',
+        },
+      },
+    });
+    mockMainDb = createMockSupabase({ tables: { projects: [] } });
+
+    const { fetchBriefByCampaign } = await import('@/lib/instantly/leadQualifier');
+    await expect(fetchBriefByCampaign('campaign-1', {
+      projectId: null,
+      ownershipProven: true,
+    })).rejects.toThrow(/legacy brief storage unavailable/i);
+  });
+});
 
 describe('classifyWithAI', () => {
   const oldMaxTokens = process.env.INSTANTLY_LEAD_QUAL_MAX_TOKENS;

@@ -34,6 +34,7 @@ jest.mock('@/lib/instantly/leadQualificationWorker', () => {
     qualifyOneReply: (...args: unknown[]) => qualifyOneReply(...args),
     getCampaignsByAccountCached: (...args: unknown[]) => getCampaignsByAccountCached(...args),
     isTransientQualifyError: actual.isTransientQualifyError,
+    persistTransientQualificationRetry: actual.persistTransientQualificationRetry,
     // Гейт колонок сирот для error-insert'а: в тестах вотчдога «миграция
     // применена» — true (проверку самого окна «код без миграции» см. в
     // leadQualificationWorker.test.ts).
@@ -468,13 +469,20 @@ describe('pollOthersOnce', () => {
     expect((qualifyOneReply.mock.calls[0][1] as Email).campaign_id).toBe('camp-velar');
   });
 
-  it('транзиентный сбой квалификации НЕ пишет строку (письмо перепробуется)', async () => {
+  it('транзиентный сбой квалификации пишет durable needs_review, а не terminal error', async () => {
     qualifyOneReply.mockRejectedValue(new Error('Instantly API 503: overloaded'));
     const { pollOthersOnce } = await importWatchdog();
     const processed = await pollOthersOnce();
 
     expect(processed).toBe(0);
-    expect(mockInstantlyDb?.inserts).toHaveLength(0);
+    expect(mockInstantlyDb?.getRows('instantly_lead_qualifications')).toEqual([
+      expect.objectContaining({
+        instantly_email_id: 'others-email-1',
+        campaign_id: 'camp-velar',
+        status: 'needs_review',
+        reply_out_of_campaign: true,
+      }),
+    ]);
   });
 
   it('постоянный сбой квалификации пишет error-строку для видимости', async () => {
