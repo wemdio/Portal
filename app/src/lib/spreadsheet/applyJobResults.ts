@@ -5,6 +5,10 @@ import {
   saveCompressedStateWithCas,
   type SpreadsheetState,
 } from './serverState';
+import {
+  applyWebsiteInnLookupResultsToTabs,
+  type WebsiteInnLookupResult,
+} from '@/lib/enrich/websiteInnLookupShared';
 
 /**
  * Server-side apply for completed/in-progress job results.
@@ -119,6 +123,32 @@ export async function applyEnrichmentResults(
   });
 }
 
+export async function applyWebsiteInnLookupResults(
+  userId: string,
+  jobId: string,
+  tabId: string,
+  urlColumn: number,
+  innColumn: number,
+  companyColumn: number,
+): Promise<boolean> {
+  if (!supabaseAdmin) return false;
+  return runApplyWithCasRetry('website_inn_lookup', userId, jobId, tabId, async (state) => {
+    const results = await fetchAllWebsiteInnLookupResults(jobId);
+    const applied = applyWebsiteInnLookupResultsToTabs(state.tabs, {
+      tabId,
+      urlColumn,
+      innColumn,
+      companyColumn,
+      results,
+    });
+    if (applied.mutated) state.tabs = applied.tabs;
+    return {
+      applied: applied.applied,
+      mutated: applied.mutated,
+    };
+  });
+}
+
 /**
  * Generic wrapper: load → mutate → save with CAS retry.
  *
@@ -126,7 +156,7 @@ export async function applyEnrichmentResults(
  * читаем свежий state и пробуем заново. Retry'имся до MAX_CAS_RETRIES раз,
  * после чего сдаёмся (на следующем периодическом тике попробуем ещё).
  */
-async function runApplyWithCasRetry(
+export async function runApplyWithCasRetry(
   label: string,
   userId: string,
   jobId: string,
@@ -210,6 +240,25 @@ async function fetchAllEnrichmentResults(jobId: string) {
     if (!data?.length) break;
     all.push(...data);
     page++;
+  }
+  return all;
+}
+
+async function fetchAllWebsiteInnLookupResults(jobId: string): Promise<WebsiteInnLookupResult[]> {
+  if (!supabaseAdmin) return [];
+  const all: WebsiteInnLookupResult[] = [];
+  let page = 0;
+  while (true) {
+    const { data } = await supabaseAdmin
+      .from('website_inn_lookup_items')
+      .select('id, row_index, url, status, inn, company_name, error_message')
+      .eq('job_id', jobId)
+      .in('status', ['completed', 'failed'])
+      .order('row_index', { ascending: true })
+      .range(page * 1000, (page + 1) * 1000 - 1);
+    if (!data?.length) break;
+    all.push(...(data as WebsiteInnLookupResult[]));
+    page += 1;
   }
   return all;
 }

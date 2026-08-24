@@ -25,6 +25,12 @@ import { removeSignalErrorRows } from '@/lib/spreadsheet/removeSignalErrorRows';
 import { deduplicateRowsByKey } from '@/lib/spreadsheet/deduplicateRowsByKey';
 import { resolveInnLookupColumns } from '@/lib/enrich/innLookupColumns';
 import {
+  applyWebsiteInnLookupResultsToTabs,
+  WEBSITE_INN_LOOKUP_COMPANY_HEADER,
+  WEBSITE_INN_LOOKUP_INN_HEADER,
+  type WebsiteInnLookupResult,
+} from '@/lib/enrich/websiteInnLookupShared';
+import {
   ALL_EXTRACTOR_KEYS,
   CASCADE_RULES,
   EXTRACTOR_LABELS,
@@ -40,6 +46,20 @@ type Sheet = {
   id: string;
   name: string;
   data: string[][];
+};
+
+type WebsiteInnLookupJobSnapshot = {
+  id: string;
+  status: string;
+  tab_id: string;
+  url_column: number;
+  inn_column: number;
+  company_column: number;
+  total: number;
+  processed: number;
+  found: number;
+  error_message?: string | null;
+  results_applied_at?: string | null;
 };
 
 type Selection = {
@@ -1664,6 +1684,8 @@ export function DatabaseSpreadsheet() {
     totalRows: number;
     currentRow: number;
     found: number;
+    jobId: string | null;
+    error: string | null;
   }>({
     isOpen: false,
     urlCol: 0,
@@ -1672,8 +1694,12 @@ export function DatabaseSpreadsheet() {
     totalRows: 0,
     currentRow: 0,
     found: 0,
+    jobId: null,
+    error: null,
   });
   const innLookupAbortRef = useRef<AbortController | null>(null);
+  const innLookupResumeRef = useRef<string | null>(null);
+  const innLookupHandledJobsRef = useRef(new Set<string>());
 
   const readEnrichmentStorage = useCallback(() => {
     try {
@@ -8955,25 +8981,27 @@ export function DatabaseSpreadsheet() {
   };
 
   const openInnLookupModal = () => {
-    setInnLookup({
-      isOpen: true,
-      urlCol: 0,
-      isProcessing: false,
-      progress: 0,
-      totalRows: 0,
-      currentRow: 0,
-      found: 0,
-    });
+    setInnLookup((prev) => prev.isProcessing
+      ? { ...prev, isOpen: true }
+      : {
+          isOpen: true,
+          urlCol: 0,
+          isProcessing: false,
+          progress: 0,
+          totalRows: 0,
+          currentRow: 0,
+          found: 0,
+          jobId: null,
+          error: null,
+        });
   };
   const closeInnLookupModal = () => {
-    if (innLookupAbortRef.current) {
-      innLookupAbortRef.current.abort();
-      innLookupAbortRef.current = null;
-    }
-    setInnLookup((prev) => ({ ...prev, isOpen: false, isProcessing: false }));
+    // Закрывается только модалка. Серверный job и polling продолжаются;
+    // явная остановка вынесена в отдельную кнопку.
+    setInnLookup((prev) => ({ ...prev, isOpen: false }));
   };
 
-  const handleStartInnLookup = async () => {
+  const handleStartInnLookupInBrowser = async () => {
     if (!activeTab || innLookup.isProcessing) return;
     flushSave();
 
@@ -9169,6 +9197,254 @@ export function DatabaseSpreadsheet() {
       setInnLookup((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
     } finally {
       innLookupAbortRef.current = null;
+    }
+  };
+
+  const runInnLookupPolling = useCallback(async (
+    initialJob: WebsiteInnLookupJobSnapshot,
+    initialToken?: string | null,
+  ) => {
+    const controller = new AbortController();
+    innLookupAbortRef.current?.abort();
+    innLookupAbortRef.current = controller;
+    const signal = controller.signal;
+    let token = initialToken ?? (await getFreshToken());
+    if (!token) {
+      setInnLookup((prev) => ({
+        ...prev,
+        isProcessing: false,
+        error: 'Сессия истекла. Сервер продолжает обработку; войдите заново, чтобы увидеть прогресс.',
+      }));
+      return;
+    }
+
+    let afterRowIndex = 0;
+    let consecutiveFailures = 0;
+    const pageLimit = 500;
+    setInnLookup((prev) => ({
+      ...prev,
+      urlCol: initialJob.url_column,
+      isProcessing: ['pending', 'running'].includes(initialJob.status),
+      totalRows: initialJob.total,
+      currentRow: initialJob.processed,
+      found: initialJob.found,
+      progress: initialJob.total > 0
+        ? Math.round((initialJob.processed / initialJob.total) * 100)
+        : 0,
+      jobId: initialJob.id,
+      error: null,
+    }));
+
+    try {
+      while (!signal.aborted) {
+        const requestResults = (accessToken: string) => fetch(
+          `/api/enrich/inn-lookup/jobs/${initialJob.id}/results?afterRowIndex=${afterRowIndex}&limit=${pageLimit}`,
+          { headers: { Authorization: `Bearer ${accessToken}` }, signal },
+        );
+
+        let response = await requestResults(token);
+        if (response.status === 401) {
+          const refreshed = await getFreshToken();
+          if (!refreshed) {
+            throw new Error('Сессия истекла. Сервер продолжает обработку; войдите заново, чтобы увидеть прогресс.');
+          }
+          token = refreshed;
+          response = await requestResults(token);
+        }
+
+        if (!response.ok) {
+          consecutiveFailures += 1;
+          if (consecutiveFailures >= 10) {
+            throw new Error(`Не удалось обновить прогресс (HTTP ${response.status}). Серверная обработка продолжается.`);
+          }
+          await sleep(Math.min(30_000, 1000 * 2 ** consecutiveFailures));
+          continue;
+        }
+        consecutiveFailures = 0;
+
+        const payload = await parseJsonResponse<{
+          job: WebsiteInnLookupJobSnapshot;
+          results: WebsiteInnLookupResult[];
+          next_row_index: number | null;
+        }>(response, 'website_inn_lookup.poll');
+
+        if (payload.results.length > 0) {
+          startTransition(() => {
+            setTabs((prev) => applyWebsiteInnLookupResultsToTabs(prev, {
+              tabId: payload.job.tab_id,
+              urlColumn: payload.job.url_column,
+              innColumn: payload.job.inn_column,
+              companyColumn: payload.job.company_column,
+              results: payload.results,
+            }).tabs);
+          });
+          afterRowIndex = payload.next_row_index ?? afterRowIndex;
+        }
+
+        const safeTotal = Math.max(0, payload.job.total);
+        const safeProcessed = Math.min(Math.max(0, payload.job.processed), safeTotal);
+        setInnLookup((prev) => ({
+          ...prev,
+          urlCol: payload.job.url_column,
+          isProcessing: ['pending', 'running'].includes(payload.job.status),
+          totalRows: safeTotal,
+          currentRow: safeProcessed,
+          found: Math.max(0, payload.job.found),
+          progress: safeTotal > 0 ? Math.round((safeProcessed / safeTotal) * 100) : 0,
+          jobId: payload.job.id,
+          error: payload.job.status === 'failed' ? payload.job.error_message ?? 'Ошибка обработки' : null,
+        }));
+
+        const terminal = ['completed', 'failed', 'cancelled'].includes(payload.job.status);
+        // Сначала дочитываем все страницы terminal results, затем закрываем polling.
+        if (terminal && payload.results.length < pageLimit) {
+          setLastAction({
+            message: payload.job.status === 'completed'
+              ? `ИНН: найдено ${payload.job.found} из ${payload.job.processed}; результаты сохранены`
+              : payload.job.status === 'cancelled'
+                ? `ИНН: остановлено после ${payload.job.processed} строк; готовые результаты сохранены`
+                : `ИНН: ошибка после ${payload.job.processed} строк — ${payload.job.error_message ?? 'неизвестная ошибка'}`,
+            time: Date.now(),
+          });
+          setInnLookup((prev) => ({
+            ...prev,
+            isProcessing: false,
+            isOpen: payload.job.status === 'failed' ? prev.isOpen : false,
+            jobId: null,
+          }));
+          return;
+        }
+
+        await sleep(payload.results.length >= pageLimit ? 0 : 2000);
+      }
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') return;
+      setInnLookup((prev) => ({
+        ...prev,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    } finally {
+      if (innLookupAbortRef.current === controller) innLookupAbortRef.current = null;
+    }
+  }, [getFreshToken, setLastAction, setTabs]);
+
+  const handleStopInnLookup = async () => {
+    if (!innLookup.isProcessing) return;
+    if (!innLookup.jobId) {
+      // Rollback fallback: старый browser-only процесс.
+      innLookupAbortRef.current?.abort();
+      setInnLookup((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+      return;
+    }
+    if (!window.confirm('Остановить поиск ИНН? Уже найденные результаты сохранятся.')) return;
+
+    const token = await getFreshToken();
+    if (!token) {
+      setInnLookup((prev) => ({ ...prev, error: 'Не удалось отправить остановку: нужна авторизация' }));
+      return;
+    }
+    try {
+      const response = await fetch(`/api/enrich/inn-lookup/jobs/${innLookup.jobId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'cancel' }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setInnLookup((prev) => ({ ...prev, error: 'Останавливаем после текущей пачки…' }));
+    } catch (error) {
+      setInnLookup((prev) => ({
+        ...prev,
+        error: `Не удалось остановить: ${error instanceof Error ? error.message : String(error)}`,
+      }));
+    }
+  };
+
+  const handleStartInnLookup = async () => {
+    if (!activeTab || innLookup.isProcessing) return;
+    flushSave();
+
+    const urlCol = innLookup.urlCol;
+    const headerRow = activeTab.data[0];
+    if (urlCol < 0 || !headerRow) return;
+    const { innCol, compCol, missingLabels } = resolveInnLookupColumns(
+      headerRow,
+      WEBSITE_INN_LOOKUP_INN_HEADER,
+      WEBSITE_INN_LOOKUP_COMPANY_HEADER,
+    );
+    const rowsToProcess = visibleRowIndices
+      .map((rowIndex) => ({
+        rowIndex,
+        url: String(activeTab.data[rowIndex]?.[urlCol] ?? '').trim(),
+      }))
+      .filter((item) => item.url && (/\./.test(item.url) || /^https?:\/\//i.test(item.url)));
+    if (rowsToProcess.length === 0) {
+      setLastAction({ message: 'Найти ИНН: нет строк с URL для обработки', time: Date.now() });
+      return;
+    }
+
+    if (missingLabels.length > 0) {
+      setTabs((prev) => prev.map((tab) => {
+        if (tab.id !== activeTab.id) return tab;
+        const nextData = tab.data.map((row) => row.slice());
+        let nextColumn = nextData[0].length;
+        for (const label of missingLabels) nextData[0][nextColumn++] = label;
+        for (let rowIndex = 1; rowIndex < nextData.length; rowIndex += 1) {
+          while (nextData[rowIndex].length < nextColumn) nextData[rowIndex].push('');
+        }
+        return { ...tab, data: nextData };
+      }));
+    }
+
+    const token = await getFreshToken();
+    if (!token) {
+      setInnLookup((prev) => ({ ...prev, error: 'Необходима авторизация' }));
+      return;
+    }
+    setInnLookup((prev) => ({
+      ...prev,
+      isProcessing: true,
+      totalRows: rowsToProcess.length,
+      currentRow: 0,
+      found: 0,
+      progress: 0,
+      error: null,
+    }));
+
+    try {
+      const response = await fetch('/api/enrich/inn-lookup/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          tabId: activeTab.id,
+          urlColumn: urlCol,
+          innColumn: innCol,
+          companyColumn: compCol,
+          items: rowsToProcess,
+        }),
+      });
+
+      // Совместимость при откате только portal-контейнера до версии без jobs API.
+      if (response.status === 404) {
+        setInnLookup((prev) => ({ ...prev, isProcessing: false }));
+        await handleStartInnLookupInBrowser();
+        return;
+      }
+
+      const payload = await parseJsonResponse<{
+        job?: WebsiteInnLookupJobSnapshot;
+        active_job?: WebsiteInnLookupJobSnapshot;
+        error?: string;
+      }>(response, 'website_inn_lookup.start');
+      const job = payload.job ?? payload.active_job;
+      if (!response.ok || !job) throw new Error(payload.error ?? `HTTP ${response.status}`);
+      innLookupHandledJobsRef.current.add(job.id);
+      await runInnLookupPolling(job, token);
+    } catch (error) {
+      setInnLookup((prev) => ({
+        ...prev,
+        isProcessing: false,
+        error: error instanceof Error ? error.message : String(error),
+      }));
     }
   };
 
@@ -9787,6 +10063,42 @@ export function DatabaseSpreadsheet() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isHydrated, activeTab, activeTabId, websiteEnrichment.isGenerating, tabs]);
 
+  // После reload/входа на другом ПК подхватываем server job. Для terminal
+  // job это также дольёт результаты, если финальный CAS apply конфликтовал
+  // с последним browser autosave перед закрытием вкладки.
+  useEffect(() => {
+    if (!isHydrated || !userId || innLookup.isProcessing) return;
+    let cancelled = false;
+    void (async () => {
+      const token = await getFreshToken();
+      if (!token || cancelled) return;
+      try {
+        const response = await fetch('/api/enrich/inn-lookup/jobs', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok || cancelled) return;
+        const payload = await parseJsonResponse<{
+          active_job?: WebsiteInnLookupJobSnapshot | null;
+          unapplied_job?: WebsiteInnLookupJobSnapshot | null;
+        }>(response, 'website_inn_lookup.resume');
+        const job = payload.active_job ?? payload.unapplied_job;
+        if (
+          !job || cancelled || innLookupResumeRef.current === job.id ||
+          innLookupHandledJobsRef.current.has(job.id)
+        ) return;
+        if (!tabs.some((tab) => tab.id === job.tab_id)) return;
+        innLookupHandledJobsRef.current.add(job.id);
+        innLookupResumeRef.current = job.id;
+        await runInnLookupPolling(job, token);
+      } catch {
+        // Best-effort: server worker всё равно продолжает без браузера.
+      } finally {
+        innLookupResumeRef.current = null;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [getFreshToken, innLookup.isProcessing, isHydrated, runInnLookupPolling, tabs, userId]);
+
   const reconcileCalledRef = useRef(false);
   useEffect(() => {
     if (!isHydrated || !userId || reconcileCalledRef.current) return;
@@ -10257,10 +10569,10 @@ export function DatabaseSpreadsheet() {
         {innLookup.isProcessing ? (
           <button
             type="button"
-            onClick={td.closeInnLookupModal}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+            onClick={td.openInnLookupModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-blue-700"
           >
-            ИНН... {innLookup.progress}% — Стоп
+            ИНН... {innLookup.progress}% — в фоне
           </button>
         ) : (
           <button
@@ -13788,7 +14100,16 @@ export function DatabaseSpreadsheet() {
                 <p className="text-xs text-blue-700 leading-relaxed">
                   Ищет ИНН на страницах сайта: главная, /contacts, /requisites, /oferta, /policy и др. Найденный ИНН проверяется через DaData. Результаты: «ИНН (найден)», «Компания (найдена)».
                 </p>
+                <p className="mt-2 text-xs font-medium text-blue-800">
+                  Обработка идёт на сервере — вкладку и компьютер можно закрыть.
+                </p>
               </div>
+
+              {innLookup.error && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+                  {innLookup.error}
+                </div>
+              )}
 
               {innLookup.isProcessing && (
                 <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-4">
@@ -13831,8 +14152,17 @@ export function DatabaseSpreadsheet() {
                   onClick={closeInnLookupModal}
                   className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 transition"
                 >
-                  {innLookup.isProcessing ? 'Стоп' : 'Закрыть'}
+                  {innLookup.isProcessing ? 'Скрыть' : 'Закрыть'}
                 </button>
+                {innLookup.isProcessing && (
+                  <button
+                    type="button"
+                    onClick={() => void handleStopInnLookup()}
+                    className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-xs font-medium text-red-700 hover:bg-red-100 transition"
+                  >
+                    Остановить
+                  </button>
+                )}
                 {!innLookup.isProcessing && (
                   <button
                     type="button"

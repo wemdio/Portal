@@ -2,7 +2,11 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { applyBriefScoringResults, applyEnrichmentResults } from '@/lib/spreadsheet/applyJobResults';
+import {
+  applyBriefScoringResults,
+  applyEnrichmentResults,
+  applyWebsiteInnLookupResults,
+} from '@/lib/spreadsheet/applyJobResults';
 
 export const dynamic = 'force-dynamic';
 
@@ -60,6 +64,35 @@ export async function POST(req: NextRequest) {
           user.id, job.id, job.spreadsheet_tab_id, job.result_col_index, job.result_col_header ?? undefined,
         );
         if (ok) applied++;
+      }
+    }
+
+    const { data: innLookupJobs } = await supabaseAdmin
+      .from('website_inn_lookup_jobs')
+      .select('id, tab_id, url_column, inn_column, company_column')
+      .eq('user_id', user.id)
+      .in('status', ['completed', 'cancelled', 'failed'])
+      .is('results_applied_at', null)
+      .gte('completed_at', since)
+      .order('completed_at', { ascending: false })
+      .limit(5);
+
+    for (const job of innLookupJobs ?? []) {
+      const ok = await applyWebsiteInnLookupResults(
+        user.id,
+        job.id,
+        job.tab_id,
+        job.url_column,
+        job.inn_column,
+        job.company_column,
+      );
+      if (ok) {
+        applied += 1;
+        await supabaseAdmin
+          .from('website_inn_lookup_jobs')
+          .update({ results_applied_at: new Date().toISOString() })
+          .eq('id', job.id)
+          .is('results_applied_at', null);
       }
     }
 
