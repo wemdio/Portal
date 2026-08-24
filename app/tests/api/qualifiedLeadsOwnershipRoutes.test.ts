@@ -57,6 +57,8 @@ const QUALIFICATION = {
   last_outbound_preview: 'Our offer',
   created_at: '2026-08-24T08:00:00Z',
   read_at: null,
+  qualified_project_id: null,
+  qualified_project_owner_proven: false,
 };
 
 function makeMainDb() {
@@ -65,6 +67,7 @@ function makeMainDb() {
       profiles: [
         { id: 'specialist-a', role: 'technician' },
         { id: 'specialist-b', role: 'technician' },
+        { id: 'supervisor', role: 'manager' },
       ],
       projects: [
         {
@@ -88,6 +91,7 @@ function makeInstantlyDb(options: {
   legacy?: Array<Record<string, unknown>>;
   periods?: Array<Record<string, unknown>>;
   errorTable?: 'project_instantly_campaigns' | 'project_period_instantly_campaigns';
+  qualification?: Record<string, unknown>;
 } = {}) {
   return createMockSupabase({
     ...(options.errorTable
@@ -101,7 +105,7 @@ function makeInstantlyDb(options: {
         }
       : {}),
     tables: {
-      instantly_lead_qualifications: [QUALIFICATION],
+      instantly_lead_qualifications: [{ ...QUALIFICATION, ...(options.qualification ?? {}) }],
       project_instantly_campaigns: options.legacy ?? [],
       project_period_instantly_campaigns: options.periods ?? [],
     },
@@ -184,7 +188,7 @@ describe('PATCH /api/instantly/qualified-leads ownership isolation', () => {
     expect(mockInstantlyDb.updates).toHaveLength(0);
   });
 
-  it('allows the responsible specialist and guards the update by campaign id', async () => {
+  it('allows the responsible specialist and CAS-guards the unresolved owner state', async () => {
     mockInstantlyDb = makeInstantlyDb({
       legacy: [{ project_id: 'project-a', campaign_id: 'campaign-shared' }],
       periods: [{ project_id: 'project-a', campaign_id: 'campaign-shared' }],
@@ -197,7 +201,13 @@ describe('PATCH /api/instantly/qualified-leads ownership isolation', () => {
     expect(mockInstantlyDb.updates).toHaveLength(1);
     expect(mockInstantlyDb.updates[0].filters).toEqual(expect.arrayContaining([
       expect.objectContaining({ column: 'id', op: 'in', value: [QUALIFICATION.id] }),
-      expect.objectContaining({ column: 'campaign_id', op: 'in', value: ['campaign-shared'] }),
+      expect.objectContaining({ column: 'campaign_id', op: 'eq', value: 'campaign-shared' }),
+      expect.objectContaining({
+        column: 'qualified_project_owner_proven',
+        op: 'eq',
+        value: false,
+      }),
+      expect.objectContaining({ column: 'qualified_project_id', op: 'is', value: null }),
     ]));
     expect(mockInstantlyDb.getRows('instantly_lead_qualifications')[0]).toEqual(
       expect.objectContaining({ read_by: 'specialist-a', read_at: expect.any(String) }),
@@ -426,5 +436,76 @@ describe('POST /api/instantly/qualified-leads/handoff-draft ownership isolation'
 
     expect(response.status).toBe(200);
     expect(mockBuildHandoffDraft).toHaveBeenCalledWith(expect.objectContaining({ legend: 'Legend A' }));
+  });
+
+  it('uses the immutable qualification project after the campaign is reassigned', async () => {
+    mockInstantlyDb = makeInstantlyDb({
+      qualification: {
+        qualified_project_id: 'project-a',
+        qualified_project_owner_proven: true,
+      },
+      periods: [{ project_id: 'project-b', campaign_id: 'campaign-shared' }],
+    });
+    const { POST } = await import('@/app/api/instantly/qualified-leads/handoff-draft/route');
+
+    const response = await POST(draftReq());
+
+    expect(response.status).toBe(200);
+    expect(mockBuildHandoffDraft).toHaveBeenCalledWith(expect.objectContaining({ legend: 'Legend A' }));
+  });
+
+  it('keeps handoff drafts restricted to the assigned specialist even for supervisors', async () => {
+    mockUserId = 'supervisor';
+    mockInstantlyDb = makeInstantlyDb({
+      qualification: {
+        qualified_project_id: 'project-a',
+        qualified_project_owner_proven: true,
+      },
+      periods: [{ project_id: 'project-b', campaign_id: 'campaign-shared' }],
+    });
+    const { POST } = await import('@/app/api/instantly/qualified-leads/handoff-draft/route');
+
+    const response = await POST(draftReq());
+
+    expect(response.status).toBe(403);
+    expect(mockBuildHandoffDraft).not.toHaveBeenCalled();
+  });
+
+  it('does not expose a historical handoff draft to the campaign new specialist', async () => {
+    mockUserId = 'specialist-b';
+    mockInstantlyDb = makeInstantlyDb({
+      qualification: {
+        qualified_project_id: 'project-a',
+        qualified_project_owner_proven: true,
+      },
+      periods: [{ project_id: 'project-b', campaign_id: 'campaign-shared' }],
+    });
+    const { POST } = await import('@/app/api/instantly/qualified-leads/handoff-draft/route');
+
+    const response = await POST(draftReq());
+
+    expect(response.status).toBe(403);
+    expect(mockBuildHandoffDraft).not.toHaveBeenCalled();
+  });
+
+  it('does not use a later managed owner for a proven self-serve qualification', async () => {
+    mockInstantlyDb = makeInstantlyDb({
+      qualification: {
+        qualified_project_id: null,
+        qualified_project_owner_proven: true,
+      },
+      periods: [{ project_id: 'project-a', campaign_id: 'campaign-shared' }],
+    });
+    const { POST } = await import('@/app/api/instantly/qualified-leads/handoff-draft/route');
+
+    const response = await POST(draftReq());
+
+    expect(response.status).toBe(403);
+    expect(mockBuildHandoffDraft).not.toHaveBeenCalled();
+    expect(mockInstantlyDb.selects.filter(
+      ({ table }) =>
+        table === 'project_instantly_campaigns' ||
+        table === 'project_period_instantly_campaigns',
+    )).toHaveLength(0);
   });
 });

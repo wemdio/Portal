@@ -74,6 +74,8 @@ export interface MockSupabaseSeed {
    * not silently reinterpreted.
    */
   enforceQueryWindows?: boolean;
+  /** Optional PostgREST-style maximum rows returned by one ranged query. */
+  maxRowsPerQuery?: number;
   /**
    * INSERT succeeds and mutates the table, but `.select().maybeSingle()` returns
    * no representation. This models a successful PostgREST write whose response
@@ -87,6 +89,11 @@ export interface MockSupabaseSeed {
    * же таблицы.
    */
   errorUpdates?: Record<string, { message: string; patchIncludes?: Row }>;
+  /**
+   * One-shot mutation hook immediately before a table's first UPDATE builder.
+   * Models a concurrent commit between an authorization SELECT and write CAS.
+   */
+  beforeFirstUpdates?: Record<string, (rows: Row[]) => Row[]>;
   /**
    * Обработчики RPC-функций (`db.rpc('search_pdl_companies', params)`):
    * имя функции → (params, db) → { data, error? }. Хендлер получает сам мок,
@@ -287,7 +294,13 @@ function parseOrExpr(expr: string): Filter[][] {
 function parseTerm(term: string): Filter {
   const [column, op, ...rest] = term.split('.');
   const valueRaw = rest.join('.');
-  const value = valueRaw === 'null' ? null : valueRaw;
+  const value = valueRaw === 'null'
+    ? null
+    : valueRaw === 'true'
+      ? true
+      : valueRaw === 'false'
+        ? false
+        : valueRaw;
   const opMap: Record<string, Op> = {
     eq: 'eq', neq: 'neq', gte: 'gte', lte: 'lte', gt: 'gt', lt: 'lt', is: 'is',
     // ilike внутри or(...) — идиома поиска по нескольким колонкам/значениям
@@ -331,11 +344,13 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
     let pendingInsert: Row[] = [];
     let pendingUpsert: { rows: Row[]; onConflict: string | null } | null = null;
     let pendingUpdate: Row | null = null;
-    let requestedOrder: { column: string; ascending: boolean } | null = null;
+    const requestedOrders: Array<{ column: string; ascending: boolean }> = [];
     let requestedLimit: number | null = null;
     let requestedRange: { from: number; to: number } | null = null;
+    let countRequested = false;
+    let beforeFirstUpdateApplied = false;
 
-    function rowsForRead(): Row[] {
+    function rowsForRead(applyWindow = true): Row[] {
       let out = tables[table] ? tables[table].slice() : [];
       for (const f of filters) out = applyFilter(out, f);
       for (const groupSet of orGroups) {
@@ -343,21 +358,30 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
           groupSet.some((conj) => conj.every((f) => applyFilter([r], f).length > 0)),
         );
       }
-      if (seed.enforceQueryWindows && requestedOrder) {
-        const { column, ascending } = requestedOrder;
+      if (seed.enforceQueryWindows && requestedOrders.length > 0) {
         out.sort((left, right) => {
-          const a = left[column];
-          const b = right[column];
-          if (a === b) return 0;
-          if (a === null || a === undefined) return ascending ? 1 : -1;
-          if (b === null || b === undefined) return ascending ? -1 : 1;
-          return (a < b ? -1 : 1) * (ascending ? 1 : -1);
+          for (const { column, ascending } of requestedOrders) {
+            const a = left[column];
+            const b = right[column];
+            if (a === b) continue;
+            if (a === null || a === undefined) return ascending ? 1 : -1;
+            if (b === null || b === undefined) return ascending ? -1 : 1;
+            return (a < b ? -1 : 1) * (ascending ? 1 : -1);
+          }
+          return 0;
         });
       }
-      if (seed.enforceQueryWindows && requestedRange) {
+      if (applyWindow && seed.enforceQueryWindows && requestedRange) {
         out = out.slice(requestedRange.from, requestedRange.to + 1);
-      } else if (seed.enforceQueryWindows && requestedLimit !== null) {
+      } else if (applyWindow && seed.enforceQueryWindows && requestedLimit !== null) {
         out = out.slice(0, requestedLimit);
+      }
+      if (
+        applyWindow &&
+        seed.enforceQueryWindows &&
+        seed.maxRowsPerQuery !== undefined
+      ) {
+        out = out.slice(0, seed.maxRowsPerQuery);
       }
       return out;
     }
@@ -437,12 +461,17 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         return { data: matching, error: null, count: matching.length };
       }
       const data = rowsForRead();
-      return { data, error: null, count: data.length };
+      return {
+        data,
+        error: null,
+        count: countRequested ? rowsForRead(false).length : data.length,
+      };
     }
 
     const builder: Builder = {
-      select: (columns) => {
+      select: (columns, opts) => {
         selects.push({ table, columns: columns ?? '*' });
+        countRequested = Boolean(opts?.count);
         if (selectError && (columns ?? '*').includes(selectError.columnsInclude)) {
           errorMessage = selectError.message;
         }
@@ -462,6 +491,13 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         return builder;
       },
       update: (patch) => {
+        const beforeFirstUpdate = seed.beforeFirstUpdates?.[table];
+        if (!beforeFirstUpdateApplied && beforeFirstUpdate) {
+          tables[table] = beforeFirstUpdate(
+            (tables[table] ?? []).map((row) => ({ ...row })),
+          ).map((row) => ({ ...row }));
+          beforeFirstUpdateApplied = true;
+        }
         mode = 'update';
         pendingUpdate = patch;
         return builder;
@@ -495,7 +531,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
 
       order: (...args) => {
         const [column, options] = args as [string, { ascending?: boolean } | undefined];
-        requestedOrder = { column, ascending: options?.ascending !== false };
+        requestedOrders.push({ column, ascending: options?.ascending !== false });
         return builder;
       },
       limit: (...args) => {

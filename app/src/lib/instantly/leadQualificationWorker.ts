@@ -20,7 +20,6 @@ import { getEmailRecipients } from '@/lib/clientCampaignReplies/participants';
 import { buildHandoffDraft } from './handoffLegend';
 import { signHandoffCallback } from './handoffCallback';
 import {
-  resolveBoardProjectId,
   getOrCreateBoard,
   getBoardLinkForProject,
   upsertBoardRow,
@@ -82,6 +81,8 @@ export function isTransientQualifyError(message: string): boolean {
 /** Кэш пробы колонок сирот (reply_out_of_campaign/eaccount), TTL 60с. */
 let strayColumnsProbe: { at: number; ok: boolean } | null = null;
 const STRAY_COLUMNS_PROBE_TTL_MS = 60_000;
+let qualificationOwnerSnapshotProbe: { at: number; ok: boolean } | null = null;
+const QUALIFICATION_OWNER_SNAPSHOT_PROBE_TTL_MS = 60_000;
 
 /**
  * Есть ли в instantly_lead_qualifications колонки сирот (миграция
@@ -112,6 +113,36 @@ export async function strayColumnsSupported(
     );
   }
   return strayColumnsProbe.ok;
+}
+
+/**
+ * Code-first deploys must not silently fall back to the old racy behaviour.
+ * Until the owner-snapshot migration is visible, every reply is deferred and
+ * picked up by the durable qualification retry loop. A self-serve decision is
+ * also ownership-sensitive: the campaign could become managed before an
+ * unsnapshotted verdict is persisted or backfilled.
+ */
+async function qualificationOwnerSnapshotSupported(
+  db: NonNullable<typeof supabaseAdmin>,
+): Promise<boolean> {
+  if (
+    qualificationOwnerSnapshotProbe &&
+    Date.now() - qualificationOwnerSnapshotProbe.at < QUALIFICATION_OWNER_SNAPSHOT_PROBE_TTL_MS
+  ) {
+    return qualificationOwnerSnapshotProbe.ok;
+  }
+  const { error } = await db
+    .from('instantly_lead_qualifications')
+    .select('qualified_project_id, qualified_project_owner_proven')
+    .limit(1);
+  qualificationOwnerSnapshotProbe = { at: Date.now(), ok: !error };
+  if (error) {
+    workerLog(
+      'warn',
+      `qualification owner-snapshot probe failed (${error.message}) — qualification deferred`,
+    );
+  }
+  return !error;
 }
 
 /**
@@ -791,6 +822,8 @@ function splitEmailList(value: string | null | undefined): string[] {
 async function getClientPartyAddresses(
   instantlyDb: NonNullable<typeof supabaseAdmin>,
   campaignId: string,
+  /** undefined = resolve now; null = caller already proved self-serve. */
+  provenProjectId?: string | null,
 ): Promise<{ addresses: Set<string>; domains: Set<string>; ownershipSafe: boolean }> {
   const addresses = new Set<string>();
 
@@ -801,14 +834,20 @@ async function getClientPartyAddresses(
     workerLog('warn', `client-echo guard degraded (fail-closed): ${source} query failed — ${message ?? 'unknown'}`);
 
   let projectOwner;
-  try {
-    projectOwner = await resolveCampaignProjectOwner(instantlyDb, campaignId);
-  } catch (error) {
-    logDegraded(
-      'campaign project ownership',
-      error instanceof Error ? error.message : String(error),
-    );
-    return { addresses, domains: new Set<string>(), ownershipSafe: false };
+  if (provenProjectId !== undefined) {
+    projectOwner = provenProjectId
+      ? { status: 'resolved' as const, projectId: provenProjectId }
+      : { status: 'none' as const };
+  } else {
+    try {
+      projectOwner = await resolveCampaignProjectOwner(instantlyDb, campaignId);
+    } catch (error) {
+      logDegraded(
+        'campaign project ownership',
+        error instanceof Error ? error.message : String(error),
+      );
+      return { addresses, domains: new Set<string>(), ownershipSafe: false };
+    }
   }
   if (projectOwner.status === 'ambiguous') {
     workerLog(
@@ -864,6 +903,16 @@ async function persistQualificationRow(
   data: { id: string } | null;
   error: { message: string; code?: string } | null;
 }> {
+  const throwOwnershipChange = (error: { message: string; code?: string } | null) => {
+    if (
+      error &&
+      (error.code === '40001' || error.message.includes('qualification_project_ownership_changed'))
+    ) {
+      throw new Error(
+        `${OWNERSHIP_DEFER_ERROR_PREFIX}: campaign project owner changed before qualification commit`,
+      );
+    }
+  };
   if (existingQualificationId) {
     if (!attemptedAt) {
       return {
@@ -885,6 +934,7 @@ async function persistQualificationRow(
       .eq('updated_at', attemptedAt)
       .select('id')
       .maybeSingle();
+    throwOwnershipChange(result.error as { message: string; code?: string } | null);
     return {
       data: result.data as { id: string } | null,
       error: result.error as { message: string; code?: string } | null,
@@ -896,6 +946,7 @@ async function persistQualificationRow(
     .upsert(payload, { onConflict: 'instantly_email_id', ignoreDuplicates: true })
     .select('id')
     .maybeSingle();
+  throwOwnershipChange(result.error as { message: string; code?: string } | null);
   return {
     data: result.data as { id: string } | null,
     error: result.error as { message: string; code?: string } | null,
@@ -1015,6 +1066,8 @@ export async function qualifyOneReply(
   }
 
   const campaignId = ownership.effectiveCampaignId;
+  const qualifiedProjectId = ownership.effectiveProjectId;
+  const ownerSnapshotSupported = await qualificationOwnerSnapshotSupported(db);
   const effectiveReply: Email = ownership.corrected
     ? { ...reply, campaign_id: campaignId }
     : reply;
@@ -1026,6 +1079,19 @@ export async function qualifyOneReply(
     );
   }
 
+  if (!ownerSnapshotSupported) {
+    throw new Error(
+      `${OWNERSHIP_DEFER_ERROR_PREFIX} for ${reply.id ?? '?'} ` +
+      `(campaign ${campaignId}): qualification owner-snapshot migration is not available`,
+    );
+  }
+  const qualificationOwnerSnapshot = ownerSnapshotSupported
+    ? {
+        qualified_project_id: qualifiedProjectId,
+        qualified_project_owner_proven: true,
+      }
+    : {};
+
   // Окно деплоя «код без миграции»: пока колонок сирот нет (миграция
   // 20260812_0001 не применена), пишем квалификации БЕЗ них — иначе upsert
   // падает нетранзиентно и письмо навсегда уходит в error+дедуп (см.
@@ -1036,7 +1102,7 @@ export async function qualifyOneReply(
   // дедуп по instantly_email_id иначе будет пытаться заново каждый тик.
   const fromLower = leadEmail.trim().toLowerCase();
   const fromDomain = fromLower.split('@')[1] ?? '';
-  const clientParty = await getClientPartyAddresses(db, campaignId);
+  const clientParty = await getClientPartyAddresses(db, campaignId, qualifiedProjectId);
   if (!clientParty.ownershipSafe) {
     throw new Error(
       `${OWNERSHIP_DEFER_ERROR_PREFIX} for ${reply.id ?? '?'} ` +
@@ -1053,6 +1119,7 @@ export async function qualifyOneReply(
       db,
       {
         campaign_id: campaignId,
+        ...qualificationOwnerSnapshot,
         campaign_name: await resolveCampaignName(campaignId, accountId),
         lead_email: leadEmail,
         thread_id: reply.thread_id,
@@ -1109,6 +1176,7 @@ export async function qualifyOneReply(
         db,
         {
           campaign_id: campaignId,
+          ...qualificationOwnerSnapshot,
           campaign_name: await resolveCampaignName(campaignId, accountId),
           lead_email: leadEmail,
           thread_id: reply.thread_id,
@@ -1173,6 +1241,7 @@ export async function qualifyOneReply(
         db,
         {
           campaign_id: campaignId,
+          ...qualificationOwnerSnapshot,
           campaign_name: await resolveCampaignName(campaignId, accountId),
           lead_email: leadEmail,
           thread_id: reply.thread_id,
@@ -1334,30 +1403,31 @@ export async function qualifyOneReply(
   // если ON CONFLICT снова сломается — теперь сразу будет видно в логах.
   const { data: inserted, error: upsertErr } = await persistQualificationRow(
     db,
-      {
-        campaign_id: campaignId,
-        campaign_name: campaignName,
-        lead_email: leadEmail,
-        lead_name: leadName,
-        company_name: companyName,
-        thread_id: effectiveReply.thread_id,
-        reply_subject: effectiveReply.subject ?? null,
-        reply_preview: replyText.slice(0, 300) || null,
-        reply_body: replyText || null,
-        last_outbound_preview: lastOutText?.slice(0, 300) ?? null,
-        last_outbound_ue_type: result.threadContext?.lastOutbound?.ue_type ?? null,
-        status,
-        proposal_seen: result.proposalSeen,
-        interest_signals: result.interestSignals,
-        ai_reason: result.reason,
-        ai_confidence: result.confidence,
-        instantly_email_id: effectiveReply.id,
-        instantly_lead_id: null,
-        reply_timestamp: effectiveReply.timestamp_email ?? null,
-        objection_handleable: result.objectionHandleable,
-        objection_draft: result.objectionDraft,
-        ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
-      },
+    {
+      campaign_id: campaignId,
+      ...qualificationOwnerSnapshot,
+      campaign_name: campaignName,
+      lead_email: leadEmail,
+      lead_name: leadName,
+      company_name: companyName,
+      thread_id: effectiveReply.thread_id,
+      reply_subject: effectiveReply.subject ?? null,
+      reply_preview: replyText.slice(0, 300) || null,
+      reply_body: replyText || null,
+      last_outbound_preview: lastOutText?.slice(0, 300) ?? null,
+      last_outbound_ue_type: result.threadContext?.lastOutbound?.ue_type ?? null,
+      status,
+      proposal_seen: result.proposalSeen,
+      interest_signals: result.interestSignals,
+      ai_reason: result.reason,
+      ai_confidence: result.confidence,
+      instantly_email_id: effectiveReply.id,
+      instantly_lead_id: null,
+      reply_timestamp: effectiveReply.timestamp_email ?? null,
+      objection_handleable: result.objectionHandleable,
+      objection_draft: result.objectionDraft,
+      ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
+    },
     opts?.existingQualificationId,
     opts?.existingQualificationAttemptedAt,
   );
@@ -1380,44 +1450,42 @@ export async function qualifyOneReply(
   // Гостевая таблица лидов проекта (lead board): авто-строка при каждом новом
   // лиде project-linked кампании. Неудача НЕ роняет квалификацию/алерт —
   // логируем и едем дальше.
-  if (status === 'lead' && inserted?.id) {
+  if (status === 'lead' && inserted?.id && qualifiedProjectId) {
     try {
-      const boardProjectId = await resolveBoardProjectId(db, campaignId);
-      if (boardProjectId) {
-        await getOrCreateBoard(db, boardProjectId);
-        // Шаг — тот же счёт, что ИИ видит в промпте («шаг N кампании»): наши
-        // исходящие (ue_type=1) в треде. Имя — фолбэк на заголовок письма,
-        // когда Instantly Lead API его не вернул.
-        const stepNumber = result.threadContext
-          ? result.threadContext.threadEmails.filter((e) => (e.ue_type ?? 1) === 1).length
-          : null;
-        let fromName: string | null = null;
-        const fromArr = effectiveReply.from_address_json;
-        if (Array.isArray(fromArr) && fromArr.length > 0) {
-          const n = fromArr[0]?.name;
-          if (typeof n === 'string' && n.trim().length > 0) fromName = n.trim();
-        }
-        await upsertBoardRow(db, {
-          qualificationId: inserted.id,
-          projectId: boardProjectId,
-          campaignId,
-          campaignName,
-          leadEmail,
-          leadName: leadName ?? fromName,
-          companyName: companyName ?? null,
-          phone: leadPhone ?? null,
-          website: leadWebsite ?? null,
-          requestText: replyText || null,
-          stepNumber,
-          replyTimestamp: effectiveReply.timestamp_email ?? null,
-        });
+      const boardProjectId = qualifiedProjectId;
+      await getOrCreateBoard(db, boardProjectId);
+      // Шаг — тот же счёт, что ИИ видит в промпте («шаг N кампании»): наши
+      // исходящие (ue_type=1) в треде. Имя — фолбэк на заголовок письма,
+      // когда Instantly Lead API его не вернул.
+      const stepNumber = result.threadContext
+        ? result.threadContext.threadEmails.filter((e) => (e.ue_type ?? 1) === 1).length
+        : null;
+      let fromName: string | null = null;
+      const fromArr = effectiveReply.from_address_json;
+      if (Array.isArray(fromArr) && fromArr.length > 0) {
+        const n = fromArr[0]?.name;
+        if (typeof n === 'string' && n.trim().length > 0) fromName = n.trim();
       }
+      await upsertBoardRow(db, {
+        qualificationId: inserted.id,
+        projectId: boardProjectId,
+        campaignId,
+        campaignName,
+        leadEmail,
+        leadName: leadName ?? fromName,
+        companyName: companyName ?? null,
+        phone: leadPhone ?? null,
+        website: leadWebsite ?? null,
+        requestText: replyText || null,
+        stepNumber,
+        replyTimestamp: effectiveReply.timestamp_email ?? null,
+      });
     } catch (err) {
       workerLog('warn', `lead board row upsert failed for ${leadEmail} (campaign ${campaignId}): ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  if (status === 'lead' && inserted?.id && supabaseMain) {
+  if (status === 'lead' && inserted?.id && supabaseMain && qualifiedProjectId) {
     await notifySpecialistsAboutLead(
       db,
       inserted.id,
@@ -1429,14 +1497,16 @@ export async function qualifyOneReply(
       effectiveReply.subject ?? null,
       replyText || null,
       result.reason ?? null,
+      { projectId: qualifiedProjectId },
     );
   }
 
-  if (status === 'lead' && inserted?.id) {
+  if (status === 'lead' && inserted?.id && qualifiedProjectId) {
     await maybePostLeadHandoff({
       instantlyDb: db,
       qualificationId: inserted.id,
       campaignId,
+      projectId: qualifiedProjectId,
       reply: effectiveReply,
       leadEmail,
       leadName: leadName ?? null,
@@ -1479,6 +1549,8 @@ export async function qualifyOneReply(
       // нет и быть не может (инцидент 11.08.2026).
       outOfCampaign,
       eaccount: replyEaccount,
+      projectOwnershipProven: true,
+      projectId: qualifiedProjectId,
     });
   }
 }
@@ -2136,6 +2208,10 @@ export async function notifyClientOfReply(
     outOfCampaign?: boolean;
     /** Ящик, физически принявший письмо — «Ящик:» в DM при сироте. */
     eaccount?: string | null;
+    /** True when qualification already froze project ownership atomically. */
+    projectOwnershipProven?: boolean;
+    /** Immutable project snapshot; null means proven self-serve at qualification time. */
+    projectId?: string | null;
   },
 ): Promise<void> {
   try {
@@ -2145,15 +2221,21 @@ export async function notifyClientOfReply(
     const clientUserIds = new Set<string>();
 
     let projectOwner;
-    try {
-      projectOwner = await resolveCampaignProjectOwner(instantlyDb, campaignId);
-    } catch (error) {
-      workerLog(
-        'warn',
-        `notifyClientOfReply ownership lookup failed (campaign ${campaignId}) — no DM`,
-        error,
-      );
-      return;
+    if (data.projectOwnershipProven) {
+      projectOwner = data.projectId
+        ? { status: 'resolved' as const, projectId: data.projectId }
+        : { status: 'none' as const };
+    } else {
+      try {
+        projectOwner = await resolveCampaignProjectOwner(instantlyDb, campaignId);
+      } catch (error) {
+        workerLog(
+          'warn',
+          `notifyClientOfReply ownership lookup failed (campaign ${campaignId}) — no DM`,
+          error,
+        );
+        return;
+      }
     }
     if (projectOwner.status === 'ambiguous') {
       workerLog(
@@ -2263,6 +2345,8 @@ async function notifySpecialistsAboutLead(
   replyPreview: string | null,
   aiReason: string | null,
   delivery?: {
+    /** Immutable owner persisted with the qualification. */
+    projectId?: string | null;
     /** Existing deadline_notification_log row already CAS-claimed by recovery. */
     existingClaimId?: string;
     /** Stable attempt timestamp used for failed-delivery backoff. */
@@ -2293,36 +2377,39 @@ async function notifySpecialistsAboutLead(
     const userIds = new Set<string>();
     let clientName: string | null = null;
 
-    let projectOwner;
-    try {
-      projectOwner = await resolveCampaignProjectOwner(instantlyDb, campaignId);
-    } catch (error) {
-      const reason = `Project owner lookup failed for campaign ${campaignId}: ${error instanceof Error ? error.message : String(error)}`;
-      workerLog('warn', `${reason} — lead notification deferred`);
-      if (deliveryClaimed) {
-        await markDelivery({
-          tg_sent: false,
-          tg_error: reason.slice(0, 500),
-          tg_sent_at: deliveryAttemptAt,
-        });
+    let projectId = delivery?.projectId ?? null;
+    if (!projectId) {
+      let projectOwner;
+      try {
+        projectOwner = await resolveCampaignProjectOwner(instantlyDb, campaignId);
+      } catch (error) {
+        const reason = `Project owner lookup failed for campaign ${campaignId}: ${error instanceof Error ? error.message : String(error)}`;
+        workerLog('warn', `${reason} — lead notification deferred`);
+        if (deliveryClaimed) {
+          await markDelivery({
+            tg_sent: false,
+            tg_error: reason.slice(0, 500),
+            tg_sent_at: deliveryAttemptAt,
+          });
+        }
+        return;
       }
-      return;
-    }
-    if (projectOwner.status !== 'resolved') {
-      const reason = projectOwner.status === 'none'
-        ? `No project owner for campaign ${campaignId}`
-        : `Campaign ${campaignId} has multiple project owners (${projectOwner.projectIds.join(', ')})`;
-      workerLog('warn', `${reason} — lead notification deferred`);
-      if (deliveryClaimed) {
-        await markDelivery({
-          tg_sent: false,
-          tg_error: reason.slice(0, 500),
-          tg_sent_at: deliveryAttemptAt,
-        });
+      if (projectOwner.status !== 'resolved') {
+        const reason = projectOwner.status === 'none'
+          ? `No project owner for campaign ${campaignId}`
+          : `Campaign ${campaignId} has multiple project owners (${projectOwner.projectIds.join(', ')})`;
+        workerLog('warn', `${reason} — lead notification deferred`);
+        if (deliveryClaimed) {
+          await markDelivery({
+            tg_sent: false,
+            tg_error: reason.slice(0, 500),
+            tg_sent_at: deliveryAttemptAt,
+          });
+        }
+        return;
       }
-      return;
+      projectId = projectOwner.projectId;
     }
-    const projectId = projectOwner.projectId;
 
     let boardLink: string | null = null;
     // Ссылка на гостевую таблицу лидов проекта — в каждой карточке (never throws).
@@ -2532,6 +2619,8 @@ export interface LeadNotificationDeliveryRecoveryOptions {
 type RecoverableLeadQualification = {
   id: string;
   campaign_id: string;
+  qualified_project_id: string | null;
+  qualified_project_owner_proven: boolean | null;
   lead_email: string;
   lead_name: string | null;
   company_name: string | null;
@@ -2567,6 +2656,7 @@ export async function reconcileLeadNotificationDeliveries(
   if (!supabaseAdmin || !supabaseMain) return 0;
   const instantlyDb = supabaseAdmin;
   const main = supabaseMain;
+  if (!(await qualificationOwnerSnapshotSupported(instantlyDb))) return 0;
   const now = options.now ?? new Date();
   const nowIso = now.toISOString();
   const limit = Math.max(
@@ -2615,7 +2705,7 @@ export async function reconcileLeadNotificationDeliveries(
   while (true) {
     const { data: leadRows, error: leadRowsError } = await instantlyDb
       .from('instantly_lead_qualifications')
-      .select('id, campaign_id, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_preview, ai_reason, created_at, updated_at')
+      .select('id, campaign_id, qualified_project_id, qualified_project_owner_proven, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_preview, ai_reason, created_at, updated_at')
       .eq('status', 'lead')
       .gte('created_at', recentCutoffIso)
       .order('updated_at', { ascending: true })
@@ -2687,15 +2777,20 @@ export async function reconcileLeadNotificationDeliveries(
   try {
     ownersByCampaign = await resolveCampaignProjectOwners(
       instantlyDb,
-      dueCandidates.map(({ lead }) => lead.campaign_id),
+      dueCandidates
+        .filter(({ lead }) => lead.qualified_project_owner_proven !== true)
+        .map(({ lead }) => lead.campaign_id),
     );
   } catch (error) {
     workerLog('warn', 'lead delivery recovery: project-owner batch unavailable', error);
     return 0;
   }
-  const managedDueCandidates = dueCandidates.filter(({ lead }) =>
-    ownersByCampaign.get(lead.campaign_id)?.status !== 'none',
-  );
+  const managedDueCandidates = dueCandidates.filter(({ lead }) => {
+    if (lead.qualified_project_owner_proven === true) {
+      return Boolean(lead.qualified_project_id);
+    }
+    return ownersByCampaign.get(lead.campaign_id)?.status !== 'none';
+  });
 
   managedDueCandidates.sort(
     (left, right) =>
@@ -2768,7 +2863,11 @@ export async function reconcileLeadNotificationDeliveries(
       lead.reply_subject,
       lead.reply_preview,
       lead.ai_reason,
-      { existingClaimId: claimId, attemptedAt: nowIso },
+      {
+        existingClaimId: claimId,
+        attemptedAt: nowIso,
+        projectId: lead.qualified_project_id,
+      },
     );
   }
 
@@ -2885,6 +2984,7 @@ export async function maybePostLeadHandoff(opts: {
   instantlyDb: NonNullable<typeof supabaseAdmin>;
   qualificationId: string;
   campaignId: string;
+  projectId?: string | null;
   reply: Email;
   leadEmail: string;
   leadName: string | null;
@@ -2899,26 +2999,31 @@ export async function maybePostLeadHandoff(opts: {
     const main = supabaseMain;
     const { instantlyDb, qualificationId, campaignId } = opts;
 
-    // 1. Project → handoff config + responsible specialist.
-    let projectOwner;
-    try {
-      projectOwner = await resolveCampaignProjectOwner(instantlyDb, campaignId);
-    } catch (error) {
-      workerLog(
-        'warn',
-        `Handoff: project-owner lookup failed for campaign ${campaignId} — skip all side effects`,
-        error,
-      );
-      return;
+    // 1. Project → handoff config + responsible specialist. New
+    // qualifications carry an immutable snapshot; the lookup remains only for
+    // legacy/direct callers that predate the snapshot migration.
+    let projectId = opts.projectId ?? null;
+    if (!projectId) {
+      let projectOwner;
+      try {
+        projectOwner = await resolveCampaignProjectOwner(instantlyDb, campaignId);
+      } catch (error) {
+        workerLog(
+          'warn',
+          `Handoff: project-owner lookup failed for campaign ${campaignId} — skip all side effects`,
+          error,
+        );
+        return;
+      }
+      if (projectOwner.status !== 'resolved') {
+        workerLog(
+          'warn',
+          `Handoff: campaign ${campaignId} has ${projectOwner.status === 'ambiguous' ? projectOwner.projectIds.length : 0} distinct project owners — skip all side effects`,
+        );
+        return;
+      }
+      projectId = projectOwner.projectId;
     }
-    if (projectOwner.status !== 'resolved') {
-      workerLog(
-        'warn',
-        `Handoff: campaign ${campaignId} has ${projectOwner.status === 'ambiguous' ? projectOwner.projectIds.length : 0} distinct project owners — skip all side effects`,
-      );
-      return;
-    }
-    const projectId = projectOwner.projectId;
 
     const { data: projectRow, error: projectsError } = await main
       .from('projects')

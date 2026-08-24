@@ -38,6 +38,9 @@ declare
   v_new public.project_periods%rowtype;
   v_period_count integer;
   v_prior_start date;
+  v_legacy_launch_date date;
+  v_legacy_payment_date date;
+  v_legacy_deadline date;
   v_contacts_obligation text;
   v_kpi_plan text;
   v_deadline date;
@@ -109,10 +112,17 @@ begin
     raise exception using errcode = '40001', message = 'project_period_state_changed';
   end if;
 
+  -- These project columns are legacy text in production, while period columns
+  -- are dates. The shared parser accepts supported legacy formats and returns
+  -- null (rather than aborting the transition) for malformed values.
+  v_legacy_launch_date := public.team_statistics_safe_date(v_project.launch_date);
+  v_legacy_payment_date := public.team_statistics_safe_date(v_project.payment_date);
+  v_legacy_deadline := public.team_statistics_safe_date(v_project.deadline);
+
   if v_period_count = 0 then
     v_prior_start := coalesce(
-      v_project.launch_date,
-      v_project.payment_date,
+      v_legacy_launch_date,
+      v_legacy_payment_date,
       (v_project.created_at at time zone 'UTC')::date
     );
   else
@@ -154,10 +164,10 @@ begin
       v_project.contacts_done,
       v_project.kpi_plan,
       v_project.kpi_fact,
-      v_project.deadline,
+      v_legacy_deadline,
       v_project.budget,
       v_project.margin,
-      v_project.payment_date
+      v_legacy_payment_date
     );
   elsif v_active.id is not null then
     update public.project_periods
@@ -177,7 +187,7 @@ begin
   end;
   v_deadline := case
     when coalesce(p_has_deadline, false) then p_deadline
-    else v_project.deadline
+    else v_legacy_deadline
   end;
   v_budget := case
     when coalesce(p_has_budget, false) then nullif(btrim(p_budget), '')
@@ -189,7 +199,7 @@ begin
   end;
   v_payment_date := case
     when coalesce(p_has_payment_date, false) then p_payment_date
-    else v_project.payment_date
+    else v_legacy_payment_date
   end;
 
   insert into public.project_periods (

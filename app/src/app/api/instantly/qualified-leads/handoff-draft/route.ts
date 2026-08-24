@@ -3,7 +3,10 @@ import { withAuth, jsonError } from '@/lib/instantly/apiRouteHelper';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { buildHandoffDraft } from '@/lib/instantly/handoffLegend';
-import { resolveCampaignProjectOwner } from '@/lib/instantly/campaignProjectOwnerResolver';
+import {
+  loadAuthorizedQualification,
+  qualifiedLeadAccessErrorResponse,
+} from '@/lib/instantly/qualifiedLeadAuthorization';
 
 export const dynamic = 'force-dynamic';
 
@@ -31,29 +34,15 @@ export const POST = withAuth(async (req, user) => {
   const { qualification_id, framing } = (await req.json()) as DraftBody;
   if (!qualification_id) return jsonError('qualification_id обязателен', 400);
 
-  const { data: qual, error } = await supabaseInstantly
-    .from('instantly_lead_qualifications')
-    .select('lead_name, campaign_id, reply_body, reply_preview, last_outbound_preview')
-    .eq('id', qualification_id)
-    .single();
-
-  if (error || !qual) return jsonError('Квалификация не найдена', 404);
-
-  const campaignId = (qual.campaign_id as string | null) ?? '';
-  if (!campaignId) return jsonError('У квалификации не указана кампания', 409);
-
-  const owner = await resolveCampaignProjectOwner(supabaseInstantly, campaignId);
-  if (owner.status === 'ambiguous') {
-    return jsonError('Не удалось однозначно определить проект кампании', 409);
-  }
-  if (owner.status === 'none') {
-    return jsonError('Проект кампании не найден', 404);
-  }
+  const authorization = await loadAuthorizedQualification(user.id, qualification_id);
+  if (!authorization.ok) return qualifiedLeadAccessErrorResponse(authorization);
+  const { qualification: qual, projectId } = authorization;
+  if (!projectId) return jsonError('Проект квалификации не найден', 403);
 
   const { data: project, error: projectError } = await supabaseAdmin
     .from('projects')
     .select('handoff_legend, handoff_ai_adapt, specialist_user_id')
-    .eq('id', owner.projectId)
+    .eq('id', projectId)
     .single();
   if (projectError || !project) {
     return jsonError('Проект кампании не найден', 404);

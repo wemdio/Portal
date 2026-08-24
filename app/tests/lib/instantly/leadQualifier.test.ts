@@ -507,6 +507,68 @@ describe('qualifyReply — пер-проектное определение ли
     expect(stringFalse.customCriteriaMatched).toBe(false);
   });
 
+  it('одиночное «КП» по дефолтному критерию доходит до AI и считается лидом', async () => {
+    mockAiResult({
+      is_lead: true,
+      custom_criteria_matched: false,
+      interest_signals: ['запрос КП'],
+      reason: 'Получатель запросил коммерческое предложение.',
+      needs_review: false,
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply('КП', null),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+  });
+
+  it.each(['Да', 'Yes'])(
+    'короткий ответ «%s» доходит до кастомного критерия и получает его приоритет',
+    async (replyText) => {
+      mockAiResult({
+        is_lead: false,
+        custom_criteria_matched: true,
+        interest_signals: ['совпадение с кастомным критерием'],
+        reason: 'Ответ соответствует определению проекта.',
+        needs_review: true,
+      });
+      const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+      const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+        apiKey: 'test-key',
+        briefText: '',
+        leadCriteria: 'Одиночный ответ «Да» или «Yes» считать лидом.',
+        prefetchedContext: contextWithReply(replyText, null),
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(res.customCriteriaMatched).toBe(true);
+      expect(res.isLead).toBe(true);
+      expect(res.needsReview).toBe(false);
+    },
+  );
+
+  it.each(['.', 'Спасибо'])(
+    'реальный мусор «%s» по-прежнему отсекается до AI',
+    async (replyText) => {
+      const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+      const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+        apiKey: 'test-key',
+        briefText: '',
+        leadCriteria: 'Одиночный ответ «Да» или «Yes» считать лидом.',
+        prefetchedContext: contextWithReply(replyText, null),
+      });
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(res.customCriteriaMatched).toBe(false);
+      expect(res.isLead).toBe(false);
+    },
+  );
+
   it.each([
     'Можете меня набрать в 14.00-15.00.',
     'Давайте завтра проведём встречу.',
@@ -721,6 +783,55 @@ describe('qualifyReply — пер-проектное определение ли
     expect(res.isLead).toBe(true);
     expect(res.needsReview).toBe(false);
     expect(res.interestSignals).toContain('готовность к сотрудничеству');
+  });
+
+  it('самостоятельная надежда на сотрудничество остаётся лидом, даже если модель ошибочно сняла проверку', async () => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: false,
+      interest_signals: [],
+      reason: 'Модель ошибочно не увидела прямой интерес',
+      needs_review: false,
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(
+        'Обсудим с коллегами. Надеюсь на возможное сотрудничество.',
+        null,
+      ),
+    });
+
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+    expect(res.interestSignals).toContain('готовность к сотрудничеству');
+  });
+
+  it.each([
+    'Я не надеюсь на возможное сотрудничество.',
+    'Я не очень надеюсь на возможное сотрудничество.',
+    'Мы вряд ли надеемся на сотрудничество.',
+    'Надеюсь на сотрудничество, если это станет актуально.',
+    'Будем рады сотрудничеству в будущем.',
+    'Хотели бы сотрудничать в будущем.',
+  ])('отрицательный, условный или только будущий интерес не повышается до лида: %s', async (replyText) => {
+    mockAiResult({
+      is_lead: false,
+      proposal_seen: false,
+      interest_signals: [],
+      reason: 'Получатель не выразил безусловный интерес',
+      needs_review: false,
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(replyText, null),
+    });
+
+    expect(res.isLead).toBe(false);
+    expect(res.needsReview).toBe(false);
   });
 
   it('кириллическая граница не принимает «мне интересно» за отрицание', async () => {

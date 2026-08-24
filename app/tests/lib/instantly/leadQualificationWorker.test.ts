@@ -681,6 +681,165 @@ describe('pollAndQualifyReplies', () => {
     }));
   });
 
+  it('keeps the committed project snapshot when ownership changes immediately after persistence', async () => {
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          { id: 'project-1', client: 'Owner A', specialist_user_id: 'specialist-1' },
+          { id: 'project-2', client: 'Owner B', specialist_user_id: 'specialist-2' },
+        ],
+        profiles: [
+          { id: 'specialist-1', full_name: 'Specialist A', email: 'a@example.com' },
+          { id: 'specialist-2', full_name: 'Specialist B', email: 'b@example.com' },
+        ],
+        telegram_links: [
+          { user_id: 'specialist-1', telegram_id: '111', telegram_username: 'specialist_a' },
+          { user_id: 'specialist-2', telegram_id: '222', telegram_username: 'specialist_b' },
+        ],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+    });
+    const instantlyDb = mockInstantlyDb!;
+    const originalFrom = instantlyDb.from.bind(instantlyDb);
+    let ownershipChanged = false;
+    instantlyDb.from = ((table: string) => {
+      const builder = originalFrom(table);
+      if (table !== 'instantly_lead_qualifications') return builder;
+      const originalUpsert = builder.upsert.bind(builder);
+      builder.upsert = ((...args: Parameters<typeof builder.upsert>) => {
+        const upsertBuilder = originalUpsert(...args);
+        const originalMaybeSingle = upsertBuilder.maybeSingle.bind(upsertBuilder);
+        upsertBuilder.maybeSingle = async () => {
+          const result = await originalMaybeSingle();
+          if (!ownershipChanged && result.data) {
+            ownershipChanged = true;
+            await originalFrom('project_instantly_campaigns')
+              .delete()
+              .eq('project_id', 'project-1')
+              .eq('campaign_id', 'linked-campaign');
+            await originalFrom('project_instantly_campaigns').insert({
+              project_id: 'project-2',
+              campaign_id: 'linked-campaign',
+              match_source: 'auto-text',
+            });
+          }
+          return result;
+        };
+        return upsertBuilder;
+      }) as typeof builder.upsert;
+      return builder;
+    }) as typeof instantlyDb.from;
+    qualifyReply.mockResolvedValueOnce({
+      isLead: true,
+      proposalSeen: true,
+      interestSignals: ['asked_for_call'],
+      reason: 'Просит созвон',
+      confidence: 0.94,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: replyEmail({
+          id: 'owner-race-email',
+          body: { text: 'Давайте созвонимся' },
+        }),
+        threadEmails: [],
+        lastOutbound: null,
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'owner-race-email', campaign_id: 'linked-campaign' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0]).toEqual(
+      expect.objectContaining({
+        status: 'lead',
+        qualified_project_id: 'project-1',
+        qualified_project_owner_proven: true,
+      }),
+    );
+    expect(mockInstantlyDb!.getRows('project_lead_board_rows')[0]).toEqual(
+      expect.objectContaining({ project_id: 'project-1' }),
+    );
+    expect(sendLeadTelegramAlert).toHaveBeenCalledWith(expect.objectContaining({
+      clientName: 'Owner A',
+      specialistMentions: [expect.objectContaining({ userId: 'specialist-1' })],
+    }));
+    expect(sendLeadTelegramAlert).not.toHaveBeenCalledWith(expect.objectContaining({
+      specialistMentions: [expect.objectContaining({ userId: 'specialist-2' })],
+    }));
+  });
+
+  it('defers without side effects when the database rejects a snapshot changed during AI', async () => {
+    const instantlyDb = mockInstantlyDb!;
+    const originalFrom = instantlyDb.from.bind(instantlyDb);
+    let rejectSnapshot = true;
+    instantlyDb.from = ((table: string) => {
+      const builder = originalFrom(table);
+      if (table !== 'instantly_lead_qualifications') return builder;
+      const originalUpsert = builder.upsert.bind(builder);
+      builder.upsert = ((rows: unknown, options?: unknown) => {
+        const row = (Array.isArray(rows) ? rows[0] : rows) as Record<string, unknown>;
+        if (rejectSnapshot && row.qualified_project_owner_proven === true) {
+          rejectSnapshot = false;
+          return {
+            select: () => ({
+              maybeSingle: async () => ({
+                data: null,
+                error: {
+                  code: '40001',
+                  message: 'qualification_project_ownership_changed',
+                },
+              }),
+            }),
+          } as unknown as ReturnType<typeof originalUpsert>;
+        }
+        return originalUpsert(
+          rows as Parameters<typeof originalUpsert>[0],
+          options as Parameters<typeof originalUpsert>[1],
+        );
+      }) as typeof builder.upsert;
+      return builder;
+    }) as typeof instantlyDb.from;
+    qualifyReply.mockResolvedValueOnce({
+      isLead: true,
+      proposalSeen: true,
+      interestSignals: ['asked_for_call'],
+      reason: 'Просит созвон',
+      confidence: 0.94,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: replyEmail({ id: 'owner-cas-email', body: { text: 'Созвонимся' } }),
+        threadEmails: [],
+        lastOutbound: null,
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'owner-cas-email', campaign_id: 'linked-campaign' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
+      expect.objectContaining({
+        instantly_email_id: 'owner-cas-email',
+        status: 'needs_review',
+        ai_reason: expect.stringContaining('Reply ownership deferred'),
+      }),
+    ]);
+    expect(mockInstantlyDb!.getRows('project_lead_board_rows')).toHaveLength(0);
+    expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+  });
+
   it('custom criterion match wins over a conflicting needs_review flag and sends the lead alert', async () => {
     mockMainDb = createMockSupabase({
       tables: {
@@ -1792,6 +1951,7 @@ describe('pollAndQualifyReplies', () => {
       'AI classification failed after retries',
       'connect ETIMEDOUT 1.2.3.4:443',
       'socket hang up',
+      'Reply ownership deferred: campaign project owner changed before qualification commit',
     ]) {
       expect(isTransientQualifyError(msg)).toBe(true);
     }
@@ -4859,6 +5019,8 @@ describe('qualifyOneReply — сирота (outOfCampaign) из Others-конт�
       expect.objectContaining({
         instantly_email_id: 'stray-email-1',
         status: 'lead',
+        qualified_project_id: null,
+        qualified_project_owner_proven: true,
         reply_out_of_campaign: true,
         eaccount: 'sales@clientmail.ru',
       }),
@@ -5075,5 +5237,54 @@ describe('qualifyOneReply — сирота (outOfCampaign) из Others-конт�
     const html = String(sendClientReplyTelegram.mock.calls[0][1]);
     expect(html).toContain('"outOfCampaign":true');
     expect(html).toContain('"eaccount":"team@outreach-contact.ru"');
+  });
+
+  it('окно «код без owner-snapshot миграции»: self-serve ответ откладывается без AI и побочных эффектов', async () => {
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        project_period_instantly_campaigns: [],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          {
+            client_user_id: 'client-7',
+            resource_type: 'campaign',
+            resource_id: 'self-serve-campaign',
+            instantly_account_id: 'main',
+          },
+        ],
+        client_reply_telegram_links: [
+          { client_user_id: 'client-7', chat_id: 111, enabled: true },
+        ],
+      },
+      errorSelects: {
+        instantly_lead_qualifications: {
+          columnsInclude: 'qualified_project_id',
+          message: 'column instantly_lead_qualifications.qualified_project_id does not exist',
+        },
+      },
+    });
+
+    const { qualifyOneReply } = await import('@/lib/instantly/leadQualificationWorker');
+    await expect(
+      qualifyOneReply(
+        mockInstantlyDb! as unknown as Parameters<typeof qualifyOneReply>[0],
+        replyEmail({
+          id: 'snapshot-pre-migration-self-serve',
+          campaign_id: 'self-serve-campaign',
+          eaccount: 'team@outreach-contact.ru',
+          body: { text: 'Давайте созвонимся' },
+        }),
+        'test-ai-key',
+        'main',
+        null,
+        { clientDmOnlyOnLead: true },
+      ),
+    ).rejects.toThrow(/Reply ownership deferred.*migration is not available/);
+
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows).toHaveLength(0);
+    expect(qualifyReply).not.toHaveBeenCalled();
+    expect(sendClientReplyTelegram).not.toHaveBeenCalled();
   });
 });

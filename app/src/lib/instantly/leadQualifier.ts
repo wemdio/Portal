@@ -238,12 +238,27 @@ const JUNK_REPLY_EXACT = new Set([
   '+', '-', '.', '..', '...', '?', '!', 'да', 'yes', 'угу', 'ага',
 ]);
 
+const DEFAULT_SHORT_COMMERCIAL_REQUESTS = new Set(['кп']);
+const CUSTOM_CRITERIA_SHORT_REPLY_CANDIDATES = new Set(['да', 'yes']);
+
+function normalizeShortReply(text: string): string {
+  return text.trim().toLowerCase().replace(/[.!?,;:«»"'`\s]+$/g, '').trim();
+}
+
 export function isJunkReply(text: string): boolean {
   if (!text) return true;
-  const normalized = text.trim().toLowerCase().replace(/[.!?,;:«»"'`\s]+$/g, '').trim();
+  const normalized = normalizeShortReply(text);
   if (normalized.length < 3) return true;
   if (normalized.length > 50) return false;
   return JUNK_REPLY_EXACT.has(normalized);
+}
+
+function shouldEvaluateShortReply(text: string, hasCustomCriteria: boolean): boolean {
+  const normalized = normalizeShortReply(text);
+  return (
+    DEFAULT_SHORT_COMMERCIAL_REQUESTS.has(normalized) ||
+    (hasCustomCriteria && CUSTOM_CRITERIA_SHORT_REPLY_CANDIDATES.has(normalized))
+  );
 }
 
 export function isProposalMessage(text: string): boolean {
@@ -280,8 +295,20 @@ const CONDITIONAL_INTEREST_PATTERN = new RegExp(
   String.raw`${LETTER_TOKEN_START_SOURCE}(?:если(?!\s+(?:честно(?:\s+говоря)?|откровенно))|в\s+случае)${LETTER_TOKEN_END_SOURCE}[^.!?\n]{0,100}(?:интерес|сотруднич|свяж)`,
   'i',
 );
+const TRAILING_CONDITIONAL_INTEREST_PATTERN = new RegExp(
+  String.raw`(?:интерес|сотруднич|свяж|cooperat|collaborat)[^.!?\n]{0,100}${LETTER_TOKEN_START_SOURCE}(?:если(?!\s+(?:честно(?:\s+говоря)?|откровенно))|в\s+случае|if)${LETTER_TOKEN_END_SOURCE}`,
+  'i',
+);
 const THIRD_PARTY_INTEREST_PATTERN = new RegExp(
   String.raw`${LETTER_TOKEN_START_SOURCE}(?:коллегам|руководству|им|они)${LETTER_TOKEN_END_SOURCE}[^.!?\n]{0,80}(?:будет\s+)?интерес`,
+  'i',
+);
+const FUTURE_ONLY_COOPERATION_PATTERN = new RegExp(
+  String.raw`(?:наде(?:юсь|емся)|буд(?:у|ем)\s+рад(?:а|ы)?|хотел(?:и|а)?\s+бы|hope)[^.!?\n]{0,100}(?:сотруднич[а-яё]*|cooperat(?:e|ion)|collaborat(?:e|ion))[^.!?\n]{0,40}(?:в\s+будущем|in\s+the\s+future)`,
+  'i',
+);
+const NEGATED_SELF_SIGNAL_PREFIX_PATTERN = new RegExp(
+  String.raw`${LETTER_TOKEN_START_SOURCE}(?:не(?:\s+(?:очень|особо))?|вряд\s+ли|едва\s+ли)\s*$`,
   'i',
 );
 const SELF_COOPERATION_PATTERNS = [
@@ -575,12 +602,19 @@ function hasSelfDirectedCooperationInterest(authoredReply: string): boolean {
   if (
     EXPLICIT_REFUSAL_PATTERN.test(statement) ||
     CONDITIONAL_INTEREST_PATTERN.test(statement) ||
-    THIRD_PARTY_INTEREST_PATTERN.test(statement)
+    TRAILING_CONDITIONAL_INTEREST_PATTERN.test(statement) ||
+    THIRD_PARTY_INTEREST_PATTERN.test(statement) ||
+    FUTURE_ONLY_COOPERATION_PATTERN.test(statement)
   ) {
     return false;
   }
 
-  return SELF_COOPERATION_PATTERNS.some((pattern) => pattern.test(statement));
+  return SELF_COOPERATION_PATTERNS.some((pattern) => {
+    const match = pattern.exec(statement);
+    if (!match) return false;
+    const prefix = statement.slice(0, match.index);
+    return !NEGATED_SELF_SIGNAL_PREFIX_PATTERN.test(prefix);
+  });
 }
 
 function outboundRequestsOwnPhone(outboundText: string): boolean {
@@ -626,7 +660,7 @@ function normalizeDefaultLeadSignals(
   if (confirmedProposal && hasDirectPositiveInterest(authoredReply)) {
     signal = 'положительный интерес к предложению';
     reason = 'Получатель прямо выразил положительный интерес к подтверждённому предложению.';
-  } else if (result.needsReview && hasSelfDirectedCooperationInterest(authoredReply)) {
+  } else if (hasSelfDirectedCooperationInterest(authoredReply)) {
     signal = 'готовность к сотрудничеству';
     reason = 'Получатель самостоятельно выразил заинтересованность в возможном сотрудничестве.';
   } else if (
@@ -1230,6 +1264,7 @@ export async function qualifyReply(
   }
 
   const replyText = getBodyText(ctx.replyEmail.body);
+  const hasCustomCriteria = Boolean(aiOptions.leadCriteria?.trim());
 
   if (isAutoReplyOrUnsubscribe(replyText)) {
     return {
@@ -1246,7 +1281,7 @@ export async function qualifyReply(
     };
   }
 
-  if (isJunkReply(replyText)) {
+  if (isJunkReply(replyText) && !shouldEvaluateShortReply(replyText, hasCustomCriteria)) {
     return {
       isLead: false,
       customCriteriaMatched: false,
@@ -1266,7 +1301,6 @@ export async function qualifyReply(
   // Проверяем только основной ответ до подписи и quoted history. При кастомном
   // критерии модель должна сначала сообщить, совпало ли именно это правило.
   const sharedContactRouting = isSharedContactRoutingReply(replyText);
-  const hasCustomCriteria = Boolean(aiOptions.leadCriteria?.trim());
   if (sharedContactRouting && !hasCustomCriteria) {
     return {
       ...sharedContactRoutingNonLead(ctx),
