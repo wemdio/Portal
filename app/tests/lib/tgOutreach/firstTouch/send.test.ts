@@ -237,6 +237,56 @@ describe('sendFirstTouchBatch — недоступные контакты и о�
     expect(db.updates.filter((u) => u.table === 'tg_outreach_base_contacts')).toHaveLength(0);
   });
 
+  /**
+   * До 24.08 PEER_FLOOD на первом касании только останавливал порцию.
+   * Воркер в следующем круге снова брал тот же номер — отсюда три удара
+   * в стену за день у 998950879438. Пауза кампании уже существовала,
+   * но ставилась только на флуде ответа. Здесь она должна встать тоже.
+   */
+  it('PEER_FLOOD на первом касании ставит аккаунт на паузу кампании', async () => {
+    const db = fakeDb([contact()]);
+    const client = fakeClient({
+      sendMessage: jest.fn(async () => {
+        throw tgError('PEER_FLOOD');
+      }),
+    });
+
+    const before = Date.now();
+    await sendFirstTouchBatch({ ...baseArgs, cooldownHours: 24, db, client } as never);
+
+    const park = db.updates.find((u) => u.table === 'tg_outreach_accounts');
+    expect(park?.id).toBe('acc-1');
+    const until = new Date(String(park?.patch.cooldown_until)).getTime();
+    expect(until - before).toBeGreaterThan(23 * 3600_000);
+    expect(until - before).toBeLessThan(25 * 3600_000);
+  });
+
+  it('PEER_FLOOD на резолве юзернейма тоже ставит паузу аккаунта', async () => {
+    const db = fakeDb([contact()]);
+    const client = fakeClient({
+      getEntity: jest.fn(async () => {
+        throw tgError('PEER_FLOOD');
+      }),
+    });
+
+    await sendFirstTouchBatch({ ...baseArgs, cooldownHours: 24, db, client } as never);
+
+    expect(db.updates.some((u) => u.table === 'tg_outreach_accounts' && Boolean(u.patch.cooldown_until))).toBe(true);
+  });
+
+  it('обрыв прокси не уводит аккаунт в паузу на сутки', async () => {
+    const db = fakeDb([contact()]);
+    const client = fakeClient({
+      sendMessage: jest.fn(async () => {
+        throw new Error('ECONNRESET');
+      }),
+    });
+
+    await sendFirstTouchBatch({ ...baseArgs, cooldownHours: 24, db, client } as never);
+
+    expect(db.updates.filter((u) => u.table === 'tg_outreach_accounts')).toHaveLength(0);
+  });
+
   it('на ограничении аккаунта прекращает порцию, а не идёт по остальным', async () => {
     const db = fakeDb([contact({ id: 'c-1', username: 'first' }), contact({ id: 'c-2', username: 'second' })]);
     const sendMessage = jest.fn(async () => {
