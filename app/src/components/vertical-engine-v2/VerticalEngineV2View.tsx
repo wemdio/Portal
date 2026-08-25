@@ -19,7 +19,6 @@ import {
   type VeLegacyCandidatesResponse,
   type VeLegacyProjectDetailResponse,
   type VeLegacyProjectsResponse,
-  type VeProjectCreateResponse,
   type VeProjectsResponse,
 } from './api';
 import { VeEngineWorkspace } from './engine/HypothesisEngineView';
@@ -27,14 +26,6 @@ import { LegacyArchivePanel } from './LegacyArchivePanel';
 import { LegacyReviewPanel } from './LegacyReviewPanel';
 
 type Tab = 'projects' | 'archive' | 'review';
-
-function formatDate(value: string | null | undefined): string {
-  if (!value) return '—';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : date.toLocaleString('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
-}
 
 function ErrorNotice({ message }: { message: string }) {
   return (
@@ -52,10 +43,6 @@ export function VerticalEngineV2View() {
   const [canManageArchive, setCanManageArchive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-
-  const [websiteUrl, setWebsiteUrl] = useState('');
-  const [name, setName] = useState('');
-  const [creating, setCreating] = useState(false);
 
   const [legacyDetail, setLegacyDetail] = useState<VeLegacyProjectDetail | null>(null);
   const [legacyDetailLoading, setLegacyDetailLoading] = useState(false);
@@ -135,30 +122,6 @@ export function VerticalEngineV2View() {
       cancelled = true;
     };
   }, []);
-
-  const createProject = useCallback(async () => {
-    if (!websiteUrl.trim() || creating) return;
-    setCreating(true);
-    setError('');
-    try {
-      const result = await vePost<VeProjectCreateResponse>(`${VE_API}/projects`, {
-        website_url: websiteUrl.trim(),
-        ...(name.trim() ? { name: name.trim() } : {}),
-      });
-      if (!result.ok || !result.data.project) {
-        throw new Error(result.data.error || 'Не удалось создать проект');
-      }
-      setProjects((current) => [result.data.project as VeProject, ...current]);
-      setWebsiteUrl('');
-      setName('');
-    } catch (createError) {
-      setError(
-        createError instanceof Error ? createError.message : 'Не удалось создать проект',
-      );
-    } finally {
-      setCreating(false);
-    }
-  }, [creating, name, websiteUrl]);
 
   const openLegacyProject = useCallback(async (projectId: string) => {
     setLegacyDetailLoading(true);
@@ -246,7 +209,7 @@ export function VerticalEngineV2View() {
   return (
     <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
       <header className="border-b border-slate-200 pb-6">
-        <nav className="text-xs text-slate-400" aria-label="Хлебные крошки">
+        <nav className="text-xs text-slate-500" aria-label="Хлебные крошки">
           Инструменты / Движок вертикалей / v2
         </nav>
         <div className="mt-2 flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
@@ -274,25 +237,32 @@ export function VerticalEngineV2View() {
         </div>
       </header>
 
-      <div className="mt-6 flex flex-wrap gap-2 border-b border-slate-200 pb-3">
-        {tabs.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => {
-              setTab(item.id);
-              if (item.id !== 'archive') setLegacyDetail(null);
-            }}
-            className={`rounded-full px-4 py-2 text-sm font-medium transition ${
-              tab === item.id
-                ? 'bg-slate-950 text-white'
-                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-            }`}
-          >
-            {item.label}
-            {typeof item.count === 'number' ? ` · ${item.count}` : ''}
-          </button>
-        ))}
+      <div className="mt-6">
+        <div
+          role="group"
+          aria-label="Разделы движка"
+          className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-full bg-slate-100 p-1"
+        >
+          {tabs.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => {
+                setTab(item.id);
+                if (item.id !== 'archive') setLegacyDetail(null);
+              }}
+              aria-pressed={tab === item.id}
+              className={`rounded-full px-4 py-1.5 text-sm font-medium transition active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 ${
+                tab === item.id
+                  ? 'bg-white text-slate-900 shadow-sm ring-1 ring-black/5'
+                  : 'text-slate-500 hover:text-slate-900'
+              }`}
+            >
+              {item.label}
+              {typeof item.count === 'number' ? ` · ${item.count}` : ''}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="mt-6 space-y-5">

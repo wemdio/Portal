@@ -79,22 +79,8 @@ export function VeEngineWorkspace() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-7xl space-y-8 px-4 py-8 text-left sm:px-6 lg:px-8">
-      {/* Шапка: хлебные крошки, заголовок и тихая мета-строка */}
-      <div className="border-b border-gray-200 pb-6">
-        <nav aria-label="Хлебные крошки" className="flex items-center gap-1.5 text-xs text-gray-400">
-          <span>Инструменты</span>
-          <span aria-hidden>/</span>
-          <span>Движок вертикалей</span>
-        </nav>
-        <h1 className="mt-2 text-[21px] font-semibold tracking-tight text-gray-900">
-          Движок вертикалей
-        </h1>
-        <p className={`mt-1 ${HE.lead}`}>
-          Сайт клиента → исчерпывающие гипотезы рынков с доказательствами, чистые вертикали,
-          цепочки писем, вокабуляр и шаблон 85/15 под загруженную базу.
-        </p>
-      </div>
+    <div className="space-y-8 text-left">
+      {/* Шапку и хлебные крошки даёт оболочка (VerticalEngineV2View) — здесь сразу контент. */}
 
       {/* Новый проект */}
       <div className={`${HE.card} ${HE.cardPad}`}>
@@ -148,7 +134,7 @@ export function VeEngineWorkspace() {
           {[1, 2].map((i) => (
             <div
               key={i}
-              className="h-24 animate-pulse rounded-2xl border border-gray-200 bg-gray-50"
+              className="h-24 rounded-2xl border border-gray-200 bg-gray-50 motion-safe:animate-pulse"
               aria-hidden
             />
           ))}
@@ -156,7 +142,7 @@ export function VeEngineWorkspace() {
       ) : projects.length === 0 ? (
         <div className="flex min-h-[220px] flex-col items-center justify-center rounded-2xl border border-dashed border-gray-300 bg-gray-50/50 p-10 text-center">
           <p className="text-sm font-semibold text-gray-700">Проектов пока нет</p>
-          <p className="mt-1.5 max-w-sm text-[13px] leading-relaxed text-gray-400">
+          <p className="mt-1.5 max-w-sm text-[13px] leading-relaxed text-gray-500">
             Создайте первый проект: укажите сайт клиента. Движок соберёт рынки, письма и шаблон.
           </p>
         </div>
@@ -167,7 +153,7 @@ export function VeEngineWorkspace() {
               <button
                 type="button"
                 onClick={() => setSelectedId(p.id)}
-                className={`${HE.card} ${HE.cardPad} flex w-full flex-col gap-2 text-left transition hover:border-gray-300`}
+                className={`${HE.card} ${HE.cardPad} flex w-full flex-col gap-2 text-left transition hover:border-gray-300 hover:shadow-sm active:scale-[0.98] active:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300`}
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">

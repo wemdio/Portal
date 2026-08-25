@@ -16,17 +16,18 @@ export const HE = {
   card: 'rounded-2xl border border-gray-200 bg-white',
   cardPad: 'p-5',
   btnPrimary:
-    'h-10 rounded-lg bg-blue-600 px-4 text-[13px] font-semibold text-white transition hover:bg-blue-700 disabled:opacity-50',
+    'h-10 rounded-lg bg-blue-600 px-4 text-[13px] font-semibold text-white transition hover:bg-blue-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
   btnGhost:
-    'h-10 rounded-lg border border-gray-300 bg-white px-4 text-[13px] font-medium text-gray-600 transition hover:border-gray-400 hover:text-gray-900 disabled:opacity-50',
-  btnQuiet: 'text-[13px] font-medium text-blue-600 hover:underline disabled:opacity-50',
+    'h-10 rounded-lg border border-gray-300 bg-white px-4 text-[13px] font-medium text-gray-600 transition hover:border-gray-400 hover:text-gray-900 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
+  btnQuiet:
+    'text-[13px] font-medium text-blue-600 transition hover:underline active:opacity-70 disabled:opacity-50 focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
   btnSmall:
-    'h-8 rounded-lg border border-gray-300 bg-white px-3 text-xs font-medium text-gray-600 transition hover:border-gray-400 hover:text-gray-900 disabled:opacity-50',
+    'h-8 rounded-lg border border-gray-300 bg-white px-3 text-xs font-medium text-gray-600 transition hover:border-gray-400 hover:text-gray-900 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
   pill: 'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold',
   dot: 'inline-block h-1.5 w-1.5 rounded-full',
   secTitle: 'text-[13px] font-semibold text-gray-900',
   lead: 'text-[13.5px] leading-relaxed text-gray-600',
-  muted: 'text-gray-400',
+  muted: 'text-gray-500',
   muted2: 'text-gray-500',
   input:
     'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-400 focus:outline-none',

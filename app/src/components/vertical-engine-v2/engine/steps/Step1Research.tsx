@@ -274,7 +274,7 @@ function OfferBlock({
 
   return (
     <div className="mt-8 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
-      <label htmlFor="he-step1-offer" className="text-xs font-semibold uppercase tracking-widest text-gray-400">
+      <label htmlFor="he-step1-offer" className="text-xs font-semibold uppercase tracking-widest text-gray-500">
         Оффер (необязательно)
       </label>
       <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
@@ -302,7 +302,7 @@ function OfferBlock({
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
-        {saved ? <span className="text-xs text-emerald-500">Сохранено ✓</span> : null}
+        {saved ? <span className="text-xs text-emerald-600">Сохранено ✓</span> : null}
       </div>
     </div>
   );
@@ -346,7 +346,7 @@ function SignatureBlock({
     <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
       <label
         htmlFor="he-step1-signature"
-        className="text-xs font-semibold uppercase tracking-widest text-gray-400"
+        className="text-xs font-semibold uppercase tracking-widest text-gray-500"
       >
         Отправитель (подпись в письмах)
       </label>
@@ -376,7 +376,7 @@ function SignatureBlock({
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
-        {saved ? <span className="text-xs text-emerald-500">Сохранено ✓</span> : null}
+        {saved ? <span className="text-xs text-emerald-600">Сохранено ✓</span> : null}
       </div>
       {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
     </div>
@@ -427,7 +427,7 @@ function BusinessBlock({
     >
       <label
         htmlFor="he-step1-business"
-        className="text-xs font-semibold uppercase tracking-widest text-gray-400"
+        className="text-xs font-semibold uppercase tracking-widest text-gray-500"
       >
         Описание бизнеса (если сайт не раскрывает)
       </label>
@@ -458,7 +458,7 @@ function BusinessBlock({
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
-        {saved ? <span className="text-xs text-emerald-500">Сохранено ✓</span> : null}
+        {saved ? <span className="text-xs text-emerald-600">Сохранено ✓</span> : null}
       </div>
       {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
     </div>
@@ -504,7 +504,7 @@ function StyleBlock({
 
   return (
     <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
-      <label htmlFor="he-step1-style" className="text-xs font-semibold uppercase tracking-widest text-gray-400">
+      <label htmlFor="he-step1-style" className="text-xs font-semibold uppercase tracking-widest text-gray-500">
         Эталон стиля (необязательно)
       </label>
       <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
@@ -533,7 +533,7 @@ function StyleBlock({
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
-        {saved ? <span className="text-xs text-emerald-500">Сохранено ✓</span> : null}
+        {saved ? <span className="text-xs text-emerald-600">Сохранено ✓</span> : null}
       </div>
       {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
     </div>
@@ -597,7 +597,7 @@ function CasesBlock({
 
   return (
     <details className="group mt-4 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
-      <summary className="flex cursor-pointer select-none items-center gap-2 text-xs font-semibold uppercase tracking-widest text-gray-400 transition hover:text-gray-600">
+      <summary className="flex cursor-pointer select-none items-center gap-2 text-xs font-semibold uppercase tracking-widest text-gray-500 transition hover:text-gray-600">
         Кейсы клиента ({cases.length})
       </summary>
       <p className={`mt-2 text-xs leading-relaxed ${HE.muted}`}>
@@ -618,8 +618,8 @@ function CasesBlock({
                     {c.source === 'site' ? 'сайт' : 'файл'}
                   </Badge>
                   {c.industry ? <span className="text-xs font-medium text-gray-700">{c.industry}</span> : null}
-                  {c.client_type ? <span className="text-xs text-gray-400">{c.client_type}</span> : null}
-                  {c.filename ? <span className="truncate text-[11px] text-gray-400">{c.filename}</span> : null}
+                  {c.client_type ? <span className="text-xs text-gray-500">{c.client_type}</span> : null}
+                  {c.filename ? <span className="truncate text-[11px] text-gray-500">{c.filename}</span> : null}
                 </div>
                 {c.result ? <p className="mt-1 line-clamp-2 text-xs text-gray-600">{c.result}</p> : null}
               </div>
@@ -629,7 +629,7 @@ function CasesBlock({
                   onClick={() => void handleDelete(c.id)}
                   disabled={deletingId === c.id}
                   title="Удалить кейс"
-                  className="shrink-0 text-[11px] font-medium text-gray-400 transition hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="shrink-0 text-[11px] font-medium text-gray-500 transition hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {deletingId === c.id ? <Spinner className="h-3.5 w-3.5" /> : 'Удалить'}
                 </button>
@@ -737,11 +737,11 @@ function StageChecklist({ jobs, running }: { jobs: VeJobSummary[]; running: bool
                   ? 'text-gray-600'
                   : state === 'failed'
                     ? 'text-red-600'
-                    : 'text-gray-400'
+                    : 'text-gray-500'
             }`}
           >
             <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-              <StatusDot tone={STAGE_DOT_TONE[state]} className={state === 'current' ? 'animate-pulse' : ''} />
+              <StatusDot tone={STAGE_DOT_TONE[state]} className={state === 'current' ? 'motion-safe:animate-pulse' : ''} />
             </span>
             <span>
               {line}

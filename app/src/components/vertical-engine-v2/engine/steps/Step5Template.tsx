@@ -167,16 +167,16 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
       </summary>
       <div className="border-t border-gray-100 px-4 py-3">
         {state === 'loading' || state === 'idle' ? (
-          <p className="text-xs text-gray-400">Загружаем строки базы…</p>
+          <p className="text-xs text-gray-500">Загружаем строки базы…</p>
         ) : null}
         {state === 'error' ? (
-          <p className="text-xs text-gray-400">
+          <p className="text-xs text-gray-500">
             Не удалось загрузить строки базы — превью недоступно. Закройте и откройте блок, чтобы
             повторить.
           </p>
         ) : null}
         {preview && preview.rows.length === 0 ? (
-          <p className="text-xs text-gray-400">В базе нет строк для превью.</p>
+          <p className="text-xs text-gray-500">В базе нет строк для превью.</p>
         ) : null}
         {preview && preview.rows.length > 0 && sample ? (
           <div className="space-y-3">
@@ -206,7 +206,7 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
                           <p className="text-xs font-semibold text-gray-800">
                             Письмо {letterIdx + 1}
                             {letter.wait_days > 0 ? (
-                              <span className="ml-1 font-normal text-gray-400">
+                              <span className="ml-1 font-normal text-gray-500">
                                 через {letter.wait_days} дн.
                               </span>
                             ) : null}
@@ -231,7 +231,7 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
                     </p>
                   ) : null}
                   {emptyVars.length > 0 ? (
-                    <p className="mt-1 text-[11px] text-gray-400">
+                    <p className="mt-1 text-[11px] text-gray-500">
                       Пустые значения у этого лида: {emptyVars.map((u) => `{{${u}}}`).join(', ')} —
                       в письме будет пустая строка
                     </p>
@@ -240,7 +240,7 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
               );
             })}
             {hasVariants ? (
-              <p className="text-[11px] text-gray-400">
+              <p className="text-[11px] text-gray-500">
                 {segmentsClassified
                   ? 'Сегментные варианты подставлены по классификации сегмента — совпадает с запуском.'
                   : 'Сегментные варианты не подставлены (классификация недоступна) — показан дефолтный текст писем.'}
@@ -393,18 +393,18 @@ function LaunchSection({ launch }: { launch: TemplateLaunchState }) {
         Активация — вручную после проверки.
       </p>
       {launch.presets === null && !launch.loadError ? (
-        <p className="text-xs text-gray-400">Загружаем пресеты…</p>
+        <p className="text-xs text-gray-500">Загружаем пресеты…</p>
       ) : null}
       {launch.loadError ? <p className="text-xs text-red-500">{launch.loadError}</p> : null}
       {launch.presets && launch.presets.length === 0 && !launch.loadError ? (
-        <p className="text-xs text-gray-400">Нет доступных пресетов — сначала настройте пресет клиенту.</p>
+        <p className="text-xs text-gray-500">Нет доступных пресетов — сначала настройте пресет клиенту.</p>
       ) : null}
       {launch.presets && launch.presets.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2">
           <select
             value={launch.presetId}
             onChange={(e) => launch.setPresetId(e.target.value)}
-            className="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs text-gray-700"
+            className="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs text-gray-700 transition focus:border-blue-400 focus:outline-none"
             aria-label="Пресет запуска"
           >
             {launch.presets.map((p) => (
@@ -492,7 +492,7 @@ export function Step5Template(props: {
       return (
         <div className="space-y-3">
           <StatusBox tone="info">Собираем шаблон под базу {base?.filename ?? '—'}…</StatusBox>
-          <p className="text-xs text-gray-400">
+          <p className="text-xs text-gray-500">
             Обычно это занимает несколько минут — страницу можно не закрывать.
           </p>
         </div>
@@ -544,11 +544,11 @@ export function Step5Template(props: {
               <Badge tone="amber">Черновик</Badge>
             )}
           </div>
-          <p className="mt-1 text-sm text-gray-400">
+          <p className="mt-1 text-sm text-gray-500">
             Боевой шаблон: цепочка вертикали, адаптированная под базу {base?.filename ?? '—'}. В
             рассылку идёт этот текст.
           </p>
-          <p className="mt-1 text-xs text-gray-400">
+          <p className="mt-1 text-xs text-gray-500">
             Правится на шаге 3 (Контент) → пересобрать шаблон
           </p>
         </div>
@@ -574,7 +574,7 @@ export function Step5Template(props: {
 
       {/* База больше лимита запуска — кнопка выключена, объясняем почему */}
       {baseOverLaunchLimit ? (
-        <p className="text-xs text-gray-400">
+        <p className="text-xs text-gray-500">
           База больше лимита запуска ({VE_LAUNCH_MAX_LEADS}). Скачайте CSV и запускайте порциями —
           или соберите базу меньшего лимита.
         </p>
@@ -598,7 +598,7 @@ export function Step5Template(props: {
               {letter.subject ? (
                 <OperatorText text={letter.subject} className="text-sm font-semibold text-gray-900" />
               ) : (
-                <p className="text-sm italic text-gray-400">Без темы</p>
+                <p className="text-sm italic text-gray-500">Без темы</p>
               )}
               <button
                 type="button"
@@ -686,7 +686,7 @@ export function Step5Template(props: {
                           <span className="inline-flex flex-col items-start gap-0.5">
                             <Badge tone="red">Нет колонки</Badge>
                             {m.fallback ? (
-                              <span className="text-[11px] text-gray-400">
+                              <span className="text-[11px] text-gray-500">
                                 Подставим: {m.fallback}
                               </span>
                             ) : null}

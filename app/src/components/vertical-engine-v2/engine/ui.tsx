@@ -129,7 +129,7 @@ export function ProjectStatusBadge({ status }: { status: VeProjectStatus }) {
   const meta = PROJECT_STATUS_META[status] ?? PROJECT_STATUS_META.draft;
   return (
     <span className={`${HE.pill} ${BADGE_TONE_CLASS[meta.tone]}`}>
-      <StatusDot tone={meta.dot} className={meta.pulse ? 'animate-pulse' : undefined} />
+      <StatusDot tone={meta.dot} className={meta.pulse ? 'motion-safe:animate-pulse' : undefined} />
       {meta.label}
     </span>
   );

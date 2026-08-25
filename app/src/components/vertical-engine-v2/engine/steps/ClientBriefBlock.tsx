@@ -249,7 +249,13 @@ export function ClientBriefBlock({
     <div className="mt-8 border-t border-gray-100 pt-6 text-left">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className={HE.secTitle}>Бриф клиента</h3>
-        <button type="button" onClick={() => setOpen((v) => !v)} className={HE.btnQuiet}>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-controls="ve-client-brief-body"
+          className={HE.btnQuiet}
+        >
           {open ? 'Свернуть' : fileName ? 'Открыть бриф' : 'Загрузить бриф'}
         </button>
       </div>
@@ -260,7 +266,7 @@ export function ClientBriefBlock({
       </p>
 
       {!open ? null : (
-        <div className="mt-4 space-y-4">
+        <div id="ve-client-brief-body" className="mt-4 space-y-4">
           <div className="flex flex-wrap items-center gap-3">
             <input
               ref={fileRef}
