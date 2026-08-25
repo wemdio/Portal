@@ -24,12 +24,32 @@ beforeEach(() => {
 });
 
 describe('resolveBoardProjectId', () => {
-  it('period-ссылка найдена → возвращает её', async () => {
+  it('один distinct project в period + legacy → возвращает его', async () => {
+    const db = makeDb({
+      project_period_instantly_campaigns: [{ project_id: PID, campaign_id: 'c1' }],
+      project_instantly_campaigns: [{ project_id: PID, campaign_id: 'c1' }],
+    });
+    expect(await resolveBoardProjectId(db, 'c1')).toBe(PID);
+  });
+
+  it('разные project owners → null (fail closed, доску не выбираем)', async () => {
     const db = makeDb({
       project_period_instantly_campaigns: [{ project_id: PID, campaign_id: 'c1' }],
       project_instantly_campaigns: [{ project_id: PID2, campaign_id: 'c1' }],
     });
-    expect(await resolveBoardProjectId(db, 'c1')).toBe(PID);
+    expect(await resolveBoardProjectId(db, 'c1')).toBeNull();
+  });
+
+  it('ошибка любого link lookup → бросает, caller обязан прекратить side effects', async () => {
+    const db = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [{ project_id: PID, campaign_id: 'c1' }],
+      },
+      errorTables: {
+        project_period_instantly_campaigns: 'period links unavailable',
+      },
+    }) as unknown as Db;
+    await expect(resolveBoardProjectId(db, 'c1')).rejects.toThrow('period links unavailable');
   });
 
   it('только легаси-ссылка → возвращает её', async () => {

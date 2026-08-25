@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { claimCampaignProjectOwnership } from '@/lib/instantly/campaignProjectOwnership';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,15 +11,21 @@ type ActivePeriod = {
   created_at: string | null;
 };
 
-async function getActivePeriod(projectId: string): Promise<ActivePeriod | null> {
-  if (!supabaseAdmin) return null;
-  const { data } = await supabaseAdmin
+type ReadResult<T> = {
+  data: T;
+  error: string | null;
+};
+
+async function getActivePeriod(projectId: string): Promise<ReadResult<ActivePeriod | null>> {
+  if (!supabaseAdmin) return { data: null, error: 'Server misconfigured' };
+  const { data, error } = await supabaseAdmin
     .from('project_periods')
     .select('id, period_start, created_at')
     .eq('project_id', projectId)
     .eq('status', 'active')
     .maybeSingle();
-  return (data as ActivePeriod | null) ?? null;
+  if (error) return { data: null, error: error.message };
+  return { data: (data as ActivePeriod | null) ?? null, error: null };
 }
 
 /**
@@ -41,19 +48,23 @@ function campaignStartsInsidePeriod(
   return campaignMs >= boundaryMs;
 }
 
-async function getCampaignBaseline(campaignId: string, activePeriod: ActivePeriod): Promise<number> {
-  if (!supabaseInstantly) return 0;
-  const { data } = await supabaseInstantly
+async function getCampaignBaseline(
+  campaignId: string,
+  activePeriod: ActivePeriod,
+): Promise<ReadResult<number>> {
+  if (!supabaseInstantly) return { data: 0, error: 'Server misconfigured' };
+  const { data, error } = await supabaseInstantly
     .from('instantly_campaign_catalog')
     .select('id, timestamp_created, new_leads_contacted_count')
     .eq('id', campaignId)
     .maybeSingle();
-  if (!data) return 0;
+  if (error) return { data: 0, error: error.message };
+  if (!data) return { data: 0, error: null };
   if (campaignStartsInsidePeriod(data as { timestamp_created?: string | null }, activePeriod)) {
-    return 0;
+    return { data: 0, error: null };
   }
   const n = Number((data as { new_leads_contacted_count?: number | null }).new_leads_contacted_count);
-  return Number.isFinite(n) ? n : 0;
+  return { data: Number.isFinite(n) ? n : 0, error: null };
 }
 
 export async function GET(
@@ -64,7 +75,11 @@ export async function GET(
   if (!supabaseInstantly) {
     return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
   }
-  const activePeriod = await getActivePeriod(projectId);
+  const activePeriodRead = await getActivePeriod(projectId);
+  if (activePeriodRead.error) {
+    return NextResponse.json({ error: activePeriodRead.error }, { status: 500 });
+  }
+  const activePeriod = activePeriodRead.data;
 
   const query = activePeriod
     ? supabaseInstantly
@@ -125,30 +140,37 @@ export async function POST(
     return NextResponse.json({ error: 'campaign_id required' }, { status: 400 });
   }
 
-  const activePeriod = await getActivePeriod(projectId);
-  const baseline = activePeriod ? await getCampaignBaseline(body.campaign_id, activePeriod) : 0;
-  const { error } = activePeriod
-    ? await supabaseInstantly
-        .from('project_period_instantly_campaigns')
-        .upsert(
-          {
-            project_id: projectId,
-            period_id: activePeriod.id,
-            campaign_id: body.campaign_id,
-            match_source: 'manual',
-            baseline_contacts: baseline,
-          },
-          { onConflict: 'period_id,campaign_id' },
-        )
-    : await supabaseInstantly
-        .from('project_instantly_campaigns')
-        .upsert(
-          { project_id: projectId, campaign_id: body.campaign_id, match_source: 'manual' },
-          { onConflict: 'project_id,campaign_id' },
-        );
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  const activePeriodRead = await getActivePeriod(projectId);
+  if (activePeriodRead.error) {
+    return NextResponse.json({ error: activePeriodRead.error }, { status: 500 });
+  }
+  const activePeriod = activePeriodRead.data;
+  const baselineRead = activePeriod
+    ? await getCampaignBaseline(body.campaign_id, activePeriod)
+    : { data: 0, error: null };
+  if (baselineRead.error) {
+    return NextResponse.json({ error: baselineRead.error }, { status: 500 });
+  }
+  try {
+    const claim = await claimCampaignProjectOwnership(supabaseInstantly, {
+      projectId,
+      campaignId: body.campaign_id,
+      matchSource: 'manual',
+      periodId: activePeriod?.id ?? null,
+      baselineContacts: baselineRead.data,
+      replaceAutomatic: false,
+    });
+    if (claim.status === 'conflict') {
+      return NextResponse.json(
+        { error: 'Campaign is already assigned to another project' },
+        { status: 409 },
+      );
+    }
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Campaign assignment failed' },
+      { status: 500 },
+    );
   }
 
   // Если специалист руками добавил кампанию обратно — это явная отмена
@@ -178,7 +200,11 @@ export async function DELETE(
     return NextResponse.json({ error: 'campaign_id required' }, { status: 400 });
   }
 
-  const activePeriod = await getActivePeriod(projectId);
+  const activePeriodRead = await getActivePeriod(projectId);
+  if (activePeriodRead.error) {
+    return NextResponse.json({ error: activePeriodRead.error }, { status: 500 });
+  }
+  const activePeriod = activePeriodRead.data;
   const { error } = activePeriod
     ? await supabaseInstantly
         .from('project_period_instantly_campaigns')

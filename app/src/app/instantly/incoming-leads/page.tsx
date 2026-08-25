@@ -324,9 +324,12 @@ function ForwardToClientDialog({
 /* ─── Forward via Email (reply with CC) ──────────────────────────────────────── */
 
 function ForwardEmailDialog({
-  qualificationId, companyName, campaignId, leadEmail, onClose, onForwarded,
+  qualificationId, companyName, onClose, onForwarded,
 }: {
-  qualificationId: string; companyName?: string | null; campaignId?: string; leadEmail?: string; onClose: () => void; onForwarded: () => void;
+  qualificationId: string;
+  companyName?: string | null;
+  onClose: () => void;
+  onForwarded: () => void;
 }) {
   const [clientEmail, setClientEmail] = useState('');
   const [replyText, setReplyText] = useState('Добрый день! Скоро свяжемся с вами с основной почты.');
@@ -377,7 +380,11 @@ function ForwardEmailDialog({
         <div className="space-y-3">
           {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
 
-          <MacroPicker companyName={companyName} campaignId={campaignId} leadEmail={leadEmail} onSelect={setReplyText} />
+          <MacroPicker
+            qualificationId={qualificationId}
+            companyName={companyName}
+            onSelect={setReplyText}
+          />
 
           <div>
             <label className="block text-xs font-medium text-zinc-500 mb-1">Email клиента (CC) — можно несколько через запятую</label>
@@ -421,9 +428,11 @@ function ForwardEmailDialog({
 /* ─── Macro Picker (shared between Reply and Forward dialogs) ────────────────── */
 
 function MacroPicker({
-  companyName, campaignId, leadEmail, onSelect,
+  qualificationId, companyName, onSelect,
 }: {
-  companyName?: string | null; campaignId?: string; leadEmail?: string; onSelect: (text: string) => void;
+  qualificationId?: string;
+  companyName?: string | null;
+  onSelect: (text: string) => void;
 }) {
   const [userMacros, setUserMacros] = useState<ReplyMacro[]>([]);
   const [showAdd, setShowAdd] = useState(false);
@@ -456,11 +465,12 @@ function MacroPicker({
   };
 
   const handleMacroClick = async (macro: ReplyMacro) => {
-    if (macro.id === 'sys-1' && campaignId && leadEmail) {
+    if (macro.id === 'sys-1' && qualificationId) {
       setLoadingProposal(true);
       try {
         const res = await fetchWithAuth<{ text: string | null; step: number }>(
-          `/api/instantly/qualified-leads/thread-outbound?campaign_id=${campaignId}&lead_email=${encodeURIComponent(leadEmail)}`,
+          '/api/instantly/qualified-leads/thread-outbound' +
+            `?qualification_id=${encodeURIComponent(qualificationId)}`,
         );
         let body = macro.body;
         if (res.text) {
@@ -572,9 +582,13 @@ function MacroPicker({
 /* ─── Reply to lead (no CC) ──────────────────────────────────────────────────── */
 
 function ReplyDialog({
-  qualificationId, initialText, companyName, campaignId, leadEmail, onClose, onSent,
+  qualificationId, initialText, companyName, onClose, onSent,
 }: {
-  qualificationId: string; initialText?: string; companyName?: string | null; campaignId?: string; leadEmail?: string; onClose: () => void; onSent: () => void;
+  qualificationId: string;
+  initialText?: string;
+  companyName?: string | null;
+  onClose: () => void;
+  onSent: () => void;
 }) {
   const [replyText, setReplyText] = useState(initialText ?? '');
   const [sending, setSending] = useState(false);
@@ -623,7 +637,11 @@ function ReplyDialog({
         <div className="space-y-3">
           {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
 
-          <MacroPicker companyName={companyName} campaignId={campaignId} leadEmail={leadEmail} onSelect={setReplyText} />
+          <MacroPicker
+            qualificationId={qualificationId}
+            companyName={companyName}
+            onSelect={setReplyText}
+          />
 
           <div>
             <textarea
@@ -903,8 +921,6 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
             qualificationId={item.id}
             initialText={item.objection_draft ?? ''}
             companyName={item.company_name}
-            campaignId={item.campaign_id}
-            leadEmail={item.lead_email}
             onClose={() => setShowReply(false)}
             onSent={() => { setShowReply(false); onRefresh(); }}
           />
@@ -920,8 +936,6 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
           <ForwardEmailDialog
             qualificationId={item.id}
             companyName={item.company_name}
-            campaignId={item.campaign_id}
-            leadEmail={item.lead_email}
             onClose={() => setShowEmailForward(false)}
             onForwarded={() => { setShowEmailForward(false); onRefresh(); }}
           />

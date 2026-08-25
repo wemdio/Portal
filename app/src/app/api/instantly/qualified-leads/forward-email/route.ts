@@ -3,6 +3,10 @@ import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import * as instantly from '@/lib/instantly/client';
 import { textToReplyHtml } from '@/lib/clientCampaignReplies/bodyHtml';
+import {
+  loadAuthorizedQualification,
+  qualifiedLeadAccessErrorResponse,
+} from '@/lib/instantly/qualifiedLeadAuthorization';
 
 export const dynamic = 'force-dynamic';
 
@@ -47,15 +51,9 @@ export const POST = withAuth(async (req, user) => {
     }
   }
 
-  const { data: qual, error: qualErr } = await supabaseInstantly
-    .from('instantly_lead_qualifications')
-    .select('*')
-    .eq('id', qualification_id)
-    .single();
-
-  if (qualErr || !qual) {
-    return NextResponse.json({ error: 'Квалификация не найдена' }, { status: 404 });
-  }
+  const authorization = await loadAuthorizedQualification(user.id, qualification_id);
+  if (!authorization.ok) return qualifiedLeadAccessErrorResponse(authorization);
+  const qual = authorization.qualification;
 
   const instantlyEmailId = qual.instantly_email_id as string | null;
   if (!instantlyEmailId) {

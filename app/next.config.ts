@@ -1,6 +1,17 @@
 import type { NextConfig } from "next";
 import { config } from 'dotenv';
 import { resolve } from 'path';
+
+// Capture CI identity before dotenv loads project files with `override: true`.
+// A local/project env file must never be able to disable Next's typecheck.
+const semaphoreBranchCiRequestedTypecheckSkip =
+  process.env.CI === 'true' &&
+  process.env.SEMAPHORE === 'true' &&
+  process.env.SEMAPHORE_GIT_REF_TYPE === 'branch' &&
+  Boolean(process.env.SEMAPHORE_GIT_BRANCH) &&
+  !['main', 'test'].includes(process.env.SEMAPHORE_GIT_BRANCH ?? '') &&
+  process.env.NEXT_BUILD_SKIP_TYPECHECK === '1';
+
 // UI_ONLY=1 skips loading the real ../.env — no Supabase env means middleware
 // disables auth (renders pages without login) and the browser client falls
 // back to a dead URL, so data fetches surface empty/error states. Lets the UI
@@ -14,9 +25,16 @@ if (process.env.UI_ONLY !== '1') {
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+// В branch CI отдельная параллельная job уже запускает `next typegen` и строгий
+// `tsc --noEmit`. Там пропускаем только дублирующую проверку Next, которая не
+// помещается в 4 ГБ e1-standard-2. Локальные/protected/production-сборки строгие.
+const skipDuplicateCiTypecheck = semaphoreBranchCiRequestedTypecheckSkip;
 
 const nextConfig: NextConfig = {
   /* config options here */
+  typescript: {
+    ignoreBuildErrors: skipDuplicateCiTypecheck,
+  },
   turbopack: {
     root: __dirname,
   },

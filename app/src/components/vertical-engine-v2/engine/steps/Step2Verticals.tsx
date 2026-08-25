@@ -104,7 +104,14 @@ function PctPill({ pct }: { pct: number }) {
       : pct >= 25
         ? 'bg-amber-100 text-amber-700'
         : 'bg-gray-100 text-gray-500';
-  return <span className={`${HE.pill} ${tone}`}>{pct}%</span>;
+  return (
+    <span
+      className={`${HE.pill} ${tone}`}
+      title="Потенциал сегмента (0–100) — оценка привлекательности сегмента как рынка для аутрича. Это не прогноз reply%."
+    >
+      {pct}%
+    </span>
+  );
 }
 
 export interface Step2VerticalsProps {

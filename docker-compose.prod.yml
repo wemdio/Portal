@@ -1,6 +1,6 @@
 # Лимиты memory+cpus — потолки; суммы ≤90-95 % от 32 vCPU / 64 GB RAM.
 # Сервер: 2×Xeon E5-2670 (16C/32T) / 64 GB / 1 TB HDD SFF / HW RAID / 2×PSU.
-# CPU: 29.15 / 32 = 91 %; RAM: 61 184 / 65 536 = 93 %. Остаток — ОС и Docker daemon.
+# CPU: 29.65 / 32 = 93 %; RAM: 61 952 / 65 536 = 95 %. Остаток — ОС и Docker daemon.
 # 2026-07-22: full rebuild trigger after DB migration to 139 — rebake NEXT_PUBLIC_SUPABASE_URL=https://polza-portal.ru into the client bundle.
 services:
   portal:
@@ -414,6 +414,32 @@ services:
           memory: 2048M
           cpus: '1'
           pids: 512
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  # Поиск ИНН по сайтам из «Работа с базами». Отдельный worker нужен, чтобы
+  # закрытие браузера не останавливало обработку и чтобы сетевой обход сайтов
+  # не блокировал быстрый матчинг уже известных ИНН в worker-inn-enrich.
+  worker-website-inn-lookup:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-website-inn-lookup
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WEBSITE_INN_LOOKUP_CONCURRENCY=${WEBSITE_INN_LOOKUP_CONCURRENCY:-5}
+      - WORKER_KIND=websiteinnlookup
+    stop_grace_period: 2m
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '0.5'
+          pids: 256
     restart: unless-stopped
     networks:
       - portal-network

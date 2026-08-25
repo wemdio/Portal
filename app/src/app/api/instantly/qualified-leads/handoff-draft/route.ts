@@ -3,6 +3,10 @@ import { withAuth, jsonError } from '@/lib/instantly/apiRouteHelper';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { buildHandoffDraft } from '@/lib/instantly/handoffLegend';
+import {
+  loadAuthorizedQualification,
+  qualifiedLeadAccessErrorResponse,
+} from '@/lib/instantly/qualifiedLeadAuthorization';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,47 +28,35 @@ const API_KEY = () =>
  * ДОСЛОВНО (+ подстановка имени); ON — ИИ адаптирует легенду под ответ лида.
  * Легенды нет (и override не передан) — пустой драфт, спец пишет руками.
  */
-export const POST = withAuth(async (req) => {
-  if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
+export const POST = withAuth(async (req, user) => {
+  if (!supabaseInstantly || !supabaseAdmin) return jsonError('Server misconfigured', 500);
 
   const { qualification_id, framing } = (await req.json()) as DraftBody;
   if (!qualification_id) return jsonError('qualification_id обязателен', 400);
 
-  const { data: qual, error } = await supabaseInstantly
-    .from('instantly_lead_qualifications')
-    .select('lead_name, campaign_id, reply_body, reply_preview, last_outbound_preview')
-    .eq('id', qualification_id)
-    .single();
+  const authorization = await loadAuthorizedQualification(user.id, qualification_id);
+  if (!authorization.ok) return qualifiedLeadAccessErrorResponse(authorization);
+  const { qualification: qual, projectId } = authorization;
+  if (!projectId) return jsonError('Проект квалификации не найден', 403);
 
-  if (error || !qual) return jsonError('Квалификация не найдена', 404);
+  const { data: project, error: projectError } = await supabaseAdmin
+    .from('projects')
+    .select('handoff_legend, handoff_ai_adapt, specialist_user_id')
+    .eq('id', projectId)
+    .single();
+  if (projectError || !project) {
+    return jsonError('Проект кампании не найден', 404);
+  }
+  if ((project.specialist_user_id as string | null) !== user.id) {
+    return jsonError('Доступ к лиду запрещён', 403);
+  }
 
   // Легенда: per-request override ИЛИ легенда проекта кампании.
   let legend = (framing ?? '').trim();
   let aiAdapt = false;
   if (!legend) {
-    const campaignId = (qual.campaign_id as string | null) ?? '';
-    if (!campaignId) return NextResponse.json({ draft: '' });
-    const { data: periodLinks } = await supabaseInstantly
-      .from('project_period_instantly_campaigns')
-      .select('project_id')
-      .eq('campaign_id', campaignId);
-    const { data: legacyLinks } = await supabaseInstantly
-      .from('project_instantly_campaigns')
-      .select('project_id')
-      .eq('campaign_id', campaignId);
-    const projectIds = [...(periodLinks ?? []), ...(legacyLinks ?? [])]
-      .map((l: { project_id?: string | null }) => l.project_id)
-      .filter((id): id is string => Boolean(id));
-    if (projectIds.length > 0 && supabaseAdmin) {
-      const { data: project } = await supabaseAdmin
-        .from('projects')
-        .select('handoff_legend, handoff_ai_adapt')
-        .in('id', projectIds)
-        .limit(1)
-        .maybeSingle();
-      legend = ((project?.handoff_legend as string | null) ?? '').trim();
-      aiAdapt = Boolean(project?.handoff_ai_adapt);
-    }
+    legend = ((project.handoff_legend as string | null) ?? '').trim();
+    aiAdapt = Boolean(project.handoff_ai_adapt);
   }
 
   // Пустой драфт (нет легенды) — спец напишет текст руками, как до ИИ-превью.

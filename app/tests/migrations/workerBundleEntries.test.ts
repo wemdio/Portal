@@ -62,6 +62,24 @@ describe('worker bundle entry lists point at real files', () => {
     expect(deployTargets).toMatch(/ALL_WORKER_SERVICES="[^"]*\bworker-inn-enrich\b/);
   });
 
+  it('prod compose runs website INN lookup outside the browser', () => {
+    const yml = fs.readFileSync(path.join(REPO_ROOT, 'docker-compose.prod.yml'), 'utf8');
+    expect(yml).toMatch(/container_name:\s*portal-worker-website-inn-lookup/);
+    expect(yml).toMatch(/WORKER_KIND=websiteinnlookup/);
+    const runner = fs.readFileSync(path.join(REPO_ROOT, 'app', 'worker', 'runner.ts'), 'utf8');
+    expect(runner).toMatch(/case 'websiteinnlookup'/);
+    expect(fs.existsSync(path.join(REPO_ROOT, 'app', 'worker', 'websiteInnLookup.ts'))).toBe(true);
+    const dockerfile = fs.readFileSync(path.join(REPO_ROOT, 'Dockerfile.worker'), 'utf8');
+    expect(dockerfile).toMatch(/worker\/websiteInnLookup\.ts/);
+    const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'app', 'package.json'), 'utf8'));
+    expect(pkg.scripts['build:workers']).toMatch(/worker\/websiteInnLookup\.ts/);
+    const deployTargets = fs.readFileSync(
+      path.join(REPO_ROOT, '.semaphore', 'select-deploy-targets.sh'),
+      'utf8',
+    );
+    expect(deployTargets).toMatch(/ALL_WORKER_SERVICES="[^"]*\bworker-website-inn-lookup\b/);
+  });
+
   it('every *Cron.ts in build:workers is also bundled in Dockerfile.worker', () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'app', 'package.json'), 'utf8'));
     const dockerEntries = workerEntriesFrom(fs.readFileSync(path.join(REPO_ROOT, 'Dockerfile.worker'), 'utf8'));

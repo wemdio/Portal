@@ -74,6 +74,57 @@ function formatDate(iso: string | null): string {
   return `${dd}.${mm}.${d.getFullYear()}`;
 }
 
+/** Текстовое значение ячейки для копирования (зеркалит switch рендера). */
+function cellText(row: BoardRow, key: string): string {
+  switch (key) {
+    case 'phone': return row.phone ?? '';
+    case 'email': return row.lead_email ?? '';
+    case 'name': return row.lead_name ?? '';
+    case 'company': return row.company_name ?? '';
+    case 'website': return row.website ?? '';
+    case 'request': return row.request_text ?? '';
+    case 'quality': return row.quality ?? '';
+    case 'comment': return row.comment ?? '';
+    case 'campaign': return row.campaign_name ?? '';
+    case 'step': return row.step_number != null ? String(row.step_number) : '';
+    case 'date': return formatDate(row.reply_timestamp);
+    case 'taken': return row.taken ? 'да' : '';
+    default: return row.custom?.[key] ?? '';
+  }
+}
+
+/** Убирает табы и переносы строк, чтобы TSV при вставке не разъезжался по колонкам/строкам. */
+function tsvEscape(v: string): string {
+  return v.replace(/\r\n?/g, ' ').replace(/\n/g, ' ').replace(/\t/g, ' ');
+}
+
+/** Копирование в буфер: Clipboard API + фолбэк на textarea (не-HTTPS/встроенные браузеры). */
+async function copyText(text: string): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // падаем в textarea-фолбэк
+    }
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 const CELL_INPUT =
   'w-full min-w-[5rem] bg-transparent border-b border-transparent hover:border-[var(--cp-divider-strong)] focus:border-[var(--cp-paper)] outline-none text-[13px] text-[var(--cp-paper-mute)] focus:text-[var(--cp-paper)] py-0.5 placeholder:text-[var(--cp-paper-faint)] disabled:opacity-50 transition-colors';
 const CELL_INPUT_MONO = `${CELL_INPUT} ds-mono text-[12px]`;
@@ -352,6 +403,25 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
   );
   const projectTitle = data.project.name || 'Проект';
 
+  function buildRowTsv(row: BoardRow): string {
+    return visibleColumns.map((c) => tsvEscape(cellText(row, c.key))).join('\t');
+  }
+
+  function buildTableTsv(): string {
+    const header = visibleColumns.map((c) => tsvEscape(columnLabel(c))).join('\t');
+    return [header, ...rows.map(buildRowTsv)].join('\n');
+  }
+
+  async function copyRow(row: BoardRow) {
+    const ok = await copyText(buildRowTsv(row));
+    setToast(ok ? 'Строка скопирована' : 'Не удалось скопировать');
+  }
+
+  async function copyAll() {
+    const ok = await copyText(buildTableTsv());
+    setToast(ok ? 'Таблица скопирована' : 'Не удалось скопировать');
+  }
+
   return (
     <div className="min-h-screen">
       <header className="border-b border-[var(--cp-divider)] px-4 md:px-6 py-5">
@@ -388,6 +458,13 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
             </button>
             <button onClick={() => setShowColPanel((v) => !v)} className="ds-btn-ghost">
               Колонки
+            </button>
+            <button
+              onClick={() => void copyAll()}
+              disabled={rows.length === 0}
+              className="ds-btn-secondary"
+            >
+              Копировать таблицу
             </button>
           </div>
           {showColPanel && (
@@ -544,7 +621,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                         {columnLabel(c)}
                       </th>
                     ))}
-                    <th className="w-16" />
+                    <th className="w-40" />
                   </tr>
                 </thead>
                 <tbody>
@@ -734,7 +811,13 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                               );
                           }
                         })}
-                        <td className="px-2.5 py-2 text-right">
+                        <td className="px-2.5 py-2 text-right whitespace-nowrap">
+                          <button
+                            onClick={() => void copyRow(row)}
+                            className="ds-mono uppercase text-[11px] tracking-[0.02em] text-[var(--cp-paper-faint)] hover:text-[var(--cp-paper)] transition-colors mr-3"
+                          >
+                            Копировать
+                          </button>
                           <button
                             onClick={() => void deleteRow(row.id)}
                             disabled={saving}

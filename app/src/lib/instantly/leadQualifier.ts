@@ -1,4 +1,5 @@
 import type { Email } from './types';
+import { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
 import * as instantly from './client';
 import { isPersonName } from '@/lib/enrich/extractors/nameQuality';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
@@ -237,12 +238,27 @@ const JUNK_REPLY_EXACT = new Set([
   '+', '-', '.', '..', '...', '?', '!', 'да', 'yes', 'угу', 'ага',
 ]);
 
+const DEFAULT_SHORT_COMMERCIAL_REQUESTS = new Set(['кп']);
+const CUSTOM_CRITERIA_SHORT_REPLY_CANDIDATES = new Set(['да', 'yes']);
+
+function normalizeShortReply(text: string): string {
+  return text.trim().toLowerCase().replace(/[.!?,;:«»"'`\s]+$/g, '').trim();
+}
+
 export function isJunkReply(text: string): boolean {
   if (!text) return true;
-  const normalized = text.trim().toLowerCase().replace(/[.!?,;:«»"'`\s]+$/g, '').trim();
+  const normalized = normalizeShortReply(text);
   if (normalized.length < 3) return true;
   if (normalized.length > 50) return false;
   return JUNK_REPLY_EXACT.has(normalized);
+}
+
+function shouldEvaluateShortReply(text: string, hasCustomCriteria: boolean): boolean {
+  const normalized = normalizeShortReply(text);
+  return (
+    DEFAULT_SHORT_COMMERCIAL_REQUESTS.has(normalized) ||
+    (hasCustomCriteria && CUSTOM_CRITERIA_SHORT_REPLY_CANDIDATES.has(normalized))
+  );
 }
 
 export function isProposalMessage(text: string): boolean {
@@ -271,16 +287,115 @@ const QUOTED_REPLY_BOUNDARY_PATTERNS = [
 ];
 const LETTER_TOKEN_START_SOURCE = String.raw`(?:^|[^A-Za-zА-ЯЁа-яё])`;
 const LETTER_TOKEN_END_SOURCE = String.raw`(?=$|[^A-Za-zА-ЯЁа-яё])`;
+const TEMPORARY_NOT_INTERESTED_SOURCE = String.raw`(?:(?:(?:нам|мне)\s+)?(?:сейчас|пока|на\s+данный\s+момент)\s+(?:(?:нам|мне)\s+)?(?:это\s+)?не\s+интересн(?:о|а|ы)|(?:(?:нам|мне)\s+)?(?:это\s+)?не\s+интересн(?:о|а|ы)\s+(?:сейчас|пока|на\s+данный\s+момент)|(?:(?:we(?:\s+are|'re)?|i(?:\s+am|'m)?|this|it)\s+)?not\s+interested\s+(?:right\s+now|now|at\s+the\s+moment))`;
+const TEMPORARY_NOT_INTERESTED_PATTERN = new RegExp(
+  String.raw`${LETTER_TOKEN_START_SOURCE}${TEMPORARY_NOT_INTERESTED_SOURCE}${LETTER_TOKEN_END_SOURCE}`,
+  'gi',
+);
+const TEMPORARY_REFUSAL_SOURCE = String.raw`(?:не\s+актуальн(?:о|а|ы)|не\s+готов(?:ы|а)?|не\s+сейчас|not\s+(?:relevant|ready|now)|${TEMPORARY_NOT_INTERESTED_SOURCE})`;
+const CATEGORICAL_REFUSAL_SOURCE = String.raw`(?:не\s+интересн(?:о|а|ы)|не\s+интересует|не\s+заинтересован(?:ы|а|о)?|нам\s+не\s+нужн(?:о|а|ы)|не\s+нужн(?:о|а|ы)|нам\s+(?:это\s+)?не\s+подходит|не\s+видим[^.!?\n]{0,40}возможност[а-яё]*[^.!?\n]{0,40}сотруднич[а-яё]*|не\s+рассматриваем|не\s+планиру(?:ем|ю)[^.!?\n]{0,40}сотруднич[а-яё]*|не\s+буд(?:ем|у)\s+(?:(?:с\s+вами|дальше|сейчас)\s+){0,2}(?:сотрудничать|обсуждать|созваниваться|встречаться|покупать|внедрять|заказывать|рассматривать)|нет\s+потребности|отказываемся|not\s+interested|we\s+(?:do\s+not|don't)\s+need|no\s+need)`;
 const EXPLICIT_REFUSAL_PATTERN = new RegExp(
-  String.raw`${LETTER_TOKEN_START_SOURCE}(?:не\s+актуальн(?:о|а|ы)|не\s+интересн(?:о|а|ы)|не\s+интересует|не\s+заинтересован(?:ы|а|о)?|не\s+готов(?:ы|а)?|нам\s+не\s+нужн(?:о|а|ы)|не\s+нужн(?:о|а|ы)|нам\s+(?:это\s+)?не\s+подходит|не\s+видим[^.!?\n]{0,40}возможност[а-яё]*[^.!?\n]{0,40}сотруднич[а-яё]*|не\s+рассматриваем|не\s+планиру(?:ем|ю)[^.!?\n]{0,40}сотруднич[а-яё]*|не\s+буд(?:ем|у)\s+(?:(?:с\s+вами|дальше|сейчас)\s+){0,2}(?:сотрудничать|обсуждать|созваниваться|встречаться|покупать|внедрять|заказывать|рассматривать)|нет\s+потребности|отказываемся|not\s+(?:interested|relevant|ready)|we\s+(?:do\s+not|don't)\s+need|no\s+need)${LETTER_TOKEN_END_SOURCE}`,
+  String.raw`${LETTER_TOKEN_START_SOURCE}(?:${TEMPORARY_REFUSAL_SOURCE}|${CATEGORICAL_REFUSAL_SOURCE})${LETTER_TOKEN_END_SOURCE}`,
+  'i',
+);
+const CATEGORICAL_REFUSAL_PATTERN = new RegExp(
+  String.raw`${LETTER_TOKEN_START_SOURCE}${CATEGORICAL_REFUSAL_SOURCE}${LETTER_TOKEN_END_SOURCE}`,
   'i',
 );
 const CONDITIONAL_INTEREST_PATTERN = new RegExp(
-  String.raw`${LETTER_TOKEN_START_SOURCE}(?:если(?!\s+(?:честно(?:\s+говоря)?|откровенно))|в\s+случае)${LETTER_TOKEN_END_SOURCE}[^.!?\n]{0,100}(?:интерес|сотруднич|свяж)`,
+  String.raw`${LETTER_TOKEN_START_SOURCE}(?:если(?!\s+(?:честно(?:\s+говоря)?|откровенно))|в\s+случае)${LETTER_TOKEN_END_SOURCE}[^.!?\n]{0,100}(?:интерес|сотруднич)`,
+  'i',
+);
+const TRAILING_CONDITIONAL_INTEREST_PATTERN = new RegExp(
+  String.raw`(?:интерес|сотруднич|cooperat|collaborat)[^.!?\n]{0,100}${LETTER_TOKEN_START_SOURCE}(?:если(?!\s+(?:честно(?:\s+говоря)?|откровенно))|в\s+случае|if)${LETTER_TOKEN_END_SOURCE}`,
   'i',
 );
 const THIRD_PARTY_INTEREST_PATTERN = new RegExp(
   String.raw`${LETTER_TOKEN_START_SOURCE}(?:коллегам|руководству|им|они)${LETTER_TOKEN_END_SOURCE}[^.!?\n]{0,80}(?:будет\s+)?интерес`,
+  'i',
+);
+const FUTURE_ONLY_COOPERATION_PATTERN = new RegExp(
+  String.raw`(?:(?:наде(?:юсь|емся)|буд(?:у|ем)\s+рад(?:а|ы)?|хотел(?:и|а)?\s+бы|hope)[^.!?\n]{0,100}(?:сотруднич[а-яё]*|cooperat(?:e|ion)|collaborat(?:e|ion))[^.!?\n]{0,40}(?:в\s+будущем|in\s+the\s+future)|(?:в\s+будущем|in\s+the\s+future)[^.!?\n]{0,40}(?:наде(?:юсь|емся)|буд(?:у|ем)\s+рад(?:а|ы)?|хотел(?:и|а)?\s+бы|hope)[^.!?\n]{0,100}(?:сотруднич[а-яё]*|cooperat(?:e|ion)|collaborat(?:e|ion)))`,
+  'i',
+);
+const FOLLOWUP_MATERIAL_REQUEST_PATTERN = new RegExp(
+  String.raw`${LETTER_TOKEN_START_SOURCE}(?:(?:пришлите|вышлите|отправьте|направьте|скиньте|предоставьте)|(?:можно|хотел(?:и|а)?\s+бы)\s+(?:получить|посмотреть)|(?:send|share|forward|provide))[^.!?\n]{0,100}?(?:предложен[а-яё]*|информац[а-яё]*|материал[а-яё]*|презентац[а-яё]*|кейс[а-яё]*|пример[а-яё]*|proposal|information|materials?|presentation|case\s+stud(?:y|ies)|examples?)${LETTER_TOKEN_END_SOURCE}`,
+  'i',
+);
+const FOLLOWUP_MATERIAL_SUBJECT_PATTERN = /(?:предложен[а-яё]*|информац[а-яё]*|материал[а-яё]*|презентац[а-яё]*|кейс[а-яё]*|пример[а-яё]*|proposal|information|materials?|presentation|case\s+stud(?:y|ies)|examples?)/i;
+const NEGATED_FOLLOWUP_MATERIAL_REQUEST_PATTERN = new RegExp(
+  String.raw`${LETTER_TOKEN_START_SOURCE}(?:не\s+(?:присылайте|высылайте|отправляйте|направляйте|скидывайте|предоставляйте)|(?:не\s+(?:нужно|надо)|don't|do\s+not)\s*(?:,\s*)?(?:(?:пожалуйста|please)\s*,?\s*)?(?:присылать|высылать|отправлять|направлять|скидывать|send|share|forward|provide))${LETTER_TOKEN_END_SOURCE}`,
+  'i',
+);
+const DIRECT_COMMERCIAL_SUBJECT_SOURCE = String.raw`(?:кп|коммерческ[а-яё]*\s+предложен[а-яё]*|прайс[а-яё]*|цен(?:а|ы|е|у|ой|ами|ах)?|стоимост(?:ь|и|ью|ям|ями|ях)|тариф(?:а|ы|ов|у|ам|ом|ами|е|ах)?|расч[её]т(?:а|у|ом|ы|ов|ам|ами|ах)?|смет(?:а|ы|е|у|ой|ами|ах)|commercial\s+proposal|quote|pric(?:e|es|ing)|costs?|rates?|estimates?)`;
+const NEGATED_REQUEST_SUBJECT_PATTERN = new RegExp(
+  String.raw`(?:${FOLLOWUP_MATERIAL_SUBJECT_PATTERN.source}|${DIRECT_COMMERCIAL_SUBJECT_SOURCE})`,
+  'i',
+);
+const DIRECT_COMMERCIAL_REQUEST_PATTERN = new RegExp(
+  String.raw`(?:^\s*(?:кп|коммерческ[а-яё]*\s+предложен[а-яё]*|quote)\s*$|${LETTER_TOKEN_START_SOURCE}(?:(?:пришлите|вышлите|отправьте|направьте|скиньте|предоставьте|подготовьте|дайте)|(?:можно|хотел(?:и|а)?\s+бы)\s+(?:получить|посмотреть)|(?:send|share|forward|provide))[^.!?\n]{0,100}${LETTER_TOKEN_START_SOURCE}${DIRECT_COMMERCIAL_SUBJECT_SOURCE}${LETTER_TOKEN_END_SOURCE})`,
+  'i',
+);
+const NEGATED_REQUEST_PREFIX_PATTERN = /(?:не|don't|do\s+not)\s*(?:,\s*)?(?:пожалуйста|please)?(?:,\s*)?$/i;
+const EXCLUDED_COMMERCIAL_SUBJECT_PREFIX_PATTERN = /(?:(?:^|[^A-Za-zА-ЯЁа-яё])(?:без(?:\s+(?:указания|информации)(?:\s+о)?)?|не\s+(?:указывайте|включайте|добавляйте))|\b(?:without|(?:do\s+not|don't)\s+(?:include|mention|add)))\s*$/i;
+const EXCLUDED_COMMERCIAL_SUBJECT_SUFFIX_PATTERN = /^\s*(?:(?:можно|можете)\s+)?не\s+(?:указывать|указывайте|включать|включайте|добавлять|добавляйте)|^\s*(?:need\s+not|should\s+not)\s+be\s+(?:included|mentioned|added)/i;
+const DIRECT_COMMERCIAL_QUERY_PATTERNS = [
+  /(?:сколько|поч[её]м)[^.!?\n]{0,30}(?:стоит|будет\s+стоить)/i,
+  /(?:какая|каков[аы]?|уточните|подскажите)[^.!?\n]{0,30}(?:цена|стоимость)/i,
+  /какие[^.!?\n]{0,30}(?:тарифы|расценки)/i,
+  /what[^.!?\n]{0,40}(?:price|cost|rates?|pricing)/i,
+];
+const DIRECT_PURCHASE_INTENT_PATTERNS = [
+  /готов(?:ы|а)?\s+(?:купить|приобрести|заказать|оформить)/i,
+  /(?:выставляйте|выставьте|направьте|пришлите)\s+(?:нам\s+)?сч[её]т/i,
+  /(?:we(?:'re|\s+are)|i(?:'m|\s+am))\s+ready\s+to\s+(?:buy|purchase|order)/i,
+  /send\s+(?:us\s+)?(?:an?\s+)?invoice/i,
+];
+const DEFERRED_TIME_SOURCE = String.raw`(?:позже|через\s+(?:(?:\d+|один|одну|два|две|три|пару|несколько)\s+)?(?:день|дня|дней|недел[юьиь]|недели|недель|месяц|месяца|месяцев|год|года|лет)|летом|осенью|зимой|весной|в\s+(?:январе|феврале|марте|апреле|мае|июне|июле|августе|сентябре|октябре|ноябре|декабре)|(?:на|в)\s+следующ(?:ей|ем|ий|ую)\s+(?:неделе|месяце|год|весну|лето|осень|зиму)|later|in\s+(?:(?:\d+|one|two|three|a\s+few)\s+)?(?:days?|weeks?|months?|years?)|next\s+(?:week|month|year|spring|summer|autumn|fall|winter))`;
+const DEFERRED_ACTION_SOURCE = String.raw`(?:(?:вернитесь|напишите|пишите|свяжитесь|позвоните|наберите|обратитесь)|давайте\s+(?:верн[её]мся|обсудим|созвонимся)|(?:я\s+)?(?:вернусь|напишу|свяжусь|позвоню)|(?:мы\s+)?(?:верн[её]мся|напишем|свяжемся|позвоним|обсудим|созвонимся|рассмотрим)|follow\s+up|write|contact|reach\s+out|call)`;
+const DEFERRED_ACTION_PATTERN = new RegExp(
+  String.raw`${LETTER_TOKEN_START_SOURCE}${DEFERRED_ACTION_SOURCE}${LETTER_TOKEN_END_SOURCE}`,
+  'gi',
+);
+const DEFERRED_TIME_MATCH_PATTERN = new RegExp(
+  String.raw`${LETTER_TOKEN_START_SOURCE}${DEFERRED_TIME_SOURCE}${LETTER_TOKEN_END_SOURCE}`,
+  'gi',
+);
+const DEFERRED_TIME_PATTERN = new RegExp(DEFERRED_TIME_SOURCE, 'gi');
+const DEFERRED_CLAUSE_BOUNDARY_PATTERN = /[.!?;\n]+|,\s*(?=(?:(?:а|но|зато|однако)(?=\s)|(?:but|however)\b))/i;
+const RUSSIAN_DEFERRED_THIRD_PARTY_POSSESSIVE_SOURCE = String.raw`(?:(?:наш(?:ему|им|ей)|мо(?:ему|им|ей)|ваш(?:ему|им|ей)|сво(?:ему|им|ей)|его|её|их)\s+)?`;
+const RUSSIAN_DEFERRED_ROLE_QUALIFIER_SOURCE = String.raw`(?:(?:коммерческ|финансов|генеральн|техническ|исполнительн|операционн|закупочн|профильн)[а-яё]*\s+){0,2}`;
+const RUSSIAN_DEFERRED_THIRD_PARTY_ROLE_SOURCE = String.raw`(?:${RUSSIAN_DEFERRED_ROLE_QUALIFIER_SOURCE}(?:коллег(?:ам|ами|е|ой)|руководств(?:у|ом)|руководител(?:ю|ем)|директор(?:у|ом)|менеджер(?:у|ом)|сотрудник(?:у|ом)|специалист(?:у|ом)|команд(?:е|ой)|отдел(?:у|ом))|ответственн(?:ому|ым)(?:\s+за\s+[A-Za-zА-ЯЁа-яё\s-]{1,40})?\s+(?:сотрудник(?:у|ом)|специалист(?:у|ом)|менеджер(?:у|ом)|лиц(?:у|ом)))`;
+const ENGLISH_DEFERRED_ROLE_QUALIFIER_SOURCE = String.raw`(?:(?:commercial|financial|general|technical|executive|operations?|sales|procurement)\s+){0,2}`;
+const DEFERRED_THIRD_PARTY_TARGET_SOURCE = String.raw`(?:${RUSSIAN_DEFERRED_THIRD_PARTY_POSSESSIVE_SOURCE}${RUSSIAN_DEFERRED_THIRD_PARTY_ROLE_SOURCE}|им|ему|ей|(?:(?:our|the|your|my|their)\s+)?${ENGLISH_DEFERRED_ROLE_QUALIFIER_SOURCE}(?:manager|team|colleague|director|responsible\s+(?:person|employee|manager)|staff\s+member)|them|him|her)`;
+const DEFERRED_THIRD_PARTY_ROUTING_PATTERN = new RegExp(
+  String.raw`${LETTER_TOKEN_START_SOURCE}${DEFERRED_ACTION_SOURCE}${LETTER_TOKEN_END_SOURCE}\s+(?:(?:(?:к|с|со)\s+)|(?:(?:with|to)\s+))?${DEFERRED_THIRD_PARTY_TARGET_SOURCE}${LETTER_TOKEN_END_SOURCE}`,
+  'i',
+);
+const PREPOSED_DEFERRED_THIRD_PARTY_ROUTING_PATTERN = new RegExp(
+  String.raw`${LETTER_TOKEN_START_SOURCE}(?:(?:к|с|со)\s+)?${DEFERRED_THIRD_PARTY_TARGET_SOURCE}${LETTER_TOKEN_END_SOURCE}[^.!?;\n]{0,50}${DEFERRED_ACTION_SOURCE}${LETTER_TOKEN_END_SOURCE}`,
+  'i',
+);
+const NEGATED_DEFERRED_FOLLOWUP_PATTERN = new RegExp(
+  String.raw`${LETTER_TOKEN_START_SOURCE}(?:не\s+(?:пишите|связывайтесь|звоните|возвращайтесь|обращайтесь)|(?:не\s+(?:нужно|надо)|don't|do\s+not)\s+(?:писать|связываться|звонить|возвращаться|обращаться|write|contact|call|follow\s+up)|(?:я\s+)?не\s+(?:вернусь|напишу|свяжусь|позвоню)|(?:мы\s+)?не\s+(?:верн[её]мся|напишем|свяжемся|позвоним|обсудим|созвонимся|рассмотрим)|(?:i|we)\s+(?:will\s+not|won't)\s+(?:follow\s+up|write|contact|call|return))${LETTER_TOKEN_END_SOURCE}`,
+  'i',
+);
+const DEFERRED_SELF_TARGET_PATTERN = new RegExp(
+  String.raw`${LETTER_TOKEN_START_SOURCE}(?:мне|нам|со\s+мной|с\s+нами|ко\s+мне|к\s+нам|me|us)${LETTER_TOKEN_END_SOURCE}`,
+  'gi',
+);
+const NEGATED_DEFERRED_SELF_TARGET_PREFIX_PATTERN = /(?:не|not)\s*$/i;
+const NEGATED_SELF_CONTACT_CLAUSE_PATTERN = /(?:(?:мне|нам|со\s+мной|с\s+нами|ко\s+мне|к\s+нам)[^,;.!?\n]{0,35}(?:звонить|писать|связываться|обращаться)[^,;.!?\n]{0,20}не\s+(?:надо|нужно)|не\s+(?:надо|нужно)[^,;.!?\n]{0,25}(?:мне|нам|со\s+мной|с\s+нами|ко\s+мне|к\s+нам)[^,;.!?\n]{0,25}(?:звонить|писать|связываться|обращаться))/i;
+const DIRECT_ACTIONABLE_CTA_PATTERNS = [
+  /давайте[^.!?\n]{0,50}(?:созвонимся|встретимся|провед[её]м\s+встречу|обсудим)/i,
+  /(?:позвоните|наберите|свяжитесь)[^.!?\n]{0,30}(?:мне|со\s+мной|нам|с\s+нами)/i,
+  /(?:можете|можно)[^.!?\n]{0,30}(?:набрать|позвонить|связаться|созвониться|встретиться)/i,
+  /(?:запустим|начн[её]м|провед[её]м)[^.!?\n]{0,30}(?:тест|пилот|демо)/i,
+  /(?:let(?:'s|\s+us)|we\s+can)[^.!?\n]{0,50}(?:schedule|book|have|start|run)[^.!?\n]{0,30}(?:call|meeting|demo|test|pilot)/i,
+];
+const VAGUE_DEFERRED_INTEREST_PATTERN = /^(?:(?:возможно|может\s+быть|наверное)[,\s]+)?(?:когда-нибудь|позже|в\s+будущем)\s+(?:посмотрим|рассмотрим|ознакомимся|обсудим|верн[её]мся)(?:(?:\s+к\s+(?:этому|вопросу|предложению))|(?:\s+(?:ваше|это)\s+предложение))?(?:[.!?,\s]+(?:спасибо|благодарю|thanks|thank\s+you))?$/i;
+const NEGATED_SELF_SIGNAL_PREFIX_PATTERN = new RegExp(
+  String.raw`${LETTER_TOKEN_START_SOURCE}(?:не(?:\s+(?:очень|особо))?|вряд\s+ли|едва\s+ли)\s*$`,
   'i',
 );
 const SELF_COOPERATION_PATTERNS = [
@@ -425,7 +540,7 @@ function isPureNamedContactRouting(text: string): boolean {
   if (endsWithContactName(russianForwardMatch)) return true;
 
   const englishForwardMatch = text.match(
-    /^(?:(?:talk|write)\s+to|reach\s+out\s+to|contact)\s+(.+)$/i,
+    /^(?:(?:talk|write)\s+to|reach\s+out\s+to|contact|call)\s+(.+)$/i,
   );
   return endsWithContactName(englishForwardMatch);
 }
@@ -558,28 +673,462 @@ function normalizeAuthoredStatement(text: string): string {
     .trim();
 }
 
+function hasConditionalOrThirdPartyInterest(statement: string): boolean {
+  return (
+    CONDITIONAL_INTEREST_PATTERN.test(statement) ||
+    TRAILING_CONDITIONAL_INTEREST_PATTERN.test(statement) ||
+    THIRD_PARTY_INTEREST_PATTERN.test(statement)
+  );
+}
+
+function hasExplicitNegativeContext(statement: string): boolean {
+  return (
+    EXPLICIT_REFUSAL_PATTERN.test(statement) ||
+    hasConditionalOrThirdPartyInterest(statement)
+  );
+}
+
+function hasCategoricalNegativeContext(statement: string): boolean {
+  const withoutTemporaryNotInterested = statement.replace(
+    TEMPORARY_NOT_INTERESTED_PATTERN,
+    ' ',
+  );
+  return (
+    CATEGORICAL_REFUSAL_PATTERN.test(withoutTemporaryNotInterested) ||
+    hasConditionalOrThirdPartyInterest(statement)
+  );
+}
+
 function hasDirectPositiveInterest(authoredReply: string): boolean {
   const statement = normalizeAuthoredStatement(authoredReply);
-  return [
+  const patterns = [
     /^(?:(?:возможно|пожалуй)[,\s]+)?интересно$/i,
     /^(?:(?:возможно|пожалуй)[,\s]+)?(?:нам|мне)\s+(?:это\s+)?интересно(?:\s+(?:ваше|это)\s+предложение)?$/i,
     /^(?:(?:возможно|пожалуй)[,\s]+)?(?:это|ваше\s+предложение)\s+(?:выглядит\s+|звучит\s+)?интересно$/i,
     /^(?:выглядит|звучит)\s+интересно$/i,
     /^(?:(?:possibly|perhaps|maybe)[,\s]+)?(?:(?:we(?:'re|\s+are)|i(?:'m|\s+am))\s+)?interested$/i,
-  ].some((pattern) => pattern.test(statement));
+  ];
+  const candidates = [
+    statement,
+    ...statement
+      .split(/[.!?;\n]+|,\s*(?=(?:но|а|but)\s+)/i)
+      .map((clause) =>
+        normalizeAuthoredStatement(
+          clause.replace(/^(?:но|а|but)\s+/i, ''),
+        ),
+      ),
+  ].filter(Boolean);
+
+  return candidates.some((candidate) =>
+    patterns.some((pattern) => pattern.test(candidate)),
+  );
 }
 
 function hasSelfDirectedCooperationInterest(authoredReply: string): boolean {
   const statement = normalizeAuthoredStatement(authoredReply);
   if (
-    EXPLICIT_REFUSAL_PATTERN.test(statement) ||
-    CONDITIONAL_INTEREST_PATTERN.test(statement) ||
-    THIRD_PARTY_INTEREST_PATTERN.test(statement)
+    hasExplicitNegativeContext(statement) ||
+    FUTURE_ONLY_COOPERATION_PATTERN.test(statement)
   ) {
     return false;
   }
 
+  return SELF_COOPERATION_PATTERNS.some((pattern) => {
+    const match = pattern.exec(statement);
+    if (!match) return false;
+    const prefix = statement.slice(0, match.index);
+    return !NEGATED_SELF_SIGNAL_PREFIX_PATTERN.test(prefix);
+  });
+}
+
+function hasStandaloneFutureCooperationInterest(authoredReply: string): boolean {
+  const statement = normalizeAuthoredStatement(authoredReply);
+  if (hasExplicitNegativeContext(statement)) {
+    return false;
+  }
+
+  const futureMatch = FUTURE_ONLY_COOPERATION_PATTERN.exec(statement);
+  if (!futureMatch) return false;
+  const meaningfulPrefix = statement
+    .slice(0, futureMatch.index)
+    .replace(/[\s,.;:!?\-–—]+/g, '');
+  if (meaningfulPrefix) return false;
+
   return SELF_COOPERATION_PATTERNS.some((pattern) => pattern.test(statement));
+}
+
+function hasRequestedFollowupMaterials(authoredReply: string): boolean {
+  const statement = normalizeAuthoredStatement(authoredReply);
+  if (hasExplicitNegativeContext(statement)) {
+    return false;
+  }
+  return isFollowupMaterialRequest(statement);
+}
+
+function hasNonNegatedPatternMatch(statement: string, pattern: RegExp): boolean {
+  return Array.from(
+    statement.matchAll(new RegExp(pattern.source, 'gi')),
+  ).some((match) => {
+    if (typeof match.index !== 'number') return false;
+    const prefix = statement.slice(Math.max(0, match.index - 40), match.index);
+    return !NEGATED_REQUEST_PREFIX_PATTERN.test(prefix);
+  });
+}
+
+function isFollowupMaterialRequest(statement: string): boolean {
+  return hasNonNegatedPatternMatch(statement, FOLLOWUP_MATERIAL_REQUEST_PATTERN);
+}
+
+function isNegatedFollowupMaterialRequest(statement: string): boolean {
+  return (
+    NEGATED_FOLLOWUP_MATERIAL_REQUEST_PATTERN.test(statement) &&
+    NEGATED_REQUEST_SUBJECT_PATTERN.test(statement)
+  );
+}
+
+function hasDirectActionableCta(authoredReply: string): boolean {
+  const statement = normalizeAuthoredStatement(authoredReply);
+  return (
+    !hasCategoricalNegativeContext(statement) &&
+    DIRECT_ACTIONABLE_CTA_PATTERNS.some((pattern) =>
+      findDirectActionableCtaMatches(statement, pattern).some(
+        (match) => !isDirectActionableCtaMatchNegated(statement, match),
+      ),
+    )
+  );
+}
+
+function findDirectActionableCtaMatches(
+  statement: string,
+  pattern: RegExp,
+): RegExpMatchArray[] {
+  return Array.from(statement.matchAll(new RegExp(pattern.source, 'gi')));
+}
+
+function isDirectActionableCtaMatchNegated(
+  statement: string,
+  match: RegExpMatchArray,
+): boolean {
+  if (typeof match.index !== 'number') return true;
+  const prefix = statement.slice(Math.max(0, match.index - 24), match.index);
+  const matchedText = match[0];
+  return (
+    /(?:^|[^A-Za-zА-ЯЁа-яё])(?:не|нельзя|not)\s*(?:вы\s+)?$/i.test(prefix) ||
+    /^(?:давайте|let(?:'s|\s+us))[^.!?\n]{0,25}(?:не|not)(?=$|[^A-Za-zА-ЯЁа-яё])/i.test(matchedText) ||
+    /^we\s+can(?:not|'t)\b/i.test(matchedText)
+  );
+}
+
+function hasNegatedDirectActionableCta(authoredReply: string): boolean {
+  const statement = normalizeAuthoredStatement(authoredReply);
+  return DIRECT_ACTIONABLE_CTA_PATTERNS.some((pattern) =>
+    findDirectActionableCtaMatches(statement, pattern).some((match) =>
+      isDirectActionableCtaMatchNegated(statement, match),
+    ),
+  );
+}
+
+function commercialRequestMatchHasPositiveSubject(
+  matchText: string,
+  followingText: string,
+): boolean {
+  return Array.from(
+    matchText.matchAll(new RegExp(DIRECT_COMMERCIAL_SUBJECT_SOURCE, 'gi')),
+  ).some((subjectMatch) => {
+    if (typeof subjectMatch.index !== 'number') return false;
+    const subjectPrefix = matchText.slice(
+      Math.max(0, subjectMatch.index - 45),
+      subjectMatch.index,
+    );
+    const subjectSuffix = (
+      matchText.slice(subjectMatch.index + subjectMatch[0].length) +
+      followingText
+    ).slice(0, 45);
+    return (
+      !EXCLUDED_COMMERCIAL_SUBJECT_PREFIX_PATTERN.test(subjectPrefix) &&
+      !EXCLUDED_COMMERCIAL_SUBJECT_SUFFIX_PATTERN.test(subjectSuffix)
+    );
+  });
+}
+
+function hasActionableDirectCommercialRequest(authoredReply: string): boolean {
+  const statement = normalizeAuthoredStatement(authoredReply);
+  if (hasCategoricalNegativeContext(statement)) return false;
+
+  if (
+    DIRECT_COMMERCIAL_QUERY_PATTERNS.some((pattern) => pattern.test(statement)) ||
+    DIRECT_PURCHASE_INTENT_PATTERNS.some((pattern) => pattern.test(statement))
+  ) {
+    return true;
+  }
+
+  const matches = statement.matchAll(
+    new RegExp(DIRECT_COMMERCIAL_REQUEST_PATTERN.source, 'gi'),
+  );
+  return Array.from(matches).some((match) => {
+    if (typeof match.index !== 'number') return false;
+    const prefix = statement.slice(Math.max(0, match.index - 40), match.index);
+    const followingText = statement.slice(
+      match.index + match[0].length,
+      match.index + match[0].length + 45,
+    );
+    return (
+      !NEGATED_REQUEST_PREFIX_PATTERN.test(prefix) &&
+      commercialRequestMatchHasPositiveSubject(match[0], followingText)
+    );
+  });
+}
+
+interface TextSpan {
+  start: number;
+  end: number;
+}
+
+function findPatternSpans(text: string, pattern: RegExp): TextSpan[] {
+  return Array.from(text.matchAll(new RegExp(pattern.source, pattern.flags)))
+    .filter((match) => typeof match.index === 'number')
+    .map((match) => ({
+      start: match.index,
+      end: match.index + match[0].length,
+    }));
+}
+
+function distanceBetweenSpans(left: TextSpan, right: TextSpan): number {
+  if (left.end <= right.start) return right.start - left.end;
+  if (right.end <= left.start) return left.start - right.end;
+  return 0;
+}
+
+function findLocalDeferredClauseStart(
+  clause: string,
+  previousAction: TextSpan | undefined,
+  action: TextSpan,
+): number {
+  if (!previousAction) return 0;
+
+  const betweenActions = clause.slice(previousAction.end, action.start);
+  const localBoundaries = Array.from(
+    betweenActions.matchAll(
+      /[,;:!?]|\s+(?:(?:а|но|и|затем|потом)(?=\s)|(?:and|but|then)\b)\s*/gi,
+    ),
+  );
+  const lastBoundary = localBoundaries.at(-1);
+  if (!lastBoundary || typeof lastBoundary.index !== 'number') {
+    return action.start;
+  }
+
+  return previousAction.end + lastBoundary.index + lastBoundary[0].length;
+}
+
+function findDeferredFollowupClauses(statement: string): string[] {
+  const matches = statement
+    .split(DEFERRED_CLAUSE_BOUNDARY_PATTERN)
+    .map((clause) => clause.trim())
+    .filter(Boolean)
+    .flatMap((clause) => {
+      const actions = findPatternSpans(clause, DEFERRED_ACTION_PATTERN);
+      const times = findPatternSpans(clause, DEFERRED_TIME_MATCH_PATTERN);
+      if (actions.length === 0 || times.length === 0) return [];
+
+      return times.flatMap((time) => {
+        const firstAction = actions[0];
+        const lastAction = actions.at(-1);
+        if (
+          firstAction &&
+          lastAction &&
+          actions.length > 1 &&
+          time.end <= firstAction.start &&
+          lastAction.end - time.start <= 140
+        ) {
+          return [clause];
+        }
+
+        const nearestAction = actions
+          .map((action, index) => ({
+            action,
+            index,
+            distance: distanceBetweenSpans(action, time),
+          }))
+          .sort((left, right) => left.distance - right.distance)[0];
+        if (!nearestAction || nearestAction.distance > 100) return [];
+
+        const previousAction = actions[nearestAction.index - 1];
+        const nextAction = actions[nearestAction.index + 1];
+        const start = findLocalDeferredClauseStart(
+          clause,
+          previousAction,
+          nearestAction.action,
+        );
+        const end = nextAction?.start ?? clause.length;
+        const deferredClause = clause
+          .slice(start, end)
+          .replace(/^[^A-Za-zА-ЯЁа-яё]+/, '')
+          .replace(/[^A-Za-zА-ЯЁа-яё]+$/, '')
+          .trim();
+        return deferredClause ? [deferredClause] : [];
+      });
+    });
+
+  return [...new Set(matches)];
+}
+
+function isDeferredThirdPartyRouting(clause: string): boolean {
+  const withoutTiming = clause
+    .replace(DEFERRED_TIME_PATTERN, ' ')
+    .replace(/,?\s*(?:пожалуйста|пож(?:алуйста)?-?та)\s*,?/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s,;:.!?\-–—]+|[\s,;:.!?\-–—]+$/g, '')
+    .replace(/^(?:а|но|зато|однако|but|however)\s+/i, '')
+    .trim();
+  return (
+    DEFERRED_THIRD_PARTY_ROUTING_PATTERN.test(withoutTiming) ||
+    PREPOSED_DEFERRED_THIRD_PARTY_ROUTING_PATTERN.test(withoutTiming) ||
+    isPlainContactRoutingReply(withoutTiming) ||
+    isSharedContactRoutingReply(withoutTiming)
+  );
+}
+
+function hasExplicitDeferredSelfTarget(clause: string): boolean {
+  return Array.from(
+    clause.matchAll(new RegExp(DEFERRED_SELF_TARGET_PATTERN.source, 'gi')),
+  ).some((match) => {
+    if (typeof match.index !== 'number') return false;
+    const localStart = Math.max(
+      clause.lastIndexOf(',', match.index - 1),
+      clause.lastIndexOf(';', match.index - 1),
+      clause.lastIndexOf('.', match.index - 1),
+      clause.lastIndexOf('!', match.index - 1),
+      clause.lastIndexOf('?', match.index - 1),
+    ) + 1;
+    const followingBoundaries = [',', ';', '.', '!', '?']
+      .map((separator) => clause.indexOf(separator, match.index + match[0].length))
+      .filter((index) => index >= 0);
+    const localEnd = followingBoundaries.length > 0
+      ? Math.min(...followingBoundaries)
+      : clause.length;
+    const localTargetClause = clause.slice(localStart, localEnd);
+    if (NEGATED_SELF_CONTACT_CLAUSE_PATTERN.test(localTargetClause)) return false;
+    const prefix = clause.slice(Math.max(0, match.index - 12), match.index);
+    return !NEGATED_DEFERRED_SELF_TARGET_PREFIX_PATTERN.test(prefix);
+  });
+}
+
+function hasExplicitDeferredFollowup(authoredReply: string): boolean {
+  const statement = normalizeAuthoredStatement(authoredReply);
+  if (hasCategoricalNegativeContext(statement)) return false;
+  return findDeferredFollowupClauses(statement).some(
+    (clause) =>
+      !NEGATED_DEFERRED_FOLLOWUP_PATTERN.test(clause) &&
+      (
+        hasExplicitDeferredSelfTarget(clause) ||
+        !isDeferredThirdPartyRouting(clause)
+      ),
+  );
+}
+
+interface ProtectedDefaultVerdict {
+  reason: string;
+  needsReview: boolean;
+}
+
+function protectedDefaultVerdict(
+  authoredReply: string,
+  confirmedProposal: boolean,
+): ProtectedDefaultVerdict | null {
+  const statement = normalizeAuthoredStatement(authoredReply);
+  const deferredClauses = findDeferredFollowupClauses(statement);
+  const validDeferredFollowup = hasExplicitDeferredFollowup(statement);
+  const actionableCommercialRequest = hasActionableDirectCommercialRequest(statement);
+  const actionableDirectCta = hasDirectActionableCta(statement);
+  const negatedDirectCta = hasNegatedDirectActionableCta(statement);
+  const requestedFollowupMaterials = isFollowupMaterialRequest(statement);
+  const selfCooperationInterest = hasSelfDirectedCooperationInterest(statement);
+
+  if (confirmedProposal && hasDirectPositiveInterest(statement)) {
+    return null;
+  }
+
+  if (
+    !validDeferredFollowup &&
+    !actionableCommercialRequest &&
+    !actionableDirectCta &&
+    !selfCooperationInterest &&
+    !(confirmedProposal && requestedFollowupMaterials) &&
+    negatedDirectCta
+  ) {
+    return {
+      reason: 'Получатель явно отверг предложенный звонок, встречу, тест или другой прямой CTA.',
+      needsReview: false,
+    };
+  }
+
+  if (
+    !validDeferredFollowup &&
+    !actionableCommercialRequest &&
+    !actionableDirectCta &&
+    !selfCooperationInterest &&
+    !requestedFollowupMaterials &&
+    isNegatedFollowupMaterialRequest(statement)
+  ) {
+    return {
+      reason: 'Получатель явно попросил не присылать материалы; коммерческого интереса в ответе нет.',
+      needsReview: false,
+    };
+  }
+
+  if (
+    !validDeferredFollowup &&
+    !actionableCommercialRequest &&
+    !actionableDirectCta &&
+    !selfCooperationInterest &&
+    requestedFollowupMaterials &&
+    (!confirmedProposal || hasExplicitNegativeContext(statement))
+  ) {
+    return {
+      reason: confirmedProposal
+        ? 'Явный отказ или условный интерес третьих лиц не становится лидом из-за просьбы о материалах.'
+        : 'Без подтверждённого оффера общая просьба прислать ознакомительные материалы не является лидом.',
+      needsReview: false,
+    };
+  }
+
+  if (
+    !confirmedProposal &&
+    hasVagueDeferredInterest(statement)
+  ) {
+    return {
+      reason: 'Без подтверждённого оффера неопределённый будущий интерес требует ручной проверки.',
+      needsReview: true,
+    };
+  }
+
+  if (
+    deferredClauses.length > 0 &&
+    !validDeferredFollowup &&
+    (
+      hasCategoricalNegativeContext(statement) ||
+      deferredClauses.some(
+        (clause) =>
+          NEGATED_DEFERRED_FOLLOWUP_PATTERN.test(clause) ||
+          isDeferredThirdPartyRouting(clause),
+      )
+    )
+  ) {
+    return {
+      reason: 'Категоричный отказ или перенаправление третьему лицу не является собственным отложенным интересом.',
+      needsReview: hasConditionalOrThirdPartyInterest(statement),
+    };
+  }
+
+  return null;
+}
+
+function hasVagueDeferredInterest(authoredReply: string): boolean {
+  const statement = normalizeAuthoredStatement(authoredReply);
+  return (
+    !hasExplicitNegativeContext(statement) &&
+    VAGUE_DEFERRED_INTEREST_PATTERN.test(statement)
+  );
 }
 
 function outboundRequestsOwnPhone(outboundText: string): boolean {
@@ -620,12 +1169,45 @@ function normalizeDefaultLeadSignals(
   const confirmedProposal =
     substantiveOutboundTexts.length > 0 || isSubstantiveOfferText(quotedText);
 
+  const protectedVerdict = protectedDefaultVerdict(
+    authoredReply,
+    confirmedProposal,
+  );
+  if (protectedVerdict) {
+    return {
+      ...result,
+      isLead: false,
+      interestSignals: [],
+      reason: protectedVerdict.reason,
+      confidence: Math.max(result.confidence, 0.95),
+      needsReview: protectedVerdict.needsReview,
+      objectionHandleable: false,
+      objectionDraft: null,
+    };
+  }
+
   let signal: string | null = null;
   let reason: string | null = null;
   if (confirmedProposal && hasDirectPositiveInterest(authoredReply)) {
     signal = 'положительный интерес к предложению';
     reason = 'Получатель прямо выразил положительный интерес к подтверждённому предложению.';
-  } else if (result.needsReview && hasSelfDirectedCooperationInterest(authoredReply)) {
+  } else if (hasActionableDirectCommercialRequest(authoredReply)) {
+    signal = 'прямой коммерческий запрос';
+    reason = 'Получатель прямо запросил коммерческое предложение, расчёт или цены.';
+  } else if (
+    hasExplicitDeferredFollowup(authoredReply) ||
+    hasStandaloneFutureCooperationInterest(authoredReply) ||
+    (confirmedProposal && hasVagueDeferredInterest(authoredReply))
+  ) {
+    signal = 'отложенный интерес';
+    reason = 'Получатель выразил собственный интерес и предложил вернуться к нему позже.';
+  } else if (hasDirectActionableCta(authoredReply)) {
+    signal = 'прямой следующий шаг';
+    reason = 'Получатель предложил прямой коммерчески значимый следующий шаг.';
+  } else if (confirmedProposal && hasRequestedFollowupMaterials(authoredReply)) {
+    signal = 'запрошены дополнительные материалы по предложению';
+    reason = 'После подтверждённого предложения получатель запросил дополнительные материалы.';
+  } else if (hasSelfDirectedCooperationInterest(authoredReply)) {
     signal = 'готовность к сотрудничеству';
     reason = 'Получатель самостоятельно выразил заинтересованность в возможном сотрудничестве.';
   } else if (
@@ -678,8 +1260,8 @@ function buildSystemPrompt(briefText?: string | null, leadCriteria?: string | nu
 ЗАДАЧА: определить категорию ответа.
 
 КАТЕГОРИИ:
-1. КВАЛИФИЦИРОВАННЫЙ ЛИД — клиент выразил собственный положительный интерес к полученному офферу или готовность к коммерчески значимому следующему действию: звонку, встрече, демо, тесту, пилоту, покупке, заказу, обсуждению условий или другому конкретному CTA. Также лидом является конкретный коммерческий запрос: КП или коммерческое предложение; цену, стоимость, тарифы, расчёт или смету.
-2. МОЖНО ОБРАБОТАТЬ ВОЗРАЖЕНИЕ — клиент видел предложение, но выразил сомнение, возражение или мягкий отказ, который можно обработать аргументами (например: "дорого", "не сейчас", "у нас уже есть подрядчик", "не уверен что нам это нужно"). НЕ прямой категоричный отказ.
+1. КВАЛИФИЦИРОВАННЫЙ ЛИД — клиент выразил собственный положительный интерес к полученному офферу или готовность к коммерчески значимому следующему действию: звонку, встрече, демо, тесту, пилоту, покупке, заказу, обсуждению условий или другому конкретному CTA. Явная просьба вернуться к разговору позже (через месяц, летом, в конкретный будущий период) — это отложенный CTA и тоже лид. Также лидом является конкретный коммерческий запрос: КП или коммерческое предложение; цену, стоимость, тарифы, расчёт или смету.
+2. МОЖНО ОБРАБОТАТЬ ВОЗРАЖЕНИЕ — клиент видел предложение, но выразил сомнение, возражение или мягкий отказ, который можно обработать аргументами (например: "дорого", "не сейчас" без просьбы вернуться позже, "у нас уже есть подрядчик", "не уверен что нам это нужно"). НЕ прямой категоричный отказ.
 3. НЕ ЛИД — автоответ, отписка, прямой отказ, простая передача контакта, общий запрос ознакомительной информации без коммерческого намерения или нейтральный ответ.
 
 КРИТЕРИЙ ЛИДА:
@@ -710,11 +1292,14 @@ function buildSystemPrompt(briefText?: string | null, leadCriteria?: string | nu
 - После подтверждённого оффера ответы «интересно», «нам интересно», «возможно, нам это интересно» выражают собственный положительный интерес: ставь is_lead=true, needs_review=false даже без назначенного следующего шага.
 - Самостоятельное «Надеюсь на возможное сотрудничество», «Будем рады сотрудничеству» или «Хотели бы сотрудничать» также является лидом, даже если исходящее письмо не восстановилось.
 - Выполнение прямого CTA из содержательного предложения — например, мы попросили личный номер, а человек передал свой номер — является лидом.
+- После подтверждённого оффера просьба прислать предложение, информацию, материалы, презентацию, кейсы или примеры означает продолжение интереса и является лидом. В том числе «пришлите материалы, возможно, когда-нибудь посмотрим». Но просьба о материалах не отменяет явный отказ или условный интерес третьих лиц.
+- Явный отложенный интерес — «вернитесь через месяц», «напишите летом», «через месяц напишите мне», «летом свяжитесь со мной», «сейчас не актуально, но напишите через месяц» — является лидом даже без восстановленного исходящего письма. Самостоятельная готовность сотрудничать в будущем тоже является лидом. Категоричный отказ («не интересно») и перенаправление к другому человеку, чужому менеджеру/коллеге или в общий отдел отложенным интересом не являются; дата такого перенаправления ничего не меняет.
+- После подтверждённого оффера неопределённое «возможно, когда-нибудь посмотрим» считается отложенным интересом. Без подтверждённого оффера такой ответ неоднозначен и идёт на проверку.
 - Явное отрицание («не интересно», «не актуально») и условный интерес третьих лиц («если коллегам будет интересно — они свяжутся») не являются положительным интересом самого получателя.
 
 ОБЩЕЕ ЛЮБОПЫТСТВО — НЕ ЛИД:
-- «пришлите предложение» без слова «коммерческое», без расчёта/цены и без конкретного следующего шага — это лишь просьба ознакомиться.
-- «пришлите информацию/материалы/презентацию», запрос примеров или кейсов сами по себе НЕ являются лидом: ставь is_lead=false, needs_review=false.
+- БЕЗ подтверждённого оффера «пришлите предложение» без слова «коммерческое», без расчёта/цены и без конкретного следующего шага — это лишь просьба ознакомиться.
+- БЕЗ подтверждённого оффера «пришлите информацию/материалы/презентацию», запрос примеров или кейсов сами по себе НЕ являются лидом: ставь is_lead=false, needs_review=false. После подтверждённого оффера это лид по правилу выше.
 - «расскажите подробнее» без конкретного следующего шага — ставь is_lead=false, needs_review=true.
 - Без подтверждённого оффера одиночное «интересно» остаётся неоднозначным: ставь is_lead=false, needs_review=true.
 - Запрос РАЗЪЯСНЕНИЯ («что вы предлагаете?», «о чём речь?», «что это за решение?», «в чём суть?») означает, что человек ещё не понял оффер: ставь is_lead=false, needs_review=true.
@@ -785,48 +1370,60 @@ function envNumber(name: string, fallback: number): number {
 /**
  * Fetch brief text for a campaign.
  * Source: campaign → project (via project_instantly_campaigns) → projects.brief_text.
- * Falls back to old instantly_brief_campaigns → instantly_briefs if project brief not found.
+ * Falls back to old instantly_brief_campaigns → instantly_briefs only for a
+ * campaign that has no managed project owner.
  */
-export async function fetchBriefByCampaign(campaignId: string): Promise<string | null> {
+export async function fetchBriefByCampaign(
+  campaignId: string,
+  ownerProof?: { projectId: string | null; ownershipProven: true },
+): Promise<string | null> {
   if (!supabaseInstantly) return null;
 
-  // Primary: get brief from project linked to this campaign
-  if (supabaseMain) {
-    const { data: periodLink } = await supabaseInstantly
-      .from('project_period_instantly_campaigns')
-      .select('project_id')
-      .eq('campaign_id', campaignId)
-      .limit(1)
-      .maybeSingle();
+  const owner = ownerProof?.ownershipProven
+    ? ownerProof.projectId
+      ? { status: 'resolved' as const, projectId: ownerProof.projectId }
+      : { status: 'none' as const }
+    : await resolveCampaignProjectOwner(supabaseInstantly, campaignId);
 
-    const { data: legacyLink } = periodLink?.project_id
-      ? { data: null }
-      : await supabaseInstantly
-      .from('project_instantly_campaigns')
-      .select('project_id')
-      .eq('campaign_id', campaignId)
-      .limit(1)
-      .maybeSingle();
-
-    const link = periodLink?.project_id ? periodLink : legacyLink;
-    if (link?.project_id) {
-      const { data: project } = await supabaseMain
-        .from('projects')
-        .select('brief_text')
-        .eq('id', link.project_id)
-        .maybeSingle();
-
-      if (project?.brief_text) return project.brief_text as string;
-    }
+  // An ambiguous managed owner has no safe project or legacy brief. The
+  // qualification worker normally records needs_review before this call, but
+  // throwing also keeps any present/future direct caller fail-closed.
+  if (owner.status === 'ambiguous') {
+    throw new Error(
+      `Campaign brief has multiple project owners: ${owner.projectIds.join(', ')}`,
+    );
   }
 
-  // Fallback: old instantly_briefs table (for campaigns not yet linked to projects)
-  const { data } = await supabaseInstantly
+  // A managed campaign may use only its exact project's brief. Falling back
+  // to the legacy campaign brief here can leak the previous owner's context
+  // after ownership changes. A read failure is transient and must propagate so
+  // the worker retries instead of permanently qualifying with a default brief.
+  if (owner.status === 'resolved') {
+    if (!supabaseMain) {
+      throw new Error('Portal project database is unavailable while reading campaign brief');
+    }
+    const { data: project, error } = await supabaseMain
+      .from('projects')
+      .select('brief_text')
+      .eq('id', owner.projectId)
+      .maybeSingle();
+    if (error) throw new Error(`Project brief lookup failed: ${error.message}`);
+    return typeof project?.brief_text === 'string' && project.brief_text.trim()
+      ? project.brief_text
+      : null;
+  }
+
+  // Fallback: old instantly_briefs table for campaigns not linked to projects.
+  const { data, error } = await supabaseInstantly
     .from('instantly_brief_campaigns')
     .select('brief_id, instantly_briefs(brief_text)')
     .eq('campaign_id', campaignId)
     .limit(1)
     .maybeSingle();
+
+  if (error) {
+    throw new Error(`Legacy campaign brief lookup failed: ${error.message}`);
+  }
 
   if (!data) return null;
   const briefs = data.instantly_briefs as unknown as { brief_text: string } | null;
@@ -1217,6 +1814,7 @@ export async function qualifyReply(
   }
 
   const replyText = getBodyText(ctx.replyEmail.body);
+  const hasCustomCriteria = Boolean(aiOptions.leadCriteria?.trim());
 
   if (isAutoReplyOrUnsubscribe(replyText)) {
     return {
@@ -1233,7 +1831,7 @@ export async function qualifyReply(
     };
   }
 
-  if (isJunkReply(replyText)) {
+  if (isJunkReply(replyText) && !shouldEvaluateShortReply(replyText, hasCustomCriteria)) {
     return {
       isLead: false,
       customCriteriaMatched: false,
@@ -1253,7 +1851,6 @@ export async function qualifyReply(
   // Проверяем только основной ответ до подписи и quoted history. При кастомном
   // критерии модель должна сначала сообщить, совпало ли именно это правило.
   const sharedContactRouting = isSharedContactRoutingReply(replyText);
-  const hasCustomCriteria = Boolean(aiOptions.leadCriteria?.trim());
   if (sharedContactRouting && !hasCustomCriteria) {
     return {
       ...sharedContactRoutingNonLead(ctx),

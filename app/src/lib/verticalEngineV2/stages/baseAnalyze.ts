@@ -76,6 +76,7 @@ export async function runBaseAnalyzeStage(job: VeJob, ctx: VeStageContext): Prom
       columns,
       sampleRows,
       verticalName,
+      today: new Date().toISOString().slice(0, 10),
     }),
     VeBaseAnalysisSchema,
     { model: getVeModel('bulk'), maxTokens: 4096 },

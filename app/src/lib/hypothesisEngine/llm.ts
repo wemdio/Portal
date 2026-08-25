@@ -136,6 +136,24 @@ export function setHeActiveJobSignal(signal: AbortSignal | null): void {
   activeJobSignal = signal;
 }
 
+/**
+ * json_object-режим отвечает 400, если слово «json» не встречается ни в одном
+ * сообщении. Промпты в prompts/ формат упоминают, а инлайновые (system досье
+ * собирается в stages/dossier.ts) — нет, и такая стадия падала на каждом
+ * прогоне. Подсказку добавляем здесь, а не в каждом промпте.
+ */
+function withJsonModeHint(messages: LLMMessage[]): LLMMessage[] {
+  if (messages.some((m) => /json/i.test(m.content))) return messages;
+  return [
+    ...messages,
+    {
+      role: 'user',
+      content:
+        'Верни ответ строго как валидный JSON по схеме: без markdown-фенсов и без текста до/после.',
+    },
+  ];
+}
+
 async function rawCall(
   messages: LLMMessage[],
   model: string,
@@ -147,7 +165,7 @@ async function rawCall(
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getApiKey()}` },
     body: JSON.stringify({
       model,
-      messages,
+      messages: jsonMode ? withJsonModeHint(messages) : messages,
       max_tokens: maxTokens,
       ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
     }),
