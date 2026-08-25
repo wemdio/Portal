@@ -208,6 +208,10 @@ services:
       # на job ≈ ~900-1100MB (cheerio HTML + Playwright temp). 2G с запасом.
       - WEBSITE_ENRICHMENT_CONCURRENCY=${WEBSITE_ENRICHMENT_CONCURRENCY:-25}
       - ENRICH_MAX_CONCURRENCY=${ENRICH_MAX_CONCURRENCY:-8}
+      # Spreadsheet «Оценка ЦА»: две модельные пачки по 5 компаний параллельно.
+      # Код жёстко ограничивает значение диапазоном 1..4. Base Constructor
+      # использует другой worker и эту настройку не читает.
+      - BRIEF_SCORING_MODEL_CONCURRENCY=${BRIEF_SCORING_MODEL_CONCURRENCY:-2}
       # Coordinator pattern всегда включён (см. lib/enrich/enrichBuffer.ts):
       # scraper пишет результат в website_enrichment_results_buffer одной
       # строкой, worker-enrich-coordinator batch'ит в queue/cache/jobs.

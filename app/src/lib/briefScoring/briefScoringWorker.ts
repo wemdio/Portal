@@ -4,6 +4,10 @@ import { scoreBriefCompanies, type BriefScoringResult } from '@/lib/briefScoring
 import { applyBriefScoringResults } from '@/lib/spreadsheet/applyJobResults';
 import { startTrace } from '@/lib/tracer';
 import type { Span } from '@/lib/tracer';
+import {
+  mapBriefScoringWithConcurrency,
+  resolveBriefScoringConcurrency,
+} from '@/lib/briefScoring/concurrency';
 
 type QueueItem = {
   id: string;
@@ -34,6 +38,15 @@ const WORKER_BATCH_SIZE = Number(process.env.BRIEF_SCORING_WORKER_BATCH_SIZE ?? 
 // max_tokens ceiling — even if one batch truncates, the salvage parser in
 // `parseBriefScoringContent` rescues whatever items finished.
 const MODEL_BATCH_SIZE = Number(process.env.BRIEF_SCORING_MODEL_BATCH_SIZE ?? '5');
+// Две маленькие пачки по 5 компаний в полёте: почти 2x ускорение без роста
+// размера ответа модели и риска массовой truncation. Потолок (4) зашит в
+// resolveBriefScoringConcurrency, чтобы ошибочный env не устроил API-шторм.
+// Это относится только к spreadsheet brief_scoring_jobs; конструктор баз
+// использует отдельный stepTAScore и этим параметром не затрагивается.
+const MODEL_CONCURRENCY = resolveBriefScoringConcurrency(
+  process.env.BRIEF_SCORING_MODEL_CONCURRENCY,
+  2,
+);
 const MAX_ATTEMPTS = Number(process.env.BRIEF_SCORING_MAX_ATTEMPTS ?? '3');
 const STALE_PROCESSING_MINUTES = Number(process.env.BRIEF_SCORING_STALE_MINUTES ?? '5');
 const OPENROUTER_BRIEF_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY ?? '';
@@ -203,7 +216,12 @@ export async function runBriefScoringJob(jobId: string) {
 
     trace = await startTrace({
       name: 'database.brief_scoring',
-      input: { jobId, total: job.total },
+      input: {
+        jobId,
+        total: job.total,
+        modelBatchSize: MODEL_BATCH_SIZE,
+        modelConcurrency: MODEL_CONCURRENCY,
+      },
       message: `Скоринг по брифу (${job.total} компаний)`,
       userId: job.user_id,
       jobId,
@@ -268,8 +286,12 @@ export async function runBriefScoringJob(jobId: string) {
         continue;
       }
 
+      const chunks: QueueItem[][] = [];
       for (let i = 0; i < batch.length; i += MODEL_BATCH_SIZE) {
-        const chunk = batch.slice(i, i + MODEL_BATCH_SIZE);
+        chunks.push(batch.slice(i, i + MODEL_BATCH_SIZE));
+      }
+
+      await mapBriefScoringWithConcurrency(chunks, MODEL_CONCURRENCY, async (chunk) => {
 
         const overAttemptItems = chunk.filter((item) => MAX_ATTEMPTS > 0 && item.attempt_count > MAX_ATTEMPTS);
         for (const item of overAttemptItems) {
@@ -281,7 +303,7 @@ export async function runBriefScoringJob(jobId: string) {
         }
 
         const activeItems = chunk.filter((item) => !overAttemptItems.some((it) => it.id === item.id));
-        if (activeItems.length === 0) continue;
+        if (activeItems.length === 0) return;
 
         try {
           const scores = await scoreBriefCompanies({
@@ -340,7 +362,7 @@ export async function runBriefScoringJob(jobId: string) {
             batchSize: activeItems.length,
           });
         }
-      }
+      });
 
       await supabaseAdmin
         .from('brief_scoring_jobs')
@@ -393,6 +415,8 @@ export async function runBriefScoringJob(jobId: string) {
       processed: processedTotal,
       success: completedCount,
       errors: failedCount,
+      modelBatchSize: MODEL_BATCH_SIZE,
+      modelConcurrency: MODEL_CONCURRENCY,
     });
 
     if (
