@@ -25,7 +25,7 @@ MERGING RULES:
 - Different tiers MAY live in one vertical: a tier-3 hypothesis about neobanks goes into the same fintech vertical as a tier-1 about banks.
 
 VERTICAL FORMAT:
-- name — a short, natural English name (2–4 words), the way a sales director would call it.
+- name — a short, natural English name (2–4 words), the way a sales director would call it. The name MUST be clear to an outsider and NOT classifier/catalog jargon: FORBIDDEN are "B2B", "B2C", "B2G", "consumer services", "paid services", and OKVED/catalog-style labels. Instead of an umbrella "paid B2C services", name the concrete client company type: "private schools and tutoring", "medical clinics", "beauty salons".
 - summary — 1–2 sentences: who they are (client company type and DM class) and why they buy the client's product. If the vertical unites not an industry but a product use-case (e.g., "outbound for hiring" or "venture deal sourcing"), the summary MUST start with the words "Use-case vertical: …".
 - synonyms — ONLY alternative names for the same client company type: how this same segment is called in other sources (terms matter for the vocabulary and lead-base search). FORBIDDEN in synonyms: geographies ("Canada", "Mexico"), buyer personas ("HR Director"), deal elements ("franchise fee"), offers and value propositions ("Spanish-language outbound"). Every synonym must be a factually correct name of the CLIENT SEGMENT: if, for example, clinics in this vertical are the buyer rather than the client, then "dental clinics" is not a synonym.
 - member_titles — EXACT titles of hypotheses from the input list (copy character for character). Each hypothesis belongs to at most one vertical.
@@ -56,7 +56,8 @@ Self-check before answering:
 1) every title from the list appears exactly once across all member_titles combined; member_titles are copied exactly;
 2) each vertical holds one client company type and one DM class; no "supplier + its customer" gluing and no merges by a shared word;
 3) is every synonym another name for the same client company type? Remove geographies, personas, offers, and deal terms;
-4) the summary of use-case verticals starts with "Use-case vertical: ".`;
+4) the summary of use-case verticals starts with "Use-case vertical: ";
+5) every name is a natural human name with no B2B/B2C/B2G/OKVED jargon ("consumer services", "paid services"): it names a concrete client company type, not an umbrella category.`;
 
   return [
     { role: 'system', content: SYSTEM },
