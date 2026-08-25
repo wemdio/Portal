@@ -114,9 +114,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         userId,
         verticalId: id,
         baseId: result.base.id,
+        basesCount: result.bases.length,
       });
 
-      return NextResponse.json({ ok: true, base: result.base }, { status: 201 });
+      return NextResponse.json({ ok: true, base: result.base, bases: result.bases }, { status: 201 });
     },
   );
 }

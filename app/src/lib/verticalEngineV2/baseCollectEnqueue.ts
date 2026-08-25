@@ -48,8 +48,8 @@ export interface VeBaseCollectInput {
 }
 
 export type VeBaseCollectResult =
-  /** Сборка стартовала: создана новая база + джоба. */
-  | { ok: true; created: true; base: Record<string, unknown> }
+  /** Сборка стартовала: созданы базы + джобы (по одной на гипотезу либо одна). */
+  | { ok: true; created: true; bases: Array<Record<string, unknown>>; base: Record<string, unknown> }
   /** Дедуп: сборка уже идёт (существующая collecting-база). */
   | { ok: true; created: false; base: Record<string, unknown> }
   | { ok: false; message: string };
@@ -60,84 +60,36 @@ export async function enqueueVeBaseCollect(
 ): Promise<VeBaseCollectResult> {
   const { verticalId, projectId, verticalName, limit, hypothesisIds, filename, refill } = input;
 
-  // Дедуп 1: уже собирающаяся auto-база этой вертикали.
-  const { data: collecting, error: collErr } = await supabase
-    .from('ve_bases')
-    .select('id, status, collect_info')
-    .eq('vertical_id', verticalId)
-    .eq('source', 'auto')
-    .eq('status', 'collecting')
-    .limit(1)
-    .maybeSingle();
-  if (collErr) return { ok: false, message: collErr.message };
-  if (collecting) return { ok: true, created: false, base: collecting as Record<string, unknown> };
+  // Base-per-hypothesis: непустой выбор гипотез → по одной базе на каждую.
+  // hypothesisIds = null/пусто → прежний путь «одна база на вертикаль» (легаси
+  // и ENG-refill: refill не использует hypothesis_ids, план строится по
+  // неотклонённым гипотезам, как без явного выбора).
+  const perHypothesis = !refill && Array.isArray(hypothesisIds) && hypothesisIds.length > 0;
+  const targets: Array<{ hypothesisId: string | null }> = perHypothesis
+    ? hypothesisIds.map((id) => ({ hypothesisId: id }))
+    : [{ hypothesisId: null }];
 
-  // Дедуп 2: pending/running base_collect-задача на базу этой вертикали
-  // (база могла уже выйти из collecting, пока джоба ещё активна).
-  const { data: active, error: activeErr } = await supabase
-    .from('ve_jobs')
-    .select('id, payload')
-    .eq('project_id', projectId)
-    .eq('stage', 'base_collect')
-    .in('status', ['pending', 'running']);
-  if (activeErr) return { ok: false, message: activeErr.message };
-  const baseIds = (active ?? [])
-    .map((j) => (j.payload as { base_id?: string } | null)?.base_id)
-    .filter((v): v is string => typeof v === 'string' && v.length > 0);
-  if (baseIds.length > 0) {
-    const { data: existingBase, error: baseErr } = await supabase
-      .from('ve_bases')
-      .select('id, status, collect_info')
-      .eq('vertical_id', verticalId)
-      .in('id', baseIds)
-      // Упавшая сборка не блокирует повторный запуск: failed-базу
-      // не считаем конфликтом, даём создать новую.
-      .neq('status', 'failed')
-      .limit(1)
-      .maybeSingle();
-    if (baseErr) return { ok: false, message: baseErr.message };
-    if (existingBase) return { ok: true, created: false, base: existingBase as Record<string, unknown> };
-  }
+  const created: Array<Record<string, unknown>> = [];
 
-  // collect_info/payload джобы: у refill-сборки свой снапшот полей (кампания
-  // долива), hypothesis_ids в нём не используется — план строится по
-  // неотклонённым гипотезам, как без явного выбора.
-  const collectInfo: Record<string, unknown> = refill
-    ? { limit, refill: true, campaign_id: refill.campaignId }
-    : hypothesisIds
-      ? { limit, hypothesis_ids: hypothesisIds }
-      : { limit };
-  const jobPayload: Record<string, unknown> = refill
-    ? { limit, refill: true }
-    : hypothesisIds
-      ? { limit, hypothesis_ids: hypothesisIds }
-      : { limit };
+  for (const target of targets) {
+    const hypothesisId = target.hypothesisId;
 
-  const { data: base, error: baseInsertErr } = await supabase
-    .from('ve_bases')
-    .insert({
-      project_id: projectId,
-      vertical_id: verticalId,
-      source: 'auto',
-      status: 'collecting',
-      filename: filename ?? `auto: ${verticalName}`,
-      row_count: 0,
-      columns: [],
-      data: [],
-      // Лимит и выбранные гипотезы — сразу в collect_info: прогресс-карта
-      // показывает лимит, пока стадия ещё не перезаписала collect_info
-      // планом (поля живут дальше — стадия мержит collect_info, а не
-      // заменяет).
-      collect_info: collectInfo,
-    })
-    .select('id, status')
-    .single();
-  if (baseInsertErr || !base) {
-    // 23505 = unique_violation на ve_bases_one_collecting_per_vertical:
-    // параллельный запуск успел вставить collecting-базу раньше. Это тот же
-    // дедуп, только пойманный индексом, — отвечаем 'existing' с чужой базой.
-    if (baseInsertErr?.code === '23505') {
-      const { data: conflict, error: conflictErr } = await supabase
+    // Дедуп 1: уже собирающаяся auto-база этой гипотезы (или вертикали, когда
+    // гипотезы нет — легаси-путь).
+    let collecting: Record<string, unknown> | null = null;
+    if (hypothesisId) {
+      const { data, error } = await supabase
+        .from('ve_bases')
+        .select('id, status, collect_info')
+        .eq('hypothesis_id', hypothesisId)
+        .eq('source', 'auto')
+        .eq('status', 'collecting')
+        .limit(1)
+        .maybeSingle();
+      if (error) return { ok: false, message: error.message };
+      collecting = data as Record<string, unknown> | null;
+    } else {
+      const { data, error } = await supabase
         .from('ve_bases')
         .select('id, status, collect_info')
         .eq('vertical_id', verticalId)
@@ -145,23 +97,114 @@ export async function enqueueVeBaseCollect(
         .eq('status', 'collecting')
         .limit(1)
         .maybeSingle();
-      if (conflictErr) return { ok: false, message: conflictErr.message };
-      if (conflict) return { ok: true, created: false, base: conflict as Record<string, unknown> };
+      if (error) return { ok: false, message: error.message };
+      collecting = data as Record<string, unknown> | null;
     }
-    return { ok: false, message: baseInsertErr?.message ?? 'base insert failed' };
+    if (collecting) return { ok: true, created: false, base: collecting };
+
+    // Дедуп 2: pending/running base_collect-задача на базу этой гипотезы/вертикали.
+    const { data: active, error: activeErr } = await supabase
+      .from('ve_jobs')
+      .select('id, payload')
+      .eq('project_id', projectId)
+      .eq('stage', 'base_collect')
+      .in('status', ['pending', 'running']);
+    if (activeErr) return { ok: false, message: activeErr.message };
+    const activePayloads = (active ?? []).map((j) => j.payload as { base_id?: string; hypothesis_id?: string | null } | null);
+    const baseIds = activePayloads
+      .map((p) => p?.base_id)
+      .filter((v): v is string => typeof v === 'string' && v.length > 0);
+    if (baseIds.length > 0) {
+      const existingQ = supabase
+        .from('ve_bases')
+        .select('id, status, collect_info')
+        .in('id', baseIds)
+        .neq('status', 'failed')
+        .limit(1);
+      const { data: existingBase, error: baseErr } = await existingQ.maybeSingle();
+      if (baseErr) return { ok: false, message: baseErr.message };
+      if (existingBase) return { ok: true, created: false, base: existingBase as Record<string, unknown> };
+    }
+
+    // collect_info/payload джобы: у refill-сборки свой снапшот полей (кампания
+    // долива), hypothesis_ids в нём не используется. У per-hypothesis — одна
+    // hypothesis_id; у легаси — hypothesis_ids или только limit.
+    const collectInfo: Record<string, unknown> = refill
+      ? { limit, refill: true, campaign_id: refill.campaignId }
+      : hypothesisId
+        ? { limit, hypothesis_id: hypothesisId }
+        : hypothesisIds
+          ? { limit, hypothesis_ids: hypothesisIds }
+          : { limit };
+    const jobPayload: Record<string, unknown> = refill
+      ? { limit, refill: true }
+      : hypothesisId
+        ? { limit, hypothesis_id: hypothesisId }
+        : hypothesisIds
+          ? { limit, hypothesis_ids: hypothesisIds }
+          : { limit };
+
+    const { data: base, error: baseInsertErr } = await supabase
+      .from('ve_bases')
+      .insert({
+        project_id: projectId,
+        vertical_id: verticalId,
+        hypothesis_id: hypothesisId,
+        source: 'auto',
+        status: 'collecting',
+        filename: filename ?? `auto: ${verticalName}`,
+        row_count: 0,
+        columns: [],
+        data: [],
+        // Лимит и гипотеза — сразу в collect_info: прогресс-карта показывает
+        // лимит, пока стадия ещё не перезаписала collect_info планом (поля
+        // живут дальше — стадия мержит collect_info, а не заменяет).
+        collect_info: collectInfo,
+      })
+      .select('id, status')
+      .single();
+    if (baseInsertErr || !base) {
+      // 23505 = unique_violation на ve_bases_one_collecting_per_hypothesis /
+      // ve_bases_one_collecting_per_vertical: параллельный запуск успел вставить
+      // collecting-базу раньше. Это тот же дедуп, только пойманный индексом, —
+      // отвечаем 'existing' с чужой базой.
+      if (baseInsertErr?.code === '23505') {
+        const conflictQ = hypothesisId
+          ? supabase
+              .from('ve_bases')
+              .select('id, status, collect_info')
+              .eq('hypothesis_id', hypothesisId)
+              .eq('source', 'auto')
+              .eq('status', 'collecting')
+              .limit(1)
+          : supabase
+              .from('ve_bases')
+              .select('id, status, collect_info')
+              .eq('vertical_id', verticalId)
+              .eq('source', 'auto')
+              .eq('status', 'collecting')
+              .limit(1);
+        const { data: conflict, error: conflictErr } = await conflictQ.maybeSingle();
+        if (conflictErr) return { ok: false, message: conflictErr.message };
+        if (conflict) return { ok: true, created: false, base: conflict as Record<string, unknown> };
+      }
+      return { ok: false, message: baseInsertErr?.message ?? 'base insert failed' };
+    }
+
+    const { error: jobErr } = await supabase
+      .from('ve_jobs')
+      .insert({
+        project_id: projectId,
+        stage: 'base_collect',
+        status: 'pending',
+        payload: { base_id: base.id, ...jobPayload },
+      });
+    if (jobErr) {
+      return { ok: false, message: jobErr.message };
+    }
+
+    created.push(base as Record<string, unknown>);
   }
 
-  const { error: jobErr } = await supabase
-    .from('ve_jobs')
-    .insert({
-      project_id: projectId,
-      stage: 'base_collect',
-      status: 'pending',
-      payload: { base_id: base.id, ...jobPayload },
-    });
-  if (jobErr) {
-    return { ok: false, message: jobErr.message };
-  }
-
-  return { ok: true, created: true, base: base as Record<string, unknown> };
+  return { ok: true, created: true, base: created[0], bases: created };
 }
