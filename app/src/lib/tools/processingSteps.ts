@@ -89,6 +89,8 @@ const ENRICH_CONCURRENCY = Math.max(1, Number(process.env.BASE_ENRICH_SCRAPE_CON
 const ENRICH_PER_SITE_TIMEOUT_MS = 60_000;
 const SITE_CHECK_BATCH = 50;
 const TA_BATCH = 10;
+/** Дополнительные попытки только для индексов, пропущенных в успешном HTTP 200. */
+const TA_RESPONSE_MAX_RETRIES = 3;
 // CLEANUP_BATCH (50, не 100) и обоснование — в nameCleanupProtocol.ts.
 const PERSONALIZATION_BATCH = 5;
 const MAX_RETRIES = 3;
@@ -849,8 +851,82 @@ const TA_SYSTEM_PROMPT = `Ты — эксперт по B2B лидогенера�
 БУДЬ СТРОГИМ. Большинство компаний — 3-6 баллов. 9-10 только при идеальном совпадении.
 При малом количестве данных — максимум 5.
 
-ФОРМАТ ОТВЕТА: Только JSON массив, без пояснений.
-[{"idx": 0, "score": 7, "reason": "краткое обоснование на русском"}]`;
+Всегда копируй idx компании из входа без изменений. Не перенумеровывай компании.
+
+ФОРМАТ ОТВЕТА: Только JSON объект, без пояснений.
+{"scores":[{"idx": 0, "score": 7, "reason": "краткое обоснование на русском"}]}`;
+
+interface TAScoreAnswer {
+  idx: number;
+  score: number;
+  reason: string;
+}
+
+function parseTAScoreResponse(content: string): unknown[] {
+  if (!content.trim()) throw new Error('ИИ вернул пустой ответ');
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    const codeBlock = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+    const raw = codeBlock ? codeBlock[1].trim() : content.trim();
+    const arrMatch = raw.match(/\[[\s\S]*\]/);
+    parsed = arrMatch ? JSON.parse(arrMatch[0]) : JSON.parse(raw);
+  }
+
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && typeof parsed === 'object') {
+    const scores = (parsed as { scores?: unknown }).scores;
+    if (Array.isArray(scores)) return scores;
+  }
+  throw new Error('ИИ вернул JSON без массива scores');
+}
+
+function finiteNumber(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Принимаем только однозначные ответы на ожидаемые индексы. Настоящий score=0
+ * валиден; отсутствие, дубль или чужой idx — нет, их нужно запросить повторно.
+ */
+function collectTAScoreAnswers(rows: unknown[], expectedIndexes: Set<number>): Map<number, TAScoreAnswer> {
+  const answers = new Map<number, TAScoreAnswer>();
+  const candidatesByIndex = new Map<
+    number,
+    Array<{ score?: unknown; reason?: unknown }>
+  >();
+
+  for (const raw of rows) {
+    if (!raw || typeof raw !== 'object') continue;
+    const candidate = raw as { idx?: unknown; score?: unknown; reason?: unknown };
+    const idx = candidate.idx;
+    if (typeof idx !== 'number' || !Number.isInteger(idx) || !expectedIndexes.has(idx)) continue;
+    const candidates = candidatesByIndex.get(idx) ?? [];
+    candidates.push(candidate);
+    candidatesByIndex.set(idx, candidates);
+  }
+
+  for (const [idx, candidates] of candidatesByIndex) {
+    // Даже один валидный и один испорченный ответ на один idx неоднозначны:
+    // не угадываем, какой верный, а запрашиваем компанию повторно.
+    if (candidates.length !== 1) continue;
+    const candidate = candidates[0];
+    const score = finiteNumber(candidate.score);
+    if (score == null) continue;
+    answers.set(idx, {
+      idx,
+      score,
+      reason: typeof candidate.reason === 'string' ? candidate.reason : '',
+    });
+  }
+
+  return answers;
+}
 
 export interface StepTAScoreOptions {
   /**
@@ -872,7 +948,7 @@ export interface StepTAScoreOptions {
     pre_filter_avg_score: number;
     /** Строк с заглушкой «Ошибка оценки» — ИИ по ним не ответил. */
     failed_rows: number;
-    /** Сколько запросов к ИИ провалилось (одна пачка = до 10 компаний). */
+    /** Сколько исходных пачек после всех повторов осталось хотя бы частично без оценки. */
     failed_batches: number;
     /** Причины провалов с частотой — то, чего раньше немой catch не оставлял. */
     errors: Array<{ reason: string; count: number }>;
@@ -931,66 +1007,110 @@ export async function stepTAScore(
   const failedKeys = new Set<string>();
   const errorCounts = new Map<string, number>();
   let failedBatches = 0;
+  const markFailedKeys = (keys: string[], reason: string) => {
+    if (keys.length === 0) return;
+    failedBatches += 1;
+    for (const key of keys) {
+      failedKeys.add(key);
+      scoreByKey.set(key, { score: '5', reason: 'Ошибка оценки' });
+    }
+    errorCounts.set(reason, (errorCounts.get(reason) ?? 0) + 1);
+  };
+
   for (let batch = 0; batch < uniqueRows.length; batch += TA_BATCH) {
-    if (isCancelled && await isCancelled()) throw new Error('Отменено');
     const chunkKeys = uniqueKeys.slice(batch, batch + TA_BATCH);
     const chunk = uniqueRows.slice(batch, batch + TA_BATCH);
-    const companies = chunk.map((row, bIdx) => {
-      const obj: Record<string, string> = {};
-      // email НЕ кладём в промпт: оценка зависит от компании, а не от конкретного
-      // адреса — иначе балл представителя зависел бы от того, какая почта
-      // оказалась первой в группе, и дедуп переставал бы быть lossless.
-      header.forEach((h, c) => { obj[h] = c === emailIdx ? '' : (row[c] || ''); });
-      return { idx: bIdx, data: obj };
-    });
+    let unresolved = chunk.map((row, idx) => ({ idx, key: chunkKeys[idx], row }));
+    let failureReason: string | null = null;
 
-    const userMsg = `Бриф:\n${brief.slice(0, 4000)}\n\nКомпании:\n${JSON.stringify(companies)}`;
-    try {
-      const content = await callOpenRouter(OPENROUTER_BRIEF_API_KEY, AI_MODEL, [
-        { role: 'system', content: TA_SYSTEM_PROMPT },
-        { role: 'user', content: userMsg },
-      ], { temperature: 0.2, json: true, title: 'Portal - Base Constructor TA Scoring' });
+    // HTTP/сеть уже повторяются внутри callOpenRouter. Этот цикл отвечает за
+    // другой класс ошибки: провайдер вернул 200, но забыл часть индексов.
+    // Успешные ответы сохраняем, а в следующий запрос отправляем только хвост.
+    for (
+      let responseAttempt = 0;
+      responseAttempt <= TA_RESPONSE_MAX_RETRIES && unresolved.length > 0;
+      responseAttempt += 1
+    ) {
+      if (isCancelled && await isCancelled()) throw new Error('Отменено');
 
-      // Пустой ответ раньше падал на JSON.parse('') и попадал в общий catch без
-      // объяснения. Называем причину своими словами — она уйдёт в телеметрию.
-      if (!content.trim()) throw new Error('ИИ вернул пустой ответ');
+      const companies = unresolved.map(({ idx, row }) => {
+        const obj: Record<string, string> = {};
+        // email НЕ кладём в промпт: оценка зависит от компании, а не от конкретного
+        // адреса — иначе балл представителя зависел бы от того, какая почта
+        // оказалась первой в группе, и дедуп переставал бы быть lossless.
+        header.forEach((h, c) => { obj[h] = c === emailIdx ? '' : (row[c] || ''); });
+        return { idx, data: obj };
+      });
+      const userMsg = `Бриф:\n${brief.slice(0, 4000)}\n\nКомпании:\n${JSON.stringify(companies)}`;
 
-      let parsed: unknown;
+      let content: string;
       try {
-        parsed = JSON.parse(content);
-      } catch {
-        const codeBlock = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-        const raw = codeBlock ? codeBlock[1].trim() : content.trim();
-        const arrMatch = raw.match(/\[[\s\S]*\]/);
-        parsed = arrMatch ? JSON.parse(arrMatch[0]) : JSON.parse(raw);
+        content = await callOpenRouter(OPENROUTER_BRIEF_API_KEY, AI_MODEL, [
+          { role: 'system', content: TA_SYSTEM_PROMPT },
+          { role: 'user', content: userMsg },
+        ], { temperature: 0.2, json: true, title: 'Portal - Base Constructor TA Scoring' });
+      } catch (err) {
+        failureReason = err instanceof Error ? err.message : String(err);
+        break;
       }
-      const scores = (Array.isArray(parsed) ? parsed : []) as { idx: number; score: number; reason: string }[];
-      const scoreMap = new Map(scores.map((s) => [s.idx, s]));
 
-      for (let i = 0; i < chunk.length; i++) {
-        const s = scoreMap.get(i);
-        scoreByKey.set(chunkKeys[i], { score: String(s?.score ?? 0), reason: s?.reason ?? '' });
+      let responseRows: unknown[];
+      try {
+        responseRows = parseTAScoreResponse(content);
+      } catch (err) {
+        failureReason = err instanceof Error ? err.message : String(err);
+        if (responseAttempt < TA_RESPONSE_MAX_RETRIES) continue;
+        break;
       }
-    } catch (err) {
-      // Причину НЕ теряем. Раньше здесь был немой catch, и разобрать инцидент
-      // было нечем: в результате видно «Ошибка оценки», а почему — нигде.
-      const reason = err instanceof Error ? err.message : String(err);
-      failedBatches += 1;
-      for (const k of chunkKeys) failedKeys.add(k);
-      errorCounts.set(reason, (errorCounts.get(reason) ?? 0) + 1);
+
+      const expectedIndexes = new Set(unresolved.map(({ idx }) => idx));
+      const answers = collectTAScoreAnswers(responseRows, expectedIndexes);
+      const unresolvedByIndex = new Map(unresolved.map((company) => [company.idx, company]));
+      for (const [idx, answer] of answers) {
+        const company = unresolvedByIndex.get(idx);
+        if (!company) continue;
+        scoreByKey.set(company.key, { score: String(answer.score), reason: answer.reason });
+      }
+
+      unresolved = unresolved.filter(({ idx }) => !answers.has(idx));
+      if (unresolved.length === 0) {
+        failureReason = null;
+        break;
+      }
+      failureReason =
+        `Неполный ответ ИИ: отсутствуют или неоднозначны индексы ` +
+        unresolved.map(({ idx }) => idx).join(', ');
+    }
+
+    if (unresolved.length > 0) {
+      // Причину НЕ теряем. Успешно оценённая часть пачки остаётся нетронутой,
+      // явная заглушка ставится только компаниям, которые не удалось добрать.
+      const reason = failureReason ?? 'ИИ не вернул оценки для части компаний';
+      markFailedKeys(unresolved.map(({ key }) => key), reason);
       console.warn(
-        `[ta_scoring] пачка ${Math.floor(batch / TA_BATCH) + 1} (${chunk.length} компаний) не оценена: ${reason}`,
+        `[ta_scoring] пачка ${Math.floor(batch / TA_BATCH) + 1}: ` +
+          `${unresolved.length}/${chunk.length} компаний не оценено: ${reason}`,
       );
-      for (const k of chunkKeys) scoreByKey.set(k, { score: '5', reason: 'Ошибка оценки' });
     }
 
     await onProgress(Math.round(((batch + chunk.length) / uniqueRows.length) * 100));
   }
 
+  // Защита инварианта: новый/изменённый код маршрутизации не должен снова
+  // превратить потерянную компанию в молчаливый 0 и обойти телеметрию.
+  const unassignedKeys = uniqueKeys.filter((key) => !scoreByKey.has(key));
+  if (unassignedKeys.length > 0) {
+    const reason = 'Внутренняя ошибка сопоставления оценок ЦА';
+    markFailedKeys(unassignedKeys, reason);
+    console.warn(`[ta_scoring] ${unassignedKeys.length} компаний потеряно при сопоставлении результатов`);
+  }
+
   // Транслируем баллы обратно на ВСЕ строки в ИСХОДНОМ порядке. Строки одной
   // компании получают один и тот же балл/причину (что и требуется).
   const scored: string[][] = body.map((row) => {
-    const s = scoreByKey.get(keyOf(row)) ?? { score: '0', reason: '' };
+    // Защитный fallback тоже явный: даже при будущей ошибке маршрутизации строка
+    // никогда снова не превратится в молчаливую «оценку 0».
+    const s = scoreByKey.get(keyOf(row)) ?? { score: '5', reason: 'Ошибка оценки' };
     return [...row, s.score, s.reason];
   });
 
@@ -1026,7 +1146,7 @@ export async function stepTAScore(
   if (failedBatches > 0) {
     console.warn(
       `[ta_scoring] не оценено ${failedRows} строк из ${preFilterRows} ` +
-        `(${failedBatches} неудачных запросов к ИИ). Причины: ` +
+        `(${failedBatches} неудачных пачек после повторов). Причины: ` +
         errors.map((e) => `${e.reason} ×${e.count}`).join('; '),
     );
   }

@@ -2,9 +2,12 @@
  * Превью финальных писем шаблона 85/15 по лидам из загруженной базы.
  *
  * Чистая подстановка {{operators}} значениями колонок строки — без LLM и без
- * внешних вызовов. Сегментные варианты (letters[].segment_variants) НЕ
- * выбираются автоматически: их `when` — человекочитаемое условие, поэтому
- * превью всегда рендерит дефолтный body, а варианты показываются в UI отдельно.
+ * внешних вызовов. Сегментные варианты (letters[].segment_variants) применяются
+ * по `rowSegments` — результату серверной классификации sample-строк (тот же
+ * `segmentClassify`, что и в боевом запуске): для строки с сегментом `when`
+ * подставляется `text` варианта с совпавшим `when` (регистронезависимо, байт-в-
+ * байт как buildLaunchSequence). Без `rowSegments`/сегмента рендерится дефолтный
+ * body.
  *
  * Правила подстановки (зеркалят рендер Instantly):
  *  - matched-маппинг: берём значение row[column] (строкифицированное, trimmed);
@@ -198,6 +201,26 @@ function flattenTokens(tokens: VePreviewToken[]): string {
   return tokens.map((t) => t.text).join('');
 }
 
+/**
+ * Тело сегментного варианта письма, чьё `when` совпало с сегментом строки.
+ * Матч — регистронезависимый по `when`, байт-в-байт как buildLaunchSequence
+ * (launchHandoff.ts): только тогда превью показывает тот же текст, что и
+ * боевая рассылка после сплита по сегментам. Нет совпадения/сегмента → null
+ * (дефолтный body).
+ */
+function selectSegmentBody(
+  letter: { body: string; segment_variants?: Array<{ when: string; text: string }> },
+  segmentKey: string | null,
+): string | null {
+  if (!segmentKey) return null;
+  const key = segmentKey.trim().toLowerCase();
+  if (!key) return null;
+  const variants = letter.segment_variants ?? [];
+  if (variants.length === 0) return null;
+  const matched = variants.find((v) => (v.when ?? '').trim().toLowerCase() === key);
+  return matched ? matched.text : null;
+}
+
 /** Слияние списков операторов с регистронезависимым дедупом (первое написание). */
 function mergeOperatorNames(first: string[], second: string[]): string[] {
   const seen = new Set(first.map((n) => n.toLowerCase()));
@@ -213,7 +236,8 @@ function mergeOperatorNames(first: string[], second: string[]): string[] {
 
 /**
  * Превью писем по первым maxRows строкам базы (по умолчанию 3).
- * Рендерится дефолтный текст писем; сегментные варианты сознательно игнорируются.
+ * Для каждой строки применяется её сегментный вариант (rowSegments[i]),
+ * иначе — дефолтный текст письма.
  */
 export function renderTemplatePreview(input: {
   letters: Array<{
@@ -226,6 +250,8 @@ export function renderTemplatePreview(input: {
   rows: Array<Record<string, unknown>>;
   columns: string[];
   maxRows?: number;
+  /** Сегмент (when) каждой строки по индексу — результат серверной классификации. */
+  rowSegments?: Array<string | null>;
 }): VePreviewResult {
   const maxRows = Math.max(0, input.maxRows ?? 3);
   const rows = input.rows.slice(0, maxRows);
@@ -233,8 +259,10 @@ export function renderTemplatePreview(input: {
     rows: rows.map((row, index) => ({
       rowLabel: previewRowLabel(row, input.columns, input.operatorMapping, index),
       letters: input.letters.map((letter) => {
+        const segmentKey = input.rowSegments?.[index] ?? null;
+        const segmentBody = selectSegmentBody(letter, segmentKey);
         const subject = tokenizePreviewText(letter.subject ?? '', input.operatorMapping, row);
-        const body = tokenizePreviewText(letter.body ?? '', input.operatorMapping, row);
+        const body = tokenizePreviewText(segmentBody ?? letter.body, input.operatorMapping, row);
         return {
           subject: flattenTokens(subject.tokens),
           body: flattenTokens(body.tokens),
