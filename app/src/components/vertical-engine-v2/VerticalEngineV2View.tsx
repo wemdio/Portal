@@ -24,6 +24,7 @@ import {
 import { VeEngineWorkspace } from './engine/HypothesisEngineView';
 import { LegacyArchivePanel } from './LegacyArchivePanel';
 import { LegacyReviewPanel } from './LegacyReviewPanel';
+import styles from './VerticalEngineV2View.module.css';
 
 type Tab = 'projects' | 'archive' | 'review';
 
@@ -241,7 +242,7 @@ export function VerticalEngineV2View() {
         <div
           role="group"
           aria-label="Разделы движка"
-          className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-full bg-slate-100 p-1"
+          className={`inline-flex max-w-full flex-wrap items-center gap-1 rounded-full p-1 ${styles.track}`}
         >
           {tabs.map((item) => (
             <button
@@ -254,8 +255,8 @@ export function VerticalEngineV2View() {
               aria-pressed={tab === item.id}
               className={`rounded-full px-4 py-1.5 text-sm font-medium transition active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 ${
                 tab === item.id
-                  ? 'bg-white text-slate-900 shadow-sm ring-1 ring-black/5'
-                  : 'text-slate-500 hover:text-slate-900'
+                  ? `shadow-sm ring-1 ring-black/5 ${styles.itemActive}`
+                  : styles.item
               }`}
             >
               {item.label}

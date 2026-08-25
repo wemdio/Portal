@@ -1,0 +1,34 @@
+/* Theme-aware segmented control — Vertical Engine v2.
+   Светлая тема: светлая плашка + белый «плавающий» активный сегмент.
+   Тёмная тема (html[data-portal-theme='dark']): тёмная плашка + светлый активный
+   сегмент на токенах поверхности --pd-* из globals.css (НЕ меняем globals.css). */
+
+.track {
+  background-color: #f1f5f9; /* slate-100 */
+}
+
+.item {
+  color: #64748b; /* slate-500 */
+}
+.item:hover {
+  color: #0f172a; /* slate-900 */
+}
+
+.itemActive {
+  background-color: #ffffff;
+  color: #0f172a;
+}
+
+:global(html[data-portal-theme='dark']) .track {
+  background-color: var(--pd-surface);
+}
+:global(html[data-portal-theme='dark']) .item {
+  color: var(--pd-text-mute);
+}
+:global(html[data-portal-theme='dark']) .item:hover {
+  color: var(--pd-text);
+}
+:global(html[data-portal-theme='dark']) .itemActive {
+  background-color: var(--pd-surface-active);
+  color: var(--pd-text);
+}
