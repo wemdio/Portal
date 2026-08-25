@@ -54,8 +54,13 @@ ENV NEXT_PUBLIC_SIGNUP_HOSTS=$NEXT_PUBLIC_SIGNUP_HOSTS
 # Increase Node heap for Next.js build (avoids OOM in Docker)
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 
-# Build Next.js application
-RUN npm run build
+# Validate generated route types and the whole project in separate Node
+# processes so each one releases its heap before the 4 GB Next.js build.
+RUN npm run typecheck:strict
+
+# The strict precheck above already passed. Skip only Next's duplicate checker;
+# compilation and all other production build validation remain enabled.
+RUN NEXT_BUILD_PRECHECKED_TYPECHECK=1 NEXT_BUILD_SKIP_TYPECHECK=1 npm run build
 RUN npm run build:sbis-importer
 RUN npm run build:sbis-exact-importer
 

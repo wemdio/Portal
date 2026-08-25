@@ -77,12 +77,9 @@ blocks:
             # Раздельные incremental-кэши для проекта и Next route validator.
             # Протухший кэш безопасен — tsc сверяет файлы по содержимому.
             - 'cache restore tsc-v2-$SEMAPHORE_GIT_BRANCH,tsc-v2-'
-            - mkdir -p .next/cache/tsc
-            # typedRoutes генерируются отдельно: голый tsc на чистой машине не
-            # видит ошибки Route/handler, пока Next не создал .next/types.
-            - npx next typegen
-            - npx tsc -p tsconfig.next-route-validator.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/routes.tsbuildinfo
-            - npx tsc --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/project.tsbuildinfo
+            # Общий сценарий используется также production Docker-сборкой:
+            # typegen и два tsc идут отдельными процессами и не суммируют heap.
+            - npm run typecheck:strict
             - 'cache store tsc-v2-$SEMAPHORE_GIT_BRANCH .next/cache/tsc'
             # npm audit переехал в ночной прогон (.semaphore/nightly-audit.yml):
             # на каждом пуше он ходил в интернет и изредка подвисал/флапал.
