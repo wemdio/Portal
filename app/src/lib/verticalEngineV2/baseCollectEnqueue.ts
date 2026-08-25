@@ -65,8 +65,25 @@ export async function enqueueVeBaseCollect(
   // и ENG-refill: refill не использует hypothesis_ids, план строится по
   // неотклонённым гипотезам, как без явного выбора).
   const perHypothesis = !refill && Array.isArray(hypothesisIds) && hypothesisIds.length > 0;
+
+  // Заголовки гипотез → различающий суффикс filename авто-базы. Гипотеза
+  // показывается заголовком на карточке (Phase 3), но filename одинаков у всех
+  // баз вертикали — без суффикса карточки неразличимы и экспорт путается.
+  let hypothesisTitle: Record<string, string> = {};
+  if (perHypothesis) {
+    const ids = hypothesisIds as string[];
+    const { data: hypRows, error: hypErr } = await supabase
+      .from('ve_hypotheses')
+      .select('id, title')
+      .in('id', ids);
+    if (hypErr) return { ok: false, message: hypErr.message };
+    hypothesisTitle = Object.fromEntries(
+      (hypRows ?? []).map((h) => [String(h.id), String(h.title ?? '').trim() || String(h.id)]),
+    );
+  }
+
   const targets: Array<{ hypothesisId: string | null }> = perHypothesis
-    ? hypothesisIds.map((id) => ({ hypothesisId: id }))
+    ? (hypothesisIds as string[]).map((id) => ({ hypothesisId: id }))
     : [{ hypothesisId: null }];
 
   const created: Array<Record<string, unknown>> = [];
@@ -102,7 +119,10 @@ export async function enqueueVeBaseCollect(
     }
     if (collecting) return { ok: true, created: false, base: collecting };
 
-    // Дедуп 2: pending/running base_collect-задача на базу этой гипотезы/вертикали.
+    // Дедуп 2: pending/running base_collect-задача ЭТОЙ гипотезы (или вертикали,
+    // когда гипотезы нет). База могла уже выйти из collecting, пока джоба ещё
+    // активна. Фильтруем по hypothesis_id в payload — иначе своя же джоба первой
+    // гипотезы заблокировала бы создание базы второй (multi-hypothesis).
     const { data: active, error: activeErr } = await supabase
       .from('ve_jobs')
       .select('id, payload')
@@ -110,8 +130,11 @@ export async function enqueueVeBaseCollect(
       .eq('stage', 'base_collect')
       .in('status', ['pending', 'running']);
     if (activeErr) return { ok: false, message: activeErr.message };
-    const activePayloads = (active ?? []).map((j) => j.payload as { base_id?: string; hypothesis_id?: string | null } | null);
-    const baseIds = activePayloads
+    const baseIds = (active ?? [])
+      .map((j) => j.payload as { base_id?: string; hypothesis_id?: string | null } | null)
+      // При per-hypothesis берём только джобы этой гипотезы; при легаси — без
+      // hypothesis_id (джобы вертикали). Чужие гипотезы не блокируют.
+      .filter((p) => (hypothesisId ? p?.hypothesis_id === hypothesisId : !p?.hypothesis_id))
       .map((p) => p?.base_id)
       .filter((v): v is string => typeof v === 'string' && v.length > 0);
     if (baseIds.length > 0) {
@@ -152,7 +175,11 @@ export async function enqueueVeBaseCollect(
         hypothesis_id: hypothesisId,
         source: 'auto',
         status: 'collecting',
-        filename: filename ?? `auto: ${verticalName}`,
+        // Уникальность по гипотезе: «auto: <вертикаль> — <гипотеза>». Только
+        // для per-hypothesis (у легаси/refill гипотезы нет — прежнее имя).
+        filename: filename ?? (hypothesisId && hypothesisTitle[hypothesisId]
+          ? `auto: ${verticalName} — ${hypothesisTitle[hypothesisId]}`
+          : `auto: ${verticalName}`),
         row_count: 0,
         columns: [],
         data: [],

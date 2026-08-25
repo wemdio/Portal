@@ -227,17 +227,26 @@ export function Step2Verticals({
     return set;
   }, [templates]);
 
-  // Гипотезы, под которые собрана база (collect_info.hypothesis_ids; у старых баз
-  // поля нет — они просто ничего не помечают). Фейловые базы не считаем: маркер
-  // «база» на гипотезе должен совпадать со статистикой карточки.
+  // Гипотезы, под которые собрана база. Источники (base-per-hypothesis):
+  // 1) колонка ve_bases.hypothesis_id (новый путь «база на гипотезу»);
+  // 2) collect_info.hypothesis_id (ед., снапшот в стадии);
+  // 3) collect_info.hypothesis_ids (мн., легаси-сборка по вертикали).
+  // У старых баз поля нет — они просто ничего не помечают. Фейловые базы не
+  // считаем: маркер «база» на гипотезе должен совпадать со статистикой карточки.
   const baseHypothesisIds = useMemo(() => {
     const set = new Set<string>();
     for (const b of bases ?? []) {
       if (b.status === 'failed') continue;
-      const ids = b.collect_info?.hypothesis_ids;
-      if (!Array.isArray(ids)) continue;
-      for (const id of ids) {
-        if (typeof id === 'string') set.add(id);
+      const colId = (b as { hypothesis_id?: string | null }).hypothesis_id;
+      if (typeof colId === 'string' && colId.length > 0) set.add(colId);
+      const info = b.collect_info as { hypothesis_id?: unknown; hypothesis_ids?: unknown } | null | undefined;
+      if (typeof info?.hypothesis_id === 'string' && info.hypothesis_id.length > 0) {
+        set.add(info.hypothesis_id);
+      }
+      if (Array.isArray(info?.hypothesis_ids)) {
+        for (const id of info.hypothesis_ids) {
+          if (typeof id === 'string') set.add(id);
+        }
       }
     }
     return set;
