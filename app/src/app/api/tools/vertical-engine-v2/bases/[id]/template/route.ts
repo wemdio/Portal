@@ -4,6 +4,7 @@ import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { classifyBaseRowsIntoSegments, detectSegmentLanguage } from '@/lib/verticalEngineV2/segmentClassify';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -85,7 +86,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
 // GET — последний шаблон по базе (404, если генерации ещё не было).
 // Дополнительно отдаёт sample_rows базы (первые 5, серверный кап — для
-// клиентского превью писем по лидам) и columns; data базы не отдаём.
+// клиентского превью писем по лидам), columns и sample_segments (сегмент
+// каждой sample-строки, тот же классификатор, что и при запуске); data базы
+// не отдаём.
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.vertical-engine-v2.template.get' },
@@ -131,7 +134,47 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         sampleRows = (base.sample_rows as Array<Record<string, unknown>>).slice(0, 5);
       }
 
-      return NextResponse.json({ template, columns, sample_rows: sampleRows });
+      // Сегмент каждой sample-строки — для сегментно-осознанного превью. Тот же
+      // классификатор, что и в боевом запуске (launchTemplate → segmentClassify),
+      // чтобы превью показывало ровно тот вариант, который лид получит в Instantly.
+      // Best-effort: системный сбой классификатора → null → превью деградирует к
+      // дефолтному тексту (как раньше), не роняя выдачу шаблона.
+      let sampleSegments: Array<string | null> | null = null;
+      const templateLetters = Array.isArray(template.letters) ? template.letters : [];
+      const segmentWhens: string[] = [];
+      for (const letter of templateLetters) {
+        const variants = (letter as { segment_variants?: unknown } | null)?.segment_variants;
+        if (!Array.isArray(variants)) continue;
+        for (const v of variants) {
+          const when = (v as { when?: unknown } | null)?.when;
+          if (typeof when === 'string' && when.trim()) segmentWhens.push(when.trim());
+        }
+      }
+      const uniqueSegmentWhens = [...new Set(segmentWhens)];
+      if (uniqueSegmentWhens.length > 0 && sampleRows.length > 0) {
+        try {
+          const assignments = await classifyBaseRowsIntoSegments({
+            rows: sampleRows,
+            segments: uniqueSegmentWhens,
+            language: detectSegmentLanguage(uniqueSegmentWhens),
+          });
+          sampleSegments = assignments
+            ? sampleRows.map((_, i) => assignments.get(i) ?? null)
+            : null;
+        } catch (e) {
+          await logError('tools.vertical-engine-v2.template.get.segment_classify_failed', e instanceof Error ? e : new Error(String(e)), {
+            baseId: id,
+          });
+          sampleSegments = null;
+        }
+      }
+
+      return NextResponse.json({
+        template,
+        columns,
+        sample_rows: sampleRows,
+        sample_segments: sampleSegments,
+      });
     },
   );
 }
