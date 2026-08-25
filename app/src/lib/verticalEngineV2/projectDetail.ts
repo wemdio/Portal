@@ -21,7 +21,7 @@ import { reconcileProjectVerticals } from './actualsReconcile';
 // среза, stages/baseCollect) статус 'failed' сам по себе ничего не объясняет —
 // без причины отказ выглядит поломкой, а не решением.
 export const VE_BASE_LIST_COLUMNS =
-  'id, vertical_id, filename, row_count, status, error, analysis, source, collect_info, columns, sample_rows, created_at';
+  'id, vertical_id, hypothesis_id, filename, row_count, status, error, analysis, source, collect_info, columns, sample_rows, created_at';
 // payload нужен клиенту, чтобы привязать джобу к вертикали (payload.vertical_id) —
 // иначе чужая dossier-джоба показывала бы busy/error на карточке другой вертикали.
 export const VE_JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload, progress';
