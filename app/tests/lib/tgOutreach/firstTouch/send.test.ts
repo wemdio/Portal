@@ -435,4 +435,130 @@ describe('sendFirstTouchBatch — недоступные контакты и о�
     expect(patch?.attempts).toBe(3);
     expect(patch?.status).toBe('failed');
   });
+
+  /**
+   * Аудит 25.08.2026, кампания TG_VBI, аккаунт 254360278 (Василий).
+   *
+   * gramJS getEntity → contacts.ResolveUsername. Когда аккаунт урезан/frozen,
+   * Telegram отвечает USERNAME_NOT_OCCUPIED на ЖИВЫЕ ники — один и тот же код,
+   * что и для мёртвого ника. Раньше isUsernameNotFound считал это «ника нет» и
+   * ставил status=skipped навсегда: 273 контакта сожжено, +60 только за сегодня.
+   *
+   * Дискриминатор — не строка ошибки (она одинакова), а порция целиком: мёртвый
+   * ник — явление редкое и одиночное, а замороженный аккаунт отдаёт
+   * USERNAME_NOT_OCCUPIED на каждый резолв. Поэтому вся порция «не найдена» =
+   * виноват аккаунт, а не база.
+   */
+  describe('USERNAME_NOT_OCCUPIED — замороженный аккаунт vs мёртвый ник', () => {
+    const usernameRpcError = () =>
+      Object.assign(
+        new Error('400: USERNAME_NOT_OCCUPIED (caused by contacts.ResolveUsername)'),
+        { code: 'USERNAME_NOT_OCCUPIED' },
+      );
+
+    it('весь резолв порции вернул USERNAME_NOT_OCCUPIED — паркуем аккаунт, а не базу', async () => {
+      const db = fakeDb([
+        contact({ id: 'c-1', username: 'dng68' }),
+        contact({ id: 'c-2', username: 'ver1nika20' }),
+        contact({ id: 'c-3', username: 'vasaivanov38' }),
+      ]);
+      const getEntity = jest.fn(async () => {
+        throw usernameRpcError();
+      });
+      const client = fakeClient({ getEntity });
+      const account = { ...baseArgs.account, cooldown_until: null as string | null };
+
+      const res = await sendFirstTouchBatch({ ...baseArgs, account, cooldownHours: 24, db, client } as never);
+
+      // Живые ники не сожжены: ни одной записи по контактам, skipped=0.
+      expect(res.skipped).toBe(0);
+      expect(db.updates.filter((u) => u.table === 'tg_outreach_base_contacts')).toHaveLength(0);
+      // Заморожен аккаунт — он паркуется паузой кампании до следующего круга.
+      const park = db.updates.find((u) => u.table === 'tg_outreach_accounts');
+      expect(park?.id).toBe('acc-1');
+      expect(Boolean(park?.patch.cooldown_until)).toBe(true);
+      // Круг кампании не перечитывает аккаунты из БД — пауза обязана жить и в памяти.
+      expect(account.cooldown_until).toBe(park?.patch.cooldown_until);
+      // Порция остановлена, в Telegram по никам дальше не ходим.
+      expect(getEntity).toHaveBeenCalledTimes(3);
+    });
+
+    it('одиночный USERNAME_NOT_OCCUPIED среди живых — контакт откладывается, а не сжигается', async () => {
+      const db = fakeDb([
+        contact({ id: 'c-1', username: 'dead_nick' }),
+        contact({ id: 'c-2', username: 'alive' }),
+      ]);
+      let first = true;
+      const client = fakeClient({
+        getEntity: jest.fn(async () => {
+          if (first) {
+            first = false;
+            throw usernameRpcError();
+          }
+          return { id: 777, username: 'alive' };
+        }),
+      });
+      const account = { ...baseArgs.account, cooldown_until: null as string | null };
+
+      const res = await sendFirstTouchBatch({ ...baseArgs, account, cooldownHours: 24, db, client } as never);
+
+      // Аккаунт не тронут: порция не была «вся не найдена».
+      expect(db.updates.filter((u) => u.table === 'tg_outreach_accounts')).toHaveLength(0);
+      // Живой контакт отправлен.
+      expect(res.sent).toBe(1);
+      // Сомнительный ник не сожжён навсегда: контакт отложен с попыткой.
+      expect(res.skipped).toBe(0);
+      expect(res.postponed).toBe(1);
+      const patch = db.updates.find(
+        (u) => u.table === 'tg_outreach_base_contacts' && u.patch.attempts === 1,
+      )?.patch;
+      expect(patch?.attempts).toBe(1);
+      expect(patch?.status).toBeUndefined();
+    });
+
+    it('одно-единственное «ника нет» в порции из одного (квота 1) — контакт отложен, аккаунт не паркуется', async () => {
+      // Квота 1: порция из одного контакта не может быть «вся не найдена» как
+      // сигнал о заморозке — это может быть и просто мёртвый ник. Сжигать тоже
+      // нельзя (аккаунт мог быть заморожен), поэтому откладываем.
+      const db = fakeDb([contact()]);
+      const client = fakeClient({ getEntity: jest.fn(async () => { throw usernameRpcError(); }) });
+      const account = { ...baseArgs.account, cooldown_until: null as string | null };
+
+      const res = await sendFirstTouchBatch({ ...baseArgs, account, perDay: 1, cooldownHours: 24, db, client } as never);
+
+      expect(res.skipped).toBe(0);
+      expect(res.postponed).toBe(1);
+      expect(db.updates.filter((u) => u.table === 'tg_outreach_accounts')).toHaveLength(0);
+      const patch = db.updates.find((u) => u.table === 'tg_outreach_base_contacts')?.patch;
+      expect(patch?.attempts).toBe(1);
+    });
+
+    it('USERNAME_INVALID — кривой ник, а не заморозка: скипаем, аккаунт не паркуем', async () => {
+      // USERNAME_INVALID = «ник с недопустимыми символами». Это не сигнал
+      // замороженного аккаунта: пачка кривых ников не должна ложно уводить
+      // исправный номер в паузу. Плюс normalizeUsername уже режет ник до
+      // [a-z0-9_]{5,32}, так что на первом касании код практически недостижим.
+      const db = fakeDb([
+        contact({ id: 'c-1', username: 'bad!!nick' }),
+        contact({ id: 'c-2', username: 'bad__nick' }),
+      ]);
+      const client = fakeClient({
+        getEntity: jest.fn(async () => {
+          throw Object.assign(
+            new Error('400: USERNAME_INVALID (caused by contacts.ResolveUsername)'),
+            { code: 'USERNAME_INVALID' },
+          );
+        }),
+      });
+      const account = { ...baseArgs.account, cooldown_until: null as string | null };
+
+      const res = await sendFirstTouchBatch({ ...baseArgs, account, cooldownHours: 24, db, client } as never);
+
+      expect(res.skipped).toBe(2);
+      expect(res.postponed).toBe(0);
+      expect(db.updates.filter((u) => u.table === 'tg_outreach_accounts')).toHaveLength(0);
+      const skips = db.updates.filter((u) => u.table === 'tg_outreach_base_contacts' && u.patch.status === 'skipped');
+      expect(skips).toHaveLength(2);
+    });
+  });
 });

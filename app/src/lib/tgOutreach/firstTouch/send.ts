@@ -206,10 +206,39 @@ function classifySendFailure(errMsg: string): SendFailure {
   return { kind: 'retryable' };
 }
 
-function isUsernameNotFound(err: unknown): boolean {
+/**
+ * RPC-ответ Telegram `USERNAME_NOT_OCCUPIED` — «ника нет».
+ *
+ * Это НЕ доказательство мёртвого ника: на урезанном/frozen аккаунте
+ * `contacts.ResolveUsername` отдаёт USERNAME_NOT_OCCUPIED и на живые ники
+ * (аудит 25.08.2026, TG_VBI, аккаунт 254360278 — 273 живых контакта сожжено).
+ * Дискриминатор один: мёртвый ник — явление одиночное, а замороженный аккаунт
+ * отдаёт этот код на каждый резолв порции. Поэтому одиночный RPC-код не
+ * сжигает контакт — ники пакетом буферизуются и решаются по итогу порции
+ * (буфер notOccupied разбирается в конце sendFirstTouchBatch).
+ *
+ * Намеренно НЕ включаем сюда USERNAME_INVALID: это «ник с недопустимыми
+ * символами», а не «такого ника нет», и замороженный аккаунт его не отдаёт.
+ * Плюс на входе normalizeUsername уже режет ник до [a-z0-9_]{5,32}, так что
+ * USERNAME_INVALID на первом касании практически недостижим; относимся к нему
+ * как к обычному необратимому «ника нет» (см. isUsernameReallyAbsent), а не
+ * как к сигналу парковки — иначе пачка кривых ников ложно уводила бы исправный
+ * аккаунт в паузу.
+ */
+function isUsernameNotOccupiedRpc(err: unknown): boolean {
+  const m = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return m.includes('username_not_occupied');
+}
+
+/**
+ * Необратимые «ника нет»: либо gramJS сам не резолвнул имя строкой «No user has
+ * "X" as username» (а не RPC-кодом сервера), либо ник недопустимого формата
+ * (USERNAME_INVALID). В отличие от USERNAME_NOT_OCCUPIED выше, это честный
+ * признак мёртвого/кривого ника — его можно скипнуть сразу, он не «оживёт».
+ */
+function isUsernameReallyAbsent(err: unknown): boolean {
   const m = (err instanceof Error ? err.message : String(err)).toLowerCase();
   return m.includes('as username')
-    || m.includes('username_not_occupied')
     || m.includes('username_invalid')
     || m.includes('no user has');
 }
@@ -238,6 +267,11 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
   const picked = selectNextContacts({ perBase, limit: quota });
   if (!picked.length) return result;
 
+  // RPC USERNAME_NOT_OCCUPIED неоднозначен: так Telegram отвечает и за мёртвый
+  // ник, и за замороженный аккаунт (на живые ники). Решаем судьбу таких контактов
+  // только по итогу порции — по одному сигналу ничего сказать нельзя.
+  const notOccupied: Array<{ contact: PendingContact; attempts: number }> = [];
+
   for (const contact of picked) {
     if (args.shouldStop?.()) break;
     args.onProgress?.();
@@ -257,10 +291,21 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
     try {
       entity = (await client.getEntity(`@${contact.username}`)) as { id: unknown; username?: string };
     } catch (err) {
-      if (isUsernameNotFound(err)) {
+      // Честный мёртвый ник — gramJS сам не резолвнул имя строкой «No user has
+      // "X" as username», а не RPC-кодом сервера. Такой контакт скипаем сразу:
+      // он не вернётся ни на одной попытке.
+      if (isUsernameReallyAbsent(err)) {
         await fdb.markContactSkipped(db, contact.id, 'юзернейм не найден в Telegram');
         log('info', `Первое касание: @${contact.username} пропущен — юзернейм не найден`);
         result.skipped++;
+        continue;
+      }
+
+      // RPC USERNAME_NOT_OCCUPIED — неоднозначен: тот же код Telegram отдаёт и на
+      // живые ники, когда аккаунт урезан/frozen. Сжигать контакт здесь нельзя;
+      // буферизуем и решаем по итогу порции.
+      if (isUsernameNotOccupiedRpc(err)) {
+        notOccupied.push({ contact, attempts });
         continue;
       }
 
@@ -391,6 +436,43 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
 
     if (args.gapMs && result.sent < picked.length) {
       await new Promise((r) => setTimeout(r, args.gapMs));
+    }
+  }
+
+  // Решаем судьбу буфера «USERNAME_NOT_OCCUPIED» по итогу порции.
+  //
+  // Вся порция «не найдена» (два и более контакта) — сильный признак того, что
+  // заморожен наш аккаунт, а не что база мёртвая: мёртвый ник — одиночное
+  // явление, а урезанный аккаунт отдаёт этот код на каждый резолв. Паркуем
+  // аккаунт (cooldown_until), контакты оставляем в очереди нетронутыми — они
+  // дождутся исправного номера. Если сигнала нет — откладываем каждый контакт
+  // с попыткой: живой он может быть, а сжигать его навсегда нельзя.
+  if (notOccupied.length >= 2 && notOccupied.length === picked.length) {
+    const until = cooldownUntilIso(args.cooldownHours ?? 24);
+    const err = await writeAccountCooldown(db, account.id, until);
+    if (err) {
+      log('error', `Не смог сохранить паузу аккаунта в базе — ${err}`);
+    } else {
+      account.cooldown_until = until;
+      log(
+        'warning',
+        `Первое касание остановлено: весь резолв порции вернул USERNAME_NOT_OCCUPIED — ` +
+          `Telegram, похоже, заморозил аккаунт, а не срезал ники. ` +
+          `Аккаунт на паузе до ${cooldownLabel(until)} (${args.cooldownHours ?? 24}ч), ` +
+          `контакты остаются в очереди, попытки им не засчитываем.`,
+      );
+    }
+    result.postponed += notOccupied.length;
+  } else {
+    for (const { contact, attempts } of notOccupied) {
+      const outcome = await fdb.recordContactFailure(
+        db,
+        contact.id,
+        attempts,
+        'юзернейм не резолвился: USERNAME_NOT_OCCUPIED (возможно, заморожен аккаунт)',
+      );
+      log('warning', `Первое касание: @${contact.username} отложен — юзернейм не резолвился${attemptNote(outcome)}`);
+      result.postponed++;
     }
   }
 

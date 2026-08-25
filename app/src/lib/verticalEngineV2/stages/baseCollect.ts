@@ -628,6 +628,7 @@ async function buildPlan(
   vertical: VeVertical,
   usage: VeUsage,
   market: VeMarket,
+  hypothesisId: string | null,
 ): Promise<{
   plan: VeSourcePlan;
   planRepair?: VePlanRepair;
@@ -658,24 +659,35 @@ async function buildPlan(
     })
     .filter((h) => h.title);
 
-  // Выбор гипотез из UI (route кладёт hypothesis_ids в payload джобы):
-  // непустой массив → план строим только по выбранным (пересечение с
-  // неотклонёнными — выборка выше уже отрезала rejected, даже если пользователь
-  // их отметил). Пустое пересечение — честный фейл вместо молчаливого сбора
-  // по всем гипотезам («я же выбирал одну гипотезу»).
-  const wantedHypothesisIds = payloadStringArray(job, 'hypothesis_ids');
-  if (wantedHypothesisIds) {
-    const wanted = new Set(wantedHypothesisIds);
-    hypotheses = hypotheses.filter((h) => wanted.has(h.id));
+  // Base-per-hypothesis: если джоба несёт payload.hypothesis_id — план строим
+  // по ЭТОЙ одной гипотезе (не по пересечению выбранных; на каждую гипотезу
+  // своя база/джоба). Фолбэк без hypothesis_id (легаси/ENG-refill) — прежняя
+  // семантика: hypothesis_ids из payload, иначе принятые, иначе все.
+  if (hypothesisId) {
+    hypotheses = hypotheses.filter((h) => h.id === hypothesisId);
     if (hypotheses.length === 0) {
-      throw new Error('Выбранные гипотезы не найдены или все отклонены');
+      throw new Error('Гипотеза для сборки не найдена или отклонена');
     }
   } else {
-    // Без явного выбора — семантика разметки: есть принятые → только они.
-    const accepted = hypotheses.filter((h) => h.status === 'accepted');
-    if (accepted.length > 0) {
-      stageLog(ctx, `[base_collect] план только по принятым гипотезам: ${accepted.length} из ${hypotheses.length}`);
-      hypotheses = accepted;
+    // Выбор гипотез из UI (route кладёт hypothesis_ids в payload джобы):
+    // непустой массив → план строим только по выбранным (пересечение с
+    // неотклонёнными — выборка выше уже отрезала rejected, даже если пользователь
+    // их отметил). Пустое пересечение — честный фейл вместо молчаливого сбора
+    // по всем гипотезам («я же выбирал одну гипотезу»).
+    const wantedHypothesisIds = payloadStringArray(job, 'hypothesis_ids');
+    if (wantedHypothesisIds) {
+      const wanted = new Set(wantedHypothesisIds);
+      hypotheses = hypotheses.filter((h) => wanted.has(h.id));
+      if (hypotheses.length === 0) {
+        throw new Error('Выбранные гипотезы не найдены или все отклонены');
+      }
+    } else {
+      // Без явного выбора — семантика разметки: есть принятые → только они.
+      const accepted = hypotheses.filter((h) => h.status === 'accepted');
+      if (accepted.length > 0) {
+        stageLog(ctx, `[base_collect] план только по принятым гипотезам: ${accepted.length} из ${hypotheses.length}`);
+        hypotheses = accepted;
+      }
     }
   }
 
@@ -1918,7 +1930,15 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
 
   // ─── PLAN ───
   if (!info.plan) {
-    const { plan, planRepair, sliceProbe, usedHypotheses } = await buildPlan(job, ctx, vertical, usage, market);
+    const hypothesisId = payloadString(job, 'hypothesis_id');
+    const { plan, planRepair, sliceProbe, usedHypotheses } = await buildPlan(
+      job,
+      ctx,
+      vertical,
+      usage,
+      market,
+      hypothesisId,
+    );
     info.plan = plan;
     if (planRepair) info.plan_repair = planRepair;
     if (sliceProbe) info.slice_probe = sliceProbe;
