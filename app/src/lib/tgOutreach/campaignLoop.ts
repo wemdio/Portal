@@ -28,6 +28,7 @@ import {
   recordProxySuccess,
 } from './proxyHealth';
 import { sendFirstTouchBatch } from './firstTouch/send';
+import { cooldownUntilIso, writeAccountCooldown } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
 import { processLeadForwards } from './leadForward';
 import { truncateMessage } from '@/lib/logger';
@@ -1627,11 +1628,11 @@ export async function runCampaignLoop(
                 errMsg.includes('FrozenMethodInvalidError') ||
                 errMsg.includes('FROZEN_METHOD_INVALID')
               ) {
-                const cooldownUntil = new Date(Date.now() + tg.account_cooldown_hours * 3600 * 1000).toISOString();
+                const cooldownUntil = cooldownUntilIso(tg.account_cooldown_hours);
                 const cooldownDisplay = new Date(cooldownUntil).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
-                const { error: cdErr } = await db.from('tg_outreach_accounts').update({ cooldown_until: cooldownUntil }).eq('id', account.id);
+                const cdErr = await writeAccountCooldown(db, account.id, cooldownUntil);
                 if (cdErr) {
-                  log('error', `Аккаунт ${account.session_name}: не смог сохранить паузу в базе данных — ${cdErr.message}`);
+                  log('error', `Аккаунт ${account.session_name}: не смог сохранить паузу в базе данных — ${cdErr}`);
                 }
                 (account as OutreachAccount).cooldown_until = cooldownUntil;
                 log('warning', `Аккаунт ${account.session_name}: Telegram ограничил отправку (FloodError/Frozen на диалоге ${dialogLabel}). Аккаунт на паузе до ${cooldownDisplay} (${tg.account_cooldown_hours}ч).`);
@@ -1877,6 +1878,7 @@ export async function runCampaignLoop(
             account,
             perDay: tg.first_touch_per_account_per_day,
             maxChars: tg.first_touch_max_chars,
+            cooldownHours: tg.account_cooldown_hours,
             log,
             shouldStop,
             onProgress: tick,

@@ -392,7 +392,7 @@ export const DEFAULT_TELEGRAM_SETTINGS: TelegramSettings = {
   ignore_bot_usernames: true,
   ignore_no_username: true,
   blocked_usernames: ['SpamBot'],
-  account_cooldown_hours: 5,
+  account_cooldown_hours: 24,
   first_touch_max_chars: DEFAULT_MAX_MESSAGE_CHARS,
   follow_up: DEFAULT_FOLLOW_UP,
 };

@@ -10,6 +10,11 @@ import type { TelegramClient } from 'telegram';
 import { validateFirstTouch, describeFailure, resolveMaxChars } from './validateMessage';
 import { selectNextContacts, remainingDailyQuota, type PendingContact } from './selectContacts';
 import * as fdb from './db';
+import {
+  isFloodLimitReason,
+  cooldownUntilIso,
+  writeAccountCooldown,
+} from '../accountCooldown';
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
@@ -17,7 +22,7 @@ export interface SendBatchArgs {
   db: SupabaseClient;
   client: TelegramClient;
   campaignId: string;
-  account: { id: string; session_name: string; campaign_id: string };
+  account: { id: string; session_name: string; campaign_id: string; cooldown_until?: string | null };
   /** Дневная норма первых сообщений на аккаунт. Ноль = выключено. */
   perDay: number | undefined;
   log: LogFn;
@@ -30,6 +35,11 @@ export interface SendBatchArgs {
    * дефолт из `validateMessage`.
    */
   maxChars?: number;
+  /**
+   * «Пауза после ограничения» кампании. Ноль или отсутствие — паузу не ставим
+   * (как было до 24.08: PEER_FLOOD только останавливал порцию).
+   */
+  cooldownHours?: number;
 }
 
 export interface SendBatchResult {
@@ -56,6 +66,43 @@ function attemptNote(outcome: { attempts: number; exhausted: boolean }): string 
   return outcome.exhausted
     ? ` (попытка ${outcome.attempts} из ${fdb.MAX_CONTACT_ATTEMPTS} — больше пробовать не буду, верните в очередь на вкладке «Базы»)`
     : ` (попытка ${outcome.attempts} из ${fdb.MAX_CONTACT_ATTEMPTS})`;
+}
+
+function cooldownLabel(untilIso: string): string {
+  return new Date(untilIso).toLocaleString('ru-RU', {
+    hour: '2-digit',
+    minute: '2-digit',
+    day: '2-digit',
+    month: '2-digit',
+  });
+}
+
+/**
+ * PEER_FLOOD / FLOOD_WAIT — виноват наш аккаунт. Без cooldown_until следующий
+ * круг снова берёт тот же номер. Контакт не трогаем.
+ */
+async function parkIfFlood(args: {
+  db: SupabaseClient;
+  account: { id: string; cooldown_until?: string | null };
+  hours: number | undefined;
+  reason: string;
+  log: LogFn;
+}): Promise<boolean> {
+  if (!args.hours || args.hours <= 0 || !isFloodLimitReason(args.reason)) return false;
+  const until = cooldownUntilIso(args.hours);
+  const err = await writeAccountCooldown(args.db, args.account.id, until);
+  if (err) {
+    args.log('error', `Не смог сохранить паузу аккаунта в базе — ${err}`);
+    return false;
+  }
+  args.account.cooldown_until = until;
+  args.log(
+    'warning',
+    `Первое касание остановлено: Telegram ограничил аккаунт (${args.reason}). ` +
+      `Аккаунт на паузе до ${cooldownLabel(until)} (${args.hours}ч), следующий круг его не возьмёт. ` +
+      `Контакты остаются в очереди, попытки им не засчитываем.`,
+  );
+  return true;
 }
 
 /**
@@ -233,14 +280,24 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       }
 
       if (failure.kind === 'account_limited' || failure.kind === 'transport_down') {
-        const cause = failure.kind === 'transport_down'
-          ? `обрыв связи или прокси (${failure.reason})`
-          : `Telegram ограничил аккаунт (${failure.reason})`;
-        log(
-          'warning',
-          `Первое касание остановлено на резолве юзернейма: ${cause}. ` +
-            `Контакты остаются в очереди, попытки им не засчитываем — продолжим следующим кругом.`,
-        );
+        const parked = failure.kind === 'account_limited'
+          && await parkIfFlood({
+            db,
+            account,
+            hours: args.cooldownHours,
+            reason: failure.reason,
+            log,
+          });
+        if (!parked) {
+          const cause = failure.kind === 'transport_down'
+            ? `обрыв связи или прокси (${failure.reason})`
+            : `Telegram ограничил аккаунт (${failure.reason})`;
+          log(
+            'warning',
+            `Первое касание остановлено на резолве юзернейма: ${cause}. ` +
+              `Контакты остаются в очереди, попытки им не засчитываем — продолжим следующим кругом.`,
+          );
+        }
         result.postponed++;
         break;
       }
@@ -284,14 +341,24 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       }
 
       if (failure.kind === 'account_limited' || failure.kind === 'transport_down') {
-        const cause = failure.kind === 'transport_down'
-          ? `обрыв связи или прокси (${failure.reason})`
-          : `Telegram ограничил аккаунт (${failure.reason})`;
-        log(
-          'warning',
-          `Первое касание остановлено: ${cause}. ` +
-            `Контакты остаются в очереди, попытки им не засчитываем — продолжим следующим кругом.`,
-        );
+        const parked = failure.kind === 'account_limited'
+          && await parkIfFlood({
+            db,
+            account,
+            hours: args.cooldownHours,
+            reason: failure.reason,
+            log,
+          });
+        if (!parked) {
+          const cause = failure.kind === 'transport_down'
+            ? `обрыв связи или прокси (${failure.reason})`
+            : `Telegram ограничил аккаунт (${failure.reason})`;
+          log(
+            'warning',
+            `Первое касание остановлено: ${cause}. ` +
+              `Контакты остаются в очереди, попытки им не засчитываем — продолжим следующим кругом.`,
+          );
+        }
         result.postponed++;
         break;
       }

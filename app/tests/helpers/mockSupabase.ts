@@ -63,11 +63,37 @@ export interface MockSupabaseSeed {
    */
   errorInserts?: Record<string, { code: string; message: string; commitRow?: boolean }>;
   /**
+   * Targeted UPSERT failure. Unlike errorInserts this is deliberately scoped
+   * to the upsert verb so fallback tests can keep ordinary inserts/selects on
+   * the same table healthy.
+   */
+  errorUpserts?: Record<string, { code: string; message: string }>;
+  /**
+   * Opt-in faithful `.order/.limit/.range` handling for pagination regressions.
+   * Kept opt-in so existing tests that intentionally rely on seed order are
+   * not silently reinterpreted.
+   */
+  enforceQueryWindows?: boolean;
+  /** Optional PostgREST-style maximum rows returned by one ranged query. */
+  maxRowsPerQuery?: number;
+  /**
+   * INSERT succeeds and mutates the table, but `.select().maybeSingle()` returns
+   * no representation. This models a successful PostgREST write whose response
+   * body is unavailable/empty, so saga code cannot treat `data === null` as
+   * proof that nothing was committed.
+   */
+  nullInsertRepresentations?: string[];
+  /**
    * Прицельная ошибка UPDATE. `patchIncludes` позволяет уронить только один
    * переход состояния (например processed=false), не ломая claim-update той
    * же таблицы.
    */
   errorUpdates?: Record<string, { message: string; patchIncludes?: Row }>;
+  /**
+   * One-shot mutation hook immediately before a table's first UPDATE builder.
+   * Models a concurrent commit between an authorization SELECT and write CAS.
+   */
+  beforeFirstUpdates?: Record<string, (rows: Row[]) => Row[]>;
   /**
    * Обработчики RPC-функций (`db.rpc('search_pdl_companies', params)`):
    * имя функции → (params, db) → { data, error? }. Хендлер получает сам мок,
@@ -75,7 +101,15 @@ export interface MockSupabaseSeed {
    * SQL-функции поверх них. Функции без хендлера отвечают ошибкой —
    * забытый мок виден сразу, а не «пустым успехом».
    */
-  rpcHandlers?: Record<string, (params: Row, db: MockSupabaseClient) => { data: unknown; error?: { message: string } }>;
+  rpcHandlers?: Record<
+    string,
+    (
+      params: Row,
+      db: MockSupabaseClient,
+    ) =>
+      | { data: unknown; error?: { message: string } }
+      | Promise<{ data: unknown; error?: { message: string } }>
+  >;
 }
 
 export interface InsertCall {
@@ -260,7 +294,13 @@ function parseOrExpr(expr: string): Filter[][] {
 function parseTerm(term: string): Filter {
   const [column, op, ...rest] = term.split('.');
   const valueRaw = rest.join('.');
-  const value = valueRaw === 'null' ? null : valueRaw;
+  const value = valueRaw === 'null'
+    ? null
+    : valueRaw === 'true'
+      ? true
+      : valueRaw === 'false'
+        ? false
+        : valueRaw;
   const opMap: Record<string, Op> = {
     eq: 'eq', neq: 'neq', gte: 'gte', lte: 'lte', gt: 'gt', lt: 'lt', is: 'is',
     // ilike внутри or(...) — идиома поиска по нескольким колонкам/значениям
@@ -296,6 +336,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
     let errorMessage = seed.errorTables?.[table];
     const selectError = seed.errorSelects?.[table];
     const insertError = seed.errorInserts?.[table];
+    const upsertError = seed.errorUpserts?.[table];
     const updateError = seed.errorUpdates?.[table];
     const filters: Filter[] = [];
     const orGroups: Filter[][][] = []; // list of (DNF) constraints; each must hold
@@ -303,14 +344,44 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
     let pendingInsert: Row[] = [];
     let pendingUpsert: { rows: Row[]; onConflict: string | null } | null = null;
     let pendingUpdate: Row | null = null;
+    const requestedOrders: Array<{ column: string; ascending: boolean }> = [];
+    let requestedLimit: number | null = null;
+    let requestedRange: { from: number; to: number } | null = null;
+    let countRequested = false;
+    let beforeFirstUpdateApplied = false;
 
-    function rowsForRead(): Row[] {
+    function rowsForRead(applyWindow = true): Row[] {
       let out = tables[table] ? tables[table].slice() : [];
       for (const f of filters) out = applyFilter(out, f);
       for (const groupSet of orGroups) {
         out = out.filter((r) =>
           groupSet.some((conj) => conj.every((f) => applyFilter([r], f).length > 0)),
         );
+      }
+      if (seed.enforceQueryWindows && requestedOrders.length > 0) {
+        out.sort((left, right) => {
+          for (const { column, ascending } of requestedOrders) {
+            const a = left[column];
+            const b = right[column];
+            if (a === b) continue;
+            if (a === null || a === undefined) return ascending ? 1 : -1;
+            if (b === null || b === undefined) return ascending ? -1 : 1;
+            return (a < b ? -1 : 1) * (ascending ? 1 : -1);
+          }
+          return 0;
+        });
+      }
+      if (applyWindow && seed.enforceQueryWindows && requestedRange) {
+        out = out.slice(requestedRange.from, requestedRange.to + 1);
+      } else if (applyWindow && seed.enforceQueryWindows && requestedLimit !== null) {
+        out = out.slice(0, requestedLimit);
+      }
+      if (
+        applyWindow &&
+        seed.enforceQueryWindows &&
+        seed.maxRowsPerQuery !== undefined
+      ) {
+        out = out.slice(0, seed.maxRowsPerQuery);
       }
       return out;
     }
@@ -390,12 +461,17 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         return { data: matching, error: null, count: matching.length };
       }
       const data = rowsForRead();
-      return { data, error: null, count: data.length };
+      return {
+        data,
+        error: null,
+        count: countRequested ? rowsForRead(false).length : data.length,
+      };
     }
 
     const builder: Builder = {
-      select: (columns) => {
+      select: (columns, opts) => {
         selects.push({ table, columns: columns ?? '*' });
+        countRequested = Boolean(opts?.count);
         if (selectError && (columns ?? '*').includes(selectError.columnsInclude)) {
           errorMessage = selectError.message;
         }
@@ -415,6 +491,13 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         return builder;
       },
       update: (patch) => {
+        const beforeFirstUpdate = seed.beforeFirstUpdates?.[table];
+        if (!beforeFirstUpdateApplied && beforeFirstUpdate) {
+          tables[table] = beforeFirstUpdate(
+            (tables[table] ?? []).map((row) => ({ ...row })),
+          ).map((row) => ({ ...row }));
+          beforeFirstUpdateApplied = true;
+        }
         mode = 'update';
         pendingUpdate = patch;
         return builder;
@@ -446,17 +529,29 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         return builder;
       },
 
-      order: () => builder,
-      limit: () => builder,
+      order: (...args) => {
+        const [column, options] = args as [string, { ascending?: boolean } | undefined];
+        requestedOrders.push({ column, ascending: options?.ascending !== false });
+        return builder;
+      },
+      limit: (...args) => {
+        const [count] = args as [number];
+        requestedLimit = count;
+        return builder;
+      },
       // Как then/single: errorTables/errorSelects обязаны пробиваться и через
       // range-пагинацию (PostgREST вернёт error на выполнении запроса).
-      range: async () => {
+      range: async (...args) => {
+        const [from, to] = args as [number, number];
+        requestedRange = { from, to };
+        if (mode === 'upsert' && upsertError) return { data: [], error: upsertError, count: 0 };
         if (errorMessage) return { data: [], error: { message: errorMessage }, count: 0 };
         return flushMutation();
       },
 
       single: async () => {
         if (mode === 'insert' && insertError) return failInsert(insertError);
+        if (mode === 'upsert' && upsertError) return { data: null, error: upsertError };
         if (errorMessage) return { data: null, error: { message: errorMessage } };
         const result = flushMutation();
         const first = result.data[0] ?? null;
@@ -465,14 +560,22 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
       },
       maybeSingle: async () => {
         if (mode === 'insert' && insertError) return failInsert(insertError) as never;
+        if (mode === 'upsert' && upsertError) return { data: null, error: upsertError } as never;
         if (errorMessage) return { data: null, error: { message: errorMessage } as never };
         const result = flushMutation();
+        if (mode === 'insert' && seed.nullInsertRepresentations?.includes(table)) {
+          return { data: null, error: null };
+        }
         return { data: result.data[0] ?? null, error: null };
       },
 
       then: <T>(onFulfilled?: (v: { data: Row[]; error: null; count: number }) => T) => {
         if (mode === 'insert' && insertError) {
           return Promise.resolve({ ...failInsert(insertError), count: 0 } as never).then(onFulfilled as never);
+        }
+        if (mode === 'upsert' && upsertError) {
+          return Promise.resolve({ data: null, error: upsertError, count: 0 } as never)
+            .then(onFulfilled as never);
         }
         const updateShouldFail =
           mode === 'update' &&
@@ -503,7 +606,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
       rpcCalls.push({ fn, params });
       const handler = seed.rpcHandlers?.[fn];
       if (!handler) return { data: null, error: { message: `no rpc handler mocked for ${fn}` } };
-      const out = handler(params, api);
+      const out = await handler(params, api);
       return { data: out.data ?? null, error: out.error ?? null };
     },
     getRows: (table: string) => (tables[table] ?? []).map((r) => ({ ...r })),

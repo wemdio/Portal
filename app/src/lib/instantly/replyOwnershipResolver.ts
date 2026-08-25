@@ -7,6 +7,7 @@ import {
 } from './accountCampaignMappings';
 import { fetchThreadContext, getBodyText, type ThreadContext } from './leadQualifier';
 import { CampaignStatus, type Email } from './types';
+import { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
 
 const MAPPING_POSITIVE_TTL_MS = 10 * 60 * 1000;
 const MAPPING_NEGATIVE_TTL_MS = 60 * 1000;
@@ -16,6 +17,8 @@ const MAX_OWNERSHIP_EVIDENCE_CALLS = 2;
 interface MappedCampaigns {
   allCampaignIds: string[];
   currentCampaignIds: string[];
+  /** A live positive cache omitted the email's provider campaign, so we refreshed it. */
+  refreshedForProviderMismatch?: boolean;
 }
 
 type MappingCacheEntry = { at: number; value: MappedCampaigns };
@@ -134,14 +137,33 @@ function pruneMappingCache(): void {
   }
 }
 
-async function getMappedCampaigns(mailbox: string, accountId?: string): Promise<MappedCampaigns> {
+async function getMappedCampaigns(
+  mailbox: string,
+  accountId?: string,
+  providerCampaignId?: string,
+): Promise<MappedCampaigns> {
   const key = `${accountId ?? 'main'}:${mailbox}`;
   const cached = mappingCache.get(key);
+  let refreshedForProviderMismatch = false;
   if (cached) {
     const ttl = cached.value.allCampaignIds.length > 0
       ? MAPPING_POSITIVE_TTL_MS
       : MAPPING_NEGATIVE_TTL_MS;
-    if (Date.now() - cached.at < ttl) return cached.value;
+    const cacheIsLive = Date.now() - cached.at < ttl;
+    const providerMissingFromPositiveCache = Boolean(
+      cacheIsLive &&
+      providerCampaignId &&
+      cached.value.allCampaignIds.length > 0 &&
+      !cached.value.allCampaignIds.includes(providerCampaignId),
+    );
+    // Provider campaign_id is fresh per email. If it is absent from an
+    // otherwise-live mailbox cache, the mailbox may have moved projects since
+    // the cache was populated. Force one provider refresh instead of routing
+    // the reply through the previous owner's ten-minute snapshot.
+    if (cacheIsLive && !providerMissingFromPositiveCache) {
+      return cached.value;
+    }
+    refreshedForProviderMismatch = providerMissingFromPositiveCache;
     mappingCache.delete(key);
   }
 
@@ -170,7 +192,9 @@ async function getMappedCampaigns(mailbox: string, accountId?: string): Promise<
   };
   mappingCache.set(key, { at: Date.now(), value });
   pruneMappingCache();
-  return value;
+  return refreshedForProviderMismatch
+    ? { ...value, refreshedForProviderMismatch: true }
+    : value;
 }
 
 interface OwnershipLinks {
@@ -510,6 +534,71 @@ function campaignParentMatches(
   });
 }
 
+function strongExactProviderParent(args: {
+  context: ThreadContext | null;
+  reply: Email;
+  providerCampaignId: string;
+  mailbox: string;
+  leadEmail: string;
+}): Email | null {
+  const { context, reply, providerCampaignId, mailbox, leadEmail } = args;
+  const parent = context?.lastOutbound;
+  if (!parent) return null;
+  const parentCampaignId = parent.campaign_id?.trim();
+  if (parentCampaignId && parentCampaignId !== providerCampaignId) return null;
+
+  const normalizedParent = parentCampaignId
+    ? parent
+    : { ...parent, campaign_id: providerCampaignId };
+  const evidence = collectCampaignEvidence(
+    [providerCampaignId],
+    reply,
+    mailbox,
+    leadEmail,
+    [normalizedParent],
+    null,
+  );
+  return evidence.get(providerCampaignId)?.parents[0]?.email ?? null;
+}
+
+async function resolveProviderCampaignFallback(args: {
+  db: SupabaseClient;
+  providerCampaignId: string;
+  providerContext: ThreadContext | null;
+  reason: string;
+}): Promise<ReplyOwnershipResolution> {
+  const { db, providerCampaignId, providerContext, reason } = args;
+  let owner;
+  try {
+    owner = await resolveCampaignProjectOwner(db, providerCampaignId);
+  } catch (error) {
+    return {
+      status: 'defer',
+      providerCampaignId,
+      reason: `campaign ownership unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  if (owner.status === 'ambiguous') {
+    return {
+      status: 'ambiguous',
+      providerCampaignId,
+      candidateCampaignIds: [providerCampaignId],
+      candidateProjectIds: owner.projectIds,
+      reason: `provider campaign ${providerCampaignId} is linked to multiple Portal projects`,
+    };
+  }
+  return {
+    status: 'resolved',
+    providerCampaignId,
+    effectiveCampaignId: providerCampaignId,
+    effectiveProjectId: owner.status === 'resolved' ? owner.projectId : null,
+    context: providerContext,
+    corrected: false,
+    mailboxVerified: false,
+    reason,
+  };
+}
+
 /**
  * Resolve the real campaign/project before any qualification criteria or
  * user-visible side effects. Instantly can attach an inbound to a different
@@ -541,21 +630,17 @@ export async function resolveEffectiveReplyOwner(args: {
       : await fetchThreadContext(providerCampaignId, leadEmail, reply.thread_id, accountId);
   const mailbox = normalizeMailbox(reply.eaccount);
   if (!mailbox) {
-    return {
-      status: 'resolved',
+    return resolveProviderCampaignFallback({
+      db,
       providerCampaignId,
-      effectiveCampaignId: providerCampaignId,
-      effectiveProjectId: null,
-      context: providerContext,
-      corrected: false,
-      mailboxVerified: false,
+      providerContext,
       reason: 'reply has no eaccount; provider campaign retained',
-    };
+    });
   }
 
   let mappings: MappedCampaigns;
   try {
-    mappings = await getMappedCampaigns(mailbox, accountId);
+    mappings = await getMappedCampaigns(mailbox, accountId, providerCampaignId);
   } catch (error) {
     return {
       status: 'defer',
@@ -568,15 +653,24 @@ export async function resolveEffectiveReplyOwner(args: {
   // existing guard path; unlike an API error this is not a reason to stall all
   // replies on an old/rotated account.
   if (mappings.allCampaignIds.length === 0) {
-    return {
-      status: 'resolved',
+    return resolveProviderCampaignFallback({
+      db,
       providerCampaignId,
-      effectiveCampaignId: providerCampaignId,
-      effectiveProjectId: null,
-      context: providerContext,
-      corrected: false,
-      mailboxVerified: false,
+      providerContext,
       reason: 'mailbox has no current campaign mappings; provider campaign retained',
+    });
+  }
+
+  if (
+    mappings.refreshedForProviderMismatch &&
+    !mappings.allCampaignIds.includes(providerCampaignId)
+  ) {
+    return {
+      status: 'defer',
+      providerCampaignId,
+      reason:
+        `mailbox mapping refresh still omits provider campaign ${providerCampaignId}; ` +
+        'waiting for provider ownership to converge',
     };
   }
 
@@ -617,6 +711,41 @@ export async function resolveEffectiveReplyOwner(args: {
       candidateCampaignIds: evidenceCampaignIds,
       candidateProjectIds: [...providerProjects],
       reason: `provider campaign ${providerCampaignId} is linked to multiple Portal projects`,
+    };
+  }
+
+  const providerProjectId = [...providerProjects][0] ?? null;
+  // A sibling campaign can retain stale duplicate project links even while
+  // the provider campaign itself is unambiguous. Such a sibling is compatible
+  // when one of its links still names the provider project; a current campaign
+  // owned only by somebody else remains a real conflict and stays fail-closed.
+  const providerIsCurrent = currentCampaignIds.includes(providerCampaignId);
+  const currentMappingsRemainCompatible = Boolean(
+    providerProjectId &&
+    currentCampaignIds.every((campaignId) =>
+      campaignId === providerCampaignId ||
+      links.projectsByCampaign.get(campaignId)?.has(providerProjectId),
+    ),
+  );
+  const providerParent = providerProjectId && providerIsCurrent && currentMappingsRemainCompatible
+    ? strongExactProviderParent({
+        context: providerContext,
+        reply,
+        providerCampaignId,
+        mailbox,
+        leadEmail,
+      })
+    : null;
+  if (providerProjectId && providerParent) {
+    return {
+      status: 'resolved',
+      providerCampaignId,
+      effectiveCampaignId: providerCampaignId,
+      effectiveProjectId: providerProjectId,
+      context: providerContext,
+      corrected: false,
+      mailboxVerified: true,
+      reason: `current exact mailbox and strong provider parent resolve campaign ${providerCampaignId}`,
     };
   }
 

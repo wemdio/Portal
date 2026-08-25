@@ -431,8 +431,9 @@ function SettingsTab({ campaign, onSave }: {
           <div className="space-y-1">
             <FieldNum label="Пауза после ограничения (часов)" value={telegram.account_cooldown_hours} onChange={v => setTG('account_cooldown_hours', v)} />
             <p className="text-[10px] text-gray-400">
-              Сколько аккаунт отдыхает после того, как Telegram ограничил его. Это наказание
-              постфактум, а не размеренная работа — отправки по дню оно не разносит.
+              Сколько аккаунт отдыхает после PEER_FLOOD / FloodWait — и на ответе, и на
+              первом касании. Пока пауза не кончилась, воркер этот номер не берёт.
+              Для холодной рассылки ставьте сутки, не 5 часов.
             </p>
           </div>
         </div>

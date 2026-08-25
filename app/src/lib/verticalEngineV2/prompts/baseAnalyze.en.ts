@@ -15,9 +15,9 @@ const SYSTEM = `You are a senior data analyst at the Polza agency. You are given
 Rules:
 - Rely ONLY on the data below. If a breakdown cannot be built (the column is missing) — return an empty array, do not invent a distribution.
 - share_pct — the share of rows holding the value (0–100), rounded to whole numbers; compute it from the sample, not from imagination. Top-5 values per breakdown, collapse the tail into "Other".
-- notable_segments — 2–6 meaningful observations: what genuinely stands out in the data (e.g. "40% are micro-businesses with no website", "e-commerce from New York dominates", "half of the decision-makers are founders").
+- notable_segments — 2–6 meaningful observations: what genuinely stands out in the data (e.g. "40% are micro-businesses with no website", "e-commerce from New York dominates", "half of the decision-makers are founders"). If the list contains seasonal industries (education → September/back-to-school, retail → the pre-holiday peak), note the approaching season relative to the TODAY date.
 - data_quality_notes — be honest: which columns are missing, which fields are dirty, what will hinder personalization.
-- recommended_angles — 3–6 messaging angles for THIS specific list: examples, phrasings, and emphases that will land with its segments (geo specifics, industry case studies, decision-maker roles). This is the basis for the template's segment-level tailoring — make the angles concrete, not "write about the benefits".
+- recommended_angles — 3–6 messaging angles for THIS specific list: examples, phrasings, and emphases that will land with its segments (geo specifics, industry case studies, decision-maker roles). If relevant given the TODAY date — add a seasonal angle (an industry's peak season as a reason and offer timing). This is the basis for the template's segment-level tailoring — make the angles concrete, not "write about the benefits".
 - Respond strictly in English, JSON ONLY.`;
 
 export function buildBaseAnalysisMessagesEn(input: BaseAnalyzePromptInput): LLMMessage[] {
@@ -27,6 +27,7 @@ export function buildBaseAnalysisMessagesEn(input: BaseAnalyzePromptInput): LLMM
 
   const user = `LIST: ${input.filename} — ${input.rowCount} rows (sample below)
 SALES VERTICAL: ${input.verticalName}
+TODAY: ${input.today}
 
 COLUMNS (${input.columns.length}):
 ${input.columns.map((c) => `- ${c}`).join('\n')}

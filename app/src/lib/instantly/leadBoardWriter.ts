@@ -1,5 +1,9 @@
 import type { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { createBoardToken, boardTokenSecret, boardUrl } from '@/lib/leadBoard/boardToken';
+import { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
+
+export { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
+export type { CampaignProjectOwnerResolution } from './campaignProjectOwnerResolver';
 
 /**
  * Гостевая таблица лидов проекта (lead board): создание/чтение доски и запись
@@ -61,28 +65,13 @@ export function parseColumnConfig(raw: unknown): BoardColumnConfigEntry[] {
   return out.length > 0 ? out : DEFAULT_COLUMN_CONFIG;
 }
 
-/**
- * Кампания → проект. Периодные ссылки (project_period_instantly_campaigns)
- * приоритетнее легаси — тот же порядок, что у handoff/notify резолва.
- * Кампания может числиться за несколькими проектами — доска ведётся по первому
- * (реальный случай — один проект на кампанию).
- */
+/** Кампания → доказанный единственный проект; ambiguity/none → null. */
 export async function resolveBoardProjectId(
   db: InstantlyDb,
   campaignId: string,
 ): Promise<string | null> {
-  const { data: periodLinks } = await db
-    .from('project_period_instantly_campaigns')
-    .select('project_id')
-    .eq('campaign_id', campaignId);
-  const { data: legacyLinks } = await db
-    .from('project_instantly_campaigns')
-    .select('project_id')
-    .eq('campaign_id', campaignId);
-  const ids = [...(periodLinks ?? []), ...(legacyLinks ?? [])]
-    .map((l: { project_id?: string | null }) => l.project_id)
-    .filter((id): id is string => Boolean(id));
-  return ids[0] ?? null;
+  const owner = await resolveCampaignProjectOwner(db, campaignId);
+  return owner.status === 'resolved' ? owner.projectId : null;
 }
 
 export interface LeadBoard {

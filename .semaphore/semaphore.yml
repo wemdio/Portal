@@ -74,12 +74,16 @@ blocks:
             - cd $APP_PATH
             - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
             - npm run lint
-            # Инкрементальный tsc: .tsbuildinfo.ci помнит прошлый прогон,
-            # перепроверяются только изменённые файлы (−20-40с). Протухший
-            # кэш безопасен — tsc сверяет по содержимому.
-            - 'cache restore tsc-$SEMAPHORE_GIT_BRANCH,tsc-'
-            - npx tsc --noEmit --incremental --tsBuildInfoFile .tsbuildinfo.ci
-            - 'cache store tsc-$SEMAPHORE_GIT_BRANCH .tsbuildinfo.ci'
+            # Раздельные incremental-кэши для проекта и Next route validator.
+            # Протухший кэш безопасен — tsc сверяет файлы по содержимому.
+            - 'cache restore tsc-v2-$SEMAPHORE_GIT_BRANCH,tsc-v2-'
+            - mkdir -p .next/cache/tsc
+            # typedRoutes генерируются отдельно: голый tsc на чистой машине не
+            # видит ошибки Route/handler, пока Next не создал .next/types.
+            - npx next typegen
+            - npx tsc -p tsconfig.next-route-validator.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/routes.tsbuildinfo
+            - npx tsc --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/project.tsbuildinfo
+            - 'cache store tsc-v2-$SEMAPHORE_GIT_BRANCH .next/cache/tsc'
             # npm audit переехал в ночной прогон (.semaphore/nightly-audit.yml):
             # на каждом пуше он ходил в интернет и изредка подвисал/флапал.
             - npm test -- --watchAll=false
@@ -89,7 +93,10 @@ blocks:
             - cd $APP_PATH
             - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
             - 'cache restore nextjs-$SEMAPHORE_GIT_BRANCH,nextjs-'
-            - npm run build
+            # next typegen + строгий tsc выполняются соседней обязательной job.
+            # Next здесь пропускает только повторную проверку типов, иначе она
+            # после успешной компиляции упирается в физические 4 ГБ runner-а.
+            - 'NEXT_BUILD_SKIP_TYPECHECK=1 npm run build'
             - 'cache store nextjs-$SEMAPHORE_GIT_BRANCH .next/cache'
 
   - name: Build portal

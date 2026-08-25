@@ -5,6 +5,10 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import * as instantly from '@/lib/instantly/client';
 import { sendLeadNotification } from '@/lib/instantly/leadNotifier';
 import type { LeadNotificationData } from '@/lib/instantly/leadNotifier';
+import {
+  loadAuthorizedQualification,
+  qualifiedLeadAccessErrorResponse,
+} from '@/lib/instantly/qualifiedLeadAuthorization';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,6 +16,20 @@ interface ForwardBody {
   qualification_id: string;
   client_user_id?: string | null;
   telegram_chat_id?: number | null;
+}
+
+interface ForwardQualification extends Record<string, unknown> {
+  campaign_id: string;
+  campaign_name: string | null;
+  lead_email: string;
+  lead_name: string | null;
+  company_name: string | null;
+  reply_subject: string | null;
+  reply_body: string | null;
+  last_outbound_preview: string | null;
+  reply_timestamp: string | null;
+  status: string | null;
+  ai_reason: string | null;
 }
 
 export const POST = withAuth(async (req, user) => {
@@ -35,6 +53,14 @@ export const POST = withAuth(async (req, user) => {
       { status: 400 },
     );
   }
+
+  const authorization = await loadAuthorizedQualification<ForwardQualification>(
+    user.id,
+    qualification_id,
+  );
+  if (!authorization.ok) return qualifiedLeadAccessErrorResponse(authorization);
+  const qual = authorization.qualification;
+  const campaignId = authorization.campaignId;
 
   // Deduplication: check by qualification + chat combo (or qualification + client)
   if (telegram_chat_id) {
@@ -67,16 +93,6 @@ export const POST = withAuth(async (req, user) => {
     }
   }
 
-  const { data: qual, error: qualErr } = await supabaseInstantly
-    .from('instantly_lead_qualifications')
-    .select('*')
-    .eq('id', qualification_id)
-    .single();
-
-  if (qualErr || !qual) {
-    return NextResponse.json({ error: 'Lead qualification not found' }, { status: 404 });
-  }
-
   let phone: string | null = null;
   let website: string | null = null;
   let linkedinUrl: string | null = null;
@@ -84,7 +100,10 @@ export const POST = withAuth(async (req, user) => {
   let companyName = qual.company_name as string | null;
 
   try {
-    const leads = await instantly.getLeadsByEmail({ email: qual.lead_email });
+    const leads = await instantly.getLeadsByEmail({
+      email: qual.lead_email,
+      campaign_id: campaignId,
+    });
     const lead = leads?.[0];
     if (lead) {
       phone = lead.phone ?? null;
@@ -107,6 +126,7 @@ export const POST = withAuth(async (req, user) => {
         .from('client_campaign_leads')
         .select('first_name, last_name, company_name, website, linkedin_url')
         .eq('email', qual.lead_email)
+        .eq('campaign_id', campaignId)
         .limit(1)
         .maybeSingle();
 

@@ -10,6 +10,7 @@ import {
   qualifyOneReply,
   getCampaignsByAccountCached,
   isTransientQualifyError,
+  persistTransientQualificationRetry,
   strayColumnsSupported,
 } from './leadQualificationWorker';
 import type { Email } from './types';
@@ -59,7 +60,6 @@ import type { Email } from './types';
  */
 
 const OTHERS_PAGE_SIZE = 100;
-const MAX_TRANSIENT_RETRIES = 5;
 const MAX_MAILBOX_PROBES_PER_DOMAIN = 4;
 const MAX_CAMPAIGN_PROBES_PER_EMAIL = 5;
 
@@ -544,9 +544,6 @@ function buildOthersThreadContext(
 
 // ─── Основной тик ─────────────────────────────────────────────────────────────
 
-/** email_id → сколько раз подряд падал транзиентно (в памяти процесса). */
-const transientRetryCount = new Map<string, number>();
-
 export async function pollOthersOnce(): Promise<number> {
   if (!supabaseAdmin) {
     workerLog('warn', 'supabaseAdmin not configured — skipping');
@@ -741,7 +738,6 @@ export async function pollOthersOnce(): Promise<number> {
         prefetchedParentMatched: candidates.length === 1,
       });
       processed++;
-      if (email.id) transientRetryCount.delete(email.id);
       workerLog(
         'info',
         `Qualified Others reply from ${sender} (cited ${citedDomain} → campaign ${chosen.campaignId})`,
@@ -751,22 +747,28 @@ export async function pollOthersOnce(): Promise<number> {
       const emailId = email.id ?? '';
       workerLog('error', `Failed to qualify Others reply ${emailId}`, err);
 
-      // Транзиентная политика — как в поллере: строку не пишем (письмо
-      // перепробуется, пока оно в окне сканирования), но с ПОТОЛКОМ попыток:
-      // хронически «транзиентный» сбой (вечный 429 исчерпанного ключа) без
-      // потолка не оставлял бы вообще никакого следа.
+      // Others scans only a bounded provider window. Persist the same durable
+      // generated needs_review state as the main poller: otherwise a long DB,
+      // ownership or AI outage lets the reply fall out of the scan before it
+      // ever reaches a specialist.
       if (emailId && isTransientQualifyError(message)) {
-        const tries = (transientRetryCount.get(emailId) ?? 0) + 1;
-        if (tries < MAX_TRANSIENT_RETRIES) {
-          transientRetryCount.set(emailId, tries);
-          workerLog(
-            'warn',
-            `Transient failure for ${emailId} (${tries}/${MAX_TRANSIENT_RETRIES}) — no row written, will retry next tick`,
-          );
-          continue;
+        const { error: retryError } = await persistTransientQualificationRetry(
+          db,
+          reply,
+          message,
+          {
+            campaignId: chosen.campaignId,
+            outOfCampaign,
+            eaccount: email.eaccount ?? null,
+            lastOutbound: matchedOutreach,
+          },
+        );
+        if (retryError) {
+          workerLog('error', `Could not persist retryable Others reply ${emailId}: ${retryError.message}`);
+        } else {
+          workerLog('warn', `Deferred Others reply ${emailId} to durable qualification retry`);
         }
-        transientRetryCount.delete(emailId);
-        workerLog('error', `Transient failures exhausted for ${emailId} — writing error row for visibility`);
+        continue;
       }
       const { error: insErr } = await db.from('instantly_lead_qualifications').insert({
         campaign_id: chosen.campaignId,

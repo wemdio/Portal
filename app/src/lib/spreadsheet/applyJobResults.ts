@@ -5,6 +5,12 @@ import {
   saveCompressedStateWithCas,
   type SpreadsheetState,
 } from './serverState';
+import {
+  applyWebsiteInnLookupResultsToTabs,
+  isWebsiteInnLookupApplyComplete,
+  type ApplyWebsiteInnLookupResult,
+  type WebsiteInnLookupResult,
+} from '@/lib/enrich/websiteInnLookupShared';
 
 /**
  * Server-side apply for completed/in-progress job results.
@@ -119,6 +125,39 @@ export async function applyEnrichmentResults(
   });
 }
 
+export async function applyWebsiteInnLookupResults(
+  userId: string,
+  jobId: string,
+  tabId: string,
+  urlColumn: number,
+  innColumn: number,
+  companyColumn: number,
+): Promise<boolean> {
+  if (!supabaseAdmin) return false;
+  let latestApply: ApplyWebsiteInnLookupResult | null = null;
+  const saved = await runApplyWithCasRetry('website_inn_lookup', userId, jobId, tabId, async (state) => {
+    const results = await fetchAllWebsiteInnLookupResults(jobId);
+    const applied = applyWebsiteInnLookupResultsToTabs(state.tabs, {
+      tabId,
+      urlColumn,
+      innColumn,
+      companyColumn,
+      results,
+    });
+    latestApply = applied;
+    if (applied.mutated) state.tabs = applied.tabs;
+    return {
+      applied: applied.applied,
+      mutated: applied.mutated,
+    };
+  });
+  // runApplyWithCasRetry считает корректный no-op успехом. Для website lookup
+  // это безопасно только когда вкладка/строки присутствуют и целевые колонки
+  // не были переставлены. Иначе results_applied_at должен остаться пустым,
+  // чтобы браузер или следующий reconciliation смог повторить применение.
+  return saved && latestApply !== null && isWebsiteInnLookupApplyComplete(latestApply);
+}
+
 /**
  * Generic wrapper: load → mutate → save with CAS retry.
  *
@@ -126,7 +165,7 @@ export async function applyEnrichmentResults(
  * читаем свежий state и пробуем заново. Retry'имся до MAX_CAS_RETRIES раз,
  * после чего сдаёмся (на следующем периодическом тике попробуем ещё).
  */
-async function runApplyWithCasRetry(
+export async function runApplyWithCasRetry(
   label: string,
   userId: string,
   jobId: string,
@@ -210,6 +249,25 @@ async function fetchAllEnrichmentResults(jobId: string) {
     if (!data?.length) break;
     all.push(...data);
     page++;
+  }
+  return all;
+}
+
+async function fetchAllWebsiteInnLookupResults(jobId: string): Promise<WebsiteInnLookupResult[]> {
+  if (!supabaseAdmin) return [];
+  const all: WebsiteInnLookupResult[] = [];
+  let page = 0;
+  while (true) {
+    const { data } = await supabaseAdmin
+      .from('website_inn_lookup_items')
+      .select('id, row_index, url, status, inn, company_name, error_message')
+      .eq('job_id', jobId)
+      .in('status', ['completed', 'failed'])
+      .order('row_index', { ascending: true })
+      .range(page * 1000, (page + 1) * 1000 - 1);
+    if (!data?.length) break;
+    all.push(...(data as WebsiteInnLookupResult[]));
+    page += 1;
   }
   return all;
 }

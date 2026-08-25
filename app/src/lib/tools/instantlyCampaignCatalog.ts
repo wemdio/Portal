@@ -13,6 +13,7 @@ import {
   iterateInstantlyCampaignPages,
   type InstantlyCampaignItem,
 } from '@/lib/tools/autoReportBuilder';
+import { claimCampaignProjectOwnership } from '@/lib/instantly/campaignProjectOwnership';
 
 /** Порог актуальности каталога (синхронизация ведётся TG-ботом раз в час). */
 export const INSTANTLY_CATALOG_STALE_MS = 65 * 60 * 1000;
@@ -623,6 +624,33 @@ const GENERIC_TOKENS = new Set([
   'software', 'marketing', 'sales', 'tech', 'pro', 'data', 'base',
 ]);
 
+function wordsForStrongMatch(value: string): string[] {
+  return transliterate(value)
+    .normalize('NFKC')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+/**
+ * Replacement is destructive, so substring matching is not enough. Require a
+ * distinctive token (4+ chars) and a complete token-boundary phrase. Generic
+ * trailing suffixes such as "Group"/"eng" may be omitted from the brand.
+ */
+function isStrongReplacementTextMatch(campaignName: string, clientName: string): boolean {
+  const campaignWords = wordsForStrongMatch(campaignName);
+  const clientWords = wordsForStrongMatch(clientName);
+  while (clientWords.length > 1 && GENERIC_TOKENS.has(clientWords.at(-1) ?? '')) {
+    clientWords.pop();
+  }
+  if (!clientWords.some((word) => word.length >= 4 && !GENERIC_TOKENS.has(word))) {
+    return false;
+  }
+  if (clientWords.length === 0 || clientWords.length > campaignWords.length) return false;
+  return campaignWords.some((_, start) =>
+    clientWords.every((word, offset) => campaignWords[start + offset] === word));
+}
+
 function tokenizeClient(s: string): Set<string> {
   return new Set(
     transliterate(s)
@@ -646,6 +674,19 @@ interface MatchableCampaign {
   new_leads_contacted_count?: number | null;
 }
 
+type AutoMatchReadError = { message: string } | null;
+
+function autoMatchReadFailed(
+  source: string,
+  error: AutoMatchReadError | undefined,
+): boolean {
+  if (!error) return false;
+  console.error(
+    `[instantly-catalog] ${source} read failed; auto-match skipped (fail-closed): ${error.message}`,
+  );
+  return true;
+}
+
 /**
  * Принадлежит ли кампания активному периоду.
  *
@@ -667,20 +708,27 @@ function campaignStartsInsidePeriod(campaign: MatchableCampaign, period: ActiveP
 
 async function loadActiveProjectPeriods(
   projectIds: readonly string[],
-): Promise<Map<string, ActiveProjectPeriod>> {
+): Promise<{
+  periodsByProjectId: Map<string, ActiveProjectPeriod>;
+  error: AutoMatchReadError;
+}> {
   const map = new Map<string, ActiveProjectPeriod>();
-  if (!supabaseMain || projectIds.length === 0) return map;
+  if (!supabaseMain || projectIds.length === 0) {
+    return { periodsByProjectId: map, error: null };
+  }
 
-  const { data } = await supabaseMain
+  const { data, error } = await supabaseMain
     .from('project_periods')
     .select('id, project_id, created_at')
     .in('project_id', projectIds)
     .eq('status', 'active');
 
+  if (error) return { periodsByProjectId: map, error };
+
   for (const row of (data ?? []) as ActiveProjectPeriod[]) {
     map.set(row.project_id, row);
   }
-  return map;
+  return { periodsByProjectId: map, error: null };
 }
 
 /**
@@ -702,11 +750,12 @@ async function loadActiveProjectPeriods(
  */
 async function aiMatchUnmatchedCampaigns(
   projects: { id: string; client: string }[],
-  allCampaignIds: Set<string>,
+  catalogRows: MatchableCampaign[],
+  linkedIds: Set<string>,
   denylistSet: Set<string>,
   activePeriodByProjectId: Map<string, ActiveProjectPeriod>,
 ): Promise<{ matched: number; aiCalls: number }> {
-  if (!supabaseAdmin || !supabaseMain) return { matched: 0, aiCalls: 0 };
+  if (!supabaseAdmin) return { matched: 0, aiCalls: 0 };
 
   const apiKey =
     process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY ??
@@ -726,33 +775,15 @@ async function aiMatchUnmatchedCampaigns(
   );
   const MAX_CANDIDATES_PER_CLIENT = 60; // топ-N кандидатов в одном AI запросе
 
-  // 1. Найти кампании, ещё не привязанные ни к какому проекту.
-  const { data: alreadyLinked } = await supabaseAdmin
-    .from('project_instantly_campaigns')
-    .select('campaign_id');
-
-  const { data: alreadyPeriodLinked } = await supabaseAdmin
-    .from('project_period_instantly_campaigns')
-    .select('campaign_id');
-
-  const linkedIds = new Set(
-    (alreadyLinked ?? []).map((r: { campaign_id: string }) => r.campaign_id),
-  );
-  for (const row of (alreadyPeriodLinked ?? []) as { campaign_id: string }[]) {
-    linkedIds.add(row.campaign_id);
-  }
-
-  const { data: catalogRows } = await supabaseAdmin
-    .from('instantly_campaign_catalog')
-    .select('id, name, timestamp_created, new_leads_contacted_count')
-    .not('name', 'is', null);
-  const unmatched = (catalogRows as MatchableCampaign[] | null ?? [])
+  // Critical ownership/catalog reads are loaded and checked once by the
+  // caller before any text or AI claim. Reusing that verified snapshot avoids
+  // a second fail-open read between the text and AI phases.
+  const unmatched = catalogRows
     .filter(
       (c) =>
         c.name &&
         c.name.trim().length > 3 &&
-        !linkedIds.has(c.id) &&
-        allCampaignIds.has(c.id),
+        !linkedIds.has(c.id),
     );
 
   if (unmatched.length === 0) return { matched: 0, aiCalls: 0 };
@@ -981,90 +1012,47 @@ Return {"matches": []} if no confident matches.`;
     );
   }
 
-  if (dedupedMatches.some((m) => m.period_id)) {
-    const legacyMatches = dedupedMatches.flatMap((m) =>
-      m.period_id
-        ? []
-        : [{
-            project_id: m.project_id,
-            campaign_id: m.campaign_id,
-            match_source: m.match_source,
-            match_confidence: m.match_confidence,
-            match_reason: m.match_reason,
-          }],
-    );
-    const periodMatches = dedupedMatches.flatMap((m) =>
-      m.period_id
-        ? [{
-            project_id: m.project_id,
-            period_id: m.period_id,
-            campaign_id: m.campaign_id,
-            match_source: m.match_source,
-            match_confidence: m.match_confidence,
-            match_reason: m.match_reason,
-            baseline_contacts: m.baseline_contacts ?? 0,
-          }]
-        : [],
-    );
-
-    let insertedCount = 0;
-    if (legacyMatches.length > 0) {
-      const { error } = await supabaseAdmin
-        .from('project_instantly_campaigns')
-        .upsert(legacyMatches, {
-          onConflict: 'project_id,campaign_id',
-          ignoreDuplicates: true,
-        });
-      if (error) {
-        console.error('[ai-match] legacy upsert error:', error.message);
-      } else {
-        insertedCount += legacyMatches.length;
-      }
-    }
-
-    if (periodMatches.length > 0) {
-      const { error } = await supabaseAdmin
-        .from('project_period_instantly_campaigns')
-        .upsert(periodMatches, {
-          onConflict: 'period_id,campaign_id',
-          ignoreDuplicates: true,
-        });
-      if (error) {
-        console.error('[ai-match] period upsert error:', error.message);
-      } else {
-        insertedCount += periodMatches.length;
-      }
-    }
-
-    totalMatched = insertedCount;
-    return { matched: totalMatched, aiCalls };
-  }
-
-  if (dedupedMatches.length > 0) {
-    const { error } = await supabaseAdmin
-      .from('project_instantly_campaigns')
-      .upsert(dedupedMatches, {
-        onConflict: 'project_id,campaign_id',
-        ignoreDuplicates: true,
+  // Claim one campaign at a time. A racing/manual ownership conflict must not
+  // roll back unrelated AI matches from the same batch.
+  const claimedMatches: typeof dedupedMatches = [];
+  for (const match of dedupedMatches) {
+    try {
+      const claim = await claimCampaignProjectOwnership(supabaseAdmin, {
+        projectId: match.project_id,
+        campaignId: match.campaign_id,
+        matchSource: 'auto-ai',
+        periodId: match.period_id ?? null,
+        baselineContacts: match.baseline_contacts ?? 0,
+        matchConfidence: match.match_confidence,
+        matchReason: match.match_reason,
+        replaceAutomatic: false,
       });
-    if (error) {
-      console.error('[ai-match] upsert error:', error.message);
-    } else {
-      totalMatched = dedupedMatches.length;
-      // Чтобы постфактум можно было ревьюить — пишем краткий лог в stdout.
-      // Например: «[ai-match] auto-ai: Profit-Gateway ← campaign-uuid 0.95
-      // "Profit gateaway = transliteration of Profit Gateway"»
-      const previewN = Math.min(10, dedupedMatches.length);
-      for (const m of dedupedMatches.slice(0, previewN)) {
-        const project = projects.find((p) => p.id === m.project_id);
-        console.log(
-          `[ai-match] ${(project?.client ?? '?').slice(0, 30)} ← ${m.campaign_id.slice(0, 8)}… conf=${m.match_confidence.toFixed(2)} "${m.match_reason.slice(0, 80)}"`,
+      if (claim.status === 'claimed') {
+        claimedMatches.push(match);
+      } else if (claim.status === 'conflict') {
+        console.warn(
+          `[ai-match] campaign ${match.campaign_id} already belongs to another project — skipped`,
         );
       }
-      if (dedupedMatches.length > previewN) {
-        console.log(`[ai-match] ... +${dedupedMatches.length - previewN} more matches`);
-      }
+    } catch (error) {
+      console.error(
+        `[ai-match] ownership claim failed for campaign ${match.campaign_id}:`,
+        error instanceof Error ? error.message : error,
+      );
     }
+  }
+
+  totalMatched = claimedMatches.length;
+  // Чтобы постфактум можно было ревьюить — пишем краткий лог в stdout.
+  const previewN = Math.min(10, claimedMatches.length);
+  for (const match of claimedMatches.slice(0, previewN)) {
+    const project = projects.find((p) => p.id === match.project_id);
+    console.log(
+      `[ai-match] ${(project?.client ?? '?').slice(0, 30)} ← ${match.campaign_id.slice(0, 8)}… conf=${match.match_confidence.toFixed(2)} "${match.match_reason.slice(0, 80)}"`,
+    );
+  }
+  if (claimedMatches.length > previewN) {
+    console.log(`[ai-match] ... +${claimedMatches.length - previewN} more matches`);
   }
 
   return { matched: totalMatched, aiCalls };
@@ -1079,49 +1067,77 @@ Return {"matches": []} if no confident matches.`;
 export async function autoMatchCampaignsToProjects(): Promise<{ matched: number }> {
   if (!supabaseAdmin || !supabaseMain) return { matched: 0 };
 
-  const { data: projects } = await supabaseMain
+  const { data: projects, error: projectsError } = await supabaseMain
     .from('projects')
     .select('id, client')
     .not('client', 'is', null)
     .neq('client', '');
 
+  if (autoMatchReadFailed('projects', projectsError)) return { matched: 0 };
   if (!projects?.length) return { matched: 0 };
 
-  const { data: campaigns } = await supabaseAdmin
+  const { data: campaigns, error: campaignsError } = await supabaseAdmin
     .from('instantly_campaign_catalog')
     .select('id, name, timestamp_created, new_leads_contacted_count');
 
+  if (autoMatchReadFailed('campaign catalog', campaignsError)) return { matched: 0 };
   if (!campaigns?.length) return { matched: 0 };
 
   const projectRows = projects as { id: string; client: string }[];
-  const activePeriodByProjectId = await loadActiveProjectPeriods(projectRows.map((p) => p.id));
+  const activePeriodsRead = await loadActiveProjectPeriods(projectRows.map((p) => p.id));
+  if (autoMatchReadFailed('active project periods', activePeriodsRead.error)) {
+    return { matched: 0 };
+  }
+  const activePeriodByProjectId = activePeriodsRead.periodsByProjectId;
 
-  const { data: existingManual } = await supabaseAdmin
+  const { data: existingLegacyLinks, error: legacyLinksError } = await supabaseAdmin
     .from('project_instantly_campaigns')
-    .select('project_id, campaign_id')
-    .eq('match_source', 'manual');
+    .select('project_id, campaign_id, match_source');
 
-  const manualSet = new Set(
-    (existingManual ?? []).map((r: { project_id: string; campaign_id: string }) =>
+  if (autoMatchReadFailed('legacy campaign ownership', legacyLinksError)) {
+    return { matched: 0 };
+  }
+
+  const legacyLinkSet = new Set(
+    (existingLegacyLinks ?? []).map((r: { project_id: string; campaign_id: string }) =>
       `${r.project_id}::${r.campaign_id}`),
   );
 
-  const { data: existingPeriodLinks } = await supabaseAdmin
+  const { data: existingPeriodLinks, error: periodLinksError } = await supabaseAdmin
     .from('project_period_instantly_campaigns')
-    .select('project_id, period_id, campaign_id');
+    .select('project_id, period_id, campaign_id, match_source');
+
+  if (autoMatchReadFailed('period campaign ownership', periodLinksError)) {
+    return { matched: 0 };
+  }
 
   const periodLinkSet = new Set(
-    (existingPeriodLinks ?? []).map((r: { period_id: string; campaign_id: string }) =>
-      `${r.period_id}::${r.campaign_id}`),
+    (existingPeriodLinks ?? []).map(
+      (r: { project_id: string; period_id: string; campaign_id: string }) =>
+        `${r.project_id}::${r.period_id}::${r.campaign_id}`,
+    ),
   );
+
+  const ownerProjectIdsByCampaign = new Map<string, Set<string>>();
+  for (const row of [
+    ...(existingLegacyLinks ?? []),
+    ...(existingPeriodLinks ?? []),
+  ] as { project_id: string; campaign_id: string }[]) {
+    const owners = ownerProjectIdsByCampaign.get(row.campaign_id) ?? new Set<string>();
+    owners.add(row.project_id);
+    ownerProjectIdsByCampaign.set(row.campaign_id, owners);
+  }
+  const linkedCampaignIds = new Set(ownerProjectIdsByCampaign.keys());
 
   // Чёрный список ручных удалений — кампании, которые специалист отвязал
   // от проекта в карточке. Без этого фильтра text-match при каждом прогоне
   // возвращает их обратно — главная боль продлеваемых проектов, где
   // кампании прошлого периода не должны подтягиваться к новому.
-  const { data: denylist } = await supabaseAdmin
+  const { data: denylist, error: denylistError } = await supabaseAdmin
     .from('project_instantly_campaigns_denylist')
     .select('project_id, campaign_id');
+
+  if (autoMatchReadFailed('campaign denylist', denylistError)) return { matched: 0 };
 
   const denylistSet = new Set<string>(
     (denylist ?? []).map((r: { project_id: string; campaign_id: string }) =>
@@ -1136,6 +1152,7 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
     match_source: string;
     baseline_contacts: number;
   }[] = [];
+  const textMatchingProjectIdsByCampaign = new Map<string, Set<string>>();
 
   for (const project of projectRows) {
     const clientLower = project.client.trim().toLowerCase();
@@ -1146,12 +1163,38 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
       const campaignLower = (campaign.name ?? '').toLowerCase();
       if (!campaignLower.includes(clientLower)) continue;
       const key = `${project.id}::${campaign.id}`;
-      if (manualSet.has(key)) continue;
       if (denylistSet.has(key)) continue;
+
+      // Ambiguity must be calculated from every non-denylisted name match,
+      // including the already-correct owner that will later be skipped either
+      // as unchanged or because the campaign predates its new active period.
+      // Otherwise nested names ("Acme" / "Acme Labs") make only the second
+      // project reach the claim queue and can flap ownership every sync.
+      const textProjectIds = textMatchingProjectIdsByCampaign.get(campaign.id)
+        ?? new Set<string>();
+      textProjectIds.add(project.id);
+      textMatchingProjectIdsByCampaign.set(campaign.id, textProjectIds);
+
+      // Period eligibility decides whether a link should be created. It must
+      // not erase a project from the independent name-ambiguity set above.
+      if (activePeriod && !campaignStartsInsidePeriod(campaign, activePeriod)) continue;
+
+      const existingOwners = ownerProjectIdsByCampaign.get(campaign.id);
+      const hasForeignOwner = existingOwners
+        ? [...existingOwners].some((ownerProjectId) => ownerProjectId !== project.id)
+        : false;
+      if (
+        hasForeignOwner &&
+        !isStrongReplacementTextMatch(campaign.name ?? '', project.client)
+      ) {
+        console.warn(
+          `[instantly-catalog] weak text match cannot replace owner for campaign ${campaign.id}`,
+        );
+        continue;
+      }
       if (activePeriod) {
-        if (!campaignStartsInsidePeriod(campaign, activePeriod)) continue;
-        const periodKey = `${activePeriod.id}::${campaign.id}`;
-        if (periodLinkSet.has(periodKey)) continue;
+        const periodKey = `${project.id}::${activePeriod.id}::${campaign.id}`;
+        if (periodLinkSet.has(periodKey) && !hasForeignOwner) continue;
         periodMatches.push({
           project_id: project.id,
           period_id: activePeriod.id,
@@ -1160,6 +1203,7 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
           baseline_contacts: 0,
         });
       } else {
+        if (legacyLinkSet.has(key) && !hasForeignOwner) continue;
         legacyMatches.push({
           project_id: project.id,
           campaign_id: campaign.id,
@@ -1169,40 +1213,75 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
     }
   }
 
-  let textMatched = 0;
-  if (legacyMatches.length > 0) {
-    const { error } = await supabaseAdmin
-      .from('project_instantly_campaigns')
-      .upsert(legacyMatches, { onConflict: 'project_id,campaign_id', ignoreDuplicates: true });
-
-    if (error) {
-      console.error('[instantly-catalog] auto-match campaigns to projects failed', error.message);
-    } else {
-      textMatched += legacyMatches.length;
-    }
+  // A text match may correct stale automatic ownership, but only when the
+  // current catalog name points to exactly one Portal project. The atomic DB
+  // claim replaces old automatic links across both ownership tables and
+  // refuses to overwrite a manual choice.
+  type TextMatchCandidate = {
+    project_id: string;
+    campaign_id: string;
+    match_source: string;
+    period_id?: string;
+    baseline_contacts?: number;
+  };
+  const textCandidates: TextMatchCandidate[] = [...legacyMatches, ...periodMatches];
+  const candidatesByCampaign = new Map<string, TextMatchCandidate[]>();
+  for (const candidate of textCandidates) {
+    const group = candidatesByCampaign.get(candidate.campaign_id) ?? [];
+    group.push(candidate);
+    candidatesByCampaign.set(candidate.campaign_id, group);
   }
 
-  if (periodMatches.length > 0) {
-    const { error } = await supabaseAdmin
-      .from('project_period_instantly_campaigns')
-      .upsert(periodMatches, { onConflict: 'period_id,campaign_id', ignoreDuplicates: true });
+  let textMatched = 0;
+  for (const [campaignId, candidates] of candidatesByCampaign) {
+    const projectIds = textMatchingProjectIdsByCampaign.get(campaignId) ?? new Set<string>();
+    if (projectIds.size !== 1) {
+      console.warn(
+        `[instantly-catalog] ambiguous text ownership for campaign ${campaignId}: ` +
+        `${[...projectIds].join(', ')} — skipped`,
+      );
+      continue;
+    }
 
-    if (error) {
-      console.error('[instantly-catalog] auto-match campaigns to project periods failed', error.message);
-    } else {
-      textMatched += periodMatches.length;
+    const candidate = candidates[0];
+    try {
+      const claim = await claimCampaignProjectOwnership(supabaseAdmin, {
+        projectId: candidate.project_id,
+        campaignId: candidate.campaign_id,
+        matchSource: 'auto-text',
+        periodId: candidate.period_id ?? null,
+        baselineContacts: candidate.baseline_contacts ?? 0,
+        replaceAutomatic: true,
+      });
+      if (claim.status === 'claimed') {
+        textMatched++;
+        linkedCampaignIds.add(campaignId);
+      } else if (claim.status === 'unchanged') {
+        linkedCampaignIds.add(campaignId);
+      } else if (claim.status === 'conflict') {
+        linkedCampaignIds.add(campaignId);
+        console.warn(
+          `[instantly-catalog] manual campaign owner kept for ${campaignId}; ` +
+          `text candidate ${candidate.project_id} skipped`,
+        );
+      }
+    } catch (error) {
+      console.error(
+        '[instantly-catalog] campaign ownership claim failed',
+        error instanceof Error ? error.message : error,
+      );
     }
   }
 
   // AI-powered matching for campaigns that text matching missed.
   // См. aiMatchUnmatchedCampaigns — per-client с confidence threshold 0.85.
-  const allCampaignIds = new Set((campaigns as { id: string }[]).map((c) => c.id));
   let aiMatched = 0;
   let aiCalls = 0;
   try {
     const aiResult = await aiMatchUnmatchedCampaigns(
       projectRows,
-      allCampaignIds,
+      campaigns as MatchableCampaign[],
+      linkedCampaignIds,
       denylistSet,
       activePeriodByProjectId,
     );
