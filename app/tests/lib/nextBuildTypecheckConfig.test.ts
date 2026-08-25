@@ -14,6 +14,11 @@ describe('Next build typecheck contract', () => {
     trackedEnv.map((name) => [name, process.env[name]]),
   );
 
+  beforeEach(() => {
+    for (const name of trackedEnv) delete process.env[name];
+    jest.resetModules();
+  });
+
   afterEach(() => {
     for (const name of trackedEnv) {
       const original = originalEnv[name];
@@ -30,8 +35,6 @@ describe('Next build typecheck contract', () => {
   }
 
   it('keeps the built-in TypeScript check enabled by default', async () => {
-    for (const name of trackedEnv) delete process.env[name];
-
     const config = await loadConfig();
 
     expect(config.typescript?.ignoreBuildErrors).toBe(false);
