@@ -53,6 +53,8 @@ interface VeTemplateGetResponse {
   template?: VeTemplate;
   columns?: string[];
   sample_rows?: Array<Record<string, unknown>>;
+  /** Сегмент каждой sample-строки (when дословно) по индексу; null — дефолт/сбой. */
+  sample_segments?: Array<string | null> | null;
   error?: string;
 }
 
@@ -112,6 +114,7 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
   const [sample, setSample] = useState<{
     columns: string[];
     rows: Array<Record<string, unknown>>;
+    segments: Array<string | null> | null;
   } | null>(null);
 
   const mapping = useMemo(
@@ -128,7 +131,11 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
           setState('error');
           return;
         }
-        setSample({ columns: data.columns ?? [], rows: data.sample_rows ?? [] });
+        setSample({
+          columns: data.columns ?? [],
+          rows: data.sample_rows ?? [],
+          segments: data.sample_segments ?? null,
+        });
         setState('ready');
       })
       .catch(() => setState('error'));
@@ -142,10 +149,12 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
       rows: sample.rows,
       columns: sample.columns,
       maxRows: 3,
+      rowSegments: sample.segments ?? undefined,
     });
   }, [state, sample, template, mapping]);
 
   const hasVariants = template.letters.some((l) => (l.segment_variants ?? []).length > 0);
+  const segmentsClassified = hasVariants && (sample?.segments ?? null) !== null;
 
   return (
     <details
@@ -232,7 +241,9 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
             })}
             {hasVariants ? (
               <p className="text-[11px] text-gray-400">
-                Сегментные варианты в превью не применяются — показан дефолтный текст писем.
+                {segmentsClassified
+                  ? 'Сегментные варианты подставлены по классификации сегмента — совпадает с запуском.'
+                  : 'Сегментные варианты не подставлены (классификация недоступна) — показан дефолтный текст писем.'}
               </p>
             ) : null}
           </div>
