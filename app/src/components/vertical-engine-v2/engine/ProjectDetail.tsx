@@ -564,26 +564,22 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   }
 
   return (
-    <div className="mx-auto w-full max-w-7xl space-y-8 px-4 py-8 text-left sm:px-6 lg:px-8">
-      {/* Шапка: хлебные крошки, название проекта, статус и тихая мета-строка */}
+    <div className="space-y-8 text-left">
+      {/* Шапка: возврат к проектам, название проекта, статус и тихая мета-строка */}
       <div className="border-b border-gray-200 pb-6">
-        <nav aria-label="Хлебные крошки" className="flex items-center gap-1.5 text-xs text-gray-400">
+        <div>
           <button
             type="button"
             onClick={onBack}
-            className="font-medium text-gray-500 transition hover:text-gray-900"
+            className="-ml-1 inline-flex items-center gap-1 rounded-md px-1 py-0.5 text-sm font-medium text-gray-500 transition hover:text-gray-900 active:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
           >
-            Проекты
+            ← Проекты
           </button>
-          <span aria-hidden>/</span>
-          <span>Инструменты</span>
-          <span aria-hidden>/</span>
-          <span>Движок вертикалей</span>
-        </nav>
+        </div>
         <div className="mt-2 flex flex-wrap items-center gap-2.5">
-          <h1 className="truncate text-[21px] font-semibold tracking-tight text-gray-900">
+          <h2 className="truncate text-[21px] font-semibold tracking-tight text-gray-900">
             {project ? prettyProjectName(project.name, project.website_url) : 'Проект'}
-          </h1>
+          </h2>
           {project ? <ProjectStatusBadge status={project.status} /> : null}
           {hasActiveJobs ? (
             <button
@@ -598,7 +594,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
           ) : null}
         </div>
         {project ? (
-          <p className="mt-1 text-xs text-gray-400">
+          <p className="mt-1 text-xs text-gray-500">
             {hypotheses.length} {pluralRu(hypotheses.length, 'гипотеза', 'гипотезы', 'гипотез')}
             {' · '}
             {verticals.length} {pluralRu(verticals.length, 'вертикаль', 'вертикали', 'вертикалей')}
@@ -639,7 +635,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
                 <span className="min-w-0 flex-1 truncate" title={item.text}>
                   {item.text}
                 </span>
-                <span className="shrink-0 text-gray-400">{timeAgoRu(item.at)}</span>
+                <span className="shrink-0 text-gray-500">{timeAgoRu(item.at)}</span>
               </li>
             ))}
           </ul>
@@ -660,7 +656,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
       {loading && !detail ? (
         <div className="space-y-3">
           {[1, 2, 3].map((i) => (
-            <div key={i} className="h-24 animate-pulse rounded-2xl border border-gray-200 bg-gray-50" aria-hidden />
+            <div key={i} className="h-24 rounded-2xl border border-gray-200 bg-gray-50 motion-safe:animate-pulse" aria-hidden />
           ))}
         </div>
       ) : null}
@@ -674,7 +670,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
 
           {/* Техническая информация для отладки — по умолчанию скрыта */}
           <details className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
-            <summary className="cursor-pointer select-none text-xs font-semibold uppercase tracking-widest text-gray-400 transition hover:text-gray-600">
+            <summary className="cursor-pointer select-none text-xs font-semibold uppercase tracking-widest text-gray-500 transition hover:text-gray-700">
               Подробности
             </summary>
             <JobsDebugTable jobs={jobs} />
@@ -700,7 +696,7 @@ function StepHint({
   return (
     <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-10 text-center">
       <p className="text-sm font-medium text-gray-700">{title}</p>
-      <p className="mt-1 text-xs text-gray-400">{text}</p>
+      <p className="mt-1 text-xs text-gray-500">{text}</p>
       <button type="button" onClick={onAction} className={`mt-4 inline-flex ${HE.btnPrimary}`}>
         {actionLabel}
       </button>
@@ -711,13 +707,13 @@ function StepHint({
 /** Сырая таблица джоб проекта — только внутри «Подробностей», для отладки. */
 function JobsDebugTable({ jobs }: { jobs: VeJobSummary[] }) {
   if (jobs.length === 0) {
-    return <p className="mt-3 text-xs text-gray-400">Фоновых задач пока не было.</p>;
+    return <p className="mt-3 text-xs text-gray-500">Фоновых задач пока не было.</p>;
   }
   return (
     <div className="mt-3 overflow-x-auto">
       <table className="w-full min-w-[640px] border-collapse text-left text-xs">
         <thead>
-          <tr className="border-b border-gray-200 text-gray-400">
+          <tr className="border-b border-gray-200 text-gray-500">
             <th className="py-1.5 pr-3 font-medium">Стадия</th>
             <th className="py-1.5 pr-3 font-medium">Статус</th>
             <th className="py-1.5 pr-3 font-medium">Попытки</th>

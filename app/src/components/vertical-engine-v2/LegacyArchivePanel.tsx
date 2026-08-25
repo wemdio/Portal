@@ -72,7 +72,7 @@ export function LegacyArchivePanel({
             key={project.id}
             type="button"
             onClick={() => onSelect(project.id)}
-            className="rounded-2xl border border-slate-200 bg-white p-5 text-left transition hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-sm"
+            className="rounded-2xl border border-slate-200 bg-white p-5 text-left transition hover:border-slate-300 hover:shadow-sm motion-safe:hover:-translate-y-0.5 motion-safe:active:scale-[0.99]"
           >
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">

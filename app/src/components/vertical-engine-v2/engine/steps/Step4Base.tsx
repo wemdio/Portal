@@ -86,6 +86,7 @@ export function Step4Base(props: {
 
   const [parsed, setParsed] = useState<ParsedFile | null>(null);
   const [parsing, setParsing] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const [parseError, setParseError] = useState('');
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
@@ -437,7 +438,7 @@ export function Step4Base(props: {
                 ))}
               </span>
             </div>
-            <p className="mt-1.5 text-[11px] text-gray-400">
+            <p className="mt-1.5 text-[11px] text-gray-500">
               Больше строк — дольше сбор и больше файл.
             </p>
             {verticalHypotheses.length > 0 && checkedHypCount === 0 ? (
@@ -459,27 +460,42 @@ export function Step4Base(props: {
 
       {/* Загрузка файла */}
       <section className={`${HE.card} ${HE.cardPad}`}>
-        <label
-          className={`${HE.card} flex cursor-pointer flex-col items-center justify-center gap-1.5 border-dashed px-4 py-8 text-center transition hover:border-blue-300 hover:bg-blue-50/60 ${
+        <button
+          type="button"
+          disabled={parsing}
+          onClick={() => fileInputRef.current?.click()}
+          onDragOver={(e) => {
+            e.preventDefault();
+            if (!parsing) setDragOver(true);
+          }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragOver(false);
+            if (parsing) return;
+            const file = e.dataTransfer.files?.[0];
+            if (file) void handleFile(file);
+          }}
+          className={`${HE.card} flex w-full cursor-pointer flex-col items-center justify-center gap-1.5 border-dashed px-4 py-8 text-center transition hover:border-blue-300 hover:bg-blue-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 ${
             parsing ? 'pointer-events-none opacity-60' : ''
-          }`}
+          } ${dragOver ? 'border-blue-300 bg-blue-50/60' : ''}`}
         >
           {parsing ? <Spinner className="h-5 w-5" /> : null}
           <span className="text-sm font-medium text-gray-700">
-            {parsing ? 'Читаем файл…' : parsed ? parsed.filename : 'Выберите файл CSV/XLSX'}
+            {parsing ? 'Читаем файл…' : parsed ? parsed.filename : 'Выберите или перетащите файл'}
           </span>
           <span className={`text-xs ${HE.muted}`}>CSV, TSV или XLSX</span>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".csv,.tsv,.xlsx,.xls,.txt"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void handleFile(file);
-            }}
-          />
-        </label>
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".csv,.tsv,.xlsx,.xls,.txt"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void handleFile(file);
+          }}
+        />
 
         {parseError ? (
           <p className="mt-2 text-sm text-red-600" role="alert">
@@ -556,7 +572,7 @@ export function Step4Base(props: {
       {/* Список баз вертикали */}
       {verticalBases.length > 0 ? (
         <section className="space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-widest text-gray-400">
+          <p className="text-xs font-semibold uppercase tracking-widest text-gray-500">
             Базы под эту вертикаль ({verticalBases.length})
           </p>
           <div className="flex flex-wrap items-start gap-2">
@@ -580,7 +596,7 @@ export function Step4Base(props: {
       {/* Профиль последней разобранной базы */}
       {latestAnalyzed?.analysis ? (
         <section className="space-y-3">
-          <p className="text-xs font-semibold uppercase tracking-widest text-gray-400">
+          <p className="text-xs font-semibold uppercase tracking-widest text-gray-500">
             Состав базы «{latestAnalyzed.filename}»
           </p>
           <BaseAnalysisCards analysis={latestAnalyzed.analysis} />
@@ -605,12 +621,12 @@ export function Step4Base(props: {
           </button>
         )}
         {templateBusy ? (
-          <span className="text-xs text-gray-400">
+          <span className="text-xs text-gray-500">
             AI собирает боевой шаблон под базу — обычно 1–2 минуты.
           </span>
         ) : null}
         {!templateBusy && !templateDone && latestBase?.status !== 'analyzed' ? (
-          <span className="text-xs text-gray-400">
+          <span className="text-xs text-gray-500">
             Кнопка станет активной, когда база будет разобрана.
           </span>
         ) : null}
@@ -705,7 +721,7 @@ function BaseCard({ base, hypothesisTitle }: { base: VeBaseSummary; hypothesisTi
               </span>
             ) : null}
           </span>
-          <span className="block text-[11px] text-gray-400">
+          <span className="block text-[11px] text-gray-500">
             {base.row_count.toLocaleString('ru-RU')} строк · {formatDate(base.created_at)}
           </span>
         </span>
@@ -803,7 +819,7 @@ function BaseCard({ base, hypothesisTitle }: { base: VeBaseSummary; hypothesisTi
             </tbody>
           </table>
           {previewRows.length === 0 ? (
-            <p className="px-3 py-2 text-[11px] text-gray-400">Нет строк для превью</p>
+            <p className="px-3 py-2 text-[11px] text-gray-500">Нет строк для превью</p>
           ) : null}
         </div>
       ) : null}
@@ -897,7 +913,7 @@ function HypothesisPicker({
                   {h.title}
                 </span>
                 {rejected ? (
-                  <span className="shrink-0 text-[10.5px] text-gray-400">отклонена</span>
+                  <span className="shrink-0 text-[10.5px] text-gray-500">отклонена</span>
                 ) : null}
                 <PctPill pct={h.potential_pct} />
               </label>
@@ -999,14 +1015,14 @@ function CollectProgress({ base }: { base: VeBaseSummary }) {
               )}
               <span>{collectSourceLabel(task.source)}</span>
               {collectTaskDone(task.status) && typeof task.rows === 'number' ? (
-                <span className="text-gray-400">· {task.rows.toLocaleString('ru-RU')} строк</span>
+                <span className="text-gray-500">· {task.rows.toLocaleString('ru-RU')} строк</span>
               ) : null}
             </li>
           ))}
         </ul>
       ) : null}
       {plan.length === 0 && tasks.length === 0 ? (
-        <p className="mt-2 text-xs text-gray-400">Подбираем источники под направление…</p>
+        <p className="mt-2 text-xs text-gray-500">Подбираем источники под направление…</p>
       ) : null}
     </div>
   );
@@ -1033,7 +1049,7 @@ function BarList({
               <span className="truncate text-gray-700" title={e.value}>
                 {e.value}
               </span>
-              <span className="shrink-0 text-gray-400">{e.share_pct}%</span>
+              <span className="shrink-0 text-gray-500">{e.share_pct}%</span>
             </div>
             <span className="mt-0.5 block h-1.5 overflow-hidden rounded-full bg-gray-200">
               <span
@@ -1066,7 +1082,7 @@ function BaseAnalysisCards({ analysis }: { analysis: VeBaseAnalysis }) {
       </div>
       {segments.length > 0 ? (
         <div>
-          <p className="mb-1.5 text-xs font-semibold uppercase tracking-widest text-gray-400">
+          <p className="mb-1.5 text-xs font-semibold uppercase tracking-widest text-gray-500">
             Заметные сегменты
           </p>
           <div className="flex flex-wrap gap-1">
@@ -1080,7 +1096,7 @@ function BaseAnalysisCards({ analysis }: { analysis: VeBaseAnalysis }) {
       ) : null}
       {qualityItems.length > 0 ? (
         <div>
-          <p className="mb-1.5 text-xs font-semibold uppercase tracking-widest text-gray-400">
+          <p className="mb-1.5 text-xs font-semibold uppercase tracking-widest text-gray-500">
             Качество данных
           </p>
           <ul className="space-y-1">
@@ -1095,7 +1111,7 @@ function BaseAnalysisCards({ analysis }: { analysis: VeBaseAnalysis }) {
       ) : null}
       {angles.length > 0 ? (
         <div>
-          <p className="mb-1.5 text-xs font-semibold uppercase tracking-widest text-gray-400">
+          <p className="mb-1.5 text-xs font-semibold uppercase tracking-widest text-gray-500">
             Рекомендуемые углы для писем
           </p>
           <ul className="list-disc space-y-1 pl-5 text-sm text-gray-600 marker:text-gray-300">

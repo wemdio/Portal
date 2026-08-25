@@ -383,6 +383,9 @@ function VerticalCard({
   const acceptedCount = hypotheses.filter((h) => h.status === 'accepted').length;
   const visibleHypotheses =
     filter === 'all' ? hypotheses : hypotheses.filter((h) => matchesFilter(h, filter));
+  // Длинное саммари режется line-clamp-2: тогда «Подробнее» нужно даже без
+  // синонимов — иначе хвост описания недоступен вовсе.
+  const summaryLong = (vertical.summary?.length ?? 0) > 160;
 
   // Массовая разметка всех гипотез вертикали — последовательно, чтобы не гнать
   // десятки PATCH параллельно; ошибки показывает родитель (actionError).
@@ -501,7 +504,7 @@ function VerticalCard({
           />
 
           {/* Синонимы — за «Подробнее», чтобы не шуметь */}
-          {vertical.synonyms.length > 0 ? (
+          {vertical.synonyms.length > 0 || summaryLong ? (
             <div className="mt-2">
               <button
                 type="button"
@@ -511,7 +514,7 @@ function VerticalCard({
               >
                 {showDetails ? 'Скрыть' : 'Подробнее'}
               </button>
-              {showDetails ? (
+              {showDetails && vertical.synonyms.length > 0 ? (
                 <div className="mt-2 flex flex-wrap gap-1">
                   {vertical.synonyms.map((syn) => (
                     <span key={syn} className={HE.chip}>
@@ -725,8 +728,8 @@ function HypothesisItem({
             aria-pressed={accepted}
             className={
               accepted
-                ? 'text-xs font-semibold text-emerald-600 underline decoration-emerald-300 underline-offset-4 transition hover:text-emerald-700'
-                : 'text-xs font-medium text-gray-500 transition hover:text-emerald-600'
+                ? '-mx-2 -my-1 rounded-md px-2 py-1 text-xs font-semibold text-emerald-600 underline decoration-emerald-300 underline-offset-4 transition hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300'
+                : '-mx-2 -my-1 rounded-md px-2 py-1 text-xs font-medium text-gray-500 transition hover:text-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300'
             }
           >
             {accepted ? 'Принято' : 'Принять'}
@@ -738,8 +741,8 @@ function HypothesisItem({
             aria-pressed={rejected}
             className={
               rejected
-                ? 'text-xs font-semibold text-red-500 transition hover:text-red-600'
-                : 'text-xs font-medium text-gray-500 transition hover:text-red-600'
+                ? '-mx-2 -my-1 rounded-md px-2 py-1 text-xs font-semibold text-red-500 transition hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300'
+                : '-mx-2 -my-1 rounded-md px-2 py-1 text-xs font-medium text-gray-500 transition hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300'
             }
           >
             {rejected ? 'Отклонено' : 'Отклонить'}
