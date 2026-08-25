@@ -146,6 +146,8 @@ export interface VeBase {
   id: string;
   project_id: string;
   vertical_id: string;
+  /** Гипотеза, под которую собрана база. NULL = ручная загрузка/легаси. */
+  hypothesis_id: string | null;
   filename: string;
   row_count: number;
   columns: string[];
