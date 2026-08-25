@@ -359,7 +359,7 @@ export function Step3Content(props: {
           <h2 className="text-lg font-bold text-gray-900">{vertical.name}</h2>
           <PotentialBadge pct={vertical.potential_pct} />
         </div>
-        <p className="mt-1 text-sm text-gray-400">
+        <p className="mt-1 text-sm text-gray-500">
           Черновые материалы под это направление. Боевой текст собирается на шаге 4–5 из загруженной
           базы.
         </p>
@@ -385,7 +385,7 @@ export function Step3Content(props: {
               onChange={(e) => setLanguage(e.target.value as VeChainLanguage)}
               disabled={chainBusy}
               aria-label="Язык цепочки"
-              className="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs font-medium text-gray-600 focus:outline-none disabled:opacity-50"
+              className="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs font-medium text-gray-600 transition focus:border-blue-400 focus:outline-none disabled:opacity-50"
             >
               {LANG_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>
@@ -471,7 +471,7 @@ export function Step3Content(props: {
                     {shown.subject ? (
                       <p className="text-sm font-semibold text-gray-900">{shown.subject}</p>
                     ) : (
-                      <p className="text-sm italic text-gray-400">Без темы</p>
+                      <p className="text-sm italic text-gray-500">Без темы</p>
                     )}
                     <span className="ml-auto inline-flex items-center gap-3">
                       <button
@@ -517,12 +517,12 @@ export function Step3Content(props: {
                         ))}
                       </div>
                       {view === 0 ? (
-                        <span className="text-[10px] font-medium uppercase tracking-wide text-gray-400">
+                        <span className="text-[10px] font-medium uppercase tracking-wide text-gray-500">
                           основной
                         </span>
                       ) : (
                         <>
-                          <span className="text-[10px] text-gray-400">основной: A</span>
+                          <span className="text-[10px] text-gray-500">основной: A</span>
                           <button
                             type="button"
                             disabled={variantBusy !== null}
@@ -740,7 +740,7 @@ function ChainLetterEditor({
         </span>
         <p className="text-sm font-semibold text-gray-900">Редактирование письма</p>
         {isFirst ? (
-          <span className="text-xs text-gray-400">Отправка: сразу</span>
+          <span className="text-xs text-gray-500">Отправка: сразу</span>
         ) : (
           <label className="inline-flex items-center gap-1.5 text-xs text-gray-500">
             Отправка: через
@@ -759,11 +759,11 @@ function ChainLetterEditor({
             {daysWord(waitDays)} после предыдущего
           </label>
         )}
-        <span className="text-[11px] text-gray-400">({startCaption})</span>
+        <span className="text-[11px] text-gray-500">({startCaption})</span>
       </div>
 
       <label className="block">
-        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-widest text-gray-400">
+        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-widest text-gray-500">
           Тема письма
         </span>
         <input
@@ -777,7 +777,7 @@ function ChainLetterEditor({
         />
       </label>
       <label className="mt-3 block">
-        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-widest text-gray-400">
+        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-widest text-gray-500">
           Текст письма
         </span>
         <textarea
@@ -809,7 +809,7 @@ function ChainLetterEditor({
             })
           }
           disabled={!dirty || saving}
-          className="inline-flex h-9 items-center rounded-lg bg-blue-600 px-4 text-xs font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+          className={`${HE.btnPrimary} inline-flex items-center gap-2`}
         >
           {saving ? 'Сохраняем…' : 'Сохранить'}
         </button>
@@ -825,7 +825,7 @@ function DossierNum({ value, caption }: { value: string; caption: string }) {
   return (
     <div>
       <p className="text-2xl font-bold tabular-nums text-gray-900">{value}</p>
-      <p className="text-[11px] text-gray-400">{caption}</p>
+      <p className="text-[11px] text-gray-500">{caption}</p>
     </div>
   );
 }
@@ -844,7 +844,7 @@ function DossierSegmentCard({ data }: { data: VeDossierData }) {
               caption="компаний в директории"
             />
             {counters.companies_note ? (
-              <p className="mt-0.5 text-[11px] text-gray-400">{counters.companies_note}</p>
+              <p className="mt-0.5 text-[11px] text-gray-500">{counters.companies_note}</p>
             ) : null}
           </div>
         ) : null}
@@ -856,7 +856,7 @@ function DossierSegmentCard({ data }: { data: VeDossierData }) {
             />
             {counters.hh_vacancies_sample.length > 0 ? (
               <details className="group mt-1">
-                <summary className="cursor-pointer list-none text-[11px] font-medium text-gray-500 hover:text-gray-700">
+                <summary className="cursor-pointer list-none text-[11px] font-medium text-gray-500 transition hover:text-gray-700 hover:underline">
                   Примеры вакансий ({counters.hh_vacancies_sample.length})
                 </summary>
                 <ul className="mt-1 space-y-0.5 border-l-2 border-gray-100 pl-2 text-[11px] text-gray-500">
@@ -891,7 +891,7 @@ function SegmentSizeBadge({ value }: { value: string }) {
   return (
     <div>
       <Badge tone={meta?.tone ?? 'blue'}>{meta?.label ?? (rawSize ?? '').trim()}</Badge>
-      {note ? <p className="mt-1 text-[11px] leading-relaxed text-gray-400">{note}</p> : null}
+      {note ? <p className="mt-1 text-[11px] leading-relaxed text-gray-500">{note}</p> : null}
     </div>
   );
 }
@@ -906,7 +906,7 @@ function DossierSignalsCard({ data }: { data: VeDossierData }) {
     <div className={`${HE.card} p-4`}>
       <p className={`mb-2 ${HE.secTitle}`}>Сигналы боли</p>
       {signals.length === 0 ? (
-        <p className="text-xs text-gray-400">Сигналов не найдено.</p>
+        <p className="text-xs text-gray-500">Сигналов не найдено.</p>
       ) : (
         <ul className="space-y-1.5">
           {signals.map((s, i) => (
@@ -923,7 +923,7 @@ function DossierSignalsCard({ data }: { data: VeDossierData }) {
         <div className="mt-3 border-t border-gray-200 pt-2">
           <Badge tone={buysMeta.tone}>{buysMeta.label}</Badge>
           {data.interpretation.buys_sales_channels_reason ? (
-            <p className="mt-1 text-[11px] leading-relaxed text-gray-400">
+            <p className="mt-1 text-[11px] leading-relaxed text-gray-500">
               {data.interpretation.buys_sales_channels_reason}
             </p>
           ) : null}
@@ -947,11 +947,11 @@ function DossierDatasetCard({ data }: { data: VeDossierData }) {
           ) : null}
         </div>
       ) : null}
-      <p className="mt-2 text-[11px] text-gray-400">
+      <p className="mt-2 text-[11px] text-gray-500">
         {ds.campaigns.toLocaleString('ru-RU')} кампаний · {ds.sent.toLocaleString('ru-RU')} отправлено ·{' '}
         {ds.replies.toLocaleString('ru-RU')} ответов
       </p>
-      {ds.note ? <p className="mt-1 text-[11px] text-gray-400">{ds.note}</p> : null}
+      {ds.note ? <p className="mt-1 text-[11px] text-gray-500">{ds.note}</p> : null}
       {ds.matched_segments.length > 0 ? (
         <div className="mt-2 flex flex-wrap gap-1">
           {ds.matched_segments.map((seg) => (
@@ -963,7 +963,7 @@ function DossierDatasetCard({ data }: { data: VeDossierData }) {
       ) : null}
       {ds.top_subjects.length > 0 ? (
         <details className="group mt-2">
-          <summary className="cursor-pointer list-none text-[11px] font-medium text-gray-500 hover:text-gray-700">
+          <summary className="cursor-pointer list-none text-[11px] font-medium text-gray-500 transition hover:text-gray-700 hover:underline">
             Лучшие темы ({ds.top_subjects.length})
           </summary>
           <ul className="mt-1 space-y-0.5 border-l-2 border-gray-100 pl-2 text-[11px] text-gray-500">
@@ -975,7 +975,7 @@ function DossierDatasetCard({ data }: { data: VeDossierData }) {
       ) : null}
       {interpretation.dataset_verdict ? (
         <details className="group mt-2">
-          <summary className="cursor-pointer list-none text-[11px] font-medium text-gray-500 hover:text-gray-700">
+          <summary className="cursor-pointer list-none text-[11px] font-medium text-gray-500 transition hover:text-gray-700 hover:underline">
             Вывод по кампаниям
           </summary>
           <p className="mt-1 text-xs leading-relaxed text-gray-500">{interpretation.dataset_verdict}</p>
@@ -983,10 +983,10 @@ function DossierDatasetCard({ data }: { data: VeDossierData }) {
       ) : null}
       {interpretation.market_summary ? (
         <details className="group mt-1.5">
-          <summary className="cursor-pointer list-none text-[11px] font-medium text-gray-500 hover:text-gray-700">
+          <summary className="cursor-pointer list-none text-[11px] font-medium text-gray-500 transition hover:text-gray-700 hover:underline">
             Резюме рынка
           </summary>
-          <p className="mt-1 text-xs leading-relaxed text-gray-400">{interpretation.market_summary}</p>
+          <p className="mt-1 text-xs leading-relaxed text-gray-500">{interpretation.market_summary}</p>
         </details>
       ) : null}
     </div>
@@ -1016,7 +1016,7 @@ function CompanyTypesCard({ companyTypes }: { companyTypes: VeCompanyType[] }) {
         Типы компаний ({companyTypes.length})
       </p>
       {grouped.length === 0 ? (
-        <p className="text-xs text-gray-400">Пусто.</p>
+        <p className="text-xs text-gray-500">Пусто.</p>
       ) : (
         <div className="space-y-2.5">
           {grouped.map(({ kind, items }) => {
@@ -1059,7 +1059,7 @@ function JobTitlesCard({ jobTitles }: { jobTitles: JobTitleRow[] }) {
         Должности ({jobTitles.length})
       </p>
       {jobTitles.length === 0 ? (
-        <p className="text-xs text-gray-400">Пусто.</p>
+        <p className="text-xs text-gray-500">Пусто.</p>
       ) : hasSide ? (
         <div className="space-y-3">
           <JobTitlesTable title="Кому продаём" rows={buyerRows} />
@@ -1136,7 +1136,7 @@ function QueriesCard({ queries }: { queries: VeVocab['search_queries'] }) {
         Поисковые запросы ({queries.length})
       </p>
       {grouped.length === 0 ? (
-        <p className="text-xs text-gray-400">Пусто.</p>
+        <p className="text-xs text-gray-500">Пусто.</p>
       ) : (
         <div className="space-y-2.5">
           {grouped.map(([source, list]) => (

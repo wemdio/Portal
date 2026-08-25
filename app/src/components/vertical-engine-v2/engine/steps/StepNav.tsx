@@ -27,7 +27,7 @@ const LABEL_CLASS: Record<VeWizardStepState, string> = {
   done: 'text-gray-900',
   active: 'text-gray-900',
   available: 'text-gray-600 group-hover:text-gray-900',
-  locked: 'text-gray-400 group-hover:text-gray-500',
+  locked: 'text-gray-500 group-hover:text-gray-700',
 };
 
 /** 4 состояния мастера → 3 состояния кружка: available и locked делят idle. */
@@ -64,23 +64,25 @@ export function StepNav({
             {idx > 0 ? (
               <span
                 aria-hidden
-                className="absolute left-[calc(-50%+1rem)] right-[calc(50%+1rem)] top-3.5 h-0.5 bg-gray-200"
+                className={`absolute left-[calc(-50%+1rem)] right-[calc(50%+1rem)] top-3.5 h-0.5 transition-colors ${
+                  steps[idx - 1]?.state === 'done' ? 'bg-blue-600' : 'bg-gray-200'
+                }`}
               />
             ) : null}
             <button
               type="button"
               onClick={() => onJump(step.id)}
               aria-current={step.state === 'active' ? 'step' : undefined}
-              className="group relative flex w-full min-w-0 flex-col items-center gap-1.5 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+              className="group relative flex w-full min-w-0 flex-col items-center gap-1.5 rounded-lg transition active:scale-[0.97] focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
             >
               <StepNum n={step.id} state={stepNumState(step.state)} />
               <span
-                className={`min-w-0 max-w-full text-[11px] font-semibold leading-tight sm:text-xs md:text-sm ${LABEL_CLASS[step.state]}`}
+                className={`min-w-0 max-w-full text-[11px] font-semibold leading-tight transition-colors sm:text-xs md:text-sm ${LABEL_CLASS[step.state]}`}
               >
                 {step.label}
               </span>
               {/* Подзаголовок прячется на узких экранах */}
-              <span className="hidden max-w-full text-[11px] leading-tight text-gray-400 md:block">
+              <span className="hidden max-w-full text-[11px] leading-tight text-gray-500 transition-colors md:block">
                 {step.subtitle}
               </span>
               {/* Активный шаг: синее подчёркивание 2px (у остальных — прозрачная
