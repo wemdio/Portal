@@ -194,6 +194,12 @@ export function Step4Base(props: {
         .sort((a, b) => b.created_at.localeCompare(a.created_at)),
     [bases, vertical.id],
   );
+  // Гипотеза → заголовок: метка на карточке базы (base-per-hypothesis).
+  const hypothesisTitleById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const h of hypotheses) map.set(h.id, h.title);
+    return map;
+  }, [hypotheses]);
   const latestBase = verticalBases[0];
   const latestAnalyzed = useMemo(
     () => verticalBases.find((b) => b.status === 'analyzed' && b.analysis),
@@ -555,7 +561,11 @@ export function Step4Base(props: {
           </p>
           <div className="flex flex-wrap items-start gap-2">
             {verticalBases.map((base) => (
-              <BaseCard key={base.id} base={base} />
+              <BaseCard
+                key={base.id}
+                base={base}
+                hypothesisTitle={base.hypothesis_id ? hypothesisTitleById.get(base.hypothesis_id) : undefined}
+              />
             ))}
           </div>
         </section>
@@ -634,7 +644,7 @@ function exportDownloadName(res: Response, baseId: string): string {
   return match?.[1] ?? `base-${baseId}.csv`;
 }
 
-function BaseCard({ base }: { base: VeBaseSummary }) {
+function BaseCard({ base, hypothesisTitle }: { base: VeBaseSummary; hypothesisTitle?: string }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState('');
@@ -689,6 +699,11 @@ function BaseCard({ base }: { base: VeBaseSummary }) {
             ) : (
               <span className={`${HE.pill} bg-gray-100 text-gray-500`}>загрузка</span>
             )}
+            {hypothesisTitle ? (
+              <span className="max-w-[160px] truncate text-[11px] text-gray-500" title={hypothesisTitle}>
+                {hypothesisTitle}
+              </span>
+            ) : null}
           </span>
           <span className="block text-[11px] text-gray-400">
             {base.row_count.toLocaleString('ru-RU')} строк · {formatDate(base.created_at)}

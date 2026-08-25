@@ -407,13 +407,22 @@ export async function runTemplateStage(job: VeJob, ctx: VeStageContext): Promise
   if (vError || !verticalRow) throw new Error(`ve_verticals ${base.vertical_id}: ${vError?.message ?? 'not found'}`);
   const vertical = verticalRow as VeVertical;
 
-  // Разметка специалиста по гипотезам вертикали: rejected уходят из промпта,
-  // accepted — первыми (см. selectPromptHypotheses в stages/chain).
-  const { data: hyps, error: hError } = await ctx.supabase
-    .from('ve_hypotheses')
-    .select('title, description, tier, status')
-    .eq('project_id', job.project_id)
-    .eq('vertical_id', base.vertical_id);
+  // Разметка специалиста по гипотезам: rejected уходят из промпта, accepted —
+  // первыми (см. selectPromptHypotheses в stages/chain). Base-per-hypothesis:
+  // у базы есть hypothesis_id → промпт строится по ЭТОЙ гипотезе; иначе
+  // (легаси/ручная загрузка) — по всем гипотезам вертикали, как раньше.
+  const hypothesesByHyp = base.hypothesis_id
+    ? await ctx.supabase
+        .from('ve_hypotheses')
+        .select('title, description, tier, status')
+        .eq('project_id', job.project_id)
+        .eq('id', base.hypothesis_id)
+    : await ctx.supabase
+        .from('ve_hypotheses')
+        .select('title, description, tier, status')
+        .eq('project_id', job.project_id)
+        .eq('vertical_id', base.vertical_id);
+  const { data: hyps, error: hError } = hypothesesByHyp;
   if (hError) throw new Error(`ve_hypotheses read: ${hError.message}`);
   const hypSelection = selectPromptHypotheses(
     (hyps ?? []) as Array<Pick<VeHypothesis, 'title' | 'description' | 'tier' | 'status'>>,

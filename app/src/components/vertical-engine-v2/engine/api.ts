@@ -82,7 +82,7 @@ export interface VeCollectInfo {
 /** GET /projects/[id] отдаёт усечённые строки баз (без тяжёлого data). */
 export type VeBaseSummary = Pick<
   VeBase,
-  'id' | 'vertical_id' | 'filename' | 'row_count' | 'analysis' | 'created_at' | 'columns' | 'sample_rows'
+  'id' | 'vertical_id' | 'hypothesis_id' | 'filename' | 'row_count' | 'analysis' | 'created_at' | 'columns' | 'sample_rows'
 > & {
   /**
    * Причина падения сборки. Обязательна на экране с тех пор, как автопилот
