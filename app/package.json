@@ -11,6 +11,8 @@
     "dev:next": "next dev",
     "dev:ui": "node scripts/dev-ui.mjs",
     "dev:workers": "concurrently \"npm run build:workers:watch\" \"node --watch --env-file ../.env dist/workers/hh.js\" \"node --watch --env-file ../.env dist/workers/engHiring.js\" \"node --watch --env-file ../.env dist/workers/search.js\" \"node --watch --env-file ../.env dist/workers/enrich.js\" \"node --watch --env-file ../.env dist/workers/yandexmaps.js\" \"node --watch --env-file ../.env dist/workers/emailvalidation.js\" \"node --watch --env-file ../.env dist/workers/tgOutreach.js\" \"node --watch --env-file ../.env dist/workers/salesCopilot.js\" \"node --watch --env-file ../.env dist/workers/salesChatLogger.js\" \"node --watch --env-file ../.env dist/workers/byoSend.js\" \"node --watch --env-file ../.env dist/workers/byoReplies.js\"",
+    "pretypecheck:strict": "node -e \"require('node:fs').mkdirSync('.next/cache/tsc', { recursive: true })\"",
+    "typecheck:strict": "next typegen && tsc -p tsconfig.next-route-validator.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/routes.tsbuildinfo && tsc --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/project.tsbuildinfo",
     "build": "next build",
     "build:sbis-importer": "esbuild ./scripts/apply-sbis-directory-plan.ts --bundle --platform=node --target=node22 --format=cjs --outfile=./dist/scripts/apply-sbis-directory-plan.cjs --tsconfig=tsconfig.json --external:pg --log-level=info",
     "build:polza-registry-planner": "esbuild ./scripts/plan-polza-registry-v2.ts --bundle --platform=node --target=node22 --format=cjs --outfile=./dist/scripts/plan-polza-registry-v2.cjs --tsconfig=tsconfig.json --external:pg --log-level=info",

@@ -9,6 +9,7 @@ describe('Next build typecheck contract', () => {
     'SEMAPHORE_GIT_BRANCH',
     'SEMAPHORE_GIT_REF_TYPE',
     'NEXT_BUILD_SKIP_TYPECHECK',
+    'NEXT_BUILD_PRECHECKED_TYPECHECK',
   ] as const;
   const originalEnv = Object.fromEntries(
     trackedEnv.map((name) => [name, process.env[name]]),
@@ -60,17 +61,37 @@ describe('Next build typecheck contract', () => {
     expect(config.typescript?.ignoreBuildErrors).toBe(true);
   });
 
-  it.each(['main', 'test'])('never skips the built-in check for protected branch %s', async (branch) => {
-    process.env.CI = 'true';
-    process.env.SEMAPHORE = 'true';
-    process.env.SEMAPHORE_GIT_BRANCH = branch;
-    process.env.SEMAPHORE_GIT_REF_TYPE = 'branch';
-    process.env.NEXT_BUILD_SKIP_TYPECHECK = '1';
+  it('does not allow a Docker precheck flag alone to disable the built-in check', async () => {
+    process.env.NEXT_BUILD_PRECHECKED_TYPECHECK = '1';
 
     const config = await loadConfig();
 
     expect(config.typescript?.ignoreBuildErrors).toBe(false);
   });
+
+  it('allows an explicitly prechecked build to skip only the duplicate Next.js check', async () => {
+    process.env.NEXT_BUILD_SKIP_TYPECHECK = '1';
+    process.env.NEXT_BUILD_PRECHECKED_TYPECHECK = '1';
+
+    const config = await loadConfig();
+
+    expect(config.typescript?.ignoreBuildErrors).toBe(true);
+  });
+
+  it.each(['main', 'test'])(
+    'does not let the Semaphore branch flag alone skip checks for protected branch %s',
+    async (branch) => {
+      process.env.CI = 'true';
+      process.env.SEMAPHORE = 'true';
+      process.env.SEMAPHORE_GIT_BRANCH = branch;
+      process.env.SEMAPHORE_GIT_REF_TYPE = 'branch';
+      process.env.NEXT_BUILD_SKIP_TYPECHECK = '1';
+
+      const config = await loadConfig();
+
+      expect(config.typescript?.ignoreBuildErrors).toBe(false);
+    },
+  );
 
   function namedSection(workflow: string, name: string, indentation: number): string {
     const prefix = ' '.repeat(indentation);
@@ -85,24 +106,34 @@ describe('Next build typecheck contract', () => {
     return lines.slice(start, next < 0 ? undefined : start + 1 + next).join('\n');
   }
 
-  it('keeps route type generation and strict tsc in the required test job', () => {
+  it('keeps the shared strict typecheck command in the required test job', () => {
     const workflow = fs.readFileSync(
       path.resolve(process.cwd(), '..', '.semaphore', 'semaphore.yml'),
       'utf8',
     );
+    const packageJson = JSON.parse(
+      fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8'),
+    ) as { scripts?: Record<string, string> };
     const testBlock = namedSection(workflow, 'Run tests', 2);
     const typecheckJob = namedSection(testBlock, 'Lint, typecheck, test', 8);
-    const typegenIndex = typecheckJob.indexOf('- npx next typegen');
-    const routeValidatorIndex = typecheckJob.indexOf(
-      '- npx tsc -p tsconfig.next-route-validator.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/routes.tsbuildinfo',
+    const strictTypecheck = packageJson.scripts?.['typecheck:strict'] ?? '';
+    const typegenIndex = strictTypecheck.indexOf('next typegen');
+    const routeValidatorIndex = strictTypecheck.indexOf(
+      'tsc -p tsconfig.next-route-validator.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/routes.tsbuildinfo',
     );
-    const tscIndex = typecheckJob.indexOf('- npx tsc --noEmit --incremental');
+    const tscIndex = strictTypecheck.indexOf(
+      'tsc --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/project.tsbuildinfo',
+    );
 
     expect(testBlock).toContain("branch != 'main' AND branch != 'test'");
+    expect(typecheckJob).toContain('- npm run typecheck:strict');
+    expect(typecheckJob).not.toContain('- npx next typegen');
     expect(typegenIndex).toBeGreaterThan(-1);
     expect(routeValidatorIndex).toBeGreaterThan(typegenIndex);
     expect(tscIndex).toBeGreaterThan(routeValidatorIndex);
-    expect(typecheckJob).toContain('--tsBuildInfoFile .next/cache/tsc/project.tsbuildinfo');
+    expect(packageJson.scripts?.['pretypecheck:strict']).toContain(
+      "mkdirSync('.next/cache/tsc', { recursive: true })",
+    );
     expect(typecheckJob).toContain("cache restore tsc-v2-$SEMAPHORE_GIT_BRANCH,tsc-v2-");
     expect(typecheckJob).toContain('cache store tsc-v2-$SEMAPHORE_GIT_BRANCH .next/cache/tsc');
     expect(typecheckJob).not.toContain('.tsbuildinfo.ci');
@@ -131,7 +162,7 @@ describe('Next build typecheck contract', () => {
     expect(validatorConfig.exclude).toEqual(['node_modules']);
   });
 
-  it('sets the skip flag only inside the branch CI Next build job', () => {
+  it('sets the branch-CI skip flag only inside the branch Next build job', () => {
     const workflow = fs.readFileSync(
       path.resolve(process.cwd(), '..', '.semaphore', 'semaphore.yml'),
       'utf8',
@@ -141,5 +172,28 @@ describe('Next build typecheck contract', () => {
 
     expect(nextBuildJob).toContain("- 'NEXT_BUILD_SKIP_TYPECHECK=1 npm run build'");
     expect(workflow.match(/NEXT_BUILD_SKIP_TYPECHECK=1 npm run build/g)).toHaveLength(1);
+  });
+
+  it('strictly prechecks the production Docker build before skipping the duplicate check', () => {
+    const dockerfile = fs.readFileSync(
+      path.resolve(process.cwd(), '..', 'Dockerfile'),
+      'utf8',
+    );
+    const builderStage = dockerfile.match(
+      /FROM node:22-alpine AS builder([\s\S]*?)FROM node:22-alpine AS runner/,
+    )?.[1] ?? '';
+    const precheckIndex = builderStage.indexOf('RUN npm run typecheck:strict');
+    const buildIndex = builderStage.indexOf(
+      'RUN NEXT_BUILD_PRECHECKED_TYPECHECK=1 NEXT_BUILD_SKIP_TYPECHECK=1 npm run build',
+    );
+
+    expect(builderStage).not.toBe('');
+    expect(precheckIndex).toBeGreaterThan(-1);
+    expect(buildIndex).toBeGreaterThan(precheckIndex);
+    expect(builderStage).not.toMatch(
+      /(?:ARG|ENV) NEXT_BUILD_(?:PRECHECKED_TYPECHECK|SKIP_TYPECHECK)/,
+    );
+    expect(builderStage).not.toMatch(/npm run typecheck:strict[^\r\n]*\|\| true/);
+    expect(dockerfile.match(/NEXT_BUILD_PRECHECKED_TYPECHECK=1/g)).toHaveLength(1);
   });
 });

@@ -11,6 +11,9 @@ const semaphoreBranchCiRequestedTypecheckSkip =
   Boolean(process.env.SEMAPHORE_GIT_BRANCH) &&
   !['main', 'test'].includes(process.env.SEMAPHORE_GIT_BRANCH ?? '') &&
   process.env.NEXT_BUILD_SKIP_TYPECHECK === '1';
+const explicitlyPrecheckedBuildRequestedTypecheckSkip =
+  process.env.NEXT_BUILD_SKIP_TYPECHECK === '1' &&
+  process.env.NEXT_BUILD_PRECHECKED_TYPECHECK === '1';
 
 // UI_ONLY=1 skips loading the real ../.env — no Supabase env means middleware
 // disables auth (renders pages without login) and the browser client falls
@@ -25,10 +28,11 @@ if (process.env.UI_ONLY !== '1') {
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-// В branch CI отдельная параллельная job уже запускает `next typegen` и строгий
-// `tsc --noEmit`. Там пропускаем только дублирующую проверку Next, которая не
-// помещается в 4 ГБ e1-standard-2. Локальные/protected/production-сборки строгие.
-const skipDuplicateCiTypecheck = semaphoreBranchCiRequestedTypecheckSkip;
+// Branch CI и production Docker сначала запускают общий `typecheck:strict`.
+// После успешного precheck пропускаем только повторную проверку Next, которая
+// не помещается в 4 ГБ e1-standard-2. Обычные локальные сборки остаются строгими.
+const skipDuplicateCiTypecheck =
+  semaphoreBranchCiRequestedTypecheckSkip || explicitlyPrecheckedBuildRequestedTypecheckSkip;
 
 const nextConfig: NextConfig = {
   /* config options here */
