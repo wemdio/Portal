@@ -207,7 +207,7 @@ function classifySendFailure(errMsg: string): SendFailure {
 }
 
 /**
- * RPC-ответ Telegram «ника нет» (`USERNAME_NOT_OCCUPIED` / `USERNAME_INVALID`).
+ * RPC-ответ Telegram `USERNAME_NOT_OCCUPIED` — «ника нет».
  *
  * Это НЕ доказательство мёртвого ника: на урезанном/frozen аккаунте
  * `contacts.ResolveUsername` отдаёт USERNAME_NOT_OCCUPIED и на живые ники
@@ -216,21 +216,30 @@ function classifySendFailure(errMsg: string): SendFailure {
  * отдаёт этот код на каждый резолв порции. Поэтому одиночный RPC-код не
  * сжигает контакт — ники пакетом буферизуются и решаются по итогу порции
  * (буфер notOccupied разбирается в конце sendFirstTouchBatch).
+ *
+ * Намеренно НЕ включаем сюда USERNAME_INVALID: это «ник с недопустимыми
+ * символами», а не «такого ника нет», и замороженный аккаунт его не отдаёт.
+ * Плюс на входе normalizeUsername уже режет ник до [a-z0-9_]{5,32}, так что
+ * USERNAME_INVALID на первом касании практически недостижим; относимся к нему
+ * как к обычному необратимому «ника нет» (см. isUsernameReallyAbsent), а не
+ * как к сигналу парковки — иначе пачка кривых ников ложно уводила бы исправный
+ * аккаунт в паузу.
  */
 function isUsernameNotOccupiedRpc(err: unknown): boolean {
   const m = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return m.includes('username_not_occupied')
-    || m.includes('username_invalid');
+  return m.includes('username_not_occupied');
 }
 
 /**
- * Локальная строка gramJS «нет такого пользователя» — в отличие от RPC-кода выше,
- * это честный признак мёртвого ника: gramJS сам не смог резолвнуть имя, не
- * получив от сервера ошибки. Такой контакт можно скипнуть сразу.
+ * Необратимые «ника нет»: либо gramJS сам не резолвнул имя строкой «No user has
+ * "X" as username» (а не RPC-кодом сервера), либо ник недопустимого формата
+ * (USERNAME_INVALID). В отличие от USERNAME_NOT_OCCUPIED выше, это честный
+ * признак мёртвого/кривого ника — его можно скипнуть сразу, он не «оживёт».
  */
 function isUsernameReallyAbsent(err: unknown): boolean {
   const m = (err instanceof Error ? err.message : String(err)).toLowerCase();
   return m.includes('as username')
+    || m.includes('username_invalid')
     || m.includes('no user has');
 }
 
@@ -292,9 +301,9 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         continue;
       }
 
-      // RPC USERNAME_NOT_OCCUPIED / USERNAME_INVALID — неоднозначен: тот же код
-      // Telegram отдаёт и на живые ники, когда аккаунт урезан/frozen. Сжигать
-      // контакт здесь нельзя; буферизуем и решаем по итогу порции.
+      // RPC USERNAME_NOT_OCCUPIED — неоднозначен: тот же код Telegram отдаёт и на
+      // живые ники, когда аккаунт урезан/frozen. Сжигать контакт здесь нельзя;
+      // буферизуем и решаем по итогу порции.
       if (isUsernameNotOccupiedRpc(err)) {
         notOccupied.push({ contact, attempts });
         continue;

@@ -532,5 +532,33 @@ describe('sendFirstTouchBatch — недоступные контакты и о�
       const patch = db.updates.find((u) => u.table === 'tg_outreach_base_contacts')?.patch;
       expect(patch?.attempts).toBe(1);
     });
+
+    it('USERNAME_INVALID — кривой ник, а не заморозка: скипаем, аккаунт не паркуем', async () => {
+      // USERNAME_INVALID = «ник с недопустимыми символами». Это не сигнал
+      // замороженного аккаунта: пачка кривых ников не должна ложно уводить
+      // исправный номер в паузу. Плюс normalizeUsername уже режет ник до
+      // [a-z0-9_]{5,32}, так что на первом касании код практически недостижим.
+      const db = fakeDb([
+        contact({ id: 'c-1', username: 'bad!!nick' }),
+        contact({ id: 'c-2', username: 'bad__nick' }),
+      ]);
+      const client = fakeClient({
+        getEntity: jest.fn(async () => {
+          throw Object.assign(
+            new Error('400: USERNAME_INVALID (caused by contacts.ResolveUsername)'),
+            { code: 'USERNAME_INVALID' },
+          );
+        }),
+      });
+      const account = { ...baseArgs.account, cooldown_until: null as string | null };
+
+      const res = await sendFirstTouchBatch({ ...baseArgs, account, cooldownHours: 24, db, client } as never);
+
+      expect(res.skipped).toBe(2);
+      expect(res.postponed).toBe(0);
+      expect(db.updates.filter((u) => u.table === 'tg_outreach_accounts')).toHaveLength(0);
+      const skips = db.updates.filter((u) => u.table === 'tg_outreach_base_contacts' && u.patch.status === 'skipped');
+      expect(skips).toHaveLength(2);
+    });
   });
 });
