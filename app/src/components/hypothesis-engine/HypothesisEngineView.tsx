@@ -7,27 +7,20 @@
  * стили — токены HE из ./design, без иконок.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { HeProject } from '@/lib/hypothesisEngine/types';
 import {
   HE_API,
   heCall,
-  hePost,
-  type HeProjectCreateResponse,
   type HeProjectsResponse,
 } from './api';
-import { HE, Spinner } from './design';
+import { HE } from './design';
 import { ProjectDetail } from './ProjectDetail';
-import { ProjectStatusBadge, StatusBox, formatDate, prettyHost, prettyProjectName } from './ui';
+import { ProjectStatusBadge, formatDate, prettyHost, prettyProjectName } from './ui';
 
 export function HypothesisEngineView() {
   const [projects, setProjects] = useState<HeProject[]>([]);
   const [listLoading, setListLoading] = useState(true);
-  const [errorMsg, setErrorMsg] = useState('');
-
-  const [websiteUrl, setWebsiteUrl] = useState('');
-  const [name, setName] = useState('');
-  const [creating, setCreating] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -45,29 +38,6 @@ export function HypothesisEngineView() {
       cancelled = true;
     };
   }, []);
-
-  const handleCreate = useCallback(async () => {
-    const url = websiteUrl.trim();
-    if (!url || creating) return;
-    setErrorMsg('');
-    setCreating(true);
-    try {
-      const body: { website_url: string; name?: string } = { website_url: url };
-      if (name.trim()) body.name = name.trim();
-      const { ok, data } = await hePost<HeProjectCreateResponse>(`${HE_API}/projects`, body);
-      if (!ok || !data.project) {
-        throw new Error(data.error || 'Не удалось создать проект');
-      }
-      setProjects((prev) => [data.project as HeProject, ...prev]);
-      setWebsiteUrl('');
-      setName('');
-      setSelectedId(data.project.id);
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Произошла ошибка');
-    } finally {
-      setCreating(false);
-    }
-  }, [websiteUrl, name, creating]);
 
   if (selectedId) {
     return (
@@ -96,51 +66,21 @@ export function HypothesisEngineView() {
         </p>
       </div>
 
-      {/* Новый проект */}
-      <div className={`${HE.card} ${HE.cardPad}`}>
-        <label htmlFor="he-website" className={`block ${HE.secTitle}`}>
-          Новый проект
-        </label>
-        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-          <input
-            id="he-website"
-            type="text"
-            value={websiteUrl}
-            onChange={(e) => setWebsiteUrl(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void handleCreate();
-            }}
-            placeholder="Сайт клиента: acme.com"
-            disabled={creating}
-            className={`${HE.input} flex-1`}
-          />
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void handleCreate();
-            }}
-            placeholder="Название (необязательно)"
-            disabled={creating}
-            className={`${HE.input} sm:w-56`}
-          />
-          <button
-            type="button"
-            onClick={() => void handleCreate()}
-            disabled={creating || !websiteUrl.trim()}
-            className={`${HE.btnPrimary} inline-flex shrink-0 items-center justify-center gap-2`}
-          >
-            {creating ? <Spinner className="h-3.5 w-3.5" /> : null}
-            Создать проект
-          </button>
-        </div>
-        <p className={`mt-2 text-xs ${HE.muted}`}>
-          После создания откроется страница проекта: там запускается исследование (5–15 минут).
+      {/* Переход на v2: новые прогоны только там */}
+      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4">
+        <p className="text-sm font-semibold text-emerald-900">
+          Движок вертикалей переехал в v2
         </p>
+        <p className={`mt-1 text-sm ${HE.muted}`}>
+          Новые прогоны создаются в новой версии. Здесь доступны только уже созданные проекты.
+        </p>
+        <a
+          href="/tools/vertical-engine-v2"
+          className="mt-3 inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700"
+        >
+          Открыть Движок вертикалей v2
+        </a>
       </div>
-
-      {errorMsg && <StatusBox tone="error">{errorMsg}</StatusBox>}
 
       {/* Список проектов */}
       {listLoading ? (

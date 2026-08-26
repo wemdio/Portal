@@ -81,6 +81,7 @@ export const ALL_TOOL_IDS = [
   'inn-enrich',
   'sales-chat-analyzer',
   'hypothesis-engine',
+  'vertical-engine-v2',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
@@ -417,11 +418,20 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
   },
   'hypothesis-engine': {
     id: 'hypothesis-engine',
-    title: 'Движок вертикалей',
-    title_en: 'Hypothesis Engine',
+    title: 'Движок вертикалей v1',
+    title_en: 'Hypothesis Engine v1',
     description: 'Сайт клиента → вертикали рынка с доказательствами и %, цепочки писем, вокабуляр и шаблон 85/15 под базу.',
     description_en: 'Client site → market verticals with evidence and potential, email chains, vocab matrix, and an 85/15 template for the uploaded base.',
     href: '/tools/hypothesis-engine',
+    accentColor: 'emerald',
+  },
+  'vertical-engine-v2': {
+    id: 'vertical-engine-v2',
+    title: 'Движок вертикалей v2',
+    title_en: 'Hypothesis Engine v2',
+    description: 'База на гипотезу, сезонность, человеческие названия вертикалей и сегментно-осознанное превью.',
+    description_en: 'Base-per-hypothesis, seasonality, human-readable vertical names, and segment-aware preview.',
+    href: '/tools/vertical-engine-v2',
     accentColor: 'emerald',
   },
 };
@@ -436,7 +446,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Аутрич',
     label_en: 'Outreach',
-    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'sales-hypotheses', 'hypothesis-engine', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach', 'sales-chat-analyzer'],
+    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'sales-hypotheses', 'hypothesis-engine', 'vertical-engine-v2', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach', 'sales-chat-analyzer'],
   },
   {
     label: 'Базы и данные',

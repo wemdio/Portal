@@ -91,7 +91,7 @@ describe('Vertical Engine v2 architecture boundary', () => {
     expect(llm).not.toMatch(/HE_MODEL_RESEARCH/);
   });
 
-  it('keeps v2 hidden while the legacy internal route remains unchanged', () => {
+  it('exposes v2 in the registry while the legacy internal route stays mounted', () => {
     const registry = source(path.resolve(process.cwd(), 'src/lib/toolsRegistry.ts'));
     const legacyPage = source(
       path.resolve(process.cwd(), 'src/app/tools/hypothesis-engine/page.tsx'),
@@ -101,8 +101,8 @@ describe('Vertical Engine v2 architecture boundary', () => {
       'src/app/tools/vertical-engine-v2/page.tsx',
     );
 
-    expect(registry).not.toContain("'vertical-engine-v2'");
-    expect(registry).not.toContain('"vertical-engine-v2"');
+    // Cutover: v2 видим в реестре; легаси-роут остаётся (read-only баннер).
+    expect(registry).toContain("'vertical-engine-v2'");
     expect(legacyPage).toContain('HypothesisEngineView');
     expect(fs.existsSync(v2Page)).toBe(true);
   });

@@ -3,9 +3,8 @@
 /**
  * Tests for /api/tools/hypothesis-engine/projects.
  *
- *   POST { website_url, name? }
- *     201 -> { project } (name defaults to hostname, url normalized)
- *     400 -> { error } for missing / invalid website_url
+ *   POST — migrated: new runs live in v2, this route is read-only.
+ *     409 -> { error, code: 'MIGRATED_TO_V2' }
  *   GET
  *     200 -> { projects } with vertical_count per project
  */
@@ -69,73 +68,21 @@ beforeEach(() => {
   mockDb = createMockSupabase({ tables: { he_projects: [], he_verticals: [] } });
 });
 
-describe('POST /api/tools/hypothesis-engine/projects — validation', () => {
-  it('returns 400 when website_url is missing', async () => {
-    const res = await POST(makeReq({}));
-    expect(res.status).toBe(400);
+describe('POST /api/tools/hypothesis-engine/projects — migrated to v2', () => {
+  it('rejects a new run with 409 MIGRATED_TO_V2 and writes nothing', async () => {
+    const res = await POST(makeReq({ website_url: 'example.com', name: 'Example' }));
+    expect(res.status).toBe(409);
+
+    const body = (await res.json()) as { code?: string; error?: string };
+    expect(body.code).toBe('MIGRATED_TO_V2');
+    expect(mockDb.mutations).toHaveLength(0);
+    expect(mockDb.getRows('he_projects')).toHaveLength(0);
   });
 
-  it('returns 400 when website_url is blank', async () => {
-    const res = await POST(makeReq({ website_url: '   ' }));
-    expect(res.status).toBe(400);
-  });
-
-  it('returns 400 for non-http(s) input (mailto:)', async () => {
-    const res = await POST(makeReq({ website_url: 'mailto:foo@bar' }));
-    expect(res.status).toBe(400);
-  });
-
-  it('returns 400 for free text with spaces', async () => {
-    const res = await POST(makeReq({ website_url: 'не сайт а текст' }));
-    expect(res.status).toBe(400);
-  });
-
-  it('returns 400 for a hostname without a dot', async () => {
-    const res = await POST(makeReq({ website_url: 'localhost' }));
-    expect(res.status).toBe(400);
-  });
-});
-
-describe('POST /api/tools/hypothesis-engine/projects — happy path', () => {
-  it('normalizes a bare domain, defaults name to hostname, returns 201', async () => {
-    const res = await POST(makeReq({ website_url: 'example.com' }));
-    expect(res.status).toBe(201);
-
-    const body = (await res.json()) as { project: Record<string, unknown> };
-    expect(body.project.website_url).toBe('https://example.com/');
-    expect(body.project.name).toBe('example.com');
-    expect(body.project.status).toBe('draft');
-    expect(body.project.created_by).toBe(USER_ID);
-
-    const rows = mockDb.getRows('he_projects');
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toEqual(expect.objectContaining({ website_url: 'https://example.com/' }));
-  });
-
-  it('keeps an explicit name and an https URL', async () => {
-    const res = await POST(makeReq({ website_url: 'https://acme.io/about', name: 'Acme' }));
-    expect(res.status).toBe(201);
-    const body = (await res.json()) as { project: Record<string, unknown> };
-    expect(body.project.name).toBe('Acme');
-    expect(body.project.website_url).toBe('https://acme.io/about');
-  });
-
-  it('stores a Cyrillic (IDN) domain in Unicode, not punycode', async () => {
-    const res = await POST(makeReq({ website_url: 'цельныерешения.рф' }));
-    expect(res.status).toBe(201);
-    const body = (await res.json()) as { project: Record<string, unknown> };
-    expect(body.project.website_url).toBe('https://цельныерешения.рф/');
-    expect(body.project.name).toBe('цельныерешения.рф');
-  });
-
-  it('decodes punycode input to Unicode for storage', async () => {
-    const res = await POST(
-      makeReq({ website_url: 'https://xn--e1aaaapoody9c2a6al5c.xn--p1ai/' }),
-    );
-    expect(res.status).toBe(201);
-    const body = (await res.json()) as { project: Record<string, unknown> };
-    expect(body.project.website_url).toBe('https://цельныерешения.рф/');
-    expect(body.project.name).toBe('цельныерешения.рф');
+  it('short-circuits to 409 even for invalid input (no create path)', async () => {
+    const res = await POST(makeReq({ website_url: 'not a website' }));
+    expect(res.status).toBe(409);
+    expect(mockDb.mutations).toHaveLength(0);
   });
 });
 
