@@ -16,9 +16,11 @@
  * собирающаяся auto-база уже есть → outcome 'existing' (UI показывает «уже
  * собирается», а не молча продолжает; collect_info в выборке — ради
  * collect_info.limit в этом уведомлении).
- * Гонку двух параллельных запусков (оба прошли проверки до insert) закрывает
- * partial unique index ve_bases_one_collecting_per_vertical: проигравший
- * insert получает 23505 и тоже отвечает 'existing' с чужой collecting-базой.
+ * Гонку двух параллельных запусков (оба прошли проверки до insert) закрывают
+ * partial unique index'ы: ve_bases_one_collecting_per_hypothesis (базы с
+ * гипотезой) и ve_bases_one_collecting_per_vertical (легаси/refill, где
+ * hypothesis_id IS NULL). Проигравший insert получает 23505 и тоже отвечает
+ * 'existing' с чужой collecting-базой.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';

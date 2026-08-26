@@ -579,8 +579,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
           ) : (
             <>
               <style>{`
-                /* Липкая первая колонка при горизонтальном скролле карточки:
-                   идентификатор строки не уезжает за край. */
+                /* Липкая первая колонка + липкая шапка при скролле в обе стороны. */
                 .lb-table td:first-child, .lb-table th:first-child {
                   position: sticky;
                   left: 0;
@@ -588,15 +587,24 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                   background: var(--cp-surface-rest);
                   min-width: 130px;
                 }
-                .lb-table thead th:first-child { z-index: 20; }
+                .lb-table thead th {
+                  position: sticky;
+                  top: 0;
+                  z-index: 30;
+                  background: var(--cp-surface-rest);
+                  box-shadow: inset 0 -1px 0 var(--cp-divider);
+                }
+                .lb-table thead th:first-child { z-index: 40; }
                 .lb-table tbody tr:hover td:first-child { background: var(--cp-surface-elev); }
-                /* Видимый горизонтальный скроллбар: светлый ползунок на подложке.
-                   Кросс-браузерно: Firefox — scrollbar-width/color, остальные — webkit. */
+                /* Таблица — отдельный прокручиваемый блок ограниченной высоты:
+                   горизонтальный скроллбар всегда внизу видимой области, а не внизу страницы. */
                 .lb-scroll {
+                  max-height: calc(100vh - 240px);
+                  overflow: auto;
                   scrollbar-width: thin;
                   scrollbar-color: var(--cp-paper-faint) var(--cp-surface-active);
                 }
-                .lb-scroll::-webkit-scrollbar { height: 10px; }
+                .lb-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
                 .lb-scroll::-webkit-scrollbar-track {
                   background: var(--cp-surface-active);
                   border-radius: 5px;
@@ -608,8 +616,12 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                 .lb-scroll::-webkit-scrollbar-thumb:hover {
                   background: var(--cp-paper-mute);
                 }
+                @media (max-width: 640px) {
+                  .lb-scroll { max-height: 55vh; }
+                  .lb-table td:first-child, .lb-table th:first-child { min-width: 96px; }
+                }
               `}</style>
-            <div className="lb-scroll rounded-lg bg-[var(--cp-surface-rest)] overflow-x-auto">
+            <div className="lb-scroll rounded-lg bg-[var(--cp-surface-rest)]">
               <table className="lb-table w-full text-[13px]">
                 <thead>
                   <tr>

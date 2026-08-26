@@ -110,6 +110,7 @@ const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
   'inn-enrich': FileSpreadsheet,
   'sales-chat-analyzer': TelegramIcon,
   'hypothesis-engine': Telescope,
+  'vertical-engine-v2': Sparkles,
 };
 
 function ToolLinkCard({

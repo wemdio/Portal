@@ -270,7 +270,12 @@ export function isProposalMessage(text: string): boolean {
 // контактом ЛПР. Детерминированно отсекаем только этот узкий класс; все прочие
 // ответы отправляем в AI, чтобы не перечислять бесконечным allowlist'ом варианты
 // «свяжитесь со мной», «когда поговорим», «пришлите прайс» и другие CTA.
-const CONTACT_EMAIL_OR_USERNAME_PATTERN = /(?:[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|@[a-z0-9_]{5,})/gi;
+const CONTACT_EMAIL_SOURCE = String.raw`[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}`;
+const CONTACT_EMAIL_PATTERN = new RegExp(CONTACT_EMAIL_SOURCE, 'i');
+const CONTACT_EMAIL_OR_USERNAME_PATTERN = new RegExp(
+  String.raw`(?:${CONTACT_EMAIL_SOURCE}|@[a-z0-9_]{5,})`,
+  'gi',
+);
 const CONTACT_TEL_URI_PATTERN = /<?tel:\s*\+?\d[\d\s().-]{6,}\d>?/gi;
 const CONTACT_PHONE_CANDIDATE_PATTERN = /\+?\d[\d\s().-]{6,}\d/g;
 const CONTACT_PHONE_LABEL_PATTERN = /(?:телефон|тел\.|номер|phone)/i;
@@ -281,7 +286,8 @@ const QUOTED_REPLY_BOUNDARY_PATTERNS = [
   /^>/,
   /^On\s+.+\s+wrote:\s*$/i,
   /^(?:От|From|Sent|Кому|To):\s+.+$/i,
-  /^-{2,}\s*(?:Original Message|Исходное сообщение|Пересланное сообщение)\s*-{2,}$/i,
+  /^(?:-{2,}\s*)?(?:Original Message|Forwarded Message|Исходное сообщение|Пересланное сообщение|Перенаправленное сообщение|Пересылаемое сообщение)(?::)?(?:\s*-{2,})?$/i,
+  /^Begin forwarded message:\s*$/i,
   /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}[^\n]{0,160}(?:пишет|написал(?:а)?|wrote):\s*$/i,
   /^(?:пн|вт|ср|чт|пт|сб|вс),?\s+\d{1,2}\s+[а-яё]{3,}\.?(?:\s+\d{4})?(?:\s*г\.)?[^\n]{0,160}:\s*$/i,
 ];
@@ -565,6 +571,98 @@ function extractAuthoredReplyText(text: string): string {
     );
   });
   return lines.slice(0, boundaryIndex === -1 ? lines.length : boundaryIndex).join('\n').trim();
+}
+
+function hasStandaloneSharedEmailLeadCriterion(leadCriteria?: string | null): boolean {
+  if (!leadCriteria?.trim()) return false;
+
+  // Детерминированно понимаем только узкую самостоятельную формулировку.
+  // Остальные свободные критерии по-прежнему интерпретирует модель: нельзя
+  // превращать «имя И почта» или «не считать общую почту» в правило по одному email.
+  const hasEmailException =
+    /(?:не\s+считать|не\s+является|не\s+считается)[^.!?;\n]{0,100}(?:почт|e-?mail)|(?:почт|e-?mail)[^.!?;\n]{0,100}(?:не\s+считать|не\s+является|не\s+считается)/iu.test(
+      leadCriteria,
+    );
+  if (hasEmailException) return false;
+  const emailMentions = leadCriteria.match(/(?:почт[а-яё]*|e-?mail[а-яё]*)/giu) ?? [];
+  if (emailMentions.length !== 1) return false;
+
+  const positiveLeadClause =
+    /(?:^|[.!?;\n]\s*)(?:(?:также|дополнительно)\s+)?считать\s+(?:это\s+)?лидом\s*,?\s*(?:если\s+)?([^.!?;\n]+)/giu;
+  for (const match of leadCriteria.matchAll(positiveLeadClause)) {
+    const condition = (match[1] ?? '')
+      .replace(/[«»"'`]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (/^поделил(?:ся|ась|ось|ись|и)\s+(?:почтой|e-?mail(?:ом)?)$/iu.test(condition)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hasDeliberatelySharedEmailInAuthoredReply(replyText: string): boolean {
+  const authoredReply = extractAuthoredReplyText(replyText);
+  if (!authoredReply || !CONTACT_EMAIL_PATTERN.test(authoredReply)) return false;
+
+  // Шаблонное подтверждение получения может содержать дежурный support-email,
+  // но не является сознательной передачей контакта потенциальным клиентом.
+  if (
+    /(?:ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)\s+(?:был[оа]?\s+)?(?:успешно\s+)?(?:зарегистрирован[оа]?|получен[оа]?|принят[оа]?)|(?:мы\s+)?(?:получили|зарегистрировали|приняли)\s+ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)|\byour\s+(?:request|message|email)\s+(?:has\s+been|was|is)\s+(?:received|registered|accepted)\b|\bwe\s+have\s+(?:received|registered|accepted)\s+your\s+(?:request|message|email)\b)/iu.test(
+      authoredReply,
+    )
+  ) {
+    return false;
+  }
+
+  // Один email (возможно после приветствия) — однозначная передача контакта.
+  // Но email в многострочной подписи без «С уважением» этим условием не пройдёт.
+  const normalizedReply = normalizeAuthoredStatement(authoredReply);
+  const bareEmailPattern = new RegExp(
+    String.raw`^<?${CONTACT_EMAIL_SOURCE}>?[,;:]?$`,
+    'i',
+  );
+  if (bareEmailPattern.test(normalizedReply)) return true;
+
+  const lines = authoredReply
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const russianShareAction =
+    String.raw`(?:уточнит(?:е|ь)|напиш(?:ите|и)|написать|пиш(?:ите|и)|писать|обратит(?:есь|ься)|обращайтесь|свяжит(?:есь|ься)|связаться|направ(?:ьте|ить)|отправ(?:ьте|ить)|перешл(?:ите|ать)|продублиру(?:йте|овать))`;
+  const russianRoutingTarget = String.raw`(?:(?:${LETTER_TOKEN_START_SOURCE}на${LETTER_TOKEN_END_SOURCE})(?:\s+(?:(?:этот|эту|данный|данную|указанный|указанную|следующий|следующую)\s+)?(?:адрес|почт(?:у|е)|e-?mail))?|(?:${LETTER_TOKEN_START_SOURCE}по${LETTER_TOKEN_END_SOURCE})\s+(?:(?:этому|указанному|следующему)\s+)?(?:адресу|почте|e-?mail)|${LETTER_TOKEN_START_SOURCE}сюда${LETTER_TOKEN_END_SOURCE})`;
+  const englishShareAction = String.raw`(?:write|send|forward|reach\s+out)`;
+  const englishRoutingTarget = String.raw`${LETTER_TOKEN_START_SOURCE}(?:to|at|via)${LETTER_TOKEN_END_SOURCE}`;
+  const linkedEmailRouting = new RegExp(
+    String.raw`(?:${LETTER_TOKEN_START_SOURCE}${russianShareAction}${LETTER_TOKEN_END_SOURCE}[^.!?;\n]{0,80}${russianRoutingTarget}|${LETTER_TOKEN_START_SOURCE}${englishShareAction}${LETTER_TOKEN_END_SOURCE}[^.!?;\n]{0,60}${englishRoutingTarget})\s*[:\-–—]?\s*(?:(?:e-?mail|электронн(?:ая|ую)\s+почт(?:а|у))\s*[:\-–—]?\s*)?$`,
+    'iu',
+  );
+  const russianNegativeModal =
+    String.raw`(?:нужно|надо|следует|стоит|можете|можно|должны|рекомендуем|советуем)`;
+  const negatedEmailRouting = new RegExp(
+    String.raw`(?:${LETTER_TOKEN_START_SOURCE}(?:не|нельзя)${LETTER_TOKEN_END_SOURCE}\s+(?:(?:${russianNegativeModal})\s+(?:(?:пока|сейчас|больше)\s+)?(?:вам\s+)?|(?:вам\s+)?)${russianShareAction}${LETTER_TOKEN_END_SOURCE}|${LETTER_TOKEN_START_SOURCE}${russianShareAction}${LETTER_TOKEN_END_SOURCE}[^.!?;\n]{0,30}${LETTER_TOKEN_START_SOURCE}не${LETTER_TOKEN_END_SOURCE}\s+${russianRoutingTarget}|${LETTER_TOKEN_START_SOURCE}(?:not|do\s+not|don't|cannot|can't|should\s+not|must\s+not)${LETTER_TOKEN_END_SOURCE}\s+(?:(?:allowed|recommended)\s+to\s+)?${englishShareAction}${LETTER_TOKEN_END_SOURCE}|${LETTER_TOKEN_START_SOURCE}${englishShareAction}${LETTER_TOKEN_END_SOURCE}[^.!?;\n]{0,30}${LETTER_TOKEN_START_SOURCE}not${LETTER_TOKEN_END_SOURCE}\s+${englishRoutingTarget})`,
+    'iu',
+  );
+  const trailingEmailNegation =
+    /(?:не\s+(?:нужно|надо|следует|стоит|пишите|писать|используйте|использовать)|нельзя|запрещен[оа]?|запрещается|\b(?:is\s+)?not\s+allowed\b|\b(?:do\s+not|don't|cannot|can't|should\s+not|must\s+not)\b)/iu;
+
+  return lines.some((line, index) => {
+    if (!CONTACT_EMAIL_PATTERN.test(line)) return false;
+    const previousLine = index > 0 ? lines[index - 1] : '';
+    const emailMatch = CONTACT_EMAIL_PATTERN.exec(line);
+    if (!emailMatch || emailMatch.index === undefined) return false;
+    const textBeforeEmail = `${previousLine} ${line.slice(0, emailMatch.index)}`.trim();
+    const linkedClause = textBeforeEmail.split(/[.!?;]/).at(-1)?.trim() ?? '';
+    const trailingClause = line
+      .slice(emailMatch.index + emailMatch[0].length)
+      .split(/[.!?;]/, 1)[0];
+    return (
+      linkedEmailRouting.test(linkedClause) &&
+      !negatedEmailRouting.test(linkedClause) &&
+      !trailingEmailNegation.test(trailingClause)
+    );
+  });
 }
 
 function isSharedContactRoutingReply(text: string): boolean {
@@ -1670,6 +1768,33 @@ function enforceCustomCriteriaPriority(
   };
 }
 
+function enforceDeterministicCustomCriteria(
+  result: QualificationResult,
+  leadCriteria: string | null | undefined,
+  replyText: string,
+): QualificationResult {
+  if (
+    result.customCriteriaMatched ||
+    !hasStandaloneSharedEmailLeadCriterion(leadCriteria) ||
+    !hasDeliberatelySharedEmailInAuthoredReply(replyText)
+  ) {
+    return result;
+  }
+
+  const signal = 'передан email по кастомному критерию проекта';
+  return {
+    ...result,
+    isLead: true,
+    customCriteriaMatched: true,
+    interestSignals: [...new Set([...result.interestSignals, signal])],
+    reason: 'В основном ответе передан email, а кастомный критерий проекта прямо считает это лидом.',
+    confidence: Math.max(result.confidence, 0.98),
+    needsReview: false,
+    objectionHandleable: false,
+    objectionDraft: null,
+  };
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1893,14 +2018,19 @@ export async function qualifyReply(
   }
 
   const aiResult = await classifyWithAI(ctx, { ...aiOptions, briefText });
-  if (sharedContactRouting && !aiResult.customCriteriaMatched) {
+  const criteriaAwareResult = enforceDeterministicCustomCriteria(
+    aiResult,
+    aiOptions.leadCriteria,
+    replyText,
+  );
+  if (sharedContactRouting && !criteriaAwareResult.customCriteriaMatched) {
     return {
-      ...sharedContactRoutingNonLead(ctx, aiResult),
+      ...sharedContactRoutingNonLead(ctx, criteriaAwareResult),
       threadContext: ctx,
     };
   }
   const normalizedResult = hasCustomCriteria
-    ? aiResult
-    : normalizeDefaultLeadSignals(ctx, replyText, aiResult);
+    ? criteriaAwareResult
+    : normalizeDefaultLeadSignals(ctx, replyText, criteriaAwareResult);
   return { ...normalizedResult, threadContext: ctx };
 }

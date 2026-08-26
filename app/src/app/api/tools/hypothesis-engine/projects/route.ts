@@ -2,9 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
-import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { normalizeWebsiteInput } from '@/lib/hypothesisEngine/websiteUrl';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -55,56 +53,24 @@ export async function GET(req: NextRequest) {
   );
 }
 
-// POST — создать проект: { website_url, name? }. Имя по умолчанию — hostname.
+// POST — создание новых прогонов переехало в v2 (/tools/vertical-engine-v2).
+// Этот инструмент работает только с уже созданными проектами. ENG-контур
+// (/api/client/eng/projects) не затрагивается.
 export async function POST(req: NextRequest) {
   return withToolTrace(
     { request: req, operation: 'tools.hypothesis-engine.projects.post' },
     async () => {
       const authed = await requireInternalToolAuth(req);
       if ('error' in authed) return authed.error;
-      const { userId } = authed.auth;
-      if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
-      let body: { website_url?: unknown; name?: unknown };
-      try {
-        body = (await req.json()) as { website_url?: unknown; name?: unknown };
-      } catch {
-        return jsonError('Invalid body', 400);
-      }
-
-      const rawUrl = typeof body?.website_url === 'string' ? body.website_url : '';
-      const normalized = normalizeWebsiteInput(rawUrl);
-      if (!normalized) {
-        return jsonError('Некорректный website_url — укажите домен или URL сайта клиента', 400);
-      }
-
-      const name =
-        typeof body?.name === 'string' && body.name.trim()
-          ? body.name.trim().slice(0, 300)
-          : normalized.hostname;
-
-      const { data: project, error } = await supabaseAdmin
-        .from('he_projects')
-        .insert({
-          created_by: userId,
-          name,
-          website_url: normalized.url,
-          status: 'draft',
-        })
-        .select()
-        .single();
-      if (error || !project) {
-        await logError('tools.hypothesis-engine.projects.create_failed', error, { userId });
-        return jsonError(error?.message ?? 'Не удалось создать проект', 500);
-      }
-
-      void logAudit('tools.hypothesis-engine.projects.created', 'Hypothesis engine project created', {
-        userId,
-        projectId: project.id,
-        websiteUrl: normalized.url,
-      });
-
-      return NextResponse.json({ project }, { status: 201 });
+      return NextResponse.json(
+        {
+          error:
+            'Новые прогоны создаются в Движке вертикалей v2 (/tools/vertical-engine-v2). Этот инструмент — только просмотр существующих проектов.',
+          code: 'MIGRATED_TO_V2',
+        },
+        { status: 409 },
+      );
     },
   );
 }

@@ -454,6 +454,48 @@ describe('qualifyReply — пер-проектное определение ли
     },
   } as Email;
 
+  const adkEmailCriteria = [
+    'Дополнительно считать лидом, если дали номер телефона и Имя, предложили созвониться или попросили связаться.',
+    'Оставили какой-то мессенджер для связи и попросили связаться в нем.',
+    'Также считать лидом если поделились кодом в АТИ (ati.su).',
+    'Также считать лидом, если поделились почтой.',
+    'Также считать лидом, если попросили сделать расчет заявки, рассчитать стоимость перевозки.',
+  ].join(' ');
+  const camozziEmailRoutingReply = [
+    'Добрый день, Никита.',
+    'В Санкт-Петербург только отдел продаж, склада нет.',
+    'Попробуйте уточнить информацию по этому адресу: info@camozzi.ru',
+    '',
+    'С уважением,',
+    'Мария Иванова',
+    'Менеджер отдела продаж',
+    'maria.ivanova@camozzi.ru',
+  ].join('\n');
+
+  async function qualifyEmailCriterionReply(
+    replyText: string,
+    options: {
+      leadCriteria?: string;
+      aiOverrides?: Record<string, unknown>;
+    } = {},
+  ) {
+    mockAiResult({
+      is_lead: false,
+      custom_criteria_matched: false,
+      interest_signals: [],
+      reason: 'Модель не распознала кастомный критерий.',
+      needs_review: false,
+      ...options.aiOverrides,
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    return qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      leadCriteria: options.leadCriteria ?? adkEmailCriteria,
+      prefetchedContext: contextWithReply(replyText),
+    });
+  }
+
   function replyWithQuotedProposal(authoredReply: string): string {
     return [
       authoredReply,
@@ -2119,6 +2161,181 @@ describe('qualifyReply — пер-проектное определение ли
     expect(res.isLead).toBe(false);
     expect(res.needsReview).toBe(false);
     expect(res.reason).toContain('общий контакт');
+  });
+
+  it('АДК Транс: явная передача email в основном ответе побеждает ошибочный not_lead модели', async () => {
+    const res = await qualifyEmailCriterionReply(camozziEmailRoutingReply, {
+      aiOverrides: {
+        proposal_seen: false,
+        reason: 'Перенаправление на общий почтовый ящик без собственного интереса.',
+        confidence: 0.95,
+        objection_handleable: true,
+        objection_draft: 'Лишний черновик возражения.',
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.customCriteriaMatched).toBe(true);
+    expect(res.isLead).toBe(true);
+    expect(res.needsReview).toBe(false);
+    expect(res.objectionHandleable).toBe(false);
+    expect(res.objectionDraft).toBeNull();
+    expect(res.interestSignals).toContain('передан email по кастомному критерию проекта');
+  });
+
+  it.each([
+    {
+      title: 'email находится только в подписи',
+      replyText: 'Спасибо за письмо.\n\nС уважением,\nМария Иванова\nmaria.ivanova@camozzi.ru',
+    },
+    {
+      title: 'email находится только в процитированной истории',
+      replyText: 'Спасибо за письмо.\n\n18.08.2026 11:21, Никита пишет:\n> Напишите на info@camozzi.ru',
+    },
+    {
+      title: 'email находится только в перенаправленном сообщении',
+      replyText: 'Спасибо за письмо.\n\nПеренаправленное сообщение\nFrom: colleague@camozzi.ru\nПишите на info@camozzi.ru',
+    },
+    {
+      title: 'email находится в подписи без формального разделителя',
+      replyText: 'Спасибо за письмо.\n\nМария Иванова\nМенеджер отдела продаж\nmaria.ivanova@camozzi.ru',
+    },
+    {
+      title: 'слово contact находится только внутри email подписи',
+      replyText: 'Спасибо за письмо.\n\nМария Иванова\nМенеджер отдела продаж\ncontact@camozzi.ru',
+    },
+    {
+      title: 'Freight Forwarder является должностью, а не командой переслать',
+      replyText: 'Спасибо за письмо.\n\nJohn Smith\nFreight Forwarder\njohn@camozzi.ru',
+    },
+    {
+      title: 'email находится в юридическом футере',
+      replyText: 'Спасибо за письмо.\n\nООО «Камоцци»\nЮридический адрес: Санкт-Петербург\nE-mail: info@camozzi.ru',
+    },
+    {
+      title: 'email находится после английской границы пересылки',
+      replyText: 'Спасибо за письмо.\n\n----- Forwarded message -----\nПишите на info@camozzi.ru',
+    },
+    {
+      title: 'email находится после Begin forwarded message',
+      replyText: 'Спасибо за письмо.\n\nBegin forwarded message:\nПишите на info@camozzi.ru',
+    },
+  ])('email-критерий не использует служебный текст: $title', async ({ replyText }) => {
+    const res = await qualifyEmailCriterionReply(replyText, {
+      aiOverrides: { reason: 'В основном ответе email не передан.' },
+    });
+
+    expect(res.customCriteriaMatched).toBe(false);
+    expect(res.isLead).toBe(false);
+  });
+
+  it.each([
+    'Лидом считать только запрос цены или сметы.',
+    'Не считать лидом, если поделились общей почтой.',
+    'Считать лидом, если дали имя и почту.',
+    'Считать лидом, если поделились именем и почтой.',
+    'Считать лидом, если поделились почтой и телефоном.',
+    'Считать лидом, если поделились только корпоративной почтой.',
+    'Считать лидом, если поделились почтой. Общую почту лидом не считать.',
+    'Считать лидом, если поделились почтой. Кроме общей почты.',
+    'Считать лидом, если поделились почтой. Только личная почта.',
+  ])('не расширяет более узкий или отрицательный кастомный критерий: %s', async (leadCriteria) => {
+    const res = await qualifyEmailCriterionReply(camozziEmailRoutingReply, {
+      leadCriteria,
+      aiOverrides: { reason: 'Кастомный критерий не совпал.' },
+    });
+
+    expect(res.customCriteriaMatched).toBe(false);
+    expect(res.isLead).toBe(false);
+  });
+
+  it('запрет писать на упомянутый email не считается передачей контакта', async () => {
+    const res = await qualifyEmailCriterionReply(
+      'Не пишите на info@camozzi.ru, этот адрес не используется.',
+      {
+        aiOverrides: { reason: 'Получатель запретил использовать упомянутый адрес.' },
+      },
+    );
+
+    expect(res.customCriteriaMatched).toBe(false);
+    expect(res.isLead).toBe(false);
+  });
+
+  it.each([
+    'Спасибо за обращение. Ваш запрос зарегистрирован. По вопросам напишите support@camozzi.ru.',
+    'Благодарим за обращение. Ваш запрос успешно зарегистрирован. По вопросам писать на support@camozzi.ru.',
+    'Thank you for contacting us. Your request has been received. For additional questions, write to support@camozzi.com.',
+    'Напишите подробнее. E-mail: info@camozzi.ru',
+    'Напишите подробнее, E-mail: info@camozzi.ru',
+    'Напишите ваш номер\nE-mail: info@camozzi.ru',
+    'Напишите имена\nE-mail: info@camozzi.ru',
+    'Send the photo\nE-mail: info@camozzi.com',
+    'Писать на info@camozzi.ru не нужно.',
+    'Пишите на info@camozzi.ru нельзя.',
+    'Write to info@camozzi.com is not allowed.',
+    'Вы не можете писать на info@camozzi.ru.',
+    'Не рекомендуем писать на info@camozzi.ru.',
+    'You are not allowed to write to info@camozzi.com.',
+    'Не нужно пока писать на info@camozzi.ru.',
+    'Писать на info@camozzi.ru запрещено.',
+    'Мы получили ваше письмо. По вопросам писать на support@camozzi.ru.',
+    'We have received your email. For questions write to support@camozzi.com.',
+    'Ваше обращение было зарегистрировано. По вопросам пишите на support@camozzi.ru.',
+    'Your request was received. For questions write to support@camozzi.com.',
+  ])('шаблонный или не связанный с email призыв не даёт детерминированный lead: %s', async (replyText) => {
+    const res = await qualifyEmailCriterionReply(replyText, {
+      aiOverrides: { reason: 'Email не является сознательно переданным контактом.' },
+    });
+
+    expect(res.customCriteriaMatched).toBe(false);
+    expect(res.isLead).toBe(false);
+  });
+
+  it.each([
+    'info@camozzi.ru',
+    'Добрый день! Напишите на sales@camozzi.ru.',
+    'Можно писать на logistics@camozzi.ru.',
+    'Можете написать на logistics@camozzi.ru.',
+    'Не я отвечаю за логистику, напишите на info@camozzi.ru.',
+    'Не знаю, попробуйте написать на info@camozzi.ru.',
+    'Спасибо за письмо. По этому вопросу напишите на ivan@camozzi.ru.',
+    'Thank you for your email. Please write to Jane at jane@camozzi.com.',
+    'Напишите по e-mail: info@camozzi.ru.',
+    'Напишите на эту почту: info@camozzi.ru.',
+  ])('однозначно переданный email удовлетворяет атомарному критерию: %s', async (replyText) => {
+    const res = await qualifyEmailCriterionReply(replyText);
+
+    expect(res.customCriteriaMatched).toBe(true);
+    expect(res.isLead).toBe(true);
+  });
+
+  it('email в автоответе не становится лидом по кастомному критерию', async () => {
+    const res = await qualifyEmailCriterionReply(
+      'Автоматический ответ: данный почтовый ящик больше не обслуживается. Пишите на info@camozzi.ru.',
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res.customCriteriaMatched).toBe(false);
+    expect(res.isLead).toBe(false);
+  });
+
+  it('без email-критерия перенаправление на общий адрес не получает детерминированный lead', async () => {
+    mockAiResult({
+      is_lead: false,
+      custom_criteria_matched: false,
+      interest_signals: [],
+      reason: 'Перенаправление на общий почтовый ящик без собственного интереса.',
+      needs_review: false,
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(camozziEmailRoutingReply),
+    });
+
+    expect(res.customCriteriaMatched).toBe(false);
+    expect(res.isLead).toBe(false);
   });
 
   it('прямой CTA без восстановленного исходящего письма доходит до ИИ и остаётся лидом', async () => {
