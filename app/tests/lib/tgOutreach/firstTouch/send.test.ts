@@ -142,7 +142,10 @@ describe('sendFirstTouchBatch', () => {
     expect(String(postponed?.patch.skip_reason)).toBe('текст длиннее 600 знаков');
   });
 
-  it('юзернейм не найден — пропуск с причиной, без повторов', async () => {
+  it('«No user has X as username» не сжигает — контакт откладывается', async () => {
+    // gramJS в _getEntityFromUsername маскирует RPC USERNAME_NOT_OCCUPIED в эту
+    // строку (telegram/client/users.js), а на замороженном аккаунте Telegram
+    // отдаёт её и на живые ники. Поэтому сжигать здесь нельзя — откладываем.
     const db = fakeDb([contact()]);
     const client = fakeClient({
       getEntity: jest.fn(async () => {
@@ -153,9 +156,11 @@ describe('sendFirstTouchBatch', () => {
     const res = await sendFirstTouchBatch({ ...baseArgs, db, client } as never);
 
     expect(res.sent).toBe(0);
-    const skipped = db.updates.find((u) => u.patch.status === 'skipped');
-    expect(skipped).toBeDefined();
-    expect(String(skipped?.patch.skip_reason)).toContain('не найден');
+    expect(res.skipped).toBe(0);
+    expect(res.postponed).toBe(1);
+    const patch = db.updates.find((u) => u.patch.attempts === 1)?.patch;
+    expect(patch?.attempts).toBe(1);
+    expect(patch?.status).toBeUndefined();
   });
 
   it('дневная норма ноль — в Telegram не ходим вообще', async () => {
@@ -437,24 +442,30 @@ describe('sendFirstTouchBatch — недоступные контакты и о�
   });
 
   /**
-   * Аудит 25.08.2026, кампания TG_VBI, аккаунт 254360278 (Василий).
+   * Аудит 25.08.2026, кампания TG_VBI, аккаунт 254360278 (Василий); 26.08 — та же
+   * картина на TG_Roistat (живые polydamas/savinovadi/spasisohrany и т.д.).
    *
    * gramJS getEntity → contacts.ResolveUsername. Когда аккаунт урезан/frozen,
    * Telegram отвечает USERNAME_NOT_OCCUPIED на ЖИВЫЕ ники — один и тот же код,
-   * что и для мёртвого ника. Раньше isUsernameNotFound считал это «ника нет» и
-   * ставил status=skipped навсегда: 273 контакта сожжено, +60 только за сегодня.
+   * что и для мёртвого ника. Причём gramJS в _getEntityFromUsername ловит этот
+   * RPC-код и маскирует его в строку `No user has "X" as username`, так что до
+   * нашего кода сырой код не доезжает. Раньше isUsernameNotFound считал всё это
+   * «ника нет» и ставил status=skipped навсегда: сотни контактов сожжено.
    *
    * Дискриминатор — не строка ошибки (она одинакова), а порция целиком: мёртвый
    * ник — явление редкое и одиночное, а замороженный аккаунт отдаёт
    * USERNAME_NOT_OCCUPIED на каждый резолв. Поэтому вся порция «не найдена» =
    * виноват аккаунт, а не база.
    */
-  describe('USERNAME_NOT_OCCUPIED — замороженный аккаунт vs мёртвый ник', () => {
+  describe('USERNAME_NOT_OCCUPIED / «No user has» — замороженный аккаунт vs мёртвый ник', () => {
     const usernameRpcError = () =>
       Object.assign(
         new Error('400: USERNAME_NOT_OCCUPIED (caused by contacts.ResolveUsername)'),
         { code: 'USERNAME_NOT_OCCUPIED' },
       );
+    // gramJS-маска того же RPC — именно в этой форме ошибка реально доезжает до кода.
+    const usernameGramjsError = (username = 'x') =>
+      new Error(`No user has "${username}" as username`);
 
     it('весь резолв порции вернул USERNAME_NOT_OCCUPIED — паркуем аккаунт, а не базу', async () => {
       const db = fakeDb([
@@ -480,6 +491,32 @@ describe('sendFirstTouchBatch — недоступные контакты и о�
       // Круг кампании не перечитывает аккаунты из БД — пауза обязана жить и в памяти.
       expect(account.cooldown_until).toBe(park?.patch.cooldown_until);
       // Порция остановлена, в Telegram по никам дальше не ходим.
+      expect(getEntity).toHaveBeenCalledTimes(3);
+    });
+
+    it('вся порция «No user has X as username» (грамJS-маска RPC) — тоже паркуем аккаунт, а не базу', async () => {
+      // Это РЕАЛЬНАЯ форма ошибки: gramJS перехватывает USERNAME_NOT_OCCUPIED и
+      // бросает строку. Раньше она скипалась как «честный мёртвый ник» — 26.08 на
+      // TG_Roistat так сожжены живые polydamas/savinovadi/spasisohrany.
+      const db = fakeDb([
+        contact({ id: 'c-1', username: 'polydamas' }),
+        contact({ id: 'c-2', username: 'savinovadi' }),
+        contact({ id: 'c-3', username: 'vstille' }),
+      ]);
+      const getEntity = jest.fn(async () => {
+        throw usernameGramjsError();
+      });
+      const client = fakeClient({ getEntity });
+      const account = { ...baseArgs.account, cooldown_until: null as string | null };
+
+      const res = await sendFirstTouchBatch({ ...baseArgs, account, cooldownHours: 24, db, client } as never);
+
+      expect(res.skipped).toBe(0);
+      expect(db.updates.filter((u) => u.table === 'tg_outreach_base_contacts')).toHaveLength(0);
+      const park = db.updates.find((u) => u.table === 'tg_outreach_accounts');
+      expect(park?.id).toBe('acc-1');
+      expect(Boolean(park?.patch.cooldown_until)).toBe(true);
+      expect(account.cooldown_until).toBe(park?.patch.cooldown_until);
       expect(getEntity).toHaveBeenCalledTimes(3);
     });
 
