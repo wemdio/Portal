@@ -52,7 +52,9 @@ const PROJECT_BATCH_SIZE = 100;
  * строка нужна: повтор их не вылечит, а видимость важна.
  */
 const TRANSIENT_QUALIFY_ERROR_RE =
-  /\b(?:429|500|502|503|504)\b|overload|rate.?limit|fetch failed|network error|timed?.?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|aborted|failed after retries/i;
+  /\b(?:402|429|500|502|503|504)\b|overload|rate.?limit|fetch failed|network error|timed?.?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|aborted|failed after retries/i;
+const RETRIABLE_BILLING_QUALIFY_ERROR_RE =
+  /\b(?:insufficient credits?|insufficient balance|balance is too low|payment required|out of credits?|spend(?:ing)? limit|billing limit)\b/i;
 const OWNERSHIP_DEFER_ERROR_PREFIX = 'Reply ownership deferred';
 export const OWNERSHIP_REVIEW_REASON_PREFIX =
   'Не удалось однозначно определить проект-владельца ответа:';
@@ -74,7 +76,8 @@ let lastLeadDeliveryRetryAt = 0;
 export function isTransientQualifyError(message: string): boolean {
   return (
     message.startsWith(OWNERSHIP_DEFER_ERROR_PREFIX) ||
-    TRANSIENT_QUALIFY_ERROR_RE.test(message)
+    TRANSIENT_QUALIFY_ERROR_RE.test(message) ||
+    RETRIABLE_BILLING_QUALIFY_ERROR_RE.test(message)
   );
 }
 
@@ -1837,7 +1840,9 @@ export async function reprocessOwnershipReviewRows(
       .eq('ai_confidence', 0)
       .or(retryReasonFilter)
       .eq('updated_at', raw.updated_at)
-      .select('id')
+      // PostgREST 12 reapplies the update filter to the returned projection.
+      // Keep ai_reason available there so the OR claim remains valid.
+      .select('id, ai_reason')
       .maybeSingle();
     if (claimError) {
       workerLog('warn', `ownership retry: claim failed for ${raw.id}: ${claimError.message}`);
