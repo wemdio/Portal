@@ -208,9 +208,22 @@ export interface VeProjectsResponse {
   error?: string;
 }
 
+export interface VeLegacyDuplicateDto {
+  id: string;
+  name: string;
+  website_url: string;
+}
+
+export interface VeProjectCreateConflictDto {
+  domain?: string;
+  legacy_projects?: VeLegacyDuplicateDto[];
+}
+
 export interface VeProjectCreateResponse {
   project?: VeProject;
   error?: string;
+  code?: string;
+  conflict?: VeProjectCreateConflictDto;
 }
 
 export interface VeProjectResponse {

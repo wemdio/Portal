@@ -5,6 +5,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { normalizeWebsiteInput } from '@/lib/verticalEngineV2/websiteUrl';
+import { findInternalLegacyDuplicates } from '@/lib/verticalEngineV2/legacyDuplicateCheck';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -66,9 +67,9 @@ export async function POST(req: NextRequest) {
       const { userId } = authed.auth;
       if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
-      let body: { website_url?: unknown; name?: unknown };
+      let body: { website_url?: unknown; name?: unknown; confirm?: unknown };
       try {
-        body = (await req.json()) as { website_url?: unknown; name?: unknown };
+        body = (await req.json()) as { website_url?: unknown; name?: unknown; confirm?: unknown };
       } catch {
         return jsonError('Invalid body', 400);
       }
@@ -77,6 +78,24 @@ export async function POST(req: NextRequest) {
       const normalized = normalizeWebsiteInput(rawUrl);
       if (!normalized) {
         return jsonError('Некорректный website_url — укажите домен или URL сайта клиента', 400);
+      }
+
+      // Блокировка дублей с v1: сверяемся с внутренними he_projects по домену.
+      // Без явного confirm при найденных дублях отвечаем 409 (UI показывает
+      // предупреждение и повторяет запрос с confirm=true).
+      const confirm = typeof body?.confirm === 'boolean' ? body.confirm : false;
+      if (!confirm) {
+        const dups = await findInternalLegacyDuplicates(supabaseAdmin, normalized.hostname);
+        if (dups.length > 0) {
+          return NextResponse.json(
+            {
+              error: 'Этот сайт уже прогоняли в Движке вертикалей v1.',
+              code: 'LEGACY_DUPLICATE',
+              conflict: { domain: normalized.hostname, legacy_projects: dups },
+            },
+            { status: 409 },
+          );
+        }
       }
 
       const name =

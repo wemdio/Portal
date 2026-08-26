@@ -13,6 +13,7 @@ import {
   VE_API,
   veEngineCall,
   veEnginePost,
+  type VeProjectCreateConflictDto,
   type VeProjectCreateResponse,
   type VeProjectsResponse,
 } from './api';
@@ -28,6 +29,7 @@ export function VeEngineWorkspace() {
   const [websiteUrl, setWebsiteUrl] = useState('');
   const [name, setName] = useState('');
   const [creating, setCreating] = useState(false);
+  const [pendingConflict, setPendingConflict] = useState<VeProjectCreateConflictDto | null>(null);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -46,28 +48,51 @@ export function VeEngineWorkspace() {
     };
   }, []);
 
-  const handleCreate = useCallback(async () => {
-    const url = websiteUrl.trim();
-    if (!url || creating) return;
-    setErrorMsg('');
-    setCreating(true);
-    try {
-      const body: { website_url: string; name?: string } = { website_url: url };
-      if (name.trim()) body.name = name.trim();
-      const { ok, data } = await veEnginePost<VeProjectCreateResponse>(`${VE_API}/projects`, body);
-      if (!ok || !data.project) {
-        throw new Error(data.error || 'Не удалось создать проект');
+  const createProject = useCallback(
+    async (confirm: boolean) => {
+      const url = websiteUrl.trim();
+      if (!url || creating) return;
+      setErrorMsg('');
+      setCreating(true);
+      try {
+        const body: { website_url: string; name?: string; confirm?: boolean } = {
+          website_url: url,
+        };
+        if (name.trim()) body.name = name.trim();
+        if (confirm) body.confirm = true;
+        const { ok, status, data } = await veEnginePost<VeProjectCreateResponse>(
+          `${VE_API}/projects`,
+          body,
+        );
+        if (status === 409 && data.conflict) {
+          setPendingConflict(data.conflict);
+          return;
+        }
+        if (!ok || !data.project) {
+          throw new Error(data.error || 'Не удалось создать проект');
+        }
+        setProjects((prev) => [data.project as VeProject, ...prev]);
+        setWebsiteUrl('');
+        setName('');
+        setSelectedId(data.project.id);
+      } catch (err) {
+        setErrorMsg(err instanceof Error ? err.message : 'Произошла ошибка');
+      } finally {
+        setCreating(false);
       }
-      setProjects((prev) => [data.project as VeProject, ...prev]);
-      setWebsiteUrl('');
-      setName('');
-      setSelectedId(data.project.id);
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Произошла ошибка');
-    } finally {
-      setCreating(false);
-    }
-  }, [websiteUrl, name, creating]);
+    },
+    [websiteUrl, name, creating],
+  );
+
+  const handleCreate = useCallback(async () => {
+    setPendingConflict(null);
+    await createProject(false);
+  }, [createProject]);
+
+  const handleConfirmCreate = useCallback(async () => {
+    setPendingConflict(null);
+    await createProject(true);
+  }, [createProject]);
 
   if (selectedId) {
     return (
@@ -127,6 +152,45 @@ export function VeEngineWorkspace() {
       </div>
 
       {errorMsg && <StatusBox tone="error">{errorMsg}</StatusBox>}
+
+      {pendingConflict ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-amber-200 bg-white p-6 shadow-xl">
+            <h3 className="text-base font-semibold text-gray-900">
+              Этот сайт уже прогоняли в v1
+            </h3>
+            <p className="mt-2 text-sm text-gray-600">
+              В Движке вертикалей v1 уже есть {pendingConflict.legacy_projects?.length ?? 0} прогон(ов)
+              для домена {pendingConflict.domain ?? ''}:
+            </p>
+            <ul className="mt-2 space-y-1">
+              {(pendingConflict.legacy_projects ?? []).map((p) => (
+                <li key={p.id} className="text-sm text-gray-500">
+                  {p.name || p.website_url}
+                </li>
+              ))}
+            </ul>
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setPendingConflict(null)}
+                disabled={creating}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmCreate()}
+                disabled={creating}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+              >
+                Всё равно создать в v2
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* Список проектов */}
       {listLoading ? (
