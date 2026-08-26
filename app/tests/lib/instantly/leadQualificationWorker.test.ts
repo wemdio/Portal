@@ -1927,6 +1927,34 @@ describe('pollAndQualifyReplies', () => {
     ]);
   });
 
+  // Production incident 26.08: Requesty returned HTTP 402 while the
+  // organisation balance was empty. Persisting that provider-wide outage as a
+  // terminal error poisons the instantly_email_id dedup forever, so topping up
+  // cannot recover replies that arrived during the outage.
+  it('Requesty low-balance 402 writes a durable retry row, not terminal error', async () => {
+    qualifyReply.mockRejectedValueOnce(
+      new Error(
+        'AI API 402: {"error":{"origin":"router","message":"Your organization\'s balance is too low to run this request. Top up or enable auto-top-up"}}',
+      ),
+    );
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'requesty-balance-email' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(0);
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
+      expect.objectContaining({
+        instantly_email_id: 'requesty-balance-email',
+        status: 'needs_review',
+        ai_confidence: 0,
+      }),
+    ]);
+  });
+
   it('permanent failure DOES write an error row (retry would not help; visibility matters)', async () => {
     qualifyReply.mockRejectedValueOnce(new Error('Cannot find JSON object in AI response'));
     listEmails.mockResolvedValue({
@@ -1948,6 +1976,8 @@ describe('pollAndQualifyReplies', () => {
       'AI API 503: {"error":{"origin":"provider","message":"Server Overloaded"}}',
       'Upsert failed: TypeError: fetch failed',
       'AI API 429: rate limit exceeded',
+      'AI API 402: {"error":{"origin":"router","message":"Your organization\'s balance is too low to run this request"}}',
+      'AI API 403: insufficient credits for this API key',
       'AI classification failed after retries',
       'connect ETIMEDOUT 1.2.3.4:443',
       'socket hang up',
@@ -3341,6 +3371,52 @@ describe('pollAndQualifyReplies', () => {
 
   describe('ownership-review reconciliation', () => {
     const retryNow = new Date('2026-08-24T18:00:00.000Z');
+
+    it('recovers a legacy Requesty 402 row with a PostgREST-12-safe claim and alerts exactly once', async () => {
+      installOwnershipReviewRetryFixture({
+        enforceQueryWindows: true,
+        row: {
+          status: 'error',
+          ai_reason: null,
+          ai_confidence: null,
+          error_message:
+            'AI API 402: {"error":{"origin":"router","message":"Your organization\'s balance is too low to run this request. Top up or enable auto-top-up"}}',
+          created_at: '2026-08-24T17:00:00.000Z',
+          updated_at: '2026-08-24T17:00:00.000Z',
+        },
+      });
+
+      const { reprocessOwnershipReviewRows } = await import(
+        '@/lib/instantly/leadQualificationWorker'
+      );
+      expect(await reprocessOwnershipReviewRows({
+        now: retryNow,
+        minRetryAgeMs: 0,
+      })).toBe(1);
+
+      expect(mockInstantlyDb!.selects).toContainEqual({
+        table: 'instantly_lead_qualifications',
+        // PostgREST 12 re-applies an `or(ai_reason...)` filter to the returned
+        // PATCH representation. Omitting ai_reason here produces the real prod
+        // 42703 even though the physical table column exists.
+        columns: 'id, ai_reason',
+      });
+      expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
+        expect.objectContaining({
+          id: 'ownership-review-qualification',
+          instantly_email_id: 'ownership-email',
+          status: 'lead',
+          error_message: null,
+        }),
+      ]);
+      expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
+
+      expect(await reprocessOwnershipReviewRows({
+        now: new Date('2026-08-24T18:01:00.000Z'),
+        minRetryAgeMs: 0,
+      })).toBe(0);
+      expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
+    });
 
     it('reopens a recent legacy terminal transient row and alerts exactly once', async () => {
       installOwnershipReviewRetryFixture({
