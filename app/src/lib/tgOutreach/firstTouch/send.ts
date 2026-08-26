@@ -207,40 +207,37 @@ function classifySendFailure(errMsg: string): SendFailure {
 }
 
 /**
- * RPC-ответ Telegram `USERNAME_NOT_OCCUPIED` — «ника нет».
+ * Неоднозначный «юзернейм не найден».
  *
- * Это НЕ доказательство мёртвого ника: на урезанном/frozen аккаунте
- * `contacts.ResolveUsername` отдаёт USERNAME_NOT_OCCUPIED и на живые ники
- * (аудит 25.08.2026, TG_VBI, аккаунт 254360278 — 273 живых контакта сожжено).
+ * ВАЖНО: gramJS в `_getEntityFromUsername` (telegram/client/users.js) ловит RPC
+ * `USERNAME_NOT_OCCUPIED` и маскирует его в строку `No user has "X" as username`
+ * — то есть сырой код в `err.message` до сюда НЕ доезжает. А на урезанном/frozen
+ * аккаунте Telegram отдаёт USERNAME_NOT_OCCUPIED и на ЖИВЫЕ ники (аудит 25.08.2026,
+ * TG_VBI, аккаунт 254360278 — 273 живых контакта сожжено; 26.08 TG_Roistat — те же
+ * «отправлено 0, пропущено N» на живых polydamas/savinovadi/spasisohrany).
+ *
+ * Поэтому и строка «No user has X as username», и сырой username_not_occupied —
+ * ОДИН и тот же неоднозначный сигнал: мёртвый ник ИЛИ замороженный аккаунт.
+ * Ни то, ни другое нельзя скипать сразу: буферизуем и решаем по итогу порции.
  * Дискриминатор один: мёртвый ник — явление одиночное, а замороженный аккаунт
- * отдаёт этот код на каждый резолв порции. Поэтому одиночный RPC-код не
- * сжигает контакт — ники пакетом буферизуются и решаются по итогу порции
- * (буфер notOccupied разбирается в конце sendFirstTouchBatch).
- *
- * Намеренно НЕ включаем сюда USERNAME_INVALID: это «ник с недопустимыми
- * символами», а не «такого ника нет», и замороженный аккаунт его не отдаёт.
- * Плюс на входе normalizeUsername уже режет ник до [a-z0-9_]{5,32}, так что
- * USERNAME_INVALID на первом касании практически недостижим; относимся к нему
- * как к обычному необратимому «ника нет» (см. isUsernameReallyAbsent), а не
- * как к сигналу парковки — иначе пачка кривых ников ложно уводила бы исправный
- * аккаунт в паузу.
+ * отдаёт этот ответ на каждый резолв порции.
  */
-function isUsernameNotOccupiedRpc(err: unknown): boolean {
+function isUsernameNotFoundAmbiguous(err: unknown): boolean {
   const m = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return m.includes('username_not_occupied');
+  return m.includes('as username')
+    || m.includes('no user has')
+    || m.includes('username_not_occupied');
 }
 
 /**
- * Необратимые «ника нет»: либо gramJS сам не резолвнул имя строкой «No user has
- * "X" as username» (а не RPC-кодом сервера), либо ник недопустимого формата
- * (USERNAME_INVALID). В отличие от USERNAME_NOT_OCCUPIED выше, это честный
- * признак мёртвого/кривого ника — его можно скипнуть сразу, он не «оживёт».
+ * Честно кривой ник — недопустимый формат (USERNAME_INVALID). Это НЕ заморозка:
+ * такой ник не «оживёт», его можно скипнуть сразу. На первом касании почти
+ * недостижим (normalizeUsername уже режет ник до [a-z0-9_]{5,32}), но если
+ * доедет — скипаем, а не паркуем аккаунт.
  */
-function isUsernameReallyAbsent(err: unknown): boolean {
+function isUsernameInvalid(err: unknown): boolean {
   const m = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return m.includes('as username')
-    || m.includes('username_invalid')
-    || m.includes('no user has');
+  return m.includes('username_invalid');
 }
 
 export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatchResult> {
@@ -291,20 +288,19 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
     try {
       entity = (await client.getEntity(`@${contact.username}`)) as { id: unknown; username?: string };
     } catch (err) {
-      // Честный мёртвый ник — gramJS сам не резолвнул имя строкой «No user has
-      // "X" as username», а не RPC-кодом сервера. Такой контакт скипаем сразу:
-      // он не вернётся ни на одной попытке.
-      if (isUsernameReallyAbsent(err)) {
+      // Честно кривой ник (недопустимый формат, USERNAME_INVALID) — это не
+      // заморозка, такой ник не «оживёт». Скипаем сразу.
+      if (isUsernameInvalid(err)) {
         await fdb.markContactSkipped(db, contact.id, 'юзернейм не найден в Telegram');
         log('info', `Первое касание: @${contact.username} пропущен — юзернейм не найден`);
         result.skipped++;
         continue;
       }
 
-      // RPC USERNAME_NOT_OCCUPIED — неоднозначен: тот же код Telegram отдаёт и на
-      // живые ники, когда аккаунт урезан/frozen. Сжигать контакт здесь нельзя;
-      // буферизуем и решаем по итогу порции.
-      if (isUsernameNotOccupiedRpc(err)) {
+      // «No user has X as username» / USERNAME_NOT_OCCUPIED — неоднозначен: тот же
+      // ответ Telegram отдаёт и на живые ники, когда аккаунт урезан/frozen. Сжигать
+      // контакт здесь нельзя; буферизуем и решаем по итогу порции.
+      if (isUsernameNotFoundAmbiguous(err)) {
         notOccupied.push({ contact, attempts });
         continue;
       }
@@ -439,11 +435,11 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
     }
   }
 
-  // Решаем судьбу буфера «USERNAME_NOT_OCCUPIED» по итогу порции.
+  // Решаем судьбу буфера «юзернейм не найден» по итогу порции.
   //
   // Вся порция «не найдена» (два и более контакта) — сильный признак того, что
   // заморожен наш аккаунт, а не что база мёртвая: мёртвый ник — одиночное
-  // явление, а урезанный аккаунт отдаёт этот код на каждый резолв. Паркуем
+  // явление, а урезанный аккаунт отдаёт этот ответ на каждый резолв. Паркуем
   // аккаунт (cooldown_until), контакты оставляем в очереди нетронутыми — они
   // дождутся исправного номера. Если сигнала нет — откладываем каждый контакт
   // с попыткой: живой он может быть, а сжигать его навсегда нельзя.
@@ -456,7 +452,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       account.cooldown_until = until;
       log(
         'warning',
-        `Первое касание остановлено: весь резолв порции вернул USERNAME_NOT_OCCUPIED — ` +
+        `Первое касание остановлено: весь резолв порции вернул «юзернейм не найден» — ` +
           `Telegram, похоже, заморозил аккаунт, а не срезал ники. ` +
           `Аккаунт на паузе до ${cooldownLabel(until)} (${args.cooldownHours ?? 24}ч), ` +
           `контакты остаются в очереди, попытки им не засчитываем.`,
@@ -469,7 +465,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         db,
         contact.id,
         attempts,
-        'юзернейм не резолвился: USERNAME_NOT_OCCUPIED (возможно, заморожен аккаунт)',
+        'юзернейм не резолвился (возможно, заморожен аккаунт)',
       );
       log('warning', `Первое касание: @${contact.username} отложен — юзернейм не резолвился${attemptNote(outcome)}`);
       result.postponed++;
