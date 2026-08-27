@@ -44,18 +44,18 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
       const { data: campaign } = await auth.supabase
         .from('tg_outreach_campaigns')
-        .select('id, name, user_id')
+        .select('id, name')
         .eq('id', campaignId)
         .maybeSingle();
       if (!campaign) return jsonError('Кампания не найдена', 404);
-      const camp = campaign as { id: string; name: string; user_id: string };
+      const camp = campaign as { id: string; name: string };
 
       // Базы теперь принадлежат кампании — контакты берём только по ним.
       const { data: baseRows } = await auth.supabase
         .from('tg_outreach_bases')
-        .select('id, name')
+        .select('id, name, source_chats')
         .eq('campaign_id', campaignId);
-      const bases = (baseRows ?? []) as Array<{ id: string; name: string }>;
+      const bases = (baseRows ?? []) as Array<{ id: string; name: string; source_chats: string | null }>;
 
       let contacts: ReportContact[] = [];
       if (bases.length) {
@@ -74,32 +74,18 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         .limit(20_000);
 
       /**
-       * Задачи парсера к кампании не привязаны — у них есть только владелец.
-       * Берём задачи владельца кампании: это ближайшее, что есть, и в отчёте
-       * подписано как «по всем задачам парсера за период».
+       * Задачи парсера сюда больше не приходят. Раньше «обработанные чаты»
+       * считались по ним — но к кампании они не привязаны, только к владельцу,
+       * и в отчёт клиента попадали чаты, которые специалист парсил в тот же
+       * период для другого клиента. Теперь чаты считаются по контактам самой
+       * кампании, внутри buildCampaignReport.
        */
-      const { data: jobRows } = await auth.supabase
-        .from('tg_parser_jobs')
-        .select('completed_at, config')
-        .eq('user_id', camp.user_id)
-        .eq('status', 'done')
-        .gte('completed_at', from)
-        .lt('completed_at', to)
-        .limit(5_000);
-
       const report = buildCampaignReport({
         from,
         to,
         tzOffsetHours: TZ_OFFSET_HOURS,
         dialogs: (dialogRows ?? []) as ReportDialog[],
         contacts,
-        parserJobs: (jobRows ?? []).map((j) => {
-          const cfg = (j as { config?: { links?: unknown[] } }).config ?? {};
-          return {
-            completed_at: (j as { completed_at: string | null }).completed_at,
-            links_count: Array.isArray(cfg.links) ? cfg.links.length : 0,
-          };
-        }),
         bases,
       });
 
@@ -174,7 +160,7 @@ function buildWorkbook(report: CampaignReport, campaignName: string, from: strin
   rows.push(SECTION_1_HEADER);
   for (const w of [...report.weeks, report.total]) {
     rows.push([
-      w.period, w.chats, w.contacts, w.delivered,
+      w.period, w.chats === null ? '—' : w.chats, w.contacts, w.delivered,
       w.anyReplies, w.targetReplies, w.blocks,
       w.conversion === null ? '—' : w.conversion,
     ]);

@@ -10,10 +10,20 @@ const RANGES: Record<string, number> = {
   '6h': 6 * 60 * 60 * 1000,
   '24h': 24 * 60 * 60 * 1000,
   '7d': 7 * 24 * 60 * 60 * 1000,
+  '30d': 30 * 24 * 60 * 60 * 1000,
 };
 
-// Cap to keep JSON payloads sane (~1 MB at ~200 bytes per row).
-const MAX_ROWS = 5_000;
+/**
+ * Потолки разные, потому что читатели разные.
+ *
+ * JSON уходит в модалку и рисуется в DOM — там пять тысяч строк уже предел
+ * читаемости, а больше просто вешает вкладку. Файл читают в редакторе, и за
+ * месяц у болтливого аккаунта строк набирается заметно больше пяти тысяч:
+ * обрезать выгрузку по тому же порогу значило бы отдать оператору файл, в
+ * котором молча нет половины истории.
+ */
+const MAX_ROWS_JSON = 5_000;
+const MAX_ROWS_TXT = 50_000;
 const PAGE_SIZE = 1_000;
 
 function slugify(name: string | null | undefined, fallback: string): string {
@@ -36,7 +46,7 @@ function formatTxtLine(row: { created_at: string; level: string; message: string
  * the worker writes account-tied lines (gramClient and campaignLoop both
  * prefix with `${session_name}:` or `Аккаунт ${session_name}: ...`).
  *
- * Query: ?range=6h|24h|7d&format=json|txt (default json, 24h)
+ * Query: ?range=6h|24h|7d|30d&format=json|txt (default json, 24h)
  *  - format=json → { items, range, since, truncated }
  *  - format=txt  → text/plain attachment (same shape as the campaign-level
  *                  /logs/export endpoint, for parity)
@@ -70,6 +80,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       if (aErr) return jsonError(aErr.message, 500);
       if (!account) return jsonError('Аккаунт не найден', 404);
 
+      const maxRows = format === 'txt' ? MAX_ROWS_TXT : MAX_ROWS_JSON;
       const sinceMs = Date.now() - rangeMs;
       const sinceIso = new Date(sinceMs).toISOString();
 
@@ -81,7 +92,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       let from = 0;
       const items: Array<{ created_at: string; level: string; message: string }> = [];
 
-      while (items.length < MAX_ROWS) {
+      while (items.length < maxRows) {
         const to = from + PAGE_SIZE - 1;
         const { data, error } = await auth.supabase
           .from('tg_outreach_logs')
@@ -97,14 +108,14 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
         for (const row of data) {
           items.push(row);
-          if (items.length >= MAX_ROWS) break;
+          if (items.length >= maxRows) break;
         }
 
         if (data.length < PAGE_SIZE) break;
         from += PAGE_SIZE;
       }
 
-      const truncated = items.length >= MAX_ROWS;
+      const truncated = items.length >= maxRows;
 
       if (format === 'txt') {
         const header =
@@ -112,7 +123,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
           `# account:  ${account.session_name} (${account.id})\n` +
           `# range:    ${rangeKey}  (since ${sinceIso})\n` +
           `# exported: ${new Date().toISOString()}\n` +
-          `# rows:     ${items.length}${truncated ? ` (TRUNCATED at MAX_ROWS=${MAX_ROWS})` : ''}\n` +
+          `# rows:     ${items.length}${truncated ? ` (TRUNCATED at MAX_ROWS=${maxRows})` : ''}\n` +
           `# ─────────────────────────────────────────────────────────────────────\n`;
 
         const body = header + items.map(formatTxtLine).join('');

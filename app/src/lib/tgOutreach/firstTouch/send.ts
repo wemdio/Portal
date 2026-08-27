@@ -15,6 +15,7 @@ import {
   cooldownUntilIso,
   writeAccountCooldown,
 } from '../accountCooldown';
+import { classifyRestriction, describeRestriction } from '../restriction';
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
@@ -86,6 +87,8 @@ async function parkIfFlood(args: {
   account: { id: string; cooldown_until?: string | null };
   hours: number | undefined;
   reason: string;
+  /** Полный текст ошибки Telegram — по нему видно, временное это или навсегда. */
+  rawError?: string;
   log: LogFn;
 }): Promise<boolean> {
   if (!args.hours || args.hours <= 0 || !isFloodLimitReason(args.reason)) return false;
@@ -96,9 +99,37 @@ async function parkIfFlood(args: {
     return false;
   }
   args.account.cooldown_until = until;
+
+  /**
+   * Диагноз пишем и в карточку аккаунта, а не только в ленту журнала.
+   *
+   * Журнал за сутки — это тысячи строк, и «Telegram ограничил аккаунт» тонет в
+   * них к утру. А вопрос «что с этим номером» оператор задаёт, глядя на список
+   * аккаунтов, — там до этой правки не было ничего, кроме кулдауна без причины.
+   *
+   * Отдельно важно, что временное ограничение НЕ пишется как `banned`: спам-блок
+   * проходит сам, и списывать из-за него живой номер незачем.
+   */
+  const restriction = classifyRestriction(args.rawError ?? args.reason, Date.now());
+  const humanDiagnosis = restriction
+    ? describeRestriction(restriction)
+    : `ВРЕМЕННОЕ ограничение (${args.reason}) — Telegram придержал отправку. Пройдёт само.`;
+
+  const { error: diagErr } = await args.db
+    .from('tg_outreach_accounts')
+    .update({
+      check_status: restriction?.kind === 'permanent' ? 'banned' : 'restricted',
+      check_detail: humanDiagnosis.slice(0, 500),
+      checked_at: new Date().toISOString(),
+    })
+    .eq('id', args.account.id);
+  if (diagErr) {
+    args.log('warning', `Не смог записать диагноз ограничения в карточку аккаунта — ${diagErr.message}`);
+  }
+
   args.log(
     'warning',
-    `Первое касание остановлено: Telegram ограничил аккаунт (${args.reason}). ` +
+    `Первое касание остановлено. ${humanDiagnosis} ` +
       `Аккаунт на паузе до ${cooldownLabel(until)} (${args.hours}ч), следующий круг его не возьмёт. ` +
       `Контакты остаются в очереди, попытки им не засчитываем.`,
   );
@@ -327,12 +358,21 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
             account,
             hours: args.cooldownHours,
             reason: failure.reason,
+            rawError: msg,
             log,
           });
         if (!parked) {
+          // Пауза не настроена — но сказать, временное это или навсегда, всё
+          // равно обязаны: иначе оператор читает «Telegram ограничил аккаунт»
+          // и не знает, ждать ему или менять номер.
+          const restriction = failure.kind === 'account_limited'
+            ? classifyRestriction(msg, Date.now())
+            : null;
           const cause = failure.kind === 'transport_down'
             ? `обрыв связи или прокси (${failure.reason})`
-            : `Telegram ограничил аккаунт (${failure.reason})`;
+            : restriction
+              ? describeRestriction(restriction)
+              : `Telegram ограничил аккаунт (${failure.reason})`;
           log(
             'warning',
             `Первое касание остановлено на резолве юзернейма: ${cause}. ` +
@@ -388,12 +428,21 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
             account,
             hours: args.cooldownHours,
             reason: failure.reason,
+            rawError: msg,
             log,
           });
         if (!parked) {
+          // Пауза не настроена — но сказать, временное это или навсегда, всё
+          // равно обязаны: иначе оператор читает «Telegram ограничил аккаунт»
+          // и не знает, ждать ему или менять номер.
+          const restriction = failure.kind === 'account_limited'
+            ? classifyRestriction(msg, Date.now())
+            : null;
           const cause = failure.kind === 'transport_down'
             ? `обрыв связи или прокси (${failure.reason})`
-            : `Telegram ограничил аккаунт (${failure.reason})`;
+            : restriction
+              ? describeRestriction(restriction)
+              : `Telegram ограничил аккаунт (${failure.reason})`;
           log(
             'warning',
             `Первое касание остановлено: ${cause}. ` +

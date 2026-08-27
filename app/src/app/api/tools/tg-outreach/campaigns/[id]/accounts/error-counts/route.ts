@@ -11,6 +11,7 @@ const RANGES: Record<string, number> = {
   '6h': 6 * 60 * 60 * 1000,
   '24h': 24 * 60 * 60 * 1000,
   '7d': 7 * 24 * 60 * 60 * 1000,
+  '30d': 30 * 24 * 60 * 60 * 1000,
 };
 
 // Hard ceiling on rows we scan. A campaign with 25 accounts × ~12 errors/account/day

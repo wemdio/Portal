@@ -11,13 +11,28 @@ export const dynamic = 'force-dynamic';
 
 type Ctx = { params: Promise<{ id: string }> };
 
+/** Кто заказал проверку — то же правило, что у передачи лида. */
+function operatorName(user: { email?: string | null; user_metadata?: Record<string, unknown> | null }): string {
+  const meta = user.user_metadata ?? {};
+  const named = [meta.full_name, meta.name, meta.username].find(
+    (v): v is string => typeof v === 'string' && v.trim() !== '',
+  );
+  return named ?? user.email ?? 'сотрудник портала';
+}
+
 /**
  * Проверить, жив ли аккаунт и кто в нём ещё сидит.
  *
- * Гейт по статусу кампании тот же, что у профиля: пока идёт рассылка или
- * прогрев, аккаунт занят воркером, и второе подключение через мобильный прокси —
- * лишний повод для сбоя. Проверять на ходу всё равно бессмысленно: работающий
- * аккаунт по определению жив.
+ * Два пути, и выбирает между ними состояние кампании.
+ *
+ * Кампания остановлена — подключаемся отсюда и отвечаем результатом сразу.
+ *
+ * Кампания работает — не подключаемся вовсе, а ставим заказ в очередь
+ * (`check_requested_at`). Сессию держит воркер, и второе подключение к ней даёт
+ * AUTH_KEY_DUPLICATED, то есть выключенный аккаунт. Раньше здесь стоял простой
+ * отказ «остановите кампанию» — и оператор, разумеется, её не останавливал, а
+ * «жив/не жив» на экране устаревал неделями. Теперь проверку выполнит воркер
+ * своим уже открытым соединением, дойдя до аккаунта в круге.
  */
 export async function POST(req: NextRequest, ctx: Ctx) {
   return withToolTrace(
@@ -41,11 +56,34 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         .eq('id', account.campaign_id)
         .maybeSingle();
       const status = (campaign as { status?: string } | null)?.status;
-      if (status && status !== 'stopped' && status !== 'error') {
-        return jsonError(
-          `Кампания сейчас в состоянии «${status}». Остановите её, чтобы проверить аккаунты: во время работы они заняты.`,
-          409,
-        );
+      /**
+       * Занят воркером только включённый аккаунт: выключенные круг не берёт
+       * вовсе. А диагностировать чаще всего нужно именно их — аккаунт и
+       * выключился обычно потому, что с ним что-то не так. Поэтому такие
+       * проверяем сразу, не дожидаясь круга, который до них никогда не дойдёт.
+       */
+      const busyWithWorker = account.is_active
+        && status !== undefined && status !== 'stopped' && status !== 'error';
+      if (busyWithWorker) {
+        // Уже стоит в очереди — второй заказ ничего не меняет, но отвечать
+        // «поставлено» на каждое нажатие честнее, чем ошибкой: результат для
+        // оператора один и тот же.
+        const requestedAt = account.check_requested_at ?? new Date().toISOString();
+        if (!account.check_requested_at) {
+          const { error: queueErr } = await auth.supabase
+            .from('tg_outreach_accounts')
+            .update({
+              check_requested_at: requestedAt,
+              check_requested_by_name: operatorName(auth.user),
+            })
+            .eq('id', id);
+          if (queueErr) return jsonError(queueErr.message, 500);
+        }
+        return NextResponse.json({
+          queued: true,
+          requested_at: requestedAt,
+          detail: 'Проверка поставлена в очередь: её выполнит рассылка, когда дойдёт до этого аккаунта в круге (обычно несколько минут). Останавливать кампанию не нужно.',
+        });
       }
 
       const save = async (result: {
@@ -63,6 +101,9 @@ export async function POST(req: NextRequest, ctx: Ctx) {
             check_detail: result.detail.slice(0, 500),
             checked_at: new Date().toISOString(),
             other_sessions: result.other_sessions ?? [],
+            // Заказ на проверку снимаем: он выполнен, пусть и не воркером.
+            check_requested_at: null,
+            check_requested_by_name: null,
             ...(result.tg_user_id != null ? { tg_user_id: result.tg_user_id } : {}),
             ...(result.tg_username != null ? { tg_username: result.tg_username } : {}),
             // Телефона в tdata нет — он приходит только от Telegram, и это
@@ -105,7 +146,12 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       }
 
       try {
-        const result = await checkAccount(client);
+        // К @SpamBot идём только если аккаунт уже числится ограниченным: у
+        // здорового ответ предсказуем и не стоит лишнего исходящего сообщения
+        // с боевого номера.
+        const result = await checkAccount(client, {
+          askSpamBotWhenRestricted: account.check_status === 'restricted',
+        });
         await save(result);
         return NextResponse.json(result);
       } finally {

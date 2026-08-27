@@ -16,6 +16,18 @@ export async function GET(req: NextRequest) {
       if (!campaignId) return jsonError('campaign_id обязателен', 400);
 
       const status = url.searchParams.get('status');
+      /**
+       * Поиск по собеседнику: никнейм или числовой id.
+       *
+       * Без него найти конкретного человека в кампании на несколько сотен
+       * диалогов можно было только листая страницы по тридцать штук. Ищем на
+       * сервере, а не в уже загруженной странице: искомый диалог почти всегда
+       * лежит не на ней.
+       *
+       * `@` и регистр съедаем: оператор копирует ник из Telegram как есть, а в
+       * базе он лежит без собачки.
+       */
+      const q = (url.searchParams.get('q') ?? '').trim().replace(/^@/, '');
       const canSendParam = url.searchParams.get('can_send');
       const isBotParam = url.searchParams.get('tg_is_bot');
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
@@ -36,6 +48,19 @@ export async function GET(req: NextRequest) {
       }
       if (isBotParam === 'true' || isBotParam === 'false') {
         query = query.eq('tg_is_bot', isBotParam === 'true');
+      }
+      if (q) {
+        // Запятая разделяет условия в `or`, а внутри неё она сломала бы разбор
+        // фильтра. Ник с запятой невозможен, поэтому просто вырезаем.
+        const safe = q.replace(/[,()]/g, '');
+        if (safe) {
+          const digits = /^\d+$/.test(safe);
+          // Числовой ввод ищем и как id, и как часть ника: у части контактов
+          // ник — это номер телефона.
+          query = digits
+            ? query.or(`tg_username.ilike.%${safe}%,tg_user_id.eq.${safe}`)
+            : query.ilike('tg_username', `%${safe}%`);
+        }
       }
 
       const { data, error, count } = await query;

@@ -5,7 +5,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
 
-type BaseRow = { id: string; name: string; notes: string; created_at: string; campaign_id: string | null };
+type BaseRow = { id: string; name: string; notes: string; source_chats: string; created_at: string; campaign_id: string | null };
 
 /** Счётчики по состояниям — то, ради чего оператор открывает список. */
 async function withCounts(supabase: SupabaseClient, bases: BaseRow[]) {
@@ -49,14 +49,14 @@ export async function GET(req: NextRequest) {
 
       const { data: bases, error } = await auth.supabase
         .from('tg_outreach_bases')
-        .select('id, name, notes, created_at, campaign_id')
+        .select('id, name, notes, source_chats, created_at, campaign_id')
         .eq('campaign_id', campaignId)
         .order('created_at', { ascending: false });
       if (error) return jsonError(error.message, 500);
 
       const { data: orphanRows, error: oErr } = await auth.supabase
         .from('tg_outreach_bases')
-        .select('id, name, notes, created_at, campaign_id')
+        .select('id, name, notes, source_chats, created_at, campaign_id')
         .is('campaign_id', null)
         .order('created_at', { ascending: false });
       if (oErr) return jsonError(oErr.message, 500);
@@ -77,7 +77,7 @@ export async function POST(req: NextRequest) {
       if ('error' in auth) return auth.error;
 
       const body = (await req.json().catch(() => null)) as
-        { name?: string; notes?: string; campaign_id?: string } | null;
+        { name?: string; notes?: string; source_chats?: string; campaign_id?: string } | null;
       const name = body?.name?.trim();
       if (!name) return jsonError('Укажите название базы', 400);
 
@@ -93,6 +93,7 @@ export async function POST(req: NextRequest) {
           campaign_id: campaignId,
           name,
           notes: body?.notes?.trim() ?? '',
+          source_chats: body?.source_chats?.trim() ?? '',
         })
         .select()
         .single();

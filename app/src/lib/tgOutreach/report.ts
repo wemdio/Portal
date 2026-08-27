@@ -14,6 +14,9 @@
  * Точность привязки к неделе разная, и это честно вынесено в тип:
  *   - доставлено, блокировки, подобранные контакты — по своей метке времени,
  *     считаются точно;
+ *   - обработанные чаты — уникальные источники контактов, загруженных в базы
+ *     этой кампании за неделю; точно, но зависит от того, что источник вообще
+ *     указан в файле выгрузки;
  *   - любые ответы — по метке первого входящего сообщения в диалоге, точно;
  *   - целевые ответы — по последнему сообщению диалога: момент, когда сработал
  *     триггер, в базе не сохраняется, и это ближайшее к нему время.
@@ -43,14 +46,31 @@ export interface ReportContact {
   raw: Record<string, unknown> | null;
 }
 
-export interface ReportParserJob {
-  completed_at: string | null;
-  links_count: number;
-}
-
 export interface ReportBase {
   id: string;
   name: string;
+  /**
+   * Чаты, из которых собрана эта гипотеза, — как их ввёл оператор: по одной
+   * ссылке в строке. Именно отсюда берутся «обработанные чаты» и «Канал/чат»:
+   * в файле базы источника нет, а вводить его на каждую из трёхсот строк ради
+   * трёх-четырёх чатов никто не станет.
+   */
+  source_chats?: string | null;
+}
+
+/** Ссылки из поля базы: по одной в строке, пустые и повторы убираем. */
+export function parseSourceChats(value: string | null | undefined): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const line of (value ?? '').split(/[\n,;]+/)) {
+    const chat = line.trim();
+    if (!chat) continue;
+    const key = sourceChatKey(chat);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(chat);
+  }
+  return out;
 }
 
 export interface ReportInput {
@@ -61,7 +81,6 @@ export interface ReportInput {
   tzOffsetHours?: number;
   dialogs: ReportDialog[];
   contacts: ReportContact[];
-  parserJobs: ReportParserJob[];
   bases: ReportBase[];
 }
 
@@ -70,7 +89,12 @@ export interface ReportWeekRow {
   period: string;
   fromIso: string;
   toIso: string;
-  chats: number;
+  /**
+   * Уникальных чатов-источников за неделю. null — источник не указан ни у
+   * одного контакта, и в отчёте это прочерк: ноль читался бы как «чаты не
+   * обрабатывали», хотя на самом деле их просто не записали в файл.
+   */
+  chats: number | null;
   contacts: number;
   delivered: number;
   anyReplies: number;
@@ -98,8 +122,8 @@ export interface ReportOfferRow {
   /** Заполняется руками. */
   offerNumber: '';
   offer: string;
-  /** Заполняется руками. */
-  channel: '';
+  /** Чаты-источники гипотезы. Пусто — их не заполнили у базы. */
+  channel: string;
   /** Заполняется руками. */
   language: '';
   /** Заполняется руками. */
@@ -130,6 +154,36 @@ function ts(value: string | null | undefined): number | null {
 /** Юзернейм как ключ сверки: без «@» и в нижнем регистре. */
 export function usernameKey(value: string | null | undefined): string {
   return (value ?? '').trim().replace(/^@/, '').toLowerCase();
+}
+
+/**
+ * Чат, из которого взяли контакт, — из сырой строки файла выгрузки.
+ *
+ * Название колонки у скраперов разное, поэтому пробуем три известных подряд.
+ * Пустая строка значит «в файле источника нет», и это не то же самое, что
+ * «источников не было»: на этой разнице держится прочерк в колонке отчёта.
+ */
+export function sourceChatOf(raw: Record<string, unknown> | null | undefined): string {
+  const value = raw?.['Ссылка на источник']
+    ?? raw?.['Название источника']
+    ?? raw?.['Источник']
+    ?? '';
+  return String(value).trim();
+}
+
+/**
+ * Ключ сверки чатов: у одного и того же чата в выгрузке встречаются и ссылка
+ * с «https://t.me/», и голый юзернейм. Без нормализации один чат считался бы
+ * за два, и «обработано чатов» в отчёте по договору оказалось бы завышено.
+ */
+export function sourceChatKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^t\.me\//, '')
+    .replace(/^@/, '')
+    .replace(/\/+$/, '');
 }
 
 /**
@@ -185,12 +239,38 @@ function leadAt(dialog: ReportDialog): number | null {
 }
 
 function countWindow(input: ReportInput, fromMs: number, toMs: number) {
-  const chats = input.parserJobs
-    .filter((j) => inRange(ts(j.completed_at), fromMs, toMs))
-    .reduce((sum, j) => sum + (Number(j.links_count) || 0), 0);
+  /**
+   * Обработанные чаты считаем по самим контактам кампании, а не по задачам
+   * парсера. Задачи к кампании не привязаны — у них есть только владелец, и в
+   * отчёт клиента попадали чаты, которые специалист парсил в тот же период для
+   * кого-то другого. Контакт же всегда лежит в базе конкретной кампании и несёт
+   * ссылку на свой чат-источник.
+   */
+  const windowContacts = input.contacts
+    .filter((c) => inRange(ts(c.created_at), fromMs, toMs));
 
-  const contacts = input.contacts
-    .filter((c) => inRange(ts(c.created_at), fromMs, toMs)).length;
+  const chatKeys = new Set<string>();
+  for (const c of windowContacts) {
+    const key = sourceChatKey(sourceChatOf(c.raw));
+    if (key) chatKeys.add(key);
+  }
+  /**
+   * Чаты, объявленные у самих баз. Считаем только те базы, в которые за это
+   * окно грузили контакты: гипотеза, заведённая в мае, к неделе августа
+   * отношения не имеет, и её чаты в этой строке отчёта были бы приписками.
+   */
+  const loadedBaseIds = new Set(windowContacts.map((c) => c.base_id));
+  for (const base of input.bases) {
+    if (!loadedBaseIds.has(base.id)) continue;
+    for (const chat of parseSourceChats(base.source_chats)) {
+      chatKeys.add(sourceChatKey(chat));
+    }
+  }
+  // Контакты есть, а источников нет — прочерк: колонку заполнят руками, а не
+  // сдадут клиенту ноль, который читается как «не работали».
+  const chats = chatKeys.size > 0 ? chatKeys.size : (windowContacts.length ? null : 0);
+
+  const contacts = windowContacts.length;
 
   const delivered = input.contacts
     .filter((c) => inRange(ts(c.sent_at), fromMs, toMs)).length;
@@ -258,10 +338,7 @@ export function buildCampaignReport(input: ReportInput): CampaignReport {
     .sort((a, b) => (leadAt(a) ?? 0) - (leadAt(b) ?? 0))
     .map((d) => {
       const contact = contactByUsername.get(usernameKey(d.tg_username));
-      const raw = contact?.raw ?? {};
-      const source = String(
-        raw['Ссылка на источник'] ?? raw['Название источника'] ?? raw['Источник'] ?? '',
-      );
+      const source = sourceChatOf(contact?.raw);
       return {
         sourceChat: source,
         criterion: '' as const,
@@ -296,7 +373,7 @@ export function buildCampaignReport(input: ReportInput): CampaignReport {
     return {
       offerNumber: '' as const,
       offer: base.name,
-      channel: '' as const,
+      channel: parseSourceChats(base.source_chats).join('\n'),
       language: '' as const,
       status: '' as const,
       deadline: '' as const,

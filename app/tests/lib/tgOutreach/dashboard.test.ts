@@ -237,7 +237,7 @@ describe('цифры сходятся с отчётом по договору', 
       dialogs, contacts: contacts.map((c) => ({
         base_id: 'b1', username: 'u', status: 'sent', created_at: c.created_at, sent_at: c.sent_at, raw: null,
       })),
-      parserJobs: [], bases: [{ id: 'b1', name: 'база' }],
+      bases: [{ id: 'b1', name: 'база' }],
     });
 
     const byKey = Object.fromEntries(dash.funnel.map((s) => [s.key, s.value]));

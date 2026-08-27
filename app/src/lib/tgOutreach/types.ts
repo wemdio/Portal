@@ -232,6 +232,14 @@ export interface OutreachAccount {
   check_status?: string | null;
   check_detail?: string | null;
   checked_at?: string | null;
+  /**
+   * Проверка, заказанная на работающей кампании (миграция 20260827_0001).
+   * Подключаться из портала к занятой воркером сессии нельзя, поэтому нажатие
+   * только ставит отметку, а выполняет проверку воркер своим соединением в
+   * ближайшем круге. NULL — заказа нет.
+   */
+  check_requested_at?: string | null;
+  check_requested_by_name?: string | null;
   other_sessions?: Array<{
     device: string;
     platform: string;
