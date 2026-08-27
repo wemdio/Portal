@@ -154,30 +154,70 @@ function withJsonModeHint(messages: LLMMessage[]): LLMMessage[] {
   ];
 }
 
+/**
+ * Статусы, которые стоит ретраить: 408 (таймаут апстрима), 425/429 (лимиты),
+ * 5xx (провайдер временно недоступен — 502/503/504). Остальные 4xx (ключ,
+ * схема, баланс) — постоянные, повторять бессмысленно.
+ */
+const RAW_RETRYABLE_STATUSES = new Set<number>([408, 425, 429, 500, 502, 503, 504]);
+/** Сколько повторных попыток после первого вызова (итого 4). */
+const RAW_MAX_RETRIES = 3;
+/** База экспоненциального бэкоффа: 2с → 4с → 8с. */
+const RAW_RETRY_BASE_MS = 2000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'AbortError';
+}
+
 async function rawCall(
   messages: LLMMessage[],
   model: string,
   maxTokens: number,
   jsonMode: boolean,
 ): Promise<{ text: string; response: RequestyResponse }> {
-  const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getApiKey()}` },
-    body: JSON.stringify({
-      model,
-      messages: jsonMode ? withJsonModeHint(messages) : messages,
-      max_tokens: maxTokens,
-      ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
-    }),
-    ...(activeJobSignal ? { signal: activeJobSignal } : {}),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Requesty ${res.status}: ${text.slice(0, 300)}`);
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= RAW_MAX_RETRIES; attempt++) {
+    if (attempt > 0) await sleep(RAW_RETRY_BASE_MS * 2 ** (attempt - 1));
+
+    let res: Response;
+    try {
+      res = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getApiKey()}` },
+        body: JSON.stringify({
+          model,
+          messages: jsonMode ? withJsonModeHint(messages) : messages,
+          max_tokens: maxTokens,
+          ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+        }),
+        ...(activeJobSignal ? { signal: activeJobSignal } : {}),
+      });
+    } catch (err) {
+      // Отмена задачи (AbortSignal) — пробрасываем сразу, бэкоффы не держим.
+      if (isAbortError(err)) throw err;
+      lastError = err instanceof Error ? err : new Error(String(err));
+      continue;
+    }
+
+    if (res.ok) {
+      const response = (await res.json()) as RequestyResponse;
+      const text = response.choices?.[0]?.message?.content ?? '';
+      return { text, response };
+    }
+
+    const status = res.status;
+    const body = await res.text().catch(() => '');
+    const err = new Error(`Requesty ${status}: ${body.slice(0, 300)}`);
+    if (status < 500 && !RAW_RETRYABLE_STATUSES.has(status)) throw err;
+    lastError = err;
   }
-  const response = (await res.json()) as RequestyResponse;
-  const text = response.choices?.[0]?.message?.content ?? '';
-  return { text, response };
+
+  throw lastError ?? new Error('Requesty: неизвестная ошибка после ретраев');
 }
 
 function usageOf(response: RequestyResponse): { promptTokens: number; completionTokens: number; tokensUsed: number } {
