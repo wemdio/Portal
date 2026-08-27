@@ -774,6 +774,7 @@ const VISIT_STAGE_NAMES: Record<VeStage, string> = {
   base_analyze: 'Анализ базы',
   base_collect: 'Авто-сборка базы',
   template: 'Сборка шаблона',
+  segmentation_audit: 'Проверяем сегментацию',
   dossier: 'Сборка досье',
 };
 

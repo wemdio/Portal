@@ -52,18 +52,47 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       }
 
       const now = new Date().toISOString();
+      // Audit + its worker job transition in one DB transaction. The SQL
+      // function also catches the race where the stage has already persisted
+      // ready but its job is still running: the returned job id authorizes
+      // cancelling that ready audit instead of leaving a zombie snapshot.
+      const { data: segmentationCancelled, error: segmentationCancelError } =
+        await supabaseAdmin.rpc('ve_cancel_segmentation_audits', {
+          p_project_id: id,
+          p_now: now,
+          p_error: 'Отменено пользователем',
+        });
+      if (segmentationCancelError) {
+        await logError(
+          'tools.vertical-engine-v2.cancel.segmentation_failed',
+          segmentationCancelError,
+          { userId, projectId: id },
+        );
+        return jsonError(segmentationCancelError.message, 500);
+      }
+      const segmentationCounts =
+        segmentationCancelled && typeof segmentationCancelled === 'object'
+          ? (segmentationCancelled as { jobs?: unknown; audits?: unknown })
+          : {};
+      const segmentationJobs =
+        typeof segmentationCounts.jobs === 'number' ? segmentationCounts.jobs : 0;
+      const audits =
+        typeof segmentationCounts.audits === 'number' ? segmentationCounts.audits : 0;
+
       const { data: cancelledJobs, error: jobsErr } = await supabaseAdmin
         .from('ve_jobs')
         .update({ status: 'cancelled', finished_at: now, updated_at: now })
         .eq('project_id', id)
+        .neq('stage', 'segmentation_audit')
         .in('status', ['pending', 'running'])
         .select('id');
       if (jobsErr) {
         await logError('tools.vertical-engine-v2.cancel.jobs_failed', jobsErr, { userId, projectId: id });
         return jsonError(jobsErr.message, 500);
       }
-      const cancelled = (cancelledJobs ?? []).length;
-      if (cancelled === 0) {
+      const cancelled = (cancelledJobs ?? []).length + segmentationJobs;
+
+      if (cancelled === 0 && audits === 0) {
         return jsonError('Нет активных задач — отменять нечего', 409);
       }
 
@@ -93,9 +122,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         userId,
         projectId: id,
         cancelled,
+        audits,
       });
 
-      return NextResponse.json({ ok: true, cancelled });
+      return NextResponse.json({ ok: true, cancelled, cancelled_audits: audits });
     },
   );
 }

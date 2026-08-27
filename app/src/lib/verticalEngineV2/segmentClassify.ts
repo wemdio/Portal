@@ -39,6 +39,27 @@ export interface SegmentClassifyInput {
   log?: (msg: string) => void;
 }
 
+export interface SegmentClassifyUsage {
+  tokensUsed: number;
+  costUsd: number;
+}
+
+/**
+ * Полный результат классификации для предзапускного аудита.
+ *
+ * В assignments присутствует только явный ответ модели по строке:
+ * string — каноническое условие сегмента, null — осознанный default.
+ * Отсутствующий/невалидный ответ и строка упавшего батча перечисляются в
+ * unclassifiedRows и никогда не маскируются под default.
+ */
+export interface DetailedSegmentClassificationResult {
+  assignments: Map<number, string | null>;
+  unclassifiedRows: number[];
+  failedBatches: number;
+  totalBatches: number;
+  usage: SegmentClassifyUsage;
+}
+
 function truncateCell(value: unknown): string {
   const s = String(value ?? '').trim();
   return s.length > MAX_CELL_CHARS ? `${s.slice(0, MAX_CELL_CHARS)}…` : s;
@@ -78,16 +99,27 @@ function buildClassifyMessages(
 }
 
 /**
- * Классифицировать строки. Возвращает Map «индекс строки во входном массиве →
- * условие сегмента (дословное)». Строки без уверенного матча в Map не
- * попадают (= дефолтный текст). null — системный сбой (все батчи упали).
+ * Детальная классификация строк для аудита: различает явный default
+ * (`segment: null`) и отсутствие достоверного ответа.
  */
-export async function classifyBaseRowsIntoSegments(
+export async function classifyBaseRowsIntoSegmentsDetailed(
   input: SegmentClassifyInput,
-): Promise<Map<number, string> | null> {
+): Promise<DetailedSegmentClassificationResult> {
   const { rows, segments, language, log } = input;
   const cleaned = [...new Set(segments.map((s) => s.trim()).filter(Boolean))];
-  if (rows.length === 0 || cleaned.length === 0) return new Map();
+  const emptyResult = (): DetailedSegmentClassificationResult => ({
+    assignments: new Map(),
+    unclassifiedRows: [],
+    failedBatches: 0,
+    totalBatches: 0,
+    usage: { tokensUsed: 0, costUsd: 0 },
+  });
+  if (rows.length === 0) return emptyResult();
+  if (cleaned.length === 0) {
+    const result = emptyResult();
+    rows.forEach((_, index) => result.assignments.set(index, null));
+    return result;
+  }
 
   const canonical = new Map(cleaned.map((s) => [s.toLowerCase(), s]));
 
@@ -105,7 +137,9 @@ export async function classifyBaseRowsIntoSegments(
     batches.push({ start, items });
   }
 
-  const result = new Map<number, string>();
+  const assignments = new Map<number, string | null>();
+  const unclassified = new Set(rows.map((_, index) => index));
+  const usage: SegmentClassifyUsage = { tokensUsed: 0, costUsd: 0 };
   let failedBatches = 0;
   for (let wave = 0; wave < batches.length; wave += CONCURRENCY) {
     const group = batches.slice(wave, wave + CONCURRENCY);
@@ -118,13 +152,23 @@ export async function classifyBaseRowsIntoSegments(
             // Роль gate: присвоение сегмента — классификация, мини-модель.
             { model: getVeModel('gate'), maxTokens: 4096 },
           );
+          usage.tokensUsed += llm.tokensUsed;
+          usage.costUsd += llm.costUsd;
           const validRows = new Set(batch.items.map((it) => it.index));
           for (const a of llm.data.assignments) {
             if (!validRows.has(a.row)) continue;
+            if (a.segment === null) {
+              assignments.set(a.row, null);
+              unclassified.delete(a.row);
+              continue;
+            }
             const key = a.segment?.trim().toLowerCase();
             if (!key) continue;
             const condition = canonical.get(key);
-            if (condition) result.set(a.row, condition);
+            if (condition) {
+              assignments.set(a.row, condition);
+              unclassified.delete(a.row);
+            }
           }
         } catch (e) {
           failedBatches += 1;
@@ -136,7 +180,33 @@ export async function classifyBaseRowsIntoSegments(
     );
   }
 
-  if (failedBatches === batches.length) return null;
+  return {
+    assignments,
+    unclassifiedRows: [...unclassified].sort((a, b) => a - b),
+    failedBatches,
+    totalBatches: batches.length,
+    usage,
+  };
+}
+
+/**
+ * Backward-compatible контракт запуска: string-назначения остаются в Map,
+ * явный default/неполный ответ — отсутствуют; полный системный сбой — null.
+ */
+export async function classifyBaseRowsIntoSegments(
+  input: SegmentClassifyInput,
+): Promise<Map<number, string> | null> {
+  const detailed = await classifyBaseRowsIntoSegmentsDetailed(input);
+  if (
+    detailed.totalBatches > 0 &&
+    detailed.failedBatches === detailed.totalBatches
+  ) {
+    return null;
+  }
+  const result = new Map<number, string>();
+  for (const [row, segment] of detailed.assignments) {
+    if (segment !== null) result.set(row, segment);
+  }
   return result;
 }
 

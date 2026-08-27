@@ -23,7 +23,7 @@
  */
 
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, startWorkerHeartbeat } from './_shared';
-import { runVeStage } from '@/lib/verticalEngineV2/stages';
+import { markSegmentationAuditFailed, runVeStage } from '@/lib/verticalEngineV2/stages';
 import { setVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
 import { normalizeVeMarket } from '@/lib/verticalEngineV2/market';
 import {
@@ -31,6 +31,7 @@ import {
   maxAttemptsFor,
   retryRunAfter,
 } from '@/lib/verticalEngineV2/jobRetry';
+import { transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
 import type { VeJob, VeStage } from '@/lib/verticalEngineV2/types';
 
 const WORKER_ID = `vertical-engine-v2-${process.pid}`;
@@ -239,7 +240,7 @@ async function handleJob(job: VeJob) {
     return;
   }
 
-  await db
+  const { data: completed, error: completeError } = await db
     .from('ve_jobs')
     .update({
       status: 'done',
@@ -250,7 +251,25 @@ async function handleJob(job: VeJob) {
       cost_usd: Number(job.cost_usd ?? 0) + costUsd,
       updated_at: new Date().toISOString(),
     })
-    .eq('id', job.id);
+    .eq('id', job.id)
+    .eq('status', 'running')
+    .select('id')
+    .maybeSingle();
+  if (completeError) throw new Error(`ve_jobs complete: ${completeError.message}`);
+  if (!completed) {
+    await db
+      .from('ve_jobs')
+      .update({
+        tokens_used: (job.tokens_used ?? 0) + tokensUsed,
+        cost_usd: Number(job.cost_usd ?? 0) + costUsd,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', job.id)
+      .eq('status', 'cancelled');
+    await accumulateProjectUsage(job.project_id, tokensUsed, costUsd);
+    log('info', `Job ${job.id} (${job.stage}) was cancelled before completion (+${tokensUsed} tok)`);
+    return;
+  }
 
   await accumulateProjectUsage(job.project_id, tokensUsed, costUsd);
   await enqueueNextResearchStage(job);
@@ -277,19 +296,29 @@ async function failJob(job: VeJob, err: unknown) {
   const finalFail = nextAttempts >= attemptCap;
   log('error', `Job ${job.id} (${job.stage}) failed (attempt ${nextAttempts}/${attemptCap}${retryable ? ', retryable' : ''}): ${msg}`);
 
-  await db
-    .from('ve_jobs')
-    .update({
-      status: finalFail ? 'failed' : 'pending',
-      attempts: nextAttempts,
-      error: msg.slice(0, 500),
-      finished_at: finalFail ? new Date().toISOString() : null,
-      // Транзиентные ошибки пережидаем с бэкоффом (run_after в будущем), чтобы
-      // провайдер успел восстановиться; постоянные клеймим сразу, как раньше.
-      run_after: retryRunAfter(nextAttempts, retryable),
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', job.id);
+  // Release the active-audit slot before the generic job transition. If the
+  // process dies between these writes, a recovered old job sees terminal
+  // audit state and cannot repeat the LLM classification.
+  if (finalFail && job.stage === 'segmentation_audit') {
+    await markSegmentationAuditFailed(db, job, err);
+  }
+
+  const transition = await transitionVeJobFailure(db, {
+    jobId: job.id,
+    status: finalFail ? 'failed' : 'pending',
+    attempts: nextAttempts,
+    error: msg.slice(0, 500),
+    finishedAt: finalFail ? new Date().toISOString() : null,
+    // Транзиентные ошибки пережидаем с бэкоффом (run_after в будущем), чтобы
+    // провайдер успел восстановиться; постоянные клеймим сразу, как раньше.
+    runAfter: retryRunAfter(nextAttempts, retryable),
+    updatedAt: new Date().toISOString(),
+  });
+  if (transition.error) throw new Error(`ve_jobs fail transition: ${transition.error}`);
+  if (!transition.transitioned) {
+    log('info', `Job ${job.id} (${job.stage}) cancellation won the failure transition`);
+    return;
+  }
 
   // Финальный фейл research-стадии валит весь research-пайплайн проекта.
   if (finalFail && RESEARCH_STAGES.has(job.stage)) {
@@ -324,6 +353,7 @@ async function failJob(job: VeJob, err: unknown) {
         .eq('status', 'collecting');
     }
   }
+
 }
 
 async function pollOnce(): Promise<boolean> {

@@ -9,11 +9,7 @@
 
 import { useCallback, useMemo, useState, type JSX } from 'react';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
-import {
-  renderTemplatePreview,
-  tokenizePreviewText,
-  type VePreviewToken,
-} from '@/lib/verticalEngineV2/renderPreview';
+import { renderTemplatePreview, type VePreviewToken } from '@/lib/verticalEngineV2/renderPreview';
 import {
   VE_LAUNCH_MAX_LEADS,
   parseLaunchInfo,
@@ -23,6 +19,11 @@ import {
 import { VE_API, veEngineCall, veEnginePost, type VeBaseSummary, type VeJobSummary } from '../api';
 import { HE, StatusDot } from '../design';
 import { Badge, OperatorText, StatusBox, formatDate } from '../ui';
+import {
+  SegmentationAuditPanel,
+  useSegmentationAudit,
+  type SegmentationAuditController,
+} from './SegmentationAuditPanel';
 
 const TH_CLASS = 'px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-gray-500';
 
@@ -76,30 +77,42 @@ function dedupOperatorNames(names: string[]): string[] {
  * где янтарным был сам {{operator}}), запасной текст unmatched-операторов —
  * фиолетовый, неразрешённые операторы — красные.
  */
-function PreviewTokens({ tokens, className }: { tokens: VePreviewToken[]; className?: string }) {
+function PreviewTokens({
+  tokens,
+  className,
+  plainText,
+}: {
+  tokens: VePreviewToken[];
+  className?: string;
+  /** Цельная фраза для screen reader; визуальные токены остаются подсвеченными. */
+  plainText?: string;
+}) {
+  const tokenNodes = tokens.map((t, i) =>
+    t.kind === 'value' ? (
+      <mark key={i} className="rounded bg-amber-100 px-0.5 text-amber-800">
+        {t.text}
+      </mark>
+    ) : t.kind === 'fallback' ? (
+      <mark
+        key={i}
+        title="Запасной текст: колонки нет"
+        className="rounded bg-violet-100 px-0.5 text-violet-800"
+      >
+        {t.text}
+      </mark>
+    ) : t.kind === 'unresolved' ? (
+      <mark key={i} className="rounded bg-red-100 px-0.5 font-mono text-[0.92em] text-red-700">
+        {t.text}
+      </mark>
+    ) : (
+      <span key={i}>{t.text}</span>
+    ),
+  );
+
   return (
     <span className={className}>
-      {tokens.map((t, i) =>
-        t.kind === 'value' ? (
-          <mark key={i} className="rounded bg-amber-100 px-0.5 text-amber-800">
-            {t.text}
-          </mark>
-        ) : t.kind === 'fallback' ? (
-          <mark
-            key={i}
-            title="Запасной текст: колонки нет"
-            className="rounded bg-violet-100 px-0.5 text-violet-800"
-          >
-            {t.text}
-          </mark>
-        ) : t.kind === 'unresolved' ? (
-          <mark key={i} className="rounded bg-red-100 px-0.5 font-mono text-[0.92em] text-red-700">
-            {t.text}
-          </mark>
-        ) : (
-          <span key={i}>{t.text}</span>
-        ),
-      )}
+      {plainText === undefined ? tokenNodes : <span className="sr-only">{plainText}</span>}
+      {plainText === undefined ? null : <span aria-hidden="true">{tokenNodes}</span>}
     </span>
   );
 }
@@ -107,7 +120,7 @@ function PreviewTokens({ tokens, className }: { tokens: VePreviewToken[]; classN
 /**
  * «Превью по лидам»: финальные письма глазами конкретных лидов из базы.
  * Строки базы лениво подгружаются при первом раскрытии; рендер — чистый,
- * через renderTemplatePreview (сегментные варианты не применяются).
+ * через renderTemplatePreview (сегментные варианты применяются по sample_segments).
  */
 function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseId: string }) {
   const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
@@ -178,24 +191,13 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
         {preview && preview.rows.length > 0 && sample ? (
           <div className="space-y-3">
             {preview.rows.map((leadRow, leadIdx) => {
-              const rawRow = sample.rows[leadIdx] ?? {};
               const unresolved = dedupOperatorNames(leadRow.letters.flatMap((l) => l.unresolved));
               const emptyVars = dedupOperatorNames(leadRow.letters.flatMap((l) => l.emptyVars));
               return (
                 <div key={leadIdx} className="rounded-lg border border-gray-200 bg-white p-3">
                   <p className="mb-2 text-xs font-semibold text-gray-700">{leadRow.rowLabel}</p>
                   <div className="space-y-2">
-                    {leadRow.letters.map((letter, letterIdx) => {
-                      // Токенизируем ИСХОДНЫЙ текст письма (индексы совпадают с
-                      // template.letters) — иначе позиции подстановок потеряны.
-                      const source = template.letters[letterIdx];
-                      const subjectTokens = tokenizePreviewText(
-                        source?.subject ?? '',
-                        mapping,
-                        rawRow,
-                      ).tokens;
-                      const bodyTokens = tokenizePreviewText(source?.body ?? '', mapping, rawRow).tokens;
-                      return (
+                    {leadRow.letters.map((letter, letterIdx) => (
                         <div
                           key={letterIdx}
                           className="rounded-md border border-gray-100 bg-gray-50/60 px-3 py-2"
@@ -210,17 +212,17 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
                             {letter.subject ? (
                               <>
                                 {' — '}
-                                <PreviewTokens tokens={subjectTokens} />
+                                <PreviewTokens tokens={letter.subjectTokens} />
                               </>
                             ) : null}
                           </p>
                           <PreviewTokens
-                            tokens={bodyTokens}
+                            tokens={letter.bodyTokens}
+                            plainText={letter.body}
                             className="mt-1 block whitespace-pre-wrap text-xs leading-relaxed text-gray-600"
                           />
                         </div>
-                      );
-                    })}
+                      ))}
                   </div>
                   {unresolved.length > 0 ? (
                     <p className="mt-2 text-[11px] text-red-500">
@@ -239,8 +241,8 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
             {hasVariants ? (
               <p className="text-[11px] text-gray-500">
                 {segmentsClassified
-                  ? 'Сегментные варианты подставлены по классификации сегмента — совпадает с запуском.'
-                  : 'Сегментные варианты не подставлены (классификация недоступна) — показан дефолтный текст писем.'}
+                  ? 'Сегментные варианты показаны по выборочной классификации превью. Финальную раскладку подтвердите в аудите перед запуском.'
+                  : 'Выборочная классификация недоступна — показан основной текст. Финальную раскладку подтвердите в аудите перед запуском.'}
               </p>
             ) : null}
           </div>
@@ -262,15 +264,23 @@ interface VeLaunchResponse {
   launch?: VeTemplateLaunchInfo;
   warnings?: string[];
   error?: string;
+  code?: string;
 }
 
 /**
  * Состояние запуска шаблона. Пока в launch_info шаблона есть запись — вместо
  * формы показываем её (один запуск на шаблон; повторный force — только через API).
  */
-function useTemplateLaunch(template: VeTemplate | null) {
+function useTemplateLaunch(
+  template: VeTemplate | null,
+  onSegmentationRejected: (phase: 'stale' | 'incomplete' | 'refresh') => void,
+) {
+  const templateLaunch = parseLaunchInfo(
+    (template as { launch_info?: unknown } | null)?.launch_info,
+  );
+  const reconciliationRequired = templateLaunch?.reconciliation_required === true;
   const [recorded, setRecorded] = useState<VeTemplateLaunchInfo | null>(() =>
-    parseLaunchInfo((template as { launch_info?: unknown } | null)?.launch_info),
+    reconciliationRequired ? null : templateLaunch,
   );
   const [formOpen, setFormOpen] = useState(false);
   const [presets, setPresets] = useState<VeLaunchPresetOption[] | null>(null);
@@ -285,14 +295,16 @@ function useTemplateLaunch(template: VeTemplate | null) {
     setFormOpen(true);
     setSubmitError(null);
     if (presets !== null) return;
-    veEngineCall<VeLaunchPresetsResponse>(`${VE_API}/templates/${template.id}/launch`)
-      .then(({ ok, data }) => {
-        if (!ok) {
-          setLoadError(data.error ?? 'Не удалось загрузить пресеты');
+    void Promise.resolve(
+      veEngineCall<VeLaunchPresetsResponse>(`${VE_API}/templates/${template.id}/launch`),
+    )
+      .then((response) => {
+        if (!response?.ok) {
+          setLoadError(response?.data?.error ?? 'Не удалось загрузить пресеты');
           setPresets([]);
           return;
         }
-        const list = data.presets ?? [];
+        const list = response.data.presets ?? [];
         setPresets(list);
         setPresetId((cur) => cur || list[0]?.id || '');
       })
@@ -302,13 +314,32 @@ function useTemplateLaunch(template: VeTemplate | null) {
       });
   }, [presets, template]);
 
-  const submit = useCallback(() => {
-    if (!template || !presetId || submitting) return;
+  const submit = useCallback((segmentationAuditId: string) => {
+    if (!template || !presetId || !segmentationAuditId || submitting) return;
     setSubmitting(true);
     setSubmitError(null);
-    veEnginePost<VeLaunchResponse>(`${VE_API}/templates/${template.id}/launch`, { preset_id: presetId })
+    veEnginePost<VeLaunchResponse>(`${VE_API}/templates/${template.id}/launch`, {
+      preset_id: presetId,
+      segmentation_audit_id: segmentationAuditId,
+      confirm_segmentation: true,
+    })
       .then(({ ok, data }) => {
+        if (
+          data.code === 'TEMPLATE_LAUNCH_UNCERTAIN' ||
+          data.code === 'TEMPLATE_LAUNCH_IN_PROGRESS'
+        ) {
+          onSegmentationRejected('refresh');
+          return;
+        }
         if (!ok || !data.launch) {
+          if (data.code === 'SEGMENTATION_AUDIT_STALE') {
+            onSegmentationRejected('stale');
+            return;
+          }
+          if (data.code === 'SEGMENTATION_AUDIT_INCOMPLETE') {
+            onSegmentationRejected('incomplete');
+            return;
+          }
           setSubmitError(data.error ?? 'Не удалось отправить в запуск');
           return;
         }
@@ -318,7 +349,7 @@ function useTemplateLaunch(template: VeTemplate | null) {
       })
       .catch(() => setSubmitError('Не удалось отправить в запуск'))
       .finally(() => setSubmitting(false));
-  }, [template, presetId, submitting]);
+  }, [onSegmentationRejected, template, presetId, submitting]);
 
   return {
     recorded,
@@ -331,6 +362,7 @@ function useTemplateLaunch(template: VeTemplate | null) {
     submitting,
     submitError,
     warnings,
+    reconciliationRequired,
     openForm,
     submit,
   };
@@ -338,11 +370,18 @@ function useTemplateLaunch(template: VeTemplate | null) {
 
 type TemplateLaunchState = ReturnType<typeof useTemplateLaunch>;
 
-/** Записанный запуск (emerald) либо инлайн-форма выбора пресета. */
-function LaunchSection({ launch }: { launch: TemplateLaunchState }) {
-  if (launch.recorded) {
-    const info = launch.recorded;
-    const campaigns = info.campaigns && info.campaigns.length > 0 ? info.campaigns : null;
+/** Записанный запуск либо инлайн-аудит и форма выбора пресета. */
+function LaunchSection({
+  launch,
+  audit,
+}: {
+  launch: TemplateLaunchState;
+  audit: SegmentationAuditController;
+}) {
+  const recorded = launch.recorded ?? (audit.phase === 'launch_succeeded' ? audit.launchInfo : null);
+  if (recorded) {
+    const info = recorded;
+    const campaigns = info.campaigns && info.campaigns.length > 1 ? info.campaigns : null;
     return (
       <div className={`px-4 py-3 ${HE.successPanel}`}>
         <p className="flex items-center gap-2 text-sm font-medium text-emerald-800">
@@ -384,49 +423,66 @@ function LaunchSection({ launch }: { launch: TemplateLaunchState }) {
   if (!launch.formOpen) return null;
 
   return (
-    <div className={`space-y-3 px-4 py-3 ${HE.infoPanel}`}>
-      <p className="text-sm font-medium text-gray-800">
-        Запуск в Instantly: кампания будет создана <b>на паузе</b>, лиды загрузятся из базы.
-        Активация — вручную после проверки.
-      </p>
-      {launch.presets === null && !launch.loadError ? (
-        <p className="text-xs text-gray-500">Загружаем пресеты…</p>
-      ) : null}
-      {launch.loadError ? <p className="text-xs text-red-500">{launch.loadError}</p> : null}
-      {launch.presets && launch.presets.length === 0 && !launch.loadError ? (
-        <p className="text-xs text-gray-500">Нет доступных пресетов — сначала настройте пресет клиенту.</p>
-      ) : null}
-      {launch.presets && launch.presets.length > 0 ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <select
-            value={launch.presetId}
-            onChange={(e) => launch.setPresetId(e.target.value)}
-            className="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs text-gray-700 transition focus:border-blue-400 focus:outline-none"
-            aria-label="Пресет запуска"
-          >
-            {launch.presets.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={launch.submit}
-            disabled={launch.submitting || !launch.presetId}
-            className={HE.btnPrimary}
-          >
-            {launch.submitting ? 'Создаём кампанию…' : 'Создать кампанию (на паузе)'}
-          </button>
-          <button type="button" onClick={() => launch.setFormOpen(false)} className={HE.btnGhost}>
-            Отмена
-          </button>
+    <div className="space-y-3">
+      <SegmentationAuditPanel audit={audit} />
+      {audit.canLaunch && audit.auditId ? (
+        <div className={`space-y-3 px-4 py-3 ${HE.infoPanel}`}>
+          <p className="text-sm font-medium text-gray-800">
+            Запуск в Instantly: кампании будут созданы <b>на паузе</b>, получатели загрузятся из
+            проверенной раскладки. Активация — вручную после проверки.
+          </p>
+          {launch.presets === null && !launch.loadError ? (
+            <p className="text-xs text-gray-500">Загружаем пресеты…</p>
+          ) : null}
+          {launch.loadError ? <p className="text-xs text-red-500">{launch.loadError}</p> : null}
+          {launch.presets && launch.presets.length === 0 && !launch.loadError ? (
+            <p className="text-xs text-gray-500">
+              Нет доступных пресетов — сначала настройте пресет клиенту.
+            </p>
+          ) : null}
+          {launch.presets && launch.presets.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={launch.presetId}
+                onChange={(e) => launch.setPresetId(e.target.value)}
+                className="h-10 min-w-0 flex-1 rounded-lg border border-gray-200 bg-white px-3 text-xs text-gray-700 transition focus:border-blue-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 sm:flex-none"
+                aria-label="Пресет запуска"
+              >
+                {launch.presets.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => launch.submit(audit.auditId as string)}
+                disabled={launch.submitting || !launch.presetId}
+                className={HE.btnPrimary}
+              >
+                {launch.submitting
+                  ? 'Создаём кампании…'
+                  : (() => {
+                      const groups = audit.summary
+                        ? audit.summary.segments.filter((segment) => segment.count > 0).length +
+                          (audit.summary.defaultGroup.count > 0 ? 1 : 0)
+                        : 0;
+                      return groups === 1
+                        ? 'Создать кампанию (на паузе)'
+                        : `Создать ${groups} кампании на паузе`;
+                    })()}
+              </button>
+              <button type="button" onClick={() => launch.setFormOpen(false)} className={HE.btnGhost}>
+                Отмена
+              </button>
+            </div>
+          ) : null}
+          {launch.submitError ? (
+            <p className="text-xs text-red-600" role="alert">
+              {launch.submitError}
+            </p>
+          ) : null}
         </div>
-      ) : null}
-      {launch.submitError ? (
-        <p className="text-xs text-red-600" role="alert">
-          {launch.submitError}
-        </p>
       ) : null}
     </div>
   );
@@ -441,7 +497,22 @@ export function Step5Template(props: {
   const { template, base, jobs, onBuildTemplate } = props;
   const [copied, setCopied] = useState(false);
   const [copiedLetterIdx, setCopiedLetterIdx] = useState<number | null>(null);
-  const launch = useTemplateLaunch(template);
+  const segmentationAudit = useSegmentationAudit(template?.id ?? null);
+  const {
+    refresh: refreshSegmentationAudit,
+    markRejected: markSegmentationRejected,
+  } = segmentationAudit;
+  const handleSegmentationRejected = useCallback(
+    (phase: 'stale' | 'incomplete' | 'refresh') => {
+      if (phase === 'refresh') {
+        refreshSegmentationAudit();
+        return;
+      }
+      markSegmentationRejected(phase);
+    },
+    [markSegmentationRejected, refreshSegmentationAudit],
+  );
+  const launch = useTemplateLaunch(template, handleSegmentationRejected);
 
   const templateJob = useMemo(() => latestStageJob(jobs, 'template'), [jobs]);
   const busy = templateJob?.status === 'pending' || templateJob?.status === 'running';
@@ -549,15 +620,26 @@ export function Step5Template(props: {
             Правится на шаге 3 (Контент) → пересобрать шаблон
           </p>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {!launch.recorded ? (
+        <div className="flex max-w-full flex-wrap items-center justify-end gap-2 sm:shrink-0">
+          {!launch.recorded && segmentationAudit.phase !== 'launch_succeeded' ? (
             <button
               type="button"
-              onClick={launch.openForm}
+              onClick={() => {
+                if (launch.formOpen) return;
+                segmentationAudit.start();
+                launch.openForm();
+              }}
               disabled={baseOverLaunchLimit}
-              className={HE.btnPrimary}
+              aria-disabled={baseOverLaunchLimit || launch.formOpen}
+              className={`${HE.btnPrimary} ${launch.formOpen ? 'cursor-default opacity-70' : ''}`}
             >
-              Отправить в запуск
+              {launch.formOpen
+                ? segmentationAudit.phase === 'loading'
+                  ? 'Проверяем сегментацию…'
+                  : 'Проверка открыта'
+                : launch.reconciliationRequired
+                  ? 'Проверить результат запуска'
+                  : 'Проверить перед запуском'}
             </button>
           ) : null}
           <button type="button" onClick={handleCopy} className={HE.btnGhost}>
@@ -578,7 +660,7 @@ export function Step5Template(props: {
       ) : null}
 
       {/* Отправка в запуск: запись о запуске либо форма выбора пресета */}
-      <LaunchSection launch={launch} />
+      <LaunchSection launch={launch} audit={segmentationAudit} />
 
       {/* Превью по лидам — финальные письма с подставленными значениями базы */}
       <TemplateLeadPreview template={template} baseId={base?.id ?? template.base_id} />
