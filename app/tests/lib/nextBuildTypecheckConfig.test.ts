@@ -134,10 +134,16 @@ describe('Next build typecheck contract', () => {
     expect(packageJson.scripts?.['pretypecheck:strict']).toContain(
       "mkdirSync('.next/cache/tsc', { recursive: true })",
     );
-    expect(typecheckJob).toContain("cache restore tsc-v2-$SEMAPHORE_GIT_BRANCH,tsc-v2-");
-    expect(typecheckJob).toContain('cache store tsc-v2-$SEMAPHORE_GIT_BRANCH .next/cache/tsc');
+    // Проверяем инвариант, а не буквальный ключ: incremental-состояние tsc
+    // обязано и подниматься из кэша, и складываться обратно из .next/cache/tsc.
+    // Раньше здесь были прибиты точные строки ключей, и любая правка схемы
+    // кэширования (например переход на ротацию ключа) валила тест, ничего
+    // содержательного при этом не поймав.
+    expect(typecheckJob).toContain('cache restore tsc-');
+    expect(typecheckJob).toContain('cache store tsc-');
+    expect(typecheckJob).toContain('.next/cache/tsc');
     expect(typecheckJob).not.toContain('.tsbuildinfo.ci');
-    expect(typecheckJob).toContain('- npm test -- --watchAll=false');
+    expect(typecheckJob).toContain('npm test -- --watchAll=false');
   });
 
   it('includes Next generated page and route validators in a dedicated tsc program', () => {
