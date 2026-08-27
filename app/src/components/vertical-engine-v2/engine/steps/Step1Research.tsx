@@ -7,10 +7,11 @@
  * research-пайплайна человеческими формулировками (без технических деталей)
  * и компактное «готово». Навигация между шагами — забота оболочки (ProjectDetail).
  * Питается от массива jobs проекта: состояние стадии = статус её последней джобы.
- * Визуал — токены design.ts: без иконок, статусы точками, один синий акцент.
+ * Визуал — токены design.ts: рабочая поверхность, статусы и ясные действия.
  */
 
 import { useRef, useState, type JSX } from 'react';
+import { Play, RotateCcw } from 'lucide-react';
 import type { VeStage } from '@/lib/verticalEngineV2/types';
 import { Badge, StatusBox } from '../ui';
 import { HE, Spinner, StatusDot } from '../design';
@@ -100,7 +101,7 @@ export function Step1Research({
 
   if (running) {
     return (
-      <section className={`mx-auto max-w-xl ${HE.card} ${HE.cardPad}`}>
+      <section className={`max-w-3xl ${HE.card} ${HE.cardPad}`}>
         <h2 className={`mb-4 ${HE.secTitle}`}>Идёт исследование…</h2>
         <StageChecklist jobs={jobs} running />
         {failedStages.length > 0 ? (
@@ -115,7 +116,7 @@ export function Step1Research({
 
   if (failed) {
     return (
-      <section className={`mx-auto max-w-xl ${HE.card} ${HE.cardPad}`}>
+      <section className={`max-w-3xl ${HE.card} ${HE.cardPad}`}>
         <h2 className={`mb-4 ${HE.secTitle}`}>Исследование остановилось</h2>
         <StageChecklist jobs={jobs} running={false} />
         <FailureNote
@@ -131,8 +132,8 @@ export function Step1Research({
 
   if (done) {
     return (
-      <section className={`mx-auto max-w-xl ${HE.card} ${HE.cardPad}`}>
-        <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+      <section className="max-w-5xl">
+        <div className={`flex items-start gap-3 px-4 py-3 ${HE.successPanel}`}>
           <StatusDot tone="ok" className="mt-1.5" />
           <div>
             <p className="text-sm font-semibold text-emerald-800">Исследование готово</p>
@@ -153,7 +154,7 @@ export function Step1Research({
         {/* Бриф доступен и после исследования: дозаполненные поля уходят в
             цепочки и шаблон, а перезапуск подхватит их в гипотезы. */}
         <ClientBriefBlock projectId={project?.id ?? null} onBriefChanged={onCasesChanged} />
-        <div className="mt-4 text-center">
+        <div className="mt-5 flex justify-start">
           <button
             type="button"
             disabled={busy}
@@ -166,8 +167,9 @@ export function Step1Research({
                 onStartResearch();
               }
             }}
-            className={HE.btnQuiet}
+            className={`${HE.btnGhost} h-9`}
           >
+            <RotateCcw aria-hidden className="h-3.5 w-3.5" />
             Перезапустить исследование
           </button>
         </div>
@@ -223,25 +225,40 @@ function NotStarted({
   onCasesChanged?: () => void;
 }) {
   return (
-    <section className={`mx-auto max-w-xl ${HE.card} px-6 py-10 text-center`}>
-      <p className="text-[44px] font-light leading-none text-gray-200" aria-hidden>
-        01
-      </p>
-      <h2 className="mt-3 text-lg font-semibold text-gray-900">Исследование рынка</h2>
-      <p className={`mx-auto mt-2 max-w-md ${HE.lead}`}>
-        Движок изучит сайт, найдёт конкурентов и их клиентов, соберёт 25–40 гипотез рынков с доказательствами
-        и сложит их в вертикали. Обычно 10–20 минут.
-      </p>
-      <button type="button" onClick={onStartResearch} disabled={busy} className={`mt-6 ${HE.btnPrimary}`}>
-        {busy ? <Spinner className="h-4 w-4" /> : null}
-        Запустить исследование
-      </button>
-      <OfferBlock offerValue={offerValue} onSaveOffer={onSaveOffer} />
-      <ClientBriefBlock projectId={projectId} onBriefChanged={onCasesChanged} />
-      <BusinessBlock projectId={projectId} businessValue={businessValue} emphasized={siteThin} />
-      <SignatureBlock projectId={projectId} signatureValue={signatureValue} />
-      <StyleBlock projectId={projectId} styleValue={styleValue} onSaved={onStyleSaved} />
-      <CasesBlock projectId={projectId} cases={cases} onCasesChanged={onCasesChanged} />
+    <section className="max-w-5xl">
+      <div className="grid gap-6 border-b border-gray-200 pb-7 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+        <div>
+          <h2 className="text-xl font-semibold text-gray-900">Подготовить карту рынка</h2>
+          <p className={`mt-2 max-w-2xl ${HE.lead}`}>
+            Движок изучит сайт и бриф, найдёт конкурентов и соберёт 25–40 проверенных гипотез.
+            Результат появится в виде сравнимых вертикалей.
+          </p>
+          <p className="mt-3 text-xs text-gray-500">Обычно 10–20 минут. Страницу можно закрыть.</p>
+        </div>
+        <button type="button" onClick={onStartResearch} disabled={busy} className={HE.btnPrimary}>
+          {busy ? <Spinner className="h-4 w-4" /> : <Play aria-hidden className="h-4 w-4 fill-current" />}
+          Запустить исследование
+        </button>
+      </div>
+
+      <div className="mt-7">
+        <h3 className={HE.sectionTitle}>Контекст для исследования</h3>
+        <p className={`mt-1 ${HE.muted}`}>
+          Чем точнее исходные данные, тем меньше лишних гипотез придётся отсеивать после генерации.
+        </p>
+        <div className="grid items-start gap-x-5 lg:grid-cols-2">
+          <div>
+            <OfferBlock offerValue={offerValue} onSaveOffer={onSaveOffer} />
+            <BusinessBlock projectId={projectId} businessValue={businessValue} emphasized={siteThin} />
+            <SignatureBlock projectId={projectId} signatureValue={signatureValue} />
+          </div>
+          <div>
+            <ClientBriefBlock projectId={projectId} onBriefChanged={onCasesChanged} />
+            <StyleBlock projectId={projectId} styleValue={styleValue} onSaved={onStyleSaved} />
+            <CasesBlock projectId={projectId} cases={cases} onCasesChanged={onCasesChanged} />
+          </div>
+        </div>
+      </div>
     </section>
   );
 }
@@ -273,8 +290,8 @@ function OfferBlock({
   };
 
   return (
-    <div className="mt-8 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
-      <label htmlFor="he-step1-offer" className="text-xs font-semibold uppercase tracking-widest text-gray-500">
+    <div className={`mt-8 text-left ${HE.formPanel}`}>
+      <label htmlFor="he-step1-offer" className={HE.eyebrow}>
         Оффер (необязательно)
       </label>
       <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
@@ -302,7 +319,7 @@ function OfferBlock({
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
-        {saved ? <span className="text-xs text-emerald-600">Сохранено ✓</span> : null}
+        {saved ? <span className="text-xs text-emerald-600">Сохранено</span> : null}
       </div>
     </div>
   );
@@ -343,10 +360,10 @@ function SignatureBlock({
   };
 
   return (
-    <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
+    <div className={`mt-4 text-left ${HE.formPanel}`}>
       <label
         htmlFor="he-step1-signature"
-        className="text-xs font-semibold uppercase tracking-widest text-gray-500"
+        className={HE.eyebrow}
       >
         Отправитель (подпись в письмах)
       </label>
@@ -376,7 +393,7 @@ function SignatureBlock({
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
-        {saved ? <span className="text-xs text-emerald-600">Сохранено ✓</span> : null}
+        {saved ? <span className="text-xs text-emerald-600">Сохранено</span> : null}
       </div>
       {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
     </div>
@@ -421,13 +438,13 @@ function BusinessBlock({
 
   return (
     <div
-      className={`mt-4 rounded-xl border p-4 text-left ${
+      className={`mt-4 rounded-lg border p-4 text-left ${
         emphasized ? 'border-amber-300 bg-amber-50/60' : 'border-gray-200 bg-gray-50/50'
       }`}
     >
       <label
         htmlFor="he-step1-business"
-        className="text-xs font-semibold uppercase tracking-widest text-gray-500"
+        className={HE.eyebrow}
       >
         Описание бизнеса (если сайт не раскрывает)
       </label>
@@ -458,7 +475,7 @@ function BusinessBlock({
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
-        {saved ? <span className="text-xs text-emerald-600">Сохранено ✓</span> : null}
+        {saved ? <span className="text-xs text-emerald-600">Сохранено</span> : null}
       </div>
       {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
     </div>
@@ -503,8 +520,8 @@ function StyleBlock({
   };
 
   return (
-    <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
-      <label htmlFor="he-step1-style" className="text-xs font-semibold uppercase tracking-widest text-gray-500">
+    <div className={`mt-4 text-left ${HE.formPanel}`}>
+      <label htmlFor="he-step1-style" className={HE.eyebrow}>
         Эталон стиля (необязательно)
       </label>
       <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
@@ -533,7 +550,7 @@ function StyleBlock({
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
-        {saved ? <span className="text-xs text-emerald-600">Сохранено ✓</span> : null}
+        {saved ? <span className="text-xs text-emerald-600">Сохранено</span> : null}
       </div>
       {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
     </div>
@@ -596,8 +613,10 @@ function CasesBlock({
   };
 
   return (
-    <details className="group mt-4 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
-      <summary className="flex cursor-pointer select-none items-center gap-2 text-xs font-semibold uppercase tracking-widest text-gray-500 transition hover:text-gray-600">
+    <details className={`group mt-4 text-left ${HE.formPanel}`}>
+      <summary
+        className={`flex cursor-pointer select-none items-center gap-2 transition hover:text-gray-600 ${HE.eyebrow}`}
+      >
         Кейсы клиента ({cases.length})
       </summary>
       <p className={`mt-2 text-xs leading-relaxed ${HE.muted}`}>

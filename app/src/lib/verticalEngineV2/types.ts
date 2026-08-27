@@ -20,7 +20,8 @@ export type VeStage =
   | 'base_analyze'
   | 'base_collect'
   | 'template'
-  | 'dossier';
+  | 'dossier'
+  | 'segmentation_audit';
 
 export type VeJobStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -32,6 +33,8 @@ export type VeHypothesisStatus = 'proposed' | 'accepted' | 'rejected';
 export type VeHypothesisTier = 1 | 2 | 3;
 
 export type VeBaseStatus = 'uploaded' | 'collecting' | 'analyzing' | 'analyzed' | 'failed';
+
+export type VeBaseSource = 'upload' | 'auto';
 
 export type VeTemplateStatus = 'draft' | 'ready';
 
@@ -153,6 +156,7 @@ export interface VeBase {
   columns: string[];
   sample_rows: Array<Record<string, unknown>>;
   data: unknown;
+  source: VeBaseSource;
   status: VeBaseStatus;
   analysis: VeBaseAnalysis | null;
   created_at: string;
@@ -171,6 +175,101 @@ export interface VeTemplate {
   status: VeTemplateStatus;
   tokens_used: number;
   cost_usd: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type VeSegmentationAuditStatus =
+  | 'pending'
+  | 'running'
+  | 'ready'
+  | 'failed'
+  | 'cancelled';
+
+export type VeSegmentationAuditSummaryStatus = 'complete' | 'incomplete' | 'not_required';
+
+export type VeSegmentationAuditLaunchStatus =
+  | 'idle'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'uncertain';
+
+export interface VeSegmentationAuditAssignment {
+  /** Index in the prepared launch audience, not the raw source-row index. */
+  row_index: number;
+  /** Canonical segment condition; null means the reviewed default bucket. */
+  segment: string | null;
+}
+
+export interface VeSegmentationAuditExample {
+  /** Original index in ve_bases.data, useful for explaining the bucket. */
+  row_index: number;
+  label: string;
+  email: string;
+}
+
+export interface VeSegmentationAuditBucket {
+  count: number;
+  share_pct: number;
+  examples: VeSegmentationAuditExample[];
+}
+
+export interface VeSegmentationAuditSummary {
+  version: 1;
+  status: VeSegmentationAuditSummaryStatus;
+  /** Canonical names plus compatibility aliases consumed by the UI. */
+  base_rows_total: number;
+  total_base_rows: number;
+  launchable_rows_total: number;
+  launchable_rows: number;
+  covered_rows_total: number;
+  default_rows_total: number;
+  unclassified_rows_total: number;
+  unclassified_count: number;
+  excluded: {
+    low_relevance: number;
+    invalid_verification: number;
+    invalid_email_status: number;
+    invalid_email: number;
+    duplicate_email: number;
+  };
+  segments: Array<
+    VeSegmentationAuditBucket & {
+      /** Stable storage/API key for the template segment condition. */
+      key: string;
+    }
+  >;
+  default: VeSegmentationAuditBucket;
+  failed_batches: number;
+  total_batches: number;
+}
+
+export interface VeSegmentationAudit {
+  id: string;
+  project_id: string;
+  template_id: string;
+  base_id: string;
+  requested_by: string;
+  status: VeSegmentationAuditStatus;
+  input_hash: string | null;
+  segment_keys: string[];
+  summary: VeSegmentationAuditSummary | null;
+  assignments: VeSegmentationAuditAssignment[];
+  error: string | null;
+  tokens_used: number;
+  cost_usd: number;
+  completed_at: string | null;
+  launch_status: VeSegmentationAuditLaunchStatus;
+  launch_reservation_id: string | null;
+  launch_preset_id: string | null;
+  launch_started_at: string | null;
+  launch_heartbeat_at: string | null;
+  launch_completed_at: string | null;
+  launch_error: string | null;
+  launch_resolution_id: string | null;
+  launch_resolved_by: string | null;
+  launch_resolved_at: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -20,6 +20,7 @@
  */
 
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
+import { ENRICH_CHECKPOINT_ATTEMPTED_COL } from '@/lib/tools/processingSteps';
 
 // Мокаем supabase клиент чтобы наблюдать какие шаги/обновления случились.
 // Используем jest.mock для перехвата импорта.
@@ -192,5 +193,29 @@ describe('runBaseConstructorJob resume logic', () => {
       (u) => 'current_step_progress' in u && 'started_at' in u,
     );
     expect(heartbeats.length).toBeGreaterThan(0);
+  });
+
+  it('resume после завершённого enrich не передаёт checkpoint metadata дальше', async () => {
+    admin.__setCurrentJob({
+      id: 'job-5',
+      user_id: 'u',
+      file_name: 'test.csv',
+      status: 'processing',
+      selected_steps: ['enrich_descriptions', 'ta_scoring'],
+      step_config: {},
+      current_step: 1,
+      current_step_progress: 100,
+      total_steps: 2,
+      data: [
+        ['Компания', 'Сайт', 'Описание', ENRICH_CHECKPOINT_ATTEMPTED_COL],
+        ['Alpha', 'https://alpha.example', '', '1'],
+      ],
+    });
+
+    await runBaseConstructorJob('job-5');
+
+    const finalUpdate = admin.__getUpdates().find((update) => update.status === 'completed');
+    expect(finalUpdate).toBeDefined();
+    expect((finalUpdate?.data as string[][])[0]).toEqual(['Компания', 'Сайт', 'Описание']);
   });
 });

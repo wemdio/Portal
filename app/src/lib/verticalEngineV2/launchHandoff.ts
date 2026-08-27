@@ -62,6 +62,12 @@ export interface VeTemplateLaunchInfo {
   leads_count: number;
   preset_id: string;
   created_at: string;
+  /** Проверенный снимок сегментации, по которому построены кампании. */
+  segmentation_audit_id?: string;
+  /** Хеш точной аудитории + условий + сохранённых назначений аудита. */
+  segmentation_audit_input_hash?: string;
+  /** External outcome needs explicit specialist reconciliation before retry. */
+  reconciliation_required?: boolean;
   /** Все кампании запуска (основная + сегментные). Поля нет у запусков до сплита. */
   campaigns?: VeTemplateLaunchCampaign[];
 }
@@ -96,6 +102,13 @@ export function parseLaunchInfo(raw: unknown): VeTemplateLaunchInfo | null {
     leads_count: typeof r.leads_count === 'number' && Number.isFinite(r.leads_count) ? r.leads_count : 0,
     preset_id: typeof r.preset_id === 'string' ? r.preset_id : '',
     created_at: typeof r.created_at === 'string' ? r.created_at : '',
+    ...(typeof r.segmentation_audit_id === 'string' && r.segmentation_audit_id
+      ? { segmentation_audit_id: r.segmentation_audit_id }
+      : {}),
+    ...(typeof r.segmentation_audit_input_hash === 'string' && r.segmentation_audit_input_hash
+      ? { segmentation_audit_input_hash: r.segmentation_audit_input_hash }
+      : {}),
+    ...(r.reconciliation_required === true ? { reconciliation_required: true } : {}),
     ...(campaigns && campaigns.length > 0 ? { campaigns } : {}),
   };
 }

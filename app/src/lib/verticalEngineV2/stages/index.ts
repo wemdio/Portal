@@ -18,6 +18,7 @@ import { runBaseAnalyzeStage } from './baseAnalyze';
 import { runBaseCollectStage } from './baseCollect';
 import { runTemplateStage } from './template';
 import { runDossierStage } from './dossier';
+import { runSegmentationAuditStage } from './segmentationAudit';
 
 export type { VeStageContext, VeStageResult } from './shared';
 
@@ -47,6 +48,8 @@ export async function runVeStage(job: VeJob, ctx: VeStageContext): Promise<VeSta
       return runTemplateStage(job, ctx);
     case 'dossier':
       return runDossierStage(job, ctx);
+    case 'segmentation_audit':
+      return runSegmentationAuditStage(job, ctx);
     default: {
       const neverStage: never = job.stage;
       throw new Error(`Неизвестная стадия hypothesis engine: ${String(neverStage)}`);
@@ -71,3 +74,15 @@ export {
   mapOperatorsToColumns,
 } from './template';
 export { runDossierStage } from './dossier';
+export {
+  isStoredAuditCurrent,
+  markSegmentationAuditFailed,
+  prepareAuditSnapshot,
+  runSegmentationAuditStage,
+  toStoredAuditSummary,
+  validateStoredAuditSnapshot,
+} from './segmentationAudit';
+export type {
+  StoredAuditValidation,
+  StoredAuditValidationInput,
+} from './segmentationAudit';

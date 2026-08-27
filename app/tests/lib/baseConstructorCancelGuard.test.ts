@@ -73,6 +73,7 @@ jest.mock('@/lib/tools/processingSteps', () => ({
   FOUND_EMAIL_COL: 'Найденный Email',
   foundEmailColForLocale: (locale?: string) => (locale === 'en' ? 'Found Email' : 'Найденный Email'),
   normalizeConstructorLocale: (value?: unknown) => (value === 'en' ? 'en' : 'ru'),
+  stripEnrichCheckpointMetadata: (data: string[][]) => data,
   stepRemoveEmpty: (data: string[][], onProgress: (n: number) => Promise<void>) => mockStepHook.fn(data, onProgress),
   stepFullDedup: async (data: string[][]) => data,
   stepEmailDedup: async (data: string[][]) => data,
