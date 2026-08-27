@@ -13,26 +13,51 @@
 import { createElement, type JSX } from 'react';
 
 export const HE = {
-  card: 'rounded-2xl border border-gray-200 bg-white',
+  // ── Поверхности ──────────────────────────────────────────────────────────
+  /** Карточка: тонкая рамка + мягкая тень поднимает её над фоном страницы. */
+  card: 'rounded-2xl border border-gray-200/80 bg-white shadow-[0_1px_3px_rgba(15,23,42,0.05)]',
+  /** Hover-фидбек для кликабельных карточек: рамка темнеет, тень растёт. */
+  cardHover: 'hover:border-gray-300/90 hover:shadow-[0_6px_24px_rgba(15,23,42,0.09)]',
   cardPad: 'p-5',
+  /** Вторичная панель (вложенный блок, мета-зона): заливка без рамки. */
+  panelSoft: 'rounded-xl bg-gray-50/80',
+  /** Разделительная линия секций. */
+  divider: 'border-gray-200/80',
+
+  // ── Типографика (шкала ~1.125–1.2, иерархия размером и весом) ────────────
+  /** Заголовок страницы/экрана. */
+  pageTitle: 'text-[26px] font-semibold leading-tight tracking-tight text-gray-900',
+  /** Заголовок секции внутри экрана. */
+  sectionTitle: 'text-[15px] font-semibold tracking-tight text-gray-900',
+  /** Заголовок карточки/блока. */
+  cardTitle: 'text-[15px] font-semibold tracking-tight text-gray-900',
+  /** Лид-абзац под заголовком. */
+  lead: 'text-sm leading-relaxed text-gray-600',
+  /** Тихий текст (мета, подписи). */
+  muted: 'text-[13px] text-gray-500',
+  muted2: 'text-[13px] text-gray-500',
+  /** Совсем тихий (даты, вторичные факты). */
+  faint: 'text-xs text-gray-500',
+
+  // ── Кнопки ───────────────────────────────────────────────────────────────
   btnPrimary:
-    'h-10 rounded-lg bg-blue-600 px-4 text-[13px] font-semibold text-white transition hover:bg-blue-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
+    'h-10 rounded-lg bg-blue-600 px-4 text-[13px] font-semibold text-white shadow-sm transition hover:bg-blue-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
   btnGhost:
     'h-10 rounded-lg border border-gray-300 bg-white px-4 text-[13px] font-medium text-gray-600 transition hover:border-gray-400 hover:text-gray-900 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
   btnQuiet:
     'text-[13px] font-medium text-blue-600 transition hover:underline active:opacity-70 disabled:opacity-50 focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
   btnSmall:
     'h-8 rounded-lg border border-gray-300 bg-white px-3 text-xs font-medium text-gray-600 transition hover:border-gray-400 hover:text-gray-900 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
+
+  // ── Статусы и мелочь ─────────────────────────────────────────────────────
   pill: 'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold',
   dot: 'inline-block h-1.5 w-1.5 rounded-full',
   secTitle: 'text-[13px] font-semibold text-gray-900',
-  lead: 'text-[13.5px] leading-relaxed text-gray-600',
-  muted: 'text-gray-500',
-  muted2: 'text-gray-500',
+  /** Поле ввода. */
   input:
-    'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-400 focus:outline-none',
+    'w-full rounded-lg border border-gray-300 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 transition focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100',
   tierText: 'text-[10.5px] font-bold uppercase tracking-wider text-violet-600',
-  chip: 'rounded-md border border-gray-200 px-1.5 py-0.5 text-[11px] text-gray-400',
+  chip: 'rounded-md border border-gray-200 px-1.5 py-0.5 text-[11px] text-gray-500',
   rankNum: 'text-[22px] font-light leading-none tabular-nums text-gray-300 translate-y-[2px]',
 } as const;
 

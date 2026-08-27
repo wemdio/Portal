@@ -25,7 +25,7 @@ export interface VeWizardStep {
 
 const LABEL_CLASS: Record<VeWizardStepState, string> = {
   done: 'text-gray-900',
-  active: 'text-gray-900',
+  active: 'text-blue-700',
   available: 'text-gray-600 group-hover:text-gray-900',
   locked: 'text-gray-500 group-hover:text-gray-700',
 };
@@ -89,7 +89,7 @@ export function StepNav({
                   полоса той же высоты, чтобы геометрия шагов совпадала) */}
               <span
                 aria-hidden
-                className={`h-0.5 w-10 rounded-full ${step.state === 'active' ? 'bg-blue-600' : 'bg-transparent'}`}
+                className={`h-1 w-12 rounded-full transition-colors ${step.state === 'active' ? 'bg-blue-600' : 'bg-transparent'}`}
               />
             </button>
           </li>

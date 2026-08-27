@@ -45,6 +45,9 @@ export function VerticalEngineV2View() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  // Открыт ли конкретный проект (мастер) — тогда прячем хром оболочки (шапку и вкладки).
+  const [projectOpen, setProjectOpen] = useState(false);
+
   const [legacyDetail, setLegacyDetail] = useState<VeLegacyProjectDetail | null>(null);
   const [legacyDetailLoading, setLegacyDetailLoading] = useState(false);
   const [busyCandidateId, setBusyCandidateId] = useState<string | null>(null);
@@ -207,9 +210,14 @@ export function VerticalEngineV2View() {
       : []),
   ];
 
+  // Когда открыт проект — мастер в фокусе, хром оболочки не нужен.
+  const showChrome = !(tab === 'projects' && projectOpen);
+
   return (
     <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-      <header className="border-b border-slate-200 pb-6">
+      {showChrome ? (
+        <>
+          <header className="border-b border-slate-200 pb-6">
         <nav className="text-xs text-slate-500" aria-label="Хлебные крошки">
           Инструменты / Движок вертикалей / v2
         </nav>
@@ -265,11 +273,15 @@ export function VerticalEngineV2View() {
           ))}
         </div>
       </div>
+        </>
+      ) : null}
 
       <div className="mt-6 space-y-5">
         {error ? <ErrorNotice message={error} /> : null}
 
-        {tab === 'projects' ? <VeEngineWorkspace /> : null}
+        {tab === 'projects' ? (
+          <VeEngineWorkspace onProjectOpenChange={setProjectOpen} />
+        ) : null}
 
         {loading && tab !== 'projects' ? (
           <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">
