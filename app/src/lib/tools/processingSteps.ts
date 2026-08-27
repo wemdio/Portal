@@ -24,6 +24,10 @@ import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator'
 import { isSupportEmail } from './supportEmails';
 import { makeCheckpointGate } from './checkpointGate';
 import {
+  ENRICH_CHECKPOINT_ATTEMPTED_COL,
+  stripEnrichCheckpointMetadata,
+} from './baseConstructorCheckpoint';
+import {
   CLEANUP_JSON_SYSTEM_PROMPT,
   CLEANUP_BATCH,
   buildCleanupUserMessage,
@@ -34,6 +38,10 @@ import {
 // Re-export: исторический дом парсеров — здесь; тесты и внешние импортёры
 // продолжают работать. Каноничная реализация теперь в nameCleanupProtocol.
 export { parseCleanupResponseJson, parseCleanupResponse };
+export {
+  ENRICH_CHECKPOINT_ATTEMPTED_COL,
+  stripEnrichCheckpointMetadata,
+} from './baseConstructorCheckpoint';
 
 export type ProgressFn = (progress: number) => Promise<void>;
 export type CancelCheckFn = () => Promise<boolean>;
@@ -70,9 +78,16 @@ const SITE_CHECK_TIMEOUT = 12_000;
 // outbound socket pool. 15 is conservative for shared infrastructure;
 // can lift further if telemetry shows no upstream complaints.
 // Env-настраиваемо: при высокой глобальной параллельности (base-constructor =
-// 3 реплики x 4 = 12 job'ов) дефолтные 15+5 дали бы сотни исходящих коннектов
+// 7 реплик x 1 = 7 job'ов) дефолтные 15+5 дали бы больше сотни исходящих коннектов
 // и риск IP-бана. base-constructor-контейнеры ставят BASE_*_SCRAPE_CONCURRENCY
 // ниже; кто не ставит (напр. DFYB) - остаётся на дефолтах 15/5.
+export function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
+  if (value == null || (typeof value === 'string' && value.trim() === '')) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(parsed)));
+}
+
 const EMAIL_CONCURRENCY = Math.max(1, Number(process.env.BASE_EMAIL_SCRAPE_CONCURRENCY) || 15);
 const ENRICH_CONCURRENCY = Math.max(1, Number(process.env.BASE_ENRICH_SCRAPE_CONCURRENCY) || 5);
 /**
@@ -83,12 +98,23 @@ const ENRICH_CONCURRENCY = Math.max(1, Number(process.env.BASE_ENRICH_SCRAPE_CON
  * With concurrency=5, if all five slots latch onto such hosts at once, the
  * step's `await processInPool(...)` never returns and the whole job hangs.
  *
- * 60s is generous enough for honest slow servers but caps the catastrophic
- * tail. Worker abandons the in-flight promise and moves on.
+ * 60s restores the longer safety window for retries and URL fallbacks while
+ * still bounding a genuinely stuck site. The value remains env-configurable.
  */
-const ENRICH_PER_SITE_TIMEOUT_MS = 60_000;
+const ENRICH_PER_SITE_TIMEOUT_MS = boundedInteger(
+  process.env.BASE_ENRICH_PER_SITE_TIMEOUT_MS,
+  60_000,
+  5_000,
+  60_000,
+);
 const SITE_CHECK_BATCH = 50;
 const TA_BATCH = 10;
+const TA_SCORING_CONCURRENCY = boundedInteger(
+  process.env.BASE_TA_SCORING_CONCURRENCY,
+  1,
+  1,
+  4,
+);
 /** Дополнительные попытки только для индексов, пропущенных в успешном HTTP 200. */
 const TA_RESPONSE_MAX_RETRIES = 3;
 // CLEANUP_BATCH (50, не 100) и обоснование — в nameCleanupProtocol.ts.
@@ -783,8 +809,18 @@ export async function stepEnrich(
   onCheckpoint?: CheckpointFn,
   options?: StepEnrichOptions,
 ): Promise<string[][]> {
-  const header = data[0];
-  const body = data.slice(1);
+  const checkpointHeader = data[0] ?? [];
+  const attemptedColIdx = checkpointHeader.indexOf(ENRICH_CHECKPOINT_ATTEMPTED_COL);
+  const attemptedRows = new Set<number>();
+  if (attemptedColIdx >= 0) {
+    data.slice(1).forEach((row, index) => {
+      if (row[attemptedColIdx] === '1') attemptedRows.add(index);
+    });
+  }
+
+  const cleanData = stripEnrichCheckpointMetadata(data);
+  const header = cleanData[0] ?? [];
+  const body = cleanData.slice(1);
   const locale = normalizeConstructorLocale(options?.locale);
   const descIdx = findColumnIndex(header, 'описание', 'description');
   const siteIdx = findColumnIndex(header, 'сайт', 'site', 'website', 'url', 'домен', 'domain');
@@ -799,7 +835,12 @@ export async function stepEnrich(
 
   const toProcess = newBody
     .map((row, i) => ({ row, i, url: (row[siteIdx] || '').trim() }))
-    .filter((r) => r.url && !(r.row[targetDescIdx] || '').trim() && !isNonScrapeableHost(r.url, locale));
+    .filter((r) =>
+      r.url &&
+      !attemptedRows.has(r.i) &&
+      !(r.row[targetDescIdx] || '').trim() &&
+      !isNonScrapeableHost(r.url, locale),
+    );
 
   if (toProcess.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
 
@@ -807,19 +848,45 @@ export async function stepEnrich(
   let timedOut = 0;
   const shouldCheckpoint = makeCheckpointGate();
   const settledIndexes = new Set<number>();
+  let reportChain = Promise.resolve();
+
+  const materializeCheckpointRows = (includeMetadata: boolean): string[][] => {
+    const snapshotHeader = includeMetadata
+      ? [...newHeader, ENRICH_CHECKPOINT_ATTEMPTED_COL]
+      : [...newHeader];
+    const snapshotBody = newBody.map((row, index) => {
+      const out = row.slice(0, newHeader.length);
+      while (out.length < newHeader.length) out.push('');
+      if (includeMetadata) out.push(attemptedRows.has(index) ? '1' : '');
+      return out;
+    });
+    return [snapshotHeader, ...snapshotBody];
+  };
+
   const markSettled = async (index: number, didTimeOut: boolean) => {
     // The watchdog can release the pool slot before the aborted fetch promise
     // unwinds. Whichever path settles first owns progress for this row.
     if (settledIndexes.has(index)) return;
     settledIndexes.add(index);
+    attemptedRows.add(toProcess[index].i);
     done += 1;
     if (didTimeOut) timedOut += 1;
-    if (done % 10 === 0 || done === toProcess.length) {
-      await onProgress(Math.round((done / toProcess.length) * 100));
-    }
-    if (onCheckpoint && shouldCheckpoint(done, done === toProcess.length)) {
-      await onCheckpoint([newHeader, ...newBody]);
-    }
+    const isLast = done === toProcess.length;
+    const progress = !isLast && done % 10 === 0
+      ? Math.min(99, Math.round((done / toProcess.length) * 100))
+      : null;
+    const checkpointRows = onCheckpoint && shouldCheckpoint(done, isLast)
+      ? materializeCheckpointRows(!isLast)
+      : null;
+
+    // Several pool slots can settle together. Serialize persistence so an
+    // older metadata checkpoint cannot land after the final clean checkpoint.
+    const report = async () => {
+      if (checkpointRows && onCheckpoint) await onCheckpoint(checkpointRows);
+      if (progress != null) await onProgress(progress);
+    };
+    reportChain = reportChain.then(report, report);
+    await reportChain;
   };
   await processInPool(toProcess, ENRICH_CONCURRENCY, async (item, _i, signal) => {
     if (isCancelled && await isCancelled()) return;
@@ -827,7 +894,11 @@ export async function stepEnrich(
       // signal comes from the pool's per-task watchdog. Pass it down so a
       // tarpit website's fetch is aborted at ENRICH_PER_SITE_TIMEOUT_MS.
       const text = await fetchAndExtract(item.url, { timeout: 15_000, signal });
-      if (text) newBody[item.i][targetDescIdx] = text.slice(0, 2000);
+      // The watchdog may already have released this slot. A late fetch result
+      // must not mutate data after its timeout checkpoint was persisted.
+      if (text && !settledIndexes.has(_i)) {
+        newBody[item.i][targetDescIdx] = text.slice(0, 2000);
+      }
     } catch {
       // Other errors silently skipped: site is unreachable / blocked.
     } finally {
@@ -840,6 +911,8 @@ export async function stepEnrich(
       return undefined;
     },
   });
+
+  await reportChain;
 
   if (timedOut > 0) {
     console.warn(
@@ -975,10 +1048,13 @@ export interface StepTAScoreOptions {
     errors: Array<{ reason: string; count: number }>;
   }) => void;
   /**
-   * Mid-step checkpoint for long ta_scoring runs. Receives rows with current
-   * score/reason columns filled for completed companies, before final filtering.
+   * Checkpoint for long ta_scoring runs. Intermediate callbacks contain the
+   * current pre-filter score/reason matrix so resume can continue; the final
+   * callback is the exact filtered step output and is persisted before 100%.
    */
   onCheckpoint?: CheckpointFn;
+  /** Internal/test override; production is bounded by BASE_TA_SCORING_CONCURRENCY. */
+  concurrency?: number;
 }
 
 const TA_SCORE_COL = 'ЦА Балл';
@@ -1087,6 +1163,7 @@ export async function stepTAScore(
   const checkpoint = async () => {
     if (options?.onCheckpoint) await options.onCheckpoint(materializeCheckpointRows());
   };
+  const shouldCheckpoint = makeCheckpointGate();
   const markFailedKeys = (keys: string[], reason: string) => {
     if (keys.length === 0) return;
     failedBatches += 1;
@@ -1105,9 +1182,54 @@ export async function stepTAScore(
     scoreByKey.set(keyOfRow(row), { score: String(score), reason });
   }
 
-  for (let batch = 0; batch < uniqueRows.length; batch += TA_BATCH) {
-    const chunkKeys = uniqueKeys.slice(batch, batch + TA_BATCH);
-    const chunk = uniqueRows.slice(batch, batch + TA_BATCH);
+  const batches: Array<{
+    batchNumber: number;
+    chunkKeys: string[];
+    chunk: string[][];
+  }> = [];
+  for (let batchStart = 0; batchStart < uniqueRows.length; batchStart += TA_BATCH) {
+    batches.push({
+      batchNumber: Math.floor(batchStart / TA_BATCH) + 1,
+      chunkKeys: uniqueKeys.slice(batchStart, batchStart + TA_BATCH),
+      chunk: uniqueRows.slice(batchStart, batchStart + TA_BATCH),
+    });
+  }
+
+  const scoringConcurrency = boundedInteger(
+    options?.concurrency ?? TA_SCORING_CONCURRENCY,
+    TA_SCORING_CONCURRENCY,
+    1,
+    4,
+  );
+  let processedUniqueRows = 0;
+  let reportChain = Promise.resolve();
+  let cancellationError: Error | null = null;
+  const fatalErrors: Error[] = [];
+
+  const reportBatchCompletion = (rowCount: number): Promise<void> => {
+    const report = async () => {
+      processedUniqueRows += rowCount;
+      const isLast = processedUniqueRows === uniqueRows.length;
+      if (
+        !isLast &&
+        options?.onCheckpoint &&
+        shouldCheckpoint(processedUniqueRows, false)
+      ) {
+        await checkpoint();
+      }
+      await onProgress(Math.min(99, Math.round((processedUniqueRows / uniqueRows.length) * 100)));
+    };
+    reportChain = reportChain.then(report, report);
+    return reportChain;
+  };
+
+  const processBatch = async ({
+    batchNumber,
+    chunkKeys,
+    chunk,
+  }: (typeof batches)[number]): Promise<void> => {
+    if (cancellationError || fatalErrors.length > 0) return;
+
     let unresolved = chunk
       .map((row, idx) => ({ idx, key: chunkKeys[idx], row }))
       .filter(({ key }) => !scoreByKey.has(key));
@@ -1115,8 +1237,8 @@ export async function stepTAScore(
     let batchSawLength = false;
 
     if (unresolved.length === 0) {
-      await onProgress(Math.round(((batch + chunk.length) / uniqueRows.length) * 100));
-      continue;
+      await reportBatchCompletion(chunk.length);
+      return;
     }
 
     // HTTP/сеть уже повторяются внутри callOpenRouter. Этот цикл отвечает за
@@ -1127,7 +1249,11 @@ export async function stepTAScore(
       responseAttempt <= TA_RESPONSE_MAX_RETRIES && unresolved.length > 0;
       responseAttempt += 1
     ) {
-      if (isCancelled && await isCancelled()) throw new Error('Отменено');
+      if (cancellationError || fatalErrors.length > 0) return;
+      if (isCancelled && await isCancelled()) {
+        cancellationError = new Error('Отменено');
+        return;
+      }
 
       const companies = unresolved.map(({ idx, row }) => {
         const obj: Record<string, string> = {};
@@ -1192,14 +1318,31 @@ export async function stepTAScore(
       const reason = failureReason ?? 'ИИ не вернул оценки для части компаний';
       markFailedKeys(unresolved.map(({ key }) => key), reason);
       console.warn(
-        `[ta_scoring] пачка ${Math.floor(batch / TA_BATCH) + 1}: ` +
+        `[ta_scoring] пачка ${batchNumber}: ` +
           `${unresolved.length}/${chunk.length} компаний не оценено: ${reason}`,
       );
     }
 
-    await onProgress(Math.round(((batch + chunk.length) / uniqueRows.length) * 100));
-    await checkpoint();
-  }
+    await reportBatchCompletion(chunk.length);
+  };
+
+  await processInPool(batches, scoringConcurrency, async (batch) => {
+    if (cancellationError || fatalErrors.length > 0) return;
+    try {
+      await processBatch(batch);
+    } catch (err) {
+      // processInPool deliberately isolates ordinary task failures. TA scoring
+      // must not turn an unexpected internal failure into a plausible score=5,
+      // so remember it here and fail the whole step after workers settle.
+      if (fatalErrors.length === 0) {
+        fatalErrors.push(err instanceof Error ? err : new Error(String(err)));
+      }
+    }
+  });
+
+  await reportChain;
+  if (fatalErrors.length > 0) throw fatalErrors[0];
+  if (cancellationError) throw cancellationError;
 
   // Защита инварианта: новый/изменённый код маршрутизации не должен снова
   // превратить потерянную компанию в молчаливый 0 и обойти телеметрию.
@@ -1276,6 +1419,11 @@ export async function stepTAScore(
     errors,
   });
 
+  // The in-pool checkpoints are intentionally pre-filter so a mid-step resume
+  // can continue scoring every company. Once scoring is complete, persist the
+  // actual step output (including the 7+ filter) before exposing progress=100;
+  // otherwise a restart in that window would skip TA and export unfiltered rows.
+  if (options?.onCheckpoint) await options.onCheckpoint([newHeader, ...filtered]);
   await onProgress(100);
   return [newHeader, ...filtered];
 }

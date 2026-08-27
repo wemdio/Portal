@@ -4,6 +4,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 import { rowsToCsvChunks } from '@/lib/tools/rowsToCsv';
 import { EXPORT_BUCKET, uploadExportArtifact } from '@/lib/tools/csvExportArtifact';
+import { stripEnrichCheckpointMetadata } from '@/lib/tools/baseConstructorCheckpoint';
 
 const admin = supabaseAdmin!;
 
@@ -32,11 +33,9 @@ const CSV_HEADERS = {
  * whole `data` jsonb (up to ~50MB) out of PostgREST and built the CSV per
  * request — 13-15s before the first byte (the "не качается" incident).
  *
- * Legacy fallback (jobs completed before the artifact existed, or whose upload
- * failed): pull `data` and stream the CSV exactly as before (byte-identical,
- * rowsToCsvChunks), then lazily backfill the artifact fire-and-forget — but
- * ONLY for status='completed' jobs: an in-flight job's `data` is partial, and
- * caching it as the artifact would serve a stale partial export forever.
+ * Legacy/recovery fallback: pull `data`, remove private checkpoint metadata,
+ * and stream the CSV exactly as before (byte-identical, rowsToCsvChunks).
+ * Completed jobs lazily backfill the artifact; partial jobs never do.
  */
 export async function GET(
   req: NextRequest,
@@ -67,7 +66,7 @@ export async function GET(
       // pointed at another tenant's object; deriving it makes that impossible.
       // export_path is used ONLY as a "an artifact was built" flag.
       const artifactPath = `${id}.csv.gz`;
-      if (job.export_path) {
+      if (job.status === 'completed' && job.export_path) {
         const { data: blob, error: dlErr } = await admin.storage
           .from(EXPORT_BUCKET)
           .download(artifactPath);
@@ -116,11 +115,12 @@ export async function GET(
         .single();
       if (fullErr || !full) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
-      const rows = Array.isArray(full.data) ? (full.data as unknown[][]) : [];
+      const storedRows = Array.isArray(full.data) ? (full.data as string[][]) : [];
+      const rows = stripEnrichCheckpointMetadata(storedRows);
 
-      // Lazy backfill so the NEXT download hits the fast path. Completed only
-      // (an in-flight job's `data` is partial — caching it would serve a stale
-      // export forever). Fire-and-forget — never delays this response. Runs even
+      // Lazy backfill so the NEXT download hits the fast path. Only completed
+      // jobs are cached, and `rows` was sanitized above. Fire-and-forget —
+      // never delays this response. Runs even
       // when export_path is set but the object was lost (upsert self-heals).
       if (job.status === 'completed' && rows.length > 0) {
         void (async () => {

@@ -7,6 +7,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
+import { ArrowRight, Copy } from 'lucide-react';
 import type {
   VeChainLanguage,
   VeCompanyType,
@@ -30,7 +31,7 @@ import type {
   VeJobSummary,
   VeLetterVariant,
 } from '../api';
-import { HE, Spinner } from '../design';
+import { HE, Spinner, StatusDot } from '../design';
 import { Badge, PotentialBadge, StatusBox, type BadgeTone } from '../ui';
 
 const LANG_OPTIONS: Array<{ value: VeChainLanguage; label: string }> = [
@@ -60,6 +61,7 @@ const BUYS_CHANNELS_META: Record<'yes' | 'likely' | 'unknown', { label: string; 
 
 /** На новых данных должность может нести audience_side; на старых поля нет. */
 type JobTitleRow = VeJobTitle & { audience_side?: string };
+type ContentPanel = 'chain' | 'vocab' | 'dossier';
 
 /** Объектные A/B-варианты письма; легаси-строки старого формата отбрасываем. */
 function abVariants(letter: VeChainLetterDto): VeLetterVariant[] {
@@ -147,6 +149,7 @@ export function Step3Content(props: {
     onBuildDossier,
   } = props;
   const [language, setLanguage] = useState<VeChainLanguage>('ru');
+  const [activePanel, setActivePanel] = useState<ContentPanel>('chain');
 
   const chain = useMemo(
     () => latestByCreatedAt(chains.filter((c) => c.vertical_id === vertical.id)),
@@ -352,21 +355,55 @@ export function Step3Content(props: {
   const dossierReady = !dossierBusy && dossier?.status === 'ready' && dossier.data ? dossier.data : null;
 
   return (
-    <div className="space-y-5">
+    <div className="max-w-6xl space-y-5">
       {/* Контекст шага */}
-      <header>
+      <header className="border-b border-gray-200 pb-5">
         <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-lg font-bold text-gray-900">{vertical.name}</h2>
+          <h2 className={HE.sectionTitle}>{vertical.name}</h2>
           <PotentialBadge pct={vertical.potential_pct} />
         </div>
-        <p className="mt-1 text-sm text-gray-500">
+        <p className={`mt-1 ${HE.lead}`}>
           Черновые материалы под это направление. Боевой текст собирается на шаге 4–5 из загруженной
           базы.
         </p>
       </header>
 
+      <div className="flex gap-5 overflow-x-auto border-b border-gray-200" role="tablist" aria-label="Материалы вертикали">
+        {([
+          { id: 'chain' as const, label: 'Цепочка писем', ready: Boolean(chain), busy: chainBusy },
+          { id: 'vocab' as const, label: 'Вокабуляр', ready: Boolean(vocab), busy: vocabBusy },
+          { id: 'dossier' as const, label: 'Досье', ready: Boolean(dossierReady), busy: dossierBusy },
+        ]).map((item) => (
+          <button
+            key={item.id}
+            id={`ve-content-tab-${item.id}`}
+            type="button"
+            role="tab"
+            aria-selected={activePanel === item.id}
+            aria-controls={`ve-content-panel-${item.id}`}
+            onClick={() => {
+              if (requestEditorExit('leaveStep')) setActivePanel(item.id);
+            }}
+            className={`flex shrink-0 items-center gap-2 border-b-2 px-0.5 pb-2.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
+              activePanel === item.id
+                ? 'border-blue-600 text-blue-700'
+                : 'border-transparent text-gray-500 hover:text-gray-900'
+            }`}
+          >
+            <StatusDot tone={item.busy ? 'info' : item.ready ? 'ok' : 'muted'} className={item.busy ? 'motion-safe:animate-pulse' : undefined} />
+            {item.label}
+          </button>
+        ))}
+      </div>
+
       {/* Блок A: цепочка писем (черновик) */}
-      <section className={`${HE.card} ${HE.cardPad}`}>
+      <section
+        id="ve-content-panel-chain"
+        role="tabpanel"
+        aria-labelledby="ve-content-tab-chain"
+        hidden={activePanel !== 'chain'}
+        className={`${HE.card} ${HE.cardPad}`}
+      >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -385,7 +422,7 @@ export function Step3Content(props: {
               onChange={(e) => setLanguage(e.target.value as VeChainLanguage)}
               disabled={chainBusy}
               aria-label="Язык цепочки"
-              className="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs font-medium text-gray-600 transition focus:border-blue-400 focus:outline-none disabled:opacity-50"
+              className="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs font-medium text-gray-600 transition focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100 disabled:opacity-50"
             >
               {LANG_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>
@@ -399,7 +436,7 @@ export function Step3Content(props: {
                 if (requestEditorExit('regenerate')) onGenerateChain(language);
               }}
               disabled={chainBusy}
-              className={`${HE.btnGhost} inline-flex items-center justify-center gap-1.5`}
+              className={HE.btnGhost}
             >
               {chainBusy ? <Spinner className="h-3.5 w-3.5" /> : null}
               {chainFailed ? 'Попробовать снова' : chain ? 'Перегенерировать' : 'Сгенерировать'}
@@ -464,7 +501,7 @@ export function Step3Content(props: {
               return (
                 <li key={idx} className={`${HE.card} p-4`}>
                   <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                    <span className={`${HE.muted2} text-[11px] font-medium uppercase tracking-wider`}>
+                    <span className={`${HE.muted2} text-[11px] font-medium uppercase`}>
                       Письмо {idx + 1}
                       {letter.wait_days > 0 ? ` · через ${letter.wait_days} дн.` : ''}
                     </span>
@@ -481,7 +518,10 @@ export function Step3Content(props: {
                         aria-label="Скопировать письмо"
                         className={HE.btnQuiet}
                       >
-                        {copiedIdx === idx ? '✓' : 'Скопировать'}
+                        <span className="inline-flex items-center gap-1.5">
+                          <Copy aria-hidden className="h-3.5 w-3.5" />
+                          {copiedIdx === idx ? 'Скопировано' : 'Скопировать'}
+                        </span>
                       </button>
                       <button
                         type="button"
@@ -517,7 +557,7 @@ export function Step3Content(props: {
                         ))}
                       </div>
                       {view === 0 ? (
-                        <span className="text-[10px] font-medium uppercase tracking-wide text-gray-500">
+                        <span className="text-[10px] font-medium uppercase text-gray-500">
                           основной
                         </span>
                       ) : (
@@ -549,7 +589,7 @@ export function Step3Content(props: {
               type="button"
               onClick={() => void addLetter()}
               disabled={lettersSaving || chainBusy || letters.length >= 6}
-              className={`${HE.btnGhost} inline-flex items-center justify-center gap-1.5`}
+              className={HE.btnGhost}
             >
               {lettersSaving ? <Spinner className="h-3.5 w-3.5" /> : null}
               Добавить письмо
@@ -564,7 +604,13 @@ export function Step3Content(props: {
       </section>
 
       {/* Блок B: вокабуляр для сбора базы */}
-      <section className={`${HE.card} ${HE.cardPad}`}>
+      <section
+        id="ve-content-panel-vocab"
+        role="tabpanel"
+        aria-labelledby="ve-content-tab-vocab"
+        hidden={activePanel !== 'vocab'}
+        className={`${HE.card} ${HE.cardPad}`}
+      >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <h3 className={HE.secTitle}>Вокабуляр для сбора базы</h3>
@@ -577,7 +623,7 @@ export function Step3Content(props: {
             type="button"
             onClick={onGenerateVocab}
             disabled={vocabBusy}
-            className={`${HE.btnGhost} shrink-0 inline-flex items-center justify-center gap-1.5`}
+            className={`shrink-0 ${HE.btnGhost}`}
           >
             {vocabBusy ? <Spinner className="h-3.5 w-3.5" /> : null}
             {vocabFailed ? 'Попробовать снова' : vocab ? 'Перегенерировать' : 'Сгенерировать'}
@@ -613,7 +659,13 @@ export function Step3Content(props: {
       </section>
 
       {/* Блок C: досье вертикали — объективные числа сегмента */}
-      <section className={`${HE.card} ${HE.cardPad}`}>
+      <section
+        id="ve-content-panel-dossier"
+        role="tabpanel"
+        aria-labelledby="ve-content-tab-dossier"
+        hidden={activePanel !== 'dossier'}
+        className={`${HE.card} ${HE.cardPad}`}
+      >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <h3 className={HE.secTitle}>Досье вертикали</h3>
@@ -626,7 +678,7 @@ export function Step3Content(props: {
               type="button"
               onClick={onBuildDossier}
               disabled={dossierBusy}
-              className={`${HE.btnGhost} shrink-0 inline-flex items-center justify-center gap-1.5`}
+              className={`shrink-0 ${HE.btnGhost}`}
             >
               {dossierBusy ? <Spinner className="h-3.5 w-3.5" /> : null}
               {dossierFailed ? 'Попробовать снова' : dossierReady ? 'Пересобрать' : 'Собрать досье'}
@@ -669,7 +721,8 @@ export function Step3Content(props: {
           }}
           className={HE.btnPrimary}
         >
-          Далее: загрузить базу →
+          Далее: база
+          <ArrowRight aria-hidden className="h-4 w-4" />
         </button>
       </div>
     </div>
@@ -733,9 +786,9 @@ function ChainLetterEditor({
     totalDays === 0 ? 'Сразу' : `через ${totalDays} ${daysWord(totalDays)} от старта`;
 
   return (
-    <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-4">
+    <div className={`rounded-lg border-blue-200 p-4 ${HE.infoPanel}`}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <span className={`${HE.muted2} text-[11px] font-medium uppercase tracking-wider`}>
+        <span className={`${HE.muted2} text-[11px] font-medium uppercase`}>
           Письмо {letterIndex + 1}
         </span>
         <p className="text-sm font-semibold text-gray-900">Редактирование письма</p>
@@ -763,7 +816,7 @@ function ChainLetterEditor({
       </div>
 
       <label className="block">
-        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-widest text-gray-500">
+        <span className={`mb-1 block ${HE.eyebrow}`}>
           Тема письма
         </span>
         <input
@@ -777,7 +830,7 @@ function ChainLetterEditor({
         />
       </label>
       <label className="mt-3 block">
-        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-widest text-gray-500">
+        <span className={`mb-1 block ${HE.eyebrow}`}>
           Текст письма
         </span>
         <textarea
@@ -824,7 +877,7 @@ function ChainLetterEditor({
 function DossierNum({ value, caption }: { value: string; caption: string }) {
   return (
     <div>
-      <p className="text-2xl font-bold tabular-nums text-gray-900">{value}</p>
+      <p className="text-[22px] font-semibold tabular-nums text-gray-900">{value}</p>
       <p className="text-[11px] text-gray-500">{caption}</p>
     </div>
   );

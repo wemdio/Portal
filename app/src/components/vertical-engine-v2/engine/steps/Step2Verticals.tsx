@@ -15,6 +15,7 @@
  */
 
 import { useMemo, useState, type JSX } from 'react';
+import { ArrowRight } from 'lucide-react';
 import type {
   VeHypothesis,
   VeHypothesisTier,
@@ -267,7 +268,7 @@ export function Step2Verticals({
 
   if (sorted.length === 0) {
     return (
-      <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50/50 p-10 text-center">
+      <div className={HE.emptyState}>
         <p className="text-sm font-medium text-gray-500">Вертикалей пока нет</p>
         <p className={`mt-1 text-xs ${HE.muted}`}>
           Дождитесь окончания исследования — направления появятся здесь.
@@ -277,14 +278,26 @@ export function Step2Verticals({
   }
 
   return (
-    <div className="grid items-start gap-4 xl:grid-cols-2">
-      <p className={`xl:col-span-2 ${HE.lead}`}>
-        Движок нашёл {sorted.length} {pluralDirections(sorted.length)}. Выберите одно — под него соберём письма,
-        вокабуляр и шаблон.
-      </p>
+    <div className="max-w-6xl space-y-5">
+      <header className="border-b border-gray-200 pb-5">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 className={HE.sectionTitle}>Найденные направления</h2>
+            <p className={`mt-1 ${HE.lead}`}>
+              {sorted.length} {pluralDirections(sorted.length)}. Сравните потенциал и доказательства,
+              затем выберите один фокус для писем и базы.
+            </p>
+          </div>
+          {selectedVerticalId ? (
+            <span className="rounded-md bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
+              Направление выбрано
+            </span>
+          ) : null}
+        </div>
+      </header>
 
       {/* Фильтр гипотез внутри карточек + свёртка всех карточек разом */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 xl:col-span-2">
+      <div className="sticky top-14 z-10 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-gray-200 bg-white/95 p-2 backdrop-blur-md">
         <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Фильтр гипотез">
           {FILTER_CHIPS.map((chip) => (
             <button
@@ -300,7 +313,7 @@ export function Step2Verticals({
             </button>
           ))}
         </div>
-        <div className="ml-auto flex items-center gap-3">
+        <div className="ml-auto flex items-center gap-3 px-1">
           <button
             type="button"
             onClick={() => setCollapsedIds(new Set(sorted.map((v) => v.id)))}
@@ -314,26 +327,28 @@ export function Step2Verticals({
         </div>
       </div>
 
-      {sorted.map((vertical) => (
-        <VerticalCard
-          key={vertical.id}
-          vertical={vertical}
-          hypotheses={hypothesesByVertical.get(vertical.id) ?? []}
-          filter={filter}
-          collapsed={collapsedIds.has(vertical.id)}
-          onToggleCollapsed={() => toggleCollapsed(vertical.id)}
-          selected={vertical.id === selectedVerticalId}
-          buildNote={vertical.id === selectedVerticalId && buildActive}
-          dossier={readyDossierByVertical.get(vertical.id) ?? null}
-          chain={readyChainByVertical.get(vertical.id) ?? null}
-          vocabReady={readyVocabVerticals.has(vertical.id)}
-          bases={basesByVertical.get(vertical.id) ?? []}
-          templateReady={readyTemplateVerticals.has(vertical.id)}
-          baseHypothesisIds={baseHypothesisIds}
-          onSelectVertical={onSelectVertical}
-          onPatchHypothesis={onPatchHypothesis}
-        />
-      ))}
+      <div className="space-y-3">
+        {sorted.map((vertical) => (
+          <VerticalCard
+            key={vertical.id}
+            vertical={vertical}
+            hypotheses={hypothesesByVertical.get(vertical.id) ?? []}
+            filter={filter}
+            collapsed={collapsedIds.has(vertical.id)}
+            onToggleCollapsed={() => toggleCollapsed(vertical.id)}
+            selected={vertical.id === selectedVerticalId}
+            buildNote={vertical.id === selectedVerticalId && buildActive}
+            dossier={readyDossierByVertical.get(vertical.id) ?? null}
+            chain={readyChainByVertical.get(vertical.id) ?? null}
+            vocabReady={readyVocabVerticals.has(vertical.id)}
+            bases={basesByVertical.get(vertical.id) ?? []}
+            templateReady={readyTemplateVerticals.has(vertical.id)}
+            baseHypothesisIds={baseHypothesisIds}
+            onSelectVertical={onSelectVertical}
+            onPatchHypothesis={onPatchHypothesis}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -409,9 +424,7 @@ function VerticalCard({
   const busy = busyAction !== null;
 
   return (
-    <article
-      className={`${HE.card} p-5 transition ${selected ? 'border-blue-500! ring-1 ring-blue-500/40' : ''}`}
-    >
+    <article className={`${HE.card} p-5 transition ${selected ? 'border-blue-500! ring-1 ring-blue-500/40' : ''}`}>
       {/* Шапка: rank, название, потенциал, выбор, массовые действия, свёртка */}
       <div className="flex flex-wrap items-center gap-2">
         {vertical.rank != null ? <span className={HE.rankNum}>{vertical.rank}</span> : null}
@@ -484,9 +497,7 @@ function VerticalCard({
       {!collapsed ? (
         <>
           {vertical.summary ? (
-            <p
-              className={`mt-2 text-[13px] leading-relaxed text-gray-600 ${showDetails ? '' : 'line-clamp-2'}`}
-            >
+            <p className={`mt-2 text-[13px] leading-relaxed text-gray-600 ${showDetails ? '' : 'line-clamp-2'}`}>
               {vertical.summary}
             </p>
           ) : null}
@@ -558,7 +569,7 @@ function VerticalCard({
               disabled={selected}
               className={
                 selected
-                  ? 'inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-5 text-sm font-medium text-emerald-700'
+                  ? `inline-flex h-11 w-full items-center justify-center gap-2 px-5 text-sm font-medium text-emerald-700 ${HE.successPanel}`
                   : `w-full ${HE.btnPrimary}`
               }
             >
@@ -568,7 +579,10 @@ function VerticalCard({
                   Выбрано
                 </>
               ) : (
-                'Выбрать это направление →'
+                <>
+                  Выбрать направление
+                  <ArrowRight aria-hidden className="h-4 w-4" />
+                </>
               )}
             </button>
             {buildNote ? (

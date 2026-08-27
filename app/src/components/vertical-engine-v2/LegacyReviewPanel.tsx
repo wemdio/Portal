@@ -29,7 +29,7 @@ export function LegacyReviewPanel({
 
   return (
     <div className="space-y-5">
-      <div className="rounded-2xl border border-red-200 bg-red-50 p-5">
+      <div className="rounded-lg border border-red-200 bg-red-50 p-5">
         <h2 className="text-sm font-semibold text-red-900">
           Ручная проверка обязательна
         </h2>
@@ -46,7 +46,7 @@ export function LegacyReviewPanel({
         value={query}
         onChange={(event) => setQuery(event.target.value)}
         placeholder="Поиск по названию, сайту, статусу или рынку"
-        className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none transition focus:border-slate-500"
+        className="w-full rounded-md border border-slate-300 bg-white px-4 py-3 text-sm outline-none transition focus:border-slate-500"
       />
 
       <div className="space-y-3">
@@ -55,7 +55,7 @@ export function LegacyReviewPanel({
           return (
             <article
               key={candidate.id}
-              className="rounded-2xl border border-slate-200 bg-white p-5"
+              className="rounded-lg border border-slate-200 bg-white p-5"
             >
               <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-start">
                 <div className="min-w-0">
@@ -104,7 +104,7 @@ export function LegacyReviewPanel({
                       type="button"
                       disabled={isBusy}
                       onClick={() => void onRemove(candidate)}
-                      className="w-full rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:border-red-300 hover:text-red-700 disabled:opacity-50"
+                      className="w-full rounded-md border border-slate-300 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:border-red-300 hover:text-red-700 disabled:opacity-50"
                     >
                       {isBusy ? 'Удаляем…' : 'Убрать из архива'}
                     </button>
@@ -120,7 +120,7 @@ export function LegacyReviewPanel({
                           }))
                         }
                         placeholder="Основание проверки (обязательно)"
-                        className="w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm outline-none transition focus:border-slate-500"
+                        className="w-full rounded-md border border-slate-300 px-3 py-2.5 text-sm outline-none transition focus:border-slate-500"
                       />
                       <button
                         type="button"
@@ -128,7 +128,7 @@ export function LegacyReviewPanel({
                         onClick={() =>
                           void onApprove(candidate, (notes[candidate.id] ?? '').trim())
                         }
-                        className="w-full rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+                        className="w-full rounded-md bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         {isBusy ? 'Добавляем…' : 'Подтвердить внутренний проект'}
                       </button>
@@ -142,7 +142,7 @@ export function LegacyReviewPanel({
       </div>
 
       {filtered.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">
+        <div className="rounded-lg border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">
           Ничего не найдено.
         </div>
       ) : null}

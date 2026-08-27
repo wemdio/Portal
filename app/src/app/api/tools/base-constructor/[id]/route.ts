@@ -5,6 +5,7 @@ import { blockDemo } from '@/lib/auth/blockDemo';
 import { withToolTrace } from '@/lib/toolTrace';
 import { extractEmail, findColumnIndex } from '@/lib/tools/dfybUtils';
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
+import { stripEnrichCheckpointMetadata } from '@/lib/tools/baseConstructorCheckpoint';
 
 const admin = supabaseAdmin!;
 
@@ -63,7 +64,7 @@ async function autoCompleteIfStuck(jobId: string): Promise<void> {
 
   // Случай 1: финальный шаг, > 2 минут — пересчитываем stats и завершаем.
   if (isLastStep && elapsedMs >= FINAL_STUCK_AFTER_MS) {
-    const data = (row.data as string[][] | null) ?? [];
+    const data = stripEnrichCheckpointMetadata((row.data as string[][] | null) ?? []);
     if (data.length < 2) return;
     const header = data[0] ?? [];
     const body = data.slice(1);
@@ -78,6 +79,7 @@ async function autoCompleteIfStuck(jobId: string): Promise<void> {
     await admin
       .from('base_constructor_jobs')
       .update({
+        data,
         status: 'completed',
         completed_at: new Date().toISOString(),
         current_step_key: 'done',
