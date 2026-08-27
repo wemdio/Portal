@@ -32,6 +32,7 @@ import {
   LayoutDashboard,
 } from 'lucide-react';
 import DashboardTab from '@/components/tg-outreach/DashboardTab';
+import BaseComparison from '@/components/tg-outreach/BaseComparison';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
 import type {
   CampaignStatus,
@@ -58,6 +59,11 @@ import {
 } from '@/lib/tgOutreach/autoForward';
 import { DEFAULT_MAX_MESSAGE_CHARS } from '@/lib/tgOutreach/firstTouch/validateMessage';
 import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
+import {
+  takenProxyUrls,
+  selectableProxies,
+  proxyOptionsFor,
+} from '@/lib/tgOutreach/proxySelection';
 import {
   describeSending,
   describeProxy,
@@ -1990,6 +1996,8 @@ function CampaignAccountsTab({
 }) {
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   const [proxies, setProxies] = useState<OutreachProxy[]>([]);
+  /** Адреса прокси, занятые аккаунтами по всему порталу (не только этой кампании). */
+  const [takenUrls, setTakenUrls] = useState<string[]>([]);
   const [errorCounts, setErrorCounts] = useState<
     Record<string, { error: number; warning: number; account_id: string }>
   >({});
@@ -2037,17 +2045,31 @@ function CampaignAccountsTab({
   /**
    * Прокси, которые ещё никому не назначены.
    *
-   * Занятость по экрану не читается, и один и тот же мобильный прокси легко
-   * уходил двум аккаунтам — для Telegram это одно устройство с двумя аккаунтами,
-   * то есть прямой повод для блокировки. Поэтому занятых в выпадающем списке
-   * просто нет. Считаем в пределах кампании: прокси заводятся ей же, и список
-   * аккаунтов на экране — тоже её; сверять весь портал значило бы тянуть с
-   * сервера чужие кампании ради подсказки.
+   * Ключ занятости — АДРЕС, а не строка в базе, и берётся он по всему порталу.
+   *
+   * По id и в пределах кампании это ломалось двумя способами сразу. Один и тот
+   * же адрес заведён несколькими строками (598 записей на 532 адреса, дубли
+   * есть и внутри одной кампании): назначил первую — вторая оставалась
+   * «свободной» и тут же предлагалась следующему аккаунту, хотя это тот же
+   * прокси. И отдельно: 66 адресов заведены в двух кампаниях, так что занятый
+   * в соседней здесь числился свободным.
+   *
+   * Для Telegram один адрес — это одно устройство: два аккаунта на нём прямой
+   * повод для блокировки, ради экономии запроса такое допускать нельзя.
+   *
+   * `takenUrls` приходит с сервера (портал целиком), к нему добавляем то, что
+   * назначено прямо сейчас на этом экране: между назначением и перезагрузкой
+   * списка оператор успевает открыть следующую строку.
    */
-  const freeProxies = useMemo(() => {
-    const taken = new Set(accounts.map(a => a.proxy_id).filter((v): v is string => Boolean(v)));
-    return proxies.filter(p => !taken.has(p.id));
-  }, [accounts, proxies]);
+  const takenUrlSet = useMemo(
+    () => takenProxyUrls({ serverTakenUrls: takenUrls, accounts, proxies }),
+    [takenUrls, accounts, proxies],
+  );
+
+  const freeProxies = useMemo(
+    () => selectableProxies(proxies, takenUrlSet),
+    [proxies, takenUrlSet],
+  );
 
   /**
    * Варианты для строки аккаунта: свободные плюс его собственный прокси.
@@ -2056,12 +2078,7 @@ function CampaignAccountsTab({
    * выпадашка выглядела бы как «прокси сбросился».
    */
   const proxyOptions = useCallback(
-    (currentId: string | null) => {
-      const current = currentId ? proxies.find(p => p.id === currentId) : null;
-      return current && !freeProxies.some(p => p.id === current.id)
-        ? [current, ...freeProxies]
-        : freeProxies;
-    },
+    (currentId: string | null) => proxyOptionsFor(currentId, proxies, freeProxies),
     [freeProxies, proxies],
   );
 
@@ -2081,8 +2098,9 @@ function CampaignAccountsTab({
       setAccounts(d.items);
     }
     if (proxRes.ok) {
-      const d = await proxRes.json() as { items: OutreachProxy[] };
+      const d = await proxRes.json() as { items: OutreachProxy[]; taken_urls?: string[] };
       setProxies(d.items);
+      setTakenUrls(d.taken_urls ?? []);
     }
     if (errRes.ok) {
       const d = await errRes.json() as {
@@ -2599,6 +2617,17 @@ function CampaignAccountsTab({
             </span>
           )}
 
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${freeProxies.length > 0 ? 'bg-gray-100 text-gray-600' : 'bg-amber-50 text-amber-700'}`}
+            title={
+              `Прокси в кампании: ${proxies.length}. Свободных — ${freeProxies.length}: только они и предлагаются при назначении. `
+              + 'Занятость считается по адресу и по всему порталу — один адрес это одно устройство для Telegram, '
+              + 'и два аккаунта на нём это повод для блокировки.'
+            }
+          >
+            свободных прокси {freeProxies.length} из {proxies.length}
+          </span>
+
           <span className="ml-auto text-[10px] text-gray-400">
             {accountStats.newestCheck === null ? (
               'проверок ещё не было — «жив» и «не жив» показывать не из чего'
@@ -2793,7 +2822,7 @@ function CampaignAccountsTab({
         </div>
       ) : (
         <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[32px_44px_minmax(0,1.1fr)_126px_120px_minmax(220px,1fr)_138px_60px_64px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_60px_64px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <SelectAllCheckbox total={accounts.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span />
             <span>Аккаунт</span>
@@ -2832,7 +2861,7 @@ function CampaignAccountsTab({
             return (
               <div
                 key={a.id}
-                className={`grid grid-cols-[32px_44px_minmax(0,1.1fr)_126px_120px_minmax(220px,1fr)_138px_60px_64px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
+                className={`grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_60px_64px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
               >
                 <input
                   type="checkbox"
@@ -3556,9 +3585,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   const [editingChatsFor, setEditingChatsFor] = useState<string | null>(null);
   const [chatsDraft, setChatsDraft] = useState('');
   const [savingChats, setSavingChats] = useState(false);
-  /** База, у которой открыто меню «скачать» (формат выбирают в нём). */
-  const [exportMenuFor, setExportMenuFor] = useState<string | null>(null);
-  /** `<id базы>:<формат>` пока файл собирается на сервере. */
+  /** id базы, пока её файл собирается на сервере. */
   const [exporting, setExporting] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -3666,18 +3693,20 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   };
 
   /**
-   * Скачать базу файлом.
+   * Скачать базу файлом Excel.
+   *
+   * Формат не спрашиваем: выбор между xlsx и csv — лишний шаг там, где ответ
+   * всегда один, а роут при необходимости отдаёт и `format=csv`.
    *
    * Через `fetch`, а не обычной ссылкой: роут закрыт токеном, а `<a href>` его
    * не передаёт. Имя файла берём из `Content-Disposition` — там оно с
    * кириллицей и датой выгрузки.
    */
-  const downloadBase = async (base: OutreachBase, format: 'xlsx' | 'csv') => {
-    setExportMenuFor(null);
-    setExporting(`${base.id}:${format}`);
+  const downloadBase = async (base: OutreachBase) => {
+    setExporting(base.id);
     setError(null); setNotice(null);
     try {
-      const res = await authFetch(`${API_BASE}/bases/${base.id}/export?format=${format}`);
+      const res = await authFetch(`${API_BASE}/bases/${base.id}/export?format=xlsx`);
       if (!res.ok) {
         const d = (await res.json().catch(() => null)) as { error?: string } | null;
         setError(d?.error ?? `Не удалось выгрузить базу (${res.status})`);
@@ -3688,7 +3717,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       const ascii = /filename="?([^";]+)"?/i.exec(cd);
       const filename = utf8
         ? decodeURIComponent(utf8[1])
-        : (ascii?.[1] ?? `${base.name}.${format}`);
+        : (ascii?.[1] ?? `${base.name}.xlsx`);
 
       const url = URL.createObjectURL(await res.blob());
       const a = document.createElement('a');
@@ -3700,38 +3729,24 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   };
 
   /**
-   * Кнопка «скачать» с выбором формата — одна и та же в обоих списках баз.
+   * Кнопка «скачать» — одна и та же в обоих списках баз.
    *
    * Функция, а не вложенный компонент: вложенный пересоздавался бы на каждый
-   * ререндер вкладки и ронял бы открытое меню.
+   * ререндер вкладки.
    */
   const exportButton = (base: OutreachBase) => (
-    <div className="relative">
-      <button
-        type="button"
-        onClick={() => setExportMenuFor(exportMenuFor === base.id ? null : base.id)}
-        disabled={exporting !== null || base.counts.total === 0}
-        title={base.counts.total === 0 ? 'В базе нет контактов' : 'Скачать базу файлом — Excel или CSV'}
-        aria-label={`Скачать базу ${base.name}`}
-        className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent"
-      >
-        {exporting?.startsWith(`${base.id}:`)
-          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          : <Download className="h-3.5 w-3.5" />}
-      </button>
-      {exportMenuFor === base.id && (
-        <div className="absolute right-0 top-full z-20 mt-1 w-40 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
-          <button type="button" onClick={() => { void downloadBase(base, 'xlsx'); }}
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer">
-            <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600" /> Excel (.xlsx)
-          </button>
-          <button type="button" onClick={() => { void downloadBase(base, 'csv'); }}
-            className="flex w-full items-center gap-2 border-t border-gray-100 px-3 py-2 text-left text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer">
-            <ScrollText className="h-3.5 w-3.5 text-gray-400" /> CSV
-          </button>
-        </div>
-      )}
-    </div>
+    <button
+      type="button"
+      onClick={() => { void downloadBase(base); }}
+      disabled={exporting !== null || base.counts.total === 0}
+      title={base.counts.total === 0 ? 'В базе нет контактов' : 'Скачать базу в Excel'}
+      aria-label={`Скачать базу ${base.name}`}
+      className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent"
+    >
+      {exporting === base.id
+        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        : <Download className="h-3.5 w-3.5" />}
+    </button>
   );
 
   const deleteBase = async (base: OutreachBase) => {
@@ -3951,6 +3966,16 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
             );
           })}
         </div>
+      )}
+
+      {/* Сравнение — под списком: сначала оператор видит, какие базы вообще
+          есть и что с ними, и только потом сравнивает две из них. Обратный
+          порядок заставлял бы выбирать вслепую. */}
+      {!loading && bases.length > 0 && (
+        <BaseComparison
+          campaignId={campaignId}
+          bases={bases.map((b) => ({ id: b.id, name: b.name }))}
+        />
       )}
 
       {/* Наследство старой модели: кнопка «Создать базу» кампанию не спрашивала,
