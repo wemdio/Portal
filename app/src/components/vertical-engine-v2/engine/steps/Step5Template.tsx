@@ -8,6 +8,7 @@
  */
 
 import { useCallback, useMemo, useState, type JSX } from 'react';
+import { Copy, Download, Rocket, Sparkles } from 'lucide-react';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
 import { renderTemplatePreview, type VePreviewToken } from '@/lib/verticalEngineV2/renderPreview';
 import {
@@ -25,7 +26,7 @@ import {
   type SegmentationAuditController,
 } from './SegmentationAuditPanel';
 
-const TH_CLASS = 'px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-gray-500';
+const TH_CLASS = 'px-3 py-2 text-left text-[11px] font-semibold uppercase text-gray-500';
 
 function templateToText(t: VeTemplate): string {
   const parts: string[] = [`ФИКСИРОВАННЫЙ БЛОК (85%):\n${t.fixed_block}`];
@@ -588,6 +589,7 @@ export function Step5Template(props: {
           {base?.filename ? ` «${base.filename}»` : ''} и расставит операторы персонализации.
         </p>
         <button type="button" onClick={onBuildTemplate} className={`${HE.btnPrimary} mt-4`}>
+          <Sparkles aria-hidden className="h-4 w-4" />
           Собрать шаблон
         </button>
       </div>
@@ -601,8 +603,8 @@ export function Step5Template(props: {
   const baseOverLaunchLimit = (base?.row_count ?? 0) > VE_LAUNCH_MAX_LEADS;
 
   return (
-    <div className="space-y-5">
-      <header className="flex flex-wrap items-start justify-between gap-3">
+    <div className="max-w-6xl space-y-5">
+      <header className="flex flex-wrap items-start justify-between gap-4 border-b border-gray-200 pb-5">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h2 className={HE.sectionTitle}>Шаблон 85/15</h2>
@@ -633,6 +635,7 @@ export function Step5Template(props: {
               aria-disabled={baseOverLaunchLimit || launch.formOpen}
               className={`${HE.btnPrimary} ${launch.formOpen ? 'cursor-default opacity-70' : ''}`}
             >
+              <Rocket aria-hidden className="h-4 w-4" />
               {launch.formOpen
                 ? segmentationAudit.phase === 'loading'
                   ? 'Проверяем сегментацию…'
@@ -643,9 +646,11 @@ export function Step5Template(props: {
             </button>
           ) : null}
           <button type="button" onClick={handleCopy} className={HE.btnGhost}>
-            {copied ? '✓ Скопировано' : 'Скопировать'}
+            <Copy aria-hidden className="h-4 w-4" />
+            {copied ? 'Скопировано' : 'Скопировать'}
           </button>
           <button type="button" onClick={handleDownload} className={HE.btnGhost}>
+            <Download aria-hidden className="h-4 w-4" />
             Скачать JSON
           </button>
         </div>
@@ -666,11 +671,11 @@ export function Step5Template(props: {
       <TemplateLeadPreview template={template} baseId={base?.id ?? template.base_id} />
 
       {/* Финальные письма */}
-      <ol className="max-w-3xl space-y-3">
+      <ol className="max-w-4xl space-y-3">
         {template.letters.map((letter, idx) => (
           <li key={idx} className={`${HE.card} p-4`}>
             <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-              <span className={`${HE.muted2} text-[11px] font-medium uppercase tracking-wider`}>
+              <span className={`${HE.muted2} text-[11px] font-medium uppercase`}>
                 Письмо {idx + 1}
                 {letter.wait_days > 0 ? ` · через ${letter.wait_days} дн.` : ''}
               </span>
@@ -686,7 +691,10 @@ export function Step5Template(props: {
                 aria-label="Скопировать письмо"
                 className={`ml-auto ${HE.btnQuiet}`}
               >
-                {copiedLetterIdx === idx ? '✓' : 'Скопировать'}
+                <span className="inline-flex items-center gap-1.5">
+                  <Copy aria-hidden className="h-3.5 w-3.5" />
+                  {copiedLetterIdx === idx ? 'Скопировано' : 'Скопировать'}
+                </span>
               </button>
             </div>
             <OperatorText

@@ -1,5 +1,6 @@
 'use client';
 
+import { ArrowLeft } from 'lucide-react';
 import type {
   VeLegacyProjectDetail,
   VeLegacyProjectSummary,
@@ -23,7 +24,7 @@ function recordId(row: Record<string, unknown>, index: number): string {
 
 function Stat({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
+    <div className="rounded-lg border border-slate-200 bg-white px-4 py-3">
       <div className="text-2xl font-semibold text-slate-950">{value}</div>
       <div className="mt-1 text-xs text-slate-500">{label}</div>
     </div>
@@ -32,7 +33,7 @@ function Stat({ label, value }: { label: string; value: number }) {
 
 function EmptyArchive() {
   return (
-    <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-6 py-12 text-center">
+    <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-6 py-12 text-center">
       <p className="text-sm font-semibold text-slate-800">Архив пока пуст</p>
       <p className="mx-auto mt-2 max-w-lg text-sm leading-6 text-slate-500">
         В архив попадают только проекты, которые администратор вручную подтвердил как
@@ -57,7 +58,7 @@ export function LegacyArchivePanel({
 }) {
   if (detailLoading) {
     return (
-      <div className="rounded-2xl border border-slate-200 bg-white p-8 text-sm text-slate-500">
+      <div className="rounded-lg border border-slate-200 bg-white p-8 text-sm text-slate-500">
         Загружаем read-only снимок старого прогона…
       </div>
     );
@@ -72,7 +73,7 @@ export function LegacyArchivePanel({
             key={project.id}
             type="button"
             onClick={() => onSelect(project.id)}
-            className="rounded-2xl border border-slate-200 bg-white p-5 text-left transition hover:border-slate-300 hover:shadow-sm motion-safe:hover:-translate-y-0.5 motion-safe:active:scale-[0.99]"
+            className="rounded-lg border border-slate-200 bg-white p-5 text-left transition hover:border-slate-300 hover:bg-slate-50 motion-safe:active:scale-[0.99]"
           >
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
@@ -103,12 +104,13 @@ export function LegacyArchivePanel({
       <button
         type="button"
         onClick={onBack}
-        className="text-sm font-medium text-slate-600 hover:text-slate-950"
+        className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-600 hover:text-slate-950"
       >
-        ← Назад к архиву
+        <ArrowLeft aria-hidden className="h-4 w-4" />
+        Назад к архиву
       </button>
 
-      <section className="rounded-2xl border border-amber-200 bg-amber-50/70 p-5">
+      <section className="rounded-lg border border-amber-200 bg-amber-50/70 p-5">
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
           <div>
             <div className="flex flex-wrap items-center gap-2">
@@ -142,7 +144,7 @@ export function LegacyArchivePanel({
         <Stat label="Джоб" value={detail.jobs.length} />
       </div>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5">
+      <section className="rounded-lg border border-slate-200 bg-white p-5">
         <h3 className="text-sm font-semibold text-slate-950">Вертикали</h3>
         {detail.verticals.length === 0 ? (
           <p className="mt-3 text-sm text-slate-500">Вертикалей нет.</p>
@@ -151,7 +153,7 @@ export function LegacyArchivePanel({
             {detail.verticals.map((vertical, index) => (
               <div
                 key={recordId(vertical, index)}
-                className="rounded-xl border border-slate-200 p-4"
+                className="rounded-lg border border-slate-200 p-4"
               >
                 <div className="flex items-start justify-between gap-3">
                   <p className="text-sm font-semibold text-slate-900">
@@ -174,7 +176,7 @@ export function LegacyArchivePanel({
         )}
       </section>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5">
+      <section className="rounded-lg border border-slate-200 bg-white p-5">
         <h3 className="text-sm font-semibold text-slate-950">Гипотезы</h3>
         {detail.hypotheses.length === 0 ? (
           <p className="mt-3 text-sm text-slate-500">Гипотез нет.</p>
@@ -183,10 +185,10 @@ export function LegacyArchivePanel({
             {detail.hypotheses.map((hypothesis, index) => (
               <div
                 key={recordId(hypothesis, index)}
-                className="rounded-xl border border-slate-200 px-4 py-3"
+                className="rounded-lg border border-slate-200 px-4 py-3"
               >
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                  <span className="text-[11px] font-semibold uppercase text-slate-400">
                     T{String(hypothesis.tier ?? '—')}
                   </span>
                   <p className="text-sm font-medium text-slate-900">
@@ -209,7 +211,7 @@ export function LegacyArchivePanel({
         )}
       </section>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5">
+      <section className="rounded-lg border border-slate-200 bg-white p-5">
         <h3 className="text-sm font-semibold text-slate-950">Письма и шаблоны</h3>
         {detail.chains.length === 0 && detail.templates.length === 0 ? (
           <p className="mt-3 text-sm text-slate-500">Материалов нет.</p>
@@ -220,8 +222,8 @@ export function LegacyArchivePanel({
                 ? (chain.letters as Array<Record<string, unknown>>)
                 : [];
               return (
-                <div key={recordId(chain, index)} className="rounded-xl bg-slate-50 p-4">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                <div key={recordId(chain, index)} className="rounded-lg bg-slate-50 p-4">
+                  <p className="text-xs font-semibold uppercase text-slate-500">
                     Цепочка · {text(chain.language, 'язык не указан')} · {letters.length}{' '}
                     писем
                   </p>
@@ -246,7 +248,7 @@ export function LegacyArchivePanel({
             {detail.templates.map((template, index) => (
               <div
                 key={recordId(template, index)}
-                className="flex items-center justify-between rounded-xl border border-slate-200 px-4 py-3 text-sm"
+                className="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-3 text-sm"
               >
                 <span className="font-medium text-slate-800">
                   Шаблон {index + 1}
@@ -258,7 +260,7 @@ export function LegacyArchivePanel({
         )}
       </section>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5">
+      <section className="rounded-lg border border-slate-200 bg-white p-5">
         <h3 className="text-sm font-semibold text-slate-950">Базы</h3>
         {detail.bases.length === 0 ? (
           <p className="mt-3 text-sm text-slate-500">Баз нет.</p>

@@ -7,6 +7,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { ArrowRight, Globe2, Plus, TriangleAlert, X } from 'lucide-react';
 import type { VeProject } from '@/lib/verticalEngineV2/types';
 import {
   VE_API,
@@ -33,15 +34,15 @@ function pluralRu(n: number, one: string, few: string, many: string): string {
 /** Скелетон карточки проекта — повторяет форму настоящей карточки. */
 function ProjectCardSkeleton() {
   return (
-    <div className={`${HE.card} ${HE.cardPad}`} aria-hidden>
-      <div className="flex items-start justify-between gap-3">
+    <div className="grid min-h-20 grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-gray-200 px-4 py-3 last:border-b-0" aria-hidden>
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="h-9 w-9 shrink-0 rounded-md bg-gray-100 motion-safe:animate-pulse" />
         <div className="space-y-2">
-          <div className="h-3.5 w-36 rounded bg-gray-200 motion-safe:animate-pulse" />
+          <div className="h-3.5 w-40 rounded bg-gray-200 motion-safe:animate-pulse" />
           <div className="h-3 w-24 rounded bg-gray-100 motion-safe:animate-pulse" />
         </div>
-        <div className="h-5 w-16 rounded-md bg-gray-100 motion-safe:animate-pulse" />
       </div>
-      <div className="mt-7 h-3 w-20 rounded bg-gray-100 motion-safe:animate-pulse" />
+      <div className="h-5 w-16 rounded-md bg-gray-100 motion-safe:animate-pulse" />
     </div>
   );
 }
@@ -138,168 +139,180 @@ export function VeEngineWorkspace({
   }
 
   return (
-    <div className="space-y-9 text-left">
-      {/* Шапку и хлебные крошки даёт оболочка (VerticalEngineV2View) — здесь сразу контент. */}
+    <div className="text-left">
+      {errorMsg ? <div className="mb-5"><StatusBox tone="error">{errorMsg}</StatusBox></div> : null}
 
-      {/* Быстрое создание проекта */}
-      <section className={`${HE.card} ${HE.cardPad}`}>
-        <h2 className={HE.sectionTitle}>Новый проект</h2>
-        <p className={`mt-1 ${HE.muted}`}>
-          Укажите сайт клиента — движок соберёт рынки, гипотезы, письма и шаблон.
-        </p>
-        <div className="mt-4 flex flex-col gap-2.5 sm:flex-row">
-          <label htmlFor="he-website" className="sr-only">
-            Сайт клиента
-          </label>
-          <input
-            id="he-website"
-            type="text"
-            value={websiteUrl}
-            onChange={(e) => setWebsiteUrl(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void handleCreate();
-            }}
-            placeholder="Сайт клиента: acme.com"
-            disabled={creating}
-            className={`${HE.input} flex-1`}
-          />
-          <label htmlFor="he-project-name" className="sr-only">
-            Название проекта (необязательно)
-          </label>
-          <input
-            id="he-project-name"
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void handleCreate();
-            }}
-            placeholder="Название (необязательно)"
-            disabled={creating}
-            className={`${HE.input} sm:w-60`}
-          />
-          <button
-            type="button"
-            onClick={() => void handleCreate()}
-            disabled={creating || !websiteUrl.trim()}
-            className={`${HE.btnPrimary} inline-flex shrink-0 items-center justify-center gap-2`}
-          >
-            {creating ? <Spinner className="h-3.5 w-3.5" /> : null}
-            Создать проект
-          </button>
-        </div>
-        <p className={`mt-3 ${HE.faint}`}>
-          После создания откроется страница проекта: там запускается исследование (5–15 минут).
-        </p>
-      </section>
+      <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_360px] lg:items-start">
+        <section className="min-w-0">
+          <div className="mb-4 flex items-end justify-between gap-4">
+            <div>
+              <h2 className={HE.sectionTitle}>Рабочие проекты</h2>
+              <p className={`mt-1 ${HE.muted}`}>
+                Продолжайте с этапа, на котором остановились.
+              </p>
+            </div>
+            {!listLoading ? (
+              <span className={HE.faint}>
+                {projects.length} {pluralRu(projects.length, 'проект', 'проекта', 'проектов')}
+              </span>
+            ) : null}
+          </div>
 
-      {errorMsg && <StatusBox tone="error">{errorMsg}</StatusBox>}
-
-      {pendingConflict ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-md rounded-2xl border border-amber-200 bg-white p-6 shadow-xl">
-            <h3 className="text-base font-semibold text-gray-900">
-              Этот сайт уже прогоняли в v1
-            </h3>
-            <p className="mt-2 text-sm text-gray-600">
-              В Движке вертикалей v1 уже есть {pendingConflict.legacy_projects?.length ?? 0} прогон(ов)
-              для домена {pendingConflict.domain ?? ''}:
-            </p>
-            <ul className="mt-2 space-y-1">
-              {(pendingConflict.legacy_projects ?? []).map((p) => (
-                <li key={p.id} className="text-sm text-gray-500">
-                  {p.name || p.website_url}
+          {listLoading ? (
+            <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+              {[1, 2, 3].map((i) => (
+                <ProjectCardSkeleton key={i} />
+              ))}
+            </div>
+          ) : projects.length === 0 ? (
+            <div className={`${HE.emptyState} flex min-h-[320px] flex-col items-center justify-center`}>
+              <Globe2 aria-hidden className="mb-4 h-8 w-8 text-gray-300" />
+              <p className={HE.cardTitle}>Здесь появятся проекты</p>
+              <p className={`mt-2 max-w-sm ${HE.lead}`}>
+                Добавьте сайт клиента в панели справа. Первый этап начнётся внутри проекта.
+              </p>
+            </div>
+          ) : (
+            <ul className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+              {projects.map((p) => (
+                <li key={p.id} className="border-b border-gray-200 last:border-b-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedId(p.id);
+                      onProjectOpenChange?.(true);
+                    }}
+                    className="group grid min-h-20 w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-4 py-3 text-left transition hover:bg-gray-50/80 active:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400 sm:grid-cols-[minmax(0,1fr)_auto_auto] md:grid-cols-[minmax(0,1fr)_140px_150px_20px]"
+                  >
+                    <span className="flex min-w-0 items-center gap-3">
+                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-gray-100 text-gray-500">
+                        <Globe2 aria-hidden className="h-4 w-4" />
+                      </span>
+                      <span className="min-w-0">
+                        <span className={`block truncate ${HE.cardTitle}`}>
+                          {prettyProjectName(p.name, p.website_url)}
+                        </span>
+                        <span className={`mt-0.5 block truncate ${HE.faint}`}>
+                          {prettyHost(p.website_url)}
+                        </span>
+                        <span className="mt-2 inline-flex sm:hidden">
+                          <ProjectStatusBadge status={p.status} />
+                        </span>
+                      </span>
+                    </span>
+                    <span className="hidden sm:block md:text-left">
+                      <ProjectStatusBadge status={p.status} />
+                    </span>
+                    <span className={`hidden md:block ${HE.faint}`}>
+                      Создан {formatDate(p.created_at)}
+                    </span>
+                    <ArrowRight
+                      aria-hidden
+                      className="h-4 w-4 text-gray-300 transition group-hover:translate-x-0.5 group-hover:text-gray-700"
+                    />
+                  </button>
                 </li>
               ))}
             </ul>
-            <div className="mt-5 flex justify-end gap-3">
-              <button
-                type="button"
-                onClick={() => setPendingConflict(null)}
-                disabled={creating}
-                className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
-              >
-                Отмена
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleConfirmCreate()}
-                disabled={creating}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-              >
-                Всё равно создать в v2
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+          )}
+        </section>
 
-      {/* Список проектов */}
-      <section>
-        <div className="mb-4 flex items-baseline justify-between gap-3">
-          <h2 className={HE.sectionTitle}>Проекты</h2>
-          {!listLoading && projects.length > 0 ? (
-            <span className={HE.faint}>
-              {projects.length} {pluralRu(projects.length, 'проект', 'проекта', 'проектов')}
-            </span>
-          ) : null}
-        </div>
-
-        {listLoading ? (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {[1, 2, 3].map((i) => (
-              <ProjectCardSkeleton key={i} />
-            ))}
-          </div>
-        ) : projects.length === 0 ? (
-          <div className="flex min-h-[240px] flex-col items-center justify-center rounded-2xl border border-dashed border-gray-300 bg-gray-50/50 px-10 py-12 text-center">
-            <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-full border border-gray-200 bg-white text-lg text-gray-300">
-              +
+        <aside className="order-first lg:order-last lg:sticky lg:top-6">
+          <section className="rounded-lg border border-gray-200 bg-gray-50/70 p-5">
+            <div className="flex items-start gap-3">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-gray-900 text-white">
+                <Plus aria-hidden className="h-4 w-4" />
+              </span>
+              <div>
+                <h2 className={HE.sectionTitle}>Новый проект</h2>
+                <p className={`mt-1 ${HE.muted}`}>
+                  Достаточно сайта. Название можно добавить для удобства команды.
+                </p>
+              </div>
             </div>
-            <p className={HE.cardTitle}>Проектов пока нет</p>
-            <p className={`mt-1.5 max-w-sm ${HE.lead}`}>
-              Создайте первый проект выше: укажите сайт клиента. Движок соберёт рынки, гипотезы,
-              письма и шаблон.
-            </p>
-          </div>
-        ) : (
-          <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {projects.map((p) => (
-              <li key={p.id}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedId(p.id);
-                    onProjectOpenChange?.(true);
+
+            <div className="mt-5 space-y-4">
+              <label htmlFor="he-website" className="block">
+                <span className="mb-1.5 block text-xs font-medium text-gray-700">Сайт клиента</span>
+                <input
+                  id="he-website"
+                  type="text"
+                  value={websiteUrl}
+                  onChange={(e) => setWebsiteUrl(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void handleCreate();
                   }}
-                  className={`${HE.card} ${HE.cardPad} ${HE.cardHover} group flex w-full flex-col text-left transition-all active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300`}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className={`truncate ${HE.cardTitle}`}>
-                        {prettyProjectName(p.name, p.website_url)}
+                  placeholder="acme.com"
+                  disabled={creating}
+                  className={HE.input}
+                />
+              </label>
+              <label htmlFor="he-project-name" className="block">
+                <span className="mb-1.5 block text-xs font-medium text-gray-700">
+                  Название <span className="font-normal text-gray-400">необязательно</span>
+                </span>
+                <input
+                  id="he-project-name"
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void handleCreate();
+                  }}
+                  placeholder="Например, Acme RU"
+                  disabled={creating}
+                  className={HE.input}
+                />
+              </label>
+
+              {pendingConflict ? (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                  <div className="flex items-start gap-2">
+                    <TriangleAlert aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs font-semibold text-amber-800">Сайт уже прогоняли в v1</p>
+                      <p className="mt-1 text-xs leading-5 text-amber-700">
+                        Найдено {pendingConflict.legacy_projects?.length ?? 0} прогон(ов) для{' '}
+                        {pendingConflict.domain ?? 'этого домена'}.
                       </p>
-                      {p.name?.trim() ? (
-                        <p className={`mt-1 truncate ${HE.faint}`}>{prettyHost(p.website_url)}</p>
-                      ) : null}
                     </div>
-                    <ProjectStatusBadge status={p.status} />
-                  </div>
-                  <div className="mt-6 flex items-center justify-between gap-2">
-                    <span className={HE.faint}>Создан {formatDate(p.created_at)}</span>
-                    <span
-                      aria-hidden
-                      className="text-sm leading-none text-gray-300 transition group-hover:translate-x-0.5 group-hover:text-blue-500 group-hover:opacity-100"
+                    <button
+                      type="button"
+                      onClick={() => setPendingConflict(null)}
+                      aria-label="Закрыть предупреждение"
+                      title="Закрыть"
+                      className="rounded p-0.5 text-amber-700 hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
                     >
-                      →
-                    </span>
+                      <X aria-hidden className="h-4 w-4" />
+                    </button>
                   </div>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+                  <button
+                    type="button"
+                    onClick={() => void handleConfirmCreate()}
+                    disabled={creating}
+                    className="mt-3 text-xs font-semibold text-amber-800 underline underline-offset-2 hover:text-amber-950"
+                  >
+                    Всё равно создать в v2
+                  </button>
+                </div>
+              ) : null}
+
+              <button
+                type="button"
+                onClick={() => void handleCreate()}
+                disabled={creating || !websiteUrl.trim()}
+                className={`${HE.btnPrimary} w-full`}
+              >
+                {creating ? <Spinner className="h-3.5 w-3.5" /> : <Plus aria-hidden className="h-4 w-4" />}
+                Создать проект
+              </button>
+            </div>
+            <p className={`mt-3 ${HE.faint}`}>
+              Исследование запускается отдельно внутри проекта и занимает 10–20 минут.
+            </p>
+          </section>
+        </aside>
+      </div>
     </div>
   );
 }

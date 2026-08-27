@@ -11,6 +11,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
+import { ArrowRight, Database, Upload } from 'lucide-react';
 import type {
   VeBaseAnalysis,
   VeDistributionEntry,
@@ -39,6 +40,7 @@ const COLLECT_POLL_MS = 4000;
 
 /** Лимит строк автосборки — выбор пользователя; route валидирует те же значения. */
 type CollectLimit = 2000 | 10000 | 50000;
+type BaseMode = 'auto' | 'upload';
 const COLLECT_LIMITS: readonly CollectLimit[] = [2000, 10000, 50000];
 const DEFAULT_COLLECT_LIMIT: CollectLimit = 10000;
 
@@ -84,6 +86,7 @@ export function Step4Base(props: {
     onGoToTemplate,
   } = props;
 
+  const [baseMode, setBaseMode] = useState<BaseMode>('auto');
   const [parsed, setParsed] = useState<ParsedFile | null>(null);
   const [parsing, setParsing] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -376,16 +379,52 @@ export function Step4Base(props: {
   }, [latestBase, templateBusy, onTemplateStarted]);
 
   return (
-    <div className="space-y-5">
+    <div className="max-w-6xl space-y-5">
       <p className={HE.lead}>
-        Загрузите CSV или XLSX с контактами под эту вертикаль (до{' '}
-        {CLIENT_LAUNCH_ROW_LIMIT.toLocaleString('ru-RU')} строк). Движок разберёт состав базы и
-        подготовит финальный шаблон.
+        Выберите способ подготовки контактов под вертикаль. После анализа базы можно собрать
+        финальный шаблон.
       </p>
 
+      <div className="grid grid-cols-2 gap-1 rounded-lg border border-gray-200 bg-gray-50 p-1" role="tablist" aria-label="Способ подготовки базы">
+        <button
+          id="ve-base-tab-auto"
+          type="button"
+          role="tab"
+          aria-selected={baseMode === 'auto'}
+          aria-controls="ve-base-panel-auto"
+          onClick={() => setBaseMode('auto')}
+          className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
+            baseMode === 'auto' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'
+          }`}
+        >
+          <Database aria-hidden className="h-4 w-4" />
+          Собрать автоматически
+        </button>
+        <button
+          id="ve-base-tab-upload"
+          type="button"
+          role="tab"
+          aria-selected={baseMode === 'upload'}
+          aria-controls="ve-base-panel-upload"
+          onClick={() => setBaseMode('upload')}
+          className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
+            baseMode === 'upload' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'
+          }`}
+        >
+          <Upload aria-hidden className="h-4 w-4" />
+          Загрузить файл
+        </button>
+      </div>
+
       {/* Автосборка базы под вертикаль */}
-      <section className={`${HE.card} ${HE.cardPad}`}>
-        <p className={HE.secTitle}>Или соберите автоматически</p>
+      <section
+        id="ve-base-panel-auto"
+        role="tabpanel"
+        aria-labelledby="ve-base-tab-auto"
+        hidden={baseMode !== 'auto'}
+        className={`${HE.card} ${HE.cardPad}`}
+      >
+        <p className={HE.secTitle}>Автосбор под выбранные гипотезы</p>
         <p className={`mt-1 text-xs ${HE.muted}`}>
           Движок сам подберёт источники: реестр компаний, hh.ru, карты — и соберёт базу под это
           направление.
@@ -396,7 +435,7 @@ export function Step4Base(props: {
           <div className="mt-3">
             {collectFailed ? (
               <p className="mb-2 text-sm text-red-600" role="alert">
-                Автосборка завершилась ошибкой. Попробуйте ещё раз или загрузите файл вручную ниже.
+                Автосборка завершилась ошибкой. Попробуйте ещё раз или переключитесь на загрузку файла.
               </p>
             ) : null}
             {verticalHypotheses.length > 0 ? (
@@ -459,7 +498,19 @@ export function Step4Base(props: {
       </section>
 
       {/* Загрузка файла */}
-      <section className={`${HE.card} ${HE.cardPad}`}>
+      <section
+        id="ve-base-panel-upload"
+        role="tabpanel"
+        aria-labelledby="ve-base-tab-upload"
+        hidden={baseMode !== 'upload'}
+        className={`${HE.card} ${HE.cardPad}`}
+      >
+        <div className="mb-4">
+          <p className={HE.secTitle}>Файл с готовыми контактами</p>
+          <p className={`mt-1 text-xs ${HE.muted}`}>
+            CSV, TSV или XLSX, до {CLIENT_LAUNCH_ROW_LIMIT.toLocaleString('ru-RU')} строк.
+          </p>
+        </div>
         <button
           type="button"
           disabled={parsing}
@@ -534,7 +585,7 @@ export function Step4Base(props: {
                     {parsed.columns.map((col) => (
                       <th
                         key={col}
-                        className="whitespace-nowrap px-3 py-2 text-left font-semibold uppercase tracking-wider text-gray-500"
+                        className="whitespace-nowrap px-3 py-2 text-left font-semibold uppercase text-gray-500"
                       >
                         {col}
                       </th>
@@ -604,10 +655,11 @@ export function Step4Base(props: {
       ) : null}
 
       {/* Переход к шаблону */}
-      <section className={`${HE.card} ${HE.cardPad} flex flex-wrap items-center gap-3`}>
+      <section className="flex flex-wrap items-center gap-3 rounded-lg border border-gray-200 bg-gray-50/70 p-4">
         {templateDone ? (
           <button type="button" onClick={onGoToTemplate} className={HE.btnPrimary}>
-            Перейти к шаблону →
+            Перейти к шаблону
+            <ArrowRight aria-hidden className="h-4 w-4" />
           </button>
         ) : (
           <button
@@ -617,7 +669,8 @@ export function Step4Base(props: {
             className={`${HE.btnPrimary} inline-flex items-center justify-center gap-2`}
           >
             {templateBusy ? <Spinner /> : null}
-            {templateBusy ? 'Собираем шаблон…' : 'Собрать шаблон →'}
+            {templateBusy ? 'Собираем шаблон…' : 'Собрать шаблон'}
+            {!templateBusy ? <ArrowRight aria-hidden className="h-4 w-4" /> : null}
           </button>
         )}
         {templateBusy ? (
@@ -784,7 +837,7 @@ function BaseCard({ base, hypothesisTitle }: { base: VeBaseSummary; hypothesisTi
                 {columns.map((col) => (
                   <th
                     key={col}
-                    className="whitespace-nowrap px-3 py-1.5 text-left font-semibold uppercase tracking-wider text-gray-500"
+                    className="whitespace-nowrap px-3 py-1.5 text-left font-semibold uppercase text-gray-500"
                   >
                     {col}
                   </th>

@@ -38,7 +38,7 @@ export function Badge({
   return (
     <span
       title={title}
-      className={`inline-flex items-center gap-1 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${BADGE_TONE_CLASS[tone]}`}
+      className={`inline-flex items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[10px] font-bold uppercase ${BADGE_TONE_CLASS[tone]}`}
     >
       {children}
     </span>
@@ -59,7 +59,7 @@ export function StatusBox({
     : 'border-gray-200 bg-blue-50/40 text-gray-600';
   return (
     <div
-      className={`flex items-start gap-2.5 rounded-xl border px-4 py-3 text-sm ${toneClass}`}
+      className={`flex items-start gap-2.5 rounded-lg border px-4 py-3 text-sm ${toneClass}`}
       role={isError ? 'alert' : undefined}
     >
       <StatusDot tone={isError ? 'err' : 'info'} className="mt-[7px] shrink-0" />
