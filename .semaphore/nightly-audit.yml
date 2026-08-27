@@ -28,7 +28,12 @@ blocks:
             - checkout
             - sem-version node 22
             - cd app
-            - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json), node-modules'
+            # Ключи те же, что в semaphore.yml (без имени ветки), иначе ночной
+            # прогон промахивается мимо кэша, наполненного дневными пушами.
+            - 'cache restore node-modules-$(checksum package-lock.json),node-modules-'
+            # Без этого postinstall («playwright install chromium») качает ~150 МБ
+            # с CDN каждую ночь ради проверки, которой браузер вообще не нужен.
+            - 'cache restore playwright-$(checksum package-lock.json),playwright-'
             # Те же ретраи, что в semaphore.yml: postinstall тянет бинарники со
             # сторонних хостов, и ECONNRESET на них — не повод будить команду
             # ночным красным аудитом.
