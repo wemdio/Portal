@@ -7,6 +7,27 @@ agent:
 execution_time_limit:
   hours: 3
 
+# ─── Не дожигать устаревшие прогоны ──────────────────────────────────────────
+# Semaphore считает минуты как сумму по всем джобам, а не по времени «от и до»,
+# поэтому серия быстрых пушей оплачивается как столько же полных прогонов,
+# хотя полезен из них только последний.
+#   - ветки: отменяем и очередь, и уже запущенное — обратная связь по коммиту,
+#     который уже перезаписан следующим, никому не нужна;
+#   - main: только очередь. Начатую сборку образа прерывать нельзя — деплой
+#     тянет :prod и должен получить готовый образ, а не половину.
+auto_cancel:
+  running:
+    when: "branch != 'main'"
+  queued:
+    when: "branch = 'main'"
+
+# Упавший линт больше не даёт соседней джобе докрутить свою сборку в никуда.
+# На main не включаем: если упала сборка portal, сборка worker обязана дойти
+# до конца, иначе следующий деплой не получит свежий образ воркера.
+fail_fast:
+  stop:
+    when: "branch != 'main'"
+
 # ─── Сборка образов: параллельные блоки + change_in + registry-кэш ────────────
 # Было: 13 образов паровозиком в одной джобе (~10 мин на каждый пуш в main).
 # Стало:
@@ -43,7 +64,20 @@ blocks:
           - 'if [ -d "${ROOT_DIR}/app" ]; then APP_PATH="${ROOT_DIR}/app"; else APP_REL_PATH=$(find "${ROOT_DIR}" -type d -name "app" -not -path "*/node_modules/*" | head -n1); if [ -n "$APP_REL_PATH" ]; then APP_PATH="$APP_REL_PATH"; else echo "app folder not found!"; exit 1; fi; fi'
           - echo "APP_PATH=$APP_PATH" >> /tmp/env_vars
           - cd $APP_PATH
-          - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json), node-modules'
+          # Ключ без имени ветки: package-lock.json и так однозначно определяет
+          # содержимое node_modules, а $SEMAPHORE_GIT_BRANCH плодил отдельную
+          # копию на каждую ветку. Квота кэша забивалась дублями, старые записи
+          # вытеснялись, и новая ветка регулярно промахивалась мимо уже готовых
+          # зависимостей и ставила их с нуля.
+          - 'cache restore node-modules-$(checksum package-lock.json),node-modules-'
+          # Браузеры Playwright лежат ВНЕ node_modules ($HOME/.cache/ms-playwright)
+          # и до сих пор не кэшировались вообще. При этом postinstall проекта
+          # (`patch-package && playwright install chromium`) выполняется при
+          # КАЖДОМ `npm install` — в том числе когда node_modules целиком подняты
+          # из кэша. То есть ~150 МБ качались с CDN на каждом прогоне, и дважды
+          # за пуш, потому что prologue выполняется в каждой джобе блока.
+          # С кэшем `playwright install` видит готовый браузер и выходит сразу.
+          - 'cache restore playwright-$(checksum package-lock.json),playwright-'
           # npm install с ретраями. Установка ходит в сеть не только за
           # тарболами npm: postinstall тянет бинарники со сторонних хостов —
           # ffmpeg-static качает ~80 МБ с GitHub Releases, `playwright install
@@ -60,7 +94,10 @@ blocks:
           # ветка, смена package-lock.json) загрузка случается, и она обязана
           # переживать разрыв соединения.
           - 'i=1; until npm install; do if [ $i -ge 3 ]; then echo "npm install не прошёл 3 раза подряд — это не флап сети, разбираться руками"; exit 1; fi; echo "npm install упал (попытка $i из 3), повтор через $((i*15))с"; sleep $((i*15)); i=$((i+1)); done'
-          - cache store node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json) node_modules
+          # Ключи в Semaphore не перезаписываются: повторный store с тем же
+          # ключом — no-op, поэтому обе джобы блока могут звать его безопасно.
+          - 'cache store node-modules-$(checksum package-lock.json) node_modules'
+          - 'if [ -d "$HOME/.cache/ms-playwright" ]; then cache store playwright-$(checksum package-lock.json) "$HOME/.cache/ms-playwright"; fi'
       # Две параллельные джобы вместо паровозика: сборка (самый долгий шаг,
       # ~2-2.5 мин) идёт одновременно с линтом/типами/тестами. Время блока =
       # самая долгая джоба, а не сумма шагов. node_modules у обеих из кэша
@@ -76,25 +113,47 @@ blocks:
             - npm run lint
             # Раздельные incremental-кэши для проекта и Next route validator.
             # Протухший кэш безопасен — tsc сверяет файлы по содержимому.
-            - 'cache restore tsc-v2-$SEMAPHORE_GIT_BRANCH,tsc-v2-'
+            #
+            # Недельная ротация в ключе. Semaphore НЕ перезаписывает
+            # существующие ключи, а прежний ключ tsc-v2-<ветка> был постоянным:
+            # первый прогон ветки клал кэш, все следующие store были no-op, и
+            # инкрементальный кэш навсегда замирал на состоянии первого дня —
+            # чем дальше ветка уезжала, тем больше файлов tsc считал заново.
+            # Теперь свежий кэш кладётся раз в неделю, а restore по префиксу
+            # поднимает самый недавний подходящий.
+            - 'cache restore tsc-v3-$SEMAPHORE_GIT_BRANCH-$(date +%G%V),tsc-v3-$SEMAPHORE_GIT_BRANCH-,tsc-v3-'
             # Общий сценарий используется также production Docker-сборкой:
             # typegen и два tsc идут отдельными процессами и не суммируют heap.
             - npm run typecheck:strict
-            - 'cache store tsc-v2-$SEMAPHORE_GIT_BRANCH .next/cache/tsc'
+            - 'cache store tsc-v3-$SEMAPHORE_GIT_BRANCH-$(date +%G%V) .next/cache/tsc'
             # npm audit переехал в ночной прогон (.semaphore/nightly-audit.yml):
             # на каждом пуше он ходил в интернет и изредка подвисал/флапал.
-            - npm test -- --watchAll=false
+            #
+            # Кэш трансформации jest (689 тестовых файлов) раньше не сохранялся
+            # вовсе: он лежит в /tmp и умирает вместе с машиной, так что каждый
+            # прогон перекомпилировал все тесты с нуля.
+            # --maxWorkers=2: у e1-standard-2 два ядра, а jest по умолчанию
+            # берёт cpus-1 = 1 воркер и гоняет весь набор последовательно.
+            # --workerIdleMemoryLimit перезапускает раздувшийся воркер, чтобы
+            # два процесса не вышли за физические 4 ГБ runner-а.
+            - 'cache restore jest-$SEMAPHORE_GIT_BRANCH-$(date +%G%V),jest-$SEMAPHORE_GIT_BRANCH-,jest-'
+            - 'npm test -- --watchAll=false --maxWorkers=2 --workerIdleMemoryLimit=1200MB --cacheDirectory=.jest-cache'
+            - 'cache store jest-$SEMAPHORE_GIT_BRANCH-$(date +%G%V) .jest-cache'
         - name: 'Next build'
           commands:
             - source /tmp/env_vars
             - cd $APP_PATH
             - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
-            - 'cache restore nextjs-$SEMAPHORE_GIT_BRANCH,nextjs-'
+            # Недельная ротация ключа — та же причина, что у tsc-кэша выше:
+            # постоянный ключ nextjs-<ветка> означал, что .next/cache навсегда
+            # застывал на первом прогоне ветки и сборка переставала быть
+            # инкрементальной.
+            - 'cache restore nextjs-v2-$SEMAPHORE_GIT_BRANCH-$(date +%G%V),nextjs-v2-$SEMAPHORE_GIT_BRANCH-,nextjs-v2-'
             # next typegen + строгий tsc выполняются соседней обязательной job.
             # Next здесь пропускает только повторную проверку типов, иначе она
             # после успешной компиляции упирается в физические 4 ГБ runner-а.
             - 'NEXT_BUILD_SKIP_TYPECHECK=1 npm run build'
-            - 'cache store nextjs-$SEMAPHORE_GIT_BRANCH .next/cache'
+            - 'cache store nextjs-v2-$SEMAPHORE_GIT_BRANCH-$(date +%G%V) .next/cache'
 
   - name: Build portal
     dependencies: []
