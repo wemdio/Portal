@@ -11,6 +11,7 @@ import {
   weekStart,
   firstReplyAt,
   usernameKey,
+  parseSourceChats,
   type ReportInput,
 } from '@/lib/tgOutreach/report';
 
@@ -28,7 +29,6 @@ const base = (over: Partial<ReportInput> = {}): ReportInput => ({
   tzOffsetHours: TZ,
   dialogs: [],
   contacts: [],
-  parserJobs: [],
   bases: [],
   ...over,
 });
@@ -90,18 +90,83 @@ describe('buildCampaignReport — раздел 1', () => {
   it('разносит события по своим неделям', () => {
     const r = buildCampaignReport(base({
       contacts: [
-        { base_id: 'b', username: 'a', status: 'sent', created_at: iso(MON), sent_at: iso(MON + HOUR), raw: null },
-        { base_id: 'b', username: 'c', status: 'sent', created_at: iso(MON), sent_at: iso(MON + 8 * DAY), raw: null },
-      ],
-      parserJobs: [
-        { completed_at: iso(MON + 2 * DAY), links_count: 4 },
-        { completed_at: iso(MON + 9 * DAY), links_count: 3 },
+        { base_id: 'b', username: 'a', status: 'sent', created_at: iso(MON), sent_at: iso(MON + HOUR), raw: { 'Ссылка на источник': 'https://t.me/chat_one' } },
+        { base_id: 'b', username: 'c', status: 'sent', created_at: iso(MON), sent_at: iso(MON + 8 * DAY), raw: { 'Ссылка на источник': 'https://t.me/chat_two' } },
+        { base_id: 'b', username: 'd', status: 'pending', created_at: iso(MON + 8 * DAY), sent_at: null, raw: { 'Ссылка на источник': 'https://t.me/chat_three' } },
       ],
     }));
 
-    expect(r.weeks[0]).toMatchObject({ delivered: 1, chats: 4, contacts: 2 });
-    expect(r.weeks[1]).toMatchObject({ delivered: 1, chats: 3, contacts: 0 });
-    expect(r.total).toMatchObject({ delivered: 2, chats: 7 });
+    expect(r.weeks[0]).toMatchObject({ delivered: 1, chats: 2, contacts: 2 });
+    expect(r.weeks[1]).toMatchObject({ delivered: 1, chats: 1, contacts: 1 });
+    expect(r.total).toMatchObject({ delivered: 2, chats: 3, contacts: 3 });
+  });
+
+  describe('обработанные чаты', () => {
+    const contact = (username: string, source: unknown, at = MON) => ({
+      base_id: 'b', username, status: 'sent',
+      created_at: iso(at), sent_at: iso(at), raw: source === undefined ? null : { 'Ссылка на источник': source },
+    });
+
+    it('один чат в разных написаниях считается один раз', () => {
+      const r = buildCampaignReport(base({
+        contacts: [
+          contact('a', 'https://t.me/atol_chat'),
+          contact('b', 't.me/atol_chat/'),
+          contact('c', '@atol_chat'),
+          contact('d', 'ATOL_CHAT'),
+        ],
+      }));
+      expect(r.total.chats).toBe(1);
+    });
+
+    it('контакты есть, источник не указан — прочерк, а не ноль', () => {
+      const r = buildCampaignReport(base({ contacts: [contact('a', undefined), contact('b', '  ')] }));
+      // Ноль читался бы клиентом как «чаты не обрабатывали», хотя их просто не
+      // записали в файл выгрузки.
+      expect(r.total.chats).toBeNull();
+    });
+
+    it('контактов нет вовсе — честный ноль', () => {
+      expect(buildCampaignReport(base()).total.chats).toBe(0);
+    });
+
+    it('складывает чаты, объявленные у базы, с теми, что пришли в файле', () => {
+      const r = buildCampaignReport(base({
+        contacts: [contact('a', 'https://t.me/chat_one')],
+        bases: [{ id: 'b', name: 'Гипотеза 1', source_chats: 'https://t.me/chat_one\nt.me/chat_two\n@chat_three' }],
+      }));
+      // chat_one объявлен и у базы, и в файле — это один чат, не два.
+      expect(r.total.chats).toBe(3);
+    });
+
+    it('чаты базы, в которую за период ничего не грузили, не считаются', () => {
+      const r = buildCampaignReport(base({
+        contacts: [{ ...contact('a', 'https://t.me/chat_one'), base_id: 'b1' }],
+        bases: [
+          { id: 'b1', name: 'Работающая', source_chats: 'https://t.me/chat_one' },
+          // Гипотеза прошлого месяца: её чаты в этой неделе были бы припиской.
+          { id: 'b2', name: 'Прошлая', source_chats: 'https://t.me/old_a\nhttps://t.me/old_b' },
+        ],
+      }));
+      expect(r.total.chats).toBe(1);
+    });
+
+    it('чаты базы заполняют «Канал/чат» в разделе офферов', () => {
+      const r = buildCampaignReport(base({
+        bases: [{ id: 'b', name: 'Гипотеза 1', source_chats: ' https://t.me/a \n\n@b ' }],
+      }));
+      expect(r.offers[0].channel).toBe('https://t.me/a\n@b');
+    });
+
+    it('берёт и «Название источника», и «Источник»', () => {
+      const r = buildCampaignReport(base({
+        contacts: [
+          { base_id: 'b', username: 'a', status: 'sent', created_at: iso(MON), sent_at: iso(MON), raw: { 'Название источника': 'chat_a' } },
+          { base_id: 'b', username: 'b', status: 'sent', created_at: iso(MON), sent_at: iso(MON), raw: { 'Источник': 'chat_b' } },
+        ],
+      }));
+      expect(r.total.chats).toBe(2);
+    });
   });
 
   it('считает ответы, лиды и блокировки', () => {
@@ -234,5 +299,26 @@ describe('usernameKey', () => {
     expect(usernameKey('@Ivanov')).toBe('ivanov');
     expect(usernameKey(' IVANOV ')).toBe('ivanov');
     expect(usernameKey(null)).toBe('');
+  });
+});
+
+
+describe('parseSourceChats', () => {
+  it('режет по строкам, запятым и точкам с запятой', () => {
+    expect(parseSourceChats('https://t.me/a\nt.me/b, @c; d')).toEqual([
+      'https://t.me/a', 't.me/b', '@c', 'd',
+    ]);
+  });
+
+  it('один и тот же чат в разных написаниях остаётся один', () => {
+    // Оператор вставляет ссылки из парсера как есть, и один чат легко попадает
+    // в список дважды — «обработано чатов» от этого расти не должно.
+    expect(parseSourceChats('https://t.me/atol\n@atol\nATOL/')).toEqual(['https://t.me/atol']);
+  });
+
+  it('пусто — пустой список, а не строка из пустоты', () => {
+    expect(parseSourceChats('')).toEqual([]);
+    expect(parseSourceChats(null)).toEqual([]);
+    expect(parseSourceChats('  \n , ; ')).toEqual([]);
   });
 });

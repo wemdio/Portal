@@ -102,22 +102,40 @@ export default function DashboardFunnel({ funnel }: { funnel: FunnelStage[] }) {
   const theme = useChartTheme(rootRef);
   const reducedMotion = usePrefersReducedMotion();
 
-  const option = useMemo(
-    () => (theme ? buildOption(funnel, theme, !reducedMotion) : null),
-    [funnel, theme, reducedMotion],
-  );
+  /**
+   * С какой ступени рисовать.
+   *
+   * Первая ступень — «Контактов в базе» — считает контакты, ЗАГРУЖЕННЫЕ за
+   * период, а не лежащие в базе. Базу заливают один раз, поэтому в любом окне
+   * короче её возраста здесь честный ноль, и всю воронку это прятало: на ATOL
+   * 27.08.2026 вкладка «7 дней» показывала «контактов нет», хотя за те же семь
+   * дней ушло больше двухсот сообщений, пришло сорок ответов и семнадцать
+   * человек стали лидами. Оператор читал это как «лидов нет».
+   *
+   * Поэтому пустыми ступенями в начале воронку не открываем: пропускаем их и
+   * говорим словами, что базу за период не пополняли. Скрывать воронку целиком
+   * можно только когда пусты вообще все ступени.
+   */
+  const { visible, skipped, empty } = useMemo(() => {
+    const firstNonZero = funnel.findIndex((s) => s.value > 0);
+    return {
+      visible: firstNonZero <= 0 ? funnel : funnel.slice(firstNonZero),
+      skipped: firstNonZero > 0 ? funnel.slice(0, firstNonZero) : [],
+      empty: firstNonZero === -1,
+    };
+  }, [funnel]);
 
-  // Первая ступень — «Контактов в базе» за период. Ноль здесь значит, что
-  // смотреть вообще не на что, а не «всё сорвалось на первом шаге»: рисовать
-  // пустую воронку в этом случае только запутывает.
-  const empty = (funnel[0]?.value ?? 0) === 0;
+  const option = useMemo(
+    () => (theme ? buildOption(visible, theme, !reducedMotion) : null),
+    [visible, theme, reducedMotion],
+  );
 
   return (
     <div ref={rootRef} className="rounded-xl border border-gray-200 bg-white p-4">
       <h3 className="mb-1 text-sm font-semibold text-gray-800">Воронка</h3>
       {empty ? (
         <div className="px-3 py-10 text-center text-sm text-gray-400">
-          За выбранный период контактов нет.
+          За выбранный период не было ни одного события: ни загрузок в базу, ни отправок, ни ответов.
         </div>
       ) : option ? (
         <div className="mx-auto w-full max-w-[680px]">
@@ -126,6 +144,12 @@ export default function DashboardFunnel({ funnel }: { funnel: FunnelStage[] }) {
             height={280}
             ariaLabel="Воронка кампании: контакты в базе, отправлено, ответили, целевые, переданы менеджеру"
           />
+          {skipped.length > 0 && (
+            <p className="mt-2 text-center text-[11px] text-gray-400">
+              {skipped.map((s) => `«${s.name}»`).join(', ')} за период — 0: новых контактов в базу не
+              загружали, рассылка шла по загруженным раньше.
+            </p>
+          )}
         </div>
       ) : (
         <div style={{ height: 280 }} />

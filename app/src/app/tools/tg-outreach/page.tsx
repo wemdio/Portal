@@ -58,6 +58,13 @@ import {
 } from '@/lib/tgOutreach/autoForward';
 import { DEFAULT_MAX_MESSAGE_CHARS } from '@/lib/tgOutreach/firstTouch/validateMessage';
 import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
+import {
+  describeSending,
+  describeProxy,
+  countSendingAccounts,
+  type AccountSendingStat,
+  type HealthMark,
+} from '@/lib/tgOutreach/accountHealth';
 // Только тип: сам модуль серверный (тянет gramJS), в клиентский бандл он не
 // попадает — import type стирается при сборке. Берём его, чтобы набор статусов
 // проверки был один на портал, а не переписанный руками на экране.
@@ -604,7 +611,23 @@ function SettingsTab({ campaign, onSave }: {
 }
 
 /* =================== LOGS TAB =================== */
-type ErrorRange = '6h' | '24h' | '7d';
+/**
+ * Окна, по которым режется журнал. Месяц добавлен 27.08.2026: на семи днях не
+ * видно медленного — аккаунт, замолчавший две недели назад, в таком окне
+ * выглядит как никогда не работавший.
+ */
+type ErrorRange = '6h' | '24h' | '7d' | '30d';
+
+const RANGE_MS: Record<ErrorRange, number> = {
+  '6h': 6 * 60 * 60 * 1000,
+  '24h': 24 * 60 * 60 * 1000,
+  '7d': 7 * 24 * 60 * 60 * 1000,
+  '30d': 30 * 24 * 60 * 60 * 1000,
+};
+
+const RANGE_LABEL: Record<ErrorRange, string> = {
+  '6h': '6 часов', '24h': '24 часа', '7d': '7 дней', '30d': '30 дней',
+};
 
 type ErrorCountsResponse = {
   range: ErrorRange;
@@ -640,6 +663,14 @@ function LogsTab({ campaignId }: { campaignId: string }) {
   // and the aggregated error counts. Polled on the same 5s cadence as logs so
   // a fresh ошибка in the dark block doesn't lag behind in the side list.
   const [panelRange, setPanelRange] = useState<ErrorRange>('24h');
+  /**
+   * Глубина живой ленты. Раньше была намертво зашита в шесть часов, и на
+   * вопрос «когда этот аккаунт замолчал» журнал ответить не мог вовсе: всё,
+   * что старше утра, было доступно только выгрузкой в файл.
+   */
+  const [viewRange, setViewRange] = useState<ErrorRange>('6h');
+  /** Лента упёрлась в потолок строк — часть периода в неё не поместилась. */
+  const [viewCapped, setViewCapped] = useState(false);
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   const [proxies, setProxies] = useState<OutreachProxy[]>([]);
   const [errData, setErrData] = useState<ErrorCountsResponse | null>(null);
@@ -647,20 +678,24 @@ function LogsTab({ campaignId }: { campaignId: string }) {
   const [selectedAccount, setSelectedAccount] = useState<OutreachAccount | null>(null);
 
   const fetchLogs = useCallback(async () => {
-    // Rolling 6-hour window — wide enough to cover overnight quiet hours
-    // ending mid-morning, narrow enough that the dark block stays readable
-    // and scroll-to-bottom feels live. Limit of 5000 is well above the
-    // realistic 6h volume (~300-500 lines at current cadence) and prevents
-    // a runaway response if the worker enters a logging hot loop.
-    const sinceIso = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
-    const params = new URLSearchParams({ since: sinceIso, limit: '5000' });
+    /**
+     * Потолок в пять тысяч строк — предел читаемости тёмного блока: больше
+     * просто не пролистать, а DOM на месяце болтливой кампании уже ощутимо
+     * тормозит. Запрос идёт от новых к старым, поэтому обрезается хвост
+     * истории, а не свежие строки, — и об обрезке говорим словами, иначе
+     * «логов за месяц нет» и «они не поместились» неразличимы.
+     */
+    const LIMIT = 5000;
+    const sinceIso = new Date(Date.now() - RANGE_MS[viewRange]).toISOString();
+    const params = new URLSearchParams({ since: sinceIso, limit: String(LIMIT) });
     const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/logs?${params}`);
     if (res.ok) {
-      const d = await res.json() as { items: OutreachLog[] };
+      const d = await res.json() as { items: OutreachLog[]; total?: number };
       setLogs(d.items.reverse());
+      setViewCapped((d.total ?? d.items.length) > d.items.length);
     }
     setLoading(false);
-  }, [campaignId]);
+  }, [campaignId, viewRange]);
 
   const fetchSidePanel = useCallback(async () => {
     const [errRes, accRes, proxRes] = await Promise.all([
@@ -777,13 +812,27 @@ function LogsTab({ campaignId }: { campaignId: string }) {
       {/* Left: existing export bar + dark log block */}
       <div className="space-y-3 min-w-0">
         <div className="flex items-center justify-between gap-2 flex-wrap">
-          <span className="text-[11px] text-gray-400">
-            Показаны логи за последние 6 часов · обновление каждые 10 сек
-          </span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-gray-400">Показывать за:</span>
+            {(['6h', '24h', '7d', '30d'] as const).map((r) => (
+              <button
+                key={r}
+                type="button"
+                onClick={() => setViewRange(r)}
+                className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition cursor-pointer border ${viewRange === r ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}
+              >
+                {RANGE_LABEL[r]}
+              </button>
+            ))}
+            <span className="ml-1 text-[11px] text-gray-400">
+              · обновление каждые 10 сек
+              {viewCapped && ' · поместились только последние 5000 строк, весь период — кнопкой «Выгрузить .txt»'}
+            </span>
+          </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-gray-500 mr-1">Выгрузить .txt:</span>
-            {(['6h', '24h', '7d'] as const).map((r) => {
-              const labels: Record<typeof r, string> = { '6h': '6 часов', '24h': '24 часа', '7d': '7 дней' };
+            {(['6h', '24h', '7d', '30d'] as const).map((r) => {
+              const labels: Record<typeof r, string> = { '6h': '6 часов', '24h': '24 часа', '7d': '7 дней', '30d': '30 дней' };
               const busy = exportingRange === r;
               return (
                 <button
@@ -836,8 +885,8 @@ function LogsTab({ campaignId }: { campaignId: string }) {
             </button>
           </div>
           <div className="flex items-center gap-1">
-            {(['6h', '24h', '7d'] as const).map(r => {
-              const labels: Record<ErrorRange, string> = { '6h': '6ч', '24h': '24ч', '7d': '7д' };
+            {(['6h', '24h', '7d', '30d'] as const).map(r => {
+              const labels: Record<ErrorRange, string> = { '6h': '6ч', '24h': '24ч', '7d': '7д', '30d': '30д' };
               const active = panelRange === r;
               return (
                 <button
@@ -988,6 +1037,13 @@ function DialogsTab({ campaignId }: {
   const [loading, setLoading] = useState(true);
   const [offset, setOffset] = useState(0);
   const [filterStatus, setFilterStatus] = useState('');
+  /**
+   * Поиск по нику. `search` — то, что в поле, `query` — то, что уже ушло на
+   * сервер. Разделены ради задержки: без неё каждая буква била бы запросом по
+   * базе, и список моргал бы на каждом нажатии.
+   */
+  const [search, setSearch] = useState('');
+  const [query, setQuery] = useState('');
   const [filterCanSend, setFilterCanSend] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [filterAudience, setFilterAudience] = useState<'all' | 'users' | 'bots'>('all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -1016,6 +1072,7 @@ function DialogsTab({ campaignId }: {
   const fetchDialogs = useCallback(async () => {
     setLoading(true);
     const params = new URLSearchParams({ campaign_id: campaignId, limit: String(limit), offset: String(offset) });
+    if (query.trim()) params.set('q', query.trim());
     if (filterStatus) params.set('status', filterStatus);
     if (filterCanSend === 'enabled') params.set('can_send', 'true');
     if (filterCanSend === 'disabled') params.set('can_send', 'false');
@@ -1027,7 +1084,17 @@ function DialogsTab({ campaignId }: {
       setDialogs(d.items); setTotal(d.total);
     }
     setLoading(false);
-  }, [campaignId, offset, filterStatus, filterCanSend, filterAudience]);
+  }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience]);
+
+  // Полсекунды тишины — и запрос уходит. Заодно сбрасываем страницу: искать на
+  // третьей странице прошлого фильтра бессмысленно.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setQuery((cur) => (cur === search ? cur : search));
+      setOffset((cur) => (search === query ? cur : 0));
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [search, query]);
 
   useEffect(() => { queueMicrotask(() => { void fetchDialogs(); void fetchAccounts(); }); }, [fetchDialogs, fetchAccounts]);
 
@@ -1207,6 +1274,28 @@ function DialogsTab({ campaignId }: {
     <div className="space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Поиск стоит первым: когда ищут конкретного человека, фильтры не
+              нужны, а листать три сотни диалогов руками — не вариант. */}
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Поиск по нику или ID"
+              aria-label="Поиск диалога по никнейму или числовому ID"
+              className="w-56 rounded-full border border-gray-200 bg-white py-1.5 pl-8 pr-7 text-xs outline-none transition focus:border-indigo-400"
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                title="Очистить поиск"
+                className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </div>
           <span className="text-xs text-gray-500">Статус:</span>
           {['', 'none', 'lead', 'not_lead', 'later'].map(s => (
             <button key={s} type="button" onClick={() => { setFilterStatus(s); setOffset(0); }}
@@ -1250,7 +1339,11 @@ function DialogsTab({ campaignId }: {
       {loading ? (
         <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
       ) : dialogs.length === 0 ? (
-        <p className="text-xs text-gray-400 py-8 text-center">Нет диалогов</p>
+        <p className="text-xs text-gray-400 py-8 text-center">
+          {query.trim()
+            ? `По запросу «${query.trim()}» ничего не нашлось. Ник ищется по части, но только по нику собеседника — не по тексту переписки.`
+            : 'Нет диалогов'}
+        </p>
       ) : (
         <div className="space-y-2">
           {dialogs.map(d => {
@@ -1756,6 +1849,12 @@ interface CheckRow {
   status: string;
   detail: string;
   otherSessions: OtherSession[];
+  /**
+   * Проверка не выполнена, а поставлена в очередь: кампания работает, и лезть в
+   * занятую сессию из портала нельзя. Выполнит рассылка своим соединением,
+   * дойдя до аккаунта в круге.
+   */
+  queued?: boolean;
 }
 
 /**
@@ -1766,15 +1865,26 @@ interface CheckRow {
  * «Чужой вход» жёлтый намеренно: аккаунт жив, но в нём кто-то есть, и это
  * требует разбирательства, а не списания.
  */
+/**
+ * Цвет здесь — это рекомендация к действию, а не оценка серьёзности.
+ *
+ * Красное — аккаунт не вернуть, списывайте. Жёлтое — пройдёт само или чинится
+ * перезаливкой. До 27.08.2026 временное ограничение и окончательный бан оба
+ * были красными и назывались похоже («ограничен» / «забанен»), из-за чего
+ * живые номера, поймавшие спам-блок на пару дней, читались как сгоревшие.
+ */
 const CHECK_LABEL: Record<string, { text: string; cls: string }> = {
   ok: { text: 'жив', cls: 'bg-emerald-50 text-emerald-700' },
   session_revoked: { text: 'разлогинен', cls: 'bg-amber-50 text-amber-700' },
   session_duplicate: { text: 'чужой вход', cls: 'bg-amber-50 text-amber-700' },
   no_session: { text: 'нет сессии', cls: 'bg-amber-50 text-amber-700' },
   proxy_dead: { text: 'прокси молчит', cls: 'bg-amber-50 text-amber-700' },
-  restricted: { text: 'ограничен', cls: 'bg-rose-50 text-rose-700' },
-  banned: { text: 'забанен', cls: 'bg-rose-50 text-rose-700' },
+  restricted: { text: 'ограничен временно', cls: 'bg-amber-50 text-amber-700' },
+  banned: { text: 'бан навсегда', cls: 'bg-rose-50 text-rose-700' },
   error: { text: 'ошибка', cls: 'bg-gray-100 text-gray-500' },
+  // Не итог проверки, а её ожидание: кампания работает, и проверку выполнит
+  // рассылка своим соединением, дойдя до аккаунта в круге.
+  queued: { text: 'проверка в очереди', cls: 'bg-indigo-50 text-indigo-700' },
 };
 
 /* =================== ACCOUNT AVATAR =================== */
@@ -1842,18 +1952,49 @@ interface AccountsUploadSummary {
 }
 
 /* =================== CAMPAIGN ACCOUNTS TAB =================== */
+/**
+ * Ячейка здоровья: слово и цвет, объяснение — под курсором.
+ *
+ * Один компонент на обе колонки («Рассылка» и «Прокси»): состояния у них
+ * разные, а язык должен быть один — иначе строка читается как два независимых
+ * прибора, и оператор сравнивает не то.
+ */
+function HealthCell({ mark }: { mark: HealthMark }) {
+  const cls = mark.tone === 'ok'
+    ? 'bg-emerald-50 text-emerald-700'
+    : mark.tone === 'warn'
+      ? 'bg-amber-50 text-amber-700'
+      : mark.tone === 'bad'
+        ? 'bg-rose-50 text-rose-700'
+        : 'bg-gray-100 text-gray-500';
+  return (
+    <span title={mark.detail} className={`w-fit cursor-help rounded-md px-1.5 py-0.5 text-[10px] font-medium ${cls}`}>
+      {mark.label}
+    </span>
+  );
+}
+
 function CampaignAccountsTab({
   campaignId,
   campaignStatus,
+  firstTouchPerDay,
 }: {
   campaignId: string;
   campaignStatus: CampaignStatus;
+  /**
+   * Дневной лимит первых сообщений на аккаунт. Ноль — первое касание выключено
+   * вовсе, и «не рассылает» тогда не поломка, а настройка: колонка здоровья
+   * обязана говорить об этом словами, иначе оператор пойдёт чинить прокси.
+   */
+  firstTouchPerDay: number;
 }) {
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   const [proxies, setProxies] = useState<OutreachProxy[]>([]);
   const [errorCounts, setErrorCounts] = useState<
     Record<string, { error: number; warning: number; account_id: string }>
   >({});
+  /** Что каждый аккаунт отправил за сутки и когда отправлял в последний раз. */
+  const [sendingStats, setSendingStats] = useState<Record<string, AccountSendingStat>>({});
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -1926,12 +2067,14 @@ function CampaignAccountsTab({
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [accRes, proxRes, errRes] = await Promise.all([
+    const [accRes, proxRes, errRes, sendRes] = await Promise.all([
       authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}`),
       authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`),
       // Bulk error counts in last 24h — cheap (one query, grouped server-side).
       // Used to render the ⚠ N chips next to each account name.
       authFetch(`${API_BASE}/campaigns/${campaignId}/accounts/error-counts?range=24h`),
+      // Отправки по аккаунтам — колонка «Рассылка» и счётчик «рассылают N».
+      authFetch(`${API_BASE}/campaigns/${campaignId}/accounts/sending`),
     ]);
     if (accRes.ok) {
       const d = await accRes.json() as { items: OutreachAccount[] };
@@ -1946,6 +2089,10 @@ function CampaignAccountsTab({
         counts: Record<string, { error: number; warning: number; account_id: string }>;
       };
       setErrorCounts(d.counts ?? {});
+    }
+    if (sendRes.ok) {
+      const d = await sendRes.json() as { stats: Record<string, AccountSendingStat> };
+      setSendingStats(d.stats ?? {});
     }
     setLoadedAt(Date.now());
     setLoading(false);
@@ -2079,10 +2226,28 @@ function CampaignAccountsTab({
         try {
           const res = await authFetch(`${API_BASE}/accounts/${t.id}/check`, { method: 'POST' });
           const data = (await res.json().catch(() => null)) as
-            | (Partial<AccountCheckResult> & { error?: string })
+            | (Partial<AccountCheckResult> & { error?: string; queued?: boolean; requested_at?: string })
             | null;
 
-          // Отказ ручки (кампания работает, аккаунта нет) — это не ответ
+          // Кампания работает — ручка не ходила в Telegram, а поставила заказ.
+          // Строку аккаунта помечаем ожиданием: результат придёт сам, когда
+          // рассылка дойдёт до аккаунта.
+          if (res.ok && data?.queued) {
+            rows[i] = {
+              id: t.id,
+              name: t.name,
+              status: 'queued',
+              detail: data.detail ?? 'проверка поставлена в очередь',
+              otherSessions: [],
+              queued: true,
+            };
+            setAccounts((prev) => prev.map((a) => (a.id === t.id
+              ? { ...a, check_requested_at: data.requested_at ?? new Date().toISOString() }
+              : a)));
+            continue;
+          }
+
+          // Отказ ручки (аккаунта нет, база не ответила) — это не ответ
           // Telegram, поэтому и статуса из его набора у него нет: error.
           const status = res.ok && data?.status ? data.status : 'error';
           const detail = (res.ok ? data?.detail : data?.error)
@@ -2293,6 +2458,29 @@ function CampaignAccountsTab({
     [accounts, errorCounts, loadedAt],
   );
 
+  /**
+   * Сколько аккаунтов реально ведут рассылку.
+   *
+   * Отдельно от «жив» и «Активен»: и то, и другое — про разрешения, а не про
+   * работу. Аккаунт может быть живым, включённым, с рабочим прокси — и при этом
+   * не написать никому ни разу, потому что кончилась очередь контактов или круг
+   * до него не доходит.
+   */
+  const sendingCount = useMemo(
+    () => countSendingAccounts(accounts, sendingStats),
+    [accounts, sendingStats],
+  );
+
+  /** Кто именно не рассылает — под курсор на плашке, чтобы не искать глазами. */
+  const notSendingNames = useMemo(
+    () => accounts
+      .filter((a) => (sendingStats[a.id]?.sent_24h ?? 0) === 0)
+      .map((a) => a.session_name)
+      .slice(0, 12)
+      .join(', '),
+    [accounts, sendingStats],
+  );
+
   /** Разбивка мёртвых по причине — человеческими ярлыками, для подсказки. */
   const deadBreakdown = useMemo(
     () => Object.entries(accountStats.byStatus)
@@ -2350,9 +2538,24 @@ function CampaignAccountsTab({
           проверке читается как «сейчас всё хорошо», а это не так. */}
       {!loading && accounts.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-[11px]">
+          {/* Первым числом — то, ради чего экран открывают: сколько аккаунтов
+              реально пишут людям. «Жив» и «Активен» отвечают только на вопрос
+              о разрешениях. */}
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${sendingCount > 0 ? 'bg-indigo-50 text-indigo-700' : 'bg-rose-50 text-rose-700'}`}
+            title={
+              `За сутки первое сообщение ушло с ${sendingCount} из ${accounts.length} аккаунтов.`
+              + (notSendingNames ? ` Не рассылают: ${notSendingNames}${accounts.length - sendingCount > 12 ? ' и другие' : ''}. Причина по каждому — в колонке «Рассылка».` : '')
+            }
+          >
+            рассылают {sendingCount} из {accounts.length}
+          </span>
+
+          <span className="mx-1 h-4 w-px bg-gray-200" aria-hidden />
+
           <span
             className="rounded-md bg-emerald-50 px-2 py-1 font-medium text-emerald-700"
-            title="Последняя проверка вернула «жив». Это снимок на момент проверки, а не состояние прямо сейчас: проверка ходит в Telegram по кнопке и только на остановленной кампании."
+            title="Последняя проверка вернула «жив». Проверку теперь ставит и сама рассылка: каждый успешный круг аккаунта — это подтверждение, что он жив, без остановки кампании."
           >
             жив {accountStats.alive}
           </span>
@@ -2510,20 +2713,32 @@ function CampaignAccountsTab({
         </div>
       )}
 
+      {/* Проверять можно и на работающей кампании: там нажатие не лезет в
+          Telegram, а ставит заказ — выполнит рассылка своим соединением в
+          ближайшем круге. Раньше кнопка была просто заблокирована, и «жив/не
+          жив» на экране устаревал неделями. */}
       <BulkActionsBar
         selectedCount={selectedIds.length}
         deleting={bulkDeleting}
         onClear={clear}
         onDelete={() => { void deleteSelected(); }}
         checking={checkingIds.length > 0}
-        canCheck={profileReadable}
+        canCheck
         onCheck={() => { void checkSelected(); }}
+        checkTitle={profileReadable
+          ? 'Зайти в каждый аккаунт и проверить, жив ли он и кто ещё в нём сидит'
+          : 'Кампания работает: проверка встанет в очередь и выполнится рассылкой в ближайшем круге, обычно за несколько минут. Останавливать кампанию не нужно.'}
+        checkLabel={profileReadable ? 'Проверить аккаунты' : 'Проверить (в очередь)'}
       />
 
       {checkResults && checkResults.length > 0 && (
         <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
           <div className="flex items-start justify-between gap-3">
-            <span>Проверено аккаунтов: {checkResults.length}. Что ответил Telegram по каждому:</span>
+            <span>
+              {checkResults.every((r) => r.queued)
+                ? `Поставлено в очередь: ${checkResults.length}. Рассылка выполнит проверку своим соединением, когда дойдёт до аккаунта в круге — обычно за несколько минут. Результат появится в строке аккаунта сам.`
+                : `Проверено аккаунтов: ${checkResults.length}. Что ответил Telegram по каждому:`}
+            </span>
             <button type="button" onClick={() => setCheckResults(null)} className="cursor-pointer text-gray-400 hover:text-gray-600">
               <X className="h-3.5 w-3.5" />
             </button>
@@ -2578,20 +2793,46 @@ function CampaignAccountsTab({
         </div>
       ) : (
         <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[32px_44px_minmax(0,1fr)_130px_minmax(340px,1.4fr)_72px_72px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_44px_minmax(0,1.1fr)_126px_120px_minmax(220px,1fr)_138px_60px_64px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <SelectAllCheckbox total={accounts.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span />
-            <span>Аккаунт</span><span>Телефон</span><span>Прокси</span><span>Активен</span><span />
+            <span>Аккаунт</span>
+            <span title="Идёт ли с этого аккаунта рассылка первых сообщений. Если нет — почему и сколько дней уже.">
+              Рассылка
+            </span>
+            <span>Телефон</span>
+            <span>Прокси</span>
+            <span title="Проходят ли через прокси круги рассылки. Если нет — сколько дней уже не проходят.">
+              Здоровье прокси
+            </span>
+            <span>Активен</span><span />
           </div>
           {accounts.map(a => {
             const proxy = proxies.find(p => p.id === a.proxy_id);
             const onCooldown = a.cooldown_until && new Date(a.cooldown_until) > new Date();
             const counts = errorCounts[a.session_name];
             const errorCount = counts?.error ?? 0;
+            // Обе колонки здоровья считаются от момента загрузки списка, а не
+            // от момента отрисовки: Date.now() в рендере — нечистый вызов, и
+            // «молчит 2 дня» не должно меняться от того, что React перерисовал
+            // строку.
+            // Ноль тут был бы хуже, чем неточность: с ним любой кулдаун
+            // оказывается «в будущем», и все аккаунты разом объявляются
+            // стоящими на паузе.
+            const healthNow = loadedAt ?? Date.now();
+            const sendingMark = describeSending({
+              account: a,
+              stat: sendingStats[a.id],
+              proxy: proxy ?? null,
+              campaignRunning: campaignStatus === 'running',
+              firstTouchEnabled: firstTouchPerDay > 0,
+              now: healthNow,
+            });
+            const proxyMark = describeProxy(proxy ?? null, healthNow);
             return (
               <div
                 key={a.id}
-                className={`grid grid-cols-[32px_44px_minmax(0,1fr)_130px_minmax(340px,1.4fr)_72px_72px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
+                className={`grid grid-cols-[32px_44px_minmax(0,1.1fr)_126px_120px_minmax(220px,1fr)_138px_60px_64px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
               >
                 <input
                   type="checkbox"
@@ -2653,14 +2894,24 @@ function CampaignAccountsTab({
                   </div>
                   {/* Итог проверки. Чужие сеансы выносим отдельно: это ответ на
                       вопрос, почему аккаунты теряют сессии пачками. */}
-                  {a.check_status && (
+                  {(a.check_status || a.check_requested_at) && (
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                      <span
-                        title={a.check_detail ?? undefined}
-                        className={`rounded-md px-1.5 py-0.5 text-[10px] ${CHECK_LABEL[a.check_status]?.cls ?? 'bg-gray-100 text-gray-500'}`}
-                      >
-                        {CHECK_LABEL[a.check_status]?.text ?? a.check_status}
-                      </span>
+                      {a.check_requested_at && (
+                        <span
+                          title={`Проверку заказал ${a.check_requested_by_name || 'сотрудник портала'} — ${new Date(a.check_requested_at).toLocaleString('ru-RU')}. Выполнит рассылка своим соединением, когда дойдёт до аккаунта в круге: подключаться из портала к занятой сессии нельзя, Telegram выключит аккаунт.`}
+                          className="cursor-help rounded-md bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700"
+                        >
+                          проверка в очереди
+                        </span>
+                      )}
+                      {a.check_status && (
+                        <span
+                          title={a.check_detail ?? undefined}
+                          className={`rounded-md px-1.5 py-0.5 text-[10px] ${CHECK_LABEL[a.check_status]?.cls ?? 'bg-gray-100 text-gray-500'}`}
+                        >
+                          {CHECK_LABEL[a.check_status]?.text ?? a.check_status}
+                        </span>
+                      )}
                       {(a.other_sessions?.length ?? 0) > 0 && (
                         <span
                           title={a.other_sessions!
@@ -2697,6 +2948,7 @@ function CampaignAccountsTab({
                     </div>
                   )}
                 </div>
+                <HealthCell mark={sendingMark} />
                 <span className="text-xs text-gray-500 truncate">{a.phone || '—'}</span>
                 {editingProxyFor === a.id ? (
                   <select
@@ -2727,6 +2979,7 @@ function CampaignAccountsTab({
                     {proxy ? (proxy.name || proxy.url) : <span className="text-gray-300 group-hover:text-indigo-400">—</span>}
                   </button>
                 )}
+                <HealthCell mark={proxyMark} />
                 <button type="button" onClick={() => { void toggleActive(a.id, a.is_active); }}
                   className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${a.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
                   {a.is_active ? 'Да' : 'Нет'}
@@ -3044,7 +3297,7 @@ function AccountLogsModal({
   proxy: OutreachProxy | null;
   onClose: () => void;
 }) {
-  const [range, setRange] = useState<'6h' | '24h' | '7d'>('24h');
+  const [range, setRange] = useState<ErrorRange>('24h');
   const [logs, setLogs] = useState<OutreachLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [exportingRange, setExportingRange] = useState<string | null>(null);
@@ -3086,7 +3339,7 @@ function AccountLogsModal({
   }, [logs]);
 
   const exportLogs = useCallback(
-    async (r: '6h' | '24h' | '7d') => {
+    async (r: ErrorRange) => {
       setExportingRange(r);
       try {
         const res = await authFetch(`${API_BASE}/accounts/${account.id}/logs?range=${r}&format=txt`);
@@ -3174,8 +3427,8 @@ function AccountLogsModal({
         <div className="px-5 py-3 border-b border-gray-100 flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-gray-500 mr-1">Период:</span>
-            {(['6h', '24h', '7d'] as const).map(r => {
-              const labels: Record<typeof r, string> = { '6h': '6ч', '24h': '24ч', '7d': '7д' };
+            {(['6h', '24h', '7d', '30d'] as const).map(r => {
+              const labels: Record<typeof r, string> = { '6h': '6ч', '24h': '24ч', '7d': '7д', '30d': '30д' };
               const active = range === r;
               return (
                 <button
@@ -3205,7 +3458,7 @@ function AccountLogsModal({
                   <> · <span className="text-amber-600 font-semibold">{warningCount} предупреждений</span></>
                 )}
                 {truncated && (
-                  <> · <span className="text-gray-400">(показано не всё — обрезано лимитом)</span></>
+                  <> · <span className="text-gray-400">(поместились только первые 5000 строк — весь период есть в выгрузке .txt)</span></>
                 )}
               </>
             )}
@@ -3213,8 +3466,8 @@ function AccountLogsModal({
 
           <div className="ml-auto flex items-center gap-1.5">
             <span className="text-xs text-gray-500 mr-1">.txt:</span>
-            {(['6h', '24h', '7d'] as const).map(r => {
-              const labels: Record<typeof r, string> = { '6h': '6ч', '24h': '24ч', '7d': '7д' };
+            {(['6h', '24h', '7d', '30d'] as const).map(r => {
+              const labels: Record<typeof r, string> = { '6h': '6ч', '24h': '24ч', '7d': '7д', '30d': '30д' };
               const busy = exportingRange === r;
               return (
                 <button
@@ -3262,6 +3515,12 @@ interface OutreachBase {
   id: string;
   name: string;
   notes: string;
+  /**
+   * Чаты, из которых собрана гипотеза: по одной ссылке в строке. Кормит
+   * «Кол-во обработанных чатов» и «Канал/чат» в отчёте по договору — в самом
+   * файле базы источника нет, там только юзернейм и текст сообщения.
+   */
+  source_chats?: string;
   /** Кампания-владелец. null — база осталась без владельца от старой модели. */
   campaign_id: string | null;
   counts: { total: number; pending: number; sent: number; replied: number; failed: number; skipped: number };
@@ -3293,6 +3552,10 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** База, у которой сейчас правят список чатов-источников. */
+  const [editingChatsFor, setEditingChatsFor] = useState<string | null>(null);
+  const [chatsDraft, setChatsDraft] = useState('');
+  const [savingChats, setSavingChats] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -3372,6 +3635,30 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       setNotice(`База «${base.name}» перенесена в кампанию.`);
       void load();
     } finally { setBusy(false); }
+  };
+
+  /**
+   * Сохранить чаты-источники гипотезы.
+   *
+   * Ввести их один раз на базу дешевле, чем добавлять колонку в файл на триста
+   * строк, — а отчёту хватает и того, и другого: он складывает объявленные тут
+   * чаты с теми, что пришли в файле, и считает уникальные.
+   */
+  const saveSourceChats = async (baseId: string) => {
+    setSavingChats(true); setError(null); setNotice(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases/${baseId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ source_chats: chatsDraft }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(d?.error ?? `Не удалось сохранить чаты-источники (${res.status})`);
+        return;
+      }
+      setBases((cur) => cur.map((b) => (b.id === baseId ? { ...b, source_chats: chatsDraft.trim() } : b)));
+      setEditingChatsFor(null);
+    } finally { setSavingChats(false); }
   };
 
   const deleteBase = async (base: OutreachBase) => {
@@ -3499,8 +3786,14 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
             <span />
             <span>База</span><span>Всего</span><span>Ждут</span><span>Отправлено</span><span>Пропущено</span><span>Отложено</span><span />
           </div>
-          {bases.map((b) => (
-            <div key={b.id} className={`grid grid-cols-[32px_1fr_repeat(5,80px)_150px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
+          {bases.map((b) => {
+            const chats = (b.source_chats ?? '')
+              .split(/[\n,;]+/)
+              .map((c) => c.trim())
+              .filter(Boolean);
+            return (
+            <React.Fragment key={b.id}>
+            <div className={`grid grid-cols-[32px_1fr_repeat(5,80px)_150px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
               <input
                 type="checkbox"
                 checked={linked.has(b.id)}
@@ -3509,7 +3802,23 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
                 aria-label={`Участвует в рассылке: база ${b.name}`}
                 className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
               />
-              <span className="text-xs font-medium text-gray-800 truncate">{b.name}</span>
+              <div className="min-w-0">
+                <div className="text-xs font-medium text-gray-800 truncate">{b.name}</div>
+                {/* Чаты-источники живут в строке базы, а не в отдельном экране:
+                    их спрашивает отчёт по договору, и заполнить их проще там
+                    же, где базу заводят. */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingChatsFor(editingChatsFor === b.id ? null : b.id);
+                    setChatsDraft(b.source_chats ?? '');
+                  }}
+                  title="Чаты, из которых собрана эта гипотеза. Идут в отчёт: «Кол-во обработанных чатов» и «Канал/чат»."
+                  className={`mt-0.5 text-[10px] underline decoration-dotted underline-offset-2 transition cursor-pointer ${chats.length ? 'text-gray-400 hover:text-indigo-600' : 'text-amber-600 hover:text-amber-700'}`}
+                >
+                  {chats.length ? `чатов-источников: ${chats.length}` : 'чаты-источники не указаны — отчёт не посчитает'}
+                </button>
+              </div>
               <span className="text-xs text-gray-600">{b.counts.total}</span>
               <span className="text-xs text-gray-600">{b.counts.pending}</span>
               <span className="text-xs text-gray-600">{b.counts.sent}</span>
@@ -3535,7 +3844,38 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
                 </button>
               </div>
             </div>
-          ))}
+            {editingChatsFor === b.id && (
+              <div className="space-y-2 border-t border-gray-100 bg-gray-50 px-4 py-3">
+                <div className="text-[11px] font-medium text-gray-700">
+                  Чаты-источники базы «{b.name}»
+                </div>
+                <p className="text-[10px] text-gray-500">
+                  По одной ссылке в строке — те чаты, из которых собирали контакты этой гипотезы
+                  (обычно 3–4). Отсюда берутся «Кол-во обработанных чатов» и колонка «Канал/чат»
+                  в отчёте по договору: в самом файле базы источника нет.
+                </p>
+                <textarea
+                  value={chatsDraft}
+                  onChange={(e) => setChatsDraft(e.target.value)}
+                  rows={4}
+                  placeholder={'https://t.me/buhrussia\nhttps://t.me/buhcha\n@tilda_official_chat'}
+                  className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 font-mono text-[11px] outline-none focus:border-indigo-400"
+                />
+                <div className="flex items-center gap-2">
+                  <button type="button" disabled={savingChats} onClick={() => { void saveSourceChats(b.id); }}
+                    className="rounded-full bg-indigo-600 px-4 py-1.5 text-[11px] font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-50 cursor-pointer">
+                    {savingChats ? 'Сохраняю…' : 'Сохранить'}
+                  </button>
+                  <button type="button" onClick={() => setEditingChatsFor(null)}
+                    className="rounded-full border border-gray-200 px-3 py-1.5 text-[11px] text-gray-500 transition hover:bg-gray-100 cursor-pointer">
+                    Отмена
+                  </button>
+                </div>
+              </div>
+            )}
+            </React.Fragment>
+            );
+          })}
         </div>
       )}
 
@@ -4034,7 +4374,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
 interface ReportResponse {
   report: {
     weeks: Array<{
-      period: string; chats: number; contacts: number; delivered: number;
+      period: string; chats: number | null; contacts: number; delivered: number;
       anyReplies: number; targetReplies: number; blocks: number; conversion: number | null;
     }>;
     total: ReportResponse['report']['weeks'][number];
@@ -4186,7 +4526,7 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
                   {[...data.weeks, data.total].map((w, i) => (
                     <tr key={w.period + i} className={w.period === 'Итого' ? 'font-medium bg-gray-50' : ''}>
                       <td className={cell}>{w.period}</td>
-                      <td className={cell}>{w.chats}</td>
+                      <td className={cell}>{w.chats === null ? '—' : w.chats}</td>
                       <td className={cell}>{w.contacts}</td>
                       <td className={cell}>{w.delivered}</td>
                       <td className={cell}>{w.anyReplies}</td>
@@ -4203,10 +4543,18 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
             <p className="text-[10px] text-gray-400">
               Блокировки — только выявленные: мы узнаём о них, когда пытаемся написать
               повторно, поэтому заблокировавшие сразу после первого касания сюда не попадают.
-              Обработанные чаты считаются по всем задачам парсера за период — парсер к кампании
-              не привязан. Целевые ответы отнесены к неделе последнего сообщения диалога:
+              Обработанные чаты — уникальные чаты-источники контактов, загруженных в базы этой
+              кампании за период. Целевые ответы отнесены к неделе последнего сообщения диалога:
               момент срабатывания триггера в базе не хранится.
             </p>
+            {[...data.weeks, data.total].every((w) => w.chats === null) && (
+              <p className="text-[11px] text-amber-600">
+                «Обработано чатов» — прочерк: в файлах базы этой кампании нет колонки
+                «Ссылка на источник», и портал не знает, из каких чатов взяты контакты.
+                Добавьте её при следующей загрузке базы — TG-парсер отдаёт её в выгрузке, —
+                и цифра начнёт считаться сама. За прошлые недели впишите её в файл руками.
+              </p>
+            )}
           </div>
 
           <div className="space-y-2">
@@ -4511,7 +4859,11 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
         {tab === 'dashboard' && <DashboardTab campaignId={campaign.id} />}
         {tab === 'settings' && <SettingsTab campaign={campaign} onSave={saveSettings} />}
         {tab === 'accounts' && (
-          <CampaignAccountsTab campaignId={campaign.id} campaignStatus={campaign.status} />
+          <CampaignAccountsTab
+            campaignId={campaign.id}
+            campaignStatus={campaign.status}
+            firstTouchPerDay={campaign.telegram_settings?.first_touch_per_account_per_day ?? 0}
+          />
         )}
         {tab === 'bases' && <CampaignBasesTab campaignId={campaign.id} />}
         {tab === 'proxies' && <CampaignProxiesTab campaignId={campaign.id} />}
