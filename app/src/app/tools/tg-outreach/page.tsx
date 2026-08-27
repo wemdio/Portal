@@ -59,6 +59,11 @@ import {
 import { DEFAULT_MAX_MESSAGE_CHARS } from '@/lib/tgOutreach/firstTouch/validateMessage';
 import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
 import {
+  takenProxyUrls,
+  selectableProxies,
+  proxyOptionsFor,
+} from '@/lib/tgOutreach/proxySelection';
+import {
   describeSending,
   describeProxy,
   countSendingAccounts,
@@ -1990,6 +1995,8 @@ function CampaignAccountsTab({
 }) {
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   const [proxies, setProxies] = useState<OutreachProxy[]>([]);
+  /** Адреса прокси, занятые аккаунтами по всему порталу (не только этой кампании). */
+  const [takenUrls, setTakenUrls] = useState<string[]>([]);
   const [errorCounts, setErrorCounts] = useState<
     Record<string, { error: number; warning: number; account_id: string }>
   >({});
@@ -2037,17 +2044,31 @@ function CampaignAccountsTab({
   /**
    * Прокси, которые ещё никому не назначены.
    *
-   * Занятость по экрану не читается, и один и тот же мобильный прокси легко
-   * уходил двум аккаунтам — для Telegram это одно устройство с двумя аккаунтами,
-   * то есть прямой повод для блокировки. Поэтому занятых в выпадающем списке
-   * просто нет. Считаем в пределах кампании: прокси заводятся ей же, и список
-   * аккаунтов на экране — тоже её; сверять весь портал значило бы тянуть с
-   * сервера чужие кампании ради подсказки.
+   * Ключ занятости — АДРЕС, а не строка в базе, и берётся он по всему порталу.
+   *
+   * По id и в пределах кампании это ломалось двумя способами сразу. Один и тот
+   * же адрес заведён несколькими строками (598 записей на 532 адреса, дубли
+   * есть и внутри одной кампании): назначил первую — вторая оставалась
+   * «свободной» и тут же предлагалась следующему аккаунту, хотя это тот же
+   * прокси. И отдельно: 66 адресов заведены в двух кампаниях, так что занятый
+   * в соседней здесь числился свободным.
+   *
+   * Для Telegram один адрес — это одно устройство: два аккаунта на нём прямой
+   * повод для блокировки, ради экономии запроса такое допускать нельзя.
+   *
+   * `takenUrls` приходит с сервера (портал целиком), к нему добавляем то, что
+   * назначено прямо сейчас на этом экране: между назначением и перезагрузкой
+   * списка оператор успевает открыть следующую строку.
    */
-  const freeProxies = useMemo(() => {
-    const taken = new Set(accounts.map(a => a.proxy_id).filter((v): v is string => Boolean(v)));
-    return proxies.filter(p => !taken.has(p.id));
-  }, [accounts, proxies]);
+  const takenUrlSet = useMemo(
+    () => takenProxyUrls({ serverTakenUrls: takenUrls, accounts, proxies }),
+    [takenUrls, accounts, proxies],
+  );
+
+  const freeProxies = useMemo(
+    () => selectableProxies(proxies, takenUrlSet),
+    [proxies, takenUrlSet],
+  );
 
   /**
    * Варианты для строки аккаунта: свободные плюс его собственный прокси.
@@ -2056,12 +2077,7 @@ function CampaignAccountsTab({
    * выпадашка выглядела бы как «прокси сбросился».
    */
   const proxyOptions = useCallback(
-    (currentId: string | null) => {
-      const current = currentId ? proxies.find(p => p.id === currentId) : null;
-      return current && !freeProxies.some(p => p.id === current.id)
-        ? [current, ...freeProxies]
-        : freeProxies;
-    },
+    (currentId: string | null) => proxyOptionsFor(currentId, proxies, freeProxies),
     [freeProxies, proxies],
   );
 
@@ -2081,8 +2097,9 @@ function CampaignAccountsTab({
       setAccounts(d.items);
     }
     if (proxRes.ok) {
-      const d = await proxRes.json() as { items: OutreachProxy[] };
+      const d = await proxRes.json() as { items: OutreachProxy[]; taken_urls?: string[] };
       setProxies(d.items);
+      setTakenUrls(d.taken_urls ?? []);
     }
     if (errRes.ok) {
       const d = await errRes.json() as {
@@ -2599,6 +2616,17 @@ function CampaignAccountsTab({
             </span>
           )}
 
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${freeProxies.length > 0 ? 'bg-gray-100 text-gray-600' : 'bg-amber-50 text-amber-700'}`}
+            title={
+              `Прокси в кампании: ${proxies.length}. Свободных — ${freeProxies.length}: только они и предлагаются при назначении. `
+              + 'Занятость считается по адресу и по всему порталу — один адрес это одно устройство для Telegram, '
+              + 'и два аккаунта на нём это повод для блокировки.'
+            }
+          >
+            свободных прокси {freeProxies.length} из {proxies.length}
+          </span>
+
           <span className="ml-auto text-[10px] text-gray-400">
             {accountStats.newestCheck === null ? (
               'проверок ещё не было — «жив» и «не жив» показывать не из чего'
@@ -2793,7 +2821,7 @@ function CampaignAccountsTab({
         </div>
       ) : (
         <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[32px_44px_minmax(0,1.1fr)_126px_120px_minmax(220px,1fr)_138px_60px_64px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_60px_64px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <SelectAllCheckbox total={accounts.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span />
             <span>Аккаунт</span>
@@ -2832,7 +2860,7 @@ function CampaignAccountsTab({
             return (
               <div
                 key={a.id}
-                className={`grid grid-cols-[32px_44px_minmax(0,1.1fr)_126px_120px_minmax(220px,1fr)_138px_60px_64px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
+                className={`grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_60px_64px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
               >
                 <input
                   type="checkbox"

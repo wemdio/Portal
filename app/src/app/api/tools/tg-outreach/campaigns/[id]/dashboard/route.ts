@@ -31,8 +31,6 @@ const PERIODS: DashboardPeriod[] = ['1d', '7d', '30d', 'all'];
 // «FLOOD_WAIT 17» в одну строку, потому что оператору нужен диагноз
 // («сорок раз FLOOD_WAIT»), а не сорок отдельных записей с разными аргументами.
 const ERRORS_WINDOW_MS = 24 * 60 * 60 * 1000;
-const ERROR_MESSAGE_PREFIX_LEN = 80;
-const TOP_ERRORS_LIMIT = 10;
 
 type AccountRow = AccountsSummaryAccount & { id: string };
 
@@ -99,7 +97,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         baseIds.length
           ? supabase
               .from('tg_outreach_base_contacts')
-              .select('created_at, sent_at')
+              .select('created_at, sent_at, account_id')
               .in('base_id', baseIds)
               .limit(50_000)
           : Promise.resolve({ data: [] as DashboardContact[] }),
@@ -156,7 +154,6 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         (a, b) => b.session_name.length - a.session_name.length,
       );
       const errorCounts: Record<string, { error: number; warning: number }> = {};
-      const grouped = new Map<string, number>();
       for (const row of (errorLogsRes.data ?? []) as Array<{ message: string | null }>) {
         const msg = row.message ?? '';
         for (const a of accountsByLength) {
@@ -167,15 +164,27 @@ export async function GET(req: NextRequest, ctx: Ctx) {
             break;
           }
         }
-        const key = msg.slice(0, ERROR_MESSAGE_PREFIX_LEN);
-        grouped.set(key, (grouped.get(key) ?? 0) + 1);
       }
-      const errors = [...grouped.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, TOP_ERRORS_LIMIT)
-        .map(([message, count]) => ({ message, count }));
-
       const accounts = summarizeAccounts(accountRows, errorCounts, now);
+
+      /**
+       * Сколько аккаунтов реально ведут рассылку — то есть от скольких за сутки
+       * ушло хотя бы одно первое сообщение.
+       *
+       * Отдельно от «Живы» и «Выключены»: те отвечают на вопрос о разрешениях,
+       * а не о работе. Аккаунт может быть живым, включённым, с рабочим прокси —
+       * и не написать никому, потому что кончилась очередь контактов или круг
+       * до него не дошёл. Разницу между 18 «живыми» и 11 пишущими экран не
+       * показывал вовсе.
+       */
+      const dayAgo = now - 24 * 60 * 60 * 1000;
+      const sendingAccountIds = new Set<string>();
+      for (const c of contactsRes.data ?? []) {
+        const row = c as { sent_at: string | null; account_id: string | null };
+        if (!row.account_id || !row.sent_at) continue;
+        const at = new Date(row.sent_at).getTime();
+        if (Number.isFinite(at) && at >= dayAgo) sendingAccountIds.add(row.account_id);
+      }
       // Прогрев занимает весь активный парк разом (боевой цикл и прогрев
       // взаимоисключающие, см. warmup/loop.ts) — если прогон идёт, греются все
       // активные аккаунты кампании.
@@ -186,8 +195,8 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         dashboard,
         accounts,
         accounts_total: accountRows.length,
+        sending: sendingAccountIds.size,
         warming,
-        errors,
       });
     },
   );

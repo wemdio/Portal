@@ -41,18 +41,14 @@ import type { AccountsSummary } from '@/lib/tgOutreach/accountsSummary';
 
 const API_BASE = '/api/tools/tg-outreach';
 
-interface DashboardErrorRow {
-  message: string;
-  count: number;
-}
-
 interface DashboardApiResponse {
   period: DashboardPeriod;
+  /** Сколько аккаунтов реально отправляли первые сообщения за сутки. */
+  sending: number;
   dashboard: CampaignDashboard;
   accounts: AccountsSummary;
   accounts_total: number;
   warming: number;
-  errors: DashboardErrorRow[];
 }
 
 const PERIOD_OPTIONS: Array<{ id: DashboardPeriod; label: string }> = [
@@ -326,6 +322,21 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
     return entries.map(([status, count]) => `${status}: ${count}`).join(', ');
   }, [data]);
 
+  /**
+   * За какой период посчитано «Среднесуточно».
+   *
+   * Цифру читали как «за всё время» и не понимали, почему она меняется при
+   * переключении вкладок наверху. Считается она по выбранному периоду —
+   * поэтому период и подписан. Делим при этом на ПРОШЕДШИЕ сутки, а не на
+   * номинальную длину окна: у кампании, живущей три дня, «за 30 дней»
+   * занизило бы темп в десять раз.
+   */
+  const paceCaption = useMemo(() => {
+    if (custom) return `за период ${custom.from} — ${custom.to}`;
+    const label = PERIOD_OPTIONS.find((o) => o.id === period)?.label ?? '';
+    return period === 'all' ? 'за всё время' : `за ${label.toLowerCase()}`;
+  }, [period, custom]);
+
   return (
     <div className="space-y-3 p-4">
       {/* Переключатель периода */}
@@ -466,7 +477,17 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
             <h3 className="text-sm font-semibold text-gray-800">Здоровье кампании</h3>
 
             <div className="text-[11px] font-medium text-gray-400">Аккаунты</div>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-6">
+              {/* Первым — то, ради чего экран открывают: сколько аккаунтов
+                  реально пишут людям. «Живы» и «Выключены» отвечают только на
+                  вопрос о разрешениях: аккаунт бывает живым, включённым и при
+                  этом молчащим вторые сутки. */}
+              <Metric
+                label="Рассылают"
+                value={data.sending}
+                tone={data.sending > 0 ? 'info' : 'danger'}
+                caption={`из ${data.accounts_total} за сутки`}
+              />
               <Metric label="Живы" value={data.accounts.alive} tone="good" />
               <Metric
                 label="Мертвы"
@@ -488,7 +509,14 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
             <div className="grid grid-cols-3 gap-2">
               <Metric label="Отправлено сегодня" value={data.dashboard.pace.sentToday} />
               <Metric label="Вчера" value={data.dashboard.pace.sentYesterday} />
-              <Metric label="Среднесуточно" value={data.dashboard.pace.perDay} />
+              {/* Без подписи цифру читали как «за всё время», хотя считается
+                  она по выбранному наверху периоду — и от переключения вкладок
+                  менялась без объяснения. */}
+              <Metric
+                label="Среднесуточно"
+                value={data.dashboard.pace.perDay}
+                caption={paceCaption}
+              />
             </div>
 
             <div className="text-[11px] font-medium text-gray-400">Остаток базы</div>
@@ -502,24 +530,6 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
             </div>
           </div>
 
-          {/* Свежие ошибки за сутки */}
-          <div className="rounded-xl border border-gray-200 bg-white p-4">
-            <h3 className="mb-2 text-sm font-semibold text-gray-800">Свежие ошибки за сутки</h3>
-            {data.errors.length === 0 ? (
-              <div className="py-4 text-center text-xs text-gray-400">За сутки ошибок не было</div>
-            ) : (
-              <ul className="divide-y divide-gray-100">
-                {data.errors.map((e, i) => (
-                  <li key={i} className="flex items-center gap-3 py-2">
-                    <span className="flex-1 truncate text-xs text-gray-700">{e.message}</span>
-                    <span className="shrink-0 rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-700">
-                      × {e.count}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
         </>
       ) : null}
     </div>
