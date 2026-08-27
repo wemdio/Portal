@@ -82,6 +82,8 @@ export interface TaScoringStats {
   failed_rows: number;
   /** Сколько запросов к AI провалилось (одна пачка = до 10 компаний). */
   failed_batches: number;
+  /** Сколько успешных HTTP-ответов Requesty упёрлись в max_tokens. */
+  length_responses: number;
   /** Причины провалов с частотой. Раньше терялись в немом catch. */
   errors: Array<{ reason: string; count: number }>;
 }
@@ -522,7 +524,7 @@ export function mergeFoundEmailColumn(
  * Записать провалы оценки ЦА в application_logs.
  *
  * Зачем в БД, а не только в stdout: логи контейнеров ротируются (50 МБ × 3),
- * а base-constructor крутится в трёх репликах — искать там причину недельной
+ * а base-constructor крутится в нескольких репликах — искать там причину недельной
  * давности бесполезно. Вопрос «как часто падает и всегда ли по одной причине»
  * отвечается только по истории. Разбор 04.08.2026.
  *
@@ -849,6 +851,7 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
                 // отличалась от настоящего вердикта AI — разбор 04.08.2026.
                 ta_scoring_failed_rows: taScoringStats.failed_rows,
                 ta_scoring_failed_batches: taScoringStats.failed_batches,
+                ta_scoring_length_responses: taScoringStats.length_responses,
                 ta_scoring_errors: taScoringStats.errors,
               }
             : {}),

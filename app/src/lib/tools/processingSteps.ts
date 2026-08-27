@@ -166,12 +166,17 @@ function parseRetryAfter(res: { headers?: { get?: (n: string) => string | null }
   return Number.isFinite(sec) && sec > 0 ? sec : null;
 }
 
-async function callOpenRouter(
+interface OpenRouterCompletion {
+  content: string;
+  finishReason?: string | null;
+}
+
+async function callOpenRouterRaw(
   apiKey: string,
   model: string,
   messages: { role: string; content: string }[],
   opts: { temperature?: number; max_tokens?: number; json?: boolean; title?: string } = {},
-): Promise<string> {
+): Promise<OpenRouterCompletion> {
   let lastError: Error = new Error('Обращение к ИИ не состоялось');
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -198,7 +203,11 @@ async function callOpenRouter(
       clearTimeout(timeout);
       if (res.ok) {
         const json = await res.json();
-        return json.choices?.[0]?.message?.content || '';
+        const choice = json.choices?.[0];
+        return {
+          content: choice?.message?.content || '',
+          finishReason: choice?.finish_reason,
+        };
       }
 
       // Текст ответа кладём в ошибку: без него причина провала теряется, и
@@ -229,6 +238,16 @@ async function callOpenRouter(
     }
   }
   throw lastError;
+}
+
+async function callOpenRouter(
+  apiKey: string,
+  model: string,
+  messages: { role: string; content: string }[],
+  opts: { temperature?: number; max_tokens?: number; json?: boolean; title?: string } = {},
+): Promise<string> {
+  const { content } = await callOpenRouterRaw(apiKey, model, messages, opts);
+  return content;
 }
 
 /* ═══════════════════════════════════════════
@@ -950,6 +969,8 @@ export interface StepTAScoreOptions {
     failed_rows: number;
     /** Сколько исходных пачек после всех повторов осталось хотя бы частично без оценки. */
     failed_batches: number;
+    /** Сколько HTTP 200 ответов Requesty завершились по лимиту токенов. */
+    length_responses: number;
     /** Причины провалов с частотой — то, чего раньше немой catch не оставлял. */
     errors: Array<{ reason: string; count: number }>;
   }) => void;
@@ -1007,6 +1028,7 @@ export async function stepTAScore(
   const failedKeys = new Set<string>();
   const errorCounts = new Map<string, number>();
   let failedBatches = 0;
+  let lengthResponses = 0;
   const markFailedKeys = (keys: string[], reason: string) => {
     if (keys.length === 0) return;
     failedBatches += 1;
@@ -1022,6 +1044,7 @@ export async function stepTAScore(
     const chunk = uniqueRows.slice(batch, batch + TA_BATCH);
     let unresolved = chunk.map((row, idx) => ({ idx, key: chunkKeys[idx], row }));
     let failureReason: string | null = null;
+    let batchSawLength = false;
 
     // HTTP/сеть уже повторяются внутри callOpenRouter. Этот цикл отвечает за
     // другой класс ошибки: провайдер вернул 200, но забыл часть индексов.
@@ -1043,9 +1066,9 @@ export async function stepTAScore(
       });
       const userMsg = `Бриф:\n${brief.slice(0, 4000)}\n\nКомпании:\n${JSON.stringify(companies)}`;
 
-      let content: string;
+      let completion: OpenRouterCompletion;
       try {
-        content = await callOpenRouter(OPENROUTER_BRIEF_API_KEY, AI_MODEL, [
+        completion = await callOpenRouterRaw(OPENROUTER_BRIEF_API_KEY, AI_MODEL, [
           { role: 'system', content: TA_SYSTEM_PROMPT },
           { role: 'user', content: userMsg },
         ], { temperature: 0.2, json: true, title: 'Portal - Base Constructor TA Scoring' });
@@ -1054,11 +1077,17 @@ export async function stepTAScore(
         break;
       }
 
+      if (completion.finishReason === 'length') {
+        lengthResponses += 1;
+        batchSawLength = true;
+      }
+
       let responseRows: unknown[];
       try {
-        responseRows = parseTAScoreResponse(content);
+        responseRows = parseTAScoreResponse(completion.content);
       } catch (err) {
-        failureReason = err instanceof Error ? err.message : String(err);
+        const reason = err instanceof Error ? err.message : String(err);
+        failureReason = batchSawLength ? `${reason} (finish_reason=length)` : reason;
         if (responseAttempt < TA_RESPONSE_MAX_RETRIES) continue;
         break;
       }
@@ -1079,7 +1108,8 @@ export async function stepTAScore(
       }
       failureReason =
         `Неполный ответ ИИ: отсутствуют или неоднозначны индексы ` +
-        unresolved.map(({ idx }) => idx).join(', ');
+        unresolved.map(({ idx }) => idx).join(', ') +
+        (batchSawLength ? ' (finish_reason=length)' : '');
     }
 
     if (unresolved.length > 0) {
@@ -1151,12 +1181,20 @@ export async function stepTAScore(
     );
   }
 
+  if (lengthResponses > 0) {
+    console.warn(
+      `[ta_scoring] Ответов Requesty с finish_reason=length: ${lengthResponses}; ` +
+        `валидные оценки сохранены, недостающие запрошены повторно`,
+    );
+  }
+
   options?.onStats?.({
     pre_filter_rows: preFilterRows,
     filtered_out_count: preFilterRows - filtered.length,
     pre_filter_avg_score: preFilterAvg,
     failed_rows: failedRows,
     failed_batches: failedBatches,
+    length_responses: lengthResponses,
     errors,
   });
 
