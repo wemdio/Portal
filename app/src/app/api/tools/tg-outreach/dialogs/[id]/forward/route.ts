@@ -15,7 +15,7 @@ import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { buildLeadMessage, type ForwardKind } from '@/lib/tgOutreach/leadMessage';
 import { checkForwardConflict, cancelBlockReason, type ExistingForward } from '@/lib/tgOutreach/forwardConflict';
-import { usernameKey } from '@/lib/tgOutreach/report';
+import { usernameKey, sourceChatOf } from '@/lib/tgOutreach/report';
 import { logCampaign, forwardKindLabel, forwardWho } from '@/lib/tgOutreach/campaignLog';
 import type { OpenAISettings } from '@/lib/tgOutreach/types';
 
@@ -113,8 +113,9 @@ async function prepare(
       }>).find((c) => usernameKey(c.username) === key);
       if (contact) {
         baseName = bases.find((b) => b.id === contact.base_id)?.name ?? null;
-        const raw = contact.raw ?? {};
-        sourceChat = String(raw['Ссылка на источник'] ?? raw['Название источника'] ?? raw['Источник'] ?? '') || null;
+        // Та же функция, что считает «обработанные чаты» в отчёте: карточка
+        // менеджеру и цифра клиенту должны понимать источник одинаково.
+        sourceChat = sourceChatOf(contact.raw) || null;
       }
     }
   }
@@ -291,6 +292,37 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 
       await logCampaign(auth.supabase, prepared.campaignId, 'info',
         `Передача (${forwardKindLabel(kind)}) ${prepared.who}: поставлена в очередь, получатель ${prepared.targetChat} (нажал ${name})`);
+
+      /**
+       * Ручная передача лида — это и есть пометка «лид».
+       *
+       * До 27.08.2026 статус диалога она не трогала, и лид, отданный менеджеру
+       * руками, нигде лидом не числился: и воронка на сводке, и «Кол-во целевых
+       * ответов» в отчёте по договору считают по `status = 'lead'`. Автоматика
+       * по положительному триггеру статус ставит, оператор — нет, и отчёт
+       * клиенту занижался ровно на число ручных передач.
+       *
+       * Только для лида: кандидат в партнёры — не целевой ответ клиента, и в
+       * его воронке ему не место.
+       *
+       * Отмена передачи статус обратно не снимает: решение «это лид» принял
+       * человек, и несостоявшаяся отправка его не отменяет — снять статус можно
+       * кнопками на карточке диалога.
+       */
+      if (kind === 'lead') {
+        const { error: statusErr } = await auth.supabase
+          .from('tg_outreach_dialogs')
+          .update({ status: 'lead' })
+          .eq('id', id)
+          .neq('status', 'lead');
+        if (statusErr) {
+          // Передача уже в очереди — ронять её из-за статуса нельзя. Но и
+          // молчать нельзя: цифра в отчёте разойдётся с реальностью, и узнать
+          // об этом можно только из журнала.
+          await logCampaign(auth.supabase, prepared.campaignId, 'warning',
+            `Передача (лид) ${prepared.who}: в очереди, но статус «Лид» не проставился — ${statusErr.message}. Поставьте его руками, иначе лид не попадёт в отчёт.`);
+        }
+      }
 
       return NextResponse.json({ ok: true, id: (data as { id: string }).id, target_chat: prepared.targetChat }, { status: 201 });
     },

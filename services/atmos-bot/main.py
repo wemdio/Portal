@@ -193,6 +193,59 @@ async def get_pool() -> asyncpg.Pool:
     return _pool
 
 
+# ── Ожидание базы при старте ────────────────────────────────────────────────
+# После перезагрузки сервера или cgroup-OOM Postgres минуту-две проходит crash
+# recovery и отвечает всем «57P03: the database system is in recovery mode».
+# Без ожидания сервис падал с exit 1, docker перезапускал, он падал снова —
+# loop-watchdog глушил его после 5 падений и ставил restart=no, после чего
+# контейнер лежал до ручного подъёма. 13-14.08.2026 так вышло трижды.
+DB_WAIT_TIMEOUT_SEC = float(os.environ.get("DB_WAIT_TIMEOUT_SEC", "300"))
+
+# Транзиентное: база поднимается, перегружена или сеть моргнула. Ошибки доступа
+# (неверный пароль, отсутствующая роль) сюда намеренно не входят — на них
+# сервис обязан падать сразу, а не маскировать опечатку в конфиге ретраями.
+_DB_TRANSIENT_ERRORS = (
+    asyncpg.CannotConnectNowError,
+    asyncpg.TooManyConnectionsError,
+    asyncpg.ConnectionDoesNotExistError,
+    OSError,  # ConnectionRefusedError, DNS, TLS
+    asyncio.TimeoutError,
+)
+
+
+async def wait_for_db(timeout_sec: float = DB_WAIT_TIMEOUT_SEC) -> None:
+    """Дождаться, пока Postgres начнёт принимать соединения."""
+    if not DATABASE_URL:
+        return
+    deadline = asyncio.get_running_loop().time() + timeout_sec
+    delay = 1.0
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            conn = await asyncpg.connect(
+                DATABASE_URL, statement_cache_size=0, timeout=10
+            )
+            await conn.close()
+            if attempt > 1:
+                print(f"[atmos] БД доступна с попытки {attempt}", flush=True)
+            return
+        except _DB_TRANSIENT_ERRORS as e:
+            if asyncio.get_running_loop().time() >= deadline:
+                print(
+                    f"[atmos] БД недоступна {timeout_sec:.0f}с, сдаюсь: {e}",
+                    flush=True,
+                )
+                raise
+            print(
+                f"[atmos] БД недоступна ({type(e).__name__}), "
+                f"повтор через {delay:.0f}с",
+                flush=True,
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 15.0)
+
+
 # ── Telegram helpers ────────────────────────────────────────────────────────
 
 async def tg_api(method: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -1344,6 +1397,7 @@ async def main() -> None:
         print("[atmos] FATAL: ATMOS_ALLOWED_TG_USER_IDS not set or empty")
         sys.exit(1)
 
+    await wait_for_db()
     await ensure_tables()
     await load_config_from_db()
 

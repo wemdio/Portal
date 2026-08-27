@@ -12,6 +12,9 @@ const RANGES: Record<string, { interval: string; suffix: string }> = {
   '6h': { interval: '6 hours', suffix: '6h' },
   '24h': { interval: '24 hours', suffix: '24h' },
   '7d': { interval: '7 days', suffix: '7d' },
+  // Месяц — горизонт, на котором видно медленное: аккаунт, замолчавший две
+  // недели назад, в семидневном окне выглядит как всегда молчавший.
+  '30d': { interval: '30 days', suffix: '30d' },
 };
 
 // Hard ceiling so a wildly busy campaign can't pull tens of millions of rows.

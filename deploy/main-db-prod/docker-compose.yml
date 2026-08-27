@@ -105,9 +105,16 @@ services:
     deploy:
       resources:
         limits:
-          # База ~25 GB: 12 GB защищают от cgroup OOM на пиках, а 8 CPU
-          # исключают постоянный throttling под параллельными запросами.
-          memory: 12288M
+          # 13.08.2026: 12 GB не защищали от cgroup OOM, а вызывали его — на пике
+          # ядро дважды убило backend (`Memory cgroup out of memory`, dmesg 16:15),
+          # postmaster сбросил все соединения и ушёл в crash recovery. Наружу это
+          # выглядело как «портал упал»: вход отдавал `Database error querying
+          # schema`, client-report-exports ушёл в exit-loop. Контейнер при этом
+          # остаётся `Up` с зелёным healthcheck — по docker ps такое не видно.
+          # На хосте 64 GB и ~47 GB свободных, держать базу в 12 GB нет причин.
+          # В cgroup v2 страничный кэш считается в лимит, поэтому запас нужен
+          # кратный, а не впритык. shared_buffers оставлены на 3 GB.
+          memory: 24576M
           cpus: '8.0'
           # 2048 у postgres: 100 connections × ~1 backend + ~10 внутренних worker'ов
           # + запас для pg_cron/pgsodium. Общий default 512 у остальных.

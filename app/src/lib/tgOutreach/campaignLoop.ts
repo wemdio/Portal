@@ -16,7 +16,7 @@ import type {
   OutreachProxy,
 } from './types';
 import { DEFAULT_FOLLOW_UP } from './types';
-import { classifyCheckError } from './accountCheck';
+import { checkAccount, classifyCheckError } from './accountCheck';
 import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient } from './gramClient';
 import type { LoopControl } from './watchdog';
@@ -1581,9 +1581,71 @@ export async function runCampaignLoop(
               log('info', `Не смог записать proxy success в БД: ${e instanceof Error ? e.message : String(e)}`);
             });
           }
-          void recordAccountSuccess(db, account.id).catch((e) => {
+          const accountSuccessWrite = recordAccountSuccess(db, account.id).catch((e) => {
             log('info', `Не смог записать account success в БД: ${e instanceof Error ? e.message : String(e)}`);
           });
+
+          /**
+           * Проверка, заказанная оператором на работающей кампании.
+           *
+           * Кнопка «Проверить» в интерфейсе к Telegram не подключается: сессию
+           * держим мы, и второе подключение к ней — это AUTH_KEY_DUPLICATED и
+           * выключенный аккаунт. Поэтому нажатие только ставит отметку
+           * `check_requested_at`, а выполняем проверку здесь — соединением,
+           * которое уже открыто и только что доказало свою работоспособность.
+           *
+           * Главное, что она приносит сверх «жив»: список чужих сеансов. Именно
+           * по нему августовское расследование отличает «нас разлогинили» от
+           * «номер забанили», и добыть его иначе, не останавливая рассылку,
+           * нельзя.
+           *
+           * Сбой проверки круг не рушит: аккаунт уже отработал, а проверка —
+           * это рассказ о нём, а не сама работа.
+           */
+          if (account.check_requested_at) {
+            const who = account.check_requested_by_name || 'оператор';
+            try {
+              const checkResult = await checkAccount(client, {
+                // Спам-блок в профиле не виден — его подтверждает только
+                // @SpamBot. Спрашиваем лишь у тех, кто уже помечен ограниченным
+                // (обычно после PEER_FLOOD на рассылке).
+                askSpamBotWhenRestricted: account.check_status === 'restricted',
+              });
+              // Ждём общей отметки об успехе круга: она пишет в те же поля, и
+              // приземлившись позже, затёрла бы итог проверки своим общим
+              // текстом и потеряла бы чужие сеансы.
+              await accountSuccessWrite;
+              const { error: saveErr } = await db
+                .from('tg_outreach_accounts')
+                .update({
+                  check_status: checkResult.status,
+                  check_detail: checkResult.detail.slice(0, 500),
+                  checked_at: new Date().toISOString(),
+                  other_sessions: checkResult.other_sessions ?? [],
+                  check_requested_at: null,
+                  check_requested_by_name: null,
+                  ...(checkResult.tg_user_id != null ? { tg_user_id: checkResult.tg_user_id } : {}),
+                  ...(checkResult.tg_username != null ? { tg_username: checkResult.tg_username } : {}),
+                  ...(checkResult.phone ? { phone: checkResult.phone } : {}),
+                })
+                .eq('id', account.id);
+              if (saveErr) {
+                log('warning', `Аккаунт ${account.session_name}: проверка прошла, но результат не записался — ${saveErr.message}`);
+              } else {
+                const others = checkResult.other_sessions?.length ?? 0;
+                log(
+                  'info',
+                  `Аккаунт ${account.session_name}: проверка по заказу (${who}) выполнена на ходу — ${checkResult.detail}`
+                  + (others ? `, чужих сеансов: ${others}` : ''),
+                );
+              }
+            } catch (checkErr) {
+              const msg = checkErr instanceof Error ? checkErr.message : String(checkErr);
+              // Заказ не гасим: проверка не состоялась, и снимать её значило бы
+              // сделать вид, что оператору ответили.
+              log('warning', `Аккаунт ${account.session_name}: проверка по заказу (${who}) не удалась — ${msg}. Заказ остался в очереди, повторим в следующем круге.`);
+            }
+          }
           if (usedRawPageFallback) {
             log(
               'warning',
@@ -1708,9 +1770,16 @@ export async function runCampaignLoop(
           // Пишем только терминальные состояния: сетевые и флуд-ошибки
           // проходят сами и карточку засорять не должны.
           const diagnosis = classifyCheckError(errMsg);
+          /**
+           * `restricted` пишем наравне с терминальными: спам-блок и флуд-вейт
+           * проходят сами, но пока они держатся, аккаунт не рассылает — и
+           * оператор должен видеть в карточке, что это временно и до какого
+           * момента, а не гадать по пустому кулдауну.
+           */
           if (diagnosis.status === 'session_revoked'
             || diagnosis.status === 'session_duplicate'
-            || diagnosis.status === 'banned') {
+            || diagnosis.status === 'banned'
+            || diagnosis.status === 'restricted') {
             const { error: diagErr } = await db
               .from('tg_outreach_accounts')
               .update({
@@ -1733,9 +1802,13 @@ export async function runCampaignLoop(
           } else if (errMsg.includes('AUTH_KEY_UNREGISTERED') || errMsg.includes('USER_DEACTIVATED')) {
             const isUnreg = errMsg.includes('AUTH_KEY_UNREGISTERED');
             const reasonCode = isUnreg ? 'AUTH_KEY_UNREGISTERED' : 'USER_DEACTIVATED';
+            // «Забанил» — слово с двумя очень разными смыслами, и здесь имеется
+            // в виду именно окончательный: USER_DEACTIVATED номер не вернёт.
+            // Проговариваем это прямо, иначе строка неотличима от временного
+            // спам-блока, после которого аккаунт оживает сам.
             const friendly = isUnreg
-              ? `Telegram больше не признаёт эту сессию (после смены пароля или ручного выхода)`
-              : `Telegram забанил этот номер`;
+              ? `Telegram больше не признаёт эту сессию (после смены пароля или ручного выхода) — это не бан, аккаунт цел`
+              : `ПОСТОЯННЫЙ бан: Telegram забанил этот номер окончательно`;
             const { error: deactErr } = await db
               .from('tg_outreach_accounts')
               .update({ is_active: false, cooldown_until: null })
