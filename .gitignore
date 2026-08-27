@@ -19,6 +19,9 @@ companies_10000.xlsx
 app/.next/
 app/out/
 
+# jest transform cache (CI: --cacheDirectory=.jest-cache)
+app/.jest-cache/
+
 # production
 app/build
 app/dist/
