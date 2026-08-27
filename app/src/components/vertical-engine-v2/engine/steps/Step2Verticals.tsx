@@ -267,7 +267,7 @@ export function Step2Verticals({
 
   if (sorted.length === 0) {
     return (
-      <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50/50 p-10 text-center">
+      <div className={HE.emptyState}>
         <p className="text-sm font-medium text-gray-500">Вертикалей пока нет</p>
         <p className={`mt-1 text-xs ${HE.muted}`}>
           Дождитесь окончания исследования — направления появятся здесь.
@@ -409,9 +409,7 @@ function VerticalCard({
   const busy = busyAction !== null;
 
   return (
-    <article
-      className={`${HE.card} p-5 transition ${selected ? 'border-blue-500! ring-1 ring-blue-500/40' : ''}`}
-    >
+    <article className={`${HE.card} p-5 transition ${selected ? 'border-blue-500! ring-1 ring-blue-500/40' : ''}`}>
       {/* Шапка: rank, название, потенциал, выбор, массовые действия, свёртка */}
       <div className="flex flex-wrap items-center gap-2">
         {vertical.rank != null ? <span className={HE.rankNum}>{vertical.rank}</span> : null}
@@ -484,9 +482,7 @@ function VerticalCard({
       {!collapsed ? (
         <>
           {vertical.summary ? (
-            <p
-              className={`mt-2 text-[13px] leading-relaxed text-gray-600 ${showDetails ? '' : 'line-clamp-2'}`}
-            >
+            <p className={`mt-2 text-[13px] leading-relaxed text-gray-600 ${showDetails ? '' : 'line-clamp-2'}`}>
               {vertical.summary}
             </p>
           ) : null}
@@ -558,7 +554,7 @@ function VerticalCard({
               disabled={selected}
               className={
                 selected
-                  ? 'inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-5 text-sm font-medium text-emerald-700'
+                  ? `inline-flex h-11 w-full items-center justify-center gap-2 px-5 text-sm font-medium text-emerald-700 ${HE.successPanel}`
                   : `w-full ${HE.btnPrimary}`
               }
             >

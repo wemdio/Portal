@@ -476,7 +476,7 @@ export function Step4Base(props: {
             const file = e.dataTransfer.files?.[0];
             if (file) void handleFile(file);
           }}
-          className={`${HE.card} flex w-full cursor-pointer flex-col items-center justify-center gap-1.5 border-dashed px-4 py-8 text-center transition hover:border-blue-300 hover:bg-blue-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 ${
+          className={`${HE.emptyState} flex w-full cursor-pointer flex-col items-center justify-center gap-1.5 px-4 py-8 transition hover:border-blue-300 hover:bg-blue-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 ${
             parsing ? 'pointer-events-none opacity-60' : ''
           } ${dragOver ? 'border-blue-300 bg-blue-50/60' : ''}`}
         >
@@ -572,7 +572,7 @@ export function Step4Base(props: {
       {/* Список баз вертикали */}
       {verticalBases.length > 0 ? (
         <section className="space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-widest text-gray-500">
+          <p className={HE.eyebrow}>
             Базы под эту вертикаль ({verticalBases.length})
           </p>
           <div className="flex flex-wrap items-start gap-2">
@@ -596,7 +596,7 @@ export function Step4Base(props: {
       {/* Профиль последней разобранной базы */}
       {latestAnalyzed?.analysis ? (
         <section className="space-y-3">
-          <p className="text-xs font-semibold uppercase tracking-widest text-gray-500">
+          <p className={HE.eyebrow}>
             Состав базы «{latestAnalyzed.filename}»
           </p>
           <BaseAnalysisCards analysis={latestAnalyzed.analysis} />
@@ -701,9 +701,7 @@ function BaseCard({ base, hypothesisTitle }: { base: VeBaseSummary; hypothesisTi
   }, [base.id, downloading]);
 
   return (
-    <div
-      className={`${HE.card} px-3 py-2 ${previewOpen ? 'w-full' : ''}`}
-    >
+    <div className={`${HE.card} px-3 py-2 ${previewOpen ? 'w-full' : ''}`}>
       <div className="flex items-center gap-2">
         <span className="min-w-0">
           <span className="flex items-center gap-1.5">
@@ -765,7 +763,7 @@ function BaseCard({ base, hypothesisTitle }: { base: VeBaseSummary; hypothesisTi
               type="button"
               onClick={() => void handleDownload()}
               disabled={downloading}
-              className={`${HE.btnGhost} inline-flex items-center justify-center gap-1.5`}
+              className={HE.btnGhost}
             >
               {downloading ? <Spinner className="h-3 w-3" /> : null}
               Скачать CSV
@@ -871,7 +869,7 @@ function HypothesisPicker({
   onSetAll: (on: boolean) => void;
 }) {
   return (
-    <div className="mb-3 rounded-xl border border-gray-200 bg-gray-50/60 p-3">
+    <div className={`mb-3 ${HE.formPanel}`}>
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs font-medium text-gray-600">
           Гипотезы в сборке · выбрано {checkedCount} из {hypotheses.length}
@@ -979,7 +977,7 @@ function CollectProgress({ base }: { base: VeBaseSummary }) {
   // У баз, созданных до появления limit в collect_info, показываем дефолт.
   const shownLimit = limit ?? DEFAULT_COLLECT_LIMIT;
   return (
-    <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50/40 p-4">
+    <div className={`mt-3 p-4 ${HE.infoPanel}`}>
       <p className="flex items-center gap-2 text-sm font-medium text-blue-800">
         <Spinner className="h-4 w-4" />
         Собираем базу…
@@ -1082,7 +1080,7 @@ function BaseAnalysisCards({ analysis }: { analysis: VeBaseAnalysis }) {
       </div>
       {segments.length > 0 ? (
         <div>
-          <p className="mb-1.5 text-xs font-semibold uppercase tracking-widest text-gray-500">
+          <p className={`mb-1.5 ${HE.eyebrow}`}>
             Заметные сегменты
           </p>
           <div className="flex flex-wrap gap-1">
@@ -1096,7 +1094,7 @@ function BaseAnalysisCards({ analysis }: { analysis: VeBaseAnalysis }) {
       ) : null}
       {qualityItems.length > 0 ? (
         <div>
-          <p className="mb-1.5 text-xs font-semibold uppercase tracking-widest text-gray-500">
+          <p className={`mb-1.5 ${HE.eyebrow}`}>
             Качество данных
           </p>
           <ul className="space-y-1">
@@ -1111,7 +1109,7 @@ function BaseAnalysisCards({ analysis }: { analysis: VeBaseAnalysis }) {
       ) : null}
       {angles.length > 0 ? (
         <div>
-          <p className="mb-1.5 text-xs font-semibold uppercase tracking-widest text-gray-500">
+          <p className={`mb-1.5 ${HE.eyebrow}`}>
             Рекомендуемые углы для писем
           </p>
           <ul className="list-disc space-y-1 pl-5 text-sm text-gray-600 marker:text-gray-300">

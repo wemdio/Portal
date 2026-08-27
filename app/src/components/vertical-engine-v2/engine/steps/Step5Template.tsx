@@ -157,10 +157,7 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
   const segmentsClassified = hasVariants && (sample?.segments ?? null) !== null;
 
   return (
-    <details
-      className={HE.card}
-      onToggle={(e) => handleToggle(e.currentTarget.open)}
-    >
+    <details className={HE.card} onToggle={(e) => handleToggle(e.currentTarget.open)}>
       <summary className={`${HE.btnQuiet} w-full cursor-pointer select-none px-4 py-3`}>
         Превью по лидам — письма глазами конкретных лидов из базы
         <Badge tone="amber">новое</Badge>
@@ -347,7 +344,7 @@ function LaunchSection({ launch }: { launch: TemplateLaunchState }) {
     const info = launch.recorded;
     const campaigns = info.campaigns && info.campaigns.length > 0 ? info.campaigns : null;
     return (
-      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+      <div className={`px-4 py-3 ${HE.successPanel}`}>
         <p className="flex items-center gap-2 text-sm font-medium text-emerald-800">
           <StatusDot tone="ok" />
           {campaigns && campaigns.length > 1
@@ -387,7 +384,7 @@ function LaunchSection({ launch }: { launch: TemplateLaunchState }) {
   if (!launch.formOpen) return null;
 
   return (
-    <div className="space-y-3 rounded-2xl border border-blue-200 bg-blue-50/50 px-4 py-3">
+    <div className={`space-y-3 px-4 py-3 ${HE.infoPanel}`}>
       <p className="text-sm font-medium text-gray-800">
         Запуск в Instantly: кампания будет создана <b>на паузе</b>, лиды загрузятся из базы.
         Активация — вручную после проверки.
@@ -513,7 +510,7 @@ export function Step5Template(props: {
       );
     }
     return (
-      <div className={`${HE.card} flex min-h-[220px] flex-col items-center justify-center border-dashed p-10 text-center`}>
+      <div className={`${HE.emptyState} flex min-h-[220px] flex-col items-center justify-center`}>
         <p className="text-sm font-medium text-gray-500">Шаблона пока нет</p>
         <p className={`mt-1 max-w-md text-xs ${HE.muted}`}>
           Движок адаптирует цепочку вертикали под базу
@@ -537,14 +534,14 @@ export function Step5Template(props: {
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-lg font-bold text-gray-900">Шаблон 85/15</h2>
+            <h2 className={HE.sectionTitle}>Шаблон 85/15</h2>
             {template.status === 'ready' ? (
               <Badge tone="emerald">Готов</Badge>
             ) : (
               <Badge tone="amber">Черновик</Badge>
             )}
           </div>
-          <p className="mt-1 text-sm text-gray-500">
+          <p className={`mt-1 ${HE.lead}`}>
             Боевой шаблон: цепочка вертикали, адаптированная под базу {base?.filename ?? '—'}. В
             рассылку идёт этот текст.
           </p>
@@ -645,7 +642,7 @@ export function Step5Template(props: {
             Фиксированный блок (85%) — общая основа всех писем
           </summary>
           <div className="border-t border-gray-100 px-4 py-3">
-            <div className="rounded-lg border-2 border-dashed border-blue-200 bg-blue-50/40 p-3">
+            <div className={`rounded-lg border border-blue-100 p-3 ${HE.infoPanel}`}>
               <p className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700">
                 {template.fixed_block}
               </p>

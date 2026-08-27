@@ -21,6 +21,14 @@ export const HE = {
   cardPad: 'p-5',
   /** Вторичная панель (вложенный блок, мета-зона): заливка без рамки. */
   panelSoft: 'rounded-xl bg-gray-50/80',
+  /** Панель формы внутри шага: единая рамка, фон и отступ. */
+  formPanel: 'rounded-xl border border-gray-200 bg-gray-50/50 p-4',
+  /** Пустое состояние: пунктирная рамка без отдельного декоративного стиля. */
+  emptyState: 'rounded-2xl border border-dashed border-gray-200 bg-gray-50/50 p-10 text-center',
+  /** Информационная плашка с тем же радиусом, что у вложенных панелей. */
+  infoPanel: 'rounded-xl border border-blue-100 bg-blue-50/40',
+  /** Успешная плашка: статус остаётся точкой + текстом. */
+  successPanel: 'rounded-xl border border-emerald-200 bg-emerald-50',
   /** Разделительная линия секций. */
   divider: 'border-gray-200/80',
 
@@ -38,16 +46,18 @@ export const HE = {
   muted2: 'text-[13px] text-gray-500',
   /** Совсем тихий (даты, вторичные факты). */
   faint: 'text-xs text-gray-500',
+  /** Небольшой моно/uppercase маркер секции в рабочих шагах. */
+  eyebrow: 'text-xs font-semibold uppercase tracking-widest text-gray-500',
 
   // ── Кнопки ───────────────────────────────────────────────────────────────
   btnPrimary:
-    'h-10 rounded-lg bg-blue-600 px-4 text-[13px] font-semibold text-white shadow-sm transition hover:bg-blue-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
+    'inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 text-[13px] font-semibold text-white shadow-sm transition hover:bg-blue-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
   btnGhost:
-    'h-10 rounded-lg border border-gray-300 bg-white px-4 text-[13px] font-medium text-gray-600 transition hover:border-gray-400 hover:text-gray-900 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
+    'inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white px-4 text-[13px] font-medium text-gray-600 transition hover:border-gray-400 hover:text-gray-900 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
   btnQuiet:
     'text-[13px] font-medium text-blue-600 transition hover:underline active:opacity-70 disabled:opacity-50 focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
   btnSmall:
-    'h-8 rounded-lg border border-gray-300 bg-white px-3 text-xs font-medium text-gray-600 transition hover:border-gray-400 hover:text-gray-900 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
+    'inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 text-xs font-medium text-gray-600 transition hover:border-gray-400 hover:text-gray-900 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300',
 
   // ── Статусы и мелочь ─────────────────────────────────────────────────────
   pill: 'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold',

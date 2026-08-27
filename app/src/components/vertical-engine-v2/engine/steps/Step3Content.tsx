@@ -356,10 +356,10 @@ export function Step3Content(props: {
       {/* Контекст шага */}
       <header>
         <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-lg font-bold text-gray-900">{vertical.name}</h2>
+          <h2 className={HE.sectionTitle}>{vertical.name}</h2>
           <PotentialBadge pct={vertical.potential_pct} />
         </div>
-        <p className="mt-1 text-sm text-gray-500">
+        <p className={`mt-1 ${HE.lead}`}>
           Черновые материалы под это направление. Боевой текст собирается на шаге 4–5 из загруженной
           базы.
         </p>
@@ -385,7 +385,7 @@ export function Step3Content(props: {
               onChange={(e) => setLanguage(e.target.value as VeChainLanguage)}
               disabled={chainBusy}
               aria-label="Язык цепочки"
-              className="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs font-medium text-gray-600 transition focus:border-blue-400 focus:outline-none disabled:opacity-50"
+              className="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs font-medium text-gray-600 transition focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100 disabled:opacity-50"
             >
               {LANG_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>
@@ -399,7 +399,7 @@ export function Step3Content(props: {
                 if (requestEditorExit('regenerate')) onGenerateChain(language);
               }}
               disabled={chainBusy}
-              className={`${HE.btnGhost} inline-flex items-center justify-center gap-1.5`}
+              className={HE.btnGhost}
             >
               {chainBusy ? <Spinner className="h-3.5 w-3.5" /> : null}
               {chainFailed ? 'Попробовать снова' : chain ? 'Перегенерировать' : 'Сгенерировать'}
@@ -549,7 +549,7 @@ export function Step3Content(props: {
               type="button"
               onClick={() => void addLetter()}
               disabled={lettersSaving || chainBusy || letters.length >= 6}
-              className={`${HE.btnGhost} inline-flex items-center justify-center gap-1.5`}
+              className={HE.btnGhost}
             >
               {lettersSaving ? <Spinner className="h-3.5 w-3.5" /> : null}
               Добавить письмо
@@ -577,7 +577,7 @@ export function Step3Content(props: {
             type="button"
             onClick={onGenerateVocab}
             disabled={vocabBusy}
-            className={`${HE.btnGhost} shrink-0 inline-flex items-center justify-center gap-1.5`}
+            className={`shrink-0 ${HE.btnGhost}`}
           >
             {vocabBusy ? <Spinner className="h-3.5 w-3.5" /> : null}
             {vocabFailed ? 'Попробовать снова' : vocab ? 'Перегенерировать' : 'Сгенерировать'}
@@ -626,7 +626,7 @@ export function Step3Content(props: {
               type="button"
               onClick={onBuildDossier}
               disabled={dossierBusy}
-              className={`${HE.btnGhost} shrink-0 inline-flex items-center justify-center gap-1.5`}
+              className={`shrink-0 ${HE.btnGhost}`}
             >
               {dossierBusy ? <Spinner className="h-3.5 w-3.5" /> : null}
               {dossierFailed ? 'Попробовать снова' : dossierReady ? 'Пересобрать' : 'Собрать досье'}
@@ -733,7 +733,7 @@ function ChainLetterEditor({
     totalDays === 0 ? 'Сразу' : `через ${totalDays} ${daysWord(totalDays)} от старта`;
 
   return (
-    <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-4">
+    <div className={`rounded-lg border-blue-200 p-4 ${HE.infoPanel}`}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className={`${HE.muted2} text-[11px] font-medium uppercase tracking-wider`}>
           Письмо {letterIndex + 1}
@@ -763,7 +763,7 @@ function ChainLetterEditor({
       </div>
 
       <label className="block">
-        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-widest text-gray-500">
+        <span className={`mb-1 block ${HE.eyebrow}`}>
           Тема письма
         </span>
         <input
@@ -777,7 +777,7 @@ function ChainLetterEditor({
         />
       </label>
       <label className="mt-3 block">
-        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-widest text-gray-500">
+        <span className={`mb-1 block ${HE.eyebrow}`}>
           Текст письма
         </span>
         <textarea
@@ -824,7 +824,7 @@ function ChainLetterEditor({
 function DossierNum({ value, caption }: { value: string; caption: string }) {
   return (
     <div>
-      <p className="text-2xl font-bold tabular-nums text-gray-900">{value}</p>
+      <p className="text-[22px] font-semibold tabular-nums tracking-tight text-gray-900">{value}</p>
       <p className="text-[11px] text-gray-500">{caption}</p>
     </div>
   );

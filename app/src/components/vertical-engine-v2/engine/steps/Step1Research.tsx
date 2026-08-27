@@ -132,7 +132,7 @@ export function Step1Research({
   if (done) {
     return (
       <section className={`mx-auto max-w-xl ${HE.card} ${HE.cardPad}`}>
-        <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+        <div className={`flex items-start gap-3 px-4 py-3 ${HE.successPanel}`}>
           <StatusDot tone="ok" className="mt-1.5" />
           <div>
             <p className="text-sm font-semibold text-emerald-800">Исследование готово</p>
@@ -223,11 +223,11 @@ function NotStarted({
   onCasesChanged?: () => void;
 }) {
   return (
-    <section className={`mx-auto max-w-xl ${HE.card} px-6 py-10 text-center`}>
-      <p className="text-[44px] font-light leading-none text-gray-200" aria-hidden>
+    <section className={`mx-auto max-w-2xl ${HE.card} px-6 py-9 text-center`}>
+      <p className="text-[38px] font-light leading-none text-gray-200" aria-hidden>
         01
       </p>
-      <h2 className="mt-3 text-lg font-semibold text-gray-900">Исследование рынка</h2>
+      <h2 className={`mt-3 ${HE.sectionTitle}`}>Исследование рынка</h2>
       <p className={`mx-auto mt-2 max-w-md ${HE.lead}`}>
         Движок изучит сайт, найдёт конкурентов и их клиентов, соберёт 25–40 гипотез рынков с доказательствами
         и сложит их в вертикали. Обычно 10–20 минут.
@@ -273,8 +273,8 @@ function OfferBlock({
   };
 
   return (
-    <div className="mt-8 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
-      <label htmlFor="he-step1-offer" className="text-xs font-semibold uppercase tracking-widest text-gray-500">
+    <div className={`mt-8 text-left ${HE.formPanel}`}>
+      <label htmlFor="he-step1-offer" className={HE.eyebrow}>
         Оффер (необязательно)
       </label>
       <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
@@ -343,10 +343,10 @@ function SignatureBlock({
   };
 
   return (
-    <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
+    <div className={`mt-4 text-left ${HE.formPanel}`}>
       <label
         htmlFor="he-step1-signature"
-        className="text-xs font-semibold uppercase tracking-widest text-gray-500"
+        className={HE.eyebrow}
       >
         Отправитель (подпись в письмах)
       </label>
@@ -427,7 +427,7 @@ function BusinessBlock({
     >
       <label
         htmlFor="he-step1-business"
-        className="text-xs font-semibold uppercase tracking-widest text-gray-500"
+        className={HE.eyebrow}
       >
         Описание бизнеса (если сайт не раскрывает)
       </label>
@@ -503,8 +503,8 @@ function StyleBlock({
   };
 
   return (
-    <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
-      <label htmlFor="he-step1-style" className="text-xs font-semibold uppercase tracking-widest text-gray-500">
+    <div className={`mt-4 text-left ${HE.formPanel}`}>
+      <label htmlFor="he-step1-style" className={HE.eyebrow}>
         Эталон стиля (необязательно)
       </label>
       <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
@@ -596,8 +596,10 @@ function CasesBlock({
   };
 
   return (
-    <details className="group mt-4 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
-      <summary className="flex cursor-pointer select-none items-center gap-2 text-xs font-semibold uppercase tracking-widest text-gray-500 transition hover:text-gray-600">
+    <details className={`group mt-4 text-left ${HE.formPanel}`}>
+      <summary
+        className={`flex cursor-pointer select-none items-center gap-2 transition hover:text-gray-600 ${HE.eyebrow}`}
+      >
         Кейсы клиента ({cases.length})
       </summary>
       <p className={`mt-2 text-xs leading-relaxed ${HE.muted}`}>

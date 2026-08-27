@@ -617,9 +617,9 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
 
       {/* «С последнего визита»: что завершилось, пока пользователя не было */}
       {visitItems.length > 0 && !visitDismissed ? (
-        <section className="rounded-2xl border border-gray-200 bg-blue-50/40 px-4 py-3">
+        <section className={`px-4 py-3 ${HE.infoPanel}`}>
           <div className="flex items-center justify-between gap-3">
-            <h2 className="text-xs font-semibold uppercase tracking-widest text-blue-600">
+            <h2 className={`${HE.eyebrow} text-blue-600`}>
               С последнего визита
             </h2>
             <button
@@ -672,7 +672,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
 
           {/* Техническая информация для отладки — по умолчанию скрыта */}
           <details className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
-            <summary className="cursor-pointer select-none text-xs font-semibold uppercase tracking-widest text-gray-500 transition hover:text-gray-700">
+            <summary className={`cursor-pointer select-none transition hover:text-gray-700 ${HE.eyebrow}`}>
               Подробности
             </summary>
             <JobsDebugTable jobs={jobs} />
@@ -696,10 +696,10 @@ function StepHint({
   onAction: () => void;
 }) {
   return (
-    <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-10 text-center">
+    <div className={HE.emptyState}>
       <p className="text-sm font-medium text-gray-700">{title}</p>
       <p className="mt-1 text-xs text-gray-500">{text}</p>
-      <button type="button" onClick={onAction} className={`mt-4 inline-flex ${HE.btnPrimary}`}>
+      <button type="button" onClick={onAction} className={`mt-4 ${HE.btnPrimary}`}>
         {actionLabel}
       </button>
     </div>
