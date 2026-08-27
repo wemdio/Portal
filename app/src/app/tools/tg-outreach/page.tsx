@@ -3556,8 +3556,15 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   const [editingChatsFor, setEditingChatsFor] = useState<string | null>(null);
   const [chatsDraft, setChatsDraft] = useState('');
   const [savingChats, setSavingChats] = useState(false);
-  /** База, у которой открыто меню «скачать» (формат выбирают в нём). */
-  const [exportMenuFor, setExportMenuFor] = useState<string | null>(null);
+  /**
+   * База, для которой открыт выбор формата выгрузки.
+   *
+   * Именно модалка, а не выпадающее меню под кнопкой: список баз лежит в
+   * блоке с `overflow-hidden` (он же режет скруглённые углы), и меню в потоке
+   * этого блока обрезалось по нижней границе строки — выбрать формат было
+   * нечем.
+   */
+  const [exportFor, setExportFor] = useState<OutreachBase | null>(null);
   /** `<id базы>:<формат>` пока файл собирается на сервере. */
   const [exporting, setExporting] = useState<string | null>(null);
 
@@ -3580,6 +3587,14 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   }, [campaignId]);
 
   useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
+
+  // Escape закрывает выбор формата — как у остальных модалок портала.
+  useEffect(() => {
+    if (!exportFor) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setExportFor(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [exportFor]);
 
   const createBase = async () => {
     if (!newName.trim()) return;
@@ -3673,7 +3688,6 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
    * кириллицей и датой выгрузки.
    */
   const downloadBase = async (base: OutreachBase, format: 'xlsx' | 'csv') => {
-    setExportMenuFor(null);
     setExporting(`${base.id}:${format}`);
     setError(null); setNotice(null);
     try {
@@ -3696,42 +3710,31 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       a.download = filename;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      setExportFor(null);
     } finally { setExporting(null); }
   };
 
   /**
-   * Кнопка «скачать» с выбором формата — одна и та же в обоих списках баз.
+   * Кнопка «скачать» — одна и та же в обоих списках баз. Формат спрашиваем в
+   * модалке: в строке для двух кнопок нет места, а меню под кнопкой обрезается
+   * рамкой списка.
    *
    * Функция, а не вложенный компонент: вложенный пересоздавался бы на каждый
-   * ререндер вкладки и ронял бы открытое меню.
+   * ререндер вкладки.
    */
   const exportButton = (base: OutreachBase) => (
-    <div className="relative">
-      <button
-        type="button"
-        onClick={() => setExportMenuFor(exportMenuFor === base.id ? null : base.id)}
-        disabled={exporting !== null || base.counts.total === 0}
-        title={base.counts.total === 0 ? 'В базе нет контактов' : 'Скачать базу файлом — Excel или CSV'}
-        aria-label={`Скачать базу ${base.name}`}
-        className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent"
-      >
-        {exporting?.startsWith(`${base.id}:`)
-          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          : <Download className="h-3.5 w-3.5" />}
-      </button>
-      {exportMenuFor === base.id && (
-        <div className="absolute right-0 top-full z-20 mt-1 w-40 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
-          <button type="button" onClick={() => { void downloadBase(base, 'xlsx'); }}
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer">
-            <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600" /> Excel (.xlsx)
-          </button>
-          <button type="button" onClick={() => { void downloadBase(base, 'csv'); }}
-            className="flex w-full items-center gap-2 border-t border-gray-100 px-3 py-2 text-left text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer">
-            <ScrollText className="h-3.5 w-3.5 text-gray-400" /> CSV
-          </button>
-        </div>
-      )}
-    </div>
+    <button
+      type="button"
+      onClick={() => setExportFor(base)}
+      disabled={exporting !== null || base.counts.total === 0}
+      title={base.counts.total === 0 ? 'В базе нет контактов' : 'Скачать базу файлом — Excel или CSV'}
+      aria-label={`Скачать базу ${base.name}`}
+      className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent"
+    >
+      {exporting?.startsWith(`${base.id}:`)
+        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        : <Download className="h-3.5 w-3.5" />}
+    </button>
   );
 
   const deleteBase = async (base: OutreachBase) => {
@@ -3987,6 +3990,65 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Выбор формата выгрузки. Модалка, а не меню под кнопкой: список баз
+          обрезает всё, что выходит за его рамку. */}
+      {exportFor && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => { if (!exporting) setExportFor(null); }}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-sm rounded-xl border border-gray-200 bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3.5">
+              <h2 className="text-sm font-semibold text-gray-900">Скачать базу</h2>
+              <button type="button" onClick={() => setExportFor(null)} disabled={exporting !== null}
+                className="text-gray-400 hover:text-gray-600 disabled:opacity-40 cursor-pointer">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 px-5 py-4">
+              <p className="text-xs text-gray-600">
+                «{exportFor.name}» — {exportFor.counts.total} контактов. В файле юзернейм, текст
+                первого касания, статус, причина пропуска и даты. Такой же файл можно загрузить
+                обратно: колонки идут в том порядке, который ждёт загрузчик.
+              </p>
+
+              <div className="grid gap-2">
+                <button type="button" onClick={() => { void downloadBase(exportFor, 'xlsx'); }}
+                  disabled={exporting !== null}
+                  className="flex items-center gap-2.5 rounded-lg border border-gray-200 px-3 py-2.5 text-left transition hover:border-indigo-300 hover:bg-indigo-50/50 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+                  {exporting === `${exportFor.id}:xlsx`
+                    ? <Loader2 className="h-4 w-4 animate-spin text-indigo-600" />
+                    : <FileSpreadsheet className="h-4 w-4 text-emerald-600" />}
+                  <span>
+                    <span className="block text-xs font-medium text-gray-800">Excel (.xlsx)</span>
+                    <span className="block text-[10px] text-gray-500">Открывается двойным кликом</span>
+                  </span>
+                </button>
+
+                <button type="button" onClick={() => { void downloadBase(exportFor, 'csv'); }}
+                  disabled={exporting !== null}
+                  className="flex items-center gap-2.5 rounded-lg border border-gray-200 px-3 py-2.5 text-left transition hover:border-indigo-300 hover:bg-indigo-50/50 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+                  {exporting === `${exportFor.id}:csv`
+                    ? <Loader2 className="h-4 w-4 animate-spin text-indigo-600" />
+                    : <ScrollText className="h-4 w-4 text-gray-400" />}
+                  <span>
+                    <span className="block text-xs font-medium text-gray-800">CSV</span>
+                    <span className="block text-[10px] text-gray-500">Для загрузки в другие сервисы</span>
+                  </span>
+                </button>
+              </div>
+
+              {exporting && (
+                <p className="text-[10px] text-gray-400">Собираю файл — на большой базе это несколько секунд.</p>
+              )}
+            </div>
           </div>
         </div>
       )}
