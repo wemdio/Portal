@@ -105,7 +105,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
           : Promise.resolve({ data: [] as DashboardContact[] }),
         supabase
           .from('tg_outreach_dialogs')
-          .select('id, tg_user_id, tg_username, status, messages, last_message_at, can_send_changed_at, can_send_changed_reason')
+          .select('id, tg_user_id, tg_username, status, messages, last_message_at, can_send_changed_at, can_send_changed_reason, auto_forwarded_at')
           .eq('campaign_id', campaignId)
           .limit(20_000),
         supabase
