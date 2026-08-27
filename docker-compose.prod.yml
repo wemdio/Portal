@@ -1038,11 +1038,13 @@ services:
       # Это НЕ то же, что per-user cap MAX_ACTIVE_JOBS_PER_USER=6 в route.ts.
       - BASE_CONSTRUCTOR_CONCURRENCY=1
       # Per-job fan-out скрейпинга (find_emails/enrich). На 7 параллельных
-      # job'ах дефолтные 15+5 = до ~140 исходящих коннектов -> риск IP-бана.
-      # Снижено для base-constructor (env, тюнится без передеплоя кода). DFYB
-      # эти env не ставит -> у него остаются дефолты 15/5.
+      # job'ах библиотечные дефолты 15+5 дали бы до ~140 исходящих коннектов.
+      # Для base-constructor держим 10+6 = до ~112; env можно откатить без
+      # правки кода. DFYB эти env не ставит -> у него остаются дефолты 15/5.
       - BASE_EMAIL_SCRAPE_CONCURRENCY=${BASE_EMAIL_SCRAPE_CONCURRENCY:-10}
-      - BASE_ENRICH_SCRAPE_CONCURRENCY=${BASE_ENRICH_SCRAPE_CONCURRENCY:-4}
+      - BASE_ENRICH_SCRAPE_CONCURRENCY=${BASE_ENRICH_SCRAPE_CONCURRENCY:-6}
+      - BASE_ENRICH_PER_SITE_TIMEOUT_MS=${BASE_ENRICH_PER_SITE_TIMEOUT_MS:-30000}
+      - BASE_TA_SCORING_CONCURRENCY=${BASE_TA_SCORING_CONCURRENCY:-2}
       - BASE_CONSTRUCTOR_STALE_MINUTES=${BASE_CONSTRUCTOR_STALE_MINUTES:-15}
     # Job может занимать 30-60 минут (find_emails+enrich на 1.5к строк).
     # SIGTERM придёт при docker compose down, но шаг доработает до конца —

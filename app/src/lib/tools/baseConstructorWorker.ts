@@ -16,6 +16,7 @@ import {
   stepCapEmailsPerCompany,
   foundEmailColForLocale,
   normalizeConstructorLocale,
+  stripEnrichCheckpointMetadata,
   type ConstructorLocale,
   type StepKey,
   type ProgressFn,
@@ -674,6 +675,19 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
 
       if (await isCancelled(jobId)) return;
 
+      // enrich_descriptions stores a private attempted-row marker in its
+      // mid-step checkpoints. Preserve it only while resuming that same step;
+      // no later runner or user export may observe the technical column.
+      if (stepKey !== 'enrich_descriptions') {
+        const cleanData = stripEnrichCheckpointMetadata(data);
+        if (cleanData !== data) {
+          console.log(
+            `[base-constructor][${jobId}] stripped enrich checkpoint metadata before step '${stepKey}'`,
+          );
+          data = cleanData;
+        }
+      }
+
       const progressFn: ProgressFn = (progress) => updateJobProgress(jobId, i, stepKey, progress);
       await progressFn(0);
 
@@ -783,6 +797,9 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
       // stuck in 'processing' at 100% with no result_stats.
     }
 
+    // Belt-and-suspenders for legacy/in-flight checkpoints where enrich was
+    // the final step and the worker died between checkpoint and completion.
+    data = stripEnrichCheckpointMetadata(data);
     const header = data[0] || [];
     const body = data.slice(1);
     const emailIdx = findColumnIndex(header, 'email');

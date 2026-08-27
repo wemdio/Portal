@@ -362,7 +362,7 @@ describe('stepTAScore — провал пачки виден в телеметр
     ]);
   });
 
-  it('пишет checkpoint после AI-батча до финальной фильтрации', async () => {
+  it('финальный checkpoint совпадает с результатом после фильтрации', async () => {
     global.fetch = jest.fn(async (_url: unknown, init: { body: string }) => {
       const companies = readSentCompanies(init);
       return okWithContent(
@@ -392,11 +392,7 @@ describe('stepTAScore — провал пачки виден в телеметр
     );
 
     expect(checkpoints).toHaveLength(1);
-    expect(checkpoints[0][0]).toEqual([...header, 'ЦА Балл', 'ЦА Причина']);
-    expect(checkpoints[0].slice(1).map((row) => row.slice(4, 6))).toEqual([
-      ['5', 'r-Alpha'],
-      ['8', 'r-Beta'],
-    ]);
+    expect(checkpoints[0]).toEqual(out);
     expect(out.slice(1).map((row) => row[0])).toEqual(['Beta']);
   });
 
@@ -439,6 +435,84 @@ describe('stepTAScore — провал пачки виден в телеметр
     expect(global.fetch).toHaveBeenCalledTimes(3);
     expect(checkpoints).toHaveLength(1);
     expect(checkpoints[0]).toHaveLength(31);
+  });
+
+  it('сохраняет финальный checkpoint раньше единственного progress=100', async () => {
+    global.fetch = jest.fn(async (_url: unknown, init: { body: string }) => {
+      const companies = readSentCompanies(init);
+      return okWithContent(
+        companies.map((company) => ({
+          idx: company.idx,
+          score: company.idx === 0 ? 8 : 5,
+          reason: 'ok',
+        })),
+      );
+    }) as unknown as typeof fetch;
+    const events: string[] = [];
+    const checkpoints: string[][][] = [];
+
+    await stepTAScore(
+      [
+        header,
+        ['Alpha', 'alpha.example', 'a@alpha.example', 'description'],
+        ['Beta', 'beta.example', 'b@beta.example', 'description'],
+      ],
+      'brief',
+      async (progress) => { events.push(`progress:${progress}`); },
+      undefined,
+      {
+        onCheckpoint: async (checkpoint) => {
+          checkpoints.push(checkpoint);
+          events.push('checkpoint');
+        },
+      },
+    );
+
+    expect(checkpoints.at(-1)?.map((row) => row[0])).toEqual([header[0], 'Alpha']);
+    expect(events).toContain('checkpoint');
+    expect(events).toContain('progress:100');
+    expect(events.indexOf('checkpoint')).toBeLessThan(events.indexOf('progress:100'));
+    expect(events.filter((event) => event === 'progress:100')).toHaveLength(1);
+  });
+
+  it('обрабатывает максимум две AI-пачки параллельно и не смешивает результаты', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    global.fetch = jest.fn(async (_url: unknown, init: { body: string }) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const companies = readSentCompanies(init);
+      inFlight -= 1;
+      return okWithContent(
+        companies.map((company) => ({
+          idx: company.idx,
+          score: 8,
+          reason: `r-${company.data['компания']}`,
+        })),
+      );
+    }) as unknown as typeof fetch;
+
+    const rows = Array.from({ length: 30 }, (_, i) => [
+      `Company ${i + 1}`,
+      `company-${i + 1}.ru`,
+      `person-${i + 1}@company-${i + 1}.ru`,
+      'description',
+    ]);
+
+    const out = await stepTAScore(
+      [header, ...rows],
+      'brief',
+      noop,
+      undefined,
+      { keepAllScored: true, concurrency: 2 },
+    );
+
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(maxInFlight).toBe(2);
+    expect(out.slice(1).map((row) => row.slice(-2))).toEqual(
+      rows.map((row) => ['8', `r-${row[0]}`]),
+    );
   });
 
   it('считает провалы по пачкам: упавшая пачка не портит статистику успешной', async () => {
