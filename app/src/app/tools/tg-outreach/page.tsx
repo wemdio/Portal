@@ -3556,6 +3556,10 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   const [editingChatsFor, setEditingChatsFor] = useState<string | null>(null);
   const [chatsDraft, setChatsDraft] = useState('');
   const [savingChats, setSavingChats] = useState(false);
+  /** База, у которой открыто меню «скачать» (формат выбирают в нём). */
+  const [exportMenuFor, setExportMenuFor] = useState<string | null>(null);
+  /** `<id базы>:<формат>` пока файл собирается на сервере. */
+  const [exporting, setExporting] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -3660,6 +3664,75 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       setEditingChatsFor(null);
     } finally { setSavingChats(false); }
   };
+
+  /**
+   * Скачать базу файлом.
+   *
+   * Через `fetch`, а не обычной ссылкой: роут закрыт токеном, а `<a href>` его
+   * не передаёт. Имя файла берём из `Content-Disposition` — там оно с
+   * кириллицей и датой выгрузки.
+   */
+  const downloadBase = async (base: OutreachBase, format: 'xlsx' | 'csv') => {
+    setExportMenuFor(null);
+    setExporting(`${base.id}:${format}`);
+    setError(null); setNotice(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases/${base.id}/export?format=${format}`);
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(d?.error ?? `Не удалось выгрузить базу (${res.status})`);
+        return;
+      }
+      const cd = res.headers.get('content-disposition') ?? '';
+      const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+      const ascii = /filename="?([^";]+)"?/i.exec(cd);
+      const filename = utf8
+        ? decodeURIComponent(utf8[1])
+        : (ascii?.[1] ?? `${base.name}.${format}`);
+
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } finally { setExporting(null); }
+  };
+
+  /**
+   * Кнопка «скачать» с выбором формата — одна и та же в обоих списках баз.
+   *
+   * Функция, а не вложенный компонент: вложенный пересоздавался бы на каждый
+   * ререндер вкладки и ронял бы открытое меню.
+   */
+  const exportButton = (base: OutreachBase) => (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setExportMenuFor(exportMenuFor === base.id ? null : base.id)}
+        disabled={exporting !== null || base.counts.total === 0}
+        title={base.counts.total === 0 ? 'В базе нет контактов' : 'Скачать базу файлом — Excel или CSV'}
+        aria-label={`Скачать базу ${base.name}`}
+        className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent"
+      >
+        {exporting?.startsWith(`${base.id}:`)
+          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          : <Download className="h-3.5 w-3.5" />}
+      </button>
+      {exportMenuFor === base.id && (
+        <div className="absolute right-0 top-full z-20 mt-1 w-40 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
+          <button type="button" onClick={() => { void downloadBase(base, 'xlsx'); }}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer">
+            <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600" /> Excel (.xlsx)
+          </button>
+          <button type="button" onClick={() => { void downloadBase(base, 'csv'); }}
+            className="flex w-full items-center gap-2 border-t border-gray-100 px-3 py-2 text-left text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer">
+            <ScrollText className="h-3.5 w-3.5 text-gray-400" /> CSV
+          </button>
+        </div>
+      )}
+    </div>
+  );
 
   const deleteBase = async (base: OutreachBase) => {
     // Предупреждаем про отправленных отдельно: контакты уйдут каскадом, и
@@ -3782,7 +3855,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
           {/* «Отложено» (status=failed) раньше не показывали вовсе: контакты
               копились в невидимой колонке, и база, вставшая на пороге длины,
               выглядела просто пустеющей. */}
-          <div className="grid grid-cols-[32px_1fr_repeat(5,80px)_150px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_1fr_repeat(5,80px)_180px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <span />
             <span>База</span><span>Всего</span><span>Ждут</span><span>Отправлено</span><span>Пропущено</span><span>Отложено</span><span />
           </div>
@@ -3793,7 +3866,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
               .filter(Boolean);
             return (
             <React.Fragment key={b.id}>
-            <div className={`grid grid-cols-[32px_1fr_repeat(5,80px)_150px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
+            <div className={`grid grid-cols-[32px_1fr_repeat(5,80px)_180px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
               <input
                 type="checkbox"
                 checked={linked.has(b.id)}
@@ -3832,6 +3905,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
                 <input type="file" accept=".xlsx,.xls,.csv" className="hidden" disabled={busy}
                   onChange={(e) => { void uploadContacts(b.id, e); }} />
               </label>
+                {exportButton(b)}
                 <button type="button" onClick={() => { void requeueBase(b); }} disabled={busy || b.counts.failed === 0}
                   title="Вернуть отложенные контакты в очередь — например, после того как подняли порог длины первого сообщения"
                   className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent">
@@ -3895,11 +3969,12 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
           </p>
           <div className="divide-y divide-amber-100 rounded-lg border border-amber-200 bg-white overflow-hidden">
             {orphans.map((b) => (
-              <div key={b.id} className="grid grid-cols-[1fr_80px_80px_190px] gap-3 items-center px-3 py-2">
+              <div key={b.id} className="grid grid-cols-[1fr_80px_80px_230px] gap-3 items-center px-3 py-2">
                 <span className="text-xs font-medium text-gray-800 truncate">{b.name}</span>
                 <span className="text-xs text-gray-500">{b.counts.total} всего</span>
                 <span className="text-xs text-gray-500">{b.counts.sent} отправлено</span>
                 <div className="flex items-center justify-end gap-1">
+                  {exportButton(b)}
                   <button type="button" onClick={() => { void adoptBase(b); }} disabled={busy}
                     className="rounded-lg border border-amber-300 px-2 py-1 text-[11px] text-amber-900 hover:bg-amber-100 transition cursor-pointer disabled:opacity-50">
                     Перенести в эту кампанию
