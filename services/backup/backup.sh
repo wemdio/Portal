@@ -523,13 +523,65 @@ cleanup_remote() {
 cleanup_remote
 
 # ─── Local rotation ──────────────────────────────────────────────────────────
+#
+# Инцидент 27.08.2026: в .env на проде строка BACKUP_RETENTION_DAYS=7 слиплась
+# со следующей (перенос строки потерялся при правке), и переменная приехала
+# сюда значением «7<мусор>». find получал `-mtime +7<мусор>`, падал с ошибкой —
+# а ошибка гасилась `2>/dev/null || true`. Сорок дней подряд чистка не удаляла
+# ничего и молчала об этом: том бэкапов вырос до 510 ГБ, диск дошёл до 88%.
+#
+# Отсюда три правила ниже.
+#
+# 1. Срок хранения проверяем на «это вообще число». Мусорное значение — повод
+#    громко пожаловаться, а не тихо продолжить.
+# 2. Значение переменной НЕ печатаем ни в лог, ни в алерт. Ровно в этом
+#    инциденте в него попал пароль от боевой базы, и печать «для наглядности»
+#    разослала бы его в Telegram и в docker logs. Диагноз «не число» говорит
+#    всё, что нужно, и не разглашает ничего.
+# 3. Ошибку find больше не глотаем. Молчащая чистка неотличима от работающей —
+#    это и дало сорок дней тишины.
 
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
-echo "[backup] Cleaning local dumps older than ${RETENTION_DAYS} days..."
-find "$DUMP_DIR" -name "${PREFIX}-${INSTANCE}-*.${FILE_EXT}" -type f -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null || true
+rotation_ok=1
 
-REMAINING=$(find "$DUMP_DIR" -name "${PREFIX}-${INSTANCE}-*.${FILE_EXT}" -type f 2>/dev/null | wc -l)
+case "$RETENTION_DAYS" in
+  ''|*[!0-9]*)
+    msg="🚨 [backup ${INSTANCE}] BACKUP_RETENTION_DAYS не число — локальная чистка пропущена, том бэкапов будет расти. Проверьте .env: скорее всего строка слиплась с соседней."
+    echo "$msg" >&2
+    send_alert "$msg"
+    rotation_ok=0
+    ;;
+esac
+
+if [ "$rotation_ok" = 1 ]; then
+  echo "[backup] Cleaning local dumps older than ${RETENTION_DAYS} days..."
+  # `-exec rm -f {} +`, а не `-delete`: образ собран на alpine, где find из
+  # BusyBox, и поддержка `-delete` там не гарантирована. rm есть везде.
+  find_rc=0
+  find "$DUMP_DIR" -maxdepth 1 -name "${PREFIX}-${INSTANCE}-*.${FILE_EXT}" -type f     -mtime "+${RETENTION_DAYS}" -exec rm -f {} + || find_rc=$?
+  if [ "$find_rc" -ne 0 ]; then
+    msg="🚨 [backup ${INSTANCE}] локальная чистка упала (rc=${find_rc}) — старые дампы остались на диске"
+    echo "$msg" >&2
+    send_alert "$msg"
+  fi
+fi
+
+REMAINING=$(find "$DUMP_DIR" -maxdepth 1 -name "${PREFIX}-${INSTANCE}-*.${FILE_EXT}" -type f 2>/dev/null | wc -l)
+REMAINING=$(echo "$REMAINING" | tr -d ' ')
 echo "[backup] Done. ${REMAINING} local dump(s) for ${INSTANCE} retained."
+
+# Дампов кратно больше, чем должно быть при этом сроке хранения, — значит
+# чистка не работает, даже если формально не упала. Два запуска в сутки, плюс
+# запас на неровные границы: порог с двукратным люфтом, чтобы алерт не сыпался
+# от одной задержавшейся задачи.
+if [ "$rotation_ok" = 1 ]; then
+  EXPECTED_MAX=$(( (RETENTION_DAYS + 1) * 4 ))
+  if [ "$REMAINING" -gt "$EXPECTED_MAX" ]; then
+    msg="⚠️ [backup ${INSTANCE}] на диске ${REMAINING} дампов при сроке хранения ${RETENTION_DAYS} дней (ожидалось не больше ${EXPECTED_MAX}). Чистка не работает — проверьте том бэкапов, он переполнит диск."
+    echo "$msg" >&2
+    send_alert "$msg"
+  fi
+fi
 
 if [ "$upload_failed" = 1 ]; then
   exit 1
