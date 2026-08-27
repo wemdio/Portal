@@ -424,6 +424,7 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
     stepTAScore(data, cfg.brief || '', prog, cancel, {
       keepAllScored: cfg.keepAllScored,
       onStats: cfg.onTaScoringStats,
+      onCheckpoint: cfg.onCheckpoint,
     }),
   personalization: (data, prog, cancel, cfg) => stepPersonalize(data, cfg.prompt || '', prog, cancel),
 };
@@ -686,6 +687,7 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
         'enrich_descriptions',
         'find_emails',
         'validate_emails',
+        'ta_scoring',
       ]);
       const effectiveStepConfig: StepConfig = {
         ...stepConfig,

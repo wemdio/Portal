@@ -325,6 +325,81 @@ describe('stepTAScore — провал пачки виден в телеметр
     expect(stats?.failed_rows).toBe(0);
   });
 
+  it('resume с checkpoint не вызывает AI повторно для уже оценённых компаний', async () => {
+    const sentCompanies: string[][] = [];
+    global.fetch = jest.fn(async (_url: unknown, init: { body: string }) => {
+      const companies = readSentCompanies(init);
+      sentCompanies.push(companies.map((company) => company.data['компания']));
+      return okWithContent(
+        companies.map((company) => ({
+          idx: company.idx,
+          score: company.data['компания'] === 'Beta' ? 9 : 8,
+          reason: `fresh-${company.data['компания']}`,
+        })),
+      );
+    }) as unknown as typeof fetch;
+
+    const checkpointedHeader = [...header, 'ЦА Балл', 'ЦА Причина'];
+    const out = await stepTAScore(
+      [
+        checkpointedHeader,
+        ['Alpha', 'a.ru', 'a@a.ru', 'd', '8', 'checkpoint-alpha'],
+        ['Beta', 'b.ru', 'b@b.ru', 'd', '', ''],
+        ['Gamma', 'g.ru', 'g@g.ru', 'd', '7', 'checkpoint-gamma'],
+      ],
+      'brief',
+      noop,
+      undefined,
+      { keepAllScored: true },
+    );
+
+    expect(sentCompanies).toEqual([['Beta']]);
+    expect(out[0]).toEqual(checkpointedHeader);
+    expect(out.slice(1).map((row) => row.slice(4, 6))).toEqual([
+      ['8', 'checkpoint-alpha'],
+      ['9', 'fresh-Beta'],
+      ['7', 'checkpoint-gamma'],
+    ]);
+  });
+
+  it('пишет checkpoint после AI-батча до финальной фильтрации', async () => {
+    global.fetch = jest.fn(async (_url: unknown, init: { body: string }) => {
+      const companies = readSentCompanies(init);
+      return okWithContent(
+        companies.map((company) => ({
+          idx: company.idx,
+          score: company.data['компания'] === 'Alpha' ? 5 : 8,
+          reason: `r-${company.data['компания']}`,
+        })),
+      );
+    }) as unknown as typeof fetch;
+
+    const checkpoints: string[][][] = [];
+    const out = await stepTAScore(
+      [
+        header,
+        ['Alpha', 'a.ru', 'a@a.ru', 'd'],
+        ['Beta', 'b.ru', 'b@b.ru', 'd'],
+      ],
+      'brief',
+      noop,
+      undefined,
+      {
+        onCheckpoint: async (rows) => {
+          checkpoints.push(rows);
+        },
+      },
+    );
+
+    expect(checkpoints).toHaveLength(1);
+    expect(checkpoints[0][0]).toEqual([...header, 'ЦА Балл', 'ЦА Причина']);
+    expect(checkpoints[0].slice(1).map((row) => row.slice(4, 6))).toEqual([
+      ['5', 'r-Alpha'],
+      ['8', 'r-Beta'],
+    ]);
+    expect(out.slice(1).map((row) => row[0])).toEqual(['Beta']);
+  });
+
   it('считает провалы по пачкам: упавшая пачка не портит статистику успешной', async () => {
     // 15 уникальных компаний → две пачки (10 + 5). Первая падает, вторая проходит.
     let call = 0;

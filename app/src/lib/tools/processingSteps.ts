@@ -974,6 +974,34 @@ export interface StepTAScoreOptions {
     /** Причины провалов с частотой — то, чего раньше немой catch не оставлял. */
     errors: Array<{ reason: string; count: number }>;
   }) => void;
+  /**
+   * Mid-step checkpoint for long ta_scoring runs. Receives rows with current
+   * score/reason columns filled for completed companies, before final filtering.
+   */
+  onCheckpoint?: CheckpointFn;
+}
+
+const TA_SCORE_COL = 'ЦА Балл';
+const TA_REASON_COL = 'ЦА Причина';
+
+function findTAScoreColumnIndexes(header: string[]): { scoreIdx: number; reasonIdx: number } {
+  return {
+    scoreIdx: findColumnIndex(header, 'ца балл', 'цабалл', 'ta score'),
+    reasonIdx: findColumnIndex(header, 'ца причина', 'ta reason'),
+  };
+}
+
+function scoreColumnStripper(header: string[], scoreIdx: number, reasonIdx: number): {
+  header: string[];
+  stripRow: (row: string[]) => string[];
+} {
+  const drop = new Set([scoreIdx, reasonIdx].filter((idx) => idx >= 0));
+  if (drop.size === 0) return { header, stripRow: (row) => row };
+  const keptIndexes = header.map((_, idx) => idx).filter((idx) => !drop.has(idx));
+  return {
+    header: keptIndexes.map((idx) => header[idx]),
+    stripRow: (row) => keptIndexes.map((idx) => row[idx] || ''),
+  };
 }
 
 export async function stepTAScore(
@@ -985,7 +1013,20 @@ export async function stepTAScore(
 ): Promise<string[][]> {
   const header = data[0];
   const body = data.slice(1);
-  const newHeader = [...header, 'ЦА Балл', 'ЦА Причина'];
+  const existingScoreColumns = findTAScoreColumnIndexes(header);
+  const hasExistingScoreColumns =
+    existingScoreColumns.scoreIdx >= 0 && existingScoreColumns.reasonIdx >= 0;
+  const newHeader = hasExistingScoreColumns
+    ? [...header]
+    : [...header, TA_SCORE_COL, TA_REASON_COL];
+  const scoreColIdx = hasExistingScoreColumns
+    ? existingScoreColumns.scoreIdx
+    : newHeader.length - 2;
+  const reasonColIdx = hasExistingScoreColumns
+    ? existingScoreColumns.reasonIdx
+    : newHeader.length - 1;
+  const { header: scoringHeader, stripRow } =
+    scoreColumnStripper(newHeader, scoreColIdx, reasonColIdx);
   // ── Дедуп по компании перед AI-оценкой ──────────────────────────────
   // `split_emails` идёт ДО этого шага и размножает строки: одна компания с
   // N почтами → N идентичных строк, различие только в колонке email. Балл ЦА
@@ -1000,14 +1041,15 @@ export async function stepTAScore(
   // ОДИН балл (раньше AI оценивал каждую почту отдельно).
   // Ключ группировки «одна компания» — общий модульный хелпер (вынесен из
   // этого шага, та же логика): компания+сайт, fallback — вся строка без email.
-  const keyOf = makeCompanyKeyFn(header);
+  const keyOf = makeCompanyKeyFn(scoringHeader);
+  const keyOfRow = (row: string[]): string => keyOf(stripRow(row));
   // emailIdx нужен и дальше — чтобы НЕ класть email в AI-промпт (см. ниже).
-  const emailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
+  const emailIdx = findColumnIndex(scoringHeader, 'email', 'e-mail', 'почта', 'mail');
 
   // Уникальные представители в порядке первого появления.
   const repByKey = new Map<string, string[]>();
   for (const row of body) {
-    const k = keyOf(row);
+    const k = keyOfRow(row);
     if (!repByKey.has(k)) repByKey.set(k, row);
   }
   const uniqueKeys = [...repByKey.keys()];
@@ -1029,6 +1071,22 @@ export async function stepTAScore(
   const errorCounts = new Map<string, number>();
   let failedBatches = 0;
   let lengthResponses = 0;
+  const materializeCheckpointRows = (): string[][] => [
+    newHeader,
+    ...body.map((row) => {
+      const out = [...row];
+      while (out.length < newHeader.length) out.push('');
+      const scored = scoreByKey.get(keyOfRow(row));
+      if (scored) {
+        out[scoreColIdx] = scored.score;
+        out[reasonColIdx] = scored.reason;
+      }
+      return out;
+    }),
+  ];
+  const checkpoint = async () => {
+    if (options?.onCheckpoint) await options.onCheckpoint(materializeCheckpointRows());
+  };
   const markFailedKeys = (keys: string[], reason: string) => {
     if (keys.length === 0) return;
     failedBatches += 1;
@@ -1039,12 +1097,27 @@ export async function stepTAScore(
     errorCounts.set(reason, (errorCounts.get(reason) ?? 0) + 1);
   };
 
+  for (const row of body) {
+    if (!hasExistingScoreColumns) break;
+    const score = finiteNumber(row[scoreColIdx]);
+    if (score == null) continue;
+    const reason = row[reasonColIdx] || '';
+    scoreByKey.set(keyOfRow(row), { score: String(score), reason });
+  }
+
   for (let batch = 0; batch < uniqueRows.length; batch += TA_BATCH) {
     const chunkKeys = uniqueKeys.slice(batch, batch + TA_BATCH);
     const chunk = uniqueRows.slice(batch, batch + TA_BATCH);
-    let unresolved = chunk.map((row, idx) => ({ idx, key: chunkKeys[idx], row }));
+    let unresolved = chunk
+      .map((row, idx) => ({ idx, key: chunkKeys[idx], row }))
+      .filter(({ key }) => !scoreByKey.has(key));
     let failureReason: string | null = null;
     let batchSawLength = false;
+
+    if (unresolved.length === 0) {
+      await onProgress(Math.round(((batch + chunk.length) / uniqueRows.length) * 100));
+      continue;
+    }
 
     // HTTP/сеть уже повторяются внутри callOpenRouter. Этот цикл отвечает за
     // другой класс ошибки: провайдер вернул 200, но забыл часть индексов.
@@ -1058,10 +1131,11 @@ export async function stepTAScore(
 
       const companies = unresolved.map(({ idx, row }) => {
         const obj: Record<string, string> = {};
+        const promptRow = stripRow(row);
         // email НЕ кладём в промпт: оценка зависит от компании, а не от конкретного
         // адреса — иначе балл представителя зависел бы от того, какая почта
         // оказалась первой в группе, и дедуп переставал бы быть lossless.
-        header.forEach((h, c) => { obj[h] = c === emailIdx ? '' : (row[c] || ''); });
+        scoringHeader.forEach((h, c) => { obj[h] = c === emailIdx ? '' : (promptRow[c] || ''); });
         return { idx, data: obj };
       });
       const userMsg = `Бриф:\n${brief.slice(0, 4000)}\n\nКомпании:\n${JSON.stringify(companies)}`;
@@ -1124,6 +1198,7 @@ export async function stepTAScore(
     }
 
     await onProgress(Math.round(((batch + chunk.length) / uniqueRows.length) * 100));
+    await checkpoint();
   }
 
   // Защита инварианта: новый/изменённый код маршрутизации не должен снова
@@ -1140,12 +1215,15 @@ export async function stepTAScore(
   const scored: string[][] = body.map((row) => {
     // Защитный fallback тоже явный: даже при будущей ошибке маршрутизации строка
     // никогда снова не превратится в молчаливую «оценку 0».
-    const s = scoreByKey.get(keyOf(row)) ?? { score: '5', reason: 'Ошибка оценки' };
-    return [...row, s.score, s.reason];
+    const s = scoreByKey.get(keyOfRow(row)) ?? { score: '5', reason: 'Ошибка оценки' };
+    const out = [...row];
+    while (out.length < newHeader.length) out.push('');
+    out[scoreColIdx] = s.score;
+    out[reasonColIdx] = s.reason;
+    return out;
   });
 
   const TA_MIN_SCORE = 7;
-  const scoreColIdx = newHeader.length - 2;
 
   // Pre-filter telemetry
   const preFilterRows = scored.length;
@@ -1166,7 +1244,7 @@ export async function stepTAScore(
   // Строки (не компании), оставшиеся без настоящей оценки: у них в результате
   // стоит заглушка «Ошибка оценки», и оператор должен видеть их количество.
   const failedRows = failedKeys.size
-    ? body.filter((row) => failedKeys.has(keyOf(row))).length
+    ? body.filter((row) => failedKeys.has(keyOfRow(row))).length
     : 0;
   const errors = [...errorCounts.entries()]
     .map(([reason, count]) => ({ reason, count }))
