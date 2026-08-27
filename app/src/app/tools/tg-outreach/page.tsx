@@ -32,6 +32,7 @@ import {
   LayoutDashboard,
 } from 'lucide-react';
 import DashboardTab from '@/components/tg-outreach/DashboardTab';
+import BaseComparison from '@/components/tg-outreach/BaseComparison';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
 import type {
   CampaignStatus,
@@ -3965,6 +3966,16 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
             );
           })}
         </div>
+      )}
+
+      {/* Сравнение — под списком: сначала оператор видит, какие базы вообще
+          есть и что с ними, и только потом сравнивает две из них. Обратный
+          порядок заставлял бы выбирать вслепую. */}
+      {!loading && bases.length > 0 && (
+        <BaseComparison
+          campaignId={campaignId}
+          bases={bases.map((b) => ({ id: b.id, name: b.name }))}
+        />
       )}
 
       {/* Наследство старой модели: кнопка «Создать базу» кампанию не спрашивала,

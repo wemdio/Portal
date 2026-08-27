@@ -17,6 +17,8 @@ import { AlertCircle, Loader2 } from 'lucide-react';
 
 import { authFetch } from '@/lib/authFetch';
 import EChart from '@/components/charts/EChart';
+import BasesTable from '@/components/tg-outreach/BasesTable';
+import type { BaseStats } from '@/lib/tgOutreach/baseStats';
 import {
   AXIS_FONT_SIZE,
   AXIS_LINE,
@@ -284,6 +286,12 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
    */
   const [custom, setCustom] = useState<{ from: string; to: string } | null>(null);
   const [data, setData] = useState<DashboardApiResponse | null>(null);
+  /**
+   * Цифры по базам. Отдельным запросом, а не полем сводки: их же показывает
+   * сравнение гипотез на вкладке «Базы», и считать их надо одинаково — общая
+   * ручка гарантирует, что два экрана не разойдутся в числах.
+   */
+  const [bases, setBases] = useState<BaseStats[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -298,13 +306,24 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
         const qs = custom
           ? `period=${period}&from=${custom.from}&to=${custom.to}`
           : `period=${period}`;
-        const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/dashboard?${qs}`);
+        const [res, basesRes] = await Promise.all([
+          authFetch(`${API_BASE}/campaigns/${campaignId}/dashboard?${qs}`),
+          authFetch(`${API_BASE}/campaigns/${campaignId}/bases-stats?${qs}`),
+        ]);
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           setError((body as { error?: string }).error ?? `Не удалось загрузить сводку (${res.status})`);
           return;
         }
         setData((await res.json()) as DashboardApiResponse);
+        // Цифры по базам — дополнение к сводке: если они не пришли, показываем
+        // сводку без них, а не пустой экран с ошибкой.
+        if (basesRes.ok) {
+          const body = (await basesRes.json()) as { bases: BaseStats[] };
+          setBases(body.bases ?? []);
+        } else {
+          setBases([]);
+        }
       } catch {
         setError('Не удалось загрузить сводку');
       } finally {
@@ -519,15 +538,20 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
               />
             </div>
 
-            <div className="text-[11px] font-medium text-gray-400">Остаток базы</div>
-            <div className="grid grid-cols-2 gap-2">
-              <Metric label="Осталось контактов" value={data.dashboard.base.remaining} />
-              <Metric
-                label="Хватит на"
-                value={data.dashboard.base.daysLeft === null ? '—' : `${data.dashboard.base.daysLeft} дн.`}
-                caption={data.dashboard.base.daysLeft === null ? 'темп нулевой' : undefined}
-              />
+            {/* Раньше здесь стояли два числа по всем базам разом — «осталось
+                контактов 320». На вопрос «это одна база или пять, и какая из
+                них заканчивается» они не отвечали вовсе. Теперь строка на
+                базу: видно, сколько гипотез в работе и какая выдохлась. */}
+            <div className="text-[11px] font-medium text-gray-400">
+              Базы <span className="text-gray-300">({bases.length})</span>
             </div>
+            {bases.length === 0 ? (
+              <div className="rounded-xl bg-gray-50 px-3 py-3 text-xs text-gray-400">
+                В кампании нет ни одной базы контактов.
+              </div>
+            ) : (
+              <BasesTable bases={bases} />
+            )}
           </div>
 
         </>
