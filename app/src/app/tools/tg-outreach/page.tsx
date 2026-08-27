@@ -3556,9 +3556,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   const [editingChatsFor, setEditingChatsFor] = useState<string | null>(null);
   const [chatsDraft, setChatsDraft] = useState('');
   const [savingChats, setSavingChats] = useState(false);
-  /** База, у которой открыто меню «скачать» (формат выбирают в нём). */
-  const [exportMenuFor, setExportMenuFor] = useState<string | null>(null);
-  /** `<id базы>:<формат>` пока файл собирается на сервере. */
+  /** id базы, пока её файл собирается на сервере. */
   const [exporting, setExporting] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -3666,18 +3664,20 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   };
 
   /**
-   * Скачать базу файлом.
+   * Скачать базу файлом Excel.
+   *
+   * Формат не спрашиваем: выбор между xlsx и csv — лишний шаг там, где ответ
+   * всегда один, а роут при необходимости отдаёт и `format=csv`.
    *
    * Через `fetch`, а не обычной ссылкой: роут закрыт токеном, а `<a href>` его
    * не передаёт. Имя файла берём из `Content-Disposition` — там оно с
    * кириллицей и датой выгрузки.
    */
-  const downloadBase = async (base: OutreachBase, format: 'xlsx' | 'csv') => {
-    setExportMenuFor(null);
-    setExporting(`${base.id}:${format}`);
+  const downloadBase = async (base: OutreachBase) => {
+    setExporting(base.id);
     setError(null); setNotice(null);
     try {
-      const res = await authFetch(`${API_BASE}/bases/${base.id}/export?format=${format}`);
+      const res = await authFetch(`${API_BASE}/bases/${base.id}/export?format=xlsx`);
       if (!res.ok) {
         const d = (await res.json().catch(() => null)) as { error?: string } | null;
         setError(d?.error ?? `Не удалось выгрузить базу (${res.status})`);
@@ -3688,7 +3688,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       const ascii = /filename="?([^";]+)"?/i.exec(cd);
       const filename = utf8
         ? decodeURIComponent(utf8[1])
-        : (ascii?.[1] ?? `${base.name}.${format}`);
+        : (ascii?.[1] ?? `${base.name}.xlsx`);
 
       const url = URL.createObjectURL(await res.blob());
       const a = document.createElement('a');
@@ -3700,38 +3700,24 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   };
 
   /**
-   * Кнопка «скачать» с выбором формата — одна и та же в обоих списках баз.
+   * Кнопка «скачать» — одна и та же в обоих списках баз.
    *
    * Функция, а не вложенный компонент: вложенный пересоздавался бы на каждый
-   * ререндер вкладки и ронял бы открытое меню.
+   * ререндер вкладки.
    */
   const exportButton = (base: OutreachBase) => (
-    <div className="relative">
-      <button
-        type="button"
-        onClick={() => setExportMenuFor(exportMenuFor === base.id ? null : base.id)}
-        disabled={exporting !== null || base.counts.total === 0}
-        title={base.counts.total === 0 ? 'В базе нет контактов' : 'Скачать базу файлом — Excel или CSV'}
-        aria-label={`Скачать базу ${base.name}`}
-        className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent"
-      >
-        {exporting?.startsWith(`${base.id}:`)
-          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          : <Download className="h-3.5 w-3.5" />}
-      </button>
-      {exportMenuFor === base.id && (
-        <div className="absolute right-0 top-full z-20 mt-1 w-40 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
-          <button type="button" onClick={() => { void downloadBase(base, 'xlsx'); }}
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer">
-            <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600" /> Excel (.xlsx)
-          </button>
-          <button type="button" onClick={() => { void downloadBase(base, 'csv'); }}
-            className="flex w-full items-center gap-2 border-t border-gray-100 px-3 py-2 text-left text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer">
-            <ScrollText className="h-3.5 w-3.5 text-gray-400" /> CSV
-          </button>
-        </div>
-      )}
-    </div>
+    <button
+      type="button"
+      onClick={() => { void downloadBase(base); }}
+      disabled={exporting !== null || base.counts.total === 0}
+      title={base.counts.total === 0 ? 'В базе нет контактов' : 'Скачать базу в Excel'}
+      aria-label={`Скачать базу ${base.name}`}
+      className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent"
+    >
+      {exporting === base.id
+        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        : <Download className="h-3.5 w-3.5" />}
+    </button>
   );
 
   const deleteBase = async (base: OutreachBase) => {
