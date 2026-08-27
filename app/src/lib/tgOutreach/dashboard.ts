@@ -36,7 +36,15 @@ export interface DashboardContact {
  * он нужен, чтобы связать диалог с передачей менеджеру (у отчёта такой связи
  * нет, ему хватает счётчиков).
  */
-export type DashboardDialog = ReportDialog & { id?: string | null };
+export type DashboardDialog = ReportDialog & {
+  id?: string | null;
+  /**
+   * Момент автоматической пересылки менеджеру по положительному триггеру.
+   * Отдельной записи в очереди передач она не создаёт — только эту метку на
+   * диалоге, и без неё воронка автопередачи не видит вовсе.
+   */
+  auto_forwarded_at?: string | null;
+};
 
 export interface DashboardForward {
   status: string;
@@ -257,10 +265,35 @@ export function buildCampaignDashboard(input: DashboardInput): CampaignDashboard
   const replies = input.dialogs.filter((d) => inRange(firstReplyAt(d), fromMs, toMs)).length;
   const leads = input.dialogs
     .filter((d) => d.status === 'lead' && inRange(leadAt(d), fromMs, toMs)).length;
-  // Сорвавшиеся передачи не считаем: до менеджера такой лид не дошёл.
-  const forwarded = input.forwards
-    .filter((f) => (f.status === 'pending' || f.status === 'sent')
-      && inRange(ts(f.created_at), fromMs, toMs)).length;
+  /**
+   * Переданные менеджеру — и вручную, и автоматически.
+   *
+   * До 27.08.2026 ступень считала только очередь ручных передач
+   * (`tg_outreach_lead_forwards`), а автопересылка по положительному триггеру
+   * записи туда не делает — она ставит метку на самом диалоге. В итоге на ATOL
+   * за неделю воронка показывала «Переданы менеджеру — 0», хотя в «Диалогах»
+   * три человека стояли с плашкой «Ушёл менеджеру». Один и тот же факт брался
+   * из двух разных мест, и одно из них экран не читал.
+   *
+   * Считаем по диалогам, а не по сумме двух счётчиков: на одном человеке может
+   * быть и автопересылка, и досланная руками карточка, а менеджеру он ушёл
+   * один раз. Сорвавшиеся передачи не в счёт — до менеджера такой лид не дошёл.
+   */
+  const forwardedDialogs = new Set<string>();
+  let forwardedWithoutDialogId = 0;
+  for (const f of input.forwards) {
+    if (f.status !== 'pending' && f.status !== 'sent') continue;
+    if (!inRange(ts(f.created_at), fromMs, toMs)) continue;
+    if (f.dialog_id) forwardedDialogs.add(f.dialog_id);
+    // Диалог могли удалить из портала — передача всё равно состоялась.
+    else forwardedWithoutDialogId++;
+  }
+  for (const d of input.dialogs) {
+    if (!inRange(ts(d.auto_forwarded_at), fromMs, toMs)) continue;
+    if (d.id) forwardedDialogs.add(d.id);
+    else forwardedWithoutDialogId++;
+  }
+  const forwarded = forwardedDialogs.size + forwardedWithoutDialogId;
 
   const blocks = input.dialogs
     .filter((d) => d.can_send_changed_reason === 'tg_user_blocked_bot'
@@ -275,17 +308,26 @@ export function buildCampaignDashboard(input: DashboardInput): CampaignDashboard
   const awaiting = input.dialogs
     .filter((d) => inRange(firstOutgoingAt(d), fromMs, toMs) && firstReplyAt(d) === null).length;
 
-  // Сорвавшиеся передачи не снимают вопрос: до менеджера такой диалог не дошёл,
-  // и разобрать его всё ещё некому. Тот же предикат, что у шага воронки.
-  const forwardedDialogIds = new Set(
+  /**
+   * Сорвавшиеся передачи не снимают вопрос: до менеджера такой диалог не дошёл,
+   * и разобрать его всё ещё некому.
+   *
+   * Автопересылка считается наравне с ручной и без ограничения периодом: если
+   * человек ушёл менеджеру вчера, а ответил сегодня, внимания он уже не
+   * требует — им занимаются.
+   */
+  const handedOver = new Set(
     input.forwards
       .filter((f) => (f.status === 'pending' || f.status === 'sent') && f.dialog_id)
       .map((f) => f.dialog_id as string),
   );
+  for (const d of input.dialogs) {
+    if (d.auto_forwarded_at && d.id) handedOver.add(d.id);
+  }
   const needsAttention = input.dialogs
     .filter((d) => inRange(firstReplyAt(d), fromMs, toMs)
       && d.status === 'none'
-      && !(d.id && forwardedDialogIds.has(d.id))).length;
+      && !(d.id && handedOver.has(d.id))).length;
 
   const replyDelays: number[] = [];
   for (const d of input.dialogs) {

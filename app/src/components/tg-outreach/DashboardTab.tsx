@@ -17,6 +17,8 @@ import { AlertCircle, Loader2 } from 'lucide-react';
 
 import { authFetch } from '@/lib/authFetch';
 import EChart from '@/components/charts/EChart';
+import BasesTable from '@/components/tg-outreach/BasesTable';
+import type { BaseStats } from '@/lib/tgOutreach/baseStats';
 import {
   AXIS_FONT_SIZE,
   AXIS_LINE,
@@ -41,18 +43,14 @@ import type { AccountsSummary } from '@/lib/tgOutreach/accountsSummary';
 
 const API_BASE = '/api/tools/tg-outreach';
 
-interface DashboardErrorRow {
-  message: string;
-  count: number;
-}
-
 interface DashboardApiResponse {
   period: DashboardPeriod;
+  /** Сколько аккаунтов реально отправляли первые сообщения за сутки. */
+  sending: number;
   dashboard: CampaignDashboard;
   accounts: AccountsSummary;
   accounts_total: number;
   warming: number;
-  errors: DashboardErrorRow[];
 }
 
 const PERIOD_OPTIONS: Array<{ id: DashboardPeriod; label: string }> = [
@@ -288,6 +286,12 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
    */
   const [custom, setCustom] = useState<{ from: string; to: string } | null>(null);
   const [data, setData] = useState<DashboardApiResponse | null>(null);
+  /**
+   * Цифры по базам. Отдельным запросом, а не полем сводки: их же показывает
+   * сравнение гипотез на вкладке «Базы», и считать их надо одинаково — общая
+   * ручка гарантирует, что два экрана не разойдутся в числах.
+   */
+  const [bases, setBases] = useState<BaseStats[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -302,13 +306,24 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
         const qs = custom
           ? `period=${period}&from=${custom.from}&to=${custom.to}`
           : `period=${period}`;
-        const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/dashboard?${qs}`);
+        const [res, basesRes] = await Promise.all([
+          authFetch(`${API_BASE}/campaigns/${campaignId}/dashboard?${qs}`),
+          authFetch(`${API_BASE}/campaigns/${campaignId}/bases-stats?${qs}`),
+        ]);
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           setError((body as { error?: string }).error ?? `Не удалось загрузить сводку (${res.status})`);
           return;
         }
         setData((await res.json()) as DashboardApiResponse);
+        // Цифры по базам — дополнение к сводке: если они не пришли, показываем
+        // сводку без них, а не пустой экран с ошибкой.
+        if (basesRes.ok) {
+          const body = (await basesRes.json()) as { bases: BaseStats[] };
+          setBases(body.bases ?? []);
+        } else {
+          setBases([]);
+        }
       } catch {
         setError('Не удалось загрузить сводку');
       } finally {
@@ -325,6 +340,21 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
     if (!entries.length) return undefined;
     return entries.map(([status, count]) => `${status}: ${count}`).join(', ');
   }, [data]);
+
+  /**
+   * За какой период посчитано «Среднесуточно».
+   *
+   * Цифру читали как «за всё время» и не понимали, почему она меняется при
+   * переключении вкладок наверху. Считается она по выбранному периоду —
+   * поэтому период и подписан. Делим при этом на ПРОШЕДШИЕ сутки, а не на
+   * номинальную длину окна: у кампании, живущей три дня, «за 30 дней»
+   * занизило бы темп в десять раз.
+   */
+  const paceCaption = useMemo(() => {
+    if (custom) return `за период ${custom.from} — ${custom.to}`;
+    const label = PERIOD_OPTIONS.find((o) => o.id === period)?.label ?? '';
+    return period === 'all' ? 'за всё время' : `за ${label.toLowerCase()}`;
+  }, [period, custom]);
 
   return (
     <div className="space-y-3 p-4">
@@ -466,7 +496,17 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
             <h3 className="text-sm font-semibold text-gray-800">Здоровье кампании</h3>
 
             <div className="text-[11px] font-medium text-gray-400">Аккаунты</div>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-6">
+              {/* Первым — то, ради чего экран открывают: сколько аккаунтов
+                  реально пишут людям. «Живы» и «Выключены» отвечают только на
+                  вопрос о разрешениях: аккаунт бывает живым, включённым и при
+                  этом молчащим вторые сутки. */}
+              <Metric
+                label="Рассылают"
+                value={data.sending}
+                tone={data.sending > 0 ? 'info' : 'danger'}
+                caption={`из ${data.accounts_total} за сутки`}
+              />
               <Metric label="Живы" value={data.accounts.alive} tone="good" />
               <Metric
                 label="Мертвы"
@@ -488,38 +528,32 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
             <div className="grid grid-cols-3 gap-2">
               <Metric label="Отправлено сегодня" value={data.dashboard.pace.sentToday} />
               <Metric label="Вчера" value={data.dashboard.pace.sentYesterday} />
-              <Metric label="Среднесуточно" value={data.dashboard.pace.perDay} />
-            </div>
-
-            <div className="text-[11px] font-medium text-gray-400">Остаток базы</div>
-            <div className="grid grid-cols-2 gap-2">
-              <Metric label="Осталось контактов" value={data.dashboard.base.remaining} />
+              {/* Без подписи цифру читали как «за всё время», хотя считается
+                  она по выбранному наверху периоду — и от переключения вкладок
+                  менялась без объяснения. */}
               <Metric
-                label="Хватит на"
-                value={data.dashboard.base.daysLeft === null ? '—' : `${data.dashboard.base.daysLeft} дн.`}
-                caption={data.dashboard.base.daysLeft === null ? 'темп нулевой' : undefined}
+                label="Среднесуточно"
+                value={data.dashboard.pace.perDay}
+                caption={paceCaption}
               />
             </div>
-          </div>
 
-          {/* Свежие ошибки за сутки */}
-          <div className="rounded-xl border border-gray-200 bg-white p-4">
-            <h3 className="mb-2 text-sm font-semibold text-gray-800">Свежие ошибки за сутки</h3>
-            {data.errors.length === 0 ? (
-              <div className="py-4 text-center text-xs text-gray-400">За сутки ошибок не было</div>
+            {/* Раньше здесь стояли два числа по всем базам разом — «осталось
+                контактов 320». На вопрос «это одна база или пять, и какая из
+                них заканчивается» они не отвечали вовсе. Теперь строка на
+                базу: видно, сколько гипотез в работе и какая выдохлась. */}
+            <div className="text-[11px] font-medium text-gray-400">
+              Базы <span className="text-gray-300">({bases.length})</span>
+            </div>
+            {bases.length === 0 ? (
+              <div className="rounded-xl bg-gray-50 px-3 py-3 text-xs text-gray-400">
+                В кампании нет ни одной базы контактов.
+              </div>
             ) : (
-              <ul className="divide-y divide-gray-100">
-                {data.errors.map((e, i) => (
-                  <li key={i} className="flex items-center gap-3 py-2">
-                    <span className="flex-1 truncate text-xs text-gray-700">{e.message}</span>
-                    <span className="shrink-0 rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-700">
-                      × {e.count}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              <BasesTable bases={bases} />
             )}
           </div>
+
         </>
       ) : null}
     </div>

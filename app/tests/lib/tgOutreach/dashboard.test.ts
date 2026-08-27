@@ -108,6 +108,67 @@ describe('воронка', () => {
     expect(d.funnel.find((s) => s.key === 'forwarded')!.value).toBe(2);
   });
 
+  it('автопередача считается наравне с ручной: важен факт, а не способ', () => {
+    /**
+     * Регрессия 27.08.2026. Ступень считала только очередь ручных передач, а
+     * автопересылка по положительному триггеру записи туда не делает — она
+     * ставит метку на диалоге. На ATOL воронка показывала «Переданы менеджеру
+     * — 0», хотя в «Диалогах» три человека стояли с плашкой «Ушёл менеджеру».
+     */
+    const d = buildCampaignDashboard({
+      contacts: [],
+      dialogs: [
+        dialog({ id: 'd1', auto_forwarded_at: '2026-08-10T12:00:00+03:00' }),
+        dialog({ id: 'd2', auto_forwarded_at: '2026-08-10T13:00:00+03:00' }),
+      ],
+      forwards: [],
+      period: '1d',
+      now,
+    });
+    expect(d.funnel.find((s) => s.key === 'forwarded')!.value).toBe(2);
+  });
+
+  it('один человек, ушедший и автоматом, и руками, считается один раз', () => {
+    // Автопересылка отправляет голую переписку, и карточку с контекстом иногда
+    // досылают кнопкой. Менеджеру человек ушёл один — в воронке он один.
+    const d = buildCampaignDashboard({
+      contacts: [],
+      dialogs: [dialog({ id: 'd1', auto_forwarded_at: '2026-08-10T12:00:00+03:00' })],
+      forwards: [{ status: 'sent', created_at: '2026-08-10T14:00:00+03:00', dialog_id: 'd1' }],
+      period: '1d',
+      now,
+    });
+    expect(d.funnel.find((s) => s.key === 'forwarded')!.value).toBe(1);
+  });
+
+  it('автопередача вне периода в ступень не идёт', () => {
+    const d = buildCampaignDashboard({
+      contacts: [],
+      dialogs: [dialog({ id: 'd1', auto_forwarded_at: '2026-08-01T12:00:00+03:00' })],
+      forwards: [],
+      period: '1d',
+      now,
+    });
+    expect(d.funnel.find((s) => s.key === 'forwarded')!.value).toBe(0);
+  });
+
+  it('ушедший менеджеру автоматом внимания больше не требует', () => {
+    // «Требуют внимания» — это «ответили, но никто не разобрал». Человек,
+    // которого уже отдали менеджеру, разобран, каким бы способом он туда ни
+    // попал.
+    const d = buildCampaignDashboard({
+      contacts: [],
+      dialogs: [
+        dialog({ id: 'd1', status: 'none', messages: reply('2026-08-10T12:00:00+03:00'), auto_forwarded_at: '2026-08-10T12:30:00+03:00' }),
+        dialog({ id: 'd2', status: 'none', messages: reply('2026-08-10T12:00:00+03:00') }),
+      ],
+      forwards: [],
+      period: '1d',
+      now,
+    });
+    expect(d.needsAttention).toBe(1);
+  });
+
   it('блокировки стоят отдельно от воронки, а не ступенью в ней', () => {
     const d = buildCampaignDashboard({
       contacts: [],
