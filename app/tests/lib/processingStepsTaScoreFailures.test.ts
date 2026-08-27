@@ -400,6 +400,47 @@ describe('stepTAScore — провал пачки виден в телеметр
     expect(out.slice(1).map((row) => row[0])).toEqual(['Beta']);
   });
 
+  it('не пишет полный checkpoint после каждой AI-пачки', async () => {
+    global.fetch = jest.fn(async (_url: unknown, init: { body: string }) => {
+      const companies = readSentCompanies(init);
+      return okWithContent(
+        companies.map((company) => ({
+          idx: company.idx,
+          score: 8,
+          reason: `r-${company.data['компания']}`,
+        })),
+      );
+    }) as unknown as typeof fetch;
+
+    const checkpoints: string[][][] = [];
+    const rows = Array.from({ length: 30 }, (_, i) => [
+      `Company ${i + 1}`,
+      `company-${i + 1}.ru`,
+      `person-${i + 1}@company-${i + 1}.ru`,
+      'description',
+    ]);
+
+    await stepTAScore(
+      [header, ...rows],
+      'brief',
+      noop,
+      undefined,
+      {
+        keepAllScored: true,
+        onCheckpoint: async (checkpointRows) => {
+          checkpoints.push(checkpointRows);
+        },
+      },
+    );
+
+    // 30 компаний = 3 AI-пачки по 10, но полный JSON сохраняется только
+    // один раз — на финальной пачке. Промежуточные записи регулирует общий
+    // gate по времени/числу строк, чтобы не перегружать Postgres.
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(checkpoints).toHaveLength(1);
+    expect(checkpoints[0]).toHaveLength(31);
+  });
+
   it('считает провалы по пачкам: упавшая пачка не портит статистику успешной', async () => {
     // 15 уникальных компаний → две пачки (10 + 5). Первая падает, вторая проходит.
     let call = 0;

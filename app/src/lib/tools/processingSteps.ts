@@ -1087,6 +1087,7 @@ export async function stepTAScore(
   const checkpoint = async () => {
     if (options?.onCheckpoint) await options.onCheckpoint(materializeCheckpointRows());
   };
+  const shouldCheckpoint = makeCheckpointGate();
   const markFailedKeys = (keys: string[], reason: string) => {
     if (keys.length === 0) return;
     failedBatches += 1;
@@ -1197,8 +1198,11 @@ export async function stepTAScore(
       );
     }
 
-    await onProgress(Math.round(((batch + chunk.length) / uniqueRows.length) * 100));
-    await checkpoint();
+    const processed = batch + chunk.length;
+    await onProgress(Math.round((processed / uniqueRows.length) * 100));
+    if (options?.onCheckpoint && shouldCheckpoint(processed, processed === uniqueRows.length)) {
+      await checkpoint();
+    }
   }
 
   // Защита инварианта: новый/изменённый код маршрутизации не должен снова
