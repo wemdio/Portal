@@ -564,54 +564,56 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   }
 
   return (
-    <div className="space-y-8 text-left">
-      {/* Шапка: возврат к проектам, название проекта, статус и тихая мета-строка */}
-      <div className="border-b border-gray-200 pb-6">
-        <div>
-          <button
-            type="button"
-            onClick={onBack}
-            className="-ml-1 inline-flex items-center gap-1 rounded-md px-1 py-0.5 text-sm font-medium text-gray-500 transition hover:text-gray-900 active:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
-          >
-            ← Проекты
-          </button>
-        </div>
-        <div className="mt-2 flex flex-wrap items-center gap-2.5">
-          <h2 className="truncate text-[21px] font-semibold tracking-tight text-gray-900">
-            {project ? prettyProjectName(project.name, project.website_url) : 'Проект'}
-          </h2>
-          {project ? <ProjectStatusBadge status={project.status} /> : null}
+    <div className="space-y-9 text-left">
+      {/* Шапка: возврат к проектам, название проекта, статус и мета-строка */}
+      <header className="border-b border-gray-200/80 pb-7">
+        <button
+          type="button"
+          onClick={onBack}
+          className="-ml-1 inline-flex items-center gap-1 rounded-md px-1 py-0.5 text-[13px] font-medium text-gray-500 transition hover:text-gray-900 active:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+        >
+          ← Проекты
+        </button>
+        <div className="mt-3 flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+              <h2 className="truncate text-[22px] font-semibold leading-tight tracking-tight text-gray-900">
+                {project ? prettyProjectName(project.name, project.website_url) : 'Проект'}
+              </h2>
+              {project ? <ProjectStatusBadge status={project.status} /> : null}
+            </div>
+            {project ? (
+              <p className={`mt-1.5 ${HE.muted}`}>
+                {hypotheses.length} {pluralRu(hypotheses.length, 'гипотеза', 'гипотезы', 'гипотез')}
+                {' · '}
+                {verticals.length} {pluralRu(verticals.length, 'вертикаль', 'вертикали', 'вертикалей')}
+                {' · '}
+                обновлено {formatDate(project.updated_at)}
+                {' · '}
+                <a
+                  href={project.website_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="transition hover:text-blue-600 hover:underline"
+                >
+                  {prettyHost(project.website_url)}
+                </a>
+              </p>
+            ) : null}
+          </div>
           {hasActiveJobs ? (
             <button
               type="button"
               onClick={() => void cancelJobs()}
               disabled={cancelling}
               title="Остановить все активные задачи проекта (исследование, цепочки, шаблоны, сборку баз)"
-              className="h-7 rounded-lg border border-red-200 bg-red-50 px-2.5 text-xs font-medium text-red-600 transition hover:bg-red-100 disabled:opacity-50"
+              className="h-8 shrink-0 rounded-lg border border-red-200 bg-white px-3 text-[13px] font-medium text-red-600 transition hover:bg-red-50 active:scale-[0.97] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-200"
             >
               {cancelling ? 'Останавливаем…' : 'Остановить задачи'}
             </button>
           ) : null}
         </div>
-        {project ? (
-          <p className="mt-1 text-xs text-gray-500">
-            {hypotheses.length} {pluralRu(hypotheses.length, 'гипотеза', 'гипотезы', 'гипотез')}
-            {' · '}
-            {verticals.length} {pluralRu(verticals.length, 'вертикаль', 'вертикали', 'вертикалей')}
-            {' · '}
-            обновлено {formatDate(project.updated_at)}
-            {' · '}
-            <a
-              href={project.website_url}
-              target="_blank"
-              rel="noreferrer"
-              className="transition hover:text-blue-600"
-            >
-              {prettyHost(project.website_url)}
-            </a>
-          </p>
-        ) : null}
-      </div>
+      </header>
 
       {/* «С последнего визита»: что завершилось, пока пользователя не было */}
       {visitItems.length > 0 && !visitDismissed ? (

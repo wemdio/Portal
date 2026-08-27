@@ -102,18 +102,19 @@ describe('stepTAScore — провал пачки виден в телеметр
     return JSON.parse(reqBody.messages[1].content.split('Компании:\n')[1]) as SentCompany[];
   }
 
-  function okWithContent(content: unknown) {
+  function okWithContent(content: unknown, finishReason: 'stop' | 'length' = 'stop') {
     return {
       ok: true,
       json: async () => ({
         choices: [{
           message: { content: typeof content === 'string' ? content : JSON.stringify(content) },
+          finish_reason: finishReason,
         }],
       }),
     };
   }
 
-  it('повторяет только отсутствующие оценки и сохраняет уже полученные', async () => {
+  it('finish_reason=length: повторяет только отсутствующие оценки и сохраняет уже полученные', async () => {
     const sentIndexes: number[][] = [];
     let call = 0;
     global.fetch = jest.fn(async (_url: unknown, init: { body: string }) => {
@@ -123,11 +124,11 @@ describe('stepTAScore — провал пачки виден в телеметр
         ? okWithContent([
             { idx: 0, score: 0, reason: 'Настоящий нулевой балл' },
             { idx: 2, score: 8, reason: 'Подходит' },
-          ])
+          ], 'length')
         : okWithContent([{ idx: 1, score: 9, reason: 'Подходит после повтора' }]);
     }) as unknown as typeof fetch;
 
-    let stats: { failed_rows: number; failed_batches: number } | undefined;
+    let stats: { failed_rows: number; failed_batches: number; length_responses: number } | undefined;
     const out = await stepTAScore(
       [
         header,
@@ -150,6 +151,32 @@ describe('stepTAScore — провал пачки виден в телеметр
     ]);
     expect(stats?.failed_rows).toBe(0);
     expect(stats?.failed_batches).toBe(0);
+    expect(stats?.length_responses).toBe(1);
+  });
+
+  it('finish_reason=length с полным валидным массивом принимает, но учитывает в телеметрии', async () => {
+    global.fetch = jest.fn(async (_url: unknown, init: { body: string }) => {
+      const companies = readSentCompanies(init);
+      return okWithContent(
+        companies.map((company) => ({ idx: company.idx, score: 8, reason: `r-${company.idx}` })),
+        'length',
+      );
+    }) as unknown as typeof fetch;
+
+    let stats: { failed_rows: number; failed_batches: number; length_responses: number } | undefined;
+    const out = await stepTAScore(
+      [header, ['Alpha', 'a.ru', 'a@a.ru', 'd'], ['Beta', 'b.ru', 'b@b.ru', 'd']],
+      'brief',
+      noop,
+      undefined,
+      { keepAllScored: true, onStats: (s) => { stats = s; } },
+    );
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(out.slice(1).map((row) => row[4])).toEqual(['8', '8']);
+    expect(stats?.failed_rows).toBe(0);
+    expect(stats?.failed_batches).toBe(0);
+    expect(stats?.length_responses).toBe(1);
   });
 
   it('принимает массив оценок в JSON-обёртке вместо молчаливых нулей', async () => {
@@ -218,20 +245,21 @@ describe('stepTAScore — провал пачки виден в телеметр
     ]);
   });
 
-  it('после исчерпания повторов помечает только нерешённые компании явной ошибкой', async () => {
+  it('после исчерпания length-повторов помечает только нерешённые компании явной ошибкой', async () => {
     const sentIndexes: number[][] = [];
     let call = 0;
     global.fetch = jest.fn(async (_url: unknown, init: { body: string }) => {
       call += 1;
       sentIndexes.push(readSentCompanies(init).map((company) => company.idx));
       return call === 1
-        ? okWithContent([{ idx: 0, score: 8, reason: 'Alpha оценена' }])
-        : okWithContent([]);
+        ? okWithContent([{ idx: 0, score: 8, reason: 'Alpha оценена' }], 'length')
+        : okWithContent([], 'length');
     }) as unknown as typeof fetch;
 
     let stats: {
       failed_rows: number;
       failed_batches: number;
+      length_responses: number;
       errors: Array<{ reason: string; count: number }>;
     } | undefined;
     const out = await stepTAScore(
@@ -247,7 +275,8 @@ describe('stepTAScore — провал пачки виден в телеметр
     expect(out.slice(1).map((row) => row[5])).toEqual(['Alpha оценена', 'Ошибка оценки']);
     expect(stats?.failed_rows).toBe(1);
     expect(stats?.failed_batches).toBe(1);
-    expect(stats?.errors[0]?.reason).toMatch(/неполн|индекс/i);
+    expect(stats?.length_responses).toBe(4);
+    expect(stats?.errors[0]?.reason).toMatch(/finish_reason=length/i);
   });
 
   it('сообщает, сколько строк осталось без оценки и почему', async () => {
@@ -294,6 +323,81 @@ describe('stepTAScore — провал пачки виден в телеметр
 
     expect(stats?.failed_batches).toBe(0);
     expect(stats?.failed_rows).toBe(0);
+  });
+
+  it('resume с checkpoint не вызывает AI повторно для уже оценённых компаний', async () => {
+    const sentCompanies: string[][] = [];
+    global.fetch = jest.fn(async (_url: unknown, init: { body: string }) => {
+      const companies = readSentCompanies(init);
+      sentCompanies.push(companies.map((company) => company.data['компания']));
+      return okWithContent(
+        companies.map((company) => ({
+          idx: company.idx,
+          score: company.data['компания'] === 'Beta' ? 9 : 8,
+          reason: `fresh-${company.data['компания']}`,
+        })),
+      );
+    }) as unknown as typeof fetch;
+
+    const checkpointedHeader = [...header, 'ЦА Балл', 'ЦА Причина'];
+    const out = await stepTAScore(
+      [
+        checkpointedHeader,
+        ['Alpha', 'a.ru', 'a@a.ru', 'd', '8', 'checkpoint-alpha'],
+        ['Beta', 'b.ru', 'b@b.ru', 'd', '', ''],
+        ['Gamma', 'g.ru', 'g@g.ru', 'd', '7', 'checkpoint-gamma'],
+      ],
+      'brief',
+      noop,
+      undefined,
+      { keepAllScored: true },
+    );
+
+    expect(sentCompanies).toEqual([['Beta']]);
+    expect(out[0]).toEqual(checkpointedHeader);
+    expect(out.slice(1).map((row) => row.slice(4, 6))).toEqual([
+      ['8', 'checkpoint-alpha'],
+      ['9', 'fresh-Beta'],
+      ['7', 'checkpoint-gamma'],
+    ]);
+  });
+
+  it('пишет checkpoint после AI-батча до финальной фильтрации', async () => {
+    global.fetch = jest.fn(async (_url: unknown, init: { body: string }) => {
+      const companies = readSentCompanies(init);
+      return okWithContent(
+        companies.map((company) => ({
+          idx: company.idx,
+          score: company.data['компания'] === 'Alpha' ? 5 : 8,
+          reason: `r-${company.data['компания']}`,
+        })),
+      );
+    }) as unknown as typeof fetch;
+
+    const checkpoints: string[][][] = [];
+    const out = await stepTAScore(
+      [
+        header,
+        ['Alpha', 'a.ru', 'a@a.ru', 'd'],
+        ['Beta', 'b.ru', 'b@b.ru', 'd'],
+      ],
+      'brief',
+      noop,
+      undefined,
+      {
+        onCheckpoint: async (rows) => {
+          checkpoints.push(rows);
+        },
+      },
+    );
+
+    expect(checkpoints).toHaveLength(1);
+    expect(checkpoints[0][0]).toEqual([...header, 'ЦА Балл', 'ЦА Причина']);
+    expect(checkpoints[0].slice(1).map((row) => row.slice(4, 6))).toEqual([
+      ['5', 'r-Alpha'],
+      ['8', 'r-Beta'],
+    ]);
+    expect(out.slice(1).map((row) => row[0])).toEqual(['Beta']);
   });
 
   it('считает провалы по пачкам: упавшая пачка не портит статистику успешной', async () => {

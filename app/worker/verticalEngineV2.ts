@@ -26,11 +26,15 @@ import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLo
 import { runVeStage } from '@/lib/verticalEngineV2/stages';
 import { setVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
 import { normalizeVeMarket } from '@/lib/verticalEngineV2/market';
+import {
+  isRetryableStageError,
+  maxAttemptsFor,
+  retryRunAfter,
+} from '@/lib/verticalEngineV2/jobRetry';
 import type { VeJob, VeStage } from '@/lib/verticalEngineV2/types';
 
 const WORKER_ID = `vertical-engine-v2-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
-const MAX_ATTEMPTS = 3;
 /** Как часто воркер проверяет строку активной джобы на отмену пользователем. */
 const CANCEL_WATCH_MS = 3000;
 
@@ -267,9 +271,11 @@ async function failJob(job: VeJob, err: unknown) {
     return;
   }
   // attempts — число фейлов, а не клеймов: инкремент только здесь.
+  const retryable = isRetryableStageError(msg);
+  const attemptCap = maxAttemptsFor(msg);
   const nextAttempts = job.attempts + 1;
-  const finalFail = nextAttempts >= MAX_ATTEMPTS;
-  log('error', `Job ${job.id} (${job.stage}) failed (attempt ${nextAttempts}/${MAX_ATTEMPTS}): ${msg}`);
+  const finalFail = nextAttempts >= attemptCap;
+  log('error', `Job ${job.id} (${job.stage}) failed (attempt ${nextAttempts}/${attemptCap}${retryable ? ', retryable' : ''}): ${msg}`);
 
   await db
     .from('ve_jobs')
@@ -278,6 +284,9 @@ async function failJob(job: VeJob, err: unknown) {
       attempts: nextAttempts,
       error: msg.slice(0, 500),
       finished_at: finalFail ? new Date().toISOString() : null,
+      // Транзиентные ошибки пережидаем с бэкоффом (run_after в будущем), чтобы
+      // провайдер успел восстановиться; постоянные клеймим сразу, как раньше.
+      run_after: retryRunAfter(nextAttempts, retryable),
       updated_at: new Date().toISOString(),
     })
     .eq('id', job.id);
