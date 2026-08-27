@@ -23,6 +23,21 @@ describe('stepEnrich timeout progress', () => {
     jest.useRealTimers();
   });
 
+  it('uses the 60s production hard deadline before settling a stuck site', async () => {
+    const progress: number[] = [];
+    const resultPromise = stepEnrich(
+      [['Компания', 'Сайт'], ['Slow company', 'https://slow.example']],
+      async (value) => { progress.push(value); },
+    );
+
+    await jest.advanceTimersByTimeAsync(59_999);
+    expect(progress).not.toContain(100);
+
+    await jest.advanceTimersByTimeAsync(1);
+    await resultPromise;
+    expect(progress.at(-1)).toBe(100);
+  });
+
   it('counts watchdog timeouts as settled rows and reaches 100%', async () => {
     const rows = Array.from({ length: 15 }, (_, index) => [
       `Company ${index}`,

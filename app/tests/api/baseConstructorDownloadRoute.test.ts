@@ -13,8 +13,9 @@
  *     from `data` (byte-identical to rowsToCsvFile) AND lazily backfills the
  *     artifact (uploadExportArtifact + update export_path), guarded so only a
  *     'completed' row is written.
- *  3. No-backfill — an in-flight ('processing') job streams its partial `data`
- *     but MUST NOT backfill (caching a partial export would serve it forever).
+ *  3. Recovery export — in-flight/failed/cancelled jobs may still download the
+ *     processed prefix, but private checkpoint metadata is stripped first and
+ *     the partial result is never cached as a completed artifact.
  *
  * Plus: auth (401 no token / 403 wrong owner / 404 missing) precedes any body
  * work, and the meta SELECT never asks for `data`.
@@ -38,6 +39,16 @@ const ROWS: unknown[][] = [
   ['компания', 'Сайт', 'email'],
   ['ООО "Ромашка"', 'r.ru', 'a@r.ru, b@r.ru'],
   ['line\nbreak', '', ''],
+];
+const CHECKPOINT_ROWS: unknown[][] = [
+  ['компания', 'Сайт', '__portal_enrich_attempted_v1'],
+  ['Alpha', 'alpha.example', '1'],
+  ['Beta', 'beta.example', ''],
+];
+const CLEAN_CHECKPOINT_ROWS: unknown[][] = [
+  ['компания', 'Сайт'],
+  ['Alpha', 'alpha.example'],
+  ['Beta', 'beta.example'],
 ];
 
 /* ── supabaseAdmin mock ──────────────────────────────────────────────────── */
@@ -329,26 +340,28 @@ describe('legacy fallback + lazy backfill', () => {
   });
 });
 
-/* ── no backfill for partial data ────────────────────────────────────────── */
+/* ── safe recovery export for partial data ──────────────────────────────── */
 
-describe('no backfill for partial (in-flight) data', () => {
-  it('processing job: streams legacy CSV but MUST NOT backfill', async () => {
-    arrange({
-      authUser: { id: OWNER },
-      meta: { user_id: OWNER, status: 'processing', export_path: null },
-      rows: ROWS,
-    });
+describe('safe recovery export for partial data', () => {
+  it.each(['pending', 'processing', 'failed', 'cancelled'])(
+    '%s job: strips checkpoint metadata without caching the partial result',
+    async (status) => {
+      arrange({
+        authUser: { id: OWNER },
+        meta: { user_id: OWNER, status, export_path: 'must-not-be-read.csv.gz' },
+        rows: CHECKPOINT_ROWS,
+      });
 
-    const res = await GET(makeReq(), params);
-    expect(res.status).toBe(200);
+      const res = await GET(makeReq(), params);
+      expect(res.status).toBe(200);
+      const body = await bodyBytes(res);
+      expect(body.equals(Buffer.from(rowsToCsvFile(CLEAN_CHECKPOINT_ROWS), 'utf8'))).toBe(true);
 
-    const body = await bodyBytes(res);
-    expect(body.equals(Buffer.from(rowsToCsvFile(ROWS), 'utf8'))).toBe(true);
-
-    // Give any (erroneous) fire-and-forget backfill a chance to run, then prove
-    // it did not: caching a partial export would serve it forever.
-    for (let i = 0; i < 10; i++) await tick();
-    expect(mockStorageUpload).not.toHaveBeenCalled();
-    expect(mockJobUpdate).not.toHaveBeenCalled();
-  });
+      // Partial rows are recoverable, but neither a stale artifact nor a new
+      // backfill may bypass the sanitized data path.
+      expect(mockStorageDownload).not.toHaveBeenCalled();
+      expect(mockStorageUpload).not.toHaveBeenCalled();
+      expect(mockJobUpdate).not.toHaveBeenCalled();
+    },
+  );
 });

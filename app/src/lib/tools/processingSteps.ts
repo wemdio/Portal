@@ -24,6 +24,10 @@ import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator'
 import { isSupportEmail } from './supportEmails';
 import { makeCheckpointGate } from './checkpointGate';
 import {
+  ENRICH_CHECKPOINT_ATTEMPTED_COL,
+  stripEnrichCheckpointMetadata,
+} from './baseConstructorCheckpoint';
+import {
   CLEANUP_JSON_SYSTEM_PROMPT,
   CLEANUP_BATCH,
   buildCleanupUserMessage,
@@ -34,6 +38,10 @@ import {
 // Re-export: исторический дом парсеров — здесь; тесты и внешние импортёры
 // продолжают работать. Каноничная реализация теперь в nameCleanupProtocol.
 export { parseCleanupResponseJson, parseCleanupResponse };
+export {
+  ENRICH_CHECKPOINT_ATTEMPTED_COL,
+  stripEnrichCheckpointMetadata,
+} from './baseConstructorCheckpoint';
 
 export type ProgressFn = (progress: number) => Promise<void>;
 export type CancelCheckFn = () => Promise<boolean>;
@@ -73,7 +81,8 @@ const SITE_CHECK_TIMEOUT = 12_000;
 // 7 реплик x 1 = 7 job'ов) дефолтные 15+5 дали бы больше сотни исходящих коннектов
 // и риск IP-бана. base-constructor-контейнеры ставят BASE_*_SCRAPE_CONCURRENCY
 // ниже; кто не ставит (напр. DFYB) - остаётся на дефолтах 15/5.
-function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
+export function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
+  if (value == null || (typeof value === 'string' && value.trim() === '')) return fallback;
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(min, Math.trunc(parsed)));
@@ -89,13 +98,12 @@ const ENRICH_CONCURRENCY = Math.max(1, Number(process.env.BASE_ENRICH_SCRAPE_CON
  * With concurrency=5, if all five slots latch onto such hosts at once, the
  * step's `await processInPool(...)` never returns and the whole job hangs.
  *
- * 30s still gives the parser several chances to fetch a useful page, while
- * cutting the catastrophic tail in half. Worker abandons the in-flight
- * promise and moves on. The production value remains env-configurable.
+ * 60s restores the longer safety window for retries and URL fallbacks while
+ * still bounding a genuinely stuck site. The value remains env-configurable.
  */
 const ENRICH_PER_SITE_TIMEOUT_MS = boundedInteger(
   process.env.BASE_ENRICH_PER_SITE_TIMEOUT_MS,
-  30_000,
+  60_000,
   5_000,
   60_000,
 );
@@ -103,7 +111,7 @@ const SITE_CHECK_BATCH = 50;
 const TA_BATCH = 10;
 const TA_SCORING_CONCURRENCY = boundedInteger(
   process.env.BASE_TA_SCORING_CONCURRENCY,
-  2,
+  1,
   1,
   4,
 );
@@ -794,28 +802,6 @@ export interface StepEnrichOptions {
   locale?: ConstructorLocale;
 }
 
-/**
- * Checkpoint-only column used to remember that a website was attempted even
- * when it returned no description. Without it a restart cannot distinguish a
- * failed/empty attempt from a row that has never been processed and retries
- * the slow tail from zero.
- *
- * It must never reach another step or the user's export. Keep the exact name
- * versioned so old checkpoints remain readable if the representation changes.
- */
-export const ENRICH_CHECKPOINT_ATTEMPTED_COL = '__portal_enrich_attempted_v1';
-
-export function stripEnrichCheckpointMetadata(data: string[][]): string[][] {
-  const header = data[0];
-  if (!header) return data;
-  const metadataIndexes = new Set<number>();
-  header.forEach((column, index) => {
-    if (column === ENRICH_CHECKPOINT_ATTEMPTED_COL) metadataIndexes.add(index);
-  });
-  if (metadataIndexes.size === 0) return data;
-  return data.map((row) => row.filter((_value, index) => !metadataIndexes.has(index)));
-}
-
 export async function stepEnrich(
   data: string[][],
   onProgress: ProgressFn,
@@ -1218,6 +1204,7 @@ export async function stepTAScore(
   let processedUniqueRows = 0;
   let reportChain = Promise.resolve();
   let cancellationError: Error | null = null;
+  const fatalErrors: Error[] = [];
 
   const reportBatchCompletion = (rowCount: number): Promise<void> => {
     const report = async () => {
@@ -1236,8 +1223,12 @@ export async function stepTAScore(
     return reportChain;
   };
 
-  await processInPool(batches, scoringConcurrency, async ({ batchNumber, chunkKeys, chunk }) => {
-    if (cancellationError) return;
+  const processBatch = async ({
+    batchNumber,
+    chunkKeys,
+    chunk,
+  }: (typeof batches)[number]): Promise<void> => {
+    if (cancellationError || fatalErrors.length > 0) return;
 
     let unresolved = chunk
       .map((row, idx) => ({ idx, key: chunkKeys[idx], row }))
@@ -1258,7 +1249,7 @@ export async function stepTAScore(
       responseAttempt <= TA_RESPONSE_MAX_RETRIES && unresolved.length > 0;
       responseAttempt += 1
     ) {
-      if (cancellationError) return;
+      if (cancellationError || fatalErrors.length > 0) return;
       if (isCancelled && await isCancelled()) {
         cancellationError = new Error('Отменено');
         return;
@@ -1333,9 +1324,24 @@ export async function stepTAScore(
     }
 
     await reportBatchCompletion(chunk.length);
+  };
+
+  await processInPool(batches, scoringConcurrency, async (batch) => {
+    if (cancellationError || fatalErrors.length > 0) return;
+    try {
+      await processBatch(batch);
+    } catch (err) {
+      // processInPool deliberately isolates ordinary task failures. TA scoring
+      // must not turn an unexpected internal failure into a plausible score=5,
+      // so remember it here and fail the whole step after workers settle.
+      if (fatalErrors.length === 0) {
+        fatalErrors.push(err instanceof Error ? err : new Error(String(err)));
+      }
+    }
   });
 
   await reportChain;
+  if (fatalErrors.length > 0) throw fatalErrors[0];
   if (cancellationError) throw cancellationError;
 
   // Защита инварианта: новый/изменённый код маршрутизации не должен снова

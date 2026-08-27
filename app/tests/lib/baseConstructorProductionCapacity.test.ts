@@ -33,8 +33,8 @@ describe('BaseConstructor production capacity', () => {
     expect(declaredServices).toEqual(serviceNames);
     expect(compose).toContain('- BASE_CONSTRUCTOR_CONCURRENCY=1');
     expect(compose).toContain('- BASE_ENRICH_SCRAPE_CONCURRENCY=${BASE_ENRICH_SCRAPE_CONCURRENCY:-6}');
-    expect(compose).toContain('- BASE_ENRICH_PER_SITE_TIMEOUT_MS=${BASE_ENRICH_PER_SITE_TIMEOUT_MS:-30000}');
-    expect(compose).toContain('- BASE_TA_SCORING_CONCURRENCY=${BASE_TA_SCORING_CONCURRENCY:-2}');
+    expect(compose).toContain('- BASE_ENRICH_PER_SITE_TIMEOUT_MS=${BASE_ENRICH_PER_SITE_TIMEOUT_MS:-60000}');
+    expect(compose).toContain('- BASE_TA_SCORING_CONCURRENCY=${BASE_TA_SCORING_CONCURRENCY:-1}');
     expect(compose).not.toContain(
       'BASE_CONSTRUCTOR_CONCURRENCY=${BASE_CONSTRUCTOR_CONCURRENCY',
     );

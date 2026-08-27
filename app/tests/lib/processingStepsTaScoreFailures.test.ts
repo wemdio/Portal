@@ -18,7 +18,14 @@
  *   2. stepTAScore — провал пачки виден в телеметрии с причиной, а не молча.
  */
 
-import { planAiRetry, stepTAScore } from '@/lib/tools/processingSteps';
+import { boundedInteger, planAiRetry, stepTAScore } from '@/lib/tools/processingSteps';
+
+describe('boundedInteger', () => {
+  it('uses the fallback for an empty environment value instead of the minimum', () => {
+    expect(boundedInteger('', 60_000, 5_000, 60_000)).toBe(60_000);
+    expect(boundedInteger('   ', 1, 1, 4)).toBe(1);
+  });
+});
 
 describe('planAiRetry — расписание повторов', () => {
   it('на «постоянных» ошибках не тратит попытки: смысла повторять нет', () => {
@@ -513,6 +520,62 @@ describe('stepTAScore — провал пачки виден в телеметр
     expect(out.slice(1).map((row) => row.slice(-2))).toEqual(
       rows.map((row) => ['8', `r-${row[0]}`]),
     );
+  });
+
+  it('по умолчанию обрабатывает AI-пачки последовательно для общего production-ключа', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    global.fetch = jest.fn(async (_url: unknown, init: { body: string }) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const companies = readSentCompanies(init);
+      inFlight -= 1;
+      return okWithContent(
+        companies.map((company) => ({ idx: company.idx, score: 8, reason: 'ok' })),
+      );
+    }) as unknown as typeof fetch;
+
+    const rows = Array.from({ length: 20 }, (_, i) => [
+      `Company ${i + 1}`,
+      `company-${i + 1}.ru`,
+      `person-${i + 1}@company-${i + 1}.ru`,
+      'description',
+    ]);
+
+    await stepTAScore(
+      [header, ...rows],
+      'brief',
+      noop,
+      undefined,
+      { keepAllScored: true },
+    );
+
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(maxInFlight).toBe(1);
+  });
+
+  it('не маскирует неожиданную ошибку параллельной пачки как score=5', async () => {
+    const rows = Array.from({ length: 20 }, (_, i) => [
+      `Company ${i + 1}`,
+      `company-${i + 1}.ru`,
+      `person-${i + 1}@company-${i + 1}.ru`,
+      'description',
+    ]);
+    const cancelCheck = jest.fn(async () => {
+      throw new Error('cancel status unavailable');
+    });
+    global.fetch = jest.fn() as unknown as typeof fetch;
+
+    await expect(stepTAScore(
+      [header, ...rows],
+      'brief',
+      noop,
+      cancelCheck,
+      { keepAllScored: true, concurrency: 2 },
+    )).rejects.toThrow('cancel status unavailable');
+
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   it('считает провалы по пачкам: упавшая пачка не портит статистику успешной', async () => {

@@ -1043,8 +1043,11 @@ services:
       # правки кода. DFYB эти env не ставит -> у него остаются дефолты 15/5.
       - BASE_EMAIL_SCRAPE_CONCURRENCY=${BASE_EMAIL_SCRAPE_CONCURRENCY:-10}
       - BASE_ENRICH_SCRAPE_CONCURRENCY=${BASE_ENRICH_SCRAPE_CONCURRENCY:-6}
-      - BASE_ENRICH_PER_SITE_TIMEOUT_MS=${BASE_ENRICH_PER_SITE_TIMEOUT_MS:-30000}
-      - BASE_TA_SCORING_CONCURRENCY=${BASE_TA_SCORING_CONCURRENCY:-2}
+      # 60s возвращают запас времени для retry/fallback-цепочки.
+      - BASE_ENRICH_PER_SITE_TIMEOUT_MS=${BASE_ENRICH_PER_SITE_TIMEOUT_MS:-60000}
+      # У семи воркеров общий Requesty-ключ: по одной AI-пачке на job
+      # даёт до 7 одновременных вызовов без пика 14.
+      - BASE_TA_SCORING_CONCURRENCY=${BASE_TA_SCORING_CONCURRENCY:-1}
       - BASE_CONSTRUCTOR_STALE_MINUTES=${BASE_CONSTRUCTOR_STALE_MINUTES:-15}
     # Job может занимать 30-60 минут (find_emails+enrich на 1.5к строк).
     # SIGTERM придёт при docker compose down, но шаг доработает до конца —
