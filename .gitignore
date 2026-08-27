@@ -26,6 +26,11 @@ app/dist/
 # misc
 .DS_Store
 *.pem
+# Исключение ровно на один файл, а не на каталог: это ПУБЛИЧНЫЙ корневой
+# сертификат УЦ Минцифры (без него не открыть соединение с Точкой), а не ключ.
+# Правило `*.pem` выше намеренно оставлено широким — приватный ключ, случайно
+# положенный рядом, по-прежнему в коммит не попадёт.
+!services/portal-external-sync/certs/russian_trusted_root_ca.pem
 app/npm-debug.log*
 app/yarn-debug.log*
 app/yarn-error.log*

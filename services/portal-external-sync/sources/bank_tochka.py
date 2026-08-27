@@ -19,13 +19,18 @@ endDateBalance — см. reconcile_period_totals), пагинации в отв�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import ssl
 import traceback
 from datetime import date
+from functools import lru_cache
+from pathlib import Path
 from urllib.parse import quote
 
 import asyncpg
+import certifi
 import httpx
 
 from .base import SyncSource
@@ -33,6 +38,78 @@ from ._bank_common import classify_revenue, coerce_amount, parse_date, to_row
 
 JWT = os.environ.get("TOCHKA_JWT", "").strip()
 API_BASE = "https://enter.tochka.com/uapi/open-banking/v1.0"
+
+# ─── Доверие к УЦ Минцифры ───────────────────────────────────────────────────
+#
+# 24.08.2026 Точка переехала на национальный УЦ. Его корня нет в наборе certifi,
+# которым httpx пользуется по умолчанию, и с 25.08 синк падал на рукопожатии:
+# «self-signed certificate in certificate chain». Речь не о самоподписанном
+# сертификате банка — просто корню цепочки никто не выдавал доверия.
+#
+# Корень подключаем ТОЧЕЧНО, только к этому клиенту, а не ко всему контейнеру.
+# Доверенный корень — это разрешение принимать любой сертификат, им подписанный,
+# для любого адреса; у синка есть и другие источники, и расширять их доверие
+# ради банка незачем. Остальные модули продолжают ходить на обычном certifi.
+#
+# Стандартные корни при этом остаются: цепочка Точки сегодня целиком российская,
+# но если банк вернётся на международный УЦ, соединение не должно сломаться
+# второй раз по обратной причине.
+_ROOT_CA = Path(__file__).resolve().parent.parent / "certs" / "russian_trusted_root_ca.pem"
+
+# Отпечаток сверен с двумя независимыми источниками: официальной раздачей
+# Госуслуг (gu-st.ru) и сертификатом, который сервер Точки предъявляет в
+# рукопожатии. Держим его в коде, чтобы подменённый файл уронил тесты, а не
+# тихо доехал до прода и не начал молча заверять чужие сертификаты.
+_ROOT_CA_SHA256 = "d26d2d0231b7c39f92cc738512ba54103519e4405d68b5bd703e9788ca8ecf31"
+
+
+def _der_from_pem(pem_text: str) -> bytes:
+    """Тело сертификата без заголовков — из него и считается отпечаток."""
+    import base64
+
+    body = "".join(
+        line.strip()
+        for line in pem_text.splitlines()
+        if line.strip() and not line.startswith("-----")
+    )
+    return base64.b64decode(body)
+
+
+def root_ca_fingerprint() -> str:
+    """SHA-256 лежащего в репозитории корня, в нижнем регистре без разделителей."""
+    return hashlib.sha256(_der_from_pem(_ROOT_CA.read_text())).hexdigest()
+
+
+@lru_cache(maxsize=1)
+def tochka_ssl_context() -> ssl.SSLContext:
+    """
+    Проверка сертификата остаётся включённой — меняется только набор корней.
+
+    Соблазн «поправить» это одной строкой `verify=False` здесь особенно велик,
+    и именно здесь он особенно дорог: отключённая проверка на банковском API
+    означает, что подменить ответ Точки сможет кто угодно на пути. Поэтому
+    корень добавляется, а не проверка убирается.
+
+    Файла нет или он подменён — падаем сразу и внятно. Молча вернуть контекст
+    без нужного корня значило бы получить тот же неразборчивый SSL-отказ, из-за
+    которого выписки не грузились четверо суток.
+    """
+    if not _ROOT_CA.exists():
+        raise RuntimeError(
+            f"Нет корневого сертификата УЦ Минцифры: {_ROOT_CA}. "
+            "Без него Точка не отвечает — файл должен приехать в образ вместе с кодом."
+        )
+    actual = root_ca_fingerprint()
+    if actual != _ROOT_CA_SHA256:
+        raise RuntimeError(
+            "Корневой сертификат УЦ Минцифры не совпал с ожидаемым отпечатком: "
+            f"{actual} вместо {_ROOT_CA_SHA256}. Файл подменён или обновлён — "
+            "сверьте с официальной раздачей Госуслуг, прежде чем менять отпечаток в коде."
+        )
+
+    ctx = ssl.create_default_context(cafile=certifi.where())
+    ctx.load_verify_locations(cafile=str(_ROOT_CA))
+    return ctx
 
 # Backfill: 2023 → сегодня. Точка требует запросить период через POST /statements,
 # а потом запросить готовность отдельно; поэтому дробим по годам, иначе полишит
@@ -256,7 +333,9 @@ class BankTochkaSync(SyncSource):
         skip_counts: dict[str, int] = {}
         status_counts: dict[str, int] = {}
 
-        async with httpx.AsyncClient(timeout=90, headers=headers) as client:
+        async with httpx.AsyncClient(
+            timeout=90, headers=headers, verify=tochka_ssl_context()
+        ) as client:
             bal = await client.get(f"{API_BASE}/balances")
             bal.raise_for_status()
             accounts = sorted({
