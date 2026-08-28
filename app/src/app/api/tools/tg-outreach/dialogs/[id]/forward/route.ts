@@ -15,7 +15,7 @@ import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { buildLeadMessage, type ForwardKind } from '@/lib/tgOutreach/leadMessage';
 import { checkForwardConflict, cancelBlockReason, type ExistingForward } from '@/lib/tgOutreach/forwardConflict';
-import { usernameKey, sourceChatOf } from '@/lib/tgOutreach/report';
+import { loadLeadOrigin } from '@/lib/tgOutreach/leadOrigin';
 import { logCampaign, forwardKindLabel, forwardWho } from '@/lib/tgOutreach/campaignLog';
 import type { OpenAISettings } from '@/lib/tgOutreach/types';
 
@@ -83,42 +83,9 @@ async function prepare(
     };
   }
 
-  const { data: accountRow } = await db
-    .from('tg_outreach_accounts')
-    .select('id, session_name, phone')
-    .eq('id', dialog.account_id)
-    .maybeSingle();
-  const account = (accountRow ?? {}) as { session_name?: string; phone?: string };
-
   // Оффер и чат-источник ищем по юзернейму в базах этой кампании: в диалоге
   // связи с контактом нет, а менеджеру важно, по какому офферу человек пришёл.
-  let baseName: string | null = null;
-  let sourceChat: string | null = null;
-  const key = usernameKey(dialog.tg_username);
-  if (key) {
-    const { data: baseRows } = await db
-      .from('tg_outreach_bases')
-      .select('id, name')
-      .eq('campaign_id', dialog.campaign_id)
-      .limit(500);
-    const bases = (baseRows ?? []) as Array<{ id: string; name: string }>;
-    if (bases.length) {
-      const { data: contactRows } = await db
-        .from('tg_outreach_base_contacts')
-        .select('base_id, username, raw')
-        .in('base_id', bases.map((b) => b.id))
-        .limit(50_000);
-      const contact = ((contactRows ?? []) as Array<{
-        base_id: string; username: string; raw: Record<string, unknown> | null;
-      }>).find((c) => usernameKey(c.username) === key);
-      if (contact) {
-        baseName = bases.find((b) => b.id === contact.base_id)?.name ?? null;
-        // Та же функция, что считает «обработанные чаты» в отчёте: карточка
-        // менеджеру и цифра клиенту должны понимать источник одинаково.
-        sourceChat = sourceChatOf(contact.raw) || null;
-      }
-    }
-  }
+  const { baseName, sourceChat } = await loadLeadOrigin(db, dialog.campaign_id, dialog.tg_username);
 
   const messages = dialog.messages ?? [];
 
@@ -129,8 +96,6 @@ async function prepare(
     tgUserId: dialog.tg_user_id,
     baseName,
     sourceChat,
-    accountLabel: account.session_name ?? '—',
-    accountPhone: account.phone ?? null,
     messages,
   });
 

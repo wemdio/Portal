@@ -32,6 +32,8 @@ import { sendFirstTouchBatch } from './firstTouch/send';
 import { cooldownUntilIso, writeAccountCooldown } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
 import { processLeadForwards } from './leadForward';
+import { buildLeadMessage, splitTelegramMessage } from './leadMessage';
+import { loadLeadOrigin } from './leadOrigin';
 import { truncateMessage } from '@/lib/logger';
 import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
 
@@ -687,9 +689,26 @@ async function forwardToTargetChat(
   messageIds: number[],
   targetUsername: string,
   log: LogFn,
+  cardText?: string | null,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!targetUsername) return { ok: false, error: 'чат для пересылки не указан в настройках кампании' };
   const target = targetUsername.startsWith('@') ? targetUsername.slice(1) : targetUsername;
+
+  // Карточка идёт первой, ровно как при ручной передаче: нативная пересылка
+  // отдаёт оригиналы реплик, но не отвечает на «кто это и по какому офферу»,
+  // а у части контактов из неё даже не открывается профиль собеседника.
+  // Сбой карточки не отменяет пересылку — переписка менеджеру важнее.
+  if (cardText) {
+    try {
+      for (const part of splitTelegramMessage(cardText)) {
+        await client.sendMessage(target, { message: part });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log('warning', `Карточка лида не ушла в ${targetUsername} — ${msg}. Пересылаю переписку без неё.`);
+    }
+  }
+
   try {
     await client.forwardMessages(target, { fromPeer, messages: messageIds });
     log('info', `Переслано в ${targetUsername}`);
@@ -897,7 +916,27 @@ export async function handleChat(
     let outcome: { ok: true } | { ok: false; error: string };
     if (targetChat) {
       const messageIdsToForward = pickForwardIds(history, tg.forward_limit, sent.id);
-      outcome = await forwardToTargetChat(client, entity, messageIdsToForward, targetChat, log);
+      // Карточку шлём только положительному триггеру: отрицательный уходит в
+      // другой чат как архив отказа, представлять там «Лида» — неправда.
+      let card: string | null = null;
+      if (triggerType === 'positive') {
+        try {
+          const origin = await loadLeadOrigin(db, campaign.id, tgUsername);
+          card = buildLeadMessage({
+            kind: 'lead',
+            campaignName: campaign.name,
+            username: tgUsername,
+            tgUserId,
+            baseName: origin.baseName,
+            sourceChat: origin.sourceChat,
+            messages: chatMessages,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log('warning', `${displayName}: не смог собрать карточку лида — ${msg}. Пересылаю переписку без неё.`);
+        }
+      }
+      outcome = await forwardToTargetChat(client, entity, messageIdsToForward, targetChat, log, card);
     } else {
       log('info', `${displayName}: триггер "${triggerLabel}" сработал, но чат для пересылки не указан в настройках кампании — пересылка пропущена`);
       outcome = { ok: false, error: 'чат для пересылки не указан в настройках кампании' };
