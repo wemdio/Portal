@@ -97,6 +97,49 @@ describe('sendFirstTouchBatch', () => {
     expect(sentUpdate?.patch).toMatchObject({ account_id: 'acc-1', tg_user_id: 777 });
   });
 
+  /**
+   * Регрессия 28.08.2026. Вызовы Telegram в боевом круге и первом касании шли
+   * без ограничения по времени, и повисший запрос останавливал кампанию
+   * навсегда: цикл стоял внутри `await`, до проверки «просили остановиться» не
+   * доходил, а разрыв сокетов снаружи его не будил. Сторожу оставалось уронить
+   * весь процесс вместе с четырьмя здоровыми кампаниями.
+   */
+  it('зависшая отправка не останавливает порцию, а завершается ошибкой', async () => {
+    const db = fakeDb([contact()]);
+    const client = fakeClient({
+      // Никогда не отвечающий Telegram — ровно то, что делает мобильный прокси,
+      // сменивший IP посреди запроса.
+      sendMessage: jest.fn(() => new Promise(() => {})),
+    });
+
+    const res = await sendFirstTouchBatch({
+      ...baseArgs, sendTimeoutMs: 20, db, client,
+    } as never);
+
+    // Порция завершилась, а не повисла — это и есть главная проверка.
+    expect(res).toMatchObject({ sent: 0 });
+  });
+
+  /**
+   * Таймаут на отправке — не то же самое, что отказ: сообщение могло уйти, а
+   * потеряться могло подтверждение. Повторить — значит написать человеку то же
+   * самое второй раз, а для холодного аутрича это выглядит как работа бота.
+   */
+  it('неподтверждённая отправка не повторяется: задвоить хуже, чем пропустить', async () => {
+    const db = fakeDb([contact()]);
+    const client = fakeClient({ sendMessage: jest.fn(() => new Promise(() => {})) });
+
+    const res = await sendFirstTouchBatch({
+      ...baseArgs, sendTimeoutMs: 20, db, client,
+    } as never);
+
+    expect(res.skipped).toBe(1);
+    // Попытку контакту не засчитываем и в очередь не возвращаем: он закрыт
+    // с честной причиной, по которой видно, что это неизвестность, а не отказ.
+    const skip = db.updates.find((u) => u.patch.status === 'skipped');
+    expect(skip?.patch.skip_reason).toContain('возможно, доставлено');
+  });
+
   it('битый текст не отправляется, контакт откладывается', async () => {
     const db = fakeDb([contact({ message: 'я'.repeat(500) })]);
     const client = fakeClient();

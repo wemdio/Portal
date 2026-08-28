@@ -20,8 +20,6 @@ const input = (over: Partial<LeadMessageInput> = {}): LeadMessageInput => ({
   tgUserId: 777,
   baseName: 'Гипотеза 1',
   sourceChat: 'https://t.me/buhrussia',
-  accountLabel: 'Mihail Leshko',
-  accountPhone: '998336042756',
   messages: [
     { role: 'assistant', content: 'Иван, добрый день!', timestamp: '2026-08-11T16:25:00.000Z' },
     { role: 'user', content: 'Да, интересно', timestamp: '2026-08-12T09:40:00.000Z' },
@@ -34,12 +32,21 @@ describe('buildLeadMessage', () => {
   it('шапка отвечает на «кто и откуда»', () => {
     const text = buildLeadMessage(input());
 
-    expect(text).toContain('🔥 Лид · ATOL-1');
+    expect(text).toContain('Лид · ATOL-1');
     expect(text).toContain('Никнейм: @koraleva_vasilisa_investbuh');
-    expect(text).toContain('Профиль: t.me/koraleva_vasilisa_investbuh');
     expect(text).toContain('Оффер: Гипотеза 1');
     expect(text).toContain('Источник: https://t.me/buhrussia');
-    expect(text).toContain('Аккаунт: Mihail Leshko (998336042756)');
+  });
+
+  /**
+   * Шапку намеренно сократили: ссылка на профиль повторяла никнейм, аккаунт —
+   * отправителя карточки, а огонёк ничего не добавлял.
+   */
+  it('в шапке нет ни ссылки на профиль, ни аккаунта, ни эмодзи', () => {
+    const text = buildLeadMessage(input());
+    expect(text).not.toContain('Профиль:');
+    expect(text).not.toContain('Аккаунт:');
+    expect(text).not.toContain('🔥');
   });
 
   /**
@@ -55,8 +62,8 @@ describe('buildLeadMessage', () => {
 
   it('партнёр отличается заголовком, остальное — то же', () => {
     const text = buildLeadMessage(input({ kind: 'partner' }));
-    expect(text).toContain('🤝 Кандидат в партнёры · ATOL-1');
-    expect(text).not.toContain('🔥 Лид');
+    expect(text).toContain('Кандидат в партнёры · ATOL-1');
+    expect(text).not.toContain('Лид · ATOL-1');
   });
 
   it('переписка идёт целиком и подписана человеческими ролями', () => {
@@ -66,22 +73,18 @@ describe('buildLeadMessage', () => {
     expect(text).not.toContain('assistant');
   });
 
-  it('чего не знаем — прочерк, а не пустое место и не «undefined»', () => {
-    const text = buildLeadMessage(input({ baseName: null, sourceChat: null, accountPhone: null }));
+  it('оффер неизвестен — прочерк; источника нет — строки нет вовсе', () => {
+    const text = buildLeadMessage(input({ baseName: null, sourceChat: null }));
+    // Оффер есть у любого контакта, пустое место читалось бы как сбой.
     expect(text).toContain('Оффер: —');
-    expect(text).toContain('Источник: —');
-    // Телефона нет — скобок тоже быть не должно, а не «(null)».
-    expect(text).toContain('Аккаунт: Mihail Leshko\n');
+    // «Источник: —» менеджеру не сообщает ничего — такую строку не пишем.
+    expect(text).not.toContain('Источник:');
     expect(text).not.toContain('undefined');
   });
 
-  it('без юзернейма показываем ID и не рисуем битую ссылку на профиль', () => {
+  it('без юзернейма показываем числовой ID', () => {
     const text = buildLeadMessage(input({ username: null }));
     expect(text).toContain('Никнейм: ID 777');
-    // Строки «Профиль» быть не должно: ссылка на t.me без юзернейма никуда не
-    // ведёт. Проверяем именно её, а не подстроку «t.me/» — она законно есть в
-    // источнике контакта.
-    expect(text).not.toContain('Профиль:');
   });
 
   it('пустая переписка названа прямо', () => {

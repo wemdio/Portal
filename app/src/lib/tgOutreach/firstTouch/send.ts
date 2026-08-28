@@ -16,6 +16,16 @@ import {
   writeAccountCooldown,
 } from '../accountCooldown';
 import { classifyRestriction, describeRestriction } from '../restriction';
+import { withTimeout } from '../withTimeout';
+
+/**
+ * Сроки на вызовы Telegram в первом касании — та же причина, что в боевом
+ * круге: gramJS не таймаутит сам, а мобильный прокси умеет молча увести запрос
+ * в никуда. Повисший здесь `await` останавливал не только порцию, но и весь
+ * круг кампании: до следующего аккаунта дело уже не доходило.
+ */
+const FT_RESOLVE_TIMEOUT_MS = Number(process.env.TG_OUTREACH_RESOLVE_TIMEOUT_MS) || 60_000;
+const FT_SEND_TIMEOUT_MS = Number(process.env.TG_OUTREACH_SEND_TIMEOUT_MS) || 120_000;
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
@@ -36,6 +46,13 @@ export interface SendBatchArgs {
    * дефолт из `validateMessage`.
    */
   maxChars?: number;
+  /**
+   * Сроки на вызовы Telegram. По умолчанию берутся из окружения; параметром
+   * приходят только из тестов — иначе проверка «зависший запрос не вешает
+   * порцию» ждала бы две реальные минуты.
+   */
+  resolveTimeoutMs?: number;
+  sendTimeoutMs?: number;
   /**
    * «Пауза после ограничения» кампании. Ноль или отсутствие — паузу не ставим
    * (как было до 24.08: PEER_FLOOD только останавливал порцию).
@@ -275,6 +292,8 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
   const { db, client, campaignId, account, perDay, log } = args;
   const result: SendBatchResult = { sent: 0, skipped: 0, postponed: 0 };
   const maxChars = resolveMaxChars(args.maxChars);
+  const resolveTimeoutMs = args.resolveTimeoutMs ?? FT_RESOLVE_TIMEOUT_MS;
+  const sendTimeoutMs = args.sendTimeoutMs ?? FT_SEND_TIMEOUT_MS;
 
   // Выходим до любого запроса в базу. У всех кампаний, заведённых до этой
   // фичи, поля нет вовсе, а круг идёт по каждому аккаунту каждые несколько
@@ -317,7 +336,11 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
 
     let entity: { id: unknown; username?: string };
     try {
-      entity = (await client.getEntity(`@${contact.username}`)) as { id: unknown; username?: string };
+      entity = (await withTimeout(
+        client.getEntity(`@${contact.username}`),
+        resolveTimeoutMs,
+        'поиск контакта по юзернейму',
+      )) as { id: unknown; username?: string };
     } catch (err) {
       // Честно кривой ник (недопустимый формат, USERNAME_INVALID) — это не
       // заморозка, такой ник не «оживёт». Скипаем сразу.
@@ -409,9 +432,42 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
     }
 
     try {
-      await client.sendMessage(`@${contact.username}`, { message: contact.message });
+      await withTimeout(
+        client.sendMessage(`@${contact.username}`, { message: contact.message }),
+        sendTimeoutMs,
+        'отправка первого сообщения',
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+
+      /**
+       * Наш таймаут на ОТПРАВКЕ — особый случай, и повторять её нельзя.
+       *
+       * Ответа мы не дождались, но это не значит, что сообщение не ушло:
+       * запрос мог дойти до Telegram и быть доставленным, а потеряться могло
+       * подтверждение. Повторная попытка в следующем круге отправит человеку
+       * то же самое второй раз — а для холодного аутрича задвоенное сообщение
+       * выглядит как работа бота и стоит дороже, чем один недописанный контакт
+       * из трёхсот.
+       *
+       * Поэтому считаем контакт обработанным и оставляем след в журнале, чтобы
+       * при разборе было видно: тут не отказ, тут неизвестность.
+       *
+       * Таймауты на ЧТЕНИИ (резолв ника, история) сюда не попадают — их
+       * повторять безопасно, и они уходят в общую классификацию ниже.
+       */
+      if (msg.includes('отправка первого сообщения: нет ответа')) {
+        await fdb.markContactSkipped(db, contact.id, 'отправка без подтверждения — возможно, доставлено');
+        log(
+          'warning',
+          `Первое касание: @${contact.username} — Telegram не подтвердил отправку за ${Math.round(sendTimeoutMs / 1000)}с. `
+          + 'Сообщение могло уйти, поэтому повторять не буду: задвоенное первое касание хуже пропущенного контакта. '
+          + 'Проверьте диалог руками, если контакт важен.',
+        );
+        result.skipped++;
+        continue;
+      }
+
       const failure = classifySendFailure(msg);
 
       if (failure.kind === 'contact_permanent') {

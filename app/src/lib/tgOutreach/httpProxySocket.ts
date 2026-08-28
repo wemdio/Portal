@@ -18,8 +18,32 @@ const closeError = new Error('NetSocket was closed');
  */
 const CONNECT_TIMEOUT_MS = Number(process.env.TG_PROXY_CONNECT_TIMEOUT_MS ?? '40000');
 
+/**
+ * Подробный лог туннеля — только по флагу.
+ *
+ * Каждое подключение печатало пять строк, и при полусотне аккаунтов, которые на
+ * плохом пуле переподключаются постоянно, поток занимал весь журнал контейнера.
+ * 28.08.2026 это стоило расследования: воркер четыре раза перезапустился, а
+ * причину найти не удалось — ротация (50 МБ × 3) съела историю за шесть минут,
+ * и строки о том, что происходило перед смертью, просто не сохранились.
+ *
+ * Успешные шаги рукопожатия при работающей рассылке никому не нужны, а когда
+ * нужны — включаются переменной `TG_PROXY_DEBUG=1` без пересборки образа.
+ */
+const PROXY_DEBUG = process.env.TG_PROXY_DEBUG === '1';
+
 function proxyLog(msg: string) {
+  if (!PROXY_DEBUG) return;
   console.log(`[HttpConnectSocket] ${msg}`);
+}
+
+/**
+ * Сбои печатаем всегда: именно по ним разбирают, почему аккаунт не вышел на
+ * связь, и прятать их за флагом значит оставить оператора без объяснения ровно
+ * в тот момент, когда оно нужно.
+ */
+function proxyError(msg: string) {
+  console.error(`[HttpConnectSocket] ${msg}`);
 }
 
 export interface HttpProxy {
@@ -97,7 +121,7 @@ export function openHttpConnectTunnel(
         }
         resolve(socket);
       } else {
-        proxyLog(`CONNECT FAILED: ${allHeaders}`);
+        proxyError(`CONNECT FAILED: ${allHeaders}`);
         socket.destroy();
         reject(new HttpConnectRejectedError(statusCode, statusLine));
       }
@@ -105,11 +129,11 @@ export function openHttpConnectTunnel(
 
     socket.on('data', onData);
     socket.on('error', (err) => {
-      proxyLog(`CONNECT socket error: ${err.message}`);
+      proxyError(`CONNECT socket error: ${err.message}`);
       reject(err);
     });
     socket.setTimeout(timeoutMs, () => {
-      proxyLog(`CONNECT timeout after ${timeoutMs}ms to ${destIp}:${destPort}`);
+      proxyError(`CONNECT timeout after ${timeoutMs}ms to ${destIp}:${destPort}`);
       socket.destroy();
       reject(new Error('HTTP CONNECT timeout'));
     });
@@ -195,7 +219,7 @@ export class HttpConnectSocket {
     });
 
     this.client.on('error', (err) => {
-      proxyLog(`socket error: ${err.message}`);
+      proxyError(`socket error: ${err.message}`);
     });
     this.client.on('close', (hadError) => {
       proxyLog(`socket closed (hadError=${hadError}, destroyed=${this.client?.destroyed})`);
