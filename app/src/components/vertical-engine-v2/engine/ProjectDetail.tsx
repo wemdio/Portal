@@ -34,6 +34,13 @@ import { Badge, ProjectStatusBadge, StatusBox, formatDate, prettyHost, prettyPro
 
 const POLL_INTERVAL_MS = 4000;
 
+function scrollNodeToTop(node: HTMLElement | null): void {
+  if (!node) return;
+  const scroll = () => node.scrollIntoView({ block: 'start' });
+  if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(scroll);
+  else scroll();
+}
+
 /** localStorage-ключ выбранной вертикали проекта. */
 const selectedVerticalKey = (projectId: string) => `he.sel.${projectId}`;
 
@@ -69,6 +76,8 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const [step, setStep] = useState(1);
   const [maxVisitedStep, setMaxVisitedStep] = useState(1);
   const [selectedVerticalId, setSelectedVerticalId] = useState<string | null>(null);
+  const projectTopRef = useRef<HTMLDivElement | null>(null);
+  const contentTopRef = useRef<HTMLElement | null>(null);
 
   const [researchStarting, setResearchStarting] = useState(false);
   const [offerSaving, setOfferSaving] = useState(false);
@@ -84,9 +93,12 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const [visitDismissed, setVisitDismissed] = useState(false);
   const visitTrackedRef = useRef(false);
 
-  const jumpTo = useCallback((next: number) => {
+  const jumpTo = useCallback((next: number, options?: { scroll?: boolean }) => {
     setStep(next);
     setMaxVisitedStep((prev) => Math.max(prev, next));
+    if (options?.scroll === false) return;
+
+    scrollNodeToTop(contentTopRef.current);
   }, []);
 
   const load = useCallback(
@@ -122,6 +134,10 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    scrollNodeToTop(projectTopRef.current);
+  }, [projectId]);
 
   // Восстанавливаем выбранную вертикаль проекта из localStorage.
   useEffect(() => {
@@ -162,7 +178,9 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
     const status = project?.status;
     const prev = prevStatusRef.current;
     prevStatusRef.current = status;
-    if (status === 'researched' && prev !== 'researched' && step === 1) jumpTo(2);
+    if (status === 'researched' && prev !== 'researched' && step === 1) {
+      jumpTo(2, { scroll: prev !== undefined });
+    }
   }, [project?.status, step, jumpTo]);
 
   /* ── Производные данные выбранной вертикали ── */
@@ -566,7 +584,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   }
 
   return (
-    <div className="text-left">
+    <div ref={projectTopRef} className="text-left">
       {errorMsg && !detail ? <StatusBox tone="error">{errorMsg}</StatusBox> : null}
 
       {loading && !detail ? (
@@ -593,7 +611,10 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
 
             <div className="mt-4 border-b border-gray-200 pb-5">
               <div className="flex flex-wrap items-start justify-between gap-2 lg:block">
-                <h1 className="min-w-0 truncate text-lg font-semibold text-gray-900">
+                <h1
+                  className="min-w-0 line-clamp-2 break-words text-lg font-semibold text-gray-900 lg:line-clamp-1"
+                  title={project ? prettyProjectName(project.name, project.website_url) : 'Проект'}
+                >
                   {project ? prettyProjectName(project.name, project.website_url) : 'Проект'}
                 </h1>
                 <div className="mt-2 lg:mt-2">
@@ -631,7 +652,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             </div>
           </aside>
 
-          <section className="min-w-0 space-y-6">
+          <section ref={contentTopRef} className="min-w-0 space-y-6">
             <header className="flex flex-col justify-between gap-4 border-b border-gray-200 pb-5 sm:flex-row sm:items-start">
               <div className="min-w-0">
                 <p className="text-[11px] font-semibold text-blue-700">

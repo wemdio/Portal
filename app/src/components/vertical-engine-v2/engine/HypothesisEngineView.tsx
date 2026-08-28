@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowRight, Globe2, Plus, TriangleAlert, X } from 'lucide-react';
+import { ArrowRight, ChevronDown, Globe2, Plus, TriangleAlert, X } from 'lucide-react';
 import type { VeProject } from '@/lib/verticalEngineV2/types';
 import {
   VE_API,
@@ -61,6 +61,7 @@ export function VeEngineWorkspace({
   const [name, setName] = useState('');
   const [creating, setCreating] = useState(false);
   const [pendingConflict, setPendingConflict] = useState<VeProjectCreateConflictDto | null>(null);
+  const [createPanelOpen, setCreatePanelOpen] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -105,6 +106,7 @@ export function VeEngineWorkspace({
         setProjects((prev) => [data.project as VeProject, ...prev]);
         setWebsiteUrl('');
         setName('');
+        setCreatePanelOpen(false);
         setSelectedId(data.project.id);
         onProjectOpenChange?.(true);
       } catch (err) {
@@ -138,6 +140,9 @@ export function VeEngineWorkspace({
     );
   }
 
+  const mobileCreateExpanded =
+    createPanelOpen || pendingConflict !== null || (!listLoading && projects.length === 0);
+
   return (
     <div className="text-left">
       {errorMsg ? <div className="mb-5"><StatusBox tone="error">{errorMsg}</StatusBox></div> : null}
@@ -169,7 +174,7 @@ export function VeEngineWorkspace({
               <Globe2 aria-hidden className="mb-4 h-8 w-8 text-gray-300" />
               <p className={HE.cardTitle}>Здесь появятся проекты</p>
               <p className={`mt-2 max-w-sm ${HE.lead}`}>
-                Добавьте сайт клиента в панели справа. Первый этап начнётся внутри проекта.
+                Добавьте сайт клиента в форме нового проекта. Первый этап начнётся внутри проекта.
               </p>
             </div>
           ) : (
@@ -218,7 +223,29 @@ export function VeEngineWorkspace({
         </section>
 
         <aside className="order-first lg:order-last lg:sticky lg:top-6">
-          <section className="rounded-lg border border-gray-200 bg-gray-50/70 p-5">
+          {listLoading || projects.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => setCreatePanelOpen((open) => !open)}
+              aria-expanded={mobileCreateExpanded}
+              aria-controls="ve-create-project-panel"
+              className="flex h-11 w-full items-center justify-between rounded-lg border border-gray-200 bg-white px-3.5 text-sm font-semibold text-gray-800 transition hover:bg-gray-50 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 lg:hidden"
+            >
+              <span className="inline-flex items-center gap-2">
+                <Plus aria-hidden className="h-4 w-4" />
+                Новый проект
+              </span>
+              <ChevronDown
+                aria-hidden
+                className={`h-4 w-4 text-gray-400 transition-transform ${mobileCreateExpanded ? 'rotate-180' : ''}`}
+              />
+            </button>
+          ) : null}
+
+          <section
+            id="ve-create-project-panel"
+            className={`${mobileCreateExpanded ? 'block' : 'hidden'} mt-3 rounded-lg border border-gray-200 bg-gray-50/70 p-5 lg:mt-0 lg:block`}
+          >
             <div className="flex items-start gap-3">
               <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-gray-900 text-white">
                 <Plus aria-hidden className="h-4 w-4" />
