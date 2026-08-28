@@ -3,11 +3,13 @@
 > Для следующего агента (Codex и т.п.), который продолжит ветку `Sergey`.
 > Перед началом обязательно прочитать: `AGENTS.md`, `docs/vertical-engine-changelog.md`,
 > `docs/design/2026-08-20-vertical-engine-v2-isolation.md`,
-> `docs/design/2026-08-26-vertical-engine-v2-cutover.md`.
+> `docs/design/2026-08-26-vertical-engine-v2-cutover.md`,
+> `docs/design/2026-08-28-vertical-engine-v2-seasonal-launch-portfolio.md`.
 
 ## 1. Где мы и что это
 
-- **Ветка**: `Sergey` (owner — Sergey). **Worktree**: `codex-worktrees/vertical-engine-v2`.
+- **Ветка**: `Sergey` (owner — Sergey). Работать только в task-worktree этой ветки; грязный
+  корневой checkout другой ветки не использовать и не менять.
 - **Vertical Engine v2** — изолированный новый движок рядом с v1/ENG:
   `verticalEngineV2` (код), `ve_*` (таблицы/очередь), `VE_MODEL_*` (конфиг),
   `worker-vertical-engine-v2` (воркер).
@@ -18,9 +20,9 @@
 
 ## 2. Что уже сделано
 
-Пункты 1–5 были закоммичены и запушены в `Sergey` ранее. Реализация #8 существует
-только в коде ветки `Sergey`: её миграция не применялась, приложение и воркер не
-развёртывались.
+Пункты 1–5 были закоммичены и запушены в `Sergey` ранее. Реализации #8 и сезонного
+launch portfolio существуют только в коде ветки `Sergey`: их миграции не применялись,
+приложение и воркер не развёртывались.
 
 1. **Cutover v1→v2** (`8f7eaf857`, `e6cb0f084`, `9de1d2b9d`):
    - v2 видим в реестре инструментов (`toolsRegistry.ts`) — карточка на `/tools`.
@@ -61,6 +63,41 @@
    - в рамках #8 доведён до UI фикс #7: вычисляемый preview уже выбирал segment body,
      но видимая tokenized-версия повторно брала default. Теперь видимый body использует
      выбранный сегмент; это закреплено component-тестом.
+7. **Verified RU seasonality + launch portfolio — закрыто в коде**:
+   - старый пункт #5 был только prompt hint в `base_analyze`/template. Теперь evidence-stage
+     сохраняет на гипотезе структурированную оценку `seasonal | neutral | unknown` с
+     confidence, rationale и проверенными URL+цитатами; неподтверждённый вывод становится
+     `unknown`, а не эвристикой по названию ниши;
+   - положительные окна — `peak` с `lead_days`, отрицательные — `avoid`. По календарю
+     `Europe/Moscow` вычисляются `launch_now`, `prepare_now`, `neutral`, `unknown`, `wait`
+     и `avoid`; сезонность и потенциал остаются отдельными измерениями. RU queue GET и
+     activation preflight каждый раз пересчитывают date-derived timing из immutable snapshot,
+     проверяют stable hash и атомарно повышают plan version только при реальном изменении;
+   - успешная подготовка создаёт PAUSED-кампании и атомарно фиксирует один immutable bundle
+     со всеми child campaign ID, Instantly workspace и mailbox snapshot. N сегментных
+     кампаний одного шаблона = один слот; подготовленных PAUSED bundle может быть сколько
+     угодно;
+   - `ve_launch_portfolio_settings`, `ve_launch_queue_items` и
+     `ve_launch_queue_campaigns` хранят очередь/ёмкость. Для одного workspace и
+     пересекающихся mailbox-наборов лимит RU по умолчанию — один активный bundle; разные
+     workspace и непересекающиеся mailbox-наборы могут идти параллельно;
+   - запуск остаётся ручным действием специалиста в Portal после QA. Reservation,
+     idempotency key, plan version и CAS проверяются до внешних вызовов; Portal активирует
+     все child campaigns, а частичный/неоднозначный результат оставляет bundle `uncertain`.
+     Полный paginated preflight сверяет точный campaign set, ID, workspace и mailbox snapshot;
+     UI показывает кампании/сегменты/объём/ссылки до QA-confirm;
+   - `activating`, `active`, `uncertain` держат слот без preemption. Очередь: ручной порядок
+     → сезонный дедлайн/запас → confidence → potential → возраст ожидания → stable ID.
+     Ручной override требует reason/actor и не снимает занятый слот; explicit `wait`
+     исключает bundle из authoritative head;
+   - live reconciliation отслеживает статусы известных кампаний, в том числе активированных
+     напрямую в Instantly и реактивированных после manual release. `active` требует exact
+     допустимого статуса каждого child; partial bundle остаётся `uncertain`. Автоосвобождение —
+      только когда все child campaigns свежо подтверждены как `Completed`; такой exact set,
+      включая recovery, автоматически становится `released` без manual actor. Иной fresh exact
+      non-sending set не доказывает completion, но после settling fence допускает audited manual
+      release только `active | uncertain` bundle с mailbox snapshot, reason и actor. Cascade
+      guard сохраняет любой ledger с tracked remote campaign независимо от cached status.
 
 ## 3. Ключевые решения и их мотивы (этого нет в коде — важно не потерять)
 
@@ -84,19 +121,66 @@
   можно только явной сверкой той же попытки. Отмена проекта переводит уже зарезервированный
   launch в `uncertain`; heartbeat/finalize требуют audit со статусом `ready`, поэтому поздний
   процесс не продолжит следующую кампанию и не зафиксирует отменённый запуск как успешный.
+- **Сезонность — verified input, не «знание LLM»**: `neutral` допустим только с проверенным
+  источником и цитатой; у `seasonal` каждое отдельное `peak/avoid` имеет собственный
+  URL+quote evidence. Mixed-ответ теряет неподтверждённые окна, а полное отсутствие поддержки
+  нормализуется в `unknown`. Оценка делается на evidence-stage для каждой RU-гипотезы и
+  сохраняется в `ve_hypotheses`.
+- **`lead_days` смотрит назад от пика**: дата запуска outreach = начало `peak` минус
+  `lead_days`; `prepare_now` — отдельный 14-дневный буфер перед этой датой. `avoid` имеет
+  приоритет при пересечении окон. Все календарные решения считаются по Москве и поддерживают
+  окна через Новый год. Название `launch_now` означает «можно предложить ручную активацию»,
+  а не фоновый автозапуск.
+- **Deadline учитывает длительность отправки**: сезонный дедлайн — первый день после конца
+  inclusive peak; latest activation = этот дедлайн минус `ceil(estimated_run_days)`. Поэтому
+  длинный bundle с меньшим запасом поднимается выше короткого, даже если его peak позже.
+  Длительность считается по сумме лидов всех child campaigns общего mailbox pool.
+- **Подготовка ≠ активная мощность**: кампании создаются PAUSED заранее без расходования
+  слота. Слот появляется только у bundle в `activating | active | uncertain`; один bundle
+  включает все сегментные кампании одного template launch.
+- **Ёмкость mailbox-scoped**: конфликт есть только внутри одного Instantly workspace при
+  пересечении mailbox-наборов. При RU capacity=1 Portal не активирует второй конфликтующий
+  bundle, не останавливает и не вытесняет первый. Непересекающиеся пулы независимы.
+- **Очередь объяснима**: manual order/pin → seasonal deadline/slack → confidence →
+  potential → starvation age → stable ID. Нет единого «магического» score. Ручной override
+  аудируется и не обходит capacity/no-preemption; explicit `wait` исключает bundle из
+  authoritative head даже при исходном automatic eligibility.
+- **Reconciliation fail-closed**: только свежий exact set, где каждый child `Completed`, даёт
+  автоматический `released`; это не manual release и `released_by` не требуется. `active`
+  выставляется только для exact child set, где каждый child имеет допустимый active/completed
+  статус; partial active+paused/error остаётся `uncertain`. Completed recovery сразу становится
+  `released`, повторно не активируется. Иной fresh exact non-sending set (например,
+  Paused/unhealthy) не доказывает completion, но позволяет audited manual release только для
+  `active | uncertain`: он запрещён в `activating`, для fresh `uncertain` действует 10-минутный
+  settling fence, обязательны reason/actor. Missing, stale, unknown и sending proof слот сохраняют.
+  Прямой клик в Instantly остаётся операционным bypass, пока доступ там не ограничен; для
+  уже известных кампаний reconcile обнаруживает активность и блокирует следующий Portal-launch.
+- **`released` в Portal ≠ remote-terminal/delete-proof**: manual release `active | uncertain`
+  bundle после fresh non-sending proof может освободить capacity, но ledger остаётся доступен
+  reconciliation и при внешней реактивации возвращается в `active | uncertain`. Source cascade
+  разрешён только для childless `released | skipped | cancelled`; любой tracked child блокирует
+  delete при любом status, включая cached `Completed`. Полноценный cleanup с двухфазным remote
+  DELETE остаётся отдельной будущей операцией, её нельзя заменять сменой статуса.
 
 ## 4. Pending / TODO
 
-- **Следующий незакрытый пункт — #9, человеческие названия вертикалей**. Prompt-level
-  запрет жаргона B2B/B2C/ОКВЭД уже есть, но end-to-end пункт не закрыт без live VBI-прогона:
-  проверить конкретные названия в vertical → chain → template и при необходимости усилить
-  нормализацию.
+- **#9, человеческие названия вертикалей, остаётся отдельной live VBI-проверкой**.
+  Prompt-level запрет жаргона B2B/B2C/ОКВЭД уже есть, но end-to-end пункт не закрыт без
+  реального прогона: проверить конкретные названия в vertical → chain → template и при
+  необходимости усилить нормализацию. Это не следующий этап реализации launch portfolio.
 - **Деплой миграций** `#6` (base-per-hypothesis), `#12` (unique index fix) и
-  `20260828_0001_vertical_engine_v2_segmentation_audits.sql` (#8) — отдельный будущий
-  release-шаг. В этом handoff их применение не подтверждается.
-- **Live VBI-тест в v2** после деплоя: 2 гипотезы → 2 базы; сезонность; человеческие
-  названия (#9); видимый tokenized segment preview (#7); async audit (#8) с complete,
-  stale/incomplete и `not_required`; подтверждённый запуск из сохранённых assignments.
+  `20260828_0001_vertical_engine_v2_segmentation_audits.sql` (#8),
+  `20260828_0002_vertical_engine_v2_ru_seasonality.sql` и
+  `20260828_0003_vertical_engine_v2_launch_portfolio.sql` — отдельный будущий release-шаг.
+  Миграции `0002`/`0003` здесь точно не применялись; deployment не выполнялся.
+- **Live VBI-тест в v2 после деплоя**: 2 гипотезы → 2 базы; verified сезонность с
+  peak/avoid/unknown и московским состоянием; человеческие названия (#9); видимый tokenized
+  segment preview (#7); async audit (#8) с complete, stale/incomplete и `not_required`;
+  PAUSED preparation → очередь → ручная активация первого bundle → reconcile → release →
+  активация следующего.
+- **Операционная граница Instantly**: решить отдельно, ограничиваем ли специалистам прямую
+  активацию кампаний. Текущий код умеет обнаружить bypass для отслеживаемых campaign ID, но
+  не может физически запретить внешний клик.
 - **(Опционально)** «умный Повторить» — resume с упавшей стадии вместо полного перезапуска.
 - Открытые вопросы: точные границы v1 read-only (сейчас — только блок новых прогонов).
 
@@ -115,15 +199,21 @@
   hash и assignments, async persistence/cancel, `not_required`, fail-closed gate,
   reservation/heartbeat/recovery, отсутствие второго LLM-вызова и фактически видимый segment
   body. На 2026-08-28 целевой набор вместе с migration/isolation: **12 suites / 70 tests passed**.
+- **Тесты seasonality/portfolio**: `ruSeasonality.test.ts`,
+  `evidenceSeasonality.test.ts`, `launchPortfolio.test.ts`, `launchPortfolioTiming.test.ts`,
+  `verticalEngineV2RuSeasonality.test.ts`, `verticalEngineV2LaunchPortfolio.test.ts`,
+  `launchPortfolioQueue.test.ts`, `launchPortfolioActivation.test.ts`,
+  `templateLaunchPortfolioRead.test.ts`, `templateLaunchSegmentationAudit.test.ts`,
+  `VerticalEngineV2Seasonality.test.tsx`, `VerticalEngineV2LaunchPortfolio.test.tsx` и
+  `VerticalEngineV2Step5Template.test.tsx`. Итоговый прогон: весь Vertical Engine v2 —
+  **37 suites / 316 tests passed**; целевой seasonality/portfolio-набор —
+  **13 suites / 162 tests passed**; strict TypeScript — green.
 - **Старые тесты**: isolation ожидает v2 В реестре (а не скрытым); v1 `POST projects`
   ожидает `409`. `mockSupabase` поддерживает `.ilike()`/`.select()`/`.single()`.
 - **`worker/verticalEngineV2.ts`** — в eslint-ignore (worker линтится только esbuild-сборкой).
-- **Полный `jest` на этом Windows-host**: 693 suites / 8116 assertions прошли; два suite не
-  загрузились (`sqliteReader`, `sessionUtils`), потому что общий `node_modules/sqlite3` не
-  содержит native `node_sqlite3.node` для Node 22.23.2/Windows x64. Assertion-регрессий #8 нет.
-- **Не путать наличие кода с релизом**: #8 и миграция находятся только в ветке `Sergey`.
-  Состояние commit/push проверять через Git при фактической передаче; migration/deploy —
-  отдельная явно подтверждаемая фаза.
+- **Не путать наличие кода с релизом**: #8, seasonality/portfolio и их миграции находятся
+  только в ветке `Sergey`. Состояние commit/push проверять через Git при фактической передаче;
+  migration/deploy — отдельная явно подтверждаемая фаза.
 
 ## 6. Границы (обязательно соблюдать)
 
@@ -145,4 +235,11 @@ npm test -- --watchAll=false
 ```bash
 npm test -- --runInBand --watchAll=false \
   --testMatch '**/tests/{lib/vertical-engine-v2/{segmentClassify,segmentationAudit,segmentationAuditStage,renderPreview,launchReservation},api/vertical-engine-v2/{templateSegmentationAudit,templateLaunchSegmentationAudit,projectCancel},components/VerticalEngineV2Step5Template,migrations/verticalEngineV2SegmentationAudits,architecture/verticalEngineV2Isolation}.test.ts?(x)'
+```
+
+Дополнительно для seasonality/launch portfolio:
+
+```bash
+npm test -- --runInBand --watchAll=false \
+  --testMatch '**/tests/{lib/vertical-engine-v2/{ruSeasonality,evidenceSeasonality,launchPortfolio,launchPortfolioTiming},api/vertical-engine-v2/{launchPortfolioQueue,launchPortfolioActivation,templateLaunchPortfolioRead,templateLaunchSegmentationAudit},components/{VerticalEngineV2Seasonality,VerticalEngineV2LaunchPortfolio,VerticalEngineV2Step5Template},migrations/{verticalEngineV2RuSeasonality,verticalEngineV2LaunchPortfolio}}.test.ts?(x)'
 ```

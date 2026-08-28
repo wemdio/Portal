@@ -241,7 +241,7 @@ function canonicalJsonValue(value: unknown): unknown {
   return String(value);
 }
 
-function stableJson(value: unknown): string {
+export function stableJson(value: unknown): string {
   return JSON.stringify(canonicalJsonValue(value));
 }
 

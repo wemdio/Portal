@@ -18,6 +18,7 @@ import {
   type VeProjectsResponse,
 } from './api';
 import { HE, Spinner } from './design';
+import { LaunchPortfolioView } from './LaunchPortfolioView';
 import { ProjectDetail } from './ProjectDetail';
 import { ProjectStatusBadge, StatusBox, formatDate, prettyHost, prettyProjectName } from './ui';
 
@@ -64,6 +65,7 @@ export function VeEngineWorkspace({
   const [createPanelOpen, setCreatePanelOpen] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [workspaceView, setWorkspaceView] = useState<'projects' | 'launch-queue'>('projects');
 
   useEffect(() => {
     let cancelled = false;
@@ -145,9 +147,48 @@ export function VeEngineWorkspace({
 
   return (
     <div className="text-left">
-      {errorMsg ? <div className="mb-5"><StatusBox tone="error">{errorMsg}</StatusBox></div> : null}
+      <div
+        className="mb-5 inline-flex rounded-lg border border-gray-200 bg-gray-50 p-1"
+        aria-label="Раздел Vertical Engine"
+      >
+        <button
+          type="button"
+          aria-pressed={workspaceView === 'projects'}
+          onClick={() => setWorkspaceView('projects')}
+          className={`min-h-9 rounded-md px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
+            workspaceView === 'projects'
+              ? 'bg-white text-gray-900 shadow-sm'
+              : 'text-gray-500 hover:text-gray-900'
+          }`}
+        >
+          Проекты
+        </button>
+        <button
+          type="button"
+          aria-pressed={workspaceView === 'launch-queue'}
+          onClick={() => setWorkspaceView('launch-queue')}
+          className={`min-h-9 rounded-md px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
+            workspaceView === 'launch-queue'
+              ? 'bg-white text-gray-900 shadow-sm'
+              : 'text-gray-500 hover:text-gray-900'
+          }`}
+        >
+          Очередь запусков
+        </button>
+      </div>
 
-      <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_360px] lg:items-start">
+      {workspaceView === 'launch-queue' ? (
+        <LaunchPortfolioView
+          onProjectOpen={(projectId) => {
+            setSelectedId(projectId);
+            onProjectOpenChange?.(true);
+          }}
+        />
+      ) : (
+        <>
+          {errorMsg ? <div className="mb-5"><StatusBox tone="error">{errorMsg}</StatusBox></div> : null}
+
+          <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_360px] lg:items-start">
         <section className="min-w-0">
           <div className="mb-4 flex items-end justify-between gap-4">
             <div>
@@ -339,7 +380,9 @@ export function VeEngineWorkspace({
             </p>
           </section>
         </aside>
-      </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

@@ -5,6 +5,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { classifyBaseRowsIntoSegments, detectSegmentLanguage } from '@/lib/verticalEngineV2/segmentClassify';
+import { normalizeLaunchMailboxIds } from '@/lib/verticalEngineV2/launchPortfolio';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -169,8 +170,75 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         }
       }
 
+      // A successfully prepared launch is also a portfolio bundle. Enrich the
+      // template best-effort so step 5 can distinguish PAUSED preparation from
+      // sending activation. The global queue remains available if this read is
+      // temporarily unavailable; template preview itself must not regress.
+      let launchPortfolio: Record<string, unknown> | null = null;
+      if (template.launch_info) {
+        const { data: queueRows, error: queueError } = await supabaseAdmin
+          .from('ve_launch_queue_items')
+          .select(
+            'id, portfolio_id, template_id, instantly_account_id, mailbox_ids, status, plan_version, priority_snapshot, created_at',
+          )
+          .eq('template_id', template.id)
+          .order('created_at', { ascending: false })
+          .limit(1);
+        if (queueError) {
+          await logError('tools.vertical-engine-v2.template.get.portfolio_read_failed', queueError, {
+            baseId: id,
+            templateId: template.id,
+          });
+        } else {
+          const queueItem = (queueRows ?? [])[0];
+          if (queueItem) {
+            const scope = normalizeLaunchMailboxIds(queueItem.mailbox_ids);
+            const [settingsResult, holdersResult] = await Promise.all([
+              supabaseAdmin
+                .from('ve_launch_portfolio_settings')
+                .select('id, mode, max_active_bundles, plan_version')
+                .eq('id', queueItem.portfolio_id)
+                .maybeSingle(),
+              supabaseAdmin
+                .from('ve_launch_queue_items')
+                .select('id', { count: 'exact', head: true })
+                .eq('instantly_account_id', queueItem.instantly_account_id)
+                .in('status', ['activating', 'active', 'uncertain'])
+                .overlaps('mailbox_ids', scope),
+            ]);
+            const relatedError = settingsResult.error ?? holdersResult.error;
+            if (relatedError || typeof holdersResult.count !== 'number') {
+              await logError('tools.vertical-engine-v2.template.get.portfolio_capacity_failed', relatedError, {
+                baseId: id,
+                templateId: template.id,
+                queueItemId: queueItem.id,
+              });
+            } else {
+              const activeBundles = holdersResult.count;
+              launchPortfolio = {
+                item_id: queueItem.id,
+                status: queueItem.status,
+                mode: settingsResult.data?.mode === 'advisory' ? 'advisory' : 'enforced',
+                plan_version:
+                  typeof settingsResult.data?.plan_version === 'number'
+                    ? settingsResult.data.plan_version
+                    : queueItem.plan_version,
+                priority_snapshot: queueItem.priority_snapshot,
+                capacity: {
+                  max_active_bundles:
+                    typeof settingsResult.data?.max_active_bundles === 'number'
+                      ? settingsResult.data.max_active_bundles
+                      : 1,
+                  active_bundles: activeBundles,
+                },
+              };
+            }
+          }
+        }
+      }
+
       return NextResponse.json({
-        template,
+        template: launchPortfolio ? { ...template, launch_portfolio: launchPortfolio } : template,
         columns,
         sample_rows: sampleRows,
         sample_segments: sampleSegments,

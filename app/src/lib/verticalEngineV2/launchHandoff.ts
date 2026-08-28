@@ -29,7 +29,13 @@ import {
   CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP,
   type ClientLaunchSequenceStep,
 } from '@/lib/clientLaunch/types';
-import type { VeChainLetter, VeOperatorMapping } from './types';
+import type {
+  VeChainLetter,
+  VeOperatorMapping,
+  VeRuSeasonality,
+  VeRuSeasonalityPrioritySnapshot,
+} from './types';
+import { normalizeLaunchMailboxIds } from './launchPortfolio';
 
 /** Максимум лидов за один запуск из мастера (v1-ограничение роута, 413 сверх). */
 export const VE_LAUNCH_MAX_LEADS = 2000;
@@ -62,6 +68,17 @@ export interface VeTemplateLaunchInfo {
   leads_count: number;
   preset_id: string;
   created_at: string;
+  /** Immutable Instantly capacity scope captured from the chosen preset. */
+  instantly_account_id?: string;
+  mailbox_ids?: string[];
+  /** Evidence-backed calendar state frozen when the paused bundle is prepared. */
+  seasonality?: VeRuSeasonality;
+  seasonality_input_hash?: string;
+  priority_snapshot?: VeRuSeasonalityPrioritySnapshot;
+  latest_activation_at?: string | null;
+  seasonality_confidence?: 'low' | 'medium' | 'high';
+  potential_pct?: number;
+  estimated_run_days?: number;
   /** Проверенный снимок сегментации, по которому построены кампании. */
   segmentation_audit_id?: string;
   /** Хеш точной аудитории + условий + сохранённых назначений аудита. */
@@ -95,6 +112,18 @@ export function parseLaunchInfo(raw: unknown): VeTemplateLaunchInfo | null {
             typeof c.leads_count === 'number' && Number.isFinite(c.leads_count) ? c.leads_count : 0,
         }))
     : undefined;
+  const mailboxIds = Array.isArray(r.mailbox_ids)
+    ? normalizeLaunchMailboxIds(r.mailbox_ids)
+    : undefined;
+  const seasonality = r.seasonality && typeof r.seasonality === 'object' && !Array.isArray(r.seasonality)
+    ? (r.seasonality as unknown as VeRuSeasonality)
+    : undefined;
+  const prioritySnapshot =
+    r.priority_snapshot &&
+    typeof r.priority_snapshot === 'object' &&
+    !Array.isArray(r.priority_snapshot)
+      ? (r.priority_snapshot as unknown as VeRuSeasonalityPrioritySnapshot)
+      : undefined;
   return {
     campaign_id: r.campaign_id,
     campaign_name: typeof r.campaign_name === 'string' ? r.campaign_name : '',
@@ -102,6 +131,31 @@ export function parseLaunchInfo(raw: unknown): VeTemplateLaunchInfo | null {
     leads_count: typeof r.leads_count === 'number' && Number.isFinite(r.leads_count) ? r.leads_count : 0,
     preset_id: typeof r.preset_id === 'string' ? r.preset_id : '',
     created_at: typeof r.created_at === 'string' ? r.created_at : '',
+    ...(typeof r.instantly_account_id === 'string' && r.instantly_account_id.trim()
+      ? { instantly_account_id: r.instantly_account_id.trim() }
+      : {}),
+    ...(mailboxIds && mailboxIds.length > 0 ? { mailbox_ids: mailboxIds } : {}),
+    ...(seasonality ? { seasonality } : {}),
+    ...(typeof r.seasonality_input_hash === 'string' && /^[0-9a-f]{64}$/.test(r.seasonality_input_hash)
+      ? { seasonality_input_hash: r.seasonality_input_hash }
+      : {}),
+    ...(prioritySnapshot ? { priority_snapshot: prioritySnapshot } : {}),
+    ...(typeof r.latest_activation_at === 'string'
+      ? { latest_activation_at: r.latest_activation_at }
+      : r.latest_activation_at === null
+        ? { latest_activation_at: null }
+        : {}),
+    ...(r.seasonality_confidence === 'low' ||
+    r.seasonality_confidence === 'medium' ||
+    r.seasonality_confidence === 'high'
+      ? { seasonality_confidence: r.seasonality_confidence }
+      : {}),
+    ...(typeof r.potential_pct === 'number' && Number.isFinite(r.potential_pct)
+      ? { potential_pct: r.potential_pct }
+      : {}),
+    ...(typeof r.estimated_run_days === 'number' && Number.isFinite(r.estimated_run_days)
+      ? { estimated_run_days: r.estimated_run_days }
+      : {}),
     ...(typeof r.segmentation_audit_id === 'string' && r.segmentation_audit_id
       ? { segmentation_audit_id: r.segmentation_audit_id }
       : {}),

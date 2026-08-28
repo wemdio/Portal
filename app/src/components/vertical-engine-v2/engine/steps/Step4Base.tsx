@@ -33,6 +33,7 @@ import {
   type VeJobSummary,
 } from '../api';
 import { HE, StatusDot, Spinner } from '../design';
+import { SeasonalityDetail } from '../SeasonalitySummary';
 import { StatusBox, TIER_META, formatDate } from '../ui';
 
 /** Как часто дёргать reload детали во время автосборки (как POLL_INTERVAL_MS родителя). */
@@ -209,6 +210,14 @@ export function Step4Base(props: {
     () => verticalBases.find((b) => b.status === 'analyzed' && b.analysis),
     [verticalBases],
   );
+  const latestSeasonality = useMemo(() => {
+    if (!latestAnalyzed) return null;
+    if (latestAnalyzed.hypothesis_id) {
+      return hypotheses.find((hypothesis) => hypothesis.id === latestAnalyzed.hypothesis_id)
+        ?.seasonality ?? null;
+    }
+    return verticalHypotheses.find((hypothesis) => hypothesis.seasonality)?.seasonality ?? null;
+  }, [hypotheses, latestAnalyzed, verticalHypotheses]);
 
   /** Последняя база в статусе автосборки (verticalBases отсортированы по created_at desc). */
   const collectingBase = useMemo(
@@ -643,6 +652,8 @@ export function Step4Base(props: {
           Разбор базы «{latestBase.filename}» завершился ошибкой. Загрузите файл ещё раз.
         </StatusBox>
       ) : null}
+
+      {latestSeasonality ? <SeasonalityDetail assessment={latestSeasonality} /> : null}
 
       {/* Профиль последней разобранной базы */}
       {latestAnalyzed?.analysis ? (

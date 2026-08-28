@@ -9,7 +9,8 @@ import { VeBaseAnalysisSchema } from '../schemas';
 import { buildBaseAnalysisMessages } from '../prompts/baseAnalyze';
 import { buildBaseAnalysisMessagesEn } from '../prompts/baseAnalyze.en';
 import { projectMarket } from '../market';
-import type { VeBase, VeJob } from '../types';
+import { moscowDateKey, readStoredRuSeasonality } from '../ruSeasonality';
+import type { VeBase, VeJob, VeRuSeasonality } from '../types';
 import {
   addUsage,
   newUsage,
@@ -68,6 +69,23 @@ export async function runBaseAnalyzeStage(job: VeJob, ctx: VeStageContext): Prom
   // Рынок: ctx.market (воркер), фолбэк — колонка ve_projects.market (лениво,
   // только когда воркер рынок не прокинул). Определяет язык промпта анализа.
   const market = ctx.market ?? projectMarket(await readProject(ctx.supabase, job.project_id));
+  const now = new Date();
+  let verifiedSeasonality: VeRuSeasonality | null = null;
+  if (market === 'ru' && base.hypothesis_id) {
+    // Best-effort legacy boundary: old hypotheses have no column value.  Only
+    // the evidence-stage persisted snapshot may influence seasonal copy.
+    const { data: hypothesisRow, error: seasonalityError } = await ctx.supabase
+      .from('ve_hypotheses')
+      .select('seasonality')
+      .eq('id', base.hypothesis_id)
+      .maybeSingle();
+    if (!seasonalityError && hypothesisRow) {
+      const stored = readStoredRuSeasonality(
+        (hypothesisRow as { seasonality?: unknown }).seasonality,
+      );
+      if (stored.classification !== 'unknown') verifiedSeasonality = stored;
+    }
+  }
 
   const llm = await callLLMWithSchema(
     (market === 'us' ? buildBaseAnalysisMessagesEn : buildBaseAnalysisMessages)({
@@ -76,7 +94,11 @@ export async function runBaseAnalyzeStage(job: VeJob, ctx: VeStageContext): Prom
       columns,
       sampleRows,
       verticalName,
-      today: new Date().toISOString().slice(0, 10),
+      // RU business timing flips at Moscow midnight (21:00 UTC). The US
+      // pipeline keeps its existing UTC date until it has a market timezone.
+      today: market === 'ru' ? moscowDateKey(now) : now.toISOString().slice(0, 10),
+      // US keeps its previous prompt behavior; RU receives verified v2 data only.
+      verifiedSeasonality: market === 'ru' ? verifiedSeasonality : null,
     }),
     VeBaseAnalysisSchema,
     { model: getVeModel('bulk'), maxTokens: 4096 },
