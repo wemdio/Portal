@@ -20,6 +20,7 @@ import {
   attributablePayment,
   paymentAmount,
   emptyMoneyTotals,
+  moneyByDeal,
   type FirstSalesPaymentRow,
 } from '@/lib/firstSales/money';
 
@@ -133,5 +134,42 @@ describe('emptyMoneyTotals', () => {
       pendingPayments: 0,
       contractsWithInn: 0,
     });
+  });
+});
+
+/**
+ * Раскладка денег по сделкам — для списка сделок под раскрытой строкой
+ * разбивки. Правила обязаны совпадать с теми, по которым считается столбец
+ * «Деньги»: разойдись они, и список объяснял бы цифру, которой в нём нет.
+ */
+describe('moneyByDeal', () => {
+  const from = new Date('2026-07-01T00:00:00.000Z');
+  const to = new Date('2026-07-31T20:59:59.999Z');
+  const at = (iso: string, over: Partial<FirstSalesPaymentRow> = {}) =>
+    payment({ occurred_at: iso, ...over });
+
+  it('складывает приходы окна по сделке', () => {
+    const byDeal = moneyByDeal(
+      [
+        at('2026-07-05T09:00:00.000Z', { transaction_id: 1, amo_deal_id: 10, amount: 100000 }),
+        at('2026-07-20T09:00:00.000Z', { transaction_id: 2, amo_deal_id: 10, amount: 50000 }),
+      ],
+      from, to,
+    );
+    expect(byDeal.get(10)).toBe(150000);
+  });
+
+  it('вне окна, продления, спорные и возвраты не считаются', () => {
+    const byDeal = moneyByDeal(
+      [
+        at('2026-08-05T09:00:00.000Z', { transaction_id: 1, amo_deal_id: 11, amount: 100000 }),
+        at('2026-07-05T09:00:00.000Z', { transaction_id: 2, amo_deal_id: 12, renewal_state: 'renewal' }),
+        at('2026-07-05T09:00:00.000Z', { transaction_id: 3, amo_deal_id: 13, renewal_state: 'pending' }),
+        at('2026-07-05T09:00:00.000Z', { transaction_id: 4, amo_deal_id: 14, deal_matches: 2 }),
+        at('2026-07-05T09:00:00.000Z', { transaction_id: 5, amo_deal_id: 15, amount: -100000 }),
+      ],
+      from, to,
+    );
+    expect(byDeal.size).toBe(0);
   });
 });
