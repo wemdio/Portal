@@ -20,6 +20,7 @@ import { checkAccount, classifyCheckError } from './accountCheck';
 import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient } from './gramClient';
 import type { LoopControl } from './watchdog';
+import { orderByStaleness } from './accountRotation';
 import { openaiGenerate, detectTrigger } from './openaiChat';
 import { loadBlockedUserIds } from './blockedUsers';
 import {
@@ -1346,11 +1347,26 @@ export async function runCampaignLoop(
       .filter((v): v is number => typeof v === 'number'),
   );
 
+  /**
+   * Порядок обхода — «кого дольше всех не брали, тот первый».
+   *
+   * До 28.08.2026 круг всегда шёл по порядку выборки, и при падениях воркера
+   * (в тот день их было три) хвост списка не работал вовсе: пауза между
+   * аккаунтами доходит до десяти минут, процесс успевал обработать два-три и
+   * умирал, а следующий начинал с того же начала. У ATOL-1 из двенадцати
+   * аккаунтов писали двое, свежая база сутки стояла с нулём отправок.
+   *
+   * Сортируем здесь, а не в SQL: так поведение покрыто тестами, а выборка выше
+   * остаётся простой и её результат по-прежнему годится для остальных нужд
+   * (сверка своих tg_user_id, счётчики).
+   */
+  const cycleOrder = orderByStaleness(accounts as OutreachAccount[]);
+
   log('info', `Запускаю кампанию "${campaign.name}": ${accounts.length} аккаунтов, ${proxies?.length ?? 0} прокси`);
 
   const proxyMap = new Map((proxies ?? []).map((proxy: OutreachProxy) => [proxy.id, proxy]));
   const downloadSessionFile = (storagePath: string) => downloadSessionToTemp(db, storagePath);
-  let clients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db);
+  let clients = await buildClients(cycleOrder, proxies ?? [], log, downloadSessionFile, db);
   // Ручка для сторожевого таймера: порвать сокеты этой кампании, не трогая
   // соседние. Замыкание читает `clients` в момент вызова, поэтому переживает
   // переподключение ниже.
@@ -1972,6 +1988,23 @@ export async function runCampaignLoop(
           );
         }
         tick();
+
+        /**
+         * Отмечаем, что до аккаунта дошли. Это и есть позиция в круге: после
+         * перезапуска воркер начнёт со следующего, а не с начала списка.
+         *
+         * Пишем ПОСЛЕ работы, а не до: аккаунт, на котором процесс умер, должен
+         * считаться необработанным и достаться следующему запуску первым.
+         * Ошибку записи глотаем в лог — из-за неудачной пометки рушить круг
+         * нельзя, в худшем случае аккаунт возьмут дважды подряд.
+         */
+        const { error: cycleErr } = await db
+          .from('tg_outreach_accounts')
+          .update({ last_cycle_at: new Date().toISOString() })
+          .eq('id', account.id);
+        if (cycleErr) {
+          log('warning', `Аккаунт ${account.session_name}: не смог отметить прохождение круга — ${cycleErr.message}. Порядок обхода может сбиться.`);
+        }
 
         const accountDelay = randomRange(tg.account_loop_delay_range) * 1000;
         log('info', `Пауза ${Math.round(accountDelay / 1000)} секунд перед переходом к следующему аккаунту (анти-флуд)`);
