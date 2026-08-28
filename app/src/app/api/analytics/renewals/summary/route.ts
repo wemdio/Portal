@@ -2,7 +2,8 @@ import 'server-only';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireRenewalsAccess } from '@/lib/renewals/access';
 import { parseRenewalsParams } from '@/lib/renewals/params';
-import { computeRenewalsMetrics, fetchRenewalPeriods, fetchRenewalProjects } from '@/lib/renewals/metrics';
+import { computeRenewalsMetrics } from '@/lib/renewals/metrics';
+import { fetchAmoRenewals } from '@/lib/renewals/amoRenewals';
 import { buildRenewalTableRows, buildUndatedRenewalTableRows } from '@/lib/renewals/tableRows';
 import { bucketKey } from '@/lib/firstSales/buckets';
 
@@ -26,9 +27,10 @@ export async function GET(req: NextRequest) {
   const { from, to, groupBy, kpiFilter } = parsed.value;
 
   try {
-    const rows = await fetchRenewalProjects(db);
-    const projectIds = rows.map((r) => r.id);
-    const periods = await fetchRenewalPeriods(db, projectIds);
+    // Источник — воронка AMO «Вторичные (и не только) продажи», а не строки
+    // `projects` с типом «Продление»: те заводились руками и за август
+    // содержали одно продление из пяти реальных (см. шапку amoRenewals.ts).
+    const { rows, periods } = await fetchAmoRenewals(db);
 
     const today = new Date();
     const result = computeRenewalsMetrics(rows, periods, from, to, groupBy, kpiFilter, today);

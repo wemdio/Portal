@@ -1,12 +1,16 @@
 /**
  * Метрики дашборда продлений.
  *
- * Продление — не отдельная сущность в схеме, а строка `projects` с
- * `project_type = 'Продление'`. Ключевые поля (`budget`, `payment_date`,
- * `contract_date`, `kpi_fact`) — либо текстовые, либо `date`-колонки, которые
- * PostgREST в любом случае отдаёт строкой; в боевых данных они заполняются
- * руками, поэтому парсинг везде защитный и никогда не проглатывает мусор
- * молча — см. счётчики `withoutDate`/`withoutBudget` и разбор `parseAmount`.
+ * Модуль считает метрики, но НЕ ходит в БД: строки ему приносит источник —
+ * `amoRenewals.ts`, воронка AMO «Вторичные (и не только) продажи». До
+ * 28.08.2026 источником были строки `projects` с `project_type = 'Продление'`,
+ * отсюда и имя типа `RenewalProjectRow` — форма строки при переезде не
+ * менялась специально, чтобы расчёт и UI остались нетронутыми.
+ *
+ * Ключевые поля (`budget`, `payment_date`, `contract_date`, `kpi_fact`)
+ * приходят строками и заполняются людьми руками, поэтому парсинг везде
+ * защитный и никогда не проглатывает мусор молча — см. счётчики
+ * `withoutDate`/`withoutBudget` и разбор `parseAmount`.
  *
  * Стиль и границы — по образцу `firstSales/metrics.ts`:
  *   1. Чистая функция `computeRenewalsMetrics` + отдельные функции выборки.
@@ -18,8 +22,6 @@
  *      — вторая реализация разъедется с первой, и два дашборда начнут
  *      показывать разные месяцы.
  */
-import type { SupabaseClient } from '@supabase/supabase-js';
-import { chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
 import { bucketKey, buildBuckets, type GroupBy } from '@/lib/firstSales/buckets';
 
 export type RenewalProjectRow = {
@@ -307,47 +309,4 @@ export function computeRenewalsMetrics(
     series: keys.map((k) => series.get(k) as RenewalSeriesBucket),
     totals,
   };
-}
-
-const RENEWAL_PROJECT_COLUMNS =
-  'id, name, client, project_type, budget, payment_date, contract_date, kpi_fact, status, manager, specialist';
-
-/**
- * Тянет продления из `projects`.
- *
- * Фильтр на уровне SQL (`ilike '%продление%'`) — грубая предфильтрация ради
- * меньшей выборки, не источник истины: `project_type` заполняется руками и
- * может прийти с пробелами или в другом регистре, поэтому окончательное
- * решение «это продление или нет» — за `computeRenewalsMetrics`
- * (`isRenewalType`, обрезка + нижний регистр). `%...%`, а не точное
- * совпадение, — чтобы не потерять строку из-за случайных пробелов по краям,
- * которые точное `ilike` без wildcard'ов не прощает.
- */
-export async function fetchRenewalProjects(db: SupabaseClient): Promise<RenewalProjectRow[]> {
-  const { data, error } = await db
-    .from('projects')
-    .select(RENEWAL_PROJECT_COLUMNS)
-    .ilike('project_type', '%продление%');
-  if (error) throw error;
-  return (data ?? []) as RenewalProjectRow[];
-}
-
-/** История периодов для расчёта цикла. Порционируется через `chunkArray`,
- *  как в `firstSales/metrics.ts` — с большим числом проектов `.in(...)`
- *  одной строкой упирается в лимит длины URL PostgREST. */
-export async function fetchRenewalPeriods(
-  db: SupabaseClient,
-  projectIds: string[],
-): Promise<ProjectPeriodRow[]> {
-  if (projectIds.length === 0) return [];
-  const rows: ProjectPeriodRow[] = [];
-  for (const chunk of chunkArray(projectIds, IN_CHUNK_SIZE)) {
-    const { data, error } = await db
-      .from('project_periods')
-      .select('project_id, period_start, period_end')
-      .in('project_id', chunk);
-    if (error) throw error;
-    rows.push(...((data ?? []) as ProjectPeriodRow[]));
-  }
-  return rows;
 }
