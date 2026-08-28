@@ -4,26 +4,20 @@
  * её в Instantly сам) и загрузить лидов базы. Один запуск на шаблон: повтор
  * только с force (создаёт НОВУЮ paused-кампанию и перезаписывает launch_info).
  *
- * Ядро вынесено из POST api/tools/vertical-engine-v2/templates/[id]/launch —
- * клиентский ENG-контур (api/client/eng/templates/[id]/launch) делегирует
- * сюда же, отличия только в обвязке роута:
- *   - scopeClientUserId: пресет читается со скоупом владельца (у staff —
- *     service-level read любого пресета по id, см. launchHandoff.ts);
- *   - locale: тексты ошибок RU (staff-UI) / EN (клиентский кабинет);
- *   - eventPrefix: имена событий logAudit/logError своего контура.
+ * Ядро вынесено из POST api/tools/vertical-engine-v2/templates/[id]/launch.
+ * Это только внутренний VE v2-контур; production ENG использует отдельный
+ * hypothesisEngine backend и сюда не делегирует.
  *
  * Тарифных гейтов и журнала client_campaign_launches тут нет осознанно (см.
  * launchHandoff.ts): запуск HE-шаблона billing клиента не меняет.
  *
- * Материализация 15% (сегментные варианты): если у писем шаблона есть
- * segment_variants, строки базы классифицируются по условиям сегментов
- * (segmentClassify, bulk-модель) и запуск сплитится — одна paused-кампания
- * на сегмент с текстами его вариантов + основная с дефолтными текстами.
- * Системный сбой классификатора → легаси-путь: одна кампания, варианты
- * выкинуты с явным предупреждением. launch_info.campaigns хранит весь
- * список; скалярные поля — основная кампания (их читает refill-долив).
+ * Материализация 15% (сегментные варианты) работает только по сохранённому
+ * предзапускному аудиту. Запуск повторно не вызывает LLM: он валидирует, что
+ * аудит относится к текущим шаблону и базе, полностью покрывает точную
+ * launch-аудиторию, а затем использует проверенные назначения дословно.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { buildCampaignPayloadFromPreset } from '@/lib/clientLaunch/buildCampaignPayload';
 import { hasUsableCampaignSequences } from '@/lib/clientLaunch/campaignSequences';
@@ -31,19 +25,22 @@ import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
 import { createCampaign, createLeads, updateCampaign } from '@/lib/instantly/client';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { logAudit, logError } from '@/lib/loggerServer';
-import type { VeBase, VeTemplate } from './types';
-import { classifyBaseRowsIntoSegments, detectSegmentLanguage } from './segmentClassify';
+import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
 import {
   VE_LAUNCH_MAX_LEADS,
   buildLaunchCampaignName,
   buildLaunchSequence,
+  findEmailColumn,
   instantlyCampaignUrl,
-  mapBaseRowsToLeads,
   parseLaunchInfo,
-  segmentVariantsWarning,
   type VeTemplateLaunchCampaign,
   type VeTemplateLaunchInfo,
 } from './launchHandoff';
+import {
+  buildSegmentationLaunchGroups,
+} from './segmentationAudit';
+import { reconcileExpiredLaunchReservation } from './launchReservation';
+import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 
 export type VeLaunchLocale = 'ru' | 'en';
 
@@ -63,7 +60,12 @@ interface VeLaunchMessages {
   instantlyFailedFallback: string;
   zeroAccepted: string;
   launchInfoSaveWarning: string;
-  segmentVariantsWarning: (dropped: number, lettersCount: number) => string;
+  segmentationAuditRequired: string;
+  segmentationConfirmationRequired: string;
+  segmentationAuditStale: string;
+  segmentationAuditIncomplete: string;
+  launchInProgress: string;
+  launchUncertain: string;
 }
 
 const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
@@ -86,10 +88,13 @@ const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
     instantlyFailedFallback: 'Не удалось создать кампанию',
     zeroAccepted: 'Система рассылки не приняла ни одного контакта. Кампания оставлена на паузе.',
     launchInfoSaveWarning:
-      'Кампания создана, но запись о запуске не сохранилась в шаблон (вероятно, не применена миграция ve_templates.launch_info) — повторный запуск не будет заблокирован.',
-    segmentVariantsWarning: (dropped, lettersCount) =>
-      `Сегментные варианты (${dropped} шт. в ${lettersCount} письмах) не попали в кампанию: ` +
-      'Instantly не умеет условные блоки — в рассылку ушёл основной текст писем.',
+      'Кампания создана, но запись о запуске не сохранилась в шаблон. Повторный запуск заблокирован до ручной проверки результата.',
+    segmentationAuditRequired: 'Перед запуском выполните аудит сегментации.',
+    segmentationConfirmationRequired: 'Подтвердите проверенную раскладку сегментов перед запуском.',
+    segmentationAuditStale: 'Аудит сегментации устарел. Обновите проверку перед запуском.',
+    segmentationAuditIncomplete: 'Аудит сегментации не завершён полностью. Повторите проверку.',
+    launchInProgress: 'Для этого шаблона уже выполняется запуск. Дождитесь его завершения.',
+    launchUncertain: 'Предыдущий запуск мог создать кампанию. Проверьте результат вручную перед повтором.',
   },
   en: {
     templateNotFound: 'Template not found',
@@ -110,10 +115,13 @@ const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
     instantlyFailedFallback: 'Failed to create the campaign',
     zeroAccepted: 'The mailing system did not accept any contacts. The campaign was left paused.',
     launchInfoSaveWarning:
-      'The campaign was created, but the launch record was not saved to the template (the ve_templates.launch_info migration is probably not applied) — a re-launch will not be blocked.',
-    segmentVariantsWarning: (dropped, lettersCount) =>
-      `Segment variants (${dropped} across ${lettersCount} letters) were not included in the campaign: ` +
-      'the mailing system cannot run conditional blocks — the main letter text was used instead.',
+      'The campaign was created, but its launch record was not saved to the template. Re-launch is blocked until the result is reviewed manually.',
+    segmentationAuditRequired: 'Run the segmentation audit before launch.',
+    segmentationConfirmationRequired: 'Confirm the reviewed segmentation before launch.',
+    segmentationAuditStale: 'The segmentation audit is stale. Refresh it before launch.',
+    segmentationAuditIncomplete: 'The segmentation audit is incomplete. Run it again before launch.',
+    launchInProgress: 'A launch is already running for this template. Wait for it to finish.',
+    launchUncertain: 'A previous launch may have created a campaign. Review it manually before retrying.',
   },
 };
 
@@ -123,10 +131,12 @@ export interface VeTemplateLaunchInput {
   templateId: string;
   presetId: string;
   force: boolean;
+  /** Сохранённый аудит, который специалист просмотрел в UI. */
+  segmentationAuditId: string;
+  /** Явное подтверждение именно показанной раскладки. */
+  confirmSegmentation: boolean;
   /** Для аудита (userId инициатора). */
   userId: string;
-  /** Скоуп владельца пресета (клиентский контур); у staff — без скоупа. */
-  scopeClientUserId?: string;
   locale: VeLaunchLocale;
   /** Префикс событий логирования/аудита своего контура. */
   eventPrefix: string;
@@ -137,9 +147,118 @@ export interface VeTemplateLaunchOutcome {
   body: Record<string, unknown>;
 }
 
+function conflict(code: string, error: string): VeTemplateLaunchOutcome {
+  return { status: 409, body: { error, code } };
+}
+
+type LaunchReservationTerminal = 'succeeded' | 'failed' | 'uncertain';
+
+async function reserveTemplateLaunch(input: {
+  portalDb: SupabaseClient;
+  audit: VeSegmentationAudit;
+  templateId: string;
+  force: boolean;
+  reservationId: string;
+  presetId: string;
+}): Promise<{ state: 'reserved' } | { state: 'busy' } | { state: 'error'; error: string }> {
+  const startedAt = new Date().toISOString();
+  const reusableStates = input.force ? ['idle', 'failed', 'succeeded'] : ['idle', 'failed'];
+  const { data, error } = await input.portalDb
+    .from('ve_segmentation_audits')
+    .update({
+      launch_status: 'running',
+      launch_reservation_id: input.reservationId,
+      launch_preset_id: input.presetId,
+      launch_started_at: startedAt,
+      launch_heartbeat_at: startedAt,
+      launch_completed_at: null,
+      launch_error: null,
+      launch_resolution_id: null,
+      launch_resolved_by: null,
+      launch_resolved_at: null,
+      updated_at: startedAt,
+    })
+    .eq('id', input.audit.id)
+    .eq('template_id', input.templateId)
+    .eq('status', 'ready')
+    .in('launch_status', reusableStates)
+    .select('id')
+    .maybeSingle();
+  if (error) {
+    return error.code === '23505'
+      ? { state: 'busy' }
+      : { state: 'error', error: error.message };
+  }
+  return data ? { state: 'reserved' } : { state: 'busy' };
+}
+
+async function settleTemplateLaunch(input: {
+  portalDb: SupabaseClient;
+  auditId: string;
+  templateId: string;
+  reservationId: string;
+  status: LaunchReservationTerminal;
+  launchInfo?: VeTemplateLaunchInfo | null;
+  error?: string | null;
+}): Promise<string | null> {
+  const completedAt = new Date().toISOString();
+  const { data, error } = await input.portalDb.rpc('ve_finalize_template_launch', {
+    p_audit_id: input.auditId,
+    p_template_id: input.templateId,
+    p_launch_reservation_id: input.reservationId,
+    p_launch_status: input.status,
+    p_launch_info: input.launchInfo ?? null,
+    p_error: input.error?.slice(0, 500) ?? null,
+    p_now: completedAt,
+  });
+  if (error) return error.message;
+  const result = data && typeof data === 'object' ? (data as Record<string, unknown>) : null;
+  return result?.finalized === true ? null : 'Резервирование запуска больше не активно';
+}
+
+async function heartbeatTemplateLaunch(input: {
+  portalDb: SupabaseClient;
+  auditId: string;
+  reservationId: string;
+}): Promise<void> {
+  const heartbeatAt = new Date().toISOString();
+  const { data, error } = await input.portalDb
+    .from('ve_segmentation_audits')
+    .update({ launch_heartbeat_at: heartbeatAt, updated_at: heartbeatAt })
+    .eq('id', input.auditId)
+    .eq('launch_reservation_id', input.reservationId)
+    .eq('status', 'ready')
+    .eq('launch_status', 'running')
+    .select('id')
+    .maybeSingle();
+  if (error || !data) {
+    throw new Error(error?.message ?? 'Резервирование запуска больше не активно');
+  }
+}
+
 export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise<VeTemplateLaunchOutcome> {
-  const { portalDb, instantlyDb, templateId, presetId, force, userId, scopeClientUserId, locale, eventPrefix } = input;
+  const {
+    portalDb,
+    instantlyDb,
+    templateId,
+    presetId,
+    force,
+    segmentationAuditId,
+    confirmSegmentation,
+    userId,
+    locale,
+    eventPrefix,
+  } = input;
   const t = MESSAGES[locale];
+
+  // Предзапускной gate обязателен даже для force-релонча: новый запуск должен
+  // быть привязан к явно просмотренному снимку аудитории.
+  if (!segmentationAuditId) {
+    return conflict('SEGMENTATION_AUDIT_REQUIRED', t.segmentationAuditRequired);
+  }
+  if (!confirmSegmentation) {
+    return conflict('SEGMENTATION_CONFIRMATION_REQUIRED', t.segmentationConfirmationRequired);
+  }
 
   // 1. Шаблон.
   const { data: templateRow, error: tplErr } = await portalDb
@@ -167,7 +286,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   // 2. База шаблона.
   const { data: baseRow, error: baseErr } = await portalDb
     .from('ve_bases')
-    .select('id, filename, columns, data, source')
+    .select('id, project_id, filename, columns, data, source')
     .eq('id', template.base_id)
     .single();
   if (baseErr) {
@@ -176,18 +295,97 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       body: { error: baseErr.code === 'PGRST116' ? t.baseNotFound : baseErr.message },
     };
   }
-  const base = baseRow as Pick<VeBase, 'id' | 'filename' | 'columns' | 'data'> & { source?: string };
+  const base = baseRow as Pick<
+    VeBase,
+    'id' | 'project_id' | 'filename' | 'columns' | 'data' | 'source'
+  >;
 
-  // 3. Пресет — service-level read по id (у staff); в клиентском контуре —
-  //    со скоупом владельца (чужой пресет = «не найден»).
-  let presetQuery = instantlyDb
+  // 3. Письма шаблона + условия сегментных вариантов (when) для сплита запуска.
+  const templateLetters = Array.isArray(template.letters) ? template.letters : [];
+  if (!buildLaunchSequence(templateLetters)) return { status: 400, body: { error: t.noLetters } };
+
+  // 4. Сохранённый аудит — единственный источник назначений. Не доверяем
+  //    одному status='ready': заново проверяем полноту и hash текущего входа.
+  const { data: auditRow, error: auditErr } = await portalDb
+    .from('ve_segmentation_audits')
+    .select('*')
+    .eq('id', segmentationAuditId)
+    .maybeSingle();
+  if (auditErr) {
+    await logError(`${eventPrefix}.audit_load_failed`, auditErr, { userId, templateId });
+    return { status: 500, body: { error: auditErr.message } };
+  }
+  if (!auditRow) {
+    return conflict('SEGMENTATION_AUDIT_STALE', t.segmentationAuditStale);
+  }
+  let audit = auditRow as VeSegmentationAudit;
+  const validation = validateStoredAuditSnapshot({ audit, template, base });
+  if (validation.state === 'incomplete') {
+    return conflict('SEGMENTATION_AUDIT_INCOMPLETE', t.segmentationAuditIncomplete);
+  }
+  if (validation.state === 'stale') {
+    return conflict('SEGMENTATION_AUDIT_STALE', t.segmentationAuditStale);
+  }
+  if (audit.launch_status === 'running') {
+    const reconciled = await reconcileExpiredLaunchReservation(portalDb, audit);
+    if (reconciled.error) {
+      await logError(
+        `${eventPrefix}.reservation_reconcile_failed`,
+        new Error(reconciled.error),
+        { userId, templateId, auditId: audit.id },
+      );
+      return { status: 500, body: { error: reconciled.error } };
+    }
+    audit = reconciled.audit;
+  }
+  if (audit.launch_status === 'uncertain') {
+    return conflict('TEMPLATE_LAUNCH_UNCERTAIN', t.launchUncertain);
+  }
+  if (audit.launch_status === 'running') {
+    return conflict('TEMPLATE_LAUNCH_IN_PROGRESS', t.launchInProgress);
+  }
+
+  // 5. Точная launch-аудитория и назначения пришли из единого validator-а,
+  //    который использует тот же pure-путь, что worker и GET freshness.
+  const { audience, segments: segmentWhens } = validation.snapshot;
+  const { assignments } = validation;
+  const { leads } = audience;
+  const columns = Array.isArray(base.columns)
+    ? base.columns.filter((column): column is string => typeof column === 'string')
+    : [];
+  const emailColumn = findEmailColumn(columns, audience.rows);
+  if (!emailColumn) return { status: 400, body: { error: t.noEmailColumn } };
+  if (leads.length === 0) return { status: 400, body: { error: t.noValidEmails } };
+  if (leads.length > VE_LAUNCH_MAX_LEADS) {
+    return { status: 413, body: { error: t.tooManyLeads(leads.length) } };
+  }
+  const currentInputHash = audit.input_hash as string;
+
+  const classification = {
+    assignments,
+    unclassifiedRows: [] as number[],
+    failedBatches: 0,
+    totalBatches: 0,
+    usage: { tokensUsed: 0, costUsd: 0 },
+  };
+  interface LeadGroup {
+    segment: string | null;
+    leadIdx: number[];
+  }
+  const groups: LeadGroup[] = buildSegmentationLaunchGroups({
+    segments: segmentWhens,
+    leadCount: leads.length,
+    classification,
+  }).map((group) => ({ segment: group.segment, leadIdx: group.leadIndices }));
+  const segmentsMaterialized = groups.some((group) => group.segment !== null);
+
+  // 6. Пресет — только после fail-closed аудита. До этой точки нет ни одного
+  //    внешнего Instantly-вызова и тем более мутаций кампаний.
+  const { data: presetRow, error: presetErr } = await instantlyDb
     .from('client_campaign_presets')
     .select('*')
-    .eq('id', presetId);
-  if (scopeClientUserId) {
-    presetQuery = presetQuery.eq('client_user_id', scopeClientUserId);
-  }
-  const { data: presetRow, error: presetErr } = await presetQuery.maybeSingle();
+    .eq('id', presetId)
+    .maybeSingle();
   if (presetErr) {
     await logError(`${eventPrefix}.preset_failed`, presetErr, { userId });
     return { status: 500, body: { error: t.presetLoadFailed } };
@@ -195,101 +393,82 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   if (!presetRow) return { status: 404, body: { error: t.presetNotFound } };
   const preset = presetRow as ClientCampaignPreset;
 
-  // 4. Письма шаблона + условия сегментных вариантов (when) для сплита запуска.
-  const templateLetters = Array.isArray(template.letters) ? template.letters : [];
-  if (!buildLaunchSequence(templateLetters)) return { status: 400, body: { error: t.noLetters } };
-  const segmentWhens = [
-    ...new Set(
-      templateLetters.flatMap((l) =>
-        (l.segment_variants ?? []).map((v) => (v.when ?? '').trim()).filter(Boolean),
-      ),
-    ),
-  ];
-
-  // 5. Лиды из базы. Все проверки — ДО любого вызова Instantly.
-  //    Качественные пометки АВТОсборки (base_collect, source='auto'):
-  //    _email_status !== 'ok' (баунс-риск на домен клиента) и _low_relevance
-  //    (шум источников вне вертикали) в запуск не идут. Ручные базы (upload)
-  //    не фильтруем — там эти ключи, если есть, принадлежат пользователю.
-  const allRows = Array.isArray(base.data) ? (base.data as Array<Record<string, unknown>>) : [];
-  const isAutoBase = base.source === 'auto';
-  let skippedInvalid = 0;
-  let skippedIrrelevant = 0;
-  const rows = isAutoBase
-    ? allRows.filter((r) => {
-        if (r._low_relevance === true) {
-          skippedIrrelevant += 1;
-          return false;
-        }
-        const status = typeof r._email_status === 'string' ? r._email_status : null;
-        if (status && status !== 'ok') {
-          skippedInvalid += 1;
-          return false;
-        }
-        return true;
-      })
-    : allRows;
-  const columns = Array.isArray(base.columns)
-    ? base.columns.filter((c): c is string => typeof c === 'string')
-    : [];
-  const { leads, emailColumn, leadRowIndices } = mapBaseRowsToLeads({
-    rows,
-    columns,
-    operatorMapping: template.personalization_plan?.operator_mapping,
-  });
-  if (!emailColumn) return { status: 400, body: { error: t.noEmailColumn } };
-  if (leads.length === 0) return { status: 400, body: { error: t.noValidEmails } };
-  if (leads.length > VE_LAUNCH_MAX_LEADS) {
-    return { status: 413, body: { error: t.tooManyLeads(leads.length) } };
-  }
-
-  // 5b. Материализация 15%: сплит лидов по сегментам базы. Классификатор —
-  //     LLM (bulk-модель, батчами); системный сбой → null → легаси-путь:
-  //     одна кампания, сегментные варианты выкинуты с предупреждением.
-  interface LeadGroup {
-    segment: string | null;
-    leadIdx: number[];
-  }
-  let groups: LeadGroup[] = [{ segment: null, leadIdx: leads.map((_, i) => i) }];
-  let segmentsMaterialized = false;
-  if (segmentWhens.length > 0) {
-    let assignments: Map<number, string> | null = null;
-    try {
-      assignments = await classifyBaseRowsIntoSegments({
-        rows: leadRowIndices.map((ri) => rows[ri] ?? {}),
-        segments: segmentWhens,
-        language: detectSegmentLanguage(segmentWhens),
-      });
-    } catch {
-      assignments = null;
-    }
-    if (assignments) {
-      const defaultIdx: number[] = [];
-      const bySegment = new Map<string, number[]>();
-      leadRowIndices.forEach((_rowIndex, leadPos) => {
-        const seg = assignments.get(leadPos);
-        if (!seg) {
-          defaultIdx.push(leadPos);
-          return;
-        }
-        const list = bySegment.get(seg) ?? [];
-        list.push(leadPos);
-        bySegment.set(seg, list);
-      });
-      const next: LeadGroup[] = [];
-      if (defaultIdx.length > 0) next.push({ segment: null, leadIdx: defaultIdx });
-      for (const when of segmentWhens) {
-        const idxs = bySegment.get(when);
-        if (idxs && idxs.length > 0) next.push({ segment: when, leadIdx: idxs });
-      }
-      if (next.length > 0) groups = next;
-      segmentsMaterialized = segmentWhens.some((w) => (bySegment.get(w) ?? []).length > 0);
-    }
-  }
-
   const instantlyRequestOptions = { accountId: resolveInstantlyAccountId(preset.instantly_account_id) };
 
-  // 6. Instantly: по кампании на группу (НЕ активируем!) + лиды группы. Текст
+  // 7. DB-reservation closes the check-then-launch race across both repeated
+  //    requests for one audit and different current audits of one template.
+  //    The partial unique index is the cross-row guard; the CAS predicates
+  //    below are the same-row guard. Reservation happens before the first
+  //    Instantly call and remains `uncertain` after any ambiguous mutation.
+  const reservationId = randomUUID();
+  const reservation = await reserveTemplateLaunch({
+    portalDb,
+    audit,
+    templateId,
+    force,
+    reservationId,
+    presetId,
+  });
+  if (reservation.state === 'error') {
+    await logError(`${eventPrefix}.reservation_failed`, new Error(reservation.error), {
+      userId,
+      templateId,
+      auditId: audit.id,
+    });
+    return { status: 500, body: { error: reservation.error } };
+  }
+  if (reservation.state === 'busy') {
+    return conflict('TEMPLATE_LAUNCH_IN_PROGRESS', t.launchInProgress);
+  }
+  if (!force) {
+    // Request B may have read launch_info before request A reserved another
+    // ready audit. The template-level reservation index serializes them; this
+    // second read happens after B acquires it, so A's successful launch_info
+    // is now visible and B fails closed instead of duplicating campaigns.
+    const { data: latestTemplate, error: latestTemplateError } = await portalDb
+      .from('ve_templates')
+      .select('launch_info')
+      .eq('id', templateId)
+      .single();
+    if (latestTemplateError || !latestTemplate) {
+      await settleTemplateLaunch({
+        portalDb,
+        auditId: audit.id,
+        templateId,
+        reservationId,
+        status: 'failed',
+        error: latestTemplateError?.message ?? t.templateNotFound,
+      });
+      return {
+        status: latestTemplateError?.code === 'PGRST116' ? 404 : 500,
+        body: {
+          error:
+            latestTemplateError?.code === 'PGRST116'
+              ? t.templateNotFound
+              : latestTemplateError?.message ?? t.templateNotFound,
+        },
+      };
+    }
+    const concurrentLaunch = parseLaunchInfo(
+      (latestTemplate as { launch_info?: unknown }).launch_info,
+    );
+    if (concurrentLaunch) {
+      await settleTemplateLaunch({
+        portalDb,
+        auditId: audit.id,
+        templateId,
+        reservationId,
+        status: 'failed',
+        error: t.alreadyLaunched,
+      });
+      return {
+        status: 409,
+        body: { error: t.alreadyLaunched, launch: concurrentLaunch },
+      };
+    }
+  }
+
+  // 8. Instantly: по кампании на группу (НЕ активируем!) + лиды группы. Текст
   //    ошибки идёт без scrubBrand — staff-UI нужна точная формулировка API;
   //    клиентский роут скрабит бренд на своей стороне. Основная кампания
   //    (segment=null) создаётся первой — её id уходит в скалярные поля
@@ -297,27 +476,62 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   const campaigns: VeTemplateLaunchCampaign[] = [];
   const groupErrors: string[] = [];
   let accepted = 0;
+  let externalMutationAttempted = false;
+  let ambiguousGroupFailure = false;
   for (const group of groups) {
     const sequence = buildLaunchSequence(templateLetters, { segmentWhen: group.segment });
-    if (!sequence) return { status: 400, body: { error: t.noLetters } };
+    if (!sequence) {
+      if (campaigns.length > 0) {
+        ambiguousGroupFailure = true;
+        groupErrors.push(`${group.segment ?? 'default'}: ${t.noLetters}`);
+        continue;
+      }
+      await settleTemplateLaunch({
+        portalDb,
+        auditId: audit.id,
+        templateId,
+        reservationId,
+        status: 'failed',
+        error: t.noLetters,
+      });
+      return { status: 400, body: { error: t.noLetters } };
+    }
     const campaignName = buildLaunchCampaignName(base.filename, new Date(), group.segment);
+    let groupMutationAttempted = false;
     try {
       const payload = buildCampaignPayloadFromPreset({
         preset,
         sequence: { name: campaignName, steps: sequence.steps },
       });
+      await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });
+      // Even a timed-out request can have committed remotely. From this point
+      // onward a blind retry is unsafe until the result is inspected.
+      groupMutationAttempted = true;
+      externalMutationAttempted = true;
       const created = await createCampaign(payload, instantlyRequestOptions);
       const campaignId = (created as { id?: string }).id ?? null;
       if (!campaignId) {
         throw new Error('Instantly вернул кампанию без идентификатора');
       }
+      const campaignRecord: VeTemplateLaunchCampaign = {
+        campaign_id: campaignId,
+        campaign_name: campaignName,
+        campaign_url: instantlyCampaignUrl(campaignId),
+        segment: group.segment,
+        leads_count: 0,
+      };
+      campaigns.push(campaignRecord);
+      await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });
 
       // Как в клиентском запуске: если Instantly не сохранил sequences при
       // создании — досылаем PATCH'ем.
       if (!hasUsableCampaignSequences(created.sequences)) {
+        await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });
         await updateCampaign(campaignId, { sequences: payload.sequences }, instantlyRequestOptions);
+        await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });
       }
 
+      await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });
       const leadResult = await createLeads(
         group.leadIdx.map((i) => leads[i]),
         {
@@ -328,24 +542,35 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
         },
         instantlyRequestOptions,
       );
+      await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });
       accepted += leadResult.leads_uploaded;
-      campaigns.push({
-        campaign_id: campaignId,
-        campaign_name: campaignName,
-        campaign_url: instantlyCampaignUrl(campaignId),
-        segment: group.segment,
-        leads_count: leadResult.leads_uploaded,
-      });
+      campaignRecord.leads_count = leadResult.leads_uploaded;
     } catch (err) {
-      // Первая кампания — как раньше: весь запуск считается failed (ни одной
-      // кампании ещё нет, ретрай безопасен). Поздние группы — частичный
-      // успех: фиксируем в warnings, созданные кампании не трогаем.
+      // До первой успешно записанной группы весь запрос завершается ошибкой.
+      // Если внешний вызов уже предпринимался, его исход может быть неясен:
+      // reservation остаётся `uncertain`, и слепой ретрай блокируется.
+      // Поздние группы — частичный успех с warning; созданное не удаляем.
       if (campaigns.length === 0) {
         const message = err instanceof Error ? err.message : t.instantlyFailedFallback;
+        await settleTemplateLaunch({
+          portalDb,
+          auditId: audit.id,
+          templateId,
+          reservationId,
+          status: externalMutationAttempted ? 'uncertain' : 'failed',
+          error: message,
+        });
         await logError(`${eventPrefix}.failed`, err, { userId, templateId });
-        return { status: 500, body: { error: message.slice(0, 300) } };
+        return {
+          status: 500,
+          body: {
+            error: message.slice(0, 300),
+            ...(externalMutationAttempted ? { code: 'TEMPLATE_LAUNCH_UNCERTAIN' } : {}),
+          },
+        };
       }
       const message = err instanceof Error ? err.message : t.instantlyFailedFallback;
+      if (groupMutationAttempted) ambiguousGroupFailure = true;
       groupErrors.push(`${group.segment ?? 'default'}: ${message.slice(0, 200)}`);
       await logError(`${eventPrefix}.group_failed`, err, {
         userId,
@@ -355,11 +580,31 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     }
   }
 
-  if (accepted === 0) {
-    return { status: 500, body: { error: t.zeroAccepted, campaign_id: campaigns[0]?.campaign_id ?? null } };
+  const zeroAccepted = accepted === 0;
+  if (zeroAccepted && campaigns.length === 0) {
+    await settleTemplateLaunch({
+      portalDb,
+      auditId: audit.id,
+      templateId,
+      reservationId,
+      status: externalMutationAttempted ? 'uncertain' : 'failed',
+      error: t.zeroAccepted,
+    });
+    return {
+      status: 500,
+      body: {
+        error: t.zeroAccepted,
+        campaign_id: campaigns[0]?.campaign_id ?? null,
+        ...(externalMutationAttempted ? { code: 'TEMPLATE_LAUNCH_UNCERTAIN' } : {}),
+      },
+    };
+  }
+  if (zeroAccepted) {
+    ambiguousGroupFailure = true;
+    groupErrors.push(t.zeroAccepted);
   }
 
-  // 7. Запись о запуске в шаблон. Скалярные поля — первая (основная) кампания;
+  // 9. Запись о запуске в шаблон. Скалярные поля — первая кампания;
   //    полный список — campaigns[].
   const primary = campaigns[0];
   const launchInfo: VeTemplateLaunchInfo = {
@@ -369,23 +614,19 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     leads_count: accepted,
     preset_id: presetId,
     created_at: new Date().toISOString(),
+    segmentation_audit_id: audit.id,
+    segmentation_audit_input_hash: currentInputHash,
+    ...(ambiguousGroupFailure ? { reconciliation_required: true } : {}),
     campaigns,
   };
   const warnings: string[] = [];
-  if (skippedInvalid > 0 || skippedIrrelevant > 0) {
-    warnings.push(t.rowsSkippedNote(skippedInvalid, skippedIrrelevant));
-  }
-  if (segmentWhens.length > 0 && !segmentsMaterialized) {
-    const legacy = buildLaunchSequence(templateLetters);
-    const segWarning =
-      locale === 'en'
-        ? legacy && legacy.droppedSegmentVariants > 0
-          ? t.segmentVariantsWarning(legacy.droppedSegmentVariants, legacy.lettersWithSegmentVariants)
-          : null
-        : legacy
-          ? segmentVariantsWarning(legacy)
-          : null;
-    if (segWarning) warnings.push(segWarning);
+  if (audience.excluded.invalidEmailStatus > 0 || audience.excluded.lowRelevance > 0) {
+    warnings.push(
+      t.rowsSkippedNote(
+        audience.excluded.invalidEmailStatus,
+        audience.excluded.lowRelevance,
+      ),
+    );
   }
   if (segmentsMaterialized && campaigns.length > 1) {
     warnings.push(t.segmentSplitInfo(campaigns.length));
@@ -396,24 +637,50 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     );
   }
 
-  const { error: updErr } = await portalDb
-    .from('ve_templates')
-    .update({ launch_info: launchInfo })
-    .eq('id', templateId);
-  if (updErr) {
-    // Кампания уже создана — не превращаем ответ в ошибку (иначе слепой
-    // ретрай плодит дубли), но честно предупреждаем, что дедуп-записи нет.
-    await logError(`${eventPrefix}.info_save_failed`, updErr, {
+  // launch_info and the terminal reservation state commit together under a
+  // template advisory lock. An old process cannot overwrite a reconciliation.
+  const settleError = await settleTemplateLaunch({
+    portalDb,
+    auditId: audit.id,
+    templateId,
+    reservationId,
+    status: ambiguousGroupFailure ? 'uncertain' : 'succeeded',
+    launchInfo,
+    error: ambiguousGroupFailure ? groupErrors.join('; ') : null,
+  });
+  if (settleError) {
+    await logError(`${eventPrefix}.reservation_settle_failed`, new Error(settleError), {
       userId,
       templateId,
+      auditId: audit.id,
       instantlyCampaignId: primary.campaign_id,
     });
-    warnings.push(t.launchInfoSaveWarning);
+    // If the RPC itself failed before it could acquire the lock, keep the
+    // exact reservation blocked. If a resolver already won, this CAS is a no-op.
+    const failedAt = new Date().toISOString();
+    await portalDb
+      .from('ve_segmentation_audits')
+      .update({
+        launch_status: 'uncertain',
+        launch_error: settleError.slice(0, 500),
+        launch_completed_at: failedAt,
+        updated_at: failedAt,
+      })
+      .eq('id', audit.id)
+      .eq('launch_reservation_id', reservationId)
+      .eq('launch_status', 'running');
+    return {
+      status: 500,
+      body: {
+        error: t.launchInfoSaveWarning,
+        code: 'TEMPLATE_LAUNCH_UNCERTAIN',
+      },
+    };
   }
 
   await logAudit(
     `${eventPrefix}.success`,
-    'Hypothesis engine template sent to Instantly (paused)',
+    'Vertical Engine v2 template sent to Instantly (paused)',
     {
       userId,
       templateId,
@@ -422,11 +689,23 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       instantlyCampaignId: primary.campaign_id,
       campaigns: campaigns.length,
       segmentsMaterialized,
+      segmentationAuditId: audit.id,
+      segmentationAuditInputHash: currentInputHash,
+      launchReservationId: reservationId,
       accepted,
       totalLeads: leads.length,
       force,
     },
   );
 
-  return { status: 200, body: { ok: true, launch: launchInfo, warnings } };
+  return {
+    status: zeroAccepted ? 500 : 200,
+    body: {
+      ok: !zeroAccepted,
+      launch: launchInfo,
+      warnings,
+      ...(zeroAccepted ? { error: t.zeroAccepted } : {}),
+      ...(ambiguousGroupFailure ? { code: 'TEMPLATE_LAUNCH_UNCERTAIN' } : {}),
+    },
+  };
 }

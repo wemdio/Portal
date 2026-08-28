@@ -72,8 +72,8 @@ export async function GET(req: NextRequest) {
 // НА ПАУЗЕ (никогда не активируем — сотрудник проверяет её в Instantly сам) и
 // загрузить лидов базы. Один запуск на шаблон: повтор только с {force:true}
 // (создаёт НОВУЮ paused-кампанию и перезаписывает launch_info).
-// Вся механика — в lib/verticalEngineV2/launchTemplate.ts (туда же делегирует
-// клиентский ENG-контур со скоупом владельца пресета и EN-текстами).
+// Вся механика — в lib/verticalEngineV2/launchTemplate.ts. ENG-контур сюда
+// не делегирует: он остаётся на отдельном hypothesisEngine backend.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.vertical-engine-v2.template.launch.post' },
@@ -86,7 +86,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const { id } = await params;
       if (!id) return jsonError('Missing id', 400);
 
-      let body: { preset_id?: unknown; force?: unknown };
+      let body: {
+        preset_id?: unknown;
+        force?: unknown;
+        segmentation_audit_id?: unknown;
+        confirm_segmentation?: unknown;
+      };
       try {
         body = (await req.json()) as typeof body;
       } catch {
@@ -95,6 +100,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const presetId = typeof body?.preset_id === 'string' ? body.preset_id.trim() : '';
       if (!presetId) return jsonError('Укажите preset_id', 400);
       const force = body?.force === true;
+      const segmentationAuditId =
+        typeof body?.segmentation_audit_id === 'string'
+          ? body.segmentation_audit_id.trim()
+          : '';
+      const confirmSegmentation = body?.confirm_segmentation === true;
 
       const outcome = await runVeTemplateLaunch({
         portalDb: supabaseAdmin,
@@ -102,6 +112,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         templateId: id,
         presetId,
         force,
+        segmentationAuditId,
+        confirmSegmentation,
         userId,
         locale: 'ru',
         eventPrefix: 'tools.vertical-engine-v2.template.launch',

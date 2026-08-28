@@ -38,6 +38,10 @@ const LABEL_COLUMNS = ['companyname', 'company', 'компания'];
 export interface VePreviewLead {
   subject: string;
   body: string;
+  /** Токены уже выбранной (default/segment) темы для UI-подсветки. */
+  subjectTokens: VePreviewToken[];
+  /** Токены уже выбранного segment body — не надо повторно читать letter.body в UI. */
+  bodyTokens: VePreviewToken[];
   wait_days: number;
   /** Имена операторов (без скобок), которые не удалось подставить. */
   unresolved: string[];
@@ -266,6 +270,8 @@ export function renderTemplatePreview(input: {
         return {
           subject: flattenTokens(subject.tokens),
           body: flattenTokens(body.tokens),
+          subjectTokens: subject.tokens,
+          bodyTokens: body.tokens,
           wait_days: letter.wait_days ?? 0,
           unresolved: mergeOperatorNames(subject.unresolved, body.unresolved),
           emptyVars: mergeOperatorNames(subject.emptyVars, body.emptyVars),

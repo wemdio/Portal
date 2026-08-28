@@ -306,64 +306,66 @@ export function ClientBriefBlock({
               : ''}
           </p>
 
-          {SECTIONS.map((section) => (
-            <fieldset key={section.title} className={`${HE.card} ${HE.cardPad}`}>
-              <legend className={`px-1 text-xs font-semibold ${HE.muted2}`}>{section.title}</legend>
-              <div className="mt-2 space-y-3">
-                {section.fields.map((field) => {
-                  const value = fields[field.key] as string;
-                  const isGap = !value.trim();
-                  return (
-                    <label key={field.key} className="block">
-                      <span className={`text-xs ${isGap ? 'text-amber-600' : HE.muted2}`}>
-                        {field.label}
-                        {isGap ? ' · не заполнено' : ''}
-                      </span>
-                      {field.long ? (
-                        <textarea
-                          value={value}
-                          rows={3}
-                          onChange={(e) => setText(field.key, e.target.value)}
-                          className={`${HE.input} mt-1 w-full resize-y`}
-                        />
-                      ) : (
-                        <input
-                          type="text"
-                          value={value}
-                          onChange={(e) => setText(field.key, e.target.value)}
-                          className={`${HE.input} mt-1 w-full`}
-                        />
-                      )}
-                    </label>
-                  );
-                })}
+          <div className="grid gap-4 xl:grid-cols-2">
+            {SECTIONS.map((section) => (
+              <fieldset key={section.title} className={`${HE.card} ${HE.cardPad} min-w-0`}>
+                <legend className={`px-1 text-xs font-semibold ${HE.muted2}`}>{section.title}</legend>
+                <div className="mt-2 space-y-3">
+                  {section.fields.map((field) => {
+                    const value = fields[field.key] as string;
+                    const isGap = !value.trim();
+                    return (
+                      <label key={field.key} className="block">
+                        <span className={`text-xs ${isGap ? 'text-amber-600' : HE.muted2}`}>
+                          {field.label}
+                          {isGap ? ' · не заполнено' : ''}
+                        </span>
+                        {field.long ? (
+                          <textarea
+                            value={value}
+                            rows={3}
+                            onChange={(e) => setText(field.key, e.target.value)}
+                            className={`${HE.input} mt-1 h-auto w-full resize-y`}
+                          />
+                        ) : (
+                          <input
+                            type="text"
+                            value={value}
+                            onChange={(e) => setText(field.key, e.target.value)}
+                            className={`${HE.input} mt-1 w-full`}
+                          />
+                        )}
+                      </label>
+                    );
+                  })}
 
-                {section.title === 'Продукт и оффер' ? (
-                  <label className="block">
-                    <span className={`text-xs ${fields.price_tier ? HE.muted2 : 'text-amber-600'}`}>
-                      Ценовая категория{fields.price_tier ? '' : ' · не заполнено'}
-                    </span>
-                    <select
-                      value={fields.price_tier ?? ''}
-                      onChange={(e) => {
-                        const next = e.target.value as ClientBriefPriceTier | '';
-                        setFields((prev) => ({ ...prev, price_tier: next === '' ? null : next }));
-                        setDirty(true);
-                      }}
-                      className={`${HE.input} mt-1 w-full`}
-                    >
-                      <option value="">Не указана</option>
-                      {ALLOWED_PRICE_TIERS.map((tier) => (
-                        <option key={tier} value={tier}>
-                          {PRICE_TIER_LABELS[tier]}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-              </div>
-            </fieldset>
-          ))}
+                  {section.title === 'Продукт и оффер' ? (
+                    <label className="block">
+                      <span className={`text-xs ${fields.price_tier ? HE.muted2 : 'text-amber-600'}`}>
+                        Ценовая категория{fields.price_tier ? '' : ' · не заполнено'}
+                      </span>
+                      <select
+                        value={fields.price_tier ?? ''}
+                        onChange={(e) => {
+                          const next = e.target.value as ClientBriefPriceTier | '';
+                          setFields((prev) => ({ ...prev, price_tier: next === '' ? null : next }));
+                          setDirty(true);
+                        }}
+                        className={`${HE.input} mt-1 w-full`}
+                      >
+                        <option value="">Не указана</option>
+                        {ALLOWED_PRICE_TIERS.map((tier) => (
+                          <option key={tier} value={tier}>
+                            {PRICE_TIER_LABELS[tier]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                </div>
+              </fieldset>
+            ))}
+          </div>
 
           <fieldset className={`${HE.card} ${HE.cardPad}`}>
             <legend className={`px-1 text-xs font-semibold ${HE.muted2}`}>
@@ -393,7 +395,7 @@ export function ClientBriefBlock({
                       setIcp((prev) => ({ ...prev, [list.key]: items }));
                       setDirty(true);
                     }}
-                    className={`${HE.input} mt-1 w-full resize-y`}
+                    className={`${HE.input} mt-1 h-auto w-full resize-y`}
                   />
                 </label>
               ))}

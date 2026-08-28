@@ -10,6 +10,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, ExternalLink, Square } from 'lucide-react';
 import type { VeHypothesisStatus, VeProjectStatus, VeStage } from '@/lib/verticalEngineV2/types';
 import {
   VE_API,
@@ -33,6 +34,13 @@ import { Badge, ProjectStatusBadge, StatusBox, formatDate, prettyHost, prettyPro
 
 const POLL_INTERVAL_MS = 4000;
 
+function scrollNodeToTop(node: HTMLElement | null): void {
+  if (!node) return;
+  const scroll = () => node.scrollIntoView({ block: 'start' });
+  if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(scroll);
+  else scroll();
+}
+
 /** localStorage-ключ выбранной вертикали проекта. */
 const selectedVerticalKey = (projectId: string) => `he.sel.${projectId}`;
 
@@ -40,11 +48,11 @@ const selectedVerticalKey = (projectId: string) => `he.sel.${projectId}`;
 const visitKey = (projectId: string) => `he.visit.${projectId}`;
 
 const STEP_DEFS = [
-  { id: 1, label: 'Исследование', subtitle: 'анализируем рынок' },
-  { id: 2, label: 'Вертикали', subtitle: 'выбираем направление' },
-  { id: 3, label: 'Контент', subtitle: 'черновик писем и вокабуляр' },
-  { id: 4, label: 'База', subtitle: 'загружаем контакты' },
-  { id: 5, label: 'Шаблон', subtitle: 'готовый текст в работу' },
+  { id: 1, label: 'Исследование', subtitle: 'Рынок и входные данные' },
+  { id: 2, label: 'Вертикали', subtitle: 'Сравнение и выбор фокуса' },
+  { id: 3, label: 'Контент', subtitle: 'Письма, лексика и досье' },
+  { id: 4, label: 'База', subtitle: 'Сбор или загрузка контактов' },
+  { id: 5, label: 'Шаблон', subtitle: 'Проверка и передача в запуск' },
 ] as const;
 
 /**
@@ -68,6 +76,8 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const [step, setStep] = useState(1);
   const [maxVisitedStep, setMaxVisitedStep] = useState(1);
   const [selectedVerticalId, setSelectedVerticalId] = useState<string | null>(null);
+  const projectTopRef = useRef<HTMLDivElement | null>(null);
+  const contentTopRef = useRef<HTMLElement | null>(null);
 
   const [researchStarting, setResearchStarting] = useState(false);
   const [offerSaving, setOfferSaving] = useState(false);
@@ -83,9 +93,12 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const [visitDismissed, setVisitDismissed] = useState(false);
   const visitTrackedRef = useRef(false);
 
-  const jumpTo = useCallback((next: number) => {
+  const jumpTo = useCallback((next: number, options?: { scroll?: boolean }) => {
     setStep(next);
     setMaxVisitedStep((prev) => Math.max(prev, next));
+    if (options?.scroll === false) return;
+
+    scrollNodeToTop(contentTopRef.current);
   }, []);
 
   const load = useCallback(
@@ -121,6 +134,10 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    scrollNodeToTop(projectTopRef.current);
+  }, [projectId]);
 
   // Восстанавливаем выбранную вертикаль проекта из localStorage.
   useEffect(() => {
@@ -161,7 +178,9 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
     const status = project?.status;
     const prev = prevStatusRef.current;
     prevStatusRef.current = status;
-    if (status === 'researched' && prev !== 'researched' && step === 1) jumpTo(2);
+    if (status === 'researched' && prev !== 'researched' && step === 1) {
+      jumpTo(2, { scroll: prev !== undefined });
+    }
   }, [project?.status, step, jumpTo]);
 
   /* ── Производные данные выбранной вертикали ── */
@@ -250,6 +269,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             ? 'locked'
             : 'available',
   }));
+  const currentStep = STEP_DEFS.find((item) => item.id === step) ?? STEP_DEFS[0];
 
   /* ── Обработчики (API) ── */
 
@@ -564,118 +584,149 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   }
 
   return (
-    <div className="space-y-8 text-left">
-      {/* Шапка: возврат к проектам, название проекта, статус и тихая мета-строка */}
-      <div className="border-b border-gray-200 pb-6">
-        <div>
-          <button
-            type="button"
-            onClick={onBack}
-            className="-ml-1 inline-flex items-center gap-1 rounded-md px-1 py-0.5 text-sm font-medium text-gray-500 transition hover:text-gray-900 active:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
-          >
-            ← Проекты
-          </button>
-        </div>
-        <div className="mt-2 flex flex-wrap items-center gap-2.5">
-          <h2 className="truncate text-[21px] font-semibold tracking-tight text-gray-900">
-            {project ? prettyProjectName(project.name, project.website_url) : 'Проект'}
-          </h2>
-          {project ? <ProjectStatusBadge status={project.status} /> : null}
-          {hasActiveJobs ? (
-            <button
-              type="button"
-              onClick={() => void cancelJobs()}
-              disabled={cancelling}
-              title="Остановить все активные задачи проекта (исследование, цепочки, шаблоны, сборку баз)"
-              className="h-7 rounded-lg border border-red-200 bg-red-50 px-2.5 text-xs font-medium text-red-600 transition hover:bg-red-100 disabled:opacity-50"
-            >
-              {cancelling ? 'Останавливаем…' : 'Остановить задачи'}
-            </button>
-          ) : null}
-        </div>
-        {project ? (
-          <p className="mt-1 text-xs text-gray-500">
-            {hypotheses.length} {pluralRu(hypotheses.length, 'гипотеза', 'гипотезы', 'гипотез')}
-            {' · '}
-            {verticals.length} {pluralRu(verticals.length, 'вертикаль', 'вертикали', 'вертикалей')}
-            {' · '}
-            обновлено {formatDate(project.updated_at)}
-            {' · '}
-            <a
-              href={project.website_url}
-              target="_blank"
-              rel="noreferrer"
-              className="transition hover:text-blue-600"
-            >
-              {prettyHost(project.website_url)}
-            </a>
-          </p>
-        ) : null}
-      </div>
-
-      {/* «С последнего визита»: что завершилось, пока пользователя не было */}
-      {visitItems.length > 0 && !visitDismissed ? (
-        <section className="rounded-2xl border border-gray-200 bg-blue-50/40 px-4 py-3">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-xs font-semibold uppercase tracking-widest text-blue-600">
-              С последнего визита
-            </h2>
-            <button
-              type="button"
-              onClick={dismissVisitBlock}
-              className="shrink-0 text-xs font-medium text-blue-600 transition hover:underline"
-            >
-              Скрыть
-            </button>
-          </div>
-          <ul className="mt-2 space-y-1.5">
-            {visitItems.map((item) => (
-              <li key={item.id} className="flex items-center gap-2 text-xs text-gray-600">
-                <StatusDot tone={item.tone} className="shrink-0" />
-                <span className="min-w-0 flex-1 truncate" title={item.text}>
-                  {item.text}
-                </span>
-                <span className="shrink-0 text-gray-500">{timeAgoRu(item.at)}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
-
-      {errorMsg && <StatusBox tone="error">{errorMsg}</StatusBox>}
-      {actionError && <StatusBox tone="error">{actionError}</StatusBox>}
-      {project?.status === 'failed' && project.error ? (
-        <StatusBox tone="error">Исследование завершилось ошибкой: {project.error}</StatusBox>
-      ) : null}
-      {templateNotice ? (
-        <StatusBox tone="info">
-          Шаблон собирается: обычно это занимает пару минут. Прогресс виден на шаге 5.
-        </StatusBox>
-      ) : null}
+    <div ref={projectTopRef} className="text-left">
+      {errorMsg && !detail ? <StatusBox tone="error">{errorMsg}</StatusBox> : null}
 
       {loading && !detail ? (
-        <div className="space-y-3">
-          {[1, 2, 3].map((i) => (
-            <div key={i} className="h-24 rounded-2xl border border-gray-200 bg-gray-50 motion-safe:animate-pulse" aria-hidden />
-          ))}
+        <div className="grid gap-6 lg:grid-cols-[248px_minmax(0,1fr)]">
+          <div className="h-96 rounded-lg border border-gray-200 bg-gray-50 motion-safe:animate-pulse" aria-hidden />
+          <div className="space-y-3">
+            <div className="h-24 rounded-lg border border-gray-200 bg-gray-50 motion-safe:animate-pulse" aria-hidden />
+            <div className="h-80 rounded-lg border border-gray-200 bg-gray-50 motion-safe:animate-pulse" aria-hidden />
+          </div>
         </div>
       ) : null}
 
       {detail ? (
-        <>
-          {/* Навигация мастера — sticky-плашка внутри StepNav */}
-          <StepNav steps={wizardSteps} onJump={jumpTo} />
+        <div className="grid gap-7 lg:grid-cols-[248px_minmax(0,1fr)] lg:gap-9 xl:gap-12">
+          <aside className="min-w-0 lg:sticky lg:top-6 lg:self-start lg:border-r lg:border-gray-200 lg:pr-6">
+            <button
+              type="button"
+              onClick={onBack}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md px-1.5 text-xs font-medium text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            >
+              <ArrowLeft aria-hidden className="h-3.5 w-3.5" />
+              Все проекты
+            </button>
 
-          {renderStep()}
+            <div className="mt-4 border-b border-gray-200 pb-5">
+              <div className="flex flex-wrap items-start justify-between gap-2 lg:block">
+                <h1
+                  className="min-w-0 line-clamp-2 break-words text-lg font-semibold text-gray-900 lg:line-clamp-1"
+                  title={project ? prettyProjectName(project.name, project.website_url) : 'Проект'}
+                >
+                  {project ? prettyProjectName(project.name, project.website_url) : 'Проект'}
+                </h1>
+                <div className="mt-2 lg:mt-2">
+                  {project ? <ProjectStatusBadge status={project.status} /> : null}
+                </div>
+              </div>
+              {project ? (
+                <a
+                  href={project.website_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-3 inline-flex max-w-full items-center gap-1.5 text-xs text-gray-500 transition hover:text-blue-700"
+                >
+                  <span className="truncate">{prettyHost(project.website_url)}</span>
+                  <ExternalLink aria-hidden className="h-3 w-3 shrink-0" />
+                </a>
+              ) : null}
+              <dl className="mt-4 grid grid-cols-2 gap-3 text-xs">
+                <div>
+                  <dt className="text-gray-400">Гипотезы</dt>
+                  <dd className="mt-0.5 font-semibold tabular-nums text-gray-800">{hypotheses.length}</dd>
+                </div>
+                <div>
+                  <dt className="text-gray-400">Вертикали</dt>
+                  <dd className="mt-0.5 font-semibold tabular-nums text-gray-800">{verticals.length}</dd>
+                </div>
+              </dl>
+              {project ? (
+                <p className="mt-4 text-[11px] text-gray-400">Обновлено {formatDate(project.updated_at)}</p>
+              ) : null}
+            </div>
 
-          {/* Техническая информация для отладки — по умолчанию скрыта */}
-          <details className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
-            <summary className="cursor-pointer select-none text-xs font-semibold uppercase tracking-widest text-gray-500 transition hover:text-gray-700">
-              Подробности
-            </summary>
-            <JobsDebugTable jobs={jobs} />
-          </details>
-        </>
+            <div className="mt-5">
+              <StepNav steps={wizardSteps} onJump={jumpTo} />
+            </div>
+          </aside>
+
+          <section ref={contentTopRef} className="min-w-0 space-y-6">
+            <header className="flex flex-col justify-between gap-4 border-b border-gray-200 pb-5 sm:flex-row sm:items-start">
+              <div className="min-w-0">
+                <p className="text-[11px] font-semibold text-blue-700">
+                  Этап {String(step).padStart(2, '0')} из {STEP_DEFS.length}
+                </p>
+                <h2 className="mt-1 text-[25px] font-semibold leading-tight text-gray-950">
+                  {currentStep.label}
+                </h2>
+                <p className={`mt-1.5 ${HE.lead}`}>{currentStep.subtitle}</p>
+                {selectedVertical && step >= 3 ? (
+                  <p className="mt-2 text-xs text-gray-500">
+                    Фокус: <span className="font-medium text-gray-800">{selectedVertical.name}</span>
+                  </p>
+                ) : null}
+              </div>
+              {hasActiveJobs ? (
+                <button
+                  type="button"
+                  onClick={() => void cancelJobs()}
+                  disabled={cancelling}
+                  title="Остановить все активные задачи проекта"
+                  className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md border border-red-200 bg-white px-3 text-xs font-medium text-red-600 transition hover:bg-red-50 active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
+                >
+                  <Square aria-hidden className="h-3 w-3 fill-current" />
+                  {cancelling ? 'Останавливаем…' : 'Остановить задачи'}
+                </button>
+              ) : null}
+            </header>
+
+            {visitItems.length > 0 && !visitDismissed ? (
+              <section className={`px-4 py-3 ${HE.infoPanel}`}>
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className={`${HE.eyebrow} text-blue-700`}>С последнего визита</h3>
+                  <button
+                    type="button"
+                    onClick={dismissVisitBlock}
+                    className="shrink-0 text-xs font-medium text-blue-700 transition hover:text-blue-900"
+                  >
+                    Скрыть
+                  </button>
+                </div>
+                <ul className="mt-2 space-y-1.5">
+                  {visitItems.map((item) => (
+                    <li key={item.id} className="flex items-center gap-2 text-xs text-gray-600">
+                      <StatusDot tone={item.tone} className="shrink-0" />
+                      <span className="min-w-0 flex-1 truncate" title={item.text}>{item.text}</span>
+                      <span className="shrink-0 text-gray-500">{timeAgoRu(item.at)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+
+            {errorMsg ? <StatusBox tone="error">{errorMsg}</StatusBox> : null}
+            {actionError ? <StatusBox tone="error">{actionError}</StatusBox> : null}
+            {project?.status === 'failed' && project.error ? (
+              <StatusBox tone="error">Исследование завершилось ошибкой: {project.error}</StatusBox>
+            ) : null}
+            {templateNotice ? (
+              <StatusBox tone="info">
+                Шаблон собирается: обычно это занимает пару минут. Прогресс виден на этапе 5.
+              </StatusBox>
+            ) : null}
+
+            <div className="min-w-0">{renderStep()}</div>
+
+            <details className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+              <summary className={`cursor-pointer select-none transition hover:text-gray-700 ${HE.eyebrow}`}>
+                Технические подробности
+              </summary>
+              <JobsDebugTable jobs={jobs} />
+            </details>
+          </section>
+        </div>
       ) : null}
     </div>
   );
@@ -694,10 +745,10 @@ function StepHint({
   onAction: () => void;
 }) {
   return (
-    <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-10 text-center">
+    <div className={HE.emptyState}>
       <p className="text-sm font-medium text-gray-700">{title}</p>
       <p className="mt-1 text-xs text-gray-500">{text}</p>
-      <button type="button" onClick={onAction} className={`mt-4 inline-flex ${HE.btnPrimary}`}>
+      <button type="button" onClick={onAction} className={`mt-4 ${HE.btnPrimary}`}>
         {actionLabel}
       </button>
     </div>
@@ -772,6 +823,7 @@ const VISIT_STAGE_NAMES: Record<VeStage, string> = {
   base_analyze: 'Анализ базы',
   base_collect: 'Авто-сборка базы',
   template: 'Сборка шаблона',
+  segmentation_audit: 'Проверяем сегментацию',
   dossier: 'Сборка досье',
 };
 
@@ -784,16 +836,6 @@ function timeAgoRu(iso: string): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours} ч назад`;
   return `${Math.floor(hours / 24)} дн назад`;
-}
-
-/** Русские плюралы: pluralRu(2, 'гипотеза', 'гипотезы', 'гипотез') → 'гипотезы'. */
-function pluralRu(n: number, one: string, few: string, many: string): string {
-  const mod100 = Math.abs(n) % 100;
-  const mod10 = mod100 % 10;
-  if (mod100 > 10 && mod100 < 20) return many;
-  if (mod10 > 1 && mod10 < 5) return few;
-  if (mod10 === 1) return one;
-  return many;
 }
 
 /** Один пункт ленты «С последнего визита». */

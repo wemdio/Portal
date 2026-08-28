@@ -1,34 +1,48 @@
-/* Theme-aware segmented control — Vertical Engine v2.
-   Светлая тема: светлая плашка + белый «плавающий» активный сегмент.
-   Тёмная тема (html[data-portal-theme='dark']): тёмная плашка + светлый активный
-   сегмент на токенах поверхности --pd-* из globals.css (НЕ меняем globals.css). */
-
-.track {
-  background-color: #f1f5f9; /* slate-100 */
+.tabs {
+  display: flex;
+  gap: 24px;
+  overflow-x: auto;
+  border-bottom: 1px solid oklch(0.9 0.008 255);
 }
 
-.item {
-  color: #64748b; /* slate-500 */
-}
-.item:hover {
-  color: #0f172a; /* slate-900 */
-}
-
-.itemActive {
-  background-color: #ffffff;
-  color: #0f172a;
+.tab {
+  position: relative;
+  flex: none;
+  padding: 11px 1px 10px;
+  color: oklch(0.51 0.02 255);
 }
 
-:global(html[data-portal-theme='dark']) .track {
-  background-color: var(--pd-surface);
+.tab:hover {
+  color: oklch(0.22 0.015 255);
 }
-:global(html[data-portal-theme='dark']) .item {
+
+.tab::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  content: '';
+  background: transparent;
+}
+
+.tabActive {
+  color: oklch(0.22 0.015 255);
+}
+
+.tabActive::after {
+  background: oklch(0.53 0.18 257);
+}
+
+:global(html[data-portal-theme='dark']) .tabs {
+  border-bottom-color: var(--pd-divider);
+}
+
+:global(html[data-portal-theme='dark']) .tab {
   color: var(--pd-text-mute);
 }
-:global(html[data-portal-theme='dark']) .item:hover {
-  color: var(--pd-text);
-}
-:global(html[data-portal-theme='dark']) .itemActive {
-  background-color: var(--pd-surface-active);
+
+:global(html[data-portal-theme='dark']) .tab:hover,
+:global(html[data-portal-theme='dark']) .tabActive {
   color: var(--pd-text);
 }

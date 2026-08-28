@@ -1,18 +1,6 @@
 'use client';
 
-/**
- * Горизонтальный степпер мастера «Движка вертикалей»: нумерованные кружки
- * (StepNum, номер виден всегда — без галочек), подпись и короткий подзаголовок
- * у каждого шага. Активный шаг — синее подчёркивание 2px под подписью.
- * Плашка липкая (sticky top-0 + backdrop-blur): шаги остаются на экране
- * при скролле длинных досок и писем.
- * Чисто презентационный компонент: состояния шагов считает ProjectDetail,
- * клик по шагу → onJump(step.id). «Locked»-шаги приглушены, но остаются
- * кликабельными — навигация никогда не блокируется.
- * Палитра: белая подложка, один blue-акцент для пройденных/активного шага.
- */
-
-import { StepNum } from '../design';
+import { Check, LockKeyhole } from 'lucide-react';
 
 export type VeWizardStepState = 'done' | 'active' | 'available' | 'locked';
 
@@ -23,18 +11,37 @@ export interface VeWizardStep {
   state: VeWizardStepState;
 }
 
-const LABEL_CLASS: Record<VeWizardStepState, string> = {
-  done: 'text-gray-900',
-  active: 'text-gray-900',
-  available: 'text-gray-600 group-hover:text-gray-900',
-  locked: 'text-gray-500 group-hover:text-gray-700',
+const BUTTON_CLASS: Record<VeWizardStepState, string> = {
+  done: 'border-transparent text-gray-700 hover:border-gray-200 hover:bg-gray-50',
+  active: 'border-blue-200 bg-blue-50 text-blue-950',
+  available: 'border-transparent text-gray-700 hover:border-gray-200 hover:bg-gray-50',
+  locked: 'border-transparent text-gray-400 hover:border-gray-200 hover:bg-gray-50 hover:text-gray-600',
 };
 
-/** 4 состояния мастера → 3 состояния кружка: available и locked делят idle. */
-function stepNumState(state: VeWizardStepState): 'done' | 'active' | 'idle' {
-  if (state === 'done') return 'done';
-  if (state === 'active') return 'active';
-  return 'idle';
+function StepMarker({ step }: { step: VeWizardStep }) {
+  if (step.state === 'done') {
+    return (
+      <span className="flex h-6 w-6 items-center justify-center rounded-md bg-emerald-100 text-emerald-700">
+        <Check aria-hidden className="h-3.5 w-3.5" />
+      </span>
+    );
+  }
+  if (step.state === 'locked') {
+    return (
+      <span className="flex h-6 w-6 items-center justify-center rounded-md bg-gray-100 text-gray-400">
+        <LockKeyhole aria-hidden className="h-3 w-3" />
+      </span>
+    );
+  }
+  return (
+    <span
+      className={`flex h-6 w-6 items-center justify-center rounded-md text-[11px] font-semibold ${
+        step.state === 'active' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-500'
+      }`}
+    >
+      {String(step.id).padStart(2, '0')}
+    </span>
+  );
 }
 
 export function StepNav({
@@ -45,52 +52,28 @@ export function StepNav({
   onJump: (step: number) => void;
 }) {
   return (
-    // Липкая плашка поверх длинных экранов шагов: отрицательные margin
-    // компенсируют responsive-отступы контейнера ProjectDetail
-    // (px-4 / sm:px-6 / lg:px-8), так что при скролле полоса идёт во всю
-    // ширину оболочки — с backdrop-blur и нижней границей, как TopNav.
-    <nav
-      aria-label="Шаги мастера"
-      className="sticky top-14 z-20 -mx-4 border-b border-gray-200 bg-white/90 px-4 py-3 backdrop-blur-md sm:-mx-6 sm:px-6 sm:py-4 md:top-0 lg:-mx-8 lg:px-8"
-    >
-      {/* Колонки flex-1 равной ширины: на широкой оболочке шаги сами
-          разъезжаются по краям (тот же эффект, что justify-between), а
-          геометрия соединительных линий (calc(-50% …)) не ломается —
-          gap/justify-between здесь разорвали бы стыковку линий с кружками. */}
-      <ol className="flex w-full items-start">
-        {steps.map((step, idx) => (
-          <li key={step.id} className="relative min-w-0 flex-1">
-            {/* Соединительная линия к предыдущему шагу (центр кружка h-7: top-3.5) */}
-            {idx > 0 ? (
-              <span
-                aria-hidden
-                className={`absolute left-[calc(-50%+1rem)] right-[calc(50%+1rem)] top-3.5 h-0.5 transition-colors ${
-                  steps[idx - 1]?.state === 'done' ? 'bg-blue-600' : 'bg-gray-200'
-                }`}
-              />
-            ) : null}
+    <nav aria-label="Этапы проекта" className="min-w-0">
+      <p className="mb-2 hidden text-[11px] font-semibold text-gray-500 lg:block">Этапы проекта</p>
+      <ol className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 lg:mx-0 lg:flex-col lg:overflow-visible lg:px-0">
+        {steps.map((step) => (
+          <li key={step.id} className="shrink-0 lg:w-full">
             <button
               type="button"
               onClick={() => onJump(step.id)}
               aria-current={step.state === 'active' ? 'step' : undefined}
-              className="group relative flex w-full min-w-0 flex-col items-center gap-1.5 rounded-lg transition active:scale-[0.97] focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+              className={`grid min-w-[176px] grid-cols-[24px_minmax(0,1fr)] items-start gap-2.5 rounded-lg border px-2.5 py-2.5 text-left transition active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 lg:min-w-0 lg:w-full ${BUTTON_CLASS[step.state]}`}
             >
-              <StepNum n={step.id} state={stepNumState(step.state)} />
-              <span
-                className={`min-w-0 max-w-full text-[11px] font-semibold leading-tight transition-colors sm:text-xs md:text-sm ${LABEL_CLASS[step.state]}`}
-              >
-                {step.label}
+              <StepMarker step={step} />
+              <span className="min-w-0">
+                <span className="block truncate text-[13px] font-semibold leading-5">{step.label}</span>
+                <span
+                  className={`mt-0.5 hidden text-[11px] leading-4 lg:block ${
+                    step.state === 'active' ? 'text-blue-700' : 'text-gray-500'
+                  }`}
+                >
+                  {step.subtitle}
+                </span>
               </span>
-              {/* Подзаголовок прячется на узких экранах */}
-              <span className="hidden max-w-full text-[11px] leading-tight text-gray-500 transition-colors md:block">
-                {step.subtitle}
-              </span>
-              {/* Активный шаг: синее подчёркивание 2px (у остальных — прозрачная
-                  полоса той же высоты, чтобы геометрия шагов совпадала) */}
-              <span
-                aria-hidden
-                className={`h-0.5 w-10 rounded-full ${step.state === 'active' ? 'bg-blue-600' : 'bg-transparent'}`}
-              />
             </button>
           </li>
         ))}

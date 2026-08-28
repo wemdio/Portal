@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
+import { stripEnrichCheckpointMetadata } from '@/lib/tools/baseConstructorCheckpoint';
 
 const admin = supabaseAdmin!;
 
@@ -43,7 +44,10 @@ export async function GET(
           p_id: id,
           p_limit: previewLimit,
         });
-        if (!rpcErr) return NextResponse.json({ data: slice ?? [] });
+        if (!rpcErr) {
+          const rows = Array.isArray(slice) ? (slice as string[][]) : [];
+          return NextResponse.json({ data: stripEnrichCheckpointMetadata(rows) });
+        }
 
         // Fallback (e.g. RPC not yet deployed): fetch full data and slice in Node.
         // Still cheaper for the browser — it only ever receives the first N rows.
@@ -52,8 +56,10 @@ export async function GET(
           .select('data')
           .eq('id', id)
           .single();
-        const rows = Array.isArray(full?.data) ? (full!.data as unknown[]) : [];
-        return NextResponse.json({ data: rows.slice(0, previewLimit) });
+        const rows = Array.isArray(full?.data) ? (full!.data as string[][]) : [];
+        return NextResponse.json({
+          data: stripEnrichCheckpointMetadata(rows).slice(0, previewLimit),
+        });
       }
 
       // Full data (used by the admin "Открыть в базах" flow).
@@ -66,7 +72,8 @@ export async function GET(
       if (error || !job) return NextResponse.json({ error: 'Not found' }, { status: 404 });
       if (job.user_id !== user.id) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
-      return NextResponse.json({ data: job.data });
+      const rows = Array.isArray(job.data) ? (job.data as string[][]) : [];
+      return NextResponse.json({ data: stripEnrichCheckpointMetadata(rows) });
     },
   );
 }

@@ -16,6 +16,7 @@ import {
   stepCapEmailsPerCompany,
   foundEmailColForLocale,
   normalizeConstructorLocale,
+  stripEnrichCheckpointMetadata,
   type ConstructorLocale,
   type StepKey,
   type ProgressFn,
@@ -82,6 +83,8 @@ export interface TaScoringStats {
   failed_rows: number;
   /** Сколько запросов к AI провалилось (одна пачка = до 10 компаний). */
   failed_batches: number;
+  /** Сколько успешных HTTP-ответов Requesty упёрлись в max_tokens. */
+  length_responses: number;
   /** Причины провалов с частотой. Раньше терялись в немом catch. */
   errors: Array<{ reason: string; count: number }>;
 }
@@ -422,6 +425,7 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
     stepTAScore(data, cfg.brief || '', prog, cancel, {
       keepAllScored: cfg.keepAllScored,
       onStats: cfg.onTaScoringStats,
+      onCheckpoint: cfg.onCheckpoint,
     }),
   personalization: (data, prog, cancel, cfg) => stepPersonalize(data, cfg.prompt || '', prog, cancel),
 };
@@ -522,7 +526,7 @@ export function mergeFoundEmailColumn(
  * Записать провалы оценки ЦА в application_logs.
  *
  * Зачем в БД, а не только в stdout: логи контейнеров ротируются (50 МБ × 3),
- * а base-constructor крутится в трёх репликах — искать там причину недельной
+ * а base-constructor крутится в нескольких репликах — искать там причину недельной
  * давности бесполезно. Вопрос «как часто падает и всегда ли по одной причине»
  * отвечается только по истории. Разбор 04.08.2026.
  *
@@ -671,6 +675,19 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
 
       if (await isCancelled(jobId)) return;
 
+      // enrich_descriptions stores a private attempted-row marker in its
+      // mid-step checkpoints. Preserve it only while resuming that same step;
+      // no later runner or user export may observe the technical column.
+      if (stepKey !== 'enrich_descriptions') {
+        const cleanData = stripEnrichCheckpointMetadata(data);
+        if (cleanData !== data) {
+          console.log(
+            `[base-constructor][${jobId}] stripped enrich checkpoint metadata before step '${stepKey}'`,
+          );
+          data = cleanData;
+        }
+      }
+
       const progressFn: ProgressFn = (progress) => updateJobProgress(jobId, i, stepKey, progress);
       await progressFn(0);
 
@@ -684,6 +701,7 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
         'enrich_descriptions',
         'find_emails',
         'validate_emails',
+        'ta_scoring',
       ]);
       const effectiveStepConfig: StepConfig = {
         ...stepConfig,
@@ -779,6 +797,9 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
       // stuck in 'processing' at 100% with no result_stats.
     }
 
+    // Belt-and-suspenders for legacy/in-flight checkpoints where enrich was
+    // the final step and the worker died between checkpoint and completion.
+    data = stripEnrichCheckpointMetadata(data);
     const header = data[0] || [];
     const body = data.slice(1);
     const emailIdx = findColumnIndex(header, 'email');
@@ -849,6 +870,7 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
                 // отличалась от настоящего вердикта AI — разбор 04.08.2026.
                 ta_scoring_failed_rows: taScoringStats.failed_rows,
                 ta_scoring_failed_batches: taScoringStats.failed_batches,
+                ta_scoring_length_responses: taScoringStats.length_responses,
                 ta_scoring_errors: taScoringStats.errors,
               }
             : {}),
