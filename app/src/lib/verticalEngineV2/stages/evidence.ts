@@ -23,11 +23,23 @@ import {
   type VeSiteProfileOutput,
 } from '../schemas';
 import { projectMarket } from '../market';
+import {
+  moscowDateKey,
+  normalizeVerifiedRuSeasonality,
+} from '../ruSeasonality';
 import { anchorPotentialPct } from '../scoreAnchor';
 import { verifyEvidenceItems } from '../verifyEvidence';
-import { buildEvidenceMessages } from '../prompts/evidence';
+import {
+  buildEvidenceMessages,
+  type EvidenceResearchSignal,
+} from '../prompts/evidence';
 import { buildEvidenceMessagesEn } from '../prompts/evidence.en';
-import type { VeEvidenceItem, VeHypothesisTier, VeJob } from '../types';
+import type {
+  VeEvidenceItem,
+  VeHypothesisTier,
+  VeJob,
+  VeRuSeasonality,
+} from '../types';
 import { loadMarkupHistory, loadPortfolioProfile } from './hypotheses';
 import { resolveFetchText, resolveSearch } from './io';
 import {
@@ -42,11 +54,39 @@ import {
   type VeStageResult,
 } from './shared';
 
-const MAX_QUERIES_PER_CANDIDATE = 3;
-const MAX_SEARCH_ITEMS = 8;
-const MAX_SOURCES_TO_FETCH = 2;
+const MAX_MARKET_QUERIES_PER_CANDIDATE = 3;
+const MAX_SEASONAL_QUERIES_PER_CANDIDATE = 3;
+const MAX_SEARCH_ITEMS_PER_SCOPE = 6;
+const MAX_MARKET_SOURCES = 2;
+// Up to two corroborating pages per demand/availability/procurement lane when
+// search has them; still bounded so one hypothesis cannot dominate stage cost.
+const MAX_SEASONAL_SOURCES = 6;
 const SOURCE_EXCERPT = 1500;
 const MAX_EVIDENCE_PER_HYPOTHESIS = 6;
+
+type EvidenceSearchScope = 'market' | 'seasonality';
+
+interface ScopedSearchResult {
+  title: string;
+  link: string;
+  snippet?: string;
+  scope: EvidenceSearchScope;
+  signal: EvidenceResearchSignal;
+  query: string;
+}
+
+interface ScopedSource {
+  url: string;
+  text: string;
+  scope: EvidenceSearchScope;
+  signal: EvidenceResearchSignal;
+  query: string;
+}
+
+interface EvidenceQueryLane {
+  query: string;
+  signal: EvidenceResearchSignal;
+}
 
 interface AcceptedHypothesis {
   tier: VeHypothesisTier;
@@ -54,11 +94,125 @@ interface AcceptedHypothesis {
   description: string;
   fit_rationale: string;
   evidence: VeEvidenceItem[];
+  seasonality: VeRuSeasonality | null;
   potential_pct: number;
 }
 
 function normTitle(t: string): string {
   return t.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function uniqueQueries(queries: string[], limit: number): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const raw of queries) {
+    const query = raw.replace(/\s+/g, ' ').trim();
+    const key = query.toLocaleLowerCase('ru-RU');
+    if (!query || seen.has(key)) continue;
+    seen.add(key);
+    result.push(query);
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
+function takeRoundRobin<T>(groups: T[][], limit: number): T[] {
+  const result: T[] = [];
+  for (let index = 0; result.length < limit; index += 1) {
+    let found = false;
+    for (const group of groups) {
+      if (index >= group.length) continue;
+      result.push(group[index]);
+      found = true;
+      if (result.length >= limit) break;
+    }
+    if (!found) break;
+  }
+  return result;
+}
+
+function roundRobinByQuery<T extends { query: string }>(items: T[], limit: number): T[] {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const group = groups.get(item.query) ?? [];
+    group.push(item);
+    groups.set(item.query, group);
+  }
+  return takeRoundRobin([...groups.values()], limit);
+}
+
+async function collectScopedSearchResults(input: {
+  ctx: VeStageContext;
+  search: NonNullable<VeStageContext['search']>;
+  lanes: EvidenceQueryLane[];
+  scope: EvidenceSearchScope;
+}): Promise<ScopedSearchResult[]> {
+  const discoveredLinks = new Set<string>();
+  const laneResults: ScopedSearchResult[][] = [];
+  for (const lane of input.lanes) {
+    const results: ScopedSearchResult[] = [];
+    try {
+      for (const item of await input.search(lane.query)) {
+        const link = item.link.trim();
+        if (
+          !link ||
+          discoveredLinks.has(link) ||
+          results.length >= MAX_SEARCH_ITEMS_PER_SCOPE
+        ) continue;
+        discoveredLinks.add(link);
+        results.push({
+          ...item,
+          link,
+          scope: input.scope,
+          signal: lane.signal,
+          query: lane.query,
+        });
+      }
+    } catch (e) {
+      stageLog(
+        input.ctx,
+        `[evidence] поиск «${lane.query}» упал: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    laneResults.push(results);
+  }
+  return takeRoundRobin(laneResults, MAX_SEARCH_ITEMS_PER_SCOPE);
+}
+
+async function fetchScopedSources(input: {
+  ctx: VeStageContext;
+  fetchText: NonNullable<VeStageContext['fetchText']>;
+  marketResults: ScopedSearchResult[];
+  seasonalResults: ScopedSearchResult[];
+}): Promise<ScopedSource[]> {
+  // Quotas guarantee that broad market results cannot crowd targeted seasonal
+  // pages out of the bounded fetch budget. Within each scope, query-level
+  // round-robin gives every signal lane one top-source opportunity.
+  const selectedByUrl = new Map<string, ScopedSearchResult>();
+  for (const item of roundRobinByQuery(input.marketResults, MAX_MARKET_SOURCES)) {
+    selectedByUrl.set(item.link, item);
+  }
+  for (const item of roundRobinByQuery(input.seasonalResults, MAX_SEASONAL_SOURCES)) {
+    // Fetch an overlapping URL only once, but retain its targeted seasonal
+    // provenance when it participates in both discovery scopes.
+    selectedByUrl.set(item.link, item);
+  }
+  const selected = [...selectedByUrl.values()];
+  const sources: ScopedSource[] = [];
+  for (const item of selected) {
+    try {
+      sources.push({
+        url: item.link,
+        text: truncate(await input.fetchText(item.link), SOURCE_EXCERPT),
+        scope: item.scope,
+        signal: item.signal,
+        query: item.query,
+      });
+    } catch {
+      stageLog(input.ctx, `[evidence] фетч ${item.link} пропущен`);
+    }
+  }
+  return sources;
 }
 
 /**
@@ -114,39 +268,63 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
   let merged = 0;
   let dropped = 0;
   let evidenceDropped = 0;
+  const todayMoscow = moscowDateKey();
 
   for (let i = 0; i < candidates.length; i += 1) {
     const candidate = candidates[i];
     await reportProgress(ctx, job.id, i + 1, candidates.length, 'проверяем гипотезу');
     stageLog(ctx, `[evidence] «${candidate.title}»…`);
 
-    // 1) Поиск по запросам кандидата (2–4), дедуп ссылок, best-effort.
+    // 1) General market research + a separate, bounded RU seasonality lane.
+    // Both lanes reuse the same adapters but keep discovery dedup scope-local;
+    // fetch-level dedup below prevents duplicate downloads without allowing a
+    // broad market result outside its quota to hide targeted seasonal evidence.
     const fallbackQuery = market === 'us' ? `${candidate.title} market size` : `${candidate.title} рынок объём`;
-    const queries = (candidate.search_queries.length ? candidate.search_queries : [fallbackQuery])
-      .slice(0, MAX_QUERIES_PER_CANDIDATE);
-    const seenLinks = new Set<string>();
-    const searchResults: Array<{ title: string; link: string; snippet?: string }> = [];
-    for (const q of queries) {
-      try {
-        for (const item of await search(q)) {
-          if (seenLinks.has(item.link) || searchResults.length >= MAX_SEARCH_ITEMS) continue;
-          seenLinks.add(item.link);
-          searchResults.push(item);
-        }
-      } catch (e) {
-        stageLog(ctx, `[evidence] поиск «${q}» упал: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
+    const marketQueries = uniqueQueries(
+      candidate.search_queries.length ? candidate.search_queries : [fallbackQuery],
+      MAX_MARKET_QUERIES_PER_CANDIDATE,
+    );
+    const marketLanes: EvidenceQueryLane[] = marketQueries.map((query) => ({
+      query,
+      signal: 'market',
+    }));
+    const seasonalLanes: EvidenceQueryLane[] = market === 'ru'
+      ? [
+          {
+            query: `${candidate.title} сезонность спроса Россия высокий сезон`,
+            signal: 'demand_peak',
+          },
+          {
+            query: `${candidate.title} низкий сезон доступность ЛПР отпуска Россия`,
+            signal: 'negative_availability',
+          },
+          {
+            query: `${candidate.title} цикл закупок бюджеты планирование Россия`,
+            signal: 'procurement_lead_time',
+          },
+        ].slice(0, MAX_SEASONAL_QUERIES_PER_CANDIDATE) as EvidenceQueryLane[]
+      : [];
+    const marketResults = await collectScopedSearchResults({
+      ctx,
+      search,
+      lanes: marketLanes,
+      scope: 'market',
+    });
+    const seasonalResults = await collectScopedSearchResults({
+      ctx,
+      search,
+      lanes: seasonalLanes,
+      scope: 'seasonality',
+    });
+    const searchResults = [...marketResults, ...seasonalResults];
 
-    // 2) Фетч топ-1–2 источников; сбойные пропускаем.
-    const sources: Array<{ url: string; text: string }> = [];
-    for (const item of searchResults.slice(0, MAX_SOURCES_TO_FETCH)) {
-      try {
-        sources.push({ url: item.link, text: truncate(await fetchText(item.link), SOURCE_EXCERPT) });
-      } catch {
-        stageLog(ctx, `[evidence] фетч ${item.link} пропущен`);
-      }
-    }
+    // 2) Fetch at most two market and six seasonal pages; failures are best-effort.
+    const sources = await fetchScopedSources({
+      ctx,
+      fetchText,
+      marketResults,
+      seasonalResults,
+    });
 
     // 3) LLM-вердикт. Сбой по одному кандидату → drop с reason='stage_error'.
     try {
@@ -158,6 +336,7 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
         allCandidateTitles: allTitles,
         sources,
         searchResults,
+        todayMoscow,
         ...(portfolioProfile ? { portfolioProfile } : {}),
         ...(markupHistory ? { markupHistory } : {}),
       };
@@ -197,12 +376,33 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
       // Кап «нет проверенных доказательств» — ПОСЛЕ якоря: иначе горячий
       // сегмент датасета поднимал бы неверифицированную гипотезу до ~43%.
       const finalPct = check.valid.length === 0 ? Math.min(anchor.pct, 20) : anchor.pct;
+      const rawSeasonality = v.seasonality ?? null;
+      const seasonality = market === 'ru' && rawSeasonality !== null
+        ? normalizeVerifiedRuSeasonality(rawSeasonality, sources)
+        : null;
+      if (
+        rawSeasonality !== null &&
+        rawSeasonality.classification !== 'unknown' &&
+        seasonality?.classification === 'unknown'
+      ) {
+        stageLog(
+          ctx,
+          `[evidence] «${candidate.title}»: сезонность не подтверждена URL/цитатой, сохранён unknown`,
+        );
+      }
 
       if (v.verdict === 'merge' && v.merge_with_title) {
         const target = accepted.find((a) => normTitle(a.title) === normTitle(v.merge_with_title as string));
         if (target) {
           target.evidence = [...target.evidence, ...check.valid].slice(0, MAX_EVIDENCE_PER_HYPOTHESIS);
           target.potential_pct = Math.max(target.potential_pct, finalPct);
+          if (
+            (!target.seasonality || target.seasonality.classification === 'unknown') &&
+            seasonality !== null &&
+            seasonality.classification !== 'unknown'
+          ) {
+            target.seasonality = seasonality;
+          }
           merged += 1;
           continue;
         }
@@ -218,6 +418,7 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
         // пустое поле — откат к исходной цепочке кандидата.
         fit_rationale: v.fit_rationale || candidate.fit_rationale,
         evidence: check.valid.slice(0, MAX_EVIDENCE_PER_HYPOTHESIS),
+        seasonality,
         potential_pct: finalPct,
       });
     } catch (e) {
@@ -244,6 +445,7 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
       description: a.description,
       fit_rationale: a.fit_rationale,
       evidence: a.evidence,
+      seasonality: a.seasonality,
       potential_pct: a.potential_pct,
       status: 'proposed',
     }));

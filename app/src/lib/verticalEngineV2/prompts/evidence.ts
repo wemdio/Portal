@@ -29,6 +29,17 @@ const SYSTEM = `Ты — lead-аналитик доказательного ре
 13. ЭКОНОМИКА ФИТА — обязательная часть вердикта: сегмент годится, только если типичная сделка/маржа клиента вертикали позволяет окупить платный аутрич (услуга агентства стоит сотни тысяч ₽/мес). Если по материалам или по здравой оценке средний чек сегмента или LTV клиента сегмента явно меньше годовой стоимости канала — режь potential_pct, а при явном несовпадении — "drop". Существование вертикали и наличие в ней компаний фитом НЕ является.
 14. СХОЖЕСТЬ С ПОРТФЕЛЕМ: если в блоке «КОМУ УЖЕ ПРОДАЛИ» ниже есть сам сегмент или его сосед по типу клиента/чеку/циклу продаж — это доказанный спрос: учитывай как бонус к potential_pct. Бонус — за сходство экономики, не за тематическую близость.
 15. TIER-3 И ДОКАЗАТЕЛЬНЫЙ ПУТЬ К ЭФФЕКТИВНОСТИ: неочевидность сама по себе не наказывается — tier-3 с сильной болью, триггером и рабочей экономикой может держать высокий pct, выше tier-1. Но tier-3 гипотеза, у которой нет НИ ОДНОГО доказательного пути к эффективности (ни портфельного соседства, ни рабочей экономики, ни наблюдаемой интенсивной боли с триггером), — вердикт "drop", либо "keep" с potential_pct ≤ 20 и явной причиной в reason.
+16. СЕЗОННОСТЬ РФ — отдельный доказательный вывод, а не знание «из головы». Не выводи сентябрь из слова «школа», декабрь из слова «ритейл» и т.п. Используй ТОЛЬКО скачанные тексты источников. Отдельный массив seasonality.evidence может не совпадать с общим evidence рынка, но для него действуют те же железные правила URL и дословной quote.
+   - «Пик спроса» — когда клиентам сегмента реально нужен продукт/услуга; это позитивное peak-окно.
+   - «Цикл закупок / бюджетирование» — когда принимают решение и резервируют бюджет. Это доказательство procurement lead time, которое определяет, насколько заранее начинать outreach, но само по себе не является пиком спроса.
+   - «Доступность ЛПР / отпуска» — когда нужные принимающие решение люди системно недоступны. Только подтверждённое негативное окно даёт avoid; не подменяй его общим падением спроса.
+17. seasonality.classification:
+   - "seasonal" — источник подтверждает конкретное ежегодное позитивное окно спроса (peak) и/или негативное окно (avoid);
+   - "neutral" — источник явно подтверждает существенно круглогодичный спрос без выраженного окна;
+   - "unknown" — всё остальное, включая правдоподобную, но не доказанную сезонность. Для unknown верни windows=[] и evidence=[].
+18. СВЯЗЬ ОКНА С ДОКАЗАТЕЛЬСТВОМ: у КАЖДОГО объекта windows обязателен собственный массив evidence с цитатами, которые подтверждают именно это окно. Цитата про peak не подтверждает avoid и наоборот. Если для окна нет собственной дословной цитаты — не возвращай это окно. seasonality.evidence — объединение evidence всех возвращённых окон; для neutral — доказательство круглогодичного спроса.
+19. ОКНА И LEAD TIME: границы start_mm_dd/end_mm_dd включительны и могут пересекать Новый год. peak.lead_days — за сколько дней ДО start_mm_dd уже надо НАЧИНАТЬ OUTREACH, а не «готовиться». avoid — только проверенный период, когда отправку лучше не активировать. Не придумывай отрицательное окно просто как всё время вне peak.
+20. confidence — уверенность именно в сезонном выводе: low|medium|high. Это не сила гипотезы рынка. Для classification="unknown" всегда low; для seasonal/neutral оцени качество и прямоту сезонных источников. Код всё равно понизит результат до unknown/low, если URL+quote не пройдут проверку.
 
 Отвечай строго на русском, ТОЛЬКО JSON.`;
 
@@ -38,9 +49,24 @@ export interface EvidencePromptInput {
   /** Точные title всех кандидатов — для merge_with_title. */
   allCandidateTitles: string[];
   /** Скачанные тексты найденных страниц (уже обрезанные). */
-  sources: Array<{ url: string; text: string }>;
+  sources: Array<{
+    url: string;
+    text: string;
+    scope?: 'market' | 'seasonality';
+    signal?: EvidenceResearchSignal;
+    query?: string;
+  }>;
   /** Сырая выдача поиска (title/link/snippet). */
-  searchResults: Array<{ title: string; link: string; snippet?: string }>;
+  searchResults: Array<{
+    title: string;
+    link: string;
+    snippet?: string;
+    scope?: 'market' | 'seasonality';
+    signal?: EvidenceResearchSignal;
+    query?: string;
+  }>;
+  /** Календарная дата Europe/Moscow для оценки актуальности окна. */
+  todayMoscow: string;
   /** Сегменты, где агентство уже вело кампании (факт reply%) — карта доказанного спроса. */
   portfolioProfile?: Array<{
     segment: string;
@@ -54,13 +80,34 @@ export interface EvidencePromptInput {
   markupHistory?: { accepted: string[]; rejected: string[] };
 }
 
+export type EvidenceResearchSignal =
+  | 'market'
+  | 'demand_peak'
+  | 'procurement_lead_time'
+  | 'negative_availability';
+
+const SIGNAL_LABELS: Record<EvidenceResearchSignal, string> = {
+  market: 'рынок',
+  demand_peak: 'пик спроса',
+  procurement_lead_time: 'цикл закупок / бюджетирование',
+  negative_availability: 'доступность ЛПР / отпуска',
+};
+
+function signalLabel(signal: EvidenceResearchSignal | undefined): string {
+  return SIGNAL_LABELS[signal ?? 'market'];
+}
+
 export function buildEvidenceMessages(input: EvidencePromptInput): LLMMessage[] {
   const sourcesBlock = input.sources.length
-    ? input.sources.map((s) => `--- Источник: ${s.url} ---\n${s.text}`).join('\n\n')
+    ? input.sources.map((s) =>
+        `--- Источник [${signalLabel(s.signal)}]: ${s.url} ---\n${s.text}`,
+      ).join('\n\n')
     : '(тексты источников скачать не удалось — цитировать нечего: evidence верни пустым и режь potential_pct)';
 
   const searchBlock = input.searchResults.length
-    ? input.searchResults.map((r) => `- ${r.title} — ${r.link}${r.snippet ? `\n  ${r.snippet}` : ''}`).join('\n')
+    ? input.searchResults.map((r) =>
+        `- [${signalLabel(r.signal)}] ${r.title} — ${r.link}${r.snippet ? `\n  ${r.snippet}` : ''}`,
+      ).join('\n')
     : '(поиск ничего не вернул — вероятный verdict: drop или сильное понижение %)';
 
   const portfolioBlock = input.portfolioProfile?.length
@@ -77,6 +124,8 @@ ${input.portfolioProfile.map((p) => `- ${p.segment} — ${p.clients} клиен�
 
   const user = `КЛИЕНТ (контекст продукта):
 ${input.profile.company_name}: ${input.profile.product_summary}
+
+СЕГОДНЯ ПО МОСКВЕ: ${input.todayMoscow}
 
 ГИПОТЕЗА-КАНДИДАТ НА ВЕРИФИКАЦИЮ:
 ${JSON.stringify(input.candidate, null, 2)}
@@ -97,7 +146,18 @@ ${searchBlock}
   "reason": string,
   "fit_rationale": string,
   "evidence": [ { "claim": string, "source_url": string, "quote": string } ],
-  "potential_pct": number
+  "potential_pct": number,
+  "seasonality": {
+    "version": 1,
+    "classification": "seasonal"|"neutral"|"unknown",
+    "confidence": "low"|"medium"|"high",
+    "rationale": string,
+    "windows": [
+      { "kind": "peak", "label": string, "start_mm_dd": "MM-DD", "end_mm_dd": "MM-DD", "lead_days": number, "evidence": [ { "claim": string, "source_url": string, "quote": string } ] },
+      { "kind": "avoid", "label": string, "start_mm_dd": "MM-DD", "end_mm_dd": "MM-DD", "evidence": [ { "claim": string, "source_url": string, "quote": string } ] }
+    ],
+    "evidence": [ { "claim": string, "source_url": string, "quote": string } ]
+  }
 }`;
 
   return [

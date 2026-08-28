@@ -12,7 +12,7 @@
  * come with a unit test in the consuming spec.
  *
  * Filtering semantics:
- *   - eq/neq/in/gte/lte/lt/gt run on the in-memory rows in the order they were
+ *   - eq/neq/in/overlaps/gte/lte/lt/gt run on the in-memory rows in the order they were
  *     called (mirrors how PostgREST stacks predicates).
  *   - ilike(column, pattern) — case-insensitive match with PostgREST wildcards
  *     (% — любая подстрока, _ — один символ).
@@ -167,7 +167,7 @@ export interface MockSupabaseClient {
   selects: SelectCall[];
 }
 
-type Op = 'eq' | 'neq' | 'in' | 'gte' | 'lte' | 'gt' | 'lt' | 'is' | 'not_is' | 'not_in' | 'ilike';
+type Op = 'eq' | 'neq' | 'in' | 'overlaps' | 'gte' | 'lte' | 'gt' | 'lt' | 'is' | 'not_is' | 'not_in' | 'ilike';
 
 interface Filter {
   column: string;
@@ -185,6 +185,7 @@ interface Builder {
   eq: (column: string, value: unknown) => Builder;
   neq: (column: string, value: unknown) => Builder;
   in: (column: string, values: unknown[]) => Builder;
+  overlaps: (column: string, values: unknown[]) => Builder;
   gte: (column: string, value: unknown) => Builder;
   lte: (column: string, value: unknown) => Builder;
   gt: (column: string, value: unknown) => Builder;
@@ -215,6 +216,12 @@ function applyFilter(rows: Row[], f: Filter): Row[] {
       return rows.filter((r) => r[f.column] !== f.value);
     case 'in':
       return rows.filter((r) => Array.isArray(f.value) && (f.value as unknown[]).includes(r[f.column]));
+    case 'overlaps':
+      return rows.filter((r) =>
+        Array.isArray(r[f.column]) &&
+        Array.isArray(f.value) &&
+        (r[f.column] as unknown[]).some((value) => (f.value as unknown[]).includes(value)),
+      );
     case 'gte':
       return rows.filter((r) => (r[f.column] as never) >= (f.value as never));
     case 'lte':
@@ -510,6 +517,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
       eq: (column, value) => { filters.push({ column, op: 'eq', value }); return builder; },
       neq: (column, value) => { filters.push({ column, op: 'neq', value }); return builder; },
       in: (column, values) => { filters.push({ column, op: 'in', value: values }); return builder; },
+      overlaps: (column, values) => { filters.push({ column, op: 'overlaps', value: values }); return builder; },
       gte: (column, value) => { filters.push({ column, op: 'gte', value }); return builder; },
       lte: (column, value) => { filters.push({ column, op: 'lte', value }); return builder; },
       gt: (column, value) => { filters.push({ column, op: 'gt', value }); return builder; },

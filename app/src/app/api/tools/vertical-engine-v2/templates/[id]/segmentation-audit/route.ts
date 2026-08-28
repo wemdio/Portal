@@ -5,8 +5,13 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
+import { getCampaign } from '@/lib/instantly/client';
+import { CampaignStatus } from '@/lib/instantly/types';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from '@/lib/verticalEngineV2/types';
+import { launchMailboxScopesEqual } from '@/lib/verticalEngineV2/launchPortfolio';
 import {
   VE_LAUNCH_MAX_LEADS,
   buildLaunchCampaignName,
@@ -15,6 +20,10 @@ import {
   type VeTemplateLaunchInfo,
 } from '@/lib/verticalEngineV2/launchHandoff';
 import { reconcileExpiredLaunchReservation } from '@/lib/verticalEngineV2/launchReservation';
+import {
+  buildLaunchPortfolioMetadata,
+  normalizedMailboxIds,
+} from '@/lib/verticalEngineV2/launchTemplate';
 import {
   prepareAuditSnapshot,
   validateStoredAuditSnapshot,
@@ -30,11 +39,18 @@ type TemplateRow = Pick<
 > & { launch_info?: unknown };
 type BaseRow = Pick<
   VeBase,
-  'id' | 'project_id' | 'vertical_id' | 'filename' | 'columns' | 'data' | 'source'
+  | 'id'
+  | 'project_id'
+  | 'vertical_id'
+  | 'hypothesis_id'
+  | 'filename'
+  | 'columns'
+  | 'data'
+  | 'source'
 >;
 
-function jsonError(message: string, status: number) {
-  return NextResponse.json({ error: message }, { status });
+function jsonError(message: string, status: number, code?: string) {
+  return NextResponse.json({ error: message, ...(code ? { code } : {}) }, { status });
 }
 
 async function loadTemplateAndBase(db: SupabaseClient, templateId: string): Promise<
@@ -59,7 +75,7 @@ async function loadTemplateAndBase(db: SupabaseClient, templateId: string): Prom
 
   const { data: baseRow, error: baseError } = await db
     .from('ve_bases')
-    .select('id, project_id, vertical_id, filename, columns, data, source')
+    .select('id, project_id, vertical_id, hypothesis_id, filename, columns, data, source')
     .eq('id', template.base_id)
     .single();
   if (baseError || !baseRow) {
@@ -153,6 +169,203 @@ function campaignIds(raw: unknown): string[] {
         .filter((value) => value.length > 0 && value.length <= 200),
     ),
   ].slice(0, 20);
+}
+
+interface RecoveryPortfolioSnapshot {
+  instantly_account_id: string;
+  mailbox_ids: string[];
+  seasonality: NonNullable<VeTemplateLaunchInfo['seasonality']>;
+  seasonality_input_hash: string;
+  priority_snapshot: NonNullable<VeTemplateLaunchInfo['priority_snapshot']>;
+  latest_activation_at: string | null;
+  seasonality_confidence: 'low' | 'medium' | 'high';
+  potential_pct: number;
+  estimated_run_days: number;
+}
+
+interface RecoveredCampaignProof {
+  campaign_id: string;
+  remote_status: typeof CampaignStatus.Paused | typeof CampaignStatus.Completed;
+  status_observed_at: string;
+}
+
+const RECOVERY_NON_SENDING_STATUSES = new Set<number>([
+  CampaignStatus.Paused,
+  CampaignStatus.Completed,
+]);
+
+async function proveRecoveredCampaignsLive(input: {
+  campaignIds: readonly string[];
+  instantlyAccountId: string;
+  mailboxIds: readonly string[];
+}): Promise<
+  | { ok: true; proofs: RecoveredCampaignProof[] }
+  | { ok: false; response: NextResponse }
+> {
+  const statusObservedAt = new Date().toISOString();
+  const proofs: RecoveredCampaignProof[] = [];
+
+  for (const campaignId of input.campaignIds) {
+    let live: Awaited<ReturnType<typeof getCampaign>>;
+    try {
+      live = await getCampaign(campaignId, {
+        accountId: input.instantlyAccountId,
+        timeoutMs: 10_000,
+        skipRateLimiter: true,
+        retryRateLimits: false,
+      });
+    } catch (error) {
+      await logError(
+        'tools.vertical-engine-v2.segmentation-audit.recovery_live_proof_failed',
+        error,
+        { campaignId, instantlyAccountId: input.instantlyAccountId },
+      );
+      return {
+        ok: false,
+        response: jsonError(
+          'Не удалось подтвердить кампанию в исходном workspace Instantly. Очередь не изменена.',
+          502,
+          'TEMPLATE_LAUNCH_LIVE_PROOF_FAILED',
+        ),
+      };
+    }
+
+    if (!live || live.id !== campaignId || !RECOVERY_NON_SENDING_STATUSES.has(live.status)) {
+      return {
+        ok: false,
+        response: jsonError(
+          'Кампания отсутствует, уже отправляет или имеет неподтверждённый статус. Очередь не изменена.',
+          409,
+          'TEMPLATE_LAUNCH_REMOTE_STATE_UNSAFE',
+        ),
+      };
+    }
+
+    if (!launchMailboxScopesEqual(live.email_list, input.mailboxIds)) {
+      return {
+        ok: false,
+        response: jsonError(
+          'Набор отправителей кампании отличается от неизменяемого снимка запуска.',
+          409,
+          'TEMPLATE_LAUNCH_MAILBOX_SCOPE_MISMATCH',
+        ),
+      };
+    }
+
+    proofs.push({
+      campaign_id: campaignId,
+      remote_status: live.status as RecoveredCampaignProof['remote_status'],
+      status_observed_at: statusObservedAt,
+    });
+  }
+
+  return { ok: true, proofs };
+}
+
+async function buildRecoveryPortfolioSnapshot(input: {
+  portalDb: SupabaseClient;
+  template: TemplateRow;
+  base: BaseRow;
+  presetId: string;
+  knownLaunch: VeTemplateLaunchInfo | null;
+}): Promise<
+  | { ok: true; snapshot: RecoveryPortfolioSnapshot }
+  | { ok: false; response: NextResponse }
+> {
+  let instantlyAccountId = input.knownLaunch?.instantly_account_id?.trim() ?? '';
+  let mailboxIds = normalizedMailboxIds(input.knownLaunch?.mailbox_ids);
+  if (!instantlyAccountId || mailboxIds.length === 0) {
+    if (!supabaseInstantly) {
+      return { ok: false, response: jsonError('Instantly database is not configured', 500) };
+    }
+    const { data: presetRow, error: presetError } = await supabaseInstantly
+      .from('client_campaign_presets')
+      .select('id, instantly_account_id, email_account_ids')
+      .eq('id', input.presetId)
+      .maybeSingle();
+    if (presetError) {
+      return { ok: false, response: jsonError(presetError.message, 500) };
+    }
+    if (!presetRow) {
+      return { ok: false, response: jsonError('Пресет исходного запуска не найден', 409) };
+    }
+    const preset = presetRow as {
+      instantly_account_id?: unknown;
+      email_account_ids?: unknown;
+    };
+    if (!instantlyAccountId) {
+      instantlyAccountId = resolveInstantlyAccountId(
+        typeof preset.instantly_account_id === 'string' ? preset.instantly_account_id : null,
+      );
+    }
+    if (mailboxIds.length === 0) mailboxIds = normalizedMailboxIds(preset.email_account_ids);
+  }
+  if (!instantlyAccountId || mailboxIds.length === 0) {
+    return {
+      ok: false,
+      response: jsonError('Не удалось восстановить почтовые аккаунты исходного запуска', 409),
+    };
+  }
+  const estimatedRunDays = input.knownLaunch?.estimated_run_days;
+  if (
+    typeof estimatedRunDays !== 'number' ||
+    !Number.isFinite(estimatedRunDays) ||
+    estimatedRunDays <= 0
+  ) {
+    return {
+      ok: false,
+      response: jsonError(
+        'Не удалось восстановить длительность исходного запуска. Очередь не изменена.',
+        409,
+        'VE_LAUNCH_TIMING_RUN_DAYS_INVALID',
+      ),
+    };
+  }
+
+  let hypothesisRow: Record<string, unknown> | null = null;
+  if (input.base.hypothesis_id) {
+    const { data, error } = await input.portalDb
+      .from('ve_hypotheses')
+      .select('id, seasonality, potential_pct')
+      .eq('id', input.base.hypothesis_id)
+      .maybeSingle();
+    if (error) return { ok: false, response: jsonError(error.message, 500) };
+    hypothesisRow = data as Record<string, unknown> | null;
+  }
+  const { data: verticalRow, error: verticalError } = await input.portalDb
+    .from('ve_verticals')
+    .select('id, potential_pct')
+    .eq('id', input.template.vertical_id)
+    .maybeSingle();
+  if (verticalError) return { ok: false, response: jsonError(verticalError.message, 500) };
+
+  const fallback = buildLaunchPortfolioMetadata({
+    hypothesisId: input.base.hypothesis_id,
+    seasonality: input.knownLaunch?.seasonality ?? hypothesisRow?.seasonality,
+    hypothesisPotential: input.knownLaunch?.potential_pct ?? hypothesisRow?.potential_pct,
+    verticalPotential: (verticalRow as Record<string, unknown> | null)?.potential_pct,
+    estimatedRunDays,
+  });
+
+  return {
+    ok: true,
+    snapshot: {
+      instantly_account_id: instantlyAccountId,
+      mailbox_ids: mailboxIds,
+      seasonality: fallback.seasonality,
+      seasonality_input_hash:
+        input.knownLaunch?.seasonality_input_hash ?? fallback.seasonalityInputHash,
+      priority_snapshot: input.knownLaunch?.priority_snapshot ?? fallback.prioritySnapshot,
+      latest_activation_at:
+        input.knownLaunch?.latest_activation_at === undefined
+          ? fallback.latestActivationAt
+          : input.knownLaunch.latest_activation_at,
+      seasonality_confidence:
+        input.knownLaunch?.seasonality_confidence ?? fallback.seasonalityConfidence,
+      potential_pct: fallback.potentialPct,
+      estimated_run_days: estimatedRunDays,
+    },
+  };
 }
 
 /** POST — persist a pending audit and enqueue its dedicated worker stage. */
@@ -418,10 +631,35 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       if (resolution === 'campaign_created' && !presetId) {
         return jsonError('Не удалось определить пресет исходного запуска', 409);
       }
+      let portfolioSnapshot: RecoveryPortfolioSnapshot | null = null;
+      if (resolution === 'campaign_created') {
+        const recoveredSnapshot = await buildRecoveryPortfolioSnapshot({
+          portalDb: supabaseAdmin,
+          template,
+          base,
+          presetId,
+          knownLaunch,
+        });
+        if (!recoveredSnapshot.ok) return recoveredSnapshot.response;
+        portfolioSnapshot = recoveredSnapshot.snapshot;
+      }
+
+      let campaignProofs: RecoveredCampaignProof[] = [];
+      if (resolution === 'campaign_created') {
+        const liveProof = await proveRecoveredCampaignsLive({
+          campaignIds: resolvedIds,
+          instantlyAccountId: portfolioSnapshot!.instantly_account_id,
+          mailboxIds: portfolioSnapshot!.mailbox_ids,
+        });
+        if (!liveProof.ok) return liveProof.response;
+        campaignProofs = liveProof.proofs;
+      }
 
       const knownById = new Map(knownCampaigns.map((campaign) => [campaign.campaign_id, campaign]));
+      const proofById = new Map(campaignProofs.map((proof) => [proof.campaign_id, proof]));
       const recoveredCampaigns = resolvedIds.map((campaignId, index) => {
         const known = knownById.get(campaignId);
+        const proof = proofById.get(campaignId);
         return {
           campaign_id: campaignId,
           campaign_name:
@@ -430,6 +668,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
           campaign_url: known?.campaign_url || instantlyCampaignUrl(campaignId),
           segment: known?.segment ?? null,
           leads_count: known?.leads_count ?? 0,
+          ...(proof
+            ? {
+                remote_status: proof.remote_status,
+                status_observed_at: proof.status_observed_at,
+              }
+            : {}),
         };
       });
       const primary = recoveredCampaigns[0];
@@ -446,6 +690,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
               ),
               preset_id: presetId,
               created_at: knownLaunch?.created_at || audit.launch_started_at || resolvedAt,
+              ...portfolioSnapshot!,
               segmentation_audit_id: audit.id,
               ...(audit.input_hash ? { segmentation_audit_input_hash: audit.input_hash } : {}),
               campaigns: recoveredCampaigns,

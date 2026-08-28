@@ -7,9 +7,13 @@
  * скачивание JSON). Поглощает старый TemplateView.
  */
 
-import { useCallback, useMemo, useState, type JSX } from 'react';
+import { useCallback, useEffect, useMemo, useState, type JSX } from 'react';
 import { Copy, Download, Rocket, Sparkles } from 'lucide-react';
-import type { VeTemplate } from '@/lib/verticalEngineV2/types';
+import type {
+  VeRuSeasonalityPrioritySnapshot,
+  VeRuSeasonalityState,
+  VeTemplate,
+} from '@/lib/verticalEngineV2/types';
 import { renderTemplatePreview, type VePreviewToken } from '@/lib/verticalEngineV2/renderPreview';
 import {
   VE_LAUNCH_MAX_LEADS,
@@ -19,6 +23,8 @@ import {
 } from '@/lib/verticalEngineV2/launchHandoff';
 import { VE_API, veEngineCall, veEnginePost, type VeBaseSummary, type VeJobSummary } from '../api';
 import { HE, StatusDot } from '../design';
+import type { LaunchPortfolioResponse } from '../LaunchPortfolioView';
+import { SeasonalityStatus } from '../SeasonalitySummary';
 import { Badge, OperatorText, StatusBox, formatDate } from '../ui';
 import {
   SegmentationAuditPanel,
@@ -371,17 +377,327 @@ function useTemplateLaunch(
 
 type TemplateLaunchState = ReturnType<typeof useTemplateLaunch>;
 
+interface TemplateLaunchPortfolioDto {
+  item_id: string;
+  status: string;
+  mode: 'advisory' | 'enforced';
+  plan_version: number | null;
+  priority_snapshot: VeRuSeasonalityPrioritySnapshot;
+  capacity: {
+    max_active_bundles: number;
+    active_bundles: number;
+  };
+}
+
+const SEASONALITY_STATES = new Set<VeRuSeasonalityState>([
+  'launch_now',
+  'prepare_now',
+  'neutral',
+  'unknown',
+  'wait',
+  'avoid',
+]);
+
+const NON_QUEUED_LIFECYCLE_MESSAGE: Readonly<Record<string, string>> = {
+  prepared: 'Кампании подготовлены, но запуск ещё не поставлен в очередь',
+  activating: 'Активация отправки выполняется',
+  active: 'Отправка уже активна',
+  uncertain: 'Статус активации требует сверки',
+  released: 'Отправка завершена',
+  skipped: 'Запуск пропущен',
+  cancelled: 'Запуск отменён',
+};
+
+function readTemplateLaunchPortfolio(template: VeTemplate | null): TemplateLaunchPortfolioDto | null {
+  const raw = (template as { launch_portfolio?: unknown } | null)?.launch_portfolio;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const value = raw as Record<string, unknown>;
+  const snapshot = value.priority_snapshot;
+  const capacity = value.capacity;
+  if (
+    typeof value.item_id !== 'string' ||
+    !snapshot ||
+    typeof snapshot !== 'object' ||
+    Array.isArray(snapshot) ||
+    !capacity ||
+    typeof capacity !== 'object' ||
+    Array.isArray(capacity)
+  ) {
+    return null;
+  }
+  const priority = snapshot as Record<string, unknown>;
+  const capacityRecord = capacity as Record<string, unknown>;
+  if (
+    typeof priority.state !== 'string' ||
+    !SEASONALITY_STATES.has(priority.state as VeRuSeasonalityState) ||
+    typeof capacityRecord.max_active_bundles !== 'number' ||
+    typeof capacityRecord.active_bundles !== 'number'
+  ) {
+    return null;
+  }
+  return {
+    item_id: value.item_id,
+    status: typeof value.status === 'string' ? value.status : 'prepared',
+    mode: value.mode === 'advisory' ? 'advisory' : 'enforced',
+    plan_version:
+      typeof value.plan_version === 'number' && Number.isInteger(value.plan_version)
+        ? value.plan_version
+        : null,
+    priority_snapshot: priority as unknown as VeRuSeasonalityPrioritySnapshot,
+    capacity: {
+      max_active_bundles: capacityRecord.max_active_bundles,
+      active_bundles: capacityRecord.active_bundles,
+    },
+  };
+}
+
+function PreparedLaunchPortfolio({
+  info,
+  portfolio,
+  warnings,
+}: {
+  info: VeTemplateLaunchInfo;
+  portfolio: TemplateLaunchPortfolioDto;
+  warnings: string[];
+}) {
+  const [reviewed, setReviewed] = useState(false);
+  const [activating, setActivating] = useState(false);
+  const [activated, setActivated] = useState(false);
+  const [activationError, setActivationError] = useState('');
+  const [queueHint, setQueueHint] = useState(false);
+  const campaigns = info.campaigns && info.campaigns.length > 1 ? info.campaigns : null;
+  const seasonalState = portfolio.priority_snapshot.state;
+  const seasonallyEligible =
+    portfolio.mode === 'advisory' || seasonalState === 'launch_now' || seasonalState === 'neutral';
+  const slotAvailable =
+    portfolio.capacity.active_bundles < portfolio.capacity.max_active_bundles;
+  const hasCurrentPlan = portfolio.plan_version !== null;
+  const isQueued = portfolio.status === 'queued';
+  const lifecycleMessage = isQueued
+    ? null
+    : NON_QUEUED_LIFECYCLE_MESSAGE[portfolio.status]
+      ?? 'Текущий статус запуска не допускает активацию';
+  // Capacity in the queue response is a read snapshot. The backend activation
+  // preflight re-reads Instantly and can safely release a Completed holder.
+  const canActivate = isQueued && seasonallyEligible && hasCurrentPlan;
+
+  const activate = async () => {
+    if (!canActivate || !reviewed || activating) return;
+    setActivating(true);
+    setActivationError('');
+    const idempotencyKey =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${portfolio.item_id}-${Date.now()}`;
+    try {
+      const { ok, data } = await veEnginePost<{ error?: string }>(
+        `${VE_API}/launch-portfolio/${portfolio.item_id}/activate`,
+        {
+          confirm_campaign_review: true,
+          idempotency_key: idempotencyKey,
+          plan_version: portfolio.plan_version,
+        },
+      );
+      if (!ok) {
+        setActivationError(data.error || 'Не удалось активировать отправку');
+        return;
+      }
+      setActivated(true);
+    } catch {
+      setActivationError('Не удалось активировать отправку');
+    } finally {
+      setActivating(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <section
+        aria-label="Подготовка PAUSED-кампаний"
+        className={`px-4 py-3 ${HE.successPanel}`}
+      >
+        <p className="flex items-center gap-2 text-sm font-medium text-emerald-800">
+          <StatusDot tone="ok" />
+          PAUSED-кампании подготовлены.{' '}
+          {campaigns && campaigns.length > 1
+            ? `Кампании созданы (на паузе): ${campaigns.length} по сегментам · ${info.leads_count.toLocaleString('ru-RU')} лидов`
+            : `Кампания создана (на паузе): ${info.campaign_name} · ${info.leads_count.toLocaleString('ru-RU')} лидов`}
+        </p>
+        <p className="mt-1 text-xs text-emerald-700">
+          {slotAvailable ? 'Sending slot не занят.' : 'Sending slot уже занят другой отправкой.'}
+          {info.created_at ? <span> · {formatDate(info.created_at)}</span> : null}
+        </p>
+        {info.campaign_url && !campaigns ? (
+          <a
+            href={info.campaign_url}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-1 inline-block text-xs text-emerald-700 underline"
+          >
+            Открыть в Instantly
+          </a>
+        ) : null}
+        {campaigns ? (
+          <ul className="mt-1.5 space-y-0.5 text-xs text-emerald-700">
+            {campaigns.map((campaign) => (
+              <li key={campaign.campaign_id}>
+                <a
+                  href={campaign.campaign_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline"
+                >
+                  {campaign.segment ?? 'Основная (дефолтный текст)'}
+                </a>
+                <span> · {campaign.leads_count.toLocaleString('ru-RU')} лидов</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {warnings.map((warning) => (
+          <p key={warning} className="mt-1 text-xs text-amber-700">
+            {warning}
+          </p>
+        ))}
+      </section>
+
+      <section
+        aria-label="Активация отправки"
+        className="rounded-lg border border-gray-200 bg-gray-50/70 px-4 py-3"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className={HE.eyebrow}>Активация отправки</p>
+            <div className="mt-1.5">
+              <SeasonalityStatus state={seasonalState} />
+            </div>
+          </div>
+          <span className={HE.faint}>
+            Sending slot: {portfolio.capacity.active_bundles} из{' '}
+            {portfolio.capacity.max_active_bundles}
+          </span>
+        </div>
+
+        {lifecycleMessage ? (
+          <p className="mt-3 text-sm text-gray-700">{lifecycleMessage}</p>
+        ) : !seasonallyEligible ? (
+          <p className="mt-3 text-sm text-amber-700">Требуется проверка сезонного решения.</p>
+        ) : !hasCurrentPlan ? (
+          <p className="mt-3 text-sm text-amber-700">
+            План очереди нужно обновить перед активацией.
+          </p>
+        ) : (
+          <>
+            {!slotAvailable ? (
+              <p className="mt-3 text-sm text-amber-700">
+                По последнему снимку sending slot занят. При активации backend обновит live-статус
+                и безопасно освободит holder, если кампания уже Completed.
+              </p>
+            ) : null}
+            <label className="mt-3 flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={reviewed}
+                onChange={(event) => setReviewed(event.target.checked)}
+                className="mt-0.5"
+              />
+              Я проверил тексты, получателей и настройки всех PAUSED-кампаний
+            </label>
+          </>
+        )}
+
+        {isQueued ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void activate()}
+              disabled={!canActivate || !reviewed || activating || activated}
+              className={HE.btnPrimary}
+            >
+              {activated ? 'Отправка активирована' : activating ? 'Активируем…' : 'Активировать отправку'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setQueueHint(true)}
+              className={HE.btnGhost}
+            >
+              Пересмотреть сезонное решение
+            </button>
+          </div>
+        ) : null}
+        {queueHint ? (
+          <p className="mt-2 text-xs text-gray-600" role="status">
+            Откройте «Очередь запусков» и сохраните ручное решение с причиной.
+          </p>
+        ) : null}
+        {activationError ? (
+          <p className="mt-2 text-xs text-red-600" role="alert">
+            {activationError}
+          </p>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
 /** Записанный запуск либо инлайн-аудит и форма выбора пресета. */
 function LaunchSection({
   launch,
   audit,
+  template,
 }: {
   launch: TemplateLaunchState;
   audit: SegmentationAuditController;
+  template: VeTemplate;
 }) {
   const recorded = launch.recorded ?? (audit.phase === 'launch_succeeded' ? audit.launchInfo : null);
+  const embeddedPortfolio = useMemo(() => readTemplateLaunchPortfolio(template), [template]);
+  const [remotePortfolio, setRemotePortfolio] = useState<TemplateLaunchPortfolioDto | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!embeddedPortfolio && !recorded?.priority_snapshot) {
+      void Promise.resolve().then(() => {
+        if (!cancelled) setRemotePortfolio(null);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    const market = embeddedPortfolio?.mode === 'advisory' ? 'us' : 'ru';
+    void Promise.resolve(
+      veEngineCall<LaunchPortfolioResponse>(`${VE_API}/launch-portfolio?market=${market}`),
+    )
+      .then((response) => {
+        if (cancelled || !response?.ok) return;
+        const item = response.data.items?.find((candidate) => candidate.template_id === template.id);
+        if (!item?.priority_snapshot || !item.capacity) return;
+        setRemotePortfolio({
+          item_id: item.id,
+          status: item.status,
+          mode: response.data.mode,
+          plan_version: response.data.plan_version,
+          priority_snapshot: item.priority_snapshot,
+          capacity: {
+            max_active_bundles: item.capacity.max_active_bundles,
+            active_bundles: item.capacity.occupied_bundles,
+          },
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [embeddedPortfolio, recorded?.priority_snapshot, template.id]);
+
   if (recorded) {
     const info = recorded;
+    const portfolio = remotePortfolio ?? embeddedPortfolio;
+    if (portfolio) {
+      return (
+        <PreparedLaunchPortfolio info={info} portfolio={portfolio} warnings={launch.warnings} />
+      );
+    }
     const campaigns = info.campaigns && info.campaigns.length > 1 ? info.campaigns : null;
     return (
       <div className={`px-4 py-3 ${HE.successPanel}`}>
@@ -665,7 +981,7 @@ export function Step5Template(props: {
       ) : null}
 
       {/* Отправка в запуск: запись о запуске либо форма выбора пресета */}
-      <LaunchSection launch={launch} audit={segmentationAudit} />
+      <LaunchSection launch={launch} audit={segmentationAudit} template={template} />
 
       {/* Превью по лидам — финальные письма с подставленными значениями базы */}
       <TemplateLeadPreview template={template} baseId={base?.id ?? template.base_id} />

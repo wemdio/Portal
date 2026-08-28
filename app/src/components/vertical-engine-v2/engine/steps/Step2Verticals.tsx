@@ -26,6 +26,7 @@ import type {
 } from '@/lib/verticalEngineV2/types';
 import { TIER_META } from '../ui';
 import { HE, Spinner, StatusDot } from '../design';
+import { HypothesisSeasonalitySummary } from '../SeasonalitySummary';
 import type {
   VeBaseSummary,
   VeChainDto,
@@ -732,6 +733,9 @@ function HypothesisItem({
           ) : null}
           {hypothesis.description ? (
             <p className="mt-1 text-sm leading-relaxed text-gray-600">{hypothesis.description}</p>
+          ) : null}
+          {hypothesis.seasonality ? (
+            <HypothesisSeasonalitySummary assessment={hypothesis.seasonality} />
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-3">
