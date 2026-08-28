@@ -155,6 +155,110 @@ const COMPLETE_AUDIT = {
   },
 };
 
+const PRIORITY_SNAPSHOT = {
+  version: 1,
+  state: 'neutral',
+  confidence: 'high',
+  evaluated_on: '2026-08-29',
+  planned_activation_date: null,
+  seasonal_deadline_date: null,
+  automatic_activation_eligible: true,
+  priority: 70,
+};
+
+type PortfolioLifecycle =
+  | 'prepared'
+  | 'queued'
+  | 'activating'
+  | 'active'
+  | 'uncertain'
+  | 'released'
+  | 'skipped'
+  | 'cancelled';
+
+function recordedPortfolioTemplate({
+  status = 'queued',
+  activeBundles = 0,
+  prioritySnapshot = PRIORITY_SNAPSHOT,
+}: {
+  status?: PortfolioLifecycle;
+  activeBundles?: number;
+  prioritySnapshot?: typeof PRIORITY_SNAPSHOT;
+} = {}): VeTemplate {
+  return {
+    ...TEMPLATE,
+    launch_info: {
+      campaign_id: 'campaign-1',
+      campaign_name: 'education.csv',
+      campaign_url: 'https://app.instantly.ai/app/campaign/campaign-1',
+      leads_count: 112,
+      preset_id: 'preset-1',
+      created_at: '2026-08-29T08:20:00.000Z',
+      priority_snapshot: prioritySnapshot,
+    },
+    launch_portfolio: {
+      item_id: 'portfolio-item-1',
+      status,
+      mode: 'enforced',
+      plan_version: 4,
+      priority_snapshot: prioritySnapshot,
+      capacity: {
+        max_active_bundles: 1,
+        active_bundles: activeBundles,
+      },
+    },
+  } as unknown as VeTemplate;
+}
+
+function configurePortfolioRead({
+  status = 'queued',
+  globalActiveBundles = 0,
+  occupiedBundles = 0,
+  prioritySnapshot = PRIORITY_SNAPSHOT,
+}: {
+  status?: PortfolioLifecycle;
+  globalActiveBundles?: number;
+  occupiedBundles?: number;
+  prioritySnapshot?: typeof PRIORITY_SNAPSHOT;
+} = {}) {
+  mockEngineCall.mockImplementation(async (url: string) => {
+    if (url === '/api/tools/vertical-engine-v2/launch-portfolio?market=ru') {
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          as_of: '2026-08-29T08:30:00.000Z',
+          plan_version: 4,
+          mode: 'enforced',
+          capacity: {
+            max_active_bundles: 1,
+            active_bundles: globalActiveBundles,
+            next_estimated_release_at: null,
+          },
+          items: [
+            {
+              id: 'portfolio-item-1',
+              project_id: 'project-1',
+              template_id: TEMPLATE_ID,
+              status,
+              rank: 1,
+              priority_snapshot: prioritySnapshot,
+              seasonality: null,
+              campaigns: [],
+              capacity: {
+                max_active_bundles: 1,
+                occupied_bundles: occupiedBundles,
+                slot_available: occupiedBundles < 1,
+              },
+            },
+          ],
+        },
+      };
+    }
+    throw new Error(`Unexpected GET ${url}`);
+  });
+}
+
 function renderStep(template: VeTemplate = TEMPLATE) {
   return render(
     <Step5Template
@@ -615,6 +719,101 @@ describe('<Step5Template /> — предзапускный аудит сегме
     ).toBeInTheDocument();
     expect(
       screen.queryByRole('button', { name: /Создать .*кампан.*на паузе/i }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe('<Step5Template /> — активация подготовленного launch portfolio', () => {
+  it('использует mailbox-scoped capacity пункта, а не глобальную занятость портфеля', async () => {
+    const remotePriority = PRIORITY_SNAPSHOT;
+    const embeddedPriority = {
+      ...PRIORITY_SNAPSHOT,
+      state: 'avoid' as const,
+      automatic_activation_eligible: false,
+      priority: 0,
+    };
+    configurePortfolioRead({
+      status: 'queued',
+      globalActiveBundles: 1,
+      occupiedBundles: 0,
+      prioritySnapshot: remotePriority,
+    });
+
+    renderStep(recordedPortfolioTemplate({
+      status: 'prepared',
+      activeBundles: 1,
+      prioritySnapshot: embeddedPriority,
+    }));
+
+    const activation = screen.getByRole('region', { name: 'Активация отправки' });
+    expect(await within(activation).findByText('Круглый год')).toBeInTheDocument();
+    expect(within(activation).getByText(/Sending slot: 0 из 1/i)).toBeInTheDocument();
+    expect(
+      within(activation).getByRole('checkbox', {
+        name: /проверил тексты, получателей и настройки/i,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it('разрешает queued preflight при занятом снимке capacity для backend live-reconcile', async () => {
+    configurePortfolioRead({
+      status: 'queued',
+      globalActiveBundles: 1,
+      occupiedBundles: 1,
+    });
+    mockEnginePost.mockResolvedValue({
+      ok: false,
+      status: 409,
+      data: { error: 'Live holder всё ещё активен' },
+    });
+
+    const user = userEvent.setup();
+    renderStep(recordedPortfolioTemplate({ status: 'queued', activeBundles: 1 }));
+
+    const activation = screen.getByRole('region', { name: 'Активация отправки' });
+    expect(
+      await within(activation).findByText(/live-статус.*освободит.*Completed/i),
+    ).toBeInTheDocument();
+    const review = within(activation).getByRole('checkbox', {
+      name: /проверил тексты, получателей и настройки/i,
+    });
+    const activate = within(activation).getByRole('button', {
+      name: /Активировать отправку/i,
+    });
+    expect(activate).toBeDisabled();
+
+    await user.click(review);
+    expect(activate).toBeEnabled();
+    await user.click(activate);
+
+    await waitFor(() => {
+      expect(mockEnginePost).toHaveBeenCalledWith(
+        '/api/tools/vertical-engine-v2/launch-portfolio/portfolio-item-1/activate',
+        expect.objectContaining({
+          confirm_campaign_review: true,
+          plan_version: 4,
+        }),
+      );
+    });
+  });
+
+  it.each([
+    ['prepared', 'Кампании подготовлены, но запуск ещё не поставлен в очередь'],
+    ['activating', 'Активация отправки выполняется'],
+    ['active', 'Отправка уже активна'],
+    ['uncertain', 'Статус активации требует сверки'],
+    ['released', 'Отправка завершена'],
+    ['skipped', 'Запуск пропущен'],
+    ['cancelled', 'Запуск отменён'],
+  ] as const)('не показывает форму активации для lifecycle %s', async (status, message) => {
+    configurePortfolioRead({ status });
+    renderStep(recordedPortfolioTemplate({ status: 'queued' }));
+
+    const activation = screen.getByRole('region', { name: 'Активация отправки' });
+    expect(await within(activation).findByText(message)).toBeInTheDocument();
+    expect(within(activation).queryByRole('checkbox')).not.toBeInTheDocument();
+    expect(
+      within(activation).queryByRole('button', { name: /Активировать отправку/i }),
     ).not.toBeInTheDocument();
   });
 });

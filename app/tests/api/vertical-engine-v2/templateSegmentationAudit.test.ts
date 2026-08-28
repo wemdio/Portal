@@ -14,6 +14,7 @@ import {
   computeSegmentationAuditHash,
   prepareSegmentationAudience,
 } from '@/lib/verticalEngineV2/segmentationAudit';
+import { CampaignStatus } from '@/lib/instantly/types';
 import { VE_LAUNCH_MAX_LEADS } from '@/lib/verticalEngineV2/launchHandoff';
 
 const USER_ID = '00000000-0000-4000-8000-000000000281';
@@ -22,12 +23,24 @@ const TEMPLATE_ID = 'template-audit-1';
 const BASE_ID = 'base-audit-1';
 
 let mockDb: MockSupabaseClient = createMockSupabase();
+let mockInstantlyDb: MockSupabaseClient = createMockSupabase();
 let mockAuthorized = true;
+const mockGetCampaign = jest.fn();
 
 jest.mock('@/lib/supabaseAdmin', () => ({
   get supabaseAdmin() {
     return mockDb;
   },
+}));
+
+jest.mock('@/lib/supabaseInstantly', () => ({
+  get supabaseInstantly() {
+    return mockInstantlyDb;
+  },
+}));
+
+jest.mock('@/lib/instantly/client', () => ({
+  getCampaign: (...args: unknown[]) => mockGetCampaign(...args),
 }));
 
 jest.mock('@/lib/toolsApiAuth', () => ({
@@ -81,6 +94,24 @@ function seed(options: {
   templateLaunchInfo?: Record<string, unknown> | null;
   enforceQueryWindows?: boolean;
 } = {}) {
+  mockInstantlyDb = createMockSupabase({
+    tables: {
+      client_campaign_presets: [
+        {
+          id: 'preset-1',
+          instantly_account_id: 'workspace-recovery',
+          email_account_ids: [
+            'sender-b@example.test',
+            'sender-a@example.test',
+            'sender-a@example.test',
+          ],
+          daily_limit: 100,
+          daily_max_leads: 100,
+          schedule_days: [1, 2, 3, 4, 5],
+        },
+      ],
+    },
+  });
   mockDb = createMockSupabase({
     enforceQueryWindows: options.enforceQueryWindows,
     rpcHandlers: {
@@ -164,12 +195,64 @@ function seed(options: {
           );
         if (!audit) return { data: { resolved: false } };
         if (params.p_resolution === 'campaign_created') {
+          const launchInfo = params.p_launch_info as Record<string, unknown> | null;
+          if (
+            !launchInfo ||
+            typeof launchInfo.instantly_account_id !== 'string' ||
+            !Array.isArray(launchInfo.mailbox_ids) ||
+            launchInfo.mailbox_ids.length === 0 ||
+            !launchInfo.seasonality ||
+            !launchInfo.priority_snapshot
+          ) {
+            return {
+              data: null,
+              error: { message: 'recovered launch requires immutable portfolio snapshot' },
+            };
+          }
           const updatedTemplate = await db
             .from('ve_templates')
             .update({ launch_info: params.p_launch_info })
             .eq('id', params.p_template_id);
           const templateError = (updatedTemplate as { error?: { message: string } | null }).error;
           if (templateError) return { data: null, error: templateError };
+
+          const campaigns = Array.isArray(launchInfo.campaigns)
+            ? (launchInfo.campaigns as Array<Record<string, unknown>>)
+            : [];
+          const recoveredAllCompleted = campaigns.length > 0 && campaigns.every(
+            (campaign) => campaign.remote_status === CampaignStatus.Completed,
+          );
+          const queueInsert = await db
+            .from('ve_launch_queue_items')
+            .insert({
+              portfolio_id: 'ru',
+              project_id: PROJECT_ID,
+              vertical_id: 'vertical-audit-1',
+              hypothesis_id: 'hypothesis-audit-1',
+              base_id: BASE_ID,
+              template_id: TEMPLATE_ID,
+              segmentation_audit_id: audit.id,
+              prepare_reservation_id: params.p_launch_reservation_id,
+              preset_id: launchInfo.preset_id,
+              instantly_account_id: launchInfo.instantly_account_id,
+              mailbox_ids: launchInfo.mailbox_ids,
+              estimated_run_days: launchInfo.estimated_run_days,
+              status: recoveredAllCompleted ? 'released' : 'queued',
+              priority_snapshot: launchInfo.priority_snapshot,
+            })
+            .select('*')
+            .single();
+          for (const campaign of campaigns) {
+            await db.from('ve_launch_queue_campaigns').insert({
+              item_id: (queueInsert.data as Record<string, unknown>).id,
+              instantly_account_id: launchInfo.instantly_account_id,
+              campaign_id: campaign.campaign_id,
+              segment: campaign.segment ?? null,
+              leads_count: campaign.leads_count ?? 0,
+              remote_status: campaign.remote_status ?? null,
+              status_observed_at: campaign.status_observed_at ?? null,
+            });
+          }
         }
         const terminalStatus = params.p_resolution === 'campaign_created' ? 'succeeded' : 'failed';
         const updatedAudit = await db
@@ -223,6 +306,7 @@ function seed(options: {
           id: BASE_ID,
           project_id: PROJECT_ID,
           vertical_id: 'vertical-audit-1',
+          hypothesis_id: 'hypothesis-audit-1',
           filename: 'schools.csv',
           source: 'upload',
           columns: ['Email', 'Компания', 'Отрасль'],
@@ -237,6 +321,29 @@ function seed(options: {
       ],
       ve_segmentation_audits: options.audits ?? [],
       ve_jobs: options.jobs ?? [],
+      ve_hypotheses: [
+        {
+          id: 'hypothesis-audit-1',
+          seasonality: {
+            version: 1,
+            classification: 'neutral',
+            confidence: 'high',
+            rationale: 'Спрос равномерный в течение года.',
+            windows: [],
+            evidence: [
+              {
+                claim: 'Спрос распределён равномерно.',
+                source_url: 'https://example.test/seasonality',
+                quote: 'Спрос сохраняется на сопоставимом уровне весь год.',
+              },
+            ],
+          },
+          potential_pct: 72,
+        },
+      ],
+      ve_verticals: [{ id: 'vertical-audit-1', potential_pct: 61 }],
+      ve_launch_queue_items: [],
+      ve_launch_queue_campaigns: [],
       he_jobs: [{ id: 'legacy-job', status: 'done' }],
     },
   });
@@ -326,9 +433,38 @@ function readyAuditRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function recoveryLaunchInfo(
+  campaignId: string,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    campaign_id: campaignId,
+    campaign_name: `Recovery ${campaignId}`,
+    campaign_url: `https://app.instantly.ai/app/campaign/${campaignId}`,
+    leads_count: 1,
+    preset_id: 'preset-1',
+    created_at: '2026-08-28T11:06:00.000Z',
+    instantly_account_id: 'workspace-recovery',
+    mailbox_ids: ['sender-a@example.test', 'sender-b@example.test'],
+    estimated_run_days: 14,
+    segmentation_audit_id: 'audit-ready',
+    reconciliation_required: true,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockAuthorized = true;
+  mockGetCampaign.mockImplementation(async (campaignId: string) => ({
+    id: campaignId,
+    status: CampaignStatus.Paused,
+    email_list: [
+      ' Sender-B@example.test ',
+      'sender-a@example.test',
+      'sender-a@example.test',
+    ],
+  }));
   seed();
 });
 
@@ -570,6 +706,7 @@ describe('PATCH /api/tools/vertical-engine-v2/templates/[id]/segmentation-audit'
 
   it('records manually verified campaign ids before releasing an uncertain reservation', async () => {
     seed({
+      templateLaunchInfo: recoveryLaunchInfo('campaign-primary'),
       audits: [
         readyAuditRow({
           launch_status: 'uncertain',
@@ -600,6 +737,19 @@ describe('PATCH /api/tools/vertical-engine-v2/templates/[id]/segmentation-audit'
       expect.objectContaining({
         campaign_id: 'campaign-primary',
         preset_id: 'preset-1',
+        instantly_account_id: 'workspace-recovery',
+        mailbox_ids: ['sender-a@example.test', 'sender-b@example.test'],
+        seasonality: expect.objectContaining({
+          version: 1,
+          classification: 'neutral',
+          confidence: 'high',
+        }),
+        priority_snapshot: expect.objectContaining({
+          version: 1,
+          state: 'neutral',
+          automatic_activation_eligible: true,
+        }),
+        estimated_run_days: 14,
         segmentation_audit_id: 'audit-ready',
         campaigns: expect.arrayContaining([
           expect.objectContaining({ campaign_id: 'campaign-primary' }),
@@ -611,6 +761,244 @@ describe('PATCH /api/tools/vertical-engine-v2/templates/[id]/segmentation-audit'
     expect(mockDb.getRows('ve_segmentation_audits')[0]).toEqual(
       expect.objectContaining({ launch_status: 'succeeded' }),
     );
+    expect(mockDb.getRows('ve_launch_queue_items')).toEqual([
+      expect.objectContaining({
+        prepare_reservation_id: 'reservation-2',
+        instantly_account_id: 'workspace-recovery',
+        mailbox_ids: ['sender-a@example.test', 'sender-b@example.test'],
+        estimated_run_days: 14,
+        status: 'queued',
+      }),
+    ]);
+    expect(mockDb.getRows('ve_launch_queue_campaigns')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ campaign_id: 'campaign-primary' }),
+        expect.objectContaining({ campaign_id: 'campaign-segment' }),
+      ]),
+    );
+    expect(mockGetCampaign).toHaveBeenCalledTimes(2);
+    expect(mockGetCampaign).toHaveBeenNthCalledWith(
+      1,
+      'campaign-primary',
+      expect.objectContaining({ accountId: 'workspace-recovery' }),
+    );
+    expect(mockGetCampaign).toHaveBeenNthCalledWith(
+      2,
+      'campaign-segment',
+      expect.objectContaining({ accountId: 'workspace-recovery' }),
+    );
+    expect(mockDb.getRows('ve_launch_queue_campaigns')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          campaign_id: 'campaign-primary',
+          remote_status: CampaignStatus.Paused,
+          status_observed_at: expect.any(String),
+        }),
+        expect.objectContaining({
+          campaign_id: 'campaign-segment',
+          remote_status: CampaignStatus.Paused,
+          status_observed_at: expect.any(String),
+        }),
+      ]),
+    );
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['zero', 0],
+    ['negative', -3],
+  ])('fails closed before recovery finalize when estimated run days are %s', async (_label, value) => {
+    seed({
+      templateLaunchInfo: recoveryLaunchInfo('campaign-invalid-duration', {
+        estimated_run_days: value,
+      }),
+      audits: [
+        readyAuditRow({
+          launch_status: 'uncertain',
+          launch_reservation_id: 'reservation-invalid-duration',
+          launch_preset_id: 'preset-1',
+        }),
+      ],
+    });
+
+    const response = await PATCH(
+      request('PATCH', {
+        audit_id: 'audit-ready',
+        launch_reservation_id: 'reservation-invalid-duration',
+        resolution: 'campaign_created',
+        campaign_ids: ['campaign-invalid-duration'],
+        confirm: true,
+      }),
+      params,
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual(expect.objectContaining({
+      code: 'VE_LAUNCH_TIMING_RUN_DAYS_INVALID',
+    }));
+    expect(mockGetCampaign).not.toHaveBeenCalled();
+    expect(mockDb.rpcCalls).toEqual([]);
+    expect(mockDb.getRows('ve_launch_queue_items')).toEqual([]);
+  });
+
+  it('accepts a completed recovered campaign as proven non-sending state', async () => {
+    seed({
+      templateLaunchInfo: recoveryLaunchInfo('campaign-completed'),
+      audits: [
+        readyAuditRow({
+          launch_status: 'uncertain',
+          launch_reservation_id: 'reservation-completed',
+          launch_preset_id: 'preset-1',
+        }),
+      ],
+    });
+    mockGetCampaign.mockResolvedValue({
+      id: 'campaign-completed',
+      status: CampaignStatus.Completed,
+      email_list: ['sender-a@example.test', 'sender-b@example.test'],
+    });
+
+    const response = await PATCH(
+      request('PATCH', {
+        audit_id: 'audit-ready',
+        launch_reservation_id: 'reservation-completed',
+        resolution: 'campaign_created',
+        campaign_ids: ['campaign-completed'],
+        confirm: true,
+      }),
+      params,
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockDb.getRows('ve_launch_queue_campaigns')).toEqual([
+      expect.objectContaining({
+        campaign_id: 'campaign-completed',
+        remote_status: CampaignStatus.Completed,
+        status_observed_at: expect.any(String),
+      }),
+    ]);
+    expect(mockDb.getRows('ve_launch_queue_items')).toEqual([
+      expect.objectContaining({ status: 'released' }),
+    ]);
+  });
+
+  it.each([
+    ['active', CampaignStatus.Active],
+    ['running subsequences', CampaignStatus.RunningSubsequences],
+    ['draft', CampaignStatus.Draft],
+    ['unknown', 999],
+  ])('fails closed before finalize when recovered campaign status is %s', async (_label, status) => {
+    seed({
+      templateLaunchInfo: recoveryLaunchInfo('campaign-unsafe'),
+      audits: [
+        readyAuditRow({
+          launch_status: 'uncertain',
+          launch_reservation_id: 'reservation-unsafe-status',
+          launch_preset_id: 'preset-1',
+        }),
+      ],
+    });
+    mockGetCampaign.mockResolvedValue({
+      id: 'campaign-unsafe',
+      status,
+      email_list: ['sender-a@example.test', 'sender-b@example.test'],
+    });
+
+    const response = await PATCH(
+      request('PATCH', {
+        audit_id: 'audit-ready',
+        launch_reservation_id: 'reservation-unsafe-status',
+        resolution: 'campaign_created',
+        campaign_ids: ['campaign-unsafe'],
+        confirm: true,
+      }),
+      params,
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual(
+      expect.objectContaining({ code: 'TEMPLATE_LAUNCH_REMOTE_STATE_UNSAFE' }),
+    );
+    expect(mockDb.rpcCalls).toEqual([]);
+    expect(mockDb.getRows('ve_launch_queue_items')).toEqual([]);
+    expect(mockDb.getRows('ve_segmentation_audits')[0]).toEqual(
+      expect.objectContaining({ launch_status: 'uncertain' }),
+    );
+  });
+
+  it('fails closed before finalize when live mailbox scope differs from the immutable snapshot', async () => {
+    seed({
+      templateLaunchInfo: recoveryLaunchInfo('campaign-mailbox-mismatch'),
+      audits: [
+        readyAuditRow({
+          launch_status: 'uncertain',
+          launch_reservation_id: 'reservation-mailbox-mismatch',
+          launch_preset_id: 'preset-1',
+        }),
+      ],
+    });
+    mockGetCampaign.mockResolvedValue({
+      id: 'campaign-mailbox-mismatch',
+      status: CampaignStatus.Paused,
+      email_list: ['different-sender@example.test'],
+    });
+
+    const response = await PATCH(
+      request('PATCH', {
+        audit_id: 'audit-ready',
+        launch_reservation_id: 'reservation-mailbox-mismatch',
+        resolution: 'campaign_created',
+        campaign_ids: ['campaign-mailbox-mismatch'],
+        confirm: true,
+      }),
+      params,
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual(
+      expect.objectContaining({ code: 'TEMPLATE_LAUNCH_MAILBOX_SCOPE_MISMATCH' }),
+    );
+    expect(mockDb.rpcCalls).toEqual([]);
+    expect(mockDb.getRows('ve_launch_queue_items')).toEqual([]);
+  });
+
+  it('fails closed before finalize when any supplied campaign is missing from live Instantly', async () => {
+    seed({
+      templateLaunchInfo: recoveryLaunchInfo('campaign-found'),
+      audits: [
+        readyAuditRow({
+          launch_status: 'uncertain',
+          launch_reservation_id: 'reservation-missing-campaign',
+          launch_preset_id: 'preset-1',
+        }),
+      ],
+    });
+    mockGetCampaign
+      .mockResolvedValueOnce({
+        id: 'campaign-found',
+        status: CampaignStatus.Paused,
+        email_list: ['sender-a@example.test', 'sender-b@example.test'],
+      })
+      .mockRejectedValueOnce(new Error('404 campaign not found'));
+
+    const response = await PATCH(
+      request('PATCH', {
+        audit_id: 'audit-ready',
+        launch_reservation_id: 'reservation-missing-campaign',
+        resolution: 'campaign_created',
+        campaign_ids: ['campaign-found', 'campaign-missing'],
+        confirm: true,
+      }),
+      params,
+    );
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual(
+      expect.objectContaining({ code: 'TEMPLATE_LAUNCH_LIVE_PROOF_FAILED' }),
+    );
+    expect(mockGetCampaign).toHaveBeenCalledTimes(2);
+    expect(mockDb.rpcCalls).toEqual([]);
+    expect(mockDb.getRows('ve_launch_queue_items')).toEqual([]);
   });
 
   it('rejects a stale resolver that does not echo the current launch reservation', async () => {
@@ -688,6 +1076,7 @@ describe('PATCH /api/tools/vertical-engine-v2/templates/[id]/segmentation-audit'
       leads_count: 1,
       preset_id: 'preset-1',
       created_at: '2026-08-28T11:06:00.000Z',
+      estimated_run_days: 14,
       segmentation_audit_id: 'audit-ready',
       reconciliation_required: true,
       campaigns: [

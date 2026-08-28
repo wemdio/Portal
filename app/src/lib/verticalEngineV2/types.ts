@@ -32,6 +32,78 @@ export type VeHypothesisStatus = 'proposed' | 'accepted' | 'rejected';
 /** 1 — очевидные ЦА, 2 — смежные сегменты, 3 — неочевидные рынки. */
 export type VeHypothesisTier = 1 | 2 | 3;
 
+/** Проверенная классификация сезонности для российского рынка. */
+export type VeRuSeasonalityClassification = 'seasonal' | 'neutral' | 'unknown';
+export type VeRuSeasonalityConfidence = 'low' | 'medium' | 'high';
+
+/**
+ * Состояние сезонного окна на конкретную дату по Москве:
+ * - launch_now — outreach уже должен идти;
+ * - prepare_now — короткий буфер подготовки перед началом outreach;
+ * - wait / avoid — автоматическая активация запрещена;
+ * - neutral — проверенно круглогодичный спрос;
+ * - unknown — доказательств недостаточно, fail closed.
+ */
+export type VeRuSeasonalityState =
+  | 'launch_now'
+  | 'prepare_now'
+  | 'wait'
+  | 'avoid'
+  | 'unknown'
+  | 'neutral';
+
+export type VeRuSeasonalityWindow =
+  | {
+      kind: 'peak';
+      label: string;
+      /** Годовой календарный день в формате MM-DD, границы включительны. */
+      start_mm_dd: string;
+      end_mm_dd: string;
+      /** За сколько дней ДО peak start уже должен начаться outreach. */
+      lead_days: number;
+      /** Доказательства, которые подтверждают именно это окно. */
+      evidence: VeEvidenceItem[];
+    }
+  | {
+      kind: 'avoid';
+      label: string;
+      /** Проверенное негативное окно; может пересекать границу года. */
+      start_mm_dd: string;
+      end_mm_dd: string;
+      /** Доказательства, которые подтверждают именно это окно. */
+      evidence: VeEvidenceItem[];
+    };
+
+/** Persisted evidence-stage assessment in ve_hypotheses.seasonality. */
+export interface VeRuSeasonality {
+  version: 1;
+  classification: VeRuSeasonalityClassification;
+  /** Модельная уверенность сохраняется только после code-level evidence verification. */
+  confidence: VeRuSeasonalityConfidence;
+  rationale: string;
+  windows: VeRuSeasonalityWindow[];
+  /** Каноническое объединение доказательств сохранённых окон (либо neutral). */
+  evidence: VeEvidenceItem[];
+}
+
+export interface VeRuSeasonalityEvaluation {
+  state: VeRuSeasonalityState;
+  confidence: VeRuSeasonalityConfidence;
+  evaluated_on: string;
+  /** Начало outreach (peak start - lead_days), не начало самого пика. */
+  planned_activation_date: string | null;
+  /** 00:00 МСК дня после inclusive peak end; exclusive completion deadline. */
+  seasonal_deadline_date: string | null;
+  /** Ручной override живёт в portfolio-слое; здесь только безопасный auto gate. */
+  automatic_activation_eligible: boolean;
+}
+
+export interface VeRuSeasonalityPrioritySnapshot extends VeRuSeasonalityEvaluation {
+  version: 1;
+  /** Только display order; eligibility задаётся отдельным полем выше. */
+  priority: number;
+}
+
 export type VeBaseStatus = 'uploaded' | 'collecting' | 'analyzing' | 'analyzed' | 'failed';
 
 export type VeBaseSource = 'upload' | 'auto';
@@ -99,6 +171,8 @@ export interface VeHypothesis {
   /** «Почему это рынок для клиента» (ЛПР → цель → боль → оффер). NULL/отсутствует у легаси-строк. */
   fit_rationale?: string | null;
   evidence: VeEvidenceItem[];
+  /** Проверенная RU-сезонность; NULL/отсутствует у legacy и US-гипотез. */
+  seasonality?: VeRuSeasonality | null;
   potential_pct: number;
   status: VeHypothesisStatus;
   created_at: string;

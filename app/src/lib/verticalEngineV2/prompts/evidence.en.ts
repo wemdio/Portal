@@ -77,7 +77,8 @@ Return JSON ONLY:
   "reason": string,
   "fit_rationale": string,
   "evidence": [ { "claim": string, "source_url": string, "quote": string } ],
-  "potential_pct": number
+  "potential_pct": number,
+  "seasonality": null
 }`;
 
   return [
