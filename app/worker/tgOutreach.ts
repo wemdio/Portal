@@ -649,10 +649,18 @@ async function main() {
   const heartbeatTimer = setInterval(() => writeHeartbeat(), 30_000);
   if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
 
+  /**
+   * Кампании, признанные безнадёжно зависшими.
+   *
+   * Живут до конца жизни процесса и до тех пор, пока цикл кампании не уйдёт из
+   * реестра сам (тогда карантин снимается в staleKillRequests). Набор мал по
+   * определению — больше, чем кампаний в работе, в нём быть не может.
+   */
+  const campaignQuarantined = new Set<string>();
+
   // Watchdog: if any running campaign hasn't reported progress for longer
   // than WATCHDOG_THRESHOLD_MS, the loop is almost certainly frozen
-  // (gramJS recvLoop stuck, infinite proxy reconnect, etc). Force-exit so
-  // docker restarts us and auto-resume rebuilds clients with fresh sockets.
+  // (gramJS recvLoop stuck, infinite proxy reconnect, etc).
   const watchdogTimer = setInterval(() => {
     if (shouldStop()) return;
     const now = Date.now();
@@ -661,20 +669,51 @@ async function main() {
       lastProgressAt: campaignLastProgressAt,
       killRequestedAt: campaignKillRequestedAt,
       running: new Set(runningCampaigns.keys()),
+      quarantined: campaignQuarantined,
       stallMs: WATCHDOG_THRESHOLD_MS,
       graceMs: WATCHDOG_KILL_GRACE_MS,
     };
 
     for (const campaignId of staleKillRequests(snapshot)) {
       campaignKillRequestedAt.delete(campaignId);
+      // Цикл размотался — кампания снова обычная, auto-resume поднимет её сам.
+      if (campaignQuarantined.delete(campaignId)) {
+        log('info', `Watchdog: campaign ${campaignId} finally unwound — карантин снят, кампания вернётся авто-резюмом.`);
+      }
     }
 
     for (const { campaignId, action, stallMin } of planWatchdogActions(snapshot)) {
+      if (action === 'quarantine') {
+        /**
+         * Кампанию не разбудить — изолируем и живём дальше.
+         *
+         * До 28.08.2026 здесь стоял process.exit(1), и одна зависшая кампания
+         * уносила все остальные. В тот день TG_VBI зависала восемь раз, и
+         * ATOL-1 из-за этого не успевал пройти круг: при паузе до десяти минут
+         * между аккаунтами процесс не доживал до второго.
+         *
+         * Отправлять она ничего не будет: шаг `kill` уже выставил ей stop(),
+         * и когда зависший await разомкнётся, цикл выйдет на первой проверке.
+         * Двойника тоже не появится — её start-джоба осталась в `running`, а
+         * auto-resume ставит новую только при отсутствии активной.
+         *
+         * Цена — один занятый слот из двенадцати до перезапуска воркера.
+         */
+        campaignQuarantined.add(campaignId);
+        log(
+          'error',
+          `Watchdog: кампания ${campaignId} молчит ${stallMin} мин и пережила разрыв сокетов ` +
+            `(${Math.round(WATCHDOG_KILL_GRACE_MS / 60_000)} мин). Изолирую её: остальные кампании продолжают работать. ` +
+            'Кампания не отправит ничего и не поднимется сама — нужен перезапуск воркера в удобное время.',
+        );
+        continue;
+      }
+
       if (action === 'exit') {
         log(
           'error',
-          `Watchdog: campaign ${campaignId} no progress for ${stallMin} min and survived force-disconnect ` +
-            `for ${Math.round(WATCHDOG_KILL_GRACE_MS / 60_000)} min. Exiting for restart.`,
+          `Watchdog: все живые кампании зависли (последняя — ${campaignId}, молчит ${stallMin} мин). ` +
+            'Работать некому, роняю процесс для перезапуска.',
         );
         process.exit(1);
       }

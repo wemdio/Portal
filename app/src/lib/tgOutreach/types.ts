@@ -240,6 +240,12 @@ export interface OutreachAccount {
    */
   check_requested_at?: string | null;
   check_requested_by_name?: string | null;
+  /**
+   * Когда боевой круг в последний раз брал аккаунт в работу (миграция
+   * 20260828_0001). Задаёт порядок обхода: первым идёт тот, до кого дольше
+   * всех не доходили. NULL — не брали ни разу.
+   */
+  last_cycle_at?: string | null;
   other_sessions?: Array<{
     device: string;
     platform: string;

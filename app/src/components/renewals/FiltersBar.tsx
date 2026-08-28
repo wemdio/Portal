@@ -6,13 +6,19 @@ export type FiltersState = {
   from: string;
   to: string;
   groupBy: GroupBy;
-  /** Строки, а не числа — поле ввода должно допускать промежуточное
-   *  состояние (пусто, «-», незаконченный ввод) без немедленного NaN. Пустая
-   *  строка означает «граница не задана», разбор в число — только на выходе
-   *  из компонента (см. RenewalsView). */
-  kpiMin: string;
-  kpiMax: string;
 };
+
+/**
+ * Числового фильтра по KPI здесь больше нет — и это не упрощение ради
+ * упрощения. После переезда дашборда на воронку AMO (см. amoRenewals.ts) в
+ * колонку KPI приходит поле карточки «KPI проекта», а оно свободный текст:
+ * «20 лидов», «без KPI», «-». Диапазон «от/до» по такому значению не
+ * отсекает часть строк, а обнуляет дашборд целиком: непарсящийся KPI
+ * считается не подпадающим под фильтр. Оставить ввод, который умеет только
+ * стереть все цифры с экрана, — ловушка; серверные параметры `kpiMin`/
+ * `kpiMax` при этом живы (см. params.ts) на случай, если в AMO заведут
+ * числовое поле.
+ */
 
 // Дашборд живёт в МСК — тот же приём, что в first-sales/FiltersBar.tsx:
 // `toISOString().slice(0, 10)` режет по UTC и вечером в Москве может тихо
@@ -53,8 +59,6 @@ export function getDefaultFilters(): FiltersState {
     from: ALL_TIME_FROM,
     to: toDateInputValue(mskNow()),
     groupBy: 'month',
-    kpiMin: '',
-    kpiMax: '',
   };
 }
 
@@ -120,7 +124,7 @@ export default function FiltersBar({
     }`;
 
   return (
-    <div className="glass-panel space-y-2 px-3 py-2.5">
+    <div className="glass-panel px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-2">
         {PERIOD_PRESETS.map((preset) => (
           <button
@@ -170,36 +174,6 @@ export default function FiltersBar({
             </button>
           ))}
         </div>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-xs text-zinc-400">KPI-факт:</span>
-        <input
-          type="number"
-          inputMode="decimal"
-          placeholder="от"
-          value={value.kpiMin}
-          onChange={(e) => onChange({ ...value, kpiMin: e.target.value })}
-          className="w-20 rounded-lg border border-zinc-200 px-2 py-1 text-xs text-zinc-700"
-        />
-        <span className="text-xs text-zinc-400">—</span>
-        <input
-          type="number"
-          inputMode="decimal"
-          placeholder="до"
-          value={value.kpiMax}
-          onChange={(e) => onChange({ ...value, kpiMax: e.target.value })}
-          className="w-20 rounded-lg border border-zinc-200 px-2 py-1 text-xs text-zinc-700"
-        />
-        {(value.kpiMin !== '' || value.kpiMax !== '') && (
-          <button
-            type="button"
-            onClick={() => onChange({ ...value, kpiMin: '', kpiMax: '' })}
-            className="text-xs text-zinc-400 hover:text-zinc-600 hover:underline"
-          >
-            Сбросить
-          </button>
-        )}
       </div>
     </div>
   );

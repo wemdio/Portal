@@ -14,6 +14,31 @@ import { SortableTh } from '@/components/ui/SortableTh';
  */
 
 const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('ru-RU') : '—');
+const fmtMoney = (n: number) => `${Math.round(n).toLocaleString('ru-RU')} ₽`;
+
+/**
+ * Чем сделка попала в выбранный период. Ручка отдаёт только те сделки, у
+ * которых хоть одно из этих полей заполнено, — но даты в строке остаются
+ * собственными датами сделки, и без этой колонки сделка 2024 года со встречей
+ * в августе выглядела бы промахом фильтра.
+ */
+export type InPeriod = {
+  lead: boolean;
+  qualified: boolean;
+  meetings: number;
+  contract: boolean;
+  money: number;
+};
+
+function periodBadges(p: InPeriod): string[] {
+  const out: string[] = [];
+  if (p.lead) out.push('лид');
+  if (p.qualified) out.push('квал');
+  if (p.meetings > 0) out.push(p.meetings > 1 ? `встречи · ${p.meetings}` : 'встреча');
+  if (p.contract) out.push('договор');
+  if (p.money > 0) out.push(fmtMoney(p.money));
+  return out;
+}
 
 export type DrillLeadRow = {
   amo_id: number;
@@ -25,6 +50,8 @@ export type DrillLeadRow = {
   first_contract_at: string | null;
   won_at: string | null;
   history_complete: boolean;
+  /** Что именно этой сделки попало в период — см. `InPeriod`. */
+  in_period: InPeriod;
   amo_url: string | null;
 };
 
@@ -180,7 +207,7 @@ export default function DealDrillDown({
             Второй `.glass-frame` дал бы размытие внутри размытия — именно
             вложенность роняет плавность прокрутки. Плотная подложка строк. */}
         <div className="overflow-x-auto rounded-lg border border-zinc-200 bg-[var(--glass-rows)]">
-          <table className="w-full min-w-[660px] text-[11px]">
+          <table className="w-full min-w-[760px] text-[11px]">
             <thead>
               <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400">
                 <SortableTh label="Сделка" sortKey="name" sort={sort} onSort={toggleSort} className="px-2.5 py-1.5" />
@@ -223,6 +250,13 @@ export default function DealDrillDown({
                   onSort={toggleSort}
                   className="px-2.5 py-1.5"
                 />
+                {/* Не сортируется: это не величина, а перечисление причин, по
+                    которым сделка попала в период. */}
+                <th className="px-2.5 py-1.5 font-medium">
+                  <span title="Что этой сделки попало в выбранный период: лид (создана), квал, встреча по записи разговора, договор, деньги. Даты в строке — собственные даты сделки и могут быть старше периода.">
+                    В периоде
+                  </span>
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -262,6 +296,18 @@ export default function DealDrillDown({
                   <td className="px-2.5 py-1.5 tabular-nums text-zinc-600">{fmtDate(lead.first_meeting_at)}</td>
                   <td className="px-2.5 py-1.5 tabular-nums text-zinc-600">{fmtDate(lead.first_contract_at)}</td>
                   <td className="px-2.5 py-1.5 tabular-nums text-zinc-600">{fmtDate(lead.won_at)}</td>
+                  <td className="px-2.5 py-1.5">
+                    <div className="flex flex-wrap gap-1">
+                      {periodBadges(lead.in_period).map((badge) => (
+                        <span
+                          key={badge}
+                          className="rounded-full border border-zinc-200 bg-white px-1.5 py-0.5 text-[10px] text-zinc-600"
+                        >
+                          {badge}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>

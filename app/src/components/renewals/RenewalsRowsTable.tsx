@@ -18,32 +18,25 @@ function fmtMoneyCell(value: number | null, raw: string | null) {
   return '—';
 }
 
-function fmtNumberCell(value: number | null, raw: string | null) {
-  if (value !== null) return value.toLocaleString('ru-RU');
-  if (raw && raw.trim() !== '') {
-    return (
-      <span className="text-amber-700" title="Не удалось распознать число, показано как в базе">
-        {raw}
-      </span>
-    );
-  }
-  return '—';
-}
-
 /**
  * Колонки таблицы продлений для общего механизма сортировки
  * (`@/components/ui/useSortableRows`).
  *
- * `budget`/`kpiFact` сортируются по уже распарсенному числу (`row.budget`,
- * `row.kpiFact` из tableRows.ts), а НЕ по «сырой» строке `budgetRaw`/
- * `kpiFactRaw`. Строка, которая не распозналась как число (`budgetRaw`
- * показан как есть, амбер-цветом), даёт `budget === null` — а `null`
- * попадает в общее правило «пустое значение — в конец» из useSortableRows.
- * Другого осмысленного места для неё нет: сравнивать по величине нечего (нет
- * числа), а протащить в сортировку строковое сравнение сломало бы то самое
- * «100 меньше 20», которого требует задача — но для другого типа колонки.
+ * `budget` сортируется по уже распарсенному числу (`row.budget` из
+ * tableRows.ts), а НЕ по «сырой» строке `budgetRaw`. Строка, которая не
+ * распозналась как число (`budgetRaw` показан как есть, амбер-цветом), даёт
+ * `budget === null` — а `null` попадает в общее правило «пустое значение — в
+ * конец» из useSortableRows. Другого осмысленного места для неё нет:
+ * сравнивать по величине нечего (нет числа), а протащить в сортировку
+ * строковое сравнение сломало бы то самое «100 меньше 20», которого требует
+ * задача — но для другого типа колонки.
  * Строка при этом остаётся видна в ячейке (амбер, как и раньше), просто не
  * участвует в порядке по величине.
+ *
+ * KPI — исключение: после переезда на AMO (см. amoRenewals.ts) туда приходит
+ * поле карточки «KPI проекта», а это свободный текст («20 лидов», «без KPI»,
+ * «-»). Числа там нет и не будет, поэтому и сортировка строковая, по
+ * `kpiFactRaw`.
  */
 export const renewalsSortColumns: SortColumns<RenewalTableRow> = {
   client: { type: 'string', getValue: (r) => r.client },
@@ -51,7 +44,7 @@ export const renewalsSortColumns: SortColumns<RenewalTableRow> = {
   budget: { type: 'number', getValue: (r) => r.budget },
   paymentDate: { type: 'date', getValue: (r) => r.paymentDate },
   contractDate: { type: 'date', getValue: (r) => r.contractDate },
-  kpiFact: { type: 'number', getValue: (r) => r.kpiFact },
+  kpiFact: { type: 'string', getValue: (r) => r.kpiFactRaw },
   status: { type: 'string', getValue: (r) => r.status },
   manager: { type: 'string', getValue: (r) => r.manager },
 };
@@ -84,7 +77,7 @@ export default function RenewalsRowsTable({
           <SortableTh label="Сумма" sortKey="budget" sort={sort} onSort={toggleSort} align="right" />
           <SortableTh label="Дата оплаты" sortKey="paymentDate" sort={sort} onSort={toggleSort} />
           <SortableTh label="Дата договора" sortKey="contractDate" sort={sort} onSort={toggleSort} />
-          <SortableTh label="KPI-факт" sortKey="kpiFact" sort={sort} onSort={toggleSort} align="right" />
+          <SortableTh label="KPI" sortKey="kpiFact" sort={sort} onSort={toggleSort} />
           <SortableTh label="Статус" sortKey="status" sort={sort} onSort={toggleSort} />
           <SortableTh label="Менеджер" sortKey="manager" sort={sort} onSort={toggleSort} />
         </tr>
@@ -119,9 +112,10 @@ export default function RenewalsRowsTable({
               </div>
             </td>
             <td className="px-3 py-2 tabular-nums text-zinc-600">{fmtDate(row.contractDate)}</td>
-            <td className="px-3 py-2 text-right tabular-nums text-zinc-700">
-              {fmtNumberCell(row.kpiFact, row.kpiFactRaw)}
-            </td>
+            {/* Текст, а не число: «KPI проекта» в AMO заполняют словами.
+                Поэтому и без амбер-подсветки «не удалось распознать» — здесь
+                нечего распознавать, это не ошибка данных. */}
+            <td className="px-3 py-2 text-zinc-600">{row.kpiFactRaw?.trim() || '—'}</td>
             <td className="px-3 py-2 text-zinc-600">{row.status || '—'}</td>
             <td className="px-3 py-2 text-zinc-600">{row.manager || '—'}</td>
           </tr>

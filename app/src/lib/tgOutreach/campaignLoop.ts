@@ -20,6 +20,7 @@ import { checkAccount, classifyCheckError } from './accountCheck';
 import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient } from './gramClient';
 import type { LoopControl } from './watchdog';
+import { orderByStaleness } from './accountRotation';
 import { openaiGenerate, detectTrigger } from './openaiChat';
 import { loadBlockedUserIds } from './blockedUsers';
 import {
@@ -31,8 +32,48 @@ import { sendFirstTouchBatch } from './firstTouch/send';
 import { cooldownUntilIso, writeAccountCooldown } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
 import { processLeadForwards } from './leadForward';
+import { buildLeadMessage, splitTelegramMessage } from './leadMessage';
+import { loadLeadOrigin } from './leadOrigin';
+import { withTimeout } from './withTimeout';
 import { truncateMessage } from '@/lib/logger';
 import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
+
+/**
+ * Сроки на вызовы Telegram в боевом круге.
+ *
+ * gramJS не таймаутит вызовы сам, а мобильный прокси меняет IP посреди уже
+ * установленного соединения: сокет для библиотеки остаётся живым, запрос уходит
+ * в никуда и не возвращается никогда. Такой `await` не будит даже разрыв
+ * соединений снаружи — gramJS переподключается внутри себя и ждёт дальше.
+ *
+ * `withTimeout` для этого и написан, и в прогреве, проверке аккаунтов, проверке
+ * прокси и чтении профиля он стоит с 06.08.2026. В боевом цикле его не было ни
+ * разу — все девятнадцать вызовов висели без ограничения.
+ *
+ * Цена выяснилась 28.08.2026. Повисший вызов останавливал круг навсегда: цикл
+ * стоял внутри `await`, до проверки «просили остановиться» не доходил, снаружи
+ * не будился. Сторожу оставалось только уронить процесс — и вместе с зависшей
+ * кампанией умирали четыре здоровые, восемь раз за сутки.
+ *
+ * Теперь повисший вызов — обычная ошибка: аккаунт пропускается, круг едет
+ * дальше, кампания продолжает отчитываться.
+ *
+ * Сроки намеренно щедрые. Резать живую отправку на медленном мобильном прокси
+ * хуже, чем подождать лишнюю минуту: цель — исключить бесконечность, а не
+ * ускорить работу. Все крутятся переменными окружения, без пересборки образа.
+ */
+const TG_RESOLVE_TIMEOUT_MS = Number(process.env.TG_OUTREACH_RESOLVE_TIMEOUT_MS) || 60_000;
+const TG_HISTORY_TIMEOUT_MS = Number(process.env.TG_OUTREACH_HISTORY_TIMEOUT_MS) || 90_000;
+const TG_READ_TIMEOUT_MS = Number(process.env.TG_OUTREACH_READ_TIMEOUT_MS) || 60_000;
+const TG_SEND_TIMEOUT_MS = Number(process.env.TG_OUTREACH_SEND_TIMEOUT_MS) || 120_000;
+const TG_FORWARD_TIMEOUT_MS = Number(process.env.TG_OUTREACH_FORWARD_TIMEOUT_MS) || 180_000;
+/**
+ * Загрузка диалогов уже прикрыта собственным детектором зависания на 180с со
+ * своим переподключением (см. ниже по коду). Общий срок ставим чуть больше,
+ * чтобы он служил последней страховкой, а не срабатывал раньше специального
+ * механизма и не ломал его логику повторной попытки.
+ */
+const TG_DIALOGS_TIMEOUT_MS = Number(process.env.TG_OUTREACH_DIALOGS_TIMEOUT_MS) || 240_000;
 
 const BUCKET_SESSIONS = 'tg-outreach-sessions';
 const SESSION_CACHE_MAX = 100;
@@ -162,14 +203,18 @@ async function loadDialogsPageWithoutGramPagination(
   limit: number,
   archived: boolean,
 ): Promise<helpers.TotalList<Dialog>> {
-  const response = await client.invoke(new Api.messages.GetDialogs({
-    offsetDate: 0,
-    offsetId: 0,
-    offsetPeer: new Api.InputPeerEmpty(),
-    limit,
-    hash: bigInt.zero,
-    folderId: archived ? 1 : 0,
-  }));
+  const response = await withTimeout(
+    client.invoke(new Api.messages.GetDialogs({
+      offsetDate: 0,
+      offsetId: 0,
+      offsetPeer: new Api.InputPeerEmpty(),
+      limit,
+      hash: bigInt.zero,
+      folderId: archived ? 1 : 0,
+    })),
+    TG_DIALOGS_TIMEOUT_MS,
+    'загрузка диалогов без пагинации',
+  );
 
   const result = new helpers.TotalList<Dialog>();
   if (response instanceof Api.messages.DialogsNotModified) return result;
@@ -216,7 +261,11 @@ async function loadOutreachDialogs(
 ): Promise<{ dialogs: helpers.TotalList<Dialog>; usedRawPageFallback: boolean }> {
   try {
     return {
-      dialogs: await client.getDialogs({ limit, archived: false }),
+      dialogs: await withTimeout(
+        client.getDialogs({ limit, archived: false }),
+        TG_DIALOGS_TIMEOUT_MS,
+        'загрузка диалогов',
+      ),
       usedRawPageFallback: false,
     };
   } catch (err) {
@@ -686,11 +735,36 @@ async function forwardToTargetChat(
   messageIds: number[],
   targetUsername: string,
   log: LogFn,
+  cardText?: string | null,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!targetUsername) return { ok: false, error: 'чат для пересылки не указан в настройках кампании' };
   const target = targetUsername.startsWith('@') ? targetUsername.slice(1) : targetUsername;
+
+  // Карточка идёт первой, ровно как при ручной передаче: нативная пересылка
+  // отдаёт оригиналы реплик, но не отвечает на «кто это и по какому офферу»,
+  // а у части контактов из неё даже не открывается профиль собеседника.
+  // Сбой карточки не отменяет пересылку — переписка менеджеру важнее.
+  if (cardText) {
+    try {
+      for (const part of splitTelegramMessage(cardText)) {
+        await withTimeout(
+          client.sendMessage(target, { message: part }),
+          TG_SEND_TIMEOUT_MS,
+          'отправка карточки лида',
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log('warning', `Карточка лида не ушла в ${targetUsername} — ${msg}. Пересылаю переписку без неё.`);
+    }
+  }
+
   try {
-    await client.forwardMessages(target, { fromPeer, messages: messageIds });
+    await withTimeout(
+      client.forwardMessages(target, { fromPeer, messages: messageIds }),
+      TG_FORWARD_TIMEOUT_MS,
+      'пересылка переписки менеджеру',
+    );
     log('info', `Переслано в ${targetUsername}`);
     return { ok: true };
   } catch (err) {
@@ -761,7 +835,11 @@ export async function handleChat(
   if (shouldStop) await interruptibleSleep(preReadDelay, shouldStop); else await sleep(preReadDelay);
 
   try {
-    await client.invoke(new Api.messages.ReadHistory({ peer: entity, maxId: 0 }));
+    await withTimeout(
+      client.invoke(new Api.messages.ReadHistory({ peer: entity, maxId: 0 })),
+      TG_READ_TIMEOUT_MS,
+      'отметка «прочитано»',
+    );
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     // Some accounts get rate-limited / partially frozen for read operations (MTProto error 420).
@@ -775,12 +853,20 @@ export async function handleChat(
 
   let history;
   try {
-    history = await client.getMessages(entity, { limit: tg.history_limit });
+    history = await withTimeout(
+      client.getMessages(entity, { limit: tg.history_limit }),
+      TG_HISTORY_TIMEOUT_MS,
+      'чтение истории диалога',
+    );
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     // GramJS sometimes reports offset out-of-range for history pagination; a smaller retry is usually enough.
     if (errMsg.includes("offset") && errMsg.includes('out of range')) {
-      history = await client.getMessages(entity, { limit: Math.min(20, Math.max(5, tg.history_limit)) });
+      history = await withTimeout(
+        client.getMessages(entity, { limit: Math.min(20, Math.max(5, tg.history_limit)) }),
+        TG_HISTORY_TIMEOUT_MS,
+        'чтение истории диалога (короткая попытка)',
+      );
     } else {
       throw err;
     }
@@ -874,7 +960,11 @@ export async function handleChat(
   const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;
   if (shouldStop) await interruptibleSleep(readReplyDelay, shouldStop); else await sleep(readReplyDelay);
 
-  const sent = await client.sendMessage(entity, { message: replyText });
+  const sent = await withTimeout(
+    client.sendMessage(entity, { message: replyText }),
+    TG_SEND_TIMEOUT_MS,
+    'отправка ответа',
+  );
   log('info', `${displayName}: ответ отправлен (${replyText.length} символов)`);
 
   chatMessages.push({
@@ -896,7 +986,27 @@ export async function handleChat(
     let outcome: { ok: true } | { ok: false; error: string };
     if (targetChat) {
       const messageIdsToForward = pickForwardIds(history, tg.forward_limit, sent.id);
-      outcome = await forwardToTargetChat(client, entity, messageIdsToForward, targetChat, log);
+      // Карточку шлём только положительному триггеру: отрицательный уходит в
+      // другой чат как архив отказа, представлять там «Лида» — неправда.
+      let card: string | null = null;
+      if (triggerType === 'positive') {
+        try {
+          const origin = await loadLeadOrigin(db, campaign.id, tgUsername);
+          card = buildLeadMessage({
+            kind: 'lead',
+            campaignName: campaign.name,
+            username: tgUsername,
+            tgUserId,
+            baseName: origin.baseName,
+            sourceChat: origin.sourceChat,
+            messages: chatMessages,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log('warning', `${displayName}: не смог собрать карточку лида — ${msg}. Пересылаю переписку без неё.`);
+        }
+      }
+      outcome = await forwardToTargetChat(client, entity, messageIdsToForward, targetChat, log, card);
     } else {
       log('info', `${displayName}: триггер "${triggerLabel}" сработал, но чат для пересылки не указан в настройках кампании — пересылка пропущена`);
       outcome = { ok: false, error: 'чат для пересылки не указан в настройках кампании' };
@@ -1013,8 +1123,16 @@ async function handleFollowUp(
 
       const followUpDelay = randomRange(tg.read_reply_delay_range) * 1000;
       if (shouldStop) await interruptibleSleep(followUpDelay, shouldStop); else await sleep(followUpDelay);
-      const entity = await client.getEntity(tgUserId);
-      await client.sendMessage(entity, { message: reply });
+      const entity = await withTimeout(
+        client.getEntity(tgUserId),
+        TG_RESOLVE_TIMEOUT_MS,
+        'поиск собеседника по id',
+      );
+      await withTimeout(
+        client.sendMessage(entity, { message: reply }),
+        TG_SEND_TIMEOUT_MS,
+        'отправка сообщения',
+      );
 
       messages.push({ role: 'assistant', content: reply, timestamp: new Date().toISOString() });
       await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, messages, undefined, { tgIsBot: isBot });
@@ -1151,12 +1269,26 @@ async function handleMissedRepliesLastDays(
 
       let entity;
       try {
-        entity = await client.getEntity(tgUserId);
+        entity = await withTimeout(
+          client.getEntity(tgUserId),
+          TG_RESOLVE_TIMEOUT_MS,
+          'поиск собеседника по id',
+        );
       } catch {
-        if (tgUsername) entity = await client.getEntity(tgUsername);
+        if (tgUsername) {
+          entity = await withTimeout(
+            client.getEntity(tgUsername),
+            TG_RESOLVE_TIMEOUT_MS,
+            'поиск собеседника по юзернейму',
+          );
+        }
         else throw new Error(`Не удалось найти пользователя ID:${tgUserId}`);
       }
-      await client.sendMessage(entity, { message: reply });
+      await withTimeout(
+        client.sendMessage(entity, { message: reply }),
+        TG_SEND_TIMEOUT_MS,
+        'отправка догоняющего сообщения',
+      );
 
       messages.push({ role: 'assistant', content: reply, timestamp: new Date().toISOString() });
       await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, messages, undefined, { tgIsBot: isBot });
@@ -1239,12 +1371,26 @@ async function backfillEmptyDialogs(
     try {
       let entity;
       try {
-        entity = await client.getEntity(tgUserId);
+        entity = await withTimeout(
+          client.getEntity(tgUserId),
+          TG_RESOLVE_TIMEOUT_MS,
+          'поиск собеседника по id',
+        );
       } catch {
-        if (tgUsername) entity = await client.getEntity(tgUsername);
+        if (tgUsername) {
+          entity = await withTimeout(
+            client.getEntity(tgUsername),
+            TG_RESOLVE_TIMEOUT_MS,
+            'поиск собеседника по юзернейму',
+          );
+        }
         else throw new Error(`Не удалось найти пользователя ID:${tgUserId}`);
       }
-      const history = await client.getMessages(entity, { limit: tg.history_limit });
+      const history = await withTimeout(
+        client.getMessages(entity, { limit: tg.history_limit }),
+        TG_HISTORY_TIMEOUT_MS,
+        'чтение истории диалога',
+      );
 
       const backfillLabel = tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`;
       const chatMessages = await extractMessagesFromHistory(client, [...history].reverse(), log, backfillLabel);
@@ -1346,11 +1492,26 @@ export async function runCampaignLoop(
       .filter((v): v is number => typeof v === 'number'),
   );
 
+  /**
+   * Порядок обхода — «кого дольше всех не брали, тот первый».
+   *
+   * До 28.08.2026 круг всегда шёл по порядку выборки, и при падениях воркера
+   * (в тот день их было три) хвост списка не работал вовсе: пауза между
+   * аккаунтами доходит до десяти минут, процесс успевал обработать два-три и
+   * умирал, а следующий начинал с того же начала. У ATOL-1 из двенадцати
+   * аккаунтов писали двое, свежая база сутки стояла с нулём отправок.
+   *
+   * Сортируем здесь, а не в SQL: так поведение покрыто тестами, а выборка выше
+   * остаётся простой и её результат по-прежнему годится для остальных нужд
+   * (сверка своих tg_user_id, счётчики).
+   */
+  const cycleOrder = orderByStaleness(accounts as OutreachAccount[]);
+
   log('info', `Запускаю кампанию "${campaign.name}": ${accounts.length} аккаунтов, ${proxies?.length ?? 0} прокси`);
 
   const proxyMap = new Map((proxies ?? []).map((proxy: OutreachProxy) => [proxy.id, proxy]));
   const downloadSessionFile = (storagePath: string) => downloadSessionToTemp(db, storagePath);
-  let clients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db);
+  let clients = await buildClients(cycleOrder, proxies ?? [], log, downloadSessionFile, db);
   // Ручка для сторожевого таймера: порвать сокеты этой кампании, не трогая
   // соседние. Замыкание читает `clients` в момент вызова, поэтому переживает
   // переподключение ниже.
@@ -1973,6 +2134,23 @@ export async function runCampaignLoop(
         }
         tick();
 
+        /**
+         * Отмечаем, что до аккаунта дошли. Это и есть позиция в круге: после
+         * перезапуска воркер начнёт со следующего, а не с начала списка.
+         *
+         * Пишем ПОСЛЕ работы, а не до: аккаунт, на котором процесс умер, должен
+         * считаться необработанным и достаться следующему запуску первым.
+         * Ошибку записи глотаем в лог — из-за неудачной пометки рушить круг
+         * нельзя, в худшем случае аккаунт возьмут дважды подряд.
+         */
+        const { error: cycleErr } = await db
+          .from('tg_outreach_accounts')
+          .update({ last_cycle_at: new Date().toISOString() })
+          .eq('id', account.id);
+        if (cycleErr) {
+          log('warning', `Аккаунт ${account.session_name}: не смог отметить прохождение круга — ${cycleErr.message}. Порядок обхода может сбиться.`);
+        }
+
         const accountDelay = randomRange(tg.account_loop_delay_range) * 1000;
         log('info', `Пауза ${Math.round(accountDelay / 1000)} секунд перед переходом к следующему аккаунту (анти-флуд)`);
         await interruptibleSleep(accountDelay, shouldStop);
@@ -2131,12 +2309,26 @@ export async function refetchEmptyDialogs(
     try {
       let entity;
       try {
-        entity = await client.getEntity(tgUserId);
+        entity = await withTimeout(
+          client.getEntity(tgUserId),
+          TG_RESOLVE_TIMEOUT_MS,
+          'поиск собеседника по id',
+        );
       } catch {
-        if (tgUsername) entity = await client.getEntity(tgUsername);
+        if (tgUsername) {
+          entity = await withTimeout(
+            client.getEntity(tgUsername),
+            TG_RESOLVE_TIMEOUT_MS,
+            'поиск собеседника по юзернейму',
+          );
+        }
         else throw new Error(`Не удалось найти пользователя ID:${tgUserId}`);
       }
-      const history = await client.getMessages(entity, { limit: tg.history_limit });
+      const history = await withTimeout(
+        client.getMessages(entity, { limit: tg.history_limit }),
+        TG_HISTORY_TIMEOUT_MS,
+        'чтение истории диалога',
+      );
 
       const refetchLabel = tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`;
       const chatMessages = await extractMessagesFromHistory(client, [...history].reverse(), log, refetchLabel);

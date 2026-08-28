@@ -2,8 +2,16 @@ import 'server-only';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireFirstSalesAccess } from '@/lib/firstSales/access';
 import { parseFirstSalesParams } from '@/lib/firstSales/params';
-import { fetchFirstSalesLeads, NO_MANAGER } from '@/lib/firstSales/metrics';
+import {
+  fetchFirstSalesLeads,
+  isContractInWindow,
+  isLeadInWindow,
+  isQualifiedInWindow,
+  meetingsByDeal,
+  NO_MANAGER,
+} from '@/lib/firstSales/metrics';
 import { fetchMeetingLinks } from '@/lib/firstSales/meetings';
+import { fetchFirstSalesPayments, moneyByDeal } from '@/lib/firstSales/money';
 import { resolveSource } from '@/lib/firstSales/sources';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
@@ -51,24 +59,56 @@ export async function GET(req: NextRequest) {
           (lead.responsible_name ?? NO_MANAGER) === manager;
 
   try {
-    // Та же ширина выборки, что в summary/route.ts: сделка с привязанной
-    // встречей в окне может лежать вне окна по created_at/этапам (пришла
-    // раньше). Без этого расширения drill-down показал бы меньше сделок, чем
-    // summary насчитал встреч для того же среза.
-    const meetingLinks = await fetchMeetingLinks(gate.supabaseAdmin, PIPELINE_ID, from, to);
-    const meetingDealIds = [...new Set(meetingLinks.map((m) => m.amo_deal_id))];
+    // Та же ширина выборки, что в summary/route.ts: сделка может лежать вне
+    // окна по created_at/этапам (пришла раньше), а встреча или оплата по ней —
+    // случиться внутри окна. Без этого расширения drill-down показал бы меньше
+    // сделок, чем сводка насчитала встреч и денег для того же среза.
+    const [meetingLinks, payments] = await Promise.all([
+      fetchMeetingLinks(gate.supabaseAdmin, PIPELINE_ID, from, to),
+      fetchFirstSalesPayments(gate.supabaseAdmin, PIPELINE_ID, from, to),
+    ]);
+    const extraDealIds = [
+      ...new Set([
+        ...meetingLinks.map((m) => m.amo_deal_id),
+        ...payments.map((p) => p.amo_deal_id).filter((id): id is number => id != null),
+      ]),
+    ];
 
     const leads = await fetchFirstSalesLeads(
-      gate.supabaseAdmin, PIPELINE_ID, from, to, meetingDealIds,
+      gate.supabaseAdmin, PIPELINE_ID, from, to, extraDealIds,
     );
+
+    // Встречи и деньги по сделкам — теми же правилами, что и цифры разбивки
+    // (окно, порог достоверности встреч, дедуп «одна сделка — один день»,
+    // отсев продлений и спорных платежей). Считаются один раз на запрос.
+    const meetings = meetingsByDeal(meetingLinks, from, to);
+    const money = moneyByDeal(payments, from, to);
 
     // Фильтр по источникам здесь НЕ применяется: строка, в которую пользователь
     // проваливается, уже прошла его в сводке — второй раз отсеивать нечего.
     const rows = leads
       .filter(matchesSlice)
-      .sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''))
-      .slice(0, MAX_ROWS)
       .map((lead) => ({
+        lead,
+        hits: {
+          lead: isLeadInWindow(lead, from, to),
+          qualified: isQualifiedInWindow(lead, from, to),
+          meetings: meetings.get(lead.amo_id) ?? 0,
+          contract: isContractInWindow(lead, from, to),
+          money: money.get(lead.amo_id) ?? 0,
+        },
+      }))
+      // Выборка сознательно шире периода — сделка попадает в неё, если по ней
+      // была активность в окне ИЛИ она понадобилась для встречи/оплаты. Здесь
+      // остаются только те, что реально дали периоду хоть одну цифру: иначе
+      // под строкой «269 лидов за август» показывались сделки 2024 года, и
+      // это читалось как «фильтр периода не работает».
+      .filter(({ hits }) =>
+        hits.lead || hits.qualified || hits.meetings > 0 || hits.contract || hits.money > 0,
+      )
+      .sort((a, b) => (b.lead.created_at ?? '').localeCompare(a.lead.created_at ?? ''))
+      .slice(0, MAX_ROWS)
+      .map(({ lead, hits }) => ({
         amo_id: lead.amo_id,
         name: lead.name,
         // Ответственный отдаётся как есть, включая null: пустая клетка в
@@ -80,6 +120,16 @@ export async function GET(req: NextRequest) {
         first_contract_at: lead.first_contract_at,
         won_at: lead.won_at,
         history_complete: lead.history_complete,
+        // Чем именно сделка попала в период. Нужно, чтобы сделка 2024 года,
+        // у которой в августе была встреча или оплата, не выглядела мусором:
+        // видно, что она здесь не по ошибке.
+        in_period: {
+          lead: hits.lead,
+          qualified: hits.qualified,
+          meetings: hits.meetings,
+          contract: hits.contract,
+          money: hits.money,
+        },
         amo_url: AMO_BASE ? `${AMO_BASE}/leads/detail/${lead.amo_id}` : null,
       }));
 
