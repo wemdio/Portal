@@ -1,10 +1,14 @@
 /**
  * Дизайн-система «Движка вертикалей»: токены (HE) и мелкие атомарные
- * компоненты. Концепция: плотный рабочий интерфейс с нейтральным chrome,
- * blue-акцентом только для выбора/focus и семантическими статусами.
- * Только светлые классы палитры gray/blue/emerald/amber/violet/red: тёмная
- * тема портала подхватывает их через overrides в globals.css
- * (html[data-portal-theme='dark'] .portal-shell …), dark:-варианты не нужны.
+ * компоненты. Концепция редизайна: редакторский инструмент — hairline-
+ * структура, невидимый акцент (primary = самый контрастный объект без
+ * цвета), статус как данные (точка 6px + моно-тег).
+ *
+ * Строки классов ссылаются на scoped-классы ../ve2.css: они работают только
+ * под корнем .ve2 (VerticalEngineV2View) и наружу не утекают. Обе темы
+ * поддержаны токенами --ve2-* (тёмная: html[data-portal-theme='dark'] .ve2),
+ * мост globals.css для этих классов не нужен. Tailwind-утилиты компоновки
+ * (flex, grid, gap, mt-*) применяются поверх — цветов они не задают.
  *
  * Файл намеренно .ts (без JSX-синтаксиса): компоненты собираются через
  * createElement, тип возврата — JSX.Element из react.
@@ -14,69 +18,66 @@ import { createElement, type JSX } from 'react';
 
 export const HE = {
   // ── Поверхности ──────────────────────────────────────────────────────────
-  /** Рабочая поверхность: короткий радиус, hairline и без декоративной тени. */
-  card: 'rounded-lg border border-gray-200 bg-white',
+  /** Рабочая поверхность: белая/графитовая карточка с hairline-рамкой. */
+  card: 've2-card',
   /** Hover-фидбек для кликабельных поверхностей. */
-  cardHover: 'hover:border-gray-300 hover:bg-gray-50/70',
-  cardPad: 'p-5',
+  cardHover: 've2-card-h',
+  cardPad: 've2-p-5',
   /** Вторичная панель (вложенный блок, мета-зона): заливка без рамки. */
-  panelSoft: 'rounded-lg bg-gray-50/80',
+  panelSoft: 've2-soft',
   /** Панель формы внутри шага: единая рамка, фон и отступ. */
-  formPanel: 'rounded-lg border border-gray-200 bg-white p-4',
-  /** Пустое состояние: пунктирная рамка без отдельного декоративного стиля. */
-  emptyState: 'rounded-lg border border-dashed border-gray-300 bg-gray-50/50 p-8 text-center',
-  /** Информационная плашка с тем же радиусом, что у вложенных панелей. */
-  infoPanel: 'rounded-lg border border-blue-200 bg-blue-50/50',
+  formPanel: 've2-form',
+  /** Пустое состояние: пунктирная рамка. */
+  emptyState: 've2-empty',
+  /** Информационная плашка (нейтральная). */
+  infoPanel: 've2-nt ve2-nt-info',
   /** Успешная плашка: статус остаётся точкой + текстом. */
-  successPanel: 'rounded-lg border border-emerald-200 bg-emerald-50/70',
+  successPanel: 've2-nt ve2-nt-ok',
   /** Разделительная линия секций. */
-  divider: 'border-gray-200/80',
+  divider: 've2-div',
 
-  // ── Типографика (шкала ~1.125–1.2, иерархия размером и весом) ────────────
+  // ── Типографика ──────────────────────────────────────────────────────────
   /** Заголовок страницы/экрана. */
-  pageTitle: 'text-[26px] font-semibold leading-tight text-gray-900',
+  pageTitle: 've2-h1',
   /** Заголовок секции внутри экрана. */
-  sectionTitle: 'text-[17px] font-semibold text-gray-900',
+  sectionTitle: 've2-h2',
   /** Заголовок карточки/блока. */
-  cardTitle: 'text-[15px] font-semibold text-gray-900',
+  cardTitle: 've2-h3',
   /** Лид-абзац под заголовком. */
-  lead: 'text-sm leading-relaxed text-gray-600',
+  lead: 've2-lead',
   /** Тихий текст (мета, подписи). */
-  muted: 'text-[13px] text-gray-500',
-  muted2: 'text-[13px] text-gray-500',
-  /** Совсем тихий (даты, вторичные факты). */
-  faint: 'text-xs text-gray-500',
-  /** Небольшой моно/uppercase маркер секции в рабочих шагах. */
-  eyebrow: 'text-[11px] font-semibold text-gray-500',
+  muted: 've2-mut',
+  muted2: 've2-mut',
+  /** Совсем тихий (даты, вторичные факты), моно. */
+  faint: 've2-faint',
+  /** Моно-маркер секции (editorial eyebrow). */
+  eyebrow: 've2-eb',
 
   // ── Кнопки ───────────────────────────────────────────────────────────────
-  btnPrimary:
-    'inline-flex h-10 items-center justify-center gap-2 rounded-md bg-gray-900 px-4 text-[13px] font-semibold text-white transition hover:bg-gray-800 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2',
-  btnGhost:
-    'inline-flex h-10 items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 text-[13px] font-medium text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 hover:text-gray-900 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2',
-  btnQuiet:
-    'text-[13px] font-medium text-gray-600 transition hover:text-gray-900 active:opacity-70 disabled:opacity-45 focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400',
-  btnSmall:
-    'inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 text-xs font-medium text-gray-600 transition hover:border-gray-400 hover:bg-gray-50 hover:text-gray-900 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400',
+  btnPrimary: 've2-btn ve2-b-pri',
+  btnGhost: 've2-btn ve2-b-sec',
+  btnQuiet: 've2-b-quiet',
+  btnSmall: 've2-btn ve2-b-sec ve2-b-sm',
 
   // ── Статусы и мелочь ─────────────────────────────────────────────────────
-  pill: 'inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold',
-  dot: 'inline-block h-1.5 w-1.5 rounded-full',
-  secTitle: 'text-[13px] font-semibold text-gray-900',
+  pill: 've2-st',
+  dot: 've2-dot',
+  secTitle: 've2-h4',
   /** Поле ввода. */
-  input:
-    'min-h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100',
-  tierText: 'text-[10.5px] font-bold uppercase text-violet-600',
-  chip: 'rounded-md border border-gray-200 px-1.5 py-0.5 text-[11px] text-gray-500',
-  rankNum: 'text-[22px] font-light leading-none tabular-nums text-gray-300 translate-y-[2px]',
+  input: 've2-input',
+  tierText: 've2-tier',
+  chip: 've2-mchip',
+
+  // ── Рейтинги ─────────────────────────────────────────────────────────────
+  rankNum: 've2-rank',
 } as const;
 
 const DOT_TONE_CLASS = {
-  ok: 'bg-emerald-500',
-  warn: 'bg-amber-500',
-  err: 'bg-red-500',
-  info: 'bg-blue-500',
-  muted: 'bg-gray-300',
+  ok: 've2-d-g',
+  warn: 've2-d-w',
+  err: 've2-d-r',
+  info: 've2-d-n',
+  muted: 've2-d-q',
 } as const;
 
 /** Цветная точка статуса; смысл всегда дублируется соседним текстом. */
@@ -100,6 +101,6 @@ export function StatusDot({
 export function Spinner({ className = 'h-4 w-4' }: { className?: string }): JSX.Element {
   return createElement('span', {
     'aria-hidden': true,
-    className: `inline-block animate-spin rounded-full border-2 border-gray-300 border-t-blue-500 ${className}`,
+    className: `ve2-spin ${className}`,
   });
 }

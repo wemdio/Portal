@@ -24,18 +24,18 @@ function recordId(row: Record<string, unknown>, index: number): string {
 
 function Stat({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-white px-4 py-3">
-      <div className="text-2xl font-semibold text-slate-950">{value}</div>
-      <div className="mt-1 text-xs text-slate-500">{label}</div>
+    <div className="ve2-stat">
+      <div className="ve2-stat-v">{value}</div>
+      <div className="ve2-stat-k">{label}</div>
     </div>
   );
 }
 
 function EmptyArchive() {
   return (
-    <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-6 py-12 text-center">
-      <p className="text-sm font-semibold text-slate-800">Архив пока пуст</p>
-      <p className="mx-auto mt-2 max-w-lg text-sm leading-6 text-slate-500">
+    <div className="ve2-empty px-6 py-12">
+      <p className="ve2-h3">Архив пока пуст</p>
+      <p className="ve2-mut mx-auto mt-2 max-w-lg leading-6">
         В архив попадают только проекты, которые администратор вручную подтвердил как
         внутренние. ENG-проекты сюда автоматически не добавляются.
       </p>
@@ -58,7 +58,7 @@ export function LegacyArchivePanel({
 }) {
   if (detailLoading) {
     return (
-      <div className="rounded-lg border border-slate-200 bg-white p-8 text-sm text-slate-500">
+      <div className="ve2-card ve2-mut p-8">
         Загружаем read-only снимок старого прогона…
       </div>
     );
@@ -73,22 +73,20 @@ export function LegacyArchivePanel({
             key={project.id}
             type="button"
             onClick={() => onSelect(project.id)}
-            className="rounded-lg border border-slate-200 bg-white p-5 text-left transition hover:border-slate-300 hover:bg-slate-50 motion-safe:active:scale-[0.99]"
+            className="ve2-card ve2-card-h p-5 text-left transition"
           >
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-slate-950">
+                <p className="ve2-h3 truncate">
                   {project.name}
                 </p>
-                <p className="mt-1 truncate text-xs text-slate-500">
+                <p className="ve2-faint mt-1 truncate">
                   {project.website_url}
                 </p>
               </div>
-              <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-700">
-                legacy
-              </span>
+              <span className="ve2-tag">legacy</span>
             </div>
-            <div className="mt-5 flex items-center justify-between text-xs text-slate-500">
+            <div className="ve2-mut mt-5 flex items-center justify-between text-xs">
               <span>{project.status}</span>
               <span>{formatDate(project.created_at)}</span>
             </div>
@@ -104,38 +102,36 @@ export function LegacyArchivePanel({
       <button
         type="button"
         onClick={onBack}
-        className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-600 hover:text-slate-950"
+        className="ve2-b-quiet inline-flex items-center gap-1.5 text-sm"
       >
         <ArrowLeft aria-hidden className="h-4 w-4" />
         Назад к архиву
       </button>
 
-      <section className="rounded-lg border border-amber-200 bg-amber-50/70 p-5">
+      <section className="ve2-nt ve2-nt-warn p-5">
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
           <div>
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-lg font-semibold text-slate-950">
+              <h2 className="ve2-h2">
                 {text(project.name, 'Legacy-проект')}
               </h2>
-              <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-700">
-                Только чтение
-              </span>
+              <span className="ve2-tag">Только чтение</span>
             </div>
-            <p className="mt-1 text-sm text-slate-600">{text(project.website_url)}</p>
+            <p className="ve2-mut mt-1 text-sm">{text(project.website_url)}</p>
           </div>
-          <div className="text-xs leading-5 text-slate-500">
+          <div className="ve2-faint leading-5">
             <div>Создан: {formatDate(project.created_at)}</div>
             <div>Проверен: {formatDate(detail.verification.verified_at)}</div>
           </div>
         </div>
         {detail.verification.review_notes ? (
-          <p className="mt-4 border-t border-amber-200 pt-4 text-sm text-slate-600">
+          <p className="ve2-mut ve2-div mt-4 border-t pt-4 text-sm">
             {detail.verification.review_notes}
           </p>
         ) : null}
       </section>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="ve2-stats">
         <Stat label="Гипотез" value={detail.hypotheses.length} />
         <Stat label="Вертикалей" value={detail.verticals.length} />
         <Stat label="Цепочек" value={detail.chains.length} />
@@ -144,29 +140,29 @@ export function LegacyArchivePanel({
         <Stat label="Джоб" value={detail.jobs.length} />
       </div>
 
-      <section className="rounded-lg border border-slate-200 bg-white p-5">
-        <h3 className="text-sm font-semibold text-slate-950">Вертикали</h3>
+      <section className="ve2-card p-5">
+        <h3 className="ve2-h3">Вертикали</h3>
         {detail.verticals.length === 0 ? (
-          <p className="mt-3 text-sm text-slate-500">Вертикалей нет.</p>
+          <p className="ve2-mut mt-3">Вертикалей нет.</p>
         ) : (
           <div className="mt-4 grid gap-3 md:grid-cols-2">
             {detail.verticals.map((vertical, index) => (
               <div
                 key={recordId(vertical, index)}
-                className="rounded-lg border border-slate-200 p-4"
+                className="ve2-card p-4"
               >
                 <div className="flex items-start justify-between gap-3">
-                  <p className="text-sm font-semibold text-slate-900">
+                  <p className="ve2-h4">
                     {text(vertical.name)}
                   </p>
-                  <span className="text-xs font-medium text-slate-500">
+                  <span className="ve2-pct ve2-pct-lo">
                     {typeof vertical.potential_pct === 'number'
                       ? `${vertical.potential_pct}%`
                       : ''}
                   </span>
                 </div>
                 {vertical.summary ? (
-                  <p className="mt-2 text-xs leading-5 text-slate-500">
+                  <p className="ve2-mut mt-2 text-xs leading-5">
                     {String(vertical.summary)}
                   </p>
                 ) : null}
@@ -176,32 +172,32 @@ export function LegacyArchivePanel({
         )}
       </section>
 
-      <section className="rounded-lg border border-slate-200 bg-white p-5">
-        <h3 className="text-sm font-semibold text-slate-950">Гипотезы</h3>
+      <section className="ve2-card p-5">
+        <h3 className="ve2-h3">Гипотезы</h3>
         {detail.hypotheses.length === 0 ? (
-          <p className="mt-3 text-sm text-slate-500">Гипотез нет.</p>
+          <p className="ve2-mut mt-3">Гипотез нет.</p>
         ) : (
           <div className="mt-4 space-y-3">
             {detail.hypotheses.map((hypothesis, index) => (
               <div
                 key={recordId(hypothesis, index)}
-                className="rounded-lg border border-slate-200 px-4 py-3"
+                className="ve2-card px-4 py-3"
               >
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-[11px] font-semibold uppercase text-slate-400">
+                  <span className="ve2-tier">
                     T{String(hypothesis.tier ?? '—')}
                   </span>
-                  <p className="text-sm font-medium text-slate-900">
+                  <p className="ve2-h4">
                     {text(hypothesis.title)}
                   </p>
-                  <span className="ml-auto text-xs text-slate-500">
+                  <span className="ve2-pct ve2-pct-lo ml-auto">
                     {typeof hypothesis.potential_pct === 'number'
                       ? `${hypothesis.potential_pct}%`
                       : ''}
                   </span>
                 </div>
                 {hypothesis.description ? (
-                  <p className="mt-2 text-xs leading-5 text-slate-500">
+                  <p className="ve2-mut mt-2 text-xs leading-5">
                     {String(hypothesis.description)}
                   </p>
                 ) : null}
@@ -211,10 +207,10 @@ export function LegacyArchivePanel({
         )}
       </section>
 
-      <section className="rounded-lg border border-slate-200 bg-white p-5">
-        <h3 className="text-sm font-semibold text-slate-950">Письма и шаблоны</h3>
+      <section className="ve2-card p-5">
+        <h3 className="ve2-h3">Письма и шаблоны</h3>
         {detail.chains.length === 0 && detail.templates.length === 0 ? (
-          <p className="mt-3 text-sm text-slate-500">Материалов нет.</p>
+          <p className="ve2-mut mt-3">Материалов нет.</p>
         ) : (
           <div className="mt-4 space-y-4">
             {detail.chains.map((chain, index) => {
@@ -222,8 +218,8 @@ export function LegacyArchivePanel({
                 ? (chain.letters as Array<Record<string, unknown>>)
                 : [];
               return (
-                <div key={recordId(chain, index)} className="rounded-lg bg-slate-50 p-4">
-                  <p className="text-xs font-semibold uppercase text-slate-500">
+                <div key={recordId(chain, index)} className="ve2-soft p-4">
+                  <p className="ve2-eb">
                     Цепочка · {text(chain.language, 'язык не указан')} · {letters.length}{' '}
                     писем
                   </p>
@@ -231,12 +227,12 @@ export function LegacyArchivePanel({
                     {letters.map((letter, letterIndex) => (
                       <div
                         key={`${recordId(chain, index)}-${letterIndex}`}
-                        className="rounded-lg border border-slate-200 bg-white p-3"
+                        className="ve2-card p-3"
                       >
-                        <p className="text-xs font-semibold text-slate-800">
+                        <p className="ve2-h4 text-xs">
                           {text(letter.subject, `Письмо ${letterIndex + 1}`)}
                         </p>
-                        <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-slate-500">
+                        <p className="ve2-mut mt-1 whitespace-pre-wrap text-xs leading-5">
                           {text(letter.body)}
                         </p>
                       </div>
@@ -248,36 +244,36 @@ export function LegacyArchivePanel({
             {detail.templates.map((template, index) => (
               <div
                 key={recordId(template, index)}
-                className="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-3 text-sm"
+                className="ve2-card flex items-center justify-between px-4 py-3 text-sm"
               >
-                <span className="font-medium text-slate-800">
+                <span className="ve2-h4">
                   Шаблон {index + 1}
                 </span>
-                <span className="text-xs text-slate-500">{text(template.status)}</span>
+                <span className="ve2-mut text-xs">{text(template.status)}</span>
               </div>
             ))}
           </div>
         )}
       </section>
 
-      <section className="rounded-lg border border-slate-200 bg-white p-5">
-        <h3 className="text-sm font-semibold text-slate-950">Базы</h3>
+      <section className="ve2-card p-5">
+        <h3 className="ve2-h3">Базы</h3>
         {detail.bases.length === 0 ? (
-          <p className="mt-3 text-sm text-slate-500">Баз нет.</p>
+          <p className="ve2-mut mt-3">Баз нет.</p>
         ) : (
-          <div className="mt-4 divide-y divide-slate-100">
+          <div className="mt-4">
             {detail.bases.map((base, index) => (
               <div
                 key={recordId(base, index)}
-                className="flex flex-wrap items-center gap-x-5 gap-y-1 py-3 text-sm"
+                className="ve2-div flex flex-wrap items-center gap-x-5 gap-y-1 border-t py-3 text-sm first:border-t-0"
               >
-                <span className="font-medium text-slate-800">
+                <span className="ve2-h4">
                   {text(base.filename, `База ${index + 1}`)}
                 </span>
-                <span className="text-xs text-slate-500">
+                <span className="ve2-faint">
                   {String(base.row_count ?? 0)} строк
                 </span>
-                <span className="ml-auto text-xs text-slate-500">
+                <span className="ve2-mut ml-auto text-xs">
                   {text(base.status)}
                 </span>
               </div>

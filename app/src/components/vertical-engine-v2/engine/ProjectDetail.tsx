@@ -626,7 +626,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
                   href={project.website_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="mt-3 inline-flex max-w-full items-center gap-1.5 text-xs text-gray-500 transition hover:text-blue-700"
+                  className="ve2-b-quiet mt-3 inline-flex max-w-full items-center gap-1.5 text-xs"
                 >
                   <span className="truncate">{prettyHost(project.website_url)}</span>
                   <ExternalLink aria-hidden className="h-3 w-3 shrink-0" />
@@ -655,7 +655,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
           <section ref={contentTopRef} className="min-w-0 space-y-6">
             <header className="flex flex-col justify-between gap-4 border-b border-gray-200 pb-5 sm:flex-row sm:items-start">
               <div className="min-w-0">
-                <p className="text-[11px] font-semibold text-blue-700">
+                <p className="ve2-eb">
                   Этап {String(step).padStart(2, '0')} из {STEP_DEFS.length}
                 </p>
                 <h2 className="mt-1 text-[25px] font-semibold leading-tight text-gray-950">
@@ -674,7 +674,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
                   onClick={() => void cancelJobs()}
                   disabled={cancelling}
                   title="Остановить все активные задачи проекта"
-                  className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md border border-red-200 bg-white px-3 text-xs font-medium text-red-600 transition hover:bg-red-50 active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
+                  className="ve2-btn ve2-b-dan ve2-b-sm shrink-0"
                 >
                   <Square aria-hidden className="h-3 w-3 fill-current" />
                   {cancelling ? 'Останавливаем…' : 'Остановить задачи'}
@@ -685,11 +685,11 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             {visitItems.length > 0 && !visitDismissed ? (
               <section className={`px-4 py-3 ${HE.infoPanel}`}>
                 <div className="flex items-center justify-between gap-3">
-                  <h3 className={`${HE.eyebrow} text-blue-700`}>С последнего визита</h3>
+                  <h3 className={HE.eyebrow}>С последнего визита</h3>
                   <button
                     type="button"
                     onClick={dismissVisitBlock}
-                    className="shrink-0 text-xs font-medium text-blue-700 transition hover:text-blue-900"
+                    className="ve2-b-quiet shrink-0 text-xs"
                   >
                     Скрыть
                   </button>

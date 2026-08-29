@@ -110,12 +110,12 @@ const STATE_LABEL: Record<VeRuSeasonalityState, string> = {
 };
 
 const STATE_DOT: Record<VeRuSeasonalityState, string> = {
-  launch_now: 'bg-emerald-500',
-  prepare_now: 'bg-blue-500',
-  neutral: 'bg-sky-500',
-  wait: 'bg-amber-500',
-  avoid: 'bg-red-500',
-  unknown: 'bg-gray-400',
+  launch_now: 've2-d-g',
+  prepare_now: 've2-d-n',
+  neutral: 've2-d-n',
+  wait: 've2-d-w',
+  avoid: 've2-d-r',
+  unknown: 've2-d-q',
 };
 
 function seasonalStateOf(item: LaunchPortfolioItemDto): VeRuSeasonalityState {
@@ -139,17 +139,17 @@ function itemGroup(item: LaunchPortfolioItemDto): QueueGroup {
 function StatusLabel({ item }: { item: LaunchPortfolioItemDto }) {
   const state = seasonalStateOf(item);
   const lifecycle = item.status === 'active'
-    ? { label: 'Активная отправка', dotClass: 'bg-emerald-500' }
+    ? { label: 'Активная отправка', dotClass: 've2-d-g' }
     : item.status === 'activating'
-      ? { label: 'Активация выполняется', dotClass: 'bg-blue-500' }
+      ? { label: 'Активация выполняется', dotClass: 've2-d-w' }
         : item.status === 'uncertain'
-          ? { label: 'Статус не подтверждён', dotClass: 'bg-amber-500' }
+          ? { label: 'Статус не подтверждён', dotClass: 've2-d-w' }
           : item.status === 'released'
-          ? { label: 'Слот освобождён', dotClass: 'bg-gray-400' }
+          ? { label: 'Слот освобождён', dotClass: 've2-d-q' }
           : item.status === 'skipped'
-            ? { label: 'Запуск пропущен', dotClass: 'bg-gray-400' }
+            ? { label: 'Запуск пропущен', dotClass: 've2-d-q' }
             : item.status === 'cancelled'
-              ? { label: 'Запуск отменён', dotClass: 'bg-gray-400' }
+              ? { label: 'Запуск отменён', dotClass: 've2-d-q' }
               : { label: STATE_LABEL[state], dotClass: STATE_DOT[state] };
   return (
     <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-gray-700">
@@ -412,7 +412,7 @@ export function LaunchPortfolioView({
                         <button
                           type="button"
                           onClick={() => onProjectOpen(item.project_id)}
-                          className="text-left text-sm font-semibold text-gray-900 underline-offset-2 hover:underline focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+                          className="text-left text-sm font-semibold underline-offset-2 hover:underline"
                         >
                           {projectName(item)}
                         </button>
@@ -479,7 +479,7 @@ export function LaunchPortfolioView({
                                           href={href}
                                           target="_blank"
                                           rel="noopener noreferrer"
-                                          className="font-medium text-blue-700 underline-offset-2 hover:underline focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+                                          className="ve2-link font-medium underline-offset-2 hover:underline"
                                         >
                                           {name}
                                         </a>
@@ -502,7 +502,7 @@ export function LaunchPortfolioView({
                           </div>
                         ) : null}
                         {itemSlotOccupied ? (
-                          <p className="mb-3 text-xs text-amber-700">
+                          <p className="ve2-t-w mb-3 text-xs">
                             Sending slot по последнему снимку занят. Перед активацией Portal сверит
                             живой статус всех пересекающихся кампаний и продолжит только если слот
                             действительно освободился.

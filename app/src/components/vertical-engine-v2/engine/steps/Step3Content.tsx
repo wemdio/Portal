@@ -368,7 +368,7 @@ export function Step3Content(props: {
         </p>
       </header>
 
-      <div className="flex gap-5 overflow-x-auto border-b border-gray-200" role="tablist" aria-label="Материалы вертикали">
+      <div className="ve2-tabs" role="tablist" aria-label="Материалы вертикали">
         {([
           { id: 'chain' as const, label: 'Цепочка писем', ready: Boolean(chain), busy: chainBusy },
           { id: 'vocab' as const, label: 'Вокабуляр', ready: Boolean(vocab), busy: vocabBusy },
@@ -384,11 +384,7 @@ export function Step3Content(props: {
             onClick={() => {
               if (requestEditorExit('leaveStep')) setActivePanel(item.id);
             }}
-            className={`flex shrink-0 items-center gap-2 border-b-2 px-0.5 pb-2.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
-              activePanel === item.id
-                ? 'border-blue-600 text-blue-700'
-                : 'border-transparent text-gray-500 hover:text-gray-900'
-            }`}
+            className="ve2-tab shrink-0"
           >
             <StatusDot tone={item.busy ? 'info' : item.ready ? 'ok' : 'muted'} className={item.busy ? 'motion-safe:animate-pulse' : undefined} />
             {item.label}
@@ -422,7 +418,7 @@ export function Step3Content(props: {
               onChange={(e) => setLanguage(e.target.value as VeChainLanguage)}
               disabled={chainBusy}
               aria-label="Язык цепочки"
-              className="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs font-medium text-gray-600 transition focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100 disabled:opacity-50"
+              className="ve2-input h-9 min-h-9 w-auto px-2 text-xs"
             >
               {LANG_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>
@@ -549,7 +545,7 @@ export function Step3Content(props: {
                               setVariantView({ key: chainKey, map: { ...viewMap, [idx]: sideIdx } });
                             }}
                             className={`${HE.btnSmall} ${
-                              view === sideIdx ? 'border-blue-600! text-blue-600!' : ''
+                              view === sideIdx ? 've2-chip-on' : ''
                             }`}
                           >
                             {side}
@@ -786,7 +782,7 @@ function ChainLetterEditor({
     totalDays === 0 ? 'Сразу' : `через ${totalDays} ${daysWord(totalDays)} от старта`;
 
   return (
-    <div className={`rounded-lg border-blue-200 p-4 ${HE.infoPanel}`}>
+    <div className={`p-4 ${HE.infoPanel}`}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className={`${HE.muted2} text-[11px] font-medium uppercase`}>
           Письмо {letterIndex + 1}
