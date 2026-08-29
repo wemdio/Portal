@@ -96,19 +96,19 @@ function PreviewTokens({
 }) {
   const tokenNodes = tokens.map((t, i) =>
     t.kind === 'value' ? (
-      <mark key={i} className="rounded bg-amber-100 px-0.5 text-amber-800">
+      <mark key={i} className="ve2-op">
         {t.text}
       </mark>
     ) : t.kind === 'fallback' ? (
       <mark
         key={i}
         title="Запасной текст: колонки нет"
-        className="rounded bg-violet-100 px-0.5 text-violet-800"
+        className="ve2-op ve2-op-fb"
       >
         {t.text}
       </mark>
     ) : t.kind === 'unresolved' ? (
-      <mark key={i} className="rounded bg-red-100 px-0.5 font-mono text-[0.92em] text-red-700">
+      <mark key={i} className="ve2-op ve2-t-dan">
         {t.text}
       </mark>
     ) : (
@@ -762,7 +762,7 @@ function LaunchSection({
               <select
                 value={launch.presetId}
                 onChange={(e) => launch.setPresetId(e.target.value)}
-                className="h-10 min-w-0 flex-1 rounded-lg border border-gray-200 bg-white px-3 text-xs text-gray-700 transition focus:border-blue-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 sm:flex-none"
+                className="ve2-input h-10 min-w-0 flex-1 px-3 text-xs sm:flex-none"
                 aria-label="Пресет запуска"
               >
                 {launch.presets.map((p) => (
@@ -1022,12 +1022,12 @@ export function Step5Template(props: {
                 {letter.segment_variants.map((v, vi) => (
                   <details
                     key={`${v.when}-${vi}`}
-                    className="rounded-lg border border-violet-200 bg-violet-50"
+                    className="ve2-soft"
                   >
                     <summary className={`${HE.btnQuiet} w-full cursor-pointer select-none px-3 py-2`}>
                       Вариант для сегмента: {v.when}
                     </summary>
-                    <div className="border-t border-violet-100 px-3 py-2">
+                    <div className="ve2-div border-t px-3 py-2">
                       <OperatorText
                         text={v.text}
                         className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700"
@@ -1048,7 +1048,7 @@ export function Step5Template(props: {
             Фиксированный блок (85%) — общая основа всех писем
           </summary>
           <div className="border-t border-gray-100 px-4 py-3">
-            <div className={`rounded-lg border border-blue-100 p-3 ${HE.infoPanel}`}>
+            <div className={`p-3 ${HE.infoPanel}`}>
               <p className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700">
                 {template.fixed_block}
               </p>
@@ -1077,7 +1077,7 @@ export function Step5Template(props: {
                   {mapping.map((m, i) => (
                     <tr key={`${m.operator}-${i}`}>
                       <td className="px-3 py-2">
-                        <code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-xs text-amber-800">
+                        <code className="ve2-op">
                           {`{{${m.operator}}}`}
                         </code>
                       </td>

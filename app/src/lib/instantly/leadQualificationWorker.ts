@@ -4,7 +4,7 @@ import {
   qualifyReply,
   getBodyText,
   fetchBriefByCampaign,
-  isAutoReplyOrUnsubscribe,
+  classifyMachineReply,
   fetchThreadContext,
   type ThreadContext,
 } from './leadQualifier';
@@ -1523,14 +1523,16 @@ export async function qualifyOneReply(
 
   // Client-facing notification: DM the reply text to the client who owns this
   // campaign for any HUMAN reply — everything EXCEPT automated noise
-  // (out-of-office / auto-reply / unsubscribe). Deliberately does NOT filter
+  // (out-of-office / auto-reply / unsubscribe / delivery failures / service
+  // acknowledgements). Deliberately does NOT filter
   // short replies: a terse "ок"/"да" can be meaningful in an ongoing thread
   // (e.g. confirming a call time). Broader than the studio lead gate. Reuses the
-  // qualifier's own auto/OOO rule-check (runs before AI, so noise costs no AI).
+  // qualifier's own machine-message guard (runs before AI, so noise costs no AI).
   // `inserted?.id` (new qualification) is the send-once guard. Never throws.
+  const replyForMachineClassification = result.threadContext?.replyEmail ?? effectiveReply;
   const meaningfulForClient =
     !!replyText &&
-    !isAutoReplyOrUnsubscribe(replyText) &&
+    !classifyMachineReply(replyForMachineClassification) &&
     (!opts?.clientDmOnlyOnLead || status === 'lead');
   if (inserted?.id && meaningfulForClient) {
     await notifyClientOfReply(db, campaignId, {
@@ -2631,6 +2633,7 @@ type RecoverableLeadQualification = {
   company_name: string | null;
   campaign_name: string | null;
   reply_subject: string | null;
+  reply_body: string | null;
   reply_preview: string | null;
   ai_reason: string | null;
   created_at: string;
@@ -2710,7 +2713,7 @@ export async function reconcileLeadNotificationDeliveries(
   while (true) {
     const { data: leadRows, error: leadRowsError } = await instantlyDb
       .from('instantly_lead_qualifications')
-      .select('id, campaign_id, qualified_project_id, qualified_project_owner_proven, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_preview, ai_reason, created_at, updated_at')
+      .select('id, campaign_id, qualified_project_id, qualified_project_owner_proven, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_body, reply_preview, ai_reason, created_at, updated_at')
       .eq('status', 'lead')
       .gte('created_at', recentCutoffIso)
       .order('updated_at', { ascending: true })
@@ -2741,6 +2744,25 @@ export async function reconcileLeadNotificationDeliveries(
     );
 
     for (const lead of leads) {
+      const replyBody = lead.reply_body ?? '';
+      const replyPreview = lead.reply_preview ?? '';
+      const storedReplyBody = replyBody.trim()
+        ? replyBody
+        : replyPreview.trim()
+          ? replyPreview
+          : '';
+      if (
+        storedReplyBody &&
+        classifyMachineReply({
+          from_address_email: lead.lead_email,
+          subject: lead.reply_subject ?? undefined,
+          body: { text: storedReplyBody },
+          content_preview: lead.reply_preview ?? undefined,
+        })
+      ) {
+        continue;
+      }
+
       const log = logsByQualificationId.get(lead.id) ?? null;
       if (log?.tg_sent === true) continue;
       if (!log) {

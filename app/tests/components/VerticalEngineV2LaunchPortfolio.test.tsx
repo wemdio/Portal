@@ -401,7 +401,7 @@ function configureApi(portfolio: unknown = PORTFOLIO) {
 
 async function openLaunchQueue(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByText('Active Academy');
-  await user.click(screen.getByRole('button', { name: 'Очередь запусков' }));
+  await user.click(screen.getByRole('tab', { name: 'Очередь запусков' }));
 }
 
 beforeEach(() => {
@@ -416,15 +416,15 @@ describe('<VeEngineWorkspace /> — портфельная очередь зап
     const user = userEvent.setup();
     render(<VeEngineWorkspace />);
 
-    expect(await screen.findByRole('button', { name: 'Проекты' })).toHaveAttribute(
-      'aria-pressed',
+    expect(await screen.findByRole('tab', { name: 'Проекты' })).toHaveAttribute(
+      'aria-selected',
       'true',
     );
     await openLaunchQueue(user);
 
     expect(mockEngineCall).toHaveBeenCalledWith(PORTFOLIO_URL);
-    expect(screen.getByRole('button', { name: 'Очередь запусков' })).toHaveAttribute(
-      'aria-pressed',
+    expect(screen.getByRole('tab', { name: 'Очередь запусков' })).toHaveAttribute(
+      'aria-selected',
       'true',
     );
     expect(screen.getByRole('heading', { name: 'Активная отправка' })).toBeInTheDocument();
