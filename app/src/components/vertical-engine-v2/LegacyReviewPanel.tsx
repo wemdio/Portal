@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 
 import type { VeLegacyCandidate } from '@/lib/verticalEngineV2/types.legacy';
+import { StatusDot } from './engine/design';
 
 export function LegacyReviewPanel({
   candidates,
@@ -17,6 +18,8 @@ export function LegacyReviewPanel({
 }) {
   const [query, setQuery] = useState('');
   const [notes, setNotes] = useState<Record<string, string>>({});
+  /** Двухшаговое подтверждение деструктивного действия без window.confirm. */
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return candidates;
@@ -29,11 +32,12 @@ export function LegacyReviewPanel({
 
   return (
     <div className="space-y-5">
-      <div className="rounded-lg border border-red-200 bg-red-50 p-5">
-        <h2 className="text-sm font-semibold text-red-900">
+      <div className="ve2-nt ve2-nt-err p-5">
+        <h2 className="ve2-h3 flex items-center gap-2.5">
+          <StatusDot tone="err" />
           Ручная проверка обязательна
         </h2>
-        <p className="mt-2 max-w-3xl text-sm leading-6 text-red-700">
+        <p className="ve2-mut mt-2 max-w-3xl text-sm leading-6">
           Не добавляйте проект только потому, что у него market=ru или выключен
           autopilot. Сначала убедитесь, что это внутренний прогон специалиста, а не
           ENG-клиент или тест ENG-команды. Подтверждение сразу делает проект видимым
@@ -46,7 +50,7 @@ export function LegacyReviewPanel({
         value={query}
         onChange={(event) => setQuery(event.target.value)}
         placeholder="Поиск по названию, сайту, статусу или рынку"
-        className="w-full rounded-md border border-slate-300 bg-white px-4 py-3 text-sm outline-none transition focus:border-slate-500"
+        className="ve2-input"
       />
 
       <div className="space-y-3">
@@ -55,34 +59,35 @@ export function LegacyReviewPanel({
           return (
             <article
               key={candidate.id}
-              className="rounded-lg border border-slate-200 bg-white p-5"
+              className="ve2-card p-5"
             >
               <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-start">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="text-sm font-semibold text-slate-950">
+                    <h3 className="ve2-h3">
                       {candidate.name || 'Без названия'}
                     </h3>
                     {candidate.linked ? (
-                      <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
+                      <span className="ve2-st ve2-tg-ok">
+                        <StatusDot tone="ok" />
                         В архиве
                       </span>
                     ) : null}
                   </div>
-                  <p className="mt-1 text-xs text-slate-500">
+                  <p className="ve2-faint mt-1">
                     {candidate.website_url}
                   </p>
-                  <dl className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-xs text-slate-500">
+                  <dl className="ve2-mut mt-3 flex flex-wrap gap-x-5 gap-y-2 text-xs">
                     <div>
-                      <dt className="inline text-slate-400">status: </dt>
+                      <dt className="ve2-faint inline">status: </dt>
                       <dd className="inline">{candidate.status || '—'}</dd>
                     </div>
                     <div>
-                      <dt className="inline text-slate-400">market: </dt>
+                      <dt className="ve2-faint inline">market: </dt>
                       <dd className="inline">{candidate.market || '—'}</dd>
                     </div>
                     <div>
-                      <dt className="inline text-slate-400">autopilot: </dt>
+                      <dt className="ve2-faint inline">autopilot: </dt>
                       <dd className="inline">
                         {candidate.autopilot === null
                           ? '—'
@@ -92,7 +97,7 @@ export function LegacyReviewPanel({
                       </dd>
                     </div>
                     <div>
-                      <dt className="inline text-slate-400">created_by: </dt>
+                      <dt className="ve2-faint inline">created_by: </dt>
                       <dd className="inline">{candidate.created_by || '—'}</dd>
                     </div>
                   </dl>
@@ -100,14 +105,38 @@ export function LegacyReviewPanel({
 
                 <div className="w-full shrink-0 lg:w-[360px]">
                   {candidate.linked ? (
-                    <button
-                      type="button"
-                      disabled={isBusy}
-                      onClick={() => void onRemove(candidate)}
-                      className="w-full rounded-md border border-slate-300 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:border-red-300 hover:text-red-700 disabled:opacity-50"
-                    >
-                      {isBusy ? 'Удаляем…' : 'Убрать из архива'}
-                    </button>
+                    confirmRemoveId === candidate.id ? (
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => {
+                            setConfirmRemoveId(null);
+                            void onRemove(candidate);
+                          }}
+                          className="ve2-btn ve2-b-dan ve2-b-sm flex-1 border border-current"
+                        >
+                          {isBusy ? 'Удаляем…' : 'Точно убрать'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => setConfirmRemoveId(null)}
+                          className="ve2-btn ve2-b-sec ve2-b-sm"
+                        >
+                          Отмена
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => setConfirmRemoveId(candidate.id)}
+                        className="ve2-btn ve2-b-sec ve2-b-dan w-full"
+                      >
+                        Убрать из архива
+                      </button>
+                    )
                   ) : (
                     <div className="space-y-2">
                       <input
@@ -120,7 +149,7 @@ export function LegacyReviewPanel({
                           }))
                         }
                         placeholder="Основание проверки (обязательно)"
-                        className="w-full rounded-md border border-slate-300 px-3 py-2.5 text-sm outline-none transition focus:border-slate-500"
+                        className="ve2-input"
                       />
                       <button
                         type="button"
@@ -128,7 +157,7 @@ export function LegacyReviewPanel({
                         onClick={() =>
                           void onApprove(candidate, (notes[candidate.id] ?? '').trim())
                         }
-                        className="w-full rounded-md bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+                        className="ve2-btn ve2-b-pri w-full"
                       >
                         {isBusy ? 'Добавляем…' : 'Подтвердить внутренний проект'}
                       </button>
@@ -142,7 +171,7 @@ export function LegacyReviewPanel({
       </div>
 
       {filtered.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">
+        <div className="ve2-empty">
           Ничего не найдено.
         </div>
       ) : null}

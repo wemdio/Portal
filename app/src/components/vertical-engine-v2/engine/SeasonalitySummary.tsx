@@ -17,32 +17,32 @@ const STATUS_META: Record<
 > = {
   launch_now: {
     label: 'Запускать сейчас',
-    dot: 'bg-emerald-500',
+    dot: 've2-d-g',
     outcome: 'Можно запускать: подтверждённое окно outreach уже открыто.',
   },
   prepare_now: {
     label: 'Готовить сейчас',
-    dot: 'bg-blue-500',
+    dot: 've2-d-n',
     outcome: 'Соберите PAUSED-кампании сейчас, активируйте в запланированную дату.',
   },
   neutral: {
     label: 'Круглый год',
-    dot: 'bg-sky-500',
+    dot: 've2-d-n',
     outcome: 'Выраженного сезонного ограничения не подтверждено.',
   },
   wait: {
     label: 'Ждать',
-    dot: 'bg-amber-500',
+    dot: 've2-d-w',
     outcome: 'Подготовку можно планировать, но sending пока рано активировать.',
   },
   avoid: {
     label: 'Избегать',
-    dot: 'bg-red-500',
+    dot: 've2-d-r',
     outcome: 'Сейчас действует подтверждённое нежелательное окно.',
   },
   unknown: {
     label: 'Нужно решение',
-    dot: 'bg-gray-400',
+    dot: 've2-d-q',
     outcome: 'Проверенных данных недостаточно — автоматическая активация закрыта.',
   },
 };
@@ -183,7 +183,7 @@ export function SeasonalityDetail({
                   href={evidence.source_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="font-medium text-blue-700 underline underline-offset-2 hover:text-blue-900"
+                  className="ve2-link font-medium underline underline-offset-2"
                 >
                   {evidence.claim}
                 </a>

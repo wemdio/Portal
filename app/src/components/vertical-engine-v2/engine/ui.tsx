@@ -4,8 +4,8 @@
  * Мелкие презентационные блоки «Движка вертикалей»: бейджи, статусные плашки,
  * подсветка {{operators}} в письмах, форматтеры дат/хостов.
  * Без иконок: статус = цветная точка + текст (StatusDot из ./design),
- * спиннер — CSS-кольцо. Палитра — светлые тона gray/blue/emerald/amber/
- * violet/red, тёмную тему подхватывают overrides в globals.css.
+ * спиннер — CSS-кольцо. Стили — scoped-классы ../ve2.css (токены --ve2-*,
+ * обе темы); сигнатуры экспортов не менялись.
  */
 
 import { toUnicode } from 'punycode';
@@ -17,13 +17,17 @@ export { Spinner } from './design';
 
 export type BadgeTone = 'gray' | 'emerald' | 'amber' | 'red' | 'blue' | 'violet';
 
+/**
+ * Статус = данные: точка + моно-тег, без заливок. Цветовые «акцентные» тона
+ * (blue/violet) сведены к нейтральному — семантику несут ok/warn/err.
+ */
 const BADGE_TONE_CLASS: Record<BadgeTone, string> = {
-  gray: 'bg-gray-100 text-gray-600',
-  emerald: 'bg-emerald-100 text-emerald-700',
-  amber: 'bg-amber-100 text-amber-700',
-  red: 'bg-red-100 text-red-700',
-  blue: 'bg-blue-100 text-blue-700',
-  violet: 'bg-violet-100 text-violet-700',
+  gray: 've2-tg-q',
+  emerald: 've2-tg-ok',
+  amber: 've2-tg-warn',
+  red: 've2-tg-err',
+  blue: 've2-tg-q',
+  violet: 've2-tg-q',
 };
 
 export function Badge({
@@ -36,16 +40,13 @@ export function Badge({
   children: React.ReactNode;
 }) {
   return (
-    <span
-      title={title}
-      className={`inline-flex items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[10px] font-bold uppercase ${BADGE_TONE_CLASS[tone]}`}
-    >
+    <span title={title} className={`ve2-tag ${BADGE_TONE_CLASS[tone]}`}>
       {children}
     </span>
   );
 }
 
-/** Статусная плашка: цветная точка + текст (info — синяя, error — красная). */
+/** Статусная плашка: цветная точка + текст на нейтральной поверхности. */
 export function StatusBox({
   tone,
   children,
@@ -54,12 +55,9 @@ export function StatusBox({
   children: React.ReactNode;
 }) {
   const isError = tone === 'error';
-  const toneClass = isError
-    ? 'border-red-200 bg-red-50 text-red-700'
-    : 'border-gray-200 bg-blue-50/40 text-gray-600';
   return (
     <div
-      className={`flex items-start gap-2.5 rounded-lg border px-4 py-3 text-sm ${toneClass}`}
+      className={`ve2-nt ${isError ? 've2-nt-err' : 've2-nt-info'} flex items-start gap-2.5 px-4 py-3 text-sm`}
       role={isError ? 'alert' : undefined}
     >
       <StatusDot tone={isError ? 'err' : 'info'} className="mt-[7px] shrink-0" />
@@ -69,7 +67,7 @@ export function StatusBox({
 }
 
 /**
- * Подсветка операторов персонализации {{var}} янтарной плашкой.
+ * Подсветка операторов персонализации {{var}} моно-чипом.
  * Регексп — тот же, что в боевой экстракции операторов (OPERATOR_RE):
  * split с единственной capture-группой отдаёт чётные части как текст,
  * нечётные — имена операторов (без скобок).
@@ -80,7 +78,7 @@ export function OperatorText({ text, className }: { text: string; className?: st
     <span className={className}>
       {parts.map((part, i) =>
         i % 2 === 1 ? (
-          <mark key={i} className="rounded bg-amber-100 px-0.5 font-mono text-[0.92em] text-amber-800">
+          <mark key={i} className="ve2-op">
             {`{{${part}}}`}
           </mark>
         ) : (
@@ -91,10 +89,10 @@ export function OperatorText({ text, className }: { text: string; className?: st
   );
 }
 
-/** Бейдж процента потенциала: ≥50 зелёный, ≥25 янтарный, <25 серый. */
+/** Процент потенциала: ≥50 зелёный, ≥25 янтарный, <25 нейтральный. */
 export function PotentialBadge({ pct }: { pct: number }) {
-  const tone: BadgeTone = pct >= 50 ? 'emerald' : pct >= 25 ? 'amber' : 'gray';
-  return <Badge tone={tone}>{pct}%</Badge>;
+  const toneClass = pct >= 50 ? 've2-pct-hi' : pct >= 25 ? 've2-pct-mid' : 've2-pct-lo';
+  return <span className={`ve2-pct ${toneClass}`}>{pct}%</span>;
 }
 
 export const TIER_META: Record<VeHypothesisTier, { label: string; hint: string; tone: BadgeTone }> = {
@@ -106,9 +104,9 @@ export const TIER_META: Record<VeHypothesisTier, { label: string; hint: string; 
 export function TierBadge({ tier }: { tier: VeHypothesisTier }) {
   const meta = TIER_META[tier] ?? TIER_META[3];
   return (
-    <Badge tone={meta.tone} title={meta.hint}>
+    <span className={HE.tierText} title={meta.hint}>
       {meta.label}
-    </Badge>
+    </span>
   );
 }
 
@@ -124,7 +122,7 @@ export const PROJECT_STATUS_META: Record<
   failed: { label: 'Ошибка', tone: 'red', dot: 'err' },
 };
 
-/** Статус проекта: пилюля с цветной точкой и подписью. */
+/** Статус проекта: цветная точка + моно-тег. */
 export function ProjectStatusBadge({ status }: { status: VeProjectStatus }) {
   const meta = PROJECT_STATUS_META[status] ?? PROJECT_STATUS_META.draft;
   return (

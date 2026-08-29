@@ -394,7 +394,7 @@ export function Step4Base(props: {
         финальный шаблон.
       </p>
 
-      <div className="grid grid-cols-2 gap-1 rounded-lg border border-gray-200 bg-gray-50 p-1" role="tablist" aria-label="Способ подготовки базы">
+      <div className="ve2-tabs" role="tablist" aria-label="Способ подготовки базы">
         <button
           id="ve-base-tab-auto"
           type="button"
@@ -402,9 +402,7 @@ export function Step4Base(props: {
           aria-selected={baseMode === 'auto'}
           aria-controls="ve-base-panel-auto"
           onClick={() => setBaseMode('auto')}
-          className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
-            baseMode === 'auto' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'
-          }`}
+          className="ve2-tab"
         >
           <Database aria-hidden className="h-4 w-4" />
           Собрать автоматически
@@ -416,9 +414,7 @@ export function Step4Base(props: {
           aria-selected={baseMode === 'upload'}
           aria-controls="ve-base-panel-upload"
           onClick={() => setBaseMode('upload')}
-          className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
-            baseMode === 'upload' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'
-          }`}
+          className="ve2-tab"
         >
           <Upload aria-hidden className="h-4 w-4" />
           Загрузить файл
@@ -478,7 +474,7 @@ export function Step4Base(props: {
                     onClick={() => setCollectLimit(l)}
                     aria-pressed={collectLimit === l}
                     className={`${HE.btnSmall} ${
-                      collectLimit === l ? 'border-blue-600! text-blue-600!' : ''
+                      collectLimit === l ? 've2-chip-on' : ''
                     }`}
                   >
                     {l.toLocaleString('ru-RU')}
@@ -536,9 +532,9 @@ export function Step4Base(props: {
             const file = e.dataTransfer.files?.[0];
             if (file) void handleFile(file);
           }}
-          className={`${HE.emptyState} flex w-full cursor-pointer flex-col items-center justify-center gap-1.5 px-4 py-8 transition hover:border-blue-300 hover:bg-blue-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 ${
+          className={`ve2-drop flex w-full cursor-pointer flex-col items-center justify-center gap-1.5 px-4 py-8 ${
             parsing ? 'pointer-events-none opacity-60' : ''
-          } ${dragOver ? 'border-blue-300 bg-blue-50/60' : ''}`}
+          } ${dragOver ? 've2-drop-on' : ''}`}
         >
           {parsing ? <Spinner className="h-5 w-5" /> : null}
           <span className="text-sm font-medium text-gray-700">
@@ -773,9 +769,9 @@ function BaseCard({ base, hypothesisTitle }: { base: VeBaseSummary; hypothesisTi
               {base.filename}
             </span>
             {base.source === 'auto' ? (
-              <span className={`${HE.pill} bg-blue-50 text-blue-700`}>авто</span>
+              <span className="ve2-tag">авто</span>
             ) : (
-              <span className={`${HE.pill} bg-gray-100 text-gray-500`}>загрузка</span>
+              <span className="ve2-tag">загрузка</span>
             )}
             {hypothesisTitle ? (
               <span className="max-w-[160px] truncate text-[11px] text-gray-500" title={hypothesisTitle}>
@@ -788,12 +784,12 @@ function BaseCard({ base, hypothesisTitle }: { base: VeBaseSummary; hypothesisTi
           </span>
         </span>
         {base.status === 'collecting' ? (
-          <span className="inline-flex items-center gap-1 text-[11px] text-blue-600">
+          <span className="ve2-st ve2-tg-warn">
             <Spinner className="h-3.5 w-3.5" />
             Собираем…
           </span>
         ) : base.status === 'analyzing' ? (
-          <span className="inline-flex items-center gap-1.5 text-[11px] text-amber-600">
+          <span className="ve2-st ve2-tg-warn">
             <StatusDot tone="warn" />
             Разбираем…
           </span>
@@ -968,7 +964,7 @@ function HypothesisPicker({
                   checked={checked.has(h.id)}
                   onChange={() => onToggle(h.id)}
                   disabled={rejected}
-                  className="h-3.5 w-3.5 shrink-0 accent-blue-600"
+                  className="ve2-cbx h-3.5 w-3.5 shrink-0"
                 />
                 <TierText tier={h.tier} />
                 <span className="min-w-0 flex-1 truncate text-xs text-gray-700" title={h.title}>
@@ -1042,11 +1038,11 @@ function CollectProgress({ base }: { base: VeBaseSummary }) {
   const shownLimit = limit ?? DEFAULT_COLLECT_LIMIT;
   return (
     <div className={`mt-3 p-4 ${HE.infoPanel}`}>
-      <p className="flex items-center gap-2 text-sm font-medium text-blue-800">
+      <p className="flex items-center gap-2 text-sm font-medium">
         <Spinner className="h-4 w-4" />
         Собираем базу…
       </p>
-      <p className="mt-1 text-xs text-blue-700/70">
+      <p className="ve2-faint mt-1">
         собираем до {shownLimit.toLocaleString('ru-RU')} строк
       </p>
       {hypotheses.length > 0 ? (
@@ -1113,9 +1109,9 @@ function BarList({
               </span>
               <span className="shrink-0 text-gray-500">{e.share_pct}%</span>
             </div>
-            <span className="mt-0.5 block h-1.5 overflow-hidden rounded-full bg-gray-200">
+            <span className="ve2-bar mt-0.5 block">
               <span
-                className="block h-full rounded-full bg-blue-400"
+                className="ve2-bar-f"
                 style={{ width: `${Math.min(100, Math.max(3, e.share_pct))}%` }}
               />
             </span>
@@ -1149,7 +1145,7 @@ function BaseAnalysisCards({ analysis }: { analysis: VeBaseAnalysis }) {
           </p>
           <div className="flex flex-wrap gap-1">
             {segments.map((s) => (
-              <span key={s} className="rounded bg-violet-100 px-1.5 py-0.5 text-[11px] text-violet-700">
+              <span key={s} className="ve2-chip">
                 {s}
               </span>
             ))}
