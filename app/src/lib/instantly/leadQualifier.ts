@@ -216,8 +216,10 @@ const CONTACT_REQUEST_PATTERNS = [
   /(?:контактное\s+лицо|ЛПР|лицо.*принимающ)/i,
 ];
 
-const STRUCTURED_AUTO_REPLY_MARKER_PATTERN =
-  /^(?:(?:это|this\s+is)\s+(?:an?\s+)?)?(?:автоматическ(?:ий\s+ответ|ое\s+(?:сообщение|уведомление))|automatic\s+(?:reply|response|message)|auto[\s-]?reply)(?=\s*(?:[.:,!;—–-]|$))/iu;
+const STRONG_STRUCTURED_AUTO_REPLY_MARKER_PATTERN =
+  /^(?:это\s+автоматическ(?:ий\s+ответ|ое\s+(?:сообщение|уведомление))|this\s+is\s+(?:an?\s+)?(?:automatic\s+(?:reply|response|message)|auto[\s-]?reply))(?=\s*(?:[.:,!;—–-]|$))/iu;
+const BARE_STRUCTURED_AUTO_REPLY_MARKER_PATTERN =
+  /^(?:автоматическ(?:ий\s+ответ|ое\s+(?:сообщение|уведомление))|automatic\s+(?:reply|response|message)|auto[\s-]?reply)(?=\s*(?:[.:,!;—–-]|$))/iu;
 const FIRST_PERSON_OUT_OF_OFFICE_PATTERN =
   /(?:я\s+(?:временно\s+)?(?:буду\s+)?отсутств(?:ую|овать)|я\s+(?:сейчас\s+)?(?:в\s+отпуске|вне\s+офиса)|нахожусь\s+в\s+(?:командировке|отпуске)|i(?:'m|\s+am)\s+(?:currently\s+)?(?:away|out\s+of\s+office|on\s+(?:leave|vacation)))/iu;
 const EXPLICIT_UNSUBSCRIBE_PATTERN =
@@ -263,9 +265,14 @@ function hasStructuredAutoReplyMarker(text: string): boolean {
     .split(/\n+/u)
     .map((segment) => segment.trim())
     .filter(Boolean)
-    .slice(0, 2);
-  return leadingSegments.some((segment) =>
-    STRUCTURED_AUTO_REPLY_MARKER_PATTERN.test(segment),
+    .slice(0, 6);
+  return (
+    leadingSegments.some((segment) =>
+      STRONG_STRUCTURED_AUTO_REPLY_MARKER_PATTERN.test(segment),
+    ) ||
+    leadingSegments
+      .slice(0, 2)
+      .some((segment) => BARE_STRUCTURED_AUTO_REPLY_MARKER_PATTERN.test(segment))
   );
 }
 
@@ -277,8 +284,7 @@ function hasHumanReplyContinuation(text: string): boolean {
     hasRequestedFollowupMaterials(text) ||
     hasExplicitDeferredFollowup(text) ||
     hasSelfDirectedCooperationInterest(text) ||
-    hasStandaloneFutureCooperationInterest(text) ||
-    /\?/u.test(text)
+    hasStandaloneFutureCooperationInterest(text)
   );
 }
 

@@ -2633,6 +2633,7 @@ type RecoverableLeadQualification = {
   company_name: string | null;
   campaign_name: string | null;
   reply_subject: string | null;
+  reply_body: string | null;
   reply_preview: string | null;
   ai_reason: string | null;
   created_at: string;
@@ -2712,7 +2713,7 @@ export async function reconcileLeadNotificationDeliveries(
   while (true) {
     const { data: leadRows, error: leadRowsError } = await instantlyDb
       .from('instantly_lead_qualifications')
-      .select('id, campaign_id, qualified_project_id, qualified_project_owner_proven, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_preview, ai_reason, created_at, updated_at')
+      .select('id, campaign_id, qualified_project_id, qualified_project_owner_proven, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_body, reply_preview, ai_reason, created_at, updated_at')
       .eq('status', 'lead')
       .gte('created_at', recentCutoffIso)
       .order('updated_at', { ascending: true })
@@ -2743,6 +2744,25 @@ export async function reconcileLeadNotificationDeliveries(
     );
 
     for (const lead of leads) {
+      const replyBody = lead.reply_body ?? '';
+      const replyPreview = lead.reply_preview ?? '';
+      const storedReplyBody = replyBody.trim()
+        ? replyBody
+        : replyPreview.trim()
+          ? replyPreview
+          : '';
+      if (
+        storedReplyBody &&
+        classifyMachineReply({
+          from_address_email: lead.lead_email,
+          subject: lead.reply_subject ?? undefined,
+          body: { text: storedReplyBody },
+          content_preview: lead.reply_preview ?? undefined,
+        })
+      ) {
+        continue;
+      }
+
       const log = logsByQualificationId.get(lead.id) ?? null;
       if (log?.tg_sent === true) continue;
       if (!log) {

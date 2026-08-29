@@ -795,6 +795,104 @@ describe('qualifyReply — пер-проектное определение ли
     expect(res.isLead).toBe(false);
   });
 
+  it('распознаёт сильный auto-reply marker после приветствия и благодарности', async () => {
+    mockAiResult({
+      is_lead: true,
+      custom_criteria_matched: true,
+      reason: 'Модель ошибочно приняла телефон автоответчика за кастомный лид.',
+    });
+    const delayedMarkerReply = [
+      'Hello!',
+      'Thank you for your email.',
+      'This is an automatic response: your message will be reviewed shortly.',
+      'Phone: +1 555 123 4567',
+    ].join('\n');
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      leadCriteria: 'Если поделились именем и номером телефона — это лид.',
+      prefetchedContext: contextWithReply(delayedMarkerReply, outboundProposal, {
+        from_address_email: 'notifications@company.com',
+        subject: 'Re: proposal',
+      }),
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res).toMatchObject({
+      isLead: false,
+      customCriteriaMatched: false,
+      needsReview: false,
+    });
+  });
+
+  it('не блокирует голый заголовок automatic response в третьем человеческом абзаце', async () => {
+    mockAiResult({
+      is_lead: true,
+      interest_signals: ['запрос цены'],
+      reason: 'Получатель обсуждает функцию продукта и запросил цену.',
+    });
+    const humanProductReply = [
+      'Hello!',
+      'We are interested in your proposal.',
+      'Automatic response: this feature is supported in our current system.',
+      'Please send pricing.',
+    ].join('\n');
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(humanProductReply, outboundProposal),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.isLead).toBe(true);
+  });
+
+  it('оставляет OOO с дежурным вопросом и контактами машинным письмом', async () => {
+    mockAiResult({
+      is_lead: true,
+      custom_criteria_matched: true,
+      reason: 'Модель ошибочно приняла дежурный контакт за кастомный лид.',
+    });
+    const oooWithHelpQuestion = [
+      'Я сейчас в отпуске до 10 сентября.',
+      'По срочным вопросам пишите Ивану.',
+      'Нужна срочная помощь?',
+      'Телефон: +7 999 123-45-67',
+    ].join('\n');
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      leadCriteria: 'Если поделились именем и номером телефона — это лид.',
+      prefetchedContext: contextWithReply(oooWithHelpQuestion, outboundProposal),
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res.isLead).toBe(false);
+  });
+
+  it('передаёт в AI коммерческий вопрос внутри OOO', async () => {
+    mockAiResult({
+      is_lead: true,
+      interest_signals: ['запрос стоимости'],
+      reason: 'Получатель запросил стоимость.',
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(
+        'Я сейчас в отпуске до 10 сентября. Какая стоимость вашего решения?',
+        outboundProposal,
+      ),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.isLead).toBe(true);
+  });
+
   it.each([
     'Сейчас отсутствует возможность созвониться, но завтра давайте обсудим.',
     'Нас интересует автоматическая система, пришлите КП с ценами.',
