@@ -180,7 +180,17 @@ export function getBodyText(body: Email['body']): string {
     return (
       body.html
         .replace(/<br\s*\/?>/gi, '\n')
-        .replace(/<\/p>\s*<p[^>]*>/gi, '\n\n')
+        // Сохраняем структурную границу HTML-цитаты. Иначе footer исходящего
+        // письма (например, Unsubscribe) склеивается с живым ответом сверху.
+        .replace(/<blockquote\b[^>]*>/gi, '\n> ')
+        .replace(/<\/blockquote>/gi, '\n')
+        // HTML-only письма часто используют div/li/table вместо br/p. Без
+        // границ блоков соседние фразы склеиваются и технический шаблон нельзя
+        // надёжно отличить от содержательного ответа.
+        .replace(
+          /<\/?(?:p|div|li|ul|ol|table|thead|tbody|tfoot|tr|td|th|section|article|header|footer|blockquote|h[1-6])\b[^>]*>/gi,
+          '\n',
+        )
         .replace(/<[^>]+>/g, '')
         // Числовые сущности (&#1059; / &#x442;): mail.ru и часть клиентов шлют
         // html-only письма со ВСЕЙ кириллицей в таком виде — без декода в
@@ -206,10 +216,13 @@ const CONTACT_REQUEST_PATTERNS = [
   /(?:контактное\s+лицо|ЛПР|лицо.*принимающ)/i,
 ];
 
-const AUTO_REPLY_PATTERNS = [
-  /(?:автоматическ|automatic|auto[\s-]?reply|out\s+of\s+office|вне\s+офиса)/i,
-  /(?:отсутству|в\s+отпуске|нахожусь\s+в\s+(?:командировке|отпуске))/i,
-  /(?:unsubscribe|отписаться|больше\s+не\s+пишите|удалите\s+(?:мой|меня))/i,
+const STRUCTURED_AUTO_REPLY_MARKER_PATTERN =
+  /^(?:(?:это|this\s+is)\s+(?:an?\s+)?)?(?:автоматическ(?:ий\s+ответ|ое\s+(?:сообщение|уведомление))|automatic\s+(?:reply|response|message)|auto[\s-]?reply)(?=\s*(?:[.:,!;—–-]|$))/iu;
+const FIRST_PERSON_OUT_OF_OFFICE_PATTERN =
+  /(?:я\s+(?:временно\s+)?(?:буду\s+)?отсутств(?:ую|овать)|я\s+(?:сейчас\s+)?(?:в\s+отпуске|вне\s+офиса)|нахожусь\s+в\s+(?:командировке|отпуске)|i(?:'m|\s+am)\s+(?:currently\s+)?(?:away|out\s+of\s+office|on\s+(?:leave|vacation)))/iu;
+const EXPLICIT_UNSUBSCRIBE_PATTERN =
+  /(?:unsubscribe|отписаться|больше\s+не\s+пишите|удалите\s+(?:мой\s+(?:адрес|email|e-?mail)|меня))/iu;
+const RETIRED_MAILBOX_PATTERN =
   // Смена/закрытие почтового ящика: формальные уведомления «этот адрес больше
   // не работает, пишите на новый / вот контакты сотрудников». Список новых
   // контактов ИИ вероятностно читал как интерес («предоставили прямого HR») —
@@ -218,9 +231,9 @@ const AUTO_REPLY_PATTERNS = [
   // не попадает — его по-прежнему решает ИИ.
   // NB: JS `\w` не матчит кириллицу — суффиксы через [а-яё]; в зазоре
   // разрешены точки (внутри адреса вида mail.ru), перенос строки — граница.
-  /(?:почт|адрес|ящик|mailbox|e-?mail)[^\n]{0,60}(?:прекраща|прекрати|не\s+(?:обслуживается|используется|действует|работает)|is\s+no\s+longer)/i,
-  /(?:смен[аеуы]\s+(?:адреса|почты|электронной\s+почты)|официальн[а-яё]+\s+почт[а-яё]*\s+компании|просим\s+(?:вас\s+)?(?:вести\s+переписку|направлять\s+(?:письма|корреспонденцию|обращения)))/i,
-];
+  /(?:почт|адрес|ящик|mailbox|e-?mail)[^\n]{0,60}(?:прекраща|прекрати|не\s+(?:обслуживается|используется|действует|работает)|is\s+no\s+longer)/iu;
+const MAILBOX_CHANGE_NOTICE_PATTERN =
+  /(?:смен[аеуы]\s+(?:адреса|почты|электронной\s+почты)|официальн[а-яё]+\s+почт[а-яё]*\s+компании|просим\s+(?:вас\s+)?(?:вести\s+переписку|направлять\s+(?:письма|корреспонденцию|обращения)))/iu;
 
 export function isContactRequestOnly(text: string): boolean {
   if (!text || text.length < 10) return false;
@@ -229,7 +242,44 @@ export function isContactRequestOnly(text: string): boolean {
 
 export function isAutoReplyOrUnsubscribe(text: string): boolean {
   if (!text) return false;
-  return AUTO_REPLY_PATTERNS.some((p) => p.test(text));
+  if (EXPLICIT_UNSUBSCRIBE_PATTERN.test(text) || hasStructuredAutoReplyMarker(text)) {
+    return true;
+  }
+
+  // OOO и административные сообщения о почте сами по себе ещё не доказывают
+  // машинный ответ: человек мог добавить реальный вопрос, КП или следующий шаг.
+  if (hasHumanReplyContinuation(text)) return false;
+  return (
+    FIRST_PERSON_OUT_OF_OFFICE_PATTERN.test(text) ||
+    RETIRED_MAILBOX_PATTERN.test(text) ||
+    MAILBOX_CHANGE_NOTICE_PATTERN.test(text)
+  );
+}
+
+function hasStructuredAutoReplyMarker(text: string): boolean {
+  const leadingSegments = text
+    .replace(/\r\n?/g, '\n')
+    .replace(/([.!?])\s+(?=[\p{L}\p{N}])/gu, '$1\n')
+    .split(/\n+/u)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .slice(0, 2);
+  return leadingSegments.some((segment) =>
+    STRUCTURED_AUTO_REPLY_MARKER_PATTERN.test(segment),
+  );
+}
+
+function hasHumanReplyContinuation(text: string): boolean {
+  return (
+    hasActionableDirectCommercialRequest(text) ||
+    hasDirectActionableCta(text) ||
+    hasDirectPositiveInterest(text) ||
+    hasRequestedFollowupMaterials(text) ||
+    hasExplicitDeferredFollowup(text) ||
+    hasSelfDirectedCooperationInterest(text) ||
+    hasStandaloneFutureCooperationInterest(text) ||
+    /\?/u.test(text)
+  );
 }
 
 const JUNK_REPLY_EXACT = new Set([
@@ -571,6 +621,137 @@ function extractAuthoredReplyText(text: string): string {
     );
   });
   return lines.slice(0, boundaryIndex === -1 ? lines.length : boundaryIndex).join('\n').trim();
+}
+
+export type MachineReplyKind =
+  | 'auto_reply'
+  | 'delivery_failure'
+  | 'service_acknowledgement';
+
+const DELIVERY_SYSTEM_LOCAL_PART_PATTERN =
+  /^(?:postmaster|mailer[-_.]?daemon|mail[-_.]?daemon|mail[-_.]?system|mail[-_.]?delivery[-_.]?system|bounces?|bounce[-_.][a-z0-9._-]+|returned[-_.]?mail)$/i;
+const DELIVERY_FAILURE_SUBJECT_PATTERN =
+  /^(?:(?:re|fw|fwd):\s*)?(?:не\s+уда[её]тся\s+доставить|недоставленн(?:ое|ая)\s+(?:сообщение|почта)|ошибка\s+доставки|delivery\s+(?:status\s+notification|failed|failure)|mail\s+delivery\s+(?:failed|failure)|undeliver(?:able|ed)|returned\s+mail)\b/iu;
+const DELIVERY_FAILURE_BODY_PATTERN =
+  /(?:не\s+удалось\s+(?:выполнить\s+)?доставк|почтов(?:ый\s+ящик|ая\s+квота)[^\n.]{0,100}(?:переполнен|превышен)|mailbox[^\n.]{0,80}(?:full|over\s+quota)|quota\s*(?:exceeded|has\s+been\s+exceeded)|delivery\s+(?:has\s+)?failed|message\s+(?:was\s+)?not\s+delivered|recipient[^\n.]{0,100}(?:couldn'?t\s+be\s+reached|cannot\s+receive))/iu;
+const DELIVERY_DIAGNOSTIC_PATTERN =
+  /(?:диагностическ(?:ие|ая)\s+сведени|diagnostic\s+information|QuotaExceeded(?:Exception)?|STOREDRV|\b[45]\.\d\.\d\b|\b(?:421|450|451|452|550|551|552|553|554)\b)/iu;
+const SERVICE_ACK_SUBJECT_PATTERN =
+  /(?:обращени[ея][^\n]{0,50}(?:принят|получен|зарегистрирован)|запрос[^\n]{0,40}(?:принят|получен|зарегистрирован)|(?:support\s+)?(?:request|ticket)[^\n]{0,40}(?:received|accepted|registered|created))/iu;
+const SERVICE_RECEIPT_PATTERN =
+  /(?:ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)\s+(?:был[оа]?\s+)?(?:успешно\s+)?(?:зарегистрирован[оа]?|получен[оа]?|принят[оа]?)|(?:мы\s+)?(?:получили|зарегистрировали|приняли)\s+ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)|\byour\s+(?:request|message|email|ticket)\s+(?:has\s+been|was|is)\s+(?:received|registered|accepted|created)\b|\bwe\s+have\s+(?:received|registered|accepted|created)\s+your\s+(?:request|message|email|ticket)\b)/iu;
+const SERVICE_PROCESSING_PATTERN =
+  /(?:уже\s+работаем\s+над|обрабатыва[её]м\s+(?:ваш[еа]?\s+)?(?:запрос|обращение)|ответим\s+(?:вам\s+)?(?:в\s+ближайшее\s+время|как\s+можно\s+скорее)|специалист[^\n.]{0,80}(?:ответит|свяжется)|(?:our\s+)?(?:support\s+)?team[^\n.]{0,80}(?:is\s+working|will\s+(?:respond|reply|get\s+back))|we(?:'ll|\s+will)\s+(?:respond|reply|get\s+back)\s+(?:to\s+you\s+)?(?:shortly|soon))/iu;
+const SERVICE_CONTEXT_PATTERN =
+  /(?:служб[а-яё]*\s+поддержк|техническ[а-яё]*\s+поддержк|support\s+(?:service|team|desk)|help\s*desk|тикет|ticket|обращени)/iu;
+const SERVICE_ACK_GREETING_PATTERN =
+  /^(?:здравствуйте|добрый\s+(?:день|вечер|утро)|hello|hi|dear(?:\s+[\p{L} .'-]+)?)[!,.\s]*$/iu;
+const SERVICE_ACK_THANKS_PATTERN =
+  /^(?:(?:большое\s+)?спасибо|благодарим(?:\s+вас)?|thank\s+you|thanks)\s+(?:за|for)\s+(?:(?:ваше|your)\s+)?(?:обращени[ея]|сообщени[ея]|письм[оа]|запрос|contacting\s+us|your\s+(?:request|message|email))(?:\s+(?:в|к|into?)\s+)?(?:служб[уые]?\s+поддержк[иуы]|support(?:\s+(?:service|team|desk))?)?(?:\s+[\p{L}\p{N}._-]+){0,4}$/iu;
+const SERVICE_ACK_RECEIPT_SEGMENT_PATTERN =
+  /^(?:ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)\s+(?:был[оа]?\s+)?(?:успешно\s+)?(?:получен[оа]?|зарегистрирован[оа]?|принят[оа]?)(?:\s+и\s+(?:получен[оа]?|зарегистрирован[оа]?|принят[оа]?))*|(?:мы\s+)?(?:получили|зарегистрировали|приняли)\s+ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)|your\s+(?:request|message|email|ticket)\s+(?:(?:has\s+been|was|is)\s+)?(?:received|registered|accepted|created)(?:\s+and\s+(?:received|registered|accepted|created))*|we\s+have\s+(?:received|registered|accepted|created)\s+your\s+(?:request|message|email|ticket))$/iu;
+const SERVICE_ACK_PROCESSING_SEGMENT_PATTERN =
+  /^(?:(?:мы\s+)?(?:уже\s+)?работаем\s+над\s+(?:вашим|этим)\s+(?:вопросом|запросом|обращением)(?:\s+и\s+ответим(?:\s+вам)?\s+(?:в\s+ближайшее\s+время|как\s+можно\s+скорее))?|(?:наша|наш)?\s*(?:служба|команда|отдел)\s+(?:технической\s+)?поддержки\s+(?:ответит|свяжется)(?:\s+с\s+вами)?(?:\s+(?:в\s+ближайшее\s+время|как\s+можно\s+скорее))?|(?:our\s+)?(?:support\s+)?team\s+(?:is\s+working\s+on\s+(?:it|your\s+(?:request|ticket))|will\s+(?:respond|reply|get\s+back)(?:\s+to\s+you)?(?:\s+(?:shortly|soon))?)|we(?:'ll|\s+will)\s+(?:respond|reply|get\s+back)(?:\s+to\s+you)?(?:\s+(?:shortly|soon)))$/iu;
+const SERVICE_ACK_URGENT_CONTACT_PATTERN =
+  /^(?:если\s+(?:ваше\s+)?(?:обращение|сообщение|письмо|запрос|вопрос)\s+срочн(?:ое|ый),?\s*(?:пожалуйста,?\s*)?(?:свяжитесь\s+с\s+нами|позвоните\s+нам)|if\s+(?:your\s+)?(?:request|message|ticket|issue)\s+is\s+urgent,?\s*(?:please\s+)?(?:contact|call)\s+us)\s*:?$/iu;
+const SERVICE_ACK_MATERIALS_INSTRUCTION_PATTERN =
+  /^(?:(?:для|чтобы)\s+(?:дальнейшей\s+)?(?:обработки|рассмотрения)\s+(?:вашего\s+)?(?:обращения|запроса),?\s*(?:пожалуйста,?\s*)?(?:пришлите|предоставьте|направьте)\s+(?:нам\s+)?(?:дополнительн[а-яё]+\s+)?(?:информаци[юя]|материал[ыа]?|сведени[яй]|данн[ыеых]+)(?:\s+и\s+(?:дополнительн[а-яё]+\s+)?(?:информаци[юя]|материал[ыа]?|сведени[яй]|данн[ыеых]+))*|(?:to|in\s+order\s+to)\s+(?:process|review)\s+your\s+(?:request|ticket),?\s*(?:please\s+)?(?:send|provide)\s+(?:us\s+)?(?:additional\s+)?(?:information|materials|details|data)(?:\s+and\s+(?:additional\s+)?(?:information|materials|details|data))*)$/iu;
+const SERVICE_ACK_TICKET_ID_PATTERN =
+  /^(?:(?:номер|id)\s+(?:вашего\s+)?(?:обращения|запроса|тикета)|(?:request|ticket)\s+(?:number|id))\s*[:#№-]?\s*[a-z0-9._/-]+$/iu;
+const SERVICE_ACK_SIGNATURE_PATTERN =
+  /^(?:(?:служба|команда|отдел)\s+(?:технической\s+)?поддержки|(?:customer\s+|technical\s+)?support(?:\s+(?:team|desk|service))?)(?:\s+[\p{L}\p{N}._-]+){0,4}$/iu;
+const SERVICE_ACK_SIGNOFF_PATTERN =
+  /^(?:с\s+уважением|с\s+наилучшими\s+пожеланиями|kind\s+regards|best\s+regards|regards)$/iu;
+const SERVICE_ACK_CONTACT_ONLY_PATTERN =
+  /^(?:(?:телефон|тел\.?|phone|e-?mail|почта|сайт|website)\s*[:：]\s*)?(?:\+?[\d\s()+-]{6,}|[^\s@]+@[^\s@]+\.[^\s@]+|(?:https?:\/\/|www\.)?\p{L}[\p{L}\p{N}-]*(?:\.[\p{L}\p{N}-]+)+(?:\/\S*)?)$/iu;
+
+function normalizeServiceAcknowledgementSegment(rawSegment: string): string {
+  return rawSegment
+    .trim()
+    .replace(/^[>|]+\s*/u, '')
+    .replace(/[.!?,;:]+$/u, '')
+    .trim();
+}
+
+function isServiceAcknowledgementBoilerplateSegment(rawSegment: string): boolean {
+  const segment = normalizeServiceAcknowledgementSegment(rawSegment);
+  if (!segment || /^[—–\-_*=~\s]+$/u.test(segment)) return true;
+
+  return (
+    SERVICE_ACK_GREETING_PATTERN.test(segment) ||
+    SERVICE_ACK_THANKS_PATTERN.test(segment) ||
+    SERVICE_ACK_RECEIPT_SEGMENT_PATTERN.test(segment) ||
+    SERVICE_ACK_PROCESSING_SEGMENT_PATTERN.test(segment) ||
+    SERVICE_ACK_URGENT_CONTACT_PATTERN.test(segment) ||
+    SERVICE_ACK_MATERIALS_INSTRUCTION_PATTERN.test(segment) ||
+    SERVICE_ACK_TICKET_ID_PATTERN.test(segment) ||
+    SERVICE_ACK_SIGNATURE_PATTERN.test(segment) ||
+    SERVICE_ACK_SIGNOFF_PATTERN.test(segment) ||
+    SERVICE_ACK_CONTACT_ONLY_PATTERN.test(segment)
+  );
+}
+
+/**
+ * Признаём письмо чистым системным acknowledgement только когда каждый его
+ * содержательный сегмент относится к известному шаблону. Любой неизвестный
+ * остаток fail-open передаётся в AI, чтобы не потерять живой вопрос/интерес.
+ */
+function isPureServiceAcknowledgement(authoredBody: string): boolean {
+  const segments = authoredBody
+    .replace(/\r\n?/g, '\n')
+    .replace(/([.!?])\s+(?=[\p{L}\p{N}])/gu, '$1\n')
+    .split(/\n+/u);
+  return segments.every(isServiceAcknowledgementBoilerplateSegment);
+}
+
+/**
+ * Детерминированный шлюз только для доказанных машинных писем. Адреса вроде
+ * support@/info@ сами по себе ничего не решают: сомнительные и человеческие
+ * ответы продолжают идти в AI по обычным критериям.
+ */
+export function classifyMachineReply(
+  email: Pick<Email, 'from_address_email' | 'subject' | 'body' | 'content_preview'>,
+): MachineReplyKind | null {
+  const sender = (email.from_address_email ?? '').trim().toLowerCase();
+  const senderLocalPart = sender.split('@', 1)[0] ?? '';
+  const subject = (email.subject ?? '').trim();
+  const fullBody = getBodyText(email.body) || (email.content_preview ?? '');
+  const authoredBody = extractAuthoredReplyText(fullBody) || fullBody.trim();
+
+  const deliverySubject = DELIVERY_FAILURE_SUBJECT_PATTERN.test(subject);
+  const deliveryBody = DELIVERY_FAILURE_BODY_PATTERN.test(authoredBody);
+  const deliveryDiagnostics = DELIVERY_DIAGNOSTIC_PATTERN.test(authoredBody);
+  if (
+    DELIVERY_SYSTEM_LOCAL_PART_PATTERN.test(senderLocalPart) &&
+    (deliverySubject || deliveryBody || deliveryDiagnostics)
+  ) {
+    return 'delivery_failure';
+  }
+
+  const serviceReceipt = SERVICE_RECEIPT_PATTERN.test(authoredBody);
+  const serviceProcessing = SERVICE_PROCESSING_PATTERN.test(authoredBody);
+  const serviceContext = SERVICE_CONTEXT_PATTERN.test(`${subject}\n${authoredBody}`);
+  if (
+    serviceReceipt &&
+    (SERVICE_ACK_SUBJECT_PATTERN.test(subject) || (serviceProcessing && serviceContext)) &&
+    isPureServiceAcknowledgement(authoredBody)
+  ) {
+    return 'service_acknowledgement';
+  }
+
+  if (isAutoReplyOrUnsubscribe(authoredBody)) {
+    return 'auto_reply';
+  }
+
+  return null;
+}
+
+function machineReplyReason(kind: MachineReplyKind): string {
+  if (kind === 'delivery_failure') return 'Служебное уведомление о недоставке письма';
+  if (kind === 'service_acknowledgement') {
+    return 'Служебное подтверждение получения обращения';
+  }
+  return 'Автоответ или отписка';
 }
 
 function hasStandaloneSharedEmailLeadCriterion(leadCriteria?: string | null): boolean {
@@ -1941,13 +2122,14 @@ export async function qualifyReply(
   const replyText = getBodyText(ctx.replyEmail.body);
   const hasCustomCriteria = Boolean(aiOptions.leadCriteria?.trim());
 
-  if (isAutoReplyOrUnsubscribe(replyText)) {
+  const machineReply = classifyMachineReply(ctx.replyEmail);
+  if (machineReply) {
     return {
       isLead: false,
       customCriteriaMatched: false,
       proposalSeen: false,
       interestSignals: [],
-      reason: 'Автоответ или отписка',
+      reason: machineReplyReason(machineReply),
       confidence: 0.95,
       needsReview: false,
       objectionHandleable: false,

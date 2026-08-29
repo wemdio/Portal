@@ -4,7 +4,7 @@ import {
   qualifyReply,
   getBodyText,
   fetchBriefByCampaign,
-  isAutoReplyOrUnsubscribe,
+  classifyMachineReply,
   fetchThreadContext,
   type ThreadContext,
 } from './leadQualifier';
@@ -1523,14 +1523,16 @@ export async function qualifyOneReply(
 
   // Client-facing notification: DM the reply text to the client who owns this
   // campaign for any HUMAN reply — everything EXCEPT automated noise
-  // (out-of-office / auto-reply / unsubscribe). Deliberately does NOT filter
+  // (out-of-office / auto-reply / unsubscribe / delivery failures / service
+  // acknowledgements). Deliberately does NOT filter
   // short replies: a terse "ок"/"да" can be meaningful in an ongoing thread
   // (e.g. confirming a call time). Broader than the studio lead gate. Reuses the
-  // qualifier's own auto/OOO rule-check (runs before AI, so noise costs no AI).
+  // qualifier's own machine-message guard (runs before AI, so noise costs no AI).
   // `inserted?.id` (new qualification) is the send-once guard. Never throws.
+  const replyForMachineClassification = result.threadContext?.replyEmail ?? effectiveReply;
   const meaningfulForClient =
     !!replyText &&
-    !isAutoReplyOrUnsubscribe(replyText) &&
+    !classifyMachineReply(replyForMachineClassification) &&
     (!opts?.clientDmOnlyOnLead || status === 'lead');
   if (inserted?.id && meaningfulForClient) {
     await notifyClientOfReply(db, campaignId, {

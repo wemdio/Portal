@@ -16,6 +16,7 @@ const sendTestEmail = jest.fn();
 const qualifyReply = jest.fn();
 const fetchBriefByCampaign = jest.fn();
 const fetchThreadContext = jest.fn();
+const classifyMachineReply = jest.fn();
 const sendLeadTelegramAlert = jest.fn();
 const sendClientReplyTelegram = jest.fn();
 const postHandoffMessage = jest.fn();
@@ -59,6 +60,7 @@ jest.mock('@/lib/instantly/leadQualifier', () => ({
   qualifyReply: (...args: unknown[]) => qualifyReply(...args),
   fetchBriefByCampaign: (...args: unknown[]) => fetchBriefByCampaign(...args),
   fetchThreadContext: (...args: unknown[]) => fetchThreadContext(...args),
+  classifyMachineReply: (...args: unknown[]) => classifyMachineReply(...args),
   getBodyText: (body: Email['body']) => {
     if (!body) return '';
     if (typeof body === 'string') return body;
@@ -516,6 +518,7 @@ describe('pollAndQualifyReplies', () => {
     // null = контекст треда не восстановлен → кросс-клиентский guard скипается
     // (fail-open), тесты обычного потока не затрагиваются.
     fetchThreadContext.mockReset().mockResolvedValue(null);
+    classifyMachineReply.mockReset().mockReturnValue(null);
     qualifyReply.mockReset().mockResolvedValue({
       isLead: false,
       proposalSeen: true,
@@ -1808,6 +1811,66 @@ describe('pollAndQualifyReplies', () => {
     mod = await import('@/lib/instantly/leadQualificationWorker');
     await mod.pollAndQualifyReplies();
     expect(sendClientReplyTelegram).toHaveBeenCalledTimes(1);
+  });
+
+  it('suppresses client DM for a deterministically detected machine reply', async () => {
+    const listReply = replyEmail({
+      id: 'service-ack',
+      campaign_id: 'self-serve-campaign',
+      from_address_email: 'support@arttech.kz',
+      subject: 'ArtTech — обращение в поддержку принято',
+      body: { text: 'Короткий preview без достаточного контекста.' },
+    });
+    const fullReply = replyEmail({
+      ...listReply,
+      body: {
+        text: [
+          'Спасибо за обращение в службу поддержки ArtTech.',
+          'Ваш запрос получен и зарегистрирован.',
+          'Мы уже работаем над вашим вопросом и ответим в ближайшее время.',
+        ].join('\n'),
+      },
+    });
+    classifyMachineReply.mockImplementation((email: Email) =>
+      email === fullReply ? 'service_acknowledgement' : null,
+    );
+    qualifyReply.mockResolvedValueOnce({
+      isLead: false,
+      proposalSeen: false,
+      interestSignals: [],
+      reason: 'Служебное подтверждение получения обращения',
+      confidence: 1,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: fullReply,
+        threadEmails: [fullReply],
+        lastOutbound: null,
+      },
+    });
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          { client_user_id: 'client-7', resource_type: 'campaign', resource_id: 'self-serve-campaign', instantly_account_id: 'main' },
+        ],
+        client_reply_telegram_links: [
+          { client_user_id: 'client-7', chat_id: 111, enabled: true, leads_only: false },
+        ],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [listReply],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(classifyMachineReply).toHaveBeenCalledWith(fullReply);
+    expect(sendClientReplyTelegram).not.toHaveBeenCalled();
   });
 
   it('leads_only=true still DMs actual leads (with the client-criteria badge when their prompt decided)', async () => {
