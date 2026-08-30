@@ -2326,6 +2326,9 @@ def _format_heartbeat_caption(
     return "\n".join(parts)
 
 
+# NB: tg_outreach_jobs здесь намеренно нет — job `start` висит running всё
+# время работы кампании, счётчик дублировал tg_outreach_campaigns.
+# Зеркало: app/src/app/api/admin/active-jobs/route.ts
 _JOB_TABLES: list[tuple[str, str, list[str]]] = [
     *[
         (spec.table, spec.label, list(spec.active_statuses))
@@ -2333,7 +2336,6 @@ _JOB_TABLES: list[tuple[str, str, list[str]]] = [
     ],
     ("ai_caller_jobs",          "AI Звонилка",       ["pending", "running"]),
     ("ai_campaigns",            "AI Кампании",       ["running"]),
-    ("tg_outreach_jobs",        "TG Аутрич",         ["pending", "running"]),
     ("tg_outreach_campaigns",   "TG Кампании",       ["running"]),
     ("sales_copilot_jobs",      "Sales Copilot",     ["pending", "running"]),
 ]
