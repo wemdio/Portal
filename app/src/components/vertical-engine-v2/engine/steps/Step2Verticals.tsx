@@ -3,19 +3,17 @@
 /**
  * Шаг 2 мастера «Движка вертикалей» — выбор направления.
  * Карточки по rank: название, потенциал, короткое саммари; синонимы спрятаны
- * за «Подробнее», гипотезы с доказательствами — в раскрываемом блоке
- * (accept/reject как в старой доске, оптимистично через onPatchHypothesis).
- * Главное действие карточки — «Выбрать это направление →» (onSelectVertical).
- * Чтобы разметка десятков гипотез не утомляла: над доской фильтр-чипы и
- * «Свернуть/развернуть все», на карточке — тихий текст-коллапс до одной строки и
- * тихие массовые действия «принять все / отклонить все / сбросить».
+ * за «Подробнее», а гипотезы с доказательствами всегда видны и размечаются
+ * прямо в hairline-списке (оптимистично через onPatchHypothesis).
+ * Главное действие «Выбрать направление» находится в шапке карточки.
+ * Над доской — плоские фильтр-чипы, внутри карточки — тихие массовые действия
+ * «принять все / отклонить все / сбросить» с inline-подтверждением.
  * Под саммари — тихая строка «что уже собрано» по вертикали (цепочка, вокабуляр,
  * досье, база, шаблон); у гипотез, под которые собрана база, — метка «база».
  * Визуал — токены design.ts: без иконок, статусы точками, один синий акцент.
  */
 
 import { useMemo, useState, type JSX } from 'react';
-import { ArrowRight } from 'lucide-react';
 import type {
   VeHypothesis,
   VeHypothesisTier,
@@ -101,12 +99,7 @@ function TierText({ tier }: { tier: VeHypothesisTier }) {
 
 /** Пилюля процента потенциала: ≥50 изумрудная, ≥25 янтарная, <25 серая. */
 function PctPill({ pct }: { pct: number }) {
-  const tone =
-    pct >= 50
-      ? 've2-pct-hi'
-      : pct >= 25
-        ? 've2-pct-mid'
-        : 've2-pct-lo';
+  const tone = pct >= 50 ? 've2-pct-hi' : pct >= 25 ? 've2-pct-mid' : 've2-pct-lo';
   return (
     <span
       className={`ve2-pct ${tone}`}
@@ -176,9 +169,7 @@ export function Step2Verticals({
 
   // У джобы нет привязки к вертикали, поэтому заметку о досборке показываем
   // на выбранной карточке — именно под неё собираются материалы.
-  const buildActive = jobs.some(
-    (j) => BUILD_STAGES.has(j.stage) && (j.status === 'pending' || j.status === 'running'),
-  );
+  const buildActive = jobs.some((j) => BUILD_STAGES.has(j.stage) && (j.status === 'pending' || j.status === 'running'));
 
   // Готовые досье по вертикали — для строки цифр на карточке.
   // Досье приходят created_at desc: первое готовое и есть новейшее.
@@ -255,103 +246,90 @@ export function Step2Verticals({
     return set;
   }, [bases]);
 
-  // Фильтр-чипы над доской и набор свёрнутых карточек (по умолчанию все развёрнуты).
+  // Фильтр-чипы над доской. Карточки всегда раскрыты: сравнение направлений и
+  // доказательств не должно требовать дополнительных кликов.
   const [filter, setFilter] = useState<HypothesisFilter>('all');
-  const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(() => new Set());
-
-  const toggleCollapsed = (id: string) => {
-    setCollapsedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  if (sorted.length === 0) {
-    return (
-      <div className={HE.emptyState}>
-        <p className="text-sm font-medium text-gray-500">Вертикалей пока нет</p>
-        <p className={`mt-1 text-xs ${HE.muted}`}>
-          Дождитесь окончания исследования — направления появятся здесь.
-        </p>
-      </div>
-    );
-  }
+  const visibleHypothesesCount = useMemo(
+    () =>
+      sorted.reduce(
+        (sum, vertical) =>
+          sum + (hypothesesByVertical.get(vertical.id) ?? []).filter((h) => matchesFilter(h, filter)).length,
+        0,
+      ),
+    [filter, hypothesesByVertical, sorted],
+  );
 
   return (
-    <div className="max-w-6xl space-y-5">
-      <header className="border-b border-gray-200 pb-5">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <h2 className={HE.sectionTitle}>Найденные направления</h2>
-            <p className={`mt-1 ${HE.lead}`}>
-              {sorted.length} {pluralDirections(sorted.length)}. Сравните потенциал и доказательства,
-              затем выберите один фокус для писем и базы.
-            </p>
-          </div>
-          {selectedVerticalId ? (
-            <span className="rounded-md bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
-              Направление выбрано
-            </span>
-          ) : null}
+    <section className="ve2-sec" aria-labelledby="ve2-verticals-title">
+      <header className="ve2-sec-head">
+        <div>
+          <h2 id="ve2-verticals-title" className="ve2-eb">
+            01 → Найденные направления
+          </h2>
+          <p className={`mt-1.5 ${HE.muted}`}>
+            {sorted.length} {pluralDirections(sorted.length)}. Сравните потенциал и доказательства, затем выберите один
+            фокус для писем и базы.
+          </p>
         </div>
+        {selectedVerticalId ? (
+          <span className="ve2-st ve2-tg-ok">
+            <StatusDot tone="ok" />
+            Направление выбрано
+          </span>
+        ) : null}
       </header>
 
-      {/* Фильтр гипотез внутри карточек + свёртка всех карточек разом */}
-      <div className="sticky top-14 z-10 flex flex-wrap items-center gap-x-3 gap-y-2 ve2-filterbar p-2">
-        <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Фильтр гипотез">
-          {FILTER_CHIPS.map((chip) => (
-            <button
-              key={chip.id}
-              type="button"
-              onClick={() => setFilter(chip.id)}
-              aria-pressed={filter === chip.id}
-              className={`${HE.btnSmall} ${
-                filter === chip.id ? 've2-chip-on' : ''
-              }`}
-            >
-              {chip.label}
-            </button>
-          ))}
+      {sorted.length === 0 ? (
+        <div className={HE.emptyState}>
+          <p className="text-sm font-medium text-gray-500">Вертикалей пока нет</p>
+          <p className={`mt-1 text-xs ${HE.muted}`}>Дождитесь окончания исследования, направления появятся здесь.</p>
         </div>
-        <div className="ml-auto flex items-center gap-3 px-1">
-          <button
-            type="button"
-            onClick={() => setCollapsedIds(new Set(sorted.map((v) => v.id)))}
-            className={HE.btnQuiet}
-          >
-            Свернуть все
-          </button>
-          <button type="button" onClick={() => setCollapsedIds(new Set())} className={HE.btnQuiet}>
-            Развернуть все
-          </button>
-        </div>
-      </div>
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Фильтр гипотез">
+            {FILTER_CHIPS.map((chip) => (
+              <button
+                key={chip.id}
+                type="button"
+                onClick={() => setFilter(chip.id)}
+                aria-pressed={filter === chip.id}
+                className={`ve2-chip ${filter === chip.id ? 've2-chip-on' : ''}`}
+              >
+                {chip.label}
+              </button>
+            ))}
+            <span className={`ml-auto self-center ${HE.faint}`} aria-live="polite">
+              {visibleHypothesesCount} {pluralHypotheses(visibleHypothesesCount)} в выдаче
+            </span>
+          </div>
+          <p className={`mt-2.5 text-xs leading-relaxed ${HE.faint}`}>
+            Потенциал показывает привлекательность сегмента для аутрича, а не прогноз reply rate. T1: очевидная ЦА; T2:
+            смежный сегмент; T3: неочевидный рынок.
+          </p>
 
-      <div className="space-y-3">
-        {sorted.map((vertical) => (
-          <VerticalCard
-            key={vertical.id}
-            vertical={vertical}
-            hypotheses={hypothesesByVertical.get(vertical.id) ?? []}
-            filter={filter}
-            collapsed={collapsedIds.has(vertical.id)}
-            onToggleCollapsed={() => toggleCollapsed(vertical.id)}
-            selected={vertical.id === selectedVerticalId}
-            buildNote={vertical.id === selectedVerticalId && buildActive}
-            dossier={readyDossierByVertical.get(vertical.id) ?? null}
-            chain={readyChainByVertical.get(vertical.id) ?? null}
-            vocabReady={readyVocabVerticals.has(vertical.id)}
-            bases={basesByVertical.get(vertical.id) ?? []}
-            templateReady={readyTemplateVerticals.has(vertical.id)}
-            baseHypothesisIds={baseHypothesisIds}
-            onSelectVertical={onSelectVertical}
-            onPatchHypothesis={onPatchHypothesis}
-          />
-        ))}
-      </div>
-    </div>
+          <div className="mt-[18px] space-y-3.5">
+            {sorted.map((vertical) => (
+              <VerticalCard
+                key={vertical.id}
+                vertical={vertical}
+                hypotheses={hypothesesByVertical.get(vertical.id) ?? []}
+                filter={filter}
+                selected={vertical.id === selectedVerticalId}
+                buildNote={vertical.id === selectedVerticalId && buildActive}
+                dossier={readyDossierByVertical.get(vertical.id) ?? null}
+                chain={readyChainByVertical.get(vertical.id) ?? null}
+                vocabReady={readyVocabVerticals.has(vertical.id)}
+                bases={basesByVertical.get(vertical.id) ?? []}
+                templateReady={readyTemplateVerticals.has(vertical.id)}
+                baseHypothesisIds={baseHypothesisIds}
+                onSelectVertical={onSelectVertical}
+                onPatchHypothesis={onPatchHypothesis}
+              />
+            ))}
+          </div>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -361,8 +339,6 @@ function VerticalCard({
   vertical,
   hypotheses,
   filter,
-  collapsed,
-  onToggleCollapsed,
   selected,
   buildNote,
   dossier,
@@ -377,8 +353,6 @@ function VerticalCard({
   vertical: VeVertical;
   hypotheses: VeHypothesis[];
   filter: HypothesisFilter;
-  collapsed: boolean;
-  onToggleCollapsed: () => void;
   selected: boolean;
   buildNote: boolean;
   dossier: VeDossier | null;
@@ -395,24 +369,26 @@ function VerticalCard({
   const [showDetails, setShowDetails] = useState(false);
   // Какое массовое действие сейчас выполняется (спиннер на группе кнопок).
   const [busyAction, setBusyAction] = useState<HypothesisPatchStatus | null>(null);
+  const [rejectConfirmOpen, setRejectConfirmOpen] = useState(false);
 
   const total = hypotheses.length;
   const acceptedCount = hypotheses.filter((h) => h.status === 'accepted').length;
-  const visibleHypotheses =
-    filter === 'all' ? hypotheses : hypotheses.filter((h) => matchesFilter(h, filter));
+  const visibleHypotheses = filter === 'all' ? hypotheses : hypotheses.filter((h) => matchesFilter(h, filter));
+  const visibleAcceptedCount = visibleHypotheses.filter((h) => h.status === 'accepted').length;
   // Длинное саммари режется line-clamp-2: тогда «Подробнее» нужно даже без
   // синонимов — иначе хвост описания недоступен вовсе.
   const summaryLong = (vertical.summary?.length ?? 0) > 160;
+  const hypothesesTitleId = `ve2-hypotheses-${vertical.id}`;
+  const rejectConfirmTitleId = `ve2-reject-all-${vertical.id}`;
 
   // Массовая разметка всех гипотез вертикали — последовательно, чтобы не гнать
   // десятки PATCH параллельно; ошибки показывает родитель (actionError).
   const applyToAll = async (status: HypothesisPatchStatus) => {
-    if (status === 'rejected') {
-      const confirmed = window.confirm(`Отклонить все гипотезы направления «${vertical.name}»?`);
-      if (!confirmed) return;
-    }
     const targets = hypotheses.filter((h) => h.status !== status);
-    if (targets.length === 0) return;
+    if (targets.length === 0) {
+      if (status === 'rejected') setRejectConfirmOpen(false);
+      return;
+    }
     setBusyAction(status);
     try {
       for (const h of targets) {
@@ -420,94 +396,46 @@ function VerticalCard({
       }
     } finally {
       setBusyAction(null);
+      if (status === 'rejected') setRejectConfirmOpen(false);
     }
   };
 
   const busy = busyAction !== null;
 
   return (
-    <article className={`${HE.card} p-5 transition ${selected ? 've2-sel' : ''}`}>
-      {/* Шапка: rank, название, потенциал, выбор, массовые действия, свёртка */}
-      <div className="flex flex-wrap items-center gap-2">
-        {vertical.rank != null ? <span className={HE.rankNum}>{vertical.rank}</span> : null}
-        <h3 className="text-[15px] font-semibold text-gray-900">{vertical.name}</h3>
+    <article className={`ve2-panel px-5 py-[18px] transition ${selected ? 've2-sel' : ''}`}>
+      <header className="flex flex-wrap items-baseline gap-x-3.5 gap-y-2">
+        {vertical.rank != null ? <span className={HE.rankNum}>{String(vertical.rank).padStart(2, '0')}</span> : null}
+        <h3 className="text-base font-semibold text-gray-900">{vertical.name}</h3>
         <PctPill pct={vertical.potential_pct} />
         {typeof vertical.actual_reply_pct === 'number' ? (
           <span
             className="ve2-st ve2-tg-ok"
             title="Фактический reply rate запущенных кампаний вертикали (сверка прогноза с реальностью)"
           >
-            факт reply {vertical.actual_reply_pct}%{vertical.actual_sent ? ` · ${vertical.actual_sent.toLocaleString('ru-RU')} отправок` : ''}
+            факт reply {vertical.actual_reply_pct}%
+            {vertical.actual_sent ? ` · ${vertical.actual_sent.toLocaleString('ru-RU')} отправок` : ''}
           </span>
         ) : null}
-        {selected ? (
-          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600">
-            <StatusDot tone="ok" />
-            Выбрано
-          </span>
-        ) : null}
-        {collapsed && total > 0 ? (
-          <span className={`text-xs ${HE.muted}`}>
-            {total} {pluralHypotheses(total)} · {acceptedCount}/{total} принято
-          </span>
-        ) : null}
-        <div className="ml-auto flex items-center gap-2">
-          {!collapsed && total > 0 ? (
-            <div className="flex items-center gap-1.5" role="group" aria-label="Массовые действия с гипотезами">
-              {busy ? <Spinner className="mr-0.5 h-3.5 w-3.5" /> : null}
-              <button
-                type="button"
-                onClick={() => void applyToAll('accepted')}
-                disabled={busy || acceptedCount === total}
-                title="Принять все гипотезы направления"
-                className={HE.btnSmall}
-              >
-                принять все
-              </button>
-              <button
-                type="button"
-                onClick={() => void applyToAll('rejected')}
-                disabled={busy || hypotheses.every((h) => h.status === 'rejected')}
-                title="Отклонить все гипотезы направления"
-                className={HE.btnSmall}
-              >
-                отклонить все
-              </button>
-              <button
-                type="button"
-                onClick={() => void applyToAll('proposed')}
-                disabled={busy || hypotheses.every((h) => h.status === 'proposed')}
-                title="Сбросить разметку всех гипотез направления"
-                className={HE.btnSmall}
-              >
-                сбросить
-              </button>
-            </div>
-          ) : null}
-          <button
-            type="button"
-            onClick={onToggleCollapsed}
-            aria-expanded={!collapsed}
-            title={collapsed ? 'Развернуть карточку' : 'Свернуть карточку'}
-            className={HE.btnQuiet}
-          >
-            {collapsed ? 'Развернуть' : 'Свернуть'}
-          </button>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {selected ? (
+            <span className="ve2-st ve2-tg-ok">
+              <StatusDot tone="ok" />
+              Выбрано
+            </span>
+          ) : (
+            <button type="button" onClick={() => onSelectVertical(vertical.id)} className={HE.btnSmall}>
+              Выбрать направление
+            </button>
+          )}
         </div>
-      </div>
+      </header>
 
-      {!collapsed ? (
-        <>
-          {vertical.summary ? (
-            <p className={`mt-2 text-[13px] leading-relaxed text-gray-600 ${showDetails ? '' : 'line-clamp-2'}`}>
-              {vertical.summary}
-            </p>
-          ) : null}
-
-          {/* Цифры готового досье — компактная строка под саммари */}
-          {dossier ? <DossierStatRow dossier={dossier} /> : null}
-
-          {/* Что уже собрано по вертикали: цепочка/вокабуляр/досье/база/шаблон */}
+      <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1">
+        <span className={HE.faint}>
+          {visibleHypotheses.length} {pluralHypotheses(visibleHypotheses.length)} · {visibleAcceptedCount} принято
+        </span>
+        <div className="min-w-0 [&>p]:mt-0">
           <ArtifactStatRow
             chain={chain}
             vocabReady={vocabReady}
@@ -515,86 +443,135 @@ function VerticalCard({
             bases={bases}
             templateReady={templateReady}
           />
+        </div>
+      </div>
 
-          {/* Синонимы — за «Подробнее», чтобы не шуметь */}
-          {vertical.synonyms.length > 0 || summaryLong ? (
-            <div className="mt-2">
+      {vertical.summary ? (
+        <p className={`mt-2 text-[13px] leading-relaxed text-gray-600 ${showDetails ? '' : 'line-clamp-2'}`}>
+          {vertical.summary}
+        </p>
+      ) : null}
+
+      {dossier ? <DossierStatRow dossier={dossier} /> : null}
+
+      {vertical.synonyms.length > 0 || summaryLong ? (
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => setShowDetails((v) => !v)}
+            aria-expanded={showDetails}
+            className={HE.btnQuiet}
+          >
+            {showDetails ? 'Скрыть' : 'Подробнее'}
+          </button>
+          {showDetails && vertical.synonyms.length > 0 ? (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {vertical.synonyms.map((syn) => (
+                <span key={syn} className={HE.chip}>
+                  {syn}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {buildNote ? (
+        <p className={`mt-2 flex items-center gap-1.5 text-xs ${HE.muted}`} role="status">
+          <Spinner className="h-3 w-3" />
+          Собираем письма, вокабуляр и шаблон…
+        </p>
+      ) : null}
+
+      {total > 0 ? (
+        <section className="mt-4" aria-labelledby={hypothesesTitleId}>
+          <div className="flex flex-wrap items-center gap-x-3.5 gap-y-2 pb-1">
+            <h4 id={hypothesesTitleId} className="ve2-eb">
+              Гипотезы
+            </h4>
+            <span className={HE.faint}>
+              {filter === 'all' ? total : `${visibleHypotheses.length} из ${total}`} · принято {acceptedCount} / {total}
+            </span>
+            <div
+              className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-1"
+              role="group"
+              aria-label={`Массовые действия с гипотезами направления «${vertical.name}»`}
+            >
+              {busy ? <Spinner className="mr-0.5 h-3.5 w-3.5" /> : null}
               <button
                 type="button"
-                onClick={() => setShowDetails((v) => !v)}
-                aria-expanded={showDetails}
+                onClick={() => void applyToAll('accepted')}
+                disabled={busy || acceptedCount === total}
                 className={HE.btnQuiet}
               >
-                {showDetails ? 'Скрыть' : 'Подробнее'}
+                Принять все
               </button>
-              {showDetails && vertical.synonyms.length > 0 ? (
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {vertical.synonyms.map((syn) => (
-                    <span key={syn} className={HE.chip}>
-                      {syn}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
+              <button
+                type="button"
+                onClick={() => setRejectConfirmOpen(true)}
+                disabled={busy || hypotheses.every((h) => h.status === 'rejected')}
+                className={HE.btnQuiet}
+              >
+                Отклонить все
+              </button>
+              <button
+                type="button"
+                onClick={() => void applyToAll('proposed')}
+                disabled={busy || hypotheses.every((h) => h.status === 'proposed')}
+                className={HE.btnQuiet}
+              >
+                Сбросить
+              </button>
+            </div>
+          </div>
+
+          {rejectConfirmOpen ? (
+            <div
+              className="ve2-confirm"
+              role="alertdialog"
+              aria-labelledby={rejectConfirmTitleId}
+              aria-describedby={`${rejectConfirmTitleId}-description`}
+            >
+              <div className="min-w-0 flex-1">
+                <p id={rejectConfirmTitleId} className="font-semibold text-gray-900">
+                  Отклонить все гипотезы направления?
+                </p>
+                <p id={`${rejectConfirmTitleId}-description`} className={`mt-0.5 ${HE.muted}`}>
+                  Разметка пересчитает потенциал направления «{vertical.name}».
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void applyToAll('rejected')}
+                disabled={busy}
+                autoFocus
+                className="ve2-btn ve2-b-dan ve2-b-sm"
+              >
+                Да, отклонить
+              </button>
+              <button type="button" onClick={() => setRejectConfirmOpen(false)} disabled={busy} className={HE.btnQuiet}>
+                Отмена
+              </button>
             </div>
           ) : null}
 
-          {/* Гипотезы вертикали (список фильтруется чипами над доской) */}
-          {total > 0 ? (
-            <details className="group mt-3">
-              <summary className={`cursor-pointer list-none ${HE.btnQuiet}`}>
-                Гипотезы ({filter === 'all' ? total : `${visibleHypotheses.length} из ${total}`})
-                <span className={`text-xs ${HE.muted}`}> · принято {acceptedCount} / {total}</span>
-              </summary>
-              {visibleHypotheses.length > 0 ? (
-                <ul className="mt-3 space-y-2">
-                  {visibleHypotheses.map((h) => (
-                    <HypothesisItem
-                      key={h.id}
-                      hypothesis={h}
-                      onPatch={onPatchHypothesis}
-                      hasBase={baseHypothesisIds.has(h.id)}
-                    />
-                  ))}
-                </ul>
-              ) : (
-                <p className={`mt-2 text-xs ${HE.muted}`}>Под этот фильтр здесь ничего не попадает.</p>
-              )}
-            </details>
-          ) : null}
-
-          {/* Главное действие */}
-          <div className="mt-4">
-            <button
-              type="button"
-              onClick={() => onSelectVertical(vertical.id)}
-              disabled={selected}
-              className={
-                selected
-                  ? `inline-flex h-11 w-full items-center justify-center gap-2 px-5 text-sm font-medium text-emerald-700 ${HE.successPanel}`
-                  : `w-full ${HE.btnPrimary}`
-              }
-            >
-              {selected ? (
-                <>
-                  <StatusDot tone="ok" />
-                  Выбрано
-                </>
-              ) : (
-                <>
-                  Выбрать направление
-                  <ArrowRight aria-hidden className="h-4 w-4" />
-                </>
-              )}
-            </button>
-            {buildNote ? (
-              <p className={`mt-2 flex items-center justify-center gap-1.5 text-xs ${HE.muted}`}>
-                <Spinner className="h-3 w-3" />
-                Собираем письма, вокабуляр и шаблон…
-              </p>
-            ) : null}
-          </div>
-        </>
+          {visibleHypotheses.length > 0 ? (
+            <ul className="mt-1">
+              {visibleHypotheses.map((h) => (
+                <HypothesisItem
+                  key={h.id}
+                  hypothesis={h}
+                  onPatch={onPatchHypothesis}
+                  hasBase={baseHypothesisIds.has(h.id)}
+                />
+              ))}
+            </ul>
+          ) : (
+            <p className={`mt-1 border-t border-gray-200 py-3 text-xs ${HE.muted}`}>
+              Под этот фильтр здесь ничего не попадает.
+            </p>
+          )}
+        </section>
       ) : null}
     </article>
   );
@@ -716,91 +693,88 @@ function HypothesisItem({
 
   return (
     <li
-      className={`ve2-card p-3 transition ${
-        rejected
-          ? 'opacity-60'
-          : accepted
-            ? 've2-sel'
-            : ''
-      }`}
+      className={`ve2-check-row flex-wrap transition sm:flex-nowrap ${rejected ? 'opacity-60' : ''}`}
+      style={{
+        alignItems: 'flex-start',
+        borderTop: '1px solid var(--ve2-line)',
+        borderBottom: 0,
+      }}
     >
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <TierText tier={hypothesis.tier} />
-            <p className="text-sm font-semibold text-gray-900">{hypothesis.title}</p>
-            <PctPill pct={hypothesis.potential_pct} />
-            {hasBase ? (
-              <span title="Под эту гипотезу собрана база" className="ve2-tag">
-                база
-              </span>
-            ) : null}
-          </div>
-          {fitRationale ? (
-            <p className="ve2-soft ve2-mut mt-2 px-3 py-2 leading-relaxed">
-              <strong className="font-semibold text-gray-900">Почему это рынок:</strong> {fitRationale}
-            </p>
-          ) : null}
-          {hypothesis.description ? (
-            <p className="mt-1 text-sm leading-relaxed text-gray-600">{hypothesis.description}</p>
-          ) : null}
-          {hypothesis.seasonality ? (
-            <HypothesisSeasonalitySummary assessment={hypothesis.seasonality} />
+      <TierText tier={hypothesis.tier} />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+          <h5 className="text-sm font-semibold text-gray-900">{hypothesis.title}</h5>
+          <PctPill pct={hypothesis.potential_pct} />
+          {hasBase ? (
+            <span title="Под эту гипотезу собрана база" className="ve2-tag">
+              база
+            </span>
           ) : null}
         </div>
-        <div className="flex shrink-0 items-center gap-3">
-          <button
-            type="button"
-            onClick={() => onPatch(hypothesis.id, accepted ? 'proposed' : 'accepted')}
-            title={accepted ? 'Снять принятие' : 'Принять гипотезу'}
-            aria-pressed={accepted}
-            className={
-              accepted
-                ? 've2-b-quiet ve2-t-ok text-xs font-semibold underline underline-offset-4'
-                : 've2-b-quiet text-xs'
-            }
-          >
-            {accepted ? 'Принято' : 'Принять'}
-          </button>
-          <button
-            type="button"
-            onClick={() => onPatch(hypothesis.id, rejected ? 'proposed' : 'rejected')}
-            title={rejected ? 'Вернуть в предложенные' : 'Отклонить гипотезу'}
-            aria-pressed={rejected}
-            className={
-              rejected
-                ? 've2-b-quiet ve2-t-dan text-xs font-semibold'
-                : 've2-b-quiet text-xs'
-            }
-          >
-            {rejected ? 'Отклонено' : 'Отклонить'}
-          </button>
-        </div>
+        {fitRationale ? (
+          <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
+            <strong className="font-semibold text-gray-900">Почему это рынок:</strong> {fitRationale}
+          </p>
+        ) : null}
+        {hypothesis.description ? (
+          <p className="mt-1 text-sm leading-relaxed text-gray-600">{hypothesis.description}</p>
+        ) : null}
+        {hypothesis.seasonality ? <HypothesisSeasonalitySummary assessment={hypothesis.seasonality} /> : null}
+
+        {hypothesis.evidence.length > 0 ? (
+          <details className="ve2-details mt-2">
+            <summary>Доказательства ({hypothesis.evidence.length})</summary>
+            <ul className="grid gap-2 border-t border-dashed border-gray-200 pt-2">
+              {hypothesis.evidence.map((ev, ei) => (
+                <li key={ei} className="text-xs leading-relaxed">
+                  <p className="italic text-gray-500">«{ev.quote}»</p>
+                  <p className="mt-0.5 text-gray-500">{ev.claim}</p>
+                  <a href={ev.source_url} target="_blank" rel="noreferrer" className="ve2-src mt-1 inline-flex">
+                    {ev.source_url}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
       </div>
 
-      {hypothesis.evidence.length > 0 ? (
-        <details className="mt-2">
-          <summary className={`cursor-pointer list-none ${HE.btnQuiet}`}>
-            Доказательства ({hypothesis.evidence.length})
-          </summary>
-          <ul className="mt-2 space-y-2">
-            {hypothesis.evidence.map((ev, ei) => (
-              <li key={ei} className="text-xs leading-relaxed">
-                <p className="italic text-gray-500">«{ev.quote}»</p>
-                <p className="mt-0.5 text-gray-500">{ev.claim}</p>
-                <a
-                  href={ev.source_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="ve2-src mt-0.5 inline-block"
-                >
-                  {ev.source_url}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </details>
-      ) : null}
+      <div
+        className="ml-9 flex shrink-0 items-center gap-2 sm:ml-0 sm:flex-col sm:items-end"
+        role="group"
+        aria-label={`Разметка гипотезы «${hypothesis.title}»`}
+      >
+        {accepted ? (
+          <>
+            <span className="ve2-st ve2-tg-ok">
+              <StatusDot tone="ok" />
+              Принята
+            </span>
+            <button type="button" onClick={() => onPatch(hypothesis.id, 'proposed')} className={HE.btnQuiet}>
+              Вернуть
+            </button>
+          </>
+        ) : rejected ? (
+          <>
+            <span className="ve2-st ve2-tg-q">
+              <StatusDot tone="muted" />
+              Отклонена
+            </span>
+            <button type="button" onClick={() => onPatch(hypothesis.id, 'proposed')} className={HE.btnQuiet}>
+              Вернуть
+            </button>
+          </>
+        ) : (
+          <>
+            <button type="button" onClick={() => onPatch(hypothesis.id, 'accepted')} className={HE.btnQuiet}>
+              Принять
+            </button>
+            <button type="button" onClick={() => onPatch(hypothesis.id, 'rejected')} className="ve2-b-quiet ve2-b-dan">
+              Отклонить
+            </button>
+          </>
+        )}
+      </div>
     </li>
   );
 }

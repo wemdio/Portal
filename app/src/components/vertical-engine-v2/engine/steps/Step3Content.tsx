@@ -16,11 +16,7 @@ import type {
   VeVocab,
   VeVertical,
 } from '@/lib/verticalEngineV2/types';
-import {
-  decideEditorExit,
-  EDITOR_EXIT_MESSAGE,
-  type EditorExitIntent,
-} from '@/lib/verticalEngineV2/editorDirtyGuard';
+import { decideEditorExit, EDITOR_EXIT_MESSAGE, type EditorExitIntent } from '@/lib/verticalEngineV2/editorDirtyGuard';
 import { VE_API, veEnginePatch } from '../api';
 import type {
   VeChainDto,
@@ -31,16 +27,14 @@ import type {
   VeJobSummary,
   VeLetterVariant,
 } from '../api';
-import { HE, Spinner, StatusDot } from '../design';
-import { Badge, PotentialBadge, StatusBox, type BadgeTone } from '../ui';
+import { HE, Spinner } from '../design';
+import { Badge, OperatorText, StatusBox, type BadgeTone } from '../ui';
 
 const LANG_OPTIONS: Array<{ value: VeChainLanguage; label: string }> = [
   { value: 'ru', label: 'RU' },
   { value: 'en', label: 'EN' },
   { value: 'pl', label: 'PL' },
 ];
-
-const LANG_LABEL: Record<string, string> = { ru: 'RU', en: 'EN', pl: 'PL' };
 
 const KIND_ORDER: VeCompanyTypeKind[] = ['canonical', 'synonym', 'geo_variant', 'adjacent', 'slang'];
 
@@ -67,8 +61,7 @@ type ContentPanel = 'chain' | 'vocab' | 'dossier';
 function abVariants(letter: VeChainLetterDto): VeLetterVariant[] {
   if (!Array.isArray(letter.variants)) return [];
   return (letter.variants as unknown[]).filter(
-    (v): v is VeLetterVariant =>
-      typeof v === 'object' && v !== null && typeof (v as VeLetterVariant).body === 'string',
+    (v): v is VeLetterVariant => typeof v === 'object' && v !== null && typeof (v as VeLetterVariant).body === 'string',
   );
 }
 
@@ -137,17 +130,8 @@ export function Step3Content(props: {
   /** Запуск сборки досье выбранной вертикали (POST /verticals/[id]/dossier). */
   onBuildDossier?: () => void;
 }): JSX.Element {
-  const {
-    vertical,
-    chains,
-    vocabs,
-    jobs,
-    onGenerateChain,
-    onGenerateVocab,
-    onGoToBase,
-    dossiers,
-    onBuildDossier,
-  } = props;
+  const { vertical, chains, vocabs, jobs, onGenerateChain, onGenerateVocab, onGoToBase, dossiers, onBuildDossier } =
+    props;
   const [language, setLanguage] = useState<VeChainLanguage>('ru');
   const [activePanel, setActivePanel] = useState<ContentPanel>('chain');
 
@@ -161,7 +145,10 @@ export function Step3Content(props: {
   // (другая цепочка, перегенерация, подтверждённый PATCH после поллинга)
   // автоматически возвращают вид к основному варианту — без эффекта-сброса.
   const chainKey = chain ? `${chain.id}:${chain.updated_at}` : '';
-  const [variantView, setVariantView] = useState<{ key: string; map: Record<number, number> }>({
+  const [variantView, setVariantView] = useState<{
+    key: string;
+    map: Record<number, number>;
+  }>({
     key: '',
     map: {},
   });
@@ -176,7 +163,10 @@ export function Step3Content(props: {
 
   // Инлайн-редактор письма: какое письмо открыто. Ключуется цепочкой, как
   // variantView: свежие данные с сервера автоматически закрывают редактор.
-  const [editorState, setEditorState] = useState<{ key: string; idx: number } | null>(null);
+  const [editorState, setEditorState] = useState<{
+    key: string;
+    idx: number;
+  } | null>(null);
   const editorIdx = editorState && editorState.key === chainKey ? editorState.idx : null;
   // Несохранённые правки открытого редактора (репорт из ChainLetterEditor в ref —
   // мутация ref из дочернего рендера безопасна, setState родителя — нет).
@@ -193,24 +183,17 @@ export function Step3Content(props: {
   // Единая политика выхода из редактора при несохранённых правках (см.
   // editorDirtyGuard). true = действие продолжается; при clear редактор
   // закрывается, а правки отменяются.
-  const requestEditorExit = useCallback(
-    (intent: EditorExitIntent): boolean => {
-      const { confirm, clear } = decideEditorExit(intent, editorDirtyRef.current);
-      if (confirm && !window.confirm(EDITOR_EXIT_MESSAGE)) return false;
-      if (clear) {
-        editorDirtyRef.current = false;
-        setEditorState(null);
-      }
-      return true;
-    },
-    [],
-  );
+  const requestEditorExit = useCallback((intent: EditorExitIntent): boolean => {
+    const { confirm, clear } = decideEditorExit(intent, editorDirtyRef.current);
+    if (confirm && !window.confirm(EDITOR_EXIT_MESSAGE)) return false;
+    if (clear) {
+      editorDirtyRef.current = false;
+      setEditorState(null);
+    }
+    return true;
+  }, []);
 
-  const letters = chain
-    ? lettersOverride?.chainKey === chainKey
-      ? lettersOverride.letters
-      : chain.letters
-    : [];
+  const letters = chain ? (lettersOverride?.chainKey === chainKey ? lettersOverride.letters : chain.letters) : [];
 
   // Полная замена писем цепочки (редактирование/добавление): PATCH {letters},
   // нормализованный сервером массив из ответа кладём в override.
@@ -264,7 +247,11 @@ export function Step3Content(props: {
     const prevWait = Math.max(0, letters[letters.length - 1]?.wait_days ?? 0);
     const next: VeChainLetterDto[] = [
       ...letters,
-      { subject: null, body: 'Здравствуйте!\n\n', wait_days: Math.min(90, prevWait + 2) },
+      {
+        subject: null,
+        body: 'Здравствуйте!\n\n',
+        wait_days: Math.min(90, prevWait + 2),
+      },
     ];
     const saved = await saveLetters(next);
     if (saved) setEditorState({ key: chainKey, idx: next.length - 1 });
@@ -328,8 +315,7 @@ export function Step3Content(props: {
 
   const chainJob = useMemo(() => latestStageJob(jobs, 'chain'), [jobs]);
   const vocabJob = useMemo(() => latestStageJob(jobs, 'vocab'), [jobs]);
-  const chainBusy =
-    jobActive(chainJob) || chain?.status === 'generating' || chain?.status === 'pending';
+  const chainBusy = jobActive(chainJob) || chain?.status === 'generating' || chain?.status === 'pending';
   const vocabBusy = jobActive(vocabJob);
   const chainFailed = !chainBusy && (chainJob?.status === 'failed' || chain?.status === 'failed');
   const vocabFailed = !vocabBusy && vocabJob?.status === 'failed';
@@ -346,7 +332,11 @@ export function Step3Content(props: {
   // чужая dossier-джоба показывала бы busy/error на карточке этой вертикали.
   // Джобы без payload (старые строки) вертикали не соответствуют.
   const dossierJob = useMemo(
-    () => latestStageJob(jobs.filter((j) => j.payload?.vertical_id === vertical.id), 'dossier'),
+    () =>
+      latestStageJob(
+        jobs.filter((j) => j.payload?.vertical_id === vertical.id),
+        'dossier',
+      ),
     [jobs, vertical.id],
   );
   // Дедупликация: кнопка выключена, пока джоба досье pending/running (или строка ещё draft).
@@ -355,25 +345,28 @@ export function Step3Content(props: {
   const dossierReady = !dossierBusy && dossier?.status === 'ready' && dossier.data ? dossier.data : null;
 
   return (
-    <div className="max-w-6xl space-y-5">
-      {/* Контекст шага */}
-      <header className="border-b border-gray-200 pb-5">
-        <div className="flex flex-wrap items-center gap-2">
-          <h2 className={HE.sectionTitle}>{vertical.name}</h2>
-          <PotentialBadge pct={vertical.potential_pct} />
-        </div>
-        <p className={`mt-1 ${HE.lead}`}>
-          Черновые материалы под это направление. Боевой текст собирается на шаге 4–5 из загруженной
-          базы.
-        </p>
-      </header>
-
+    <div className="space-y-5">
       <div className="ve2-tabs" role="tablist" aria-label="Материалы вертикали">
-        {([
-          { id: 'chain' as const, label: 'Цепочка писем', ready: Boolean(chain), busy: chainBusy },
-          { id: 'vocab' as const, label: 'Вокабуляр', ready: Boolean(vocab), busy: vocabBusy },
-          { id: 'dossier' as const, label: 'Досье', ready: Boolean(dossierReady), busy: dossierBusy },
-        ]).map((item) => (
+        {[
+          {
+            id: 'chain' as const,
+            label: 'Цепочка писем',
+            ready: Boolean(chain),
+            busy: chainBusy,
+          },
+          {
+            id: 'vocab' as const,
+            label: 'Вокабуляр',
+            ready: Boolean(vocab),
+            busy: vocabBusy,
+          },
+          {
+            id: 'dossier' as const,
+            label: 'Досье',
+            ready: Boolean(dossierReady),
+            busy: dossierBusy,
+          },
+        ].map((item) => (
           <button
             key={item.id}
             id={`ve-content-tab-${item.id}`}
@@ -386,8 +379,14 @@ export function Step3Content(props: {
             }}
             className="ve2-tab shrink-0"
           >
-            <StatusDot tone={item.busy ? 'info' : item.ready ? 'ok' : 'muted'} className={item.busy ? 'motion-safe:animate-pulse' : undefined} />
             {item.label}
+            <span
+              className={`ve2-tab-status ${
+                item.busy ? 've2-t-w motion-safe:animate-pulse' : item.ready ? 've2-t-ok' : ''
+              }`}
+            >
+              {item.busy ? 'сборка' : item.ready ? 'готово' : 'нет'}
+            </span>
           </button>
         ))}
       </div>
@@ -398,19 +397,16 @@ export function Step3Content(props: {
         role="tabpanel"
         aria-labelledby="ve-content-tab-chain"
         hidden={activePanel !== 'chain'}
-        className={`${HE.card} ${HE.cardPad}`}
+        className="ve2-sec"
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h3 className={HE.secTitle}>Цепочка писем (черновик)</h3>
-              {chain ? (
-                <Badge tone="blue">{LANG_LABEL[chain.language] ?? chain.language.toUpperCase()}</Badge>
-              ) : null}
+              <p className="ve2-eb">
+                01 → Цепочка писем <span className="ve2-st ve2-tg-q">Черновик</span>
+              </p>
             </div>
-            <p className={`mt-1 text-xs ${HE.muted}`}>
-              Мастер-черновик. В рассылку не идёт — основа для шаблона.
-            </p>
+            <p className={`mt-1 text-xs ${HE.muted}`}>Мастер-черновик. В рассылку не идёт — основа для шаблона.</p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <select
@@ -443,16 +439,14 @@ export function Step3Content(props: {
         {chainFailed ? (
           <div className="mt-3">
             <StatusBox tone="error">
-              {chainJob?.error || 'Генерация цепочки завершилась ошибкой.'} Нажмите «Попробовать
-              снова».
+              {chainJob?.error || 'Генерация цепочки завершилась ошибкой.'} Нажмите «Попробовать снова».
             </StatusBox>
           </div>
         ) : null}
         {chainBusy ? (
           <div className="mt-3">
             <StatusBox tone="info">
-              Генерируем цепочку — обычно 1–3 минуты. Страницу можно не закрывать: доделается
-              сама.
+              Генерируем цепочку — обычно 1–3 минуты. Страницу можно не закрывать: доделается сама.
             </StatusBox>
           </div>
         ) : null}
@@ -464,7 +458,7 @@ export function Step3Content(props: {
         ) : null}
 
         {chain && letters.length > 0 ? (
-          <ol className="mt-4 max-w-3xl space-y-3">
+          <ol className="ve2-letter-sheet mt-4">
             {letters.map((letter, idx) => {
               // Открытый редактор заменяет карточку письма (правится только
               // основной вариант; A/B-показ других писем — read-only).
@@ -490,22 +484,48 @@ export function Step3Content(props: {
               }
               const variants = abVariants(letter);
               const view = viewMap[idx] ?? 0;
-              const shown =
-                view > 0 && variants[0]
-                  ? variants[0]
-                  : { subject: letter.subject, body: letter.body };
+              const shown = view > 0 && variants[0] ? variants[0] : { subject: letter.subject, body: letter.body };
               return (
-                <li key={idx} className={`${HE.card} p-4`}>
-                  <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                    <span className={`${HE.muted2} text-[11px] font-medium uppercase`}>
+                <li key={idx} className="ve2-letter">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                    <span className="ve2-eb">
                       Письмо {idx + 1}
                       {letter.wait_days > 0 ? ` · через ${letter.wait_days} дн.` : ''}
                     </span>
-                    {shown.subject ? (
-                      <p className="text-sm font-semibold text-gray-900">{shown.subject}</p>
-                    ) : (
-                      <p className="text-sm italic text-gray-500">Без темы</p>
-                    )}
+                    {variants.length > 0 ? (
+                      <>
+                        <div className="ve2-mini-seg" role="group" aria-label={`Вариант письма ${idx + 1}`}>
+                          {(['A', 'B'] as const).map((side, sideIdx) => (
+                            <button
+                              key={side}
+                              type="button"
+                              aria-pressed={view === sideIdx}
+                              disabled={variantBusy === idx}
+                              onClick={() => {
+                                if (!requestEditorExit('swapVariant')) return;
+                                setVariantView({
+                                  key: chainKey,
+                                  map: { ...viewMap, [idx]: sideIdx },
+                                });
+                              }}
+                            >
+                              {side}
+                            </button>
+                          ))}
+                        </div>
+                        <span className="ve2-faint">основной: A</span>
+                        {view !== 0 ? (
+                          <button
+                            type="button"
+                            disabled={variantBusy !== null}
+                            onClick={() => void makeVariantPrimary(idx)}
+                            className={HE.btnQuiet}
+                          >
+                            {variantBusy === idx ? 'Сохраняем…' : 'сделать основным'}
+                          </button>
+                        ) : null}
+                      </>
+                    ) : null}
                     <span className="ml-auto inline-flex items-center gap-3">
                       <button
                         type="button"
@@ -531,48 +551,15 @@ export function Step3Content(props: {
                       </button>
                     </span>
                   </div>
-                  {variants.length > 0 ? (
-                    <div className="mb-2 flex flex-wrap items-center gap-1.5">
-                      <div className="inline-flex items-center gap-1">
-                        {(['A', 'B'] as const).map((side, sideIdx) => (
-                          <button
-                            key={side}
-                            type="button"
-                            aria-pressed={view === sideIdx}
-                            disabled={variantBusy === idx}
-                            onClick={() => {
-                              if (!requestEditorExit('swapVariant')) return;
-                              setVariantView({ key: chainKey, map: { ...viewMap, [idx]: sideIdx } });
-                            }}
-                            className={`${HE.btnSmall} ${
-                              view === sideIdx ? 've2-chip-on' : ''
-                            }`}
-                          >
-                            {side}
-                          </button>
-                        ))}
-                      </div>
-                      {view === 0 ? (
-                        <span className="text-[10px] font-medium uppercase text-gray-500">
-                          основной
-                        </span>
-                      ) : (
-                        <>
-                          <span className="text-[10px] text-gray-500">основной: A</span>
-                          <button
-                            type="button"
-                            disabled={variantBusy !== null}
-                            onClick={() => void makeVariantPrimary(idx)}
-                            className={HE.btnQuiet}
-                          >
-                            {variantBusy === idx ? 'Сохраняем…' : 'сделать основным'}
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  ) : null}
-                  <p className="whitespace-pre-wrap text-[13.5px] leading-relaxed text-gray-700">
-                    {shown.body}
+                  {shown.subject ? (
+                    <p className="ve2-letter-subject">
+                      <OperatorText text={shown.subject} />
+                    </p>
+                  ) : (
+                    <p className="ve2-letter-subject ve2-faint italic">Без темы: идёт следом за предыдущим</p>
+                  )}
+                  <p className="ve2-letter-body">
+                    <OperatorText text={shown.body} />
                   </p>
                 </li>
               );
@@ -580,22 +567,35 @@ export function Step3Content(props: {
           </ol>
         ) : null}
         {chain && letters.length > 0 ? (
-          <div className="mt-3">
-            <button
-              type="button"
-              onClick={() => void addLetter()}
-              disabled={lettersSaving || chainBusy || letters.length >= 6}
-              className={HE.btnGhost}
-            >
-              {lettersSaving ? <Spinner className="h-3.5 w-3.5" /> : null}
-              Добавить письмо
-            </button>
+          <div className="ve2-step-footer">
+            {letters.length < 6 ? (
+              <button
+                type="button"
+                onClick={() => void addLetter()}
+                disabled={lettersSaving || chainBusy}
+                className="ve2-btn ve2-b-ghost ve2-b-sm"
+              >
+                {lettersSaving ? <Spinner className="h-3.5 w-3.5" /> : null}
+                Добавить письмо
+              </button>
+            ) : null}
+            <span className="ve2-faint">{letters.length} из 6 · следующая пауза +2 дня</span>
+            <span className="ml-auto">
+              <button
+                type="button"
+                onClick={() => {
+                  if (requestEditorExit('leaveStep')) onGoToBase();
+                }}
+                className={HE.btnPrimary}
+              >
+                Далее: база
+                <ArrowRight aria-hidden className="h-4 w-4" />
+              </button>
+            </span>
           </div>
         ) : null}
         {!chain && !chainBusy && !chainFailed ? (
-          <p className={`mt-4 text-xs ${HE.muted}`}>
-            Цепочки пока нет — выберите язык и нажмите «Сгенерировать».
-          </p>
+          <p className={`mt-4 text-xs ${HE.muted}`}>Цепочки пока нет — выберите язык и нажмите «Сгенерировать».</p>
         ) : null}
       </section>
 
@@ -605,22 +605,17 @@ export function Step3Content(props: {
         role="tabpanel"
         aria-labelledby="ve-content-tab-vocab"
         hidden={activePanel !== 'vocab'}
-        className={`${HE.card} ${HE.cardPad}`}
+        className="ve2-sec"
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <h3 className={HE.secTitle}>Вокабуляр для сбора базы</h3>
+            <p className="ve2-eb">01 → Вокабуляр для сбора базы</p>
             <p className={`mt-1 text-xs ${HE.muted}`}>
-              Технический слой: по этим терминам ищем компании и должности в HH/картах/реестрах. В
-              письмах не используется.
+              Технический слой: по этим терминам ищем компании и должности в HH/картах/реестрах. В письмах не
+              используется.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onGenerateVocab}
-            disabled={vocabBusy}
-            className={`shrink-0 ${HE.btnGhost}`}
-          >
+          <button type="button" onClick={onGenerateVocab} disabled={vocabBusy} className={`shrink-0 ${HE.btnGhost}`}>
             {vocabBusy ? <Spinner className="h-3.5 w-3.5" /> : null}
             {vocabFailed ? 'Попробовать снова' : vocab ? 'Перегенерировать' : 'Сгенерировать'}
           </button>
@@ -629,8 +624,7 @@ export function Step3Content(props: {
         {vocabFailed ? (
           <div className="mt-3">
             <StatusBox tone="error">
-              {vocabJob?.error || 'Генерация вокабуляра завершилась ошибкой.'} Нажмите «Попробовать
-              снова».
+              {vocabJob?.error || 'Генерация вокабуляра завершилась ошибкой.'} Нажмите «Попробовать снова».
             </StatusBox>
           </div>
         ) : null}
@@ -660,22 +654,17 @@ export function Step3Content(props: {
         role="tabpanel"
         aria-labelledby="ve-content-tab-dossier"
         hidden={activePanel !== 'dossier'}
-        className={`${HE.card} ${HE.cardPad}`}
+        className="ve2-sec"
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <h3 className={HE.secTitle}>Досье вертикали</h3>
+            <p className="ve2-eb">01 → Досье вертикали</p>
             <p className={`mt-1 text-xs ${HE.muted}`}>
               Размер широкого рыночного среза, активность найма и статистика наших кампаний.
             </p>
           </div>
           {onBuildDossier ? (
-            <button
-              type="button"
-              onClick={onBuildDossier}
-              disabled={dossierBusy}
-              className={`shrink-0 ${HE.btnGhost}`}
-            >
+            <button type="button" onClick={onBuildDossier} disabled={dossierBusy} className={`shrink-0 ${HE.btnGhost}`}>
               {dossierBusy ? <Spinner className="h-3.5 w-3.5" /> : null}
               {dossierFailed ? 'Попробовать снова' : dossierReady ? 'Пересобрать' : 'Собрать досье'}
             </button>
@@ -685,8 +674,7 @@ export function Step3Content(props: {
         {dossierFailed ? (
           <div className="mt-3">
             <StatusBox tone="error">
-              {dossier?.error || dossierJob?.error || 'Сборка досье завершилась ошибкой.'} Нажмите
-              «Попробовать снова».
+              {dossier?.error || dossierJob?.error || 'Сборка досье завершилась ошибкой.'} Нажмите «Попробовать снова».
             </StatusBox>
           </div>
         ) : null}
@@ -709,18 +697,20 @@ export function Step3Content(props: {
       </section>
 
       {/* Переход к шагу «База» — всегда доступен */}
-      <div className="flex justify-end">
-        <button
-          type="button"
-          onClick={() => {
-            if (requestEditorExit('leaveStep')) onGoToBase();
-          }}
-          className={HE.btnPrimary}
-        >
-          Далее: база
-          <ArrowRight aria-hidden className="h-4 w-4" />
-        </button>
-      </div>
+      {activePanel !== 'chain' || !chain || letters.length === 0 ? (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => {
+              if (requestEditorExit('leaveStep')) onGoToBase();
+            }}
+            className={HE.btnPrimary}
+          >
+            Далее: база
+            <ArrowRight aria-hidden className="h-4 w-4" />
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -778,20 +768,17 @@ function ChainLetterEditor({
   const isFirst = letterIndex === 0;
   // Кумулятивная подпись «от старта»: сумма пауз предыдущих писем + текущая.
   const totalDays = baseDays + (isFirst ? 0 : waitDays);
-  const startCaption =
-    totalDays === 0 ? 'Сразу' : `через ${totalDays} ${daysWord(totalDays)} от старта`;
+  const startCaption = totalDays === 0 ? 'Сразу' : `через ${totalDays} ${daysWord(totalDays)} от старта`;
 
   return (
-    <div className={`p-4 ${HE.infoPanel}`}>
+    <div className="ve2-letter-editor">
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <span className={`${HE.muted2} text-[11px] font-medium uppercase`}>
-          Письмо {letterIndex + 1}
-        </span>
-        <p className="text-sm font-semibold text-gray-900">Редактирование письма</p>
+        <span className="ve2-eb">Письмо {letterIndex + 1}</span>
+        <p className="ve2-h4">Редактирование письма</p>
         {isFirst ? (
-          <span className="text-xs text-gray-500">Отправка: сразу</span>
+          <span className="ve2-mut text-xs">Отправка: сразу</span>
         ) : (
-          <label className="inline-flex items-center gap-1.5 text-xs text-gray-500">
+          <label className="ve2-mut inline-flex items-center gap-1.5 text-xs">
             Отправка: через
             <input
               type="number"
@@ -803,18 +790,16 @@ function ChainLetterEditor({
                 setWaitDays(v);
                 markDirty();
               }}
-              className="w-16 rounded-lg border border-gray-200 px-2 py-1 text-center text-sm focus:border-blue-400 focus:outline-none"
+              className="ve2-input min-h-8 w-16 px-2 py-1 text-center text-sm"
             />
             {daysWord(waitDays)} после предыдущего
           </label>
         )}
-        <span className="text-[11px] text-gray-500">({startCaption})</span>
+        <span className="ve2-faint">({startCaption})</span>
       </div>
 
       <label className="block">
-        <span className={`mb-1 block ${HE.eyebrow}`}>
-          Тема письма
-        </span>
+        <span className={`mb-1 block ${HE.eyebrow}`}>Тема письма</span>
         <input
           value={subject}
           onChange={(e) => {
@@ -826,9 +811,7 @@ function ChainLetterEditor({
         />
       </label>
       <label className="mt-3 block">
-        <span className={`mb-1 block ${HE.eyebrow}`}>
-          Текст письма
-        </span>
+        <span className={`mb-1 block ${HE.eyebrow}`}>Текст письма</span>
         <textarea
           value={body}
           onChange={(e) => {
@@ -840,12 +823,7 @@ function ChainLetterEditor({
         />
       </label>
       <div className="mt-3 flex items-center justify-end gap-2">
-        <button
-          type="button"
-          onClick={onCancel}
-          disabled={saving}
-          className={HE.btnGhost}
-        >
+        <button type="button" onClick={onCancel} disabled={saving} className={HE.btnGhost}>
           Отмена
         </button>
         <button
@@ -922,13 +900,12 @@ function DossierSegmentCard({ data }: { data: VeDossierData }) {
             </div>
             {counters.directory_rows_total != null ? (
               <p className="mt-2 text-[11px] text-gray-500">
-                {counters.directory_rows_total.toLocaleString('ru-RU')} строк до дедупликации в
-                выбранном срезе.
+                {counters.directory_rows_total.toLocaleString('ru-RU')} строк до дедупликации в выбранном срезе.
               </p>
             ) : null}
             <p className="mt-1 text-[11px] leading-relaxed text-gray-500">
-              Это широкий срез директории, а не прогноз готовой базы. Email в справочнике ещё не
-              проверены; готовые к запуску адреса считаются после сборки и аудита.
+              Это широкий срез директории, а не прогноз готовой базы. Email в справочнике ещё не проверены; готовые к
+              запуску адреса считаются после сборки и аудита.
             </p>
             {counters.companies_note ? (
               <p className="mt-1 text-[11px] text-gray-500">{counters.companies_note}</p>
@@ -950,10 +927,7 @@ function DossierSegmentCard({ data }: { data: VeDossierData }) {
         ) : null}
         {counters.hh_vacancies_total != null ? (
           <div>
-            <DossierNum
-              value={counters.hh_vacancies_total.toLocaleString('ru-RU')}
-              caption="вакансий на hh.ru"
-            />
+            <DossierNum value={counters.hh_vacancies_total.toLocaleString('ru-RU')} caption="вакансий на hh.ru" />
             {counters.hh_vacancies_sample.length > 0 ? (
               <details className="group mt-1">
                 <summary className="cursor-pointer list-none text-[11px] font-medium text-gray-500 transition hover:text-gray-700 hover:underline">
@@ -1042,9 +1016,7 @@ function DossierDatasetCard({ data }: { data: VeDossierData }) {
       {ds.reply_pct != null || ds.baseline_pct != null ? (
         <div className="flex flex-wrap gap-6">
           {ds.reply_pct != null ? <DossierNum value={`${ds.reply_pct}%`} caption="reply в вертикали" /> : null}
-          {ds.baseline_pct != null ? (
-            <DossierNum value={`${ds.baseline_pct}%`} caption="в среднем по базе" />
-          ) : null}
+          {ds.baseline_pct != null ? <DossierNum value={`${ds.baseline_pct}%`} caption="в среднем по базе" /> : null}
         </div>
       ) : null}
       <p className="mt-2 text-[11px] text-gray-500">
@@ -1112,9 +1084,7 @@ function CompanyTypesCard({ companyTypes }: { companyTypes: VeCompanyType[] }) {
 
   return (
     <div className={`${HE.card} p-4`}>
-      <p className={`mb-2 ${HE.secTitle}`}>
-        Типы компаний ({companyTypes.length})
-      </p>
+      <p className={`mb-2 ${HE.secTitle}`}>Типы компаний ({companyTypes.length})</p>
       {grouped.length === 0 ? (
         <p className="text-xs text-gray-500">Пусто.</p>
       ) : (
@@ -1148,16 +1118,12 @@ function CompanyTypesCard({ companyTypes }: { companyTypes: VeCompanyType[] }) {
 
 function JobTitlesCard({ jobTitles }: { jobTitles: JobTitleRow[] }) {
   const hasSide = jobTitles.some((jt) => jt.audience_side);
-  const buyerRows = hasSide
-    ? jobTitles.filter((jt) => jt.audience_side !== 'campaign_target')
-    : jobTitles;
+  const buyerRows = hasSide ? jobTitles.filter((jt) => jt.audience_side !== 'campaign_target') : jobTitles;
   const targetRows = hasSide ? jobTitles.filter((jt) => jt.audience_side === 'campaign_target') : [];
 
   return (
     <div className={`${HE.card} p-4`}>
-      <p className={`mb-2 ${HE.secTitle}`}>
-        Должности ({jobTitles.length})
-      </p>
+      <p className={`mb-2 ${HE.secTitle}`}>Должности ({jobTitles.length})</p>
       {jobTitles.length === 0 ? (
         <p className="text-xs text-gray-500">Пусто.</p>
       ) : hasSide ? (
@@ -1197,10 +1163,7 @@ function JobTitlesTable({ title, rows }: { title?: string; rows: JobTitleRow[] }
                   {jt.alt_names && jt.alt_names.length > 0 ? (
                     <span className="flex flex-wrap gap-1">
                       {jt.alt_names.map((alt) => (
-                        <span
-                          key={alt}
-                          className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600"
-                        >
+                        <span key={alt} className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600">
                           {alt}
                         </span>
                       ))}
@@ -1232,9 +1195,7 @@ function QueriesCard({ queries }: { queries: VeVocab['search_queries'] }) {
 
   return (
     <div className={`${HE.card} p-4`}>
-      <p className={`mb-2 ${HE.secTitle}`}>
-        Поисковые запросы ({queries.length})
-      </p>
+      <p className={`mb-2 ${HE.secTitle}`}>Поисковые запросы ({queries.length})</p>
       {grouped.length === 0 ? (
         <p className="text-xs text-gray-500">Пусто.</p>
       ) : (

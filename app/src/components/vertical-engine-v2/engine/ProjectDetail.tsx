@@ -260,14 +260,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   };
   const wizardSteps: VeWizardStep[] = STEP_DEFS.map((def) => ({
     ...def,
-    state:
-      def.id === step
-        ? 'active'
-        : stepDone[def.id]
-          ? 'done'
-          : isStepLocked(def.id)
-            ? 'locked'
-            : 'available',
+    state: def.id === step ? 'active' : stepDone[def.id] ? 'done' : isStepLocked(def.id) ? 'locked' : 'available',
   }));
   const currentStep = STEP_DEFS.find((item) => item.id === step) ?? STEP_DEFS[0];
 
@@ -305,9 +298,11 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
     setActionError('');
     setCancelling(true);
     try {
-      const { ok, data } = await veEnginePost<{ ok?: boolean; cancelled?: number; error?: string }>(
-        `${VE_API}/projects/${projectId}/cancel`,
-      );
+      const { ok, data } = await veEnginePost<{
+        ok?: boolean;
+        cancelled?: number;
+        error?: string;
+      }>(`${VE_API}/projects/${projectId}/cancel`);
       if (!ok) {
         setActionError(data.error || 'Не удалось остановить задачи');
         return;
@@ -364,7 +359,10 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
       setActionError('');
       setDetail((prev) =>
         prev
-          ? { ...prev, hypotheses: (prev.hypotheses ?? []).map((h) => (h.id === id ? { ...h, status } : h)) }
+          ? {
+              ...prev,
+              hypotheses: (prev.hypotheses ?? []).map((h) => (h.id === id ? { ...h, status } : h)),
+            }
           : prev,
       );
       const { ok, data } = await veEngineCall<VeHypothesisResponse>(`${VE_API}/hypotheses/${id}`, {
@@ -383,7 +381,13 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
                 verticals: updatedVerticals
                   ? (prev.verticals ?? []).map((v) => {
                       const nv = updatedVerticals.find((x) => x.id === v.id);
-                      return nv ? { ...v, potential_pct: nv.potential_pct, rank: nv.rank } : v;
+                      return nv
+                        ? {
+                            ...v,
+                            potential_pct: nv.potential_pct,
+                            rank: nv.rank,
+                          }
+                        : v;
                     })
                   : prev.verticals,
               }
@@ -563,6 +567,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             base={selectedBase}
             jobs={jobs}
             onBuildTemplate={handleBuildTemplate}
+            onGoToContent={() => jumpTo(3)}
           />
         );
       }
@@ -574,6 +579,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             jobs={jobs}
             busy={researchRunning}
             onStartResearch={() => void runResearch()}
+            onGoToVerticals={() => jumpTo(2)}
             offerValue={savedOffer}
             onSaveOffer={saveOffer}
             cases={cases}
@@ -584,42 +590,36 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   }
 
   return (
-    <div ref={projectTopRef} className="text-left">
+    <div ref={projectTopRef} className="ve2-project text-left">
       {errorMsg && !detail ? <StatusBox tone="error">{errorMsg}</StatusBox> : null}
 
       {loading && !detail ? (
-        <div className="grid gap-6 lg:grid-cols-[248px_minmax(0,1fr)]">
-          <div className="h-96 rounded-lg border border-gray-200 bg-gray-50 motion-safe:animate-pulse" aria-hidden />
+        <div className="ve2-wiz">
+          <div className="ve2-skel h-96 motion-safe:animate-pulse" aria-hidden />
           <div className="space-y-3">
-            <div className="h-24 rounded-lg border border-gray-200 bg-gray-50 motion-safe:animate-pulse" aria-hidden />
-            <div className="h-80 rounded-lg border border-gray-200 bg-gray-50 motion-safe:animate-pulse" aria-hidden />
+            <div className="ve2-skel h-24 motion-safe:animate-pulse" aria-hidden />
+            <div className="ve2-skel h-80 motion-safe:animate-pulse" aria-hidden />
           </div>
         </div>
       ) : null}
 
       {detail ? (
-        <div className="grid gap-7 lg:grid-cols-[248px_minmax(0,1fr)] lg:gap-9 xl:gap-12">
-          <aside className="min-w-0 lg:sticky lg:top-6 lg:self-start lg:border-r lg:border-gray-200 lg:pr-6">
-            <button
-              type="button"
-              onClick={onBack}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md px-1.5 text-xs font-medium text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
-            >
+        <div className="ve2-wiz">
+          <aside className="ve2-rail min-w-0">
+            <button type="button" onClick={onBack} className="ve2-b-quiet inline-flex items-center gap-1.5">
               <ArrowLeft aria-hidden className="h-3.5 w-3.5" />
               Все проекты
             </button>
 
-            <div className="mt-4 border-b border-gray-200 pb-5">
+            <div className="mt-4 border-b pb-5 ve2-div">
               <div className="flex flex-wrap items-start justify-between gap-2 lg:block">
                 <h1
-                  className="min-w-0 line-clamp-2 break-words text-lg font-semibold text-gray-900 lg:line-clamp-1"
+                  className="ve2-rail-name min-w-0 line-clamp-2 break-words lg:line-clamp-1"
                   title={project ? prettyProjectName(project.name, project.website_url) : 'Проект'}
                 >
                   {project ? prettyProjectName(project.name, project.website_url) : 'Проект'}
                 </h1>
-                <div className="mt-2 lg:mt-2">
-                  {project ? <ProjectStatusBadge status={project.status} /> : null}
-                </div>
+                <div className="mt-2 lg:mt-2">{project ? <ProjectStatusBadge status={project.status} /> : null}</div>
               </div>
               {project ? (
                 <a
@@ -632,19 +632,17 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
                   <ExternalLink aria-hidden className="h-3 w-3 shrink-0" />
                 </a>
               ) : null}
-              <dl className="mt-4 grid grid-cols-2 gap-3 text-xs">
+              <dl className="ve2-kv mt-4">
                 <div>
-                  <dt className="text-gray-400">Гипотезы</dt>
-                  <dd className="mt-0.5 font-semibold tabular-nums text-gray-800">{hypotheses.length}</dd>
+                  <dt>Гипотезы</dt>
+                  <dd>{hypotheses.length}</dd>
                 </div>
                 <div>
-                  <dt className="text-gray-400">Вертикали</dt>
-                  <dd className="mt-0.5 font-semibold tabular-nums text-gray-800">{verticals.length}</dd>
+                  <dt>Вертикали</dt>
+                  <dd>{verticals.length}</dd>
                 </div>
               </dl>
-              {project ? (
-                <p className="mt-4 text-[11px] text-gray-400">Обновлено {formatDate(project.updated_at)}</p>
-              ) : null}
+              {project ? <p className="ve2-faint mt-4">Обновлено {formatDate(project.updated_at)}</p> : null}
             </div>
 
             <div className="mt-5">
@@ -652,19 +650,17 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             </div>
           </aside>
 
-          <section ref={contentTopRef} className="min-w-0 space-y-6">
-            <header className="flex flex-col justify-between gap-4 border-b border-gray-200 pb-5 sm:flex-row sm:items-start">
+          <section ref={contentTopRef} className="ve2-stage min-w-0 space-y-6">
+            <header className="ve2-stage-head">
               <div className="min-w-0">
                 <p className="ve2-eb">
                   Этап {String(step).padStart(2, '0')} из {STEP_DEFS.length}
                 </p>
-                <h2 className="mt-1 text-[25px] font-semibold leading-tight text-gray-950">
-                  {currentStep.label}
-                </h2>
+                <h2 className="ve2-stage-title mt-1">{currentStep.label}</h2>
                 <p className={`mt-1.5 ${HE.lead}`}>{currentStep.subtitle}</p>
                 {selectedVertical && step >= 3 ? (
-                  <p className="mt-2 text-xs text-gray-500">
-                    Фокус: <span className="font-medium text-gray-800">{selectedVertical.name}</span>
+                  <p className="ve2-stage-focus mt-2">
+                    Фокус: <span>{selectedVertical.name}</span>
                   </p>
                 ) : null}
               </div>
@@ -686,20 +682,18 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
               <section className={`px-4 py-3 ${HE.infoPanel}`}>
                 <div className="flex items-center justify-between gap-3">
                   <h3 className={HE.eyebrow}>С последнего визита</h3>
-                  <button
-                    type="button"
-                    onClick={dismissVisitBlock}
-                    className="ve2-b-quiet shrink-0 text-xs"
-                  >
+                  <button type="button" onClick={dismissVisitBlock} className="ve2-b-quiet shrink-0 text-xs">
                     Скрыть
                   </button>
                 </div>
                 <ul className="mt-2 space-y-1.5">
                   {visitItems.map((item) => (
-                    <li key={item.id} className="flex items-center gap-2 text-xs text-gray-600">
+                    <li key={item.id} className="ve2-mut flex items-center gap-2 text-xs">
                       <StatusDot tone={item.tone} className="shrink-0" />
-                      <span className="min-w-0 flex-1 truncate" title={item.text}>{item.text}</span>
-                      <span className="shrink-0 text-gray-500">{timeAgoRu(item.at)}</span>
+                      <span className="min-w-0 flex-1 truncate" title={item.text}>
+                        {item.text}
+                      </span>
+                      <span className="ve2-faint shrink-0">{timeAgoRu(item.at)}</span>
                     </li>
                   ))}
                 </ul>
@@ -717,12 +711,10 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
               </StatusBox>
             ) : null}
 
-            <div className="min-w-0">{renderStep()}</div>
+            <div className="ve2-step-body min-w-0">{renderStep()}</div>
 
-            <details className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-              <summary className={`cursor-pointer select-none transition hover:text-gray-700 ${HE.eyebrow}`}>
-                Технические подробности
-              </summary>
+            <details className="ve2-details">
+              <summary>Технические подробности</summary>
               <JobsDebugTable jobs={jobs} />
             </details>
           </section>
@@ -866,13 +858,23 @@ function collectVisitItems(detail: VeProjectDetailResponse, baselineIso: string)
 
   for (const c of detail.chains ?? []) {
     if (after(c.created_at)) {
-      items.push({ id: `chain-${c.id}`, tone: 'info', text: 'Сгенерирована цепочка', at: c.created_at });
+      items.push({
+        id: `chain-${c.id}`,
+        tone: 'info',
+        text: 'Сгенерирована цепочка',
+        at: c.created_at,
+      });
       coveredStages.add('chain');
     }
   }
   for (const v of detail.vocabs ?? []) {
     if (after(v.created_at)) {
-      items.push({ id: `vocab-${v.id}`, tone: 'info', text: 'Собран вокабуляр', at: v.created_at });
+      items.push({
+        id: `vocab-${v.id}`,
+        tone: 'info',
+        text: 'Собран вокабуляр',
+        at: v.created_at,
+      });
       coveredStages.add('vocab');
     }
   }
@@ -880,7 +882,12 @@ function collectVisitItems(detail: VeProjectDetailResponse, baselineIso: string)
     // У досье в DTO нет created_at — ближайшая метка готовности: data.computed_at.
     const readyAt = d.data?.computed_at;
     if (d.status === 'ready' && after(readyAt)) {
-      items.push({ id: `dossier-${d.id}`, tone: 'info', text: 'Готово досье', at: readyAt });
+      items.push({
+        id: `dossier-${d.id}`,
+        tone: 'info',
+        text: 'Готово досье',
+        at: readyAt,
+      });
       coveredStages.add('dossier');
     }
   }
@@ -892,13 +899,23 @@ function collectVisitItems(detail: VeProjectDetailResponse, baselineIso: string)
           : b.status === 'failed'
             ? `База «${b.filename}»: ошибка анализа`
             : `Загружена база «${b.filename}»`;
-      items.push({ id: `base-${b.id}`, tone: b.status === 'failed' ? 'err' : 'ok', text, at: b.created_at });
+      items.push({
+        id: `base-${b.id}`,
+        tone: b.status === 'failed' ? 'err' : 'ok',
+        text,
+        at: b.created_at,
+      });
       coveredStages.add('base_analyze');
     }
   }
   for (const t of detail.templates ?? []) {
     if (t.status === 'ready' && after(t.created_at)) {
-      items.push({ id: `template-${t.id}`, tone: 'ok', text: 'Готов шаблон', at: t.created_at });
+      items.push({
+        id: `template-${t.id}`,
+        tone: 'ok',
+        text: 'Готов шаблон',
+        at: t.created_at,
+      });
       coveredStages.add('template');
     }
   }

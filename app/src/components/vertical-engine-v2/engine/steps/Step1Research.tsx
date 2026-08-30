@@ -31,12 +31,32 @@ import {
 
 /** line — строка в чек-листе прогресса; name — короткое имя для сообщения об ошибке. */
 const RESEARCH_STAGES: Array<{ stage: VeStage; line: string; name: string }> = [
-  { stage: 'site_profile', line: 'Изучаем сайт клиента', name: 'Изучение сайта' },
+  {
+    stage: 'site_profile',
+    line: 'Изучаем сайт клиента',
+    name: 'Изучение сайта',
+  },
   { stage: 'competitors', line: 'Ищем конкурентов', name: 'Поиск конкурентов' },
-  { stage: 'brand_cloud', line: 'Разбираем клиентов конкурентов', name: 'Разбор клиентов конкурентов' },
-  { stage: 'hypotheses', line: 'Генерируем гипотезы рынков', name: 'Генерация гипотез' },
-  { stage: 'evidence', line: 'Проверяем каждую гипотезу источниками', name: 'Проверка гипотез' },
-  { stage: 'clustering', line: 'Собираем вертикали', name: 'Сборка вертикалей' },
+  {
+    stage: 'brand_cloud',
+    line: 'Разбираем клиентов конкурентов',
+    name: 'Разбор клиентов конкурентов',
+  },
+  {
+    stage: 'hypotheses',
+    line: 'Генерируем гипотезы рынков',
+    name: 'Генерация гипотез',
+  },
+  {
+    stage: 'evidence',
+    line: 'Проверяем каждую гипотезу источниками',
+    name: 'Проверка гипотез',
+  },
+  {
+    stage: 'clustering',
+    line: 'Собираем вертикали',
+    name: 'Сборка вертикалей',
+  },
 ];
 
 const RESEARCH_STAGE_SET: ReadonlySet<VeStage> = new Set(RESEARCH_STAGES.map((s) => s.stage));
@@ -54,6 +74,7 @@ export interface Step1ResearchProps {
   jobs: VeJobSummary[];
   busy: boolean;
   onStartResearch: () => void;
+  onGoToVerticals?: () => void;
   offerValue: string;
   onSaveOffer: (v: string) => Promise<void> | void;
   /** Эталон стиля (brief.style_override). Если не передан — читаем из project.brief. */
@@ -71,6 +92,7 @@ export function Step1Research({
   jobs,
   busy,
   onStartResearch,
+  onGoToVerticals,
   offerValue,
   onSaveOffer,
   styleValue,
@@ -78,6 +100,7 @@ export function Step1Research({
   cases,
   onCasesChanged,
 }: Step1ResearchProps): JSX.Element {
+  const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
   const status = project?.status;
   // Эталон стиля: приоритет у пропа, иначе — напрямую из brief проекта
   // (ProjectDetail может не передавать styleValue).
@@ -101,22 +124,23 @@ export function Step1Research({
 
   if (running) {
     return (
-      <section className={`max-w-3xl ${HE.card} ${HE.cardPad}`}>
-        <h2 className={`mb-4 ${HE.secTitle}`}>Идёт исследование…</h2>
+      <section className="ve2-panel max-w-[640px] p-6">
+        <div className="mb-2 flex items-baseline justify-between gap-3">
+          <h2 className={HE.secTitle}>Идёт исследование…</h2>
+          <span className="ve2-faint">прогресс обновляется автоматически</span>
+        </div>
         <StageChecklist jobs={jobs} running />
         {failedStages.length > 0 ? (
           <FailureNote failedStages={failedStages} jobs={jobs} busy={busy} onRetry={onStartResearch} />
         ) : null}
-        <p className={`mt-4 text-xs ${HE.muted}`}>
-          Это займёт несколько минут, страницу можно не держать открытой.
-        </p>
+        <p className={`mt-4 text-xs ${HE.muted}`}>Это займёт несколько минут, страницу можно не держать открытой.</p>
       </section>
     );
   }
 
   if (failed) {
     return (
-      <section className={`max-w-3xl ${HE.card} ${HE.cardPad}`}>
+      <section className="ve2-panel max-w-[640px] p-6">
         <h2 className={`mb-4 ${HE.secTitle}`}>Исследование остановилось</h2>
         <StageChecklist jobs={jobs} running={false} />
         <FailureNote
@@ -132,47 +156,57 @@ export function Step1Research({
 
   if (done) {
     return (
-      <section className="max-w-5xl">
+      <section>
         <div className={`flex items-start gap-3 px-4 py-3 ${HE.successPanel}`}>
           <StatusDot tone="ok" className="mt-1.5" />
           <div>
-            <p className="text-sm font-semibold text-emerald-800">Исследование готово</p>
-            <p className="mt-0.5 text-sm text-emerald-700">
-              Вертикали собраны — переходим к выбору направления.
-            </p>
+            <p className="text-sm font-semibold">Исследование готово</p>
+            <p className={`mt-0.5 text-sm ${HE.muted}`}>Вертикали собраны — переходим к выбору направления.</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {onGoToVerticals ? (
+                <button type="button" onClick={onGoToVerticals} className="ve2-btn ve2-b-sec ve2-b-sm">
+                  К выбору направления
+                </button>
+              ) : null}
+              <button type="button" disabled={busy} onClick={() => setRestartConfirmOpen(true)} className="ve2-b-quiet">
+                <RotateCcw aria-hidden className="h-3.5 w-3.5" />
+                Перезапустить
+              </button>
+            </div>
           </div>
         </div>
-        {siteThin ? (
-          <div className="mt-4">
-            <BusinessBlock
-              projectId={project?.id ?? null}
-              businessValue={resolvedBusinessValue}
-              emphasized
-            />
+        {restartConfirmOpen ? (
+          <div className="ve2-confirm" role="alertdialog" aria-label="Подтверждение перезапуска">
+            <span className={HE.muted}>
+              Перезапустить исследование? Готовые результаты останутся, новые списания начнутся заново.
+            </span>
+            <button
+              type="button"
+              className="ve2-btn ve2-b-dan ve2-b-sm"
+              onClick={() => {
+                setRestartConfirmOpen(false);
+                onStartResearch();
+              }}
+            >
+              Да, перезапустить
+            </button>
+            <button type="button" className="ve2-b-quiet" onClick={() => setRestartConfirmOpen(false)}>
+              Отмена
+            </button>
           </div>
         ) : null}
-        {/* Бриф доступен и после исследования: дозаполненные поля уходят в
-            цепочки и шаблон, а перезапуск подхватит их в гипотезы. */}
-        <ClientBriefBlock projectId={project?.id ?? null} onBriefChanged={onCasesChanged} />
-        <div className="mt-5 flex justify-start">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              if (
-                window.confirm(
-                  'Перезапустить исследование? Движок заново пройдёт все стадии — это займёт 10–20 минут.',
-                )
-              ) {
-                onStartResearch();
-              }
-            }}
-            className={`${HE.btnGhost} h-9`}
-          >
-            <RotateCcw aria-hidden className="h-3.5 w-3.5" />
-            Перезапустить исследование
-          </button>
-        </div>
+        <ResearchContextGrid
+          offerValue={offerValue}
+          onSaveOffer={onSaveOffer}
+          styleValue={resolvedStyleValue}
+          onStyleSaved={onStyleSaved}
+          signatureValue={resolvedSignatureValue}
+          businessValue={resolvedBusinessValue}
+          siteThin={siteThin}
+          projectId={project?.id ?? null}
+          cases={cases ?? []}
+          onCasesChanged={onCasesChanged}
+        />
       </section>
     );
   }
@@ -226,38 +260,78 @@ function NotStarted({
 }) {
   return (
     <section className="max-w-5xl">
-      <div className="grid gap-6 border-b border-gray-200 pb-7 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+      <div className="ve2-panel p-7">
+        <p className="ve2-eb">01 → Старт</p>
         <div>
-          <h2 className="text-xl font-semibold text-gray-900">Подготовить карту рынка</h2>
+          <h2 className="mt-2 text-xl font-semibold">Подготовить карту рынка</h2>
           <p className={`mt-2 max-w-2xl ${HE.lead}`}>
-            Движок изучит сайт и бриф, найдёт конкурентов и соберёт 25–40 проверенных гипотез.
-            Результат появится в виде сравнимых вертикалей.
+            Движок изучит сайт и бриф, найдёт конкурентов и соберёт 25–40 проверенных гипотез. Результат появится в виде
+            сравнимых вертикалей.
           </p>
-          <p className="mt-3 text-xs text-gray-500">Обычно 10–20 минут. Страницу можно закрыть.</p>
         </div>
-        <button type="button" onClick={onStartResearch} disabled={busy} className={HE.btnPrimary}>
-          {busy ? <Spinner className="h-4 w-4" /> : <Play aria-hidden className="h-4 w-4 fill-current" />}
-          Запустить исследование
-        </button>
+        <div className="ve2-step-footer">
+          <button type="button" onClick={onStartResearch} disabled={busy} className={HE.btnPrimary}>
+            {busy ? <Spinner className="h-4 w-4" /> : <Play aria-hidden className="h-4 w-4 fill-current" />}
+            Запустить исследование
+          </button>
+          <span className="ve2-faint">Обычно 10–20 минут. Страницу можно закрыть.</span>
+        </div>
       </div>
 
-      <div className="mt-7">
-        <h3 className={HE.sectionTitle}>Контекст для исследования</h3>
-        <p className={`mt-1 ${HE.muted}`}>
-          Чем точнее исходные данные, тем меньше лишних гипотез придётся отсеивать после генерации.
-        </p>
-        <div className="grid items-start gap-x-5 lg:grid-cols-2">
-          <div>
-            <OfferBlock offerValue={offerValue} onSaveOffer={onSaveOffer} />
-            <BusinessBlock projectId={projectId} businessValue={businessValue} emphasized={siteThin} />
-            <SignatureBlock projectId={projectId} signatureValue={signatureValue} />
-          </div>
-          <div>
-            <ClientBriefBlock projectId={projectId} onBriefChanged={onCasesChanged} />
-            <StyleBlock projectId={projectId} styleValue={styleValue} onSaved={onStyleSaved} />
-            <CasesBlock projectId={projectId} cases={cases} onCasesChanged={onCasesChanged} />
-          </div>
+      <ResearchContextGrid
+        offerValue={offerValue}
+        onSaveOffer={onSaveOffer}
+        styleValue={styleValue}
+        onStyleSaved={onStyleSaved}
+        signatureValue={signatureValue}
+        businessValue={businessValue}
+        siteThin={siteThin}
+        projectId={projectId}
+        cases={cases}
+        onCasesChanged={onCasesChanged}
+      />
+    </section>
+  );
+}
+
+function ResearchContextGrid({
+  offerValue,
+  onSaveOffer,
+  styleValue,
+  onStyleSaved,
+  signatureValue,
+  businessValue,
+  siteThin,
+  projectId,
+  cases,
+  onCasesChanged,
+}: {
+  offerValue: string;
+  onSaveOffer: (v: string) => Promise<void> | void;
+  styleValue: string;
+  onStyleSaved?: () => void;
+  signatureValue: string;
+  businessValue: string;
+  siteThin: boolean;
+  projectId: string | null;
+  cases: VeCaseEntry[];
+  onCasesChanged?: () => void;
+}) {
+  return (
+    <section className="ve2-sec">
+      <div className="ve2-sec-head">
+        <div>
+          <p className="ve2-eb">01 → Контекст для исследования</p>
+          <p className={`mt-1 ${HE.muted}`}>Эти ответы усиливают гипотезы. Всё можно править до перезапуска.</p>
         </div>
+      </div>
+      <div className="ve2-context-grid">
+        <OfferBlock offerValue={offerValue} onSaveOffer={onSaveOffer} />
+        <ClientBriefBlock projectId={projectId} onBriefChanged={onCasesChanged} />
+        <BusinessBlock projectId={projectId} businessValue={businessValue} emphasized={siteThin} />
+        <SignatureBlock projectId={projectId} signatureValue={signatureValue} />
+        <StyleBlock projectId={projectId} styleValue={styleValue} onSaved={onStyleSaved} />
+        <CasesBlock projectId={projectId} cases={cases} onCasesChanged={onCasesChanged} />
       </div>
     </section>
   );
@@ -310,12 +384,7 @@ function OfferBlock({
         className={`mt-2 resize-y ${HE.input}`}
       />
       <div className="mt-2 flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => void handleSave()}
-          disabled={saving || !dirty}
-          className={HE.btnSmall}
-        >
+        <button type="button" onClick={() => void handleSave()} disabled={saving || !dirty} className={HE.btnSmall}>
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
@@ -326,13 +395,7 @@ function OfferBlock({
 }
 
 /** Подпись отправителя: ставится дословно в конце каждого письма. Сохраняет сам через PATCH. */
-function SignatureBlock({
-  projectId,
-  signatureValue,
-}: {
-  projectId: string | null;
-  signatureValue: string;
-}) {
+function SignatureBlock({ projectId, signatureValue }: { projectId: string | null; signatureValue: string }) {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -361,10 +424,7 @@ function SignatureBlock({
 
   return (
     <div className={`mt-4 text-left ${HE.formPanel}`}>
-      <label
-        htmlFor="he-step1-signature"
-        className={HE.eyebrow}
-      >
+      <label htmlFor="he-step1-signature" className={HE.eyebrow}>
         Отправитель (подпись в письмах)
       </label>
       <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
@@ -384,12 +444,7 @@ function SignatureBlock({
         className={`mt-2 resize-y ${HE.input}`}
       />
       <div className="mt-2 flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => void handleSave()}
-          disabled={saving || !dirty}
-          className={HE.btnSmall}
-        >
+        <button type="button" onClick={() => void handleSave()} disabled={saving || !dirty} className={HE.btnSmall}>
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
@@ -437,15 +492,8 @@ function BusinessBlock({
   };
 
   return (
-    <div
-      className={`mt-4 rounded-lg border p-4 text-left ${
-        emphasized ? 've2-warn-soft' : 've2-soft'
-      }`}
-    >
-      <label
-        htmlFor="he-step1-business"
-        className={HE.eyebrow}
-      >
+    <div className={`mt-4 rounded-lg border p-4 text-left ${emphasized ? 've2-warn-soft' : 've2-soft'}`}>
+      <label htmlFor="he-step1-business" className={HE.eyebrow}>
         Описание бизнеса (если сайт не раскрывает)
       </label>
       <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
@@ -466,12 +514,7 @@ function BusinessBlock({
         className={`mt-2 resize-y ${HE.input}`}
       />
       <div className="mt-2 flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => void handleSave()}
-          disabled={saving || !dirty}
-          className={HE.btnSmall}
-        >
+        <button type="button" onClick={() => void handleSave()} disabled={saving || !dirty} className={HE.btnSmall}>
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
@@ -525,8 +568,7 @@ function StyleBlock({
         Эталон стиля (необязательно)
       </label>
       <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
-        Вставьте 1–2 письма, которые считаете идеальными. Движок будет писать в этой манере — факты и имена не
-        копирует.
+        Вставьте 1–2 письма, которые считаете идеальными. Движок будет писать в этой манере — факты и имена не копирует.
       </p>
       <textarea
         id="he-step1-style"
@@ -541,12 +583,7 @@ function StyleBlock({
         className={`mt-2 resize-y ${HE.input}`}
       />
       <div className="mt-2 flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => void handleSave()}
-          disabled={saving || !dirty}
-          className={HE.btnSmall}
-        >
+        <button type="button" onClick={() => void handleSave()} disabled={saving || !dirty} className={HE.btnSmall}>
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
@@ -620,22 +657,17 @@ function CasesBlock({
         Кейсы клиента ({cases.length})
       </summary>
       <p className={`mt-2 text-xs leading-relaxed ${HE.muted}`}>
-        Кейсы с сайта собираются автоматически. Можно добавить вручную — текст из PDF/презентации;
-        используются как доказательство в письмах.
+        Кейсы с сайта собираются автоматически. Можно добавить вручную — текст из PDF/презентации; используются как
+        доказательство в письмах.
       </p>
 
       {cases.length > 0 ? (
         <ul className="mt-3 space-y-2">
           {cases.map((c) => (
-            <li
-              key={c.id}
-              className="flex items-start gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2"
-            >
+            <li key={c.id} className="flex items-start gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2">
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <Badge tone={c.source === 'site' ? 'blue' : 'violet'}>
-                    {c.source === 'site' ? 'сайт' : 'файл'}
-                  </Badge>
+                  <Badge tone={c.source === 'site' ? 'blue' : 'violet'}>{c.source === 'site' ? 'сайт' : 'файл'}</Badge>
                   {c.industry ? <span className="text-xs font-medium text-gray-700">{c.industry}</span> : null}
                   {c.client_type ? <span className="text-xs text-gray-500">{c.client_type}</span> : null}
                   {c.filename ? <span className="truncate text-[11px] text-gray-500">{c.filename}</span> : null}
@@ -701,9 +733,7 @@ function progressText(job: VeJobSummary | undefined): string | null {
   const p = job?.progress;
   if (!p) return null;
   const counter =
-    typeof p.done === 'number' && typeof p.total === 'number' && p.total > 0
-      ? `${p.done}/${p.total}`
-      : null;
+    typeof p.done === 'number' && typeof p.total === 'number' && p.total > 0 ? `${p.done}/${p.total}` : null;
   const label = p.label?.trim() ? p.label.trim() : null;
   if (!counter && !label) return null;
   return [counter, label].filter(Boolean).join(' · ');
@@ -760,7 +790,10 @@ function StageChecklist({ jobs, running }: { jobs: VeJobSummary[]; running: bool
             }`}
           >
             <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-              <StatusDot tone={STAGE_DOT_TONE[state]} className={state === 'current' ? 'motion-safe:animate-pulse' : ''} />
+              <StatusDot
+                tone={STAGE_DOT_TONE[state]}
+                className={state === 'current' ? 'motion-safe:animate-pulse' : ''}
+              />
             </span>
             <span>
               {line}
