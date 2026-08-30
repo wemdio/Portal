@@ -22,6 +22,7 @@ import type {
 import { authFetch } from '@/lib/authFetch';
 import { readSpreadsheetFile } from '@/lib/spreadsheet/parseCSV';
 import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
+import { VE_LAUNCH_MAX_LEADS } from '@/lib/verticalEngineV2/launchHandoff';
 import {
   VE_API,
   veEnginePost,
@@ -831,6 +832,9 @@ function BaseCard({ base, hypothesisTitle }: { base: VeBaseSummary; hypothesisTi
           </span>
         ) : null}
       </div>
+      {base.source === 'auto' && base.status !== 'collecting' ? (
+        <CollectionFunnel base={base} />
+      ) : null}
       {downloadError ? (
         <p className="mt-1 text-[11px] text-red-600" role="alert">
           {downloadError}
@@ -1009,6 +1013,22 @@ function collectTaskFailed(status: string | undefined): boolean {
   return ['failed', 'error'].includes((status ?? '').toLowerCase());
 }
 
+/** Счётчики jsonb читаем как недоверенные данные: только конечные неотрицательные числа. */
+function collectCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value)
+    : null;
+}
+
+function recipientWord(value: number): string {
+  const mod100 = value % 100;
+  if (mod100 >= 11 && mod100 <= 14) return 'получателей';
+  const mod10 = value % 10;
+  if (mod10 === 1) return 'получатель';
+  if (mod10 >= 2 && mod10 <= 4) return 'получателя';
+  return 'получателей';
+}
+
 /** Защитное чтение collect_info: форма толерантная, любой кусок может отсутствовать. */
 function readCollectInfo(info: VeCollectInfo | null | undefined) {
   const plan = info?.plan?.tasks;
@@ -1016,7 +1036,9 @@ function readCollectInfo(info: VeCollectInfo | null | undefined) {
   // limit появился позже plan/tasks — читаем так же защитно, как весь collect_info.
   const rawLimit = info?.limit;
   // hypotheses появились позже limit — тоже защитно.
-  const hyps = (info as { hypotheses?: unknown } | null | undefined)?.hypotheses;
+  const hyps = info?.hypotheses;
+  const estimate = info?.estimate;
+  const stats = info?.stats;
   return {
     plan: Array.isArray(plan) ? plan.filter((t) => t && typeof t === 'object') : [],
     tasks: Array.isArray(tasks) ? tasks.filter((t) => t && typeof t === 'object') : [],
@@ -1028,23 +1050,129 @@ function readCollectInfo(info: VeCollectInfo | null | undefined) {
             : ''))
           .filter(Boolean)
       : [],
+    estimate: {
+      uniqueCompanies: collectCount(estimate?.unique_companies),
+      companiesWithEmail: collectCount(estimate?.companies_with_email),
+      note: typeof estimate?.note === 'string' ? estimate.note.trim() : '',
+    },
+    stats: {
+      rowsTotal: collectCount(stats?.rows_total),
+      processedRows: collectCount(stats?.processed_rows),
+      launchableRows: collectCount(stats?.launchable_rows),
+      relevanceUnchecked: collectCount(stats?.relevance_unchecked),
+      relevanceCheckedCompanies: collectCount(stats?.relevance_checked_companies),
+      relevanceTotalCompanies: collectCount(stats?.relevance_total_companies),
+      relevanceCoverageComplete:
+        typeof stats?.relevance_coverage_complete === 'boolean'
+          ? stats.relevance_coverage_complete
+          : null,
+    },
   };
+}
+
+/**
+ * Честная воронка одной автосборки. Рыночная оценка, лимит задачи, строки
+ * обработки и адресаты запуска не подменяют друг друга словом «контакты».
+ */
+function CollectionFunnel({
+  base,
+  useDefaultLimit = false,
+}: {
+  base: VeBaseSummary;
+  useDefaultLimit?: boolean;
+}) {
+  const { limit, estimate, stats } = readCollectInfo(base.collect_info);
+  const shownLimit = limit ?? (useDefaultLimit ? DEFAULT_COLLECT_LIMIT : null);
+  // После завершения CONSTRUCT row_count — надёжный фолбэк для старых записей,
+  // где processed_rows ещё не сохранялся. Failed-база могла остановиться до
+  // конструктора, поэтому её row_count сюда подставлять нельзя.
+  const processedRows = stats.processedRows
+    ?? (base.status === 'analyzing' || base.status === 'analyzed'
+      ? collectCount(base.row_count)
+      : null);
+  const hasAny = estimate.note !== '' || [
+    estimate.uniqueCompanies,
+    estimate.companiesWithEmail,
+    shownLimit,
+    stats.rowsTotal,
+    processedRows,
+    stats.launchableRows,
+    stats.relevanceUnchecked,
+    stats.relevanceCheckedCompanies,
+    stats.relevanceTotalCompanies,
+  ].some((value) => value !== null);
+  if (!hasAny) return null;
+
+  return (
+    <div
+      className="mt-2 grid gap-1 rounded-lg border border-gray-200 bg-gray-50/70 px-3 py-2 text-[11px] text-gray-600 sm:grid-cols-2"
+      aria-label="Воронка автосборки"
+    >
+      {estimate.uniqueCompanies !== null ? (
+        <p>
+          {estimate.uniqueCompanies.toLocaleString('ru-RU')} уникальных компаний в
+          реестровом срезе гипотезы
+        </p>
+      ) : null}
+      {estimate.companiesWithEmail !== null ? (
+        <p>Из них {estimate.companiesWithEmail.toLocaleString('ru-RU')} с email в реестре</p>
+      ) : null}
+      {shownLimit !== null ? (
+        <p>Лимит этого прогона: {shownLimit.toLocaleString('ru-RU')} кандидатов</p>
+      ) : null}
+      {stats.rowsTotal !== null ? (
+        <p>Собрано до обработки: {stats.rowsTotal.toLocaleString('ru-RU')} кандидатов</p>
+      ) : null}
+      {processedRows !== null ? (
+        <p>После обработки: {processedRows.toLocaleString('ru-RU')} строк</p>
+      ) : null}
+      {stats.relevanceCheckedCompanies !== null && stats.relevanceTotalCompanies !== null ? (
+        <p>
+          Релевантность проверена: {stats.relevanceCheckedCompanies.toLocaleString('ru-RU')} из{' '}
+          {stats.relevanceTotalCompanies.toLocaleString('ru-RU')} компаний
+        </p>
+      ) : null}
+      {stats.launchableRows !== null ? (
+        <p className="font-medium text-emerald-700">
+          Прошли проверки: {stats.launchableRows.toLocaleString('ru-RU')}{' '}
+          {recipientWord(stats.launchableRows)}
+        </p>
+      ) : null}
+      {stats.launchableRows !== null && stats.launchableRows > VE_LAUNCH_MAX_LEADS ? (
+        <p className="sm:col-span-2 font-medium text-amber-700">
+          Лимит одного запуска — {VE_LAUNCH_MAX_LEADS.toLocaleString('ru-RU')}. Разделите
+          аудиторию или уменьшите базу перед запуском.
+        </p>
+      ) : null}
+      {stats.relevanceUnchecked !== null && stats.relevanceUnchecked > 0 ? (
+        <p className="sm:col-span-2 font-medium text-amber-700">
+          {stats.relevanceUnchecked.toLocaleString('ru-RU')} строк без relevance-вердикта не
+          входят в «Прошли проверки» и исключены из запуска.
+        </p>
+      ) : null}
+      {estimate.companiesWithEmail !== null ? (
+        <p className="sm:col-span-2 text-gray-500">
+          Email в реестре ещё не проверены; итог после фильтров появляется только после
+          полной построчной валидации.
+        </p>
+      ) : null}
+      {estimate.note ? (
+        <p className="sm:col-span-2 text-gray-500">{estimate.note}</p>
+      ) : null}
+    </div>
+  );
 }
 
 /** Карточка прогресса автосборки: план (почему эти источники) + живые статусы задач. */
 function CollectProgress({ base }: { base: VeBaseSummary }) {
-  const { plan, tasks, limit, hypotheses } = readCollectInfo(base.collect_info);
-  // У баз, созданных до появления limit в collect_info, показываем дефолт.
-  const shownLimit = limit ?? DEFAULT_COLLECT_LIMIT;
+  const { plan, tasks, hypotheses } = readCollectInfo(base.collect_info);
   return (
     <div className={`mt-3 p-4 ${HE.infoPanel}`}>
       <p className="flex items-center gap-2 text-sm font-medium">
         <Spinner className="h-4 w-4" />
         Собираем базу…
       </p>
-      <p className="ve2-faint mt-1">
-        собираем до {shownLimit.toLocaleString('ru-RU')} строк
-      </p>
+      <CollectionFunnel base={base} useDefaultLimit />
       {hypotheses.length > 0 ? (
         <p className={`mt-1.5 text-[11px] ${HE.muted}`} title={hypotheses.join(', ')}>
           по гипотезам: {hypotheses.join(' · ')}

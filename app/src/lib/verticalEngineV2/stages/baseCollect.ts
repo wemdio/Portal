@@ -45,8 +45,10 @@
  *     джоба падает. Упавшие задачи фиксируются в collect_info, но не валят
  *     джобу, если хотя бы одна задача дала строки.
  *  5. CONSTRUCT — обогащение собранных строк конструктором баз
- *     (base_constructor_jobs: dedup_email → find_emails → validate_emails →
- *     cap_emails_per_company → enrich_descriptions; locale джобы по рынку).
+ *     (base_constructor_jobs: find_emails при бедной базе →
+ *     enrich_descriptions по одной строке компании → split_emails →
+ *     dedup_email → validate_emails → cap_emails_per_company; locale джобы
+ *     по рынку).
  *     Пропускается, когда email уже есть у >50% строк (RU-источники богатые)
  *     или фаза завершалась ранее (construct.status='done' в collect_info).
  *     DISPATCH-CONSTRUCT создаёт BC-джобу (bc_job_id — в collect_info.construct)
@@ -84,15 +86,18 @@
  * вариации поисковых запросов — future work.
  */
 
+import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
 import { extractEmail } from '@/lib/tools/dfybUtils';
+import { getVeDirectorySegmentStats } from '../dossierData';
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
 import { findIrrelevantRows } from '../relevanceGate';
+import { prepareSegmentationAudience } from '../segmentationAudit';
 import {
   probeSliceRelevance,
   sliceProbeRejectBelow,
@@ -445,6 +450,58 @@ export function mapDirectoryFilters(
   return out;
 }
 
+/**
+ * Оценить company-level размер реестровой части плана. Складывать два
+ * независимых среза нельзя: одна компания может проходить оба фильтра, а RPC
+ * считает каждый срез отдельно. Поэтому точную цифру сохраняем только для
+ * плана с одной directory-задачей; во всех остальных случаях UI получает
+ * честную причину вместо ложной суммы.
+ */
+async function estimatePlanDirectorySegment(
+  plan: VeSourcePlan,
+  supabase: SupabaseClient,
+): Promise<NonNullable<VeCollectInfo['estimate']>> {
+  const directoryTasks = plan.tasks.filter((task) => task.source === 'companies_directory');
+  if (directoryTasks.length === 0) {
+    return {
+      unique_companies: null,
+      companies_with_email: null,
+      note: 'В плане нет реестрового среза: размер оценивается по фактическим результатам источников.',
+    };
+  }
+  if (directoryTasks.length > 1) {
+    return {
+      unique_companies: null,
+      companies_with_email: null,
+      note: 'В плане несколько пересекающихся реестровых срезов; их размеры не складываются.',
+    };
+  }
+
+  const filters = mapDirectoryFilters(directoryTasks[0].directory_filters);
+  const stats = await getVeDirectorySegmentStats(
+    {
+      okvedCodes: filters.okvedCodes ?? [],
+      includeIp: filters.includeIp,
+      regionCodes: filters.regionCodes,
+      revenueFrom: filters.revenueFrom ?? undefined,
+      revenueTo: filters.revenueTo ?? undefined,
+      employeesFrom: filters.employeesFrom ?? undefined,
+      employeesTo: filters.employeesTo ?? undefined,
+      // Email — следующая ступень воронки, а не фильтр population estimate.
+      // Иначе при hasEmail=true обе цифры искусственно становятся одинаковыми.
+      requireEmail: false,
+    },
+    supabase,
+  );
+  return {
+    unique_companies: stats.companies_unique_total,
+    companies_with_email: stats.matched_companies_with_email ?? null,
+    companies_with_phone: stats.matched_companies_with_phone ?? null,
+    directory_rows_total: stats.directory_rows_total,
+    ...(stats.error ? { note: `Оценка реестрового среза недоступна: ${stats.error}` } : {}),
+  };
+}
+
 /** maps_query → поисковые URL Яндекс.Карт (формат как в YandexMapsParserForm). */
 export function buildYandexSearchUrls(query: { queries: string[]; geo?: string }): string[] {
   return query.queries.map((q) => {
@@ -571,6 +628,18 @@ export interface VeCollectInfo {
   slice_probe?: VeSliceProbe;
   /** Гипотезы, по которым реально строился план (accepted-дефолт или выбор специалиста). */
   hypotheses?: Array<{ id: string; title: string; status: string | null }>;
+  /**
+   * Оценка единственного реестрового среза плана. Несколько срезов нельзя
+   * складывать: их компании могут пересекаться, поэтому в таком случае числа
+   * остаются null, а причина записывается в note.
+   */
+  estimate?: {
+    unique_companies: number | null;
+    companies_with_email: number | null;
+    companies_with_phone?: number | null;
+    directory_rows_total?: number | null;
+    note?: string;
+  };
   tasks?: VeCollectTaskState[];
   /** Фаза CONSTRUCT: состояние передачи базы конструктору (появляется после HARVEST). */
   construct?: VeConstructInfo;
@@ -583,6 +652,21 @@ export interface VeCollectInfo {
     excluded_existing_bases: number;
     /** Реестр: строк пропущено ещё на выборке (уже собраны в других базах проекта). */
     excluded_during_fetch: number;
+    /** Строк после конструктора и relevance-gate (до launch-фильтра). */
+    processed_rows?: number;
+    /**
+     * Получателей после канонических launch-гейтов email/relevance/dedup.
+     * Поля нет, если конструктор не завершил полную построчную validation.
+     */
+    launchable_rows?: number;
+    /** Строк помечено нерелевантными закреплённой гипотезе/вертикали. */
+    low_relevance?: number;
+    /** Строки, исключённые fail-closed: их company-группа не получила verdict. */
+    relevance_unchecked?: number;
+    /** Покрытие relevance-gate по уникальным company-группам. */
+    relevance_checked_companies?: number;
+    relevance_total_companies?: number;
+    relevance_coverage_complete?: boolean;
     finished_at: string;
   };
 }
@@ -1692,8 +1776,9 @@ async function loadOtherBaseExclusionKeys(
 /* ─────────────────────────── Фаза CONSTRUCT ─────────────────────────── */
 
 /**
- * Шаги конструктора для авто-базы HE: дедуп почт → (поиск на сайтах, если
- * база бедная) → ВАЛИДАЦИЯ → кап на компанию → описания. AI-шагов
+ * Шаги конструктора для авто-базы VE2: (поиск на сайтах, если база бедная)
+ * → описания по одной строке компании → разнос адресов по строкам → дедуп
+ * почт → ВАЛИДАЦИЯ → кап на компанию. AI-шагов
  * (ta_scoring/personalization) нет — генерация и скоринг остаются в Движке.
  *
  * validate_emails — ВСЕГДА: раньше конструктор запускался только при бедных
@@ -1702,7 +1787,12 @@ async function loadOtherBaseExclusionKeys(
  * домен клиента. find_emails — только когда email есть у ≤50% строк
  * (ENG-базы pdl/funded/eng_hiring, бедные hh-сборки).
  */
-const CONSTRUCT_STEPS_TAIL = ['validate_emails', 'cap_emails_per_company', 'enrich_descriptions'];
+const CONSTRUCT_STEPS_AFTER_SPLIT = [
+  'split_emails',
+  'dedup_email',
+  'validate_emails',
+  'cap_emails_per_company',
+];
 
 /** Свыше этого размера enrich_descriptions (per-site фетчи) не укладывается в
  *  6-часовой таймаут конструктора — для больших баз шаг пропускаем. */
@@ -1711,11 +1801,11 @@ const CONSTRUCT_ENRICH_MAX_ROWS = 5000;
 function constructStepsFor(merged: VeUnifiedRow[]): string[] {
   const withEmail = merged.filter((r) => r.email.trim() !== '').length;
   const poor = withEmail * 2 <= merged.length;
-  const tail =
-    merged.length > CONSTRUCT_ENRICH_MAX_ROWS
-      ? CONSTRUCT_STEPS_TAIL.filter((s) => s !== 'enrich_descriptions')
-      : CONSTRUCT_STEPS_TAIL;
-  return ['dedup_email', ...(poor ? ['find_emails'] : []), ...tail];
+  const enrich = merged.length <= CONSTRUCT_ENRICH_MAX_ROWS ? ['enrich_descriptions'] : [];
+  // enrich_descriptions зависит только от компании/сайта. Выполняем его до
+  // split_emails: иначе до пяти адресов одной компании породят до пяти
+  // одинаковых HTTP-запросов и способны выбить 6-часовой таймаут.
+  return [...(poor ? ['find_emails'] : []), ...enrich, ...CONSTRUCT_STEPS_AFTER_SPLIT];
 }
 /** Канонические заголовки сетки конструктора (порядок — как VE_AUTO_COLLECT_COLUMNS). */
 const CONSTRUCT_HEADERS_RU = ['Компания', 'Сайт', 'Email', 'Телефон', 'Вакансия', 'Адрес', 'Категория', 'Сотрудники', 'Выручка', 'ИНН', 'Источник'];
@@ -1776,19 +1866,54 @@ function buildConstructGrid(rows: VeUnifiedRow[], market: VeMarket): string[][] 
 async function readConstructJobStatus(
   ctx: VeStageContext,
   bcJobId: string,
-): Promise<{ status: string; error_message: string | null } | null> {
+): Promise<{
+  status: string;
+  error_message: string | null;
+  selected_steps: string[] | null;
+} | null> {
   const { data, error } = await ctx.supabase
     .from('base_constructor_jobs')
-    .select('status, error_message')
+    .select('status, error_message, selected_steps')
     .eq('id', bcJobId)
     .maybeSingle();
   if (error) throw new Error(`base_constructor_jobs read: ${error.message}`);
   if (!data) return null;
-  const row = data as { status?: unknown; error_message?: unknown };
+  const row = data as { status?: unknown; error_message?: unknown; selected_steps?: unknown };
   return {
     status: String(row.status ?? ''),
     error_message: typeof row.error_message === 'string' ? row.error_message : null,
+    selected_steps: Array.isArray(row.selected_steps)
+      ? row.selected_steps.filter((step): step is string => typeof step === 'string')
+      : null,
   };
+}
+
+async function dispatchConstructJob(input: {
+  ctx: VeStageContext;
+  ownerId: string | null | undefined;
+  baseLabel: string;
+  rows: VeUnifiedRow[];
+  market: VeMarket;
+}): Promise<{ bcJobId: string; locale: 'ru' | 'en'; steps: string[] }> {
+  const { ctx, ownerId, baseLabel, rows, market } = input;
+  if (!ownerId) {
+    throw new Error('ve_projects.created_by пуст — джобе конструктора некому принадлежать');
+  }
+  const locale = market === 'us' ? 'en' : 'ru';
+  const steps = constructStepsFor(rows);
+  const bcJobId = await insertChildJob(ctx, 'base_constructor_jobs', {
+    user_id: ownerId,
+    file_name: `VE2 · ${baseLabel}`,
+    status: 'pending',
+    locale,
+    selected_steps: steps,
+    // Кап «до 5 почт на компанию» — ключ max, как читает STEP_RUNNERS воркера.
+    step_config: { cap_emails_per_company: { max: 5 } },
+    data: buildConstructGrid(rows, market),
+    initial_row_count: rows.length,
+    total_steps: steps.length,
+  });
+  return { bcJobId, locale, steps };
 }
 
 export interface VeConstructImport {
@@ -1943,6 +2068,7 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     if (planRepair) info.plan_repair = planRepair;
     if (sliceProbe) info.slice_probe = sliceProbe;
     info.hypotheses = usedHypotheses;
+    info.estimate = await estimatePlanDirectorySegment(plan, ctx.supabase);
 
     // Отказ пробы: срез не про эту вертикаль и перепланирование не помогло.
     // Сохраняем провенанс и валим сбор ДО дозвона до коллекторов — час
@@ -1979,6 +2105,12 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     }));
     await persistCollectInfo(ctx, baseId, info);
     stageLog(ctx, `[base_collect] план: ${info.tasks.length} задач (${info.tasks.map((t) => t.source).join(', ')})`);
+  }
+  // Базы, чей план был сохранён до появления estimate, получают его при
+  // следующем безопасном тике, не переигрывая LLM-план и сбор источников.
+  if (!info.estimate && info.plan) {
+    info.estimate = await estimatePlanDirectorySegment(info.plan, ctx.supabase);
+    await persistCollectInfo(ctx, baseId, info);
   }
   const tasks = info.tasks ?? [];
 
@@ -2158,22 +2290,12 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     if (!construct?.bc_job_id) {
       // DISPATCH-CONSTRUCT: джоба конструктора (воркер baseConstructor клеймит
       // pending), её id — в collect_info.construct; дальше WAIT с паузой 60с.
-      if (!project.created_by) {
-        throw new Error('ve_projects.created_by пуст — джобе конструктора некому принадлежать');
-      }
-      const locale = market === 'us' ? 'en' : 'ru';
-      const steps = constructStepsFor(merged);
-      const bcJobId = await insertChildJob(ctx, 'base_constructor_jobs', {
-        user_id: project.created_by,
-        file_name: `HE · ${base.filename ?? baseId}`,
-        status: 'pending',
-        locale,
-        selected_steps: steps,
-        // Кап «до 5 почт на компанию» — ключ max, как читает STEP_RUNNERS воркера.
-        step_config: { cap_emails_per_company: { max: 5 } },
-        data: buildConstructGrid(merged, market),
-        initial_row_count: merged.length,
-        total_steps: steps.length,
+      const { bcJobId, locale } = await dispatchConstructJob({
+        ctx,
+        ownerId: project.created_by,
+        baseLabel: base.filename ?? baseId,
+        rows: merged,
+        market,
       });
       info.construct = { bc_job_id: bcJobId, status: 'dispatched', dispatched_at: new Date().toISOString() };
       await persistCollectInfo(ctx, baseId, info);
@@ -2190,6 +2312,38 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     const bc = await readConstructJobStatus(ctx, construct.bc_job_id);
     const bcStatus = bc?.status ?? 'failed';
     if (bcStatus === 'completed' || bcStatus === 'failed' || bcStatus === 'cancelled') {
+      // Джоба могла быть поставлена до обязательного split_emails. Её
+      // row-level validation status нельзя безопасно прикрепить к первому
+      // адресу merged-ячейки: лучший статус мог относиться ко второму.
+      // Терминальную legacy-джобу не импортируем, а один раз пересобираем по
+      // текущему контракту; новая selected_steps уже содержит split_emails.
+      if (bc?.selected_steps && !bc.selected_steps.includes('split_emails')) {
+        const replacement = await dispatchConstructJob({
+          ctx,
+          ownerId: project.created_by,
+          baseLabel: base.filename ?? baseId,
+          rows: merged,
+          market,
+        });
+        info.construct = {
+          bc_job_id: replacement.bcJobId,
+          status: 'dispatched',
+          dispatched_at: new Date().toISOString(),
+          note: `legacy constructor job ${construct.bc_job_id} пересобирается с split_emails`,
+        };
+        await persistCollectInfo(ctx, baseId, info);
+        stageLog(
+          ctx,
+          `[base_collect] construct: legacy job ${construct.bc_job_id} без split_emails → ` +
+            `повтор ${replacement.bcJobId}`,
+        );
+        await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+        return {
+          result: { waiting: true, base_id: baseId, construct: 're_dispatched' },
+          tokensUsed: usage.tokensUsed,
+          costUsd: usage.costUsd,
+        };
+      }
       // IMPORT: failed/cancelled базу НЕ валит — импортируем частичный data,
       // если он есть, иначе идём в analyzing без обогащения.
       const imported = await importConstructRows(ctx, construct.bc_job_id);
@@ -2256,11 +2410,15 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   // ─── QUALITY GATE (до refill/финала: пометки нужны обоим путям) ───
   // 1) вердикты валидации почт → _email_status на строках (запуск пропускает
   //    не-'ok' — баунсы не ложатся на домен клиента);
-  // 2) релевант-гейт LLM → _low_relevance на строках вне вертикали (шум
-  //    hh/карт/реестра): запуск фильтрует их в launchTemplate, refill — в
-  //    selectRefillLeadRows. Пометки живут только в jsonb-строках: в columns
-  //    не попадают, сетки UI и маппинг операторов их не видят.
-  type StoredRow = VeUnifiedRow & { _email_status?: string; _low_relevance?: boolean };
+  // 2) релевант-гейт LLM → _low_relevance для явного несовпадения и
+  //    _relevance_unchecked для хвоста/сбойного батча. Оба fail-closed
+  //    фильтруются из launchTemplate/refill. Пометки живут только в jsonb-
+  //    строках: в columns не попадают, сетки UI их не видят.
+  type StoredRow = VeUnifiedRow & {
+    _email_status?: string;
+    _low_relevance?: boolean;
+    _relevance_unchecked?: boolean;
+  };
   let storedRows: StoredRow[] = finalRows;
   if (finalEmailStatuses) {
     storedRows = storedRows.map((r, i) => {
@@ -2269,6 +2427,10 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     });
   }
   let lowRelevanceCount = 0;
+  let relevanceUncheckedCount = 0;
+  let relevanceCheckedCompanies: number | null = null;
+  let relevanceTotalCompanies: number | null = null;
+  let relevanceCoverageComplete = false;
   try {
     const { data: vrow } = await ctx.supabase
       .from('ve_verticals')
@@ -2276,26 +2438,101 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
       .eq('id', base.vertical_id)
       .maybeSingle();
     const verticalName = (vrow as { name?: string } | null)?.name ?? '';
+    let hypothesisTitle = '';
+    let hypothesisDescription = '';
+    if (base.hypothesis_id) {
+      const { data: hypothesisRow, error: hypothesisError } = await ctx.supabase
+        .from('ve_hypotheses')
+        .select('title, description')
+        .eq('id', base.hypothesis_id)
+        .eq('project_id', job.project_id)
+        .eq('vertical_id', base.vertical_id)
+        .maybeSingle();
+      if (hypothesisError) {
+        throw new Error(`гипотеза relevance-gate недоступна: ${hypothesisError.message}`);
+      } else {
+        hypothesisTitle = (hypothesisRow as { title?: string } | null)?.title ?? '';
+        hypothesisDescription =
+          (hypothesisRow as { description?: string | null } | null)?.description ?? '';
+        if (!hypothesisTitle.trim()) {
+          throw new Error(
+            `гипотеза relevance-gate ${base.hypothesis_id} не найдена или не имеет title`,
+          );
+        }
+      }
+    }
     const gate = await findIrrelevantRows({
       rows: storedRows,
       verticalName,
       verticalSummary: (vrow as { summary?: string | null } | null)?.summary ?? '',
+      hypothesisTitle,
+      hypothesisDescription,
       language: market === 'us' ? 'en' : 'ru',
       log: (m) => stageLog(ctx, m),
     });
     usage.tokensUsed += gate.tokensUsed;
     usage.costUsd += gate.costUsd;
-    if (gate.flagged.size > 0) {
-      lowRelevanceCount = gate.flagged.size;
+    lowRelevanceCount = gate.flagged.size;
+    relevanceUncheckedCount = gate.unchecked.size;
+    relevanceCheckedCompanies = gate.coverage.checkedCompanies;
+    relevanceTotalCompanies = gate.coverage.totalCompanies;
+    relevanceCoverageComplete = gate.coverage.complete;
+    if (gate.flagged.size > 0 || gate.unchecked.size > 0) {
       storedRows = storedRows.map((r, i) =>
-        gate.flagged.has(i) ? { ...r, _low_relevance: true } : r,
+        gate.flagged.has(i)
+          ? { ...r, _low_relevance: true }
+          : gate.unchecked.has(i)
+            ? { ...r, _relevance_unchecked: true }
+            : r,
       );
-      stageLog(ctx, `[base_collect] релевант-гейт: помечено ${lowRelevanceCount} строк вне вертикали`);
     }
+    stageLog(
+      ctx,
+      `[base_collect] релевант-гейт: проверено ${gate.coverage.checkedCompanies}/` +
+        `${gate.coverage.totalCompanies} компаний; нерелевантных строк ${lowRelevanceCount}; ` +
+        `без verdict ${relevanceUncheckedCount}`,
+    );
   } catch (e) {
-    stageLog(ctx, `[base_collect] релевант-гейт пропущен: ${e instanceof Error ? e.message : String(e)}`);
+    // Неожиданный сбой вне never-throw контракта gate тоже fail-closed: ни одна
+    // строка без verdict не должна попасть в проверенный итог или refill.
+    relevanceUncheckedCount = storedRows.length;
+    storedRows = storedRows.map((row) => ({ ...row, _relevance_unchecked: true }));
+    stageLog(
+      ctx,
+      `[base_collect] релевант-гейт недоступен, все ${storedRows.length} строк исключены: ` +
+        `${e instanceof Error ? e.message : String(e)}`,
+    );
   }
-  const statsWithQuality = { ...stats, low_relevance: lowRelevanceCount };
+  // Ровно тот же pure-контракт фильтрует аудиторию перед запуском на шаге 5.
+  // Но число можно называть проверенным только после успешной построчной
+  // validation: partial/failed constructor без status-колонки не должен
+  // превращать синтаксически похожие адреса в «готовые».
+  const hasCompleteEmailValidation =
+    info.construct?.status === 'done'
+    && finalEmailStatuses !== null
+    && finalEmailStatuses.length === storedRows.length
+    && finalEmailStatuses.every((status) => status !== null);
+  const launchableRows = hasCompleteEmailValidation
+    ? prepareSegmentationAudience({
+        rows: storedRows,
+        columns: finalColumns,
+        source: 'auto',
+      }).rows.length
+    : null;
+  const statsWithQuality = {
+    ...stats,
+    processed_rows: storedRows.length,
+    ...(launchableRows === null ? {} : { launchable_rows: launchableRows }),
+    low_relevance: lowRelevanceCount,
+    relevance_unchecked: relevanceUncheckedCount,
+    ...(relevanceCheckedCompanies === null
+      ? {}
+      : { relevance_checked_companies: relevanceCheckedCompanies }),
+    ...(relevanceTotalCompanies === null
+      ? {}
+      : { relevance_total_companies: relevanceTotalCompanies }),
+    relevance_coverage_complete: relevanceCoverageComplete,
+  };
 
   // ─── REFILL (ENG auto-pipeline) ───
   // Вместо финала «analyzing + base_analyze»: долив валидных строк лидами в

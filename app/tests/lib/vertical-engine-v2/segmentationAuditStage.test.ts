@@ -120,6 +120,7 @@ describe('runSegmentationAuditStage', () => {
       launchableRows: 2,
       excluded: {
         lowRelevance: 0,
+        relevanceUnchecked: 0,
         invalidEmailStatus: 0,
         invalidEmail: 0,
         duplicateEmail: 0,

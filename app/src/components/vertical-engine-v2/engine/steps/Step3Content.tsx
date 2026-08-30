@@ -666,7 +666,7 @@ export function Step3Content(props: {
           <div className="min-w-0">
             <h3 className={HE.secTitle}>Досье вертикали</h3>
             <p className={`mt-1 text-xs ${HE.muted}`}>
-              Объективные числа сегмента: наша директория, hh.ru, статистика наших кампаний.
+              Размер широкого рыночного среза, активность найма и статистика наших кампаний.
             </p>
           </div>
           {onBuildDossier ? (
@@ -881,19 +881,70 @@ function DossierNum({ value, caption }: { value: string; caption: string }) {
 
 /** «Сегмент в цифрах»: компании директории, вакансии hh, оценка размера сегмента. */
 function DossierSegmentCard({ data }: { data: VeDossierData }) {
-  const { counters, interpretation } = data;
+  const { interpretation } = data;
+  const counters = data.counters as VeDossierData['counters'] & {
+    directory_rows_total?: number | null;
+    companies_unique_total?: number | null;
+    companies_with_email?: number | null;
+    companies_with_phone?: number | null;
+    companies_with_any_contact?: number | null;
+  };
+  const hasCompanyLevelStats = counters.companies_unique_total != null;
   return (
     <div className={`${HE.card} p-4`}>
       <p className={`mb-2 ${HE.secTitle}`}>Сегмент в цифрах</p>
       <div className="space-y-3">
-        {counters.companies_total != null ? (
+        {hasCompanyLevelStats ? (
+          <div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+              <DossierNum
+                value={counters.companies_unique_total!.toLocaleString('ru-RU')}
+                caption="уникальных компаний по ИНН"
+              />
+              {counters.companies_with_any_contact != null ? (
+                <DossierNum
+                  value={counters.companies_with_any_contact.toLocaleString('ru-RU')}
+                  caption="компаний с email или телефоном"
+                />
+              ) : null}
+              {counters.companies_with_email != null ? (
+                <DossierNum
+                  value={counters.companies_with_email.toLocaleString('ru-RU')}
+                  caption="компаний с email в справочнике"
+                />
+              ) : null}
+              {counters.companies_with_phone != null ? (
+                <DossierNum
+                  value={counters.companies_with_phone.toLocaleString('ru-RU')}
+                  caption="компаний с телефоном в справочнике"
+                />
+              ) : null}
+            </div>
+            {counters.directory_rows_total != null ? (
+              <p className="mt-2 text-[11px] text-gray-500">
+                {counters.directory_rows_total.toLocaleString('ru-RU')} строк до дедупликации в
+                выбранном срезе.
+              </p>
+            ) : null}
+            <p className="mt-1 text-[11px] leading-relaxed text-gray-500">
+              Это широкий срез директории, а не прогноз готовой базы. Email в справочнике ещё не
+              проверены; готовые к запуску адреса считаются после сборки и аудита.
+            </p>
+            {counters.companies_note ? (
+              <p className="mt-1 text-[11px] text-gray-500">{counters.companies_note}</p>
+            ) : null}
+          </div>
+        ) : counters.companies_total != null ? (
           <div>
             <DossierNum
               value={`~${counters.companies_total.toLocaleString('ru-RU')}`}
-              caption="компаний в директории"
+              caption="старый расчёт директории"
             />
+            <p className="mt-1 text-[11px] leading-relaxed text-gray-500">
+              Пересоберите досье, чтобы увидеть уникальные компании и указанные каналы связи.
+            </p>
             {counters.companies_note ? (
-              <p className="mt-0.5 text-[11px] text-gray-500">{counters.companies_note}</p>
+              <p className="mt-1 text-[11px] text-gray-500">{counters.companies_note}</p>
             ) : null}
           </div>
         ) : null}

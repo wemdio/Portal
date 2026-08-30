@@ -31,6 +31,7 @@ import type {
   VeBaseSummary,
   VeChainDto,
   VeDossier,
+  VeDossierData,
   VeJobSummary,
   VeProjectDetailResponse,
 } from '../api';
@@ -615,12 +616,21 @@ function fitRationaleOf(h: VeHypothesis): string | null {
 function DossierStatRow({ dossier }: { dossier: VeDossier }) {
   const data = dossier.data;
   if (!data) return null;
+  const counters = data.counters as VeDossierData['counters'] & {
+    companies_unique_total?: number | null;
+    companies_with_email?: number | null;
+  };
   const parts: string[] = [];
-  if (data.counters.companies_total != null) {
-    parts.push(`~${data.counters.companies_total.toLocaleString('ru-RU')} компаний`);
+  if (counters.companies_unique_total != null) {
+    parts.push(`${counters.companies_unique_total.toLocaleString('ru-RU')} уникальных компаний`);
+    if (counters.companies_with_email != null) {
+      parts.push(`${counters.companies_with_email.toLocaleString('ru-RU')} с email`);
+    }
+  } else if (counters.companies_total != null) {
+    parts.push(`~${counters.companies_total.toLocaleString('ru-RU')} по старому расчёту`);
   }
-  if (data.counters.hh_vacancies_total != null) {
-    parts.push(`${data.counters.hh_vacancies_total.toLocaleString('ru-RU')} вакансий hh`);
+  if (counters.hh_vacancies_total != null) {
+    parts.push(`${counters.hh_vacancies_total.toLocaleString('ru-RU')} вакансий hh`);
   }
   if (data.dataset_stats.reply_pct != null) {
     parts.push(
