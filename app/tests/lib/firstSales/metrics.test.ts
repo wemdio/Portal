@@ -14,6 +14,7 @@ function lead(over: Partial<FirstSalesLeadRow> = {}): FirstSalesLeadRow {
   return {
     amo_id: 1,
     name: 'Обычная сделка',
+    company_name: 'ООО Ромашка',
     responsible_name: 'Менеджер А',
     created_at: '2026-07-15T09:00:00.000Z',
     first_qualified_at: null,

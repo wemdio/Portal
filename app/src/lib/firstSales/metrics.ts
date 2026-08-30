@@ -33,6 +33,9 @@ import {
 export type FirstSalesLeadRow = {
   amo_id: number;
   name: string | null;
+  /** Компания из карточки AMO. Именно ею клиента зовут продажи и финансы,
+   *  тогда как `name` сделки часто техническое («Заявка с сайта — форма…»). */
+  company_name: string | null;
   /** Ответственный в AMO. Заполняется синком; null — сделка без ответственного. */
   responsible_name: string | null;
   created_at: string | null;
@@ -185,6 +188,22 @@ export const CONTRACT_RULE_SINCE = new Date(
  * работает». Теперь строка списка обязана иметь хотя бы одно попадание в
  * период, а какое именно — видно в отдельной колонке.
  */
+/**
+ * Какие ступени воронки достоверны для окна, кончающегося на `to`.
+ *
+ * Окно целиком раньше даты правила означает, что ступени НЕТ, а не что она
+ * равна нулю: до этой даты этап ставили не по тому поводу (договоры) либо
+ * записи разговоров не подписывали (встречи). Одна функция на всех, потому
+ * что правило читают в трёх местах — сводка, воронка и список сделок рядом с
+ * ней, — и разъехавшись, они покажут разное на одном экране.
+ */
+export function stageAvailability(to: Date): { meetingsReliable: boolean; contractsReliable: boolean } {
+  return {
+    meetingsReliable: to.getTime() >= MEETINGS_RELIABLE_SINCE.getTime(),
+    contractsReliable: to.getTime() >= CONTRACT_RULE_SINCE.getTime(),
+  };
+}
+
 export function isLeadInWindow(lead: FirstSalesLeadRow, from: Date, to: Date): boolean {
   return inWindow(lead.created_at, from, to);
 }
@@ -302,9 +321,8 @@ export function computeFirstSalesSeries(
     leads: 0, qualified: 0, meetings: 0, contracts: 0,
     leadMagnets: 0, noSourceLeads: 0, wonCount: 0,
     cycleAvgDays: null, cycleMedianDays: null,
-    contractsReliable: to.getTime() >= CONTRACT_RULE_SINCE.getTime(),
+    ...stageAvailability(to),
     contractsSince: CONTRACT_RULE_SINCE.toISOString(),
-    meetingsReliable: to.getTime() >= MEETINGS_RELIABLE_SINCE.getTime(),
     meetingsSince: MEETINGS_RELIABLE_SINCE.toISOString(),
     money: emptyMoneyTotals(),
   };
@@ -630,22 +648,29 @@ export async function fetchFirstSalesLeads(
     chunkArray(ids, IN_CHUNK_SIZE).map(async (chunk) => {
       const { data: leadsChunk, error: leadsError } = await db
         .from('amo_leads')
-        .select('amo_id, name, responsible_name, raw')
+        .select('amo_id, name, company_name, responsible_name, raw')
         .in('amo_id', chunk);
       if (leadsError) throw leadsError;
       return (leadsChunk ?? []) as Array<{
-        amo_id: number; name: string | null; responsible_name: string | null; raw: unknown;
+        amo_id: number; name: string | null; company_name: string | null;
+        responsible_name: string | null; raw: unknown;
       }>;
     }),
   );
-  const leadsById = new Map<number, { name: string | null; responsible_name: string | null; raw: unknown }>();
+  const leadsById = new Map<
+    number,
+    { name: string | null; company_name: string | null; responsible_name: string | null; raw: unknown }
+  >();
   for (const l of leadChunks.flat()) {
-    leadsById.set(l.amo_id, { name: l.name, responsible_name: l.responsible_name, raw: l.raw });
+    leadsById.set(l.amo_id, {
+      name: l.name, company_name: l.company_name, responsible_name: l.responsible_name, raw: l.raw,
+    });
   }
 
   return stageRows.map((r) => ({
     amo_id: r.amo_deal_id,
     name: leadsById.get(r.amo_deal_id)?.name ?? null,
+    company_name: leadsById.get(r.amo_deal_id)?.company_name ?? null,
     responsible_name: leadsById.get(r.amo_deal_id)?.responsible_name ?? null,
     raw: leadsById.get(r.amo_deal_id)?.raw ?? null,
     created_at: r.created_at,

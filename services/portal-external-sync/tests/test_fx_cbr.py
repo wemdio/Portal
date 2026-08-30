@@ -12,7 +12,7 @@
 from datetime import date
 from decimal import Decimal
 
-from sources.fx_cbr import parse_cbr_xml
+from sources.fx_cbr import _NEEDED_DATES_SQL, parse_cbr_xml
 
 SAMPLE = """<?xml version="1.0" encoding="windows-1251"?>
 <ValCurs Date="30.07.2026" name="Foreign Currency Market">
@@ -57,3 +57,32 @@ def test_valute_without_value_is_skipped():
     падаем на Decimal('')."""
     _, rates = parse_cbr_xml(MISSING_FIELDS)
     assert "ZZZ" not in rates
+
+
+# ─── Отбор дат ─────────────────────────────────────────────────────────────
+#
+# Предикат живёт в SQL и без базы не исполняется, поэтому тесты ниже стерегут
+# его форму, а не результат. Ценность не в сверке строк как таковой: оба
+# условия уже один раз ломали деньги в отчётах, а вернуть окно обратно —
+# правка на одну строку, которую иначе нечем поймать. Смысл каждого условия
+# разобран в комментариях у самого SQL.
+
+
+def test_dates_are_selected_by_exact_match_not_by_window():
+    """Окно «есть курс не старше N дней» закрывало обычные будни: 13.08 не
+    запрашивался из-за курса за 12.08, и приход дня считался по позавчерашнему
+    курсу. Отбор идёт по точному совпадению даты."""
+    assert "f.rate_date = x.d" in _NEEDED_DATES_SQL
+    assert "interval '10 days'" not in _NEEDED_DATES_SQL
+
+
+def test_probes_break_the_weekend_loop():
+    """Точное совпадение само по себе зациклилось бы: за субботу ЦБ отдаёт
+    пятничный курс под пятничной датой, строки с rate_date = суббота не будет
+    никогда. Цикл разрывает память о запросе."""
+    assert "fx_rate_probes" in _NEEDED_DATES_SQL
+
+
+def test_future_dates_are_not_requested():
+    """Курса за завтра у ЦБ ещё нет, а запрос пометил бы дату отработанной."""
+    assert "x.d <= current_date" in _NEEDED_DATES_SQL
