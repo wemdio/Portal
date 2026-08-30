@@ -1,0 +1,276 @@
+/* ============================================================================
+ * ve2.css — дизайн-слой страницы /tools/vertical-engine-v2 («редакторский»
+ * редизайн: hairline-структура, невидимый акцент, статус = точка + моно-тег).
+ *
+ * ИЗОЛЯЦИЯ (контракт «другие страницы не меняются»):
+ *   - все правила живут под скоупом .ve2 — корневой класс VerticalEngineV2View;
+ *   - токены объявлены на .ve2 с префиксом --ve2- и наружу не экспортируются;
+ *   - globals.css, токены --pd-* и --cp-*, а также Tailwind-конфиг не трогаем; общий хром
+ *     (LayoutShell, ThemeToggle) не модифицируется;
+ *   - тёмная тема читается из того же механизма, что у всего портала:
+ *     html[data-portal-theme='dark'] .ve2 переопределяет тот же набор токенов.
+ *
+ * Светлая тема — базовая (как прод до включения data-portal-theme='dark'),
+ * тёмная — graphite-контур. Статусные цвета в светлой теме затемнены до
+ * текстового контраста ≥ 4.5:1 на белом.
+ * ========================================================================== */
+
+.ve2 {
+  --ve2-surface: oklch(1 0 0);
+  --ve2-elev: oklch(0.96 0.002 250);
+  --ve2-active: oklch(0.93 0.004 250);
+  --ve2-fg: oklch(0.17 0.005 250);
+  --ve2-mute: oklch(0.42 0.008 250);
+  --ve2-faint: oklch(0.51 0.01 250);
+  --ve2-line: oklch(0.905 0.004 250);
+  --ve2-line-strong: oklch(0.845 0.006 250);
+  --ve2-ok: oklch(0.50 0.12 145);
+  --ve2-warn: oklch(0.56 0.11 70);
+  --ve2-err: oklch(0.54 0.18 25);
+  --ve2-q: oklch(0.51 0.01 250);
+  --ve2-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --ve2-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --ve2-ring: 0 0 0 3px color-mix(in oklab, var(--ve2-fg) 32%, transparent);
+  color: var(--ve2-fg);
+}
+html[data-portal-theme='dark'] .ve2 {
+  --ve2-surface: #111213;
+  --ve2-elev: #18191c;
+  --ve2-active: #1f2023;
+  --ve2-fg: #fafafa;
+  --ve2-mute: #a1a1a3;
+  --ve2-faint: #6c6c70;
+  --ve2-line: #1f2023;
+  --ve2-line-strong: #2a2b2f;
+  --ve2-ok: #46a758;
+  --ve2-warn: #f5a623;
+  --ve2-err: #e5484d;
+  --ve2-q: #6c6c70;
+}
+
+/* Единый focus-сигнал страницы: нейтральное кольцо вместо синих ring-400.
+   !important нужен ровно один раз — чтобы перекрыть Tailwind ring-утилиты,
+   оставшиеся в непереписанных узлах шагов. */
+.ve2 :focus-visible {
+  outline: none !important;
+  box-shadow: var(--ve2-ring) !important;
+}
+
+/* ── Типографика ────────────────────────────────────────────────────────── */
+.ve2-eb {
+  font-family: var(--ve2-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--ve2-faint);
+}
+.ve2-h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.015em; line-height: 1.2; color: var(--ve2-fg); }
+.ve2-h2 { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.25; color: var(--ve2-fg); }
+.ve2-h3 { font-size: 15px; font-weight: 600; letter-spacing: -0.005em; line-height: 1.35; color: var(--ve2-fg); }
+.ve2-h4 { font-size: 13px; font-weight: 600; line-height: 1.4; color: var(--ve2-fg); }
+.ve2-lead { font-size: 14px; line-height: 1.55; color: var(--ve2-mute); }
+.ve2-mut { font-size: 13px; color: var(--ve2-mute); }
+.ve2-faint { font-family: var(--ve2-mono); font-size: 11px; color: var(--ve2-faint); }
+.ve2-link { color: var(--ve2-fg); font-weight: 500; }
+.ve2-link:hover { color: var(--ve2-mute); }
+.ve2-link-h:hover { color: var(--ve2-fg) !important; }
+.ve2-t-ok { color: var(--ve2-ok) !important; }
+.ve2-t-w { color: var(--ve2-warn) !important; }
+.ve2-t-dan { color: var(--ve2-err) !important; }
+.ve2-t-q { color: var(--ve2-mute) !important; }
+
+/* ── Кнопки: primary — самый контрастный объект, без цвета ─────────────── */
+.ve2-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 40px; padding: 8px 16px; border-radius: 6px;
+  font-size: 13px; font-weight: 600; letter-spacing: -0.005em;
+  border: 1px solid transparent; cursor: pointer;
+  transition: background 0.18s var(--ve2-ease), color 0.18s var(--ve2-ease),
+    border-color 0.18s var(--ve2-ease), transform 0.05s var(--ve2-ease);
+}
+.ve2-btn:active { transform: scale(0.98); }
+.ve2-btn:disabled { cursor: not-allowed; opacity: 0.45; }
+.ve2-b-pri { background: var(--ve2-fg); color: var(--ve2-surface); }
+.ve2-b-pri:hover { background: color-mix(in oklab, var(--ve2-fg) 82%, var(--ve2-surface)); }
+.ve2-b-sec { border-color: var(--ve2-line-strong); color: var(--ve2-fg); background: transparent; }
+.ve2-b-sec:hover { background: var(--ve2-elev); }
+.ve2-b-ghost { color: var(--ve2-mute); background: transparent; }
+.ve2-b-ghost:hover { background: var(--ve2-elev); color: var(--ve2-fg); }
+.ve2-b-quiet {
+  color: var(--ve2-mute); min-height: 28px; padding: 2px 4px; font-size: 13px; font-weight: 500;
+  cursor: pointer; background: none; border: 0; transition: color 0.18s var(--ve2-ease);
+}
+.ve2-b-quiet:hover { color: var(--ve2-fg); }
+.ve2-b-quiet:disabled { opacity: 0.4; cursor: not-allowed; }
+.ve2-b-dan { color: var(--ve2-err); }
+.ve2-b-dan:hover { background: color-mix(in oklab, var(--ve2-err) 10%, transparent); }
+.ve2-b-sm { min-height: 30px; padding: 5px 10px; font-size: 12px; }
+
+/* ── Статус: точка 6px + моно-тег, никогда не заливка ──────────────────── */
+.ve2-st {
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+  font-family: var(--ve2-mono); font-size: 11px; font-weight: 500;
+  letter-spacing: 0.02em; text-transform: uppercase;
+}
+.ve2-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.ve2-tg-ok { color: var(--ve2-ok); }
+.ve2-tg-warn { color: var(--ve2-warn); }
+.ve2-tg-err { color: var(--ve2-err); }
+.ve2-tg-q { color: var(--ve2-mute); }
+/* Утилиты точек для карт, где тон приходит строкой класса (сезонность, портфель). */
+.ve2-d-g { background: var(--ve2-ok); }
+.ve2-d-w { background: var(--ve2-warn); }
+.ve2-d-r { background: var(--ve2-err); }
+.ve2-d-n { background: var(--ve2-mute); }
+.ve2-d-q { background: var(--ve2-line-strong); }
+
+/* ── Поверхности ────────────────────────────────────────────────────────── */
+.ve2-card { background: var(--ve2-surface); border: 1px solid var(--ve2-line); border-radius: 8px; }
+.ve2-card-h:hover { border-color: var(--ve2-line-strong); }
+.ve2-p-5 { padding: 20px; }
+.ve2-soft { background: var(--ve2-elev); border-radius: 8px; }
+.ve2-form { background: var(--ve2-surface); border: 1px solid var(--ve2-line); border-radius: 8px; padding: 16px; }
+.ve2-empty {
+  border: 1px dashed var(--ve2-line-strong); border-radius: 8px;
+  padding: 32px; text-align: center; color: var(--ve2-mute); font-size: 13px;
+}
+.ve2-nt {
+  background: var(--ve2-surface); border: 1px solid var(--ve2-line);
+  border-radius: 8px; color: var(--ve2-fg); font-size: 13px;
+}
+.ve2-nt-ok { border-color: color-mix(in oklab, var(--ve2-ok) 35%, var(--ve2-line)); }
+.ve2-nt-warn { border-color: color-mix(in oklab, var(--ve2-warn) 45%, var(--ve2-line)); }
+.ve2-nt-err { border-color: color-mix(in oklab, var(--ve2-err) 40%, var(--ve2-line)); }
+.ve2-nt-info { border-color: var(--ve2-line); }
+.ve2-warn-soft { border: 1px solid color-mix(in oklab, var(--ve2-warn) 45%, var(--ve2-line)); border-radius: 8px; }
+.ve2-div { border-color: var(--ve2-line) !important; }
+.ve2-sel { outline: 1px solid var(--ve2-line-strong); outline-offset: -1px; }
+.ve2-filterbar {
+  position: sticky; background: var(--ve2-surface);
+  border: 1px solid var(--ve2-line); border-radius: 8px;
+}
+
+/* ── Поля ───────────────────────────────────────────────────────────────── */
+.ve2-input {
+  min-height: 40px; width: 100%; background: var(--ve2-surface);
+  border: 1px solid var(--ve2-line-strong); border-radius: 6px;
+  padding: 8px 12px; font-size: 13px; color: var(--ve2-fg);
+  transition: border-color 0.18s var(--ve2-ease);
+}
+.ve2-input::placeholder { color: var(--ve2-faint); }
+.ve2-input:focus { outline: none; border-color: var(--ve2-fg); }
+.ve2-input:disabled { background: var(--ve2-elev); color: var(--ve2-faint); border-color: var(--ve2-line); }
+.ve2-cbx { accent-color: var(--ve2-fg); }
+
+/* ── Табы: один паттерн на всю страницу ────────────────────────────────── */
+.ve2-tabs { display: flex; gap: 22px; overflow-x: auto; border-bottom: 1px solid var(--ve2-line); }
+.ve2-tab {
+  position: relative; flex: none; padding: 10px 1px; cursor: pointer; background: none; border: 0;
+  font-size: 13px; font-weight: 500; color: var(--ve2-mute);
+  display: inline-flex; align-items: center; gap: 8px;
+  transition: color 0.18s var(--ve2-ease);
+}
+.ve2-tab:hover { color: var(--ve2-fg); }
+.ve2-tab::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: transparent; }
+.ve2-tab[aria-selected='true'], .ve2-tab[aria-pressed='true'] { color: var(--ve2-fg); }
+.ve2-tab[aria-selected='true']::after, .ve2-tab[aria-pressed='true']::after { background: var(--ve2-fg); }
+
+/* ── Чипы и мелкие теги ─────────────────────────────────────────────────── */
+.ve2-chip {
+  border: 1px solid var(--ve2-line-strong); border-radius: 6px; padding: 5px 10px;
+  font-family: var(--ve2-mono); font-size: 11px; letter-spacing: 0.02em;
+  color: var(--ve2-mute); background: none; cursor: pointer;
+  transition: color 0.18s var(--ve2-ease), border-color 0.18s var(--ve2-ease), background 0.18s var(--ve2-ease);
+}
+.ve2-chip:hover { color: var(--ve2-fg); border-color: var(--ve2-faint); }
+.ve2-chip-on { background: var(--ve2-fg) !important; border-color: var(--ve2-fg) !important; color: var(--ve2-surface) !important; }
+.ve2-mchip { border: 1px solid var(--ve2-line); border-radius: 6px; padding: 2px 6px; font-size: 11px; color: var(--ve2-mute); }
+.ve2-tag {
+  display: inline-flex; align-items: center; border: 1px solid var(--ve2-line-strong);
+  border-radius: 6px; padding: 3px 8px; font-family: var(--ve2-mono); font-size: 11px;
+  letter-spacing: 0.02em; color: var(--ve2-mute); white-space: nowrap;
+}
+.ve2-tier {
+  font-family: var(--ve2-mono); font-size: 11px; font-weight: 500; letter-spacing: 0.02em;
+  color: var(--ve2-mute); border: 1px solid var(--ve2-line-strong); border-radius: 4px;
+  padding: 2px 6px; white-space: nowrap;
+}
+
+/* ── Ряды ───────────────────────────────────────────────────────────────── */
+.ve2-rows { background: var(--ve2-surface); border: 1px solid var(--ve2-line); border-radius: 8px; overflow: hidden; }
+.ve2-row {
+  display: flex; align-items: center; gap: 14px; width: 100%;
+  padding: 13px 16px; border-bottom: 1px solid var(--ve2-line);
+  text-align: left; background: none; cursor: pointer;
+  transition: background 0.18s var(--ve2-ease);
+}
+.ve2-row:last-child { border-bottom: 0; }
+.ve2-row:hover { background: var(--ve2-elev); }
+
+/* ── StepNav ────────────────────────────────────────────────────────────── */
+.ve2-sn {
+  display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; align-items: start;
+  width: 100%; text-align: left; padding: 8px; border-radius: 8px;
+  border: 1px solid transparent; background: none; cursor: pointer;
+  transition: background 0.18s var(--ve2-ease);
+}
+.ve2-sn:hover { background: var(--ve2-surface); }
+.ve2-sn-act { background: var(--ve2-surface); border-color: var(--ve2-line-strong); }
+.ve2-sn-lock { opacity: 0.45; }
+.ve2-sn-mk {
+  width: 24px; height: 24px; border-radius: 6px; display: grid; place-items: center;
+  font-family: var(--ve2-mono); font-size: 11px; font-weight: 500;
+  border: 1px solid var(--ve2-line-strong); color: var(--ve2-mute);
+}
+.ve2-sn-act .ve2-sn-mk { background: var(--ve2-fg); border-color: var(--ve2-fg); color: var(--ve2-surface); }
+.ve2-sn-done .ve2-sn-mk { color: var(--ve2-ok); border-color: color-mix(in oklab, var(--ve2-ok) 40%, transparent); }
+.ve2-sn-l { display: block; font-size: 13px; font-weight: 600; line-height: 1.3; color: var(--ve2-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ve2-sn-s { display: block; font-size: 11px; color: var(--ve2-faint); line-height: 1.35; margin-top: 1px; }
+
+/* ── Данные ─────────────────────────────────────────────────────────────── */
+.ve2-rank { font-family: var(--ve2-mono); font-size: 18px; font-weight: 500; color: var(--ve2-mute); font-variant-numeric: tabular-nums; }
+.ve2-pct { font-family: var(--ve2-mono); font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.ve2-pct-hi { color: var(--ve2-ok); }
+.ve2-pct-mid { color: var(--ve2-warn); }
+.ve2-pct-lo { color: var(--ve2-q); }
+.ve2-op {
+  font-family: var(--ve2-mono); font-size: 0.92em; background: var(--ve2-elev);
+  border: 1px solid var(--ve2-line); border-radius: 4px; padding: 1px 5px; white-space: nowrap;
+}
+.ve2-op-fb { color: var(--ve2-mute); }
+.ve2-src {
+  display: inline-flex; align-items: center; gap: 5px; font-family: var(--ve2-mono);
+  font-size: 11px; color: var(--ve2-mute); border: 1px solid var(--ve2-line);
+  border-radius: 4px; padding: 2px 7px; word-break: normal; overflow-wrap: anywhere;
+  transition: color 0.18s var(--ve2-ease), border-color 0.18s var(--ve2-ease);
+}
+.ve2-src:hover { color: var(--ve2-fg); border-color: var(--ve2-faint); }
+.ve2-bar { height: 4px; background: var(--ve2-active); border-radius: 4px; overflow: hidden; }
+.ve2-bar-f { display: block; height: 100%; background: var(--ve2-fg); }
+.ve2-drop {
+  border: 1px dashed var(--ve2-line-strong); border-radius: 8px; text-align: center;
+  transition: border-color 0.18s var(--ve2-ease), background 0.18s var(--ve2-ease);
+}
+.ve2-drop:hover, .ve2-drop-on { border-color: var(--ve2-faint); background: var(--ve2-elev); }
+.ve2-skel { background: var(--ve2-elev); border-radius: 6px; }
+.ve2-spin {
+  display: inline-block; border-radius: 50%;
+  border: 2px solid var(--ve2-line-strong); border-top-color: var(--ve2-fg);
+  animation: ve2-rotate 0.8s linear infinite;
+}
+@keyframes ve2-rotate { to { transform: rotate(360deg); } }
+
+/* ── Стат-полоса (архив) ────────────────────────────────────────────────── */
+.ve2-stats { display: grid; grid-template-columns: repeat(6, 1fr); border-top: 1px solid var(--ve2-line); border-bottom: 1px solid var(--ve2-line); }
+.ve2-stat { padding: 12px 14px; border-right: 1px solid var(--ve2-line); }
+.ve2-stat:last-child { border-right: 0; }
+.ve2-stat-v { font-family: var(--ve2-mono); font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.ve2-stat-k { font-size: 11px; color: var(--ve2-faint); margin-top: 2px; }
+@media (max-width: 960px) {
+  .ve2-stats { grid-template-columns: repeat(3, 1fr); }
+  .ve2-stat:nth-child(3n) { border-right: 0; }
+  .ve2-stat:nth-child(-n + 3) { border-bottom: 1px solid var(--ve2-line); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ve2 *, .ve2 *::before, .ve2 *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

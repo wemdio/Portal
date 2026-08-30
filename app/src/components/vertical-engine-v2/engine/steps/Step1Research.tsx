@@ -439,7 +439,7 @@ function BusinessBlock({
   return (
     <div
       className={`mt-4 rounded-lg border p-4 text-left ${
-        emphasized ? 'border-amber-300 bg-amber-50/60' : 'border-gray-200 bg-gray-50/50'
+        emphasized ? 've2-warn-soft' : 've2-soft'
       }`}
     >
       <label
@@ -764,7 +764,7 @@ function StageChecklist({ jobs, running }: { jobs: VeJobSummary[]; running: bool
             </span>
             <span>
               {line}
-              {progress ? <span className="block text-xs font-normal text-blue-500">— {progress}</span> : null}
+              {progress ? <span className="ve2-faint block">— {progress}</span> : null}
             </span>
           </li>
         );

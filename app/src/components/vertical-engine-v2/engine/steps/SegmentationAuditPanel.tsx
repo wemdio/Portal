@@ -638,7 +638,7 @@ function formatShare(value: number): string {
 function GroupExamples({ examples, groupName }: { examples: SegmentationAuditExample[]; groupName: string }) {
   if (examples.length === 0) return null;
   return (
-    <ul className="mt-2 space-y-1.5 border-l-2 border-gray-100 pl-3" aria-label={`Примеры: ${groupName}`}>
+    <ul className="mt-2 space-y-1.5" aria-label={`Примеры: ${groupName}`}>
       {examples.map((example, index) => {
         const details = [
           example.email,
@@ -736,7 +736,7 @@ export function SegmentationAuditPanel({
   if (audit.phase === 'loading') {
     return (
       <section
-        className="rounded-2xl border border-blue-200 bg-blue-50/50 px-4 py-3"
+        className="ve2-nt ve2-nt-info px-4 py-3"
         aria-labelledby="segmentation-audit-title"
         aria-busy="true"
       >

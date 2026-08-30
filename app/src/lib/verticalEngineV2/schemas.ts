@@ -94,6 +94,44 @@ export const VeEvidenceItemSchema = z.object({
   quote: z.string().max(500),
 });
 
+const VeMonthDaySchema = z.string().regex(/^\d{2}-\d{2}$/);
+
+export const VeRuSeasonalityWindowSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('peak'),
+    label: z.string().min(1),
+    start_mm_dd: VeMonthDaySchema,
+    end_mm_dd: VeMonthDaySchema,
+    /** Начало outreach = peak start - lead_days. */
+    lead_days: z.number().int().min(0).max(366),
+    /** URL+quote, подтверждающие именно это окно; проверяются после parse. */
+    evidence: z.array(VeEvidenceItemSchema).default([]),
+  }),
+  z.object({
+    kind: z.literal('avoid'),
+    label: z.string().min(1),
+    start_mm_dd: VeMonthDaySchema,
+    end_mm_dd: VeMonthDaySchema,
+    /** URL+quote, подтверждающие именно это окно; проверяются после parse. */
+    evidence: z.array(VeEvidenceItemSchema).default([]),
+  }),
+]);
+
+/**
+ * Persisted RU-only seasonal assessment. Validation of URL+quote against
+ * fetched pages happens in normalizeVerifiedRuSeasonality, after Zod shape
+ * validation; unsupported output is stored as explicit unknown.
+ */
+export const VeRuSeasonalitySchema = z.object({
+  version: z.literal(1).default(1),
+  classification: z.enum(['seasonal', 'neutral', 'unknown']),
+  confidence: z.enum(['low', 'medium', 'high']),
+  rationale: z.string().default(''),
+  windows: z.array(VeRuSeasonalityWindowSchema).default([]),
+  evidence: z.array(VeEvidenceItemSchema).default([]),
+});
+export type VeRuSeasonalityOutput = z.infer<typeof VeRuSeasonalitySchema>;
+
 export const VeEvidenceVerdictSchema = z.object({
   verdict: z.enum(['keep', 'merge', 'drop']),
   /** Точный title другой гипотезы-кандидата — только для verdict=merge. */
@@ -104,6 +142,11 @@ export const VeEvidenceVerdictSchema = z.object({
   evidence: z.array(VeEvidenceItemSchema).default([]),
   /** Перекалиброванный по фактам процент потенциала. */
   potential_pct: z.number().int().min(0).max(100),
+  /**
+   * RU-only structured assessment. Nullable keeps legacy mocks/runs and US
+   * evidence backward-compatible; the stage persists NULL verbatim.
+   */
+  seasonality: VeRuSeasonalitySchema.nullable().default(null),
 });
 export type VeEvidenceVerdict = z.infer<typeof VeEvidenceVerdictSchema>;
 

@@ -17,7 +17,7 @@
  * launch-аудиторию, а затем использует проверенные назначения дословно.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { buildCampaignPayloadFromPreset } from '@/lib/clientLaunch/buildCampaignPayload';
 import { hasUsableCampaignSequences } from '@/lib/clientLaunch/campaignSequences';
@@ -38,8 +38,14 @@ import {
 } from './launchHandoff';
 import {
   buildSegmentationLaunchGroups,
+  stableJson,
 } from './segmentationAudit';
 import { reconcileExpiredLaunchReservation } from './launchReservation';
+import { latestSeasonalActivationAt, normalizeLaunchMailboxIds } from './launchPortfolio';
+import {
+  buildRuSeasonalityPrioritySnapshot,
+  readStoredRuSeasonality,
+} from './ruSeasonality';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 
 export type VeLaunchLocale = 'ru' | 'en';
@@ -51,6 +57,7 @@ interface VeLaunchMessages {
   baseNotFound: string;
   presetLoadFailed: string;
   presetNotFound: string;
+  mailboxScopeRequired: string;
   noLetters: string;
   noEmailColumn: string;
   noValidEmails: string;
@@ -76,6 +83,7 @@ const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
     baseNotFound: 'База не найдена',
     presetLoadFailed: 'Не удалось загрузить пресет',
     presetNotFound: 'Пресет не найден',
+    mailboxScopeRequired: 'В пресете нет почтовых аккаунтов для безопасного запуска.',
     noLetters: 'У шаблона нет писем для запуска',
     noEmailColumn: 'В базе не найдена колонка с email',
     noValidEmails: 'В базе нет валидных email-адресов',
@@ -103,6 +111,7 @@ const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
     baseNotFound: 'Base not found',
     presetLoadFailed: 'Failed to load the preset',
     presetNotFound: 'Preset not found',
+    mailboxScopeRequired: 'The preset has no sender accounts for a safe launch.',
     noLetters: 'The template has no letters to launch',
     noEmailColumn: 'No email column found in the collected base',
     noValidEmails: 'The base contains no valid email addresses',
@@ -149,6 +158,90 @@ export interface VeTemplateLaunchOutcome {
 
 function conflict(code: string, error: string): VeTemplateLaunchOutcome {
   return { status: 409, body: { error, code } };
+}
+
+export function normalizedMailboxIds(values: unknown): string[] {
+  return normalizeLaunchMailboxIds(values);
+}
+
+function estimatedBundleRunDays(input: {
+  campaigns: VeTemplateLaunchCampaign[];
+  preset: ClientCampaignPreset;
+  letters: VeTemplate['letters'];
+}): number {
+  const totalCampaignLeads = Math.max(
+    1,
+    input.campaigns.reduce((total, campaign) => total + campaign.leads_count, 0),
+  );
+  const dailyMax =
+    Number.isFinite(input.preset.daily_max_leads) && input.preset.daily_max_leads > 0
+      ? input.preset.daily_max_leads
+      : Number.isFinite(input.preset.daily_limit) && input.preset.daily_limit > 0
+        ? input.preset.daily_limit
+        : 1;
+  const activeDays = new Set(
+    (Array.isArray(input.preset.schedule_days) ? input.preset.schedule_days : [])
+      .filter((day) => Number.isSafeInteger(day) && day >= 0 && day <= 6),
+  ).size || 5;
+  const firstPassCalendarDays = Math.ceil(
+    (Math.ceil(totalCampaignLeads / dailyMax) * 7) / activeDays,
+  );
+  const followUpTailDays = input.letters.slice(1).reduce((total, letter) => {
+    const delay = typeof letter.wait_days === 'number' && Number.isFinite(letter.wait_days)
+      ? Math.max(0, letter.wait_days)
+      : 0;
+    return total + delay;
+  }, 0);
+  return Math.max(1, firstPassCalendarDays + followUpTailDays);
+}
+
+export function seasonalityInputHash(input: {
+  hypothesisId: string | null;
+  seasonality: unknown;
+}): string {
+  return createHash('sha256')
+    .update(stableJson({ hypothesis_id: input.hypothesisId, seasonality: input.seasonality }))
+    .digest('hex');
+}
+
+export function buildLaunchPortfolioMetadata(input: {
+  hypothesisId: string | null;
+  seasonality: unknown;
+  hypothesisPotential: unknown;
+  verticalPotential: unknown;
+  estimatedRunDays?: unknown;
+}): {
+  seasonality: ReturnType<typeof readStoredRuSeasonality>;
+  seasonalityInputHash: string;
+  prioritySnapshot: ReturnType<typeof buildRuSeasonalityPrioritySnapshot>;
+  latestActivationAt: string | null;
+  seasonalityConfidence: 'low' | 'medium' | 'high';
+  potentialPct: number;
+} {
+  const seasonality = readStoredRuSeasonality(input.seasonality);
+  const prioritySnapshot = buildRuSeasonalityPrioritySnapshot(seasonality);
+  const potentialPct =
+    typeof input.hypothesisPotential === 'number' && Number.isFinite(input.hypothesisPotential)
+      ? input.hypothesisPotential
+      : typeof input.verticalPotential === 'number' && Number.isFinite(input.verticalPotential)
+        ? input.verticalPotential
+        : 0;
+  const latestActivationAt = latestSeasonalActivationAt({
+    seasonal_deadline_date: prioritySnapshot.seasonal_deadline_date,
+    estimated_run_days:
+      typeof input.estimatedRunDays === 'number' ? input.estimatedRunDays : null,
+  });
+  return {
+    seasonality,
+    seasonalityInputHash: seasonalityInputHash({
+      hypothesisId: input.hypothesisId,
+      seasonality,
+    }),
+    prioritySnapshot,
+    latestActivationAt,
+    seasonalityConfidence: prioritySnapshot.confidence,
+    potentialPct,
+  };
 }
 
 type LaunchReservationTerminal = 'succeeded' | 'failed' | 'uncertain';
@@ -286,7 +379,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   // 2. База шаблона.
   const { data: baseRow, error: baseErr } = await portalDb
     .from('ve_bases')
-    .select('id, project_id, filename, columns, data, source')
+    .select('id, project_id, vertical_id, hypothesis_id, filename, columns, data, source')
     .eq('id', template.base_id)
     .single();
   if (baseErr) {
@@ -297,7 +390,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   }
   const base = baseRow as Pick<
     VeBase,
-    'id' | 'project_id' | 'filename' | 'columns' | 'data' | 'source'
+    'id' | 'project_id' | 'vertical_id' | 'hypothesis_id' | 'filename' | 'columns' | 'data' | 'source'
   >;
 
   // 3. Письма шаблона + условия сегментных вариантов (when) для сплита запуска.
@@ -392,8 +485,45 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   }
   if (!presetRow) return { status: 404, body: { error: t.presetNotFound } };
   const preset = presetRow as ClientCampaignPreset;
+  const mailboxIds = normalizedMailboxIds(preset.email_account_ids);
+  if (mailboxIds.length === 0) {
+    return conflict('VE_LAUNCH_MAILBOX_SCOPE_REQUIRED', t.mailboxScopeRequired);
+  }
+  const instantlyAccountId = resolveInstantlyAccountId(preset.instantly_account_id);
+  const instantlyRequestOptions = { accountId: instantlyAccountId };
 
-  const instantlyRequestOptions = { accountId: resolveInstantlyAccountId(preset.instantly_account_id) };
+  // Evidence-stage is the only source of the calendar assessment. Missing or
+  // malformed legacy values remain explicit unknown; launch never guesses a
+  // month from the hypothesis title or industry keywords.
+  let hypothesisRow: Record<string, unknown> | null = null;
+  if (base.hypothesis_id) {
+    const { data, error } = await portalDb
+      .from('ve_hypotheses')
+      .select('id, seasonality, potential_pct')
+      .eq('id', base.hypothesis_id)
+      .maybeSingle();
+    if (error) return { status: 500, body: { error: error.message } };
+    hypothesisRow = data as Record<string, unknown> | null;
+  }
+  const { data: verticalRow, error: verticalError } = await portalDb
+    .from('ve_verticals')
+    .select('id, potential_pct')
+    .eq('id', base.vertical_id)
+    .maybeSingle();
+  if (verticalError) return { status: 500, body: { error: verticalError.message } };
+
+  const {
+    seasonality,
+    seasonalityInputHash: launchSeasonalityInputHash,
+    prioritySnapshot,
+    seasonalityConfidence,
+    potentialPct,
+  } = buildLaunchPortfolioMetadata({
+    hypothesisId: base.hypothesis_id,
+    seasonality: hypothesisRow?.seasonality,
+    hypothesisPotential: hypothesisRow?.potential_pct,
+    verticalPotential: (verticalRow as Record<string, unknown> | null)?.potential_pct,
+  });
 
   // 7. DB-reservation closes the check-then-launch race across both repeated
   //    requests for one audit and different current audits of one template.
@@ -607,6 +737,11 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   // 9. Запись о запуске в шаблон. Скалярные поля — первая кампания;
   //    полный список — campaigns[].
   const primary = campaigns[0];
+  const estimatedRunDays = estimatedBundleRunDays({ campaigns, preset, letters: templateLetters });
+  const latestActivationAt = latestSeasonalActivationAt({
+    seasonal_deadline_date: prioritySnapshot.seasonal_deadline_date,
+    estimated_run_days: estimatedRunDays,
+  });
   const launchInfo: VeTemplateLaunchInfo = {
     campaign_id: primary.campaign_id,
     campaign_name: primary.campaign_name,
@@ -614,6 +749,15 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     leads_count: accepted,
     preset_id: presetId,
     created_at: new Date().toISOString(),
+    instantly_account_id: instantlyAccountId,
+    mailbox_ids: mailboxIds,
+    seasonality,
+    seasonality_input_hash: launchSeasonalityInputHash,
+    priority_snapshot: prioritySnapshot,
+    latest_activation_at: latestActivationAt,
+    seasonality_confidence: seasonalityConfidence,
+    potential_pct: potentialPct,
+    estimated_run_days: estimatedRunDays,
     segmentation_audit_id: audit.id,
     segmentation_audit_input_hash: currentInputHash,
     ...(ambiguousGroupFailure ? { reconciliation_required: true } : {}),

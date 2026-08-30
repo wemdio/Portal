@@ -26,6 +26,7 @@ import type {
 } from '@/lib/verticalEngineV2/types';
 import { TIER_META } from '../ui';
 import { HE, Spinner, StatusDot } from '../design';
+import { HypothesisSeasonalitySummary } from '../SeasonalitySummary';
 import type {
   VeBaseSummary,
   VeChainDto,
@@ -101,13 +102,13 @@ function TierText({ tier }: { tier: VeHypothesisTier }) {
 function PctPill({ pct }: { pct: number }) {
   const tone =
     pct >= 50
-      ? 'bg-emerald-100 text-emerald-700'
+      ? 've2-pct-hi'
       : pct >= 25
-        ? 'bg-amber-100 text-amber-700'
-        : 'bg-gray-100 text-gray-500';
+        ? 've2-pct-mid'
+        : 've2-pct-lo';
   return (
     <span
-      className={`${HE.pill} ${tone}`}
+      className={`ve2-pct ${tone}`}
       title="Потенциал сегмента (0–100) — оценка привлекательности сегмента как рынка для аутрича. Это не прогноз reply%."
     >
       {pct}%
@@ -297,7 +298,7 @@ export function Step2Verticals({
       </header>
 
       {/* Фильтр гипотез внутри карточек + свёртка всех карточек разом */}
-      <div className="sticky top-14 z-10 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-gray-200 bg-white/95 p-2 backdrop-blur-md">
+      <div className="sticky top-14 z-10 flex flex-wrap items-center gap-x-3 gap-y-2 ve2-filterbar p-2">
         <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Фильтр гипотез">
           {FILTER_CHIPS.map((chip) => (
             <button
@@ -306,7 +307,7 @@ export function Step2Verticals({
               onClick={() => setFilter(chip.id)}
               aria-pressed={filter === chip.id}
               className={`${HE.btnSmall} ${
-                filter === chip.id ? 'border-blue-600! text-blue-600!' : ''
+                filter === chip.id ? 've2-chip-on' : ''
               }`}
             >
               {chip.label}
@@ -424,7 +425,7 @@ function VerticalCard({
   const busy = busyAction !== null;
 
   return (
-    <article className={`${HE.card} p-5 transition ${selected ? 'border-blue-500! ring-1 ring-blue-500/40' : ''}`}>
+    <article className={`${HE.card} p-5 transition ${selected ? 've2-sel' : ''}`}>
       {/* Шапка: rank, название, потенциал, выбор, массовые действия, свёртка */}
       <div className="flex flex-wrap items-center gap-2">
         {vertical.rank != null ? <span className={HE.rankNum}>{vertical.rank}</span> : null}
@@ -432,7 +433,7 @@ function VerticalCard({
         <PctPill pct={vertical.potential_pct} />
         {typeof vertical.actual_reply_pct === 'number' ? (
           <span
-            className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700"
+            className="ve2-st ve2-tg-ok"
             title="Фактический reply rate запущенных кампаний вертикали (сверка прогноза с реальностью)"
           >
             факт reply {vertical.actual_reply_pct}%{vertical.actual_sent ? ` · ${vertical.actual_sent.toLocaleString('ru-RU')} отправок` : ''}
@@ -705,12 +706,12 @@ function HypothesisItem({
 
   return (
     <li
-      className={`rounded-lg border p-3 transition ${
+      className={`ve2-card p-3 transition ${
         rejected
-          ? 'border-gray-100 bg-gray-50/60 opacity-60'
+          ? 'opacity-60'
           : accepted
-            ? 'border-emerald-200 bg-emerald-50/40'
-            : 'border-gray-200 bg-white'
+            ? 've2-sel'
+            : ''
       }`}
     >
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -720,18 +721,21 @@ function HypothesisItem({
             <p className="text-sm font-semibold text-gray-900">{hypothesis.title}</p>
             <PctPill pct={hypothesis.potential_pct} />
             {hasBase ? (
-              <span title="Под эту гипотезу собрана база" className="text-[11px] font-medium text-blue-600">
+              <span title="Под эту гипотезу собрана база" className="ve2-tag">
                 база
               </span>
             ) : null}
           </div>
           {fitRationale ? (
-            <p className="mt-2 rounded-lg bg-blue-50/60 px-3 py-2 text-[12.5px] leading-relaxed text-gray-700">
+            <p className="ve2-soft ve2-mut mt-2 px-3 py-2 leading-relaxed">
               <strong className="font-semibold text-gray-900">Почему это рынок:</strong> {fitRationale}
             </p>
           ) : null}
           {hypothesis.description ? (
             <p className="mt-1 text-sm leading-relaxed text-gray-600">{hypothesis.description}</p>
+          ) : null}
+          {hypothesis.seasonality ? (
+            <HypothesisSeasonalitySummary assessment={hypothesis.seasonality} />
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-3">
@@ -742,8 +746,8 @@ function HypothesisItem({
             aria-pressed={accepted}
             className={
               accepted
-                ? '-mx-2 -my-1 rounded-md px-2 py-1 text-xs font-semibold text-emerald-600 underline decoration-emerald-300 underline-offset-4 transition hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300'
-                : '-mx-2 -my-1 rounded-md px-2 py-1 text-xs font-medium text-gray-500 transition hover:text-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300'
+                ? 've2-b-quiet ve2-t-ok text-xs font-semibold underline underline-offset-4'
+                : 've2-b-quiet text-xs'
             }
           >
             {accepted ? 'Принято' : 'Принять'}
@@ -755,8 +759,8 @@ function HypothesisItem({
             aria-pressed={rejected}
             className={
               rejected
-                ? '-mx-2 -my-1 rounded-md px-2 py-1 text-xs font-semibold text-red-500 transition hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300'
-                : '-mx-2 -my-1 rounded-md px-2 py-1 text-xs font-medium text-gray-500 transition hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300'
+                ? 've2-b-quiet ve2-t-dan text-xs font-semibold'
+                : 've2-b-quiet text-xs'
             }
           >
             {rejected ? 'Отклонено' : 'Отклонить'}
@@ -769,7 +773,7 @@ function HypothesisItem({
           <summary className={`cursor-pointer list-none ${HE.btnQuiet}`}>
             Доказательства ({hypothesis.evidence.length})
           </summary>
-          <ul className="mt-2 space-y-2 border-l-2 border-gray-100 pl-3">
+          <ul className="mt-2 space-y-2">
             {hypothesis.evidence.map((ev, ei) => (
               <li key={ei} className="text-xs leading-relaxed">
                 <p className="italic text-gray-500">«{ev.quote}»</p>
@@ -778,7 +782,7 @@ function HypothesisItem({
                   href={ev.source_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="mt-0.5 inline-block break-all text-blue-600 transition hover:text-blue-700 hover:underline"
+                  className="ve2-src mt-0.5 inline-block"
                 >
                   {ev.source_url}
                 </a>

@@ -17,6 +17,7 @@ const USER_ID = '00000000-0000-4000-8000-000000000282';
 const PROJECT_ID = 'project-launch-audit-1';
 const TEMPLATE_ID = 'template-launch-audit-1';
 const BASE_ID = 'base-launch-audit-1';
+const HYPOTHESIS_ID = 'hypothesis-launch-audit-1';
 const PRESET_ID = 'preset-launch-audit-1';
 const READY_AUDIT_ID = 'audit-ready-1';
 
@@ -122,6 +123,19 @@ const PRESET_ROW = {
   schedule_timezone: 'Europe/Kirov',
 };
 
+const VERIFIED_SEASONALITY = {
+  version: 1,
+  classification: 'neutral',
+  confidence: 'high',
+  rationale: 'Проверенные отраслевые данные показывают круглогодичный спрос.',
+  windows: [],
+  evidence: [{
+    claim: 'Спрос распределён в течение года.',
+    source_url: 'https://research.example/education-demand',
+    quote: 'Закупки образовательных услуг проходят на протяжении всего года.',
+  }],
+};
+
 function readyAudit(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: READY_AUDIT_ID,
@@ -167,6 +181,7 @@ function seed(
   audits: Array<Record<string, unknown>> = [],
   options: {
     errorUpdates?: Record<string, { message: string; patchIncludes?: Record<string, unknown> }>;
+    presetOverrides?: Partial<typeof PRESET_ROW>;
   } = {},
 ) {
   mockPortalDb = createMockSupabase({
@@ -206,7 +221,21 @@ function seed(
       },
     },
     tables: {
-      ve_projects: [{ id: PROJECT_ID, created_by: USER_ID }],
+      ve_projects: [{ id: PROJECT_ID, created_by: USER_ID, market: 'ru' }],
+      ve_verticals: [{
+        id: 'vertical-launch-audit-1',
+        project_id: PROJECT_ID,
+        name: 'Частные школы',
+        potential_pct: 71,
+      }],
+      ve_hypotheses: [{
+        id: HYPOTHESIS_ID,
+        project_id: PROJECT_ID,
+        vertical_id: 'vertical-launch-audit-1',
+        title: 'Круглогодичный набор',
+        potential_pct: 82,
+        seasonality: VERIFIED_SEASONALITY,
+      }],
       ve_templates: [
         {
           id: TEMPLATE_ID,
@@ -227,6 +256,7 @@ function seed(
           id: BASE_ID,
           project_id: PROJECT_ID,
           vertical_id: 'vertical-launch-audit-1',
+          hypothesis_id: HYPOTHESIS_ID,
           filename: 'schools.csv',
           columns: ['Email', 'Компания', 'Отрасль'],
           source: 'upload',
@@ -239,7 +269,9 @@ function seed(
     },
   });
   mockInstantlyDb = createMockSupabase({
-    tables: { client_campaign_presets: [PRESET_ROW] },
+    tables: {
+      client_campaign_presets: [{ ...PRESET_ROW, ...options.presetOverrides }],
+    },
   });
 }
 
@@ -396,6 +428,14 @@ describe('POST /api/tools/vertical-engine-v2/templates/[id]/launch — segmentat
         segmentation_audit_id?: string;
         segmentation_audit_input_hash?: string;
         campaigns?: Array<{ segment: string | null; leads_count: number }>;
+        instantly_account_id?: string;
+        mailbox_ids?: string[];
+        seasonality?: Record<string, unknown>;
+        seasonality_input_hash?: string;
+        priority_snapshot?: Record<string, unknown>;
+        seasonality_confidence?: string;
+        potential_pct?: number;
+        estimated_run_days?: number;
       };
     };
     expect(body.ok).toBe(true);
@@ -412,6 +452,18 @@ describe('POST /api/tools/vertical-engine-v2/templates/[id]/launch — segmentat
       expect.objectContaining({
         segmentation_audit_id: READY_AUDIT_ID,
         segmentation_audit_input_hash: INPUT_HASH,
+        instantly_account_id: 'main',
+        mailbox_ids: ['sender@example.test'],
+        seasonality: VERIFIED_SEASONALITY,
+        seasonality_input_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        priority_snapshot: expect.objectContaining({
+          version: 1,
+          state: 'neutral',
+          automatic_activation_eligible: true,
+        }),
+        seasonality_confidence: 'high',
+        potential_pct: 82,
+        estimated_run_days: expect.any(Number),
         campaigns: [
           expect.objectContaining({ segment: null, leads_count: 1 }),
           expect.objectContaining({ segment: 'частные школы', leads_count: 1 }),
@@ -460,6 +512,27 @@ describe('POST /api/tools/vertical-engine-v2/templates/[id]/launch — segmentat
       ),
     ).toBe(true);
     expect(mockPortalDb.getRows('he_templates')).toEqual([{ id: 'legacy-template', status: 'ready' }]);
+  });
+
+  it('estimates a multi-segment bundle from total leads sharing one mailbox pool', async () => {
+    seed([readyAudit()], {
+      presetOverrides: {
+        daily_max_leads: 1,
+        schedule_days: [0, 1, 2, 3, 4, 5, 6],
+      },
+    });
+
+    const response = await POST(request(launchBody()), params);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      launch?: {
+        estimated_run_days?: number;
+        campaigns?: Array<{ leads_count?: number }>;
+      };
+    };
+
+    expect(body.launch?.campaigns?.map((campaign) => campaign.leads_count)).toEqual([1, 1]);
+    expect(body.launch?.estimated_run_days).toBe(2);
   });
 
   it('keeps an uncertain reservation when the external launch may exist without launch_info', async () => {

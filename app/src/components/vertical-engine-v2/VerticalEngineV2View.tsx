@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { AlertCircle, Archive as ArchiveIcon, ExternalLink } from 'lucide-react';
+import { Archive as ArchiveIcon, ExternalLink } from 'lucide-react';
 
 import type {
   VeProject,
@@ -25,14 +25,21 @@ import {
 import { VeEngineWorkspace } from './engine/HypothesisEngineView';
 import { LegacyArchivePanel } from './LegacyArchivePanel';
 import { LegacyReviewPanel } from './LegacyReviewPanel';
-import styles from './VerticalEngineV2View.module.css';
+import { StatusDot } from './engine/design';
+
+/**
+ * Редизайн: scoped дизайн-слой страницы. Все визуальные правила живут в
+ * ve2.css под классом .ve2 (см. контракт изоляции в его шапке): глобальные
+ * стили портала и другие страницы не затрагиваются, обе темы идут через
+ * токены --ve2-*. Сам CSS подключается в роуте: app/tools/vertical-engine-v2/page.tsx.
+ */
 
 type Tab = 'projects' | 'archive' | 'review';
 
 function ErrorNotice({ message }: { message: string }) {
   return (
-    <div className="flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-      <AlertCircle aria-hidden className="mt-0.5 h-4 w-4 shrink-0" />
+    <div className="ve2-nt ve2-nt-err flex items-start gap-2.5 px-4 py-3 text-sm" role="alert">
+      <StatusDot tone="err" className="mt-[7px] shrink-0" />
       <span>{message}</span>
     </div>
   );
@@ -201,7 +208,7 @@ export function VerticalEngineV2View() {
         setBusyCandidateId(null);
       }
     },
-    [legacyDetail, loadArchive, loadCandidates],
+    [legacyDetail?.project.id, loadArchive, loadCandidates],
   );
 
   const tabs: Array<{ id: Tab; label: string; count?: number }> = [
@@ -217,33 +224,31 @@ export function VerticalEngineV2View() {
 
   return (
     <main
-      className={`mx-auto w-full max-w-[1480px] px-4 sm:px-6 lg:px-8 ${
+      className={`ve2 mx-auto w-full max-w-[1480px] px-4 sm:px-6 lg:px-8 ${
         showChrome ? 'py-6 lg:py-8' : 'py-4 lg:py-6'
       }`}
     >
       {showChrome ? (
         <>
           <header>
-            <nav className="text-xs text-gray-500" aria-label="Хлебные крошки">
-              Инструменты / Движок вертикалей
+            <nav className="ve2-eb" aria-label="Хлебные крошки">
+              Инструменты → Движок вертикалей
             </nav>
             <div className="mt-3 flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
               <div>
                 <div className="flex flex-wrap items-center gap-2.5">
-                  <h1 className="text-[28px] font-semibold leading-tight text-gray-950">
+                  <h1 className="ve2-h1">
                     Движок вертикалей
                   </h1>
-                  <span className="rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-semibold text-blue-700">
-                    V2 · внутренний контур
-                  </span>
+                  <span className="ve2-tag">V2 · внутренний контур</span>
                 </div>
-                <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-500">
+                <p className="ve2-lead mt-2 max-w-2xl">
                   От исследования рынка до готовой базы и шаблона для запуска.
                 </p>
               </div>
               <a
                 href="/tools/hypothesis-engine"
-                className="inline-flex h-9 shrink-0 items-center gap-2 self-start rounded-md border border-gray-300 bg-white px-3 text-xs font-medium text-gray-600 transition hover:border-gray-400 hover:bg-gray-50 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 sm:self-auto"
+                className="ve2-btn ve2-b-ghost ve2-b-sm shrink-0 self-start sm:self-auto"
               >
                 <ArchiveIcon aria-hidden className="h-3.5 w-3.5" />
                 Legacy
@@ -252,7 +257,7 @@ export function VerticalEngineV2View() {
             </div>
           </header>
 
-          <div className={`mt-6 ${styles.tabs}`} role="tablist" aria-label="Разделы движка">
+          <div className="ve2-tabs mt-6" role="tablist" aria-label="Разделы движка">
             {tabs.map((item) => (
               <button
                 key={item.id}
@@ -263,15 +268,11 @@ export function VerticalEngineV2View() {
                   if (item.id !== 'archive') setLegacyDetail(null);
                 }}
                 aria-selected={tab === item.id}
-                className={`flex items-center gap-2 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${styles.tab} ${
-                  tab === item.id ? styles.tabActive : ''
-                }`}
+                className="ve2-tab"
               >
                 {item.label}
                 {typeof item.count === 'number' ? (
-                  <span className="min-w-5 rounded-md bg-gray-100 px-1.5 py-0.5 text-center text-[11px] text-gray-500">
-                    {item.count}
-                  </span>
+                  <span className="ve2-faint">{item.count}</span>
                 ) : null}
               </button>
             ))}
@@ -287,7 +288,7 @@ export function VerticalEngineV2View() {
         ) : null}
 
         {loading && tab !== 'projects' ? (
-          <div className="rounded-lg border border-gray-200 bg-white p-10 text-center text-sm text-gray-500">
+          <div className="ve2-card ve2-mut p-10 text-center">
             Загружаем изолированный контур…
           </div>
         ) : null}

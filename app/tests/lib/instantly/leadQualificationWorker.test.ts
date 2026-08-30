@@ -16,6 +16,7 @@ const sendTestEmail = jest.fn();
 const qualifyReply = jest.fn();
 const fetchBriefByCampaign = jest.fn();
 const fetchThreadContext = jest.fn();
+const classifyMachineReply = jest.fn();
 const sendLeadTelegramAlert = jest.fn();
 const sendClientReplyTelegram = jest.fn();
 const postHandoffMessage = jest.fn();
@@ -59,6 +60,7 @@ jest.mock('@/lib/instantly/leadQualifier', () => ({
   qualifyReply: (...args: unknown[]) => qualifyReply(...args),
   fetchBriefByCampaign: (...args: unknown[]) => fetchBriefByCampaign(...args),
   fetchThreadContext: (...args: unknown[]) => fetchThreadContext(...args),
+  classifyMachineReply: (...args: unknown[]) => classifyMachineReply(...args),
   getBodyText: (body: Email['body']) => {
     if (!body) return '';
     if (typeof body === 'string') return body;
@@ -447,6 +449,7 @@ function installOwnershipReviewRetryFixture(options?: {
 function installLeadNotificationRecoveryFixture(options?: {
   logRow?: Record<string, unknown>;
   notificationRows?: Array<Record<string, unknown>>;
+  qualificationRow?: Record<string, unknown>;
 }) {
   const qualification = ownershipReviewRow({
     id: 'recoverable-lead-qualification',
@@ -455,6 +458,7 @@ function installLeadNotificationRecoveryFixture(options?: {
     ai_confidence: 0.96,
     created_at: '2026-08-24T17:00:00.000Z',
     updated_at: '2026-08-24T17:00:00.000Z',
+    ...options?.qualificationRow,
   });
   mockInstantlyDb = createMockSupabase({
     tables: {
@@ -516,6 +520,7 @@ describe('pollAndQualifyReplies', () => {
     // null = контекст треда не восстановлен → кросс-клиентский guard скипается
     // (fail-open), тесты обычного потока не затрагиваются.
     fetchThreadContext.mockReset().mockResolvedValue(null);
+    classifyMachineReply.mockReset().mockReturnValue(null);
     qualifyReply.mockReset().mockResolvedValue({
       isLead: false,
       proposalSeen: true,
@@ -1808,6 +1813,66 @@ describe('pollAndQualifyReplies', () => {
     mod = await import('@/lib/instantly/leadQualificationWorker');
     await mod.pollAndQualifyReplies();
     expect(sendClientReplyTelegram).toHaveBeenCalledTimes(1);
+  });
+
+  it('suppresses client DM for a deterministically detected machine reply', async () => {
+    const listReply = replyEmail({
+      id: 'service-ack',
+      campaign_id: 'self-serve-campaign',
+      from_address_email: 'support@arttech.kz',
+      subject: 'ArtTech — обращение в поддержку принято',
+      body: { text: 'Короткий preview без достаточного контекста.' },
+    });
+    const fullReply = replyEmail({
+      ...listReply,
+      body: {
+        text: [
+          'Спасибо за обращение в службу поддержки ArtTech.',
+          'Ваш запрос получен и зарегистрирован.',
+          'Мы уже работаем над вашим вопросом и ответим в ближайшее время.',
+        ].join('\n'),
+      },
+    });
+    classifyMachineReply.mockImplementation((email: Email) =>
+      email === fullReply ? 'service_acknowledgement' : null,
+    );
+    qualifyReply.mockResolvedValueOnce({
+      isLead: false,
+      proposalSeen: false,
+      interestSignals: [],
+      reason: 'Служебное подтверждение получения обращения',
+      confidence: 1,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: fullReply,
+        threadEmails: [fullReply],
+        lastOutbound: null,
+      },
+    });
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          { client_user_id: 'client-7', resource_type: 'campaign', resource_id: 'self-serve-campaign', instantly_account_id: 'main' },
+        ],
+        client_reply_telegram_links: [
+          { client_user_id: 'client-7', chat_id: 111, enabled: true, leads_only: false },
+        ],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [listReply],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(classifyMachineReply).toHaveBeenCalledWith(fullReply);
+    expect(sendClientReplyTelegram).not.toHaveBeenCalled();
   });
 
   it('leads_only=true still DMs actual leads (with the client-criteria badge when their prompt decided)', async () => {
@@ -4122,6 +4187,76 @@ describe('pollAndQualifyReplies', () => {
           tg_sent: true,
         }),
       ]);
+    });
+
+    it('does not retry a historical machine false-positive as a specialist lead', async () => {
+      const historicalReplyBody = [
+        'Не удалось выполнить доставку следующим получателям или группам:',
+        'Почтовый ящик получателя переполнен.',
+        'Диагностические сведения для администраторов:',
+        '#554-5.2.2 STOREDRV Deliver.Exception:QuotaExceededException',
+      ].join('\n');
+      installLeadNotificationRecoveryFixture({
+        qualificationRow: {
+          lead_email: 'postmaster@cit.cs',
+          reply_subject: 'Не удается доставить: Re: proposal',
+          reply_preview: 'Не удалось выполнить доставку: mailbox full.',
+          reply_body: historicalReplyBody,
+        },
+      });
+      classifyMachineReply.mockReturnValue('delivery_failure');
+      const { reconcileLeadNotificationDeliveries } = await import(
+        '@/lib/instantly/leadQualificationWorker'
+      );
+
+      const recovered = await reconcileLeadNotificationDeliveries({
+        now: deliveryNow,
+        limit: 1,
+        scanLimit: 10,
+      });
+
+      expect(recovered).toBe(0);
+      expect(classifyMachineReply).toHaveBeenCalledWith({
+        from_address_email: 'postmaster@cit.cs',
+        subject: 'Не удается доставить: Re: proposal',
+        body: { text: historicalReplyBody },
+        content_preview: 'Не удалось выполнить доставку: mailbox full.',
+      });
+      expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+      expect(sendClientReplyTelegram).not.toHaveBeenCalled();
+      expect(mockMainDb!.getRows('notifications')).toHaveLength(0);
+      expect(mockMainDb!.getRows('deadline_notification_log')).toHaveLength(0);
+    });
+
+    it('uses a non-empty preview when a historical reply body is blank', async () => {
+      installLeadNotificationRecoveryFixture({
+        qualificationRow: {
+          lead_email: 'mailer-daemon@example.com',
+          reply_subject: 'Delivery Status Notification (Failure)',
+          reply_body: '',
+          reply_preview: 'Delivery failed: recipient mailbox is full.',
+        },
+      });
+      classifyMachineReply.mockReturnValue('delivery_failure');
+      const { reconcileLeadNotificationDeliveries } = await import(
+        '@/lib/instantly/leadQualificationWorker'
+      );
+
+      const recovered = await reconcileLeadNotificationDeliveries({
+        now: deliveryNow,
+        limit: 1,
+        scanLimit: 10,
+      });
+
+      expect(recovered).toBe(0);
+      expect(classifyMachineReply).toHaveBeenCalledWith({
+        from_address_email: 'mailer-daemon@example.com',
+        subject: 'Delivery Status Notification (Failure)',
+        body: { text: 'Delivery failed: recipient mailbox is full.' },
+        content_preview: 'Delivery failed: recipient mailbox is full.',
+      });
+      expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+      expect(mockMainDb!.getRows('deadline_notification_log')).toHaveLength(0);
     });
 
     it('pages past more completed leads than one scan page to reach a missing alert', async () => {
