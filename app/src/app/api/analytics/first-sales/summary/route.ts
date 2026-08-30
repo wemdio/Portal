@@ -2,6 +2,7 @@ import 'server-only';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireFirstSalesAccess } from '@/lib/firstSales/access';
 import { parseFirstSalesParams, previousWindow } from '@/lib/firstSales/params';
+import { bucketKey } from '@/lib/firstSales/buckets';
 import {
   computeFirstSalesSeries,
   fetchFirstSalesLeads,
@@ -93,6 +94,13 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       ...result,
       previousTotals: prevResult.totals,
+      // Границы окна сравнения отдаём наружу, а не пересчитываем в браузере.
+      // Правило «предыдущее окно той же длины вплотную, без пересечения»
+      // живёт в previousWindow (params.ts); вторая его реализация на клиенте
+      // рано или поздно разъедется с этой, и в подписи под плитками будет
+      // один период, а в самих дельтах — другой.
+      previousFrom: bucketKey(prev.from, 'day'),
+      previousTo: bucketKey(prev.to, 'day'),
       syncedAt: lastRun?.finished_at ?? null,
     });
   } catch (e) {

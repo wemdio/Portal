@@ -2,17 +2,16 @@ import 'server-only';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireFirstSalesAccess } from '@/lib/firstSales/access';
 import { parseFirstSalesParams } from '@/lib/firstSales/params';
+import { matchesDrill, parseDrillSlice } from '@/lib/firstSales/drill';
 import {
   fetchFirstSalesLeads,
   isContractInWindow,
   isLeadInWindow,
   isQualifiedInWindow,
   meetingsByDeal,
-  NO_MANAGER,
 } from '@/lib/firstSales/metrics';
 import { fetchMeetingLinks } from '@/lib/firstSales/meetings';
 import { fetchFirstSalesPayments, moneyByDeal } from '@/lib/firstSales/money';
-import { resolveSource } from '@/lib/firstSales/sources';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
 // либо пустой ответ, либо чужой. Тот же паттерн, что у summary/route.ts.
@@ -35,28 +34,17 @@ export async function GET(req: NextRequest) {
 
   // Срез, в который проваливается пользователь: либо источник, либо менеджер.
   //
-  // `source` — это КЛЮЧ источника, а не название: `enum_id` строкой либо `none`
-  // для сделок без заполненного «Источник». `manager` — наоборот, отображаемое
-  // имя ответственного, ровно как его показывает разбивка, включая литерал
-  // `NO_MANAGER` для сделок без ответственного: своих идентификаторов у этого
-  // среза нет, группировка в metrics.ts идёт по тому же имени.
+  // `source` — это КЛЮЧ источника, а не название: `enum_id` строкой либо
+  // `none` для сделок без заполненного «Источник». `manager` — наоборот,
+  // отображаемое имя ответственного, ровно как его показывает разбивка,
+  // включая литерал `NO_MANAGER` для сделок без ответственного.
   //
-  // Проверяем на `null`, а не на пустоту: отсутствие параметра — ошибка вызова,
-  // а пустая строка — законное (пусть и ничего не находящее) значение.
-  const source = url.searchParams.get('source');
-  const manager = url.searchParams.get('manager');
-  if ((source === null) === (manager === null)) {
-    return NextResponse.json(
-      { error: 'Нужен ровно один параметр: source или manager' },
-      { status: 400 },
-    );
-  }
-
-  const matchesSlice =
-    source !== null
-      ? (lead: { raw: unknown }) => resolveSource(lead.raw).key === source
-      : (lead: { responsible_name: string | null }) =>
-          (lead.responsible_name ?? NO_MANAGER) === manager;
+  // Разбор и правила отбора — в lib/firstSales/drill.ts: там же объяснено,
+  // почему фильтр источников из шапки применяется к срезу по менеджеру и не
+  // применяется к срезу по источнику.
+  const slice = parseDrillSlice(url);
+  if (slice.value === null) return NextResponse.json({ error: slice.error }, { status: 400 });
+  const matchesSlice = matchesDrill(slice.value, parsed.value.sources);
 
   try {
     // Та же ширина выборки, что в summary/route.ts: сделка может лежать вне
@@ -84,8 +72,6 @@ export async function GET(req: NextRequest) {
     const meetings = meetingsByDeal(meetingLinks, from, to);
     const money = moneyByDeal(payments, from, to);
 
-    // Фильтр по источникам здесь НЕ применяется: строка, в которую пользователь
-    // проваливается, уже прошла его в сводке — второй раз отсеивать нечего.
     const rows = leads
       .filter(matchesSlice)
       .map((lead) => ({

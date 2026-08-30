@@ -130,9 +130,17 @@ export default function DealDrillDown({
     const run = async () => {
       setLoading(true);
       try {
-        // Фильтр по источникам не передаём: строка, в которую провалились, его
-        // уже прошла в сводке — второй раз отсеивать нечего.
         const qs = new URLSearchParams({ from: filters.from, to: filters.to, ...query });
+
+        // Фильтр по источникам нужен только при провале в МЕНЕДЖЕРА: его
+        // цифра в разбивке посчитана уже после фильтра, и список сделок
+        // обязан быть посчитан так же. При провале в источник фильтр не
+        // передаётся — строка сама и есть источник (и ручка тогда ждёт ровно
+        // один параметр `source`, это её срез). Подробности — в
+        // lib/firstSales/drill.ts.
+        if ('manager' in query) {
+          for (const source of filters.sources) qs.append('source', source);
+        }
 
         const res = await authFetch(`/api/analytics/first-sales/leads?${qs.toString()}`, {
           signal: controller.signal,
