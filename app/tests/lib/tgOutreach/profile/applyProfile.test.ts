@@ -60,6 +60,22 @@ describe('applyProfile', () => {
 });
 
 describe('describeTelegramError', () => {
+  /**
+   * Оператор видел «420: FROZEN_METHOD_INVALID (caused by account.UpdateProfile)»
+   * и шёл искать поломку в портале. Портал тут ни при чём: Telegram ограничил
+   * аккаунт целиком, и держать его в рассылке бессмысленно.
+   */
+  it('заморозку называет заморозкой и говорит, что делать', () => {
+    const text = describeTelegramError(
+      new Error('420: FROZEN_METHOD_INVALID (caused by account.UpdateProfile)'),
+    );
+    expect(text).toContain('заморозил');
+    expect(text).toContain('не бан');
+    expect(text).toContain('обжалование');
+    // Голого кода в тексте не остаётся — он ничего не объясняет продавцу.
+    expect(text).not.toContain('FROZEN_METHOD_INVALID');
+  });
+
   it('FLOOD_WAIT объясняется по-человечески и со сроком', () => {
     expect(describeTelegramError(new Error('A wait of 3600 seconds is required (FLOOD_WAIT_3600)')))
       .toContain('3600');
