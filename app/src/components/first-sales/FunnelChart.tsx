@@ -14,6 +14,17 @@ import {
   type ChartTheme,
 } from '@/components/charts/theme';
 import type { FirstSalesTotals } from '@/lib/firstSales/metrics';
+import type { FunnelStageId } from '@/lib/firstSales/funnelDeals';
+
+/** Подпись ступени на графике → идентификатор ступени в списке сделок рядом.
+ *  Имя на графике — то, что видит человек, и менять его ради совпадения с
+ *  ключом нельзя; таблица перевода дешевле и честнее. */
+const STAGE_BY_NAME: Record<string, FunnelStageId> = {
+  'Лиды': 'lead',
+  'Квал': 'qualified',
+  'Встречи': 'meeting',
+  'Договоры': 'contract',
+};
 
 /**
  * Воронка первички: лиды → квалификация → встречи → договоры.
@@ -112,7 +123,14 @@ function buildOption(stages: Stage[], theme: ChartTheme, animate: boolean): ECha
   };
 }
 
-export default function FunnelChart({ totals }: { totals: FirstSalesTotals }) {
+export default function FunnelChart({
+  totals,
+  onSelectStage,
+}: {
+  totals: FirstSalesTotals;
+  /** Клик по ступени — список сделок рядом прокручивается к её группе. */
+  onSelectStage?: (stage: FunnelStageId) => void;
+}) {
   const rootRef = useRef<HTMLDivElement>(null);
   const theme = useChartTheme(rootRef);
   const reducedMotion = usePrefersReducedMotion();
@@ -154,7 +172,19 @@ export default function FunnelChart({ totals }: { totals: FirstSalesTotals }) {
         // вырождается в почти горизонтальные полосы, а верхняя ступень — в
         // острый клин от края до края.
         <div className="mx-auto w-full max-w-[680px]">
-          <EChart option={option} height={320} ariaLabel="Воронка: лиды, квалификация, встречи, договоры" />
+          <EChart
+            option={option}
+            height={320}
+            ariaLabel="Воронка: лиды, квалификация, встречи, договоры"
+            onSelectItemName={
+              onSelectStage
+                ? (name) => {
+                    const stage = STAGE_BY_NAME[name];
+                    if (stage) onSelectStage(stage);
+                  }
+                : undefined
+            }
+          />
         </div>
       ) : (
         <div style={{ height: 320 }} />

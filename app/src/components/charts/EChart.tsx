@@ -20,6 +20,7 @@ export default function EChart({
   className,
   ariaLabel,
   onSelectIndex,
+  onSelectItemName,
 }: {
   option: EChartsCoreOption;
   height: number;
@@ -35,6 +36,15 @@ export default function EChart({
    * невозможно вовсе.
    */
   onSelectIndex?: (index: number) => void;
+  /**
+   * Клик по элементу серии — отдаёт его `name`.
+   *
+   * Отдельно от `onSelectIndex`: тот ловит клик по вертикальной полосе
+   * категории и работает только там, где есть grid с осями. У воронки grid'а
+   * нет вовсе, зато сами ступени крупные и попасть в них мышью легко, так что
+   * здесь достаточно обычного события серии.
+   */
+  onSelectItemName?: (name: string) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<ReturnType<typeof echarts.init> | null>(null);
@@ -44,6 +54,10 @@ export default function EChart({
   useEffect(() => {
     selectRef.current = onSelectIndex;
   }, [onSelectIndex]);
+  const selectNameRef = useRef(onSelectItemName);
+  useEffect(() => {
+    selectNameRef.current = onSelectItemName;
+  }, [onSelectItemName]);
 
   useEffect(() => {
     const el = hostRef.current;
@@ -68,7 +82,16 @@ export default function EChart({
     };
     zr.on('click', onClick);
 
+    const onItemClick = (params: unknown) => {
+      const notify = selectNameRef.current;
+      if (!notify) return;
+      const name = (params as { name?: unknown }).name;
+      if (typeof name === 'string' && name !== '') notify(name);
+    };
+    chart.on('click', onItemClick);
+
     return () => {
+      chart.off('click', onItemClick);
       zr.off('click', onClick);
       observer.disconnect();
       chart.dispose();
