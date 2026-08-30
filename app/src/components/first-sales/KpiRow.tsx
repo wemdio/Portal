@@ -78,12 +78,15 @@ function Tile({
   sub,
   delta,
   amber,
+  hint,
 }: {
   label: string;
   value: string;
   sub?: string;
   delta?: React.ReactNode;
   amber?: boolean;
+  /** Подсказка по наведению на заголовок: что именно считает плитка. */
+  hint?: string;
 }) {
   return (
     // h-full — чтобы плашка занимала всю высоту ячейки сетки. Без него та,
@@ -91,7 +94,10 @@ function Tile({
     // содержимого: у неё нет ни подписи, ни дельты, и она оказалась бы ниже
     // соседей. Сетка растягивает саму кнопку, но не вложенный в неё div.
     <div className={`glass-tile h-full px-4 py-3 ${amber ? 'glass-tint-amber' : ''}`}>
-      <p className={`text-[10px] font-medium uppercase tracking-wider ${amber ? 'text-amber-600' : 'text-zinc-400'}`}>
+      <p
+        className={`text-[10px] font-medium uppercase tracking-wider ${amber ? 'text-amber-600' : 'text-zinc-400'} ${hint ? 'cursor-help' : ''}`}
+        title={hint}
+      >
         {label}
       </p>
       <p className={`mt-1 text-xl font-semibold tabular-nums ${amber ? 'text-amber-800' : 'text-zinc-900'}`}>
@@ -208,13 +214,26 @@ export default function KpiRow({
         }
         amber={moneyPartial}
       />
+      {/* «Средний цикл» крупно показывал МЕДИАНУ, а среднее пряталось в
+          подписи — заголовок противоречил цифре под ним, и плитку читали как
+          «средний срок 13,9 дня, а рядом почему-то ещё какие-то 31,4».
+          Название теперь нейтральное, а какая цифра медиана и какая среднее —
+          сказано прямо в подписи. Медиана осталась крупной намеренно:
+          распределение длиннохвостое (одна сделка, зревшая полгода, тянет
+          среднее вверх и выдаёт нетипичный срок за типичный). */}
       <Tile
-        label="Средний цикл"
+        label="Цикл сделки"
         value={totals.cycleMedianDays !== null ? `${fmtDays(totals.cycleMedianDays)} дн.` : '—'}
         sub={
           totals.cycleAvgDays !== null
-            ? `среднее: ${fmtDays(totals.cycleAvgDays)} дн. · оплат: ${fmt(totals.wonCount)}`
+            ? `медиана · среднее: ${fmtDays(totals.cycleAvgDays)} дн. · оплат: ${fmt(totals.wonCount)}`
             : `оплат: ${fmt(totals.wonCount)}`
+        }
+        hint={
+          'Сколько проходит от создания сделки до оплаты. Считается по сделкам, '
+          + 'ОПЛАЧЕННЫМ в выбранном периоде, — сама сделка могла прийти раньше. '
+          + 'Крупно медиана: половина сделок закрылась быстрее, половина дольше. '
+          + 'Среднее выше медианы — значит несколько долгих сделок тянут его вверх.'
         }
       />
       {/* Кнопка, а не просто плашка: клик ставит фильтр на «Без источника» —

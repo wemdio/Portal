@@ -43,16 +43,18 @@ export default function KpiRow({ totals }: { totals: RenewalsTotals }) {
         value={totals.medianCheck !== null ? fmtMoney(totals.medianCheck) : '—'}
         sub={totals.avgCheck !== null ? `среднее: ${fmtMoney(totals.avgCheck)}` : undefined}
       />
-      {/* Прочерк, а не ноль, пока цикл недостоверен: история периодов заведена
-          у 11 проектов из 139, так что чаще всего цикл посчитать не из чего.
-          Ноль читался бы как «продлевают мгновенно». */}
+      {/* Прочерк, а не ноль, пока цикл недостоверен: посчитать его есть из
+          чего далеко не всегда. Ноль читался бы как «продлевают мгновенно».
+          Название плитки — «Цикл продления», а не «Средний цикл»: крупно
+          стоит МЕДИАНА, и заголовок со словом «средний» противоречил бы
+          цифре под ним (та же правка, что на дашборде первички). */}
       <Tile
-        label="Средний цикл"
+        label="Цикл продления"
         value={totals.cycleReliable && totals.cycleMedianDays !== null ? `${fmtDays(totals.cycleMedianDays)} дн.` : '—'}
         sub={
           totals.cycleReliable
             ? totals.cycleAvgDays !== null
-              ? `среднее: ${fmtDays(totals.cycleAvgDays)} дн.`
+              ? `медиана · среднее: ${fmtDays(totals.cycleAvgDays)} дн.`
               : undefined
             : `истории мало: ${fmt(totals.cycleSampleSize)} из ${fmt(totals.cycleCandidates)}`
         }
