@@ -6,7 +6,7 @@ import { logError } from '@/lib/loggerClient';
 import type { FiltersState } from '@/components/first-sales/FiltersBar';
 import { FUNNEL_STAGE_COLOR_VAR, type FunnelStageId } from '@/lib/firstSales/funnelDeals';
 import type { InPeriod } from '@/components/first-sales/DealDrillDown';
-import DealModal from '@/components/first-sales/DealModal';
+import DealModal from '@/components/analytics/DealModal';
 
 /**
  * Список сделок рядом с воронкой: кто именно стоит за каждой её ступенью.
@@ -270,7 +270,13 @@ export default function FunnelDealsList({
         </div>
       )}
 
-      {openDeal !== null && <DealModal amoId={openDeal} onClose={() => setOpenDeal(null)} />}
+      {openDeal !== null && (
+        <DealModal
+          amoId={openDeal}
+          endpoint="/api/analytics/first-sales/deal"
+          onClose={() => setOpenDeal(null)}
+        />
+      )}
     </div>
   );
 }

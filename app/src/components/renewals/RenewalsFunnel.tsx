@@ -16,6 +16,7 @@ import {
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
 import type { RenewalsFunnel as FunnelData } from '@/lib/renewals/funnel';
+import RenewalsDealsList from '@/components/renewals/RenewalsDealsList';
 
 /**
  * Воронка вторичных продаж — из воронки AMO «Вторичные (и не только) продажи».
@@ -145,58 +146,66 @@ export default function RenewalsFunnel() {
   const outcomes = data?.outcomes.filter((o) => o.count > 0) ?? [];
 
   return (
-    <div ref={rootRef} className="glass-tile p-3">
-      <h3 className="mb-1 text-sm font-semibold text-zinc-900">Воронка вторичных продаж</h3>
+    // Воронка слева, сделки справа — та же раскладка, что на дашборде
+    // первички: воронка нарисована в центре широкого пустого поля и на
+    // половине ширины ничего не теряет, а список отвечает на следующий же
+    // вопрос — «а кто это?». На узком экране список уезжает вниз.
+    <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+      <div ref={rootRef} className="glass-tile p-3">
+        <h3 className="mb-1 text-sm font-semibold text-zinc-900">Воронка вторичных продаж</h3>
 
-      {loading ? <div className="px-3 py-10 text-center text-sm text-zinc-400">Загружаю…</div> : null}
+        {loading ? <div className="px-3 py-10 text-center text-sm text-zinc-400">Загружаю…</div> : null}
 
-      {error && !loading ? (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-          Ошибка загрузки: {error}
-        </div>
-      ) : null}
+        {error && !loading ? (
+          <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+            Ошибка загрузки: {error}
+          </div>
+        ) : null}
 
-      {!loading && !error && data && data.totalDeals === 0 ? (
-        <p className="px-3 py-8 text-center text-sm text-zinc-400">
-          Сделок, прошедших по этапам, пока нет. Проекты попадают в воронку автоматически, когда сделка закрывается
-          успешно в основной воронке, — и двигаются по ней дальше.
-        </p>
-      ) : null}
+        {!loading && !error && data && data.totalDeals === 0 ? (
+          <p className="px-3 py-8 text-center text-sm text-zinc-400">
+            Сделок, прошедших по этапам, пока нет. Проекты попадают в воронку автоматически, когда сделка закрывается
+            успешно в основной воронке, — и двигаются по ней дальше.
+          </p>
+        ) : null}
 
-      {option ? (
-        <div className="mx-auto w-full max-w-[680px]">
-          <EChart option={option} height={340} ariaLabel="Воронка вторичных продаж по этапам AMO" />
-        </div>
-      ) : null}
+        {option ? (
+          <div className="mx-auto w-full max-w-[680px]">
+            <EChart option={option} height={340} ariaLabel="Воронка вторичных продаж по этапам AMO" />
+          </div>
+        ) : null}
 
-      {outcomes.length > 0 ? (
-        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-zinc-100 pt-2 text-[11px] text-zinc-500">
-          {/* Исходы вне воронки: проект попадает туда вместо продления, и
-              ступенью это быть не может — иначе отвалившиеся посчитались бы
-              продлёнными просто потому, что их этап ниже по порядку. */}
-          <span className="text-zinc-400">Вне пути:</span>
-          {outcomes.map((outcome) => (
-            <span key={outcome.statusId}>
-              {outcome.name} — <span className="font-semibold text-zinc-700">{outcome.count}</span>
+        {outcomes.length > 0 ? (
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-zinc-100 pt-2 text-[11px] text-zinc-500">
+            {/* Исходы вне воронки: проект попадает туда вместо продления, и
+                ступенью это быть не может — иначе отвалившиеся посчитались бы
+                продлёнными просто потому, что их этап ниже по порядку. */}
+            <span className="text-zinc-400">Вне пути:</span>
+            {outcomes.map((outcome) => (
+              <span key={outcome.statusId}>
+                {outcome.name} — <span className="font-semibold text-zinc-700">{outcome.count}</span>
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        {data && data.backfilledCount > 0 ? (
+          // Продлены по-настоящему, но пути не проходили: карточки заведены сразу
+          // на «Продлено» по портальным проектам. В ступенях они дали бы 100% на
+          // каждом шаге, поэтому стоят отдельным числом.
+          <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 border-t border-zinc-100 pt-2 text-[11px] text-zinc-500">
+            <span>
+              Продлено раньше воронки —{' '}
+              <span className="font-semibold text-zinc-700">{data.backfilledCount}</span>
             </span>
-          ))}
-        </div>
-      ) : null}
+            <span className="text-zinc-400">
+              заведены по проектам портала задним числом, поэтому в конверсию по этапам не входят
+            </span>
+          </div>
+        ) : null}
+      </div>
 
-      {data && data.backfilledCount > 0 ? (
-        // Продлены по-настоящему, но пути не проходили: карточки заведены сразу
-        // на «Продлено» по портальным проектам. В ступенях они дали бы 100% на
-        // каждом шаге, поэтому стоят отдельным числом.
-        <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 border-t border-zinc-100 pt-2 text-[11px] text-zinc-500">
-          <span>
-            Продлено раньше воронки —{' '}
-            <span className="font-semibold text-zinc-700">{data.backfilledCount}</span>
-          </span>
-          <span className="text-zinc-400">
-            заведены по проектам портала задним числом, поэтому в конверсию по этапам не входят
-          </span>
-        </div>
-      ) : null}
+      {data && data.dealGroups.length > 0 ? <RenewalsDealsList groups={data.dealGroups} /> : null}
     </div>
   );
 }

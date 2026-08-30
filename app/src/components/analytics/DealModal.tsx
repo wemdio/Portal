@@ -6,11 +6,16 @@ import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
 
 /**
- * Модалка одной сделки: карточка, путь по воронке, комментарии и задачи.
+ * Модалка одной сделки AMO: карточка, путь по воронке, комментарии и задачи.
  *
  * Нужна, чтобы ответить на «почему сделка застряла здесь», не уходя в AMO и не
  * теряя выбранный период. Ссылка в AMO при этом на месте — модалка её заменяет
  * не всегда, а в типичном случае.
+ *
+ * Общая для дашбордов первички и продлений, поэтому лежит в `analytics/`, а не
+ * в папке одного из них. Различаются они только ручкой: у каждого дашборда
+ * своя проверка доступа, и подставлять чужую нельзя — отсюда параметр
+ * `endpoint`, а не зашитый путь.
  */
 
 type Stages = {
@@ -72,7 +77,16 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-export default function DealModal({ amoId, onClose }: { amoId: number; onClose: () => void }) {
+export default function DealModal({
+  amoId,
+  endpoint,
+  onClose,
+}: {
+  amoId: number;
+  /** Базовый путь ручки сделки без id, например `/api/analytics/renewals/deal`. */
+  endpoint: string;
+  onClose: () => void;
+}) {
   const [data, setData] = useState<DealDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -94,9 +108,7 @@ export default function DealModal({ amoId, onClose }: { amoId: number; onClose: 
     const run = async () => {
       setLoading(true);
       try {
-        const res = await authFetch(`/api/analytics/first-sales/deal/${amoId}`, {
-          signal: controller.signal,
-        });
+        const res = await authFetch(`${endpoint}/${amoId}`, { signal: controller.signal });
         if (!res.ok) {
           const body = (await res.json().catch(() => null)) as { error?: string } | null;
           throw new Error(body?.error || `HTTP ${res.status}`);
@@ -108,7 +120,7 @@ export default function DealModal({ amoId, onClose }: { amoId: number; onClose: 
       } catch (e) {
         if (!active) return;
         if (e instanceof DOMException && e.name === 'AbortError') return;
-        logError('first-sales.deal.fetch_failed', e, { amoId });
+        logError('analytics.deal.fetch_failed', e, { amoId, endpoint });
         setError(e instanceof Error ? e.message : 'Не удалось загрузить сделку');
       } finally {
         if (active) setLoading(false);
@@ -120,7 +132,7 @@ export default function DealModal({ amoId, onClose }: { amoId: number; onClose: 
       active = false;
       controller.abort();
     };
-  }, [amoId]);
+  }, [amoId, endpoint]);
 
   return (
     <div
