@@ -59,9 +59,9 @@ describe('groupByDeepestStage', () => {
     { id: 'e', h: hits() },
   ];
 
-  it('порядок групп — от договоров к лидам', () => {
+  it('порядок групп совпадает с воронкой: сверху лиды, снизу договоры', () => {
     const groups = groupByDeepestStage(deals, (d) => d.h, allStages);
-    expect(groups.map((g) => g.stage)).toEqual(['contract', 'meeting', 'qualified', 'lead']);
+    expect(groups.map((g) => g.stage)).toEqual(['lead', 'qualified', 'meeting', 'contract']);
   });
 
   it('каждая сделка ровно в одной группе', () => {
@@ -82,7 +82,7 @@ describe('groupByDeepestStage', () => {
       meetingsReliable: false,
       contractsReliable: false,
     });
-    expect(groups.map((g) => g.stage)).toEqual(['qualified', 'lead']);
+    expect(groups.map((g) => g.stage)).toEqual(['lead', 'qualified']);
   });
 
   it('порядок сделок внутри группы сохраняется', () => {
@@ -94,7 +94,8 @@ describe('groupByDeepestStage', () => {
     expect(groups[0].deals.map((d) => d.id)).toEqual(['first', 'second']);
   });
 
-  it('порядок ступеней объявлен от глубокой к мелкой', () => {
-    expect([...FUNNEL_STAGE_ORDER]).toEqual(['contract', 'meeting', 'qualified', 'lead']);
+  it('порядок ступеней объявлен как на воронке, сверху вниз', () => {
+    // Список стоит рядом с воронкой, и читать их в разные стороны нельзя.
+    expect([...FUNNEL_STAGE_ORDER]).toEqual(['lead', 'qualified', 'meeting', 'contract']);
   });
 });

@@ -4,9 +4,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
 import type { FiltersState } from '@/components/first-sales/FiltersBar';
-import type { FunnelStageId } from '@/lib/firstSales/funnelDeals';
+import { FUNNEL_STAGE_COLOR_VAR, type FunnelStageId } from '@/lib/firstSales/funnelDeals';
 import type { InPeriod } from '@/components/first-sales/DealDrillDown';
-import DealModal from '@/components/first-sales/DealModal';
+import DealModal from '@/components/analytics/DealModal';
 
 /**
  * Список сделок рядом с воронкой: кто именно стоит за каждой её ступенью.
@@ -44,6 +44,17 @@ type GroupsResponse = { groups: StageGroup[] };
 const CHUNK = 60;
 const SCROLL_TAIL_PX = 400;
 
+/**
+ * Высота области прокрутки.
+ *
+ * Фиксированная, а не «по содержимому»: без потолка блок растягивался на всю
+ * длину списка — за месяц это несколько экранов, и всё, что ниже воронки
+ * (график по времени, таблицы), уезжало за горизонт. Подобрана под высоту
+ * графика воронки слева (320 px у EChart), чтобы оба блока кончались на одной
+ * линии.
+ */
+const LIST_HEIGHT_PX = 320;
+
 const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('ru-RU') : '—');
 const fmtMoney = (n: number) => `${Math.round(n).toLocaleString('ru-RU')} ₽`;
 
@@ -60,13 +71,15 @@ function periodBadges(p: InPeriod): string[] {
  *  отрисовка работает поверх всех групп сразу, а не отдельно в каждой. */
 type Item =
   | { kind: 'header'; stage: FunnelStageId; label: string; count: number }
-  | { kind: 'deal'; deal: DealRow };
+  // `stage` продублирован в строке сделки намеренно: цветная полоска слева
+  // рисуется у каждой строки, а не только у заголовка группы.
+  | { kind: 'deal'; stage: FunnelStageId; deal: DealRow };
 
 function flatten(groups: StageGroup[]): Item[] {
   const items: Item[] = [];
   for (const group of groups) {
     items.push({ kind: 'header', stage: group.stage, label: group.label, count: group.deals.length });
-    for (const deal of group.deals) items.push({ kind: 'deal', deal });
+    for (const deal of group.deals) items.push({ kind: 'deal', stage: group.stage, deal });
   }
   return items;
 }
@@ -169,23 +182,30 @@ export default function FunnelDealsList({
   };
 
   return (
-    <div className="glass-tile flex h-full flex-col p-3">
-      <h3 className="mb-1 text-sm font-semibold text-zinc-900">Сделки за период</h3>
+    <div className="glass-tile flex flex-col p-3">
+      <h3 className="mb-1 text-sm font-semibold text-zinc-900">Сделки за период в воронке</h3>
       <p className="mb-2 text-[11px] text-zinc-400">
         Каждая сделка — в той ступени, до которой дошла. Клик открывает карточку.
       </p>
 
       {loading ? (
-        <div className="flex-1 px-3 py-10 text-center text-sm text-zinc-400">Загрузка сделок…</div>
+        <div style={{ height: LIST_HEIGHT_PX }} className="px-3 py-10 text-center text-sm text-zinc-400">
+          Загрузка сделок…
+        </div>
       ) : error ? (
-        <div className="flex-1 px-3 py-10 text-center text-sm text-red-600">Ошибка загрузки: {error}</div>
+        <div style={{ height: LIST_HEIGHT_PX }} className="px-3 py-10 text-center text-sm text-red-600">
+          Ошибка загрузки: {error}
+        </div>
       ) : items.length === 0 ? (
-        <div className="flex-1 px-3 py-10 text-center text-sm text-zinc-400">Сделок за выбранный период нет.</div>
+        <div style={{ height: LIST_HEIGHT_PX }} className="px-3 py-10 text-center text-sm text-zinc-400">
+          Сделок за выбранный период нет.
+        </div>
       ) : (
         <div
           ref={scrollRef}
           onScroll={onScroll}
-          className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-zinc-200 bg-[var(--glass-rows)]"
+          style={{ height: LIST_HEIGHT_PX }}
+          className="overflow-y-auto rounded-lg border border-zinc-200 bg-[var(--glass-rows)]"
         >
           {shown.map((item) =>
             item.kind === 'header' ? (
@@ -201,7 +221,11 @@ export default function FunnelDealsList({
                       + 'прошедшие дальше. Здесь только те, что дальше не пошли.'
                     : undefined
                 }
-                className="sticky top-0 z-10 cursor-help border-b border-zinc-100 bg-[var(--glass-rows)] px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500 backdrop-blur"
+                // Цвет ступени берётся из палитры графика: группа в списке и
+                // ступень на воронке слева — одно и то же, и совпадающий цвет
+                // связывает их без единого слова.
+                style={{ color: FUNNEL_STAGE_COLOR_VAR[item.stage] }}
+                className="sticky top-0 z-10 cursor-help border-b border-zinc-100 bg-[var(--glass-rows)] px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider backdrop-blur"
               >
                 {item.label} — {item.count}
               </h4>
@@ -210,7 +234,11 @@ export default function FunnelDealsList({
                 key={item.deal.amo_id}
                 type="button"
                 onClick={() => setOpenDeal(item.deal.amo_id)}
-                className="block w-full border-b border-zinc-50 px-2.5 py-1.5 text-left last:border-0 hover:bg-zinc-50/60"
+                // Цветная полоска слева тянется вдоль всей группы: заголовок
+                // уезжает вверх при прокрутке (он sticky), и без полоски на
+                // середине длинной группы уже не видно, какая это ступень.
+                style={{ borderLeftColor: FUNNEL_STAGE_COLOR_VAR[item.stage] }}
+                className="block w-full border-b border-l-2 border-zinc-50 px-2.5 py-1.5 text-left last:border-b-0 hover:bg-zinc-50/60"
               >
                 <div className="flex items-baseline gap-2">
                   <span className="min-w-0 flex-1 truncate text-xs text-zinc-800">
@@ -242,7 +270,13 @@ export default function FunnelDealsList({
         </div>
       )}
 
-      {openDeal !== null && <DealModal amoId={openDeal} onClose={() => setOpenDeal(null)} />}
+      {openDeal !== null && (
+        <DealModal
+          amoId={openDeal}
+          endpoint="/api/analytics/first-sales/deal"
+          onClose={() => setOpenDeal(null)}
+        />
+      )}
     </div>
   );
 }
