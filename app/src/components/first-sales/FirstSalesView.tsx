@@ -324,14 +324,25 @@ export default function FirstSalesView() {
               {/* key на from/to/sources: смена периода или источников размонтирует и
                   заново монтирует таблицу, сбрасывая раскрытую drill-down строку
                   вместо того, чтобы показывать под ней сделки уже не того окна.
-                  groupBy в ключ не входит — drillKey() это объясняет. */}
+                  groupBy в ключ не входит — drillKey() это объясняет.
+
+                  Префиксы `sources:`/`managers:` обязательны. Без них у двух
+                  СОСЕДНИХ элементов оказывался один и тот же ключ, а React
+                  требует уникальности ключей среди соседей: при клике по дню на
+                  графике ключ менялся, сопоставить старых детей с новыми React
+                  не мог и оставлял прежние таблицы на экране — с каждым кликом
+                  их становилось на две больше. */}
               <SourceTable
-                key={drillKey(tableFilters)}
+                key={`sources:${drillKey(tableFilters)}`}
                 rows={bucketRows ?? data.bySource}
                 filters={tableFilters}
               />
 
-              <ManagerTable key={drillKey(tableFilters)} rows={data.byManager} filters={tableFilters} />
+              <ManagerTable
+                key={`managers:${drillKey(tableFilters)}`}
+                rows={data.byManager}
+                filters={tableFilters}
+              />
             </>
           )}
 

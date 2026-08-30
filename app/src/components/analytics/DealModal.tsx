@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
@@ -16,6 +17,13 @@ import { logError } from '@/lib/loggerClient';
  * в папке одного из них. Различаются они только ручкой: у каждого дашборда
  * своя проверка доступа, и подставлять чужую нельзя — отсюда параметр
  * `endpoint`, а не зашитый путь.
+ *
+ * Рисуется ПОРТАЛОМ в `document.body`, и это не украшательство. Список сделок
+ * живёт внутри `.glass-tile`, у которой есть `backdrop-filter` (globals.css).
+ * Любой `backdrop-filter` делает элемент containing block для потомков с
+ * `position: fixed` — то есть `fixed inset-0` отсчитывается не от окна, а от
+ * плитки, и модалка открывается внутри блока со списком вместо центра экрана.
+ * Портал уносит её из-под плитки, и `fixed` снова означает «от окна».
  */
 
 type Stages = {
@@ -134,7 +142,11 @@ export default function DealModal({
     };
   }, [amoId, endpoint]);
 
-  return (
+  // На сервере `document` нет. Проверка безопасна и не даёт расхождения при
+  // гидратации: модалка монтируется только после клика, то есть уже в браузере.
+  if (typeof document === 'undefined') return null;
+
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
       // Клик по подложке закрывает, клик внутри окна — нет: проверяем, что
@@ -291,6 +303,7 @@ export default function DealModal({
           </>
         ) : null}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
