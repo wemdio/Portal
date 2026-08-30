@@ -64,9 +64,11 @@ export default function RenewalsDealsList({ groups }: { groups: RenewalsStageDea
 
   return (
     <div className="glass-tile flex flex-col p-3">
-      <h3 className="mb-1 text-sm font-semibold text-zinc-900">Сделки за период в воронке</h3>
+      <h3 className="mb-1 text-sm font-semibold text-zinc-900">Сделки в воронке</h3>
+      {/* Без слова «период» в заголовке: список показывает ту же воронку, что
+          слева, а она от периода не зависит. */}
       <p className="mb-2 text-[11px] text-zinc-400">
-        Каждая сделка — в той ступени, до которой дошла. Клик открывает карточку.
+        Все сделки воронки, каждая — в той ступени, до которой дошла. Период не влияет. Клик открывает карточку.
       </p>
 
       {items.length === 0 ? (

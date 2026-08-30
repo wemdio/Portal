@@ -152,7 +152,16 @@ export default function RenewalsFunnel() {
     // вопрос — «а кто это?». На узком экране список уезжает вниз.
     <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
       <div ref={rootRef} className="glass-tile p-3">
-        <h3 className="mb-1 text-sm font-semibold text-zinc-900">Воронка вторичных продаж</h3>
+        <h3 className="text-sm font-semibold text-zinc-900">Воронка вторичных продаж: где проекты сейчас</h3>
+        {/* Период здесь не действует намеренно (см. renewals/funnel/route.ts):
+            воронка отвечает на «где стоят проекты и сколько дошло до
+            продления», а не «сколько продлили за выбранные дни». Без этой
+            строки экран противоречит сам себе: сверху «0 продлений за период»,
+            снизу шестнадцать сделок. */}
+        <p className="mb-2 text-[11px] text-zinc-400">
+          Снимок всей воронки на сейчас — выбранный период на него не влияет. Сколько продлили за период,
+          показывают плитки сверху и таблица ниже.
+        </p>
 
         {loading ? <div className="px-3 py-10 text-center text-sm text-zinc-400">Загружаю…</div> : null}
 
