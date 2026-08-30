@@ -18,16 +18,38 @@ function isSyncStale(syncedDate: Date | null): boolean {
   return Date.now() - syncedDate.getTime() > STALE_SYNC_MS;
 }
 
-/** Абсолютная и (если есть с чем сравнивать) процентная дельта к прошлому
- *  периоду. Прошлый период пустой → делить на ноль бессмысленно, показываем
- *  только абсолютную разницу — как и просили в задаче. */
+/** `YYYY-MM-DD` → `ДД.ММ`, без `new Date`: разбор ISO-даты подставил бы
+ *  часовой пояс браузера и мог бы съехать на день. */
+function shortDay(key: string): string {
+  const [, m, d] = key.split('-');
+  return m && d ? `${d}.${m}` : key;
+}
+
+/**
+ * Абсолютная и (если есть с чем сравнивать) процентная дельта к прошлому
+ * периоду. Прошлый период пустой → делить на ноль бессмысленно, показываем
+ * только абсолютную разницу.
+ *
+ * Голая цифра «-36 (-51%)» под плиткой не говорит, с чем сравнили: её читали
+ * как «минус к плану», «минус к прошлому месяцу», «минус к прошлому году».
+ * Поэтому в подсказке — и период сравнения, и само значение, с которым
+ * считали разницу, а под шапкой страницы стоит общая подпись (см.
+ * FirstSalesView).
+ */
 function Delta({
   current,
   previous,
+  label,
+  previousFrom,
+  previousTo,
   format = fmt,
 }: {
   current: number;
   previous: number;
+  /** Название метрики для подсказки: «Квал», «Встречи», … */
+  label: string;
+  previousFrom: string;
+  previousTo: string;
   /** Деньги показываются рублями, остальное — штуками. */
   format?: (n: number) => string;
 }) {
@@ -37,7 +59,14 @@ function Delta({
   const pct = previous > 0 ? Math.round((diff / previous) * 100) : null;
   const pctSign = pct !== null && pct > 0 ? '+' : '';
   return (
-    <span className={`text-[11px] font-medium tabular-nums ${color}`}>
+    <span
+      className={`cursor-help text-[11px] font-medium tabular-nums ${color}`}
+      title={
+        `Сравнение с предыдущим периодом такой же длины: `
+        + `${shortDay(previousFrom)} — ${shortDay(previousTo)}. `
+        + `${label} тогда: ${format(previous)}, сейчас: ${format(current)}.`
+      }
+    >
       {sign}{format(diff)}{pct !== null ? ` (${pctSign}${pct}%)` : ''}
     </span>
   );
@@ -79,15 +108,24 @@ function Tile({
 export default function KpiRow({
   totals,
   previousTotals,
+  previousFrom,
+  previousTo,
   syncedAt,
   onNoSourceClick,
 }: {
   totals: FirstSalesTotals;
   previousTotals: FirstSalesTotals;
+  /** Границы окна сравнения (`YYYY-MM-DD`, МСК) — считает сервер, см.
+   *  summary/route.ts. */
+  previousFrom: string;
+  previousTo: string;
   syncedAt: string | null;
   /** Клик по плашке «Без источника» — поставить фильтр на неё. */
   onNoSourceClick: () => void;
 }) {
+  // Один объект на все плитки — период сравнения у них общий, а метрика и
+  // значения свои.
+  const prevWindow = { previousFrom, previousTo };
   const syncedDate = syncedAt ? new Date(syncedAt) : null;
   const syncedValid = !!syncedDate && Number.isFinite(syncedDate.getTime());
   const syncStale = isSyncStale(syncedDate);
@@ -112,12 +150,12 @@ export default function KpiRow({
         label="Лиды"
         value={fmt(totals.leads)}
         sub={`магниты: ${fmt(totals.leadMagnets)}`}
-        delta={<Delta current={totals.leads} previous={previousTotals.leads} />}
+        delta={<Delta current={totals.leads} previous={previousTotals.leads} label="Лидов" {...prevWindow} />}
       />
       <Tile
         label="Квал"
         value={fmt(totals.qualified)}
-        delta={<Delta current={totals.qualified} previous={previousTotals.qualified} />}
+        delta={<Delta current={totals.qualified} previous={previousTotals.qualified} label="Квалов" {...prevWindow} />}
       />
       {/* Прочерк, а не ноль, пока окно целиком раньше даты, с которой подписи
           к записям в чате встреч стали регулярными: ноль читался бы как
@@ -133,7 +171,7 @@ export default function KpiRow({
         }
         delta={
           totals.meetingsReliable
-            ? <Delta current={totals.meetings} previous={previousTotals.meetings} />
+            ? <Delta current={totals.meetings} previous={previousTotals.meetings} label="Встреч" {...prevWindow} />
             : undefined
         }
       />
@@ -151,7 +189,7 @@ export default function KpiRow({
         }
         delta={
           totals.contractsReliable
-            ? <Delta current={totals.contracts} previous={previousTotals.contracts} />
+            ? <Delta current={totals.contracts} previous={previousTotals.contracts} label="Договоров" {...prevWindow} />
             : undefined
         }
       />
@@ -163,7 +201,9 @@ export default function KpiRow({
           <Delta
             current={money.received}
             previous={previousTotals.money.received}
+            label="Денег"
             format={fmtMoney}
+            {...prevWindow}
           />
         }
         amber={moneyPartial}

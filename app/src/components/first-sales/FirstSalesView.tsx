@@ -16,6 +16,9 @@ import MeetingLinksEditor from '@/components/first-sales/MeetingLinksEditor';
 
 type SummaryResponse = FirstSalesSeries & {
   previousTotals: FirstSalesSeries['totals'];
+  /** Границы окна, с которым сравниваются дельты под плитками (`YYYY-MM-DD`). */
+  previousFrom: string;
+  previousTo: string;
   syncedAt: string | null;
 };
 
@@ -236,9 +239,24 @@ export default function FirstSalesView() {
         </div>
       ) : data ? (
         <div key="content" className="space-y-4">
+          {/* Подпись к дельтам под плитками. Раньше их не было вовсе, и
+              «-36 (-51%)» читалось как что угодно — минус к плану, к прошлому
+              месяцу, к прошлому году. Строка стоит НАД плитками и названа
+              явно: подсказки по наведению достаточно для деталей, но не для
+              того, чтобы вообще догадаться, что цифра с чем-то сравнивается. */}
+          <p className="text-[11px] text-zinc-500">
+            Цифры под плитками — изменение к предыдущему периоду такой же длины:{' '}
+            <span className="font-medium text-zinc-600">
+              {formatDay(data.previousFrom)} — {formatDay(data.previousTo)}
+            </span>
+            . Наведите на цифру, чтобы увидеть значение за тот период.
+          </p>
+
           <KpiRow
             totals={data.totals}
             previousTotals={data.previousTotals}
+            previousFrom={data.previousFrom}
+            previousTo={data.previousTo}
             syncedAt={data.syncedAt}
             onNoSourceClick={() => {
               setFilters((f) => ({ ...f, sources: ['none'] }));
