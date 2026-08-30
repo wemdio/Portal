@@ -60,14 +60,19 @@ function Delta({
   const pctSign = pct !== null && pct > 0 ? '+' : '';
   return (
     <span
-      className={`cursor-help text-[11px] font-medium tabular-nums ${color}`}
+      className="cursor-help text-[11px]"
       title={
-        `Сравнение с предыдущим периодом такой же длины: `
-        + `${shortDay(previousFrom)} — ${shortDay(previousTo)}. `
+        `Предыдущий период такой же длины: ${shortDay(previousFrom)} — ${shortDay(previousTo)}. `
         + `${label} тогда: ${format(previous)}, сейчас: ${format(current)}.`
       }
     >
-      {sign}{format(diff)}{pct !== null ? ` (${pctSign}${pct}%)` : ''}
+      <span className={`font-medium tabular-nums ${color}`}>
+        {sign}{format(diff)}{pct !== null ? ` (${pctSign}${pct}%)` : ''}
+      </span>
+      {/* Период сравнения — прямо в строке, а не только в подсказке. Голое
+          «-36 (-51%)» читали как минус к плану, к прошлому месяцу, к прошлому
+          году: без дат цифра не значит ничего. */}
+      <span className="text-zinc-400"> к {shortDay(previousFrom)} — {shortDay(previousTo)}</span>
     </span>
   );
 }
@@ -103,10 +108,11 @@ function Tile({
       <p className={`mt-1 text-xl font-semibold tabular-nums ${amber ? 'text-amber-800' : 'text-zinc-900'}`}>
         {value}
       </p>
-      <div className="mt-0.5 flex items-center gap-1.5">
-        {sub && <span className={`text-[11px] ${amber ? 'text-amber-700' : 'text-zinc-400'}`}>{sub}</span>}
-        {delta}
-      </div>
+      {/* Подпись и дельта — разными строками. Рядом они склеивались в одну:
+          «магниты: 116  -51 (-15%)» читалось как «минус 51 магнит», хотя это
+          изменение самих лидов. */}
+      {sub && <p className={`mt-0.5 text-[11px] ${amber ? 'text-amber-700' : 'text-zinc-400'}`}>{sub}</p>}
+      {delta && <p className="mt-0.5">{delta}</p>}
     </div>
   );
 }

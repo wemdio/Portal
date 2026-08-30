@@ -22,6 +22,10 @@ export const dynamic = 'force-dynamic';
  *
  * `timestampField` — какое поле использовать для фильтра «за последние 24ч».
  * По умолчанию `created_at`, у некоторых — `finished_at`/`completed_at`.
+ *
+ * `tg_outreach_jobs` здесь намеренно НЕТ: строка job'а `start` живёт ровно
+ * столько же, сколько сама кампания, поэтому счётчик один в один повторял
+ * `tg_outreach_campaigns` и только путал. Не возвращать.
  */
 type JobTableConfig = {
   table: string;
@@ -36,7 +40,6 @@ const JOB_TABLES: JobTableConfig[] = [
   { table: 'ai_campaigns',            label: 'AI Кампании',      activeStatuses: ['running'] },
   { table: 'parser_jobs',             label: 'HH Парсер',        activeStatuses: ['pending', 'running'] },
   { table: 'search_parser_jobs',      label: 'Поисковый парсер', activeStatuses: ['pending', 'running'] },
-  { table: 'tg_outreach_jobs',        label: 'TG Аутрич',        activeStatuses: ['pending', 'running'] },
   { table: 'tg_outreach_campaigns',   label: 'TG Кампании',      activeStatuses: ['running'] },
   { table: 'email_validation_jobs',   label: 'Email валидация',  activeStatuses: ['pending', 'running'] },
   { table: 'website_enrichment_jobs', label: 'Обогащение',       activeStatuses: ['preparing', 'pending', 'running'] },

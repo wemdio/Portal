@@ -18,16 +18,37 @@
  * отдельно, а не выдавать одно за другое.
  */
 
-/** Ступени в порядке показа: сверху то, что дошло дальше всех. */
-export const FUNNEL_STAGE_ORDER = ['contract', 'meeting', 'qualified', 'lead'] as const;
+/**
+ * Ступени в порядке показа — сверху вниз, как на самой воронке: лиды,
+ * квал, встречи, договоры.
+ *
+ * Список читается глазами вместе с воронкой слева, и порядок обязан совпадать
+ * с ней. Обратный («сначала договоры») выглядит логично сам по себе — сверху
+ * самое ценное, — но рядом с воронкой заставляет читать два соседних блока в
+ * разные стороны.
+ */
+export const FUNNEL_STAGE_ORDER = ['lead', 'qualified', 'meeting', 'contract'] as const;
 
 export type FunnelStageId = (typeof FUNNEL_STAGE_ORDER)[number];
 
 export const FUNNEL_STAGE_LABEL: Record<FunnelStageId, string> = {
-  contract: 'Договоры',
-  meeting: 'Встречи',
-  qualified: 'Квал',
   lead: 'Лиды',
+  qualified: 'Квал',
+  meeting: 'Встречи',
+  contract: 'Договоры',
+};
+
+/**
+ * Цвет ступени — та же переменная палитры, которой красит ступень сама воронка
+ * (`seriesColor(theme, slot)` в FunnelChart.tsx, слоты 0..3 по порядку).
+ * Берём именно переменную, а не hex: палитра объявлена в globals.css и разная
+ * для светлой и тёмной темы, копия здесь разъехалась бы с графиком.
+ */
+export const FUNNEL_STAGE_COLOR_VAR: Record<FunnelStageId, string> = {
+  lead: 'var(--chart-series-1)',
+  qualified: 'var(--chart-series-2)',
+  meeting: 'var(--chart-series-3)',
+  contract: 'var(--chart-series-4)',
 };
 
 /** Что этой сделки попало в период — те же поля, что отдаёт drill-down. */
