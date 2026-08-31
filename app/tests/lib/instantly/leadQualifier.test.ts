@@ -57,6 +57,23 @@ function threadContext(): ThreadContext {
   return { replyEmail: reply, threadEmails: [outbound, reply], lastOutbound: outbound };
 }
 
+const formalMailboxChangeSubject =
+  'Уведомление о смене электронного почтового адреса ООО «СК Энерготехстрой» Re: Кому направить запрос по П-проектам';
+const formalMailboxOperationalContact =
+  'Если у Вас есть срочные вопросы, свяжитесь с нами по телефону: +7 (812) 982-97-62.';
+const formalMailboxChangeBody = [
+  'Уважаемый отправитель,',
+  '',
+  'Благодарим за Ваше сообщение! ООО «СК Энерготехстрой» обновила свой основной электронный почтовый адрес в рамках модернизации IT-инфраструктуры.',
+  '',
+  'С 24 ноября 2025 года все официальные письма следует направлять на новый адрес:',
+  'info@example.ru',
+  '',
+  `Старый адрес old@example.com перенаправил Ваше сообщение на info@example.ru, но для оперативности рекомендуем использовать новый. ${formalMailboxOperationalContact}`,
+  '',
+  'Спасибо за понимание и сотрудничество!',
+].join('\n');
+
 describe('fetchBriefByCampaign ownership isolation', () => {
   afterEach(() => {
     mockInstantlyDb = null;
@@ -351,6 +368,67 @@ describe('isAutoReplyOrUnsubscribe — уведомления о смене/за
     for (const text of negatives) {
       expect(isAutoReplyOrUnsubscribe(text)).toBe(false);
     }
+  });
+});
+
+describe('classifyMachineReply — формальное уведомление о смене почты', () => {
+  it('распознаёт полный production-кейс несмотря на дежурный контактный CTA', async () => {
+    const { classifyMachineReply } = await import('@/lib/instantly/leadQualifier');
+
+    expect(classifyMachineReply(email({
+      subject: formalMailboxChangeSubject,
+      body: { text: formalMailboxChangeBody },
+    }))).toBe('auto_reply');
+  });
+
+  it.each([
+    {
+      name: 'одна формальная тема без подтверждающего тела',
+      subject: formalMailboxChangeSubject,
+      body: 'Добрый день! Пришлите КП с ценами на этот адрес.',
+    },
+    {
+      name: 'живой запрос КП после сообщения об обновлении адреса',
+      subject: 'Re: proposal',
+      body: 'Мы обновили электронный почтовый адрес. Пришлите КП с ценами на new@example.ru.',
+    },
+    {
+      name: 'обновление email-функции продукта и предложение созвона',
+      subject: 'Re: proposal',
+      body: 'Мы обновили email в вашей системе. Давайте созвонимся завтра.',
+    },
+  ])('не блокирует человеческий ответ: $name', async ({ subject, body }) => {
+    const { classifyMachineReply } = await import('@/lib/instantly/leadQualifier');
+
+    expect(classifyMachineReply(email({ subject, body: { text: body } }))).toBeNull();
+  });
+
+  it.each([
+    'Отдельно по вашему предложению: пришлите КП с ценами на новый адрес.',
+    'Ваше предложение интересно. Давайте созвонимся завтра.',
+  ])('не скрывает настоящий коммерческий CTA после служебного текста: %s', async (cta) => {
+    const { classifyMachineReply } = await import('@/lib/instantly/leadQualifier');
+
+    expect(classifyMachineReply(email({
+      subject: formalMailboxChangeSubject,
+      body: { text: `${formalMailboxChangeBody}\n\n${cta}` },
+    }))).toBeNull();
+  });
+
+  it.each([
+    'отдельно по вашему предложению пришлите КП с ценами.',
+    'давайте созвонимся завтра.',
+  ])('не удаляет коммерческий CTA после служебного контакта в той же строке: %s', async (cta) => {
+    const { classifyMachineReply } = await import('@/lib/instantly/leadQualifier');
+    const bodyWithInlineCta = formalMailboxChangeBody.replace(
+      formalMailboxOperationalContact,
+      `${formalMailboxOperationalContact.slice(0, -1)}; ${cta}`,
+    );
+
+    expect(classifyMachineReply(email({
+      subject: formalMailboxChangeSubject,
+      body: { text: bodyWithInlineCta },
+    }))).toBeNull();
   });
 });
 
@@ -793,6 +871,55 @@ describe('qualifyReply — пер-проектное определение ли
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(res.isLead).toBe(false);
+  });
+
+  it('отсекает production-уведомление о смене почты до AI и кастомных критериев', async () => {
+    mockAiResult({
+      is_lead: true,
+      custom_criteria_matched: true,
+      reason: 'Модель ошибочно приняла email и телефон автоответчика за лид.',
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      leadCriteria: 'Если поделились почтой или телефоном — это лид.',
+      prefetchedContext: contextWithReply(formalMailboxChangeBody, outboundProposal, {
+        from_address_email: 'old@example.com',
+        subject: formalMailboxChangeSubject,
+      }),
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res).toMatchObject({
+      isLead: false,
+      customCriteriaMatched: false,
+      needsReview: false,
+    });
+  });
+
+  it('передаёт в AI настоящий запрос КП после формального уведомления о смене почты', async () => {
+    mockAiResult({
+      is_lead: true,
+      interest_signals: ['запрос КП'],
+      reason: 'Получатель отдельно запросил коммерческое предложение.',
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: contextWithReply(
+        `${formalMailboxChangeBody}\n\nОтдельно по вашему предложению: пришлите КП с ценами.`,
+        outboundProposal,
+        {
+          from_address_email: 'old@example.com',
+          subject: formalMailboxChangeSubject,
+        },
+      ),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.isLead).toBe(true);
   });
 
   it('распознаёт сильный auto-reply marker после приветствия и благодарности', async () => {
