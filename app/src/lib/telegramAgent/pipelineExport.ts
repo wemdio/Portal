@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { resolveHhEmployerId } from '@/lib/parsers/hhEmployerId';
 import type { Pipeline, PipelineStep } from './pipeline';
 
 type ExportResult = { buffer: Buffer; filename: string; rowCount: number };
@@ -110,7 +111,7 @@ async function exportHhPipeline(
 
   const { data: vacancies } = await sb
     .from('hh_vacancies')
-    .select('company_name, company_site_url, name, url, area, salary_from, salary_to, salary_currency, published_at')
+    .select('company_name, employer_id, company_url, company_site_url, name, url, area, salary_from, salary_to, salary_currency, published_at')
     .eq('job_id', parserJobId);
 
   if (!vacancies?.length) return 'Нет вакансий для экспорта.';
@@ -120,7 +121,7 @@ async function exportHhPipeline(
   const hasEnrich = enrichMap.size > 0;
   const hasValidate = validateMap.size > 0;
 
-  const headers = ['company_name', 'company_site_url', 'vacancy', 'vacancy_url', 'area', 'salary_from', 'salary_to', 'salary_currency', 'published_at'];
+  const headers = ['company_name', 'employer_id', 'company_site_url', 'vacancy', 'vacancy_url', 'area', 'salary_from', 'salary_to', 'salary_currency', 'published_at'];
   if (hasEnrich) headers.push('email');
   if (hasValidate) headers.push('email_result', 'email_quality');
 
@@ -130,12 +131,21 @@ async function exportHhPipeline(
   for (const v of vacancies as Record<string, unknown>[]) {
     const siteUrl = String(v.company_site_url ?? '').toLowerCase();
     const emails = enrichMap.get(siteUrl) ?? [];
+    const exportVacancy = {
+      ...v,
+      employer_id: resolveHhEmployerId(
+        v.employer_id as string | null | undefined,
+        v.company_url as string | null | undefined,
+      ),
+      vacancy: v.name,
+      vacancy_url: v.url,
+    };
 
     if (emails.length === 0) {
       const key = `${v.company_name}|${siteUrl}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      rows.push({ ...v, vacancy: v.name, vacancy_url: v.url, email: '', email_result: '', email_quality: '' });
+      rows.push({ ...exportVacancy, email: '', email_result: '', email_quality: '' });
     } else {
       for (const email of emails) {
         const key = `${v.company_name}|${email}`;
@@ -143,7 +153,7 @@ async function exportHhPipeline(
         seen.add(key);
         const val = validateMap.get(email);
         rows.push({
-          ...v, vacancy: v.name, vacancy_url: v.url,
+          ...exportVacancy,
           email, email_result: val?.result ?? '', email_quality: val?.quality ?? '',
         });
       }

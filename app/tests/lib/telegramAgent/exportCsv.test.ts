@@ -45,8 +45,8 @@ describe('exportParserResults', () => {
 
   it('exports HH results as CSV buffer', async () => {
     const rows = [
-      { vacancy_id: '1', name: 'Dev', url: 'http://hh.ru/1', company_name: 'Co', company_url: '', company_site_url: '', company_description: '', area: 'Moscow', salary_from: 100000, salary_to: 200000, salary_currency: 'RUR', industries: 'IT', published_at: '2026-01-01' },
-      { vacancy_id: '2', name: 'QA', url: 'http://hh.ru/2', company_name: 'Co2', company_url: '', company_site_url: '', company_description: '', area: 'SPb', salary_from: null, salary_to: null, salary_currency: null, industries: null, published_at: '2026-01-02' },
+      { vacancy_id: '1', name: 'Dev', url: 'http://hh.ru/1', company_name: 'Co', company_url: 'https://hh.ru/employer/456', employer_id: '456', company_site_url: '', company_description: '', area: 'Moscow', salary_from: 100000, salary_to: 200000, salary_currency: 'RUR', industries: 'IT', published_at: '2026-01-01' },
+      { vacancy_id: '2', name: 'QA', url: 'http://hh.ru/2', company_name: 'Co2', company_url: 'https://hh.ru/employer/789', employer_id: null, company_site_url: '', company_description: '', area: 'SPb', salary_from: null, salary_to: null, salary_currency: null, industries: null, published_at: '2026-01-02' },
     ];
 
     let callCount = 0;
@@ -71,6 +71,12 @@ describe('exportParserResults', () => {
 
     const csv = result.buffer.toString('utf-8');
     expect(csv).toContain('vacancy_id');
+    expect(csv).toContain('company_url,employer_id,company_site_url');
+    const [headerLine, ...dataLines] = csv.replace(/^\uFEFF/, '').split('\r\n');
+    const employerIdIndex = headerLine.split(',').indexOf('employer_id');
+    expect(employerIdIndex).toBeGreaterThan(-1);
+    expect(dataLines[0].split(',')[employerIdIndex]).toBe('456');
+    expect(dataLines[1].split(',')[employerIdIndex]).toBe('789');
     expect(csv).toContain('Dev');
     expect(csv).toContain('QA');
   });

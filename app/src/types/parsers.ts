@@ -151,6 +151,7 @@ export interface HHVacancyRow {
   salary_currency?: string | null;
   company_name: string;
   company_url?: string | null;
+  employer_id?: string | null;
   company_site_url?: string | null;
   company_description?: string | null;
   area: string;
