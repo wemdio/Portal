@@ -115,7 +115,10 @@ describe('Next build typecheck contract', () => {
       fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8'),
     ) as { scripts?: Record<string, string> };
     const testBlock = namedSection(workflow, 'Run tests', 2);
-    const typecheckJob = namedSection(testBlock, 'Lint, typecheck, test', 8);
+    // Линт с типами и сам прогон тестов живут в разных джобах блока: они идут
+    // параллельно, поэтому проверяем контракт отдельно по каждой.
+    const typecheckJob = namedSection(testBlock, 'Lint + typecheck', 8);
+    const testsJob = namedSection(testBlock, 'Tests', 8);
     const strictTypecheck = packageJson.scripts?.['typecheck:strict'] ?? '';
     const typegenIndex = strictTypecheck.indexOf('next typegen');
     const routeValidatorIndex = strictTypecheck.indexOf(
@@ -143,7 +146,17 @@ describe('Next build typecheck contract', () => {
     expect(typecheckJob).toMatch(/cache restore \S+/);
     expect(typecheckJob).toMatch(/cache store [^\n]*\.next\/cache/);
     expect(typecheckJob).not.toContain('.tsbuildinfo.ci');
-    expect(typecheckJob).toContain('npm test -- --watchAll=false');
+    // Тесты обязаны остаться в обязательном блоке ветки, пусть и соседней
+    // джобой. Набор делится на равные доли (jest --shard), поэтому проверяем
+    // и сам вызов, и то, что доли пересчитаны: знаменатель --shard должен
+    // совпадать с числом значений матрицы, иначе часть тестов молча не
+    // запускается и блок всё равно зелёный.
+    expect(testsJob).toContain('npm test -- --watchAll=false');
+    const shardValues = testsJob.match(/values: \[([^\]]*)\]/)?.[1] ?? '';
+    const shardCount = shardValues.split(',').filter((v) => v.trim()).length;
+    const shardDenominator = Number(testsJob.match(/--shard=\$JEST_SHARD\/(\d+)/)?.[1]);
+    expect(shardCount).toBeGreaterThan(0);
+    expect(shardDenominator).toBe(shardCount);
   });
 
   it('includes Next generated page and route validators in a dedicated tsc program', () => {

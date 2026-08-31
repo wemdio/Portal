@@ -116,8 +116,11 @@ function seedAt(stepIdx: number, leads: SeedLeadOpts[]): void {
       ai_prompt_invite: null,
       ai_prompt_chat: null,
       stop_on_reply: true,
-      min_delay: 1,
-      max_delay: 1,
+      // Пауза между лидами — 0: runCampaignTick честно спит min_delay секунд
+      // на каждом лиде, и с единицей этот файл пережидал их по-настоящему.
+      // Человекоподобный интервал проверяется не здесь.
+      min_delay: 0,
+      max_delay: 0,
       daily_invite_limit: 25,
       invites_sent_today: 0,
       last_invite_date: new Date().toISOString().slice(0, 10),

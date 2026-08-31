@@ -23,6 +23,14 @@
 
 - Before answering questions through the `portal-db` MCP (schema, Polza terminology, Sales AI tables, SQL templates), read `docs/portal-db-mcp-guide.md` — the full usage guide for that database. Keep it updated when the schema, Sales AI pipeline, or sync workers change.
 
+## Test budget (critical)
+
+- Branch CI must finish in under 3 minutes. Tests are the only gate before merge (`main` runs none), so the suite is kept deliberately small — read «Правило: тесты пишем скупо» in [`CLAUDE.md`](./CLAUDE.md) before adding any test.
+- Never assert the text of an already-applied migration or a config file. A test must be able to fail on a *future* mistake; 58 such files were deleted on 2026-08-31. Enforce a rule across all files instead (see `app/tests/migrations/grants.test.ts`).
+- Test logic by calling the function, not by rendering the screen: one render-based assertion costs about thirty plain ones on this project.
+- Never let a test live through a real backoff or cooldown — advance fake timers, or set the configurable delay to 0.
+- Do not add tests just because you touched a file. Add one for a bug you found or a new branch of logic; renames, wording, and code moves need none.
+
 ## Release and production boundary (critical)
 
 - For code or documentation changes, the default authorized stopping point is: create a focused commit and push it to the current working branch for that task.
