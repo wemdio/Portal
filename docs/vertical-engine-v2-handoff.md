@@ -4,7 +4,8 @@
 > Перед началом обязательно прочитать: `AGENTS.md`, `docs/vertical-engine-changelog.md`,
 > `docs/design/2026-08-20-vertical-engine-v2-isolation.md`,
 > `docs/design/2026-08-26-vertical-engine-v2-cutover.md`,
-> `docs/design/2026-08-28-vertical-engine-v2-seasonal-launch-portfolio.md`.
+> `docs/design/2026-08-28-vertical-engine-v2-seasonal-launch-portfolio.md`,
+> `docs/integrations/instantly-api.md`.
 
 ## 1. Где мы и что это
 
