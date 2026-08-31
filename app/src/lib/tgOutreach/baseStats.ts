@@ -55,6 +55,16 @@ export interface BaseDay {
   blocks: number;
 }
 
+/** Лид базы поимённо: ник, момент и дошёл ли он до менеджера. */
+export interface BaseLead {
+  /** Юзернейм без «@». Пусто — у собеседника его нет, остаётся только id. */
+  username: string;
+  tgUserId: number | null;
+  /** Когда стал лидом — та же метка, по которой он попал в счётчик. */
+  at: string | null;
+  forwarded: boolean;
+}
+
 export interface BaseStats {
   baseId: string;
   name: string;
@@ -72,6 +82,13 @@ export interface BaseStats {
   replyRate: number | null;
   /** Лидов на сотню ответивших, один знак. null — ответов не было. */
   leadRate: number | null;
+  /**
+   * Те же лиды, что и в счётчике `leads`, но поимённо и с пометкой «у
+   * менеджера». Счётчик отвечает, какая гипотеза лучше; список — кого именно
+   * она принесла, и без него ответ приходилось собирать вручную, сверяя ники
+   * с выгрузками баз.
+   */
+  leadList: BaseLead[];
   /** Аккаунты, которыми база рассылалась за период. */
   accountIds: string[];
   /** Среднесуточные отправки за период, один знак. */
@@ -170,6 +187,7 @@ export function buildBaseStats(input: BaseStatsInput): BaseStats[] {
     let forwarded = 0;
     let blocks = 0;
     const accountIds = new Set<string>();
+    const leadList: BaseLead[] = [];
 
     for (const c of contacts) {
       const sentAt = ts(c.sent_at);
@@ -188,12 +206,12 @@ export function buildBaseStats(input: BaseStatsInput): BaseStats[] {
         bump(replyAt, 'replies');
       }
 
-      if (dialog.status === 'lead') {
-        const at = leadAt(dialog);
-        if (inRange(at, fromMs, toMs)) {
-          leads++;
-          bump(at, 'leads');
-        }
+      const isLead = dialog.status === 'lead';
+      const leadMoment = isLead ? leadAt(dialog) : null;
+      const countedAsLead = isLead && inRange(leadMoment, fromMs, toMs);
+      if (countedAsLead) {
+        leads++;
+        bump(leadMoment, 'leads');
       }
 
       // Передача — по факту, а не по способу: автопересылка по триггеру и
@@ -201,7 +219,19 @@ export function buildBaseStats(input: BaseStatsInput): BaseStats[] {
       const autoAt = ts(dialog.auto_forwarded_at);
       const wentAuto = inRange(autoAt, fromMs, toMs);
       const wentManual = Boolean(dialog.id && forwardedDialogIds.has(dialog.id));
-      if (wentAuto || wentManual) forwarded++;
+      const wentToManager = wentAuto || wentManual;
+      if (wentToManager) forwarded++;
+
+      // В список попадают ровно те, кого посчитал счётчик: два числа про одних
+      // и тех же людей, разошедшиеся на одном экране, хуже отсутствия списка.
+      if (countedAsLead) {
+        leadList.push({
+          username: usernameKey(dialog.tg_username) || usernameKey(c.username),
+          tgUserId: dialog.tg_user_id ?? null,
+          at: leadMoment === null ? null : new Date(leadMoment).toISOString(),
+          forwarded: wentToManager,
+        });
+      }
 
       if (dialog.can_send_changed_reason === 'tg_user_blocked_bot') {
         const at = ts(dialog.can_send_changed_at);
@@ -230,6 +260,8 @@ export function buildBaseStats(input: BaseStatsInput): BaseStats[] {
       blocks,
       replyRate: share(replies, sent),
       leadRate: share(leads, replies),
+      // Свежие сверху: разметку смотрят «что там нового», а не с начала базы.
+      leadList: leadList.sort((x, y) => (y.at ?? '').localeCompare(x.at ?? '')),
       accountIds: [...accountIds],
       perDay,
       daysLeft: perDay > 0 ? Math.round((remaining / perDay) * 10) / 10 : null,

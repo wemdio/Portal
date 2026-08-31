@@ -47,11 +47,11 @@ blocks:
     dependencies: []
     run:
       # change_in: ветки, у которых текущий пуш не тронул app/, не гоняют
-      # 2-минутный прогон. branch_range принудительно сужает сравнение до
-      # диапазона именно этого пуша ($SEMAPHORE_GIT_COMMIT_RANGE = коммиты
-      # from..to последнего push). Без этого Semaphore по умолчанию берёт
-      # merge-base с main → на давно разошедшейся ветке правки в app/
-      # накопились и change_in всегда true.
+      # прогон. branch_range принудительно сужает сравнение до диапазона
+      # именно этого пуша ($SEMAPHORE_GIT_COMMIT_RANGE = коммиты from..to
+      # последнего push). Без этого Semaphore по умолчанию берёт merge-base
+      # с main → на давно разошедшейся ветке правки в app/ накопились и
+      # change_in всегда true.
       when: "branch != 'main' AND branch != 'test' AND change_in('/app/', {default_branch: 'main', branch_range: '$SEMAPHORE_GIT_COMMIT_RANGE'})"
     task:
       secrets:
@@ -69,52 +69,59 @@ blocks:
           # копию на каждую ветку. Квота кэша забивалась дублями, старые записи
           # вытеснялись, и новая ветка регулярно промахивалась мимо уже готовых
           # зависимостей и ставила их с нуля.
+          #
+          # Префикс v2 — потому что Semaphore НЕ перезаписывает существующие
+          # ключи: под старым именем лежит запись, сделанная до появления метки
+          # .ci-lock-checksum, и положить туда исправленную было бы нельзя.
           - 'LOCK_SUM=$(checksum package-lock.json)'
-          - 'cache restore node-modules-${LOCK_SUM},node-modules-'
-          # Браузеры Playwright лежат ВНЕ node_modules ($HOME/.cache/ms-playwright)
-          # и до сих пор не кэшировались вообще. При этом postinstall проекта
-          # (`patch-package && playwright install chromium`) выполняется при
-          # КАЖДОМ `npm install` — в том числе когда node_modules целиком подняты
-          # из кэша. То есть ~150 МБ качались с CDN на каждом прогоне, и дважды
-          # за пуш, потому что prologue выполняется в каждой джобе блока.
-          # С кэшем `playwright install` видит готовый браузер и выходит сразу.
-          - 'cache restore playwright-${LOCK_SUM},playwright-'
-          # Точное попадание в кэш означает, что node_modules собраны ровно под
-          # этот package-lock.json: postinstall там уже отработал — patch-package
-          # применён, биндинги sqlite3 собраны, — а браузер поднят соседним
-          # кэшем. Повторный npm install в этом случае только заново обходит
-          # дерево и заново дёргает postinstall, и так в каждой из двух джоб
-          # блока. Метка кладётся внутрь node_modules, то есть уезжает в кэш
-          # вместе с ними и существует только после успешной установки.
+          - 'cache restore node-modules-v2-${LOCK_SUM},node-modules-v2-'
+          # Метка внутри node_modules означает, что кэш собран ровно под этот
+          # package-lock.json: postinstall там уже отработал — patch-package
+          # применён, биндинги sqlite3 собраны. Тогда всё, что ниже (браузеры
+          # Playwright, npm install, запись кэшей), не нужно вовсе.
           - 'if [ -f node_modules/.ci-lock-checksum ] && [ "$(cat node_modules/.ci-lock-checksum)" = "${LOCK_SUM}" ]; then SKIP_NPM_INSTALL=1; else SKIP_NPM_INSTALL=0; fi'
+          # Браузеры Playwright (~150 МБ, лежат вне node_modules, в
+          # $HOME/.cache/ms-playwright) раньше поднимались из кэша в КАЖДОЙ
+          # джобе блока, хотя ни один jest-тест браузер не запускает: браузер
+          # нужен только postinstall'у (`playwright install chromium`), то есть
+          # исключительно на промахе кэша node_modules. Теперь и восстановление,
+          # и запись этого кэша живут внутри ветки «ставим зависимости заново».
+          - 'if [ "$SKIP_NPM_INSTALL" = 0 ]; then cache restore playwright-v2-${LOCK_SUM},playwright-v2-; fi'
           # npm install с ретраями. Установка ходит в сеть не только за
           # тарболами npm: postinstall тянет бинарники со сторонних хостов —
           # ffmpeg-static качает ~80 МБ с GitHub Releases, `playwright install
           # chromium` ещё ~150 МБ. Любой ECONNRESET на этой загрузке валит весь
-          # блок «Run tests» целиком (prologue общий у обеих джоб), и красный
-          # билд выглядит как ошибка в коде, хотя код не при чём —
-          # 12.08.2026 так упали два прогона подряд на ffmpeg-static.
+          # блок целиком (prologue общий у всех джоб), и красный билд выглядит
+          # как ошибка в коде, хотя код не при чём — 12.08.2026 так упали два
+          # прогона подряд на ffmpeg-static.
           #
           # Ретрай, а не --ignore-scripts: без скриптов не применится
           # patch-package (патч TL-схемы GramJS) и не соберутся биндинги
           # sqlite3, а они нужны tests/lib/telegram/sqliteReader.test.ts.
-          # Кэш node_modules снимает вопрос совсем — ffmpeg-static видит
-          # готовый бинарник и выходит сразу, — но на промахе кэша (новая
-          # ветка, смена package-lock.json) загрузка случается, и она обязана
-          # переживать разрыв соединения.
-          - 'if [ "$SKIP_NPM_INSTALL" = 1 ]; then echo "[ci] node_modules из кэша ровно под этот package-lock.json — npm install пропускаем"; else i=1; until npm install; do if [ $i -ge 3 ]; then echo "npm install не прошёл 3 раза подряд — это не флап сети, разбираться руками"; exit 1; fi; echo "npm install упал (попытка $i из 3), повтор через $((i*15))с"; sleep $((i*15)); i=$((i+1)); done; printf %s "${LOCK_SUM}" > node_modules/.ci-lock-checksum; fi'
-          # Ключи в Semaphore не перезаписываются: повторный store с тем же
-          # ключом — no-op, поэтому обе джобы блока могут звать его безопасно.
-          - 'cache store node-modules-${LOCK_SUM} node_modules'
-          - 'if [ -d "$HOME/.cache/ms-playwright" ]; then cache store playwright-${LOCK_SUM} "$HOME/.cache/ms-playwright"; fi'
-      # Две параллельные джобы вместо паровозика: сборка (самый долгий шаг,
-      # ~2-2.5 мин) идёт одновременно с линтом/типами/тестами. Время блока =
-      # самая долгая джоба, а не сумма шагов. node_modules у обеих из кэша
-      # (prologue общий). .next/cache кэшируется между прогонами — повторная
-      # сборка на ветке инкрементальная; протухание безопасно: Next сверяет
-      # содержимое по хэшам, максимум соберёт медленнее.
+          #
+          # Запись кэшей — здесь же, а не безусловным хвостом пролога: при
+          # попадании в кэш `cache store` под уже существующим ключом всё равно
+          # упаковывал многогигабайтные node_modules, чтобы в итоге ничего не
+          # записать, и делал это в каждой джобе блока.
+          - 'if [ "$SKIP_NPM_INSTALL" = 1 ]; then echo "[ci] node_modules из кэша ровно под этот package-lock.json — установка не нужна"; else i=1; until npm install; do if [ $i -ge 3 ]; then echo "npm install не прошёл 3 раза подряд — это не флап сети, разбираться руками"; exit 1; fi; echo "npm install упал (попытка $i из 3), повтор через $((i*15))с"; sleep $((i*15)); i=$((i+1)); done; printf %s "${LOCK_SUM}" > node_modules/.ci-lock-checksum; cache store node-modules-v2-${LOCK_SUM} node_modules; if [ -d "$HOME/.cache/ms-playwright" ]; then cache store playwright-v2-${LOCK_SUM} "$HOME/.cache/ms-playwright"; fi; fi'
+      # Одна джоба намеренно, хотя блок мог бы разложиться на параллельные.
+      #
+      # Semaphore считает минуты СУММОЙ по всем джобам, а не временем «от и
+      # до», и каждая джоба заново платит за пролог: checkout репозитория
+      # (357 МБ) и подъём node_modules (1,3 ГБ, 88 тысяч файлов) — около
+      # минуты. Поэтому раскладка на пять параллельных джоб, которая тут была
+      # 31.08.2026, сокращала ожидание втрое (6:40 → ~2:30), но добавляла в
+      # счёт четыре лишних пролога: 8:44 → ~11:45 оплачиваемых минут.
+      #
+      # После сокращения набора тестов (8423 → 1987 проверок) параллелить
+      # стало незачем: весь прогон тестов занимает меньше минуты, и делить его
+      # на машины дороже, чем прогнать подряд.
+      #
+      # Порядок шагов — от самого дешёвого к самому дорогому: линт и типы
+      # отваливаются за секунды и не дают платить за тесты и сборку, когда
+      # правка не компилируется (fail_fast на ветках выключает и остальное).
       jobs:
-        - name: 'Lint, typecheck, test'
+        - name: 'Checks and build'
           commands:
             - source /tmp/env_vars
             - cd $APP_PATH
@@ -145,27 +152,18 @@ blocks:
             # npm audit переехал в ночной прогон (.semaphore/nightly-audit.yml):
             # на каждом пуше он ходил в интернет и изредка подвисал/флапал.
             #
-            # Кэш трансформации jest (689 тестовых файлов) раньше не сохранялся
-            # вовсе: он лежит в /tmp и умирает вместе с машиной, так что каждый
-            # прогон перекомпилировал все тесты с нуля.
             # --maxWorkers=2: у e1-standard-2 два ядра, а jest по умолчанию
-            # берёт cpus-1 = 1 воркер и гоняет весь набор последовательно.
+            # берёт cpus-1 = 1 воркер и гонял бы набор последовательно.
             # --workerIdleMemoryLimit перезапускает раздувшийся воркер, чтобы
             # два процесса не вышли за физические 4 ГБ runner-а.
             #
-            # Ключ по дню, а не по коммиту: кэш весит ~53 МБ, и запись на каждый
-            # пуш выдавила бы из квоты node_modules. Для jest свежесть почти не
-            # важна — он хранит результат трансформации по хэшу содержимого
-            # файла, так что вчерашний кэш промахивается ровно на тех файлах,
-            # которые с тех пор поменялись.
-            - 'cache restore jest-$SEMAPHORE_GIT_BRANCH-$(date +%Y%m%d),jest-$SEMAPHORE_GIT_BRANCH-,jest-'
+            # В ключе кэша нет имени ветки: jest хранит результат трансформации
+            # по хэшу содержимого файла, поэтому кэш соседней ветки не «чужой» —
+            # он промахнётся ровно на тех файлах, которые с тех пор поменялись.
+            # Ротация по дню — потому что ключи не перезаписываются.
+            - 'cache restore jest-v2-$(date +%Y%m%d),jest-v2-'
             - 'npm test -- --watchAll=false --maxWorkers=2 --workerIdleMemoryLimit=1200MB --cacheDirectory=.jest-cache'
-            - 'cache store jest-$SEMAPHORE_GIT_BRANCH-$(date +%Y%m%d) .jest-cache'
-        - name: 'Next build'
-          commands:
-            - source /tmp/env_vars
-            - cd $APP_PATH
-            - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
+            - 'cache store jest-v2-$(date +%Y%m%d) .jest-cache'
             # Ежедневная ротация ключа — та же причина, что у кэша проверок
             # выше: постоянный ключ nextjs-<ветка> означал, что .next/cache
             # клал только первый прогон ветки, а дальше store молча ничего не
@@ -173,15 +171,13 @@ blocks:
             #
             # Здесь, в отличие от кэша проверок, ключ по дню, а не по коммиту:
             # webpack-кэш Next весит сотни мегабайт, и запись на каждый пуш
-            # вытеснила бы из квоты всё остальное. День — компромисс между
-            # свежестью и объёмом.
+            # вытеснила бы из квоты всё остальное.
             - 'cache restore nextjs-v2-$SEMAPHORE_GIT_BRANCH-$(date +%Y%m%d),nextjs-v2-$SEMAPHORE_GIT_BRANCH-,nextjs-v2-'
-            # next typegen + строгий tsc выполняются соседней обязательной job.
-            # Next здесь пропускает только повторную проверку типов, иначе она
-            # после успешной компиляции упирается в физические 4 ГБ runner-а.
+            # Проверку типов Next пропускает: строгий tsc уже отработал выше в
+            # этой же джобе, а повторная после успешной компиляции упирается в
+            # физические 4 ГБ runner-а.
             - 'NEXT_BUILD_SKIP_TYPECHECK=1 npm run build'
             - 'cache store nextjs-v2-$SEMAPHORE_GIT_BRANCH-$(date +%Y%m%d) .next/cache'
-
   - name: Build portal
     dependencies: []
     run:

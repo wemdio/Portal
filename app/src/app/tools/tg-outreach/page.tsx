@@ -1402,7 +1402,29 @@ function DialogsTab({ campaignId }: {
                       )}
                       <span className="text-[10px] text-gray-400">{d.messages.length} сообщ.</span>
                     </div>
-                    <span className="text-[11px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : '—'}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : '—'}</span>
+                      {/* Из какой гипотезы человек. Второй строкой, а не в ряд
+                          со статусами: разметку ведут по статусам, и лишний
+                          бейдж среди них удлинял бы поиск нужного. */}
+                      {d.base && (
+                        <span
+                          title={
+                            d.base.alsoIn.length
+                              ? `Написали из базы «${d.base.name}». Тот же контакт есть и в базах: ${d.base.alsoIn.join(', ')}.`
+                              : `Контакт из базы «${d.base.name}»`
+                          }
+                          className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700"
+                        >
+                          <Database className="h-3 w-3" />
+                          {d.base.name}
+                          {/* Цвет тот же, что у имени базы: у «text-violet-400»
+                              нет пары в тёмной теме портала, и счётчик уезжал
+                              бы в невидимое. */}
+                          {d.base.alsoIn.length > 0 && <span className="opacity-70">+{d.base.alsoIn.length}</span>}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   {isExpanded ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
                 </button>

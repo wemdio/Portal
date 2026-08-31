@@ -115,7 +115,11 @@ describe('Next build typecheck contract', () => {
       fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8'),
     ) as { scripts?: Record<string, string> };
     const testBlock = namedSection(workflow, 'Run tests', 2);
-    const typecheckJob = namedSection(testBlock, 'Lint, typecheck, test', 8);
+    // Блок намеренно состоит из одной джобы: Semaphore считает минуты суммой
+    // по джобам, и каждая лишняя заново платит за пролог. Поэтому и линт с
+    // типами, и тесты, и сборка проверяются в одной секции.
+    const typecheckJob = namedSection(testBlock, 'Checks and build', 8);
+    const testsJob = typecheckJob;
     const strictTypecheck = packageJson.scripts?.['typecheck:strict'] ?? '';
     const typegenIndex = strictTypecheck.indexOf('next typegen');
     const routeValidatorIndex = strictTypecheck.indexOf(
@@ -143,7 +147,17 @@ describe('Next build typecheck contract', () => {
     expect(typecheckJob).toMatch(/cache restore \S+/);
     expect(typecheckJob).toMatch(/cache store [^\n]*\.next\/cache/);
     expect(typecheckJob).not.toContain('.tsbuildinfo.ci');
-    expect(typecheckJob).toContain('npm test -- --watchAll=false');
+    // Тесты обязаны остаться в обязательном блоке ветки и гоняться целиком:
+    // --shard без пересчёта долей однажды уже мог бы тихо недосчитать часть
+    // набора, оставив прогон зелёным. Сейчас долей нет — и появиться они
+    // должны осознанно, вместе с правкой этого теста.
+    expect(testsJob).toContain('npm test -- --watchAll=false');
+    expect(testsJob).not.toContain('--shard=');
+    // Порядок внутри джобы: сначала дешёвые проверки, потом дорогая сборка.
+    // Иначе за сборку платится даже там, где правка не проходит типы.
+    expect(typecheckJob.indexOf('npm run typecheck:strict')).toBeLessThan(
+      typecheckJob.indexOf('npm run build'),
+    );
   });
 
   it('includes Next generated page and route validators in a dedicated tsc program', () => {
@@ -174,7 +188,7 @@ describe('Next build typecheck contract', () => {
       'utf8',
     );
     const testBlock = namedSection(workflow, 'Run tests', 2);
-    const nextBuildJob = namedSection(testBlock, 'Next build', 8);
+    const nextBuildJob = namedSection(testBlock, 'Checks and build', 8);
 
     expect(nextBuildJob).toContain("- 'NEXT_BUILD_SKIP_TYPECHECK=1 npm run build'");
     expect(workflow.match(/NEXT_BUILD_SKIP_TYPECHECK=1 npm run build/g)).toHaveLength(1);

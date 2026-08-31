@@ -87,7 +87,7 @@ function seed(): void {
       id: CAMPAIGN_ID, user_id: USER_ID, name: 'Stape', account_id: ACCOUNT_ID, lead_list_id: null,
       status: 'running', steps: [{ type: 'invite', message: 'Hi' }],
       use_ai: false, ai_prompt_invite: null, ai_prompt_chat: null, stop_on_reply: true,
-      min_delay: 1, max_delay: 1, daily_invite_limit: 25, invites_sent_today: 0,
+      min_delay: 0, max_delay: 0, daily_invite_limit: 25, invites_sent_today: 0,
       last_invite_date: new Date().toISOString().slice(0, 10),
       welcome_message: null, message_existing_connections: false, use_ai_welcome: false, use_ai_followup: false,
     },

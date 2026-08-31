@@ -77,7 +77,7 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
               <Fragment key={row.key}>
                 <tr
                   onClick={() => toggle(row.key)}
-                  className="cursor-pointer border-b border-zinc-50 hover:bg-zinc-50/60"
+                  className="cursor-pointer border-b border-zinc-50 hover:bg-[var(--glass-row-hover)]"
                   aria-expanded={isOpen}
                 >
                   <td className="px-3 py-2">
