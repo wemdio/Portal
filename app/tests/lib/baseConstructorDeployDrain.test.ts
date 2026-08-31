@@ -22,7 +22,7 @@ describe('BaseConstructor deploy drain', () => {
     )?.[1];
 
     expect(baseConstructorBlock).toBeDefined();
-    for (const replica of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
+    for (const replica of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
       const suffix = replica === 1 ? '' : `-${replica}`;
       expect(baseConstructorBlock).toContain(
         `portal-worker-baseconstructor${suffix}`,

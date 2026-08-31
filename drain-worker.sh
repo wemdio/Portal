@@ -295,7 +295,7 @@ done
 # BASE_CONSTRUCTOR_STALE_MINUTES — 15 минут простоя на ровном месте плюс
 # ложная тревога «Долго висит» в мониторе.
 #
-# Почему не в общий список выше: 15-секундный таймаут × 9 реплик = +135с к
+# Почему не в общий список выше: 15-секундный таймаут × 10 реплик = +150с к
 # каждому деплою, а ждать тут нечего. Задача НЕ должна доиграть до конца —
 # она резюмится с чекпоинта в другой реплике; хэндлеру нужно ~2 секунды
 # (UPDATE + повторный UPDATE через секунду). Останавливаем параллельно,
@@ -310,6 +310,7 @@ bc_containers=(
   "portal-worker-baseconstructor-7"
   "portal-worker-baseconstructor-8"
   "portal-worker-baseconstructor-9"
+  "portal-worker-baseconstructor-10"
 )
 
 echo "[drain] Stopping base-constructor replicas (timeout 5s, in parallel)..."
