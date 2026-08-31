@@ -98,16 +98,53 @@ describe('prepareSegmentationAudience', () => {
     ]);
     expect(audience.excluded).toEqual({
       lowRelevance: 1,
+      relevanceUnchecked: 0,
       invalidEmailStatus: 1,
       invalidEmail: 1,
       duplicateEmail: 1,
     });
     expect(
-      audience.rows.length +
-        audience.excluded.lowRelevance +
-        audience.excluded.invalidEmailStatus +
-        audience.excluded.invalidEmail +
-        audience.excluded.duplicateEmail,
+      Object.values(audience.excluded).reduce((sum, count) => sum + count, audience.rows.length),
+    ).toBe(audience.totalRows);
+  });
+
+  it('excludes unchecked auto rows separately without calling them low relevance', () => {
+    const sourceRows = [
+      {
+        Email: 'checked@example.test',
+        Компания: 'Проверенная клиника',
+        Отрасль: 'Медицина',
+        _email_status: 'ok',
+      },
+      {
+        Email: 'unchecked@example.test',
+        Компания: 'Клиника без вердикта',
+        Отрасль: 'Медицина',
+        _email_status: 'ok',
+        _relevance_unchecked: true,
+      },
+    ];
+
+    const audience = prepareSegmentationAudience({
+      rows: sourceRows,
+      columns: COLUMNS,
+      source: 'auto',
+      operatorMapping: OPERATOR_MAPPING,
+    });
+
+    expect(audience.totalRows).toBe(2);
+    expect(audience.rows).toEqual([sourceRows[0]]);
+    expect(audience.originalRowIndices).toEqual([0]);
+    expect(audience.leads.map((lead) => lead.email)).toEqual(['checked@example.test']);
+    expect(audience.excluded).toEqual({
+      lowRelevance: 0,
+      relevanceUnchecked: 1,
+      invalidEmailStatus: 0,
+      invalidEmail: 0,
+      duplicateEmail: 0,
+    });
+    expect(
+      Object.values(audience.excluded).reduce((sum, count) => sum + count, audience.rows.length),
     ).toBe(audience.totalRows);
   });
 
@@ -136,6 +173,7 @@ describe('prepareSegmentationAudience', () => {
     expect(audience.leads).toHaveLength(2);
     expect(audience.excluded).toEqual({
       lowRelevance: 0,
+      relevanceUnchecked: 0,
       invalidEmailStatus: 0,
       invalidEmail: 0,
       duplicateEmail: 0,

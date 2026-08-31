@@ -152,7 +152,7 @@ function StatusLabel({ item }: { item: LaunchPortfolioItemDto }) {
               ? { label: 'Запуск отменён', dotClass: 've2-d-q' }
               : { label: STATE_LABEL[state], dotClass: STATE_DOT[state] };
   return (
-    <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-gray-700">
+    <span className="ve2-st">
       <span aria-hidden="true" className={`h-1.5 w-1.5 shrink-0 rounded-full ${lifecycle.dotClass}`} />
       {lifecycle.label}
     </span>
@@ -341,14 +341,14 @@ export function LaunchPortfolioView({
     return (
       <div className={`${HE.emptyState} flex min-h-48 items-center justify-center gap-2`} role="status">
         <Spinner />
-        <span className="text-sm text-gray-600">Загружаем очередь запусков…</span>
+        <span className="ve2-mut">Загружаем очередь запусков…</span>
       </div>
     );
   }
 
   if (state === 'error' || !portfolio) {
     return (
-      <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700" role="alert">
+      <div className="ve2-nt ve2-nt-err px-4 py-3" role="alert">
         {error}
       </div>
     );
@@ -361,9 +361,9 @@ export function LaunchPortfolioView({
     <div className="space-y-5">
       <section
         aria-live="polite"
-        className="rounded-lg border border-gray-200 bg-gray-50/70 px-4 py-3"
+        className="ve2-panel px-5 py-4"
       >
-        <p className="text-sm font-semibold text-gray-900">
+        <p className="ve2-h3">
           Активные группы отправки · {capacity.active_bundles}
         </p>
         <p className={`mt-1 ${HE.muted}`}>
@@ -374,7 +374,7 @@ export function LaunchPortfolioView({
       </section>
 
       {actionError ? (
-        <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700" role="alert">
+        <p className="ve2-nt ve2-nt-err px-4 py-3" role="alert">
           {actionError}
         </p>
       ) : null}
@@ -384,13 +384,13 @@ export function LaunchPortfolioView({
         if (items.length === 0) return null;
         return (
           <section key={group.key} aria-labelledby={`ve-launch-group-${group.key}`}>
-            <div className="mb-2 flex items-baseline justify-between gap-3">
-              <h2 id={`ve-launch-group-${group.key}`} className={HE.sectionTitle}>
+            <div className="ve2-sec-head">
+              <h2 id={`ve-launch-group-${group.key}`} className="ve2-h3">
                 {group.title}
               </h2>
               <span className={HE.faint}>{items.length}</span>
             </div>
-            <ul className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+            <ul className="ve2-rows">
               {items.map((item) => {
                 const releaseOpen = releaseEditor?.itemId === item.id;
                 const overrideOpen = overrideEditor?.itemId === item.id;
@@ -406,13 +406,13 @@ export function LaunchPortfolioView({
                   ? !item.capacity.slot_available
                   : slotOccupied;
                 return (
-                  <li key={item.id} className="border-b border-gray-200 p-4 last:border-b-0">
+                  <li key={item.id} className="ve2-row ve2-row-static ve2-row-stack">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
                         <button
                           type="button"
                           onClick={() => onProjectOpen(item.project_id)}
-                          className="text-left text-sm font-semibold underline-offset-2 hover:underline"
+                          className="ve2-link ve2-touch-target text-left text-sm underline-offset-2 hover:underline"
                         >
                           {projectName(item)}
                         </button>
@@ -460,18 +460,18 @@ export function LaunchPortfolioView({
                     </div>
 
                     {!slotHolding && !terminal && item.status === 'queued' && item.is_activation_head ? (
-                      <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3">
+                      <div className="ve2-row-detail">
                         {item.campaigns.length > 0 ? (
                           <div className="mb-3">
-                            <p className="text-xs font-semibold text-gray-800">Кампании к запуску</p>
-                            <ul className="mt-1.5 space-y-1.5">
+                            <p className="ve2-h4 text-xs">Кампании к запуску</p>
+                            <ul className="mt-1.5">
                               {item.campaigns.map((campaign) => {
                                 const href = safeCampaignUrl(campaign.campaign_url);
                                 const name = campaignName(campaign);
                                 return (
                                   <li
                                     key={campaign.campaign_id}
-                                    className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs"
+                                    className="ve2-compact-row flex-wrap gap-x-3 gap-y-1"
                                   >
                                     <span className="min-w-0">
                                       {href ? (
@@ -479,19 +479,19 @@ export function LaunchPortfolioView({
                                           href={href}
                                           target="_blank"
                                           rel="noopener noreferrer"
-                                          className="ve2-link font-medium underline-offset-2 hover:underline"
+                                          className="ve2-link ve2-touch-target underline-offset-2 hover:underline"
                                         >
                                           {name}
                                         </a>
                                       ) : (
-                                        <span className="font-medium text-gray-800">{name}</span>
+                                        <span className="ve2-h4">{name}</span>
                                       )}
                                       {campaign.segment?.trim() ? (
-                                        <span className="ml-2 text-gray-500">{campaign.segment.trim()}</span>
+                                        <span className="ve2-faint ml-2">{campaign.segment.trim()}</span>
                                       ) : null}
                                     </span>
                                     {typeof campaign.leads_count === 'number' ? (
-                                      <span className="shrink-0 text-gray-500">
+                                      <span className="ve2-faint shrink-0">
                                         {campaign.leads_count} лидов
                                       </span>
                                     ) : null}
@@ -508,7 +508,7 @@ export function LaunchPortfolioView({
                             действительно освободился.
                           </p>
                         ) : null}
-                        <label className="flex items-start gap-2 text-sm text-gray-700">
+                        <label className="ve2-choice ve2-mut">
                           <input
                             type="checkbox"
                             required
@@ -521,7 +521,7 @@ export function LaunchPortfolioView({
                                 return next;
                               });
                             }}
-                            className="mt-0.5"
+                            className="ve2-cbx mt-0.5"
                           />
                           Я проверил тексты, получателей и настройки PAUSED-кампаний
                         </label>
@@ -542,11 +542,11 @@ export function LaunchPortfolioView({
                       && !terminal
                       && item.status === 'queued'
                       && item.activation_admissible ? (
-                      <p className="mt-3 text-xs text-gray-500" role="status">
+                      <p className="ve2-mut mt-3 text-xs" role="status">
                         Сначала должна быть активирована более приоритетная группа в этом mailbox-пуле.
                       </p>
                     ) : !slotHolding && !terminal && item.status === 'queued' ? (
-                      <p className="mt-3 text-xs text-gray-500" role="status">
+                      <p className="ve2-mut mt-3 text-xs" role="status">
                         {timingEligible
                           ? 'Активация пока отложена правилами времени запуска.'
                           : `Активация заблокирована сезонным решением «${STATE_LABEL[seasonalState]}».`}
@@ -555,8 +555,8 @@ export function LaunchPortfolioView({
                     ) : null}
 
                     {releaseOpen && releaseEditor ? (
-                      <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3">
-                        <label className="block text-xs font-medium text-gray-700">
+                      <div className="ve2-row-detail">
+                        <label className="ve2-label block">
                           Причина освобождения слота
                           <textarea
                             required
@@ -591,11 +591,11 @@ export function LaunchPortfolioView({
                     ) : null}
 
                     {overrideOpen && overrideEditor ? (
-                      <fieldset className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3">
-                        <legend className="px-1 text-xs font-semibold text-gray-800">
+                      <fieldset className="ve2-row-detail">
+                        <legend className="ve2-label">
                           Ручное сезонное решение
                         </legend>
-                        <label className="mt-1 flex items-center gap-2 text-sm text-gray-700">
+                        <label className="ve2-choice ve2-mut mt-1">
                           <input
                             type="radio"
                             name={`seasonality-${item.id}`}
@@ -603,19 +603,21 @@ export function LaunchPortfolioView({
                             onChange={() =>
                               setOverrideEditor({ ...overrideEditor, decision: 'activate_next' })
                             }
+                            className="ve2-cbx"
                           />
                           Активировать при освобождении слота
                         </label>
-                        <label className="mt-2 flex items-center gap-2 text-sm text-gray-700">
+                        <label className="ve2-choice ve2-mut mt-2">
                           <input
                             type="radio"
                             name={`seasonality-${item.id}`}
                             checked={overrideEditor.decision === 'wait'}
                             onChange={() => setOverrideEditor({ ...overrideEditor, decision: 'wait' })}
+                            className="ve2-cbx"
                           />
                           Оставить в ожидании
                         </label>
-                        <label className="mt-3 block text-xs font-medium text-gray-700">
+                        <label className="ve2-label mt-3 block">
                           Причина ручного решения
                           <textarea
                             required

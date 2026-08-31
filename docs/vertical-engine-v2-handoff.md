@@ -16,7 +16,7 @@
 - **Граница (критично)**: `hypothesisEngine` / `he_*` / `HE_MODEL_*` — это прод-бэкенд
   `/client/eng`. Их **не трогать**. v1 (`/tools/hypothesis-engine`) — легаси-клиент того
   же бэкенда.
-- Дата контекста: **2026-08-28**. Звонок с технической командой по средам уже был.
+- Дата контекста: **2026-08-30**. Звонок с технической командой по средам уже был.
 
 ## 2. Что уже сделано
 
@@ -98,6 +98,38 @@ launch portfolio существуют только в коде ветки `Serge
       non-sending set не доказывает completion, но после settling fence допускает audited manual
       release только `active | uncertain` bundle с mailbox snapshot, reason и actor. Cascade
       guard сохраняет любой ledger с tracked remote campaign независимо от cached status.
+8. **Честная воронка сегмента и базы — закрыта в коде**:
+   - старое досье показывало сырые строки широкого ОКВЭД-среза как «компании», хотя это
+     не уникальные юрлица, не фильтры гипотезы и не готовые контакты. Новый v2-only RPC
+     `ve_directory_segment_stats` возвращает raw rows, уникальные компании по ИНН и две
+     разные contact-семантики: `companies_with_*` ищет известный канал на любой строке
+     qualifying ИНН, а `matched_companies_with_*` — только на строках, прошедших точные
+     фильтры среза. Строки без ИНН не склеиваются. Malformed/partial core-счётчики RPC не
+     превращаются в ложный ноль: статистика становится недоступной с явной причиной;
+   - `20260830_0001_vertical_engine_v2_directory_stats.sql` не меняет shared directory RPC
+     и поддерживает опциональные region/revenue/employees/require-email фильтры. Миграция
+     добавлена в код, но **не применялась и не деплоилась**;
+   - досье различает raw/unique/contact-channel, предупреждает, что email не валидированы и
+     это не прогноз базы. Legacy-досье помечается старым расчётом до ручной пересборки;
+   - `base_collect` сохраняет estimate точного плана до cap; для contact-ступени estimate
+     использует matched-row, а не known-any-INN счётчики. После обработки сохраняются
+     collected/processed/low-relevance; `launchable_rows` записывается только после полной
+     построчной validation;
+   - порядок конструктора: optional `find_emails` → optional `enrich_descriptions` один раз
+     на строку компании → `split_emails` → дедуп → validation → cap. Терминальный legacy-
+     constructor job без `split_emails` не импортируется и один раз re-dispatch'ится по
+     новому контракту;
+   - relevance оценивается по title+description закреплённой гипотезы. Если контекст
+     привязанной гипотезы недоступен, её строки fail-closed считаются непроверенными;
+     vertical-only fallback разрешён только legacy-базе без `hypothesis_id`. После split
+     одна компания (ИНН, fallback `company+website`) уходит в LLM один раз, затем
+     verdict fan-out'ится на все её email-строки. Хвост лимита и сбойные/malformed батчи
+     получают отдельный `_relevance_unchecked` и fail-closed исключаются из launch/refill;
+   - Step 4 различает estimate/cap/collected/processed/проверенный итог. Последняя ступень
+     называется «Прошли проверки», показывает checked/total company coverage и число строк
+     без relevance-verdict; они в итог не входят. При >2 000 есть warning о лимите одного
+     запуска, а failed-база не получает выдуманный processed count из `row_count`. Live VBI-пример:
+     **8 410 под фильтры → cap 2 000 → 1 514 после конструктора → 651 прошёл проверки**.
 
 ## 3. Ключевые решения и их мотивы (этого нет в коде — важно не потерять)
 
@@ -121,6 +153,32 @@ launch portfolio существуют только в коде ветки `Serge
   можно только явной сверкой той же попытки. Отмена проекта переводит уже зарезервированный
   launch в `uncertain`; heartbeat/finalize требуют audit со статусом `ready`, поэтому поздний
   процесс не продолжит следующую кампанию и не зафиксирует отменённый запуск как успешный.
+- **Рынок ≠ база ≠ launch-аудитория**: raw rows директории нужны только для диагностики,
+  unique companies считаются по ИНН, наличие email/телефона означает лишь заполненный канал
+  в справочнике. Для qualifying ИНН досье может учитывать канал из любой известной строки
+  компании (`companies_with_*`), но estimate точного плана использует только channel-поля
+  matched-строк (`matched_companies_with_*`). Оценка идёт до cap; processed и проверенный
+  итог — фактические последующие ступени. Эти числа нельзя заменять одним headline и нельзя
+  складывать для пересекающихся source slices.
+- **Relevance принадлежит гипотезе**: для `base.hypothesis_id` gate обязан учитывать
+  конкретные title+description. Широкая vertical-only проверка допустима только как legacy-
+  fallback для базы без `hypothesis_id`; недоступный контекст привязанной гипотезы должен
+  fail-closed оставить строки непроверенными. Иначе смежный подтип вертикали ошибочно проходит
+  в базу выбранной гипотезы.
+  После split релевантность всё равно классифицируется один раз на компанию, а verdict
+  распространяется на все её строки: стоимость и решение не зависят от числа email. Лимит
+  проверки и временный сбой LLM не являются положительным verdict: непроверенные company-группы
+  маркируются отдельно и не допускаются ни в основной запуск, ни в refill.
+- **Один email — одна строка до validation**: описание компании обогащается до split, затем
+  multi-email ячейка разделяется раньше дедупликации и проверки. Иначе row-level «лучший»
+  status может относиться не к тому адресу, который импортёр сохранит, а enrich повторит один
+  и тот же HTTP-запрос для каждого адреса. Legacy-job без split нельзя импортировать — только
+  re-dispatch по текущим шагам.
+- **«Прошли проверки» ≠ «можно запустить всё одним кликом»**: count появляется только после
+  полной построчной validation и того же email/relevance/dedup-контракта, что использует #8.
+  Строки без relevance-verdict из-за лимита/сбоя считаются отдельным excluded-классом, а UI
+  показывает покрытие компаний. Текущий cap одного запуска — 2 000; превышение показывается
+  отдельно. Failed `row_count` не считается доказательством, что строки дошли до обработки.
 - **Сезонность — verified input, не «знание LLM»**: `neutral` допустим только с проверенным
   источником и цитатой; у `seasonal` каждое отдельное `peak/avoid` имеет собственный
   URL+quote evidence. Mixed-ответ теряет неподтверждённые окна, а полное отсутствие поддержки
@@ -171,11 +229,15 @@ launch portfolio существуют только в коде ветки `Serge
 - **Деплой миграций** `#6` (base-per-hypothesis), `#12` (unique index fix) и
   `20260828_0001_vertical_engine_v2_segmentation_audits.sql` (#8),
   `20260828_0002_vertical_engine_v2_ru_seasonality.sql` и
-  `20260828_0003_vertical_engine_v2_launch_portfolio.sql` — отдельный будущий release-шаг.
-  Миграции `0002`/`0003` здесь точно не применялись; deployment не выполнялся.
+  `20260828_0003_vertical_engine_v2_launch_portfolio.sql`, а также
+  `20260830_0001_vertical_engine_v2_directory_stats.sql` — отдельный будущий release-шаг.
+  Миграция `20260830_0001` здесь точно не применялась; deployment не выполнялся.
 - **Live VBI-тест в v2 после деплоя**: 2 гипотезы → 2 базы; verified сезонность с
   peak/avoid/unknown и московским состоянием; человеческие названия (#9); видимый tokenized
   segment preview (#7); async audit (#8) с complete, stale/incomplete и `not_required`;
+  для одной базы сверить estimate до cap → collected → processed → «Прошли проверки»,
+  split multi-email, complete-validation gate и company-level hypothesis-aware relevance;
+  пересобрать досье и сверить raw/unique/known-any-INN/matched-row channels;
   PAUSED preparation → очередь → ручная активация первого bundle → reconcile → release →
   активация следующего.
 - **Операционная граница Instantly**: решить отдельно, ограничиваем ли специалистам прямую
@@ -191,6 +253,23 @@ launch portfolio существуют только в коде ветки `Serge
 - **`ve_bases_one_collecting_per_vertical`** — legacy unique index без условия на
   `hypothesis_id`; чинится миграцией `20260826_0001_...` (drop + пересоздание). Применится
   при деплое.
+- **Live VBI-воронка диагностики 2026-08-30**: 8 410 кандидатов под точные фильтры
+  гипотезы → выбранный cap 2 000 → 1 514 строк после конструктора → 651 уникальный email,
+  прошедший полную validation и pre-launch фильтры. Старые `~31 528` были широкими raw rows
+  досье и не являлись прогнозом контактов этой гипотезы.
+- **Тесты честной воронки**: `verticalEngineV2DirectoryStats.test.ts`,
+  `dossierData.test.ts`, `VerticalEngineV2Dossier.test.tsx`,
+  `baseCollectConstruct.test.ts`, `baseCollectHypothesisRelevance.test.ts`,
+  `relevanceGate.test.ts`, `VerticalEngineV2Step4Base.test.tsx`,
+  `segmentationAudit.test.ts`, `segmentationAuditStage.test.ts` и
+  `baseCollectRefillRelevance.test.ts` фиксируют v2-only RPC,
+  дедуп по ИНН, known-any-INN vs matched-row contact counters, malformed-RPC fail-safe,
+  legacy UI, estimate/stats, re-dispatch старого constructor job, enrich-before-split,
+  company-level relevance fan-out, fail-closed unchecked coverage, обычный launch/refill,
+  complete-validation gate и truthful Step 4. Фактический локальный прогон этих десяти
+  файлов: **10 suites / 46 tests passed**; отдельный прогон
+  `noTransactionMigrations.test.ts` + `grants.test.ts`: **2 suites / 5 tests passed**;
+  полный VE2 regression: **45 suites / 349 tests passed**.
 - **Тесты #8**: `segmentClassify.test.ts`, `segmentationAudit.test.ts`,
   `launchReservation.test.ts`, `segmentationAuditStage.test.ts`,
   `jobFailureTransition.test.ts`, `templateSegmentationAudit.test.ts`, `projectCancel.test.ts`,
@@ -243,3 +322,32 @@ npm test -- --runInBand --watchAll=false \
 npm test -- --runInBand --watchAll=false \
   --testMatch '**/tests/{lib/vertical-engine-v2/{ruSeasonality,evidenceSeasonality,launchPortfolio,launchPortfolioTiming},api/vertical-engine-v2/{launchPortfolioQueue,launchPortfolioActivation,templateLaunchPortfolioRead,templateLaunchSegmentationAudit},components/{VerticalEngineV2Seasonality,VerticalEngineV2LaunchPortfolio,VerticalEngineV2Step5Template},migrations/{verticalEngineV2RuSeasonality,verticalEngineV2LaunchPortfolio}}.test.ts?(x)'
 ```
+
+Дополнительно для честной воронки досье/базы:
+
+```bash
+npm test -- --runInBand --watchAll=false \
+  tests/migrations/verticalEngineV2DirectoryStats.test.ts \
+  tests/lib/vertical-engine-v2/dossierData.test.ts \
+  tests/components/VerticalEngineV2Dossier.test.tsx \
+  tests/lib/vertical-engine-v2/baseCollectConstruct.test.ts \
+  tests/lib/vertical-engine-v2/baseCollectHypothesisRelevance.test.ts \
+  tests/lib/vertical-engine-v2/relevanceGate.test.ts \
+  tests/components/VerticalEngineV2Step4Base.test.tsx \
+  tests/lib/vertical-engine-v2/segmentationAudit.test.ts \
+  tests/lib/vertical-engine-v2/segmentationAuditStage.test.ts \
+  tests/lib/vertical-engine-v2/baseCollectRefillRelevance.test.ts
+```
+
+Фактический локальный результат этого точного набора на 2026-08-30:
+**10 suites / 46 tests passed**.
+
+Guards новой миграции:
+
+```bash
+npm test -- --runInBand --watchAll=false \
+  tests/migrations/noTransactionMigrations.test.ts \
+  tests/migrations/grants.test.ts
+```
+
+Фактический локальный результат: **2 suites / 5 tests passed**.

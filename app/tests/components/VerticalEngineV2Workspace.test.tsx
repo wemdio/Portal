@@ -103,7 +103,7 @@ describe('<ProjectDetail />', () => {
       ok: true,
       status: 200,
       data: {
-        project: PROJECT,
+        project: { ...PROJECT, status: 'researched' },
         hypotheses: [],
         verticals: [],
         chains: [],
