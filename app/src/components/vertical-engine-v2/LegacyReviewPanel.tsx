@@ -31,11 +31,11 @@ export function LegacyReviewPanel({
   }, [candidates, query]);
 
   return (
-    <div className="space-y-5">
+    <section className="space-y-5" aria-labelledby="legacy-review-title">
       <div className="ve2-nt ve2-nt-err p-5">
         <h2 className="ve2-h3 flex items-center gap-2.5">
           <StatusDot tone="err" />
-          Ручная проверка обязательна
+          <span id="legacy-review-title">Ручная проверка обязательна</span>
         </h2>
         <p className="ve2-mut mt-2 max-w-3xl text-sm leading-6">
           Не добавляйте проект только потому, что у него market=ru или выключен
@@ -45,13 +45,19 @@ export function LegacyReviewPanel({
         </p>
       </div>
 
-      <input
-        type="search"
-        value={query}
-        onChange={(event) => setQuery(event.target.value)}
-        placeholder="Поиск по названию, сайту, статусу или рынку"
-        className="ve2-input"
-      />
+      <div className="flex items-center gap-3">
+        <input
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Поиск по названию, сайту, статусу или рынку"
+          aria-label="Поиск кандидатов"
+          className="ve2-input max-w-[440px]"
+        />
+        <span className="ve2-faint shrink-0" aria-live="polite">
+          {filtered.length} из {candidates.length}
+        </span>
+      </div>
 
       <div className="space-y-3">
         {filtered.map((candidate) => {
@@ -59,7 +65,7 @@ export function LegacyReviewPanel({
           return (
             <article
               key={candidate.id}
-              className="ve2-card p-5"
+              className="ve2-panel px-5 py-4"
             >
               <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-start">
                 <div className="min-w-0">
@@ -139,7 +145,14 @@ export function LegacyReviewPanel({
                     )
                   ) : (
                     <div className="space-y-2">
+                      <label
+                        className="ve2-label"
+                        htmlFor={`legacy-review-notes-${candidate.id}`}
+                      >
+                        Основание проверки <span className="ve2-faint">обязательно</span>
+                      </label>
                       <input
+                        id={`legacy-review-notes-${candidate.id}`}
                         type="text"
                         value={notes[candidate.id] ?? ''}
                         onChange={(event) =>
@@ -148,7 +161,7 @@ export function LegacyReviewPanel({
                             [candidate.id]: event.target.value,
                           }))
                         }
-                        placeholder="Основание проверки (обязательно)"
+                        placeholder="Например: прогон Сергея, апрель"
                         className="ve2-input"
                       />
                       <button
@@ -175,6 +188,6 @@ export function LegacyReviewPanel({
           Ничего не найдено.
         </div>
       ) : null}
-    </div>
+    </section>
   );
 }

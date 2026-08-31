@@ -339,6 +339,40 @@ describe('<Step5Template /> — сегментное превью', () => {
       within(preview as HTMLElement).queryByText(/Поможем привлечь больше учеников\./i),
     ).not.toBeInTheDocument();
   });
+
+  it('показывает лидов одним плоским листом без вложенных карточек', async () => {
+    mockEngineCall.mockImplementation(async (url: string) => {
+      if (url !== PREVIEW_URL) throw new Error(`Unexpected GET ${url}`);
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          template: TEMPLATE,
+          columns: ['company', 'industry', 'email'],
+          sample_rows: [
+            {
+              company: 'Клиника Север',
+              industry: 'Медицина',
+              email: 'hello@clinic.example',
+            },
+          ],
+          sample_segments: ['Медицинские клиники'],
+        },
+      };
+    });
+
+    const user = userEvent.setup();
+    renderStep();
+
+    const summary = screen.getByText(/Превью по лидам/i);
+    await user.click(summary);
+    const preview = summary.closest('details');
+    expect(preview).not.toBeNull();
+
+    await within(preview as HTMLElement).findAllByText(/Клиника Север/i);
+    expect((preview as HTMLElement).querySelectorAll('.ve2-letter-sheet')).toHaveLength(1);
+    expect((preview as HTMLElement).querySelectorAll('.rounded-lg, .rounded-md')).toHaveLength(0);
+  });
 });
 
 describe('<Step5Template /> — предзапускный аудит сегментации', () => {

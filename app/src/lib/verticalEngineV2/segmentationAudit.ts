@@ -15,6 +15,8 @@ import { mapBaseRowsToLeads } from './launchHandoff';
 
 export interface SegmentationAuditExcluded {
   lowRelevance: number;
+  /** Нет надёжного verdict relevance-gate; fail-closed, не низкая релевантность. */
+  relevanceUnchecked: number;
   invalidEmailStatus: number;
   invalidEmail: number;
   duplicateEmail: number;
@@ -163,6 +165,7 @@ export function prepareSegmentationAudience(
   const { rows, columns, source, operatorMapping = [] } = input;
   const excluded: SegmentationAuditExcluded = {
     lowRelevance: 0,
+    relevanceUnchecked: 0,
     invalidEmailStatus: 0,
     invalidEmail: 0,
     duplicateEmail: 0,
@@ -171,6 +174,10 @@ export function prepareSegmentationAudience(
   const qualityRows: Array<{ row: Record<string, unknown>; originalIndex: number }> = [];
   rows.forEach((row, originalIndex) => {
     if (source === 'auto') {
+      if (row._relevance_unchecked === true) {
+        excluded.relevanceUnchecked += 1;
+        return;
+      }
       if (row._low_relevance === true) {
         excluded.lowRelevance += 1;
         return;

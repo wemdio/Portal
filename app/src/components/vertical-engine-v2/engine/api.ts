@@ -66,13 +66,54 @@ export interface VeSliceProbeDto {
   error?: string | null;
 }
 
+/** Оценка каталога по точным фильтрам одной гипотезы, до лимита конкретного прогона. */
+export interface VeCollectEstimateDto {
+  /** Уникальные компании по ИНН, подходящие под фильтры гипотезы. */
+  unique_companies?: number | null;
+  /** Из них matching-компании с email в строке среза (ещё не валидирован). */
+  companies_with_email?: number | null;
+  companies_with_phone?: number | null;
+  directory_rows_total?: number | null;
+  /** Почему оценка недоступна, например при нескольких пересекающихся срезах реестра. */
+  note?: string | null;
+}
+
+/** Воронка одного прогона автосборки: от ответа источников до готовых получателей. */
+export interface VeCollectStatsDto {
+  tasks_total?: number | null;
+  tasks_done?: number | null;
+  tasks_failed?: number | null;
+  /** Кандидаты после объединения источников и дедупликации, до конструктора. */
+  rows_total?: number | null;
+  /** Строки, оставшиеся после конструктора и обработки. */
+  processed_rows?: number | null;
+  /**
+   * Уникальные email после полной validation, relevance и dedup. Лимит одного
+   * запуска проверяется отдельно и может потребовать разделить аудиторию.
+   */
+  launchable_rows?: number | null;
+  low_relevance?: number | null;
+  /** Строки без надёжного relevance-verdict; они fail-closed исключены. */
+  relevance_unchecked?: number | null;
+  relevance_checked_companies?: number | null;
+  relevance_total_companies?: number | null;
+  relevance_coverage_complete?: boolean | null;
+  excluded_existing_bases?: number | null;
+  excluded_during_fetch?: number | null;
+  finished_at?: string | null;
+}
+
 export interface VeCollectInfo {
   /** Лимит строк, выбранный при запуске сборки (у старых записей поля нет). */
   limit?: number | null;
   /** Гипотезы, выбранные при запуске сборки (у записей до пикера гипотез поля нет). */
   hypothesis_ids?: string[] | null;
+  /** Снапшот гипотез, по которым фактически построен план. */
+  hypotheses?: Array<{ id?: string; title?: string; status?: string | null }> | null;
   plan?: { tasks?: VeCollectPlanTask[] } | null;
   tasks?: VeCollectTask[] | null;
+  estimate?: VeCollectEstimateDto | null;
+  stats?: VeCollectStatsDto | null;
   /** Каталог добавлен в план, которого в нём не было. */
   plan_repair?: VePlanRepairDto | null;
   /** Итог пробы каталожного среза на принадлежность вертикали. */
@@ -148,7 +189,16 @@ export interface VeDossierSignal {
 /** Форма jsonb-поля data досье вертикали — объективные числа сегмента. */
 export interface VeDossierData {
   counters: {
+    /** Legacy-алиас: в старых досье мог означать строки справочника, а не уникальные компании. */
     companies_total: number | null;
+    /** Сырые строки справочника до дедупликации по ИНН. */
+    directory_rows_total?: number | null;
+    /** Уникальные компании по ИНН в широком срезе вертикали. */
+    companies_unique_total?: number | null;
+    /** Наличие канала в справочнике не означает, что адрес/телефон уже проверен. */
+    companies_with_email?: number | null;
+    companies_with_phone?: number | null;
+    companies_with_any_contact?: number | null;
     companies_note?: string;
     hh_vacancies_total: number | null;
     hh_vacancies_sample: string[];

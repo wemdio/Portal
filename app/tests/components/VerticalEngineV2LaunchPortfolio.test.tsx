@@ -434,17 +434,25 @@ describe('<VeEngineWorkspace /> — портфельная очередь зап
     expect(screen.getByRole('heading', { name: 'Избегать запуска' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Нужно решение' })).toBeInTheDocument();
 
+    const launchNowSection = screen.getByRole('heading', { name: 'Запускать сейчас' })
+      .closest('section');
+    const launchNowRows = launchNowSection?.querySelector('ul');
+    expect(launchNowRows).toHaveClass('ve2-rows');
+    expect(launchNowRows?.querySelector('li')).toHaveClass('ve2-row', 've2-row-static');
+
     for (const projectName of PROJECTS.map((item) => item.name)) {
       expect(screen.getByText(projectName)).toBeInTheDocument();
     }
 
     const poolCopy = screen.getByText(/Активные группы отправки.*1/i);
     expect(poolCopy.closest('[aria-live="polite"]')).not.toBeNull();
+    expect(poolCopy.closest('.ve2-panel')).not.toBeNull();
     expect(screen.getByText(/считается отдельно для пересекающихся mailbox-пулов/i))
       .toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Отметить отправку завершённой/i }))
       .not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Освободить слот вручную/i })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox')).toHaveClass('ve2-cbx');
 
     // Сезонный смысл не кодируется одним цветом: рядом с каждой меткой есть
     // текст и отдельная скрытая от screen reader точка статуса.

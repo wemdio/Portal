@@ -303,6 +303,8 @@ export interface VeSegmentationAuditSummary {
   unclassified_count: number;
   excluded: {
     low_relevance: number;
+    /** Строки без надёжного relevance-verdict; поле отсутствует у старых audit summary. */
+    relevance_unchecked?: number;
     invalid_verification: number;
     invalid_email_status: number;
     invalid_email: number;
