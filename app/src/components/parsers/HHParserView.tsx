@@ -10,6 +10,7 @@ import { JobsList } from '@/components/parsers/JobsList';
 import { VacancyResults } from '@/components/parsers/VacancyResults';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
+import { resolveHhEmployerId } from '@/lib/parsers/hhEmployerId';
 
 type JobsResponse = { jobs: ParserJob[] };
 type CreateJobResponse = { job: ParserJob };
@@ -39,6 +40,7 @@ class ApiError extends Error {
 // (антибот «Произошла ошибка…»), и описания/почты выходили пустыми/мусорными.
 const exportHeader = [
   'vacancy_id',
+  'employer_id',
   'name',
   'компания',
   'сайт',
@@ -79,6 +81,7 @@ const exportLimit = 1000;
 function exportRow(v: HHVacancyRow) {
   return [
     v.vacancy_id,
+    resolveHhEmployerId(v.employer_id, v.company_url),
     v.name,
     v.company_name,            // → «компания» (название для «Очистить названия»)
     v.company_site_url ?? '',  // → «сайт» (только настоящий сайт компании, без hh.ru)

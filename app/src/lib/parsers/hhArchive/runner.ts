@@ -21,6 +21,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { resolveHhEmployerId } from '@/lib/parsers/hhEmployerId';
 import { parseAreas } from './parser';
 import { fetchVacanciesLocal, type LocalVacancyRow } from './localSearch';
 
@@ -55,18 +56,6 @@ async function updateJob(
   if (error) console.error(`[hh-archive][${jobId}] updateJob failed:`, error.message);
 }
 
-/**
- * Достаёт employer_id из ссылки типа `https://hh.ru/employer/12345`.
- * Обычный HH-парсер сохраняет company_url именно в таком виде. Если ссылка
- * не в формате /employer/N — возвращаем пустую строку (в hh_archive_results
- * employer_id NOT NULL DEFAULT ''), это ок для последующей выгрузки.
- */
-function extractEmployerId(companyUrl: string | null | undefined): string {
-  if (!companyUrl) return '';
-  const match = companyUrl.match(/\/employer\/(\d+)/);
-  return match ? match[1] : '';
-}
-
 async function insertBatch(
   db: SupabaseClient,
   jobId: string,
@@ -81,7 +70,7 @@ async function insertBatch(
     company: v.company_name ?? '',
     company_site_url: v.company_site_url ?? '',
     area: v.area ?? '',
-    employer_id: extractEmployerId(v.company_url),
+    employer_id: resolveHhEmployerId(v.employer_id, v.company_url),
     published_at: v.published_at,
     // archived_at у нас в hh_vacancies не хранится — фиксируем момент,
     // когда мы вытащили запись в архив.

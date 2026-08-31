@@ -221,7 +221,7 @@ export function HHArchiveParserView() {
     // Подгружаем партиями по 5000 и сшиваем CSV.
     let offset = 0;
     const LIMIT = 5000;
-    const all: { vacancy_id: string; title: string; company: string; company_site_url: string; area: string; employer_id: string; published_at: string | null; raw_query: string }[] = [];
+    const all: { vacancy_id: string; title: string; company: string; company_site_url: string; area: string; employer_id: string | null; published_at: string | null; raw_query: string }[] = [];
     for (;;) {
       const res = await authFetch(`/api/parsers/hh-archive/${jobId}/results?limit=${LIMIT}&offset=${offset}`);
       if (!res.ok) { setError('Не удалось загрузить результаты'); return; }
@@ -232,7 +232,7 @@ export function HHArchiveParserView() {
     }
     if (all.length === 0) { setError('Пусто'); return; }
 
-    const headers = ['Вакансия_URL', 'Название_вакансии', 'Компания', 'Сайт_компании', 'Город', 'Работодатель_hh_URL', 'Дата_публикации', 'Запрос'];
+    const headers = ['Вакансия_URL', 'Название_вакансии', 'Компания', 'Сайт_компании', 'Город', 'ID_работодателя_HH', 'Работодатель_hh_URL', 'Дата_публикации', 'Запрос'];
     const lines = [headers.join(',')];
     for (const r of all) {
       const row = [
@@ -241,6 +241,7 @@ export function HHArchiveParserView() {
         r.company,
         r.company_site_url,
         r.area,
+        r.employer_id ?? '',
         r.employer_id ? `https://hh.ru/employer/${r.employer_id}` : '',
         r.published_at ?? '',
         r.raw_query,
