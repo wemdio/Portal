@@ -84,17 +84,22 @@ const WINDOW_START = new Date('2026-07-19T21:00:00.000Z');
 const WINDOW_END = new Date('2026-07-24T15:00:00.000Z');
 
 describe('computeMetricsFromRows', () => {
-  it('считает пять каналов; «Успешно» в «Лидов», «Закрыто и не реализовано» — нет', () => {
+  it('считает пять каналов; «Успешно» в «Лидов», «Закрыто и не реализовано» — нигде', () => {
     const result = computeMetricsFromRows(
       SUMMARY_CHANNELS,
       statuses,
       [
-        // Маркетинг — только по явному маркеру «Контур»=«Маркетинг».
         lead({ Контур: 'Маркетинг' }, 20),
-        lead({ Источник: 'Сайт', utm_medium: 'smm' }, 30),
+        lead({ Источник: 'Личный бренд (инст /ютуб)' }, 30),
         lead({ Источник: 'Аутрич' }, 40),
         lead({ Источник: 'Партнер' }, 142),
         lead({ Источник: 'Telegram Outreach' }, 143),
+        // Каналы, заведённые 31.08.2026: раньше все пять выпадали из отчёта.
+        lead({ Источник: 'Конференция' }, 20),
+        lead({ Источник: 'SDR' }, 40),
+        lead({ Источник: 'портал (outreachOS)' }, 30),
+        lead({ Источник: 'TG Outreach Eng' }, 20),
+        lead({ Источник: 'Email Outreach Eng' }, 40),
       ],
       [],
       WINDOW_START,
@@ -112,19 +117,28 @@ describe('computeMetricsFromRows', () => {
       { channel: 'smm', arrived: 1, leads: 1, held: 0, scheduled: 1 },
       { channel: 'outreach', arrived: 1, leads: 1, held: 1, scheduled: 0 },
       { channel: 'partners', arrived: 1, leads: 1, held: 0, scheduled: 0 },
-      { channel: 'tg_outreach', arrived: 1, leads: 0, held: 0, scheduled: 0 },
+      // «Закрыто и не реализовано» не считается вообще нигде.
+      { channel: 'tg_outreach', arrived: 0, leads: 0, held: 0, scheduled: 0 },
+      { channel: 'auto_outreach', arrived: 1, leads: 1, held: 0, scheduled: 1 },
+      { channel: 'eng_tg_outreach', arrived: 1, leads: 1, held: 0, scheduled: 0 },
+      {
+        channel: 'eng_email_outreach',
+        arrived: 1,
+        leads: 1,
+        held: 1,
+        scheduled: 0,
+      },
+      { channel: 'conference', arrived: 1, leads: 1, held: 0, scheduled: 0 },
+      { channel: 'sdr', arrived: 1, leads: 1, held: 1, scheduled: 0 },
     ]);
   });
 
-  it('«Закрыто и не реализовано» не считается лидом и не пускает лид-магнит в «Пришло»', () => {
+  it('«Закрыто и не реализовано» не считается вообще нигде', () => {
     const result = computeMetricsFromRows(
       SUMMARY_CHANNELS,
       statuses,
       [
-        // Обычная сделка: в «Пришло» попадает, лидом не считается.
         lead({ Контур: 'Маркетинг' }, 143, { name: 'Иванов Иван' }),
-        // Лид-магнит: раньше отказ выглядел как «прошёл квалификацию» и
-        // пропускал заявку в «Пришло». Теперь не попадает никуда.
         lead({ Контур: 'Маркетинг' }, 143, { name: 'Бот: Amir' }),
       ],
       [],
@@ -133,10 +147,76 @@ describe('computeMetricsFromRows', () => {
     );
 
     expect(result.find((r) => r.channel.name === 'marketing')).toMatchObject({
-      arrived: 1,
+      arrived: 0,
       qualifiedLeads: 0,
       meetingsHeld: 0,
       meetingsScheduled: 0,
+    });
+  });
+
+  it('закрытие ПОСЛЕ конца окна сделку из отчёта не убирает', () => {
+    // Кейс «@allgrom» (34932575): пришла 28.08, на момент отсечки была на
+    // «Первом контакте», закрыли 31.08. В отчёте 28.08 обязана остаться.
+    const deal = lead({ Источник: 'Telegram Outreach' }, 143, { amoId: 920 });
+    const result = computeMetricsFromRows(
+      SUMMARY_CHANNELS,
+      statuses,
+      [deal],
+      [
+        move(920, 10, 15, '2026-07-22T09:00:00.000Z'),
+        move(920, 15, 143, '2026-07-26T09:00:00.000Z'),
+      ],
+      WINDOW_START,
+      WINDOW_END,
+    );
+
+    expect(result.find((r) => r.channel.name === 'tg_outreach')).toMatchObject({
+      arrived: 1,
+      qualifiedLeads: 0,
+    });
+  });
+
+  it('закрытую до отсечки и возвращённую после отсечки не считает', () => {
+    // Кейс «it-navigator.online» (34866399): закрыли 27.08, вернули в
+    // «Переговоры» 28.08 в 18:14 — после отправки отчёта. Отчёт показывает
+    // состояние на момент отправки, значит сделка в нём мусор.
+    const deal = lead({ Контур: 'Маркетинг' }, 45, { amoId: 921 });
+    const result = computeMetricsFromRows(
+      SUMMARY_CHANNELS,
+      statuses,
+      [deal],
+      [
+        move(921, 10, 15, '2026-07-21T09:00:00.000Z'),
+        move(921, 15, 143, '2026-07-23T09:00:00.000Z'),
+        move(921, 143, 45, '2026-07-24T18:00:00.000Z'),
+      ],
+      WINDOW_START,
+      WINDOW_END,
+    );
+
+    expect(result.find((r) => r.channel.name === 'marketing')).toMatchObject({
+      arrived: 0,
+      qualifiedLeads: 0,
+    });
+  });
+
+  it('закрытую до отсечки и возвращённую ДО отсечки считает', () => {
+    const deal = lead({ Контур: 'Маркетинг' }, 45, { amoId: 922 });
+    const result = computeMetricsFromRows(
+      SUMMARY_CHANNELS,
+      statuses,
+      [deal],
+      [
+        move(922, 10, 143, '2026-07-21T09:00:00.000Z'),
+        move(922, 143, 45, '2026-07-22T09:00:00.000Z'),
+      ],
+      WINDOW_START,
+      WINDOW_END,
+    );
+
+    expect(result.find((r) => r.channel.name === 'marketing')).toMatchObject({
+      arrived: 1,
+      qualifiedLeads: 1,
     });
   });
 
@@ -147,8 +227,9 @@ describe('computeMetricsFromRows', () => {
       [
         // Ни Контур, ни известный источник — раньше падало в «Маркетинг», теперь пропускаем.
         lead({}, 20),
-        lead({ Источник: 'Сайт' }, 20),
+        lead({ Источник: 'Незнакомый источник' }, 20),
         lead({ Источник: 'Лидскан' }, 20),
+        lead({ Источник: 'Холодная база' }, 20),
       ],
       [],
       WINDOW_START,
@@ -240,8 +321,11 @@ describe('computeMetricsFromRows', () => {
     });
   });
 
-  it('назначенная и потом закрытая встреча не пропадает', () => {
-    // Кейс «@chapurina_volna»: назначили встречу, откатили, закрыли.
+  it('назначенная встреча уходит вместе с закрытой сделкой', () => {
+    // Кейс «@chapurina_volna»: назначили встречу, откатили, закрыли. Раньше
+    // встреча оставалась в отчёте — сделка была мусором, а встреча за ней
+    // числилась. С правилом «закрытых не считаем вообще» (Дмитрий,
+    // 31.08.2026) уходит и она.
     const deal = lead({ Источник: 'Telegram Outreach' }, 143, { amoId: 902 });
     const result = computeMetricsFromRows(
       SUMMARY_CHANNELS,
@@ -257,10 +341,113 @@ describe('computeMetricsFromRows', () => {
     );
 
     expect(result.find((r) => r.channel.name === 'tg_outreach')).toMatchObject({
+      arrived: 0,
+      qualifiedLeads: 0,
+      meetingsHeld: 0,
+      meetingsScheduled: 0,
+    });
+  });
+
+  it('назначенная и откатанная встреча у живой сделки не пропадает', () => {
+    // Тот же откат этапа, но карточку не закрыли: встреча назначалась и
+    // должна остаться в «Запланировано».
+    const deal = lead({ Источник: 'Telegram Outreach' }, 10, { amoId: 923 });
+    const result = computeMetricsFromRows(
+      SUMMARY_CHANNELS,
+      statuses,
+      [deal],
+      [
+        move(923, 10, 30, '2026-07-21T09:00:00.000Z'),
+        move(923, 30, 10, '2026-07-21T14:00:00.000Z'),
+      ],
+      WINDOW_START,
+      WINDOW_END,
+    );
+
+    expect(result.find((r) => r.channel.name === 'tg_outreach')).toMatchObject({
       arrived: 1,
       qualifiedLeads: 1,
       meetingsHeld: 0,
       meetingsScheduled: 1,
+    });
+  });
+
+  it('закрытая задача-встреча считается проведённой встречей без движения этапа', () => {
+    // Кейс «@alexisneverlate» (34890875): встреча прошла 28.08 в 12:30,
+    // задача закрыта, карточка так и висит на «Назначена встреча».
+    const deal = lead({ Источник: 'Telegram Outreach' }, 30, { amoId: 930 });
+    const result = computeMetricsFromRows(
+      SUMMARY_CHANNELS,
+      statuses,
+      [deal],
+      [move(930, 10, 30, '2026-07-21T09:00:00.000Z')],
+      WINDOW_START,
+      WINDOW_END,
+      [{ amo_deal_id: 930, complete_till: '2026-07-23T09:30:00.000Z' }],
+    );
+
+    expect(result.find((r) => r.channel.name === 'tg_outreach')).toMatchObject({
+      arrived: 1,
+      qualifiedLeads: 1,
+      meetingsHeld: 1,
+      meetingsScheduled: 0,
+    });
+  });
+
+  it('задача-встреча со сроком после конца окна встречу не создаёт', () => {
+    const deal = lead({ Источник: 'Telegram Outreach' }, 30, { amoId: 931 });
+    const result = computeMetricsFromRows(
+      SUMMARY_CHANNELS,
+      statuses,
+      [deal],
+      [move(931, 10, 30, '2026-07-21T09:00:00.000Z')],
+      WINDOW_START,
+      WINDOW_END,
+      [{ amo_deal_id: 931, complete_till: '2026-07-30T09:30:00.000Z' }],
+    );
+
+    expect(result.find((r) => r.channel.name === 'tg_outreach')).toMatchObject({
+      meetingsHeld: 0,
+      meetingsScheduled: 1,
+    });
+  });
+
+  it('закрытая задача-встреча делает лидом сделку с раннего этапа', () => {
+    // Встречу не проводят с неквалифицированным лидом, а этап отстаёт.
+    const deal = lead({ Источник: 'SDR' }, 15, { amoId: 932 });
+    const result = computeMetricsFromRows(
+      SUMMARY_CHANNELS,
+      statuses,
+      [deal],
+      [],
+      WINDOW_START,
+      WINDOW_END,
+      [{ amo_deal_id: 932, complete_till: '2026-07-22T09:30:00.000Z' }],
+    );
+
+    expect(result.find((r) => r.channel.name === 'sdr')).toMatchObject({
+      arrived: 1,
+      qualifiedLeads: 1,
+      meetingsHeld: 1,
+    });
+  });
+
+  it('задача-встреча закрытой сделки не воскрешает', () => {
+    const deal = lead({ Источник: 'Конференция' }, 143, { amoId: 933 });
+    const result = computeMetricsFromRows(
+      SUMMARY_CHANNELS,
+      statuses,
+      [deal],
+      [move(933, 10, 143, '2026-07-22T09:00:00.000Z')],
+      WINDOW_START,
+      WINDOW_END,
+      [{ amo_deal_id: 933, complete_till: '2026-07-21T09:30:00.000Z' }],
+    );
+
+    expect(result.find((r) => r.channel.name === 'conference')).toMatchObject({
+      arrived: 0,
+      qualifiedLeads: 0,
+      meetingsHeld: 0,
     });
   });
 
@@ -498,6 +685,7 @@ describe('computeAllChannelMetrics', () => {
         }),
       ];
     }
+    if (table === 'amo_tasks') return [];
     return [move(700, 10, 50, '2026-07-22T09:00:00.000Z')];
   }
 
@@ -545,7 +733,13 @@ describe('computeAllChannelMetrics', () => {
       'amo_statuses',
       'amo_leads',
       'amo_events',
+      'amo_tasks',
     ]);
+
+    const tasksCall = calls[3];
+    expect(tasksCall.filters['eq:task_type_id']).toBe(2);
+    expect(tasksCall.filters['eq:is_completed']).toBe(true);
+    expect(tasksCall.filters['in:amo_deal_id']).toEqual([700]);
 
     const leadsCall = calls[1];
     expect(leadsCall.filters['gte:created_at']).toBe(WINDOW_START.toISOString());
