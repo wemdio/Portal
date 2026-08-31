@@ -2,6 +2,12 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { logError } from '@/lib/loggerServer';
+import {
+  PdlCompanyReadError,
+  pdlFiltersFromSearchParams,
+  readPdlCompanyPage,
+  type PdlRpcClient,
+} from '@/lib/companyBase/pdlSearch';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,55 +17,52 @@ function jsonError(message: string, status: number, extra?: Record<string, unkno
 
 async function getSupabase(req: NextRequest) {
   const token = getBearerToken(req.headers.get('authorization'));
-  if (!token) return { error: jsonError('Unauthorized', 401) };
+  if (!token) return { ok: false as const, response: jsonError('Unauthorized', 401) };
   const supabase = createAuthedSupabaseClient(token);
   try {
     const { data, error } = await supabase.auth.getUser();
-    if (error || !data?.user) return { error: jsonError('Unauthorized', 401) };
-    return { supabase, user: data.user };
+    if (error || !data?.user) {
+      return { ok: false as const, response: jsonError('Unauthorized', 401) };
+    }
+    return { ok: true as const, supabase, user: data.user };
   } catch {
-    return { error: jsonError('Unauthorized', 401) };
+    return { ok: false as const, response: jsonError('Unauthorized', 401) };
   }
-}
-
-function listParam(sp: URLSearchParams, key: string): string[] {
-  const out = sp
-    .getAll(key)
-    .flatMap((v) => v.split(','))
-    .map((v) => v.trim().toLowerCase())
-    .filter(Boolean);
-  return Array.from(new Set(out));
 }
 
 export async function GET(req: NextRequest) {
   const auth = await getSupabase(req);
-  if ('error' in auth) return auth.error;
+  if (!auth.ok) return auth.response;
   const { supabase, user } = auth;
   const requestId = req.headers.get('x-request-id') ?? crypto.randomUUID();
 
   const sp = req.nextUrl.searchParams;
-  const industry = listParam(sp, 'industry');
-  const size = listParam(sp, 'size');
-  const country = listParam(sp, 'country');
-  const name = (sp.get('name') ?? '').trim();
-  // Up to 100k per page so file exports pull large chunks in few round-trips.
-  const limit = Math.min(100_000, Math.max(1, Number(sp.get('limit') ?? '100')));
-  const offset = Math.max(0, Number(sp.get('offset') ?? '0'));
+  const filters = pdlFiltersFromSearchParams(sp);
+  const requestedLimit = Number(sp.get('limit') ?? '100');
+  const limit = Math.min(10_000, Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 100));
+  const afterId = (sp.get('after_id') ?? '').trim() || null;
 
-  // No COUNT(*) here — it's slow over 13M rows. The "≈ N" counter uses the
-  // instant planner estimate (/api/company-base/count); export loops until a
-  // page returns fewer than `limit` rows.
-  let query = supabase.from('pdl_companies').select('*');
-  if (country.length) query = query.in('country', country);
-  if (industry.length) query = query.in('industry', industry);
-  if (size.length) query = query.in('size', size);
-  if (name) query = query.ilike('name', `%${name.replace(/[%_]/g, '')}%`);
-  query = query.order('name', { ascending: true }).range(offset, offset + limit - 1);
-
-  const { data, error } = await query;
-  if (error) {
-    await logError('company_base.search.failed', error, { industry, size, country, name }, { userId: user.id });
-    return jsonError(error.message, 500, { request_id: requestId });
+  try {
+    const items = await readPdlCompanyPage(
+      supabase as unknown as PdlRpcClient,
+      { ...filters, afterId, limit },
+    );
+    const nextCursor = items.length === limit
+      ? String(items[items.length - 1]?.id ?? '').trim() || null
+      : null;
+    return NextResponse.json({ items, limit, next_cursor: nextCursor });
+  } catch (error) {
+    const readError = error instanceof PdlCompanyReadError ? error : null;
+    await logError(
+      'company_base.search.failed',
+      readError ? new Error(readError.rawMessage) : error,
+      { ...filters, after_id: afterId },
+      { userId: user.id, requestId },
+    );
+    return jsonError(
+      readError?.message ?? 'Не удалось получить данные базы компаний. Повторите попытку.',
+      readError?.retryable ? 503 : 500,
+      { request_id: requestId },
+    );
   }
-  return NextResponse.json({ items: data ?? [], limit, offset });
 }
