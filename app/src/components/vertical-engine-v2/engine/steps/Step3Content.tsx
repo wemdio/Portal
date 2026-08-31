@@ -6,7 +6,7 @@
  * ChainView/VocabView. Занятость/ошибки джоб выводятся из jobs по stage.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type JSX, type KeyboardEvent } from 'react';
 import { ArrowRight, Copy } from 'lucide-react';
 import type {
   VeChainLanguage,
@@ -56,6 +56,11 @@ const BUYS_CHANNELS_META: Record<'yes' | 'likely' | 'unknown', { label: string; 
 /** На новых данных должность может нести audience_side; на старых поля нет. */
 type JobTitleRow = VeJobTitle & { audience_side?: string };
 type ContentPanel = 'chain' | 'vocab' | 'dossier';
+const CONTENT_PANEL_ORDER: readonly ContentPanel[] = ['chain', 'vocab', 'dossier'];
+
+function normalizeChainLanguage(value: string | null | undefined): VeChainLanguage {
+  return value === 'en' || value === 'pl' ? value : 'ru';
+}
 
 /** Объектные A/B-варианты письма; легаси-строки старого формата отбрасываем. */
 function abVariants(letter: VeChainLetterDto): VeLetterVariant[] {
@@ -132,13 +137,22 @@ export function Step3Content(props: {
 }): JSX.Element {
   const { vertical, chains, vocabs, jobs, onGenerateChain, onGenerateVocab, onGoToBase, dossiers, onBuildDossier } =
     props;
-  const [language, setLanguage] = useState<VeChainLanguage>('ru');
-  const [activePanel, setActivePanel] = useState<ContentPanel>('chain');
 
   const chain = useMemo(
     () => latestByCreatedAt(chains.filter((c) => c.vertical_id === vertical.id)),
     [chains, vertical.id],
   );
+  // Язык селекта следует за выбранной вертикалью/готовой цепочкой, но после
+  // ручного выбора остаётся локальным до прихода новой цепочки. Ключованное
+  // состояние избегает setState-эффекта на каждом родительском polling-рендере.
+  const languageKey = `${vertical.id}:${chain?.id ?? 'new'}:${chain?.language ?? 'none'}`;
+  const [languageState, setLanguageState] = useState<{
+    key: string;
+    value: VeChainLanguage;
+  }>({ key: '', value: 'ru' });
+  const language: VeChainLanguage =
+    languageState.key === languageKey ? languageState.value : normalizeChainLanguage(chain?.language);
+  const [activePanel, setActivePanel] = useState<ContentPanel>('chain');
 
   // A/B-просмотр писем: какая сторона показана по каждому письму (0 = основной/A, 1 = вариант/B).
   // Состояние ключируется цепочкой (id + updated_at): свежие данные с сервера
@@ -192,6 +206,35 @@ export function Step3Content(props: {
     }
     return true;
   }, []);
+
+  const selectContentPanel = useCallback(
+    (nextPanel: ContentPanel, moveFocus = false) => {
+      if (nextPanel !== activePanel && !requestEditorExit('leaveStep')) return;
+      setActivePanel(nextPanel);
+      if (moveFocus) document.getElementById(`ve-content-tab-${nextPanel}`)?.focus();
+    },
+    [activePanel, requestEditorExit],
+  );
+
+  const handleContentTabKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLButtonElement>, currentPanel: ContentPanel) => {
+      const currentIndex = CONTENT_PANEL_ORDER.indexOf(currentPanel);
+      let nextPanel: ContentPanel | null = null;
+      if (event.key === 'ArrowRight') {
+        nextPanel = CONTENT_PANEL_ORDER[(currentIndex + 1) % CONTENT_PANEL_ORDER.length];
+      } else if (event.key === 'ArrowLeft') {
+        nextPanel = CONTENT_PANEL_ORDER[(currentIndex - 1 + CONTENT_PANEL_ORDER.length) % CONTENT_PANEL_ORDER.length];
+      } else if (event.key === 'Home') {
+        nextPanel = CONTENT_PANEL_ORDER[0];
+      } else if (event.key === 'End') {
+        nextPanel = CONTENT_PANEL_ORDER[CONTENT_PANEL_ORDER.length - 1];
+      }
+      if (!nextPanel) return;
+      event.preventDefault();
+      selectContentPanel(nextPanel, true);
+    },
+    [selectContentPanel],
+  );
 
   const letters = chain ? (lettersOverride?.chainKey === chainKey ? lettersOverride.letters : chain.letters) : [];
 
@@ -374,9 +417,9 @@ export function Step3Content(props: {
             role="tab"
             aria-selected={activePanel === item.id}
             aria-controls={`ve-content-panel-${item.id}`}
-            onClick={() => {
-              if (requestEditorExit('leaveStep')) setActivePanel(item.id);
-            }}
+            tabIndex={activePanel === item.id ? 0 : -1}
+            onClick={() => selectContentPanel(item.id)}
+            onKeyDown={(event) => handleContentTabKeyDown(event, item.id)}
             className="ve2-tab shrink-0"
           >
             {item.label}
@@ -402,16 +445,21 @@ export function Step3Content(props: {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <p className="ve2-eb">
+              <h3 className="ve2-eb">
                 01 → Цепочка писем <span className="ve2-st ve2-tg-q">Черновик</span>
-              </p>
+              </h3>
             </div>
             <p className={`mt-1 text-xs ${HE.muted}`}>Мастер-черновик. В рассылку не идёт — основа для шаблона.</p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <select
               value={language}
-              onChange={(e) => setLanguage(e.target.value as VeChainLanguage)}
+              onChange={(e) =>
+                setLanguageState({
+                  key: languageKey,
+                  value: e.target.value as VeChainLanguage,
+                })
+              }
               disabled={chainBusy}
               aria-label="Язык цепочки"
               className="ve2-input h-9 min-h-9 w-auto px-2 text-xs"
@@ -609,7 +657,7 @@ export function Step3Content(props: {
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <p className="ve2-eb">01 → Вокабуляр для сбора базы</p>
+            <h3 className="ve2-eb">01 → Вокабуляр для сбора базы</h3>
             <p className={`mt-1 text-xs ${HE.muted}`}>
               Технический слой: по этим терминам ищем компании и должности в HH/картах/реестрах. В письмах не
               используется.
@@ -636,11 +684,13 @@ export function Step3Content(props: {
 
         {vocab ? (
           <div className="mt-4 grid gap-4 xl:grid-cols-2">
-            <div className="xl:col-span-2">
-              <JobTitlesCard jobTitles={(vocab.job_titles ?? []) as JobTitleRow[]} />
+            <JobTitlesCard jobTitles={(vocab.job_titles ?? []) as JobTitleRow[]} />
+            <div className="ve2-panel px-5 py-4">
+              <CompanyTypesCard companyTypes={vocab.company_types ?? []} />
+              <div className="mt-5 border-t pt-4 ve2-div">
+                <QueriesCard queries={vocab.search_queries ?? []} />
+              </div>
             </div>
-            <CompanyTypesCard companyTypes={vocab.company_types ?? []} />
-            <QueriesCard queries={vocab.search_queries ?? []} />
           </div>
         ) : null}
         {!vocab && !vocabBusy && !vocabFailed ? (
@@ -658,7 +708,7 @@ export function Step3Content(props: {
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <p className="ve2-eb">01 → Досье вертикали</p>
+            <h3 className="ve2-eb">01 → Досье вертикали</h3>
             <p className={`mt-1 text-xs ${HE.muted}`}>
               Размер широкого рыночного среза, активность найма и статистика наших кампаний.
             </p>
@@ -685,10 +735,12 @@ export function Step3Content(props: {
         ) : null}
 
         {dossierReady ? (
-          <div className="mt-4 grid gap-4 lg:grid-cols-3">
+          <div className="mt-4">
             <DossierSegmentCard data={dossierReady} />
-            <DossierSignalsCard data={dossierReady} />
-            <DossierDatasetCard data={dossierReady} />
+            <div className="ve2-panel mt-4 px-5 py-4">
+              <DossierSignalsCard data={dossierReady} />
+              <DossierDatasetCard data={dossierReady} />
+            </div>
           </div>
         ) : null}
         {!dossier && !dossierBusy && !dossierFailed ? (
@@ -847,12 +899,12 @@ function ChainLetterEditor({
 
 /* ─────────────────────────── Карточки досье ─────────────────────────── */
 
-/** Крупная цифра с подписью — «.num»-статистика карточек досье. */
-function DossierNum({ value, caption }: { value: string; caption: string }) {
+/** Крупная цифра с подписью; className включает её в общую hairline stat-line. */
+function DossierNum({ value, caption, className = '' }: { value: string; caption: string; className?: string }) {
   return (
-    <div>
-      <p className="text-[22px] font-semibold tabular-nums text-gray-900">{value}</p>
-      <p className="text-[11px] text-gray-500">{caption}</p>
+    <div className={className}>
+      <p className={className ? 've2-stat-v' : 'text-[22px] font-semibold tabular-nums text-gray-900'}>{value}</p>
+      <p className={className ? 've2-stat-k' : 'text-[11px] text-gray-500'}>{caption}</p>
     </div>
   );
 }
@@ -869,83 +921,84 @@ function DossierSegmentCard({ data }: { data: VeDossierData }) {
   };
   const hasCompanyLevelStats = counters.companies_unique_total != null;
   return (
-    <div className={`${HE.card} p-4`}>
-      <p className={`mb-2 ${HE.secTitle}`}>Сегмент в цифрах</p>
-      <div className="space-y-3">
+    <div>
+      <p className={`mb-2 ${HE.eyebrow}`}>Сегмент в цифрах</p>
+      <div className="ve2-stats">
         {hasCompanyLevelStats ? (
-          <div>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+          <>
+            <DossierNum
+              className="ve2-stat"
+              value={counters.companies_unique_total!.toLocaleString('ru-RU')}
+              caption="уникальных компаний по ИНН"
+            />
+            {counters.companies_with_any_contact != null ? (
               <DossierNum
-                value={counters.companies_unique_total!.toLocaleString('ru-RU')}
-                caption="уникальных компаний по ИНН"
+                className="ve2-stat"
+                value={counters.companies_with_any_contact.toLocaleString('ru-RU')}
+                caption="компаний с email или телефоном"
               />
-              {counters.companies_with_any_contact != null ? (
-                <DossierNum
-                  value={counters.companies_with_any_contact.toLocaleString('ru-RU')}
-                  caption="компаний с email или телефоном"
-                />
-              ) : null}
-              {counters.companies_with_email != null ? (
-                <DossierNum
-                  value={counters.companies_with_email.toLocaleString('ru-RU')}
-                  caption="компаний с email в справочнике"
-                />
-              ) : null}
-              {counters.companies_with_phone != null ? (
-                <DossierNum
-                  value={counters.companies_with_phone.toLocaleString('ru-RU')}
-                  caption="компаний с телефоном в справочнике"
-                />
-              ) : null}
-            </div>
-            {counters.directory_rows_total != null ? (
-              <p className="mt-2 text-[11px] text-gray-500">
-                {counters.directory_rows_total.toLocaleString('ru-RU')} строк до дедупликации в выбранном срезе.
-              </p>
             ) : null}
-            <p className="mt-1 text-[11px] leading-relaxed text-gray-500">
+            {counters.companies_with_email != null ? (
+              <DossierNum
+                className="ve2-stat"
+                value={counters.companies_with_email.toLocaleString('ru-RU')}
+                caption="компаний с email в справочнике"
+              />
+            ) : null}
+            {counters.companies_with_phone != null ? (
+              <DossierNum
+                className="ve2-stat"
+                value={counters.companies_with_phone.toLocaleString('ru-RU')}
+                caption="компаний с телефоном в справочнике"
+              />
+            ) : null}
+          </>
+        ) : counters.companies_total != null ? (
+          <DossierNum
+            className="ve2-stat"
+            value={`~${counters.companies_total.toLocaleString('ru-RU')}`}
+            caption="старый расчёт директории"
+          />
+        ) : null}
+        {counters.hh_vacancies_total != null ? (
+          <DossierNum
+            className="ve2-stat"
+            value={counters.hh_vacancies_total.toLocaleString('ru-RU')}
+            caption="вакансий на hh.ru"
+          />
+        ) : null}
+      </div>
+      <div className="mt-3 max-w-[75ch] space-y-1 text-[11px] leading-relaxed text-gray-500">
+        {hasCompanyLevelStats ? (
+          <>
+            {counters.directory_rows_total != null ? (
+              <p>{counters.directory_rows_total.toLocaleString('ru-RU')} строк до дедупликации в выбранном срезе.</p>
+            ) : null}
+            <p>
               Это широкий срез директории, а не прогноз готовой базы. Email в справочнике ещё не проверены; готовые к
               запуску адреса считаются после сборки и аудита.
             </p>
-            {counters.companies_note ? (
-              <p className="mt-1 text-[11px] text-gray-500">{counters.companies_note}</p>
-            ) : null}
-          </div>
+          </>
         ) : counters.companies_total != null ? (
-          <div>
-            <DossierNum
-              value={`~${counters.companies_total.toLocaleString('ru-RU')}`}
-              caption="старый расчёт директории"
-            />
-            <p className="mt-1 text-[11px] leading-relaxed text-gray-500">
-              Пересоберите досье, чтобы увидеть уникальные компании и указанные каналы связи.
-            </p>
-            {counters.companies_note ? (
-              <p className="mt-1 text-[11px] text-gray-500">{counters.companies_note}</p>
-            ) : null}
-          </div>
+          <p>Пересоберите досье, чтобы увидеть уникальные компании и указанные каналы связи.</p>
         ) : null}
-        {counters.hh_vacancies_total != null ? (
-          <div>
-            <DossierNum value={counters.hh_vacancies_total.toLocaleString('ru-RU')} caption="вакансий на hh.ru" />
-            {counters.hh_vacancies_sample.length > 0 ? (
-              <details className="group mt-1">
-                <summary className="cursor-pointer list-none text-[11px] font-medium text-gray-500 transition hover:text-gray-700 hover:underline">
-                  Примеры вакансий ({counters.hh_vacancies_sample.length})
-                </summary>
-                <ul className="mt-1 space-y-0.5 border-l-2 border-gray-100 pl-2 text-[11px] text-gray-500">
-                  {counters.hh_vacancies_sample.map((title, i) => (
-                    <li key={i}>{title}</li>
-                  ))}
-                </ul>
-              </details>
-            ) : null}
-          </div>
-        ) : null}
-        {interpretation.segment_size_assessment ? (
-          <SegmentSizeBadge value={interpretation.segment_size_assessment} />
-        ) : null}
+        {counters.companies_note ? <p>{counters.companies_note}</p> : null}
       </div>
+      {counters.hh_vacancies_sample.length > 0 ? (
+        <details className="ve2-details group mt-2">
+          <summary>Примеры вакансий ({counters.hh_vacancies_sample.length})</summary>
+          <ul className="space-y-1 pb-3 text-[11px] text-gray-500">
+            {counters.hh_vacancies_sample.map((title, i) => (
+              <li key={i}>{title}</li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+      {interpretation.segment_size_assessment ? (
+        <div className="mt-3">
+          <SegmentSizeBadge value={interpretation.segment_size_assessment} />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -977,14 +1030,14 @@ function DossierSignalsCard({ data }: { data: VeDossierData }) {
   const buysChannels = data.interpretation.buys_sales_channels;
   const buysMeta = buysChannels ? BUYS_CHANNELS_META[buysChannels] : undefined;
   return (
-    <div className={`${HE.card} p-4`}>
-      <p className={`mb-2 ${HE.secTitle}`}>Сигналы боли</p>
+    <div>
+      <p className={`mb-2 ${HE.eyebrow}`}>Сигналы боли</p>
       {signals.length === 0 ? (
         <p className="text-xs text-gray-500">Сигналов не найдено.</p>
       ) : (
-        <ul className="space-y-1.5">
+        <ul>
           {signals.map((s, i) => (
-            <li key={i} className="flex items-baseline justify-between gap-2 text-xs">
+            <li key={i} className="ve2-check-row text-xs">
               <span className="min-w-0 text-gray-600" title={s.source}>
                 {s.label}
               </span>
@@ -1011,8 +1064,8 @@ function DossierSignalsCard({ data }: { data: VeDossierData }) {
 function DossierDatasetCard({ data }: { data: VeDossierData }) {
   const { dataset_stats: ds, interpretation } = data;
   return (
-    <div className={`${HE.card} p-4`}>
-      <p className={`mb-2 ${HE.secTitle}`}>Наши кампании</p>
+    <div className="mt-4 border-t pt-4 ve2-div">
+      <p className={`mb-2 ${HE.eyebrow}`}>Наши кампании</p>
       {ds.reply_pct != null || ds.baseline_pct != null ? (
         <div className="flex flex-wrap gap-6">
           {ds.reply_pct != null ? <DossierNum value={`${ds.reply_pct}%`} caption="reply в вертикали" /> : null}
@@ -1027,7 +1080,7 @@ function DossierDatasetCard({ data }: { data: VeDossierData }) {
       {ds.matched_segments.length > 0 ? (
         <div className="mt-2 flex flex-wrap gap-1">
           {ds.matched_segments.map((seg) => (
-            <span key={seg} className="rounded bg-white px-1.5 py-0.5 text-[11px] text-gray-600 ring-1 ring-gray-200">
+            <span key={seg} className="ve2-tag">
               {seg}
             </span>
           ))}
@@ -1083,26 +1136,22 @@ function CompanyTypesCard({ companyTypes }: { companyTypes: VeCompanyType[] }) {
   }, [companyTypes]);
 
   return (
-    <div className={`${HE.card} p-4`}>
-      <p className={`mb-2 ${HE.secTitle}`}>Типы компаний ({companyTypes.length})</p>
+    <div>
+      <p className={`mb-2 ${HE.eyebrow}`}>Типы компаний ({companyTypes.length})</p>
       {grouped.length === 0 ? (
         <p className="text-xs text-gray-500">Пусто.</p>
       ) : (
-        <div className="space-y-2.5">
+        <div>
           {grouped.map(({ kind, items }) => {
             const meta = KIND_META[kind] ?? KIND_META.synonym;
             return (
-              <div key={kind}>
-                <p className="mb-1">
+              <div key={kind} className="ve2-check-row items-start">
+                <p className="w-28 shrink-0">
                   <Badge tone={meta.tone}>{meta.label}</Badge>
                 </p>
-                <div className="flex flex-wrap gap-1">
+                <div className="flex min-w-0 flex-wrap gap-1.5">
                   {items.map((ct, i) => (
-                    <span
-                      key={`${ct.term}-${i}`}
-                      title={ct.notes}
-                      className="rounded bg-white px-1.5 py-0.5 text-[11px] text-gray-600 ring-1 ring-gray-200"
-                    >
+                    <span key={`${ct.term}-${i}`} title={ct.notes} className="ve2-tag">
                       {ct.term}
                     </span>
                   ))}
@@ -1122,8 +1171,8 @@ function JobTitlesCard({ jobTitles }: { jobTitles: JobTitleRow[] }) {
   const targetRows = hasSide ? jobTitles.filter((jt) => jt.audience_side === 'campaign_target') : [];
 
   return (
-    <div className={`${HE.card} p-4`}>
-      <p className={`mb-2 ${HE.secTitle}`}>Должности ({jobTitles.length})</p>
+    <div className="ve2-panel px-5 py-4">
+      <p className={`mb-2 ${HE.eyebrow}`}>Должности ({jobTitles.length})</p>
       {jobTitles.length === 0 ? (
         <p className="text-xs text-gray-500">Пусто.</p>
       ) : hasSide ? (
@@ -1143,19 +1192,19 @@ function JobTitlesTable({ title, rows }: { title?: string; rows: JobTitleRow[] }
   return (
     <div>
       {title ? <p className="mb-1 text-[11px] font-semibold text-gray-500">{title}</p> : null}
-      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-        <table className="min-w-full divide-y divide-gray-200 text-xs">
-          <thead className="bg-gray-50">
+      <div className="overflow-x-auto">
+        <table className="min-w-full border-collapse text-xs">
+          <thead>
             <tr>
-              <th className="px-2 py-1.5 text-left font-semibold text-gray-500">Должность</th>
-              <th className="px-2 py-1.5 text-left font-semibold text-gray-500">Грейд</th>
-              <th className="px-2 py-1.5 text-left font-semibold text-gray-500">Функция</th>
-              <th className="px-2 py-1.5 text-left font-semibold text-gray-500">Другие названия</th>
+              <th scope="col" className="border-b px-2 py-1.5 text-left font-semibold text-gray-500 ve2-div">Должность</th>
+              <th scope="col" className="border-b px-2 py-1.5 text-left font-semibold text-gray-500 ve2-div">Грейд</th>
+              <th scope="col" className="border-b px-2 py-1.5 text-left font-semibold text-gray-500 ve2-div">Функция</th>
+              <th scope="col" className="border-b px-2 py-1.5 text-left font-semibold text-gray-500 ve2-div">Другие названия</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-200">
+          <tbody>
             {rows.map((jt, i) => (
-              <tr key={`${jt.title}-${i}`}>
+              <tr key={`${jt.title}-${i}`} className="border-b last:border-0 ve2-div">
                 <td className="whitespace-nowrap px-2 py-1.5 align-top font-medium text-gray-900">{jt.title}</td>
                 <td className="px-2 py-1.5 align-top text-gray-600">{jt.seniority || '—'}</td>
                 <td className="px-2 py-1.5 align-top text-gray-600">{jt.function || '—'}</td>
@@ -1194,8 +1243,8 @@ function QueriesCard({ queries }: { queries: VeVocab['search_queries'] }) {
   }, [queries]);
 
   return (
-    <div className={`${HE.card} p-4`}>
-      <p className={`mb-2 ${HE.secTitle}`}>Поисковые запросы ({queries.length})</p>
+    <div>
+      <p className={`mb-2 ${HE.eyebrow}`}>Поисковые запросы ({queries.length})</p>
       {grouped.length === 0 ? (
         <p className="text-xs text-gray-500">Пусто.</p>
       ) : (
@@ -1210,7 +1259,7 @@ function QueriesCard({ queries }: { queries: VeVocab['search_queries'] }) {
                   <code
                     key={qi}
                     title={q.purpose}
-                    className="rounded bg-white px-1.5 py-0.5 font-mono text-[11px] text-gray-700 ring-1 ring-gray-200"
+                    className="ve2-chip font-mono text-[11px]"
                   >
                     {q.query}
                   </code>

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Archive as ArchiveIcon, ExternalLink } from 'lucide-react';
 
 import type { VeProject } from '@/lib/verticalEngineV2/types';
@@ -173,7 +173,7 @@ export function VerticalEngineV2View() {
         setBusyCandidateId(null);
       }
     },
-    [legacyDetail?.project.id, loadArchive, loadCandidates],
+    [legacyDetail, loadArchive, loadCandidates],
   );
 
   const tabs: Array<{ id: Tab; label: string; count?: number }> = [
@@ -191,8 +191,64 @@ export function VerticalEngineV2View() {
       : []),
   ];
 
+  const activateTab = (nextTab: Tab) => {
+    setTab(nextTab);
+    if (nextTab !== 'archive') setLegacyDetail(null);
+  };
+
+  const handleTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+    let nextIndex: number | null = null;
+    if (event.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length;
+    if (event.key === 'ArrowLeft') nextIndex = (index - 1 + tabs.length) % tabs.length;
+    if (event.key === 'Home') nextIndex = 0;
+    if (event.key === 'End') nextIndex = tabs.length - 1;
+    if (nextIndex === null) return;
+
+    event.preventDefault();
+    const nextTab = tabs[nextIndex]?.id;
+    if (!nextTab) return;
+    activateTab(nextTab);
+    document.getElementById(`ve2-root-tab-${nextTab}`)?.focus();
+  };
+
   // Когда открыт проект — мастер в фокусе, хром оболочки не нужен.
   const showChrome = !((tab === 'projects' || tab === 'queue') && projectOpen);
+
+  const activeTabContent = (
+    <>
+      {error ? <ErrorNotice message={error} /> : null}
+
+      {tab === 'projects' || tab === 'queue' ? (
+        <VeEngineWorkspace
+          view={tab === 'queue' ? 'launch-queue' : 'projects'}
+          onProjectOpenChange={setProjectOpen}
+        />
+      ) : null}
+
+      {loading && tab !== 'projects' && tab !== 'queue' ? (
+        <div className="ve2-card ve2-mut p-10 text-center">Загружаем изолированный контур…</div>
+      ) : null}
+
+      {!loading && tab === 'archive' ? (
+        <LegacyArchivePanel
+          projects={archive}
+          detail={legacyDetail}
+          detailLoading={legacyDetailLoading}
+          onSelect={(id) => void openLegacyProject(id)}
+          onBack={() => setLegacyDetail(null)}
+        />
+      ) : null}
+
+      {!loading && tab === 'review' && canManageArchive ? (
+        <LegacyReviewPanel
+          candidates={candidates}
+          busyId={busyCandidateId}
+          onApprove={approveCandidate}
+          onRemove={removeCandidate}
+        />
+      ) : null}
+    </>
+  );
 
   return (
     <main className="ve2 ve2-page min-h-full w-full">
@@ -225,16 +281,17 @@ export function VerticalEngineV2View() {
             </header>
 
             <div className="ve2-tabs mt-6" role="tablist" aria-label="Разделы движка">
-              {tabs.map((item) => (
+              {tabs.map((item, index) => (
                 <button
                   key={item.id}
+                  id={`ve2-root-tab-${item.id}`}
                   type="button"
                   role="tab"
-                  onClick={() => {
-                    setTab(item.id);
-                    if (item.id !== 'archive') setLegacyDetail(null);
-                  }}
+                  onClick={() => activateTab(item.id)}
+                  onKeyDown={(event) => handleTabKeyDown(event, index)}
                   aria-selected={tab === item.id}
+                  aria-controls={`ve2-root-panel-${item.id}`}
+                  tabIndex={tab === item.id ? 0 : -1}
                   className="ve2-tab"
                 >
                   {item.label}
@@ -245,39 +302,25 @@ export function VerticalEngineV2View() {
           </>
         ) : null}
 
-        <div className={`${showChrome && tab !== 'projects' ? 'mt-6' : ''} space-y-5`}>
-          {error ? <ErrorNotice message={error} /> : null}
-
-          {tab === 'projects' || tab === 'queue' ? (
-            <VeEngineWorkspace
-              view={tab === 'queue' ? 'launch-queue' : 'projects'}
-              onProjectOpenChange={setProjectOpen}
-            />
-          ) : null}
-
-          {loading && tab !== 'projects' && tab !== 'queue' ? (
-            <div className="ve2-card ve2-mut p-10 text-center">Загружаем изолированный контур…</div>
-          ) : null}
-
-          {!loading && tab === 'archive' ? (
-            <LegacyArchivePanel
-              projects={archive}
-              detail={legacyDetail}
-              detailLoading={legacyDetailLoading}
-              onSelect={(id) => void openLegacyProject(id)}
-              onBack={() => setLegacyDetail(null)}
-            />
-          ) : null}
-
-          {!loading && tab === 'review' && canManageArchive ? (
-            <LegacyReviewPanel
-              candidates={candidates}
-              busyId={busyCandidateId}
-              onApprove={approveCandidate}
-              onRemove={removeCandidate}
-            />
-          ) : null}
-        </div>
+        {tabs.map((item) => {
+          const active = tab === item.id;
+          return (
+            <div
+              // Активная панель сохраняет один key при переходе Проекты ↔ Очередь
+              // и при скрытии shell chrome. Так VeEngineWorkspace не размонтируется
+              // и не теряет форму создания или открытый ProjectDetail.
+              key={active ? '__active_panel__' : item.id}
+              id={`ve2-root-panel-${item.id}`}
+              role={showChrome ? 'tabpanel' : undefined}
+              aria-labelledby={showChrome ? `ve2-root-tab-${item.id}` : undefined}
+              tabIndex={showChrome ? (active ? 0 : -1) : undefined}
+              hidden={!active}
+              className={`${item.id !== 'projects' ? 'mt-6' : ''} space-y-5`}
+            >
+              {active ? activeTabContent : null}
+            </div>
+          );
+        })}
       </div>
     </main>
   );

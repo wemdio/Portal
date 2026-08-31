@@ -10,7 +10,7 @@
  * Визуал — токены design.ts: рабочая поверхность, статусы и ясные действия.
  */
 
-import { useRef, useState, type JSX } from 'react';
+import { useEffect, useRef, useState, type JSX } from 'react';
 import { Play, RotateCcw } from 'lucide-react';
 import type { VeStage } from '@/lib/verticalEngineV2/types';
 import { Badge, StatusBox } from '../ui';
@@ -101,6 +101,10 @@ export function Step1Research({
   onCasesChanged,
 }: Step1ResearchProps): JSX.Element {
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
+  const restartTriggerRef = useRef<HTMLButtonElement>(null);
+  const restartConfirmRef = useRef<HTMLButtonElement>(null);
+  const runningStatusRef = useRef<HTMLElement>(null);
+  const focusRunningAfterRestartRef = useRef(false);
   const status = project?.status;
   // Эталон стиля: приоритет у пропа, иначе — напрямую из brief проекта
   // (ProjectDetail может не передавать styleValue).
@@ -122,11 +126,34 @@ export function Step1Research({
   const done = !running && status === 'researched';
   const failed = !running && !done && (failedStages.length > 0 || status === 'failed');
 
+  useEffect(() => {
+    if (restartConfirmOpen) restartConfirmRef.current?.focus();
+  }, [restartConfirmOpen]);
+
+  useEffect(() => {
+    if (!running || !focusRunningAfterRestartRef.current) return;
+    focusRunningAfterRestartRef.current = false;
+    runningStatusRef.current?.focus();
+  }, [running]);
+
+  const closeRestartConfirm = () => {
+    setRestartConfirmOpen(false);
+    restartTriggerRef.current?.focus();
+  };
+
   if (running) {
     return (
-      <section className="ve2-panel max-w-[640px] p-6">
+      <section
+        ref={runningStatusRef}
+        role="region"
+        aria-labelledby="ve2-research-running-title"
+        tabIndex={-1}
+        className="ve2-panel max-w-[640px] p-6"
+      >
         <div className="mb-2 flex items-baseline justify-between gap-3">
-          <h2 className={HE.secTitle}>Идёт исследование…</h2>
+          <h2 id="ve2-research-running-title" className={HE.secTitle}>
+            Идёт исследование…
+          </h2>
           <span className="ve2-faint">прогресс обновляется автоматически</span>
         </div>
         <StageChecklist jobs={jobs} running />
@@ -168,7 +195,13 @@ export function Step1Research({
                   К выбору направления
                 </button>
               ) : null}
-              <button type="button" disabled={busy} onClick={() => setRestartConfirmOpen(true)} className="ve2-b-quiet">
+              <button
+                ref={restartTriggerRef}
+                type="button"
+                disabled={busy}
+                onClick={() => setRestartConfirmOpen(true)}
+                className="ve2-b-quiet"
+              >
                 <RotateCcw aria-hidden className="h-3.5 w-3.5" />
                 Перезапустить
               </button>
@@ -176,21 +209,34 @@ export function Step1Research({
           </div>
         </div>
         {restartConfirmOpen ? (
-          <div className="ve2-confirm" role="alertdialog" aria-label="Подтверждение перезапуска">
+          <div
+            className="ve2-confirm"
+            role="alertdialog"
+            aria-label="Подтверждение перезапуска"
+            onKeyDown={(event) => {
+              if (event.key !== 'Escape') return;
+              event.preventDefault();
+              event.stopPropagation();
+              closeRestartConfirm();
+            }}
+          >
             <span className={HE.muted}>
               Перезапустить исследование? Готовые результаты останутся, новые списания начнутся заново.
             </span>
             <button
+              ref={restartConfirmRef}
               type="button"
               className="ve2-btn ve2-b-dan ve2-b-sm"
               onClick={() => {
+                focusRunningAfterRestartRef.current = true;
                 setRestartConfirmOpen(false);
+                restartTriggerRef.current?.focus();
                 onStartResearch();
               }}
             >
               Да, перезапустить
             </button>
-            <button type="button" className="ve2-b-quiet" onClick={() => setRestartConfirmOpen(false)}>
+            <button type="button" className="ve2-b-quiet" onClick={closeRestartConfirm}>
               Отмена
             </button>
           </div>

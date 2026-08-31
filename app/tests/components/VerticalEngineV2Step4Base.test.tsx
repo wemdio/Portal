@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { Step4Base } from '@/components/vertical-engine-v2/engine/steps/Step4Base';
 import type { VeHypothesis, VeVertical } from '@/lib/verticalEngineV2/types';
 import type { VeBaseSummary } from '@/components/vertical-engine-v2/engine/api';
@@ -79,6 +79,58 @@ beforeEach(() => {
 });
 
 describe('<Step4Base /> collection funnel', () => {
+  it('does not duplicate collection polling while the project parent is already polling', () => {
+    jest.useFakeTimers();
+    const onUploaded = jest.fn();
+
+    try {
+      render(
+        <Step4Base
+          projectId="project-vbi"
+          vertical={VERTICAL}
+          hypotheses={[HYPOTHESIS]}
+          bases={[{ ...BASE, status: 'collecting' } as VeBaseSummary]}
+          jobs={[]}
+          parentPollingActive
+          onUploaded={onUploaded}
+          onTemplateStarted={jest.fn()}
+          onGoToTemplate={jest.fn()}
+        />,
+      );
+
+      act(() => jest.advanceTimersByTime(8_000));
+      expect(onUploaded).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('keeps the local collection polling fallback when the parent cannot see an active job', () => {
+    jest.useFakeTimers();
+    const onUploaded = jest.fn();
+
+    try {
+      render(
+        <Step4Base
+          projectId="project-vbi"
+          vertical={VERTICAL}
+          hypotheses={[HYPOTHESIS]}
+          bases={[{ ...BASE, status: 'collecting' } as VeBaseSummary]}
+          jobs={[]}
+          parentPollingActive={false}
+          onUploaded={onUploaded}
+          onTemplateStarted={jest.fn()}
+          onGoToTemplate={jest.fn()}
+        />,
+      );
+
+      act(() => jest.advanceTimersByTime(8_000));
+      expect(onUploaded).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('separates hypothesis population, run cap, processed rows and launchable recipients', () => {
     render(
       <Step4Base

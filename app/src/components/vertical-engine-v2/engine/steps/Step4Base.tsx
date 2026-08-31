@@ -83,11 +83,23 @@ export function Step4Base(props: {
   hypotheses: VeHypothesis[];
   bases: VeBaseSummary[];
   jobs: VeJobSummary[];
+  /** Родитель уже обновляет project detail, локальный interval тогда не нужен. */
+  parentPollingActive?: boolean;
   onUploaded: () => void;
   onTemplateStarted: () => void;
   onGoToTemplate: () => void;
 }): JSX.Element {
-  const { projectId, vertical, hypotheses, bases, jobs, onUploaded, onTemplateStarted, onGoToTemplate } = props;
+  const {
+    projectId,
+    vertical,
+    hypotheses,
+    bases,
+    jobs,
+    parentPollingActive = false,
+    onUploaded,
+    onTemplateStarted,
+    onGoToTemplate,
+  } = props;
 
   const [baseMode, setBaseMode] = useState<BaseMode>('auto');
   const [parsed, setParsed] = useState<ParsedFile | null>(null);
@@ -366,10 +378,10 @@ export function Step4Base(props: {
   // обновляется. Когда сборка кончается, base_analyze поднимает джобу и
   // родительский поллинг подхватывает analyzing → analyzed.
   useEffect(() => {
-    if (!collectingBase) return;
+    if (!collectingBase || parentPollingActive) return;
     const timer = setInterval(() => onUploaded(), COLLECT_POLL_MS);
     return () => clearInterval(timer);
-  }, [collectingBase, onUploaded]);
+  }, [collectingBase, onUploaded, parentPollingActive]);
 
   const handleBuildTemplate = useCallback(async () => {
     if (!latestBase || templateBusy) return;

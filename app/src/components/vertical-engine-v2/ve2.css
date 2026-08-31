@@ -25,10 +25,12 @@
   --ve2-faint: oklch(0.51 0.01 250);
   --ve2-line: oklch(0.905 0.004 250);
   --ve2-line-strong: oklch(0.845 0.006 250);
+  --ve2-input-line: oklch(0.62 0.006 250);
   --ve2-ok: oklch(0.5 0.12 145);
-  --ve2-warn: oklch(0.56 0.11 70);
+  --ve2-warn: oklch(0.54 0.11 70);
   --ve2-err: oklch(0.54 0.18 25);
   --ve2-q: oklch(0.51 0.01 250);
+  --ve2-accent: var(--ve2-fg);
   --ve2-body:
     var(--ve2-font-body), Inter, ui-sans-serif, system-ui, -apple-system,
     "Segoe UI", sans-serif;
@@ -36,9 +38,7 @@
     var(--ve2-font-mono), "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo,
     Consolas, monospace;
   --ve2-ease: cubic-bezier(0.16, 1, 0.3, 1);
-  --ve2-ring:
-    0 0 0 2px color-mix(in oklab, var(--ve2-fg) 30%, transparent),
-    0 0 0 4px var(--ve2-bg);
+  --ve2-ring: 0 0 0 4px var(--ve2-bg);
   color-scheme: light;
   background: var(--ve2-bg);
   color: var(--ve2-fg);
@@ -53,9 +53,10 @@ html[data-portal-theme="dark"] .ve2 {
   --ve2-active: #1f2023;
   --ve2-fg: #fafafa;
   --ve2-mute: #a1a1a3;
-  --ve2-faint: #6c6c70;
+  --ve2-faint: #88888d;
   --ve2-line: #1f2023;
   --ve2-line-strong: #2a2b2f;
+  --ve2-input-line: #686a70;
   --ve2-ok: #46a758;
   --ve2-warn: #f5a623;
   --ve2-err: #e5484d;
@@ -73,12 +74,17 @@ html[data-portal-theme="dark"] .ve2 {
   background: color-mix(in oklab, var(--ve2-fg) 24%, transparent);
 }
 
-/* Единый focus-сигнал страницы: нейтральное кольцо вместо синих ring-400.
-   !important нужен ровно один раз — чтобы перекрыть Tailwind ring-утилиты,
-   оставшиеся в непереписанных узлах шагов. */
+/* Сплошной двухпиксельный outline остаётся видимым без box-shadow и в
+   forced-colors. Тихая внешняя дорожка отделяет его от соседнего текста. */
 .ve2 :focus-visible {
-  outline: none !important;
+  outline: 2px solid var(--ve2-fg) !important;
+  outline-offset: 2px;
   box-shadow: var(--ve2-ring) !important;
+}
+.ve2-rows > :focus-visible,
+.ve2-tab:focus-visible,
+.ve2-mini-seg button:focus-visible {
+  outline-offset: -3px;
 }
 
 /* ── Типографика ────────────────────────────────────────────────────────── */
@@ -354,7 +360,7 @@ html[data-portal-theme="dark"] .ve2 {
   min-height: 36px;
   width: 100%;
   background: var(--ve2-surface);
-  border: 1px solid var(--ve2-line-strong);
+  border: 1px solid var(--ve2-input-line);
   border-radius: 6px;
   padding: 8px 12px;
   font-size: 13px;
@@ -364,8 +370,7 @@ html[data-portal-theme="dark"] .ve2 {
 .ve2-input::placeholder {
   color: var(--ve2-faint);
 }
-.ve2-input:focus {
-  outline: none;
+.ve2-input:focus-visible {
   border-color: var(--ve2-fg);
 }
 .ve2-input:disabled {
@@ -374,7 +379,19 @@ html[data-portal-theme="dark"] .ve2 {
   border-color: var(--ve2-line);
 }
 .ve2-cbx {
-  accent-color: var(--ve2-fg);
+  accent-color: var(--ve2-accent);
+  flex: none;
+}
+.ve2 input[type="checkbox"],
+.ve2 input[type="radio"] {
+  accent-color: var(--ve2-accent);
+}
+.ve2-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ve2-fg);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 /* ── Табы: один паттерн на всю страницу ────────────────────────────────── */
@@ -502,6 +519,40 @@ html[data-portal-theme="dark"] .ve2 {
 .ve2-row:hover {
   background: var(--ve2-elev);
 }
+.ve2-row-static {
+  cursor: default;
+}
+.ve2-row-static:hover {
+  background: none;
+}
+.ve2-row-stack {
+  display: block;
+}
+.ve2-row-detail {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ve2-line);
+}
+.ve2-compact-row {
+  display: flex;
+  align-items: baseline;
+  min-height: 30px;
+  padding: 6px 0;
+  border-top: 1px solid var(--ve2-line);
+  font-size: 12px;
+}
+.ve2-compact-row:first-child {
+  border-top: 0;
+}
+.ve2-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.ve2-touch-target {
+  display: inline-flex;
+  align-items: center;
+}
 
 /* ── StepNav ────────────────────────────────────────────────────────────── */
 .ve2-sn {
@@ -593,6 +644,7 @@ html[data-portal-theme="dark"] .ve2 {
 .ve2-op {
   font-family: var(--ve2-mono);
   font-size: 0.92em;
+  color: var(--ve2-fg);
   background: var(--ve2-elev);
   border: 1px solid var(--ve2-line);
   border-radius: 4px;
@@ -1016,18 +1068,45 @@ html[data-portal-theme="dark"] .ve2 {
     border-bottom: 1px solid var(--ve2-line);
   }
 }
-@media (pointer: coarse) {
+@media (max-width: 640px), (any-pointer: coarse) {
   .ve2-btn,
-  .ve2-b-sm {
+  .ve2-b-sm,
+  .ve2-b-quiet,
+  .ve2-input,
+  .ve2-row,
+  .ve2-sn,
+  .ve2-src,
+  .ve2-details > summary,
+  .ve2-touch-target {
     min-height: 44px;
   }
   .ve2-chip {
-    padding-top: 11px;
-    padding-bottom: 11px;
+    min-height: 44px;
   }
   .ve2-tab {
-    padding-top: 14px;
-    padding-bottom: 14px;
+    min-height: 44px;
+  }
+  .ve2-mini-seg button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .ve2-choice {
+    min-height: 44px;
+    align-items: center;
+  }
+  .ve2 label:has(input[type="checkbox"]),
+  .ve2 label:has(input[type="radio"]) {
+    min-height: 44px;
+  }
+  .ve2-cbx {
+    width: 20px;
+    height: 20px;
+  }
+}
+@media (forced-colors: active) {
+  .ve2 :focus-visible {
+    outline-color: Highlight !important;
+    box-shadow: none !important;
   }
 }
 @media (prefers-reduced-motion: reduce) {

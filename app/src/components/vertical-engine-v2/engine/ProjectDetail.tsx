@@ -252,7 +252,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
     4: selectedBases.length > 0,
     5: Boolean(selectedTemplate),
   };
-  // «Locked» — лишь визуальное приглушение: клик по шагу всегда разрешён.
+  // Locked-шаги недоступны в StepNav, пока не выполнено их условие открытия.
   const isStepLocked = (id: number): boolean => {
     if (id === 1) return false;
     if (id === 2) return !researchDone;
@@ -553,6 +553,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             hypotheses={hypotheses}
             bases={selectedBases}
             jobs={jobs}
+            parentPollingActive={hasActiveJobs}
             onUploaded={() => void load({ silent: true })}
             onTemplateStarted={handleTemplateStarted}
             onGoToTemplate={() => jumpTo(5)}

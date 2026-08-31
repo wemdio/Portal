@@ -13,7 +13,7 @@
  * Визуал — токены design.ts: без иконок, статусы точками, один синий акцент.
  */
 
-import { useMemo, useState, type JSX } from 'react';
+import { useEffect, useMemo, useRef, useState, type JSX } from 'react';
 import type {
   VeHypothesis,
   VeHypothesisTier,
@@ -690,6 +690,20 @@ function HypothesisItem({
   const rejected = hypothesis.status === 'rejected';
   const accepted = hypothesis.status === 'accepted';
   const fitRationale = fitRationaleOf(hypothesis);
+  const returnButtonRef = useRef<HTMLButtonElement>(null);
+  const acceptButtonRef = useRef<HTMLButtonElement>(null);
+  const focusForStatusRef = useRef<HypothesisPatchStatus | null>(null);
+
+  useEffect(() => {
+    if (focusForStatusRef.current !== hypothesis.status) return;
+    focusForStatusRef.current = null;
+    (hypothesis.status === 'proposed' ? acceptButtonRef.current : returnButtonRef.current)?.focus();
+  }, [hypothesis.status]);
+
+  const patchAndRestoreFocus = (status: HypothesisPatchStatus) => {
+    focusForStatusRef.current = status;
+    onPatch(hypothesis.id, status);
+  };
 
   return (
     <li
@@ -750,7 +764,12 @@ function HypothesisItem({
               <StatusDot tone="ok" />
               Принята
             </span>
-            <button type="button" onClick={() => onPatch(hypothesis.id, 'proposed')} className={HE.btnQuiet}>
+            <button
+              ref={returnButtonRef}
+              type="button"
+              onClick={() => patchAndRestoreFocus('proposed')}
+              className={HE.btnQuiet}
+            >
               Вернуть
             </button>
           </>
@@ -760,16 +779,26 @@ function HypothesisItem({
               <StatusDot tone="muted" />
               Отклонена
             </span>
-            <button type="button" onClick={() => onPatch(hypothesis.id, 'proposed')} className={HE.btnQuiet}>
+            <button
+              ref={returnButtonRef}
+              type="button"
+              onClick={() => patchAndRestoreFocus('proposed')}
+              className={HE.btnQuiet}
+            >
               Вернуть
             </button>
           </>
         ) : (
           <>
-            <button type="button" onClick={() => onPatch(hypothesis.id, 'accepted')} className={HE.btnQuiet}>
+            <button
+              ref={acceptButtonRef}
+              type="button"
+              onClick={() => patchAndRestoreFocus('accepted')}
+              className={HE.btnQuiet}
+            >
               Принять
             </button>
-            <button type="button" onClick={() => onPatch(hypothesis.id, 'rejected')} className="ve2-b-quiet ve2-b-dan">
+            <button type="button" onClick={() => patchAndRestoreFocus('rejected')} className="ve2-b-quiet ve2-b-dan">
               Отклонить
             </button>
           </>

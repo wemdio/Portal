@@ -167,68 +167,73 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
   const segmentsClassified = hasVariants && (sample?.segments ?? null) !== null;
 
   return (
-    <details className={HE.card} onToggle={(e) => handleToggle(e.currentTarget.open)}>
-      <summary className={`${HE.btnQuiet} w-full cursor-pointer select-none px-4 py-3`}>
-        Превью по лидам — письма глазами конкретных лидов из базы
+    <details className="ve2-panel-line" onToggle={(e) => handleToggle(e.currentTarget.open)}>
+      <summary className={`${HE.btnQuiet} min-h-11 w-full cursor-pointer select-none px-5 py-3`}>
+        Превью по лидам: письма глазами конкретных лидов из базы
         <Badge tone="amber">новое</Badge>
       </summary>
-      <div className="border-t border-gray-100 px-4 py-3">
+      <div className="border-t border-gray-100 px-5 py-3">
         {state === 'loading' || state === 'idle' ? (
           <p className="text-xs text-gray-500">Загружаем строки базы…</p>
         ) : null}
         {state === 'error' ? (
           <p className="text-xs text-gray-500">
-            Не удалось загрузить строки базы — превью недоступно. Закройте и откройте блок, чтобы повторить.
+            Не удалось загрузить строки базы. Закройте и откройте блок, чтобы повторить.
           </p>
         ) : null}
         {preview && preview.rows.length === 0 ? (
           <p className="text-xs text-gray-500">В базе нет строк для превью.</p>
         ) : null}
         {preview && preview.rows.length > 0 && sample ? (
-          <div className="space-y-3">
-            {preview.rows.map((leadRow, leadIdx) => {
-              const unresolved = dedupOperatorNames(leadRow.letters.flatMap((l) => l.unresolved));
-              const emptyVars = dedupOperatorNames(leadRow.letters.flatMap((l) => l.emptyVars));
-              return (
-                <div key={leadIdx} className="rounded-lg border border-gray-200 bg-white p-3">
-                  <p className="mb-2 text-xs font-semibold text-gray-700">{leadRow.rowLabel}</p>
-                  <div className="space-y-2">
-                    {leadRow.letters.map((letter, letterIdx) => (
-                      <div key={letterIdx} className="rounded-md border border-gray-100 bg-gray-50/60 px-3 py-2">
-                        <p className="text-xs font-semibold text-gray-800">
-                          Письмо {letterIdx + 1}
-                          {letter.wait_days > 0 ? (
-                            <span className="ml-1 font-normal text-gray-500">через {letter.wait_days} дн.</span>
-                          ) : null}
-                          {letter.subject ? (
-                            <>
-                              {' — '}
-                              <PreviewTokens tokens={letter.subjectTokens} />
-                            </>
-                          ) : null}
-                        </p>
-                        <PreviewTokens
-                          tokens={letter.bodyTokens}
-                          plainText={letter.body}
-                          className="mt-1 block whitespace-pre-wrap text-xs leading-relaxed text-gray-600"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                  {unresolved.length > 0 ? (
-                    <p className="mt-2 text-[11px] text-red-500">
-                      Не подставлено: {unresolved.map((u) => `{{${u}}}`).join(', ')}
-                    </p>
-                  ) : null}
-                  {emptyVars.length > 0 ? (
-                    <p className="mt-1 text-[11px] text-gray-500">
-                      Пустые значения у этого лида: {emptyVars.map((u) => `{{${u}}}`).join(', ')} — в письме будет
-                      пустая строка
-                    </p>
-                  ) : null}
-                </div>
-              );
-            })}
+          <div>
+            <ol className="ve2-letter-sheet">
+              {preview.rows.map((leadRow, leadIdx) => {
+                const unresolved = dedupOperatorNames(leadRow.letters.flatMap((l) => l.unresolved));
+                const emptyVars = dedupOperatorNames(leadRow.letters.flatMap((l) => l.emptyVars));
+                return (
+                  <li key={leadIdx} className="ve2-letter">
+                    <p className="ve2-eb">{leadRow.rowLabel}</p>
+                    <div className="mt-2">
+                      {leadRow.letters.map((letter, letterIdx) => (
+                        <div
+                          key={letterIdx}
+                          className={letterIdx > 0 ? 'mt-3 border-t border-gray-100 pt-3' : undefined}
+                        >
+                          <p className="text-xs font-semibold text-gray-800">
+                            Письмо {letterIdx + 1}
+                            {letter.wait_days > 0 ? (
+                              <span className="ml-1 font-normal text-gray-500">через {letter.wait_days} дн.</span>
+                            ) : null}
+                            {letter.subject ? (
+                              <>
+                                {': '}
+                                <PreviewTokens tokens={letter.subjectTokens} />
+                              </>
+                            ) : null}
+                          </p>
+                          <PreviewTokens
+                            tokens={letter.bodyTokens}
+                            plainText={letter.body}
+                            className="mt-1 block whitespace-pre-wrap text-xs leading-relaxed text-gray-600"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                    {unresolved.length > 0 ? (
+                      <p className="mt-2 text-[11px] text-red-500">
+                        Не подставлено: {unresolved.map((u) => `{{${u}}}`).join(', ')}
+                      </p>
+                    ) : null}
+                    {emptyVars.length > 0 ? (
+                      <p className="mt-1 text-[11px] text-gray-500">
+                        Пустые значения у этого лида: {emptyVars.map((u) => `{{${u}}}`).join(', ')}. В письме будет
+                        пустая строка.
+                      </p>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ol>
             {hasVariants ? (
               <p className="text-[11px] text-gray-500">
                 {segmentsClassified
