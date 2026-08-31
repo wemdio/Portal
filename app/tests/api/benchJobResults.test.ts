@@ -20,7 +20,7 @@ const KEY = {
 };
 
 let mockDb: MockSupabaseClient;
-const logBenchRequest = jest.fn(async () => {});
+const logBenchRequest = jest.fn(async (_entry: unknown) => {});
 
 jest.mock('@/lib/bench/auth', () => {
   const actual = jest.requireActual('@/lib/bench/auth');
@@ -31,7 +31,7 @@ jest.mock('@/lib/bench/auth', () => {
 });
 jest.mock('@/lib/bench/limits', () => ({ checkBenchLimits: jest.fn(async () => null) }));
 jest.mock('@/lib/bench/journal', () => ({
-  logBenchRequest: (entry: unknown) => logBenchRequest(entry as never),
+  logBenchRequest: (entry: unknown) => logBenchRequest(entry),
 }));
 
 import { GET } from '@/app/api/bench/v1/jobs/[id]/results/route';
