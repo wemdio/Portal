@@ -8,12 +8,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useState, type JSX } from 'react';
-import { Copy, Download, Rocket, Sparkles } from 'lucide-react';
-import type {
-  VeRuSeasonalityPrioritySnapshot,
-  VeRuSeasonalityState,
-  VeTemplate,
-} from '@/lib/verticalEngineV2/types';
+import { ChevronRight, Copy, Download, Rocket, Sparkles } from 'lucide-react';
+import type { VeRuSeasonalityPrioritySnapshot, VeRuSeasonalityState, VeTemplate } from '@/lib/verticalEngineV2/types';
 import { renderTemplatePreview, type VePreviewToken } from '@/lib/verticalEngineV2/renderPreview';
 import {
   VE_LAUNCH_MAX_LEADS,
@@ -32,7 +28,8 @@ import {
   type SegmentationAuditController,
 } from './SegmentationAuditPanel';
 
-const TH_CLASS = 'px-3 py-2 text-left text-[11px] font-semibold uppercase text-gray-500';
+const TH_CLASS =
+  'border-b border-gray-200 py-2 pr-3 text-left font-mono text-[11px] font-medium tracking-[0.02em] text-gray-500';
 
 function templateToText(t: VeTemplate): string {
   const parts: string[] = [`ФИКСИРОВАННЫЙ БЛОК (85%):\n${t.fixed_block}`];
@@ -100,11 +97,7 @@ function PreviewTokens({
         {t.text}
       </mark>
     ) : t.kind === 'fallback' ? (
-      <mark
-        key={i}
-        title="Запасной текст: колонки нет"
-        className="ve2-op ve2-op-fb"
-      >
+      <mark key={i} title="Запасной текст: колонки нет" className="ve2-op ve2-op-fb">
         {t.text}
       </mark>
     ) : t.kind === 'unresolved' ? (
@@ -137,10 +130,7 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
     segments: Array<string | null> | null;
   } | null>(null);
 
-  const mapping = useMemo(
-    () => template.personalization_plan?.operator_mapping ?? [],
-    [template],
-  );
+  const mapping = useMemo(() => template.personalization_plan?.operator_mapping ?? [], [template]);
 
   const handleToggle = (open: boolean) => {
     if (!open || (state !== 'idle' && state !== 'error')) return;
@@ -177,48 +167,46 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
   const segmentsClassified = hasVariants && (sample?.segments ?? null) !== null;
 
   return (
-    <details className={HE.card} onToggle={(e) => handleToggle(e.currentTarget.open)}>
-      <summary className={`${HE.btnQuiet} w-full cursor-pointer select-none px-4 py-3`}>
-        Превью по лидам — письма глазами конкретных лидов из базы
+    <details className="ve2-panel-line" onToggle={(e) => handleToggle(e.currentTarget.open)}>
+      <summary className={`${HE.btnQuiet} min-h-11 w-full cursor-pointer select-none px-5 py-3`}>
+        Превью по лидам: письма глазами конкретных лидов из базы
         <Badge tone="amber">новое</Badge>
       </summary>
-      <div className="border-t border-gray-100 px-4 py-3">
+      <div className="border-t border-gray-100 px-5 py-3">
         {state === 'loading' || state === 'idle' ? (
           <p className="text-xs text-gray-500">Загружаем строки базы…</p>
         ) : null}
         {state === 'error' ? (
           <p className="text-xs text-gray-500">
-            Не удалось загрузить строки базы — превью недоступно. Закройте и откройте блок, чтобы
-            повторить.
+            Не удалось загрузить строки базы. Закройте и откройте блок, чтобы повторить.
           </p>
         ) : null}
         {preview && preview.rows.length === 0 ? (
           <p className="text-xs text-gray-500">В базе нет строк для превью.</p>
         ) : null}
         {preview && preview.rows.length > 0 && sample ? (
-          <div className="space-y-3">
-            {preview.rows.map((leadRow, leadIdx) => {
-              const unresolved = dedupOperatorNames(leadRow.letters.flatMap((l) => l.unresolved));
-              const emptyVars = dedupOperatorNames(leadRow.letters.flatMap((l) => l.emptyVars));
-              return (
-                <div key={leadIdx} className="rounded-lg border border-gray-200 bg-white p-3">
-                  <p className="mb-2 text-xs font-semibold text-gray-700">{leadRow.rowLabel}</p>
-                  <div className="space-y-2">
-                    {leadRow.letters.map((letter, letterIdx) => (
+          <div>
+            <ol className="ve2-letter-sheet">
+              {preview.rows.map((leadRow, leadIdx) => {
+                const unresolved = dedupOperatorNames(leadRow.letters.flatMap((l) => l.unresolved));
+                const emptyVars = dedupOperatorNames(leadRow.letters.flatMap((l) => l.emptyVars));
+                return (
+                  <li key={leadIdx} className="ve2-letter">
+                    <p className="ve2-eb">{leadRow.rowLabel}</p>
+                    <div className="mt-2">
+                      {leadRow.letters.map((letter, letterIdx) => (
                         <div
                           key={letterIdx}
-                          className="rounded-md border border-gray-100 bg-gray-50/60 px-3 py-2"
+                          className={letterIdx > 0 ? 'mt-3 border-t border-gray-100 pt-3' : undefined}
                         >
                           <p className="text-xs font-semibold text-gray-800">
                             Письмо {letterIdx + 1}
                             {letter.wait_days > 0 ? (
-                              <span className="ml-1 font-normal text-gray-500">
-                                через {letter.wait_days} дн.
-                              </span>
+                              <span className="ml-1 font-normal text-gray-500">через {letter.wait_days} дн.</span>
                             ) : null}
                             {letter.subject ? (
                               <>
-                                {' — '}
+                                {': '}
                                 <PreviewTokens tokens={letter.subjectTokens} />
                               </>
                             ) : null}
@@ -230,21 +218,22 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
                           />
                         </div>
                       ))}
-                  </div>
-                  {unresolved.length > 0 ? (
-                    <p className="mt-2 text-[11px] text-red-500">
-                      Не подставлено: {unresolved.map((u) => `{{${u}}}`).join(', ')}
-                    </p>
-                  ) : null}
-                  {emptyVars.length > 0 ? (
-                    <p className="mt-1 text-[11px] text-gray-500">
-                      Пустые значения у этого лида: {emptyVars.map((u) => `{{${u}}}`).join(', ')} —
-                      в письме будет пустая строка
-                    </p>
-                  ) : null}
-                </div>
-              );
-            })}
+                    </div>
+                    {unresolved.length > 0 ? (
+                      <p className="mt-2 text-[11px] text-red-500">
+                        Не подставлено: {unresolved.map((u) => `{{${u}}}`).join(', ')}
+                      </p>
+                    ) : null}
+                    {emptyVars.length > 0 ? (
+                      <p className="mt-1 text-[11px] text-gray-500">
+                        Пустые значения у этого лида: {emptyVars.map((u) => `{{${u}}}`).join(', ')}. В письме будет
+                        пустая строка.
+                      </p>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ol>
             {hasVariants ? (
               <p className="text-[11px] text-gray-500">
                 {segmentsClassified
@@ -282,9 +271,7 @@ function useTemplateLaunch(
   template: VeTemplate | null,
   onSegmentationRejected: (phase: 'stale' | 'incomplete' | 'refresh') => void,
 ) {
-  const templateLaunch = parseLaunchInfo(
-    (template as { launch_info?: unknown } | null)?.launch_info,
-  );
+  const templateLaunch = parseLaunchInfo((template as { launch_info?: unknown } | null)?.launch_info);
   const reconciliationRequired = templateLaunch?.reconciliation_required === true;
   const [recorded, setRecorded] = useState<VeTemplateLaunchInfo | null>(() =>
     reconciliationRequired ? null : templateLaunch,
@@ -302,9 +289,7 @@ function useTemplateLaunch(
     setFormOpen(true);
     setSubmitError(null);
     if (presets !== null) return;
-    void Promise.resolve(
-      veEngineCall<VeLaunchPresetsResponse>(`${VE_API}/templates/${template.id}/launch`),
-    )
+    void Promise.resolve(veEngineCall<VeLaunchPresetsResponse>(`${VE_API}/templates/${template.id}/launch`))
       .then((response) => {
         if (!response?.ok) {
           setLoadError(response?.data?.error ?? 'Не удалось загрузить пресеты');
@@ -321,42 +306,42 @@ function useTemplateLaunch(
       });
   }, [presets, template]);
 
-  const submit = useCallback((segmentationAuditId: string) => {
-    if (!template || !presetId || !segmentationAuditId || submitting) return;
-    setSubmitting(true);
-    setSubmitError(null);
-    veEnginePost<VeLaunchResponse>(`${VE_API}/templates/${template.id}/launch`, {
-      preset_id: presetId,
-      segmentation_audit_id: segmentationAuditId,
-      confirm_segmentation: true,
-    })
-      .then(({ ok, data }) => {
-        if (
-          data.code === 'TEMPLATE_LAUNCH_UNCERTAIN' ||
-          data.code === 'TEMPLATE_LAUNCH_IN_PROGRESS'
-        ) {
-          onSegmentationRejected('refresh');
-          return;
-        }
-        if (!ok || !data.launch) {
-          if (data.code === 'SEGMENTATION_AUDIT_STALE') {
-            onSegmentationRejected('stale');
-            return;
-          }
-          if (data.code === 'SEGMENTATION_AUDIT_INCOMPLETE') {
-            onSegmentationRejected('incomplete');
-            return;
-          }
-          setSubmitError(data.error ?? 'Не удалось отправить в запуск');
-          return;
-        }
-        setRecorded(data.launch);
-        setWarnings(data.warnings ?? []);
-        setFormOpen(false);
+  const submit = useCallback(
+    (segmentationAuditId: string) => {
+      if (!template || !presetId || !segmentationAuditId || submitting) return;
+      setSubmitting(true);
+      setSubmitError(null);
+      veEnginePost<VeLaunchResponse>(`${VE_API}/templates/${template.id}/launch`, {
+        preset_id: presetId,
+        segmentation_audit_id: segmentationAuditId,
+        confirm_segmentation: true,
       })
-      .catch(() => setSubmitError('Не удалось отправить в запуск'))
-      .finally(() => setSubmitting(false));
-  }, [onSegmentationRejected, template, presetId, submitting]);
+        .then(({ ok, data }) => {
+          if (data.code === 'TEMPLATE_LAUNCH_UNCERTAIN' || data.code === 'TEMPLATE_LAUNCH_IN_PROGRESS') {
+            onSegmentationRejected('refresh');
+            return;
+          }
+          if (!ok || !data.launch) {
+            if (data.code === 'SEGMENTATION_AUDIT_STALE') {
+              onSegmentationRejected('stale');
+              return;
+            }
+            if (data.code === 'SEGMENTATION_AUDIT_INCOMPLETE') {
+              onSegmentationRejected('incomplete');
+              return;
+            }
+            setSubmitError(data.error ?? 'Не удалось отправить в запуск');
+            return;
+          }
+          setRecorded(data.launch);
+          setWarnings(data.warnings ?? []);
+          setFormOpen(false);
+        })
+        .catch(() => setSubmitError('Не удалось отправить в запуск'))
+        .finally(() => setSubmitting(false));
+    },
+    [onSegmentationRejected, template, presetId, submitting],
+  );
 
   return {
     recorded,
@@ -440,9 +425,7 @@ function readTemplateLaunchPortfolio(template: VeTemplate | null): TemplateLaunc
     status: typeof value.status === 'string' ? value.status : 'prepared',
     mode: value.mode === 'advisory' ? 'advisory' : 'enforced',
     plan_version:
-      typeof value.plan_version === 'number' && Number.isInteger(value.plan_version)
-        ? value.plan_version
-        : null,
+      typeof value.plan_version === 'number' && Number.isInteger(value.plan_version) ? value.plan_version : null,
     priority_snapshot: priority as unknown as VeRuSeasonalityPrioritySnapshot,
     capacity: {
       max_active_bundles: capacityRecord.max_active_bundles,
@@ -469,14 +452,12 @@ function PreparedLaunchPortfolio({
   const seasonalState = portfolio.priority_snapshot.state;
   const seasonallyEligible =
     portfolio.mode === 'advisory' || seasonalState === 'launch_now' || seasonalState === 'neutral';
-  const slotAvailable =
-    portfolio.capacity.active_bundles < portfolio.capacity.max_active_bundles;
+  const slotAvailable = portfolio.capacity.active_bundles < portfolio.capacity.max_active_bundles;
   const hasCurrentPlan = portfolio.plan_version !== null;
   const isQueued = portfolio.status === 'queued';
   const lifecycleMessage = isQueued
     ? null
-    : NON_QUEUED_LIFECYCLE_MESSAGE[portfolio.status]
-      ?? 'Текущий статус запуска не допускает активацию';
+    : (NON_QUEUED_LIFECYCLE_MESSAGE[portfolio.status] ?? 'Текущий статус запуска не допускает активацию');
   // Capacity in the queue response is a read snapshot. The backend activation
   // preflight re-reads Instantly and can safely release a Completed holder.
   const canActivate = isQueued && seasonallyEligible && hasCurrentPlan;
@@ -512,10 +493,7 @@ function PreparedLaunchPortfolio({
 
   return (
     <div className="space-y-3">
-      <section
-        aria-label="Подготовка PAUSED-кампаний"
-        className={`px-4 py-3 ${HE.successPanel}`}
-      >
+      <section aria-label="Подготовка PAUSED-кампаний" className={`px-4 py-3 ${HE.successPanel}`}>
         <p className="flex items-center gap-2 text-sm font-medium text-emerald-800">
           <StatusDot tone="ok" />
           PAUSED-кампании подготовлены.{' '}
@@ -541,12 +519,7 @@ function PreparedLaunchPortfolio({
           <ul className="mt-1.5 space-y-0.5 text-xs text-emerald-700">
             {campaigns.map((campaign) => (
               <li key={campaign.campaign_id}>
-                <a
-                  href={campaign.campaign_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="underline"
-                >
+                <a href={campaign.campaign_url} target="_blank" rel="noreferrer" className="underline">
                   {campaign.segment ?? 'Основная (дефолтный текст)'}
                 </a>
                 <span> · {campaign.leads_count.toLocaleString('ru-RU')} лидов</span>
@@ -561,10 +534,7 @@ function PreparedLaunchPortfolio({
         ))}
       </section>
 
-      <section
-        aria-label="Активация отправки"
-        className="rounded-lg border border-gray-200 bg-gray-50/70 px-4 py-3"
-      >
+      <section aria-label="Активация отправки" className="rounded-lg border border-gray-200 bg-gray-50/70 px-4 py-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <p className={HE.eyebrow}>Активация отправки</p>
@@ -573,8 +543,7 @@ function PreparedLaunchPortfolio({
             </div>
           </div>
           <span className={HE.faint}>
-            Sending slot: {portfolio.capacity.active_bundles} из{' '}
-            {portfolio.capacity.max_active_bundles}
+            Sending slot: {portfolio.capacity.active_bundles} из {portfolio.capacity.max_active_bundles}
           </span>
         </div>
 
@@ -583,15 +552,13 @@ function PreparedLaunchPortfolio({
         ) : !seasonallyEligible ? (
           <p className="mt-3 text-sm text-amber-700">Требуется проверка сезонного решения.</p>
         ) : !hasCurrentPlan ? (
-          <p className="mt-3 text-sm text-amber-700">
-            План очереди нужно обновить перед активацией.
-          </p>
+          <p className="mt-3 text-sm text-amber-700">План очереди нужно обновить перед активацией.</p>
         ) : (
           <>
             {!slotAvailable ? (
               <p className="mt-3 text-sm text-amber-700">
-                По последнему снимку sending slot занят. При активации backend обновит live-статус
-                и безопасно освободит holder, если кампания уже Completed.
+                По последнему снимку sending slot занят. При активации backend обновит live-статус и безопасно освободит
+                holder, если кампания уже Completed.
               </p>
             ) : null}
             <label className="mt-3 flex items-start gap-2 text-sm text-gray-700">
@@ -616,11 +583,7 @@ function PreparedLaunchPortfolio({
             >
               {activated ? 'Отправка активирована' : activating ? 'Активируем…' : 'Активировать отправку'}
             </button>
-            <button
-              type="button"
-              onClick={() => setQueueHint(true)}
-              className={HE.btnGhost}
-            >
+            <button type="button" onClick={() => setQueueHint(true)} className={HE.btnGhost}>
               Пересмотреть сезонное решение
             </button>
           </div>
@@ -665,9 +628,7 @@ function LaunchSection({
       };
     }
     const market = embeddedPortfolio?.mode === 'advisory' ? 'us' : 'ru';
-    void Promise.resolve(
-      veEngineCall<LaunchPortfolioResponse>(`${VE_API}/launch-portfolio?market=${market}`),
-    )
+    void Promise.resolve(veEngineCall<LaunchPortfolioResponse>(`${VE_API}/launch-portfolio?market=${market}`))
       .then((response) => {
         if (cancelled || !response?.ok) return;
         const item = response.data.items?.find((candidate) => candidate.template_id === template.id);
@@ -694,9 +655,7 @@ function LaunchSection({
     const info = recorded;
     const portfolio = remotePortfolio ?? embeddedPortfolio;
     if (portfolio) {
-      return (
-        <PreparedLaunchPortfolio info={info} portfolio={portfolio} warnings={launch.warnings} />
-      );
+      return <PreparedLaunchPortfolio info={info} portfolio={portfolio} warnings={launch.warnings} />;
     }
     const campaigns = info.campaigns && info.campaigns.length > 1 ? info.campaigns : null;
     return (
@@ -745,17 +704,15 @@ function LaunchSection({
       {audit.canLaunch && audit.auditId ? (
         <div className={`space-y-3 px-4 py-3 ${HE.infoPanel}`}>
           <p className="text-sm font-medium text-gray-800">
-            Запуск в Instantly: кампании будут созданы <b>на паузе</b>, получатели загрузятся из
-            проверенной раскладки. Активация — вручную после проверки.
+            Запуск в Instantly: кампании будут созданы <b>на паузе</b>, получатели загрузятся из проверенной раскладки.
+            Активация — вручную после проверки.
           </p>
           {launch.presets === null && !launch.loadError ? (
             <p className="text-xs text-gray-500">Загружаем пресеты…</p>
           ) : null}
           {launch.loadError ? <p className="text-xs text-red-500">{launch.loadError}</p> : null}
           {launch.presets && launch.presets.length === 0 && !launch.loadError ? (
-            <p className="text-xs text-gray-500">
-              Нет доступных пресетов — сначала настройте пресет клиенту.
-            </p>
+            <p className="text-xs text-gray-500">Нет доступных пресетов — сначала настройте пресет клиенту.</p>
           ) : null}
           {launch.presets && launch.presets.length > 0 ? (
             <div className="flex flex-wrap items-center gap-2">
@@ -784,9 +741,7 @@ function LaunchSection({
                         ? audit.summary.segments.filter((segment) => segment.count > 0).length +
                           (audit.summary.defaultGroup.count > 0 ? 1 : 0)
                         : 0;
-                      return groups === 1
-                        ? 'Создать кампанию (на паузе)'
-                        : `Создать ${groups} кампании на паузе`;
+                      return groups === 1 ? 'Создать кампанию (на паузе)' : `Создать ${groups} кампании на паузе`;
                     })()}
               </button>
               <button type="button" onClick={() => launch.setFormOpen(false)} className={HE.btnGhost}>
@@ -810,15 +765,14 @@ export function Step5Template(props: {
   base: VeBaseSummary | null;
   jobs: VeJobSummary[];
   onBuildTemplate: () => void;
+  /** Возврат к исходной цепочке: шаблон пересобирается после правок на шаге 3. */
+  onGoToContent?: () => void;
 }): JSX.Element {
-  const { template, base, jobs, onBuildTemplate } = props;
+  const { template, base, jobs, onBuildTemplate, onGoToContent } = props;
   const [copied, setCopied] = useState(false);
   const [copiedLetterIdx, setCopiedLetterIdx] = useState<number | null>(null);
   const segmentationAudit = useSegmentationAudit(template?.id ?? null);
-  const {
-    refresh: refreshSegmentationAudit,
-    markRejected: markSegmentationRejected,
-  } = segmentationAudit;
+  const { refresh: refreshSegmentationAudit, markRejected: markSegmentationRejected } = segmentationAudit;
   const handleSegmentationRejected = useCallback(
     (phase: 'stale' | 'incomplete' | 'refresh') => {
       if (phase === 'refresh') {
@@ -860,7 +814,9 @@ export function Step5Template(props: {
 
   const handleDownload = useCallback(() => {
     if (!template) return;
-    const blob = new Blob([JSON.stringify(template, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify(template, null, 2)], {
+      type: 'application/json',
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -877,9 +833,7 @@ export function Step5Template(props: {
       return (
         <div className="space-y-3">
           <StatusBox tone="info">Собираем шаблон под базу {base?.filename ?? '—'}…</StatusBox>
-          <p className="text-xs text-gray-500">
-            Обычно это занимает несколько минут — страницу можно не закрывать.
-          </p>
+          <p className="text-xs text-gray-500">Обычно это занимает несколько минут — страницу можно не закрывать.</p>
         </div>
       );
     }
@@ -887,7 +841,8 @@ export function Step5Template(props: {
       return (
         <div className="space-y-3">
           <StatusBox tone="error">
-            Сборка шаблона завершилась ошибкой{templateJob?.error ? `: ${templateJob.error}` : '.'}
+            Сборка шаблона завершилась ошибкой
+            {templateJob?.error ? `: ${templateJob.error}` : '.'}
           </StatusBox>
           <div>
             <button type="button" onClick={onBuildTemplate} className={HE.btnPrimary}>
@@ -914,32 +869,96 @@ export function Step5Template(props: {
 
   /* ── Готовый шаблон ── */
   const mapping = template.personalization_plan?.operator_mapping ?? [];
+  const unmatchedMapping = mapping.filter((item) => !item.matched);
   // Пречек лимита запуска: роут ответит 413 сверх VE_LAUNCH_MAX_LEADS —
   // не даём дойти до клика по «Отправить в запуск» с заведомо большой базой.
   const baseOverLaunchLimit = (base?.row_count ?? 0) > VE_LAUNCH_MAX_LEADS;
 
   return (
-    <div className="max-w-6xl space-y-5">
-      <header className="flex flex-wrap items-start justify-between gap-4 border-b border-gray-200 pb-5">
+    <div className="space-y-5">
+      <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className={HE.sectionTitle}>Шаблон 85/15</h2>
-            {template.status === 'ready' ? (
-              <Badge tone="emerald">Готов</Badge>
-            ) : (
-              <Badge tone="amber">Черновик</Badge>
-            )}
+          <div className="flex flex-wrap items-center gap-3">
+            <h2 className="text-xl font-semibold tracking-[-0.01em] text-gray-900">Шаблон 85/15</h2>
+            <span className={`${HE.pill} ${template.status === 'ready' ? 've2-tg-ok' : 've2-tg-warn'}`}>
+              <StatusDot tone={template.status === 'ready' ? 'ok' : 'warn'} />
+              {template.status === 'ready' ? 'Готов' : 'Черновик'}
+            </span>
           </div>
-          <p className={`mt-1 ${HE.lead}`}>
-            Боевой шаблон: цепочка вертикали, адаптированная под базу {base?.filename ?? '—'}. В
-            рассылку идёт этот текст.
-          </p>
-          <p className="mt-1 text-xs text-gray-500">
-            Правится на шаге 3 (Контент) → пересобрать шаблон
+          <p className={`mt-1.5 ${HE.muted}`}>
+            База: {base?.filename ?? '—'}
+            {base ? ` · ${base.row_count.toLocaleString('ru-RU')} строк.` : '.'}{' '}
+            {onGoToContent ? (
+              <button type="button" onClick={onGoToContent} className="ve2-b-quiet">
+                Правится на шаге 3: Контент
+              </button>
+            ) : (
+              <span className="text-gray-500">Правится на шаге 3: Контент</span>
+            )}
           </p>
         </div>
         <div className="flex max-w-full flex-wrap items-center justify-end gap-2 sm:shrink-0">
-          {!launch.recorded && segmentationAudit.phase !== 'launch_succeeded' ? (
+          <button type="button" onClick={handleCopy} className={`${HE.btnGhost} ve2-b-sm`}>
+            <Copy aria-hidden className="h-4 w-4" />
+            {copied ? 'Скопировано' : 'Скопировать'}
+          </button>
+          <button
+            type="button"
+            onClick={handleDownload}
+            aria-label="Скачать JSON"
+            className="ve2-btn ve2-b-ghost ve2-b-sm"
+          >
+            <Download aria-hidden className="h-4 w-4" />
+            JSON
+          </button>
+        </div>
+      </header>
+
+      {/* Реальные unmatched-операторы из плана, без демонстрационных процентов. */}
+      {unmatchedMapping.length > 0 ? (
+        <div className="ve2-nt ve2-nt-warn flex items-start gap-2.5 px-4 py-3" role="alert">
+          <StatusDot tone="warn" className="mt-[7px] shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="font-semibold text-gray-900">
+              {unmatchedMapping.length === 1 ? (
+                <>
+                  Оператор <code className="ve2-op">{`{{${unmatchedMapping[0].operator}}}`}</code> не совпал ни с одной
+                  колонкой.
+                </>
+              ) : (
+                <>
+                  Операторы{' '}
+                  <span className="font-mono">{unmatchedMapping.map((item) => `{{${item.operator}}}`).join(', ')}</span>{' '}
+                  не совпали ни с одной колонкой.
+                </>
+              )}
+            </p>
+            <p className="mt-1 text-xs text-gray-500">
+              {unmatchedMapping.length === 1 && unmatchedMapping[0].fallback
+                ? `Подставим запасной текст «${unmatchedMapping[0].fallback}». `
+                : 'Запасные тексты показаны в маппинге. '}
+              Проверьте их перед запуском.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Запуск: существующие audit/recovery/portfolio состояния живут внутри одной панели. */}
+      <section className="ve2-panel px-5 py-[18px]" aria-labelledby="ve2-template-launch-title">
+        <p id="ve2-template-launch-title" className={HE.eyebrow}>
+          01 → Запуск в Instantly
+        </p>
+        {!launch.recorded && segmentationAudit.phase !== 'launch_succeeded' ? (
+          <>
+            <p className={`mt-2 ${HE.muted}`}>
+              Кампании будут созданы на паузе. Ничего не уйдёт без ручной активации после проверки.
+            </p>
+            {baseOverLaunchLimit ? (
+              <p className="mt-2 text-xs text-gray-500">
+                База больше лимита запуска ({VE_LAUNCH_MAX_LEADS}). Скачайте CSV и запускайте порциями или соберите базу
+                меньшего лимита.
+              </p>
+            ) : null}
             <button
               type="button"
               onClick={() => {
@@ -949,7 +968,7 @@ export function Step5Template(props: {
               }}
               disabled={baseOverLaunchLimit}
               aria-disabled={baseOverLaunchLimit || launch.formOpen}
-              className={`${HE.btnPrimary} ${launch.formOpen ? 'cursor-default opacity-70' : ''}`}
+              className={`mt-3 ${HE.btnPrimary} ${launch.formOpen ? 'cursor-default opacity-70' : ''}`}
             >
               <Rocket aria-hidden className="h-4 w-4" />
               {launch.formOpen
@@ -960,150 +979,131 @@ export function Step5Template(props: {
                   ? 'Проверить результат запуска'
                   : 'Проверить перед запуском'}
             </button>
-          ) : null}
-          <button type="button" onClick={handleCopy} className={HE.btnGhost}>
-            <Copy aria-hidden className="h-4 w-4" />
-            {copied ? 'Скопировано' : 'Скопировать'}
-          </button>
-          <button type="button" onClick={handleDownload} className={HE.btnGhost}>
-            <Download aria-hidden className="h-4 w-4" />
-            Скачать JSON
-          </button>
+          </>
+        ) : null}
+        <div className="mt-3">
+          <LaunchSection launch={launch} audit={segmentationAudit} template={template} />
         </div>
-      </header>
+      </section>
 
-      {/* База больше лимита запуска — кнопка выключена, объясняем почему */}
-      {baseOverLaunchLimit ? (
-        <p className="text-xs text-gray-500">
-          База больше лимита запуска ({VE_LAUNCH_MAX_LEADS}). Скачайте CSV и запускайте порциями —
-          или соберите базу меньшего лимита.
+      {/* Финальные письма: один лист, письма разделяются только hairline. */}
+      <section aria-labelledby="ve2-template-letters-title">
+        <p id="ve2-template-letters-title" className={HE.eyebrow}>
+          02 → Письма
         </p>
-      ) : null}
-
-      {/* Отправка в запуск: запись о запуске либо форма выбора пресета */}
-      <LaunchSection launch={launch} audit={segmentationAudit} template={template} />
-
-      {/* Превью по лидам — финальные письма с подставленными значениями базы */}
-      <TemplateLeadPreview template={template} baseId={base?.id ?? template.base_id} />
-
-      {/* Финальные письма */}
-      <ol className="max-w-4xl space-y-3">
-        {template.letters.map((letter, idx) => (
-          <li key={idx} className={`${HE.card} p-4`}>
-            <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-              <span className={`${HE.muted2} text-[11px] font-medium uppercase`}>
-                Письмо {idx + 1}
-                {letter.wait_days > 0 ? ` · через ${letter.wait_days} дн.` : ''}
-              </span>
-              {letter.subject ? (
-                <OperatorText text={letter.subject} className="text-sm font-semibold text-gray-900" />
-              ) : (
-                <p className="text-sm italic text-gray-500">Без темы</p>
-              )}
-              <button
-                type="button"
-                onClick={() => handleCopyLetter(idx)}
-                title="Скопировать письмо"
-                aria-label="Скопировать письмо"
-                className={`ml-auto ${HE.btnQuiet}`}
-              >
-                <span className="inline-flex items-center gap-1.5">
-                  <Copy aria-hidden className="h-3.5 w-3.5" />
-                  {copiedLetterIdx === idx ? 'Скопировано' : 'Скопировать'}
+        <ol className="ve2-letter-sheet mt-2.5">
+          {template.letters.map((letter, idx) => (
+            <li key={idx} className="ve2-letter">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className={HE.eyebrow}>
+                  Письмо {idx + 1} · {letter.wait_days > 0 ? `через ${letter.wait_days} дн.` : 'сразу'}
                 </span>
-              </button>
-            </div>
-            <OperatorText
-              text={letter.body}
-              className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700"
-            />
-            {letter.segment_variants?.length ? (
-              <div className="mt-3 space-y-2">
-                {letter.segment_variants.map((v, vi) => (
-                  <details
-                    key={`${v.when}-${vi}`}
-                    className="ve2-soft"
-                  >
-                    <summary className={`${HE.btnQuiet} w-full cursor-pointer select-none px-3 py-2`}>
-                      Вариант для сегмента: {v.when}
-                    </summary>
-                    <div className="ve2-div border-t px-3 py-2">
+                <button
+                  type="button"
+                  onClick={() => handleCopyLetter(idx)}
+                  title="Скопировать письмо"
+                  aria-label={`Скопировать письмо ${idx + 1}`}
+                  className={`ml-auto ${HE.btnQuiet}`}
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <Copy aria-hidden className="h-3.5 w-3.5" />
+                    {copiedLetterIdx === idx ? 'Скопировано' : 'Скопировать'}
+                  </span>
+                </button>
+              </div>
+              {letter.subject ? (
+                <OperatorText text={letter.subject} className="ve2-letter-subject block" />
+              ) : (
+                <p className="ve2-letter-subject italic text-gray-500">Без темы: идёт следом за предыдущим</p>
+              )}
+              <OperatorText text={letter.body} className="ve2-letter-body block" />
+              {letter.segment_variants?.length ? (
+                <div className="mt-3 space-y-1">
+                  {letter.segment_variants.map((v, vi) => (
+                    <details key={`${v.when}-${vi}`} className="ve2-details group">
+                      <summary>
+                        <ChevronRight aria-hidden className="h-3 w-3 transition-transform group-open:rotate-90" />
+                        Вариант для сегмента: {v.when}
+                      </summary>
                       <OperatorText
                         text={v.text}
-                        className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700"
+                        className="block whitespace-pre-wrap pb-3 text-sm leading-relaxed text-gray-700"
                       />
-                    </div>
-                  </details>
-                ))}
-              </div>
-            ) : null}
-          </li>
-        ))}
-      </ol>
-
-      {/* Фиксированный блок — длинный, свёрнут */}
-      {template.fixed_block ? (
-        <details className={HE.card}>
-          <summary className={`${HE.btnQuiet} w-full cursor-pointer select-none px-4 py-3`}>
-            Фиксированный блок (85%) — общая основа всех писем
-          </summary>
-          <div className="border-t border-gray-100 px-4 py-3">
-            <div className={`p-3 ${HE.infoPanel}`}>
-              <p className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700">
-                {template.fixed_block}
-              </p>
-            </div>
-          </div>
-        </details>
-      ) : null}
-
-      {/* Маппинг операторов на колонки базы — свёрнут */}
-      {mapping.length > 0 ? (
-        <details className={HE.card}>
-          <summary className={`${HE.btnQuiet} w-full cursor-pointer select-none px-4 py-3`}>
-            Маппинг операторов на колонки базы ({mapping.length})
-          </summary>
-          <div className="border-t border-gray-100 px-4 py-3">
-            <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-              <table className="min-w-full divide-y divide-gray-200 text-sm">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className={TH_CLASS}>Оператор</th>
-                    <th className={TH_CLASS}>Колонка базы</th>
-                    <th className={TH_CLASS}>Статус</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {mapping.map((m, i) => (
-                    <tr key={`${m.operator}-${i}`}>
-                      <td className="px-3 py-2">
-                        <code className="ve2-op">
-                          {`{{${m.operator}}}`}
-                        </code>
-                      </td>
-                      <td className="px-3 py-2 text-gray-700">{m.column ?? '—'}</td>
-                      <td className="px-3 py-2">
-                        {m.matched ? (
-                          <Badge tone="emerald">Совпало</Badge>
-                        ) : (
-                          <span className="inline-flex flex-col items-start gap-0.5">
-                            <Badge tone="red">Нет колонки</Badge>
-                            {m.fallback ? (
-                              <span className="text-[11px] text-gray-500">
-                                Подставим: {m.fallback}
-                              </span>
-                            ) : null}
-                          </span>
-                        )}
-                      </td>
-                    </tr>
+                    </details>
                   ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
+                </div>
+              ) : null}
+            </li>
+          ))}
+        </ol>
+      </section>
+
+      {/* Маппинг виден до фиксированного блока, как в эталоне. */}
+      <section aria-labelledby="ve2-template-mapping-title">
+        <p id="ve2-template-mapping-title" className={HE.eyebrow}>
+          03 → Маппинг операторов на колонки базы
+        </p>
+        <div className="ve2-panel mt-2.5 overflow-x-auto px-5 py-1.5">
+          {mapping.length > 0 ? (
+            <table className="min-w-full border-collapse text-sm">
+              <caption className="sr-only">Маппинг операторов шаблона на колонки базы</caption>
+              <thead>
+                <tr>
+                  <th scope="col" className={TH_CLASS}>
+                    Оператор
+                  </th>
+                  <th scope="col" className={TH_CLASS}>
+                    Колонка базы
+                  </th>
+                  <th scope="col" className={TH_CLASS}>
+                    Статус
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {mapping.map((m, i) => (
+                  <tr key={`${m.operator}-${i}`} className="border-b border-gray-100 last:border-0">
+                    <td className="py-2.5 pr-3">
+                      <code className="ve2-op">{`{{${m.operator}}}`}</code>
+                    </td>
+                    <td className="py-2.5 pr-3 font-mono text-xs text-gray-700">{m.column ?? '—'}</td>
+                    <td className="py-2.5">
+                      <span className="inline-flex flex-col items-start gap-1">
+                        <span className={`${HE.pill} ${m.matched ? 've2-tg-ok' : 've2-tg-err'}`}>
+                          <StatusDot tone={m.matched ? 'ok' : 'err'} />
+                          {m.matched ? 'Совпало' : 'Нет колонки'}
+                        </span>
+                        {!m.matched && m.fallback ? (
+                          <span className="text-[11px] text-gray-500">Подставим: {m.fallback}</span>
+                        ) : null}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p className="py-3 text-xs text-gray-500">В письмах нет операторов для маппинга.</p>
+          )}
+        </div>
+      </section>
+
+      {/* Фиксированный блок: вторичная подробность после видимого маппинга. */}
+      {template.fixed_block ? (
+        <details className="ve2-details group">
+          <summary>
+            <ChevronRight aria-hidden className="h-3 w-3 transition-transform group-open:rotate-90" />
+            Фиксированный блок (85%)
+          </summary>
+          <OperatorText
+            text={template.fixed_block}
+            className="block max-w-[72ch] whitespace-pre-wrap pb-3 text-xs leading-relaxed text-gray-600"
+          />
         </details>
       ) : null}
+
+      {/* Превью по лидам сохранено как дополнительная подробность после основного шаблона. */}
+      <TemplateLeadPreview template={template} baseId={base?.id ?? template.base_id} />
     </div>
   );
 }

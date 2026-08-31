@@ -47,22 +47,29 @@ export function StepNav({
     <nav aria-label="Этапы проекта" className="min-w-0">
       <p className="ve2-eb mb-2 hidden lg:block">Этапы проекта</p>
       <ol className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 lg:mx-0 lg:flex-col lg:overflow-visible lg:px-0">
-        {steps.map((step) => (
-          <li key={step.id} className="shrink-0 lg:w-full">
-            <button
-              type="button"
-              onClick={() => onJump(step.id)}
-              aria-current={step.state === 'active' ? 'step' : undefined}
-              className={`ve2-sn min-w-[176px] lg:min-w-0 lg:w-full ${BUTTON_CLASS[step.state]}`.trim()}
-            >
-              <StepMarker step={step} />
-              <span className="min-w-0">
-                <span className="ve2-sn-l">{step.label}</span>
-                <span className="ve2-sn-s hidden lg:block">{step.subtitle}</span>
-              </span>
-            </button>
-          </li>
-        ))}
+        {steps.map((step) => {
+          const locked = step.state === 'locked';
+          return (
+            <li key={step.id} className="shrink-0 lg:w-full">
+              <button
+                type="button"
+                disabled={locked}
+                aria-disabled={locked || undefined}
+                onClick={() => {
+                  if (!locked) onJump(step.id);
+                }}
+                aria-current={step.state === 'active' ? 'step' : undefined}
+                className={`ve2-sn min-w-[176px] lg:min-w-0 lg:w-full ${BUTTON_CLASS[step.state]}`.trim()}
+              >
+                <StepMarker step={step} />
+                <span className="min-w-0">
+                  <span className="ve2-sn-l">{step.label}</span>
+                  <span className="ve2-sn-s hidden lg:block">{step.subtitle}</span>
+                </span>
+              </button>
+            </li>
+          );
+        })}
       </ol>
     </nav>
   );

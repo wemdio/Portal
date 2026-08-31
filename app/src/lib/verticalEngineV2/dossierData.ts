@@ -1,10 +1,13 @@
 /**
- * Инфраструктурный слой «досье вертикали» (Hypothesis Engine).
+ * Инфраструктурный слой «досье вертикали» Vertical Engine v2.
  *
  * Собирает объективные рыночные цифры по сегменту без LLM:
- *  - companies_total — объём сегмента в нашей директории компаний: тот же
- *    счётчик, что подставляет объёмы в гипотезы «Нашей базы компаний»
- *    (searchCount → companies_directory_count_rpc), фильтр по ОКВЭД-2;
+ *  - companies_total — число уникальных компаний в широкой ОКВЭД-выборке;
+ *    отдельный v2-only RPC сначала объединяет дубли по ИНН, а строки без ИНН
+ *    оставляет отдельными компаниями;
+ *  - directory_rows_total / companies_with_* — честная воронка от сырых
+ *    строк справочника к компаниям с указанными каналами связи. Это ещё не
+ *    число проверенных или готовых к запуску email;
  *  - hh_vacancies_total / hh_vacancies_sample — открытые вакансии hh.ru
  *    по названию вертикали и топовой целевой должности (через боевой путь
  *    hh-парсера: прокси-пул + HH_ACCESS_TOKEN, fetchWithRetry);
@@ -15,9 +18,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 import { getOkvedFlat, reduceToTopCodes } from '@/lib/companiesSearch/okved2';
-import { searchCount } from '@/lib/companiesSearch/rpcSearch';
 import { fetchWithRetry } from '@/lib/parsers/hhParser';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
@@ -45,10 +46,20 @@ export interface VeDossierSignal {
 }
 
 export interface VeDossierCounters {
-  /** Компаний в сегменте по нашей директории (null — не удалось посчитать). */
+  /** Уникальных компаний в сегменте; compatibility-поле для старых consumers. */
   companies_total: number | null;
   /** Как считали companies_total (фильтры/причина null). */
   companies_note?: string;
+  /** Сырых строк директории до объединения дублей по ИНН. */
+  directory_rows_total?: number | null;
+  /** Уникальных компаний по ИНН; строки без ИНН считаются отдельно. */
+  companies_unique_total?: number | null;
+  /** Уникальных компаний, где хотя бы в одной строке указан email. */
+  companies_with_email?: number | null;
+  /** Уникальных компаний, где хотя бы в одной строке указан телефон. */
+  companies_with_phone?: number | null;
+  /** Уникальных компаний хотя бы с одним из двух каналов. */
+  companies_with_any_contact?: number | null;
   /** Найдено открытых вакансий на hh.ru (null — запрос не удался). */
   hh_vacancies_total: number | null;
   /** Примеры названий вакансий (до 10). */
@@ -104,6 +115,16 @@ function significantTokens(value: string): string[] {
   )].filter((token) => !GENERIC_TOKEN_PREFIXES.some((prefix) => token.startsWith(prefix)));
 }
 
+function dedupeQueryTokenStems(tokens: string[]): string[] {
+  const seen = new Set<string>();
+  return tokens.filter((token) => {
+    const stem = token.slice(0, Math.min(6, token.length));
+    if (seen.has(stem)) return false;
+    seen.add(stem);
+    return true;
+  });
+}
+
 /**
  * В названиях ОКВЭД всё после «кроме …»/«исключая …» — негативный контекст
  * («Производство древесины …, кроме мебели»). Отрезаем, иначе «мебель»
@@ -128,15 +149,19 @@ function categoryScore(categoryName: string, queryTokens: string[]): number {
 }
 
 /**
- * Уверенное совпадение: хотя бы одно точное (+2) или стем-совпадение (+1)
- * токена вертикали с токеном названия категории — как у promptCategoryScore
- * в ourBaseValidation. Совпадений нет (score 0) → null + companies_note.
+ * Уверенное совпадение: хотя бы одно точное совпадение (+2) или несколько
+ * независимых стем-совпадений. Один общий корень слишком слаб: например,
+ * «медицинских целях» в фарм-производстве не делает его частной медициной.
+ * Неуверенный матч → null + companies_note вместо широкой ложной выборки.
  */
-const MIN_OKVED_MATCH_SCORE = 1;
+const MIN_OKVED_MATCH_SCORE = 2;
 const MAX_OKVED_CATEGORIES = 3;
 
 function matchOkvedCategories(text: string): CompanyBaseIndustryCategory[] {
-  const queryTokens = significantTokens(text);
+  // Synonyms often repeat the same lexical root (for example,
+  // «медицинская» + «медицина»). Count that root once so it cannot turn one
+  // weak overlap into a seemingly independent pair of signals.
+  const queryTokens = dedupeQueryTokenStems(significantTokens(text));
   if (queryTokens.length === 0) return [];
   return getAllowedCompanyBaseIndustryCategories()
     .map((category) => ({ category, score: categoryScore(category.name, queryTokens) }))
@@ -146,41 +171,112 @@ function matchOkvedCategories(text: string): CompanyBaseIndustryCategory[] {
     .map((item) => item.category);
 }
 
-/* ─────────────────── Директория компаний: счётчик ─────────────────── */
+/* ─────────────────── Директория компаний: честная статистика ─────────────────── */
 
-interface SegmentCountResult {
-  count: number | null;
+export interface VeDirectorySegmentStats {
+  directory_rows_total: number | null;
+  companies_unique_total: number | null;
+  /** Канал известен хотя бы в одной directory-строке qualifying ИНН. */
+  companies_with_email: number | null;
+  companies_with_phone: number | null;
+  companies_with_any_contact: number | null;
+  /** Канал указан именно в строках, прошедших точные фильтры среза. */
+  matched_companies_with_email?: number | null;
+  matched_companies_with_phone?: number | null;
+  matched_companies_with_any_contact?: number | null;
   error?: string;
 }
 
+export interface VeDirectorySegmentStatsFilters {
+  okvedCodes: string[];
+  includeIp?: boolean;
+  regionTokens?: string[];
+  regionCodes?: string[];
+  revenueFrom?: number;
+  revenueTo?: number;
+  employeesFrom?: number;
+  employeesTo?: number;
+  requireEmail?: boolean;
+}
+
+const emptyDirectoryStats = (error?: string): VeDirectorySegmentStats => ({
+  directory_rows_total: null,
+  companies_unique_total: null,
+  companies_with_email: null,
+  companies_with_phone: null,
+  companies_with_any_contact: null,
+  matched_companies_with_email: null,
+  matched_companies_with_phone: null,
+  matched_companies_with_any_contact: null,
+  ...(error ? { error } : {}),
+});
+
+function optionalList(values: string[] | undefined): string[] | null {
+  const normalized = (values ?? []).map((value) => value.trim()).filter(Boolean);
+  return normalized.length > 0 ? normalized : null;
+}
+
+function nonNegativeInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value)
+    : null;
+}
+
 /**
- * Установленный путь подсчёта — searchCount (RPC companies_directory_count_rpc).
- * deps.supabase — узкий обход для тестов: та же RPC, только с ОКВЭД-префиксами
- * (остальные параметры имеют дефолты в сигнатуре функции).
+ * Reusable company-level stats call for the dossier and future per-hypothesis
+ * source plans. It deliberately uses a VE2-only RPC: changing the shared
+ * companies-directory counter would alter unrelated Portal/ENG consumers.
  */
-async function countSegmentCompanies(
-  okvedCodes: string[],
+export async function getVeDirectorySegmentStats(
+  filters: VeDirectorySegmentStatsFilters,
   supabase?: SupabaseClient,
-): Promise<SegmentCountResult> {
-  if (supabase) {
-    try {
-      const { data, error } = await supabase.rpc('companies_directory_count_rpc', {
-        p_okved_prefixes: okvedCodes,
-        p_include_ip: false,
-      });
-      if (error) return { count: null, error: error.message ?? String(error) };
-      const count = Number(data);
-      return Number.isFinite(count)
-        ? { count }
-        : { count: null, error: 'некорректный ответ счётчика директории' };
-    } catch (e) {
-      return { count: null, error: e instanceof Error ? e.message : String(e) };
+): Promise<VeDirectorySegmentStats> {
+  const client = supabase ?? supabaseAdmin;
+  if (!client) return emptyDirectoryStats('admin-клиент Supabase не сконфигурирован');
+
+  try {
+    const { data, error } = await client.rpc('ve_directory_segment_stats', {
+      p_okved_prefixes: optionalList(filters.okvedCodes),
+      p_include_ip: filters.includeIp ?? false,
+      p_region_tokens: optionalList(filters.regionTokens),
+      p_region_codes: optionalList(filters.regionCodes),
+      p_revenue_from: filters.revenueFrom ?? null,
+      p_revenue_to: filters.revenueTo ?? null,
+      p_employees_from: filters.employeesFrom ?? null,
+      p_employees_to: filters.employeesTo ?? null,
+      p_require_email: filters.requireEmail ?? false,
+    });
+    if (error) return emptyDirectoryStats(error.message ?? String(error));
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return emptyDirectoryStats('некорректный ответ статистики директории');
     }
+
+    const payload = data as Record<string, unknown>;
+    const stats: VeDirectorySegmentStats = {
+      directory_rows_total: nonNegativeInteger(payload.directory_rows_total),
+      companies_unique_total: nonNegativeInteger(payload.companies_unique_total),
+      companies_with_email: nonNegativeInteger(payload.companies_with_email),
+      companies_with_phone: nonNegativeInteger(payload.companies_with_phone),
+      companies_with_any_contact: nonNegativeInteger(payload.companies_with_any_contact),
+      matched_companies_with_email: nonNegativeInteger(payload.matched_companies_with_email),
+      matched_companies_with_phone: nonNegativeInteger(payload.matched_companies_with_phone),
+      matched_companies_with_any_contact: nonNegativeInteger(
+        payload.matched_companies_with_any_contact,
+      ),
+    };
+    if ([
+      stats.directory_rows_total,
+      stats.companies_unique_total,
+      stats.companies_with_email,
+      stats.companies_with_phone,
+      stats.companies_with_any_contact,
+    ].some((value) => value === null)) {
+      return emptyDirectoryStats('некорректный ответ статистики директории');
+    }
+    return stats;
+  } catch (e) {
+    return emptyDirectoryStats(e instanceof Error ? e.message : String(e));
   }
-  const filters: CompaniesSearchFilters = { okvedCodes, includeIp: false };
-  const res = await searchCount(filters);
-  if (res.error) return { count: null, error: res.error };
-  return { count: res.count };
 }
 
 /* ───────────────────────────── hh.ru ───────────────────────────── */
@@ -288,6 +384,11 @@ export async function collectDossierCounters(
 
   // ── 1. Наша директория компаний (фильтр по ОКВЭД-2) ──
   let companies_total: number | null = null;
+  let directory_rows_total: number | null = null;
+  let companies_unique_total: number | null = null;
+  let companies_with_email: number | null = null;
+  let companies_with_phone: number | null = null;
+  let companies_with_any_contact: number | null = null;
   let companies_note: string | undefined;
   const matchText = [verticalName, ...synonyms].filter(Boolean).join(' ');
   const categories = matchText ? matchOkvedCategories(matchText) : [];
@@ -301,12 +402,20 @@ export async function collectDossierCounters(
     const criteria = `ОКВЭД-категории: ${categories.map((c) => `${c.code} ${c.name}`).join('; ')}; вся Россия; без ИП`;
     // Схлопываем предок/потомок (напр. 31 + 31.0 → 31) — как на входе searchCount.
     const okvedCodes = reduceToTopCodes(new Set(categories.map((c) => c.code)));
-    const res = await countSegmentCompanies(okvedCodes, deps?.supabase);
-    if (res.error || res.count === null) {
-      companies_note = `${criteria}. Счётчик вернул ошибку: ${res.error ?? 'неизвестная'}.`;
+    const stats = await getVeDirectorySegmentStats(
+      { okvedCodes, includeIp: false },
+      deps?.supabase,
+    );
+    if (stats.error || stats.companies_unique_total === null) {
+      companies_note = `${criteria}. Статистика вернула ошибку: ${stats.error ?? 'неизвестная'}.`;
     } else {
-      companies_total = res.count;
-      companies_note = `${criteria}. Источник: companies_directory (счётчик «Нашей базы компаний»).`;
+      directory_rows_total = stats.directory_rows_total;
+      companies_unique_total = stats.companies_unique_total;
+      companies_with_email = stats.companies_with_email;
+      companies_with_phone = stats.companies_with_phone;
+      companies_with_any_contact = stats.companies_with_any_contact;
+      companies_total = companies_unique_total;
+      companies_note = `${criteria}. Уникальные компании считаются по ИНН; строки без ИНН — отдельно. Email и телефоны из справочника ещё не валидированы.`;
     }
   }
   log(`[dossier] companies: ${companies_total ?? 'null'} — ${companies_note}`);
@@ -335,6 +444,11 @@ export async function collectDossierCounters(
   return {
     companies_total,
     companies_note,
+    directory_rows_total,
+    companies_unique_total,
+    companies_with_email,
+    companies_with_phone,
+    companies_with_any_contact,
     hh_vacancies_total,
     hh_vacancies_sample,
     signals: buildSignals(hh_vacancies_total, hh_vacancies_sample),

@@ -45,6 +45,7 @@ interface SegmentationAuditSummary {
   unclassifiedCount: number;
   excluded: {
     lowRelevance: number;
+    relevanceUnchecked: number;
     invalidEmailStatus: number;
     invalidEmail: number;
     duplicateEmail: number;
@@ -179,6 +180,7 @@ function normalizeSummary(value: unknown): SegmentationAuditSummary | null {
   const excludedRaw = asRecord(record.excluded) ?? {};
   const excluded = {
     lowRelevance: firstNumber(excludedRaw, ['low_relevance', 'lowRelevance']) ?? 0,
+    relevanceUnchecked: firstNumber(excludedRaw, ['relevance_unchecked', 'relevanceUnchecked']) ?? 0,
     invalidEmailStatus:
       firstNumber(excludedRaw, [
         'invalid_verification',
@@ -190,17 +192,11 @@ function normalizeSummary(value: unknown): SegmentationAuditSummary | null {
     duplicateEmail: firstNumber(excludedRaw, ['duplicate_email', 'duplicateEmail']) ?? 0,
   };
   const excludedTotal = Object.values(excluded).reduce((sum, count) => sum + count, 0);
-  const launchableRows =
-    firstNumber(record, ['launchable_rows', 'launchable_rows_total', 'launchableRows']) ?? 0;
+  const launchableRows = firstNumber(record, ['launchable_rows', 'launchable_rows_total', 'launchableRows']) ?? 0;
   const unclassifiedCount =
-    firstNumber(record, [
-      'unclassified_count',
-      'unclassified_rows_total',
-      'unclassifiedCount',
-    ]) ?? 0;
+    firstNumber(record, ['unclassified_count', 'unclassified_rows_total', 'unclassifiedCount']) ?? 0;
   const totalBaseRows =
-    firstNumber(record, ['total_base_rows', 'base_rows_total', 'totalBaseRows']) ??
-    launchableRows + excludedTotal;
+    firstNumber(record, ['total_base_rows', 'base_rows_total', 'totalBaseRows']) ?? launchableRows + excludedTotal;
 
   const rawStatus = firstString(record, ['status']).toLowerCase();
   const status: SegmentationAuditSummary['status'] =
@@ -250,8 +246,7 @@ function normalizeAudit(value: unknown): SegmentationAuditSnapshot | null {
     current: record.current === true,
     error: firstString(record, ['error']) || null,
     launchStatus,
-    launchReservationId:
-      firstString(record, ['launch_reservation_id', 'launchReservationId']) || null,
+    launchReservationId: firstString(record, ['launch_reservation_id', 'launchReservationId']) || null,
     launchStartedAt: firstString(record, ['launch_started_at', 'launchStartedAt']) || null,
     launchError: firstString(record, ['launch_error', 'launchError']) || null,
     launch: parseLaunchInfo(record.launch),
@@ -264,9 +259,7 @@ function errorMessage(value: unknown, fallback: string): string {
   return (record && firstString(record, ['error'])) || fallback;
 }
 
-function stateFromAudit(
-  audit: SegmentationAuditSnapshot,
-): Omit<SegmentationAuditState, 'templateId'> | null {
+function stateFromAudit(audit: SegmentationAuditSnapshot): Omit<SegmentationAuditState, 'templateId'> | null {
   if (audit.status === 'pending' || audit.status === 'running' || audit.status === 'queued') return null;
   if (audit.status === 'failed' || audit.status === 'cancelled') {
     return {
@@ -290,8 +283,7 @@ function stateFromAudit(
     return { phase: 'launch_succeeded', audit, error: null };
   }
   if (!audit.current) return { phase: 'stale', audit, error: null };
-  const summaryComplete =
-    audit.summary.status === 'complete' || audit.summary.status === 'not_required';
+  const summaryComplete = audit.summary.status === 'complete' || audit.summary.status === 'not_required';
   if (!summaryComplete || audit.summary.unclassifiedCount > 0) {
     return { phase: 'incomplete', audit, error: null };
   }
@@ -333,102 +325,103 @@ export function useSegmentationAudit(templateId: string | null) {
     [clearPollTimer],
   );
 
-  const beginRead = useCallback((enqueue: boolean) => {
-    if (!templateId) return;
-    generationRef.current += 1;
-    const generation = generationRef.current;
-    clearPollTimer();
-    setResolutionFailure((current) =>
-      current?.templateId === templateId ? null : current,
-    );
-    setState({ templateId, phase: 'loading', audit: null, error: null });
+  const beginRead = useCallback(
+    (enqueue: boolean) => {
+      if (!templateId) return;
+      generationRef.current += 1;
+      const generation = generationRef.current;
+      clearPollTimer();
+      setResolutionFailure((current) => (current?.templateId === templateId ? null : current));
+      setState({ templateId, phase: 'loading', audit: null, error: null });
 
-    const auditUrl = `${VE_API}/templates/${templateId}/segmentation-audit`;
+      const auditUrl = `${VE_API}/templates/${templateId}/segmentation-audit`;
 
-    const readAudit = async (attempt: number): Promise<void> => {
-      try {
-        const response = await veEngineCall<AuditEnvelope>(auditUrl);
-        if (generationRef.current !== generation) return;
-        if (!response?.ok) {
+      const readAudit = async (attempt: number): Promise<void> => {
+        try {
+          const response = await veEngineCall<AuditEnvelope>(auditUrl);
+          if (generationRef.current !== generation) return;
+          if (!response?.ok) {
+            setState({
+              templateId,
+              phase: 'error',
+              audit: null,
+              error: errorMessage(response?.data, 'Не удалось получить отчёт сегментации'),
+            });
+            return;
+          }
+
+          const audit = normalizeAudit(response.data.audit);
+          if (!audit) {
+            setState({
+              templateId,
+              phase: 'error',
+              audit: null,
+              error: 'Сервис вернул неполный отчёт сегментации',
+            });
+            return;
+          }
+
+          const terminalState = stateFromAudit(audit);
+          if (terminalState) {
+            setState({ templateId, ...terminalState });
+            return;
+          }
+
+          if (attempt >= AUDIT_POLL_ATTEMPTS) {
+            setState({
+              templateId,
+              phase: 'error',
+              audit,
+              error: 'Проверка сегментации не завершилась вовремя',
+            });
+            return;
+          }
+
+          pollTimerRef.current = setTimeout(() => {
+            pollTimerRef.current = null;
+            void readAudit(attempt + 1);
+          }, AUDIT_POLL_INTERVAL_MS);
+        } catch {
+          if (generationRef.current !== generation) return;
           setState({
             templateId,
             phase: 'error',
             audit: null,
-            error: errorMessage(response?.data, 'Не удалось получить отчёт сегментации'),
+            error: 'Не удалось получить отчёт сегментации',
           });
-          return;
         }
+      };
 
-        const audit = normalizeAudit(response.data.audit);
-        if (!audit) {
-          setState({
-            templateId,
-            phase: 'error',
-            audit: null,
-            error: 'Сервис вернул неполный отчёт сегментации',
-          });
-          return;
-        }
-
-        const terminalState = stateFromAudit(audit);
-        if (terminalState) {
-          setState({ templateId, ...terminalState });
-          return;
-        }
-
-        if (attempt >= AUDIT_POLL_ATTEMPTS) {
-          setState({
-            templateId,
-            phase: 'error',
-            audit,
-            error: 'Проверка сегментации не завершилась вовремя',
-          });
-          return;
-        }
-
-        pollTimerRef.current = setTimeout(() => {
-          pollTimerRef.current = null;
-          void readAudit(attempt + 1);
-        }, AUDIT_POLL_INTERVAL_MS);
-      } catch {
-        if (generationRef.current !== generation) return;
-        setState({
-          templateId,
-          phase: 'error',
-          audit: null,
-          error: 'Не удалось получить отчёт сегментации',
-        });
-      }
-    };
-
-    if (!enqueue) {
-      void readAudit(0);
-      return;
-    }
-    void veEnginePost<AuditEnvelope>(auditUrl)
-      .then((response) => {
-        if (generationRef.current !== generation) return;
-        if (!response?.ok) {
-          setState({
-            templateId,
-            phase: 'error',
-            audit: null,
-            error: errorMessage(response?.data, 'Не удалось запустить проверку сегментации'),
-          });
-          return;
-        }
+      if (!enqueue) {
         void readAudit(0);
-      })
-      .catch(() => {
-        if (generationRef.current !== generation) return;
-        setState({
-          templateId,
-          phase: 'error',
-          audit: null,
-          error: 'Не удалось запустить проверку сегментации',
+        return;
+      }
+      void veEnginePost<AuditEnvelope>(auditUrl)
+        .then((response) => {
+          if (generationRef.current !== generation) return;
+          if (!response?.ok) {
+            setState({
+              templateId,
+              phase: 'error',
+              audit: null,
+              error: errorMessage(response?.data, 'Не удалось запустить проверку сегментации'),
+            });
+            return;
+          }
+          void readAudit(0);
+        })
+        .catch(() => {
+          if (generationRef.current !== generation) return;
+          setState({
+            templateId,
+            phase: 'error',
+            audit: null,
+            error: 'Не удалось запустить проверку сегментации',
+          });
         });
-      });
-  }, [clearPollTimer, templateId]);
+    },
+    [clearPollTimer, templateId],
+  );
 
   const start = useCallback(() => beginRead(true), [beginRead]);
   const refresh = useCallback(() => beginRead(false), [beginRead]);
@@ -438,9 +431,7 @@ export function useSegmentationAudit(templateId: string | null) {
       generationRef.current += 1;
       clearPollTimer();
       setState((current) =>
-        current.templateId === templateId && current.audit
-          ? { ...current, phase, error: null }
-          : current,
+        current.templateId === templateId && current.audit ? { ...current, phase, error: null } : current,
       );
     },
     [clearPollTimer, templateId],
@@ -451,28 +442,21 @@ export function useSegmentationAudit(templateId: string | null) {
       if (!templateId) return;
       const currentAudit = state.templateId === templateId ? state.audit : null;
       const resolving = resolvingTemplateId === templateId;
-      if (
-        !currentAudit ||
-        currentAudit.launchStatus !== 'uncertain' ||
-        !currentAudit.launchReservationId ||
-        resolving
-      ) return;
+      if (!currentAudit || currentAudit.launchStatus !== 'uncertain' || !currentAudit.launchReservationId || resolving)
+        return;
       generationRef.current += 1;
       const generation = generationRef.current;
       clearPollTimer();
       setResolvingTemplateId(templateId);
       setResolutionFailure(null);
       try {
-        const response = await veEnginePatch<AuditEnvelope>(
-          `${VE_API}/templates/${templateId}/segmentation-audit`,
-          {
-            audit_id: currentAudit.id,
-            launch_reservation_id: currentAudit.launchReservationId,
-            resolution,
-            confirm: true,
-            ...(resolution === 'campaign_created' ? { campaign_ids: ids } : {}),
-          },
-        );
+        const response = await veEnginePatch<AuditEnvelope>(`${VE_API}/templates/${templateId}/segmentation-audit`, {
+          audit_id: currentAudit.id,
+          launch_reservation_id: currentAudit.launchReservationId,
+          resolution,
+          confirm: true,
+          ...(resolution === 'campaign_created' ? { campaign_ids: ids } : {}),
+        });
         if (generationRef.current !== generation) return;
         if (!response?.ok) {
           setResolutionFailure({
@@ -507,14 +491,12 @@ export function useSegmentationAudit(templateId: string | null) {
 
   const visibleState = state.templateId === templateId ? state : IDLE_AUDIT_STATE;
   const resolving = resolvingTemplateId === templateId;
-  const resolutionError =
-    resolutionFailure?.templateId === templateId ? resolutionFailure.message : null;
+  const resolutionError = resolutionFailure?.templateId === templateId ? resolutionFailure.message : null;
   const canLaunch =
     visibleState.phase === 'ready' &&
     visibleState.audit?.status === 'ready' &&
     visibleState.audit.current &&
-    (visibleState.audit.summary?.status === 'complete' ||
-      visibleState.audit.summary?.status === 'not_required') &&
+    (visibleState.audit.summary?.status === 'complete' || visibleState.audit.summary?.status === 'not_required') &&
     visibleState.audit.summary.unclassifiedCount === 0 &&
     visibleState.audit.summary.launchableRows > 0;
 
@@ -527,7 +509,7 @@ export function useSegmentationAudit(templateId: string | null) {
     resolving,
     resolutionError,
     canLaunch,
-    auditId: canLaunch ? visibleState.audit?.id ?? null : null,
+    auditId: canLaunch ? (visibleState.audit?.id ?? null) : null,
     summary: visibleState.audit?.summary ?? null,
     launchInfo: visibleState.audit?.launch ?? null,
   };
@@ -552,29 +534,23 @@ function LaunchRecoveryPanel({ audit }: { audit: SegmentationAuditController }):
   ];
 
   return (
-    <section
-      className="space-y-3 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3"
-      aria-labelledby="segmentation-audit-title"
-      role="alert"
-    >
+    <section className="ve2-nt ve2-nt-warn space-y-3 px-4 py-3" aria-labelledby="segmentation-audit-title" role="alert">
       <div>
-        <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium text-amber-900">
+        <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium">
           <StatusDot tone="warn" />
           Результат запуска нужно проверить
         </h3>
-        <p className="mt-1 text-xs leading-relaxed text-amber-900">
-          Ответ Instantly был неоднозначным. Сначала откройте список кампаний и проверьте,
-          появился ли запуск. Повтор заблокирован, чтобы не создать дубли.
+        <p className="ve2-mut mt-1 text-xs leading-relaxed">
+          Ответ Instantly был неоднозначным. Сначала откройте список кампаний и проверьте, появился ли запуск. Повтор
+          заблокирован, чтобы не создать дубли.
         </p>
-        {audit.audit?.launchError ? (
-          <p className="mt-1 text-xs text-amber-800">Причина: {audit.audit.launchError}</p>
-        ) : null}
+        {audit.audit?.launchError ? <p className="ve2-mut mt-1 text-xs">Причина: {audit.audit.launchError}</p> : null}
         {audit.launchInfo?.campaign_url ? (
           <a
             href={audit.launchInfo.campaign_url}
             target="_blank"
             rel="noreferrer"
-            className="mt-2 inline-block text-xs font-medium text-amber-900 underline"
+            className="ve2-link mt-2 inline-block text-xs underline"
           >
             Открыть найденную кампанию в Instantly
           </a>
@@ -582,7 +558,7 @@ function LaunchRecoveryPanel({ audit }: { audit: SegmentationAuditController }):
       </div>
 
       <div>
-        <label htmlFor="segmentation-launch-campaign-ids" className="text-xs font-medium text-gray-700">
+        <label htmlFor="segmentation-launch-campaign-ids" className="text-xs font-medium">
           ID кампаний
         </label>
         <textarea
@@ -591,11 +567,9 @@ function LaunchRecoveryPanel({ audit }: { audit: SegmentationAuditController }):
           onChange={(event) => setIdsText(event.target.value)}
           rows={2}
           placeholder="campaign-id; если кампаний несколько — через запятую"
-          className="mt-1 w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-xs text-gray-800 outline-none transition focus:border-amber-400 focus-visible:ring-2 focus-visible:ring-amber-200"
+          className="ve2-input mt-1 text-xs"
         />
-        <p className="mt-1 text-[11px] text-amber-800">
-          Если кампаний несколько, укажите все ID — они попадут в запись запуска.
-        </p>
+        <p className="ve2-faint mt-1">Если кампаний несколько, укажите все ID — они попадут в запись запуска.</p>
       </div>
 
       {audit.resolutionError ? (
@@ -640,10 +614,9 @@ function GroupExamples({ examples, groupName }: { examples: SegmentationAuditExa
   return (
     <ul className="mt-2 space-y-1.5" aria-label={`Примеры: ${groupName}`}>
       {examples.map((example, index) => {
-        const details = [
-          example.email,
-          ...example.fields.map((field) => `${field.label}: ${field.value}`),
-        ].filter((value): value is string => Boolean(value));
+        const details = [example.email, ...example.fields.map((field) => `${field.label}: ${field.value}`)].filter(
+          (value): value is string => Boolean(value),
+        );
         return (
           <li key={`${example.rowIndex ?? index}-${example.label}`} className="min-w-0 text-xs text-gray-500">
             <span className="font-medium text-gray-700">{example.label}</span>
@@ -657,10 +630,13 @@ function GroupExamples({ examples, groupName }: { examples: SegmentationAuditExa
 
 function AuditGroupRow({ group, label }: { group: Omit<SegmentationAuditGroup, 'when'>; label: string }) {
   return (
-    <li className="px-3 py-2.5 sm:px-4">
+    <li className="ve2-audit-row px-3 py-2.5 sm:px-4">
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 gap-y-1">
         <p className="min-w-0 break-words text-sm font-medium text-gray-800">{label}</p>
-        <span className="text-sm font-semibold tabular-nums text-gray-900" aria-label={`${formatCount(group.count)} получателей`}>
+        <span
+          className="text-sm font-semibold tabular-nums text-gray-900"
+          aria-label={`${formatCount(group.count)} получателей`}
+        >
           {formatCount(group.count)}
         </span>
         <span className="text-xs text-gray-500">Доля получателей</span>
@@ -697,17 +673,15 @@ function AuditReport({
         </p>
       </div>
 
-      <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
-        <ul className="divide-y divide-gray-100">
+      <div className="ve2-rows overflow-hidden">
+        <ul>
           {summary.segments.map((segment) => (
             <AuditGroupRow key={segment.when} group={segment} label={segment.when} />
           ))}
           <AuditGroupRow
             group={summary.defaultGroup}
             label={
-              notRequired
-                ? 'Основной текст — сегментация не требуется'
-                : 'Основной текст — не совпали с условиями'
+              notRequired ? 'Основной текст — сегментация не требуется' : 'Основной текст — не совпали с условиями'
             }
           />
         </ul>
@@ -717,6 +691,7 @@ function AuditReport({
         <p className="font-medium text-gray-700">Исключено до запуска: {formatCount(excludedTotal)}</p>
         <ul className="mt-1 grid gap-x-5 gap-y-1 sm:grid-cols-2">
           <li>Низкая релевантность: {formatCount(summary.excluded.lowRelevance)}</li>
+          <li>Нет relevance-вердикта: {formatCount(summary.excluded.relevanceUnchecked)}</li>
           <li>Не прошли email-проверку: {formatCount(summary.excluded.invalidEmailStatus)}</li>
           <li>Невалидный email: {formatCount(summary.excluded.invalidEmail)}</li>
           <li>Дубли email: {formatCount(summary.excluded.duplicateEmail)}</li>
@@ -726,27 +701,18 @@ function AuditReport({
   );
 }
 
-export function SegmentationAuditPanel({
-  audit,
-}: {
-  audit: SegmentationAuditController;
-}): JSX.Element | null {
+export function SegmentationAuditPanel({ audit }: { audit: SegmentationAuditController }): JSX.Element | null {
   if (audit.phase === 'idle') return null;
 
   if (audit.phase === 'loading') {
     return (
-      <section
-        className="ve2-nt ve2-nt-info px-4 py-3"
-        aria-labelledby="segmentation-audit-title"
-        aria-busy="true"
-      >
+      <section className="ve2-nt ve2-nt-info px-4 py-3" aria-labelledby="segmentation-audit-title" aria-busy="true">
         <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium text-gray-800">
           <Spinner className="h-3.5 w-3.5 shrink-0" />
           Проверяем сегментацию перед запуском…
         </h3>
         <p className="mt-1 text-xs text-gray-500" aria-live="polite">
-          Сверяем всех подходящих получателей и исключения. Запуск станет доступен только после
-          полной проверки.
+          Сверяем всех подходящих получателей и исключения. Запуск станет доступен только после полной проверки.
         </p>
       </section>
     );
@@ -759,12 +725,12 @@ export function SegmentationAuditPanel({
   if (audit.phase === 'launch_succeeded') {
     return (
       <section
-        className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3"
+        className="ve2-nt ve2-nt-ok px-4 py-3"
         aria-labelledby="segmentation-audit-title"
         role="status"
         aria-live="polite"
       >
-        <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium text-emerald-800">
+        <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium">
           <StatusDot tone="ok" />
           Проверенный запуск зафиксирован
         </h3>
@@ -773,7 +739,7 @@ export function SegmentationAuditPanel({
             href={audit.launchInfo.campaign_url}
             target="_blank"
             rel="noreferrer"
-            className="mt-2 inline-block text-xs text-emerald-800 underline"
+            className="ve2-link mt-2 inline-block text-xs underline"
           >
             Открыть в Instantly
           </a>
@@ -784,12 +750,12 @@ export function SegmentationAuditPanel({
 
   if (audit.phase === 'error') {
     return (
-      <section className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3" aria-labelledby="segmentation-audit-title">
-        <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium text-red-800">
+      <section className="ve2-nt ve2-nt-err px-4 py-3" aria-labelledby="segmentation-audit-title">
+        <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium">
           <StatusDot tone="err" />
           Проверка не завершена
         </h3>
-        <p className="mt-1 text-xs text-red-700" role="alert">
+        <p className="ve2-mut mt-1 text-xs" role="alert">
           {audit.error ?? 'Не удалось проверить сегментацию'}
         </p>
         <button type="button" onClick={audit.start} className={`${HE.btnSmall} mt-3`}>
@@ -802,16 +768,16 @@ export function SegmentationAuditPanel({
   if (audit.phase === 'stale') {
     return (
       <section
-        className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3"
+        className="ve2-nt ve2-nt-warn px-4 py-3"
         aria-labelledby="segmentation-audit-title"
         role="status"
         aria-live="polite"
       >
-        <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium text-amber-800">
+        <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium">
           <StatusDot tone="warn" />
           Аудит устарел
         </h3>
-        <p className="mt-1 text-xs text-amber-800">
+        <p className="ve2-mut mt-1 text-xs">
           Шаблон или база уже отличаются от проверенной версии. Обновите раскладку перед запуском.
         </p>
         <button type="button" onClick={audit.start} className={`${HE.btnSmall} mt-3`}>
@@ -825,17 +791,17 @@ export function SegmentationAuditPanel({
     const missing = audit.summary.unclassifiedCount;
     return (
       <section
-        className="space-y-3 rounded-2xl border border-amber-200 bg-amber-50/70 px-4 py-3"
+        className="ve2-nt ve2-nt-warn space-y-3 px-4 py-3"
         aria-labelledby="segmentation-audit-title"
         role="status"
         aria-live="polite"
       >
         <div>
-          <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium text-amber-800">
+          <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium">
             <StatusDot tone="warn" />
             Нужна повторная проверка
           </h3>
-          <p className="mt-1 text-xs text-amber-800">
+          <p className="ve2-mut mt-1 text-xs">
             {missing > 0
               ? `${formatCount(missing)} получателя не проверены. Запуск заблокирован.`
               : 'Не все данные проверки подтверждены. Запуск заблокирован.'}
@@ -852,29 +818,21 @@ export function SegmentationAuditPanel({
   if (audit.phase === 'ready' && audit.summary?.launchableRows === 0) {
     return (
       <section
-        className="space-y-3 rounded-2xl border border-amber-200 bg-amber-50/70 px-4 py-3"
+        className="ve2-nt ve2-nt-warn space-y-3 px-4 py-3"
         aria-labelledby="segmentation-audit-title"
         role="status"
         aria-live="polite"
       >
         <div>
-          <h3
-            id="segmentation-audit-title"
-            className="flex items-center gap-2 text-sm font-medium text-amber-800"
-          >
+          <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium">
             <StatusDot tone="warn" />
             Нет получателей для запуска
           </h3>
-          <p className="mt-1 text-xs text-amber-800">
-            После фильтров качества, проверки email и удаления дублей база пуста. Кампании не
-            будут созданы.
+          <p className="ve2-mut mt-1 text-xs">
+            После фильтров качества, проверки email и удаления дублей база пуста. Кампании не будут созданы.
           </p>
         </div>
-        <AuditReport
-          summary={audit.summary}
-          complete={false}
-          notRequired={audit.summary.status === 'not_required'}
-        />
+        <AuditReport summary={audit.summary} complete={false} notRequired={audit.summary.status === 'not_required'} />
       </section>
     );
   }
@@ -883,21 +841,16 @@ export function SegmentationAuditPanel({
 
   return (
     <section
-      className="space-y-3 rounded-2xl border border-emerald-200 bg-emerald-50/60 px-4 py-3"
+      className="ve2-nt ve2-nt-ok space-y-3 px-4 py-3"
       aria-labelledby="segmentation-audit-title"
       role="status"
       aria-live="polite"
     >
-      <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium text-emerald-800">
+      <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium">
         <StatusDot tone="ok" />
-        {audit.summary.status === 'not_required'
-          ? 'Сегментация не требуется'
-          : 'Сегментация проверена'}
+        {audit.summary.status === 'not_required' ? 'Сегментация не требуется' : 'Сегментация проверена'}
       </h3>
-      <AuditReport
-        summary={audit.summary}
-        notRequired={audit.summary.status === 'not_required'}
-      />
+      <AuditReport summary={audit.summary} notRequired={audit.summary.status === 'not_required'} />
     </section>
   );
 }

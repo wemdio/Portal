@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, ArrowRight } from 'lucide-react';
 import type {
   VeLegacyProjectDetail,
   VeLegacyProjectSummary,
@@ -58,7 +58,7 @@ export function LegacyArchivePanel({
 }) {
   if (detailLoading) {
     return (
-      <div className="ve2-card ve2-mut p-8">
+      <div className="ve2-panel ve2-mut p-8" role="status">
         Загружаем read-only снимок старого прогона…
       </div>
     );
@@ -67,38 +67,47 @@ export function LegacyArchivePanel({
   if (!detail) {
     if (projects.length === 0) return <EmptyArchive />;
     return (
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {projects.map((project) => (
-          <button
-            key={project.id}
-            type="button"
-            onClick={() => onSelect(project.id)}
-            className="ve2-card ve2-card-h p-5 text-left transition"
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div className="min-w-0">
-                <p className="ve2-h3 truncate">
-                  {project.name}
-                </p>
-                <p className="ve2-faint mt-1 truncate">
+      <section className="ve2-sec" aria-labelledby="legacy-archive-title">
+        <div className="ve2-sec-head">
+          <div>
+            <h2 id="legacy-archive-title" className="ve2-eb">
+              01 → Архив legacy-прогонов
+            </h2>
+            <p className="ve2-mut mt-1.5 max-w-3xl">
+              Сюда попадают только проекты, вручную подтверждённые как внутренние.
+              ENG-проекты не добавляются автоматически.
+            </p>
+          </div>
+          <span className="ve2-faint">{projects.length}</span>
+        </div>
+        <div className="ve2-rows">
+          {projects.map((project) => (
+            <button
+              key={project.id}
+              type="button"
+              onClick={() => onSelect(project.id)}
+              className="ve2-row flex-wrap"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="ve2-h3 block truncate">{project.name}</span>
+                <span className="ve2-faint mt-0.5 block truncate">
                   {project.website_url}
-                </p>
-              </div>
-              <span className="ve2-tag">legacy</span>
-            </div>
-            <div className="ve2-mut mt-5 flex items-center justify-between text-xs">
-              <span>{project.status}</span>
-              <span>{formatDate(project.created_at)}</span>
-            </div>
-          </button>
-        ))}
-      </div>
+                </span>
+              </span>
+              <span className="ve2-faint shrink-0">{project.status}</span>
+              <span className="ve2-faint shrink-0">{formatDate(project.created_at)}</span>
+              <span className="ve2-tag shrink-0">legacy</span>
+              <ArrowRight aria-hidden className="ve2-faint h-4 w-4 shrink-0" />
+            </button>
+          ))}
+        </div>
+      </section>
     );
   }
 
   const project = detail.project;
   return (
-    <div className="space-y-5">
+    <section className="space-y-5" aria-labelledby="legacy-detail-title">
       <button
         type="button"
         onClick={onBack}
@@ -108,11 +117,11 @@ export function LegacyArchivePanel({
         Назад к архиву
       </button>
 
-      <section className="ve2-nt ve2-nt-warn p-5">
+      <header>
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
           <div>
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="ve2-h2">
+              <h2 id="legacy-detail-title" className="ve2-h2">
                 {text(project.name, 'Legacy-проект')}
               </h2>
               <span className="ve2-tag">Только чтение</span>
@@ -125,11 +134,11 @@ export function LegacyArchivePanel({
           </div>
         </div>
         {detail.verification.review_notes ? (
-          <p className="ve2-mut ve2-div mt-4 border-t pt-4 text-sm">
+          <p className="ve2-mut mt-3 max-w-[64ch] text-sm">
             {detail.verification.review_notes}
           </p>
         ) : null}
-      </section>
+      </header>
 
       <div className="ve2-stats">
         <Stat label="Гипотез" value={detail.hypotheses.length} />
@@ -140,140 +149,136 @@ export function LegacyArchivePanel({
         <Stat label="Джоб" value={detail.jobs.length} />
       </div>
 
-      <section className="ve2-card p-5">
-        <h3 className="ve2-h3">Вертикали</h3>
+      <section aria-labelledby="legacy-verticals-title">
+        <h3 id="legacy-verticals-title" className="ve2-eb">02 → Вертикали</h3>
         {detail.verticals.length === 0 ? (
           <p className="ve2-mut mt-3">Вертикалей нет.</p>
         ) : (
-          <div className="mt-4 grid gap-3 md:grid-cols-2">
+          <div className="ve2-rows mt-2.5">
             {detail.verticals.map((vertical, index) => (
               <div
                 key={recordId(vertical, index)}
-                className="ve2-card p-4"
+                className="ve2-row ve2-row-static"
               >
-                <div className="flex items-start justify-between gap-3">
-                  <p className="ve2-h4">
-                    {text(vertical.name)}
-                  </p>
-                  <span className="ve2-pct ve2-pct-lo">
-                    {typeof vertical.potential_pct === 'number'
-                      ? `${vertical.potential_pct}%`
-                      : ''}
-                  </span>
+                <div className="min-w-0 flex-1">
+                  <p className="ve2-h4">{text(vertical.name)}</p>
+                  {vertical.summary ? (
+                    <p className="ve2-mut mt-2 text-xs leading-5">
+                      {String(vertical.summary)}
+                    </p>
+                  ) : null}
                 </div>
-                {vertical.summary ? (
-                  <p className="ve2-mut mt-2 text-xs leading-5">
-                    {String(vertical.summary)}
-                  </p>
-                ) : null}
+                <span className="ve2-pct ve2-pct-lo shrink-0">
+                  {typeof vertical.potential_pct === 'number'
+                    ? `${vertical.potential_pct}%`
+                    : ''}
+                </span>
               </div>
             ))}
           </div>
         )}
       </section>
 
-      <section className="ve2-card p-5">
-        <h3 className="ve2-h3">Гипотезы</h3>
+      <section aria-labelledby="legacy-hypotheses-title">
+        <h3 id="legacy-hypotheses-title" className="ve2-eb">03 → Гипотезы</h3>
         {detail.hypotheses.length === 0 ? (
           <p className="ve2-mut mt-3">Гипотез нет.</p>
         ) : (
-          <div className="mt-4 space-y-3">
+          <div className="ve2-rows mt-2.5">
             {detail.hypotheses.map((hypothesis, index) => (
               <div
                 key={recordId(hypothesis, index)}
-                className="ve2-card px-4 py-3"
+                className="ve2-row ve2-row-static flex-wrap"
               >
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="ve2-tier">
-                    T{String(hypothesis.tier ?? '—')}
-                  </span>
-                  <p className="ve2-h4">
-                    {text(hypothesis.title)}
-                  </p>
-                  <span className="ve2-pct ve2-pct-lo ml-auto">
-                    {typeof hypothesis.potential_pct === 'number'
-                      ? `${hypothesis.potential_pct}%`
-                      : ''}
-                  </span>
+                <span className="ve2-tier">T{String(hypothesis.tier ?? '—')}</span>
+                <div className="min-w-0 flex-1">
+                  <p className="ve2-h4">{text(hypothesis.title)}</p>
+                  {hypothesis.description ? (
+                    <p className="ve2-mut mt-2 text-xs leading-5">
+                      {String(hypothesis.description)}
+                    </p>
+                  ) : null}
                 </div>
-                {hypothesis.description ? (
-                  <p className="ve2-mut mt-2 text-xs leading-5">
-                    {String(hypothesis.description)}
-                  </p>
-                ) : null}
+                <span className="ve2-pct ve2-pct-lo shrink-0">
+                  {typeof hypothesis.potential_pct === 'number'
+                    ? `${hypothesis.potential_pct}%`
+                    : ''}
+                </span>
               </div>
             ))}
           </div>
         )}
       </section>
 
-      <section className="ve2-card p-5">
-        <h3 className="ve2-h3">Письма и шаблоны</h3>
+      <section aria-labelledby="legacy-materials-title">
+        <h3 id="legacy-materials-title" className="ve2-eb">04 → Письма и шаблоны</h3>
         {detail.chains.length === 0 && detail.templates.length === 0 ? (
           <p className="ve2-mut mt-3">Материалов нет.</p>
         ) : (
-          <div className="mt-4 space-y-4">
+          <div className="mt-2.5 space-y-4">
             {detail.chains.map((chain, index) => {
               const letters = Array.isArray(chain.letters)
                 ? (chain.letters as Array<Record<string, unknown>>)
                 : [];
               return (
-                <div key={recordId(chain, index)} className="ve2-soft p-4">
+                <div key={recordId(chain, index)} className="ve2-panel px-5 pt-4">
                   <p className="ve2-eb">
                     Цепочка · {text(chain.language, 'язык не указан')} · {letters.length}{' '}
                     писем
                   </p>
-                  <div className="mt-3 space-y-2">
+                  <ol className="mt-1 list-none">
                     {letters.map((letter, letterIndex) => (
-                      <div
+                      <li
                         key={`${recordId(chain, index)}-${letterIndex}`}
-                        className="ve2-card p-3"
+                        className="ve2-letter"
                       >
-                        <p className="ve2-h4 text-xs">
+                        <p className="ve2-letter-subject">
                           {text(letter.subject, `Письмо ${letterIndex + 1}`)}
                         </p>
-                        <p className="ve2-mut mt-1 whitespace-pre-wrap text-xs leading-5">
+                        <p className="ve2-letter-body">
                           {text(letter.body)}
                         </p>
-                      </div>
+                      </li>
                     ))}
-                  </div>
+                  </ol>
                 </div>
               );
             })}
-            {detail.templates.map((template, index) => (
-              <div
-                key={recordId(template, index)}
-                className="ve2-card flex items-center justify-between px-4 py-3 text-sm"
-              >
-                <span className="ve2-h4">
-                  Шаблон {index + 1}
-                </span>
-                <span className="ve2-mut text-xs">{text(template.status)}</span>
+            {detail.templates.length > 0 ? (
+              <div className="ve2-rows">
+                {detail.templates.map((template, index) => (
+                  <div
+                    key={recordId(template, index)}
+                    className="ve2-row ve2-row-static"
+                  >
+                    <span className="ve2-h4 flex-1">Шаблон {index + 1}</span>
+                    <span className="ve2-faint">{text(template.status)}</span>
+                  </div>
+                ))}
               </div>
-            ))}
+            ) : null}
           </div>
         )}
       </section>
 
-      <section className="ve2-card p-5">
-        <h3 className="ve2-h3">Базы</h3>
+      <section aria-labelledby="legacy-bases-title">
+        <h3 id="legacy-bases-title" className="ve2-eb">05 → Базы</h3>
         {detail.bases.length === 0 ? (
           <p className="ve2-mut mt-3">Баз нет.</p>
         ) : (
-          <div className="mt-4">
+          <div className="ve2-rows mt-2.5">
             {detail.bases.map((base, index) => (
               <div
                 key={recordId(base, index)}
-                className="ve2-div flex flex-wrap items-center gap-x-5 gap-y-1 border-t py-3 text-sm first:border-t-0"
+                className="ve2-row ve2-row-static flex-wrap"
               >
-                <span className="ve2-h4">
+                <span className="ve2-h4 min-w-0 flex-1">
                   {text(base.filename, `База ${index + 1}`)}
                 </span>
                 <span className="ve2-faint">
                   {String(base.row_count ?? 0)} строк
                 </span>
-                <span className="ve2-mut ml-auto text-xs">
+                <span className="ve2-faint shrink-0">
                   {text(base.status)}
                 </span>
               </div>
@@ -281,6 +286,6 @@ export function LegacyArchivePanel({
           </div>
         )}
       </section>
-    </div>
+    </section>
   );
 }

@@ -118,6 +118,7 @@ export function toStoredAuditSummary(report: SegmentationAuditReport): VeSegment
     unclassified_count: report.unclassifiedCount,
     excluded: {
       low_relevance: report.excluded.lowRelevance,
+      relevance_unchecked: report.excluded.relevanceUnchecked,
       invalid_verification: report.excluded.invalidEmailStatus,
       invalid_email_status: report.excluded.invalidEmailStatus,
       invalid_email: report.excluded.invalidEmail,
@@ -207,6 +208,8 @@ function sameExcluded(
   const values = excluded as Record<string, unknown>;
   return (
     numberField(values, 'low_relevance') === expected.excluded.lowRelevance &&
+    (numberField(values, 'relevance_unchecked', 'relevanceUnchecked') ?? 0) ===
+      expected.excluded.relevanceUnchecked &&
     numberField(values, 'invalid_verification', 'invalid_email_status') ===
       expected.excluded.invalidEmailStatus &&
     numberField(values, 'invalid_email') === expected.excluded.invalidEmail &&

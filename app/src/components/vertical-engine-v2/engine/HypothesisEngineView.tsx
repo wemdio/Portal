@@ -47,8 +47,10 @@ function ProjectCardSkeleton() {
 }
 
 export function VeEngineWorkspace({
+  view,
   onProjectOpenChange,
 }: {
+  view?: 'projects' | 'launch-queue';
   /** Уведомляем оболочку, что открыт мастер — та прячет свой хром. */
   onProjectOpenChange?: (open: boolean) => void;
 } = {}) {
@@ -63,8 +65,8 @@ export function VeEngineWorkspace({
   const [createPanelOpen, setCreatePanelOpen] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [workspaceView, setWorkspaceView] = useState<'projects' | 'launch-queue'>('projects');
-
+  const [internalView, setInternalView] = useState<'projects' | 'launch-queue'>('projects');
+  const activeView = view ?? internalView;
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -92,10 +94,7 @@ export function VeEngineWorkspace({
         };
         if (name.trim()) body.name = name.trim();
         if (confirm) body.confirm = true;
-        const { ok, status, data } = await veEnginePost<VeProjectCreateResponse>(
-          `${VE_API}/projects`,
-          body,
-        );
+        const { ok, status, data } = await veEnginePost<VeProjectCreateResponse>(`${VE_API}/projects`, body);
         if (status === 409 && data.conflict) {
           setPendingConflict(data.conflict);
           return;
@@ -140,35 +139,34 @@ export function VeEngineWorkspace({
     );
   }
 
-  const mobileCreateExpanded =
-    createPanelOpen || pendingConflict !== null || (!listLoading && projects.length === 0);
+  const mobileCreateExpanded = createPanelOpen || pendingConflict !== null || (!listLoading && projects.length === 0);
 
   return (
     <div className="text-left">
-      <div className="ve2-tabs mb-5" role="tablist" aria-label="Раздел Vertical Engine">
-        <button
-          type="button"
-          role="tab"
-          aria-pressed={workspaceView === 'projects'}
-          aria-selected={workspaceView === 'projects'}
-          onClick={() => setWorkspaceView('projects')}
-          className="ve2-tab"
-        >
-          Проекты
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-pressed={workspaceView === 'launch-queue'}
-          aria-selected={workspaceView === 'launch-queue'}
-          onClick={() => setWorkspaceView('launch-queue')}
-          className="ve2-tab"
-        >
-          Очередь запусков
-        </button>
-      </div>
+      {view === undefined ? (
+        <div className="ve2-tabs mb-5" role="tablist" aria-label="Раздел Vertical Engine">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeView === 'projects'}
+            onClick={() => setInternalView('projects')}
+            className="ve2-tab"
+          >
+            Проекты
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeView === 'launch-queue'}
+            onClick={() => setInternalView('launch-queue')}
+            className="ve2-tab"
+          >
+            Очередь запусков
+          </button>
+        </div>
+      ) : null}
 
-      {workspaceView === 'launch-queue' ? (
+      {activeView === 'launch-queue' ? (
         <LaunchPortfolioView
           onProjectOpen={(projectId) => {
             setSelectedId(projectId);
@@ -177,187 +175,185 @@ export function VeEngineWorkspace({
         />
       ) : (
         <>
-          {errorMsg ? <div className="mb-5"><StatusBox tone="error">{errorMsg}</StatusBox></div> : null}
-
-          <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_360px] lg:items-start">
-        <section className="min-w-0">
-          <div className="mb-4 flex items-end justify-between gap-4">
-            <div>
-              <p className="ve2-eb">01 → Рабочие проекты</p>
-              <p className={`mt-1 ${HE.muted}`}>
-                Продолжайте с этапа, на котором остановились.
-              </p>
+          {errorMsg ? (
+            <div className="mb-5">
+              <StatusBox tone="error">{errorMsg}</StatusBox>
             </div>
-            {!listLoading ? (
-              <span className={HE.faint}>
-                {projects.length} {pluralRu(projects.length, 'проект', 'проекта', 'проектов')}
-              </span>
-            ) : null}
-          </div>
-
-          {listLoading ? (
-            <div className="ve2-rows">
-              {[1, 2, 3].map((i) => (
-                <ProjectCardSkeleton key={i} />
-              ))}
-            </div>
-          ) : projects.length === 0 ? (
-            <div className={`${HE.emptyState} flex min-h-[320px] flex-col items-center justify-center`}>
-              <p className={HE.cardTitle}>Здесь появятся проекты</p>
-              <p className={`mt-2 max-w-sm ${HE.lead}`}>
-                Добавьте сайт клиента в форме нового проекта. Первый этап начнётся внутри проекта.
-              </p>
-            </div>
-          ) : (
-            <ul className="ve2-rows">
-              {projects.map((p) => (
-                <li key={p.id}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedId(p.id);
-                      onProjectOpenChange?.(true);
-                    }}
-                    className="ve2-row group"
-                  >
-                    <span className="min-w-0 flex-1">
-                      <span className={`block truncate ${HE.cardTitle}`}>
-                        {prettyProjectName(p.name, p.website_url)}
-                      </span>
-                      <span className={`mt-0.5 block truncate ${HE.faint}`}>
-                        {prettyHost(p.website_url)}
-                      </span>
-                      <span className="mt-2 inline-flex sm:hidden">
-                        <ProjectStatusBadge status={p.status} />
-                      </span>
-                    </span>
-                    <span className={`hidden w-[170px] shrink-0 md:block ${HE.faint}`}>
-                      Создан {formatDate(p.created_at)}
-                    </span>
-                    <span className="hidden w-[130px] shrink-0 sm:block">
-                      <ProjectStatusBadge status={p.status} />
-                    </span>
-                    <ArrowRight
-                      aria-hidden
-                      className="ve2-t-q h-4 w-4 shrink-0 transition group-hover:translate-x-0.5"
-                    />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-
-        <aside className="order-first lg:order-last lg:sticky lg:top-6">
-          {listLoading || projects.length > 0 ? (
-            <button
-              type="button"
-              onClick={() => setCreatePanelOpen((open) => !open)}
-              aria-expanded={mobileCreateExpanded}
-              aria-controls="ve-create-project-panel"
-              className="ve2-card flex h-11 w-full items-center justify-between px-3.5 text-sm font-semibold lg:hidden"
-            >
-              <span className="inline-flex items-center gap-2">
-                <Plus aria-hidden className="h-4 w-4" />
-                Новый проект
-              </span>
-              <ChevronDown
-                aria-hidden
-                className={`ve2-t-q h-4 w-4 transition-transform ${mobileCreateExpanded ? 'rotate-180' : ''}`}
-              />
-            </button>
           ) : null}
 
-          <section
-            id="ve-create-project-panel"
-            className={`${mobileCreateExpanded ? 'block' : 'hidden'} mt-3 lg:mt-0 lg:block ${HE.formPanel} p-5`}
-          >
-            <p className="ve2-eb">02 → Новый проект</p>
-            <p className={`mt-2 ${HE.muted}`}>
-              Достаточно сайта. Название можно добавить для удобства команды.
-            </p>
-
-            <div className="mt-5 space-y-4">
-              <label htmlFor="he-website" className="block">
-                <span className={`mb-1.5 block text-xs font-medium ${HE.muted}`}>Сайт клиента</span>
-                <input
-                  id="he-website"
-                  type="text"
-                  value={websiteUrl}
-                  onChange={(e) => setWebsiteUrl(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void handleCreate();
-                  }}
-                  placeholder="acme.com"
-                  disabled={creating}
-                  className={HE.input}
-                />
-              </label>
-              <label htmlFor="he-project-name" className="block">
-                <span className={`mb-1.5 block text-xs font-medium ${HE.muted}`}>
-                  Название <span className="ve2-faint">необязательно</span>
-                </span>
-                <input
-                  id="he-project-name"
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void handleCreate();
-                  }}
-                  placeholder="Например, Acme RU"
-                  disabled={creating}
-                  className={HE.input}
-                />
-              </label>
-
-              {pendingConflict ? (
-                <div className="ve2-nt ve2-nt-warn p-3">
-                  <div className="flex items-start gap-2.5">
-                    <StatusDot tone="warn" className="mt-[7px] shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs font-semibold">Сайт уже прогоняли в v1</p>
-                      <p className={`mt-1 text-xs leading-5 ${HE.muted}`}>
-                        Найдено {pendingConflict.legacy_projects?.length ?? 0} прогон(ов) для{' '}
-                        {pendingConflict.domain ?? 'этого домена'}.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setPendingConflict(null)}
-                      aria-label="Закрыть предупреждение"
-                      title="Закрыть"
-                      className="ve2-b-quiet"
-                    >
-                      <X aria-hidden className="h-4 w-4" />
-                    </button>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => void handleConfirmCreate()}
-                    disabled={creating}
-                    className="ve2-b-quiet mt-3 text-xs font-semibold underline underline-offset-2"
-                  >
-                    Всё равно создать в v2
-                  </button>
+          <div className="ve2-home-grid">
+            <section className="min-w-0">
+              <div className="mb-4 flex items-end justify-between gap-4">
+                <div>
+                  <p className="ve2-eb">01 → Рабочие проекты</p>
+                  <p className={`mt-1 ${HE.muted}`}>Продолжайте с этапа, на котором остановились.</p>
                 </div>
+                {!listLoading ? (
+                  <span className={HE.faint}>
+                    {projects.length} {pluralRu(projects.length, 'проект', 'проекта', 'проектов')}
+                  </span>
+                ) : null}
+              </div>
+
+              {listLoading ? (
+                <div className="ve2-rows">
+                  {[1, 2, 3].map((i) => (
+                    <ProjectCardSkeleton key={i} />
+                  ))}
+                </div>
+              ) : projects.length === 0 ? (
+                <div className={`${HE.emptyState} flex min-h-[320px] flex-col items-center justify-center`}>
+                  <p className={HE.cardTitle}>Здесь появятся проекты</p>
+                  <p className={`mt-2 max-w-sm ${HE.lead}`}>
+                    Добавьте сайт клиента в форме нового проекта. Первый этап начнётся внутри проекта.
+                  </p>
+                </div>
+              ) : (
+                <ul className="ve2-rows">
+                  {projects.map((p) => (
+                    <li key={p.id}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedId(p.id);
+                          onProjectOpenChange?.(true);
+                        }}
+                        className="ve2-row group"
+                      >
+                        <span className="min-w-0 flex-1">
+                          <span className={`block truncate ${HE.cardTitle}`}>
+                            {prettyProjectName(p.name, p.website_url)}
+                          </span>
+                          <span className={`mt-0.5 block truncate ${HE.faint}`}>{prettyHost(p.website_url)}</span>
+                          <span className="mt-2 inline-flex sm:hidden">
+                            <ProjectStatusBadge status={p.status} />
+                          </span>
+                        </span>
+                        <span className={`hidden w-[170px] shrink-0 md:block ${HE.faint}`}>
+                          Создан {formatDate(p.created_at)}
+                        </span>
+                        <span className="hidden w-[130px] shrink-0 sm:block">
+                          <ProjectStatusBadge status={p.status} />
+                        </span>
+                        <ArrowRight
+                          aria-hidden
+                          className="ve2-t-q h-4 w-4 shrink-0 transition group-hover:translate-x-0.5"
+                        />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <aside className="order-first lg:order-last">
+              {listLoading || projects.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => setCreatePanelOpen((open) => !open)}
+                  aria-expanded={mobileCreateExpanded}
+                  aria-controls="ve-create-project-panel"
+                  className="ve2-card flex h-11 w-full items-center justify-between px-3.5 text-sm font-semibold lg:hidden"
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <Plus aria-hidden className="h-4 w-4" />
+                    Новый проект
+                  </span>
+                  <ChevronDown
+                    aria-hidden
+                    className={`ve2-t-q h-4 w-4 transition-transform ${mobileCreateExpanded ? 'rotate-180' : ''}`}
+                  />
+                </button>
               ) : null}
 
-              <button
-                type="button"
-                onClick={() => void handleCreate()}
-                disabled={creating || !websiteUrl.trim()}
-                className={`${HE.btnPrimary} w-full`}
+              <section
+                id="ve-create-project-panel"
+                className={`${mobileCreateExpanded ? 'block' : 'hidden'} ve2-create-panel mt-3 lg:mt-0 lg:block`}
               >
-                {creating ? <Spinner className="h-3.5 w-3.5" /> : <Plus aria-hidden className="h-4 w-4" />}
-                Создать проект
-              </button>
-            </div>
-            <p className={`mt-3 ${HE.faint}`}>
-              Исследование запускается отдельно внутри проекта и занимает 10–20 минут.
-            </p>
-          </section>
-        </aside>
+                <p className="ve2-eb">02 → Новый проект</p>
+                <p className={`mt-2 ${HE.muted}`}>Достаточно сайта. Название можно добавить для удобства команды.</p>
+
+                <div className="mt-5 space-y-4">
+                  <label htmlFor="he-website" className="block">
+                    <span className={`mb-1.5 block text-xs font-medium ${HE.muted}`}>Сайт клиента</span>
+                    <input
+                      id="he-website"
+                      type="text"
+                      value={websiteUrl}
+                      onChange={(e) => setWebsiteUrl(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void handleCreate();
+                      }}
+                      placeholder="acme.com"
+                      disabled={creating}
+                      className={HE.input}
+                    />
+                  </label>
+                  <label htmlFor="he-project-name" className="block">
+                    <span className={`mb-1.5 block text-xs font-medium ${HE.muted}`}>
+                      Название <span className="ve2-faint">необязательно</span>
+                    </span>
+                    <input
+                      id="he-project-name"
+                      type="text"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void handleCreate();
+                      }}
+                      placeholder="Например, Acme RU"
+                      disabled={creating}
+                      className={HE.input}
+                    />
+                  </label>
+
+                  {pendingConflict ? (
+                    <div className="ve2-nt ve2-nt-warn p-3">
+                      <div className="flex items-start gap-2.5">
+                        <StatusDot tone="warn" className="mt-[7px] shrink-0" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-semibold">Сайт уже прогоняли в v1</p>
+                          <p className={`mt-1 text-xs leading-5 ${HE.muted}`}>
+                            Найдено {pendingConflict.legacy_projects?.length ?? 0} прогон(ов) для{' '}
+                            {pendingConflict.domain ?? 'этого домена'}.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setPendingConflict(null)}
+                          aria-label="Закрыть предупреждение"
+                          title="Закрыть"
+                          className="ve2-b-quiet"
+                        >
+                          <X aria-hidden className="h-4 w-4" />
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void handleConfirmCreate()}
+                        disabled={creating}
+                        className="ve2-b-quiet mt-3 text-xs font-semibold underline underline-offset-2"
+                      >
+                        Всё равно создать в v2
+                      </button>
+                    </div>
+                  ) : null}
+
+                  <button
+                    type="button"
+                    onClick={() => void handleCreate()}
+                    disabled={creating || !websiteUrl.trim()}
+                    className={`${HE.btnPrimary} w-full`}
+                  >
+                    {creating ? <Spinner className="h-3.5 w-3.5" /> : <Plus aria-hidden className="h-4 w-4" />}
+                    Создать проект
+                  </button>
+                </div>
+                <p className={`mt-3 ${HE.faint}`}>
+                  Исследование запускается отдельно внутри проекта и занимает 10–20 минут.
+                </p>
+              </section>
+            </aside>
           </div>
         </>
       )}

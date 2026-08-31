@@ -272,8 +272,13 @@ export function selectRefillLeadRows(
   for (let i = 0; i < rows.length; i += 1) {
     const row = rows[i];
     if (row.email.trim() === '') continue;
-    // Строки вне вертикали (релевант-гейт base_collect) в долив не идут.
-    if ((row as { _low_relevance?: boolean })._low_relevance === true) continue;
+    // Строки вне гипотезы и строки без надёжного relevance-verdict в долив
+    // не идут: лимит/сбой gate не должен превращаться в молчаливый fail-open.
+    const quality = row as {
+      _low_relevance?: boolean;
+      _relevance_unchecked?: boolean;
+    };
+    if (quality._low_relevance === true || quality._relevance_unchecked === true) continue;
     withEmail += 1;
     const status = emailStatuses?.[i] ?? null;
     // TODO(catch_all): catch_all-домены частично рабочие — пока не шлём (риск баунсов).
