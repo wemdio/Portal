@@ -5,6 +5,7 @@ import { benchError } from '@/lib/bench/errors';
 import { logBenchRequest } from '@/lib/bench/journal';
 import { checkBenchLimits } from '@/lib/bench/limits';
 import { getBenchTool } from '@/lib/bench/registry';
+import { applyToolScope } from '@/lib/bench/scope';
 import type { BenchJobTool } from '@/lib/bench/types';
 
 export const dynamic = 'force-dynamic';
@@ -58,11 +59,10 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   // случаях идёт через клиент робота, то есть её выполняет RLS.
   if (jobTool.results.kind === 'inline') {
     const field = jobTool.results.field;
-    const { data: job } = await auth.db
-      .from(jobTool.table)
-      .select(`id, ${field}`)
-      .eq('id', id)
-      .maybeSingle();
+    const { data: job } = await applyToolScope(
+      auth.db.from(jobTool.table).select(`id, ${field}`).eq('id', id),
+      jobTool,
+    ).maybeSingle();
     if (!job) return finish(benchError('not_found', 'Задача не найдена'), 0);
 
     const all = Array.isArray(job[field]) ? (job[field] as unknown[]) : [];
@@ -85,11 +85,10 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   // Сперва убеждаемся, что задача видна роботу. Без этого пришлось бы
   // полагаться только на RLS дочерней таблицы, а она у разных инструментов
   // написана по-разному — родителя проверяем явно.
-  const { data: job } = await auth.db
-    .from(jobTool.table)
-    .select('id')
-    .eq('id', id)
-    .maybeSingle();
+  const { data: job } = await applyToolScope(
+    auth.db.from(jobTool.table).select('id').eq('id', id),
+    jobTool,
+  ).maybeSingle();
   if (!job) return finish(benchError('not_found', 'Задача не найдена'), 0);
 
   // Курсор, а не смещение: результаты дописываются воркером прямо во время

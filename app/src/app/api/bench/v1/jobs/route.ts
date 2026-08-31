@@ -6,6 +6,7 @@ import { toBenchJobView } from '@/lib/bench/jobView';
 import { logBenchRequest } from '@/lib/bench/journal';
 import { checkActiveJobs, checkBenchLimits } from '@/lib/bench/limits';
 import { getBenchTool } from '@/lib/bench/registry';
+import { applyToolScope } from '@/lib/bench/scope';
 import type { BenchJobTool } from '@/lib/bench/types';
 
 export const dynamic = 'force-dynamic';
@@ -129,9 +130,10 @@ export async function GET(req: NextRequest) {
   // Фильтра по user_id здесь нет намеренно: клиент привязан к роботу, и чужие
   // строки отсекает RLS на уровне базы. Тест benchIsolation стережёт, чтобы
   // этот роут не начал ходить сервисным ключом, который RLS обходит.
-  const { data, error } = await auth.db
-    .from(jobTool.table)
-    .select('*')
+  const { data, error } = await applyToolScope(
+    auth.db.from(jobTool.table).select('*'),
+    jobTool,
+  )
     .order('created_at', { ascending: false })
     .limit(LIST_LIMIT);
 

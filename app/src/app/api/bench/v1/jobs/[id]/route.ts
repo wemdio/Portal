@@ -6,6 +6,7 @@ import { toBenchJobView } from '@/lib/bench/jobView';
 import { logBenchRequest } from '@/lib/bench/journal';
 import { checkBenchLimits } from '@/lib/bench/limits';
 import { getBenchTool } from '@/lib/bench/registry';
+import { applyToolScope } from '@/lib/bench/scope';
 import type { BenchJobTool } from '@/lib/bench/types';
 
 export const dynamic = 'force-dynamic';
@@ -53,7 +54,13 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   if (limited) return finish(limited);
 
   const jobTool = tool as BenchJobTool;
-  const { data } = await auth.db.from(jobTool.table).select('*').eq('id', id).maybeSingle();
+  // Разграничение обязательно: HH, ATS и англоязычный найм делят таблицу, и
+  // без него запрос «?tool=hh» по идентификатору ATS-задачи выдал бы её как
+  // HH-задачу — с чужим смыслом полей и чужой таблицей результатов.
+  const { data } = await applyToolScope(
+    auth.db.from(jobTool.table).select('*').eq('id', id),
+    jobTool,
+  ).maybeSingle();
 
   // Чужая задача просто не вернётся: клиент привязан к роботу, и RLS отсекает
   // её на уровне базы. Отвечаем `not_found`, а не `forbidden`, чтобы перебором

@@ -6,6 +6,7 @@ import { toBenchJobView } from '@/lib/bench/jobView';
 import { logBenchRequest } from '@/lib/bench/journal';
 import { checkBenchLimits } from '@/lib/bench/limits';
 import { getBenchTool } from '@/lib/bench/registry';
+import { applyToolScope } from '@/lib/bench/scope';
 import type { BenchJobTool } from '@/lib/bench/types';
 
 export const dynamic = 'force-dynamic';
@@ -56,21 +57,20 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     return finish(benchError('conflict', jobTool.stop.reason));
   }
 
-  const { data: job } = await auth.db
-    .from(jobTool.table)
-    .select('*')
-    .eq('id', id)
-    .maybeSingle();
+  const { data: job } = await applyToolScope(
+    auth.db.from(jobTool.table).select('*').eq('id', id),
+    jobTool,
+  ).maybeSingle();
   if (!job) return finish(benchError('not_found', 'Задача не найдена'));
 
   if (!STOPPABLE_FROM.includes(String(job.status))) {
     return finish(benchError('conflict', 'Задача уже завершена — останавливать нечего'));
   }
 
-  const { data, error } = await auth.db
-    .from(jobTool.table)
-    .update({ status: jobTool.stop.stoppedStatus })
-    .eq('id', id)
+  const { data, error } = await applyToolScope(
+    auth.db.from(jobTool.table).update({ status: jobTool.stop.stoppedStatus }).eq('id', id),
+    jobTool,
+  )
     .select()
     .single();
 
