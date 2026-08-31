@@ -100,7 +100,7 @@ export default function RenewalsDealsList({ groups }: { groups: RenewalsStageDea
                 // уезжает вверх, а на середине длинной группы ступень иначе не
                 // опознать.
                 style={{ borderLeftColor: item.colorVar }}
-                className="block w-full border-b border-l-2 border-zinc-50 px-2.5 py-1.5 text-left last:border-b-0 hover:bg-zinc-50/60"
+                className="block w-full border-b border-l-2 border-zinc-50 px-2.5 py-1.5 text-left last:border-b-0 hover:bg-[var(--glass-row-hover)]"
               >
                 <div className="flex items-baseline gap-2">
                   <span className="min-w-0 flex-1 truncate text-xs text-zinc-800">

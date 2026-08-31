@@ -18,12 +18,20 @@ import { logError } from '@/lib/loggerClient';
  * своя проверка доступа, и подставлять чужую нельзя — отсюда параметр
  * `endpoint`, а не зашитый путь.
  *
- * Рисуется ПОРТАЛОМ в `document.body`, и это не украшательство. Список сделок
- * живёт внутри `.glass-tile`, у которой есть `backdrop-filter` (globals.css).
- * Любой `backdrop-filter` делает элемент containing block для потомков с
+ * Рисуется ПОРТАЛОМ, и это не украшательство. Список сделок живёт внутри
+ * `.glass-tile`, у которой есть `backdrop-filter` (globals.css). Любой
+ * `backdrop-filter` делает элемент containing block для потомков с
  * `position: fixed` — то есть `fixed inset-0` отсчитывается не от окна, а от
  * плитки, и модалка открывается внутри блока со списком вместо центра экрана.
  * Портал уносит её из-под плитки, и `fixed` снова означает «от окна».
+ *
+ * Цель портала — `.portal-shell` (оболочка приложения, LayoutShell.tsx), а НЕ
+ * `document.body`. Тёмная тема в проекте сделана правилами вида
+ * `html[data-portal-theme='dark'] .portal-shell .bg-white { … }` — их почти
+ * пятьсот, и все требуют оболочку в предках. Улетев в body, модалка выпадала
+ * из-под них и оставалась белой на тёмной странице. Оболочка при этом обычный
+ * блок без transform и фильтров, так что `fixed` от неё по-прежнему считается
+ * от окна.
  */
 
 type Stages = {
@@ -145,6 +153,9 @@ export default function DealModal({
   // На сервере `document` нет. Проверка безопасна и не даёт расхождения при
   // гидратации: модалка монтируется только после клика, то есть уже в браузере.
   if (typeof document === 'undefined') return null;
+  // Оболочка есть на всех экранах портала; body — страховка на случай, если
+  // модалку однажды позовут вне её (лучше без темы, чем без модалки).
+  const host = document.querySelector('.portal-shell') ?? document.body;
 
   return createPortal(
     <div
@@ -176,7 +187,7 @@ export default function DealModal({
               href={data.amo_url}
               target="_blank"
               rel="noreferrer"
-              className="shrink-0 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs text-blue-600 hover:bg-zinc-50"
+              className="shrink-0 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs text-blue-600 hover:bg-[var(--glass-row-hover)]"
             >
               Открыть в AMO
             </a>
@@ -185,7 +196,7 @@ export default function DealModal({
             type="button"
             onClick={onClose}
             aria-label="Закрыть"
-            className="shrink-0 rounded-lg p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600"
+            className="shrink-0 rounded-lg p-1 text-zinc-400 hover:bg-[var(--glass-row-hover)] hover:text-zinc-600"
           >
             <X className="h-4 w-4" />
           </button>
@@ -304,6 +315,6 @@ export default function DealModal({
         ) : null}
       </div>
     </div>,
-    document.body,
+    host,
   );
 }
