@@ -7,7 +7,14 @@ import { logBenchRequest } from '@/lib/bench/journal';
 import { checkActiveJobs, checkBenchLimits } from '@/lib/bench/limits';
 import { getBenchTool } from '@/lib/bench/registry';
 import { applyToolScope } from '@/lib/bench/scope';
-import type { BenchJobTool } from '@/lib/bench/types';
+import type { BenchJobTool, JobRow } from '@/lib/bench/types';
+
+/** Минимум от запроса supabase, которым пользуется список задач. */
+interface JobsQuery extends PromiseLike<{ data: JobRow[] | null; error: { message: string } | null }> {
+  eq(column: string, value: unknown): JobsQuery;
+  order(column: string, options: { ascending: boolean }): JobsQuery;
+  limit(count: number): JobsQuery;
+}
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -149,10 +156,16 @@ export async function GET(req: NextRequest) {
   // Фильтра по user_id здесь нет намеренно: клиент привязан к роботу, и чужие
   // строки отсекает RLS на уровне базы. Тест benchIsolation стережёт, чтобы
   // этот роут не начал ходить сервисным ключом, который RLS обходит.
-  const { data, error } = await applyToolScope(
-    auth.db.from(jobTool.table).select('*'),
-    jobTool,
-  )
+  // Запрос сужен до JobsQuery — минимума, который здесь используется.
+  // Полный тип билдера supabase-js разворачивается на union из всех таблиц
+  // инструментов так глубоко, что на обобщённом applyToolScope tsc сдаётся с
+  // TS2589. Строки всё равно уходят в toBenchJobView как JobRow
+  // (Record<string, unknown>), то есть типы здесь ничего не стерегли, а
+  // разграничение инструмента по-прежнему ставит applyToolScope — за этим
+  // следит тест benchIsolation.
+  const table: string = jobTool.table;
+  const query = auth.db.from(table).select('*') as unknown as JobsQuery;
+  const { data, error } = await applyToolScope(query, jobTool)
     .order('created_at', { ascending: false })
     .limit(LIST_LIMIT);
 

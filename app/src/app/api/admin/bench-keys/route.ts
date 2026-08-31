@@ -45,7 +45,7 @@ async function requireAdmin(req: NextRequest) {
 
 export async function GET(req: NextRequest) {
   const auth = await requireAdmin(req);
-  if ('error' in auth) return auth.error;
+  if (auth.error) return auth.error;
 
   const { data, error } = await auth.admin
     .from('bench_api_keys')
@@ -94,7 +94,7 @@ const issueSchema = z.object({
 
 export async function POST(req: NextRequest) {
   const auth = await requireAdmin(req);
-  if ('error' in auth) return auth.error;
+  if (auth.error) return auth.error;
 
   const parsed = issueSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {

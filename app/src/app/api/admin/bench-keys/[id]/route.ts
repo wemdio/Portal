@@ -43,7 +43,7 @@ type Ctx = { params: Promise<{ id: string }> };
 /** Журнал обращений по ключу — по нему разбирают, что происходило. */
 export async function GET(req: NextRequest, ctx: Ctx) {
   const auth = await requireAdmin(req);
-  if ('error' in auth) return auth.error;
+  if (auth.error) return auth.error;
 
   const { id } = await ctx.params;
   const { data, error } = await auth.admin
@@ -68,7 +68,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
  */
 export async function POST(req: NextRequest, ctx: Ctx) {
   const auth = await requireAdmin(req);
-  if ('error' in auth) return auth.error;
+  if (auth.error) return auth.error;
 
   const { id } = await ctx.params;
   const body = (await req.json().catch(() => null)) as { action?: string } | null;

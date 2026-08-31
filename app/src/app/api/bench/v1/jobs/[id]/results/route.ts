@@ -7,6 +7,7 @@ import { checkBenchLimits } from '@/lib/bench/limits';
 import { getBenchTool } from '@/lib/bench/registry';
 import { BENCH_FILE_URL_TTL_SECONDS, signBenchResultUrl } from '@/lib/bench/resultFile';
 import { applyToolScope } from '@/lib/bench/scope';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import type { BenchJobTool } from '@/lib/bench/types';
 
 export const dynamic = 'force-dynamic';
@@ -16,6 +17,33 @@ const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 1000;
 
 type Ctx = { params: Promise<{ id: string }> };
+
+/**
+ * Строка задачи с единственным нужным полем (без поля — только проверка, что
+ * задача вообще видна роботу).
+ *
+ * Имя поля приходит из реестра инструментов, поэтому выражение для `select()`
+ * собирается шаблонной строкой. По такому выражению supabase-js выводит форму
+ * строки на уровне типов, и на union из всех возможных полей вывод
+ * вырождается: в файловой ветке получалось «нельзя индексировать по string»
+ * (TS7015), в inline — «слишком глубокий вывод типов» (TS2589). Поэтому
+ * выражение объявлено обычной `string` — вывод обрывается здесь, а форму
+ * ответа вызывающий код всё равно проверяет в рантайме (`typeof`,
+ * `Array.isArray`), а не полагается на типы.
+ */
+async function selectJobField(
+  db: SupabaseClient,
+  jobTool: BenchJobTool,
+  id: string,
+  field?: string,
+): Promise<Record<string, unknown> | null> {
+  const columns: string = field ? `id, ${field}` : 'id';
+  const { data } = await applyToolScope(
+    db.from(jobTool.table).select(columns).eq('id', id),
+    jobTool,
+  ).maybeSingle();
+  return (data as Record<string, unknown> | null) ?? null;
+}
 
 export async function GET(req: NextRequest, ctx: Ctx) {
   const started = Date.now();
@@ -60,10 +88,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   // моя» во всех случаях идёт через клиент робота, то есть её выполняет RLS.
   if (jobTool.results.kind === 'file') {
     const { bucket, pathField } = jobTool.results;
-    const { data: job } = await applyToolScope(
-      auth.db.from(jobTool.table).select(`id, ${pathField}`).eq('id', id),
-      jobTool,
-    ).maybeSingle();
+    const job = await selectJobField(auth.db, jobTool, id, pathField);
     if (!job) return finish(benchError('not_found', 'Задача не найдена'), 0);
 
     const path = typeof job[pathField] === 'string' ? (job[pathField] as string) : null;
@@ -94,10 +119,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
   if (jobTool.results.kind === 'inline') {
     const field = jobTool.results.field;
-    const { data: job } = await applyToolScope(
-      auth.db.from(jobTool.table).select(`id, ${field}`).eq('id', id),
-      jobTool,
-    ).maybeSingle();
+    const job = await selectJobField(auth.db, jobTool, id, field);
     if (!job) return finish(benchError('not_found', 'Задача не найдена'), 0);
 
     const all = Array.isArray(job[field]) ? (job[field] as unknown[]) : [];
@@ -120,10 +142,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   // Сперва убеждаемся, что задача видна роботу. Без этого пришлось бы
   // полагаться только на RLS дочерней таблицы, а она у разных инструментов
   // написана по-разному — родителя проверяем явно.
-  const { data: job } = await applyToolScope(
-    auth.db.from(jobTool.table).select('id').eq('id', id),
-    jobTool,
-  ).maybeSingle();
+  const job = await selectJobField(auth.db, jobTool, id);
   if (!job) return finish(benchError('not_found', 'Задача не найдена'), 0);
 
   // Курсор, а не смещение: результаты дописываются воркером прямо во время
