@@ -26,7 +26,9 @@
 ## Test budget (critical)
 
 - Branch CI must finish in under 3 minutes. Tests are the only gate before merge (`main` runs none), so the suite is kept deliberately small — read «Правило: тесты пишем скупо» in [`CLAUDE.md`](./CLAUDE.md) before adding any test.
-- Never assert the text of an already-applied migration or a config file. A test must be able to fail on a *future* mistake; 58 such files were deleted on 2026-08-31. Enforce a rule across all files instead (see `app/tests/migrations/grants.test.ts`).
+- The suite is deliberately small: 176 files / ~1987 assertions, kept down to a coherent core (money, access control, worker lifecycle, outreach). On 2026-08-31 it was cut from 8423 assertions — do not grow it back by habit.
+- Never assert the text of an already-applied migration or a config file. A test must be able to fail on a *future* mistake. Enforce a rule across all files instead (see `app/tests/migrations/grants.test.ts`).
+- Semaphore bills the SUM of all job minutes, not wall-clock. Splitting the branch pipeline into parallel jobs shortens the wait but adds one full prologue (checkout + 1.3 GB of node_modules) to the bill per job. The branch block is one job on purpose.
 - Test logic by calling the function, not by rendering the screen: one render-based assertion costs about thirty plain ones on this project.
 - Never let a test live through a real backoff or cooldown — advance fake timers, or set the configurable delay to 0.
 - Do not add tests just because you touched a file. Add one for a bug you found or a new branch of logic; renames, wording, and code moves need none.
