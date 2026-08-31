@@ -47,7 +47,14 @@ export type BenchStopSupport =
  */
 export type BenchResultsSource =
   | { kind: 'table'; table: string; jobColumn: string; orderColumn: string }
-  | { kind: 'inline'; field: string };
+  | { kind: 'inline'; field: string }
+  /**
+   * `file` — итог задачи это файл в хранилище, а не строки (обогащение по
+   * ИНН отдаёт готовую таблицу). Витрина выдаёт временную ссылку на скачивание
+   * вместо страниц: притвориться, что там строки, значило бы отдать наружу
+   * что-нибудь другое — например статистику — под видом результата.
+   */
+  | { kind: 'file'; bucket: string; pathField: string };
 
 export interface BenchJobTool {
   id: string;
@@ -71,6 +78,22 @@ export interface BenchJobTool {
    * знает, приведение делает сам адаптер после разбора своей схемой.
    */
   buildRow(params: unknown, ownerId: string): JobRow;
+  /**
+   * Необязательный асинхронный шаг перед созданием задачи — для инструментов,
+   * которым мало строки в таблице.
+   *
+   * Нужен ровно одному: обогащение по ИНН работает с файлом в хранилище, и
+   * файл надо сначала положить туда. Возвращённые поля дописываются в строку
+   * задачи. Такие адаптеры пишут в хранилище служебным доступом, потому что
+   * ведро закрыто для обычных пользователей; данных других людей там нет —
+   * путь строится по идентификатору создаваемой задачи.
+   */
+  prepare?(args: { params: unknown; ownerId: string }): Promise<JobRow>;
+  /**
+   * Откат `prepare`, если создать строку задачи не удалось. Без него в
+   * хранилище копились бы файлы задач, которых не существует.
+   */
+  rollback?(prepared: JobRow): Promise<void>;
   mapStatus(row: JobRow): BenchStatus;
   progress(row: JobRow): { done: number; total: number | null };
   rowsFound(row: JobRow): number;

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { baseConstructorTool } from './tools/baseConstructor';
 import { companyBaseTool } from './tools/companyBase';
 import { googleMapsTool, googleNewsTool } from './tools/googleParsers';
+import { innEnrichTool } from './tools/innEnrich';
 import { hhArchiveTool, searchParserTool, yandexDirectTool } from './tools/moreParsers';
 import { atsTool, engHiringTool, hhTool } from './tools/parserJobs';
 import { ourBasesTool, twoGisTool } from './tools/sharedDirectories';
@@ -25,6 +26,7 @@ const TOOLS: BenchTool[] = [
   hhArchiveTool,
   searchParserTool,
   yandexDirectTool,
+  innEnrichTool,
   companyBaseTool,
   twoGisTool,
   ourBasesTool,

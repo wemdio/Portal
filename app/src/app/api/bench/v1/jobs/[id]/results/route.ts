@@ -5,6 +5,7 @@ import { benchError } from '@/lib/bench/errors';
 import { logBenchRequest } from '@/lib/bench/journal';
 import { checkBenchLimits } from '@/lib/bench/limits';
 import { getBenchTool } from '@/lib/bench/registry';
+import { BENCH_FILE_URL_TTL_SECONDS, signBenchResultUrl } from '@/lib/bench/resultFile';
 import { applyToolScope } from '@/lib/bench/scope';
 import type { BenchJobTool } from '@/lib/bench/types';
 
@@ -54,9 +55,43 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   const limit = Math.max(1, Math.min(MAX_LIMIT, Number(sp.get('limit')) || DEFAULT_LIMIT));
   const cursor = sp.get('cursor');
 
-  // Результаты у инструментов лежат двумя способами — в отдельной таблице
-  // или массивом в самой строке задачи. Проверка «задача моя» в обоих
-  // случаях идёт через клиент робота, то есть её выполняет RLS.
+  // Результаты у инструментов лежат тремя способами — отдельной таблицей,
+  // массивом в самой строке задачи или файлом в хранилище. Проверка «задача
+  // моя» во всех случаях идёт через клиент робота, то есть её выполняет RLS.
+  if (jobTool.results.kind === 'file') {
+    const { bucket, pathField } = jobTool.results;
+    const { data: job } = await applyToolScope(
+      auth.db.from(jobTool.table).select(`id, ${pathField}`).eq('id', id),
+      jobTool,
+    ).maybeSingle();
+    if (!job) return finish(benchError('not_found', 'Задача не найдена'), 0);
+
+    const path = typeof job[pathField] === 'string' ? (job[pathField] as string) : null;
+    if (!path) {
+      return finish(
+        benchError('conflict', 'Результат ещё не готов — дождитесь завершения задачи'),
+        0,
+      );
+    }
+
+    // Ссылка временная и ведёт ровно на один файл этой задачи. Постоянную
+    // выдавать нельзя: она пережила бы и отзыв ключа, и увольнение
+    // подрядчика.
+    const url = await signBenchResultUrl(bucket, path);
+    if (!url) {
+      return finish(benchError('server_error', 'Не удалось выдать ссылку на результат'), 0);
+    }
+
+    return finish(
+      NextResponse.json({
+        kind: 'file',
+        url,
+        expires_in_seconds: BENCH_FILE_URL_TTL_SECONDS,
+      }),
+      1,
+    );
+  }
+
   if (jobTool.results.kind === 'inline') {
     const field = jobTool.results.field;
     const { data: job } = await applyToolScope(

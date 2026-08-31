@@ -73,13 +73,32 @@ export async function POST(req: NextRequest) {
   const busy = await checkActiveJobs(auth.db, auth.key, jobTool.table, ACTIVE_STATUSES);
   if (busy) return finish(busy, tool.id);
 
+  // Некоторым инструментам мало строки в таблице: обогащению по ИНН нужно
+  // сперва положить файл в хранилище. Если дальше вставка не удастся,
+  // подготовленное надо убрать — иначе копятся файлы несуществующих задач.
+  let prepared: Record<string, unknown> = {};
+  if (jobTool.prepare) {
+    try {
+      prepared = await jobTool.prepare({
+        params: parsed.data,
+        ownerId: auth.key.robot_user_id,
+      });
+    } catch (e) {
+      return finish(
+        benchError('server_error', e instanceof Error ? e.message : 'Не удалось подготовить задачу'),
+        tool.id,
+      );
+    }
+  }
+
   // Владелец берётся ИЗ КЛЮЧА, а не из тела запроса — подделать его нельзя.
   // Схемы адаптеров вдобавок строгие (`.strict()`), поэтому попытка прислать
   // user_id отвергается ещё на проверке параметров.
-  const row = jobTool.buildRow(parsed.data, auth.key.robot_user_id);
+  const row = { ...jobTool.buildRow(parsed.data, auth.key.robot_user_id), ...prepared };
   const { data, error } = await auth.db.from(jobTool.table).insert(row).select().single();
 
   if (error || !data) {
+    if (jobTool.rollback) await jobTool.rollback(prepared);
     return finish(
       benchError('server_error', error?.message ?? 'Не удалось создать задачу'),
       tool.id,
