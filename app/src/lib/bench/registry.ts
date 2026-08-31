@@ -4,6 +4,7 @@ import { companyBaseTool } from './tools/companyBase';
 import { googleMapsTool, googleNewsTool } from './tools/googleParsers';
 import { hhArchiveTool, searchParserTool, yandexDirectTool } from './tools/moreParsers';
 import { atsTool, engHiringTool, hhTool } from './tools/parserJobs';
+import { ourBasesTool, twoGisTool } from './tools/sharedDirectories';
 import { yandexMapsTool } from './tools/yandexmaps';
 import type { BenchTool } from './types';
 
@@ -25,6 +26,8 @@ const TOOLS: BenchTool[] = [
   searchParserTool,
   yandexDirectTool,
   companyBaseTool,
+  twoGisTool,
+  ourBasesTool,
 ];
 
 const BY_ID = new Map<string, BenchTool>(TOOLS.map((tool) => [tool.id, tool]));
