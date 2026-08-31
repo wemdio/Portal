@@ -2813,7 +2813,11 @@ const PAIRS: Array<[string, string]> = [
   ['В прошлом периоде дохода не было', 'No income in the previous period'],
   ['Поступлений за выбранный период нет.', 'No money in for the selected period.'],
   ['Поступлений нет', 'No money in'],
-  ['в этом периоде не платил', 'no payments in this period'],
+  ['Перестали платить', 'Stopped paying'],
+  [
+    'Платили в предыдущем периоде такой же длины, в выбранном — ни одной операции.',
+    'They paid in the previous period of the same length; none in the selected one.',
+  ],
   [
     'Ни имени, ни ИНН — отобрать эти операции нечем.',
     'Neither name nor TIN — there is no way to filter these operations.',
