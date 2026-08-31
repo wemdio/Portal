@@ -89,6 +89,7 @@ export interface LocalVacancyRow {
   url: string;
   company_name: string;
   company_url: string | null;
+  employer_id: string | null;
   company_site_url: string | null;
   area: string;
   published_at: string | null;
@@ -120,7 +121,7 @@ export async function fetchVacanciesLocal(
   for (let iter = 0; iter < MAX_ITERATIONS; iter += 1) {
     let q = supabaseAdmin
       .from('hh_vacancies')
-      .select('vacancy_id,name,url,company_name,company_url,company_site_url,area,published_at')
+      .select('vacancy_id,name,url,company_name,company_url,employer_id,company_site_url,area,published_at')
       .order('published_at', { ascending: false, nullsFirst: false })
       .range(offset, offset + BATCH - 1);
 

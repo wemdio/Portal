@@ -7,9 +7,11 @@ export const dynamic = 'force-dynamic';
 export const GET = withAuth(async (req) => {
   const url = new URL(req.url);
   const resourceType = url.searchParams.get('resource_type') ?? undefined;
+  const accountId = url.searchParams.get('account_id') ?? undefined;
+  const requestOptions = { accountId };
 
   if (url.searchParams.get('limit') === 'all') {
-    const items = await instantly.listAllCustomTagMappings(resourceType);
+    const items = await instantly.listAllCustomTagMappings(resourceType, requestOptions);
     return NextResponse.json({ items });
   }
 
@@ -18,6 +20,6 @@ export const GET = withAuth(async (req) => {
     starting_after: url.searchParams.get('starting_after') ?? undefined,
     tag_id: url.searchParams.get('tag_id') ?? undefined,
     resource_type: resourceType,
-  });
+  }, requestOptions);
   return NextResponse.json(data);
 });
