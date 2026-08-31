@@ -84,7 +84,7 @@ export default function RenewalsRowsTable({
       </thead>
       <tbody>
         {sortedRows.map((row) => (
-          <tr key={row.id} className="border-b border-zinc-50 last:border-0 hover:bg-zinc-50/60">
+          <tr key={row.id} className="border-b border-zinc-50 last:border-0 hover:bg-[var(--glass-row-hover)]">
             <td className="px-3 py-2 font-medium text-zinc-800">{row.client || '—'}</td>
             <td className="px-3 py-2 text-zinc-600">{row.name || '—'}</td>
             <td className="px-3 py-2 text-right tabular-nums text-zinc-700">

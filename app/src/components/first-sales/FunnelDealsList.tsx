@@ -238,7 +238,7 @@ export default function FunnelDealsList({
                 // уезжает вверх при прокрутке (он sticky), и без полоски на
                 // середине длинной группы уже не видно, какая это ступень.
                 style={{ borderLeftColor: FUNNEL_STAGE_COLOR_VAR[item.stage] }}
-                className="block w-full border-b border-l-2 border-zinc-50 px-2.5 py-1.5 text-left last:border-b-0 hover:bg-zinc-50/60"
+                className="block w-full border-b border-l-2 border-zinc-50 px-2.5 py-1.5 text-left last:border-b-0 hover:bg-[var(--glass-row-hover)]"
               >
                 <div className="flex items-baseline gap-2">
                   <span className="min-w-0 flex-1 truncate text-xs text-zinc-800">

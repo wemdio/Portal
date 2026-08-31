@@ -101,7 +101,7 @@ export default function ManagerTable({
               <Fragment key={r.manager}>
               <tr
                 onClick={() => toggle(r.manager)}
-                className="cursor-pointer border-b border-zinc-50 last:border-0 hover:bg-zinc-50/60"
+                className="cursor-pointer border-b border-zinc-50 last:border-0 hover:bg-[var(--glass-row-hover)]"
                 aria-expanded={isOpen}
               >
                 <td className="px-3 py-2 text-zinc-800">
