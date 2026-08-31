@@ -82,6 +82,7 @@ export const yandexMapsTool: BenchJobTool = {
   },
 
   results: {
+    kind: 'table',
     table: 'yandex_maps_organizations',
     jobColumn: 'job_id',
     orderColumn: 'created_at',

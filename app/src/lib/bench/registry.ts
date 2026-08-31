@@ -1,5 +1,7 @@
 import { z } from 'zod';
+import { baseConstructorTool } from './tools/baseConstructor';
 import { companyBaseTool } from './tools/companyBase';
+import { googleMapsTool, googleNewsTool } from './tools/googleParsers';
 import { yandexMapsTool } from './tools/yandexmaps';
 import type { BenchTool } from './types';
 
@@ -9,7 +11,13 @@ import type { BenchTool } from './types';
  * инструмент значит написать адаптер и дописать его сюда; ни один роут при
  * этом не меняется.
  */
-const TOOLS: BenchTool[] = [yandexMapsTool, companyBaseTool];
+const TOOLS: BenchTool[] = [
+  baseConstructorTool,
+  yandexMapsTool,
+  googleMapsTool,
+  googleNewsTool,
+  companyBaseTool,
+];
 
 const BY_ID = new Map<string, BenchTool>(TOOLS.map((tool) => [tool.id, tool]));
 
