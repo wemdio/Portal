@@ -70,3 +70,52 @@ describe('POST /api/bench/v1/jobs/{id}/stop', () => {
     expect(described.stop_supported).toBe(false);
   });
 });
+
+describe('остановка там, где она настоящая', () => {
+  function googleRequest(id: string): NextRequest {
+    return {
+      headers: { get: () => null },
+      nextUrl: new URL(`https://portal.local/api/bench/v1/jobs/${id}/stop?tool=googlemaps`),
+    } as unknown as NextRequest;
+  }
+
+  beforeEach(() => {
+    KEY.allowed_tools = ['googlemaps'];
+    mockDb = createMockSupabase({
+      tables: {
+        google_maps_jobs: [
+          { id: 'g1', user_id: ROBOT, status: 'running' },
+          { id: 'g2', user_id: ROBOT, status: 'completed' },
+        ],
+      },
+    });
+  });
+
+  afterEach(() => {
+    KEY.allowed_tools = ['yandexmaps'];
+  });
+
+  it('переводит выполняющуюся задачу в остановленную', async () => {
+    const res = await POST(googleRequest('g1'), ctx('g1'));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe('stopped');
+  });
+
+  it('пишет в таблицу именно тот статус, который слушает воркер', async () => {
+    await POST(googleRequest('g1'), ctx('g1'));
+    const update = mockDb.updates.find((u) => u.table === 'google_maps_jobs');
+    expect(update?.patch).toEqual({ status: 'stopped' });
+  });
+
+  it('завершённую задачу останавливать нечего', async () => {
+    const res = await POST(googleRequest('g2'), ctx('g2'));
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({ error: { code: 'conflict' } });
+  });
+
+  it('чужая задача — not_found, а не conflict', async () => {
+    const res = await POST(googleRequest('чужая'), ctx('чужая'));
+    expect(res.status).toBe(404);
+  });
+});
