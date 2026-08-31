@@ -4,7 +4,8 @@
 > Перед началом обязательно прочитать: `AGENTS.md`, `docs/vertical-engine-changelog.md`,
 > `docs/design/2026-08-20-vertical-engine-v2-isolation.md`,
 > `docs/design/2026-08-26-vertical-engine-v2-cutover.md`,
-> `docs/design/2026-08-28-vertical-engine-v2-seasonal-launch-portfolio.md`.
+> `docs/design/2026-08-28-vertical-engine-v2-seasonal-launch-portfolio.md`,
+> `docs/integrations/instantly-api.md`.
 
 ## 1. Где мы и что это
 
@@ -16,7 +17,7 @@
 - **Граница (критично)**: `hypothesisEngine` / `he_*` / `HE_MODEL_*` — это прод-бэкенд
   `/client/eng`. Их **не трогать**. v1 (`/tools/hypothesis-engine`) — легаси-клиент того
   же бэкенда.
-- Дата контекста: **2026-08-30**. Звонок с технической командой по средам уже был.
+- Дата контекста: **2026-08-31**. Звонок с технической командой по средам уже был.
 
 ## 2. Что уже сделано
 
@@ -130,6 +131,21 @@ launch portfolio существуют только в коде ветки `Serge
      без relevance-verdict; они в итог не входят. При >2 000 есть warning о лимите одного
      запуска, а failed-база не получает выдуманный processed count из `row_count`. Live VBI-пример:
      **8 410 под фильтры → cap 2 000 → 1 514 после конструктора → 651 прошёл проверки**.
+9. **Безопасный выбор Instantly preset/workspace — закрыт в коде**:
+   - шаг 5 не выбирает первый клиентский пресет автоматически. Непривязанный legacy-проект
+     требует явного выбора; после него UI показывает workspace, общий тег пула и количество
+     ящиков без адресов отправителей;
+   - custom tags и account mappings читаются live и отдельно для каждого workspace. Exact tag
+     означает полное совпадение account-set с preset-пулом, shared покрывает весь пул и может
+     включать дополнительные ящики; частичные теги не угадываются и показываются как mixed;
+   - `20260831_0001_vertical_engine_v2_launch_preset_binding.sql` хранит на `ve_projects`
+     immutable preset/workspace binding, автора и время. Первый выбор закрепляется CAS-
+     операцией; другая пара либо перенос live preset в другой workspace блокируются до
+     launch reservation и внешних мутаций;
+   - точные `email_account_ids` остаются server-side authority для Instantly campaign payload
+     и launch snapshot. Tag — только display identity и не расширяет фактический sender pool;
+   - общий Instantly adapter и read-routes tags/mappings поддерживают account-scoped reads.
+     Миграция не применялась и приложение не деплоилось.
 
 ## 3. Ключевые решения и их мотивы (этого нет в коде — важно не потерять)
 
@@ -230,8 +246,10 @@ launch portfolio существуют только в коде ветки `Serge
   `20260828_0001_vertical_engine_v2_segmentation_audits.sql` (#8),
   `20260828_0002_vertical_engine_v2_ru_seasonality.sql` и
   `20260828_0003_vertical_engine_v2_launch_portfolio.sql`, а также
-  `20260830_0001_vertical_engine_v2_directory_stats.sql` — отдельный будущий release-шаг.
-  Миграция `20260830_0001` здесь точно не применялась; deployment не выполнялся.
+  `20260830_0001_vertical_engine_v2_directory_stats.sql` и
+  `20260831_0001_vertical_engine_v2_launch_preset_binding.sql` — отдельный будущий
+  release-шаг. Миграции `20260830_0001` и `20260831_0001` здесь точно не применялись;
+  deployment не выполнялся.
 - **Live VBI-тест в v2 после деплоя**: 2 гипотезы → 2 базы; verified сезонность с
   peak/avoid/unknown и московским состоянием; человеческие названия (#9); видимый tokenized
   segment preview (#7); async audit (#8) с complete, stale/incomplete и `not_required`;
@@ -287,6 +305,11 @@ launch portfolio существуют только в коде ветки `Serge
   `VerticalEngineV2Step5Template.test.tsx`. Итоговый прогон: весь Vertical Engine v2 —
   **37 suites / 316 tests passed**; целевой seasonality/portfolio-набор —
   **13 suites / 162 tests passed**; strict TypeScript — green.
+- **Актуальный полный VE2 regression после preset/workspace binding**: все
+  `tests/lib/vertical-engine-v2`, `tests/api/vertical-engine-v2`, компоненты
+  `VerticalEngineV2*`, v2 migrations/isolation, workspace-scoped custom-tag reads и общие
+  migration guards — **57 suites / 404 tests passed**; strict TypeScript и targeted ESLint —
+  green; production Next build завершён успешно.
 - **Старые тесты**: isolation ожидает v2 В реестре (а не скрытым); v1 `POST projects`
   ожидает `409`. `mockSupabase` поддерживает `.ilike()`/`.select()`/`.single()`.
 - **`worker/verticalEngineV2.ts`** — в eslint-ignore (worker линтится только esbuild-сборкой).

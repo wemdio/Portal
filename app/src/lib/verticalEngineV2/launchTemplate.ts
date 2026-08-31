@@ -42,6 +42,7 @@ import {
 } from './segmentationAudit';
 import { reconcileExpiredLaunchReservation } from './launchReservation';
 import { latestSeasonalActivationAt, normalizeLaunchMailboxIds } from './launchPortfolio';
+import { ensureVeProjectLaunchPresetBinding } from './projectLaunchPresetBinding';
 import {
   buildRuSeasonalityPrioritySnapshot,
   readStoredRuSeasonality,
@@ -58,6 +59,10 @@ interface VeLaunchMessages {
   presetLoadFailed: string;
   presetNotFound: string;
   mailboxScopeRequired: string;
+  projectNotFound: string;
+  projectPresetMismatch: string;
+  projectWorkspaceChanged: string;
+  projectBindingFailed: string;
   noLetters: string;
   noEmailColumn: string;
   noValidEmails: string;
@@ -84,6 +89,12 @@ const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
     presetLoadFailed: 'Не удалось загрузить пресет',
     presetNotFound: 'Пресет не найден',
     mailboxScopeRequired: 'В пресете нет почтовых аккаунтов для безопасного запуска.',
+    projectNotFound: 'Проект базы не найден',
+    projectPresetMismatch:
+      'Проект уже привязан к другому клиентскому пресету. Обновите страницу и используйте привязанный пресет.',
+    projectWorkspaceChanged:
+      'Workspace привязанного пресета изменился. Запуск заблокирован до ручной перепривязки.',
+    projectBindingFailed: 'Не удалось закрепить клиентский пресет за проектом',
     noLetters: 'У шаблона нет писем для запуска',
     noEmailColumn: 'В базе не найдена колонка с email',
     noValidEmails: 'В базе нет валидных email-адресов',
@@ -112,6 +123,12 @@ const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
     presetLoadFailed: 'Failed to load the preset',
     presetNotFound: 'Preset not found',
     mailboxScopeRequired: 'The preset has no sender accounts for a safe launch.',
+    projectNotFound: 'The base project was not found',
+    projectPresetMismatch:
+      'The project is already bound to another client preset. Refresh and use the bound preset.',
+    projectWorkspaceChanged:
+      'The bound preset moved to another workspace. Launch is blocked until a manual rebind.',
+    projectBindingFailed: 'Failed to bind the client preset to the project',
     noLetters: 'The template has no letters to launch',
     noEmailColumn: 'No email column found in the collected base',
     noValidEmails: 'The base contains no valid email addresses',
@@ -491,6 +508,37 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   }
   const instantlyAccountId = resolveInstantlyAccountId(preset.instantly_account_id);
   const instantlyRequestOptions = { accountId: instantlyAccountId };
+
+  // A project gets one immutable preset/workspace scope on its first launch
+  // attempt. The compare-and-set helper closes simultaneous first-choice
+  // races. Any later mismatch fails before reservation and every Instantly
+  // mutation; exact mailbox ids remain the execution authority inside preset.
+  const projectBinding = await ensureVeProjectLaunchPresetBinding(portalDb, {
+    projectId: base.project_id,
+    livePresetId: presetId,
+    liveInstantlyAccountId: instantlyAccountId,
+    boundBy: userId,
+  });
+  if (projectBinding.status === 'project_not_found') {
+    return { status: 404, body: { error: t.projectNotFound } };
+  }
+  if (projectBinding.status === 'error') {
+    await logError(
+      `${eventPrefix}.project_preset_binding_failed`,
+      new Error(projectBinding.error),
+      { userId, templateId, projectId: base.project_id, presetId },
+    );
+    return {
+      status: 500,
+      body: { error: `${t.projectBindingFailed}: ${projectBinding.error}` },
+    };
+  }
+  if (projectBinding.status === 'mismatch') {
+    return conflict('VE_PROJECT_PRESET_MISMATCH', t.projectPresetMismatch);
+  }
+  if (projectBinding.status === 'workspace_changed') {
+    return conflict('VE_PROJECT_WORKSPACE_CHANGED', t.projectWorkspaceChanged);
+  }
 
   // Evidence-stage is the only source of the calendar assessment. Missing or
   // malformed legacy values remain explicit unknown; launch never guesses a

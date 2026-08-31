@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { resolveHhEmployerId } from '@/lib/parsers/hhEmployerId';
 
 function ensureAdmin() {
   if (!supabaseAdmin) throw new Error('Supabase admin not configured');
@@ -39,8 +40,8 @@ const PARSER_CONFIGS: Record<string, {
     table: 'hh_vacancies',
     jobTable: 'parser_jobs',
     jobIdCol: 'job_id',
-    columns: ['vacancy_id', 'name', 'url', 'company_name', 'company_url', 'company_site_url', 'company_description', 'area', 'salary_from', 'salary_to', 'salary_currency', 'industries', 'published_at'],
-    headers: ['vacancy_id', 'name', 'url', 'company_name', 'company_url', 'company_site_url', 'company_description', 'area', 'salary_from', 'salary_to', 'salary_currency', 'industries', 'published_at'],
+    columns: ['vacancy_id', 'name', 'url', 'company_name', 'company_url', 'employer_id', 'company_site_url', 'company_description', 'area', 'salary_from', 'salary_to', 'salary_currency', 'industries', 'published_at'],
+    headers: ['vacancy_id', 'name', 'url', 'company_name', 'company_url', 'employer_id', 'company_site_url', 'company_description', 'area', 'salary_from', 'salary_to', 'salary_currency', 'industries', 'published_at'],
     filePrefix: 'hh_vacancies',
   },
   search: {
@@ -120,6 +121,15 @@ export async function exportParserResults(
   }
 
   if (allRows.length === 0) return 'Результатов для этой задачи нет. Возможно, парсер ещё работает или задача пуста.';
+
+  if (resolvedType === 'hh') {
+    for (const row of allRows) {
+      row.employer_id = resolveHhEmployerId(
+        row.employer_id as string | null | undefined,
+        row.company_url as string | null | undefined,
+      );
+    }
+  }
 
   const buffer = buildCsvBuffer(config.headers, allRows);
   const dateStr = new Date().toISOString().slice(0, 10);

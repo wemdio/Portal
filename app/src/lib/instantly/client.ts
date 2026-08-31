@@ -555,16 +555,19 @@ function normalizeTag(raw: Record<string, unknown>): CustomTag {
   } as CustomTag;
 }
 
-export async function listCustomTags(params?: PaginationParams) {
+export async function listCustomTags(
+  params?: PaginationParams,
+  requestOptions?: InstantlyRequestOptions,
+) {
   const res = await request<PaginatedResponse<CustomTag>>('/custom-tags', {
     params: params as Record<string, string | number>,
-  });
+  }, requestOptions);
   res.items = res.items?.map((t) => normalizeTag(t as unknown as Record<string, unknown>));
   return res;
 }
 
-export async function listAllCustomTags(): Promise<CustomTag[]> {
-  const tags = await fetchAllPages<CustomTag>('/custom-tags');
+export async function listAllCustomTags(requestOptions?: InstantlyRequestOptions): Promise<CustomTag[]> {
+  const tags = await fetchAllPages<CustomTag>('/custom-tags', undefined, undefined, requestOptions);
   return tags.map((t) => normalizeTag(t as unknown as Record<string, unknown>));
 }
 
@@ -582,17 +585,26 @@ export async function toggleTagResource(body: { tag_id: string; resource_id: str
   return request<unknown>('/custom-tags/toggle-resource', { method: 'POST', body });
 }
 
-export async function listCustomTagMappings(params?: PaginationParams & { tag_id?: string; resource_type?: string }) {
+export async function listCustomTagMappings(
+  params?: PaginationParams & { tag_id?: string; resource_type?: string },
+  requestOptions?: InstantlyRequestOptions,
+) {
   return request<PaginatedResponse<{ id: string; tag_id: string; resource_id: string; resource_type: string }>>(
     '/custom-tag-mappings',
     { params: params as Record<string, string | number> },
+    requestOptions,
   );
 }
 
-export async function listAllCustomTagMappings(resourceType?: string): Promise<{ id: string; tag_id: string; resource_id: string; resource_type: string }[]> {
+export async function listAllCustomTagMappings(
+  resourceType?: string,
+  requestOptions?: InstantlyRequestOptions,
+): Promise<{ id: string; tag_id: string; resource_id: string; resource_type: string }[]> {
   return fetchAllPages<{ id: string; tag_id: string; resource_id: string; resource_type: string }>(
     '/custom-tag-mappings',
     resourceType ? { resource_type: resourceType } : undefined,
+    undefined,
+    requestOptions,
   );
 }
 
