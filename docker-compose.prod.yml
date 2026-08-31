@@ -1005,10 +1005,10 @@ services:
       - portal-network
 
   # Конструктор баз. Выносит «pipeline для CSV/Excel баз» из HTTP-процесса
-  # portal'a в отдельные долгоживущие контейнеры. 7 реплик (worker-
-  # baseconstructor / -2 ... -7) делят одну очередь base_constructor_jobs через
+  # portal'a в отдельные долгоживущие контейнеры. 9 реплик (worker-
+  # baseconstructor / -2 ... -9) делят одну очередь base_constructor_jobs через
   # атомарный CAS-claim (UPDATE WHERE status='pending') - каждый job берёт
-  # ровно одна реплика. Параллельно: 7 реплик x 1 job = 7 job'ов.
+  # ровно одна реплика. Параллельно: 9 реплик x 1 job = 9 job'ов.
   # Реплики дают отказоустойчивость: краш/OOM одной не уносит job'ы остальных.
   # Stale (без heartbeat 15+ мин) processing-задачи любая реплика автоматически
   # резумит с того шага, где остановились.
@@ -1037,16 +1037,16 @@ services:
       # Глобальный потолок — общий main-rest/Postgres, AI-роутер и скрейпинг.
       # Это НЕ то же, что per-user cap MAX_ACTIVE_JOBS_PER_USER=6 в route.ts.
       - BASE_CONSTRUCTOR_CONCURRENCY=1
-      # Per-job fan-out скрейпинга (find_emails/enrich). На 7 параллельных
-      # job'ах библиотечные дефолты 15+5 дали бы до ~140 исходящих коннектов.
-      # Для base-constructor держим 10+6 = до ~112; env можно откатить без
+      # Per-job fan-out скрейпинга (find_emails/enrich). На 9 параллельных
+      # job'ах библиотечные дефолты 15+5 дали бы до ~180 исходящих коннектов.
+      # Для base-constructor держим 10+6 = до ~144; env можно откатить без
       # правки кода. DFYB эти env не ставит -> у него остаются дефолты 15/5.
       - BASE_EMAIL_SCRAPE_CONCURRENCY=${BASE_EMAIL_SCRAPE_CONCURRENCY:-10}
       - BASE_ENRICH_SCRAPE_CONCURRENCY=${BASE_ENRICH_SCRAPE_CONCURRENCY:-6}
       # 60s возвращают запас времени для retry/fallback-цепочки.
       - BASE_ENRICH_PER_SITE_TIMEOUT_MS=${BASE_ENRICH_PER_SITE_TIMEOUT_MS:-60000}
-      # У семи воркеров общий Requesty-ключ: по одной AI-пачке на job
-      # даёт до 7 одновременных вызовов без пика 14.
+      # У девяти воркеров общий Requesty-ключ: по одной AI-пачке на job
+      # даёт до 9 одновременных вызовов без неконтролируемого fan-out.
       - BASE_TA_SCORING_CONCURRENCY=${BASE_TA_SCORING_CONCURRENCY:-1}
       - BASE_CONSTRUCTOR_STALE_MINUTES=${BASE_CONSTRUCTOR_STALE_MINUTES:-15}
     # Job может занимать 30-60 минут (find_emails+enrich на 1.5к строк).
@@ -1067,7 +1067,7 @@ services:
       - portal-network
 
   # Реплики base-constructor. Делят очередь base_constructor_jobs через
-  # атомарный CAS-claim, как enrich-реплики. Всего 7 x concurrency(1) = 7.
+  # атомарный CAS-claim, как enrich-реплики. Всего 9 x concurrency(1) = 9.
   worker-baseconstructor-2:
     <<: *worker-baseconstructor
     container_name: portal-worker-baseconstructor-2
@@ -1076,8 +1076,8 @@ services:
     <<: *worker-baseconstructor
     container_name: portal-worker-baseconstructor-3
 
-  # Реплики 4-6 прошли production-canary 20.08.2026; реплика 7 использует те же
-  # проверенные консервативные параметры.
+  # Реплики 4-6 прошли production-canary 20.08.2026; реплики 7-9 используют те
+  # же проверенные консервативные параметры.
   # Ограничиваем каждую одной CPU и 4GB: это ровно те параметры, на которых
   # временные реплики прошли проверку без OOM/restart и деградации health.
   worker-baseconstructor-4: &worker-baseconstructor-conservative
@@ -1101,6 +1101,14 @@ services:
   worker-baseconstructor-7:
     <<: *worker-baseconstructor-conservative
     container_name: portal-worker-baseconstructor-7
+
+  worker-baseconstructor-8:
+    <<: *worker-baseconstructor-conservative
+    container_name: portal-worker-baseconstructor-8
+
+  worker-baseconstructor-9:
+    <<: *worker-baseconstructor-conservative
+    container_name: portal-worker-baseconstructor-9
 
   worker-instantly-leads:
     image: ${DOCKER_USERNAME}/portal-worker:prod
