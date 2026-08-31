@@ -89,10 +89,15 @@ export interface VeTemplateLaunchInfo {
   campaigns?: VeTemplateLaunchCampaign[];
 }
 
-/** Пункт селектора пресетов (GET launch): id + человекочитаемое имя клиента. */
+/** Безопасный для UI пункт селектора пресетов (GET launch), без адресов почт. */
 export interface VeLaunchPresetOption {
   id: string;
   name: string;
+  instantly_account_id: string;
+  instantly_account_label: string;
+  mailbox_count: number;
+  mailbox_tags: Array<{ id: string; name: string }>;
+  mailbox_tag_resolution: 'exact' | 'shared' | 'mixed' | 'none' | 'unavailable';
 }
 
 /** Аккуратно прочитать launch_info из jsonb (могло прийти что угодно). */

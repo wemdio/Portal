@@ -182,6 +182,7 @@ function seed(
   options: {
     errorUpdates?: Record<string, { message: string; patchIncludes?: Record<string, unknown> }>;
     presetOverrides?: Partial<typeof PRESET_ROW>;
+    projectOverrides?: Record<string, unknown>;
   } = {},
 ) {
   mockPortalDb = createMockSupabase({
@@ -221,7 +222,16 @@ function seed(
       },
     },
     tables: {
-      ve_projects: [{ id: PROJECT_ID, created_by: USER_ID, market: 'ru' }],
+      ve_projects: [{
+        id: PROJECT_ID,
+        created_by: USER_ID,
+        market: 'ru',
+        launch_preset_id: null,
+        launch_instantly_account_id: null,
+        launch_preset_bound_at: null,
+        launch_preset_bound_by: null,
+        ...options.projectOverrides,
+      }],
       ve_verticals: [{
         id: 'vertical-launch-audit-1',
         project_id: PROJECT_ID,
@@ -392,6 +402,38 @@ describe('POST /api/tools/vertical-engine-v2/templates/[id]/launch — segmentat
     await expectBlocked(launchBody(), 'TEMPLATE_LAUNCH_IN_PROGRESS');
   });
 
+  it('rejects another preset once the project is bound, before reservation or Instantly calls', async () => {
+    seed([readyAudit()], {
+      projectOverrides: {
+        launch_preset_id: '00000000-0000-4000-8000-000000000999',
+        launch_instantly_account_id: 'main',
+        launch_preset_bound_at: '2026-08-31T10:00:00.000Z',
+        launch_preset_bound_by: USER_ID,
+      },
+    });
+
+    await expectBlocked(launchBody(), 'VE_PROJECT_PRESET_MISMATCH');
+    expect(mockPortalDb.getRows('ve_segmentation_audits')[0]).toEqual(
+      expect.objectContaining({ launch_status: 'idle', launch_reservation_id: null }),
+    );
+  });
+
+  it('rejects a live preset that moved away from the workspace frozen on the project', async () => {
+    seed([readyAudit()], {
+      projectOverrides: {
+        launch_preset_id: PRESET_ID,
+        launch_instantly_account_id: 'workspace-before-move',
+        launch_preset_bound_at: '2026-08-31T10:00:00.000Z',
+        launch_preset_bound_by: USER_ID,
+      },
+    });
+
+    await expectBlocked(launchBody(), 'VE_PROJECT_WORKSPACE_CHANGED');
+    expect(mockPortalDb.getRows('ve_segmentation_audits')[0]).toEqual(
+      expect.objectContaining({ launch_status: 'idle', launch_reservation_id: null }),
+    );
+  });
+
   it('stops before another campaign when project cancellation invalidates the audit mid-launch', async () => {
     seed([readyAudit()]);
     mockCreateCampaign
@@ -440,6 +482,15 @@ describe('POST /api/tools/vertical-engine-v2/templates/[id]/launch — segmentat
     };
     expect(body.ok).toBe(true);
     expect(mockClassify).not.toHaveBeenCalled();
+
+    expect(mockPortalDb.getRows('ve_projects')[0]).toEqual(
+      expect.objectContaining({
+        launch_preset_id: PRESET_ID,
+        launch_instantly_account_id: 'main',
+        launch_preset_bound_at: expect.any(String),
+        launch_preset_bound_by: USER_ID,
+      }),
+    );
 
     expect(mockCreateCampaign).toHaveBeenCalledTimes(2);
     expect(mockCreateLeads).toHaveBeenCalledTimes(2);

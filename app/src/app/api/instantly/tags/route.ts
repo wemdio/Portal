@@ -7,9 +7,11 @@ export const dynamic = 'force-dynamic';
 export const GET = withAuth(async (req) => {
   const url = new URL(req.url);
   const limit = url.searchParams.get('limit');
+  const accountId = url.searchParams.get('account_id') ?? undefined;
+  const requestOptions = { accountId };
 
   if (limit === 'all') {
-    const tags = await instantly.listAllCustomTags();
+    const tags = await instantly.listAllCustomTags(requestOptions);
     return NextResponse.json({ items: tags });
   }
 
@@ -17,7 +19,7 @@ export const GET = withAuth(async (req) => {
   const data = await instantly.listCustomTags({
     limit: limit ? parseInt(limit, 10) : 100,
     starting_after,
-  });
+  }, requestOptions);
   return NextResponse.json(data);
 });
 

@@ -155,6 +155,36 @@ const COMPLETE_AUDIT = {
   },
 };
 
+type LaunchPresetFixture = {
+  id: string;
+  name: string;
+  instantly_account_id: string;
+  instantly_account_label: string;
+  mailbox_count: number;
+  mailbox_tags: Array<{ id: string; name: string }>;
+  mailbox_tag_resolution: 'exact' | 'shared' | 'mixed' | 'none' | 'unavailable';
+};
+
+const VBI_PRESET: LaunchPresetFixture = {
+  id: 'preset-1',
+  name: 'VBI',
+  instantly_account_id: 'main',
+  instantly_account_label: 'Основной Instantly',
+  mailbox_count: 16,
+  mailbox_tags: [{ id: 'tag-vbi', name: 'VBI mailboxes' }],
+  mailbox_tag_resolution: 'exact',
+};
+
+const NORTH_PRESET: LaunchPresetFixture = {
+  id: 'preset-2',
+  name: 'Север',
+  instantly_account_id: 'north',
+  instantly_account_label: 'Северный workspace',
+  mailbox_count: 8,
+  mailbox_tags: [{ id: 'tag-north', name: 'North pool' }],
+  mailbox_tag_resolution: 'shared',
+};
+
 const PRIORITY_SNAPSHOT = {
   version: 1,
   state: 'neutral',
@@ -278,7 +308,15 @@ function pendingPostResult() {
   });
 }
 
-function configureAuditRead(audit: unknown) {
+function configureAuditRead(
+  audit: unknown,
+  options: {
+    presets?: LaunchPresetFixture[];
+    boundPresetId?: string | null;
+  } = {},
+) {
+  const presets = options.presets ?? [VBI_PRESET];
+  const boundPresetId = options.boundPresetId === undefined ? 'preset-1' : options.boundPresetId;
   mockEngineCall.mockImplementation(async (url: string) => {
     if (url === AUDIT_URL) {
       return { ok: true, status: 200, data: { audit } };
@@ -287,7 +325,7 @@ function configureAuditRead(audit: unknown) {
       return {
         ok: true,
         status: 200,
-        data: { presets: [{ id: 'preset-1', name: 'VBI' }] },
+        data: { presets, bound_preset_id: boundPresetId },
       };
     }
     throw new Error(`Unexpected GET ${url}`);
@@ -427,6 +465,155 @@ describe('<Step5Template /> — предзапускный аудит сегме
     await act(async () => {
       resolveAudit({ ok: true, status: 202, data: PENDING_AUDIT_RESPONSE });
     });
+  });
+
+  it('не выбирает первый пресет автоматически для непривязанного проекта', async () => {
+    configureAuditRead(COMPLETE_AUDIT, { boundPresetId: null });
+    mockEnginePost.mockImplementation((url: string) => {
+      if (url === AUDIT_URL) return pendingPostResult();
+      throw new Error(`Unexpected POST ${url}`);
+    });
+
+    const user = userEvent.setup();
+    renderStep();
+    await user.click(screen.getByRole('button', { name: /Проверить перед запуском/i }));
+
+    const select = await screen.findByRole('combobox', { name: /Клиентский пресет/i });
+    expect(select).toHaveValue('');
+    expect(screen.getByRole('option', { name: /Выберите клиента/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Создать .*кампан.*на паузе/i })).toBeDisabled();
+  });
+
+  it('выбирает только явно привязанный пресет', async () => {
+    configureAuditRead(COMPLETE_AUDIT, {
+      presets: [VBI_PRESET, NORTH_PRESET],
+      boundPresetId: NORTH_PRESET.id,
+    });
+    mockEnginePost.mockImplementation((url: string) => {
+      if (url === AUDIT_URL) return pendingPostResult();
+      throw new Error(`Unexpected POST ${url}`);
+    });
+
+    const user = userEvent.setup();
+    renderStep();
+    await user.click(screen.getByRole('button', { name: /Проверить перед запуском/i }));
+
+    const select = await screen.findByRole('combobox', { name: /Клиентский пресет/i });
+    expect(select).toHaveValue(NORTH_PRESET.id);
+    expect(select).toBeDisabled();
+    expect(screen.queryByRole('option', { name: /Выберите клиента/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/Пресет закреплён за проектом/i)).toBeInTheDocument();
+  });
+
+  it('блокирует запуск, если закреплённого пресета нет в доступной выдаче', async () => {
+    configureAuditRead(COMPLETE_AUDIT, {
+      presets: [VBI_PRESET],
+      boundPresetId: 'missing-preset',
+    });
+    mockEnginePost.mockImplementation((url: string) => {
+      if (url === AUDIT_URL) return pendingPostResult();
+      throw new Error(`Unexpected POST ${url}`);
+    });
+
+    const user = userEvent.setup();
+    renderStep();
+    await user.click(screen.getByRole('button', { name: /Проверить перед запуском/i }));
+
+    expect(await screen.findByText(/Закреплённый пресет проекта недоступен/i)).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: /Клиентский пресет/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Создать .*кампан.*на паузе/i })).toBeDisabled();
+  });
+
+  it('показывает workspace, тег и число ящиков, но не адреса почт', async () => {
+    configureAuditRead(COMPLETE_AUDIT);
+    mockEnginePost.mockImplementation((url: string) => {
+      if (url === AUDIT_URL) return pendingPostResult();
+      throw new Error(`Unexpected POST ${url}`);
+    });
+
+    const user = userEvent.setup();
+    const { container } = renderStep();
+    await user.click(screen.getByRole('button', { name: /Проверить перед запуском/i }));
+
+    await screen.findByRole('combobox', { name: /Клиентский пресет/i });
+    expect(screen.getByText('Основной Instantly')).toBeInTheDocument();
+    expect(container.querySelector('.ve2-tag')).toHaveTextContent('VBI mailboxes');
+    expect(screen.getByText(/16 ящиков/i)).toBeInTheDocument();
+    expect(container).not.toHaveTextContent('@');
+    const summary = container.querySelector('#ve2-launch-preset-summary');
+    expect(summary).toHaveClass('border-t', 'pt-3');
+    expect(summary).not.toHaveClass('rounded-md', 'bg-gray-50');
+  });
+
+  it('обновляет сводку при смене пресета и отправляет выбранный id', async () => {
+    configureAuditRead(COMPLETE_AUDIT, {
+      presets: [VBI_PRESET, NORTH_PRESET],
+      boundPresetId: null,
+    });
+    mockEnginePost.mockImplementation(async (url: string, body?: unknown) => {
+      if (url === AUDIT_URL) return pendingPostResult();
+      if (url === LAUNCH_URL) {
+        return {
+          ok: true,
+          status: 200,
+          data: {
+            launch: {
+              campaign_id: 'campaign-north',
+              campaign_name: 'education.csv',
+              campaign_url: 'https://app.instantly.ai/app/campaign/campaign-north',
+              leads_count: 112,
+              preset_id: (body as { preset_id?: string } | undefined)?.preset_id,
+              created_at: '2026-08-27T08:20:00.000Z',
+            },
+          },
+        };
+      }
+      throw new Error(`Unexpected POST ${url}`);
+    });
+
+    const user = userEvent.setup();
+    renderStep();
+    await user.click(screen.getByRole('button', { name: /Проверить перед запуском/i }));
+
+    const select = await screen.findByRole('combobox', { name: /Клиентский пресет/i });
+    await user.selectOptions(select, NORTH_PRESET.id);
+    expect(screen.getByText('Северный workspace')).toBeInTheDocument();
+    expect(screen.getByText('North pool')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Создать .*кампан.*на паузе/i }));
+
+    await waitFor(() => {
+      expect(mockEnginePost).toHaveBeenCalledWith(LAUNCH_URL, {
+        preset_id: NORTH_PRESET.id,
+        segmentation_audit_id: 'audit-1',
+        confirm_segmentation: true,
+      });
+    });
+  });
+
+  it('блокирует создание кампаний, когда в пресете нет ящиков', async () => {
+    configureAuditRead(COMPLETE_AUDIT, {
+      presets: [{
+        ...VBI_PRESET,
+        mailbox_count: 0,
+        mailbox_tags: [],
+        mailbox_tag_resolution: 'none',
+      }],
+      boundPresetId: null,
+    });
+    mockEnginePost.mockImplementation((url: string) => {
+      if (url === AUDIT_URL) return pendingPostResult();
+      throw new Error(`Unexpected POST ${url}`);
+    });
+
+    const user = userEvent.setup();
+    renderStep();
+    await user.click(screen.getByRole('button', { name: /Проверить перед запуском/i }));
+
+    const select = await screen.findByRole('combobox', { name: /Клиентский пресет/i });
+    await user.selectOptions(select, VBI_PRESET.id);
+    expect(await screen.findByText(/Тег не назначен/i)).toBeInTheDocument();
+    expect(screen.getByText(/0 ящиков/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Создать .*кампан.*на паузе/i })).toBeDisabled();
   });
 
   it('показывает полную раскладку и запускает только с подтверждённым audit id', async () => {
