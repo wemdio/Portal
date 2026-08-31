@@ -21,12 +21,14 @@ const serviceNames = [
   'worker-baseconstructor-8',
   'worker-baseconstructor-9',
   'worker-baseconstructor-10',
+  'worker-baseconstructor-11',
+  'worker-baseconstructor-12',
 ];
 
 const containerNames = serviceNames.map((serviceName) => `portal-${serviceName}`);
 
 describe('BaseConstructor production capacity', () => {
-  it('defines exactly ten single-job replicas', () => {
+  it('defines exactly twelve single-job replicas', () => {
     const compose = readRepoFile('docker-compose.prod.yml');
     const declaredServices = Array.from(
       compose.matchAll(
@@ -49,7 +51,7 @@ describe('BaseConstructor production capacity', () => {
     }
   });
 
-  it('keeps replicas four through ten on the proven conservative limits', () => {
+  it('keeps replicas four through twelve on the proven conservative limits', () => {
     const compose = readRepoFile('docker-compose.prod.yml');
     const conservativeReplicaBlock = compose.match(
       /^  worker-baseconstructor-4:[\s\S]*?(?=^  worker-baseconstructor-5:)/m,
@@ -61,11 +63,11 @@ describe('BaseConstructor production capacity', () => {
     expect(conservativeReplicaBlock).toContain('pids: 512');
     const inheritedConservativeReplicas = Array.from(
       compose.matchAll(
-        /^  worker-baseconstructor-((?:[5-9]|10)):\r?\n    <<: \*worker-baseconstructor-conservative/gm,
+        /^  worker-baseconstructor-((?:[5-9]|[1-9][0-9]+)):\r?\n    <<: \*worker-baseconstructor-conservative/gm,
       ),
       (match) => Number(match[1]),
     );
-    expect(inheritedConservativeReplicas).toEqual([5, 6, 7, 8, 9, 10]);
+    expect(inheritedConservativeReplicas).toEqual([5, 6, 7, 8, 9, 10, 11, 12]);
   });
 
   it('includes every replica in shared-worker deploy selection', () => {
