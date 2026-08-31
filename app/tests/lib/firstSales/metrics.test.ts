@@ -1,6 +1,10 @@
 import {
   CONTRACT_RULE_SINCE,
   computeFirstSalesSeries,
+  isContractInWindow,
+  isLeadInWindow,
+  isQualifiedInWindow,
+  meetingsByDeal,
   type FirstSalesLeadRow,
 } from '@/lib/firstSales/metrics';
 import { MEETINGS_RELIABLE_SINCE, type MeetingLinkRow } from '@/lib/firstSales/meetings';
@@ -10,6 +14,7 @@ function lead(over: Partial<FirstSalesLeadRow> = {}): FirstSalesLeadRow {
   return {
     amo_id: 1,
     name: 'Обычная сделка',
+    company_name: 'ООО Ромашка',
     responsible_name: 'Менеджер А',
     created_at: '2026-07-15T09:00:00.000Z',
     first_qualified_at: null,
@@ -569,5 +574,72 @@ describe('реальные деньги по ИНН', () => {
     const res = computeFirstSalesSeries([lead()], [], from, to, 'day', null);
     expect(res.totals.money.received).toBe(0);
     expect(res.byManager[0]?.money).toBe(0);
+  });
+});
+
+/**
+ * Правила «что этой сделки попало в период». Ими считаются и цифры разбивок,
+ * и список сделок под раскрытой строкой (`api/analytics/first-sales/leads`) —
+ * до этого список отдавал всю выборку окна, а она сознательно шире периода,
+ * и под строкой «лиды за август» показывались сделки 2024 года.
+ */
+describe('попадание сделки в период', () => {
+  it('лид — по дате создания внутри окна', () => {
+    expect(isLeadInWindow(lead({ created_at: '2026-07-15T09:00:00.000Z' }), from, to)).toBe(true);
+    expect(isLeadInWindow(lead({ created_at: '2024-06-26T09:00:00.000Z' }), from, to)).toBe(false);
+  });
+
+  it('квал — когортно: лид пришёл в окне и дошёл до этапа', () => {
+    expect(
+      isQualifiedInWindow(lead({ first_qualified_at: '2026-08-02T09:00:00.000Z' }), from, to),
+    ).toBe(true);
+    // Квал есть, но лид пришёл раньше окна — в этот период он не считается.
+    expect(
+      isQualifiedInWindow(
+        lead({ created_at: '2026-06-01T09:00:00.000Z', first_qualified_at: '2026-07-05T09:00:00.000Z' }),
+        from, to,
+      ),
+    ).toBe(false);
+    // Неполная история — этап мог случиться до горизонта событий.
+    expect(
+      isQualifiedInWindow(
+        lead({ history_complete: false, first_qualified_at: '2026-07-16T09:00:00.000Z' }),
+        from, to,
+      ),
+    ).toBe(false);
+  });
+
+  it('договор — по дате этапа и не раньше CONTRACT_RULE_SINCE', () => {
+    const afterRule = new Date(CONTRACT_RULE_SINCE.getTime() + 24 * 3600 * 1000);
+    const wideTo = new Date(afterRule.getTime() + 24 * 3600 * 1000);
+    expect(
+      isContractInWindow(lead({ first_contract_at: afterRule.toISOString() }), from, wideTo),
+    ).toBe(true);
+    // Тот же этап до даты правила — не договор, а «отправил файл».
+    expect(
+      isContractInWindow(lead({ first_contract_at: '2026-07-10T09:00:00.000Z' }), from, to),
+    ).toBe(false);
+  });
+
+  it('встречи по сделкам — окно, порог достоверности и один день = одна встреча', () => {
+    const byDeal = meetingsByDeal(
+      [
+        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T09:00:00.000Z' }),
+        // Тот же день той же сделки — одна встреча, разрезанная на два файла.
+        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T12:00:00.000Z' }),
+        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-11T09:00:00.000Z' }),
+        // Вне окна.
+        meetingLink({ amo_deal_id: 2, meeting_at: '2026-08-10T09:00:00.000Z' }),
+        // Раньше порога, с которого встречи вообще можно считать.
+        meetingLink({
+          amo_deal_id: 3,
+          meeting_at: new Date(MEETINGS_RELIABLE_SINCE.getTime() - 24 * 3600 * 1000).toISOString(),
+        }),
+      ],
+      from, to,
+    );
+    expect(byDeal.get(1)).toBe(2);
+    expect(byDeal.has(2)).toBe(false);
+    expect(byDeal.has(3)).toBe(false);
   });
 });

@@ -308,6 +308,57 @@ LI_REPORT_COMMAND_TIMEOUT_SEC = 180
 LI_DUP_WINDOW_DAYS = 14
 
 
+# ── Ожидание базы при старте ────────────────────────────────────────────────
+# После перезагрузки сервера или cgroup-OOM Postgres минуту-две проходит crash
+# recovery и отвечает всем «57P03: the database system is in recovery mode».
+# Без ожидания мониторинг падал с exit 1, docker перезапускал, он падал снова —
+# loop-watchdog глушил его после 5 падений и ставил restart=no. 13.08.2026 из-за
+# этого прод остался без алертов ровно в тот момент, когда они были нужнее всего.
+DB_WAIT_TIMEOUT_SEC = float(os.environ.get("DB_WAIT_TIMEOUT_SEC", "300"))
+
+# Транзиентное: база поднимается, перегружена или сеть моргнула. Ошибки доступа
+# (неверный пароль, отсутствующая роль) сюда намеренно не входят — на них
+# сервис обязан падать сразу, а не маскировать опечатку в конфиге ретраями.
+_DB_TRANSIENT_ERRORS = (
+    asyncpg.CannotConnectNowError,
+    asyncpg.TooManyConnectionsError,
+    asyncpg.ConnectionDoesNotExistError,
+    OSError,  # ConnectionRefusedError, DNS, TLS
+    asyncio.TimeoutError,
+)
+
+
+async def wait_for_db(timeout_sec: float = DB_WAIT_TIMEOUT_SEC) -> None:
+    """Дождаться, пока Postgres начнёт принимать соединения."""
+    if not DATABASE_URL:
+        return
+    deadline = asyncio.get_running_loop().time() + timeout_sec
+    delay = 1.0
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+            await conn.close()
+            if attempt > 1:
+                print(f"[health] БД доступна с попытки {attempt}", flush=True)
+            return
+        except _DB_TRANSIENT_ERRORS as e:
+            if asyncio.get_running_loop().time() >= deadline:
+                print(
+                    f"[health] БД недоступна {timeout_sec:.0f}с, сдаюсь: {e}",
+                    flush=True,
+                )
+                raise
+            print(
+                f"[health] БД недоступна ({type(e).__name__}), "
+                f"повтор через {delay:.0f}с",
+                flush=True,
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 15.0)
+
+
 async def _ensure_settings_table() -> None:
     """Create health-check state tables."""
     conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
@@ -2275,6 +2326,9 @@ def _format_heartbeat_caption(
     return "\n".join(parts)
 
 
+# NB: tg_outreach_jobs здесь намеренно нет — job `start` висит running всё
+# время работы кампании, счётчик дублировал tg_outreach_campaigns.
+# Зеркало: app/src/app/api/admin/active-jobs/route.ts
 _JOB_TABLES: list[tuple[str, str, list[str]]] = [
     *[
         (spec.table, spec.label, list(spec.active_statuses))
@@ -2282,7 +2336,6 @@ _JOB_TABLES: list[tuple[str, str, list[str]]] = [
     ],
     ("ai_caller_jobs",          "AI Звонилка",       ["pending", "running"]),
     ("ai_campaigns",            "AI Кампании",       ["running"]),
-    ("tg_outreach_jobs",        "TG Аутрич",         ["pending", "running"]),
     ("tg_outreach_campaigns",   "TG Кампании",       ["running"]),
     ("sales_copilot_jobs",      "Sales Copilot",     ["pending", "running"]),
 ]
@@ -2711,6 +2764,7 @@ async def main():
     _require("TELEGRAM_HEALTH_CHAT_ID", TELEGRAM_CHAT_ID)
     _require("TELEGRAM_HEALTH_BOT_TOKEN or TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
 
+    await wait_for_db()
     await _ensure_settings_table()
 
     scheduler = AsyncIOScheduler()

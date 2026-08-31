@@ -6,10 +6,13 @@
  * начнёт читать переписку, а сама переписка идёт целиком — без неё непонятно,
  * на что человек согласился.
  *
- * Времён первого касания и ответа в шапке намеренно нет: они видны прямо в
- * репликах ниже, а дублирование делало шапку длиннее полезного. Кто нажал
- * кнопку, тоже не пишем — этот след живёт в задаче на стороне портала
- * (`requested_by`), менеджеру он не нужен.
+ * Шапка держится короткой намеренно, лишнего в ней нет:
+ *  - времена первого касания и ответа видны прямо в репликах ниже;
+ *  - кто нажал кнопку — след для портала (`requested_by`), не для менеджера;
+ *  - ссылка на профиль дублировала никнейм: по `@ник` в Telegram открывается
+ *    тот же профиль в одно касание;
+ *  - аккаунт, которым вели переписку, не пишем — карточка и так уходит именно
+ *    с него, менеджер видит отправителя в шапке чата.
  */
 
 export type ForwardKind = 'lead' | 'partner';
@@ -23,15 +26,13 @@ export interface LeadMessageInput {
   baseName?: string | null;
   /** Чат, из которого спарсили контакт, если он сохранился при загрузке базы. */
   sourceChat?: string | null;
-  accountLabel: string;
-  accountPhone?: string | null;
   messages: Array<{ role?: string; content?: string; timestamp?: string }>;
   tzOffsetHours?: number;
 }
 
 const HEADER: Record<ForwardKind, string> = {
-  lead: '🔥 Лид',
-  partner: '🤝 Кандидат в партнёры',
+  lead: 'Лид',
+  partner: 'Кандидат в партнёры',
 };
 
 /** Предел одного сообщения Telegram. */
@@ -58,18 +59,16 @@ function nick(username: string | null, tgUserId: number | null): string {
 
 export function buildLeadMessage(input: LeadMessageInput): string {
   const tz = input.tzOffsetHours ?? 3;
-  const clean = (input.username ?? '').trim().replace(/^@/, '');
 
   const lines: string[] = [];
   lines.push(`${HEADER[input.kind]} · ${input.campaignName}`);
   lines.push('');
   lines.push(`Никнейм: ${nick(input.username, input.tgUserId)}`);
-  if (clean) lines.push(`Профиль: t.me/${clean}`);
   lines.push(`Оффер: ${input.baseName?.trim() || '—'}`);
-  lines.push(`Источник: ${input.sourceChat?.trim() || '—'}`);
-  lines.push(
-    `Аккаунт: ${input.accountLabel}${input.accountPhone ? ` (${input.accountPhone})` : ''}`,
-  );
+  // Чат, из которого спарсили контакт. Он известен не у всех баз, а строка
+  // «Источник: —» менеджеру ничего не сообщает — тогда её просто нет.
+  const source = input.sourceChat?.trim();
+  if (source) lines.push(`Источник: ${source}`);
   lines.push('');
   lines.push('── Переписка ──');
 

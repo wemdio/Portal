@@ -15,6 +15,17 @@ import {
   cooldownUntilIso,
   writeAccountCooldown,
 } from '../accountCooldown';
+import { classifyRestriction, describeRestriction } from '../restriction';
+import { withTimeout } from '../withTimeout';
+
+/**
+ * Сроки на вызовы Telegram в первом касании — та же причина, что в боевом
+ * круге: gramJS не таймаутит сам, а мобильный прокси умеет молча увести запрос
+ * в никуда. Повисший здесь `await` останавливал не только порцию, но и весь
+ * круг кампании: до следующего аккаунта дело уже не доходило.
+ */
+const FT_RESOLVE_TIMEOUT_MS = Number(process.env.TG_OUTREACH_RESOLVE_TIMEOUT_MS) || 60_000;
+const FT_SEND_TIMEOUT_MS = Number(process.env.TG_OUTREACH_SEND_TIMEOUT_MS) || 120_000;
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
@@ -35,6 +46,13 @@ export interface SendBatchArgs {
    * дефолт из `validateMessage`.
    */
   maxChars?: number;
+  /**
+   * Сроки на вызовы Telegram. По умолчанию берутся из окружения; параметром
+   * приходят только из тестов — иначе проверка «зависший запрос не вешает
+   * порцию» ждала бы две реальные минуты.
+   */
+  resolveTimeoutMs?: number;
+  sendTimeoutMs?: number;
   /**
    * «Пауза после ограничения» кампании. Ноль или отсутствие — паузу не ставим
    * (как было до 24.08: PEER_FLOOD только останавливал порцию).
@@ -86,6 +104,8 @@ async function parkIfFlood(args: {
   account: { id: string; cooldown_until?: string | null };
   hours: number | undefined;
   reason: string;
+  /** Полный текст ошибки Telegram — по нему видно, временное это или навсегда. */
+  rawError?: string;
   log: LogFn;
 }): Promise<boolean> {
   if (!args.hours || args.hours <= 0 || !isFloodLimitReason(args.reason)) return false;
@@ -96,9 +116,37 @@ async function parkIfFlood(args: {
     return false;
   }
   args.account.cooldown_until = until;
+
+  /**
+   * Диагноз пишем и в карточку аккаунта, а не только в ленту журнала.
+   *
+   * Журнал за сутки — это тысячи строк, и «Telegram ограничил аккаунт» тонет в
+   * них к утру. А вопрос «что с этим номером» оператор задаёт, глядя на список
+   * аккаунтов, — там до этой правки не было ничего, кроме кулдауна без причины.
+   *
+   * Отдельно важно, что временное ограничение НЕ пишется как `banned`: спам-блок
+   * проходит сам, и списывать из-за него живой номер незачем.
+   */
+  const restriction = classifyRestriction(args.rawError ?? args.reason, Date.now());
+  const humanDiagnosis = restriction
+    ? describeRestriction(restriction)
+    : `ВРЕМЕННОЕ ограничение (${args.reason}) — Telegram придержал отправку. Пройдёт само.`;
+
+  const { error: diagErr } = await args.db
+    .from('tg_outreach_accounts')
+    .update({
+      check_status: restriction?.kind === 'permanent' ? 'banned' : 'restricted',
+      check_detail: humanDiagnosis.slice(0, 500),
+      checked_at: new Date().toISOString(),
+    })
+    .eq('id', args.account.id);
+  if (diagErr) {
+    args.log('warning', `Не смог записать диагноз ограничения в карточку аккаунта — ${diagErr.message}`);
+  }
+
   args.log(
     'warning',
-    `Первое касание остановлено: Telegram ограничил аккаунт (${args.reason}). ` +
+    `Первое касание остановлено. ${humanDiagnosis} ` +
       `Аккаунт на паузе до ${cooldownLabel(until)} (${args.hours}ч), следующий круг его не возьмёт. ` +
       `Контакты остаются в очереди, попытки им не засчитываем.`,
   );
@@ -203,6 +251,27 @@ function classifySendFailure(errMsg: string): SendFailure {
     if (m.includes(code)) return { kind: 'transport_down', reason: code };
   }
 
+  /**
+   * НАШ таймаут (`withTimeout`) — тоже транспорт, и это не противоречит решению
+   * выше про голый TIMEOUT.
+   *
+   * Голый gramJS-TIMEOUT идёт постоянным фоном и сам по себе поломки не
+   * означает. Наш — другое: это значит, что соединение молчало целую минуту, а
+   * такое молчание всегда про связь, а не про контакт.
+   *
+   * Разница стоила 33 живых контактов. Таймауты появились в боевом пути
+   * 28.08.2026, попали в общую ветку «неизвестный сбой» и начали тратить
+   * попытки: за трое суток 178 отложений, 33 контакта выжгли все три попытки и
+   * ушли в failed. Аккаунты на медленных прокси при этом не отправили ничего —
+   * порция уходила в отложенные целиком, круг за кругом.
+   *
+   * Метку узнаём по формату `withTimeout`, а не по слову TIMEOUT: подстрока
+   * достаточно своеобразная, чтобы не поймать чужое сообщение.
+   */
+  if (m.includes(': НЕТ ОТВЕТА ЗА ')) {
+    return { kind: 'transport_down', reason: 'нет ответа от Telegram через прокси' };
+  }
+
   return { kind: 'retryable' };
 }
 
@@ -244,6 +313,8 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
   const { db, client, campaignId, account, perDay, log } = args;
   const result: SendBatchResult = { sent: 0, skipped: 0, postponed: 0 };
   const maxChars = resolveMaxChars(args.maxChars);
+  const resolveTimeoutMs = args.resolveTimeoutMs ?? FT_RESOLVE_TIMEOUT_MS;
+  const sendTimeoutMs = args.sendTimeoutMs ?? FT_SEND_TIMEOUT_MS;
 
   // Выходим до любого запроса в базу. У всех кампаний, заведённых до этой
   // фичи, поля нет вовсе, а круг идёт по каждому аккаунту каждые несколько
@@ -286,7 +357,11 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
 
     let entity: { id: unknown; username?: string };
     try {
-      entity = (await client.getEntity(`@${contact.username}`)) as { id: unknown; username?: string };
+      entity = (await withTimeout(
+        client.getEntity(`@${contact.username}`),
+        resolveTimeoutMs,
+        'поиск контакта по юзернейму',
+      )) as { id: unknown; username?: string };
     } catch (err) {
       // Честно кривой ник (недопустимый формат, USERNAME_INVALID) — это не
       // заморозка, такой ник не «оживёт». Скипаем сразу.
@@ -327,12 +402,21 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
             account,
             hours: args.cooldownHours,
             reason: failure.reason,
+            rawError: msg,
             log,
           });
         if (!parked) {
+          // Пауза не настроена — но сказать, временное это или навсегда, всё
+          // равно обязаны: иначе оператор читает «Telegram ограничил аккаунт»
+          // и не знает, ждать ему или менять номер.
+          const restriction = failure.kind === 'account_limited'
+            ? classifyRestriction(msg, Date.now())
+            : null;
           const cause = failure.kind === 'transport_down'
             ? `обрыв связи или прокси (${failure.reason})`
-            : `Telegram ограничил аккаунт (${failure.reason})`;
+            : restriction
+              ? describeRestriction(restriction)
+              : `Telegram ограничил аккаунт (${failure.reason})`;
           log(
             'warning',
             `Первое касание остановлено на резолве юзернейма: ${cause}. ` +
@@ -369,9 +453,42 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
     }
 
     try {
-      await client.sendMessage(`@${contact.username}`, { message: contact.message });
+      await withTimeout(
+        client.sendMessage(`@${contact.username}`, { message: contact.message }),
+        sendTimeoutMs,
+        'отправка первого сообщения',
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+
+      /**
+       * Наш таймаут на ОТПРАВКЕ — особый случай, и повторять её нельзя.
+       *
+       * Ответа мы не дождались, но это не значит, что сообщение не ушло:
+       * запрос мог дойти до Telegram и быть доставленным, а потеряться могло
+       * подтверждение. Повторная попытка в следующем круге отправит человеку
+       * то же самое второй раз — а для холодного аутрича задвоенное сообщение
+       * выглядит как работа бота и стоит дороже, чем один недописанный контакт
+       * из трёхсот.
+       *
+       * Поэтому считаем контакт обработанным и оставляем след в журнале, чтобы
+       * при разборе было видно: тут не отказ, тут неизвестность.
+       *
+       * Таймауты на ЧТЕНИИ (резолв ника, история) сюда не попадают — их
+       * повторять безопасно, и они уходят в общую классификацию ниже.
+       */
+      if (msg.includes('отправка первого сообщения: нет ответа')) {
+        await fdb.markContactSkipped(db, contact.id, 'отправка без подтверждения — возможно, доставлено');
+        log(
+          'warning',
+          `Первое касание: @${contact.username} — Telegram не подтвердил отправку за ${Math.round(sendTimeoutMs / 1000)}с. `
+          + 'Сообщение могло уйти, поэтому повторять не буду: задвоенное первое касание хуже пропущенного контакта. '
+          + 'Проверьте диалог руками, если контакт важен.',
+        );
+        result.skipped++;
+        continue;
+      }
+
       const failure = classifySendFailure(msg);
 
       if (failure.kind === 'contact_permanent') {
@@ -388,12 +505,21 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
             account,
             hours: args.cooldownHours,
             reason: failure.reason,
+            rawError: msg,
             log,
           });
         if (!parked) {
+          // Пауза не настроена — но сказать, временное это или навсегда, всё
+          // равно обязаны: иначе оператор читает «Telegram ограничил аккаунт»
+          // и не знает, ждать ему или менять номер.
+          const restriction = failure.kind === 'account_limited'
+            ? classifyRestriction(msg, Date.now())
+            : null;
           const cause = failure.kind === 'transport_down'
             ? `обрыв связи или прокси (${failure.reason})`
-            : `Telegram ограничил аккаунт (${failure.reason})`;
+            : restriction
+              ? describeRestriction(restriction)
+              : `Telegram ограничил аккаунт (${failure.reason})`;
           log(
             'warning',
             `Первое касание остановлено: ${cause}. ` +

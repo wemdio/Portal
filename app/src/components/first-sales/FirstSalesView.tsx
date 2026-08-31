@@ -9,6 +9,8 @@ import FiltersBar, { getDefaultFilters, type FiltersState } from '@/components/f
 import KpiRow from '@/components/first-sales/KpiRow';
 import TimeSeriesChart from '@/components/first-sales/TimeSeriesChart';
 import FunnelChart from '@/components/first-sales/FunnelChart';
+import FunnelDealsList from '@/components/first-sales/FunnelDealsList';
+import type { FunnelStageId } from '@/lib/firstSales/funnelDeals';
 import SourceTable from '@/components/first-sales/SourceTable';
 import { drillKey } from '@/components/first-sales/DealDrillDown';
 import ManagerTable from '@/components/first-sales/ManagerTable';
@@ -16,6 +18,9 @@ import MeetingLinksEditor from '@/components/first-sales/MeetingLinksEditor';
 
 type SummaryResponse = FirstSalesSeries & {
   previousTotals: FirstSalesSeries['totals'];
+  /** Границы окна, с которым сравниваются дельты под плитками (`YYYY-MM-DD`). */
+  previousFrom: string;
+  previousTo: string;
   syncedAt: string | null;
 };
 
@@ -43,6 +48,18 @@ export default function FirstSalesView() {
   const [meetingQueueCount, setMeetingQueueCount] = useState<{ count: number; truncated: boolean } | null>(null);
   /** Корзина, выбранная кликом по графику; null — таблица за весь период. */
   const [selectedBucket, setSelectedBucket] = useState<string | null>(null);
+  /**
+   * Ступень, по которой кликнули на воронке: список сделок рядом прокрутится
+   * к её группе. Хранится здесь, а не в списке, потому что источник события —
+   * соседний компонент.
+   *
+   * Значение не сбрасывается после прокрутки намеренно: повторный клик по той
+   * же ступени тогда не сработал бы вовсе (состояние не изменилось), а сброс
+   * через таймер добавил бы гонку на ровном месте. Список прокручивается
+   * заново на каждый рендер с новым `focusStage`, а тот меняется только по
+   * клику.
+   */
+  const [focusStage, setFocusStage] = useState<FunnelStageId | null>(null);
   /**
    * Сводка за одну корзину. Отдельным запросом, а не срезом уже загруженной:
    * `bySource` приходит агрегированным по всему окну, и разложить его обратно
@@ -239,6 +256,8 @@ export default function FirstSalesView() {
           <KpiRow
             totals={data.totals}
             previousTotals={data.previousTotals}
+            previousFrom={data.previousFrom}
+            previousTo={data.previousTo}
             syncedAt={data.syncedAt}
             onNoSourceClick={() => {
               setFilters((f) => ({ ...f, sources: ['none'] }));
@@ -254,8 +273,30 @@ export default function FirstSalesView() {
             <>
               {/* Воронка перед графиком по времени: она отвечает на первый
                   вопрос («сколько доходит от этапа к этапу»), а динамика по
-                  корзинам — уже на второй. */}
-              <FunnelChart totals={data.totals} />
+                  корзинам — уже на второй.
+
+                  Рядом с воронкой — список сделок, которые за ней стоят.
+                  Воронка нарисована в центре широкого пустого поля, так что на
+                  половине ширины ничего не теряет, а список отвечает на
+                  следующий же вопрос: «а кто это?». На узком экране список
+                  уезжает вниз — рядом ему там не хватит места на осмысленную
+                  строку. */}
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                <FunnelChart totals={data.totals} onSelectStage={setFocusStage} />
+                {/* Высота списка задаётся воронкой: `items-stretch` у грида по
+                    умолчанию растягивает обе ячейки по самой высокой, а внутри
+                    списка прокручивается только сам перечень строк. */}
+                <FunnelDealsList
+                  filters={filters}
+                  focusStage={focusStage}
+                  funnelCounts={{
+                    lead: data.totals.leads,
+                    qualified: data.totals.qualified,
+                    meeting: data.totals.meetingsReliable ? data.totals.meetings : undefined,
+                    contract: data.totals.contractsReliable ? data.totals.contracts : undefined,
+                  }}
+                />
+              </div>
               <TimeSeriesChart
                 series={data.series}
                 groupBy={filters.groupBy}
@@ -283,14 +324,25 @@ export default function FirstSalesView() {
               {/* key на from/to/sources: смена периода или источников размонтирует и
                   заново монтирует таблицу, сбрасывая раскрытую drill-down строку
                   вместо того, чтобы показывать под ней сделки уже не того окна.
-                  groupBy в ключ не входит — drillKey() это объясняет. */}
+                  groupBy в ключ не входит — drillKey() это объясняет.
+
+                  Префиксы `sources:`/`managers:` обязательны. Без них у двух
+                  СОСЕДНИХ элементов оказывался один и тот же ключ, а React
+                  требует уникальности ключей среди соседей: при клике по дню на
+                  графике ключ менялся, сопоставить старых детей с новыми React
+                  не мог и оставлял прежние таблицы на экране — с каждым кликом
+                  их становилось на две больше. */}
               <SourceTable
-                key={drillKey(tableFilters)}
+                key={`sources:${drillKey(tableFilters)}`}
                 rows={bucketRows ?? data.bySource}
                 filters={tableFilters}
               />
 
-              <ManagerTable key={drillKey(tableFilters)} rows={data.byManager} filters={tableFilters} />
+              <ManagerTable
+                key={`managers:${drillKey(tableFilters)}`}
+                rows={data.byManager}
+                filters={tableFilters}
+              />
             </>
           )}
 

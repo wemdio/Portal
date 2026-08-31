@@ -41,8 +41,6 @@ export default function RenewalsView() {
       setLoading(true);
       try {
         const qs = new URLSearchParams({ from: filters.from, to: filters.to, groupBy: filters.groupBy });
-        if (filters.kpiMin !== '') qs.set('kpiMin', filters.kpiMin);
-        if (filters.kpiMax !== '') qs.set('kpiMax', filters.kpiMax);
 
         const res = await authFetch(`/api/analytics/renewals/summary?${qs.toString()}`, {
           signal: controller.signal,
@@ -99,7 +97,9 @@ export default function RenewalsView() {
       <div>
         <h1 className="text-lg font-semibold text-zinc-900">Продления</h1>
         <p className="text-xs text-zinc-500">
-          Проекты с типом «Продление»: сколько продлений, на какую сумму, средний чек и цикл.
+          Сделки из воронки AMO «Вторичные (и не только) продажи», дошедшие до этапа «Продлено»:
+          сколько продлений, на какую сумму, средний чек и цикл. Дата и сумма — из полей карточки
+          «Дата оплаты продления» и «Сумма продления, ₽».
         </p>
       </div>
 

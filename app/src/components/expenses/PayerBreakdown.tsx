@@ -69,19 +69,30 @@ export default function PayerBreakdown({
   query: string;
 }) {
   const [openKey, setOpenKey] = useState<string | null>(null);
+  const [lapsedOpen, setLapsedOpen] = useState(false);
 
-  const withBars = items.filter((item) => item.total > 0).slice(0, TOP_N);
+  // Плательщик без единой операции в периоде — это тот, кого `breakdownByPayer`
+  // достал из прошлого периода (см. там же). В таблице прихода ему не место:
+  // строк с нулём набирается больше, чем строк с деньгами, и они забивают
+  // отчёт. Но и терять их нельзя — это отвалившиеся клиенты, поэтому они
+  // уезжают в свёрнутый блок под таблицей. Признак — `ops === 0`, а не
+  // `total === 0`: возврат ровно в размер платежа тоже даёт ноль суммы, но это
+  // не отвалившийся клиент.
+  const paid = items.filter((item) => item.ops > 0);
+  const lapsed = items.filter((item) => item.ops === 0);
+
+  const withBars = paid.filter((item) => item.total > 0).slice(0, TOP_N);
   const max = withBars[0]?.total ?? 0;
 
   // Как и в VendorBreakdown: сортировка касается только таблицы, бары наверху
   // всегда TOP_N по сумме.
-  const { sortedRows, sort, toggleSort } = useSortableRows(items, payerSortColumns);
+  const { sortedRows, sort, toggleSort } = useSortableRows(paid, payerSortColumns);
 
   return (
     <div className="glass-tile p-3">
       <h3 className="mb-2 text-sm font-semibold text-zinc-900">Разбивка по плательщикам</h3>
 
-      {items.length === 0 ? (
+      {paid.length === 0 ? (
         <div className="px-3 py-8 text-center text-sm text-zinc-400">
           Поступлений за выбранный период нет.
         </div>
@@ -159,6 +170,40 @@ export default function PayerBreakdown({
           </div>
         </>
       )}
+
+      {lapsed.length > 0 ? (
+        <div className="mt-4 border-t border-zinc-100 pt-2">
+          <button
+            type="button"
+            onClick={() => setLapsedOpen((prev) => !prev)}
+            aria-expanded={lapsedOpen}
+            className="text-xs text-zinc-500 hover:text-zinc-700"
+          >
+            {lapsedOpen ? '▾ ' : '▸ '}
+            {/* Подпись отдельным узлом от счётчика: словарь переводов
+                сопоставляет текстовые узлы целиком, и «Перестали платить (12)»
+                в нём не нашлось бы. */}
+            <span>Перестали платить</span> <span className="tabular-nums">({lapsed.length})</span>
+          </button>
+          {lapsedOpen ? (
+            <>
+              <p className="mt-1.5 text-[11px] text-zinc-400">
+                Платили в предыдущем периоде такой же длины, в выбранном — ни одной операции.
+              </p>
+              <ul className="mt-1.5 space-y-1">
+                {lapsed.map((item) => (
+                  <li key={rowKey(item)} className="flex items-center gap-2 text-xs text-zinc-600">
+                    <span className="truncate" title={item.payerName}>
+                      {item.payerName}
+                    </span>
+                    <span className="shrink-0 tabular-nums text-zinc-400">{item.payerInn ?? '—'}</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -209,9 +254,6 @@ function PayerRow({
               {item.payerName}
             </span>
           )}
-          {item.total === 0 ? (
-            <span className="ml-1.5 text-[10px] text-zinc-400">в этом периоде не платил</span>
-          ) : null}
         </td>
         <td className="px-3 py-2 tabular-nums text-zinc-600">{item.payerInn ?? '—'}</td>
         <td className="px-3 py-2 text-right tabular-nums text-zinc-900">

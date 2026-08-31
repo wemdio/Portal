@@ -44,9 +44,24 @@ jest.mock('@/lib/supabaseAdmin', () => {
 
 import { updateJobWithRetry } from '@/lib/tools/baseConstructorWorker';
 
-// Полный fail-сценарий ждёт 1s + 2s = 3s между попытками; дефолт jest 5s
-// флакает на загруженной CI-машине. 30s — щедрый запас.
-jest.setTimeout(30_000);
+// Паузы между попытками (1s, 2s) прокручиваются виртуальными часами, а не
+// проживаются: раньше файл честно спал ~8 секунд и был вторым по стоимости
+// логическим тестом во всём наборе. Проверяем мы порядок и число попыток, а
+// не способность Node действительно подождать секунду.
+beforeAll(() => {
+  jest.useFakeTimers();
+});
+
+afterAll(() => {
+  jest.useRealTimers();
+});
+
+// Прокручивает все запланированные паузы (в том числе те, что появятся уже во
+// время прокрутки — backoff планирует их одну за другой) и отдаёт результат.
+async function runSkippingBackoff<T>(pending: Promise<T>): Promise<T> {
+  await jest.advanceTimersByTimeAsync(10_000);
+  return pending;
+}
 
 beforeEach(() => {
   updateCalls.length = 0;
@@ -56,7 +71,7 @@ beforeEach(() => {
 describe('updateJobWithRetry', () => {
   it('succeeds on the first attempt → 1 attempt, no error', async () => {
     updateResponses.push({ error: null });
-    const result = await updateJobWithRetry('job-1', { data: [['x']] }, 'test');
+    const result = await runSkippingBackoff(updateJobWithRetry('job-1', { data: [['x']] }, 'test'));
     expect(result.error).toBeNull();
     expect(result.attempts).toBe(1);
     expect(updateCalls).toHaveLength(1);
@@ -66,7 +81,7 @@ describe('updateJobWithRetry', () => {
   it('retries once after a transient error, then succeeds → 2 attempts', async () => {
     updateResponses.push({ error: { message: 'Empty or invalid json' } });
     updateResponses.push({ error: null });
-    const result = await updateJobWithRetry('job-2', { data: [['y']] }, 'test');
+    const result = await runSkippingBackoff(updateJobWithRetry('job-2', { data: [['y']] }, 'test'));
     expect(result.error).toBeNull();
     expect(result.attempts).toBe(2);
     expect(updateCalls).toHaveLength(2);
@@ -76,7 +91,7 @@ describe('updateJobWithRetry', () => {
     updateResponses.push({ error: { message: 'first' } });
     updateResponses.push({ error: { message: 'second' } });
     updateResponses.push({ error: { message: 'third' } });
-    const result = await updateJobWithRetry('job-3', { data: [['z']] }, 'test');
+    const result = await runSkippingBackoff(updateJobWithRetry('job-3', { data: [['z']] }, 'test'));
     expect(result.attempts).toBe(3);
     expect(updateCalls).toHaveLength(3);
     expect(result.error?.message).toBe('third');
@@ -87,7 +102,7 @@ describe('updateJobWithRetry', () => {
     // DNS failure) может вылететь exception'ом. Не должен утечь наружу.
     updateResponses.push(new Error('ECONNRESET'));
     updateResponses.push({ error: null });
-    const result = await updateJobWithRetry('job-4', { data: [['q']] }, 'test');
+    const result = await runSkippingBackoff(updateJobWithRetry('job-4', { data: [['q']] }, 'test'));
     expect(result.error).toBeNull();
     expect(result.attempts).toBe(2);
   });
@@ -96,7 +111,7 @@ describe('updateJobWithRetry', () => {
     updateResponses.push(new Error('boom-1'));
     updateResponses.push(new Error('boom-2'));
     updateResponses.push(new Error('boom-3'));
-    const result = await updateJobWithRetry('job-5', { data: [['w']] }, 'test');
+    const result = await runSkippingBackoff(updateJobWithRetry('job-5', { data: [['w']] }, 'test'));
     expect(result.attempts).toBe(3);
     expect(result.error?.message).toBe('boom-3');
   });

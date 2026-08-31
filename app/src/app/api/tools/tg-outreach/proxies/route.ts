@@ -21,7 +21,47 @@ export async function GET(req: NextRequest) {
         .order('created_at', { ascending: true });
 
       if (error) return jsonError(error.message, 500);
-      return NextResponse.json({ items: data ?? [] });
+
+      /**
+       * Адреса прокси, уже занятые аккаунтами — по всему порталу, а не по этой
+       * кампании.
+       *
+       * Занятость раньше считалась по id строки и только внутри кампании, и это
+       * ломалось двумя способами сразу. Один и тот же адрес заведён в базе
+       * несколькими строками: 598 записей на 532 уникальных адреса, причём
+       * дубли есть и внутри одной кампании. Назначил первую строку — вторая
+       * оставалась «свободной» и тут же предлагалась следующему аккаунту.
+       * И отдельно: 66 адресов заведены в двух кампаниях, так что занятый в
+       * соседней кампании прокси здесь числился свободным.
+       *
+       * Для Telegram это один IP и одно устройство: два аккаунта на нём — прямой
+       * повод для блокировки, ради экономии одного запроса такое допускать
+       * нельзя. Поэтому ключ занятости — нормализованный адрес.
+       */
+      const { data: assignedRows } = await auth.supabase
+        .from('tg_outreach_accounts')
+        .select('proxy_id')
+        .not('proxy_id', 'is', null);
+      const assignedIds = [
+        ...new Set((assignedRows ?? []).map((r) => (r as { proxy_id: string }).proxy_id)),
+      ];
+
+      let takenUrls: string[] = [];
+      if (assignedIds.length) {
+        const { data: takenRows } = await auth.supabase
+          .from('tg_outreach_proxies')
+          .select('url')
+          .in('id', assignedIds);
+        takenUrls = [
+          ...new Set(
+            (takenRows ?? [])
+              .map((r) => normalizeProxyUrl(((r as { url: string }).url ?? '').trim()))
+              .filter(Boolean),
+          ),
+        ];
+      }
+
+      return NextResponse.json({ items: data ?? [], taken_urls: takenUrls });
     },
   );
 }

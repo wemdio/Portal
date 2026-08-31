@@ -71,6 +71,28 @@ assert_not_contains() {
   fi
 }
 
+assert_file_absent() {
+  local path="$1" name="$2"
+  if [ -e "$path" ]; then
+    FAIL=$((FAIL + 1)); FAILED_NAMES="$FAILED_NAMES
+    - $name (still exists: $path)"
+    echo "  ✘ $name"; echo "    must NOT exist: $path"
+  else
+    PASS=$((PASS + 1)); echo "  ✔ $name"
+  fi
+}
+
+assert_file_exists() {
+  local path="$1" name="$2"
+  if [ -e "$path" ]; then
+    PASS=$((PASS + 1)); echo "  ✔ $name"
+  else
+    FAIL=$((FAIL + 1)); FAILED_NAMES="$FAILED_NAMES
+    - $name (missing file: $path)"
+    echo "  ✘ $name"; echo "    expected to exist: $path"
+  fi
+}
+
 assert_exit_code() {
   local actual="$1" expected="$2" name="$3"
   if [ "$actual" = "$expected" ]; then
@@ -554,6 +576,36 @@ assert_contains "$CRONTAB_FILE" "/backup.sh instantly-full" "cron schedules the 
 assert_contains "$CRONTAB_FILE" "15 6,18 * * *" "Instantly full bundle starts at 09:15 and 21:15 MSK"
 assert_not_contains "$CRONTAB_FILE" "/backup.sh instantly-dev" "cron does not back up Instantly dev"
 assert_not_contains "$CRONTAB_FILE" "/backup.sh main-supabase" "cron no longer creates the incomplete legacy main dump"
+
+echo ""
+echo "── 18) локальная ротация: сломанный BACKUP_RETENTION_DAYS ──"
+# Регрессия 27.08.2026. В .env на проде строка BACKUP_RETENTION_DAYS=7 слиплась
+# со следующей (MAIN_PG_PASSWORD=...), переменная приехала мусором, find получил
+# `-mtime +7MAIN_PG_PASSWORD=...`, упал — и ошибка утонула в `2>/dev/null || true`.
+# Сорок дней чистка не удаляла ничего и молчала: том вырос до 510 ГБ, диск до 88%.
+#
+# Отдельно проверяем, что значение переменной НЕ попадает в лог и в алерт: ровно
+# в этом инциденте в нём лежал пароль от боевой базы, и «печать для наглядности»
+# разослала бы его в Telegram и в docker logs.
+SB="$TMP_ROOT/t18"; make_sandbox "$SB"
+rc="$(INSTANTLY_DATABASE_URL='postgresql://i:p@h:5432/d'   BACKUP_RETENTION_DAYS='7SECRET_TOKEN=hunter2'   TELEGRAM_HEALTH_BOT_TOKEN=tok TELEGRAM_HEALTH_CHAT_ID=42   BACKUP_SUPABASE_URL=https://x BACKUP_SUPABASE_KEY=k   run_backup "$SB" instantly-prod)"
+assert_exit_code "$rc" "0" "мусорный срок хранения не роняет сам бэкап"
+assert_contains "$SB/curl.log" "api.telegram.org/bottok/sendMessage" "мусорный срок хранения → алерт в Telegram"
+assert_contains "$SB/run.out" "не число" "лог называет причину словами"
+assert_not_contains "$SB/run.out" "hunter2" "значение переменной не печатается в лог"
+assert_not_contains "$SB/curl.log" "hunter2" "значение переменной не уходит в Telegram"
+
+echo ""
+echo "── 19) локальная ротация: нормальный срок хранения удаляет старое ──"
+SB="$TMP_ROOT/t19"; make_sandbox "$SB"
+mkdir -p "$SB/backups"
+# Файл старше срока хранения и файл сегодняшний: первый обязан уйти, второй остаться.
+touch -d '30 days ago' "$SB/backups/instantly-instantly-prod-19990101_000000.dump" 2>/dev/null   || touch -t 199901010000 "$SB/backups/instantly-instantly-prod-19990101_000000.dump"
+touch "$SB/backups/instantly-instantly-prod-29990101_000000.dump"
+rc="$(INSTANTLY_DATABASE_URL='postgresql://i:p@h:5432/d'   BACKUP_RETENTION_DAYS=7   BACKUP_SUPABASE_URL=https://x BACKUP_SUPABASE_KEY=k   run_backup "$SB" instantly-prod)"
+assert_exit_code "$rc" "0" "нормальная ротация exits 0"
+assert_file_absent "$SB/backups/instantly-instantly-prod-19990101_000000.dump" "старый локальный дамп удалён"
+assert_file_exists "$SB/backups/instantly-instantly-prod-29990101_000000.dump" "свежий локальный дамп остался на месте"
 
 echo ""
 echo "═══════════════════════════════════════"

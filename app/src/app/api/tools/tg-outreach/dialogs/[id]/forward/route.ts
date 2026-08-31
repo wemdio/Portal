@@ -15,7 +15,7 @@ import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { buildLeadMessage, type ForwardKind } from '@/lib/tgOutreach/leadMessage';
 import { checkForwardConflict, cancelBlockReason, type ExistingForward } from '@/lib/tgOutreach/forwardConflict';
-import { usernameKey } from '@/lib/tgOutreach/report';
+import { loadLeadOrigin } from '@/lib/tgOutreach/leadOrigin';
 import { logCampaign, forwardKindLabel, forwardWho } from '@/lib/tgOutreach/campaignLog';
 import type { OpenAISettings } from '@/lib/tgOutreach/types';
 
@@ -83,41 +83,9 @@ async function prepare(
     };
   }
 
-  const { data: accountRow } = await db
-    .from('tg_outreach_accounts')
-    .select('id, session_name, phone')
-    .eq('id', dialog.account_id)
-    .maybeSingle();
-  const account = (accountRow ?? {}) as { session_name?: string; phone?: string };
-
   // Оффер и чат-источник ищем по юзернейму в базах этой кампании: в диалоге
   // связи с контактом нет, а менеджеру важно, по какому офферу человек пришёл.
-  let baseName: string | null = null;
-  let sourceChat: string | null = null;
-  const key = usernameKey(dialog.tg_username);
-  if (key) {
-    const { data: baseRows } = await db
-      .from('tg_outreach_bases')
-      .select('id, name')
-      .eq('campaign_id', dialog.campaign_id)
-      .limit(500);
-    const bases = (baseRows ?? []) as Array<{ id: string; name: string }>;
-    if (bases.length) {
-      const { data: contactRows } = await db
-        .from('tg_outreach_base_contacts')
-        .select('base_id, username, raw')
-        .in('base_id', bases.map((b) => b.id))
-        .limit(50_000);
-      const contact = ((contactRows ?? []) as Array<{
-        base_id: string; username: string; raw: Record<string, unknown> | null;
-      }>).find((c) => usernameKey(c.username) === key);
-      if (contact) {
-        baseName = bases.find((b) => b.id === contact.base_id)?.name ?? null;
-        const raw = contact.raw ?? {};
-        sourceChat = String(raw['Ссылка на источник'] ?? raw['Название источника'] ?? raw['Источник'] ?? '') || null;
-      }
-    }
-  }
+  const { baseName, sourceChat } = await loadLeadOrigin(db, dialog.campaign_id, dialog.tg_username);
 
   const messages = dialog.messages ?? [];
 
@@ -128,8 +96,6 @@ async function prepare(
     tgUserId: dialog.tg_user_id,
     baseName,
     sourceChat,
-    accountLabel: account.session_name ?? '—',
-    accountPhone: account.phone ?? null,
     messages,
   });
 
@@ -291,6 +257,37 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 
       await logCampaign(auth.supabase, prepared.campaignId, 'info',
         `Передача (${forwardKindLabel(kind)}) ${prepared.who}: поставлена в очередь, получатель ${prepared.targetChat} (нажал ${name})`);
+
+      /**
+       * Ручная передача лида — это и есть пометка «лид».
+       *
+       * До 27.08.2026 статус диалога она не трогала, и лид, отданный менеджеру
+       * руками, нигде лидом не числился: и воронка на сводке, и «Кол-во целевых
+       * ответов» в отчёте по договору считают по `status = 'lead'`. Автоматика
+       * по положительному триггеру статус ставит, оператор — нет, и отчёт
+       * клиенту занижался ровно на число ручных передач.
+       *
+       * Только для лида: кандидат в партнёры — не целевой ответ клиента, и в
+       * его воронке ему не место.
+       *
+       * Отмена передачи статус обратно не снимает: решение «это лид» принял
+       * человек, и несостоявшаяся отправка его не отменяет — снять статус можно
+       * кнопками на карточке диалога.
+       */
+      if (kind === 'lead') {
+        const { error: statusErr } = await auth.supabase
+          .from('tg_outreach_dialogs')
+          .update({ status: 'lead' })
+          .eq('id', id)
+          .neq('status', 'lead');
+        if (statusErr) {
+          // Передача уже в очереди — ронять её из-за статуса нельзя. Но и
+          // молчать нельзя: цифра в отчёте разойдётся с реальностью, и узнать
+          // об этом можно только из журнала.
+          await logCampaign(auth.supabase, prepared.campaignId, 'warning',
+            `Передача (лид) ${prepared.who}: в очереди, но статус «Лид» не проставился — ${statusErr.message}. Поставьте его руками, иначе лид не попадёт в отчёт.`);
+        }
+      }
 
       return NextResponse.json({ ok: true, id: (data as { id: string }).id, target_chat: prepared.targetChat }, { status: 201 });
     },

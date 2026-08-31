@@ -129,3 +129,32 @@ export async function fetchFirstSalesPayments(
   if (error) throw error;
   return (data ?? []) as FirstSalesPaymentRow[];
 }
+
+/**
+ * Сделка → рубли, отнесённые к ней в окне.
+ *
+ * Правила отбора те же, что в `computeFirstSalesSeries`: только положительные
+ * приходы внутри окна, не продления, не «ждут разбора» и не спорные — то есть
+ * ровно та сумма, которая стоит в столбце «Деньги» разбивки. Нужна списку
+ * сделок под строкой: без неё он не может показать, за счёт чего сделка попала
+ * в период, и оплаченная в августе сделка из марта выглядела бы случайной.
+ */
+export function moneyByDeal(
+  payments: FirstSalesPaymentRow[],
+  from: Date,
+  to: Date,
+): Map<number, number> {
+  const fromMs = from.getTime();
+  const toMs = to.getTime();
+  const byDeal = new Map<number, number>();
+  for (const p of payments) {
+    const amount = paymentAmount(p);
+    if (amount <= 0) continue;
+    const t = new Date(p.occurred_at).getTime();
+    if (!Number.isFinite(t) || t < fromMs || t > toMs) continue;
+    if (!attributablePayment(p)) continue;
+    const dealId = p.amo_deal_id as number;
+    byDeal.set(dealId, (byDeal.get(dealId) ?? 0) + amount);
+  }
+  return byDeal;
+}

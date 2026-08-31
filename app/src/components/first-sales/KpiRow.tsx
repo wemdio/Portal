@@ -18,16 +18,38 @@ function isSyncStale(syncedDate: Date | null): boolean {
   return Date.now() - syncedDate.getTime() > STALE_SYNC_MS;
 }
 
-/** Абсолютная и (если есть с чем сравнивать) процентная дельта к прошлому
- *  периоду. Прошлый период пустой → делить на ноль бессмысленно, показываем
- *  только абсолютную разницу — как и просили в задаче. */
+/** `YYYY-MM-DD` → `ДД.ММ`, без `new Date`: разбор ISO-даты подставил бы
+ *  часовой пояс браузера и мог бы съехать на день. */
+function shortDay(key: string): string {
+  const [, m, d] = key.split('-');
+  return m && d ? `${d}.${m}` : key;
+}
+
+/**
+ * Абсолютная и (если есть с чем сравнивать) процентная дельта к прошлому
+ * периоду. Прошлый период пустой → делить на ноль бессмысленно, показываем
+ * только абсолютную разницу.
+ *
+ * Голая цифра «-36 (-51%)» под плиткой не говорит, с чем сравнили: её читали
+ * как «минус к плану», «минус к прошлому месяцу», «минус к прошлому году».
+ * Поэтому в подсказке — и период сравнения, и само значение, с которым
+ * считали разницу, а под шапкой страницы стоит общая подпись (см.
+ * FirstSalesView).
+ */
 function Delta({
   current,
   previous,
+  label,
+  previousFrom,
+  previousTo,
   format = fmt,
 }: {
   current: number;
   previous: number;
+  /** Название метрики для подсказки: «Квал», «Встречи», … */
+  label: string;
+  previousFrom: string;
+  previousTo: string;
   /** Деньги показываются рублями, остальное — штуками. */
   format?: (n: number) => string;
 }) {
@@ -37,8 +59,20 @@ function Delta({
   const pct = previous > 0 ? Math.round((diff / previous) * 100) : null;
   const pctSign = pct !== null && pct > 0 ? '+' : '';
   return (
-    <span className={`text-[11px] font-medium tabular-nums ${color}`}>
-      {sign}{format(diff)}{pct !== null ? ` (${pctSign}${pct}%)` : ''}
+    <span
+      className="cursor-help text-[11px]"
+      title={
+        `Предыдущий период такой же длины: ${shortDay(previousFrom)} — ${shortDay(previousTo)}. `
+        + `${label} тогда: ${format(previous)}, сейчас: ${format(current)}.`
+      }
+    >
+      <span className={`font-medium tabular-nums ${color}`}>
+        {sign}{format(diff)}{pct !== null ? ` (${pctSign}${pct}%)` : ''}
+      </span>
+      {/* Период сравнения — прямо в строке, а не только в подсказке. Голое
+          «-36 (-51%)» читали как минус к плану, к прошлому месяцу, к прошлому
+          году: без дат цифра не значит ничего. */}
+      <span className="text-zinc-400"> к {shortDay(previousFrom)} — {shortDay(previousTo)}</span>
     </span>
   );
 }
@@ -49,12 +83,15 @@ function Tile({
   sub,
   delta,
   amber,
+  hint,
 }: {
   label: string;
   value: string;
   sub?: string;
   delta?: React.ReactNode;
   amber?: boolean;
+  /** Подсказка по наведению на заголовок: что именно считает плитка. */
+  hint?: string;
 }) {
   return (
     // h-full — чтобы плашка занимала всю высоту ячейки сетки. Без него та,
@@ -62,16 +99,20 @@ function Tile({
     // содержимого: у неё нет ни подписи, ни дельты, и она оказалась бы ниже
     // соседей. Сетка растягивает саму кнопку, но не вложенный в неё div.
     <div className={`glass-tile h-full px-4 py-3 ${amber ? 'glass-tint-amber' : ''}`}>
-      <p className={`text-[10px] font-medium uppercase tracking-wider ${amber ? 'text-amber-600' : 'text-zinc-400'}`}>
+      <p
+        className={`text-[10px] font-medium uppercase tracking-wider ${amber ? 'text-amber-600' : 'text-zinc-400'} ${hint ? 'cursor-help' : ''}`}
+        title={hint}
+      >
         {label}
       </p>
       <p className={`mt-1 text-xl font-semibold tabular-nums ${amber ? 'text-amber-800' : 'text-zinc-900'}`}>
         {value}
       </p>
-      <div className="mt-0.5 flex items-center gap-1.5">
-        {sub && <span className={`text-[11px] ${amber ? 'text-amber-700' : 'text-zinc-400'}`}>{sub}</span>}
-        {delta}
-      </div>
+      {/* Подпись и дельта — разными строками. Рядом они склеивались в одну:
+          «магниты: 116  -51 (-15%)» читалось как «минус 51 магнит», хотя это
+          изменение самих лидов. */}
+      {sub && <p className={`mt-0.5 text-[11px] ${amber ? 'text-amber-700' : 'text-zinc-400'}`}>{sub}</p>}
+      {delta && <p className="mt-0.5">{delta}</p>}
     </div>
   );
 }
@@ -79,15 +120,24 @@ function Tile({
 export default function KpiRow({
   totals,
   previousTotals,
+  previousFrom,
+  previousTo,
   syncedAt,
   onNoSourceClick,
 }: {
   totals: FirstSalesTotals;
   previousTotals: FirstSalesTotals;
+  /** Границы окна сравнения (`YYYY-MM-DD`, МСК) — считает сервер, см.
+   *  summary/route.ts. */
+  previousFrom: string;
+  previousTo: string;
   syncedAt: string | null;
   /** Клик по плашке «Без источника» — поставить фильтр на неё. */
   onNoSourceClick: () => void;
 }) {
+  // Один объект на все плитки — период сравнения у них общий, а метрика и
+  // значения свои.
+  const prevWindow = { previousFrom, previousTo };
   const syncedDate = syncedAt ? new Date(syncedAt) : null;
   const syncedValid = !!syncedDate && Number.isFinite(syncedDate.getTime());
   const syncStale = isSyncStale(syncedDate);
@@ -112,12 +162,12 @@ export default function KpiRow({
         label="Лиды"
         value={fmt(totals.leads)}
         sub={`магниты: ${fmt(totals.leadMagnets)}`}
-        delta={<Delta current={totals.leads} previous={previousTotals.leads} />}
+        delta={<Delta current={totals.leads} previous={previousTotals.leads} label="Лидов" {...prevWindow} />}
       />
       <Tile
         label="Квал"
         value={fmt(totals.qualified)}
-        delta={<Delta current={totals.qualified} previous={previousTotals.qualified} />}
+        delta={<Delta current={totals.qualified} previous={previousTotals.qualified} label="Квалов" {...prevWindow} />}
       />
       {/* Прочерк, а не ноль, пока окно целиком раньше даты, с которой подписи
           к записям в чате встреч стали регулярными: ноль читался бы как
@@ -133,7 +183,7 @@ export default function KpiRow({
         }
         delta={
           totals.meetingsReliable
-            ? <Delta current={totals.meetings} previous={previousTotals.meetings} />
+            ? <Delta current={totals.meetings} previous={previousTotals.meetings} label="Встреч" {...prevWindow} />
             : undefined
         }
       />
@@ -151,7 +201,7 @@ export default function KpiRow({
         }
         delta={
           totals.contractsReliable
-            ? <Delta current={totals.contracts} previous={previousTotals.contracts} />
+            ? <Delta current={totals.contracts} previous={previousTotals.contracts} label="Договоров" {...prevWindow} />
             : undefined
         }
       />
@@ -163,18 +213,33 @@ export default function KpiRow({
           <Delta
             current={money.received}
             previous={previousTotals.money.received}
+            label="Денег"
             format={fmtMoney}
+            {...prevWindow}
           />
         }
         amber={moneyPartial}
       />
+      {/* «Средний цикл» крупно показывал МЕДИАНУ, а среднее пряталось в
+          подписи — заголовок противоречил цифре под ним, и плитку читали как
+          «средний срок 13,9 дня, а рядом почему-то ещё какие-то 31,4».
+          Название теперь нейтральное, а какая цифра медиана и какая среднее —
+          сказано прямо в подписи. Медиана осталась крупной намеренно:
+          распределение длиннохвостое (одна сделка, зревшая полгода, тянет
+          среднее вверх и выдаёт нетипичный срок за типичный). */}
       <Tile
-        label="Средний цикл"
+        label="Цикл сделки"
         value={totals.cycleMedianDays !== null ? `${fmtDays(totals.cycleMedianDays)} дн.` : '—'}
         sub={
           totals.cycleAvgDays !== null
-            ? `среднее: ${fmtDays(totals.cycleAvgDays)} дн. · оплат: ${fmt(totals.wonCount)}`
+            ? `медиана · среднее: ${fmtDays(totals.cycleAvgDays)} дн. · оплат: ${fmt(totals.wonCount)}`
             : `оплат: ${fmt(totals.wonCount)}`
+        }
+        hint={
+          'Сколько проходит от создания сделки до оплаты. Считается по сделкам, '
+          + 'ОПЛАЧЕННЫМ в выбранном периоде, — сама сделка могла прийти раньше. '
+          + 'Крупно медиана: половина сделок закрылась быстрее, половина дольше. '
+          + 'Среднее выше медианы — значит несколько долгих сделок тянут его вверх.'
         }
       />
       {/* Кнопка, а не просто плашка: клик ставит фильтр на «Без источника» —

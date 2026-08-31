@@ -483,6 +483,16 @@ export async function recordAccountProxyFailure(
  * Сбрасываем и last_failed_proxy_id: серия «разных прокси» началась заново,
  * иначе прокси, упавший до успешного круга, больше никогда не засчитался бы.
  * НЕ снимает degraded автоматически (это всегда ручная операция оператора).
+ *
+ * Здесь же обновляем итог проверки аккаунта на «жив».
+ *
+ * Проверка кнопкой требует остановленной кампании: воркер держит сессию, и
+ * второе подключение к ней — это AUTH_KEY_DUPLICATED и выключенный аккаунт.
+ * Из-за этого на работающей кампании «жив/не жив» устаревал неделями, а
+ * оператор смотрел на позавчерашние данные. Но успешный круг — это и есть
+ * проверка: аккаунт подключился, Telegram отдал диалоги. Диагноз сбоя воркер
+ * пишет сюда же (см. campaignLoop), поэтому теперь колонка живёт сама,
+ * без остановки кампании и без единого лишнего подключения.
  */
 export async function recordAccountSuccess(
   db: SupabaseClient,
@@ -490,7 +500,13 @@ export async function recordAccountSuccess(
 ): Promise<void> {
   await db
     .from('tg_outreach_accounts')
-    .update({ consecutive_proxy_failures: 0, last_failed_proxy_id: null })
+    .update({
+      consecutive_proxy_failures: 0,
+      last_failed_proxy_id: null,
+      check_status: 'ok',
+      check_detail: 'круг рассылки прошёл: аккаунт подключился и получил диалоги',
+      checked_at: new Date().toISOString(),
+    })
     .eq('id', accountId);
 }
 

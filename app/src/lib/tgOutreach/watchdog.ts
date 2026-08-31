@@ -12,15 +12,33 @@
  *     на мёртвом сокете после разрыва падает с ошибкой, и цикл разматывается
  *     сам. Остальные кампании не трогаем, слот освобождается штатно, а
  *     auto-resume поднимает пострадавшую заново.
- *  2. `exit` — если за отведённое время кампания так и не завершилась, значит
- *     она висит там, куда мы дотянуться не можем. Тогда прежнее поведение:
- *     роняем процесс.
+ *  2. `quarantine` — если за отведённое время кампания так и не завершилась,
+ *     значит она висит там, куда мы дотянуться не можем. Оставляем её висеть,
+ *     громко жалуемся и больше не трогаем. Остальные кампании работают.
+ *  3. `exit` — только когда КАЖДАЯ живая кампания уже в карантине. Тогда
+ *     процесс бесполезен, и перезапуск — единственное, что имеет смысл.
  *
- * Шаг 2 намеренно оставлен. Заманчиво «просто забыть» неубиваемую кампанию и
- * освободить слот, но брошенный цикл продолжает жить в том же процессе со
- * своими клиентами Telegram — и может дописать лиду то, что уже дописал
- * перезапущенный двойник. Полный рестарт неприятен, дубли в переписке с
- * клиентом хуже.
+ * Шаг 2 раньше был `exit`, и это было верно по замыслу: брошенный цикл живёт в
+ * том же процессе со своими клиентами Telegram и, теоретически, мог дописать
+ * лиду то, что уже дописал перезапущенный двойник. Дубли в переписке с
+ * клиентом хуже неприятного рестарта.
+ *
+ * 28.08.2026 цена этого выбора изменилась: одна кампания (TG_VBI) зависала по
+ * восемь раз за день и каждый раз уносила четыре здоровые. У ATOL-1 из-за
+ * этого не отрабатывал круг — при паузе до десяти минут между аккаунтами
+ * процесс не доживал до второго, и свежая база сутки стояла с нулём отправок.
+ *
+ * При этом оба страха, стоявшие за `exit`, к моменту карантина уже закрыты:
+ *
+ *   - двойника не появится: у зависшей кампании start-джоба осталась в
+ *     `running`, а auto-resume ставит новую только при её отсутствии;
+ *   - брошенный цикл ничего не отправит: шаг 1 уже выставил ему `stop()`, и
+ *     когда зависший await наконец разомкнётся, цикл выйдет на первой же
+ *     проверке, не дойдя до отправки.
+ *
+ * То есть карантин не «забывает» кампанию, а оставляет её в заведомо немом
+ * состоянии — и платит за это одним занятым слотом вместо падения всего
+ * воркера.
  *
  * Функция чистая: ни таймеров, ни IO — только решение по снимку состояния.
  */
@@ -45,24 +63,35 @@ export interface WatchdogSnapshot {
   killRequestedAt: ReadonlyMap<string, number>;
   /** Кампании, которые всё ещё числятся запущенными. */
   running: ReadonlySet<string>;
+  /**
+   * Кампании, уже отправленные в карантин. Нужны, чтобы сторож не планировал
+   * им действие каждую минуту: они не оживут, и повторные жалобы только
+   * забьют журнал.
+   */
+  quarantined?: ReadonlySet<string>;
   /** Сколько молчания считать зависанием. */
   stallMs: number;
-  /** Сколько ждать после kill, прежде чем ронять процесс. */
+  /** Сколько ждать после kill, прежде чем сдаться и изолировать кампанию. */
   graceMs: number;
 }
 
 export interface WatchdogAction {
   campaignId: string;
-  action: 'kill' | 'exit';
+  action: 'kill' | 'quarantine' | 'exit';
   /** Сколько кампания молчит, минуты — для лога. */
   stallMin: number;
 }
 
 export function planWatchdogActions(snapshot: WatchdogSnapshot): WatchdogAction[] {
   const { now, lastProgressAt, killRequestedAt, running, stallMs, graceMs } = snapshot;
+  const quarantined = snapshot.quarantined ?? new Set<string>();
   const actions: WatchdogAction[] = [];
+  const goingToQuarantine = new Set<string>();
 
   for (const [campaignId, lastAt] of lastProgressAt) {
+    // Уже изолирована — решение принято, повторять его нечего.
+    if (quarantined.has(campaignId)) continue;
+
     const stalled = now - lastAt;
     if (stalled <= stallMs) continue;
 
@@ -75,12 +104,28 @@ export function planWatchdogActions(snapshot: WatchdogSnapshot): WatchdogAction[
     }
 
     // Кампания ушла из реестра — значит kill сработал, цикл размотался.
-    // Слот свободен, поднимет её auto-resume; ронять процесс не за что.
+    // Слот свободен, поднимет её auto-resume; изолировать нечего.
     if (!running.has(campaignId)) continue;
 
     if (now - killedAt > graceMs) {
-      actions.push({ campaignId, action: 'exit', stallMin });
+      actions.push({ campaignId, action: 'quarantine', stallMin });
+      goingToQuarantine.add(campaignId);
     }
+  }
+
+  /**
+   * Единственный случай, когда падение процесса всё ещё оправдано: работать
+   * стало некому. Пока жива хоть одна незалипшая кампания, рестарт отнимает у
+   * неё круг и ничего не чинит — ровно та цена, из-за которой карантин и
+   * появился.
+   */
+  const stillWorking = [...running].some(
+    (id) => !quarantined.has(id) && !goingToQuarantine.has(id),
+  );
+  if (running.size > 0 && !stillWorking) {
+    const worst = actions.find((a) => a.action === 'quarantine')
+      ?? { campaignId: [...running][0], stallMin: 0 };
+    return [{ campaignId: worst.campaignId, action: 'exit', stallMin: worst.stallMin }];
   }
 
   return actions;
@@ -90,6 +135,10 @@ export function planWatchdogActions(snapshot: WatchdogSnapshot): WatchdogAction[
  * Кого можно забыть: кампания снова отчитывается или уже не запущена, значит
  * запись о попытке убийства больше не нужна и не должна копиться в памяти
  * воркера, живущего сутками.
+ *
+ * Тем же правилом снимается и карантин: если зависший цикл всё-таки
+ * размотался и ушёл из реестра, кампания снова обычная, и auto-resume поднимет
+ * её как всегда.
  */
 export function staleKillRequests(snapshot: WatchdogSnapshot): string[] {
   const { now, lastProgressAt, killRequestedAt, running, stallMs } = snapshot;
