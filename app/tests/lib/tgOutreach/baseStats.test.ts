@@ -202,6 +202,41 @@ describe('buildBaseStats — конверсии и остаток', () => {
   });
 });
 
+describe('buildBaseStats — лиды поимённо', () => {
+  it('список сходится со счётчиком и помечает дошедших до менеджера', () => {
+    const stats = buildBaseStats(base({
+      contacts: [
+        { base_id: 'b1', username: 'a', created_at: iso(DAY0), sent_at: iso(DAY0) },
+        { base_id: 'b1', username: 'b', created_at: iso(DAY0), sent_at: iso(DAY0) },
+        { base_id: 'b1', username: 'c', created_at: iso(DAY0), sent_at: iso(DAY0) },
+      ],
+      dialogs: [
+        dialog({ id: 'd1', tg_username: 'a', tg_user_id: 11, status: 'lead', messages: reply(DAY0 + HOUR), last_message_at: iso(DAY0 + 2 * HOUR) }),
+        dialog({ id: 'd2', tg_username: 'b', tg_user_id: 12, status: 'lead', messages: reply(DAY0 + HOUR), last_message_at: iso(DAY0 + DAY) }),
+        dialog({ id: 'd3', tg_username: 'c', tg_user_id: 13, status: 'none', messages: reply(DAY0 + HOUR) }),
+      ],
+      forwards: [{ dialog_id: 'd2', status: 'sent', created_at: iso(DAY0 + DAY) }],
+    }))[0];
+
+    expect(stats.leadList).toHaveLength(stats.leads);
+    // Свежие сверху.
+    expect(stats.leadList.map((l) => l.username)).toEqual(['b', 'a']);
+    expect(stats.leadList[0]).toMatchObject({ tgUserId: 12, forwarded: true });
+    expect(stats.leadList[1]).toMatchObject({ tgUserId: 11, forwarded: false });
+  });
+
+  it('лид вне периода в список не попадает — как и в счётчик', () => {
+    const stats = buildBaseStats(base({
+      contacts: [{ base_id: 'b1', username: 'a', created_at: iso(DAY0), sent_at: iso(DAY0) }],
+      dialogs: [
+        dialog({ tg_username: 'a', status: 'lead', messages: reply(DAY0 - DAY), last_message_at: iso(DAY0 - HOUR) }),
+      ],
+    }))[0];
+    expect(stats.leads).toBe(0);
+    expect(stats.leadList).toEqual([]);
+  });
+});
+
 describe('buildBaseStats — дни', () => {
   it('сетка суток одинаковая у всех баз: графики сравнивают глазами', () => {
     const stats = buildBaseStats(base({

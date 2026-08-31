@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
+import {
+  buildDialogBaseIndex,
+  type DialogBaseContact,
+  type DialogBaseRef,
+} from '@/lib/tgOutreach/dialogBase';
+import { usernameKey } from '@/lib/tgOutreach/report';
 
 export const dynamic = 'force-dynamic';
 
@@ -110,6 +116,62 @@ export async function GET(req: NextRequest) {
               error_message: f.error_message ?? null,
             };
           }
+        }
+      }
+
+      /**
+       * Из какой базы («гипотезы») пришёл каждый собеседник.
+       *
+       * Оператор размечает диалоги подряд, и вопрос «а это чья гипотеза»
+       * возникает на каждом втором. Без подписи ответ добывался вручную:
+       * выгрузить базы вкладкой «Базы» и поискать ник в каждой.
+       *
+       * Считаем только по странице, которую отдаём: контакты кампании — это
+       * тысячи строк, тянуть их целиком ради тридцати подписей незачем.
+       */
+      const { data: baseRows, error: basesError } = await auth.supabase
+        .from('tg_outreach_bases')
+        .select('id, name')
+        .eq('campaign_id', campaignId);
+      // Подпись — украшение списка, а не его смысл: если базы не прочитались,
+      // отдаём диалоги без неё, а не пятисотку на весь экран.
+      const bases = (basesError ? [] : (baseRows ?? [])) as DialogBaseRef[];
+
+      if (bases.length && rows.length) {
+        const baseIds = bases.map((b) => b.id);
+        const usernames = [...new Set(
+          rows.map((r) => usernameKey(r.tg_username as string | null)).filter(Boolean),
+        )];
+        const tgIds = [...new Set(
+          rows.map((r) => r.tg_user_id as number | null).filter((v): v is number => typeof v === 'number'),
+        )];
+
+        // Два запроса вместо одного `or`: юзернеймы и id — разные колонки, а
+        // склейка их в один фильтр требует экранирования пользовательских
+        // строк внутри строки фильтра.
+        const contactSelect = 'base_id, username, tg_user_id, sent_at';
+        const [byUsername, byTgId] = await Promise.all([
+          usernames.length
+            ? auth.supabase.from('tg_outreach_base_contacts').select(contactSelect)
+                .in('base_id', baseIds).in('username', usernames)
+            : Promise.resolve({ data: [] as unknown[] }),
+          tgIds.length
+            ? auth.supabase.from('tg_outreach_base_contacts').select(contactSelect)
+                .in('base_id', baseIds).in('tg_user_id', tgIds)
+            : Promise.resolve({ data: [] as unknown[] }),
+        ]);
+
+        const contacts = [
+          ...((byUsername.data ?? []) as DialogBaseContact[]),
+          ...((byTgId.data ?? []) as DialogBaseContact[]),
+        ];
+        const matchBase = buildDialogBaseIndex(bases, contacts);
+        for (const row of rows) {
+          const match = matchBase({
+            tg_username: row.tg_username as string | null,
+            tg_user_id: row.tg_user_id as number | null,
+          });
+          if (match) row.base = match;
         }
       }
 
