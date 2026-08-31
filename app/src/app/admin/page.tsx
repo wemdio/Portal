@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { Users, FileText, Database, Activity, Settings, Globe, Gauge } from 'lucide-react';
+import { Users, FileText, Database, Activity, Settings, Globe, Gauge, KeyRound } from 'lucide-react';
 import { useIsTma } from '@/lib/useIsTma';
 import { useUser } from '@/lib/UserProvider';
 
@@ -84,6 +84,23 @@ export default function AdminPage() {
                 </p>
               </div>
               <Globe className="h-6 w-6 text-blue-600/80" />
+            </div>
+            <p className="mt-auto text-sm font-medium text-blue-600">{locale === 'en' ? 'Open →' : 'Перейти →'}</p>
+          </div>
+        </Link>
+
+        <Link href="/admin/bench-keys" className={cardClass}>
+          <div className="flex h-full flex-col">
+            <div className="mb-4 flex items-start justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">{locale === 'en' ? 'API keys' : 'Ключи API'}</h2>
+                <p className="text-sm text-gray-500">
+                  {locale === 'en'
+                    ? 'External access to parsers and the base constructor: issue and revoke keys.'
+                    : 'Внешний доступ к парсерам и конструктору баз: выдать и отозвать ключи.'}
+                </p>
+              </div>
+              <KeyRound className="h-6 w-6 text-blue-600/80" />
             </div>
             <p className="mt-auto text-sm font-medium text-blue-600">{locale === 'en' ? 'Open →' : 'Перейти →'}</p>
           </div>

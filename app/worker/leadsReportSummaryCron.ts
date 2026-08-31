@@ -13,7 +13,7 @@ import {
 import { SUMMARY_CHANNELS } from '@/lib/leadsReport/channels';
 import { computeAllChannelMetrics } from '@/lib/leadsReport/metrics';
 import { getAllRecipients } from '@/lib/leadsReport/subscribers';
-import { formatSummary } from '@/lib/leadsReport/summaryFormatter';
+import { formatSummaryMessages } from '@/lib/leadsReport/summaryFormatter';
 import { currentMskWeekWindow } from '@/lib/leadsReport/weekWindow';
 import { sendMessage } from '@/lib/tgBot/telegramClient';
 import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
@@ -48,10 +48,15 @@ async function main(): Promise<void> {
       throw new Error('No Telegram report recipients configured');
     }
 
-    const text = formatSummary(window.start, window.end, metrics);
+    // Два сообщения: основные каналы и дополнительные — см.
+    // `formatSummaryMessages`. Получатель считается доставленным, только
+    // если ушли ОБА: половина отчёта хуже, чем явный `partial` в логе.
+    const messages = formatSummaryMessages(window.start, window.end, metrics);
     for (const chatId of recipients) {
       try {
-        await sendMessage(TOKEN, { chatId, text });
+        for (const text of messages) {
+          await sendMessage(TOKEN, { chatId, text });
+        }
         recipientsSent += 1;
       } catch (error) {
         recipientsFailed += 1;

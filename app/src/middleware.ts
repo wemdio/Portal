@@ -55,6 +55,12 @@ function isPublicApiPath(p: string): boolean {
     p === '/api/demo-lead' || // public landing demo-gate lead capture
     p === '/api/health' ||
     p.startsWith('/api/partner/') || // external pull-API, auth'd by PARTNER_API_KEY
+    // Bench — внешняя витрина инструментов для подрядчиков. Авторизуется
+    // собственным ключом (bench_live_*) и работает от имени учётки-робота,
+    // поэтому штатный staff-only гейт ей не подходит: пользовательского JWT
+    // у неё нет. Свою проверку она делает в lib/bench/auth.ts на КАЖДОМ
+    // запросе, без кэша, чтобы отзыв ключа действовал немедленно.
+    p.startsWith('/api/bench/') ||
     p.startsWith('/api/telegram/verify') ||
     p.startsWith('/api/telegram/link') ||
     p.startsWith('/api/database-review/guest/') ||

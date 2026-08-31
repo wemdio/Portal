@@ -155,6 +155,95 @@ function Row({
   );
 }
 
+/**
+ * Лиды базы поимённо.
+ *
+ * Счётчик «Лиды: 6 против 19» говорит, какая гипотеза лучше, но не говорит,
+ * кто эти шестеро. Ники приходилось собирать руками: открыть «Диалоги»,
+ * отфильтровать по статусу «Лид» и сверить каждого с выгрузкой базы.
+ *
+ * Список — тех же людей, что и в счётчике над ним, и в том же периоде: два
+ * числа про одних и тех же лидов, разошедшиеся на одном экране, хуже, чем
+ * отсутствие списка. Пометка «у менеджера» рядом — потому что «стал лидом» и
+ * «дошёл до менеджера» это разные события, и в таблице выше они тоже разные
+ * строки.
+ */
+function LeadList({ stats }: { stats: BaseStats }) {
+  const [copied, setCopied] = useState(false);
+
+  const nicknames = stats.leadList
+    .map((l) => (l.username ? `@${l.username}` : l.tgUserId === null ? '' : `ID ${l.tgUserId}`))
+    .filter(Boolean);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(nicknames.join('\n'));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Буфер закрыт настройками браузера — список остаётся на экране, его
+      // всегда можно выделить руками. Ругаться на это нечем и незачем.
+    }
+  };
+
+  return (
+    <div className="rounded-xl bg-gray-50 px-3 py-2">
+      <div className="flex items-center gap-2">
+        <span className="truncate text-[11px] font-medium text-gray-700">{stats.name}</span>
+        <span className="text-[11px] text-gray-400">лидов {stats.leadList.length}</span>
+        {nicknames.length > 0 && (
+          <button
+            type="button"
+            onClick={() => void copy()}
+            className="ml-auto cursor-pointer rounded-full border border-gray-200 bg-white px-2 py-0.5 text-[10px] text-gray-600 transition hover:border-indigo-300 hover:bg-indigo-50"
+          >
+            {copied ? 'Скопировано' : 'Скопировать ники'}
+          </button>
+        )}
+      </div>
+      {stats.leadList.length === 0 ? (
+        <div className="py-3 text-center text-[11px] text-gray-400">За период лидов не было.</div>
+      ) : (
+        // Высоту ограничиваем: на длинной гипотезе список иначе отодвигает
+        // график сравнения за экран, а он тут главный.
+        <ul className="mt-1 max-h-56 space-y-0.5 overflow-y-auto">
+          {stats.leadList.map((lead, i) => (
+            <li
+              key={`${lead.username || lead.tgUserId}-${i}`}
+              className="flex items-center gap-2 border-t border-gray-100 py-1 first:border-t-0"
+            >
+              {lead.username ? (
+                <a
+                  href={`https://t.me/${lead.username}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="truncate text-[11px] text-indigo-600 hover:underline"
+                >
+                  @{lead.username}
+                </a>
+              ) : (
+                <span className="truncate text-[11px] text-gray-600">
+                  {lead.tgUserId === null ? 'без ника' : `ID ${lead.tgUserId}`}
+                </span>
+              )}
+              {lead.forwarded && (
+                <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700">
+                  у менеджера
+                </span>
+              )}
+              <span className="ml-auto shrink-0 text-[10px] tabular-nums text-gray-400">
+                {lead.at
+                  ? new Date(lead.at).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })
+                  : '—'}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function BaseComparison({
   campaignId,
   bases,
@@ -302,6 +391,10 @@ export default function BaseComparison({
                 </div>
               </div>
             ))}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            {[left, right].map((s) => <LeadList key={s.baseId} stats={s} />)}
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
