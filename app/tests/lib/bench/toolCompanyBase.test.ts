@@ -5,7 +5,12 @@ import { companyBaseTool, escapeLike } from '@/lib/bench/tools/companyBase';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 function db(rows: Array<Record<string, unknown>>): SupabaseClient {
-  return createMockSupabase({ tables: { pdl_companies: rows } }) as unknown as SupabaseClient;
+  return createMockSupabase({
+    // Без флага мок игнорирует .order/.limit, и постраничность проверялась бы
+    // вхолостую — совпадением числа отфильтрованных строк с размером страницы.
+    enforceQueryWindows: true,
+    tables: { pdl_companies: rows },
+  }) as unknown as SupabaseClient;
 }
 
 const ROWS = [
