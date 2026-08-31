@@ -50,6 +50,37 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   if (limited) return finish(limited, 0);
 
   const jobTool = tool as BenchJobTool;
+  const limit = Math.max(1, Math.min(MAX_LIMIT, Number(sp.get('limit')) || DEFAULT_LIMIT));
+  const cursor = sp.get('cursor');
+
+  // Результаты у инструментов лежат двумя способами — в отдельной таблице
+  // или массивом в самой строке задачи. Проверка «задача моя» в обоих
+  // случаях идёт через клиент робота, то есть её выполняет RLS.
+  if (jobTool.results.kind === 'inline') {
+    const field = jobTool.results.field;
+    const { data: job } = await auth.db
+      .from(jobTool.table)
+      .select(`id, ${field}`)
+      .eq('id', id)
+      .maybeSingle();
+    if (!job) return finish(benchError('not_found', 'Задача не найдена'), 0);
+
+    const all = Array.isArray(job[field]) ? (job[field] as unknown[]) : [];
+    // У элементов JSON-массива нет ни id, ни порядка, кроме позиции —
+    // поэтому здесь курсор это номер элемента, а не идентификатор строки.
+    const from = Math.max(0, Number(cursor) || 0);
+    const page = all.slice(from, from + limit);
+    const hasMore = from + page.length < all.length;
+
+    return finish(
+      NextResponse.json({
+        rows: page,
+        cursor: hasMore ? String(from + page.length) : null,
+        has_more: hasMore,
+      }),
+      page.length,
+    );
+  }
 
   // Сперва убеждаемся, что задача видна роботу. Без этого пришлось бы
   // полагаться только на RLS дочерней таблицы, а она у разных инструментов
@@ -60,9 +91,6 @@ export async function GET(req: NextRequest, ctx: Ctx) {
     .eq('id', id)
     .maybeSingle();
   if (!job) return finish(benchError('not_found', 'Задача не найдена'), 0);
-
-  const limit = Math.max(1, Math.min(MAX_LIMIT, Number(sp.get('limit')) || DEFAULT_LIMIT));
-  const cursor = sp.get('cursor');
 
   // Курсор, а не смещение: результаты дописываются воркером прямо во время
   // выгрузки, и offset на растущей таблице теряет и дублирует строки.

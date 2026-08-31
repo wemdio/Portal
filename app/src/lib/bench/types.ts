@@ -33,6 +33,22 @@ export type BenchStopSupport =
   | { supported: true; stoppedStatus: string }
   | { supported: false; reason: string };
 
+/**
+ * Откуда берутся результаты задачи. Инструменты устроены двумя способами, и
+ * притворяться, что способ один, значило бы городить фальшивую таблицу для
+ * половины из них.
+ *
+ * `table` — строки в отдельной таблице со ссылкой на задачу (Яндекс.Карты,
+ * Google Maps, поисковый парсер). Листаются курсором по id.
+ *
+ * `inline` — массив прямо в поле строки задачи (конструктор баз хранит
+ * результат в `data`, TG-парсер в `result_users`). Листается по номеру
+ * элемента: в JSON-массиве нет ни id, ни порядка, кроме позиции.
+ */
+export type BenchResultsSource =
+  | { kind: 'table'; table: string; jobColumn: string; orderColumn: string }
+  | { kind: 'inline'; field: string };
+
 export interface BenchJobTool {
   id: string;
   kind: 'job';
@@ -53,7 +69,7 @@ export interface BenchJobTool {
   rowsFound(row: JobRow): number;
   errorOf(row: JobRow): string | null;
   finishedAt(row: JobRow): string | null;
-  results: { table: string; jobColumn: string; orderColumn: string };
+  results: BenchResultsSource;
   stop: BenchStopSupport;
 }
 
