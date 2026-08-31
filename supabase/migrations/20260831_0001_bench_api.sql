@@ -100,3 +100,17 @@ create index if not exists idx_bench_api_requests_key_action_created
 -- прочитать отпечатки и лимиты собственного и чужих ключей.
 alter table public.bench_api_keys enable row level security;
 alter table public.bench_api_requests enable row level security;
+
+-- Права. Сервисной роли — всё: ею работают проверка ключа (lib/bench/auth.ts),
+-- журнал (lib/bench/journal.ts), подсчёт лимитов и будущий экран админки.
+grant all on public.bench_api_keys to service_role;
+grant all on public.bench_api_requests to service_role;
+grant usage, select on sequence public.bench_api_requests_id_seq to service_role;
+
+-- Роли authenticated — НИЧЕГО, и это главное здесь.
+--
+-- Витрина ходит в данные задач от имени учётки-робота, а у робота роль
+-- ровно authenticated. Выдай мы ему select на эти таблицы — он прочитал бы
+-- отпечатки и лимиты и своего, и чужих ключей. RLS без политик его уже
+-- отсекает, но отсутствие гранта закрывает тот же путь вторым, независимым
+-- способом: политику можно случайно добавить, грант — нет.
