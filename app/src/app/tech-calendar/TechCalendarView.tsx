@@ -38,6 +38,7 @@ export default function TechCalendarView() {
   const [modalMode, setModalMode] = useState<ModalMode | null>(null);
   const [modalSub, setModalSub] = useState<TechSubscription | null>(null);
   const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -120,6 +121,25 @@ export default function TechCalendarView() {
     }
   };
 
+  const syncSpaceProxy = async () => {
+    setSyncing(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/tech-calendar/sync', {
+        method: 'POST',
+        headers: await authHeaders(),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setError(json.error ?? 'Не удалось синхронизировать SpaceProxy');
+        return;
+      }
+      await load();
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const remove = async (sub: TechSubscription) => {
     if (!window.confirm(`Удалить «${sub.service_name}» из календаря?`)) return;
     const res = await fetch(`/api/tech-calendar/subscriptions/${sub.id}`, {
@@ -142,16 +162,26 @@ export default function TechCalendarView() {
           <h1 className="text-xl font-semibold text-gray-900">Календарь технички</h1>
           <p className="text-sm text-gray-500">Прокси, серверы, API и софт: что и когда платим</p>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            setModalSub(null);
-            setModalMode('create');
-          }}
-          className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
-        >
-          Добавить сервис
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={syncing}
+            onClick={syncSpaceProxy}
+            className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+          >
+            {syncing ? 'Синхронизация...' : 'Синк SpaceProxy'}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setModalSub(null);
+              setModalMode('create');
+            }}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
+          >
+            Добавить сервис
+          </button>
+        </div>
       </div>
 
       <label className="inline-flex items-center gap-2 text-sm text-gray-600">
