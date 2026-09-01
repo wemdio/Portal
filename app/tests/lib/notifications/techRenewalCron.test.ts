@@ -33,6 +33,7 @@ function sub(over: Record<string, unknown> = {}) {
     currency: 'USD',
     next_billing_date: '2026-08-15',
     status: 'pending_review',
+    is_hidden: false,
     ...over,
   };
 }
@@ -114,6 +115,11 @@ describe('runTechRenewalNotifications', () => {
 
   it('не напоминает про отменённые', async () => {
     const db = seed([sub({ status: 'cancel' })]);
+    expect((await runTechRenewalNotifications({ db: db as never, now: NOW })).created).toBe(0);
+  });
+
+  it('не напоминает про скрытые', async () => {
+    const db = seed([sub({ is_hidden: true })]);
     expect((await runTechRenewalNotifications({ db: db as never, now: NOW })).created).toBe(0);
   });
 

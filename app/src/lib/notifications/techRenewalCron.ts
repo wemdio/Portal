@@ -84,6 +84,7 @@ export async function runTechRenewalNotifications(deps: TechRenewalDeps): Promis
     .from('tech_subscriptions')
     .select('id, service_name, amount, currency, next_billing_date, status')
     .neq('status', 'cancel')
+    .eq('is_hidden', false)
     .lte('next_billing_date', cutoff);
 
   if (subsRes.error) {

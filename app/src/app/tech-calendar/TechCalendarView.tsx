@@ -29,6 +29,7 @@ export default function TechCalendarView() {
   const [subscriptions, setSubscriptions] = useState<TechSubscription[]>([]);
   const [loading, setLoading] = useState(true);
   const [typeFilter, setTypeFilter] = useState<ServiceType | null>(null);
+  const [showHidden, setShowHidden] = useState(false);
 
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
@@ -42,17 +43,21 @@ export default function TechCalendarView() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/tech-calendar/subscriptions', { headers: await authHeaders() });
+      const url = showHidden ? '/api/tech-calendar/subscriptions?include_hidden=1' : '/api/tech-calendar/subscriptions';
+      const res = await fetch(url, { headers: await authHeaders() });
       const json = await res.json();
       setSubscriptions(res.ok ? (json.subscriptions ?? []) : []);
       if (!res.ok) setError(json.error ?? 'Не удалось загрузить список');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [showHidden]);
 
   useEffect(() => {
-    load();
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [load]);
 
   const visible = useMemo(
@@ -102,6 +107,19 @@ export default function TechCalendarView() {
     if (res.ok) await load();
   };
 
+  const toggleHidden = async (sub: TechSubscription) => {
+    const res = await fetch(`/api/tech-calendar/subscriptions/${sub.id}`, {
+      method: 'PATCH',
+      headers: await authHeaders(),
+      body: JSON.stringify({ is_hidden: !sub.is_hidden }),
+    });
+    if (res.ok) {
+      setModalMode(null);
+      setModalSub(null);
+      await load();
+    }
+  };
+
   const remove = async (sub: TechSubscription) => {
     if (!window.confirm(`Удалить «${sub.service_name}» из календаря?`)) return;
     const res = await fetch(`/api/tech-calendar/subscriptions/${sub.id}`, {
@@ -135,6 +153,16 @@ export default function TechCalendarView() {
           Добавить сервис
         </button>
       </div>
+
+      <label className="inline-flex items-center gap-2 text-sm text-gray-600">
+        <input
+          type="checkbox"
+          checked={showHidden}
+          onChange={(e) => setShowHidden(e.target.checked)}
+          className="h-4 w-4 rounded border-gray-300 text-blue-600"
+        />
+        Показать скрытые
+      </label>
 
       <StatsRow subscriptions={visible} year={year} month={month} today={today} />
       <TypeBreakdown subscriptions={subscriptions} year={year} month={month} selected={typeFilter} onSelect={setTypeFilter} />
@@ -199,6 +227,7 @@ export default function TechCalendarView() {
                 }
               : undefined
           }
+          onToggleHidden={modalMode === 'edit' && modalSub ? () => toggleHidden(modalSub) : undefined}
         />
       )}
     </div>

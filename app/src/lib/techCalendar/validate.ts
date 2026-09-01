@@ -68,6 +68,11 @@ function parseNotes(value: unknown): string | null {
   return (value as string).trim() || null;
 }
 
+function parseBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== 'boolean') fail(`${label} должен быть true или false`);
+  return value;
+}
+
 export interface CreateInput {
   service_name: string;
   service_type: ServiceType;
@@ -93,7 +98,7 @@ export function parseCreateInput(body: Body): CreateInput {
 export type PatchInput = Partial<CreateInput>;
 
 export function parsePatchInput(body: Body): PatchInput {
-  const patch: PatchInput = {};
+  const patch: PatchInput & { is_hidden?: boolean; hidden_at?: string | null } = {};
   if (body.service_name !== undefined) patch.service_name = parseName(body.service_name);
   if (body.service_type !== undefined) patch.service_type = parseType(body.service_type);
   if (body.amount !== undefined) patch.amount = parseAmount(body.amount);
@@ -101,6 +106,10 @@ export function parsePatchInput(body: Body): PatchInput {
   if (body.billing_cycle !== undefined) patch.billing_cycle = parseCycle(body.billing_cycle);
   if (body.next_billing_date !== undefined) patch.next_billing_date = parseDate(body.next_billing_date);
   if (body.notes !== undefined) patch.notes = parseNotes(body.notes);
+  if (body.is_hidden !== undefined) {
+    patch.is_hidden = parseBoolean(body.is_hidden, 'Флаг скрытия');
+    patch.hidden_at = patch.is_hidden ? new Date().toISOString() : null;
+  }
   if (!Object.keys(patch).length) fail('Нечего менять');
   return patch;
 }
