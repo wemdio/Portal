@@ -9,6 +9,7 @@ import {
   CYCLE_LABELS,
   SERVICE_TYPES,
   SERVICE_TYPE_LABELS,
+  TECH_SOURCE_LABELS,
   type TechSubscription,
 } from '@/lib/techCalendar/types';
 
@@ -33,6 +34,7 @@ interface Props {
   onSubmit: (payload: ModalPayload) => void;
   /** Удаление живёт в самой карточке: отдельная кнопка на странице попадалась бы под руку случайно. */
   onDelete?: () => void;
+  onToggleHidden?: () => void;
 }
 
 const EMPTY: ModalPayload = {
@@ -50,7 +52,7 @@ const EMPTY: ModalPayload = {
  * цикл, но её и сумму можно поправить: цены на прокси и серверы меняются от
  * продления к продлению, и правят их обычно ровно в этот момент.
  */
-export default function SubscriptionModal({ mode, subscription, saving, error, onClose, onSubmit, onDelete }: Props) {
+export default function SubscriptionModal({ mode, subscription, saving, error, onClose, onSubmit, onDelete, onToggleHidden }: Props) {
   const [form, setForm] = useState<ModalPayload>(() => {
     if (!subscription) return EMPTY;
     const base: ModalPayload = {
@@ -82,6 +84,15 @@ export default function SubscriptionModal({ mode, subscription, saving, error, o
         </div>
 
         <div className="space-y-3">
+          {subscription && (
+            <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+              <span>{TECH_SOURCE_LABELS[subscription.source]}</span>
+              {subscription.provider_status && <span>Статус: {subscription.provider_status}</span>}
+              {subscription.synced_at && <span>Синк: {new Date(subscription.synced_at).toLocaleString('ru-RU')}</span>}
+              {subscription.is_hidden && <span className="rounded bg-gray-100 px-2 py-0.5 text-gray-700">Скрыто</span>}
+            </div>
+          )}
+
           <label className="block">
             <span className="text-xs text-gray-500">Название сервиса</span>
             <input
@@ -180,11 +191,18 @@ export default function SubscriptionModal({ mode, subscription, saving, error, o
         {error && <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{error}</div>}
 
         <div className="mt-4 flex items-center justify-end gap-2">
-          {mode === 'edit' && onDelete && (
-            <button type="button" onClick={onDelete} className="mr-auto text-xs text-red-600 hover:underline">
-              Удалить сервис
-            </button>
-          )}
+          <div className="mr-auto flex items-center gap-3">
+            {mode === 'edit' && subscription && onToggleHidden && (
+              <button type="button" onClick={onToggleHidden} className="text-xs text-gray-600 hover:underline">
+                {subscription.is_hidden ? 'Вернуть в календарь' : 'Скрыть из календаря'}
+              </button>
+            )}
+            {mode === 'edit' && onDelete && (
+              <button type="button" onClick={onDelete} className="text-xs text-red-600 hover:underline">
+                Удалить сервис
+              </button>
+            )}
+          </div>
           <button type="button" onClick={onClose} className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-700">
             Отмена
           </button>
