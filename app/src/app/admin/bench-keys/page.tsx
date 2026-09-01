@@ -195,27 +195,27 @@ export default function BenchKeysPage() {
         <div>
           <p className="font-medium text-sm">Документация</p>
           <p className="text-sm text-gray-500">
-            Все ручки, инструменты, коды ошибок, лимиты и примеры на curl и Python.
-            Отдаётся текущая версия из выкаченной ветки.
+            Обзор — что это и что можно запускать, простым языком. Справочник —
+            каждая ручка с параметрами, ответами и ошибками. Отдаётся текущая
+            версия из выкаченной ветки.
           </p>
         </div>
-        <div className="flex gap-2 shrink-0">
+        <div className="flex flex-wrap gap-2 shrink-0">
           <a
             href="/api-portal.md"
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50"
-          >
-            <BookOpen className="w-3.5 h-3.5" />
-            Открыть
-          </a>
-          <a
-            href="/api-portal.md"
-            download="API Portal.md"
+            download="API портала.md"
             className="inline-flex items-center gap-1.5 rounded-lg bg-gray-900 px-3 py-1.5 text-sm text-white hover:bg-gray-800"
           >
+            <BookOpen className="w-3.5 h-3.5" />
+            Обзор
+          </a>
+          <a
+            href="/api-portal-endpoints.md"
+            download="API портала — справочник ручек.md"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50"
+          >
             <Download className="w-3.5 h-3.5" />
-            Скачать
+            Справочник ручек
           </a>
         </div>
       </div>
