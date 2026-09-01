@@ -1362,6 +1362,26 @@ function DialogsTab({ campaignId }: {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium text-gray-900">{d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`}</span>
+                      {/* Из какой гипотезы человек — сразу за ником: база
+                          отвечает на вопрос «кто это», а не «что с ним
+                          сделали», и читается вместе с именем. */}
+                      {d.base && (
+                        <span
+                          title={
+                            d.base.alsoIn.length
+                              ? `Написали из базы «${d.base.name}». Тот же контакт есть и в базах: ${d.base.alsoIn.join(', ')}.`
+                              : `Контакт из базы «${d.base.name}»`
+                          }
+                          className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700"
+                        >
+                          <Database className="h-3 w-3" />
+                          {d.base.name}
+                          {/* Цвет тот же, что у имени базы: у «text-violet-400»
+                              нет пары в тёмной теме портала, и счётчик уезжал
+                              бы в невидимое. */}
+                          {d.base.alsoIn.length > 0 && <span className="opacity-70">+{d.base.alsoIn.length}</span>}
+                        </span>
+                      )}
                       <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${st.cls}`}>{st.label}</span>
                       {d.tg_is_bot ? (
                         <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">Бот</span>
@@ -1402,29 +1422,7 @@ function DialogsTab({ campaignId }: {
                       )}
                       <span className="text-[10px] text-gray-400">{d.messages.length} сообщ.</span>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : '—'}</span>
-                      {/* Из какой гипотезы человек. Второй строкой, а не в ряд
-                          со статусами: разметку ведут по статусам, и лишний
-                          бейдж среди них удлинял бы поиск нужного. */}
-                      {d.base && (
-                        <span
-                          title={
-                            d.base.alsoIn.length
-                              ? `Написали из базы «${d.base.name}». Тот же контакт есть и в базах: ${d.base.alsoIn.join(', ')}.`
-                              : `Контакт из базы «${d.base.name}»`
-                          }
-                          className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700"
-                        >
-                          <Database className="h-3 w-3" />
-                          {d.base.name}
-                          {/* Цвет тот же, что у имени базы: у «text-violet-400»
-                              нет пары в тёмной теме портала, и счётчик уезжал
-                              бы в невидимое. */}
-                          {d.base.alsoIn.length > 0 && <span className="opacity-70">+{d.base.alsoIn.length}</span>}
-                        </span>
-                      )}
-                    </div>
+                    <span className="block text-[11px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : '—'}</span>
                   </div>
                   {isExpanded ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
                 </button>
