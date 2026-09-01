@@ -72,22 +72,49 @@ describe('изоляция витрины', () => {
   it('документация не обещает остановку там, где её нет', () => {
     const doc = readFileSync(join(process.cwd(), 'public/api-portal.md'), 'utf8');
     const rows = doc.split('\n');
-    const mismatched = listAllBenchTools()
-      .filter((tool) => tool.kind === 'job')
-      .filter((tool) => {
-        const row = rows.find((line) => line.startsWith(`| \`${tool.id}\``));
-        if (!row) return false;
-        const promised = row.trimEnd().endsWith('| да |');
-        return promised !== (tool as { stop: { supported: boolean } }).stop.supported;
-      })
-      .map((tool) => tool.id);
+    const jobs = listAllBenchTools().filter((tool) => tool.kind === 'job');
+
+    const checked: string[] = [];
+    const mismatched: string[] = [];
+    for (const tool of jobs) {
+      const row = rows.find((line) => line.startsWith(`| ${tool.title} |`));
+      if (!row) continue;
+      checked.push(tool.title);
+      const promised = row.trimEnd().endsWith('| да |');
+      if (promised !== (tool as { stop: { supported: boolean } }).stop.supported) {
+        mismatched.push(tool.title);
+      }
+    }
+
+    // Без этой строки тест молча проходил бы вхолостую: поменяли вид таблицы —
+    // строки перестали находиться, и «расхождений нет» означало бы «ничего не
+    // проверено». Названия в таблице обязаны совпадать с названиями в реестре.
+    expect(checked).toHaveLength(jobs.length);
     expect(mismatched).toEqual([]);
   });
 
-  it('кнопка «Скачать» в админке ведёт на существующий файл', () => {
+  it('кнопки документации в админке ведут на существующие файлы', () => {
     // Иначе страница соберётся, тесты пройдут, а человек нажмёт и получит 404.
     const page = readFileSync(join(process.cwd(), 'src/app/admin/bench-keys/page.tsx'), 'utf8');
-    expect(page).toContain('href="/api-portal.md"');
-    expect(existsSync(join(process.cwd(), 'public/api-portal.md'))).toBe(true);
+    const linked = [...page.matchAll(/href="(\/api-portal[a-z-]*\.md)"/g)].map((m) => m[1]);
+    expect(linked.length).toBeGreaterThan(0);
+    const missing = linked.filter((href) => !existsSync(join(process.cwd(), 'public', href)));
+    expect(missing).toEqual([]);
+  });
+
+  it('справочник ручек описывает каждую ручку витрины', () => {
+    // Добавили роут и забыли описать — падает здесь.
+    const doc = readFileSync(join(process.cwd(), 'public/api-portal-endpoints.md'), 'utf8');
+    const routes = walk(BENCH_ROUTES)
+      .filter((f) => f.endsWith('route.ts'))
+      .map((f) =>
+        f
+          .replace(/\\/g, '/')
+          .replace(/^.*\/api\/bench\/v1/, '')
+          .replace(/\/route\.ts$/, '')
+          .replace(/\[id\]/g, '{id}') || '/',
+      );
+    const undocumented = routes.filter((path) => !doc.includes(path));
+    expect(undocumented).toEqual([]);
   });
 });
