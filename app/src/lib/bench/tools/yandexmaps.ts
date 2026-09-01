@@ -43,6 +43,7 @@ export const yandexMapsTool: BenchJobTool = {
         search_urls: p.search_urls,
         catalog_filters: null,
         max_results: p.max_results,
+        strict_max_results: true,
         headless: true,
       },
       progress_stage: 'pending',
