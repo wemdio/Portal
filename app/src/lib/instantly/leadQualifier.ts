@@ -236,6 +236,15 @@ const RETIRED_MAILBOX_PATTERN =
   /(?:почт|адрес|ящик|mailbox|e-?mail)[^\n]{0,60}(?:прекраща|прекрати|не\s+(?:обслуживается|используется|действует|работает)|is\s+no\s+longer)/iu;
 const MAILBOX_CHANGE_NOTICE_PATTERN =
   /(?:смен[аеуы]\s+(?:адреса|почты|электронной\s+почты)|официальн[а-яё]+\s+почт[а-яё]*\s+компании|просим\s+(?:вас\s+)?(?:вести\s+переписку|направлять\s+(?:письма|корреспонденцию|обращения)))/iu;
+const FORMAL_MAILBOX_CHANGE_SUBJECT_PATTERN =
+  /(?:уведомлени|извещени)[ея]\s+о\s+(?:смене|изменении|обновлении)\s+(?:(?:основн|электронн|почтов)[а-яё]*\s+){0,3}адрес[а-яё]*/iu;
+const FORMAL_MAILBOX_CHANGE_BODY_EVIDENCE = [
+  /(?:обновил|изменил|сменил)[а-яё]*[^\n.!?]{0,120}(?:электронн[а-яё]*\s+почтов[а-яё]*\s+адрес[а-яё]*|e-?mail\s+address)/iu,
+  /(?:все\s+)?официальн[а-яё]*\s+письм[а-яё]*[^\n.!?]{0,100}(?:следует|необходимо|просим)[^\n.!?]{0,40}направ(?:лять|ить)[^\n.!?]{0,100}(?:нов[а-яё]*\s+адрес|e-?mail)/iu,
+  /стар[а-яё]*\s+(?:(?:электронн|почтов)[а-яё]*\s+){0,2}адрес[\s\S]{0,220}(?:перенаправил|переадресовал)[а-яё]*[\s\S]{0,80}(?:ваш[а-яё]*\s+)?сообщен[а-яё]*/iu,
+];
+const FORMAL_MAILBOX_OPERATIONAL_CONTACT_PATTERN =
+  /(?:если|при\s+наличии)[^\n.!?]{0,80}срочн[а-яё]*\s+вопрос[а-яё]*[^\n.!?]{0,120}(?:свяжитесь\s+с\s+нами|обратитесь\s+к\s+нам|(?:позвоните|звоните)\s+нам)/giu;
 
 export function isContactRequestOnly(text: string): boolean {
   if (!text || text.length < 10) return false;
@@ -274,6 +283,23 @@ function hasStructuredAutoReplyMarker(text: string): boolean {
       .slice(0, 2)
       .some((segment) => BARE_STRUCTURED_AUTO_REPLY_MARKER_PATTERN.test(segment))
   );
+}
+
+function hasFormalMailboxChangeNotification(subject: string, text: string): boolean {
+  if (!FORMAL_MAILBOX_CHANGE_SUBJECT_PATTERN.test(subject)) return false;
+  const evidenceCount = FORMAL_MAILBOX_CHANGE_BODY_EVIDENCE.reduce(
+    (count, pattern) => count + (pattern.test(text) ? 1 : 0),
+    0,
+  );
+  if (evidenceCount < 2) return false;
+
+  // Убираем только дежурный operational-контакт этого уведомления. Любой
+  // отдельный запрос КП, цены, встречи или созвона остаётся и отменяет hard-stop.
+  const withoutOperationalContact = text.replace(
+    FORMAL_MAILBOX_OPERATIONAL_CONTACT_PATTERN,
+    ' ',
+  );
+  return !hasHumanReplyContinuation(withoutOperationalContact);
 }
 
 function hasHumanReplyContinuation(text: string): boolean {
@@ -743,6 +769,13 @@ export function classifyMachineReply(
     isPureServiceAcknowledgement(authoredBody)
   ) {
     return 'service_acknowledgement';
+  }
+
+  // Формальные уведомления о смене корпоративной почты часто содержат
+  // дежурное «если срочно — свяжитесь с нами». Для обычного письма это CTA,
+  // но здесь три независимых административных сигнала доказывают автоответ.
+  if (hasFormalMailboxChangeNotification(subject, authoredBody)) {
+    return 'auto_reply';
   }
 
   if (isAutoReplyOrUnsubscribe(authoredBody)) {

@@ -3,6 +3,7 @@
 - **Дата:** 2026-08-28
 - **Статус:** реализовано в коде ветки `Sergey`; миграции не применены, deployment не выполнен
 - **Область:** только внутренний Vertical Engine v2 (`verticalEngineV2`, `ve_*`, `VE_MODEL_*`)
+- **Интеграция Instantly:** [`docs/integrations/instantly-api.md`](../integrations/instantly-api.md)
 
 ## Коротко
 

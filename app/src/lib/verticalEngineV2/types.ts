@@ -130,6 +130,12 @@ export interface VeProject {
   created_by: string | null;
   name: string;
   website_url: string;
+  /** First server-validated launch preset binding; null for legacy projects. */
+  launch_preset_id?: string | null;
+  /** Canonical Instantly workspace observed when the preset was first bound. */
+  launch_instantly_account_id?: string | null;
+  launch_preset_bound_at?: string | null;
+  launch_preset_bound_by?: string | null;
   /** Снапшот брифа: { site_profile, website_url, captured_at, ... }. */
   brief: Record<string, unknown> | null;
   status: VeProjectStatus;

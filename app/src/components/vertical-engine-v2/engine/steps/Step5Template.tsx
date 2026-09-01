@@ -252,6 +252,7 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
 
 interface VeLaunchPresetsResponse {
   presets?: VeLaunchPresetOption[];
+  bound_preset_id?: string | null;
   error?: string;
 }
 
@@ -279,6 +280,7 @@ function useTemplateLaunch(
   const [formOpen, setFormOpen] = useState(false);
   const [presets, setPresets] = useState<VeLaunchPresetOption[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [boundPresetId, setBoundPresetId] = useState<string | null>(null);
   const [presetId, setPresetId] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -294,21 +296,48 @@ function useTemplateLaunch(
         if (!response?.ok) {
           setLoadError(response?.data?.error ?? 'Не удалось загрузить пресеты');
           setPresets([]);
+          setBoundPresetId(null);
           return;
         }
         const list = response.data.presets ?? [];
         setPresets(list);
-        setPresetId((cur) => cur || list[0]?.id || '');
+        const responseBoundPresetId =
+          typeof response.data.bound_preset_id === 'string' && response.data.bound_preset_id.trim()
+            ? response.data.bound_preset_id
+            : null;
+        setBoundPresetId(responseBoundPresetId);
+        if (!responseBoundPresetId) {
+          setPresetId('');
+          setLoadError(null);
+          return;
+        }
+        if (list.some((preset) => preset.id === responseBoundPresetId)) {
+          setPresetId(responseBoundPresetId);
+          setLoadError(null);
+          return;
+        }
+        setPresetId('');
+        setLoadError('Закреплённый пресет проекта недоступен');
       })
       .catch(() => {
         setLoadError('Не удалось загрузить пресеты');
         setPresets([]);
+        setBoundPresetId(null);
       });
   }, [presets, template]);
 
   const submit = useCallback(
     (segmentationAuditId: string) => {
-      if (!template || !presetId || !segmentationAuditId || submitting) return;
+      const selectedPreset = presets?.find((preset) => preset.id === presetId);
+      if (
+        !template ||
+        !selectedPreset ||
+        selectedPreset.mailbox_count === 0 ||
+        !segmentationAuditId ||
+        submitting
+      ) {
+        return;
+      }
       setSubmitting(true);
       setSubmitError(null);
       veEnginePost<VeLaunchResponse>(`${VE_API}/templates/${template.id}/launch`, {
@@ -340,7 +369,7 @@ function useTemplateLaunch(
         .catch(() => setSubmitError('Не удалось отправить в запуск'))
         .finally(() => setSubmitting(false));
     },
-    [onSegmentationRejected, template, presetId, submitting],
+    [onSegmentationRejected, presets, template, presetId, submitting],
   );
 
   return {
@@ -349,6 +378,7 @@ function useTemplateLaunch(
     setFormOpen,
     presets,
     loadError,
+    boundPresetId,
     presetId,
     setPresetId,
     submitting,
@@ -361,6 +391,26 @@ function useTemplateLaunch(
 }
 
 type TemplateLaunchState = ReturnType<typeof useTemplateLaunch>;
+
+function formatMailboxCount(count: number): string {
+  const normalized = Math.max(0, Math.trunc(count));
+  const mod100 = normalized % 100;
+  const mod10 = normalized % 10;
+  const noun = mod100 >= 11 && mod100 <= 14
+    ? 'ящиков'
+    : mod10 === 1
+      ? 'ящик'
+      : mod10 >= 2 && mod10 <= 4
+        ? 'ящика'
+        : 'ящиков';
+  return `${normalized.toLocaleString('ru-RU')} ${noun}`;
+}
+
+function mailboxTagFallback(resolution: VeLaunchPresetOption['mailbox_tag_resolution']): string {
+  if (resolution === 'mixed') return 'Теги пула различаются';
+  if (resolution === 'unavailable') return 'Теги временно не загрузились';
+  return 'Тег не назначен';
+}
 
 interface TemplateLaunchPortfolioDto {
   item_id: string;
@@ -614,6 +664,7 @@ function LaunchSection({
   template: VeTemplate;
 }) {
   const recorded = launch.recorded ?? (audit.phase === 'launch_succeeded' ? audit.launchInfo : null);
+  const selectedPreset = launch.presets?.find((preset) => preset.id === launch.presetId) ?? null;
   const embeddedPortfolio = useMemo(() => readTemplateLaunchPortfolio(template), [template]);
   const [remotePortfolio, setRemotePortfolio] = useState<TemplateLaunchPortfolioDto | null>(null);
 
@@ -708,45 +759,90 @@ function LaunchSection({
             Активация — вручную после проверки.
           </p>
           {launch.presets === null && !launch.loadError ? (
-            <p className="text-xs text-gray-500">Загружаем пресеты…</p>
+            <p className="text-xs text-gray-500" role="status">Загружаем пресеты…</p>
           ) : null}
-          {launch.loadError ? <p className="text-xs text-red-500">{launch.loadError}</p> : null}
+          {launch.loadError ? <p className="text-xs text-red-500" role="alert">{launch.loadError}</p> : null}
           {launch.presets && launch.presets.length === 0 && !launch.loadError ? (
             <p className="text-xs text-gray-500">Нет доступных пресетов — сначала настройте пресет клиенту.</p>
           ) : null}
           {launch.presets && launch.presets.length > 0 ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <select
-                value={launch.presetId}
-                onChange={(e) => launch.setPresetId(e.target.value)}
-                className="ve2-input h-10 min-w-0 flex-1 px-3 text-xs sm:flex-none"
-                aria-label="Пресет запуска"
-              >
-                {launch.presets.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => launch.submit(audit.auditId as string)}
-                disabled={launch.submitting || !launch.presetId}
-                className={HE.btnPrimary}
-              >
-                {launch.submitting
-                  ? 'Создаём кампании…'
-                  : (() => {
-                      const groups = audit.summary
-                        ? audit.summary.segments.filter((segment) => segment.count > 0).length +
-                          (audit.summary.defaultGroup.count > 0 ? 1 : 0)
-                        : 0;
-                      return groups === 1 ? 'Создать кампанию (на паузе)' : `Создать ${groups} кампании на паузе`;
-                    })()}
-              </button>
-              <button type="button" onClick={() => launch.setFormOpen(false)} className={HE.btnGhost}>
-                Отмена
-              </button>
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="min-w-0 flex-1 sm:max-w-sm">
+                  <label htmlFor="ve2-launch-preset" className="ve2-label">
+                    Клиентский пресет
+                  </label>
+                  <select
+                    id="ve2-launch-preset"
+                    value={launch.presetId}
+                    onChange={(e) => launch.setPresetId(e.target.value)}
+                    disabled={Boolean(launch.boundPresetId)}
+                    className="ve2-input h-10 min-w-0 px-3 text-xs"
+                    aria-describedby={selectedPreset ? 've2-launch-preset-summary' : undefined}
+                  >
+                    {!launch.boundPresetId ? <option value="">Выберите клиента</option> : null}
+                    {launch.boundPresetId && !selectedPreset ? (
+                      <option value="">Закреплённый пресет недоступен</option>
+                    ) : null}
+                    {launch.presets.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                  {launch.boundPresetId && selectedPreset ? (
+                    <p className="mt-1 text-[11px] text-gray-500">Пресет закреплён за проектом</p>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => launch.submit(audit.auditId as string)}
+                  disabled={launch.submitting || !selectedPreset || selectedPreset.mailbox_count === 0}
+                  className={HE.btnPrimary}
+                >
+                  {launch.submitting
+                    ? 'Создаём кампании…'
+                    : (() => {
+                        const groups = audit.summary
+                          ? audit.summary.segments.filter((segment) => segment.count > 0).length +
+                            (audit.summary.defaultGroup.count > 0 ? 1 : 0)
+                          : 0;
+                        return groups === 1 ? 'Создать кампанию (на паузе)' : `Создать ${groups} кампании на паузе`;
+                      })()}
+                </button>
+                <button type="button" onClick={() => launch.setFormOpen(false)} className={HE.btnGhost}>
+                  Отмена
+                </button>
+              </div>
+              {selectedPreset ? (
+                <dl
+                  id="ve2-launch-preset-summary"
+                  aria-live="polite"
+                  className="grid gap-3 border-t border-gray-200 pt-3 text-xs sm:grid-cols-2"
+                >
+                  <div>
+                    <dt className="text-gray-500">Workspace</dt>
+                    <dd className="mt-1 font-medium text-gray-800">{selectedPreset.instantly_account_label}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-gray-500">Пул отправителей</dt>
+                    <dd className="mt-1 flex flex-wrap items-center gap-1.5 text-gray-800">
+                      {(selectedPreset.mailbox_tag_resolution === 'exact' ||
+                        selectedPreset.mailbox_tag_resolution === 'shared') &&
+                      selectedPreset.mailbox_tags.length > 0 ? (
+                        selectedPreset.mailbox_tags.map((tag) => (
+                          <span key={tag.id} className="ve2-tag">
+                            {tag.name}
+                          </span>
+                        ))
+                      ) : (
+                        <span>{mailboxTagFallback(selectedPreset.mailbox_tag_resolution)}</span>
+                      )}
+                      <span className="text-gray-500">· {formatMailboxCount(selectedPreset.mailbox_count)}</span>
+                    </dd>
+                  </div>
+                </dl>
+              ) : null}
             </div>
           ) : null}
           {launch.submitError ? (
