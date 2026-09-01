@@ -58,6 +58,7 @@ import {
   type AutoForwardMark,
 } from '@/lib/tgOutreach/autoForward';
 import { DEFAULT_MAX_MESSAGE_CHARS } from '@/lib/tgOutreach/firstTouch/validateMessage';
+import { accountLabel } from '@/lib/tgOutreach/accountLabel';
 import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
 import { ProxyPicker } from '@/components/tg-outreach/ProxyPicker';
 import {
@@ -1053,6 +1054,13 @@ function DialogsTab({ campaignId }: {
   const [query, setQuery] = useState('');
   const [filterCanSend, setFilterCanSend] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [filterAudience, setFilterAudience] = useState<'all' | 'users' | 'bots'>('all');
+  /**
+   * Чьи диалоги показывать — пустая строка означает «всех аккаунтов».
+   *
+   * Отбор идёт на сервере: список листается по тридцать штук, и фильтрация
+   * загруженной страницы врала бы про количество.
+   */
+  const [filterAccountId, setFilterAccountId] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [sendText, setSendText] = useState('');
   const [sending, setSending] = useState(false);
@@ -1070,9 +1078,19 @@ function DialogsTab({ campaignId }: {
     }
   }, [campaignId]);
 
-  const accountNameMap = React.useMemo(() => {
+  /**
+   * Как называется наш аккаунт в каждом диалоге.
+   *
+   * Раньше карта нужна была только подписям сообщений в раскрытой переписке.
+   * Теперь имя стоит и в свёрнутой строке: у кампании несколько аккаунтов, и
+   * «кто с нашей стороны это ведёт» — первый вопрос при разборе диалога.
+   */
+  const accountLabelMap = React.useMemo(() => {
     const map = new Map<string, string>();
-    for (const a of accounts) map.set(a.id, a.session_name);
+    for (const a of accounts) {
+      const label = accountLabel(a);
+      if (label) map.set(a.id, label);
+    }
     return map;
   }, [accounts]);
 
@@ -1085,13 +1103,14 @@ function DialogsTab({ campaignId }: {
     if (filterCanSend === 'disabled') params.set('can_send', 'false');
     if (filterAudience === 'bots') params.set('tg_is_bot', 'true');
     if (filterAudience === 'users') params.set('tg_is_bot', 'false');
+    if (filterAccountId) params.set('account_id', filterAccountId);
     const res = await authFetch(`${API_BASE}/dialogs?${params}`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachDialog[]; total: number };
       setDialogs(d.items); setTotal(d.total);
     }
     setLoading(false);
-  }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience]);
+  }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience, filterAccountId]);
 
   // Полсекунды тишины — и запрос уходит. Заодно сбрасываем страницу: искать на
   // третьей странице прошлого фильтра бессмысленно.
@@ -1331,6 +1350,27 @@ function DialogsTab({ campaignId }: {
               {s.label}
             </button>
           ))}
+          {/* Не плашки, как у соседних фильтров: аккаунтов в кампании полтора
+              десятка, и рядом кнопок они переносили бы всю панель на третью
+              строку. Показываем контрол, только когда аккаунт не один — с
+              единственным выбирать не из чего. */}
+          {accounts.length > 1 && (
+            <>
+              <span className="ml-2 text-xs text-gray-500">Аккаунт:</span>
+              <select
+                value={filterAccountId}
+                onChange={(e) => { setFilterAccountId(e.target.value); setOffset(0); }}
+                aria-label="Показывать диалоги только одного нашего аккаунта"
+                title="С какого нашего аккаунта ведётся переписка"
+                className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterAccountId ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+              >
+                <option value="">Все</option>
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.id}>{accountLabel(a) ?? a.session_name}</option>
+                ))}
+              </select>
+            </>
+          )}
         </div>
         <div className="flex gap-2">
           <button type="button" onClick={() => void exportDialogs('json')} className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
@@ -1348,7 +1388,11 @@ function DialogsTab({ campaignId }: {
         <p className="text-xs text-gray-400 py-8 text-center">
           {query.trim()
             ? `По запросу «${query.trim()}» ничего не нашлось. Ник ищется по части, но только по нику собеседника — не по тексту переписки.`
-            : 'Нет диалогов'}
+            : filterAccountId
+              // Пустой список под фильтром читается как «диалогов нет вообще»,
+              // и оператор идёт проверять кампанию. Называем аккаунт вслух.
+              ? `У аккаунта ${accountLabelMap.get(filterAccountId) ?? ''} диалогов нет. Выберите «Аккаунт: Все», чтобы увидеть остальные.`
+              : 'Нет диалогов'}
         </p>
       ) : (
         <div className="space-y-2">
@@ -1423,7 +1467,23 @@ function DialogsTab({ campaignId }: {
                       )}
                       <span className="text-[10px] text-gray-400">{d.messages.length} сообщ.</span>
                     </div>
-                    <span className="block text-[11px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : '—'}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : '—'}</span>
+                      {/* С какого нашего аккаунта идёт переписка. В кампании их
+                          несколько, а раньше это было видно только внутри
+                          раскрытого диалога, в подписях сообщений: чтобы
+                          понять, кому писать дальше, приходилось разворачивать
+                          каждую строку. */}
+                      {accountLabelMap.get(d.account_id) && (
+                        <span
+                          title={`Переписку ведёт наш аккаунт ${accountLabelMap.get(d.account_id)}`}
+                          className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700"
+                        >
+                          <Send className="h-3 w-3" />
+                          {accountLabelMap.get(d.account_id)}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   {isExpanded ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
                 </button>
@@ -1599,7 +1659,7 @@ function DialogsTab({ campaignId }: {
                       {d.messages.map((m, i) => {
                         const senderName = m.role === 'user'
                           ? (d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`)
-                          : accountNameMap.get(d.account_id) ?? 'Бот';
+                          : accountLabelMap.get(d.account_id) ?? 'Наш аккаунт';
                         return (
                           <div key={i} className={`rounded-lg px-3 py-2 text-xs ${m.role === 'user' ? 'bg-blue-50 text-gray-800' : 'bg-emerald-50 text-gray-800'}`}>
                             <span className="font-semibold">{senderName}:</span> {m.content}
