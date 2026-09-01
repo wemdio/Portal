@@ -17,7 +17,7 @@
 - **Граница (критично)**: `hypothesisEngine` / `he_*` / `HE_MODEL_*` — это прод-бэкенд
   `/client/eng`. Их **не трогать**. v1 (`/tools/hypothesis-engine`) — легаси-клиент того
   же бэкенда.
-- Дата контекста: **2026-08-31**. Звонок с технической командой по средам уже был.
+- Дата контекста: **2026-09-01**. Звонок с технической командой по средам уже был.
 
 ## 2. Что уже сделано
 
@@ -146,6 +146,26 @@ launch portfolio существуют только в коде ветки `Serge
      и launch snapshot. Tag — только display identity и не расширяет фактический sender pool;
    - общий Instantly adapter и read-routes tags/mappings поддерживают account-scoped reads.
      Миграция не применялась и приложение не деплоилось.
+10. **Self-service onboarding клиента специалистом — закрыт в коде**:
+   - только `technician | admin` видит inline-форму шага 5 и может передать email, пароль и
+     пару Instantly workspace+tag. Backend берёт display name из текущего VE2-проекта,
+     принудительно создаёт роль `client` и игнорирует любые присланные role/full_name;
+   - список для формы безопасен: workspace, tag и опциональный count без sender addresses.
+     Он строится по всем настроенным workspace; tags и mappings деградируют независимо, сбой
+     одного workspace не скрывает здоровые, а неизвестный count не блокирует создание. Для
+     записи preset backend не доверяет mapping-счётчику, а заново пагинирует live
+     `/accounts?tag_ids=<id>` в выбранном workspace, валидирует, нормализует и дедуплицирует
+     точный sender snapshot. У всех VE2 pagination loops есть page/repeated-cursor guards;
+   - новый клиент без отдельного тарифа ограничен 16 ящиками. Preset получает канонические
+     default schedule/limits/tracking. После успеха он появляется и выбирается в текущей
+     форме, но immutable binding проекта устанавливается только фактическим launch;
+   - cross-DB операция компенсируется: profile/preset failure удаляет только что созданного
+     auth-user; duplicate email возвращает `409` без preset и без delete. Неоднозначный
+     Auth-response сверяется по заранее заданному UUID попытки, а не поиском/удалением по email.
+     Пароль и sender addresses не попадают в response/logs;
+   - tag не является подпиской: будущие изменения его состава не обновляют сохранённый
+     preset. Правка live campaign в Instantly действует на неё; следующий запуск опять берёт
+     настройки из preset. Миграций и deploy для этого пункта нет.
 
 ## 3. Ключевые решения и их мотивы (этого нет в коде — важно не потерять)
 
@@ -256,6 +276,8 @@ launch portfolio существуют только в коде ветки `Serge
   для одной базы сверить estimate до cap → collected → processed → «Прошли проверки»,
   split multi-email, complete-validation gate и company-level hypothesis-aware relevance;
   пересобрать досье и сверить raw/unique/known-any-INN/matched-row channels;
+  technician создаёт тестового client по email/password и workspace+tag → сверить exact
+  snapshot, отсутствие sender addresses в UI и отсутствие project binding до launch;
   PAUSED preparation → очередь → ручная активация первого bundle → reconcile → release →
   активация следующего.
 - **Операционная граница Instantly**: решить отдельно, ограничиваем ли специалистам прямую
@@ -310,6 +332,11 @@ launch portfolio существуют только в коде ветки `Serge
   `VerticalEngineV2*`, v2 migrations/isolation, workspace-scoped custom-tag reads и общие
   migration guards — **57 suites / 404 tests passed**; strict TypeScript и targeted ESLint —
   green; production Next build завершён успешно.
+- **Self-service client onboarding (2026-09-01)**: targeted API/UI/auth/admin contract —
+  **5 suites / 16 tests passed**; exact полный CI-командный прогон —
+  **188 suites / 2025 tests passed**. Он включает `verticalEngineV2Isolation`; strict
+  TypeScript, targeted ESLint, `git diff --check` и production Next build — green. В build
+  остаются только прежние repository-wide warnings Next/Turbopack, не связанные с VE2.
 - **Старые тесты**: isolation ожидает v2 В реестре (а не скрытым); v1 `POST projects`
   ожидает `409`. `mockSupabase` поддерживает `.ilike()`/`.select()`/`.single()`.
 - **`worker/verticalEngineV2.ts`** — в eslint-ignore (worker линтится только esbuild-сборкой).

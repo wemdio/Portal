@@ -100,6 +100,16 @@ export interface VeLaunchPresetOption {
   mailbox_tag_resolution: 'exact' | 'shared' | 'mixed' | 'none' | 'unavailable';
 }
 
+/** Безопасный для UI тег пула отправителей, без адресов почтовых ящиков. */
+export interface VeMailboxTagOption {
+  id: string;
+  name: string;
+  instantly_account_id: string;
+  instantly_account_label: string;
+  /** Display-only hint from tag mappings; null means POST must resolve the live tag. */
+  mailbox_count: number | null;
+}
+
 /** Аккуратно прочитать launch_info из jsonb (могло прийти что угодно). */
 export function parseLaunchInfo(raw: unknown): VeTemplateLaunchInfo | null {
   if (!raw || typeof raw !== 'object') return null;
