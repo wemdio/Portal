@@ -49,6 +49,12 @@ select_deploy_targets_from_files() {
         DEPLOY_WORKERS=1
         DEPLOY_DATASET_SYNC=1
         ;;
+      app/src/app/*|app/src/components/*|app/src/middleware.ts|app/public/*)
+        # Next.js-only surface: routes, UI components, middleware and public
+        # assets are served by the Portal container. Worker bundles are built
+        # from app/worker/* plus the shared runtime code under app/src/lib/*.
+        DEPLOY_PORTAL=1
+        ;;
       app/*)
         # Both production images copy app/. A shared app change can affect any
         # worker bundle, so the monolithic worker image is deployed as a unit.

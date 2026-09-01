@@ -659,6 +659,21 @@ function formatPeriod(sinceIso: string, untilIso: string) {
   return `${since} — ${until}`;
 }
 
+/**
+ * Отметка времени в строке журнала — с датой, а не только со временем.
+ *
+ * Период журнала выбирается вплоть до 30 дней, а в строке стояло одно время:
+ * «13:33:20» на такой глубине не отвечает на вопрос «когда», и соседние строки
+ * за разные дни читаются как одна цепочка событий подряд. Год не пишем — он
+ * один на весь доступный диапазон, а лишние символы в моноширинном списке
+ * съедают ширину у самого сообщения.
+ */
+function logTimestamp(iso: string): string {
+  const d = new Date(iso);
+  const day = d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+  return `${day} ${d.toLocaleTimeString('ru-RU')}`;
+}
+
 function LogsTab({ campaignId }: { campaignId: string }) {
   const [logs, setLogs] = useState<OutreachLog[]>([]);
   const [loading, setLoading] = useState(true);
@@ -866,7 +881,7 @@ function LogsTab({ campaignId }: { campaignId: string }) {
           {!loading && logs.length === 0 && <p className="text-gray-600">Нет логов. Запустите кампанию.</p>}
           {logs.map(log => (
             <div key={log.id} className="flex gap-2">
-              <span className="text-gray-600 shrink-0">{new Date(log.created_at).toLocaleTimeString('ru-RU')}</span>
+              <span className="text-gray-600 shrink-0 tabular-nums">{logTimestamp(log.created_at)}</span>
               <span className={`shrink-0 font-bold uppercase w-14 ${levelColor(log.level)}`}>{log.level}</span>
               <span className="text-gray-300 break-all">{log.message}</span>
             </div>
@@ -3609,8 +3624,8 @@ function AccountLogsModal({
           )}
           {logs.map((log, idx) => (
             <div key={`${log.id}-${idx}`} className="flex gap-2">
-              <span className="text-gray-600 shrink-0">
-                {new Date(log.created_at).toLocaleTimeString('ru-RU')}
+              <span className="text-gray-600 shrink-0 tabular-nums">
+                {logTimestamp(log.created_at)}
               </span>
               <span className={`shrink-0 font-bold uppercase w-14 ${levelColor(log.level)}`}>
                 {log.level}

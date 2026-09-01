@@ -36,6 +36,24 @@ assert_eq "$DEPLOY_WORKERS" 1 "app change selects shared worker image"
 assert_eq "$WORKER_SERVICES" "$ALL_WORKER_SERVICES" "app change selects every shared-image worker"
 assert_eq "$DEPLOY_DATASET_SYNC" 0 "generic app change does not deploy dataset sync"
 
+select_deploy_targets_from_files 'app/src/app/tools/tg-outreach/page.tsx'
+assert_eq "$CORE_SERVICES" portal "Next app route change selects Portal"
+assert_eq "$DEPLOY_WORKERS" 0 "Next app route change does not restart workers"
+assert_eq "$WORKER_SERVICES" "" "Next app route change selects no worker services"
+
+select_deploy_targets_from_files 'app/src/components/ReglamentCallout.tsx'
+assert_eq "$CORE_SERVICES" portal "UI component change selects Portal"
+assert_eq "$DEPLOY_WORKERS" 0 "UI component change does not restart workers"
+assert_eq "$WORKER_SERVICES" "" "UI component change selects no worker services"
+
+select_deploy_targets_from_files 'app/src/middleware.ts'
+assert_eq "$CORE_SERVICES" portal "Next middleware change selects Portal"
+assert_eq "$DEPLOY_WORKERS" 0 "Next middleware change does not restart workers"
+
+select_deploy_targets_from_files 'app/public/favicon.ico'
+assert_eq "$CORE_SERVICES" portal "public asset change selects Portal"
+assert_eq "$DEPLOY_WORKERS" 0 "public asset change does not restart workers"
+
 select_deploy_targets_from_files 'app/scripts/instantly-dataset/sync.mjs
 app/scripts/instantly-dataset/022_leads_capture.sql'
 assert_eq "$DEPLOY_DATASET_SYNC" 1 "dataset sync script change deploys dataset sync"
