@@ -137,17 +137,12 @@ describe('Vertical Engine v2 Step 5 client onboarding', () => {
       />,
     );
 
-    expect(screen.getByRole('button', { name: 'Скачать CSV для запуска' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Скачать CSV для запуска' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /исходный CSV/i })).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Скачать CSV для запуска' }));
-    await waitFor(() => {
-      expect(mockAuthFetch).toHaveBeenCalledWith(
-        '/api/tools/vertical-engine-v2/bases/base-1/export?mode=launch-ready',
-      );
-    });
 
     await user.click(screen.getByRole('button', { name: 'Проверить перед запуском' }));
     const createAction = await screen.findByRole('button', { name: 'Создать клиента и пресет' });
+    expect(screen.queryByRole('button', { name: 'Скачать CSV для запуска' })).not.toBeInTheDocument();
     expect(screen.queryByText(/sender-(one|two)@secret\.test/)).not.toBeInTheDocument();
     expect(createAction).toBeEnabled();
 
@@ -179,5 +174,12 @@ describe('Vertical Engine v2 Step 5 client onboarding', () => {
     expect(screen.getByText('Основной Instantly')).toBeInTheDocument();
     expect(screen.getByText('VBI')).toBeInTheDocument();
     expect(screen.queryByText(/sender-(one|two)@secret\.test/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Скачать CSV для запуска' }));
+    await waitFor(() => {
+      expect(mockAuthFetch).toHaveBeenCalledWith(
+        '/api/tools/vertical-engine-v2/bases/base-1/export?mode=launch-ready&template_id=template-1&segmentation_audit_id=audit-1&preset_id=preset-1',
+      );
+    });
   });
 });

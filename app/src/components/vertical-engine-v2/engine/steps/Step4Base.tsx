@@ -44,7 +44,7 @@ const COLLECT_POLL_MS = 4000;
 /** Лимит строк автосборки — выбор пользователя; route валидирует те же значения. */
 type CollectLimit = 2000 | 10000 | 50000;
 type BaseMode = 'auto' | 'upload';
-type BaseExportMode = 'raw' | 'launch-ready';
+type BaseExportMode = 'raw';
 const COLLECT_LIMITS: readonly CollectLimit[] = [2000, 10000, 50000];
 const DEFAULT_COLLECT_LIMIT: CollectLimit = 10000;
 
@@ -870,16 +870,6 @@ function BaseRow({ base, hypothesisTitle }: { base: VeBaseSummary; hypothesisTit
               aria-controls={`ve-base-preview-${base.id}`}
             >
               {previewOpen ? 'Скрыть' : 'Превью'}
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleDownload('launch-ready')}
-              disabled={downloadingMode !== null}
-              className={HE.btnGhost}
-              title="Только уникальные контакты с валидной почтой, прошедшие проверку релевантности"
-            >
-              {downloadingMode === 'launch-ready' ? <Spinner className="h-3 w-3" /> : null}
-              CSV для запуска
             </button>
             <button
               type="button"

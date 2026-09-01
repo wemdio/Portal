@@ -98,6 +98,7 @@ function portalDb() {
 }
 
 function instantlyDb(options: { blocklistError?: string; blockedEmails?: string[] } = {}) {
+  const blockedEmails = options.blockedEmails ?? ['BLOCKED@example.test'];
   return createMockSupabase({
     tables: {
       client_campaign_presets: [
@@ -110,12 +111,12 @@ function instantlyDb(options: { blocklistError?: string; blockedEmails?: string[
           schedule_days: [1, 2, 3, 4, 5],
         },
       ],
-      client_blocked_contacts: (options.blockedEmails ?? ['BLOCKED@example.test'])
-        .map((email) => ({ client_user_id: CLIENT_ID, email })),
     },
-    ...(options.blocklistError
-      ? { errorTables: { client_blocked_contacts: options.blocklistError } }
-      : {}),
+    rpcHandlers: {
+      client_blocklist_snapshot: () => options.blocklistError
+        ? { data: null, error: { message: options.blocklistError } }
+        : { data: { count: blockedEmails.length, emails: blockedEmails } },
+    },
   });
 }
 
@@ -174,7 +175,10 @@ describe('Vertical Engine v2 initial launch client blocklist', () => {
 
     expect(outcome.status).toBe(200);
     expect(outcome.body.warnings).toContain('Исключено контактов из чёрного списка клиента: 1.');
-    expect(instantly.selects).toContainEqual({ table: 'client_blocked_contacts', columns: 'email' });
+    expect(instantly.rpcCalls).toContainEqual({
+      fn: 'client_blocklist_snapshot',
+      params: { p_client_user_id: CLIENT_ID },
+    });
     expect(mockCreateLeads).toHaveBeenCalledWith(
       [{ email: 'allowed@example.test' }],
       {

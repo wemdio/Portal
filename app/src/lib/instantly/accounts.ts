@@ -26,6 +26,11 @@ export interface InstantlyRequestOptions {
   skipRateLimiter?: boolean;
   /** Defaults to true; recovery status reads disable 429 retries. */
   retryRateLimits?: boolean;
+  /**
+   * Internal write-ahead hook fired immediately before each provider fetch.
+   * Callers use it to distinguish preflight failures from an ambiguous POST.
+   */
+  onRequestAttempt?: () => void;
 }
 
 type RawAccount = {

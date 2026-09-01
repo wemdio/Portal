@@ -32,6 +32,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   baseRowMatchesExclusion,
   buildBaseExclusionKeysFromRows,
+  dedupUnifiedRows,
+  mapGoogleRow,
+  pruneBaseRowAgainstExclusion,
   runBaseCollectStage,
   VE_AUTO_COLLECT_COLUMNS,
   type VeCollectInfo,
@@ -595,6 +598,36 @@ describe('VE2 auto email validation gate', () => {
   });
 });
 
+describe('VE2 source-row email preservation', () => {
+  it('keeps every email returned by Google Maps for the constructor split', () => {
+    const row = mapGoogleRow({
+      name: 'Clinic',
+      website: 'clinic.test',
+      emails: ['first@clinic.test', 'second@clinic.test'],
+    });
+
+    expect(row.email).toBe('first@clinic.test, second@clinic.test');
+  });
+
+  it('merges emails when duplicate company and website rows collapse', () => {
+    const rows = dedupUnifiedRows([
+      unifiedRow({
+        company: 'ООО Клиника',
+        website: 'https://clinic.test/about',
+        email: 'first@clinic.test',
+      }),
+      unifiedRow({
+        company: 'Клиника ООО',
+        website: 'www.clinic.test',
+        email: 'second@clinic.test',
+      }),
+    ]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].email).toBe('first@clinic.test, second@clinic.test');
+  });
+});
+
 describe('VE2 cross-base contact exclusion', () => {
   it('waits for an older collecting base in the same project before dispatching work', async () => {
     const info = collectInfo([
@@ -617,6 +650,15 @@ describe('VE2 cross-base contact exclusion', () => {
     };
     const db = seed(info, {
       ve_bases: [current, older],
+      ve_jobs: [
+        {
+          id: 'job-old',
+          project_id: 'p1',
+          stage: 'base_collect',
+          status: 'pending',
+          payload: { base_id: 'b-old', hypothesis_id: 'h1' },
+        },
+      ],
     });
 
     await expect(
@@ -633,6 +675,36 @@ describe('VE2 cross-base contact exclusion', () => {
       table: 've_jobs',
       patch: expect.objectContaining({ status: 'pending' }),
     }));
+  });
+
+  it('does not wait forever for an old collecting base without a live worker job', async () => {
+    const info = collectInfo([
+      unifiedRow({
+        company: 'Клиника Новая',
+        website: 'new.test',
+        email: 'new@example.test',
+        inn: '7700000333',
+      }),
+    ]);
+    const current = {
+      ...makeBase(info),
+      id: 'b-new',
+      created_at: '2026-08-30T00:02:00Z',
+    };
+    const stale = {
+      ...makeBase(collectInfo([])),
+      id: 'b-stale',
+      created_at: '2026-08-30T00:01:00Z',
+    };
+    const db = seed(info, { ve_bases: [current, stale] });
+
+    const result = await runBaseCollectStage(
+      { ...makeJob(), payload: { base_id: 'b-new', hypothesis_id: 'h1' } },
+      { supabase: db as unknown as SupabaseClient },
+    );
+
+    expect(result.result).not.toHaveProperty('waiting_for_base_id');
+    expect(db.inserts).toContainEqual(expect.objectContaining({ table: 'base_constructor_jobs' }));
   });
 
   it('treats every email in another base as occupied even when company and inn differ', () => {
@@ -654,6 +726,57 @@ describe('VE2 cross-base contact exclusion', () => {
       inn: '7800000002',
       email: 'fresh@example.test',
     }))).toBe(false);
+  });
+
+  it('keeps a multi-email row when at least one contact is still unused', () => {
+    const keys = buildBaseExclusionKeysFromRows([
+      {
+        company: 'Старая компания',
+        inn: '7700000001',
+        email: 'used@example.test',
+      },
+    ]);
+
+    const partial = unifiedRow({
+      company: 'Новая компания',
+      inn: '7800000002',
+      email: 'used@example.test, fresh@example.test',
+    });
+    expect(baseRowMatchesExclusion(keys, partial)).toBe(false);
+    expect(pruneBaseRowAgainstExclusion(keys, partial)).toMatchObject({
+      email: 'fresh@example.test',
+    });
+    expect(baseRowMatchesExclusion(keys, unifiedRow({
+      company: 'Новая компания',
+      inn: '7800000002',
+      email: 'used@example.test',
+    }))).toBe(true);
+  });
+
+  it('reads localized email, company and INN aliases from uploaded bases', () => {
+    const keys = buildBaseExclusionKeysFromRows([
+      {
+        Компания: 'ООО Альфа',
+        ИНН: '7700000123',
+        'E-mail': 'Owner@Alpha.test',
+      },
+    ]);
+
+    expect(baseRowMatchesExclusion(keys, unifiedRow({
+      company: 'Другая компания',
+      inn: '7800000456',
+      email: 'owner@alpha.test',
+    }))).toBe(true);
+    expect(baseRowMatchesExclusion(keys, unifiedRow({
+      company: 'Другая компания',
+      inn: '7700000123',
+      email: 'fresh@other.test',
+    }))).toBe(true);
+    expect(baseRowMatchesExclusion(keys, unifiedRow({
+      company: 'Альфа ООО',
+      inn: '',
+      email: 'fresh@other.test',
+    }))).toBe(true);
   });
 
   it('rechecks other project bases after constructor import and drops duplicate emails', async () => {

@@ -68,6 +68,21 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
     expect(body).not.toHaveProperty('lead_list_id');
   });
 
+  it('marks a provider attempt only when the transport is about to start', async () => {
+    const onRequestAttempt = jest.fn();
+    fetchMock.mockRejectedValueOnce(new Error('provider timeout'));
+    const { createLeads } = await import('@/lib/instantly/client');
+
+    await expect(createLeads(
+      [{ email: 'person@example.test' }],
+      { campaign_id: 'campaign-1' },
+      { skipRateLimiter: true, onRequestAttempt },
+    )).rejects.toThrow('provider timeout');
+
+    expect(onRequestAttempt).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('translates campaign_id → campaign (the actual Instantly API key)', async () => {
     const { listLeads } = await import('@/lib/instantly/client');
     await listLeads({ campaign_id: 'camp-abc', limit: 100 });

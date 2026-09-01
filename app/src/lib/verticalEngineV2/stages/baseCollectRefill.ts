@@ -30,7 +30,10 @@
  *     ЭТОЙ базы невозможен — стадия работает только из статуса 'collecting'.
  */
 
-import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
+import {
+  AppendLeadsPartialError,
+  appendLeadsToClientCampaign,
+} from '@/lib/clientLaunch/appendLeads';
 import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { mapBaseRowsToLeads, parseLaunchInfo } from '../launchHandoff';
@@ -42,17 +45,16 @@ import {
   type VeUnifiedRow,
 } from './baseCollect';
 
-/** Дефолт дневного капа лидов на проект — зеркало DEFAULT миграции 20260804_0005. */
-export const VE_AUTO_DEFAULT_DAILY_LEADS_CAP = 50;
-
 /** Статистика воронки долива (ve_auto_pipeline_runs.stats + refill_result). */
 export interface VeRefillStats {
   /** Строк собрано сборкой (после импорта конструктора). */
   collected: number;
   /** Строк с непустым email. */
   with_email: number;
-  /** Строк с email и вердиктом 'ok' (либо без валидации — см. шапку). */
+  /** Строк с email и точным вердиктом 'ok'. */
   valid: number;
+  /** Строк, для которых реально начался provider POST (может быть неоднозначным). */
+  attempted: number;
   /** Принято Instantly. */
   appended: number;
   /** Отрезано blocklist'ом владельца пресета. */
@@ -74,38 +76,95 @@ export interface VeRefillResult {
 
 interface RefillConfigRow {
   id: string;
-  dailyLeadsCap: number;
 }
 
-/** Начало текущих UTC-суток — дневной бюджет daily_leads_cap считается по ним. */
-function utcDayStart(now = new Date()): string {
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+interface RefillBudgetReservation {
+  id: string | null;
+  granted: number;
 }
 
 /**
- * Конфиг auto-pipeline проекта. Best-effort: таблицы миграции может ещё не
- * быть на окружении (воркер выкатили раньше миграции) — тогда долив идёт с
- * дефолтным капом, а runs-запись пишется без config_id.
+ * Atomically claim this project's remaining UTC-day budget before any
+ * provider write. The database serializes claims by project+day, so two
+ * workers cannot both observe the same remaining allowance.
+ */
+async function reserveRefillDailyBudget(
+  ctx: VeStageContext,
+  input: { projectId: string; baseId: string; requested: number },
+): Promise<RefillBudgetReservation> {
+  if (input.requested === 0) return { id: null, granted: 0 };
+  const { data, error } = await ctx.supabase.rpc('ve_reserve_refill_daily_budget', {
+    p_project_id: input.projectId,
+    p_base_id: input.baseId,
+    p_requested: input.requested,
+  });
+  if (error) throw new Error(`ve_refill daily budget reservation: ${error.message}`);
+  const rows = Array.isArray(data) ? data : [];
+  const row = rows.length === 1 && rows[0] && typeof rows[0] === 'object'
+    ? rows[0] as { reservation_id?: unknown; granted?: unknown }
+    : null;
+  const granted = row?.granted;
+  const reservationId = row?.reservation_id;
+  if (
+    typeof granted !== 'number'
+    || !Number.isSafeInteger(granted)
+    || granted < 0
+    || granted > input.requested
+    || (granted > 0 && (typeof reservationId !== 'string' || !reservationId))
+    || (granted === 0 && reservationId !== null)
+  ) {
+    throw new Error('ve_refill daily budget reservation returned an invalid snapshot');
+  }
+  return { id: reservationId as string | null, granted };
+}
+
+/**
+ * Release unused allowance after the base snapshot is durable. A failed
+ * finalize leaves the original full reservation in place (safe under-send),
+ * so this audit-side cleanup must not reopen a duplicate-send path.
+ */
+async function finalizeRefillDailyBudget(
+  ctx: VeStageContext,
+  input: { reservationId: string | null; baseId: string; consumed: number },
+): Promise<void> {
+  if (!input.reservationId) return;
+  try {
+    const { error } = await ctx.supabase.rpc('ve_finalize_refill_daily_budget', {
+      p_reservation_id: input.reservationId,
+      p_base_id: input.baseId,
+      p_consumed: input.consumed,
+    });
+    if (error) throw new Error(error.message);
+  } catch (error) {
+    stageLog(
+      ctx,
+      `[base_collect] refill: освобождение неиспользованного daily budget не удалось: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
+/**
+ * Идентификатор конфига auto-pipeline нужен только для best-effort журнала.
+ * Сам cap берёт и фиксирует на UTC-день DB reservation RPC: caller не может
+ * подменить лимит, а отсутствие optional config-таблицы даёт DB default.
  */
 async function loadRefillConfig(ctx: VeStageContext, projectId: string): Promise<RefillConfigRow | null> {
   try {
     const { data, error } = await ctx.supabase
       .from('ve_auto_pipeline_configs')
-      .select('id, daily_leads_cap')
+      .select('id')
       .eq('project_id', projectId)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return null;
-    const row = data as { id?: unknown; daily_leads_cap?: unknown };
-    const cap =
-      typeof row.daily_leads_cap === 'number' && Number.isFinite(row.daily_leads_cap)
-        ? row.daily_leads_cap
-        : VE_AUTO_DEFAULT_DAILY_LEADS_CAP;
-    return { id: String(row.id), dailyLeadsCap: cap };
+    const row = data as { id?: unknown };
+    return { id: String(row.id) };
   } catch (e) {
     stageLog(
       ctx,
-      `[base_collect] refill: ve_auto_pipeline_configs read: ${e instanceof Error ? e.message : String(e)} — кап по умолчанию`,
+      `[base_collect] refill: ve_auto_pipeline_configs read: ${e instanceof Error ? e.message : String(e)} — журнал без config_id`,
     );
     return null;
   }
@@ -165,7 +224,11 @@ async function writeRefillRun(
   }
 }
 
-/** Терминальный апдейт refill-базы: строки как в обычном пути, но статус 'analyzed' + refill_result. */
+/**
+ * Терминальный апдейт refill-базы. В data лежит только зарезервированный
+ * пакет, который был передан append-операции; полный harvest остаётся в
+ * статистике collected и не блокирует будущий добор.
+ */
 async function persistRefillBase(
   ctx: VeStageContext,
   baseId: string,
@@ -287,6 +350,20 @@ export function selectRefillLeadRows(
   return { leadRows, withEmail, valid: leadRows.length };
 }
 
+/** Resolve append input indexes back to the exact collected rows. */
+function selectAttemptedRows(
+  rows: readonly VeUnifiedRow[],
+  attemptedIndexes: readonly number[],
+): VeUnifiedRow[] {
+  const unique = new Set(attemptedIndexes);
+  const valid = unique.size === attemptedIndexes.length
+    && attemptedIndexes.every(
+      (index) => Number.isSafeInteger(index) && index >= 0 && index < rows.length,
+    );
+  if (!valid) throw new Error('refill append returned an invalid attempted-contact snapshot');
+  return attemptedIndexes.map((index) => rows[index]);
+}
+
 /**
  * Пустой harvest refill-сборки — штатный «no_new»: база в терминальный
  * 'analyzed' (НЕ failed), прогон 'no_new', джоба завершится успешно.
@@ -355,11 +432,14 @@ export async function runVeRefillAppend(args: {
     collected: finalRows.length,
     with_email: 0,
     valid: 0,
+    attempted: 0,
     appended: 0,
     skipped_blocklist: 0,
     skipped_instantly: 0,
     capped: 0,
   };
+  let reservedRows: VeUnifiedRow[] = [];
+  let budgetReservationId: string | null = null;
 
   try {
     // 1. Кампания и маппинг — из запущенного шаблона вертикали.
@@ -396,10 +476,16 @@ export async function runVeRefillAppend(args: {
     const { leadRows, withEmail, valid } = selectRefillLeadRows(finalRows, emailStatuses);
     runStats.with_email = withEmail;
     runStats.valid = valid;
-    const { leads } = mapBaseRowsToLeads({
+    const { leads, leadRowIndices } = mapBaseRowsToLeads({
       rows: leadRows,
       columns: finalColumns,
       operatorMapping: pick.operatorMapping,
+    });
+    const sourceRowByLead = new Map<(typeof leads)[number], VeUnifiedRow>();
+    leads.forEach((lead, index) => {
+      const sourceIndex = leadRowIndices[index];
+      const sourceRow = sourceIndex === undefined ? undefined : leadRows[sourceIndex];
+      if (sourceRow) sourceRowByLead.set(lead, sourceRow);
     });
 
     // 4. Blocklist владельца (сами считаем — число нужно в журнале;
@@ -408,38 +494,50 @@ export async function runVeRefillAppend(args: {
     const { kept, blockedCount } = filterBlockedLeads(leads, blockedSet);
     runStats.skipped_blocklist = blockedCount;
 
-    // 5. Дневной кап проекта: минус уже долитое сегодня (UTC) всеми refill'ами конфига.
-    const cap = config?.dailyLeadsCap ?? VE_AUTO_DEFAULT_DAILY_LEADS_CAP;
-    let spent = 0;
-    if (config) {
-      const { data: spentRows, error: spentErr } = await ctx.supabase
-        .from('ve_auto_pipeline_runs')
-        .select('stats')
-        .eq('config_id', config.id)
-        .eq('status', 'appended')
-        .gte('completed_at', utcDayStart());
-      if (spentErr) throw new Error(`ve_auto_pipeline_runs daily spent: ${spentErr.message}`);
-      for (const row of spentRows ?? []) {
-        const appended = (row as { stats?: { appended?: unknown } }).stats?.appended;
-        if (typeof appended === 'number' && Number.isFinite(appended)) spent += appended;
-      }
-    }
-    const remaining = Math.max(0, cap - spent);
-    const toSend = kept.slice(0, remaining);
+    // 5. Дневной cap проекта резервируется атомарно в БД. Обычный read spent
+    //    -> POST имеет race между workers и поэтому здесь запрещён.
+    const budget = await reserveRefillDailyBudget(ctx, {
+      projectId: job.project_id,
+      baseId: base.id,
+      requested: kept.length,
+    });
+    budgetReservationId = budget.id;
+    const toSend = kept.slice(0, budget.granted);
     runStats.capped = kept.length - toSend.length;
+
+    const appendInputRows = toSend.map((lead) => sourceRowByLead.get(lead) ?? null);
+    if (appendInputRows.some((row) => row === null)) {
+      throw new Error('не удалось однозначно связать лиды refill с исходными строками');
+    }
+    const candidateRows = appendInputRows.filter((row): row is VeUnifiedRow => row !== null);
 
     // 6. Долив. valid===0 (нечего слать после фильтров) — 'no_new'; валидные
     //    были, но всё съели blocklist/кап — 'appended' с appended=0 (воронка в stats).
     if (toSend.length > 0) {
-      const appended = await appendLeadsToClientCampaign({
-        userId: ownerUserId,
-        campaignId: pick.campaignId,
-        leads: toSend,
-        contextLabel: `HE auto-refill · ${base.id}`,
-        skipIfInCampaign: true,
-      });
-      runStats.appended = appended.accepted;
-      runStats.skipped_instantly = appended.skipped;
+      try {
+        const appended = await appendLeadsToClientCampaign({
+          userId: ownerUserId,
+          campaignId: pick.campaignId,
+          leads: toSend,
+          contextLabel: `VE2 auto-refill · ${base.id}`,
+          skipIfInCampaign: true,
+        });
+        reservedRows = selectAttemptedRows(candidateRows, appended.attemptedIndexes);
+        runStats.attempted = reservedRows.length;
+        runStats.appended = appended.accepted;
+        runStats.skipped_instantly = appended.skipped;
+      } catch (error) {
+        if (error instanceof AppendLeadsPartialError) {
+          reservedRows = selectAttemptedRows(
+            candidateRows,
+            error.partialResult.attemptedIndexes,
+          );
+          runStats.attempted = reservedRows.length;
+          runStats.appended = error.partialResult.accepted;
+          runStats.skipped_instantly = error.partialResult.skipped;
+        }
+        throw error;
+      }
     }
     const outcome: VeRefillResult['status'] = valid === 0 ? 'no_new' : 'appended';
 
@@ -449,7 +547,12 @@ export async function runVeRefillAppend(args: {
       stats: runStats,
       completed_at: new Date().toISOString(),
     };
-    await persistRefillBase(ctx, base.id, { columns: finalColumns, rows: finalRows, info, stats, refillResult });
+    await persistRefillBase(ctx, base.id, { columns: finalColumns, rows: reservedRows, info, stats, refillResult });
+    await finalizeRefillDailyBudget(ctx, {
+      reservationId: budgetReservationId,
+      baseId: base.id,
+      consumed: runStats.appended,
+    });
     await writeRefillRun(ctx, {
       configId: config?.id ?? null,
       projectId: job.project_id,
@@ -473,7 +576,12 @@ export async function runVeRefillAppend(args: {
       error: message,
       completed_at: new Date().toISOString(),
     };
-    await persistRefillBase(ctx, base.id, { columns: finalColumns, rows: finalRows, info, stats, refillResult });
+    await persistRefillBase(ctx, base.id, { columns: finalColumns, rows: reservedRows, info, stats, refillResult });
+    await finalizeRefillDailyBudget(ctx, {
+      reservationId: budgetReservationId,
+      baseId: base.id,
+      consumed: Math.max(runStats.appended, runStats.attempted),
+    });
     await writeRefillRun(ctx, {
       configId: config?.id ?? null,
       projectId: job.project_id,

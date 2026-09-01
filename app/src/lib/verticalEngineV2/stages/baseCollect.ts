@@ -209,9 +209,9 @@ function cell(value: unknown): string {
   return String(value).trim();
 }
 
-/** Первый элемент массива как строка (phones[0], emails[0]); не массив — пусто. */
-function firstCell(value: unknown): string {
-  return Array.isArray(value) ? cell(value[0]) : '';
+/** Все непустые элементы массива как одна multi-value ячейка. */
+function joinedCells(value: unknown): string {
+  return Array.isArray(value) ? value.map(cell).filter(Boolean).join(', ') : cell(value);
 }
 
 function unifiedRow(partial: Partial<VeUnifiedRow>): VeUnifiedRow {
@@ -266,7 +266,9 @@ export function mapGoogleRow(row: Record<string, unknown>): VeUnifiedRow {
   return unifiedRow({
     company: cell(row.name),
     website: cell(row.website),
-    email: firstCell(row.emails),
+    // Google Maps может вернуть несколько адресов. Конструктор сам разнесёт
+    // их по строкам, поэтому до него нельзя молча оставлять только первый.
+    email: joinedCells(row.emails),
     phone: cell(row.phone),
     address: cell(row.address),
     category: cell(row.category),
@@ -370,9 +372,11 @@ export function normalizeWebsiteForDedup(website: string): string {
  * выбрасываются как и строки с пустым сырым company.
  */
 export function dedupUnifiedRows(rows: VeUnifiedRow[]): VeUnifiedRow[] {
-  const seen = new Set<string>();
+  const idxByExactKey = new Map<string, number>();
   const firstIdxByCompany = new Map<string, number>();
   const out: VeUnifiedRow[] = [];
+  const mergedEmails = (left: string, right: string): string =>
+    extractEmails(`${left}, ${right}`).join(', ');
   for (const row of rows) {
     const company = normalizeCompanyForDedup(row.company);
     if (!company) continue;
@@ -381,7 +385,7 @@ export function dedupUnifiedRows(rows: VeUnifiedRow[]): VeUnifiedRow[] {
     const idx = firstIdxByCompany.get(company);
     if (idx === undefined) {
       firstIdxByCompany.set(company, out.length);
-      seen.add(key);
+      idxByExactKey.set(key, out.length);
       out.push(row);
       continue;
     }
@@ -392,16 +396,24 @@ export function dedupUnifiedRows(rows: VeUnifiedRow[]): VeUnifiedRow[] {
       // при равенстве — первую.
       const existingRich = existingWebsite !== '' || out[idx].email !== '';
       const rowRich = website !== '' || row.email !== '';
+      const email = mergedEmails(out[idx].email, row.email);
       if (rowRich && !existingRich) {
-        out[idx] = row;
-        seen.add(key);
+        out[idx] = { ...row, email };
+        idxByExactKey.set(key, idx);
+      } else if (email !== out[idx].email) {
+        out[idx] = { ...out[idx], email };
       }
       continue;
     }
     // У обеих строк непустые сайты: точный дубль пропускаем, разные домены
     // (дочки/филиалы) живут обе.
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const exactIdx = idxByExactKey.get(key);
+    if (exactIdx !== undefined) {
+      const email = mergedEmails(out[exactIdx].email, row.email);
+      if (email !== out[exactIdx].email) out[exactIdx] = { ...out[exactIdx], email };
+      continue;
+    }
+    idxByExactKey.set(key, out.length);
     out.push(row);
   }
   return out;
@@ -1133,18 +1145,17 @@ async function fetchDirectoryRows(
     offset += res.rows.length;
     for (const r of res.rows) {
       // Дубль другой базы: по email, имени (с ИНН-уточнением) или точно по ИНН.
-      if (baseRowMatchesExclusion(excludedKeys, {
-        company: cell(r.name),
-        inn: cell(r.inn),
-        email: cell(r.email),
-      })) {
+      const pruned = pruneBaseRowAgainstExclusion(excludedKeys, mapDirectoryRow(r));
+      if (!pruned) {
         excludedDuringFetch += 1;
         continue;
       }
       // Новых строк на странице может быть больше остатка до limit — лишние
       // не берём (они не попадают ни в базу, ни в исключения и будут
       // подобраны следующей сборкой-продолжением).
-      if (rows.length < limit) rows.push(r);
+      if (rows.length < limit) {
+        rows.push(pruned.email === cell(r.email) ? r : { ...r, email: pruned.email });
+      }
     }
     if (res.rows.length < DIRECTORY_PAGE_SIZE) break;
   }
@@ -1725,14 +1736,11 @@ export interface VeBaseExclusionKeys {
   emails: Set<string>;
 }
 
-/** Строка исключена: совпал непустой ИНН или имя (с ИНН-уточнением, см. выше). */
-export function baseRowMatchesExclusion(
+/** Совпадение юрлица исключает строку целиком, независимо от её контактов. */
+function baseRowMatchesCompanyExclusion(
   keys: VeBaseExclusionKeys,
   row: Pick<VeUnifiedRow, 'company' | 'inn' | 'email'>,
 ): boolean {
-  for (const email of extractEmails(row.email)) {
-    if (keys.emails.has(email)) return true;
-  }
   const innKey = normalizeInnForDedup(row.inn);
   if (innKey && keys.inns.has(innKey)) return true;
   const nameKey = normalizeCompanyForDedup(row.company);
@@ -1744,16 +1752,88 @@ export function baseRowMatchesExclusion(
   return true;
 }
 
+/**
+ * Удалить из multi-email строки уже занятые контакты. Совпадение компании или
+ * ИНН исключает всю строку; совпадение одного email — только этот email.
+ * null означает, что после безопасного исключения строка целиком занята.
+ */
+export function pruneBaseRowAgainstExclusion(
+  keys: VeBaseExclusionKeys,
+  row: VeUnifiedRow,
+): VeUnifiedRow | null {
+  if (baseRowMatchesCompanyExclusion(keys, row)) return null;
+  const emails = extractEmails(row.email);
+  if (emails.length === 0) return row;
+  const freshEmails = emails.filter((email) => !keys.emails.has(email));
+  if (freshEmails.length === 0) return null;
+  if (freshEmails.length === emails.length) return row;
+  return { ...row, email: freshEmails.join(', ') };
+}
+
+/** Строка исключена целиком: занято юрлицо или все найденные email. */
+export function baseRowMatchesExclusion(
+  keys: VeBaseExclusionKeys,
+  row: Pick<VeUnifiedRow, 'company' | 'inn' | 'email'>,
+): boolean {
+  if (baseRowMatchesCompanyExclusion(keys, row)) return true;
+  const emails = extractEmails(row.email);
+  return emails.length > 0 && emails.every((email) => keys.emails.has(email));
+}
+
+function normalizedUploadColumn(value: string): string {
+  return value
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[_.-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isEmailUploadColumn(column: string): boolean {
+  return /^(?:e ?mail|mail|почта|электронная почта|эл почта|емейл)(?: адрес)?(?: \d+)?$/.test(
+    normalizedUploadColumn(column),
+  );
+}
+
+function uploadField(
+  row: Record<string, unknown>,
+  aliases: ReadonlySet<string>,
+): unknown {
+  let fallback: unknown;
+  for (const [column, value] of Object.entries(row)) {
+    if (!aliases.has(normalizedUploadColumn(column))) continue;
+    if (fallback === undefined) fallback = value;
+    if (cell(value) !== '') return value;
+  }
+  return fallback;
+}
+
+const COMPANY_UPLOAD_COLUMNS = new Set([
+  'company',
+  'company name',
+  'компания',
+  'название компании',
+  'наименование',
+  'организация',
+]);
+const INN_UPLOAD_COLUMNS = new Set(['inn', 'инн', 'tin', 'tax id']);
+
 function addRowsToExclusionKeys(keys: VeBaseExclusionKeys, rows: unknown[]): VeBaseExclusionKeys {
   for (const item of rows) {
-    const rec = item as Partial<VeUnifiedRow> | null;
-    if (!rec) continue;
-    for (const email of extractEmails(String(rec.email ?? ''))) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const rec = item as Record<string, unknown>;
+    const emailValues = Object.entries(rec)
+      .filter(([column]) => isEmailUploadColumn(column))
+      .map(([, value]) => String(value ?? ''));
+    for (const email of extractEmails(emailValues.join(', '))) {
       keys.emails.add(email);
     }
-    const innKey = normalizeInnForDedup(rec.inn);
+    const innValue = uploadField(rec, INN_UPLOAD_COLUMNS);
+    const innKey = normalizeInnForDedup(innValue);
     if (innKey) keys.inns.add(innKey);
-    const company = rec.company;
+    const company = uploadField(rec, COMPANY_UPLOAD_COLUMNS);
     if (typeof company !== 'string') continue;
     const nameKey = normalizeCompanyForDedup(company);
     if (!nameKey) continue;
@@ -1820,6 +1900,9 @@ function isOlderCollectingBase(current: Pick<VeAutoBase, 'id' | 'created_at'>, c
   return candidate.id < current.id;
 }
 
+/** Короткое окно между INSERT базы и INSERT её worker-job. */
+const COLLECTING_JOB_GRACE_MS = 5 * 60 * 1000;
+
 async function findOlderCollectingBase(
   ctx: VeStageContext,
   projectId: string,
@@ -1836,7 +1919,27 @@ async function findOlderCollectingBase(
   const older = ((data ?? []) as Array<Pick<VeAutoBase, 'id' | 'created_at'>>)
     .filter((candidate) => isOlderCollectingBase(base, candidate))
     .sort((a, b) => baseCreatedAtMs(a) - baseCreatedAtMs(b) || a.id.localeCompare(b.id));
-  return older[0]?.id ?? null;
+  if (older.length === 0) return null;
+
+  const { data: activeJobs, error: jobsError } = await ctx.supabase
+    .from('ve_jobs')
+    .select('payload')
+    .eq('project_id', projectId)
+    .eq('stage', 'base_collect')
+    .in('status', ['pending', 'running']);
+  if (jobsError) throw new Error(`ve_jobs collecting read: ${jobsError.message}`);
+  const activeBaseIds = new Set(
+    (activeJobs ?? [])
+      .map((job) => (job as { payload?: { base_id?: unknown } }).payload?.base_id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0),
+  );
+  const now = Date.now();
+  const blocking = older.find((candidate) => {
+    if (activeBaseIds.has(candidate.id)) return true;
+    const createdAt = baseCreatedAtMs(candidate);
+    return createdAt > 0 && now - createdAt < COLLECTING_JOB_GRACE_MS;
+  });
+  return blocking?.id ?? null;
 }
 
 /* ─────────────────────────── Фаза CONSTRUCT ─────────────────────────── */
@@ -2276,7 +2379,9 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   // реестра это страховка (основное исключение прошло на выборке), для
   // hh/карт — единственная точка исключения.
   const existingKeys = await getExcludedKeys();
-  const kept = interleaved.filter((r) => !baseRowMatchesExclusion(existingKeys, r));
+  const kept = interleaved
+    .map((row) => pruneBaseRowAgainstExclusion(existingKeys, row))
+    .filter((row): row is VeUnifiedRow => row !== null);
   const excludedExisting = interleaved.length - kept.length;
   if (excludedExisting > 0) {
     stageLog(ctx, `[base_collect] исключено ${excludedExisting} строк — компании уже есть в других базах проекта`);
@@ -2498,8 +2603,9 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     const currentStatuses = finalEmailStatuses;
     const nextStatuses: Array<string | null> | null = currentStatuses ? [] : null;
     finalRows.forEach((row, index) => {
-      if (baseRowMatchesExclusion(freshExistingKeys, row)) return;
-      nextRows.push(row);
+      const pruned = pruneBaseRowAgainstExclusion(freshExistingKeys, row);
+      if (!pruned) return;
+      nextRows.push(pruned);
       if (nextStatuses && currentStatuses) nextStatuses.push(currentStatuses[index] ?? null);
     });
     const excludedAfterConstruct = rowsBeforePostConstructDedup - nextRows.length;

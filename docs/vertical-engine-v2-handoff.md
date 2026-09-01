@@ -130,14 +130,34 @@ launch portfolio существуют только в коде ветки `Serge
      называется «Прошли проверки», показывает checked/total company coverage и число строк
      без relevance-verdict; они в итог не входят. При >2 000 есть warning о лимите одного
      запуска, а failed-база не получает выдуманный processed count из `row_count`;
-   - raw CSV теперь явно диагностический. Для запуска используется `mode=launch-ready`:
-     он прогоняет тот же email/relevance/dedup-контракт, что и pre-launch audit. Step 4
-     разделяет «CSV для запуска» и «Исходный CSV», Step 5 скачивает только launch-ready;
+   - raw CSV теперь явно диагностический и остаётся на Step 4 как «Исходный CSV». Для
+     `mode=launch-ready` Step 5 требует выбранный client preset и точную актуальную связку
+     template + complete segmentation audit. Экспорт берёт сохранённую audited-аудиторию,
+     добавляет `_ve_segment`, заново валидирует snapshot и исключает blocklist владельца
+     выбранного preset; без любого из этих контекстов ответ fail-closed;
+   - client blocklist читается одним транзакционным RPC: count и email берутся из одного
+     MVCC-snapshot, а malformed/oversize/error останавливает экспорт и launch;
    - `base_collect` исключает другие базы проекта по email тоже, включая все адреса из
-     multi-email ячейки. Новая collecting-база ждёт более старую collecting-базу того же
-     проекта; после конструктора excluded keys перечитываются заново, чтобы параллельная
-     база, завершившаяся за время validation/split, не дала сохранить тот же контакт вторым
+     multi-email ячейки. Занятый адрес вырезается отдельно, а свежие адреса строки остаются;
+     Google Maps сохраняет весь список, дубли компании объединяют email. Upload-базы с
+     `E-mail`/`Компания`/`ИНН` также формируют exclusion keys. После конструктора keys
+     перечитываются заново, чтобы параллельная база не сохранила тот же контакт вторым
      запуском. Старый JS-slice чужого `data` до `MAX_ROWS_LIMIT` убран;
+   - очередь collecting больше не ждёт старый orphan без живой job бесконечно: живую
+     старшую сборку ждём, свежему base→job оставляем короткий grace, повторный enqueue
+     восстанавливает потерянную job только из snapshot самой базы. Режим текущего normal/refill-
+     вызова в repair не протекает; DB unique guard не допускает две активные job на один base,
+     а ошибка job INSERT переводит новую базу в `failed`. При multi-hypothesis повторе
+     существующая первая база не отменяет постановку остальных;
+   - refill сохраняет в `ve_bases.data` только строки, для которых реально начался provider
+     POST в Instantly. Отрезанные тарифом/cap/blocklist или pre-provider ошибкой строки можно
+     собрать позднее. Дневной cap резервируется атомарно в основной БД по project+UTC-day до
+     provider POST. Первый claim фиксирует server-side cap дня (config или DB-default), его
+     изменение вступает в силу со следующего UTC-дня; параллельные workers не делят один и тот
+     же остаток. Timeout расходует неоднозначно отправленный chunk консервативно, crash до
+     финализации оставляет полную бронь до конца дня, повторная финализация не может увеличить
+     расход, а удаление базы не стирает ledger. `ve_auto_pipeline_runs` — только best-effort
+     аудит, не authority cap;
    - live VBI-пример до этого safety-fix был диагностическим снимком:
      **8 410 под фильтры → cap 2 000 → 1 514 после конструктора → 651 строка прошла тогдашние
      проверки**. Старые VBI/transport базы, собранные до fail-closed email gate, launch-ready
@@ -170,10 +190,11 @@ launch portfolio существуют только в коде ветки `Serge
    - новый клиент без отдельного тарифа ограничен 16 ящиками. Preset получает канонические
      default schedule/limits/tracking. После успеха он появляется и выбирается в текущей
      форме, но immutable binding проекта устанавливается только фактическим launch;
-   - cross-DB операция компенсируется: profile/preset failure удаляет только что созданного
-     auth-user; duplicate email возвращает `409` без preset и без delete. Неоднозначный
-     Auth-response сверяется по заранее заданному UUID попытки, а не поиском/удалением по email.
-     Пароль и sender addresses не попадают в response/logs;
+   - cross-DB операция использует best-effort компенсацию: при profile/preset failure код
+     пытается удалить только что созданные сущности, а отдельный сбой cleanup логируется и
+     не маскируется обещанием обязательного удаления. Duplicate email возвращает `409` без
+     preset и delete. Неоднозначный Auth-response сверяется по заранее заданному UUID попытки,
+     а не поиском/удалением по email. Пароль и sender addresses не попадают в response/logs;
    - tag не является подпиской: будущие изменения его состава не обновляют сохранённый
      preset. Правка live campaign в Instantly действует на неё; следующий запуск опять берёт
      настройки из preset. Миграций и deploy для этого пункта нет.
@@ -227,13 +248,15 @@ launch portfolio существуют только в коде ветки `Serge
   показывает покрытие компаний. Текущий cap одного запуска — 2 000; превышение показывается
   отдельно. Failed `row_count` не считается доказательством, что строки дошли до обработки.
 - **Raw CSV не равен launch-ready**: исходная выгрузка нужна для диагностики и разбора
-  источников; перед запуском всегда используется `launch-ready` экспорт/аудитория с теми же
-  gates, что в segmentation audit. Строка без `_email_status='ok'` не может попасть ни в
-  launch, ни в refill.
+  источников. Launch-ready можно сформировать только на Step 5 с выбранным клиентским
+  preset и complete/current segmentation audit; это именно сохранённая audited-аудитория
+  после blocklist выбранного клиента, а не повторная безымянная фильтрация raw-базы. Строка
+  без `_email_status='ok'` не может попасть ни в launch, ни в refill.
 - **Дедуп между базами — контактный**: компания/ИНН остаются важными, но email сильнее для
-  запуска. Любой email, уже сохранённый в другой базе проекта, исключает строку новой базы
-  даже при другом названии компании/ИНН. Параллельные collecting-базы одного проекта идут
-  по очереди, а после конструктора исключения перечитываются свежо.
+  запуска. Уже сохранённый email удаляется из multi-email строки новой базы даже при другом
+  названии компании/ИНН; вся строка исчезает только когда заняты все её email либо совпало
+  юрлицо. Параллельные collecting-базы одного проекта идут по очереди только при живой job,
+  а после конструктора исключения перечитываются свежо.
 - **Сезонность — verified input, не «знание LLM»**: `neutral` допустим только с проверенным
   источником и цитатой; у `seasonal` каждое отдельное `peak/avoid` имеет собственный
   URL+quote evidence. Mixed-ответ теряет неподтверждённые окна, а полное отсутствие поддержки
@@ -285,10 +308,15 @@ launch portfolio существуют только в коде ветки `Serge
   `20260828_0001_vertical_engine_v2_segmentation_audits.sql` (#8),
   `20260828_0002_vertical_engine_v2_ru_seasonality.sql` и
   `20260828_0003_vertical_engine_v2_launch_portfolio.sql`, а также
-  `20260830_0001_vertical_engine_v2_directory_stats.sql` и
-  `20260831_0001_vertical_engine_v2_launch_preset_binding.sql` — отдельный будущий
-  release-шаг. Миграции `20260830_0001` и `20260831_0001` здесь точно не применялись;
-  deployment не выполнялся.
+  `20260830_0001_vertical_engine_v2_directory_stats.sql`,
+  `20260831_0001_vertical_engine_v2_launch_preset_binding.sql`,
+  `20260901_0004_vertical_engine_v2_base_collect_job_guard.sql`,
+  `20260901_0005_vertical_engine_v2_refill_budget.sql` (основная БД) и
+  `20260901_0001_client_blocklist_snapshot.sql` (Instantly DB) — отдельный будущий
+  release-шаг. Миграции `20260830_0001`, `20260831_0001` и все `20260901_*` здесь точно не
+  применялись; deployment не выполнялся. Перед `20260901_0004` нужен read-only preflight на
+  дубли active `base_collect` по `payload.base_id`: миграция намеренно остановится и потребует
+  ручного разбора, если такие job уже существуют.
 - **Live VBI-тест в v2 после деплоя**: 2 гипотезы → 2 базы; verified сезонность с
   peak/avoid/unknown и московским состоянием; человеческие названия (#9); видимый tokenized
   segment preview (#7); async audit (#8) с complete, stale/incomplete и `not_required`;

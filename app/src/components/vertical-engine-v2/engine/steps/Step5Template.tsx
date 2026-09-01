@@ -930,10 +930,16 @@ function LaunchSection({
   launch,
   audit,
   template,
+  onDownloadLaunchCsv,
+  csvDownloading,
+  csvDownloadError,
 }: {
   launch: TemplateLaunchState;
   audit: SegmentationAuditController;
   template: VeTemplate;
+  onDownloadLaunchCsv: () => void;
+  csvDownloading: boolean;
+  csvDownloadError: string;
 }) {
   const recorded = launch.recorded ?? (audit.phase === 'launch_succeeded' ? audit.launchInfo : null);
   const selectedPreset = launch.presets?.find((preset) => preset.id === launch.presetId) ?? null;
@@ -1086,10 +1092,27 @@ function LaunchSection({
                         return groups === 1 ? 'Создать кампанию (на паузе)' : `Создать ${groups} кампании на паузе`;
                       })()}
                 </button>
+                {selectedPreset ? (
+                  <button
+                    type="button"
+                    onClick={onDownloadLaunchCsv}
+                    disabled={csvDownloading}
+                    aria-label="Скачать CSV для запуска"
+                    className={HE.btnGhost}
+                  >
+                    <Download aria-hidden className="h-4 w-4" />
+                    {csvDownloading ? 'Готовим CSV…' : 'CSV для запуска'}
+                  </button>
+                ) : null}
                 <button type="button" onClick={() => launch.setFormOpen(false)} className={HE.btnGhost}>
                   Отмена
                 </button>
               </div>
+              {csvDownloadError ? (
+                <p className="text-xs text-red-600" role="alert">
+                  {csvDownloadError}
+                </p>
+              ) : null}
               {selectedPreset ? (
                 <dl
                   id="ve2-launch-preset-summary"
@@ -1204,13 +1227,28 @@ export function Step5Template(props: {
     URL.revokeObjectURL(url);
   }, [template]);
 
-  const exportBaseId = base?.id ?? template?.base_id ?? null;
+  const exportBaseId = template?.base_id ?? null;
   const handleLaunchReadyCsvDownload = useCallback(async () => {
-    if (!exportBaseId || csvDownloading) return;
+    const auditId = segmentationAudit.auditId;
+    const presetId = launch.presetId.trim();
+    if (
+      !template ||
+      !exportBaseId ||
+      !segmentationAudit.canLaunch ||
+      !auditId ||
+      !presetId ||
+      csvDownloading
+    ) return;
     setCsvDownloadError('');
     setCsvDownloading(true);
     try {
-      const res = await authFetch(`${VE_API}/bases/${exportBaseId}/export?mode=launch-ready`);
+      const query = new URLSearchParams({
+        mode: 'launch-ready',
+        template_id: template.id,
+        segmentation_audit_id: auditId,
+        preset_id: presetId,
+      });
+      const res = await authFetch(`${VE_API}/bases/${exportBaseId}/export?${query}`);
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(data.error || `Ошибка ${res.status}`);
@@ -1221,7 +1259,14 @@ export function Step5Template(props: {
     } finally {
       setCsvDownloading(false);
     }
-  }, [csvDownloading, exportBaseId]);
+  }, [
+    csvDownloading,
+    exportBaseId,
+    launch.presetId,
+    segmentationAudit.auditId,
+    segmentationAudit.canLaunch,
+    template,
+  ]);
 
   /* ── Шаблона ещё нет ── */
   if (!template) {
@@ -1294,16 +1339,6 @@ export function Step5Template(props: {
           </p>
         </div>
         <div className="flex max-w-full flex-wrap items-center justify-end gap-2 sm:shrink-0">
-          <button
-            type="button"
-            onClick={() => void handleLaunchReadyCsvDownload()}
-            disabled={csvDownloading}
-            aria-label="Скачать CSV для запуска"
-            className={`${HE.btnGhost} ve2-b-sm`}
-          >
-            <Download aria-hidden className="h-4 w-4" />
-            {csvDownloading ? 'Готовим CSV…' : 'CSV для запуска'}
-          </button>
           <button type="button" onClick={handleCopy} className={`${HE.btnGhost} ve2-b-sm`}>
             <Copy aria-hidden className="h-4 w-4" />
             {copied ? 'Скопировано' : 'Скопировать'}
@@ -1319,12 +1354,6 @@ export function Step5Template(props: {
           </button>
         </div>
       </header>
-
-      {csvDownloadError ? (
-        <p className="text-xs text-red-600" role="alert">
-          {csvDownloadError}
-        </p>
-      ) : null}
 
       {/* Реальные unmatched-операторы из плана, без демонстрационных процентов. */}
       {unmatchedMapping.length > 0 ? (
@@ -1367,8 +1396,8 @@ export function Step5Template(props: {
             </p>
             {baseOverLaunchLimit ? (
               <p className="mt-2 text-xs text-gray-500">
-                База больше лимита запуска ({VE_LAUNCH_MAX_LEADS}). Скачайте CSV и запускайте порциями или соберите базу
-                меньшего лимита.
+                База больше лимита запуска ({VE_LAUNCH_MAX_LEADS}). Разделите исходный CSV или соберите базу
+                меньшего лимита, затем повторите проверку.
               </p>
             ) : null}
             <button
@@ -1394,7 +1423,14 @@ export function Step5Template(props: {
           </>
         ) : null}
         <div className="mt-3">
-          <LaunchSection launch={launch} audit={segmentationAudit} template={template} />
+          <LaunchSection
+            launch={launch}
+            audit={segmentationAudit}
+            template={template}
+            onDownloadLaunchCsv={() => void handleLaunchReadyCsvDownload()}
+            csvDownloading={csvDownloading}
+            csvDownloadError={csvDownloadError}
+          />
         </div>
       </section>
 
