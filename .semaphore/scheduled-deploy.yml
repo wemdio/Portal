@@ -516,8 +516,8 @@ blocks:
               fi
 
               if [ "$DEPLOY_PORTAL_HOST" = 1 ]; then
-                echo "--- Waiting 15s for selected containers to stabilize ---"
-                sleep 15
+                echo "--- Waiting 10s for selected containers to stabilize ---"
+                sleep 10
 
                 echo "--- Docker container status ---"
                 run_ssh "docker ps" \
