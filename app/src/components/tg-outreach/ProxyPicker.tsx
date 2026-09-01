@@ -89,16 +89,23 @@ export function ProxyPicker<T extends PickerProxy>({
       if (popupRef.current?.contains(target) || triggerRef.current?.contains(target)) return;
       close();
     };
-    const onScrollOrResize = () => close();
     // capture: список закрываем и от прокрутки внутренних контейнеров, а они
-    // событие наверх не отдают.
+    // событие наверх не отдают. Сам popup в capture-цепочке тоже виден — без
+    // фильтра скролл внутри него закрывал бы список раньше, чем оператор
+    // докрутит до конца (история: баг 27.08.2026, ~74 прокси не помещались).
+    const onScroll = (e: Event) => {
+      const target = e.target as Node | null;
+      if (popupRef.current && target && popupRef.current.contains(target)) return;
+      close();
+    };
+    const onResize = () => close();
     document.addEventListener('mousedown', onDocClick);
-    window.addEventListener('scroll', onScrollOrResize, true);
-    window.addEventListener('resize', onScrollOrResize);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onResize);
     return () => {
       document.removeEventListener('mousedown', onDocClick);
-      window.removeEventListener('scroll', onScrollOrResize, true);
-      window.removeEventListener('resize', onScrollOrResize);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onResize);
     };
   }, [open, close]);
 
