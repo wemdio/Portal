@@ -34,6 +34,14 @@ export async function GET(req: NextRequest) {
        * базе он лежит без собачки.
        */
       const q = (url.searchParams.get('q') ?? '').trim().replace(/^@/, '');
+      /**
+       * Чей это диалог с нашей стороны.
+       *
+       * Фильтруем на сервере, а не в уже загруженной странице: список идёт по
+       * тридцать штук, и отбор внутри страницы показывал бы «диалогов этого
+       * аккаунта — три», хотя их полторы сотни на следующих страницах.
+       */
+      const accountId = url.searchParams.get('account_id');
       const canSendParam = url.searchParams.get('can_send');
       const isBotParam = url.searchParams.get('tg_is_bot');
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
@@ -48,6 +56,9 @@ export async function GET(req: NextRequest) {
 
       if (status) {
         query = query.eq('status', status);
+      }
+      if (accountId) {
+        query = query.eq('account_id', accountId);
       }
       if (canSendParam === 'true' || canSendParam === 'false') {
         query = query.eq('can_send', canSendParam === 'true');

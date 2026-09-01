@@ -146,11 +146,16 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       }
 
       try {
-        // К @SpamBot идём только если аккаунт уже числится ограниченным: у
-        // здорового ответ предсказуем и не стоит лишнего исходящего сообщения
-        // с боевого номера.
+        // К @SpamBot идём, если аккаунт числится ограниченным ИЛИ стоит на
+        // паузе: у здорового ответ предсказуем и не стоит лишнего исходящего
+        // сообщения с боевого номера. Пауза здесь равноправна статусу — её
+        // ставит рассылка, поймав ограничение, и оператор жмёт «Проверить»
+        // ровно затем, чтобы узнать настоящий срок.
+        const onCooldown = Boolean(
+          account.cooldown_until && new Date(account.cooldown_until).getTime() > Date.now(),
+        );
         const result = await checkAccount(client, {
-          askSpamBotWhenRestricted: account.check_status === 'restricted',
+          askSpamBotWhenRestricted: account.check_status === 'restricted' || onCooldown,
         });
         await save(result);
         return NextResponse.json(result);

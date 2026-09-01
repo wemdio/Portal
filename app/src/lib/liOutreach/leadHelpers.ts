@@ -31,3 +31,68 @@ export function extractPublicIdentifier(profileUrl: string | null | undefined): 
   const slug = match[1].trim();
   return slug.length > 0 ? slug : null;
 }
+
+
+/**
+ * Куда в CSV легли имя, компания и ссылка на профиль.
+ *
+ * Заголовки приходят от людей, а не от системы: выгрузка из Sales Navigator
+ * называет колонку `Profile URL`, ручная таблица — `Person` и `Компания`,
+ * экспорт портала — `name` и `company`. Раньше импорт понимал ровно одно
+ * написание (`name`), и файл с любым другим молча импортировался нулём строк:
+ * каждая строка отбраковывалась как «нет имени», а оператор видел «принято 0»
+ * без единого намёка, что дело в заголовке.
+ *
+ * BOM снимаем здесь же: Excel сохраняет CSV в UTF-8 с меткой в начале файла,
+ * и первый заголовок превращался в `\uFEFFname`, который не совпадал ни с чем.
+ */
+export interface LeadCsvColumns {
+  name: number;
+  firstName: number;
+  lastName: number;
+  position: number;
+  company: number;
+  profileUrl: number;
+  publicId: number;
+  linkedinId: number;
+  /** Заголовки как их увидел разбор — для сообщения об ошибке. */
+  normalized: string[];
+}
+
+const LEAD_CSV_ALIASES: Record<Exclude<keyof LeadCsvColumns, 'normalized'>, string[]> = {
+  name: ['name', 'full_name', 'fullname', 'person', 'contact', 'полное_имя', 'фио', 'ф.и.о.', 'контакт'],
+  firstName: ['first_name', 'firstname', 'имя'],
+  lastName: ['last_name', 'lastname', 'surname', 'фамилия'],
+  position: ['position', 'title', 'job_title', 'должность', 'позиция'],
+  company: ['company', 'organization', 'company_name', 'компания', 'организация'],
+  profileUrl: [
+    'profile_url', 'linkedin_url', 'linkedin_profile_url', 'linkedin_profile', 'linkedin',
+    'linkedin_link', 'url', 'profile', 'ссылка', 'ссылка_на_профиль', 'профиль',
+  ],
+  publicId: ['public_identifier', 'public_id', 'linkedin_public_identifier'],
+  linkedinId: ['linkedin_id', 'provider_id'],
+};
+
+export function resolveLeadCsvColumns(headers: string[]): LeadCsvColumns {
+  const normalized = headers.map((h) =>
+    (h ?? '').replace(/^\uFEFF/, '').trim().toLowerCase().replace(/\s+/g, '_'),
+  );
+  const find = (aliases: string[]) => {
+    for (const alias of aliases) {
+      const idx = normalized.indexOf(alias);
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  };
+  return {
+    name: find(LEAD_CSV_ALIASES.name),
+    firstName: find(LEAD_CSV_ALIASES.firstName),
+    lastName: find(LEAD_CSV_ALIASES.lastName),
+    position: find(LEAD_CSV_ALIASES.position),
+    company: find(LEAD_CSV_ALIASES.company),
+    profileUrl: find(LEAD_CSV_ALIASES.profileUrl),
+    publicId: find(LEAD_CSV_ALIASES.publicId),
+    linkedinId: find(LEAD_CSV_ALIASES.linkedinId),
+    normalized,
+  };
+}

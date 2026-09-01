@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError, normalizeProxyUrl } from '@/lib/tgOutreach/apiHelpers';
+import { authenticateRequest, jsonError, buildProxyImportRows } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { parseBulkDeleteBody } from '@/lib/tgOutreach/bulkDelete';
 
@@ -30,20 +30,31 @@ export async function POST(req: NextRequest) {
       
         if (lines.length === 0) return jsonError('Нет прокси для добавления', 400);
       
-        const rows = lines.map((raw, i) => ({
-          campaign_id: campaignId,
-          url: normalizeProxyUrl(raw),
-          name: `Прокси ${i + 1}`,
-          is_active: true,
-        }));
-      
+        // Дубли отсекает общий помощник: и против уже заведённых в кампании
+        // адресов, и внутри самого списка.
+        const { data: existingRows } = await auth.supabase
+          .from('tg_outreach_proxies')
+          .select('url')
+          .eq('campaign_id', campaignId);
+        const { rows, skipped } = buildProxyImportRows(
+          lines,
+          (existingRows ?? []).map((r) => (r as { url: string }).url),
+          campaignId,
+        );
+        if (rows.length === 0) {
+          return NextResponse.json({ items: [], count: 0, skipped }, { status: 200 });
+        }
+
         const { data, error } = await auth.supabase
           .from('tg_outreach_proxies')
           .insert(rows)
           .select();
       
         if (error) return jsonError(error.message, 500);
-        return NextResponse.json({ items: data ?? [], count: data?.length ?? 0 }, { status: 201 });
+        return NextResponse.json(
+          { items: data ?? [], count: data?.length ?? 0, skipped },
+          { status: 201 },
+        );
     },
   );
 }
