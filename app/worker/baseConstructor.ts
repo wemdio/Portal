@@ -23,6 +23,7 @@
  * с WORKER_KIND=baseconstructor.
  */
 
+import { randomUUID } from 'node:crypto';
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
 import { markShuttingDown } from '@/lib/workerShutdown';
 import {
@@ -59,13 +60,17 @@ const WORKER_ID = `baseconstructor-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 
 const running = new Set<Promise<void>>();
+interface ClaimedJob {
+  jobId: string;
+  runToken: string;
+}
+
 /**
- * Job IDs currently executing on this worker. Used by the SIGTERM handler
- * below to bump their `started_at` to a past timestamp before the process
- * exits — that way the next worker reclaims them on the next poll tick
- * (≈5s) instead of waiting STALE_JOB_MINUTES.
+ * Jobs currently executing on this worker, paired with the exact ownership
+ * token this process claimed. The token matters during SIGTERM: an old
+ * container must not backdate a row that a replacement has already reclaimed.
  */
-const runningJobIds = new Set<string>();
+const runningJobs = new Map<string, string>();
 
 /**
  * Best-effort: ageing `started_at` on every job this worker is mid-flight
@@ -75,21 +80,28 @@ const runningJobIds = new Set<string>();
  * window fallback still works in the worst case.
  */
 async function ageRunningJobsForFastHandoff(): Promise<void> {
-  if (runningJobIds.size === 0) return;
-  const ids = Array.from(runningJobIds);
+  if (runningJobs.size === 0) return;
+  const ownedJobs = Array.from(runningJobs, ([jobId, runToken]) => ({ jobId, runToken }));
   const db = requireSupabaseAdmin(log);
   // Far enough past that any STALE_JOB_MINUTES setting < 60min instantly
   // counts these as stale. The next polling worker's claimStaleResumable()
   // CAS will pick them up within ~5s.
-  const age = () =>
-    db
-      .from('base_constructor_jobs')
-      .update({ started_at: new Date(Date.now() - 60 * 60_000).toISOString() })
-      .in('id', ids)
-      .eq('status', 'processing');
+  const age = async () => {
+    const backdatedAt = new Date(Date.now() - 60 * 60_000).toISOString();
+    await Promise.all(
+      ownedJobs.map(({ jobId, runToken }) =>
+        db
+          .from('base_constructor_jobs')
+          .update({ started_at: backdatedAt })
+          .eq('id', jobId)
+          .eq('status', 'processing')
+          .eq('run_token', runToken),
+      ),
+    );
+  };
   log(
     'info',
-    `marking ${ids.length} in-flight job(s) for fast handoff after shutdown: ${ids.join(', ')}`,
+    `marking ${ownedJobs.length} in-flight job(s) for fast handoff after shutdown: ${ownedJobs.map(({ jobId }) => jobId).join(', ')}`,
   );
   await age();
   // Второй проход. markShuttingDown() глушит будущие heartbeat'ы, но UPDATE,
@@ -105,7 +117,7 @@ async function ageRunningJobsForFastHandoff(): Promise<void> {
  * Атомарно подбирает один pending-job: UPDATE WHERE status=pending.
  * Если другой воркер успел раньше — UPDATE затронет 0 строк, claim вернёт null.
  */
-async function claimPendingJob(): Promise<string | null> {
+async function claimPendingJob(): Promise<ClaimedJob | null> {
   const db = requireSupabaseAdmin(log);
   const { data: pending } = await db
     .from('base_constructor_jobs')
@@ -116,14 +128,19 @@ async function claimPendingJob(): Promise<string | null> {
     .maybeSingle();
   if (!pending) return null;
 
+  const runToken = randomUUID();
   const { data: claimed } = await db
     .from('base_constructor_jobs')
-    .update({ status: 'processing', started_at: new Date().toISOString() })
+    .update({
+      status: 'processing',
+      started_at: new Date().toISOString(),
+      run_token: runToken,
+    })
     .eq('id', pending.id)
     .eq('status', 'pending')
-    .select('id')
+    .select('id, run_token')
     .maybeSingle();
-  return claimed?.id ?? null;
+  return claimed?.id ? { jobId: claimed.id, runToken: claimed.run_token ?? runToken } : null;
 }
 
 /**
@@ -136,7 +153,7 @@ async function claimPendingJob(): Promise<string | null> {
  * только первый воркер успешно bumps started_at, остальные видят свежий
  * timestamp и пропускают.
  */
-async function claimStaleResumable(): Promise<string | null> {
+async function claimStaleResumable(): Promise<ClaimedJob | null> {
   const db = requireSupabaseAdmin(log);
   const cutoffIso = new Date(Date.now() - STALE_JOB_MINUTES * 60_000).toISOString();
   const { data: stale } = await db
@@ -149,13 +166,17 @@ async function claimStaleResumable(): Promise<string | null> {
     .maybeSingle();
   if (!stale) return null;
 
+  const runToken = randomUUID();
   const { data: claimed } = await db
     .from('base_constructor_jobs')
-    .update({ started_at: new Date().toISOString() })
+    .update({
+      started_at: new Date().toISOString(),
+      run_token: runToken,
+    })
     .eq('id', stale.id)
     .eq('status', 'processing')
     .lt('started_at', cutoffIso)
-    .select('id')
+    .select('id, run_token')
     .maybeSingle();
   if (!claimed) return null;
 
@@ -163,7 +184,7 @@ async function claimStaleResumable(): Promise<string | null> {
     'info',
     `claiming stale job ${stale.id} for resume: step ${stale.current_step}/${stale.total_steps}, progress ${stale.current_step_progress}%`,
   );
-  return claimed.id;
+  return { jobId: claimed.id, runToken: claimed.run_token ?? runToken };
 }
 
 /**
@@ -176,24 +197,25 @@ async function pollOnce(): Promise<boolean> {
     return true; // занят — повторим скоро
   }
 
-  let jobId = await claimPendingJob();
+  let claimedJob = await claimPendingJob();
   let isResume = false;
-  if (!jobId) {
-    jobId = await claimStaleResumable();
-    isResume = !!jobId;
+  if (!claimedJob) {
+    claimedJob = await claimStaleResumable();
+    isResume = !!claimedJob;
   }
-  if (!jobId) return false;
+  if (!claimedJob) return false;
+  const { jobId, runToken } = claimedJob;
 
   const task = (async () => {
     log('info', `Running base-constructor job ${jobId}${isResume ? ' (RESUME)' : ''}`);
-    runningJobIds.add(jobId);
+    runningJobs.set(jobId, runToken);
     try {
-      await runBaseConstructorJob(jobId);
+      await runBaseConstructorJob(jobId, runToken);
       log('info', `Finished base-constructor job ${jobId}`);
     } catch (err) {
       log('error', `base-constructor job ${jobId} crashed`, err);
     } finally {
-      runningJobIds.delete(jobId);
+      if (runningJobs.get(jobId) === runToken) runningJobs.delete(jobId);
     }
   })();
   running.add(task);

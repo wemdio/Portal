@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { randomUUID } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { blockDemo } from '@/lib/auth/blockDemo';
 import { withToolTrace } from '@/lib/toolTrace';
 import { extractEmail, findColumnIndex } from '@/lib/tools/dfybUtils';
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
-import { stripEnrichCheckpointMetadata } from '@/lib/tools/baseConstructorCheckpoint';
+import { stripBaseConstructorCheckpointMetadata } from '@/lib/tools/baseConstructorCheckpoint';
 
 const admin = supabaseAdmin!;
 
@@ -49,12 +50,16 @@ async function autoCompleteIfStuck(jobId: string): Promise<void> {
   const INTERMEDIATE_STUCK_AFTER_MS = 15 * 60_000;
   const { data: row } = await admin
     .from('base_constructor_jobs')
-    .select('id, status, current_step, total_steps, current_step_progress, started_at, data')
+    .select('id, status, current_step, current_step_key, total_steps, current_step_progress, started_at, run_token, data')
     .eq('id', jobId)
     .single();
   if (!row) return;
   if (row.status !== 'processing') return;
   if ((row.current_step_progress ?? 0) < 100) return;
+  // Legacy validate workers could publish 100 before their filtered result was
+  // durable. Never auto-complete that ambiguous checkpoint in the API; the
+  // dedicated worker reclaims it and intentionally replays validate_emails.
+  if (row.current_step_key === 'validate_emails') return;
 
   const startedAt = row.started_at ? new Date(row.started_at).getTime() : 0;
   if (!startedAt) return;
@@ -64,7 +69,7 @@ async function autoCompleteIfStuck(jobId: string): Promise<void> {
 
   // Случай 1: финальный шаг, > 2 минут — пересчитываем stats и завершаем.
   if (isLastStep && elapsedMs >= FINAL_STUCK_AFTER_MS) {
-    const data = stripEnrichCheckpointMetadata((row.data as string[][] | null) ?? []);
+    const data = stripBaseConstructorCheckpointMetadata((row.data as string[][] | null) ?? []);
     if (data.length < 2) return;
     const header = data[0] ?? [];
     const body = data.slice(1);
@@ -76,7 +81,7 @@ async function autoCompleteIfStuck(jobId: string): Promise<void> {
       scoreIdx >= 0
         ? body.reduce((s, r) => s + (parseInt(r[scoreIdx], 10) || 0), 0) / (body.length || 1)
         : 0;
-    await admin
+    let completeQuery = admin
       .from('base_constructor_jobs')
       .update({
         data,
@@ -92,7 +97,11 @@ async function autoCompleteIfStuck(jobId: string): Promise<void> {
         },
       })
       .eq('id', jobId)
-      .eq('status', 'processing');
+      .eq('status', 'processing')
+      // A heartbeat/reclaim after our read means this snapshot is stale.
+      .eq('started_at', row.started_at);
+    if (row.run_token) completeQuery = completeQuery.eq('run_token', row.run_token);
+    await completeQuery;
     return;
   }
 
@@ -110,15 +119,20 @@ async function autoCompleteIfStuck(jobId: string): Promise<void> {
   // worker (иначе они бы конкурентно писали в data).
   if (!isLastStep && elapsedMs >= INTERMEDIATE_STUCK_AFTER_MS) {
     const cutoffIso = new Date(Date.now() - INTERMEDIATE_STUCK_AFTER_MS).toISOString();
+    const runToken = randomUUID();
     const { data: claimed } = await admin
       .from('base_constructor_jobs')
-      .update({ started_at: new Date().toISOString() })
+      .update({
+        started_at: new Date().toISOString(),
+        run_token: runToken,
+      })
       .eq('id', jobId)
       .eq('status', 'processing')
       .lt('started_at', cutoffIso)
-      .select('id');
+      .select('id, run_token')
+      .maybeSingle();
 
-    if (!claimed?.length) {
+    if (!claimed) {
       // Уже клеймнули в другом запросе — пусть тот и резумит.
       return;
     }
@@ -128,7 +142,7 @@ async function autoCompleteIfStuck(jobId: string): Promise<void> {
     // Fire-and-forget — та же архитектура что и при первичном POST.
     // Если этот промис снова умрёт от рестарта — следующий GET через
     // ещё 15 минут попробует резумнуть снова.
-    runBaseConstructorJob(jobId).catch((err) =>
+    runBaseConstructorJob(jobId, claimed.run_token ?? runToken).catch((err) =>
       console.error(`[base-constructor][${jobId}] auto-resume failed:`, err),
     );
     return;

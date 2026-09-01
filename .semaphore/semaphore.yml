@@ -52,7 +52,7 @@ blocks:
       # последнего push). Без этого Semaphore по умолчанию берёт merge-base
       # с main → на давно разошедшейся ветке правки в app/ накопились и
       # change_in всегда true.
-      when: "branch != 'main' AND branch != 'test' AND change_in('/app/', {default_branch: 'main', branch_range: '$SEMAPHORE_GIT_COMMIT_RANGE'})"
+      when: "branch != 'main' AND branch != 'test' AND change_in(['/app/', '/.semaphore/semaphore.yml', '/.semaphore/select-deploy-targets.sh', '/.semaphore/test-select-deploy-targets.sh', '/drain-worker.sh'], {default_branch: 'main', branch_range: '$SEMAPHORE_GIT_COMMIT_RANGE'})"
     task:
       secrets:
         - name: portal_secrets
@@ -124,6 +124,7 @@ blocks:
         - name: 'Checks and build'
           commands:
             - source /tmp/env_vars
+            - '(cd "$APP_PATH/.." && bash .semaphore/test-select-deploy-targets.sh)'
             - cd $APP_PATH
             - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
             # Один кэш на обе медленные проверки: и eslint (.next/cache/eslint),

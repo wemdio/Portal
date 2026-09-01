@@ -20,6 +20,24 @@ assert_eq() {
   fi
 }
 
+BASE_CONSTRUCTOR_WORKER_SERVICES="worker-baseconstructor worker-baseconstructor-2 worker-baseconstructor-3 worker-baseconstructor-4 worker-baseconstructor-5 worker-baseconstructor-6 worker-baseconstructor-7 worker-baseconstructor-8 worker-baseconstructor-9 worker-baseconstructor-10 worker-baseconstructor-11 worker-baseconstructor-12"
+
+assert_base_constructor_selection() {
+  expected_bc_services="$1"
+  assertion_name="$2"
+  selected_bc_services=""
+
+  for bc_service in $BASE_CONSTRUCTOR_WORKER_SERVICES; do
+    case " ${WORKER_SERVICES} " in
+      *" ${bc_service} "*)
+        selected_bc_services="${selected_bc_services}${selected_bc_services:+ }${bc_service}"
+        ;;
+    esac
+  done
+
+  assert_eq "$selected_bc_services" "$expected_bc_services" "$assertion_name"
+}
+
 select_deploy_targets_from_files 'services/backup/crontab
 docs/instantly-local-pg-cutover.md'
 assert_eq "$DEPLOY_BACKUP" 1 "backup change deploys backup"
@@ -35,6 +53,29 @@ assert_eq "$CORE_SERVICES" portal "app change selects Portal"
 assert_eq "$DEPLOY_WORKERS" 1 "app change selects shared worker image"
 assert_eq "$WORKER_SERVICES" "$ALL_WORKER_SERVICES" "app change selects every shared-image worker"
 assert_eq "$DEPLOY_DATASET_SYNC" 0 "generic app change does not deploy dataset sync"
+
+# UI/API-only releases must not recreate long-running Base Constructor workers.
+# Those workers are selected only when their own runtime or persistence contract
+# changes, so an unrelated Portal release cannot reset an in-flight validation.
+select_deploy_targets_from_files 'app/src/components/projects/ProjectCard.tsx'
+assert_eq "$DEPLOY_PORTAL" 1 "unrelated UI change still deploys Portal"
+assert_eq "$DEPLOY_WORKERS" 0 "unrelated UI change does not schedule a worker drain"
+assert_base_constructor_selection "" "unrelated UI change leaves Base Constructor replicas running"
+
+select_deploy_targets_from_files 'app/src/app/api/projects/route.ts'
+assert_eq "$DEPLOY_PORTAL" 1 "unrelated API change still deploys Portal"
+assert_eq "$DEPLOY_WORKERS" 0 "unrelated API change does not schedule a worker drain"
+assert_base_constructor_selection "" "unrelated API change leaves Base Constructor replicas running"
+
+select_deploy_targets_from_files 'app/worker/baseConstructor.ts'
+assert_base_constructor_selection "$BASE_CONSTRUCTOR_WORKER_SERVICES" "Base Constructor worker change selects every replica"
+
+select_deploy_targets_from_files 'app/src/lib/tools/processingSteps.ts'
+assert_base_constructor_selection "$BASE_CONSTRUCTOR_WORKER_SERVICES" "shared Base Constructor processing change selects every replica"
+assert_eq "$WORKER_SERVICES" "$ALL_WORKER_SERVICES" "shared processingSteps change keeps the monolithic worker pool on one image revision"
+
+select_deploy_targets_from_files 'supabase/migrations/20260901000000_base_constructor_resume_guard.sql'
+assert_base_constructor_selection "$BASE_CONSTRUCTOR_WORKER_SERVICES" "Base Constructor migration selects every replica"
 
 select_deploy_targets_from_files 'app/scripts/instantly-dataset/sync.mjs
 app/scripts/instantly-dataset/022_leads_capture.sql'

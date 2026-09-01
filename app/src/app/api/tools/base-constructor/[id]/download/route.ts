@@ -4,7 +4,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 import { rowsToCsvChunks } from '@/lib/tools/rowsToCsv';
 import { EXPORT_BUCKET, uploadExportArtifact } from '@/lib/tools/csvExportArtifact';
-import { stripEnrichCheckpointMetadata } from '@/lib/tools/baseConstructorCheckpoint';
+import { stripBaseConstructorCheckpointMetadata } from '@/lib/tools/baseConstructorCheckpoint';
 
 const admin = supabaseAdmin!;
 
@@ -23,6 +23,22 @@ const CSV_HEADERS = {
   'content-type': 'text/csv; charset=utf-8',
   'cache-control': 'no-store',
 } as const;
+
+const RUN_TOKEN_ARTIFACT_SUFFIX_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.csv\.gz$/i;
+
+function safeArtifactPath(jobId: string, storedPath: unknown): string {
+  const legacyPath = `${jobId}.csv.gz`;
+  if (storedPath === legacyPath) return legacyPath;
+  if (typeof storedPath !== 'string') return legacyPath;
+
+  // New workers isolate each ownership attempt under this job's own prefix.
+  // Accept only a UUID filename beneath the already ownership-checked job id;
+  // arbitrary client-writable paths can never escape into another job/tenant.
+  const prefix = `${jobId}/`;
+  const suffix = storedPath.startsWith(prefix) ? storedPath.slice(prefix.length) : '';
+  return RUN_TOKEN_ARTIFACT_SUFFIX_RE.test(suffix) ? storedPath : legacyPath;
+}
 
 /**
  * CSV export of a base-constructor job.
@@ -59,13 +75,11 @@ export async function GET(
       if (job.user_id !== user.id) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
       // ── Fast path: stored artifact ─────────────────────────────────────
-      // The artifact path is DERIVED from the authenticated, ownership-checked
-      // job id — NEVER from the client-writable export_path column. RLS lets a
-      // user UPDATE their own row (base_constructor_jobs_update USING auth.uid()
-      // = user_id, no column restriction), so a stored path string could be
-      // pointed at another tenant's object; deriving it makes that impossible.
-      // export_path is used ONLY as a "an artifact was built" flag.
-      const artifactPath = `${id}.csv.gz`;
+      // Legacy artifacts are derived from the authenticated, ownership-checked
+      // job id. New run-token-scoped artifacts use export_path only after strict
+      // validation that it remains under this exact job id; RLS therefore
+      // cannot be abused to point a download at another tenant's object.
+      const artifactPath = safeArtifactPath(id, job.export_path);
       if (job.status === 'completed' && job.export_path) {
         const { data: blob, error: dlErr } = await admin.storage
           .from(EXPORT_BUCKET)
@@ -116,7 +130,7 @@ export async function GET(
       if (fullErr || !full) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
       const storedRows = Array.isArray(full.data) ? (full.data as string[][]) : [];
-      const rows = stripEnrichCheckpointMetadata(storedRows);
+      const rows = stripBaseConstructorCheckpointMetadata(storedRows);
 
       // Lazy backfill so the NEXT download hits the fast path. Only completed
       // jobs are cached, and `rows` was sanitized above. Fire-and-forget —
