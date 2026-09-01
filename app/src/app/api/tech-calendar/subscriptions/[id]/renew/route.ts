@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 
 import { requireAdmin } from '@/lib/adminAuth';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { techCalendarMutationError } from '@/lib/techCalendar/budgetErrors';
 import { addCycle } from '@/lib/techCalendar/dates';
 import { ValidationError, parseRenewInput } from '@/lib/techCalendar/validate';
 
@@ -52,26 +53,39 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 
   const { data: current, error: loadError } = await supabaseAdmin
     .from('tech_subscriptions')
-    .select('id, next_billing_date, billing_cycle')
+    .select('id, next_billing_date, billing_cycle, updated_at')
     .eq('id', id)
     .maybeSingle();
 
   if (loadError) return NextResponse.json({ error: loadError.message }, { status: 500 });
   if (!current) return NextResponse.json({ error: 'Сервис не найден' }, { status: 404 });
 
-  const row = current as { next_billing_date: string; billing_cycle: 'monthly' | 'quarterly' | 'yearly' };
+  const row = current as {
+    next_billing_date: string;
+    billing_cycle: 'monthly' | 'quarterly' | 'yearly';
+    updated_at: string;
+  };
   const nextDate = input.next_billing_date ?? addCycle(row.next_billing_date, row.billing_cycle);
 
-  const patch: Record<string, unknown> = {
-    next_billing_date: nextDate,
-    status: 'active',
-    decision_by: null,
-    decision_at: null,
-    decision_notes: null,
-  };
-  if (input.amount !== undefined) patch.amount = input.amount;
-
-  const { error } = await supabaseAdmin.from('tech_subscriptions').update(patch).eq('id', id);
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ ok: true, next_billing_date: nextDate });
+  const { data, error } = await supabaseAdmin.rpc('renew_tech_subscription_with_budget', {
+    p_subscription_id: id,
+    p_next_billing_date: nextDate,
+    p_next_amount: input.amount ?? null,
+    p_actor_id: guard.user.id,
+    p_expected_updated_at: input.expected_updated_at ?? row.updated_at,
+  });
+  if (error) {
+    const mapped = techCalendarMutationError(error);
+    if (mapped) {
+      return NextResponse.json(
+        { error: mapped.message, code: mapped.code },
+        { status: mapped.status },
+      );
+    }
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+  return NextResponse.json({
+    ok: true,
+    next_billing_date: typeof data === 'string' ? data : nextDate,
+  });
 }

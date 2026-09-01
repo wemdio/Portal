@@ -89,6 +89,8 @@ function monthSummary(month: string) {
       missingFxCount: 0,
       mailPaid: 0,
       mailReserved: 0,
+      techPaid: 0,
+      techReserved: 0,
       manualPaid: 0,
       manualReserved: 0,
       byCategory: {

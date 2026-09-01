@@ -236,6 +236,8 @@ export function paymentSummaryToApi(value: unknown): PaymentMonthSummary {
     missingFxCount: numberOrZero(readSummaryValue(costRow, 'missingFxCount', 'missing_fx_count')),
     mailPaid: numberOrZero(readSummaryValue(costRow, 'mailPaid', 'mail_paid')),
     mailReserved: numberOrZero(readSummaryValue(costRow, 'mailReserved', 'mail_reserved')),
+    techPaid: numberOrZero(readSummaryValue(costRow, 'techPaid', 'tech_paid')),
+    techReserved: numberOrZero(readSummaryValue(costRow, 'techReserved', 'tech_reserved')),
     manualPaid: numberOrZero(readSummaryValue(costRow, 'manualPaid', 'manual_paid')),
     manualReserved: numberOrZero(readSummaryValue(costRow, 'manualReserved', 'manual_reserved')),
     byCategory,

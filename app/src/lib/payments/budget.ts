@@ -22,9 +22,10 @@ export interface PaymentBudgetRow {
 }
 
 export interface PaymentCalendarCostRow {
+  source: 'mail' | 'tech';
   sourceId: string;
   costAmountRub: number | null;
-  status: 'active' | 'pending_review' | 'keep' | 'cancel' | 'expired';
+  status: 'active' | 'pending_review' | 'keep' | 'cancel' | 'expired' | 'paid';
   nextBillingDate: string;
 }
 
@@ -77,6 +78,58 @@ function calendarAmountRub(row: PaymentCalendarCostRow): number | null {
   return Number.isFinite(amount) && amount >= 0 ? roundMoney(amount) : null;
 }
 
+type CalendarCostSource = PaymentCalendarCostRow['source'];
+type CalendarCostBucket = 'paid' | 'reserved';
+
+const CALENDAR_SOURCE_CATEGORY: Record<CalendarCostSource, PaymentCostCategory> = {
+  mail: 'email',
+  tech: 'other',
+};
+
+function emptyCalendarSourceTotals(): Record<CalendarCostSource, {
+  paid: number;
+  reserved: number;
+}> {
+  return {
+    mail: { paid: 0, reserved: 0 },
+    tech: { paid: 0, reserved: 0 },
+  };
+}
+
+function calendarChargeKey(row: PaymentCalendarCostRow): string {
+  return `${row.source}:${row.sourceId}`;
+}
+
+function shouldReplaceCalendarCharge(
+  current: PaymentCalendarCostRow,
+  candidate: PaymentCalendarCostRow,
+): boolean {
+  const currentIsPaid = current.status === 'paid';
+  const candidateIsPaid = candidate.status === 'paid';
+  if (currentIsPaid !== candidateIsPaid) return candidateIsPaid;
+  return calendarAmountRub(current) === null && calendarAmountRub(candidate) !== null;
+}
+
+function calendarCostsForMonth(
+  rows: readonly PaymentCalendarCostRow[],
+  month: string,
+): PaymentCalendarCostRow[] {
+  const charges = new Map<string, PaymentCalendarCostRow>();
+  for (const row of rows) {
+    if (
+      (row.status !== 'keep' && row.status !== 'paid')
+      || !isInMonth(row.nextBillingDate, month)
+    ) continue;
+
+    const key = calendarChargeKey(row);
+    const current = charges.get(key);
+    if (!current || shouldReplaceCalendarCharge(current, row)) {
+      charges.set(key, row);
+    }
+  }
+  return [...charges.values()];
+}
+
 export function summarizePaymentMonth(
   rows: readonly PaymentBudgetRow[],
   month: string,
@@ -95,8 +148,7 @@ export function summarizePaymentMonth(
   let approvedCount = 0;
   let manualCostPaid = 0;
   let manualCostReserved = 0;
-  let mailPaid = 0;
-  let mailReserved = 0;
+  const calendarTotals = emptyCalendarSourceTotals();
   let missingFxCount = 0;
 
   for (const row of rows) {
@@ -143,26 +195,19 @@ export function summarizePaymentMonth(
     }
   }
 
-  const seenCalendarSources = new Set<string>();
-  for (const row of options.calendarCosts ?? []) {
-    if (
-      seenCalendarSources.has(row.sourceId)
-      || row.status !== 'keep'
-      || !isInMonth(row.nextBillingDate, month)
-    ) continue;
-    seenCalendarSources.add(row.sourceId);
+  for (const row of calendarCostsForMonth(options.calendarCosts ?? [], month)) {
     const amountRub = calendarAmountRub(row);
     if (amountRub === null) {
       missingFxCount += 1;
       continue;
     }
-    if (row.nextBillingDate <= asOf) {
-      mailPaid += amountRub;
-      byCategory.email.paid += amountRub;
+    const bucket: CalendarCostBucket = row.status === 'paid' || row.nextBillingDate <= asOf
+      ? 'paid'
+      : 'reserved';
+    calendarTotals[row.source][bucket] += amountRub;
+    byCategory[CALENDAR_SOURCE_CATEGORY[row.source]][bucket] += amountRub;
+    if (bucket === 'paid') {
       paidAll += amountRub;
-    } else {
-      mailReserved += amountRub;
-      byCategory.email.reserved += amountRub;
     }
   }
 
@@ -181,14 +226,20 @@ export function summarizePaymentMonth(
       : 'normal';
   manualCostPaid = roundMoney(manualCostPaid);
   manualCostReserved = roundMoney(manualCostReserved);
-  mailPaid = roundMoney(mailPaid);
-  mailReserved = roundMoney(mailReserved);
+  for (const totals of Object.values(calendarTotals)) {
+    totals.paid = roundMoney(totals.paid);
+    totals.reserved = roundMoney(totals.reserved);
+  }
   for (const totals of Object.values(byCategory)) {
     totals.paid = roundMoney(totals.paid);
     totals.reserved = roundMoney(totals.reserved);
   }
-  const costPaid = roundMoney(manualCostPaid + mailPaid);
-  const costReserved = roundMoney(manualCostReserved + mailReserved);
+  const costPaid = roundMoney(
+    manualCostPaid + calendarTotals.mail.paid + calendarTotals.tech.paid,
+  );
+  const costReserved = roundMoney(
+    manualCostReserved + calendarTotals.mail.reserved + calendarTotals.tech.reserved,
+  );
   const costUsed = roundMoney(costPaid + costReserved);
   const costRemaining = roundMoney(costLimit - costUsed);
   const costOverage = roundMoney(Math.max(costUsed - costLimit, 0));
@@ -224,8 +275,10 @@ export function summarizePaymentMonth(
       level: costLevel,
       dataComplete: missingFxCount === 0,
       missingFxCount,
-      mailPaid,
-      mailReserved,
+      mailPaid: calendarTotals.mail.paid,
+      mailReserved: calendarTotals.mail.reserved,
+      techPaid: calendarTotals.tech.paid,
+      techReserved: calendarTotals.tech.reserved,
       manualPaid: manualCostPaid,
       manualReserved: manualCostReserved,
       byCategory,

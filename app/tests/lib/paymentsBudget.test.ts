@@ -7,6 +7,7 @@ import {
   type PaymentCalendarCostRow,
   type PaymentBudgetRow,
 } from '@/lib/payments/budget';
+import { paymentSummaryToApi } from '@/lib/payments/server';
 
 function payment(overrides: Partial<PaymentBudgetRow> = {}): PaymentBudgetRow {
   return {
@@ -23,6 +24,7 @@ function calendarCost(
   overrides: Partial<PaymentCalendarCostRow> = {},
 ): PaymentCalendarCostRow {
   return {
+    source: 'mail',
     sourceId: 'calendar-1',
     costAmountRub: 8_000,
     status: 'keep',
@@ -66,6 +68,17 @@ describe('getPaymentCostMonthLimit', () => {
 
   it('rejects a non-canonical month just like the one-time budget', () => {
     expect(() => getPaymentCostMonthLimit('2026-9')).toThrow();
+  });
+});
+
+describe('paymentSummaryToApi', () => {
+  it('defaults new tech-calendar totals to zero for older database payloads', () => {
+    const summary = paymentSummaryToApi({ costBudget: {} });
+
+    expect(summary.costBudget).toEqual(expect.objectContaining({
+      techPaid: 0,
+      techReserved: 0,
+    }));
   });
 });
 
@@ -259,6 +272,97 @@ describe('summarizePaymentMonth', () => {
     expect(onBillingDate.paidAll).toBe(8_000);
   });
 
+  it('counts a kept tech-calendar charge as «other»: reserved before billing and paid on the date', () => {
+    const techCharge = calendarCost({
+      source: 'tech',
+      sourceId: 'tech:sub-1:2026-09-15',
+    });
+
+    const beforeBilling = summarizePaymentMonth([], '2026-09', {
+      asOf: '2026-09-14',
+      calendarCosts: [techCharge],
+    });
+    const onBillingDate = summarizePaymentMonth([], '2026-09', {
+      asOf: '2026-09-15',
+      calendarCosts: [techCharge],
+    });
+
+    expect(beforeBilling.costBudget).toEqual(expect.objectContaining({
+      techPaid: 0,
+      techReserved: 8_000,
+      paid: 0,
+      reserved: 8_000,
+      used: 8_000,
+    }));
+    expect(beforeBilling.costBudget.byCategory.other).toEqual({ paid: 0, reserved: 8_000 });
+    expect(onBillingDate.costBudget).toEqual(expect.objectContaining({
+      techPaid: 8_000,
+      techReserved: 0,
+      paid: 8_000,
+      reserved: 0,
+      used: 8_000,
+    }));
+    expect(onBillingDate.costBudget.byCategory.other).toEqual({ paid: 8_000, reserved: 0 });
+    expect(onBillingDate.paidAll).toBe(8_000);
+  });
+
+  it('keeps a paid tech ledger event in fact after renewal and does not double-count its current row', () => {
+    const chargeKey = 'tech:sub-1:2026-09-15';
+    const summary = summarizePaymentMonth([], '2026-09', {
+      asOf: '2026-09-01',
+      calendarCosts: [
+        calendarCost({
+          source: 'tech',
+          sourceId: chargeKey,
+          status: 'keep',
+        }),
+        calendarCost({
+          source: 'tech',
+          sourceId: chargeKey,
+          status: 'paid',
+        }),
+        calendarCost({
+          source: 'tech',
+          sourceId: 'tech:sub-1:2026-10-15',
+          status: 'active',
+          nextBillingDate: '2026-10-15',
+        }),
+      ],
+    });
+
+    expect(summary.costBudget).toEqual(expect.objectContaining({
+      techPaid: 8_000,
+      techReserved: 0,
+      paid: 8_000,
+      reserved: 0,
+      used: 8_000,
+    }));
+    expect(summary.costBudget.byCategory.other).toEqual({ paid: 8_000, reserved: 0 });
+    expect(summary.paidAll).toBe(8_000);
+  });
+
+  it.each([
+    ['paid first', ['paid', 'keep'] as const],
+    ['paid last', ['keep', 'paid'] as const],
+  ])('keeps the paid ledger event authoritative when a duplicate has missing FX: %s', (_label, statuses) => {
+    const chargeKey = 'tech:sub-1:2026-09-15';
+    const rows = statuses.map((status) => calendarCost({
+      source: 'tech',
+      sourceId: chargeKey,
+      status,
+      costAmountRub: status === 'paid' ? null : 8_000,
+    }));
+    const summary = summarizePaymentMonth([], '2026-09', {
+      asOf: '2026-09-01',
+      calendarCosts: rows,
+    });
+
+    expect(summary.costBudget.techPaid).toBe(0);
+    expect(summary.costBudget.techReserved).toBe(0);
+    expect(summary.costBudget.missingFxCount).toBe(1);
+    expect(summary.costBudget.dataComplete).toBe(false);
+  });
+
   it('does not consume the cost budget for active, pending-review, cancelled or other-month calendar rows', () => {
     const summary = summarizePaymentMonth([], '2026-09', {
       asOf: '2026-09-30',
@@ -280,6 +384,27 @@ describe('summarizePaymentMonth', () => {
     }));
   });
 
+  it('excludes non-kept tech-calendar rows from the cost budget', () => {
+    const summary = summarizePaymentMonth([], '2026-09', {
+      asOf: '2026-09-30',
+      calendarCosts: [
+        calendarCost({ source: 'tech', sourceId: 'active', status: 'active' }),
+        calendarCost({ source: 'tech', sourceId: 'pending', status: 'pending_review' }),
+        calendarCost({ source: 'tech', sourceId: 'cancel', status: 'cancel' }),
+        calendarCost({ source: 'tech', sourceId: 'expired', status: 'expired' }),
+      ],
+    });
+
+    expect(summary.costBudget).toEqual(expect.objectContaining({
+      paid: 0,
+      reserved: 0,
+      used: 0,
+      techPaid: 0,
+      techReserved: 0,
+    }));
+    expect(summary.costBudget.byCategory.other).toEqual({ paid: 0, reserved: 0 });
+  });
+
   it('deduplicates a calendar charge by its immutable source id', () => {
     const sameCharge = calendarCost({ sourceId: 'same-charge', costAmountRub: 1_000 });
     const summary = summarizePaymentMonth([], '2026-09', {
@@ -291,6 +416,20 @@ describe('summarizePaymentMonth', () => {
     expect(summary.costBudget.used).toBe(1_000);
   });
 
+  it('keeps equal immutable ids from mail and tech as separate charges', () => {
+    const summary = summarizePaymentMonth([], '2026-09', {
+      asOf: '2026-09-01',
+      calendarCosts: [
+        calendarCost({ source: 'mail', sourceId: 'shared-id', costAmountRub: 1_000 }),
+        calendarCost({ source: 'tech', sourceId: 'shared-id', costAmountRub: 2_000 }),
+      ],
+    });
+
+    expect(summary.costBudget.mailReserved).toBe(1_000);
+    expect(summary.costBudget.techReserved).toBe(2_000);
+    expect(summary.costBudget.used).toBe(3_000);
+  });
+
   it('fails closed when a foreign-currency calendar charge has no RUB rate', () => {
     const summary = summarizePaymentMonth([], '2026-09', {
       asOf: '2026-09-01',
@@ -299,6 +438,22 @@ describe('summarizePaymentMonth', () => {
 
     expect(summary.costBudget.missingFxCount).toBe(1);
     expect(summary.costBudget.dataComplete).toBe(false);
+  });
+
+  it('fails closed when a kept tech-calendar charge has no RUB rate', () => {
+    const summary = summarizePaymentMonth([], '2026-09', {
+      asOf: '2026-09-01',
+      calendarCosts: [calendarCost({
+        source: 'tech',
+        sourceId: 'tech:missing-fx',
+        costAmountRub: null,
+      })],
+    });
+
+    expect(summary.costBudget.missingFxCount).toBe(1);
+    expect(summary.costBudget.dataComplete).toBe(false);
+    expect(summary.costBudget.techPaid).toBe(0);
+    expect(summary.costBudget.techReserved).toBe(0);
   });
 
   it('rounds every frozen calendar charge to kopecks before aggregation', () => {

@@ -146,9 +146,9 @@ export default function PaymentLimitSummary({ summary, canManage }: PaymentLimit
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Косты компании</p>
-            <h2 className="mt-2 text-lg font-semibold text-gray-950">Instantly, почты, базы и домены</h2>
+            <h2 className="mt-2 text-lg font-semibold text-gray-950">Instantly, почты, базы, домены и другое</h2>
             <p className="mt-1 text-sm leading-5 text-gray-500">
-              «Оставить» из календаря почт учитывается автоматически: до даты списания в резерве, с даты списания в факте.
+              Календарь почт попадает в «Почты», календарь технички в «Другое». «Оставить» до даты списания считается резервом, затем фактом.
             </p>
           </div>
           <span className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ring-1 ring-inset ${
@@ -206,9 +206,14 @@ export default function PaymentLimitSummary({ summary, canManage }: PaymentLimit
               </div>
             ))}
           </dl>
-          <p className="mt-4 text-xs leading-5 text-gray-500">
-            {`Из календаря почт: оплачено ${formatRubles(summary.costBudget.mailPaid)}, в резерве ${formatRubles(summary.costBudget.mailReserved)}.`}
-          </p>
+          <div className="mt-4 grid gap-1 text-xs leading-5 text-gray-500 sm:grid-cols-2 sm:gap-x-5">
+            <p>
+              {`Календарь почт: оплачено ${formatRubles(summary.costBudget.mailPaid)}, резерв ${formatRubles(summary.costBudget.mailReserved)}.`}
+            </p>
+            <p>
+              {`Календарь технички: оплачено ${formatRubles(summary.costBudget.techPaid)}, резерв ${formatRubles(summary.costBudget.techReserved)}.`}
+            </p>
+          </div>
         </div>
       </section>
 
@@ -219,7 +224,7 @@ export default function PaymentLimitSummary({ summary, canManage }: PaymentLimit
         >
           <AlertTriangle aria-hidden="true" className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
           <p>
-            {`Не удалось пересчитать ${summary.costBudget.missingFxCount} платеж(а) из календаря в рубли. До обновления курса новые косты заблокированы, чтобы не превысить лимит незаметно.`}
+            {`Не удалось пересчитать ${summary.costBudget.missingFxCount} платеж(а) из календарей в рубли. До обновления курса новые косты заблокированы, чтобы не превысить лимит незаметно.`}
           </p>
         </aside>
       )}

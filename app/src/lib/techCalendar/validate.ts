@@ -68,6 +68,28 @@ function parseNotes(value: unknown): string | null {
   return (value as string).trim() || null;
 }
 
+function parseUpdatedAt(value: unknown): string {
+  const isoTimestampWithZone = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
+  if (
+    typeof value !== 'string'
+    || !isoTimestampWithZone.test(value)
+    || Number.isNaN(Date.parse(value))
+  ) {
+    fail('Версия карточки указана неверно');
+  }
+  return value;
+}
+
+/**
+ * PATCH/DELETE/решение всегда должны прислать версию карточки,
+ * которую видел пользователь. Это не даёт тихо затереть более свежую
+ * правку другого администратора.
+ */
+export function parseExpectedUpdatedAt(body: Body): string {
+  if (body.expected_updated_at === undefined) fail('Обновите страницу и повторите');
+  return parseUpdatedAt(body.expected_updated_at);
+}
+
 export interface CreateInput {
   service_name: string;
   service_type: ServiceType;
@@ -108,12 +130,16 @@ export function parsePatchInput(body: Body): PatchInput {
 export interface RenewInput {
   next_billing_date?: string;
   amount?: number;
+  expected_updated_at?: string;
 }
 
 export function parseRenewInput(body: Body): RenewInput {
   const input: RenewInput = {};
   if (body.next_billing_date !== undefined) input.next_billing_date = parseDate(body.next_billing_date);
   if (body.amount !== undefined) input.amount = parseAmount(body.amount);
+  if (body.expected_updated_at !== undefined) {
+    input.expected_updated_at = parseUpdatedAt(body.expected_updated_at);
+  }
   return input;
 }
 

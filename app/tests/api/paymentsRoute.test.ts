@@ -92,6 +92,8 @@ function summary(overrides: Record<string, unknown> = {}) {
       missingFxCount: 0,
       mailPaid: 20_000,
       mailReserved: 30_000,
+      techPaid: 0,
+      techReserved: 0,
       manualPaid: 30_000,
       manualReserved: 70_000,
       byCategory: {

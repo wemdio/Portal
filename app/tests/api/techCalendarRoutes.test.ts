@@ -15,9 +15,11 @@ import type { NextRequest } from 'next/server';
 
 const ADMIN_ID = '00000000-0000-4000-8000-000000000001';
 const TECH_ID = '00000000-0000-4000-8000-000000000002';
+const INITIAL_UPDATED_AT = '2026-08-01T00:00:00.000Z';
 
 let mockDb: MockSupabaseClient = createMockSupabase();
 let currentUserId = ADMIN_ID;
+let mockRenewError: string | null = null;
 
 jest.mock('@/lib/supabaseAdmin', () => ({
   get supabaseAdmin() {
@@ -62,6 +64,7 @@ function subRow(over: Record<string, unknown> = {}) {
     service_name: 'Bright Data',
     service_type: 'proxy',
     amount: 250,
+    cost_amount_rub: 25_000,
     currency: 'USD',
     billing_cycle: 'monthly',
     next_billing_date: '2026-08-20',
@@ -72,22 +75,69 @@ function subRow(over: Record<string, unknown> = {}) {
     notes: null,
     created_by: ADMIN_ID,
     created_at: '2026-08-01T00:00:00.000Z',
-    updated_at: '2026-08-01T00:00:00.000Z',
+    updated_at: INITIAL_UPDATED_AT,
     ...over,
   };
 }
 
-beforeEach(() => {
-  currentUserId = ADMIN_ID;
-  mockDb = createMockSupabase({
+function createTechCalendarDb(subscriptions = [subRow()]): MockSupabaseClient {
+  return createMockSupabase({
     tables: {
       profiles: [
         { id: ADMIN_ID, role: 'admin' },
         { id: TECH_ID, role: 'technician' },
       ],
-      tech_subscriptions: [subRow()],
+      tech_subscriptions: subscriptions,
+      tech_subscription_cost_events: [],
+    },
+    rpcHandlers: {
+      renew_tech_subscription_with_budget: async (params, db) => {
+        if (mockRenewError) return { data: null, error: { message: mockRenewError } };
+        const current = db.getRows('tech_subscriptions')
+          .find((row) => row.id === params.p_subscription_id);
+        if (!current) {
+          return { data: null, error: { message: 'tech_subscription_not_found' } };
+        }
+        if (current.updated_at !== params.p_expected_updated_at) {
+          return { data: null, error: { message: 'tech_subscription_conflict' } };
+        }
+        const currentBillingDate = String(current.next_billing_date ?? '');
+        const nextBillingDate = String(params.p_next_billing_date ?? '');
+        if (
+          current.status !== 'keep'
+          || nextBillingDate <= currentBillingDate
+          || current.cost_amount_rub === null
+        ) {
+          return { data: null, error: { message: 'tech_subscription_invalid_input' } };
+        }
+
+        await db.from('tech_subscriptions').update({
+          next_billing_date: params.p_next_billing_date,
+          amount: params.p_next_amount ?? current.amount,
+          status: 'active',
+          decision_by: null,
+          decision_at: null,
+          decision_notes: null,
+        }).eq('id', params.p_subscription_id);
+        await db.from('tech_subscription_cost_events').insert({
+          subscription_id: current.id,
+          service_name: current.service_name,
+          billing_date: current.next_billing_date,
+          amount: current.amount,
+          currency: current.currency,
+          amount_rub: current.currency === 'RUB' ? current.amount : 25_000,
+          paid_by: params.p_actor_id,
+        });
+        return { data: params.p_next_billing_date };
+      },
     },
   });
+}
+
+beforeEach(() => {
+  currentUserId = ADMIN_ID;
+  mockRenewError = null;
+  mockDb = createTechCalendarDb();
   jest.resetModules();
 });
 
@@ -183,12 +233,9 @@ describe('POST создания', () => {
 
 describe('POST продления', () => {
   it('двигает дату на цикл и сбрасывает решение', async () => {
-    mockDb = createMockSupabase({
-      tables: {
-        profiles: [{ id: ADMIN_ID, role: 'admin' }],
-        tech_subscriptions: [subRow({ status: 'keep', decision_by: ADMIN_ID, decision_at: '2026-08-13T10:00:00.000Z' })],
-      },
-    });
+    mockDb = createTechCalendarDb([
+      subRow({ status: 'keep', decision_by: ADMIN_ID, decision_at: '2026-08-13T10:00:00.000Z' }),
+    ]);
     const { POST } = await import('@/app/api/tech-calendar/subscriptions/[id]/renew/route');
     const res = await POST(req({}), { params: Promise.resolve({ id: 'sub-1' }) });
 
@@ -200,11 +247,33 @@ describe('POST продления', () => {
       decision_by: null,
       decision_at: null,
     });
+    expect(mockDb.getRows('tech_subscription_cost_events')).toEqual([
+      expect.objectContaining({
+        subscription_id: 'sub-1',
+        billing_date: '2026-08-20',
+        paid_by: ADMIN_ID,
+      }),
+    ]);
+    expect(mockDb.rpcCalls).toContainEqual({
+      fn: 'renew_tech_subscription_with_budget',
+      params: {
+        p_subscription_id: 'sub-1',
+        p_next_billing_date: '2026-09-20',
+        p_next_amount: null,
+        p_actor_id: ADMIN_ID,
+        p_expected_updated_at: INITIAL_UPDATED_AT,
+      },
+    });
   });
 
   it('принимает ручную дату и сумму', async () => {
+    mockDb = createTechCalendarDb([subRow({ status: 'keep' })]);
     const { POST } = await import('@/app/api/tech-calendar/subscriptions/[id]/renew/route');
-    const res = await POST(req({ next_billing_date: '2026-09-25', amount: 275 }), {
+    const res = await POST(req({
+      next_billing_date: '2026-09-25',
+      amount: 275,
+      expected_updated_at: INITIAL_UPDATED_AT,
+    }), {
       params: Promise.resolve({ id: 'sub-1' }),
     });
 
@@ -221,7 +290,48 @@ describe('POST продления', () => {
     expect(res.status).toBe(404);
   });
 
+  it.each([
+    ['payment_request_cost_limit_exceeded', 'cost_limit_exceeded'],
+    ['payment_request_cost_budget_incomplete', 'cost_budget_incomplete'],
+  ])('не двигает дату, когда бюджетный RPC отклоняет продление: %s', async (message, code) => {
+    mockRenewError = message;
+    const { POST } = await import('@/app/api/tech-calendar/subscriptions/[id]/renew/route');
+    const res = await POST(req({}), { params: Promise.resolve({ id: 'sub-1' }) });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expect.objectContaining({ code }));
+    expect(mockDb.getRows('tech_subscriptions')[0].next_billing_date).toBe('2026-08-20');
+    expect(mockDb.getRows('tech_subscription_cost_events')).toHaveLength(0);
+  });
+
+  it('отдаёт конфликт и не продлевает устаревшую карточку', async () => {
+    mockDb = createTechCalendarDb([subRow({
+      status: 'keep',
+      updated_at: '2026-08-02T00:00:00.000Z',
+    })]);
+    const { POST } = await import('@/app/api/tech-calendar/subscriptions/[id]/renew/route');
+    const res = await POST(req({ expected_updated_at: INITIAL_UPDATED_AT }), {
+      params: Promise.resolve({ id: 'sub-1' }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expect.objectContaining({ code: 'tech_subscription_conflict' }));
+    expect(mockDb.getRows('tech_subscription_cost_events')).toHaveLength(0);
+  });
+
+  it('объясняет, что продлевать можно только подтверждённый сервис', async () => {
+    const { POST } = await import('@/app/api/tech-calendar/subscriptions/[id]/renew/route');
+    const res = await POST(req({}), { params: Promise.resolve({ id: 'sub-1' }) });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expect.objectContaining({
+      code: 'tech_subscription_invalid_input',
+    }));
+    expect(mockDb.getRows('tech_subscription_cost_events')).toHaveLength(0);
+  });
+
   it('пустое тело — это «посчитай по циклу», а не ошибка', async () => {
+    mockDb = createTechCalendarDb([subRow({ status: 'keep' })]);
     const { POST } = await import('@/app/api/tech-calendar/subscriptions/[id]/renew/route');
     const res = await POST(req(), { params: Promise.resolve({ id: 'sub-1' }) });
     expect(res.status).toBe(200);
@@ -238,9 +348,23 @@ describe('POST продления', () => {
 });
 
 describe('POST решения', () => {
+  it('требует версию карточки для защиты от перезаписи', async () => {
+    const { POST } = await import('@/app/api/tech-calendar/subscriptions/[id]/decision/route');
+    const res = await POST(req({ decision: 'keep' }), {
+      params: Promise.resolve({ id: 'sub-1' }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(mockDb.getRows('tech_subscriptions')[0].status).toBe('pending_review');
+  });
+
   it('пишет решение и автора', async () => {
     const { POST } = await import('@/app/api/tech-calendar/subscriptions/[id]/decision/route');
-    const res = await POST(req({ decision: 'cancel', notes: 'дорого' }), {
+    const res = await POST(req({
+      decision: 'cancel',
+      notes: 'дорого',
+      expected_updated_at: INITIAL_UPDATED_AT,
+    }), {
       params: Promise.resolve({ id: 'sub-1' }),
     });
 
@@ -251,34 +375,195 @@ describe('POST решения', () => {
       decision_notes: 'дорого',
     });
   });
+
+  it.each([
+    ['payment_request_cost_limit_exceeded', 'cost_limit_exceeded'],
+    ['payment_request_cost_budget_incomplete', 'cost_budget_incomplete'],
+    ['tech_subscription_paid_cycle_locked', 'tech_subscription_paid_cycle_locked'],
+  ])('не ставит «Оставить», если бюджетный guard отклонил решение: %s', async (message, code) => {
+    mockDb = createMockSupabase({
+      tables: {
+        profiles: [{ id: ADMIN_ID, role: 'admin' }],
+        tech_subscriptions: [subRow()],
+      },
+      errorUpdates: {
+        tech_subscriptions: { message, patchIncludes: { status: 'keep' } },
+      },
+    });
+    const { POST } = await import('@/app/api/tech-calendar/subscriptions/[id]/decision/route');
+    const res = await POST(req({ decision: 'keep', expected_updated_at: INITIAL_UPDATED_AT }), {
+      params: Promise.resolve({ id: 'sub-1' }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expect.objectContaining({ code }));
+    expect(mockDb.getRows('tech_subscriptions')[0].status).toBe('pending_review');
+  });
+
+  it('не применяет решение из устаревшей карточки', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        profiles: [{ id: ADMIN_ID, role: 'admin' }],
+        tech_subscriptions: [subRow()],
+      },
+      beforeFirstUpdates: {
+        tech_subscriptions: (rows) => rows.map((row) => ({
+          ...row,
+          updated_at: '2026-08-02T00:00:00.000Z',
+        })),
+      },
+    });
+    const { POST } = await import('@/app/api/tech-calendar/subscriptions/[id]/decision/route');
+    const res = await POST(req({ decision: 'cancel', expected_updated_at: INITIAL_UPDATED_AT }), {
+      params: Promise.resolve({ id: 'sub-1' }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expect.objectContaining({ code: 'tech_subscription_conflict' }));
+    expect(mockDb.getRows('tech_subscriptions')[0].status).toBe('pending_review');
+  });
 });
 
 describe('PATCH', () => {
+  it('требует версию карточки для защиты от перезаписи', async () => {
+    const { PATCH } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
+    const res = await PATCH(req({ amount: 300 }), {
+      params: Promise.resolve({ id: 'sub-1' }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(mockDb.getRows('tech_subscriptions')[0].amount).toBe(250);
+  });
+
   it('правит поле', async () => {
     const { PATCH } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
-    const res = await PATCH(req({ amount: 300 }), { params: Promise.resolve({ id: 'sub-1' }) });
+    const res = await PATCH(req({ amount: 300, expected_updated_at: INITIAL_UPDATED_AT }), {
+      params: Promise.resolve({ id: 'sub-1' }),
+    });
     expect(res.status).toBe(200);
     expect(mockDb.getRows('tech_subscriptions')[0]).toMatchObject({ amount: 300 });
   });
 
   it('отдаёт 404 на несуществующем сервисе', async () => {
     const { PATCH } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
-    const res = await PATCH(req({ amount: 300 }), { params: Promise.resolve({ id: 'нет-такого' }) });
+    const res = await PATCH(req({ amount: 300, expected_updated_at: INITIAL_UPDATED_AT }), {
+      params: Promise.resolve({ id: 'нет-такого' }),
+    });
     expect(res.status).toBe(404);
+  });
+
+  it('возвращает понятный конфликт, если правка подтверждённого сервиса превышает лимит', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        profiles: [{ id: ADMIN_ID, role: 'admin' }],
+        tech_subscriptions: [subRow({ status: 'keep' })],
+      },
+      errorUpdates: {
+        tech_subscriptions: {
+          message: 'payment_request_cost_limit_exceeded',
+          patchIncludes: { amount: 700_000 },
+        },
+      },
+    });
+    const { PATCH } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
+    const res = await PATCH(req({ amount: 700_000, expected_updated_at: INITIAL_UPDATED_AT }), {
+      params: Promise.resolve({ id: 'sub-1' }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expect.objectContaining({ code: 'cost_limit_exceeded' }));
+    expect(mockDb.getRows('tech_subscriptions')[0].amount).toBe(250);
+  });
+
+  it('не перезаписывает изменения другого администратора', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        profiles: [{ id: ADMIN_ID, role: 'admin' }],
+        tech_subscriptions: [subRow()],
+      },
+      beforeFirstUpdates: {
+        tech_subscriptions: (rows) => rows.map((row) => ({
+          ...row,
+          amount: 275,
+          updated_at: '2026-08-02T00:00:00.000Z',
+        })),
+      },
+    });
+    const { PATCH } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
+    const res = await PATCH(req({ amount: 300, expected_updated_at: INITIAL_UPDATED_AT }), {
+      params: Promise.resolve({ id: 'sub-1' }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(mockDb.getRows('tech_subscriptions')[0].amount).toBe(275);
+  });
+
+  it('не возвращает карточку на уже сохранённый в истории период', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        profiles: [{ id: ADMIN_ID, role: 'admin' }],
+        tech_subscriptions: [subRow({ status: 'active' })],
+      },
+      errorUpdates: {
+        tech_subscriptions: {
+          message: 'tech_subscription_cycle_already_archived',
+          patchIncludes: { next_billing_date: '2026-07-20' },
+        },
+      },
+    });
+    const { PATCH } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
+    const res = await PATCH(req({
+      next_billing_date: '2026-07-20',
+      expected_updated_at: INITIAL_UPDATED_AT,
+    }), {
+      params: Promise.resolve({ id: 'sub-1' }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expect.objectContaining({
+      code: 'tech_subscription_cycle_already_archived',
+    }));
+    expect(mockDb.getRows('tech_subscriptions')[0].next_billing_date).toBe('2026-08-20');
   });
 });
 
 describe('DELETE', () => {
-  it('удаляет сервис', async () => {
+  it('требует версию карточки для защиты от случайного удаления', async () => {
     const { DELETE } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
     const res = await DELETE(req(), { params: Promise.resolve({ id: 'sub-1' }) });
+
+    expect(res.status).toBe(400);
+    expect(mockDb.getRows('tech_subscriptions')).toHaveLength(1);
+  });
+
+  it('удаляет сервис', async () => {
+    const { DELETE } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
+    const res = await DELETE(req({ expected_updated_at: INITIAL_UPDATED_AT }), {
+      params: Promise.resolve({ id: 'sub-1' }),
+    });
     expect(res.status).toBe(200);
     expect(mockDb.getRows('tech_subscriptions')).toHaveLength(0);
   });
 
   it('отдаёт 404 на несуществующем сервисе', async () => {
     const { DELETE } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
-    const res = await DELETE(req(), { params: Promise.resolve({ id: 'нет-такого' }) });
+    const res = await DELETE(req({ expected_updated_at: INITIAL_UPDATED_AT }), {
+      params: Promise.resolve({ id: 'нет-такого' }),
+    });
     expect(res.status).toBe(404);
+  });
+
+  it('не удаляет карточку, открытую до чужого изменения', async () => {
+    mockDb = createTechCalendarDb([subRow({
+      updated_at: '2026-08-02T00:00:00.000Z',
+    })]);
+    const { DELETE } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
+    const res = await DELETE(req({ expected_updated_at: INITIAL_UPDATED_AT }), {
+      params: Promise.resolve({ id: 'sub-1' }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expect.objectContaining({ code: 'tech_subscription_conflict' }));
+    expect(mockDb.getRows('tech_subscriptions')).toHaveLength(1);
   });
 });

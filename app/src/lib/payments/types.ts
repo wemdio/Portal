@@ -79,6 +79,8 @@ export interface PaymentCostBudgetSummary {
   missingFxCount: number;
   mailPaid: number;
   mailReserved: number;
+  techPaid: number;
+  techReserved: number;
   manualPaid: number;
   manualReserved: number;
   byCategory: PaymentCostCategoryTotals;
