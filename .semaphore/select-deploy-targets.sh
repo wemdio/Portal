@@ -93,7 +93,7 @@ select_deploy_targets_from_files() {
         DEPLOY_PORTAL=1
         select_base_constructor_workers
         ;;
-      app/src/app/*|app/src/components/*|app/tests/*|app/public/*)
+      app/src/app/*|app/src/components/*|app/src/middleware.ts|app/tests/*|app/public/*)
         # UI, API, tests and static assets cannot change a worker bundle. In
         # particular, do not interrupt long-running Base Constructor jobs for
         # an unrelated Portal-only release.

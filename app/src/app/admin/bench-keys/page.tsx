@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Copy, KeyRound, Plus, RefreshCw, ScrollText, X } from 'lucide-react';
+import { AlertTriangle, BookOpen, Copy, Download, KeyRound, Plus, RefreshCw, ScrollText, X } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 
 interface BenchKey {
@@ -163,11 +163,12 @@ export default function BenchKeysPage() {
         <div>
           <h1 className="text-2xl font-semibold flex items-center gap-2">
             <KeyRound className="w-6 h-6" />
-            Ключи API
+            API портала
           </h1>
           <p className="text-sm text-gray-500 mt-1">
-            Доступ подрядчиков к нашим парсерам и конструктору баз снаружи.
-            Каждый ключ видит только свои задачи и только открытые ему инструменты.
+            Программный доступ к нашим инструментам — для своих автоматизаций,
+            подрядчиков и сервисов. Каждый ключ видит только свои задачи и
+            только открытые ему инструменты.
           </p>
         </div>
         <button
@@ -185,6 +186,39 @@ export default function BenchKeysPage() {
           <span>{error}</span>
         </div>
       )}
+
+      {/* Документы лежат в app/public и едут в образ вместе с приложением —
+          здесь всегда версия из выкаченной ветки, а не копия, которую забыли
+          обновить. Ключ в эти файлы не вставляем: его дают отдельным
+          сообщением и при необходимости отзывают. */}
+      <div className="mb-8 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 p-4">
+        <div>
+          <p className="font-medium text-sm">Документация</p>
+          <p className="text-sm text-gray-500">
+            Обзор — обязательная памятка безопасности для людей без опыта в
+            коде. Контекст для ИИ-чата — файл, который прикладывают к ChatGPT,
+            Claude или Cursor вместе с ключом.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2 shrink-0">
+          <a
+            href="/api-portal.md"
+            download="API портала.md"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-gray-900 px-3 py-1.5 text-sm text-white hover:bg-gray-800"
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            Обзор
+          </a>
+          <a
+            href="/portal-api-ai-context.md"
+            download="Контекст для ИИ-чата.md"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Контекст для ИИ-чата
+          </a>
+        </div>
+      </div>
 
       {/* Ключ показывается ровно один раз: в базе лежит только его отпечаток,
           восстановить его потом неоткуда. */}
@@ -240,9 +274,31 @@ export default function BenchKeysPage() {
           className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm mb-4"
         />
 
-        <p className="text-sm text-gray-600 mb-2">
-          Инструменты — ключ не увидит ничего, кроме отмеченного
-        </p>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-sm text-gray-600">
+            Инструменты — ключ не увидит ничего, кроме отмеченного
+          </p>
+          {/* Подрядчику чаще открывают весь набор, чем два инструмента из
+              четырнадцати, а отмечать их приходилось по одному. Промежуточное
+              состояние показываем полоской: галочка, стоящая при трёх
+              отмеченных из четырнадцати, читалась бы как «открыто всё». */}
+          <label className="flex shrink-0 cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm text-gray-600 hover:bg-gray-50">
+            <input
+              type="checkbox"
+              ref={(el) => {
+                if (el) el.indeterminate = form.tools.length > 0 && form.tools.length < tools.length;
+              }}
+              checked={tools.length > 0 && form.tools.length === tools.length}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, tools: e.target.checked ? tools.map((t) => t.id) : [] }))
+              }
+            />
+            <span>Все инструменты</span>
+            <span className="text-xs text-gray-400">
+              выбрано {form.tools.length} из {tools.length}
+            </span>
+          </label>
+        </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 mb-4">
           {tools.map((tool) => (
             <label

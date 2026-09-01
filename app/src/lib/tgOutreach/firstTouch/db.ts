@@ -19,7 +19,33 @@ export async function loadCampaignBaseIds(
 }
 
 /**
- * Ожидающие контакты по каждой базе.
+ * С какого места очереди начинает конкретный аккаунт.
+ *
+ * Все аккаунты читали очередь с одной и той же головы, и это превращало любую
+ * пробку в отказ всего пула. Механика была такая: отправленный контакт уходит
+ * из очереди, а нерезолвящийся остаётся (попытку ему намеренно не засчитывают,
+ * чтобы не жечь живых лидов из-за проблем аккаунта) — и голова очереди день за
+ * днём набивается именно теми, кто не резолвится. Дальше каждый аккаунт брал
+ * оттуда три мёртвых ника подряд, портал считал это заморозкой и ставил сутки
+ * паузы. 01.09.2026: 15 таких парковок за сутки при 165 контактах в очереди,
+ * 163 из которых висели с нулём засчитанных попыток.
+ *
+ * Смещение считаем от идентификатора аккаунта: оно стабильно (аккаунт не
+ * прыгает по очереди между кругами) и при этом разводит аккаунты по разным
+ * участкам. Пробка теперь стоит ровно тем, кто в неё упёрся, а не всем.
+ */
+export function queueOffsetForAccount(accountId: string, pending: number, take: number): number {
+  const room = pending - take;
+  if (room <= 0) return 0;
+  let hash = 0;
+  for (let i = 0; i < accountId.length; i++) {
+    hash = (hash * 31 + accountId.charCodeAt(i)) % 1_000_003;
+  }
+  return hash % (room + 1);
+}
+
+/**
+ * Ожидающие контакты по каждой базе — начиная с участка этого аккаунта.
  *
  * Берём с запасом (`perBaseLimit`), потому что часть отсеется на дедупе и
  * резолве юзернейма, а ходить в базу второй раз за добором дороже.
@@ -28,9 +54,19 @@ export async function loadPendingByBase(
   db: SupabaseClient,
   baseIds: string[],
   perBaseLimit: number,
+  accountId?: string,
 ): Promise<Array<{ baseId: string; contacts: PendingContact[] }>> {
   const out: Array<{ baseId: string; contacts: PendingContact[] }> = [];
   for (const baseId of baseIds) {
+    let offset = 0;
+    if (accountId) {
+      const { count } = await db
+        .from('tg_outreach_base_contacts')
+        .select('id', { count: 'exact', head: true })
+        .eq('base_id', baseId)
+        .eq('status', 'pending');
+      offset = queueOffsetForAccount(accountId, count ?? 0, perBaseLimit);
+    }
     const { data } = await db
       .from('tg_outreach_base_contacts')
       // `attempts` обязателен: send.ts читает его с контакта, чтобы понять,
@@ -42,7 +78,7 @@ export async function loadPendingByBase(
       .eq('base_id', baseId)
       .eq('status', 'pending')
       .order('created_at', { ascending: true })
-      .limit(perBaseLimit);
+      .range(offset, offset + perBaseLimit - 1);
     out.push({ baseId, contacts: (data ?? []) as PendingContact[] });
   }
   return out;

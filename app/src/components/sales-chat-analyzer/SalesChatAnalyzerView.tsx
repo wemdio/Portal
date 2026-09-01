@@ -28,6 +28,10 @@ const ARCHIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const API = '/api/tools/sales-chat-analyzer';
 const POLL_MS = 10_000;
+/** Сколько диалогов тянем за раз — и на первом показе, и на каждой догрузке. */
+const DIALOGS_PAGE = 200;
+/** Потолок страницы на стороне API: больше он не отдаст при всём желании. */
+const DIALOGS_MAX_PAGE = 500;
 
 type AccountListRow = Omit<SalesChatAccountRow, 'created_by'>;
 
@@ -196,6 +200,23 @@ export function SalesChatAnalyzerView() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [dialogsLoading, setDialogsLoading] = useState(false);
+  /**
+   * Сколько диалогов у аккаунта всего — по данным сервера, а не по длине
+   * загруженного куска. Заголовок обязан называть полное число: список
+   * подгружается по мере прокрутки, и «Диалоги: 200» у аккаунта с двумя
+   * тысячами читалось как «больше и нет».
+   */
+  const [dialogsTotal, setDialogsTotal] = useState<number | null>(null);
+  const [dialogsHasMore, setDialogsHasMore] = useState(false);
+  const [dialogsLoadingMore, setDialogsLoadingMore] = useState(false);
+  /**
+   * Идёт ли догрузка прямо сейчас — ref, а не состояние: наблюдатель за
+   * прокруткой срабатывает чаще, чем React успевает перерисовать, и без этого
+   * замка одна и та же страница запрашивалась бы по несколько раз.
+   */
+  const loadingMoreRef = useRef(false);
+  const dialogListRef = useRef<HTMLDivElement | null>(null);
+  const dialogSentinelRef = useRef<HTMLDivElement | null>(null);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [archiveJob, setArchiveJob] = useState<ArchiveJobRow | null>(null);
   /** id аккаунта с открытым меню действий (⋮). null = все закрыты. */
@@ -214,21 +235,100 @@ export function SalesChatAnalyzerView() {
 
   const initialLoaded = useRef(false);
 
+  /**
+   * Зеркала состояния для догрузки и опроса.
+   *
+   * Наблюдатель за прокруткой и таймер опроса живут дольше одной отрисовки, и
+   * замыкание на состоянии дало бы им устаревшие значения: догрузка ушла бы за
+   * страницей не того аккаунта или с уже неактуальным поиском.
+   */
+  const dialogsRef = useRef<DialogRow[]>([]);
+  const selectedAccountRef = useRef<string | null>(null);
+  const dialogQueryRef = useRef('');
+  useEffect(() => { dialogsRef.current = dialogs; }, [dialogs]);
+  useEffect(() => { selectedAccountRef.current = selectedAccount; }, [selectedAccount]);
+  useEffect(() => { dialogQueryRef.current = dialogQuery; }, [dialogQuery]);
+
   const loadAccounts = useCallback(async () => {
     const data = await authFetchJson<{ accounts: AccountListRow[] }>(`${API}/accounts`, { method: 'GET' });
     setAccounts(data.accounts ?? []);
   }, []);
 
+  const dialogsUrl = useCallback(
+    (accountId: string, q: string, offset: number, limit: number) => {
+      const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+      if (q) params.set('q', q);
+      return `${API}/accounts/${accountId}/dialogs?${params.toString()}`;
+    },
+    [],
+  );
+
   const loadDialogs = useCallback(async (accountId: string, q: string, silent = false) => {
     if (!silent) setDialogsLoading(true);
     try {
-      const url = `${API}/accounts/${accountId}/dialogs${q ? `?q=${encodeURIComponent(q)}` : ''}`;
-      const data = await authFetchJson<{ dialogs: DialogRow[] }>(url, { method: 'GET' });
-      setDialogs(data.dialogs ?? []);
+      /**
+       * Фоновое обновление не перетряхивает уже долистанный список.
+       *
+       * Опрос идёт раз в несколько секунд ради прогресса архива и статусов
+       * аккаунтов. Если бы он каждый раз возвращал первую страницу, у
+       * оператора, долиставшего до шестисотого диалога, список схлопывался бы
+       * до двухсот прямо под курсором. Поэтому в тихом режиме перечитываем
+       * ровно столько, сколько уже показано.
+       */
+      const keep = silent ? dialogsRef.current.length : 0;
+      // Долистали дальше, чем API отдаёт за один запрос, или прямо сейчас идёт
+      // догрузка — тихое обновление пропускаем целиком. Иначе оно обрезало бы
+      // список до размера страницы, то есть «обновление» съедало бы уже
+      // показанное.
+      if (silent && (keep > DIALOGS_MAX_PAGE || loadingMoreRef.current)) return;
+      const limit = Math.min(DIALOGS_MAX_PAGE, Math.max(DIALOGS_PAGE, keep));
+      const data = await authFetchJson<{ dialogs: DialogRow[]; total?: number; has_more?: boolean }>(
+        dialogsUrl(accountId, q, 0, limit),
+        { method: 'GET' },
+      );
+      const rows = data.dialogs ?? [];
+      setDialogs(rows);
+      setDialogsTotal(data.total ?? rows.length);
+      setDialogsHasMore(data.has_more ?? false);
     } finally {
       if (!silent) setDialogsLoading(false);
     }
-  }, []);
+  }, [dialogsUrl]);
+
+  /**
+   * Догрузить следующую страницу — вызывает наблюдатель за прокруткой, когда
+   * низ списка показался на экране.
+   */
+  const loadMoreDialogs = useCallback(async () => {
+    const accountId = selectedAccountRef.current;
+    if (!accountId || loadingMoreRef.current) return;
+    loadingMoreRef.current = true;
+    setDialogsLoadingMore(true);
+    try {
+      const offset = dialogsRef.current.length;
+      const data = await authFetchJson<{ dialogs: DialogRow[]; total?: number; has_more?: boolean }>(
+        dialogsUrl(accountId, dialogQueryRef.current, offset, DIALOGS_PAGE),
+        { method: 'GET' },
+      );
+      const rows = data.dialogs ?? [];
+      // Склейка по id: страницы отдаются по времени последнего сообщения, а
+      // оно меняется прямо во время просмотра — без проверки один и тот же
+      // диалог мог приехать в двух страницах подряд.
+      setDialogs((prev) => {
+        const seen = new Set(prev.map((d) => d.id));
+        return [...prev, ...rows.filter((d) => !seen.has(d.id))];
+      });
+      if (data.total != null) setDialogsTotal(data.total);
+      setDialogsHasMore(rows.length > 0 && (data.has_more ?? false));
+    } catch {
+      // Сеть моргнула — просто останавливаем догрузку: следующая прокрутка
+      // попробует снова, а вечно крутящийся кружок обманывал бы.
+      setDialogsHasMore(false);
+    } finally {
+      loadingMoreRef.current = false;
+      setDialogsLoadingMore(false);
+    }
+  }, [dialogsUrl]);
 
   const loadMessages = useCallback(async (dialogId: string, silent = false) => {
     if (!silent) setMessagesLoading(true);
@@ -358,11 +458,36 @@ export function SalesChatAnalyzerView() {
     selectedAccount, selectedDialog, dialogQuery, archiveActive,
   ]);
 
+  /**
+   * Бесконечная прокрутка: следим за пустой полоской в конце списка.
+   *
+   * `root` — сам контейнер списка, а не окно: список прокручивается внутри
+   * себя, и наблюдатель по окну сработал бы только когда страница целиком
+   * доедет до низа, то есть никогда.
+   */
+  useEffect(() => {
+    const root = dialogListRef.current;
+    const node = dialogSentinelRef.current;
+    if (!root || !node || !dialogsHasMore || dialogsLoading) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) void loadMoreDialogs();
+      },
+      // Небольшой запас: догрузка стартует чуть раньше, чем пользователь
+      // упрётся в конец, и список не дёргается пустотой.
+      { root, rootMargin: '160px' },
+    );
+    io.observe(node);
+    return () => io.disconnect();
+  }, [dialogsHasMore, dialogsLoading, loadMoreDialogs, dialogs.length]);
+
   const selectAccount = useCallback(
     async (accountId: string) => {
       setSelectedAccount(accountId);
       setSelectedDialog(null);
       setDialogs([]);
+      setDialogsTotal(null);
+      setDialogsHasMore(false);
       setMessages([]);
       setDialogQuery('');
       setArchiveJob(null);
@@ -916,8 +1041,14 @@ export function SalesChatAnalyzerView() {
         {/* Колонка 2: диалоги */}
         <div className="lg:col-span-3 rounded-2xl border border-gray-200 bg-white p-4">
           <div className="flex items-start justify-between gap-2 mb-3 min-h-[2rem]">
+            {/* Всего диалогов, а рядом — сколько из них уже подтянуто.
+                Пока загружено не всё, число «показано» отвечает на вопрос
+                «список кончился или просто ещё не долистан». */}
             <h2 className="text-sm font-semibold text-gray-900 shrink-0 pt-1">
-              {selectedAccount ? `Диалоги: ${dialogs.length}` : 'Диалоги'}
+              {selectedAccount ? `Диалоги: ${dialogsTotal ?? dialogs.length}` : 'Диалоги'}
+              {selectedAccount && dialogsTotal != null && dialogs.length < dialogsTotal ? (
+                <span className="ml-1.5 font-normal text-gray-400">показано {dialogs.length}</span>
+              ) : null}
             </h2>
             {selectedAccount ? renderArchiveControl() : null}
           </div>
@@ -934,7 +1065,7 @@ export function SalesChatAnalyzerView() {
                 placeholder="Поиск по названию…"
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm mb-3"
               />
-              <div className="space-y-1 max-h-[520px] overflow-y-auto pr-1">
+              <div ref={dialogListRef} className="space-y-1 max-h-[520px] overflow-y-auto pr-1">
                 {dialogsLoading ? (
                   <LoadingState label="Загружаем диалоги..." />
                 ) : dialogs.length === 0 ? (
@@ -961,6 +1092,18 @@ export function SalesChatAnalyzerView() {
                     </button>
                   ))
                 )}
+                {/* Полоска-маячок: как только она показалась — тянем ещё
+                    страницу. Рисуем её и под спиннером, чтобы длинный список
+                    догружался подряд, пока пользователь не остановится. */}
+                {!dialogsLoading && dialogsHasMore ? (
+                  <div ref={dialogSentinelRef} className="flex items-center justify-center py-3">
+                    {dialogsLoadingMore ? (
+                      <Loader2 className="h-4 w-4 animate-spin text-blue-600" aria-label="Загружаем ещё диалоги" />
+                    ) : (
+                      <span className="h-4" aria-hidden />
+                    )}
+                  </div>
+                ) : null}
               </div>
             </>
           )}

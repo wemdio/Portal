@@ -40,6 +40,7 @@ export async function refreshPendingReview(
     .from('tech_subscriptions')
     .select('id')
     .eq('status', 'active')
+    .eq('is_hidden', false)
     .lte('next_billing_date', cutoff);
 
   if (error) {

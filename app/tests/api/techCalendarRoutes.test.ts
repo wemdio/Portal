@@ -44,8 +44,18 @@ function req(body?: unknown): NextRequest {
   const raw = body === undefined ? '' : JSON.stringify(body);
   return {
     headers: { get: () => 'Bearer test-token' },
+    nextUrl: { searchParams: new URLSearchParams() },
     text: async () => raw,
     json: async () => JSON.parse(raw || '{}'),
+  } as unknown as NextRequest;
+}
+
+function reqQuery(query: string): NextRequest {
+  return {
+    headers: { get: () => 'Bearer test-token' },
+    nextUrl: { searchParams: new URLSearchParams(query) },
+    text: async () => '',
+    json: async () => ({}),
   } as unknown as NextRequest;
 }
 
@@ -73,6 +83,13 @@ function subRow(over: Record<string, unknown> = {}) {
     decision_at: null,
     decision_notes: null,
     notes: null,
+    source: 'manual',
+    external_key: null,
+    quantity: 1,
+    provider_status: null,
+    synced_at: null,
+    is_hidden: false,
+    hidden_at: null,
     created_by: ADMIN_ID,
     created_at: '2026-08-01T00:00:00.000Z',
     updated_at: INITIAL_UPDATED_AT,
@@ -187,12 +204,55 @@ describe('доступ', () => {
 
 describe('GET списка', () => {
   it('отдаёт подписки админу', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        profiles: [{ id: ADMIN_ID, role: 'admin' }],
+        tech_subscriptions: [subRow()],
+        tech_provider_balances: [{
+          provider: 'serper',
+          label: 'Serper',
+          balance: 9909,
+          unit: 'credits',
+          synced_at: '2026-09-01T06:00:00.000Z',
+          last_error: null,
+          updated_at: '2026-09-01T06:00:00.000Z',
+        }, {
+          provider: 'proxymarket',
+          label: 'proxy.market',
+          balance: 32,
+          unit: 'RUB',
+          synced_at: '2026-09-01T06:00:00.000Z',
+          last_error: null,
+          updated_at: '2026-09-01T06:00:00.000Z',
+        }],
+      },
+    });
     const { GET } = await import('@/app/api/tech-calendar/subscriptions/route');
     const res = await GET(req());
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.subscriptions).toHaveLength(1);
     expect(json.subscriptions[0].service_name).toBe('Bright Data');
+    expect(json.balances).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider: 'serper', balance: 9909, unit: 'credits' }),
+      expect.objectContaining({ provider: 'proxymarket', balance: 32, unit: 'RUB' }),
+    ]));
+  });
+
+  it('скрытые строки отдаёт только по явному запросу', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        profiles: [{ id: ADMIN_ID, role: 'admin' }],
+        tech_subscriptions: [subRow({ is_hidden: true, hidden_at: '2026-08-13T10:00:00.000Z' })],
+      },
+    });
+    const { GET } = await import('@/app/api/tech-calendar/subscriptions/route');
+
+    const normal = await GET(req());
+    expect((await normal.json()).subscriptions).toHaveLength(0);
+
+    const withHidden = await GET(reqQuery('include_hidden=1'));
+    expect((await withHidden.json()).subscriptions).toHaveLength(1);
   });
 
   it('желтит активный сервис, до списания которого пара дней', async () => {
@@ -442,6 +502,17 @@ describe('PATCH', () => {
     });
     expect(res.status).toBe(200);
     expect(mockDb.getRows('tech_subscriptions')[0]).toMatchObject({ amount: 300 });
+  });
+
+  it('скрывает сервис без удаления', async () => {
+    const { PATCH } = await import('@/app/api/tech-calendar/subscriptions/[id]/route');
+    const res = await PATCH(req({
+      is_hidden: true,
+      expected_updated_at: INITIAL_UPDATED_AT,
+    }), { params: Promise.resolve({ id: 'sub-1' }) });
+    expect(res.status).toBe(200);
+    expect(mockDb.getRows('tech_subscriptions')).toHaveLength(1);
+    expect(mockDb.getRows('tech_subscriptions')[0]).toMatchObject({ is_hidden: true });
   });
 
   it('отдаёт 404 на несуществующем сервисе', async () => {

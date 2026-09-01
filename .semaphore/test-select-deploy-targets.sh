@@ -77,6 +77,16 @@ assert_eq "$WORKER_SERVICES" "$ALL_WORKER_SERVICES" "shared processingSteps chan
 select_deploy_targets_from_files 'supabase/migrations/20260901000000_base_constructor_resume_guard.sql'
 assert_base_constructor_selection "$BASE_CONSTRUCTOR_WORKER_SERVICES" "Base Constructor migration selects every replica"
 
+select_deploy_targets_from_files 'app/src/middleware.ts'
+assert_eq "$CORE_SERVICES" portal "Next middleware change selects Portal"
+assert_eq "$DEPLOY_WORKERS" 0 "Next middleware change does not restart workers"
+assert_eq "$WORKER_SERVICES" "" "Next middleware change selects no worker services"
+
+select_deploy_targets_from_files 'app/public/favicon.ico'
+assert_eq "$CORE_SERVICES" portal "public asset change selects Portal"
+assert_eq "$DEPLOY_WORKERS" 0 "public asset change does not restart workers"
+assert_eq "$WORKER_SERVICES" "" "public asset change selects no worker services"
+
 select_deploy_targets_from_files 'app/scripts/instantly-dataset/sync.mjs
 app/scripts/instantly-dataset/022_leads_capture.sql'
 assert_eq "$DEPLOY_DATASET_SYNC" 1 "dataset sync script change deploys dataset sync"

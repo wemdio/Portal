@@ -9,7 +9,7 @@ import SubscriptionModal, { type ModalMode, type ModalPayload } from '@/componen
 import TypeBreakdown from '@/components/tech-calendar/TypeBreakdown';
 import UpcomingList from '@/components/tech-calendar/UpcomingList';
 import { daysUntil, mskDateStr } from '@/lib/techCalendar/dates';
-import type { ServiceType, TechSubscription } from '@/lib/techCalendar/types';
+import type { ServiceType, TechProviderBalance, TechSubscription } from '@/lib/techCalendar/types';
 
 const MONTH_NAMES = [
   'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
@@ -18,6 +18,8 @@ const MONTH_NAMES = [
 
 interface TechCalendarApiResponse {
   subscriptions?: TechSubscription[];
+  balances?: TechProviderBalance[];
+  sync?: Record<string, SyncOutcomeResponse>;
   error?: string;
 }
 
@@ -28,6 +30,18 @@ async function responseJson(res: Response): Promise<TechCalendarApiResponse> {
     return {};
   }
 }
+
+const SYNC_PROVIDER_LABELS: Record<string, string> = {
+  spaceproxy: 'SpaceProxy',
+  serper: 'Serper',
+  proxymarket: 'proxy.market',
+};
+
+type SyncOutcomeResponse = {
+  ok?: boolean;
+  skipped?: boolean;
+  error?: string;
+};
 
 async function authHeaders(): Promise<Record<string, string>> {
   const { data: { session } } = await supabase.auth.getSession();
@@ -40,8 +54,10 @@ async function authHeaders(): Promise<Record<string, string>> {
 export default function TechCalendarView() {
   const today = mskDateStr(new Date());
   const [subscriptions, setSubscriptions] = useState<TechSubscription[]>([]);
+  const [balances, setBalances] = useState<TechProviderBalance[]>([]);
   const [loading, setLoading] = useState(true);
   const [typeFilter, setTypeFilter] = useState<ServiceType | null>(null);
+  const [showHidden, setShowHidden] = useState(false);
 
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
@@ -50,25 +66,32 @@ export default function TechCalendarView() {
   const [modalMode, setModalMode] = useState<ModalMode | null>(null);
   const [modalSub, setModalSub] = useState<TechSubscription | null>(null);
   const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/tech-calendar/subscriptions', { headers: await authHeaders() });
+      const url = showHidden ? '/api/tech-calendar/subscriptions?include_hidden=1' : '/api/tech-calendar/subscriptions';
+      const res = await fetch(url, { headers: await authHeaders() });
       const json = await responseJson(res);
       setSubscriptions(res.ok ? (json.subscriptions ?? []) : []);
+      setBalances(res.ok ? (json.balances ?? []) : []);
       setError(res.ok ? null : (json.error ?? 'Не удалось загрузить список'));
     } catch {
       setSubscriptions([]);
+      setBalances([]);
       setError('Не удалось загрузить список');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [showHidden]);
 
   useEffect(() => {
-    load();
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [load]);
 
   const visible = useMemo(
@@ -138,6 +161,55 @@ export default function TechCalendarView() {
     }
   };
 
+  const toggleHidden = async (sub: TechSubscription) => {
+    setError(null);
+    try {
+      const res = await fetch(`/api/tech-calendar/subscriptions/${sub.id}`, {
+        method: 'PATCH',
+        headers: await authHeaders(),
+        body: JSON.stringify({
+          is_hidden: !sub.is_hidden,
+          expected_updated_at: sub.updated_at,
+        }),
+      });
+      const json = await responseJson(res);
+      if (!res.ok) {
+        setError(json.error ?? 'Не удалось изменить видимость сервиса');
+        return;
+      }
+      setModalMode(null);
+      setModalSub(null);
+      await load();
+    } catch {
+      setError('Не удалось изменить видимость сервиса');
+    }
+  };
+
+  const syncTechCalendar = async () => {
+    setSyncing(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/tech-calendar/sync', {
+        method: 'POST',
+        headers: await authHeaders(),
+      });
+      const json = await responseJson(res);
+      if (!res.ok) {
+        setError(json.error ?? 'Не удалось синхронизировать техничку');
+        return;
+      }
+      const failedProviders = Object.entries(json.sync ?? {})
+        .filter(([, outcome]) => outcome && !outcome.ok && !outcome.skipped)
+        .map(([provider, outcome]) => `${SYNC_PROVIDER_LABELS[provider] ?? provider}: ${outcome.error ?? 'ошибка синка'}`);
+      await load();
+      if (failedProviders.length) setError(failedProviders.join('; '));
+    } catch {
+      setError('Не удалось синхронизировать техничку');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const remove = async (sub: TechSubscription): Promise<boolean> => {
     if (!window.confirm(`Удалить «${sub.service_name}» из календаря?`)) return false;
     setError(null);
@@ -173,18 +245,40 @@ export default function TechCalendarView() {
           <h1 className="text-xl font-semibold text-gray-900">Календарь технички</h1>
           <p className="text-sm text-gray-500">Прокси, серверы, API и софт: что и когда платим</p>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            setError(null);
-            setModalSub(null);
-            setModalMode('create');
-          }}
-          className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
-        >
-          Добавить сервис
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={syncing}
+            onClick={syncTechCalendar}
+            className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+          >
+            {syncing ? 'Синхронизация...' : 'Синк сейчас'}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setError(null);
+              setModalSub(null);
+              setModalMode('create');
+            }}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
+          >
+            Добавить сервис
+          </button>
+        </div>
       </div>
+
+      <label className="inline-flex h-9 cursor-pointer select-none items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-700 shadow-sm transition hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-200 dark:hover:bg-white/10">
+        <input
+          type="checkbox"
+          checked={showHidden}
+          onChange={(e) => setShowHidden(e.target.checked)}
+          className="h-4 w-4 rounded border-gray-300 text-blue-600 accent-blue-600"
+        />
+        Показать скрытые
+      </label>
+
+      <ProviderBalances balances={balances} />
 
       <StatsRow subscriptions={visible} year={year} month={month} today={today} />
       <TypeBreakdown subscriptions={subscriptions} year={year} month={month} selected={typeFilter} onSelect={setTypeFilter} />
@@ -260,8 +354,76 @@ export default function TechCalendarView() {
                 }
               : undefined
           }
+          onToggleHidden={modalMode === 'edit' && modalSub ? () => toggleHidden(modalSub) : undefined}
         />
       )}
+    </div>
+  );
+}
+
+function formatBalance(value: number | null, unit: TechProviderBalance['unit']): string {
+  if (value === null) return 'нет данных';
+  if (unit === 'RUB') {
+    return value.toLocaleString('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 2 });
+  }
+  return value.toLocaleString('ru-RU', { maximumFractionDigits: 2 });
+}
+
+function formatSyncTime(value: string | null): string {
+  if (!value) return 'ещё не синхронизировали';
+  return new Date(value).toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function ProviderBalances({ balances }: { balances: TechProviderBalance[] }) {
+  const byProvider = new Map(balances.map((balance) => [balance.provider, balance]));
+  const ordered = [
+    byProvider.get('serper') ?? {
+      provider: 'serper',
+      label: 'Serper',
+      balance: null,
+      unit: 'credits',
+      synced_at: null,
+      last_error: null,
+      updated_at: '',
+    },
+    byProvider.get('proxymarket') ?? {
+      provider: 'proxymarket',
+      label: 'proxy.market',
+      balance: null,
+      unit: 'RUB',
+      synced_at: null,
+      last_error: null,
+      updated_at: '',
+    },
+  ] satisfies TechProviderBalance[];
+  const columns = Math.min(ordered.length, 4);
+  const gridClassName =
+    columns === 1
+      ? 'grid grid-cols-1 gap-3'
+      : columns === 2
+        ? 'grid grid-cols-1 gap-3 sm:grid-cols-2'
+        : columns === 3
+          ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3'
+          : 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4';
+
+  return (
+    <div className={gridClassName}>
+      {ordered.map((balance) => (
+        <div key={balance.provider} className="rounded-xl border border-gray-100 bg-white p-4">
+          <div className="text-xs text-gray-500">
+            {balance.provider === 'serper' ? 'Serper credits' : `${balance.label} баланс`}
+          </div>
+          <div className="mt-1 text-2xl font-semibold text-gray-900">{formatBalance(balance.balance, balance.unit)}</div>
+          <div className={`mt-1 text-xs ${balance.last_error ? 'text-red-600' : 'text-gray-500'}`}>
+            {balance.last_error ? `Ошибка синка: ${balance.last_error}` : `Синк: ${formatSyncTime(balance.synced_at)}`}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

@@ -287,6 +287,8 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     const maxResults = typeof maxResultsRaw === 'number' || typeof maxResultsRaw === 'string'
       ? (Number(maxResultsRaw) || 5000)
       : 5000;
+    const strictMaxResults = (cfg as { strict_max_results?: unknown }).strict_max_results === true;
+    const maxResultsLimit = Math.max(1, Math.floor(maxResults));
     const headless = (cfg as { headless?: unknown }).headless !== false;
     const catalogFilters = normalizeYandexMapsCatalogFilters((cfg as { catalog_filters?: unknown }).catalog_filters);
 
@@ -398,6 +400,7 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     const queue = searchUrls.map((url, i) => ({ url, index: i + 1 }));
     let queueIdx = 0;
     let cancelled = false;
+    let limitReached = false;
 
     const processUrl = async ({ url: search_url, index: urlIndex }: { url: string; index: number }) => {
       const urlSpan = await trace?.startChild({
@@ -409,14 +412,25 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       const collectStreamCallback = async (ch: { links: string[] }) => {
         if (ch.links.length > 0) {
           const normalized = normalizeYandexOrgUrls(ch.links);
+          const accepted: string[] = [];
           for (const link of normalized) {
+            if (strictMaxResults && allLinks.length >= maxResultsLimit) {
+              limitReached = true;
+              break;
+            }
             if (!allLinksSet.has(link)) {
               allLinksSet.add(link);
               allLinks.push(link);
+              accepted.push(link);
             }
           }
-          const rows = normalized.map((link) => ({ job_id: jobId, link }));
-          await supabaseAdmin!.from('yandex_maps_links').upsert(rows, { onConflict: 'job_id,link' });
+          if (strictMaxResults && allLinks.length >= maxResultsLimit) {
+            limitReached = true;
+          }
+          if (accepted.length > 0) {
+            const rows = accepted.map((link) => ({ job_id: jobId, link }));
+            await supabaseAdmin!.from('yandex_maps_links').upsert(rows, { onConflict: 'job_id,link' });
+          }
         }
         await setJobPatch(jobId, {
           total_links: allLinks.length,
@@ -503,6 +517,10 @@ export async function runYandexMapsCollectLinks(jobId: string) {
 
     const runCollectWorker = async () => {
       while (!cancelled) {
+        if (strictMaxResults && allLinks.length >= maxResultsLimit) {
+          limitReached = true;
+          return;
+        }
         const my = queueIdx++;
         if (my >= queue.length) return;
         // Проверяем отмену задачи раз в 3 URL, а не на каждой итерации —
@@ -548,8 +566,8 @@ export async function runYandexMapsCollectLinks(jobId: string) {
         logMeta,
       );
     }
-    await trace?.end({ total_unique_links: allLinks.length, intl_redirect_urls: intlRedirectUrls });
-    void logInfo('parser.yandexmaps.collect.complete', 'YandexMaps collect-links completed', { jobId, totalLinks: allLinks.length, intlRedirectUrls }, logMeta);
+    await trace?.end({ total_unique_links: allLinks.length, intl_redirect_urls: intlRedirectUrls, limit_reached: limitReached });
+    void logInfo('parser.yandexmaps.collect.complete', 'YandexMaps collect-links completed', { jobId, totalLinks: allLinks.length, intlRedirectUrls, limitReached }, logMeta);
 
     if (allLinks.length > 0) {
       void logInfo('parser.yandexmaps.auto_parse', 'Auto-starting parse after collect', { jobId, totalLinks: allLinks.length }, logMeta);
@@ -624,6 +642,12 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
   try {
     const cfg = job.config ?? {};
     const headless = (cfg as { headless?: unknown }).headless !== false;
+    const maxResultsRaw = (cfg as { max_results?: unknown }).max_results;
+    const maxResults = typeof maxResultsRaw === 'number' || typeof maxResultsRaw === 'string'
+      ? (Number(maxResultsRaw) || 5000)
+      : 5000;
+    const strictMaxResults = (cfg as { strict_max_results?: unknown }).strict_max_results === true;
+    const maxResultsLimit = Math.max(1, Math.floor(maxResults));
 
     const { data: linkRows, error: linksError } = await supabaseAdmin
       .from('yandex_maps_links')
@@ -632,7 +656,8 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
 
     if (linksError) throw new Error(linksError.message);
 
-    const links = normalizeYandexOrgUrls((linkRows ?? []).map((r) => String((r as { link?: unknown }).link ?? '')).filter(Boolean));
+    const normalizedLinks = normalizeYandexOrgUrls((linkRows ?? []).map((r) => String((r as { link?: unknown }).link ?? '')).filter(Boolean));
+    const links = strictMaxResults ? normalizedLinks.slice(0, maxResultsLimit) : normalizedLinks;
     if (!links.length) {
       await setJobPatch(jobId, { status: 'failed', error_message: 'Нет ссылок организаций (сначала соберите ссылки)' });
       await trace?.fail(new Error('Missing links'));

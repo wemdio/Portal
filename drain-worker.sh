@@ -316,8 +316,9 @@ if should_drain_non_baseconstructor_workers; then
 
   echo "[drain] Stopping worker containers (timeout 15s each)..."
   for c in "${containers[@]}"; do
-    sudo -n docker stop -t 15 "$c" 2>/dev/null || true
+    sudo -n docker stop -t 15 "$c" 2>/dev/null || true &
   done
+  wait
 fi
 
 # BaseConstructor-реплики останавливаем отдельно и с коротким таймаутом.

@@ -12,8 +12,8 @@ import { selectNextContacts, remainingDailyQuota, type PendingContact } from './
 import * as fdb from './db';
 import {
   isFloodLimitReason,
-  cooldownUntilIso,
-  writeAccountCooldown,
+  parkAccountAfterLimit,
+  clearRestrictionAfterSend,
 } from '../accountCooldown';
 import { classifyRestriction, describeRestriction } from '../restriction';
 import { withTimeout } from '../withTimeout';
@@ -33,7 +33,15 @@ export interface SendBatchArgs {
   db: SupabaseClient;
   client: TelegramClient;
   campaignId: string;
-  account: { id: string; session_name: string; campaign_id: string; cooldown_until?: string | null };
+  account: {
+    id: string;
+    session_name: string;
+    campaign_id: string;
+    cooldown_until?: string | null;
+    /** Итог последней проверки. Нужен, чтобы снять «ограничен», когда письмо ушло. */
+    check_status?: string | null;
+    check_detail?: string | null;
+  };
   /** Дневная норма первых сообщений на аккаунт. Ноль = выключено. */
   perDay: number | undefined;
   log: LogFn;
@@ -98,10 +106,15 @@ function cooldownLabel(untilIso: string): string {
 /**
  * PEER_FLOOD / FLOOD_WAIT — виноват наш аккаунт. Без cooldown_until следующий
  * круг снова берёт тот же номер. Контакт не трогаем.
+ *
+ * Срок паузы берёт `parkAccountAfterLimit`: он спрашивает @SpamBot прямо этим
+ * же соединением. Раньше здесь стояла константа из настроек кампании, и после
+ * неё аккаунт выходил ровно в тот же спам-блок — сутки за сутками.
  */
 async function parkIfFlood(args: {
   db: SupabaseClient;
-  account: { id: string; cooldown_until?: string | null };
+  client?: TelegramClient | null;
+  account: { id: string; cooldown_until?: string | null; check_status?: string | null; check_detail?: string | null };
   hours: number | undefined;
   reason: string;
   /** Полный текст ошибки Telegram — по нему видно, временное это или навсегда. */
@@ -109,45 +122,21 @@ async function parkIfFlood(args: {
   log: LogFn;
 }): Promise<boolean> {
   if (!args.hours || args.hours <= 0 || !isFloodLimitReason(args.reason)) return false;
-  const until = cooldownUntilIso(args.hours);
-  const err = await writeAccountCooldown(args.db, args.account.id, until);
-  if (err) {
-    args.log('error', `Не смог сохранить паузу аккаунта в базе — ${err}`);
-    return false;
-  }
-  args.account.cooldown_until = until;
-
-  /**
-   * Диагноз пишем и в карточку аккаунта, а не только в ленту журнала.
-   *
-   * Журнал за сутки — это тысячи строк, и «Telegram ограничил аккаунт» тонет в
-   * них к утру. А вопрос «что с этим номером» оператор задаёт, глядя на список
-   * аккаунтов, — там до этой правки не было ничего, кроме кулдауна без причины.
-   *
-   * Отдельно важно, что временное ограничение НЕ пишется как `banned`: спам-блок
-   * проходит сам, и списывать из-за него живой номер незачем.
-   */
-  const restriction = classifyRestriction(args.rawError ?? args.reason, Date.now());
-  const humanDiagnosis = restriction
-    ? describeRestriction(restriction)
-    : `ВРЕМЕННОЕ ограничение (${args.reason}) — Telegram придержал отправку. Пройдёт само.`;
-
-  const { error: diagErr } = await args.db
-    .from('tg_outreach_accounts')
-    .update({
-      check_status: restriction?.kind === 'permanent' ? 'banned' : 'restricted',
-      check_detail: humanDiagnosis.slice(0, 500),
-      checked_at: new Date().toISOString(),
-    })
-    .eq('id', args.account.id);
-  if (diagErr) {
-    args.log('warning', `Не смог записать диагноз ограничения в карточку аккаунта — ${diagErr.message}`);
-  }
+  const parked = await parkAccountAfterLimit({
+    db: args.db,
+    client: args.client,
+    account: args.account,
+    hours: args.hours,
+    reason: args.reason,
+    rawError: args.rawError,
+    log: args.log,
+  });
+  if (!parked.parked) return false;
 
   args.log(
     'warning',
-    `Первое касание остановлено. ${humanDiagnosis} ` +
-      `Аккаунт на паузе до ${cooldownLabel(until)} (${args.hours}ч), следующий круг его не возьмёт. ` +
+    `Первое касание остановлено. ${parked.diagnosis} ` +
+      `Аккаунт на паузе до ${cooldownLabel(parked.untilIso)}, следующий круг его не возьмёт. ` +
       `Контакты остаются в очереди, попытки им не засчитываем.`,
   );
   return true;
@@ -331,7 +320,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
 
   // С запасом: часть контактов отсеется на дедупе и резолве, второй заход в БД
   // за добором дороже, чем лишние строки в выборке.
-  const perBase = await fdb.loadPendingByBase(db, baseIds, quota * 2);
+  const perBase = await fdb.loadPendingByBase(db, baseIds, quota * 2, account.id);
   const picked = selectNextContacts({ perBase, limit: quota });
   if (!picked.length) return result;
 
@@ -399,6 +388,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         const parked = failure.kind === 'account_limited'
           && await parkIfFlood({
             db,
+            client,
             account,
             hours: args.cooldownHours,
             reason: failure.reason,
@@ -502,6 +492,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         const parked = failure.kind === 'account_limited'
           && await parkIfFlood({
             db,
+            client,
             account,
             hours: args.cooldownHours,
             reason: failure.reason,
@@ -563,28 +554,66 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
 
   // Решаем судьбу буфера «юзернейм не найден» по итогу порции.
   //
-  // Вся порция «не найдена» (два и более контакта) — сильный признак того, что
-  // заморожен наш аккаунт, а не что база мёртвая: мёртвый ник — одиночное
-  // явление, а урезанный аккаунт отдаёт этот ответ на каждый резолв. Паркуем
-  // аккаунт (cooldown_until), контакты оставляем в очереди нетронутыми — они
-  // дождутся исправного номера. Если сигнала нет — откладываем каждый контакт
-  // с попыткой: живой он может быть, а сжигать его навсегда нельзя.
+  // Вся порция «не найдена» (два и более контакта) — подозрение, что заморожен
+  // наш аккаунт, а не что база мёртвая: мёртвый ник — одиночное явление, а
+  // урезанный аккаунт отдаёт этот ответ на каждый резолв. Подозрение проверяем
+  // у @SpamBot и только подтверждённое считаем ограничением; иначе виноваты
+  // ники, и попытка списывается им. Одиночный такой ответ (ветка else) —
+  // всегда про контакт: откладываем с попыткой, но навсегда не сжигаем.
   if (notOccupied.length >= 2 && notOccupied.length === picked.length) {
-    const until = cooldownUntilIso(args.cooldownHours ?? 24);
-    const err = await writeAccountCooldown(db, account.id, until);
-    if (err) {
-      log('error', `Не смог сохранить паузу аккаунта в базе — ${err}`);
-    } else {
-      account.cooldown_until = until;
+    /**
+     * Тот же ответ Telegram («юзернейм не найден») означает две разные вещи:
+     * мёртвый ник в базе или живой ник, который не видит урезанный аккаунт.
+     * Раньше выбирали всегда второе — и сутки паузы получал исправный номер,
+     * а мёртвые ники оставались в очереди и валили следующий аккаунт. Теперь
+     * решает @SpamBot: подтвердил ограничение — паркуем номер и не трогаем
+     * контакты; не подтвердил — виноваты ники, и списываем попытку им.
+     */
+    const parked = await parkAccountAfterLimit({
+      db,
+      client,
+      account,
+      hours: args.cooldownHours ?? 24,
+      reason: 'USERNAME_NOT_OCCUPIED на всей порции',
+      log,
+      requireBotConfirmation: true,
+    });
+    if (parked.parked) {
       log(
         'warning',
-        `Первое касание остановлено: весь резолв порции вернул «юзернейм не найден» — ` +
-          `Telegram, похоже, заморозил аккаунт, а не срезал ники. ` +
-          `Аккаунт на паузе до ${cooldownLabel(until)} (${args.cooldownHours ?? 24}ч), ` +
+        `Первое касание остановлено: весь резолв порции вернул «юзернейм не найден», ` +
+          `и ограничение подтвердилось. ${parked.diagnosis} ` +
+          `Аккаунт на паузе до ${cooldownLabel(parked.untilIso)}, ` +
           `контакты остаются в очереди, попытки им не засчитываем.`,
       );
+      result.postponed += notOccupied.length;
+    } else if (parked.reason === 'write_failed') {
+      // Пауза не записалась — про аккаунт мы по-прежнему ничего не знаем.
+      // Списывать за это попытку контактам нельзя: они ни при чём.
+      log(
+        'error',
+        'Весь резолв порции вернул «юзернейм не найден», но паузу не удалось сохранить в базе. ' +
+          'Контакты оставляю в очереди нетронутыми.',
+      );
+      result.postponed += notOccupied.length;
+    } else {
+      log(
+        'warning',
+        'Весь резолв порции вернул «юзернейм не найден», но ограничения на аккаунте нет — ' +
+          `@SpamBot его не подтвердил. Значит дело в никах, а не в номере: аккаунт остаётся в работе, ` +
+          `попытки засчитываю контактам, после ${fdb.MAX_CONTACT_ATTEMPTS} они уйдут из очереди.`,
+      );
+      for (const { contact, attempts } of notOccupied) {
+        const outcome = await fdb.recordContactFailure(
+          db,
+          contact.id,
+          attempts,
+          'юзернейм не резолвился (ограничение аккаунта не подтвердилось)',
+        );
+        log('warning', `Первое касание: @${contact.username} отложен — юзернейм не резолвился${attemptNote(outcome)}`);
+        result.postponed++;
+      }
     }
-    result.postponed += notOccupied.length;
   } else {
     for (const { contact, attempts } of notOccupied) {
       const outcome = await fdb.recordContactFailure(
@@ -596,6 +625,12 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       log('warning', `Первое касание: @${contact.username} отложен — юзернейм не резолвился${attemptNote(outcome)}`);
       result.postponed++;
     }
+  }
+
+  // Ушедшее письмо незнакомому человеку — единственное доказательство, что
+  // спам-блок снят: в профиле он не виден, и «отпустило» Telegram не сообщает.
+  if (result.sent > 0) {
+    await clearRestrictionAfterSend(db, account);
   }
 
   return result;

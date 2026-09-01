@@ -10,6 +10,7 @@
  */
 
 import { classifyCheckError, describeSessions, resetOtherSessions, describeResetError } from '@/lib/tgOutreach/accountCheck';
+import { decideCooldown } from '@/lib/tgOutreach/accountCooldown';
 
 describe('разбор ошибок проверки', () => {
   it('бан номера отличается от отзыва сессии', () => {
@@ -121,5 +122,60 @@ describe('сброс чужих сеансов', () => {
 
   it('про отозванную сессию говорит, что сбрасывать нечего', () => {
     expect(describeResetError(new Error('AUTH_KEY_UNREGISTERED'))).toMatch(/нечего/);
+  });
+});
+
+/**
+ * Срок паузы после спам-блока.
+ *
+ * До 01.09.2026 он брался из настройки кампании всегда: аккаунт выходил из
+ * суточной паузы, получал тот же PEER_FLOOD и парковался на новые сутки —
+ * 30-40 номеров в день по кругу, шесть дней подряд. Настоящий срок называет
+ * только @SpamBot, и здесь проверяется, что его действительно применяют.
+ */
+describe('выбор срока паузы', () => {
+  const now = new Date('2026-09-01T12:00:00.000Z');
+
+  it('срок бота дальше настройки — берём его', () => {
+    const d = decideCooldown({
+      restriction: null,
+      verdict: { text: '…', kind: 'limited', until: '2026-09-05T09:00:00.000Z' },
+      fallbackHours: 24,
+      now,
+    });
+    expect(d.source).toBe('spambot');
+    expect(new Date(d.untilIso).getTime()).toBeGreaterThan(new Date('2026-09-05T09:00:00.000Z').getTime());
+  });
+
+  it('пауза не может стать короче настройки кампании', () => {
+    // Одностороннее правило: правка срока умеет только удлинять паузу. Иначе
+    // FLOOD_WAIT на минуту отменял бы суточную отлёжку и разгонял отправку —
+    // а разгон и есть причина спам-блоков.
+    const d = decideCooldown({
+      restriction: { kind: 'temporary', code: 'FLOOD_WAIT', label: '', detail: '', until: '2026-09-01T12:01:00.000Z' },
+      verdict: { text: '…', kind: 'limited', until: '2026-09-01T13:00:00.000Z' },
+      fallbackHours: 24,
+      now,
+    });
+    expect(d.source).toBe('settings');
+    expect(d.untilIso).toBe('2026-09-02T12:00:00.000Z');
+  });
+
+  it('ограничение без срока — это неделя вне ротации, а не сутки', () => {
+    const d = decideCooldown({
+      restriction: null,
+      verdict: { text: 'account is limited', kind: 'limited', until: null },
+      fallbackHours: 24,
+      now,
+    });
+    expect(d.indefinite).toBe(true);
+    expect(d.untilIso).toBe('2026-09-08T12:00:00.000Z');
+  });
+
+  it('молчание бота оставляет настройку кампании', () => {
+    const d = decideCooldown({ restriction: null, verdict: null, fallbackHours: 5, now });
+    expect(d.source).toBe('settings');
+    expect(d.indefinite).toBe(false);
+    expect(d.untilIso).toBe('2026-09-01T17:00:00.000Z');
   });
 });

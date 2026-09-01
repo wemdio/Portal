@@ -43,6 +43,22 @@ fail_fast:
 # ВАЖНО: новый сервис = новый блок здесь + контейнер в scheduled-deploy.yml.
 
 blocks:
+  - name: Validate deploy scripts
+    dependencies: []
+    run:
+      when: "change_in(['/.semaphore/', '/drain-worker.sh'], {default_branch: 'main', branch_range: '$SEMAPHORE_GIT_COMMIT_RANGE'})"
+    task:
+      prologue:
+        commands:
+          - checkout
+      jobs:
+        - name: 'Shell checks'
+          commands:
+            - bash -n drain-worker.sh
+            - bash -n .semaphore/select-deploy-targets.sh
+            - bash -n .semaphore/test-select-deploy-targets.sh
+            - bash .semaphore/test-select-deploy-targets.sh
+
   - name: Run tests
     dependencies: []
     run:
