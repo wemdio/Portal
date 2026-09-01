@@ -131,7 +131,7 @@ async function parkIfFlood(args: {
     rawError: args.rawError,
     log: args.log,
   });
-  if (!parked) return false;
+  if (!parked.parked) return false;
 
   args.log(
     'warning',
@@ -320,7 +320,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
 
   // С запасом: часть контактов отсеется на дедупе и резолве, второй заход в БД
   // за добором дороже, чем лишние строки в выборке.
-  const perBase = await fdb.loadPendingByBase(db, baseIds, quota * 2);
+  const perBase = await fdb.loadPendingByBase(db, baseIds, quota * 2, account.id);
   const picked = selectNextContacts({ perBase, limit: quota });
   if (!picked.length) return result;
 
@@ -554,19 +554,20 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
 
   // Решаем судьбу буфера «юзернейм не найден» по итогу порции.
   //
-  // Вся порция «не найдена» (два и более контакта) — сильный признак того, что
-  // заморожен наш аккаунт, а не что база мёртвая: мёртвый ник — одиночное
-  // явление, а урезанный аккаунт отдаёт этот ответ на каждый резолв. Паркуем
-  // аккаунт (cooldown_until), контакты оставляем в очереди нетронутыми — они
-  // дождутся исправного номера. Если сигнала нет — откладываем каждый контакт
-  // с попыткой: живой он может быть, а сжигать его навсегда нельзя.
+  // Вся порция «не найдена» (два и более контакта) — подозрение, что заморожен
+  // наш аккаунт, а не что база мёртвая: мёртвый ник — одиночное явление, а
+  // урезанный аккаунт отдаёт этот ответ на каждый резолв. Подозрение проверяем
+  // у @SpamBot и только подтверждённое считаем ограничением; иначе виноваты
+  // ники, и попытка списывается им. Одиночный такой ответ (ветка else) —
+  // всегда про контакт: откладываем с попыткой, но навсегда не сжигаем.
   if (notOccupied.length >= 2 && notOccupied.length === picked.length) {
     /**
-     * Здесь @SpamBot отвечает не только на вопрос «до какого числа», но и на
-     * сам диагноз: заморозку он подтверждает словами, а «ограничений нет»
-     * означает, что аккаунт-то цел и порция ников действительно мёртвая.
-     * Паркуем в обоих случаях (сжигать базу дороже), но в журнале это теперь
-     * две разные строки, а не одна догадка.
+     * Тот же ответ Telegram («юзернейм не найден») означает две разные вещи:
+     * мёртвый ник в базе или живой ник, который не видит урезанный аккаунт.
+     * Раньше выбирали всегда второе — и сутки паузы получал исправный номер,
+     * а мёртвые ники оставались в очереди и валили следующий аккаунт. Теперь
+     * решает @SpamBot: подтвердил ограничение — паркуем номер и не трогаем
+     * контакты; не подтвердил — виноваты ники, и списываем попытку им.
      */
     const parked = await parkAccountAfterLimit({
       db,
@@ -575,17 +576,44 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       hours: args.cooldownHours ?? 24,
       reason: 'USERNAME_NOT_OCCUPIED на всей порции',
       log,
+      requireBotConfirmation: true,
     });
-    if (parked) {
+    if (parked.parked) {
       log(
         'warning',
-        `Первое касание остановлено: весь резолв порции вернул «юзернейм не найден» — ` +
-          `Telegram, похоже, заморозил аккаунт, а не срезал ники. ${parked.diagnosis} ` +
+        `Первое касание остановлено: весь резолв порции вернул «юзернейм не найден», ` +
+          `и ограничение подтвердилось. ${parked.diagnosis} ` +
           `Аккаунт на паузе до ${cooldownLabel(parked.untilIso)}, ` +
           `контакты остаются в очереди, попытки им не засчитываем.`,
       );
+      result.postponed += notOccupied.length;
+    } else if (parked.reason === 'write_failed') {
+      // Пауза не записалась — про аккаунт мы по-прежнему ничего не знаем.
+      // Списывать за это попытку контактам нельзя: они ни при чём.
+      log(
+        'error',
+        'Весь резолв порции вернул «юзернейм не найден», но паузу не удалось сохранить в базе. ' +
+          'Контакты оставляю в очереди нетронутыми.',
+      );
+      result.postponed += notOccupied.length;
+    } else {
+      log(
+        'warning',
+        'Весь резолв порции вернул «юзернейм не найден», но ограничения на аккаунте нет — ' +
+          `@SpamBot его не подтвердил. Значит дело в никах, а не в номере: аккаунт остаётся в работе, ` +
+          `попытки засчитываю контактам, после ${fdb.MAX_CONTACT_ATTEMPTS} они уйдут из очереди.`,
+      );
+      for (const { contact, attempts } of notOccupied) {
+        const outcome = await fdb.recordContactFailure(
+          db,
+          contact.id,
+          attempts,
+          'юзернейм не резолвился (ограничение аккаунта не подтвердилось)',
+        );
+        log('warning', `Первое касание: @${contact.username} отложен — юзернейм не резолвился${attemptNote(outcome)}`);
+        result.postponed++;
+      }
     }
-    result.postponed += notOccupied.length;
   } else {
     for (const { contact, attempts } of notOccupied) {
       const outcome = await fdb.recordContactFailure(

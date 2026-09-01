@@ -1863,7 +1863,7 @@ export async function runCampaignLoop(
                   rawError: errMsg,
                   log,
                 });
-                if (parked) {
+                if (parked.parked) {
                   const cooldownDisplay = new Date(parked.untilIso).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
                   log('warning', `Аккаунт ${account.session_name}: Telegram ограничил отправку (FloodError/Frozen на диалоге ${dialogLabel}). ${parked.diagnosis} Аккаунт на паузе до ${cooldownDisplay}.`);
                 }

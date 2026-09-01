@@ -148,6 +148,16 @@ export interface ParkOutcome extends CooldownDecision {
 }
 
 /**
+ * Итог попытки увести аккаунт в паузу.
+ *
+ * `parked: false` — не сбой, а осмысленный ответ: ограничение не подтвердилось,
+ * и вызывающий должен разбираться не с аккаунтом, а с тем, что он отправлял.
+ */
+export type ParkResult =
+  | ({ parked: true } & ParkOutcome)
+  | { parked: false; reason: 'unconfirmed' | 'write_failed'; verdict: SpamBotVerdict | null };
+
+/**
  * Увести аккаунт в паузу после ограничения Telegram — со сроком, а не вслепую.
  *
  * Соединение аккаунта уже открыто у вызывающего, поэтому @SpamBot спрашиваем
@@ -176,19 +186,39 @@ export async function parkAccountAfterLimit(args: {
   rawError?: string;
   log: LogFn;
   now?: Date;
-}): Promise<ParkOutcome | null> {
+  /**
+   * Паркуем только если ограничение подтвердил Telegram — кодом ошибки или
+   * ответом @SpamBot.
+   *
+   * Нужно там, где ограничение не названо прямо, а выведено по косвенным
+   * признакам. Главный такой случай — «весь резолв порции вернул юзернейм не
+   * найден»: тем же ответом Telegram отвечает и на мёртвый ник в базе, и на
+   * живой ник с урезанного аккаунта. Пока догадка приравнивалась к факту,
+   * пробка из нерезолвящихся ников в голове очереди выкашивала весь пул —
+   * каждый дошедший до неё аккаунт вставал на сутки (01.09.2026: 15 таких
+   * парковок за сутки против одного настоящего спам-блока).
+   *
+   * Молчание бота — тоже не подтверждение: лучше лишний раз списать попытку
+   * контакту, чем сутки простоя аккаунта.
+   */
+  requireBotConfirmation?: boolean;
+}): Promise<ParkResult> {
   const now = args.now ?? new Date();
   const restriction = classifyRestriction(args.rawError ?? args.reason, now.getTime());
 
   const needBot = Boolean(args.client) && restriction?.kind !== 'permanent' && !restriction?.until;
   const verdict = needBot ? await askSpamBot(args.client as TelegramClient) : null;
 
+  if (args.requireBotConfirmation && !restriction && verdict?.kind !== 'limited') {
+    return { parked: false, reason: 'unconfirmed', verdict };
+  }
+
   const decision = decideCooldown({ restriction, verdict, fallbackHours: args.hours, now });
 
   const err = await writeAccountCooldown(args.db, args.account.id, decision.untilIso);
   if (err) {
     args.log('error', `Не смог сохранить паузу аккаунта в базе — ${err}`);
-    return null;
+    return { parked: false, reason: 'write_failed', verdict };
   }
   args.account.cooldown_until = decision.untilIso;
 
@@ -231,7 +261,7 @@ export async function parkAccountAfterLimit(args: {
     }
   }
 
-  return { ...decision, diagnosis };
+  return { parked: true, ...decision, diagnosis };
 }
 
 /**
