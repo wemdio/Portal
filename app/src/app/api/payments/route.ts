@@ -32,7 +32,7 @@ export async function GET(req: NextRequest) {
   const databaseMonth = paymentMonthDatabaseDate(month);
 
   const [listResult, summaryResult, projectsResult] = await Promise.all([
-    actor.client.rpc('list_payment_requests', { p_month: databaseMonth }),
+    actor.client.rpc('list_payment_requests_with_budget', { p_month: databaseMonth }),
     actor.client.rpc('payment_request_month_summary', { p_month: databaseMonth }),
     supabaseAdmin.from('projects').select('id, client, name').order('client').order('name'),
   ]);
@@ -77,7 +77,7 @@ export async function POST(req: NextRequest) {
   if ('error' in parsed) return jsonError(parsed.error, 400);
   const input = parsed.value;
 
-  const { data, error } = await actor.client.rpc('submit_payment_request', {
+  const { data, error } = await actor.client.rpc('submit_payment_request_with_budget', {
     p_idempotency_key: idempotency.value,
     p_department: input.department,
     p_description: input.description,
@@ -85,6 +85,8 @@ export async function POST(req: NextRequest) {
     p_project_id: input.projectId,
     p_comment: input.comment,
     p_expense_type: input.expenseType,
+    p_budget_scope: input.budgetScope,
+    p_cost_category: input.costCategory,
     p_expected_payment_on: input.expectedPaymentOn,
     p_urgency: input.urgency,
     p_document_url: input.documentUrl,

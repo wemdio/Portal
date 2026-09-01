@@ -42,6 +42,8 @@ function rawRequest(overrides: Record<string, unknown> = {}) {
     project_client: 'Acme',
     comment: 'Для теста нового сегмента',
     expense_type: 'one_time',
+    budget_scope: 'general',
+    cost_category: null,
     status: 'approved',
     approval_reason: null,
     expected_payment_on: '2026-08-25',
@@ -77,6 +79,29 @@ function summary(overrides: Record<string, unknown> = {}) {
     paidAll: 17_000,
     pendingCount: 1,
     approvedCount: 1,
+    costBudget: {
+      limit: 650_000,
+      paid: 50_000,
+      reserved: 100_000,
+      used: 150_000,
+      remaining: 500_000,
+      overage: 0,
+      usagePct: 23.076923,
+      level: 'normal',
+      dataComplete: true,
+      missingFxCount: 0,
+      mailPaid: 20_000,
+      mailReserved: 30_000,
+      manualPaid: 30_000,
+      manualReserved: 70_000,
+      byCategory: {
+        instantly: { paid: 30_000, reserved: 70_000 },
+        email: { paid: 20_000, reserved: 30_000 },
+        bases: { paid: 0, reserved: 0 },
+        domains: { paid: 0, reserved: 0 },
+        other: { paid: 0, reserved: 0 },
+      },
+    },
     ...overrides,
   };
 }
@@ -112,6 +137,8 @@ function validPayload(overrides: Record<string, unknown> = {}) {
     projectId: PROJECT_ID,
     comment: 'Для теста нового сегмента',
     expenseType: 'one_time',
+    budgetScope: 'general',
+    costCategory: null,
     expectedPaymentOn: '2026-08-25',
     urgency: 'urgent',
     documentUrl: 'https://docs.example.com/invoice.pdf',
@@ -172,22 +199,26 @@ beforeEach(() => {
         return { data: mockCanUse, error: mockCapabilityError };
       case 'can_manage_payment_requests':
         return { data: mockCanManage, error: mockCapabilityError };
-      case 'list_payment_requests':
+      case 'list_payment_requests_with_budget':
         return { data: [rawRequest()], error: mockListError };
       case 'payment_request_month_summary':
         return { data: summary(), error: mockSummaryError };
-      case 'submit_payment_request': {
-        const needsApproval = params.p_expense_type === 'planned'
-          || Number(params.p_amount) > 53_000;
+      case 'submit_payment_request_with_budget': {
+        const isCosts = params.p_budget_scope === 'costs';
+        const needsApproval = !isCosts && (
+          params.p_expense_type === 'planned' || Number(params.p_amount) > 53_000
+        );
         return {
           data: {
             request: rawRequest({
               expense_type: params.p_expense_type,
+              budget_scope: params.p_budget_scope,
+              cost_category: params.p_cost_category,
               expected_payment_on: params.p_expected_payment_on,
               urgency: params.p_urgency,
               amount: params.p_amount,
               status: needsApproval ? 'pending' : 'approved',
-              approval_reason: params.p_expense_type === 'planned'
+              approval_reason: !isCosts && params.p_expense_type === 'planned'
                 ? 'planned'
                 : needsApproval
                   ? 'limit_exceeded'
@@ -237,6 +268,8 @@ describe('GET /api/payments', () => {
         project: { id: PROJECT_ID, client: 'Acme', name: 'Аутрич' },
         comment: 'Для теста нового сегмента',
         expenseType: 'one_time',
+        budgetScope: 'general',
+        costCategory: null,
         status: 'approved',
         approvalReason: null,
         expectedPaymentOn: '2026-08-25',
@@ -248,7 +281,7 @@ describe('GET /api/payments', () => {
         updatedAt: '2026-08-18T10:00:00.000Z',
       }),
     ]);
-    expect(mockRpc).toHaveBeenCalledWith('list_payment_requests', {
+    expect(mockRpc).toHaveBeenCalledWith('list_payment_requests_with_budget', {
       p_month: '2026-08-01',
     });
     expect(mockRpc).toHaveBeenCalledWith('payment_request_month_summary', {
@@ -295,7 +328,7 @@ describe('GET /api/payments', () => {
       const response = await GET(request(`/api/payments?month=${month}`));
 
       expect(response.status).toBe(400);
-      expect(mockRpc).not.toHaveBeenCalledWith('list_payment_requests', expect.anything());
+      expect(mockRpc).not.toHaveBeenCalledWith('list_payment_requests_with_budget', expect.anything());
     },
   );
 
@@ -306,7 +339,7 @@ describe('GET /api/payments', () => {
     const response = await GET(request('/api/payments?month=2026-08'));
 
     expect(response.status).toBe(500);
-    expect(mockRpc).not.toHaveBeenCalledWith('list_payment_requests', expect.anything());
+    expect(mockRpc).not.toHaveBeenCalledWith('list_payment_requests_with_budget', expect.anything());
   });
 
   it('denies clients and demo/unknown users before reading any request', async () => {
@@ -316,7 +349,7 @@ describe('GET /api/payments', () => {
     const response = await GET(request('/api/payments?month=2026-08'));
 
     expect(response.status).toBe(403);
-    expect(mockRpc).not.toHaveBeenCalledWith('list_payment_requests', expect.anything());
+    expect(mockRpc).not.toHaveBeenCalledWith('list_payment_requests_with_budget', expect.anything());
     expect(mockMainDb.selects).toHaveLength(0);
   });
 
@@ -408,7 +441,7 @@ describe('POST /api/payments', () => {
     const body = await response.json();
 
     expect(response.status).toBe(201);
-    expect(mockRpc).toHaveBeenCalledWith('submit_payment_request', {
+    expect(mockRpc).toHaveBeenCalledWith('submit_payment_request_with_budget', {
       p_idempotency_key: IDEMPOTENCY_KEY,
       p_department: 'outreach',
       p_description: 'Разовая база контактов',
@@ -416,11 +449,13 @@ describe('POST /api/payments', () => {
       p_project_id: PROJECT_ID,
       p_comment: 'Для теста нового сегмента',
       p_expense_type: 'one_time',
+      p_budget_scope: 'general',
+      p_cost_category: null,
       p_expected_payment_on: '2026-08-25',
       p_urgency: 'urgent',
       p_document_url: 'https://docs.example.com/invoice.pdf',
     });
-    const submitCall = mockRpc.mock.calls.find(([fn]) => fn === 'submit_payment_request');
+    const submitCall = mockRpc.mock.calls.find(([fn]) => fn === 'submit_payment_request_with_budget');
     expect(submitCall?.[1]).not.toEqual(expect.objectContaining({
       p_user_id: expect.anything(),
       p_actor_id: expect.anything(),
@@ -457,7 +492,7 @@ describe('POST /api/payments', () => {
     await expect(retry.json()).resolves.toEqual(expect.objectContaining({
       request: expect.objectContaining({ id: REQUEST_ID }),
     }));
-    const submitCalls = mockRpc.mock.calls.filter(([fn]) => fn === 'submit_payment_request');
+    const submitCalls = mockRpc.mock.calls.filter(([fn]) => fn === 'submit_payment_request_with_budget');
     expect(submitCalls).toHaveLength(2);
     expect(submitCalls.map(([, params]) => params)).toEqual([
       expect.objectContaining({ p_idempotency_key: IDEMPOTENCY_KEY }),
@@ -480,7 +515,7 @@ describe('POST /api/payments', () => {
 
     expect(response.status).toBe(400);
     expect(body.code).toBe('invalid_idempotency_key');
-    expect(mockRpc).not.toHaveBeenCalledWith('submit_payment_request', expect.anything());
+    expect(mockRpc).not.toHaveBeenCalledWith('submit_payment_request_with_budget', expect.anything());
   });
 
   it('returns 409 when the same actor reuses a key for a different canonical payload', async () => {
@@ -499,7 +534,7 @@ describe('POST /api/payments', () => {
 
     expect(response.status).toBe(409);
     expect(body.code).toBe('idempotency_conflict');
-    expect(mockRpc).toHaveBeenCalledWith('submit_payment_request', expect.objectContaining({
+    expect(mockRpc).toHaveBeenCalledWith('submit_payment_request_with_budget', expect.objectContaining({
       p_idempotency_key: IDEMPOTENCY_KEY,
       p_amount: 12_000,
     }));
@@ -549,6 +584,76 @@ describe('POST /api/payments', () => {
     }));
   });
 
+  it('submits a categorized cost through the independent 650,000 RUB budget', async () => {
+    const { POST } = await loadRoute();
+    const response = await POST(request('/api/payments', {
+      method: 'POST',
+      body: validPayload({
+        amount: 120_000,
+        budgetScope: 'costs',
+        costCategory: 'domains',
+      }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(mockRpc).toHaveBeenCalledWith('submit_payment_request_with_budget', expect.objectContaining({
+      p_amount: 120_000,
+      p_budget_scope: 'costs',
+      p_cost_category: 'domains',
+    }));
+    expect(body).toEqual(expect.objectContaining({
+      outcome: 'auto_approved',
+      request: expect.objectContaining({
+        budgetScope: 'costs',
+        costCategory: 'domains',
+        status: 'approved',
+      }),
+    }));
+  });
+
+  it.each([
+    ['missing category', { budgetScope: 'costs', costCategory: null }],
+    ['unknown category', { budgetScope: 'costs', costCategory: 'hosting' }],
+    ['category on general expense', { budgetScope: 'general', costCategory: 'domains' }],
+    ['unknown budget scope', { budgetScope: 'subscriptions', costCategory: null }],
+  ])('rejects an inconsistent cost classification: %s', async (_case, overrides) => {
+    const { POST } = await loadRoute();
+    const response = await POST(request('/api/payments', {
+      method: 'POST',
+      body: validPayload(overrides),
+    }));
+
+    expect(response.status).toBe(400);
+    expect(mockRpc).not.toHaveBeenCalledWith('submit_payment_request_with_budget', expect.anything());
+  });
+
+  it('fails closed when the 650,000 RUB cost limit would be exceeded', async () => {
+    mockSubmitError = { message: 'payment_request_cost_limit_exceeded', code: 'P0001' };
+    const { POST } = await loadRoute();
+    const response = await POST(request('/api/payments', {
+      method: 'POST',
+      body: validPayload({ budgetScope: 'costs', costCategory: 'instantly' }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(body.code).toBe('cost_limit_exceeded');
+  });
+
+  it('fails closed when the mail-calendar budget cannot be converted to RUB', async () => {
+    mockSubmitError = { message: 'payment_request_cost_budget_incomplete', code: 'P0001' };
+    const { POST } = await loadRoute();
+    const response = await POST(request('/api/payments', {
+      method: 'POST',
+      body: validPayload({ budgetScope: 'costs', costCategory: 'bases' }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(body.code).toBe('cost_budget_incomplete');
+  });
+
   it.each([
     ['legacy type', { expenseType: 'legacy_unclassified' }],
     ['unknown type', { expenseType: 'subscription' }],
@@ -565,7 +670,7 @@ describe('POST /api/payments', () => {
     }));
 
     expect(response.status).toBe(400);
-    expect(mockRpc).not.toHaveBeenCalledWith('submit_payment_request', expect.anything());
+    expect(mockRpc).not.toHaveBeenCalledWith('submit_payment_request_with_budget', expect.anything());
   });
 
   it.each([
@@ -582,7 +687,7 @@ describe('POST /api/payments', () => {
     }));
 
     expect(response.status).toBe(400);
-    expect(mockRpc).not.toHaveBeenCalledWith('submit_payment_request', expect.anything());
+    expect(mockRpc).not.toHaveBeenCalledWith('submit_payment_request_with_budget', expect.anything());
   });
 
   it('denies a non-staff caller before the write RPC', async () => {
@@ -594,7 +699,7 @@ describe('POST /api/payments', () => {
     }));
 
     expect(response.status).toBe(403);
-    expect(mockRpc).not.toHaveBeenCalledWith('submit_payment_request', expect.anything());
+    expect(mockRpc).not.toHaveBeenCalledWith('submit_payment_request_with_budget', expect.anything());
   });
 
   it('fails closed when the atomic submit RPC errors and never reports success', async () => {
