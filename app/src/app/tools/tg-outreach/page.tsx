@@ -59,6 +59,7 @@ import {
 } from '@/lib/tgOutreach/autoForward';
 import { DEFAULT_MAX_MESSAGE_CHARS } from '@/lib/tgOutreach/firstTouch/validateMessage';
 import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
+import { ProxyPicker } from '@/components/tg-outreach/ProxyPicker';
 import {
   takenProxyUrls,
   selectableProxies,
@@ -2054,6 +2055,14 @@ function CampaignAccountsTab({
    */
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
 
+  /**
+   * Момент, от которого считается здоровье аккаунтов и прокси, — один на весь
+   * экран. Ноль тут был бы хуже неточности: с ним любая отлёжка оказывается «в
+   * будущем», и все прокси разом объявляются мёртвыми. `Date.now()` берётся
+   * ровно один раз и только пока список ещё не пришёл.
+   */
+  const healthNow = loadedAt ?? Date.now();
+
   // Профиль читается через то же соединение, что и работа кампании, поэтому
   // на запущенной кампании в Telegram не ходим — см. гейт в API.
   const profileReadable = campaignStatus === 'stopped' || campaignStatus === 'error';
@@ -2740,15 +2749,19 @@ function CampaignAccountsTab({
               <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+79001234567"
                 className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
             </label>
-            <label className="space-y-1">
-              <span className="text-[11px] font-medium text-gray-500">Прокси</span>
-              <select value={proxyId} onChange={e => setProxyId(e.target.value)}
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400">
-                <option value="">Без прокси</option>
-                {freeProxies.map(p => <option key={p.id} value={p.id}>{p.name || p.url}</option>)}
-                {freeProxies.length === 0 && <option disabled>Свободных прокси нет</option>}
-              </select>
-            </label>
+            {/* Не <label>: внутри теперь кнопка со своим списком, а клик по
+                подписи в этом случае никуда не ведёт. */}
+            <div className="space-y-1">
+              <span className="block text-[11px] font-medium text-gray-500">Прокси</span>
+              <ProxyPicker
+                value={proxyId}
+                proxies={freeProxies}
+                now={healthNow}
+                ariaLabel="Прокси нового аккаунта"
+                onChange={setProxyId}
+                className="py-1.5"
+              />
+            </div>
           </div>
           <div className="flex gap-2">
             <button type="button" onClick={() => { void addAccount(); }} disabled={saving || !sessionName.trim() || !apiId || !apiHash.trim()}
@@ -2860,14 +2873,9 @@ function CampaignAccountsTab({
             const onCooldown = a.cooldown_until && new Date(a.cooldown_until) > new Date();
             const counts = errorCounts[a.session_name];
             const errorCount = counts?.error ?? 0;
-            // Обе колонки здоровья считаются от момента загрузки списка, а не
-            // от момента отрисовки: Date.now() в рендере — нечистый вызов, и
-            // «молчит 2 дня» не должно меняться от того, что React перерисовал
-            // строку.
-            // Ноль тут был бы хуже, чем неточность: с ним любой кулдаун
-            // оказывается «в будущем», и все аккаунты разом объявляются
-            // стоящими на паузе.
-            const healthNow = loadedAt ?? Date.now();
+            // Обе колонки здоровья считаются от момента загрузки списка
+            // (`healthNow` выше), а не от момента отрисовки: «молчит 2 дня» не
+            // должно меняться от того, что React перерисовал строку.
             const sendingMark = describeSending({
               account: a,
               stat: sendingStats[a.id],
@@ -2999,21 +3007,20 @@ function CampaignAccountsTab({
                 <HealthCell mark={sendingMark} />
                 <span className="text-xs text-gray-500 truncate">{a.phone || '—'}</span>
                 {editingProxyFor === a.id ? (
-                  <select
-                    autoFocus
-                    defaultValue={a.proxy_id ?? ''}
-                    onBlur={e => { void assignProxy(a.id, e.target.value); }}
-                    onChange={e => { void assignProxy(a.id, e.target.value); }}
-                    className="w-full rounded border border-indigo-300 bg-white px-1.5 py-0.5 text-xs outline-none focus:border-indigo-500 cursor-pointer"
-                  >
-                    <option value="">Без прокси</option>
-                    {proxyOptions(a.proxy_id).map(p => (
-                      <option key={p.id} value={p.id}>{p.name || p.url}</option>
-                    ))}
-                    {proxyOptions(a.proxy_id).length === 0 && (
-                      <option disabled>Свободных прокси нет</option>
-                    )}
-                  </select>
+                  /* Свой список вместо <select>: рядом с каждым адресом стоит
+                     его состояние, иначе сорок одинаковых строк «тот же хост,
+                     другой порт» выбираются вслепую — и аккаунт с равной
+                     вероятностью садится на прокси, который неделю не
+                     отвечает. */
+                  <ProxyPicker
+                    defaultOpen
+                    value={a.proxy_id ?? ''}
+                    proxies={proxyOptions(a.proxy_id)}
+                    now={healthNow}
+                    ariaLabel={`Прокси для ${a.session_name}`}
+                    onChange={(id) => { void assignProxy(a.id, id); }}
+                    onDismiss={() => setEditingProxyFor(null)}
+                  />
                 ) : (
                   <button
                     type="button"

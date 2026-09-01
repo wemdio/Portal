@@ -322,6 +322,22 @@ export function describeProxy(proxy: HealthProxy | null | undefined, now: number
   };
 }
 
+/**
+ * Цвет плашки под тон диагноза.
+ *
+ * Один набор на весь экран: колонка здоровья и выпадающий список прокси
+ * обязаны красить «сбоит» одинаково, иначе оператор читает их как два разных
+ * прибора и сверяет не то.
+ */
+export function healthToneClass(tone: HealthTone): string {
+  switch (tone) {
+    case 'ok': return 'bg-emerald-50 text-emerald-700';
+    case 'warn': return 'bg-amber-50 text-amber-700';
+    case 'bad': return 'bg-rose-50 text-rose-700';
+    default: return 'bg-gray-100 text-gray-500';
+  }
+}
+
 /** Технические коды причин — словами. */
 export function proxyReasonWord(reason: string): string {
   switch (reason) {
