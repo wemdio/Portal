@@ -500,14 +500,31 @@ export async function recordAccountSuccess(
 ): Promise<void> {
   await db
     .from('tg_outreach_accounts')
+    .update({ consecutive_proxy_failures: 0, last_failed_proxy_id: null })
+    .eq('id', accountId);
+
+  /**
+   * «Жив» пишем всем, КРОМЕ ограниченных и забаненных.
+   *
+   * Подключиться и получить диалоги умеет и аккаунт под спам-блоком: блок
+   * закрывает переписку с незнакомыми, а не вход. Пока эта отметка ставилась
+   * всем подряд, она затирала диагноз со спам-блоком на «жив» в ту же минуту,
+   * когда его поставили. В списке аккаунтов стояло зелёное «жив» рядом с
+   * суточной паузой, и проверка через @SpamBot после этого не запускалась
+   * вовсе — она идёт только к тем, кто числится ограниченным.
+   *
+   * Обратно в «жив» ограниченный аккаунт возвращает не круг, а факт ушедшего
+   * первого касания — см. `clearRestrictionAfterSend`.
+   */
+  await db
+    .from('tg_outreach_accounts')
     .update({
-      consecutive_proxy_failures: 0,
-      last_failed_proxy_id: null,
       check_status: 'ok',
       check_detail: 'круг рассылки прошёл: аккаунт подключился и получил диалоги',
       checked_at: new Date().toISOString(),
     })
-    .eq('id', accountId);
+    .eq('id', accountId)
+    .or('check_status.is.null,check_status.not.in.(restricted,banned)');
 }
 
 /**

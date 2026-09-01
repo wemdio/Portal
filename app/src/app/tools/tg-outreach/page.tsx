@@ -58,7 +58,9 @@ import {
   type AutoForwardMark,
 } from '@/lib/tgOutreach/autoForward';
 import { DEFAULT_MAX_MESSAGE_CHARS } from '@/lib/tgOutreach/firstTouch/validateMessage';
+import { accountLabel } from '@/lib/tgOutreach/accountLabel';
 import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
+import { ProxyPicker } from '@/components/tg-outreach/ProxyPicker';
 import {
   takenProxyUrls,
   selectableProxies,
@@ -1052,6 +1054,13 @@ function DialogsTab({ campaignId }: {
   const [query, setQuery] = useState('');
   const [filterCanSend, setFilterCanSend] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [filterAudience, setFilterAudience] = useState<'all' | 'users' | 'bots'>('all');
+  /**
+   * Чьи диалоги показывать — пустая строка означает «всех аккаунтов».
+   *
+   * Отбор идёт на сервере: список листается по тридцать штук, и фильтрация
+   * загруженной страницы врала бы про количество.
+   */
+  const [filterAccountId, setFilterAccountId] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [sendText, setSendText] = useState('');
   const [sending, setSending] = useState(false);
@@ -1069,9 +1078,19 @@ function DialogsTab({ campaignId }: {
     }
   }, [campaignId]);
 
-  const accountNameMap = React.useMemo(() => {
+  /**
+   * Как называется наш аккаунт в каждом диалоге.
+   *
+   * Раньше карта нужна была только подписям сообщений в раскрытой переписке.
+   * Теперь имя стоит и в свёрнутой строке: у кампании несколько аккаунтов, и
+   * «кто с нашей стороны это ведёт» — первый вопрос при разборе диалога.
+   */
+  const accountLabelMap = React.useMemo(() => {
     const map = new Map<string, string>();
-    for (const a of accounts) map.set(a.id, a.session_name);
+    for (const a of accounts) {
+      const label = accountLabel(a);
+      if (label) map.set(a.id, label);
+    }
     return map;
   }, [accounts]);
 
@@ -1084,13 +1103,14 @@ function DialogsTab({ campaignId }: {
     if (filterCanSend === 'disabled') params.set('can_send', 'false');
     if (filterAudience === 'bots') params.set('tg_is_bot', 'true');
     if (filterAudience === 'users') params.set('tg_is_bot', 'false');
+    if (filterAccountId) params.set('account_id', filterAccountId);
     const res = await authFetch(`${API_BASE}/dialogs?${params}`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachDialog[]; total: number };
       setDialogs(d.items); setTotal(d.total);
     }
     setLoading(false);
-  }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience]);
+  }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience, filterAccountId]);
 
   // Полсекунды тишины — и запрос уходит. Заодно сбрасываем страницу: искать на
   // третьей странице прошлого фильтра бессмысленно.
@@ -1330,6 +1350,27 @@ function DialogsTab({ campaignId }: {
               {s.label}
             </button>
           ))}
+          {/* Не плашки, как у соседних фильтров: аккаунтов в кампании полтора
+              десятка, и рядом кнопок они переносили бы всю панель на третью
+              строку. Показываем контрол, только когда аккаунт не один — с
+              единственным выбирать не из чего. */}
+          {accounts.length > 1 && (
+            <>
+              <span className="ml-2 text-xs text-gray-500">Аккаунт:</span>
+              <select
+                value={filterAccountId}
+                onChange={(e) => { setFilterAccountId(e.target.value); setOffset(0); }}
+                aria-label="Показывать диалоги только одного нашего аккаунта"
+                title="С какого нашего аккаунта ведётся переписка"
+                className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterAccountId ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+              >
+                <option value="">Все</option>
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.id}>{accountLabel(a) ?? a.session_name}</option>
+                ))}
+              </select>
+            </>
+          )}
         </div>
         <div className="flex gap-2">
           <button type="button" onClick={() => void exportDialogs('json')} className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
@@ -1347,7 +1388,11 @@ function DialogsTab({ campaignId }: {
         <p className="text-xs text-gray-400 py-8 text-center">
           {query.trim()
             ? `По запросу «${query.trim()}» ничего не нашлось. Ник ищется по части, но только по нику собеседника — не по тексту переписки.`
-            : 'Нет диалогов'}
+            : filterAccountId
+              // Пустой список под фильтром читается как «диалогов нет вообще»,
+              // и оператор идёт проверять кампанию. Называем аккаунт вслух.
+              ? `У аккаунта ${accountLabelMap.get(filterAccountId) ?? ''} диалогов нет. Выберите «Аккаунт: Все», чтобы увидеть остальные.`
+              : 'Нет диалогов'}
         </p>
       ) : (
         <div className="space-y-2">
@@ -1362,6 +1407,26 @@ function DialogsTab({ campaignId }: {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium text-gray-900">{d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`}</span>
+                      {/* Из какой гипотезы человек — сразу за ником: база
+                          отвечает на вопрос «кто это», а не «что с ним
+                          сделали», и читается вместе с именем. */}
+                      {d.base && (
+                        <span
+                          title={
+                            d.base.alsoIn.length
+                              ? `Написали из базы «${d.base.name}». Тот же контакт есть и в базах: ${d.base.alsoIn.join(', ')}.`
+                              : `Контакт из базы «${d.base.name}»`
+                          }
+                          className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700"
+                        >
+                          <Database className="h-3 w-3" />
+                          {d.base.name}
+                          {/* Цвет тот же, что у имени базы: у «text-violet-400»
+                              нет пары в тёмной теме портала, и счётчик уезжал
+                              бы в невидимое. */}
+                          {d.base.alsoIn.length > 0 && <span className="opacity-70">+{d.base.alsoIn.length}</span>}
+                        </span>
+                      )}
                       <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${st.cls}`}>{st.label}</span>
                       {d.tg_is_bot ? (
                         <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">Бот</span>
@@ -1404,24 +1469,18 @@ function DialogsTab({ campaignId }: {
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="text-[11px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : '—'}</span>
-                      {/* Из какой гипотезы человек. Второй строкой, а не в ряд
-                          со статусами: разметку ведут по статусам, и лишний
-                          бейдж среди них удлинял бы поиск нужного. */}
-                      {d.base && (
+                      {/* С какого нашего аккаунта идёт переписка. В кампании их
+                          несколько, а раньше это было видно только внутри
+                          раскрытого диалога, в подписях сообщений: чтобы
+                          понять, кому писать дальше, приходилось разворачивать
+                          каждую строку. */}
+                      {accountLabelMap.get(d.account_id) && (
                         <span
-                          title={
-                            d.base.alsoIn.length
-                              ? `Написали из базы «${d.base.name}». Тот же контакт есть и в базах: ${d.base.alsoIn.join(', ')}.`
-                              : `Контакт из базы «${d.base.name}»`
-                          }
-                          className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700"
+                          title={`Переписку ведёт наш аккаунт ${accountLabelMap.get(d.account_id)}`}
+                          className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700"
                         >
-                          <Database className="h-3 w-3" />
-                          {d.base.name}
-                          {/* Цвет тот же, что у имени базы: у «text-violet-400»
-                              нет пары в тёмной теме портала, и счётчик уезжал
-                              бы в невидимое. */}
-                          {d.base.alsoIn.length > 0 && <span className="opacity-70">+{d.base.alsoIn.length}</span>}
+                          <Send className="h-3 w-3" />
+                          {accountLabelMap.get(d.account_id)}
                         </span>
                       )}
                     </div>
@@ -1600,7 +1659,7 @@ function DialogsTab({ campaignId }: {
                       {d.messages.map((m, i) => {
                         const senderName = m.role === 'user'
                           ? (d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`)
-                          : accountNameMap.get(d.account_id) ?? 'Бот';
+                          : accountLabelMap.get(d.account_id) ?? 'Наш аккаунт';
                         return (
                           <div key={i} className={`rounded-lg px-3 py-2 text-xs ${m.role === 'user' ? 'bg-blue-50 text-gray-800' : 'bg-emerald-50 text-gray-800'}`}>
                             <span className="font-semibold">{senderName}:</span> {m.content}
@@ -2055,6 +2114,14 @@ function CampaignAccountsTab({
    * честнее мерить от момента загрузки данных, а не от момента перерисовки.
    */
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
+
+  /**
+   * Момент, от которого считается здоровье аккаунтов и прокси, — один на весь
+   * экран. Ноль тут был бы хуже неточности: с ним любая отлёжка оказывается «в
+   * будущем», и все прокси разом объявляются мёртвыми. `Date.now()` берётся
+   * ровно один раз и только пока список ещё не пришёл.
+   */
+  const healthNow = loadedAt ?? Date.now();
 
   // Профиль читается через то же соединение, что и работа кампании, поэтому
   // на запущенной кампании в Telegram не ходим — см. гейт в API.
@@ -2742,15 +2809,19 @@ function CampaignAccountsTab({
               <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+79001234567"
                 className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
             </label>
-            <label className="space-y-1">
-              <span className="text-[11px] font-medium text-gray-500">Прокси</span>
-              <select value={proxyId} onChange={e => setProxyId(e.target.value)}
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400">
-                <option value="">Без прокси</option>
-                {freeProxies.map(p => <option key={p.id} value={p.id}>{p.name || p.url}</option>)}
-                {freeProxies.length === 0 && <option disabled>Свободных прокси нет</option>}
-              </select>
-            </label>
+            {/* Не <label>: внутри теперь кнопка со своим списком, а клик по
+                подписи в этом случае никуда не ведёт. */}
+            <div className="space-y-1">
+              <span className="block text-[11px] font-medium text-gray-500">Прокси</span>
+              <ProxyPicker
+                value={proxyId}
+                proxies={freeProxies}
+                now={healthNow}
+                ariaLabel="Прокси нового аккаунта"
+                onChange={setProxyId}
+                className="py-1.5"
+              />
+            </div>
           </div>
           <div className="flex gap-2">
             <button type="button" onClick={() => { void addAccount(); }} disabled={saving || !sessionName.trim() || !apiId || !apiHash.trim()}
@@ -2862,14 +2933,9 @@ function CampaignAccountsTab({
             const onCooldown = a.cooldown_until && new Date(a.cooldown_until) > new Date();
             const counts = errorCounts[a.session_name];
             const errorCount = counts?.error ?? 0;
-            // Обе колонки здоровья считаются от момента загрузки списка, а не
-            // от момента отрисовки: Date.now() в рендере — нечистый вызов, и
-            // «молчит 2 дня» не должно меняться от того, что React перерисовал
-            // строку.
-            // Ноль тут был бы хуже, чем неточность: с ним любой кулдаун
-            // оказывается «в будущем», и все аккаунты разом объявляются
-            // стоящими на паузе.
-            const healthNow = loadedAt ?? Date.now();
+            // Обе колонки здоровья считаются от момента загрузки списка
+            // (`healthNow` выше), а не от момента отрисовки: «молчит 2 дня» не
+            // должно меняться от того, что React перерисовал строку.
             const sendingMark = describeSending({
               account: a,
               stat: sendingStats[a.id],
@@ -3001,21 +3067,20 @@ function CampaignAccountsTab({
                 <HealthCell mark={sendingMark} />
                 <span className="text-xs text-gray-500 truncate">{a.phone || '—'}</span>
                 {editingProxyFor === a.id ? (
-                  <select
-                    autoFocus
-                    defaultValue={a.proxy_id ?? ''}
-                    onBlur={e => { void assignProxy(a.id, e.target.value); }}
-                    onChange={e => { void assignProxy(a.id, e.target.value); }}
-                    className="w-full rounded border border-indigo-300 bg-white px-1.5 py-0.5 text-xs outline-none focus:border-indigo-500 cursor-pointer"
-                  >
-                    <option value="">Без прокси</option>
-                    {proxyOptions(a.proxy_id).map(p => (
-                      <option key={p.id} value={p.id}>{p.name || p.url}</option>
-                    ))}
-                    {proxyOptions(a.proxy_id).length === 0 && (
-                      <option disabled>Свободных прокси нет</option>
-                    )}
-                  </select>
+                  /* Свой список вместо <select>: рядом с каждым адресом стоит
+                     его состояние, иначе сорок одинаковых строк «тот же хост,
+                     другой порт» выбираются вслепую — и аккаунт с равной
+                     вероятностью садится на прокси, который неделю не
+                     отвечает. */
+                  <ProxyPicker
+                    defaultOpen
+                    value={a.proxy_id ?? ''}
+                    proxies={proxyOptions(a.proxy_id)}
+                    now={healthNow}
+                    ariaLabel={`Прокси для ${a.session_name}`}
+                    onChange={(id) => { void assignProxy(a.id, id); }}
+                    onDismiss={() => setEditingProxyFor(null)}
+                  />
                 ) : (
                   <button
                     type="button"

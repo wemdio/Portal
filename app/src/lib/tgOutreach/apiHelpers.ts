@@ -41,6 +41,60 @@ export function jsonError(message: string, status: number) {
 // поддерживает только http:// (см. коммент выше про HttpConnectSocket).
 const PROXY_TYPE_SUFFIX = /:(?:HTTP|HTTPS|SOCKS4|SOCKS5)$/i;
 
+/**
+ * Имя прокси по умолчанию — `хост:порт`.
+ *
+ * Массовая загрузка раньше подписывала строки как «Прокси 1», «Прокси 2», и
+ * нумерация начиналась заново на каждой загрузке: в кампании с 140 адресами
+ * половина имён повторялась, а по имени нельзя было понять, какой канал пула
+ * перед тобой. Хост с портом отличает строки друг от друга и совпадает с тем,
+ * как их называет сам провайдер.
+ */
+export interface ProxyImportRow {
+  campaign_id: string;
+  url: string;
+  name: string;
+  is_active: boolean;
+}
+
+/**
+ * Строки массовой загрузки прокси — в готовые записи, без дублей.
+ *
+ * Отсекаем двойников дважды: против уже заведённых в кампании адресов и внутри
+ * самого списка. Дубль прокси — это не лишняя строка в таблице, а два аккаунта
+ * на одном канале пула, то есть на одном устройстве с точки зрения Telegram;
+ * ровно за это он и блокирует. На момент правки в базе лежало 598 записей на
+ * 532 уникальных адреса — накопилось повторными загрузками одного списка.
+ *
+ * Сравниваем нормализованные адреса: провайдеры отдают один и тот же прокси в
+ * разных написаниях (`host:port@user:pass` и `user:pass@host:port`), и без
+ * нормализации они выглядят как две разные строки.
+ */
+export function buildProxyImportRows(
+  lines: string[],
+  existingUrls: string[],
+  campaignId: string,
+): { rows: ProxyImportRow[]; skipped: number } {
+  const known = new Set(existingUrls.map((u) => normalizeProxyUrl((u ?? '').trim())).filter(Boolean));
+  const rows: ProxyImportRow[] = [];
+  for (const raw of lines) {
+    const url = normalizeProxyUrl((raw ?? '').trim());
+    if (!url || known.has(url)) continue;
+    known.add(url);
+    rows.push({ campaign_id: campaignId, url, name: proxyDisplayName(url), is_active: true });
+  }
+  return { rows, skipped: lines.length - rows.length };
+}
+
+export function proxyDisplayName(url: string): string {
+  try {
+    const u = new URL(url);
+    return u.port ? `${u.hostname}:${u.port}` : u.hostname;
+  } catch {
+    return url.slice(0, 80);
+  }
+}
+
 export function normalizeProxyUrl(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return trimmed;

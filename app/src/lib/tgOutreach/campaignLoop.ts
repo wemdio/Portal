@@ -29,7 +29,7 @@ import {
   recordProxySuccess,
 } from './proxyHealth';
 import { sendFirstTouchBatch } from './firstTouch/send';
-import { cooldownUntilIso, writeAccountCooldown } from './accountCooldown';
+import { parkAccountAfterLimit } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
 import { processLeadForwards } from './leadForward';
 import { buildLeadMessage, splitTelegramMessage } from './leadMessage';
@@ -1851,14 +1851,22 @@ export async function runCampaignLoop(
                 errMsg.includes('FrozenMethodInvalidError') ||
                 errMsg.includes('FROZEN_METHOD_INVALID')
               ) {
-                const cooldownUntil = cooldownUntilIso(tg.account_cooldown_hours);
-                const cooldownDisplay = new Date(cooldownUntil).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
-                const cdErr = await writeAccountCooldown(db, account.id, cooldownUntil);
-                if (cdErr) {
-                  log('error', `Аккаунт ${account.session_name}: не смог сохранить паузу в базе данных — ${cdErr}`);
+                // Срок паузы спрашиваем у @SpamBot этим же соединением: пауза
+                // из настроек ставилась вслепую и каждые сутки выпускала
+                // аккаунт ровно в то же ограничение.
+                const parked = await parkAccountAfterLimit({
+                  db,
+                  client,
+                  account,
+                  hours: tg.account_cooldown_hours,
+                  reason: 'FloodError/Frozen',
+                  rawError: errMsg,
+                  log,
+                });
+                if (parked.parked) {
+                  const cooldownDisplay = new Date(parked.untilIso).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
+                  log('warning', `Аккаунт ${account.session_name}: Telegram ограничил отправку (FloodError/Frozen на диалоге ${dialogLabel}). ${parked.diagnosis} Аккаунт на паузе до ${cooldownDisplay}.`);
                 }
-                (account as OutreachAccount).cooldown_until = cooldownUntil;
-                log('warning', `Аккаунт ${account.session_name}: Telegram ограничил отправку (FloodError/Frozen на диалоге ${dialogLabel}). Аккаунт на паузе до ${cooldownDisplay} (${tg.account_cooldown_hours}ч).`);
                 cycleStats.flood++;
                 break;
               }

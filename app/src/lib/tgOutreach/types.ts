@@ -186,6 +186,19 @@ export interface OutreachProxy {
   name: string;
   is_active: boolean;
   created_at: string;
+  /**
+   * Здоровье прокси (миграция 20260603_0001). Ручка отдаёт строку целиком, и
+   * экран этими полями уже пользуется — колонка «Здоровье прокси» и выбор
+   * прокси при назначении. Необязательные: старые строки заполнены не все, а
+   * рассылка пишет их по ходу кругов.
+   */
+  consecutive_errors?: number | null;
+  last_error_at?: string | null;
+  last_error_reason?: string | null;
+  cooldown_until?: string | null;
+  last_used_at?: string | null;
+  total_uses?: number | null;
+  total_errors?: number | null;
 }
 
 export interface OutreachAccount {
