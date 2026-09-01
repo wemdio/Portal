@@ -41,6 +41,11 @@ export const TECH_SOURCE_LABELS: Record<TechSource, string> = {
   spaceproxy: 'SpaceProxy',
 };
 
+export const TECH_BALANCE_PROVIDERS = ['serper'] as const;
+export type TechBalanceProvider = (typeof TECH_BALANCE_PROVIDERS)[number];
+
+export type TechBalanceUnit = 'credits';
+
 export const STATUS_LABELS: Record<TechStatus, string> = {
   active: 'Активна',
   pending_review: 'Ожидает решения',
@@ -70,6 +75,16 @@ export interface TechSubscription {
   hidden_at: string | null;
   created_by: string | null;
   created_at: string;
+  updated_at: string;
+}
+
+export interface TechProviderBalance {
+  provider: TechBalanceProvider;
+  label: string;
+  balance: number | null;
+  unit: TechBalanceUnit;
+  synced_at: string | null;
+  last_error: string | null;
   updated_at: string;
 }
 

@@ -9,7 +9,7 @@ import SubscriptionModal, { type ModalMode, type ModalPayload } from '@/componen
 import TypeBreakdown from '@/components/tech-calendar/TypeBreakdown';
 import UpcomingList from '@/components/tech-calendar/UpcomingList';
 import { mskDateStr } from '@/lib/techCalendar/dates';
-import type { ServiceType, TechSubscription } from '@/lib/techCalendar/types';
+import type { ServiceType, TechProviderBalance, TechSubscription } from '@/lib/techCalendar/types';
 
 const MONTH_NAMES = [
   'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
@@ -27,6 +27,7 @@ async function authHeaders(): Promise<Record<string, string>> {
 export default function TechCalendarView() {
   const today = mskDateStr(new Date());
   const [subscriptions, setSubscriptions] = useState<TechSubscription[]>([]);
+  const [balances, setBalances] = useState<TechProviderBalance[]>([]);
   const [loading, setLoading] = useState(true);
   const [typeFilter, setTypeFilter] = useState<ServiceType | null>(null);
   const [showHidden, setShowHidden] = useState(false);
@@ -48,6 +49,7 @@ export default function TechCalendarView() {
       const res = await fetch(url, { headers: await authHeaders() });
       const json = await res.json();
       setSubscriptions(res.ok ? (json.subscriptions ?? []) : []);
+      setBalances(res.ok ? (json.balances ?? []) : []);
       if (!res.ok) setError(json.error ?? 'Не удалось загрузить список');
     } finally {
       setLoading(false);
@@ -131,8 +133,11 @@ export default function TechCalendarView() {
       });
       const json = await res.json();
       if (!res.ok) {
-        setError(json.error ?? 'Не удалось синхронизировать SpaceProxy');
+        setError(json.error ?? 'Не удалось синхронизировать техничку');
         return;
+      }
+      if (json.sync?.serper && !json.sync.serper.ok) {
+        setError(`Serper: ${json.sync.serper.error ?? 'не удалось обновить кредиты'}`);
       }
       await load();
     } finally {
@@ -169,7 +174,7 @@ export default function TechCalendarView() {
             onClick={syncSpaceProxy}
             className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60"
           >
-            {syncing ? 'Синхронизация...' : 'Синк SpaceProxy'}
+            {syncing ? 'Синхронизация...' : 'Синк сейчас'}
           </button>
           <button
             type="button"
@@ -193,6 +198,8 @@ export default function TechCalendarView() {
         />
         Показать скрытые
       </label>
+
+      <ProviderBalances balances={balances} />
 
       <StatsRow subscriptions={visible} year={year} month={month} today={today} />
       <TypeBreakdown subscriptions={subscriptions} year={year} month={month} selected={typeFilter} onSelect={setTypeFilter} />
@@ -260,6 +267,38 @@ export default function TechCalendarView() {
           onToggleHidden={modalMode === 'edit' && modalSub ? () => toggleHidden(modalSub) : undefined}
         />
       )}
+    </div>
+  );
+}
+
+function formatCredits(value: number | null): string {
+  if (value === null) return 'нет данных';
+  return value.toLocaleString('ru-RU', { maximumFractionDigits: 2 });
+}
+
+function formatSyncTime(value: string | null): string {
+  if (!value) return 'ещё не синхронизировали';
+  return new Date(value).toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function ProviderBalances({ balances }: { balances: TechProviderBalance[] }) {
+  const serper = balances.find((b) => b.provider === 'serper');
+  if (!serper) return null;
+
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="rounded-xl border border-gray-100 bg-white p-4">
+        <div className="text-xs text-gray-500">Serper credits</div>
+        <div className="mt-1 text-2xl font-semibold text-gray-900">{formatCredits(serper.balance)}</div>
+        <div className={`mt-1 text-xs ${serper.last_error ? 'text-red-600' : 'text-gray-500'}`}>
+          {serper.last_error ? `Ошибка синка: ${serper.last_error}` : `Синк: ${formatSyncTime(serper.synced_at)}`}
+        </div>
+      </div>
     </div>
   );
 }

@@ -1,13 +1,14 @@
 import { NextResponse } from 'next/server';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { runSpaceProxyTechCalendarSync } from '@/lib/techCalendar/spaceProxySync';
+import { runTechCalendarSync } from '@/lib/techCalendar/sync';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 const CRON_SECRET = process.env.CRON_SECRET ?? '';
 const SPACEPROXY_API_KEY = process.env.SPACEPROXY_API_KEY ?? '';
+const SERPER_API_KEY = process.env.SERPER_API_KEY ?? '';
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -23,17 +24,14 @@ async function run() {
   if (!supabaseAdmin) {
     return jsonError('Server misconfigured: missing Supabase service role', 500);
   }
-  if (!SPACEPROXY_API_KEY.trim()) {
-    return jsonError('Server misconfigured: missing SPACEPROXY_API_KEY', 500);
-  }
-
   try {
-    const spaceproxy = await runSpaceProxyTechCalendarSync({
+    const sync = await runTechCalendarSync({
       db: supabaseAdmin,
-      apiKey: SPACEPROXY_API_KEY.trim(),
       now: new Date(),
+      spaceProxyApiKey: SPACEPROXY_API_KEY,
+      serperApiKey: SERPER_API_KEY,
     });
-    return NextResponse.json({ ok: true, spaceproxy });
+    return NextResponse.json({ ok: true, sync });
   } catch (e) {
     const message = e instanceof Error ? e.message : 'Tech calendar sync failed';
     console.error('[tech-calendar-sync] failed', e);
