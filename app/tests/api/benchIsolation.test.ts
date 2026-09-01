@@ -72,15 +72,24 @@ describe('изоляция витрины', () => {
   it('документация не обещает остановку там, где её нет', () => {
     const doc = readFileSync(join(process.cwd(), 'public/api-portal.md'), 'utf8');
     const rows = doc.split('\n');
-    const mismatched = listAllBenchTools()
-      .filter((tool) => tool.kind === 'job')
-      .filter((tool) => {
-        const row = rows.find((line) => line.startsWith(`| \`${tool.id}\``));
-        if (!row) return false;
-        const promised = row.trimEnd().endsWith('| да |');
-        return promised !== (tool as { stop: { supported: boolean } }).stop.supported;
-      })
-      .map((tool) => tool.id);
+    const jobs = listAllBenchTools().filter((tool) => tool.kind === 'job');
+
+    const checked: string[] = [];
+    const mismatched: string[] = [];
+    for (const tool of jobs) {
+      const row = rows.find((line) => line.startsWith(`| ${tool.title} |`));
+      if (!row) continue;
+      checked.push(tool.title);
+      const promised = row.trimEnd().endsWith('| да |');
+      if (promised !== (tool as { stop: { supported: boolean } }).stop.supported) {
+        mismatched.push(tool.title);
+      }
+    }
+
+    // Без этой строки тест молча проходил бы вхолостую: поменяли вид таблицы —
+    // строки перестали находиться, и «расхождений нет» означало бы «ничего не
+    // проверено». Названия в таблице обязаны совпадать с названиями в реестре.
+    expect(checked).toHaveLength(jobs.length);
     expect(mismatched).toEqual([]);
   });
 
