@@ -154,12 +154,39 @@ describe('доступ', () => {
 
 describe('GET списка', () => {
   it('отдаёт подписки админу', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        profiles: [{ id: ADMIN_ID, role: 'admin' }],
+        tech_subscriptions: [subRow()],
+        tech_provider_balances: [{
+          provider: 'serper',
+          label: 'Serper',
+          balance: 9909,
+          unit: 'credits',
+          synced_at: '2026-09-01T06:00:00.000Z',
+          last_error: null,
+          updated_at: '2026-09-01T06:00:00.000Z',
+        }, {
+          provider: 'proxymarket',
+          label: 'proxy.market',
+          balance: 32,
+          unit: 'RUB',
+          synced_at: '2026-09-01T06:00:00.000Z',
+          last_error: null,
+          updated_at: '2026-09-01T06:00:00.000Z',
+        }],
+      },
+    });
     const { GET } = await import('@/app/api/tech-calendar/subscriptions/route');
     const res = await GET(req());
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.subscriptions).toHaveLength(1);
     expect(json.subscriptions[0].service_name).toBe('Bright Data');
+    expect(json.balances).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider: 'serper', balance: 9909, unit: 'credits' }),
+      expect.objectContaining({ provider: 'proxymarket', balance: 32, unit: 'RUB' }),
+    ]));
   });
 
   it('скрытые строки отдаёт только по явному запросу', async () => {

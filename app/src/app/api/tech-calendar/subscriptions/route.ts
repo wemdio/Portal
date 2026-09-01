@@ -11,6 +11,7 @@ export const dynamic = 'force-dynamic';
 
 const COLUMNS =
   'id, service_name, service_type, amount, currency, billing_cycle, next_billing_date, status, decision_by, decision_at, decision_notes, notes, source, external_key, quantity, provider_status, synced_at, is_hidden, hidden_at, created_by, created_at, updated_at';
+const BALANCE_COLUMNS = 'provider, label, balance, unit, synced_at, last_error, updated_at';
 
 export async function GET(req: NextRequest) {
   const guard = await requireAdmin(req);
@@ -30,10 +31,14 @@ export async function GET(req: NextRequest) {
 
   if (!includeHidden) query = query.eq('is_hidden', false);
 
-  const { data, error } = await query;
+  const [{ data, error }, balancesRes] = await Promise.all([
+    query,
+    supabaseAdmin.from('tech_provider_balances').select(BALANCE_COLUMNS).order('provider', { ascending: true }),
+  ]);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ subscriptions: data ?? [] });
+  if (balancesRes.error) return NextResponse.json({ error: balancesRes.error.message }, { status: 500 });
+  return NextResponse.json({ subscriptions: data ?? [], balances: balancesRes.data ?? [] });
 }
 
 export async function POST(req: NextRequest) {

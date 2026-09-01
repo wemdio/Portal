@@ -14,7 +14,7 @@
     },
     {
       "path": "/api/cron/tech-calendar-sync",
-      "schedule": "0 6 * * *"
+      "schedule": "0 6,18 * * *"
     },
     {
       "path": "/api/cron/deadline-notifications",
