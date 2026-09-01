@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
-import { extractPublicIdentifier } from '@/lib/liOutreach/leadHelpers';
+import { extractPublicIdentifier, resolveLeadCsvColumns } from '@/lib/liOutreach/leadHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -36,14 +36,6 @@ function parseCsvLine(line: string): string[] {
   return result;
 }
 
-function findHeaderIndex(headers: string[], aliases: string[]): number {
-  for (const alias of aliases) {
-    const idx = headers.indexOf(alias);
-    if (idx >= 0) return idx;
-  }
-  return -1;
-}
-
 export async function POST(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.li-outreach.leads.import' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
@@ -59,24 +51,41 @@ export async function POST(req: NextRequest) {
     const lines = text.split(/\r?\n/).filter((l) => l.trim());
     if (lines.length < 2) return jsonError('CSV must have a header row and at least one data row', 400);
 
-    const headerFields = parseCsvLine(lines[0]).map((h) => h.toLowerCase().replace(/\s+/g, '_'));
-    const nameIdx = headerFields.indexOf('name');
-    const firstNameIdx = headerFields.indexOf('first_name');
-    const lastNameIdx = headerFields.indexOf('last_name');
-    const positionIdx = headerFields.indexOf('position');
-    const companyIdx = headerFields.indexOf('company');
-    const profileUrlIdx = findHeaderIndex(headerFields, [
-      'profile_url',
-      'linkedin_url',
-      'linkedin_profile_url',
-      'linkedin_profile',
-      'linkedin',
-      'linkedin_link',
-      'url',
-      'profile',
-    ]);
-    const publicIdIdx = findHeaderIndex(headerFields, ['public_identifier', 'public_id', 'linkedin_public_identifier']);
-    const linkedinIdIdx = findHeaderIndex(headerFields, ['linkedin_id', 'provider_id']);
+    const cols = resolveLeadCsvColumns(parseCsvLine(lines[0]));
+    const {
+      name: nameIdx,
+      firstName: firstNameIdx,
+      lastName: lastNameIdx,
+      position: positionIdx,
+      company: companyIdx,
+      profileUrl: profileUrlIdx,
+      publicId: publicIdIdx,
+      linkedinId: linkedinIdIdx,
+    } = cols;
+
+    /**
+     * Нераспознанный заголовок — это отказ, а не «импортировано 0».
+     *
+     * Раньше файл с колонкой `Person` вместо `name` проходил весь разбор и
+     * возвращал ноль строк с припиской «без валидных данных: 123». Оператор
+     * читал это как «портал не принимает файл» и шёл искать проблему в данных,
+     * хотя данные были в порядке — не совпало одно слово в шапке.
+     */
+    const headersSeen = cols.normalized.filter(Boolean).join(', ') || '(пусто)';
+    if (nameIdx < 0 && firstNameIdx < 0 && lastNameIdx < 0) {
+      return jsonError(
+        `В шапке CSV нет колонки с именем. Нашёл: ${headersSeen}. ` +
+          'Ожидаю name (или first_name + last_name; понимаю также Person, ФИО, Имя + Фамилия).',
+        400,
+      );
+    }
+    if (profileUrlIdx < 0 && publicIdIdx < 0 && linkedinIdIdx < 0) {
+      return jsonError(
+        `В шапке CSV нет колонки со ссылкой на профиль. Нашёл: ${headersSeen}. ` +
+          'Ожидаю profile_url (понимаю также LinkedIn URL, Profile, Ссылка).',
+        400,
+      );
+    }
 
     const leadsToInsert: Record<string, unknown>[] = [];
     const skipped: string[] = [];
