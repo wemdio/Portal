@@ -5,11 +5,16 @@ import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/
 let mainDb: MockSupabaseClient = createMockSupabase();
 let instantlyDb: MockSupabaseClient = createMockSupabase();
 const createLeadsMock = jest.fn();
+const resolveEffectiveLimitsMock = jest.fn(() => ({ max_contacts: 5000 }));
 
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mainDb; } }));
 jest.mock('@/lib/supabaseInstantly', () => ({ get supabaseInstantly() { return instantlyDb; } }));
 jest.mock('@/lib/instantly/client', () => ({
-  createLeads: (...args: unknown[]) => createLeadsMock(...args),
+  createLeads: (...args: unknown[]) => {
+    const requestOptions = args[2] as { onRequestAttempt?: () => void } | undefined;
+    requestOptions?.onRequestAttempt?.();
+    return createLeadsMock(...args);
+  },
   listLeads: jest.fn(),
 }));
 jest.mock('@/lib/instantly/accounts', () => ({ resolveInstantlyAccountId: () => 'main' }));
@@ -25,7 +30,7 @@ jest.mock('@/lib/tariffs', () => ({
   getBillingPeriodStart: jest.fn(() => '2026-08-01T00:00:00Z'),
   getClientTariffRow: jest.fn(async () => ({ status: 'active' })),
   getClientStatus: jest.fn(() => 'active'),
-  resolveEffectiveLimits: jest.fn(() => ({ max_contacts: 5000 })),
+  resolveEffectiveLimits: () => resolveEffectiveLimitsMock(),
   isAwaitingFirstPayment: jest.fn(() => false),
 }));
 jest.mock('@/lib/loggerServer', () => ({
@@ -50,6 +55,7 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
       client_campaign_presets: [{ id: 'preset-1', client_user_id: 'client-1', instantly_account_id: 'main' }],
     } });
     createLeadsMock.mockResolvedValue({ leads_uploaded: 2 });
+    resolveEffectiveLimitsMock.mockReturnValue({ max_contacts: 5000 });
   });
 
   it('persists submitted identities and a terminal confirmation independently of the external contact list', async () => {
@@ -85,7 +91,12 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
       identity_complete: true,
       accepted_identities: [{ externalContactId: 'external-two', email: 'two@example.com', index: 1 }],
     });
-    expect(result).toMatchObject({ accepted: 1, acceptedIndexes: [1], identityComplete: true });
+    expect(result).toMatchObject({
+      accepted: 1,
+      acceptedIndexes: [1],
+      attemptedIndexes: [0, 1],
+      identityComplete: true,
+    });
   });
 
   it('journals provider-sized chunks independently and returns input-relative accepted identities', async () => {
@@ -114,6 +125,7 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
     expect(result.identityComplete).toBe(true);
     expect(result.acceptedIndexes ?? []).toHaveLength(1001);
     expect(result.acceptedIndexes?.at(-1)).toBe(1000);
+    expect(result.attemptedIndexes).toHaveLength(1001);
   });
 
   it('keeps completed chunks durable and exposes their exact partial result if a later chunk fails', async () => {
@@ -134,6 +146,7 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
         accepted: 1000,
         identityComplete: true,
         acceptedIndexes: expect.arrayContaining([0, 999]),
+        attemptedIndexes: expect.arrayContaining([0, 1000]),
       }),
     });
 
@@ -164,6 +177,7 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
         accepted: 1,
         skipped: 1,
         acceptedIndexes: [1],
+        attemptedIndexes: [0, 1],
         identityComplete: true,
       },
     });
@@ -178,8 +192,27 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
     await expect(appendLeadsToClientCampaign({
       userId: 'client-1', campaignId: 'campaign-1', leads,
       ledgerSource: { kind: 'auto_pipeline', runId: 'run-1' },
-    })).rejects.toThrow(/ledger/i);
+    })).rejects.toMatchObject({
+      partialResult: expect.objectContaining({ attemptedIndexes: [] }),
+    });
     expect(createLeadsMock).not.toHaveBeenCalled();
+  });
+
+  it('reports only the tariff-truncated prefix as attempted', async () => {
+    resolveEffectiveLimitsMock.mockReturnValue({ max_contacts: 1 });
+    createLeadsMock.mockResolvedValue({ leads_uploaded: 1 });
+
+    const result = await appendLeadsToClientCampaign({
+      userId: 'client-1', campaignId: 'campaign-1', leads,
+      ledgerSource: { kind: 'auto_pipeline', runId: 'run-1' },
+    });
+
+    expect(createLeadsMock).toHaveBeenCalledWith(
+      [leads[0]],
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(result.attemptedIndexes).toEqual([0]);
   });
 
   it('fails closed before external delivery when a requested lead has no journalable identity', async () => {

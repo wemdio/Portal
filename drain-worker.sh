@@ -26,6 +26,37 @@ should_drain_worker() {
   esac
 }
 
+is_baseconstructor_worker() {
+  case "$1" in
+    worker-baseconstructor|worker-baseconstructor-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+should_drain_baseconstructor_workers() {
+  if [ -z "$requested_worker_targets" ]; then
+    return 0
+  fi
+  for requested_target in $requested_worker_targets; do
+    if is_baseconstructor_worker "$requested_target"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+should_drain_non_baseconstructor_workers() {
+  if [ -z "$requested_worker_targets" ]; then
+    return 0
+  fi
+  for requested_target in $requested_worker_targets; do
+    if ! is_baseconstructor_worker "$requested_target"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [ -f .env ]; then
   set -o allexport
   source <(tr -d '\r' < .env)
@@ -100,7 +131,7 @@ patch_running_to_pending() {
   patch_rows "$table" "status=eq.running" "$body"
 }
 
-if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
+if should_drain_non_baseconstructor_workers && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
   echo "[drain] Checking active running tasks before deploy..."
 
   total_running=0
@@ -252,8 +283,10 @@ PY
   else
     echo "[drain] ai_campaigns: running=0"
   fi
-else
+elif should_drain_non_baseconstructor_workers; then
   echo "[drain] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — skipping Supabase pause flow"
+else
+  echo "[drain] Base Constructor-only deploy — unrelated queues stay running"
 fi
 
 if should_drain_worker "worker-autopipeline"; then
@@ -266,25 +299,27 @@ if should_drain_worker "worker-autopipeline"; then
   echo "[drain] Auto-pipeline stopped cleanly"
 fi
 
-containers=(
-  "portal-worker"
-  "portal-worker-hh"
-  "portal-worker-eng-hiring"
-  "portal-worker-search"
-  "portal-worker-enrich"
-  "portal-worker-yandexmaps"
-  "portal-worker-emailvalidation"
-  "portal-worker-tg-outreach"
-  "portal-worker-aicaller"
-  "portal-worker-tg-transcribe"
-  "portal-worker-outreach"
-)
+if should_drain_non_baseconstructor_workers; then
+  containers=(
+    "portal-worker"
+    "portal-worker-hh"
+    "portal-worker-eng-hiring"
+    "portal-worker-search"
+    "portal-worker-enrich"
+    "portal-worker-yandexmaps"
+    "portal-worker-emailvalidation"
+    "portal-worker-tg-outreach"
+    "portal-worker-aicaller"
+    "portal-worker-tg-transcribe"
+    "portal-worker-outreach"
+  )
 
-echo "[drain] Stopping worker containers (timeout 15s each)..."
-for c in "${containers[@]}"; do
-  sudo -n docker stop -t 15 "$c" 2>/dev/null || true &
-done
-wait
+  echo "[drain] Stopping worker containers (timeout 15s each)..."
+  for c in "${containers[@]}"; do
+    sudo -n docker stop -t 15 "$c" 2>/dev/null || true &
+  done
+  wait
+fi
 
 # BaseConstructor-реплики останавливаем отдельно и с коротким таймаутом.
 #
@@ -301,36 +336,38 @@ wait
 # она резюмится с чекпоинта в другой реплике; хэндлеру нужно ~2 секунды
 # (UPDATE + повторный UPDATE через секунду). Останавливаем параллельно,
 # так весь шаг стоит ~5 секунд.
-bc_containers=(
-  "portal-worker-baseconstructor"
-  "portal-worker-baseconstructor-2"
-  "portal-worker-baseconstructor-3"
-  "portal-worker-baseconstructor-4"
-  "portal-worker-baseconstructor-5"
-  "portal-worker-baseconstructor-6"
-  "portal-worker-baseconstructor-7"
-  "portal-worker-baseconstructor-8"
-  "portal-worker-baseconstructor-9"
-  "portal-worker-baseconstructor-10"
-  "portal-worker-baseconstructor-11"
-  "portal-worker-baseconstructor-12"
-)
+if should_drain_baseconstructor_workers; then
+  bc_containers=(
+    "portal-worker-baseconstructor"
+    "portal-worker-baseconstructor-2"
+    "portal-worker-baseconstructor-3"
+    "portal-worker-baseconstructor-4"
+    "portal-worker-baseconstructor-5"
+    "portal-worker-baseconstructor-6"
+    "portal-worker-baseconstructor-7"
+    "portal-worker-baseconstructor-8"
+    "portal-worker-baseconstructor-9"
+    "portal-worker-baseconstructor-10"
+    "portal-worker-baseconstructor-11"
+    "portal-worker-baseconstructor-12"
+  )
 
-echo "[drain] Stopping base-constructor replicas (timeout 5s, in parallel)..."
-for c in "${bc_containers[@]}"; do
-  sudo -n docker stop -t 5 "$c" 2>/dev/null || true &
-done
-wait
+  echo "[drain] Stopping base-constructor replicas (timeout 5s, in parallel)..."
+  for c in "${bc_containers[@]}"; do
+    sudo -n docker stop -t 5 "$c" 2>/dev/null || true &
+  done
+  wait
 
-# The worker-side shutdown guard normally ages each processing job before exit.
-# Keep a deployment-side backstop after every replica has stopped so a failed
-# signal handler or database request cannot leave a fresh heartbeat behind.
-if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
-  base_constructor_handoff_code="$(patch_rows "base_constructor_jobs" "status=eq.processing" '{"started_at":"1970-01-01T00:00:00Z"}')"
-  if [[ "$base_constructor_handoff_code" =~ ^(200|204)$ ]]; then
-    echo "[drain] base_constructor_jobs: processing jobs marked for immediate resume"
-  else
-    echo "[drain] base_constructor_jobs: handoff request returned http ${base_constructor_handoff_code}"
+  # The worker-side shutdown guard normally ages each processing job before exit.
+  # Keep a deployment-side backstop after every replica has stopped so a failed
+  # signal handler or database request cannot leave a fresh heartbeat behind.
+  if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
+    base_constructor_handoff_code="$(patch_rows "base_constructor_jobs" "status=eq.processing" '{"started_at":"1970-01-01T00:00:00Z"}')"
+    if [[ "$base_constructor_handoff_code" =~ ^(200|204)$ ]]; then
+      echo "[drain] base_constructor_jobs: processing jobs marked for immediate resume"
+    else
+      echo "[drain] base_constructor_jobs: handoff request returned http ${base_constructor_handoff_code}"
+    fi
   fi
 fi
 

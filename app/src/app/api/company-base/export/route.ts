@@ -1,14 +1,22 @@
-import type { NextRequest } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import archiver from 'archiver';
 import { Readable } from 'node:stream';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { industryLabelRu, sizeLabelRu, countryLabelRu, synthDescription } from '@/lib/companyBase/labels';
+import { logError } from '@/lib/loggerServer';
+import {
+  PdlCompanyReadError,
+  iteratePdlCompanyPages,
+  pdlFiltersFromSearchParams,
+  type PdlCompanyCatalogRow,
+  type PdlRpcClient,
+} from '@/lib/companyBase/pdlSearch';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 const PART_ROWS = 100_000; // rows per CSV file inside a ZIP
-const BATCH = 1000; // keyset page size (PostgREST limit-safe)
+const BATCH = PART_ROWS; // RPC returns one JSON value, so PostgREST's row cap does not apply
 const HEADER = ['Company', 'Site', 'Industry', 'Size', 'Country', 'City', 'Description', 'Source'];
 const ATTR = 'Company data: People Data Labs, CC BY 4.0';
 
@@ -17,19 +25,17 @@ function csvCell(v: unknown): string {
   return `"${t.replaceAll('"', '""')}"`;
 }
 
-type Row = {
-  id: string; name: string; website: string | null; industry: string | null;
-  size: string | null; country: string | null; locality: string | null; description: string | null;
-};
-
-function rowToCsv(r: Row): string {
+function rowToCsv(r: PdlCompanyCatalogRow): string {
   return [r.name, r.website ?? '', industryLabelRu(r.industry), sizeLabelRu(r.size), countryLabelRu(r.country), r.locality ?? '', r.description || synthDescription(r), 'pdl']
     .map(csvCell)
     .join(',');
 }
 
-function list(sp: URLSearchParams, key: string): string[] {
-  return Array.from(new Set(sp.getAll(key).flatMap((v) => v.split(',')).map((v) => v.trim().toLowerCase()).filter(Boolean)));
+function jsonError(message: string, status: number, requestId?: string) {
+  return NextResponse.json(
+    { error: message, ...(requestId ? { request_id: requestId } : {}) },
+    { status },
+  );
 }
 
 export async function GET(req: NextRequest) {
@@ -38,46 +44,57 @@ export async function GET(req: NextRequest) {
   if (!token) return new Response('Unauthorized', { status: 401 });
 
   const supabase = createAuthedSupabaseClient(token);
+  let userId: string;
   try {
     const { data, error } = await supabase.auth.getUser();
     if (error || !data?.user) return new Response('Unauthorized', { status: 401 });
+    userId = data.user.id;
   } catch {
     return new Response('Unauthorized', { status: 401 });
   }
 
-  const country = list(sp, 'country');
-  const industry = list(sp, 'industry');
-  const size = list(sp, 'size');
-  const name = (sp.get('name') ?? '').trim();
+  const requestId = req.headers.get('x-request-id') ?? crypto.randomUUID();
+  const filters = pdlFiltersFromSearchParams(sp);
   const all = sp.get('all') === '1';
-  const max = all ? Infinity : Math.max(1, Number(sp.get('max') ?? '1000'));
+  const requestedMax = Number(sp.get('max') ?? '1000');
+  const max = all
+    ? Infinity
+    : Math.max(1, Number.isFinite(requestedMax) ? Math.floor(requestedMax) : 1000);
   const asZip = sp.get('format') === 'zip';
 
-  async function* rowBatches(): AsyncGenerator<Row[]> {
-    let lastId = '';
-    let emitted = 0;
-    while (emitted < max) {
-      let q = supabase
-        .from('pdl_companies')
-        .select('id,name,website,industry,size,country,locality,description')
-        .gt('id', lastId)
-        .order('id', { ascending: true })
-        .limit(BATCH);
-      if (country.length) q = q.in('country', country);
-      if (industry.length) q = q.in('industry', industry);
-      if (size.length) q = q.in('size', size);
-      if (name) q = q.ilike('name', `%${name.replace(/[%_]/g, '')}%`);
+  const pageIterator = iteratePdlCompanyPages(
+    supabase as unknown as PdlRpcClient,
+    filters,
+    { pageSize: BATCH, maxRows: max },
+  );
+  let firstPage: PdlCompanyCatalogRow[];
+  try {
+    const first = await pageIterator.next();
+    if (first.done || !first.value.length) {
+      return jsonError('По выбранным фильтрам компании не найдены.', 404, requestId);
+    }
+    firstPage = first.value;
+  } catch (error) {
+    const readError = error instanceof PdlCompanyReadError ? error : null;
+    await logError(
+      'company_base.export.failed',
+      readError ? new Error(readError.rawMessage) : error,
+      { ...filters, phase: 'first_page' },
+      { userId, requestId },
+    );
+    return jsonError(
+      readError?.message ?? 'Не удалось подготовить выгрузку. Повторите попытку.',
+      readError?.retryable ? 503 : 500,
+      requestId,
+    );
+  }
 
-      const { data, error } = await q;
-      if (error) throw new Error(error.message);
-      const batch = (data ?? []) as Row[];
-      if (batch.length === 0) break;
-      lastId = batch[batch.length - 1].id;
-      let rows = batch;
-      if (emitted + rows.length > max) rows = rows.slice(0, max - emitted);
-      emitted += rows.length;
-      yield rows;
-      if (batch.length < BATCH) break;
+  async function* rowBatches(): AsyncGenerator<PdlCompanyCatalogRow[]> {
+    yield firstPage;
+    for (;;) {
+      const next = await pageIterator.next();
+      if (next.done) return;
+      yield next.value;
     }
   }
 
@@ -104,14 +121,24 @@ export async function GET(req: NextRequest) {
             if (inPart >= PART_ROWS) flush();
           }
         }
-        if (inPart > 0 || partNo === 1) flush();
+        if (inPart > 0) flush();
         await archive.finalize();
-      } catch {
+      } catch (error) {
+        await logError(
+          'company_base.export.failed',
+          error instanceof PdlCompanyReadError ? new Error(error.rawMessage) : error,
+          { ...filters, phase: 'stream' },
+          { userId, requestId },
+        );
         archive.abort();
       }
     })();
     return new Response(Readable.toWeb(archive) as ReadableStream, {
-      headers: { 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="eu_us_companies_${stamp}.zip"` },
+      headers: {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': `attachment; filename="eu_us_companies_${stamp}.zip"`,
+        'Cache-Control': 'no-store',
+      },
     });
   }
 
@@ -137,6 +164,10 @@ export async function GET(req: NextRequest) {
   });
 
   return new Response(stream, {
-    headers: { 'Content-Type': 'text/csv;charset=utf-8', 'Content-Disposition': `attachment; filename="eu_us_companies_${stamp}.csv"` },
+    headers: {
+      'Content-Type': 'text/csv;charset=utf-8',
+      'Content-Disposition': `attachment; filename="eu_us_companies_${stamp}.csv"`,
+      'Cache-Control': 'no-store',
+    },
   });
 }
