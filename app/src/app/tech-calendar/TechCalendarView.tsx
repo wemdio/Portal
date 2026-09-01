@@ -202,12 +202,12 @@ export default function TechCalendarView() {
         </div>
       </div>
 
-      <label className="inline-flex items-center gap-2 text-sm text-gray-600">
+      <label className="inline-flex h-9 cursor-pointer select-none items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-700 shadow-sm transition hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-200 dark:hover:bg-white/10">
         <input
           type="checkbox"
           checked={showHidden}
           onChange={(e) => setShowHidden(e.target.checked)}
-          className="h-4 w-4 rounded border-gray-300 text-blue-600"
+          className="h-4 w-4 rounded border-gray-300 text-blue-600 accent-blue-600"
         />
         Показать скрытые
       </label>
@@ -324,9 +324,18 @@ function ProviderBalances({ balances }: { balances: TechProviderBalance[] }) {
       updated_at: '',
     },
   ] satisfies TechProviderBalance[];
+  const columns = Math.min(ordered.length, 4);
+  const gridClassName =
+    columns === 1
+      ? 'grid grid-cols-1 gap-3'
+      : columns === 2
+        ? 'grid grid-cols-1 gap-3 sm:grid-cols-2'
+        : columns === 3
+          ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3'
+          : 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4';
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+    <div className={gridClassName}>
       {ordered.map((balance) => (
         <div key={balance.provider} className="rounded-xl border border-gray-100 bg-white p-4">
           <div className="text-xs text-gray-500">
