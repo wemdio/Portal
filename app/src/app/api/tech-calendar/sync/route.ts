@@ -10,6 +10,7 @@ export const runtime = 'nodejs';
 
 const SPACEPROXY_API_KEY = process.env.SPACEPROXY_API_KEY ?? '';
 const SERPER_API_KEY = process.env.SERPER_API_KEY ?? '';
+const PROXY_MARKET_API_KEY = process.env.PROXY_MARKET_API_KEY ?? '';
 
 export async function POST(req: NextRequest) {
   const guard = await requireAdmin(req);
@@ -22,6 +23,7 @@ export async function POST(req: NextRequest) {
       now: new Date(),
       spaceProxyApiKey: SPACEPROXY_API_KEY,
       serperApiKey: SERPER_API_KEY,
+      proxyMarketApiKey: PROXY_MARKET_API_KEY,
     });
     return NextResponse.json({ ok: true, sync });
   } catch (e) {

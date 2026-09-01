@@ -9,6 +9,7 @@ export const runtime = 'nodejs';
 const CRON_SECRET = process.env.CRON_SECRET ?? '';
 const SPACEPROXY_API_KEY = process.env.SPACEPROXY_API_KEY ?? '';
 const SERPER_API_KEY = process.env.SERPER_API_KEY ?? '';
+const PROXY_MARKET_API_KEY = process.env.PROXY_MARKET_API_KEY ?? '';
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -30,6 +31,7 @@ async function run() {
       now: new Date(),
       spaceProxyApiKey: SPACEPROXY_API_KEY,
       serperApiKey: SERPER_API_KEY,
+      proxyMarketApiKey: PROXY_MARKET_API_KEY,
     });
     return NextResponse.json({ ok: true, sync });
   } catch (e) {

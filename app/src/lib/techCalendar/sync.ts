@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+import { runProxyMarketTechCalendarSync, type ProxyMarketSyncResult } from '@/lib/techCalendar/proxyMarketSync';
 import { runSerperBalanceSync, type SerperBalanceSyncResult } from '@/lib/techCalendar/serperBalanceSync';
 import { runSpaceProxyTechCalendarSync, type TechCalendarSyncResult } from '@/lib/techCalendar/spaceProxySync';
 
@@ -8,6 +9,7 @@ export interface RunTechCalendarSyncDeps {
   now: Date;
   spaceProxyApiKey?: string;
   serperApiKey?: string;
+  proxyMarketApiKey?: string;
 }
 
 export interface ProviderSyncOutcome<T> {
@@ -20,6 +22,7 @@ export interface ProviderSyncOutcome<T> {
 export interface RunTechCalendarSyncResult {
   spaceproxy: ProviderSyncOutcome<TechCalendarSyncResult>;
   serper: ProviderSyncOutcome<SerperBalanceSyncResult>;
+  proxymarket: ProviderSyncOutcome<ProxyMarketSyncResult>;
 }
 
 function skipped<T>(message: string): ProviderSyncOutcome<T> {
@@ -34,6 +37,7 @@ export async function runTechCalendarSync(deps: RunTechCalendarSyncDeps): Promis
   const result: RunTechCalendarSyncResult = {
     spaceproxy: skipped('SPACEPROXY_API_KEY is not set'),
     serper: skipped('SERPER_API_KEY is not set'),
+    proxymarket: skipped('PROXY_MARKET_API_KEY is not set'),
   };
 
   const spaceProxyApiKey = deps.spaceProxyApiKey?.trim();
@@ -65,6 +69,22 @@ export async function runTechCalendarSync(deps: RunTechCalendarSyncDeps): Promis
       };
     } catch (e) {
       result.serper = failed(e);
+    }
+  }
+
+  const proxyMarketApiKey = deps.proxyMarketApiKey?.trim();
+  if (proxyMarketApiKey) {
+    try {
+      result.proxymarket = {
+        ok: true,
+        result: await runProxyMarketTechCalendarSync({
+          db: deps.db,
+          apiKey: proxyMarketApiKey,
+          now: deps.now,
+        }),
+      };
+    } catch (e) {
+      result.proxymarket = failed(e);
     }
   }
 

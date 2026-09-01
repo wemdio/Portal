@@ -166,6 +166,14 @@ describe('GET списка', () => {
           synced_at: '2026-09-01T06:00:00.000Z',
           last_error: null,
           updated_at: '2026-09-01T06:00:00.000Z',
+        }, {
+          provider: 'proxymarket',
+          label: 'proxy.market',
+          balance: 32,
+          unit: 'RUB',
+          synced_at: '2026-09-01T06:00:00.000Z',
+          last_error: null,
+          updated_at: '2026-09-01T06:00:00.000Z',
         }],
       },
     });
@@ -175,9 +183,10 @@ describe('GET списка', () => {
     const json = await res.json();
     expect(json.subscriptions).toHaveLength(1);
     expect(json.subscriptions[0].service_name).toBe('Bright Data');
-    expect(json.balances).toEqual([
+    expect(json.balances).toEqual(expect.arrayContaining([
       expect.objectContaining({ provider: 'serper', balance: 9909, unit: 'credits' }),
-    ]);
+      expect.objectContaining({ provider: 'proxymarket', balance: 32, unit: 'RUB' }),
+    ]));
   });
 
   it('скрытые строки отдаёт только по явному запросу', async () => {

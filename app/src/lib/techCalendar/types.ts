@@ -33,18 +33,19 @@ export const CYCLE_LABELS: Record<BillingCycle, string> = {
 export const TECH_STATUSES = ['active', 'pending_review', 'keep', 'cancel'] as const;
 export type TechStatus = (typeof TECH_STATUSES)[number];
 
-export const TECH_SOURCES = ['manual', 'spaceproxy'] as const;
+export const TECH_SOURCES = ['manual', 'spaceproxy', 'proxymarket'] as const;
 export type TechSource = (typeof TECH_SOURCES)[number];
 
 export const TECH_SOURCE_LABELS: Record<TechSource, string> = {
   manual: 'Вручную',
   spaceproxy: 'SpaceProxy',
+  proxymarket: 'proxy.market',
 };
 
-export const TECH_BALANCE_PROVIDERS = ['serper'] as const;
+export const TECH_BALANCE_PROVIDERS = ['serper', 'proxymarket'] as const;
 export type TechBalanceProvider = (typeof TECH_BALANCE_PROVIDERS)[number];
 
-export type TechBalanceUnit = 'credits';
+export type TechBalanceUnit = 'credits' | 'RUB';
 
 export const STATUS_LABELS: Record<TechStatus, string> = {
   active: 'Активна',

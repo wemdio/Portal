@@ -16,6 +16,18 @@ const MONTH_NAMES = [
   'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
 ];
 
+const SYNC_PROVIDER_LABELS: Record<string, string> = {
+  spaceproxy: 'SpaceProxy',
+  serper: 'Serper',
+  proxymarket: 'proxy.market',
+};
+
+type SyncOutcomeResponse = {
+  ok?: boolean;
+  skipped?: boolean;
+  error?: string;
+};
+
 async function authHeaders(): Promise<Record<string, string>> {
   const { data: { session } } = await supabase.auth.getSession();
   return {
@@ -123,7 +135,7 @@ export default function TechCalendarView() {
     }
   };
 
-  const syncSpaceProxy = async () => {
+  const syncTechCalendar = async () => {
     setSyncing(true);
     setError(null);
     try {
@@ -136,9 +148,10 @@ export default function TechCalendarView() {
         setError(json.error ?? 'Не удалось синхронизировать техничку');
         return;
       }
-      if (json.sync?.serper && !json.sync.serper.ok) {
-        setError(`Serper: ${json.sync.serper.error ?? 'не удалось обновить кредиты'}`);
-      }
+      const failedProviders = Object.entries((json.sync ?? {}) as Record<string, SyncOutcomeResponse>)
+        .filter(([, outcome]) => outcome && !outcome.ok && !outcome.skipped)
+        .map(([provider, outcome]) => `${SYNC_PROVIDER_LABELS[provider] ?? provider}: ${outcome.error ?? 'ошибка синка'}`);
+      if (failedProviders.length) setError(failedProviders.join('; '));
       await load();
     } finally {
       setSyncing(false);
@@ -171,7 +184,7 @@ export default function TechCalendarView() {
           <button
             type="button"
             disabled={syncing}
-            onClick={syncSpaceProxy}
+            onClick={syncTechCalendar}
             className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60"
           >
             {syncing ? 'Синхронизация...' : 'Синк сейчас'}
@@ -271,8 +284,11 @@ export default function TechCalendarView() {
   );
 }
 
-function formatCredits(value: number | null): string {
+function formatBalance(value: number | null, unit: TechProviderBalance['unit']): string {
   if (value === null) return 'нет данных';
+  if (unit === 'RUB') {
+    return value.toLocaleString('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 2 });
+  }
   return value.toLocaleString('ru-RU', { maximumFractionDigits: 2 });
 }
 
@@ -287,18 +303,26 @@ function formatSyncTime(value: string | null): string {
 }
 
 function ProviderBalances({ balances }: { balances: TechProviderBalance[] }) {
-  const serper = balances.find((b) => b.provider === 'serper');
-  if (!serper) return null;
+  if (!balances.length) return null;
+  const providerOrder: Record<TechProviderBalance['provider'], number> = {
+    serper: 0,
+    proxymarket: 1,
+  };
+  const ordered = [...balances].sort((a, b) => providerOrder[a.provider] - providerOrder[b.provider]);
 
   return (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-      <div className="rounded-xl border border-gray-100 bg-white p-4">
-        <div className="text-xs text-gray-500">Serper credits</div>
-        <div className="mt-1 text-2xl font-semibold text-gray-900">{formatCredits(serper.balance)}</div>
-        <div className={`mt-1 text-xs ${serper.last_error ? 'text-red-600' : 'text-gray-500'}`}>
-          {serper.last_error ? `Ошибка синка: ${serper.last_error}` : `Синк: ${formatSyncTime(serper.synced_at)}`}
+      {ordered.map((balance) => (
+        <div key={balance.provider} className="rounded-xl border border-gray-100 bg-white p-4">
+          <div className="text-xs text-gray-500">
+            {balance.provider === 'serper' ? 'Serper credits' : `${balance.label} баланс`}
+          </div>
+          <div className="mt-1 text-2xl font-semibold text-gray-900">{formatBalance(balance.balance, balance.unit)}</div>
+          <div className={`mt-1 text-xs ${balance.last_error ? 'text-red-600' : 'text-gray-500'}`}>
+            {balance.last_error ? `Ошибка синка: ${balance.last_error}` : `Синк: ${formatSyncTime(balance.synced_at)}`}
+          </div>
         </div>
-      </div>
+      ))}
     </div>
   );
 }
