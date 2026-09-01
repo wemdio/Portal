@@ -19,7 +19,7 @@ interface Props {
 
 function dayTotals(subs: TechSubscription[]) {
   return subs
-    .filter((s) => s.status !== 'cancel')
+    .filter((s) => s.status !== 'cancel' && !s.is_hidden)
     .reduce((acc, s) => addMoney(acc, s.currency, s.amount), emptyTotals());
 }
 
@@ -75,7 +75,7 @@ export default function MonthGrid({ subscriptions, year, month, today, onSelect 
                       key={sub.id}
                       type="button"
                       onClick={() => onSelect(sub)}
-                      className={`flex w-full items-center gap-1 rounded px-1.5 py-1 text-left text-[11px] ${style.bg} ${style.text}`}
+                      className={`flex w-full items-center gap-1 rounded px-1.5 py-1 text-left text-[11px] ${style.bg} ${style.text} ${sub.is_hidden ? 'opacity-45 line-through' : ''}`}
                     >
                       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${style.dot}`} />
                       <span className="truncate">{sub.service_name}</span>
@@ -112,7 +112,7 @@ export default function MonthGrid({ subscriptions, year, month, today, onSelect 
                     className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-gray-50"
                   >
                     <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${style.dot}`} />
-                    <span className="truncate">{sub.service_name}</span>
+                    <span className={`truncate ${sub.is_hidden ? 'text-gray-400 line-through' : ''}`}>{sub.service_name}</span>
                     <span className={`ml-auto shrink-0 rounded px-1.5 py-0.5 ${style.bg} ${style.text}`}>
                       {STATUS_LABELS[sub.status]}
                     </span>

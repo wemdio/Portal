@@ -18,7 +18,7 @@ const UPCOMING_AHEAD_DAYS = 7;
 const UPCOMING_BEHIND_DAYS = 3;
 
 function isPayable(sub: TechSubscription): boolean {
-  return sub.status !== 'cancel';
+  return sub.status !== 'cancel' && !sub.is_hidden;
 }
 
 function inMonth(sub: TechSubscription, year: number, month: number): boolean {
@@ -53,7 +53,7 @@ export function activeCount(subs: TechSubscription[]): number {
 }
 
 export function pendingCount(subs: TechSubscription[]): number {
-  return subs.filter((s) => s.status === 'pending_review').length;
+  return subs.filter((s) => s.status === 'pending_review' && !s.is_hidden).length;
 }
 
 /** Сколько решений ждёт ответа в ближайшие `days` дней. Просрочка тоже ждёт. */
@@ -64,6 +64,7 @@ export function decisionsDueWithin(
 ): number {
   return subs.filter((s) => {
     if (s.status !== 'active' && s.status !== 'pending_review') return false;
+    if (s.is_hidden) return false;
     return daysUntil(s.next_billing_date, todayStr) <= days;
   }).length;
 }

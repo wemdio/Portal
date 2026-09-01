@@ -1,6 +1,7 @@
 /** @jest-environment node */
 
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { listAllBenchTools } from '@/lib/bench/registry';
 import { join } from 'node:path';
 
 const BENCH_ROUTES = join(process.cwd(), 'src/app/api/bench');
@@ -55,5 +56,38 @@ describe('изоляция витрины', () => {
     // Не «запрещено настройкой» — такого глагола в разделе просто нет.
     expect(files.filter((f) => /export async function DELETE/.test(read(f)))).toEqual([]);
     expect(files.filter((f) => /\.delete\(\)/.test(read(f)))).toEqual([]);
+  });
+
+  it('документация знает про каждый инструмент реестра', () => {
+    // Добавили адаптер и забыли документацию — падает здесь. `GET /tools`
+    // расскажет о новом инструменте сам, но человек, которому дали ключ,
+    // читает сначала файл.
+    const doc = readFileSync(join(process.cwd(), 'public/api-portal.md'), 'utf8');
+    const undocumented = listAllBenchTools()
+      .map((tool) => tool.id)
+      .filter((id) => !doc.includes(`\`${id}\``));
+    expect(undocumented).toEqual([]);
+  });
+
+  it('документация не обещает остановку там, где её нет', () => {
+    const doc = readFileSync(join(process.cwd(), 'public/api-portal.md'), 'utf8');
+    const rows = doc.split('\n');
+    const mismatched = listAllBenchTools()
+      .filter((tool) => tool.kind === 'job')
+      .filter((tool) => {
+        const row = rows.find((line) => line.startsWith(`| \`${tool.id}\``));
+        if (!row) return false;
+        const promised = row.trimEnd().endsWith('| да |');
+        return promised !== (tool as { stop: { supported: boolean } }).stop.supported;
+      })
+      .map((tool) => tool.id);
+    expect(mismatched).toEqual([]);
+  });
+
+  it('кнопка «Скачать» в админке ведёт на существующий файл', () => {
+    // Иначе страница соберётся, тесты пройдут, а человек нажмёт и получит 404.
+    const page = readFileSync(join(process.cwd(), 'src/app/admin/bench-keys/page.tsx'), 'utf8');
+    expect(page).toContain('href="/api-portal.md"');
+    expect(existsSync(join(process.cwd(), 'public/api-portal.md'))).toBe(true);
   });
 });

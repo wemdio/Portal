@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Copy, KeyRound, Plus, RefreshCw, ScrollText, X } from 'lucide-react';
+import { AlertTriangle, BookOpen, Copy, Download, KeyRound, Plus, RefreshCw, ScrollText, X } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 
 interface BenchKey {
@@ -163,11 +163,12 @@ export default function BenchKeysPage() {
         <div>
           <h1 className="text-2xl font-semibold flex items-center gap-2">
             <KeyRound className="w-6 h-6" />
-            Ключи API
+            API портала
           </h1>
           <p className="text-sm text-gray-500 mt-1">
-            Доступ подрядчиков к нашим парсерам и конструктору баз снаружи.
-            Каждый ключ видит только свои задачи и только открытые ему инструменты.
+            Программный доступ к нашим инструментам — для своих автоматизаций,
+            подрядчиков и сервисов. Каждый ключ видит только свои задачи и
+            только открытые ему инструменты.
           </p>
         </div>
         <button
@@ -185,6 +186,39 @@ export default function BenchKeysPage() {
           <span>{error}</span>
         </div>
       )}
+
+      {/* Документ лежит в app/public и едет в образ вместе с приложением —
+          то есть здесь всегда та версия, что в выкаченной ветке, а не копия,
+          которую забыли обновить. Ссылка ведёт на статику портала, поэтому
+          её видят только сотрудники: middleware гейтит и статические пути. */}
+      <div className="mb-8 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 p-4">
+        <div>
+          <p className="font-medium text-sm">Документация</p>
+          <p className="text-sm text-gray-500">
+            Все ручки, инструменты, коды ошибок, лимиты и примеры на curl и Python.
+            Отдаётся текущая версия из выкаченной ветки.
+          </p>
+        </div>
+        <div className="flex gap-2 shrink-0">
+          <a
+            href="/api-portal.md"
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50"
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            Открыть
+          </a>
+          <a
+            href="/api-portal.md"
+            download="API Portal.md"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-gray-900 px-3 py-1.5 text-sm text-white hover:bg-gray-800"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Скачать
+          </a>
+        </div>
+      </div>
 
       {/* Ключ показывается ровно один раз: в базе лежит только его отпечаток,
           восстановить его потом неоткуда. */}
