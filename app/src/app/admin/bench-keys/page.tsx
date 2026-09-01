@@ -187,17 +187,17 @@ export default function BenchKeysPage() {
         </div>
       )}
 
-      {/* Документ лежит в app/public и едет в образ вместе с приложением —
-          то есть здесь всегда та версия, что в выкаченной ветке, а не копия,
-          которую забыли обновить. Ссылка ведёт на статику портала, поэтому
-          её видят только сотрудники: middleware гейтит и статические пути. */}
+      {/* Документы лежат в app/public и едут в образ вместе с приложением —
+          здесь всегда версия из выкаченной ветки, а не копия, которую забыли
+          обновить. Ключ в эти файлы не вставляем: его дают отдельным
+          сообщением и при необходимости отзывают. */}
       <div className="mb-8 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 p-4">
         <div>
           <p className="font-medium text-sm">Документация</p>
           <p className="text-sm text-gray-500">
-            Обзор — что это и что можно запускать, простым языком. Справочник —
-            каждая ручка с параметрами, ответами и ошибками. Отдаётся текущая
-            версия из выкаченной ветки.
+            Обзор — обязательная памятка безопасности для людей без опыта в
+            коде. Контекст для ИИ-чата — файл, который прикладывают к ChatGPT,
+            Claude или Cursor вместе с ключом.
           </p>
         </div>
         <div className="flex flex-wrap gap-2 shrink-0">
@@ -210,12 +210,12 @@ export default function BenchKeysPage() {
             Обзор
           </a>
           <a
-            href="/api-portal-endpoints.md"
-            download="API портала — справочник ручек.md"
+            href="/portal-api-ai-context.md"
+            download="Контекст для ИИ-чата.md"
             className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50"
           >
             <Download className="w-3.5 h-3.5" />
-            Справочник ручек
+            Контекст для ИИ-чата
           </a>
         </div>
       </div>
