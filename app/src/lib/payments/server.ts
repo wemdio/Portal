@@ -7,7 +7,11 @@ import { logError } from '@/lib/loggerServer';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import type {
   PaymentApprovalReason,
+  PaymentBudgetScope,
   PaymentBudgetLevel,
+  PaymentCostBudgetSummary,
+  PaymentCostCategory,
+  PaymentCostCategoryTotals,
   PaymentDepartment,
   PaymentExpenseType,
   PaymentMonthSummary,
@@ -173,6 +177,8 @@ export function paymentRequestToApi(
       : null,
     comment: stringOrNull(row.comment),
     expenseType: row.expense_type as PaymentExpenseType,
+    budgetScope: (stringOrNull(row.budget_scope) ?? 'general') as PaymentBudgetScope,
+    costCategory: stringOrNull(row.cost_category) as PaymentCostCategory | null,
     expectedPaymentOn: stringOrNull(row.expected_payment_on) ?? '',
     urgency: row.urgency as PaymentUrgency,
     documentUrl,
@@ -200,6 +206,42 @@ function readSummaryValue(
 
 export function paymentSummaryToApi(value: unknown): PaymentMonthSummary {
   const row = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+  const rawCostBudget = readSummaryValue(row, 'costBudget', 'cost_budget');
+  const costRow = (rawCostBudget && typeof rawCostBudget === 'object'
+    ? rawCostBudget
+    : {}) as Record<string, unknown>;
+  const rawByCategory = readSummaryValue(costRow, 'byCategory', 'by_category');
+  const categoryRow = (rawByCategory && typeof rawByCategory === 'object'
+    ? rawByCategory
+    : {}) as Record<string, unknown>;
+  const categories: PaymentCostCategory[] = ['instantly', 'email', 'bases', 'domains', 'other'];
+  const byCategory = Object.fromEntries(categories.map((category) => {
+    const raw = categoryRow[category];
+    const totals = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    return [category, {
+      paid: numberOrZero(totals.paid),
+      reserved: numberOrZero(totals.reserved),
+    }];
+  })) as PaymentCostCategoryTotals;
+  const costBudget: PaymentCostBudgetSummary = {
+    limit: numberOrZero(costRow.limit),
+    paid: numberOrZero(costRow.paid),
+    reserved: numberOrZero(costRow.reserved),
+    used: numberOrZero(costRow.used),
+    remaining: numberOrZero(costRow.remaining),
+    overage: numberOrZero(costRow.overage),
+    usagePct: numberOrZero(readSummaryValue(costRow, 'usagePct', 'usage_pct')),
+    level: (costRow.level ?? 'normal') as PaymentBudgetLevel,
+    dataComplete: readSummaryValue(costRow, 'dataComplete', 'data_complete') !== false,
+    missingFxCount: numberOrZero(readSummaryValue(costRow, 'missingFxCount', 'missing_fx_count')),
+    mailPaid: numberOrZero(readSummaryValue(costRow, 'mailPaid', 'mail_paid')),
+    mailReserved: numberOrZero(readSummaryValue(costRow, 'mailReserved', 'mail_reserved')),
+    techPaid: numberOrZero(readSummaryValue(costRow, 'techPaid', 'tech_paid')),
+    techReserved: numberOrZero(readSummaryValue(costRow, 'techReserved', 'tech_reserved')),
+    manualPaid: numberOrZero(readSummaryValue(costRow, 'manualPaid', 'manual_paid')),
+    manualReserved: numberOrZero(readSummaryValue(costRow, 'manualReserved', 'manual_reserved')),
+    byCategory,
+  };
   return {
     limit: numberOrZero(readSummaryValue(row, 'limit', 'limit')),
     paidOneTime: numberOrZero(readSummaryValue(row, 'paidOneTime', 'paid_one_time')),
@@ -214,6 +256,7 @@ export function paymentSummaryToApi(value: unknown): PaymentMonthSummary {
     paidAll: numberOrZero(readSummaryValue(row, 'paidAll', 'paid_all')),
     pendingCount: numberOrZero(readSummaryValue(row, 'pendingCount', 'pending_count')),
     approvedCount: numberOrZero(readSummaryValue(row, 'approvedCount', 'approved_count')),
+    costBudget,
   };
 }
 
@@ -277,6 +320,20 @@ export function paymentRpcError(error: { message?: string } | null | undefined):
   }
   if (message.includes('payment_request_project_not_found')) {
     return { status: 400, code: 'invalid_project', message: 'Выбранный проект не найден.' };
+  }
+  if (message.includes('payment_request_cost_limit_exceeded')) {
+    return {
+      status: 409,
+      code: 'cost_limit_exceeded',
+      message: 'Лимит костов 650 000 ₽ на этот месяц будет превышен.',
+    };
+  }
+  if (message.includes('payment_request_cost_budget_incomplete')) {
+    return {
+      status: 409,
+      code: 'cost_budget_incomplete',
+      message: 'Не удалось пересчитать календарь почт в рубли. Обновите курсы и повторите.',
+    };
   }
   return null;
 }

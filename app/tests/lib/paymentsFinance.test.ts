@@ -141,25 +141,12 @@ describe('summarizePaymentsFinanceMonth', () => {
 });
 
 describe('/finance integration contract', () => {
-  const source = readFileSync(resolve(process.cwd(), 'src/app/finance/page.tsx'), 'utf8');
+  const pageSource = readFileSync(resolve(process.cwd(), 'src/app/finance/page.tsx'), 'utf8');
+  const layoutSource = readFileSync(resolve(process.cwd(), 'src/app/finance/layout.tsx'), 'utf8');
 
-  it('не считает approved + created_at фактической оплатой', () => {
-    expect(source).not.toMatch(/\.eq\(\s*['"]status['"]\s*,\s*['"]approved['"]\s*\)/);
-    expect(source).not.toMatch(/new Date\(\s*p\.created_at\s*\)/);
-  });
-
-  it('использует общий financial helper и защищённый месячный read-model', () => {
-    expect(source).toMatch(/summarizePaymentsFinanceMonth/);
-    expect(source).toMatch(/loadPayments/);
-  });
-
-  it('применяет одну проекцию к выбранному месяцу, MoM и годовой динамике', () => {
-    expect(source.match(/summarizePaymentsFinanceMonth\(/g)).toHaveLength(3);
-  });
-
-  it('загружает месяцы параллельно и отменяет устаревший годовой запрос', () => {
-    expect(source).toMatch(/new AbortController\(\)/);
-    expect(source).toMatch(/Promise\.all\(/);
-    expect(source).toMatch(/controller\.abort\(\)/);
+  it('keeps the unfinished implementation intact but redirects old bookmarks to «Оплаты»', () => {
+    expect(layoutSource).toMatch(/redirect\(['"]\/payments['"]\)/);
+    expect(layoutSource).not.toMatch(/children/);
+    expect(pageSource).toMatch(/summarizePaymentsFinanceMonth|loadPayments|supabase/);
   });
 });

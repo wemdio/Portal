@@ -68,7 +68,6 @@ export const navTree: NavEntry[] = [
   { id: 'tasks', name: 'Задачи', nameEn: 'Tasks', href: '/tasks' },
   { id: 'board', name: 'Доска', nameEn: 'Board', href: '/board', navTabId: 'nav-tasks-board' },
   { id: 'team', name: 'Команда', nameEn: 'Team', href: '/team' },
-  { id: 'finance', name: 'Финансы', nameEn: 'Finance', href: '/finance' },
   { id: 'instantly', name: 'Instantly', nameEn: 'Instantly', href: '/instantly', requiresTool: 'instantly' },
   { id: 'tools', name: 'Инструменты', nameEn: 'Tools', href: '/tools' },
   { id: 'payments', name: 'Оплаты', nameEn: 'Payments', href: '/payments' },

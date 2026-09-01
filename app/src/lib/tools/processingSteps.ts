@@ -24,8 +24,15 @@ import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator'
 import { isSupportEmail } from './supportEmails';
 import { makeCheckpointGate } from './checkpointGate';
 import {
+  EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
+  EMAIL_VALIDATION_MAX_ATTEMPTS,
   ENRICH_CHECKPOINT_ATTEMPTED_COL,
+  parseEmailValidationCheckpointState,
+  serializeEmailValidationCheckpointState,
+  stripBaseConstructorCheckpointMetadata,
   stripEnrichCheckpointMetadata,
+  type EmailValidationCheckpointEntry,
+  type EmailValidationCheckpointState,
 } from './baseConstructorCheckpoint';
 import {
   CLEANUP_JSON_SYSTEM_PROMPT,
@@ -39,7 +46,10 @@ import {
 // продолжают работать. Каноничная реализация теперь в nameCleanupProtocol.
 export { parseCleanupResponseJson, parseCleanupResponse };
 export {
+  EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
+  EMAIL_VALIDATION_MAX_ATTEMPTS,
   ENRICH_CHECKPOINT_ATTEMPTED_COL,
+  stripBaseConstructorCheckpointMetadata,
   stripEnrichCheckpointMetadata,
 } from './baseConstructorCheckpoint';
 
@@ -1663,7 +1673,10 @@ export async function stepValidateEmails(
   if ((target === 'found' || target === 'both') && foundEmailIdx >= 0) {
     indicesToValidate.push(foundEmailIdx);
   }
-  if (indicesToValidate.length === 0) { await onProgress(100); return data; }
+  if (indicesToValidate.length === 0) {
+    await onProgress(100);
+    return stripBaseConstructorCheckpointMetadata(data);
+  }
 
   // Status/provider колонки добавляем по одной паре на каждую валидируемую
   // колонку. Имена префиксуем явно чтобы юзер в финальном экспорте понимал
@@ -1698,10 +1711,64 @@ export async function stepValidateEmails(
     }
     meta.push({ srcIdx: idx, statusIdx, providerIdx, label: srcLabel });
   }
+
+  // The private state column exists only while checkpoints are useful: a
+  // normal standalone invocation should retain the historical public schema,
+  // whereas a worker run (onCheckpoint supplied) or a resume (column already
+  // present) needs durable per-email verdicts and attempt counts.
+  let checkpointStateIdx = newHeader.indexOf(EMAIL_VALIDATION_CHECKPOINT_STATE_COL);
+  const resumedWithCheckpointState = checkpointStateIdx >= 0;
+  const tracksCheckpointState = checkpointStateIdx >= 0 || Boolean(options?.onCheckpoint);
+  if (tracksCheckpointState && checkpointStateIdx < 0) {
+    checkpointStateIdx = newHeader.length;
+    newHeader.push(EMAIL_VALIDATION_CHECKPOINT_STATE_COL);
+    for (const row of newBody) row.push('');
+  }
   // «Рваные» строки (короче header'а) добиваем пустыми ячейками, чтобы записи
   // по переиспользованным индексам не уходили в «дырки» массива.
   for (const row of newBody) {
     while (row.length < newHeader.length) row.push('');
+  }
+
+  const checkpointStateByRow: EmailValidationCheckpointState[] = newBody.map((row) =>
+    checkpointStateIdx >= 0
+      ? parseEmailValidationCheckpointState(row[checkpointStateIdx])
+      : {},
+  );
+
+  type ProbeResult = {
+    result: EmailValidationCheckpointEntry['result'];
+    is_free: boolean;
+    is_catch_all: boolean;
+    errorText: string;
+  };
+  const results = new Map<string, ProbeResult>();
+  const attemptsByEmail = new Map<string, number>();
+  const CONCLUSIVE_STATUSES = new Set(['ok', 'invalid', 'disposable', 'catch_all']);
+
+  // Seed per-email state from the durable checkpoint. If duplicate rows carry
+  // slightly different snapshots, prefer a conclusive verdict and always keep
+  // the largest attempt count so a restart can never replenish the budget.
+  for (const rowState of checkpointStateByRow) {
+    for (const [email, entry] of Object.entries(rowState)) {
+      const previousAttempts = attemptsByEmail.get(email) ?? 0;
+      attemptsByEmail.set(email, Math.max(previousAttempts, entry.attempts));
+      const previous = results.get(email);
+      const entryIsConclusive = CONCLUSIVE_STATUSES.has(entry.result);
+      const previousIsConclusive = previous
+        ? CONCLUSIVE_STATUSES.has(previous.result)
+        : false;
+      if (!previous
+        || (entryIsConclusive && !previousIsConclusive)
+        || (entryIsConclusive === previousIsConclusive && entry.attempts >= previousAttempts)) {
+        results.set(email, {
+          result: entry.result,
+          is_free: entry.isFree,
+          is_catch_all: entry.isCatchAll,
+          errorText: entry.errorText,
+        });
+      }
+    }
   }
 
   // Собираем ячейки для валидации. Мульти-email ячейка («a@x.ru, b@y.ru»)
@@ -1715,7 +1782,6 @@ export async function stepValidateEmails(
   // строки, у которых в переиспользованной колонке «… Статус» уже стоит
   // финальный вердикт (ok/invalid/disposable/catch_all), ПРОПУСКАЕМ —
   // повторная SMTP-проба ничего не даст. Перепроверяем только ''/unknown/error.
-  const CONCLUSIVE_STATUSES = new Set(['ok', 'invalid', 'disposable', 'catch_all']);
   type CellToValidate = {
     rowIdx: number;
     srcIdx: number;
@@ -1730,21 +1796,35 @@ export async function stepValidateEmails(
       const emails = extractEmails(newBody[r][m.srcIdx] || '');
       if (emails.length === 0) continue;
       const prevStatus = (newBody[r][m.statusIdx] || '').trim();
-      if (CONCLUSIVE_STATUSES.has(prevStatus)) continue;
+      const allEmailsDurablyAccountedFor = emails.every((email) => {
+        const previous = results.get(email);
+        if (!previous) return false;
+        return CONCLUSIVE_STATUSES.has(previous.result)
+          || (attemptsByEmail.get(email) ?? 0) >= EMAIL_VALIDATION_MAX_ATTEMPTS;
+      });
+      // Legacy/final exports have only the public aggregate status, so retain
+      // the old idempotent skip. A durable mid-step checkpoint, however, may
+      // contain `invalid` for the first address while another address in the
+      // same cell has not been probed yet; skip it only when every address is
+      // represented in the private per-email state.
+      if (CONCLUSIVE_STATUSES.has(prevStatus)
+        && (!resumedWithCheckpointState || allEmailsDurablyAccountedFor)) continue;
       cells.push({ rowIdx: r, srcIdx: m.srcIdx, statusIdx: m.statusIdx, providerIdx: m.providerIdx, emails });
-      for (const e of emails) uniqueEmails.add(e);
+      for (const e of emails) {
+        const previous = results.get(e);
+        const attempts = attemptsByEmail.get(e) ?? 0;
+        if (!previous || !CONCLUSIVE_STATUSES.has(previous.result)) {
+          if (attempts < EMAIL_VALIDATION_MAX_ATTEMPTS) uniqueEmails.add(e);
+        }
+      }
     }
   }
-
-  if (cells.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
 
   // Ранг статусов для выбора «лучшего» адреса в ячейке — общий модульный
   // statusRank (ok > catch_all > unknown > error > invalid > disposable,
   // пустой/неизвестный — ниже всех), вынесен наверх т.к. используется и
   // шагом cap_emails_per_company.
 
-  type ProbeResult = { result: string; is_free: boolean; is_catch_all: boolean; errorText: string };
-  const results = new Map<string, ProbeResult>();
   const domainCache = new Map<string, DomainInfo>();
 
   const runProbe = async (email: string): Promise<ProbeResult> => {
@@ -1784,6 +1864,32 @@ export async function stepValidateEmails(
     }
   }
 
+  const recordProbeResult = (email: string, result: ProbeResult) => {
+    const attempts = Math.min(
+      EMAIL_VALIDATION_MAX_ATTEMPTS,
+      (attemptsByEmail.get(email) ?? 0) + 1,
+    );
+    attemptsByEmail.set(email, attempts);
+    results.set(email, result);
+
+    if (checkpointStateIdx < 0) return;
+    const affectedRows = new Set(
+      (cellByEmail.get(email) ?? []).map((cell) => cell.rowIdx),
+    );
+    for (const rowIdx of affectedRows) {
+      checkpointStateByRow[rowIdx][email] = {
+        attempts,
+        result: result.result,
+        isFree: result.is_free,
+        isCatchAll: result.is_catch_all,
+        errorText: result.errorText,
+      };
+      newBody[rowIdx][checkpointStateIdx] = serializeEmailValidationCheckpointState(
+        checkpointStateByRow[rowIdx],
+      );
+    }
+  };
+
   // Пишет в «… Статус»/«… Провайдер» статус лучшего из УЖЕ проверенных
   // адресов ячейки. Пока не проверен ни один — ничего не пишет.
   const applyCellStatus = (cell: CellToValidate) => {
@@ -1802,6 +1908,12 @@ export async function stepValidateEmails(
     const domain = bestEmail.split('@')[1] || '';
     newBody[cell.rowIdx][cell.providerIdx] = best.is_free ? 'free' : best.is_catch_all ? 'catch-all' : domain;
   };
+
+  // Rehydrate the public aggregate columns before deciding what still needs a
+  // probe. This matters for duplicated/multi-email rows: the private state is
+  // per address and is the source of truth after a crash, while the public
+  // status may have been captured one callback earlier.
+  for (const cell of cells) applyCellStatus(cell);
 
   // Round-robin по доменам: группируем адреса по домену и интерливим,
   // чтобы 10 одновременных проб пула не уперлись бурстом в один
@@ -1828,12 +1940,34 @@ export async function stepValidateEmails(
   const onCheckpoint = options?.onCheckpoint;
   const shouldCheckpoint = makeCheckpointGate();
   let cancelled = false;
+  let checkpointError: Error | null = null;
+  let checkpointChain: Promise<void> = Promise.resolve();
+  const enqueueCheckpoint = async (): Promise<void> => {
+    if (!onCheckpoint || checkpointError) return;
+    // Snapshot at enqueue time and serialize writes. Without both properties,
+    // two pool callbacks can PATCH concurrently and an older partial matrix
+    // may finish after the newer one, rolling durable progress backward.
+    const snapshot = [
+      [...newHeader],
+      ...newBody.map((row) => [...row]),
+    ];
+    checkpointChain = checkpointChain.then(async () => {
+      if (checkpointError) return;
+      try {
+        await onCheckpoint(snapshot);
+      } catch (err) {
+        checkpointError = err instanceof Error ? err : new Error(String(err));
+      }
+    });
+    await checkpointChain;
+  };
   const mainPassStartedAt = Date.now();
 
   await processInPool(toValidate, VALIDATION_CONCURRENCY, async (email) => {
+    if (checkpointError) return;
     if (isCancelled && await isCancelled()) { cancelled = true; return; }
     const r = await probe(email);
-    results.set(email, r);
+    recordProbeResult(email, r);
     const affected = cellByEmail.get(email);
     if (affected) for (const cell of affected) applyCellStatus(cell);
     done++;
@@ -1846,9 +1980,12 @@ export async function stepValidateEmails(
       await onProgress(Math.min(99, Math.round((done / toValidate.length) * 100)));
     }
     if (onCheckpoint && shouldCheckpoint(done, done === toValidate.length)) {
-      await onCheckpoint([newHeader, ...newBody]);
+      await enqueueCheckpoint();
     }
   });
+
+  await checkpointChain;
+  if (checkpointError) throw checkpointError;
 
   // Отмена посреди шага: НЕ отдаём полу-валидированную матрицу в фильтр —
   // строки со статусом '' (пробы не успели отработать) были бы выкинуты как
@@ -1868,7 +2005,8 @@ export async function stepValidateEmails(
   const retryable = toValidate.filter((e) => {
     const r = results.get(e);
     if (!r || (r.result !== 'unknown' && r.result !== 'error')) return false;
-    return RETRYABLE_ERROR_RE.test(r.errorText);
+    return RETRYABLE_ERROR_RE.test(r.errorText)
+      && (attemptsByEmail.get(e) ?? 0) < EMAIL_VALIDATION_MAX_ATTEMPTS;
   });
   if (retryable.length > 0 && !(isCancelled && await isCancelled())) {
     // Пауза нужна только если основной проход отработал быстро: на больших
@@ -1890,21 +2028,27 @@ export async function stepValidateEmails(
       if (isCancelled && await isCancelled()) throw new Error('Отменено');
     }
     let retryDone = 0;
+    const shouldRetryCheckpoint = makeCheckpointGate();
     await processInPool(retryable, VALIDATION_CONCURRENCY, async (email) => {
+      if (checkpointError) return;
       if (isCancelled && await isCancelled()) { cancelled = true; return; }
       const r = await runProbe(email); // свежая проба, мимо memo
-      results.set(email, r);
+      recordProbeResult(email, r);
       const affected = cellByEmail.get(email);
       if (affected) for (const cell of affected) applyCellStatus(cell);
       // Heartbeat и в самом пуле: на больших retry-списках пул идёт минуты,
       // молчание здесь — то же окно для stuck-reaper'а, что и пауза выше.
       retryDone++;
       if (retryDone % 10 === 0) await onProgress(99);
+      if (onCheckpoint && shouldRetryCheckpoint(retryDone, retryDone === retryable.length)) {
+        await enqueueCheckpoint();
+      }
     });
+    await checkpointChain;
+    if (checkpointError) throw checkpointError;
     if (cancelled || (isCancelled && await isCancelled())) {
       throw new Error('Отменено');
     }
-    if (onCheckpoint) await onCheckpoint([newHeader, ...newBody]);
   }
 
   // Фильтрация: строка остаётся ЕСЛИ хотя бы в одной из валидируемых колонок
@@ -1978,7 +2122,9 @@ export async function stepValidateEmails(
   });
 
   await onProgress(100);
-  return [newHeader, ...filtered];
+  // Attempt counters are strictly worker state. Neither the next pipeline
+  // step nor a completed export may observe the private JSON column.
+  return stripBaseConstructorCheckpointMetadata([newHeader, ...filtered]);
 }
 
 /* ═══════════════════════════════════════════

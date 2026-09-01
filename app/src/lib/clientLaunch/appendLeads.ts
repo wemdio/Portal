@@ -78,6 +78,8 @@ export interface AppendLeadsToClientCampaignInput {
 export interface AppendLeadsResult {
   accepted: number;
   skipped: number;
+  /** Exact positions in input.leads whose provider transport was started. */
+  attemptedIndexes: number[];
   /** Exact positions in input.leads, or null when the provider only returned an aggregate. */
   acceptedIndexes: number[] | null;
   identityComplete: boolean;
@@ -135,7 +137,13 @@ export async function appendLeadsToClientCampaign(
     throw new ClientLaunchError('Server misconfigured: supabaseInstantly is not available', 500);
   }
   if (input.leads.length === 0) {
-    return { accepted: 0, skipped: 0, acceptedIndexes: [], identityComplete: true };
+    return {
+      accepted: 0,
+      skipped: 0,
+      attemptedIndexes: [],
+      acceptedIndexes: [],
+      identityComplete: true,
+    };
   }
 
   const { userId, campaignId, leads, contextLabel } = input;
@@ -176,6 +184,7 @@ export async function appendLeadsToClientCampaign(
     return {
       accepted: 0,
       skipped: blockedCount,
+      attemptedIndexes: [],
       acceptedIndexes: [],
       identityComplete: true,
     };
@@ -244,11 +253,13 @@ export async function appendLeadsToClientCampaign(
   let externalSkipped = 0;
   let identityComplete = true;
   const acceptedIndexes: number[] = [];
+  const attemptedIndexes = new Set<number>();
   const batchIds: string[] = [];
 
   const currentResult = (): AppendLeadsResult => ({
     accepted,
     skipped: externalSkipped + blockedCount,
+    attemptedIndexes: [...attemptedIndexes].sort((a, b) => a - b),
     acceptedIndexes: identityComplete ? [...acceptedIndexes].sort((a, b) => a - b) : null,
     identityComplete,
   });
@@ -290,7 +301,14 @@ export async function appendLeadsToClientCampaign(
       const leadResult = await createLeads(
         chunk,
         { campaign_id: campaignId, skip_if_in_campaign: skipIfInCampaign },
-        instantlyRequestOptions,
+        {
+          ...instantlyRequestOptions,
+          onRequestAttempt: () => {
+            for (const index of sentInputIndexes.slice(offset, offset + chunk.length)) {
+              attemptedIndexes.add(index);
+            }
+          },
+        },
       );
       chunkAccepted = leadResult.leads_uploaded;
       createdLeads = leadResult.created_leads ?? [];

@@ -46,6 +46,10 @@ function findGroup(entries: ReturnType<typeof visibleNavEntries>): NavGroup | un
 }
 
 describe('nav tree shape', () => {
+  it('temporarily hides the unfinished «Финансы» section from every navigation surface', () => {
+    expect(navItems.some((item) => item.id === 'finance' || item.href === '/finance')).toBe(false);
+  });
+
   it('«Дашборды» — группа с «Первичкой», «Продлениями» и «Расходами и доходами»', () => {
     expect(isNavGroup(dashboards)).toBe(true);
     expect(dashboards.children.map((child) => child.id)).toEqual(['first-sales', 'renewals', 'expenses']);

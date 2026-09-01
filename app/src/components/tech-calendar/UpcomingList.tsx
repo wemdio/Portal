@@ -34,9 +34,14 @@ export default function UpcomingList({ subscriptions, today, onRenew, onDecide }
       <div className="divide-y divide-gray-50">
         {items.map((sub) => {
           const style = STATUS_STYLES[sub.status];
+          const daysToBilling = daysUntil(sub.next_billing_date, today);
+          const isAccepted = sub.status === 'keep';
+          const canRenew = isAccepted && daysToBilling <= 0;
+          const canKeep = !isAccepted;
+          const canCancel = !isAccepted || daysToBilling > 0;
           return (
             <div key={sub.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
-              <span className={`h-2 w-2 shrink-0 rounded-full ${style.dot}`} />
+              <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${style.dot}`} />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm font-medium text-gray-900">{sub.service_name}</div>
                 <div className="text-xs text-gray-500">
@@ -46,27 +51,33 @@ export default function UpcomingList({ subscriptions, today, onRenew, onDecide }
               <div className="text-sm font-medium text-gray-900">{formatMoney(sub.amount, sub.currency)}</div>
               <span className={`rounded px-2 py-1 text-xs ${style.bg} ${style.text}`}>{STATUS_LABELS[sub.status]}</span>
               <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => onRenew(sub)}
-                  className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs text-white hover:bg-emerald-700"
-                >
-                  Оплачено — продлить
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onDecide(sub, 'keep')}
-                  className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
-                >
-                  Оставить
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onDecide(sub, 'cancel')}
-                  className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-600 hover:bg-red-50"
-                >
-                  Отменить
-                </button>
+                {canRenew && (
+                  <button
+                    type="button"
+                    onClick={() => onRenew(sub)}
+                    className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs text-white hover:bg-emerald-700"
+                  >
+                    Оплачено — продлить
+                  </button>
+                )}
+                {canKeep && (
+                  <button
+                    type="button"
+                    onClick={() => onDecide(sub, 'keep')}
+                    className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+                  >
+                    Оставить
+                  </button>
+                )}
+                {canCancel && (
+                  <button
+                    type="button"
+                    onClick={() => onDecide(sub, 'cancel')}
+                    className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-600 hover:bg-red-50"
+                  >
+                    Отменить
+                  </button>
+                )}
               </div>
             </div>
           );

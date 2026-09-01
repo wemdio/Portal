@@ -60,6 +60,14 @@ const EXPENSE_TYPE_LABELS: Record<PaymentRequest['expenseType'], string> = {
   legacy_unclassified: 'Тип не определён',
 };
 
+const COST_CATEGORY_LABELS: Record<NonNullable<PaymentRequest['costCategory']>, string> = {
+  instantly: 'Instantly',
+  email: 'Почты',
+  bases: 'Базы',
+  domains: 'Домены',
+  other: 'Другое',
+};
+
 const URGENCY_LABELS: Record<PaymentRequest['urgency'], string> = {
   normal: 'Обычная',
   urgent: 'Высокая',
@@ -67,7 +75,7 @@ const URGENCY_LABELS: Record<PaymentRequest['urgency'], string> = {
 };
 
 type StatusFilter = 'all' | PaymentRequest['status'];
-type ExpenseTypeFilter = 'all' | PaymentRequest['expenseType'];
+type ExpenseTypeFilter = 'all' | PaymentRequest['expenseType'] | 'costs';
 
 const filterClass = 'min-h-11 rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-800 outline-none transition-colors hover:border-gray-300 focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-100';
 
@@ -91,7 +99,12 @@ export default function PaymentRequestList({
     const normalizedQuery = query.trim().toLocaleLowerCase('ru');
     return requests.filter((request) => {
       if (statusFilter !== 'all' && request.status !== statusFilter) return false;
-      if (expenseTypeFilter !== 'all' && request.expenseType !== expenseTypeFilter) return false;
+      if (expenseTypeFilter === 'costs' && request.budgetScope !== 'costs') return false;
+      if (
+        expenseTypeFilter !== 'all'
+        && expenseTypeFilter !== 'costs'
+        && (request.budgetScope === 'costs' || request.expenseType !== expenseTypeFilter)
+      ) return false;
       if (!normalizedQuery) return true;
 
       const projectLabel = request.project
@@ -187,6 +200,7 @@ export default function PaymentRequestList({
               <option value="all">Все типы</option>
               <option value="one_time">Разовые</option>
               <option value="planned">Плановые</option>
+              <option value="costs">Косты</option>
               <option value="legacy_unclassified">Тип не определён</option>
             </select>
           </label>
@@ -240,9 +254,13 @@ export default function PaymentRequestList({
                     <span className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset xl:mt-0 ${
                       request.expenseType === 'legacy_unclassified'
                         ? 'bg-amber-50 text-amber-800 ring-amber-200'
+                        : request.budgetScope === 'costs'
+                          ? 'bg-blue-50 text-blue-700 ring-blue-200'
                         : 'bg-gray-100 text-gray-700 ring-gray-200'
                     }`}>
-                      {EXPENSE_TYPE_LABELS[request.expenseType]}
+                      {request.budgetScope === 'costs'
+                        ? `Косты · ${COST_CATEGORY_LABELS[request.costCategory ?? 'other']}`
+                        : EXPENSE_TYPE_LABELS[request.expenseType]}
                     </span>
                     {request.expenseType === 'legacy_unclassified' && <p className="mt-1 text-xs text-amber-700">Старые данные</p>}
                     {request.urgency !== 'normal' && (

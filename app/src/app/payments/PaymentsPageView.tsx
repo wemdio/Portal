@@ -64,7 +64,9 @@ function PaymentStatistics({ model }: { model: PaymentsReadModel }) {
         <dl className="flex gap-6">
           <div>
             <dt className="text-xs text-gray-500">Всего оплачено</dt>
-            <dd className="mt-1 font-semibold tabular-nums text-gray-950">{formatRubles(model.summary.paidAll)}</dd>
+            <dd className="mt-1 font-semibold tabular-nums text-gray-950">
+              {formatRubles(departmentRows.reduce((sum, [, values]) => sum + values.amount, 0))}
+            </dd>
           </div>
           <div>
             <dt className="text-xs text-gray-500">Оплат</dt>
@@ -227,7 +229,7 @@ export default function PaymentsPageView() {
             <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Финансы компании</p>
             <h1 className="mt-1 text-3xl font-semibold tracking-tight text-gray-950">Оплаты</h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-500">
-              Фактические расходы, заявки на согласование и лимит разовых покупок.
+              Фактические расходы, заявки и отдельные лимиты разовых покупок и костов.
             </p>
           </div>
           <button

@@ -5,16 +5,20 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import { isTechnician } from '@/lib/roles';
 import {
   listInstantlyAccounts,
   resolveInstantlyAccountId,
 } from '@/lib/instantly/accounts';
-import {
-  listAllCustomTagMappings,
-  listAllCustomTags,
-} from '@/lib/instantly/client';
 import { runVeTemplateLaunch } from '@/lib/verticalEngineV2/launchTemplate';
-import { type VeLaunchPresetOption } from '@/lib/verticalEngineV2/launchHandoff';
+import {
+  listVeInstantlyAccountTagMappings,
+  listVeInstantlyCustomTags,
+} from '@/lib/verticalEngineV2/launchClientProvisioning';
+import {
+  type VeLaunchPresetOption,
+  type VeMailboxTagOption,
+} from '@/lib/verticalEngineV2/launchHandoff';
 import {
   resolveVeLaunchPresetMailboxTags,
   type VeInstantlyTagMapping,
@@ -38,9 +42,56 @@ interface LaunchPresetRow {
 }
 
 interface WorkspaceTagData {
-  available: boolean;
+  tagsAvailable: boolean;
+  mappingsAvailable: boolean;
   tags: CustomTag[];
   mappings: VeInstantlyTagMapping[];
+}
+
+function buildMailboxTagOptions(input: {
+  workspaces: Array<{ id: string; label: string }>;
+  tagDataByWorkspace: Map<string, WorkspaceTagData>;
+}): VeMailboxTagOption[] {
+  return input.workspaces
+    .flatMap((workspace) => {
+      const workspaceTagData = input.tagDataByWorkspace.get(workspace.id);
+      if (!workspaceTagData?.tagsAvailable) return [];
+
+      const mailboxIdsByTag = new Map<string, Set<string>>();
+      for (const mapping of workspaceTagData.mappings) {
+        if (mapping.resource_type !== 'account') continue;
+        const tagId = mapping.tag_id?.trim();
+        const mailboxId = mapping.resource_id?.trim().toLowerCase();
+        if (!tagId || !mailboxId) continue;
+        const mailboxIds = mailboxIdsByTag.get(tagId) ?? new Set<string>();
+        mailboxIds.add(mailboxId);
+        mailboxIdsByTag.set(tagId, mailboxIds);
+      }
+
+      const seenTagIds = new Set<string>();
+      return workspaceTagData.tags.flatMap((tag) => {
+        const id = tag.id?.trim();
+        if (!id || seenTagIds.has(id)) return [];
+        seenTagIds.add(id);
+        return [{
+          id,
+          name: tag.name?.trim() || tag.label?.trim() || id,
+          instantly_account_id: workspace.id,
+          instantly_account_label: workspace.label,
+          mailbox_count:
+            workspaceTagData.mappingsAvailable && (mailboxIdsByTag.get(id)?.size ?? 0) > 0
+              ? mailboxIdsByTag.get(id)?.size ?? null
+              : null,
+        }];
+      });
+    })
+    .sort(
+      (left, right) =>
+        left.name.localeCompare(right.name, 'ru') ||
+        left.instantly_account_label.localeCompare(right.instantly_account_label, 'ru') ||
+        left.instantly_account_id.localeCompare(right.instantly_account_id) ||
+        left.id.localeCompare(right.id),
+    );
 }
 
 // GET — display-safe список клиентских пресетов для «Отправить в запуск».
@@ -57,6 +108,7 @@ export async function GET(
       const authed = await requireInternalToolAuth(req);
       if ('error' in authed) return authed.error;
       if (!supabaseAdmin || !supabaseInstantly) return jsonError('Server misconfigured', 500);
+      const canCreateClient = isTechnician(authed.auth.role);
 
       const { id: templateId } = await params;
       if (!templateId) return jsonError('Missing id', 400);
@@ -112,48 +164,63 @@ export async function GET(
         }
       }
 
-      const workspaceIds = Array.from(
-        new Set(rows.map((row) => resolveInstantlyAccountId(row.instantly_account_id))),
-      );
+      let configuredWorkspaces: Array<{ id: string; label: string }> = [];
       let workspaceLabels = new Map<string, string>();
       try {
+        configuredWorkspaces = listInstantlyAccounts().map((account) => ({
+          id: account.id,
+          label: account.label,
+        }));
         workspaceLabels = new Map(
-          listInstantlyAccounts().map((account) => [account.id, account.label] as const),
+          configuredWorkspaces.map((account) => [account.id, account.label] as const),
         );
       } catch (error) {
         await logError('tools.vertical-engine-v2.template.launch.accounts_failed', error, {});
       }
 
+      // Preset workspaces stay readable even when their configuration was
+      // removed, while onboarding options cover every currently configured
+      // workspace — including workspaces not referenced by any preset yet.
+      const workspaceIds = Array.from(
+        new Set([
+          ...(canCreateClient ? configuredWorkspaces.map((workspace) => workspace.id) : []),
+          ...rows.map((row) => resolveInstantlyAccountId(row.instantly_account_id)),
+        ]),
+      );
+
       const tagDataByWorkspace = new Map<string, WorkspaceTagData>();
       await Promise.all(
         workspaceIds.map(async (accountId) => {
-          try {
-            // Display metadata must not hold the pre-launch screen for the
-            // adapter's full write-oriented timeout/retry budget. Exact
-            // mailbox ids remain usable even when this live label read fails.
-            const requestOptions = {
-              accountId,
-              timeoutMs: 15_000,
-              retryRateLimits: false,
-            };
-            const [tags, mappings] = await Promise.all([
-              listAllCustomTags(requestOptions),
-              listAllCustomTagMappings('account', requestOptions),
-            ]);
-            tagDataByWorkspace.set(accountId, {
-              available: true,
-              tags,
-              mappings,
-            });
-          } catch (error) {
-            tagDataByWorkspace.set(accountId, {
-              available: false,
-              tags: [],
-              mappings: [],
-            });
+          // Display metadata must not hold the pre-launch screen for the
+          // adapter's full write-oriented timeout/retry budget. Tags and their
+          // approximate mapping count degrade independently: POST resolves the
+          // selected tag against live /accounts?tag_ids before any write.
+          const requestOptions = {
+            accountId,
+            timeoutMs: 15_000,
+            retryRateLimits: false,
+          };
+          const [tagsResult, mappingsResult] = await Promise.allSettled([
+            listVeInstantlyCustomTags(requestOptions),
+            listVeInstantlyAccountTagMappings(requestOptions),
+          ]);
+          tagDataByWorkspace.set(accountId, {
+            tagsAvailable: tagsResult.status === 'fulfilled',
+            mappingsAvailable: mappingsResult.status === 'fulfilled',
+            tags: tagsResult.status === 'fulfilled' ? tagsResult.value : [],
+            mappings: mappingsResult.status === 'fulfilled' ? mappingsResult.value : [],
+          });
+          if (tagsResult.status === 'rejected') {
             await logError(
               'tools.vertical-engine-v2.template.launch.mailbox_tags_failed',
-              error,
+              tagsResult.reason,
+              { accountId },
+            );
+          }
+          if (mappingsResult.status === 'rejected') {
+            await logError(
+              'tools.vertical-engine-v2.template.launch.mailbox_tag_mappings_failed',
+              mappingsResult.reason,
               { accountId },
             );
           }
@@ -164,7 +231,8 @@ export async function GET(
         .map((row) => {
           const instantlyAccountId = resolveInstantlyAccountId(row.instantly_account_id);
           const workspaceTagData = tagDataByWorkspace.get(instantlyAccountId) ?? {
-            available: false,
+            tagsAvailable: false,
+            mappingsAvailable: false,
             tags: [],
             mappings: [],
           };
@@ -179,14 +247,23 @@ export async function GET(
               emailAccountIds: row.email_account_ids,
               tags: workspaceTagData.tags,
               mappings: workspaceTagData.mappings,
-              available: workspaceTagData.available,
+              available: workspaceTagData.tagsAvailable && workspaceTagData.mappingsAvailable,
             }),
           };
         })
         .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
 
+      const mailboxTagOptions = canCreateClient
+        ? buildMailboxTagOptions({
+            workspaces: configuredWorkspaces,
+            tagDataByWorkspace,
+          })
+        : [];
+
       return NextResponse.json({
         presets,
+        can_create_client: canCreateClient,
+        mailbox_tag_options: mailboxTagOptions,
         bound_preset_id:
           typeof projectRow.launch_preset_id === 'string' && projectRow.launch_preset_id
             ? projectRow.launch_preset_id

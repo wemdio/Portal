@@ -48,21 +48,39 @@ export async function getBlockedEmailSet(
   db: SupabaseClient,
   clientUserId: string,
 ): Promise<Set<string>> {
-  const { data, error } = await db
-    .from('client_blocked_contacts')
-    .select('email')
-    .eq('client_user_id', clientUserId)
-    .limit(BLOCKLIST_MAX_ENTRIES);
-
+  // A single RPC statement gives one MVCC snapshot. Multiple offset/cursor
+  // requests cannot prove completeness when a delete+insert keeps the same
+  // count while pages are being read.
+  const { data, error } = await db.rpc('client_blocklist_snapshot', {
+    p_client_user_id: clientUserId,
+  });
   if (error) {
     throw new Error(`Не удалось загрузить чёрный список: ${error.message}`);
   }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Не удалось подтвердить полноту чёрного списка');
+  }
+
+  const snapshot = data as { count?: unknown; emails?: unknown };
+  const count = snapshot.count;
+  const emails = snapshot.emails;
+  if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0 || !Array.isArray(emails)) {
+    throw new Error('Не удалось подтвердить полноту чёрного списка');
+  }
+  if (count > BLOCKLIST_MAX_ENTRIES) {
+    throw new Error(`Чёрный список превышает лимит ${BLOCKLIST_MAX_ENTRIES}`);
+  }
+  if (emails.length !== count) {
+    throw new Error('Чёрный список загружен не полностью');
+  }
 
   const set = new Set<string>();
-  for (const row of (data ?? []) as { email?: unknown }[]) {
-    const email = normalizeBlockedEmail(row.email);
-    if (email) set.add(email);
+  for (const rawEmail of emails) {
+    const email = normalizeBlockedEmail(rawEmail);
+    if (!email) throw new Error('Чёрный список содержит некорректный email');
+    set.add(email);
   }
+  if (set.size !== count) throw new Error('Чёрный список содержит дубликаты');
   return set;
 }
 

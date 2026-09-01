@@ -4,29 +4,13 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { isAdmin } from '@/lib/roles';
+import { createManagedPortalUser } from '@/lib/auth/managedUserProvisioning';
 import type { UserRole } from '@/types';
 
 export const dynamic = 'force-dynamic';
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
-}
-
-function isUserExistsError(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false;
-  const e = err as { code?: unknown; message?: unknown; status?: unknown };
-  const code = typeof e.code === 'string' ? e.code.toLowerCase() : '';
-  const message = typeof e.message === 'string' ? e.message.toLowerCase() : '';
-  const status = typeof e.status === 'number' ? e.status : null;
-
-  // Supabase Auth (GoTrue) commonly uses code `user_exists`.
-  if (code === 'user_exists') return true;
-
-  // Fallbacks across versions/messages.
-  if (message.includes('already') || message.includes('exists') || message.includes('registered')) return true;
-  if (status === 409) return true;
-
-  return false;
 }
 
 function safeJsonParse<T>(text: string): T | null {
@@ -99,47 +83,43 @@ export async function POST(req: NextRequest) {
 
   const fullName = fullNameRaw || email.split('@')[0] || '';
 
-  const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+  const created = await createManagedPortalUser({
     email,
     password,
-    email_confirm: true,
-    user_metadata: {
-      full_name: fullName,
-      role,
-    },
+    fullName,
+    role,
   });
 
-  if (createErr) {
-    if (isUserExistsError(createErr)) {
+  if (!created.ok) {
+    if (created.kind === 'duplicate') {
       await logAudit('admin.users.create.conflict', 'User already exists', { email, role }, logMeta);
       return jsonError('Пользователь с таким email уже существует', 409);
     }
 
-    const msg = createErr.message || 'Failed to create user';
-    await logError('admin.users.create.failed', createErr, { email, role }, logMeta);
-    return jsonError(msg, 500);
+    const event = created.kind === 'profile'
+      ? 'admin.users.create.profile.upsert.failed'
+      : 'admin.users.create.failed';
+    await logError(event, created.error, { email, role }, logMeta);
+    if (created.cleanupError) {
+      await logError('admin.users.create.cleanup.failed', created.cleanupError, { email, role }, logMeta);
+    }
+    if (created.kind === 'profile') {
+      if (created.cleanupError) {
+        return jsonError(
+          'Failed to create user profile; account rollback could not be confirmed',
+          500,
+        );
+      }
+      return jsonError('Failed to create user profile; account creation was rolled back', 500);
+    }
+    const message =
+      created.error && typeof created.error === 'object' && 'message' in created.error
+        ? String(created.error.message || 'Failed to create user')
+        : 'Failed to create user';
+    return jsonError(message, 500);
   }
 
-  const newUserId = created.user?.id;
-  if (!newUserId) {
-    await logError('admin.users.create.failed', 'Missing created user id', { email, role }, logMeta);
-    return jsonError('Не удалось создать пользователя', 500);
-  }
-
-  const { error: upsertErr } = await supabaseAdmin
-    .from('profiles')
-    .upsert({
-      id: newUserId,
-      email,
-      role,
-      full_name: fullName,
-    });
-
-  if (upsertErr) {
-    await logError('admin.users.create.profile.upsert.failed', upsertErr, { targetUserId: newUserId, email, role }, logMeta);
-    return jsonError('User created but failed to update profile', 500);
-  }
-
+  const newUserId = created.user.id;
   await logAudit('admin.users.create.success', 'User created', { targetUserId: newUserId, email, role }, logMeta);
   return NextResponse.json({ ok: true, user: { id: newUserId, email, role, full_name: fullName } });
 }

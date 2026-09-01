@@ -11,14 +11,37 @@ function readRepoFile(relativePath: string): string {
 }
 
 describe('BaseConstructor deploy drain', () => {
+  it('does not pause or stop unrelated workers during a Base Constructor-only drain', () => {
+    const drainWorker = readRepoFile('drain-worker.sh');
+    const guardedGenericStops = drainWorker.match(
+      /if should_drain_non_baseconstructor_workers; then[\s\S]*?for c in "\$\{containers\[@\]\}"[\s\S]*?\nfi/,
+    )?.[0];
+
+    expect(drainWorker).toContain(
+      'if should_drain_non_baseconstructor_workers && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then',
+    );
+    expect(guardedGenericStops).toBeDefined();
+  });
+
+  it('does not stop or age Base Constructor jobs unless its worker group was selected', () => {
+    const drainWorker = readRepoFile('drain-worker.sh');
+    const guardedDrain = drainWorker.match(
+      /if should_drain_baseconstructor_workers; then[\s\S]*?\nfi/,
+    )?.[0];
+
+    expect(guardedDrain).toBeDefined();
+    expect(guardedDrain).toContain('for c in "${bc_containers[@]}"');
+    expect(guardedDrain).toContain('status=eq.processing');
+  });
+
   it('stops every replica in parallel before handoff and scheduled removal', () => {
     const drainWorker = readRepoFile('drain-worker.sh');
     const scheduledDeploy = readRepoFile('.semaphore/scheduled-deploy.yml');
     const baseConstructorBlock = drainWorker.match(
-      /bc_containers=\(\s*([\s\S]*?)\n\)/,
+      /bc_containers=\(\s*([\s\S]*?)\n\s*\)/,
     )?.[1];
     const genericContainerBlock = drainWorker.match(
-      /^containers=\(\s*([\s\S]*?)\n\)/m,
+      /^\s*containers=\(\s*([\s\S]*?)\n\s*\)/m,
     )?.[1];
 
     expect(baseConstructorBlock).toBeDefined();
@@ -36,7 +59,7 @@ describe('BaseConstructor deploy drain', () => {
     expect(drainWorker).toContain('"started_at":"1970-01-01T00:00:00Z"');
 
     const stopIndex = drainWorker.indexOf('for c in "${bc_containers[@]}"');
-    const waitIndex = drainWorker.indexOf('\nwait', stopIndex);
+    const waitIndex = drainWorker.indexOf('\n  wait', stopIndex);
     const handoffIndex = drainWorker.indexOf('status=eq.processing');
     expect(stopIndex).toBeGreaterThanOrEqual(0);
     expect(waitIndex).toBeGreaterThan(stopIndex);

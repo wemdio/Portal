@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, Search, Download, Copy, Database, ExternalLink } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import { supabase } from '@/lib/supabaseClient';
+import { readApiError } from '@/lib/apiError';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 import {
   type PdlCompanyRow,
@@ -16,7 +17,7 @@ import {
 
 type Facet = { value: string; count: number };
 type FacetsResponse = { industries: Facet[]; countries: Facet[]; sizes: Facet[] };
-type SearchResponse = { items: PdlCompanyRow[] };
+type SearchResponse = { items: PdlCompanyRow[]; next_cursor: string | null };
 type CountResponse = { estimate: number };
 
 const PREVIEW = 100;
@@ -34,15 +35,7 @@ function exportRow(r: PdlCompanyRow): string[] {
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await authFetch(path, { method: 'GET', ...init });
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    let message = text || `Request failed: ${res.status}`;
-    try {
-      const j = JSON.parse(text) as { error?: string };
-      if (j?.error) message = j.error;
-    } catch {
-      /* keep */
-    }
-    throw new Error(message);
+    throw new Error(await readApiError(res));
   }
   return (await res.json()) as T;
 }
@@ -165,13 +158,20 @@ export function EuUsCompanyBaseView() {
   const downloadFile = useCallback(async () => {
     setActionsBusy(true);
     setProgress('Готовим выгрузку…');
+    setError(null);
     try {
-      const { data } = await supabase.auth.getSession();
-      const token = data.session?.access_token;
-      if (!token) throw new Error('Нет сессии');
       const n = Math.max(1, Number(exportN) || 1000);
       const big = exportAll || n > ZIP_THRESHOLD;
       const p = filterQuery(filters);
+
+      const preflight = new URLSearchParams(p);
+      preflight.set('limit', '1');
+      const preview = await apiFetch<SearchResponse>(`/api/company-base/search?${preflight.toString()}`);
+      if (!preview.items.length) throw new Error('По выбранным фильтрам компании не найдены.');
+
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) throw new Error('Нет сессии');
       p.set('t', token);
       if (exportAll) p.set('all', '1');
       else p.set('max', String(n));
@@ -197,12 +197,16 @@ export function EuUsCompanyBaseView() {
     setActionsBusy(true);
     setProgress('Базы: загрузка…');
     try {
-      // Page in 1000s up to the cap (PostgREST limit-safe).
       const rows: PdlCompanyRow[] = [];
-      for (let offset = 0; rows.length < MAX_DB_ROWS; offset += 1000) {
-        const data = await apiFetch<SearchResponse>(`/api/company-base/search?${filterQuery(filters).toString()}&limit=1000&offset=${offset}`);
+      let cursor: string | null = null;
+      while (rows.length < MAX_DB_ROWS) {
+        const query = filterQuery(filters);
+        query.set('limit', String(Math.min(1000, MAX_DB_ROWS - rows.length)));
+        if (cursor) query.set('after_id', cursor);
+        const data = await apiFetch<SearchResponse>(`/api/company-base/search?${query.toString()}`);
         rows.push(...data.items);
-        if (data.items.length < 1000) break;
+        if (!data.next_cursor || data.next_cursor === cursor) break;
+        cursor = data.next_cursor;
       }
       if (!rows.length) {
         setToast({ tone: 'error', message: 'Нет данных' });

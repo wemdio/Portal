@@ -20,7 +20,11 @@
  */
 
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
-import { ENRICH_CHECKPOINT_ATTEMPTED_COL } from '@/lib/tools/processingSteps';
+import {
+  EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
+  ENRICH_CHECKPOINT_ATTEMPTED_COL,
+  stepValidateEmails,
+} from '@/lib/tools/processingSteps';
 
 // Мокаем supabase клиент чтобы наблюдать какие шаги/обновления случились.
 // Используем jest.mock для перехвата импорта.
@@ -58,6 +62,16 @@ jest.mock('@/lib/supabaseAdmin', () => {
 // чтобы тест мог проверить какие шаги отработали.
 jest.mock('@/lib/tools/processingSteps', () => {
   const stepNoop = async (data: string[][]) => data;
+  const stepValidateEmails = jest.fn(async (
+    data: string[][],
+    onProgress: (progress: number) => Promise<void>,
+  ) => {
+    // A resumed step may internally report progress relative to its remaining
+    // tail. The worker owns the persisted UI percentage and must clamp these
+    // callbacks to the pre-restart floor.
+    await onProgress(10);
+    return data;
+  });
   const original = jest.requireActual('@/lib/tools/processingSteps');
   return {
     ...original,
@@ -69,7 +83,7 @@ jest.mock('@/lib/tools/processingSteps', () => {
     stepSiteCheck: stepNoop,
     stepEnrich: stepNoop,
     stepNameCleanup: stepNoop,
-    stepValidateEmails: stepNoop,
+    stepValidateEmails,
     stepTAScore: stepNoop,
     stepPersonalize: stepNoop,
   };
@@ -81,6 +95,8 @@ interface MockedAdmin {
   __reset: () => void;
 }
 
+const validateEmailsMock = jest.mocked(stepValidateEmails);
+
 describe('runBaseConstructorJob resume logic', () => {
   let admin: MockedAdmin;
 
@@ -88,6 +104,7 @@ describe('runBaseConstructorJob resume logic', () => {
     const mod = await import('@/lib/supabaseAdmin');
     admin = mod.supabaseAdmin as unknown as MockedAdmin;
     admin.__reset();
+    jest.clearAllMocks();
   });
 
   it('fresh start: status=pending → runs all steps from 0', async () => {
@@ -170,6 +187,44 @@ describe('runBaseConstructorJob resume logic', () => {
     expect(stepKeys).toContain('find_emails');
   });
 
+  it('resume validate_emails never reports less than the saved 45%', async () => {
+    admin.__setCurrentJob({
+      id: 'job-validation-progress-floor',
+      user_id: 'u',
+      file_name: 'test.csv',
+      status: 'processing',
+      selected_steps: ['validate_emails'],
+      step_config: {},
+      current_step: 1,
+      current_step_key: 'validate_emails',
+      current_step_progress: 45,
+      total_steps: 1,
+      data: [
+        ['Email', 'Email Статус', 'Email Провайдер'],
+        ['pending@example.com', '', ''],
+      ],
+    });
+
+    await runBaseConstructorJob('job-validation-progress-floor');
+
+    const updates = admin.__getUpdates();
+    const validationProgress = updates
+      .filter((update) => update.current_step_key === 'validate_emails')
+      .map((update) => update.current_step_progress)
+      .filter((progress): progress is number => typeof progress === 'number');
+
+    expect(validationProgress.length).toBeGreaterThan(0);
+    expect(Math.min(...validationProgress)).toBeGreaterThanOrEqual(45);
+    expect(Math.max(...validationProgress)).toBeLessThanOrEqual(99);
+    expect(updates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: 'completed',
+        current_step_key: 'done',
+        current_step_progress: 100,
+      }),
+    ]));
+  });
+
   it('updateJobProgress bumps started_at as heartbeat', async () => {
     admin.__setCurrentJob({
       id: 'job-4',
@@ -217,5 +272,42 @@ describe('runBaseConstructorJob resume logic', () => {
     const finalUpdate = admin.__getUpdates().find((update) => update.status === 'completed');
     expect(finalUpdate).toBeDefined();
     expect((finalUpdate?.data as string[][])[0]).toEqual(['Компания', 'Сайт', 'Описание']);
+  });
+
+  it('resume после validate_emails=100 не экспортирует private validation state', async () => {
+    admin.__setCurrentJob({
+      id: 'job-validation-finished-before-persist',
+      user_id: 'u',
+      file_name: 'test.csv',
+      status: 'processing',
+      selected_steps: ['validate_emails'],
+      step_config: {},
+      current_step: 1,
+      current_step_key: 'validate_emails',
+      current_step_progress: 100,
+      total_steps: 1,
+      data: [
+        ['Email', 'Email Статус', EMAIL_VALIDATION_CHECKPOINT_STATE_COL],
+        [
+          'ok@example.com',
+          'ok',
+          '{"ok@example.com":{"attempts":1,"result":"ok"}}',
+        ],
+      ],
+    });
+
+    await runBaseConstructorJob('job-validation-finished-before-persist');
+
+    expect(validateEmailsMock).toHaveBeenCalledTimes(1);
+    const updates = admin.__getUpdates();
+    const replayProgress = updates
+      .filter((update) => update.current_step_key === 'validate_emails')
+      .map((update) => update.current_step_progress)
+      .filter((progress): progress is number => typeof progress === 'number');
+    expect(Math.min(...replayProgress)).toBeGreaterThanOrEqual(99);
+    const finalUpdate = updates.find((update) => update.status === 'completed');
+    expect(finalUpdate).toBeDefined();
+    expect((finalUpdate?.data as string[][])[0]).toEqual(['Email', 'Email Статус']);
+    expect(finalUpdate?.result_stats).toEqual(expect.objectContaining({ columns: 2 }));
   });
 });

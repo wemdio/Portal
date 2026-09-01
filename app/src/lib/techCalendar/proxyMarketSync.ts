@@ -1,6 +1,11 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { mskDateStr } from '@/lib/techCalendar/dates';
+import {
+  isDueKeptProviderCycle,
+  mergeProviderSubscriptionDecision,
+  type ExistingProviderSubscriptionDecision,
+} from '@/lib/techCalendar/providerSyncDecision';
 import type { Currency, TechStatus } from '@/lib/techCalendar/types';
 
 const PROXY_MARKET_API_BASE = 'https://api.dashboard.proxy.market/dev-api';
@@ -33,7 +38,7 @@ interface ProxyMarketBalanceResponse {
   balance?: number | string | null;
 }
 
-interface ExistingProxyMarketRow {
+interface ExistingProxyMarketRow extends ExistingProviderSubscriptionDecision {
   external_key: string;
   amount: number | null;
   currency: Currency | null;
@@ -215,7 +220,7 @@ export async function runProxyMarketTechCalendarSync(deps: ProxyMarketSyncDeps):
 
     const existingRes = await deps.db
       .from('tech_subscriptions')
-      .select('external_key, amount, currency, notes, is_hidden')
+      .select('external_key, amount, currency, notes, is_hidden, status, next_billing_date, decision_by, decision_at, decision_notes')
       .eq('source', 'proxymarket');
 
     if (existingRes.error) {
@@ -244,6 +249,14 @@ export async function runProxyMarketTechCalendarSync(deps: ProxyMarketSyncDeps):
 
       const externalKey = `proxymarket:${id}`;
       const old = existing.get(externalKey);
+      if (isDueKeptProviderCycle(old, today)) {
+        skipped++;
+        return [];
+      }
+      const decision = mergeProviderSubscriptionDecision(old, {
+        status: calendarStatus(status, billingDate, today),
+        next_billing_date: billingDate,
+      });
 
       return [{
         source: 'proxymarket',
@@ -253,11 +266,11 @@ export async function runProxyMarketTechCalendarSync(deps: ProxyMarketSyncDeps):
         amount: old?.amount ?? 0,
         currency: old?.currency ?? 'RUB',
         billing_cycle: 'monthly',
-        next_billing_date: billingDate,
-        status: calendarStatus(status, billingDate, today),
-        decision_by: null,
-        decision_at: null,
-        decision_notes: null,
+        next_billing_date: decision.next_billing_date,
+        status: decision.status,
+        decision_by: decision.decision_by,
+        decision_at: decision.decision_at,
+        decision_notes: decision.decision_notes,
         notes: old?.notes ?? null,
         quantity: 1,
         provider_status: normalizedStatus || status,
