@@ -96,6 +96,30 @@ function replyEmail(overrides: Partial<Email>): Email {
   } as Email;
 }
 
+type EmailListQuery = {
+  campaign_id?: string;
+  search?: string;
+  lead?: string;
+  email_type?: string;
+  mode?: string;
+  limit?: number;
+};
+
+function expectLeadScopedSentEvidenceCall(expectedLead: string): void {
+  const sentCalls = listEmails.mock.calls.filter(
+    ([params]) => (params as EmailListQuery).email_type === 'sent',
+  );
+  expect(sentCalls).toHaveLength(1);
+  const params = sentCalls[0]?.[0] as EmailListQuery;
+  expect(params).toEqual(expect.objectContaining({
+    lead: expectedLead,
+    email_type: 'sent',
+    mode: 'emode_all',
+    limit: 100,
+  }));
+  expect(params).not.toHaveProperty('campaign_id');
+}
+
 function installMailboxOwnershipConflictFixture(options?: {
   mappingError?: Error;
   webhookRequeueError?: string;
@@ -4856,6 +4880,99 @@ describe('pollAndQualifyReplies', () => {
       .toBe('historical-parent');
   });
 
+  it('resolves exact cross-owner sent evidence for one lead even when workspace sent history has more pages', async () => {
+    const { providerCampaignId, candidateCampaignIds, ownerMailbox, inbound } =
+      installMailboxOwnershipConflictFixture();
+    const leadEmail = inbound.from_address_email ?? '';
+    const candidateParent = replyEmail({
+      id: 'lead-scoped-parent',
+      campaign_id: candidateCampaignIds[0],
+      eaccount: ownerMailbox,
+      lead: leadEmail,
+      to_address_email_list: leadEmail,
+      thread_id: `05-${inbound.thread_id}`,
+      ue_type: 1,
+      timestamp_email: '2026-05-12T10:00:00.000Z',
+    });
+    listEmails.mockImplementation(async (params: EmailListQuery) => {
+      if (params.search) {
+        return { items: [candidateParent], next_starting_after: null };
+      }
+      if (params.email_type === 'sent' && params.lead === leadEmail) {
+        return { items: [candidateParent], next_starting_after: null };
+      }
+      if (params.email_type === 'sent') {
+        return { items: [], next_starting_after: 'workspace-sent-page-2' };
+      }
+      return { items: [inbound], next_starting_after: null };
+    });
+
+    const { resolveEffectiveReplyOwner } = await import(
+      '@/lib/instantly/replyOwnershipResolver'
+    );
+    const result = await resolveEffectiveReplyOwner({
+      db: mockInstantlyDb! as unknown as Parameters<typeof resolveEffectiveReplyOwner>[0]['db'],
+      reply: inbound,
+      providerCampaignId,
+      leadEmail,
+      accountId: 'main',
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      status: 'resolved',
+      effectiveCampaignId: candidateCampaignIds[0],
+      effectiveProjectId: 'project-owner-a',
+      corrected: true,
+      mailboxVerified: true,
+    }));
+    expectLeadScopedSentEvidenceCall(leadEmail);
+  });
+
+  it('fails closed when exact lead-filtered sent evidence still has another page', async () => {
+    const { providerCampaignId, candidateCampaignIds, ownerMailbox, inbound } =
+      installMailboxOwnershipConflictFixture();
+    const leadEmail = inbound.from_address_email ?? '';
+    const candidateParent = replyEmail({
+      id: 'lead-scoped-incomplete-parent',
+      campaign_id: candidateCampaignIds[0],
+      eaccount: ownerMailbox,
+      lead: leadEmail,
+      to_address_email_list: leadEmail,
+      thread_id: `05-${inbound.thread_id}`,
+      ue_type: 1,
+      timestamp_email: '2026-05-12T10:00:00.000Z',
+    });
+    listEmails.mockImplementation(async (params: EmailListQuery) => {
+      if (params.search) {
+        return { items: [candidateParent], next_starting_after: null };
+      }
+      if (params.email_type === 'sent' && params.lead === leadEmail) {
+        return { items: [candidateParent], next_starting_after: 'lead-sent-page-2' };
+      }
+      if (params.email_type === 'sent') {
+        return { items: [candidateParent], next_starting_after: null };
+      }
+      return { items: [inbound], next_starting_after: null };
+    });
+
+    const { resolveEffectiveReplyOwner } = await import(
+      '@/lib/instantly/replyOwnershipResolver'
+    );
+    const result = await resolveEffectiveReplyOwner({
+      db: mockInstantlyDb! as unknown as Parameters<typeof resolveEffectiveReplyOwner>[0]['db'],
+      reply: inbound,
+      providerCampaignId,
+      leadEmail,
+      accountId: 'main',
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      status: 'ambiguous',
+      reason: 'workspace ownership evidence exceeded the bounded page budget',
+    }));
+    expectLeadScopedSentEvidenceCall(leadEmail);
+  });
+
   it('uses the bounded sent fallback when workspace search has only an unrelated outbound', async () => {
     const { providerCampaignId, candidateCampaignIds, ownerMailbox, inbound } =
       installMailboxOwnershipConflictFixture();
@@ -4986,9 +5103,7 @@ describe('pollAndQualifyReplies', () => {
     ]);
     expect(qualifyReply).not.toHaveBeenCalled();
     expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
-    expect(listEmails.mock.calls.filter(
-      ([params]) => (params as { email_type?: string }).email_type === 'sent',
-    )).toHaveLength(1);
+    expectLeadScopedSentEvidenceCall(inbound.from_address_email ?? '');
   });
 
   it.each([
@@ -5497,5 +5612,1263 @@ describe('qualifyOneReply — сирота (outOfCampaign) из Others-конт�
     expect(rows).toHaveLength(0);
     expect(qualifyReply).not.toHaveBeenCalled();
     expect(sendClientReplyTelegram).not.toHaveBeenCalled();
+  });
+});
+
+type SpecialistAlertClaimRpcOptions = {
+  failFirst?: number;
+  failError?: { code?: string; message: string };
+};
+
+function specialistAlertClaimRpc(options: SpecialistAlertClaimRpcOptions = {}) {
+  let failuresRemaining = options.failFirst ?? 0;
+  return async (
+    params: Record<string, unknown>,
+    db: MockSupabaseClient,
+  ): Promise<{ data: unknown; error?: { message: string } }> => {
+    const qualificationId = String(params.p_qualification_id ?? '');
+    const qualification = db
+      .getRows('instantly_lead_qualifications')
+      .find((row) => row.id === qualificationId);
+    if (!qualification) {
+      return {
+        data: null,
+        error: { message: 'instantly_specialist_alert_qualification_not_found' },
+      };
+    }
+    if (
+      qualification.status !== 'lead' ||
+      qualification.qualified_project_owner_proven !== true ||
+      !qualification.qualified_project_id
+    ) {
+      return {
+        data: null,
+        error: { message: 'instantly_specialist_alert_qualification_not_eligible' },
+      };
+    }
+
+    // Supabase supplies these defaults in production. The in-memory mock does
+    // not, but delivery recovery needs them to keep its bounded time window.
+    if (!qualification.created_at || !qualification.updated_at) {
+      await db
+        .from('instantly_lead_qualifications')
+        .update({
+          created_at: qualification.created_at ?? '2026-09-01T12:00:00.000Z',
+          updated_at: qualification.updated_at ?? '2026-09-01T12:00:00.000Z',
+        })
+        .eq('id', qualificationId);
+    }
+
+    if (failuresRemaining > 0) {
+      failuresRemaining--;
+      return {
+        data: null,
+        error: options.failError ?? { message: 'claim RPC unavailable' },
+      };
+    }
+
+    const existing = db
+      .getRows('instantly_specialist_alert_decisions')
+      .find((row) => row.qualification_id === qualificationId);
+    if (existing) {
+      if (existing.is_claimant && params.p_enqueue_handoff === true) {
+        const queued = db.getRows('instantly_lead_handoff_outbox')
+          .some((row) => row.qualification_id === qualificationId);
+        if (!queued) await db.from('instantly_lead_handoff_outbox').insert({
+          qualification_id: qualificationId,
+          project_id: qualification.qualified_project_id,
+          status: 'pending',
+        });
+      }
+      return {
+        data: [{
+          should_alert: existing.is_claimant,
+          winner_qualification_id: existing.winner_qualification_id,
+          dedup_applied: true,
+        }],
+      };
+    }
+
+    const rawThreadId = String(qualification.thread_id ?? '').trim();
+    if (!rawThreadId) {
+      if (params.p_enqueue_handoff === true) {
+        await db.from('instantly_lead_handoff_outbox').insert({
+          qualification_id: qualificationId,
+          project_id: qualification.qualified_project_id,
+          status: 'pending',
+        });
+      }
+      return {
+        data: [{
+          should_alert: true,
+          winner_qualification_id: qualificationId,
+          dedup_applied: false,
+        }],
+      };
+    }
+    const threadKey = /^[a-z0-9]{2}-.+/i.test(rawThreadId)
+      ? rawThreadId.slice(3)
+      : rawThreadId;
+    const projectId = String(qualification.qualified_project_id ?? '');
+    const winner = db
+      .getRows('instantly_specialist_alert_decisions')
+      .find((row) =>
+        row.project_id === projectId &&
+        row.thread_key === threadKey &&
+        row.is_claimant === true,
+      );
+    const winnerQualificationId = String(winner?.qualification_id ?? qualificationId);
+    const isClaimant = !winner;
+    await db.from('instantly_specialist_alert_decisions').insert({
+      qualification_id: qualificationId,
+      project_id: projectId,
+      thread_key: threadKey,
+      is_claimant: isClaimant,
+      winner_qualification_id: winnerQualificationId,
+      decided_at: '2026-09-01T12:00:00.000Z',
+    });
+    if (isClaimant && params.p_enqueue_handoff === true) {
+      await db.from('instantly_lead_handoff_outbox').insert({
+        qualification_id: qualificationId,
+        project_id: qualification.qualified_project_id,
+        status: 'pending',
+      });
+    }
+    return {
+      data: [{
+        should_alert: isClaimant,
+        winner_qualification_id: winnerQualificationId,
+        dedup_applied: true,
+      }],
+    };
+  };
+}
+
+function threadDedupInstantlySeed(
+  tables: Record<string, Record<string, unknown>[]>,
+  rpcOptions: SpecialistAlertClaimRpcOptions = {},
+) {
+  return {
+    tables: {
+      ...tables,
+      instantly_specialist_alert_decisions:
+        tables.instantly_specialist_alert_decisions ?? [],
+      instantly_lead_handoff_outbox:
+        tables.instantly_lead_handoff_outbox ?? [],
+    },
+    rpcHandlers: {
+      claim_instantly_specialist_alert: specialistAlertClaimRpc(rpcOptions),
+      lease_instantly_lead_handoff_jobs: async (
+        params: Record<string, unknown>,
+        db: MockSupabaseClient,
+      ) => {
+        const requestedId = params.p_qualification_id as string | null;
+        const rows = db.getRows('instantly_lead_handoff_outbox')
+          .filter((row) =>
+            (!requestedId || row.qualification_id === requestedId) &&
+            row.status === 'pending',
+          )
+          .slice(0, Number(params.p_limit ?? 2));
+        const leased = [];
+        for (const row of rows) {
+          const leaseToken = `lease-${row.qualification_id}`;
+          await db.from('instantly_lead_handoff_outbox').update({
+            status: 'processing',
+            lease_token: leaseToken,
+          }).eq('qualification_id', row.qualification_id);
+          leased.push({ qualification_id: row.qualification_id, lease_token: leaseToken });
+        }
+        return { data: leased };
+      },
+      finish_instantly_lead_handoff_job: async (
+        params: Record<string, unknown>,
+        db: MockSupabaseClient,
+      ) => {
+        const status = params.p_disposition === 'retry' ? 'retry' : params.p_disposition;
+        await db.from('instantly_lead_handoff_outbox').update({
+          status: status === 'retry' ? 'pending' : status,
+          outcome: params.p_outcome,
+          last_error: params.p_error,
+          available_at: params.p_retry_at,
+          lease_token: null,
+        }).eq('qualification_id', params.p_qualification_id)
+          .eq('lease_token', params.p_lease_token);
+        return { data: true };
+      },
+    },
+  };
+}
+
+describe('thread-level specialist alert dedup — RED contract', () => {
+  const oldLeadKey = process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY;
+
+  const projectLinks = [
+    { project_id: 'project-a', campaign_id: 'campaign-a', match_source: 'auto' },
+    { project_id: 'project-b', campaign_id: 'campaign-b', match_source: 'auto' },
+  ];
+
+  function leadReply(
+    id: string,
+    campaignId: string,
+    threadId: string | null,
+  ): Email {
+    return replyEmail({
+      id,
+      campaign_id: campaignId,
+      thread_id: threadId ?? undefined,
+      from_address_email: `${id}@prospect.example`,
+      timestamp_email: `2026-09-01T12:${id.endsWith('2') ? '02' : '01'}:00.000Z`,
+      body: { text: 'Да, интересно. Пришлите предложение.' },
+    });
+  }
+
+  async function qualifyLead(reply: Email): Promise<void> {
+    const { qualifyOneReply } = await import('@/lib/instantly/leadQualificationWorker');
+    await qualifyOneReply(
+      mockInstantlyDb! as unknown as Parameters<typeof qualifyOneReply>[0],
+      reply,
+      'test-ai-key',
+      'main',
+      {
+        replyEmail: reply,
+        threadEmails: [reply],
+        lastOutbound: null,
+        campaignOutboundMailboxes: [],
+      },
+    );
+  }
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY = 'test-ai-key';
+    delete process.env.LEAD_HANDOFF_ENABLED;
+
+    listEmails.mockReset().mockResolvedValue({ items: [], next_starting_after: null });
+    getLeadsByEmail.mockReset().mockResolvedValue([]);
+    getCampaign.mockReset().mockImplementation(async (campaignId: string) => ({
+      id: campaignId,
+      name: campaignId,
+    }));
+    getAccountCampaignMappings.mockReset().mockResolvedValue([]);
+    getEmail.mockReset();
+    replyToEmail.mockReset().mockResolvedValue({ id: 'sent-1' });
+    sendTestEmail.mockReset().mockResolvedValue({ id: 'sent-test-1' });
+    postHandoffMessage.mockReset().mockResolvedValue(555);
+    editHandoffMessage.mockReset().mockResolvedValue(undefined);
+    sendLeadTelegramAlert.mockReset().mockResolvedValue({ sent: true, messageId: 42 });
+    sendClientReplyTelegram.mockReset().mockResolvedValue({ messageId: 7 });
+    fetchBriefByCampaign.mockReset().mockResolvedValue(null);
+    fetchThreadContext.mockReset().mockResolvedValue(null);
+    classifyMachineReply.mockReset().mockReturnValue(null);
+    qualifyReply.mockReset().mockImplementation(async (
+      _campaignId: string,
+      _leadEmail: string,
+      _threadId: string | null,
+      options: { prefetchedContext?: unknown },
+    ) => ({
+      isLead: true,
+      customCriteriaMatched: false,
+      proposalSeen: true,
+      interestSignals: ['requested_proposal'],
+      reason: 'Просит предложение.',
+      confidence: 0.97,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: options.prefetchedContext,
+    }));
+
+    mockInstantlyDb = createMockSupabase(threadDedupInstantlySeed({
+      project_instantly_campaigns: projectLinks,
+      project_period_instantly_campaigns: [],
+      client_instantly_access: [],
+      client_forwarded_leads: [],
+      instantly_lead_qualifications: [],
+    }));
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          { id: 'project-a', client: 'Client A', specialist_user_id: 'specialist-a' },
+          { id: 'project-b', client: 'Client B', specialist_user_id: 'specialist-b' },
+        ],
+        profiles: [
+          { id: 'specialist-a', full_name: 'Specialist A', email: 'a@example.com' },
+          { id: 'specialist-b', full_name: 'Specialist B', email: 'b@example.com' },
+        ],
+        telegram_links: [
+          { user_id: 'specialist-a', telegram_id: '111', telegram_username: 'a' },
+          { user_id: 'specialist-b', telegram_id: '222', telegram_username: 'b' },
+        ],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+    });
+  });
+
+  afterAll(() => {
+    if (oldLeadKey === undefined) delete process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY;
+    else process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY = oldLeadKey;
+  });
+
+  it('alerts specialists once for two lead replies in the same project and stable provider thread', async () => {
+    await qualifyLead(leadReply('same-thread-1', 'campaign-a', '9c-shared-thread'));
+    await qualifyLead(leadReply('same-thread-2', 'campaign-a', '05-shared-thread'));
+
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toHaveLength(2);
+    expect(mockMainDb!.getRows('notifications')).toHaveLength(1);
+    expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies the same thread decision to specialist handoff cards', async () => {
+    process.env.LEAD_HANDOFF_ENABLED = 'true';
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [{
+          id: 'project-a',
+          client: 'Client A',
+          specialist_user_id: 'specialist-a',
+          handoff_email: 'client@example.com',
+          handoff_legend: 'Спасибо за интерес. Продолжим обсуждение.',
+          handoff_ai_adapt: false,
+          handoff_auto_send: false,
+        }],
+        profiles: [
+          { id: 'specialist-a', full_name: 'Specialist A', email: 'a@example.com' },
+        ],
+        telegram_links: [
+          { user_id: 'specialist-a', telegram_id: '111', telegram_username: 'a' },
+        ],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+    });
+
+    await qualifyLead({
+      ...leadReply('handoff-thread-1', 'campaign-a', '9c-handoff-thread'),
+      eaccount: 'sender@example.com',
+    });
+    await qualifyLead({
+      ...leadReply('handoff-thread-2', 'campaign-a', '05-handoff-thread'),
+      eaccount: 'sender@example.com',
+    });
+
+    expect(postHandoffMessage).toHaveBeenCalledTimes(1);
+    expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')).toHaveLength(1);
+  });
+
+  it('persists outbox work before alert and does not begin handoff until the fresh alert completes', async () => {
+    process.env.LEAD_HANDOFF_ENABLED = 'true';
+    let resolvePost!: (value: number) => void;
+    postHandoffMessage.mockImplementation(() => new Promise<number>((resolve) => {
+      resolvePost = resolve;
+    }));
+    mockMainDb = createMockSupabase({ tables: {
+      projects: [{
+        id: 'project-a', client: 'Client A', specialist_user_id: 'specialist-a',
+        handoff_email: 'client@example.com', handoff_legend: 'Передаю коллеге.',
+        handoff_ai_adapt: false, handoff_auto_send: false,
+      }],
+      profiles: [{ id: 'specialist-a', full_name: 'Specialist A', email: 'a@example.com' }],
+      telegram_links: [{ user_id: 'specialist-a', telegram_id: '111', telegram_username: 'a' }],
+      notifications: [], deadline_notification_log: [],
+    } });
+
+    const inFlight = qualifyLead({
+      ...leadReply('nonblocking-handoff-1', 'campaign-a', '9c-nonblocking-thread'),
+      eaccount: 'sender@example.com',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
+    expect(mockInstantlyDb!.getRows('instantly_lead_handoff_outbox')).toEqual([
+      expect.objectContaining({ status: 'processing' }),
+    ]);
+    expect(postHandoffMessage).toHaveBeenCalledTimes(1);
+    resolvePost(555);
+    await inFlight;
+  });
+
+  it('recovers durable handoff work even when the specialist delivery is already tg_sent', async () => {
+    process.env.LEAD_HANDOFF_ENABLED = 'true';
+    const qualification = {
+      id: 'sent-alert-handoff', campaign_id: 'campaign-a', qualified_project_id: 'project-a',
+      qualified_project_owner_proven: true, instantly_email_id: 'email-sent-alert',
+      eaccount: 'sender@example.com', thread_id: '9c-sent-alert', lead_email: 'lead@example.com',
+      lead_name: null, campaign_name: 'Campaign A', reply_subject: 'Re', reply_body: 'Да',
+      reply_preview: 'Да', last_outbound_preview: null, reply_timestamp: '2026-09-01T12:00:00Z',
+      status: 'lead', created_at: '2026-09-01T12:00:00Z', updated_at: '2026-09-01T12:00:00Z',
+    };
+    mockInstantlyDb = createMockSupabase(threadDedupInstantlySeed({
+      project_instantly_campaigns: projectLinks,
+      instantly_lead_qualifications: [qualification],
+      instantly_pending_handoffs: [],
+      instantly_lead_handoff_outbox: [{ qualification_id: qualification.id, status: 'pending' }],
+    }));
+    mockMainDb = createMockSupabase({ tables: {
+      projects: [{ id: 'project-a', specialist_user_id: 'specialist-a', handoff_email: 'client@example.com', handoff_legend: 'Передаю.', handoff_ai_adapt: false, handoff_auto_send: false }],
+      profiles: [{ id: 'specialist-a', full_name: 'Specialist A' }],
+      deadline_notification_log: [{ entity_id: qualification.id, tg_sent: true }],
+    } });
+
+    const { reconcileLeadHandoffJobs } = await import('@/lib/instantly/leadQualificationWorker');
+    expect(await reconcileLeadHandoffJobs({ qualificationId: qualification.id })).toBe(1);
+    expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')).toEqual([
+      expect.objectContaining({ qualification_id: qualification.id, status: 'pending' }),
+    ]);
+    expect(mockInstantlyDb!.getRows('instantly_lead_handoff_outbox')).toEqual([
+      expect.objectContaining({ qualification_id: qualification.id, status: 'completed' }),
+    ]);
+  });
+
+  it('finishes an existing pending handoff idempotently without posting another card', async () => {
+    process.env.LEAD_HANDOFF_ENABLED = 'true';
+    const qualification = {
+      id: 'existing-pending-handoff', campaign_id: 'campaign-a', qualified_project_id: 'project-a',
+      instantly_email_id: 'email-existing', lead_email: 'lead@example.com', status: 'lead',
+    };
+    mockInstantlyDb = createMockSupabase(threadDedupInstantlySeed({
+      instantly_lead_qualifications: [qualification],
+      instantly_pending_handoffs: [{ id: 'pending-1', qualification_id: qualification.id, status: 'pending' }],
+      instantly_lead_handoff_outbox: [{ qualification_id: qualification.id, status: 'pending' }],
+    }));
+    const { reconcileLeadHandoffJobs } = await import('@/lib/instantly/leadQualificationWorker');
+    expect(await reconcileLeadHandoffJobs({ qualificationId: qualification.id })).toBe(1);
+    expect(postHandoffMessage).not.toHaveBeenCalled();
+    expect(mockInstantlyDb!.getRows('instantly_lead_handoff_outbox')[0]).toEqual(
+      expect.objectContaining({ status: 'completed' }),
+    );
+  });
+
+  it.each(['pending', 'sent'])('finishes an existing manual %s handoff without sending it', async (status) => {
+    process.env.LEAD_HANDOFF_ENABLED = 'true';
+    const qualification = {
+      id: `manual-${status}-handoff`, campaign_id: 'campaign-a', qualified_project_id: 'project-a',
+      instantly_email_id: `email-${status}`, lead_email: 'lead@example.com', status: 'lead',
+    };
+    mockInstantlyDb = createMockSupabase(threadDedupInstantlySeed({
+      instantly_lead_qualifications: [qualification],
+      instantly_pending_handoffs: [{
+        id: `pending-${status}`, qualification_id: qualification.id, status,
+        campaign_id: 'campaign-a', draft_text: 'Передаю.', reply_to_uuid: `email-${status}`,
+        eaccount: 'sender@example.com', client_email: 'client@example.com',
+      }],
+      instantly_lead_handoff_outbox: [{ qualification_id: qualification.id, status: 'pending' }],
+    }));
+    const { reconcileLeadHandoffJobs } = await import('@/lib/instantly/leadQualificationWorker');
+    expect(await reconcileLeadHandoffJobs({ qualificationId: qualification.id })).toBe(1);
+    expect(replyToEmail).not.toHaveBeenCalled();
+    expect(postHandoffMessage).not.toHaveBeenCalled();
+    expect(mockInstantlyDb!.getRows('instantly_lead_handoff_outbox')[0]).toEqual(
+      expect.objectContaining({ status: 'completed' }),
+    );
+  });
+
+  it.each(['pending', 'failed'])('retries an existing %s auto handoff through the same pending row', async (status) => {
+    process.env.LEAD_HANDOFF_ENABLED = 'true';
+    const qualification = {
+      id: 'failed-auto-handoff', campaign_id: 'campaign-a', qualified_project_id: 'project-a',
+      instantly_email_id: 'email-failed-auto', lead_email: 'lead@example.com', status: 'lead',
+    };
+    mockInstantlyDb = createMockSupabase(threadDedupInstantlySeed({
+      instantly_lead_qualifications: [qualification],
+      instantly_pending_handoffs: [{
+        id: 'pending-failed-auto', qualification_id: qualification.id, status, auto_send: true,
+        campaign_id: 'campaign-a', draft_text: 'Передаю.', reply_to_uuid: 'email-failed-auto',
+        eaccount: 'sender@example.com', client_email: 'client@example.com',
+        responsible_user_id: 'specialist-a',
+      }],
+      instantly_lead_handoff_outbox: [{ qualification_id: qualification.id, status: 'pending' }],
+    }));
+    mockMainDb = createMockSupabase({ tables: {
+      projects: [{ id: 'project-a', handoff_auto_send: true }],
+    } });
+    const { reconcileLeadHandoffJobs } = await import('@/lib/instantly/leadQualificationWorker');
+    expect(await reconcileLeadHandoffJobs({ qualificationId: qualification.id })).toBe(1);
+    expect(replyToEmail).toHaveBeenCalledTimes(1);
+    expect(postHandoffMessage).not.toHaveBeenCalled();
+    expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')[0]).toEqual(
+      expect.objectContaining({ id: 'pending-failed-auto', status: 'sent', error_message: null }),
+    );
+    expect(mockInstantlyDb!.getRows('instantly_lead_handoff_outbox')[0]).toEqual(
+      expect.objectContaining({ status: 'completed' }),
+    );
+  });
+
+  it('keeps an uncertain post-before-persist failure retryable (at-least-once)', async () => {
+    process.env.LEAD_HANDOFF_ENABLED = 'true';
+    const qualification = {
+      id: 'post-persist-crash', campaign_id: 'campaign-a', qualified_project_id: 'project-a',
+      instantly_email_id: 'email-post-persist', eaccount: 'sender@example.com',
+      lead_email: 'lead@example.com', status: 'lead', reply_body: 'Да',
+    };
+    mockInstantlyDb = createMockSupabase({
+      ...threadDedupInstantlySeed({
+        instantly_lead_qualifications: [qualification], instantly_pending_handoffs: [],
+        instantly_lead_handoff_outbox: [{ qualification_id: qualification.id, status: 'pending' }],
+      }),
+      errorInserts: {
+        instantly_pending_handoffs: {
+          code: '08006',
+          message: 'connection dropped after Telegram post',
+        },
+      },
+    });
+    mockMainDb = createMockSupabase({ tables: {
+      projects: [{ id: 'project-a', specialist_user_id: 'specialist-a', handoff_email: 'client@example.com', handoff_legend: 'Передаю.', handoff_ai_adapt: false, handoff_auto_send: false }],
+      profiles: [{ id: 'specialist-a', full_name: 'Specialist A' }],
+    } });
+    const { reconcileLeadHandoffJobs } = await import('@/lib/instantly/leadQualificationWorker');
+    expect(await reconcileLeadHandoffJobs({ qualificationId: qualification.id })).toBe(1);
+    expect(postHandoffMessage).toHaveBeenCalledTimes(1);
+    expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')).toHaveLength(0);
+    expect(mockInstantlyDb!.getRows('instantly_lead_handoff_outbox')[0]).toEqual(
+      expect.objectContaining({
+        status: 'pending',
+        last_error: expect.stringContaining('pending insert failed'),
+      }),
+    );
+  });
+
+  it('preserves direct auto handoff during the code-before-auto_send-column rollout window', async () => {
+    process.env.LEAD_HANDOFF_ENABLED = 'true';
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        instantly_pending_handoffs: [],
+        instantly_lead_qualifications: [{ id: 'legacy-auto-column', reply_body: 'Да' }],
+      },
+      errorSelects: {
+        instantly_pending_handoffs: {
+          columnsInclude: 'auto_send',
+          message: 'column instantly_pending_handoffs.auto_send does not exist',
+        },
+      },
+      errorInserts: {
+        instantly_pending_handoffs: {
+          columnsInclude: 'auto_send',
+          code: 'PGRST204',
+          message: "Could not find the 'auto_send' column in the schema cache",
+        },
+      },
+    });
+    mockMainDb = createMockSupabase({ tables: {
+      projects: [{
+        id: 'project-a', specialist_user_id: 'specialist-a', handoff_email: 'client@example.com',
+        handoff_legend: 'Передаю.', handoff_ai_adapt: false, handoff_auto_send: true,
+      }],
+      profiles: [{ id: 'specialist-a', full_name: 'Specialist A' }],
+    } });
+    const { maybePostLeadHandoff } = await import('@/lib/instantly/leadQualificationWorker');
+    expect(await maybePostLeadHandoff({
+      instantlyDb: mockInstantlyDb! as unknown as Parameters<typeof maybePostLeadHandoff>[0]['instantlyDb'],
+      qualificationId: 'legacy-auto-column', campaignId: 'campaign-a', projectId: 'project-a',
+      reply: { id: 'legacy-email', eaccount: 'sender@example.com' } as Email,
+      leadEmail: 'lead@example.com', leadName: null, campaignName: 'Campaign A',
+      leadReplyText: 'Да', lastOutboundText: null, apiKey: 'test-ai-key',
+    })).toEqual(expect.objectContaining({ disposition: 'completed' }));
+    expect(postHandoffMessage).toHaveBeenCalledTimes(1);
+    expect(replyToEmail).toHaveBeenCalledTimes(1);
+    expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')).toEqual([
+      expect.objectContaining({ qualification_id: 'legacy-auto-column', status: 'sent' }),
+    ]);
+  });
+
+  it('recovers a failed rollout-window auto handoff after the auto_send column appears', async () => {
+    process.env.LEAD_HANDOFF_ENABLED = 'true';
+    replyToEmail
+      .mockRejectedValueOnce(new Error('temporary provider failure'))
+      .mockResolvedValueOnce({ id: 'sent-after-migration' });
+    const legacySeed = {
+      tables: {
+        instantly_pending_handoffs: [] as Record<string, unknown>[],
+        instantly_lead_qualifications: [{ id: 'legacy-auto-retry', reply_body: 'Да' }],
+      },
+      errorSelects: {
+        instantly_pending_handoffs: {
+          columnsInclude: 'auto_send',
+          code: 'PGRST204',
+          message: "Could not find the 'auto_send' column in the schema cache",
+        },
+      },
+      errorInserts: {
+        instantly_pending_handoffs: {
+          columnsInclude: 'auto_send',
+          code: 'PGRST204',
+          message: "Could not find the 'auto_send' column in the schema cache",
+        },
+      },
+    };
+    mockInstantlyDb = createMockSupabase(legacySeed);
+    mockMainDb = createMockSupabase({ tables: {
+      projects: [{
+        id: 'project-a', specialist_user_id: 'specialist-a', handoff_email: 'client@example.com',
+        handoff_legend: 'Передаю.', handoff_ai_adapt: false, handoff_auto_send: true,
+      }],
+      profiles: [{ id: 'specialist-a', full_name: 'Specialist A' }],
+    } });
+    const { maybePostLeadHandoff } = await import('@/lib/instantly/leadQualificationWorker');
+    const args: Parameters<typeof maybePostLeadHandoff>[0] = {
+      instantlyDb: mockInstantlyDb! as unknown as Parameters<typeof maybePostLeadHandoff>[0]['instantlyDb'],
+      qualificationId: 'legacy-auto-retry', campaignId: 'campaign-a', projectId: 'project-a',
+      reply: { id: 'legacy-email', eaccount: 'sender@example.com' } as Email,
+      leadEmail: 'lead@example.com', leadName: null, campaignName: 'Campaign A',
+      leadReplyText: 'Да', lastOutboundText: null, apiKey: 'test-ai-key',
+    };
+
+    await expect(maybePostLeadHandoff(args)).resolves.toEqual(
+      expect.objectContaining({ disposition: 'retry' }),
+    );
+    const failedRow = mockInstantlyDb!.getRows('instantly_pending_handoffs')[0];
+    expect(failedRow).toEqual(expect.objectContaining({
+      status: 'failed',
+      error_message: expect.stringContaining('auto_send'),
+    }));
+
+    // Simulate the migration: the old row receives default false, while the
+    // durable marker must preserve the original auto-send intent.
+    mockInstantlyDb = createMockSupabase({ tables: {
+      instantly_pending_handoffs: [{ ...failedRow, auto_send: false }],
+      instantly_lead_qualifications: legacySeed.tables.instantly_lead_qualifications,
+    } });
+    args.instantlyDb = mockInstantlyDb! as unknown as Parameters<typeof maybePostLeadHandoff>[0]['instantlyDb'];
+    await expect(maybePostLeadHandoff(args)).resolves.toEqual(
+      expect.objectContaining({ disposition: 'completed' }),
+    );
+    expect(replyToEmail).toHaveBeenCalledTimes(2);
+    expect(postHandoffMessage).toHaveBeenCalledTimes(1);
+    expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')[0]).toEqual(
+      expect.objectContaining({ status: 'sent', error_message: null }),
+    );
+  });
+
+  it('does not hide an unrelated PostgREST schema error as an auto_send rollout fallback', async () => {
+    process.env.LEAD_HANDOFF_ENABLED = 'true';
+    mockInstantlyDb = createMockSupabase({
+      tables: { instantly_pending_handoffs: [] },
+      errorSelects: {
+        instantly_pending_handoffs: {
+          columnsInclude: 'auto_send',
+          code: 'PGRST204',
+          message: "Could not find the 'campaign_id' column in the schema cache",
+        },
+      },
+    });
+    const { maybePostLeadHandoff } = await import('@/lib/instantly/leadQualificationWorker');
+
+    await expect(maybePostLeadHandoff({
+      instantlyDb: mockInstantlyDb! as unknown as Parameters<typeof maybePostLeadHandoff>[0]['instantlyDb'],
+      qualificationId: 'unrelated-schema-error', campaignId: 'campaign-a', projectId: 'project-a',
+      reply: { id: 'email-1', eaccount: 'sender@example.com' } as Email,
+      leadEmail: 'lead@example.com', leadName: null, campaignName: 'Campaign A',
+      leadReplyText: 'Да', lastOutboundText: null, apiKey: 'test-ai-key',
+    })).resolves.toEqual(expect.objectContaining({ disposition: 'retry' }));
+    expect(postHandoffMessage).not.toHaveBeenCalled();
+  });
+
+  it('marks a leased handoff retry when Telegram posting fails', async () => {
+    process.env.LEAD_HANDOFF_ENABLED = 'true';
+    postHandoffMessage.mockResolvedValue(null);
+    const qualification = {
+      id: 'retry-handoff', campaign_id: 'campaign-a', qualified_project_id: 'project-a',
+      instantly_email_id: 'email-retry', eaccount: 'sender@example.com', lead_email: 'lead@example.com',
+      status: 'lead', reply_body: 'Да',
+    };
+    mockInstantlyDb = createMockSupabase(threadDedupInstantlySeed({
+      instantly_lead_qualifications: [qualification], instantly_pending_handoffs: [],
+      instantly_lead_handoff_outbox: [{ qualification_id: qualification.id, status: 'pending' }],
+    }));
+    mockMainDb = createMockSupabase({ tables: {
+      projects: [{ id: 'project-a', specialist_user_id: 'specialist-a', handoff_email: 'client@example.com', handoff_legend: 'Передаю.', handoff_ai_adapt: false, handoff_auto_send: false }],
+      profiles: [{ id: 'specialist-a', full_name: 'Specialist A' }],
+    } });
+    const { reconcileLeadHandoffJobs } = await import('@/lib/instantly/leadQualificationWorker');
+    expect(await reconcileLeadHandoffJobs({ qualificationId: qualification.id, now: new Date('2026-09-01T12:00:00Z') })).toBe(1);
+    expect(mockInstantlyDb!.rpcCalls).toContainEqual(expect.objectContaining({
+      fn: 'finish_instantly_lead_handoff_job',
+      params: {
+        p_qualification_id: qualification.id,
+        p_lease_token: `lease-${qualification.id}`,
+        p_disposition: 'retry',
+        p_outcome: null,
+        p_error: 'Telegram handoff post failed',
+        p_retry_at: '2026-09-01T12:15:00.000Z',
+      },
+    }));
+  });
+
+  it('does not count an outbox finish after the lease fence was lost', async () => {
+    process.env.LEAD_HANDOFF_ENABLED = 'true';
+    const qualification = {
+      id: 'lost-handoff-lease', campaign_id: 'campaign-a', qualified_project_id: 'project-a',
+      instantly_email_id: 'email-lost-lease', lead_email: 'lead@example.com', status: 'lead',
+    };
+    const seed = threadDedupInstantlySeed({
+      instantly_lead_qualifications: [qualification],
+      instantly_pending_handoffs: [{
+        id: 'manual-pending', qualification_id: qualification.id, status: 'pending', auto_send: false,
+      }],
+      instantly_lead_handoff_outbox: [{ qualification_id: qualification.id, status: 'pending' }],
+    });
+    seed.rpcHandlers.finish_instantly_lead_handoff_job = async () => ({ data: false });
+    mockInstantlyDb = createMockSupabase(seed);
+
+    const { reconcileLeadHandoffJobs } = await import('@/lib/instantly/leadQualificationWorker');
+    expect(await reconcileLeadHandoffJobs({ qualificationId: qualification.id })).toBe(0);
+  });
+
+  it('keeps different threads in the same project independent', async () => {
+    await qualifyLead(leadReply('different-thread-1', 'campaign-a', 'thread-one'));
+    await qualifyLead(leadReply('different-thread-2', 'campaign-a', 'thread-two'));
+
+    expect(mockMainDb!.getRows('notifications')).toHaveLength(2);
+    expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the same stable thread token independent across projects', async () => {
+    await qualifyLead(leadReply('different-project-1', 'campaign-a', '9c-shared-thread'));
+    await qualifyLead(leadReply('different-project-2', 'campaign-b', '05-shared-thread'));
+
+    expect(mockMainDb!.getRows('notifications')).toHaveLength(2);
+    expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails open for missing thread ids so unrelated conversations are not suppressed', async () => {
+    await qualifyLead(leadReply('null-thread-1', 'campaign-a', null));
+    await qualifyLead(leadReply('null-thread-2', 'campaign-a', null));
+
+    expect(mockMainDb!.getRows('notifications')).toHaveLength(2);
+    expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses the durable handoff outbox for a null thread when the claim RPC exists', async () => {
+    process.env.LEAD_HANDOFF_ENABLED = 'true';
+    mockMainDb = createMockSupabase({ tables: {
+      projects: [{
+        id: 'project-a', client: 'Client A', specialist_user_id: 'specialist-a',
+        handoff_email: 'client@example.com', handoff_legend: 'Передаю коллеге.',
+        handoff_ai_adapt: false, handoff_auto_send: false,
+      }],
+      profiles: [{ id: 'specialist-a', full_name: 'Specialist A', email: 'a@example.com' }],
+      telegram_links: [{ user_id: 'specialist-a', telegram_id: '111', telegram_username: 'a' }],
+      notifications: [], deadline_notification_log: [],
+    } });
+
+    await qualifyLead({
+      ...leadReply('null-thread-handoff', 'campaign-a', null),
+      eaccount: 'sender@example.com',
+    });
+
+    expect(postHandoffMessage).toHaveBeenCalledTimes(1);
+    expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')).toHaveLength(1);
+    expect(mockInstantlyDb!.getRows('instantly_lead_handoff_outbox')).toEqual([
+      expect.objectContaining({
+        qualification_id: expect.any(String),
+        status: 'completed',
+      }),
+    ]);
+  });
+
+  it('does not let an old deferred reply steal or repeat a thread alert already sent by a newer reply', async () => {
+    const oldReply = leadReply('old-deferred-1', 'campaign-a', '05-shared-thread');
+    mockInstantlyDb = createMockSupabase({
+      ...threadDedupInstantlySeed({
+      project_instantly_campaigns: projectLinks,
+      project_period_instantly_campaigns: [],
+      client_instantly_access: [],
+      client_forwarded_leads: [],
+      instantly_lead_qualifications: [ownershipReviewRow({
+        id: 'old-deferred-qualification',
+        campaign_id: 'campaign-a',
+        instantly_email_id: oldReply.id,
+        lead_email: oldReply.from_address_email,
+        thread_id: oldReply.thread_id,
+        created_at: '2026-08-31T10:00:00.000Z',
+        updated_at: '2026-08-31T10:00:00.000Z',
+      })],
+      }),
+      enforceQueryWindows: true,
+    });
+    getEmail.mockResolvedValue(oldReply);
+
+    await qualifyLead(leadReply('newer-thread-2', 'campaign-a', '9c-shared-thread'));
+
+    const { reprocessOwnershipReviewRows } = await import(
+      '@/lib/instantly/leadQualificationWorker'
+    );
+    expect(await reprocessOwnershipReviewRows({
+      now: new Date('2026-09-01T12:10:00.000Z'),
+      minRetryAgeMs: 0,
+      limit: 2,
+    })).toBe(1);
+
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'old-deferred-qualification', status: 'lead' }),
+      ]),
+    );
+    expect(mockMainDb!.getRows('notifications')).toHaveLength(1);
+    expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed on a real claim RPC error and leaves recovery able to retry the saved lead', async () => {
+    mockInstantlyDb = createMockSupabase(threadDedupInstantlySeed({
+      project_instantly_campaigns: projectLinks,
+      project_period_instantly_campaigns: [],
+      client_instantly_access: [],
+      client_forwarded_leads: [],
+      instantly_lead_qualifications: [],
+    }, { failFirst: 1 }));
+
+    await qualifyLead(leadReply('claim-error-1', 'campaign-a', '9c-claim-error-thread'));
+
+    const qualifications = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(qualifications).toEqual([
+      expect.objectContaining({ status: 'lead', qualified_project_id: 'project-a' }),
+    ]);
+    expect(mockInstantlyDb!.rpcCalls).toEqual([
+      expect.objectContaining({
+        fn: 'claim_instantly_specialist_alert',
+        params: { p_qualification_id: qualifications[0].id, p_enqueue_handoff: false },
+      }),
+    ]);
+    expect(mockMainDb!.getRows('notifications')).toHaveLength(0);
+    expect(mockMainDb!.getRows('deadline_notification_log')).toHaveLength(0);
+    expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+
+    const { reconcileLeadNotificationDeliveries } = await import(
+      '@/lib/instantly/leadQualificationWorker'
+    );
+    expect(await reconcileLeadNotificationDeliveries({
+      now: new Date('2026-09-01T13:00:00.000Z'),
+      limit: 2,
+      scanLimit: 10,
+    })).toBe(1);
+    expect(mockInstantlyDb!.rpcCalls).toHaveLength(2);
+    expect(mockMainDb!.getRows('notifications')).toHaveLength(1);
+    expect(mockMainDb!.getRows('deadline_notification_log')).toEqual([
+      expect.objectContaining({
+        entity_id: qualifications[0].id,
+        tg_sent: true,
+      }),
+    ]);
+    expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when PostgREST cannot build its schema cache', async () => {
+    mockInstantlyDb = createMockSupabase(threadDedupInstantlySeed({
+      project_instantly_campaigns: projectLinks,
+      project_period_instantly_campaigns: [],
+      client_instantly_access: [],
+      client_forwarded_leads: [],
+      instantly_lead_qualifications: [],
+    }, {
+      failFirst: 1,
+      failError: {
+        code: 'PGRST002',
+        message: 'Could not query the database for the schema cache',
+      },
+    }));
+
+    await qualifyLead(leadReply('claim-schema-cache-1', 'campaign-a', '9c-schema-cache-thread'));
+
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
+      expect.objectContaining({ status: 'lead', qualified_project_id: 'project-a' }),
+    ]);
+    expect(mockMainDb!.getRows('notifications')).toHaveLength(0);
+    expect(mockMainDb!.getRows('deadline_notification_log')).toHaveLength(0);
+    expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { handoffEnabled: true, autoSend: false, expectedStatus: 'pending' },
+    { handoffEnabled: true, autoSend: true, expectedStatus: 'sent' },
+    { handoffEnabled: false, autoSend: false, expectedStatus: null },
+  ])(
+    'durably recovers handoff after a transient claim failure (enabled=$handoffEnabled, auto=$autoSend)',
+    async ({ handoffEnabled: enabled, autoSend, expectedStatus }) => {
+      if (enabled) process.env.LEAD_HANDOFF_ENABLED = 'true';
+      else delete process.env.LEAD_HANDOFF_ENABLED;
+      mockInstantlyDb = createMockSupabase(threadDedupInstantlySeed({
+        project_instantly_campaigns: projectLinks,
+        project_period_instantly_campaigns: [],
+        client_instantly_access: [],
+        client_forwarded_leads: [],
+        instantly_lead_qualifications: [],
+        instantly_pending_handoffs: [],
+      }, { failFirst: 1 }));
+      mockMainDb = createMockSupabase({
+        tables: {
+          projects: [{
+            id: 'project-a',
+            client: 'Client A',
+            specialist_user_id: 'specialist-a',
+            handoff_email: 'client@example.com',
+            handoff_legend: 'Спасибо за интерес. Продолжим обсуждение.',
+            handoff_ai_adapt: false,
+            handoff_auto_send: autoSend,
+          }],
+          profiles: [
+            { id: 'specialist-a', full_name: 'Specialist A', email: 'a@example.com' },
+          ],
+          telegram_links: [
+            { user_id: 'specialist-a', telegram_id: '111', telegram_username: 'a' },
+          ],
+          notifications: [],
+          deadline_notification_log: [],
+        },
+      });
+
+      await qualifyLead({
+        ...leadReply('claim-handoff-1', 'campaign-a', '9c-claim-handoff-thread'),
+        eaccount: 'sender@example.com',
+      });
+      expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')).toHaveLength(0);
+      expect(postHandoffMessage).not.toHaveBeenCalled();
+
+      const { reconcileLeadNotificationDeliveries } = await import(
+        '@/lib/instantly/leadQualificationWorker'
+      );
+      expect(await reconcileLeadNotificationDeliveries({
+        now: new Date('2026-09-01T13:00:00.000Z'),
+        limit: 2,
+        scanLimit: 10,
+      })).toBe(1);
+
+      const pending = mockInstantlyDb!.getRows('instantly_pending_handoffs');
+      if (!enabled) {
+        expect(pending).toHaveLength(0);
+        expect(mockInstantlyDb!.getRows('instantly_lead_handoff_outbox')).toHaveLength(0);
+        expect(mockInstantlyDb!.rpcCalls).not.toEqual(expect.arrayContaining([
+          expect.objectContaining({ fn: 'lease_instantly_lead_handoff_jobs' }),
+        ]));
+        expect(postHandoffMessage).not.toHaveBeenCalled();
+        expect(replyToEmail).not.toHaveBeenCalled();
+        return;
+      }
+      expect(postHandoffMessage).toHaveBeenCalledTimes(1);
+      expect(sendLeadTelegramAlert.mock.invocationCallOrder[0]).toBeLessThan(
+        postHandoffMessage.mock.invocationCallOrder[0],
+      );
+      expect(pending).toEqual([
+        expect.objectContaining({
+          qualification_id: expect.any(String),
+          status: expectedStatus,
+        }),
+      ]);
+      expect(replyToEmail).toHaveBeenCalledTimes(autoSend ? 1 : 0);
+    },
+  );
+
+  it('permanently skips a persisted loser during delivery recovery without creating a delivery log', async () => {
+    const loserQualification = {
+      id: 'loser-qualification',
+      campaign_id: 'campaign-a',
+      qualified_project_id: 'project-a',
+      qualified_project_owner_proven: true,
+      lead_email: 'loser@prospect.example',
+      lead_name: null,
+      company_name: null,
+      campaign_name: 'Campaign A',
+      thread_id: '05-shared-loser-thread',
+      reply_subject: 'Re: proposal',
+      reply_body: 'Да, интересно.',
+      reply_preview: 'Да, интересно.',
+      ai_reason: 'Просит продолжить обсуждение.',
+      ai_confidence: 0.96,
+      status: 'lead',
+      created_at: '2026-09-01T10:00:00.000Z',
+      updated_at: '2026-09-01T10:00:00.000Z',
+    };
+    mockInstantlyDb = createMockSupabase(threadDedupInstantlySeed({
+      project_instantly_campaigns: projectLinks,
+      project_period_instantly_campaigns: [],
+      client_instantly_access: [],
+      instantly_lead_qualifications: [loserQualification],
+      instantly_specialist_alert_decisions: [{
+        qualification_id: 'loser-qualification',
+        project_id: 'project-a',
+        thread_key: 'shared-loser-thread',
+        is_claimant: false,
+        winner_qualification_id: 'winner-qualification',
+        decided_at: '2026-09-01T10:00:01.000Z',
+      }],
+    }));
+
+    const { reconcileLeadNotificationDeliveries } = await import(
+      '@/lib/instantly/leadQualificationWorker'
+    );
+    for (const now of [
+      '2026-09-01T12:00:00.000Z',
+      '2026-09-01T18:00:00.000Z',
+    ]) {
+      expect(await reconcileLeadNotificationDeliveries({
+        now: new Date(now),
+        limit: 2,
+        scanLimit: 10,
+      })).toBe(0);
+    }
+
+    expect(mockInstantlyDb!.rpcCalls).toEqual([
+      expect.objectContaining({
+        fn: 'claim_instantly_specialist_alert',
+        params: { p_qualification_id: 'loser-qualification', p_enqueue_handoff: false },
+      }),
+      expect.objectContaining({
+        fn: 'claim_instantly_specialist_alert',
+        params: { p_qualification_id: 'loser-qualification', p_enqueue_handoff: false },
+      }),
+    ]);
+    expect(mockMainDb!.getRows('deadline_notification_log')).toHaveLength(0);
+    expect(mockInstantlyDb!.getRows('instantly_lead_handoff_outbox')).toHaveLength(0);
+    expect(mockMainDb!.getRows('notifications')).toHaveLength(0);
+    expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it('restores a legacy managed owner before claim while leaving self-serve leads outside claim RPC', async () => {
+    const legacyManaged = {
+      id: 'legacy-managed-qualification',
+      campaign_id: 'campaign-a',
+      qualified_project_id: null,
+      qualified_project_owner_proven: null,
+      lead_email: 'managed@prospect.example',
+      lead_name: null,
+      company_name: null,
+      campaign_name: 'Managed campaign',
+      thread_id: '9c-legacy-managed-thread',
+      reply_subject: 'Re: proposal',
+      reply_body: 'Да, пришлите предложение.',
+      reply_preview: 'Да, пришлите предложение.',
+      ai_reason: 'Просит предложение.',
+      ai_confidence: 0.96,
+      status: 'lead',
+      created_at: '2026-09-01T09:00:00.000Z',
+      updated_at: '2026-09-01T09:00:00.000Z',
+    };
+    const legacySelfServe = {
+      ...legacyManaged,
+      id: 'legacy-self-serve-qualification',
+      campaign_id: 'self-serve-campaign',
+      lead_email: 'self-serve@prospect.example',
+      campaign_name: 'Self-serve campaign',
+      thread_id: '05-legacy-self-serve-thread',
+      created_at: '2026-09-01T09:01:00.000Z',
+      updated_at: '2026-09-01T09:01:00.000Z',
+    };
+    mockInstantlyDb = createMockSupabase(threadDedupInstantlySeed({
+      project_instantly_campaigns: projectLinks,
+      project_period_instantly_campaigns: [],
+      client_instantly_access: [],
+      instantly_lead_qualifications: [legacyManaged, legacySelfServe],
+    }));
+
+    const { reconcileLeadNotificationDeliveries } = await import(
+      '@/lib/instantly/leadQualificationWorker'
+    );
+    expect(await reconcileLeadNotificationDeliveries({
+      now: new Date('2026-09-01T12:00:00.000Z'),
+      limit: 2,
+      scanLimit: 10,
+    })).toBe(1);
+
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'legacy-managed-qualification',
+          qualified_project_id: 'project-a',
+          qualified_project_owner_proven: true,
+        }),
+        expect.objectContaining({
+          id: 'legacy-self-serve-qualification',
+          qualified_project_id: null,
+          qualified_project_owner_proven: null,
+        }),
+      ]),
+    );
+    expect(mockInstantlyDb!.rpcCalls).toEqual([
+      expect.objectContaining({
+        fn: 'claim_instantly_specialist_alert',
+        params: { p_qualification_id: 'legacy-managed-qualification', p_enqueue_handoff: false },
+      }),
+    ]);
+    expect(mockMainDb!.getRows('deadline_notification_log')).toEqual([
+      expect.objectContaining({
+        entity_id: 'legacy-managed-qualification',
+        tg_sent: true,
+      }),
+    ]);
+    expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ownership retry page-budget quarantine — RED contract', () => {
+  const oldLeadKey = process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY;
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY = 'test-ai-key';
+    delete process.env.LEAD_HANDOFF_ENABLED;
+
+    listEmails.mockReset().mockResolvedValue({ items: [], next_starting_after: null });
+    getLeadsByEmail.mockReset().mockResolvedValue([]);
+    getCampaign.mockReset().mockResolvedValue({ id: 'linked-campaign', name: 'Campaign' });
+    getAccountCampaignMappings.mockReset().mockResolvedValue([]);
+    getEmail.mockReset().mockImplementation(async (emailId: string) => leadReplyForRetry(emailId));
+    sendLeadTelegramAlert.mockReset().mockResolvedValue({ sent: true, messageId: 42 });
+    sendClientReplyTelegram.mockReset().mockResolvedValue({ messageId: 7 });
+    fetchBriefByCampaign.mockReset().mockResolvedValue(null);
+    fetchThreadContext.mockReset().mockResolvedValue(null);
+    classifyMachineReply.mockReset().mockReturnValue(null);
+    qualifyReply.mockReset().mockResolvedValue({
+      isLead: false,
+      customCriteriaMatched: false,
+      proposalSeen: true,
+      interestSignals: [],
+      reason: 'Нет коммерческого интереса.',
+      confidence: 0.9,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: null,
+    });
+  });
+
+  afterAll(() => {
+    if (oldLeadKey === undefined) delete process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY;
+    else process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY = oldLeadKey;
+  });
+
+  function leadReplyForRetry(emailId: string): Email {
+    return replyEmail({
+      id: emailId,
+      campaign_id: 'linked-campaign',
+      from_address_email: `${emailId}@prospect.example`,
+      thread_id: `${emailId}-thread`,
+      body: { text: 'Спасибо, неактуально.' },
+    });
+  }
+
+  it('quarantines unchanged page-budget rows without starving a later transient retry', async () => {
+    const pageBudgetReason =
+      'Не удалось однозначно определить проект-владельца ответа: ' +
+      'workspace ownership evidence exceeded the bounded page budget. ' +
+      'Автоматические уведомления и передача отключены до ручной проверки.';
+    const oldRows = Array.from({ length: 6 }, (_, index) => ownershipReviewRow({
+      id: `page-budget-${index}`,
+      instantly_email_id: `page-budget-email-${index}`,
+      lead_email: `page-budget-${index}@prospect.example`,
+      ai_reason: pageBudgetReason,
+      created_at: `2026-08-31T09:0${index}:00.000Z`,
+      updated_at: `2026-08-31T09:0${index}:00.000Z`,
+    }));
+    const transient = ownershipReviewRow({
+      id: 'transient-retry',
+      instantly_email_id: 'transient-email',
+      lead_email: 'transient@prospect.example',
+      ai_reason: 'Автоматическая повторная квалификация: Instantly API 503',
+      created_at: '2026-08-31T10:00:00.000Z',
+      updated_at: '2026-08-31T10:00:00.000Z',
+    });
+    mockInstantlyDb = createMockSupabase({
+      enforceQueryWindows: true,
+      tables: {
+        project_instantly_campaigns: [
+          { project_id: 'project-a', campaign_id: 'linked-campaign', match_source: 'auto' },
+        ],
+        project_period_instantly_campaigns: [],
+        client_instantly_access: [],
+        client_forwarded_leads: [],
+        instantly_lead_qualifications: [...oldRows, transient],
+      },
+    });
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [{ id: 'project-a', client: 'Client A', specialist_user_id: 'specialist-a' }],
+        profiles: [{ id: 'specialist-a', full_name: 'Specialist A', email: 'a@example.com' }],
+        telegram_links: [],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+    });
+
+    const { reprocessOwnershipReviewRows } = await import(
+      '@/lib/instantly/leadQualificationWorker'
+    );
+    expect(await reprocessOwnershipReviewRows({
+      now: new Date('2026-09-01T12:00:00.000Z'),
+      minRetryAgeMs: 0,
+      limit: 2,
+    })).toBe(1);
+    expect(getEmail.mock.calls.map(([emailId]) => emailId)).toEqual(['transient-email']);
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual(
+      expect.arrayContaining(oldRows.map((row) => expect.objectContaining({
+        id: row.id,
+        status: 'needs_review',
+        updated_at: row.updated_at,
+      }))),
+    );
+  });
+
+  it('rechecks page-budget rows in a separate slow lane without consuming the transient lane', async () => {
+    const pageBudget = ownershipReviewRow({
+      id: 'slow-page-budget',
+      instantly_email_id: 'slow-page-budget-email',
+      lead_email: 'slow-page-budget@prospect.example',
+      ai_reason:
+        'Не удалось однозначно определить проект-владельца ответа: ' +
+        'workspace ownership evidence exceeded the bounded page budget. ' +
+        'Автоматические уведомления и передача отключены до ручной проверки.',
+      created_at: '2026-08-31T09:00:00.000Z',
+      updated_at: '2026-08-31T09:00:00.000Z',
+    });
+    const transient = ownershipReviewRow({
+      id: 'slow-lane-transient',
+      instantly_email_id: 'slow-lane-transient-email',
+      lead_email: 'slow-lane-transient@prospect.example',
+      ai_reason: 'Автоматическая повторная квалификация: Instantly API 503',
+      created_at: '2026-08-31T10:00:00.000Z',
+      updated_at: '2026-08-31T10:00:00.000Z',
+    });
+    mockInstantlyDb = createMockSupabase({
+      enforceQueryWindows: true,
+      tables: {
+        project_instantly_campaigns: [
+          { project_id: 'project-a', campaign_id: 'linked-campaign', match_source: 'auto' },
+        ],
+        project_period_instantly_campaigns: [],
+        client_instantly_access: [],
+        client_forwarded_leads: [],
+        instantly_lead_qualifications: [pageBudget, transient],
+      },
+    });
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [{ id: 'project-a', client: 'Client A', specialist_user_id: 'specialist-a' }],
+        profiles: [{ id: 'specialist-a', full_name: 'Specialist A', email: 'a@example.com' }],
+        telegram_links: [],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+    });
+
+    const { reprocessOwnershipReviewRows } = await import(
+      '@/lib/instantly/leadQualificationWorker'
+    );
+    expect(await reprocessOwnershipReviewRows({
+      now: new Date('2026-09-01T12:00:00.000Z'),
+      minRetryAgeMs: 0,
+      limit: 1,
+      lane: 'page_budget',
+    })).toBe(1);
+    expect(getEmail.mock.calls.map(([emailId]) => emailId)).toEqual([
+      'slow-page-budget-email',
+    ]);
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'slow-lane-transient',
+          status: 'needs_review',
+          updated_at: transient.updated_at,
+        }),
+      ]),
+    );
   });
 });
