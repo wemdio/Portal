@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError, normalizeProxyUrl } from '@/lib/tgOutreach/apiHelpers';
+import { authenticateRequest, jsonError, normalizeProxyUrl, proxyDisplayName } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -87,12 +87,33 @@ export async function POST(req: NextRequest) {
       if (!rawUrl) return jsonError('url обязателен', 400);
       const url = normalizeProxyUrl(rawUrl);
 
+      /**
+       * Тот же адрес в кампании второй раз не заводим.
+       *
+       * Массовая загрузка идёт по строке на запрос, и повторная вставка того
+       * же списка (докинули к существующим, перезалили после ошибки) множила
+       * строки: 598 записей на 532 уникальных адреса на момент правки. Для
+       * Telegram дубль — это два аккаунта на одном канале пула, то есть на
+       * одном устройстве: прямой повод для блокировки. Отвечаем существующей
+       * строкой и статусом 200 — для загрузчика это успех, и остаток списка
+       * не обрывается.
+       */
+      const { data: existing } = await auth.supabase
+        .from('tg_outreach_proxies')
+        .select('*')
+        .eq('campaign_id', campaignId)
+        .eq('url', url)
+        .maybeSingle();
+      if (existing) return NextResponse.json({ ...existing, duplicate: true });
+
+      const providedName = ((body.name as string) ?? '').trim();
+
       const { data, error } = await auth.supabase
         .from('tg_outreach_proxies')
         .insert({
           campaign_id: campaignId,
           url,
-          name: (body.name as string) ?? '',
+          name: providedName || proxyDisplayName(url),
           is_active: body.is_active !== false,
         })
         .select()
