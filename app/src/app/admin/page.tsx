@@ -93,11 +93,11 @@ export default function AdminPage() {
           <div className="flex h-full flex-col">
             <div className="mb-4 flex items-start justify-between">
               <div>
-                <h2 className="text-lg font-semibold text-gray-900">{locale === 'en' ? 'API keys' : 'Ключи API'}</h2>
+                <h2 className="text-lg font-semibold text-gray-900">{locale === 'en' ? 'Portal API' : 'API портала'}</h2>
                 <p className="text-sm text-gray-500">
                   {locale === 'en'
-                    ? 'External access to parsers and the base constructor: issue and revoke keys.'
-                    : 'Внешний доступ к парсерам и конструктору баз: выдать и отозвать ключи.'}
+                    ? 'Programmatic access to the tools: keys, limits, request log and docs.'
+                    : 'Программный доступ к инструментам: ключи, лимиты, журнал обращений и документация.'}
                 </p>
               </div>
               <KeyRound className="h-6 w-6 text-blue-600/80" />
