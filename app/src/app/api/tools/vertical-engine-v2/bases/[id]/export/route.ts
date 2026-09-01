@@ -4,6 +4,7 @@ import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { buildBaseCsv, safeBaseFilename } from '@/lib/verticalEngineV2/baseCsv';
+import { prepareSegmentationAudience } from '@/lib/verticalEngineV2/segmentationAudit';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -13,7 +14,18 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-// GET — скачать базу целиком как CSV (разделитель ';', BOM — под Excel-RU).
+type BaseExportMode = 'raw' | 'launch-ready';
+
+function exportMode(req: NextRequest): BaseExportMode | null {
+  const requested = req.nextUrl.searchParams.get('mode');
+  if (requested === null || requested === '' || requested === 'raw') return 'raw';
+  if (requested === 'launch-ready') return 'launch-ready';
+  return null;
+}
+
+// GET — скачать raw-базу целиком или только launch-ready аудиторию как CSV
+// (разделитель ';', BOM — под Excel-RU). Отсутствующий mode остаётся raw для
+// обратной совместимости со старыми ссылками.
 // Пустая база (row_count=0, напр. сборка упала или файл только загрузили) →
 // 409: отдавать CSV из одних заголовков было бы молчаливой потерей данных.
 // data ≤ 50 000 строк (кап автосборки; ручная загрузка — 10 000), поэтому
@@ -28,10 +40,12 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
       const { id } = await params;
       if (!id) return jsonError('Missing id', 400);
+      const mode = exportMode(req);
+      if (!mode) return jsonError('Неизвестный режим выгрузки', 400);
 
       const { data: base, error: baseErr } = await supabaseAdmin
         .from('ve_bases')
-        .select('id, filename, row_count, columns, data')
+        .select('id, filename, row_count, columns, data, source')
         .eq('id', id)
         .single();
       if (baseErr) {
@@ -58,10 +72,24 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         return jsonError('База пустая — нечего выгружать', 409);
       }
 
-      const csv = buildBaseCsv(columns, rows);
+      const exportRows =
+        mode === 'launch-ready'
+          ? prepareSegmentationAudience({
+              rows,
+              columns,
+              source: base.source === 'auto' ? 'auto' : 'upload',
+            }).rows
+          : rows;
+      if (exportRows.length === 0) {
+        return jsonError('В базе нет строк, готовых к запуску', 409);
+      }
+
+      const csv = buildBaseCsv(columns, exportRows);
+      const requestedMode = req.nextUrl.searchParams.get('mode');
       const filename = safeBaseFilename(
         typeof base.filename === 'string' ? base.filename : null,
         id,
+        requestedMode ? mode : undefined,
       );
 
       return new NextResponse(csv, {

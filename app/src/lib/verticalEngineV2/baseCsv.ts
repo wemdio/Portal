@@ -35,6 +35,28 @@ export function buildBaseCsv(
   return '﻿' + lines.join('\r\n');
 }
 
+/**
+ * Сохраняет ответ защищённого CSV-эндпоинта в браузере. Экспорт нельзя делать
+ * обычной ссылкой: внутренние tools-роуты требуют Bearer-токен, поэтому оба
+ * шага движка сначала получают Response через authFetch и используют этот
+ * общий финальный участок.
+ */
+export async function downloadBaseCsvResponse(response: Response, fallbackFilename: string): Promise<void> {
+  const match = /filename="([^"]+)"/.exec(response.headers.get('content-disposition') ?? '');
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  try {
+    anchor.href = url;
+    anchor.download = match?.[1] ?? fallbackFilename;
+    document.body.appendChild(anchor);
+    anchor.click();
+  } finally {
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }
+}
+
 /* ─────────────────────── Имя файла для Content-Disposition ─────────────────────── */
 
 /** Посимвольная транслитерация кириллицы (нижний регистр на входе). */
@@ -50,9 +72,14 @@ const CYRILLIC_LATIN: Record<string, string> = {
  * ломает Content-Disposition и старые даунлоад-менеджеры). Известное
  * табличное расширение исходного имени (.csv/.xlsx/.xls) срезаем, чтобы не
  * плодить двойное «podem.xlsx.csv». Пустой результат (напр. filename из
- * одних эмодзи) → fallback `base-<id>.csv`.
+ * одних эмодзи) → fallback `base-<id>.csv`. Явный режим добавляется суффиксом,
+ * чтобы launch-ready и raw нельзя было перепутать после скачивания.
  */
-export function safeBaseFilename(filename: string | null | undefined, id: string): string {
+export function safeBaseFilename(
+  filename: string | null | undefined,
+  id: string,
+  variant?: 'raw' | 'launch-ready',
+): string {
   const stem = (filename ?? '')
     .toLowerCase()
     .split('')
@@ -62,5 +89,5 @@ export function safeBaseFilename(filename: string | null | undefined, id: string
     .replace(/[^a-z0-9-_.]+/g, '-')
     .replace(/-{2,}/g, '-')
     .replace(/^[-.]+|[-.]+$/g, '');
-  return `${stem || `base-${id}`}.csv`;
+  return `${stem || `base-${id}`}${variant ? `-${variant}` : ''}.csv`;
 }

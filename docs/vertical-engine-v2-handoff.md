@@ -129,8 +129,19 @@ launch portfolio существуют только в коде ветки `Serge
    - Step 4 различает estimate/cap/collected/processed/проверенный итог. Последняя ступень
      называется «Прошли проверки», показывает checked/total company coverage и число строк
      без relevance-verdict; они в итог не входят. При >2 000 есть warning о лимите одного
-     запуска, а failed-база не получает выдуманный processed count из `row_count`. Live VBI-пример:
-     **8 410 под фильтры → cap 2 000 → 1 514 после конструктора → 651 прошёл проверки**.
+     запуска, а failed-база не получает выдуманный processed count из `row_count`;
+   - raw CSV теперь явно диагностический. Для запуска используется `mode=launch-ready`:
+     он прогоняет тот же email/relevance/dedup-контракт, что и pre-launch audit. Step 4
+     разделяет «CSV для запуска» и «Исходный CSV», Step 5 скачивает только launch-ready;
+   - `base_collect` исключает другие базы проекта по email тоже, включая все адреса из
+     multi-email ячейки. Новая collecting-база ждёт более старую collecting-базу того же
+     проекта; после конструктора excluded keys перечитываются заново, чтобы параллельная
+     база, завершившаяся за время validation/split, не дала сохранить тот же контакт вторым
+     запуском. Старый JS-slice чужого `data` до `MAX_ROWS_LIMIT` убран;
+   - live VBI-пример до этого safety-fix был диагностическим снимком:
+     **8 410 под фильтры → cap 2 000 → 1 514 после конструктора → 651 строка прошла тогдашние
+     проверки**. Старые VBI/transport базы, собранные до fail-closed email gate, launch-ready
+     export и межбазового email-дедупа, нужно пересобрать после деплоя.
 9. **Безопасный выбор Instantly preset/workspace — закрыт в коде**:
    - шаг 5 не выбирает первый клиентский пресет автоматически. Непривязанный legacy-проект
      требует явного выбора; после него UI показывает workspace, общий тег пула и количество
@@ -215,6 +226,14 @@ launch portfolio существуют только в коде ветки `Serge
   Строки без relevance-verdict из-за лимита/сбоя считаются отдельным excluded-классом, а UI
   показывает покрытие компаний. Текущий cap одного запуска — 2 000; превышение показывается
   отдельно. Failed `row_count` не считается доказательством, что строки дошли до обработки.
+- **Raw CSV не равен launch-ready**: исходная выгрузка нужна для диагностики и разбора
+  источников; перед запуском всегда используется `launch-ready` экспорт/аудитория с теми же
+  gates, что в segmentation audit. Строка без `_email_status='ok'` не может попасть ни в
+  launch, ни в refill.
+- **Дедуп между базами — контактный**: компания/ИНН остаются важными, но email сильнее для
+  запуска. Любой email, уже сохранённый в другой базе проекта, исключает строку новой базы
+  даже при другом названии компании/ИНН. Параллельные collecting-базы одного проекта идут
+  по очереди, а после конструктора исключения перечитываются свежо.
 - **Сезонность — verified input, не «знание LLM»**: `neutral` допустим только с проверенным
   источником и цитатой; у `seasonal` каждое отдельное `peak/avoid` имеет собственный
   URL+quote evidence. Mixed-ответ теряет неподтверждённые окна, а полное отсутствие поддержки
@@ -274,7 +293,8 @@ launch portfolio существуют только в коде ветки `Serge
   peak/avoid/unknown и московским состоянием; человеческие названия (#9); видимый tokenized
   segment preview (#7); async audit (#8) с complete, stale/incomplete и `not_required`;
   для одной базы сверить estimate до cap → collected → processed → «Прошли проверки»,
-  split multi-email, complete-validation gate и company-level hypothesis-aware relevance;
+  split multi-email, complete-validation gate, межбазовый email-дедуп и company-level
+  hypothesis-aware relevance;
   пересобрать досье и сверить raw/unique/known-any-INN/matched-row channels;
   technician создаёт тестового client по email/password и workspace+tag → сверить exact
   snapshot, отсутствие sender addresses в UI и отсутствие project binding до launch;

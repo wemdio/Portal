@@ -22,6 +22,7 @@ import type {
 import { authFetch } from '@/lib/authFetch';
 import { readSpreadsheetFile } from '@/lib/spreadsheet/parseCSV';
 import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
+import { downloadBaseCsvResponse } from '@/lib/verticalEngineV2/baseCsv';
 import { VE_LAUNCH_MAX_LEADS } from '@/lib/verticalEngineV2/launchHandoff';
 import {
   VE_API,
@@ -43,6 +44,7 @@ const COLLECT_POLL_MS = 4000;
 /** Лимит строк автосборки — выбор пользователя; route валидирует те же значения. */
 type CollectLimit = 2000 | 10000 | 50000;
 type BaseMode = 'auto' | 'upload';
+type BaseExportMode = 'raw' | 'launch-ready';
 const COLLECT_LIMITS: readonly CollectLimit[] = [2000, 10000, 50000];
 const DEFAULT_COLLECT_LIMIT: CollectLimit = 10000;
 
@@ -785,48 +787,34 @@ function previewCellText(value: unknown): string {
   return typeof value === 'string' ? value : String(value);
 }
 
-/** Имя файла из Content-Disposition ответа экспорта; fallback — base-<id>.csv. */
-function exportDownloadName(res: Response, baseId: string): string {
-  const match = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '');
-  return match?.[1] ?? `base-${baseId}.csv`;
-}
-
 function BaseRow({ base, hypothesisTitle }: { base: VeBaseSummary; hypothesisTitle?: string }) {
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [downloading, setDownloading] = useState(false);
+  const [downloadingMode, setDownloadingMode] = useState<BaseExportMode | null>(null);
   const [downloadError, setDownloadError] = useState('');
 
   const hasRows = base.row_count > 0;
   const columns = Array.isArray(base.columns) ? base.columns : [];
   const previewRows = (Array.isArray(base.sample_rows) ? base.sample_rows : []).slice(0, PREVIEW_ROWS);
 
-  const handleDownload = useCallback(async () => {
-    if (downloading) return;
+  const handleDownload = useCallback(async (mode: BaseExportMode) => {
+    if (downloadingMode) return;
     setDownloadError('');
-    setDownloading(true);
+    setDownloadingMode(mode);
     try {
       // Не <a href>: экспорт за Bearer-авторизацией — тянем через authFetch
       // и скачиваем blob через временный objectURL.
-      const res = await authFetch(`${VE_API}/bases/${base.id}/export`);
+      const res = await authFetch(`${VE_API}/bases/${base.id}/export?mode=${mode}`);
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(data.error || `Ошибка ${res.status}`);
       }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = exportDownloadName(res, base.id);
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      await downloadBaseCsvResponse(res, `base-${base.id}-${mode}.csv`);
     } catch (err) {
       setDownloadError(err instanceof Error ? err.message : 'Не удалось скачать CSV');
     } finally {
-      setDownloading(false);
+      setDownloadingMode(null);
     }
-  }, [base.id, downloading]);
+  }, [base.id, downloadingMode]);
 
   return (
     <div className="border-b ve2-div last:border-b-0">
@@ -883,9 +871,25 @@ function BaseRow({ base, hypothesisTitle }: { base: VeBaseSummary; hypothesisTit
             >
               {previewOpen ? 'Скрыть' : 'Превью'}
             </button>
-            <button type="button" onClick={() => void handleDownload()} disabled={downloading} className={HE.btnGhost}>
-              {downloading ? <Spinner className="h-3 w-3" /> : null}
-              Скачать CSV
+            <button
+              type="button"
+              onClick={() => void handleDownload('launch-ready')}
+              disabled={downloadingMode !== null}
+              className={HE.btnGhost}
+              title="Только уникальные контакты с валидной почтой, прошедшие проверку релевантности"
+            >
+              {downloadingMode === 'launch-ready' ? <Spinner className="h-3 w-3" /> : null}
+              CSV для запуска
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleDownload('raw')}
+              disabled={downloadingMode !== null}
+              className={HE.btnQuiet}
+              title="Все собранные строки, включая исключённые из запуска"
+            >
+              {downloadingMode === 'raw' ? <Spinner className="h-3 w-3" /> : null}
+              Исходный CSV
             </button>
           </span>
         ) : null}

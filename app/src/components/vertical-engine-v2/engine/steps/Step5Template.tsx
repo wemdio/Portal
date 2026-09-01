@@ -9,6 +9,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type JSX } from 'react';
 import { ChevronRight, Copy, Download, Rocket, Sparkles } from 'lucide-react';
+import { authFetch } from '@/lib/authFetch';
+import { downloadBaseCsvResponse } from '@/lib/verticalEngineV2/baseCsv';
 import type { VeRuSeasonalityPrioritySnapshot, VeRuSeasonalityState, VeTemplate } from '@/lib/verticalEngineV2/types';
 import { renderTemplatePreview, type VePreviewToken } from '@/lib/verticalEngineV2/renderPreview';
 import {
@@ -1144,6 +1146,8 @@ export function Step5Template(props: {
   const { template, base, jobs, onBuildTemplate, onGoToContent } = props;
   const [copied, setCopied] = useState(false);
   const [copiedLetterIdx, setCopiedLetterIdx] = useState<number | null>(null);
+  const [csvDownloading, setCsvDownloading] = useState(false);
+  const [csvDownloadError, setCsvDownloadError] = useState('');
   const segmentationAudit = useSegmentationAudit(template?.id ?? null);
   const { refresh: refreshSegmentationAudit, markRejected: markSegmentationRejected } = segmentationAudit;
   const handleSegmentationRejected = useCallback(
@@ -1199,6 +1203,25 @@ export function Step5Template(props: {
     a.remove();
     URL.revokeObjectURL(url);
   }, [template]);
+
+  const exportBaseId = base?.id ?? template?.base_id ?? null;
+  const handleLaunchReadyCsvDownload = useCallback(async () => {
+    if (!exportBaseId || csvDownloading) return;
+    setCsvDownloadError('');
+    setCsvDownloading(true);
+    try {
+      const res = await authFetch(`${VE_API}/bases/${exportBaseId}/export?mode=launch-ready`);
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || `Ошибка ${res.status}`);
+      }
+      await downloadBaseCsvResponse(res, `base-${exportBaseId}-launch-ready.csv`);
+    } catch (err) {
+      setCsvDownloadError(err instanceof Error ? err.message : 'Не удалось скачать CSV для запуска');
+    } finally {
+      setCsvDownloading(false);
+    }
+  }, [csvDownloading, exportBaseId]);
 
   /* ── Шаблона ещё нет ── */
   if (!template) {
@@ -1271,6 +1294,16 @@ export function Step5Template(props: {
           </p>
         </div>
         <div className="flex max-w-full flex-wrap items-center justify-end gap-2 sm:shrink-0">
+          <button
+            type="button"
+            onClick={() => void handleLaunchReadyCsvDownload()}
+            disabled={csvDownloading}
+            aria-label="Скачать CSV для запуска"
+            className={`${HE.btnGhost} ve2-b-sm`}
+          >
+            <Download aria-hidden className="h-4 w-4" />
+            {csvDownloading ? 'Готовим CSV…' : 'CSV для запуска'}
+          </button>
           <button type="button" onClick={handleCopy} className={`${HE.btnGhost} ve2-b-sm`}>
             <Copy aria-hidden className="h-4 w-4" />
             {copied ? 'Скопировано' : 'Скопировать'}
@@ -1286,6 +1319,12 @@ export function Step5Template(props: {
           </button>
         </div>
       </header>
+
+      {csvDownloadError ? (
+        <p className="text-xs text-red-600" role="alert">
+          {csvDownloadError}
+        </p>
+      ) : null}
 
       {/* Реальные unmatched-операторы из плана, без демонстрационных процентов. */}
       {unmatchedMapping.length > 0 ? (

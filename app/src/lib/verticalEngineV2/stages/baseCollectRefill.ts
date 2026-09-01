@@ -14,9 +14,8 @@
  *   - лиды: только строки с email И вердиктом валидации 'ok' (колонка
  *     «Email Статус» сетки конструктора; catch_all/invalid/disposable
  *     исключаем — TODO: catch_all может дать часть рабочих адресов, пока
- *     сознательно не шлём). Если валидации не было (конструктор пропущен
- *     или не дошёл до validate_emails) — статус неизвестен, берём все
- *     строки с email: ровно так ведёт себя первичный запуск;
+ *     сознательно не шлём). Если валидации не было или она не завершилась,
+ *     статус неизвестен и строка fail-closed не идёт в кампанию;
  *   - кап daily_leads_cap конфига — на ПРОЕКТ в сутки (UTC): уже долитое
  *     сегодня другими refill'ами вычитается;
  *   - blocklist владельца пресета и чанкование — внутри
@@ -259,8 +258,8 @@ export function pickRefillTemplate(
 }
 
 /**
- * Строки-кандидаты в лиды: непустой email И (вердикт валидации 'ok' ЛИБО
- * валидации не было — статус null). catch_all/invalid/disposable/unknown
+ * Строки-кандидаты в лиды: непустой email И точный вердикт валидации 'ok'.
+ * Отсутствующий/пустой статус, catch_all/invalid/disposable/unknown/error
  * отсекаем. Возвращает счётчики воронки для журнала.
  */
 export function selectRefillLeadRows(
@@ -282,7 +281,7 @@ export function selectRefillLeadRows(
     withEmail += 1;
     const status = emailStatuses?.[i] ?? null;
     // TODO(catch_all): catch_all-домены частично рабочие — пока не шлём (риск баунсов).
-    if (status !== null && status !== 'ok') continue;
+    if (status !== 'ok') continue;
     leadRows.push(row);
   }
   return { leadRows, withEmail, valid: leadRows.length };

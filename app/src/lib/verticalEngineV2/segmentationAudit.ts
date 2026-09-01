@@ -183,7 +183,7 @@ export function prepareSegmentationAudience(
         return;
       }
       const emailStatus = typeof row._email_status === 'string' ? row._email_status : null;
-      if (emailStatus && emailStatus !== 'ok') {
+      if (emailStatus !== 'ok') {
         excluded.invalidEmailStatus += 1;
         return;
       }

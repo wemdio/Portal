@@ -6,6 +6,16 @@ import { Step5Template } from '@/components/vertical-engine-v2/engine/steps/Step
 const mockVeEngineCall = jest.fn();
 const mockVeEnginePost = jest.fn();
 const mockStartAudit = jest.fn();
+const mockAuthFetch = jest.fn();
+const mockDownloadBaseCsvResponse = jest.fn();
+
+jest.mock('@/lib/authFetch', () => ({
+  authFetch: (...args: unknown[]) => mockAuthFetch(...args),
+}));
+
+jest.mock('@/lib/verticalEngineV2/baseCsv', () => ({
+  downloadBaseCsvResponse: (...args: unknown[]) => mockDownloadBaseCsvResponse(...args),
+}));
 
 jest.mock('@/components/vertical-engine-v2/engine/api', () => ({
   VE_API: '/api/tools/vertical-engine-v2',
@@ -64,6 +74,8 @@ const template: VeTemplate = {
 describe('Vertical Engine v2 Step 5 client onboarding', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockAuthFetch.mockResolvedValue({ ok: true });
+    mockDownloadBaseCsvResponse.mockResolvedValue(undefined);
     mockVeEngineCall.mockResolvedValue({
       ok: true,
       status: 200,
@@ -124,6 +136,15 @@ describe('Vertical Engine v2 Step 5 client onboarding', () => {
         onBuildTemplate={jest.fn()}
       />,
     );
+
+    expect(screen.getByRole('button', { name: 'Скачать CSV для запуска' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /исходный CSV/i })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Скачать CSV для запуска' }));
+    await waitFor(() => {
+      expect(mockAuthFetch).toHaveBeenCalledWith(
+        '/api/tools/vertical-engine-v2/bases/base-1/export?mode=launch-ready',
+      );
+    });
 
     await user.click(screen.getByRole('button', { name: 'Проверить перед запуском' }));
     const createAction = await screen.findByRole('button', { name: 'Создать клиента и пресет' });

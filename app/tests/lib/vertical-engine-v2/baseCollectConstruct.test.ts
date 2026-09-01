@@ -30,11 +30,14 @@ jest.mock('@/lib/verticalEngineV2/relevanceGate', () => ({
 import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
+  baseRowMatchesExclusion,
+  buildBaseExclusionKeysFromRows,
   runBaseCollectStage,
   VE_AUTO_COLLECT_COLUMNS,
   type VeCollectInfo,
   type VeUnifiedRow,
 } from '@/lib/verticalEngineV2/stages/baseCollect';
+import { selectRefillLeadRows } from '@/lib/verticalEngineV2/stages/baseCollectRefill';
 import { prepareSegmentationAudience } from '@/lib/verticalEngineV2/segmentationAudit';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 
@@ -540,6 +543,205 @@ describe('base_collect CONSTRUCT import', () => {
       relevance_checked_companies: 1,
       relevance_total_companies: 2,
       relevance_coverage_complete: false,
+    });
+  });
+});
+
+describe('VE2 auto email validation gate', () => {
+  it('excludes auto rows with a missing or empty validation status', () => {
+    const audience = prepareSegmentationAudience({
+      rows: [
+        { company: 'Подтверждённая', email: 'ok@example.test', _email_status: 'ok' },
+        { company: 'Без статуса', email: 'missing@example.test' },
+        { company: 'Пустой статус', email: 'empty@example.test', _email_status: '' },
+      ],
+      columns: ['company', 'email'],
+      source: 'auto',
+    });
+
+    expect(audience.leads.map((lead) => lead.email)).toEqual(['ok@example.test']);
+    expect(audience.excluded.invalidEmailStatus).toBe(2);
+  });
+
+  it('does not turn a partial constructor row without a verdict into a launch lead', () => {
+    const audience = prepareSegmentationAudience({
+      rows: [{ company: 'Частичная', email: 'unchecked@example.test' }],
+      columns: ['company', 'email'],
+      source: 'auto',
+    });
+
+    expect(audience.leads).toEqual([]);
+    expect(audience.excluded.invalidEmailStatus).toBe(1);
+  });
+
+  it('refill admits only exact ok and fails closed without status data', () => {
+    const rows = [
+      unifiedRow({ company: 'OK', email: 'ok@example.test' }),
+      unifiedRow({ company: 'Catch-all', email: 'catch@example.test' }),
+      unifiedRow({ company: 'Без статуса', email: 'missing@example.test' }),
+      unifiedRow({ company: 'Пустой статус', email: 'empty@example.test' }),
+    ];
+
+    expect(selectRefillLeadRows(rows, ['ok', 'catch_all', null, ''])).toMatchObject({
+      leadRows: [expect.objectContaining({ email: 'ok@example.test' })],
+      withEmail: 4,
+      valid: 1,
+    });
+    expect(selectRefillLeadRows(rows, null)).toMatchObject({
+      leadRows: [],
+      withEmail: 4,
+      valid: 0,
+    });
+  });
+});
+
+describe('VE2 cross-base contact exclusion', () => {
+  it('waits for an older collecting base in the same project before dispatching work', async () => {
+    const info = collectInfo([
+      unifiedRow({
+        company: 'Клиника Новая',
+        website: 'new.test',
+        email: 'new@example.test',
+        inn: '7700000333',
+      }),
+    ]);
+    const current = {
+      ...makeBase(info),
+      id: 'b-new',
+      created_at: '2026-08-30T00:02:00Z',
+    };
+    const older = {
+      ...makeBase(collectInfo([])),
+      id: 'b-old',
+      created_at: '2026-08-30T00:01:00Z',
+    };
+    const db = seed(info, {
+      ve_bases: [current, older],
+    });
+
+    await expect(
+      runBaseCollectStage(
+        { ...makeJob(), payload: { base_id: 'b-new', hypothesis_id: 'h1' } },
+        { supabase: db as unknown as SupabaseClient },
+      ),
+    ).resolves.toMatchObject({
+      result: { waiting: true, base_id: 'b-new', waiting_for_base_id: 'b-old' },
+    });
+
+    expect(db.inserts).toEqual([]);
+    expect(db.updates).toContainEqual(expect.objectContaining({
+      table: 've_jobs',
+      patch: expect.objectContaining({ status: 'pending' }),
+    }));
+  });
+
+  it('treats every email in another base as occupied even when company and inn differ', () => {
+    const keys = buildBaseExclusionKeysFromRows([
+      {
+        company: 'ООО Старое имя',
+        inn: '7700000001',
+        email: 'owner@example.test, Shared@Example.test',
+      },
+    ]);
+
+    expect(baseRowMatchesExclusion(keys, unifiedRow({
+      company: 'Совсем другая компания',
+      inn: '7800000002',
+      email: 'shared@example.test',
+    }))).toBe(true);
+    expect(baseRowMatchesExclusion(keys, unifiedRow({
+      company: 'Совсем другая компания',
+      inn: '7800000002',
+      email: 'fresh@example.test',
+    }))).toBe(false);
+  });
+
+  it('rechecks other project bases after constructor import and drops duplicate emails', async () => {
+    const dispatched: NonNullable<VeCollectInfo['construct']> = {
+      bc_job_id: 'bc-post-construct-dedup',
+      status: 'dispatched',
+      dispatched_at: '2026-08-30T00:00:00Z',
+    };
+    const currentHarvest = [
+      unifiedRow({
+        company: 'Клиника Новое Имя',
+        website: 'new-name.test',
+        email: 'source@new-name.test',
+        inn: '7700000111',
+      }),
+    ];
+    const db = seed(
+      collectInfo(currentHarvest, dispatched),
+      {
+        ve_bases: [
+          makeBase(collectInfo(currentHarvest, dispatched)),
+          {
+            id: 'b-other',
+            project_id: 'p1',
+            vertical_id: 'v1',
+            hypothesis_id: 'h2',
+            filename: 'other',
+            row_count: 1,
+            columns: [],
+            sample_rows: [],
+            data: [
+              {
+                company: 'Клиника Старое Имя',
+                website: 'old-name.test',
+                email: 'found@clinic.test',
+                inn: '7800000222',
+              },
+            ],
+            status: 'analyzed',
+            source: 'auto',
+            collect_info: {},
+            error: null,
+          },
+        ],
+        base_constructor_jobs: [
+          {
+            id: 'bc-post-construct-dedup',
+            status: 'completed',
+            error_message: null,
+            selected_steps: [
+              'split_emails',
+              'dedup_email',
+              'validate_emails',
+              'cap_emails_per_company',
+            ],
+            data: [
+              [
+                'Компания', 'Сайт', 'Email', 'Телефон', 'Вакансия', 'Адрес', 'Категория',
+                'Сотрудники', 'Выручка', 'ИНН', 'Источник', 'Email Статус',
+              ],
+              [
+                'Клиника Новое Имя', 'new-name.test', 'found@clinic.test', '', '', '',
+                '86.2', '', '', '7700000111', 'реестр', 'ok',
+              ],
+              [
+                'Клиника Новое Имя', 'new-name.test', 'fresh@clinic.test', '', '', '',
+                '86.2', '', '', '7700000111', 'реестр', 'ok',
+              ],
+            ],
+            result_stats: { total_rows: 2, emails_found: 2 },
+          },
+        ],
+      },
+    );
+
+    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+
+    const storedRows = (lastBasePatch(db)?.data ?? []) as Array<Record<string, unknown>>;
+    expect(storedRows.map((row) => row.email)).toEqual(['fresh@clinic.test']);
+    expect(lastBasePatch(db)?.row_count).toBe(1);
+
+    const storedInfo = lastBasePatch(db)?.collect_info as VeCollectInfo;
+    expect(storedInfo.stats).toMatchObject({
+      rows_total: 1,
+      processed_rows: 1,
+      excluded_existing_bases: 1,
+      excluded_existing_bases_after_construct: 1,
+      launchable_rows: 1,
     });
   });
 });
