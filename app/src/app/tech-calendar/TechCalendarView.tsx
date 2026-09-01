@@ -303,12 +303,27 @@ function formatSyncTime(value: string | null): string {
 }
 
 function ProviderBalances({ balances }: { balances: TechProviderBalance[] }) {
-  if (!balances.length) return null;
-  const providerOrder: Record<TechProviderBalance['provider'], number> = {
-    serper: 0,
-    proxymarket: 1,
-  };
-  const ordered = [...balances].sort((a, b) => providerOrder[a.provider] - providerOrder[b.provider]);
+  const byProvider = new Map(balances.map((balance) => [balance.provider, balance]));
+  const ordered = [
+    byProvider.get('serper') ?? {
+      provider: 'serper',
+      label: 'Serper',
+      balance: null,
+      unit: 'credits',
+      synced_at: null,
+      last_error: null,
+      updated_at: '',
+    },
+    byProvider.get('proxymarket') ?? {
+      provider: 'proxymarket',
+      label: 'proxy.market',
+      balance: null,
+      unit: 'RUB',
+      synced_at: null,
+      last_error: null,
+      updated_at: '',
+    },
+  ] satisfies TechProviderBalance[];
 
   return (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
