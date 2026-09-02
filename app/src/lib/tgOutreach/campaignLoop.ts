@@ -31,7 +31,7 @@ import {
 import { sendFirstTouchBatch } from './firstTouch/send';
 import { parkAccountAfterLimit } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
-import { processLeadForwards } from './leadForward';
+import { runLeadForwardPoller } from './leadForward';
 import { buildLeadMessage, splitTelegramMessage } from './leadMessage';
 import { loadLeadOrigin } from './leadOrigin';
 import { withTimeout } from './withTimeout';
@@ -1538,6 +1538,32 @@ export async function runCampaignLoop(
     if (stErr) log('error', `Не смог записать статус "запущена" в базу данных — ${stErr.message}`);
   }
 
+  /**
+   * Ручные передачи лидов и партнёров — отдельным опросом, а не по ходу круга.
+   *
+   * Все аккаунты подключены с этого момента и до конца запуска, а круг с
+   * паузами 5–10 минут между аккаунтами и «тихим часом» ночью доходит до
+   * нужного аккаунта часами: 01.09.2026 лид, поставленный в 19:26, ушёл в
+   * 08:57. Опрос берёт клиент из `clients` в момент отправки — круг
+   * пересоздаёт клиенты на мёртвых сокетах, и нужен свежий.
+   *
+   * `forwardsStopped` поднимаем в `finally` перед разрывом сокетов: иначе
+   * опрос успел бы взять задачу на закрывающемся клиенте.
+   */
+  let forwardsStopped = false;
+  const forwardPoller = runLeadForwardPoller({
+    db,
+    campaignId,
+    getClient: (accountId) => {
+      const entry = clients.find((c) => c.account.id === accountId);
+      return entry ? { client: entry.client, accountName: entry.account.session_name } : null;
+    },
+    log,
+    shouldStop: () => forwardsStopped || shouldStop(),
+  }).catch((err) => {
+    log('warning', `Опрос очереди передач остановился с ошибкой — ${err instanceof Error ? err.message : String(err)}. Передачи уйдут после перезапуска кампании.`);
+  });
+
   const offsetErrorCounts = new Map<string, number>();
   // Separate counter for the gramJS internal pagination bug — `getDialogs`
   // throws RangeError ("offset out of range") on accounts with thousands of
@@ -2091,24 +2117,8 @@ export async function runCampaignLoop(
           }
         }
 
-        // Ручные передачи лидов и партнёров: оператор поставил их из интерфейса,
-        // отправить может только живое соединение — оно здесь.
-        try {
-          await processLeadForwards({
-            db,
-            client,
-            accountId: account.id,
-            accountName: account.session_name,
-            log,
-            shouldStop,
-          });
-        } catch (err) {
-          // Передача лида не должна ронять круг: аутрич важнее и уже отработал.
-          log(
-            'warning',
-            `Аккаунт ${account.session_name}: очередь передач не отработала — ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
+        // Ручные передачи лидов здесь больше не разбираем — их шлёт отдельный
+        // опрос очереди (см. runLeadForwardPoller выше), не дожидаясь круга.
 
         // Первое касание — после разбора входящих и только этим же аккаунтом:
         // отвечать на ответ обязан тот, кто написал первым.
@@ -2196,7 +2206,12 @@ export async function runCampaignLoop(
       }
     }
   } finally {
+    forwardsStopped = true;
     await disconnectAll(clients);
+    // Опрос выходит сам по флагу выше, не позже чем через секунду; зависшая
+    // отправка ограничена своим таймаутом. Дождаться его надо: иначе он
+    // допишет статус задачи уже после строки «Кампания остановлена».
+    await forwardPoller;
     // On worker shutdown we must preserve campaign status (running/paused), otherwise
     // auto-resume on the next worker start will skip it.
     // Explicit stop is handled by worker handler which sets status=stopped before signaling stop.
