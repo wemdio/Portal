@@ -32,6 +32,19 @@ const DB_ERROR_BACKOFF_MS = 5_000;
 const FOREIGN_CALL_WAIT_MS = 30_000;
 /** Звонок считается успешным, только если человек реально говорил. */
 const SUCCESS_MIN_DURATION_SEC = 15;
+/**
+ * С какого возраста звонка верить ответу провайдера «такого звонка нет» (404).
+ *
+ * Пять минут — заметно больше и потолка ожидания звонка (2 минуты), и любой
+ * разумной задержки индексации у провайдера, но заметно меньше, чем человек
+ * ждёт от зависшего контакта.
+ */
+const STALE_404_MS = 5 * 60_000;
+/**
+ * Сколько раз подряд ждать чужие звонки, прежде чем признать кампанию
+ * заклинившей (см. ветку «ожидающих нет, но кто-то ещё звонит»).
+ */
+const MAX_FOREIGN_CALL_PASSES = 10;
 
 type LogFn = (level: 'info' | 'warn' | 'error', msg: string) => void;
 
@@ -80,9 +93,17 @@ function isCallNotFound(err: unknown): boolean {
   return /\b404\b/.test(msg);
 }
 
-function isAbortError(err: unknown): boolean {
-  return err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
-}
+/*
+ * Отдельной проверки «это прерывание» здесь НЕТ, и она была бы враньём.
+ *
+ * Библиотека прерывает работу строковой причиной (`abort.abort('shutdown')`), а
+ * fetch отвергает промис РОВНО этой причиной — то есть строкой, а не объектом
+ * Error с именем AbortError. Проверка `err instanceof Error && name ===
+ * 'AbortError'` не сработала бы никогда, и первый же вызывающий, положившийся
+ * на неё вместо shouldStop(), принял бы остановку за отказ провайдера. Поэтому
+ * везде ниже прерывание распознаётся одним способом — через shouldStop(), то
+ * есть через сам сигнал.
+ */
 
 interface Campaign {
   id: string;
@@ -159,6 +180,17 @@ function isInconclusive(outcome: CallOutcome): boolean {
  * Жетон передаётся насквозь: функция сама ограждает запись по нему, и запись
  * перехваченной кампании не проходит. `null` — для ручного пути из интерфейса,
  * у которого аренды нет.
+ *
+ * Ограждение — ТОЛЬКО по жетону, без условия на статус. Жетон уже доказывает
+ * владение: чужого жетона в строке быть не может, пока она наша. А вот статус
+ * между началом звонка и записью его итога меняется законно — оператор жмёт
+ * «Паузу», пока разговор идёт. С условием на статус такой звонок, оплаченный и
+ * состоявшийся, не попадал бы в счётчик вовсе: в списке контактов он виден, а
+ * в метрике его нет, и сверка его не восстановит — она счётчики не двигает.
+ *
+ * Ответ RPC — число обновлённых строк, и его обязательно читать: ноль означает
+ * «кампания уже не наша», то есть потерянный инкремент. Молчать о нём нельзя,
+ * иначе оплаченный звонок пропадает вообще без следа.
  */
 async function bumpCounters(
   db: SupabaseClient,
@@ -167,13 +199,22 @@ async function bumpCounters(
   runToken: string | null,
   log: LogFn,
 ): Promise<void> {
-  const { error } = await db.rpc('ai_campaign_bump_counters', {
+  const { data, error } = await db.rpc('ai_campaign_bump_counters', {
     p_campaign_id: campaignId,
     p_called: deltas.called ?? 0,
     p_successful: deltas.successful ?? 0,
     p_run_token: runToken,
   });
-  if (error) log('warn', `Не смог обновить счётчики кампании: ${error.message}`);
+  if (error) {
+    log('warn', `Не смог обновить счётчики кампании: ${error.message}`);
+    return;
+  }
+  if (data === 0) {
+    log(
+      'warn',
+      `Прирост счётчиков (звонков +${deltas.called ?? 0}, успешных +${deltas.successful ?? 0}) не применён: кампания уже не наша. Звонок сделан, но в метрику не попал.`,
+    );
+  }
 }
 
 /**
@@ -209,7 +250,7 @@ async function waitForCallEnd(
       errors = 0;
     } catch (err) {
       // Прерывание — не ошибка провайдера и в бюджет ошибок не идёт: выходим.
-      if (isAbortError(err) || shouldStop()) break;
+      if (shouldStop()) break;
       errors++;
       log('warn', `Poll error #${errors} for call ${callId}: ${err instanceof Error ? err.message : String(err)}`);
       if (errors >= MAX_POLL_ERRORS) {
@@ -225,7 +266,24 @@ async function waitForCallEnd(
   return { duration: null, endedReason: 'stopped', hasTranscript: false };
 }
 
-/** Записать законченный звонок в строку контакта и в счётчик успехов. */
+/**
+ * Записать законченный звонок в строку контакта и в счётчик успехов.
+ *
+ * ЕДИНСТВЕННОЕ место, где закрывается контакт, — и им пользуются оба пути,
+ * цикл и сверка. Раньше пути расходились: тот же ответ провайдера («звонок
+ * кончился, соединения не было») цикл писал в контакт, а сверка возвращала
+ * контакт в очередь. То есть судьба человека зависела от того, застал ли его
+ * звонок перезапуск воркера. Общая функция делает такое расхождение невозможным
+ * по устройству, а не по дисциплине.
+ *
+ * Счётчик успехов двигается ТОЛЬКО если обновление контакта реально нашло
+ * строку. Условие `status = 'calling'` стоит здесь потому, что контакт мог
+ * закрыть кто-то другой (сверка соседа, ручное завершение из интерфейса), и
+ * переписывать чужой итог нечем — но пока результат этого условия
+ * игнорировался, инкремент шёл всё равно, и тот же звонок считался успешным
+ * дважды. Атомарный инкремент, в отличие от прежней записи «значение из
+ * памяти», сам по себе не идемпотентен: два таких вызова дают +2.
+ */
 async function recordCallResult(
   db: SupabaseClient,
   campaignId: string,
@@ -234,7 +292,7 @@ async function recordCallResult(
   runToken: string | null,
   log: LogFn,
 ): Promise<void> {
-  await db
+  const { data: closed, error } = await db
     .from('ai_campaign_contacts')
     .update({
       status: 'completed',
@@ -242,16 +300,30 @@ async function recordCallResult(
       call_ended_reason: outcome.endedReason,
     })
     .eq('id', contactId)
-    // Только из «звоним»: контакт мог быть закрыт другим путём (сверкой соседа,
-    // ручным завершением из интерфейса), и переписывать чужой итог нечем.
-    .eq('status', 'calling');
+    .eq('status', 'calling')
+    .select('id')
+    .maybeSingle();
+
+  if (error) {
+    log('error', `Не смог записать итог звонка контакту ${contactId}: ${error.message}`);
+    return;
+  }
+  if (!closed) {
+    log('info', `Контакт ${contactId} уже закрыт кем-то другим — счётчик успехов не трогаю`);
+    return;
+  }
 
   if (isSuccessfulCall(outcome)) {
     await bumpCounters(db, campaignId, { successful: 1 }, runToken, log);
   }
 }
 
-/** Вернуть контакт в очередь: звонка не было или он не состоялся. */
+/**
+ * Вернуть контакт в очередь — только когда записывать НЕЧЕГО: звонок не
+ * создавался, либо провайдер устойчиво не знает такого звонка. Состоявшийся
+ * (пусть и не соединившийся) звонок сюда не попадает — у него есть итог, и его
+ * пишет recordCallResult.
+ */
 async function returnContactToQueue(
   db: SupabaseClient,
   contactId: string,
@@ -274,10 +346,19 @@ async function returnContactToQueue(
  *
  * ЧТО СТАЛО: спрашиваем провайдера об исходе именно этого звонка (getCall есть
  * у обоих провайдеров — lib/vapi.ts, lib/elevenlabs-convai.ts, ключи те же, что
- * у самого цикла) и записываем результат. В очередь контакт возвращается только
- * когда звонка у провайдера нет вовсе (404) либо он закончился, НЕ соединившись
- * (нет startedAt → длительности нет): такой звонок человек не увидел, и набрать
- * его — это не повтор, а первая попытка.
+ * у самого цикла) и записываем результат ТОЙ ЖЕ функцией, что и основной цикл
+ * (recordCallResult). Один и тот же ответ провайдера не может получить здесь
+ * одну судьбу, а в цикле другую.
+ *
+ * В очередь контакт возвращается ровно в двух случаях, и оба означают «записать
+ * нечего»: звонок не успели создать (нет идентификатора) либо провайдер устойчиво
+ * отвечает, что такого звонка у него нет (см. STALE_404_MS ниже). Звонок,
+ * который кончился, НЕ соединившись, в очередь не возвращается — он тоже итог, и
+ * итог записанный: причина от провайдера ложится в call_ended_reason, и человек
+ * видит «не дозвонились», а не пустоту. Возвращать такой контакт в очередь
+ * значило бы, что номер, до которого не дозвонились, перенабирают только тогда,
+ * когда его угораздило попасть в перезапуск воркера, — политика, зависящая от
+ * деплоя, а не от продукта.
  *
  * Живой звонок (queued/ringing/in-progress) дожидаем обычным ожиданием: мы
  * законный владелец кампании, звонок наш, и его исход надо дописать.
@@ -296,7 +377,9 @@ export async function reconcileStuckContacts(
 ): Promise<void> {
   const { data, error } = await db
     .from('ai_campaign_contacts')
-    .select('id, vapi_call_id')
+    // called_at нужен, чтобы судить о возрасте звонка: свежий 404 у провайдера
+    // ничего не доказывает (см. isStale404 ниже).
+    .select('id, vapi_call_id, called_at')
     .eq('campaign_id', campaignId)
     .eq('status', 'calling');
 
@@ -304,7 +387,7 @@ export async function reconcileStuckContacts(
     log('error', `Не смог прочитать незавершённые звонки: ${error.message}`);
     return;
   }
-  const stuck = (data ?? []) as Array<{ id: string; vapi_call_id: string | null }>;
+  const stuck = (data ?? []) as Array<{ id: string; vapi_call_id: string | null; called_at: string | null }>;
   if (!stuck.length) return;
 
   log('info', `Сверяю ${stuck.length} незавершённых звонк(а/ов) с провайдером`);
@@ -325,10 +408,36 @@ export async function reconcileStuckContacts(
     try {
       callData = (await getCall(contact.vapi_call_id, provider, ctx?.signal)) as Record<string, unknown>;
     } catch (err) {
-      if (isAbortError(err) || shouldStop()) return;
+      if (shouldStop()) return;
       if (isCallNotFound(err)) {
+        /*
+         * 404 сам по себе НЕ доказательство, что звонка не было.
+         *
+         * Два известных способа получить его на живой звонок. Первый:
+         * createCall у ElevenLabs кладёт в идентификатор conversation_id, а
+         * если его в ответе нет — sip_call_id; по второму `getCall
+         * /conversations/<id>` не находит ничего и отвечает 404, хотя разговор
+         * идёт. Второй: сверка после краха запускается через секунды, а
+         * провайдер ещё не проиндексировал только что созданный звонок — 404
+         * приходит транзиентно у обоих. В обоих случаях сброс в очередь = второй
+         * набор живому человеку, ровно то, что эта функция и должна была
+         * прекратить.
+         *
+         * Поэтому 404 обязан быть СТАРЫМ. Свежий контакт оставляем в «звоним»
+         * и решаем на следующем проходе — к тому времени либо звонок найдётся,
+         * либо 404 станет устойчивым и честным.
+         */
+        const calledAtMs = contact.called_at ? new Date(contact.called_at).getTime() : NaN;
+        const ageMs = Number.isFinite(calledAtMs) ? Date.now() - calledAtMs : Infinity;
+        if (ageMs < STALE_404_MS) {
+          log(
+            'warn',
+            `Контакт ${contact.id}: провайдер отвечает 404 по звонку ${contact.vapi_call_id}, но звонку всего ${Math.round(ageMs / 1000)}с — жду, не возвращаю в очередь`,
+          );
+          continue;
+        }
         await returnContactToQueue(db, contact.id);
-        log('info', `Контакт ${contact.id}: звонка ${contact.vapi_call_id} у провайдера нет — возвращён в очередь`);
+        log('info', `Контакт ${contact.id}: звонка ${contact.vapi_call_id} у провайдера нет уже ${Math.round(ageMs / 60_000)} мин — возвращён в очередь`);
         continue;
       }
       // Провайдер не ответил. Контакт СОЗНАТЕЛЬНО оставляем в «звоним»: сверку
@@ -356,17 +465,13 @@ export async function reconcileStuckContacts(
       continue;
     }
 
-    if (outcome.duration == null) {
-      // Соединения не было (нет startedAt) — человек звонка не видел.
-      await returnContactToQueue(db, contact.id);
-      log('info', `Контакт ${contact.id}: звонок не состоялся (${outcome.endedReason ?? '—'}) — возвращён в очередь`);
-      continue;
-    }
-
+    // Тот же путь записи, что и в цикле: соединился звонок или нет, итог у него
+    // один и записывается одинаково. Ветки «не соединился → в очередь» здесь
+    // больше нет — см. шапку функции.
     await recordCallResult(db, campaignId, contact.id, outcome, runToken, log);
     log(
       'info',
-      `Контакт ${contact.id}: исход звонка подтянут от провайдера — ${outcome.duration}s, ${outcome.endedReason ?? '—'}`,
+      `Контакт ${contact.id}: исход звонка подтянут от провайдера — ${outcome.duration ?? 'соединения не было'}, ${outcome.endedReason ?? '—'}`,
     );
   }
 }
@@ -503,6 +608,18 @@ export async function runCampaignLoop(
 
   log('info', `Campaign "${campaignId}" loop started (provider: ${camp.provider})`);
   let waitingForForeignCallLogged = false;
+  /*
+   * Сколько кругов подряд мы ждём чужие звонки. Обнуляется, как только ждать
+   * стало нечего.
+   *
+   * Второй половины проблемы — серийного ожидания внутри одной сверки — здесь
+   * нет: цикл набирает контакты по одному, значит у одного исполнителя в
+   * «звоним» может висеть максимум один контакт. Пачка возникает только из окна
+   * пересечения владельцев, где их двое; потолок ожидания на контакт — те же
+   * CALL_TIMEOUT_MS (2 минуты), то есть реально сверка стоит одну-две минуты, а
+   * не «сколько угодно».
+   */
+  let foreignCallPasses = 0;
 
   while (!shouldStop()) {
     // Кампанию могли остановить снаружи (кнопка «Пауза» пишет статус напрямую).
@@ -548,6 +665,28 @@ export async function runCampaignLoop(
       // завершённой сейчас — потерять этот контакт из отчёта.
       const calling = await countCallingContacts(db, campaignId);
       if (calling === null || calling > 0) {
+        foreignCallPasses += 1;
+        /*
+         * Ожидание чужих звонков ОГРАНИЧЕНО — десять проходов, это пять минут
+         * ожидания плюс время самих сверок.
+         *
+         * Без предела контакт, исход которого провайдер не отдаёт никогда,
+         * держал бы счётчик «в звонке» выше нуля вечно: кампания не
+         * завершилась бы, цикл крутил бы этот круг раз в тридцать секунд, а
+         * закончилось бы всё только порогом простоя минут через семьдесят — то
+         * есть медленным вращением вместо внятного сигнала. Пауза кампании и
+         * есть внятный сигнал: она видна оператору сразу, снимается одной
+         * кнопкой, а контакт остаётся в «звоним» и будет сверен при следующем
+         * запуске.
+         */
+        if (foreignCallPasses > MAX_FOREIGN_CALL_PASSES) {
+          log(
+            'error',
+            `Ожидающих контактов нет, но ${calling ?? '?'} застряли в «звоним» и не сверяются ${MAX_FOREIGN_CALL_PASSES} проходов подряд. Ставлю кампанию на паузу — сама она не завершится.`,
+          );
+          await writeCampaign({ status: 'paused', ...CLEAR_OWNERSHIP }, { onlyWhileRunning: true });
+          return;
+        }
         if (!waitingForForeignCallLogged) {
           waitingForForeignCallLogged = true;
           log('info', `Ожидающих контактов нет, но ${calling ?? '?'} ещё в звонке — жду и сверяю, кампанию не закрываю`);
@@ -557,6 +696,8 @@ export async function runCampaignLoop(
         await reconcileStuckContacts(db, campaignId, camp.provider, log, ctx);
         continue;
       }
+      // Сверка расчистила очередь — счётчик проходов начинается заново.
+      foreignCallPasses = 0;
       await writeCampaign({ status: 'completed', ...CLEAR_OWNERSHIP }, { onlyWhileRunning: true });
       log('info', 'All contacts processed — campaign completed');
       return;
@@ -603,7 +744,7 @@ export async function runCampaignLoop(
         callId = (call as Record<string, string>).id;
         break;
       } catch (err) {
-        if (isAbortError(err) || shouldStop()) break;
+        if (shouldStop()) break;
         const msg = err instanceof Error ? err.message : String(err);
         if (attempt < MAX_CREATE_CALL_RETRIES) {
           log('warn', `createCall attempt ${attempt + 1} failed: ${msg}, retrying...`);

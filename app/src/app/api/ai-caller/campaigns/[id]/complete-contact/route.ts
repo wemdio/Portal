@@ -57,15 +57,25 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   const hasTranscript = !!((callData?.transcript as string)?.trim());
   const isSuccessful = hasTranscript && (duration ?? 0) > 15;
 
-  // Update contact
-  await supabase
+  // Закрываем контакт ТОЛЬКО из «звоним» и смотрим, нашлась ли строка.
+  // Без этого условия два нажатия подряд (или гонка с воркером) закрывали
+  // контакт дважды, а инкремент ниже — атомарный и, в отличие от прежней записи
+  // «значение из памяти», не идемпотентный: один звонок засчитывался как два.
+  const { data: closed } = await supabase
     .from('ai_campaign_contacts')
     .update({
       status: 'completed',
       call_duration: duration,
       call_ended_reason: endedReason,
     })
-    .eq('id', body.contactId);
+    .eq('id', body.contactId)
+    .eq('status', 'calling')
+    .select('id')
+    .maybeSingle();
+
+  if (!closed) {
+    return NextResponse.json({ ok: true, alreadyClosed: true, duration, endedReason, isSuccessful });
+  }
 
   // Инкремент — в самой базе (col = col + 1). Прежнее чтение-изменение-запись
   // из уже прочитанной строки теряло инкремент, если параллельно счётчик двигал
