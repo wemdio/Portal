@@ -21,7 +21,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   const { id: campaignId } = await ctx.params;
   const { data: campaignForProvider } = await supabase
     .from('ai_campaigns')
-    .select('id, successful_contacts')
+    .select('id')
     .eq('id', campaignId)
     .eq('provider', provider)
     .maybeSingle();
@@ -67,16 +67,16 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     })
     .eq('id', body.contactId);
 
-  // Update campaign counters
+  // Инкремент — в самой базе (col = col + 1). Прежнее чтение-изменение-запись
+  // из уже прочитанной строки теряло инкремент, если параллельно счётчик двигал
+  // воркер обзвона. p_run_token = null — у ручного пути аренды нет.
   if (isSuccessful) {
-    await supabase
-      .from('ai_campaigns')
-      .update({
-        successful_contacts: (campaignForProvider.successful_contacts ?? 0) + 1,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', campaignId)
-      .eq('provider', provider);
+    await supabase.rpc('ai_campaign_bump_counters', {
+      p_campaign_id: campaignId,
+      p_called: 0,
+      p_successful: 1,
+      p_run_token: null,
+    });
   }
 
   return NextResponse.json({ ok: true, duration, endedReason, isSuccessful });

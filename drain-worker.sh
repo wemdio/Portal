@@ -4,8 +4,8 @@
 # Что скрипт делает сейчас:
 # 1) Снимает снимок активных задач (running) по legacy-таблицам очередей.
 # 2) Переводит running -> pending, чтобы задачи возобновились после рестарта.
-# 3) Ставит на паузу in-memory кампании (TG Outreach, AI Caller) и ставит им
-#    job на автостарт после деплоя.
+# 3) Ставит на паузу in-memory кампании TG Outreach и ставит им job на
+#    автостарт после деплоя.
 # 4) Отдельно и мягко тушит worker-autopipeline (его 20-минутный grace нужен,
 #    чтобы прогон дописал свой префикс доменов).
 #
@@ -16,7 +16,8 @@
 #   разъехаться с docker-compose.prod.yml;
 # - не трогает таблицы воркеров, переехавших на общий жизненный цикл задач
 #   (app/src/lib/jobs/lifecycle.ts): base_constructor_jobs, tg_parser_jobs,
-#   search_parser_jobs, yandex_maps_jobs и parser_jobs (HH/ATS/ENG-найм).
+#   search_parser_jobs, yandex_maps_jobs, parser_jobs (HH/ATS/ENG-найм) и
+#   ai_campaigns с ai_caller_jobs (обзвон).
 #   Очередь sales_chat_sync_runs в списке ниже не значилась
 #   и не значится — искать, откуда её убрали, не нужно; воркер этой очереди
 #   просто добавлен в is_lifecycle_managed_worker, чтобы деплой одного его не
@@ -65,6 +66,7 @@ is_lifecycle_managed_worker() {
     worker-yandexmaps) return 0 ;;
     worker-hh) return 0 ;;
     worker-eng-hiring) return 0 ;;
+    worker-aicaller) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -175,7 +177,10 @@ if should_pause_legacy_queues && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
     "email_validation_jobs"
     "lead_import_jobs"
     "tg_outreach_jobs"
-    "ai_caller_jobs"
+    # ai_caller_jobs убран: очередь стала каналом мгновенных команд оператора
+    # («старт», «стоп»), которые закрываются тем же запросом, что их берёт.
+    # Строки в `running` в ней больше не задерживаются, а сама кампания живёт
+    # своей строкой под арендой — сбрасывать здесь нечего.
     "tg_scan_jobs"
     "tg_transcribe_jobs"
   )
@@ -268,51 +273,16 @@ PY
     echo "[drain] tg_outreach_campaigns: running=0"
   fi
 
-  # AI Caller campaigns: running -> paused, then queue "start" job for auto-resume.
-  ai_rows="$(fetch_running_rows "ai_campaigns" "id,created_by" 2>/dev/null || true)"
-  ai_count="$(printf '%s' "$ai_rows" | count_json_rows)"
-  if [ "$ai_count" -gt 0 ]; then
-    echo "[drain] ai_campaigns: running=${ai_count}; scheduling auto-resume"
-    ai_pause_code="$(patch_running_to_pending "ai_campaigns" "{\"status\":\"paused\",\"updated_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}")"
-    if [[ "$ai_pause_code" =~ ^(200|204)$ ]]; then
-      echo "[drain] ai_campaigns: running -> paused"
-    fi
-
-    export AI_RUNNING_ROWS="$ai_rows"
-    python3 - <<'PY' > /tmp/portal_ai_resume_jobs.json
-import json, os
-raw = os.environ.get("AI_RUNNING_ROWS", "")
-out = []
-try:
-    data = json.loads(raw) if raw else []
-except Exception:
-    data = []
-for row in data:
-    if not isinstance(row, dict):
-        continue
-    cid = str(row.get("id", "")).strip()
-    uid = str(row.get("created_by", "")).strip()
-    if cid and uid:
-        out.append({"campaign_id": cid, "user_id": uid, "action": "start", "status": "pending"})
-print(json.dumps(out, ensure_ascii=True))
-PY
-
-    if [ -s /tmp/portal_ai_resume_jobs.json ]; then
-      resume_payload="$(cat /tmp/portal_ai_resume_jobs.json)"
-      if [ "${resume_payload}" != "[]" ]; then
-        curl -sS -X POST \
-          "${SUPABASE_URL}/rest/v1/ai_caller_jobs" \
-          "${auth_headers[@]}" \
-          -H "Content-Type: application/json" \
-          -H "Prefer: return=minimal" \
-          -d "${resume_payload}" >/dev/null 2>&1 || true
-        echo "[drain] ai_caller_jobs: queued start jobs for paused campaigns"
-      fi
-    fi
-    rm -f /tmp/portal_ai_resume_jobs.json || true
-  else
-    echo "[drain] ai_campaigns: running=0"
-  fi
+  # Кампании обзвона (ai_campaigns) здесь БОЛЬШЕ НЕ ТРОГАЮТСЯ.
+  #
+  # Раньше на этом месте был блок «running -> paused + положить команду старт»:
+  # цикл кампании жил в памяти процесса, и без него кампания после деплоя просто
+  # не возобновлялась. Воркер portal-worker-aicaller переехал на общий
+  # жизненный цикл задач — строка кампании арендуется, по SIGTERM аренда
+  # отпускается за пару секунд, и кампанию подхватывает следующая реплика сама.
+  # Пауза здесь теперь была бы вредна дважды: она останавливала бы кампанию,
+  # которую никто не просил останавливать, а команда «старт» ещё и воскрешала бы
+  # ту, которую оператор остановил руками.
 elif should_pause_legacy_queues; then
   echo "[drain] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — skipping Supabase pause flow"
 else

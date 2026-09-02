@@ -72,16 +72,16 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   }
 
   // Get next pending contact
-  const { data: contact } = await supabase
+  const { data: candidate } = await supabase
     .from('ai_campaign_contacts')
-    .select('*')
+    .select('id')
     .eq('campaign_id', campaignId)
     .eq('status', 'pending')
     .order('created_at', { ascending: true })
     .limit(1)
-    .single();
+    .maybeSingle();
 
-  if (!contact) {
+  if (!candidate) {
     // No more contacts — complete the campaign
     await supabase
       .from('ai_campaigns')
@@ -96,11 +96,23 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     return NextResponse.json({ done: true, message: 'Все контакты обзвонены' });
   }
 
-  // Mark as calling
-  await supabase
+  // Переход в «звоним» — атомарный (CAS по статусу), ровно как в воркере
+  // (lib/ai-caller/campaignLoop.ts). Без него этот маршрут и цикл воркера могли
+  // взять один и тот же контакт: два платных звонка одному человеку.
+  const { data: contact } = await supabase
     .from('ai_campaign_contacts')
     .update({ status: 'calling', called_at: new Date().toISOString() })
-    .eq('id', contact.id);
+    .eq('id', candidate.id)
+    .eq('status', 'pending')
+    .select('*')
+    .maybeSingle();
+
+  if (!contact) {
+    return NextResponse.json(
+      { done: false, skipped: true, message: 'Контакт уже взят другим исполнителем' },
+      { status: 409 },
+    );
+  }
 
   const phone = normalizeRuPhoneNumber(contact.phone_number);
   if (!phone) {
@@ -133,15 +145,16 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       .update({ vapi_call_id: (call as Record<string, string>).id })
       .eq('id', contact.id);
 
-    // Increment called_contacts
-    await supabase
-      .from('ai_campaigns')
-      .update({
-        called_contacts: (campaign.called_contacts ?? 0) + 1,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', campaignId)
-      .eq('provider', provider);
+    // Инкремент — в самой базе (col = col + 1), а не чтением-изменением-записью
+    // из уже прочитанной строки: воркер может считать ту же кампанию
+    // параллельно, и последняя запись затирала бы чужой инкремент.
+    // p_run_token = null — у ручного пути аренды нет.
+    await supabase.rpc('ai_campaign_bump_counters', {
+      p_campaign_id: campaignId,
+      p_called: 1,
+      p_successful: 0,
+      p_run_token: null,
+    });
 
     return NextResponse.json({
       done: false,

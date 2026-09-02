@@ -67,8 +67,13 @@ export function listCalls(params?: {
   return backend(provider).listCalls(params);
 }
 
-export function getCall(id: string, provider?: AiCallerProvider) {
-  return backend(provider).getCall(id);
+/**
+ * `signal` последним параметром, после `provider`: порядок аргументов у всех
+ * существующих вызовов не меняется. Нужен воркеру обзвона — он опрашивает исход
+ * звонка в цикле и на остановке процесса обязан выйти сразу.
+ */
+export function getCall(id: string, provider?: AiCallerProvider, signal?: AbortSignal) {
+  return backend(provider).getCall(id, signal);
 }
 
 export function createCall(data: {
