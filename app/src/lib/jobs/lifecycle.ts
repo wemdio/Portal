@@ -145,6 +145,21 @@ export interface JobRunnerOptions<Row extends { id: string }, C> {
   /** Дополнительные поля при переводе в failed (например error_message). */
   failedPatch?: (reason: string) => Record<string, unknown>;
   /**
+   * Чекпойнт не записался, хотя задача осталась нашей.
+   *
+   * saveCheckpoint отвечает про ВЛАДЕНИЕ и в этом случае вернёт true, поэтому
+   * сам по себе провал записи для воркера невидим: предупреждение уходит в
+   * stdout контейнера, а в журнале самой задачи не появляется ничего. Между тем
+   * реальный случай — чекпойнт, который PostgREST не принимает по размеру
+   * (у TG-парсера в него копится список пользователей), и тогда продолжение с
+   * места молча мертво ровно на тех задачах, которым оно нужнее всего.
+   *
+   * Колбэк — шанс воркеру написать об этом в СВОЙ, видимый пользователю журнал
+   * задачи. Зовётся без ожидания результата, исключения из него гасятся; он
+   * обязан быть дешёвым и не бросать.
+   */
+  onCheckpointUnpersisted?: (jobId: string) => void | Promise<void>;
+  /**
    * true (по умолчанию): библиотека сама ставит done/failed/pending по итогу run().
    * false: run() пишет терминальный статус сам (конструктор баз, TG-парсер);
    * библиотека тогда только держит аренду и отпускает её при остановке.
@@ -606,6 +621,12 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
           attemptsBase = 0;
         } else {
           jobLog('warn', 'checkpoint not persisted after retries — progress may be replayed');
+          // Воркеру дают знать, чтобы он показал это в журнале задачи, а не
+          // только в stdout. Ошибку колбэка гасим: журнал не повод ронять run.
+          if (opts.onCheckpointUnpersisted) {
+            void (async () => opts.onCheckpointUnpersisted?.(job.id))()
+              .catch((err) => jobLog('warn', 'onCheckpointUnpersisted threw', err));
+          }
         }
         return true;
       },

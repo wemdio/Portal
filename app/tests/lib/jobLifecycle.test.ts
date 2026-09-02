@@ -219,6 +219,27 @@ describe('job lifecycle', () => {
     expect(db.rows[0].lease_until).toBe(new Date(clock + 60_000).toISOString());
   });
 
+  it('reports an unpersisted checkpoint while still answering "owned"', async () => {
+    const db = makeFakeDb([{ id: 'j', status: 'pending', created_at: '1', attempts: 0 }]);
+    const unpersisted: string[] = [];
+    let ctxRef: JobContext<Row> | null = null;
+    const runner = makeRunner(db, async (_job, ctx) => { ctxRef = ctx; await new Promise(() => {}); }, {
+      onCheckpointUnpersisted: (jobId: string) => { unpersisted.push(jobId); },
+    });
+    await runner.pollOnce();
+    await flush();
+
+    // База не принимает запись (в жизни — слишком большой чекпойнт).
+    db.control.failUpdates = true;
+    const saving = ctxRef!.saveCheckpoint({ page: 3 });
+    await jest.advanceTimersByTimeAsync(2_000); // повторы записи
+    // true — про ВЛАДЕНИЕ: строка всё ещё наша, работу прекращать не надо.
+    expect(await saving).toBe(true);
+    // Но воркер обязан узнать, что продолжение с места мертво.
+    expect(unpersisted).toEqual(['j']);
+    expect(db.rows[0].checkpoint).toBeUndefined();
+  });
+
   it('shutdown releases only its own leases, twice, and silences heartbeats', async () => {
     const db = makeFakeDb([
       { id: 'mine', status: 'pending', created_at: '1', attempts: 0 },
