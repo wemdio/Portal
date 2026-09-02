@@ -2759,6 +2759,147 @@ async def run_li_outreach_report() -> None:
     await send_telegram("\n".join(lines), force=True)
 
 
+# ── Ежедневный отчёт по каталогу Яндекс.Карт (08:00 МСК) ────────────────────
+#
+# Каталог пополняется двумя фоновыми процессами воркера portal-worker-yandexmaps,
+# у которых нет «времени запуска»: обход новых организаций (discovery) идёт всё
+# время, пока воркер не занят ручными задачами, и упирается в дневной лимит;
+# обновление старых карточек (refresh) — по своей очереди. Оба ходят в Яндекс
+# через прокси-пул воркера, и когда пул умирает, оба молча дают ноль.
+#
+# 28.08.2026 так и случилось: пять дней подряд каждый скан падал с
+# ERR_PROXY_CONNECTION_FAILED, новых компаний — ноль, обновлений — ноль, и
+# никто не узнал до 02.09. Проверка живых прокси в этом боте не помогла бы:
+# она смотрит PROXY_URLS, а воркер Карт при наличии YANDEXMAPS_PROXY_URLS
+# берёт его. Поэтому здесь проверяется результат, а не инструмент: сколько
+# сканов и обновлений прошло за сутки и чем кончались упавшие.
+YANDEXMAPS_REPORT_COMMAND_TIMEOUT_SEC = 60
+# Доля упавших сканов, с которой сутки считаются проблемными даже при
+# ненулевом результате: половина пула мёртвая — это уже не «бывает».
+YANDEXMAPS_ERROR_SHARE_WARN = 0.5
+
+
+def _yandexmaps_verdict(
+    scans: int, failed: int, found_new: int, reserved: int, completed: int,
+) -> tuple[str, str]:
+    """Оценка суток каталога: (значок, причина).
+
+    Вынесено из отчёта, чтобы порог менялся в одном месте, а не по тексту
+    сообщения. 🔴 — синк не прошёл, 🟠 — прошёл с натяжкой, 🟢 — норма.
+    """
+    if scans == 0:
+        return "🔴", "обход новых организаций за сутки не запускался ни разу"
+    if failed >= scans:
+        return "🔴", "все сканы упали — новых организаций ноль"
+    if reserved > 0 and completed == 0:
+        return "🔴", "обновление карточек не прошло: зарезервировано, выполнено 0"
+    if failed / scans >= YANDEXMAPS_ERROR_SHARE_WARN:
+        return "🟠", f"упало {failed} из {scans} сканов"
+    if found_new == 0:
+        return "🟠", "сканы прошли, но новых организаций не нашлось"
+    return "🟢", "норма"
+
+
+async def run_yandexmaps_catalog_report() -> None:
+    """Ежедневная сводка каталога Яндекс.Карт → health-бот (08:00 МСК).
+
+    Окно — последние 24 часа по сканам (у обхода нет расписания) и вчерашний
+    день МСК по обновлению карточек (счётчик ведётся по дням). Сообщение
+    уходит всегда: тихий день должен отличаться от тихой поломки бота.
+    """
+    try:
+        conn = await asyncpg.connect(
+            DATABASE_URL, **_connect_kwargs(YANDEXMAPS_REPORT_COMMAND_TIMEOUT_SEC)
+        )
+    except Exception as e:
+        await send_telegram(
+            f"🗺 <b>Каталог Яндекс.Карт</b>\nНе смог подключиться к БД для отчёта: "
+            f"{_normalize_network_error(e)}",
+            force=True,
+        )
+        return
+    try:
+        scan = await conn.fetchrow(
+            """
+            select count(*)::int as scans,
+                   count(*) filter (where last_error is not null)::int as failed,
+                   coalesce(sum(last_found_new), 0)::int as found_new,
+                   coalesce(sum(last_seen_links), 0)::int as seen_links
+              from public.yandex_maps_catalog_discovery_queue
+             where last_scanned_at >= now() - interval '24 hours'
+            """
+        )
+        # Ошибки группируем по сути, а не по тексту: в тексте зашит URL запроса,
+        # и один и тот же мёртвый прокси даёт сотни «разных» строк.
+        errors = await conn.fetch(
+            """
+            select case
+                     when last_error like '%ERR_PROXY_CONNECTION_FAILED%' then 'прокси не соединяется (ERR_PROXY_CONNECTION_FAILED)'
+                     when last_error ilike '%timeout%' then 'таймаут'
+                     when last_error like '%Сервис yandexmaps недоступен%' then 'сервис yandexmaps недоступен'
+                     else left(regexp_replace(last_error, ' at https?://\\S+', ''), 120)
+                   end as reason,
+                   count(*)::int as n
+              from public.yandex_maps_catalog_discovery_queue
+             where last_scanned_at >= now() - interval '24 hours'
+               and last_error is not null
+             group by 1
+             order by 2 desc
+             limit 3
+            """
+        )
+        refresh = await conn.fetchrow(
+            """
+            select coalesce(reserved_rows, 0)::int as reserved,
+                   coalesce(completed_rows, 0)::int as completed
+              from public.yandex_maps_catalog_refresh_daily
+             where day = ((now() at time zone 'Europe/Moscow')::date - 1)
+            """
+        )
+    except Exception as e:
+        await send_telegram(
+            f"🗺 <b>Каталог Яндекс.Карт</b>\nОтчёт не собрался: "
+            f"<code>{html.escape(_format_exception_message(e))}</code>",
+            force=True,
+        )
+        return
+    finally:
+        await conn.close()
+
+    scans = int(scan["scans"] or 0)
+    failed = int(scan["failed"] or 0)
+    found_new = int(scan["found_new"] or 0)
+    seen_links = int(scan["seen_links"] or 0)
+    reserved = int(refresh["reserved"] or 0) if refresh else 0
+    completed = int(refresh["completed"] or 0) if refresh else 0
+
+    icon, reason = _yandexmaps_verdict(scans, failed, found_new, reserved, completed)
+    title = "синк не прошёл" if icon == "🔴" else ("синк с проблемами" if icon == "🟠" else "синк прошёл")
+
+    lines = [
+        f"{icon} <b>Каталог Яндекс.Карт: {title}</b> — {_now_msk()}",
+        f"Обход за 24 ч: сканов {scans}, упало {failed}, "
+        f"ссылок просмотрено {seen_links}, <b>новых организаций {found_new}</b>",
+        f"Обновление карточек за вчера: зарезервировано {reserved}, выполнено {completed}",
+    ]
+    if icon != "🟢":
+        lines.append(f"Причина: {reason}")
+    if failed and errors:
+        lines.append("Ошибки сканов:")
+        for row in errors:
+            lines.append(f"• {html.escape(str(row['reason']))} — {row['n']}")
+        if any("прокси" in str(row["reason"]) for row in errors):
+            lines.append(
+                "Похоже, умер прокси-пул воркера Карт. Проверить: "
+                "<code>docker exec portal-worker-yandexmaps printenv YANDEXMAPS_PROXY_URLS PROXY_URLS</code>, "
+                "после правки .env пересоздать воркер с <code>--force-recreate</code> — пул кэшируется при старте."
+            )
+    lines.append(
+        "Логи: <code>docker logs portal-worker-yandexmaps --since 24h 2>&1 | grep -ci err_proxy</code>"
+    )
+    await send_telegram("\n".join(lines), force=icon != "🟢")
+
+
 async def main():
     _require("DATABASE_URL or SUPABASE_DB_URL", DATABASE_URL)
     _require("TELEGRAM_HEALTH_CHAT_ID", TELEGRAM_CHAT_ID)
@@ -2816,6 +2957,16 @@ async def main():
         run_li_outreach_report, "cron",
         hour=16, minute=0, timezone="UTC",
         id="li_outreach_report",
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # Ежедневная сводка каталога Яндекс.Карт в 08:00 МСК == 05:00 UTC.
+    # misfire_grace_time=1h — тот же смысл, что у LinkedIn-отчёта выше.
+    scheduler.add_job(
+        run_yandexmaps_catalog_report, "cron",
+        hour=5, minute=0, timezone="UTC",
+        id="yandexmaps_catalog_report",
         max_instances=1,
         misfire_grace_time=3600,
     )
