@@ -6,6 +6,9 @@ let mainDb: MockSupabaseClient = createMockSupabase();
 let instantlyDb: MockSupabaseClient = createMockSupabase();
 const createLeadsMock = jest.fn();
 const resolveEffectiveLimitsMock = jest.fn(() => ({ max_contacts: 5000 }));
+const getClientTariffRowMock = jest.fn(async () => ({ status: 'active' }));
+const getClientStatusMock = jest.fn(() => 'active');
+let mockBlockedEmails = new Set<string>();
 
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mainDb; } }));
 jest.mock('@/lib/supabaseInstantly', () => ({ get supabaseInstantly() { return instantlyDb; } }));
@@ -22,14 +25,17 @@ jest.mock('@/lib/instantly/clientAccountOptions', () => ({
   resolveClientInstantlyRequestOptions: jest.fn(async () => ({ accountId: 'main' })),
 }));
 jest.mock('@/lib/clientBlocklist/blockedContacts', () => ({
-  getBlockedEmailSet: jest.fn(async () => new Set()),
-  filterBlockedLeads: (leads: unknown[]) => ({ kept: leads, blockedCount: 0 }),
+  getBlockedEmailSet: jest.fn(async () => mockBlockedEmails),
+  filterBlockedLeads: (leads: Array<{ email: string }>, blocked: Set<string>) => ({
+    kept: leads.filter((lead) => !blocked.has(lead.email)),
+    blockedCount: leads.filter((lead) => blocked.has(lead.email)).length,
+  }),
 }));
 jest.mock('@/lib/tariffs', () => ({
   countClientContacts: jest.fn(async () => 0),
   getBillingPeriodStart: jest.fn(() => '2026-08-01T00:00:00Z'),
-  getClientTariffRow: jest.fn(async () => ({ status: 'active' })),
-  getClientStatus: jest.fn(() => 'active'),
+  getClientTariffRow: () => getClientTariffRowMock(),
+  getClientStatus: () => getClientStatusMock(),
   resolveEffectiveLimits: () => resolveEffectiveLimitsMock(),
   isAwaitingFirstPayment: jest.fn(() => false),
 }));
@@ -56,6 +62,9 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
     } });
     createLeadsMock.mockResolvedValue({ leads_uploaded: 2 });
     resolveEffectiveLimitsMock.mockReturnValue({ max_contacts: 5000 });
+    getClientTariffRowMock.mockResolvedValue({ status: 'active' });
+    getClientStatusMock.mockReturnValue('active');
+    mockBlockedEmails = new Set();
   });
 
   it('persists submitted identities and a terminal confirmation independently of the external contact list', async () => {
@@ -94,6 +103,7 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
     expect(result).toMatchObject({
       accepted: 1,
       acceptedIndexes: [1],
+      skippedIndexes: [0],
       attemptedIndexes: [0, 1],
       identityComplete: true,
     });
@@ -213,6 +223,47 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
       expect.any(Object),
     );
     expect(result.attemptedIndexes).toEqual([0]);
+  });
+
+  it('uses the explicit managed-contract entitlement without requiring a self-serve client tariff', async () => {
+    getClientTariffRowMock.mockResolvedValue({ status: 'inactive' });
+    getClientStatusMock.mockReturnValue('inactive');
+
+    const result = await appendLeadsToClientCampaign({
+      userId: 'client-1',
+      campaignId: 'campaign-1',
+      leads,
+      entitlementMode: 'managed_contract',
+      ledgerSource: { kind: 've2_contact_delivery', runId: 'delivery-run-1' },
+    });
+
+    expect(createLeadsMock).toHaveBeenCalledWith(leads, expect.any(Object), expect.any(Object));
+    expect(result.attemptedIndexes).toEqual([0, 1]);
+  });
+
+  it('returns exact blocklist identities even when no provider request is made for them', async () => {
+    mockBlockedEmails = new Set([leads[0].email]);
+    createLeadsMock.mockResolvedValue({ leads_uploaded: 1 });
+    const result = await appendLeadsToClientCampaign({
+      userId: 'client-1', campaignId: 'campaign-1', leads, entitlementMode: 'managed_contract',
+    });
+    expect(result).toMatchObject({
+      acceptedIndexes: [1], attemptedIndexes: [1], skippedIndexes: [0],
+    });
+    mockBlockedEmails = new Set(leads.map((lead) => lead.email));
+    await expect(appendLeadsToClientCampaign({
+      userId: 'client-1', campaignId: 'campaign-1', leads, entitlementMode: 'managed_contract',
+    })).resolves.toMatchObject({ attemptedIndexes: [], skippedIndexes: [0, 1] });
+    expect(createLeadsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('fences a changed workspace again at the actual append boundary', async () => {
+    await expect(appendLeadsToClientCampaign({
+      userId: 'client-1', campaignId: 'campaign-1', leads,
+      expectedInstantlyAccountId: 'original-workspace', entitlementMode: 'managed_contract',
+    })).rejects.toThrow('workspace');
+    expect(createLeadsMock).not.toHaveBeenCalled();
+    expect(mainDb.getRows('client_campaign_append_batches')).toHaveLength(0);
   });
 
   it('fails closed before external delivery when a requested lead has no journalable identity', async () => {

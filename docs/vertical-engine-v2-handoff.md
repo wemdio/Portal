@@ -5,6 +5,7 @@
 > `docs/design/2026-08-20-vertical-engine-v2-isolation.md`,
 > `docs/design/2026-08-26-vertical-engine-v2-cutover.md`,
 > `docs/design/2026-08-28-vertical-engine-v2-seasonal-launch-portfolio.md`,
+> `docs/design/2026-09-02-vertical-engine-v2-contact-delivery-pacing.md`,
 > `docs/integrations/instantly-api.md`.
 
 ## 1. Где мы и что это
@@ -17,9 +18,17 @@
 - **Граница (критично)**: `hypothesisEngine` / `he_*` / `HE_MODEL_*` — это прод-бэкенд
   `/client/eng`. Их **не трогать**. v1 (`/tools/hypothesis-engine`) — легаси-клиент того
   же бэкенда.
-- Дата контекста: **2026-09-01**. Звонок с технической командой по средам уже был.
+- Дата контекста: **2026-09-02**. Звонок с технической командой по средам уже был.
 
 ## 2. Что уже сделано
+
+**Новое: дозированная загрузка под обязательство.** Шаг 5 закрепляет точный Portal-проект,
+активный период и числовую цель; кампании готовятся с письмами, база сохраняется в Portal.
+Дневной sweep в VE-воркере работает только с допущенными к запуску гипотезами, исключает
+выходные, учитывает уже загруженный остаток и не считает upload фактом выполнения.
+Старый refill не должен обходить этот план. Новая миграция
+`20260902_0001_vertical_engine_v2_contact_delivery.sql` **не применялась**, deploy не выполнялся.
+Полный контракт, формулы и recovery: [contact delivery pacing](design/2026-09-02-vertical-engine-v2-contact-delivery-pacing.md).
 
 Пункты 1–5 были закоммичены и запушены в `Sergey` ранее. Реализации #8 и сезонного
 launch portfolio существуют только в коде ветки `Sergey`: их миграции не применялись,

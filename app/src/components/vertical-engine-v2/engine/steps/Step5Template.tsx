@@ -20,7 +20,16 @@ import {
   type VeMailboxTagOption,
   type VeTemplateLaunchInfo,
 } from '@/lib/verticalEngineV2/launchHandoff';
-import { VE_API, veEngineCall, veEnginePost, type VeBaseSummary, type VeJobSummary } from '../api';
+import {
+  VE_API,
+  veEngineCall,
+  veEnginePost,
+  vePreviewDeliveryPlan,
+  type VeBaseSummary,
+  type VeDeliveryPlanPreviewDto,
+  type VeJobSummary,
+  type VePortalProjectOptionDto,
+} from '../api';
 import { HE, StatusDot } from '../design';
 import type { LaunchPortfolioResponse } from '../LaunchPortfolioView';
 import { SeasonalityStatus } from '../SeasonalitySummary';
@@ -258,6 +267,10 @@ interface VeLaunchPresetsResponse {
   bound_preset_id?: string | null;
   can_create_client?: boolean;
   mailbox_tag_options?: VeMailboxTagOption[];
+  /** Additive delivery contract. Missing fields keep the form readable but block a new launch. */
+  portal_projects?: VePortalProjectOptionDto[];
+  /** Present when this VE-project is already immutably bound to a Portal period. */
+  delivery_plan?: VeDeliveryPlanPreviewDto | null;
   error?: string;
 }
 
@@ -277,12 +290,55 @@ interface VeLaunchResponse {
   code?: string;
 }
 
+type DeliveryPreviewState = 'idle' | 'loading' | 'ready' | 'error';
+
+function parseExactTarget(value: string): number | null {
+  const normalized = value.trim();
+  if (!/^[1-9]\d*$/.test(normalized)) return null;
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isValidDeliveryPreview(value: VeDeliveryPlanPreviewDto | null): value is VeDeliveryPlanPreviewDto {
+  if (!value || !value.portal_project_id || !value.portal_period_id || !value.deadline) return false;
+  return [
+    value.contacts_done_count,
+    value.target_contacts,
+    value.remaining,
+    value.remaining_workdays,
+    value.required_daily,
+    value.effective_daily,
+    value.ready_remaining,
+    value.sender_capacity,
+    value.supply_deficit,
+    value.capacity_deficit,
+  ].every(isNonNegativeInteger) && value.target_contacts > 0;
+}
+
+function portalProjectFromBoundPlan(plan: VeDeliveryPlanPreviewDto): VePortalProjectOptionDto {
+  return {
+    id: plan.portal_project_id,
+    name: plan.portal_project_name?.trim() || 'Проект Portal',
+    active_period: {
+      id: plan.portal_period_id,
+      label: plan.portal_period_label,
+      deadline: plan.deadline,
+      contacts_done_count: plan.contacts_done_count,
+    },
+  };
+}
+
 /**
  * Состояние запуска шаблона. Пока в launch_info шаблона есть запись — вместо
  * формы показываем её (один запуск на шаблон; повторный force — только через API).
  */
 function useTemplateLaunch(
   template: VeTemplate | null,
+  segmentationAuditId: string | null,
   onSegmentationRejected: (phase: 'stale' | 'incomplete' | 'refresh') => void,
 ) {
   const templateLaunch = parseLaunchInfo((template as { launch_info?: unknown } | null)?.launch_info);
@@ -297,9 +353,35 @@ function useTemplateLaunch(
   const [presetId, setPresetId] = useState('');
   const [canCreateClient, setCanCreateClient] = useState(false);
   const [mailboxTagOptions, setMailboxTagOptions] = useState<VeMailboxTagOption[]>([]);
+  const [portalProjects, setPortalProjects] = useState<VePortalProjectOptionDto[] | null>(null);
+  const [portalProjectId, setPortalProjectId] = useState('');
+  const [targetContactsInput, setTargetContactsInput] = useState('');
+  const [deliveryPlanLocked, setDeliveryPlanLocked] = useState(false);
+  const [deliveryPreview, setDeliveryPreview] = useState<VeDeliveryPlanPreviewDto | null>(null);
+  const [deliveryPreviewState, setDeliveryPreviewState] = useState<DeliveryPreviewState>('idle');
+  const [deliveryPreviewError, setDeliveryPreviewError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
+
+  const selectedPortalProject = portalProjects?.find((project) => project.id === portalProjectId) ?? null;
+  const activePortalPeriod = selectedPortalProject?.active_period ?? null;
+  const targetContacts = parseExactTarget(targetContactsInput);
+  const activePeriodIssue = !selectedPortalProject
+    ? null
+    : !activePortalPeriod
+      ? 'У проекта нет активного периода.'
+      : !activePortalPeriod.deadline
+        ? 'В активном периоде не задан дедлайн.'
+        : !isNonNegativeInteger(activePortalPeriod.contacts_done_count)
+          ? 'В активном периоде нет числового факта первых контактов.'
+          : null;
+
+  const clearDeliveryPreview = useCallback(() => {
+    setDeliveryPreview(null);
+    setDeliveryPreviewState('idle');
+    setDeliveryPreviewError(null);
+  }, []);
 
   const openForm = useCallback(() => {
     if (!template) return;
@@ -314,12 +396,43 @@ function useTemplateLaunch(
           setBoundPresetId(null);
           setCanCreateClient(false);
           setMailboxTagOptions([]);
+          setPortalProjects(null);
+          setDeliveryPreview(null);
+          setDeliveryPreviewState('error');
+          setDeliveryPreviewError('Не удалось загрузить проекты Portal и план выполнения.');
           return;
         }
         const list = response.data.presets ?? [];
         setPresets(list);
         setCanCreateClient(response.data.can_create_client === true);
         setMailboxTagOptions(response.data.mailbox_tag_options ?? []);
+
+        const boundDeliveryPlan = response.data.delivery_plan ?? null;
+        const deliveryContractAvailable =
+          response.data.portal_projects !== undefined || response.data.delivery_plan !== undefined;
+        if (deliveryContractAvailable) {
+          const projects = [...(response.data.portal_projects ?? [])];
+          if (boundDeliveryPlan && !projects.some((project) => project.id === boundDeliveryPlan.portal_project_id)) {
+            projects.push(portalProjectFromBoundPlan(boundDeliveryPlan));
+          }
+          setPortalProjects(projects);
+          setPortalProjectId(boundDeliveryPlan?.portal_project_id ?? '');
+          setTargetContactsInput(boundDeliveryPlan ? String(boundDeliveryPlan.target_contacts) : '');
+          setDeliveryPlanLocked(Boolean(boundDeliveryPlan));
+          const validBoundDeliveryPlan = isValidDeliveryPreview(boundDeliveryPlan) ? boundDeliveryPlan : null;
+          setDeliveryPreview(validBoundDeliveryPlan);
+          setDeliveryPreviewState(validBoundDeliveryPlan ? 'ready' : 'idle');
+          setDeliveryPreviewError(null);
+        } else {
+          setPortalProjects(null);
+          setPortalProjectId('');
+          setTargetContactsInput('');
+          setDeliveryPlanLocked(false);
+          setDeliveryPreview(null);
+          setDeliveryPreviewState('error');
+          setDeliveryPreviewError('Сервер пока не вернул контракт плана выполнения.');
+        }
+
         const responseBoundPresetId =
           typeof response.data.bound_preset_id === 'string' && response.data.bound_preset_id.trim()
             ? response.data.bound_preset_id
@@ -344,8 +457,28 @@ function useTemplateLaunch(
         setBoundPresetId(null);
         setCanCreateClient(false);
         setMailboxTagOptions([]);
+        setPortalProjects(null);
+        setDeliveryPreview(null);
+        setDeliveryPreviewState('error');
+        setDeliveryPreviewError('Не удалось загрузить проекты Portal и план выполнения.');
       });
   }, [presets, template]);
+
+  const selectPreset = useCallback((id: string) => {
+    setPresetId(id);
+    clearDeliveryPreview();
+  }, [clearDeliveryPreview]);
+
+  const selectPortalProject = useCallback((id: string) => {
+    setPortalProjectId(id);
+    setTargetContactsInput('');
+    clearDeliveryPreview();
+  }, [clearDeliveryPreview]);
+
+  const changeTargetContacts = useCallback((value: string) => {
+    setTargetContactsInput(value);
+    clearDeliveryPreview();
+  }, [clearDeliveryPreview]);
 
   const acceptCreatedPreset = useCallback((preset: VeLaunchPresetOption) => {
     setPresets((current) => {
@@ -353,8 +486,88 @@ function useTemplateLaunch(
       return next.sort((left, right) => left.name.localeCompare(right.name, 'ru'));
     });
     setPresetId(preset.id);
+    clearDeliveryPreview();
     setLoadError(null);
-  }, []);
+  }, [clearDeliveryPreview]);
+
+  useEffect(() => {
+    const periodId = activePortalPeriod?.id ?? '';
+    if (
+      !formOpen ||
+      !template ||
+      !presetId ||
+      !portalProjectId ||
+      !periodId ||
+      !segmentationAuditId ||
+      targetContacts === null ||
+      activePeriodIssue
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      if (cancelled) return;
+      setDeliveryPreviewState('loading');
+      setDeliveryPreviewError(null);
+      void vePreviewDeliveryPlan(template.id, {
+        portal_project_id: portalProjectId,
+        expected_portal_period_id: periodId,
+        target_contacts: targetContacts,
+        preset_id: presetId,
+        segmentation_audit_id: segmentationAuditId,
+      })
+        .then(({ ok, data }) => {
+          if (cancelled) return;
+          const preview = data.preview ?? null;
+          if (
+            !ok ||
+            !isValidDeliveryPreview(preview) ||
+            preview.portal_project_id !== portalProjectId ||
+            preview.portal_period_id !== periodId ||
+            preview.target_contacts !== targetContacts
+          ) {
+            setDeliveryPreview(null);
+            setDeliveryPreviewState('error');
+            setDeliveryPreviewError(data.error ?? 'Не удалось рассчитать темп выполнения.');
+            return;
+          }
+          setDeliveryPreview(preview);
+          setDeliveryPreviewState('ready');
+          setDeliveryPreviewError(null);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setDeliveryPreview(null);
+          setDeliveryPreviewState('error');
+          setDeliveryPreviewError('Не удалось рассчитать темп выполнения.');
+        });
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    activePeriodIssue,
+    activePortalPeriod?.id,
+    formOpen,
+    portalProjectId,
+    presetId,
+    segmentationAuditId,
+    targetContacts,
+    template,
+  ]);
+
+  const deliveryPlanReady = Boolean(
+    deliveryPreviewState === 'ready' &&
+      deliveryPreview &&
+      activePortalPeriod &&
+      targetContacts !== null &&
+      deliveryPreview.portal_project_id === portalProjectId &&
+      deliveryPreview.portal_period_id === activePortalPeriod.id &&
+      deliveryPreview.target_contacts === targetContacts,
+  );
 
   const submit = useCallback(
     (segmentationAuditId: string) => {
@@ -364,6 +577,8 @@ function useTemplateLaunch(
         !selectedPreset ||
         selectedPreset.mailbox_count === 0 ||
         !segmentationAuditId ||
+        !deliveryPlanReady ||
+        !deliveryPreview ||
         submitting
       ) {
         return;
@@ -374,6 +589,9 @@ function useTemplateLaunch(
         preset_id: presetId,
         segmentation_audit_id: segmentationAuditId,
         confirm_segmentation: true,
+        portal_project_id: deliveryPreview.portal_project_id,
+        expected_portal_period_id: deliveryPreview.portal_period_id,
+        target_contacts: deliveryPreview.target_contacts,
       })
         .then(({ ok, data }) => {
           if (data.code === 'TEMPLATE_LAUNCH_UNCERTAIN' || data.code === 'TEMPLATE_LAUNCH_IN_PROGRESS') {
@@ -399,7 +617,7 @@ function useTemplateLaunch(
         .catch(() => setSubmitError('Не удалось отправить в запуск'))
         .finally(() => setSubmitting(false));
     },
-    [onSegmentationRejected, presets, template, presetId, submitting],
+    [deliveryPlanReady, deliveryPreview, onSegmentationRejected, presets, template, presetId, submitting],
   );
 
   return {
@@ -410,9 +628,23 @@ function useTemplateLaunch(
     loadError,
     boundPresetId,
     presetId,
-    setPresetId,
+    setPresetId: selectPreset,
     canCreateClient,
     mailboxTagOptions,
+    portalProjects,
+    portalProjectId,
+    selectedPortalProject,
+    activePortalPeriod,
+    selectPortalProject,
+    targetContactsInput,
+    targetContacts,
+    changeTargetContacts,
+    deliveryPlanLocked,
+    deliveryPreview,
+    deliveryPreviewState,
+    deliveryPreviewError,
+    deliveryPlanReady,
+    activePeriodIssue,
     acceptCreatedPreset,
     submitting,
     submitError,
@@ -456,6 +688,188 @@ function mailboxTagOptionKey(option: VeMailboxTagOption): string {
 function formatEmailCount(count: number | null): string {
   if (count === null || count <= 0) return 'будет проверено при создании';
   return formatRussianCount(count, ['почта', 'почты', 'почт']);
+}
+
+function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
+  const preview = launch.deliveryPreview;
+  const period = launch.activePortalPeriod;
+  const targetInvalid = launch.targetContactsInput.trim() !== '' && launch.targetContacts === null;
+  const periodLabel = preview?.portal_period_label?.trim() || period?.label?.trim() || 'Активный период';
+  const periodDeadline = preview?.deadline ?? period?.deadline ?? null;
+  const periodDone = preview?.contacts_done_count ?? period?.contacts_done_count ?? null;
+
+  return (
+    <section className="border-t border-gray-200 pt-3" aria-labelledby="ve2-delivery-plan-title">
+      <div className="flex flex-wrap items-center gap-2">
+        <p id="ve2-delivery-plan-title" className={HE.eyebrow}>
+          План выполнения
+        </p>
+        {launch.deliveryPlanLocked ? (
+          <span className={`${HE.pill} ve2-tg-ok`}>
+            <StatusDot tone="ok" />
+            Закреплён
+          </span>
+        ) : null}
+      </div>
+
+      {launch.portalProjects === null ? (
+        <p className="mt-2 text-xs text-red-600" role="alert">
+          Проекты Portal и активный период недоступны. Новый запуск заблокирован.
+        </p>
+      ) : launch.portalProjects.length === 0 ? (
+        <p className="mt-2 text-xs text-red-600" role="alert">
+          Нет проектов Portal, доступных для привязки. Новый запуск заблокирован.
+        </p>
+      ) : (
+        <>
+          <div className="mt-2 grid gap-3 sm:grid-cols-2">
+            <div>
+              <label htmlFor="ve2-portal-project" className="ve2-label">
+                Проект Portal
+              </label>
+              <select
+                id="ve2-portal-project"
+                value={launch.portalProjectId}
+                onChange={(event) => launch.selectPortalProject(event.target.value)}
+                disabled={launch.deliveryPlanLocked || launch.submitting}
+                className="ve2-input h-10 w-full px-3 text-xs"
+              >
+                <option value="">Выберите проект</option>
+                {launch.portalProjects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="ve2-delivery-target" className="ve2-label">
+                Обязательство, контактов
+              </label>
+              <input
+                id="ve2-delivery-target"
+                type="number"
+                inputMode="numeric"
+                min={1}
+                step={1}
+                value={launch.targetContactsInput}
+                onChange={(event) => launch.changeTargetContacts(event.target.value)}
+                disabled={!launch.selectedPortalProject || launch.deliveryPlanLocked || launch.submitting}
+                placeholder="Точное число"
+                aria-invalid={targetInvalid}
+                aria-describedby={targetInvalid ? 've2-delivery-target-error' : undefined}
+                className="ve2-input h-10 w-full px-3 text-xs"
+              />
+            </div>
+          </div>
+
+          {launch.selectedPortalProject ? (
+            period ? (
+              <p className="mt-2 text-xs text-gray-600">
+                {periodLabel}
+                <span className="text-gray-400"> · </span>
+                дедлайн {periodDeadline ? formatDate(periodDeadline) : 'не задан'}
+                <span className="text-gray-400"> · </span>
+                факт первых контактов{' '}
+                {isNonNegativeInteger(periodDone) ? periodDone.toLocaleString('ru-RU') : 'не задан'}
+              </p>
+            ) : null
+          ) : (
+            <p className="mt-2 text-xs text-gray-500">Выберите проект явно, период подставится из Portal.</p>
+          )}
+
+          {targetInvalid ? (
+            <p id="ve2-delivery-target-error" className="mt-2 text-xs text-red-600" role="alert">
+              Укажите целое число больше нуля.
+            </p>
+          ) : null}
+          {launch.activePeriodIssue ? (
+            <p className="mt-2 text-xs text-red-600" role="alert">
+              {launch.activePeriodIssue} Новый запуск заблокирован.
+            </p>
+          ) : null}
+          {!launch.presetId && launch.portalProjectId && launch.targetContacts !== null ? (
+            <p className="mt-2 text-xs text-gray-500">Выберите клиентский пресет, чтобы рассчитать мощность.</p>
+          ) : null}
+        </>
+      )}
+
+      {launch.deliveryPreviewState === 'loading' ? (
+        <p className="mt-2 text-xs text-gray-500" role="status">
+          Считаем темп по рабочим дням…
+        </p>
+      ) : null}
+      {launch.portalProjects !== null && launch.deliveryPreviewState === 'error' && launch.deliveryPreviewError ? (
+        <p className="mt-2 text-xs text-red-600" role="alert">
+          {launch.deliveryPreviewError}
+        </p>
+      ) : null}
+
+      {preview && launch.deliveryPlanReady ? (
+        <div className="mt-3" aria-live="polite">
+          <dl className="grid grid-cols-2 border-y border-gray-200 text-xs sm:grid-cols-5">
+            {[
+              [
+                'Факт',
+                `${preview.contacts_done_count.toLocaleString('ru-RU')} / ${preview.target_contacts.toLocaleString('ru-RU')}`,
+              ],
+              ['Осталось', preview.remaining.toLocaleString('ru-RU')],
+              ['Рабочих дней', preview.remaining_workdays.toLocaleString('ru-RU')],
+              ['Нужно в день', preview.required_daily.toLocaleString('ru-RU')],
+              ['Следующая партия', preview.effective_daily.toLocaleString('ru-RU')],
+            ].map(([label, value]) => (
+              <div
+                key={label}
+                className="min-w-0 border-b border-gray-100 px-2 py-2.5 last:border-b-0 sm:border-b-0 sm:border-r sm:last:border-r-0"
+              >
+                <dt className="text-[11px] text-gray-500">{label}</dt>
+                <dd className="mt-0.5 font-semibold tabular-nums text-gray-900">{value}</dd>
+              </div>
+            ))}
+          </dl>
+
+          <p className="mt-2 text-[11px] text-gray-500">
+            Готово к загрузке: {preview.ready_remaining.toLocaleString('ru-RU')}
+            <span className="text-gray-400"> · </span>
+            мощность отправителей: {preview.sender_capacity.toLocaleString('ru-RU')} в день
+          </p>
+          <p className="mt-1 text-[11px] text-gray-500">
+            Всего в резерве: {(preview.reserve_remaining ?? preview.ready_remaining).toLocaleString('ru-RU')}
+            {' · '}Загружено, ждёт первого контакта: {(preview.outstanding_count ?? 0).toLocaleString('ru-RU')}.
+            {' '}Загрузка не засчитывается в обязательство. Прогноз предполагает отправку в пределах дневного лимита;
+            дата допуска новой гипотезы зависит от очереди и сезонности.
+          </p>
+
+          {preview.supply_deficit > 0 ? (
+            <p className="mt-2 flex items-start gap-2 text-xs text-amber-700" role="alert">
+              <StatusDot tone="warn" className="mt-1 shrink-0" />
+              <span>
+                Дефицит базы:{' '}
+                {formatRussianCount(preview.supply_deficit, ['контакт', 'контакта', 'контактов'])} сверх доступного резерва и уже загруженного остатка.
+              </span>
+            </p>
+          ) : null}
+          {preview.capacity_deficit > 0 ? (
+            <p className="mt-2 flex items-start gap-2 text-xs text-amber-700" role="alert">
+              <StatusDot tone="warn" className="mt-1 shrink-0" />
+              <span>
+                Риск мощности: не хватает{' '}
+                {formatRussianCount(preview.capacity_deficit, ['контакт', 'контакта', 'контактов'])}. Предел{' '}
+                {preview.sender_capacity.toLocaleString('ru-RU')} в день на{' '}
+                {preview.remaining_workdays.toLocaleString('ru-RU')} рабочих дней.
+              </span>
+            </p>
+          ) : null}
+          {preview.supply_deficit === 0 && preview.capacity_deficit === 0 ? (
+            <p className="mt-2 flex items-center gap-2 text-xs text-emerald-700" role="status">
+              <StatusDot tone="ok" />
+              База и мощность покрывают остаток периода.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
 }
 
 function CreateClientPresetInline({
@@ -768,6 +1182,7 @@ function PreparedLaunchPortfolio({
   const [reviewed, setReviewed] = useState(false);
   const [activating, setActivating] = useState(false);
   const [activated, setActivated] = useState(false);
+  const [deliveryDeferred, setDeliveryDeferred] = useState(false);
   const [activationError, setActivationError] = useState('');
   const [queueHint, setQueueHint] = useState(false);
   const campaigns = info.campaigns && info.campaigns.length > 1 ? info.campaigns : null;
@@ -779,7 +1194,9 @@ function PreparedLaunchPortfolio({
   const isQueued = portfolio.status === 'queued';
   const lifecycleMessage = isQueued
     ? null
-    : (NON_QUEUED_LIFECYCLE_MESSAGE[portfolio.status] ?? 'Текущий статус запуска не допускает активацию');
+    : (portfolio.status === 'active' && info.ready_leads_count !== undefined
+      ? 'Запуск одобрен. Контакты загружаются по будням согласно плану; пустые кампании ждут первой партии.'
+      : NON_QUEUED_LIFECYCLE_MESSAGE[portfolio.status] ?? 'Текущий статус запуска не допускает активацию');
   // Capacity in the queue response is a read snapshot. The backend activation
   // preflight re-reads Instantly and can safely release a Completed holder.
   const canActivate = isQueued && seasonallyEligible && hasCurrentPlan;
@@ -793,7 +1210,7 @@ function PreparedLaunchPortfolio({
         ? crypto.randomUUID()
         : `${portfolio.item_id}-${Date.now()}`;
     try {
-      const { ok, data } = await veEnginePost<{ error?: string }>(
+      const { ok, data } = await veEnginePost<{ error?: string; delivery_activation_deferred?: boolean }>(
         `${VE_API}/launch-portfolio/${portfolio.item_id}/activate`,
         {
           confirm_campaign_review: true,
@@ -806,6 +1223,7 @@ function PreparedLaunchPortfolio({
         return;
       }
       setActivated(true);
+      setDeliveryDeferred(data.delivery_activation_deferred === true);
     } catch {
       setActivationError('Не удалось активировать отправку');
     } finally {
@@ -820,8 +1238,8 @@ function PreparedLaunchPortfolio({
           <StatusDot tone="ok" />
           PAUSED-кампании подготовлены.{' '}
           {campaigns && campaigns.length > 1
-            ? `Кампании созданы (на паузе): ${campaigns.length} по сегментам · ${info.leads_count.toLocaleString('ru-RU')} лидов`
-            : `Кампания создана (на паузе): ${info.campaign_name} · ${info.leads_count.toLocaleString('ru-RU')} лидов`}
+            ? `Подготовлено кампаний: ${campaigns.length} по сегментам · контактов при подготовке: ${(info.ready_leads_count ?? info.leads_count).toLocaleString('ru-RU')}`
+            : `Кампания: ${info.campaign_name} · контактов при подготовке: ${(info.ready_leads_count ?? info.leads_count).toLocaleString('ru-RU')}`}
         </p>
         <p className="mt-1 text-xs text-emerald-700">
           {slotAvailable ? 'Sending slot не занят.' : 'Sending slot уже занят другой отправкой.'}
@@ -844,7 +1262,7 @@ function PreparedLaunchPortfolio({
                 <a href={campaign.campaign_url} target="_blank" rel="noreferrer" className="underline">
                   {campaign.segment ?? 'Основная (дефолтный текст)'}
                 </a>
-                <span> · {campaign.leads_count.toLocaleString('ru-RU')} лидов</span>
+                <span> · подготовлено: {(campaign.ready_leads_count ?? campaign.leads_count).toLocaleString('ru-RU')}</span>
               </li>
             ))}
           </ul>
@@ -903,12 +1321,17 @@ function PreparedLaunchPortfolio({
               disabled={!canActivate || !reviewed || activating || activated}
               className={HE.btnPrimary}
             >
-              {activated ? 'Отправка активирована' : activating ? 'Активируем…' : 'Активировать отправку'}
+              {activated ? (deliveryDeferred ? 'Запуск одобрен' : 'Отправка активирована') : activating ? 'Активируем…' : 'Активировать отправку'}
             </button>
             <button type="button" onClick={() => setQueueHint(true)} className={HE.btnGhost}>
               Пересмотреть сезонное решение
             </button>
           </div>
+        ) : null}
+        {deliveryDeferred ? (
+          <p className="mt-2 text-xs text-gray-600" role="status">
+            Кампании ждут первой дневной партии. После её загрузки отправка начнётся по расписанию пресета.
+          </p>
         ) : null}
         {queueHint ? (
           <p className="mt-2 text-xs text-gray-600" role="status">
@@ -984,7 +1407,14 @@ function LaunchSection({
     const info = recorded;
     const portfolio = remotePortfolio ?? embeddedPortfolio;
     if (portfolio) {
-      return <PreparedLaunchPortfolio info={info} portfolio={portfolio} warnings={launch.warnings} />;
+      return <div className="space-y-3">
+        <PreparedLaunchPortfolio info={info} portfolio={portfolio} warnings={launch.warnings} />
+        {info.portal_project_id ? (
+          launch.formOpen ? <DeliveryPlanBlock launch={launch} /> : (
+            <button type="button" onClick={launch.openForm} className="ve2-b-quiet">План и запас контактов</button>
+          )
+        ) : null}
+      </div>;
     }
     const campaigns = info.campaigns && info.campaigns.length > 1 ? info.campaigns : null;
     return (
@@ -992,8 +1422,8 @@ function LaunchSection({
         <p className="flex items-center gap-2 text-sm font-medium text-emerald-800">
           <StatusDot tone="ok" />
           {campaigns && campaigns.length > 1
-            ? `Кампании созданы (на паузе): ${campaigns.length} по сегментам · ${info.leads_count.toLocaleString('ru-RU')} лидов`
-            : `Кампания создана (на паузе): ${info.campaign_name} · ${info.leads_count.toLocaleString('ru-RU')} лидов`}
+            ? `Подготовлено кампаний: ${campaigns.length} по сегментам · контактов при подготовке: ${(info.ready_leads_count ?? info.leads_count).toLocaleString('ru-RU')}`
+            : `Кампания: ${info.campaign_name} · контактов при подготовке: ${(info.ready_leads_count ?? info.leads_count).toLocaleString('ru-RU')}`}
         </p>
         <p className="mt-1 text-xs text-emerald-700">
           {info.campaign_url && !campaigns ? (
@@ -1011,7 +1441,7 @@ function LaunchSection({
                 <a href={c.campaign_url} target="_blank" rel="noreferrer" className="underline">
                   {c.segment ?? 'Основная (дефолтный текст)'}
                 </a>
-                <span> · {c.leads_count.toLocaleString('ru-RU')} лидов</span>
+                <span> · подготовлено: {(c.ready_leads_count ?? c.leads_count).toLocaleString('ru-RU')}</span>
               </li>
             ))}
           </ul>
@@ -1049,37 +1479,72 @@ function LaunchSection({
           ) : null}
           {launch.presets && launch.presets.length > 0 ? (
             <div className="space-y-3">
-              <div className="flex flex-wrap items-end gap-2">
-                <div className="min-w-0 flex-1 sm:max-w-sm">
-                  <label htmlFor="ve2-launch-preset" className="ve2-label">
-                    Клиентский пресет
-                  </label>
-                  <select
-                    id="ve2-launch-preset"
-                    value={launch.presetId}
-                    onChange={(e) => launch.setPresetId(e.target.value)}
-                    disabled={Boolean(launch.boundPresetId)}
-                    className="ve2-input h-10 min-w-0 px-3 text-xs"
-                    aria-describedby={selectedPreset ? 've2-launch-preset-summary' : undefined}
-                  >
-                    {!launch.boundPresetId ? <option value="">Выберите клиента</option> : null}
-                    {launch.boundPresetId && !selectedPreset ? (
-                      <option value="">Закреплённый пресет недоступен</option>
-                    ) : null}
-                    {launch.presets.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                  {launch.boundPresetId && selectedPreset ? (
-                    <p className="mt-1 text-[11px] text-gray-500">Пресет закреплён за проектом</p>
+              <div className="min-w-0 sm:max-w-sm">
+                <label htmlFor="ve2-launch-preset" className="ve2-label">
+                  Клиентский пресет
+                </label>
+                <select
+                  id="ve2-launch-preset"
+                  value={launch.presetId}
+                  onChange={(event) => launch.setPresetId(event.target.value)}
+                  disabled={Boolean(launch.boundPresetId)}
+                  className="ve2-input h-10 w-full px-3 text-xs"
+                  aria-describedby={selectedPreset ? 've2-launch-preset-summary' : undefined}
+                >
+                  {!launch.boundPresetId ? <option value="">Выберите клиента</option> : null}
+                  {launch.boundPresetId && !selectedPreset ? (
+                    <option value="">Закреплённый пресет недоступен</option>
                   ) : null}
-                </div>
+                  {launch.presets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.name}
+                    </option>
+                  ))}
+                </select>
+                {launch.boundPresetId && selectedPreset ? (
+                  <p className="mt-1 text-[11px] text-gray-500">Пресет закреплён за проектом</p>
+                ) : null}
+              </div>
+              {selectedPreset ? (
+                <dl
+                  id="ve2-launch-preset-summary"
+                  aria-live="polite"
+                  className="grid gap-3 border-t border-gray-200 pt-3 text-xs sm:grid-cols-2"
+                >
+                  <div>
+                    <dt className="text-gray-500">Workspace</dt>
+                    <dd className="mt-1 font-medium text-gray-800">{selectedPreset.instantly_account_label}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-gray-500">Пул отправителей</dt>
+                    <dd className="mt-1 flex flex-wrap items-center gap-1.5 text-gray-800">
+                      {(selectedPreset.mailbox_tag_resolution === 'exact' ||
+                        selectedPreset.mailbox_tag_resolution === 'shared') &&
+                      selectedPreset.mailbox_tags.length > 0 ? (
+                        selectedPreset.mailbox_tags.map((tag) => (
+                          <span key={tag.id} className="ve2-tag">
+                            {tag.name}
+                          </span>
+                        ))
+                      ) : (
+                        <span>{mailboxTagFallback(selectedPreset.mailbox_tag_resolution)}</span>
+                      )}
+                      <span className="text-gray-500">· {formatMailboxCount(selectedPreset.mailbox_count)}</span>
+                    </dd>
+                  </div>
+                </dl>
+              ) : null}
+              <DeliveryPlanBlock launch={launch} />
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() => launch.submit(audit.auditId as string)}
-                  disabled={launch.submitting || !selectedPreset || selectedPreset.mailbox_count === 0}
+                  disabled={
+                    launch.submitting ||
+                    !selectedPreset ||
+                    selectedPreset.mailbox_count === 0 ||
+                    !launch.deliveryPlanReady
+                  }
                   className={HE.btnPrimary}
                 >
                   {launch.submitting
@@ -1112,35 +1577,6 @@ function LaunchSection({
                 <p className="text-xs text-red-600" role="alert">
                   {csvDownloadError}
                 </p>
-              ) : null}
-              {selectedPreset ? (
-                <dl
-                  id="ve2-launch-preset-summary"
-                  aria-live="polite"
-                  className="grid gap-3 border-t border-gray-200 pt-3 text-xs sm:grid-cols-2"
-                >
-                  <div>
-                    <dt className="text-gray-500">Workspace</dt>
-                    <dd className="mt-1 font-medium text-gray-800">{selectedPreset.instantly_account_label}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-gray-500">Пул отправителей</dt>
-                    <dd className="mt-1 flex flex-wrap items-center gap-1.5 text-gray-800">
-                      {(selectedPreset.mailbox_tag_resolution === 'exact' ||
-                        selectedPreset.mailbox_tag_resolution === 'shared') &&
-                      selectedPreset.mailbox_tags.length > 0 ? (
-                        selectedPreset.mailbox_tags.map((tag) => (
-                          <span key={tag.id} className="ve2-tag">
-                            {tag.name}
-                          </span>
-                        ))
-                      ) : (
-                        <span>{mailboxTagFallback(selectedPreset.mailbox_tag_resolution)}</span>
-                      )}
-                      <span className="text-gray-500">· {formatMailboxCount(selectedPreset.mailbox_count)}</span>
-                    </dd>
-                  </div>
-                </dl>
               ) : null}
             </div>
           ) : null}
@@ -1183,7 +1619,11 @@ export function Step5Template(props: {
     },
     [markSegmentationRejected, refreshSegmentationAudit],
   );
-  const launch = useTemplateLaunch(template, handleSegmentationRejected);
+  const launch = useTemplateLaunch(
+    template,
+    segmentationAudit.auditId,
+    handleSegmentationRejected,
+  );
 
   const templateJob = useMemo(() => latestStageJob(jobs, 'template'), [jobs]);
   const busy = templateJob?.status === 'pending' || templateJob?.status === 'running';
@@ -1311,9 +1751,8 @@ export function Step5Template(props: {
   /* ── Готовый шаблон ── */
   const mapping = template.personalization_plan?.operator_mapping ?? [];
   const unmatchedMapping = mapping.filter((item) => !item.matched);
-  // Пречек лимита запуска: роут ответит 413 сверх VE_LAUNCH_MAX_LEADS —
-  // не даём дойти до клика по «Отправить в запуск» с заведомо большой базой.
-  const baseOverLaunchLimit = (base?.row_count ?? 0) > VE_LAUNCH_MAX_LEADS;
+  // The cap applies to validated unique contacts, not raw company rows.
+  const baseOverLaunchLimit = (segmentationAudit.summary?.launchableRows ?? 0) > VE_LAUNCH_MAX_LEADS;
 
   return (
     <div className="space-y-5">

@@ -6,6 +6,11 @@
  * (после рестарта пода) обратно в 'pending' с сохранением attempts, иначе после
  * деплоя они висят навсегда.
  *
+ * Здесь же живёт независимый guarded tick ежедневной VE2-дозагрузки контактов:
+ * один проход на старте и затем раз в пять минут. Суточную идемпотентность и
+ * точную резервацию строк обеспечивает main DB; process-local guard не даёт
+ * одному экземпляру воркера запускать два прохода одновременно.
+ *
  * Джобы создаются API (/api/tools/vertical-engine-v2/*): API ставит только
  * первую research-стадию (site_profile) либо точечные стадии (chain/vocab/
  * base_analyze/base_collect/template). Research-цепочку дальше ведёт сам воркер:
@@ -32,10 +37,20 @@ import {
   retryRunAfter,
 } from '@/lib/verticalEngineV2/jobRetry';
 import { transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
+import {
+  createGuardedContactDeliveryTick,
+  runBoundContactDeliveries,
+} from '@/lib/verticalEngineV2/contactDeliveryScheduler';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import type { VeJob, VeStage } from '@/lib/verticalEngineV2/types';
 
 const WORKER_ID = `vertical-engine-v2-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
+const configuredContactDeliveryInterval = Number(process.env.VE_CONTACT_DELIVERY_INTERVAL_MS);
+const CONTACT_DELIVERY_INTERVAL_MS =
+  Number.isFinite(configuredContactDeliveryInterval) && configuredContactDeliveryInterval >= 60_000
+    ? configuredContactDeliveryInterval
+    : 5 * 60_000;
 /** Как часто воркер проверяет строку активной джобы на отмену пользователем. */
 const CANCEL_WATCH_MS = 3000;
 
@@ -51,6 +66,38 @@ const HEARTBEAT_PATH = process.env.VE_WORKER_HEARTBEAT_PATH ?? '/tmp/vertical-en
 const log = createWorkerLogger(WORKER_ID);
 const db = requireSupabaseAdmin(log);
 const shouldStop = setupGracefulShutdown(log);
+
+const contactDeliveryTick = createGuardedContactDeliveryTick({
+  log: (level, message, extra) => log(level, `[contact-delivery] ${message}`, extra),
+  run: async () => {
+    const result = await runBoundContactDeliveries({
+      portalDb: db,
+      instantlyDb: supabaseInstantly,
+      now: new Date(),
+      log: (level, message, extra) => log(level, `[contact-delivery] ${message}`, extra),
+    });
+    if (!result.skipped && result.eligibleProjects > 0) {
+      log(
+        result.failedProjects > 0 ? 'warn' : 'info',
+        `[contact-delivery] sweep done: ${result.attemptedProjects}/${result.eligibleProjects} attempted, ` +
+          `${result.failedProjects} failed or uncertain`,
+      );
+    }
+  },
+});
+
+let activeContactDeliveryTick: Promise<boolean> | null = null;
+
+function triggerContactDeliveryTick(): Promise<boolean> {
+  const promise = contactDeliveryTick();
+  if (!activeContactDeliveryTick) {
+    activeContactDeliveryTick = promise;
+    void promise.finally(() => {
+      if (activeContactDeliveryTick === promise) activeContactDeliveryTick = null;
+    });
+  }
+  return promise;
+}
 
 /** Порядок research-пайплайна: после done стадии ставится следующая (если её ещё нет). */
 const NEXT_RESEARCH_STAGE: Partial<Record<VeStage, VeStage>> = {
@@ -375,7 +422,16 @@ async function main() {
 
   await resetStuckJobs();
 
+  const contactDeliveryTimer = setInterval(
+    () => { void triggerContactDeliveryTick(); },
+    CONTACT_DELIVERY_INTERVAL_MS,
+  );
+  if (typeof contactDeliveryTimer.unref === 'function') contactDeliveryTimer.unref();
+
   try {
+    // Delivery is independent from VE research/template jobs; do not hold the
+    // main poll loop behind a potentially slow provider batch at process start.
+    void triggerContactDeliveryTick();
     await pollLoop({
       log,
       pollIntervalMs: POLL_INTERVAL_MS,
@@ -384,6 +440,8 @@ async function main() {
       realtimeTables: ['ve_jobs'],
     });
   } finally {
+    clearInterval(contactDeliveryTimer);
+    if (activeContactDeliveryTick) await activeContactDeliveryTick;
     clearInterval(heartbeat);
   }
 

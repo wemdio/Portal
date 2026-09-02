@@ -7,7 +7,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { getCampaign } from '@/lib/instantly/client';
-import { CampaignStatus } from '@/lib/instantly/types';
+import { CampaignStatus, type Campaign } from '@/lib/instantly/types';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from '@/lib/verticalEngineV2/types';
@@ -17,6 +17,7 @@ import {
   buildLaunchCampaignName,
   instantlyCampaignUrl,
   parseLaunchInfo,
+  type VeTemplateLaunchCampaign,
   type VeTemplateLaunchInfo,
 } from '@/lib/verticalEngineV2/launchHandoff';
 import { reconcileExpiredLaunchReservation } from '@/lib/verticalEngineV2/launchReservation';
@@ -28,6 +29,12 @@ import {
   prepareAuditSnapshot,
   validateStoredAuditSnapshot,
 } from '@/lib/verticalEngineV2/stages/segmentationAudit';
+import {
+  ContactDeliveryRecoveryError,
+  materializeRecoveredContactDelivery,
+  prepareBoundContactDeliveryRecovery,
+  type BoundContactDeliveryRecovery,
+} from '@/lib/verticalEngineV2/launchRecovery';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -199,11 +206,12 @@ async function proveRecoveredCampaignsLive(input: {
   instantlyAccountId: string;
   mailboxIds: readonly string[];
 }): Promise<
-  | { ok: true; proofs: RecoveredCampaignProof[] }
+  | { ok: true; proofs: RecoveredCampaignProof[]; campaigns: Campaign[] }
   | { ok: false; response: NextResponse }
 > {
   const statusObservedAt = new Date().toISOString();
   const proofs: RecoveredCampaignProof[] = [];
+  const campaigns: Campaign[] = [];
 
   for (const campaignId of input.campaignIds) {
     let live: Awaited<ReturnType<typeof getCampaign>>;
@@ -257,9 +265,10 @@ async function proveRecoveredCampaignsLive(input: {
       remote_status: live.status as RecoveredCampaignProof['remote_status'],
       status_observed_at: statusObservedAt,
     });
+    campaigns.push(live);
   }
 
-  return { ok: true, proofs };
+  return { ok: true, proofs, campaigns };
 }
 
 async function buildRecoveryPortfolioSnapshot(input: {
@@ -268,6 +277,7 @@ async function buildRecoveryPortfolioSnapshot(input: {
   base: BaseRow;
   presetId: string;
   knownLaunch: VeTemplateLaunchInfo | null;
+  boundRecovery: BoundContactDeliveryRecovery | null;
 }): Promise<
   | { ok: true; snapshot: RecoveryPortfolioSnapshot }
   | { ok: false; response: NextResponse }
@@ -306,7 +316,7 @@ async function buildRecoveryPortfolioSnapshot(input: {
       response: jsonError('Не удалось восстановить почтовые аккаунты исходного запуска', 409),
     };
   }
-  const estimatedRunDays = input.knownLaunch?.estimated_run_days;
+  const estimatedRunDays = input.knownLaunch?.estimated_run_days ?? input.boundRecovery?.estimatedRunDays;
   if (
     typeof estimatedRunDays !== 'number' ||
     !Number.isFinite(estimatedRunDays) ||
@@ -632,19 +642,32 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         return jsonError('Не удалось определить пресет исходного запуска', 409);
       }
       let portfolioSnapshot: RecoveryPortfolioSnapshot | null = null;
+      let boundRecovery: BoundContactDeliveryRecovery | null = null;
       if (resolution === 'campaign_created') {
+        if (!supabaseInstantly) return jsonError('Instantly database is not configured', 500);
+        try {
+          boundRecovery = await prepareBoundContactDeliveryRecovery({
+            portalDb: supabaseAdmin, instantlyDb: supabaseInstantly,
+            template, base, audit, presetId, campaignIds: resolvedIds,
+          });
+        } catch (error) {
+          if (error instanceof ContactDeliveryRecoveryError) return jsonError(error.message, error.status, error.code);
+          throw error;
+        }
         const recoveredSnapshot = await buildRecoveryPortfolioSnapshot({
           portalDb: supabaseAdmin,
           template,
           base,
           presetId,
           knownLaunch,
+          boundRecovery,
         });
         if (!recoveredSnapshot.ok) return recoveredSnapshot.response;
         portfolioSnapshot = recoveredSnapshot.snapshot;
       }
 
       let campaignProofs: RecoveredCampaignProof[] = [];
+      let liveCampaigns: Campaign[] = [];
       if (resolution === 'campaign_created') {
         const liveProof = await proveRecoveredCampaignsLive({
           campaignIds: resolvedIds,
@@ -653,11 +676,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         });
         if (!liveProof.ok) return liveProof.response;
         campaignProofs = liveProof.proofs;
+        liveCampaigns = liveProof.campaigns;
       }
 
       const knownById = new Map(knownCampaigns.map((campaign) => [campaign.campaign_id, campaign]));
       const proofById = new Map(campaignProofs.map((proof) => [proof.campaign_id, proof]));
-      const recoveredCampaigns = resolvedIds.map((campaignId, index) => {
+      let recoveredCampaigns: VeTemplateLaunchCampaign[] = resolvedIds.map((campaignId, index) => {
         const known = knownById.get(campaignId);
         const proof = proofById.get(campaignId);
         return {
@@ -676,6 +700,19 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
             : {}),
         };
       });
+      let recoveredDelivery: Awaited<ReturnType<typeof materializeRecoveredContactDelivery>> | null = null;
+      if (boundRecovery && supabaseInstantly) {
+        try {
+          recoveredDelivery = await materializeRecoveredContactDelivery({
+            instantlyDb: supabaseInstantly, prepared: boundRecovery,
+            liveCampaigns, recoveredCampaigns, knownCampaigns,
+          });
+          recoveredCampaigns = recoveredDelivery.campaigns;
+        } catch (error) {
+          if (error instanceof ContactDeliveryRecoveryError) return jsonError(error.message, error.status, error.code);
+          throw error;
+        }
+      }
       const primary = recoveredCampaigns[0];
       const resolvedAt = new Date().toISOString();
       const launchInfo: VeTemplateLaunchInfo | null =
@@ -691,13 +728,19 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
               preset_id: presetId,
               created_at: knownLaunch?.created_at || audit.launch_started_at || resolvedAt,
               ...portfolioSnapshot!,
+              ...(boundRecovery && recoveredDelivery ? {
+                portal_project_id: boundRecovery.project.portal_project_id,
+                portal_period_id: boundRecovery.project.portal_period_id,
+                target_contacts: boundRecovery.project.target_contacts,
+                ready_leads_count: recoveredDelivery.dripRows.length,
+              } : {}),
               segmentation_audit_id: audit.id,
               ...(audit.input_hash ? { segmentation_audit_input_hash: audit.input_hash } : {}),
               campaigns: recoveredCampaigns,
             }
           : null;
       const { data: resolveData, error: resolveError } = await supabaseAdmin.rpc(
-        've_resolve_template_launch',
+        recoveredDelivery ? 've_resolve_template_contact_delivery' : 've_resolve_template_launch',
         {
           p_audit_id: audit.id,
           p_template_id: template.id,
@@ -707,6 +750,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
           p_resolved_by: userId,
           p_resolution_id: randomUUID(),
           p_now: resolvedAt,
+          ...(recoveredDelivery ? { p_drip_rows: recoveredDelivery.dripRows } : {}),
         },
       );
       if (resolveError) {
