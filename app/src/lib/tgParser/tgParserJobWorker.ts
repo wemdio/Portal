@@ -48,6 +48,21 @@ export interface TgParserRunContext {
   signal: AbortSignal;
   checkpoint: TgParserCheckpoint | null;
   saveCheckpoint(data: TgParserCheckpoint): Promise<boolean>;
+  /**
+   * Жетон текущего захвата (lib/jobs/lifecycle.ts). Им ограждаются ИТОГОВЫЕ
+   * записи задачи.
+   *
+   * Терминальный статус тут пишет сам runTgParserJob (manageTerminalStatus =
+   * false), значит библиотека оградить эти записи не может — это обязанность
+   * тела. Без жетона `.eq('status','running')` пропускает запись и от СТАРОГО
+   * тела: после перехвата задачи (истёкшая аренда, деплой) прежний исполнитель
+   * дорабатывает свой последний шаг и может проштамповать done/error поверх
+   * работы нового владельца. На одной реплике с последовательным деплоем это
+   * недостижимо, но пара «manageTerminalStatus=false + неограждённая
+   * терминальная запись» переезжает в остальные воркеры, а там таблицы с
+   * девятью репликами.
+   */
+  runToken: string;
 }
 
 type TgParserLogLevel = 'info' | 'warning' | 'error';
@@ -324,6 +339,20 @@ export async function runTgParserJob(jobId: string, ctx?: TgParserRunContext): P
   }
   if (job.status !== 'running') return;
 
+  /**
+   * Ограждение итоговых записей жетоном захвата (см. TgParserRunContext.runToken).
+   *
+   * Ctx необязателен — тогда жетона нет и фильтр не добавляется: поведение
+   * ровно то, что было до ограждения. Ослаблять до «не писать вовсе» нельзя,
+   * иначе вызов без контекста молча терял бы результат задачи.
+   *
+   * Тип билдера — any по той же причине, что в lib/jobs/lifecycle.ts: цепочка
+   * PostgREST меняет форму на каждом шаге, а нам нужен только .eq.
+   */
+  const runToken = ctx?.runToken ?? null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ownedRow = <T>(q: T): T => (runToken ? ((q as any).eq('run_token', runToken) as T) : q);
+
   const cfg = job.config as TgParserJobConfig;
   const isTarget = Boolean(cfg.is_target);
   const accountLabel = cfg.account_label ?? null;
@@ -386,15 +415,17 @@ export async function runTgParserJob(jobId: string, ctx?: TgParserRunContext): P
   });
   if (links.length === 0) {
     const msg = 'Пустой список ссылок';
-    await db
-      .from('tg_parser_jobs')
-      .update({
-        status: 'error',
-        error_message: msg,
-        completed_at: new Date().toISOString(),
-      })
-      .eq('id', jobId)
-      .eq('status', 'running');
+    await ownedRow(
+      db
+        .from('tg_parser_jobs')
+        .update({
+          status: 'error',
+          error_message: msg,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', jobId)
+        .eq('status', 'running'),
+    );
     await writeJobLog({ jobId, jobUserId, isTarget, accountLabel, level: 'error', message: msg });
     await trace?.fail(new Error(msg), { stage: 'validate_links' });
     return;
@@ -407,15 +438,17 @@ export async function runTgParserJob(jobId: string, ctx?: TgParserRunContext): P
   if (isTarget) {
     if (!process.env.TG_TARGET_API_ID || !process.env.TG_TARGET_SESSION) {
       const msg = 'Целевой аккаунт не настроен на сервере';
-      await db
-        .from('tg_parser_jobs')
-        .update({
-          status: 'error',
-          error_message: msg,
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', jobId)
-        .eq('status', 'running');
+      await ownedRow(
+        db
+          .from('tg_parser_jobs')
+          .update({
+            status: 'error',
+            error_message: msg,
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', jobId)
+          .eq('status', 'running'),
+      );
       await writeJobLog({ jobId, jobUserId, isTarget, accountLabel, level: 'error', message: msg });
       await trace?.fail(new Error(msg), { stage: 'target_account_check' });
       return;
@@ -462,11 +495,13 @@ export async function runTgParserJob(jobId: string, ctx?: TgParserRunContext): P
         );
         if (conflict) {
           const msg = outreachConflictMessage(row.phone, conflict);
-          await db
-            .from('tg_parser_jobs')
-            .update({ status: 'error', error_message: msg, completed_at: new Date().toISOString() })
-            .eq('id', jobId)
-            .eq('status', 'running');
+          await ownedRow(
+            db
+              .from('tg_parser_jobs')
+              .update({ status: 'error', error_message: msg, completed_at: new Date().toISOString() })
+              .eq('id', jobId)
+              .eq('status', 'running'),
+          );
           await writeJobLog({ jobId, jobUserId, isTarget, accountLabel, level: 'error', message: msg });
           await trace?.fail(new Error(msg), { stage: 'account_conflict' });
           return;
@@ -476,15 +511,17 @@ export async function runTgParserJob(jobId: string, ctx?: TgParserRunContext): P
 
     if (!row?.session_data) {
       const msg = 'Аккаунт не найден или неактивен';
-      await db
-        .from('tg_parser_jobs')
-        .update({
-          status: 'error',
-          error_message: msg,
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', jobId)
-        .eq('status', 'running');
+      await ownedRow(
+        db
+          .from('tg_parser_jobs')
+          .update({
+            status: 'error',
+            error_message: msg,
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', jobId)
+          .eq('status', 'running'),
+      );
       await writeJobLog({ jobId, jobUserId, isTarget, accountLabel, level: 'error', message: msg });
       await trace?.fail(new Error(msg), { stage: 'account_check' });
       return;
@@ -668,14 +705,16 @@ export async function runTgParserJob(jobId: string, ctx?: TgParserRunContext): P
         logFailureDetails?: boolean;
       },
     ): Promise<{ ok: boolean; errorMessage?: string }> => {
-      const { data: updated, error: updateErr } = await db
-        .from('tg_parser_jobs')
-        .update({
-          ...patch,
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', jobId)
-        .eq('status', 'running')
+      const { data: updated, error: updateErr } = await ownedRow(
+        db
+          .from('tg_parser_jobs')
+          .update({
+            ...patch,
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', jobId)
+          .eq('status', 'running'),
+      )
         .select('id')
         .maybeSingle();
 
@@ -717,16 +756,18 @@ export async function runTgParserJob(jobId: string, ctx?: TgParserRunContext): P
         return { ok: false, errorMessage: persistMsg };
       }
 
-      const { data: fallbackRow, error: fallbackErr } = await db
-        .from('tg_parser_jobs')
-        .update({
-          status: 'error',
-          stop_reason: 'persist_failed',
-          error_message: truncateText(persistMsg, 900),
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', jobId)
-        .eq('status', 'running')
+      const { data: fallbackRow, error: fallbackErr } = await ownedRow(
+        db
+          .from('tg_parser_jobs')
+          .update({
+            status: 'error',
+            stop_reason: 'persist_failed',
+            error_message: truncateText(persistMsg, 900),
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', jobId)
+          .eq('status', 'running'),
+      )
         .select('id')
         .maybeSingle();
 
@@ -916,15 +957,17 @@ export async function runTgParserJob(jobId: string, ctx?: TgParserRunContext): P
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[tg-parser-job] run failed', err);
-    await db
-      .from('tg_parser_jobs')
-      .update({
-        status: 'error',
-        error_message: msg,
-        completed_at: new Date().toISOString(),
-      })
-      .eq('id', jobId)
-      .eq('status', 'running');
+    await ownedRow(
+      db
+        .from('tg_parser_jobs')
+        .update({
+          status: 'error',
+          error_message: msg,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', jobId)
+        .eq('status', 'running'),
+    );
     await writeJobLog({
       jobId,
       jobUserId,
