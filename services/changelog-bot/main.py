@@ -270,7 +270,44 @@ def _is_noise_merge(first_line: str) -> bool:
     )
 
 
+# Git-трейлеры в конце описания коммита: «Co-Authored-By: …», «Signed-off-by: …»,
+# «Refs: …». Для дайджеста это шум, а «Co-Authored-By: Claude» ещё и уводит
+# редактора в рассуждения об авторстве вместо содержания.
+_TRAILER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*:\s", re.ASCII)
+
+# Сколько символов описания одного коммита отдаём редактору. Описание в
+# 3–5 абзацев (см. коммит 3b24a2b8) укладывается целиком; простыня из
+# автогенерированного changelog'а или вставленного стектрейса обрезается.
+MAX_BODY_CHARS = 1500
+
+
+def _commit_body(msg: str) -> str:
+    """Описание коммита без заголовка и без трейлеров, схлопнутое в абзацы."""
+    lines = msg.splitlines()[1:]
+    kept: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if _TRAILER_RE.match(stripped):
+            continue
+        kept.append(stripped)
+    # Пустые строки между абзацами — в один пробел, чтобы список коммитов
+    # оставался списком: один коммит — один пункт «- …».
+    body = " ".join(part for part in " ".join(kept).split() if part)
+    if len(body) > MAX_BODY_CHARS:
+        body = body[:MAX_BODY_CHARS].rstrip() + "…"
+    return body
+
+
 def _extract_commit_info(commits: list[dict[str, Any]]) -> list[str]:
+    """
+    Одна строка на коммит: заголовок, и через « — » описание, если оно есть.
+
+    До 01.09.2026 в дайджест шёл только заголовок. На коммите 3b24a2b8
+    («новые каналы продаж в сводке») этого не хватило: в описании было, какие
+    каналы и в каком сообщении, а в дайджесте осталось «добавлены новые
+    каналы» — и Дмитрий узнал о содержании правки, только спросив напрямую.
+    Описание пишут именно для того, чтобы его прочитали.
+    """
     messages: list[str] = []
     skipped_merges = 0
     for c in commits:
@@ -283,7 +320,8 @@ def _extract_commit_info(commits: list[dict[str, Any]]) -> list[str]:
         if _is_noise_merge(first_line):
             skipped_merges += 1
             continue
-        messages.append(first_line)
+        body = _commit_body(msg)
+        messages.append(f"{first_line} — {body}" if body else first_line)
     if skipped_merges:
         print(f"[changelog] Skipped {skipped_merges} merge-only commits (branch/PR merges)", flush=True)
     return messages
@@ -293,6 +331,8 @@ def _extract_commit_info(commits: list[dict[str, Any]]) -> list[str]:
 
 SYSTEM_PROMPT = """\
 Ты — технический редактор продуктовой команды. По списку коммит-сообщений из git напиши дайджест обновлений портала.
+
+Каждая строка списка — «заголовок коммита — описание». Заголовок короткий и часто называет только часть изменения; суть, детали и изменившиеся правила лежат в описании. Пиши пункт по описанию, а не по заголовку: если в описании сказано, что поменялось правило расчёта, объединились категории или что-то перестало считаться, — это обязано попасть в дайджест, даже если заголовок говорит лишь «добавлены каналы».
 
 ## Структура ответа
 
