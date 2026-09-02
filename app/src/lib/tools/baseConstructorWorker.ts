@@ -21,6 +21,7 @@ import {
   type StepKey,
   type ProgressFn,
   type CancelCheckFn,
+  type TaScoringTelemetry,
 } from './processingSteps';
 import {
   stripBaseConstructorCheckpointMetadata,
@@ -28,6 +29,11 @@ import {
 } from './baseConstructorCheckpoint';
 import { extractEmail, findColumnIndex } from './dfybUtils';
 import { uploadExportArtifact } from './csvExportArtifact';
+import {
+  accumulateTaScoringTelemetry,
+  createBaseConstructorMetrics,
+  mergeBaseConstructorStats,
+} from './baseConstructorMetrics';
 
 const admin = supabaseAdmin!;
 
@@ -74,6 +80,7 @@ interface StepConfig {
   locale?: ConstructorLocale;
   onCheckpoint?: (data: string[][]) => Promise<void>;
   onTaScoringStats?: (stats: TaScoringStats) => void;
+  onTaScoringTelemetry?: (stats: TaScoringTelemetry) => void;
 }
 
 export interface TaScoringStats {
@@ -340,12 +347,14 @@ export async function updateJobProgress(
   stepKey: string,
   progress: number,
   runToken?: string,
+  resultStats?: Record<string, unknown>,
 ) {
   const patch: Record<string, unknown> = {
     current_step: stepIndex + 1,
     current_step_key: stepKey,
     current_step_progress: Math.min(100, Math.max(0, Math.round(progress))),
     status: 'processing',
+    ...(resultStats ? { result_stats: resultStats } : {}),
   };
   // Heartbeat: каждое обновление прогресса bumps started_at. Семантика
   // меняется с «когда началось» на «когда была последняя активность».
@@ -469,6 +478,7 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
     stepTAScore(data, cfg.brief || '', prog, cancel, {
       keepAllScored: cfg.keepAllScored,
       onStats: cfg.onTaScoringStats,
+      onTelemetry: cfg.onTaScoringTelemetry,
       onCheckpoint: cfg.onCheckpoint,
     }),
   personalization: (data, prog, cancel, cfg) => stepPersonalize(data, cfg.prompt || '', prog, cancel),
@@ -608,6 +618,7 @@ async function logTaScoringFailures(
 }
 
 export async function runBaseConstructorJob(jobId: string, runToken?: string): Promise<void> {
+  let metrics: ReturnType<typeof createBaseConstructorMetrics> | undefined;
   try {
     const { data: job, error } = await admin
       .from('base_constructor_jobs')
@@ -622,6 +633,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
       );
       return;
     }
+    metrics = createBaseConstructorMetrics(job.result_stats);
 
     const selectedSteps: StepKey[] = job.selected_steps || [];
     const stepConfig: StepConfig = job.step_config || {};
@@ -715,7 +727,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
       const approxBytes = JSON.stringify(sanitized).length;
       const { error, ms, attempts } = await updateJobWithRetry(
         jobId,
-        { data: sanitized },
+        { data: sanitized, result_stats: metrics!.snapshot() },
         `persistData:${label}`,
         { runToken },
       );
@@ -731,8 +743,6 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
         );
       }
     }
-
-    let taScoringStats: TaScoringStats | undefined;
 
     for (let i = resumeFromStep; i < selectedSteps.length; i++) {
       const stepKey = selectedSteps[i];
@@ -781,6 +791,34 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
           ? 99
           : Math.min(99, Math.max(0, Math.round(job.current_step_progress ?? 0)))
         : 0;
+      metrics.beginStep(i + 1, stepKey, Math.max(0, data.length - 1), isResumingCurrentStep);
+      const priorStats = metrics.snapshot();
+      const savedTelemetry = mergeBaseConstructorStats(priorStats.ta_scoring_telemetry, {});
+      const priorTelemetry = mergeBaseConstructorStats(priorStats.ta_scoring_telemetry, {
+        length_responses: Number(priorStats.ta_scoring_length_responses ?? savedTelemetry.length_responses) || 0,
+      });
+      let latestTaTelemetry: TaScoringTelemetry | undefined;
+      let taScoringComplete = false;
+      const isCompletedTaReplay = (snapshot: TaScoringTelemetry) => isResumingCurrentStep
+        && priorTelemetry.complete === true && snapshot.http_attempts === 0;
+      const recordTaTelemetry = (snapshot: TaScoringTelemetry) => {
+        latestTaTelemetry = snapshot;
+        // A final filtered checkpoint can precede status=completed. A no-API
+        // replay of it must preserve the original pre-filter failure counts.
+        const effectiveSnapshot = isCompletedTaReplay(snapshot) ? {
+          ...snapshot,
+          failed_rows: Number(priorStats.ta_scoring_failed_rows) || 0,
+          failed_batches: Number(priorStats.ta_scoring_failed_batches) || 0,
+          errors: Array.isArray(priorStats.ta_scoring_errors) ? priorStats.ta_scoring_errors : [],
+        } : snapshot;
+        const telemetry = accumulateTaScoringTelemetry(
+          priorTelemetry, effectiveSnapshot, isResumingCurrentStep, taScoringComplete,
+        );
+        metrics!.merge({
+          ta_scoring_telemetry: telemetry,
+          ta_scoring_length_responses: telemetry.length_responses,
+        });
+      };
       let lastReportedProgress = savedProgressFloor;
       const progressFn: ProgressFn = async (progress) => {
         // A step's local 100 means "the function is about to return", not
@@ -792,7 +830,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
           ? savedProgressFloor + Math.round(((100 - savedProgressFloor) * normalized) / 100)
           : normalized);
         lastReportedProgress = Math.max(lastReportedProgress, mapped);
-        await updateJobProgress(jobId, i, stepKey, lastReportedProgress, runToken);
+        await updateJobProgress(jobId, i, stepKey, lastReportedProgress, runToken, metrics!.snapshot());
       };
       await progressFn(0);
 
@@ -824,7 +862,23 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
         ...(stepKey === 'ta_scoring'
           ? {
               onTaScoringStats: (stats) => {
-                taScoringStats = stats;
+                taScoringComplete = true;
+                if (latestTaTelemetry) recordTaTelemetry({
+                  ...latestTaTelemetry,
+                  failed_rows: stats.failed_rows,
+                  failed_batches: stats.failed_batches,
+                  errors: stats.errors,
+                });
+                if (latestTaTelemetry && isCompletedTaReplay(latestTaTelemetry)) return;
+                metrics!.merge({
+                  ta_scoring_pre_filter_rows: stats.pre_filter_rows,
+                  ta_scoring_filtered_out: stats.filtered_out_count,
+                  ta_scoring_pre_filter_avg: Math.round(stats.pre_filter_avg_score * 10) / 10,
+                  ta_scoring_failed_rows: stats.failed_rows,
+                  ta_scoring_failed_batches: stats.failed_batches,
+                  ta_scoring_length_responses: Number(priorTelemetry.length_responses) + stats.length_responses,
+                  ta_scoring_errors: stats.errors,
+                });
                 console.log(
                   `[base-constructor][${jobId}] ta_scoring stats: scored=${stats.pre_filter_rows}, ` +
                     `avg=${stats.pre_filter_avg_score.toFixed(2)}, ` +
@@ -839,6 +893,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
                   void logTaScoringFailures(jobId, job.user_id ?? null, stats);
                 }
               },
+              onTaScoringTelemetry: recordTaTelemetry,
             }
           : {}),
       };
@@ -887,6 +942,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
         `[base-constructor][${jobId}] step ${i + 1}/${selectedSteps.length} '${stepKey}' starting (input rows=${Math.max(0, data.length - 1)}, cols=${data[0]?.length ?? 0})`,
       );
       data = await runner(data, progressFn, cancelCheck, effectiveStepConfig);
+      metrics.finishStep(Math.max(0, data.length - 1));
       console.log(
         `[base-constructor][${jobId}] step '${stepKey}' returned in ${Date.now() - stepStart}ms (output rows=${Math.max(0, data.length - 1)}, cols=${data[0]?.length ?? 0})`,
       );
@@ -907,7 +963,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
         // opposite order makes resume skip this step while retaining its old
         // checkpoint (real validation restart/data-loss window).
         await persistData(`after:${stepKey}`, data);
-        await updateJobProgress(jobId, i, stepKey, 100, runToken);
+        await updateJobProgress(jobId, i, stepKey, 100, runToken, metrics.snapshot());
       }
       // For the last step we skip the intermediate write and let the final
       // atomic update below set both `data` and `status='completed'` together —
@@ -978,28 +1034,12 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
         ...(exportArtifact
           ? { export_path: exportArtifact.path, export_bytes: exportArtifact.bytes }
           : {}),
-        result_stats: {
+        result_stats: mergeBaseConstructorStats(metrics.snapshot(), {
           total_rows: body.length,
           emails_found: emailsFound,
           avg_ta_score: Math.round(avgScore * 10) / 10,
           columns: header.length,
-          // Pre-filter ta_scoring telemetry — лежит здесь, чтобы UI мог показать
-          // «AI оценил 27, средний балл 4.2, ниже 7 — отфильтровано 27» и юзер
-          // не подумал что инструмент сломался при пустом результате.
-          ...(taScoringStats
-            ? {
-                ta_scoring_pre_filter_rows: taScoringStats.pre_filter_rows,
-                ta_scoring_filtered_out: taScoringStats.filtered_out_count,
-                ta_scoring_pre_filter_avg: Math.round(taScoringStats.pre_filter_avg_score * 10) / 10,
-                // Провалы оценки. Без этого «Ошибка оценки» в результате не
-                // отличалась от настоящего вердикта AI — разбор 04.08.2026.
-                ta_scoring_failed_rows: taScoringStats.failed_rows,
-                ta_scoring_failed_batches: taScoringStats.failed_batches,
-                ta_scoring_length_responses: taScoringStats.length_responses,
-                ta_scoring_errors: taScoringStats.errors,
-              }
-            : {}),
-        },
+        }),
       },
       'final',
       { neqStatus: 'cancelled', runToken },
@@ -1020,10 +1060,12 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
     // .neq('status','cancelled'): если шаг упал из-за отмены (stepTAScore и др.
     // бросают 'Отменено' при isCancelled), НЕ перетираем намеренный 'cancelled'
     // на 'failed' — иначе пользователь видит «Ошибка» вместо «Отменена».
+    metrics?.finishStep();
     let failureQuery = admin.from('base_constructor_jobs').update({
       status: 'failed',
       error_message: message.slice(0, 500),
       completed_at: new Date().toISOString(),
+      ...(metrics ? { result_stats: metrics.snapshot() } : {}),
     }).eq('id', jobId).neq('status', 'cancelled');
     if (runToken) failureQuery = failureQuery.eq('run_token', runToken);
     await failureQuery;

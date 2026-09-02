@@ -17,7 +17,7 @@ import {
   runBaseConstructorJob,
   updateJobProgress,
 } from '@/lib/tools/baseConstructorWorker';
-import { stepValidateEmails } from '@/lib/tools/processingSteps';
+import { stepTAScore, stepValidateEmails } from '@/lib/tools/processingSteps';
 import { uploadExportArtifact } from '@/lib/tools/csvExportArtifact';
 
 type Row = Record<string, unknown>;
@@ -183,6 +183,7 @@ type TokenAwareRun = (jobId: string, runToken: string) => Promise<void>;
 const progressWithToken = updateJobProgress as unknown as TokenAwareProgress;
 const runWithToken = runBaseConstructorJob as unknown as TokenAwareRun;
 const validateEmailsMock = stepValidateEmails as jest.MockedFunction<typeof stepValidateEmails>;
+const taScoreMock = jest.mocked(stepTAScore);
 const uploadExportArtifactMock = jest.mocked(uploadExportArtifact);
 
 const ACTIVE_TOKEN = '11111111-1111-4111-8111-111111111111';
@@ -214,6 +215,7 @@ describe('Base Constructor run-token fencing', () => {
     admin.__reset();
     jest.clearAllMocks();
     validateEmailsMock.mockImplementation(async (data) => data);
+    taScoreMock.mockImplementation(async (data) => data);
     uploadExportArtifactMock.mockResolvedValue(null);
   });
 
@@ -269,6 +271,7 @@ describe('Base Constructor run-token fencing', () => {
         run_token: NEW_TOKEN,
         current_step_progress: 58,
         data: newOwnerRows,
+        result_stats: { owner_marker: 'new-owner' },
       }));
       await onProgress(80);
       await config?.onCheckpoint?.([['Email'], ['stale-checkpoint@example.com']]);
@@ -282,6 +285,132 @@ describe('Base Constructor run-token fencing', () => {
       current_step_progress: 58,
       data: newOwnerRows,
       run_token: NEW_TOKEN,
+      result_stats: { owner_marker: 'new-owner' },
+    }));
+  });
+
+  it('keeps step timing and earlier TA stats through checkpoints, resume and completion', async () => {
+    const originalStart = '2026-09-03T08:00:00.000Z';
+    let now = Date.parse('2026-09-03T10:00:00.000Z');
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const completedTa = {
+      step_index: 1, key: 'ta_scoring', started_at: originalStart,
+      completed_at: '2026-09-03T08:01:00.000Z', active_ms: 60_000,
+      attempts: 1, interrupted: false, input_rows: 10, output_rows: 2,
+    };
+    admin.__setRow(baseJob({
+      selected_steps: ['ta_scoring', 'validate_emails'],
+      current_step: 2,
+      total_steps: 2,
+      result_stats: {
+        ta_scoring_failed_rows: 2,
+        ta_scoring_length_responses: 4,
+        step_timings: { version: 1, steps: [completedTa, {
+          step_index: 2, key: 'validate_emails', started_at: originalStart,
+          active_ms: 15_000, attempts: 1, interrupted: false, input_rows: 2,
+        }] },
+      },
+    }));
+    validateEmailsMock.mockImplementation(async (data, onProgress, _cancel, config) => {
+      now += 1_000;
+      await onProgress(60);
+      await config?.onCheckpoint?.(data);
+      const checkpoint = admin.__getRow().result_stats as Record<string, unknown>;
+      expect(checkpoint).toEqual(expect.objectContaining({
+        ta_scoring_failed_rows: 2,
+        step_timings: { version: 1, steps: [completedTa, expect.objectContaining({
+          key: 'validate_emails', active_ms: 16_000, attempts: 2,
+          interrupted: true, started_at: originalStart,
+        })] },
+      }));
+      now += 2_000;
+      return data;
+    });
+    try {
+      await runWithToken('job-token-fence', ACTIVE_TOKEN);
+      const stats = admin.__getRow().result_stats as Record<string, unknown>;
+      expect(stats).toEqual(expect.objectContaining({
+        ta_scoring_failed_rows: 2,
+        ta_scoring_length_responses: 4,
+        step_timings: { version: 1, steps: [completedTa, expect.objectContaining({
+          active_ms: 18_000, attempts: 2, interrupted: true,
+          input_rows: 2, output_rows: 1,
+          completed_at: new Date(now).toISOString(),
+        })] },
+      }));
+      const metricsWrites = admin.__getAttemptedUpdates().filter(({ patch }) => patch.result_stats);
+      expect(metricsWrites.length).toBeGreaterThanOrEqual(3);
+      expect(metricsWrites.every(({ filters }) => filters.some((filter) =>
+        filter.col === 'run_token' && filter.value === ACTIVE_TOKEN,
+      ))).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('accumulates TA request telemetry once per attempt while replacing final failure counts', async () => {
+    admin.__setRow(baseJob({
+      selected_steps: ['ta_scoring'], current_step_key: 'ta_scoring',
+      result_stats: {
+        ta_scoring_length_responses: 3,
+        ta_scoring_failed_rows: 1,
+        ta_scoring_telemetry: {
+          version: 1, http_attempts: 4, api_duration_ms: 9_000,
+          length_responses: 3, unique_companies: 10, models: ['old-model'],
+        },
+      },
+    }));
+    taScoreMock.mockImplementation(async (data, _brief, onProgress, _cancel, options) => {
+      const telemetry = {
+        unique_companies: 10, http_attempts: 2, api_duration_ms: 5_000,
+        retry_wait_ms: 500, length_responses: 1, usage_responses: 2,
+        prompt_tokens: 100, completion_tokens: 200, reasoning_tokens: 50,
+        models: ['new-model'], failed_rows: 0, failed_batches: 0, errors: [],
+      };
+      const receiver = options as typeof options & { onTelemetry?: (value: typeof telemetry) => void };
+      receiver?.onTelemetry?.(telemetry);
+      await onProgress(50);
+      receiver?.onTelemetry?.(telemetry); // repeated snapshots must not double count
+      options?.onStats?.({
+        pre_filter_rows: 10, filtered_out_count: 2, pre_filter_avg_score: 8,
+        failed_rows: 0, failed_batches: 0, length_responses: 1, errors: [],
+      });
+      await options?.onCheckpoint?.(data);
+      return data;
+    });
+    await runWithToken('job-token-fence', ACTIVE_TOKEN);
+    expect(admin.__getRow().result_stats).toEqual(expect.objectContaining({
+      ta_scoring_failed_rows: 0,
+      ta_scoring_length_responses: 4,
+      ta_scoring_telemetry: expect.objectContaining({
+        version: 1, complete: true, interrupted: true,
+        http_attempts: 6, api_duration_ms: 14_000, retry_wait_ms: 500,
+        length_responses: 4, usage_responses: 2, prompt_tokens: 100,
+        completion_tokens: 200, reasoning_tokens: 50,
+        unique_companies: 10, failed_rows: 0, failed_batches: 0,
+        models: ['old-model', 'new-model'],
+      }),
+    }));
+    // The filtered final checkpoint may be durable before the final status.
+    // Replaying its already-scored rows must not shrink the original metrics.
+    admin.__setRow({ ...admin.__getRow(), status: 'processing',
+      current_step_key: 'ta_scoring', current_step_progress: 99 });
+    taScoreMock.mockImplementation(async (data, _brief, _progress, _cancel, options) => {
+      const receiver = options as typeof options & { onTelemetry?: (value: Record<string, unknown>) => void };
+      receiver?.onTelemetry?.({
+        unique_companies: 1, http_attempts: 0, api_duration_ms: 0, retry_wait_ms: 0,
+        length_responses: 0, usage_responses: 0, prompt_tokens: 0, completion_tokens: 0,
+        reasoning_tokens: 0, models: [], failed_rows: 0, failed_batches: 0, errors: [],
+      });
+      options?.onStats?.({ pre_filter_rows: 1, filtered_out_count: 0, pre_filter_avg_score: 9,
+        failed_rows: 0, failed_batches: 0, length_responses: 0, errors: [] });
+      return data;
+    });
+    await runWithToken('job-token-fence', ACTIVE_TOKEN);
+    expect(admin.__getRow().result_stats).toEqual(expect.objectContaining({
+      ta_scoring_pre_filter_rows: 10, ta_scoring_filtered_out: 2,
+      ta_scoring_pre_filter_avg: 8, ta_scoring_length_responses: 4,
+      ta_scoring_telemetry: expect.objectContaining({ http_attempts: 6, unique_companies: 10 }),
     }));
   });
 

@@ -12,7 +12,7 @@
  * the <7 filter, telemetry) must stay identical.
  */
 
-import { stepTAScore } from '@/lib/tools/processingSteps';
+import { stepNameCleanup, stepPersonalize, stepTAScore } from '@/lib/tools/processingSteps';
 
 interface SentCompany {
   idx: number;
@@ -47,6 +47,7 @@ describe('stepTAScore — per-company dedup', () => {
   afterEach(() => {
     global.fetch = realFetch;
     jest.restoreAllMocks();
+    jest.useRealTimers();
   });
 
   const header = ['компания', 'Сайт', 'email', 'Описание'];
@@ -166,5 +167,137 @@ describe('stepTAScore — per-company dedup', () => {
       expect(r[4]).toBe(String(idx));
       expect(r[5]).toBe(`r-${r[0]}`);
     }
+  });
+
+  // Incident 2026-09-02: valid partial JSON was covered historically, but a
+  // genuinely cut-off JSON document kept retrying an unchanged ten-company request.
+  it('shrinks truncated requests, keeps prior answers and accepts complete length responses', async () => {
+    const requests: number[][] = [];
+    const budgets: number[] = [];
+    const checkpoints: string[][][] = [];
+    const progress: number[] = [];
+    const input = [header, ...Array.from({ length: 10 }, (_, i) => [`C${i}`, `c${i}.ru`, '', 'd'])];
+    global.fetch = jest.fn(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const companies = JSON.parse(request.messages[1].content.split('Компании:\n')[1]) as SentCompany[];
+      requests.push(companies.map((c) => c.idx));
+      budgets.push(request.max_tokens);
+      const content = requests.length === 1
+        ? JSON.stringify({ scores: [{ idx: 0, score: 0, reason: 'real zero' }] })
+        : companies.length > 1
+          ? '{"scores":[{"idx":1,"score":8,"reason":"cut off'
+          : JSON.stringify({ scores: companies.map((c) => ({ idx: c.idx, score: 8, reason: 'ok' })) });
+      return { ok: true, json: async () => ({ choices: [{ message: { content }, finish_reason: 'length' }] }) } as Response;
+    });
+    const out = await stepTAScore(input, 'brief', async (p) => {
+      if (p === 100) expect(checkpoints.at(-1)).toEqual(outcome());
+      progress.push(p);
+    }, undefined, { keepAllScored: true, onCheckpoint: async (rows) => { checkpoints.push(rows); } });
+    function outcome() { return [[...header, 'ЦА Балл', 'ЦА Причина'], ...input.slice(1).map((r, i) => [...r, i === 0 ? '0' : '8', i === 0 ? 'real zero' : 'ok'])]; }
+    expect(out).toEqual(outcome());
+    expect(budgets.every((budget) => budget === 8000)).toBe(true);
+    expect(requests[0]).toHaveLength(10);
+    expect(requests.slice(1).every((r) => r.length <= 5 && !r.includes(0))).toBe(true);
+    expect(requests.length).toBeLessThanOrEqual(16);
+    expect(progress.at(-1)).toBe(100);
+  });
+
+  it('bounds persistent truncation and exposes exhausted rows as errors', async () => {
+    const sizes: number[] = [];
+    global.fetch = jest.fn(async (_url, init) => {
+      sizes.push(JSON.parse(JSON.parse(String(init?.body)).messages[1].content.split('Компании:\n')[1]).length);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }) } as Response;
+    });
+    const stats = jest.fn();
+    const out = await stepTAScore([header, ...Array.from({ length: 10 }, (_, i) => [`C${i}`, '', '', 'd'])], 'brief', noop, undefined, { keepAllScored: true, onStats: stats });
+    expect(sizes).toContain(1);
+    expect(sizes.length).toBeLessThanOrEqual(16);
+    expect(out.slice(1).every((r) => r[4] === '5' && r[5] === 'Ошибка оценки')).toBe(true);
+    expect(stats).toHaveBeenLastCalledWith(expect.objectContaining({ failed_rows: 10, failed_batches: 1 }));
+  });
+
+  it('retries checkpoint error placeholders but preserves genuine zero and five scores', async () => {
+    const h = [...header, 'ЦА Балл', 'ЦА Причина'];
+    const out = await stepTAScore([h,
+      ['Alpha', 'a.ru', '', 'd', '0', 'real zero'],
+      ['Beta', 'b.ru', '', 'd', '5', 'real five'],
+      ['Gamma', 'g.ru', '', 'd', '5', 'Ошибка оценки'],
+    ], 'brief', noop, undefined, { keepAllScored: true });
+    expect(sentBatches.flat().map((c) => c.data['компания'])).toEqual(['Gamma']);
+    expect(out.slice(1).map((r) => r[4])).toEqual(['0', '5', '7']);
+  });
+
+  it('keeps the request timeout armed until the response body has been read', async () => {
+    jest.useFakeTimers();
+    const signals: AbortSignal[] = [];
+    global.fetch = jest.fn(async (_url, init) => {
+      const signal = init?.signal as AbortSignal;
+      signals.push(signal);
+      const result = { choices: [{ message: { content: '{"scores":[{"idx":0,"score":8,"reason":"ok"}]}' } }] };
+      return { ok: true, json: () => signals.length > 1 ? Promise.resolve(result) : new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve(result), 71_000);
+        signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('body aborted')); }, { once: true });
+      }) } as Response;
+    });
+    const pending = stepTAScore([header, ['Alpha', 'a.ru', '', 'd']], 'brief', noop, undefined, { keepAllScored: true });
+    await jest.advanceTimersByTimeAsync(75_000);
+    expect((await pending)[1][4]).toBe('8');
+    expect(signals[0].aborted).toBe(true);
+    expect(signals).toHaveLength(2);
+  });
+
+  it('bounds total batch time including rate-limit waits without changing other AI budgets', async () => {
+    jest.useFakeTimers();
+    const stats = jest.fn();
+    let calls = 0;
+    global.fetch = jest.fn(async (_url, init) => {
+      calls += 1;
+      if (calls <= 3) return { ok: false, status: 429, headers: { get: () => '60' }, text: async () => 'rate limited' } as unknown as Response;
+      return { ok: true, json: () => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }), 65_000);
+        init?.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('deadline')); }, { once: true });
+      }) } as Response;
+    });
+    const started = Date.now();
+    let elapsed = 0;
+    const pending = stepTAScore([header, ['Alpha', '', '', 'd']], 'brief', noop, undefined, { keepAllScored: true, onStats: stats })
+      .then((out) => { elapsed = Date.now() - started; return out; });
+    await jest.advanceTimersByTimeAsync(500_000);
+    await pending;
+    expect(elapsed).toBeLessThanOrEqual(240_000);
+    expect(global.fetch).toHaveBeenCalledTimes(4);
+    expect(stats).toHaveBeenLastCalledWith(expect.objectContaining({ failed_rows: 1 }));
+    const budgets: number[] = [];
+    global.fetch = jest.fn(async (_url, init) => {
+      const req = JSON.parse(String(init?.body));
+      budgets.push(req.max_tokens);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: req.model === 'policy/cleanup' ? '{"companies":[{"idx":0,"name":"Alpha"}]}' : 'hello' } }] }) } as Response;
+    });
+    await stepNameCleanup([header, ['Alpha', '', '', 'd']], noop);
+    await stepPersonalize([header, ['Alpha', '', '', 'd']], 'brief', noop);
+    expect(budgets).toEqual([4000, 1500]);
+  });
+
+  it('propagates a failed final checkpoint and does not report completion', async () => {
+    const progress = jest.fn(noop);
+    await expect(stepTAScore([header, ['Alpha', 'a.ru', '', 'd']], 'brief', progress, undefined, {
+      onCheckpoint: async () => { throw new Error('checkpoint unavailable'); },
+    })).rejects.toThrow('checkpoint unavailable');
+    expect(progress).not.toHaveBeenCalledWith(100);
+  });
+
+  it('does not checkpoint or retry after cancellation during the provider response', async () => {
+    let cancelled = false;
+    const progress = jest.fn(noop);
+    const checkpoint = jest.fn(noop);
+    global.fetch = jest.fn(async () => {
+      cancelled = true;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '[{"idx":0,"score":8,"reason":"ok"}]' } }] }) } as Response;
+    });
+    await expect(stepTAScore([header, ['Alpha', '', '', 'd']], 'brief', progress,
+      async () => cancelled, { onCheckpoint: checkpoint })).rejects.toThrow('Отменено');
+    expect(checkpoint).not.toHaveBeenCalled();
+    expect(progress).not.toHaveBeenCalledWith(100);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 });
