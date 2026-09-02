@@ -5,6 +5,7 @@ import { discoverSubpaths } from '@/lib/enrich/subpathDiscovery';
 import { extractHiring, findExternalCareerLinks } from '@/lib/enrich/extractors/hiringExtractor';
 import { detectSignals } from '@/lib/enrich/signalDetector';
 import { SIGNALS_LLM_MODEL } from '@/lib/enrich/extractors/signalsModel';
+import { extractEmailsFromHtmlAdvanced, filterJunkEmails } from '@/lib/enrich/emailScraper';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 
 /**
@@ -38,6 +39,7 @@ const MAX_EVIDENCE = 200;
 const LLM_TIMEOUT_MS = 30_000;
 const LLM_PER_PAGE_CHARS = 4_000;
 const LLM_TOTAL_CHARS = 16_000;
+const MAX_REUSED_EMAILS = 8;
 
 // ─── Публичные типы ──────────────────────────────────────────────────────────
 
@@ -95,6 +97,8 @@ export interface OutreachSignalsResult {
   signals: OutreachSignalSet;
   /** Число сработавших сигналов 0..6. */
   signalsCount: number;
+  /** Пригодные email из уже скачанных страниц; повторного crawl не требуют. */
+  emails: string[];
   /** 'Homepage checked', 'Homepage + N subpages checked', 'Site unreachable', ... */
   note: string;
   /** Сайт был доступен и распарсен. */
@@ -1015,7 +1019,14 @@ const defaultLlmExtract: OutreachLlmExtractor = async ({ url, needed, pagesText 
 
 const defaultFetchPage: FetchPageFn = async (url) => {
   try {
-    const res = await fetchHtmlWithRetry(url, { allowHttpErrors: false });
+    // У GIS priority-пул выведен из маршрута: его три адреса недоступны, а
+    // каждая попытка ждала timeout до живого fallback. Две стандартные попытки
+    // сохраняются, поэтому worst-case время не растёт. Остальные потребители
+    // websiteParser (включая ручной Конструктор баз) используют прежний маршрут.
+    const res = await fetchHtmlWithRetry(url, {
+      allowHttpErrors: false,
+      preferPriority: false,
+    });
     if (res && res.status >= 200 && res.status < 300 && res.html) {
       return { html: res.html, finalUrl: url };
     }
@@ -1080,6 +1091,19 @@ function buildLlmPagesText(pages: FetchedPage[]): string {
   return parts.join('\n\n').slice(0, LLM_TOTAL_CHARS);
 }
 
+/**
+ * Повторно используем HTML сигнального прохода. Внешнюю HH-страницу не берём:
+ * её служебная почта не является контактом проверяемой компании.
+ */
+function extractReusableEmails(pages: FetchedPage[]): string[] {
+  const found = new Set<string>();
+  for (const page of pages) {
+    if (page.kind === 'external_careers') continue;
+    for (const email of extractEmailsFromHtmlAdvanced(page.html)) found.add(email);
+  }
+  return filterJunkEmails(Array.from(found)).slice(0, MAX_REUSED_EMAILS);
+}
+
 // ─── Оркестратор ─────────────────────────────────────────────────────────────
 
 export async function detectOutreachSignals(
@@ -1092,7 +1116,7 @@ export async function detectOutreachSignals(
   try {
     normalized = normalizeUrl(input.siteUrl);
   } catch {
-    return { signals: emptySignals(), signalsCount: 0, note: 'Invalid URL', ok: false };
+    return { signals: emptySignals(), signalsCount: 0, emails: [], note: 'Invalid URL', ok: false };
   }
 
   // 1. Главная страница (apex → www → http-варианты).
@@ -1109,7 +1133,7 @@ export async function detectOutreachSignals(
     }
   }
   if (!home?.html) {
-    return { signals: emptySignals(), signalsCount: 0, note: 'Site unreachable', ok: false };
+    return { signals: emptySignals(), signalsCount: 0, emails: [], note: 'Site unreachable', ok: false };
   }
 
   const pages: FetchedPage[] = [
@@ -1188,6 +1212,7 @@ export async function detectOutreachSignals(
   const result: OutreachSignalsResult = {
     signals,
     signalsCount,
+    emails: extractReusableEmails(pages),
     note,
     ok: true,
     medicineHardReject: detectMedicineHardReject(pages),
