@@ -6,7 +6,10 @@
  *  - истёкшая или обнулённая аренда перехватывается, живая — нет;
  *  - продление и чекпойнт с чужим run_token не проходят;
  *  - shutdown обнуляет аренду только своих задач и глушит продления;
- *  - исключение в run ниже maxAttempts → pending, на пределе → failed.
+ *  - исключение в run ниже maxAttempts → pending, на пределе → failed;
+ *  - where отсекает чужой тип задачи на обоих путях захвата;
+ *  - терминальный статус, записанный телом, снимает владение со строки, а
+ *    оставленная в running строка остаётся нетронутой.
  *
  * Время — виртуальное: аренда и таймеры прокручиваются, а не проживаются.
  */
@@ -15,7 +18,7 @@ import { __resetShutdownStateForTests } from '@/lib/workerShutdown';
 import { createJobRunner, type JobContext } from '@/lib/jobs/lifecycle';
 
 type Row = Record<string, unknown>;
-type Filter = { op: 'eq' | 'lt' | 'or'; col?: string; value?: unknown; raw?: string };
+type Filter = { op: 'eq' | 'neq' | 'lt' | 'in' | 'or'; col?: string; value?: unknown; raw?: string };
 
 const T0 = Date.parse('2026-09-02T10:00:00.000Z');
 let clock = T0;
@@ -24,13 +27,15 @@ const now = () => clock;
 /** Крошечный PostgREST: строки в памяти, фильтры eq/lt/or(is.null,lt). */
 function makeFakeDb(initial: Row[]) {
   const rows: Row[] = initial.map((r) => ({ ...r }));
-  const updates: Array<{ patch: Row; matched: number }> = [];
+  const updates: Array<{ patch: Row; matched: number; filters: Filter[] }> = [];
   /** Переключатель «база отвечает ошибкой на запись» — см. тест про сбой захвата. */
   const control = { failUpdates: false };
 
   const matches = (row: Row, filters: Filter[]) =>
     filters.every((f) => {
       if (f.op === 'eq') return row[f.col!] === f.value;
+      if (f.op === 'neq') return row[f.col!] !== f.value;
+      if (f.op === 'in') return (f.value as unknown[]).includes(row[f.col!]);
       if (f.op === 'lt') return typeof row[f.col!] === 'string' && (row[f.col!] as string) < (f.value as string);
       // or: 'lease_until.is.null,lease_until.lt."<iso>"' — значение в кавычках, как шлёт библиотека
       return f.raw!.split(',').some((clause) => {
@@ -52,6 +57,8 @@ function makeFakeDb(initial: Row[]) {
     q.select = () => q;
     q.update = (p: Row) => { mode = 'update'; patch = p; return q; };
     q.eq = (col: string, value: unknown) => { filters.push({ op: 'eq', col, value }); return q; };
+    q.neq = (col: string, value: unknown) => { filters.push({ op: 'neq', col, value }); return q; };
+    q.in = (col: string, value: unknown[]) => { filters.push({ op: 'in', col, value }); return q; };
     q.lt = (col: string, value: unknown) => { filters.push({ op: 'lt', col, value }); return q; };
     q.or = (raw: string) => { filters.push({ op: 'or', raw }); return q; };
     q.order = (col: string) => { orderCol = col; return q; };
@@ -63,7 +70,7 @@ function makeFakeDb(initial: Row[]) {
       if (mode === 'update') {
         if (control.failUpdates) return { data: null, error: { message: 'statement timeout' } };
         for (const r of hit) Object.assign(r, patch);
-        updates.push({ patch, matched: hit.length });
+        updates.push({ patch, matched: hit.length, filters: [...filters] });
       }
       return { data: hit[0] ? { ...hit[0] } : null, error: null };
     };
@@ -354,5 +361,81 @@ describe('job lifecycle', () => {
     await runner.pollOnce();
     await flush();
     expect(db.rows[0].status).toBe('done_by_runner');
+  });
+
+  it('the where filter keeps a worker off another type on the pending path', async () => {
+    // Одна таблица на несколько типов парсеров: чужая задача стоит ПЕРВОЙ по
+    // порядку захвата, так что взять свою можно только фильтром, а не сортировкой.
+    const db = makeFakeDb([
+      { id: 'eng', status: 'pending', created_at: '1', attempts: 0, parser_type: 'eng_hiring' },
+      { id: 'hh', status: 'pending', created_at: '2', attempts: 0, parser_type: 'hh_vacancies' },
+    ]);
+    const seen: string[] = [];
+    const runner = makeRunner(db, async (job) => { seen.push(job.id as string); }, {
+      where: [['parser_type', ['hh_vacancies', 'ats_companies']]],
+    });
+
+    expect(await runner.pollOnce()).toBe(true);
+    await flush();
+
+    expect(seen).toEqual(['hh']);
+    expect(db.rows.find((r) => r.id === 'eng')!.status).toBe('pending');
+    expect(db.rows.find((r) => r.id === 'eng')!.run_token).toBeUndefined();
+    // Фильтр обязан стоять и в CAS-UPDATE, а не только в выборе кандидата:
+    // между двумя запросами тип строки может смениться, и без него воркер
+    // в гонке уводит чужую задачу.
+    const claim = db.updates.find((u) => u.patch.status === 'running')!;
+    expect(claim.filters).toContainEqual({ op: 'in', col: 'parser_type', value: ['hh_vacancies', 'ats_companies'] });
+  });
+
+  it('the where filter keeps a worker off another type when reclaiming an expired lease', async () => {
+    const db = makeFakeDb([
+      { id: 'eng', status: 'running', created_at: '1', attempts: 0, parser_type: 'eng_hiring', run_token: 'e', lease_until: new Date(T0 - 1_000).toISOString() },
+      { id: 'hh', status: 'running', created_at: '2', attempts: 0, parser_type: 'hh_vacancies', run_token: 'h', lease_until: new Date(T0 - 1_000).toISOString() },
+    ]);
+    const seen: string[] = [];
+    const runner = makeRunner(db, async (job) => { seen.push(job.id as string); }, {
+      where: [['parser_type', 'hh_vacancies']],
+    });
+
+    expect(await runner.pollOnce()).toBe(true);
+    await flush();
+
+    expect(seen).toEqual(['hh']);
+    // Чужую строку не тронули: ни жетон, ни счётчик попыток.
+    expect(db.rows.find((r) => r.id === 'eng')!.run_token).toBe('e');
+    expect(db.rows.find((r) => r.id === 'eng')!.attempts).toBe(0);
+    const reclaim = db.updates.find((u) => u.patch.worker_id === 'w1')!;
+    expect(reclaim.filters).toContainEqual({ op: 'eq', col: 'parser_type', value: 'hh_vacancies' });
+  });
+
+  it('releases ownership when run() itself wrote the terminal status', async () => {
+    // manageTerminalStatus=false: раньше библиотека не писала ничего, и
+    // завершённая (или отменённая пользователем) задача навсегда оставалась
+    // с живыми lease_until/run_token/worker_id — дежурный запрос по арендам
+    // показывал давно закрытые строки.
+    const db = makeFakeDb([{ id: 'j', status: 'pending', created_at: '1', attempts: 0 }]);
+    const runner = makeRunner(db, async () => { db.rows[0].status = 'cancelled'; }, { manageTerminalStatus: false });
+    await runner.pollOnce();
+    await flush();
+
+    expect(db.rows[0].status).toBe('cancelled');
+    expect(db.rows[0].lease_until).toBeNull();
+    expect(db.rows[0].run_token).toBeNull();
+    expect(db.rows[0].worker_id).toBeNull();
+  });
+
+  it('does not release ownership from a row the body deliberately left running', async () => {
+    // Тело вернулось штатно, но статус оставило running — задачу продолжит
+    // другая реплика с чекпойнта. Ей нужны живые жетон и аренда.
+    const db = makeFakeDb([{ id: 'j', status: 'pending', created_at: '1', attempts: 0 }]);
+    const runner = makeRunner(db, async () => {}, { manageTerminalStatus: false });
+    await runner.pollOnce();
+    await flush();
+
+    expect(db.rows[0].status).toBe('running');
+    expect(typeof db.rows[0].run_token).toBe('string');
+    expect(db.rows[0].worker_id).toBe('w1');
+    expect(db.rows[0].lease_until).toBe(new Date(T0 + 60_000).toISOString());
   });
 });

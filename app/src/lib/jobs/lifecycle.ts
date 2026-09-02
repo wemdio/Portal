@@ -112,6 +112,23 @@ export interface JobRunnerOptions<Row extends { id: string }, C> {
   concurrency?: number;
   /** Колонка порядка захвата pending. По умолчанию created_at. */
   orderBy?: string;
+  /**
+   * Дополнительный фильтр ОТБОРА задач: пары [колонка, значение] или
+   * [колонка, значения[]] (массив идёт в .in(), скаляр — в .eq()).
+   *
+   * Зачем: одна таблица нередко обслуживает несколько типов задач
+   * (parser_jobs — HH-вакансии, ATS-компании, ENG-найм). Тип обязан входить в
+   * САМ захват, а не проверяться после него: иначе воркер в гонке уводит чужую
+   * задачу и либо делает её неправильно, либо возвращает уже испорченной.
+   * Поэтому фильтр применяется на обоих путях захвата (pending и перехват
+   * истёкшей аренды) и в обоих запросах каждого пути — и в выборе кандидата, и
+   * в CAS-UPDATE.
+   *
+   * Это фильтр ОТБОРА и только. Ограждение записей остаётся на run_token:
+   * where не мешает соседу с тем же фильтром перехватить строку и не заменяет
+   * жетон ни в одной записи после захвата.
+   */
+  where?: Array<[string, string | number | Array<string | number>]>;
   /** Что читать в job для run(). id, checkpoint, attempts, run_token добавляются всегда. */
   select?: string;
   /**
@@ -162,7 +179,10 @@ export interface JobRunnerOptions<Row extends { id: string }, C> {
   /**
    * true (по умолчанию): библиотека сама ставит done/failed/pending по итогу run().
    * false: run() пишет терминальный статус сам (конструктор баз, TG-парсер);
-   * библиотека тогда только держит аренду и отпускает её при остановке.
+   * библиотека тогда держит аренду, отпускает её при остановке, а после
+   * штатного возврата run() снимает со строки владение (lease_until, run_token,
+   * worker_id) — но только если статус уже НЕ running, то есть тело
+   * действительно закрыло задачу, а не оставило её на возобновление.
    */
   manageTerminalStatus?: boolean;
   /**
@@ -289,6 +309,15 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
   const expiredFilter = () => `lease_until.is.null,lease_until.lt."${iso(now())}"`;
   const clearOwnership = { lease_until: null, run_token: null, worker_id: null };
 
+  /** Навесить where-фильтр на любой запрос захвата (см. JobRunnerOptions.where). */
+  function applyWhere(query: QueryBuilder): QueryBuilder {
+    let q = query;
+    for (const [column, value] of opts.where ?? []) {
+      q = Array.isArray(value) ? q.in(column, value) : q.eq(column, value);
+    }
+    return q;
+  }
+
   type Owned = {
     runToken: string;
     abort: AbortController;
@@ -358,11 +387,49 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
   const releaseLease = (jobId: string, runToken: string) =>
     fencedUpdateWithRetry(jobId, runToken, { lease_until: null }, RELEASE_WRITE_TRIES, RELEASE_BACKOFF_MS);
 
+  /**
+   * Снять владение со строки, терминальный статус которой записало само тело
+   * задачи (manageTerminalStatus: false — конструктор баз, TG-парсер, архив HH,
+   * Директ; сюда же попадает отмена пользователем).
+   *
+   * Раньше библиотека в этом случае не писала ничего, и завершённая или
+   * отменённая задача НАВСЕГДА оставалась с непустыми lease_until, run_token и
+   * worker_id. Захвату это не мешало (все его пути фильтруют по running), но
+   * ровно так же выглядит и по-настоящему арендованная строка — и дежурный
+   * запрос «кто держит аренду» показывал давно закрытые задачи. Три воркера с
+   * одним и тем же осадком — повод чинить здесь, а не патчить каждый.
+   *
+   * Два условия, оба обязательны:
+   *  - .eq(run_token) — обычное ограждение: строку могли перехватить, и тогда
+   *    жетон уже чужой, а владение не наше;
+   *  - .neq(status, running) — строку могли ОСТАВИТЬ в running намеренно, чтобы
+   *    другая реплика продолжила с чекпойнта (так делает путь прерывания). Ей
+   *    жетон и аренда нужны живыми, и стирать их нельзя. Так что это именно
+   *    «статус уже не running», а не «run() вернулся».
+   */
+  async function releaseOwnershipAfterForeignTerminal(jobId: string, runToken: string): Promise<void> {
+    for (let attempt = 0; attempt < RELEASE_WRITE_TRIES; attempt += 1) {
+      if (attempt > 0) await sleep(RELEASE_BACKOFF_MS * attempt);
+      const { error } = await client
+        .from(table)
+        .update(clearOwnership)
+        .eq('id', jobId)
+        .eq('run_token', runToken)
+        .neq('status', statuses.running)
+        .select('id')
+        .maybeSingle();
+      if (!error) return;
+      log('warn', `[${table}] ownership release for ${jobId} failed: ${error.message}`);
+    }
+  }
+
   async function claimPending(): Promise<ClaimOutcome> {
-    const { data: candidate, error: selectError } = await client
-      .from(table)
-      .select('id, attempts')
-      .eq('status', statuses.pending)
+    const { data: candidate, error: selectError } = await applyWhere(
+      client
+        .from(table)
+        .select('id, attempts')
+        .eq('status', statuses.pending),
+    )
       .order(orderBy, { ascending: true })
       .limit(1)
       .maybeSingle();
@@ -372,18 +439,20 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
     }
     if (!candidate) return EMPTY;
     const runToken = randomUUID();
-    const { data, error } = await client
-      .from(table)
-      .update({
-        status: statuses.running,
-        run_token: runToken,
-        worker_id: workerId,
-        lease_until: leaseUntil(),
-        ...(opts.claimPatch?.() ?? {}),
-      })
-      .eq('id', candidate.id)
-      // CAS: строку получит ровно та реплика, для которой она ещё pending.
-      .eq('status', statuses.pending)
+    const { data, error } = await applyWhere(
+      client
+        .from(table)
+        .update({
+          status: statuses.running,
+          run_token: runToken,
+          worker_id: workerId,
+          lease_until: leaseUntil(),
+          ...(opts.claimPatch?.() ?? {}),
+        })
+        .eq('id', candidate.id)
+        // CAS: строку получит ровно та реплика, для которой она ещё pending.
+        .eq('status', statuses.pending),
+    )
       .select(select)
       .maybeSingle();
     // Ошибку захвата НЕЛЬЗЯ трактовать как проигранную гонку: ноль строк из-за
@@ -398,11 +467,13 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
   }
 
   async function claimExpired(): Promise<ClaimOutcome> {
-    const { data: candidate, error: selectError } = await client
-      .from(table)
-      .select('id, attempts, lease_until')
-      .eq('status', statuses.running)
-      .or(expiredFilter())
+    const { data: candidate, error: selectError } = await applyWhere(
+      client
+        .from(table)
+        .select('id, attempts, lease_until')
+        .eq('status', statuses.running)
+        .or(expiredFilter()),
+    )
       .order(orderBy, { ascending: true })
       .limit(1)
       .maybeSingle();
@@ -416,41 +487,51 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
     const attempts = (candidate.attempts ?? 0) + (lost ? 1 : 0);
     if (lost && attempts >= maxAttempts) {
       const reason = `исполнитель терял задачу ${attempts} раз(а) подряд — остановлено`;
-      await client
-        .from(table)
-        .update({
-          status: statuses.failed,
-          attempts,
-          ...clearOwnership,
-          ...(opts.failedPatch?.(reason) ?? {}),
-        })
-        .eq('id', candidate.id)
-        .eq('status', statuses.running)
-        .or(expiredFilter())
+      // where и здесь. По id строка та же, что отобрал кандидатский запрос, так
+      // что для сегодняшнего parser_type фильтр избыточен. Но колонка отбора —
+      // обычная колонка, и ничто не мешает ей смениться между чтением и этой
+      // записью (перенос задачи в другой тип/очередь руками или экраном).
+      // Тогда мы поставили бы failed чужой задаче, а стоит фильтр ноль. Правило
+      // проще держать целиком: where применяется ко ВСЕМ запросам захвата.
+      await applyWhere(
+        client
+          .from(table)
+          .update({
+            status: statuses.failed,
+            attempts,
+            ...clearOwnership,
+            ...(opts.failedPatch?.(reason) ?? {}),
+          })
+          .eq('id', candidate.id)
+          .eq('status', statuses.running)
+          .or(expiredFilter()),
+      )
         .select('id')
         .maybeSingle();
       log('warn', `[${table}] job ${candidate.id} failed: ${reason}`);
       return EMPTY;
     }
     const runToken = randomUUID();
-    const { data, error } = await client
-      .from(table)
-      .update({
-        run_token: runToken,
-        worker_id: workerId,
-        lease_until: leaseUntil(),
-        attempts,
-        // Тот же claimPatch, что и на pending-пути: «поля при захвате» — это
-        // поля при любом захвате. Без него перехваченная строка сохраняет
-        // отметку прогресса прежнего владельца, и монитор здоровья считает
-        // задачу зависшей в ту же секунду, как её подобрали.
-        ...(opts.claimPatch?.() ?? {}),
-      })
-      .eq('id', candidate.id)
-      .eq('status', statuses.running)
-      // Тот же фильтр в UPDATE: между чтением кандидата и записью аренду мог
-      // перехватить сосед — тогда строка уже не «истёкшая» и мы её не тронем.
-      .or(expiredFilter())
+    const { data, error } = await applyWhere(
+      client
+        .from(table)
+        .update({
+          run_token: runToken,
+          worker_id: workerId,
+          lease_until: leaseUntil(),
+          attempts,
+          // Тот же claimPatch, что и на pending-пути: «поля при захвате» — это
+          // поля при любом захвате. Без него перехваченная строка сохраняет
+          // отметку прогресса прежнего владельца, и монитор здоровья считает
+          // задачу зависшей в ту же секунду, как её подобрали.
+          ...(opts.claimPatch?.() ?? {}),
+        })
+        .eq('id', candidate.id)
+        .eq('status', statuses.running)
+        // Тот же фильтр в UPDATE: между чтением кандидата и записью аренду мог
+        // перехватить сосед — тогда строка уже не «истёкшая» и мы её не тронем.
+        .or(expiredFilter()),
+    )
       .select(select)
       .maybeSingle();
     // Как и на pending-пути: сбой запроса — не проигранная гонка.
@@ -645,11 +726,22 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
     entry.promise = Promise.resolve().then(async () => {
       try {
         await opts.run(job, ctx);
-        if (manageTerminalStatus && !abort.signal.aborted) {
-          await fencedUpdateWithRetry(
-            job.id, runToken, { status: statuses.done, ...clearOwnership },
-            TERMINAL_WRITE_TRIES, TERMINAL_BACKOFF_MS,
-          );
+        // На прерывании не пишем ничего: строка остаётся в running с
+        // отпущенной арендой, и это делает shutdown() (двумя проходами, жетон
+        // намеренно сохраняя). Влезать сюда — значит либо дублировать его
+        // запись, либо стереть жетон под ещё дорабатывающим телом.
+        if (!abort.signal.aborted) {
+          if (manageTerminalStatus) {
+            await fencedUpdateWithRetry(
+              job.id, runToken, { status: statuses.done, ...clearOwnership },
+              TERMINAL_WRITE_TRIES, TERMINAL_BACKOFF_MS,
+            );
+          } else {
+            // Терминальный статус уже записало тело (или отмена пользователем) —
+            // снимаем осадок владения. Строку, оставленную в running ради
+            // возобновления, .neq(status) не тронет.
+            await releaseOwnershipAfterForeignTerminal(job.id, runToken);
+          }
         }
       } catch (err) {
         if (abort.signal.aborted) {
