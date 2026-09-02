@@ -82,21 +82,30 @@
 ```ts
 createJobRunner<Row, Checkpoint>({
   table: 'tg_parser_jobs',
-  statuses: { pending: 'pending', running: 'running', done: 'completed', failed: 'failed' },
+  workerId: 'tg-parser-1234-...',
+  statuses: { pending: 'pending', running: 'running', done: 'done', failed: 'error' },
   leaseSeconds: 180,          // аренда; продление каждые leaseSeconds/3
   maxAttempts: 3,
   concurrency: 1,
-  order: 'created_at',        // порядок захвата pending
-  select: 'id, params, checkpoint',
+  orderBy: 'created_at',      // порядок захвата pending
+  select: 'params',           // id, checkpoint, attempts, run_token читаются всегда
+  manageTerminalStatus: true, // false — терминальный статус пишет сам run()
+  claimPatch: () => ({ started_at: new Date().toISOString() }),
+  failedPatch: (reason) => ({ error_message: reason }),
+  log,
   run: async (job, ctx) => { … },
-}) => { pollOnce(): Promise<boolean>; shutdown(): Promise<void>; owned(): string[] }
+}) => { pollOnce(): Promise<boolean>; shutdown(): Promise<void>; activeJobIds(): string[] }
 ```
 
 `ctx` внутри `run`:
 
-- `ctx.checkpoint(data)` — записать `checkpoint = data`, продлить аренду.
-  Возвращает `false`, если запись не прошла фильтр `run_token` (строку уже
-  перехватили): воркер обязан прекратить работу над задачей.
+- `ctx.saveCheckpoint(data)` — записать `checkpoint = data`, продлить аренду и
+  обнулить `attempts` (прогресс возвращает бюджет попыток). Возвращает `false`,
+  если запись не прошла фильтр `run_token` (строку уже перехватили): воркер
+  обязан прекратить работу над задачей. `true` означает «владение сохранено»;
+  запись — best-effort после трёх попыток, поэтому терять состояние из памяти
+  по одному `true` нельзя.
+- `ctx.checkpoint` — чекпойнт с прошлого захвата или `null`.
 - `ctx.signal: AbortSignal` — взводится при SIGTERM/SIGINT; передавать в
   fetch/паузы, чтобы задача прерывалась между шагами, а не дожидалась
   SIGKILL.
@@ -106,9 +115,12 @@ createJobRunner<Row, Checkpoint>({
 Поведение раннера:
 
 1. **Захват.** Сначала `pending` → `running` с новыми `run_token`,
-   `worker_id`, `lease_until = now()+lease`, `attempts+1`, CAS по
-   `status='pending'`. Если pending нет — `running` с `lease_until < now()`
-   → те же поля, CAS по `status='running' and lease_until < now()`. Pending
+   `worker_id`, `lease_until = now()+lease`, CAS по `status='pending'`.
+   `attempts` при захвате не растёт — счётчик считает потери, а не запуски
+   (см. п. 3). Если pending нет — `running` с истёкшей (`lease_until < now()`)
+   или обнулённой (`lease_until is null`) арендой, CAS по тому же условию.
+   Обнулённая аренда — чистая передача при остановке, попыткой не считается;
+   истёкшая — падение исполнителя, `attempts+1`. Pending
    приоритетнее, чтобы новые задачи не ждали за резюмами. Через PostgREST,
    без RPC — тот же паттерн, что уже работает в конструкторе баз.
 2. **Продление.** Пока `run` выполняется, `setInterval` каждые
@@ -117,21 +129,37 @@ createJobRunner<Row, Checkpoint>({
    `app/src/lib/workerShutdown.ts`, инцидент 11.08.2026).
 3. **Завершение.** `run` вернулся → `status=done`, `lease_until=null`,
    `run_token=null`. Бросил исключение → если `attempts < maxAttempts`,
-   `status=pending`, `lease_until=null`, `last_error` (если колонка есть);
-   иначе `status=failed`. Отмена по `ctx.signal` не считается ошибкой:
-   строка остаётся `running` с обнулённой арендой (п. 4).
-4. **Остановка (SIGTERM/SIGINT).** Синхронно `markShuttingDown()`, затем
-   для всех своих задач `lease_until = now() - 1h` с фильтром `run_token`,
-   дважды с паузой в секунду (перебивает продление, ушедшее в PostgREST до
-   сигнала). Потом ждёт завершения `run`-промисов до `shutdownGraceMs`
-   (по умолчанию 10 с) и выходит. Новая реплика перехватывает задачу на
+   `status=pending`, `lease_until=null` и поля из `failedPatch`; иначе
+   `status=failed`. Терминальные записи идут с тремя попытками и коротким
+   ожиданием: одна сетевая осечка не должна оставить готовую задачу в работе.
+   Отмена по `ctx.signal` не считается ошибкой: строка остаётся `running` с
+   обнулённой арендой (п. 4). При `manageTerminalStatus: false` статус пишет
+   сам `run`, а библиотека только отпускает аренду.
+4. **Остановка (SIGTERM/SIGINT).** Синхронно `markShuttingDown()`, прерывание
+   `ctx.signal`, затем для всех своих задач `lease_until = null` с фильтром
+   `run_token`, дважды с паузой в секунду (перебивает продление, ушедшее в
+   PostgREST до сигнала), и контрольное чтение строки: если аренда всё-таки
+   ожила, отпускаем ещё раз. Потом ждёт завершения `run`-промисов до
+   `shutdownGraceMs` (по умолчанию 10 с, потолок 12 с — чтобы всё уложилось в
+   `docker stop --timeout 15`) и выходит. Новая реплика перехватывает задачу на
    первом же опросе.
+   Захват, случившийся уже во время остановки, немедленно отпускается: задача
+   не стартует.
 5. **Восстановление при старте — отсутствует.** Никаких «running →
    pending» при загрузке. Брошенная задача определяется только истёкшей
    арендой. Это делает механизм корректным при любом числе реплик.
 6. **Жёсткое убийство (SIGKILL, OOM).** Аренда истекает сама через
    `leaseSeconds`; задача перехватывается без участия людей. Порог задачи
    «зависла» для монитора здоровья не меняется (20 минут без прогресса).
+7. **Недоступная база.** Сбой записи не считается потерей владения (все записи
+   и так ограждены жетоном), но исполнитель следит за собственной арендой по
+   часам: если она провисела дольше срока — прерывает работу сам, до следующего
+   запроса. Иначе при зависшем соединении два исполнителя делали бы одну задачу,
+   и внешние действия (отправка в Telegram, платные API) не ограждены ничем.
+
+Контракт для `run`: обязан слушать `ctx.signal`, продолжаться с последнего
+чекпойнта и переживать ситуацию, когда соседняя реплика начала ту же задачу
+раньше, чем он остановился.
 
 Не входит: приоритеты, отложенный запуск (`run_after` у HE/VE остаётся их
 локальной надстройкой поверх захвата), распределённые блокировки.
