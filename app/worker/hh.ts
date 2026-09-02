@@ -3,18 +3,18 @@
  * (обе через `parser_jobs`), архив вакансий (`hh_archive_jobs`) и
  * Яндекс.Директ (`yandex_direct_jobs`).
  *
- * 02.09.2026: архив и Директ переведены на единый жизненный цикл задач
- * (lib/jobs/lifecycle.ts) — захват по аренде, продление таймером, чекпойнт по
- * пройденным чанкам/запросам, освобождение аренды при остановке. Восстановление
- * их `processing` при старте снято: брошенную задачу определяет истёкшая
- * аренда, а не возраст `updated_at`, и потому механизм корректен при любом
- * числе реплик. Вместе с ним снят и глобальный мьютекс в памяти на каждую из
- * двух очередей — его роль играет `concurrency: 1` у соответствующего раннера.
+ * 02.09.2026: ВСЕ ЧЕТЫРЕ на едином жизненном цикле задач (lib/jobs/lifecycle.ts)
+ * — захват по аренде, продление таймером, освобождение аренды при остановке.
+ * Восстановления при старте нет ни у одной: брошенную задачу определяет
+ * истёкшая аренда, а не возраст строки, и потому механизм корректен при любом
+ * числе реплик. Вместе с ним сняты оба глобальных мьютекса в памяти
+ * (archiveJobActive/yandexDirectJobActive, затем atsJobActive) и набор `running`
+ * — их роль играет `concurrency` соответствующего раннера.
  *
- * `parser_jobs` (HH и ATS) ОСТАЮТСЯ на прежнем механизме: их перевод — задача 5
- * этапа 2. Поэтому здесь по-прежнему живут recoverRunningParserJobs, мьютекс
- * atsJobActive и набор `running`, а сам сервис worker-hh не добавлен в
- * is_lifecycle_managed_worker в drain-worker.sh.
+ * Раннеров четыре, а не два, ровно из-за параллельности: у `parser_jobs` разные
+ * типы уживаются с разными лимитами (HH — три задачи разом, ATS — одна), а
+ * настройка concurrency у раннера одна. Фильтр по parser_type входит в захват,
+ * так что ATS-раннер физически не может увести HH-задачу, и наоборот.
  */
 
 import { runHHParserJob } from '@/lib/parsers/hhRunner';
@@ -29,19 +29,15 @@ import {
 import { runAtsParserJob } from '@/lib/parsers/atsRunner';
 import { createJobRunner } from '@/lib/jobs/lifecycle';
 import { markShuttingDown } from '@/lib/workerShutdown';
-import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
-import { claimParserJob, recoverRunningParserJobs } from './parserJobs';
+import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown } from './_shared';
+import { createParserJobRunner } from './parserJobs';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const MAX_CONCURRENCY = 3;
+/** Потолок времени на ОДНУ задачу HH-парсера, не срок остановки контейнера. */
 const DRAIN_TIMEOUT_MS = Number(process.env.WORKER_DRAIN_TIMEOUT_MINUTES ?? '180') * 60 * 1000;
 const WORKER_ID = `hh-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
-const running = new Set<Promise<void>>();
-// ATS-парсер (Greenhouse/Lever/Ashby) — глобально один за раз: ходит по тысячам
-// внешних бордов + Clearbit, держим concurrency=1, чтобы не словить rate-limit.
-// Остаётся мьютексом в памяти, пока parser_jobs не переехали на жизненный цикл.
-let atsJobActive = false;
 
 /**
  * Аренда — признак живости ПРОЦЕССА. Продление идёт независимым таймером каждые
@@ -81,35 +77,46 @@ const ARCHIVE_STALL_MS = Math.max(60_000, Number(process.env.HH_ARCHIVE_STALL_MI
  */
 const YANDEX_DIRECT_STALL_MS = Math.max(60_000, Number(process.env.YANDEX_DIRECT_STALL_MINUTES ?? '10') * 60_000);
 
-async function startupRecovery(): Promise<void> {
-  // Только parser_jobs: у hh_archive_jobs и yandex_direct_jobs восстановление
-  // снято вместе с переездом на жизненный цикл — брошенную задачу там
-  // определяет истёкшая аренда, а сброс по возрасту updated_at отбирал бы
-  // строку у живого исполнителя.
-  await recoverRunningParserJobs(log, ['hh_vacancies', 'ats_companies'], 'HH/ATS parser_jobs');
-}
-
-async function claimHHJob(): Promise<string | null> {
-  return claimParserJob(log, 'hh_vacancies');
-}
-
-/**
- * Атомарно клеймит один pending ATS parser_jobs (parser_type='ats_companies').
- * Глобальная concurrency=1 (atsJobActive): много внешних запросов + Clearbit.
- */
-async function claimAtsJob(): Promise<string | null> {
-  if (atsJobActive) return null;
-  return claimParserJob(log, 'ats_companies');
-}
-
 async function main(): Promise<void> {
   log('info', `Starting HH worker (pid=${process.pid})`);
   requireSupabaseAdmin(log);
   const shouldStop = setupGracefulShutdown(log);
 
-  log('info', 'Running startup recovery...');
-  await startupRecovery();
-  log('info', 'Startup recovery done');
+  // Восстановления при старте здесь больше нет ни для одной очереди: брошенную
+  // задачу определяет истёкшая аренда. Прежний сброс parser_jobs
+  // running → pending бил по всем строкам своего типа, включая те, что прямо
+  // сейчас выполняла живая соседняя реплика.
+
+  /**
+   * HH-парсер вакансий. Три задачи разом — как было до перевода (MAX_CONCURRENCY
+   * и набор `running` в памяти).
+   */
+  const hhParserRunner = createParserJobRunner({
+    parserTypes: ['hh_vacancies'],
+    workerId: WORKER_ID,
+    log,
+    concurrency: MAX_CONCURRENCY,
+    run: async (jobId, ctx) => {
+      log('info', `Running HH parser job ${jobId}`);
+      await runHHParserJob(jobId, DRAIN_TIMEOUT_MS, { signal: ctx.signal, runToken: ctx.runToken });
+    },
+  });
+
+  /**
+   * ATS-парсер (Greenhouse/Lever/Ashby) — глобально один за раз: ходит по
+   * тысячам внешних бордов + Clearbit, иначе ловим rate-limit. Раньше это
+   * обеспечивал мьютекс atsJobActive, теперь concurrency: 1.
+   */
+  const atsRunner = createParserJobRunner({
+    parserTypes: ['ats_companies'],
+    workerId: WORKER_ID,
+    log,
+    concurrency: 1,
+    run: async (jobId, ctx) => {
+      log('info', `Running ATS parser job ${jobId}`);
+      await runAtsParserJob(jobId, { signal: ctx.signal, runToken: ctx.runToken });
+    },
+  });
 
   /**
    * Архив вакансий. Статусы — из check-констрейнта таблицы (миграция
@@ -172,64 +179,24 @@ async function main(): Promise<void> {
     },
   });
 
+  const runners = [hhParserRunner, atsRunner, archiveRunner, directRunner];
+
   const pollOnce = async (): Promise<boolean> => {
-    // Сначала пробуем обычный HH-парсер (concurrency=3, обычно есть свободный слот).
-    if (running.size < MAX_CONCURRENCY) {
-      const jobId = await claimHHJob();
-      if (jobId) {
-        const task = (async () => {
-          log('info', `Running HH parser job ${jobId}`);
-          await runHHParserJob(jobId, DRAIN_TIMEOUT_MS);
-        })();
-        running.add(task);
-        void task.finally(() => running.delete(task));
-        return true;
-      }
-    }
-
-    // ATS-парсер (Greenhouse/Lever/Ashby) — глобально один на воркер.
-    if (!atsJobActive) {
-      const atsJobId = await claimAtsJob();
-      if (atsJobId) {
-        atsJobActive = true;
-        const task = (async () => {
-          log('info', `Running ATS parser job ${atsJobId}`);
-          try {
-            await runAtsParserJob(atsJobId);
-          } catch (err) {
-            log('error', `ATS parser job ${atsJobId} crashed`, err);
-          }
-        })();
-        running.add(task);
-        void task.finally(() => {
-          running.delete(task);
-          atsJobActive = false;
-        });
-        return true;
-      }
-    }
-
-    // Архив и Директ — через жизненный цикл, по одной задаче на очередь.
-    //
-    // Опрашиваем ОБА раннера и только потом складываем ответы. Короткое
+    // Опрашиваем ВСЕ раннеры и только потом складываем ответы. Короткое
     // замыкание (`a.pollOnce() || b.pollOnce()`) здесь — starvation: pollOnce
     // отвечает true не только когда задачу взяли, но и когда все слоты заняты
     // (lifecycle.ts: спит 500 мс и возвращает true, чтобы цикл не ушёл спать на
-    // 30 с). Оба раннера идут с concurrency=1, поэтому с момента захвата
-    // архивной задачи и до её конца — часами на архиве в 50 тысяч — первый
-    // pollOnce возвращал бы true каждый тик, а до второго очередь не доходила
-    // бы вовсе: pending-задача Директа просто стояла бы. Прежние два мьютекса
-    // проверялись независимо, так что это была бы регрессия.
-    const archivePolled = await archiveRunner.pollOnce();
-    const directPolled = await directRunner.pollOnce();
-    if (archivePolled || directPolled) return true;
-
-    if (running.size >= MAX_CONCURRENCY) {
-      await sleep(250);
-      return true;
-    }
-    return false;
+    // 30 с). У трёх раннеров из четырёх concurrency=1, поэтому с момента
+    // захвата архивной задачи и до её конца — часами на архиве в 50 тысяч —
+    // первый pollOnce возвращал бы true каждый тик, а до остальных очередей
+    // опрос не доходил бы вовсе. Прежние мьютексы проверялись независимо, так
+    // что это была бы регрессия.
+    const polled: boolean[] = [];
+    for (const runner of runners) polled.push(await runner.pollOnce());
+    return polled.some(Boolean);
   };
+
+  const shutdownAll = () => Promise.all(runners.map((runner) => runner.shutdown()));
 
   let stopFired = false;
   for (const sig of ['SIGTERM', 'SIGINT'] as const) {
@@ -241,8 +208,7 @@ async function main(): Promise<void> {
       // библиотеки, нельзя — флаг читают из другого модуля.
       markShuttingDown();
       log('info', `${sig} received — releasing leases for fast handoff`);
-      void Promise.all([archiveRunner.shutdown(), directRunner.shutdown()])
-        .catch((err) => log('error', 'shutdown failed', err));
+      void shutdownAll().catch((err) => log('error', 'shutdown failed', err));
     });
   }
 
@@ -253,7 +219,7 @@ async function main(): Promise<void> {
     pollOnce,
     realtimeTables: ['parser_jobs', 'hh_archive_jobs', 'yandex_direct_jobs'],
   });
-  await Promise.all([archiveRunner.shutdown(), directRunner.shutdown()]);
+  await shutdownAll();
   log('info', 'Worker stopped');
 }
 

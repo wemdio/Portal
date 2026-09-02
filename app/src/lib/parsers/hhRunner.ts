@@ -3,6 +3,7 @@ import { logAudit, logError, logInfo } from '@/lib/loggerServer';
 import { fetchVacancies, HHApiError, ParserJobCancelledError, parseHhSearchUrl, withTimeout, type ParserProgressStage, type PartitionProgress } from '@/lib/parsers/hhParser';
 import type { HHSearchConfig, HHVacancy } from '@/lib/parsers/hhParser';
 import { startTrace } from '@/lib/tracer';
+import { fenceParserJobQuery, type ParserJobRunContext } from '@/lib/parsers/parserJobContext';
 
 const PROGRESS_WEIGHTS = {
   vacancies: 0.4,
@@ -85,12 +86,28 @@ async function upsertInBatches(
   }
 }
 
-export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Promise<void> {
+/**
+ * 02.09.2026 — единый жизненный цикл задач (app/src/lib/jobs/lifecycle.ts).
+ * Из воркера функция вызывается с контекстом: все записи в строку задачи
+ * ограждены жетоном захвата, а на остановке (SIGTERM, потеря аренды, перехват)
+ * функция выходит МОЛЧА — терминальный статус не пишет, строку с живой арендой
+ * отпускает библиотека, и задачу целиком переигрывает следующая реплика
+ * (курсора у этой очереди нет, см. app/worker/parserJobs.ts). Без контекста
+ * (старые вызовы) поведение прежнее.
+ */
+export async function runHHParserJob(
+  jobId: string,
+  drainTimeoutMs: number,
+  ctx?: ParserJobRunContext,
+): Promise<void> {
   if (!supabaseAdmin) {
     console.error('[hhRunner] supabaseAdmin not configured');
     return;
   }
   const db = supabaseAdmin;
+  /** Любая запись в строку задачи — только под своим жетоном. */
+  const updateJob = (patch: Record<string, unknown>) =>
+    fenceParserJobQuery(db.from('parser_jobs').update(patch).eq('id', jobId), ctx);
 
   const { data: job, error: jobError } = await db
     .from('parser_jobs')
@@ -124,13 +141,10 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
   const logMeta = { userId: job.user_id as string, requestId, route: 'hh_runner_worker' };
 
   const updateStage = async (stage: ParserProgressStage) => {
-    const { error } = await db
-      .from('parser_jobs')
-      .update({
-        progress_stage: stage,
-        ...(stage === 'partitioning' ? { progress_percent: null } : {}),
-      })
-      .eq('id', jobId);
+    const { error } = await updateJob({
+      progress_stage: stage,
+      ...(stage === 'partitioning' ? { progress_percent: null } : {}),
+    });
     if (error) {
       await logError('parser.hh.stage.update.failed', error, { jobId, searchText, stage }, logMeta);
     }
@@ -141,25 +155,21 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
     const detail = JSON.stringify(info);
     if (detail === lastPartitionDetail) return;
     lastPartitionDetail = detail;
-    const { error } = await db
-      .from('parser_jobs')
-      .update({ progress_detail: info })
-      .eq('id', jobId);
+    const { error } = await updateJob({ progress_detail: info });
     if (error) {
       await logError('parser.hh.partition_detail.update.failed', error, { jobId, searchText, info }, logMeta);
     }
   };
 
-  const { error: startError } = await db
-    .from('parser_jobs')
-    .update({
-      status: 'running',
-      started_at: new Date().toISOString(),
-      error_message: null,
-      progress_percent: 0,
-      progress_stage: 'fetching_vacancies',
-    })
-    .eq('id', jobId);
+  const { error: startError } = await updateJob({
+    status: 'running',
+    // started_at при захвате ставит раннер (claimPatch); в вызовах без
+    // контекста его по-прежнему ставим здесь.
+    ...(ctx ? {} : { started_at: new Date().toISOString() }),
+    error_message: null,
+    progress_percent: 0,
+    progress_stage: 'fetching_vacancies',
+  });
 
   if (startError) {
     await logError('parser.hh.execute.start_failed', startError, { jobId }, logMeta);
@@ -177,6 +187,11 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
   });
 
   const shouldCancel = async () => {
+    // Остановка воркера видна раньше похода в базу: библиотека взводит сигнал
+    // на SIGTERM, потере аренды и перехвате строки. Проверка стоит на том же
+    // интервале, что и проверка отмены пользователем (5 с по умолчанию), —
+    // так стоп доходит до качалки HH за секунды, а не за минуты.
+    if (ctx?.signal.aborted) return true;
     try {
       const { data, error } = await db.from('parser_jobs').select('status').eq('id', jobId).single();
       if (error || !data) return false;
@@ -245,10 +260,11 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
           lastSavedTotal = nextSavedTotal;
           lastSavedDone = nextSavedDone;
           lastPercent = nextPercent;
-          const { error } = await db
-            .from('parser_jobs')
-            .update({ total_found: nextFound, total_parsed: nextParsed, progress_percent: nextPercent })
-            .eq('id', jobId);
+          const { error } = await updateJob({
+            total_found: nextFound,
+            total_parsed: nextParsed,
+            progress_percent: nextPercent,
+          });
           if (error) {
             await logError('parser.hh.progress.update.failed', error, { jobId, searchText }, logMeta);
           }
@@ -320,19 +336,16 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
         await saveSpan?.end({ savedRows: rows.length }, `Сохранено ${rows.length} записей`);
         await logInfo('parser.hh.upsert.completed', 'HH vacancies upsert completed', { jobId, searchText }, logMeta);
 
-        const { error: doneError } = await db
-          .from('parser_jobs')
-          .update({
-            status: 'completed',
-            total_found: found,
-            total_parsed: vacancies.length,
-            completed_at: new Date().toISOString(),
-            error_message: null,
-            progress_percent: 100,
-            progress_stage: 'completed',
-            progress_detail: null,
-          })
-          .eq('id', jobId);
+        const { error: doneError } = await updateJob({
+          status: 'completed',
+          total_found: found,
+          total_parsed: vacancies.length,
+          completed_at: new Date().toISOString(),
+          error_message: null,
+          progress_percent: 100,
+          progress_stage: 'completed',
+          progress_detail: null,
+        });
 
         if (doneError) {
           await logError('parser.hh.execute.update_failed', doneError, { jobId, searchText }, logMeta);
@@ -352,6 +365,18 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
       () => new ParserJobCancelledError('Job timed out'),
     );
   } catch (err: unknown) {
+    // Развилка по СОСТОЯНИЮ СИГНАЛА, а не по типу ошибки: остановка воркера
+    // приходит сюда тем же ParserJobCancelledError, что и отмена
+    // пользователем, а честный таймаут — обычной ошибкой. Судить по типу
+    // значило бы записать пользователю деплой как падение задачи.
+    // Выходим молча: строка остаётся running с арендой, которую отпустит
+    // библиотека, и её целиком переиграет следующая реплика.
+    if (ctx?.signal.aborted) {
+      console.log(`[hhRunner] job ${jobId} stopped mid-run — leaving it for reclaim`);
+      await trace?.cancel('Пауза на время технических работ. Задача продолжится после деплоя.');
+      return;
+    }
+
     if (err instanceof ParserJobCancelledError) {
       await updateStage('cancelled');
       const { data: currentStatusRow } = await db.from('parser_jobs').select('status').eq('id', jobId).single();
@@ -359,15 +384,12 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
 
       // Deployment pause flow: running -> pending should not fail the job.
       if (currentStatus === 'pending') {
-        await db
-          .from('parser_jobs')
-          .update({
-            status: 'pending',
-            completed_at: null,
-            error_message: null,
-            progress_percent: lastPercent ?? null,
-          })
-          .eq('id', jobId);
+        await updateJob({
+          status: 'pending',
+          completed_at: null,
+          error_message: null,
+          progress_percent: lastPercent ?? null,
+        });
         await trace?.cancel('Пауза на время технических работ. Задача автоматически продолжится после деплоя.');
         await logAudit(
           'parser.hh.execute.paused',
@@ -386,17 +408,14 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
         : 'Задача отменена пользователем';
       await trace?.cancel(message);
       await logAudit('parser.hh.execute.cancelled', 'HH parser execution cancelled', { jobId, searchText, message }, logMeta);
-      const { error: updateError } = await db
-        .from('parser_jobs')
-        .update({
-          status: 'failed',
-          completed_at: new Date().toISOString(),
-          error_message: message,
-          progress_percent: lastPercent ?? null,
-          progress_stage: 'failed',
-          progress_detail: null,
-        })
-        .eq('id', jobId);
+      const { error: updateError } = await updateJob({
+        status: 'failed',
+        completed_at: new Date().toISOString(),
+        error_message: message,
+        progress_percent: lastPercent ?? null,
+        progress_stage: 'failed',
+        progress_detail: null,
+      });
       if (updateError) {
         await logError('parser.hh.execute.update_failed_on_cancel', updateError, { jobId, searchText, message }, logMeta);
       }
@@ -416,17 +435,14 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
       };
     }
 
-    await db
-      .from('parser_jobs')
-      .update({
-        status: 'failed',
-        completed_at: new Date().toISOString(),
-        error_message: jobMessage,
-        progress_percent: lastPercent ?? null,
-        progress_stage: 'failed',
-        progress_detail: null,
-      })
-      .eq('id', jobId);
+    await updateJob({
+      status: 'failed',
+      completed_at: new Date().toISOString(),
+      error_message: jobMessage,
+      progress_percent: lastPercent ?? null,
+      progress_stage: 'failed',
+      progress_detail: null,
+    });
 
     await trace?.fail(err, extra);
     await logError('parser.hh.execute.failed', err, {

@@ -27,6 +27,13 @@ type FetchOptions = {
   body?: string;
   fetchImpl?: FetchLike;
   curlImpl?: CurlLike;
+  /**
+   * Остановка воркера (единый жизненный цикл задач). Складывается с
+   * собственным таймаутом запроса; когда он взведён, curl-фолбэк НЕ
+   * запускается — иначе прерванный fetch тут же уходил бы тем же запросом в
+   * дочерний процесс, и остановка не наблюдалась бы вовсе.
+   */
+  signal?: AbortSignal;
 };
 
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -96,11 +103,14 @@ export async function fetchTextWithFallback(url: string, options: FetchOptions =
       method,
       headers,
       ...(isWrite ? { body: options.body } : {}),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: options.signal
+        ? AbortSignal.any([AbortSignal.timeout(timeoutMs), options.signal])
+        : AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return await response.text();
-  } catch {
+  } catch (err) {
+    if (options.signal?.aborted) throw err;
     // Keep GET callers (and their tests) on the original 3-arg curl contract;
     // only writes need the method/body init (e.g. Workday CXS POST behind a WAF).
     return isWrite

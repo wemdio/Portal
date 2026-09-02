@@ -16,6 +16,12 @@ import {
 } from '@/lib/jobs/atsCompanyParser';
 import { buildRolesRegex, buildCountryRegex } from '@/lib/parsers/atsFilters';
 import { resolveCompanyDomainByName } from '@/lib/parsers/companyDomainResolver';
+import {
+  fenceParserJobQuery,
+  requestSignal,
+  sleepUnlessAborted,
+  type ParserJobRunContext,
+} from '@/lib/parsers/parserJobContext';
 import type { AtsSearchConfig } from '@/types';
 
 const TOKENS_BASE =
@@ -29,8 +35,6 @@ const MAX_RESULT_ROWS = 5_000; // cap stored companies
 const SCAN_DELAY_MS = 120;
 const ENRICH_DELAY_MS = 200;
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 function log(level: 'info' | 'error', msg: string, extra?: unknown) {
   const line = `[ats-runner][${level.toUpperCase()}] ${msg}`;
   if (extra !== undefined) console[level](line, extra);
@@ -39,25 +43,32 @@ function log(level: 'info' | 'error', msg: string, extra?: unknown) {
 
 class JobCancelledError extends Error {}
 
-async function fetchJson(url: string): Promise<unknown> {
+async function fetchJson(url: string, signal?: AbortSignal): Promise<unknown> {
   const res = await fetch(url, {
     headers: { Accept: 'application/json', 'User-Agent': UA },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: requestSignal(REQUEST_TIMEOUT_MS, signal),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
-async function fetchText(url: string): Promise<string> {
+async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
   const res = await fetch(url, {
     headers: { 'User-Agent': UA },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: requestSignal(REQUEST_TIMEOUT_MS, signal),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.text();
 }
 
-export async function runAtsParserJob(jobId: string): Promise<void> {
+/**
+ * 02.09.2026 — единый жизненный цикл задач (app/src/lib/jobs/lifecycle.ts).
+ * С контекстом: записи в строку задачи ограждены жетоном захвата, паузы и
+ * сетевые запросы слушают сигнал остановки, а на остановке функция выходит без
+ * терминальной записи — задачу целиком переиграет следующая реплика (курсора у
+ * очереди нет, см. app/worker/parserJobs.ts). Без контекста — как было.
+ */
+export async function runAtsParserJob(jobId: string, ctx?: ParserJobRunContext): Promise<void> {
   const db = supabaseAdmin;
   if (!db) {
     log('error', 'supabaseAdmin not configured');
@@ -65,9 +76,15 @@ export async function runAtsParserJob(jobId: string): Promise<void> {
   }
 
   const setProgress = (patch: Record<string, unknown>) =>
-    db.from('parser_jobs').update(patch).eq('id', jobId);
+    fenceParserJobQuery(db.from('parser_jobs').update(patch).eq('id', jobId), ctx);
+
+  const sleep = (ms: number) => sleepUnlessAborted(ms, ctx?.signal);
 
   const ensureNotCancelled = async () => {
+    // Остановка воркера — тот же выход, что и отмена пользователем: бросаем
+    // JobCancelledError и не пишем терминальный статус. Кто именно нас
+    // остановил, решает вызывающий по ctx.signal.aborted.
+    if (ctx?.signal.aborted) throw new JobCancelledError();
     const { data } = await db.from('parser_jobs').select('status').eq('id', jobId).single();
     if (!data || data.status !== 'running') throw new JobCancelledError();
   };
@@ -109,7 +126,8 @@ export async function runAtsParserJob(jobId: string): Promise<void> {
     // 1) Load company-token lists.
     const companies: Array<{ ats: string; name: string; slug: string }> = [];
     for (const ats of finalAts) {
-      const csv = await fetchText(`${TOKENS_BASE}/${ats}.csv`);
+      await ensureNotCancelled();
+      const csv = await fetchText(`${TOKENS_BASE}/${ats}.csv`, ctx?.signal);
       let toks = parseCompanyCsv(csv);
       if (limit > 0) toks = toks.slice(0, limit);
       for (const t of toks) companies.push({ ats, name: t.name, slug: t.slug });
@@ -122,7 +140,7 @@ export async function runAtsParserJob(jobId: string): Promise<void> {
     for (let i = 0; i < companies.length; i += 1) {
       const c = companies[i];
       try {
-        const payload = await fetchJson(postingsUrl(c.ats, c.slug));
+        const payload = await fetchJson(postingsUrl(c.ats, c.slug), ctx?.signal);
         for (const raw of extractJobs(c.ats, payload)) {
           const norm = normalizeJob(c.ats, raw, { slug: c.slug, companyName: c.name });
           if (norm && matches(norm)) jobs.push(norm);
@@ -130,6 +148,10 @@ export async function runAtsParserJob(jobId: string): Promise<void> {
       } catch {
         /* board moved off ATS, private, or rate-limited — skip */
       }
+      // Прерванный запрос попадает в тот же catch, что и мёртвый борд, поэтому
+      // остановку проверяем ЗДЕСЬ, а не полагаемся на исключение: иначе воркер
+      // на стопе молотил бы оставшиеся тысячи бордов вхолостую.
+      if (ctx?.signal.aborted) throw new JobCancelledError();
       if ((i + 1) % 25 === 0 || i === companies.length - 1) {
         await ensureNotCancelled();
         await setProgress({
@@ -147,6 +169,7 @@ export async function runAtsParserJob(jobId: string): Promise<void> {
     // 4) Resolve domains (free from careers URL, then Clearbit fallback).
     await setProgress({ progress_stage: 'enriching', progress_percent: 82 });
     for (let i = 0; i < leads.length; i += 1) {
+      if (ctx?.signal.aborted) throw new JobCancelledError();
       const lead = leads[i];
       lead.domain = domainFromJobUrls(lead.job_urls);
       if (!lead.domain && enrich) {
@@ -197,19 +220,24 @@ export async function runAtsParserJob(jobId: string): Promise<void> {
     });
     log('info', `job ${jobId} completed: ${leads.length} companies from ${totalCompanies} scanned`);
   } catch (err) {
+    // Судим по СОСТОЯНИЮ СИГНАЛА, а не по типу ошибки: остановка воркера может
+    // прилететь и прерванным fetch'ем, и JobCancelledError, а чужой AbortError
+    // по таймауту обязан остаться настоящей ошибкой. Терминальный статус на
+    // остановке не пишем — строку с живой арендой отпустит библиотека.
+    if (ctx?.signal.aborted) {
+      log('info', `job ${jobId} stopped mid-run — leaving it for reclaim`);
+      return;
+    }
     if (err instanceof JobCancelledError) {
       log('info', `job ${jobId} cancelled`);
       return; // status already changed by the canceller
     }
     log('error', `job ${jobId} failed`, err);
-    await db
-      .from('parser_jobs')
-      .update({
-        status: 'failed',
-        progress_stage: 'failed',
-        completed_at: new Date().toISOString(),
-        error_message: err instanceof Error ? err.message : 'Unknown error',
-      })
-      .eq('id', jobId);
+    await setProgress({
+      status: 'failed',
+      progress_stage: 'failed',
+      completed_at: new Date().toISOString(),
+      error_message: err instanceof Error ? err.message : 'Unknown error',
+    });
   }
 }

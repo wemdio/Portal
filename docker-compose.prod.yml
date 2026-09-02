@@ -111,27 +111,27 @@ services:
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
-      # HH parser jobs routinely scrape tens of thousands of vacancies; 15min was
-      # a copy-paste leftover from email-validation that started killing real jobs
-      # at 44-68% progress. Bumped to 180 (3h) — matches stop_grace_period below.
-      # Внимание: scheduled deploy обрезает это до 15 секунд (шаг 5
-      # .semaphore/scheduled-deploy.yml), grace целиком отрабатывает только при
-      # ручном `docker compose stop`.
+      # Потолок времени на ОДНУ задачу HH-парсера (внутренний withTimeout
+      # раннера), а не срок остановки контейнера: 15 минут были копипастой из
+      # email-validation и убивали живые задачи на 44-68% прогресса.
       - WORKER_DRAIN_TIMEOUT_MINUTES=${HH_WORKER_DRAIN_TIMEOUT_MINUTES:-180}
-      # Архив вакансий и Яндекс.Директ — на едином жизненном цикле задач:
-      # аренда (живость процесса) и порог остановки прогресса (живость работы).
-      # Арифметика порогов — в шапке констант app/worker/hh.ts.
+      # Все четыре очереди контейнера — на едином жизненном цикле задач:
+      # аренда (живость процесса) и, где она применима, порог остановки
+      # прогресса (живость работы). Арифметика порогов — в шапке констант
+      # app/worker/hh.ts; почему у parser_jobs порога нет — в докблоке
+      # createParserJobRunner (app/worker/parserJobs.ts).
       - HH_ARCHIVE_LEASE_SECONDS=${HH_ARCHIVE_LEASE_SECONDS:-180}
       - HH_ARCHIVE_STALL_MINUTES=${HH_ARCHIVE_STALL_MINUTES:-10}
       - YANDEX_DIRECT_LEASE_SECONDS=${YANDEX_DIRECT_LEASE_SECONDS:-180}
       - YANDEX_DIRECT_STALL_MINUTES=${YANDEX_DIRECT_STALL_MINUTES:-10}
+      - PARSER_JOBS_LEASE_SECONDS=${PARSER_JOBS_LEASE_SECONDS:-180}
       - WORKER_KIND=hh
-    # 3 часа остаются, хотя ни разу не отрабатывали: деплой бьёт контейнер
-    # через `docker stop --timeout 15` (шаг 5 .semaphore/scheduled-deploy.yml).
-    # Срок снизится до 30 секунд в задаче 5 этапа 2, когда на жизненный цикл
-    # переедет последняя очередь этого контейнера — parser_jobs; пока она жива,
-    # длинный grace всё ещё что-то значит при ручной остановке.
-    stop_grace_period: 3h
+    # 30 секунд, а не 3 часа: контейнер целиком на едином жизненном цикле задач
+    # и по SIGTERM отпускает аренды за несколько секунд, после чего задачу
+    # подбирает следующая реплика. Прежние 3 часа не соблюдались НИ РАЗУ —
+    # деплой бьёт контейнер через `docker stop --timeout 15` (шаг 5
+    # .semaphore/scheduled-deploy.yml).
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:
@@ -153,8 +153,15 @@ services:
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      # Очередь parser_jobs на едином жизненном цикле задач: аренда — признак
+      # живости процесса, порога остановки прогресса у этой очереди нет
+      # намеренно (докблок createParserJobRunner, app/worker/parserJobs.ts).
+      - PARSER_JOBS_LEASE_SECONDS=${PARSER_JOBS_LEASE_SECONDS:-180}
       - WORKER_KIND=enghiring
-    stop_grace_period: 3h
+    # 30 секунд, а не 3 часа: воркер по SIGTERM отпускает аренду за несколько
+    # секунд, а задачу подбирает следующая реплика. Трёхчасовой grace не
+    # отрабатывал никогда — деплой бьёт контейнер через `docker stop --timeout 15`.
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:

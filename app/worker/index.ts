@@ -6,16 +6,24 @@
  * Не зависит от Next.js — деплой портала не прерывает запущенные задачи.
  *
  * Сборка: esbuild с --conditions=react-server (нейтрализует server-only).
+ *
+ * ВАЖНО. Этот файл — ветка `WORKER_KIND=all` в worker/runner.ts, и на проде она
+ * НЕ ЗАПУСКАЕТСЯ: каждый сервис в docker-compose.prod.yml либо задаёт
+ * конкретный WORKER_KIND, либо переопределяет command на свой бандл (проверено
+ * по всем сервисам на образе portal-worker). Из-за этого файл легко пропустить
+ * при правках — и 02.09.2026 отсюда убраны очереди, переехавшие на единый
+ * жизненный цикл задач (app/src/lib/jobs/lifecycle.ts): parser_jobs,
+ * search_parser_jobs, yandex_maps_jobs и yandex_direct_jobs. Их захват здесь
+ * шёл БЕЗ аренды и жетона, а восстановление при старте помечало чужие живые
+ * задачи как failed — запустись эта ветка хоть раз рядом с нынешними
+ * воркерами, она отобрала бы и испортила их строки. Если очередь понадобится
+ * здесь снова — только через createJobRunner, как в отдельных воркерах.
  */
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { runHHParserJob } from '@/lib/parsers/hhRunner';
-import { runSearchParserJob } from '@/lib/parsers/searchParserWorker';
-import { runYandexDirectJob } from '@/lib/parsers/yandexDirect/runner';
 import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
 import { recoverStalePreparingWebsiteEnrichmentJobs } from '@/lib/enrich/websiteEnrichmentJobPublisher';
 import { runBriefScoringJob } from '@/lib/briefScoring/briefScoringWorker';
-import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
 import { runEmailValidationJob } from '@/lib/emailValidation/emailValidationWorker';
 import { runInnEnrichJob } from '@/lib/innEnrich/runJob';
 import { runBugorSmtpValidation } from '@/lib/bugorOutreach/smtpValidationWorker';
@@ -40,7 +48,6 @@ const LI_CAMPAIGN_TICK_INTERVAL_MS = Number(process.env.LI_CAMPAIGN_TICK_INTERVA
 const DEADLINE_NOTIFICATIONS_INTERVAL_MS = Number(
   process.env.DEADLINE_NOTIFICATIONS_INTERVAL_MS ?? String(10 * 60 * 1000),
 );
-const HH_DRAIN_TIMEOUT_MS = Number(process.env.WORKER_DRAIN_TIMEOUT_MINUTES ?? '180') * 60 * 1000;
 const WORKER_ID = `worker-${process.pid}-${Date.now()}`;
 
 // Interval for syncing Instantly campaign analytics to DB (used by client portal).
@@ -75,35 +82,12 @@ async function startupRecovery(): Promise<void> {
   const now = new Date().toISOString();
   const errorMsg = 'Прервано перезапуском worker-сервиса';
 
-  // HH vacancies parser
-  const { data: hhJobs, error: hhErr } = await db
-    .from('parser_jobs')
-    .update({ status: 'failed', completed_at: now, error_message: errorMsg, progress_stage: 'failed' })
-    .eq('status', 'running')
-    .select('id');
-  if (hhErr) log('warn', 'Startup recovery: parser_jobs update failed', hhErr);
-  else if (hhJobs?.length) log('info', `Startup recovery: marked ${hhJobs.length} parser_jobs as failed`);
-
-  // Search parser
-  const searchUpdate = await db
-    .from('search_parser_jobs')
-    .update({ status: 'failed', completed_at: now, error_message: errorMsg, progress_stage: 'failed' })
-    .eq('status', 'running')
-    .select('id');
-  const searchErr = searchUpdate.error as { code?: string; message?: string } | null;
-  if (searchErr?.code === 'PGRST204' && (searchErr.message ?? '').includes("progress_stage")) {
-    const fallbackUpdate = await db
-      .from('search_parser_jobs')
-      .update({ status: 'failed', completed_at: now, error_message: errorMsg })
-      .eq('status', 'running')
-      .select('id');
-    if (fallbackUpdate.error) log('warn', 'Startup recovery: search_parser_jobs update failed', fallbackUpdate.error);
-    else if (fallbackUpdate.data?.length) log('info', `Startup recovery: marked ${fallbackUpdate.data.length} search_parser_jobs as failed`);
-  } else if (searchUpdate.error) {
-    log('warn', 'Startup recovery: search_parser_jobs update failed', searchUpdate.error);
-  } else if (searchUpdate.data?.length) {
-    log('info', `Startup recovery: marked ${searchUpdate.data.length} search_parser_jobs as failed`);
-  }
+  // parser_jobs, search_parser_jobs, yandex_maps_jobs и yandex_direct_jobs
+  // здесь НЕ восстанавливаются: они на едином жизненном цикле задач, и
+  // брошенную задачу там определяет истёкшая аренда. Прежний код помечал их
+  // running-строки как failed «Прервано перезапуском worker-сервиса» — по
+  // ВСЕЙ таблице, без разбора владельца, то есть убивал бы живые задачи
+  // отдельных воркеров.
 
   // Website enrichment — сбрасываем в 'pending' (воркер сам продолжит с места остановки)
   const { data: enrichJobs, error: enrichErr } = await db
@@ -138,15 +122,6 @@ async function startupRecovery(): Promise<void> {
   if (briefErr) log('warn', 'Startup recovery: brief_scoring_jobs update failed', briefErr);
   else if (briefJobs?.length) log('info', `Startup recovery: reset ${briefJobs.length} brief_scoring_jobs to pending`);
 
-  // YandexMaps — сбрасываем в 'failed' (нельзя безопасно продолжить посередине HTTP-цикла к Python-сервису)
-  const { data: ymJobs, error: ymErr } = await db
-    .from('yandex_maps_jobs')
-    .update({ status: 'failed', error_message: 'Прервано перезапуском worker-сервиса' })
-    .eq('status', 'running')
-    .select('id');
-  if (ymErr) log('warn', 'Startup recovery: yandex_maps_jobs update failed', ymErr);
-  else if (ymJobs?.length) log('info', `Startup recovery: marked ${ymJobs.length} yandex_maps_jobs as failed`);
-
   // Email validation — сбрасываем в 'pending' (воркер сам продолжит с места остановки)
   const { data: evJobs, error: evErr } = await db
     .from('email_validation_jobs')
@@ -163,71 +138,18 @@ async function startupRecovery(): Promise<void> {
     .select('id');
   if (innErr) log('warn', 'Startup recovery: inn_enrich_jobs update failed', innErr);
   else if (innJobs?.length) log('info', `Startup recovery: reset ${innJobs.length} inn_enrich_jobs to pending`);
-
-  // Yandex Direct parser — сбрасываем 'processing' в 'pending'. Полный
-  // повтор безопасен: дедуп по UNIQUE(job_id, domain) не даст дублей строк
-  // (повторный прогон лишь заново тратит XMLStock-запросы).
-  const { data: ydJobs, error: ydErr } = await db
-    .from('yandex_direct_jobs')
-    .update({ status: 'pending' })
-    .eq('status', 'processing')
-    .select('id');
-  if (ydErr) log('warn', 'Startup recovery: yandex_direct_jobs update failed', ydErr);
-  else if (ydJobs?.length) log('info', `Startup recovery: reset ${ydJobs.length} yandex_direct_jobs to pending`);
 }
 
 // --------------------------------------------------------------------------
 // Job claim helpers
 // --------------------------------------------------------------------------
 
-async function claimHHJob(): Promise<string | null> {
-  const db = supabaseAdmin!;
-
-  const { data: pending } = await db
-    .from('parser_jobs')
-    .select('id')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (!pending) return null;
-
-  // Optimistic lock: only claim if still pending
-  const { data: claimed } = await db
-    .from('parser_jobs')
-    .update({ status: 'running', started_at: new Date().toISOString() })
-    .eq('id', pending.id)
-    .eq('status', 'pending')
-    .select('id')
-    .maybeSingle();
-
-  return claimed?.id ?? null;
-}
-
-async function claimSearchJob(): Promise<string | null> {
-  const db = supabaseAdmin!;
-
-  const { data: pending } = await db
-    .from('search_parser_jobs')
-    .select('id')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (!pending) return null;
-
-  const { data: claimed } = await db
-    .from('search_parser_jobs')
-    .update({ status: 'running', started_at: new Date().toISOString() })
-    .eq('id', pending.id)
-    .eq('status', 'pending')
-    .select('id')
-    .maybeSingle();
-
-  return claimed?.id ?? null;
-}
+// Захвата parser_jobs, search_parser_jobs, yandex_maps_jobs и
+// yandex_direct_jobs здесь больше нет: эти очереди на едином жизненном цикле
+// задач, и брать их можно только с арендой и жетоном (createJobRunner). Прежние
+// функции клеймили строку одним UPDATE без аренды — рядом с нынешними воркерами
+// это была бы вторая реплика без владения, которая молча переписывала бы чужую
+// задачу.
 
 async function claimEnrichJob(): Promise<string | null> {
   const db = supabaseAdmin!;
@@ -251,38 +173,6 @@ async function claimEnrichJob(): Promise<string | null> {
     .maybeSingle();
 
   return claimed?.id ?? null;
-}
-
-async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'parse' } | null> {
-  const db = supabaseAdmin!;
-
-  // Collect-links step: jobs in 'pending' status with initial stage ('pending')
-  //   → after collecting, automatically continues to parse-orgs within the same run
-  // Parse step: jobs in 'pending' + 'ready_to_parse' — manual re-parse of existing links
-  const { data: pending } = await db
-    .from('yandex_maps_jobs')
-    .select('id, progress_stage')
-    .eq('status', 'pending')
-    .in('progress_stage', ['pending', 'ready_to_parse'])
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (!pending) return null;
-
-  const { data: claimed } = await db
-    .from('yandex_maps_jobs')
-    .update({ status: 'running', started_at: new Date().toISOString() })
-    .eq('id', pending.id)
-    .eq('status', 'pending')
-    .eq('progress_stage', pending.progress_stage)
-    .select('id, progress_stage')
-    .maybeSingle();
-
-  if (!claimed) return null;
-
-  const stage = (claimed.progress_stage as string) === 'ready_to_parse' ? 'parse' : 'collect';
-  return { id: claimed.id as string, stage };
 }
 
 async function claimBriefScoringJob(): Promise<string | null> {
@@ -381,30 +271,6 @@ async function claimLeadImportJob(): Promise<string | null> {
   return claimed?.id ?? null;
 }
 
-async function claimYandexDirectJob(): Promise<string | null> {
-  const db = supabaseAdmin!;
-
-  const { data: pending } = await db
-    .from('yandex_direct_jobs')
-    .select('id')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (!pending) return null;
-
-  const { data: claimed } = await db
-    .from('yandex_direct_jobs')
-    .update({ status: 'processing', started_at: new Date().toISOString() })
-    .eq('id', pending.id)
-    .eq('status', 'pending')
-    .select('id')
-    .maybeSingle();
-
-  return claimed?.id ?? null;
-}
-
 // --------------------------------------------------------------------------
 // RDP booking expiry — marks bookings as 'expired' when starts_at + 5 min
 // has passed without an active session being started.
@@ -467,20 +333,6 @@ async function pollOnce(): Promise<boolean> {
   if (!supabaseAdmin) return false;
 
   // Try each job type in order; run the first one found
-  const hhJobId = await claimHHJob();
-  if (hhJobId) {
-    log('info', `Running HH parser job ${hhJobId}`);
-    await runHHParserJob(hhJobId, HH_DRAIN_TIMEOUT_MS);
-    return true;
-  }
-
-  const searchJobId = await claimSearchJob();
-  if (searchJobId) {
-    log('info', `Running search parser job ${searchJobId}`);
-    await runSearchParserJob(searchJobId);
-    return true;
-  }
-
   const enrichJobId = await claimEnrichJob();
   if (enrichJobId) {
     log('info', `Running website enrichment job ${enrichJobId}`);
@@ -492,18 +344,6 @@ async function pollOnce(): Promise<boolean> {
   if (briefScoringJobId) {
     log('info', `Running brief scoring job ${briefScoringJobId}`);
     await runBriefScoringJob(briefScoringJobId);
-    return true;
-  }
-
-  const ymJob = await claimYandexMapsJob();
-  if (ymJob) {
-    if (ymJob.stage === 'collect') {
-      log('info', `Running YandexMaps collect-links job ${ymJob.id}`);
-      await runYandexMapsCollectLinks(ymJob.id);
-    } else {
-      log('info', `Running YandexMaps parse-orgs job ${ymJob.id}`);
-      await runYandexMapsParseOrganizations(ymJob.id);
-    }
     return true;
   }
 
@@ -548,13 +388,6 @@ async function pollOnce(): Promise<boolean> {
     return true;
   }
 
-  const yandexDirectJobId = await claimYandexDirectJob();
-  if (yandexDirectJobId) {
-    log('info', `Running Yandex Direct job ${yandexDirectJobId}`);
-    await runYandexDirectJob(supabaseAdmin, yandexDirectJobId);
-    return true;
-  }
-
   // Instantly lead qualification: poll Instantly API for new reply emails and qualify via AI
   try {
     const qualCount = await pollAndQualifyReplies();
@@ -595,16 +428,13 @@ async function pollOnce(): Promise<boolean> {
 // Main polling loop (Realtime-aware)
 // --------------------------------------------------------------------------
 
+// Очередей на едином жизненном цикле здесь нет — их не будит и realtime.
 const REALTIME_TABLES = [
-  'parser_jobs',
-  'search_parser_jobs',
   'website_enrichment_jobs',
   'brief_scoring_jobs',
-  'yandex_maps_jobs',
   'email_validation_jobs',
   'inn_enrich_jobs',
   'lead_import_jobs',
-  'yandex_direct_jobs',
 ];
 const FALLBACK_POLL_MS = 30_000;
 

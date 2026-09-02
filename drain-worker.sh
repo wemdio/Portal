@@ -15,8 +15,9 @@
 #   в шаге 5 .semaphore/scheduled-deploy.yml), поэтому список не может
 #   разъехаться с docker-compose.prod.yml;
 # - не трогает таблицы воркеров, переехавших на общий жизненный цикл задач
-#   (app/src/lib/jobs/lifecycle.ts): base_constructor_jobs, tg_parser_jobs и
-#   search_parser_jobs. Очередь sales_chat_sync_runs в списке ниже не значилась
+#   (app/src/lib/jobs/lifecycle.ts): base_constructor_jobs, tg_parser_jobs,
+#   search_parser_jobs, yandex_maps_jobs и parser_jobs (HH/ATS/ENG-найм).
+#   Очередь sales_chat_sync_runs в списке ниже не значилась
 #   и не значится — искать, откуда её убрали, не нужно; воркер этой очереди
 #   просто добавлен в is_lifecycle_managed_worker, чтобы деплой одного его не
 #   ставил на паузу чужие legacy-очереди.
@@ -62,6 +63,8 @@ is_lifecycle_managed_worker() {
     worker-search) return 0 ;;
     worker-sales-chat-logger) return 0 ;;
     worker-yandexmaps) return 0 ;;
+    worker-hh) return 0 ;;
+    worker-eng-hiring) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -159,7 +162,10 @@ if should_pause_legacy_queues && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
 
   total_running=0
   tracked_tables=(
-    "parser_jobs"
+    # parser_jobs убран: HH-, ATS- и ENG-парсеры на едином жизненном цикле,
+    # захват идёт с фильтром по parser_type. Сброс всех running в pending
+    # отсюда отбирал бы строку у ещё живого исполнителя — в том числе у
+    # соседнего воркера, которого этот деплой не касается.
     "website_enrichment_jobs"
     "brief_scoring_jobs"
     # yandex_maps_jobs убран: воркер Яндекс.Карт на едином жизненном цикле сам
