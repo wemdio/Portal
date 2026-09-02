@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useId, useState } from 'react';
 
 import { addCycle } from '@/lib/techCalendar/dates';
 import {
@@ -53,6 +53,7 @@ const EMPTY: ModalPayload = {
  * продления к продлению, и правят их обычно ровно в этот момент.
  */
 export default function SubscriptionModal({ mode, subscription, saving, error, onClose, onSubmit, onDelete, onToggleHidden }: Props) {
+  const titleId = useId();
   const [form, setForm] = useState<ModalPayload>(() => {
     if (!subscription) return EMPTY;
     const base: ModalPayload = {
@@ -75,10 +76,20 @@ export default function SubscriptionModal({ mode, subscription, saving, error, o
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
-      <div className="w-full max-w-lg rounded-xl bg-white p-5 shadow-xl">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="w-full max-w-lg rounded-xl bg-white p-5 shadow-xl"
+      >
         <div className="mb-4 flex items-center justify-between">
-          <h3 className="text-base font-semibold text-gray-900">{title}</h3>
-          <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-600">
+          <h3 id={titleId} className="text-base font-semibold text-gray-900">{title}</h3>
+          <button
+            type="button"
+            aria-label="Закрыть"
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600"
+          >
             ✕
           </button>
         </div>
@@ -188,7 +199,11 @@ export default function SubscriptionModal({ mode, subscription, saving, error, o
           </label>
         </div>
 
-        {error && <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{error}</div>}
+        {error && (
+          <div role="alert" className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">
+            {error}
+          </div>
+        )}
 
         <div className="mt-4 flex items-center justify-end gap-2">
           <div className="mr-auto flex items-center gap-3">

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
-import { stripEnrichCheckpointMetadata } from '@/lib/tools/baseConstructorCheckpoint';
+import { stripBaseConstructorCheckpointMetadata } from '@/lib/tools/baseConstructorCheckpoint';
 
 const admin = supabaseAdmin!;
 
@@ -46,7 +46,7 @@ export async function GET(
         });
         if (!rpcErr) {
           const rows = Array.isArray(slice) ? (slice as string[][]) : [];
-          return NextResponse.json({ data: stripEnrichCheckpointMetadata(rows) });
+          return NextResponse.json({ data: stripBaseConstructorCheckpointMetadata(rows) });
         }
 
         // Fallback (e.g. RPC not yet deployed): fetch full data and slice in Node.
@@ -58,7 +58,7 @@ export async function GET(
           .single();
         const rows = Array.isArray(full?.data) ? (full!.data as string[][]) : [];
         return NextResponse.json({
-          data: stripEnrichCheckpointMetadata(rows).slice(0, previewLimit),
+          data: stripBaseConstructorCheckpointMetadata(rows).slice(0, previewLimit),
         });
       }
 
@@ -73,7 +73,7 @@ export async function GET(
       if (job.user_id !== user.id) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
       const rows = Array.isArray(job.data) ? (job.data as string[][]) : [];
-      return NextResponse.json({ data: stripEnrichCheckpointMetadata(rows) });
+      return NextResponse.json({ data: stripBaseConstructorCheckpointMetadata(rows) });
     },
   );
 }

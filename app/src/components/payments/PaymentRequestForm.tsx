@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 
 import type {
   PaymentMonthSummary,
+  PaymentCostCategory,
   PaymentDepartment,
   PaymentProject,
   SubmitPaymentRequestInput,
@@ -27,7 +28,8 @@ interface PaymentDraft {
   amount: string;
   projectId: string;
   comment: string;
-  expenseType: 'one_time' | 'planned';
+  budgetMode: 'one_time' | 'planned' | 'costs';
+  costCategory: PaymentCostCategory | '';
   expectedPaymentOn: string;
   urgency: 'normal' | 'urgent' | 'critical';
   documentUrl: string;
@@ -39,7 +41,8 @@ const EMPTY_DRAFT: PaymentDraft = {
   amount: '',
   projectId: '',
   comment: '',
-  expenseType: 'one_time',
+  budgetMode: 'one_time',
+  costCategory: '',
   expectedPaymentOn: '',
   urgency: 'normal',
   documentUrl: '',
@@ -66,11 +69,23 @@ export default function PaymentRequestForm({
   const amount = useMemo(() => Number(draft.amount), [draft.amount]);
   const targetMonth = draft.expectedPaymentOn.slice(0, 7);
   const targetsAnotherMonth = targetMonth.length === 7 && targetMonth !== periodKey;
-  const needsApproval = draft.expenseType === 'planned'
-    || (!targetsAnotherMonth && Number.isFinite(amount) && amount > summary.remaining);
+  const isCosts = draft.budgetMode === 'costs';
+  const relevantRemaining = isCosts ? summary.costBudget.remaining : summary.remaining;
+  const costBudgetIncomplete = isCosts
+    && !targetsAnotherMonth
+    && !summary.costBudget.dataComplete;
+  const costLimitExceeded = isCosts
+    && !targetsAnotherMonth
+    && Number.isFinite(amount)
+    && amount > relevantRemaining;
+  const costBudgetBlocked = costBudgetIncomplete || costLimitExceeded;
+  const needsApproval = draft.budgetMode === 'planned'
+    || (!isCosts && !targetsAnotherMonth && Number.isFinite(amount) && amount > relevantRemaining);
   const valid = draft.description.trim().length > 0
     && amount > 0
-    && draft.expectedPaymentOn.length > 0;
+    && draft.expectedPaymentOn.length > 0
+    && (!isCosts || draft.costCategory !== '')
+    && !costBudgetBlocked;
 
   useEffect(() => {
     if (error) errorRef.current?.focus();
@@ -90,7 +105,9 @@ export default function PaymentRequestForm({
         amount,
         projectId: draft.projectId || null,
         comment: draft.comment.trim() || null,
-        expenseType: draft.expenseType,
+        expenseType: draft.budgetMode === 'planned' ? 'planned' : 'one_time',
+        budgetScope: isCosts ? 'costs' : 'general',
+        costCategory: isCosts ? draft.costCategory as PaymentCostCategory : null,
         expectedPaymentOn: draft.expectedPaymentOn,
         urgency: draft.urgency,
         documentUrl: draft.documentUrl.trim() || null,
@@ -118,40 +135,82 @@ export default function PaymentRequestForm({
 
       <div className="grid gap-x-5 gap-y-4 px-5 py-5 sm:grid-cols-2 sm:px-6 sm:py-6">
         <fieldset className="sm:col-span-2">
-          <legend className="text-sm font-medium text-gray-800">Тип расхода</legend>
-          <div role="radiogroup" aria-label="Тип расхода" className="mt-2 grid gap-3 sm:grid-cols-2">
+          <legend className="text-sm font-medium text-gray-800">Контур бюджета</legend>
+          <div role="radiogroup" aria-label="Контур бюджета" className="mt-2 grid gap-3 lg:grid-cols-3">
             <label className={`flex min-h-14 cursor-pointer items-start gap-3 rounded-xl border px-4 py-3 transition-colors ${
-              draft.expenseType === 'one_time'
+              draft.budgetMode === 'one_time'
                 ? 'border-gray-900 bg-gray-50 ring-1 ring-gray-900'
                 : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'
             }`}>
               <input
                 type="radio"
-                name="expenseType"
+                name="budgetMode"
                 value="one_time"
-                checked={draft.expenseType === 'one_time'}
-                onChange={() => setDraft((current) => ({ ...current, expenseType: 'one_time' }))}
+                checked={draft.budgetMode === 'one_time'}
+                onChange={() => setDraft((current) => ({ ...current, budgetMode: 'one_time' }))}
                 className="mt-0.5 h-4 w-4"
               />
               <span><span className="block text-sm font-semibold text-gray-900">Разовый</span><span className="mt-0.5 block text-xs leading-5 text-gray-500">Учитывается в месячном лимите</span></span>
             </label>
             <label className={`flex min-h-14 cursor-pointer items-start gap-3 rounded-xl border px-4 py-3 transition-colors ${
-              draft.expenseType === 'planned'
+              draft.budgetMode === 'planned'
                 ? 'border-gray-900 bg-gray-50 ring-1 ring-gray-900'
                 : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'
             }`}>
               <input
                 type="radio"
-                name="expenseType"
+                name="budgetMode"
                 value="planned"
-                checked={draft.expenseType === 'planned'}
-                onChange={() => setDraft((current) => ({ ...current, expenseType: 'planned' }))}
+                checked={draft.budgetMode === 'planned'}
+                onChange={() => setDraft((current) => ({ ...current, budgetMode: 'planned' }))}
                 className="mt-0.5 h-4 w-4"
               />
               <span><span className="block text-sm font-semibold text-gray-900">Плановый</span><span className="mt-0.5 block text-xs leading-5 text-gray-500">Не входит в лимит, тип подтверждает Аня</span></span>
             </label>
+            <label className={`flex min-h-14 cursor-pointer items-start gap-3 rounded-xl border px-4 py-3 transition-colors ${
+              draft.budgetMode === 'costs'
+                ? 'border-gray-900 bg-gray-50 ring-1 ring-gray-900'
+                : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'
+            }`}>
+              <input
+                type="radio"
+                name="budgetMode"
+                value="costs"
+                checked={draft.budgetMode === 'costs'}
+                onChange={() => setDraft((current) => ({ ...current, budgetMode: 'costs' }))}
+                className="mt-0.5 h-4 w-4"
+              />
+              <span><span className="block text-sm font-semibold text-gray-900">Косты</span><span className="mt-0.5 block text-xs leading-5 text-gray-500">Instantly, почты, базы и домены, лимит 650 000 ₽</span></span>
+            </label>
           </div>
         </fieldset>
+
+        {isCosts && (
+          <label className="text-sm font-medium text-gray-800 sm:col-span-2">
+            Категория костов
+            <select
+              required
+              value={draft.costCategory}
+              onChange={(event) => setDraft((current) => ({
+                ...current,
+                costCategory: event.target.value as PaymentCostCategory,
+              }))}
+              className={`${inputClass} mt-1.5`}
+            >
+              <option value="" disabled>Выберите категорию</option>
+              <option value="instantly">Instantly</option>
+              <option value="email">Почты</option>
+              <option value="bases">Базы</option>
+              <option value="domains">Домены</option>
+              <option value="other">Другое</option>
+            </select>
+            {draft.costCategory === 'email' && (
+              <span className="mt-1.5 block text-xs leading-5 text-gray-500">
+                Записи со статусом «Оставить» уже приходят из календаря автоматически. Не дублируйте их вручную.
+              </span>
+            )}
+          </label>
+        )}
 
         <label className="text-sm font-medium text-gray-800">
           Отдел
@@ -259,18 +318,24 @@ export default function PaymentRequestForm({
 
         {amount > 0 && (
           <div className={`rounded-xl border px-4 py-3 text-sm leading-5 sm:col-span-2 ${
-            needsApproval
+            needsApproval || costBudgetBlocked
               ? 'border-amber-200 bg-amber-50 text-amber-950'
               : 'border-emerald-200 bg-emerald-50 text-emerald-900'
           }`}>
-            {draft.expenseType === 'planned' ? (
+            {draft.budgetMode === 'planned' ? (
               <p>Плановый расход не уменьшает лимит разовых и будет отправлен Ане.</p>
+            ) : costBudgetIncomplete ? (
+              <p>В календаре почт не хватает курса валюты. Пока сумма не пересчитана в рубли, новый кост добавить нельзя.</p>
             ) : targetsAnotherMonth ? (
               <p>Лимит выбранного месяца проверит сервер. После отправки откроется месяц ожидаемой оплаты.</p>
-            ) : amount > summary.remaining ? (
-              <p>Превышает доступный остаток на {formatRubles(amount - summary.remaining)}. Расход будет отправлен Ане.</p>
+            ) : costLimitExceeded ? (
+              <p>{`Превышает доступный остаток костов на ${formatRubles(amount - relevantRemaining)}. Уменьшите сумму или перенесите расход.`}</p>
+            ) : !isCosts && amount > relevantRemaining ? (
+              <p>{`Превышает доступный остаток на ${formatRubles(amount - relevantRemaining)}. Расход будет отправлен Ане.`}</p>
             ) : (
-              <p>Расход будет одобрен автоматически. После отправки сервер ещё раз проверит остаток.</p>
+              <p>{isCosts
+                ? 'Кост будет одобрен автоматически. После отправки сервер ещё раз проверит остаток.'
+                : 'Расход будет одобрен автоматически. После отправки сервер ещё раз проверит остаток.'}</p>
             )}
           </div>
         )}
@@ -286,7 +351,15 @@ export default function PaymentRequestForm({
             disabled={!valid || submitting}
             className="min-h-11 w-full rounded-lg bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white outline-none transition-colors hover:bg-gray-800 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:bg-gray-300 sm:w-auto"
           >
-            {submitting ? 'Отправляем…' : needsApproval ? 'Отправить Ане' : 'Добавить расход'}
+            {submitting
+              ? 'Отправляем…'
+              : costBudgetIncomplete
+                ? 'Недоступно до пересчёта курса'
+                : costLimitExceeded
+                ? 'Недоступно сверх лимита'
+                : needsApproval
+                  ? 'Отправить Ане'
+                  : 'Добавить расход'}
           </button>
         </div>
       </div>

@@ -32,7 +32,11 @@ import {
   editHandoffMessage,
   escapeHtml,
 } from './handoffTelegram';
-import { sendHandoffNow } from './handoffSender';
+import {
+  HANDOFF_AUTO_SEND_MARKER,
+  sendHandoffNow,
+  type PendingHandoffRow,
+} from './handoffSender';
 import type { Email } from './types';
 import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
 import {
@@ -65,13 +69,175 @@ const TRANSIENT_OTHERS_RETRY_TAG = '[others]';
 const OWNERSHIP_REVIEW_RETRY_INTERVAL_MS = 15 * 60 * 1000;
 const OWNERSHIP_REVIEW_RETRY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const OWNERSHIP_REVIEW_PROCESSING_LEASE_MS = 30 * 60 * 1000;
+const OWNERSHIP_PAGE_BUDGET_REASON_FRAGMENT =
+  'workspace ownership evidence exceeded the bounded page budget';
+const OWNERSHIP_PAGE_BUDGET_RETRY_BACKOFF_MS = 6 * 60 * 60 * 1000;
+const OWNERSHIP_PAGE_BUDGET_RETRY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const LEAD_DELIVERY_RETRY_INTERVAL_MS = 15 * 60 * 1000;
 const LEAD_DELIVERY_RECENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const LEAD_DELIVERY_PENDING_LEASE_MS = 30 * 60 * 1000;
 const LEAD_DELIVERY_FAILED_BACKOFF_MS = 15 * 60 * 1000;
 const LEAD_DELIVERY_RETRYING_ERROR = 'Lead notification retry in progress';
+const SPECIALIST_ALERT_CLAIM_RPC = 'claim_instantly_specialist_alert';
 let lastOwnershipReviewRetryAt = 0;
 let lastLeadDeliveryRetryAt = 0;
+
+type SpecialistAlertClaimDecision =
+  | { status: 'alert'; dedupApplied: boolean; claimRpcApplied: boolean }
+  | { status: 'duplicate'; winnerQualificationId: string }
+  | { status: 'retry'; reason: string };
+
+function isMissingSpecialistAlertClaimRpc(error: {
+  code?: string;
+  message?: string;
+}): boolean {
+  const message = error.message ?? '';
+  return (
+    error.code === '42883' ||
+    error.code === 'PGRST202' ||
+    /could not find (?:the )?function|function .* does not exist/i.test(message) ||
+    // Unit-test mocks deliberately expose an unregistered RPC instead of
+    // silently returning success. Production PostgREST never emits this text.
+    message.startsWith('no rpc handler mocked for ')
+  );
+}
+
+/**
+ * Atomically elect the one qualification that may alert specialists for a
+ * managed project/thread pair. The SQL RPC derives project/thread from the
+ * already-persisted qualification, so callers cannot claim a different owner.
+ *
+ * During the narrow migration-first/code-second rollout window a genuinely
+ * missing RPC preserves the old per-qualification delivery (fail-open). Any
+ * other database failure is retried by the durable delivery reconciler instead
+ * of risking two simultaneous alerts.
+ */
+async function claimSpecialistThreadAlert(
+  db: NonNullable<typeof supabaseAdmin>,
+  qualificationId: string,
+  enqueueHandoff = false,
+): Promise<SpecialistAlertClaimDecision> {
+  const { data, error } = await db.rpc(SPECIALIST_ALERT_CLAIM_RPC, {
+    p_qualification_id: qualificationId,
+    p_enqueue_handoff: enqueueHandoff,
+  });
+  if (error) {
+    if (isMissingSpecialistAlertClaimRpc(error)) {
+      workerLog(
+        'warn',
+        `specialist thread-alert claim RPC is not available for ${qualificationId} — using qualification-level delivery`,
+      );
+      return { status: 'alert', dedupApplied: false, claimRpcApplied: false };
+    }
+    return {
+      status: 'retry',
+      reason: `Specialist thread-alert claim failed: ${error.message ?? 'unknown'}`,
+    };
+  }
+
+  const raw = Array.isArray(data) ? data[0] : data;
+  if (!raw || typeof raw !== 'object') {
+    return {
+      status: 'retry',
+      reason: 'Specialist thread-alert claim returned no decision',
+    };
+  }
+  const row = raw as {
+    should_alert?: unknown;
+    winner_qualification_id?: unknown;
+    dedup_applied?: unknown;
+  };
+  if (typeof row.should_alert !== 'boolean') {
+    return {
+      status: 'retry',
+      reason: 'Specialist thread-alert claim returned an invalid decision',
+    };
+  }
+  if (row.should_alert) {
+    return {
+      status: 'alert',
+      dedupApplied: row.dedup_applied === true,
+      claimRpcApplied: true,
+    };
+  }
+
+  const winnerQualificationId = typeof row.winner_qualification_id === 'string'
+    ? row.winner_qualification_id.trim()
+    : '';
+  if (!winnerQualificationId) {
+    return {
+      status: 'retry',
+      reason: 'Specialist thread-alert duplicate decision has no winner',
+    };
+  }
+  return { status: 'duplicate', winnerQualificationId };
+}
+
+async function persistLegacyLeadOwnerSnapshot(
+  db: NonNullable<typeof supabaseAdmin>,
+  lead: {
+    id: string;
+    qualified_project_id: string | null;
+    qualified_project_owner_proven: boolean | null;
+  },
+  projectId: string,
+): Promise<boolean> {
+  if (
+    lead.qualified_project_owner_proven === true &&
+    lead.qualified_project_id === projectId
+  ) {
+    return true;
+  }
+
+  const { data: updated, error } = await db
+    .from('instantly_lead_qualifications')
+    .update({
+      qualified_project_id: projectId,
+      qualified_project_owner_proven: true,
+    })
+    .eq('id', lead.id)
+    .eq('status', 'lead')
+    .not('qualified_project_owner_proven', 'is', true)
+    .select('id, qualified_project_id, qualified_project_owner_proven')
+    .maybeSingle();
+  if (error) {
+    workerLog(
+      'warn',
+      `lead delivery recovery: owner snapshot failed for ${lead.id}: ${error.message}`,
+    );
+    return false;
+  }
+  if (updated) {
+    lead.qualified_project_id = projectId;
+    lead.qualified_project_owner_proven = true;
+    return true;
+  }
+
+  // A concurrent recovery worker may have won the immutable snapshot update.
+  // Accept only the exact same proven owner; any other state waits for the next
+  // cycle rather than being overwritten or routed by a stale catalog read.
+  const { data: current, error: currentError } = await db
+    .from('instantly_lead_qualifications')
+    .select('qualified_project_id, qualified_project_owner_proven')
+    .eq('id', lead.id)
+    .maybeSingle();
+  if (currentError) {
+    workerLog(
+      'warn',
+      `lead delivery recovery: owner snapshot re-read failed for ${lead.id}: ${currentError.message}`,
+    );
+    return false;
+  }
+  if (
+    current?.qualified_project_owner_proven === true &&
+    current.qualified_project_id === projectId
+  ) {
+    lead.qualified_project_id = projectId;
+    lead.qualified_project_owner_proven = true;
+    return true;
+  }
+  return false;
+}
 
 export function isTransientQualifyError(message: string): boolean {
   return (
@@ -642,6 +808,7 @@ export async function pollAndQualifyReplies(): Promise<number> {
   const finishPoll = async (count: number): Promise<number> => {
     await maybeReprocessOwnershipReviews();
     await maybeReconcileLeadNotificationDeliveries();
+    await reconcileLeadHandoffJobs();
     return count;
   };
 
@@ -1488,7 +1655,33 @@ export async function qualifyOneReply(
     }
   }
 
-  if (status === 'lead' && inserted?.id && supabaseMain && qualifiedProjectId) {
+  let specialistLeadSideEffectsAllowed = false;
+  let specialistThreadClaim: SpecialistAlertClaimDecision | null = null;
+  if (status === 'lead' && inserted?.id && qualifiedProjectId) {
+    const threadClaim = await claimSpecialistThreadAlert(
+      db,
+      inserted.id,
+      handoffEnabled(),
+    );
+    specialistThreadClaim = threadClaim;
+    if (threadClaim.status === 'alert') {
+      specialistLeadSideEffectsAllowed = true;
+    } else if (threadClaim.status === 'duplicate') {
+      workerLog(
+        'info',
+        `Lead specialist side effects ${inserted.id} suppressed: thread already belongs to qualification ${threadClaim.winnerQualificationId}`,
+      );
+    } else {
+      workerLog('warn', `${threadClaim.reason} — specialist lead side effects deferred`);
+    }
+  }
+
+  if (
+    specialistLeadSideEffectsAllowed &&
+    inserted?.id &&
+    supabaseMain &&
+    qualifiedProjectId
+  ) {
     await notifySpecialistsAboutLead(
       db,
       inserted.id,
@@ -1500,11 +1693,22 @@ export async function qualifyOneReply(
       effectiveReply.subject ?? null,
       replyText || null,
       result.reason ?? null,
-      { projectId: qualifiedProjectId },
+      { projectId: qualifiedProjectId, threadClaimConfirmed: true },
     );
   }
 
-  if (status === 'lead' && inserted?.id && qualifiedProjectId) {
+  if (
+    specialistLeadSideEffectsAllowed &&
+    inserted?.id &&
+    qualifiedProjectId &&
+    // During migration rollout there is no durable outbox yet, so preserve the
+    // old direct handoff path. Once the RPC is present, its transactional
+    // enqueue is the only source of handoff work. `dedupApplied` cannot be used
+    // for this distinction because a real RPC deliberately returns false when
+    // the provider omitted the thread id, while still enqueueing the outbox.
+    specialistThreadClaim?.status === 'alert' &&
+    !specialistThreadClaim.claimRpcApplied
+  ) {
     await maybePostLeadHandoff({
       instantlyDb: db,
       qualificationId: inserted.id,
@@ -1519,6 +1723,17 @@ export async function qualifyOneReply(
       apiKey,
       accountId,
     });
+  }
+
+  if (
+    specialistLeadSideEffectsAllowed &&
+    inserted?.id &&
+    specialistThreadClaim?.status === 'alert' &&
+    specialistThreadClaim.claimRpcApplied
+  ) {
+    // Alert delivery intentionally stays first: handoff drafting/provider I/O
+    // must not add latency to the fresh specialist alert.
+    await reconcileLeadHandoffJobs({ qualificationId: inserted.id, limit: 1 });
   }
 
   // Client-facing notification: DM the reply text to the client who owns this
@@ -1598,6 +1813,8 @@ export interface OwnershipReviewRetryOptions {
   minRetryAgeMs?: number;
   maxAgeMs?: number;
   processingLeaseMs?: number;
+  /** Fast transient lane by default; page-budget uses its own tiny slow lane. */
+  lane?: 'active' | 'page_budget';
 }
 
 /**
@@ -1616,22 +1833,39 @@ export async function reprocessOwnershipReviewRows(
   const db = supabaseAdmin;
   const now = options.now ?? new Date();
   const nowIso = now.toISOString();
+  const pageBudgetLane = options.lane === 'page_budget';
   const limit = Math.max(
     1,
-    Math.min(5, options.limit ?? envNumber('INSTANTLY_OWNERSHIP_RETRY_BATCH', 2)),
+    Math.min(
+      5,
+      options.limit ?? envNumber(
+        pageBudgetLane
+          ? 'INSTANTLY_OWNERSHIP_PAGE_BUDGET_RETRY_BATCH'
+          : 'INSTANTLY_OWNERSHIP_RETRY_BATCH',
+        pageBudgetLane ? 1 : 5,
+      ),
+    ),
   );
   const minRetryAgeMs = Math.max(
     0,
     options.minRetryAgeMs ?? envNumber(
-      'INSTANTLY_OWNERSHIP_RETRY_BACKOFF_MS',
-      OWNERSHIP_REVIEW_RETRY_INTERVAL_MS,
+      pageBudgetLane
+        ? 'INSTANTLY_OWNERSHIP_PAGE_BUDGET_RETRY_BACKOFF_MS'
+        : 'INSTANTLY_OWNERSHIP_RETRY_BACKOFF_MS',
+      pageBudgetLane
+        ? OWNERSHIP_PAGE_BUDGET_RETRY_BACKOFF_MS
+        : OWNERSHIP_REVIEW_RETRY_INTERVAL_MS,
     ),
   );
   const maxAgeMs = Math.max(
     minRetryAgeMs,
     options.maxAgeMs ?? envNumber(
-      'INSTANTLY_OWNERSHIP_RETRY_MAX_AGE_MS',
-      OWNERSHIP_REVIEW_RETRY_MAX_AGE_MS,
+      pageBudgetLane
+        ? 'INSTANTLY_OWNERSHIP_PAGE_BUDGET_RETRY_MAX_AGE_MS'
+        : 'INSTANTLY_OWNERSHIP_RETRY_MAX_AGE_MS',
+      pageBudgetLane
+        ? OWNERSHIP_PAGE_BUDGET_RETRY_MAX_AGE_MS
+        : OWNERSHIP_REVIEW_RETRY_MAX_AGE_MS,
     ),
   );
   const processingLeaseMs = Math.max(
@@ -1655,58 +1889,60 @@ export async function reprocessOwnershipReviewRows(
   // failures and fence the exact old status/timestamp; permanent parser/data
   // errors remain terminal. Pagination covers the complete bounded max-age
   // horizon so newer permanent errors cannot starve an older retryable row.
-  type LegacyErrorRow = {
-    id: string;
-    instantly_email_id: string | null;
-    error_message: string | null;
-    created_at: string | null;
-    updated_at: string | null;
-  };
-  const legacyErrors: LegacyErrorRow[] = [];
-  const legacyPageSize = 100;
-  let legacyScanFailed = false;
-  for (let pageStart = 0; ; pageStart += legacyPageSize) {
-    const { data: page, error: pageError } = await db
-      .from('instantly_lead_qualifications')
-      .select('id, instantly_email_id, error_message, created_at, updated_at')
-      .eq('status', 'error')
-      .not('instantly_email_id', 'is', null)
-      .gte('created_at', recentCutoffIso)
-      .order('created_at', { ascending: false })
-      .range(pageStart, pageStart + legacyPageSize - 1);
-    if (pageError) {
-      workerLog('warn', `qualification retry: legacy error scan failed: ${pageError.message}`);
-      legacyScanFailed = true;
-      break;
-    }
-    const rows = (page ?? []) as LegacyErrorRow[];
-    legacyErrors.push(...rows);
-    if (rows.length < legacyPageSize) break;
-  }
-  if (!legacyScanFailed) {
-    for (const raw of legacyErrors) {
-      const emailId = raw.instantly_email_id?.trim() ?? '';
-      const errorMessage = raw.error_message?.trim() ?? '';
-      if (!emailId || emailId.startsWith('webhook:') || !isTransientQualifyError(errorMessage)) {
-        continue;
-      }
-
-      const legacyClaimBase = db
+  if (!pageBudgetLane) {
+    type LegacyErrorRow = {
+      id: string;
+      instantly_email_id: string | null;
+      error_message: string | null;
+      created_at: string | null;
+      updated_at: string | null;
+    };
+    const legacyErrors: LegacyErrorRow[] = [];
+    const legacyPageSize = 100;
+    let legacyScanFailed = false;
+    for (let pageStart = 0; ; pageStart += legacyPageSize) {
+      const { data: page, error: pageError } = await db
         .from('instantly_lead_qualifications')
-        .update({
-          status: 'needs_review',
-          ai_reason: `${TRANSIENT_RETRY_REASON_PREFIX} Recovered legacy terminal retry: ${errorMessage}`.slice(0, 500),
-          ai_confidence: 0,
-          updated_at: nowIso,
-        })
-        .eq('id', raw.id)
-        .eq('status', 'error');
-      const legacyClaim = raw.updated_at
-        ? legacyClaimBase.eq('updated_at', raw.updated_at)
-        : legacyClaimBase.is('updated_at', null);
-      const { error: reopenError } = await legacyClaim;
-      if (reopenError) {
-        workerLog('warn', `qualification retry: legacy row ${raw.id} reopen failed: ${reopenError.message}`);
+        .select('id, instantly_email_id, error_message, created_at, updated_at')
+        .eq('status', 'error')
+        .not('instantly_email_id', 'is', null)
+        .gte('created_at', recentCutoffIso)
+        .order('created_at', { ascending: false })
+        .range(pageStart, pageStart + legacyPageSize - 1);
+      if (pageError) {
+        workerLog('warn', `qualification retry: legacy error scan failed: ${pageError.message}`);
+        legacyScanFailed = true;
+        break;
+      }
+      const rows = (page ?? []) as LegacyErrorRow[];
+      legacyErrors.push(...rows);
+      if (rows.length < legacyPageSize) break;
+    }
+    if (!legacyScanFailed) {
+      for (const raw of legacyErrors) {
+        const emailId = raw.instantly_email_id?.trim() ?? '';
+        const errorMessage = raw.error_message?.trim() ?? '';
+        if (!emailId || emailId.startsWith('webhook:') || !isTransientQualifyError(errorMessage)) {
+          continue;
+        }
+
+        const legacyClaimBase = db
+          .from('instantly_lead_qualifications')
+          .update({
+            status: 'needs_review',
+            ai_reason: `${TRANSIENT_RETRY_REASON_PREFIX} Recovered legacy terminal retry: ${errorMessage}`.slice(0, 500),
+            ai_confidence: 0,
+            updated_at: nowIso,
+          })
+          .eq('id', raw.id)
+          .eq('status', 'error');
+        const legacyClaim = raw.updated_at
+          ? legacyClaimBase.eq('updated_at', raw.updated_at)
+          : legacyClaimBase.is('updated_at', null);
+        const { error: reopenError } = await legacyClaim;
+        if (reopenError) {
+          workerLog('warn', `qualification retry: legacy row ${raw.id} reopen failed: ${reopenError.message}`);
+        }
       }
     }
   }
@@ -1764,12 +2000,26 @@ export async function reprocessOwnershipReviewRows(
     workerLog('warn', `qualification retry: expired-row DLQ failed: ${expiredError.message}`);
   }
 
-  const { data: candidates, error: candidatesError } = await db
+  let candidatesQuery = db
     .from('instantly_lead_qualifications')
     .select('id, campaign_id, lead_email, instantly_email_id, status, ai_reason, ai_confidence, created_at, updated_at')
     .eq('status', 'needs_review')
     .eq('ai_confidence', 0)
-    .or(retryReasonFilter)
+    .or(retryReasonFilter);
+  candidatesQuery = pageBudgetLane
+    ? candidatesQuery.ilike(
+        'ai_reason',
+        `%${OWNERSHIP_PAGE_BUDGET_REASON_FRAGMENT}%`,
+      )
+    // This reason means the bounded ownership proof remained incomplete, not
+    // that a transient API call failed. Exclude it in SQL before LIMIT so a
+    // large manual-review backlog cannot consume every fresh retry slot.
+    : candidatesQuery.not(
+        'ai_reason',
+        'ilike',
+        `%${OWNERSHIP_PAGE_BUDGET_REASON_FRAGMENT}%`,
+      );
+  const { data: candidates, error: candidatesError } = await candidatesQuery
     .not('instantly_email_id', 'is', null)
     .gte('created_at', recentCutoffIso)
     .lte('updated_at', retryCutoffIso)
@@ -1968,7 +2218,16 @@ async function maybeReprocessOwnershipReviews(): Promise<number> {
   // scan. Cross-process concurrency is covered by the row CAS claim.
   lastOwnershipReviewRetryAt = nowMs;
   try {
-    return await reprocessOwnershipReviewRows({ now: new Date(nowMs) });
+    const now = new Date(nowMs);
+    const active = await reprocessOwnershipReviewRows({ now });
+    // A separate one-row lane eventually rechecks old bounded-page ambiguity
+    // after mailbox/catalog changes, without letting that backlog consume the
+    // five slots reserved for fresh infrastructure and ownership retries.
+    const pageBudget = await reprocessOwnershipReviewRows({
+      now,
+      lane: 'page_budget',
+    });
+    return active + pageBudget;
   } catch (error) {
     workerLog('warn', 'ownership retry cycle failed', error);
     return 0;
@@ -2356,6 +2615,8 @@ async function notifySpecialistsAboutLead(
     projectId?: string | null;
     /** Existing deadline_notification_log row already CAS-claimed by recovery. */
     existingClaimId?: string;
+    /** Recovery already obtained the atomic project/thread decision. */
+    threadClaimConfirmed?: boolean;
     /** Stable attempt timestamp used for failed-delivery backoff. */
     attemptedAt?: string;
   },
@@ -2416,6 +2677,28 @@ async function notifySpecialistsAboutLead(
         return;
       }
       projectId = projectOwner.projectId;
+    }
+
+    if (delivery?.threadClaimConfirmed !== true) {
+      const threadClaim = await claimSpecialistThreadAlert(instantlyDb, qualificationId);
+      if (threadClaim.status === 'duplicate') {
+        workerLog(
+          'info',
+          `Lead notification ${qualificationId} suppressed: thread already belongs to qualification ${threadClaim.winnerQualificationId}`,
+        );
+        return;
+      }
+      if (threadClaim.status === 'retry') {
+        workerLog('warn', `${threadClaim.reason} — lead notification deferred`);
+        if (deliveryClaimed) {
+          await markDelivery({
+            tg_sent: false,
+            tg_error: threadClaim.reason.slice(0, 500),
+            tg_sent_at: deliveryAttemptAt,
+          });
+        }
+        return;
+      }
     }
 
     let boardLink: string | null = null;
@@ -2628,6 +2911,9 @@ type RecoverableLeadQualification = {
   campaign_id: string;
   qualified_project_id: string | null;
   qualified_project_owner_proven: boolean | null;
+  thread_id: string | null;
+  instantly_email_id: string | null;
+  eaccount: string | null;
   lead_email: string;
   lead_name: string | null;
   company_name: string | null;
@@ -2635,6 +2921,8 @@ type RecoverableLeadQualification = {
   reply_subject: string | null;
   reply_body: string | null;
   reply_preview: string | null;
+  last_outbound_preview: string | null;
+  reply_timestamp: string | null;
   ai_reason: string | null;
   created_at: string;
   updated_at: string;
@@ -2713,7 +3001,7 @@ export async function reconcileLeadNotificationDeliveries(
   while (true) {
     const { data: leadRows, error: leadRowsError } = await instantlyDb
       .from('instantly_lead_qualifications')
-      .select('id, campaign_id, qualified_project_id, qualified_project_owner_proven, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_body, reply_preview, ai_reason, created_at, updated_at')
+      .select('id, campaign_id, qualified_project_id, qualified_project_owner_proven, thread_id, instantly_email_id, eaccount, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_body, reply_preview, last_outbound_preview, reply_timestamp, ai_reason, created_at, updated_at')
       .eq('status', 'lead')
       .gte('created_at', recentCutoffIso)
       .order('updated_at', { ascending: true })
@@ -2812,12 +3100,30 @@ export async function reconcileLeadNotificationDeliveries(
     workerLog('warn', 'lead delivery recovery: project-owner batch unavailable', error);
     return 0;
   }
-  const managedDueCandidates = dueCandidates.filter(({ lead }) => {
+  const managedDueCandidates: typeof dueCandidates = [];
+  for (const candidate of dueCandidates) {
+    const { lead } = candidate;
     if (lead.qualified_project_owner_proven === true) {
-      return Boolean(lead.qualified_project_id);
+      if (lead.qualified_project_id) managedDueCandidates.push(candidate);
+      continue;
     }
-    return ownersByCampaign.get(lead.campaign_id)?.status !== 'none';
-  });
+
+    const owner = ownersByCampaign.get(lead.campaign_id);
+    if (!owner || owner.status === 'none') {
+      // Self-serve campaigns intentionally have no specialist alert and must
+      // never call the managed-project claim RPC.
+      continue;
+    }
+    if (owner.status === 'ambiguous') {
+      // Preserve the existing durable delivery failure/backoff behavior. The
+      // notification function will re-check ownership and stop before claim.
+      managedDueCandidates.push(candidate);
+      continue;
+    }
+    if (await persistLegacyLeadOwnerSnapshot(instantlyDb, lead, owner.projectId)) {
+      managedDueCandidates.push(candidate);
+    }
+  }
 
   managedDueCandidates.sort(
     (left, right) =>
@@ -2829,6 +3135,30 @@ export async function reconcileLeadNotificationDeliveries(
   let claimedCount = 0;
   for (const { lead, log } of managedDueCandidates) {
     if (claimedCount >= limit) break;
+    let threadClaimConfirmed = false;
+    if (
+      lead.qualified_project_owner_proven === true &&
+      lead.qualified_project_id
+    ) {
+      const threadClaim = await claimSpecialistThreadAlert(
+        instantlyDb,
+        lead.id,
+        handoffEnabled(),
+      );
+      if (threadClaim.status === 'duplicate') {
+        workerLog(
+          'info',
+          `Lead delivery recovery skipped ${lead.id}: thread alert belongs to ${threadClaim.winnerQualificationId}`,
+        );
+        continue;
+      }
+      if (threadClaim.status === 'retry') {
+        workerLog('warn', `lead delivery recovery: ${threadClaim.reason}`);
+        continue;
+      }
+      threadClaimConfirmed = true;
+    }
+
     let claimId: string | null = null;
     if (!log) {
       const { data: insertedClaim, error: insertClaimError } = await main
@@ -2892,10 +3222,14 @@ export async function reconcileLeadNotificationDeliveries(
       lead.ai_reason,
       {
         existingClaimId: claimId,
+        threadClaimConfirmed,
         attemptedAt: nowIso,
         projectId: lead.qualified_project_id,
       },
     );
+    if (threadClaimConfirmed) {
+      await reconcileLeadHandoffJobs({ qualificationId: lead.id, limit: 1 });
+    }
   }
 
   return claimedCount;
@@ -2998,6 +3332,112 @@ function handoffEnabled(): boolean {
   return v === '1' || v === 'true' || v === 'yes';
 }
 
+type LeadHandoffDisposition =
+  | { disposition: 'completed' | 'skipped'; detail?: string }
+  | { disposition: 'retry'; detail: string };
+
+function isMissingHandoffAutoSendColumn(error: { code?: string; message?: string } | null): boolean {
+  if (!error) return false;
+  const message = error.message ?? '';
+  if (!/\bauto_send\b/i.test(message)) return false;
+  return (
+    error.code === '42703' ||
+    error.code === 'PGRST204' ||
+    /(?:column|does not exist|schema cache)/i.test(message)
+  );
+}
+
+export async function reconcileLeadHandoffJobs(options: {
+  qualificationId?: string;
+  limit?: number;
+  now?: Date;
+} = {}): Promise<number> {
+  if (!supabaseAdmin || !handoffEnabled()) return 0;
+  const db = supabaseAdmin;
+  const limit = Math.max(1, Math.min(10, options.limit ?? 2));
+  const { data: leased, error: leaseError } = await db.rpc(
+    'lease_instantly_lead_handoff_jobs',
+    {
+      p_limit: limit,
+      p_qualification_id: options.qualificationId ?? null,
+      p_lease_seconds: 300,
+    },
+  );
+  if (leaseError) {
+    if (!isMissingSpecialistAlertClaimRpc(leaseError)) {
+      workerLog('warn', `Handoff outbox lease failed: ${leaseError.message}`);
+    }
+    return 0;
+  }
+
+  let processed = 0;
+  for (const job of (Array.isArray(leased) ? leased : leased ? [leased] : []) as Array<{
+    qualification_id: string;
+    lease_token: string;
+  }>) {
+    let result: LeadHandoffDisposition;
+    const { data: lead, error: leadError } = await db
+      .from('instantly_lead_qualifications')
+      .select('id, campaign_id, qualified_project_id, instantly_email_id, eaccount, thread_id, lead_email, lead_name, campaign_name, reply_subject, reply_body, reply_preview, last_outbound_preview, reply_timestamp')
+      .eq('id', job.qualification_id)
+      .maybeSingle();
+    if (leadError) {
+      result = { disposition: 'retry', detail: `qualification lookup failed: ${leadError.message}` };
+    } else if (!lead || !lead.qualified_project_id) {
+      result = { disposition: 'skipped', detail: 'qualification or proven project is unavailable' };
+    } else {
+      const storedReplyText = String(lead.reply_body ?? '').trim()
+        ? String(lead.reply_body)
+        : String(lead.reply_preview ?? '');
+      result = await maybePostLeadHandoff({
+        instantlyDb: db,
+        qualificationId: String(lead.id),
+        campaignId: String(lead.campaign_id),
+        projectId: String(lead.qualified_project_id),
+        reply: {
+          id: lead.instantly_email_id ?? undefined,
+          campaign_id: lead.campaign_id,
+          thread_id: lead.thread_id ?? undefined,
+          from_address_email: lead.lead_email,
+          subject: lead.reply_subject ?? undefined,
+          body: { text: storedReplyText },
+          ue_type: 2,
+          eaccount: lead.eaccount ?? undefined,
+          timestamp_email: lead.reply_timestamp ?? undefined,
+        } as Email,
+        leadEmail: String(lead.lead_email),
+        leadName: lead.lead_name ?? null,
+        campaignName: lead.campaign_name ?? null,
+        leadReplyText: storedReplyText,
+        lastOutboundText: lead.last_outbound_preview ?? null,
+        apiKey: API_KEY(),
+      });
+    }
+
+    const retryAt = result.disposition === 'retry'
+      ? new Date((options.now ?? new Date()).getTime() + 15 * 60 * 1000).toISOString()
+      : null;
+    const { data: finished, error: finishError } = await db.rpc('finish_instantly_lead_handoff_job', {
+      p_qualification_id: job.qualification_id,
+      p_lease_token: job.lease_token,
+      p_disposition: result.disposition,
+      p_outcome: result.disposition === 'retry' ? null : result.detail ?? null,
+      p_error: result.disposition === 'retry' ? result.detail : null,
+      p_retry_at: retryAt,
+    });
+    if (finishError) {
+      workerLog('warn', `Handoff outbox finish failed for ${job.qualification_id}: ${finishError.message}`);
+      continue;
+    }
+    if (finished !== true) {
+      workerLog('warn', `Handoff outbox finish lost its lease for ${job.qualification_id}`);
+      continue;
+    }
+    processed++;
+  }
+  return processed;
+}
+
 /**
  * If the lead's project has handoff configured (handoff_email + handoff_legend)
  * and a responsible specialist, post the handoff card to Telegram with a
@@ -3020,11 +3460,50 @@ export async function maybePostLeadHandoff(opts: {
   lastOutboundText: string | null;
   apiKey: string;
   accountId?: string;
-}): Promise<void> {
+}): Promise<LeadHandoffDisposition> {
   try {
-    if (!handoffEnabled() || !supabaseMain) return;
+    if (!handoffEnabled()) return { disposition: 'skipped', detail: 'handoff disabled' };
+    if (!supabaseMain) return { disposition: 'retry', detail: 'main database unavailable' };
     const main = supabaseMain;
     const { instantlyDb, qualificationId, campaignId } = opts;
+
+    // The delivery mode is snapshotted on materialization. In particular, an
+    // auto handoff may crash after INSERT but before sendHandoffNow, leaving a
+    // perfectly valid `pending` row that still needs delivery. Manual pending
+    // rows, and every sent row, are terminal for the worker outbox.
+    const existingLookup = await instantlyDb
+      .from('instantly_pending_handoffs')
+      .select('id, qualification_id, campaign_id, draft_text, reply_to_uuid, eaccount, client_email, responsible_user_id, status, auto_send, error_message')
+      .eq('qualification_id', qualificationId)
+      .maybeSingle();
+    let existing = existingLookup.data as Record<string, unknown> | null;
+    let existingError = existingLookup.error;
+    if (isMissingHandoffAutoSendColumn(existingError)) {
+      const legacyLookup = await instantlyDb
+        .from('instantly_pending_handoffs')
+        .select('id, qualification_id, campaign_id, draft_text, reply_to_uuid, eaccount, client_email, responsible_user_id, status, error_message')
+        .eq('qualification_id', qualificationId)
+        .maybeSingle();
+      existing = legacyLookup.data as Record<string, unknown> | null;
+      existingError = legacyLookup.error;
+    }
+    if (existingError) return { disposition: 'retry', detail: `pending lookup failed: ${existingError.message}` };
+    if (existing) {
+      const materialized = existing as unknown as PendingHandoffRow & {
+        status: 'pending' | 'sent' | 'failed';
+        auto_send?: boolean;
+        error_message?: string | null;
+      };
+      const automatic = materialized.auto_send === true ||
+        materialized.error_message?.startsWith(HANDOFF_AUTO_SEND_MARKER) === true;
+      if (!automatic || materialized.status === 'sent') {
+        return { disposition: 'completed', detail: 'handoff already materialized' };
+      }
+      const resent = await sendHandoffNow(instantlyDb, materialized);
+      return resent.ok
+        ? { disposition: 'completed', detail: `auto handoff sent via ${resent.via}` }
+        : { disposition: 'retry', detail: `auto-send failed: ${resent.error}` };
+    }
 
     // 1. Project → handoff config + responsible specialist. New
     // qualifications carry an immutable snapshot; the lookup remains only for
@@ -3040,14 +3519,14 @@ export async function maybePostLeadHandoff(opts: {
           `Handoff: project-owner lookup failed for campaign ${campaignId} — skip all side effects`,
           error,
         );
-        return;
+        return { disposition: 'retry', detail: 'project-owner lookup failed' };
       }
       if (projectOwner.status !== 'resolved') {
         workerLog(
           'warn',
           `Handoff: campaign ${campaignId} has ${projectOwner.status === 'ambiguous' ? projectOwner.projectIds.length : 0} distinct project owners — skip all side effects`,
         );
-        return;
+        return { disposition: 'skipped', detail: 'project owner is not uniquely resolved' };
       }
       projectId = projectOwner.projectId;
     }
@@ -3059,28 +3538,23 @@ export async function maybePostLeadHandoff(opts: {
       .maybeSingle();
     if (projectsError) {
       workerLog('warn', `Handoff: project config lookup failed for campaign ${campaignId} — skip all side effects`);
-      return;
+      return { disposition: 'retry', detail: 'project config lookup failed' };
     }
     const project = projectRow &&
       Boolean((projectRow.handoff_email as string | null)?.trim()) &&
       Boolean((projectRow.handoff_legend as string | null)?.trim())
       ? projectRow as { handoff_email: string; handoff_legend: string; handoff_ai_adapt: boolean; handoff_auto_send: boolean; specialist_user_id: string | null }
       : undefined;
-    if (!project) return; // handoff not configured → off for this project
+    if (!project) return { disposition: 'skipped', detail: 'handoff is not configured' };
 
     if (!project.specialist_user_id) {
       workerLog('warn', `Handoff: campaign ${campaignId} project has no specialist_user_id — skip (only the responsible specialist may send)`);
-      return;
+      return { disposition: 'skipped', detail: 'project has no responsible specialist' };
     }
 
-    // 2. One handoff per qualification.
-    const { data: existing } = await instantlyDb
-      .from('instantly_pending_handoffs').select('id').eq('qualification_id', qualificationId).maybeSingle();
-    if (existing) return;
-
-    // 3. Reply target + sending mailbox.
+    // 2. Reply target + sending mailbox.
     const replyToUuid = opts.reply.id;
-    if (!replyToUuid) return;
+    if (!replyToUuid) return { disposition: 'skipped', detail: 'reply target is unavailable' };
     let eaccount = (opts.reply as { eaccount?: string | null }).eaccount ?? null;
     if (!eaccount) {
       try {
@@ -3092,7 +3566,7 @@ export async function maybePostLeadHandoff(opts: {
     }
     if (!eaccount) {
       workerLog('warn', `Handoff: no eaccount for ${opts.leadEmail} (qual ${qualificationId}) — skip`);
-      return;
+      return { disposition: 'retry', detail: 'sending mailbox is unavailable' };
     }
 
     // 4. Текст передачи: по тумблеру проекта — OFF: легенда ДОСЛОВНО (дефолт,
@@ -3106,7 +3580,7 @@ export async function maybePostLeadHandoff(opts: {
       lastOutboundText: opts.lastOutboundText,
       apiKey: opts.apiKey,
     });
-    if (!draft.trim()) return;
+    if (!draft.trim()) return { disposition: 'skipped', detail: 'handoff draft is empty' };
 
     // 5. Responsible specialist name (display only).
     let specialistName = 'ответственный';
@@ -3121,7 +3595,7 @@ export async function maybePostLeadHandoff(opts: {
     const chatId = handoffChatId();
     if (!token || !chatId) {
       workerLog('warn', 'Handoff: LEAD_ALERTS bot token/chat missing — skip post');
-      return;
+      return { disposition: 'retry', detail: 'Telegram handoff destination is unavailable' };
     }
     const boardLink = await getBoardLinkForProject(instantlyDb, projectId);
     const contactLabel = opts.leadName ? `${opts.leadName} (${opts.leadEmail})` : opts.leadEmail;
@@ -3151,33 +3625,46 @@ export async function maybePostLeadHandoff(opts: {
     });
     if (!messageId) {
       workerLog('warn', `Handoff: failed to post TG message (qual ${qualificationId})`);
-      return;
+      return { disposition: 'retry', detail: 'Telegram handoff post failed' };
     }
 
     // 7. Pending record: для авто-режима — основа отправки; для кнопки — акт при нажатии.
-    const { data: pendingRow, error: insErr } = await instantlyDb
+    const pendingPayload = {
+      qualification_id: qualificationId,
+      campaign_id: campaignId,
+      draft_text: draft,
+      reply_to_uuid: replyToUuid,
+      eaccount,
+      client_email: project.handoff_email,
+      responsible_user_id: project.specialist_user_id,
+      tg_chat_id: Number(chatId),
+      tg_message_id: messageId,
+      auto_send: autoSend,
+      error_message: autoSend ? HANDOFF_AUTO_SEND_MARKER : null,
+      status: 'pending',
+    };
+    let { data: pendingRow, error: insErr } = await instantlyDb
       .from('instantly_pending_handoffs')
-      .insert({
-        qualification_id: qualificationId,
-        campaign_id: campaignId,
-        draft_text: draft,
-        reply_to_uuid: replyToUuid,
-        eaccount,
-        client_email: project.handoff_email,
-        responsible_user_id: project.specialist_user_id,
-        tg_chat_id: Number(chatId),
-        tg_message_id: messageId,
-        status: 'pending',
-      })
+      .insert(pendingPayload)
       .select('id')
       .maybeSingle();
+    if (isMissingHandoffAutoSendColumn(insErr)) {
+      const { auto_send: _autoSend, ...legacyPayload } = pendingPayload;
+      const legacyInsert = await instantlyDb
+        .from('instantly_pending_handoffs')
+        .insert(legacyPayload)
+        .select('id')
+        .maybeSingle();
+      pendingRow = legacyInsert.data;
+      insErr = legacyInsert.error;
+    }
     if (insErr || !pendingRow) {
       workerLog('error', `Handoff: pending insert failed (qual ${qualificationId}): ${insErr?.message ?? 'no row returned'}`);
-      return;
+      return { disposition: 'retry', detail: `pending insert failed: ${insErr?.message ?? 'no row returned'}` };
     }
     if (!autoSend) {
       workerLog('info', `Handoff posted for ${opts.leadEmail} (qual ${qualificationId}); awaiting ${specialistName}`);
-      return;
+      return { disposition: 'completed' };
     }
 
     // 8. Автопередача: отправляем сразу через общий sender (reply + fallback).
@@ -3190,6 +3677,8 @@ export async function maybePostLeadHandoff(opts: {
       eaccount,
       client_email: project.handoff_email,
       responsible_user_id: project.specialist_user_id,
+      auto_send: autoSend,
+      error_message: autoSend ? HANDOFF_AUTO_SEND_MARKER : null,
     });
     if (!sent.ok) {
       await editHandoffMessage(
@@ -3199,10 +3688,12 @@ export async function maybePostLeadHandoff(opts: {
         `${text}\n\n❌ Автопередача не отправлена: ${escapeHtml(sent.error.slice(0, 200))}`,
       );
       workerLog('warn', `Handoff auto-send failed for ${opts.leadEmail} (qual ${qualificationId}): ${sent.error}`);
-      return;
+      return { disposition: 'retry', detail: `auto-send failed: ${sent.error}` };
     }
     workerLog('info', `Handoff auto-sent for ${opts.leadEmail} (qual ${qualificationId}, via ${sent.via})`);
+    return { disposition: 'completed' };
   } catch (err) {
     workerLog('error', `Handoff post failed (qual ${opts.qualificationId})`, err);
+    return { disposition: 'retry', detail: err instanceof Error ? err.message : String(err) };
   }
 }

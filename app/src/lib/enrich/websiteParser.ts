@@ -884,6 +884,11 @@ export async function fetchHtmlWithRetry(
     signal?: AbortSignal;
     allowHttpErrors?: boolean;
     retries?: number;
+    /**
+     * undefined сохраняет стандартный маршрут priority → fallback.
+     * false принудительно использует fallback на всех попытках; true — priority.
+     */
+    preferPriority?: boolean;
   },
 ): Promise<{ html: string; status: number } | null> {
   const retries = Math.max(0, Math.floor(options?.retries ?? FETCH_RETRIES));
@@ -891,7 +896,7 @@ export async function fetchHtmlWithRetry(
     // Первая попытка — приоритетный пул (RU). Retry — уходим в fallback:
     // если RU-прокси упал/дал 403 на .ru-сайте, второй раз через тот же
     // RU-прокси обычно ничего не даст; шанс через HK/EU выше нуля.
-    const preferPriority = attempt === 0;
+    const preferPriority = options?.preferPriority ?? attempt === 0;
     const result = await fetchHtml(url, { ...options, preferPriority });
     if (result) return result;
     if (options?.signal?.aborted) return null;

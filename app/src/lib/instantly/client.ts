@@ -80,6 +80,12 @@ async function request<T>(
 
     let res: Response;
     try {
+      // Everything that can fail locally (limiter, API key, URL and JSON
+      // serialization) has completed. From this point a thrown timeout or
+      // network error is ambiguous: the provider may already have applied the
+      // request. The hook is intentionally write-ahead and may fire again on
+      // a 429 retry; callers must make their record idempotent.
+      requestOptions?.onRequestAttempt?.();
       res = await fetch(url.toString(), init);
     } finally {
       clearTimeout(timeoutId);

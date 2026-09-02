@@ -19,6 +19,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { buildCampaignPayloadFromPreset } from '@/lib/clientLaunch/buildCampaignPayload';
 import { hasUsableCampaignSequences } from '@/lib/clientLaunch/campaignSequences';
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
@@ -58,6 +59,9 @@ interface VeLaunchMessages {
   baseNotFound: string;
   presetLoadFailed: string;
   presetNotFound: string;
+  blocklistLoadFailed: string;
+  allContactsBlocked: string;
+  blockedContactsNote: (count: number) => string;
   mailboxScopeRequired: string;
   projectNotFound: string;
   projectPresetMismatch: string;
@@ -88,6 +92,10 @@ const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
     baseNotFound: 'База не найдена',
     presetLoadFailed: 'Не удалось загрузить пресет',
     presetNotFound: 'Пресет не найден',
+    blocklistLoadFailed: 'Не удалось проверить чёрный список клиента. Запуск остановлен.',
+    allContactsBlocked: 'После проверки чёрного списка клиента не осталось контактов для запуска.',
+    blockedContactsNote: (count) =>
+      `Исключено контактов из чёрного списка клиента: ${count.toLocaleString('ru-RU')}.`,
     mailboxScopeRequired: 'В пресете нет почтовых аккаунтов для безопасного запуска.',
     projectNotFound: 'Проект базы не найден',
     projectPresetMismatch:
@@ -122,6 +130,10 @@ const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
     baseNotFound: 'Base not found',
     presetLoadFailed: 'Failed to load the preset',
     presetNotFound: 'Preset not found',
+    blocklistLoadFailed: 'The client blocklist could not be verified. Launch was stopped.',
+    allContactsBlocked: 'No contacts remain after applying the client blocklist.',
+    blockedContactsNote: (count) =>
+      `Contacts excluded by the client blocklist: ${count.toLocaleString('en-US')}.`,
     mailboxScopeRequired: 'The preset has no sender accounts for a safe launch.',
     projectNotFound: 'The base project was not found',
     projectPresetMismatch:
@@ -482,12 +494,11 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     segment: string | null;
     leadIdx: number[];
   }
-  const groups: LeadGroup[] = buildSegmentationLaunchGroups({
+  let groups: LeadGroup[] = buildSegmentationLaunchGroups({
     segments: segmentWhens,
     leadCount: leads.length,
     classification,
   }).map((group) => ({ segment: group.segment, leadIdx: group.leadIndices }));
-  const segmentsMaterialized = groups.some((group) => group.segment !== null);
 
   // 6. Пресет — только после fail-closed аудита. До этой точки нет ни одного
   //    внешнего Instantly-вызова и тем более мутаций кампаний.
@@ -508,6 +519,42 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   }
   const instantlyAccountId = resolveInstantlyAccountId(preset.instantly_account_id);
   const instantlyRequestOptions = { accountId: instantlyAccountId };
+
+  // Client-scoped blocklist is the safety boundary for shared Instantly
+  // workspaces. Read it fail-closed before the launch reservation and before
+  // any remote campaign mutation, then preserve segmentation by filtering the
+  // original lead indices inside each group.
+  const clientUserId = typeof preset.client_user_id === 'string'
+    ? preset.client_user_id.trim()
+    : '';
+  let blockedContactsCount = 0;
+  try {
+    if (!clientUserId) throw new Error('Client preset has no client_user_id');
+    const blockedEmails = await getBlockedEmailSet(instantlyDb, clientUserId);
+    const filtered = filterBlockedLeads(leads, blockedEmails);
+    blockedContactsCount = filtered.blockedCount;
+    const allowedEmails = new Set(filtered.kept.map((lead) => lead.email.trim().toLowerCase()));
+    groups = groups
+      .map((group) => ({
+        ...group,
+        leadIdx: group.leadIdx.filter((index) =>
+          allowedEmails.has(leads[index].email.trim().toLowerCase()),
+        ),
+      }))
+      .filter((group) => group.leadIdx.length > 0);
+  } catch (error) {
+    await logError(`${eventPrefix}.blocklist_failed`, error, {
+      userId,
+      templateId,
+      presetId,
+      clientUserId: clientUserId || null,
+    });
+    return { status: 500, body: { error: t.blocklistLoadFailed } };
+  }
+  if (groups.length === 0) {
+    return { status: 400, body: { error: t.allContactsBlocked } };
+  }
+  const segmentsMaterialized = groups.some((group) => group.segment !== null);
 
   // A project gets one immutable preset/workspace scope on its first launch
   // attempt. The compare-and-set helper closes simultaneous first-choice
@@ -812,6 +859,9 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     campaigns,
   };
   const warnings: string[] = [];
+  if (blockedContactsCount > 0) {
+    warnings.push(t.blockedContactsNote(blockedContactsCount));
+  }
   if (audience.excluded.invalidEmailStatus > 0 || audience.excluded.lowRelevance > 0) {
     warnings.push(
       t.rowsSkippedNote(
@@ -886,6 +936,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       launchReservationId: reservationId,
       accepted,
       totalLeads: leads.length,
+      blockedContacts: blockedContactsCount,
       force,
     },
   );

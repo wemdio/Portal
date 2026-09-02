@@ -22,6 +22,10 @@ import {
   type ProgressFn,
   type CancelCheckFn,
 } from './processingSteps';
+import {
+  stripBaseConstructorCheckpointMetadata,
+  stripEmailValidationCheckpointMetadata,
+} from './baseConstructorCheckpoint';
 import { extractEmail, findColumnIndex } from './dfybUtils';
 import { uploadExportArtifact } from './csvExportArtifact';
 
@@ -201,7 +205,7 @@ export async function updateJobWithRetry(
   jobId: string,
   patch: Record<string, unknown>,
   label: string,
-  opts?: { neqStatus?: string },
+  opts?: { neqStatus?: string; runToken?: string },
 ): Promise<{ error: { message: string } | null; ms: number; attempts: number }> {
   const t0 = Date.now();
   let lastError: { message: string } | null = null;
@@ -212,6 +216,10 @@ export async function updateJobWithRetry(
       // a mid-run cancel must not be overwritten back to completed. A 0-row
       // match is not an error — the guard just makes the write a no-op.
       if (opts?.neqStatus) q = q.neq('status', opts.neqStatus);
+      // Ownership fence: after a redeploy/reclaim the old container may still
+      // finish an HTTP call or JavaScript turn. Its token no longer matches,
+      // so its checkpoint/final write must become a no-op.
+      if (opts?.runToken) q = q.eq('run_token', opts.runToken);
       const { error } = await q;
       if (!error) return { error: null, ms: Date.now() - t0, attempts: attempt };
       lastError = { message: error.message };
@@ -331,6 +339,7 @@ export async function updateJobProgress(
   stepIndex: number,
   stepKey: string,
   progress: number,
+  runToken?: string,
 ) {
   const patch: Record<string, unknown> = {
     current_step: stepIndex + 1,
@@ -354,7 +363,7 @@ export async function updateJobProgress(
     patch.started_at = new Date().toISOString();
   }
 
-  await admin
+  let query = admin
     .from('base_constructor_jobs')
     .update(patch)
     .eq('id', jobId)
@@ -366,11 +375,46 @@ export async function updateJobProgress(
     // UPDATE не находит строку, прогресс/статус не перетираются, и следующий
     // isCancelled() видит 'cancelled' → шаг бросает 'Отменено' и встаёт.
     .in('status', ['pending', 'processing']);
+  if (runToken) query = query.eq('run_token', runToken);
+  await query;
 }
 
-async function isCancelled(jobId: string): Promise<boolean> {
-  const { data } = await admin.from('base_constructor_jobs').select('status').eq('id', jobId).single();
+async function isCancelled(jobId: string, runToken?: string): Promise<boolean> {
+  const { data, error } = await admin
+    .from('base_constructor_jobs')
+    .select('status, run_token')
+    .eq('id', jobId)
+    .single();
+  if (error) {
+    // A transient read failure is not evidence that ownership changed. All
+    // writes remain token-fenced, so continuing computation is safe and avoids
+    // turning a brief PostgREST blip into a failed multi-hour job.
+    console.warn(`[base-constructor][${jobId}] cancellation check failed: ${error.message}`);
+    return false;
+  }
+  // Losing ownership is cancellation from this runner's point of view. The
+  // replacement worker owns all future progress and persisted data.
+  if (runToken && data?.run_token !== runToken) return true;
   return data?.status === 'cancelled';
+}
+
+async function ownsActiveRun(jobId: string, runToken?: string): Promise<boolean> {
+  if (!runToken) return true; // Backward compatibility for isolated unit tests.
+  const { data, error } = await admin
+    .from('base_constructor_jobs')
+    .select('id')
+    .eq('id', jobId)
+    .eq('status', 'processing')
+    .eq('run_token', runToken)
+    .maybeSingle();
+  if (error) {
+    // Same fail-open rationale as isCancelled(): token guards on every write
+    // are authoritative, while an availability blip on this advisory read is
+    // not proof that the runner is stale.
+    console.warn(`[base-constructor][${jobId}] ownership check failed: ${error.message}`);
+    return true;
+  }
+  return !!data;
 }
 
 type StepRunner = (
@@ -563,7 +607,7 @@ async function logTaScoringFailures(
   }
 }
 
-export async function runBaseConstructorJob(jobId: string): Promise<void> {
+export async function runBaseConstructorJob(jobId: string, runToken?: string): Promise<void> {
   try {
     const { data: job, error } = await admin
       .from('base_constructor_jobs')
@@ -572,6 +616,12 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
       .single();
 
     if (error || !job) throw new Error(`Job not found: ${error?.message}`);
+    if (runToken && job.run_token !== runToken) {
+      console.warn(
+        `[base-constructor][${jobId}] refusing to start: ownership token was already replaced`,
+      );
+      return;
+    }
 
     const selectedSteps: StepKey[] = job.selected_steps || [];
     const stepConfig: StepConfig = job.step_config || {};
@@ -598,17 +648,34 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
     //      идемпотентны по определению, ta_scoring и clean_names AI
     //      просто перезапишут.
     const isResume = job.status === 'processing' && (job.current_step ?? 0) > 0;
+    // Older workers could persist validate_emails=100 just before returning
+    // the filtered rows. A deploy in that gap leaves only the pre-filter
+    // checkpoint durable. Replaying validation is idempotent for conclusive
+    // rows and is the only safe way to distinguish/recover that legacy state.
+    const mustReplayCompletedValidation = isResume
+      && job.current_step_key === 'validate_emails'
+      && (job.current_step_progress ?? 0) >= 100;
     const resumeFromStep = isResume
-      ? (job.current_step_progress ?? 0) >= 100
+      ? mustReplayCompletedValidation
+        ? Math.max(0, job.current_step - 1)
+        : (job.current_step_progress ?? 0) >= 100
         ? job.current_step // последний шаг finished — стартуем со следующего (1-based → как 0-based индекс след. шага)
         : Math.max(0, job.current_step - 1) // mid-step — перезапускаем его
       : 0;
 
-    await admin.from('base_constructor_jobs').update({
+    let startQuery = admin.from('base_constructor_jobs').update({
       started_at: new Date().toISOString(),
       status: 'processing',
       total_steps: selectedSteps.length,
     }).eq('id', jobId);
+    if (runToken) startQuery = startQuery.eq('run_token', runToken);
+    await startQuery;
+    if (!(await ownsActiveRun(jobId, runToken))) {
+      console.warn(
+        `[base-constructor][${jobId}] ownership changed before runner startup`,
+      );
+      return;
+    }
 
     if (isResume) {
       console.log(
@@ -625,7 +692,7 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
     if (locale === 'en') data = normalizeEnHeaders(data);
     if (data.length === 0) throw new Error('Нет данных для обработки');
 
-    const cancelCheck: CancelCheckFn = () => isCancelled(jobId);
+    const cancelCheck: CancelCheckFn = () => isCancelled(jobId, runToken);
 
     /**
      * Persist `data` to the row, with timing + size + supabase error logging.
@@ -636,9 +703,9 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
      * по jobId в `docker logs portal`.
      *
      * Retry: updateJobWithRetry — 3 попытки с 1s/2s/4s backoff, защищает от
-     * транзитных 5xx/network-блипов в PostgREST gateway. Не throws после
-     * исчерпания — persistData продолжает pipeline (на следующем шаге может
-     * повезти, плюс finally-блок выше может пометить failed по-другому).
+     * транзитных 5xx/network-блипов в PostgREST gateway. После исчерпания
+     * попыток останавливаем pipeline: публиковать progress=100 при несохранённом
+     * checkpoint/result опаснее, чем явно завершить job с ошибкой.
      */
     async function persistData(label: string, payload: string[][]): Promise<void> {
       const sanitized = sanitizeRowsForJsonb(payload);
@@ -650,11 +717,13 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
         jobId,
         { data: sanitized },
         `persistData:${label}`,
+        { runToken },
       );
       if (error) {
         console.error(
           `[base-constructor][${jobId}] persistData(${label}) FAILED in ${ms}ms after ${attempts} attempt(s) — ${error.message} (rows=${rows}, cols=${headerCols}, ~${approxBytes}B)`,
         );
+        throw new Error(`Failed to persist ${label}: ${error.message}`);
       } else {
         const retryNote = attempts > 1 ? ` (after ${attempts} attempts)` : '';
         console.log(
@@ -673,11 +742,12 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
         continue;
       }
 
-      if (await isCancelled(jobId)) return;
+      if (await isCancelled(jobId, runToken)) return;
 
-      // enrich_descriptions stores a private attempted-row marker in its
-      // mid-step checkpoints. Preserve it only while resuming that same step;
-      // no later runner or user export may observe the technical column.
+      // Each long-running step may store private resume state in the row
+      // matrix. Preserve only the state owned by the step being resumed; a
+      // restart after progress=100 can otherwise skip that step and leak its
+      // private column into the next runner or final CSV.
       if (stepKey !== 'enrich_descriptions') {
         const cleanData = stripEnrichCheckpointMetadata(data);
         if (cleanData !== data) {
@@ -687,8 +757,43 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
           data = cleanData;
         }
       }
+      if (stepKey !== 'validate_emails') {
+        const cleanData = stripEmailValidationCheckpointMetadata(data);
+        if (cleanData !== data) {
+          console.log(
+            `[base-constructor][${jobId}] stripped email-validation checkpoint metadata before step '${stepKey}'`,
+          );
+          data = cleanData;
+        }
+      }
 
-      const progressFn: ProgressFn = (progress) => updateJobProgress(jobId, i, stepKey, progress);
+      // On a mid-step resume the runner works only on the unprocessed tail.
+      // Its local 0..100 callbacks therefore describe the tail, not the whole
+      // original step. Map them into savedProgress..100 and keep an in-memory
+      // monotonic floor so the UI never jumps 45% -> 0% after a deploy.
+      const isResumingCurrentStep =
+        isResume
+        && i === resumeFromStep
+        && job.current_step === i + 1
+        && ((job.current_step_progress ?? 0) < 100 || mustReplayCompletedValidation);
+      const savedProgressFloor = isResumingCurrentStep
+        ? mustReplayCompletedValidation
+          ? 99
+          : Math.min(99, Math.max(0, Math.round(job.current_step_progress ?? 0)))
+        : 0;
+      let lastReportedProgress = savedProgressFloor;
+      const progressFn: ProgressFn = async (progress) => {
+        // A step's local 100 means "the function is about to return", not
+        // "its returned rows are durable". Keep persisted progress at <=99;
+        // the worker publishes 100 only after saving non-final output or in
+        // the atomic final data+completed update below.
+        const normalized = Math.min(99, Math.max(0, Math.round(progress)));
+        const mapped = Math.min(99, isResumingCurrentStep
+          ? savedProgressFloor + Math.round(((100 - savedProgressFloor) * normalized) / 100)
+          : normalized);
+        lastReportedProgress = Math.max(lastReportedProgress, mapped);
+        await updateJobProgress(jobId, i, stepKey, lastReportedProgress, runToken);
+      };
       await progressFn(0);
 
       // Шаги которые мутируют состояние строк И идут >> минуты — у них в
@@ -786,10 +891,23 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
         `[base-constructor][${jobId}] step '${stepKey}' returned in ${Date.now() - stepStart}ms (output rows=${Math.max(0, data.length - 1)}, cols=${data[0]?.length ?? 0})`,
       );
 
+      // The token can change while the runner is awaiting SMTP/HTTP/AI. Do
+      // not build an artifact or attempt any after-step/final write once a
+      // replacement worker owns the row.
+      if (!(await ownsActiveRun(jobId, runToken))) {
+        console.warn(
+          `[base-constructor][${jobId}] ownership changed during '${stepKey}', discarding stale result`,
+        );
+        return;
+      }
+
       const isLast = i === selectedSteps.length - 1;
       if (!isLast) {
-        // Persist intermediate data so the next step has it on resume.
+        // Persist intermediate data BEFORE progress=100. A crash in the
+        // opposite order makes resume skip this step while retaining its old
+        // checkpoint (real validation restart/data-loss window).
         await persistData(`after:${stepKey}`, data);
+        await updateJobProgress(jobId, i, stepKey, 100, runToken);
       }
       // For the last step we skip the intermediate write and let the final
       // atomic update below set both `data` and `status='completed'` together —
@@ -797,9 +915,10 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
       // stuck in 'processing' at 100% with no result_stats.
     }
 
-    // Belt-and-suspenders for legacy/in-flight checkpoints where enrich was
-    // the final step and the worker died between checkpoint and completion.
-    data = stripEnrichCheckpointMetadata(data);
+    // Belt-and-suspenders for legacy/in-flight checkpoints where a resumable
+    // step was already marked 100% before its cleaned return value persisted.
+    // Strip before calculating stats as well as before building the export.
+    data = stripBaseConstructorCheckpointMetadata(data);
     const header = data[0] || [];
     const body = data.slice(1);
     const emailIdx = findColumnIndex(header, 'email');
@@ -830,14 +949,20 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
     // resurrected to processing, и молчит на shutdown — иначе затрёт
     // fast-handoff backdate (см. updateJobProgress).
     if (!isShuttingDown()) {
-      await admin
+      let heartbeatQuery = admin
         .from('base_constructor_jobs')
         .update({ started_at: new Date().toISOString() })
         .eq('id', jobId)
         .eq('status', 'processing');
+      if (runToken) heartbeatQuery = heartbeatQuery.eq('run_token', runToken);
+      await heartbeatQuery;
     }
 
-    const exportArtifact = await uploadExportArtifact(admin, jobId, finalSanitized);
+    // A reclaimed runner uses a different storage object. Its token-fenced DB
+    // update cannot publish this path, so even a late upload from the old
+    // container cannot overwrite the active owner's download artifact.
+    const artifactOwnerKey = runToken ? `${jobId}/${runToken}` : jobId;
+    const exportArtifact = await uploadExportArtifact(admin, artifactOwnerKey, finalSanitized);
     if (!exportArtifact) {
       console.warn(`[base-constructor][${jobId}] export artifact not built — download will use legacy path`);
     }
@@ -877,7 +1002,7 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
         },
       },
       'final',
-      { neqStatus: 'cancelled' },
+      { neqStatus: 'cancelled', runToken },
     );
     if (finalErr) {
       console.error(
@@ -895,10 +1020,12 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
     // .neq('status','cancelled'): если шаг упал из-за отмены (stepTAScore и др.
     // бросают 'Отменено' при isCancelled), НЕ перетираем намеренный 'cancelled'
     // на 'failed' — иначе пользователь видит «Ошибка» вместо «Отменена».
-    await admin.from('base_constructor_jobs').update({
+    let failureQuery = admin.from('base_constructor_jobs').update({
       status: 'failed',
       error_message: message.slice(0, 500),
       completed_at: new Date().toISOString(),
     }).eq('id', jobId).neq('status', 'cancelled');
+    if (runToken) failureQuery = failureQuery.eq('run_token', runToken);
+    await failureQuery;
   }
 }

@@ -8,6 +8,15 @@ export const PAYMENT_DEPARTMENTS = [
 export type PaymentDepartment = (typeof PAYMENT_DEPARTMENTS)[number];
 export type PaymentExpenseType = 'one_time' | 'planned' | 'legacy_unclassified';
 export type NewPaymentExpenseType = Exclude<PaymentExpenseType, 'legacy_unclassified'>;
+export type PaymentBudgetScope = 'general' | 'costs';
+export const PAYMENT_COST_CATEGORIES = [
+  'instantly',
+  'email',
+  'bases',
+  'domains',
+  'other',
+] as const;
+export type PaymentCostCategory = (typeof PAYMENT_COST_CATEGORIES)[number];
 export type PaymentUrgency = 'normal' | 'urgent' | 'critical';
 export type PaymentRequestStatus = 'pending' | 'approved' | 'paid' | 'rejected';
 export type PaymentApprovalReason = 'planned' | 'limit_exceeded' | null;
@@ -34,6 +43,8 @@ export interface PaymentRequest {
   project: PaymentProject | null;
   comment: string | null;
   expenseType: PaymentExpenseType;
+  budgetScope: PaymentBudgetScope;
+  costCategory: PaymentCostCategory | null;
   expectedPaymentOn: string;
   urgency: PaymentUrgency;
   documentUrl: string | null;
@@ -50,6 +61,31 @@ export interface PaymentRequest {
   updatedAt: string;
 }
 
+export type PaymentCostCategoryTotals = Record<PaymentCostCategory, {
+  paid: number;
+  reserved: number;
+}>;
+
+export interface PaymentCostBudgetSummary {
+  limit: number;
+  paid: number;
+  reserved: number;
+  used: number;
+  remaining: number;
+  overage: number;
+  usagePct: number;
+  level: PaymentBudgetLevel;
+  dataComplete: boolean;
+  missingFxCount: number;
+  mailPaid: number;
+  mailReserved: number;
+  techPaid: number;
+  techReserved: number;
+  manualPaid: number;
+  manualReserved: number;
+  byCategory: PaymentCostCategoryTotals;
+}
+
 export interface PaymentMonthSummary {
   limit: number;
   paidOneTime: number;
@@ -64,6 +100,7 @@ export interface PaymentMonthSummary {
   paidAll: number;
   pendingCount: number;
   approvedCount: number;
+  costBudget: PaymentCostBudgetSummary;
 }
 
 export interface PaymentPeriod {
@@ -89,6 +126,8 @@ export interface SubmitPaymentRequestInput {
   projectId: string | null;
   comment: string | null;
   expenseType: NewPaymentExpenseType;
+  budgetScope: PaymentBudgetScope;
+  costCategory: PaymentCostCategory | null;
   expectedPaymentOn: string;
   urgency: PaymentUrgency;
   documentUrl: string | null;

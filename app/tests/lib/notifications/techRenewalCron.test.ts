@@ -127,6 +127,8 @@ describe('runTechRenewalNotifications', () => {
     const db = seed([sub({ status: 'keep', next_billing_date: '2026-08-13' })]);
     const result = await runTechRenewalNotifications({ db: db as never, now: NOW });
     expect(result.created).toBe(2);
+    expect(String(db.getRows('notifications')[0].body)).toContain('Отметьте оплату и продлите период');
+    expect(String(db.getRows('notifications')[0].body)).not.toContain('отменить');
   });
 
   it('просроченный сервис не звенит второй раз на ту же дату', async () => {

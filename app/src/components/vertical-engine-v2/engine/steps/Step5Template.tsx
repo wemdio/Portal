@@ -7,14 +7,17 @@
  * скачивание JSON). Поглощает старый TemplateView.
  */
 
-import { useCallback, useEffect, useMemo, useState, type JSX } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type JSX } from 'react';
 import { ChevronRight, Copy, Download, Rocket, Sparkles } from 'lucide-react';
+import { authFetch } from '@/lib/authFetch';
+import { downloadBaseCsvResponse } from '@/lib/verticalEngineV2/baseCsv';
 import type { VeRuSeasonalityPrioritySnapshot, VeRuSeasonalityState, VeTemplate } from '@/lib/verticalEngineV2/types';
 import { renderTemplatePreview, type VePreviewToken } from '@/lib/verticalEngineV2/renderPreview';
 import {
   VE_LAUNCH_MAX_LEADS,
   parseLaunchInfo,
   type VeLaunchPresetOption,
+  type VeMailboxTagOption,
   type VeTemplateLaunchInfo,
 } from '@/lib/verticalEngineV2/launchHandoff';
 import { VE_API, veEngineCall, veEnginePost, type VeBaseSummary, type VeJobSummary } from '../api';
@@ -253,7 +256,17 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
 interface VeLaunchPresetsResponse {
   presets?: VeLaunchPresetOption[];
   bound_preset_id?: string | null;
+  can_create_client?: boolean;
+  mailbox_tag_options?: VeMailboxTagOption[];
   error?: string;
+}
+
+interface VeLaunchClientResponse {
+  ok?: boolean;
+  client?: { id: string; email: string };
+  preset?: VeLaunchPresetOption;
+  error?: string;
+  code?: string;
 }
 
 interface VeLaunchResponse {
@@ -282,6 +295,8 @@ function useTemplateLaunch(
   const [loadError, setLoadError] = useState<string | null>(null);
   const [boundPresetId, setBoundPresetId] = useState<string | null>(null);
   const [presetId, setPresetId] = useState('');
+  const [canCreateClient, setCanCreateClient] = useState(false);
+  const [mailboxTagOptions, setMailboxTagOptions] = useState<VeMailboxTagOption[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -297,10 +312,14 @@ function useTemplateLaunch(
           setLoadError(response?.data?.error ?? 'Не удалось загрузить пресеты');
           setPresets([]);
           setBoundPresetId(null);
+          setCanCreateClient(false);
+          setMailboxTagOptions([]);
           return;
         }
         const list = response.data.presets ?? [];
         setPresets(list);
+        setCanCreateClient(response.data.can_create_client === true);
+        setMailboxTagOptions(response.data.mailbox_tag_options ?? []);
         const responseBoundPresetId =
           typeof response.data.bound_preset_id === 'string' && response.data.bound_preset_id.trim()
             ? response.data.bound_preset_id
@@ -323,8 +342,19 @@ function useTemplateLaunch(
         setLoadError('Не удалось загрузить пресеты');
         setPresets([]);
         setBoundPresetId(null);
+        setCanCreateClient(false);
+        setMailboxTagOptions([]);
       });
   }, [presets, template]);
+
+  const acceptCreatedPreset = useCallback((preset: VeLaunchPresetOption) => {
+    setPresets((current) => {
+      const next = [...(current ?? []).filter((item) => item.id !== preset.id), preset];
+      return next.sort((left, right) => left.name.localeCompare(right.name, 'ru'));
+    });
+    setPresetId(preset.id);
+    setLoadError(null);
+  }, []);
 
   const submit = useCallback(
     (segmentationAuditId: string) => {
@@ -381,6 +411,9 @@ function useTemplateLaunch(
     boundPresetId,
     presetId,
     setPresetId,
+    canCreateClient,
+    mailboxTagOptions,
+    acceptCreatedPreset,
     submitting,
     submitError,
     warnings,
@@ -392,24 +425,263 @@ function useTemplateLaunch(
 
 type TemplateLaunchState = ReturnType<typeof useTemplateLaunch>;
 
-function formatMailboxCount(count: number): string {
+function formatRussianCount(count: number, forms: readonly [string, string, string]): string {
   const normalized = Math.max(0, Math.trunc(count));
   const mod100 = normalized % 100;
   const mod10 = normalized % 10;
   const noun = mod100 >= 11 && mod100 <= 14
-    ? 'ящиков'
+    ? forms[2]
     : mod10 === 1
-      ? 'ящик'
+      ? forms[0]
       : mod10 >= 2 && mod10 <= 4
-        ? 'ящика'
-        : 'ящиков';
+        ? forms[1]
+        : forms[2];
   return `${normalized.toLocaleString('ru-RU')} ${noun}`;
+}
+
+function formatMailboxCount(count: number): string {
+  return formatRussianCount(count, ['ящик', 'ящика', 'ящиков']);
 }
 
 function mailboxTagFallback(resolution: VeLaunchPresetOption['mailbox_tag_resolution']): string {
   if (resolution === 'mixed') return 'Теги пула различаются';
   if (resolution === 'unavailable') return 'Теги временно не загрузились';
   return 'Тег не назначен';
+}
+
+function mailboxTagOptionKey(option: VeMailboxTagOption): string {
+  return JSON.stringify([option.instantly_account_id, option.id]);
+}
+
+function formatEmailCount(count: number | null): string {
+  if (count === null || count <= 0) return 'будет проверено при создании';
+  return formatRussianCount(count, ['почта', 'почты', 'почт']);
+}
+
+function CreateClientPresetInline({
+  launch,
+  templateId,
+}: {
+  launch: TemplateLaunchState;
+  templateId: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [tagKey, setTagKey] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [created, setCreated] = useState<{ email: string; mailboxCount: number } | null>(null);
+  const emailRef = useRef<HTMLInputElement>(null);
+  const passwordRef = useRef<HTMLInputElement>(null);
+
+  const options = useMemo(
+    () => [...launch.mailboxTagOptions].sort((left, right) => {
+      const workspaceOrder = left.instantly_account_label.localeCompare(right.instantly_account_label, 'ru');
+      return workspaceOrder || left.name.localeCompare(right.name, 'ru');
+    }),
+    [launch.mailboxTagOptions],
+  );
+  const selectedTag = options.find((option) => mailboxTagOptionKey(option) === tagKey) ?? null;
+  const hasTagOptions = options.length > 0;
+
+  useEffect(() => {
+    if (open) emailRef.current?.focus();
+  }, [open]);
+
+  const showForm = () => {
+    setCreated(null);
+    setError(null);
+    setOpen(true);
+  };
+
+  const closeForm = () => {
+    setOpen(false);
+    setPassword('');
+    setError(null);
+  };
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (creating || !selectedTag) return;
+
+    const normalizedEmail = email.trim();
+    if (!normalizedEmail || !password) return;
+
+    setCreating(true);
+    setCreated(null);
+    setError(null);
+    try {
+      const response = await veEnginePost<VeLaunchClientResponse>(`${VE_API}/launch-clients`, {
+        template_id: templateId,
+        email: normalizedEmail,
+        password,
+        instantly_account_id: selectedTag.instantly_account_id,
+        mailbox_tag_id: selectedTag.id,
+      });
+      if (!response.ok || !response.data.preset) {
+        setError(
+          response.status === 409
+            ? 'Пользователь с такой почтой уже существует. Выберите его пресет или укажите другую почту.'
+            : response.data.error ?? 'Не удалось создать клиента и пресет. Попробуйте ещё раз.',
+        );
+        requestAnimationFrame(() => passwordRef.current?.focus());
+        return;
+      }
+
+      launch.acceptCreatedPreset(response.data.preset);
+      setCreated({
+        email: response.data.client?.email ?? normalizedEmail,
+        mailboxCount: response.data.preset.mailbox_count,
+      });
+      setEmail('');
+      setTagKey('');
+      setOpen(false);
+      requestAnimationFrame(() => document.getElementById('ve2-launch-preset')?.focus());
+    } catch {
+      setError('Не удалось создать клиента и пресет. Проверьте соединение и попробуйте ещё раз.');
+      requestAnimationFrame(() => passwordRef.current?.focus());
+    } finally {
+      setPassword('');
+      setCreating(false);
+    }
+  };
+
+  return (
+    <div className="border-t border-gray-200 pt-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="max-w-2xl">
+          <p id="ve2-create-client-title" className="text-sm font-medium text-gray-800">
+            Новый клиент
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-gray-500">
+            Создайте вход в портал и пресет отправителей прямо для этого проекта.
+          </p>
+        </div>
+        {!open ? (
+          <button
+            type="button"
+            onClick={showForm}
+            disabled={!hasTagOptions}
+            aria-expanded="false"
+            aria-controls="ve2-create-client-form"
+            className={HE.btnSmall}
+          >
+            Создать клиента и пресет
+          </button>
+        ) : null}
+      </div>
+
+      {!hasTagOptions ? (
+        <p className="mt-2 text-xs text-gray-500" role="status">
+          В Instantly пока нет доступных тегов отправителей. Добавьте тег и обновите страницу.
+        </p>
+      ) : null}
+      {created ? (
+        <p className="mt-2 flex items-center gap-2 text-xs text-emerald-700" role="status" aria-live="polite">
+          <StatusDot tone="ok" />
+          Клиент {created.email} создан, в пресете сохранено {formatMailboxCount(created.mailboxCount)}.
+        </p>
+      ) : null}
+
+      {open ? (
+        <form
+          id="ve2-create-client-form"
+          onSubmit={submit}
+          aria-labelledby="ve2-create-client-title"
+          aria-describedby="ve2-create-client-note"
+          className="mt-3 space-y-3"
+        >
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label htmlFor="ve2-client-email" className="ve2-label">
+                Почта для входа
+              </label>
+              <input
+                ref={emailRef}
+                id="ve2-client-email"
+                name="email"
+                type="email"
+                autoComplete="email"
+                required
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                disabled={creating}
+                placeholder="client@company.ru"
+                className="ve2-input h-10 w-full px-3 text-xs"
+              />
+            </div>
+            <div>
+              <label htmlFor="ve2-client-password" className="ve2-label">
+                Пароль для входа
+              </label>
+              <input
+                ref={passwordRef}
+                id="ve2-client-password"
+                name="new-password"
+                type="password"
+                autoComplete="new-password"
+                minLength={8}
+                maxLength={72}
+                required
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                disabled={creating}
+                className="ve2-input h-10 w-full px-3 text-xs"
+              />
+            </div>
+          </div>
+
+          <div className="max-w-2xl">
+            <label htmlFor="ve2-client-mailbox-tag" className="ve2-label">
+              Тег почт в Instantly
+            </label>
+            <select
+              id="ve2-client-mailbox-tag"
+              value={tagKey}
+              onChange={(event) => setTagKey(event.target.value)}
+              disabled={creating}
+              required
+              className="ve2-input h-10 w-full px-3 text-xs"
+            >
+              <option value="">Выберите workspace и тег</option>
+              {options.map((option) => (
+                <option
+                  key={mailboxTagOptionKey(option)}
+                  value={mailboxTagOptionKey(option)}
+                >
+                  {option.instantly_account_label} · {option.name} · {formatEmailCount(option.mailbox_count)}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <p id="ve2-create-client-note" className="max-w-3xl text-[11px] leading-relaxed text-gray-500">
+            Точный состав тега проверим в Instantly при создании. Он фиксируется в пресете и позднее не обновляется
+            вслед за тегом. Кампании создаются без отправки, текущую кампанию можно вручную поправить перед активацией.
+          </p>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="submit"
+              disabled={creating || !email.trim() || password.length < 8 || !selectedTag}
+              className={HE.btnPrimary}
+            >
+              {creating ? 'Создаём клиента…' : 'Создать клиента'}
+            </button>
+            <button type="button" onClick={closeForm} disabled={creating} className={HE.btnGhost}>
+              Отмена
+            </button>
+          </div>
+          {error ? (
+            <p className="text-xs text-red-600" role="alert">
+              {error}
+            </p>
+          ) : null}
+        </form>
+      ) : null}
+    </div>
+  );
 }
 
 interface TemplateLaunchPortfolioDto {
@@ -658,10 +930,16 @@ function LaunchSection({
   launch,
   audit,
   template,
+  onDownloadLaunchCsv,
+  csvDownloading,
+  csvDownloadError,
 }: {
   launch: TemplateLaunchState;
   audit: SegmentationAuditController;
   template: VeTemplate;
+  onDownloadLaunchCsv: () => void;
+  csvDownloading: boolean;
+  csvDownloadError: string;
 }) {
   const recorded = launch.recorded ?? (audit.phase === 'launch_succeeded' ? audit.launchInfo : null);
   const selectedPreset = launch.presets?.find((preset) => preset.id === launch.presetId) ?? null;
@@ -763,7 +1041,11 @@ function LaunchSection({
           ) : null}
           {launch.loadError ? <p className="text-xs text-red-500" role="alert">{launch.loadError}</p> : null}
           {launch.presets && launch.presets.length === 0 && !launch.loadError ? (
-            <p className="text-xs text-gray-500">Нет доступных пресетов — сначала настройте пресет клиенту.</p>
+            <p className="text-xs text-gray-500">
+              {launch.canCreateClient
+                ? 'Для этого проекта ещё нет доступного пресета.'
+                : 'Нет доступных пресетов. Сначала настройте пресет клиенту.'}
+            </p>
           ) : null}
           {launch.presets && launch.presets.length > 0 ? (
             <div className="space-y-3">
@@ -810,10 +1092,27 @@ function LaunchSection({
                         return groups === 1 ? 'Создать кампанию (на паузе)' : `Создать ${groups} кампании на паузе`;
                       })()}
                 </button>
+                {selectedPreset ? (
+                  <button
+                    type="button"
+                    onClick={onDownloadLaunchCsv}
+                    disabled={csvDownloading}
+                    aria-label="Скачать CSV для запуска"
+                    className={HE.btnGhost}
+                  >
+                    <Download aria-hidden className="h-4 w-4" />
+                    {csvDownloading ? 'Готовим CSV…' : 'CSV для запуска'}
+                  </button>
+                ) : null}
                 <button type="button" onClick={() => launch.setFormOpen(false)} className={HE.btnGhost}>
                   Отмена
                 </button>
               </div>
+              {csvDownloadError ? (
+                <p className="text-xs text-red-600" role="alert">
+                  {csvDownloadError}
+                </p>
+              ) : null}
               {selectedPreset ? (
                 <dl
                   id="ve2-launch-preset-summary"
@@ -845,6 +1144,9 @@ function LaunchSection({
               ) : null}
             </div>
           ) : null}
+          {launch.presets && launch.canCreateClient && !launch.boundPresetId && !launch.loadError ? (
+            <CreateClientPresetInline launch={launch} templateId={template.id} />
+          ) : null}
           {launch.submitError ? (
             <p className="text-xs text-red-600" role="alert">
               {launch.submitError}
@@ -867,6 +1169,8 @@ export function Step5Template(props: {
   const { template, base, jobs, onBuildTemplate, onGoToContent } = props;
   const [copied, setCopied] = useState(false);
   const [copiedLetterIdx, setCopiedLetterIdx] = useState<number | null>(null);
+  const [csvDownloading, setCsvDownloading] = useState(false);
+  const [csvDownloadError, setCsvDownloadError] = useState('');
   const segmentationAudit = useSegmentationAudit(template?.id ?? null);
   const { refresh: refreshSegmentationAudit, markRejected: markSegmentationRejected } = segmentationAudit;
   const handleSegmentationRejected = useCallback(
@@ -922,6 +1226,47 @@ export function Step5Template(props: {
     a.remove();
     URL.revokeObjectURL(url);
   }, [template]);
+
+  const exportBaseId = template?.base_id ?? null;
+  const handleLaunchReadyCsvDownload = useCallback(async () => {
+    const auditId = segmentationAudit.auditId;
+    const presetId = launch.presetId.trim();
+    if (
+      !template ||
+      !exportBaseId ||
+      !segmentationAudit.canLaunch ||
+      !auditId ||
+      !presetId ||
+      csvDownloading
+    ) return;
+    setCsvDownloadError('');
+    setCsvDownloading(true);
+    try {
+      const query = new URLSearchParams({
+        mode: 'launch-ready',
+        template_id: template.id,
+        segmentation_audit_id: auditId,
+        preset_id: presetId,
+      });
+      const res = await authFetch(`${VE_API}/bases/${exportBaseId}/export?${query}`);
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || `Ошибка ${res.status}`);
+      }
+      await downloadBaseCsvResponse(res, `base-${exportBaseId}-launch-ready.csv`);
+    } catch (err) {
+      setCsvDownloadError(err instanceof Error ? err.message : 'Не удалось скачать CSV для запуска');
+    } finally {
+      setCsvDownloading(false);
+    }
+  }, [
+    csvDownloading,
+    exportBaseId,
+    launch.presetId,
+    segmentationAudit.auditId,
+    segmentationAudit.canLaunch,
+    template,
+  ]);
 
   /* ── Шаблона ещё нет ── */
   if (!template) {
@@ -1051,8 +1396,8 @@ export function Step5Template(props: {
             </p>
             {baseOverLaunchLimit ? (
               <p className="mt-2 text-xs text-gray-500">
-                База больше лимита запуска ({VE_LAUNCH_MAX_LEADS}). Скачайте CSV и запускайте порциями или соберите базу
-                меньшего лимита.
+                База больше лимита запуска ({VE_LAUNCH_MAX_LEADS}). Разделите исходный CSV или соберите базу
+                меньшего лимита, затем повторите проверку.
               </p>
             ) : null}
             <button
@@ -1078,7 +1423,14 @@ export function Step5Template(props: {
           </>
         ) : null}
         <div className="mt-3">
-          <LaunchSection launch={launch} audit={segmentationAudit} template={template} />
+          <LaunchSection
+            launch={launch}
+            audit={segmentationAudit}
+            template={template}
+            onDownloadLaunchCsv={() => void handleLaunchReadyCsvDownload()}
+            csvDownloading={csvDownloading}
+            csvDownloadError={csvDownloadError}
+          />
         </div>
       </section>
 

@@ -57,12 +57,16 @@ function formatDay(dateStr: string): string {
 
 function buildContent(sub: SubRow, level: Level): { title: string; body: string } {
   const money = formatMoney(sub.amount, sub.currency);
+  const billing = `${money}, списание ${formatDay(sub.next_billing_date)}`;
   return {
     title: `Продление: ${sub.service_name}`,
-    body:
-      level === 'soon'
-        ? `${money}, списание ${formatDay(sub.next_billing_date)}. Решите: продлить или отменить.`
-        : `${money}, списание ${formatDay(sub.next_billing_date)} — дата наступила. Решите: продлить или отменить.`,
+    body: sub.status === 'keep'
+      ? level === 'soon'
+        ? `${billing}. Сервис оставлен; проверьте готовность к оплате.`
+        : `${billing} — дата наступила. Отметьте оплату и продлите период.`
+      : level === 'soon'
+        ? `${billing}. Решите: продлить или отменить.`
+        : `${billing} — дата наступила. Решите: продлить или отменить.`,
   };
 }
 

@@ -5,13 +5,15 @@ import {
   isValidUuid,
 } from '@/lib/apiValidation';
 import type {
+  PaymentBudgetScope,
+  PaymentCostCategory,
   NewPaymentExpenseType,
   PaymentDepartment,
   PaymentRequestActionInput,
   PaymentUrgency,
   SubmitPaymentRequestInput,
 } from './types';
-import { PAYMENT_DEPARTMENTS } from './types';
+import { PAYMENT_COST_CATEGORIES, PAYMENT_DEPARTMENTS } from './types';
 
 const PAYMENT_MONTH_RE = /^(\d{4})-(\d{2})$/;
 const MAX_AMOUNT = 9_999_999_999.99;
@@ -97,6 +99,8 @@ export function parseSubmitPaymentRequest(
     'projectId',
     'comment',
     'expenseType',
+    'budgetScope',
+    'costCategory',
     'expectedPaymentOn',
     'urgency',
     'documentUrl',
@@ -131,6 +135,20 @@ export function parseSubmitPaymentRequest(
   if (body.expenseType !== 'one_time' && body.expenseType !== 'planned') {
     return { error: 'expenseType must be one_time or planned' };
   }
+  const budgetScope = body.budgetScope ?? 'general';
+  const costCategory = body.costCategory ?? null;
+  if (budgetScope !== 'general' && budgetScope !== 'costs') {
+    return { error: 'budgetScope must be general or costs' };
+  }
+  const isKnownCostCategory = PAYMENT_COST_CATEGORIES.includes(
+    costCategory as PaymentCostCategory,
+  );
+  if (
+    (budgetScope === 'costs' && !isKnownCostCategory)
+    || (budgetScope === 'general' && costCategory !== null)
+  ) {
+    return { error: 'costCategory must be set only for cost expenses' };
+  }
   if (typeof body.expectedPaymentOn !== 'string' || !isValidIsoDate(body.expectedPaymentOn)) {
     return { error: 'expectedPaymentOn must be a valid YYYY-MM-DD date' };
   }
@@ -151,6 +169,8 @@ export function parseSubmitPaymentRequest(
       projectId,
       comment: comment.value,
       expenseType: body.expenseType as NewPaymentExpenseType,
+      budgetScope: budgetScope as PaymentBudgetScope,
+      costCategory: costCategory as PaymentCostCategory | null,
       expectedPaymentOn: body.expectedPaymentOn,
       urgency: body.urgency as PaymentUrgency,
       documentUrl: documentUrl.value,

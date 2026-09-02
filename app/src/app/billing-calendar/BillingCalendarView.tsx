@@ -56,47 +56,6 @@ const CYCLE_LABELS: Record<string, string> = {
   yearly: 'Ежегодно',
 };
 
-const SETUP_SQL = `CREATE TABLE IF NOT EXISTS email_subscriptions (
-  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-  project_id UUID REFERENCES projects(id) ON DELETE SET NULL,
-  project_name TEXT NOT NULL,
-  email_provider TEXT NOT NULL DEFAULT '',
-  email_count INTEGER NOT NULL DEFAULT 1,
-  next_billing_date DATE NOT NULL,
-  billing_amount NUMERIC(10, 2) NOT NULL DEFAULT 0,
-  currency TEXT NOT NULL DEFAULT 'USD',
-  billing_cycle TEXT NOT NULL DEFAULT 'monthly'
-    CHECK (billing_cycle IN ('monthly', 'quarterly', 'yearly')),
-  status TEXT NOT NULL DEFAULT 'active'
-    CHECK (status IN ('active', 'pending_review', 'keep', 'cancel', 'expired')),
-  lead_decision TEXT
-    CHECK (lead_decision IS NULL OR lead_decision IN ('keep', 'cancel')),
-  lead_decision_by UUID REFERENCES profiles(id) ON DELETE SET NULL,
-  lead_decision_at TIMESTAMPTZ,
-  lead_notes TEXT,
-  created_by UUID REFERENCES profiles(id) ON DELETE SET NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW(),
-  notes TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_email_subscriptions_billing_date ON email_subscriptions(next_billing_date);
-CREATE INDEX IF NOT EXISTS idx_email_subscriptions_status ON email_subscriptions(status);
-CREATE INDEX IF NOT EXISTS idx_email_subscriptions_project ON email_subscriptions(project_id);
-
-ALTER TABLE email_subscriptions ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "email_subscriptions_select" ON email_subscriptions FOR SELECT TO authenticated USING (true);
-CREATE POLICY "email_subscriptions_insert" ON email_subscriptions FOR INSERT TO authenticated WITH CHECK (true);
-CREATE POLICY "email_subscriptions_update" ON email_subscriptions FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "email_subscriptions_delete" ON email_subscriptions FOR DELETE TO authenticated USING (true);
-
-CREATE OR REPLACE FUNCTION update_email_subscriptions_updated_at()
-RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
-
-CREATE TRIGGER email_subscriptions_updated_at BEFORE UPDATE ON email_subscriptions
-  FOR EACH ROW EXECUTE FUNCTION update_email_subscriptions_updated_at();`;
-
 const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; dot: string }> = {
   active: { label: 'Активна', bg: 'bg-blue-50', text: 'text-blue-700', dot: 'bg-blue-500' },
   pending_review: { label: 'Ожидает решения', bg: 'bg-amber-50', text: 'text-amber-700', dot: 'bg-amber-500' },
@@ -113,6 +72,122 @@ function formatCurrency(amount: number, currency: string): string {
   const symbols: Record<string, string> = { USD: '$', EUR: '€', RUB: '₽' };
   const symbol = symbols[currency] || currency;
   return `${symbol}${amount.toLocaleString('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+}
+
+function formatSubscriptionTotals(
+  subscriptions: Pick<EmailSubscription, 'billing_amount' | 'currency'>[],
+): string {
+  const totals = new Map<string, number>();
+  subscriptions.forEach((subscription) => {
+    const currency = subscription.currency.toUpperCase();
+    totals.set(currency, (totals.get(currency) ?? 0) + subscription.billing_amount);
+  });
+
+  return [...totals.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([currency, amount]) => formatCurrency(amount, currency))
+    .join(' · ') || '—';
+}
+
+function canEditEmailSubscription(
+  role: UserRole | null,
+  status: EmailSubscription['status'],
+): boolean {
+  return isAdmin(role)
+    || (role === 'technician' && (status === 'active' || status === 'pending_review'));
+}
+
+function canDecideEmailSubscription(
+  role: UserRole | null,
+  status: EmailSubscription['status'],
+): boolean {
+  return isLead(role) && status !== 'expired';
+}
+
+function useModalFocusTrap(isOpen: boolean, onClose: () => void) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const dialog = dialogRef.current;
+    const focusableSelector =
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
+    const frame = window.requestAnimationFrame(() => {
+      const firstFocusable = dialog?.querySelector<HTMLElement>(focusableSelector);
+      (firstFocusable ?? dialog)?.focus();
+    });
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab' || !dialog) return;
+
+      const focusable = [...dialog.querySelectorAll<HTMLElement>(focusableSelector)]
+        .filter((element) => !element.hasAttribute('hidden'));
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (
+        document.activeElement === first
+        || document.activeElement === dialog
+        || !dialog.contains(document.activeElement)
+      )) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener('keydown', handleKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, [isOpen]);
+
+  return dialogRef;
+}
+
+function billingSaveErrorMessage(error: unknown): string {
+  const message = error && typeof error === 'object' && 'message' in error
+    ? String((error as { message?: unknown }).message ?? '')
+    : '';
+  if (message.includes('payment_request_cost_limit_exceeded')) {
+    return 'Лимит костов 650 000 ₽ на этот месяц будет превышен. Измените сумму или дату.';
+  }
+  if (message.includes('payment_request_cost_budget_incomplete')) {
+    return 'Не удалось пересчитать сумму в рубли: для даты списания нет курса валюты. Повторите после обновления курсов.';
+  }
+  if (message.toLowerCase().includes('permission') || message.includes('42501')) {
+    return 'Недостаточно прав для изменения календаря почт.';
+  }
+  if (message.includes('email_subscription_duplicate_today')) {
+    return 'Оплата для этого проекта на сегодня уже зарегистрирована.';
+  }
+  if (message.includes('email_subscription_changed_retry')) {
+    return 'Запись изменилась после открытия окна. Обновите календарь и проверьте данные перед повторным решением.';
+  }
+  return 'Не удалось сохранить изменение. Обновите данные и попробуйте ещё раз.';
 }
 
 function getDaysInMonth(year: number, month: number): number {
@@ -137,16 +212,6 @@ function daysBetween(dateStr1: string, dateStr2: string): number {
 function todayStr(): string {
   const d = new Date();
   return toDateStr(d.getFullYear(), d.getMonth(), d.getDate());
-}
-
-function getNextMonthDate(dateStr: string): string {
-  const d = new Date(dateStr);
-  const day = d.getDate();
-  const nextMonth = d.getMonth() + 1;
-  const nextYear = nextMonth > 11 ? d.getFullYear() + 1 : d.getFullYear();
-  const normalizedMonth = nextMonth % 12;
-  const daysInNext = new Date(nextYear, normalizedMonth + 1, 0).getDate();
-  return toDateStr(nextYear, normalizedMonth, Math.min(day, daysInNext));
 }
 
 /* ═══════════════════════════════════════════
@@ -232,16 +297,21 @@ export default function BillingCalendarView() {
 
   // Saving state to prevent double-click
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
   // Duplicates modal state
   const [duplicatesModalOpen, setDuplicatesModalOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const modalDialogRef = useModalFocusTrap(modalOpen, () => setModalOpen(false));
+  const duplicatesDialogRef = useModalFocusTrap(
+    duplicatesModalOpen,
+    () => setDuplicatesModalOpen(false),
+  );
 
   /* ─── Data Fetching ─── */
 
   // Table existence state
   const [tableExists, setTableExists] = useState(true);
-  const [sqlCopied, setSqlCopied] = useState(false);
 
   const fetchSubscriptions = useCallback(async () => {
     setLoading(true);
@@ -290,7 +360,7 @@ export default function BillingCalendarView() {
   /* ─── Auto-update status to pending_review 7 days before billing ─── */
 
   useEffect(() => {
-    if (subscriptions.length === 0) return;
+    if (!isTechnician(userRole) || subscriptions.length === 0) return;
 
     const today = todayStr();
     const toUpdate: string[] = [];
@@ -313,7 +383,7 @@ export default function BillingCalendarView() {
         fetchSubscriptions();
       })();
     }
-  }, [subscriptions, fetchSubscriptions]);
+  }, [subscriptions, fetchSubscriptions, userRole]);
 
   /* ─── Calendar Data ─── */
 
@@ -359,6 +429,7 @@ export default function BillingCalendarView() {
   /* ─── CRUD ─── */
 
   function openCreateModal(date?: string) {
+    setSaveError('');
     setModalMode('create');
     setEditingItem(null);
     setProjectSearch('');
@@ -378,6 +449,7 @@ export default function BillingCalendarView() {
   }
 
   function openPayTodayModal() {
+    setSaveError('');
     setModalMode('pay_today');
     setEditingItem(null);
     setProjectSearch('');
@@ -397,6 +469,8 @@ export default function BillingCalendarView() {
   }
 
   function openEditModal(item: EmailSubscription) {
+    if (!canEditEmailSubscription(userRole, item.status)) return;
+    setSaveError('');
     setModalMode('edit');
     setEditingItem(item);
     setProjectSearch('');
@@ -416,6 +490,7 @@ export default function BillingCalendarView() {
   }
 
   function openDecisionModal(item: EmailSubscription) {
+    setSaveError('');
     setModalMode('decision');
     setEditingItem(item);
     setDecisionForm({
@@ -423,6 +498,16 @@ export default function BillingCalendarView() {
       notes: item.lead_notes || '',
     });
     setModalOpen(true);
+  }
+
+  function openSubscriptionModal(item: EmailSubscription) {
+    // Decision is the primary calendar action for leaders/admins; admins can
+    // still use the list view when they need to edit an already decided row.
+    if (canDecideEmailSubscription(userRole, item.status)) {
+      openDecisionModal(item);
+    } else if (canEditEmailSubscription(userRole, item.status)) {
+      openEditModal(item);
+    }
   }
 
   async function handleSave() {
@@ -442,15 +527,17 @@ export default function BillingCalendarView() {
     };
 
     setSaving(true);
+    setSaveError('');
     try {
       if (modalMode === 'create') {
         // Check for duplicate before inserting
-        const { data: existing } = await supabase
+        const { data: existing, error: existingError } = await supabase
           .from('email_subscriptions')
           .select('id')
           .eq('project_name', payload.project_name)
           .eq('next_billing_date', payload.next_billing_date)
           .limit(1);
+        if (existingError) throw existingError;
 
         if (existing && existing.length > 0) {
           alert('Подписка для этого проекта на эту дату уже существует. Откройте её для редактирования.');
@@ -458,68 +545,38 @@ export default function BillingCalendarView() {
           return;
         }
 
-        await supabase
+        const { error: insertError } = await supabase
           .from('email_subscriptions')
           .insert({ ...payload, created_by: userId, status: 'active' });
+        if (insertError) throw insertError;
       } else if (modalMode === 'pay_today') {
-        const today = todayStr();
-        const nextMonth = getNextMonthDate(today);
-
-        // Check for duplicate today
-        const { data: existingToday } = await supabase
-          .from('email_subscriptions')
-          .select('id')
-          .eq('project_name', payload.project_name)
-          .eq('next_billing_date', today)
-          .limit(1);
-
-        if (existingToday && existingToday.length > 0) {
-          alert('Оплата для этого проекта на сегодня уже зарегистрирована.');
-          setSaving(false);
-          return;
-        }
-
-        await supabase
-          .from('email_subscriptions')
-          .insert({
-            ...payload,
-            next_billing_date: today,
-            created_by: userId,
-            status: 'keep',
-            lead_decision: 'keep',
-            lead_decision_by: userId,
-            lead_decision_at: new Date().toISOString(),
-          });
-
-        // Check before creating next-month record
-        const { data: existingNext } = await supabase
-          .from('email_subscriptions')
-          .select('id')
-          .eq('project_name', payload.project_name)
-          .eq('next_billing_date', nextMonth)
-          .limit(1);
-
-        if (!existingNext || existingNext.length === 0) {
-          await supabase
-            .from('email_subscriptions')
-            .insert({
-              ...payload,
-              next_billing_date: nextMonth,
-              created_by: userId,
-              status: 'active',
-            });
-        }
+        const { error: paymentError } = await supabase.rpc(
+          'record_email_subscription_payment_today',
+          {
+            p_project_id: payload.project_id,
+            p_project_name: payload.project_name,
+            p_email_provider: payload.email_provider,
+            p_email_count: payload.email_count,
+            p_billing_amount: payload.billing_amount,
+            p_currency: payload.currency,
+            p_billing_cycle: payload.billing_cycle,
+            p_notes: payload.notes,
+          },
+        );
+        if (paymentError) throw paymentError;
       } else if (modalMode === 'edit' && editingItem) {
-        await supabase
+        const { error: updateError } = await supabase
           .from('email_subscriptions')
           .update(payload)
           .eq('id', editingItem.id);
+        if (updateError) throw updateError;
       }
 
       setModalOpen(false);
       fetchSubscriptions();
     } catch (err) {
       console.error('Error saving:', err);
+      setSaveError(billingSaveErrorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -530,61 +587,22 @@ export default function BillingCalendarView() {
     if (!editingItem || !decisionForm.decision) return;
 
     setSaving(true);
+    setSaveError('');
     try {
-      const previousDecision = editingItem.lead_decision;
-      const nextMonthDate = getNextMonthDate(editingItem.next_billing_date);
-
-      await supabase
-        .from('email_subscriptions')
-        .update({
-          lead_decision: decisionForm.decision,
-          lead_notes: decisionForm.notes || null,
-          lead_decision_by: userId,
-          lead_decision_at: new Date().toISOString(),
-          status: decisionForm.decision,
-        })
-        .eq('id', editingItem.id);
-
-      if (decisionForm.decision === 'keep') {
-        // Check if next-month record already exists for this project (prevent duplicates from re-clicking "keep")
-        const { data: existingNext } = await supabase
-          .from('email_subscriptions')
-          .select('id, status')
-          .eq('project_name', editingItem.project_name)
-          .eq('next_billing_date', nextMonthDate)
-          .limit(1);
-
-        if (!existingNext || existingNext.length === 0) {
-          await supabase
-            .from('email_subscriptions')
-            .insert({
-              project_id: editingItem.project_id,
-              project_name: editingItem.project_name,
-              email_provider: editingItem.email_provider,
-              email_count: editingItem.email_count,
-              next_billing_date: nextMonthDate,
-              billing_amount: editingItem.billing_amount,
-              currency: editingItem.currency,
-              billing_cycle: editingItem.billing_cycle,
-              notes: editingItem.notes,
-              created_by: editingItem.created_by,
-              status: 'active',
-            });
-        }
-      } else if (decisionForm.decision === 'cancel' && previousDecision === 'keep') {
-        // Decision changed from keep to cancel — remove the auto-created next-month active record
-        await supabase
-          .from('email_subscriptions')
-          .delete()
-          .eq('project_name', editingItem.project_name)
-          .eq('next_billing_date', nextMonthDate)
-          .eq('status', 'active');
-      }
+      const { error: decisionError } = await supabase
+        .rpc('decide_email_subscription', {
+          p_subscription_id: editingItem.id,
+          p_decision: decisionForm.decision,
+          p_notes: decisionForm.notes || null,
+          p_expected_updated_at: editingItem.updated_at,
+        });
+      if (decisionError) throw decisionError;
 
       setModalOpen(false);
       fetchSubscriptions();
     } catch (err) {
       console.error('Error saving decision:', err);
+      setSaveError(billingSaveErrorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -593,20 +611,24 @@ export default function BillingCalendarView() {
   async function handleDelete(id: string) {
     if (!confirm('Удалить эту запись?')) return;
     try {
-      await supabase.from('email_subscriptions').delete().eq('id', id);
+      const { error } = await supabase.from('email_subscriptions').delete().eq('id', id);
+      if (error) throw error;
       fetchSubscriptions();
     } catch (err) {
       console.error('Error deleting:', err);
+      alert(billingSaveErrorMessage(err));
     }
   }
 
   async function handleDeleteDuplicate(id: string) {
     setDeletingId(id);
     try {
-      await supabase.from('email_subscriptions').delete().eq('id', id);
+      const { error } = await supabase.from('email_subscriptions').delete().eq('id', id);
+      if (error) throw error;
       await fetchSubscriptions();
     } catch (err) {
       console.error('Error deleting duplicate:', err);
+      alert(billingSaveErrorMessage(err));
     } finally {
       setDeletingId(null);
     }
@@ -618,12 +640,15 @@ export default function BillingCalendarView() {
     if (!confirm(`Удалить подписку «${editingItem.project_name}» от ${new Date(editingItem.next_billing_date).toLocaleDateString('ru-RU')}?\n\nЭто действие необратимо.`)) return;
 
     setSaving(true);
+    setSaveError('');
     try {
-      await supabase.from('email_subscriptions').delete().eq('id', editingItem.id);
+      const { error } = await supabase.from('email_subscriptions').delete().eq('id', editingItem.id);
+      if (error) throw error;
       setModalOpen(false);
       await fetchSubscriptions();
     } catch (err) {
       console.error('Error deleting:', err);
+      setSaveError(billingSaveErrorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -681,7 +706,7 @@ export default function BillingCalendarView() {
       const d = new Date(s.next_billing_date);
       return d.getFullYear() === currentYear && d.getMonth() === currentMonth && s.status === 'keep';
     });
-    const monthTotal = thisMonthSubs.reduce((sum, s) => sum + s.billing_amount, 0);
+    const monthTotal = formatSubscriptionTotals(thisMonthSubs);
     const upcomingCount = subscriptions.filter((s) => {
       const daysUntil = daysBetween(today, s.next_billing_date);
       return daysUntil >= 0 && daysUntil <= 7 && (s.status === 'active' || s.status === 'pending_review');
@@ -709,26 +734,11 @@ export default function BillingCalendarView() {
           <p className="mt-1 text-sm text-gray-500">Требуется настройка базы данных</p>
         </div>
         <div className="bg-amber-50 border border-amber-200 rounded-2xl p-6">
-          <h2 className="text-lg font-bold text-amber-800 mb-2">Таблица email_subscriptions не найдена</h2>
-          <p className="text-sm text-amber-700 mb-4">
-            Для работы календаря необходимо создать таблицу в Supabase. Скопируйте SQL ниже и выполните его
-            в <a href="https://supabase.com/dashboard/project/whhkkmfcmstawodnghzw/sql/new" target="_blank" rel="noopener noreferrer" className="underline font-medium">Supabase SQL Editor</a>.
+          <h2 className="text-lg font-bold text-amber-800 mb-2">Календарь почт временно недоступен</h2>
+          <p className="text-sm leading-6 text-amber-700">
+            Таблица календаря не найдена. Обратитесь к администратору: необходимо применить штатные миграции Portal.
+            Не создавайте таблицу вручную — вместе со схемой должны установиться ограничения бюджета и права доступа.
           </p>
-          <div className="relative">
-            <pre className="bg-gray-900 text-gray-100 rounded-xl p-4 text-xs overflow-x-auto max-h-[400px] overflow-y-auto whitespace-pre">
-{SETUP_SQL}
-            </pre>
-            <button
-              onClick={() => {
-                navigator.clipboard.writeText(SETUP_SQL);
-                setSqlCopied(true);
-                setTimeout(() => setSqlCopied(false), 2000);
-              }}
-              className="absolute top-3 right-3 px-3 py-1.5 text-xs font-medium bg-white text-gray-800 rounded-lg hover:bg-gray-100 transition-colors shadow"
-            >
-              {sqlCopied ? 'Скопировано!' : 'Копировать SQL'}
-            </button>
-          </div>
           <button
             onClick={() => { setTableExists(true); fetchSubscriptions(); }}
             className="mt-4 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
@@ -752,9 +762,9 @@ export default function BillingCalendarView() {
             Управление сроками оплаты email-аккаунтов по проектам
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
           {/* View toggle */}
-          <div className="flex bg-gray-100 p-0.5 rounded-lg mr-2">
+          <div className="flex bg-gray-100 p-0.5 rounded-lg sm:mr-2">
             <button
               onClick={() => setViewMode('calendar')}
               className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
@@ -773,7 +783,7 @@ export default function BillingCalendarView() {
             </button>
           </div>
 
-          {isTechnician(userRole) && duplicatesCount > 0 && (
+          {isAdmin(userRole) && duplicatesCount > 0 && (
             <button
               onClick={() => setDuplicatesModalOpen(true)}
               className="px-4 py-2 text-sm font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors shadow-sm flex items-center gap-1.5"
@@ -812,7 +822,7 @@ export default function BillingCalendarView() {
           value={String(stats.pendingCount)}
           color={stats.pendingCount > 0 ? 'amber' : undefined}
         />
-        <StatCard label="На этот месяц" value={formatCurrency(stats.monthTotal, 'USD')} />
+        <StatCard label="На этот месяц" value={stats.monthTotal} />
         <StatCard
           label="Ближайшие 7 дней"
           value={String(stats.upcomingCount)}
@@ -837,6 +847,8 @@ export default function BillingCalendarView() {
 
               <div className="justify-self-center flex items-center gap-3">
                 <button
+                  type="button"
+                  aria-label="Предыдущий месяц"
                   onClick={prevMonth}
                   className="p-2 rounded-lg hover:bg-gray-100 transition-colors text-gray-600"
                 >
@@ -848,6 +860,8 @@ export default function BillingCalendarView() {
                   {MONTH_NAMES[currentMonth]} {currentYear}
                 </h2>
                 <button
+                  type="button"
+                  aria-label="Следующий месяц"
                   onClick={nextMonth}
                   className="p-2 rounded-lg hover:bg-gray-100 transition-colors text-gray-600"
                 >
@@ -899,7 +913,8 @@ export default function BillingCalendarView() {
                     ${isToday ? 'bg-blue-50/40' : isWeekend ? 'bg-red-100' : 'hover:bg-gray-50/50'}
                     ${isTechnician(userRole) ? 'cursor-pointer' : ''}
                   `}
-                  onClick={() => {
+                  onClick={(event) => {
+                    if ((event.target as HTMLElement).closest('[data-subscription-item]')) return;
                     if (isTechnician(userRole)) openCreateModal(dateStr);
                   }}
                 >
@@ -921,24 +936,43 @@ export default function BillingCalendarView() {
                   <div className="space-y-0.5">
                     {daySubs.slice(0, 3).map((sub) => {
                       const cfg = STATUS_CONFIG[sub.status] || STATUS_CONFIG.active;
+                      const canOpen = canDecideEmailSubscription(userRole, sub.status)
+                        || canEditEmailSubscription(userRole, sub.status);
+                      const content = (
+                        <>
+                          <span className="font-medium truncate block">{sub.project_name}</span>
+                          <span className="opacity-70">{formatCurrency(sub.billing_amount, sub.currency)}</span>
+                        </>
+                      );
+                      const className = `w-full text-left px-1.5 py-0.5 rounded text-[9px] sm:text-[10px] leading-tight truncate block transition-all
+                        ${canOpen ? 'hover:opacity-80' : ''} ${cfg.bg} ${cfg.text}`;
+
+                      if (!canOpen) {
+                        return (
+                          <div
+                            key={sub.id}
+                            data-subscription-item
+                            className={className}
+                            title={`${sub.project_name} — ${formatCurrency(sub.billing_amount, sub.currency)}`}
+                          >
+                            {content}
+                          </div>
+                        );
+                      }
+
                       return (
                         <button
                           key={sub.id}
+                          type="button"
+                          data-subscription-item
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (isLead(userRole) && (sub.status === 'active' || sub.status === 'pending_review' || sub.status === 'keep' || sub.status === 'cancel')) {
-                              openDecisionModal(sub);
-                            } else if (isTechnician(userRole)) {
-                              openEditModal(sub);
-                            }
+                            openSubscriptionModal(sub);
                           }}
-                          className={`w-full text-left px-1.5 py-0.5 rounded text-[9px] sm:text-[10px] leading-tight truncate block transition-all hover:opacity-80
-                            ${cfg.bg} ${cfg.text}
-                          `}
+                          className={className}
                           title={`${sub.project_name} — ${formatCurrency(sub.billing_amount, sub.currency)}`}
                         >
-                          <span className="font-medium truncate block">{sub.project_name}</span>
-                          <span className="opacity-70">{formatCurrency(sub.billing_amount, sub.currency)}</span>
+                          {content}
                         </button>
                       );
                     })}
@@ -972,7 +1006,7 @@ export default function BillingCalendarView() {
             if (popSubs.length === 0) return null;
             const d = new Date(dayPopover.dateStr + 'T00:00:00');
             const label = d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
-            const total = popSubs.reduce((s, sub) => s + sub.billing_amount, 0);
+            const total = formatSubscriptionTotals(popSubs);
             const r = dayPopover.rect;
             const openUp = r.bottom + 300 > window.innerHeight;
             let left = r.left;
@@ -995,27 +1029,17 @@ export default function BillingCalendarView() {
                     <span className="text-sm font-semibold text-gray-900">{label}</span>
                     <span className="ml-2 text-xs text-gray-400">{popSubs.length} подписок</span>
                   </div>
-                  <button type="button" onClick={() => setDayPopover(null)} className="w-6 h-6 flex items-center justify-center rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors">
+                  <button type="button" aria-label="Закрыть список подписок" onClick={() => setDayPopover(null)} className="w-6 h-6 flex items-center justify-center rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors">
                     <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M10.5 3.5L3.5 10.5M3.5 3.5l7 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
                   </button>
                 </div>
                 <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1" style={{ minHeight: 0 }}>
                   {popSubs.map((sub) => {
                     const cfg = STATUS_CONFIG[sub.status] || STATUS_CONFIG.active;
-                    return (
-                      <button
-                        key={sub.id}
-                        type="button"
-                        onClick={() => {
-                          setDayPopover(null);
-                          if (isLead(userRole) && (sub.status === 'active' || sub.status === 'pending_review' || sub.status === 'keep' || sub.status === 'cancel')) {
-                            openDecisionModal(sub);
-                          } else if (isTechnician(userRole)) {
-                            openEditModal(sub);
-                          }
-                        }}
-                        className={`w-full text-left rounded-lg p-2.5 text-xs transition-colors hover:opacity-80 ${cfg.bg} ${cfg.text}`}
-                      >
+                    const canOpen = canDecideEmailSubscription(userRole, sub.status)
+                      || canEditEmailSubscription(userRole, sub.status);
+                    const content = (
+                      <>
                         <div className="flex items-center justify-between gap-2">
                           <span className="font-medium truncate">{sub.project_name}</span>
                           <span className="font-semibold flex-shrink-0">{formatCurrency(sub.billing_amount, sub.currency)}</span>
@@ -1025,17 +1049,36 @@ export default function BillingCalendarView() {
                           <span>·</span>
                           <span>{sub.email_count} почт</span>
                           <span>·</span>
-                          <span className={`inline-flex items-center gap-0.5`}>
+                          <span className="inline-flex items-center gap-0.5">
                             <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
                             {cfg.label}
                           </span>
                         </div>
+                      </>
+                    );
+                    const className = `w-full text-left rounded-lg p-2.5 text-xs transition-colors ${canOpen ? 'hover:opacity-80' : ''} ${cfg.bg} ${cfg.text}`;
+
+                    if (!canOpen) {
+                      return <div key={sub.id} className={className}>{content}</div>;
+                    }
+
+                    return (
+                      <button
+                        key={sub.id}
+                        type="button"
+                        onClick={() => {
+                          setDayPopover(null);
+                          openSubscriptionModal(sub);
+                        }}
+                        className={className}
+                      >
+                        {content}
                       </button>
                     );
                   })}
                 </div>
                 <div className="px-4 py-2 border-t border-gray-100 text-xs font-semibold text-gray-700 text-right">
-                  Итого: {formatCurrency(total, popSubs[0]?.currency || 'USD')}
+                  Итого: {total}
                 </div>
               </div>
             );
@@ -1128,7 +1171,7 @@ export default function BillingCalendarView() {
                               Решение
                             </button>
                           )}
-                          {isTechnician(userRole) && (
+                          {canEditEmailSubscription(userRole, sub.status) && (
                             <>
                               <button
                                 onClick={() => openEditModal(sub)}
@@ -1136,6 +1179,10 @@ export default function BillingCalendarView() {
                               >
                                 Ред.
                               </button>
+                            </>
+                          )}
+                          {isAdmin(userRole) && (
+                            <>
                               <button
                                 onClick={() => handleDelete(sub.id)}
                                 className="px-2.5 py-1 text-[11px] sm:text-xs font-medium text-red-600 bg-red-50 rounded-md hover:bg-red-100 transition-colors"
@@ -1174,15 +1221,24 @@ export default function BillingCalendarView() {
       {modalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setModalOpen(false)} />
-          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+          <div
+            ref={modalDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="billing-calendar-modal-title"
+            tabIndex={-1}
+            className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto outline-none"
+          >
             {/* Modal Header */}
             <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-              <h3 className="text-lg font-bold text-gray-900">
+              <h3 id="billing-calendar-modal-title" className="text-lg font-bold text-gray-900">
                 {modalMode === 'create' ? 'Новая подписка' : modalMode === 'pay_today' ? 'Оплата сегодня' : modalMode === 'edit' ? 'Редактирование' : 'Решение по подписке'}
               </h3>
               <button
+                type="button"
+                aria-label="Закрыть окно"
                 onClick={() => setModalOpen(false)}
-                className="p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+                className="p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -1423,6 +1479,8 @@ export default function BillingCalendarView() {
                     <label className="block text-sm font-medium text-gray-700 mb-2">Решение</label>
                     <div className="grid grid-cols-2 gap-3">
                       <button
+                        type="button"
+                        aria-pressed={decisionForm.decision === 'keep'}
                         onClick={() => setDecisionForm({ ...decisionForm, decision: 'keep' })}
                         className={`p-4 rounded-xl border-2 text-center transition-all ${
                           decisionForm.decision === 'keep'
@@ -1435,6 +1493,8 @@ export default function BillingCalendarView() {
                         <div className="text-xs opacity-70 mt-0.5">Продолжаем оплачивать</div>
                       </button>
                       <button
+                        type="button"
+                        aria-pressed={decisionForm.decision === 'cancel'}
                         onClick={() => setDecisionForm({ ...decisionForm, decision: 'cancel' })}
                         className={`p-4 rounded-xl border-2 text-center transition-all ${
                           decisionForm.decision === 'cancel'
@@ -1463,6 +1523,12 @@ export default function BillingCalendarView() {
                 </>
               )}
             </div>
+
+            {saveError && (
+              <div role="alert" className="mx-6 mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm leading-5 text-red-800">
+                {saveError}
+              </div>
+            )}
 
             {/* Modal Footer */}
             <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between gap-3">
@@ -1520,21 +1586,30 @@ export default function BillingCalendarView() {
       )}
 
       {/* Duplicates Modal */}
-      {duplicatesModalOpen && (
+      {isAdmin(userRole) && duplicatesModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setDuplicatesModalOpen(false)} />
-          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col">
+          <div
+            ref={duplicatesDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="billing-calendar-duplicates-title"
+            tabIndex={-1}
+            className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col outline-none"
+          >
             <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
               <div>
-                <h3 className="text-lg font-bold text-gray-900">Найдены повторяющиеся подписки</h3>
+                <h3 id="billing-calendar-duplicates-title" className="text-lg font-bold text-gray-900">Найдены повторяющиеся подписки</h3>
                 <p className="text-xs text-gray-500 mt-0.5">
                   {duplicateGroups.length} {duplicateGroups.length === 1 ? 'группа' : 'групп'} ·
                   {' '}{duplicatesCount} лишних {duplicatesCount === 1 ? 'запись' : 'записей'}
                 </p>
               </div>
               <button
+                type="button"
+                aria-label="Закрыть окно дубликатов"
                 onClick={() => setDuplicatesModalOpen(false)}
-                className="p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+                className="p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -1743,7 +1818,7 @@ function UpcomingDeadlines({
                     Решить
                   </button>
                 )}
-                {isTechnician(userRole) && (
+                {canEditEmailSubscription(userRole, sub.status) && (
                   <button
                     onClick={() => onEdit(sub)}
                     className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 rounded-lg hover:bg-blue-100 transition-colors"

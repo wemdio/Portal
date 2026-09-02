@@ -37,6 +37,8 @@ function rawRequest(overrides: Record<string, unknown> = {}) {
     project_client: null,
     comment: null,
     expense_type: 'legacy_unclassified',
+    budget_scope: 'general',
+    cost_category: null,
     status: 'paid',
     approval_reason: null,
     expected_payment_on: '2026-08-01',
@@ -74,6 +76,31 @@ function monthSummary(month: string) {
     paidAll: 10_000,
     pendingCount: 0,
     approvedCount: 0,
+    costBudget: {
+      limit: 650_000,
+      paid: 0,
+      reserved: 0,
+      used: 0,
+      remaining: 650_000,
+      overage: 0,
+      usagePct: 0,
+      level: 'normal',
+      dataComplete: true,
+      missingFxCount: 0,
+      mailPaid: 0,
+      mailReserved: 0,
+      techPaid: 0,
+      techReserved: 0,
+      manualPaid: 0,
+      manualReserved: 0,
+      byCategory: {
+        instantly: { paid: 0, reserved: 0 },
+        email: { paid: 0, reserved: 0 },
+        bases: { paid: 0, reserved: 0 },
+        domains: { paid: 0, reserved: 0 },
+        other: { paid: 0, reserved: 0 },
+      },
+    },
   };
 }
 
@@ -341,6 +368,8 @@ describe('PATCH /api/payments/[id]', () => {
     ['payment_request_invalid_transition', 409, 'invalid_transition'],
     ['payment_request_not_found', 404, 'payment_request_not_found'],
     ['payment_request_forbidden', 403, 'payment_request_forbidden'],
+    ['payment_request_cost_limit_exceeded', 409, 'cost_limit_exceeded'],
+    ['payment_request_cost_budget_incomplete', 409, 'cost_budget_incomplete'],
   ])('maps the RPC domain error %s to HTTP %d', async (message, status, code) => {
     mockTransitionError = { message, code: 'P0001' };
 

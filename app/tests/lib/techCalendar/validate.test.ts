@@ -9,7 +9,31 @@
  * запроса в базу непроверенным.
  */
 
-import { ValidationError, parseCreateInput, parsePatchInput, parseRenewInput, parseDecisionInput } from '@/lib/techCalendar/validate';
+import {
+  ValidationError,
+  parseCreateInput,
+  parseDecisionInput,
+  parseExpectedUpdatedAt,
+  parsePatchInput,
+  parseRenewInput,
+} from '@/lib/techCalendar/validate';
+
+describe('parseExpectedUpdatedAt', () => {
+  it('принимает ISO timestamp с часовым поясом', () => {
+    expect(parseExpectedUpdatedAt({
+      expected_updated_at: '2026-08-01T03:00:00.123+03:00',
+    })).toBe('2026-08-01T03:00:00.123+03:00');
+  });
+
+  it.each([
+    {},
+    { expected_updated_at: '' },
+    { expected_updated_at: '08/01/2026' },
+    { expected_updated_at: '2026-08-01T00:00:00' },
+  ])('не принимает отсутствующую или неоднозначную версию: %p', (body) => {
+    expect(() => parseExpectedUpdatedAt(body)).toThrow(ValidationError);
+  });
+});
 
 describe('parseCreateInput', () => {
   it('принимает полную карточку', () => {
@@ -113,9 +137,14 @@ describe('parseRenewInput', () => {
   });
 
   it('принимает ручную дату и сумму', () => {
-    expect(parseRenewInput({ next_billing_date: '2026-09-25', amount: 275 })).toEqual({
+    expect(parseRenewInput({
       next_billing_date: '2026-09-25',
       amount: 275,
+      expected_updated_at: '2026-08-01T00:00:00.000Z',
+    })).toEqual({
+      next_billing_date: '2026-09-25',
+      amount: 275,
+      expected_updated_at: '2026-08-01T00:00:00.000Z',
     });
   });
 

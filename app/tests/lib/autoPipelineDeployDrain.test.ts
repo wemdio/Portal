@@ -25,7 +25,7 @@ describe('auto-pipeline deploy drain', () => {
     expect(composeService).toContain('stop_grace_period: 20m');
 
     const genericContainerBlock = drainWorker.match(
-      /^containers=\(\s*([\s\S]*?)\n\)/m,
+      /^\s*containers=\(\s*([\s\S]*?)\n\s*\)/m,
     )?.[1];
     expect(genericContainerBlock).toBeDefined();
     expect(genericContainerBlock).not.toContain('portal-worker-autopipeline');

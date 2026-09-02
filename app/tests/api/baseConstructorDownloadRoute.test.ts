@@ -5,10 +5,10 @@
  * commit 751fba065 — precomputed .csv.gz artifact).
  *
  * Three behaviours the incident fix depends on:
- *  1. Fast path — a job with export_path set streams the DERIVED artifact path
- *     `${id}.csv.gz` (NEVER the client-writable export_path column: RLS lets a
- *     user point that string at another tenant's object) with Content-Encoding:
- *     gzip when the client accepts gzip. It must NOT pull the ~50MB `data` jsonb.
+ *  1. Fast path — a job with export_path set streams either legacy
+ *     `${id}.csv.gz` or a strictly validated `${id}/${runToken}.csv.gz` path.
+ *     Arbitrary client-writable paths cannot become a cross-tenant read. Gzip
+ *     clients get Content-Encoding:gzip without pulling the ~50MB `data` jsonb.
  *  2. Legacy fallback — a completed job without an artifact streams the CSV built
  *     from `data` (byte-identical to rowsToCsvFile) AND lazily backfills the
  *     artifact (uploadExportArtifact + update export_path), guarded so only a
@@ -31,6 +31,10 @@ import { gunzipSync } from 'node:zlib';
 import { Readable } from 'node:stream';
 import { rowsToCsvFile } from '@/lib/tools/rowsToCsv';
 import { buildCsvGzip, EXPORT_BUCKET } from '@/lib/tools/csvExportArtifact';
+import {
+  EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
+  ENRICH_CHECKPOINT_ATTEMPTED_COL,
+} from '@/lib/tools/baseConstructorCheckpoint';
 
 const JOB_ID = 'job-abc';
 const OWNER = 'owner-1';
@@ -41,9 +45,14 @@ const ROWS: unknown[][] = [
   ['line\nbreak', '', ''],
 ];
 const CHECKPOINT_ROWS: unknown[][] = [
-  ['компания', 'Сайт', '__portal_enrich_attempted_v1'],
-  ['Alpha', 'alpha.example', '1'],
-  ['Beta', 'beta.example', ''],
+  [
+    'компания',
+    'Сайт',
+    ENRICH_CHECKPOINT_ATTEMPTED_COL,
+    EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
+  ],
+  ['Alpha', 'alpha.example', '1', '{"a@alpha.example":{"attempts":1}}'],
+  ['Beta', 'beta.example', '', ''],
 ];
 const CLEAN_CHECKPOINT_ROWS: unknown[][] = [
   ['компания', 'Сайт'],
@@ -213,6 +222,23 @@ describe('auth precedes any body work', () => {
 /* ── fast path: stored artifact ──────────────────────────────────────────── */
 
 describe('fast path: stored artifact', () => {
+  it('uses a validated token-scoped artifact path produced by the active worker', async () => {
+    const runToken = '11111111-1111-4111-8111-111111111111';
+    const tokenPath = `${JOB_ID}/${runToken}.csv.gz`;
+    const gz = await buildCsvGzip(ROWS);
+    mockStorageDownload.mockResolvedValue({ data: gzBlob(gz), error: null });
+    arrange({
+      authUser: { id: OWNER },
+      meta: { user_id: OWNER, status: 'completed', export_path: tokenPath },
+    });
+
+    const res = await GET(makeReq({ acceptGzip: true }), params);
+
+    expect(res.status).toBe(200);
+    expect(mockStorageDownload).toHaveBeenCalledWith(EXPORT_BUCKET, tokenPath);
+    expect(mockJobSelect).toHaveBeenCalledTimes(1);
+  });
+
   it('streams the DERIVED ${id}.csv.gz with content-encoding gzip and never pulls data', async () => {
     const gz = await buildCsvGzip(ROWS);
     mockStorageDownload.mockResolvedValue({ data: gzBlob(gz), error: null });

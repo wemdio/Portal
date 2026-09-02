@@ -5,6 +5,7 @@ import { Loader2, Download, FileSpreadsheet, CirclePause, Trash2, Play, Info } f
 
 import { saveAs } from 'file-saver';
 import { supabase } from '@/lib/supabaseClient';
+import { readApiError } from '@/lib/apiError';
 
 type ParsedCompany = {
   companyName: string;
@@ -155,24 +156,6 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${token}`,
   };
-}
-
-async function readApiError(res: Response): Promise<string> {
-  if (res.status === 401) return 'Сессия истекла. Обновите страницу и войдите снова.';
-  const raw = await res.text().catch(() => '');
-  if (!raw) return `Ошибка запроса: ${res.status}`;
-  try {
-    const parsed = JSON.parse(raw) as { error?: unknown };
-    if (typeof parsed.error === 'string' && parsed.error.trim()) {
-      return parsed.error;
-    }
-  } catch {
-    // Response is not JSON (e.g. HTML maintenance page) — return a friendly message
-  }
-  if (/^\s*</.test(raw)) {
-    return `Сервер вернул неожиданный ответ (${res.status}). Попробуйте позже.`;
-  }
-  return raw.length > 300 ? `${raw.slice(0, 300)}…` : raw;
 }
 
 export function CryptoPaymentParserView() {

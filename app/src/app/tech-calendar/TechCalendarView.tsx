@@ -8,13 +8,28 @@ import StatsRow from '@/components/tech-calendar/StatsRow';
 import SubscriptionModal, { type ModalMode, type ModalPayload } from '@/components/tech-calendar/SubscriptionModal';
 import TypeBreakdown from '@/components/tech-calendar/TypeBreakdown';
 import UpcomingList from '@/components/tech-calendar/UpcomingList';
-import { mskDateStr } from '@/lib/techCalendar/dates';
+import { daysUntil, mskDateStr } from '@/lib/techCalendar/dates';
 import type { ServiceType, TechProviderBalance, TechSubscription } from '@/lib/techCalendar/types';
 
 const MONTH_NAMES = [
   'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
   'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
 ];
+
+interface TechCalendarApiResponse {
+  subscriptions?: TechSubscription[];
+  balances?: TechProviderBalance[];
+  sync?: Record<string, SyncOutcomeResponse>;
+  error?: string;
+}
+
+async function responseJson(res: Response): Promise<TechCalendarApiResponse> {
+  try {
+    return await res.json() as TechCalendarApiResponse;
+  } catch {
+    return {};
+  }
+}
 
 const SYNC_PROVIDER_LABELS: Record<string, string> = {
   spaceproxy: 'SpaceProxy',
@@ -59,10 +74,14 @@ export default function TechCalendarView() {
     try {
       const url = showHidden ? '/api/tech-calendar/subscriptions?include_hidden=1' : '/api/tech-calendar/subscriptions';
       const res = await fetch(url, { headers: await authHeaders() });
-      const json = await res.json();
+      const json = await responseJson(res);
       setSubscriptions(res.ok ? (json.subscriptions ?? []) : []);
       setBalances(res.ok ? (json.balances ?? []) : []);
-      if (!res.ok) setError(json.error ?? 'Не удалось загрузить список');
+      setError(res.ok ? null : (json.error ?? 'Не удалось загрузить список'));
+    } catch {
+      setSubscriptions([]);
+      setBalances([]);
+      setError('Не удалось загрузить список');
     } finally {
       setLoading(false);
     }
@@ -89,18 +108,26 @@ export default function TechCalendarView() {
       if (modalMode === 'create') {
         res = await fetch('/api/tech-calendar/subscriptions', { method: 'POST', headers, body: JSON.stringify(payload) });
       } else if (modalMode === 'edit' && modalSub) {
-        res = await fetch(`/api/tech-calendar/subscriptions/${modalSub.id}`, { method: 'PATCH', headers, body: JSON.stringify(payload) });
+        res = await fetch(`/api/tech-calendar/subscriptions/${modalSub.id}`, {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({ ...payload, expected_updated_at: modalSub.updated_at }),
+        });
       } else if (modalMode === 'renew' && modalSub) {
         res = await fetch(`/api/tech-calendar/subscriptions/${modalSub.id}/renew`, {
           method: 'POST',
           headers,
-          body: JSON.stringify({ next_billing_date: payload.next_billing_date, amount: payload.amount }),
+          body: JSON.stringify({
+            next_billing_date: payload.next_billing_date,
+            amount: payload.amount,
+            expected_updated_at: modalSub.updated_at,
+          }),
         });
       } else {
         return;
       }
 
-      const json = await res.json();
+      const json = await responseJson(res);
       if (!res.ok) {
         setError(json.error ?? 'Не удалось сохранить');
         return;
@@ -108,30 +135,53 @@ export default function TechCalendarView() {
       setModalMode(null);
       setModalSub(null);
       await load();
+    } catch {
+      setError('Не удалось сохранить');
     } finally {
       setSaving(false);
     }
   };
 
   const decide = async (sub: TechSubscription, decision: 'keep' | 'cancel') => {
-    const res = await fetch(`/api/tech-calendar/subscriptions/${sub.id}/decision`, {
-      method: 'POST',
-      headers: await authHeaders(),
-      body: JSON.stringify({ decision }),
-    });
-    if (res.ok) await load();
+    setError(null);
+    try {
+      const res = await fetch(`/api/tech-calendar/subscriptions/${sub.id}/decision`, {
+        method: 'POST',
+        headers: await authHeaders(),
+        body: JSON.stringify({ decision, expected_updated_at: sub.updated_at }),
+      });
+      const json = await responseJson(res);
+      if (!res.ok) {
+        setError(json.error ?? 'Не удалось сохранить решение');
+        return;
+      }
+      await load();
+    } catch {
+      setError('Не удалось сохранить решение');
+    }
   };
 
   const toggleHidden = async (sub: TechSubscription) => {
-    const res = await fetch(`/api/tech-calendar/subscriptions/${sub.id}`, {
-      method: 'PATCH',
-      headers: await authHeaders(),
-      body: JSON.stringify({ is_hidden: !sub.is_hidden }),
-    });
-    if (res.ok) {
+    setError(null);
+    try {
+      const res = await fetch(`/api/tech-calendar/subscriptions/${sub.id}`, {
+        method: 'PATCH',
+        headers: await authHeaders(),
+        body: JSON.stringify({
+          is_hidden: !sub.is_hidden,
+          expected_updated_at: sub.updated_at,
+        }),
+      });
+      const json = await responseJson(res);
+      if (!res.ok) {
+        setError(json.error ?? 'Не удалось изменить видимость сервиса');
+        return;
+      }
       setModalMode(null);
       setModalSub(null);
       await load();
+    } catch {
+      setError('Не удалось изменить видимость сервиса');
     }
   };
 
@@ -143,28 +193,43 @@ export default function TechCalendarView() {
         method: 'POST',
         headers: await authHeaders(),
       });
-      const json = await res.json();
+      const json = await responseJson(res);
       if (!res.ok) {
         setError(json.error ?? 'Не удалось синхронизировать техничку');
         return;
       }
-      const failedProviders = Object.entries((json.sync ?? {}) as Record<string, SyncOutcomeResponse>)
+      const failedProviders = Object.entries(json.sync ?? {})
         .filter(([, outcome]) => outcome && !outcome.ok && !outcome.skipped)
         .map(([provider, outcome]) => `${SYNC_PROVIDER_LABELS[provider] ?? provider}: ${outcome.error ?? 'ошибка синка'}`);
-      if (failedProviders.length) setError(failedProviders.join('; '));
       await load();
+      if (failedProviders.length) setError(failedProviders.join('; '));
+    } catch {
+      setError('Не удалось синхронизировать техничку');
     } finally {
       setSyncing(false);
     }
   };
 
-  const remove = async (sub: TechSubscription) => {
-    if (!window.confirm(`Удалить «${sub.service_name}» из календаря?`)) return;
-    const res = await fetch(`/api/tech-calendar/subscriptions/${sub.id}`, {
-      method: 'DELETE',
-      headers: await authHeaders(),
-    });
-    if (res.ok) await load();
+  const remove = async (sub: TechSubscription): Promise<boolean> => {
+    if (!window.confirm(`Удалить «${sub.service_name}» из календаря?`)) return false;
+    setError(null);
+    try {
+      const res = await fetch(`/api/tech-calendar/subscriptions/${sub.id}`, {
+        method: 'DELETE',
+        headers: await authHeaders(),
+        body: JSON.stringify({ expected_updated_at: sub.updated_at }),
+      });
+      const json = await responseJson(res);
+      if (!res.ok) {
+        setError(json.error ?? 'Не удалось удалить сервис');
+        return false;
+      }
+      await load();
+      return true;
+    } catch {
+      setError('Не удалось удалить сервис');
+      return false;
+    }
   };
 
   const shiftMonth = (delta: number) => {
@@ -192,6 +257,7 @@ export default function TechCalendarView() {
           <button
             type="button"
             onClick={() => {
+              setError(null);
               setModalSub(null);
               setModalMode('create');
             }}
@@ -238,8 +304,13 @@ export default function TechCalendarView() {
           month={month}
           today={today}
           onSelect={(sub) => {
+            setError(null);
             setModalSub(sub);
-            setModalMode('edit');
+            setModalMode(
+              sub.status === 'keep' && daysUntil(sub.next_billing_date, today) <= 0
+                ? 'renew'
+                : 'edit',
+            );
           }}
         />
       )}
@@ -248,13 +319,18 @@ export default function TechCalendarView() {
         subscriptions={visible}
         today={today}
         onRenew={(sub) => {
+          setError(null);
           setModalSub(sub);
           setModalMode('renew');
         }}
         onDecide={decide}
       />
 
-      {error && !modalMode && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{error}</div>}
+      {error && !modalMode && (
+        <div role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">
+          {error}
+        </div>
+      )}
 
       {modalMode && (
         <SubscriptionModal
@@ -271,9 +347,10 @@ export default function TechCalendarView() {
           onDelete={
             modalMode === 'edit' && modalSub
               ? async () => {
-                  await remove(modalSub);
-                  setModalMode(null);
-                  setModalSub(null);
+                  if (await remove(modalSub)) {
+                    setModalMode(null);
+                    setModalSub(null);
+                  }
                 }
               : undefined
           }

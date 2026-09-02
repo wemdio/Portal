@@ -4,14 +4,15 @@
  * Для каждого активного сегмента (уже отсортированы по priority) стримим
  * карточки iterateTwoGisCards({ rubricGroups, hasWebsite: true }) и набираем
  * per-сегментную квоту, пропуская:
- *   - twogis_id из seen-журнала (батчевый lookup filterUnseenIds, чанк 100 —
+ *   - twogis_id или корпоративный домен из seen-журнала (батчевые lookup,
+ *     чанк 100 —
  *     длинные 2GIS id в .in() упираются в 8K-лимит URL nginx, см. seenCompanies);
  *   - twogis_id со свежей проверкой в архиве gis_signal_company_signals
  *     (filterRecentlyCheckedIds, окно RECHECK_AFTER_DAYS=30: отсеянные вчера
  *     reject'ы не перепроверяем, через 30+ дней сайт мог восстановиться);
- *   - id, уже взятые РАНЕЕ в этом прогоне другим сегментом (cross-segment
- *     дедуп: рубрики сегментов пересекаются, компанию забирает ПЕРВЫЙ по
- *     приоритету сегмент — порядок массива segments решает).
+ *   - id/сайт, уже взятые РАНЕЕ в этом прогоне другим сегментом (cross-segment
+ *     дедуп: рубрики сегментов и карточки филиалов пересекаются, компанию
+ *     забирает ПЕРВЫЙ по приоритету сегмент).
  *
  * Квота: daily_limit делится на enabled-сегменты ПОРОВНУ (floor), остаток
  * деления раздаётся первым сегментам по одному (priority ASC). Осознанно
@@ -28,10 +29,10 @@
 import 'server-only';
 import { deriveDomain } from '@/lib/jobs/hhAutoParser';
 import { RECONTACT_AFTER_DAYS, loadRecentlySeenDomains } from '@/lib/outreachos/seenEmployers';
-import { getLatestTwoGisSnapshotId, iterateTwoGisCards } from '@/lib/twoGis/repository';
+import { iterateTwoGisCards } from '@/lib/twoGis/repository';
 import type { TwoGisCard } from '@/lib/twoGis/types';
 import { toTwoGisRubricGroups, type GisSignalSegment } from './config';
-import { filterUnseenIds, filterRecentlyCheckedIds } from './seenCompanies';
+import { filterUnseenDomains, filterUnseenIds, filterRecentlyCheckedIds } from './seenCompanies';
 
 // Переэкспорт для существующих потребителей (pipelineRunner): каноническое
 // определение теперь в twoGis/repository (общая точка с OutreachOS top-up).
@@ -50,6 +51,58 @@ export interface SegmentCandidate {
 }
 
 type Logger = (msg: string) => void;
+
+const SHARED_SITE_HOSTS = [
+  '2gis.ru',
+  'business.site',
+  'facebook.com',
+  'hipolink.me',
+  'instagram.com',
+  'linktr.ee',
+  'ok.ru',
+  'sites.google.com',
+  't.me',
+  'taplink.cc',
+  'taplink.ru',
+  'telegram.me',
+  'vk.com',
+  'wa.me',
+  'whatsapp.com',
+  'yandex.ru',
+  'youtube.com',
+] as const;
+
+function parsedCandidateSite(site: string): { host: string; path: string } | null {
+  try {
+    const url = new URL(site.startsWith('http') ? site : `https://${site}`);
+    const host = url.hostname.replace(/^www\./, '').toLowerCase();
+    if (!host) return null;
+    const path = `${url.pathname.replace(/\/+$/, '') || '/'}${url.search}`.toLowerCase();
+    return { host, path };
+  } catch {
+    return null;
+  }
+}
+
+function isSharedSiteHost(host: string): boolean {
+  return SHARED_SITE_HOSTS.some((shared) => host === shared || host.endsWith(`.${shared}`));
+}
+
+/** Ключ дедупа сайта: корпоративный домен либо конкретный shared-hosting URL. */
+export function candidateSiteIdentity(site: string): string | null {
+  const parsed = parsedCandidateSite(site);
+  if (!parsed) return null;
+  return isSharedSiteHost(parsed.host)
+    ? `url:${parsed.host}${parsed.path}`
+    : `domain:${parsed.host}`;
+}
+
+/** Домен, который безопасно сравнивать с seen-журналом между 2GIS-карточками. */
+function candidateCorporateDomain(site: string): string | null {
+  const parsed = parsedCandidateSite(site);
+  if (!parsed || isSharedSiteHost(parsed.host)) return null;
+  return parsed.host;
+}
 
 /**
  * Дневной лимит → квоты по сегментам. Порядок возврата = порядку segments
@@ -129,6 +182,7 @@ export async function pullSegmentCandidates(
   const log = opts.log ?? (() => {});
   const quotas = computeSegmentQuotas(opts.dailyLimit, segments.map((s) => s.quota_weight));
   const takenIds = new Set<string>(); // cross-segment дедуп этого прогона
+  const takenSiteIdentities = new Set<string>();
   const out: SegmentCandidate[] = [];
 
   // Обратный кросс-дедуп (§4.2 дизайн-дока 2026-08-11-outreachos-2gis-topup):
@@ -149,7 +203,9 @@ export async function pullSegmentCandidates(
     let pulled = 0;
     let scanned = 0;
     let seenDropped = 0;
+    let seenDomainDropped = 0;
     let recentDropped = 0;
+    let duplicateSiteDropped = 0;
     let outreachosDropped = 0;
 
     for await (const batch of iterateTwoGisCards(filters, { snapshotId: opts.snapshotId })) {
@@ -162,10 +218,26 @@ export async function pullSegmentCandidates(
       seenDropped += fresh.length - survivors.length;
       // …потом архив проверок (отсеянные за последние RECHECK_AFTER_DAYS дней).
       const notCheckedRecently = await filterRecentlyCheckedIds(survivors.map((c) => c.id));
+      // Один бизнес часто представлен несколькими 2GIS-карточками филиалов.
+      // Успешно залитые карточки отсекаем ещё и по корпоративному домену.
+      const corporateDomains = survivors
+        .map((card) => candidateCorporateDomain(card.website))
+        .filter((domain): domain is string => !!domain);
+      const unseenDomains = await filterUnseenDomains(corporateDomains);
       for (const card of survivors) {
         if (pulled >= quota) break;
         if (!notCheckedRecently.has(card.id)) {
           recentDropped += 1;
+          continue;
+        }
+        const corporateDomain = candidateCorporateDomain(card.website);
+        if (corporateDomain && !unseenDomains.has(corporateDomain)) {
+          seenDomainDropped += 1;
+          continue;
+        }
+        const siteIdentity = candidateSiteIdentity(card.website);
+        if (siteIdentity && takenSiteIdentities.has(siteIdentity)) {
+          duplicateSiteDropped += 1;
           continue;
         }
         // Домен в seen-журнале OutreachOS (45д) — пропускаем: компания уже
@@ -176,6 +248,7 @@ export async function pullSegmentCandidates(
           continue;
         }
         takenIds.add(card.id);
+        if (siteIdentity) takenSiteIdentities.add(siteIdentity);
         out.push(cardToCandidate(card, segment.key));
         pulled += 1;
       }
@@ -183,7 +256,8 @@ export async function pullSegmentCandidates(
     }
     log(
       `[segments] ${segment.key}: pulled=${pulled}/${quota} ` +
-        `(scanned=${scanned}, seen-отсев=${seenDropped}, недавние-проверки-отсев=${recentDropped}, ` +
+        `(scanned=${scanned}, seen-id-отсев=${seenDropped}, seen-domain-отсев=${seenDomainDropped}, ` +
+        `дубли-сайта-отсев=${duplicateSiteDropped}, недавние-проверки-отсев=${recentDropped}, ` +
         `outreachos-${RECONTACT_AFTER_DAYS}д-отсев=${outreachosDropped})`,
     );
   }

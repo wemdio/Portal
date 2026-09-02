@@ -100,10 +100,12 @@ database_review_requests(id uuid, owner_user_id, tab_name, project_id, specialis
 agent_pipelines(id uuid, user_id, chat_id bigint, name, status, current_step_index int, steps jsonb, context jsonb, error_message, created_at, completed_at)
 
 -- Платежи / подписки
-payment_requests(id uuid, user_id, department, description, amount numeric, project_id, status, expense_type, expected_payment_on, paid_on, created_at)
-  -- status: pending|approved|paid|rejected. expense_type: one_time (входит в общий лимит месяца — 75 000 ₽, в январе/мае/декабре 40 000 ₽) | planned (лимит не режет) | legacy_unclassified (старая запись, тип ещё не уточнён).
+payment_requests(id uuid, user_id, department, description, amount numeric, project_id, status, expense_type, budget_scope, cost_category, expected_payment_on, paid_on, created_at)
+  -- status: pending|approved|paid|rejected. budget_scope: general (старый контур) | costs (отдельный общий лимит 650 000 ₽/месяц). cost_category для costs: instantly|email|bases|domains|other.
+  -- expense_type в general: one_time (входит в общий лимит месяца — 75 000 ₽, в январе/мае/декабре 40 000 ₽) | planned (лимит не режет) | legacy_unclassified (старая запись, тип ещё не уточнён).
   -- ФАКТ расхода = status='paid' и считается по paid_on, НЕ по created_at; approved — это только резерв по expected_payment_on. user_id пуст, если сотрудник удалён.
-email_subscriptions(id uuid, project_id, project_name, email_provider, email_count int, billing_amount numeric, status, created_at)
+email_subscriptions(id uuid, project_id, project_name, email_provider, email_count int, billing_amount numeric, currency, next_billing_date, status, created_at)
+  -- Только status='keep' входит в costs/почты: до next_billing_date это резерв, начиная с даты списания — факт. Не суммируй такую строку второй раз как ручную заявку.
 
 -- Email-цепочки (генератор писем)
 email_sequence_runs(id uuid, user_id uuid, status text, brief jsonb, segments jsonb, created_at, updated_at, error_message)
