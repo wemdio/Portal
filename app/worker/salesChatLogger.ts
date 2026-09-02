@@ -59,9 +59,30 @@ interface SyncRun {
   id: string;
   trigger: string;
 }
-/** Курсор синка: сколько аккаунтов уже пройдено в этом запуске. */
+/**
+ * Курсор синка.
+ *
+ * accounts_done — счётчик для экрана. Возобновляться по нему НЕЛЬЗЯ: он
+ * позиционный, а список аккаунтов между захватами меняет длину, и меняет её
+ * этот же воркер. syncOneAccount на любой ошибке авторизации ставит аккаунту
+ * status='auth_error', то есть выбрасывает его из выборки `status = active`.
+ * Аккаунт, выпавший ПЕРЕД курсором, сдвигает весь хвост на позицию влево, и
+ * slice(accounts_done) начинается на одну позицию дальше нужной — ровно один
+ * аккаунт молча пропускается до следующей ночи (A,B,C,D; A ушёл в auth_error,
+ * B синхронизирован, курсор 2, новый список B,C,D, slice(2) = только D — C
+ * потерян). Симметрично промахивается и аккаунт, ЗАВЕДЁННЫЙ посреди прогона.
+ *
+ * Поэтому возобновляемся по last_account_id — идентификатору последнего
+ * обработанного аккаунта: берём первый аккаунт, чей id сортируется ПОСЛЕ него.
+ * Такой курсор не зависит ни от длины списка, ни от того, что из него выпало.
+ */
 interface SyncCheckpoint {
   accounts_done: number;
+  /**
+   * Может отсутствовать: чекпойнты, записанные прежней (позиционной) формой,
+   * должны продолжаться, а не начинаться заново. Для них фолбэк — accounts_done.
+   */
+  last_account_id?: string;
 }
 
 function mskNow(): Date {
@@ -222,27 +243,43 @@ async function runSync(run: SyncRun, ctx: JobContext<SyncCheckpoint>): Promise<v
     .from('sales_chat_accounts')
     .select('id, label, tg_user_id, session_sealed, last_synced_at')
     .eq('status', 'active')
-    // ПОРЯДОК ОБЯЗАТЕЛЕН. Курсор в чекпойнте позиционный («сколько аккаунтов
-    // пройдено»), и он осмыслен только если при следующем захвате список
-    // выстроится ровно так же. Без order by PostgREST возвращает строки в
-    // произвольном порядке — «пропустить первые N» тогда пропускало бы
-    // случайные N аккаунтов, то есть тихую потерю данных вместо продолжения.
-    // id — первичный ключ, ключ стабильнее в таблице отсутствует.
+    // ПОРЯДОК ОБЯЗАТЕЛЕН, и вот что именно он даёт. Возобновление ищет первый
+    // аккаунт, чей id больше last_account_id из чекпойнта; это осмысленно
+    // только при детерминированной сортировке по тому же ключу — без order by
+    // PostgREST волен вернуть строки как угодно, и «всё, что после X» стало бы
+    // случайным подмножеством. Гарантия ровно такая: каждый аккаунт, чей id
+    // больше курсора, будет обработан, независимо от того, сколько аккаунтов
+    // выпало из выборки или добавилось в неё между захватами. Аккаунт,
+    // ЗАВЕДЁННЫЙ посреди прогона с id меньше курсора, в этом прогоне пропущен —
+    // это уже осознанный размен, а не тихий сдвиг списка: он попадёт в
+    // ближайший ночной запуск, и его last_synced_at никто не двигал.
+    // id — первичный ключ, ключа стабильнее в таблице нет.
     .order('id', { ascending: true });
 
   const list = (accounts ?? []) as AccountRow[];
   // Курсор с прошлого захвата. Аккаунты до него уже синхронизированы, и у них
-  // сдвинут last_synced_at — переигрывать их не нужно. Обрезаем по длине
-  // списка: аккаунт могли деактивировать между захватами, и курсор из
-  // прошлого прогона мог оказаться за концом нынешнего.
+  // сдвинут last_synced_at — переигрывать их не нужно.
+  const lastId = ctx.checkpoint?.last_account_id;
+  const startIndex = lastId
+    ? list.findIndex((acc) => acc.id > lastId)
+    // Фолбэк для чекпойнтов прежней, позиционной формы (и только для них):
+    // обрезаем по длине списка, иначе курсор из прогона с более длинным
+    // списком уехал бы за конец нынешнего.
+    : Math.min(Math.max(ctx.checkpoint?.accounts_done ?? 0, 0), list.length);
+  // findIndex вернул -1 — курсор старше всех оставшихся аккаунтов, значит
+  // обработаны все: остаток пуст, а не «начать сначала».
+  const resumeFrom = startIndex < 0 ? list.length : startIndex;
+  // Счётчик для экрана ведём отдельно от курсора: он должен продолжать
+  // прежнюю нумерацию, а не пересчитываться от позиции в изменившемся списке.
   let done = Math.min(Math.max(ctx.checkpoint?.accounts_done ?? 0, 0), list.length);
   await updateRun({ accounts_total: list.length, accounts_done: done });
   log(
     'info',
-    `Sync run ${run.id} (${run.trigger}): ${list.length} accounts${done > 0 ? ` (RESUME from ${done})` : ''}`,
+    `Sync run ${run.id} (${run.trigger}): ${list.length} accounts` +
+      `${resumeFrom > 0 ? ` (RESUME from index ${resumeFrom}, done=${done})` : ''}`,
   );
 
-  for (const acc of list.slice(done)) {
+  for (const acc of list.slice(resumeFrom)) {
     if (ctx.signal.aborted) return; // остановка или перехват — статус не трогаем
     await syncOneAccount(acc, ctx.signal);
     done += 1;
@@ -250,11 +287,24 @@ async function runSync(run: SyncRun, ctx: JobContext<SyncCheckpoint>): Promise<v
     // библиотека. Пишем оба: колонка без чекпойнта не переживёт перехват,
     // чекпойнт без колонки не увидит пользователь.
     await updateRun({ accounts_done: done });
-    const owned = await ctx.saveCheckpoint({ accounts_done: done });
+    const owned = await ctx.saveCheckpoint({ accounts_done: done, last_account_id: acc.id });
     if (!owned || ctx.signal.aborted) return; // перехват или остановка — статус не трогаем
   }
 
-  await updateRun({ status: 'done', finished_at: new Date().toISOString() });
+  // Владение снимаем ВМЕСТЕ со статусом — ровно как это делает библиотека в
+  // своей терминальной записи (clearOwnership в lib/jobs/lifecycle.ts). Сегодня
+  // ни один путь захвата не смотрит за пределы status='running', так что для
+  // корректности это не нужно; нужно для того, чтобы законченная строка не
+  // читалась как арендованная в SQL и на экране, и чтобы продление, успевшее
+  // сработать между этой записью и снятием таймера, не написало в журнал
+  // ложное «lease lost to another worker».
+  await updateRun({
+    status: 'done',
+    finished_at: new Date().toISOString(),
+    lease_until: null,
+    run_token: null,
+    worker_id: null,
+  });
   log('info', `Sync run ${run.id} done`);
 }
 
@@ -311,10 +361,11 @@ async function main(): Promise<void> {
      * И решающее, как у TG-парсера: при concurrency=1 и одной реплике
      * брошенная по простою аренда никого не спасает. syncAccount на signal не
      * смотрит вовсе — после abort тело не завершится, его промис не осядет,
-     * owned не очистится, и pollOnce будет вечно упираться в предел
-     * параллелизма. Хуже: аренду подобрал бы ЭТОТ ЖЕ контейнер и подключился
-     * бы тем же Telegram-аккаунтом поверх живого соединения — AUTH_KEY_
-     * DUPLICATED вместо починки.
+     * owned.delete в finally не выполнится, и pollOnce будет вечно упираться в
+     * предел параллелизма. То есть этот контейнер структурно не способен взять
+     * брошенную строку обратно, а другого контейнера здесь нет: строка просто
+     * простаивала бы в running с истёкшей арендой до ближайшего рестарта — ровно
+     * то же, что и без опции progress, только с потраченной попыткой.
      *
      * Что защищает вместо progress: мёртвый процесс аренду не продлевает —
      * строку подберут через ≤ LEASE_SECONDS, и это главный сценарий; а
@@ -356,7 +407,16 @@ async function main(): Promise<void> {
         log('error', `Sync run ${job.id} crashed`, err);
         await requireSupabaseAdmin(log)
           .from('sales_chat_sync_runs')
-          .update({ status: 'error', error_message: msg.slice(0, 500), finished_at: new Date().toISOString() })
+          // Владение снимаем вместе со статусом — см. терминальную запись
+          // успеха в runSync.
+          .update({
+            status: 'error',
+            error_message: msg.slice(0, 500),
+            finished_at: new Date().toISOString(),
+            lease_until: null,
+            run_token: null,
+            worker_id: null,
+          })
           .eq('id', job.id)
           .eq('run_token', ctx.runToken);
       }
@@ -365,8 +425,24 @@ async function main(): Promise<void> {
 
   // Планирование — СНАРУЖИ раннера: создание плановой строки не должно зависеть
   // от того, взяли мы сейчас задачу или нет (и от предела параллелизма).
+  //
+  // Но и звать его на каждом круге нельзя. Пока задача идёт, pollOnce упирается
+  // в предел параллелизма и возвращает true после паузы в 500 мс, а pollLoop на
+  // true свой интервал НЕ выжидает — круг замыкается сразу. Без ограничителя
+  // проверка расписания уходила бы в базу дважды в секунду всю дорогу синка:
+  // на полном бэкфилле в несколько часов это десятки тысяч лишних запросов, и
+  // каждый по отдельности дешёвый, то есть незаметный. Раньше этой ямы не было
+  // только потому, что старый pollOnce блокировался на всё время синка.
+  //
+  // Минуты хватает с запасом: строка плановая, одна на сутки, и опоздать на
+  // минуту она не может (SCHEDULED_HOUR_MSK — час, а не момент).
+  const SCHEDULE_CHECK_INTERVAL_MS = 60_000;
+  let lastScheduleCheckAt = 0;
   const pollOnce = async (): Promise<boolean> => {
-    await ensureScheduledRun();
+    if (Date.now() - lastScheduleCheckAt >= SCHEDULE_CHECK_INTERVAL_MS) {
+      lastScheduleCheckAt = Date.now();
+      await ensureScheduledRun();
+    }
     return runner.pollOnce();
   };
 

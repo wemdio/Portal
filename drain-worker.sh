@@ -15,8 +15,11 @@
 #   в шаге 5 .semaphore/scheduled-deploy.yml), поэтому список не может
 #   разъехаться с docker-compose.prod.yml;
 # - не трогает таблицы воркеров, переехавших на общий жизненный цикл задач
-#   (app/src/lib/jobs/lifecycle.ts): base_constructor_jobs, tg_parser_jobs,
-#   search_parser_jobs и sales_chat_sync_runs.
+#   (app/src/lib/jobs/lifecycle.ts): base_constructor_jobs, tg_parser_jobs и
+#   search_parser_jobs. Очередь sales_chat_sync_runs в списке ниже не значилась
+#   и не значится — искать, откуда её убрали, не нужно; воркер этой очереди
+#   просто добавлен в is_lifecycle_managed_worker, чтобы деплой одного его не
+#   ставил на паузу чужие legacy-очереди.
 #   Такие воркеры по SIGTERM сами отпускают аренду за ~2 секунды, а задача
 #   продолжается с чекпоинта в соседней реплике — БД трогать не нужно.
 #
