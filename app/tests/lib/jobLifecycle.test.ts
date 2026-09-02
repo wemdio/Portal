@@ -25,6 +25,8 @@ const now = () => clock;
 function makeFakeDb(initial: Row[]) {
   const rows: Row[] = initial.map((r) => ({ ...r }));
   const updates: Array<{ patch: Row; matched: number }> = [];
+  /** Переключатель «база отвечает ошибкой на запись» — см. тест про сбой захвата. */
+  const control = { failUpdates: false };
 
   const matches = (row: Row, filters: Filter[]) =>
     filters.every((f) => {
@@ -59,6 +61,7 @@ function makeFakeDb(initial: Row[]) {
       if (orderCol) hit = [...hit].sort((a, b) => String(a[orderCol!]).localeCompare(String(b[orderCol!])));
       hit = hit.slice(0, limit);
       if (mode === 'update') {
+        if (control.failUpdates) return { data: null, error: { message: 'statement timeout' } };
         for (const r of hit) Object.assign(r, patch);
         updates.push({ patch, matched: hit.length });
       }
@@ -67,7 +70,7 @@ function makeFakeDb(initial: Row[]) {
     return q;
   };
 
-  return { client: { from } as never, rows, updates };
+  return { client: { from } as never, rows, updates, control };
 }
 
 const statuses = { pending: 'pending', running: 'running', done: 'done', failed: 'failed' };
@@ -112,7 +115,10 @@ describe('job lifecycle', () => {
     const runA = makeRunner(db, async () => { runs.push('A'); await new Promise(() => {}); }, { workerId: 'A' });
     const runB = makeRunner(db, async () => { runs.push('B'); await new Promise(() => {}); }, { workerId: 'B' });
 
-    const [gotA, gotB] = await Promise.all([runA.pollOnce(), runB.pollOnce()]);
+    const polls = Promise.all([runA.pollOnce(), runB.pollOnce()]);
+    // Проигравший перед ответом выжидает паузу — прокручиваем её.
+    await jest.advanceTimersByTimeAsync(1_000);
+    const [gotA, gotB] = await polls;
     await flush();
 
     // Оба просят позвать снова: победитель — потому что взял задачу,
@@ -124,6 +130,22 @@ describe('job lifecycle', () => {
     expect(db.rows[0].status).toBe('running');
     expect(typeof db.rows[0].run_token).toBe('string');
     expect(db.rows[0].lease_until).toBe(new Date(T0 + 60_000).toISOString());
+  });
+
+  it('a failed claim update is not a lost race — no immediate re-poll', async () => {
+    const db = makeFakeDb([{ id: 'j', status: 'pending', created_at: '1', attempts: 0 }]);
+    const run = jest.fn(async () => {});
+    const runner = makeRunner(db, run);
+    // База отвечает ошибкой на запись: кандидат виден, захват не проходит.
+    db.control.failUpdates = true;
+
+    // false, а не true: ноль строк из-за сбоя ничего не говорит об очереди, и
+    // pollLoop зовёт снова без паузы — иначе реплики уходят в цикл по базе,
+    // которой и так плохо.
+    expect(await runner.pollOnce()).toBe(false);
+    expect(run).not.toHaveBeenCalled();
+    expect(db.rows[0].status).toBe('pending');
+    expect(db.rows[0].run_token).toBeUndefined();
   });
 
   it('reclaims an expired or released lease, never a live one', async () => {
