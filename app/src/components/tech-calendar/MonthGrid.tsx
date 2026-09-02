@@ -2,12 +2,35 @@
 
 import { useState } from 'react';
 
-import { getDaysInMonth, getFirstDayOfMonth, toDateStr } from '@/lib/techCalendar/dates';
+import { getDaysInMonth, getFirstDayOfMonth, parseDateStr, toDateStr } from '@/lib/techCalendar/dates';
 import { addMoney, emptyTotals, formatMoney, formatTotals } from '@/lib/techCalendar/money';
 import { STATUS_LABELS, type TechSubscription } from '@/lib/techCalendar/types';
 import { STATUS_STYLES } from '@/components/tech-calendar/statusStyles';
 
 const DAY_NAMES = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+
+const MONTH_NAMES_GENITIVE = [
+  'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+  'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
+];
+
+// Сколько сервисов показываем в клетке. Дальше — плашка «+N ещё»: в день
+// переоформления пула прокси их бывает с десяток, и клетка растягивала строку
+// календаря на пол-экрана, пряча соседние дни под скролл.
+const VISIBLE_PER_DAY = 3;
+
+function formatDayLabel(dateStr: string): string {
+  const { month, day } = parseDateStr(dateStr);
+  return `${day} ${MONTH_NAMES_GENITIVE[month]}`;
+}
+
+function pluralSubs(count: number): string {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'подписка';
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'подписки';
+  return 'подписок';
+}
 
 interface Props {
   subscriptions: TechSubscription[];
@@ -68,7 +91,7 @@ export default function MonthGrid({ subscriptions, year, month, today, onSelect 
                 {day}
               </button>
               <div className="space-y-1">
-                {subs.map((sub) => {
+                {subs.slice(0, VISIBLE_PER_DAY).map((sub) => {
                   const style = STATUS_STYLES[sub.status];
                   return (
                     <button
@@ -83,6 +106,15 @@ export default function MonthGrid({ subscriptions, year, month, today, onSelect 
                     </button>
                   );
                 })}
+                {subs.length > VISIBLE_PER_DAY && (
+                  <button
+                    type="button"
+                    onClick={() => setOpenDay(dateStr)}
+                    className="w-full rounded bg-amber-100 px-1.5 py-0.5 text-center text-[11px] font-semibold text-amber-700 transition-colors hover:bg-amber-200"
+                  >
+                    +{subs.length - VISIBLE_PER_DAY} ещё
+                  </button>
+                )}
               </div>
             </div>
           );
@@ -93,7 +125,12 @@ export default function MonthGrid({ subscriptions, year, month, today, onSelect 
         <div className="absolute inset-0 flex items-center justify-center bg-black/10 p-4" onClick={() => setOpenDay(null)}>
           <div className="w-full max-w-sm rounded-xl border border-gray-200 bg-white p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
             <div className="mb-2 flex items-center justify-between">
-              <div className="text-sm font-semibold text-gray-900">{openDay}</div>
+              <div className="text-sm font-semibold text-gray-900">
+                {formatDayLabel(openDay)}
+                <span className="ml-2 text-xs font-normal text-gray-500">
+                  {openSubs.length} {pluralSubs(openSubs.length)}
+                </span>
+              </div>
               <button type="button" onClick={() => setOpenDay(null)} className="text-gray-400 hover:text-gray-600">
                 ✕
               </button>
