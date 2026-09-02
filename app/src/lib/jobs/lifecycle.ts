@@ -152,6 +152,9 @@ const CHECKPOINT_BACKOFF_MS = 200;
  */
 const TERMINAL_WRITE_TRIES = 3;
 const TERMINAL_BACKOFF_MS = 500;
+/** Повторы освобождения аренды: короткие, они идут внутри бюджета остановки. */
+const RELEASE_WRITE_TRIES = 2;
+const RELEASE_BACKOFF_MS = 300;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
 
@@ -262,9 +265,16 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
     return result;
   }
 
-  /** Отпустить аренду, оставив жетон: строку сразу подберёт сосед. */
+  /**
+   * Отпустить аренду, оставив жетон: строку сразу подберёт сосед.
+   *
+   * С повтором: часть освобождений — единственное, что стоит между строкой и
+   * простоем на весь leaseSeconds с записью «падение» (захват во время
+   * shutdown, падение при manageTerminalStatus=false). Два прохода shutdown()
+   * их не прикрывают.
+   */
   const releaseLease = (jobId: string, runToken: string) =>
-    fencedUpdate(jobId, runToken, { lease_until: null });
+    fencedUpdateWithRetry(jobId, runToken, { lease_until: null }, RELEASE_WRITE_TRIES, RELEASE_BACKOFF_MS);
 
   async function claimPending(): Promise<Claim | null> {
     const { data: candidate } = await client
@@ -346,24 +356,50 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
     const jobLog: JobLogger = (level, msg, extra) => log(level, `[${table}][${job.id}] ${msg}`, extra);
     /** Момент последнего УСПЕШНОГО продления — по нему судим о своей аренде. */
     let lastRenewedAt = now();
+    /**
+     * Сколько неудач числится за задачей сейчас. Снимок с захвата, но записанный
+     * чекпойнт обнуляет его вместе с колонкой в базе — иначе исключение после
+     * многочасовой работы считалось бы по счётчику на момент захвата, и задача,
+     * подобранная с attempts=2, падала бы в failed при первой же осечке.
+     */
+    let attemptsBase = job.attempts ?? 0;
+
+    /** Идёт ли прямо сейчас запрос продления (см. guard ниже). */
+    let beating = false;
 
     const heartbeat = async () => {
       if (abort.signal.aborted || halting()) return;
-      const result = await fencedUpdate(job.id, runToken, { lease_until: leaseUntil() });
-      if (result.persisted) lastRenewedAt = now();
-      if (abort.signal.aborted) return;
-      if (!result.owned) {
-        jobLog('warn', 'lease lost to another worker — aborting');
-        abort.abort('lease-lost');
-        return;
-      }
-      // База недоступна дольше срока аренды: в базе она уже истекла, задачу
-      // забрал сосед, а мы об этом никогда не узнаем из ответа — узнаём по
-      // часам. Иначе двое делают одну работу, и ограждение жетоном спасает
-      // только таблицу задач, но не отправки, платные запросы и чужие таблицы.
+      // Проверка ДО запроса, а не после: иначе она мертва в главном сценарии,
+      // ради которого заведена. У undici нет таймаута по умолчанию, и зависшее
+      // соединение с PostgREST не возвращается никогда — свежие тики честно
+      // приходят, но все встают на том же await и до проверки не доходят
+      // (тот же класс отказа, что heartbeat в app/worker/_shared.ts и зависший
+      // воркер ЯКарт 27.07.2026). В базе аренда к этому моменту истекла, задачу
+      // забрал сосед, и мы узнаём об этом только по часам. Иначе двое делают
+      // одну работу, а ограждение жетоном спасает лишь таблицу задач — не
+      // отправки, платные запросы и записи в чужие таблицы.
+      // На первых тиках проверка безвредна: дельта тогда порядка leaseMs/3.
       if (now() - lastRenewedAt > leaseMs) {
         jobLog('warn', `lease not renewed for ${Math.round((now() - lastRenewedAt) / 1000)}s — aborting`);
         abort.abort('lease-expired');
+        return;
+      }
+      // Guard от наложения: setInterval с async-колбэком не ждёт предыдущий,
+      // и на залипшем соединении вызовы копятся все часы работы задачи. Стоит
+      // ПОСЛЕ проверки протухания — она обязана работать как раз тогда, когда
+      // запрос завис.
+      if (beating) return;
+      beating = true;
+      try {
+        const result = await fencedUpdate(job.id, runToken, { lease_until: leaseUntil() });
+        if (result.persisted) lastRenewedAt = now();
+        if (abort.signal.aborted) return;
+        if (!result.owned) {
+          jobLog('warn', 'lease lost to another worker — aborting');
+          abort.abort('lease-lost');
+        }
+      } finally {
+        beating = false;
       }
     };
     const timer = setInterval(() => { void heartbeat(); }, heartbeatMs);
@@ -398,8 +434,14 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
           abort.abort('lease-lost');
           return false;
         }
-        if (result.persisted) lastRenewedAt = now();
-        else jobLog('warn', 'checkpoint not persisted after retries — progress may be replayed');
+        if (result.persisted) {
+          lastRenewedAt = now();
+          // Ровно то же, что записали в колонку: иначе сброс жил бы только в
+          // базе, а терминальная запись считала бы попытки по старому снимку.
+          attemptsBase = 0;
+        } else {
+          jobLog('warn', 'checkpoint not persisted after retries — progress may be replayed');
+        }
         return true;
       },
     };
@@ -428,6 +470,9 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
           jobLog('info', 'run interrupted (shutdown or lease lost); row left for reclaim');
           // Отпускаем аренду только если ушли сами: при lease-lost/lease-expired
           // строкой уже владеет сосед, и лезть к ней нечего.
+          // Сюда попадает только тело, которое БРОСИЛО на отмене; тело, которое
+          // отмену поймало и вернулось штатно, идёт успешным путём, и его
+          // аренду отпускают два прохода shutdown().
           if (abort.signal.reason === 'shutdown') await releaseLease(job.id, runToken);
           return;
         }
@@ -440,7 +485,7 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
           await releaseLease(job.id, runToken);
           return;
         }
-        const attempts = (job.attempts ?? 0) + 1;
+        const attempts = attemptsBase + 1;
         const patch = attempts >= maxAttempts
           ? { status: statuses.failed, attempts, ...clearOwnership, ...(opts.failedPatch?.(reason) ?? {}) }
           : { status: statuses.pending, attempts, ...clearOwnership };
@@ -497,7 +542,9 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
         // Контрольное чтение: продление, ушедшее ещё раньше, могло приземлиться
         // и после второго прохода. Жетон в освобождении не трогаем — иначе
         // последний чекпойнт дорабатывающего тела не пройдёт ограждение.
-        for (const [id, o] of snapshot) {
+        // Параллельно: последовательные чтения девяти задач на медленном
+        // PostgREST не влезут в docker stop --timeout 15.
+        await Promise.all(snapshot.map(async ([id, o]) => {
           const { data } = await client
             .from(table)
             .select('id, lease_until')
@@ -508,7 +555,7 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
             log('warn', `[${table}] lease on ${id} came back after release — releasing again`);
             await releaseLease(id, o.runToken);
           }
-        }
+        }));
       }
       await Promise.race([
         Promise.allSettled(snapshot.map(([, o]) => o.promise)),

@@ -202,6 +202,17 @@ TG-аутрич (кампании и прогрев), обзвон, LinkedIn: с
    `ctx.signal`.
 4. Убрать SIGTERM-обработчики воркера, оставить `runner.shutdown()`.
 5. Добавить таблицу в список пропуска `drain-worker.sh`.
+6. Во всех операторских маршрутах «возобновить / перезапустить» обнулять
+   `attempts` рядом с `error_message`. `attempts` — бюджет неудач, а не
+   счётчик запусков: строка, возвращённая в `pending` со счётчиком 2,
+   получает одну попытку вместо трёх и уходит в `failed` при первой же
+   осечке. Чекпойнт бюджет возвращает, но только когда задача до него
+   дошла, — а рано падающая задача как раз не доходит. Известные случаи
+   (фаза 2, вместе с переводом самих воркеров):
+   `app/src/app/api/parsers/crypto-payments/jobs/[id]/resume/route.ts`,
+   `app/src/app/api/parsers/hh/execute/route.ts`,
+   `app/src/app/api/parsers/yandexmaps/[jobId]/collect-links/route.ts`,
+   `app/src/app/api/parsers/yandexmaps/[jobId]/parse/route.ts`.
 
 ## Тесты
 
