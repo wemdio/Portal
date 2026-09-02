@@ -128,14 +128,41 @@ async function insertBatch(
   // ON CONFLICT DO NOTHING имитируем через upsert по уникальному (job_id, vacancy_id).
   // Дубли между разными query внутри одного job'а — нормально: юзер видит
   // «какой query нашёл эту вакансию», но в архив её пишем один раз.
-  const { error } = await db
+  //
+  // Считаем СОХРАНЁННЫЕ строки, а не размер батча: при ON CONFLICT DO NOTHING
+  // ответ с представлением содержит только те строки, которые действительно
+  // легли. Разница не косметическая — saved_total управляет работой
+  // (`savedTotal >= maxResults` останавливает job, `remaining` задаёт размер
+  // выборки), и завышенный счётчик обрывает выдачу раньше срока.
+  const { data, error } = await db
     .from('hh_archive_results')
-    .upsert(payload, { onConflict: 'job_id,vacancy_id', ignoreDuplicates: true });
+    .upsert(payload, { onConflict: 'job_id,vacancy_id', ignoreDuplicates: true })
+    .select('vacancy_id');
   if (error) {
     console.error(`[hh-archive][${jobId}] insertBatch error:`, error.message);
     return 0;
   }
-  return payload.length;
+  return data?.length ?? 0;
+}
+
+/**
+ * Сколько вакансий уже лежит в архиве этой задачи.
+ *
+ * Единственный честный источник для saved_total при возобновлении. Брать его
+ * из строки задачи нельзя: колонка накапливалась прежними заходами и при
+ * перехвате может быть завышена, а именно она гасит работу по max_results.
+ * Запрос дешёвый — count по idx_hh_archive_results_job.
+ */
+async function countSavedResults(db: SupabaseClient, jobId: string): Promise<number | null> {
+  const { count, error } = await db
+    .from('hh_archive_results')
+    .select('vacancy_id', { count: 'exact', head: true })
+    .eq('job_id', jobId);
+  if (error) {
+    console.error(`[hh-archive][${jobId}] countSavedResults failed:`, error.message);
+    return null;
+  }
+  return count ?? 0;
 }
 
 export async function runHHArchiveJob(
@@ -184,13 +211,21 @@ export async function runHHArchiveJob(
   // нашёл её первым).
   //
   // При продолжении множество пустое: вакансии, найденные в прошлом заходе,
-  // повторно попадут в fresh и будут посчитаны в found/saved. Данные от этого
-  // не портятся — upsert по (job_id, vacancy_id) с ignoreDuplicates не создаёт
-  // дублей; сдвигается только счётчик saved_total (в большую сторону) на
-  // задаче, которую пришлось подобрать. Хранить весь список vacancy_id в
-  // чекпойнте ради точности счётчика дороже, чем сам счётчик стоит.
+  // снова пройдут через fresh. Дублей в базе от этого не будет (upsert по
+  // (job_id, vacancy_id) с ignoreDuplicates), и saved_total тоже не поедет —
+  // insertBatch считает реально записанные строки, а не размер батча.
+  // Завышаться будет только found_total: он описывает, сколько строк отдал
+  // поиск, ничем не управляет и на экране идёт справочной цифрой.
   const seenVacancyIds = new Set<string>();
-  let savedTotal = resumeFrom > 0 ? (job.saved_total ?? 0) : 0;
+  // saved_total на возобновлении берём ИЗ БАЗЫ, а не из строки задачи.
+  // Этот счётчик — не индикатор, а регулятор: он гасит работу по max_results
+  // и задаёт remaining. Значение из строки могло быть завышено прежними
+  // заходами, и тогда подобранная задача упёрлась бы в лимит раньше времени и
+  // молча отдала бы пользователю меньше вакансий, чем он просил.
+  // Если считалка не ответила — на этот заход считаем, что сохранено 0: так
+  // задача доработает до конца (лишние строки отсеет upsert), а не оборвётся.
+  const savedFromDb = resumeFrom > 0 ? await countSavedResults(db, jobId) : 0;
+  let savedTotal = savedFromDb ?? 0;
   let foundTotal = resumeFrom > 0 ? (job.found_total ?? 0) : 0;
   let errorsCount = resumeFrom > 0 ? (job.errors_count ?? 0) : 0;
 

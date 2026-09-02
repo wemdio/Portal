@@ -139,17 +139,31 @@ async function isCancelled(db: SupabaseClient, jobId: string): Promise<boolean> 
   return data?.status === 'cancelled';
 }
 
+/**
+ * Запись в строку задачи.
+ *
+ * Возвращает, ЛЕГЛА ЛИ правка: под ограждением жетоном update по перехваченной
+ * строке совпадает с нулём строк и НЕ возвращает ошибку — молчаливый ноль тут
+ * неотличим от успеха, если на него не смотреть. Для записей-индикаторов это
+ * терпимо (прогресс перепишется следующей), но там, где от факта записи
+ * зависит дальнейшая работа, результат обязателен к проверке.
+ */
 async function updateJob(
   db: SupabaseClient,
   jobId: string,
   patch: Record<string, unknown>,
   ctx?: YandexDirectRunContext,
-): Promise<void> {
+): Promise<boolean> {
   const query = db.from('yandex_direct_jobs').update(patch).eq('id', jobId);
   // Тип билдера — any по той же причине, что в lib/jobs/lifecycle.ts.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error } = await (ctx ? (query as any).eq('run_token', ctx.runToken) : query);
-  if (error) console.error(`[yandex-direct][${jobId}] updateJob failed:`, error.message);
+  const fenced = ctx ? (query as any).eq('run_token', ctx.runToken) : query;
+  const { data, error } = await fenced.select('id');
+  if (error) {
+    console.error(`[yandex-direct][${jobId}] updateJob failed:`, error.message);
+    return false;
+  }
+  return Array.isArray(data) ? data.length > 0 : !!data;
 }
 
 /** Восстанавливает накопленные группы ошибок из строки задачи при продолжении. */
@@ -229,10 +243,29 @@ export async function runYandexDirectJob(
         regions[0].code,
         job.n_seeds || 20,
         job.expand_suggest,
+        ctx?.signal,
       );
+      // Генерация — самый долгий шаг задачи (LLM + до 60 запросов к Suggest,
+      // две-три минуты), и за это время строку могли перехватить. Проверяем
+      // сразу, ДО первого платного запроса к XMLStock.
+      if (ctx?.signal.aborted) {
+        console.log(`[yandex-direct][${jobId}] stopped during keyword generation — leaving job for reclaim`);
+        return;
+      }
       // Сохраняем сгенерированные ключи в job: и для прозрачности, и как
       // фиксацию последовательности для будущего продолжения.
-      await updateJob(db, jobId, { keywords }, ctx);
+      //
+      // Успех записи здесь обязателен к проверке. Незаписанный список — это
+      // ровно та потеря данных, ради которой фиксация и делается: следующий
+      // захват увидит keywords=[], сгенерирует ДРУГОЙ список, а курсор по
+      // номеру запроса будет указывать в другую пару. Ноль совпавших строк
+      // означает вдобавок, что задача уже не наша, и продолжать её — жечь
+      // лимит XMLStock за чужой счёт.
+      const persisted = await updateJob(db, jobId, { keywords }, ctx);
+      if (!persisted) {
+        console.warn(`[yandex-direct][${jobId}] keywords not persisted (row reclaimed or write failed) — leaving job for reclaim`);
+        return;
+      }
     }
     keywords = Array.from(new Set(keywords.map((k) => k.trim()).filter(Boolean)));
     if (keywords.length === 0) {
@@ -249,9 +282,15 @@ export async function runYandexDirectJob(
     // Дедуп по домену в рамках всего job'а (один домен = одна строка).
     //
     // При продолжении множество пустое: домены, сохранённые в прошлом заходе,
-    // снова пройдут фильтр и снова уйдут в базу. Данные не портятся — запись
-    // идёт upsert'ом с ignoreDuplicates по (job_id, domain), — сдвигается лишь
-    // счётчик saved_total в большую сторону на подобранной задаче.
+    // снова пройдут фильтр и снова уйдут в запись. Ни данные, ни счётчик от
+    // этого не портятся — upsert с ignoreDuplicates по (job_id, domain) не
+    // создаёт дублей, а saved_total кредитуется по реально записанным строкам.
+    // Завышаться может только found_advertisers: он считает найденные объявления
+    // и ничем не управляет.
+    //
+    // В отличие от архива HH, здесь ни один счётчик НЕ управляет работой (нет
+    // аналога max_results), поэтому seed'ить их из базы незачем — берём из
+    // строки задачи.
     const seenDomains = new Set<string>();
     // Курсор: позиция в развёртке регионы × ключи. processed — она же.
     let position = 0;
@@ -303,13 +342,20 @@ export async function runYandexDirectJob(
             // дедуп-множество доменов пустое, и обычный insert падал бы целым
             // батчем из-за одного уже сохранённого домена, теряя вместе с ним
             // и новые строки того же запроса.
-            const { error: insErr } = await db
+            //
+            // Счётчик кредитуем по РЕАЛЬНО записанным строкам: при ON CONFLICT
+            // DO NOTHING ответ содержит только их. Проверки на «duplicate» в
+            // тексте ошибки больше нет — с ignoreDuplicates конфликт вообще не
+            // доходит до ошибки, и прежняя ветка была мёртвой: любая настоящая
+            // ошибка со словом duplicate молча засчиталась бы как успех.
+            const { data: inserted, error: insErr } = await db
               .from('yandex_direct_results')
-              .upsert(rows, { onConflict: 'job_id,domain', ignoreDuplicates: true });
-            if (insErr && !insErr.message.includes('duplicate')) {
+              .upsert(rows, { onConflict: 'job_id,domain', ignoreDuplicates: true })
+              .select('domain');
+            if (insErr) {
               console.error(`[yandex-direct][${jobId}] insert error:`, insErr.message);
             } else {
-              savedTotal += rows.length;
+              savedTotal += inserted?.length ?? 0;
             }
           }
         } catch (e) {

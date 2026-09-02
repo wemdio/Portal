@@ -105,10 +105,11 @@ export async function fetchVacanciesLocal(
   filters: LocalSearchFilters,
   limit: number,
   /**
-   * Отмена (единый жизненный цикл задач). Один запрос — до 500 батчей по
+   * Отмена (единый жизненный цикл задач). Один вызов — до 500 батчей по
    * 1000 строк, и без сигнала остановка воркера ждала бы конца всего чанка.
    * С ним оборванный батч возвращается сразу, а цикл выходит на ближайшей
-   * границе. Необязателен: preview и старые вызовы работают как раньше.
+   * границе. Необязателен только ради вызывающих без контекста задачи;
+   * единственный такой в репозитории — тест.
    */
   signal?: AbortSignal,
 ): Promise<LocalVacancyRow[]> {
@@ -130,12 +131,14 @@ export async function fetchVacanciesLocal(
     let q = supabaseAdmin
       .from('hh_vacancies')
       .select('vacancy_id,name,url,company_name,company_url,employer_id,company_site_url,area,published_at')
+      // Безусловно, а не под `if (signal)`: условный вызов означал бы, что
+      // забытый сигнал у следующего вызывающего ничем не проявится. undefined
+      // supabase-js кладёт в fetch как есть, это законный «сигнала нет»;
+      // приведение типа — только потому, что сигнатура требует AbortSignal.
+      .abortSignal(signal as AbortSignal)
       .order('published_at', { ascending: false, nullsFirst: false })
       .range(offset, offset + BATCH - 1);
 
-    // Только когда сигнал передан: в вызовах без него цепочка билдера остаётся
-    // ровно прежней (включая фейк PostgREST в тестах).
-    if (signal) q = q.abortSignal(signal);
     if (filters.query.trim()) q = q.ilike('name', `%${filters.query.trim()}%`);
     if (areaNames && areaNames.length > 0) q = q.in('area', areaNames);
     if (filters.dateFrom) q = q.gte('published_at', `${filters.dateFrom}T00:00:00Z`);

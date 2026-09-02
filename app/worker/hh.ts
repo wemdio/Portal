@@ -210,7 +210,19 @@ async function main(): Promise<void> {
     }
 
     // Архив и Директ — через жизненный цикл, по одной задаче на очередь.
-    if ((await archiveRunner.pollOnce()) || (await directRunner.pollOnce())) return true;
+    //
+    // Опрашиваем ОБА раннера и только потом складываем ответы. Короткое
+    // замыкание (`a.pollOnce() || b.pollOnce()`) здесь — starvation: pollOnce
+    // отвечает true не только когда задачу взяли, но и когда все слоты заняты
+    // (lifecycle.ts: спит 500 мс и возвращает true, чтобы цикл не ушёл спать на
+    // 30 с). Оба раннера идут с concurrency=1, поэтому с момента захвата
+    // архивной задачи и до её конца — часами на архиве в 50 тысяч — первый
+    // pollOnce возвращал бы true каждый тик, а до второго очередь не доходила
+    // бы вовсе: pending-задача Директа просто стояла бы. Прежние два мьютекса
+    // проверялись независимо, так что это была бы регрессия.
+    const archivePolled = await archiveRunner.pollOnce();
+    const directPolled = await directRunner.pollOnce();
+    if (archivePolled || directPolled) return true;
 
     if (running.size >= MAX_CONCURRENCY) {
       await sleep(250);

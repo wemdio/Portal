@@ -391,10 +391,12 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
     progress: { column: 'processed_chunks', stalledAfterMs: STALL_MS },
     /* … */
   });
-  const directRunner = createJobRunner<{ id: string }, { processed_queries: number }>({
+  const directRunner = createJobRunner<{ id: string }, { processed_requests: number }>({
     table: 'yandex_direct_jobs',
     statuses: { pending: 'pending', running: 'processing', done: 'completed', failed: 'failed' },
-    progress: { column: 'processed_queries', stalledAfterMs: STALL_MS },
+    // Колонка называется processed_requests (миграция 20260517_0001).
+    // processed_queries на этой таблице нет — это колонка search_parser_jobs.
+    progress: { column: 'processed_requests', stalledAfterMs: STALL_MS },
     /* … */
   });
 ```
@@ -402,8 +404,12 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 и
 
 ```ts
-  const pollOnce = async () => (await archiveRunner.pollOnce()) || (await directRunner.pollOnce());
+  const archivePolled = await archiveRunner.pollOnce();
+  const directPolled = await directRunner.pollOnce();
+  if (archivePolled || directPolled) return true;
 ```
+
+Опрашивать раннеры ЧЕРЕЗ КОРОТКОЕ ЗАМЫКАНИЕ (`a.pollOnce() || b.pollOnce()`) нельзя: `pollOnce` отвечает true не только когда задачу взяли, но и когда все слоты раннера заняты (в этом случае библиотека спит 500 мс и возвращает true, чтобы цикл не ушёл ждать realtime на 30 секунд). При `concurrency: 1` это значит, что занятый первый раннер отвечает true всё время работы своей задачи — часами, — и до второй очереди опрос не доходит вовсе. Это правило действует и в задаче 5, когда в этот же воркер добавятся раннеры `parser_jobs`: сначала опросить все, потом сложить ответы.
 
 Оба останавливать в обработчике сигнала и после цикла. Убрать из файла восстановление `processing` старше 30 минут для обеих таблиц и глобальные мьютексы `archiveJobActive` / `yandexDirectJobActive` — их роль теперь играет `concurrency: 1` у соответствующего раннера. Проверить, что мьютексы больше нигде не читаются.
 

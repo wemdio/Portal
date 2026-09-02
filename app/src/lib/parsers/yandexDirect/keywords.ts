@@ -39,7 +39,11 @@ ${description}
  * Requesty/Claude генерирует seed-ключи по описанию аудитории.
  * Требует env OPENROUTER_YANDEX_DIRECT_API_KEY.
  */
-export async function generateSeeds(description: string, n = 20): Promise<string[]> {
+export async function generateSeeds(
+  description: string,
+  n = 20,
+  signal?: AbortSignal,
+): Promise<string[]> {
   const apiKey = (process.env.OPENROUTER_YANDEX_DIRECT_API_KEY ?? '').trim();
   if (!apiKey) {
     throw new Error('OPENROUTER_YANDEX_DIRECT_API_KEY не настроен в env');
@@ -49,6 +53,7 @@ export async function generateSeeds(description: string, n = 20): Promise<string
     apiKey,
     model: KEYWORD_MODEL,
     title: 'Portal Yandex Direct keywords',
+    signal,
     temperature: 0.4,
     maxTokens: 1024,
     messages: [
@@ -92,6 +97,7 @@ export async function suggestExpand(
   keyword: string,
   regionCode = 213,
   limit = 10,
+  signal?: AbortSignal,
 ): Promise<string[]> {
   try {
     const params = new URLSearchParams({
@@ -102,6 +108,7 @@ export async function suggestExpand(
       svg: '1',
     });
     const res = await fetch(`${SUGGEST_URL}?${params.toString()}`, {
+      signal,
       headers: { 'User-Agent': 'Mozilla/5.0' },
     });
     if (!res.ok) return [];
@@ -135,11 +142,15 @@ export async function expandAll(
   seeds: string[],
   regionCode = 213,
   delayMs = 300,
+  signal?: AbortSignal,
 ): Promise<string[]> {
   const all = [...seeds];
   const seen = new Set(seeds.map((s) => s.toLowerCase()));
   for (const seed of seeds) {
-    const expansions = await suggestExpand(seed, regionCode);
+    // Остановка — прекращаем расширение и отдаём накопленное: вызывающий код
+    // всё равно проверит signal сразу после возврата и не пойдёт дальше.
+    if (signal?.aborted) return all;
+    const expansions = await suggestExpand(seed, regionCode, 10, signal);
     for (const kw of expansions) {
       const lower = kw.toLowerCase();
       if (!seen.has(lower)) {
@@ -147,7 +158,7 @@ export async function expandAll(
         seen.add(lower);
       }
     }
-    await sleep(delayMs);
+    await sleep(delayMs, signal);
   }
   return all;
 }
@@ -162,11 +173,21 @@ export async function buildKeywordList(
   regionCode = 213,
   nSeeds = 20,
   expand = true,
+  /**
+   * Отмена. Это самый долгий шаг задачи Директа — LLM плюс до 60 запросов к
+   * Suggest, две-три минуты, — и без сигнала остановка воркера ждала бы его
+   * целиком, а сработавший порог простоя оставил бы тело генерировать ключи
+   * для задачи, которая уже ушла соседу.
+   */
+  signal?: AbortSignal,
 ): Promise<string[]> {
-  const seeds = await generateSeeds(description, nSeeds);
+  const seeds = await generateSeeds(description, nSeeds, signal);
   if (seeds.length === 0) {
+    // На отмене список законно пуст — ошибкой это не считаем, решение за
+    // вызывающим (он смотрит на signal сразу после возврата).
+    if (signal?.aborted) return [];
     throw new Error('AI не сгенерировал ни одного ключа');
   }
   if (!expand) return seeds;
-  return expandAll(seeds, regionCode);
+  return expandAll(seeds, regionCode, 300, signal);
 }
