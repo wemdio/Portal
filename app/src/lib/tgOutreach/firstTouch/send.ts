@@ -72,6 +72,18 @@ export interface SendBatchResult {
   sent: number;
   skipped: number;
   postponed: number;
+  /**
+   * Аккаунт не резолвнул НИ ОДНОГО ника из порции, и ограничение не
+   * подтвердилось ни кодом ошибки, ни ботом.
+   *
+   * Сам по себе это не приговор — порция могла состоять из мёртвых ников. Но
+   * повторяясь круг за кругом, признак становится однозначным: 02.09.2026 в
+   * ATOL-1 пятнадцать аккаунтов одной партии за неделю не отправили НИ ОДНОГО
+   * первого касания при 205 отложенных, тогда как остальные восемнадцать
+   * рассылали с той же очереди. Решение по этому флагу принимает круг
+   * кампании — он видит историю аккаунта, а порция видит только себя.
+   */
+  resolveBlocked: boolean;
 }
 
 /** Начало текущих суток по времени сервера — для дневной нормы. */
@@ -300,7 +312,7 @@ function isUsernameInvalid(err: unknown): boolean {
 
 export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatchResult> {
   const { db, client, campaignId, account, perDay, log } = args;
-  const result: SendBatchResult = { sent: 0, skipped: 0, postponed: 0 };
+  const result: SendBatchResult = { sent: 0, skipped: 0, postponed: 0, resolveBlocked: false };
   const maxChars = resolveMaxChars(args.maxChars);
   const resolveTimeoutMs = args.resolveTimeoutMs ?? FT_RESOLVE_TIMEOUT_MS;
   const sendTimeoutMs = args.sendTimeoutMs ?? FT_SEND_TIMEOUT_MS;
@@ -597,22 +609,29 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       );
       result.postponed += notOccupied.length;
     } else {
+      /**
+       * Порция не резолвнулась целиком, а бот ограничения не подтвердил.
+       * Виноват либо аккаунт, либо ники — и по одной порции не различить.
+       *
+       * Пока в этой ветке списывали попытку контактам, вышло хуже некуда:
+       * пятнадцать замороженных аккаунтов ATOL-1 за сутки сожгли треть
+       * оставшейся базы, хотя ники были живыми — те же контакты потом
+       * спокойно уходили с исправных номеров. Поэтому контакты здесь не
+       * трогаем: неизвестность не повод портить базу.
+       *
+       * Мёртвые ники всё равно выбывают — но по другой ветке (ниже), где
+       * аккаунт доказал делом, что резолвить умеет: часть порции у него
+       * прошла, а этот ник нет.
+       */
       log(
         'warning',
-        'Весь резолв порции вернул «юзернейм не найден», но ограничения на аккаунте нет — ' +
-          `@SpamBot его не подтвердил. Значит дело в никах, а не в номере: аккаунт остаётся в работе, ` +
-          `попытки засчитываю контактам, после ${fdb.MAX_CONTACT_ATTEMPTS} они уйдут из очереди.`,
+        'Весь резолв порции вернул «юзернейм не найден», ограничения @SpamBot не подтвердил. ' +
+          'Кто виноват — аккаунт или ники — по одной порции не понять, поэтому контакты ' +
+          'оставляю в очереди нетронутыми. Если повторится ещё круг, круг кампании уведёт ' +
+          'аккаунт на паузу.',
       );
-      for (const { contact, attempts } of notOccupied) {
-        const outcome = await fdb.recordContactFailure(
-          db,
-          contact.id,
-          attempts,
-          'юзернейм не резолвился (ограничение аккаунта не подтвердилось)',
-        );
-        log('warning', `Первое касание: @${contact.username} отложен — юзернейм не резолвился${attemptNote(outcome)}`);
-        result.postponed++;
-      }
+      result.resolveBlocked = true;
+      result.postponed += notOccupied.length;
     }
   } else {
     for (const { contact, attempts } of notOccupied) {
