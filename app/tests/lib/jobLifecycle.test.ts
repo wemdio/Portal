@@ -1,0 +1,253 @@
+/**
+ * @jest-environment node
+ *
+ * Контракты единого жизненного цикла задач (lib/jobs/lifecycle.ts):
+ *  - две реплики берут одну pending-задачу — побеждает одна;
+ *  - истёкшая или обнулённая аренда перехватывается, живая — нет;
+ *  - продление и чекпойнт с чужим run_token не проходят;
+ *  - shutdown обнуляет аренду только своих задач и глушит продления;
+ *  - исключение в run ниже maxAttempts → pending, на пределе → failed.
+ *
+ * Время — виртуальное: аренда и таймеры прокручиваются, а не проживаются.
+ */
+
+import { __resetShutdownStateForTests } from '@/lib/workerShutdown';
+import { createJobRunner, type JobContext } from '@/lib/jobs/lifecycle';
+
+type Row = Record<string, unknown>;
+type Filter = { op: 'eq' | 'lt' | 'or'; col?: string; value?: unknown; raw?: string };
+
+const T0 = Date.parse('2026-09-02T10:00:00.000Z');
+let clock = T0;
+const now = () => clock;
+
+/** Крошечный PostgREST: строки в памяти, фильтры eq/lt/or(is.null,lt). */
+function makeFakeDb(initial: Row[]) {
+  const rows: Row[] = initial.map((r) => ({ ...r }));
+  const updates: Array<{ patch: Row; matched: number }> = [];
+
+  const matches = (row: Row, filters: Filter[]) =>
+    filters.every((f) => {
+      if (f.op === 'eq') return row[f.col!] === f.value;
+      if (f.op === 'lt') return typeof row[f.col!] === 'string' && (row[f.col!] as string) < (f.value as string);
+      // or: 'lease_until.is.null,lease_until.lt."<iso>"' — значение в кавычках, как шлёт библиотека
+      return f.raw!.split(',').some((clause) => {
+        const [col, op, ...rest] = clause.split('.');
+        const val = rest.join('.').replace(/^"|"$/g, '');
+        if (op === 'is' && val === 'null') return row[col] == null;
+        if (op === 'lt') return typeof row[col] === 'string' && (row[col] as string) < val;
+        throw new Error(`fake db: unsupported or-clause ${clause}`);
+      });
+    });
+
+  const from = () => {
+    const filters: Filter[] = [];
+    let mode: 'select' | 'update' = 'select';
+    let patch: Row = {};
+    let orderCol: string | null = null;
+    let limit = Infinity;
+    const q: Record<string, unknown> = {};
+    q.select = () => q;
+    q.update = (p: Row) => { mode = 'update'; patch = p; return q; };
+    q.eq = (col: string, value: unknown) => { filters.push({ op: 'eq', col, value }); return q; };
+    q.lt = (col: string, value: unknown) => { filters.push({ op: 'lt', col, value }); return q; };
+    q.or = (raw: string) => { filters.push({ op: 'or', raw }); return q; };
+    q.order = (col: string) => { orderCol = col; return q; };
+    q.limit = (n: number) => { limit = n; return q; };
+    q.maybeSingle = async () => {
+      let hit = rows.filter((r) => matches(r, filters));
+      if (orderCol) hit = [...hit].sort((a, b) => String(a[orderCol!]).localeCompare(String(b[orderCol!])));
+      hit = hit.slice(0, limit);
+      if (mode === 'update') {
+        for (const r of hit) Object.assign(r, patch);
+        updates.push({ patch, matched: hit.length });
+      }
+      return { data: hit[0] ? { ...hit[0] } : null, error: null };
+    };
+    return q;
+  };
+
+  return { client: { from } as never, rows, updates };
+}
+
+const statuses = { pending: 'pending', running: 'running', done: 'done', failed: 'failed' };
+const log = () => {};
+
+function makeRunner(
+  db: ReturnType<typeof makeFakeDb>,
+  run: (job: Row, ctx: JobContext<Row>) => Promise<void>,
+  extra: Record<string, unknown> = {},
+) {
+  return createJobRunner<Row & { id: string }, Row>({
+    table: 'jobs',
+    workerId: 'w1',
+    statuses,
+    leaseSeconds: 60,
+    maxAttempts: 3,
+    db: db.client,
+    now,
+    log,
+    run: run as never,
+    ...extra,
+  } as never);
+}
+
+/** Отпускает microtask-очередь, чтобы run()/finally успели отработать. */
+async function flush() {
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+}
+
+beforeAll(() => jest.useFakeTimers());
+afterAll(() => jest.useRealTimers());
+beforeEach(() => {
+  clock = T0;
+  jest.setSystemTime(T0);
+  __resetShutdownStateForTests();
+});
+
+describe('job lifecycle', () => {
+  it('two replicas race for one pending job — exactly one wins', async () => {
+    const db = makeFakeDb([{ id: 'j1', status: 'pending', created_at: '2026-09-02T09:00:00Z', attempts: 0 }]);
+    const runs: string[] = [];
+    const runA = makeRunner(db, async () => { runs.push('A'); await new Promise(() => {}); }, { workerId: 'A' });
+    const runB = makeRunner(db, async () => { runs.push('B'); await new Promise(() => {}); }, { workerId: 'B' });
+
+    const [gotA, gotB] = await Promise.all([runA.pollOnce(), runB.pollOnce()]);
+    await flush();
+
+    expect([gotA, gotB].filter(Boolean)).toHaveLength(1);
+    expect(runs).toHaveLength(1);
+    expect(db.rows[0].status).toBe('running');
+    expect(typeof db.rows[0].run_token).toBe('string');
+    expect(db.rows[0].lease_until).toBe(new Date(T0 + 60_000).toISOString());
+  });
+
+  it('reclaims an expired or released lease, never a live one', async () => {
+    const db = makeFakeDb([
+      { id: 'live', status: 'running', created_at: '1', attempts: 0, run_token: 'x', lease_until: new Date(T0 + 30_000).toISOString() },
+      { id: 'expired', status: 'running', created_at: '2', attempts: 0, run_token: 'y', lease_until: new Date(T0 - 1_000).toISOString() },
+      { id: 'released', status: 'running', created_at: '3', attempts: 0, run_token: 'z', lease_until: null },
+    ]);
+    const seen: string[] = [];
+    const runner = makeRunner(db, async (job) => { seen.push(job.id as string); }, { concurrency: 3 });
+
+    expect(await runner.pollOnce()).toBe(true);
+    expect(await runner.pollOnce()).toBe(true);
+    expect(await runner.pollOnce()).toBe(false);
+    await flush();
+
+    expect(seen.sort()).toEqual(['expired', 'released']);
+    expect(db.rows.find((r) => r.id === 'live')!.run_token).toBe('x');
+    // Потеря аренды (crash) считается попыткой, чистая передача (null) — нет.
+    expect(db.rows.find((r) => r.id === 'expired')!.attempts).toBe(1);
+    expect(db.rows.find((r) => r.id === 'released')!.attempts).toBe(0);
+  });
+
+  it('fails a job whose lease was lost maxAttempts times', async () => {
+    const db = makeFakeDb([
+      { id: 'j', status: 'running', created_at: '1', attempts: 2, run_token: 'old', lease_until: new Date(T0 - 1).toISOString() },
+    ]);
+    const run = jest.fn(async () => {});
+    const runner = makeRunner(db, run, { failedPatch: (reason: string) => ({ error_message: reason }) });
+
+    expect(await runner.pollOnce()).toBe(false);
+    expect(run).not.toHaveBeenCalled();
+    expect(db.rows[0].status).toBe('failed');
+    expect(db.rows[0].attempts).toBe(3);
+    expect(String(db.rows[0].error_message)).toContain('3');
+  });
+
+  it('heartbeat extends the lease; a foreign run_token is rejected and aborts the run', async () => {
+    const db = makeFakeDb([{ id: 'j', status: 'pending', created_at: '1', attempts: 0 }]);
+    let ctxRef: JobContext<Row> | null = null;
+    const runner = makeRunner(db, async (_job, ctx) => {
+      ctxRef = ctx;
+      await new Promise<void>((resolve) => ctx.signal.addEventListener('abort', () => resolve()));
+    });
+    await runner.pollOnce();
+    await flush();
+
+    clock += 20_000; jest.setSystemTime(clock);
+    await jest.advanceTimersByTimeAsync(20_000);
+    expect(db.rows[0].lease_until).toBe(new Date(clock + 60_000).toISOString());
+
+    // Чужой захват: жетон сменился — наш чекпойнт не проходит, run прерывается.
+    db.rows[0].run_token = 'stolen';
+    expect(await ctxRef!.saveCheckpoint({ page: 5 })).toBe(false);
+    expect(db.rows[0].checkpoint).toBeUndefined();
+    clock += 20_000; jest.setSystemTime(clock);
+    await jest.advanceTimersByTimeAsync(20_000);
+    expect(ctxRef!.signal.aborted).toBe(true);
+  });
+
+  it('saveCheckpoint stores the checkpoint and renews the lease', async () => {
+    const db = makeFakeDb([{ id: 'j', status: 'pending', created_at: '1', attempts: 0 }]);
+    let ctxRef: JobContext<Row> | null = null;
+    const runner = makeRunner(db, async (_job, ctx) => { ctxRef = ctx; await new Promise(() => {}); });
+    await runner.pollOnce();
+    await flush();
+
+    clock += 5_000; jest.setSystemTime(clock);
+    expect(await ctxRef!.saveCheckpoint({ page: 3 })).toBe(true);
+    expect(db.rows[0].checkpoint).toEqual({ page: 3 });
+    expect(db.rows[0].lease_until).toBe(new Date(clock + 60_000).toISOString());
+  });
+
+  it('shutdown releases only its own leases, twice, and silences heartbeats', async () => {
+    const db = makeFakeDb([
+      { id: 'mine', status: 'pending', created_at: '1', attempts: 0 },
+      { id: 'other', status: 'running', created_at: '2', attempts: 0, run_token: 'o', lease_until: new Date(T0 + 50_000).toISOString() },
+    ]);
+    const runner = makeRunner(db, async (_job, ctx) => {
+      await new Promise<void>((resolve) => ctx.signal.addEventListener('abort', () => resolve()));
+    }, { shutdownGraceMs: 3_000 });
+    await runner.pollOnce();
+    await flush();
+    const before = db.updates.length;
+
+    const done = runner.shutdown();
+    await jest.advanceTimersByTimeAsync(5_000);
+    await done;
+
+    const releases = db.updates.slice(before).filter((u) => 'lease_until' in u.patch && u.patch.lease_until === null);
+    expect(releases).toHaveLength(2);
+    expect(db.rows.find((r) => r.id === 'mine')!.lease_until).toBeNull();
+    expect(db.rows.find((r) => r.id === 'other')!.lease_until).toBe(new Date(T0 + 50_000).toISOString());
+    // После остановки продления не пишутся.
+    const after = db.updates.length;
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(db.updates.length).toBe(after);
+    expect(await runner.pollOnce()).toBe(false);
+  });
+
+  it('a thrown run goes back to pending below maxAttempts and to failed at the limit', async () => {
+    const db = makeFakeDb([
+      { id: 'a', status: 'pending', created_at: '1', attempts: 0 },
+      { id: 'b', status: 'pending', created_at: '2', attempts: 2 },
+    ]);
+    const runner = makeRunner(db, async () => { throw new Error('boom'); }, {
+      concurrency: 2,
+      failedPatch: (reason: string) => ({ error_message: reason }),
+    });
+    await runner.pollOnce();
+    await runner.pollOnce();
+    await flush();
+
+    const a = db.rows.find((r) => r.id === 'a')!;
+    const b = db.rows.find((r) => r.id === 'b')!;
+    expect(a.status).toBe('pending');
+    expect(a.attempts).toBe(1);
+    expect(a.run_token).toBeNull();
+    expect(b.status).toBe('failed');
+    expect(b.attempts).toBe(3);
+    expect(String(b.error_message)).toContain('boom');
+  });
+
+  it('manageTerminalStatus=false leaves the terminal status to run()', async () => {
+    const db = makeFakeDb([{ id: 'j', status: 'pending', created_at: '1', attempts: 0 }]);
+    const runner = makeRunner(db, async () => { db.rows[0].status = 'done_by_runner'; }, { manageTerminalStatus: false });
+    await runner.pollOnce();
+    await flush();
+    expect(db.rows[0].status).toBe('done_by_runner');
+  });
+});
