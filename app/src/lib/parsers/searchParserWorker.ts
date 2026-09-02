@@ -27,6 +27,14 @@
  *
  * 6. **Сохранение.** Дедупликация по нормализованному домену (site), батч-вставка
  *    в `search_results`. Прогресс обновляется в `search_parser_jobs`.
+ *
+ * 7. **Владение задачей.** Из воркера функция вызывается с `SearchParserRunContext`
+ *    (единый жизненный цикл, `lib/jobs/lifecycle.ts`): все записи в строку задачи
+ *    ограждены жетоном захвата, после каждого запроса пишется чекпойнт, а на
+ *    прерывании (остановка воркера / потеря аренды) функция выходит БЕЗ
+ *    терминального статуса — строка остаётся `running` и продолжается соседом с
+ *    `processed_queries`. Без контекста (`worker/index.ts`, `dfybWorker`)
+ *    поведение прежнее.
  */
 
 import { SEARCH_CONFIG } from '@/lib/config';
@@ -141,12 +149,39 @@ async function insertInBatches<T extends Record<string, unknown>>(
   return { inserted, hadFailures, firstErrorMessage };
 }
 
+/**
+ * Контекст запуска из единого жизненного цикла задач (lib/jobs/lifecycle.ts).
+ *
+ * Необязателен: `runSearchParserJob` зовут ещё два места без всякой аренды
+ * (`worker/index.ts`, `lib/tools/dfybWorker.ts`), и там поведение обязано
+ * остаться прежним.
+ */
+export interface SearchParserRunContext {
+  /** Взводится на SIGTERM воркера и при потере аренды. */
+  signal: AbortSignal;
+  /**
+   * Жетон текущего захвата. Им ограждаются ВСЕ записи в строку задачи: при
+   * manageTerminalStatus=false терминальный статус пишет само тело, и без
+   * жетона старый исполнитель после перехвата задачи мог бы проштамповать
+   * completed/failed поверх работы нового владельца.
+   */
+  runToken: string;
+  /** false — задачу перехватили: прекратить работу. */
+  saveCheckpoint(data: { processed_queries: number }): Promise<boolean>;
+}
+
 async function safeUpdateSearchJob(
   admin: NonNullable<typeof supabaseAdmin>,
   jobId: string,
   patch: Record<string, unknown>,
+  /** Жетон захвата; без него фильтр не добавляется — поведение до ограждения. */
+  runToken?: string | null,
 ): Promise<void> {
-  const attempt = await admin.from('search_parser_jobs').update(patch).eq('id', jobId);
+  // Тип билдера — any по той же причине, что в lib/jobs/lifecycle.ts: цепочка
+  // PostgREST меняет форму на каждом шаге, а нам нужен от неё только .eq.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const owned = <T>(q: T): T => (runToken ? ((q as any).eq('run_token', runToken) as T) : q);
+  const attempt = await owned(admin.from('search_parser_jobs').update(patch).eq('id', jobId));
   if (!attempt.error) return;
 
   const err = attempt.error as { code?: string; message?: string };
@@ -168,7 +203,7 @@ async function safeUpdateSearchJob(
   void progress_percent;
 
   if (Object.keys(rest).length === 0) return;
-  const retry = await admin.from('search_parser_jobs').update(rest).eq('id', jobId);
+  const retry = await owned(admin.from('search_parser_jobs').update(rest).eq('id', jobId));
   if (retry.error) {
     console.warn('search_parser_jobs update retry failed:', (retry.error as { message?: string })?.message ?? retry.error);
   }
@@ -668,12 +703,28 @@ function toLeadRow(
   };
 }
 
-export async function runSearchParserJob(jobId: string) {
+export async function runSearchParserJob(jobId: string, ctx?: SearchParserRunContext) {
   if (!supabaseAdmin) {
     console.error('supabaseAdmin not configured');
     return;
   }
   const admin = supabaseAdmin;
+  const runToken = ctx?.runToken ?? null;
+
+  /**
+   * Работа прервана извне: остановка воркера (SIGTERM) или потерянная аренда.
+   *
+   * Это НЕ итог задачи. Строка обязана остаться в running с тем прогрессом,
+   * что уже записан: аренду отпустит библиотека, соседняя реплика подберёт
+   * задачу и продолжит с processed_queries. Любая терминальная запись здесь
+   * (completed/failed) стоила бы часов работы — поэтому флаг проверяется и
+   * после цикла, и в общем catch.
+   */
+  let interrupted = false;
+
+  /** Все записи в строку задачи идут через один ограждённый жетоном путь. */
+  const updateJob = (patch: Record<string, unknown>) =>
+    safeUpdateSearchJob(admin, jobId, patch, runToken);
 
   try {
     // 1. Fetch job
@@ -695,11 +746,10 @@ export async function runSearchParserJob(jobId: string) {
     const requestId = crypto.randomUUID();
     const logMeta = { userId: job.user_id, requestId, route: 'search_parser_worker' };
 
-    // 2. Set running
-    await admin
-      .from('search_parser_jobs')
-      .update({ status: 'running', started_at: job.started_at ?? new Date().toISOString() })
-      .eq('id', jobId);
+    // 2. Set running. Под жизненным циклом строка УЖЕ running (её так захватил
+    // раннер), и запись сводится к started_at — но идёт через тот же
+    // ограждённый путь, чтобы старое тело после перехвата ничего не двигало.
+    await updateJob({ status: 'running', started_at: job.started_at ?? new Date().toISOString() });
 
     const rawConfig =
       job.config && typeof job.config === 'object' ? (job.config as { queries?: string[]; brief?: string; search_depth?: number }) : {};
@@ -712,7 +762,7 @@ export async function runSearchParserJob(jobId: string) {
 
     if (queries.length === 0) {
       if (!brief) {
-        await safeUpdateSearchJob(admin, jobId, {
+        await updateJob({
           status: 'failed',
           completed_at: new Date().toISOString(),
           error_message: 'Бриф не указан',
@@ -721,7 +771,7 @@ export async function runSearchParserJob(jobId: string) {
         return;
       }
 
-      await safeUpdateSearchJob(admin, jobId, {
+      await updateJob({
         progress_stage: 'generating_queries',
         progress_percent: 2,
         processed_queries: 0,
@@ -733,7 +783,7 @@ export async function runSearchParserJob(jobId: string) {
       queries = generated.queries.map((q) => q.trim()).filter(Boolean);
 
       if (queries.length === 0) {
-        await safeUpdateSearchJob(admin, jobId, {
+        await updateJob({
           status: 'failed',
           completed_at: new Date().toISOString(),
           error_message: 'Не удалось сформировать поисковые запросы',
@@ -742,7 +792,7 @@ export async function runSearchParserJob(jobId: string) {
         return;
       }
 
-      await safeUpdateSearchJob(admin, jobId, {
+      await updateJob({
         config: { ...rawConfig, brief, queries },
         total_queries: queries.length,
         processed_queries: 0,
@@ -753,7 +803,7 @@ export async function runSearchParserJob(jobId: string) {
       const alreadyProcessed = Math.max(0, Number(job.processed_queries ?? 0));
       const clampedProcessed = Math.min(alreadyProcessed, queries.length);
       const initialProgressPercent = queries.length > 0 ? Math.round((clampedProcessed / queries.length) * 100) : 0;
-      await safeUpdateSearchJob(admin, jobId, {
+      await updateJob({
         total_queries: queries.length,
         processed_queries: clampedProcessed,
         progress_stage: 'searching',
@@ -1369,7 +1419,7 @@ export async function runSearchParserJob(jobId: string) {
           if (hadQueryFailures) hadFailures = true;
         });
         const progressPercent = totalQueries > 0 ? Math.round((processedQueries / totalQueries) * 100) : null;
-        await safeUpdateSearchJob(admin, jobId, {
+        await updateJob({
           processed_queries: processedQueries,
           total_results: totalResults,
           progress_percent: progressPercent,
@@ -1390,13 +1440,55 @@ export async function runSearchParserJob(jobId: string) {
         } catch (statsErr) {
           console.warn('search_parser_query_stats upsert failed:', statsErr);
         }
+
+        /**
+         * Чекпойнт после каждого обработанного запроса.
+         *
+         * Он ИЗБЫТОЧЕН как хранилище прогресса: продолжение с места и так
+         * считается по колонке processed_queries, которую мы только что
+         * записали строкой выше (resumeFrom в начале функции). Пишем его всё
+         * равно ради двух побочных эффектов библиотеки, которых у обычного
+         * update нет: он обнуляет бюджет неудач attempts (иначе задача, которая
+         * честно движется, но пережила три деплоя с грубой остановкой, ушла бы
+         * в failed) и продлевает аренду; а его ответ — единственный ДЕШЁВЫЙ
+         * способ узнать, что строку перехватили.
+         *
+         * Прерывание НЕ пишет терминальный статус: строка остаётся running с
+         * записанным прогрессом, аренду отпустит библиотека, продолжит сосед.
+         * Флаг взводит и cancelled — чтобы параллельные запросы (QUERY_CONCURRENCY)
+         * вышли на своей ближайшей проверке, а не доработали пачку до конца.
+         */
+        if (ctx) {
+          const stillOurs = await ctx.saveCheckpoint({ processed_queries: processedQueries });
+          if (!stillOurs) {
+            interrupted = true;
+            cancelled = true;
+          }
+        }
+        if (ctx?.signal.aborted) {
+          interrupted = true;
+          cancelled = true;
+        }
       }
     });
+
+    if (interrupted) {
+      // Ни completed, ни failed, ни pending: строка остаётся running под
+      // управлением библиотеки. Единственный корректный выход из прерывания.
+      void logInfo(
+        'parser.search.job.interrupted',
+        'Search parser job interrupted — left running for reclaim',
+        { jobId, processedQueries, totalQueries },
+        logMeta,
+      );
+      await trace?.cancel('Остановка воркера: задача продолжится с последнего обработанного запроса.');
+      return;
+    }
 
     if (cancelled) {
       const progressPercent = totalQueries > 0 ? Math.round((processedQueries / totalQueries) * 100) : null;
       if (cancelledByStatus === 'pending') {
-        await safeUpdateSearchJob(admin, jobId, {
+        await updateJob({
           status: 'pending',
           processed_queries: processedQueries,
           total_results: totalResults,
@@ -1429,7 +1521,7 @@ export async function runSearchParserJob(jobId: string) {
     }
 
     // 4. Complete
-    await safeUpdateSearchJob(admin, jobId, {
+    await updateJob({
       status: 'completed',
       completed_at: new Date().toISOString(),
       processed_queries: processedQueries,
@@ -1451,14 +1543,24 @@ export async function runSearchParserJob(jobId: string) {
     );
   } catch (err) {
     console.error('Search parser worker failed:', err);
-    if (supabaseAdmin) {
-      await safeUpdateSearchJob(supabaseAdmin, jobId, {
-        status: 'failed',
-        error_message: err instanceof Error ? err.message : 'Unknown error',
-        completed_at: new Date().toISOString(),
-        progress_stage: 'failed',
-      });
+    // Исключение НА ПРЕРЫВАНИИ — не отказ задачи: прерванный fetch бросает
+    // AbortError, и без этой проверки остановка воркера штамповала бы failed
+    // на живой задаче, которую сосед был готов продолжить с чекпойнта.
+    if (interrupted || ctx?.signal.aborted) {
+      void logInfo(
+        'parser.search.job.interrupted',
+        'Search parser job aborted mid-flight — left running for reclaim',
+        { jobId, reason: err instanceof Error ? err.message : String(err) },
+        undefined,
+      );
+      return;
     }
+    await updateJob({
+      status: 'failed',
+      error_message: err instanceof Error ? err.message : 'Unknown error',
+      completed_at: new Date().toISOString(),
+      progress_stage: 'failed',
+    });
     void logError(
       'parser.search.job.failed',
       err,

@@ -171,8 +171,13 @@ services:
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       # Search parser drains huge result sets too — same reasoning as worker-hh.
       - WORKER_DRAIN_TIMEOUT_MINUTES=${SEARCH_WORKER_DRAIN_TIMEOUT_MINUTES:-180}
+      - SEARCH_LEASE_SECONDS=${SEARCH_LEASE_SECONDS:-180}
       - WORKER_KIND=search
-    stop_grace_period: 30m
+    # 30 секунд, а не 30 минут: воркер на едином жизненном цикле задач
+    # (app/src/lib/jobs/lifecycle.ts) по SIGTERM отпускает аренду за ~3 с, и
+    # задача продолжается с processed_queries в следующей реплике. Ждать, пока
+    # доиграет тело, больше незачем — а прежние 30 минут держали деплой.
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:

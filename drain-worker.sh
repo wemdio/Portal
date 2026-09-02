@@ -15,7 +15,8 @@
 #   в шаге 5 .semaphore/scheduled-deploy.yml), поэтому список не может
 #   разъехаться с docker-compose.prod.yml;
 # - не трогает таблицы воркеров, переехавших на общий жизненный цикл задач
-#   (app/src/lib/jobs/lifecycle.ts): base_constructor_jobs и tg_parser_jobs.
+#   (app/src/lib/jobs/lifecycle.ts): base_constructor_jobs, tg_parser_jobs и
+#   search_parser_jobs.
 #   Такие воркеры по SIGTERM сами отпускают аренду за ~2 секунды, а задача
 #   продолжается с чекпоинта в соседней реплике — БД трогать не нужно.
 #
@@ -55,6 +56,7 @@ is_lifecycle_managed_worker() {
   case "$1" in
     worker-baseconstructor|worker-baseconstructor-*) return 0 ;;
     worker-tg-parser) return 0 ;;
+    worker-search) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -153,7 +155,6 @@ if should_pause_legacy_queues && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
   total_running=0
   tracked_tables=(
     "parser_jobs"
-    "search_parser_jobs"
     "website_enrichment_jobs"
     "brief_scoring_jobs"
     "yandex_maps_jobs"
