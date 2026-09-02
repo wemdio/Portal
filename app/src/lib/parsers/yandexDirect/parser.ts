@@ -173,7 +173,27 @@ export function parseXmlResponse(xmlText: string, includeOrganic = false): YDAdv
   return results;
 }
 
-/** sleep-утилита для пауз между запросами. */
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * sleep-утилита для пауз между запросами.
+ *
+ * Пауза обрывается отменой и при этом РЕЗОЛВИТСЯ, а не бросает: что делать с
+ * остановкой, решает вызывающий код (та же форма, что в yandexMapsWorker.ts).
+ * Без сигнала — обычный setTimeout, как было.
+ */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    // AbortSignal не переигрывает уже случившуюся отмену для поздних
+    // слушателей — поэтому проверка выше идёт до подписки.
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
 }

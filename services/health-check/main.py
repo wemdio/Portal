@@ -1228,9 +1228,20 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
         "portal-worker-yandexmaps",
     ),
     JobMonitorSpec(
-        "yandex_direct_jobs", "Яндекс.Директ", ("pending", "running"),
+        # Статус выполнения в этой таблице — processing (check-констрейнт из
+        # миграции 20260517_0001), а не running: без него выполняющиеся задачи
+        # не попадали в выборку монитора вовсе.
+        "yandex_direct_jobs", "Яндекс.Директ", ("pending", "running", "processing"),
         ("total_requests", "processed_requests", "found_advertisers", "saved_total", "errors_count"),
-        "portal-worker-hh", updated_column="updated_at",
+        # updated_at снят намеренно. Воркер переехал на единый жизненный цикл,
+        # а продление аренды — обычный UPDATE строки раз в 60 с; триггер
+        # trg_yandex_direct_jobs_updated_at (20260517_0001) двигает updated_at
+        # на ЛЮБОМ UPDATE. То есть у живого исполнителя он свеж всегда, даже
+        # когда задача не сдвинулась ни на запрос, и алерт «Долго висит» для
+        # этой очереди молча выключился бы. Без updated_column монитор считает
+        # простой по отпечатку прогресса (колонки выше; processed_requests
+        # двигает сам раннер) — как для search_parser_jobs и yandex_maps_jobs.
+        "portal-worker-hh",
     ),
     JobMonitorSpec(
         "google_maps_jobs", "Google Maps", ("queued", "running"),
@@ -1248,9 +1259,16 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
         started_column=None,
     ),
     JobMonitorSpec(
-        "hh_archive_jobs", "Архив HH", ("pending", "running"),
+        # Статус выполнения — processing (check-констрейнт из миграции
+        # 20260516_0001); с прежним набором выполняющиеся задачи в выборку
+        # монитора не попадали.
+        "hh_archive_jobs", "Архив HH", ("pending", "running", "processing"),
         ("found_total", "saved_total", "processed_chunks", "total_chunks", "errors_count"),
-        "portal-worker-hh", updated_column="updated_at",
+        # updated_at снят по той же причине, что и у yandex_direct_jobs выше:
+        # триггер trg_hh_archive_jobs_updated_at (20260516_0001) двигает его на
+        # любом UPDATE, а продление аренды — тоже UPDATE. Простой считаем по
+        # отпечатку прогресса; processed_chunks двигает сам раннер задачи.
+        "portal-worker-hh",
     ),
     JobMonitorSpec(
         "lead_import_jobs", "Импорт / парсинг лидов", ("pending", "running"),

@@ -118,7 +118,19 @@ services:
       # .semaphore/scheduled-deploy.yml), grace целиком отрабатывает только при
       # ручном `docker compose stop`.
       - WORKER_DRAIN_TIMEOUT_MINUTES=${HH_WORKER_DRAIN_TIMEOUT_MINUTES:-180}
+      # Архив вакансий и Яндекс.Директ — на едином жизненном цикле задач:
+      # аренда (живость процесса) и порог остановки прогресса (живость работы).
+      # Арифметика порогов — в шапке констант app/worker/hh.ts.
+      - HH_ARCHIVE_LEASE_SECONDS=${HH_ARCHIVE_LEASE_SECONDS:-180}
+      - HH_ARCHIVE_STALL_MINUTES=${HH_ARCHIVE_STALL_MINUTES:-10}
+      - YANDEX_DIRECT_LEASE_SECONDS=${YANDEX_DIRECT_LEASE_SECONDS:-180}
+      - YANDEX_DIRECT_STALL_MINUTES=${YANDEX_DIRECT_STALL_MINUTES:-10}
       - WORKER_KIND=hh
+    # 3 часа остаются, хотя ни разу не отрабатывали: деплой бьёт контейнер
+    # через `docker stop --timeout 15` (шаг 5 .semaphore/scheduled-deploy.yml).
+    # Срок снизится до 30 секунд в задаче 5 этапа 2, когда на жизненный цикл
+    # переедет последняя очередь этого контейнера — parser_jobs; пока она жива,
+    # длинный grace всё ещё что-то значит при ручной остановке.
     stop_grace_period: 3h
     deploy:
       resources:
