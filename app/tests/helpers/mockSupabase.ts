@@ -19,7 +19,8 @@
  *   - .or('and(eq.x,eq.y),and(eq.a,eq.b)') is parsed as a disjunction of AND
  *     groups whose terms are simple `column.op.value` expressions. Other
  *     operators (`is`, `like`, ...) are not yet supported here on purpose.
- *   - .not('col', 'is', null) and .not('col', 'in', '(a,b,c)') are supported.
+ *   - .not('col', 'is', null), .not('col', 'in', '(a,b,c)') and
+ *     .not('col', 'ilike', '%pattern%') are supported.
  *
  * Mutations:
  *   - insert(rows) appends to the table and records the call (per-table and
@@ -51,7 +52,7 @@ export interface MockSupabaseSeed {
    * запрос (напр. projects.lead_criteria), не задевая другие запросы к той же
    * таблице (напр. верификацию привязки projects.select('id, client')).
    */
-  errorSelects?: Record<string, { columnsInclude: string; message: string }>;
+  errorSelects?: Record<string, { columnsInclude: string; message: string; code?: string }>;
   /**
    * Прицельная инъекция ошибки INSERT'а в таблицу с кодом Postgres
    * (напр. { code: '23505' } — unique_violation). SELECT'ы той же таблицы
@@ -61,7 +62,13 @@ export interface MockSupabaseSeed {
    * строка всё же появляется в таблице (как конфликтующая запись чужого
    * COMMIT'а), и последующие SELECT'ы её видят.
    */
-  errorInserts?: Record<string, { code: string; message: string; commitRow?: boolean }>;
+  errorInserts?: Record<string, {
+    code: string;
+    message: string;
+    commitRow?: boolean;
+    /** Fail only payloads containing this column; later fallback inserts stay healthy. */
+    columnsInclude?: string;
+  }>;
   /**
    * Targeted UPSERT failure. Unlike errorInserts this is deliberately scoped
    * to the upsert verb so fallback tests can keep ordinary inserts/selects on
@@ -167,7 +174,7 @@ export interface MockSupabaseClient {
   selects: SelectCall[];
 }
 
-type Op = 'eq' | 'neq' | 'in' | 'overlaps' | 'gte' | 'lte' | 'gt' | 'lt' | 'is' | 'not_is' | 'not_in' | 'ilike';
+type Op = 'eq' | 'neq' | 'in' | 'overlaps' | 'gte' | 'lte' | 'gt' | 'lt' | 'is' | 'not_is' | 'not_in' | 'ilike' | 'not_ilike';
 
 interface Filter {
   column: string;
@@ -208,6 +215,15 @@ interface Builder {
   ) => Promise<T>;
 }
 
+function matchesIlike(value: unknown, pattern: unknown): boolean {
+  // PostgREST wildcards: % — любая подстрока, _ — один символ; регистр игнорируется.
+  const source = String(pattern)
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/%/g, '.*')
+    .replace(/_/g, '.');
+  return new RegExp(`^${source}$`, 'i').test(String(value ?? ''));
+}
+
 function applyFilter(rows: Row[], f: Filter): Row[] {
   switch (f.op) {
     case 'eq':
@@ -232,15 +248,10 @@ function applyFilter(rows: Row[], f: Filter): Row[] {
       return rows.filter((r) => (r[f.column] as never) < (f.value as never));
     case 'is':
       return rows.filter((r) => r[f.column] === f.value);
-    case 'ilike': {
-      // PostgREST wildcards: % — любая подстрока, _ — один символ; регистр игнорируется.
-      const source = String(f.value)
-        .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-        .replace(/%/g, '.*')
-        .replace(/_/g, '.');
-      const re = new RegExp(`^${source}$`, 'i');
-      return rows.filter((r) => re.test(String(r[f.column] ?? '')));
-    }
+    case 'ilike':
+      return rows.filter((r) => matchesIlike(r[f.column], f.value));
+    case 'not_ilike':
+      return rows.filter((r) => !matchesIlike(r[f.column], f.value));
     case 'not_is':
       return rows.filter((r) => r[f.column] !== f.value);
     case 'not_in': {
@@ -341,6 +352,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
 
   function makeBuilder(table: string): Builder {
     let errorMessage = seed.errorTables?.[table];
+    let errorCode: string | undefined;
     const selectError = seed.errorSelects?.[table];
     const insertError = seed.errorInserts?.[table];
     const upsertError = seed.errorUpserts?.[table];
@@ -403,6 +415,14 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         tables[table] = (tables[table] ?? []).concat(committed);
       }
       return { data: null, error };
+    }
+
+    function insertShouldFail(): boolean {
+      if (!insertError) return false;
+      if (!insertError.columnsInclude) return true;
+      return pendingInsert.some((row) =>
+        Object.keys(row).some((column) => column.includes(insertError.columnsInclude!)),
+      );
     }
 
     function flushMutation(): { data: Row[]; error: null; count: number } {
@@ -481,6 +501,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         countRequested = Boolean(opts?.count);
         if (selectError && (columns ?? '*').includes(selectError.columnsInclude)) {
           errorMessage = selectError.message;
+          errorCode = selectError.code;
         }
         return builder;
       },
@@ -528,6 +549,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
       not: (column, op, value) => {
         if (op === 'is') filters.push({ column, op: 'not_is', value });
         else if (op === 'in') filters.push({ column, op: 'not_in', value });
+        else if (op === 'ilike') filters.push({ column, op: 'not_ilike', value });
         else throw new Error(`mockSupabase: not.${op} is not implemented`);
         return builder;
       },
@@ -553,23 +575,23 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         const [from, to] = args as [number, number];
         requestedRange = { from, to };
         if (mode === 'upsert' && upsertError) return { data: [], error: upsertError, count: 0 };
-        if (errorMessage) return { data: [], error: { message: errorMessage }, count: 0 };
+        if (errorMessage) return { data: [], error: { message: errorMessage, code: errorCode }, count: 0 };
         return flushMutation();
       },
 
       single: async () => {
-        if (mode === 'insert' && insertError) return failInsert(insertError);
+        if (mode === 'insert' && insertShouldFail()) return failInsert(insertError!);
         if (mode === 'upsert' && upsertError) return { data: null, error: upsertError };
-        if (errorMessage) return { data: null, error: { message: errorMessage } };
+        if (errorMessage) return { data: null, error: { message: errorMessage, code: errorCode } };
         const result = flushMutation();
         const first = result.data[0] ?? null;
         // Как у настоящего PostgREST: 0 строк на .single() → PGRST116.
         return { data: first, error: first ? null : { message: 'not found', code: 'PGRST116' } };
       },
       maybeSingle: async () => {
-        if (mode === 'insert' && insertError) return failInsert(insertError) as never;
+        if (mode === 'insert' && insertShouldFail()) return failInsert(insertError!) as never;
         if (mode === 'upsert' && upsertError) return { data: null, error: upsertError } as never;
-        if (errorMessage) return { data: null, error: { message: errorMessage } as never };
+        if (errorMessage) return { data: null, error: { message: errorMessage, code: errorCode } as never };
         const result = flushMutation();
         if (mode === 'insert' && seed.nullInsertRepresentations?.includes(table)) {
           return { data: null, error: null };
@@ -578,8 +600,8 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
       },
 
       then: <T>(onFulfilled?: (v: { data: Row[]; error: null; count: number }) => T) => {
-        if (mode === 'insert' && insertError) {
-          return Promise.resolve({ ...failInsert(insertError), count: 0 } as never).then(onFulfilled as never);
+        if (mode === 'insert' && insertShouldFail()) {
+          return Promise.resolve({ ...failInsert(insertError!), count: 0 } as never).then(onFulfilled as never);
         }
         if (mode === 'upsert' && upsertError) {
           return Promise.resolve({ data: null, error: upsertError, count: 0 } as never)
@@ -600,7 +622,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
           }).then(onFulfilled as never);
         }
         return errorMessage
-          ? Promise.resolve({ data: null as never, error: { message: errorMessage } as never, count: 0 }).then(onFulfilled as never)
+          ? Promise.resolve({ data: null as never, error: { message: errorMessage, code: errorCode } as never, count: 0 }).then(onFulfilled as never)
           : Promise.resolve(flushMutation()).then(onFulfilled as never);
       },
     };

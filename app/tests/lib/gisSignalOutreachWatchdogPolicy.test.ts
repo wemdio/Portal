@@ -1,6 +1,10 @@
 /** @jest-environment node */
 
 jest.mock('server-only', () => ({}));
+jest.mock('@/lib/enrich/websiteParser', () => {
+  const actual = jest.requireActual('@/lib/enrich/websiteParser');
+  return { ...actual, fetchHtmlWithRetry: jest.fn() };
+});
 
 import {
   decideWatchdogAction,
@@ -8,6 +12,15 @@ import {
   MAX_RUNS_PER_DAY,
   WATCHDOG_GRACE_MS,
 } from '@/lib/gisSignalOutreach/watchdogPolicy';
+import { sanitizeGisConstructorSteps } from '@/lib/gisSignalOutreach/config';
+import { companiesToGrid } from '@/lib/gisSignalOutreach/gridMapping';
+import { candidateSiteIdentity } from '@/lib/gisSignalOutreach/segments';
+import { detectOutreachSignals } from '@/lib/gisSignalOutreach/signals';
+import {
+  partitionKnownClientCompanies,
+  reserveFreshClientLeads,
+} from '@/lib/gisSignalOutreach/uploadPolicy';
+import { fetchHtmlWithRetry } from '@/lib/enrich/websiteParser';
 
 /** Момент по МСК → Date (Москва без DST, всегда +03:00). */
 const msk = (iso: string): Date => new Date(`${iso}+03:00`);
@@ -139,5 +152,102 @@ describe('decideWatchdogAction — ограничители перезапуск
     }));
     expect(d.reap.map((r) => r.id)).toEqual(['r1']);
     expect(d.restart).toBe(false);
+  });
+});
+
+describe('GIS pipeline isolation and dedup policy', () => {
+  it('не запускает повторную проверку сайтов через конструктор', () => {
+    expect(sanitizeGisConstructorSteps([
+      'validate_emails',
+      'check_sites',
+      'find_emails',
+      'ta_scoring',
+      'remove_empty',
+    ])).toEqual(['remove_empty', 'find_emails', 'validate_emails']);
+  });
+
+  it('схлопывает карточки одного корпоративного домена, но не профили на shared-hosting', () => {
+    expect(candidateSiteIdentity('https://www.acme.ru/contacts'))
+      .toBe(candidateSiteIdentity('http://acme.ru/branch/spb'));
+    expect(candidateSiteIdentity('https://taplink.cc/acme'))
+      .not.toBe(candidateSiteIdentity('https://taplink.cc/beta'));
+  });
+
+  it('переиспользует скачанный HTML для email и передаёт его конструктору', async () => {
+    const fetchPage = jest.fn().mockResolvedValue({
+      html: '<html><body><form>Оставить заявку</form><a href="mailto:sales@acme.ru">Email</a></body></html>',
+      finalUrl: 'https://acme.ru',
+    });
+    const signals = await detectOutreachSignals({
+      siteUrl: 'acme.ru',
+      fetchPage,
+      llmExtract: async () => null,
+    });
+
+    const grid = companiesToGrid([{
+      candidate: {
+        twogisId: '1',
+        segmentKey: 'consulting',
+        name: 'Acme',
+        site: 'https://acme.ru',
+        phone: '',
+        email: '',
+        cityName: 'Москва',
+        category: 'Консалтинг',
+        subcategory: '',
+      },
+      signals,
+    }]);
+
+    expect(fetchPage).toHaveBeenCalledTimes(1);
+    expect(signals.emails).toEqual(['sales@acme.ru']);
+    expect(grid[1][4]).toBe('sales@acme.ru');
+  });
+
+  it('не тратит GIS-попытку на мёртвый priority proxy pool', async () => {
+    (fetchHtmlWithRetry as jest.Mock).mockResolvedValue({
+      html: '<html><body><form>Оставить заявку</form></body></html>',
+      status: 200,
+    });
+
+    await detectOutreachSignals({ siteUrl: 'acme.ru', llmExtract: async () => null });
+
+    expect(fetchHtmlWithRetry).toHaveBeenCalledWith(
+      'https://acme.ru/',
+      expect.objectContaining({ allowHttpErrors: false, preferPriority: false }),
+    );
+  });
+
+  it('дедуплицирует email по всем кампаниям клиента и между сегментами прогона', () => {
+    const knownClientEmails = new Set(['existing@acme.ru']);
+    const consulting = reserveFreshClientLeads([
+      { email: 'existing@acme.ru' },
+      { email: 'new@acme.ru' },
+      { email: 'NEW@acme.ru' },
+    ], knownClientEmails);
+    const legal = reserveFreshClientLeads([
+      { email: 'new@acme.ru' },
+      { email: 'legal@beta.ru' },
+    ], knownClientEmails);
+
+    expect(consulting.map((lead) => lead.email)).toEqual(['new@acme.ru']);
+    expect(legal.map((lead) => lead.email)).toEqual(['legal@beta.ru']);
+    expect(knownClientEmails).toEqual(new Set([
+      'existing@acme.ru',
+      'new@acme.ru',
+      'legal@beta.ru',
+    ]));
+  });
+
+  it('не отправляет известный email в конструктор, но сохраняет строки без email и со свежим адресом', () => {
+    const partition = partitionKnownClientCompanies([
+      { id: 'duplicate', emails: ['existing@acme.ru'] },
+      { id: 'unknown', emails: [] },
+      { id: 'fresh', emails: ['fresh@beta.ru'] },
+      { id: 'mixed', emails: ['existing@acme.ru', 'new@acme.ru'] },
+    ], new Set(['existing@acme.ru']), (row) => row.emails);
+
+    expect(partition.duplicates.map((row) => row.id)).toEqual(['duplicate']);
+    expect(partition.fresh.map((row) => row.id)).toEqual(['unknown', 'fresh', 'mixed']);
   });
 });

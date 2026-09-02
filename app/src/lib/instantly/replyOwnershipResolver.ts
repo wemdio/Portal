@@ -498,7 +498,12 @@ async function fetchWorkspaceEvidence(args: {
     return { evidence, complete: false };
   }
   const sent = await instantly.listEmails(
-    { email_type: 'sent', mode: 'emode_all', limit: 100 },
+    {
+      lead: identity,
+      email_type: 'sent',
+      mode: 'emode_all',
+      limit: 100,
+    },
     { accountId },
   );
   items.push(...(sent.items ?? []));

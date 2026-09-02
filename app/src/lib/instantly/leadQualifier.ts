@@ -360,7 +360,7 @@ const CONTACT_EMAIL_OR_USERNAME_PATTERN = new RegExp(
 );
 const CONTACT_TEL_URI_PATTERN = /<?tel:\s*\+?\d[\d\s().-]{6,}\d>?/gi;
 const CONTACT_PHONE_CANDIDATE_PATTERN = /\+?\d[\d\s().-]{6,}\d/g;
-const CONTACT_PHONE_LABEL_PATTERN = /(?:телефон|тел\.|номер|phone)/i;
+const CONTACT_PHONE_LABEL_PATTERN = /(?:телефон|тел(?=\s|[.:,;]|$)|номер|phone)/i;
 const CONTACT_DESCRIPTOR_PATTERN = /^(?:директор[а-яё]*|руководител[а-яё]*|начальник[а-яё]*|менеджер[а-яё]*|специалист[а-яё]*|координатор[а-яё]*|секретар[а-яё]*|телефон|тел\.|номер|e-?mail|почта|director|head|manager|specialist|coordinator|assistant|procurement)(?:\s+[А-ЯЁа-яёA-Za-z-]+){0,4}$/i;
 const GENERIC_FOOTER_CONTACT_PATTERN = /^\s*(?:позвоните\s+мне\s+по\s+любым\s+вопросам|feel\s+free\s+to\s+(?:call|contact|reach\s+out(?:\s+to)?)\s+me(?:\s+if\s+you\s+have\s+any\s+questions)?)[.!]?\s*$/i;
 const SIGNATURE_BOUNDARY_PATTERN = /^(?:--|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:[,.!].*)?|best\s+regards(?:[,.!].*)?|kind\s+regards(?:[,.!].*)?|regards(?:[,.!].*)?)$/i;
@@ -406,8 +406,13 @@ const FUTURE_ONLY_COOPERATION_PATTERN = new RegExp(
   String.raw`(?:(?:наде(?:юсь|емся)|буд(?:у|ем)\s+рад(?:а|ы)?|хотел(?:и|а)?\s+бы|hope)[^.!?\n]{0,100}(?:сотруднич[а-яё]*|cooperat(?:e|ion)|collaborat(?:e|ion))[^.!?\n]{0,40}(?:в\s+будущем|in\s+the\s+future)|(?:в\s+будущем|in\s+the\s+future)[^.!?\n]{0,40}(?:наде(?:юсь|емся)|буд(?:у|ем)\s+рад(?:а|ы)?|хотел(?:и|а)?\s+бы|hope)[^.!?\n]{0,100}(?:сотруднич[а-яё]*|cooperat(?:e|ion)|collaborat(?:e|ion)))`,
   'i',
 );
+const MATERIAL_SEND_VERB_SOURCE = String.raw`(?:прислать|выслать|отправить|направить|скинуть)`;
+const MODAL_MATERIAL_SEND_SOURCE = String.raw`(?:можно|можете)(?:\s+(?:мне|нам))?\s+${MATERIAL_SEND_VERB_SOURCE}`;
+const ELLIPTICAL_MATERIAL_REQUEST_SOURCE =
+  String.raw`${MODAL_MATERIAL_SEND_SOURCE}(?=\s*(?:,?\s*(?:пожалуйста|please))?\s*$)`;
+const MATERIAL_REQUEST_ACTION_SOURCE = String.raw`(?:(?:пришлите|вышлите|отправьте|направьте|скиньте|предоставьте)|(?:можно|хотел(?:и|а)?\s+бы)\s+(?:получить|посмотреть)|${MODAL_MATERIAL_SEND_SOURCE}|(?:send|share|forward|provide))`;
 const FOLLOWUP_MATERIAL_REQUEST_PATTERN = new RegExp(
-  String.raw`${LETTER_TOKEN_START_SOURCE}(?:(?:пришлите|вышлите|отправьте|направьте|скиньте|предоставьте)|(?:можно|хотел(?:и|а)?\s+бы)\s+(?:получить|посмотреть)|(?:send|share|forward|provide))[^.!?\n]{0,100}?(?:предложен[а-яё]*|информац[а-яё]*|материал[а-яё]*|презентац[а-яё]*|кейс[а-яё]*|пример[а-яё]*|proposal|information|materials?|presentation|case\s+stud(?:y|ies)|examples?)${LETTER_TOKEN_END_SOURCE}`,
+  String.raw`${LETTER_TOKEN_START_SOURCE}(?:${MATERIAL_REQUEST_ACTION_SOURCE}[^.!?\n]{0,100}?(?:предложен[а-яё]*|информац[а-яё]*|материал[а-яё]*|презентац[а-яё]*|кейс[а-яё]*|пример[а-яё]*|proposal|information|materials?|presentation|case\s+stud(?:y|ies)|examples?)|${ELLIPTICAL_MATERIAL_REQUEST_SOURCE})${LETTER_TOKEN_END_SOURCE}`,
   'i',
 );
 const FOLLOWUP_MATERIAL_SUBJECT_PATTERN = /(?:предложен[а-яё]*|информац[а-яё]*|материал[а-яё]*|презентац[а-яё]*|кейс[а-яё]*|пример[а-яё]*|proposal|information|materials?|presentation|case\s+stud(?:y|ies)|examples?)/i;
@@ -421,7 +426,7 @@ const NEGATED_REQUEST_SUBJECT_PATTERN = new RegExp(
   'i',
 );
 const DIRECT_COMMERCIAL_REQUEST_PATTERN = new RegExp(
-  String.raw`(?:^\s*(?:кп|коммерческ[а-яё]*\s+предложен[а-яё]*|quote)\s*$|${LETTER_TOKEN_START_SOURCE}(?:(?:пришлите|вышлите|отправьте|направьте|скиньте|предоставьте|подготовьте|дайте)|(?:можно|хотел(?:и|а)?\s+бы)\s+(?:получить|посмотреть)|(?:send|share|forward|provide))[^.!?\n]{0,100}${LETTER_TOKEN_START_SOURCE}${DIRECT_COMMERCIAL_SUBJECT_SOURCE}${LETTER_TOKEN_END_SOURCE})`,
+  String.raw`(?:^\s*(?:кп|коммерческ[а-яё]*\s+предложен[а-яё]*|quote)\s*$|${LETTER_TOKEN_START_SOURCE}(?:${MATERIAL_REQUEST_ACTION_SOURCE}|подготовьте|дайте)[^.!?\n]{0,100}${LETTER_TOKEN_START_SOURCE}${DIRECT_COMMERCIAL_SUBJECT_SOURCE}${LETTER_TOKEN_END_SOURCE})`,
   'i',
 );
 const NEGATED_REQUEST_PREFIX_PATTERN = /(?:не|don't|do\s+not)\s*(?:,\s*)?(?:пожалуйста|please)?(?:,\s*)?$/i;
@@ -556,7 +561,8 @@ function stripContactArtifacts(text: string): {
       const digitsCount = (candidate.match(/\d/g) ?? []).length;
       const separatorsCount = (candidate.match(/[\s().-]/g) ?? []).length;
       const isPhone =
-        (digitsCount >= 10 && (candidate.trimStart().startsWith('+') || separatorsCount >= 2)) ||
+        (digitsCount >= 10 && digitsCount <= 15) ||
+        (digitsCount >= 7 && candidate.trimStart().startsWith('+') && separatorsCount >= 1) ||
         (hasPhoneLabel && digitsCount >= 7);
       if (!isPhone) return candidate;
       hadArtifact = true;
@@ -633,12 +639,50 @@ function isPureNamedContactRouting(text: string): boolean {
   return endsWithContactName(englishForwardMatch);
 }
 
-function isPlainContactRoutingReply(text: string): boolean {
-  if (GENERIC_FOOTER_CONTACT_PATTERN.test(text)) return true;
+function isStructurallyPlausibleRoutedContactName(value: string): boolean {
+  const normalized = value.trim().replace(/[.,;:]+$/, '').trim();
+  return (
+    isLikelyContactName(normalized) ||
+    /^[А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ][а-яё-]+){0,2}$/u.test(normalized)
+  );
+}
 
-  const stripped = stripContactArtifacts(text);
+function isPlainContactRoutingReply(text: string): boolean {
+  const authoredReply = extractAuthoredReplyText(text) || text.trim();
+  if (GENERIC_FOOTER_CONTACT_PATTERN.test(authoredReply)) return true;
+
+  const stripped = stripContactArtifacts(authoredReply);
   if (!stripped.text) return stripped.hadArtifact;
   if (stripped.hadArtifact && isLikelyContactName(stripped.text)) return true;
+
+  if (stripped.hadArtifact) {
+    const withoutGreeting = stripped.text.replace(
+      /^\s*(?:(?:добр(?:ый|ое|ого)\s+(?:день|утро|вечер))|здравствуйте|коллеги)\s*[,!.:\-–—]*\s*/i,
+      '',
+    );
+    const afterPhoneFraming = withoutGreeting.replace(
+      /^\s*(?:запишите|запиши|сохраните|сохрани)\s+(?:(?:мой|наш|этот)\s+)?(?:тел(?:ефон)?|номер)\s*[:\-–—]*\s*/i,
+      '',
+    );
+    if (
+      afterPhoneFraming !== withoutGreeting &&
+      isStructurallyPlausibleRoutedContactName(afterPhoneFraming)
+    ) {
+      return true;
+    }
+
+    const routedContact = withoutGreeting.match(
+      /^\s*(?:можете\s+)?(?:связаться|свяжитесь|напишите|пишите)\s+с\s+(.+?)(?:\s+(?:в|через)\s+(?:телеграм(?:м)?(?:е|у)?|telegram|whatsapp|ватсап(?:е)?))?\s*$/i,
+    )?.[1]?.trim();
+    if (
+      routedContact &&
+      !/^(?:мной|нами|me|us)$/i.test(routedContact) &&
+      isStructurallyPlausibleRoutedContactName(routedContact)
+    ) {
+      return true;
+    }
+  }
+
   return isPureNamedContactRouting(stripped.text);
 }
 
@@ -669,21 +713,21 @@ const DELIVERY_FAILURE_BODY_PATTERN =
 const DELIVERY_DIAGNOSTIC_PATTERN =
   /(?:диагностическ(?:ие|ая)\s+сведени|diagnostic\s+information|QuotaExceeded(?:Exception)?|STOREDRV|\b[45]\.\d\.\d\b|\b(?:421|450|451|452|550|551|552|553|554)\b)/iu;
 const SERVICE_ACK_SUBJECT_PATTERN =
-  /(?:обращени[ея][^\n]{0,50}(?:принят|получен|зарегистрирован)|запрос[^\n]{0,40}(?:принят|получен|зарегистрирован)|(?:support\s+)?(?:request|ticket)[^\n]{0,40}(?:received|accepted|registered|created))/iu;
+  /(?:обращени[ея][^\n]{0,50}(?:принят|получен|зарегистрирован)|запрос[^\n]{0,40}(?:принят|получен|зарегистрирован)|уведомлени[ея]\s+о\s+получении\s+заявк[иы]|заявк[а-яё]*[^\n]{0,40}(?:принят|получен|зарегистрирован)|(?:support\s+)?(?:request|ticket)[^\n]{0,40}(?:received|accepted|registered|created))/iu;
 const SERVICE_RECEIPT_PATTERN =
-  /(?:ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)\s+(?:был[оа]?\s+)?(?:успешно\s+)?(?:зарегистрирован[оа]?|получен[оа]?|принят[оа]?)|(?:мы\s+)?(?:получили|зарегистрировали|приняли)\s+ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)|\byour\s+(?:request|message|email|ticket)\s+(?:has\s+been|was|is)\s+(?:received|registered|accepted|created)\b|\bwe\s+have\s+(?:received|registered|accepted|created)\s+your\s+(?:request|message|email|ticket)\b)/iu;
+  /(?:ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)\s+(?:был[оа]?\s+)?(?:успешно\s+)?(?:зарегистрирован[оа]?|получен[оа]?|принят[оа]?)|(?:мы\s+)?(?:получили|зарегистрировали|приняли)\s+ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)|спасибо\s+за\s+(?:вашу\s+)?заявк[ау]|\byour\s+(?:request|message|email|ticket)\s+(?:has\s+been|was|is)\s+(?:received|registered|accepted|created)\b|\bwe\s+have\s+(?:received|registered|accepted|created)\s+your\s+(?:request|message|email|ticket)\b)/iu;
 const SERVICE_PROCESSING_PATTERN =
-  /(?:уже\s+работаем\s+над|обрабатыва[её]м\s+(?:ваш[еа]?\s+)?(?:запрос|обращение)|ответим\s+(?:вам\s+)?(?:в\s+ближайшее\s+время|как\s+можно\s+скорее)|специалист[^\n.]{0,80}(?:ответит|свяжется)|(?:our\s+)?(?:support\s+)?team[^\n.]{0,80}(?:is\s+working|will\s+(?:respond|reply|get\s+back))|we(?:'ll|\s+will)\s+(?:respond|reply|get\s+back)\s+(?:to\s+you\s+)?(?:shortly|soon))/iu;
+  /(?:уже\s+работаем\s+над|обрабатыва[её]м\s+(?:ваш[еа]?\s+)?(?:запрос|обращение)|ответим\s+(?:вам\s+)?(?:в\s+ближайшее\s+время|как\s+можно\s+скорее)|специалист[^\n.]{0,140}(?:ответит|свяжется|занима[а-яё]*\s+рассмотрени[а-яё]*[^\n.]{0,60}постара[а-яё]*\s+ответить)|персональн[а-яё]*\s+менеджер[^\n.]{0,80}свяжется|(?:our\s+)?(?:support\s+)?team[^\n.]{0,80}(?:is\s+working|will\s+(?:respond|reply|get\s+back))|we(?:'ll|\s+will)\s+(?:respond|reply|get\s+back)\s+(?:to\s+you\s+)?(?:shortly|soon))/iu;
 const SERVICE_CONTEXT_PATTERN =
-  /(?:служб[а-яё]*\s+поддержк|техническ[а-яё]*\s+поддержк|support\s+(?:service|team|desk)|help\s*desk|тикет|ticket|обращени)/iu;
+  /(?:служб[а-яё]*\s+поддержк|техническ[а-яё]*\s+поддержк|support\s+(?:service|team|desk)|help\s*desk|тикет|ticket|обращени|заявк)/iu;
 const SERVICE_ACK_GREETING_PATTERN =
   /^(?:здравствуйте|добрый\s+(?:день|вечер|утро)|hello|hi|dear(?:\s+[\p{L} .'-]+)?)[!,.\s]*$/iu;
 const SERVICE_ACK_THANKS_PATTERN =
-  /^(?:(?:большое\s+)?спасибо|благодарим(?:\s+вас)?|thank\s+you|thanks)\s+(?:за|for)\s+(?:(?:ваше|your)\s+)?(?:обращени[ея]|сообщени[ея]|письм[оа]|запрос|contacting\s+us|your\s+(?:request|message|email))(?:\s+(?:в|к|into?)\s+)?(?:служб[уые]?\s+поддержк[иуы]|support(?:\s+(?:service|team|desk))?)?(?:\s+[\p{L}\p{N}._-]+){0,4}$/iu;
+  /^(?:(?:большое\s+)?спасибо|благодарим(?:\s+вас)?|thank\s+you|thanks)\s+(?:за|for)\s+(?:(?:ваше|вашу|your)\s+)?(?:обращени[ея]|сообщени[ея]|письм[оа]|запрос|заявк[ау]|contacting\s+us|your\s+(?:request|message|email))(?:\s+(?:в|к|into?)\s+)?(?:служб[уые]?\s+поддержк[иуы]|support(?:\s+(?:service|team|desk))?)?(?:\s+[\p{L}\p{N}._-]+){0,4}$/iu;
 const SERVICE_ACK_RECEIPT_SEGMENT_PATTERN =
-  /^(?:ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)\s+(?:был[оа]?\s+)?(?:успешно\s+)?(?:получен[оа]?|зарегистрирован[оа]?|принят[оа]?)(?:\s+и\s+(?:получен[оа]?|зарегистрирован[оа]?|принят[оа]?))*|(?:мы\s+)?(?:получили|зарегистрировали|приняли)\s+ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)|your\s+(?:request|message|email|ticket)\s+(?:(?:has\s+been|was|is)\s+)?(?:received|registered|accepted|created)(?:\s+and\s+(?:received|registered|accepted|created))*|we\s+have\s+(?:received|registered|accepted|created)\s+your\s+(?:request|message|email|ticket))$/iu;
+  /^(?:ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)\s+(?:был[оа]?\s+)?(?:успешно\s+)?(?:получен[оа]?|зарегистрирован[оа]?|принят[оа]?)(?:\s+и\s+(?:получен[оа]?|зарегистрирован[оа]?|принят[оа]?))*|(?:мы\s+)?(?:получили|зарегистрировали|приняли)\s+ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)(?:\s+и\s+хотим\s+подтвердить\s+(?:его|их)\s+получение)?|your\s+(?:request|message|email|ticket)\s+(?:(?:has\s+been|was|is)\s+)?(?:received|registered|accepted|created)(?:\s+and\s+(?:received|registered|accepted|created))*|we\s+have\s+(?:received|registered|accepted|created)\s+your\s+(?:request|message|email|ticket))$/iu;
 const SERVICE_ACK_PROCESSING_SEGMENT_PATTERN =
-  /^(?:(?:мы\s+)?(?:уже\s+)?работаем\s+над\s+(?:вашим|этим)\s+(?:вопросом|запросом|обращением)(?:\s+и\s+ответим(?:\s+вам)?\s+(?:в\s+ближайшее\s+время|как\s+можно\s+скорее))?|(?:наша|наш)?\s*(?:служба|команда|отдел)\s+(?:технической\s+)?поддержки\s+(?:ответит|свяжется)(?:\s+с\s+вами)?(?:\s+(?:в\s+ближайшее\s+время|как\s+можно\s+скорее))?|(?:our\s+)?(?:support\s+)?team\s+(?:is\s+working\s+on\s+(?:it|your\s+(?:request|ticket))|will\s+(?:respond|reply|get\s+back)(?:\s+to\s+you)?(?:\s+(?:shortly|soon))?)|we(?:'ll|\s+will)\s+(?:respond|reply|get\s+back)(?:\s+to\s+you)?(?:\s+(?:shortly|soon)))$/iu;
+  /^(?:(?:мы\s+)?(?:уже\s+)?работаем\s+над\s+(?:вашим|этим)\s+(?:вопросом|запросом|обращением)(?:\s+и\s+ответим(?:\s+вам)?\s+(?:в\s+ближайшее\s+время|как\s+можно\s+скорее))?|(?:наш[иаяе]\s+)?специалист[а-яё]*\s+(?:уже\s+)?занима[а-яё]*\s+рассмотрени[а-яё]*\s+(?:вашего\s+)?(?:запроса|обращения)\s+и\s+постара[а-яё]*\s+ответить(?:\s+(?:вам\s+)?(?:в\s+ближайшее\s+время|как\s+можно\s+скорее))?|(?:ваш\s+)?персональн[а-яё]*\s+менеджер(?:\s+[А-ЯЁ][а-яё-]+){0,3}\s+свяжется\s+с\s+вами(?:\s+(?:в\s+ближайшее\s+время|как\s+можно\s+скорее))?|(?:наша|наш)?\s*(?:служба|команда|отдел)\s+(?:технической\s+)?поддержки\s+(?:ответит|свяжется)(?:\s+с\s+вами)?(?:\s+(?:в\s+ближайшее\s+время|как\s+можно\s+скорее))?|(?:our\s+)?(?:support\s+)?team\s+(?:is\s+working\s+on\s+(?:it|your\s+(?:request|ticket))|will\s+(?:respond|reply|get\s+back)(?:\s+to\s+you)?(?:\s+(?:shortly|soon))?)|we(?:'ll|\s+will)\s+(?:respond|reply|get\s+back)(?:\s+to\s+you)?(?:\s+(?:shortly|soon)))$/iu;
 const SERVICE_ACK_URGENT_CONTACT_PATTERN =
   /^(?:если\s+(?:ваше\s+)?(?:обращение|сообщение|письмо|запрос|вопрос)\s+срочн(?:ое|ый),?\s*(?:пожалуйста,?\s*)?(?:свяжитесь\s+с\s+нами|позвоните\s+нам)|if\s+(?:your\s+)?(?:request|message|ticket|issue)\s+is\s+urgent,?\s*(?:please\s+)?(?:contact|call)\s+us)\s*:?$/iu;
 const SERVICE_ACK_MATERIALS_INSTRUCTION_PATTERN =
@@ -696,6 +740,9 @@ const SERVICE_ACK_SIGNOFF_PATTERN =
   /^(?:с\s+уважением|с\s+наилучшими\s+пожеланиями|kind\s+regards|best\s+regards|regards)$/iu;
 const SERVICE_ACK_CONTACT_ONLY_PATTERN =
   /^(?:(?:телефон|тел\.?|phone|e-?mail|почта|сайт|website)\s*[:：]\s*)?(?:\+?[\d\s()+-]{6,}|[^\s@]+@[^\s@]+\.[^\s@]+|(?:https?:\/\/|www\.)?\p{L}[\p{L}\p{N}-]*(?:\.[\p{L}\p{N}-]+)+(?:\/\S*)?)$/iu;
+const SERVICE_ACK_OPERATIONAL_CONTACT_PATTERN =
+  /^(?:если\s+срочно,?\s*)?(?:также\s+вы\s+)?(?:можете\s+)?(?:связаться(?:\s+с\s+(?:нами|ним))?|свяжитесь(?:\s+с\s+(?:нами|ним))?|позвонить(?:\s+нам)?)\s*(?::|по\s+телефону)?\s*(?:(?:(?:telegram|телеграм|whatsapp|ватсап|телефон|тел\.?)\s*[:：]?\s*)?(?:@[a-z0-9_]{5,}|\+?[\d\s()+-]{7,})\s*[,;]?\s*)+$/iu;
+const SERVICE_ACK_PATIENCE_PATTERN = /^(?:спасибо|благодарим(?:\s+вас)?)\s+за\s+терпение$/iu;
 
 function normalizeServiceAcknowledgementSegment(rawSegment: string): string {
   return rawSegment
@@ -719,7 +766,9 @@ function isServiceAcknowledgementBoilerplateSegment(rawSegment: string): boolean
     SERVICE_ACK_TICKET_ID_PATTERN.test(segment) ||
     SERVICE_ACK_SIGNATURE_PATTERN.test(segment) ||
     SERVICE_ACK_SIGNOFF_PATTERN.test(segment) ||
-    SERVICE_ACK_CONTACT_ONLY_PATTERN.test(segment)
+    SERVICE_ACK_CONTACT_ONLY_PATTERN.test(segment) ||
+    SERVICE_ACK_OPERATIONAL_CONTACT_PATTERN.test(segment) ||
+    SERVICE_ACK_PATIENCE_PATTERN.test(segment)
   );
 }
 
@@ -820,6 +869,43 @@ function hasStandaloneSharedEmailLeadCriterion(leadCriteria?: string | null): bo
   }
 
   return false;
+}
+
+function customCriteriaExplicitlyRejectsPlainContactRouting(
+  leadCriteria?: string | null,
+): boolean {
+  if (!leadCriteria?.trim()) return false;
+
+  const normalized = leadCriteria
+    .toLowerCase()
+    .replace(/[«»"'`]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 4_000);
+  const contactMatch = /(?:прост(?:ая|ую|ой)\s+)?передач[а-яё]*\s+контакт[а-яё]*/iu.exec(
+    normalized,
+  );
+  if (!contactMatch || typeof contactMatch.index !== 'number') return false;
+
+  const nearbyPrefix = normalized.slice(
+    Math.max(0, contactMatch.index - 240),
+    contactMatch.index,
+  );
+  const localRule = normalized.slice(contactMatch.index, contactMatch.index + 500);
+  const hasExplicitNegativeMarker = /(?:^|[.!?;:\-–—]\s*)(?:не\s+лид|не\s+считать(?:\s+это)?\s+лидом)/iu.test(
+    nearbyPrefix,
+  );
+  const explicitlyWithoutInterest = /без\s+(?:выраженн[а-яё]*\s+)?интерес[а-яё]*/iu.test(
+    localRule,
+  );
+  const explicitlyRoutingNotInterest = /маршрутизац[а-яё]*\s*,?\s*а\s+не\s+интерес[а-яё]*/iu.test(
+    localRule,
+  );
+
+  return (
+    (hasExplicitNegativeMarker && explicitlyWithoutInterest) ||
+    explicitlyRoutingNotInterest
+  );
 }
 
 function hasDeliberatelySharedEmailInAuthoredReply(replyText: string): boolean {
@@ -1567,6 +1653,7 @@ function buildSystemPrompt(briefText?: string | null, leadCriteria?: string | nu
     ? `\n\nФИНАЛЬНАЯ ПРОВЕРКА КАСТОМНОГО КРИТЕРИЯ:
 - Перед выставлением флагов ещё раз сверь с определением проекта выше только основной ответ человека. При любом противоречии ПРИОРИТЕТ у кастомного определения.
 - Ставь custom_criteria_matched=true, только когда основной ответ сам соответствует хотя бы одному позитивному условию кастомного определения.
+- Явные пункты «НЕ лид» и исключения в определении проекта — это запрет: они не могут одновременно давать custom_criteria_matched=true.
 - При custom_criteria_matched=true обязательно ставь is_lead=true, needs_review=false. Код применит это как однозначный итоговый вердикт.
 - Не считай совпадением данные только из подписи, процитированной переписки или автоответа. В таких случаях custom_criteria_matched=false, если в основном ответе нет отдельного подходящего сигнала.`
     : '\n\nКАСТОМНЫЙ КРИТЕРИЙ НЕ ЗАДАН: всегда ставь custom_criteria_matched=false.';
@@ -2039,6 +2126,23 @@ function sharedContactRoutingNonLead(
   };
 }
 
+function isPlainContactReplyToContactOnlyOpener(
+  ctx: ThreadContext,
+  replyText: string,
+): boolean {
+  if (!ctx.lastOutbound) return false;
+  const outboundText = getBodyText(ctx.lastOutbound.body);
+  const replyHasQuotes =
+    replyText.includes('>') ||
+    /(?:On|В|от)\s+.+(?:wrote|написал|:$)/im.test(replyText);
+  return (
+    isContactRequestOnly(outboundText) &&
+    !isProposalMessage(outboundText) &&
+    !replyHasQuotes &&
+    isPlainContactRoutingReply(replyText)
+  );
+}
+
 /** Внутренние функции для unit-тестов парсера. Не использовать в продакшен-коде. */
 export const _private = {
   sanitizeAIJsonString,
@@ -2207,30 +2311,16 @@ export async function qualifyReply(
   // После contact-only opener детерминированно отсекаем только явно простую
   // маршрутизацию на ЛПР. Любой другой содержательный ответ идёт в AI: исходящий
   // оффер мог не сохраниться, а сам ответ уже достаточен для lead/review-решения.
-  // Кастомный критерий полностью отключает этот guard, потому что проект вправе
-  // считать лидом даже простую передачу контакта.
-  if (ctx.lastOutbound && !aiOptions.leadCriteria?.trim()) {
-    const outboundText = getBodyText(ctx.lastOutbound.body);
-    const replyHasQuotes = replyText.includes('>') || /(?:On|В|от)\s+.+(?:wrote|написал|:$)/im.test(replyText);
-    if (
-      isContactRequestOnly(outboundText) &&
-      !isProposalMessage(outboundText) &&
-      !replyHasQuotes &&
-      isPlainContactRoutingReply(replyText)
-    ) {
-      return {
-        isLead: false,
-        customCriteriaMatched: false,
-        proposalSeen: false,
-        interestSignals: [],
-        reason: 'Ответ на запрос контакта без коммерческого интереса',
-        confidence: 0.9,
-        needsReview: false,
-        objectionHandleable: false,
-        objectionDraft: null,
-        threadContext: ctx,
-      };
-    }
+  // Кастомный критерий может считать такую передачу лидом, поэтому до AI её
+  // отсекает только дефолтный режим. Явное кастомное исключение применяем ниже
+  // как veto уже после того, как модель интерпретировала весь критерий.
+  const plainContactRouting = isPlainContactReplyToContactOnlyOpener(ctx, replyText);
+  if (plainContactRouting && !hasCustomCriteria) {
+    return {
+      ...sharedContactRoutingNonLead(ctx),
+      reason: 'Ответ на запрос контакта без коммерческого интереса',
+      threadContext: ctx,
+    };
   }
 
   let briefText = aiOptions.briefText ?? null;
@@ -2244,6 +2334,16 @@ export async function qualifyReply(
     aiOptions.leadCriteria,
     replyText,
   );
+  if (
+    plainContactRouting &&
+    customCriteriaExplicitlyRejectsPlainContactRouting(aiOptions.leadCriteria)
+  ) {
+    return {
+      ...sharedContactRoutingNonLead(ctx, criteriaAwareResult),
+      reason: 'Кастомный критерий прямо исключает простую передачу контакта без интереса.',
+      threadContext: ctx,
+    };
+  }
   if (sharedContactRouting && !criteriaAwareResult.customCriteriaMatched) {
     return {
       ...sharedContactRoutingNonLead(ctx, criteriaAwareResult),
