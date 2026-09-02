@@ -11,7 +11,10 @@
  *     работает в конструкторе баз.
  *  2. Продление. Пока run() идёт, независимый setInterval продлевает аренду с
  *     фильтром run_token. После markShuttingDown() продления молчат (инцидент
- *     11.08.2026: heartbeat затирал handoff).
+ *     11.08.2026: heartbeat затирал handoff). Продление независимо от тела, и
+ *     потому само по себе означает «процесс жив», а не «задача движется»: для
+ *     второго есть опция progress — она прекращает продление, когда колонка
+ *     прогресса стоит дольше порога (см. JobRunnerOptions.progress).
  *  3. Чекпойнт. ctx.saveCheckpoint пишет checkpoint + продлевает аренду; false —
  *     строку перехватили, воркер обязан остановиться (мы ещё и abort'им signal).
  *  4. Остановка. shutdown(): markShuttingDown, abort всех run, lease_until=null
@@ -99,8 +102,29 @@ export interface JobRunnerOptions<Row extends { id: string }, C> {
   orderBy?: string;
   /** Что читать в job для run(). id, checkpoint, attempts, run_token добавляются всегда. */
   select?: string;
-  /** Дополнительные поля при захвате (например started_at). */
+  /**
+   * Дополнительные поля при ЛЮБОМ захвате — и нового pending, и перехвата
+   * чужой истёкшей аренды (например started_at). На перехвате они особенно
+   * нужны: без них строка уносит с собой отметку прогресса прежнего владельца.
+   */
   claimPatch?: () => Record<string, unknown>;
+  /**
+   * Признак живости по прогрессу, а не по процессу.
+   *
+   * Продление аренды идёт независимым таймером, поэтому здоровый процесс с
+   * намертво зависшим телом задачи (повисший scrape, неотвечающий AI-вызов)
+   * продлевал бы аренду вечно и задачу не подобрал бы никто. Раньше от этого
+   * защищал порог по started_at, который двигался только на реальном прогрессе.
+   *
+   * Если задано, каждое продление сперва читает `column` у своей строки. Пока
+   * значение меняется — это прогресс: таймер простоя сбрасывается, а бюджет
+   * попыток обнуляется (иначе воркер без чекпойнтов копит попытки в одну
+   * сторону и уходит в failed после трёх грубых остановок). Если значение не
+   * менялось дольше `stalledAfterMs` — продления прекращаются, run прерывается
+   * с reason 'progress-stalled', и аренда НЕ отпускается: она истекает сама,
+   * задачу подбирает соседняя реплика и потеря честно считается падением.
+   */
+  progress?: { column: string; stalledAfterMs: number };
   /** Дополнительные поля при переводе в failed (например error_message). */
   failedPatch?: (reason: string) => Record<string, unknown>;
   /**
@@ -126,7 +150,9 @@ export interface JobRunnerOptions<Row extends { id: string }, C> {
 
 export interface JobRunner {
   /**
-   * Один опрос: взял задачу → true (зови снова), нечего брать → false.
+   * Один опрос. true — зови снова сразу (задачу взяли, либо кандидат был, но
+   * гонку за него проиграли: очередь непуста). false — брать нечего, можно
+   * спать до следующего тика.
    *
    * Не реентерабелен: рассчитан на последовательного вызывающего (pollLoop
    * воркера). Два параллельных вызова на одной реплике могут вдвоём пройти
@@ -191,8 +217,18 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
   const select = opts.select ? `${baseSelect}, ${opts.select}` : baseSelect;
 
   type ClaimedJob = Row & { checkpoint: C | null; attempts: number };
-  /** Захваченная задача вместе с выписанным ей жетоном. */
-  type Claim = { job: ClaimedJob; runToken: string };
+  /**
+   * Итог попытки захвата. 'lost' отделён от 'empty' намеренно: кандидат был,
+   * но CAS проиграл — значит очередь непуста и звать снова надо немедленно,
+   * а не засыпать на ожидании realtime (оно будит только по status=pending,
+   * так что перехват освобождённых аренд им не покрыт вовсе).
+   */
+  type ClaimOutcome =
+    | { kind: 'claimed'; job: ClaimedJob; runToken: string }
+    | { kind: 'empty' }
+    | { kind: 'lost' };
+  const EMPTY: ClaimOutcome = { kind: 'empty' };
+  const LOST: ClaimOutcome = { kind: 'lost' };
 
   const iso = (ms: number) => new Date(ms).toISOString();
   const leaseUntil = () => iso(now() + leaseMs);
@@ -217,6 +253,8 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
   };
   const owned = new Map<string, Owned>();
   let stopping = false;
+  /** Промис идущей остановки — чтобы повторный shutdown() дожидался первого. */
+  let shutdownRun: Promise<void> | null = null;
 
   /** Останавливаемся: свой флаг раннера или общий процессный. */
   const halting = () => stopping || isShuttingDown();
@@ -276,7 +314,7 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
   const releaseLease = (jobId: string, runToken: string) =>
     fencedUpdateWithRetry(jobId, runToken, { lease_until: null }, RELEASE_WRITE_TRIES, RELEASE_BACKOFF_MS);
 
-  async function claimPending(): Promise<Claim | null> {
+  async function claimPending(): Promise<ClaimOutcome> {
     const { data: candidate } = await client
       .from(table)
       .select('id, attempts')
@@ -284,7 +322,7 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
       .order(orderBy, { ascending: true })
       .limit(1)
       .maybeSingle();
-    if (!candidate) return null;
+    if (!candidate) return EMPTY;
     const runToken = randomUUID();
     const { data } = await client
       .from(table)
@@ -302,10 +340,10 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
       .maybeSingle();
     // Жетон берём свой, а не из ответа: представление могло не отдать колонку,
     // и тогда все дальнейшие ограждённые записи били бы мимо (baseConstructor.ts:143).
-    return data ? { job: data as ClaimedJob, runToken } : null;
+    return data ? { kind: 'claimed', job: data as ClaimedJob, runToken } : LOST;
   }
 
-  async function claimExpired(): Promise<Claim | null> {
+  async function claimExpired(): Promise<ClaimOutcome> {
     const { data: candidate } = await client
       .from(table)
       .select('id, attempts, lease_until')
@@ -314,7 +352,7 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
       .order(orderBy, { ascending: true })
       .limit(1)
       .maybeSingle();
-    if (!candidate) return null;
+    if (!candidate) return EMPTY;
     // null — чистая передача при shutdown, не попытка. Иначе — crash/kill.
     const lost = candidate.lease_until != null;
     const attempts = (candidate.attempts ?? 0) + (lost ? 1 : 0);
@@ -334,12 +372,22 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
         .select('id')
         .maybeSingle();
       log('warn', `[${table}] job ${candidate.id} failed: ${reason}`);
-      return null;
+      return EMPTY;
     }
     const runToken = randomUUID();
     const { data } = await client
       .from(table)
-      .update({ run_token: runToken, worker_id: workerId, lease_until: leaseUntil(), attempts })
+      .update({
+        run_token: runToken,
+        worker_id: workerId,
+        lease_until: leaseUntil(),
+        attempts,
+        // Тот же claimPatch, что и на pending-пути: «поля при захвате» — это
+        // поля при любом захвате. Без него перехваченная строка сохраняет
+        // отметку прогресса прежнего владельца, и монитор здоровья считает
+        // задачу зависшей в ту же секунду, как её подобрали.
+        ...(opts.claimPatch?.() ?? {}),
+      })
       .eq('id', candidate.id)
       .eq('status', statuses.running)
       // Тот же фильтр в UPDATE: между чтением кандидата и записью аренду мог
@@ -348,7 +396,7 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
       .select(select)
       .maybeSingle();
     if (data) log('info', `[${table}] reclaimed job ${candidate.id} (${lost ? 'lease expired' : 'released'})`);
-    return data ? { job: data as ClaimedJob, runToken } : null;
+    return data ? { kind: 'claimed', job: data as ClaimedJob, runToken } : LOST;
   }
 
   function execute(job: ClaimedJob, runToken: string): void {
@@ -366,6 +414,50 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
 
     /** Идёт ли прямо сейчас запрос продления (см. guard ниже). */
     let beating = false;
+    const progress = opts.progress;
+    /** Последнее увиденное значение колонки прогресса и когда оно менялось. */
+    let progressValue: unknown = progress
+      ? (job as unknown as Record<string, unknown>)[progress.column]
+      : undefined;
+    let progressSeeded = progressValue !== undefined;
+    let lastProgressAt = now();
+
+    /**
+     * moving — колонка сдвинулась (это и есть прогресс);
+     * idle — не сдвинулась, но порог простоя ещё не выбран;
+     * stalled — стоит дольше порога, продление прекращено и run прерван.
+     */
+    const checkProgress = async (): Promise<'moving' | 'idle' | 'stalled'> => {
+      if (!progress) return 'idle';
+      const { data, error } = await client
+        .from(table)
+        .select(`id, ${progress.column}`)
+        .eq('id', job.id)
+        .maybeSingle();
+      // Читать под жетоном незачем: значение нужно нам самим, а не для записи.
+      // Ошибку чтения не считаем ни прогрессом, ни простоем — мёртвую базу
+      // ловит проверка протухшей аренды выше.
+      if (error || !data) return 'idle';
+      const value = (data as Record<string, unknown>)[progress.column];
+      if (!progressSeeded) {
+        // Первое чтение — точка отсчёта, а не прогресс: бюджет попыток за него
+        // не возвращаем, иначе одного тика хватало бы, чтобы обнулить счётчик.
+        progressValue = value;
+        progressSeeded = true;
+        lastProgressAt = now();
+        return 'idle';
+      }
+      if (value !== progressValue) {
+        progressValue = value;
+        lastProgressAt = now();
+        return 'moving';
+      }
+      const idleMs = now() - lastProgressAt;
+      if (idleMs <= progress.stalledAfterMs) return 'idle';
+      jobLog('warn', `no progress in ${progress.column} for ${Math.round(idleMs / 1000)}s — abandoning lease`);
+      abort.abort('progress-stalled');
+      return 'stalled';
+    };
 
     const heartbeat = async () => {
       if (abort.signal.aborted || halting()) return;
@@ -391,7 +483,20 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
       if (beating) return;
       beating = true;
       try {
-        const result = await fencedUpdate(job.id, runToken, { lease_until: leaseUntil() });
+        // Прогресс проверяем ДО продления: узнав о простое из ответа на само
+        // продление, мы бы этим же запросом продлили аренду ещё на срок и
+        // отодвинули перехват соседом на целый leaseSeconds.
+        const liveness = await checkProgress();
+        if (liveness === 'stalled') return;
+        const patch: Record<string, unknown> = { lease_until: leaseUntil() };
+        if (liveness === 'moving') {
+          // Задача видимо движется — бюджет неудач возвращается, как и на
+          // чекпойнте. Пишем в колонку, а не только в память: перехват после
+          // грубой остановки считает попытки по строке в базе.
+          attemptsBase = 0;
+          patch.attempts = 0;
+        }
+        const result = await fencedUpdate(job.id, runToken, patch);
         if (result.persisted) lastRenewedAt = now();
         if (abort.signal.aborted) return;
         if (!result.owned) {
@@ -504,8 +609,15 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
         await sleep(500);
         return true;
       }
-      const claim = (await claimPending()) ?? (await claimExpired());
-      if (!claim) return false;
+      const pending = await claimPending();
+      const claim = pending.kind === 'empty' ? await claimExpired() : pending;
+      // Гонку проиграли: строку только что забрал сосед, значит в очереди было
+      // что брать. Просим позвать снова сразу, вместо сна до 30 с на ожидании
+      // realtime. Раскрутки не будет: 'lost' возможен только когда кто-то
+      // действительно захватил строку, так что лишних кругов не больше, чем
+      // разобранных задач.
+      if (claim.kind === 'lost') return true;
+      if (claim.kind === 'empty') return false;
       // Сигнал мог прийти, пока захват был в полёте: shutdown() уже снял свой
       // снимок owned, и эту задачу никто бы не прервал и не отпустил — она
       // дожила бы до SIGKILL с живой арендой, а сосед прождал бы полный
@@ -519,8 +631,20 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
       return true;
     },
 
-    async shutdown() {
-      if (stopping) return;
+    // Повторный вызов возвращает ТОТ ЖЕ промис, а не пустой: воркеры зовут
+    // shutdown() из обработчика сигнала и ещё раз после pollLoop, и второй
+    // вызов обязан дождаться первого, иначе `await runner.shutdown()` в конце
+    // main() только выглядит страховкой — процесс уходил бы, пока аренды ещё
+    // отпускаются. Эту форму скопируют все ~29 воркеров.
+    shutdown() {
+      shutdownRun ??= runShutdown();
+      return shutdownRun;
+    },
+
+    activeJobIds: () => Array.from(owned.keys()),
+  };
+
+  async function runShutdown(): Promise<void> {
       stopping = true;
       markShuttingDown();
       const snapshot = Array.from(owned.entries());
@@ -561,8 +685,5 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
         Promise.allSettled(snapshot.map(([, o]) => o.promise)),
         sleep(shutdownGraceMs),
       ]);
-    },
-
-    activeJobIds: () => Array.from(owned.keys()),
-  };
+  }
 }

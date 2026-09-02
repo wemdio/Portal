@@ -115,7 +115,11 @@ describe('job lifecycle', () => {
     const [gotA, gotB] = await Promise.all([runA.pollOnce(), runB.pollOnce()]);
     await flush();
 
-    expect([gotA, gotB].filter(Boolean)).toHaveLength(1);
+    // Оба просят позвать снова: победитель — потому что взял задачу,
+    // проигравший — потому что кандидат был и очередь могла не опустеть
+    // (иначе он уснул бы до 30 с на ожидании realtime). Тело при этом
+    // запущено ровно одно — это и есть «победитель один».
+    expect([gotA, gotB]).toEqual([true, true]);
     expect(runs).toHaveLength(1);
     expect(db.rows[0].status).toBe('running');
     expect(typeof db.rows[0].run_token).toBe('string');
@@ -218,6 +222,43 @@ describe('job lifecycle', () => {
     await jest.advanceTimersByTimeAsync(60_000);
     expect(db.updates.length).toBe(after);
     expect(await runner.pollOnce()).toBe(false);
+  });
+
+  it('a stalled progress column stops renewals and abandons the lease', async () => {
+    const db = makeFakeDb([{ id: 'j', status: 'pending', created_at: '1', attempts: 2, processed: 0 }]);
+    let ctxRef: JobContext<Row> | null = null;
+    const runner = makeRunner(db, async (_job, ctx) => {
+      ctxRef = ctx;
+      await new Promise<void>((resolve) => ctx.signal.addEventListener('abort', () => resolve()));
+    }, { progress: { column: 'processed', stalledAfterMs: 45_000 } });
+    await runner.pollOnce();
+    await flush();
+
+    // Прогресс сдвинулся: аренда продлена, бюджет попыток возвращён.
+    db.rows[0].processed = 7;
+    clock += 20_000; jest.setSystemTime(clock);
+    await jest.advanceTimersByTimeAsync(20_000);
+    expect(db.rows[0].lease_until).toBe(new Date(clock + 60_000).toISOString());
+    expect(db.rows[0].attempts).toBe(0);
+
+    // Прогресс встал. Порог 45 с ещё не выбран — продление идёт.
+    clock += 20_000; jest.setSystemTime(clock);
+    await jest.advanceTimersByTimeAsync(20_000);
+    const lastLease = db.rows[0].lease_until;
+    expect(lastLease).toBe(new Date(clock + 60_000).toISOString());
+
+    // Порог перейден: продления прекращаются, run прерывается.
+    clock += 30_000; jest.setSystemTime(clock);
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(ctxRef!.signal.aborted).toBe(true);
+    // Аренду НЕ обнуляем: она истекает сама, сосед подбирает задачу и
+    // засчитывает потерю как падение — ровно как старый порог по started_at.
+    expect(db.rows[0].lease_until).toBe(lastLease);
+
+    // Дальше таймер молчит: аренда больше не продлевается.
+    clock += 60_000; jest.setSystemTime(clock);
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(db.rows[0].lease_until).toBe(lastLease);
   });
 
   it('shutdown during an in-flight claim releases the job instead of starting it', async () => {
