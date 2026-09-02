@@ -1010,8 +1010,8 @@ services:
   # атомарный CAS-claim (UPDATE WHERE status='pending') - каждый job берёт
   # ровно одна реплика. Параллельно: 12 реплик x 1 job = 12 job'ов.
   # Реплики дают отказоустойчивость: краш/OOM одной не уносит job'ы остальных.
-  # Stale (без heartbeat 15+ мин) processing-задачи любая реплика автоматически
-  # резумит с того шага, где остановились.
+  # Задачи с истёкшей или обнулённой арендой (lease_until) любая реплика
+  # автоматически перехватывает и продолжает с того шага, где остановились.
   worker-baseconstructor: &worker-baseconstructor
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-baseconstructor
@@ -1048,12 +1048,13 @@ services:
       # У двенадцати воркеров общий Requesty-ключ: по одной AI-пачке на job
       # даёт до 12 одновременных вызовов без неконтролируемого fan-out.
       - BASE_TA_SCORING_CONCURRENCY=${BASE_TA_SCORING_CONCURRENCY:-1}
-      - BASE_CONSTRUCTOR_STALE_MINUTES=${BASE_CONSTRUCTOR_STALE_MINUTES:-15}
-    # Job может занимать 30-60 минут (find_emails+enrich на 1.5к строк).
-    # SIGTERM придёт при docker compose down, но шаг доработает до конца —
-    # просто след. шаг не запустится, и worker корректно выйдет.
-    # Резумнётся при следующем старте контейнера.
-    stop_grace_period: 5m
+      - BASE_CONSTRUCTOR_LEASE_SECONDS=${BASE_CONSTRUCTOR_LEASE_SECONDS:-300}
+    # Job может занимать 30-60 минут (find_emails+enrich на 1.5к строк), но
+    # ждать его завершения на SIGTERM незачем: задача не должна доиграть — она
+    # резюмится с чекпоинта в другой реплике. Воркеру нужны секунды, чтобы
+    # обнулить аренду своих задач (два прохода с паузой в секунду), после чего
+    # соседняя реплика подберёт их на ближайшем опросе.
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:
@@ -1270,10 +1271,12 @@ services:
       - HEALTH_PORTAL_URL=${HEALTH_PORTAL_URL:-https://polza-portal.ru}
       - HEALTH_INTERVAL_SEC=${HEALTH_INTERVAL_SEC:-900}
       - HEALTH_JOB_MONITOR_INTERVAL_SEC=${HEALTH_JOB_MONITOR_INTERVAL_SEC:-300}
-      # Держать строго выше BASE_CONSTRUCTOR_STALE_MINUTES (15): воркер сам
-      # резюмит осиротевшую задачу на этом пороге, и при равных значениях
-      # каждый деплой давал ложную тревогу за секунды до самоподбора
-      # (инцидент 11.08.2026).
+      # Держать строго выше порога перехвата у конструктора баз —
+      # BASE_CONSTRUCTOR_LEASE_SECONDS (300 с = 5 мин): воркер сам подбирает
+      # осиротевшую задачу по истёкшей аренде, а чистый редеплой отдаёт её за
+      # секунды. При равных значениях каждый деплой давал ложную тревогу за
+      # секунды до самоподбора (инцидент 11.08.2026); 20 минут оставляют
+      # четырёхкратный запас.
       - HEALTH_JOB_STUCK_MIN=${HEALTH_JOB_STUCK_MIN:-20}
       - HEALTH_SERVER_IP=${HEALTH_SERVER_IP:-139.60.162.12}
       - PROXY_URLS=${PROXY_URLS}

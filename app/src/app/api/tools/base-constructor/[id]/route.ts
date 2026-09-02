@@ -1,11 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { randomUUID } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { blockDemo } from '@/lib/auth/blockDemo';
 import { withToolTrace } from '@/lib/toolTrace';
 import { extractEmail, findColumnIndex } from '@/lib/tools/dfybUtils';
-import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
 import { stripBaseConstructorCheckpointMetadata } from '@/lib/tools/baseConstructorCheckpoint';
 
 const admin = supabaseAdmin!;
@@ -20,34 +18,18 @@ async function getUser(req: NextRequest) {
 /**
  * Self-heal jobs stuck in processing.
  *
- * Архитектурный фон: base-constructor исторически живёт fire-and-forget
- * promise'ом в HTTP-процессе portal'a. При любом рестарте контейнера
- * (deploy/OOM/healthcheck) promise умирает посередине, и БД остаётся
- * с status='processing' без живой работы. Юзер видит «висит на N%»
- * сутками. Реальный фикс — переезд на отдельного worker'a, но пока
- * чиним симптомами.
+ * Единственный случай, который чинит HTTP-роут:
  *
- * Две стратегии в зависимости от того, где умерло:
+ * **Зависло на последнем шаге, 100%** — финальный update со status=completed
+ * не успел пройти, но `data` уже актуальная. Помечаем completed,
+ * пересчитываем result_stats из data — пользователь получает экспорт.
  *
- * 1. **Зависло на последнем шаге, 100%** — финальный update со status=completed
- *    не успел пройти, но `data` уже актуальная. Помечаем completed,
- *    пересчитываем result_stats из data — пользователь получает экспорт.
- *
- * 2. **Зависло на промежуточном шаге** (current_step < total_steps) — данные
- *    обработаны частично, дальнейшие шаги (ta_scoring, persona и т.д.)
- *    не выполнены. Помечать completed неправильно — это введёт юзера
- *    в заблуждение и испортит метрики. Помечаем failed с пояснением,
- *    чтобы UI разблокировался и юзер запустил заново. Случай Вероники:
- *    find_emails (3/4) 100%, clean_names (4/4) даже не запускался.
- *
- * Порог STUCK_AFTER_MS — окно, в которое реальная медленная работа
- * не должна попасть. find_emails на 1.5k строках занимает 10-20 минут;
- * 15 минут на промежуточном шаге — уже точно «зависло» (нет других
- * промежуточных шагов в пайплайне которые столько идут).
+ * Порог FINAL_STUCK_AFTER_MS — окно, в которое реальная медленная работа
+ * не должна попасть: после 100% на последнем шаге остаётся только запись
+ * результата, две минуты на неё — с запасом.
  */
 async function autoCompleteIfStuck(jobId: string): Promise<void> {
   const FINAL_STUCK_AFTER_MS = 2 * 60_000;
-  const INTERMEDIATE_STUCK_AFTER_MS = 15 * 60_000;
   const { data: row } = await admin
     .from('base_constructor_jobs')
     .select('id, status, current_step, current_step_key, total_steps, current_step_progress, started_at, run_token, data')
@@ -105,48 +87,8 @@ async function autoCompleteIfStuck(jobId: string): Promise<void> {
     return;
   }
 
-  // Случай 2: зависло на промежуточном шаге > 15 минут — РЕСУМИМ.
-  //
-  // Раньше тут было status='failed'. Теперь — пытаемся продолжить с того
-  // места где умерло. `data` персистится между шагами + onCheckpoint
-  // внутри enrich, так что прогресс не теряется. Worker сам поймёт что
-  // это resume (status уже 'processing', current_step >0) и пропустит
-  // выполненные шаги.
-  //
-  // CAS-блокировка через cutoff на started_at: только первый GET после
-  // 15 минут реально клеймит задачу. Если два юзера одновременно открыли
-  // карточку — второй увидит свежий started_at и не запустит второй
-  // worker (иначе они бы конкурентно писали в data).
-  if (!isLastStep && elapsedMs >= INTERMEDIATE_STUCK_AFTER_MS) {
-    const cutoffIso = new Date(Date.now() - INTERMEDIATE_STUCK_AFTER_MS).toISOString();
-    const runToken = randomUUID();
-    const { data: claimed } = await admin
-      .from('base_constructor_jobs')
-      .update({
-        started_at: new Date().toISOString(),
-        run_token: runToken,
-      })
-      .eq('id', jobId)
-      .eq('status', 'processing')
-      .lt('started_at', cutoffIso)
-      .select('id, run_token')
-      .maybeSingle();
-
-    if (!claimed) {
-      // Уже клеймнули в другом запросе — пусть тот и резумит.
-      return;
-    }
-
-    console.log(`[base-constructor][${jobId}] auto-resume after ${Math.round(elapsedMs / 60_000)}min stuck on step ${row.current_step}/${row.total_steps}`);
-
-    // Fire-and-forget — та же архитектура что и при первичном POST.
-    // Если этот промис снова умрёт от рестарта — следующий GET через
-    // ещё 15 минут попробует резумнуть снова.
-    runBaseConstructorJob(jobId, claimed.run_token ?? runToken).catch((err) =>
-      console.error(`[base-constructor][${jobId}] auto-resume failed:`, err),
-    );
-    return;
-  }
+  // Промежуточный шаг без живого исполнителя перехватывает сам воркер по
+  // истёкшей аренде (lib/jobs/lifecycle.ts). HTTP-процесс задачи не запускает.
 }
 
 export async function GET(
@@ -159,7 +101,7 @@ export async function GET(
       const { user, token } = await getUser(req);
       if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-      // This GET triggers autoCompleteIfStuck() which MUTATES / resumes jobs — a
+      // This GET triggers autoCompleteIfStuck() which MUTATES the job row — a
       // hidden side effect, so it must be demo-gated like the mutating handlers.
       const supabase = createAuthedSupabaseClient(token!);
       const demo = await blockDemo(supabase, user.id);

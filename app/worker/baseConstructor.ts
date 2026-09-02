@@ -1,306 +1,99 @@
 /**
- * BaseConstructor worker — выносит «Конструктор баз» из HTTP-процесса portal'a
- * в отдельный долгоживущий контейнер.
+ * BaseConstructor worker — «Конструктор баз» в отдельном долгоживущем контейнере.
  *
- * Зачем: до миграции `runBaseConstructorJob` запускался как fire-and-forget
- * Promise прямо из POST-роута Next.js. Любой рестарт portal'a (deploy,
- * OOM, healthcheck) убивал promise посередине — задача оставалась в
- * `processing` навсегда (или, после симптом-фикса auto-resume в GET,
- * восстанавливалась только когда юзер открывал карточку через 15+ мин).
+ * Владение задачей — через единый жизненный цикл (lib/jobs/lifecycle.ts):
+ * захват pending или задачи с истёкшей/обнулённой арендой, продление аренды по
+ * таймеру, на SIGTERM — обнуление аренды, чтобы соседняя реплика подобрала job
+ * на ближайшем опросе, а не через порог простоя.
  *
- * Архитектура (по образу `enrich.ts`):
- *   - polling-loop ищет `status='pending'` (новые) → атомарный claim
- *     через CAS-UPDATE → запуск runBaseConstructorJob.
- *   - также ищет `status='processing'` со старым `started_at` (умерли при
- *     прошлом рестарте контейнера или фоновой promise отвалился) — резумит
- *     с того места где остановилось (см. resume-логику в самом
- *     runBaseConstructorJob).
- *   - MAX_CONCURRENCY ограничивает кол-во job'ов на одной реплике.
- *     Для 3-5 параллельных задач можно либо поднять concurrency на одной
- *     реплике, либо запустить несколько реплик через docker-compose `replicas`.
+ * Сам runner (runBaseConstructorJob) не менялся: он по-прежнему пишет
+ * терминальный статус сам, ограждает записи run_token'ом и продвигает
+ * started_at как heartbeat прогресса для монитора здоровья. Поэтому
+ * manageTerminalStatus=false.
  *
- * Деплой: новый контейнер `worker-baseconstructor` в docker-compose.prod.yml
- * с WORKER_KIND=baseconstructor.
+ * Резюм с чекпойнта живёт внутри runBaseConstructorJob (current_step /
+ * current_step_progress / data), отдельный checkpoint-столбец тут не нужен.
+ *
+ * Undici-ассерт (инцидент 19.06.2026): при массовом скрейпинге в find_emails
+ * парсер undici роняет весь процесс синхронным ассертом из обработчика сокета,
+ * который не ловится try/catch вокруг fetch. installUndiciAssertGuard глушит
+ * именно его — иначе контейнер падал на одном и том же URL по кругу.
  */
 
-import { randomUUID } from 'node:crypto';
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
+import { createJobRunner } from '@/lib/jobs/lifecycle';
 import { markShuttingDown } from '@/lib/workerShutdown';
 import {
   createWorkerLogger,
   pollLoop,
   requireSupabaseAdmin,
   setupGracefulShutdown,
-  sleep,
 } from './_shared';
 import { installUndiciAssertGuard } from './_undiciAssertGuard';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
-/** Сколько job'ов параллельно один воркер берёт. Память: 1 job ≈ 0.5–1.5GB JS heap (большой `data` в памяти). */
+/** Сколько job'ов параллельно один воркер берёт. Память: 1 job ≈ 0.5–1.5GB JS heap. */
 const MAX_CONCURRENCY = Math.max(1, Number(process.env.BASE_CONSTRUCTOR_CONCURRENCY ?? '2'));
 /**
- * Через сколько минут «застрявшая» processing-задача считается умершей и
- * её надо резумнуть. Heartbeat в `updateJobProgress` шлёт started_at на
- * каждый прогресс-тик (find_emails — каждые 10 строк), так что в норме
- * между двумя heartbeat'ами проходит секунды, максимум 1-2 мин в самых
- * медленных шагах. 5 мин = ~30× нормального интервала: достаточно
- * консервативно чтобы не воровать живые job'ы, и достаточно быстро
- * чтобы redeploy не оставлял клиента ждать 15 мин до пере-claim'а
- * (как было в реальном случае polza@polza.ru job 55d37e8e — потеряли
- * почти час между «worker умер при redeploy» и «новый worker подобрал»).
- *
- * NB: код-дефолт 5, но прод ставит 15 (BASE_CONSTRUCTOR_STALE_MINUTES в
- * docker-compose.prod.yml). С 3 репликами этот порог важен: пока он заметно
- * больше heartbeat-интервала, реплика B не «угонит» живую job'у реплики A.
- * 15 мин = с запасом; чистый redeploy всё равно реклеймит за ~5 сек через
- * ageRunningJobsForFastHandoff (SIGTERM), не дожидаясь порога.
+ * Аренда. Продление идёт независимым таймером каждые lease/3, а не по тикам
+ * прогресса, так что порог можно держать коротким: 5 минут = ~3 пропущенных
+ * продления. Чистый redeploy аренду обнуляет сразу, порога не ждёт.
  */
-const STALE_JOB_MINUTES = Math.max(2, Number(process.env.BASE_CONSTRUCTOR_STALE_MINUTES ?? '5'));
+const LEASE_SECONDS = Math.max(60, Number(process.env.BASE_CONSTRUCTOR_LEASE_SECONDS ?? '300'));
 const WORKER_ID = `baseconstructor-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 
-const running = new Set<Promise<void>>();
-interface ClaimedJob {
-  jobId: string;
-  runToken: string;
-}
-
-/**
- * Jobs currently executing on this worker, paired with the exact ownership
- * token this process claimed. The token matters during SIGTERM: an old
- * container must not backdate a row that a replacement has already reclaimed.
- */
-const runningJobs = new Map<string, string>();
-
-/**
- * Best-effort: ageing `started_at` on every job this worker is mid-flight
- * for, so the next worker after a redeploy can reclaim immediately. Called
- * from the SIGTERM/SIGINT handler. Failures are logged but don't block —
- * Docker's stop-timeout (10s by default) is our hard ceiling, and a stale-
- * window fallback still works in the worst case.
- */
-async function ageRunningJobsForFastHandoff(): Promise<void> {
-  if (runningJobs.size === 0) return;
-  const ownedJobs = Array.from(runningJobs, ([jobId, runToken]) => ({ jobId, runToken }));
-  const db = requireSupabaseAdmin(log);
-  // Far enough past that any STALE_JOB_MINUTES setting < 60min instantly
-  // counts these as stale. The next polling worker's claimStaleResumable()
-  // CAS will pick them up within ~5s.
-  const age = async () => {
-    const backdatedAt = new Date(Date.now() - 60 * 60_000).toISOString();
-    await Promise.all(
-      ownedJobs.map(({ jobId, runToken }) =>
-        db
-          .from('base_constructor_jobs')
-          .update({ started_at: backdatedAt })
-          .eq('id', jobId)
-          .eq('status', 'processing')
-          .eq('run_token', runToken),
-      ),
-    );
-  };
-  log(
-    'info',
-    `marking ${ownedJobs.length} in-flight job(s) for fast handoff after shutdown: ${ownedJobs.map(({ jobId }) => jobId).join(', ')}`,
-  );
-  await age();
-  // Второй проход. markShuttingDown() глушит будущие heartbeat'ы, но UPDATE,
-  // улетевший в PostgREST за миллисекунды ДО сигнала, может приземлиться уже
-  // после нашего backdate и снова сделать started_at свежим. Повтор через
-  // секунду оставляет последнее слово за нами и укладывается в docker
-  // stop-timeout (10s).
-  await sleep(1000);
-  await age();
-}
-
-/**
- * Атомарно подбирает один pending-job: UPDATE WHERE status=pending.
- * Если другой воркер успел раньше — UPDATE затронет 0 строк, claim вернёт null.
- */
-async function claimPendingJob(): Promise<ClaimedJob | null> {
-  const db = requireSupabaseAdmin(log);
-  const { data: pending } = await db
-    .from('base_constructor_jobs')
-    .select('id')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-  if (!pending) return null;
-
-  const runToken = randomUUID();
-  const { data: claimed } = await db
-    .from('base_constructor_jobs')
-    .update({
-      status: 'processing',
-      started_at: new Date().toISOString(),
-      run_token: runToken,
-    })
-    .eq('id', pending.id)
-    .eq('status', 'pending')
-    .select('id, run_token')
-    .maybeSingle();
-  return claimed?.id ? { jobId: claimed.id, runToken: claimed.run_token ?? runToken } : null;
-}
-
-/**
- * Атомарно подбирает один processing-job со старым `started_at` (≥STALE_JOB_MINUTES без heartbeat).
- *
- * Heartbeat — `started_at` обновляется в `updateJobProgress` при каждом тике
- * прогресса. Если 15+ минут не двигалось — promise умер, можно резумнуть.
- *
- * Защита от гонок: тот же CAS-паттерн с `lt('started_at', cutoff)` —
- * только первый воркер успешно bumps started_at, остальные видят свежий
- * timestamp и пропускают.
- */
-async function claimStaleResumable(): Promise<ClaimedJob | null> {
-  const db = requireSupabaseAdmin(log);
-  const cutoffIso = new Date(Date.now() - STALE_JOB_MINUTES * 60_000).toISOString();
-  const { data: stale } = await db
-    .from('base_constructor_jobs')
-    .select('id, current_step, total_steps, current_step_progress')
-    .eq('status', 'processing')
-    .lt('started_at', cutoffIso)
-    .order('started_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-  if (!stale) return null;
-
-  const runToken = randomUUID();
-  const { data: claimed } = await db
-    .from('base_constructor_jobs')
-    .update({
-      started_at: new Date().toISOString(),
-      run_token: runToken,
-    })
-    .eq('id', stale.id)
-    .eq('status', 'processing')
-    .lt('started_at', cutoffIso)
-    .select('id, run_token')
-    .maybeSingle();
-  if (!claimed) return null;
-
-  log(
-    'info',
-    `claiming stale job ${stale.id} for resume: step ${stale.current_step}/${stale.total_steps}, progress ${stale.current_step_progress}%`,
-  );
-  return { jobId: claimed.id, runToken: claimed.run_token ?? runToken };
-}
-
-/**
- * Пытается забрать pending → если нет, забирает stale processing.
- * Pending приоритетнее, чтобы новые задачи не ждали в очереди за резумами.
- */
-async function pollOnce(): Promise<boolean> {
-  if (running.size >= MAX_CONCURRENCY) {
-    await sleep(500);
-    return true; // занят — повторим скоро
-  }
-
-  let claimedJob = await claimPendingJob();
-  let isResume = false;
-  if (!claimedJob) {
-    claimedJob = await claimStaleResumable();
-    isResume = !!claimedJob;
-  }
-  if (!claimedJob) return false;
-  const { jobId, runToken } = claimedJob;
-
-  const task = (async () => {
-    log('info', `Running base-constructor job ${jobId}${isResume ? ' (RESUME)' : ''}`);
-    runningJobs.set(jobId, runToken);
-    try {
-      await runBaseConstructorJob(jobId, runToken);
-      log('info', `Finished base-constructor job ${jobId}`);
-    } catch (err) {
-      log('error', `base-constructor job ${jobId} crashed`, err);
-    } finally {
-      if (runningJobs.get(jobId) === runToken) runningJobs.delete(jobId);
-    }
-  })();
-  running.add(task);
-  void task.finally(() => running.delete(task));
-  return true;
-}
-
-/**
- * Suppress known undici body-parser assertion that crashes this worker
- * mid-job during `find_emails` (массовый скрейпинг сайтов через global fetch).
- *
- * Симптом (incident 2026-06-19, jobs 561a2018-... и d2786f96-...):
- *   AssertionError [ERR_ASSERTION]: assert(!this.paused)
- *     at Parser.finish (node:internal/deps/undici/undici:6157:9)
- *     at Socket.<anonymous> (node:internal/deps/undici/undici:6491:36)
- *     at Socket.emit (node:events:531:35)
- *
- * Что происходит: undici парсит ответ HTTP, AbortController таймаута дёргает
- * abort() в момент когда сокет уже эмитит 'end'. Внутренний инвариант
- * парсера (`!this.paused`) ломается, ассерт-throw летит ИЗ event-handler'a
- * сокета — `try/catch` вокруг `await fetch(...)` его не ловит, потому что
- * это не reject промиса, а синхронный uncaught в обработчике события.
- * Node по умолчанию валит весь процесс. Дальше:
- *   1. Контейнер падает на ~29% find_emails
- *   2. Docker restart policy поднимает новый процесс
- *   3. Через STALE_JOB_MINUTES мин stale-claim резюмит задачу с того же
- *      чекпоинта, попадаем на тот же URL → тот же ассерт → crash
- *   4. Infinite loop, base не дописывается никогда.
- *
- * Фикс: ловим именно этот ассерт на process-level — воркер пропускает
- * один битый запрос (его данные мы и так теряем) и продолжает. Любые
- * другие uncaught/unhandled остаются как были — `process.exit(1)`.
- *
- * Долгосрочно: вместе с этим хэндлером в emailScraper.fetchPage добавлен
- * outer Promise.race timeout — если promise `fetch(...)` после ассерта
- * не зарезолвится сам (видели в трейсе остановку body-stream'а), он
- * принудительно вернёт null и слот processInPool освободится.
- */
 async function main(): Promise<void> {
   log(
     'info',
-    `Starting BaseConstructor worker (pid=${process.pid}, concurrency=${MAX_CONCURRENCY}, stale=${STALE_JOB_MINUTES}min)`,
+    `Starting BaseConstructor worker (pid=${process.pid}, concurrency=${MAX_CONCURRENCY}, lease=${LEASE_SECONDS}s)`,
   );
   installUndiciAssertGuard(log);
   requireSupabaseAdmin(log);
   const shouldStop = setupGracefulShutdown(log);
 
-  // На SIGTERM/SIGINT — параллельно к стандартному `shouldStop`-флагу —
-  // отметить in-flight job'ы как «протухшие», чтобы следующий worker после
-  // redeploy подобрал их на ближайшем poll tick (~5 сек) вместо ожидания
-  // STALE_JOB_MINUTES. Эти listener'ы fire-and-forget'ят async UPDATE до
-  // того, как Docker'у выпадет SIGKILL по stop-timeout (обычно 10s).
-  // Бывшая логика без этого hand-off'а оставляла polza@polza.ru job
-  // 55d37e8e ждать почти час пока новый worker дотерпел stale cutoff.
-  let bumpFired = false;
-  const onShutdownSignal = (sig: string) => {
-    if (bumpFired) return; // дубль-сигнал — без работы
-    bumpFired = true;
-    // ПЕРВЫМ делом, синхронно: глушим heartbeat'ы. Иначе job'ы, которые
-    // доигрывают свои последние секунды до SIGKILL, перепишут started_at
-    // обратно на now() и отменят backdate ниже (инцидент 11.08.2026 —
-    // три job'а прождали полные STALE_JOB_MINUTES вместо ~5 секунд).
-    markShuttingDown();
-    log('info', `${sig} received — ageing in-flight job(s) for fast handoff`);
-    void ageRunningJobsForFastHandoff().catch((err) => {
-      log('error', 'failed to age in-flight jobs during shutdown', err);
-    });
-  };
-  process.on('SIGTERM', () => onShutdownSignal('SIGTERM'));
-  process.on('SIGINT', () => onShutdownSignal('SIGINT'));
+  const runner = createJobRunner<{ id: string }, never>({
+    table: 'base_constructor_jobs',
+    workerId: WORKER_ID,
+    statuses: { pending: 'pending', running: 'processing', done: 'completed', failed: 'failed' },
+    leaseSeconds: LEASE_SECONDS,
+    concurrency: MAX_CONCURRENCY,
+    manageTerminalStatus: false,
+    claimPatch: () => ({ started_at: new Date().toISOString() }),
+    failedPatch: (reason) => ({ error_message: reason, completed_at: new Date().toISOString() }),
+    log,
+    run: async (job, ctx) => {
+      log('info', `Running base-constructor job ${job.id}`);
+      await runBaseConstructorJob(job.id, ctx.runToken);
+      log('info', `Finished base-constructor job ${job.id}`);
+    },
+  });
 
-  // NB: startup recovery нам не нужен. processing-задачи без heartbeat
-  // (до stale cutoff) подберутся claimStaleResumable() на следующих тиках —
-  // и любая реплика, которая первой провернёт CAS, возьмёт её.
-  // Если перезапустилась в момент когда задача только-только стартовала
-  // (started_at свежий), мы её не подберём пока не пройдёт STALE_JOB_MINUTES,
-  // но это безопасный trade-off: лучше подождать чем подобрать живую.
+  let stopFired = false;
+  for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+    process.once(sig, () => {
+      if (stopFired) return;
+      stopFired = true;
+      // markShuttingDown синхронно, ДО любой async-работы: shutdown() тоже
+      // ставит этот флаг, но полагаться на то, что он стоит до первого await
+      // внутри библиотеки, нельзя — от этого зависит heartbeat конструктора
+      // баз (updateJobProgress перестаёт трогать started_at), а он живёт в
+      // другом модуле и крутится всё время docker stop grace. Вызов
+      // идемпотентный, флаг односторонний — лишним он быть не может.
+      markShuttingDown();
+      log('info', `${sig} received — releasing leases for fast handoff`);
+      void runner.shutdown().catch((err) => log('error', 'shutdown failed', err));
+    });
+  }
 
   await pollLoop({
     log,
     pollIntervalMs: POLL_INTERVAL_MS,
     shouldStop,
-    pollOnce,
+    pollOnce: () => runner.pollOnce(),
     realtimeTables: ['base_constructor_jobs'],
   });
+  await runner.shutdown();
 }
 
 main().catch((err) => {
