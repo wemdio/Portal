@@ -1,20 +1,23 @@
 /**
  * @jest-environment node
  *
- * Locks the redeploy fast-handoff fix (incident 11.08.2026, jobs b35d5785 /
+ * Locks the shutdown heartbeat guard (incident 11.08.2026, jobs b35d5785 /
  * 8b198c11 / 5c8c1dd1).
  *
- * What broke: on SIGTERM the worker backdates `started_at` of its in-flight
- * jobs (ageRunningJobsForFastHandoff) so the next replica reclaims them on the
- * next poll tick instead of waiting BASE_CONSTRUCTOR_STALE_MINUTES. But the
- * jobs keep running for the whole Docker stop grace (~10s) and their heartbeat
- * — `updateJobProgress` — rewrote `started_at` back to now, undoing the
- * backdate. All three jobs of the 15:10 deploy waited the full 15 minutes and
+ * What broke back then: handoff to the next replica went through backdating
+ * `started_at`, but the jobs keep running for the whole Docker stop grace and
+ * their heartbeat — `updateJobProgress` — rewrote `started_at` back to now,
+ * undoing it. All three jobs of the 15:10 deploy waited the full 15 minutes and
  * tripped the "Долго висит" monitor at 15:25.
  *
- * The fix: once the process is marked as shutting down, the heartbeat stops
- * touching `started_at` (progress is still recorded), so the backdate is the
- * last word.
+ * Handoff now goes through the lease (`lease_until`, lib/jobs/lifecycle.ts),
+ * which the heartbeat never touches — but the guard still matters, now for the
+ * readers of `started_at`: the health monitor and the lease's stall threshold.
+ * A process that keeps writing "I am alive" until SIGKILL hides the job's
+ * standstill from both.
+ *
+ * The guard: once the process is marked as shutting down, the heartbeat stops
+ * touching `started_at`; progress itself is still recorded.
  */
 
 import { updateJobProgress } from '@/lib/tools/baseConstructorWorker';
@@ -79,7 +82,8 @@ const supa = jest.requireMock('@/lib/supabaseAdmin').supabaseAdmin as {
   __getRow: () => Record<string, unknown>;
 };
 
-/** What ageRunningJobsForFastHandoff writes on SIGTERM (now - 60min). */
+/** Any timestamp older than the stall threshold — stands for a job that has
+ *  not moved for a while; the guard must leave it exactly as it is. */
 const BACKDATED = new Date(Date.now() - 60 * 60_000).toISOString();
 
 beforeEach(() => {
@@ -102,8 +106,8 @@ describe('base-constructor heartbeat — redeploy fast handoff', () => {
     markShuttingDown(); // SIGTERM arrived; backdate already written
     await updateJobProgress('j1', 1, 'dedup_full', 40);
     const row = supa.__getRow();
-    // The backdate must survive — otherwise the next replica waits the full
-    // BASE_CONSTRUCTOR_STALE_MINUTES instead of reclaiming on the next tick.
+    // The old timestamp must survive — otherwise a stopping process reports
+    // progress it is not making, to the monitor and to the lease alike.
     expect(row.started_at).toBe(BACKDATED);
     // Progress itself is still worth recording — resume restarts from it.
     expect(row.current_step_progress).toBe(40);

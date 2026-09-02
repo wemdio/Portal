@@ -326,16 +326,15 @@ fi
 # Зачем вообще (инцидент 11.08.2026, деплой 15:10): всё, чего нет в этом
 # скрипте, деплой убивает через force_rm_svc → `docker rm -f`, то есть
 # SIGKILL'ом без сигнала. Обработчик SIGTERM в app/worker/baseConstructor.ts
-# (ageRunningJobsForFastHandoff) при этом не выполняется, in-flight job'ы не
-# помечаются осиротевшими, и соседняя реплика подбирает их только по
-# BASE_CONSTRUCTOR_STALE_MINUTES — 15 минут простоя на ровном месте плюс
-# ложная тревога «Долго висит» в мониторе.
+# при этом не выполняется, аренда (lease_until) остаётся живой, и соседняя
+# реплика подбирает задачу только когда та истечёт — BASE_CONSTRUCTOR_LEASE_SECONDS
+# (300 с) простоя на ровном месте плюс риск ложной тревоги «Долго висит».
 #
 # Почему не в общий список выше: 15-секундный таймаут × 12 реплик = +180с к
 # каждому деплою, а ждать тут нечего. Задача НЕ должна доиграть до конца —
 # она резюмится с чекпоинта в другой реплике; хэндлеру нужно ~2 секунды
-# (UPDATE + повторный UPDATE через секунду). Останавливаем параллельно,
-# так весь шаг стоит ~5 секунд.
+# (два прохода освобождения аренды с паузой в секунду). Останавливаем
+# параллельно, так весь шаг стоит ~5 секунд.
 if should_drain_baseconstructor_workers; then
   bc_containers=(
     "portal-worker-baseconstructor"
@@ -358,11 +357,13 @@ if should_drain_baseconstructor_workers; then
   done
   wait
 
-  # The worker-side shutdown guard normally ages each processing job before exit.
-  # Keep a deployment-side backstop after every replica has stopped so a failed
-  # signal handler or database request cannot leave a fresh heartbeat behind.
+  # The worker-side shutdown guard normally releases the lease of each in-flight
+  # job before exit. Keep a deployment-side backstop after every replica has
+  # stopped so a failed signal handler or database request cannot leave a live
+  # lease behind: a null lease_until is exactly what makes a processing row
+  # claimable again on the next poll (app/src/lib/jobs/lifecycle.ts).
   if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
-    base_constructor_handoff_code="$(patch_rows "base_constructor_jobs" "status=eq.processing" '{"started_at":"1970-01-01T00:00:00Z"}')"
+    base_constructor_handoff_code="$(patch_rows "base_constructor_jobs" "status=eq.processing" '{"lease_until":null}')"
     if [[ "$base_constructor_handoff_code" =~ ^(200|204)$ ]]; then
       echo "[drain] base_constructor_jobs: processing jobs marked for immediate resume"
     else

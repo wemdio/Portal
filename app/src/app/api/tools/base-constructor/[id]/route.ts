@@ -32,11 +32,17 @@ async function autoCompleteIfStuck(jobId: string): Promise<void> {
   const FINAL_STUCK_AFTER_MS = 2 * 60_000;
   const { data: row } = await admin
     .from('base_constructor_jobs')
-    .select('id, status, current_step, current_step_key, total_steps, current_step_progress, started_at, run_token, data')
+    .select('id, status, current_step, current_step_key, total_steps, current_step_progress, started_at, run_token, lease_until, data')
     .eq('id', jobId)
     .single();
   if (!row) return;
   if (row.status !== 'processing') return;
+  // Живая аренда — значит у задачи есть исполнитель, который её вот-вот
+  // допишет сам. Финальный блок (сборка и выгрузка результата) законно идёт
+  // дольше двух минут, и без этой проверки роут завершал бы задачу из-под
+  // работающего воркера. Ограждение по run_token от этого не спасает: жетон
+  // в строке тот же самый, он же и подставляется в UPDATE ниже.
+  if (row.lease_until && new Date(row.lease_until).getTime() > Date.now()) return;
   if ((row.current_step_progress ?? 0) < 100) return;
   // Legacy validate workers could publish 100 before their filtered result was
   // durable. Never auto-complete that ambiguous checkpoint in the API; the

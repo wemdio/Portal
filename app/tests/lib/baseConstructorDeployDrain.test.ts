@@ -56,7 +56,9 @@ describe('BaseConstructor deploy drain', () => {
     expect(drainWorker).toContain(
       'patch_rows "base_constructor_jobs" "status=eq.processing"',
     );
-    expect(drainWorker).toContain('"started_at":"1970-01-01T00:00:00Z"');
+    // Освобождение аренды, а не backdate started_at: подбирает задачу теперь
+    // фильтр по lease_until (app/src/lib/jobs/lifecycle.ts).
+    expect(drainWorker).toContain('\'{"lease_until":null}\'');
 
     const stopIndex = drainWorker.indexOf('for c in "${bc_containers[@]}"');
     const waitIndex = drainWorker.indexOf('\n  wait', stopIndex);
