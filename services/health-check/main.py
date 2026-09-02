@@ -1271,8 +1271,14 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
         "portal-worker-hh",
     ),
     JobMonitorSpec(
+        # Контейнер здесь portal, а не portal-worker-enrich: эту очередь никогда
+        # не обслуживал воркер обогащения. runLeadImportJob запускается прямо из
+        # маршрутов Next.js (api/tools/cis-leads/import и .../jobs), а
+        # единственный воркер, который её знает, — ветка WORKER_KIND=all в
+        # worker/index.ts, а она на проде не поднимается. Дежурный по прежней
+        # подсказке шёл читать логи контейнера, где этой задачи нет вовсе.
         "lead_import_jobs", "Импорт / парсинг лидов", ("pending", "running"),
-        ("total_rows", "processed_rows", "enrichment_progress"), "portal-worker-enrich",
+        ("total_rows", "processed_rows", "enrichment_progress"), "portal",
     ),
     JobMonitorSpec(
         "lpr_jobs", "LPR Discovery", ("pending", "running"),
@@ -1305,11 +1311,22 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
         "portal-worker-tg-parser",
     ),
     JobMonitorSpec(
+        # updated_at здесь — пульс ПРОЦЕССА, а не задачи, и это осознанно.
+        # Триггера на таблице нет, но tgScanWorker раз в 60 с делает пустой
+        # updateJob(jobId, {}), который штампует updated_at (это добавлено
+        # намеренно, чтобы markStaleJobs не убивал скан, ждущий квоту Groq).
+        # Значит «Долго висит» ловит здесь только мёртвый или зависший процесс,
+        # а не стоящую задачу у живого воркера. Менять на отпечаток прогресса
+        # нельзя без разговора: ожидание квоты — штатный простой на часы.
         "tg_scan_jobs", "Telegram-сканер", ("pending", "running"),
         ("scanned", "videos_found", "completed", "errors"),
         "portal-worker-tg-transcribe", updated_column="updated_at",
     ),
     JobMonitorSpec(
+        # Как и у скана выше: updated_at — пульс процесса. Триггера нет, но
+        # writeHeartbeat в worker/tgTranscribe.ts штампует updated_at по таймеру
+        # (раз в 30 с) независимо от того, сдвинулась ли стадия. progress_sql
+        # ниже поэтому работает на текст алерта, а не на порог простоя.
         "tg_transcribe_jobs", "Telegram-транскрибация", ("pending", "running"),
         ("payload",), "portal-worker-tg-transcribe", updated_column="updated_at",
         owner_column=None,
