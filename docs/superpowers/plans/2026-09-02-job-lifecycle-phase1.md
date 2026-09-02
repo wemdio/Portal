@@ -229,10 +229,14 @@ function makeFakeDb(initial: Row[]) {
 const statuses = { pending: 'pending', running: 'running', done: 'done', failed: 'failed' };
 const log = () => {};
 
-function makeRunner(db: ReturnType<typeof makeFakeDb>, run: (job: Row, ctx: JobContext<Row>) => Promise<void>, extra: Partial<Parameters<typeof createJobRunner>[0]> = {}) {
+function makeRunner(
+  db: ReturnType<typeof makeFakeDb>,
+  run: (job: Row, ctx: JobContext<Row>) => Promise<void>,
+  extra: Record<string, unknown> = {},
+) {
   return createJobRunner<Row & { id: string }, Row>({
     table: 'jobs',
-    workerId: extra.workerId ?? 'w1',
+    workerId: 'w1',
     statuses,
     leaseSeconds: 60,
     maxAttempts: 3,
@@ -241,7 +245,7 @@ function makeRunner(db: ReturnType<typeof makeFakeDb>, run: (job: Row, ctx: JobC
     log,
     run: run as never,
     ...extra,
-  });
+  } as never);
 }
 
 /** Отпускает microtask-очередь, чтобы run()/finally успели отработать. */
