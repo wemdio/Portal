@@ -219,14 +219,15 @@ describe('summarizePaymentMonth', () => {
     }));
   });
 
-  it('keeps cost requests out of the 75/40 thousand one-time budget', () => {
+  it('counts a recorded cost once in its actual paid month, outside the 75/40 thousand budget', () => {
     const summary = summarizePaymentMonth([
       payment({
         amount: 120_000,
-        status: 'approved',
+        status: 'paid',
         budgetScope: 'costs',
         costCategory: 'instantly',
-        expectedPaymentOn: '2026-09-10',
+        expectedPaymentOn: '2026-08-31',
+        paidOn: '2026-09-01',
       }),
     ], '2026-09', { asOf: '2026-09-10' });
 
@@ -234,15 +235,16 @@ describe('summarizePaymentMonth', () => {
       limit: 75_000,
       usedOneTime: 0,
       remaining: 75_000,
+      paidAll: 120_000,
     }));
     expect(summary.costBudget).toEqual(expect.objectContaining({
       limit: 650_000,
-      paid: 0,
-      reserved: 120_000,
+      paid: 120_000,
+      reserved: 0,
       used: 120_000,
       remaining: 530_000,
     }));
-    expect(summary.costBudget.byCategory.instantly).toEqual({ paid: 0, reserved: 120_000 });
+    expect(summary.costBudget.byCategory.instantly).toEqual({ paid: 120_000, reserved: 0 });
   });
 
   it('treats calendar «keep» as mail reserve before billing and paid fact on the billing date', () => {
