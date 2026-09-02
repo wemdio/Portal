@@ -23,10 +23,10 @@
  *      из конфига). Ждём, пока worker-baseconstructor доработает. Финальную
  *      сетку раскладываем обратно по сегментам через колонку id (= twogis_id).
  *   5. measure_only → журналируем воронку и ВЫХОДИМ (без заливки, без seen).
- *      Иначе per-сегментно: лиды → дедуп против уже лежащих в кампании сегмента
+ *      Иначе: лиды → дедуп против всех Roistat-кампаний клиента
  *      → appendLeadsToClientCampaign. Сегмент без instantly_campaign_id
  *      пропускаем (лог + воронка). markSeen — ТОЛЬКО для компаний, чей ≥1
- *      контакт успешно залит (at-least-once: сбой append → компания ретраится).
+ *      контакт успешно залит либо уже подтверждён в кампании клиента.
  *   6. Финализируем run-строку: status completed/failed (CHECK constraint
  *      миграции: running/completed/failed) + funnel jsonb
  *      ({ perSegment: {...}, total: {...} }) для дашборда.
@@ -58,13 +58,14 @@ import { appendLeadsToClientCampaign, fetchExistingCampaignEmails } from '@/lib/
 import { getBlockedEmailSet, filterBlockedLeads } from '@/lib/clientBlocklist/blockedContacts';
 import { extractEmail } from '@/lib/tools/dfybUtils';
 import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
-import { loadGisSignalConfig, loadGisSignalSegments, type GisSignalSegment } from './config';
+import { loadGisSignalConfig, loadGisSignalSegments } from './config';
 import { getLatestTwoGisSnapshotId, pullSegmentCandidates, type SegmentCandidate } from './segments';
 import { markSeen } from './seenCompanies';
 import { detectOutreachSignals, emptySignals, type OutreachSignalsResult } from './signals';
-import { companiesToGrid, gridToLeadPayloads } from './gridMapping';
+import { collectCompanyEmails, companiesToGrid, gridToLeadPayloads } from './gridMapping';
 import { applyHardReject, computeSegmentScore, getSegmentScoringProfile } from './scoring';
 import { createStallWatchdog } from './runGuards';
+import { partitionKnownClientCompanies, reserveFreshClientLeads } from './uploadPolicy';
 import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 
 /** Конкурентность проверки сайтов детектором сигналов. */
@@ -153,6 +154,15 @@ function domainOf(url: string): string | null {
   }
 }
 
+function candidateToSeenRow(candidate: SegmentCandidate) {
+  return {
+    twogis_id: candidate.twogisId,
+    domain: domainOf(candidate.site),
+    company_name: candidate.name || null,
+    segment_key: candidate.segmentKey,
+  };
+}
+
 /** Ограниченная конкурентность: пул воркеров по индексу, порядок результатов сохранён. */
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -178,6 +188,7 @@ function signalFailResult(note: string): OutreachSignalsResult {
   return {
     signals: emptySignals(),
     signalsCount: 0,
+    emails: [],
     note,
     ok: false,
   };
@@ -420,6 +431,24 @@ export async function runGisSignalPipeline(
       await finishRun({ status: 'completed', funnel });
       return { ...empty, runId, status: 'completed' };
     }
+    if (!measureOnly && !supabaseInstantly) {
+      throw new Error('supabaseInstantly unavailable — клиентский дедуп и заливка остановлены');
+    }
+
+    // Читаем клиентский дедуп параллельно сетевой проверке сайтов. Ошибку
+    // разворачиваем в значение, чтобы долгий signal-pool не держал rejected
+    // promise без обработчика; проверяем результат ДО архива сигналов.
+    const clientCampaignIds = Array.from(new Set(
+      segments
+        .map((segment) => segment.instantly_campaign_id)
+        .filter((campaignId): campaignId is string => !!campaignId),
+    ));
+    const knownClientEmailsLoad: Promise<{ emails: Set<string>; error: unknown | null }> = measureOnly
+      ? Promise.resolve({ emails: new Set<string>(), error: null })
+      : fetchExistingCampaignEmails(clientUserId, clientCampaignIds).then(
+          (emails) => ({ emails, error: null }),
+          (error: unknown) => ({ emails: new Set<string>(), error }),
+        );
 
     // 4. Сигнальная квалификация (конкурентность SIGNAL_CHECK_CONCURRENCY).
     //    Сбой одной компании не роняет прогон: пишем fail-строку с note.
@@ -463,6 +492,18 @@ export async function runGisSignalPipeline(
     // Итоговый heartbeat сразу после пула — граница «signals done → archive»
     // теперь всегда видна в логе (в инциденте лог затих именно здесь).
     tlog(`[signals] checked ${candidates.length}/${candidates.length} (elapsed ${minutesSince(signalsStartedAt)}min)`);
+
+    const knownClientEmailsResult = await knownClientEmailsLoad;
+    if (knownClientEmailsResult.error) {
+      const err = knownClientEmailsResult.error;
+      throw new Error(
+        `не удалось прочитать кампании клиента для дедупа: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const knownClientEmails = knownClientEmailsResult.emails;
+    if (!measureOnly) {
+      tlog(`Дедуп клиента: ${knownClientEmails.size} email из ${clientCampaignIds.length} кампаний`);
+    }
 
     // 4a. СКОРИНГ: у сегментов с профилем (legal) считаем взвешенный скор
     //     0–100 и грейд по каждой компании — до архива, чтобы записать туда.
@@ -572,12 +613,43 @@ export async function runGisSignalPipeline(
     const qualifiedPairs = signalOkPairs.filter(
       (p) => !requireOnlineSegments.has(p.cand.segmentKey) || p.signals.onlineFormat?.hit === true,
     );
-    const qualified = qualifiedPairs.map((p) => p.cand);
     for (const p of qualifiedPairs) funnel.perSegment[p.cand.segmentKey].onlineOk += 1;
-    funnel.total.onlineOk = qualified.length;
+    funnel.total.onlineOk = qualifiedPairs.length;
     if (requireOnlineSegments.size > 0) {
-      tlog(`Онлайн-гейт (${Array.from(requireOnlineSegments).join(', ')}): ${qualified.length}/${signalOkPairs.length}`);
+      tlog(`Онлайн-гейт (${Array.from(requireOnlineSegments).join(', ')}): ${qualifiedPairs.length}/${signalOkPairs.length}`);
     }
+
+    if (qualifiedPairs.length === 0) {
+      await finishRun({ status: 'completed', funnel });
+      return {
+        ...empty,
+        runId,
+        status: 'completed',
+        pulled: candidates.length,
+        signalsOk: signalOkPairs.length,
+        onlineOk: 0,
+      };
+    }
+
+    // Загружаем email всех Roistat-кампаний клиента ОДИН раз и уже здесь
+    // убираем компании, у которых сигнальный проход нашёл только известные
+    // адреса. Так они не попадают в повторный crawl/SMTP-валидацию конструктора.
+    let constructorPairs = qualifiedPairs;
+    if (!measureOnly) {
+      const partition = partitionKnownClientCompanies(
+        qualifiedPairs,
+        knownClientEmails,
+        (pair) => collectCompanyEmails(pair.cand, pair.signals),
+      );
+      constructorPairs = partition.fresh;
+      if (partition.duplicates.length > 0) {
+        currentStage = 'seen';
+        await markSeen(partition.duplicates.map((pair) => candidateToSeenRow(pair.cand)));
+        tlog(`Дедуп клиента до конструктора: -${partition.duplicates.length} → ${constructorPairs.length}`);
+      }
+    }
+
+    const qualified = constructorPairs.map((pair) => pair.cand);
 
     if (qualified.length === 0) {
       await finishRun({ status: 'completed', funnel });
@@ -587,13 +659,14 @@ export async function runGisSignalPipeline(
         status: 'completed',
         pulled: candidates.length,
         signalsOk: signalOkPairs.length,
+        onlineOk: qualifiedPairs.length,
       };
     }
 
     // 5. Сетка → ОДИН base_constructor_jobs. Раскладка по сегментам после
     //    прогона — через колонку id (twogis_id), позиции строк не сохраняются.
     const qualifiedById = new Map<string, { cand: SegmentCandidate; signals: OutreachSignalsResult }>();
-    for (const p of qualifiedPairs) {
+    for (const p of constructorPairs) {
       qualifiedById.set(p.cand.twogisId, p);
     }
     // base_constructor_jobs.data — тоже jsonb: та же санитизация, что у архива
@@ -601,12 +674,13 @@ export async function runGisSignalPipeline(
     // всех сайтов).
     const grid = stripUnstorableJsonChars(
       companiesToGrid(
-        qualifiedPairs.map((p) => ({
+        constructorPairs.map((p) => ({
           candidate: p.cand,
           signals: p.signals,
           score: p.scoring?.score ?? null,
           grade: p.scoring?.grade ?? null,
         })),
+        knownClientEmails,
       ),
     );
     for (const c of qualified) funnel.perSegment[c.segmentKey].bcIn += 1;
@@ -720,11 +794,13 @@ export async function runGisSignalPipeline(
       };
     }
 
-    // 8. Per-сегментная заливка. Дедуп против СВОЕЙ кампании делаем сами
+    // 8. Per-сегментная заливка. Дедуп против ВСЕХ Roistat-кампаний клиента
     //    (skip_if_in_campaign=false — флаг у Instantly воркспейс-широкий и
-    //    резал бы по пересечению с чужими клиентскими кампаниями). Fail-soft:
-    //    не смогли прочитать кампанию — шлём без дедупа.
-    //    markSeen — ТОЛЬКО после успешного append (at-least-once).
+    //    резал бы по пересечению с чужими клиентскими кампаниями). Список
+    //    читаем один раз до первой заливки; сбой чтения = fail-closed, чтобы
+    //    транспортная ошибка не создала дубли.
+    //    markSeen после успешного append; найденные до конструктора дубли уже
+    //    помечены выше, потому что наличие в клиентской кампании подтверждено.
     //
     //    Чёрный список клиента применяем САМИ тем же helper'ом, что внутри
     //    appendLeadsToClientCampaign (getBlockedEmailSet/filterBlockedLeads):
@@ -746,19 +822,13 @@ export async function runGisSignalPipeline(
       }
       const campaignId = segment.instantly_campaign_id;
 
-      let existingEmails = new Set<string>();
-      try {
-        existingEmails = await fetchExistingCampaignEmails(clientUserId, [campaignId]);
-      } catch (err) {
-        tlog(`[${segment.key}] не удалось прочитать кампанию (${err instanceof Error ? err.message : String(err)}) — шлём без дедупа`);
-      }
-      const freshLeads = leads.filter((l) => !existingEmails.has(l.email.trim().toLowerCase()));
-      if (freshLeads.length < leads.length) {
-        tlog(`[${segment.key}] дедуп против кампании: -${leads.length - freshLeads.length} → ${freshLeads.length}`);
-      }
-      const { kept: sendLeads, blockedCount } = filterBlockedLeads(freshLeads, blockedEmails);
+      const { kept: allowedLeads, blockedCount } = filterBlockedLeads(leads, blockedEmails);
       if (blockedCount > 0) {
-        tlog(`[${segment.key}] блок-лист клиента: -${blockedCount} → ${sendLeads.length}`);
+        tlog(`[${segment.key}] блок-лист клиента: -${blockedCount} → ${allowedLeads.length}`);
+      }
+      const sendLeads = reserveFreshClientLeads(allowedLeads, knownClientEmails);
+      if (sendLeads.length < allowedLeads.length) {
+        tlog(`[${segment.key}] дедуп клиента: -${allowedLeads.length - sendLeads.length} → ${sendLeads.length}`);
       }
       if (sendLeads.length === 0) continue;
 
@@ -806,12 +876,7 @@ export async function runGisSignalPipeline(
         const seenRows = Array.from(seenIds)
           .map((id) => qualifiedById.get(id))
           .filter((x): x is { cand: SegmentCandidate; signals: OutreachSignalsResult } => !!x)
-          .map(({ cand }) => ({
-            twogis_id: cand.twogisId,
-            domain: domainOf(cand.site),
-            company_name: cand.name || null,
-            segment_key: cand.segmentKey,
-          }));
+          .map(({ cand }) => candidateToSeenRow(cand));
         await markSeen(seenRows);
         currentStage = 'upload';
       }

@@ -1,9 +1,10 @@
 /**
  * Дедуп-журнал gisSignalOutreach (gis_signal_seen_companies).
  *
- * Ключ — twogis_id карточки 2GIS. Компания попадает сюда ТОЛЬКО после
- * успешного append хотя бы одного её контакта в Instantly (at-least-once:
- * пока append не случился, компания остаётся eligible на следующих прогонах).
+ * Ключ — twogis_id карточки 2GIS. Компания попадает сюда после успешного
+ * append хотя бы одного контакта либо когда найденный адрес уже подтверждён
+ * в одной из Roistat-кампаний клиента. При сбое append без подтверждённого
+ * адреса компания остаётся eligible на следующих прогонах.
  * Окна ре-контакта нет: 2GIS-карточка, однажды залитая, больше не трогается.
  *
  * Второй фильтр дедупа — архив проверок gis_signal_company_signals: туда
@@ -34,6 +35,37 @@ const CHUNK = 500;
  */
 const SELECT_CHUNK = 100;
 
+type SeenCompanyLookupColumn = 'twogis_id' | 'domain';
+
+async function filterValuesMissingFromSeenCompanies(
+  values: string[],
+  column: SeenCompanyLookupColumn,
+): Promise<Set<string>> {
+  const unique = Array.from(new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean)));
+  if (unique.length === 0) return new Set();
+  if (!supabaseAdmin) return new Set();
+
+  const seen = new Set<string>();
+  for (let i = 0; i < unique.length; i += SELECT_CHUNK) {
+    const slice = unique.slice(i, i + SELECT_CHUNK);
+    const { data, error } = await supabaseAdmin
+      .from('gis_signal_seen_companies')
+      .select(column)
+      .in(column, slice);
+    if (error) {
+      console.warn(
+        `[gis-signal][seen] ${column} lookup failed (chunk ${i / SELECT_CHUNK + 1}, ${slice.length} values): ${error.message} — fail-closed, весь батч отсеян`,
+      );
+      return new Set();
+    }
+    for (const row of (data ?? []) as unknown as Array<Record<SeenCompanyLookupColumn, string | null>>) {
+      const value = row[column]?.trim().toLowerCase();
+      if (value) seen.add(value);
+    }
+  }
+  return new Set(unique.filter((value) => !seen.has(value)));
+}
+
 /**
  * Из переданных twogis_id возвращает те, которых НЕТ в журнале (unseen-подмножество
  * входа). Батчевый lookup: `in` чанками по SELECT_CHUNK, чтобы не упираться в лимит
@@ -41,28 +73,16 @@ const SELECT_CHUNK = 100;
  * тянем, прогон ретраится завтра — лучше пропустить день, чем пере-залить).
  */
 export async function filterUnseenIds(ids: string[]): Promise<Set<string>> {
-  const unique = Array.from(new Set(ids.filter(Boolean)));
-  if (unique.length === 0) return new Set();
-  if (!supabaseAdmin) return new Set(); // fail-closed, см. шапку
+  return filterValuesMissingFromSeenCompanies(ids, 'twogis_id');
+}
 
-  const seen = new Set<string>();
-  for (let i = 0; i < unique.length; i += SELECT_CHUNK) {
-    const slice = unique.slice(i, i + SELECT_CHUNK);
-    const { data, error } = await supabaseAdmin
-      .from('gis_signal_seen_companies')
-      .select('twogis_id')
-      .in('twogis_id', slice);
-    if (error) {
-      console.warn(
-        `[gis-signal][seen] lookup failed (chunk ${i / SELECT_CHUNK + 1}, ${slice.length} ids): ${error.message} — fail-closed, весь батч отсеян`,
-      );
-      return new Set(); // fail-closed, см. шапку
-    }
-    for (const r of (data ?? []) as { twogis_id: string }[]) {
-      if (r.twogis_id) seen.add(r.twogis_id);
-    }
-  }
-  return new Set(unique.filter((id) => !seen.has(id)));
+/**
+ * Доменный дедуп поверх 2GIS id: одна компания может иметь несколько карточек
+ * филиалов. Проверяем только корпоративные домены; shared-hosting отсеивается
+ * вызывающей стороной, чтобы не схлопнуть разные профили на одном сервисе.
+ */
+export async function filterUnseenDomains(domains: string[]): Promise<Set<string>> {
+  return filterValuesMissingFromSeenCompanies(domains, 'domain');
 }
 
 /** Окно повторной проверки отсеянных (дней). Залитые (seen) не трогаем никогда,
@@ -111,7 +131,7 @@ export async function filterRecentlyCheckedIds(
 /**
  * Upsert обработанных компаний чанками по 500, ignore-duplicates по twogis_id
  * (повторный прогон/гонка сегментов не должны перетирать first_seen_at).
- * Вызывается ТОЛЬКО после успешного append — см. pipelineRunner (at-least-once).
+ * Вызывается после успешного append или подтверждённого client-campaign дубля.
  */
 export async function markSeen(rows: SeenCompanyRow[]): Promise<void> {
   if (!supabaseAdmin || rows.length === 0) return;
