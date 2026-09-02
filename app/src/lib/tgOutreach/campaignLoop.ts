@@ -1572,6 +1572,23 @@ export async function runCampaignLoop(
   // so we no longer retry. Instead we track consecutive failures per account
   // and put chronic offenders on a 6h cooldown so the operator can act.
   const pagingFailureCounts = new Map<string, number>();
+
+  /**
+   * Сколько кругов подряд аккаунт не резолвнул ни одного ника из порции.
+   *
+   * Заморозка Telegram глушит аккаунту резолв юзернеймов и при этом не
+   * называется никак: в ошибке приходит обычное «юзернейм не найден», @SpamBot
+   * молчит (он отвечает только про спам-блок), в профиле флага нет. Отличить
+   * такой аккаунт от невезения с мёртвыми никами можно только по истории — на
+   * одной порции это неразличимо, поэтому счётчик живёт здесь, в круге.
+   *
+   * 02.09.2026 в ATOL-1 таких аккаунтов было пятнадцать из одной партии: за
+   * неделю ноль отправленных первых касаний при 205 отложенных, тогда как
+   * остальные восемнадцать рассылали с той же очереди.
+   */
+  const resolveBlockedRounds = new Map<string, number>();
+  /** После скольких пустых кругов подряд уводим аккаунт на паузу. */
+  const RESOLVE_BLOCKED_LIMIT = 2;
   // Stays true while we're inside a sleep_periods window so we can emit a
   // matching "сон закончился" line when it ends (otherwise users see only
   // the start of the silence and can't tell when work resumed).
@@ -2141,6 +2158,42 @@ export async function runCampaignLoop(
               'info',
               `Аккаунт ${account.session_name}: первое касание — отправлено ${ft.sent}, пропущено ${ft.skipped}, отложено ${ft.postponed}`,
             );
+          }
+
+          // Ушедшее сообщение доказывает, что резолв у аккаунта работает —
+          // счётчик пустых кругов обнуляем.
+          if (ft.sent > 0) resolveBlockedRounds.delete(account.id);
+          else if (ft.resolveBlocked) {
+            const blanks = (resolveBlockedRounds.get(account.id) ?? 0) + 1;
+            resolveBlockedRounds.set(account.id, blanks);
+            if (blanks >= RESOLVE_BLOCKED_LIMIT) {
+              const detail =
+                `ВРЕМЕННОЕ ограничение — аккаунт не резолвит юзернеймы: ${blanks} круга подряд ` +
+                'ни один ник из порции не нашёлся, при том что другие аккаунты кампании с той же ' +
+                'очереди рассылают. Так выглядит заморозка Telegram: @SpamBot про неё не отвечает, ' +
+                'кода ошибки нет. Проверьте аккаунт в официальном приложении — при заморозке там ' +
+                'висит баннер с кнопкой обжалования.';
+              const parked = await parkAccountAfterLimit({
+                db,
+                account,
+                hours: tg.account_cooldown_hours,
+                reason: 'резолв юзернеймов не работает',
+                log,
+                // Бота не спрашиваем: он уже отвечал «ограничений нет» на
+                // каждом из этих кругов — про заморозку он не знает.
+                client: null,
+                inferred: { status: 'restricted', detail },
+              });
+              resolveBlockedRounds.delete(account.id);
+              if (parked.parked) {
+                log(
+                  'warning',
+                  `Аккаунт ${account.session_name}: ${detail} Аккаунт на паузе до ` +
+                    `${new Date(parked.untilIso).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}, ` +
+                    'контакты остаются в очереди нетронутыми.',
+                );
+              }
+            }
           }
         } catch (err) {
           // Первое касание не должно ронять круг: аутрич по существующим
