@@ -376,6 +376,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `app/worker/hh.ts`
 - Modify: `app/src/lib/parsers/hhArchive/runner.ts`
 - Modify: `app/src/lib/parsers/yandexDirect/runner.ts`
+- Modify: `services/health-check/main.py`
 - Modify: `docker-compose.prod.yml`
 - Modify: `drain-worker.sh`
 
@@ -414,23 +415,36 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 В обоих: передавать `ctx.signal` в паузы и запросы; при остановке выходить без терминальной записи; терминальные записи ограничить `run_token`.
 
-- [ ] **Step 3: Compose и drain**
+- [ ] **Step 3: Монитор здоровья — В ТОМ ЖЕ КОММИТЕ, не отдельным**
+
+`services/health-check/main.py`, записи `JobMonitorSpec` для `hh_archive_jobs` и `yandex_direct_jobs`: снять `updated_column="updated_at"` у обеих и добавить `"processing"` в оба набора `active_statuses`.
+
+Почему это нельзя откладывать. У обеих таблиц есть безусловный триггер на `updated_at` (`trg_hh_archive_jobs_updated_at`, `supabase/migrations/20260516_0001:105`; `trg_yandex_direct_jobs_updated_at`, `20260517_0001:113`) — он срабатывает на ЛЮБОМ `UPDATE` строки. А продление аренды — это тоже `UPDATE` строки, раз в `аренда/3`. То есть с момента перевода `updated_at` у живого исполнителя свеж всегда, даже когда задача не сдвинулась ни на чанк: `activity_secs` в мониторе никогда не дорастает до порога, и алерт «Долго висит» для этих двух очередей молча выключается. Без `updated_column` монитор считает простой по отпечатку прогресса (колонки в самой спецификации) — этот путь уже работает на бою для `search_parser_jobs` и `yandex_maps_jobs`.
+
+Ту же ловушку проверяли на всех остальных спецификациях с `updated_column="updated_at"` — они безопасны, трогать их не нужно: у `website_inn_lookup_jobs`, `crypto_payment_jobs`, `large_score_jobs`, `tg_scan_jobs`, `tg_transcribe_jobs` триггера на `updated_at` нет вовсе; у `parser_jobs` (задача 5) нет ни триггера, ни `updated_column`; `base_constructor_jobs` смотрит на `started_at`, а его продление аренды не пишет.
+
+Статусы правятся здесь же и по той же причине — иначе эти две очереди становятся ненаблюдаемыми дважды. Сегодня монитор не видит их выполнение вовсе (`active_statuses` = `("pending","running")`, а воркеры пишут `processing`), и снятие `updated_column` без добавления `processing` ничего бы не починило: считать простой стало бы не по чему, потому что строки в выборку не попадают.
+
+Прецедент, ради которого шаг вынесен в тот же коммит: при переводе Яндекс.Карт (задача 3) ровно это и обнаружилось — правка воркера без правки монитора оставляла бы очередь без единственного внешнего наблюдателя, и заметить это по логам было бы нечем.
+
+- [ ] **Step 4: Compose и drain**
 
 Сроки остановки для `worker-hh` привести к 30 секундам. Отдельно отметить в комментарии, что прежние 3 часа не соблюдались ни разу: скрипт остановки всегда бил через 15 секунд.
 
 `drain-worker.sh`: `hh_archive_jobs` и `yandex_direct_jobs` в `tracked_tables` отсутствуют — проверить и не трогать. Сервис `worker-hh` в `is_lifecycle_managed_worker` НЕ добавлять на этом шаге: он всё ещё обслуживает `parser_jobs`, которые переводятся в задаче 5.
 
-- [ ] **Step 4: Проверить**
+- [ ] **Step 5: Проверить**
 
 ```bash
 cd app && npm run typecheck:strict && npx jest tests/lib --silent
+cd services/health-check && python -c "import ast,sys; ast.parse(open('main.py',encoding='utf-8').read()); print('syntax ok')"
 ```
 Expected: чисто. Плюс esbuild на `worker/hh.ts`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add app/worker/hh.ts app/src/lib/parsers/hhArchive/runner.ts app/src/lib/parsers/yandexDirect/runner.ts docker-compose.prod.yml
+git add app/worker/hh.ts app/src/lib/parsers/hhArchive/runner.ts app/src/lib/parsers/yandexDirect/runner.ts services/health-check/main.py docker-compose.prod.yml
 git commit -m "feat(hh): архив вакансий и Яндекс.Директ на едином жизненном цикле
 
 Курсор по чанкам и по запросам вместо перезапуска с нуля; мьютексы в
@@ -509,18 +523,22 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 6: Монитор здоровья видит `processing`
+### Task 6: Монитор здоровья — сверка остальных спецификаций
 
-Найденный при разведке дефект, не связанный с переводом, но задевающий те же таблицы.
+Найденный при разведке дефект, не связанный с переводом.
+
+**`hh_archive_jobs` и `yandex_direct_jobs` здесь БОЛЬШЕ НЕ ТРОГАЕМ.** Обе спецификации (и `active_statuses` с `processing`, и снятие `updated_column`) правятся в задаче 4, в одном коммите с переводом их воркера, — иначе между коммитами эти очереди остаются без наблюдателя. Если задача 4 уже выполнена, проверить, что там это сделано, и на этом по ним закончить.
+
+Остаток задачи — сверка ВСЕХ ОСТАЛЬНЫХ спецификаций.
 
 **Files:**
 - Modify: `services/health-check/main.py`
 
-- [ ] **Step 1: Исправить наборы статусов**
+- [ ] **Step 1: Сверить наборы статусов у остальных таблиц**
 
-В `main.py` записи `JobMonitorSpec` для `hh_archive_jobs` и `yandex_direct_jobs` объявляют активные статусы `("pending", "running")`, тогда как воркеры пишут `processing`. Пока задача выполняется, монитор её не видит вовсе. Добавить `"processing"` в оба набора.
+Для каждой оставшейся таблицы сверить набор активных статусов с тем, что реально пишет соответствующий воркер, и перечислить в отчёте все расхождения. Исправлять только явные, не додумывая.
 
-Проверить остальные записи спецификаций тем же способом: для каждой таблицы сверить набор активных статусов с тем, что реально пишет соответствующий воркер, и перечислить в отчёте все расхождения. Исправлять только явные, не додумывая.
+Заодно проверить тем же способом ловушку `updated_at` (описана в задаче 4, Step 3): у спецификации с `updated_column="updated_at"` таблица не должна иметь безусловного триггера на эту колонку, если её воркер уже переехал на аренду. На момент составления плана проверены все и опасны только две — обе в задаче 4; шаг нужен на случай, если за время этапа добавились новые.
 
 - [ ] **Step 2: Проверить**
 
@@ -533,10 +551,11 @@ Expected: `syntax ok`.
 
 ```bash
 git add services/health-check/main.py
-git commit -m "fix(health-check): активные статусы архива HH и Яндекс.Директа
+git commit -m "fix(health-check): наборы активных статусов сверены с воркерами
 
-Воркеры пишут processing, а монитор ждал running — выполняющиеся задачи
-этих двух очередей не наблюдались вовсе.
+Сплошная сверка оставшихся очередей: где монитор ждал не тот статус,
+выполняющиеся задачи не наблюдались вовсе. Архив HH и Яндекс.Директ
+исправлены раньше, вместе с переводом их воркера.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```

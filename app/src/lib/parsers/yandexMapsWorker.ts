@@ -100,6 +100,19 @@ export interface YandexMapsRunContext {
 export type YandexMapsCheckpoint = { stage: 'collect' | 'parse'; done: number };
 
 /**
+ * Задача перестала быть нашей посреди шага, который сам по себе не умеет
+ * останавливаться (заливка каталога порциями). Единственный способ выйти из
+ * него — бросить: вызывающий код отличает это исключение от отказа задачи и
+ * НЕ пишет терминальный статус.
+ */
+class YandexMapsJobReclaimedError extends Error {
+  constructor() {
+    super('yandex maps job reclaimed or stopped');
+    this.name = 'YandexMapsJobReclaimedError';
+  }
+}
+
+/**
  * Одна ограждённая точка записи в строку задачи.
  *
  * Без ctx — поведение ровно как до переезда на жизненный цикл (жетона нет,
@@ -408,10 +421,20 @@ export async function runYandexMapsCollectLinks(jobId: string, ctx?: YandexMapsR
             processed_organizations: collected,
           }, ctx);
           // Порция каталога легла в базу — продлеваем аренду и обнуляем
-          // бюджет неудач. Владение здесь не проверяем: единственное, что
-          // осталось после этого колбэка, — терминальная запись, а она и так
-          // ограждена жетоном.
-          await ctx?.saveCheckpoint({ stage: 'collect', done: collected });
+          // бюджет неудач.
+          //
+          // И ОБЯЗАТЕЛЬНО слушаем ответ про владение. Заливка каталога — не
+          // «одна оставшаяся терминальная запись»: это лесенка порций, каждая
+          // из которых зовёт yandex_maps_catalog_fill_job. Если задачу забрал
+          // сосед или пришла остановка, продолжать лесенку значит лить строки
+          // в задачу, которой мы больше не владеем, параллельно с её новым
+          // владельцем. Останавливаться нечем, кроме исключения: сам шаг —
+          // один серверный SQL-вызов, отменить его на полпути нельзя, поэтому
+          // начатая порция дописывается, а следующая уже не начинается.
+          if (ctx) {
+            const stillOurs = await ctx.saveCheckpoint({ stage: 'collect', done: collected });
+            if (!stillOurs || interrupted()) throw new YandexMapsJobReclaimedError();
+          }
         },
       );
 
@@ -730,7 +753,9 @@ export async function runYandexMapsCollectLinks(jobId: string, ctx?: YandexMapsR
     // аренду отпустит библиотека, сбор продолжится с сохранённых ссылок.
     // Судим по СИГНАЛУ, а не по имени ошибки: AbortError прилетает и от
     // собственного 990-секундного таймаута запроса, и вот он как раз отказ.
-    if (interrupted()) {
+    // Отдельно — свой YandexMapsJobReclaimedError: им лесенка заливки каталога
+    // сообщает, что задача перестала быть нашей.
+    if (interrupted() || e instanceof YandexMapsJobReclaimedError) {
       await trace?.cancel('Interrupted');
       return;
     }

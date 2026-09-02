@@ -27,8 +27,13 @@ function pollOnceBody(): string {
   // переехал на единый жизненный цикл: ему нужен runner из замыкания.
   const start = SOURCE.indexOf('const pollOnce = async (');
   expect(start).toBeGreaterThan(-1);
-  const next = SOURCE.indexOf('\n  let stopFired', start + 1);
-  return SOURCE.slice(start, next === -1 ? undefined : next);
+  // Конец — закрывающая скобка самой стрелки (`\n  };` на её отступе), а не
+  // соседний код: привязка к чему-то за пределами pollOnce означала бы, что
+  // безобидное переименование в соседних строках молча расширяет срез до
+  // конца файла и превращает проверки ниже в поиск по всему воркеру.
+  const end = SOURCE.indexOf('\n  };', start + 1);
+  expect(end).toBeGreaterThan(start);
+  return SOURCE.slice(start, end);
 }
 
 describe('yandexmaps worker: фоновый обход не блокирует цикл опроса', () => {
