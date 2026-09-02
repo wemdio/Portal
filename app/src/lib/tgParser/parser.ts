@@ -301,7 +301,7 @@ async function userToParsed(
   };
 }
 
-export type ParseStopReason = 'contact_limit' | 'error';
+export type ParseStopReason = 'contact_limit' | 'error' | 'interrupted';
 
 export type ParseResult =
   | { status: 'ok'; users: ParsedUser[] }
@@ -503,6 +503,9 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
   const enrichProfile =
     opts.enrich_profile ?? String(process.env.TG_PARSER_ENRICH_PROFILE ?? '').trim().toLowerCase() === 'true';
   const allUsers = new Map<number, ParsedUser>();
+  // Подсадка из чекпойнта: без неё дедупликация и лимит max_contacts после
+  // перезапуска считались бы с нуля и набрали бы тех же людей заново.
+  for (const u of opts.initialUsers ?? []) allUsers.set(u.ID, u);
   const stopRef: { reason: ParseStopReason | null } = { reason: null };
   const mergeUser = buildMergeUser(opts, allUsers, stopRef);
   /** Источники, которые не открылись. Задачу валят только все разом. */
@@ -510,6 +513,7 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
 
   try {
     for (const link of opts.links) {
+      if (opts.signal?.aborted) { stopRef.reason = 'interrupted'; break; }
       if (stopRef.reason) break;
       const trimmed = String(link).trim();
       if (!trimmed) continue;
@@ -537,6 +541,13 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
 
         const idleGuard = new Promise<never>((_, reject) => {
           timer = setInterval(() => {
+            // Сигнал проверяем тем же таймером: этап живёт часами, и ждать его
+            // конца ради остановки — значит не уложиться в grace деплоя.
+            if (opts.signal?.aborted) {
+              stopRef.reason = 'interrupted';
+              reject(new Error('interrupted'));
+              return;
+            }
             if (Date.now() - lastBeat > idleMs) {
               reject(new Error(`обход источника (${stage}): нет движения ${Math.round(idleMs / 60_000)} мин`));
             }
@@ -547,6 +558,10 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
           await Promise.race([fn(() => { lastBeat = Date.now(); }), idleGuard]);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
+          // Прерывание — не провал этапа: этап не закончен, и отчитываться о
+          // нём как о завершённом нельзя. Просто выходим, дальше сработает
+          // проверка stopRef.reason и цикл прервётся.
+          if (msg === 'interrupted') return;
           if (!msg.includes('нет движения')) throw e;
           await report(opts, { link: trimmed, stage, phase: 'done', total: totalSoFar() });
         } finally {
@@ -580,6 +595,20 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
         const msg = e instanceof Error ? e.message : String(e);
         linkFailures.push({ link: trimmed, error: msg });
         await report(opts, { link: trimmed, stage: 'messages', phase: 'done', total: totalSoFar() });
+      }
+
+      // Источник закрыт: либо обошли все этапы, либо он не открылся и свою
+      // попытку израсходовал — повторять его после перезапуска незачем.
+      // Прерванный источник сюда не доходит: любой break по stopRef.reason
+      // уводит из цикла раньше, иначе недобранный источник пометился бы
+      // готовым и его люди пропали бы навсегда.
+      if (!stopRef.reason && opts.onLinkDone) {
+        try {
+          await opts.onLinkDone(trimmed, [...allUsers.values()]);
+        } catch {
+          // Сбой чекпойнта не должен ронять обход: в худшем случае задача
+          // переиграет этот источник, а не потеряет всю работу.
+        }
       }
     }
     await client.disconnect();

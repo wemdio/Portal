@@ -53,6 +53,16 @@ export interface ParseOptions {
    * колбэка парсер игнорирует: отчётность не должна ронять сбор.
    */
   onProgress?: (p: ParseProgress) => void | Promise<void>;
+  /**
+   * Останов по сигналу (деплой, потеря аренды). Проверяется между источниками и
+   * раз в 30 секунд внутри этапа: обход прерывается, собранное возвращается со
+   * stop_reason='interrupted', задача продолжится с чекпойнта у другого исполнителя.
+   */
+  signal?: AbortSignal;
+  /** Пользователи, набранные до перезапуска (из чекпойнта): подсаживаются в накопитель. */
+  initialUsers?: ParsedUser[];
+  /** Источник полностью обработан (или окончательно пропущен) — момент для чекпойнта. */
+  onLinkDone?: (link: string, usersSoFar: ParsedUser[]) => void | Promise<void>;
 }
 
 export interface ParseProgress {
