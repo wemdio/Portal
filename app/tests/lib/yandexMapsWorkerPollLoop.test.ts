@@ -23,9 +23,11 @@ const SOURCE = fs.readFileSync(
 );
 
 function pollOnceBody(): string {
-  const start = SOURCE.indexOf('async function pollOnce(');
+  // pollOnce живёт внутри main() как const-стрелка с тех пор, как воркер
+  // переехал на единый жизненный цикл: ему нужен runner из замыкания.
+  const start = SOURCE.indexOf('const pollOnce = async (');
   expect(start).toBeGreaterThan(-1);
-  const next = SOURCE.indexOf('\nasync function ', start + 1);
+  const next = SOURCE.indexOf('\n  let stopFired', start + 1);
   return SOURCE.slice(start, next === -1 ? undefined : next);
 }
 
@@ -45,7 +47,8 @@ describe('yandexmaps worker: фоновый обход не блокирует �
 
   it('новый обход не начинается, пока идут пользовательские задачи', () => {
     // Приоритет пользовательских задач был и раньше — важно, что он остался
-    // после переноса обхода в фон.
-    expect(pollOnceBody()).toMatch(/if \(runningJobs\.size === 0\) startCatalogDiscovery\(\);/);
+    // и после переноса обхода в фон, и после переезда на жизненный цикл
+    // (свой Map running-задач сменился на runner.activeJobIds()).
+    expect(pollOnceBody()).toMatch(/runner\.activeJobIds\(\)\.length === 0\) startCatalogDiscovery\(\);/);
   });
 });

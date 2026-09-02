@@ -61,6 +61,7 @@ is_lifecycle_managed_worker() {
     worker-tg-parser) return 0 ;;
     worker-search) return 0 ;;
     worker-sales-chat-logger) return 0 ;;
+    worker-yandexmaps) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -161,7 +162,10 @@ if should_pause_legacy_queues && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
     "parser_jobs"
     "website_enrichment_jobs"
     "brief_scoring_jobs"
-    "yandex_maps_jobs"
+    # yandex_maps_jobs убран: воркер Яндекс.Карт на едином жизненном цикле сам
+    # отпускает аренду по SIGTERM, а задача продолжается с сохранённых ссылок и
+    # карточек в следующей реплике. Сброс её в pending отсюда только отбирал бы
+    # строку у ещё живого исполнителя.
     "email_validation_jobs"
     "lead_import_jobs"
     "tg_outreach_jobs"

@@ -313,6 +313,17 @@ services:
       - PROXY_URLS=${PROXY_URLS}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
+      # Аренда задачи (единый жизненный цикл, app/src/lib/jobs/lifecycle.ts).
+      # 180 с = три пропущенных продления (продление раз в аренда/3 = 60 с).
+      # После краха строку подберут через аренду + один опрос ≈ 3,5 минуты —
+      # вшестеро ниже HEALTH_JOB_STUCK_MIN (20 мин).
+      #
+      # Переменной порога простоя (STALL_MINUTES) у этого воркера НЕТ намеренно:
+      # опция progress не подключена, потому что updated_at двигает само
+      # продление аренды, а законный промежуток между записями счётчиков
+      # доходит до 148 минут при 20-минутном потолке монитора. Полная
+      # арифметика — в комментарии над createJobRunner в worker/yandexmaps.ts.
+      - YANDEXMAPS_LEASE_SECONDS=${YANDEXMAPS_LEASE_SECONDS:-180}
       - WORKER_KIND=yandexmaps
     depends_on:
       # Дожидаемся именно healthy, не просто "процесс стартовал": иначе
@@ -320,10 +331,12 @@ services:
       # падает с "health check failed".
       yandexmaps:
         condition: service_healthy
-    # 60s вместо 30m: воркер не должен долго "доделывать текущую задачу"
-    # при рестарте — есть watchdog + startup_recovery, который зомби-задачи
-    # переведёт в failed автоматически. 30m делали docker restart вечным
-    # (blocking на ~30 минут), сегодня из-за этого пришлось docker kill.
+    # 60s оставлены как есть, хотя воркер уехал на единый жизненный цикл и сам
+    # укладывается в 15 с (12 с ожидания тела — shutdownGraceMs в
+    # worker/yandexmaps.ts — плюс два прохода освобождения аренды с паузой в
+    # секунду и контрольное чтение). Запас идёт браузерам: обрыв запроса к
+    # python-сервису даёт ему время закрыть chromium, а не оставить зомби.
+    # Больше 60 с не нужно и вредно: 30m когда-то делали docker restart вечным.
     stop_grace_period: 60s
     # autoheal + heartbeat healthcheck — защита от event-loop hang'ов
     # (инцидент 27.07.2026: воркер дважды за день замерз на 1-5 часов при

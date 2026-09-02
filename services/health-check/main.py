@@ -1216,7 +1216,16 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
     JobMonitorSpec(
         "yandex_maps_jobs", "Яндекс.Карты", ("pending", "running"),
         ("progress_stage", "total_links", "processed_links", "total_organizations", "processed_organizations"),
-        "portal-worker-yandexmaps", updated_column="updated_at",
+        # updated_at здесь БОЛЬШЕ НЕ ГОДИТСЯ как пульс, и это не косметика.
+        # С переездом воркера на единый жизненный цикл задачу держит аренда,
+        # а её продление — обычный UPDATE строки раз в 60 с. Триггер
+        # trg_yandex_maps_jobs_updated_at (миграция 20260714_0002) двигает
+        # updated_at на любом UPDATE, значит у живого процесса он свежий всегда,
+        # даже когда задача не движется ни на карточку. Оставить его тут —
+        # молча выключить алерт «Долго висит» для этой таблицы.
+        # Без updated_column монитор считает простой по отпечатку прогресса
+        # (колонки выше) — ровно так же, как для search_parser_jobs.
+        "portal-worker-yandexmaps",
     ),
     JobMonitorSpec(
         "yandex_direct_jobs", "Яндекс.Директ", ("pending", "running"),
