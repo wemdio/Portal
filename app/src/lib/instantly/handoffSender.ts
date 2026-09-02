@@ -14,6 +14,12 @@ import { logError } from '@/lib/loggerServer';
 
 type InstantlyDb = NonNullable<typeof supabaseInstantly>;
 
+// Rollout marker for rows created while the durable `auto_send` snapshot
+// column is not available yet. It survives a failed send and lets recovery
+// distinguish an automatic handoff from an old manual pending row after the
+// migration backfills `auto_send=false`.
+export const HANDOFF_AUTO_SEND_MARKER = '[auto_send]';
+
 export interface PendingHandoffRow {
   id: string;
   qualification_id: string;
@@ -23,6 +29,8 @@ export interface PendingHandoffRow {
   eaccount: string;
   client_email: string;
   responsible_user_id: string | null;
+  auto_send?: boolean;
+  error_message?: string | null;
 }
 
 export type HandoffSendResult =
@@ -121,9 +129,14 @@ export async function sendHandoffNow(
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    const autoSend = pending.auto_send === true ||
+      pending.error_message?.startsWith(HANDOFF_AUTO_SEND_MARKER) === true;
     await db
       .from('instantly_pending_handoffs')
-      .update({ status: 'failed', error_message: message.slice(0, 300) })
+      .update({
+        status: 'failed',
+        error_message: `${autoSend ? `${HANDOFF_AUTO_SEND_MARKER} ` : ''}${message}`.slice(0, 300),
+      })
       .eq('id', pending.id);
     return { ok: false, error: message };
   }
@@ -132,6 +145,7 @@ export async function sendHandoffNow(
     .from('instantly_pending_handoffs')
     .update({
       status: 'sent',
+      error_message: null,
       ...(opts.sentByTelegramId != null ? { sent_by_telegram_id: opts.sentByTelegramId } : {}),
       sent_at: new Date().toISOString(),
     })
