@@ -17,10 +17,11 @@
  *     прогресса стоит дольше порога (см. JobRunnerOptions.progress).
  *  3. Чекпойнт. ctx.saveCheckpoint пишет checkpoint + продлевает аренду; false —
  *     строку перехватили, воркер обязан остановиться (мы ещё и abort'им signal).
- *  4. Остановка. shutdown(): markShuttingDown, abort всех run, lease_until=null
- *     своим задачам дважды с паузой в секунду (перебивает продление, ушедшее до
- *     сигнала), ждём run-промисы до shutdownGraceMs. Новая реплика подхватит
- *     задачу на первом опросе.
+ *  4. Остановка. shutdown(): markShuttingDown, abort всех run, при желании
+ *     воркера — beforeRelease (закрыть внешние ресурсы, пока строка ещё наша),
+ *     затем lease_until=null своим задачам дважды с паузой в секунду
+ *     (перебивает продление, ушедшее до сигнала), ждём run-промисы до
+ *     shutdownGraceMs. Новая реплика подхватит задачу на первом опросе.
  *  5. Восстановления при старте НЕТ. Брошенная задача = истёкшая/обнулённая
  *     аренда. Поэтому механизм корректен при любом числе реплик.
  *
@@ -42,6 +43,10 @@
  *  - Терпеть, что сосед начал ту же задачу раньше, чем мы дописали свою:
  *    shutdown отпускает аренду намеренно, не дожидаясь конца тела. Пересечение
  *    коротко, но существует, и шаги задачи должны быть идемпотентны.
+ *    Задаче, у которой пересечение стоит не переделанной работы, а сожжённого
+ *    ресурса (живая MTProto-сессия: второе подключение той же сессии даёт
+ *    AUTH_KEY_DUPLICATED и выключает аккаунт навсегда), идемпотентности мало —
+ *    ей нужен beforeRelease, см. JobRunnerOptions.beforeRelease.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -186,14 +191,47 @@ export interface JobRunnerOptions<Row extends { id: string }, C> {
    */
   manageTerminalStatus?: boolean;
   /**
-   * Сколько ждать run-промисы после сигнала. По умолчанию 10 с, максимум
-   * MAX_SHUTDOWN_GRACE_MS: деплой даёт контейнеру `docker stop --timeout 15`,
-   * и в эти 15 секунд кроме ожидания должны уложиться два прохода освобождения
-   * аренды с паузой в секунду между ними и контрольное чтение строки.
-   * Большее значение обрезается — иначе SIGKILL прилетит раньше, чем аренда
-   * будет отпущена, и задача простоит полный leaseSeconds.
+   * Весь бюджет остановки: от сигнала до момента, когда shutdown() возвращает
+   * управление. По умолчанию 10 с, максимум MAX_SHUTDOWN_GRACE_MS, потому что
+   * деплой даёт контейнеру `docker stop --timeout 15`.
+   *
+   * Из этого бюджета последовательно тратятся: beforeRelease (если задан), два
+   * прохода освобождения аренды с паузой в секунду между ними, контрольное
+   * чтение строк — и только ОСТАТОК достаётся ожиданию run-промисов. Раньше
+   * ожидание отсчитывалось после освобождений, то есть реальная остановка
+   * стоила grace + секунда паузы + запросы и в худшем случае не влезала в
+   * пятнадцать секунд деплоя. Большее значение обрезается: SIGKILL раньше
+   * отпущенной аренды означает простой на полный leaseSeconds.
    */
   shutdownGraceMs?: number;
+  /**
+   * Закрыть внешние ресурсы задач ДО того, как их аренда отпущена.
+   *
+   * Обычной задаче это не нужно: пересечение владельцев стоит переделанной
+   * работы, и от неё защищает идемпотентность шагов. Но у TG-аутрича единица
+   * работы — кампания с дюжиной живых MTProto-сессий, и там порядок обратный:
+   * сосед, подхвативший строку раньше, чем уходящий процесс отключил клиентов,
+   * подключит ТЕ ЖЕ сессии, получит AUTH_KEY_DUPLICATED и после трёх таких
+   * подряд аккаунт выключается насовсем (lib/tgOutreach/gramClient.ts) —
+   * восстановление только руками, с перевыпуском сессии с телефона.
+   *
+   * Зовётся один раз за остановку, ПОСЛЕ abort всех run (тело обязано уже
+   * прекратить пользоваться клиентами, пока хук их закрывает) и ДО первого
+   * освобождения аренды. Получает id задач, которые прямо сейчас наши.
+   *
+   * Хук не может помешать освобождению: он и не бросает наружу (исключение
+   * логируется), и не висит дольше beforeReleaseTimeoutMs. Так и задумано —
+   * НЕотпущенная аренда хуже отпущенной на несколько секунд позже: задачу с
+   * живой арендой не подберёт никто до конца leaseSeconds, а перехват потом
+   * запишет это как падение и потратит попытку.
+   */
+  beforeRelease?: (jobIds: string[]) => void | Promise<void>;
+  /**
+   * Потолок ожидания beforeRelease. По умолчанию 5 с; больше shutdownGraceMs
+   * быть не может — иначе хук съедал бы бюджет целиком и аренду отпускал бы уже
+   * SIGKILL, то есть никто.
+   */
+  beforeReleaseTimeoutMs?: number;
   now?: () => number;
   db?: JobDbClient;
   log: JobLogger;
@@ -233,6 +271,12 @@ const TERMINAL_BACKOFF_MS = 500;
 /** Повторы освобождения аренды: короткие, они идут внутри бюджета остановки. */
 const RELEASE_WRITE_TRIES = 2;
 const RELEASE_BACKOFF_MS = 300;
+/**
+ * Потолок ожидания beforeRelease по умолчанию, см. JobRunnerOptions.
+ * Пять секунд — это примерно вдвое больше, чем занимает закрытие дюжины
+ * клиентов gramJS, и вдвое меньше бюджета остановки по умолчанию.
+ */
+const DEFAULT_BEFORE_RELEASE_MS = 5_000;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
 
@@ -260,6 +304,11 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
   const shutdownGraceMs = Math.min(requestedGrace, MAX_SHUTDOWN_GRACE_MS);
   if (requestedGrace > MAX_SHUTDOWN_GRACE_MS) {
     log('warn', `[${table}] shutdownGraceMs ${requestedGrace} обрезан до ${MAX_SHUTDOWN_GRACE_MS}: не влезает в docker stop --timeout 15`);
+  }
+  const requestedHookCap = opts.beforeReleaseTimeoutMs ?? DEFAULT_BEFORE_RELEASE_MS;
+  const beforeReleaseCapMs = Math.min(requestedHookCap, shutdownGraceMs);
+  if (requestedHookCap > shutdownGraceMs) {
+    log('warn', `[${table}] beforeReleaseTimeoutMs ${requestedHookCap} обрезан до ${beforeReleaseCapMs}: хук не может съесть весь бюджет остановки, аренду надо успеть отпустить`);
   }
   const now = opts.now ?? Date.now;
   const leaseMs = Math.max(1_000, opts.leaseSeconds * 1_000);
@@ -328,6 +377,19 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
   let stopping = false;
   /** Промис идущей остановки — чтобы повторный shutdown() дожидался первого. */
   let shutdownRun: Promise<void> | null = null;
+  /**
+   * Пропуск на освобождение аренды во время остановки.
+   *
+   * Пока beforeRelease не отработал, аренду не отпускает НИКТО — ни shutdown,
+   * ни тело, которое бросило на отмене и торопится отдать строку соседу. Иначе
+   * хук закрывал бы клиентов уже после того, как строка стала свободной, и
+   * весь его смысл терялся бы на самом частом пути (тело, брошенное abort'ом,
+   * доходит до своего catch за один микротаск).
+   *
+   * Промис никогда не отвергается и всегда разрешается в пределах потолка, так
+   * что ждать его безопасно откуда угодно.
+   */
+  let releaseGate: Promise<void> | null = null;
 
   /** Останавливаемся: свой флаг раннера или общий процессный. */
   const halting = () => stopping || isShuttingDown();
@@ -644,7 +706,19 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
         // отодвинули перехват соседом на целый leaseSeconds.
         const liveness = await checkProgress();
         if (liveness === 'stalled') return;
-        const patch: Record<string, unknown> = { lease_until: leaseUntil() };
+        /**
+         * Точка отсчёта аренды — момент ПЕРЕД запросом, а не после ответа.
+         *
+         * lease_until считается от неё же, и база истечёт ровно в
+         * renewedFrom + leaseMs. Если записать сюда время ОТВЕТА, то самопроверка
+         * ниже поверит в аренду, которой в базе уже нет, ровно на длительность
+         * запроса — а длинные запросы бывают именно тогда, когда база больна,
+         * то есть в единственном сценарии, ради которого проверка и заведена.
+         * На здоровой базе разница — десятки миллисекунд, на умирающей — минуты
+         * лишнего пересечения с соседом, который строку уже забрал.
+         */
+        const renewedFrom = now();
+        const patch: Record<string, unknown> = { lease_until: iso(renewedFrom + leaseMs) };
         if (liveness === 'moving') {
           // Задача видимо движется — бюджет неудач возвращается, как и на
           // чекпойнте. Пишем в колонку, а не только в память: перехват после
@@ -653,7 +727,7 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
           patch.attempts = 0;
         }
         const result = await fencedUpdate(job.id, runToken, patch);
-        if (result.persisted) lastRenewedAt = now();
+        if (result.persisted) lastRenewedAt = renewedFrom;
         if (abort.signal.aborted) return;
         if (!result.owned) {
           jobLog('warn', 'lease lost to another worker — aborting');
@@ -686,7 +760,10 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
         const patch: Record<string, unknown> = { checkpoint: data, attempts: 0 };
         // Во время остановки чекпойнт сохраняем, а аренду не продлеваем:
         // именно продление в shutdown отменяло быструю передачу (11.08.2026).
-        if (!halting()) patch.lease_until = leaseUntil();
+        // Точка отсчёта — как в heartbeat, момент до запроса.
+        const renewedFrom = now();
+        const renewing = !halting();
+        if (renewing) patch.lease_until = iso(renewedFrom + leaseMs);
         const result = await fencedUpdateWithRetry(
           job.id, runToken, patch, CHECKPOINT_WRITE_TRIES, CHECKPOINT_BACKOFF_MS,
         );
@@ -696,7 +773,9 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
           return false;
         }
         if (result.persisted) {
-          lastRenewedAt = now();
+          // Только если аренду и правда продлили: на остановке lease_until в
+          // патч не попал, и двигать точку отсчёта было бы враньём.
+          if (renewing) lastRenewedAt = renewedFrom;
           // Ровно то же, что записали в колонку: иначе сброс жил бы только в
           // базе, а терминальная запись считала бы попытки по старому снимку.
           attemptsBase = 0;
@@ -751,7 +830,12 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
           // Сюда попадает только тело, которое БРОСИЛО на отмене; тело, которое
           // отмену поймало и вернулось штатно, идёт успешным путём, и его
           // аренду отпускают два прохода shutdown().
-          if (abort.signal.reason === 'shutdown') await releaseLease(job.id, runToken);
+          if (abort.signal.reason === 'shutdown') {
+            // Но не раньше, чем закрыты внешние ресурсы: строка, отпущенная
+            // здесь, уходит соседу немедленно (см. releaseGate).
+            if (releaseGate) await releaseGate;
+            await releaseLease(job.id, runToken);
+          }
           return;
         }
         const reason = err instanceof Error ? err.message : String(err);
@@ -802,6 +886,9 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
       // снимок owned, и эту задачу никто бы не прервал и не отпустил — она
       // дожила бы до SIGKILL с живой арендой, а сосед прождал бы полный
       // leaseSeconds и записал бы это как падение.
+      // beforeRelease здесь не нужен и звать его нечем: тело этой задачи не
+      // запускалось (execute ниже не вызывался), внешних ресурсов у неё нет, а
+      // строка простояла бы полный leaseSeconds.
       if (halting()) {
         log('info', `[${table}] claimed ${claim.job.id} during shutdown — releasing immediately`);
         await releaseLease(claim.job.id, claim.runToken);
@@ -824,6 +911,31 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
     activeJobIds: () => Array.from(owned.keys()),
   };
 
+  /**
+   * Дать воркеру закрыть внешние ресурсы, пока аренда ещё наша.
+   *
+   * Ни исключение, ни зависание хука не должны помешать освобождению — поэтому
+   * ошибка гасится в лог, а ожидание идёт с потолком. Функция не отвергается
+   * никогда и возвращается не позже beforeReleaseCapMs.
+   */
+  async function runBeforeRelease(jobIds: string[]): Promise<void> {
+    if (!opts.beforeRelease) return;
+    let settled = false;
+    const hook = Promise.resolve()
+      .then(() => opts.beforeRelease?.(jobIds))
+      .then(
+        () => { settled = true; },
+        (err) => {
+          settled = true;
+          log('error', `[${table}] beforeRelease threw — аренда отпускается всё равно`, err);
+        },
+      );
+    await Promise.race([hook, sleep(beforeReleaseCapMs)]);
+    if (!settled) {
+      log('warn', `[${table}] beforeRelease не уложился в ${beforeReleaseCapMs} мс — отпускаю аренду, внешние ресурсы могут быть ещё открыты`);
+    }
+  }
+
   async function runShutdown(): Promise<void> {
       stopping = true;
       markShuttingDown();
@@ -837,6 +949,29 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
       const release = () =>
         Promise.all(snapshot.map(([id, o]) => releaseLease(id, o.runToken)));
       if (snapshot.length > 0) {
+        /**
+         * Бюджет остановки заводится ОДНИМ таймером и здесь, до всего
+         * остального: и хук, и паузы между проходами освобождения тратят то же
+         * время, что достанется ожиданию тел. Раньше ожидание отсчитывалось
+         * после освобождений, и реальная остановка стоила grace плюс секунда
+         * паузы плюс запросы — за пятнадцать секунд деплоя это уже не влезало.
+         */
+        const graceExpired = sleep(shutdownGraceMs);
+        /*
+         * Хук — ПОСЛЕ abort и ДО первого освобождения.
+         *
+         * После abort: тело обязано перестать пользоваться клиентами прежде,
+         * чем их закроют, иначе отправка налетит на рвущийся сокет.
+         * До освобождения: в этом и весь смысл — пока lease_until не обнулён,
+         * строку не подберёт никто, и сессии Telegram успевают закрыться до
+         * того, как их откроет сосед.
+         *
+         * Присваивание releaseGate синхронно, до первого await: тело, брошенное
+         * abort'ом выше, доберётся до своего catch не раньше следующего
+         * микротаска и увидит уже готовый пропуск.
+         */
+        releaseGate = runBeforeRelease(snapshot.map(([id]) => id));
+        await releaseGate;
         log('info', `[${table}] releasing ${snapshot.length} job(s) for fast handoff: ${snapshot.map(([id]) => id).join(', ')}`);
         await release();
         // Второй проход: продление, улетевшее в PostgREST до сигнала, могло
@@ -860,10 +995,12 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
             await releaseLease(id, o.runToken);
           }
         }));
+        // Остаток бюджета — телам. Таймер тот же, что заведён в начале
+        // остановки, так что хук и паузы освобождения уже вычтены.
+        await Promise.race([
+          Promise.allSettled(snapshot.map(([, o]) => o.promise)),
+          graceExpired,
+        ]);
       }
-      await Promise.race([
-        Promise.allSettled(snapshot.map(([, o]) => o.promise)),
-        sleep(shutdownGraceMs),
-      ]);
   }
 }
