@@ -64,6 +64,31 @@ const USE_SERPER = Boolean((process.env.SERPER_API_KEY ?? '').trim());
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Пауза, которую обрывает отмена.
+ *
+ * Кулдаун после блокировки поисковика доходит до 90 секунд, и отключённое от
+ * задачи тело столько ждать не должно: пока оно спит, новый владелец уже
+ * работает над той же задачей. Резолвится, а не бросает — решение, что делать
+ * с отменой, принимает вызывающий код.
+ */
+const sleepUnlessAborted = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    // AbortSignal не переигрывает уже случившуюся отмену для поздних
+    // слушателей — поэтому проверка выше идёт до подписки.
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+
 const toNonNegativeInt = (value: number, fallback: number) => {
   const normalized = Number.isFinite(value) ? Math.floor(value) : fallback;
   return normalized >= 0 ? normalized : fallback;
@@ -209,7 +234,10 @@ async function safeUpdateSearchJob(
   }
 }
 
-async function throttleBetweenQueries(provider: 'google' | 'duckduckgo' | 'bing' | 'mojeek') {
+async function throttleBetweenQueries(
+  provider: 'google' | 'duckduckgo' | 'bing' | 'mojeek',
+  signal?: AbortSignal,
+) {
   // Aim for stability over speed; jitter helps avoid anti-bot thresholds.
   // Google already has internal delay in googleSearchDetailed; DDG does not.
   const base =
@@ -220,7 +248,7 @@ async function throttleBetweenQueries(provider: 'google' | 'duckduckgo' | 'bing'
         : provider === 'mojeek'
           ? randInt(900, 2200)
           : randInt(900, 2200);
-  await sleep(base);
+  await sleepUnlessAborted(base, signal);
 }
 
 function createAsyncLock() {
@@ -811,6 +839,23 @@ export async function runSearchParserJob(jobId: string, ctx?: SearchParserRunCon
       });
     }
 
+    /**
+     * Точка продолжения — СЧЁТЧИК обработанных запросов, а не индекс границы.
+     *
+     * ИЗВЕСТНАЯ ДЫРА, и она реальная, а не теоретическая: запросы идут по два
+     * сразу (QUERY_CONCURRENCY = 2). Если запрос i+1 успел дописать счётчик, а
+     * i на момент прерывания — нет, счётчик уже перешагнул i, срез начнётся
+     * после него, и запрос i не будет отработан НИКОГДА, хотя задача в итоге
+     * отчитается completed. Обратный порядок безобиден: один запрос переиграют,
+     * а дубли снимет seenSites, который при resumeFrom > 0 подгружается из
+     * search_results.
+     *
+     * Дыра не новая — прежний сброс running→pending продолжал по тому же
+     * счётчику, — и шириной ровно в один запрос. Правильное лечение: держать
+     * высшую отметку по НЕПРЕРЫВНОМУ префиксу завершённых запросов (индекс, а
+     * не счётчик) и двигать её только тогда, когда закрыт весь префикс. Это
+     * отдельная правка, здесь она сознательно отложена.
+     */
     const resumeFrom = Math.min(Math.max(0, Number(job.processed_queries ?? 0)), queries.length);
     const remainingQueries = queries.slice(resumeFrom);
     const totalQueries = queries.length;
@@ -1211,6 +1256,9 @@ export async function runSearchParserJob(jobId: string, ctx?: SearchParserRunCon
                   timeoutMs: 15000,
                   maxInternalPages: 30,
                   maxSites: SOURCE_EXPAND_MAX_SITES_PER_SOURCE,
+                  // Обход каталога — до 30 страниц подряд по 15 с: без сигнала
+                  // отключённое от задачи тело скрейпило бы ещё минуты.
+                  signal: ctx?.signal,
                 });
                 return { source, sites: out.sites };
               } catch (e) {
@@ -1290,6 +1338,7 @@ export async function runSearchParserJob(jobId: string, ctx?: SearchParserRunCon
             try {
               const { emails, brand_name } = await fetchWebsiteEmails(lead.site, {
                 maxPages: ENRICH_EMAIL_MAX_PAGES_PER_SITE,
+                signal: ctx?.signal,
               });
               const cleaned = emails.map((e) => e.trim()).filter(Boolean);
               const unique = Array.from(new Set(cleaned)).slice(0, 3);
@@ -1311,7 +1360,13 @@ export async function runSearchParserJob(jobId: string, ctx?: SearchParserRunCon
           }
         }
 
-        if (companyRowsToInsert.length > 0) {
+        // Вставка результатов — единственная запись этого тела в ЧУЖУЮ таблицу,
+        // и жетоном её оградить нельзя: у search_results нет уникального ключа
+        // (только idx_search_results_job_id), дедуп держится на seenSites в
+        // памяти процесса, а его два исполнителя не делят. Значит отключённое
+        // от задачи тело обязано молчать: иначе новый владелец и старое тело
+        // пишут одни и те же компании, и дубли уезжают в выгрузку клиента.
+        if (companyRowsToInsert.length > 0 && !ctx?.signal.aborted) {
           const inserted = await insertInBatches(admin, companyRowsToInsert, { batchSize: 60 });
           if (inserted.hadFailures) {
             hadQueryFailures = true;
@@ -1385,7 +1440,7 @@ export async function runSearchParserJob(jobId: string, ctx?: SearchParserRunCon
             ddgBlockedStreak = 0;
             lastBlockedHint = err.message;
           });
-          await throttleBetweenQueries('duckduckgo');
+          await throttleBetweenQueries('duckduckgo', ctx?.signal);
         } else if (isDuckDuckGoBlockedError(err)) {
           await withLock(async () => {
             ddgBlockedStreak += 1;
@@ -1394,19 +1449,19 @@ export async function runSearchParserJob(jobId: string, ctx?: SearchParserRunCon
           });
           const streak = Math.min(ddgBlockedStreak, 6);
           const cooldown = Math.min(90_000, 4500 * 2 ** (streak - 1) + randInt(0, 2500));
-          await sleep(cooldown);
+          await sleepUnlessAborted(cooldown, ctx?.signal);
         } else if (isBingBlockedError(err)) {
           await withLock(async () => {
             ddgBlockedStreak = 0;
             lastBlockedHint = err instanceof Error ? err.message : String(err);
           });
-          await sleep(randInt(6000, 16000));
+          await sleepUnlessAborted(randInt(6000, 16000), ctx?.signal);
         } else if (isMojeekBlockedError(err)) {
           await withLock(async () => {
             ddgBlockedStreak = 0;
             lastBlockedHint = err instanceof Error ? err.message : String(err);
           });
-          await sleep(randInt(3500, 9000));
+          await sleepUnlessAborted(randInt(3500, 9000), ctx?.signal);
         } else {
           await withLock(async () => {
             ddgBlockedStreak = 0;
