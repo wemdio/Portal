@@ -220,6 +220,27 @@ describe('job lifecycle', () => {
     expect(await runner.pollOnce()).toBe(false);
   });
 
+  it('shutdown during an in-flight claim releases the job instead of starting it', async () => {
+    const db = makeFakeDb([{ id: 'j', status: 'pending', created_at: '1', attempts: 0 }]);
+    const run = jest.fn(async () => {});
+    const runner = makeRunner(db, run, { shutdownGraceMs: 3_000 });
+
+    // Сигнал приходит, пока запрос захвата в полёте: снимок owned в shutdown
+    // уже снят, и задачу, захваченную следом, некому прервать и отпустить.
+    const polling = runner.pollOnce();
+    const stopping = runner.shutdown();
+    const claimed = await polling;
+    await jest.advanceTimersByTimeAsync(5_000);
+    await stopping;
+
+    expect(claimed).toBe(false);
+    expect(run).not.toHaveBeenCalled();
+    // Чистая передача: аренда обнулена, попытка не потрачена.
+    expect(db.rows[0].lease_until).toBeNull();
+    expect(db.rows[0].attempts).toBe(0);
+    expect(runner.activeJobIds()).toEqual([]);
+  });
+
   it('a thrown run goes back to pending below maxAttempts and to failed at the limit', async () => {
     const db = makeFakeDb([
       { id: 'a', status: 'pending', created_at: '1', attempts: 0 },
