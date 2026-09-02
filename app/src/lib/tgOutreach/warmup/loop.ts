@@ -290,6 +290,13 @@ export async function runWarmupLoop(
    *  - снимает владение вместе со статусом (lease_until/run_token/worker_id),
    *    ровно как это делает библиотека в своей терминальной записи. Иначе
    *    законченный прогон навсегда остался бы похожим на арендованный.
+   *
+   * Побочный эффект второго свойства, безвредный, но пугающий в журнале: жетон
+   * стёрт, а таймер продления ещё вооружён — между этой записью и возвратом из
+   * тела стоят отключение всех клиентов Telegram и сохранение ключей сессий,
+   * секунды. Тик продления, попавший в этот промежуток, не найдёт свою строку
+   * и напишет «lease lost to another worker». Никакого перехвата за этим нет:
+   * прогон в этот момент уже закрыт нами самими.
    */
   const finishRun = async (patch: {
     status: WarmupRun['status'];
@@ -389,7 +396,22 @@ export async function runWarmupLoop(
     return;
   }
 
-  await wdb.setCampaignWarming(db, campaignId, true);
+  // Замок берём записью с проверкой статуса, а не просто проверкой выше:
+  // между чтением кампании и этой строкой есть окно, в которое команда «старт»
+  // успевает поставить `running`. Если запись не легла — кампанию увели, и
+  // прогреву тут делать нечего.
+  if (!(await wdb.setCampaignWarming(db, campaignId, true))) {
+    log(
+      'error',
+      'Прогрев остановлен: кампанию перехватил боевой аутрич в момент запуска. Остановите аутрич и запустите прогрев заново.',
+    );
+    await finishRun({
+      status: 'failed',
+      error_message: 'campaign_busy_with_outreach',
+      finished_at: new Date().toISOString(),
+    });
+    return;
+  }
   const tg = campaign.telegram_settings as TelegramSettings;
 
   const { data: accountRows } = await db

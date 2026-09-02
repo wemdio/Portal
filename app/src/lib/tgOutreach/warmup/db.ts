@@ -50,22 +50,40 @@ export async function logWarmup(
  * становится видимым и проверяемым: воркер не берёт `warming` в боевой
  * auto-resume, а API отказывает в запуске аутрича.
  */
+/**
+ * Обе стороны ограждены статусом, и обе — по одной причине.
+ *
+ * Пока прогрев держался слотом в памяти воркера, ни одна из этих записей
+ * физически не могла попасть на кампанию, которую ведёт боевой цикл: слот был
+ * один на двоих. Под арендой прогон живёт своей жизнью, и безусловная запись
+ * стала бы способом отобрать чужую кампанию:
+ *  - `false` без фильтра остановил бы аутрич, который тем временем законно
+ *    владеет кампанией;
+ *  - `true` без фильтра затёр бы `running`, поставленный командой «старт»,
+ *    проскочившей в узком окне между проверкой владельца в начале прогрева и
+ *    этой записью. Оба цикла пошли бы по одним и тем же аккаунтам.
+ *
+ * Поэтому взятие замка (`true`) разрешено только из состояний, в которых
+ * кампанией никто не занят: `stopped`, `error` и уже стоящий `warming` (его
+ * ставит интерфейс сразу по нажатию кнопки — повторная запись идемпотентна).
+ *
+ * Возвращает, легла ли запись. Для `true` это ответ «замок наш»: false значит
+ * кампанию перехватил аутрич, и продолжать прогрев нельзя.
+ */
 export async function setCampaignWarming(
   db: SupabaseClient,
   campaignId: string,
   warming: boolean,
-): Promise<void> {
+): Promise<boolean> {
   const q = db
     .from('tg_outreach_campaigns')
     .update({ status: warming ? 'warming' : 'stopped', updated_at: new Date().toISOString() })
     .eq('id', campaignId);
-  // Снятие «прогрева» ограничено самим статусом `warming`, и это не косметика.
-  // Пока прогрев держался слотом в памяти воркера, эта запись физически не
-  // могла попасть на кампанию, которую ведёт боевой цикл. Под арендой прогон
-  // живёт своей жизнью, и безусловный `stopped` здесь остановил бы аутрич,
-  // который тем временем законно владеет кампанией (ровно так же осторожен
-  // handleWarmupStopJob в воркере).
-  await (warming ? q : q.eq('status', 'warming'));
+  const { data } = await (warming
+    ? q.in('status', ['stopped', 'error', 'warming'])
+    : q.eq('status', 'warming')
+  ).select('id');
+  return (data ?? []).length > 0;
 }
 
 /** Идущий или ожидающий запуск прогрева. Активный может быть только один. */
@@ -303,10 +321,9 @@ export async function finishConversation(
 export async function requeueStuckConversations(
   db: SupabaseClient,
   runId: string,
-  now: Date = new Date(),
 ): Promise<number> {
   const staleBefore = new Date(
-    now.getTime() - CONVERSATION_STALE_MINUTES * 60_000,
+    Date.now() - CONVERSATION_STALE_MINUTES * 60_000,
   ).toISOString();
   const { data } = await db
     .from('tg_outreach_warmup_conversations')

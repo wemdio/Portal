@@ -240,10 +240,9 @@ export async function finishActivity(
 export async function requeueStuckActivities(
   db: SupabaseClient,
   runId: string,
-  now: Date = new Date(),
 ): Promise<number> {
   const staleBefore = new Date(
-    now.getTime() - CONVERSATION_STALE_MINUTES * 60_000,
+    Date.now() - CONVERSATION_STALE_MINUTES * 60_000,
   ).toISOString();
   const { data } = await db
     .from('tg_outreach_warmup_activities')
