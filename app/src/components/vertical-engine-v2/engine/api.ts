@@ -104,6 +104,19 @@ export interface VeCollectStatsDto {
 }
 
 export interface VeCollectInfo {
+  /** Более ранняя база проекта, которую ждёт этот сбор. */
+  waiting_for_base_id?: string | null;
+  /** Снимок обработки; не означает, что итоговая база уже сохранена. */
+  construct?: {
+    status?: string;
+    progress?: {
+      status?: string;
+      current_step?: number | null;
+      total_steps?: number | null;
+      current_step_key?: string | null;
+      current_step_progress?: number | null;
+    } | null;
+  } | null;
   /** Лимит строк, выбранный при запуске сборки (у старых записей поля нет). */
   limit?: number | null;
   /** Гипотезы, выбранные при запуске сборки (у записей до пикера гипотез поля нет). */
@@ -146,7 +159,7 @@ export type VeJobSummary = Pick<
 > & {
   finished_at: string | null;
   /** Вход стадии: фильтрация джоб по вертикали (payload.vertical_id). */
-  payload?: { vertical_id?: string } | null;
+  payload?: { vertical_id?: string; base_id?: string } | null;
   /** Живой прогресс стадии (ve_jobs.progress): счётчик «— 14/33 · проверяем гипотезу». */
   progress?: { done?: number; total?: number; label?: string } | null;
 };

@@ -551,7 +551,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             projectId={projectId}
             vertical={selectedVertical}
             hypotheses={hypotheses}
-            bases={selectedBases}
+            bases={bases}
             jobs={jobs}
             parentPollingActive={hasActiveJobs}
             onUploaded={() => void load({ silent: true })}

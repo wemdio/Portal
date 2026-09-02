@@ -37,6 +37,7 @@ import {
 import { HE, StatusDot, Spinner } from '../design';
 import { SeasonalityDetail } from '../SeasonalitySummary';
 import { StatusBox, TIER_META, formatDate } from '../ui';
+import { collectCount, collectTaskDone, collectTaskFailed, getCollectionProgress, getCollectionQueue } from '../collectionProgress';
 
 /** Как часто дёргать reload детали во время автосборки (как POLL_INTERVAL_MS родителя). */
 const COLLECT_POLL_MS = 4000;
@@ -83,6 +84,7 @@ export function Step4Base(props: {
   vertical: VeVertical;
   /** Гипотезы проекта (пикер автосборки фильтрует по vertical.id). */
   hypotheses: VeHypothesis[];
+  /** Все базы проекта: очередь сбора общая для всех вертикалей. */
   bases: VeBaseSummary[];
   jobs: VeJobSummary[];
   /** Родитель уже обновляет project detail, локальный interval тогда не нужен. */
@@ -235,7 +237,9 @@ export function Step4Base(props: {
     return verticalHypotheses.find((hypothesis) => hypothesis.seasonality)?.seasonality ?? null;
   }, [hypotheses, latestAnalyzed, verticalHypotheses]);
 
-  /** Последняя база в статусе автосборки (verticalBases отсортированы по created_at desc). */
+  const collectionQueue = useMemo(() => getCollectionQueue(bases, jobs), [bases, jobs]);
+  const queuedBaseIds = useMemo(() => new Set(collectionQueue.queued.map((base) => base.id)), [collectionQueue]);
+  /** Любая сборка этой вертикали блокирует повторный старт, включая ожидающую. */
   const collectingBase = useMemo(() => verticalBases.find((b) => b.status === 'collecting'), [verticalBases]);
   /** Автосборка упала: последняя база вертикали — авто и в ошибке (retry уводит в re-POST). */
   const collectFailed = !collectingBase && latestBase?.source === 'auto' && latestBase.status === 'failed';
@@ -515,7 +519,12 @@ export function Step4Base(props: {
         </div>
 
         {collectingBase ? (
-          <CollectProgress base={collectingBase} />
+          <CollectProgress
+            base={collectionQueue.current ?? collectingBase}
+            queuedCount={collectionQueue.queued.length}
+            queued={!collectionQueue.current}
+            otherVertical={collectionQueue.current != null && collectionQueue.current.vertical_id !== vertical.id}
+          />
         ) : (
           <div className="mt-4">
             {collectFailed ? (
@@ -687,6 +696,7 @@ export function Step4Base(props: {
               <BaseRow
                 key={base.id}
                 base={base}
+                queued={queuedBaseIds.has(base.id)}
                 hypothesisTitle={base.hypothesis_id ? hypothesisTitleById.get(base.hypothesis_id) : undefined}
               />
             ))}
@@ -787,12 +797,13 @@ function previewCellText(value: unknown): string {
   return typeof value === 'string' ? value : String(value);
 }
 
-function BaseRow({ base, hypothesisTitle }: { base: VeBaseSummary; hypothesisTitle?: string }) {
+function BaseRow({ base, hypothesisTitle, queued }: { base: VeBaseSummary; hypothesisTitle?: string; queued: boolean }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [downloadingMode, setDownloadingMode] = useState<BaseExportMode | null>(null);
   const [downloadError, setDownloadError] = useState('');
 
   const hasRows = base.row_count > 0;
+  const progress = getCollectionProgress(base.collect_info);
   const columns = Array.isArray(base.columns) ? base.columns : [];
   const previewRows = (Array.isArray(base.sample_rows) ? base.sample_rows : []).slice(0, PREVIEW_ROWS);
 
@@ -833,11 +844,15 @@ function BaseRow({ base, hypothesisTitle }: { base: VeBaseSummary; hypothesisTit
           <span className={HE.faint}>{formatDate(base.created_at)}</span>
         </span>
         <span className="ve2-tag">{base.source === 'auto' ? 'авто' : 'загрузка'}</span>
-        <span className="shrink-0 font-mono text-xs text-gray-700">{base.row_count.toLocaleString('ru-RU')} строк</span>
+        {base.status !== 'collecting' ? (
+          <span className="shrink-0 font-mono text-xs text-gray-700">{base.row_count.toLocaleString('ru-RU')} строк</span>
+        ) : !queued && progress.candidates !== null ? (
+          <span className="shrink-0 font-mono text-xs text-gray-700">{progress.candidates.toLocaleString('ru-RU')} кандидатов</span>
+        ) : null}
         {base.status === 'collecting' ? (
-          <span className="ve2-st ve2-tg-warn">
-            <Spinner className="h-3.5 w-3.5" />
-            Собираем…
+          <span className={`ve2-st ${queued ? 've2-tg-q' : 've2-tg-warn'}`}>
+            {queued ? <StatusDot tone="muted" /> : <Spinner className="h-3.5 w-3.5" />}
+            {queued ? 'В очереди' : COLLECT_PHASE_LABELS[progress.phase]}
           </span>
         ) : base.status === 'analyzing' ? (
           <span className="ve2-st ve2-tg-warn">
@@ -1029,19 +1044,6 @@ function collectSourceLabel(source: string | undefined): string {
   return COLLECT_SOURCE_LABELS[key] ?? (source?.trim() || 'источник');
 }
 
-function collectTaskDone(status: string | undefined): boolean {
-  return ['done', 'completed', 'success', 'ok'].includes((status ?? '').toLowerCase());
-}
-
-function collectTaskFailed(status: string | undefined): boolean {
-  return ['failed', 'error'].includes((status ?? '').toLowerCase());
-}
-
-/** Счётчики jsonb читаем как недоверенные данные: только конечные неотрицательные числа. */
-function collectCount(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null;
-}
-
 function recipientWord(value: number): string {
   const mod100 = value % 100;
   if (mod100 >= 11 && mod100 <= 14) return 'получателей';
@@ -1169,53 +1171,85 @@ function CollectionFunnel({ base, useDefaultLimit = false }: { base: VeBaseSumma
   );
 }
 
-/** Карточка прогресса автосборки: план (почему эти источники) + живые статусы задач. */
-function CollectProgress({ base }: { base: VeBaseSummary }) {
-  const { plan, tasks, hypotheses, limit, stats } = readCollectInfo(base.collect_info);
-  const shownLimit = limit ?? DEFAULT_COLLECT_LIMIT;
-  const progressCount = stats.processedRows ?? stats.rowsTotal ?? collectCount(base.row_count);
-  const progressPct = progressCount === null ? null : Math.min(100, Math.max(0, (progressCount / shownLimit) * 100));
+const COLLECT_PHASE_LABELS = {
+  planning: 'Подбираем источники',
+  collecting: 'Собираем из источников',
+  construct_queued: 'Ждём обработку базы',
+  processing: 'Обогащаем и проверяем',
+  finishing: 'Завершаем проверку базы',
+  construct_failed: 'Обработка остановлена',
+};
+
+// Не импортируем серверный processingSteps в клиентский bundle.
+const CONSTRUCT_STEP_LABELS: Record<string, string> = {
+  find_emails: 'Поиск email',
+  enrich_descriptions: 'Обогащение компаний',
+  split_emails: 'Разделение email',
+  dedup_email: 'Удаление дублей email',
+  validate_emails: 'Проверка email',
+  cap_emails_per_company: 'Ограничение адресов на компанию',
+};
+
+/** Лимит кандидатов не является целью или процентом готовности сбора. */
+function CollectProgress({ base, queuedCount, queued, otherVertical }: {
+  base: VeBaseSummary; queuedCount: number; queued: boolean; otherVertical: boolean;
+}) {
+  const { plan, tasks } = readCollectInfo(base.collect_info);
+  const progress = getCollectionProgress(base.collect_info);
+  const stepLabel = CONSTRUCT_STEP_LABELS[progress.stepKey ?? ''] ?? 'Обработка базы';
 
   return (
     <div className="ve2-panel-line mt-4 px-5 py-4" aria-live="polite">
       <div className="flex flex-wrap items-baseline justify-between gap-3">
         <p className="flex items-center gap-2 text-sm font-semibold text-gray-800">
-          <Spinner className="h-4 w-4" />
-          Собираем базу
+          {queued ? <StatusDot tone="muted" /> : <Spinner className="h-4 w-4" />}
+          {queued ? 'В очереди' : COLLECT_PHASE_LABELS[progress.phase]}
         </p>
-        <span className={HE.faint}>
-          {progressCount === null ? '—' : progressCount.toLocaleString('ru-RU')} / {shownLimit.toLocaleString('ru-RU')}
-        </span>
+        {queuedCount > 0 ? <span className={HE.faint}>В очереди проекта: {queuedCount}</span> : null}
       </div>
-      {progressPct !== null ? (
-        <span
-          className="ve2-bar mt-2.5 block"
-          role="progressbar"
-          aria-label="Прогресс автосборки"
-          aria-valuemin={0}
-          aria-valuemax={shownLimit}
-          aria-valuenow={Math.min(progressCount ?? 0, shownLimit)}
-        >
-          <span className="ve2-bar-f" style={{ width: `${progressPct}%` }} />
-        </span>
+      <p className="mt-2 break-words text-xs font-medium text-gray-700">{base.filename}</p>
+      {otherVertical ? (
+        <p className="mt-1 text-xs text-gray-500">Сейчас собирается другая вертикаль проекта. Базы этой вертикали ждут своей очереди.</p>
+      ) : null}
+      {queuedCount > 0 ? (
+        <p className="mt-1 text-xs text-gray-500">Базы проекта собираются по очереди, чтобы исключать повторные контакты.</p>
+      ) : null}
+      {!queued ? (
+        <p className="mt-3 text-xs text-gray-600">
+          {progress.candidates !== null
+            ? `Собрано кандидатов: ${progress.candidates.toLocaleString('ru-RU')}. Готовые получатели появятся после проверок.`
+            : progress.sourceRows !== null
+              ? `Получено из завершённых источников: ${progress.sourceRows.toLocaleString('ru-RU')} строк. Дубли ещё не исключены.`
+              : 'Количество кандидатов пока неизвестно. Это не означает, что найдено 0.'}
+        </p>
+      ) : null}
+      {!queued && progress.stepPercent !== null ? (
+        <div className="mt-3">
+          <p className="mb-1 text-xs text-gray-600">{stepLabel}: {progress.stepPercent}% текущего этапа</p>
+          <span
+            className="ve2-bar block"
+            role="progressbar"
+            aria-label={`${stepLabel}: прогресс текущего этапа`}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progress.stepPercent}
+          >
+            <span className="ve2-bar-f" style={{ width: `${progress.stepPercent}%` }} />
+          </span>
+        </div>
       ) : null}
       <CollectionFunnel base={base} useDefaultLimit />
-      {hypotheses.length > 0 ? (
-        <p className={`mt-2 text-[11px] ${HE.muted}`} title={hypotheses.join(', ')}>
-          По гипотезам: {hypotheses.join(' · ')}
-        </p>
-      ) : null}
-      {plan.length > 0 ? (
+      {!queued && plan.length > 0 ? (
         <ul className="mt-3 space-y-1">
           {plan.map((task, i) => (
             <li key={`plan-${i}`} className="text-xs text-gray-500">
               <span className="font-medium text-gray-600">{collectSourceLabel(task.source)}</span>
-              {task.rationale ? ` — ${task.rationale}` : ''}
+              {task.rationale ? `: ${task.rationale}` : ''}
             </li>
           ))}
         </ul>
       ) : null}
-      {tasks.length > 0 ? (
+      {!queued && tasks.length > 0 ? (
         <ul className="mt-3">
           {tasks.map((task, i) => (
             <li key={`task-${i}`} className="ve2-check-row text-xs text-gray-700">
@@ -1227,8 +1261,8 @@ function CollectProgress({ base }: { base: VeBaseSummary }) {
                 <Spinner className="h-3.5 w-3.5 shrink-0" />
               )}
               <span>{collectSourceLabel(task.source)}</span>
-              {collectTaskDone(task.status) && typeof task.rows === 'number' ? (
-                <span className="text-gray-500">· {task.rows.toLocaleString('ru-RU')} строк</span>
+              {collectTaskDone(task.status) && collectCount(task.rows) !== null ? (
+                <span className="text-gray-500">· {collectCount(task.rows)!.toLocaleString('ru-RU')} строк</span>
               ) : null}
               <span className={`ml-auto ${HE.faint}`}>
                 {collectTaskDone(task.status) ? 'готово' : collectTaskFailed(task.status) ? 'ошибка' : 'в работе'}
@@ -1236,9 +1270,6 @@ function CollectProgress({ base }: { base: VeBaseSummary }) {
             </li>
           ))}
         </ul>
-      ) : null}
-      {plan.length === 0 && tasks.length === 0 ? (
-        <p className="mt-2 text-xs text-gray-500">Подбираем источники под направление…</p>
       ) : null}
     </div>
   );

@@ -579,6 +579,14 @@ export interface VeConstructInfo {
   valid_count?: number;
   /** Пометка для UI (частичный импорт / без обогащения / таймаут). */
   note?: string;
+  /** Read-only снимок BC: не заменяет status, управляющий импортом результата. */
+  progress?: {
+    status: string;
+    current_step: number | null;
+    total_steps: number | null;
+    current_step_key: string | null;
+    current_step_progress: number | null;
+  };
 }
 
 /** Провенанс починки плана: почему её запускали и чем кончилось. */
@@ -616,6 +624,8 @@ export interface VeSliceProbe {
 export interface VeCollectInfo {
   /** Лимит строк, выбранный при запуске сборки (route пишет при создании базы). */
   limit?: number;
+  /** Более ранняя авто-сборка проекта: эта база ещё не начала работу. */
+  waiting_for_base_id?: string;
   /**
    * Refill-режим ENG auto-pipeline (payload.refill джобы): после CONSTRUCT —
    * долив лидов в запущенную кампанию вместо analyzing/base_analyze.
@@ -683,7 +693,8 @@ export interface VeCollectInfo {
     relevance_checked_companies?: number;
     relevance_total_companies?: number;
     relevance_coverage_complete?: boolean;
-    finished_at: string;
+    /** Отсутствует у промежуточного снимка кандидатов до окончания проверок. */
+    finished_at?: string;
   };
 }
 
@@ -2031,6 +2042,22 @@ function buildConstructGrid(rows: VeUnifiedRow[], market: VeMarket): string[][] 
   ];
 }
 
+/** Неизвестные/некорректные числа прогресса не превращаем в ложный ноль. */
+function constructProgressNumber(value: unknown, min: number, max = Infinity): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max
+    ? value
+    : null;
+}
+
+/** Плоские числовые снимки: порядок jsonb-ключей не означает изменение. */
+function sameCollectSnapshot(previous: object | undefined, next: object): boolean {
+  if (!previous) return false;
+  const values = previous as Record<string, unknown>;
+  const entries = Object.entries(next);
+  return Object.keys(previous).length === entries.length
+    && entries.every(([key, value]) => values[key] === value);
+}
+
 /** Статус BC-джобы (null — строка потерялась: трактуем как failed без данных). */
 async function readConstructJobStatus(
   ctx: VeStageContext,
@@ -2039,21 +2066,32 @@ async function readConstructJobStatus(
   status: string;
   error_message: string | null;
   selected_steps: string[] | null;
+  progress: NonNullable<VeConstructInfo['progress']>;
 } | null> {
   const { data, error } = await ctx.supabase
     .from('base_constructor_jobs')
-    .select('status, error_message, selected_steps')
+    .select('status, error_message, selected_steps, current_step, total_steps, current_step_key, current_step_progress')
     .eq('id', bcJobId)
     .maybeSingle();
   if (error) throw new Error(`base_constructor_jobs read: ${error.message}`);
   if (!data) return null;
-  const row = data as { status?: unknown; error_message?: unknown; selected_steps?: unknown };
+  const row = data as Record<string, unknown>;
+  const totalSteps = constructProgressNumber(row.total_steps, 1);
   return {
     status: String(row.status ?? ''),
     error_message: typeof row.error_message === 'string' ? row.error_message : null,
     selected_steps: Array.isArray(row.selected_steps)
       ? row.selected_steps.filter((step): step is string => typeof step === 'string')
       : null,
+    progress: {
+      status: String(row.status ?? ''),
+      current_step: constructProgressNumber(row.current_step, 1, totalSteps ?? Infinity),
+      total_steps: totalSteps,
+      current_step_key: typeof row.current_step_key === 'string' && row.current_step_key.trim()
+        ? row.current_step_key.trim()
+        : null,
+      current_step_progress: constructProgressNumber(row.current_step_progress, 0, 100),
+    },
   };
 }
 
@@ -2063,7 +2101,7 @@ async function dispatchConstructJob(input: {
   baseLabel: string;
   rows: VeUnifiedRow[];
   market: VeMarket;
-}): Promise<{ bcJobId: string; locale: 'ru' | 'en'; steps: string[] }> {
+}): Promise<{ bcJobId: string; locale: 'ru' | 'en'; construct: VeConstructInfo }> {
   const { ctx, ownerId, baseLabel, rows, market } = input;
   if (!ownerId) {
     throw new Error('ve_projects.created_by пуст — джобе конструктора некому принадлежать');
@@ -2082,7 +2120,19 @@ async function dispatchConstructJob(input: {
     initial_row_count: rows.length,
     total_steps: steps.length,
   });
-  return { bcJobId, locale, steps };
+  return {
+    bcJobId,
+    locale,
+    construct: {
+      bc_job_id: bcJobId,
+      status: 'dispatched',
+      dispatched_at: new Date().toISOString(),
+      progress: {
+        status: 'pending', current_step: null, total_steps: steps.length,
+        current_step_key: null, current_step_progress: null,
+      },
+    },
+  };
 }
 
 export interface VeConstructImport {
@@ -2203,8 +2253,16 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   if (base.status !== 'collecting') {
     throw new Error(`ve_bases ${baseId}: status='${base.status}' — сборка не начиналась`);
   }
+  const info: VeCollectInfo =
+    base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
   const olderCollectingBaseId = await findOlderCollectingBase(ctx, job.project_id, base);
   if (olderCollectingBaseId) {
+    // result при self-requeue не сохраняется воркером. Очередь должна быть
+    // видна через саму базу, но большой collect_info не переписываем без нужды.
+    if (info.waiting_for_base_id !== olderCollectingBaseId) {
+      info.waiting_for_base_id = olderCollectingBaseId;
+      await persistCollectInfo(ctx, baseId, info);
+    }
     stageLog(
       ctx,
       `[base_collect] база ${baseId} ждёт старшую сборку проекта ${olderCollectingBaseId}, чтобы не дублировать контакты`,
@@ -2215,6 +2273,10 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
       tokensUsed: usage.tokensUsed,
       costUsd: usage.costUsd,
     };
+  }
+  if (info.waiting_for_base_id) {
+    delete info.waiting_for_base_id;
+    await persistCollectInfo(ctx, baseId, info);
   }
 
   const { data: verticalRow, error: vError } = await ctx.supabase
@@ -2231,9 +2293,6 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   // Рынок проекта: выбор промпта планировщика (EN-источники при 'us').
   // ctx.market прокидывает воркер, фолбэк — колонка ve_projects.market.
   const market = ctx.market ?? projectMarket(project);
-
-  const info: VeCollectInfo =
-    base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
 
   // ─── PLAN ───
   if (!info.plan) {
@@ -2327,8 +2386,10 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   }
 
   // ─── WAIT ───
+  let polledTasks = false;
   for (const state of tasks) {
     if (state.status !== 'dispatched') continue;
+    polledTasks = true;
     // Дочерняя джоба висит дольше 3ч (парсер умер/потерял строку) — вечно
     // не ждём: задача failed, сборка продолжается по остальным задачам.
     // У задач без dispatched_at (collect_info до появления штампа) таймаута
@@ -2350,7 +2411,7 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
       stageLog(ctx, `[base_collect] poll ${state.source} упал: ${state.error}`);
     }
   }
-  await persistCollectInfo(ctx, baseId, info);
+  if (polledTasks) await persistCollectInfo(ctx, baseId, info);
 
   const waiting = tasks.filter((t) => t.status === 'pending' || t.status === 'dispatched');
   if (waiting.length > 0) {
@@ -2470,19 +2531,25 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   // пометке строк (_email_status) при финальной записи: null, когда
   // конструктор не запускался / вернул пусто.
   let finalEmailStatuses: Array<string | null> | null = null;
-  const construct = info.construct;
+  // Это реальные кандидаты после дедупа, ещё не готовые получатели. row_count
+  // остаётся счётчиком финальных строк, а finished_at до финала не публикуем.
+  const candidateStats = { ...stats };
+  delete candidateStats.finished_at;
+  const candidateStatsChanged = !sameCollectSnapshot(info.stats, candidateStats);
+  info.stats = candidateStats;
+  let construct = info.construct;
   if ((!construct || construct.status === 'dispatched') && needsConstruct(merged)) {
     if (!construct?.bc_job_id) {
       // DISPATCH-CONSTRUCT: джоба конструктора (воркер baseConstructor клеймит
       // pending), её id — в collect_info.construct; дальше WAIT с паузой 60с.
-      const { bcJobId, locale } = await dispatchConstructJob({
+      const { bcJobId, locale, construct: queuedConstruct } = await dispatchConstructJob({
         ctx,
         ownerId: project.created_by,
         baseLabel: base.filename ?? baseId,
         rows: merged,
         market,
       });
-      info.construct = { bc_job_id: bcJobId, status: 'dispatched', dispatched_at: new Date().toISOString() };
+      info.construct = queuedConstruct;
       await persistCollectInfo(ctx, baseId, info);
       stageLog(ctx, `[base_collect] construct: создана base_constructor_jobs ${bcJobId} (${merged.length} строк, locale ${locale})`);
       await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
@@ -2494,8 +2561,17 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     }
 
     // WAIT-CONSTRUCT: опрос BC-джобы до терминального статуса.
-    const bc = await readConstructJobStatus(ctx, construct.bc_job_id);
+    const bcJobId = construct.bc_job_id;
+    const bc = await readConstructJobStatus(ctx, bcJobId);
     const bcStatus = bc?.status ?? 'failed';
+    if (bc && (candidateStatsChanged || !sameCollectSnapshot(construct.progress, bc.progress))) {
+      // Терминальный BC-снимок тоже только информационный: status остаётся
+      // dispatched до атомарной записи импортированных строк в финале ниже.
+      // Иначе рестарт между импортом и записью пропустит импорт/валидацию.
+      construct = { ...construct, progress: bc.progress };
+      info.construct = construct;
+      await persistCollectInfo(ctx, baseId, { ...info });
+    }
     if (bcStatus === 'completed' || bcStatus === 'failed' || bcStatus === 'cancelled') {
       // Джоба могла быть поставлена до обязательного split_emails. Её
       // row-level validation status нельзя безопасно прикрепить к первому
@@ -2511,9 +2587,7 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
           market,
         });
         info.construct = {
-          bc_job_id: replacement.bcJobId,
-          status: 'dispatched',
-          dispatched_at: new Date().toISOString(),
+          ...replacement.construct,
           note: `legacy constructor job ${construct.bc_job_id} пересобирается с split_emails`,
         };
         await persistCollectInfo(ctx, baseId, info);
@@ -2531,7 +2605,7 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
       }
       // IMPORT: failed/cancelled базу НЕ валит — импортируем частичный data,
       // если он есть, иначе идём в analyzing без обогащения.
-      const imported = await importConstructRows(ctx, construct.bc_job_id);
+      const imported = await importConstructRows(ctx, bcJobId);
       const failNote =
         bcStatus === 'completed'
           ? null
