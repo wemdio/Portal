@@ -899,6 +899,15 @@ services:
   # accountConflict.ts). Проверка конфликта смотрит только в
   # tg_outreach_campaigns и второй процесс парсера увидеть не может.
   # Единственность держится этим container_name и последовательным деплоем.
+  #
+  # stop_grace_period 30 с (было 30 мин): доигрывать обход в останавливаемом
+  # контейнере больше не нужно — задача возобновляется с чекпойнта, а аренда
+  # отпускается за секунды (app/worker/tgParser.ts). Тридцати секунд хватает на
+  # два прохода освобождения аренды с контрольным чтением (~3 с) и на
+  # shutdownGraceMs=12 с, за которые обход обрывается и client.disconnect()
+  # закрывает сессию Telegram — до того, как новый контейнер подключится тем же
+  # аккаунтом. Прежние 30 минут ровно на столько и растягивали каждый деплой,
+  # заставший работающий обход.
   worker-tg-parser:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-tg-parser
@@ -916,7 +925,7 @@ services:
       - TG_TARGET_SESSION=${TG_TARGET_SESSION}
     depends_on:
       - telegram-bot-api
-    stop_grace_period: 30m
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:
