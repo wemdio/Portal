@@ -7,10 +7,18 @@
  *
  * Сборка: esbuild с --conditions=react-server (нейтрализует server-only).
  *
- * ВАЖНО. Этот файл — ветка `WORKER_KIND=all` в worker/runner.ts, и на проде она
- * НЕ ЗАПУСКАЕТСЯ: каждый сервис в docker-compose.prod.yml либо задаёт
+ * ВАЖНО. Этот файл — ветка `WORKER_KIND=all` в worker/runner.ts, и НА ПРОДЕ она
+ * не запускается: каждый сервис в docker-compose.prod.yml либо задаёт
  * конкретный WORKER_KIND, либо переопределяет command на свой бандл (проверено
- * по всем сервисам на образе portal-worker). Из-за этого файл легко пропустить
+ * по всем сервисам на образе portal-worker). Мёртвой веткой она при этом НЕ
+ * является: `all` — это значение по умолчанию в самом образе
+ * (Dockerfile.worker: `ENV WORKER_KIND=all`), и сюда попадают сервис `worker`
+ * из локального docker-compose.yml и любой ручной `docker run` без
+ * WORKER_KIND. После 02.09.2026 такой контейнер молча НЕ обслуживает четыре
+ * очереди ниже — их обслуживают только выделенные воркеры (worker-hh,
+ * worker-eng-hiring, worker-search, worker-yandexmaps).
+ *
+ * Из-за того, что на проде эта ветка не поднимается, файл легко пропустить
  * при правках — и 02.09.2026 отсюда убраны очереди, переехавшие на единый
  * жизненный цикл задач (app/src/lib/jobs/lifecycle.ts): parser_jobs,
  * search_parser_jobs, yandex_maps_jobs и yandex_direct_jobs. Их захват здесь

@@ -53,7 +53,7 @@
 - Modify: `docker-compose.prod.yml` (сервис `worker-search`)
 - Modify: `drain-worker.sh` (убрать `search_parser_jobs` из `tracked_tables`)
 
-- [ ] **Step 1: Принять контекст в раннере**
+- [x] **Step 1: Принять контекст в раннере**
 
 В `app/src/lib/search/searchParserWorker.ts` добавить рядом с существующими экспортами:
 
@@ -82,7 +82,7 @@ export interface SearchParserRunContext {
 
 Все терминальные записи в этом файле (`completed` и `failed`) ограничить владельцем: добавить `.eq('run_token', ctx.runToken)` там, где `ctx` есть, и оставить как есть, когда его нет.
 
-- [ ] **Step 2: Переписать воркер**
+- [x] **Step 2: Переписать воркер**
 
 Заменить содержимое `app/worker/search.ts`:
 
@@ -174,13 +174,13 @@ main().catch((err) => {
 
 Сверить `MAX_CONCURRENCY` с текущим значением в файле до правки и сохранить его, а не выдумывать новое.
 
-- [ ] **Step 3: Compose и drain**
+- [x] **Step 3: Compose и drain**
 
 `docker-compose.prod.yml`, сервис `worker-search`: `stop_grace_period: 30m` → `30s`, добавить `- SEARCH_LEASE_SECONDS=${SEARCH_LEASE_SECONDS:-180}` и `- SEARCH_STALL_MINUTES=${SEARCH_STALL_MINUTES:-10}` в `environment`.
 
 `drain-worker.sh`: убрать `"search_parser_jobs"` из `tracked_tables`; в `is_lifecycle_managed_worker` добавить ветку `worker-search`.
 
-- [ ] **Step 4: Проверить**
+- [x] **Step 4: Проверить**
 
 ```bash
 cd app && npm run typecheck:strict && npx jest tests/lib --silent
@@ -194,7 +194,7 @@ Expected: без вывода.
 
 Плюс сборка воркера тем же вызовом esbuild, что и `Dockerfile.worker` (platform node, target node22, `--conditions=react-server`, `--external:playwright`), на `worker/search.ts`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/worker/search.ts app/src/lib/search/searchParserWorker.ts docker-compose.prod.yml drain-worker.sh
@@ -217,7 +217,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `docker-compose.prod.yml` (сервис `worker-sales-chat-logger`)
 - Modify: `drain-worker.sh`
 
-- [ ] **Step 1: Отделить планирование от выполнения**
+- [x] **Step 1: Отделить планирование от выполнения**
 
 В `app/worker/salesChatLogger.ts` `pollOnce` сегодня делает две вещи: заводит запланированный запуск (`ensureScheduledRun`) и выполняет его. Планирование остаётся вне раннера. Новая структура `pollOnce`:
 
@@ -228,7 +228,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   };
 ```
 
-- [ ] **Step 2: Перевести выполнение в раннер**
+- [x] **Step 2: Перевести выполнение в раннер**
 
 Тело `runSync` становится функцией `run(job, ctx)`. Внутри цикла по аккаунтам после инкремента `accounts_done` добавить:
 
@@ -264,18 +264,18 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 Держать `concurrency: 1` и одну реплику: живые сессии Telegram нельзя открывать из двух процессов (тот же класс проблем, что описан у `worker-tg-parser` в compose).
 
-- [ ] **Step 3: Compose и drain**
+- [x] **Step 3: Compose и drain**
 
 `worker-sales-chat-logger`: `stop_grace_period: 5m` → `30s`; добавить переменные аренды и порога. В `drain-worker.sh` добавить сервис в `is_lifecycle_managed_worker` (в `tracked_tables` этой таблицы нет, проверить и не трогать лишнего).
 
-- [ ] **Step 4: Проверить**
+- [x] **Step 4: Проверить**
 
 ```bash
 cd app && npm run typecheck:strict && npx jest tests/lib --silent
 ```
 Expected: чисто. Плюс esbuild на `worker/salesChatLogger.ts` и `bash -n drain-worker.sh`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/worker/salesChatLogger.ts docker-compose.prod.yml drain-worker.sh
@@ -299,7 +299,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `docker-compose.prod.yml` (сервис `worker-yandexmaps`)
 - Modify: `drain-worker.sh`
 
-- [ ] **Step 1: Снять восстановление и сторожа**
+- [x] **Step 1: Снять восстановление и сторожа**
 
 Из `app/worker/yandexmaps.ts` удалить:
 - блок восстановления свежих `running` → `pending`;
@@ -313,7 +313,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 Поведенческое изменение, которое надо описать в комментарии и в отчёте: задачи больше не уходят в `failed` с формулировкой `stuck_recovered`. Вместо этого зависшая задача перестаёт продлевать аренду и её подбирает следующий опрос, продолжая с сохранённого места. Пользователь вместо ошибки видит продолжение.
 
-- [ ] **Step 2: Раннер**
+- [x] **Step 2: Раннер**
 
 ```ts
   const runner = createJobRunner<{ id: string; job_type?: string }, never>({
@@ -337,22 +337,22 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 Порог остановки прогресса: у ЯКарт один шаг между записями прогресса может быть длинным (медленные прокси). Посмотреть, как часто пишется прогресс в `app/src/lib/parsers/yandexMapsWorker.ts`, и выбрать порог с запасом от самого долгого нормального промежутка, но так, чтобы сумма (порог + аренда + опрос) оставалась ниже 20 минут монитора. Если запас не сходится, поднять `HEALTH_JOB_STUCK_MIN` и сказать об этом явно.
 
-- [ ] **Step 3: Чекпойнт и сигнал в раннере этапов**
+- [x] **Step 3: Чекпойнт и сигнал в раннере этапов**
 
 В `app/src/lib/parsers/yandexMapsWorker.ts` принять контекст (`signal`, `runToken`, `saveCheckpoint`), передавать `ctx.signal` в паузы и сетевые вызовы, и на границах (после порции ссылок, после каждой организации) звать `ctx.saveCheckpoint`. Содержимое чекпойнта минимальное: этап и счётчики, поскольку фактическое продолжение и так считается из сохранённых организаций и ссылок. Терминальные записи ограничить `run_token`, как в этапе 1.
 
-- [ ] **Step 4: Compose и drain**
+- [x] **Step 4: Compose и drain**
 
 `worker-yandexmaps`: `stop_grace_period: 60s` оставить (60 секунд нужны браузеру на закрытие), добавить переменные аренды и порога. Healthcheck по пульсу и метку autoheal НЕ трогать. В `drain-worker.sh` убрать `yandex_maps_jobs` из `tracked_tables` и добавить сервис в `is_lifecycle_managed_worker`.
 
-- [ ] **Step 5: Проверить**
+- [x] **Step 5: Проверить**
 
 ```bash
 cd app && npm run typecheck:strict && npx jest tests/lib tests/migrations --silent
 ```
 Expected: чисто. Плюс esbuild на `worker/yandexmaps.ts`, `bash -n drain-worker.sh`, и разбор `docker-compose.prod.yml` через js-yaml.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/worker/yandexmaps.ts app/src/lib/parsers/yandexMapsWorker.ts docker-compose.prod.yml drain-worker.sh
@@ -380,7 +380,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `docker-compose.prod.yml`
 - Modify: `drain-worker.sh`
 
-- [ ] **Step 1: Два раннера в одном воркере**
+- [x] **Step 1: Два раннера в одном воркере**
 
 `app/worker/hh.ts` обслуживает несколько таблиц. Завести отдельный `createJobRunner` на каждую и опрашивать их по очереди в одном `pollOnce`:
 
@@ -413,7 +413,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 Оба останавливать в обработчике сигнала и после цикла. Убрать из файла восстановление `processing` старше 30 минут для обеих таблиц и глобальные мьютексы `archiveJobActive` / `yandexDirectJobActive` — их роль теперь играет `concurrency: 1` у соответствующего раннера. Проверить, что мьютексы больше нигде не читаются.
 
-- [ ] **Step 2: Курсоры**
+- [x] **Step 2: Курсоры**
 
 `app/src/lib/parsers/hhArchive/runner.ts`: цикл по чанкам уже пишет `processed_chunks`; принять `ctx`, после каждого чанка звать `ctx.saveCheckpoint({ processed_chunks })`, а при старте пропускать первые `ctx.checkpoint?.processed_chunks` чанков. Порядок чанков обязан быть детерминированным — проверить и, если он зависит от порядка выборки из базы, добавить явную сортировку и сказать об этом.
 
@@ -421,7 +421,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 В обоих: передавать `ctx.signal` в паузы и запросы; при остановке выходить без терминальной записи; терминальные записи ограничить `run_token`.
 
-- [ ] **Step 3: Монитор здоровья — В ТОМ ЖЕ КОММИТЕ, не отдельным**
+- [x] **Step 3: Монитор здоровья — В ТОМ ЖЕ КОММИТЕ, не отдельным**
 
 `services/health-check/main.py`, записи `JobMonitorSpec` для `hh_archive_jobs` и `yandex_direct_jobs`: снять `updated_column="updated_at"` у обеих и добавить `"processing"` в оба набора `active_statuses`.
 
@@ -433,13 +433,13 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 Прецедент, ради которого шаг вынесен в тот же коммит: при переводе Яндекс.Карт (задача 3) ровно это и обнаружилось — правка воркера без правки монитора оставляла бы очередь без единственного внешнего наблюдателя, и заметить это по логам было бы нечем.
 
-- [ ] **Step 4: Compose и drain**
+- [x] **Step 4: Compose и drain**
 
 Сроки остановки для `worker-hh` привести к 30 секундам. Отдельно отметить в комментарии, что прежние 3 часа не соблюдались ни разу: скрипт остановки всегда бил через 15 секунд.
 
 `drain-worker.sh`: `hh_archive_jobs` и `yandex_direct_jobs` в `tracked_tables` отсутствуют — проверить и не трогать. Сервис `worker-hh` в `is_lifecycle_managed_worker` НЕ добавлять на этом шаге: он всё ещё обслуживает `parser_jobs`, которые переводятся в задаче 5.
 
-- [ ] **Step 5: Проверить**
+- [x] **Step 5: Проверить**
 
 ```bash
 cd app && npm run typecheck:strict && npx jest tests/lib --silent
@@ -447,7 +447,7 @@ cd services/health-check && python -c "import ast,sys; ast.parse(open('main.py',
 ```
 Expected: чисто. Плюс esbuild на `worker/hh.ts`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/worker/hh.ts app/src/lib/parsers/hhArchive/runner.ts app/src/lib/parsers/yandexDirect/runner.ts services/health-check/main.py docker-compose.prod.yml
@@ -472,7 +472,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `docker-compose.prod.yml`
 - Modify: `drain-worker.sh`
 
-- [ ] **Step 1: Общая фабрика раннера**
+- [x] **Step 1: Общая фабрика раннера**
 
 `app/worker/parserJobs.ts` сейчас экспортирует `claimParserJob` и `recoverRunningParserJobs`. Заменить их одной фабрикой:
 
@@ -498,24 +498,33 @@ export function createParserJobRunner(opts: {
 
 Фильтр по `parser_type` — это отбор кандидатов, которого сейчас в библиотеке нет. Проверить `app/src/lib/jobs/lifecycle.ts`: если опции фильтра по дополнительному условию нет, добавить её (`where?: Array<[column, value]>`, применяемая и к выборке кандидата, и к CAS-обновлению в обоих путях захвата) и описать в докблоке. Это правка библиотеки — вынести её отдельным коммитом ПЕРЕД правкой воркеров и прогнать `npx jest tests/lib/jobLifecycle.test.ts`.
 
-- [ ] **Step 2: Подключить оба воркера**
+- [x] **Step 2: Подключить оба воркера**
 
 `app/worker/hh.ts` и `app/worker/engHiring.ts` создают свои раннеры через фабрику с нужным набором типов и своим `run`, который вызывает существующие `runHHParserJob` / `runAtsParserJob` / `runEngHiringParserJob`. Убрать `recoverRunningParserJobs` из обоих. Убрать мьютексы `atsJobActive` и `engHiringJobActive`.
 
 Порог прогресса: `parser_jobs` пишет `total_parsed` и `progress_percent`. Взять `total_parsed` как колонку прогресса; убедиться, что она двигается регулярно, и подобрать порог по тем же правилам суммы.
 
-- [ ] **Step 3: Compose и drain**
+**ОТСТУПЛЕНИЕ ПРИ РЕАЛИЗАЦИИ (02.09.2026, коммит 6bfd4c81): порог прогресса НЕ подключён ни у одного из трёх типов — ни `total_parsed`, ни `progress_percent`.** Задачам 6 и 7 это не переигрывать. Проверка по коду дала числа, которые не влезают в бюджет (порог + аренда 3 мин + опрос 30 с < HEALTH_JOB_STUCK_MIN 20 мин, то есть порог ≤ ~16,5 мин):
+
+- `total_parsed` у ENG-найма пишется трижды за всю задачу (0, 0 и итог), а у ATS двигается раз в 25 бордов и только если среди них нашлась вакансия; весь этап обогащения (до 300 компаний) не двигает его вовсе. Как признак живости не годится.
+- `progress_percent` двигается у всех трёх, но законные промежутки больше потолка: у HH этап разбиения ограничен `HH_PARTITION_TIMEOUT_MS` (5 мин) + 30 с на термин сверх трёх — до 13,5 мин на запросе из 20 терминов; у ENG один процентный пункт при `companies_limit` 25000 стоит ~450 бордов, а пейсинг workday — 2 борда в 1,5 с, то есть от 5,7 мин до часа на пункт; у ATS на этапе обогащения процент пишется раз в 20 компаний, каждая из которых может встать на Clearbit.
+
+Раннеры у типов при этом РАЗДЕЛЬНЫЕ (`hh.ts` заводит свой на `hh_vacancies` и свой на `ats_companies` — у них разная параллельность), так что настройка не общая; ATS не получил порог по причине выше, а не из-за одной настройки на воркер.
+
+Цена ложного срабатывания здесь выше пропуска: курсора нет, брошенная аренда означает повтор задачи С НУЛЯ и тысячи внешних запросов заново. Живость работы оставлена монитору здоровья: спецификация `parser_jobs` в `services/health-check/main.py` считает простой по отпечатку из пяти колонок прогресса (продление аренды в него не входит) и шлёт «Долго висит» через 20 минут — правки монитора эта задача не потребовала. Подробности и арифметика — в докблоке `createParserJobRunner` (`app/worker/parserJobs.ts`).
+
+- [x] **Step 3: Compose и drain**
 
 Сроки остановки `worker-hh` и `worker-eng-hiring` — 30 секунд. Добавить оба сервиса в `is_lifecycle_managed_worker` и убрать `parser_jobs` из `tracked_tables`.
 
-- [ ] **Step 4: Проверить**
+- [x] **Step 4: Проверить**
 
 ```bash
 cd app && npm run typecheck:strict && npx jest --silent
 ```
 Expected: весь набор зелёный. Плюс esbuild на `worker/hh.ts` и `worker/engHiring.ts`, `bash -n drain-worker.sh`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/worker/parserJobs.ts app/worker/hh.ts app/worker/engHiring.ts docker-compose.prod.yml drain-worker.sh

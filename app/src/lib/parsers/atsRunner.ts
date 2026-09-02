@@ -186,6 +186,18 @@ export async function runAtsParserJob(jobId: string, ctx?: ParserJobRunContext):
     }
 
     // 5) Persist (idempotent: clear prior rows for this job, then upsert).
+    //
+    // Единственная запись этого раннера, которую НЕЛЬЗЯ оградить жетоном:
+    // строки чужой таблицы, у них нет run_token. И она не идемпотентна по
+    // отношению к соседу: shutdown() библиотеки отпускает аренду, не дожидаясь
+    // конца тела (это её контракт), поэтому новый владелец может начать задачу,
+    // пока старое тело ещё доигрывает. Если старое тело попадёт в этот delete
+    // внутри такого окна, оно снесёт строки, которые новый владелец уже
+    // записал. Терпим осознанно: окно ограничено сроком остановки контейнера
+    // (docker stop --timeout 15), а новый владелец идёт задачу с нуля и
+    // допишет всё заново. Та же форма у ENG-найма (saveResults чистит
+    // eng_hiring_vacancies перед записью); у HH-парсера её нет — он только
+    // upsert'ит.
     await setProgress({ progress_stage: 'saving', progress_percent: 96 });
     await db.from('ats_companies').delete().eq('job_id', jobId);
     const rows = leads.map((l) => ({

@@ -117,6 +117,20 @@ export async function runHHParserJob(
 
   if (jobError || !job) {
     console.error('[hhRunner] Job not found:', jobId);
+    // Терминальный статус обязателен даже здесь. Библиотека зовётся с
+    // manageTerminalStatus: false и снимает владение только со строки, которая
+    // УЖЕ не running; молчаливый выход оставлял бы задачу в работе с живой на
+    // вид арендой, её через три минуты перехватывал бы сосед, упирался бы в тот
+    // же выход — и после трёх перехватов строка падала бы с чужой причиной
+    // «исполнитель терял задачу 3 раза подряд». Десять минут и неверный
+    // диагноз вместо одной честной записи. Если строки нет вовсе, запись —
+    // безобидный no-op.
+    await updateJob({
+      status: 'failed',
+      completed_at: new Date().toISOString(),
+      error_message: `Не удалось прочитать задачу: ${jobError?.message ?? 'строка не найдена'}`,
+      progress_stage: 'failed',
+    });
     return;
   }
 
@@ -173,6 +187,16 @@ export async function runHHParserJob(
 
   if (startError) {
     await logError('parser.hh.execute.start_failed', startError, { jobId }, logMeta);
+    // Та же причина, что и у «задача не найдена» выше: выйти молча — значит
+    // оставить строку в running и получить через три перехвата failed с
+    // неверной причиной. Запись ограждена жетоном: если стартовая правка не
+    // прошла из-за перехвата строки, не пройдёт и эта, и мы ничего не испортим.
+    await updateJob({
+      status: 'failed',
+      completed_at: new Date().toISOString(),
+      error_message: `Не удалось начать задачу: ${startError.message}`,
+      progress_stage: 'failed',
+    });
     return;
   }
 
