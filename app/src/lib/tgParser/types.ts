@@ -61,8 +61,13 @@ export interface ParseOptions {
   signal?: AbortSignal;
   /** Пользователи, набранные до перезапуска (из чекпойнта): подсаживаются в накопитель. */
   initialUsers?: ParsedUser[];
-  /** Источник полностью обработан (или окончательно пропущен) — момент для чекпойнта. */
-  onLinkDone?: (link: string, usersSoFar: ParsedUser[]) => void | Promise<void>;
+  /**
+   * Источник полностью обработан (или окончательно пропущен) — момент для чекпойнта.
+   * failure заполнен, если источник не открылся: возобновление обязано помнить
+   * такие ссылки, иначе итоговый вердикт задачи после перезапуска будет мягче
+   * настоящего.
+   */
+  onLinkDone?: (link: string, usersSoFar: ParsedUser[], failure?: string) => void | Promise<void>;
 }
 
 export interface ParseProgress {

@@ -37,7 +37,12 @@ export type TgParserJobConfig = {
  * Гранулярность — источник: он идёт от минуты до сорока, а внутри этапа
  * восстанавливать позицию нечем (GramJS-итераторы курсор наружу не отдают).
  */
-export type TgParserCheckpoint = { done_links: string[]; users: ParsedUser[] };
+export type TgParserCheckpoint = {
+  done_links: string[];
+  users: ParsedUser[];
+  /** Источники, которые не открылись, в формате «ссылка — причина». */
+  failed_links?: string[];
+};
 
 export interface TgParserRunContext {
   signal: AbortSignal;
@@ -123,6 +128,44 @@ function stripHeavyText(users: ParsedUser[]): ParsedUser[] {
     Сообщения: '',
     Биография: '',
   }));
+}
+
+/**
+ * Потолок чекпойнта. Строку переписываем целиком после КАЖДОГО источника, а
+ * запись идёт обычным PostgREST-запросом — тело в единицы мегабайт проходит,
+ * в десятки уже нет. 4 МБ выбраны как заведомо безопасный конверт под типовым
+ * лимитом тела запроса (единицы-десятки МБ) с запасом на служебные поля.
+ */
+const CHECKPOINT_MAX_BYTES = Number(process.env.TG_PARSER_CHECKPOINT_MAX_BYTES ?? '4000000');
+
+function jsonBytes(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8');
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+/**
+ * Ужать список под потолок ДЕТЕРМИНИРОВАННО — по измеренному размеру, а не на
+ * глазок, ровно как persistDoneUsersWithRetry делает это для финальной записи.
+ *
+ * `Сообщения` держат до 12 000 символов на человека, `Биография` — до 4 000, а
+ * целевой обход набирает до 50 000 контактов: без обрезки это сотни мегабайт
+ * после каждого источника. Важно, что перебор размера не даёт ошибки:
+ * saveCheckpoint отвечает про владение, а не про запись, и слишком тяжёлый
+ * чекпойнт просто молча не сохранится — возобновление тогда не работает вовсе.
+ * Поэтому лучше отдать людей без текстов, чем не отдать никого.
+ *
+ * `fits: false` означает, что не помещается даже самый лёгкий вариант (десятки
+ * тысяч контактов): сжимать дальше нечем, не потеряв самих людей, — отдаём как
+ * есть и говорим об этом в журнале.
+ */
+function fitUsersInCheckpoint(users: ParsedUser[]): { users: ParsedUser[]; fits: boolean; degraded: boolean } {
+  const light = sanitizeUsersForJson(stripMessages(users));
+  if (jsonBytes(light) <= CHECKPOINT_MAX_BYTES) return { users: light, fits: true, degraded: false };
+  const lightest = sanitizeUsersForJson(stripHeavyText(users));
+  return { users: lightest, fits: jsonBytes(lightest) <= CHECKPOINT_MAX_BYTES, degraded: true };
 }
 
 function truncateText(s: string, max = 800): string {
@@ -227,6 +270,41 @@ async function writeJobLog(args: {
   }
 }
 
+/**
+ * «Чекпойнт не записался» — в журнал самой задачи, а не только в stdout.
+ *
+ * Отдельная экспортируемая функция, а не поле в TgParserRunContext: библиотека
+ * зовёт onCheckpointUnpersisted на уровне бегунка и знает только jobId, тогда
+ * как ctx создаётся под конкретный запуск. Так воркеру (задача 6) хватает
+ * одной строчки `onCheckpointUnpersisted: logTgParserCheckpointUnpersisted`,
+ * без собственной карты jobId → колбэк и без её времени жизни. Поля задачи
+ * дочитываем сами: путь редкий, лишний SELECT на нём не жалко.
+ */
+export async function logTgParserCheckpointUnpersisted(jobId: string): Promise<void> {
+  const db = supabaseAdmin;
+  if (!db) return;
+  try {
+    const { data: job } = await db
+      .from('tg_parser_jobs')
+      .select('user_id, config')
+      .eq('id', jobId)
+      .single();
+    if (!job) return;
+    const cfg = (job.config ?? {}) as TgParserJobConfig;
+    await writeJobLog({
+      jobId,
+      jobUserId: job.user_id,
+      isTarget: Boolean(cfg.is_target),
+      accountLabel: cfg.account_label ?? null,
+      level: 'warning',
+      message:
+        'Чекпойнт не сохранился: при перезапуске исполнителя часть обхода будет пройдена заново',
+    });
+  } catch {
+    // Диагностика не должна ронять воркер.
+  }
+}
+
 export async function runTgParserJob(jobId: string, ctx?: TgParserRunContext): Promise<void> {
   const db = supabaseAdmin;
   if (!db) {
@@ -259,7 +337,12 @@ export async function runTgParserJob(jobId: string, ctx?: TgParserRunContext): P
   const checkpoint = ctx?.checkpoint ?? null;
   const doneLinks = new Set<string>(checkpoint?.done_links ?? []);
   const remainingLinks = links.filter((l) => !doneLinks.has(l));
-  const seedUsers: ParsedUser[] = checkpoint?.users ?? [];
+  // Чекпойнт читаем из БД как чужие данные: запись без числового ID села бы в
+  // накопитель парсера ключом undefined и тихо сломала дедупликацию.
+  const seedUsers: ParsedUser[] = (checkpoint?.users ?? []).filter(
+    (u) => typeof u?.ID === 'number' && Number.isFinite(u.ID),
+  );
+  const failedLinks: string[] = checkpoint?.failed_links ?? [];
 
   await writeJobLog({
     jobId,
@@ -277,7 +360,10 @@ export async function runTgParserJob(jobId: string, ctx?: TgParserRunContext): P
       isTarget,
       accountLabel,
       level: 'info',
-      message: `Продолжаем с чекпойнта: источников обработано ${links.length - remainingLinks.length} из ${links.length}, контактов уже собрано ${seedUsers.length}`,
+      // Счётчик найденных после возобновления просядет: контакты недобранного
+      // источника отброшены вместе с ним и будут собраны заново. Говорим об
+      // этом сразу, иначе падение числа выглядит как потеря данных.
+      message: `Продолжаем после перезапуска: источников обработано ${links.length - remainingLinks.length} из ${links.length}, контактов уже собрано ${seedUsers.length}. Счётчик найденных может временно опуститься ниже прежнего значения — недобранный источник обходится заново`,
     });
   }
 
@@ -465,32 +551,50 @@ export async function runTgParserJob(jobId: string, ctx?: TgParserRunContext): P
     /**
      * Чекпойнт после каждого источника.
      *
-     * Сообщения в чекпойнт не кладём (stripMessages): поле держит до 12 000
-     * символов на человека, а целевой обход набирает до 50 000 человек — это
-     * сотни мегабайт в одной строке на КАЖДЫЙ источник, чего PostgREST не
-     * примет. Запись при этом best-effort и молча возвращает «владеем», так
-     * что слишком тяжёлый чекпойнт не сохранился бы вообще и продолжение
-     * работало бы вхолостую. Плата за компромисс: у людей, набранных ДО
-     * перезапуска, в итоге не будет текстов сообщений — ровно та же деградация,
-     * до которой финальная запись доходит сама под давлением размера, и она
+     * Размер держит fitUsersInCheckpoint: тексты сообщений (а при перегрузе и
+     * биографии) в чекпойнт не попадают. Плата: у людей, набранных ДО
+     * перезапуска, не будет этих полей в итоге — ровно та же деградация, до
+     * которой финальная запись доходит сама под давлением размера, и она
      * несопоставимо дешевле потери всего сорокаминутного обхода.
      */
-    const onLinkDone = async (link: string, usersSoFar: ParsedUser[]) => {
+    let warnedCheckpointOversize = false;
+    const onLinkDone = async (link: string, usersSoFar: ParsedUser[], failure?: string) => {
       doneLinks.add(link);
+      if (failure) failedLinks.push(`${link} — ${failure}`);
+      const fitted = fitUsersInCheckpoint(usersSoFar);
+      if (!fitted.fits && !warnedCheckpointOversize) {
+        warnedCheckpointOversize = true;
+        await writeJobLog({
+          jobId,
+          jobUserId,
+          isTarget,
+          accountLabel,
+          level: 'warning',
+          message:
+            'Слишком много контактов для чекпойнта: при перезапуске исполнителя часть обхода придётся пройти заново',
+        });
+      }
       // Ответ про владение игнорируем намеренно: при false библиотека уже
-      // взвела ctx.signal, и обход прервётся на проверке следующего источника —
-      // отдельный механизм остановки был бы вторым источником правды.
+      // взвела ctx.signal, и обход прервётся на ближайшем контакте — отдельный
+      // механизм остановки был бы вторым источником правды.
       await ctx?.saveCheckpoint({
         done_links: [...doneLinks],
-        users: sanitizeUsersForJson(stripMessages(usersSoFar)),
+        users: fitted.users,
+        failed_links: failedLinks,
       });
     };
 
     let result: ParseResult;
     if (remainingLinks.length === 0 && checkpoint) {
       // Все источники закрыты ещё до перезапуска — обходить нечего, а пустой
-      // список парсер счёл бы ошибкой конфигурации.
-      result = { status: 'ok', users: seedUsers };
+      // список парсер счёл бы ошибкой конфигурации. Вердикт восстанавливаем
+      // тот же, что выдал бы непрерванный обход: без этого задача, у которой
+      // не открылся НИ ОДИН источник, после перезапуска отчиталась бы
+      // «готово, 0 контактов» вместо ошибки.
+      result =
+        seedUsers.length === 0 && failedLinks.length > 0
+          ? { status: 'error', error: `не удалось открыть ни один источник: ${failedLinks.join('; ')}` }
+          : { status: 'ok', users: seedUsers };
     } else {
       result = await parseTgUsers({
         links: remainingLinks,
@@ -509,6 +613,20 @@ export async function runTgParserJob(jobId: string, ctx?: TgParserRunContext): P
         max_contacts,
         onProgress,
       });
+    }
+
+    // Провалы источников, случившиеся ДО перезапуска, парсер этого запуска уже
+    // не видит: он получил только оставшиеся ссылки. Без этого задача, у
+    // которой половина источников не открылась, после перезапуска отчиталась бы
+    // безупречным «успешно завершено». Ветка срабатывает только на чистом 'ok',
+    // то есть когда в ЭТОМ запуске провалов не было и двойного счёта нет.
+    if (result.status === 'ok' && failedLinks.length > 0) {
+      result = {
+        status: 'partial',
+        users: result.users,
+        stop_reason: 'error',
+        error: `пропущены источники (${failedLinks.length} из ${links.length}): ${failedLinks.join('; ')}`,
+      };
     }
 
     // Нас останавливают (деплой или потеря аренды) — терминальный статус НЕ

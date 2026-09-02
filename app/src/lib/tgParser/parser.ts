@@ -435,9 +435,14 @@ async function parsePostComments(
   const usersMap = new Map<number, { user: Api.User; messages: string[] }>();
   for await (const post of client.iterMessages(entity, { limit: opts.message_limit })) {
     beat();
+    // Этап перебора постов не сливает ни одного контакта до самого конца, и
+    // проверка в mergeUser его не останавливает. Без этих двух выходов сессия
+    // Telegram жила бы после потери задачи — см. комментарий в buildMergeUser.
+    if (opts.signal?.aborted) return;
     if (!post?.replies?.comments) continue;
     try {
       for await (const reply of client.iterMessages(entity, { replyTo: post.id, limit: 100 })) {
+        if (opts.signal?.aborted) return;
         if (!reply?.senderId || !reply.message) continue;
         const sender = await reply.getSender();
         if (!sender || (sender as Api.User).className !== 'User' || (sender as Api.User).bot) continue;
@@ -477,6 +482,22 @@ function buildMergeUser(
   stopRef: { reason: ParseStopReason | null },
 ): (u: ParsedUser) => Promise<boolean> {
   return async (u: ParsedUser) => {
+    /*
+     * Сигнал проверяем здесь, на каждом контакте, а не только сторожевым
+     * таймером раз в 30 секунд.
+     *
+     * shutdown() отпускает аренду через пару секунд и не ждёт конца обхода:
+     * задачу почти сразу может забрать сосед. Если мы к этому моменту всё ещё
+     * держим соединение, сосед подключится ТЕМ ЖЕ аккаунтом и Telegram за доли
+     * секунды ответит AUTH_KEY_DUPLICATED (см. accountConflict.ts) — падают оба
+     * обхода, а на повторах сессия сгорает и требует переавторизации. Штатный
+     * `if (!(await mergeUser(...))) return;` есть в каждом этапе, поэтому одна
+     * эта проверка сокращает окно с полуминуты до одного контакта.
+     */
+    if (opts.signal?.aborted) {
+      stopRef.reason = 'interrupted';
+      return false;
+    }
     if (stopRef.reason) return false;
     const ex = allUsers.get(u.ID);
     if (ex) {
@@ -569,6 +590,9 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
         }
       };
 
+      /** Причина, по которой источник не открылся, — её же уносим в чекпойнт. */
+      let linkFailure: string | null = null;
+
       // Источник, который не открылся, — не повод бросать остальные. Раньше
       // весь цикл стоял под одним try: 12.08.2026 первая же ссылка не
       // зарезолвилась, и задача упала целиком, не попробовав ни одной другой.
@@ -593,6 +617,7 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
         // самое, а на флуд-лимите перебор источников его только усугубит.
         if (isAccountLevelFailure(e)) throw e;
         const msg = e instanceof Error ? e.message : String(e);
+        linkFailure = msg;
         linkFailures.push({ link: trimmed, error: msg });
         await report(opts, { link: trimmed, stage: 'messages', phase: 'done', total: totalSoFar() });
       }
@@ -604,7 +629,7 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
       // готовым и его люди пропали бы навсегда.
       if (!stopRef.reason && opts.onLinkDone) {
         try {
-          await opts.onLinkDone(trimmed, [...allUsers.values()]);
+          await opts.onLinkDone(trimmed, [...allUsers.values()], linkFailure ?? undefined);
         } catch {
           // Сбой чекпойнта не должен ронять обход: в худшем случае задача
           // переиграет этот источник, а не потеряет всю работу.
