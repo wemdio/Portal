@@ -1587,6 +1587,17 @@ export async function runCampaignLoop(
    * остальные восемнадцать рассылали с той же очереди.
    */
   const resolveBlockedRounds = new Map<string, number>();
+
+  /**
+   * Контакты, уже разобранные кем-то в текущем проходе по аккаунтам.
+   *
+   * Порция первого касания добирается до нормы, а неудачный контакт остаётся
+   * `pending`. Без общей отметки следующий аккаунт того же прохода взял бы
+   * ровно те же ники — и повторил бы ту же работу, только с другого номера.
+   * Набор обнуляется на каждом новом проходе: через сутки контакт стоит
+   * попробовать снова, но не через десять минут.
+   */
+  let claimedContacts = new Set<string>();
   /** После скольких пустых кругов подряд уводим аккаунт на паузу. */
   const RESOLVE_BLOCKED_LIMIT = 2;
   // Stays true while we're inside a sleep_periods window so we can emit a
@@ -1621,6 +1632,7 @@ export async function runCampaignLoop(
       }
 
       let tlSchemaErrorCount = 0;
+      claimedContacts = new Set<string>();
       log('info', `Начинаю обход ${clients.length} аккаунтов`);
 
       for (const entry of clients) {
@@ -2152,6 +2164,7 @@ export async function runCampaignLoop(
             shouldStop,
             onProgress: tick,
             gapMs: randomRange(tg.read_reply_delay_range) * 1000,
+            claimed: claimedContacts,
           });
           if (ft.sent || ft.skipped || ft.postponed) {
             log(
