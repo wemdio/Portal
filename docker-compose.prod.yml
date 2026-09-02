@@ -799,6 +799,13 @@ services:
     networks:
       - portal-network
 
+  # РОВНО ОДНА РЕПЛИКА И ОДИН container_name — это инвариант, а не оформление.
+  # Воркер держит живое MTProto-соединение sales-chat-аккаунтами; два процесса
+  # на одном Telegram-аккаунте дают AUTH_KEY_DUPLICATED и сжигают сессию (та же
+  # причина, что у worker-tg-parser; см. lib/tgParser/accountConflict.ts).
+  # Именованный контейнер гарантирует последовательный recreate: новый не
+  # поднимется, пока старый не отпустил имя. Отсюда же concurrency=1 в самом
+  # воркере (app/worker/salesChatLogger.ts).
   worker-sales-chat-logger:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-sales-chat-logger
@@ -817,8 +824,13 @@ services:
       - MAIN_S3_ACCESS_KEY_ID=${MAIN_S3_ACCESS_KEY_ID}
       - MAIN_S3_SECRET_ACCESS_KEY=${MAIN_S3_SECRET_ACCESS_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - SALES_CHAT_LEASE_SECONDS=${SALES_CHAT_LEASE_SECONDS:-180}
       - WORKER_KIND=saleschatlogger
-    stop_grace_period: 5m
+    # 30 с вместо прежних 5 минут: воркер на едином жизненном цикле по SIGTERM
+    # отпускает аренду за пару секунд, а синк продолжается с курсора по
+    # аккаунтам в следующем захвате. Ждать конца текущего аккаунта незачем —
+    # он идёт минутами-часами и в любой grace всё равно не уложится.
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:
