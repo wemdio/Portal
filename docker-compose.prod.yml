@@ -113,7 +113,10 @@ services:
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       # HH parser jobs routinely scrape tens of thousands of vacancies; 15min was
       # a copy-paste leftover from email-validation that started killing real jobs
-      # at 44-68% progress. Bumped to 180 (3h) — matches stop_grace_period above.
+      # at 44-68% progress. Bumped to 180 (3h) — matches stop_grace_period below.
+      # Внимание: scheduled deploy обрезает это до 15 секунд (шаг 5
+      # .semaphore/scheduled-deploy.yml), grace целиком отрабатывает только при
+      # ручном `docker compose stop`.
       - WORKER_DRAIN_TIMEOUT_MINUTES=${HH_WORKER_DRAIN_TIMEOUT_MINUTES:-180}
       - WORKER_KIND=hh
     stop_grace_period: 3h
@@ -879,6 +882,9 @@ services:
       - WORKER_KIND=clientreportexports
     # A long COPY finishes gracefully during a rolling deploy. Memory remains
     # bounded to stream buffers and S3 multipart parts.
+    # Внимание: scheduled deploy обрезает это до 15 секунд (шаг 5
+    # .semaphore/scheduled-deploy.yml), grace целиком отрабатывает только при
+    # ручном `docker compose stop`.
     stop_grace_period: 2h
     deploy:
       resources:

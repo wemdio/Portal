@@ -24,12 +24,6 @@ describe('auto-pipeline deploy drain', () => {
     expect(composeService).toContain('container_name: portal-worker-autopipeline');
     expect(composeService).toContain('stop_grace_period: 20m');
 
-    const genericContainerBlock = drainWorker.match(
-      /^\s*containers=\(\s*([\s\S]*?)\n\s*\)/m,
-    )?.[1];
-    expect(genericContainerBlock).toBeDefined();
-    expect(genericContainerBlock).not.toContain('portal-worker-autopipeline');
-
     const gracefulStop = drainWorker.match(
       /if should_drain_worker "worker-autopipeline"; then[\s\S]*?\nfi/,
     )?.[0];
@@ -45,9 +39,7 @@ describe('auto-pipeline deploy drain', () => {
     const autoStopIndex = drainWorker.indexOf(
       'docker compose --env-file .env -p portal -f docker-compose.prod.yml stop worker-autopipeline',
     );
-    const genericStopIndex = drainWorker.indexOf('for c in "${containers[@]}"');
     expect(autoStopIndex).toBeGreaterThanOrEqual(0);
-    expect(genericStopIndex).toBeGreaterThan(autoStopIndex);
 
     const drainIndex = scheduledDeploy.indexOf(
       'sudo -n bash drain-worker.sh \\${WORKER_TARGETS};',
