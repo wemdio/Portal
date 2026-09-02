@@ -440,6 +440,18 @@ blocks:
                 if [ -n \"\${WORKER_TARGETS}\" ]; then
                   echo '--- Step 3: drain workers ---';
                   sudo -n bash drain-worker.sh \${WORKER_TARGETS};
+                  # Один SIGTERM сразу всем выбранным воркерам, сразу за паузой
+                  # очередей: иначе живые воркеры успеют перехватить строки,
+                  # которые drain только что вернул в pending. 15 секунд хватает —
+                  # воркеры на общем жизненном цикле (app/src/lib/jobs/lifecycle.ts)
+                  # отпускают аренду примерно за две секунды, а задаче не надо
+                  # доигрывать до конца: она продолжится с чекпоинта в соседней
+                  # реплике. force_rm_svc в шаге 5 остаётся фолбэком для всего,
+                  # что не остановилось. Список сервисов compose проверяет целиком
+                  # до остановки: одно разъехавшееся имя в ALL_WORKER_SERVICES
+                  # (.semaphore/select-deploy-targets.sh) превращает всю мягкую
+                  # остановку в no-op, поэтому провал печатаем явно.
+                  sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml stop --timeout 15 \${WORKER_TARGETS} || echo \"[deploy] graceful stop failed — workers will be SIGKILLed\" >&2;
                 fi;
                 force_rm_svc() {
                   local svc=\"\$1\";
@@ -500,6 +512,25 @@ blocks:
                   for svc in \${WORKER_TARGETS}; do force_rm_svc \"\$svc\"; done;
                   sudo -n docker rm -f portal-worker-enrich-10 2>/dev/null || true;
                   sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate \${WORKER_TARGETS};
+                  # Страховка от каскада зависимостей. У `docker compose stop`
+                  # нет даже флага --no-deps (в отличие от `restart`), и остановка
+                  # зависимостей нигде не документирована — почти наверняка
+                  # каскада нет, и тогда эта строка не делает ничего.
+                  # Но если он всё же есть, шаг 3 гасит yandexmaps / googleparsers
+                  # / telegram-bot-api / transcribe-worker (их держат
+                  # worker-yandexmaps, worker-googleparsers, worker-tg-parser,
+                  # worker-tg-transcribe), и обратно они уже не поднимутся:
+                  # `restart: unless-stopped` не перезапускает явно остановленный
+                  # контейнер, а `up -d` выше идёт с --no-deps и только по
+                  # WORKER_TARGETS. guacd в список не входит: от него зависит
+                  # только rdp-ws, а это core-сервис, не воркер.
+                  # ВАЖНО: без --force-recreate — для живого контейнера это no-op,
+                  # остановленный поднимается. С --force-recreate строка
+                  # пересоздавала бы здоровые core-сервисы на каждом деплое.
+                  # Точный ответ про каскад стоит дёшево, прямо на хосте:
+                  # `docker compose --env-file .env -p portal -f docker-compose.prod.yml --dry-run stop worker-tg-parser`
+                  # — если в плане нет telegram-bot-api, каскада нет и строку можно снять.
+                  sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps yandexmaps googleparsers telegram-bot-api transcribe-worker || echo \"[deploy] dependency services check failed\" >&2;
                 fi;
                 if [ \"\${PORTAL_CHANGED}\" = 1 ]; then
                   echo '--- Step 6: disable maintenance mode (normal path) ---';

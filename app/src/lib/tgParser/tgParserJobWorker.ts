@@ -3,7 +3,7 @@
  */
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { startTrace } from '@/lib/tracer';
-import { parseTgUsers } from '@/lib/tgParser/parser';
+import { parseTgUsers, type ParseResult } from '@/lib/tgParser/parser';
 import { findOutreachConflict, outreachConflictMessage } from '@/lib/tgParser/accountConflict';
 import { clampTgParserMaxContactsPerRun } from '@/lib/tgParser/constants';
 import { normalizeTgLinks } from '@/lib/tgParser/normalizeLinks';
@@ -30,6 +30,40 @@ export type TgParserJobConfig = {
   account_label?: string;
   links_summary?: string;
 };
+
+/**
+ * Чекпойнт обхода: какие источники закрыты и кто уже набран.
+ *
+ * Гранулярность — источник: он идёт от минуты до сорока, а внутри этапа
+ * восстанавливать позицию нечем (GramJS-итераторы курсор наружу не отдают).
+ */
+export type TgParserCheckpoint = {
+  done_links: string[];
+  users: ParsedUser[];
+  /** Источники, которые не открылись, в формате «ссылка — причина». */
+  failed_links?: string[];
+};
+
+export interface TgParserRunContext {
+  signal: AbortSignal;
+  checkpoint: TgParserCheckpoint | null;
+  saveCheckpoint(data: TgParserCheckpoint): Promise<boolean>;
+  /**
+   * Жетон текущего захвата (lib/jobs/lifecycle.ts). Им ограждаются ИТОГОВЫЕ
+   * записи задачи.
+   *
+   * Терминальный статус тут пишет сам runTgParserJob (manageTerminalStatus =
+   * false), значит библиотека оградить эти записи не может — это обязанность
+   * тела. Без жетона `.eq('status','running')` пропускает запись и от СТАРОГО
+   * тела: после перехвата задачи (истёкшая аренда, деплой) прежний исполнитель
+   * дорабатывает свой последний шаг и может проштамповать done/error поверх
+   * работы нового владельца. На одной реплике с последовательным деплоем это
+   * недостижимо, но пара «manageTerminalStatus=false + неограждённая
+   * терминальная запись» переезжает в остальные воркеры, а там таблицы с
+   * девятью репликами.
+   */
+  runToken: string;
+}
 
 type TgParserLogLevel = 'info' | 'warning' | 'error';
 type PgErrorLike = {
@@ -109,6 +143,44 @@ function stripHeavyText(users: ParsedUser[]): ParsedUser[] {
     Сообщения: '',
     Биография: '',
   }));
+}
+
+/**
+ * Потолок чекпойнта. Строку переписываем целиком после КАЖДОГО источника, а
+ * запись идёт обычным PostgREST-запросом — тело в единицы мегабайт проходит,
+ * в десятки уже нет. 4 МБ выбраны как заведомо безопасный конверт под типовым
+ * лимитом тела запроса (единицы-десятки МБ) с запасом на служебные поля.
+ */
+const CHECKPOINT_MAX_BYTES = Number(process.env.TG_PARSER_CHECKPOINT_MAX_BYTES ?? '4000000');
+
+function jsonBytes(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8');
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+/**
+ * Ужать список под потолок ДЕТЕРМИНИРОВАННО — по измеренному размеру, а не на
+ * глазок, ровно как persistDoneUsersWithRetry делает это для финальной записи.
+ *
+ * `Сообщения` держат до 12 000 символов на человека, `Биография` — до 4 000, а
+ * целевой обход набирает до 50 000 контактов: без обрезки это сотни мегабайт
+ * после каждого источника. Важно, что перебор размера не даёт ошибки:
+ * saveCheckpoint отвечает про владение, а не про запись, и слишком тяжёлый
+ * чекпойнт просто молча не сохранится — возобновление тогда не работает вовсе.
+ * Поэтому лучше отдать людей без текстов, чем не отдать никого.
+ *
+ * `fits: false` означает, что не помещается даже самый лёгкий вариант (десятки
+ * тысяч контактов): сжимать дальше нечем, не потеряв самих людей, — отдаём как
+ * есть и говорим об этом в журнале.
+ */
+function fitUsersInCheckpoint(users: ParsedUser[]): { users: ParsedUser[]; fits: boolean; degraded: boolean } {
+  const light = sanitizeUsersForJson(stripMessages(users));
+  if (jsonBytes(light) <= CHECKPOINT_MAX_BYTES) return { users: light, fits: true, degraded: false };
+  const lightest = sanitizeUsersForJson(stripHeavyText(users));
+  return { users: lightest, fits: jsonBytes(lightest) <= CHECKPOINT_MAX_BYTES, degraded: true };
 }
 
 function truncateText(s: string, max = 800): string {
@@ -213,7 +285,42 @@ async function writeJobLog(args: {
   }
 }
 
-export async function runTgParserJob(jobId: string): Promise<void> {
+/**
+ * «Чекпойнт не записался» — в журнал самой задачи, а не только в stdout.
+ *
+ * Отдельная экспортируемая функция, а не поле в TgParserRunContext: библиотека
+ * зовёт onCheckpointUnpersisted на уровне бегунка и знает только jobId, тогда
+ * как ctx создаётся под конкретный запуск. Так воркеру (задача 6) хватает
+ * одной строчки `onCheckpointUnpersisted: logTgParserCheckpointUnpersisted`,
+ * без собственной карты jobId → колбэк и без её времени жизни. Поля задачи
+ * дочитываем сами: путь редкий, лишний SELECT на нём не жалко.
+ */
+export async function logTgParserCheckpointUnpersisted(jobId: string): Promise<void> {
+  const db = supabaseAdmin;
+  if (!db) return;
+  try {
+    const { data: job } = await db
+      .from('tg_parser_jobs')
+      .select('user_id, config')
+      .eq('id', jobId)
+      .single();
+    if (!job) return;
+    const cfg = (job.config ?? {}) as TgParserJobConfig;
+    await writeJobLog({
+      jobId,
+      jobUserId: job.user_id,
+      isTarget: Boolean(cfg.is_target),
+      accountLabel: cfg.account_label ?? null,
+      level: 'warning',
+      message:
+        'Чекпойнт не сохранился: при перезапуске исполнителя часть обхода будет пройдена заново',
+    });
+  } catch {
+    // Диагностика не должна ронять воркер.
+  }
+}
+
+export async function runTgParserJob(jobId: string, ctx?: TgParserRunContext): Promise<void> {
   const db = supabaseAdmin;
   if (!db) {
     console.error('[tg-parser-job] supabaseAdmin missing');
@@ -232,6 +339,20 @@ export async function runTgParserJob(jobId: string): Promise<void> {
   }
   if (job.status !== 'running') return;
 
+  /**
+   * Ограждение итоговых записей жетоном захвата (см. TgParserRunContext.runToken).
+   *
+   * Ctx необязателен — тогда жетона нет и фильтр не добавляется: поведение
+   * ровно то, что было до ограждения. Ослаблять до «не писать вовсе» нельзя,
+   * иначе вызов без контекста молча терял бы результат задачи.
+   *
+   * Тип билдера — any по той же причине, что в lib/jobs/lifecycle.ts: цепочка
+   * PostgREST меняет форму на каждом шаге, а нам нужен только .eq.
+   */
+  const runToken = ctx?.runToken ?? null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ownedRow = <T>(q: T): T => (runToken ? ((q as any).eq('run_token', runToken) as T) : q);
+
   const cfg = job.config as TgParserJobConfig;
   const isTarget = Boolean(cfg.is_target);
   const accountLabel = cfg.account_label ?? null;
@@ -239,6 +360,18 @@ export async function runTgParserJob(jobId: string): Promise<void> {
   // Второй раз, уже над сохранённым cfg: задачи, заведённые до расклейки на
   // роуте, лежат в базе со склеенными ссылками и при повторе упали бы так же.
   const { links } = normalizeTgLinks(cfg.links);
+
+  // Продолжение после перезапуска исполнителя: закрытые источники не трогаем,
+  // набранных людей подсаживаем обратно в накопитель парсера.
+  const checkpoint = ctx?.checkpoint ?? null;
+  const doneLinks = new Set<string>(checkpoint?.done_links ?? []);
+  const remainingLinks = links.filter((l) => !doneLinks.has(l));
+  // Чекпойнт читаем из БД как чужие данные: запись без числового ID села бы в
+  // накопитель парсера ключом undefined и тихо сломала дедупликацию.
+  const seedUsers: ParsedUser[] = (checkpoint?.users ?? []).filter(
+    (u) => typeof u?.ID === 'number' && Number.isFinite(u.ID),
+  );
+  const failedLinks: string[] = checkpoint?.failed_links ?? [];
 
   await writeJobLog({
     jobId,
@@ -248,6 +381,20 @@ export async function runTgParserJob(jobId: string): Promise<void> {
     level: 'info',
     message: `Запуск задачи: ссылок ${links.length}, режим ${isTarget ? 'целевой' : 'обычный'}`,
   });
+
+  if (checkpoint) {
+    await writeJobLog({
+      jobId,
+      jobUserId,
+      isTarget,
+      accountLabel,
+      level: 'info',
+      // Счётчик найденных после возобновления просядет: контакты недобранного
+      // источника отброшены вместе с ним и будут собраны заново. Говорим об
+      // этом сразу, иначе падение числа выглядит как потеря данных.
+      message: `Продолжаем после перезапуска: источников обработано ${links.length - remainingLinks.length} из ${links.length}, контактов уже собрано ${seedUsers.length}. Счётчик найденных может временно опуститься ниже прежнего значения — недобранный источник обходится заново`,
+    });
+  }
 
   const trace = await startTrace({
     name: 'tg-parser.job.run',
@@ -268,15 +415,17 @@ export async function runTgParserJob(jobId: string): Promise<void> {
   });
   if (links.length === 0) {
     const msg = 'Пустой список ссылок';
-    await db
-      .from('tg_parser_jobs')
-      .update({
-        status: 'error',
-        error_message: msg,
-        completed_at: new Date().toISOString(),
-      })
-      .eq('id', jobId)
-      .eq('status', 'running');
+    await ownedRow(
+      db
+        .from('tg_parser_jobs')
+        .update({
+          status: 'error',
+          error_message: msg,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', jobId)
+        .eq('status', 'running'),
+    );
     await writeJobLog({ jobId, jobUserId, isTarget, accountLabel, level: 'error', message: msg });
     await trace?.fail(new Error(msg), { stage: 'validate_links' });
     return;
@@ -289,15 +438,17 @@ export async function runTgParserJob(jobId: string): Promise<void> {
   if (isTarget) {
     if (!process.env.TG_TARGET_API_ID || !process.env.TG_TARGET_SESSION) {
       const msg = 'Целевой аккаунт не настроен на сервере';
-      await db
-        .from('tg_parser_jobs')
-        .update({
-          status: 'error',
-          error_message: msg,
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', jobId)
-        .eq('status', 'running');
+      await ownedRow(
+        db
+          .from('tg_parser_jobs')
+          .update({
+            status: 'error',
+            error_message: msg,
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', jobId)
+          .eq('status', 'running'),
+      );
       await writeJobLog({ jobId, jobUserId, isTarget, accountLabel, level: 'error', message: msg });
       await trace?.fail(new Error(msg), { stage: 'target_account_check' });
       return;
@@ -344,11 +495,13 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         );
         if (conflict) {
           const msg = outreachConflictMessage(row.phone, conflict);
-          await db
-            .from('tg_parser_jobs')
-            .update({ status: 'error', error_message: msg, completed_at: new Date().toISOString() })
-            .eq('id', jobId)
-            .eq('status', 'running');
+          await ownedRow(
+            db
+              .from('tg_parser_jobs')
+              .update({ status: 'error', error_message: msg, completed_at: new Date().toISOString() })
+              .eq('id', jobId)
+              .eq('status', 'running'),
+          );
           await writeJobLog({ jobId, jobUserId, isTarget, accountLabel, level: 'error', message: msg });
           await trace?.fail(new Error(msg), { stage: 'account_conflict' });
           return;
@@ -358,15 +511,17 @@ export async function runTgParserJob(jobId: string): Promise<void> {
 
     if (!row?.session_data) {
       const msg = 'Аккаунт не найден или неактивен';
-      await db
-        .from('tg_parser_jobs')
-        .update({
-          status: 'error',
-          error_message: msg,
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', jobId)
-        .eq('status', 'running');
+      await ownedRow(
+        db
+          .from('tg_parser_jobs')
+          .update({
+            status: 'error',
+            error_message: msg,
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', jobId)
+          .eq('status', 'running'),
+      );
       await writeJobLog({ jobId, jobUserId, isTarget, accountLabel, level: 'error', message: msg });
       await trace?.fail(new Error(msg), { stage: 'account_check' });
       return;
@@ -430,20 +585,107 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       }
     };
 
-    const result = await parseTgUsers({
-      links,
-      parse_chat_messages: cfg.parse_chat_messages ?? true,
-      parse_chat_members: cfg.parse_chat_members ?? true,
-      parse_post_comments: cfg.parse_post_comments ?? true,
-      enrich_profile: Boolean(cfg.enrich_profile),
-      message_limit: Math.min(5000, Math.max(10, Number(cfg.message_limit) || 100)),
-      filter_online: Boolean(cfg.filter_online),
-      filter_recently: Boolean(cfg.filter_recently),
-      max_offline_days: cfg.max_offline_days != null ? Number(cfg.max_offline_days) : null,
-      account,
-      max_contacts,
-      onProgress,
-    });
+    /**
+     * Чекпойнт после каждого источника.
+     *
+     * Размер держит fitUsersInCheckpoint: тексты сообщений (а при перегрузе и
+     * биографии) в чекпойнт не попадают. Плата: у людей, набранных ДО
+     * перезапуска, не будет этих полей в итоге — ровно та же деградация, до
+     * которой финальная запись доходит сама под давлением размера, и она
+     * несопоставимо дешевле потери всего сорокаминутного обхода.
+     */
+    let warnedCheckpointOversize = false;
+    const onLinkDone = async (link: string, usersSoFar: ParsedUser[], failure?: string) => {
+      doneLinks.add(link);
+      if (failure) failedLinks.push(`${link} — ${failure}`);
+      const fitted = fitUsersInCheckpoint(usersSoFar);
+      if (!fitted.fits && !warnedCheckpointOversize) {
+        warnedCheckpointOversize = true;
+        await writeJobLog({
+          jobId,
+          jobUserId,
+          isTarget,
+          accountLabel,
+          level: 'warning',
+          message:
+            'Слишком много контактов для чекпойнта: при перезапуске исполнителя часть обхода придётся пройти заново',
+        });
+      }
+      // Ответ про владение игнорируем намеренно: при false библиотека уже
+      // взвела ctx.signal, и обход прервётся на ближайшем контакте — отдельный
+      // механизм остановки был бы вторым источником правды.
+      await ctx?.saveCheckpoint({
+        done_links: [...doneLinks],
+        users: fitted.users,
+        failed_links: failedLinks,
+      });
+    };
+
+    let result: ParseResult;
+    if (remainingLinks.length === 0 && checkpoint) {
+      // Все источники закрыты ещё до перезапуска — обходить нечего, а пустой
+      // список парсер счёл бы ошибкой конфигурации. Вердикт восстанавливаем
+      // тот же, что выдал бы непрерванный обход: без этого задача, у которой
+      // не открылся НИ ОДИН источник, после перезапуска отчиталась бы
+      // «готово, 0 контактов» вместо ошибки.
+      result =
+        seedUsers.length === 0 && failedLinks.length > 0
+          ? { status: 'error', error: `не удалось открыть ни один источник: ${failedLinks.join('; ')}` }
+          : { status: 'ok', users: seedUsers };
+    } else {
+      result = await parseTgUsers({
+        links: remainingLinks,
+        signal: ctx?.signal,
+        initialUsers: seedUsers,
+        onLinkDone,
+        parse_chat_messages: cfg.parse_chat_messages ?? true,
+        parse_chat_members: cfg.parse_chat_members ?? true,
+        parse_post_comments: cfg.parse_post_comments ?? true,
+        enrich_profile: Boolean(cfg.enrich_profile),
+        message_limit: Math.min(5000, Math.max(10, Number(cfg.message_limit) || 100)),
+        filter_online: Boolean(cfg.filter_online),
+        filter_recently: Boolean(cfg.filter_recently),
+        max_offline_days: cfg.max_offline_days != null ? Number(cfg.max_offline_days) : null,
+        account,
+        max_contacts,
+        onProgress,
+      });
+    }
+
+    // Провалы источников, случившиеся ДО перезапуска, парсер этого запуска уже
+    // не видит: он получил только оставшиеся ссылки. Без этого задача, у
+    // которой половина источников не открылась, после перезапуска отчиталась бы
+    // безупречным «успешно завершено». Ветка срабатывает только на чистом 'ok',
+    // то есть когда в ЭТОМ запуске провалов не было и двойного счёта нет.
+    if (result.status === 'ok' && failedLinks.length > 0) {
+      result = {
+        status: 'partial',
+        users: result.users,
+        stop_reason: 'error',
+        error: `пропущены источники (${failedLinks.length} из ${links.length}): ${failedLinks.join('; ')}`,
+      };
+    }
+
+    // Нас останавливают (деплой или потеря аренды) — терминальный статус НЕ
+    // пишем: строка обязана остаться running, чтобы библиотека отпустила аренду
+    // и соседняя реплика продолжила задачу с чекпойнта, а не начала с нуля.
+    if (result.status === 'partial' && result.stop_reason === 'interrupted') {
+      await writeJobLog({
+        jobId,
+        jobUserId,
+        isTarget,
+        accountLabel,
+        level: 'info',
+        message: 'Остановлено для перезапуска исполнителя — продолжится с чекпойнта',
+      });
+      await trace?.end({
+        stage: 'parse',
+        status: 'interrupted',
+        users_count: result.users.length,
+      });
+      return;
+    }
+
     const safeUsers = result.status === 'error' ? null : sanitizeUsersForJson(result.users);
 
     const persistTerminalState = async (
@@ -463,14 +705,16 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         logFailureDetails?: boolean;
       },
     ): Promise<{ ok: boolean; errorMessage?: string }> => {
-      const { data: updated, error: updateErr } = await db
-        .from('tg_parser_jobs')
-        .update({
-          ...patch,
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', jobId)
-        .eq('status', 'running')
+      const { data: updated, error: updateErr } = await ownedRow(
+        db
+          .from('tg_parser_jobs')
+          .update({
+            ...patch,
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', jobId)
+          .eq('status', 'running'),
+      )
         .select('id')
         .maybeSingle();
 
@@ -512,16 +756,18 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         return { ok: false, errorMessage: persistMsg };
       }
 
-      const { data: fallbackRow, error: fallbackErr } = await db
-        .from('tg_parser_jobs')
-        .update({
-          status: 'error',
-          stop_reason: 'persist_failed',
-          error_message: truncateText(persistMsg, 900),
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', jobId)
-        .eq('status', 'running')
+      const { data: fallbackRow, error: fallbackErr } = await ownedRow(
+        db
+          .from('tg_parser_jobs')
+          .update({
+            status: 'error',
+            stop_reason: 'persist_failed',
+            error_message: truncateText(persistMsg, 900),
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', jobId)
+          .eq('status', 'running'),
+      )
         .select('id')
         .maybeSingle();
 
@@ -711,15 +957,17 @@ export async function runTgParserJob(jobId: string): Promise<void> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[tg-parser-job] run failed', err);
-    await db
-      .from('tg_parser_jobs')
-      .update({
-        status: 'error',
-        error_message: msg,
-        completed_at: new Date().toISOString(),
-      })
-      .eq('id', jobId)
-      .eq('status', 'running');
+    await ownedRow(
+      db
+        .from('tg_parser_jobs')
+        .update({
+          status: 'error',
+          error_message: msg,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', jobId)
+        .eq('status', 'running'),
+    );
     await writeJobLog({
       jobId,
       jobUserId,

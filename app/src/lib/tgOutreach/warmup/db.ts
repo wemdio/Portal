@@ -50,15 +50,40 @@ export async function logWarmup(
  * становится видимым и проверяемым: воркер не берёт `warming` в боевой
  * auto-resume, а API отказывает в запуске аутрича.
  */
+/**
+ * Обе стороны ограждены статусом, и обе — по одной причине.
+ *
+ * Пока прогрев держался слотом в памяти воркера, ни одна из этих записей
+ * физически не могла попасть на кампанию, которую ведёт боевой цикл: слот был
+ * один на двоих. Под арендой прогон живёт своей жизнью, и безусловная запись
+ * стала бы способом отобрать чужую кампанию:
+ *  - `false` без фильтра остановил бы аутрич, который тем временем законно
+ *    владеет кампанией;
+ *  - `true` без фильтра затёр бы `running`, поставленный командой «старт»,
+ *    проскочившей в узком окне между проверкой владельца в начале прогрева и
+ *    этой записью. Оба цикла пошли бы по одним и тем же аккаунтам.
+ *
+ * Поэтому взятие замка (`true`) разрешено только из состояний, в которых
+ * кампанией никто не занят: `stopped`, `error` и уже стоящий `warming` (его
+ * ставит интерфейс сразу по нажатию кнопки — повторная запись идемпотентна).
+ *
+ * Возвращает, легла ли запись. Для `true` это ответ «замок наш»: false значит
+ * кампанию перехватил аутрич, и продолжать прогрев нельзя.
+ */
 export async function setCampaignWarming(
   db: SupabaseClient,
   campaignId: string,
   warming: boolean,
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  const q = db
     .from('tg_outreach_campaigns')
     .update({ status: warming ? 'warming' : 'stopped', updated_at: new Date().toISOString() })
     .eq('id', campaignId);
+  const { data } = await (warming
+    ? q.in('status', ['stopped', 'error', 'warming'])
+    : q.eq('status', 'warming')
+  ).select('id');
+  return (data ?? []).length > 0;
 }
 
 /** Идущий или ожидающий запуск прогрева. Активный может быть только один. */
@@ -103,6 +128,17 @@ export async function createRun(
   return { run: (data as WarmupRun | null) ?? null, error: error?.message ?? null };
 }
 
+/**
+ * Записать в строку прогона — с ограждением по жетону аренды.
+ *
+ * `runToken` необязателен, потому что прогон переехал на единый жизненный цикл
+ * задач (lib/jobs/lifecycle.ts) с `manageTerminalStatus: false`: терминальный
+ * статус пишет само тело прогрева, и библиотека эти записи оградить не может.
+ * Без жетона вытесненный исполнитель проштамповал бы `finished`/`failed` или
+ * сдвинул `current_day` поверх работы нового владельца строки. Когда жетона
+ * нет (вызов вне раннера), фильтр не добавляется и поведение остаётся прежним —
+ * тот же приём, что в safeUpdateSearchJob (lib/parsers/searchParserWorker.ts).
+ */
 export async function setRunStatus(
   db: SupabaseClient,
   runId: string,
@@ -113,9 +149,15 @@ export async function setRunStatus(
     started_at?: string;
     finished_at?: string;
     summary?: WarmupSummary;
+    /** Снятие владения вместе с терминальным статусом (см. lib/jobs/lifecycle.ts). */
+    lease_until?: null;
+    run_token?: null;
+    worker_id?: null;
   },
+  runToken?: string | null,
 ): Promise<void> {
-  await db.from('tg_outreach_warmup_runs').update(patch).eq('id', runId);
+  const q = db.from('tg_outreach_warmup_runs').update(patch).eq('id', runId);
+  await (runToken ? q.eq('run_token', runToken) : q);
 }
 
 /**
@@ -248,12 +290,31 @@ export async function finishConversation(
 }
 
 /**
- * Вернуть в очередь переписки, зависшие в `running` от прошлого процесса.
+ * Вернуть в очередь переписки прогона, зависшие в `running` дольше порога.
  *
- * Вызывается один раз на старте цикла: процесс только что поднялся, значит ни
- * одна переписка физически не может идти. Без этого такая запись лежала бы
- * `running` до истечения CONVERSATION_STALE_MINUTES — 45 минут простоя на
- * каждый перезапуск воркера, а их за 06.08.2026 набралось восемь.
+ * Зовётся ПОСЛЕ захвата прогона, когда аренда уже наша, и только по своей
+ * строке прогона — но этого мало, поэтому порог остался. Чем это отличается от
+ * прежнего поведения:
+ *
+ *  - БЫЛО: слепой сброс ВСЕХ `running`-переписок прогона при входе в цикл.
+ *    Основание — «процесс только что поднялся, значит ни одна переписка
+ *    физически не может идти». Пока прогон жил в памяти одного процесса, это
+ *    было правдой.
+ *  - СТАЛО: под арендой процесс не единственный. Библиотека намеренно допускает
+ *    окно, когда уходящий владелец ещё дописывает переписку, а сосед уже
+ *    захватил прогон (lib/jobs/lifecycle.ts, «Терпеть, что сосед начал ту же
+ *    задачу раньше»). Слепой сброс в этом окне выдернул бы живую переписку:
+ *    два процесса повели бы один и тот же диалог теми же двумя аккаунтами, и
+ *    собеседники получили бы по второму комплекту реплик.
+ *
+ * Порог — тот же CONVERSATION_STALE_MINUTES (45 минут), по которому переписку
+ * подбирает loadDueConversations: переписка из 10 реплик с паузами до 90 с
+ * укладывается в ~15 минут, то есть запас тройной. Функция после этого не
+ * ускоряет подбор (loadDueConversations взял бы ту же строку), а приводит её
+ * статус в порядок и даёт число для журнала.
+ *
+ * `started_at is null` при `running` — отдельная ветка: такую строку не берёт
+ * ни один порог, и без неё она осталась бы `running` навсегда.
  *
  * Возвращает, сколько записей вернули — вызывающий код пишет это в журнал.
  */
@@ -261,11 +322,15 @@ export async function requeueStuckConversations(
   db: SupabaseClient,
   runId: string,
 ): Promise<number> {
+  const staleBefore = new Date(
+    Date.now() - CONVERSATION_STALE_MINUTES * 60_000,
+  ).toISOString();
   const { data } = await db
     .from('tg_outreach_warmup_conversations')
     .update({ status: 'pending', started_at: null })
     .eq('run_id', runId)
     .eq('status', 'running')
+    .or(`started_at.is.null,started_at.lt."${staleBefore}"`)
     .select('id');
   return (data ?? []).length;
 }

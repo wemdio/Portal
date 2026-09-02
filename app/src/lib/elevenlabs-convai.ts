@@ -315,8 +315,9 @@ export function listCalls(params?: {
   });
 }
 
-export function getCall(id: string) {
-  return elRequest<R>(`/conversations/${id}`).then(elConversationToVapiShape);
+/** `signal` — см. одноимённый параметр в lib/vapi.ts. */
+export function getCall(id: string, signal?: AbortSignal) {
+  return elRequest<R>(`/conversations/${id}`, { signal }).then(elConversationToVapiShape);
 }
 
 export function createCall(data: {

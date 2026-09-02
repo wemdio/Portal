@@ -1,49 +1,111 @@
-import { requireSupabaseAdmin, type WorkerLogger } from './_shared';
+import { createJobRunner, type JobContext, type JobRunner } from '@/lib/jobs/lifecycle';
+import type { WorkerLogger } from './_shared';
 
-export async function recoverRunningParserJobs(
-  log: WorkerLogger,
-  parserTypes: readonly string[],
-  label = 'parser_jobs',
-): Promise<number> {
-  const db = requireSupabaseAdmin(log);
-  const query = db
-    .from('parser_jobs')
-    .update({ status: 'pending' })
-    .eq('status', 'running');
+/**
+ * Аренда — признак живости ПРОЦЕССА. Продление идёт независимым таймером каждые
+ * аренда/3 = 60 с, поэтому срок держим коротким: после краха/OOM/SIGKILL строку
+ * подберут через аренду (3 мин) + один опрос (30 с: realtime будит только на
+ * status=eq.pending) ≈ 3,5 минуты.
+ */
+const LEASE_SECONDS = Math.max(60, Number(process.env.PARSER_JOBS_LEASE_SECONDS ?? '180'));
 
-  const { data, error } = parserTypes.length === 1
-    ? await query.eq('parser_type', parserTypes[0]).select('id')
-    : await query.in('parser_type', [...parserTypes]).select('id');
-
-  if (error) {
-    log('warn', `Startup recovery: ${label} update failed`, error);
-    return 0;
-  }
-  if (data?.length) log('info', `Startup recovery: reset ${data.length} ${label} to pending`);
-  return data?.length ?? 0;
-}
-
-export async function claimParserJob(log: WorkerLogger, parserType: string): Promise<string | null> {
-  const db = requireSupabaseAdmin(log);
-
-  const { data: pending } = await db
-    .from('parser_jobs')
-    .select('id')
-    .eq('status', 'pending')
-    .eq('parser_type', parserType)
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (!pending) return null;
-
-  const { data: claimed } = await db
-    .from('parser_jobs')
-    .update({ status: 'running', started_at: new Date().toISOString() })
-    .eq('id', pending.id)
-    .eq('status', 'pending')
-    .select('id')
-    .maybeSingle();
-
-  return claimed?.id ?? null;
+/**
+ * Общий раннер очереди `parser_jobs`.
+ *
+ * Тип парсера в строке (`parser_type`: hh_vacancies, ats_companies, eng_hiring)
+ * определяет, кто её берёт: HH-воркер не должен трогать задачи ENG-найма и
+ * наоборот, поэтому фильтр по типу входит в САМ захват (опция `where`
+ * библиотеки — она навешивается на оба пути захвата и на оба запроса каждого
+ * пути). Проверять тип после захвата нельзя: в гонке воркер увёл бы чужую
+ * задачу и вернул бы её уже испорченной.
+ *
+ * ЧЕСТНОЕ ОГРАНИЧЕНИЕ: курсора у этих задач нет. Ни один из трёх парсеров не
+ * умеет продолжить с середины — перехваченная задача проходит ЗАНОВО целиком, а
+ * от дублей в результатах защищают только уникальные индексы
+ * (`idx_hh_vacancies_job_vacancy_unique`, `idx_ats_companies_job_ats_slug_unique`,
+ * `idx_eng_hiring_vacancies_job_source_job_unique`) и полная перезапись
+ * результатов у ATS и ENG. Это ровно то же поведение, что давал прежний сброс
+ * running → pending при старте воркера, — минус риск отобрать задачу у живого
+ * соседа: сброс бил по ВСЕМ running-строкам типа, включая те, что прямо сейчас
+ * выполняла другая реплика. Повторный проход стоит внешних запросов (борды ATS,
+ * HH API, Clearbit), поэтому аренду держим короткой, а перехват — редким.
+ *
+ * ПОЧЕМУ НЕТ `progress`. Библиотека умеет бросать аренду, когда колонка
+ * прогресса стоит дольше порога, но сумма (порог + одна аренда 3 мин + один
+ * опрос 30 с) обязана оставаться ниже HEALTH_JOB_STUCK_MIN (20 мин), то есть
+ * порог не может быть больше ~16,5 мин. Кандидатов два, и ни один не проходит:
+ *
+ *  - `total_parsed`. У ENG-найма он пишется трижды за всю задачу (0, 0 и итог
+ *    в конце) — детектор был бы выключен по построению, а на длинной задаче
+ *    сработал бы ложно. У ATS он двигается раз в 25 бордов, но только когда
+ *    среди них нашлась подходящая вакансия, и весь этап обогащения (до 300
+ *    компаний с Clearbit) не двигает его вовсе.
+ *  - `progress_percent`. Двигается у всех трёх, но законные промежутки между
+ *    его сменами превышают потолок: у HH-парсера этап разбиения запроса
+ *    ограничен HH_PARTITION_TIMEOUT_MS (5 мин по умолчанию) плюс 30 с на каждый
+ *    термин сверх трёх — на запросе из 20 терминов это 13,5 мин честной работы
+ *    без единой записи процента; у ENG-найма процент — это round(доля × 55/число
+ *    источников), так что при companies_limit 25000 один процентный пункт
+ *    стоит ~450 бордов, а у workday пейсинг 2 борда в 1,5 с (WAF), то есть
+ *    ≥ 5,7 мин и до часа на пункт. У ATS процент двигается раз в 25 бордов
+ *    (≈ 6 мин в худшем случае), но на этапе обогащения — только раз в 20
+ *    компаний, и каждая может встать на резолве домена через Clearbit: порог
+ *    пришлось бы брать с большим запасом, а тогда он почти ничего не ловит.
+ *
+ * Настройка у каждого типа СВОЯ (hh.ts заводит по отдельному раннеру на
+ * hh_vacancies и на ats_companies — параллельность у них разная), так что ATS
+ * технически мог бы получить свой порог. Не получил по причине выше, а не
+ * из-за общей настройки.
+ *
+ * Ложное срабатывание тут стоит дороже пропуска: аренда бросается, соседняя
+ * реплика берёт задачу и гоняет её С НУЛЯ — тысячи внешних запросов заново, — и
+ * так по кругу, пока законный этап не уложится в порог. Поэтому живость РАБОТЫ
+ * здесь оставлена внешнему наблюдателю: монитор здоровья
+ * (services/health-check/main.py, спецификация parser_jobs) считает простой по
+ * отпечатку из пяти колонок прогресса и шлёт алерт «Долго висит» через 20
+ * минут. Продление аренды в этот отпечаток не входит, так что наблюдение
+ * честное. Библиотека же ловит смерть ПРОЦЕССА — ровно то, ради чего сюда и
+ * приехала.
+ *
+ * БЮДЖЕТ ПОПЫТОК. Из-за того же отсутствия чекпойнтов и колонки прогресса
+ * `attempts` у этой очереди НИКОГДА не обнуляется — она единственная такая.
+ * Штатная остановка (SIGTERM) обнуляет аренду и попыткой не считается, а
+ * грубая (crash/OOM/SIGKILL) считается: три подряд — и задача уходит в failed
+ * с формулировкой «исполнитель терял задачу N раз(а) подряд». Это осознанно, и
+ * поднимать здесь maxAttempts НЕ НАДО: каждая новая попытка переигрывает
+ * задачу целиком и заново тратит тысячи внешних запросов, так что предел на
+ * повторяющееся падение как раз и нужен.
+ */
+export function createParserJobRunner(opts: {
+  /** Значения parser_type, которые этому воркеру разрешено брать. */
+  parserTypes: string[];
+  workerId: string;
+  log: WorkerLogger;
+  /** Сколько задач этого набора типов одновременно. По умолчанию 1. */
+  concurrency?: number;
+  run(jobId: string, ctx: JobContext<never>): Promise<void>;
+}): JobRunner {
+  return createJobRunner<{ id: string; parser_type: string }, never>({
+    table: 'parser_jobs',
+    workerId: opts.workerId,
+    // Статусы — из check-констрейнта таблицы (миграция 20260128_0001):
+    // pending / running / completed / failed. Никаких processing здесь нет.
+    statuses: { pending: 'pending', running: 'running', done: 'completed', failed: 'failed' },
+    leaseSeconds: LEASE_SECONDS,
+    concurrency: opts.concurrency ?? 1,
+    where: [['parser_type', opts.parserTypes]],
+    select: 'parser_type',
+    // Терминальный статус пишет сам парсер: он отличает отмену пользователем от
+    // ошибки, кладёт человеку текст в error_message и ведёт progress_stage.
+    manageTerminalStatus: false,
+    claimPatch: () => ({ started_at: new Date().toISOString() }),
+    failedPatch: (reason) => ({
+      error_message: reason,
+      progress_stage: 'failed',
+      completed_at: new Date().toISOString(),
+    }),
+    shutdownGraceMs: 5_000,
+    log: opts.log,
+    run: (job, ctx) => opts.run(job.id, ctx),
+  });
 }

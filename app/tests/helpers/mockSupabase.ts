@@ -202,6 +202,14 @@ interface Builder {
   not: (column: string, op: string, value: unknown) => Builder;
   or: (expr: string) => Builder;
 
+  /**
+   * No-op: PostgREST принимает AbortSignal и возвращает тот же билдер. Фейку
+   * отменять нечего, но метод обязан существовать — иначе прод-код вынужден
+   * звать .abortSignal() условно, и забытый сигнал у следующего вызывающего
+   * пройдёт незамеченным.
+   */
+  abortSignal: (signal?: AbortSignal) => Builder;
+
   order: (...args: unknown[]) => Builder;
   limit: (...args: unknown[]) => Builder;
   range: (...args: unknown[]) => Promise<{ data: Row[]; error: { message: string } | null; count: number }>;
@@ -559,6 +567,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         return builder;
       },
 
+      abortSignal: () => builder,
       order: (...args) => {
         const [column, options] = args as [string, { ascending?: boolean } | undefined];
         requestedOrders.push({ column, ascending: options?.ascending !== false });

@@ -17,6 +17,11 @@ import {
 } from '@/lib/parsers/engHiring';
 import { fetchJsonWithFallback, fetchTextWithFallback } from '@/lib/parsers/atsHttp';
 import { domainToSiteUrl, resolveCompanyDomainByName } from '@/lib/parsers/companyDomainResolver';
+import {
+  fenceParserJobQuery,
+  sleepUnlessAborted,
+  type ParserJobRunContext,
+} from '@/lib/parsers/parserJobContext';
 
 const TOKENS_BASE = 'https://raw.githubusercontent.com/kalil0321/ats-scrapers/main/ats-companies';
 // One or more comma-separated bases, each serving `<base>/<source>.csv` in the
@@ -118,10 +123,6 @@ type DetailRequest = {
   format: 'json' | 'text';
 };
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function log(level: 'info' | 'error' | 'warn', msg: string, extra?: unknown) {
   const line = `[eng-hiring-runner][${level.toUpperCase()}] ${msg}`;
   if (extra !== undefined) console[level](line, extra);
@@ -166,21 +167,23 @@ function cacheCountryCodes(config: EngHiringSearchConfig): string[] {
   return Array.from(new Set(countries));
 }
 
-async function fetchJson(url: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
+async function fetchJson(url: string, timeoutMs = REQUEST_TIMEOUT_MS, signal?: AbortSignal): Promise<unknown> {
   return fetchJsonWithFallback(url, {
     headers: { Accept: 'application/json', 'User-Agent': UA },
     timeoutMs,
+    signal,
   });
 }
 
-async function fetchText(url: string): Promise<string> {
+async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
   return fetchTextWithFallback(url, {
     headers: { 'User-Agent': UA },
     timeoutMs: REQUEST_TIMEOUT_MS,
+    signal,
   });
 }
 
-async function fetchWorkdayPayloads(url: string): Promise<unknown[]> {
+async function fetchWorkdayPayloads(url: string, signal?: AbortSignal): Promise<unknown[]> {
   const payloads: unknown[] = [];
 
   for (const searchText of SALES_SEARCH_TEXTS) {
@@ -188,6 +191,10 @@ async function fetchWorkdayPayloads(url: string): Promise<unknown[]> {
     let total = WORKDAY_PAGE_SIZE;
 
     while (offset < total && offset < WORKDAY_MAX_POSTINGS_PER_COMPANY) {
+      // Один борд Workday — до дюжины POST'ов подряд, и ни одной проверки
+      // отмены между ними: без этой строки остановка воркера ждала бы конца
+      // всего борда.
+      if (signal?.aborted) return payloads;
       // Workday's CXS endpoint sits behind a WAF that blocks Node/undici by TLS
       // fingerprint (same class of block as Clearbit), so route the POST through
       // the curl-backed fallback instead of a raw fetch — otherwise every board
@@ -205,6 +212,7 @@ async function fetchWorkdayPayloads(url: string): Promise<unknown[]> {
           'User-Agent': UA,
         },
         timeoutMs: REQUEST_TIMEOUT_MS,
+        signal,
       }) as Record<string, unknown>;
       payloads.push(payload);
       const count = Array.isArray(payload.jobPostings) ? payload.jobPostings.length : 0;
@@ -226,7 +234,7 @@ async function fetchWorkdayPayloads(url: string): Promise<unknown[]> {
   return payloads;
 }
 
-async function fetchSmartrecruitersPayloads(baseUrl: string): Promise<unknown[]> {
+async function fetchSmartrecruitersPayloads(baseUrl: string, signal?: AbortSignal): Promise<unknown[]> {
   const payloads: unknown[] = [];
 
   for (const searchText of SALES_SEARCH_TEXTS) {
@@ -234,9 +242,11 @@ async function fetchSmartrecruitersPayloads(baseUrl: string): Promise<unknown[]>
     let total = SMARTRECRUITERS_PAGE_SIZE;
 
     while (offset < total && offset < SMARTRECRUITERS_MAX_POSTINGS_PER_COMPANY) {
+      // Та же причина, что у Workday: страницы идут подряд без проверок отмены.
+      if (signal?.aborted) return payloads;
       const params = new URLSearchParams({ limit: String(SMARTRECRUITERS_PAGE_SIZE), offset: String(offset) });
       if (searchText) params.set('q', searchText);
-      const payload = await fetchJson(`${baseUrl}?${params.toString()}`) as Record<string, unknown>;
+      const payload = await fetchJson(`${baseUrl}?${params.toString()}`, REQUEST_TIMEOUT_MS, signal) as Record<string, unknown>;
       payloads.push(payload);
       const count = Array.isArray(payload.content) ? payload.content.length : 0;
       const rawTotal = Number(payload.totalFound);
@@ -283,15 +293,20 @@ function toCacheRow(v: EngHiringVacancy) {
   });
 }
 
-async function fetchSourceCacheRows(source: EngHiringSource, token: AtsCompanyToken): Promise<{ rows: ReturnType<typeof toCacheRow>[]; failed: boolean }> {
+async function fetchSourceCacheRows(
+  source: EngHiringSource,
+  token: AtsCompanyToken,
+  signal?: AbortSignal,
+): Promise<{ rows: ReturnType<typeof toCacheRow>[]; failed: boolean }> {
   try {
     const payloads = source === 'workday'
-      ? await fetchWorkdayPayloads(postingsUrl(source, token.slug, token.url))
+      ? await fetchWorkdayPayloads(postingsUrl(source, token.slug, token.url), signal)
       : source === 'smartrecruiters'
-        ? await fetchSmartrecruitersPayloads(postingsUrl(source, token.slug, token.url))
+        ? await fetchSmartrecruitersPayloads(postingsUrl(source, token.slug, token.url), signal)
         : [await fetchJson(
           postingsUrl(source, token.slug, token.url),
           source === 'lever' ? LEVER_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+          signal,
         )];
     const rows: ReturnType<typeof toCacheRow>[] = [];
     for (const payload of payloads) {
@@ -384,7 +399,7 @@ export async function upsertInChunksWithRetry(
   rows: unknown[],
   opts: { chunkSize: number; retries: number; delayMs: number; sleep?: (ms: number) => Promise<void>; label?: string },
 ): Promise<void> {
-  const wait = opts.sleep ?? sleep;
+  const wait = opts.sleep ?? ((ms: number) => sleepUnlessAborted(ms));
   const label = opts.label ?? 'cache upsert';
   for (let i = 0; i < rows.length; i += opts.chunkSize) {
     const chunk = rows.slice(i, i + opts.chunkSize);
@@ -524,11 +539,12 @@ async function refreshSourceCache(
   run: CacheRunRow,
   ensureNotCancelled: () => Promise<void>,
   onProgress: (done: number, total: number, source: EngHiringSource) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<RefreshSourceStats> {
   const tokenLists = await Promise.all(
     TOKEN_BASES.map(async (base) => {
       try {
-        return parseCompanyCsv(await fetchText(`${base}/${source}.csv`));
+        return parseCompanyCsv(await fetchText(`${base}/${source}.csv`, signal));
       } catch {
         return []; // a base may not publish this source's list — skip it
       }
@@ -553,7 +569,7 @@ async function refreshSourceCache(
   for (let i = startIndex; i < tokens.length; i += pace.concurrency) {
     await ensureNotCancelled();
     const chunk = tokens.slice(i, Math.min(i + pace.concurrency, tokens.length));
-    const chunkResults = await Promise.all(chunk.map((token) => fetchSourceCacheRows(source, token)));
+    const chunkResults = await Promise.all(chunk.map((token) => fetchSourceCacheRows(source, token, signal)));
     for (const { rows, failed } of chunkResults) {
       if (failed) failedBoards += 1;
       batch.push(...rows);
@@ -578,7 +594,7 @@ async function refreshSourceCache(
       await ensureNotCancelled();
       await onProgress(done, tokens.length, source);
     }
-    if (pace.delayMs > 0 && done < tokens.length) await sleep(pace.delayMs);
+    if (pace.delayMs > 0 && done < tokens.length) await sleepUnlessAborted(pace.delayMs, signal);
   }
 
   if (batch.length) {
@@ -648,6 +664,7 @@ async function enrichVacancyDetails(
   rows: CacheRow[],
   ensureNotCancelled: () => Promise<void>,
   setProgress: (patch: Record<string, unknown>) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (DETAIL_ENRICH_LIMIT <= 0) return;
 
@@ -663,8 +680,12 @@ async function enrichVacancyDetails(
 
     try {
       const detail = detailRequest.format === 'json'
-        ? await fetchJson(detailRequest.url, row.source === 'lever' ? LEVER_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS)
-        : await fetchText(detailRequest.url);
+        ? await fetchJson(
+          detailRequest.url,
+          row.source === 'lever' ? LEVER_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+          signal,
+        )
+        : await fetchText(detailRequest.url, signal);
       Object.assign(row, mergeEngHiringVacancyDetail(row, detail));
       await updateCacheDetail(db, row);
     } catch {
@@ -677,7 +698,7 @@ async function enrichVacancyDetails(
         progress_detail: { enriching_details: i + 1, total_detail_enrich: targets.length },
       });
     }
-    await sleep(DETAIL_ENRICH_DELAY_MS);
+    await sleepUnlessAborted(DETAIL_ENRICH_DELAY_MS, signal);
   }
 }
 
@@ -692,6 +713,7 @@ async function ensureCache(
   config: EngHiringSearchConfig,
   ensureNotCancelled: () => Promise<void>,
   setProgress: (patch: Record<string, unknown>) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<Record<EngHiringSource, SourceDiagnostics>> {
   const sources = sourcesFromConfig(config);
   const diagnostics = Object.fromEntries(sources.map((source) => [
@@ -731,7 +753,7 @@ async function ensureCache(
           progress_percent: Math.max(1, Math.min(55, percent)),
           progress_detail: { source: currentSource, scanned_companies: done, total_companies: total },
         });
-      });
+      }, signal);
       diagnostics[source] = {
         ...diagnostics[source],
         refreshed: true,
@@ -817,6 +839,7 @@ async function enrichSelectedRows(
   config: EngHiringSearchConfig,
   ensureNotCancelled: () => Promise<void>,
   setProgress: (patch: Record<string, unknown>) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (config.enrich === false || ENRICH_LIMIT <= 0) return;
 
@@ -849,7 +872,7 @@ async function enrichSelectedRows(
         progress_detail: { enriching_companies: i + 1, total_enrich_companies: entries.length },
       });
     }
-    await sleep(ENRICH_DELAY_MS);
+    await sleepUnlessAborted(ENRICH_DELAY_MS, signal);
   }
 }
 
@@ -892,19 +915,35 @@ function attachMatchedDiagnostics(
   return out;
 }
 
-export async function runEngHiringParserJob(jobId: string): Promise<void> {
+/**
+ * 02.09.2026 — единый жизненный цикл задач (app/src/lib/jobs/lifecycle.ts).
+ * С контекстом: записи в строку задачи ограждены жетоном захвата, сканирование
+ * бордов и паузы слушают сигнал остановки, а на остановке функция выходит без
+ * терминальной записи. Курсора у очереди нет, поэтому подобранная задача идёт
+ * заново (см. app/worker/parserJobs.ts); кэш бордов при этом не теряется — у
+ * eng_hiring_cache_runs собственное продолжение по next_company_index.
+ */
+export async function runEngHiringParserJob(jobId: string, ctx?: ParserJobRunContext): Promise<void> {
   const db = supabaseAdmin;
   if (!db) {
     log('error', 'supabaseAdmin not configured');
     return;
   }
+  const signal = ctx?.signal;
 
   const setProgress = async (patch: Record<string, unknown>) => {
-    const { error } = await db.from('parser_jobs').update(patch).eq('id', jobId);
+    const { error } = await fenceParserJobQuery(
+      db.from('parser_jobs').update(patch).eq('id', jobId),
+      ctx,
+    );
     if (error) log('warn', `progress update failed for ${jobId}`, error);
   };
 
   const ensureNotCancelled = async () => {
+    // Остановка воркера выходит тем же путём, что и отмена пользователем:
+    // исключением без терминальной записи. Кто именно остановил — решает
+    // catch по signal.aborted, а не по типу ошибки.
+    if (signal?.aborted) throw new EngHiringCancelledError();
     const { data } = await db.from('parser_jobs').select('status').eq('id', jobId).single();
     if (!data || data.status !== 'running') throw new EngHiringCancelledError();
   };
@@ -920,7 +959,9 @@ export async function runEngHiringParserJob(jobId: string): Promise<void> {
     const config = (job.config ?? {}) as EngHiringSearchConfig;
     await setProgress({
       status: 'running',
-      started_at: new Date().toISOString(),
+      // started_at при захвате ставит раннер (claimPatch); в вызовах без
+      // контекста его по-прежнему ставим здесь.
+      ...(ctx ? {} : { started_at: new Date().toISOString() }),
       error_message: null,
       progress_stage: 'refreshing_cache',
       progress_percent: 0,
@@ -928,7 +969,7 @@ export async function runEngHiringParserJob(jobId: string): Promise<void> {
       total_parsed: 0,
     });
 
-    let sourceDiagnostics = await ensureCache(db, config, ensureNotCancelled, setProgress);
+    let sourceDiagnostics = await ensureCache(db, config, ensureNotCancelled, setProgress, signal);
 
     await ensureNotCancelled();
     await setProgress({ progress_stage: 'filtering_cache', progress_percent: 60, progress_detail: null });
@@ -937,10 +978,10 @@ export async function runEngHiringParserJob(jobId: string): Promise<void> {
     await setProgress({ total_found: matched.length, total_parsed: 0, progress_percent: 65 });
 
     await setProgress({ progress_stage: 'enriching_details', progress_percent: 65 });
-    await enrichVacancyDetails(db, matched, ensureNotCancelled, setProgress);
+    await enrichVacancyDetails(db, matched, ensureNotCancelled, setProgress, signal);
 
     await setProgress({ progress_stage: 'enriching', progress_percent: 75 });
-    await enrichSelectedRows(db, matched, config, ensureNotCancelled, setProgress);
+    await enrichSelectedRows(db, matched, config, ensureNotCancelled, setProgress, signal);
 
     await ensureNotCancelled();
     await setProgress({ progress_stage: 'saving', progress_percent: 85 });
@@ -961,19 +1002,24 @@ export async function runEngHiringParserJob(jobId: string): Promise<void> {
     });
     log('info', `job ${jobId} completed: ${matched.length} vacancies`);
   } catch (err) {
+    // Судим по СОСТОЯНИЮ СИГНАЛА, а не по типу ошибки: остановка приходит и
+    // прерванным запросом, и EngHiringCancelledError, а чужой AbortError по
+    // таймауту обязан остаться настоящей ошибкой. На остановке терминальный
+    // статус не пишем — строку с живой арендой отпустит библиотека.
+    if (signal?.aborted) {
+      log('info', `job ${jobId} stopped mid-run — leaving it for reclaim`);
+      return;
+    }
     if (err instanceof EngHiringCancelledError) {
       log('info', `job ${jobId} cancelled`);
       return;
     }
     log('error', `job ${jobId} failed`, err);
-    await db
-      .from('parser_jobs')
-      .update({
-        status: 'failed',
-        progress_stage: 'failed',
-        completed_at: new Date().toISOString(),
-        error_message: err instanceof Error ? err.message : 'Unknown error',
-      })
-      .eq('id', jobId);
+    await setProgress({
+      status: 'failed',
+      progress_stage: 'failed',
+      completed_at: new Date().toISOString(),
+      error_message: err instanceof Error ? err.message : 'Unknown error',
+    });
   }
 }

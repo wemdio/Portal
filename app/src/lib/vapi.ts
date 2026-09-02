@@ -105,8 +105,13 @@ export function pickRecordingUrl(
   );
 }
 
-export async function getCall(id: string) {
-  const call = await vapiRequest<Record<string, unknown>>(`/call/${id}`);
+/**
+ * `signal` необязателен и нужен воркеру обзвона: он читает исход звонка в
+ * цикле, а на остановке процесса обязан выйти немедленно, а не досидеть
+ * запрос без таймаута (у undici его нет по умолчанию).
+ */
+export async function getCall(id: string, signal?: AbortSignal) {
+  const call = await vapiRequest<Record<string, unknown>>(`/call/${id}`, { signal });
   const recordingUrl = pickRecordingUrl(call);
   if (!recordingUrl) return call;
 

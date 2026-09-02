@@ -64,11 +64,16 @@ HEALTH_INTERVAL_SEC = int(os.environ.get("HEALTH_INTERVAL_SEC", "900"))
 JOB_MONITOR_INTERVAL_SEC = max(
     60, int(os.environ.get("HEALTH_JOB_MONITOR_INTERVAL_SEC", "300"))
 )
-# 20, а не 15: baseConstructor-воркер сам резюмит осиротевшую задачу через
-# BASE_CONSTRUCTOR_STALE_MINUTES=15 (docker-compose.prod.yml). Пока пороги были
-# равны, каждый деплой, заставший работающие задачи, давал ложную тревогу за
-# секунды до самоподбора — инцидент 11.08.2026, три задачи конструктора баз.
-# Порог монитора обязан быть заметно больше порога автоподбора.
+# 20 минут: baseConstructor-воркер чинит зависшую задачу сам, и порог монитора
+# обязан быть больше ПОЛНОГО времени этой самопочинки, а не одного её слагаемого.
+# Сумма (docker-compose.prod.yml): порог простоя прогресса
+# BASE_CONSTRUCTOR_STALL_MINUTES=10 + не больше одной аренды
+# BASE_CONSTRUCTOR_LEASE_SECONDS=300 (5 мин) + не больше одного опроса соседней
+# реплики (30 с) ≈ 16 минут. На чистом редеплое аренда обнуляется сразу и задача
+# уезжает за секунды. Пока пороги были равны (15 и 15), каждый деплой, заставший
+# работающие задачи, давал ложную тревогу за секунды до самоподбора — инцидент
+# 11.08.2026, три задачи конструктора баз. Меняя любое из трёх слагаемых, сверяй
+# сумму с этим порогом.
 JOB_STUCK_MINUTES = max(
     2, int(os.environ.get("HEALTH_JOB_STUCK_MIN", "20"))
 )
@@ -1211,12 +1216,32 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
     JobMonitorSpec(
         "yandex_maps_jobs", "Яндекс.Карты", ("pending", "running"),
         ("progress_stage", "total_links", "processed_links", "total_organizations", "processed_organizations"),
-        "portal-worker-yandexmaps", updated_column="updated_at",
+        # updated_at здесь БОЛЬШЕ НЕ ГОДИТСЯ как пульс, и это не косметика.
+        # С переездом воркера на единый жизненный цикл задачу держит аренда,
+        # а её продление — обычный UPDATE строки раз в 60 с. Триггер
+        # trg_yandex_maps_jobs_updated_at (миграция 20260714_0002) двигает
+        # updated_at на любом UPDATE, значит у живого процесса он свежий всегда,
+        # даже когда задача не движется ни на карточку. Оставить его тут —
+        # молча выключить алерт «Долго висит» для этой таблицы.
+        # Без updated_column монитор считает простой по отпечатку прогресса
+        # (колонки выше) — ровно так же, как для search_parser_jobs.
+        "portal-worker-yandexmaps",
     ),
     JobMonitorSpec(
-        "yandex_direct_jobs", "Яндекс.Директ", ("pending", "running"),
+        # Статус выполнения в этой таблице — processing (check-констрейнт из
+        # миграции 20260517_0001), а не running: без него выполняющиеся задачи
+        # не попадали в выборку монитора вовсе.
+        "yandex_direct_jobs", "Яндекс.Директ", ("pending", "running", "processing"),
         ("total_requests", "processed_requests", "found_advertisers", "saved_total", "errors_count"),
-        "portal-worker-hh", updated_column="updated_at",
+        # updated_at снят намеренно. Воркер переехал на единый жизненный цикл,
+        # а продление аренды — обычный UPDATE строки раз в 60 с; триггер
+        # trg_yandex_direct_jobs_updated_at (20260517_0001) двигает updated_at
+        # на ЛЮБОМ UPDATE. То есть у живого исполнителя он свеж всегда, даже
+        # когда задача не сдвинулась ни на запрос, и алерт «Долго висит» для
+        # этой очереди молча выключился бы. Без updated_column монитор считает
+        # простой по отпечатку прогресса (колонки выше; processed_requests
+        # двигает сам раннер) — как для search_parser_jobs и yandex_maps_jobs.
+        "portal-worker-hh",
     ),
     JobMonitorSpec(
         "google_maps_jobs", "Google Maps", ("queued", "running"),
@@ -1234,13 +1259,26 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
         started_column=None,
     ),
     JobMonitorSpec(
-        "hh_archive_jobs", "Архив HH", ("pending", "running"),
+        # Статус выполнения — processing (check-констрейнт из миграции
+        # 20260516_0001); с прежним набором выполняющиеся задачи в выборку
+        # монитора не попадали.
+        "hh_archive_jobs", "Архив HH", ("pending", "running", "processing"),
         ("found_total", "saved_total", "processed_chunks", "total_chunks", "errors_count"),
-        "portal-worker-hh", updated_column="updated_at",
+        # updated_at снят по той же причине, что и у yandex_direct_jobs выше:
+        # триггер trg_hh_archive_jobs_updated_at (20260516_0001) двигает его на
+        # любом UPDATE, а продление аренды — тоже UPDATE. Простой считаем по
+        # отпечатку прогресса; processed_chunks двигает сам раннер задачи.
+        "portal-worker-hh",
     ),
     JobMonitorSpec(
+        # Контейнер здесь portal, а не portal-worker-enrich: эту очередь никогда
+        # не обслуживал воркер обогащения. runLeadImportJob запускается прямо из
+        # маршрутов Next.js (api/tools/cis-leads/import и .../jobs), а
+        # единственный воркер, который её знает, — ветка WORKER_KIND=all в
+        # worker/index.ts, а она на проде не поднимается. Дежурный по прежней
+        # подсказке шёл читать логи контейнера, где этой задачи нет вовсе.
         "lead_import_jobs", "Импорт / парсинг лидов", ("pending", "running"),
-        ("total_rows", "processed_rows", "enrichment_progress"), "portal-worker-enrich",
+        ("total_rows", "processed_rows", "enrichment_progress"), "portal",
     ),
     JobMonitorSpec(
         "lpr_jobs", "LPR Discovery", ("pending", "running"),
@@ -1273,11 +1311,22 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
         "portal-worker-tg-parser",
     ),
     JobMonitorSpec(
+        # updated_at здесь — пульс ПРОЦЕССА, а не задачи, и это осознанно.
+        # Триггера на таблице нет, но tgScanWorker раз в 60 с делает пустой
+        # updateJob(jobId, {}), который штампует updated_at (это добавлено
+        # намеренно, чтобы markStaleJobs не убивал скан, ждущий квоту Groq).
+        # Значит «Долго висит» ловит здесь только мёртвый или зависший процесс,
+        # а не стоящую задачу у живого воркера. Менять на отпечаток прогресса
+        # нельзя без разговора: ожидание квоты — штатный простой на часы.
         "tg_scan_jobs", "Telegram-сканер", ("pending", "running"),
         ("scanned", "videos_found", "completed", "errors"),
         "portal-worker-tg-transcribe", updated_column="updated_at",
     ),
     JobMonitorSpec(
+        # Как и у скана выше: updated_at — пульс процесса. Триггера нет, но
+        # writeHeartbeat в worker/tgTranscribe.ts штампует updated_at по таймеру
+        # (раз в 30 с) независимо от того, сдвинулась ли стадия. progress_sql
+        # ниже поэтому работает на текст алерта, а не на порог простоя.
         "tg_transcribe_jobs", "Telegram-транскрибация", ("pending", "running"),
         ("payload",), "portal-worker-tg-transcribe", updated_column="updated_at",
         owner_column=None,

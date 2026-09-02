@@ -1,5 +1,53 @@
-import { runYandexMapsCatalogDiscoveryBatch, runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
-import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep, startWorkerHeartbeat } from './_shared';
+/**
+ * YandexMaps worker — сбор ссылок и парсинг организаций Яндекс.Карт.
+ *
+ * Владение задачей — единый жизненный цикл (lib/jobs/lifecycle.ts): захват
+ * pending или строки с истёкшей/обнулённой арендой, продление аренды таймером,
+ * на SIGTERM — обнуление аренды для быстрой передачи соседу.
+ *
+ * ЧТО УБРАНО И ЧТО ИЗМЕНИЛОСЬ ДЛЯ ПОЛЬЗОВАТЕЛЯ.
+ *
+ * Здесь стояли три самописных механизма владения, и все три сняты:
+ *  1. startupRecovery по yandex_maps_jobs: «свежие» running → pending (окно 30
+ *     мин) и running старше 15 минут → failed с progress_stage='stuck_recovered';
+ *  2. zombie watchdog на setInterval раз в 5 минут — та же запись в failed;
+ *  3. graceful requeue своих running-задач в pending при выходе.
+ *
+ * Поведенческое изменение: задача больше НЕ уходит в failed с формулировкой
+ * «автоматически остановлено … зомби». Зависшая задача просто перестаёт
+ * продлевать аренду, её подбирает следующий опрос и продолжает с сохранённого
+ * места — по уже собранным ссылкам (yandex_maps_links) и уже разобранным
+ * карточкам (yandex_maps_organizations). Пользователь видит продолжение, а не
+ * ошибку со слотом, который надо перезапускать руками.
+ *
+ * ЧТО ОСТАЛОСЬ НАМЕРЕННО:
+ *  - восстановление очереди обхода каталога (yandex_maps_catalog_discovery_queue:
+ *    running с claimed_at старше 120 минут → pending) и весь код обхода. Эта
+ *    очередь берётся и закрывается через RPC против общего суточного бюджета
+ *    Яндекса, а не через аренду, и в эту фазу переезда сознательно не входит;
+ *  - startWorkerHeartbeat и healthcheck контейнера по файлу пульса. Это другой
+ *    слой защиты, чем аренда: аренда ловит мёртвый процесс, пульс — мёртвый
+ *    event loop в живом процессе (инцидент 27.07.2026), а autoheal его
+ *    перезапускает. Аренда такое не увидит: продление идёт из того же event
+ *    loop'а и вместе с ним замирает — строку подберут лишь по истечении аренды,
+ *    контейнер же останется дохлым до рестарта.
+ *
+ * Терминальный статус (completed/failed) пишут сами стадии: они умеют отличить
+ * блокировку Яндекса от медленных прокси и от пустой выдачи и кладут человеку
+ * внятный текст в error_message. Поэтому manageTerminalStatus=false; библиотека
+ * держит аренду, а в failed переводит только задачу, которую исполнитель терял
+ * три раза подряд (crash/OOM), чтобы битая строка не крутилась вечно.
+ */
+
+import {
+  runYandexMapsCatalogDiscoveryBatch,
+  runYandexMapsCollectLinks,
+  runYandexMapsParseOrganizations,
+  type YandexMapsCheckpoint,
+} from '@/lib/parsers/yandexMapsWorker';
+import { createJobRunner } from '@/lib/jobs/lifecycle';
+import { markShuttingDown } from '@/lib/workerShutdown';
+import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, startWorkerHeartbeat } from './_shared';
 
 /**
  * Heartbeat-файл: обновляется каждые 30с независимым setInterval-тиком.
@@ -17,61 +65,54 @@ const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 // на app-сервер держим ≤ 8 одновременных chromium-контекстов, ~2 ГБ RAM.
 // Если сервер слабее — снизить через env WORKER_YANDEXMAPS_CONCURRENCY.
 const MAX_CONCURRENCY = Number(process.env.WORKER_YANDEXMAPS_CONCURRENCY ?? '4');
+/**
+ * Аренда — признак живости ПРОЦЕССА, не работы.
+ *
+ * Продлевает её независимый таймер каждые lease/3 = 60 с, поэтому срок держим
+ * коротким: 180 с ≈ три пропущенных продления. Время до перехвата после
+ * краха/OOM/SIGKILL складывается из
+ *     аренда (3 мин, она доживает свой срок сама)
+ *   + один опрос соседа (30 с: realtime будит только на status=eq.pending, а
+ *     простаивающий цикл ждёт Math.max(pollIntervalMs, 30_000) —
+ *     effectiveFallback в app/worker/_shared.ts)
+ *   ≈ 3,5 минуты — вшестеро ниже порога монитора «Долго висит»
+ *   (HEALTH_JOB_STUCK_MIN, 20 мин, services/health-check/main.py).
+ * Прежний watchdog на то же самое тратил до 15 минут И ронял задачу в failed.
+ */
+const LEASE_SECONDS = Math.max(60, Number(process.env.YANDEXMAPS_LEASE_SECONDS ?? '180'));
+const CATALOG_DISCOVERY_STALE_MINUTES = Number(process.env.YANDEXMAPS_CATALOG_DISCOVERY_STALE_MINUTES ?? '120');
 const WORKER_ID = `yandexmaps-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
-// Map jobId → Promise: держим jobId, чтобы при graceful shutdown (SIGTERM
-// от docker compose --force-recreate) успеть пометить свои running-задачи
-// как pending до exit. Без этого задача остаётся в running, updated_at
-// стареет, watchdog добивает её как зомби вместо восстановления новым
-// процессом.
-const runningJobs = new Map<string, Promise<void>>();
 
-const ZOMBIE_THRESHOLD_MINUTES = 15;
-const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000;
-// Окно «свежих» running при startupRecovery: раньше было 5 мин, но реальные
-// production-деплои через scheduled-deploy занимают 3-10 мин (образ pull +
-// force-recreate + healthcheck warmup). Задачи с updated_at 5-15 мин назад
-// оставались в running между shutdown и startup → в дыру попадали, watchdog
-// потом добивал вместо восстановления. 30 мин с запасом покрывает любой
-// нормальный деплой; всё старше — реально зомби (см. cutoffZombie ниже).
-const RECOVERY_FRESH_WINDOW_MINUTES = Number(process.env.YANDEXMAPS_RECOVERY_FRESH_WINDOW_MINUTES ?? '30');
-const CATALOG_DISCOVERY_STALE_MINUTES = Number(process.env.YANDEXMAPS_CATALOG_DISCOVERY_STALE_MINUTES ?? '120');
+type YandexMapsJobRow = { id: string; progress_stage: string | null };
 
+/**
+ * По какой стадии продолжать задачу. Ровно та же логика, что была в снятом
+ * claimYandexMapsJob: стадию задаёт progress_stage, отдельной колонки вида
+ * `kind` в yandex_maps_jobs нет.
+ */
+function stageOf(job: YandexMapsJobRow): 'collect' | 'parse' {
+  const stage = String(job.progress_stage ?? 'pending');
+  return stage === 'ready_to_parse' ||
+    stage === 'links_collected' ||
+    stage.startsWith('parsing_organizations')
+    ? 'parse'
+    : 'collect';
+}
+
+/**
+ * Восстановление ТОЛЬКО очереди обхода каталога.
+ *
+ * НЕ УДАЛЯТЬ «для симметрии» с остальными воркерами на жизненном цикле:
+ * yandex_maps_catalog_discovery_queue — не таблица задач, у её строк нет ни
+ * аренды, ни жетона. Задание берётся и закрывается RPC-функциями против общего
+ * суточного бюджета Яндекса (lib/parsers/yandexMapsCatalog.ts), и взятое перед
+ * остановкой задание иначе ждало бы своей отложенной даты неделю.
+ *
+ * Здесь же стояли два восстановления по yandex_maps_jobs — см. шапку файла.
+ */
 async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
-  // СВЕЖИЕ running (updated_at < RECOVERY_FRESH_WINDOW_MINUTES назад) →
-  // pending. У нас всегда только один worker-yandexmaps на весь prod (нет
-  // horizontal scale), значит на момент startup любая running-задача точно
-  // осиротела от предыдущего процесса. Прошлое поведение (окно 5 мин)
-  // не покрывало деплои >5 мин — задачи Глеба слетали в failed через
-  // watchdog вместо продолжения.
-  const cutoffFresh = new Date(Date.now() - RECOVERY_FRESH_WINDOW_MINUTES * 60 * 1000).toISOString();
-  const { data: fresh, error: freshErr } = await db
-    .from('yandex_maps_jobs')
-    .update({ status: 'pending' })
-    .eq('status', 'running')
-    .gte('updated_at', cutoffFresh)
-    .select('id');
-  if (freshErr) log('warn', 'Startup recovery: fresh running -> pending failed', freshErr);
-  else if (fresh?.length) log('info', `Startup recovery: ${fresh.length} свежих running сброшены в pending (окно ${RECOVERY_FRESH_WINDOW_MINUTES} мин)`);
-
-  const cutoffZombie = new Date(Date.now() - ZOMBIE_THRESHOLD_MINUTES * 60 * 1000).toISOString();
-  const { data: zombies, error: zombieErr } = await db
-    .from('yandex_maps_jobs')
-    .update({
-      status: 'failed',
-      error_message: `Автоматически остановлено при старте воркера: задача была в статусе running более ${ZOMBIE_THRESHOLD_MINUTES} мин без обновлений (зомби). Слот освобождён, попробуйте перезапустить.`,
-      progress_stage: 'stuck_recovered',
-      completed_at: new Date().toISOString(),
-    })
-    .eq('status', 'running')
-    .lt('updated_at', cutoffZombie)
-    .select('id');
-  if (zombieErr) log('warn', 'Startup recovery: zombie cleanup failed', zombieErr);
-  else if (zombies?.length) log('warn', `Startup recovery: ${zombies.length} зомби переведены в failed (${ZOMBIE_THRESHOLD_MINUTES}+ мин без updates)`);
-
-  // Задание обхода, взятое в работу перед остановкой воркера, иначе ждало бы
-  // своей отложенной даты неделю. Возвращаем такие в очередь сразу.
   const catalogCutoff = new Date(Date.now() - CATALOG_DISCOVERY_STALE_MINUTES * 60 * 1000).toISOString();
   const { data: staleScans, error: staleScanError } = await db
     .from('yandex_maps_catalog_discovery_queue')
@@ -85,74 +126,6 @@ async function startupRecovery(): Promise<void> {
     .select('id');
   if (staleScanError) log('warn', 'Startup recovery: stale catalog discovery cleanup failed', staleScanError);
   else if (staleScans?.length) log('warn', `Startup recovery: ${staleScans.length} зависших заданий обхода возвращены в очередь`);
-}
-
-/**
- * Watchdog: раз в 5 мин ищет running-задачи без обновлений > 15 мин и
- * переводит их в failed. Отдельная async-петля, независимая от основного
- * pollLoop — если основной loop застрял в retry supabase, watchdog всё
- * равно ходит по timer'у setInterval и разморозит слот. Работает через
- * тот же supabaseAdmin, но использует другую цепочку fetch — если сеть
- * умерла полностью, оба встанут (но тогда и делать нечего).
- */
-function startZombieWatchdog(shouldStop: () => boolean): NodeJS.Timeout {
-  const db = requireSupabaseAdmin(log);
-  const tick = async () => {
-    if (shouldStop()) return;
-    try {
-      const cutoff = new Date(Date.now() - ZOMBIE_THRESHOLD_MINUTES * 60 * 1000).toISOString();
-      const { data: zombies, error } = await db
-        .from('yandex_maps_jobs')
-        .update({
-          status: 'failed',
-          error_message: `Автоматически остановлено watchdog'ом: задача была в running более ${ZOMBIE_THRESHOLD_MINUTES} мин без обновлений (зависла). Слот освобождён. Если данные успели собраться — нажмите Продолжить парсинг.`,
-          progress_stage: 'stuck_recovered',
-          completed_at: new Date().toISOString(),
-        })
-        .eq('status', 'running')
-        .lt('updated_at', cutoff)
-        .select('id');
-      if (error) log('warn', 'Watchdog: zombie cleanup query failed', error);
-      else if (zombies?.length) log('warn', `Watchdog: ${zombies.length} зомби-задач переведены в failed`);
-    } catch (e) {
-      log('warn', 'Watchdog tick failed', e);
-    }
-  };
-  // Первый тик через 1 мин после старта — даём успеть подхватить свежие задачи.
-  const timer = setInterval(() => void tick(), WATCHDOG_INTERVAL_MS);
-  setTimeout(() => void tick(), 60_000);
-  return timer;
-}
-
-async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'parse' } | null> {
-  const db = requireSupabaseAdmin(log);
-  const { data: pending } = await db
-    .from('yandex_maps_jobs')
-    .select('id, progress_stage')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (!pending) return null;
-
-  const { data: claimed } = await db
-    .from('yandex_maps_jobs')
-    .update({ status: 'running', started_at: new Date().toISOString() })
-    .eq('id', pending.id)
-    .eq('status', 'pending')
-    .select('id, progress_stage')
-    .maybeSingle();
-
-  if (!claimed) return null;
-  const stageValue = String(claimed.progress_stage ?? 'pending');
-  const stage =
-    stageValue === 'ready_to_parse' ||
-    stageValue === 'links_collected' ||
-    stageValue.startsWith('parsing_organizations')
-      ? 'parse'
-      : 'collect';
-  return { id: claimed.id as string, stage };
 }
 
 /**
@@ -178,81 +151,173 @@ function startCatalogDiscovery(): void {
     .finally(() => { discoveryTask = null; });
 }
 
-async function pollOnce(): Promise<boolean> {
-  if (runningJobs.size >= MAX_CONCURRENCY) {
-    await sleep(500);
-    return true;
-  }
-  const job = await claimYandexMapsJob();
-  // Пользовательские задачи в приоритете: новый обход не начинаем, пока хоть
-  // одна из них выполняется. Уже начатый при этом доживает свой круг — рвать
-  // его на полпути дороже, чем потерпеть одну лишнюю параллельную задачу.
-  //
-  // Возвращаем false, а не результат обхода: цикл уходит ждать realtime и
-  // проснётся на первой же пользовательской задаче. Плата — до 30 секунд
-  // (fallback цикла) простоя между кругами обхода; для механизма, который
-  // приносит сотни организаций в сутки, это ничто.
-  if (!job) {
-    if (runningJobs.size === 0) startCatalogDiscovery();
-    return false;
-  }
-  const task = (async () => {
-    if (job.stage === 'collect') {
-      log('info', `Running YandexMaps collect-links job ${job.id}`);
-      await runYandexMapsCollectLinks(job.id);
-    } else {
-      log('info', `Running YandexMaps parse-orgs job ${job.id}`);
-      await runYandexMapsParseOrganizations(job.id);
-    }
-  })();
-  runningJobs.set(job.id, task);
-  void task.finally(() => runningJobs.delete(job.id));
-  return true;
-}
-
 async function main(): Promise<void> {
-  log('info', `Starting YandexMaps worker (pid=${process.pid})`);
+  log('info', `Starting YandexMaps worker (pid=${process.pid}, concurrency=${MAX_CONCURRENCY}, lease=${LEASE_SECONDS}s)`);
   requireSupabaseAdmin(log);
   const shouldStop = setupGracefulShutdown(log);
 
   const heartbeat = startWorkerHeartbeat(HEARTBEAT_PATH);
   log('info', `Heartbeat ticker started → ${HEARTBEAT_PATH} (every 30s)`);
 
-  log('info', 'Running startup recovery...');
   await startupRecovery();
-  log('info', 'Startup recovery done');
 
-  const watchdog = startZombieWatchdog(shouldStop);
-  log('info', `Zombie watchdog started (threshold=${ZOMBIE_THRESHOLD_MINUTES}min, tick=${WATCHDOG_INTERVAL_MS / 1000}s)`);
+  const runner = createJobRunner<YandexMapsJobRow, YandexMapsCheckpoint>({
+    table: 'yandex_maps_jobs',
+    workerId: WORKER_ID,
+    // Статусы — из check-констрейнта таблицы: pending, running, completed,
+    // failed. Своих названий у этой очереди нет.
+    statuses: { pending: 'pending', running: 'running', done: 'completed', failed: 'failed' },
+    leaseSeconds: LEASE_SECONDS,
+    concurrency: MAX_CONCURRENCY,
+    manageTerminalStatus: false,
+    // Стадию берём из строки: обе стадии живут в одной таблице, и раннер
+    // разводит их по progress_stage.
+    select: 'progress_stage',
+    /**
+     * progress НЕ включаем — сознательно, и вот арифметика. Опция взвешивалась
+     * дважды: по updated_at и по колонкам счётчиков. Ни одна не годится.
+     *
+     * 1. updated_at (казалось бы очевидный кандидат: триггер
+     *    trg_yandex_maps_jobs_updated_at, миграция 20260714_0002, ставит его
+     *    на КАЖДОМ update строки, то есть покрывает обе стадии сразу).
+     *    Не годится именно поэтому: продление аренды — тоже update этой
+     *    строки. Таймер продления бьёт раз в lease/3 = 60 с и каждым тиком
+     *    двигает updated_at. Детектор простоя читает колонку ПЕРЕД продлением
+     *    и всегда видит движение от собственного прошлого тика. То есть
+     *    «прогресс» был бы всегда, простоя не было бы никогда, а заодно молча
+     *    обнулялся бы бюджет попыток (attempts=0 на каждом тике). Ровно та
+     *    ловушка, о которой предупреждает JobRunnerOptions.progress.
+     *
+     * 2. Счётчики. Колонок две и они разные у стадий: сбор двигает
+     *    processed_links, парсинг — processed_organizations. Библиотека берёт
+     *    ОДНУ. Взять колонку парсинга значит объявить зависшей любую задачу на
+     *    стадии сбора (она её не трогает вовсе). Общий на обе — progress_stage,
+     *    он двигается в обеих (`collecting_links:N/M`, `parsing_organizations:N/M`).
+     *    Но порог под него не существует:
+     *      - сверху его держит монитор: порог простоя + не больше одной аренды
+     *        (3 мин) + один опрос (30 с) обязаны лечь заметно ниже
+     *        HEALTH_JOB_STUCK_MIN (20 мин) — то есть порог ≤ ~15 минут;
+     *      - снизу — самый длинный ЗАКОННЫЙ промежуток между записями. Строка
+     *        меняется раз на завершённый URL (сбор) или чанк (парсинг), а один
+     *        вызов сервиса законно длится до 900 с (COLLECT_TIMEOUT_SEC /
+     *        PARSE_TIMEOUT_SEC в services/yandexmaps/server.py; клиент ждёт
+     *        990 с) и повторяется по числу прокси в пуле + 1 (сегодня 8+1=9
+     *        попыток, см. maxProxyRetries). Это до 9 × 990 с ≈ 148 минут на
+     *        один URL/чанк — и это здоровая работа на медленных прокси, ради
+     *        которых чанк и урезали до 5 карточек.
+     *    Между 15 минутами сверху и 148 снизу выбирать нечего: любой порог
+     *    отбирал бы задачу у живого тела, и сосед переигрывал бы тот же чанк
+     *    через те же задушенные прокси.
+     *
+     * Что защищает вместо progress:
+     *  - мёртвый процесс аренду не продлевает — строку подберут через
+     *    ≤ LEASE_SECONDS + опрос ≈ 3,5 минуты, и это главный сценарий;
+     *  - мёртвый event loop в живом процессе ловит heartbeat-файл и autoheal
+     *    (5 минут), после рестарта аренда истекает и задача уходит соседу;
+     *  - зависшее ТЕЛО в живом процессе занимает один слот из четырёх (ровно
+     *    как и до миграции: прежний воркер держал такой промис в Map), а на
+     *    ближайшем деплое shutdown() обнулит аренду независимо от того, осел
+     *    ли промис.
+     */
+    /**
+     * Ждём тело 12 с — потолок библиотеки (MAX_SHUTDOWN_GRACE_MS).
+     *
+     * Бюджет тут щедрый: stop_grace_period у сервиса 60 с (его держат ради
+     * браузеров на стороне python-сервиса), а последовательность остановки
+     * стоит 12 с ожидания + два прохода освобождения аренды с паузой в
+     * секунду + контрольное чтение ≈ 15 с. Влезает вчетверо.
+     * Больше и не нужно: тело смотрит на signal на границе URL/чанка, а
+     * оборванный по signal запрос к сервису возвращается за секунды —
+     * останавливаемся мы быстро, а недоигранное продолжится с уже сохранённых
+     * ссылок и карточек в следующем захвате.
+     */
+    shutdownGraceMs: 12_000,
+    /**
+     * claimPatch НЕТ — писать при захвате нечего, и это стоит объяснить.
+     *
+     * updated_at ставит триггер trg_yandex_maps_jobs_updated_at на любом
+     * UPDATE, а сам захват — это UPDATE; писать колонку руками значило бы
+     * дублировать триггер. started_at выставляют сами стадии
+     * (`job.started_at ?? now`) и намеренно сохраняют при перехвате: экран
+     * показывает «в работе с …», и это должно быть время начала задачи, а не
+     * время последнего подбора.
+     *
+     * ЧЕГО ЭТО СТОИТ, честно. Монитор здоровья для этой таблицы теперь считает
+     * простой по отпечатку прогресса (progress_stage и счётчики), а не по
+     * updated_at — иначе продление аренды выключало бы алерт совсем, см.
+     * комментарий к спецификации в services/health-check/main.py. Отпечаток
+     * живёт в памяти монитора и при передаче задачи соседу НЕ сбрасывается:
+     * перехваченная строка приносит отпечаток прежнего владельца вместе с его
+     * возрастом. Значит задача, подобранная и честно ушедшая в законно долгий
+     * чанк (до 148 минут, арифметика выше), может через 20 минут поднять
+     * «Долго висит», хотя с ней всё в порядке. Сбросить таймер отсюда нечем:
+     * колонки прогресса при захвате не двигаются, а двигать их искусственно —
+     * значит врать монитору ровно тем же способом, каким врал бы updated_at.
+     *
+     * Заметим, что склонность к ложной тревоге при этом НЕ выросла: и до
+     * перевода порог был те же 20 минут, а updated_at двигали ровно те же
+     * записи прогресса. Новое здесь только одно — передача задачи больше не
+     * обнуляет счётчик.
+     *
+     * Что с этим делать (менять сейчас не стали — HEALTH_JOB_STUCK_MIN общий
+     * на все очереди, и поднимать его ради одной значит ослабить остальные):
+     * нужен ПОШТУЧНЫЙ порог, поле вроде stuck_minutes в JobMonitorSpec, и для
+     * yandex_maps_jobs поставить его в 40-60 минут.
+     */
+    failedPatch: (reason) => ({ error_message: reason, completed_at: new Date().toISOString() }),
+    log,
+    run: async (job, ctx) => {
+      const stage = stageOf(job);
+      const runCtx = { signal: ctx.signal, runToken: ctx.runToken, saveCheckpoint: ctx.saveCheckpoint };
+      if (stage === 'collect') {
+        log('info', `Running YandexMaps collect-links job ${job.id}${ctx.checkpoint ? ' (RESUME)' : ''}`);
+        await runYandexMapsCollectLinks(job.id, runCtx);
+      } else {
+        log('info', `Running YandexMaps parse-orgs job ${job.id}${ctx.checkpoint ? ' (RESUME)' : ''}`);
+        await runYandexMapsParseOrganizations(job.id, runCtx);
+      }
+    },
+  });
+
+  const pollOnce = async (): Promise<boolean> => {
+    const claimed = await runner.pollOnce();
+    // Пользовательские задачи в приоритете: новый обход не начинаем, пока хоть
+    // одна из них выполняется. Уже начатый при этом доживает свой круг — рвать
+    // его на полпути дороже, чем потерпеть одну лишнюю параллельную задачу.
+    //
+    // Возвращаем результат опроса как есть: на false цикл уходит ждать realtime
+    // и проснётся на первой же пользовательской задаче. Плата — до 30 секунд
+    // простоя между кругами обхода; для механизма, который приносит сотни
+    // организаций в сутки, это ничто.
+    if (!claimed && runner.activeJobIds().length === 0) startCatalogDiscovery();
+    return claimed;
+  };
+
+  let stopFired = false;
+  for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+    process.once(sig, () => {
+      if (stopFired) return;
+      stopFired = true;
+      // markShuttingDown синхронно, ДО любой async-работы: shutdown() ставит
+      // флаг и сам, но полагаться на то, что он успеет до первого await внутри
+      // библиотеки, нельзя — флаг читают из другого модуля. Вызов
+      // идемпотентный, флаг односторонний — лишним он быть не может.
+      markShuttingDown();
+      log('info', `${sig} received — releasing leases for fast handoff`);
+      void runner.shutdown().catch((err) => log('error', 'shutdown failed', err));
+    });
+  }
 
   try {
     await pollLoop({ log, pollIntervalMs: POLL_INTERVAL_MS, shouldStop, pollOnce, realtimeTables: ['yandex_maps_jobs'] });
+    await runner.shutdown();
   } finally {
-    clearInterval(watchdog);
     clearInterval(heartbeat);
-    // Graceful requeue: помечаем свои running-задачи как pending, чтобы
-    // следующий процесс (после docker restart / --force-recreate) сразу их
-    // подхватил через startupRecovery без ожидания 15-мин watchdog'а и без
-    // риска зафейлиться. Держим общий тайм-аут 5с — если БД не отвечает,
-    // всё равно выходим (deploy не должен блокироваться).
-    if (runningJobs.size > 0) {
-      const jobIds = Array.from(runningJobs.keys());
-      log('info', `Graceful requeue: ${jobIds.length} running задач → pending (${jobIds.join(', ')})`);
-      try {
-        const db = requireSupabaseAdmin(log);
-        await Promise.race([
-          db.from('yandex_maps_jobs').update({ status: 'pending' }).in('id', jobIds).eq('status', 'running'),
-          new Promise((resolve) => setTimeout(resolve, 5000)),
-        ]);
-      } catch (e) {
-        log('warn', 'Graceful requeue failed', e);
-      }
-    }
   }
+  log('info', 'Worker stopped');
 }
 
 main().catch((err) => {
   log('error', 'Worker crashed', err);
   process.exit(1);
 });
-

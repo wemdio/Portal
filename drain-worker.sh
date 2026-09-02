@@ -1,18 +1,47 @@
 #!/usr/bin/env bash
 # drain-worker.sh
 #
-# Мягкая "пауза перед деплоем":
-# 1) Снимаем снимок активных задач (running) по таблицам очередей.
-# 2) Переводим running -> pending, чтобы задачи автоматически возобновились после рестарта.
-# 3) Сигнализируем и останавливаем worker-контейнеры.
-# 4) Для BaseConstructor помечаем processing-задачи для немедленного resume.
+# Что скрипт делает сейчас:
+# 1) Снимает снимок активных задач (running) по legacy-таблицам очередей.
+# 2) Переводит running -> pending, чтобы задачи возобновились после рестарта.
+# 3) Ставит на паузу in-memory кампании TG Outreach и ставит им job на
+#    автостарт после деплоя.
+# 4) Отдельно и мягко тушит worker-autopipeline (его 20-минутный grace нужен,
+#    чтобы прогон дописал свой префикс доменов).
+#
+# Чего скрипт намеренно НЕ делает:
+# - не хранит списки контейнеров и не останавливает воркеры: SIGTERM всем
+#   выбранным сервисам шлёт сам деплой (`docker compose stop --timeout 15`
+#   в шаге 5 .semaphore/scheduled-deploy.yml), поэтому список не может
+#   разъехаться с docker-compose.prod.yml;
+# - не трогает таблицы воркеров, переехавших на общий жизненный цикл задач
+#   (app/src/lib/jobs/lifecycle.ts): base_constructor_jobs, tg_parser_jobs,
+#   search_parser_jobs, yandex_maps_jobs, parser_jobs (HH/ATS/ENG-найм) и
+#   ai_campaigns с ai_caller_jobs (обзвон).
+#   Очередь sales_chat_sync_runs в списке ниже не значилась
+#   и не значится — искать, откуда её убрали, не нужно; воркер этой очереди
+#   просто добавлен в is_lifecycle_managed_worker, чтобы деплой одного его не
+#   ставил на паузу чужие legacy-очереди.
+#   Такие воркеры по SIGTERM сами отпускают аренду за ~2 секунды, а задача
+#   продолжается с чекпоинта в соседней реплике — БД трогать не нужно.
+#
+# По мере переезда остальных воркеров на общий жизненный цикл скрипт
+# сокращается до нуля и удаляется целиком.
 #
 # Важно: задача не должна уходить в failed из-за самого деплоя.
 
 set -euo pipefail
 
-# Scheduled deploy passes the selected compose worker services. No arguments
-# means an explicit/manual full drain for backward compatibility.
+# Scheduled deploy passes the selected compose worker services.
+#
+# Без аргументов скрипт ставит на паузу ВСЕ legacy-очереди и тушит
+# worker-autopipeline, но контейнеры остальных воркеров он больше не трогает —
+# они останутся живыми и в течение одного poll-интервала разберут обратно
+# строки, которые скрипт только что вернул в pending. При ручном запуске
+# остановку контейнеров обязан сделать сам вызывающий, например:
+#   docker compose --env-file .env -p portal -f docker-compose.prod.yml \
+#     stop --timeout 15 <сервисы>
+# (именно это делает шаг 3 .semaphore/scheduled-deploy.yml сразу после вызова).
 requested_worker_targets="$*"
 
 should_drain_worker() {
@@ -26,31 +55,30 @@ should_drain_worker() {
   esac
 }
 
-is_baseconstructor_worker() {
+# Воркеры на общем жизненном цикле задач (app/src/lib/jobs/lifecycle.ts)
+# передают задачу сами: их таблицы и очереди не трогаем.
+is_lifecycle_managed_worker() {
   case "$1" in
     worker-baseconstructor|worker-baseconstructor-*) return 0 ;;
+    worker-tg-parser) return 0 ;;
+    worker-search) return 0 ;;
+    worker-sales-chat-logger) return 0 ;;
+    worker-yandexmaps) return 0 ;;
+    worker-hh) return 0 ;;
+    worker-eng-hiring) return 0 ;;
+    worker-aicaller) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-should_drain_baseconstructor_workers() {
+# Пауза legacy-очередей нужна, только если деплой задевает хотя бы один воркер,
+# который ещё не переехал на общий жизненный цикл.
+should_pause_legacy_queues() {
   if [ -z "$requested_worker_targets" ]; then
     return 0
   fi
   for requested_target in $requested_worker_targets; do
-    if is_baseconstructor_worker "$requested_target"; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-should_drain_non_baseconstructor_workers() {
-  if [ -z "$requested_worker_targets" ]; then
-    return 0
-  fi
-  for requested_target in $requested_worker_targets; do
-    if ! is_baseconstructor_worker "$requested_target"; then
+    if ! is_lifecycle_managed_worker "$requested_target"; then
       return 0
     fi
   done
@@ -131,21 +159,28 @@ patch_running_to_pending() {
   patch_rows "$table" "status=eq.running" "$body"
 }
 
-if should_drain_non_baseconstructor_workers && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
+if should_pause_legacy_queues && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
   echo "[drain] Checking active running tasks before deploy..."
 
   total_running=0
   tracked_tables=(
-    "parser_jobs"
-    "search_parser_jobs"
+    # parser_jobs убран: HH-, ATS- и ENG-парсеры на едином жизненном цикле,
+    # захват идёт с фильтром по parser_type. Сброс всех running в pending
+    # отсюда отбирал бы строку у ещё живого исполнителя — в том числе у
+    # соседнего воркера, которого этот деплой не касается.
     "website_enrichment_jobs"
     "brief_scoring_jobs"
-    "yandex_maps_jobs"
+    # yandex_maps_jobs убран: воркер Яндекс.Карт на едином жизненном цикле сам
+    # отпускает аренду по SIGTERM, а задача продолжается с сохранённых ссылок и
+    # карточек в следующей реплике. Сброс её в pending отсюда только отбирал бы
+    # строку у ещё живого исполнителя.
     "email_validation_jobs"
     "lead_import_jobs"
     "tg_outreach_jobs"
-    "ai_caller_jobs"
-    "tg_parser_jobs"
+    # ai_caller_jobs убран: очередь стала каналом мгновенных команд оператора
+    # («старт», «стоп»), которые закрываются тем же запросом, что их берёт.
+    # Строки в `running` в ней больше не задерживаются, а сама кампания живёт
+    # своей строкой под арендой — сбрасывать здесь нечего.
     "tg_scan_jobs"
     "tg_transcribe_jobs"
   )
@@ -238,55 +273,20 @@ PY
     echo "[drain] tg_outreach_campaigns: running=0"
   fi
 
-  # AI Caller campaigns: running -> paused, then queue "start" job for auto-resume.
-  ai_rows="$(fetch_running_rows "ai_campaigns" "id,created_by" 2>/dev/null || true)"
-  ai_count="$(printf '%s' "$ai_rows" | count_json_rows)"
-  if [ "$ai_count" -gt 0 ]; then
-    echo "[drain] ai_campaigns: running=${ai_count}; scheduling auto-resume"
-    ai_pause_code="$(patch_running_to_pending "ai_campaigns" "{\"status\":\"paused\",\"updated_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}")"
-    if [[ "$ai_pause_code" =~ ^(200|204)$ ]]; then
-      echo "[drain] ai_campaigns: running -> paused"
-    fi
-
-    export AI_RUNNING_ROWS="$ai_rows"
-    python3 - <<'PY' > /tmp/portal_ai_resume_jobs.json
-import json, os
-raw = os.environ.get("AI_RUNNING_ROWS", "")
-out = []
-try:
-    data = json.loads(raw) if raw else []
-except Exception:
-    data = []
-for row in data:
-    if not isinstance(row, dict):
-        continue
-    cid = str(row.get("id", "")).strip()
-    uid = str(row.get("created_by", "")).strip()
-    if cid and uid:
-        out.append({"campaign_id": cid, "user_id": uid, "action": "start", "status": "pending"})
-print(json.dumps(out, ensure_ascii=True))
-PY
-
-    if [ -s /tmp/portal_ai_resume_jobs.json ]; then
-      resume_payload="$(cat /tmp/portal_ai_resume_jobs.json)"
-      if [ "${resume_payload}" != "[]" ]; then
-        curl -sS -X POST \
-          "${SUPABASE_URL}/rest/v1/ai_caller_jobs" \
-          "${auth_headers[@]}" \
-          -H "Content-Type: application/json" \
-          -H "Prefer: return=minimal" \
-          -d "${resume_payload}" >/dev/null 2>&1 || true
-        echo "[drain] ai_caller_jobs: queued start jobs for paused campaigns"
-      fi
-    fi
-    rm -f /tmp/portal_ai_resume_jobs.json || true
-  else
-    echo "[drain] ai_campaigns: running=0"
-  fi
-elif should_drain_non_baseconstructor_workers; then
+  # Кампании обзвона (ai_campaigns) здесь БОЛЬШЕ НЕ ТРОГАЮТСЯ.
+  #
+  # Раньше на этом месте был блок «running -> paused + положить команду старт»:
+  # цикл кампании жил в памяти процесса, и без него кампания после деплоя просто
+  # не возобновлялась. Воркер portal-worker-aicaller переехал на общий
+  # жизненный цикл задач — строка кампании арендуется, по SIGTERM аренда
+  # отпускается за пару секунд, и кампанию подхватывает следующая реплика сама.
+  # Пауза здесь теперь была бы вредна дважды: она останавливала бы кампанию,
+  # которую никто не просил останавливать, а команда «старт» ещё и воскрешала бы
+  # ту, которую оператор остановил руками.
+elif should_pause_legacy_queues; then
   echo "[drain] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — skipping Supabase pause flow"
 else
-  echo "[drain] Base Constructor-only deploy — unrelated queues stay running"
+  echo "[drain] Deploy touches only lifecycle-managed workers — legacy queues stay running"
 fi
 
 if should_drain_worker "worker-autopipeline"; then
@@ -299,76 +299,4 @@ if should_drain_worker "worker-autopipeline"; then
   echo "[drain] Auto-pipeline stopped cleanly"
 fi
 
-if should_drain_non_baseconstructor_workers; then
-  containers=(
-    "portal-worker"
-    "portal-worker-hh"
-    "portal-worker-eng-hiring"
-    "portal-worker-search"
-    "portal-worker-enrich"
-    "portal-worker-yandexmaps"
-    "portal-worker-emailvalidation"
-    "portal-worker-tg-outreach"
-    "portal-worker-aicaller"
-    "portal-worker-tg-transcribe"
-    "portal-worker-outreach"
-  )
-
-  echo "[drain] Stopping worker containers (timeout 15s each)..."
-  for c in "${containers[@]}"; do
-    sudo -n docker stop -t 15 "$c" 2>/dev/null || true &
-  done
-  wait
-fi
-
-# BaseConstructor-реплики останавливаем отдельно и с коротким таймаутом.
-#
-# Зачем вообще (инцидент 11.08.2026, деплой 15:10): всё, чего нет в этом
-# скрипте, деплой убивает через force_rm_svc → `docker rm -f`, то есть
-# SIGKILL'ом без сигнала. Обработчик SIGTERM в app/worker/baseConstructor.ts
-# (ageRunningJobsForFastHandoff) при этом не выполняется, in-flight job'ы не
-# помечаются осиротевшими, и соседняя реплика подбирает их только по
-# BASE_CONSTRUCTOR_STALE_MINUTES — 15 минут простоя на ровном месте плюс
-# ложная тревога «Долго висит» в мониторе.
-#
-# Почему не в общий список выше: 15-секундный таймаут × 12 реплик = +180с к
-# каждому деплою, а ждать тут нечего. Задача НЕ должна доиграть до конца —
-# она резюмится с чекпоинта в другой реплике; хэндлеру нужно ~2 секунды
-# (UPDATE + повторный UPDATE через секунду). Останавливаем параллельно,
-# так весь шаг стоит ~5 секунд.
-if should_drain_baseconstructor_workers; then
-  bc_containers=(
-    "portal-worker-baseconstructor"
-    "portal-worker-baseconstructor-2"
-    "portal-worker-baseconstructor-3"
-    "portal-worker-baseconstructor-4"
-    "portal-worker-baseconstructor-5"
-    "portal-worker-baseconstructor-6"
-    "portal-worker-baseconstructor-7"
-    "portal-worker-baseconstructor-8"
-    "portal-worker-baseconstructor-9"
-    "portal-worker-baseconstructor-10"
-    "portal-worker-baseconstructor-11"
-    "portal-worker-baseconstructor-12"
-  )
-
-  echo "[drain] Stopping base-constructor replicas (timeout 5s, in parallel)..."
-  for c in "${bc_containers[@]}"; do
-    sudo -n docker stop -t 5 "$c" 2>/dev/null || true &
-  done
-  wait
-
-  # The worker-side shutdown guard normally ages each processing job before exit.
-  # Keep a deployment-side backstop after every replica has stopped so a failed
-  # signal handler or database request cannot leave a fresh heartbeat behind.
-  if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
-    base_constructor_handoff_code="$(patch_rows "base_constructor_jobs" "status=eq.processing" '{"started_at":"1970-01-01T00:00:00Z"}')"
-    if [[ "$base_constructor_handoff_code" =~ ^(200|204)$ ]]; then
-      echo "[drain] base_constructor_jobs: processing jobs marked for immediate resume"
-    else
-      echo "[drain] base_constructor_jobs: handoff request returned http ${base_constructor_handoff_code}"
-    fi
-  fi
-fi
-
-echo "[drain] Workers stopped (jobs are paused or marked for immediate resume)"
+echo "[drain] Legacy job queues paused; stopping containers is the deploy's job now"

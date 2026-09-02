@@ -349,16 +349,16 @@ export async function updateJobProgress(
   };
   // Heartbeat: каждое обновление прогресса bumps started_at. Семантика
   // меняется с «когда началось» на «когда была последняя активность».
-  // Нужно для resume-логики в autoCompleteIfStuck: если started_at
-  // свежий — worker реально работает; если устарел >15 мин — умер,
-  // безопасно пере-запустить с этого места.
+  // По этой колонке судят двое: монитор здоровья (services/health-check)
+  // и сама библиотека жизненного цикла — она перестаёт продлевать аренду,
+  // если started_at стоит дольше порога простоя, и задачу забирает соседняя
+  // реплика (progress в app/worker/baseConstructor.ts).
   //
-  // Исключение — shutdown (инцидент 11.08.2026): после SIGTERM воркер уже
-  // backdate'ил started_at, чтобы соседняя реплика подхватила job за ~5с
-  // вместо BASE_CONSTRUCTOR_STALE_MINUTES. Job доигрывает свои последние
-  // секунды до SIGKILL, и её heartbeat затирал этот backdate обратно на
-  // now() — handoff не срабатывал ни разу. Прогресс продолжаем писать
-  // (resume стартует с него), «я жив» — больше нет.
+  // Исключение — shutdown (инцидент 11.08.2026): писать «я жив» после
+  // SIGTERM — враньё. Задача доигрывает последние секунды до SIGKILL, её
+  // аренда уже отпущена для передачи соседу, и свежий started_at только
+  // прятал бы простой от монитора. Прогресс продолжаем писать (resume
+  // стартует с него), «я жив» — больше нет.
   if (!isShuttingDown()) {
     patch.started_at = new Date().toISOString();
   }
@@ -944,10 +944,10 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
     // legacy build-from-data path (and lazily backfills on first download).
     // Heartbeat before the (up to ~30s) artifact build+upload. The final block
     // otherwise emits no started_at bump, so autoCompleteIfStuck (2 min stale)
-    // or a stale-reclaim could early-complete/reclaim the job mid-block and race
-    // a stale artifact onto storage. Status-guarded so a mid-run cancel is not
-    // resurrected to processing, и молчит на shutdown — иначе затрёт
-    // fast-handoff backdate (см. updateJobProgress).
+    // could early-complete the job mid-block and race a stale artifact onto
+    // storage — and the lease would stop being renewed as if the work had
+    // wedged. Status-guarded so a mid-run cancel is not resurrected to
+    // processing, и молчит на shutdown (см. updateJobProgress).
     if (!isShuttingDown()) {
       let heartbeatQuery = admin
         .from('base_constructor_jobs')

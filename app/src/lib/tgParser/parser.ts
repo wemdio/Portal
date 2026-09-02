@@ -301,7 +301,7 @@ async function userToParsed(
   };
 }
 
-export type ParseStopReason = 'contact_limit' | 'error';
+export type ParseStopReason = 'contact_limit' | 'error' | 'interrupted';
 
 export type ParseResult =
   | { status: 'ok'; users: ParsedUser[] }
@@ -435,9 +435,14 @@ async function parsePostComments(
   const usersMap = new Map<number, { user: Api.User; messages: string[] }>();
   for await (const post of client.iterMessages(entity, { limit: opts.message_limit })) {
     beat();
+    // Этап перебора постов не сливает ни одного контакта до самого конца, и
+    // проверка в mergeUser его не останавливает. Без этих двух выходов сессия
+    // Telegram жила бы после потери задачи — см. комментарий в buildMergeUser.
+    if (opts.signal?.aborted) return;
     if (!post?.replies?.comments) continue;
     try {
       for await (const reply of client.iterMessages(entity, { replyTo: post.id, limit: 100 })) {
+        if (opts.signal?.aborted) return;
         if (!reply?.senderId || !reply.message) continue;
         const sender = await reply.getSender();
         if (!sender || (sender as Api.User).className !== 'User' || (sender as Api.User).bot) continue;
@@ -477,6 +482,22 @@ function buildMergeUser(
   stopRef: { reason: ParseStopReason | null },
 ): (u: ParsedUser) => Promise<boolean> {
   return async (u: ParsedUser) => {
+    /*
+     * Сигнал проверяем здесь, на каждом контакте, а не только сторожевым
+     * таймером раз в 30 секунд.
+     *
+     * shutdown() отпускает аренду через пару секунд и не ждёт конца обхода:
+     * задачу почти сразу может забрать сосед. Если мы к этому моменту всё ещё
+     * держим соединение, сосед подключится ТЕМ ЖЕ аккаунтом и Telegram за доли
+     * секунды ответит AUTH_KEY_DUPLICATED (см. accountConflict.ts) — падают оба
+     * обхода, а на повторах сессия сгорает и требует переавторизации. Штатный
+     * `if (!(await mergeUser(...))) return;` есть в каждом этапе, поэтому одна
+     * эта проверка сокращает окно с полуминуты до одного контакта.
+     */
+    if (opts.signal?.aborted) {
+      stopRef.reason = 'interrupted';
+      return false;
+    }
     if (stopRef.reason) return false;
     const ex = allUsers.get(u.ID);
     if (ex) {
@@ -503,6 +524,9 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
   const enrichProfile =
     opts.enrich_profile ?? String(process.env.TG_PARSER_ENRICH_PROFILE ?? '').trim().toLowerCase() === 'true';
   const allUsers = new Map<number, ParsedUser>();
+  // Подсадка из чекпойнта: без неё дедупликация и лимит max_contacts после
+  // перезапуска считались бы с нуля и набрали бы тех же людей заново.
+  for (const u of opts.initialUsers ?? []) allUsers.set(u.ID, u);
   const stopRef: { reason: ParseStopReason | null } = { reason: null };
   const mergeUser = buildMergeUser(opts, allUsers, stopRef);
   /** Источники, которые не открылись. Задачу валят только все разом. */
@@ -510,6 +534,7 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
 
   try {
     for (const link of opts.links) {
+      if (opts.signal?.aborted) { stopRef.reason = 'interrupted'; break; }
       if (stopRef.reason) break;
       const trimmed = String(link).trim();
       if (!trimmed) continue;
@@ -537,6 +562,13 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
 
         const idleGuard = new Promise<never>((_, reject) => {
           timer = setInterval(() => {
+            // Сигнал проверяем тем же таймером: этап живёт часами, и ждать его
+            // конца ради остановки — значит не уложиться в grace деплоя.
+            if (opts.signal?.aborted) {
+              stopRef.reason = 'interrupted';
+              reject(new Error('interrupted'));
+              return;
+            }
             if (Date.now() - lastBeat > idleMs) {
               reject(new Error(`обход источника (${stage}): нет движения ${Math.round(idleMs / 60_000)} мин`));
             }
@@ -547,12 +579,19 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
           await Promise.race([fn(() => { lastBeat = Date.now(); }), idleGuard]);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
+          // Прерывание — не провал этапа: этап не закончен, и отчитываться о
+          // нём как о завершённом нельзя. Просто выходим, дальше сработает
+          // проверка stopRef.reason и цикл прервётся.
+          if (msg === 'interrupted') return;
           if (!msg.includes('нет движения')) throw e;
           await report(opts, { link: trimmed, stage, phase: 'done', total: totalSoFar() });
         } finally {
           if (timer) clearInterval(timer);
         }
       };
+
+      /** Причина, по которой источник не открылся, — её же уносим в чекпойнт. */
+      let linkFailure: string | null = null;
 
       // Источник, который не открылся, — не повод бросать остальные. Раньше
       // весь цикл стоял под одним try: 12.08.2026 первая же ссылка не
@@ -578,8 +617,23 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
         // самое, а на флуд-лимите перебор источников его только усугубит.
         if (isAccountLevelFailure(e)) throw e;
         const msg = e instanceof Error ? e.message : String(e);
+        linkFailure = msg;
         linkFailures.push({ link: trimmed, error: msg });
         await report(opts, { link: trimmed, stage: 'messages', phase: 'done', total: totalSoFar() });
+      }
+
+      // Источник закрыт: либо обошли все этапы, либо он не открылся и свою
+      // попытку израсходовал — повторять его после перезапуска незачем.
+      // Прерванный источник сюда не доходит: любой break по stopRef.reason
+      // уводит из цикла раньше, иначе недобранный источник пометился бы
+      // готовым и его люди пропали бы навсегда.
+      if (!stopRef.reason && opts.onLinkDone) {
+        try {
+          await opts.onLinkDone(trimmed, [...allUsers.values()], linkFailure ?? undefined);
+        } catch {
+          // Сбой чекпойнта не должен ронять обход: в худшем случае задача
+          // переиграет этот источник, а не потеряет всю работу.
+        }
       }
     }
     await client.disconnect();

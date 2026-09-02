@@ -45,7 +45,101 @@ function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/**
+ * Пауза, которую обрывает отмена. Резолвится, а не бросает: что делать с
+ * отменой, решает вызывающий код (та же форма, что в searchParserWorker.ts).
+ */
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    // AbortSignal не переигрывает уже случившуюся отмену для поздних
+    // слушателей — поэтому проверка выше идёт до подписки.
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+
+/**
+ * Контекст исполнения задачи под единым жизненным циклом
+ * (app/src/lib/jobs/lifecycle.ts).
+ *
+ * Необязателен: обе стадии зовут ещё и из мест без всякой аренды
+ * (`worker/index.ts`, бенчи), и там поведение обязано остаться прежним.
+ */
+export interface YandexMapsRunContext {
+  /** Взводится на SIGTERM воркера, при потере аренды и при перехвате строки. */
+  signal: AbortSignal;
+  /**
+   * Жетон текущего захвата. Им ограждаются ВСЕ записи в строку задачи: обе
+   * стадии пишут терминальный статус сами (manageTerminalStatus=false), и без
+   * жетона вытесненное тело проштамповало бы completed/failed и свой прогресс
+   * поверх работы нового владельца строки.
+   */
+  runToken: string;
+  /**
+   * Чекпойнт нужен НЕ как хранилище состояния: возобновление у обеих стадий
+   * и так выводится из БД — из уже сохранённых ссылок (yandex_maps_links) и
+   * уже разобранных карточек (yandex_maps_organizations). Он нужен ради двух
+   * побочных эффектов библиотеки: продлить аренду и обнулить бюджет неудач,
+   * чтобы задача, которая честно движется, не падала в failed из-за трёх
+   * разнесённых во времени грубых остановок. Поэтому и содержимое у него
+   * минимальное — счётчик, а не список.
+   *
+   * false — задачу перехватили: работу надо прекратить.
+   */
+  saveCheckpoint(data: YandexMapsCheckpoint): Promise<boolean>;
+}
+
+export type YandexMapsCheckpoint = { stage: 'collect' | 'parse'; done: number };
+
+/**
+ * Задача перестала быть нашей посреди шага, который сам по себе не умеет
+ * останавливаться (заливка каталога порциями). Единственный способ выйти из
+ * него — бросить: вызывающий код отличает это исключение от отказа задачи и
+ * НЕ пишет терминальный статус.
+ */
+class YandexMapsJobReclaimedError extends Error {
+  constructor() {
+    super('yandex maps job reclaimed or stopped');
+    this.name = 'YandexMapsJobReclaimedError';
+  }
+}
+
+/**
+ * Одна ограждённая точка записи в строку задачи.
+ *
+ * Без ctx — поведение ровно как до переезда на жизненный цикл (жетона нет,
+ * фильтр не добавляется).
+ */
+async function setJobPatch(jobId: string, patch: Record<string, unknown>, ctx?: YandexMapsRunContext) {
+  if (!supabaseAdmin) return;
+  const query = supabaseAdmin.from('yandex_maps_jobs').update(patch).eq('id', jobId);
+  // Тип билдера — any по той же причине, что в lib/jobs/lifecycle.ts: цепочка
+  // PostgREST меняет форму на каждом шаге, а нам нужен от неё только .eq.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (ctx ? (query as any).eq('run_token', ctx.runToken) : query);
+}
+
+/**
+ * Терминальная запись снимает владение вместе со статусом — ровно как это
+ * делает библиотека в своих терминальных записях (clearOwnership в
+ * lib/jobs/lifecycle.ts). При manageTerminalStatus=false она этого за нас не
+ * сделает, и законченная строка иначе читается как арендованная и в SQL, и на
+ * экране, а продление, успевшее сработать между записью и снятием таймера,
+ * пишет в журнал ложное «lease lost to another worker».
+ */
+const CLEAR_OWNERSHIP = { lease_until: null, run_token: null, worker_id: null };
+
+async function setJobTerminal(jobId: string, patch: Record<string, unknown>, ctx?: YandexMapsRunContext) {
+  await setJobPatch(jobId, { ...patch, ...CLEAR_OWNERSHIP }, ctx);
+}
 
 /**
  * Ждёт готовности yandexmaps сервиса. Нужно, потому что при деплое воркер
@@ -54,17 +148,13 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  * одна неудача сразу помечала job как failed («health check failed»), из-за
  * чего свежие задачи после деплоя приходилось перезапускать вручную.
  */
-async function waitForYandexMapsHealth(attempts = 6, delayMs = 10_000): Promise<boolean> {
+async function waitForYandexMapsHealth(attempts = 6, delayMs = 10_000, signal?: AbortSignal): Promise<boolean> {
   for (let i = 0; i < attempts; i += 1) {
-    if (await yandexMapsHealth()) return true;
-    if (i < attempts - 1) await sleep(delayMs);
+    if (signal?.aborted) return false;
+    if (await yandexMapsHealth(signal)) return true;
+    if (i < attempts - 1) await sleep(delayMs, signal);
   }
   return false;
-}
-
-async function setJobPatch(jobId: string, patch: Record<string, unknown>) {
-  if (!supabaseAdmin) return;
-  await supabaseAdmin.from('yandex_maps_jobs').update(patch).eq('id', jobId);
 }
 
 async function getJob(jobId: string) {
@@ -226,7 +316,7 @@ function slowProxyMessage(report: string): string {
   );
 }
 
-export async function runYandexMapsCollectLinks(jobId: string) {
+export async function runYandexMapsCollectLinks(jobId: string, ctx?: YandexMapsRunContext) {
   if (!supabaseAdmin) {
     console.error('supabaseAdmin not configured');
     return;
@@ -236,6 +326,15 @@ export async function runYandexMapsCollectLinks(jobId: string) {
   if (!job) return;
 
   if (job.status === 'completed') return;
+
+  /**
+   * Работа прервана извне: остановка воркера (SIGTERM), потеря аренды или
+   * перехват строки соседом. Это НЕ итог задачи: строка обязана остаться в
+   * running с уже записанным прогрессом, аренду отпустит библиотека, а сбор
+   * продолжится с сохранённых ссылок. Любая терминальная запись здесь стоила
+   * бы часов работы — поэтому проверка стоит на каждом выходе.
+   */
+  const interrupted = () => ctx?.signal.aborted === true;
 
   const requestId = crypto.randomUUID();
   const logMeta = { userId: job.user_id, requestId, route: 'yandex_maps_collect_links' };
@@ -276,7 +375,7 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       processed_links: allLinks.length,
       total_links: allLinks.length,
       error_message: null,
-    });
+    }, ctx);
 
     const cfg = (job.config && typeof job.config === 'object') ? (job.config as Record<string, unknown>) : {};
     const MAX_SEARCH_URLS = 500;
@@ -311,7 +410,7 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       // иначе несколько минут смотрит на пустой экран. Первые тысячи ложатся за
       // пару секунд, дальше счётчик растёт после каждой порции — форма опрашивает
       // задачу раз в пять секунд и подтягивает уже собранное.
-      await setJobPatch(jobId, { progress_stage: 'catalog_search' });
+      await setJobPatch(jobId, { progress_stage: 'catalog_search' }, ctx);
       const filled = await fillYandexMapsCatalogJobInChunks(
         jobId,
         catalogFilters,
@@ -320,18 +419,34 @@ export async function runYandexMapsCollectLinks(jobId: string) {
           await setJobPatch(jobId, {
             total_organizations: collected,
             processed_organizations: collected,
-          });
+          }, ctx);
+          // Порция каталога легла в базу — продлеваем аренду и обнуляем
+          // бюджет неудач.
+          //
+          // И ОБЯЗАТЕЛЬНО слушаем ответ про владение. Заливка каталога — не
+          // «одна оставшаяся терминальная запись»: это лесенка порций, каждая
+          // из которых зовёт yandex_maps_catalog_fill_job. Если задачу забрал
+          // сосед или пришла остановка, продолжать лесенку значит лить строки
+          // в задачу, которой мы больше не владеем, параллельно с её новым
+          // владельцем. Останавливаться нечем, кроме исключения: сам шаг —
+          // один серверный SQL-вызов, отменить его на полпути нельзя, поэтому
+          // начатая порция дописывается, а следующая уже не начинается.
+          if (ctx) {
+            const stillOurs = await ctx.saveCheckpoint({ stage: 'collect', done: collected });
+            if (!stillOurs || interrupted()) throw new YandexMapsJobReclaimedError();
+          }
         },
       );
 
-      await setJobPatch(jobId, {
+      if (interrupted()) return;
+      await setJobTerminal(jobId, {
         status: 'completed',
         progress_stage: filled.organizations ? 'catalog_completed' : 'catalog_empty',
         completed_at: new Date().toISOString(),
         total_organizations: filled.organizations,
         processed_organizations: filled.organizations,
         error_message: null,
-      });
+      }, ctx);
       await trace?.end({ source: 'catalog', total_organizations: filled.organizations });
       void logInfo('parser.yandexmaps.catalog.complete', 'YandexMaps catalog search completed', {
         jobId,
@@ -341,15 +456,17 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     }
 
     if (!searchUrls.length) {
-      await setJobPatch(jobId, { status: 'failed', error_message: 'Нет URL для поиска' });
+      await setJobTerminal(jobId, { status: 'failed', error_message: 'Нет URL для поиска' }, ctx);
       await trace?.fail(new Error('Missing search_urls'));
       return;
     }
 
-    const serviceHealthy = await waitForYandexMapsHealth();
+    const serviceHealthy = await waitForYandexMapsHealth(6, 10_000, ctx?.signal);
+    // Ожидание могли оборвать остановкой — это не «сервис не поднялся».
+    if (interrupted()) return;
     if (!serviceHealthy) {
       const msg = 'Сервис yandexmaps недоступен (не поднялся за минуту). Проверьте, что контейнер yandexmaps запущен.';
-      await setJobPatch(jobId, { status: 'failed', error_message: msg });
+      await setJobTerminal(jobId, { status: 'failed', error_message: msg }, ctx);
       await trace?.fail(new Error(msg));
       void logError('parser.yandexmaps.collect.health_failed', new Error(msg), { jobId }, logMeta);
       return;
@@ -362,14 +479,15 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     let activePool: ResolvedProxy[] | undefined;
     if (!job.proxy_enabled && getYandexMapsProxyPool().length > 0) {
       const probe = await probeProxyPool(jobId, logMeta);
+      if (interrupted()) return;
       if (probe.checked && probe.filtered.length === 0) {
         const msg = slowProxyMessage(probe.report);
-        await setJobPatch(jobId, {
+        await setJobTerminal(jobId, {
           status: 'failed',
           error_message: msg,
           progress_stage: 'proxy_too_slow',
           completed_at: new Date().toISOString(),
-        });
+        }, ctx);
         await trace?.fail(new Error(msg));
         void logWarn('parser.yandexmaps.collect.proxy_too_slow', 'All proxies below speed threshold', { jobId, report: probe.report }, logMeta);
         return;
@@ -436,7 +554,7 @@ export async function runYandexMapsCollectLinks(jobId: string) {
           total_links: allLinks.length,
           processed_links: allLinks.length,
           progress_stage: `collecting_links:${completedUrls}/${searchUrls.length}`,
-        });
+        }, ctx);
       };
 
       const maxProxyRetries = Math.max(1, proxyPoolSize) + 1;
@@ -446,16 +564,23 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       let lastBlockedError: YandexMapsBlockedError | null = null;
       let lastGenericError: unknown = null;
       for (let attempt = 0; attempt < maxProxyRetries; attempt++) {
+        // Остановка/перехват: ни повторять URL через следующий прокси, ни
+        // записывать исход не нужно — задачу продолжит новый владелец.
+        if (interrupted()) return;
         try {
           const { total, intlRedirect } = await yandexMapsCollectLinksStream(
             { search_url, max_results: maxResults, headless, proxy: pickProxy(job, urlIndex - 1 + attempt, activePool) },
             collectStreamCallback,
+            ctx?.signal,
           );
           lastTotal = total;
           urlIntlRedirect = intlRedirect;
           success = true;
           break;
         } catch (e) {
+          // Оборванный по отмене стрим — не отказ URL: выходим молча, ничего
+          // не помечая ни блокировкой, ни ошибкой.
+          if (interrupted()) return;
           if (e instanceof YandexMapsBlockedError) {
             lastBlockedError = e;
             void logWarn(
@@ -516,7 +641,7 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     };
 
     const runCollectWorker = async () => {
-      while (!cancelled) {
+      while (!cancelled && !interrupted()) {
         if (strictMaxResults && allLinks.length >= maxResultsLimit) {
           limitReached = true;
           return;
@@ -537,12 +662,25 @@ export async function runYandexMapsCollectLinks(jobId: string) {
         } finally {
           completedUrls += 1;
         }
+        // Граница URL — естественная точка чекпойнта: ссылки этого URL уже
+        // лежат в yandex_maps_links, и с них сбор продолжится в любом случае.
+        if (ctx) {
+          const stillOurs = await ctx.saveCheckpoint({ stage: 'collect', done: completedUrls });
+          if (!stillOurs) return;
+        }
       }
     };
 
     await Promise.all(
       Array.from({ length: Math.min(collectConcurrency, queue.length) }, () => runCollectWorker()),
     );
+
+    // Остановка воркера или перехват аренды: статус не трогаем совсем, строка
+    // остаётся running с уже собранными ссылками.
+    if (interrupted()) {
+      await trace?.cancel('Interrupted');
+      return;
+    }
 
     if (cancelled) {
       await trace?.cancel('Cancelled');
@@ -553,7 +691,7 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       total_links: allLinks.length,
       processed_links: allLinks.length,
       progress_stage: 'links_collected',
-    });
+    }, ctx);
 
     if (intlRedirectUrls > 0) {
       // Сигнал «собрали 2% возможного»: зарубежные прокси -> yandex.com ->
@@ -571,7 +709,9 @@ export async function runYandexMapsCollectLinks(jobId: string) {
 
     if (allLinks.length > 0) {
       void logInfo('parser.yandexmaps.auto_parse', 'Auto-starting parse after collect', { jobId, totalLinks: allLinks.length }, logMeta);
-      await runYandexMapsParseOrganizations(jobId);
+      // Контекст передаём дальше: вторая стадия идёт под тем же захватом и той
+      // же арендой, и её записи обязаны быть ограждены тем же жетоном.
+      await runYandexMapsParseOrganizations(jobId, ctx);
     } else if (blockedUrls > 0) {
       // 0 ссылок и была блокировка => это не «пустая выдача», а капча/антибот.
       // Пишем честную причину вместо вводящего в заблуждение «Завершено».
@@ -579,12 +719,12 @@ export async function runYandexMapsCollectLinks(jobId: string) {
         `Яндекс временно заблокировал наши прокси на этапе поиска ` +
         `(${blockedUrls} из ${searchUrls.length} запросов не прошли). ` +
         `Подождите 15–20 минут (IP прокси меняются каждые 2 минуты) и нажмите «Продолжить парсинг» — попробуем те же запросы через свежие IP.`;
-      await setJobPatch(jobId, {
+      await setJobTerminal(jobId, {
         status: 'failed',
         error_message: msg,
         progress_stage: 'yandex_blocked',
         completed_at: new Date().toISOString(),
-      });
+      }, ctx);
       void logWarn('parser.yandexmaps.collect.all_blocked', 'Collect finished with 0 links due to blocking', { jobId, blockedUrls, totalUrls: searchUrls.length }, logMeta);
     } else if (failedUrls > 0) {
       // 0 ссылок и все (или часть) URL упали с не-блокировочной ошибкой —
@@ -594,28 +734,38 @@ export async function runYandexMapsCollectLinks(jobId: string) {
         `Не удалось собрать ссылки: ${failedUrls} из ${searchUrls.length} поисковых запросов ` +
         `упали с ошибкой загрузки страницы (прокси не отвечает или слишком медленный). ` +
         `Проверьте прокси и нажмите «Продолжить парсинг».`;
-      await setJobPatch(jobId, {
+      await setJobTerminal(jobId, {
         status: 'failed',
         error_message: msg,
         progress_stage: 'collect_failed',
         completed_at: new Date().toISOString(),
-      });
+      }, ctx);
       void logWarn('parser.yandexmaps.collect.all_failed', 'Collect finished with 0 links due to URL errors', { jobId, failedUrls, totalUrls: searchUrls.length }, logMeta);
     } else {
-      await setJobPatch(jobId, {
+      await setJobTerminal(jobId, {
         status: 'completed',
         progress_stage: 'completed',
         completed_at: new Date().toISOString(),
-      });
+      }, ctx);
     }
   } catch (e) {
-    await setJobPatch(jobId, { status: 'failed', error_message: e instanceof Error ? e.message : 'Ошибка' });
+    // Исключение из-за отмены — не отказ задачи: строку оставляем в running,
+    // аренду отпустит библиотека, сбор продолжится с сохранённых ссылок.
+    // Судим по СИГНАЛУ, а не по имени ошибки: AbortError прилетает и от
+    // собственного 990-секундного таймаута запроса, и вот он как раз отказ.
+    // Отдельно — свой YandexMapsJobReclaimedError: им лесенка заливки каталога
+    // сообщает, что задача перестала быть нашей.
+    if (interrupted() || e instanceof YandexMapsJobReclaimedError) {
+      await trace?.cancel('Interrupted');
+      return;
+    }
+    await setJobTerminal(jobId, { status: 'failed', error_message: e instanceof Error ? e.message : 'Ошибка' }, ctx);
     await trace?.fail(e);
     void logError('parser.yandexmaps.collect.failed', e, { jobId }, logMeta);
   }
 }
 
-export async function runYandexMapsParseOrganizations(jobId: string) {
+export async function runYandexMapsParseOrganizations(jobId: string, ctx?: YandexMapsRunContext) {
   if (!supabaseAdmin) {
     console.error('supabaseAdmin not configured');
     return;
@@ -628,6 +778,9 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
 
   const isCancelled = job.status === 'failed';
   if (isCancelled) return;
+
+  /** См. одноимённый комментарий в runYandexMapsCollectLinks. */
+  const interrupted = () => ctx?.signal.aborted === true;
 
   const requestId = crypto.randomUUID();
   const logMeta = { userId: job.user_id, requestId, route: 'yandex_maps_parse_orgs' };
@@ -659,7 +812,7 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
     const normalizedLinks = normalizeYandexOrgUrls((linkRows ?? []).map((r) => String((r as { link?: unknown }).link ?? '')).filter(Boolean));
     const links = strictMaxResults ? normalizedLinks.slice(0, maxResultsLimit) : normalizedLinks;
     if (!links.length) {
-      await setJobPatch(jobId, { status: 'failed', error_message: 'Нет ссылок организаций (сначала соберите ссылки)' });
+      await setJobTerminal(jobId, { status: 'failed', error_message: 'Нет ссылок организаций (сначала соберите ссылки)' }, ctx);
       await trace?.fail(new Error('Missing links'));
       return;
     }
@@ -684,12 +837,14 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
       processed_organizations: parsedCardUrls.size,
       total_organizations: links.length,
       error_message: null,
-    });
+    }, ctx);
 
-    const serviceHealthy = await waitForYandexMapsHealth();
+    const serviceHealthy = await waitForYandexMapsHealth(6, 10_000, ctx?.signal);
+    // Ожидание могли оборвать остановкой — это не «сервис не поднялся».
+    if (interrupted()) return;
     if (!serviceHealthy) {
       const msg = 'Сервис yandexmaps недоступен (не поднялся за минуту). Проверьте, что контейнер yandexmaps запущен.';
-      await setJobPatch(jobId, { status: 'failed', error_message: msg });
+      await setJobTerminal(jobId, { status: 'failed', error_message: msg }, ctx);
       await trace?.fail(new Error(msg));
       void logError('parser.yandexmaps.parse.health_failed', new Error(msg), { jobId }, logMeta);
       return;
@@ -711,15 +866,16 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
     let activePool: ResolvedProxy[] | undefined;
     if (!job.proxy_enabled && getYandexMapsProxyPool().length > 0) {
       const probe = await probeProxyPool(jobId, logMeta);
+      if (interrupted()) return;
       if (probe.checked && probe.filtered.length === 0) {
         const msg = slowProxyMessage(probe.report);
-        await setJobPatch(jobId, {
+        await setJobTerminal(jobId, {
           status: 'failed',
           error_message: msg,
           progress_stage: 'proxy_too_slow',
           processed_organizations: parsedCardUrls.size,
           completed_at: new Date().toISOString(),
-        });
+        }, ctx);
         await trace?.fail(new Error(msg));
         void logWarn('parser.yandexmaps.parse.proxy_too_slow', 'All proxies below speed threshold', { jobId, report: probe.report }, logMeta);
         return;
@@ -785,8 +941,14 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
       let lastBlockedError: YandexMapsBlockedError | null = null;
       for (let attempt = 0; attempt < maxProxyRetries; attempt++) {
         if (parseCancelled) break;
+        // Остановка/перехват: чанк не повторяем и исход не записываем —
+        // непарсенные ссылки и так вычисляются заново по yandex_maps_organizations.
+        if (interrupted()) return;
         try {
-          const res = await yandexMapsParseOrgs({ links: part, headless, proxy: pickProxy(job, chunkIdx + attempt, activePool) });
+          const res = await yandexMapsParseOrgs(
+            { links: part, headless, proxy: pickProxy(job, chunkIdx + attempt, activePool) },
+            ctx?.signal,
+          );
           const orgs = res.organizations ?? [];
           const rows = orgs.map((o) => ({
             job_id: jobId,
@@ -829,12 +991,14 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
           await setJobPatch(jobId, {
             processed_organizations: processed,
             progress_stage: `parsing_organizations:${recentOutcomes.length + 1}/${chunks.length}`,
-          });
+          }, ctx);
 
           await partSpan?.end({ parsed: orgs.length, processed_links: processed, proxy_retries: attempt });
           success = true;
           break;
         } catch (e) {
+          // Оборванный по отмене запрос — не отказ чанка.
+          if (interrupted()) return;
           if (e instanceof YandexMapsBlockedError) {
             lastBlockedError = e;
             void logWarn(
@@ -873,7 +1037,7 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
     };
 
     const runChunkWorker = async () => {
-      while (!parseCancelled) {
+      while (!parseCancelled && !interrupted()) {
         const my = chunkQueueIdx++;
         if (my >= chunks.length) return;
         // Проверяем cancel из БД раз в 3 чанка (юзер мог нажать «Остановить»).
@@ -885,6 +1049,12 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
           }
         }
         await processChunk(my);
+        // Граница чанка — естественная точка чекпойнта: разобранные карточки
+        // уже в yandex_maps_organizations, и остаток вычисляется по ним.
+        if (ctx) {
+          const stillOurs = await ctx.saveCheckpoint({ stage: 'parse', done: processed });
+          if (!stillOurs) return;
+        }
       }
     };
 
@@ -892,19 +1062,27 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
       Array.from({ length: Math.min(chunkConcurrency, chunks.length) }, () => runChunkWorker()),
     );
 
+    // Остановка воркера или перехват аренды: статус не трогаем совсем — ни
+    // «заблокировано», ни «завершено». Строка остаётся running с уже
+    // разобранными карточками, и парсинг продолжит новый владелец.
+    if (interrupted()) {
+      await trace?.cancel('Interrupted');
+      return;
+    }
+
     if (blockedStopError) {
       const totalOrgs = links.length;
       const msg =
         `Яндекс временно заблокировал наши прокси. ` +
         `Уже сохранено ${processed} из ${totalOrgs} организаций — они никуда не денутся. ` +
         `Подождите 15–20 минут (IP прокси меняются каждые 2 минуты) и нажмите «Продолжить парсинг» — работа возобновится с того же места.`;
-      await setJobPatch(jobId, {
+      await setJobTerminal(jobId, {
         status: 'failed',
         error_message: msg,
         progress_stage: 'yandex_blocked',
         processed_organizations: processed,
         completed_at: new Date().toISOString(),
-      });
+      }, ctx);
       void logWarn(
         'parser.yandexmaps.parse.blocked',
         'Yandex banned all proxies in pool',
@@ -921,16 +1099,22 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
       return;
     }
 
-    await setJobPatch(jobId, {
+    await setJobTerminal(jobId, {
       status: 'completed',
       progress_stage: 'completed',
       completed_at: new Date().toISOString(),
       processed_organizations: processed,
-    });
+    }, ctx);
     await trace?.end({ processed_links: processed });
     void logInfo('parser.yandexmaps.parse.complete', 'YandexMaps parse-orgs completed', { jobId }, logMeta);
   } catch (e) {
-    await setJobPatch(jobId, { status: 'failed', error_message: e instanceof Error ? e.message : 'Ошибка' });
+    // Как и в сборе ссылок: отмена — не отказ. Судим по сигналу, а не по
+    // имени ошибки (AbortError прилетает и от собственного таймаута запроса).
+    if (interrupted()) {
+      await trace?.cancel('Interrupted');
+      return;
+    }
+    await setJobTerminal(jobId, { status: 'failed', error_message: e instanceof Error ? e.message : 'Ошибка' }, ctx);
     await trace?.fail(e);
     void logError('parser.yandexmaps.parse.failed', e, { jobId }, logMeta);
   }

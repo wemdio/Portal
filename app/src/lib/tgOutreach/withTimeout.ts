@@ -15,13 +15,39 @@
  * повисший воркер.
  */
 
-export function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+/**
+ * `signal` необязателен и добавлен для прогрева на едином жизненном цикле:
+ * минутный таймаут спасает от повисшего запроса, но при остановке воркера
+ * ждать эту минуту незачем — деплой даёт контейнеру считанные секунды, а после
+ * перехвата прогона соседом наш вызов вообще идёт за чужой счёт. С сигналом
+ * ожидание обрывается сразу, сам сетевой вызов при этом продолжает жить (гасить
+ * gramJS изнутри нечем) — его добьёт разрыв соединений на выходе из цикла.
+ *
+ * Ошибка отмены намеренно НЕ отличается по типу от таймаутной: решение
+ * «остановка или настоящий сбой» принимается по `signal.aborted` у вызывающего,
+ * а не по разбору текста и имени ошибки.
+ */
+export function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  what: string,
+  signal?: AbortSignal,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
   const guard = new Promise<never>((_, reject) => {
     timer = setTimeout(
       () => reject(new Error(`${what}: нет ответа за ${Math.round(ms / 1000)}с`)),
       ms,
     );
+    if (signal) {
+      if (signal.aborted) reject(new Error(`${what}: прервано остановкой`));
+      onAbort = () => reject(new Error(`${what}: прервано остановкой`));
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
   });
-  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
+  return Promise.race([promise, guard]).finally(() => {
+    clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+  });
 }

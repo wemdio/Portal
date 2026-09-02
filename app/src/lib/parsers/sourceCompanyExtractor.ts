@@ -88,9 +88,21 @@ function looksLikeInternalCompanyPage(href: string): boolean {
   );
 }
 
-async function fetchHtml(url: string, timeoutMs: number): Promise<{ html: string; finalUrl: string; status: number } | null> {
+async function fetchHtml(
+  url: string,
+  timeoutMs: number,
+  /** Внешняя отмена (остановка воркера / потеря аренды). */
+  signal?: AbortSignal,
+): Promise<{ html: string; finalUrl: string; status: number } | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // Свой контроллер нужен для таймаута, поэтому внешний сигнал не заменяет его,
+  // а ПОДВЯЗЫВАЕТСЯ: отмена снаружи обрывает запрос так же, как таймаут.
+  // AbortSignal не переигрывает уже случившуюся отмену для поздних слушателей —
+  // поэтому сперва проверка, и только потом подписка.
+  if (signal?.aborted) controller.abort();
+  const onExternalAbort = () => controller.abort();
+  signal?.addEventListener('abort', onExternalAbort, { once: true });
   try {
     const dispatcher = await getSearchProxyDispatcher();
     const init: RequestInit & { dispatcher?: Dispatcher } = {
@@ -118,6 +130,7 @@ async function fetchHtml(url: string, timeoutMs: number): Promise<{ html: string
     return null;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onExternalAbort);
   }
 }
 
@@ -182,16 +195,17 @@ function extractSitesFromHtml(html: string, baseUrl: string, sourceUrl: string):
 
 export async function extractCompanySitesFromSource(
   sourcePageUrl: string,
-  opts?: { timeoutMs?: number; maxInternalPages?: number; maxSites?: number },
+  opts?: { timeoutMs?: number; maxInternalPages?: number; maxSites?: number; signal?: AbortSignal },
 ): Promise<{ sites: ExtractedCompanySite[]; debug: { fetched: string[]; internalQueued: number } }> {
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const signal = opts?.signal;
   const maxInternalPages = Math.max(0, Math.min(40, opts?.maxInternalPages ?? DEFAULT_MAX_INTERNAL_PAGES));
   const maxSites = Math.max(1, Math.min(400, opts?.maxSites ?? DEFAULT_MAX_SITES_PER_SOURCE));
 
   const fetched: string[] = [];
   const uniqueBySite = new Map<string, ExtractedCompanySite>();
 
-  const main = await fetchHtml(sourcePageUrl, timeoutMs);
+  const main = await fetchHtml(sourcePageUrl, timeoutMs, signal);
   if (!main?.html) {
     return { sites: [], debug: { fetched, internalQueued: 0 } };
   }
@@ -210,7 +224,10 @@ export async function extractCompanySitesFromSource(
   // Follow a small number of internal "card/profile" pages to find the actual company site links.
   for (const u of internalCandidates) {
     if (uniqueBySite.size >= maxSites) break;
-    const page = await fetchHtml(u, timeoutMs);
+    // Обход внутренних страниц последовательный и длинный (до 40 штук), так что
+    // отмену проверяем на каждом шаге, а не только внутри самого запроса.
+    if (signal?.aborted) break;
+    const page = await fetchHtml(u, timeoutMs, signal);
     if (!page?.html) continue;
     fetched.push(page.finalUrl);
     const extracted = extractSitesFromHtml(page.html, page.finalUrl, main.finalUrl);

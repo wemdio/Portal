@@ -61,8 +61,28 @@ export class YandexMapsBlockedError extends Error {
   }
 }
 
-function sleep(ms: number) {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+/**
+ * Пауза, которую обрывает отмена.
+ *
+ * Резолвится, а не бросает: решение, что делать с отменой, принимает
+ * вызывающий код (та же форма, что sleepUnlessAborted в searchParserWorker.ts).
+ */
+function sleep(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    // AbortSignal не переигрывает уже случившуюся отмену для поздних
+    // слушателей — поэтому проверка выше идёт до подписки.
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
 }
 
 function getTimeoutMs() {
@@ -125,25 +145,50 @@ function getLongPollDispatcher(): UndiciAgent {
   return longPollDispatcher;
 }
 
-async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: number) {
+/**
+ * Внешняя отмена (`signal`) складывается с собственным таймаутом запроса.
+ *
+ * Зачем внешняя: один вызов сервиса законно длится до 990 с, и тело задачи,
+ * у которого отобрали аренду или которому пришёл SIGTERM, все эти минуты
+ * продолжало бы гонять чужой браузер и чужие прокси. Обрыв соединения —
+ * единственный способ остановить его за секунды.
+ *
+ * Цена обрыва: на стороне сервиса запрос отменяется вместе с клиентом.
+ * Для /collect-links/stream это безопасно by design — освобождение семафора и
+ * закрытие браузера там вынесены в отдельную task (инцидент 14.07.2026,
+ * см. services/yandexmaps/server.py). Для /parse-orgs отмена может оставить
+ * chromium недозакрытым: `finally: await parser.close()` в отменённом scope
+ * не гарантирован. Это ровно тот же обрыв, что уже случается по 990-секундному
+ * таймауту, и происходит он только на остановке воркера или потере аренды,
+ * когда контейнер сервиса обычно пересоздаётся рядом.
+ */
+async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: number, signal?: AbortSignal) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
+  const onExternalAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
   try {
     // `dispatcher` — undici-расширение RequestInit, в типах lib.dom его нет.
     const initWithDispatcher = { ...init, dispatcher: getLongPollDispatcher(), signal: controller.signal } as RequestInit;
     return await fetch(input, initWithDispatcher);
   } finally {
     clearTimeout(t);
+    signal?.removeEventListener('abort', onExternalAbort);
   }
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const url = `${getServiceUrl()}${path}`;
   const timeoutMs = getTimeoutMs();
   const maxRetries = getMaxRetries();
   let lastErr: unknown;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    // Отмена ретраи прекращает: повторять запрос за чужой счёт бессмысленно.
+    if (signal?.aborted) throw new Error('yandexmaps request aborted');
     try {
       const res = await fetchWithTimeout(
         url,
@@ -153,6 +198,7 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
           body: JSON.stringify(body),
         },
         timeoutMs,
+        signal,
       );
 
       if (!res.ok) {
@@ -173,7 +219,7 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
       if (err instanceof YandexMapsBlockedError) throw err;
       lastErr = err;
       if (attempt >= maxRetries) break;
-      await sleep(250 * Math.pow(2, attempt));
+      await sleep(250 * Math.pow(2, attempt), signal);
     }
   }
 
@@ -182,10 +228,10 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   throw new Error(`yandexmaps fetch failed (${summary}): ${url} ${details}`, { cause: lastErr });
 }
 
-export async function yandexMapsHealth(): Promise<boolean> {
+export async function yandexMapsHealth(signal?: AbortSignal): Promise<boolean> {
   const url = `${getServiceUrl()}/health`;
   try {
-    const res = await fetchWithTimeout(url, { method: 'GET' }, Math.min(getTimeoutMs(), 15000));
+    const res = await fetchWithTimeout(url, { method: 'GET' }, Math.min(getTimeoutMs(), 15000), signal);
     return res.ok;
   } catch {
     return false;
@@ -219,8 +265,8 @@ export async function yandexMapsProxyCheck(proxy: YandexMapsProxy, timeoutSec = 
   }
 }
 
-export async function yandexMapsCollectLinks(req: CollectLinksRequest): Promise<CollectLinksResponse> {
-  return await postJson<CollectLinksResponse>('/collect-links', req);
+export async function yandexMapsCollectLinks(req: CollectLinksRequest, signal?: AbortSignal): Promise<CollectLinksResponse> {
+  return await postJson<CollectLinksResponse>('/collect-links', req, signal);
 }
 
 export type CollectLinksChunk = {
@@ -242,6 +288,7 @@ export type CollectLinksChunk = {
 export async function yandexMapsCollectLinksStream(
   req: CollectLinksRequest,
   onChunk: (chunk: CollectLinksChunk) => void | Promise<void>,
+  signal?: AbortSignal,
 ): Promise<{ links: string[]; total: number; intlRedirect: boolean }> {
   const url = `${getServiceUrl()}/collect-links/stream`;
   const timeoutMs = getTimeoutMs();
@@ -253,6 +300,7 @@ export async function yandexMapsCollectLinksStream(
       body: JSON.stringify(req),
     },
     timeoutMs,
+    signal,
   );
 
   if (!res.ok) {
@@ -334,7 +382,7 @@ export async function yandexMapsCollectLinksStream(
   return { links: allLinks, total, intlRedirect };
 }
 
-export async function yandexMapsParseOrgs(req: ParseOrgsRequest): Promise<ParseOrgsResponse> {
-  return await postJson<ParseOrgsResponse>('/parse-orgs', req);
+export async function yandexMapsParseOrgs(req: ParseOrgsRequest, signal?: AbortSignal): Promise<ParseOrgsResponse> {
+  return await postJson<ParseOrgsResponse>('/parse-orgs', req, signal);
 }
 

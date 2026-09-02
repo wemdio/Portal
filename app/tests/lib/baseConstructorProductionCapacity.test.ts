@@ -79,16 +79,4 @@ describe('BaseConstructor production capacity', () => {
       expect(` ${allWorkers} `).toContain(` ${serviceName} `);
     }
   });
-
-  it('includes every replica in the parallel deploy drain', () => {
-    const drainWorker = readRepoFile('drain-worker.sh');
-    const baseConstructorBlock = drainWorker.match(
-      /bc_containers=\(\s*([\s\S]*?)\n\s*\)/,
-    )?.[1];
-
-    expect(baseConstructorBlock).toBeDefined();
-    for (const containerName of containerNames) {
-      expect(baseConstructorBlock).toContain(containerName);
-    }
-  });
 });

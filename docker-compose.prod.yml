@@ -111,12 +111,27 @@ services:
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
-      # HH parser jobs routinely scrape tens of thousands of vacancies; 15min was
-      # a copy-paste leftover from email-validation that started killing real jobs
-      # at 44-68% progress. Bumped to 180 (3h) — matches stop_grace_period above.
+      # Потолок времени на ОДНУ задачу HH-парсера (внутренний withTimeout
+      # раннера), а не срок остановки контейнера: 15 минут были копипастой из
+      # email-validation и убивали живые задачи на 44-68% прогресса.
       - WORKER_DRAIN_TIMEOUT_MINUTES=${HH_WORKER_DRAIN_TIMEOUT_MINUTES:-180}
+      # Все четыре очереди контейнера — на едином жизненном цикле задач:
+      # аренда (живость процесса) и, где она применима, порог остановки
+      # прогресса (живость работы). Арифметика порогов — в шапке констант
+      # app/worker/hh.ts; почему у parser_jobs порога нет — в докблоке
+      # createParserJobRunner (app/worker/parserJobs.ts).
+      - HH_ARCHIVE_LEASE_SECONDS=${HH_ARCHIVE_LEASE_SECONDS:-180}
+      - HH_ARCHIVE_STALL_MINUTES=${HH_ARCHIVE_STALL_MINUTES:-10}
+      - YANDEX_DIRECT_LEASE_SECONDS=${YANDEX_DIRECT_LEASE_SECONDS:-180}
+      - YANDEX_DIRECT_STALL_MINUTES=${YANDEX_DIRECT_STALL_MINUTES:-10}
+      - PARSER_JOBS_LEASE_SECONDS=${PARSER_JOBS_LEASE_SECONDS:-180}
       - WORKER_KIND=hh
-    stop_grace_period: 3h
+    # 30 секунд, а не 3 часа: контейнер целиком на едином жизненном цикле задач
+    # и по SIGTERM отпускает аренды за несколько секунд, после чего задачу
+    # подбирает следующая реплика. Прежние 3 часа не соблюдались НИ РАЗУ —
+    # деплой бьёт контейнер через `docker stop --timeout 15` (шаг 5
+    # .semaphore/scheduled-deploy.yml).
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:
@@ -138,8 +153,15 @@ services:
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      # Очередь parser_jobs на едином жизненном цикле задач: аренда — признак
+      # живости процесса, порога остановки прогресса у этой очереди нет
+      # намеренно (докблок createParserJobRunner, app/worker/parserJobs.ts).
+      - PARSER_JOBS_LEASE_SECONDS=${PARSER_JOBS_LEASE_SECONDS:-180}
       - WORKER_KIND=enghiring
-    stop_grace_period: 3h
+    # 30 секунд, а не 3 часа: воркер по SIGTERM отпускает аренду за несколько
+    # секунд, а задачу подбирает следующая реплика. Трёхчасовой grace не
+    # отрабатывал никогда — деплой бьёт контейнер через `docker stop --timeout 15`.
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:
@@ -168,8 +190,13 @@ services:
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       # Search parser drains huge result sets too — same reasoning as worker-hh.
       - WORKER_DRAIN_TIMEOUT_MINUTES=${SEARCH_WORKER_DRAIN_TIMEOUT_MINUTES:-180}
+      - SEARCH_LEASE_SECONDS=${SEARCH_LEASE_SECONDS:-180}
       - WORKER_KIND=search
-    stop_grace_period: 30m
+    # 30 секунд, а не 30 минут: воркер на едином жизненном цикле задач
+    # (app/src/lib/jobs/lifecycle.ts) по SIGTERM отпускает аренду за ~3 с, и
+    # задача продолжается с processed_queries в следующей реплике. Ждать, пока
+    # доиграет тело, больше незачем — а прежние 30 минут держали деплой.
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:
@@ -305,6 +332,17 @@ services:
       - PROXY_URLS=${PROXY_URLS}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
+      # Аренда задачи (единый жизненный цикл, app/src/lib/jobs/lifecycle.ts).
+      # 180 с = три пропущенных продления (продление раз в аренда/3 = 60 с).
+      # После краха строку подберут через аренду + один опрос ≈ 3,5 минуты —
+      # вшестеро ниже HEALTH_JOB_STUCK_MIN (20 мин).
+      #
+      # Переменной порога простоя (STALL_MINUTES) у этого воркера НЕТ намеренно:
+      # опция progress не подключена, потому что updated_at двигает само
+      # продление аренды, а законный промежуток между записями счётчиков
+      # доходит до 148 минут при 20-минутном потолке монитора. Полная
+      # арифметика — в комментарии над createJobRunner в worker/yandexmaps.ts.
+      - YANDEXMAPS_LEASE_SECONDS=${YANDEXMAPS_LEASE_SECONDS:-180}
       - WORKER_KIND=yandexmaps
     depends_on:
       # Дожидаемся именно healthy, не просто "процесс стартовал": иначе
@@ -312,10 +350,12 @@ services:
       # падает с "health check failed".
       yandexmaps:
         condition: service_healthy
-    # 60s вместо 30m: воркер не должен долго "доделывать текущую задачу"
-    # при рестарте — есть watchdog + startup_recovery, который зомби-задачи
-    # переведёт в failed автоматически. 30m делали docker restart вечным
-    # (blocking на ~30 минут), сегодня из-за этого пришлось docker kill.
+    # 60s оставлены как есть, хотя воркер уехал на единый жизненный цикл и сам
+    # укладывается в 15 с (12 с ожидания тела — shutdownGraceMs в
+    # worker/yandexmaps.ts — плюс два прохода освобождения аренды с паузой в
+    # секунду и контрольное чтение). Запас идёт браузерам: обрыв запроса к
+    # python-сервису даёт ему время закрыть chromium, а не оставить зомби.
+    # Больше 60 с не нужно и вредно: 30m когда-то делали docker restart вечным.
     stop_grace_period: 60s
     # autoheal + heartbeat healthcheck — защита от event-loop hang'ов
     # (инцидент 27.07.2026: воркер дважды за день замерз на 1-5 часов при
@@ -460,11 +500,14 @@ services:
       - OPENROUTER_TG_OUTREACH_API_KEY=${OPENROUTER_TG_OUTREACH_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=tgoutreach
-      # Сколько кампаний воркер ведёт одновременно. Значение зашито, а не взято
-      # из .env: прошлый подъём 5 → 10 задумывался, но переменную на сервер так
-      # и не завезли, и воркер продолжал работать с дефолтом 5 из кода. Из-за
-      # этого 04.08.2026 прогрев ATOL-1 два часа висел в pending — слот занимали
-      # пять боевых кампаний, а прогрев берёт слот из того же пула.
+      # Сколько БОЕВЫХ кампаний воркер ведёт одновременно. Значение зашито, а
+      # не взято из .env: прошлый подъём 5 → 10 задумывался, но переменную на
+      # сервер так и не завезли, и воркер продолжал работать с дефолтом 5 из
+      # кода. Из-за этого 04.08.2026 прогрев ATOL-1 два часа висел в pending —
+      # слот занимали пять боевых кампаний, а прогрев брал слот из того же пула.
+      # С переездом прогрева на аренду этот пул только боевой: у прогрева своя
+      # очередь и свой предел (TG_WARMUP_MAX_CONCURRENCY ниже), и потолок
+      # одновременных наборов клиентов теперь — СУММА двух чисел.
       - TG_OUTREACH_MAX_CONCURRENCY=12
       # Сторож: сколько молчания кампании считать зависанием. Дефолт из кода —
       # 15 мин, и этого мало: штатная анти-флуд пауза между аккаунтами доходит
@@ -476,6 +519,30 @@ services:
       # размотаться, и мягкая ступень «гасим одну кампанию» каждый раз
       # эскалировала в process.exit(1). Даём циклу реальное время умереть.
       - TG_OUTREACH_WATCHDOG_GRACE_MS=600000
+      # Прогрев переехал на единый жизненный цикл задач
+      # (app/src/lib/jobs/lifecycle.ts): строка прогона арендуется, аренда
+      # продлевается таймером каждые lease/3 = 60 с. 180 с ≈ три пропущенных
+      # продления; после краха прогон подберут через аренду (3 мин) + один
+      # опрос соседа (30 с). Порога простоя у этой очереди нет намеренно —
+      # арифметика в комментарии к warmupRunner в app/worker/tgOutreach.ts
+      # (законная ночная пауза прогрева — 8 часов, ниже неё порог не поставить).
+      - TG_WARMUP_LEASE_SECONDS=180
+      # Сколько прогревов идут одновременно. Прибавляется к боевым кампаниям
+      # выше, а не делит с ними пул, поэтому смотреть надо на сумму: память
+      # контейнера считалась по числу одновременных наборов клиентов gramJS.
+      # Два — чтобы вторая партия аккаунтов не ждала четверо суток и при этом
+      # прибавка к пику была шестой частью от боевой нагрузки.
+      - TG_WARMUP_MAX_CONCURRENCY=2
+    # stop_grace_period НЕ трогаем: в этом же контейнере ещё живут боевые
+    # кампании аутрича, не переведённые на аренду, и им нужен запас, чтобы
+    # доиграть круг. Срок переезжает вместе с ними, в задаче 4 этапа.
+    #
+    # Тридцать минут — потолок для РУЧНОЙ остановки (`docker compose stop` без
+    # --timeout) и только. Плановый деплой их не даёт: он останавливает воркеры
+    # `docker compose stop --timeout 15` (шаг 5 .semaphore/scheduled-deploy.yml),
+    # то есть SIGKILL приходит через 15 секунд. Под эти 15 секунд и посчитан
+    # shutdownGraceMs прогрева в app/worker/tgOutreach.ts, а не под тридцать
+    # минут отсюда.
     stop_grace_period: 30m
     # `autoheal=true` makes the autoheal sidecar (defined below) restart this
     # container whenever the healthcheck reports `unhealthy`. Docker's
@@ -528,7 +595,31 @@ services:
       - AI_CALLER_PROVIDER=${AI_CALLER_PROVIDER:-vapi}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=aicaller
-    stop_grace_period: 30m
+      # Сколько кампаний обзвона идут одновременно. Значение не новое — это тот
+      # же дефолт, что был зашит в коде; вписан сюда явно, чтобы менять его не
+      # приходилось правкой воркера (соседний TG_OUTREACH_MAX_CONCURRENCY —
+      # памятник тому, чем кончается зашитая константа).
+      - AI_CALLER_MAX_CONCURRENCY=${AI_CALLER_MAX_CONCURRENCY:-3}
+      # Обзвон переехал на единый жизненный цикл задач
+      # (app/src/lib/jobs/lifecycle.ts): строка кампании арендуется, аренда
+      # продлевается таймером каждые lease/3 = 60 с. 180 с ≈ три пропущенных
+      # продления; после краха кампанию подберут через аренду (3 мин) + один
+      # опрос соседа (30 с).
+      - AI_CALLER_LEASE_SECONDS=${AI_CALLER_LEASE_SECONDS:-180}
+      # Порог простоя по счётчику `called_contacts`. Здоровый цикл двигает его
+      # раз в 2–3 минуты (звонок ≤ 120 с + пауза 5–15 с), но серия контактов, на
+      # которых провайдер отвечает ошибкой, законно идёт ~10 с на контакт без
+      # инкремента. 20 минут — выше такой серии и всё ещё вчетверо быстрее, чем
+      # человек заметит замерший счётчик. Полный срок до перезапуска кампании
+      # соседом: 20 мин порога + 3 мин аренды + 30 с опроса ≈ 23,5 минуты.
+      - AI_CALLER_STALL_MS=${AI_CALLER_STALL_MS:-1200000}
+    # Тридцать СЕКУНД, а не прежние тридцать минут: кампании держать больше
+    # нечего. Цикл выходит по сигналу за секунды (все паузы прерываемые), а
+    # незавершённый звонок не теряется — его сверяют с провайдером при следующем
+    # захвате. Тридцати секунд хватает с запасом на shutdownGraceMs (8 с) плюс
+    # два прохода освобождения аренды; плановый деплой всё равно даёт меньше —
+    # `docker compose stop --timeout 15`, шаг 5 .semaphore/scheduled-deploy.yml.
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:
@@ -791,6 +882,13 @@ services:
     networks:
       - portal-network
 
+  # РОВНО ОДНА РЕПЛИКА И ОДИН container_name — это инвариант, а не оформление.
+  # Воркер держит живое MTProto-соединение sales-chat-аккаунтами; два процесса
+  # на одном Telegram-аккаунте дают AUTH_KEY_DUPLICATED и сжигают сессию (та же
+  # причина, что у worker-tg-parser; см. lib/tgParser/accountConflict.ts).
+  # Именованный контейнер гарантирует последовательный recreate: новый не
+  # поднимется, пока старый не отпустил имя. Отсюда же concurrency=1 в самом
+  # воркере (app/worker/salesChatLogger.ts).
   worker-sales-chat-logger:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-sales-chat-logger
@@ -809,8 +907,13 @@ services:
       - MAIN_S3_ACCESS_KEY_ID=${MAIN_S3_ACCESS_KEY_ID}
       - MAIN_S3_SECRET_ACCESS_KEY=${MAIN_S3_SECRET_ACCESS_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - SALES_CHAT_LEASE_SECONDS=${SALES_CHAT_LEASE_SECONDS:-180}
       - WORKER_KIND=saleschatlogger
-    stop_grace_period: 5m
+    # 30 с вместо прежних 5 минут: воркер на едином жизненном цикле по SIGTERM
+    # отпускает аренду за пару секунд, а синк продолжается с курсора по
+    # аккаунтам в следующем захвате. Ждать конца текущего аккаунта незачем —
+    # он идёт минутами-часами и в любой grace всё равно не уложится.
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:
@@ -879,6 +982,9 @@ services:
       - WORKER_KIND=clientreportexports
     # A long COPY finishes gracefully during a rolling deploy. Memory remains
     # bounded to stream buffers and S3 multipart parts.
+    # Внимание: scheduled deploy обрезает это до 15 секунд (шаг 5
+    # .semaphore/scheduled-deploy.yml), grace целиком отрабатывает только при
+    # ручном `docker compose stop`.
     stop_grace_period: 2h
     deploy:
       resources:
@@ -890,6 +996,26 @@ services:
     networks:
       - portal-network
 
+  # РОВНО ОДНА РЕПЛИКА. Не масштабировать, не поднимать второй такой контейнер
+  # и не запускать этот воркер локально против прод-БД.
+  # Задача парсера держит открытую сессию Telegram. Сосед, забравший задачу
+  # (после деплоя или по истечении аренды), подключится ТЕМ ЖЕ аккаунтом, и
+  # Telegram за доли секунды ответит AUTH_KEY_DUPLICATED: падают оба обхода, а
+  # на повторах сессия сгорает и требует переавторизации (app/src/lib/tgParser/
+  # accountConflict.ts). Проверка конфликта смотрит только в
+  # tg_outreach_campaigns и второй процесс парсера увидеть не может.
+  # Единственность держится этим container_name и последовательным деплоем.
+  #
+  # stop_grace_period 30 с (было 30 мин): доигрывать обход в останавливаемом
+  # контейнере больше не нужно — задача возобновляется с чекпойнта, а аренда
+  # отпускается за секунды (app/worker/tgParser.ts). Тридцати секунд хватает на
+  # два прохода освобождения аренды с контрольным чтением (~3 с) и на
+  # shutdownGraceMs=12 с ожидания тела. Эти 12 с — попытка доиграть, а не
+  # гарантия: обход может не успеть свернуться, и client.disconnect() тогда не
+  # выполнится до SIGKILL. От наложения сессий защищает не он, а описанная
+  # выше топология — единственный container_name и последовательный recreate;
+  # на SIGKILL сокет закрывает ядро. Прежние 30 минут ровно на столько и
+  # растягивали каждый деплой, заставший работающий обход.
   worker-tg-parser:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-tg-parser
@@ -907,7 +1033,7 @@ services:
       - TG_TARGET_SESSION=${TG_TARGET_SESSION}
     depends_on:
       - telegram-bot-api
-    stop_grace_period: 30m
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:
@@ -1010,8 +1136,8 @@ services:
   # атомарный CAS-claim (UPDATE WHERE status='pending') - каждый job берёт
   # ровно одна реплика. Параллельно: 12 реплик x 1 job = 12 job'ов.
   # Реплики дают отказоустойчивость: краш/OOM одной не уносит job'ы остальных.
-  # Stale (без heartbeat 15+ мин) processing-задачи любая реплика автоматически
-  # резумит с того шага, где остановились.
+  # Задачи с истёкшей или обнулённой арендой (lease_until) любая реплика
+  # автоматически перехватывает и продолжает с того шага, где остановились.
   worker-baseconstructor: &worker-baseconstructor
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-baseconstructor
@@ -1048,12 +1174,13 @@ services:
       # У двенадцати воркеров общий Requesty-ключ: по одной AI-пачке на job
       # даёт до 12 одновременных вызовов без неконтролируемого fan-out.
       - BASE_TA_SCORING_CONCURRENCY=${BASE_TA_SCORING_CONCURRENCY:-1}
-      - BASE_CONSTRUCTOR_STALE_MINUTES=${BASE_CONSTRUCTOR_STALE_MINUTES:-15}
-    # Job может занимать 30-60 минут (find_emails+enrich на 1.5к строк).
-    # SIGTERM придёт при docker compose down, но шаг доработает до конца —
-    # просто след. шаг не запустится, и worker корректно выйдет.
-    # Резумнётся при следующем старте контейнера.
-    stop_grace_period: 5m
+      - BASE_CONSTRUCTOR_LEASE_SECONDS=${BASE_CONSTRUCTOR_LEASE_SECONDS:-300}
+    # Job может занимать 30-60 минут (find_emails+enrich на 1.5к строк), но
+    # ждать его завершения на SIGTERM незачем: задача не должна доиграть — она
+    # резюмится с чекпоинта в другой реплике. Воркеру нужны секунды, чтобы
+    # обнулить аренду своих задач (два прохода с паузой в секунду), после чего
+    # соседняя реплика подберёт их на ближайшем опросе.
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:
@@ -1270,10 +1397,13 @@ services:
       - HEALTH_PORTAL_URL=${HEALTH_PORTAL_URL:-https://polza-portal.ru}
       - HEALTH_INTERVAL_SEC=${HEALTH_INTERVAL_SEC:-900}
       - HEALTH_JOB_MONITOR_INTERVAL_SEC=${HEALTH_JOB_MONITOR_INTERVAL_SEC:-300}
-      # Держать строго выше BASE_CONSTRUCTOR_STALE_MINUTES (15): воркер сам
-      # резюмит осиротевшую задачу на этом пороге, и при равных значениях
-      # каждый деплой давал ложную тревогу за секунды до самоподбора
-      # (инцидент 11.08.2026).
+      # Держать строго выше ПОЛНОГО времени самопочинки у конструктора баз.
+      # Оно складывается: порог простоя прогресса (BASE_CONSTRUCTOR_STALL_MINUTES,
+      # 10 мин) + не больше одной аренды (BASE_CONSTRUCTOR_LEASE_SECONDS, 300 с)
+      # + не больше одного опроса соседней реплики (30 с) ≈ 16 минут. Чистый
+      # редеплой отдаёт задачу за секунды и в эту сумму не входит. При равных
+      # значениях каждый деплой давал ложную тревогу за секунды до самоподбора
+      # (инцидент 11.08.2026); 20 минут против 16 оставляют рабочий запас.
       - HEALTH_JOB_STUCK_MIN=${HEALTH_JOB_STUCK_MIN:-20}
       - HEALTH_SERVER_IP=${HEALTH_SERVER_IP:-139.60.162.12}
       - PROXY_URLS=${PROXY_URLS}

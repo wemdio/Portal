@@ -10,10 +10,11 @@
  *    сирота закрывается, а решение о рестарте принимает resumeRunningCampaigns
  *    — он вызывается следующим в том же тике и уже статус-гейтед.
  *
- * 2. Фильтр action='start' оставлял warmup_start вне сторожа, хотя
- *    resumeWarmupRuns при виде активной джобы делает `continue` — прогрев
- *    попадает ровно в ту же ловушку «старт уже запланирован», ради которой
- *    сторож и ставился.
+ * 2. Фильтр action='start' оставлял warmup_start вне сторожа, хотя прогрев
+ *    попадал ровно в ту же ловушку «старт уже запланирован», ради которой
+ *    сторож и ставился. (С переездом прогрева на единый жизненный цикл задач
+ *    команда warmup_start закрывается сразу и осиротеть не может, но из
+ *    сторожа не выпадает — на случай команды от старого контейнера.)
  */
 
 jest.mock('@/lib/supabaseAdmin', () => ({
@@ -29,7 +30,6 @@ import {
   reclaimOrphanedStartJobs,
   resetStuckJobs,
   resumeRunningCampaigns,
-  resumeWarmupRuns,
   claimJob,
   START_ACTIONS,
 } from '../../../worker/tgOutreach';
@@ -274,17 +274,8 @@ describe('сторож + авто-резюм: статус кампании ре
     expect(inserts[0].data).toMatchObject({ campaign_id: 'camp-1', action: 'start', status: 'pending' });
   });
 
-  it('прогрев восстанавливается: resumeWarmupRuns ставит новую warmup_start после закрытия сироты', async () => {
-    const { inserts } = makeDb({
-      campaigns: [{ id: 'camp-w', status: 'stopped', user_id: 'user-1' }],
-      jobs: [orphanStart({ id: 'job-w1', campaign_id: 'camp-w', action: 'warmup_start' })],
-      warmupRuns: [{ id: 'run-1', campaign_id: 'camp-w', status: 'running' }],
-    });
-
-    await reclaimOrphanedStartJobs();
-    await resumeWarmupRuns();
-
-    expect(inserts).toHaveLength(1);
-    expect(inserts[0].data).toMatchObject({ campaign_id: 'camp-w', action: 'warmup_start', status: 'pending' });
-  });
+  // Проверка «resumeWarmupRuns ставит новую warmup_start после закрытия сироты»
+  // удалена вместе с самой функцией: прогрев переехал на единый жизненный цикл
+  // задач, и брошенный прогон определяется истёкшей арендой, а не отсутствием
+  // активной команды. Она закрепляла снятый механизм.
 });

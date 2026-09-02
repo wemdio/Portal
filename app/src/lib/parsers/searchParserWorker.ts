@@ -27,6 +27,14 @@
  *
  * 6. **Сохранение.** Дедупликация по нормализованному домену (site), батч-вставка
  *    в `search_results`. Прогресс обновляется в `search_parser_jobs`.
+ *
+ * 7. **Владение задачей.** Из воркера функция вызывается с `SearchParserRunContext`
+ *    (единый жизненный цикл, `lib/jobs/lifecycle.ts`): все записи в строку задачи
+ *    ограждены жетоном захвата, после каждого запроса пишется чекпойнт, а на
+ *    прерывании (остановка воркера / потеря аренды) функция выходит БЕЗ
+ *    терминального статуса — строка остаётся `running` и продолжается соседом с
+ *    `processed_queries`. Без контекста (`worker/index.ts`, `dfybWorker`)
+ *    поведение прежнее.
  */
 
 import { SEARCH_CONFIG } from '@/lib/config';
@@ -55,6 +63,31 @@ import { extractCompanySitesFromSource } from './sourceCompanyExtractor';
 const USE_SERPER = Boolean((process.env.SERPER_API_KEY ?? '').trim());
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Пауза, которую обрывает отмена.
+ *
+ * Кулдаун после блокировки поисковика доходит до 90 секунд, и отключённое от
+ * задачи тело столько ждать не должно: пока оно спит, новый владелец уже
+ * работает над той же задачей. Резолвится, а не бросает — решение, что делать
+ * с отменой, принимает вызывающий код.
+ */
+const sleepUnlessAborted = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    // AbortSignal не переигрывает уже случившуюся отмену для поздних
+    // слушателей — поэтому проверка выше идёт до подписки.
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
 
 const toNonNegativeInt = (value: number, fallback: number) => {
   const normalized = Number.isFinite(value) ? Math.floor(value) : fallback;
@@ -141,12 +174,39 @@ async function insertInBatches<T extends Record<string, unknown>>(
   return { inserted, hadFailures, firstErrorMessage };
 }
 
+/**
+ * Контекст запуска из единого жизненного цикла задач (lib/jobs/lifecycle.ts).
+ *
+ * Необязателен: `runSearchParserJob` зовут ещё два места без всякой аренды
+ * (`worker/index.ts`, `lib/tools/dfybWorker.ts`), и там поведение обязано
+ * остаться прежним.
+ */
+export interface SearchParserRunContext {
+  /** Взводится на SIGTERM воркера и при потере аренды. */
+  signal: AbortSignal;
+  /**
+   * Жетон текущего захвата. Им ограждаются ВСЕ записи в строку задачи: при
+   * manageTerminalStatus=false терминальный статус пишет само тело, и без
+   * жетона старый исполнитель после перехвата задачи мог бы проштамповать
+   * completed/failed поверх работы нового владельца.
+   */
+  runToken: string;
+  /** false — задачу перехватили: прекратить работу. */
+  saveCheckpoint(data: { processed_queries: number }): Promise<boolean>;
+}
+
 async function safeUpdateSearchJob(
   admin: NonNullable<typeof supabaseAdmin>,
   jobId: string,
   patch: Record<string, unknown>,
+  /** Жетон захвата; без него фильтр не добавляется — поведение до ограждения. */
+  runToken?: string | null,
 ): Promise<void> {
-  const attempt = await admin.from('search_parser_jobs').update(patch).eq('id', jobId);
+  // Тип билдера — any по той же причине, что в lib/jobs/lifecycle.ts: цепочка
+  // PostgREST меняет форму на каждом шаге, а нам нужен от неё только .eq.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const owned = <T>(q: T): T => (runToken ? ((q as any).eq('run_token', runToken) as T) : q);
+  const attempt = await owned(admin.from('search_parser_jobs').update(patch).eq('id', jobId));
   if (!attempt.error) return;
 
   const err = attempt.error as { code?: string; message?: string };
@@ -168,13 +228,16 @@ async function safeUpdateSearchJob(
   void progress_percent;
 
   if (Object.keys(rest).length === 0) return;
-  const retry = await admin.from('search_parser_jobs').update(rest).eq('id', jobId);
+  const retry = await owned(admin.from('search_parser_jobs').update(rest).eq('id', jobId));
   if (retry.error) {
     console.warn('search_parser_jobs update retry failed:', (retry.error as { message?: string })?.message ?? retry.error);
   }
 }
 
-async function throttleBetweenQueries(provider: 'google' | 'duckduckgo' | 'bing' | 'mojeek') {
+async function throttleBetweenQueries(
+  provider: 'google' | 'duckduckgo' | 'bing' | 'mojeek',
+  signal?: AbortSignal,
+) {
   // Aim for stability over speed; jitter helps avoid anti-bot thresholds.
   // Google already has internal delay in googleSearchDetailed; DDG does not.
   const base =
@@ -185,7 +248,7 @@ async function throttleBetweenQueries(provider: 'google' | 'duckduckgo' | 'bing'
         : provider === 'mojeek'
           ? randInt(900, 2200)
           : randInt(900, 2200);
-  await sleep(base);
+  await sleepUnlessAborted(base, signal);
 }
 
 function createAsyncLock() {
@@ -668,12 +731,28 @@ function toLeadRow(
   };
 }
 
-export async function runSearchParserJob(jobId: string) {
+export async function runSearchParserJob(jobId: string, ctx?: SearchParserRunContext) {
   if (!supabaseAdmin) {
     console.error('supabaseAdmin not configured');
     return;
   }
   const admin = supabaseAdmin;
+  const runToken = ctx?.runToken ?? null;
+
+  /**
+   * Работа прервана извне: остановка воркера (SIGTERM) или потерянная аренда.
+   *
+   * Это НЕ итог задачи. Строка обязана остаться в running с тем прогрессом,
+   * что уже записан: аренду отпустит библиотека, соседняя реплика подберёт
+   * задачу и продолжит с processed_queries. Любая терминальная запись здесь
+   * (completed/failed) стоила бы часов работы — поэтому флаг проверяется и
+   * после цикла, и в общем catch.
+   */
+  let interrupted = false;
+
+  /** Все записи в строку задачи идут через один ограждённый жетоном путь. */
+  const updateJob = (patch: Record<string, unknown>) =>
+    safeUpdateSearchJob(admin, jobId, patch, runToken);
 
   try {
     // 1. Fetch job
@@ -695,11 +774,10 @@ export async function runSearchParserJob(jobId: string) {
     const requestId = crypto.randomUUID();
     const logMeta = { userId: job.user_id, requestId, route: 'search_parser_worker' };
 
-    // 2. Set running
-    await admin
-      .from('search_parser_jobs')
-      .update({ status: 'running', started_at: job.started_at ?? new Date().toISOString() })
-      .eq('id', jobId);
+    // 2. Set running. Под жизненным циклом строка УЖЕ running (её так захватил
+    // раннер), и запись сводится к started_at — но идёт через тот же
+    // ограждённый путь, чтобы старое тело после перехвата ничего не двигало.
+    await updateJob({ status: 'running', started_at: job.started_at ?? new Date().toISOString() });
 
     const rawConfig =
       job.config && typeof job.config === 'object' ? (job.config as { queries?: string[]; brief?: string; search_depth?: number }) : {};
@@ -712,7 +790,7 @@ export async function runSearchParserJob(jobId: string) {
 
     if (queries.length === 0) {
       if (!brief) {
-        await safeUpdateSearchJob(admin, jobId, {
+        await updateJob({
           status: 'failed',
           completed_at: new Date().toISOString(),
           error_message: 'Бриф не указан',
@@ -721,7 +799,7 @@ export async function runSearchParserJob(jobId: string) {
         return;
       }
 
-      await safeUpdateSearchJob(admin, jobId, {
+      await updateJob({
         progress_stage: 'generating_queries',
         progress_percent: 2,
         processed_queries: 0,
@@ -733,7 +811,7 @@ export async function runSearchParserJob(jobId: string) {
       queries = generated.queries.map((q) => q.trim()).filter(Boolean);
 
       if (queries.length === 0) {
-        await safeUpdateSearchJob(admin, jobId, {
+        await updateJob({
           status: 'failed',
           completed_at: new Date().toISOString(),
           error_message: 'Не удалось сформировать поисковые запросы',
@@ -742,7 +820,7 @@ export async function runSearchParserJob(jobId: string) {
         return;
       }
 
-      await safeUpdateSearchJob(admin, jobId, {
+      await updateJob({
         config: { ...rawConfig, brief, queries },
         total_queries: queries.length,
         processed_queries: 0,
@@ -753,7 +831,7 @@ export async function runSearchParserJob(jobId: string) {
       const alreadyProcessed = Math.max(0, Number(job.processed_queries ?? 0));
       const clampedProcessed = Math.min(alreadyProcessed, queries.length);
       const initialProgressPercent = queries.length > 0 ? Math.round((clampedProcessed / queries.length) * 100) : 0;
-      await safeUpdateSearchJob(admin, jobId, {
+      await updateJob({
         total_queries: queries.length,
         processed_queries: clampedProcessed,
         progress_stage: 'searching',
@@ -761,6 +839,23 @@ export async function runSearchParserJob(jobId: string) {
       });
     }
 
+    /**
+     * Точка продолжения — СЧЁТЧИК обработанных запросов, а не индекс границы.
+     *
+     * ИЗВЕСТНАЯ ДЫРА, и она реальная, а не теоретическая: запросы идут по два
+     * сразу (QUERY_CONCURRENCY = 2). Если запрос i+1 успел дописать счётчик, а
+     * i на момент прерывания — нет, счётчик уже перешагнул i, срез начнётся
+     * после него, и запрос i не будет отработан НИКОГДА, хотя задача в итоге
+     * отчитается completed. Обратный порядок безобиден: один запрос переиграют,
+     * а дубли снимет seenSites, который при resumeFrom > 0 подгружается из
+     * search_results.
+     *
+     * Дыра не новая — прежний сброс running→pending продолжал по тому же
+     * счётчику, — и шириной ровно в один запрос. Правильное лечение: держать
+     * высшую отметку по НЕПРЕРЫВНОМУ префиксу завершённых запросов (индекс, а
+     * не счётчик) и двигать её только тогда, когда закрыт весь префикс. Это
+     * отдельная правка, здесь она сознательно отложена.
+     */
     const resumeFrom = Math.min(Math.max(0, Number(job.processed_queries ?? 0)), queries.length);
     const remainingQueries = queries.slice(resumeFrom);
     const totalQueries = queries.length;
@@ -1161,6 +1256,9 @@ export async function runSearchParserJob(jobId: string) {
                   timeoutMs: 15000,
                   maxInternalPages: 30,
                   maxSites: SOURCE_EXPAND_MAX_SITES_PER_SOURCE,
+                  // Обход каталога — до 30 страниц подряд по 15 с: без сигнала
+                  // отключённое от задачи тело скрейпило бы ещё минуты.
+                  signal: ctx?.signal,
                 });
                 return { source, sites: out.sites };
               } catch (e) {
@@ -1240,6 +1338,7 @@ export async function runSearchParserJob(jobId: string) {
             try {
               const { emails, brand_name } = await fetchWebsiteEmails(lead.site, {
                 maxPages: ENRICH_EMAIL_MAX_PAGES_PER_SITE,
+                signal: ctx?.signal,
               });
               const cleaned = emails.map((e) => e.trim()).filter(Boolean);
               const unique = Array.from(new Set(cleaned)).slice(0, 3);
@@ -1261,7 +1360,13 @@ export async function runSearchParserJob(jobId: string) {
           }
         }
 
-        if (companyRowsToInsert.length > 0) {
+        // Вставка результатов — единственная запись этого тела в ЧУЖУЮ таблицу,
+        // и жетоном её оградить нельзя: у search_results нет уникального ключа
+        // (только idx_search_results_job_id), дедуп держится на seenSites в
+        // памяти процесса, а его два исполнителя не делят. Значит отключённое
+        // от задачи тело обязано молчать: иначе новый владелец и старое тело
+        // пишут одни и те же компании, и дубли уезжают в выгрузку клиента.
+        if (companyRowsToInsert.length > 0 && !ctx?.signal.aborted) {
           const inserted = await insertInBatches(admin, companyRowsToInsert, { batchSize: 60 });
           if (inserted.hadFailures) {
             hadQueryFailures = true;
@@ -1335,7 +1440,7 @@ export async function runSearchParserJob(jobId: string) {
             ddgBlockedStreak = 0;
             lastBlockedHint = err.message;
           });
-          await throttleBetweenQueries('duckduckgo');
+          await throttleBetweenQueries('duckduckgo', ctx?.signal);
         } else if (isDuckDuckGoBlockedError(err)) {
           await withLock(async () => {
             ddgBlockedStreak += 1;
@@ -1344,19 +1449,19 @@ export async function runSearchParserJob(jobId: string) {
           });
           const streak = Math.min(ddgBlockedStreak, 6);
           const cooldown = Math.min(90_000, 4500 * 2 ** (streak - 1) + randInt(0, 2500));
-          await sleep(cooldown);
+          await sleepUnlessAborted(cooldown, ctx?.signal);
         } else if (isBingBlockedError(err)) {
           await withLock(async () => {
             ddgBlockedStreak = 0;
             lastBlockedHint = err instanceof Error ? err.message : String(err);
           });
-          await sleep(randInt(6000, 16000));
+          await sleepUnlessAborted(randInt(6000, 16000), ctx?.signal);
         } else if (isMojeekBlockedError(err)) {
           await withLock(async () => {
             ddgBlockedStreak = 0;
             lastBlockedHint = err instanceof Error ? err.message : String(err);
           });
-          await sleep(randInt(3500, 9000));
+          await sleepUnlessAborted(randInt(3500, 9000), ctx?.signal);
         } else {
           await withLock(async () => {
             ddgBlockedStreak = 0;
@@ -1369,7 +1474,7 @@ export async function runSearchParserJob(jobId: string) {
           if (hadQueryFailures) hadFailures = true;
         });
         const progressPercent = totalQueries > 0 ? Math.round((processedQueries / totalQueries) * 100) : null;
-        await safeUpdateSearchJob(admin, jobId, {
+        await updateJob({
           processed_queries: processedQueries,
           total_results: totalResults,
           progress_percent: progressPercent,
@@ -1390,13 +1495,55 @@ export async function runSearchParserJob(jobId: string) {
         } catch (statsErr) {
           console.warn('search_parser_query_stats upsert failed:', statsErr);
         }
+
+        /**
+         * Чекпойнт после каждого обработанного запроса.
+         *
+         * Он ИЗБЫТОЧЕН как хранилище прогресса: продолжение с места и так
+         * считается по колонке processed_queries, которую мы только что
+         * записали строкой выше (resumeFrom в начале функции). Пишем его всё
+         * равно ради двух побочных эффектов библиотеки, которых у обычного
+         * update нет: он обнуляет бюджет неудач attempts (иначе задача, которая
+         * честно движется, но пережила три деплоя с грубой остановкой, ушла бы
+         * в failed) и продлевает аренду; а его ответ — единственный ДЕШЁВЫЙ
+         * способ узнать, что строку перехватили.
+         *
+         * Прерывание НЕ пишет терминальный статус: строка остаётся running с
+         * записанным прогрессом, аренду отпустит библиотека, продолжит сосед.
+         * Флаг взводит и cancelled — чтобы параллельные запросы (QUERY_CONCURRENCY)
+         * вышли на своей ближайшей проверке, а не доработали пачку до конца.
+         */
+        if (ctx) {
+          const stillOurs = await ctx.saveCheckpoint({ processed_queries: processedQueries });
+          if (!stillOurs) {
+            interrupted = true;
+            cancelled = true;
+          }
+        }
+        if (ctx?.signal.aborted) {
+          interrupted = true;
+          cancelled = true;
+        }
       }
     });
+
+    if (interrupted) {
+      // Ни completed, ни failed, ни pending: строка остаётся running под
+      // управлением библиотеки. Единственный корректный выход из прерывания.
+      void logInfo(
+        'parser.search.job.interrupted',
+        'Search parser job interrupted — left running for reclaim',
+        { jobId, processedQueries, totalQueries },
+        logMeta,
+      );
+      await trace?.cancel('Остановка воркера: задача продолжится с последнего обработанного запроса.');
+      return;
+    }
 
     if (cancelled) {
       const progressPercent = totalQueries > 0 ? Math.round((processedQueries / totalQueries) * 100) : null;
       if (cancelledByStatus === 'pending') {
-        await safeUpdateSearchJob(admin, jobId, {
+        await updateJob({
           status: 'pending',
           processed_queries: processedQueries,
           total_results: totalResults,
@@ -1429,7 +1576,7 @@ export async function runSearchParserJob(jobId: string) {
     }
 
     // 4. Complete
-    await safeUpdateSearchJob(admin, jobId, {
+    await updateJob({
       status: 'completed',
       completed_at: new Date().toISOString(),
       processed_queries: processedQueries,
@@ -1451,14 +1598,24 @@ export async function runSearchParserJob(jobId: string) {
     );
   } catch (err) {
     console.error('Search parser worker failed:', err);
-    if (supabaseAdmin) {
-      await safeUpdateSearchJob(supabaseAdmin, jobId, {
-        status: 'failed',
-        error_message: err instanceof Error ? err.message : 'Unknown error',
-        completed_at: new Date().toISOString(),
-        progress_stage: 'failed',
-      });
+    // Исключение НА ПРЕРЫВАНИИ — не отказ задачи: прерванный fetch бросает
+    // AbortError, и без этой проверки остановка воркера штамповала бы failed
+    // на живой задаче, которую сосед был готов продолжить с чекпойнта.
+    if (interrupted || ctx?.signal.aborted) {
+      void logInfo(
+        'parser.search.job.interrupted',
+        'Search parser job aborted mid-flight — left running for reclaim',
+        { jobId, reason: err instanceof Error ? err.message : String(err) },
+        undefined,
+      );
+      return;
     }
+    await updateJob({
+      status: 'failed',
+      error_message: err instanceof Error ? err.message : 'Unknown error',
+      completed_at: new Date().toISOString(),
+      progress_stage: 'failed',
+    });
     void logError(
       'parser.search.job.failed',
       err,

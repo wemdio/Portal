@@ -104,6 +104,14 @@ export interface LocalVacancyRow {
 export async function fetchVacanciesLocal(
   filters: LocalSearchFilters,
   limit: number,
+  /**
+   * Отмена (единый жизненный цикл задач). Один вызов — до 500 батчей по
+   * 1000 строк, и без сигнала остановка воркера ждала бы конца всего чанка.
+   * С ним оборванный батч возвращается сразу, а цикл выходит на ближайшей
+   * границе. Необязателен только ради вызывающих без контекста задачи;
+   * единственный такой в репозитории — тест.
+   */
+  signal?: AbortSignal,
 ): Promise<LocalVacancyRow[]> {
   if (!supabaseAdmin) throw new Error('supabaseAdmin not configured');
   if (limit <= 0) return [];
@@ -119,9 +127,15 @@ export async function fetchVacanciesLocal(
   const MAX_ITERATIONS = 500;
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter += 1) {
+    if (signal?.aborted) return out;
     let q = supabaseAdmin
       .from('hh_vacancies')
       .select('vacancy_id,name,url,company_name,company_url,employer_id,company_site_url,area,published_at')
+      // Безусловно, а не под `if (signal)`: условный вызов означал бы, что
+      // забытый сигнал у следующего вызывающего ничем не проявится. undefined
+      // supabase-js кладёт в fetch как есть, это законный «сигнала нет»;
+      // приведение типа — только потому, что сигнатура требует AbortSignal.
+      .abortSignal(signal as AbortSignal)
       .order('published_at', { ascending: false, nullsFirst: false })
       .range(offset, offset + BATCH - 1);
 

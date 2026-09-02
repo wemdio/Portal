@@ -2,17 +2,15 @@ jest.mock('@/lib/supabaseAdmin', () => ({
   supabaseAdmin: { from: jest.fn() },
 }));
 
-jest.mock('@/lib/ai-caller/campaignLoop', () => ({
-  resetStuckContacts: jest.fn().mockResolvedValue(undefined),
-  runCampaignLoop: jest.fn().mockResolvedValue(undefined),
-}));
-
 jest.mock('@/lib/tgOutreach/campaignLoop', () => ({
   runCampaignLoop: jest.fn().mockResolvedValue(undefined),
   refetchEmptyDialogs: jest.fn().mockResolvedValue(undefined),
 }));
 
-import { resumeRunningCampaigns as resumeAiCampaigns } from '../../worker/aiCaller';
+// Обзвон (worker/aiCaller.ts) отсюда убран вместе со своим авто-резюмом:
+// кампания там теперь арендуется как задача, брошенную подбирает истёкшая
+// аренда, и функции resumeRunningCampaigns у этого воркера больше нет.
+// Проверять нечего — механизм снят, а не переименован.
 import { resumeRunningCampaigns as resumeTgCampaigns } from '../../worker/tgOutreach';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
@@ -83,25 +81,6 @@ function makeDb(campaignRows: CampaignRow[], jobRows: JobRow[]) {
 }
 
 describe('worker resumeRunningCampaigns', () => {
-  it('AI Caller auto-resumes even if only non-start jobs exist', async () => {
-    const { from, inserts } = makeDb(
-      [{ id: 'camp-1', user_id: 'user-1' }],
-      [{ id: 'job-1', campaign_id: 'camp-1', action: 'stop', status: 'pending' }],
-    );
-
-    await resumeAiCampaigns();
-
-    expect(from).toHaveBeenCalledWith('ai_campaigns');
-    expect(from).toHaveBeenCalledWith('ai_caller_jobs');
-    expect(inserts).toHaveLength(1);
-    expect(inserts[0]).toEqual(
-      expect.objectContaining({
-        table: 'ai_caller_jobs',
-        data: expect.objectContaining({ campaign_id: 'camp-1', action: 'start', status: 'pending' }),
-      }),
-    );
-  });
-
   it('TG Outreach auto-resumes even if only non-start jobs exist', async () => {
     const { from, inserts } = makeDb(
       [{ id: 'camp-1', user_id: 'user-1' }],
@@ -119,17 +98,6 @@ describe('worker resumeRunningCampaigns', () => {
         data: expect.objectContaining({ campaign_id: 'camp-1', action: 'start', status: 'pending' }),
       }),
     );
-  });
-
-  it('does not queue duplicate AI Caller start jobs when one already exists', async () => {
-    const { inserts } = makeDb(
-      [{ id: 'camp-1', user_id: 'user-1' }],
-      [{ id: 'job-1', campaign_id: 'camp-1', action: 'start', status: 'pending' }],
-    );
-
-    await resumeAiCampaigns();
-
-    expect(inserts).toHaveLength(0);
   });
 
   it('does not queue another TG Outreach start job when duplicates already exist', async () => {
