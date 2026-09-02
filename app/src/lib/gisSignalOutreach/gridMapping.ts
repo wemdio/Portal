@@ -21,7 +21,7 @@
  * Чистые функции, без внешних вызовов.
  */
 
-import { extractEmail, findColumnIndex } from '@/lib/tools/dfybUtils';
+import { extractEmail, extractEmails, findColumnIndex } from '@/lib/tools/dfybUtils';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
 import { SIGNAL_COLUMNS, type OutreachSignalsResult } from './signals';
 import type { SegmentCandidate } from './segments';
@@ -51,12 +51,28 @@ export interface QualifiedCompany {
   grade?: string | null;
 }
 
+export function collectCompanyEmails(
+  candidate: SegmentCandidate,
+  signals: OutreachSignalsResult,
+): string[] {
+  return Array.from(new Set([
+    ...extractEmails(candidate.email),
+    ...signals.emails.map((email) => email.trim().toLowerCase()).filter(Boolean),
+  ]));
+}
+
 /**
  * Квалифицированные компании одного/нескольких сегментов → сетка для
  * base_constructor_jobs.data. Первая строка — GRID_HEADER.
  */
-export function companiesToGrid(companies: QualifiedCompany[]): string[][] {
+export function companiesToGrid(
+  companies: QualifiedCompany[],
+  excludedEmails?: ReadonlySet<string>,
+): string[][] {
   const rows = companies.map(({ candidate, signals, score, grade }) => {
+    const emails = collectCompanyEmails(candidate, signals)
+      .filter((email) => !excludedEmails?.has(email))
+      .join(', ');
     const signalCells = SIGNAL_COLUMNS.flatMap((col) => {
       const verdict = signals.signals[col.key];
       return [
@@ -69,7 +85,7 @@ export function companiesToGrid(companies: QualifiedCompany[]): string[][] {
       candidate.name,
       candidate.cityName,
       candidate.phone,
-      candidate.email,
+      emails,
       candidate.site,
       candidate.category,
       candidate.subcategory,

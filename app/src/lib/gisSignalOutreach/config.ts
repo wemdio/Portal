@@ -20,7 +20,12 @@ import type { TwoGisRubricGroup } from '@/lib/twoGis/types';
 export { SEGMENT_SCORING_PROFILES } from './scoring';
 
 /** Шаги конструктора баз, которые НИКОГДА не допускаем в прогон этого пайплайна. */
-export const FORBIDDEN_STEPS = ['ta_scoring', 'personalization', 'remove_support_emails'] as const;
+export const FORBIDDEN_STEPS = [
+  'check_sites',
+  'ta_scoring',
+  'personalization',
+  'remove_support_emails',
+] as const;
 
 /**
  * Канонический порядок шагов (приоритеты из AVAILABLE_STEPS, lib/tools/
@@ -37,6 +42,18 @@ const STEP_PRIORITY: Record<string, number> = {
 
 function sortByPriority(steps: string[]): string[] {
   return [...steps].sort((a, b) => (STEP_PRIORITY[a] ?? 999) - (STEP_PRIORITY[b] ?? 999));
+}
+
+/**
+ * Изолирует GIS от пользовательского сценария конструктора. `check_sites`
+ * здесь дублировал бы уже выполненную сигнальную загрузку сайта, поэтому GIS
+ * его никогда не запускает; в ручном конструкторе шаг остаётся без изменений.
+ */
+export function sanitizeGisConstructorSteps(steps: readonly string[]): string[] {
+  const allowed = steps.filter(
+    (step) => !FORBIDDEN_STEPS.includes(step as (typeof FORBIDDEN_STEPS)[number]),
+  );
+  return sortByPriority(Array.from(new Set(allowed)));
 }
 
 /**
@@ -66,7 +83,7 @@ export interface GisSignalConfig {
   daily_limit: number;
   /** Минимум сработавших сигналов (0..6), чтобы компания пошла в конструктор. */
   signal_min_count: number;
-  /** Шаги конструктора баз. ta_scoring/personalization/remove_support_emails вырезаются при загрузке. */
+  /** Шаги конструктора баз. check_sites и не-GIS шаги вырезаются при загрузке. */
   selected_steps: string[];
   /** step_config для base_constructor_jobs (find_emails.stop_at_first, cap_emails_per_company.max, ...). */
   step_config: Record<string, unknown>;
@@ -123,11 +140,7 @@ export async function loadGisSignalConfig(): Promise<GisSignalConfig | null> {
   if (error || !data) return null;
 
   const row = data as GisSignalConfig;
-  const cleanedSteps = sortByPriority(
-    (row.selected_steps ?? []).filter(
-      (s) => !FORBIDDEN_STEPS.includes(s as (typeof FORBIDDEN_STEPS)[number]),
-    ),
-  );
+  const cleanedSteps = sanitizeGisConstructorSteps(row.selected_steps ?? []);
   return {
     ...row,
     signal_min_count: Math.max(1, Number(row.signal_min_count ?? 1)),
