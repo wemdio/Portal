@@ -6,9 +6,12 @@
  * простоя), и прогрев обязан продолжиться с той же точки. Каждый проход —
  * «какой сейчас день → есть ли план на него → какие переписки пора провести».
  *
- * Прогрев и боевой цикл кампании взаимоисключающие (это гарантируют API и
- * реестр запущенных кампаний в воркере), поэтому оба свободно пишут в общий
- * cooldown_until без конфликта и им не нужен отдельный счётчик пауз.
+ * Прогрев и боевой цикл кампании взаимоисключающие, поэтому оба свободно пишут
+ * в общий cooldown_until без конфликта и им не нужен отдельный счётчик пауз.
+ * Держит это правило СТАТУС КАМПАНИИ, а не реестр запущенных кампаний в памяти
+ * воркера: греющаяся кампания стоит в `warming`, боевая — в `running`, и одна
+ * колонка не бывает двумя значениями сразу. Подробности — в комментарии к
+ * проверке `campaignBusyWithOutreach` ниже.
  */
 import { Api } from 'telegram';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -51,7 +54,13 @@ import {
 import { assignChats, planChatActivities } from './chatSchedule';
 import { runActivity, runJoin } from './chatRunner';
 import * as wdb from './db';
-import type { WarmupChat, WarmupConversation, WarmupMessage, WarmupRun } from './types';
+import type {
+  WarmupChat,
+  WarmupConversation,
+  WarmupMessage,
+  WarmupRun,
+  WarmupSummary,
+} from './types';
 import { CONVERSATION_STALE_MINUTES } from './types';
 
 /** Как часто цикл просыпается посмотреть, не пора ли провести переписку. */
@@ -84,6 +93,88 @@ async function interruptibleSleep(ms: number, shouldStop: () => boolean): Promis
     await sleep(Math.min(2000, Math.max(end - Date.now(), 0)));
   }
 }
+
+/**
+ * Пауза между репликами переписки, которую рвёт сигнал остановки.
+ *
+ * Пауза доходит до 90 секунд (REPLY_DELAY_RANGE_SEC), и досидеть её до конца
+ * после SIGTERM нельзя: контейнеру на остановку отводятся секунды, а после
+ * перехвата прогона соседом следующая реплика ушла бы уже за чужой счёт — в тот
+ * же диалог, который сосед в этот момент ведёт сам.
+ *
+ * Отменённая пауза БРОСАЕТ, а не возвращается: вернувшись, она отправила бы
+ * следующую реплику немедленно, то есть остановка превратилась бы в пачку
+ * сообщений подряд — ровно тот машинный след, ради ухода от которого паузы и
+ * заведены. Ошибку разбирает вызывающий по `signal.aborted`, а не по её тексту.
+ */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return sleep(ms);
+  if (signal.aborted) return Promise.reject(new Error('прогрев остановлен'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('прогрев остановлен'));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * Что раннер единого жизненного цикла (lib/jobs/lifecycle.ts) даёт телу
+ * прогрева. Необязателен: та же функция должна оставаться вызываемой и без
+ * аренды.
+ */
+export interface WarmupRunContext {
+  /** Строка прогона, которую мы арендовали. Сверяется с активной. */
+  runId: string;
+  /** Взводится на SIGTERM воркера и при потере аренды. */
+  signal: AbortSignal;
+  /**
+   * Жетон текущего захвата. Им ограждается КАЖДАЯ запись в строку прогона:
+   * терминальный статус пишет само тело (manageTerminalStatus: false), и без
+   * жетона вытесненный исполнитель проштамповал бы итог поверх работы нового
+   * владельца.
+   */
+  runToken: string;
+  /** false — прогон перехватили: работу прекратить. */
+  saveCheckpoint(data: WarmupCheckpoint): Promise<boolean>;
+}
+
+/**
+ * Чекпойнт прогрева — намеренно минимальный.
+ *
+ * Возобновляться по нему почти не нужно: день прогрева считается от
+ * `started_at`, статусы переписок и уже отправленные сообщения лежат в
+ * собственных строках, ключи сессий сохраняются по ходу. То есть перехваченный
+ * прогон продолжается с того же места и с пустым чекпойнтом.
+ *
+ * Он нужен для другого, и это его главная работа: каждая запись продлевает
+ * аренду и обнуляет бюджет попыток (attempts). Без него прогон, переживший три
+ * грубые остановки за четверо суток — а деплоев за это время больше, — ушёл бы
+ * в `failed` по счётчику потерь. День и последний диалог здесь для человека,
+ * который смотрит на строку глазами: они говорят, где прогон был в момент
+ * перехвата.
+ */
+export interface WarmupCheckpoint {
+  day: number;
+  last_conversation_id: number | null;
+}
+
+/** Снятие владения вместе с терминальным статусом — как в lib/jobs/lifecycle.ts. */
+const CLEAR_OWNERSHIP = { lease_until: null, run_token: null, worker_id: null } as const;
+
+/**
+ * Статусы кампании, означающие «кампанией владеет боевой аутрич».
+ *
+ * `paused` в этом списке потому, что пауза — это середина передачи боевой
+ * кампании между процессами (скрипт остановки деплоя ставит running → paused и
+ * кладёт команду «старт»), а не свободная кампания.
+ */
+const OUTREACH_OWNED_STATUSES = new Set(['running', 'paused']);
 
 /**
  * Активное окно суток по sleep_periods кампании, в UTC.
@@ -167,7 +258,12 @@ export async function runWarmupLoop(
   shouldStop: () => boolean,
   onProgress?: () => void,
   control?: LoopControl,
+  ctx?: WarmupRunContext,
 ): Promise<void> {
+  const signal = ctx?.signal;
+  /** Остановка: сигнал раннера (SIGTERM, потеря аренды) или флаг вызывающего. */
+  const stopping = () => shouldStop() || signal?.aborted === true;
+
   const run = await wdb.getActiveRun(db, campaignId);
   if (!run) {
     // Логировать некуда — записи прогрева привязаны к запуску, а его нет.
@@ -176,6 +272,46 @@ export async function runWarmupLoop(
     await wdb.setCampaignWarming(db, campaignId, false);
     return;
   }
+  // Арендовали одну строку, а активной оказалась другая — прогон, который мы
+  // держим, уже не тот (оператор остановил его и завёл новый). Уникальный
+  // частичный индекс не даёт двум прогонам кампании быть активными сразу, так
+  // что это проверка от неожиданности, а не штатная ветка. Терминального
+  // статуса не пишем: своей строке мы им соврали бы, чужую трогать нельзя.
+  if (ctx && run.id !== ctx.runId) return;
+
+  /**
+   * Терминальная запись итога прогона.
+   *
+   * Два обязательных свойства, оба — следствие аренды:
+   *  - на прерывании НЕ ПИШЕТ НИЧЕГО. Решение принимается по `signal.aborted`,
+   *    а не по имени или тексту ошибки: настоящий таймаут обязан остаться
+   *    отказом, а остановка воркера — не итог прогона. Строка остаётся в
+   *    `running` с отпущенной арендой, и её штатно подберут;
+   *  - снимает владение вместе со статусом (lease_until/run_token/worker_id),
+   *    ровно как это делает библиотека в своей терминальной записи. Иначе
+   *    законченный прогон навсегда остался бы похожим на арендованный.
+   */
+  const finishRun = async (patch: {
+    status: WarmupRun['status'];
+    error_message?: string | null;
+    finished_at?: string;
+    current_day?: number;
+    summary?: WarmupSummary;
+  }): Promise<void> => {
+    if (signal?.aborted) return;
+    await wdb.setRunStatus(db, run.id, { ...patch, ...(ctx ? CLEAR_OWNERSHIP : {}) }, ctx?.runToken);
+  };
+
+  /**
+   * Рабочая (не терминальная) запись в строку прогона — с тем же ограждением.
+   *
+   * Владение не снимает: строка остаётся нашей и живёт дальше.
+   */
+  const updateRun = (patch: {
+    status?: WarmupRun['status'];
+    current_day?: number;
+    started_at?: string;
+  }): Promise<void> => wdb.setRunStatus(db, run.id, patch, ctx?.runToken);
 
   const log: LogFn = (level, message, accountId) => {
     void wdb
@@ -208,9 +344,51 @@ export async function runWarmupLoop(
     .maybeSingle();
   const campaign = campaignRow as OutreachCampaign | null;
   if (!campaign) {
-    await wdb.setRunStatus(db, run.id, { status: 'failed', error_message: 'campaign_not_found' });
+    await finishRun({ status: 'failed', error_message: 'campaign_not_found' });
     return;
   }
+
+  /*
+   * Взаимное исключение с боевым аутричем — ЧЕМ ОНО ДЕРЖИТСЯ ТЕПЕРЬ.
+   *
+   * Раньше его держала карта в памяти воркера: прогрев и боевой цикл занимали
+   * один и тот же слот в runningCampaigns, и второй просто не запускался. Такой
+   * замок жил ровно столько, сколько процесс, и между репликами не работал
+   * вовсе. Под арендой карты больше нет — обе стороны теперь опираются на одну
+   * колонку, `tg_outreach_campaigns.status`, и на то, что она не бывает двумя
+   * значениями сразу:
+   *
+   *  - боевой аутрич (задача 4) арендует САМУ строку кампании со статусом
+   *    выполнения `running`. Кампания под прогревом стоит в `warming`, то есть
+   *    для его раннера она структурно невидима — ни как ожидающая, ни как
+   *    брошенная. Отдельного механизма ему не нужно, и заводить второй нельзя:
+   *    два замка на одном ресурсе расходятся при первом же расхождении;
+   *  - прогрев арендует строку прогона, а не кампании, и статусом кампании
+   *    фильтровать захват не может (опция `where` библиотеки работает только по
+   *    колонкам своей таблицы). Поэтому его половина замка — проверка здесь, в
+   *    начале работы, до подключения хотя бы одного клиента Telegram.
+   *
+   * Состояние «прогон активен, а кампания занята аутричем» недостижимо через
+   * интерфейс: POST warmup отказывает при `running`, POST start — при
+   * `warming`. Значит попасть сюда можно только правкой базы руками или
+   * ошибкой, и правильный ответ — остановить прогон с внятной причиной, а не
+   * пытаться его переждать. Переждать было бы хуже: прогон, который выходит
+   * молча, раннер захватит снова, потратит попытку и через три круга запишет в
+   * `failed` уже без объяснения.
+   */
+  if (OUTREACH_OWNED_STATUSES.has(campaign.status)) {
+    log(
+      'error',
+      'Прогрев остановлен: кампания сейчас занята боевым аутричем. Греть и писать клиентам одними аккаунтами одновременно нельзя — остановите аутрич и запустите прогрев заново.',
+    );
+    await finishRun({
+      status: 'failed',
+      error_message: 'campaign_busy_with_outreach',
+      finished_at: new Date().toISOString(),
+    });
+    return;
+  }
+
   await wdb.setCampaignWarming(db, campaignId, true);
   const tg = campaign.telegram_settings as TelegramSettings;
 
@@ -221,9 +399,10 @@ export async function runWarmupLoop(
     .eq('is_active', true);
   const accounts = (accountRows ?? []) as OutreachAccount[];
   if (accounts.length < 2) {
-    await wdb.setRunStatus(db, run.id, {
+    await finishRun({
       status: 'failed',
       error_message: 'need_at_least_two_accounts',
+      finished_at: new Date().toISOString(),
     });
     log('error', 'Прогрев: нужно минимум два активных аккаунта — греть не с кем.');
     await wdb.setCampaignWarming(db, campaignId, false);
@@ -247,112 +426,123 @@ export async function runWarmupLoop(
     (storagePath) => downloadSessionToTemp(db, storagePath),
     db,
   );
-  if (clients.length < 2) {
-    await disconnectAll(clients);
-    await wdb.setRunStatus(db, run.id, {
-      status: 'failed',
-      error_message: 'not_enough_clients',
-    });
-    log(
-      'error',
-      `Прогрев: подключились только ${clients.length} аккаунтов из ${accounts.length} — прогревать не с кем. Проверьте прокси.`,
-    );
-    await wdb.setCampaignWarming(db, campaignId, false);
-    return;
-  }
-
-  // Ручка для сторожевого таймера: погасить только эту кампанию, не роняя
-  // воркер с остальными.
-  if (control) control.forceDisconnect = () => disconnectAll(clients);
-
-  const byAccountId = new Map<string, ActiveClient>(clients.map((c) => [c.account.id, c]));
-  // Имена всех аккаунтов кампании, включая не подключившихся: сбой
-  // «не подключён» должен называть виновника по имени, а не по uuid.
-  const accountNames = new Map<string, string>(accounts.map((a) => [a.id, a.session_name]));
-
-  // Процесс только что поднялся: то, что числится «идёт», осталось от прошлого
-  // воркера и никуда уже не едет. Возвращаем в очередь сразу, а не ждём 45 минут
-  // до признания переписки брошенной.
-  // Собеседники, найденные в прошлые дни и прошлые прогоны. Загружаем один раз:
-  // без этого каждая переписка начиналась бы с импорта контакта, а по этому
-  // счётчику Telegram и придушил прогрев 07.08.2026 на четвёртом дне.
-  const peerCache = await loadPeerCache(db, campaignId);
-  if (peerCache.size) {
-    log('info', `Прогрев: ${peerCache.size} собеседников взято из памяти, искать заново не нужно.`);
-  }
-
-  const requeued = await wdb.requeueStuckConversations(db, run.id);
-  if (requeued > 0) {
-    log(
-      'info',
-      `Прогрев: возвращено в очередь ${requeued} переписок, прерванных перезапуском воркера.`,
-    );
-  }
-
-  if (run.status === 'pending') {
-    const startedAt = new Date().toISOString();
-    await wdb.setRunStatus(db, run.id, {
-      status: 'running',
-      started_at: startedAt,
-      current_day: 1,
-    });
-    run.started_at = startedAt;
-    run.status = 'running';
-    log('info', `Прогрев начат: ${run.days} дней, подключено ${clients.length} аккаунтов.`);
-  }
-
-  // Личность нужна до первой переписки: без tg_username/phone аккаунт нечем
-  // адресовать, и все его переписки провалятся на резолве.
-  //
-  // onProgress на каждом аккаунте обязателен: этот цикл идёт последовательно по
-  // всем клиентам и до 05.08.2026 был самым длинным участком без единого
-  // признака жизни — от последнего «подключён» до входа в главный цикл. Именно
-  // здесь прогрев и вставал, а сторожевой таймер убивал воркер целиком.
-  for (const c of clients) {
-    if (shouldStop()) break;
-    onProgress?.();
-    try {
-      const identity = await bootstrapAccountIdentity(db, c.client, c.account);
-      c.account.tg_user_id = identity.tg_user_id;
-      c.account.tg_username = identity.tg_username;
-      if (identity.phone) c.account.phone = identity.phone;
-    } catch (e) {
+  /*
+   * Всё, что после подключения, идёт под общим finally, и это обязательное
+   * условие жизни под арендой: клиенты Telegram закрываются на ЛЮБОМ пути
+   * выхода — на успехе, на исключении, на остановке. Клиент, переживший выход
+   * из цикла, — это второе соединение той же сессией, когда прогон подберёт
+   * следующий владелец: AUTH_KEY_DUPLICATED, три подряд — и аккаунт
+   * выключается насовсем (lib/tgOutreach/gramClient.ts). Раньше половина
+   * ранних выходов закрывала клиенты вручную, а часть путей (исключение в
+   * загрузке кэша собеседников, в уборке переписок) не закрывала вовсе.
+   */
+  try {
+    if (clients.length < 2) {
+      await finishRun({
+        status: 'failed',
+        error_message: 'not_enough_clients',
+        finished_at: new Date().toISOString(),
+      });
       log(
-        'warning',
-        `Прогрев: не смог определить личность аккаунта — ${e instanceof Error ? e.message : String(e)}`,
-        c.account.id,
+        'error',
+        `Прогрев: подключились только ${clients.length} аккаунтов из ${accounts.length} — прогревать не с кем. Проверьте прокси.`,
+      );
+      await wdb.setCampaignWarming(db, campaignId, false);
+      return;
+    }
+
+    // Ручка для сторожевого таймера: погасить только эту кампанию, не роняя
+    // воркер с остальными.
+    if (control) control.forceDisconnect = () => disconnectAll(clients);
+
+    const byAccountId = new Map<string, ActiveClient>(clients.map((c) => [c.account.id, c]));
+    // Имена всех аккаунтов кампании, включая не подключившихся: сбой
+    // «не подключён» должен называть виновника по имени, а не по uuid.
+    const accountNames = new Map<string, string>(accounts.map((a) => [a.id, a.session_name]));
+
+    // Собеседники, найденные в прошлые дни и прошлые прогоны. Загружаем один раз:
+    // без этого каждая переписка начиналась бы с импорта контакта, а по этому
+    // счётчику Telegram и придушил прогрев 07.08.2026 на четвёртом дне.
+    const peerCache = await loadPeerCache(db, campaignId);
+    if (peerCache.size) {
+      log('info', `Прогрев: ${peerCache.size} собеседников взято из памяти, искать заново не нужно.`);
+    }
+
+    // Перехват переписок — только теперь, когда прогон уже наш: см. развёрнутое
+    // объяснение порога в requeueStuckConversations (warmup/db.ts).
+    const requeued = await wdb.requeueStuckConversations(db, run.id);
+    if (requeued > 0) {
+      log(
+        'info',
+        `Прогрев: возвращено в очередь ${requeued} переписок, брошенных прошлым исполнителем.`,
       );
     }
-  }
-  onProgress?.();
 
-  const chatsById = new Map<string, WarmupChat>();
-  /** Свои tg_user_id: на публике аккаунты не должны отвечать друг другу. */
-  const ownUserIds = new Set<number>();
-  for (const a of accounts) if (a.tg_user_id) ownUserIds.add(Number(a.tg_user_id));
+    // Признак «прогон ещё ни разу не стартовал» — пустой started_at, а НЕ
+    // статус `pending`: библиотека переводит строку в `running` при захвате, и
+    // к этому месту статус уже `running` всегда. По статусу условие молча
+    // никогда бы не выполнилось, started_at остался бы null, и dayNumber() до
+    // конца прогона возвращал бы первый день.
+    if (!run.started_at) {
+      const startedAt = new Date().toISOString();
+      await updateRun({ status: 'running', started_at: startedAt, current_day: 1 });
+      run.started_at = startedAt;
+      run.status = 'running';
+      log('info', `Прогрев начат: ${run.days} дней, подключено ${clients.length} аккаунтов.`);
+    }
 
-  /*
-   * Уборка после мёртвого процесса — ровно один раз, до первого круга.
-   *
-   * `requeueStuckActivities` не смотрит на возраст: она возвращает в очередь
-   * ЛЮБУЮ активность в статусе «выполняется». Здесь это верно — воркер только
-   * что стартовал, своих активностей у него ещё нет, а всё найденное осталось
-   * от процесса, который умер, не закрыв их. Позвать её на каждом круге значило
-   * бы сбрасывать те, что идут прямо сейчас.
-   *
-   * Зовём независимо от того, включён ли этап чатов: если выключен, активностей
-   * нет и апдейт не заденет ни строки.
-   */
-  const requeuedOnStart = await cdb.requeueStuckActivities(db, run.id);
-  if (requeuedOnStart > 0) {
-    log('info', `Активность в чатах: возвращено в очередь ${requeuedOnStart} действий после перезапуска.`);
-  }
+    // Личность нужна до первой переписки: без tg_username/phone аккаунт нечем
+    // адресовать, и все его переписки провалятся на резолве.
+    //
+    // onProgress на каждом аккаунте обязателен: этот цикл идёт последовательно по
+    // всем клиентам и до 05.08.2026 был самым длинным участком без единого
+    // признака жизни — от последнего «подключён» до входа в главный цикл. Именно
+    // здесь прогрев и вставал, а сторожевой таймер убивал воркер целиком.
+    for (const c of clients) {
+      if (stopping()) break;
+      onProgress?.();
+      try {
+        const identity = await bootstrapAccountIdentity(db, c.client, c.account);
+        c.account.tg_user_id = identity.tg_user_id;
+        c.account.tg_username = identity.tg_username;
+        if (identity.phone) c.account.phone = identity.phone;
+      } catch (e) {
+        log(
+          'warning',
+          `Прогрев: не смог определить личность аккаунта — ${e instanceof Error ? e.message : String(e)}`,
+          c.account.id,
+        );
+      }
+    }
+    onProgress?.();
 
-  try {
-    while (!shouldStop()) {
+    const chatsById = new Map<string, WarmupChat>();
+    /** Свои tg_user_id: на публике аккаунты не должны отвечать друг другу. */
+    const ownUserIds = new Set<number>();
+    for (const a of accounts) if (a.tg_user_id) ownUserIds.add(Number(a.tg_user_id));
+
+    /*
+     * Уборка после прошлого исполнителя — ровно один раз, до первого круга.
+     *
+     * `requeueStuckActivities` тоже гейтится порогом устаревания (см. её
+     * комментарий в chatDb.ts): под арендой «всё, что в работе, — чужое и
+     * мёртвое» больше не верно.
+     *
+     * Зовём независимо от того, включён ли этап чатов: если выключен, активностей
+     * нет и апдейт не заденет ни строки.
+     */
+    const requeuedOnStart = await cdb.requeueStuckActivities(db, run.id);
+    if (requeuedOnStart > 0) {
+      log('info', `Активность в чатах: возвращено в очередь ${requeuedOnStart} действий после перезапуска.`);
+    }
+
+    while (!stopping()) {
       onProgress?.();
 
       const fresh = await wdb.getActiveRun(db, campaignId);
+      // Прогона среди активных больше нет — его остановил оператор (команда
+      // «warmup_stop» ставит `stopped` прямо в строку). Терминальный статус уже
+      // записан, писать свой нечего.
       if (!fresh) break;
 
       const now = new Date();
@@ -375,7 +565,7 @@ export async function runWarmupLoop(
         if (publicChatsEnabled) {
           await cdb.skipRemainingActivities(db, run.id, run.days, 'прогрев завершён');
         }
-        await wdb.setRunStatus(db, run.id, {
+        await finishRun({
           status: 'finished',
           finished_at: new Date().toISOString(),
           current_day: run.days,
@@ -391,7 +581,7 @@ export async function runWarmupLoop(
       }
 
       if (fresh.current_day !== day) {
-        await wdb.setRunStatus(db, run.id, { current_day: day });
+        await updateRun({ current_day: day });
         if (day > 1) {
           await wdb.skipRemainingForDay(db, run.id, day - 1, 'day_over');
           // Вчерашние активности тоже закрываем: не выполненная вечером реакция
@@ -400,6 +590,9 @@ export async function runWarmupLoop(
             await cdb.skipRemainingActivities(db, run.id, day - 1, 'день закончился');
           }
         }
+        // Смена дня — второе место чекпойнта: она случается раз в сутки, но
+        // ровно после неё стоит зафиксировать, где прогон находится.
+        if (ctx && !(await ctx.saveCheckpoint({ day, last_conversation_id: null }))) break;
       }
 
       if (!(await wdb.isDayPlanned(db, run.id, day))) {
@@ -417,9 +610,17 @@ export async function runWarmupLoop(
 
       const due = await wdb.loadDueConversations(db, run.id, day, now);
       for (const conv of due) {
-        if (shouldStop()) break;
+        if (stopping()) break;
         onProgress?.();
-        await runOneConversation(db, conv, byAccountId, accountNames, peerCache, log, onProgress);
+        await runOneConversation(
+          db, conv, byAccountId, accountNames, peerCache, log, onProgress, signal,
+        );
+        // Чекпойнт после каждой переписки. Возобновление он почти не двигает
+        // (день считается от started_at, статусы переписок и ушедшие сообщения
+        // уже в своих строках) — его работа в другом: продлить аренду и вернуть
+        // бюджет попыток в ноль, чтобы четырёхсуточный прогон не ушёл в failed
+        // по счётчику деплоев. false — прогон перехватили, работу прекращаем.
+        if (ctx && !(await ctx.saveCheckpoint({ day, last_conversation_id: conv.id }))) break;
       }
 
       if (publicChatsEnabled) {
@@ -431,14 +632,14 @@ export async function runWarmupLoop(
           await runChatStage({
             db, run, day, now, tg, limits,
             byAccountId, accountNames, chatsById, ownUserIds,
-            shouldStop, log, onProgress,
+            shouldStop: stopping, log, onProgress,
           });
         }
       }
 
       await persistSessions(db, clients, log);
 
-      await interruptibleSleep(POLL_INTERVAL_MS, shouldStop);
+      await interruptibleSleep(POLL_INTERVAL_MS, stopping);
     }
   } finally {
     // Перед разрывом соединений — последний раз: цикл мог выйти сразу после
@@ -673,8 +874,17 @@ async function runOneConversation(
    * без отметок на каждом шаге здоровый разговор выглядит зависшим циклом.
    */
   onProgress?: () => void,
+  /**
+   * Сигнал остановки раннера. Решение «остановка или настоящий сбой»
+   * принимается ТОЛЬКО по нему: на остановке переписка не помечается ни
+   * done, ни failed — она остаётся как есть, с уже сохранёнными сообщениями,
+   * и её подберёт следующий владелец прогона. По тексту или имени ошибки такое
+   * решение принимать нельзя: настоящий таймаут обязан остаться отказом.
+   */
+  signal?: AbortSignal,
 ): Promise<void> {
   const nameOf = (id: string) => accountNames.get(id) ?? id.slice(0, 8);
+  if (signal?.aborted) return;
   const a = byAccountId.get(conv.account_a_id);
   const b = byAccountId.get(conv.account_b_id);
   if (!a || !b) {
@@ -744,6 +954,9 @@ async function runOneConversation(
     peerForB = await resolveCached(b, a);
     onProgress?.();
   } catch (e) {
+    // Нас остановили посреди поиска — это не отказ переписки. Оставляем её как
+    // есть: следующий владелец прогона возьмёт её заново.
+    if (signal?.aborted) return;
     const reason = e instanceof Error ? e.message : String(e);
     await wdb.finishConversation(db, conv.id, {
       status: 'failed',
@@ -777,6 +990,7 @@ async function runOneConversation(
         a.client.sendMessage(resolvedA.entity, { message: text }),
         TELEGRAM_CALL_TIMEOUT_MS,
         'отправка сообщения',
+        signal,
       );
     },
   };
@@ -787,6 +1001,7 @@ async function runOneConversation(
         b.client.sendMessage(resolvedB.entity, { message: text }),
         TELEGRAM_CALL_TIMEOUT_MS,
         'отправка сообщения',
+        signal,
       );
     },
   };
@@ -813,8 +1028,11 @@ async function runOneConversation(
           openaiGenerate(settings, history),
           TELEGRAM_CALL_TIMEOUT_MS,
           'генерация реплики',
+          signal,
         ),
-      sleep,
+      // Пауза между репликами рвётся сигналом — иначе остановка ждала бы до
+      // 90 секунд на каждой реплике (см. abortableSleep).
+      sleep: (ms) => abortableSleep(ms, signal),
       random: Math.random,
       onMessage: async (msg, index, total) => {
         // Отметка жизни на каждой реплике: переписка из десяти сообщений с
@@ -834,7 +1052,17 @@ async function runOneConversation(
     });
     await wdb.finishConversation(db, conv.id, { status: 'done', messages });
   } catch (e) {
-    if (e instanceof WarmupSendError) {
+    // Остановка — не итог переписки. Строка остаётся в «выполняется» с уже
+    // сохранёнными сообщениями: следующий владелец прогона подберёт её по тому
+    // же порогу устаревания, что и любую брошенную. Решаем по сигналу, а не по
+    // типу ошибки: и прерванная пауза, и прерванная отправка приходят сюда
+    // обычным Error, а настоящий таймаут обязан остаться отказом.
+    if (signal?.aborted) {
+      log(
+        'info',
+        `Прогрев: переписка ${a.account.session_name} ↔ ${b.account.session_name} прервана остановкой воркера (ушло ${sentSoFar.length} из ${conv.planned_messages}) — статус не меняем.`,
+      );
+    } else if (e instanceof WarmupSendError) {
       await wdb.finishConversation(db, conv.id, {
         status: 'failed',
         messages: e.sent,

@@ -12,6 +12,7 @@ import type {
   WarmupChatMember,
   WarmupChatMemberStatus,
 } from './types';
+import { CONVERSATION_STALE_MINUTES } from './types';
 
 /** Чаты кампании, готовые к работе: резолвнутые и не выключенные оператором. */
 export async function loadUsableChats(
@@ -222,16 +223,34 @@ export async function finishActivity(
     .eq('id', id);
 }
 
-/** Вернуть в очередь активности, прерванные перезапуском воркера. */
+/**
+ * Вернуть в очередь активности, зависшие в «выполняется» дольше порога.
+ *
+ * Порог появился вместе с арендой прогона, по той же причине, что и в
+ * requeueStuckConversations (warmup/db.ts): раньше основанием для слепого
+ * сброса было «процесс только что поднялся, значит своих активностей у него
+ * нет». Под арендой процесс не единственный — уходящий владелец может ещё
+ * дописывать ответ в публичный чат, и сброс отдал бы ту же активность второму
+ * исполнителю, то есть чат получил бы два ответа от одного аккаунта.
+ *
+ * Порог тот же, по которому активность подбирает loadDueActivities
+ * (CONVERSATION_STALE_MINUTES, 45 минут). `started_at is null` при
+ * «выполняется» — отдельная ветка: такую строку не берёт ни один порог.
+ */
 export async function requeueStuckActivities(
   db: SupabaseClient,
   runId: string,
+  now: Date = new Date(),
 ): Promise<number> {
+  const staleBefore = new Date(
+    now.getTime() - CONVERSATION_STALE_MINUTES * 60_000,
+  ).toISOString();
   const { data } = await db
     .from('tg_outreach_warmup_activities')
     .update({ status: 'pending', started_at: null })
     .eq('run_id', runId)
     .eq('status', 'running')
+    .or(`started_at.is.null,started_at.lt."${staleBefore}"`)
     .select('id');
   return (data ?? []).length;
 }
