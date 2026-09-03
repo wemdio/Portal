@@ -44,9 +44,25 @@ export async function POST(req: NextRequest) {
   if (items.length === 0) return jsonError('No items to scan', 400);
 
   const nowIso = new Date().toISOString();
+  // Владение снимаем вместе со статусом. Задача на едином жизненном цикле
+  // (lib/jobs/lifecycle.ts): исполнитель узнаёт о вытеснении ровно отсюда —
+  // его продление аренды идёт с фильтром status=running и такую строку уже не
+  // проходит, после чего библиотека взводит сигнал и тело выходит без
+  // терминальной записи. Но само оно, выходя, строку не трогает, а его записи
+  // ограждены жетоном — и пока жетон жив, работающее тело продолжает попадать
+  // в вытесненную строку: писать счётчик и, между последним чекпойнтом и
+  // финальной записью, проштамповать 'completed' поверх остановленной задачи.
+  // Плюс строка до конца аренды выглядит арендованной в дежурном запросе
+  // «кто что держит». Те же три обнуления стоят в маршрутах stop и resume.
   await supabaseAdmin
     .from('crypto_payment_jobs')
-    .update({ status: 'stopped', updated_at: nowIso })
+    .update({
+      status: 'stopped',
+      updated_at: nowIso,
+      lease_until: null,
+      run_token: null,
+      worker_id: null,
+    })
     .eq('user_id', user.id)
     .in('status', ['pending', 'running']);
 

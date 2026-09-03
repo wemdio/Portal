@@ -285,58 +285,101 @@ export async function runCryptoPaymentJob(
   const interrupted = () => signal?.aborted === true;
 
   /**
-   * Единственный путь записи в строку задачи, ограждённый жетоном захвата.
-   * Без жетона (вызов без контекста) — поведение ровно как до перевода.
+   * Единственный путь записи в строку задачи.
+   *
+   * Ограждение двойное. Жетон — обязательное: строку мог перехватить сосед, и
+   * тогда она уже не наша. Статус — подстраховка: остановка пользователем,
+   * вытеснение новой загрузкой и повтор через resume снимают жетон сами
+   * (маршруты api/parsers/crypto-payments/**), но если хоть один писатель это
+   * когда-нибудь забудет, фильтр status=running всё равно не даст работающему
+   * телу дописать что-либо в уже закрытую строку — вплоть до 'completed'
+   * поверх остановленной задачи.
+   *
+   * Без жетона (вызов без контекста) фильтров нет вовсе — поведение ровно как
+   * до перевода на единый жизненный цикл.
+   *
+   * tries > 1 — только для терминальной записи: один моргнувший запрос иначе
+   * оставил бы законченную задачу в running, и она стоила бы простоя, попытки
+   * и повторного обхода последней пачки. Прогресс так защищать незачем — его
+   * перепишет следующая пачка. Та же логика, что у TERMINAL_WRITE_TRIES в
+   * lib/jobs/lifecycle.ts.
    */
-  const updateJob = async (patch: Record<string, unknown>): Promise<void> => {
-    const base = client.from('crypto_payment_jobs').update(patch).eq('id', jobId);
-    const { error } = await (runToken ? base.eq('run_token', runToken) : base);
-    if (error) console.warn(`[crypto-payments] update of ${jobId} failed:`, error.message);
+  const updateJob = async (patch: Record<string, unknown>, tries = 1): Promise<void> => {
+    for (let attempt = 0; attempt < tries; attempt += 1) {
+      if (attempt > 0) await new Promise((r) => { setTimeout(r, 500 * attempt); });
+      const base = client.from('crypto_payment_jobs').update(patch).eq('id', jobId);
+      const { error } = await (
+        runToken ? base.eq('run_token', runToken).eq('status', 'running') : base
+      );
+      if (!error) return;
+      console.warn(`[crypto-payments] update of ${jobId} failed:`, error.message);
+    }
   };
+  const TERMINAL_WRITE_TRIES = 3;
   /** Терминальная запись снимает и владение — иначе оно остаётся на строке навсегда. */
   const CLEAR_OWNERSHIP = { lease_until: null, run_token: null, worker_id: null };
 
-  // Load job
-  const { data: job, error: loadErr } = await client
-    .from('crypto_payment_jobs')
-    .select('*')
-    .eq('id', jobId)
-    .single();
-
-  if (loadErr || !job) {
-    console.error('[crypto-payments] Job not found', jobId, loadErr?.message);
-    return;
-  }
-
   /**
-   * Первый удар пульса. Монитор здоровья считает простой ЭТОЙ очереди по
-   * updated_at (services/health-check/main.py, спецификация crypto_payment_jobs,
-   * updated_column='updated_at'), а штампует эту колонку само тело: триггера на
-   * таблице нет (миграция 20260402_0001 создаёт её без единого триггера).
-   * Поэтому захват и продление аренды updated_at не трогают вовсе — иначе
-   * перехват зависшей задачи каждые ~3,5 минуты обновлял бы отметку и тревога
-   * «Долго висит» не наступила бы никогда. Здесь же отметка нужна: строка могла
-   * пролежать в pending часами, и без неё монитор счёл бы только что взятую
-   * задачу зависшей в ту же секунду.
-   *
-   * status здесь больше НЕ пишем: в running строку перевёл захват. Прежняя
-   * безусловная запись status='running' воскресила бы задачу, остановленную
-   * пользователем в окне между захватом и стартом тела.
+   * Объявлены ДО try, потому что их читает catch. Всё остальное — загрузка
+   * строки, пульс, нарезка — переехало ВНУТРЬ try намеренно: исключение оттуда
+   * улетело бы в библиотеку, а она при manageTerminalStatus=false отпускает
+   * аренду обнулением lease_until — то есть ровно так же, как выглядит чистая
+   * передача при остановке. Перехват такую строку попыткой не считает, и
+   * задача переклеймивалась бы вечно без единой записи о падении. Сегодня
+   * бросить там нечему (supabase-js возвращает ошибку, а не бросает), но цена
+   * ошибки слишком велика, чтобы держать это на честном слове.
    */
-  await updateJob({ updated_at: new Date().toISOString() });
-
-  const allItems: ScanItem[] = job.items as ScanItem[];
-  const totalCount = job.total_count as number;
-  let checkedCount = job.checked_count as number;
-  const existingMatches: MatchRow[] = (job.matches as MatchRow[]) ?? [];
-  const matches: MatchRow[] = [...existingMatches];
-
-  // Resume: skip already checked items
-  const remaining = allItems.slice(checkedCount);
-
-  console.log(`[crypto-payments] Starting job ${jobId}: total=${totalCount}, checked=${checkedCount}, remaining=${remaining.length}`);
+  let totalCount = 0;
+  let checkedCount = 0;
+  const matches: MatchRow[] = [];
 
   try {
+    // Load job
+    const { data: job, error: loadErr } = await client
+      .from('crypto_payment_jobs')
+      .select('*')
+      .eq('id', jobId)
+      .single();
+
+    if (loadErr || !job) {
+      console.error('[crypto-payments] Job not found', jobId, loadErr?.message);
+      return;
+    }
+
+    /**
+     * Первый удар пульса. Монитор здоровья считает простой ЭТОЙ очереди по
+     * updated_at (services/health-check/main.py, спецификация crypto_payment_jobs,
+     * updated_column='updated_at'), а штампует эту колонку само тело: триггера на
+     * таблице нет (миграция 20260402_0001 создаёт её без единого триггера).
+     * Поэтому захват и продление аренды updated_at не трогают вовсе — иначе
+     * перехват зависшей задачи каждые ~3,5 минуты обновлял бы отметку и тревога
+     * «Долго висит» не наступила бы никогда. Здесь же отметка нужна: строка могла
+     * пролежать в pending часами, и без неё монитор счёл бы только что взятую
+     * задачу зависшей в ту же секунду.
+     *
+     * Цена размена названа честно: КАЖДЫЙ перехват зависшей задачи начинается с
+     * этой отметки, то есть заводит часы монитора заново. Бесконечно это длиться
+     * не может — перехваты считаются попытками, и на третьей строка уходит в
+     * 'error', о чём монитор сообщит уже по другому признаку. Обратный размен
+     * (не ставить отметку) хуже: тревога приходила бы на каждую здоровую задачу,
+     * подобранную из давно лежавшего pending.
+     *
+     * status здесь больше НЕ пишем: в running строку перевёл захват. Прежняя
+     * безусловная запись status='running' воскресила бы задачу, остановленную
+     * пользователем в окне между захватом и стартом тела.
+     */
+    await updateJob({ updated_at: new Date().toISOString() });
+
+    const allItems: ScanItem[] = job.items as ScanItem[];
+    totalCount = job.total_count as number;
+    checkedCount = job.checked_count as number;
+    matches.push(...((job.matches as MatchRow[]) ?? []));
+
+    // Resume: skip already checked items
+    const remaining = allItems.slice(checkedCount);
+
+    console.log(`[crypto-payments] Starting job ${jobId}: total=${totalCount}, checked=${checkedCount}, remaining=${remaining.length}`);
+
     const chunks: ScanItem[][] = [];
     for (let i = 0; i < remaining.length; i += BATCH_SIZE) {
       chunks.push(remaining.slice(i, i + BATCH_SIZE));
@@ -396,7 +439,7 @@ export async function runCryptoPaymentJob(
       matches: matches as unknown as Record<string, unknown>[],
       updated_at: new Date().toISOString(),
       ...CLEAR_OWNERSHIP,
-    });
+    }, TERMINAL_WRITE_TRIES);
 
     console.log(`[crypto-payments] Job ${jobId} completed: checked=${checkedCount}, matches=${matches.length}`);
   } catch (err) {
@@ -418,6 +461,6 @@ export async function runCryptoPaymentJob(
       error_message: msg,
       updated_at: new Date().toISOString(),
       ...CLEAR_OWNERSHIP,
-    });
+    }, TERMINAL_WRITE_TRIES);
   }
 }
