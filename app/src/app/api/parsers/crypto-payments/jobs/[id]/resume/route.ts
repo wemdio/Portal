@@ -43,17 +43,29 @@ export async function POST(
   }
 
   const nowIso = new Date().toISOString();
+  // Владение снимаем вместе со статусом — по той же причине, что в маршруте
+  // остановки: исполнитель, потерявший строку, сам её больше не трогает.
+  const clearOwnership = { lease_until: null, run_token: null, worker_id: null };
   await supabaseAdmin
     .from('crypto_payment_jobs')
-    .update({ status: 'stopped', updated_at: nowIso })
+    .update({ status: 'stopped', updated_at: nowIso, ...clearOwnership })
     .eq('user_id', user.id)
     .neq('id', id)
     .in('status', ['pending', 'running']);
 
-  // Set back to pending — enrich worker will pick it up and resume from checked_count
+  // Set back to pending — enrich worker will pick it up and resume from checked_count.
+  // attempts обнуляем: это явный повтор по воле человека, и бюджет неудач,
+  // накопленный прошлыми потерями аренды, не должен ронять задачу в 'error'
+  // после первой же осечки нового прогона.
   await supabaseAdmin
     .from('crypto_payment_jobs')
-    .update({ status: 'pending', error_message: null, updated_at: nowIso })
+    .update({
+      status: 'pending',
+      error_message: null,
+      updated_at: nowIso,
+      attempts: 0,
+      ...clearOwnership,
+    })
     .eq('id', id);
 
   return NextResponse.json({ ok: true, resumeFrom: job.checked_count });

@@ -39,9 +39,22 @@ export async function POST(
     return jsonError('Job is not running', 400);
   }
 
+  // Владение снимаем вместе со статусом. Задача на едином жизненном цикле
+  // (lib/jobs/lifecycle.ts): исполнитель узнаёт об остановке ровно отсюда —
+  // его продление аренды идёт с фильтром status=running и такую строку уже не
+  // проходит, после чего библиотека взводит сигнал и тело выходит без
+  // терминальной записи. Но само оно, выходя, строку не трогает — и без этих
+  // трёх обнулений остановленная задача до конца аренды выглядела бы
+  // арендованной в дежурном запросе «кто что держит».
   await supabaseAdmin
     .from('crypto_payment_jobs')
-    .update({ status: 'stopped', updated_at: new Date().toISOString() })
+    .update({
+      status: 'stopped',
+      updated_at: new Date().toISOString(),
+      lease_until: null,
+      run_token: null,
+      worker_id: null,
+    })
     .eq('id', id);
 
   return NextResponse.json({ ok: true });

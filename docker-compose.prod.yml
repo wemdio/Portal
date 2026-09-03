@@ -239,10 +239,25 @@ services:
       # Код жёстко ограничивает значение диапазоном 1..4. Base Constructor
       # использует другой worker и эту настройку не читает.
       - BRIEF_SCORING_MODEL_CONCURRENCY=${BRIEF_SCORING_MODEL_CONCURRENCY:-2}
+      # Крипто-приходы (crypto_payment_jobs) — единый жизненный цикл задач.
+      # CRYPTO_PAYMENTS_LEASE_SECONDS: срок аренды строки задачи; продление идёт
+      #   таймером каждые аренда/3 = 60 с. После краха реплики задачу подберёт
+      #   соседняя через аренду + один опрос ≈ 3,5 мин.
+      # CRYPTO_PAYMENTS_STALL_MINUTES: сколько checked_count имеет право не
+      #   двигаться, прежде чем аренда бросается и задачу берёт сосед. Законный
+      #   максимум — одна пачка (≈1 мин), порог с запасом впятеро; сумма
+      #   5 + 3 + 0,5 = 8,5 мин укладывается в порог монитора (20 мин).
+      - CRYPTO_PAYMENTS_LEASE_SECONDS=${CRYPTO_PAYMENTS_LEASE_SECONDS:-180}
+      - CRYPTO_PAYMENTS_STALL_MINUTES=${CRYPTO_PAYMENTS_STALL_MINUTES:-5}
       # Coordinator pattern всегда включён (см. lib/enrich/enrichBuffer.ts):
       # scraper пишет результат в website_enrichment_results_buffer одной
       # строкой, worker-enrich-coordinator batch'ит в queue/cache/jobs.
       # Подключения к БД от scraper'а не растут линейно с числом реплик.
+    # stop_grace_period НЕ трогаем: 30 минут нужны двум непереведённым очередям
+    # этого же контейнера (обогащение сайтов и оценка ЦА) — они дорабатывают
+    # задачу до конца. Крипто-приходам столько не нужно, они отпускают аренду за
+    # секунды, но срок здесь один на контейнер. Он переезжает к 30 секундам
+    # вместе с обогащением, в задаче 8 этапа 4.
     stop_grace_period: 30m
     deploy:
       resources:

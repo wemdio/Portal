@@ -99,9 +99,19 @@ function normalizeUrl(raw: string): string | null {
   }
 }
 
-async function fetchHtml(url: string): Promise<{ ok: true; html: string } | { ok: false }> {
+async function fetchHtml(
+  url: string,
+  /** Сигнал остановки задачи: рвёт запрос, не дожидаясь своего таймаута. */
+  external?: AbortSignal | null,
+): Promise<{ ok: true; html: string } | { ok: false }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  // Внешний сигнал транслируем в свой контроллер, а не подменяем им: у запроса
+  // остаётся собственный таймаут, а слушателя снимаем в finally — иначе на
+  // одном сигнале за большую задачу копятся тысячи подписок.
+  const relay = () => controller.abort();
+  if (external?.aborted) controller.abort();
+  else external?.addEventListener('abort', relay, { once: true });
   try {
     const res = await fetch(url, {
       method: 'GET',
@@ -122,6 +132,7 @@ async function fetchHtml(url: string): Promise<{ ok: true; html: string } | { ok
     return { ok: false };
   } finally {
     clearTimeout(timer);
+    external?.removeEventListener('abort', relay);
   }
 }
 
@@ -163,7 +174,10 @@ function detectProviders(html: string): string[] {
   return Array.from(found);
 }
 
-async function detectCryptoOnSite(websiteRaw: string): Promise<string[]> {
+async function detectCryptoOnSite(
+  websiteRaw: string,
+  signal?: AbortSignal | null,
+): Promise<string[]> {
   const homeUrl = normalizeUrl(websiteRaw);
   if (!homeUrl) return [];
 
@@ -171,13 +185,14 @@ async function detectCryptoOnSite(websiteRaw: string): Promise<string[]> {
   const allProviders = new Set<string>();
 
   for (const pathname of KEY_PATHS) {
+    if (signal?.aborted) break;
     const url = new URL(root.toString());
     url.pathname = pathname;
     url.search = '';
     url.hash = '';
     const pageUrl = url.toString().replace(/\/+$/, '');
 
-    const response = await fetchHtml(pageUrl);
+    const response = await fetchHtml(pageUrl, signal);
     if (!response.ok) continue;
 
     const providers = detectProviders(response.html);
@@ -189,11 +204,22 @@ async function detectCryptoOnSite(websiteRaw: string): Promise<string[]> {
   return Array.from(allProviders);
 }
 
-async function scanBatch(items: ScanItem[]): Promise<MatchRow[]> {
+/**
+ * Потолок на один сайт. Таймер снимаем, когда обход закончился раньше: иначе
+ * десять висящих setTimeout на пачку держали бы event loop до минуты после
+ * остановки воркера — и бюджет docker stop уходил бы в ожидание пустоты.
+ */
+function withDeadline<T>(promise: Promise<T>, ms: number, onTimeout: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<T>((resolve) => { timer = setTimeout(() => resolve(onTimeout), ms); });
+  return Promise.race([promise, guard]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
+async function scanBatch(items: ScanItem[], signal?: AbortSignal | null): Promise<MatchRow[]> {
   const results = await Promise.allSettled(
     items.map((item) =>
-      Promise.race([
-        detectCryptoOnSite(item.website).then((providers) => {
+      withDeadline<MatchRow | null>(
+        detectCryptoOnSite(item.website, signal).then((providers) => {
           if (providers.length === 0) return null;
           return {
             companyName: item.companyName,
@@ -201,8 +227,9 @@ async function scanBatch(items: ScanItem[]): Promise<MatchRow[]> {
             paymentSystem: providers.join(', '),
           };
         }),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), SITE_TIMEOUT_MS)),
-      ])
+        SITE_TIMEOUT_MS,
+        null,
+      )
     )
   );
 
@@ -211,12 +238,63 @@ async function scanBatch(items: ScanItem[]): Promise<MatchRow[]> {
     .filter((v): v is MatchRow => v !== null);
 }
 
+/** Чекпойнт единого жизненного цикла: сколько позиций уже проверено. */
+export type CryptoPaymentCheckpoint = { checked: number };
+
+/**
+ * Контекст запуска из единого жизненного цикла задач (lib/jobs/lifecycle.ts).
+ *
+ * Необязателен: без него тело ведёт себя ровно как до перевода — пишет в строку
+ * без ограждения и не умеет узнать об остановке. Сегодня единственный вызов —
+ * из worker/enrich.ts, и он контекст передаёт.
+ */
+export interface CryptoPaymentRunContext {
+  /** Взводится на SIGTERM воркера, при потере аренды и при остановке задачи пользователем. */
+  signal: AbortSignal;
+  /**
+   * Жетон текущего захвата. Им ограждаются ВСЕ записи в строку задачи: при
+   * manageTerminalStatus=false терминальный статус пишет само тело, и без
+   * жетона старый исполнитель после перехвата проштамповал бы completed/error
+   * поверх работы нового владельца.
+   */
+  runToken: string;
+  /** false — задачу перехватили: прекратить работу без терминальной записи. */
+  saveCheckpoint(data: CryptoPaymentCheckpoint): Promise<boolean>;
+}
+
 /**
  * Run a crypto payment scan job. Resumes from checked_count if job was interrupted.
  */
-export async function runCryptoPaymentJob(jobId: string, db?: SupabaseClient): Promise<void> {
+export async function runCryptoPaymentJob(
+  jobId: string,
+  ctx?: CryptoPaymentRunContext,
+  db?: SupabaseClient,
+): Promise<void> {
   const { supabaseAdmin } = await import('@/lib/supabaseAdmin');
   const client = db ?? supabaseAdmin!;
+  const runToken = ctx?.runToken ?? null;
+  const signal = ctx?.signal ?? null;
+  /**
+   * Работа прервана извне: остановка воркера, потеря аренды или остановка
+   * задачи пользователем (кнопка «Стоп» пишет status='stopped', продление
+   * аренды его не проходит — фильтр status=running — и библиотека взводит
+   * сигнал). Решаем ТОЛЬКО по сигналу и никогда по имени/тексту ошибки:
+   * прерванный fetch бросает AbortError, но так же назвалась бы и любая чужая
+   * отмена внутри сети.
+   */
+  const interrupted = () => signal?.aborted === true;
+
+  /**
+   * Единственный путь записи в строку задачи, ограждённый жетоном захвата.
+   * Без жетона (вызов без контекста) — поведение ровно как до перевода.
+   */
+  const updateJob = async (patch: Record<string, unknown>): Promise<void> => {
+    const base = client.from('crypto_payment_jobs').update(patch).eq('id', jobId);
+    const { error } = await (runToken ? base.eq('run_token', runToken) : base);
+    if (error) console.warn(`[crypto-payments] update of ${jobId} failed:`, error.message);
+  };
+  /** Терминальная запись снимает и владение — иначе оно остаётся на строке навсегда. */
+  const CLEAR_OWNERSHIP = { lease_until: null, run_token: null, worker_id: null };
 
   // Load job
   const { data: job, error: loadErr } = await client
@@ -230,11 +308,22 @@ export async function runCryptoPaymentJob(jobId: string, db?: SupabaseClient): P
     return;
   }
 
-  // Mark as running
-  await client
-    .from('crypto_payment_jobs')
-    .update({ status: 'running', updated_at: new Date().toISOString() })
-    .eq('id', jobId);
+  /**
+   * Первый удар пульса. Монитор здоровья считает простой ЭТОЙ очереди по
+   * updated_at (services/health-check/main.py, спецификация crypto_payment_jobs,
+   * updated_column='updated_at'), а штампует эту колонку само тело: триггера на
+   * таблице нет (миграция 20260402_0001 создаёт её без единого триггера).
+   * Поэтому захват и продление аренды updated_at не трогают вовсе — иначе
+   * перехват зависшей задачи каждые ~3,5 минуты обновлял бы отметку и тревога
+   * «Долго висит» не наступила бы никогда. Здесь же отметка нужна: строка могла
+   * пролежать в pending часами, и без неё монитор счёл бы только что взятую
+   * задачу зависшей в ту же секунду.
+   *
+   * status здесь больше НЕ пишем: в running строку перевёл захват. Прежняя
+   * безусловная запись status='running' воскресила бы задачу, остановленную
+   * пользователем в окне между захватом и стартом тела.
+   */
+  await updateJob({ updated_at: new Date().toISOString() });
 
   const allItems: ScanItem[] = job.items as ScanItem[];
   const totalCount = job.total_count as number;
@@ -256,63 +345,79 @@ export async function runCryptoPaymentJob(jobId: string, db?: SupabaseClient): P
     let itemsSinceLastPersist = 0;
 
     for (const chunk of chunks) {
-      // Check if job was stopped by user
-      const { data: fresh } = await client
-        .from('crypto_payment_jobs')
-        .select('status')
-        .eq('id', jobId)
-        .single();
-
-      if (fresh?.status === 'stopped') {
-        console.log(`[crypto-payments] Job ${jobId} stopped by user`);
+      // Прежде здесь шёл самоопрос строки на предмет status='stopped'. Теперь
+      // об остановке (пользователем, деплоем, потерей аренды) говорит сигнал:
+      // выходим БЕЗ терминальной записи — строку либо уже закрыл пользователь,
+      // либо её подберёт соседняя реплика и продолжит с checked_count.
+      if (interrupted()) {
+        console.log(`[crypto-payments] Job ${jobId} interrupted at ${checkedCount}/${totalCount}`);
         return;
       }
 
-      const batchMatches = await scanBatch(chunk);
+      const batchMatches = await scanBatch(chunk, signal);
+      // Прерванную пачку не засчитываем: сигнал рвёт запросы на полпути, и
+      // часть сайтов осталась бы «проверенной» вообще без обхода.
+      if (interrupted()) {
+        console.log(`[crypto-payments] Job ${jobId} interrupted at ${checkedCount}/${totalCount}`);
+        return;
+      }
       matches.push(...batchMatches);
       checkedCount += chunk.length;
       itemsSinceLastPersist += chunk.length;
 
       // Persist progress periodically
       if (itemsSinceLastPersist >= PERSIST_INTERVAL) {
-        await client
-          .from('crypto_payment_jobs')
-          .update({
-            checked_count: checkedCount,
-            matches: matches as unknown as Record<string, unknown>[],
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', jobId);
+        await updateJob({
+          checked_count: checkedCount,
+          matches: matches as unknown as Record<string, unknown>[],
+          updated_at: new Date().toISOString(),
+        });
         itemsSinceLastPersist = 0;
+        /**
+         * Чекпойнт не хранилище: настоящее возобновление и так идёт из колонки
+         * checked_count, которую мы только что записали. Он нужен ради двух
+         * побочных эффектов библиотеки — продлить аренду в момент реального
+         * прогресса и обнулить бюджет попыток, — и ради третьего ответа:
+         * false означает, что строку перехватили, и работать дальше нельзя.
+         */
+        if (ctx && !(await ctx.saveCheckpoint({ checked: checkedCount }))) return;
       }
     }
 
+    if (interrupted()) {
+      console.log(`[crypto-payments] Job ${jobId} interrupted at ${checkedCount}/${totalCount}`);
+      return;
+    }
+
     // Final persist
-    await client
-      .from('crypto_payment_jobs')
-      .update({
-        status: 'completed',
-        checked_count: checkedCount,
-        matches: matches as unknown as Record<string, unknown>[],
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', jobId);
+    await updateJob({
+      status: 'completed',
+      checked_count: checkedCount,
+      matches: matches as unknown as Record<string, unknown>[],
+      updated_at: new Date().toISOString(),
+      ...CLEAR_OWNERSHIP,
+    });
 
     console.log(`[crypto-payments] Job ${jobId} completed: checked=${checkedCount}, matches=${matches.length}`);
   } catch (err) {
+    // Прерывание — не итог задачи: строка остаётся в работе с записанным
+    // прогрессом, аренду отпустит библиотека, продолжит сосед. Решаем по
+    // сигналу, а не по имени ошибки.
+    if (interrupted()) {
+      console.log(`[crypto-payments] Job ${jobId} interrupted at ${checkedCount}/${totalCount}`);
+      return;
+    }
     const raw = err instanceof Error ? err.message : String(err);
     const msg = /^\s*</.test(raw) ? 'Internal error (HTML response)' : raw.slice(0, 500);
     console.error(`[crypto-payments] Job ${jobId} failed:`, raw);
 
-    await client
-      .from('crypto_payment_jobs')
-      .update({
-        status: 'error',
-        checked_count: checkedCount,
-        matches: matches as unknown as Record<string, unknown>[],
-        error_message: msg,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', jobId);
+    await updateJob({
+      status: 'error',
+      checked_count: checkedCount,
+      matches: matches as unknown as Record<string, unknown>[],
+      error_message: msg,
+      updated_at: new Date().toISOString(),
+      ...CLEAR_OWNERSHIP,
+    });
   }
 }
