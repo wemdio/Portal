@@ -9,6 +9,8 @@ import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
 
 export interface QualificationResult {
   isLead: boolean;
+  /** Explicit AI verdict for a purely machine/service reply; absent in legacy results. */
+  machineReplyKind?: MachineReplyKind | null;
   /**
    * ИИ явно подтвердил совпадение ОСНОВНОГО человеческого ответа с
    * per-project/client lead_criteria. Код использует этот флаг как
@@ -518,6 +520,10 @@ const SUBSTANTIVE_OFFER_SIGNAL_PATTERNS = [
   /мы[^.!?\n]{0,100}(?:помогаем|поможем|можем\s+(?:закрыть|решить|сократить|увеличить|автоматизировать|обеспечить)|сократим|увеличим|автоматизируем|обеспечим)/i,
   /наш[иаяе][^.!?\n]{0,50}цен[а-яё]*[^.!?\n]{0,30}ниж[а-яё]*/i,
   /\bwe\s+(?:offer|provide|help|build)|\bour\s+(?:solution|service|product|platform|system)/i,
+  // A concrete promised outcome is an offer even without literal "we offer".
+  // Keep both the delivery verb and outcome: "we'll forward this to a colleague"
+  // is still just a contact opener, regardless of its length or signature.
+  /\bwe(?:['’]ll|\s+(?:will|can))\s+(?:bring|deliver|generate|book|secure)\b[^.!?\n]{0,80}\b(?:leads|meetings|appointments|sales\s+opportunities|customers|clients)\b/i,
 ];
 const ROUTING_VERB_SOURCE = String.raw`(?:обратитесь|обращайтесь|позвоните|звоните|наберите|напишите|пишите|свяжитесь)`;
 // Только известные названия подразделений. Произвольное слово после «отдел»
@@ -728,8 +734,19 @@ const SERVICE_ACK_RECEIPT_SEGMENT_PATTERN =
   /^(?:ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)\s+(?:был[оа]?\s+)?(?:успешно\s+)?(?:получен[оа]?|зарегистрирован[оа]?|принят[оа]?)(?:\s+и\s+(?:получен[оа]?|зарегистрирован[оа]?|принят[оа]?))*|(?:мы\s+)?(?:получили|зарегистрировали|приняли)\s+ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)(?:\s+и\s+хотим\s+подтвердить\s+(?:его|их)\s+получение)?|your\s+(?:request|message|email|ticket)\s+(?:(?:has\s+been|was|is)\s+)?(?:received|registered|accepted|created)(?:\s+and\s+(?:received|registered|accepted|created))*|we\s+have\s+(?:received|registered|accepted|created)\s+your\s+(?:request|message|email|ticket))$/iu;
 const SERVICE_ACK_PROCESSING_SEGMENT_PATTERN =
   /^(?:(?:мы\s+)?(?:уже\s+)?работаем\s+над\s+(?:вашим|этим)\s+(?:вопросом|запросом|обращением)(?:\s+и\s+ответим(?:\s+вам)?\s+(?:в\s+ближайшее\s+время|как\s+можно\s+скорее))?|(?:наш[иаяе]\s+)?специалист[а-яё]*\s+(?:уже\s+)?занима[а-яё]*\s+рассмотрени[а-яё]*\s+(?:вашего\s+)?(?:запроса|обращения)\s+и\s+постара[а-яё]*\s+ответить(?:\s+(?:вам\s+)?(?:в\s+ближайшее\s+время|как\s+можно\s+скорее))?|(?:ваш\s+)?персональн[а-яё]*\s+менеджер(?:\s+[А-ЯЁ][а-яё-]+){0,3}\s+свяжется\s+с\s+вами(?:\s+(?:в\s+ближайшее\s+время|как\s+можно\s+скорее))?|(?:наша|наш)?\s*(?:служба|команда|отдел)\s+(?:технической\s+)?поддержки\s+(?:ответит|свяжется)(?:\s+с\s+вами)?(?:\s+(?:в\s+ближайшее\s+время|как\s+можно\s+скорее))?|(?:our\s+)?(?:support\s+)?team\s+(?:is\s+working\s+on\s+(?:it|your\s+(?:request|ticket))|will\s+(?:respond|reply|get\s+back)(?:\s+to\s+you)?(?:\s+(?:shortly|soon))?)|we(?:'ll|\s+will)\s+(?:respond|reply|get\s+back)(?:\s+to\s+you)?(?:\s+(?:shortly|soon)))$/iu;
-const SERVICE_ACK_URGENT_CONTACT_PATTERN =
-  /^(?:если\s+(?:ваше\s+)?(?:обращение|сообщение|письмо|запрос|вопрос)\s+срочн(?:ое|ый),?\s*(?:пожалуйста,?\s*)?(?:свяжитесь\s+с\s+нами|позвоните\s+нам)|if\s+(?:your\s+)?(?:request|message|ticket|issue)\s+is\s+urgent,?\s*(?:please\s+)?(?:contact|call)\s+us)\s*:?$/iu;
+const SERVICE_ACK_RESPONSE_PROMISE_PATTERN =
+  /^(?:(?:мы\s+)?(?:обязательно\s+)?ответим(?:\s+вам)?\s+(?:в\s+ближайшее\s+время|как\s+можно\s+скорее)|we(?:['’]ll|\s+will)\s+(?:respond|reply|get\s+back)(?:\s+to\s+you)?\s+(?:shortly|soon))$/iu;
+const SERVICE_ACK_CONTACT_LABEL_SOURCE = String.raw`(?:telegram|телеграм|whatsapp|ватсап|телефон|тел\.?)`;
+const SERVICE_ACK_CONTACT_TOKEN_SOURCE = String.raw`(?:${SERVICE_ACK_CONTACT_LABEL_SOURCE}\s*[:：]?\s*)?(?:@[a-z0-9_]{5,32}|\+?\d[\d\s()+-]{5,30}\d)`;
+const SERVICE_ACK_CONTACT_SEPARATOR_SOURCE = String.raw`(?:\s*[,;]\s*(?:(?:или|or)\s+)?|\s+(?:или|or)\s+|\s+(?=${SERVICE_ACK_CONTACT_LABEL_SOURCE}\s*[:：]?))`;
+// Bound each token and require separators: nested optional numeric tokens can
+// otherwise backtrack for seconds on a long number followed by human text.
+// Unusual/long contact lists fail open to AI, never block the worker.
+const SERVICE_ACK_CONTACT_DETAILS_SOURCE = String.raw`${SERVICE_ACK_CONTACT_TOKEN_SOURCE}(?:${SERVICE_ACK_CONTACT_SEPARATOR_SOURCE}${SERVICE_ACK_CONTACT_TOKEN_SOURCE}){0,4}`;
+const SERVICE_ACK_CONDITIONAL_CONTACT_PATTERN = new RegExp(
+  String.raw`^(?:если\s+(?:ваш[еа]?\s+)?(?:обращение|сообщение|письмо|запрос|вопрос)\s+(?:срочн(?:ое|ый)|актуал(?:ен|ьно)\s+и\s+требует\s+ответа|требует\s+ответа),?\s*(?:то\s+)?(?:пожалуйста,?\s*)?(?:свяжитесь\s+с\s+нами|позвоните\s+нам)|if\s+(?:your\s+)?(?:request|message|ticket|issue)\s+(?:is\s+urgent|requires\s+(?:a\s+)?response),?\s*(?:please\s+)?(?:contact|call)\s+us)(?:\s+по\s+телефону)?\s*:?\s*(?:${SERVICE_ACK_CONTACT_DETAILS_SOURCE})?$`,
+  'iu',
+);
 const SERVICE_ACK_MATERIALS_INSTRUCTION_PATTERN =
   /^(?:(?:для|чтобы)\s+(?:дальнейшей\s+)?(?:обработки|рассмотрения)\s+(?:вашего\s+)?(?:обращения|запроса),?\s*(?:пожалуйста,?\s*)?(?:пришлите|предоставьте|направьте)\s+(?:нам\s+)?(?:дополнительн[а-яё]+\s+)?(?:информаци[юя]|материал[ыа]?|сведени[яй]|данн[ыеых]+)(?:\s+и\s+(?:дополнительн[а-яё]+\s+)?(?:информаци[юя]|материал[ыа]?|сведени[яй]|данн[ыеых]+))*|(?:to|in\s+order\s+to)\s+(?:process|review)\s+your\s+(?:request|ticket),?\s*(?:please\s+)?(?:send|provide)\s+(?:us\s+)?(?:additional\s+)?(?:information|materials|details|data)(?:\s+and\s+(?:additional\s+)?(?:information|materials|details|data))*)$/iu;
 const SERVICE_ACK_TICKET_ID_PATTERN =
@@ -740,8 +757,10 @@ const SERVICE_ACK_SIGNOFF_PATTERN =
   /^(?:с\s+уважением|с\s+наилучшими\s+пожеланиями|kind\s+regards|best\s+regards|regards)$/iu;
 const SERVICE_ACK_CONTACT_ONLY_PATTERN =
   /^(?:(?:телефон|тел\.?|phone|e-?mail|почта|сайт|website)\s*[:：]\s*)?(?:\+?[\d\s()+-]{6,}|[^\s@]+@[^\s@]+\.[^\s@]+|(?:https?:\/\/|www\.)?\p{L}[\p{L}\p{N}-]*(?:\.[\p{L}\p{N}-]+)+(?:\/\S*)?)$/iu;
-const SERVICE_ACK_OPERATIONAL_CONTACT_PATTERN =
-  /^(?:если\s+срочно,?\s*)?(?:также\s+вы\s+)?(?:можете\s+)?(?:связаться(?:\s+с\s+(?:нами|ним))?|свяжитесь(?:\s+с\s+(?:нами|ним))?|позвонить(?:\s+нам)?)\s*(?::|по\s+телефону)?\s*(?:(?:(?:telegram|телеграм|whatsapp|ватсап|телефон|тел\.?)\s*[:：]?\s*)?(?:@[a-z0-9_]{5,}|\+?[\d\s()+-]{7,})\s*[,;]?\s*)+$/iu;
+const SERVICE_ACK_OPERATIONAL_CONTACT_PATTERN = new RegExp(
+  String.raw`^(?:если\s+срочно,?\s*)?(?:также\s+вы\s+)?(?:можете\s+)?(?:связаться(?:\s+с\s+(?:нами|ним))?|свяжитесь(?:\s+с\s+(?:нами|ним))?|позвонить(?:\s+нам)?)\s*(?::|по\s+телефону)?\s*${SERVICE_ACK_CONTACT_DETAILS_SOURCE}$`,
+  'iu',
+);
 const SERVICE_ACK_PATIENCE_PATTERN = /^(?:спасибо|благодарим(?:\s+вас)?)\s+за\s+терпение$/iu;
 
 function normalizeServiceAcknowledgementSegment(rawSegment: string): string {
@@ -752,8 +771,7 @@ function normalizeServiceAcknowledgementSegment(rawSegment: string): string {
     .trim();
 }
 
-function isServiceAcknowledgementBoilerplateSegment(rawSegment: string): boolean {
-  const segment = normalizeServiceAcknowledgementSegment(rawSegment);
+function isServiceAcknowledgementBoilerplateSegment(segment: string): boolean {
   if (!segment || /^[—–\-_*=~\s]+$/u.test(segment)) return true;
 
   return (
@@ -761,7 +779,8 @@ function isServiceAcknowledgementBoilerplateSegment(rawSegment: string): boolean
     SERVICE_ACK_THANKS_PATTERN.test(segment) ||
     SERVICE_ACK_RECEIPT_SEGMENT_PATTERN.test(segment) ||
     SERVICE_ACK_PROCESSING_SEGMENT_PATTERN.test(segment) ||
-    SERVICE_ACK_URGENT_CONTACT_PATTERN.test(segment) ||
+    SERVICE_ACK_RESPONSE_PROMISE_PATTERN.test(segment) ||
+    SERVICE_ACK_CONDITIONAL_CONTACT_PATTERN.test(segment) ||
     SERVICE_ACK_MATERIALS_INSTRUCTION_PATTERN.test(segment) ||
     SERVICE_ACK_TICKET_ID_PATTERN.test(segment) ||
     SERVICE_ACK_SIGNATURE_PATTERN.test(segment) ||
@@ -773,16 +792,17 @@ function isServiceAcknowledgementBoilerplateSegment(rawSegment: string): boolean
 }
 
 /**
- * Признаём письмо чистым системным acknowledgement только когда каждый его
+ * Разбиваем основной ответ на нормализованные сегменты. Чистый acknowledgement
+ * распознаётся вызывающим кодом только когда каждый его
  * содержательный сегмент относится к известному шаблону. Любой неизвестный
  * остаток fail-open передаётся в AI, чтобы не потерять живой вопрос/интерес.
  */
-function isPureServiceAcknowledgement(authoredBody: string): boolean {
-  const segments = authoredBody
+function serviceAcknowledgementSegments(authoredBody: string): string[] {
+  return authoredBody
     .replace(/\r\n?/g, '\n')
     .replace(/([.!?])\s+(?=[\p{L}\p{N}])/gu, '$1\n')
-    .split(/\n+/u);
-  return segments.every(isServiceAcknowledgementBoilerplateSegment);
+    .split(/\n+/u)
+    .map(normalizeServiceAcknowledgementSegment);
 }
 
 /**
@@ -812,10 +832,17 @@ export function classifyMachineReply(
   const serviceReceipt = SERVICE_RECEIPT_PATTERN.test(authoredBody);
   const serviceProcessing = SERVICE_PROCESSING_PATTERN.test(authoredBody);
   const serviceContext = SERVICE_CONTEXT_PATTERN.test(`${subject}\n${authoredBody}`);
+  const serviceSegments = serviceAcknowledgementSegments(authoredBody);
+  // Some service templates never say "received" (GracieDigital). Require two
+  // independent boilerplate signals, not just a human promise to reply/call.
+  const receiptlessAcknowledgement =
+    serviceSegments.some((segment) => SERVICE_ACK_RESPONSE_PROMISE_PATTERN.test(segment)) &&
+    serviceSegments.some((segment) => SERVICE_ACK_CONDITIONAL_CONTACT_PATTERN.test(segment));
   if (
-    serviceReceipt &&
-    (SERVICE_ACK_SUBJECT_PATTERN.test(subject) || (serviceProcessing && serviceContext)) &&
-    isPureServiceAcknowledgement(authoredBody)
+    ((serviceReceipt &&
+      (SERVICE_ACK_SUBJECT_PATTERN.test(subject) || (serviceProcessing && serviceContext))) ||
+      receiptlessAcknowledgement) &&
+    serviceSegments.every(isServiceAcknowledgementBoilerplateSegment)
   ) {
     return 'service_acknowledgement';
   }
@@ -840,6 +867,24 @@ function machineReplyReason(kind: MachineReplyKind): string {
     return 'Служебное подтверждение получения обращения';
   }
   return 'Автоответ или отписка';
+}
+
+function machineReplyNonLead(
+  kind: MachineReplyKind,
+  baseResult?: QualificationResult,
+): QualificationResult {
+  return {
+    isLead: false,
+    machineReplyKind: kind,
+    customCriteriaMatched: false,
+    proposalSeen: false,
+    interestSignals: [],
+    reason: machineReplyReason(kind),
+    confidence: baseResult?.confidence ?? 0.95,
+    needsReview: false,
+    objectionHandleable: false,
+    objectionDraft: null,
+  };
 }
 
 function hasStandaloneSharedEmailLeadCriterion(leadCriteria?: string | null): boolean {
@@ -1722,8 +1767,15 @@ function buildSystemPrompt(briefText?: string | null, leadCriteria?: string | nu
 - Вежливость ("спасибо", "благодарю за информацию") без прямого CTA или конкретного коммерческого запроса — НЕ лид.
 ${criteriaReminder}
 
+ФИНАЛЬНАЯ ПРОВЕРКА МАШИННОГО ОТВЕТА (раньше любых критериев лида):
+- machine_reply_kind = "auto_reply" для автоматического ответа/отпуска, "delivery_failure" для уведомления о недоставке, "service_acknowledgement" для шаблонного подтверждения или обещания обработать запрос/ответить. Например, «Мы обязательно ответим в ближайшее время. Если запрос актуален — свяжитесь по телефону» — служебный шаблон, не коммерческий CTA, даже без слов «письмо получено».
+- Ставь этот признак только для полностью машинного/служебного ОСНОВНОГО ответа без самостоятельного человеческого интереса. Машинный текст в цитате или подписи не учитывай. Если рядом есть живой вопрос про цену/КП или просьба обсудить предложение/созвониться, machine_reply_kind=null: оцени человеческую часть по обычным критериям.
+- При machine_reply_kind != null обязательно is_lead=false, custom_criteria_matched=false, needs_review=false, objection_handleable=false, objection_draft=null. Контакты и призывы из служебного шаблона не могут выполнить кастомное правило «передали контакт — лид».
+- Для человеческого ответа или при сомнении machine_reply_kind=null.
+
 ФОРМАТ ОТВЕТА (только валидный JSON, без markdown):
 {
+  "machine_reply_kind": "auto_reply"/"delivery_failure"/"service_acknowledgement"/null,
   "is_lead": true/false,
   "custom_criteria_matched": true/false,
   "proposal_seen": true/false,
@@ -2028,6 +2080,12 @@ function parseAIResult(content: string): QualificationResult {
   }
 
   return {
+    machineReplyKind:
+      parsed.machine_reply_kind === 'auto_reply' ||
+      parsed.machine_reply_kind === 'delivery_failure' ||
+      parsed.machine_reply_kind === 'service_acknowledgement'
+        ? parsed.machine_reply_kind
+        : null,
     isLead: Boolean(parsed.is_lead),
     customCriteriaMatched: parsed.custom_criteria_matched === true,
     proposalSeen: Boolean(parsed.proposal_seen),
@@ -2052,6 +2110,9 @@ function enforceCustomCriteriaPriority(
   result: QualificationResult,
   hasCustomCriteria: boolean,
 ): QualificationResult {
+  if (result.machineReplyKind) {
+    return machineReplyNonLead(result.machineReplyKind, result);
+  }
   // Модель не может сама объявить совпадение, если проектный/клиентский
   // критерий вообще не был передан. Это также защищает дефолтный режим от
   // случайного/инъекционного custom_criteria_matched=true в ответе модели.
@@ -2268,15 +2329,7 @@ export async function qualifyReply(
   const machineReply = classifyMachineReply(ctx.replyEmail);
   if (machineReply) {
     return {
-      isLead: false,
-      customCriteriaMatched: false,
-      proposalSeen: false,
-      interestSignals: [],
-      reason: machineReplyReason(machineReply),
-      confidence: 0.95,
-      needsReview: false,
-      objectionHandleable: false,
-      objectionDraft: null,
+      ...machineReplyNonLead(machineReply),
       threadContext: ctx,
     };
   }
@@ -2329,6 +2382,9 @@ export async function qualifyReply(
   }
 
   const aiResult = await classifyWithAI(ctx, { ...aiOptions, briefText });
+  // classifyWithAI has already applied the machine veto before custom priority.
+  // Do not let contact/CTA postprocessing undo that verdict.
+  if (aiResult.machineReplyKind) return { ...aiResult, threadContext: ctx };
   const criteriaAwareResult = enforceDeterministicCustomCriteria(
     aiResult,
     aiOptions.leadCriteria,

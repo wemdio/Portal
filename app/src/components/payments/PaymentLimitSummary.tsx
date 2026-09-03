@@ -148,7 +148,7 @@ export default function PaymentLimitSummary({ summary, canManage }: PaymentLimit
             <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Косты компании</p>
             <h2 className="mt-2 text-lg font-semibold text-gray-950">Instantly, почты, базы, домены и другое</h2>
             <p className="mt-1 text-sm leading-5 text-gray-500">
-              Календарь почт попадает в «Почты», календарь технички в «Другое». «Оставить» до даты списания считается резервом, затем фактом.
+              Ручные косты сразу учитываются как оплаченные. Календарь почт попадает в «Почты», календарь технички в «Другое». «Оставить» до даты списания считается резервом, затем фактом.
             </p>
           </div>
           <span className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ring-1 ring-inset ${
@@ -214,6 +214,11 @@ export default function PaymentLimitSummary({ summary, canManage }: PaymentLimit
               {`Календарь технички: оплачено ${formatRubles(summary.costBudget.techPaid)}, резерв ${formatRubles(summary.costBudget.techReserved)}.`}
             </p>
           </div>
+          {summary.costBudget.manualReserved > 0 && (
+            <p role="note" className="mt-3 text-xs leading-5 text-amber-700">
+              {`В резерве ${formatRubles(summary.costBudget.manualReserved)} ручных костов, внесённых по прежним правилам. Для переноса в факт нужно уточнить реальные даты оплаты. Новые косты сразу записываются оплаченными.`}
+            </p>
+          )}
         </div>
       </section>
 

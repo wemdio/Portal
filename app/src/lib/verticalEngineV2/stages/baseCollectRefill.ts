@@ -442,6 +442,27 @@ export async function runVeRefillAppend(args: {
   let budgetReservationId: string | null = null;
 
   try {
+    // The legacy refill path has its own UTC-day budget and sends directly.
+    // It cannot bypass the newer period-bound reserve or reuse an old audit
+    // for newly collected rows. Require the specialist's normal audited path.
+    const { data: deliveryProject, error: deliveryProjectError } = await ctx.supabase
+      .from('ve_projects')
+      .select('id, portal_project_id, portal_period_id, delivery_plan_bound_at')
+      .eq('id', job.project_id)
+      .maybeSingle();
+    if (deliveryProjectError || !deliveryProject) {
+      throw new Error('Не удалось проверить план дозированной загрузки проекта; прямой долив остановлен');
+    }
+    if (
+      deliveryProject.portal_project_id || deliveryProject.portal_period_id
+      || deliveryProject.delivery_plan_bound_at
+    ) {
+      throw new Error(
+        'У проекта включена дозированная загрузка: прямой автодолив отключён. '
+        + 'Соберите новую базу по гипотезе и пройдите аудит и шаг 5, чтобы добавить контакты в общий резерв.',
+      );
+    }
+
     // 1. Кампания и маппинг — из запущенного шаблона вертикали.
     const { data: templateRows, error: tErr } = await ctx.supabase
       .from('ve_templates')

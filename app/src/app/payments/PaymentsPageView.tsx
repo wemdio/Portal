@@ -161,9 +161,11 @@ export default function PaymentsPageView() {
     const result = await submitPaymentRequest(input, idempotencyKey);
     submissionKeyRef.current = null;
     setIsFormOpen(false);
-    setSubmitFeedback(result.outcome === 'auto_approved'
-      ? 'Расход одобрен автоматически.'
-      : 'Расход отправлен Ане на согласование.');
+    setSubmitFeedback(result.request.status === 'paid'
+      ? 'Оплата записана и учтена в фактических расходах.'
+      : result.outcome === 'auto_approved'
+        ? 'Расход одобрен автоматически.'
+        : 'Расход отправлен Ане на согласование.');
     const targetMonth = input.expectedPaymentOn.slice(0, 7);
     if (model && targetMonth !== model.period.key) {
       setModel(null);

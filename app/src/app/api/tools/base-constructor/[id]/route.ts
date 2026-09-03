@@ -7,6 +7,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { extractEmail, findColumnIndex } from '@/lib/tools/dfybUtils';
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
 import { stripBaseConstructorCheckpointMetadata } from '@/lib/tools/baseConstructorCheckpoint';
+import { mergeBaseConstructorStats } from '@/lib/tools/baseConstructorMetrics';
 
 const admin = supabaseAdmin!;
 
@@ -50,7 +51,7 @@ async function autoCompleteIfStuck(jobId: string): Promise<void> {
   const INTERMEDIATE_STUCK_AFTER_MS = 15 * 60_000;
   const { data: row } = await admin
     .from('base_constructor_jobs')
-    .select('id, status, current_step, current_step_key, total_steps, current_step_progress, started_at, run_token, data')
+    .select('id, status, current_step, current_step_key, total_steps, current_step_progress, started_at, run_token, data, result_stats')
     .eq('id', jobId)
     .single();
   if (!row) return;
@@ -89,12 +90,12 @@ async function autoCompleteIfStuck(jobId: string): Promise<void> {
         completed_at: new Date().toISOString(),
         current_step_key: 'done',
         current_step_progress: 100,
-        result_stats: {
+        result_stats: mergeBaseConstructorStats(row.result_stats, {
           total_rows: body.length,
           emails_found: emailsFound,
           avg_ta_score: Math.round(avgScore * 10) / 10,
           columns: header.length,
-        },
+        }),
       })
       .eq('id', jobId)
       .eq('status', 'processing')

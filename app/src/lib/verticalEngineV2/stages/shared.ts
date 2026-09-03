@@ -48,6 +48,17 @@ export function stageLog(ctx: VeStageContext, msg: string): void {
   ctx.log?.(msg);
 }
 
+/** Worker preserves this pending state after a waiting stage returns. */
+export async function requeueVeJob(ctx: VeStageContext, job: VeJob, cooldownMs = 30_000): Promise<void> {
+  const { error } = await ctx.supabase.from('ve_jobs').update({
+    status: 'pending',
+    started_at: null,
+    run_after: new Date(Date.now() + cooldownMs).toISOString(),
+    updated_at: new Date().toISOString(),
+  }).eq('id', job.id).eq('status', 'running');
+  if (error) throw new Error(`ve_jobs requeue: ${error.message}`);
+}
+
 export function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
   return text.slice(0, max).trimEnd() + '…';

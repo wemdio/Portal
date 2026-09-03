@@ -12,7 +12,10 @@ import { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
 const MAPPING_POSITIVE_TTL_MS = 10 * 60 * 1000;
 const MAPPING_NEGATIVE_TTL_MS = 60 * 1000;
 const MAPPING_CACHE_MAX = 1_500;
-const MAX_OWNERSHIP_EVIDENCE_CALLS = 2;
+// Each narrow surface may need a final empty page even after returning fewer
+// than 100 rows (TobyLab, 2026-09-02). Reserve its own bounded budget: at most
+// four listEmails calls in total, still using the shared workspace limiter.
+const MAX_OWNERSHIP_EVIDENCE_PAGES_PER_SURFACE = 2;
 
 interface MappedCampaigns {
   allCampaignIds: string[];
@@ -456,69 +459,53 @@ async function fetchWorkspaceEvidence(args: {
   );
   if (trustedParentAlreadyProven) return { evidence, complete: true };
 
-  let calls = 0;
-  let searchCursor: string | undefined;
-  let searchComplete = false;
-  while (calls < MAX_OWNERSHIP_EVIDENCE_CALLS) {
-    const searched = await instantly.listEmails(
-      {
-        search: identity,
-        mode: 'emode_all',
-        limit: 100,
-        ...(searchCursor ? { starting_after: searchCursor } : {}),
-      },
-      { accountId },
-    );
-    calls++;
-    items.push(...(searched.items ?? []));
-    evidence = collectCampaignEvidence(
-      campaignIds,
-      reply,
-      mailbox,
-      leadEmail,
-      items,
-      trustedParentId,
-    );
-    searchCursor = searched.next_starting_after?.trim() || undefined;
-    if (!searchCursor) {
-      searchComplete = true;
-      break;
+  const consumeSurface = async (filter: {
+    search?: string;
+    lead?: string;
+    email_type?: 'sent';
+  }): Promise<boolean> => {
+    let cursor: string | undefined;
+    const seenCursors = new Set<string>();
+    for (let page = 0; page < MAX_OWNERSHIP_EVIDENCE_PAGES_PER_SURFACE; page++) {
+      const response = await instantly.listEmails(
+        {
+          ...filter,
+          mode: 'emode_all',
+          limit: 100,
+          ...(cursor ? { starting_after: cursor } : {}),
+        },
+        { accountId },
+      );
+      items.push(...(response.items ?? []));
+      evidence = collectCampaignEvidence(
+        campaignIds,
+        reply,
+        mailbox,
+        leadEmail,
+        items,
+        trustedParentId,
+      );
+      const next = response.next_starting_after?.trim() || undefined;
+      if (!next) return true;
+      if (seenCursors.has(next)) return false;
+      seenCursors.add(next);
+      cursor = next;
     }
-  }
+    return false;
+  };
 
   // A parent from an early page is not enough to correct ownership when later
-  // pages may contain an equally strong parent for another project.
+  // pages may contain an equally strong parent for another project. In
+  // particular, a short page with a cursor is not a complete result.
+  const searchComplete = await consumeSurface({ search: identity });
   if (!searchComplete) return { evidence, complete: false };
 
   // Instantly's generic search can omit sent rows even when it returned one
   // apparently strong outbound. Cross-owner routing therefore also verifies
-  // the dedicated sent surface. If search pagination consumed the whole call
-  // budget, fail closed instead of trusting a potentially polluted copy.
-  if (calls >= MAX_OWNERSHIP_EVIDENCE_CALLS) {
-    return { evidence, complete: false };
-  }
-  const sent = await instantly.listEmails(
-    {
-      lead: identity,
-      email_type: 'sent',
-      mode: 'emode_all',
-      limit: 100,
-    },
-    { accountId },
-  );
-  items.push(...(sent.items ?? []));
-  evidence = collectCampaignEvidence(
-    campaignIds,
-    reply,
-    mailbox,
-    leadEmail,
-    items,
-    trustedParentId,
-  );
-  return {
-    evidence,
-    complete: !sent.next_starting_after?.trim(),
-  };
+  // the dedicated lead-filtered sent surface, with an independent page budget
+  // so the terminal search page cannot starve this mandatory verification.
+  const sentComplete = await consumeSurface({ lead: identity, email_type: 'sent' });
+  return { evidence, complete: sentComplete };
 }
 
 function campaignParentMatches(
