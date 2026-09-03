@@ -4,9 +4,7 @@
 # Что скрипт делает сейчас:
 # 1) Снимает снимок активных задач (running) по legacy-таблицам очередей.
 # 2) Переводит running -> pending, чтобы задачи возобновились после рестарта.
-# 3) Ставит на паузу in-memory кампании TG Outreach и ставит им job на
-#    автостарт после деплоя.
-# 4) Отдельно и мягко тушит worker-autopipeline (его 20-минутный grace нужен,
+# 3) Отдельно и мягко тушит worker-autopipeline (его 20-минутный grace нужен,
 #    чтобы прогон дописал свой префикс доменов).
 #
 # Чего скрипт намеренно НЕ делает:
@@ -16,8 +14,9 @@
 #   разъехаться с docker-compose.prod.yml;
 # - не трогает таблицы воркеров, переехавших на общий жизненный цикл задач
 #   (app/src/lib/jobs/lifecycle.ts): base_constructor_jobs, tg_parser_jobs,
-#   search_parser_jobs, yandex_maps_jobs, parser_jobs (HH/ATS/ENG-найм) и
-#   ai_campaigns с ai_caller_jobs (обзвон).
+#   search_parser_jobs, yandex_maps_jobs, parser_jobs (HH/ATS/ENG-найм),
+#   ai_campaigns с ai_caller_jobs (обзвон) и tg_outreach_campaigns с
+#   tg_outreach_warmup_runs и tg_outreach_jobs (TG-аутрич и прогрев).
 #   Очередь sales_chat_sync_runs в списке ниже не значилась
 #   и не значится — искать, откуда её убрали, не нужно; воркер этой очереди
 #   просто добавлен в is_lifecycle_managed_worker, чтобы деплой одного его не
@@ -67,6 +66,7 @@ is_lifecycle_managed_worker() {
     worker-hh) return 0 ;;
     worker-eng-hiring) return 0 ;;
     worker-aicaller) return 0 ;;
+    worker-tg-outreach) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -176,7 +176,10 @@ if should_pause_legacy_queues && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
     # строку у ещё живого исполнителя.
     "email_validation_jobs"
     "lead_import_jobs"
-    "tg_outreach_jobs"
+    # tg_outreach_jobs убран: очередь стала каналом мгновенных команд оператора
+    # («старт», «стоп», «обновить переписки»), а сама кампания живёт своей
+    # строкой под арендой. Команда «старт» больше не висит в running всё время
+    # работы кампании — сбрасывать здесь нечего.
     # ai_caller_jobs убран: очередь стала каналом мгновенных команд оператора
     # («старт», «стоп»), которые закрываются тем же запросом, что их берёт.
     # Строки в `running` в ней больше не задерживаются, а сама кампания живёт
@@ -226,52 +229,16 @@ if should_pause_legacy_queues && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
     fi
   done
 
-  # TG Outreach campaign loops run in-memory, so we explicitly:
-  # running campaign -> paused, then queue "start" job for auto-resume.
-  tg_rows="$(fetch_running_rows "tg_outreach_campaigns" "id,user_id" 2>/dev/null || true)"
-  tg_count="$(printf '%s' "$tg_rows" | count_json_rows)"
-  if [ "$tg_count" -gt 0 ]; then
-    echo "[drain] tg_outreach_campaigns: running=${tg_count}; scheduling auto-resume"
-    tg_pause_code="$(patch_running_to_pending "tg_outreach_campaigns" "{\"status\":\"paused\",\"updated_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}")"
-    if [[ "$tg_pause_code" =~ ^(200|204)$ ]]; then
-      echo "[drain] tg_outreach_campaigns: running -> paused"
-    fi
-
-    export TG_RUNNING_ROWS="$tg_rows"
-    python3 - <<'PY' > /tmp/portal_tg_resume_jobs.json
-import json, os, sys
-raw = os.environ.get("TG_RUNNING_ROWS", "")
-out = []
-try:
-    data = json.loads(raw) if raw else []
-except Exception:
-    data = []
-for row in data:
-    if not isinstance(row, dict):
-        continue
-    cid = str(row.get("id", "")).strip()
-    uid = str(row.get("user_id", "")).strip()
-    if cid and uid:
-        out.append({"campaign_id": cid, "user_id": uid, "action": "start", "status": "pending"})
-print(json.dumps(out, ensure_ascii=True))
-PY
-
-    if [ -s /tmp/portal_tg_resume_jobs.json ]; then
-      resume_payload="$(cat /tmp/portal_tg_resume_jobs.json)"
-      if [ "${resume_payload}" != "[]" ]; then
-        curl -sS -X POST \
-          "${SUPABASE_URL}/rest/v1/tg_outreach_jobs" \
-          "${auth_headers[@]}" \
-          -H "Content-Type: application/json" \
-          -H "Prefer: return=minimal" \
-          -d "${resume_payload}" >/dev/null 2>&1 || true
-        echo "[drain] tg_outreach_jobs: queued start jobs for paused campaigns"
-      fi
-    fi
-    rm -f /tmp/portal_tg_resume_jobs.json || true
-  else
-    echo "[drain] tg_outreach_campaigns: running=0"
-  fi
+  # Кампании TG-аутрича (tg_outreach_campaigns) здесь БОЛЬШЕ НЕ ТРОГАЮТСЯ.
+  #
+  # Раньше на этом месте был блок «running -> paused + положить команду старт»:
+  # цикл кампании жил в памяти процесса, и без него кампания после деплоя просто
+  # не возобновлялась. Воркер portal-worker-tg-outreach переехал на общий
+  # жизненный цикл задач — строка кампании арендуется, по SIGTERM воркер сначала
+  # закрывает клиенты Telegram, потом отпускает аренду, и кампанию подхватывает
+  # следующая реплика с чекпойнта. Пауза здесь теперь была бы вредна дважды: она
+  # останавливала бы кампанию, которую никто не просил останавливать, а команда
+  # «старт» ещё и воскрешала бы ту, которую оператор остановил руками.
 
   # Кампании обзвона (ai_campaigns) здесь БОЛЬШЕ НЕ ТРОГАЮТСЯ.
   #

@@ -99,14 +99,29 @@ export async function downloadSessionToTemp(db: SupabaseClient, storagePath: str
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise(r => setTimeout(r, ms));
+  if (signal.aborted) return Promise.resolve();
+  // Пауза обязана рваться сигналом, а не дожидаться конца куска: между
+  // аккаунтами кампания спит до десяти минут, и без этого остановка процесса
+  // упиралась бы в шаг опроса. Слушателя снимаем всегда — за сутки работы их
+  // иначе накапливаются тысячи на одном сигнале.
+  return new Promise((resolve) => {
+    const done = () => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
 }
 
-async function interruptibleSleep(ms: number, shouldStop: () => boolean, chunkMs = 2000): Promise<void> {
+async function interruptibleSleep(
+  ms: number,
+  shouldStop: () => boolean,
+  chunkMs = 2000,
+  signal?: AbortSignal,
+): Promise<void> {
   const end = Date.now() + ms;
   while (Date.now() < end && !shouldStop()) {
-    await sleep(Math.min(chunkMs, end - Date.now()));
+    await sleep(Math.min(chunkMs, end - Date.now()), signal);
   }
 }
 
@@ -1418,6 +1433,48 @@ async function backfillEmptyDialogs(
 
 export type TraceContext = { requestId: string };
 
+/**
+ * Что кампания сохраняет между исполнителями.
+ *
+ * Круг по всем аккаунтам идёт часами: пауза между аккаунтами доходит до десяти
+ * минут, а сам аккаунт занят минутами. Без чекпойнта перехват строки означал бы
+ * начать круг с начала — то есть заново пройти уже отработанные аккаунты и
+ * снова выждать их паузы. С ним перехват стоит одной паузы.
+ *
+ * Счётчики здесь — те самые, что раньше жили ТОЛЬКО в памяти процесса и
+ * обнулялись при каждом рестарте. Их смысл в накоплении: аккаунт уводится на
+ * паузу за ДВА пустых круга подряд, а на шестичасовую — за ПЯТЬ сбоев загрузки
+ * диалогов. Пока они терялись при передаче, «подряд» на практике не наступало
+ * никогда, если воркер перезапускался чаще, чем кампания успевала накопить.
+ */
+export interface CampaignCheckpoint {
+  /** Номер круга по всем аккаунтам с начала прогона. Для журнала и диагностики. */
+  round: number;
+  /** Последний ПОЛНОСТЬЮ отработанный аккаунт — с него не начинаем. */
+  lastAccountId: string | null;
+  /** accountId -> сколько кругов подряд аккаунт не резолвнул ни одного ника. */
+  resolveBlockedRounds: Record<string, number>;
+  /** accountId -> сколько раз подряд не смог загрузить диалоги. */
+  pagingFailureCounts: Record<string, number>;
+  /** accountId -> сколько раз подряд не прочитался .session-файл. */
+  offsetErrorCounts: Record<string, number>;
+}
+
+/**
+ * Связь с раннером аренды (app/src/lib/jobs/lifecycle.ts).
+ *
+ * Необязательна: цикл остаётся вызываемым и без неё (тесты, ручной прогон), но
+ * тогда у него нет ни ограждения записей жетоном, ни чекпойнта.
+ */
+export interface CampaignRunContext {
+  /** Взводится при остановке процесса и при потере аренды. */
+  signal?: AbortSignal;
+  /** Жетон владения: им ограждается КАЖДАЯ запись в строку кампании. */
+  runToken?: string;
+  checkpoint?: CampaignCheckpoint | null;
+  saveCheckpoint?: (data: CampaignCheckpoint) => Promise<boolean>;
+}
+
 export async function runCampaignLoop(
   campaignId: string,
   db: SupabaseClient,
@@ -1425,13 +1482,41 @@ export async function runCampaignLoop(
   traceContext?: TraceContext,
   onProgress?: () => void,
   control?: LoopControl,
+  runtime?: CampaignRunContext,
 ) {
-  // Called from every loop hot-spot so the worker-level watchdog can detect
-  // a stuck campaign (e.g. gramJS recvLoop blocked, infinite proxy reconnect)
-  // and force-exit the process. Without this, the heartbeat setInterval keeps
-  // the container "healthy" while the campaign is actually frozen (May 10
-  // incident: stuck 35 hours after a single "Пауза 211 сек" log line).
+  // Отметка «цикл продвинулся» из всех горячих точек. Раньше её читал
+  // сторожевой таймер воркера, теперь — колонка прогресса `progress_at` строки
+  // кампании: пока она двигается, аренда продлевается, а если встала дольше
+  // порога, библиотека прерывает работу и отдаёт кампанию соседу. Точки те же
+  // самые, изменился только адресат.
   const tick = () => { try { onProgress?.(); } catch { /* */ } };
+  const signal = runtime?.signal;
+  const runToken = runtime?.runToken;
+
+  /**
+   * Любая запись в строку кампании — только под жетоном.
+   *
+   * Между двумя нашими записями строку мог перехватить сосед (истекла аренда,
+   * оператор нажал «Стоп» и снял владение). Незаграждённая запись тогда
+   * затирала бы решение нового владельца или воскрешала бы кампанию, которую
+   * только что остановили. Жетона нет — значит, цикл запущен без раннера, и
+   * ограждать нечем.
+   */
+  const campaignUpdate = (patch: Record<string, unknown>) => {
+    const q = db.from('tg_outreach_campaigns').update(patch).eq('id', campaignId);
+    return runToken ? q.eq('run_token', runToken) : q;
+  };
+  /**
+   * Терминальная запись снимает и владение: аренда, жетон и исполнитель.
+   *
+   * Библиотека делает то же самое в своей терминальной записи (clearOwnership в
+   * lib/jobs/lifecycle.ts), но при manageTerminalStatus=false итог пишет тело —
+   * значит, и осадок владения убирать телу. Иначе закрытая кампания навсегда
+   * осталась бы с непустым lease_until, и дежурный запрос «кто держит аренду»
+   * показывал бы её работающей.
+   */
+  const campaignTerminal = (patch: Record<string, unknown>) =>
+    campaignUpdate({ ...patch, lease_until: null, run_token: null, worker_id: null });
   const logToDb = async (level: 'info' | 'warning' | 'error', msg: string) => {
     console.log(`[tg-outreach][${campaignId.slice(0, 8)}][${level}] ${msg}`);
     await writeLog(db, campaignId, level, msg, traceContext);
@@ -1456,7 +1541,7 @@ export async function runCampaignLoop(
   if (!process.env.OPENROUTER_TG_OUTREACH_API_KEY) {
     log('error', 'Не задан ключ OpenRouter (OPENROUTER_TG_OUTREACH_API_KEY в .env) — без него GPT не сможет отвечать. Кампания переведена в статус "ошибка".');
     // Hard config error — leave in error so we don't loop on it forever
-    const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'error' }).eq('id', campaignId);
+    const { error: stErr } = await campaignTerminal({ status: 'error' });
     if (stErr) log('error', `Не смог записать статус "ошибка" в базу данных — ${stErr.message}`);
     return;
   }
@@ -1468,10 +1553,18 @@ export async function runCampaignLoop(
     .eq('is_active', true);
 
   if (!accounts?.length) {
-    log('error', 'Нет активных аккаунтов в кампании — поставил на паузу. Как только включите хотя бы один аккаунт, кампания возобновится автоматически.');
-    // Use paused (not error) so resumeRunningCampaigns retries us automatically
-    // once accounts become active again, instead of leaving the campaign stuck.
-    const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
+    /*
+     * Пауза — и она теперь окончательная, до кнопки оператора.
+     *
+     * Раньше эту кампанию каждые пять минут поднимал авто-резюм: он переводил
+     * ВСЕ paused обратно в running и подкладывал команду «старт». Вместе с
+     * авто-резюмом ушло и это: механизм воскрешал и те кампании, которые
+     * оператор остановил руками, а на второй реплике был просто неверен.
+     * Строку с `paused` захват аренды не берёт, поэтому кампания честно ждёт
+     * человека — и в интерфейсе у неё есть кнопка «Запустить».
+     */
+    log('error', 'Нет активных аккаунтов в кампании — поставил на паузу. Включите хотя бы один аккаунт и запустите кампанию снова.');
+    const { error: stErr } = await campaignTerminal({ status: 'paused' });
     if (stErr) log('error', `Не смог записать статус "на паузе" в базу данных — ${stErr.message}`);
     return;
   }
@@ -1520,13 +1613,13 @@ export async function runCampaignLoop(
 
   if (clients.length === 0) {
     log('warning', 'Ни один аккаунт не подключился — пробую ещё раз через 60 секунд');
-    await interruptibleSleep(60_000, shouldStop);
+    await interruptibleSleep(60_000, shouldStop, 2000, signal);
     if (shouldStop()) return;
     const retryClients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db);
     log('info', `Повторная попытка: подключились ${retryClients.length} из ${accounts.length} аккаунтов`);
     if (retryClients.length === 0) {
       log('error', 'Повторная попытка тоже провалилась — кампания на паузе. Проверьте прокси и сессии аккаунтов, затем запустите снова.');
-      const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
+      const { error: stErr } = await campaignTerminal({ status: 'paused' });
       if (stErr) log('error', `Не смог записать статус "на паузе" в базу данных — ${stErr.message}`);
       return;
     }
@@ -1534,7 +1627,11 @@ export async function runCampaignLoop(
   }
 
   {
-    const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'running', updated_at: new Date().toISOString() }).eq('id', campaignId);
+    // Под жетоном, как и всё остальное. Строку кампании раннер уже захватил в
+    // статусе `running` — эта запись только освежает отметку времени, но без
+    // ограждения она воскрешала бы кампанию, которую оператор остановил, пока
+    // мы подключали аккаунты.
+    const { error: stErr } = await campaignUpdate({ status: 'running', updated_at: new Date().toISOString() });
     if (stErr) log('error', `Не смог записать статус "запущена" в базу данных — ${stErr.message}`);
   }
 
@@ -1564,14 +1661,39 @@ export async function runCampaignLoop(
     log('warning', `Опрос очереди передач остановился с ошибкой — ${err instanceof Error ? err.message : String(err)}. Передачи уйдут после перезапуска кампании.`);
   });
 
-  const offsetErrorCounts = new Map<string, number>();
+  /*
+   * Счётчики поднимаем из чекпойнта, а не с нуля.
+   *
+   * Все три считают «сколько раз ПОДРЯД», и от этого зависят решения об
+   * аккаунте: два пустых круга — сутки паузы, пять сбоев загрузки диалогов —
+   * шесть часов. Пока счётчики жили только в памяти, каждый деплой обнулял их,
+   * и «подряд» не набиралось: аккаунт с мёртвым резолвом крутился неделю и
+   * рассылал ноль (ATOL-1, 02.09.2026), а лечение так и не наступало.
+   */
+  const cp = runtime?.checkpoint ?? null;
+  const toMap = (rec: Record<string, number> | undefined) => new Map(Object.entries(rec ?? {}));
+  const fromMap = (map: Map<string, number>) => Object.fromEntries(map);
+  let round = cp?.round ?? 0;
+  /**
+   * С кого НЕ начинать первый круг после перехвата.
+   *
+   * Обычно порядок и так решает `last_cycle_at` (orderByStaleness): только что
+   * отработавший аккаунт оказывается последним. Но отметка пишется отдельным
+   * запросом, и он может не пройти — код это прямо допускает («в худшем случае
+   * аккаунт возьмут дважды подряд»). Под арендой цена такой осечки выше:
+   * перехват заново прогонял бы тот же аккаунт с его паузами. Чекпойнт — второй
+   * ключ к тому же замку, и стоит он один раз, на первом круге.
+   */
+  let resumeAfterAccountId = cp?.lastAccountId ?? null;
+
+  const offsetErrorCounts = toMap(cp?.offsetErrorCounts);
   // Separate counter for the gramJS internal pagination bug — `getDialogs`
   // throws RangeError ("offset out of range") on accounts with thousands of
   // dialogs. Production data shows the inner retry with smaller limit never
   // succeeds (1:1 ratio of retry attempts to outer-catch failures over 7d),
   // so we no longer retry. Instead we track consecutive failures per account
   // and put chronic offenders on a 6h cooldown so the operator can act.
-  const pagingFailureCounts = new Map<string, number>();
+  const pagingFailureCounts = toMap(cp?.pagingFailureCounts);
 
   /**
    * Сколько кругов подряд аккаунт не резолвнул ни одного ника из порции.
@@ -1586,7 +1708,7 @@ export async function runCampaignLoop(
    * неделю ноль отправленных первых касаний при 205 отложенных, тогда как
    * остальные восемнадцать рассылали с той же очереди.
    */
-  const resolveBlockedRounds = new Map<string, number>();
+  const resolveBlockedRounds = toMap(cp?.resolveBlockedRounds);
 
   /**
    * Контакты, уже разобранные кем-то в текущем проходе по аккаунтам.
@@ -1615,7 +1737,7 @@ export async function runCampaignLoop(
           log('info', 'Тихий час начался — пауза по расписанию. Буду проверять каждые 60 секунд, не пора ли возобновлять.');
           inSleepPeriod = true;
         }
-        await interruptibleSleep(60_000, shouldStop);
+        await interruptibleSleep(60_000, shouldStop, 2000, signal);
         continue;
       } else if (inSleepPeriod) {
         log('info', 'Тихий час закончился — возобновляю рассылку.');
@@ -1633,9 +1755,27 @@ export async function runCampaignLoop(
 
       let tlSchemaErrorCount = 0;
       claimedContacts = new Set<string>();
-      log('info', `Начинаю обход ${clients.length} аккаунтов`);
+      round += 1;
 
-      for (const entry of clients) {
+      /*
+       * Первый круг после перехвата начинаем со следующего аккаунта.
+       *
+       * Порядок при этом не ломается: список тот же, просто прокручен так,
+       * чтобы уже отработавший аккаунт оказался в конце. Обойдём мы всех — но
+       * не заплатим второй раз паузой того, кто только что отработал.
+       */
+      let roundClients = clients;
+      if (resumeAfterAccountId) {
+        const at = clients.findIndex((c) => c.account.id === resumeAfterAccountId);
+        if (at >= 0 && at + 1 < clients.length) {
+          roundClients = [...clients.slice(at + 1), ...clients.slice(0, at + 1)];
+          log('info', `Продолжаю круг ${round} со следующего аккаунта после ${clients[at]!.account.session_name} — его уже отработал прошлый исполнитель.`);
+        }
+        resumeAfterAccountId = null;
+      }
+      log('info', `Начинаю обход ${roundClients.length} аккаунтов (круг ${round})`);
+
+      for (const entry of roundClients) {
         const { account } = entry;
         // `let`, not destructured const: if getDialogs wedges we rebuild the
         // client mid-iteration and must point every downstream call (handleChat,
@@ -2235,16 +2375,39 @@ export async function runCampaignLoop(
           log('warning', `Аккаунт ${account.session_name}: не смог отметить прохождение круга — ${cycleErr.message}. Порядок обхода может сбиться.`);
         }
 
+        /*
+         * Чекпойнт — здесь же, в единственном месте, где известно всё сразу:
+         * аккаунт отработан целиком, счётчики за него уже обновлены.
+         *
+         * `false` означает не «не записалось», а «строка больше не наша»:
+         * библиотека к этому моменту уже взвела ctx.signal, и продолжать круг
+         * — значит писать в Telegram за чужой счёт. Выходим сразу, не дожидаясь
+         * паузы.
+         */
+        if (runtime?.saveCheckpoint) {
+          const kept = await runtime.saveCheckpoint({
+            round,
+            lastAccountId: account.id,
+            resolveBlockedRounds: fromMap(resolveBlockedRounds),
+            pagingFailureCounts: fromMap(pagingFailureCounts),
+            offsetErrorCounts: fromMap(offsetErrorCounts),
+          });
+          if (!kept) {
+            log('warning', 'Кампанию перехватил другой исполнитель — выхожу из круга.');
+            break;
+          }
+        }
+
         const accountDelay = randomRange(tg.account_loop_delay_range) * 1000;
         log('info', `Пауза ${Math.round(accountDelay / 1000)} секунд перед переходом к следующему аккаунту (анти-флуд)`);
-        await interruptibleSleep(accountDelay, shouldStop);
+        await interruptibleSleep(accountDelay, shouldStop, 2000, signal);
         tick();
       }
 
       if (tlSchemaErrorCount > 0 && tlSchemaErrorCount >= clients.length) {
         const tlBackoff = 300_000;
         log('warning', `Все ${tlSchemaErrorCount} аккаунтов получили ошибку устаревшего протокола Telegram. Делаю большую паузу ${tlBackoff / 1000} секунд. Чтобы починить — обновите пакет 'telegram' командой 'npm update telegram' и пересоберите воркер.`);
-        await interruptibleSleep(tlBackoff, shouldStop);
+        await interruptibleSleep(tlBackoff, shouldStop, 2000, signal);
       }
 
       // cycle_delay_range появилось в TelegramSettings (миграция
@@ -2256,7 +2419,7 @@ export async function runCampaignLoop(
         : [300, 600];
       const cycleDelay = randomRange(cycleDelayRange) * 1000;
       log('info', `Круг по всем аккаунтам завершён. Пауза ${Math.round(cycleDelay / 1000)} секунд перед следующим кругом (рандом ${cycleDelayRange[0]}-${cycleDelayRange[1]}с).`);
-      await interruptibleSleep(cycleDelay, shouldStop);
+      await interruptibleSleep(cycleDelay, shouldStop, 2000, signal);
 
       const { data: fresh, error: freshErr } = await db
         .from('tg_outreach_campaigns')
@@ -2278,19 +2441,26 @@ export async function runCampaignLoop(
     // отправка ограничена своим таймаутом. Дождаться его надо: иначе он
     // допишет статус задачи уже после строки «Кампания остановлена».
     await forwardPoller;
-    // On worker shutdown we must preserve campaign status (running/paused), otherwise
-    // auto-resume on the next worker start will skip it.
-    // Explicit stop is handled by worker handler which sets status=stopped before signaling stop.
+    /*
+     * Итог пишем только тогда, когда вышли САМИ (кончилась работа, статус
+     * сменили снаружи, кампанию доиграли).
+     *
+     * Остановка процесса или потеря аренды — не итог кампании: строка либо
+     * уже не наша, либо отдаётся соседу, и решение о ней принимает он.
+     * Написать здесь «остановлена» значило бы погасить кампанию деплоем —
+     * ровно тем, от чего переезд на аренду и избавляет.
+     *
+     * `neq('status','paused')` на месте: цикл мог сам поставить паузу выше
+     * (нет аккаунтов, никто не подключился), и затирать её нельзя.
+     */
     if (!shouldStop()) {
-      const { error: stErr } = await db.from('tg_outreach_campaigns')
-        .update({ status: 'stopped', updated_at: new Date().toISOString() })
-        .eq('id', campaignId)
+      const { error: stErr } = await campaignTerminal({ status: 'stopped', updated_at: new Date().toISOString() })
         .neq('status', 'paused');
       if (stErr) {
         log('error', `Не смог пометить кампанию как "остановлена" в базе данных при завершении — ${stErr.message}`);
       }
     } else {
-      log('info', 'Воркер останавливается — оставляю кампании текущий статус, чтобы при следующем запуске она автоматически продолжила работу.');
+      log('info', 'Останавливаюсь — статус кампании не трогаю: её продолжит следующий владелец аренды.');
     }
     log('info', 'Кампания остановлена.');
   }
