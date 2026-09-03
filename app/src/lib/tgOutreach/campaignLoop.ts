@@ -1653,19 +1653,24 @@ export async function runCampaignLoop(
    * закрыв то, что успело подключиться.
    */
   try {
-    clients = await buildClients(cycleOrder, proxies ?? [], log, downloadSessionFile, db, { sink: clients, signal });
+    clients = await buildClients(cycleOrder, proxies ?? [], log, downloadSessionFile, db, { sink: clients, signal, onProgress: tick });
     log('info', `Подключились ${clients.length} из ${accounts.length} аккаунтов${clients.length < accounts.length ? ` (остальные с ошибками подключения, смотри строки выше)` : ''}`);
 
     if (shouldStop()) { await disconnectAll(clients); return; }
 
     if (clients.length === 0) {
       log('warning', 'Ни один аккаунт не подключился — пробую ещё раз через 60 секунд');
+      tick();
       await interruptibleSleep(60_000, shouldStop, 2000, signal);
+      // Минута сна сама по себе порога не выбирает, но следующий проход — это
+      // ещё один полный обход аккаунтов, и отсчёт для него должен начинаться
+      // отсюда, а не с момента захвата строки.
+      tick();
       if (shouldStop()) return;
       // Приёмник повторной попытки ставим в `clients` ДО вызова — по той же
       // причине, что и выше: ручка обязана видеть то, что подключается сейчас.
       clients = [];
-      const retryClients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db, { sink: clients, signal });
+      const retryClients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db, { sink: clients, signal, onProgress: tick });
       log('info', `Повторная попытка: подключились ${retryClients.length} из ${accounts.length} аккаунтов`);
       if (retryClients.length === 0) {
         log('error', 'Повторная попытка тоже провалилась — кампания на паузе. Проверьте прокси и сессии аккаунтов, затем запустите снова.');

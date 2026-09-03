@@ -407,6 +407,10 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
     abort: AbortController;
     promise: Promise<void>;
     stopHeartbeat: () => void;
+    /** Когда задачу прервали. null — работает штатно. */
+    abortedAt: number | null;
+    /** Когда последний раз жаловались, что тело не завершилось. */
+    warnedAt: number;
   };
   const owned = new Map<string, Owned>();
   let stopping = false;
@@ -829,7 +833,13 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
 
     // Владение регистрируем ДО запуска тела: и сам run (shouldStop,
     // saveCheckpoint), и finally с owned.delete обязаны видеть готовую карту.
-    const entry: Owned = { runToken, abort, promise: Promise.resolve(), stopHeartbeat };
+    const entry: Owned = {
+      runToken, abort, promise: Promise.resolve(), stopHeartbeat, abortedAt: null, warnedAt: 0,
+    };
+    // Момент прерывания запоминаем здесь, а не в каждой точке abort(): их
+    // четыре (остановка процесса, потеря аренды, простой, отказ чекпойнта), и
+    // забыть одну — значит потерять единственный признак зависшего тела.
+    abort.signal.addEventListener('abort', () => { entry.abortedAt = now(); }, { once: true });
     owned.set(job.id, entry);
 
     // Тело задачи стартует отдельной микротаской: pollOnce обязан вернуть
@@ -894,9 +904,51 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
     });
   }
 
+  /**
+   * Сколько ждать после прерывания, прежде чем считать тело зависшим.
+   *
+   * Прерванное тело обязано выйти быстро: паузы прерываемые, внешние ресурсы
+   * закрывает beforeRelease. Две аренды — заведомо больше любого честного
+   * выхода и заведомо меньше, чем время, за которое человек заметит проблему
+   * сам.
+   */
+  const STUCK_BODY_AFTER_MS = Math.max(2 * leaseMs, 60_000);
+  /** Как часто напоминать об одном и том же зависшем теле. */
+  const STUCK_BODY_WARN_EVERY_MS = 5 * 60_000;
+
+  /**
+   * Сказать вслух о теле, которое не завершилось после прерывания.
+   *
+   * Пока такое тело живо, его id исключён из захвата (excludeOwned) — то есть
+   * строка для этого раннера невидима, и в журнале об этом нет ни слова.
+   * Раньше о пропуске сообщала проверка после захвата, но она стоила лишнего
+   * CAS и упиралась в одну и ту же строку каждый опрос; отказавшись от неё,
+   * нельзя отказываться и от симптома. Жалуемся именно на зависшее тело, а не
+   * на сам факт исключения: исключение — это нормальная работа (у здорового
+   * раннера всегда есть свои задачи), а вот прерванное и не завершившееся тело
+   * — всегда неисправность.
+   */
+  function warnStuckBodies(): void {
+    if (halting()) return;
+    const t = now();
+    for (const [id, o] of owned) {
+      if (o.abortedAt == null) continue;
+      const stuckMs = t - o.abortedAt;
+      if (stuckMs < STUCK_BODY_AFTER_MS) continue;
+      if (t - o.warnedAt < STUCK_BODY_WARN_EVERY_MS) continue;
+      o.warnedAt = t;
+      log(
+        'warn',
+        `[${table}] job ${id}: тело не завершилось через ${Math.round(stuckMs / 1000)}с после прерывания — ` +
+          'строка не берётся этим исполнителем, пока оно живо. Если это повторяется, воркер нужно перезапустить.',
+      );
+    }
+  }
+
   return {
     async pollOnce() {
       if (halting()) return false;
+      warnStuckBodies();
       if (owned.size >= concurrency) {
         await sleep(500);
         return true;

@@ -275,6 +275,29 @@ function closeCampaignClients(campaignId: string): Promise<void> {
 }
 
 /**
+ * Потолок на закрытие клиентов в обработчике команды «стоп».
+ *
+ * Закрытие идёт последовательно по клиентам (disconnectAll), и на кампании в
+ * три десятка аккаунтов повисший через прокси сокет стоит доли секунды каждый —
+ * то есть в худшем случае десяток секунд. Обычно это доли секунды на всё.
+ * Пятнадцать — заведомо больше худшего случая и всё ещё конечное число: команда
+ * оператора идёт внутри опроса, и неограниченное ожидание здесь снова заперло
+ * бы голову очереди, из которой мы только что убрали минутное ожидание тела.
+ */
+const STOP_CLOSE_CAP_MS = 15_000;
+
+/** Дождаться с потолком. true — успели, false — потолок вышел. */
+async function withCap(work: Promise<unknown>, capMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), capMs); });
+  try {
+    return await Promise.race([work.then(() => true), expired]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * Дождаться, пока прошлое тело кампании закончит, помогая ему закончить.
  *
  * Два движения — те же, что делал сторожевой таймер: кооперативная просьба
@@ -290,15 +313,7 @@ async function handOverCampaign(campaignId: string, previous: Promise<void>): Pr
     log('error', `Не смог попросить прошлый прогон ${campaignId} остановиться: ${err instanceof Error ? err.message : String(err)}`);
   }
   void closeCampaignClients(campaignId);
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const expired = new Promise<false>((resolve) => {
-    timer = setTimeout(() => resolve(false), CAMPAIGN_BODY_HANDOVER_MS);
-  });
-  try {
-    return await Promise.race([previous.then(() => true), expired]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  return withCap(previous, CAMPAIGN_BODY_HANDOVER_MS);
 }
 
 /**
@@ -929,7 +944,24 @@ async function handleStopJob(job: { id: string; campaign_id: string }) {
    * проверка живого тела в самом раннере (второй запуск не начнётся, пока
    * прошлый цикл жив) и такая же проверка в догрузке переписок.
    */
-  await closeCampaignClients(campaignId);
+  const closed = await withCap(closeCampaignClients(campaignId), STOP_CLOSE_CAP_MS);
+  if (!closed) {
+    /*
+     * Потолок вышел — команду всё равно закрываем, но говорим об этом.
+     *
+     * Что происходит дальше: закрытие продолжается в фоне (промис живёт, и
+     * следующий, кто его позовёт, дождётся того же), а от второго набора
+     * сессий защищает не оно, а проверка живого тела — ни новый прогон
+     * кампании, ни догрузка переписок не начнутся, пока цикл не вышел. То есть
+     * цена превышения — задержка перед следующим запуском, а не открытые
+     * сессии в чужих руках.
+     */
+    log(
+      'warn',
+      `Кампания ${campaignId}: клиенты Telegram закрываются дольше ${Math.round(STOP_CLOSE_CAP_MS / 1000)}с — не жду дальше, ` +
+        'чтобы не держать очередь команд. Закрытие продолжается; запуск до выхода цикла всё равно не начнётся.',
+    );
+  }
   log('info', `Stop recorded for campaign ${campaignId}`);
 
   await db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
