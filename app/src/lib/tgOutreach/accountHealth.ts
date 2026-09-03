@@ -371,3 +371,78 @@ export function countSendingAccounts(
   }
   return sending;
 }
+
+
+/**
+ * Кого отключать кнопкой «Выключить неживые».
+ *
+ * Кнопка нужна не для красоты: партия из пятнадцати замороженных номеров
+ * (ATOL-1, 30.08.2026) неделю числилась «живой» — они подключались, проходили
+ * круг, но не могли найти в Telegram ни одного собеседника. Со стороны экрана
+ * такой аккаунт неотличим от исправного: зелёное «жив», рабочий прокси,
+ * галочка «Активен». Разница видна только в колонке рассылки, и искать их
+ * там глазами среди сорока строк оператор не станет — а каждый их заход в
+ * круг стоил трёх живых контактов из базы.
+ *
+ * Два признака, и оба — про рассылку, а не про подключение:
+ *   - диагноз «сам не заработает» (мёртвая сессия, бан, нет прокси, прокси не
+ *     отвечает) — это `tone: 'bad'`;
+ *   - молчание дольше порога, в том числе «не рассылал ни разу», если аккаунт
+ *     заведён давно.
+ *
+ * Аккаунт на паузе не трогаем: пауза пройдёт сама, и выключать номер из-за
+ * неё — значит терять его до ручного возврата.
+ */
+export interface DeadAccountRow {
+  id: string;
+  /** Как показать его оператору в подтверждении. */
+  name: string;
+  isActive: boolean;
+  /** Когда аккаунт заведён в портале — чтобы не выключать свежие. */
+  addedAt?: string | null;
+  mark: HealthMark;
+}
+
+export interface DeadAccountPick {
+  id: string;
+  name: string;
+  /** Причина словами — она же уедет в подтверждение и в лог. */
+  reason: string;
+}
+
+export function pickDeadAccounts(
+  rows: DeadAccountRow[],
+  opts: { now: number; silentDays: number },
+): DeadAccountPick[] {
+  const picks: DeadAccountPick[] = [];
+  for (const row of rows) {
+    // Выключенные пропускаем: кнопка выключает, а не «переподтверждает».
+    if (!row.isActive) continue;
+    // Пауза пройдёт сама — это не повод списывать номер.
+    if (row.mark.label === 'на паузе') continue;
+
+    if (row.mark.tone === 'bad') {
+      picks.push({ id: row.id, name: row.name, reason: row.mark.label });
+      continue;
+    }
+
+    const silent = row.mark.days;
+    if (silent !== null && silent >= opts.silentDays) {
+      picks.push({ id: row.id, name: row.name, reason: `молчит ${daysWord(silent)}` });
+      continue;
+    }
+
+    /**
+     * «Ни разу не рассылал» — самый частый вид мёртвого номера, но у только
+     * что заведённого аккаунта он выглядит так же. Разводит их дата заведения:
+     * пока аккаунт моложе порога, молчание — это норма, а не диагноз.
+     */
+    if (silent === null && row.addedAt) {
+      const ageDays = Math.floor((opts.now - new Date(row.addedAt).getTime()) / DAY_MS);
+      if (ageDays >= opts.silentDays) {
+        picks.push({ id: row.id, name: row.name, reason: `не рассылал ни разу за ${daysWord(ageDays)}` });
+      }
+    }
+  }
+  return picks;
+}

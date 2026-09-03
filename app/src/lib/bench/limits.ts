@@ -10,7 +10,7 @@ export type BenchAction = 'read' | 'create_job' | 'results' | 'stop' | 'search';
  * норма обнулялась бы в три часа ночи по Москве, посреди рабочей ночи
  * ночных парсеров.
  */
-function mskDayStartUtc(now: Date): string {
+export function mskDayStartUtc(now: Date): string {
   const msk = new Date(now.getTime() + 3 * 60 * 60 * 1000);
   const start = Date.UTC(msk.getUTCFullYear(), msk.getUTCMonth(), msk.getUTCDate());
   return new Date(start - 3 * 60 * 60 * 1000).toISOString();

@@ -30,6 +30,7 @@ import {
   ShieldCheck,
   FileSpreadsheet,
   LayoutDashboard,
+  PowerOff,
 } from 'lucide-react';
 import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import BaseComparison from '@/components/tg-outreach/BaseComparison';
@@ -70,6 +71,7 @@ import {
   describeSending,
   describeProxy,
   countSendingAccounts,
+  pickDeadAccounts,
   type AccountSendingStat,
   type HealthMark,
 } from '@/lib/tgOutreach/accountHealth';
@@ -80,6 +82,14 @@ import type { AccountCheckResult, OtherSession } from '@/lib/tgOutreach/accountC
 import type { ProxyCheckResult } from '@/lib/tgOutreach/proxyCheck';
 
 const API_BASE = '/api/tools/tg-outreach';
+/**
+ * Со скольких дней молчания аккаунт считается неживым.
+ *
+ * Трое суток — это минимум три полных круга кампании (проход по сорока
+ * аккаунтам занимает около шести часов). Меньше брать нельзя: аккаунт мог
+ * пропустить день из-за паузы или обрыва прокси, и выключать его за это рано.
+ */
+const DEAD_SILENT_DAYS = 3;
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString('ru-RU', {
@@ -2138,6 +2148,7 @@ function CampaignAccountsTab({
    * честнее мерить от момента загрузки данных, а не от момента перерисовки.
    */
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
+  const [disablingDead, setDisablingDead] = useState(false);
 
   /**
    * Момент, от которого считается здоровье аккаунтов и прокси, — один на весь
@@ -2611,6 +2622,33 @@ function CampaignAccountsTab({
     [accounts, sendingStats],
   );
 
+  /**
+   * Кого предлагает выключить кнопка «Снять неживые с рассылки».
+   *
+   * Считается тем же `describeSending`, что рисует колонку «Рассылка», —
+   * оператор видит на экране ровно те причины, по которым кнопка и выбирает.
+   */
+  const deadAccounts = useMemo(
+    () => pickDeadAccounts(
+      accounts.map((a) => ({
+        id: a.id,
+        name: a.session_name,
+        isActive: a.is_active,
+        addedAt: a.created_at,
+        mark: describeSending({
+          account: a,
+          stat: sendingStats[a.id],
+          proxy: proxies.find((p) => p.id === a.proxy_id) ?? null,
+          campaignRunning: campaignStatus === 'running',
+          firstTouchEnabled: firstTouchPerDay > 0,
+          now: healthNow,
+        }),
+      })),
+      { now: healthNow, silentDays: DEAD_SILENT_DAYS },
+    ),
+    [accounts, sendingStats, proxies, campaignStatus, firstTouchPerDay, healthNow],
+  );
+
   /** Разбивка мёртвых по причине — человеческими ярлыками, для подсказки. */
   const deadBreakdown = useMemo(
     () => Object.entries(accountStats.byStatus)
@@ -2620,6 +2658,43 @@ function CampaignAccountsTab({
     [accountStats.byStatus],
   );
 
+  /**
+   * Снять с рассылки все неживые аккаунты разом.
+   *
+   * Кого именно — считает `pickDeadAccounts` по той же колонке «Рассылка»,
+   * которую оператор видит на экране. Список с причинами показываем до
+   * действия: выключение обратимо, но сорок строк вслепую переключать нельзя.
+   */
+  const disableDeadAccounts = useCallback(async () => {
+    if (!deadAccounts.length) return;
+    const preview = deadAccounts.slice(0, 15).map((d) => `• ${d.name} — ${d.reason}`).join('\n');
+    const tail = deadAccounts.length > 15 ? `\n…и ещё ${deadAccounts.length - 15}` : '';
+    if (!confirm(
+      `Снять с рассылки аккаунтов: ${deadAccounts.length}?\n\n${preview}${tail}\n\n`
+      + 'Аккаунты останутся в кампании — их можно включить обратно галочкой «Активен».',
+    )) return;
+
+    setDisablingDead(true);
+    try {
+      const res = await authFetch(`${API_BASE}/accounts/bulk`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          campaign_id: campaignId,
+          ids: deadAccounts.map((d) => d.id),
+          is_active: false,
+        }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        alert(`Не удалось выключить: ${d?.error ?? res.status}`);
+        return;
+      }
+      await load();
+    } finally {
+      setDisablingDead(false);
+    }
+  }, [deadAccounts, campaignId, load]);
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -2627,6 +2702,24 @@ function CampaignAccountsTab({
           Аккаунты кампании <span className="text-gray-400 font-normal">({accounts.length})</span>
         </span>
         <div className="flex items-center gap-2">
+          {/* Первой кнопкой — уборка: пока в списке висят мёртвые номера, они
+              съедают время круга и контакты из базы, а искать их глазами среди
+              сорока строк никто не станет. */}
+          {deadAccounts.length > 0 && (
+            <button
+              type="button"
+              disabled={disablingDead}
+              onClick={() => { void disableDeadAccounts(); }}
+              title={`Снять с рассылки аккаунты, которые сами не заработают: ${deadAccounts
+                .slice(0, 12)
+                .map((d) => `${d.name} — ${d.reason}`)
+                .join('; ')}${deadAccounts.length > 12 ? ' и другие' : ''}. Перед выключением покажу полный список.`}
+              className="inline-flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-800 hover:bg-amber-100 transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {disablingDead ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PowerOff className="h-3.5 w-3.5" />}
+              Снять неживые ({deadAccounts.length})
+            </button>
+          )}
           <button
             type="button"
             disabled={!profileReadable || syncingIds.length > 0 || syncTargets.length === 0}

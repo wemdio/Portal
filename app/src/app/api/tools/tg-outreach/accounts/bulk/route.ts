@@ -88,6 +88,46 @@ export async function POST(req: NextRequest) {
 }
 
 /**
+ * Массовое включение/выключение аккаунтов кампании.
+ *
+ * Оператор снимает с рассылки партию мёртвых номеров: сорок строк на экране,
+ * из них полтора десятка молчат неделю, и щёлкать «Активен» по одному —
+ * гарантия того, что этого не сделает никто. Кого именно выключать, решает
+ * экран (`pickDeadAccounts`), здесь только применение по списку id.
+ *
+ * Фильтр по campaign_id обязателен: без него чужой id в списке погасил бы
+ * аккаунт соседней кампании.
+ */
+export async function PATCH(req: NextRequest) {
+  return withToolTrace(
+    { request: req, operation: 'tools.tg-outreach.accounts.bulk.patch' },
+    async () => {
+      const auth = await authenticateRequest(req.headers.get('authorization'));
+      if ('error' in auth) return auth.error;
+
+      const body = (await req.json().catch(() => null)) as
+        | { campaign_id?: string; ids?: unknown; is_active?: unknown }
+        | null;
+      const campaignId = body?.campaign_id;
+      if (!campaignId) return jsonError('campaign_id обязателен', 400);
+      const ids = Array.isArray(body?.ids) ? body.ids.filter((v): v is string => typeof v === 'string') : [];
+      if (!ids.length) return jsonError('ids должен быть непустым массивом', 400);
+      if (typeof body?.is_active !== 'boolean') return jsonError('is_active обязателен', 400);
+
+      const { data, error } = await auth.supabase
+        .from('tg_outreach_accounts')
+        .update({ is_active: body.is_active })
+        .eq('campaign_id', campaignId)
+        .in('id', ids)
+        .select('id');
+
+      if (error) return jsonError(error.message, 500);
+      return NextResponse.json({ ok: true, count: data?.length ?? 0 });
+    },
+  );
+}
+
+/**
  * Массовое удаление аккаунтов кампании.
  *
  * Удалять по одному через /accounts/[id] оператор физически не может: партия

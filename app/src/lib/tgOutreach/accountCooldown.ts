@@ -184,6 +184,16 @@ export async function parkAccountAfterLimit(args: {
   reason: string;
   /** Полный текст ошибки Telegram — по нему видно, временное это или навсегда. */
   rawError?: string;
+  /**
+   * Диагноз, выведенный нами, когда Telegram ограничение прямо не называет.
+   *
+   * Заморозка — ровно такой случай: она глушит аккаунту резолв юзернеймов, но
+   * @SpamBot про неё молчит (он отвечает только про спам-блок), и в ошибке
+   * никакого кода нет — приходит обычное «юзернейм не найден». Без этого поля
+   * такой аккаунт оставался бы в карточке «живым» и оператор искал бы причину
+   * в базе.
+   */
+  inferred?: { status: 'restricted'; detail: string };
   log: LogFn;
   now?: Date;
   /**
@@ -226,7 +236,7 @@ export async function parkAccountAfterLimit(args: {
     ? describeRestriction(restriction)
     : verdict?.kind === 'limited'
       ? 'ВРЕМЕННОЕ ограничение — Telegram закрыл аккаунту переписку с незнакомыми.'
-      : `Ограничение отправки (${args.reason}).`;
+      : args.inferred?.detail ?? `Ограничение отправки (${args.reason}).`;
   const diagnosis = `${humanRestriction} ${decision.note}`;
 
   /**
@@ -243,7 +253,7 @@ export async function parkAccountAfterLimit(args: {
     ? 'banned'
     : restriction || verdict?.kind === 'limited'
       ? 'restricted'
-      : null;
+      : args.inferred?.status ?? null;
   if (status) {
     const { error: diagErr } = await args.db
       .from('tg_outreach_accounts')
