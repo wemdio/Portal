@@ -255,18 +255,43 @@ export function looksLikeProxyFailure(errMsg: string): boolean {
     || m.includes('socket hang up');
 }
 
+/**
+ * Подключение — не мгновенное действие: аккаунты заводятся по одному, каждый со
+ * своим прокси, и на дюжине это минуты. Всё это время у вызывающего должна быть
+ * возможность закрыть уже открытое.
+ *
+ *  - `sink` — массив, который заполняется ПО ХОДУ и который вызывающий завёл
+ *    заранее. Ручку «закрыть всё» он ставит на него ДО вызова, поэтому она
+ *    работает и в середине подключения. Без этого остановка, пришедшая во время
+ *    buildClients, отчитывалась бы «клиенты закрыты» (закрывать нечего, ручки
+ *    ещё нет), аренда отпускалась бы, а процесс продолжал бы открывать сессии
+ *    одну за другой — и сосед подключил бы те же.
+ *  - `signal` — прекратить подключать остальных, когда работа уже не наша.
+ *    Проверяется между аккаунтами: каждый следующий — это новая сессия, и
+ *    открывать её, когда строку уже отдают соседу, нельзя.
+ */
+export interface BuildClientsOptions {
+  sink?: ActiveClient[];
+  signal?: AbortSignal;
+}
+
 export async function buildClients(
   accounts: OutreachAccount[],
   proxies: OutreachProxy[],
   log: (level: 'info' | 'warning' | 'error', msg: string) => void,
   downloadSessionFile?: SessionFactory,
   db?: SupabaseClient,
+  options?: BuildClientsOptions,
 ): Promise<ActiveClient[]> {
   const proxyMap = new Map(proxies.map(p => [p.id, p]));
-  const clients: ActiveClient[] = [];
+  const clients: ActiveClient[] = options?.sink ?? [];
 
   for (const acc of accounts) {
     writeHeartbeat();
+    if (options?.signal?.aborted) {
+      log('warning', `Подключение прервано: работа больше не наша. Подключено ${clients.length} из ${accounts.length} аккаунтов, остальные не трогаю.`);
+      break;
+    }
     if (!acc.is_active) continue;
     const hasSession = (acc.session_data?.trim()) || (acc.session_file_path && downloadSessionFile);
     if (!hasSession) {

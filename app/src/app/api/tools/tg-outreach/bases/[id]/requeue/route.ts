@@ -36,12 +36,18 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 
       // attempts обнуляем вместе со статусом: иначе контакт вернётся в очередь с
       // тремя попытками за спиной и сгорит на первом же сетевом сбое.
+      //
+      // Замок (claimed_by/claimed_at) снимаем тем же движением: контакт,
+      // возвращённый в очередь руками, должен быть доступен немедленно, а не
+      // через срок замка, оставшийся от аккаунта, который его когда-то брал.
       const { data, error } = await auth.supabase
         .from('tg_outreach_base_contacts')
         .update({
           status: 'pending',
           attempts: 0,
           skip_reason: null,
+          claimed_by: null,
+          claimed_at: null,
           updated_at: new Date().toISOString(),
         })
         .eq('base_id', id)

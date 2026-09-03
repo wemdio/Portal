@@ -155,19 +155,55 @@ const WATCHDOG_CHECK_INTERVAL_MS = 60_000;
 const WATCHDOG_KILL_GRACE_MS = Number(process.env.TG_OUTREACH_WATCHDOG_GRACE_MS) || 3 * 60_000;
 
 /**
- * Ручки, которыми снаружи гасят конкретную кампанию или прогрев, не трогая
- * соседние: разрыв сокетов (forceDisconnect) — единственное, чем можно разбудить
- * цикл, стоящий внутри зависшего сетевого await'а.
+ * Ручки «порвать сокеты» боевых кампаний, по campaign_id.
  *
- * Для боевых кампаний ручку теперь дёргает не сторож, а сам сигнал остановки:
- * закрыть клиенты обязаны МЫ и до того, как строку заберёт сосед, иначе он
- * подключит те же сессии и получит AUTH_KEY_DUPLICATED (см. beforeRelease).
+ * Разрыв сокетов — единственное, чем можно разбудить цикл, стоящий внутри
+ * зависшего сетевого await'а, и единственное, чем можно освободить сессии
+ * Telegram до того, как строку заберёт кто-то ещё.
+ *
+ * КАРТА ОТДЕЛЬНАЯ ОТ ПРОГРЕВА, И ЭТО ВАЖНО. Раньше она была общей, а ключом в
+ * обеих служит campaign_id — то есть прогрев и боевой цикл одной кампании
+ * писали в одну ячейку. После остановки прогрева аутрич можно запускать сразу,
+ * прогревное тело в этот момент ещё разматывается, и его finally стирал ключ
+ * уже начавшейся кампании. Хук закрытия клиентов не находил ручку и отпускал
+ * аренду с живыми сессиями — ровно то, ради чего он существует. Теперь у
+ * каждого своя карта, а удаление идёт с проверкой на тождество объекта: чужую
+ * запись не сотрёт даже опоздавший finally.
  */
 const campaignControls = new Map<string, LoopControl>();
+const warmupControls = new Map<string, LoopControl>();
 const warmupKillRequestedAt = new Map<string, number>();
 
 /** Кооперативные ручки «остановись» боевых кампаний, по campaign_id. */
 const campaignStops = new Map<string, () => void>();
+
+/**
+ * Идущее тело кампании: campaign_id -> промис, который разрешится, когда цикл
+ * действительно вышел.
+ *
+ * ЭТО ГЛАВНАЯ ЗАЩИТА ОТ ВТОРОГО ЗАПУСКА. Раньше её роль играла карта
+ * runningCampaigns: пока кампания в ней, старт по команде не проходил. С
+ * переездом на аренду карта ушла, а вместе с ней и проверка — и открылся путь
+ * в два клика. Оператор жмёт «Стоп»: статус становится `stopped`, владение
+ * снимается, но тело останавливается кооперативно и, если стоит в зависшем
+ * вызове gramJS, живёт ещё минуты. Оператор тут же жмёт «Запустить»: статус
+ * снова `running`, аренды нет, раннер берёт строку — и buildClients открывает
+ * ТЕ ЖЕ двенадцать сессий, которые держит первое тело. Это AUTH_KEY_DUPLICATED
+ * на каждый аккаунт, а три таких эпизода выключают аккаунт насовсем.
+ * «Перезапустить» делал обе половины подряд вообще без паузы.
+ */
+const campaignBodies = new Map<string, Promise<void>>();
+
+/**
+ * Сколько ждать, пока прошлое тело кампании доработает, прежде чем сдаться.
+ *
+ * Разбуженное разрывом сокетов тело выходит за секунды: паузы прерываемые,
+ * сетевые вызовы падают с ошибкой сразу. Минута — с запасом на то, чтобы цикл
+ * доразмотал текущий шаг и дописал строки в журнал. Если не уложился, новый
+ * прогон не начинаем вовсе: подключать сессии поверх живых нельзя, а строку
+ * отдадим следующему опросу — он придёт через полминуты.
+ */
+const CAMPAIGN_BODY_HANDOVER_MS = 60_000;
 
 /**
  * Идущее закрытие клиентов кампании: campaign_id -> промис.
@@ -228,9 +264,48 @@ function closeCampaignClients(campaignId: string): Promise<void> {
   return closing;
 }
 
-function forgetCampaign(campaignId: string) {
-  campaignStops.delete(campaignId);
-  campaignControls.delete(campaignId);
+/**
+ * Дождаться, пока прошлое тело кампании закончит, помогая ему закончить.
+ *
+ * Два движения — те же, что делал сторожевой таймер: кооперативная просьба
+ * остановиться и разрыв сокетов, потому что цикл может стоять внутри зависшего
+ * сетевого вызова и до проверки «просили остановиться» не дойти. Возвращает
+ * false, если за отведённое время тело так и не вышло, — тогда начинать второй
+ * прогон нельзя.
+ */
+async function handOverCampaign(campaignId: string, previous: Promise<void>): Promise<boolean> {
+  try {
+    campaignStops.get(campaignId)?.();
+  } catch (err) {
+    log('error', `Не смог попросить прошлый прогон ${campaignId} остановиться: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  void closeCampaignClients(campaignId);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), CAMPAIGN_BODY_HANDOVER_MS);
+  });
+  try {
+    return await Promise.race([previous.then(() => true), expired]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Снять регистрацию прогона, НО только если она всё ещё наша.
+ *
+ * Тождество объекта, а не факт наличия ключа: тело, размотавшееся с опозданием,
+ * не должно стирать ручки прогона, который уже начался на том же ключе. Именно
+ * так общая карта ломала защиту от второго набора клиентов.
+ */
+function forgetIfOwn<T>(map: Map<string, T>, key: string, own: T): void {
+  if (map.get(key) === own) map.delete(key);
+}
+
+function forgetCampaign(campaignId: string, own: { control: LoopControl; stop: () => void; body: Promise<void> }) {
+  forgetIfOwn(campaignStops, campaignId, own.stop);
+  forgetIfOwn(campaignControls, campaignId, own.control);
+  forgetIfOwn(campaignBodies, campaignId, own.body);
   /*
    * campaignClosing здесь НЕ чистим — намеренно.
    *
@@ -456,6 +531,30 @@ const campaignRunner = createJobRunner<
    */
   progress: { column: 'progress_at', stalledAfterMs: CAMPAIGN_STALL_MS },
   /*
+   * У кампании нет колонки под причину отказа — зато есть свой журнал, который
+   * оператор и читает на вкладке кампании.
+   *
+   * Поэтому failedPatch здесь работает РАДИ ПОБОЧНОГО ДЕЙСТВИЯ: он пишет строку
+   * в tg_outreach_logs и возвращает только отметку времени. Без него
+   * библиотечный отказ («исполнитель терял задачу N раз подряд») виден лишь в
+   * stdout контейнера — то есть человеку, у которого кампания молча покраснела,
+   * не виден нигде. Запись не ждём: терминальная запись библиотеки не должна
+   * зависеть от журнала.
+   */
+  failedPatch: (reason, campaignId) => {
+    void db
+      .from('tg_outreach_logs')
+      .insert({
+        campaign_id: campaignId,
+        level: 'error',
+        message: `Кампания остановлена механизмом задач: ${reason}. Нажмите «Запустить», чтобы продолжить.`,
+      })
+      .then(({ error }) => {
+        if (error) log('error', `Не смог записать причину отказа в журнал кампании: ${error.message}`);
+      }, () => {});
+    return { updated_at: new Date().toISOString() };
+  },
+  /*
    * Бюджет остановки: 12 секунд, из них 4 — на закрытие клиентов.
    *
    * Считаем от деплоя: он останавливает воркеры `docker compose stop
@@ -502,15 +601,56 @@ const campaignRunner = createJobRunner<
   log,
   run: async (job, ctx) => {
     const campaignId = job.id;
+
+    /*
+     * Одна кампания — один набор клиентов. Проверка ДО всего остального.
+     *
+     * Прошлое тело этой кампании может быть ещё живо: остановка кооперативная,
+     * а цикл, стоящий в зависшем вызове gramJS, выходит не сразу. Запустить
+     * второй цикл поверх него — значит открыть те же сессии MTProto и получить
+     * AUTH_KEY_DUPLICATED на каждый аккаунт (трижды — и аккаунт выключен
+     * навсегда). Поэтому: просим прошлое тело закончить, рвём его сокеты и
+     * ЖДЁМ. Дождались — работаем дальше, оно уже сняло свои ручки. Не
+     * дождались — не начинаем вовсе и отпускаем аренду: строку возьмёт
+     * следующий опрос, через полминуты, и к тому времени тело, скорее всего,
+     * выйдет.
+     */
+    const previousBody = campaignBodies.get(campaignId);
+    if (previousBody) {
+      log('warn', `Campaign ${campaignId}: предыдущий прогон ещё не завершился — прошу его закончить и жду до ${Math.round(CAMPAIGN_BODY_HANDOVER_MS / 1000)}с`);
+      const handedOver = await handOverCampaign(campaignId, previousBody);
+      if (!handedOver) {
+        log(
+          'error',
+          `Campaign ${campaignId}: предыдущий прогон не завершился за ${Math.round(CAMPAIGN_BODY_HANDOVER_MS / 1000)}с — не запускаю второй. ` +
+            'Клиенты Telegram этой кампании держит он; второй набор тех же сессий выключил бы аккаунты. Отпускаю аренду, вернусь на следующем опросе.',
+        );
+        await releaseCampaignLeaseIfIdle(campaignId, ctx.runToken);
+        return;
+      }
+    }
+
+    // Пока мы ждали прошлое тело, всё могло измениться: пришёл SIGTERM, или
+    // строку у нас забрали. Подключать сессии после этого нельзя.
+    if (ctx.shouldStop()) {
+      log('info', `Campaign ${campaignId}: остановка пришла до запуска цикла — не подключаюсь`);
+      if (!ctx.signal.aborted) await releaseCampaignLeaseIfIdle(campaignId, ctx.runToken);
+      return;
+    }
+
     log('info', `Starting campaign ${campaignId}`);
 
     let stopRequested = false;
-    campaignStops.set(campaignId, () => { stopRequested = true; });
+    const stop = () => { stopRequested = true; };
+    campaignStops.set(campaignId, stop);
     const control: LoopControl = {};
     campaignControls.set(campaignId, control);
     // Отметка о закрытии клиентов ПРОШЛОГО запуска этой кампании: снимаем её
     // здесь, а не при выходе, — см. forgetCampaign.
     campaignClosing.delete(campaignId);
+    let bodyDone: () => void = () => {};
+    const body = new Promise<void>((resolve) => { bodyDone = resolve; });
+    campaignBodies.set(campaignId, body);
 
     /*
      * Прерывание — сразу рвём сокеты, не дожидаясь, пока цикл заметит сам.
@@ -534,6 +674,7 @@ const campaignRunner = createJobRunner<
      */
     let lastProgressWriteAt = 0;
     let progressWriteInFlight = false;
+    let progressWriteFailures = 0;
     const onProgress = () => {
       const now = Date.now();
       if (progressWriteInFlight || now - lastProgressWriteAt < PROGRESS_WRITE_INTERVAL_MS) return;
@@ -546,7 +687,31 @@ const campaignRunner = createJobRunner<
           .update({ progress_at: new Date(now).toISOString() })
           .eq('id', campaignId)
           .eq('run_token', ctx.runToken);
-        if (error) log('warn', `Не смог записать отметку прогресса кампании ${campaignId}: ${error.message}`);
+        if (!error) {
+          progressWriteFailures = 0;
+          return;
+        }
+        progressWriteFailures += 1;
+        /*
+         * Отдельный громкий сигнал, а не одна и та же тихая строка.
+         *
+         * Пока отметка не пишется, здоровая кампания выглядит зависшей: порог
+         * простоя сработает, аренда уйдёт, кампанию передадут — и так каждые
+         * полчаса, без единого намёка на настоящую причину. Библиотека такое не
+         * поймает: её собственное предупреждение «колонку прогресса не
+         * прочитать» касается ЧТЕНИЯ, а здесь ломается запись. Порог в пять —
+         * это пять минут подряд неудачных попыток, то есть уже не моргание сети.
+         */
+        if (progressWriteFailures === 1 || progressWriteFailures % 5 === 0) {
+          const level = progressWriteFailures >= 5 ? 'error' : 'warn';
+          log(
+            level,
+            `Кампания ${campaignId}: отметка прогресса не пишется ${progressWriteFailures} раз(а) подряд — ${error.message}. ` +
+              (progressWriteFailures >= 5
+                ? `Кампания выглядит зависшей и будет передана другому исполнителю через ${Math.round(CAMPAIGN_STALL_MS / 60_000)} мин, хотя работает.`
+                : ''),
+          );
+        }
       })()
         .catch(() => {})
         .finally(() => { progressWriteInFlight = false; });
@@ -624,7 +789,10 @@ const campaignRunner = createJobRunner<
       if (error) log('error', `Failed to mark tg campaign ${campaignId} as error: ${error.message}`);
     } finally {
       ctx.signal.removeEventListener('abort', onAbort);
-      forgetCampaign(campaignId);
+      forgetCampaign(campaignId, { control, stop, body });
+      // Разрешаем промис ПОСЛЕ снятия ручек: тот, кто нас ждёт, должен
+      // увидеть карты уже чистыми и поставить в них своё.
+      bodyDone();
     }
   },
 });
@@ -715,7 +883,34 @@ async function handleStopJob(job: { id: string; campaign_id: string }) {
    * ждать минуту незачем. Кросс-процессный путь при этом остаётся — просьба в
    * памяти его не заменяет, а опережает.
    */
+  const body = campaignBodies.get(campaignId);
   campaignStops.get(campaignId)?.();
+
+  /*
+   * И только потом закрываем клиенты — до того, как команда будет отмечена
+   * выполненной.
+   *
+   * Как только команда закрыта, интерфейс показывает кнопку «Запустить», и
+   * следующий клик может прийти через секунду. Если к этому моменту сессии
+   * Telegram ещё открыты, новый прогон откроет их вторыми — AUTH_KEY_DUPLICATED
+   * и выключенные аккаунты. Поэтому «остановлено» означает «сессии свободны», а
+   * не «мы попросили».
+   *
+   * Ждём и само тело — с тем же потолком, что и передача между прогонами.
+   * Не дождались — не страшно: второй запуск упрётся в ту же проверку и не
+   * начнётся, пока тело живо.
+   */
+  await closeCampaignClients(campaignId);
+  if (body) {
+    const finished = await handOverCampaign(campaignId, body);
+    if (!finished) {
+      log(
+        'warn',
+        `Кампания ${campaignId}: цикл ещё разматывается после остановки. Клиенты Telegram уже закрыты, ` +
+          'запуск до его выхода не начнётся — это защита от второго набора сессий.',
+      );
+    }
+  }
   log('info', `Stop recorded for campaign ${campaignId}`);
 
   await db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
@@ -733,6 +928,9 @@ async function handleStopJob(job: { id: string; campaign_id: string }) {
  * строкой выше.
  */
 async function handleRestartJob(job: { id: string; campaign_id: string }) {
+  // handleStopJob уже закрыл клиенты и дождался тела (или сказал, что не
+  // дождался) — отдельного ожидания здесь не нужно, а статус пишем только
+  // после него.
   await handleStopJob(job);
   const { error } = await db
     .from('tg_outreach_campaigns')
@@ -896,13 +1094,17 @@ const warmupRunner = createJobRunner<{ id: string; campaign_id: string }, Warmup
     warmupLastProgressAt.set(campaignId, Date.now());
     const onProgress = () => { warmupLastProgressAt.set(campaignId, Date.now()); };
     const control: LoopControl = {};
-    campaignControls.set(campaignId, control);
+    // Своя карта, не общая с боевыми кампаниями: ключ у обеих один
+    // (campaign_id), и общая карта позволяла опоздавшему прогревному телу
+    // стереть ручку уже запущенного аутрича — см. комментарий к warmupControls.
+    warmupControls.set(campaignId, control);
     // Ручка сторожа: он гасит зависший прогрев теми же двумя движениями, что и
     // кампанию, — просит остановиться и рвёт сокеты. Выйдя, тело вернёт
     // управление раннеру, а аренду отпустит блок ниже, и прогон подберут
     // заново — это и есть замена прежнему «auto-resume поднимет».
     let stopRequested = false;
-    warmupStops.set(campaignId, () => { stopRequested = true; });
+    const warmupStop = () => { stopRequested = true; };
+    warmupStops.set(campaignId, warmupStop);
     warmupWaitLogged.delete(job.id);
 
     try {
@@ -977,9 +1179,11 @@ const warmupRunner = createJobRunner<{ id: string; campaign_id: string }, Warmup
         .eq('id', campaignId)
         .eq('status', 'warming');
     } finally {
-      warmupStops.delete(campaignId);
+      // Только своё: прогон этой же кампании мог начаться заново, и стирать его
+      // ручки нельзя (то же правило, что в forgetCampaign).
+      forgetIfOwn(warmupStops, campaignId, warmupStop);
+      forgetIfOwn(warmupControls, campaignId, control);
       warmupLastProgressAt.delete(campaignId);
-      campaignControls.delete(campaignId);
       warmupKillRequestedAt.delete(campaignId);
     }
   },
@@ -1290,9 +1494,16 @@ async function main() {
       // идемпотентный, флаг односторонний — лишним он быть не может.
       markShuttingDown();
       log('info', `${sig} received — закрываю клиенты Telegram и отпускаю аренды`);
-      // Кампании первыми: их остановка закрывает клиенты Telegram ДО того, как
-      // строка станет свободной (beforeRelease). Прогрев ждёт своей очереди —
-      // у него хука нет и терять ему нечего.
+      /*
+       * Оба раннера останавливаются ПАРАЛЛЕЛЬНО, и это осознанно.
+       *
+       * Последовательно было бы 12 секунд бюджета кампаний плюс 10 прогрева —
+       * 22 секунды, а деплой даёт пятнадцать (`docker compose stop --timeout
+       * 15`), и аренду прогрева отпускал бы уже SIGKILL, то есть никто.
+       * Параллельно общий срок равен большему из двух, 12 секундам, и в
+       * пятнадцать укладывается с запасом. Мешать друг другу им нечем: у
+       * каждого свои строки, свои клиенты и свои карты ручек.
+       */
       void campaignRunner.shutdown().catch((err) => log('error', 'campaign shutdown failed', err));
       void warmupRunner.shutdown().catch((err) => log('error', 'warmup shutdown failed', err));
     });
@@ -1389,7 +1600,7 @@ async function main() {
       } catch (err) {
         log('error', `Watchdog: stop() failed for ${campaignId}: ${err instanceof Error ? err.message : String(err)}`);
       }
-      void campaignControls
+      void warmupControls
         .get(campaignId)
         ?.forceDisconnect?.()
         .catch((err: unknown) => {
@@ -1436,10 +1647,9 @@ async function main() {
   clearInterval(resumeTimer);
 
   // Оба вызова идемпотентны и возвращают тот же промис, что уже запустил
-  // обработчик сигнала. Кампании — первыми: их остановка закрывает клиенты
-  // Telegram до отпускания аренды, и тянуть с ней нельзя.
-  await campaignRunner.shutdown();
-  await warmupRunner.shutdown();
+  // обработчик сигнала, — то есть здесь мы дожидаемся уже идущих параллельно
+  // остановок, а не запускаем их одну за другой.
+  await Promise.all([campaignRunner.shutdown(), warmupRunner.shutdown()]);
 
   log('info', 'TG Outreach worker stopped');
   process.exit(0);

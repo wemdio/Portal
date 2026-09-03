@@ -164,8 +164,15 @@ export interface JobRunnerOptions<Row extends { id: string }, C> {
    * попыток. Обычно это счётчик обработанного или отметка последнего шага.
    */
   progress?: { column: string; stalledAfterMs: number };
-  /** Дополнительные поля при переводе в failed (например error_message). */
-  failedPatch?: (reason: string) => Record<string, unknown>;
+  /**
+   * Дополнительные поля при переводе в failed (например error_message).
+   *
+   * Вторым аргументом идёт id задачи: у части воркеров колонки под причину нет
+   * вовсе, зато есть свой журнал, который читает человек, — и написать в него
+   * без идентификатора невозможно. Такой воркер возвращает пустой патч (или
+   * одну отметку времени), а строку в журнал пишет побочным действием.
+   */
+  failedPatch?: (reason: string, jobId: string) => Record<string, unknown>;
   /**
    * Чекпойнт не записался, хотя задача осталась нашей.
    *
@@ -562,7 +569,7 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
             status: statuses.failed,
             attempts,
             ...clearOwnership,
-            ...(opts.failedPatch?.(reason) ?? {}),
+            ...(opts.failedPatch?.(reason, candidate.id) ?? {}),
           })
           .eq('id', candidate.id)
           .eq('status', statuses.running)
@@ -849,7 +856,7 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
         }
         const attempts = attemptsBase + 1;
         const patch = attempts >= maxAttempts
-          ? { status: statuses.failed, attempts, ...clearOwnership, ...(opts.failedPatch?.(reason) ?? {}) }
+          ? { status: statuses.failed, attempts, ...clearOwnership, ...(opts.failedPatch?.(reason, job.id) ?? {}) }
           : { status: statuses.pending, attempts, ...clearOwnership };
         await fencedUpdateWithRetry(job.id, runToken, patch, TERMINAL_WRITE_TRIES, TERMINAL_BACKOFF_MS);
       } finally {
@@ -882,6 +889,29 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
         return true;
       }
       if (claim.kind === 'empty') return false;
+      /**
+       * Раннер не берёт задачу, которую сам же ещё выполняет.
+       *
+       * Захват истёкшей аренды смотрит только на строку, а строка выглядит
+       * свободной и тогда, когда её прежний прогон в ЭТОМ процессе ещё не
+       * размотался: аренду перестают продлевать сразу после abort (потеря
+       * аренды, простой дольше порога), а тело может дорабатывать минутами,
+       * если стоит внутри зависшего сетевого вызова. Без этой проверки
+       * получалось бы два тела одной задачи в одном процессе — для TG-аутрича
+       * это второе подключение тех же MTProto-сессий и выключенные навсегда
+       * аккаунты, для остальных очередей — двойная работа и двойные внешние
+       * запросы.
+       *
+       * Аренду отпускаем: строка должна достаться кому-то, когда прежнее тело
+       * закончит. Захват сюда же вернётся на следующем опросе — это не гонка на
+       * месте, пауза между опросами есть всегда (pollLoop ждёт свой интервал на
+       * ответ false).
+       */
+      if (owned.has(claim.job.id)) {
+        log('warn', `[${table}] job ${claim.job.id} claimed while its previous run is still unwinding — releasing, will retry`);
+        await releaseLease(claim.job.id, claim.runToken);
+        return false;
+      }
       // Сигнал мог прийти, пока захват был в полёте: shutdown() уже снял свой
       // снимок owned, и эту задачу никто бы не прервал и не отпустил — она
       // дожила бы до SIGKILL с живой арендой, а сосед прождал бы полный

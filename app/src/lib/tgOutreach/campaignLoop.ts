@@ -18,7 +18,7 @@ import type {
 import { DEFAULT_FOLLOW_UP } from './types';
 import { checkAccount, classifyCheckError } from './accountCheck';
 import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
-import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient } from './gramClient';
+import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient, type ActiveClient } from './gramClient';
 import type { LoopControl } from './watchdog';
 import { orderByStaleness } from './accountRotation';
 import { openaiGenerate, detectTrigger } from './openaiChat';
@@ -1602,20 +1602,41 @@ export async function runCampaignLoop(
 
   log('info', `Запускаю кампанию "${campaign.name}": ${accounts.length} аккаунтов, ${proxies?.length ?? 0} прокси`);
 
+  // Последняя проверка перед подключением: дальше начинаются живые сессии
+  // Telegram, и открывать их, когда работа уже не наша, нельзя.
+  if (shouldStop()) return;
+
   const proxyMap = new Map((proxies ?? []).map((proxy: OutreachProxy) => [proxy.id, proxy]));
   const downloadSessionFile = (storagePath: string) => downloadSessionToTemp(db, storagePath);
-  let clients = await buildClients(cycleOrder, proxies ?? [], log, downloadSessionFile, db);
-  // Ручка для сторожевого таймера: порвать сокеты этой кампании, не трогая
-  // соседние. Замыкание читает `clients` в момент вызова, поэтому переживает
-  // переподключение ниже.
+  /*
+   * Ручка «закрыть все клиенты» ставится ДО подключения, а не после.
+   *
+   * Подключить дюжину аккаунтов — это минуты, и раньше всё это время ручки не
+   * существовало: остановка, пришедшая в это окно, отчитывалась бы «клиенты
+   * закрыты» (закрывать было нечего), аренда отпускалась бы, а процесс
+   * продолжал бы открывать сессии одну за другой — и сосед подключил бы те же.
+   * Массив заводим здесь и отдаём buildClients как приёмник: он заполняется по
+   * ходу, поэтому ручка закрывает и то, что успело подключиться. Сигнал внутрь
+   * — чтобы после отмены не открывать оставшихся вовсе.
+   *
+   * Замыкание читает `clients` в момент вызова, поэтому переживает и повторную
+   * попытку ниже, и переподключение внутри круга.
+   */
+  let clients: ActiveClient[] = [];
   if (control) control.forceDisconnect = () => disconnectAll(clients);
+  clients = await buildClients(cycleOrder, proxies ?? [], log, downloadSessionFile, db, { sink: clients, signal });
   log('info', `Подключились ${clients.length} из ${accounts.length} аккаунтов${clients.length < accounts.length ? ` (остальные с ошибками подключения, смотри строки выше)` : ''}`);
+
+  if (shouldStop()) return;
 
   if (clients.length === 0) {
     log('warning', 'Ни один аккаунт не подключился — пробую ещё раз через 60 секунд');
     await interruptibleSleep(60_000, shouldStop, 2000, signal);
     if (shouldStop()) return;
-    const retryClients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db);
+    // Приёмник повторной попытки ставим в `clients` ДО вызова — по той же
+    // причине, что и выше: ручка обязана видеть то, что подключается сейчас.
+    clients = [];
+    const retryClients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db, { sink: clients, signal });
     log('info', `Повторная попытка: подключились ${retryClients.length} из ${accounts.length} аккаунтов`);
     if (retryClients.length === 0) {
       log('error', 'Повторная попытка тоже провалилась — кампания на паузе. Проверьте прокси и сессии аккаунтов, затем запустите снова.');
@@ -2017,6 +2038,18 @@ export async function runCampaignLoop(
 
           for (const dialog of dialogs) {
             if (shouldStop()) break;
+            /*
+             * Отметка прогресса на КАЖДОМ диалоге, а не только на аккаунте.
+             *
+             * Разбор одного непрочитанного — это пауза «чтения», вызов модели и
+             * отправка ответа; на аккаунте с полусотней непрочитанных всё это
+             * складывается в десятки минут, внутри которых раньше не было ни
+             * одной отметки. Порог простоя (25 минут) считал бы такую работу
+             * зависанием и передавал бы кампанию соседу посреди переписки —
+             * причём цена ошибки теперь выше, чем у прежнего сторожа: это
+             * полный перезахват с переподключением всех сессий.
+             */
+            tick();
             if (dialog.unreadCount === 0) continue;
             if (!dialog.entity || !(dialog.entity instanceof Api.User)) {
               cycleStats.not_user++;
@@ -2089,11 +2122,18 @@ export async function runCampaignLoop(
             }
           }
 
+          // Каждый из трёх проходов ниже сам по себе идёт минутами (у каждого
+          // свои паузы между сообщениями), поэтому отмечаемся после каждого:
+          // молчание длиной в порог простоя не должно набегать из честной
+          // работы.
           await handleFollowUp(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop);
+          tick();
           await handleMissedRepliesLastDays(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop);
+          tick();
 
           try {
             await backfillEmptyDialogs(client, account, campaign as unknown as OutreachCampaign, db, log);
+            tick();
           } catch (err) {
             log('warning', `Аккаунт ${account.session_name}: ошибка при загрузке истории пустых диалогов (backfill) — ${err instanceof Error ? err.message : String(err)}`);
           }

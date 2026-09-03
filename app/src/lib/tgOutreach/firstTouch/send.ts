@@ -378,29 +378,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       .slice(0, Math.max(1, quota - result.sent));
     if (!picked.length) break;
 
-    /**
-     * Замок в БАЗЕ, а не только в памяти.
-     *
-     * Множество `claimed` разводит аккаунты внутри ОДНОГО процесса и от второго
-     * исполнителя не защищает никак. А второй исполнитель теперь бывает:
-     * кампания арендуется как задача, и библиотека намеренно допускает короткое
-     * окно, когда уходящий владелец ещё дорабатывает, а сосед уже взял строку.
-     * Без замка в базе один и тот же человек получил бы два первых сообщения с
-     * двух номеров — брак, который не исправить.
-     *
-     * Проигранные контакты всё равно помечаем в памяти: их прямо сейчас ведёт
-     * кто-то другой, и на этом круге они не наши. Без этого следующая итерация
-     * добора выбрала бы ровно их же и цикл крутился бы вхолостую.
-     */
-    const { claimed: mine, error: claimError } = await fdb.claimContacts(db, picked, account.id);
-    if (claimError) {
-      log('warning', `Первое касание остановлено: не смог занять контакты в базе — ${claimError}. Контакты остаются в очереди нетронутыми, продолжим следующим кругом.`);
-      break;
-    }
-    for (const c of picked) claimed.add(c.id);
-    if (!mine.length) continue;
-
-    for (const contact of mine) {
+    for (const contact of picked) {
       if (args.shouldStop?.()) { stopAll = true; break; }
       args.onProgress?.();
       claimed.add(contact.id);
@@ -408,6 +386,34 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       // означает и резолвы без отправки, а частые резолвы подряд Telegram не
       // любит ровно так же.
       if (examined > 0 && args.gapMs) await new Promise((r) => setTimeout(r, args.gapMs));
+
+      /**
+       * Замок в БАЗЕ, а не только в памяти, и берётся он ЗДЕСЬ — прямо перед
+       * работой с этим контактом.
+       *
+       * Множество `claimed` разводит аккаунты внутри ОДНОГО процесса и от
+       * второго исполнителя не защищает никак. А второй исполнитель теперь
+       * бывает: кампания арендуется как задача, и библиотека намеренно
+       * допускает короткое окно, когда уходящий владелец ещё дорабатывает, а
+       * сосед уже взял строку. Без замка в базе один и тот же человек получил
+       * бы два первых сообщения с двух номеров — брак, который не исправить.
+       *
+       * Момент захвата важен не меньше самого захвата: срок замка рассчитан на
+       * работу с одним контактом, а пачка бывает в десятки. Возьми мы замок на
+       * всю пачку разом, её хвост дошёл бы до дела уже с протухшим замком.
+       *
+       * Проигранный контакт помечаем в памяти и идём дальше: его прямо сейчас
+       * ведёт кто-то другой. Паузу мы уже выдержали, но `examined` не тратим —
+       * работы с Telegram не было.
+       */
+      const { claimed: mine, error: claimError } = await fdb.claimContact(db, contact.id, account.id);
+      if (claimError) {
+        log('warning', `Первое касание остановлено: не смог занять контакт в базе — ${claimError}. Контакты остаются в очереди нетронутыми, продолжим следующим кругом.`);
+        stopAll = true;
+        break;
+      }
+      if (!mine) continue;
+
       examined++;
 
       const attempts = Number((contact as PendingContact & { attempts?: number }).attempts ?? 0);
@@ -713,7 +719,18 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       // Снимаем обе отметки: и память круга, и замок в базе — иначе следующий
       // аккаунт увидел бы контакт свободным в памяти и не смог взять его в базе.
       for (const { contact } of notOccupied) claimed.delete(contact.id);
-      await fdb.releaseContactClaims(db, notOccupied.map(({ contact }) => contact.id));
+      const released = await fdb.releaseContactClaims(
+        db,
+        notOccupied.map(({ contact }) => contact.id),
+        account.id,
+      );
+      if (released.error) {
+        log(
+          'error',
+          `Не смог снять свои отметки с ${notOccupied.length} контактов — ${released.error}. `
+          + 'Другие аккаунты не возьмут их ещё несколько минут; сами контакты в очереди и не пострадали.',
+        );
+      }
     }
   } else {
     for (const { contact, attempts } of notOccupied) {
