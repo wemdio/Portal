@@ -29,8 +29,29 @@ import { computeSleepMs } from '@/lib/instantly/rateLimiterMath';
 const RPC_TIMEOUT_MS = 2500; // короткий таймаут на RPC, чтобы 120-сек дефолт supabaseAdmin не подвесил
 const DEFAULT_MAX_WAIT_MS = 120_000; // фоновому скореру не жалко подождать — это и есть пейсинг
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+/**
+ * Пауза, прерываемая сигналом.
+ *
+ * Ожидание токена — самая длинная пауза на пути к Mailganer (до max-wait, по
+ * умолчанию 120 с). Пока она не была прерываемой, воркер на едином жизненном
+ * цикле (ручной скоринг) после SIGTERM продолжал спать здесь и не успевал
+ * отдать аренду в отведённый бюджет остановки. Сигнал необязателен: остальные
+ * вызывающие (фоновый скорер, добор) зовут без него и спят как прежде.
+ */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((r) => {
+    if (signal?.aborted) {
+      r();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      r();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
 }
 
 function maxWaitMs(): number {
@@ -43,17 +64,25 @@ function maxWaitMs(): number {
  *   true  — слать запрос можно (токен выдан, либо лимитер недоступен → fail-open).
  *   false — бюджет исчерпан и за max-wait не освободился → ПРОПУСТИТЬ домен.
  * Никогда не бросает.
+ *
+ * `signal` (необязателен) прерывает ожидание токена: вызывающий на едином
+ * жизненном цикле задач обязан бросить платную работу, как только аренда
+ * потеряна или пришёл SIGTERM. Прерванное ожидание отвечает false — «домен
+ * пропустить», ровно как исчерпанный бюджет; повторная попытка достанется
+ * следующему владельцу прогона.
  */
-export async function acquireMailganerScoreToken(): Promise<boolean> {
+export async function acquireMailganerScoreToken(signal?: AbortSignal): Promise<boolean> {
   try {
     // Kill-switch — мгновенный обход.
     if (process.env.MAILGANER_SCORING_RATE_LIMIT_DISABLED === '1') return true;
+    if (signal?.aborted) return false;
     // Нет service-role клиента (тесты / не сконфигурён env) → fail-open.
     if (!supabaseAdmin) return true;
 
     const deadline = Date.now() + maxWaitMs();
 
     for (;;) {
+      if (signal?.aborted) return false;
       let wait: number;
       try {
         const { data, error } = await supabaseAdmin
@@ -79,7 +108,7 @@ export async function acquireMailganerScoreToken(): Promise<boolean> {
         // Бюджет исчерпан и не освободился за max-wait → ЖЁСТКО пропускаем домен.
         return false;
       }
-      await sleep(computeSleepMs(wait, remaining));
+      await sleep(computeSleepMs(wait, remaining), signal);
     }
   } catch (e) {
     // Абсолютный предохранитель — наружу ничего не летит, скоринг не ломаем.

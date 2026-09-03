@@ -57,13 +57,61 @@ interface ProcessOptions {
   concurrency?: number;
   /** Лимит на одну строку, чтобы не зависнуть. Default 60 сек. */
   perRowTimeoutMs?: number;
+  /**
+   * Сигнал прерывания от единого жизненного цикла задач (`ctx.signal`).
+   *
+   * Взводится на SIGTERM воркера и при потере аренды. С этого момента прогон
+   * уже не наш, и любой платный запрос к внешнему сервису — работа за чужой
+   * счёт. Тело обязано выйти БЕЗ терминального статуса: строка остаётся в
+   * работе, аренду отпускает библиотека, а продолжит прогон следующий владелец
+   * (возобновление по построению — берутся только строки с bucket IS NULL).
+   *
+   * Необязателен: без сигнала поведение прежнее (прямой вызов, тесты).
+   */
+  signal?: AbortSignal;
+  /**
+   * Жетон текущего захвата (`ctx.runToken`).
+   *
+   * Терминальный статус пишет само тело (manageTerminalStatus: false), значит
+   * оградить эти записи библиотека не может. Без жетона прежний исполнитель
+   * после перехвата прогона проштамповал бы completed/failed поверх работы
+   * нового владельца. Необязателен по той же причине, что и signal.
+   */
+  runToken?: string | null;
 }
 
 interface ProcessResult {
-  status: 'completed' | 'failed';
+  /**
+   * interrupted — прогон прерван сигналом. Терминального статуса НЕ пишем:
+   * строка остаётся в статусе «в работе», и её продолжит следующий владелец.
+   */
+  status: 'completed' | 'failed' | 'interrupted';
   total: number;
   buckets: Record<ManualBucket, number>;
   error?: string;
+}
+
+const EMPTY_BUCKETS = (): Record<ManualBucket, number> =>
+  ({ storage: 0, medium: 0, high: 0, top: 0, invalid: 0 });
+
+/**
+ * Ограждение записей в строку прогона жетоном захвата.
+ *
+ * Один обёртывающий помощник на ВСЕ записи — тот же приём, что
+ * `safeUpdateSearchJob` в lib/parsers/searchParserWorker.ts. Без жетона
+ * фильтр не добавляется, и поведение остаётся ровно тем, что было до аренды.
+ */
+type RunFence = <T>(query: T) => T;
+
+function makeRunFence(runToken: string | null | undefined): RunFence {
+  // Тип билдера — any по той же причине, что в lib/jobs/lifecycle.ts: цепочка
+  // PostgREST меняет форму на каждом шаге, а нам нужен от неё только .eq.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return <T>(q: T): T => (runToken ? ((q as any).eq('run_token', runToken) as T) : q);
+}
+
+function interrupted(): ProcessResult {
+  return { status: 'interrupted', total: 0, buckets: EMPTY_BUCKETS() };
 }
 
 /**
@@ -75,18 +123,32 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
     return {
       status: 'failed',
       total: 0,
-      buckets: { storage: 0, medium: 0, high: 0, top: 0, invalid: 0 },
+      buckets: EMPTY_BUCKETS(),
       error: 'supabaseAdmin not initialized',
     };
   }
 
   const concurrency = opts.concurrency ?? 5;
+  const fence = makeRunFence(opts.runToken);
+  const signal = opts.signal;
+  /**
+   * Единственный признак прерывания. Решаем по СИГНАЛУ, а не по имени ошибки:
+   * прерванный fetch и истёкший таймаут дают неотличимый AbortError, и разбор
+   * по имени рано или поздно записал бы отказ там, где задачу просто отобрали.
+   */
+  const aborted = () => signal?.aborted === true;
 
   // 1. Mark as processing
-  await supabaseAdmin
-    .from('client_manual_score_runs')
-    .update({ status: 'processing' })
-    .eq('id', opts.runId);
+  //    С единым жизненным циклом захват уже поставил этот статус, и запись
+  //    здесь — тавтология для воркера, но она нужна прямому вызову (без
+  //    аренды). Ограждена жетоном: если строку перехватили, тавтология не
+  //    должна воскресить наш статус поверх чужой работы.
+  await fence(
+    supabaseAdmin
+      .from('client_manual_score_runs')
+      .update({ status: 'processing' })
+      .eq('id', opts.runId),
+  );
 
   // 2. Берём все ещё не обработанные строки этого прогона
   const { data: rowsData, error: rowsErr } = await supabaseAdmin
@@ -97,22 +159,27 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
     .order('id', { ascending: true });
 
   if (rowsErr) {
-    return await markFailed(opts.runId, `Failed to load rows: ${rowsErr.message}`);
+    if (aborted()) return interrupted();
+    return await markFailed(opts.runId, `Failed to load rows: ${rowsErr.message}`, fence);
   }
 
   const rows = (rowsData ?? []) as Array<{ id: number; domain: string | null }>;
   if (rows.length === 0) {
     // Scoring already finished, but routing/snapshot persistence may have been
     // interrupted. Reconcile both before the run is allowed to complete.
+    if (aborted()) return interrupted();
     try {
-      await reconcileManualRoutingAndSnapshots(opts.runId);
+      await reconcileManualRoutingAndSnapshots(opts.runId, signal);
     } catch (err) {
+      if (aborted()) return interrupted();
       return await markFailed(
         opts.runId,
         err instanceof Error ? err.message : 'routing reconciliation failed',
+        fence,
       );
     }
-    return await finalize(opts.runId);
+    if (aborted()) return interrupted();
+    return await finalize(opts.runId, fence);
   }
 
   // 3. Shared MX cache между всеми row'ами этого прогона — economy для повторяющихся
@@ -126,11 +193,18 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
 
   async function worker(): Promise<void> {
     while (true) {
+      // Граница строки — единственная точка кооперативной остановки в пуле.
+      if (aborted()) return;
       const i = cursor++;
       if (i >= rows.length) return;
       const row = rows[i];
 
-      const result = await processOneRow(row, opts.endpoint, domainInfoCache);
+      const result = await processOneRow(row, opts.endpoint, domainInfoCache, signal);
+
+      // Прерванную строку НЕ записываем. Иначе домен, чей скоринг оборвал
+      // SIGTERM, лёг бы с bucket='invalid' — а повтор берёт только строки с
+      // bucket IS NULL, то есть его не переоценили бы уже никогда.
+      if (aborted()) return;
 
       // Сохраняем результат — независимо от ошибки. bucket всегда выставляем,
       // чтобы при повторном вызове processManualRun row не выбралась снова.
@@ -152,25 +226,41 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
       Array.from({ length: Math.min(concurrency, rows.length) }, worker),
     );
   } catch (err) {
+    if (aborted()) return interrupted();
     return await markFailed(
       opts.runId,
       err instanceof Error ? err.message : 'worker pool crashed',
+      fence,
     );
   }
+
+  if (aborted()) return interrupted();
+
+  // Отметка перед длинным хвостом. Она нужна не для возобновления (оно идёт по
+  // строкам с bucket IS NULL), а чтобы продлить аренду и обнулить бюджет
+  // попыток ПЕРЕД фазой, которая не пишет processed_count вовсе: чистка имён
+  // через AI, заливка в Instantly и снапшоты идут пачками по всему прогону.
+  if (opts.onProgress) {
+    await opts.onProgress(cursor).catch(() => undefined);
+  }
+  if (aborted()) return interrupted();
 
   // 4.5. Резолв названий (кэш ФНС) + чистка (AI как кнопка «Очистить названия»)
   //      + маршрутизация активных контактов в СУЩЕСТВУЮЩИЕ кампании авто-
   //      пайплайна по скорингу. Ошибка оставляет прогон retryable.
   try {
-    await reconcileManualRoutingAndSnapshots(opts.runId);
+    await reconcileManualRoutingAndSnapshots(opts.runId, signal);
   } catch (err) {
+    if (aborted()) return interrupted();
     return await markFailed(
       opts.runId,
       err instanceof Error ? err.message : 'routing reconciliation failed',
+      fence,
     );
   }
 
-  return await finalize(opts.runId);
+  if (aborted()) return interrupted();
+  return await finalize(opts.runId, fence);
 }
 
 /** Имя-кандидат из домена (крайний фоллбек): "stripe.com" → "Stripe". */
@@ -207,7 +297,10 @@ class ManualPartialRouteError extends Error {
   }
 }
 
-async function resolveNamesAndRoute(runId: string): Promise<Map<number, ManualRouteOutcome>> {
+async function resolveNamesAndRoute(
+  runId: string,
+  signal?: AbortSignal,
+): Promise<Map<number, ManualRouteOutcome>> {
   const routedRows = new Map<number, ManualRouteOutcome>();
   const newlyRoutedRows = new Map<number, ManualRouteOutcome>();
   if (!supabaseAdmin) return routedRows;
@@ -295,14 +388,21 @@ async function resolveNamesAndRoute(runId: string): Promise<Map<number, ManualRo
   // 2. Сырое имя по фоллбек-цепочке: ФНС-кэш → scraped_name (с сайта) → из
   //    домена. Затем AI-чистка (тот же механизм, что кнопка). Так название
   //    есть у КАЖДОГО живого контакта, даже если домена нет в базе ФНС.
-  const cleaned = await cleanCompanyNames(rows.map((r) => ({
-    name:
-      r.company_name?.trim() ||
-      (r.domain ? nameByDomain.get(r.domain) : null) ||
-      r.scraped_name ||
-      (r.domain ? domainToNameCandidate(r.domain) : ''),
-    domain: r.domain,
-  })));
+  const cleaned = await cleanCompanyNames(
+    rows.map((r) => ({
+      name:
+        r.company_name?.trim() ||
+        (r.domain ? nameByDomain.get(r.domain) : null) ||
+        r.scraped_name ||
+        (r.domain ? domainToNameCandidate(r.domain) : ''),
+      domain: r.domain,
+    })),
+    // Чистка идёт батчами по 100 через AI и умеет останавливаться между ними —
+    // подаём ей тот же сигнал, что и всему прогону.
+    signal ? async () => signal.aborted : undefined,
+  );
+
+  if (signal?.aborted) throw new Error('manual scoring interrupted');
 
   // 3. Сохраняем company_name ('' = резолв выполнен, имени нет → идемпотентность).
   for (let i = 0; i < rows.length; i += 1) {
@@ -381,6 +481,17 @@ async function resolveNamesAndRoute(runId: string): Promise<Map<number, ManualRo
   }
 
   for (const g of groups.values()) {
+    // Прерывание между кампаниями: уже залитые лиды обязаны попасть в снапшоты,
+    // иначе следующий владелец зальёт их второй раз. Поэтому не тихий выход, а
+    // ManualPartialRouteError — reconcile ниже сохранит по ним снапшоты и
+    // пробросит ошибку, а processManualRun увидит взведённый сигнал и выйдет
+    // без терминального статуса.
+    if (signal?.aborted) {
+      if (newlyRoutedRows.size > 0) {
+        throw new ManualPartialRouteError(new Error('manual scoring interrupted'), newlyRoutedRows);
+      }
+      throw new Error('manual scoring interrupted');
+    }
     const recordAcceptedRows = (outcome: Parameters<typeof selectAcceptedItems>[1]) => {
       const acceptedRowIds = selectAcceptedItems(g.leadRowIds, outcome);
       if (acceptedRowIds === null) {
@@ -503,9 +614,12 @@ async function persistManualRunSnapshots(
   );
 }
 
-async function reconcileManualRoutingAndSnapshots(runId: string): Promise<void> {
+async function reconcileManualRoutingAndSnapshots(
+  runId: string,
+  signal?: AbortSignal,
+): Promise<void> {
   try {
-    const routedRows = await resolveNamesAndRoute(runId);
+    const routedRows = await resolveNamesAndRoute(runId, signal);
     await persistManualRunSnapshots(runId, routedRows);
   } catch (error) {
     if (error instanceof ManualPartialRouteError && error.routedRows.size > 0) {
@@ -571,6 +685,7 @@ async function processOneRow(
   row: { id: number; domain: string | null },
   endpoint: EndpointConfig,
   mxCache: Map<string, DomainInfo>,
+  signal?: AbortSignal,
 ): Promise<ProcessedRow> {
   const domain = row.domain ? normalizeDomain(row.domain) : null;
   if (!domain) {
@@ -587,11 +702,17 @@ async function processOneRow(
     };
   }
 
-  // 1. Score (использует кэш — для уже виденных доменов мгновенно)
+  // 1. Score (использует кэш — для уже виденных доменов мгновенно).
+  //    Сигнал уходит и в ожидание суточного токена Mailganer, и в сам вызов:
+  //    после потери аренды платить за этот домен уже не наше дело.
   let scoreResult;
   try {
-    scoreResult = await getOrFetchScore(domain, endpoint, 'manual');
+    scoreResult = await getOrFetchScore(domain, { ...endpoint, signal }, 'manual');
   } catch (err) {
+    // Прерывание — это не «домен невалиден». Записанный bucket='invalid'
+    // навсегда исключил бы домен из повтора (он берёт только bucket IS NULL),
+    // поэтому пробрасываем и даём вызывающему решить по сигналу.
+    if (signal?.aborted) throw err;
     return {
       domain,
       score: null,
@@ -632,11 +753,18 @@ async function processOneRow(
   const scraped = await scrapeEmails(`https://${domain}`, {
     timeout: 12_000,
     maxPages: 5,
+    signal,
   }).catch(() => ({ emails: [] as string[], siteName: null as string | null }));
   const scrapedName = scraped.siteName ?? null;
   // До 2 почт с домена (как авто) — каждая станет отдельным лидом/строкой.
   const candidates = scraped.emails.slice(0, 2);
+  // validateEmailForAutoPipeline сигнала не принимает (SMTP-слой общий с
+  // валидацией почт), но каждая его проба ограничена собственным таймаутом, а
+  // прерывание проверяем перед вызовом. Дороже этого прерывание здесь не
+  // стоит: строка всё равно не будет записана — вызывающий выбросит результат,
+  // увидев взведённый сигнал.
   const validateSafe = async (e: string): Promise<string | null> => {
+    if (signal?.aborted) return null;
     try {
       return (await validateEmailForAutoPipeline(e, mxCache)).status;
     } catch {
@@ -663,31 +791,37 @@ async function processOneRow(
   };
 }
 
-async function markFailed(runId: string, message: string): Promise<ProcessResult> {
+async function markFailed(
+  runId: string,
+  message: string,
+  fence: RunFence,
+): Promise<ProcessResult> {
   if (supabaseAdmin) {
-    await supabaseAdmin
-      .from('client_manual_score_runs')
-      .update({
-        status: 'failed',
-        error_message: message.slice(0, 500),
-        finished_at: new Date().toISOString(),
-      })
-      .eq('id', runId);
+    await fence(
+      supabaseAdmin
+        .from('client_manual_score_runs')
+        .update({
+          status: 'failed',
+          error_message: message.slice(0, 500),
+          finished_at: new Date().toISOString(),
+        })
+        .eq('id', runId),
+    );
   }
   return {
     status: 'failed',
     total: 0,
-    buckets: { storage: 0, medium: 0, high: 0, top: 0, invalid: 0 },
+    buckets: EMPTY_BUCKETS(),
     error: message,
   };
 }
 
-async function finalize(runId: string): Promise<ProcessResult> {
+async function finalize(runId: string, fence: RunFence): Promise<ProcessResult> {
   if (!supabaseAdmin) {
     return {
       status: 'failed',
       total: 0,
-      buckets: { storage: 0, medium: 0, high: 0, top: 0, invalid: 0 },
+      buckets: EMPTY_BUCKETS(),
       error: 'supabaseAdmin gone',
     };
   }
@@ -730,18 +864,20 @@ async function finalize(runId: string): Promise<ProcessResult> {
     if (r.email2 && isReadyEmailStatus(r.email2_validation_status)) buckets[r.bucket] += 1;
   }
 
-  await supabaseAdmin
-    .from('client_manual_score_runs')
-    .update({
-      status: 'completed',
-      finished_at: new Date().toISOString(),
-      processed_count: processed,
-      bucket_storage_count: buckets.storage,
-      bucket_medium_count: buckets.medium,
-      bucket_high_count: buckets.high,
-      bucket_top_count: buckets.top,
-    })
-    .eq('id', runId);
+  await fence(
+    supabaseAdmin
+      .from('client_manual_score_runs')
+      .update({
+        status: 'completed',
+        finished_at: new Date().toISOString(),
+        processed_count: processed,
+        bucket_storage_count: buckets.storage,
+        bucket_medium_count: buckets.medium,
+        bucket_high_count: buckets.high,
+        bucket_top_count: buckets.top,
+      })
+      .eq('id', runId),
+  );
 
   return { status: 'completed', total: processed, buckets };
 }

@@ -44,6 +44,16 @@ export interface FetchScoreInput {
   domain: string;
   /** Optional per-call timeout override. */
   timeoutMs?: number;
+  /**
+   * Сигнал прерывания вызывающего (необязателен).
+   *
+   * Нужен вызывающим на едином жизненном цикле задач: когда аренда потеряна
+   * или пришёл SIGTERM, платный запрос к внешнему сервису — работа за чужой
+   * счёт, и её надо бросить сразу, а не досидеть таймаут с двумя повторами.
+   * Прерывание гасит и ожидание суточного токена, и сам HTTP-вызов, и паузы
+   * между повторами. Без сигнала поведение прежнее.
+   */
+  signal?: AbortSignal;
 }
 
 export interface FetchScoreResult {
@@ -94,12 +104,17 @@ export async function fetchScoreForDomain(input: FetchScoreInput): Promise<Fetch
   const { url, apiKey, domain } = input;
   const authScheme = (input.authScheme ?? 'Bearer').trim();
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const outerSignal = input.signal;
+
+  if (outerSignal?.aborted) {
+    return { score: null, spf: null, raw: null, ok: false, error: 'aborted' };
+  }
 
   // Жёсткий распределённый лимит к Mailganer (≤20k/сутки, равномерно). Только
   // для mailganer-эндпоинта; на исчерпании бюджета домен пропускаем (ok:false),
   // фоновые скореры возьмут его в следующий тик. См. mailganerScoringRateLimit.
   if (isMailganerEndpointUrl(url)) {
-    const allowed = await acquireMailganerScoreToken();
+    const allowed = await acquireMailganerScoreToken(outerSignal);
     if (!allowed) {
       return { score: null, spf: null, raw: null, ok: false, error: 'rate_limited' };
     }
@@ -108,8 +123,21 @@ export async function fetchScoreForDomain(input: FetchScoreInput): Promise<Fetch
   let lastError = '';
 
   for (let attempt = 0; attempt <= RETRY_ATTEMPTS; attempt++) {
+    if (outerSignal?.aborted) {
+      return { score: null, spf: null, raw: null, ok: false, error: 'aborted' };
+    }
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    // Внешнее прерывание рвёт тот же контроллер, что и таймаут: fetch не умеет
+    // двух сигналов, а AbortSignal.any есть не во всех рантаймах, где собирается
+    // этот бандл. Слушателя обязательно снимаем — иначе долгий сигнал воркера
+    // копил бы по одному на каждый домен прогона.
+    const onOuterAbort = () => controller.abort();
+    outerSignal?.addEventListener('abort', onOuterAbort, { once: true });
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      outerSignal?.removeEventListener('abort', onOuterAbort);
+    };
 
     try {
       const headers: HeadersInit = { 'Content-Type': 'application/json' };
@@ -126,7 +154,7 @@ export async function fetchScoreForDomain(input: FetchScoreInput): Promise<Fetch
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
+      cleanup();
 
       if (!res.ok) {
         lastError = `HTTP ${res.status}`;
@@ -154,13 +182,21 @@ export async function fetchScoreForDomain(input: FetchScoreInput): Promise<Fetch
         };
       }
     } catch (err) {
-      clearTimeout(timeoutId);
+      cleanup();
       lastError = err instanceof Error ? err.message : 'fetch failed';
       // На abort/timeout/network — ретраим (до RETRY_ATTEMPTS+1 попыток).
+      // Кроме внешнего прерывания: решаем по СИГНАЛУ, а не по имени ошибки —
+      // таймаут и прерывание дают неотличимый AbortError.
+      if (outerSignal?.aborted) {
+        return { score: null, spf: null, raw: null, ok: false, error: 'aborted' };
+      }
     }
 
     if (attempt < RETRY_ATTEMPTS) {
       await sleep(RETRY_BASE_DELAY_MS * Math.pow(2, attempt));
+      if (outerSignal?.aborted) {
+        return { score: null, spf: null, raw: null, ok: false, error: 'aborted' };
+      }
     }
   }
 
