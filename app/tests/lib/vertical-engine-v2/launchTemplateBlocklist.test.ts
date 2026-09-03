@@ -110,6 +110,7 @@ function portalDb() {
       ve_finalize_template_launch: async () => ({ data: { finalized: true } }),
       ve_bind_contact_delivery_plan: async () => ({ data: { bound: true, replayed: false } }),
       ve_finalize_template_contact_delivery: async () => ({ data: { finalized: true } }),
+      ve_contact_supply_approval_current: async () => ({ data: true }),
     },
   });
 }
@@ -138,8 +139,20 @@ function instantlyDb(options: { blocklistError?: string; blockedEmails?: string[
   });
 }
 
-async function launch(options: { blocklistError?: string; blockedEmails?: string[]; reservedEmails?: string[] } = {}) {
+async function launch(options: { blocklistError?: string; blockedEmails?: string[]; reservedEmails?: string[]; preview?: boolean; supplyBatch?: boolean; approvedPlan?: Record<string, unknown>; force?: boolean } = {}) {
   const portal = portalDb();
+  if (options.preview) {
+    await portal.from('ve_bases').update({ collect_info: { collection_mode: 'preview' } }).eq('id', BASE_ID);
+  }
+  if (options.supplyBatch) {
+    await portal.from('ve_templates').update({ supply_batch_id: 'batch-1' }).eq('id', TEMPLATE_ID);
+  }
+  if (options.approvedPlan) await portal.from('ve_contact_supply_plans').insert({
+    id: 'supply-1', template_id: TEMPLATE_ID, status: 'active', preview_audit_id: AUDIT_ID,
+    approval_snapshot: { preset_id: 'preset-1', portal_project_id: PORTAL_PROJECT_ID,
+      portal_period_id: PORTAL_PERIOD_ID, target_contacts: 100, instantly_account_id: 'workspace-a' },
+    ...options.approvedPlan,
+  });
   if (options.reservedEmails) {
     await portal.from('ve_contact_delivery_rows').insert(options.reservedEmails.map((email, index) => ({
       id: `reserved-${index}`, ve_project_id: PROJECT_ID, campaign_row_id: 'previous-child', email_normalized: email, status: 'accepted',
@@ -151,7 +164,7 @@ async function launch(options: { blocklistError?: string; blockedEmails?: string
     instantlyDb: instantly as never,
     templateId: TEMPLATE_ID,
     presetId: 'preset-1',
-    force: false,
+    force: options.force === true,
     segmentationAuditId: AUDIT_ID,
     confirmSegmentation: true,
     userId: 'staff-1',
@@ -200,6 +213,19 @@ beforeEach(() => {
 });
 
 describe('Vertical Engine v2 initial launch client blocklist', () => {
+  it('requires customer approval for a new preview and never launches an internal supply template', async () => {
+    for (const options of [{ preview: true }, { supplyBatch: true },
+      { preview: true, approvedPlan: { preview_audit_id: 'other-audit' } },
+      { preview: true, approvedPlan: { item_id: 'already-launched' }, force: true },
+      { preview: true, approvedPlan: { approval_snapshot: { preset_id: 'preset-1', portal_project_id: PORTAL_PROJECT_ID,
+        portal_period_id: PORTAL_PERIOD_ID, target_contacts: 100, instantly_account_id: 'other-workspace' } } },
+    ]) {
+      const { outcome } = await launch(options);
+      expect(outcome.status).toBe(409);
+      expect(mockCreateCampaign).not.toHaveBeenCalled();
+      expect(mockCreateLeads).not.toHaveBeenCalled();
+    }
+  });
   it('does not create campaigns for contacts already committed by another hypothesis', async () => {
     const { outcome } = await launch({ reservedEmails: ['allowed@example.test'] });
     expect(outcome.status).toBe(400);

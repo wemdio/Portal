@@ -3,6 +3,7 @@ import {
   runContactDeliveryDay,
   type ContactDeliveryDayResult,
 } from '@/lib/verticalEngineV2/contactDeliveryRunner';
+import { runProjectContactSupply } from './contactSupplyRunner';
 
 export type ContactDeliverySchedulerLog = (
   level: 'info' | 'warn' | 'error',
@@ -46,6 +47,7 @@ export async function runBoundContactDeliveries(input: {
   instantlyDb: SupabaseClient | null;
   now?: Date;
   runProject?: RunContactDeliveryProject;
+  runSupply?: typeof runProjectContactSupply;
   log: ContactDeliverySchedulerLog;
 }): Promise<ContactDeliverySweepResult> {
   if (!input.instantlyDb) {
@@ -105,6 +107,14 @@ export async function runBoundContactDeliveries(input: {
   let failedProjects = 0;
 
   for (const project of projects) {
+    try {
+      await (input.runSupply ?? runProjectContactSupply)({
+        portalDb: input.portalDb, instantlyDb: input.instantlyDb, veProjectId: project.id, now: input.now,
+      });
+    } catch (error) {
+      // A source outage must not stop the already validated ready reserve.
+      input.log('error', `VE2 contact supply project ${project.id} failed`, error);
+    }
     try {
       const result = await runProject({
         portalDb: input.portalDb,

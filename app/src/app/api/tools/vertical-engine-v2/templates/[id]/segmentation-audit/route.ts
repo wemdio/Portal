@@ -66,7 +66,7 @@ async function loadTemplateAndBase(db: SupabaseClient, templateId: string): Prom
 > {
   const { data: templateRow, error: templateError } = await db
     .from('ve_templates')
-    .select('id, base_id, vertical_id, letters, personalization_plan, status, launch_info')
+    .select('id, base_id, vertical_id, letters, personalization_plan, status, launch_info, supply_batch_id')
     .eq('id', templateId)
     .single();
   if (templateError || !templateRow) {
@@ -76,6 +76,12 @@ async function loadTemplateAndBase(db: SupabaseClient, templateId: string): Prom
         templateError?.code === 'PGRST116' ? 'Шаблон не найден' : templateError?.message ?? 'Шаблон не найден',
         templateError?.code === 'PGRST116' ? 404 : 500,
       ),
+    };
+  }
+  if (templateRow.supply_batch_id) {
+    return {
+      ok: false,
+      response: jsonError('Аудит партии пополнения запускается только согласованным планом', 409),
     };
   }
   const template = templateRow as TemplateRow;

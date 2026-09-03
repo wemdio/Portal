@@ -5,6 +5,8 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue';
+import { VE_PREVIEW_READY_TARGET, VE_COLLECTION_MAX_CANDIDATES } from '@/lib/verticalEngineV2/collectionTarget';
+import { stripTaskHarvest } from '@/lib/verticalEngineV2/projectDetail';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -17,20 +19,8 @@ function jsonError(message: string, status: number) {
 // POST — запустить авто-сборку базы под вертикаль (стадия base_collect: план
 // источников → коллекторы → harvest в ve_bases). Создаёт ve_bases
 // (source='auto', status='collecting') + ve_jobs (stage='base_collect').
-// Тело опционально: {limit?: 2000 | 10000 | 50000, hypothesis_ids?: string[]}.
-// limit — лимит строк сборки (практический предохранитель от раздутого data
-// jsonb; выбор — за пользователем, дефолт 10000). hypothesis_ids — выбранные
-// в UI гипотезы: массив непустых строк (иначе 400); пустой массив равноценен
-// отсутствию поля. Лимит и непустой hypothesis_ids едут в payload джобы (их
-// читают totalRowsCap и buildPlan в стадии) и в ve_bases.collect_info (его
-// показывает UI).
-// Дедуп и вставки — в lib/verticalEngineV2/baseCollectEnqueue.ts (им же
-// пользуется клиентский ENG-контур): активная сборка этой вертикали →
-// 200 + existing, иначе 201; гонку параллельных запусков закрывает
-// partial unique index ve_bases_one_collecting_per_vertical.
-/** Допустимые лимиты строк авто-сборки (см. UI Step4Base). */
-const ALLOWED_LIMITS: readonly number[] = [2000, 10000, 50000];
-const DEFAULT_LIMIT = 10000;
+// Каждый новый ручной запуск готовит превью по явно выбранным гипотезам.
+// Старый client-supplied limit больше не управляет сбором: цель задаёт сервер.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.vertical-engine-v2.collect.post' },
@@ -43,29 +33,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const { id } = await params;
       if (!id) return jsonError('Missing id', 400);
 
-      // Тело опционально (пустое/не-JSON — ок): лимит строк из выбора
-      // пользователя, любое значение вне ALLOWED_LIMITS — 400.
       let body: unknown = null;
       try {
         body = await req.json();
       } catch {
         body = null;
       }
-      let limit = DEFAULT_LIMIT;
-      if (body && typeof body === 'object' && 'limit' in body) {
-        const raw = (body as { limit?: unknown }).limit;
-        if (raw !== undefined) {
-          if (typeof raw !== 'number' || !ALLOWED_LIMITS.includes(raw)) {
-            return jsonError('limit должен быть одним из: 2000, 10000, 50000', 400);
-          }
-          limit = raw;
-        }
-      }
-
-      // Выбор гипотез из UI (шаг 4): массив непустых строк или отсутствие
-      // поля; пустой массив трактуем как «поля нет» (стадия фильтрует план
-      // только по непустому массиву — иначе «снял все галочки» молча собирало
-      // бы по всем гипотезам, а UI в таком состоянии кнопку блокирует).
       let hypothesisIds: string[] | null = null;
       if (body && typeof body === 'object' && 'hypothesis_ids' in body) {
         const raw = (body as { hypothesis_ids?: unknown }).hypothesis_ids;
@@ -79,6 +52,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           hypothesisIds = raw.length > 0 ? raw : null;
         }
       }
+      if (!hypothesisIds?.length) return jsonError('Выберите хотя бы одну гипотезу для превью', 400);
 
       const { data: vertical, error: vertErr } = await supabaseAdmin
         .from('ve_verticals')
@@ -96,7 +70,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         verticalId: id,
         projectId: vertical.project_id,
         verticalName: vertical.name,
-        limit,
+        limit: VE_COLLECTION_MAX_CANDIDATES,
+        collectionMode: 'preview',
+        readyTarget: VE_PREVIEW_READY_TARGET,
         hypothesisIds,
       });
       if (!result.ok) {
@@ -107,7 +83,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         return jsonError(result.message, 500);
       }
       if (!result.created) {
-        return NextResponse.json({ ok: true, existing: true, base: result.base });
+        return NextResponse.json({ ok: true, existing: true, base: stripTaskHarvest(result.base) });
       }
 
       void logAudit('tools.vertical-engine-v2.collect.enqueued', 'Hypothesis engine auto-collect enqueued', {
@@ -117,7 +93,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         basesCount: result.bases.length,
       });
 
-      return NextResponse.json({ ok: true, base: result.base, bases: result.bases }, { status: 201 });
+      return NextResponse.json({
+        ok: true, base: stripTaskHarvest(result.base), bases: result.bases.map(stripTaskHarvest),
+      }, { status: 201 });
     },
   );
 }

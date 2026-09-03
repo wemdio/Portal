@@ -46,6 +46,8 @@ jest.mock('@/lib/verticalEngineV2/stages/segmentationAudit', () => ({
 }));
 
 import { POST } from '@/app/api/tools/vertical-engine-v2/templates/[id]/launch/delivery-preview/route';
+import { GET as GET_SUPPLY, POST as POST_SUPPLY } from '@/app/api/tools/vertical-engine-v2/templates/[id]/supply/route';
+import { approveVeContactSupply } from '@/lib/verticalEngineV2/contactSupplyApproval';
 
 function request(overrides: Record<string, unknown> = {}): NextRequest {
   return new Request(
@@ -72,6 +74,8 @@ function seed(options: {
   deadline?: unknown;
   periodId?: string;
   blocklistError?: string;
+  blockedEmails?: string[];
+  supplyRevision?: string;
 } = {}) {
   mockPortalDb = createMockSupabase({
     tables: {
@@ -111,12 +115,19 @@ function seed(options: {
         deadline: options.deadline === undefined ? '2026-09-11' : options.deadline,
       }],
     },
+    rpcHandlers: options.supplyRevision ? {
+      ve_contact_supply_preview_revision: () => ({ data: options.supplyRevision }),
+      ve_contact_supply_approval_current: () => ({ data: true }),
+      ve_approve_contact_supply: () => ({ data: 'supply-plan-1' }),
+    } : undefined,
   });
   mockInstantlyDb = createMockSupabase({
     tables: {
       client_campaign_presets: [{
         id: PRESET_ID,
         client_user_id: 'client-preview-1',
+        instantly_account_id: 'main',
+        email_account_ids: ['sender@example.test'],
         daily_limit: 3,
         daily_max_leads: 2,
         schedule_days: [1, 2, 3, 4, 5],
@@ -126,7 +137,7 @@ function seed(options: {
     rpcHandlers: {
       client_blocklist_snapshot: () => options.blocklistError
         ? { data: null, error: { message: options.blocklistError } }
-        : { data: { count: 1, emails: ['blocked@example.test'] } },
+        : { data: { count: (options.blockedEmails ?? ['blocked@example.test']).length, emails: options.blockedEmails ?? ['blocked@example.test'] } },
     },
   });
   mockAuditValidation = {
@@ -164,6 +175,89 @@ describe('POST Vertical Engine v2 contact-delivery preview', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     seed();
+  });
+
+  it('requires explicit customer confirmation before approval and fails closed on revision-read errors', async () => {
+    const input = { templateId: TEMPLATE_ID, portalProjectId: PORTAL_PROJECT_ID,
+      expectedPortalPeriodId: PERIOD_ID, targetContacts: 23, presetId: PRESET_ID,
+      segmentationAuditId: AUDIT_ID, userId: 'staff-1', confirmed: false, reviewedRevision: 'reviewed' };
+    const unconfirmed = await approveVeContactSupply(mockPortalDb as never, mockInstantlyDb as never, input);
+    expect(unconfirmed.status).toBe(400);
+    expect(mockPortalDb.rpcCalls).toHaveLength(0);
+    const unavailable = await approveVeContactSupply(mockPortalDb as never, mockInstantlyDb as never, { ...input, confirmed: true });
+    expect(unavailable.status).toBe(503);
+    expect(mockPortalDb.rpcCalls.some((call) => call.fn === 've_approve_contact_supply')).toBe(false);
+  });
+
+  it.each([
+    { name: 'current review', revision: 'reviewed', allBlocked: false, status: 200 },
+    { name: 'stale review', revision: 'changed', allBlocked: false, status: 409 },
+    { name: 'fully blocked audience', revision: 'reviewed', allBlocked: true, status: 409 },
+  ])('approves only usable, currently reviewed supply: $name', async ({ revision, allBlocked, status }) => {
+    seed({ supplyRevision: revision, ...(allBlocked ? { blockedEmails: ['ready-a', 'ready-b', 'ready-c', 'blocked'].map((name) => `${name}@example.test`) } : {}) });
+    const response = await POST_SUPPLY(request({
+      action: 'approve', confirm_customer_approval: true, expected_preview_revision: 'reviewed',
+      segmentation_audit_id: AUDIT_ID, userId: 'untrusted-body-user',
+    }), { params: Promise.resolve({ id: TEMPLATE_ID }) });
+    expect(response.status).toBe(status);
+    const approvals = mockPortalDb.rpcCalls.filter((call) => call.fn === 've_approve_contact_supply');
+    expect(approvals).toEqual(status === 200 ? [{ fn: 've_approve_contact_supply', params: {
+      p_template_id: TEMPLATE_ID, p_audit_id: AUDIT_ID, p_expected_preview_revision: 'reviewed',
+      p_preset_id: PRESET_ID, p_portal_project_id: PORTAL_PROJECT_ID, p_portal_period_id: PERIOD_ID,
+      p_target_contacts: 23, p_instantly_account_id: 'main', p_approved_by: 'user-preview-1',
+      p_now: '2026-09-06T21:30:00.000Z',
+    } }] : []);
+    expect([mockPortalDb.mutations, mockInstantlyDb.mutations]).toEqual([[], []]);
+  });
+
+  it('reports unblocked hypothesis stock, local uploads and the frozen day plan without reviving an unknown later estimate', async () => {
+    seed({ supplyRevision: 'reviewed' });
+    const estimate = { contacts: 10, as_of: '2026-09-06T12:00:00.000Z', scope: 'Observed directory yield', confidence: 'low' };
+    await mockPortalDb.from('ve_bases').update({ collect_info: { collection_mode: 'preview', estimate: { remaining_ready_estimate: estimate } } }).eq('id', BASE_ID);
+    await mockPortalDb.from('ve_contact_supply_plans').insert({
+      id: 'supply-plan-1', template_id: TEMPLATE_ID, project_id: VE_PROJECT_ID, item_id: 'item-a',
+      preview_audit_id: AUDIT_ID, status: 'active', approved_at: estimate.as_of, last_error: null, source_state: {},
+      approval_snapshot: { preset_id: PRESET_ID, portal_project_id: PORTAL_PROJECT_ID, portal_period_id: PERIOD_ID, target_contacts: 23 },
+    });
+    await mockPortalDb.from('ve_launch_queue_items').insert(['a', 'b'].map((id) => ({
+      id: `item-${id}`, project_id: VE_PROJECT_ID, status: 'active', potential_pct: 50,
+    })));
+    await mockPortalDb.from('ve_launch_queue_campaigns').insert(['a', 'b'].map((id) => ({
+      id: `child-${id}`, item_id: `item-${id}`, campaign_id: `campaign-${id}`,
+    })));
+    await mockInstantlyDb.from('instantly_campaign_catalog').insert([
+      { id: 'campaign-a', new_leads_contacted_count: 4 }, { id: 'campaign-b', new_leads_contacted_count: 0 },
+    ]);
+    await mockPortalDb.from('ve_contact_delivery_rows').insert([
+      ['a', 'ready', 'ready-a', null], ['a', 'ready', 'reserve-a', null], ['a', 'ready', 'blocked', null],
+      ['a', 'accepted', 'accepted-today', '2026-09-06T21:05:00Z'],
+      ['a', 'accepted', 'accepted-yesterday', '2026-09-06T20:59:00Z'],
+      ['a', 'attempting', 'attempting', null], ['a', 'uncertain', 'uncertain', null],
+      ['b', 'ready', 'ready-b', null], ['b', 'ready', 'ready-c', null], ['b', 'ready', 'reserve-b', null],
+    ].map(([item, status, email, finalized_at], index) => ({
+      id: `row-${index}`, ve_project_id: VE_PROJECT_ID, item_id: `item-${item}`, campaign_row_id: `child-${item}`,
+      status, email_normalized: `${email}@example.test`, finalized_at,
+    })));
+    await mockPortalDb.from('ve_contact_delivery_daily_runs').insert([
+      { id: 'other-period', ve_project_id: VE_PROJECT_ID, portal_period_id: 'other', run_date: '2026-09-07', effective_count: 99 },
+      { id: 'yesterday', ve_project_id: VE_PROJECT_ID, portal_period_id: PERIOD_ID, run_date: '2026-09-06', effective_count: 50 },
+      { id: 'today', ve_project_id: VE_PROJECT_ID, portal_period_id: PERIOD_ID, run_date: '2026-09-07', effective_count: 0 },
+    ]);
+    const read = async () => {
+      const response = await GET_SUPPLY(new Request(`http://portal.test/templates/${TEMPLATE_ID}/supply`) as NextRequest, { params: Promise.resolve({ id: TEMPLATE_ID }) });
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+    const status = await read();
+    expect(status).toMatchObject({ required: true, preview_revision: 'reviewed', estimate, plan: { current: true, launched: true } });
+    expect(status.metrics).toEqual({
+      ready: 2, uploaded: 2, uploaded_today: 1, uncertain: 2, project_first_contacted: 10,
+      project_daily_plan: 0, project_required_daily: 2, project_ready: 5, project_stock_workdays: 2,
+      hypothesis_daily_target: 1, hypothesis_stock_workdays: 2, hypothesis_estimated_workdays: 12,
+      business_date: '2026-09-07', timezone: 'Europe/Moscow',
+    });
+    await mockPortalDb.from('ve_contact_supply_plans').update({ source_state: { previous_base_id: 'later-supply-base' }, estimate: { remaining_ready_estimate: null } }).eq('id', 'supply-plan-1');
+    expect(await read()).toMatchObject({ estimate: null, metrics: { ready: 2, hypothesis_estimated_workdays: null } });
   });
 
   it('uses only the exact active Portal period and the fresh unblocked audited audience', async () => {

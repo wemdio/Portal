@@ -104,6 +104,10 @@ export interface VeCollectStatsDto {
 }
 
 export interface VeCollectInfo {
+  collection_mode?: 'preview' | 'supply';
+  ready_target?: number;
+  supply_hold?: boolean;
+  target_progress?: import('@/lib/verticalEngineV2/collectionTarget').VeCollectionTargetProgress;
   /** Более ранняя база проекта, которую ждёт этот сбор. */
   waiting_for_base_id?: string | null;
   /** Снимок обработки; не означает, что итоговая база уже сохранена. */

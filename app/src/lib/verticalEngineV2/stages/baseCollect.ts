@@ -98,6 +98,11 @@ import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
 import { findIrrelevantRows } from '../relevanceGate';
 import { prepareSegmentationAudience } from '../segmentationAudit';
+import { isContactSupplyActive } from '../contactSupplyEligibility';
+import {
+  collectionRoundLimit, createCollectionTarget, finishCollectionRound, estimateRemainingReady,
+  type VeCollectionMode, type VeCollectionTargetProgress, type VeRemainingReadyEstimate,
+} from '../collectionTarget';
 import {
   probeSliceRelevance,
   sliceProbeRejectBelow,
@@ -123,6 +128,7 @@ import {
   newUsage,
   payloadString,
   readProject,
+  requeueVeJob as requeueSelf,
   stageLog,
   type VeStageContext,
   type VeStageResult,
@@ -626,6 +632,20 @@ export interface VeCollectInfo {
   limit?: number;
   /** Более ранняя авто-сборка проекта: эта база ещё не начала работу. */
   waiting_for_base_id?: string;
+  collection_mode?: VeCollectionMode;
+  ready_target?: number;
+  supply_batch_id?: string;
+  supply_hold?: boolean;
+  supply_hold_since?: string;
+  target_progress?: VeCollectionTargetProgress;
+  /** Worker-only: discarded candidates must not be paid for again next round. */
+  target_checkpoint?: {
+    completed_round: number;
+    seen_rows: Array<Pick<VeUnifiedRow, 'company' | 'inn' | 'email'>>;
+    processed_rows?: number;
+    low_relevance?: number;
+    relevance_unchecked?: number;
+  };
   /**
    * Refill-режим ENG auto-pipeline (payload.refill джобы): после CONSTRUCT —
    * долив лидов в запущенную кампанию вместо analyzing/base_analyze.
@@ -661,6 +681,7 @@ export interface VeCollectInfo {
     companies_with_phone?: number | null;
     directory_rows_total?: number | null;
     note?: string;
+    remaining_ready_estimate?: VeRemainingReadyEstimate | null;
   };
   tasks?: VeCollectTaskState[];
   /** Фаза CONSTRUCT: состояние передачи базы конструктору (появляется после HARVEST). */
@@ -1698,29 +1719,6 @@ async function pollTask(ctx: VeStageContext, state: VeCollectTaskState, limit: n
   // queued/running/pending — задача остаётся dispatched, ждём следующий тик.
 }
 
-/* ─────────────────────────── Self-requeue ─────────────────────────── */
-
-/**
- * Вернуть свою джобу в pending БЕЗ инкремента attempts — воркер клеймит её
- * не раньше run_after (пауза между тиками ожидания: 30с — дочерние парсеры,
- * 60с — конструктор баз; без паузы цикл claim→requeue крутился с нулевой
- * задержкой, ~10 запросов к БД на итерацию в течение всего ожидания).
- * Финальный done-апдейт воркер пропускает, видя, что строка больше не running
- * (см. app/worker/verticalEngineV2.ts).
- */
-async function requeueSelf(ctx: VeStageContext, job: VeJob, cooldownMs = 30_000): Promise<void> {
-  const { error } = await ctx.supabase
-    .from('ve_jobs')
-    .update({
-      status: 'pending',
-      started_at: null,
-      run_after: new Date(Date.now() + cooldownMs).toISOString(),
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', job.id);
-  if (error) throw new Error(`ve_jobs requeue: ${error.message}`);
-}
-
 /* ─────────────────────────── Исключение чужих баз проекта ─────────────────────────── */
 
 /** Нормализация ИНН для дедупа: только цифры, валидная длина 10/12. */
@@ -1879,10 +1877,13 @@ async function loadOtherBaseExclusionKeys(
   ctx: VeStageContext,
   projectId: string,
   baseId: string,
+  checkpointHypothesisId?: string | null,
 ): Promise<VeBaseExclusionKeys> {
   const { data, error } = await ctx.supabase
     .from('ve_bases')
-    .select('data')
+    .select(checkpointHypothesisId
+      ? 'data, hypothesis_id, target_checkpoint:collect_info->target_checkpoint'
+      : 'data')
     .eq('project_id', projectId)
     .neq('status', 'failed')
     .neq('id', baseId);
@@ -1893,8 +1894,15 @@ async function loadOtherBaseExclusionKeys(
     inns: new Set<string>(),
     emails: new Set<string>(),
   };
-  for (const row of (data ?? []) as Array<{ data?: unknown }>) {
+  for (const row of (data ?? []) as Array<{
+    data?: unknown; hypothesis_id?: string; target_checkpoint?: VeCollectInfo['target_checkpoint'];
+    collect_info?: VeCollectInfo;
+  }>) {
     addRowsToExclusionKeys(keys, Array.isArray(row.data) ? row.data : []);
+    if (checkpointHypothesisId && row.hypothesis_id === checkpointHypothesisId) {
+      const checkpoint = row.target_checkpoint ?? row.collect_info?.target_checkpoint;
+      addRowsToExclusionKeys(keys, Array.isArray(checkpoint?.seen_rows) ? checkpoint.seen_rows : []);
+    }
   }
   return keys;
 }
@@ -1918,17 +1926,21 @@ async function findOlderCollectingBase(
   ctx: VeStageContext,
   projectId: string,
   base: Pick<VeAutoBase, 'id' | 'created_at'>,
+  resumingHeldSupply = false,
 ): Promise<string | null> {
   const { data, error } = await ctx.supabase
     .from('ve_bases')
-    .select('id, created_at')
+    .select('id, created_at, supply_hold:collect_info->supply_hold')
     .eq('project_id', projectId)
     .eq('source', 'auto')
     .eq('status', 'collecting')
     .neq('id', base.id);
   if (error) throw new Error(`ve_bases collecting read: ${error.message}`);
-  const older = ((data ?? []) as Array<Pick<VeAutoBase, 'id' | 'created_at'>>)
-    .filter((candidate) => isOlderCollectingBase(base, candidate))
+  const older = ((data ?? []) as Array<Pick<VeAutoBase, 'id' | 'created_at'> & {
+    supply_hold?: boolean; collect_info?: VeCollectInfo;
+  }>)
+    .filter((candidate) => candidate.supply_hold !== true && candidate.collect_info?.supply_hold !== true)
+    .filter((candidate) => resumingHeldSupply || isOlderCollectingBase(base, candidate))
     .sort((a, b) => baseCreatedAtMs(a) - baseCreatedAtMs(b) || a.id.localeCompare(b.id));
   if (older.length === 0) return null;
 
@@ -2221,12 +2233,141 @@ async function importConstructRows(ctx: VeStageContext, bcJobId: string): Promis
 
 /* ─────────────────────────── Стадия ─────────────────────────── */
 
-export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
+async function holdInactiveSupply(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo): Promise<boolean> {
+  const batchId = info.supply_batch_id ?? job.payload?.supply_batch_id;
+  if (info.collection_mode !== 'supply' || typeof batchId !== 'string') return false;
+  const { data: batch, error: batchError } = await ctx.supabase.from('ve_contact_supply_batches')
+    .select('plan_id').eq('id', batchId).eq('base_id', base.id).maybeSingle();
+  if (batchError || !batch?.plan_id) throw new Error(`supply batch unavailable: ${batchError?.message ?? batchId}`);
+  if (await isContactSupplyActive(ctx.supabase, batch.plan_id)) return false;
+  if (!info.supply_hold) {
+    info.supply_hold = true;
+    info.supply_hold_since = new Date().toISOString();
+    delete info.waiting_for_base_id;
+    await persistCollectInfo(ctx, base.id, info);
+  }
+  await requeueSelf(ctx, job, 5 * 60_000);
+  return true;
+}
+
+function resumeHeldSupplyTimers(info: VeCollectInfo): void {
+  const heldAt = Date.parse(info.supply_hold_since ?? '');
+  const pausedMs = Number.isFinite(heldAt) ? Math.max(0, Date.now() - heldAt) : 0;
+  const adjusted = (value: string | undefined) => {
+    const time = Date.parse(value ?? '');
+    return Number.isFinite(time) ? new Date(time + pausedMs).toISOString() : value;
+  };
+  if (info.construct?.dispatched_at) info.construct.dispatched_at = adjusted(info.construct.dispatched_at);
+  for (const task of info.tasks ?? []) if (task.dispatched_at) task.dispatched_at = adjusted(task.dispatched_at);
+  delete info.supply_hold;
+  delete info.supply_hold_since;
+}
+
+async function ensureTargetBaseAnalysis(ctx: VeStageContext, job: VeJob, baseId: string): Promise<void> {
+  const { data, error } = await ctx.supabase.from('ve_jobs').select('id, payload')
+    .eq('project_id', job.project_id).eq('stage', 'base_analyze');
+  if (error) throw new Error(`ve_jobs analysis recovery read: ${error.message}`);
+  if ((data ?? []).some((candidate) => (candidate.payload as { base_id?: string } | null)?.base_id === baseId)) return;
+  const { error: insertError } = await ctx.supabase.from('ve_jobs').insert({
+    project_id: job.project_id, stage: 'base_analyze', status: 'pending', payload: { base_id: baseId },
+  });
+  if (insertError) throw new Error(`ve_jobs base_analyze enqueue: ${insertError.message}`);
+}
+
+async function completeTargetRound(args: {
+  ctx: VeStageContext; job: VeJob; base: VeAutoBase; info: VeCollectInfo;
+  progress: VeCollectionTargetProgress; candidates: VeUnifiedRow[];
+  rows: Array<Record<string, unknown>>; columns: string[];
+  stats: NonNullable<VeCollectInfo['stats']>; hasBufferedCandidates: boolean;
+  validationError: string | null; usage: VeUsage;
+}): Promise<VeStageResult> {
+  const { ctx, job, base, info, progress } = args;
+  const tasks = info.tasks ?? [];
+  const prior = info.target_checkpoint;
+  const columns = [...new Set([...(base.columns ?? []), ...args.columns])];
+  const previousRows = Array.isArray(base.data) ? base.data : [];
+  const freshKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, base.id, base.hypothesis_id);
+  const availableRows = [...previousRows, ...args.rows].filter((row) =>
+    row && typeof row === 'object' && !baseRowMatchesExclusion(freshKeys, row as VeUnifiedRow),
+  );
+  const readyRows = prepareSegmentationAudience({ rows: availableRows, columns, source: 'auto' }).rows;
+  const seen = new Map<string, Pick<VeUnifiedRow, 'company' | 'inn' | 'email'>>();
+  for (const row of [...(prior?.seen_rows ?? []), ...args.candidates, ...args.rows]) {
+    const compact = { company: cell(row.company), inn: cell(row.inn), email: cell(row.email) };
+    seen.set(JSON.stringify(compact), compact);
+  }
+  const renewableDirectory = tasks.some((task) =>
+    task.source === 'companies_directory' && task.status === 'done' && !task.exhausted && !task.hit_ceiling,
+  );
+  const exhausted = !args.hasBufferedCandidates && tasks.length > 0 && tasks.every((task) =>
+    task.source === 'companies_directory' && task.status === 'done' && task.exhausted && !task.hit_ceiling,
+  );
+  const taskError = tasks.find((task) => task.status === 'failed');
+  const next = finishCollectionRound(progress, {
+    candidates: args.candidates.length, readyRows: readyRows.length,
+    exhausted, canContinue: args.hasBufferedCandidates || renewableDirectory,
+    error: args.validationError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null),
+  });
+  const checkpoint: NonNullable<VeCollectInfo['target_checkpoint']> = {
+    completed_round: progress.round,
+    seen_rows: [...seen.values()],
+    processed_rows: (prior?.processed_rows ?? 0) + args.rows.length,
+    low_relevance: (prior?.low_relevance ?? 0) + (args.stats.low_relevance ?? 0),
+    relevance_unchecked: (prior?.relevance_unchecked ?? 0) + (args.stats.relevance_unchecked ?? 0),
+  };
+  const stats: NonNullable<VeCollectInfo['stats']> = {
+    ...args.stats, rows_total: next.candidates_processed,
+    processed_rows: checkpoint.processed_rows, launchable_rows: readyRows.length,
+    low_relevance: checkpoint.low_relevance, relevance_unchecked: checkpoint.relevance_unchecked,
+  };
+  info.target_progress = next;
+  info.target_checkpoint = checkpoint;
+  if (info.estimate) info.estimate.remaining_ready_estimate = estimateRemainingReady({
+    population: info.estimate.unique_companies,
+    candidatesProcessed: next.candidates_processed, readyRows: readyRows.length,
+    asOf: new Date().toISOString(),
+    eligible: progress.mode === 'preview' && progress.round === 1 && !args.validationError
+      && tasks.length === 1 && tasks[0].source === 'companies_directory'
+      && !args.stats.excluded_existing_bases && !args.stats.excluded_during_fetch,
+  });
+  if (next.status === 'collecting') {
+    // One atomic checkpoint: prior validated output is durable BEFORE the next
+    // input round becomes pending. Resuming must never revalidate these rows.
+    delete info.construct;
+    delete stats.finished_at;
+    info.tasks = tasks.map((state) =>
+      state.source === 'companies_directory' && !state.exhausted && !state.hit_ceiling
+        ? { source: state.source, task: state.task, status: 'pending', child_job_id: null, rows: 0 }
+        : state,
+    );
+    info.limit = collectionRoundLimit(next);
+  } else {
+    stats.finished_at = new Date().toISOString();
+  }
+  info.stats = stats;
+  const status = next.status === 'collecting' ? 'collecting'
+    : next.status === 'error' ? 'failed'
+      : next.mode === 'preview' && readyRows.length > 0 ? 'analyzing' : 'analyzed';
+  const { error } = await ctx.supabase.from('ve_bases').update({
+    data: readyRows, columns, sample_rows: readyRows.slice(0, SAMPLE_ROWS), row_count: readyRows.length,
+    status, collect_info: info, error: next.status === 'error' ? next.reason?.slice(0, 500) : null,
+    updated_at: new Date().toISOString(),
+  }).eq('id', base.id);
+  if (error) throw new Error(`ve_bases target checkpoint: ${error.message}`);
+  if (next.status === 'collecting') await requeueSelf(ctx, job);
+  else if (status === 'analyzing') await ensureTargetBaseAnalysis(ctx, job, base.id);
+  return {
+    result: { base_id: base.id, rows: readyRows.length, target_status: next.status, ...(next.status === 'collecting' ? { waiting: true } : {}) },
+    tokensUsed: args.usage.tokensUsed, costUsd: args.usage.costUsd,
+  };
+}
+
+async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
   const usage = newUsage();
   const baseId = payloadString(job, 'base_id');
   // Лимит сборки из payload (route кладёт туда выбор пользователя): один на
   // всё — пагинация реестра, чтение дочерних джоб, итоговый кап базы.
-  const limit = totalRowsCap(job);
+  let limit = totalRowsCap(job);
   // Refill-режим ENG auto-pipeline: финал — долив в запущенную кампанию
   // (stages/baseCollectRefill.ts), а не analyzing + base_analyze.
   const isRefill = job.payload?.refill === true;
@@ -2247,6 +2388,9 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   // MAX_ATTEMPTS — каждая повторная попытка спотыкалась об этот guard и затирала
   // настоящую причину своим сообщением. No-op сохраняет причину в ve_bases.error.
   if (base.status === 'analyzing' || base.status === 'analyzed' || base.status === 'failed') {
+    if (base.status === 'analyzing' && base.collect_info?.collection_mode === 'preview') {
+      await ensureTargetBaseAnalysis(ctx, job, baseId);
+    }
     stageLog(ctx, `[base_collect] база ${baseId} уже в статусе '${base.status}' — повторная сборка не нужна`);
     return { result: { base_id: baseId, skipped: 'already_finished', base_status: base.status } };
   }
@@ -2255,7 +2399,36 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   }
   const info: VeCollectInfo =
     base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
-  const olderCollectingBaseId = await findOlderCollectingBase(ctx, job.project_id, base);
+  const mode = info.collection_mode ?? job.payload?.collection_mode;
+  if (mode !== undefined && mode !== 'preview' && mode !== 'supply') throw new Error('Unknown collection_mode');
+  let target: VeCollectionTargetProgress | null = null;
+  if (mode === 'preview' || mode === 'supply') {
+    if (isRefill || info.refill) throw new Error('Target collection cannot use legacy refill');
+    if (!base.hypothesis_id || base.project_id !== job.project_id) throw new Error('Target collection requires a scoped hypothesis base');
+    target = createCollectionTarget(mode, info.ready_target ?? job.payload?.ready_target as number | undefined);
+    const previous = info.target_progress;
+    if (previous) {
+      if (!Number.isSafeInteger(previous.round) || previous.round < 1 || previous.round > target.max_rounds
+        || !Number.isSafeInteger(previous.candidates_processed) || previous.candidates_processed < 0 || previous.candidates_processed > target.max_candidates
+        || !Number.isSafeInteger(previous.ready_rows) || previous.ready_rows < 0 || previous.ready_rows > target.max_candidates * 5
+        || (info.target_checkpoint?.completed_round ?? 0) !== previous.round - 1) {
+        throw new Error('Invalid collection target checkpoint');
+      }
+      target.round = previous.round;
+      target.candidates_processed = previous.candidates_processed;
+      target.ready_rows = previous.ready_rows;
+    }
+    info.collection_mode = mode;
+    info.ready_target = target.ready_target;
+    info.target_progress = target;
+    limit = collectionRoundLimit(target);
+    info.limit = limit;
+    if (!previous) await persistCollectInfo(ctx, baseId, info);
+  }
+  if (target && await holdInactiveSupply(ctx, job, base, info)) {
+    return { result: { waiting: true, base_id: baseId, supply_held: true } };
+  }
+  const olderCollectingBaseId = await findOlderCollectingBase(ctx, job.project_id, base, info.supply_hold === true);
   if (olderCollectingBaseId) {
     // result при self-requeue не сохраняется воркером. Очередь должна быть
     // видна через саму базу, но большой collect_info не переписываем без нужды.
@@ -2276,6 +2449,10 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   }
   if (info.waiting_for_base_id) {
     delete info.waiting_for_base_id;
+    await persistCollectInfo(ctx, baseId, info);
+  }
+  if (info.supply_hold) {
+    resumeHeldSupplyTimers(info);
     await persistCollectInfo(ctx, baseId, info);
   }
 
@@ -2362,7 +2539,11 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   let excludedKeysCache: VeBaseExclusionKeys | null = null;
   const getExcludedKeys = async (): Promise<VeBaseExclusionKeys> => {
     if (!excludedKeysCache) {
-      excludedKeysCache = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId);
+      excludedKeysCache = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, target ? base.hypothesis_id : undefined);
+      if (target) {
+        addRowsToExclusionKeys(excludedKeysCache, info.target_checkpoint?.seen_rows ?? []);
+        addRowsToExclusionKeys(excludedKeysCache, Array.isArray(base.data) ? base.data : []);
+      }
     }
     return excludedKeysCache;
   };
@@ -2404,7 +2585,7 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
       continue;
     }
     try {
-      await pollTask(ctx, state, limit);
+      await pollTask(ctx, state, target?.max_candidates ?? limit);
     } catch (e) {
       state.status = 'failed';
       state.error = e instanceof Error ? e.message : String(e);
@@ -2463,6 +2644,11 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   };
 
   if (merged.length === 0) {
+    if (target) return await completeTargetRound({
+      ctx, job, base, info, progress: target, candidates: [], rows: [],
+      columns: [...VE_AUTO_COLLECT_COLUMNS], stats, hasBufferedCandidates: false,
+      validationError: null, usage,
+    });
     // Refill-сборка ENG auto-pipeline: «новых компаний нет» — ШТАТНЫЙ исход
     // добора (сегмент под вертикаль уже выбран прошлыми сборками), а не сбой:
     // база уходит в терминальный 'analyzed' (НЕ failed), прогон журналируется
@@ -2534,6 +2720,11 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   // Это реальные кандидаты после дедупа, ещё не готовые получатели. row_count
   // остаётся счётчиком финальных строк, а finished_at до финала не публикуем.
   const candidateStats = { ...stats };
+  if (target) {
+    candidateStats.rows_total += target.candidates_processed;
+    candidateStats.processed_rows = info.target_checkpoint?.processed_rows ?? 0;
+    candidateStats.launchable_rows = target.ready_rows;
+  }
   delete candidateStats.finished_at;
   const candidateStatsChanged = !sameCollectSnapshot(info.stats, candidateStats);
   info.stats = candidateStats;
@@ -2670,7 +2861,7 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   // завершиться. Повторяем дедуп свежим чтением и уже по email тоже: именно
   // здесь ловятся контакты, найденные конструктором под разными названиями
   // компаний.
-  const freshExistingKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId);
+  const freshExistingKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, target ? base.hypothesis_id : undefined);
   const rowsBeforePostConstructDedup = finalRows.length;
   if (rowsBeforePostConstructDedup > 0) {
     const nextRows: VeUnifiedRow[] = [];
@@ -2697,6 +2888,11 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   }
 
   if (finalRows.length === 0) {
+    if (target) return await completeTargetRound({
+      ctx, job, base, info, progress: target, candidates: merged, rows: [],
+      columns: finalColumns, stats, hasBufferedCandidates: kept.length > merged.length,
+      validationError: null, usage,
+    });
     if (isRefill) {
       const refillResult = await completeVeRefillNoNew({
         ctx,
@@ -2851,6 +3047,13 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
       : { relevance_total_companies: relevanceTotalCompanies }),
     relevance_coverage_complete: relevanceCoverageComplete,
   };
+  if (target) return await completeTargetRound({
+    ctx, job, base, info, progress: target, candidates: merged, rows: storedRows,
+    columns: finalColumns, stats: statsWithQuality, hasBufferedCandidates: kept.length > merged.length,
+    validationError: !hasCompleteEmailValidation ? 'Проверка email завершилась не полностью'
+      : !relevanceCoverageComplete ? 'Проверка релевантности завершилась не полностью' : null,
+    usage,
+  });
 
   // ─── REFILL (ENG auto-pipeline) ───
   // Вместо финала «analyzing + base_analyze»: долив валидных строк лидами в
@@ -2904,4 +3107,27 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     tokensUsed: usage.tokensUsed,
     costUsd: usage.costUsd,
   };
+}
+
+/** Keep an explicit target error without erasing a committed round checkpoint. */
+export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
+  try {
+    return await runBaseCollectStageImpl(job, ctx);
+  } catch (error) {
+    try {
+      const baseId = payloadString(job, 'base_id');
+      const { data: base, error: readError } = await ctx.supabase.from('ve_bases')
+        .select('status, collect_info').eq('id', baseId).maybeSingle();
+      const info = base?.collect_info as VeCollectInfo | undefined;
+      if (!readError && info?.target_progress && base?.status !== 'analyzing' && base?.status !== 'analyzed') {
+        await persistCollectInfo(ctx, baseId, { ...info, target_progress: {
+          ...info.target_progress, status: 'error',
+          reason: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+        } });
+      }
+    } catch (snapshotError) {
+      stageLog(ctx, `[base_collect] target error snapshot unavailable: ${snapshotError instanceof Error ? snapshotError.message : String(snapshotError)}`);
+    }
+    throw error;
+  }
 }

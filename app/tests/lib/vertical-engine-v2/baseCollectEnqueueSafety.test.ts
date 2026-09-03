@@ -1,9 +1,21 @@
 /** @jest-environment node */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { NextRequest } from 'next/server';
 
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue';
+
+let mockRouteDb = createMockSupabase();
+jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mockRouteDb; } }));
+jest.mock('@/lib/toolsApiAuth', () => ({
+  requireInternalToolAuth: jest.fn(async () => ({ auth: { userId: 'user-1', role: 'technician' } })),
+}));
+jest.mock('@/lib/toolTrace', () => ({
+  withToolTrace: async (_options: unknown, handler: () => Promise<unknown>) => handler(),
+}));
+jest.mock('@/lib/loggerServer', () => ({ logAudit: jest.fn(), logError: jest.fn() }));
+import { POST as collectPreview } from '@/app/api/tools/vertical-engine-v2/verticals/[id]/collect/route';
 
 const input = {
   verticalId: 'vertical-1',
@@ -14,6 +26,35 @@ const input = {
 };
 
 describe('VE2 base collection enqueue recovery', () => {
+  it('does not expose private candidate checkpoints on existing or mixed preview requests', async () => {
+    const privateInfo = {
+      collection_mode: 'preview', ready_target: 1_000, limit: 2_000,
+      target_checkpoint: { seen_rows: [{ email: 'rejected@example.com' }] },
+      tasks: [{ source: 'directory', rows: 25, harvest: [{ email: 'raw@example.com' }] }],
+    };
+    mockRouteDb = createMockSupabase({ tables: {
+      ve_verticals: [{ id: input.verticalId, project_id: input.projectId, name: input.verticalName }],
+      ve_hypotheses: ['hypothesis-1', 'hypothesis-2'].map((id) => ({ id, title: id })),
+      ve_bases: [{ id: 'existing', vertical_id: input.verticalId, project_id: input.projectId,
+        hypothesis_id: 'hypothesis-1', source: 'auto', status: 'collecting', collect_info: privateInfo }],
+      ve_jobs: [{ id: 'existing-job', project_id: input.projectId, stage: 'base_collect',
+        status: 'pending', payload: { base_id: 'existing', hypothesis_id: 'hypothesis-1' } }],
+    } });
+    for (const hypothesisIds of [['hypothesis-1'], ['hypothesis-1', 'hypothesis-2']]) {
+      const response = await collectPreview(new NextRequest('http://portal.test/collect', {
+        method: 'POST', body: JSON.stringify({ hypothesis_ids: hypothesisIds, limit: 50_000 }),
+      }), { params: Promise.resolve({ id: input.verticalId }) });
+      expect(response.ok).toBe(true);
+      const payload = await response.json();
+      for (const base of [payload.base, ...(payload.bases ?? [])]) {
+        expect(base.collect_info).not.toHaveProperty('target_checkpoint');
+        expect(base.collect_info?.tasks?.some((task: Record<string, unknown>) => 'harvest' in task)).not.toBe(true);
+      }
+    }
+    // Sanitizing a response must not destroy the worker's durable state.
+    expect(mockRouteDb.getRows('ve_bases').find((row) => row.id === 'existing')?.collect_info).toEqual(privateInfo);
+  });
+
   it('continues with the remaining hypotheses when one selected base already exists', async () => {
     const db = createMockSupabase({
       tables: {
@@ -48,16 +89,19 @@ describe('VE2 base collection enqueue recovery', () => {
       enqueueVeBaseCollect(db as unknown as SupabaseClient, {
         ...input,
         hypothesisIds: ['hypothesis-1', 'hypothesis-2'],
+        collectionMode: 'preview',
+        readyTarget: 50_000,
       }),
     ).resolves.toMatchObject({ ok: true, created: true });
 
     expect(db.getRows('ve_bases')).toContainEqual(expect.objectContaining({
       hypothesis_id: 'hypothesis-2',
       status: 'collecting',
+      collect_info: expect.objectContaining({ collection_mode: 'preview', ready_target: 1_000, limit: 2_000 }),
     }));
     expect(db.getRows('ve_jobs')).toContainEqual(expect.objectContaining({
       status: 'pending',
-      payload: expect.objectContaining({ hypothesis_id: 'hypothesis-2' }),
+      payload: expect.objectContaining({ hypothesis_id: 'hypothesis-2', collection_mode: 'preview', ready_target: 1_000 }),
     }));
   });
 
@@ -72,7 +116,7 @@ describe('VE2 base collection enqueue recovery', () => {
             hypothesis_id: null,
             source: 'auto',
             status: 'collecting',
-            collect_info: { limit: 500 },
+            collect_info: { limit: 500, collection_mode: 'supply', ready_target: 250 },
           },
         ],
         ve_jobs: [
@@ -96,7 +140,7 @@ describe('VE2 base collection enqueue recovery', () => {
       project_id: input.projectId,
       stage: 'base_collect',
       status: 'pending',
-      payload: expect.objectContaining({ base_id: collecting[0]?.id, limit: 500 }),
+      payload: expect.objectContaining({ base_id: collecting[0]?.id, limit: 500, collection_mode: 'supply', ready_target: 250 }),
     }));
   });
 

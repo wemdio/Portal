@@ -37,9 +37,11 @@ jest.mock('@/lib/instantly/campaignProjectOwnership', () => ({
 }));
 jest.mock('@/lib/verticalEngineV2/stages/segmentationAudit', () => ({
   validateStoredAuditSnapshot: (...args: unknown[]) => mockValidate(...args),
+  prepareAuditSnapshot: jest.fn(() => ({ audience: { leads: [] } })),
 }));
 
-import { PATCH } from '@/app/api/tools/vertical-engine-v2/templates/[id]/segmentation-audit/route';
+import { GET as getAudit, PATCH, POST as createAudit } from '@/app/api/tools/vertical-engine-v2/templates/[id]/segmentation-audit/route';
+import { GET as getBaseTemplate } from '@/app/api/tools/vertical-engine-v2/bases/[id]/template/route';
 import { activateApprovedLaunchCampaigns, activateDeliveredContactCampaigns } from '@/lib/verticalEngineV2/contactDeliveryActivation';
 
 const letters = [{ subject: 'Тема', body: 'Письмо', wait_days: 0 }];
@@ -126,6 +128,23 @@ it('recovers a known live campaign even when the failed attempt saved no launch_
   seed(false);
   expect((await recover()).status).toBe(200);
   expect(mockPortalDb.rpcCalls.at(-1)?.fn).toBe('ve_resolve_template_contact_delivery');
+});
+
+it('keeps supply clones out of ordinary template, audit and recovery endpoints', async () => {
+  seed(false);
+  await mockPortalDb.from('ve_templates').update({ supply_batch_id: 'supply-batch' }).eq('id', 'template-1');
+  await mockPortalDb.from('ve_segmentation_audits').update({ launch_status: 'idle' }).eq('id', 'audit-1');
+  const request = new Request('http://x/template') as NextRequest;
+  const context = { params: Promise.resolve({ id: 'template-1' }) };
+  const responses = await Promise.all([
+    getBaseTemplate(request, { params: Promise.resolve({ id: 'base-1' }) }),
+    createAudit(new Request('http://x/audit', { method: 'POST' }) as NextRequest, context),
+    getAudit(request, context),
+    recover(),
+  ]);
+  expect(responses.map((response) => response.status)).toEqual([409, 409, 409, 409]);
+  expect(mockPortalDb.rpcCalls).toHaveLength(0);
+  expect(mockGetCampaign).not.toHaveBeenCalled();
 });
 
 it.each(['stale audit', 'nonempty remote campaign', 'previously contacted campaign', 'ownership conflict'])('keeps %s fail-closed', async (failure) => {

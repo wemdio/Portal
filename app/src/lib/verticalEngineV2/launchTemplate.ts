@@ -443,7 +443,11 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       body: { error: tplErr.code === 'PGRST116' ? t.templateNotFound : tplErr.message },
     };
   }
-  const template = templateRow as VeTemplate & { launch_info?: unknown };
+  const template = templateRow as VeTemplate & { launch_info?: unknown; supply_batch_id?: string | null };
+
+  if (template.supply_batch_id) {
+    return conflict('SUPPLY_BATCH_NOT_LAUNCHABLE', 'Партия пополнения использует существующие кампании. Новый запуск запрещён.');
+  }
 
   if (template.status !== 'ready') {
     return { status: 409, body: { error: t.templateNotReady } };
@@ -457,7 +461,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   // 2. База шаблона.
   const { data: baseRow, error: baseErr } = await portalDb
     .from('ve_bases')
-    .select('id, project_id, vertical_id, hypothesis_id, filename, columns, data, source')
+    .select('id, project_id, vertical_id, hypothesis_id, filename, columns, data, source, collect_info')
     .eq('id', template.base_id)
     .single();
   if (baseErr) {
@@ -470,6 +474,27 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     VeBase,
     'id' | 'project_id' | 'vertical_id' | 'hypothesis_id' | 'filename' | 'columns' | 'data' | 'source'
   >;
+
+  const collectionInfo = baseRow.collect_info as { collection_mode?: string } | null;
+  let approvedSupplyWorkspace: string | null = null;
+  if (collectionInfo?.collection_mode === 'preview') {
+    const { data: plan, error: planError } = await portalDb.from('ve_contact_supply_plans')
+      .select('id, status, approval_snapshot, preview_audit_id, item_id')
+      .eq('template_id', templateId).maybeSingle();
+    if (planError) return { status: 500, body: { error: 'Не удалось проверить согласование превью' } };
+    if (plan?.item_id) return conflict('SUPPLY_ALREADY_LAUNCHED', 'Для этой гипотезы кампании уже созданы. Пополнение использует их, повторный запуск запрещён.');
+    if (!plan || !['approved', 'active'].includes(plan.status)
+      || plan.approval_snapshot?.preset_id !== presetId || plan.approval_snapshot?.portal_project_id !== portalProjectId
+      || plan.approval_snapshot?.portal_period_id !== expectedPortalPeriodId || plan.approval_snapshot?.target_contacts !== targetContacts
+      || plan.preview_audit_id !== segmentationAuditId) {
+      return conflict('SUPPLY_APPROVAL_REQUIRED', 'Сначала подтвердите согласование превью и условий запуска с заказчиком.');
+    }
+    const { data: current, error: currentError } = await portalDb.rpc('ve_contact_supply_approval_current', { p_plan_id: plan.id });
+    if (currentError || current !== true) {
+      return conflict('SUPPLY_APPROVAL_STALE', 'Согласованные данные изменились. Проверьте превью и согласуйте его заново.');
+    }
+    approvedSupplyWorkspace = plan.approval_snapshot.instantly_account_id;
+  }
 
   // 3. Письма шаблона + условия сегментных вариантов (when) для сплита запуска.
   const templateLetters = Array.isArray(template.letters) ? template.letters : [];
@@ -567,6 +592,9 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     return conflict('VE_LAUNCH_MAILBOX_SCOPE_REQUIRED', t.mailboxScopeRequired);
   }
   const instantlyAccountId = resolveInstantlyAccountId(preset.instantly_account_id);
+  if (collectionInfo?.collection_mode === 'preview' && approvedSupplyWorkspace !== instantlyAccountId) {
+    return conflict('SUPPLY_WORKSPACE_CHANGED', 'Workspace пресета изменился после согласования. Проверьте клиентский аккаунт.');
+  }
   const instantlyRequestOptions = { accountId: instantlyAccountId };
 
   // Client-scoped blocklist is the safety boundary for shared Instantly

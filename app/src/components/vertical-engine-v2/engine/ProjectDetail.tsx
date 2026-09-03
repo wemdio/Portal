@@ -80,6 +80,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const contentTopRef = useRef<HTMLElement | null>(null);
 
   const [researchStarting, setResearchStarting] = useState(false);
+  const [selectedBaseId, setSelectedBaseId] = useState<string | null>(null);
   const [offerSaving, setOfferSaving] = useState(false);
   const [cancelling, setCancelling] = useState(false);
 
@@ -210,11 +211,11 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const selectedBases = useMemo(
     () =>
       (detail?.bases ?? [])
-        .filter((b) => b.vertical_id === selectedVerticalId)
+        .filter((b) => b.vertical_id === selectedVerticalId && b.collect_info?.collection_mode !== 'supply')
         .sort((a, b) => b.created_at.localeCompare(a.created_at)),
     [detail, selectedVerticalId],
   );
-  const selectedBase = selectedBases[0] ?? null;
+  const selectedBase = selectedBases.find((base) => base.id === selectedBaseId) ?? selectedBases[0] ?? null;
   // Шаблон — последний собранный для выбранной базы.
   const selectedTemplate = useMemo(() => {
     if (!selectedBase) return null;
@@ -492,6 +493,19 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
     />
   );
 
+  const baseSelector = selectedBases.length > 1 ? (
+    <div className="mb-5 max-w-xl">
+      <label htmlFor="ve2-selected-preview" className="ve2-label">База и гипотеза для согласования и запуска</label>
+      <select id="ve2-selected-preview" className="ve2-input w-full px-3 py-2" value={selectedBase?.id ?? ''}
+        onChange={(event) => setSelectedBaseId(event.target.value)}>
+        {selectedBases.map((base) => <option key={base.id} value={base.id}>
+          {hypotheses.find((hypothesis) => hypothesis.id === base.hypothesis_id)?.title ?? base.filename}
+          {' · '}{new Date(base.created_at).toLocaleString('ru-RU')}
+        </option>)}
+      </select>
+    </div>
+  ) : null;
+
   function renderStep() {
     switch (step) {
       case 2: {
@@ -547,29 +561,37 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
       case 4: {
         if (!selectedVertical) return verticalRequiredHint;
         return (
+          <>
+          {baseSelector}
           <Step4Base
             projectId={projectId}
             vertical={selectedVertical}
             hypotheses={hypotheses}
             bases={bases}
+            selectedBaseId={selectedBase?.id}
             jobs={jobs}
             parentPollingActive={hasActiveJobs}
             onUploaded={() => void load({ silent: true })}
             onTemplateStarted={handleTemplateStarted}
             onGoToTemplate={() => jumpTo(5)}
           />
+          </>
         );
       }
       case 5: {
         if (!selectedVertical) return verticalRequiredHint;
         return (
+          <>
+          {baseSelector}
           <Step5Template
+            key={selectedBase?.id ?? 'empty'}
             template={selectedTemplate}
             base={selectedBase}
             jobs={jobs}
             onBuildTemplate={handleBuildTemplate}
             onGoToContent={() => jumpTo(3)}
           />
+          </>
         );
       }
       case 1:

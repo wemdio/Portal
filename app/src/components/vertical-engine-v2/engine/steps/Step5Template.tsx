@@ -31,6 +31,7 @@ import {
   type VePortalProjectOptionDto,
 } from '../api';
 import { HE, StatusDot } from '../design';
+import { ContactSupplyPanel, useContactSupply, type ContactSupplyController } from '../ContactSupplyPanel';
 import type { LaunchPortfolioResponse } from '../LaunchPortfolioView';
 import { SeasonalityStatus } from '../SeasonalitySummary';
 import { Badge, OperatorText, StatusBox, formatDate } from '../ui';
@@ -1351,6 +1352,7 @@ function PreparedLaunchPortfolio({
 /** Записанный запуск либо инлайн-аудит и форма выбора пресета. */
 function LaunchSection({
   launch,
+  supply,
   audit,
   template,
   onDownloadLaunchCsv,
@@ -1358,6 +1360,7 @@ function LaunchSection({
   csvDownloadError,
 }: {
   launch: TemplateLaunchState;
+  supply: ContactSupplyController;
   audit: SegmentationAuditController;
   template: VeTemplate;
   onDownloadLaunchCsv: () => void;
@@ -1409,6 +1412,7 @@ function LaunchSection({
     if (portfolio) {
       return <div className="space-y-3">
         <PreparedLaunchPortfolio info={info} portfolio={portfolio} warnings={launch.warnings} />
+        <ContactSupplyPanel supply={supply} />
         {info.portal_project_id ? (
           launch.formOpen ? <DeliveryPlanBlock launch={launch} /> : (
             <button type="button" onClick={launch.openForm} className="ve2-b-quiet">План и запас контактов</button>
@@ -1535,6 +1539,7 @@ function LaunchSection({
                 </dl>
               ) : null}
               <DeliveryPlanBlock launch={launch} />
+              <ContactSupplyPanel supply={supply} />
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
@@ -1543,7 +1548,7 @@ function LaunchSection({
                     launch.submitting ||
                     !selectedPreset ||
                     selectedPreset.mailbox_count === 0 ||
-                    !launch.deliveryPlanReady
+                    !launch.deliveryPlanReady || !supply.approved
                   }
                   className={HE.btnPrimary}
                 >
@@ -1624,8 +1629,14 @@ export function Step5Template(props: {
     segmentationAudit.auditId,
     handleSegmentationRejected,
   );
+  const supplyContext = launch.deliveryPlanReady && launch.deliveryPreview && segmentationAudit.auditId ? {
+    preset_id: launch.presetId, portal_project_id: launch.deliveryPreview.portal_project_id,
+    expected_portal_period_id: launch.deliveryPreview.portal_period_id,
+    target_contacts: launch.deliveryPreview.target_contacts, segmentation_audit_id: segmentationAudit.auditId,
+  } : null;
+  const supply = useContactSupply(template?.id ?? null, base?.collect_info?.collection_mode === 'preview', supplyContext);
 
-  const templateJob = useMemo(() => latestStageJob(jobs, 'template'), [jobs]);
+  const templateJob = useMemo(() => latestStageJob(jobs.filter((job) => job.payload?.base_id === base?.id), 'template'), [jobs, base?.id]);
   const busy = templateJob?.status === 'pending' || templateJob?.status === 'running';
   const failed = !busy && templateJob?.status === 'failed';
 
@@ -1864,6 +1875,7 @@ export function Step5Template(props: {
         <div className="mt-3">
           <LaunchSection
             launch={launch}
+            supply={supply}
             audit={segmentationAudit}
             template={template}
             onDownloadLaunchCsv={() => void handleLaunchReadyCsvDownload()}

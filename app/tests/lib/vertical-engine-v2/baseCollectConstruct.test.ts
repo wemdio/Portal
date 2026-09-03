@@ -43,6 +43,13 @@ import {
 import { selectRefillLeadRows } from '@/lib/verticalEngineV2/stages/baseCollectRefill';
 import { prepareSegmentationAudience } from '@/lib/verticalEngineV2/segmentationAudit';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
+import {
+  createCollectionTarget,
+  finishCollectionRound,
+  collectionRoundLimit,
+  estimateRemainingReady,
+} from '@/lib/verticalEngineV2/collectionTarget';
+import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 
 const PROJECT = { id: 'p1', name: 'P', created_by: 'user-1', market: 'ru' };
 const VERTICAL = {
@@ -185,6 +192,119 @@ beforeEach(() => {
 });
 
 describe('base_collect CONSTRUCT step order', () => {
+  it('targets validated recipients with bounded rounds and distinct stopping reasons', () => {
+    const preview = createCollectionTarget('preview', 50_000);
+    expect(preview.ready_target).toBe(1_000);
+    expect(collectionRoundLimit(preview)).toBe(2_000);
+    const progressing = finishCollectionRound(preview, {
+      candidates: 2_000, readyRows: 200, exhausted: false, canContinue: true, error: null,
+    });
+    expect(progressing).toMatchObject({ status: 'collecting', round: 2, ready_rows: 200 });
+    expect(collectionRoundLimit(progressing)).toBe(5_000);
+    for (const [change, status] of [
+      [{ readyRows: 1_100 }, 'target_reached'],
+      [{ exhausted: true }, 'exhausted'],
+      [{ candidates: 10_000 }, 'limited'],
+      [{ canContinue: false }, 'limited'],
+      [{ error: 'validation unavailable' }, 'error'],
+      [{ error: 'validation incomplete', readyRows: 1_100 }, 'error'],
+    ] as const) {
+      expect(finishCollectionRound(preview, Object.assign({
+        candidates: 2_000, readyRows: 200, exhausted: false, canContinue: true, error: null,
+      }, change)).status).toBe(status);
+    }
+    expect(finishCollectionRound({ ...preview, round: 5 }, {
+      candidates: 1, readyRows: 0, exhausted: false, canContinue: true, error: null,
+    }).status).toBe('limited');
+    expect(estimateRemainingReady({ population: 5_000, candidatesProcessed: 1_000, readyRows: 200, eligible: true, asOf: '2026-09-03' }))
+      .toMatchObject({ contacts: 800, confidence: 'low' });
+    expect(estimateRemainingReady({ population: 5_000, candidatesProcessed: 1_000, readyRows: 200, eligible: false, asOf: '2026-09-03' })).toBeNull();
+  });
+
+  it('resumes a supply target from committed ready rows without revalidating the previous round', async () => {
+    const first = unifiedRow({ company: 'Clinic First', website: 'first.test', email: 'ready@first.test' });
+    const bad = unifiedRow({ company: 'Clinic Bad', website: 'bad.test', email: 'bad@bad.test' });
+    const info = {
+      ...collectInfo([first, bad], { bc_job_id: 'bc-first', status: 'dispatched' }),
+      collection_mode: 'supply' as const,
+      ready_target: 2,
+    };
+    const db = seed(info, { base_constructor_jobs: [{
+      id: 'bc-first', status: 'completed', selected_steps: ['split_emails', 'validate_emails'],
+      data: [
+        ['Компания', 'Сайт', 'Email', 'Email Статус'],
+        [first.company, first.website, first.email, 'ok'],
+        [bad.company, bad.website, bad.email, 'invalid'],
+      ],
+    }] });
+    const job = { ...makeJob(), payload: { ...makeJob().payload, collection_mode: 'supply', ready_target: 2 } };
+    await expect(runBaseCollectStage(job, { supabase: db as unknown as SupabaseClient }))
+      .resolves.toMatchObject({ result: { waiting: true, target_status: 'collecting' } });
+    const checkpoint = db.getRows('ve_bases')[0];
+    expect(checkpoint).toMatchObject({ status: 'collecting', row_count: 1 });
+    expect((checkpoint.collect_info as VeCollectInfo).construct).toBeUndefined();
+    expect((checkpoint.collect_info as VeCollectInfo).target_progress).toMatchObject({ round: 2, ready_rows: 1 });
+
+    jest.mocked(searchRows).mockResolvedValue({ rows: [
+      { name: first.company, email: first.email, website: first.website },
+      { name: bad.company, email: bad.email, website: bad.website },
+      { name: 'Clinic Next', email: 'next@next.test', website: 'next.test' },
+    ] });
+    await runBaseCollectStage(job, { supabase: db as unknown as SupabaseClient });
+    const constructor = db.getRows('base_constructor_jobs').find((row) => row.id !== 'bc-first')!;
+    expect(constructor.data).not.toEqual(expect.arrayContaining([expect.arrayContaining([first.company])]));
+    await db.from('base_constructor_jobs').update({
+      status: 'completed', data: [
+        ['Компания', 'Сайт', 'Email', 'Email Статус'],
+        ['Clinic Next', 'next.test', 'next@next.test', 'ok'],
+      ],
+    }).eq('id', constructor.id);
+    await runBaseCollectStage(job, { supabase: db as unknown as SupabaseClient });
+    const completed = db.getRows('ve_bases')[0];
+    expect(completed).toMatchObject({ status: 'analyzed', row_count: 2 });
+    expect((completed.collect_info as VeCollectInfo).target_progress).toMatchObject({ status: 'target_reached', ready_rows: 2 });
+    expect((completed.data as Array<Record<string, unknown>>).map((row) => row.email)).toEqual(['ready@first.test', 'next@next.test']);
+    expect(mockFindIrrelevantRows.mock.calls.map(([input]) => input.rows.length)).toEqual([2, 1]);
+    expect(db.inserts.filter((entry) => entry.table === 've_jobs')).toEqual([]);
+  });
+
+  it('holds paused supply without blocking manual work, then resumes safely and records processing errors', async () => {
+    const info = { ...collectInfo([
+      unifiedRow({ company: 'Held Clinic', email: 'held@clinic.test', website: 'held.test' }),
+    ], { bc_job_id: 'bc-held', status: 'dispatched' as const, dispatched_at: '2020-01-01T00:00:00Z' }),
+    collection_mode: 'supply' as const, ready_target: 10, supply_batch_id: 'batch-held' };
+    const db = seed(info, {
+      ve_bases: [{ ...makeBase(info), created_at: '2026-08-30T00:00:00Z' }],
+      ve_contact_supply_batches: [{ id: 'batch-held', base_id: 'b1', plan_id: 'plan-held' }],
+      base_constructor_jobs: [{ id: 'bc-held', status: 'processing' }],
+    });
+    let eligible = false;
+    const originalRpc = db.rpc;
+    db.rpc = (name, params) => name === 've_require_contact_supply_active'
+      ? Promise.resolve(eligible ? { data: { id: 'plan-held' }, error: null } : { data: null, error: { message: 'supply plan is not active (paused or stopped)' } })
+      : originalRpc(name, params);
+    const job = { ...makeJob(), payload: { ...makeJob().payload, collection_mode: 'supply', ready_target: 10, supply_batch_id: 'batch-held' } };
+    await expect(runBaseCollectStage(job, { supabase: db as unknown as SupabaseClient }))
+      .resolves.toMatchObject({ result: { waiting: true, supply_held: true } });
+    expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).supply_hold).toBe(true);
+    expect(db.inserts).toEqual([]);
+
+    await db.from('ve_bases').insert({ ...makeBase(collectInfo([
+      unifiedRow({ company: 'Manual Clinic', email: 'manual@clinic.test', website: 'manual.test' }),
+    ])), id: 'b-manual', created_at: '2026-08-31T00:00:00Z' });
+    await db.from('ve_jobs').insert({ ...makeJob(), id: 'job-manual', payload: { base_id: 'b-manual' } });
+    await expect(runBaseCollectStage({ ...makeJob(), id: 'job-manual', payload: { base_id: 'b-manual' } }, { supabase: db as unknown as SupabaseClient }))
+      .resolves.toMatchObject({ result: { construct: 'dispatched' } });
+    eligible = true;
+    await expect(runBaseCollectStage(job, { supabase: db as unknown as SupabaseClient }))
+      .resolves.toMatchObject({ result: { waiting_for_base_id: 'b-manual' } });
+    await db.from('ve_bases').update({ status: 'analyzed' }).eq('id', 'b-manual');
+    await expect(runBaseCollectStage(job, { supabase: db as unknown as SupabaseClient })).rejects.toThrow('6ч');
+    const failed = db.getRows('ve_bases').find((base) => base.id === 'b1')!;
+    expect(failed.status).toBe('failed');
+    expect((failed.collect_info as VeCollectInfo).target_progress).toMatchObject({ status: 'error' });
+  });
+
   it.each([
     {
       label: 'email-rich harvest',

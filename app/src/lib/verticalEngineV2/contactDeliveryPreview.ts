@@ -267,6 +267,7 @@ export async function buildVeContactDeliveryPreview(
   let readyRemaining: number;
   let reserveRemaining: number;
   let outstandingCount: number;
+  let prospectiveReady: number;
   try {
     const [inventory, rows] = await Promise.all([
       loadVeContactDeliveryCampaignInventory(portalDb, instantlyDb, base.project_id),
@@ -274,6 +275,7 @@ export async function buildVeContactDeliveryPreview(
     ]);
     const existingEmails = new Set(rows.map((row) => row.email_normalized));
     const prospective = candidateLeads.filter((lead) => !existingEmails.has(lead.email.trim().toLowerCase())).length;
+    prospectiveReady = prospective;
     const activeRows = new Set(inventory.activeCampaignRowIds);
     const readyRows = rows.filter((row) => row.status === 'ready' && !blockedEmails.has(row.email_normalized));
     readyRemaining = readyRows.filter((row) => activeRows.has(row.campaign_row_id)).length + prospective;
@@ -333,6 +335,7 @@ export async function buildVeContactDeliveryPreview(
         reserve_remaining: reserveRemaining,
         outstanding_count: outstandingCount,
         estimated_valid: estimatedValid,
+        prospective_ready: prospectiveReady,
         sender_capacity: senderCapacity,
         daily_capacity: senderCapacity,
         supply_deficit: plan.supplyShortfall,

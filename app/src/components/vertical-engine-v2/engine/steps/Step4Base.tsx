@@ -24,6 +24,7 @@ import { readSpreadsheetFile } from '@/lib/spreadsheet/parseCSV';
 import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
 import { downloadBaseCsvResponse } from '@/lib/verticalEngineV2/baseCsv';
 import { VE_LAUNCH_MAX_LEADS } from '@/lib/verticalEngineV2/launchHandoff';
+import { VE_PREVIEW_READY_TARGET, VE_COLLECTION_MAX_CANDIDATES } from '@/lib/verticalEngineV2/collectionTarget';
 import {
   VE_API,
   veEnginePost,
@@ -42,12 +43,8 @@ import { collectCount, collectTaskDone, collectTaskFailed, getCollectionProgress
 /** Как часто дёргать reload детали во время автосборки (как POLL_INTERVAL_MS родителя). */
 const COLLECT_POLL_MS = 4000;
 
-/** Лимит строк автосборки — выбор пользователя; route валидирует те же значения. */
-type CollectLimit = 2000 | 10000 | 50000;
 type BaseMode = 'auto' | 'upload';
-type BaseExportMode = 'raw';
-const COLLECT_LIMITS: readonly CollectLimit[] = [2000, 10000, 50000];
-const DEFAULT_COLLECT_LIMIT: CollectLimit = 10000;
+type BaseExportMode = 'raw' | 'preview';
 
 interface ParsedFile {
   filename: string;
@@ -86,6 +83,7 @@ export function Step4Base(props: {
   hypotheses: VeHypothesis[];
   /** Все базы проекта: очередь сбора общая для всех вертикалей. */
   bases: VeBaseSummary[];
+  selectedBaseId?: string;
   jobs: VeJobSummary[];
   /** Родитель уже обновляет project detail, локальный interval тогда не нужен. */
   parentPollingActive?: boolean;
@@ -98,6 +96,7 @@ export function Step4Base(props: {
     vertical,
     hypotheses,
     bases,
+    selectedBaseId,
     jobs,
     parentPollingActive = false,
     onUploaded,
@@ -115,7 +114,6 @@ export function Step4Base(props: {
   const [collectStarting, setCollectStarting] = useState(false);
   const [collectError, setCollectError] = useState('');
   const [collectNotice, setCollectNotice] = useState('');
-  const [collectLimit, setCollectLimit] = useState<CollectLimit>(DEFAULT_COLLECT_LIMIT);
   const [templateStarting, setTemplateStarting] = useState(false);
   const [templateError, setTemplateError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -215,7 +213,7 @@ export function Step4Base(props: {
   );
 
   const verticalBases = useMemo(
-    () => bases.filter((b) => b.vertical_id === vertical.id).sort((a, b) => b.created_at.localeCompare(a.created_at)),
+    () => bases.filter((b) => b.vertical_id === vertical.id && b.collect_info?.collection_mode !== 'supply').sort((a, b) => b.created_at.localeCompare(a.created_at)),
     [bases, vertical.id],
   );
   // Гипотеза → заголовок: метка на карточке базы (base-per-hypothesis).
@@ -224,10 +222,10 @@ export function Step4Base(props: {
     for (const h of hypotheses) map.set(h.id, h.title);
     return map;
   }, [hypotheses]);
-  const latestBase = verticalBases[0];
+  const latestBase = verticalBases.find((base) => base.id === selectedBaseId) ?? verticalBases[0];
   const latestAnalyzed = useMemo(
-    () => verticalBases.find((b) => b.status === 'analyzed' && b.analysis),
-    [verticalBases],
+    () => latestBase?.status === 'analyzed' && latestBase.analysis ? latestBase : undefined,
+    [latestBase],
   );
   const latestSeasonality = useMemo(() => {
     if (!latestAnalyzed) return null;
@@ -244,7 +242,7 @@ export function Step4Base(props: {
   /** Автосборка упала: последняя база вертикали — авто и в ошибке (retry уводит в re-POST). */
   const collectFailed = !collectingBase && latestBase?.source === 'auto' && latestBase.status === 'failed';
 
-  const templateJob = useMemo(() => latestStageJob(jobs, 'template'), [jobs]);
+  const templateJob = useMemo(() => latestStageJob(jobs.filter((job) => job.payload?.base_id === latestBase?.id), 'template'), [jobs, latestBase?.id]);
   const templateBusy = templateStarting || jobActive(templateJob);
   const templateDone = !templateBusy && templateJob?.status === 'done';
   const templateFailed = !templateBusy && templateJob?.status === 'failed';
@@ -330,9 +328,7 @@ export function Step4Base(props: {
       // Отмеченные гипотезы — всегда в запросе, когда пикер есть: явный выбор
       // вместо молчаливой сборки по всем неотклонённым. Порядок — как в
       // пикере (pct desc), детерминированно.
-      const body: { limit: CollectLimit; hypothesis_ids?: string[] } = {
-        limit: collectLimit,
-      };
+      const body: { hypothesis_ids?: string[] } = {};
       if (verticalHypotheses.length > 0) {
         // Отклонённые не отправляем: стадия их всё равно отрежет — не даём
         // пользователю включить их молча (в пикере они disabled).
@@ -352,12 +348,7 @@ export function Step4Base(props: {
       // с каким лимитом уже идёт сборка, — иначе клик с другим лимитом
       // выглядел бы как молча проигнорированный.
       if (data.existing) {
-        const runningLimit = data.base?.collect_info?.limit;
-        setCollectNotice(
-          typeof runningLimit === 'number' && Number.isFinite(runningLimit)
-            ? `Уже собирается база с лимитом ${runningLimit.toLocaleString('ru-RU')}`
-            : 'Уже собирается база — повторный запуск не создаётся',
-        );
+        setCollectNotice('Сбор уже идёт. Повторная задача не создаётся.');
       }
       // 201 (сборка стартовала) и 200 (уже идёт) — в обоих случаях перечитываем деталь.
       onUploaded();
@@ -369,7 +360,6 @@ export function Step4Base(props: {
   }, [
     collectStarting,
     collectingBase,
-    collectLimit,
     verticalHypotheses,
     checkedHyps,
     checkedHypCount,
@@ -486,7 +476,7 @@ export function Step4Base(props: {
           />
         ) : (
           <div className="ve2-nt ve2-nt-info px-4 py-3">
-            Для этой вертикали гипотез пока нет. Движок подберёт источники по самой вертикали.
+            Сначала выберите гипотезу на шаге «Вертикали».
           </div>
         )}
 
@@ -500,23 +490,10 @@ export function Step4Base(props: {
           </div>
         ) : null}
 
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <span className={HE.eyebrow}>Строк</span>
-          <span className="ve2-mini-seg" role="group" aria-label="Лимит строк">
-            {COLLECT_LIMITS.map((limit) => (
-              <button
-                key={limit}
-                type="button"
-                onClick={() => setCollectLimit(limit)}
-                disabled={collectLocked}
-                aria-pressed={collectLimit === limit}
-              >
-                {limit.toLocaleString('ru-RU')}
-              </button>
-            ))}
-          </span>
-          <span className={HE.faint}>Больше строк: дольше сбор и выше расход на обогащение.</span>
-        </div>
+        <p className={`mt-4 max-w-[70ch] ${HE.muted}`}>
+          Превью: до {VE_PREVIEW_READY_TARGET.toLocaleString('ru-RU')} проверенных контактов на каждую гипотезу для согласования с заказчиком.
+          После согласования и запуска новые контакты будут собираться небольшими партиями и поступать в те же кампании по будням.
+        </p>
 
         {collectingBase ? (
           <CollectProgress
@@ -535,11 +512,11 @@ export function Step4Base(props: {
             <button
               type="button"
               onClick={() => void handleCollect()}
-              disabled={collectStarting || (verticalHypotheses.length > 0 && checkedHypCount === 0)}
+              disabled={collectStarting || checkedHypCount === 0}
               className={`${HE.btnPrimary} inline-flex items-center justify-center gap-2`}
             >
               {collectStarting ? <Spinner /> : null}
-              {collectFailed ? 'Попробовать снова' : 'Собрать базу автоматически'}
+              {collectFailed ? 'Подготовить превью заново' : 'Подготовить превью'}
             </button>
             {collectNotice ? (
               <p className={`mt-2 ${HE.faint}`} role="status">
@@ -888,13 +865,13 @@ function BaseRow({ base, hypothesisTitle, queued }: { base: VeBaseSummary; hypot
             </button>
             <button
               type="button"
-              onClick={() => void handleDownload('raw')}
-              disabled={downloadingMode !== null}
+              onClick={() => void handleDownload(base.collect_info?.collection_mode === 'preview' ? 'preview' : 'raw')}
+              disabled={downloadingMode !== null || (base.collect_info?.collection_mode === 'preview' && base.status === 'collecting')}
               className={HE.btnQuiet}
-              title="Все собранные строки, включая исключённые из запуска"
+              title={base.collect_info?.collection_mode === 'preview' ? 'До 1000 проверенных контактов для согласования' : 'Все собранные строки, включая исключённые из запуска'}
             >
-              {downloadingMode === 'raw' ? <Spinner className="h-3 w-3" /> : null}
-              Исходный CSV
+              {downloadingMode ? <Spinner className="h-3 w-3" /> : null}
+              {base.collect_info?.collection_mode === 'preview' ? 'CSV превью' : 'Исходный CSV'}
             </button>
           </span>
         ) : null}
@@ -1099,8 +1076,9 @@ function readCollectInfo(info: VeCollectInfo | null | undefined) {
  * обработки и адресаты запуска не подменяют друг друга словом «контакты».
  */
 function CollectionFunnel({ base, useDefaultLimit = false }: { base: VeBaseSummary; useDefaultLimit?: boolean }) {
+  const target = base.collect_info?.target_progress;
   const { limit, estimate, stats } = readCollectInfo(base.collect_info);
-  const shownLimit = limit ?? (useDefaultLimit ? DEFAULT_COLLECT_LIMIT : null);
+  const shownLimit = limit ?? (useDefaultLimit ? VE_COLLECTION_MAX_CANDIDATES : null);
   // После завершения CONSTRUCT row_count — надёжный фолбэк для старых записей,
   // где processed_rows ещё не сохранялся. Failed-база могла остановиться до
   // конструктора, поэтому её row_count сюда подставлять нельзя.
@@ -1127,24 +1105,37 @@ function CollectionFunnel({ base, useDefaultLimit = false }: { base: VeBaseSumma
       className="mt-3 grid gap-x-5 gap-y-1 border-t pt-3 text-[11px] text-gray-600 ve2-div sm:grid-cols-2"
       aria-label="Воронка автосборки"
     >
+      {target ? (
+        <div className="sm:col-span-2 mb-2 text-xs" role="status">
+          <p className="font-medium">Проверено и подготовлено: {target.ready_rows.toLocaleString('ru-RU')} / цель {target.ready_target.toLocaleString('ru-RU')}</p>
+          <p className="mt-1">
+            {target.status === 'collecting' ? `Проход ${target.round} из ${target.max_rounds}. Добираем контакты после проверок.`
+              : target.status === 'target_reached' ? 'Превью готово к согласованию. Отправка ещё не включена.'
+              : target.status === 'exhausted' ? 'Источники текущего плана закончились. Это не оценка всего рынка.'
+              : target.status === 'limited' ? 'Сбор остановлен защитным лимитом. Это не означает, что контакты закончились.'
+              : 'Не удалось закончить проверки. Непроверенные контакты не попадут в запуск.'}
+          </p>
+          <p className={`mt-1 ${HE.faint}`}>Обработано кандидатов за все проходы: {target.candidates_processed.toLocaleString('ru-RU')}. В CSV превью не более {VE_PREVIEW_READY_TARGET.toLocaleString('ru-RU')} контактов.</p>
+        </div>
+      ) : null}
       {estimate.uniqueCompanies !== null ? (
         <p>{estimate.uniqueCompanies.toLocaleString('ru-RU')} уникальных компаний в реестровом срезе гипотезы</p>
       ) : null}
       {estimate.companiesWithEmail !== null ? (
         <p>Из них {estimate.companiesWithEmail.toLocaleString('ru-RU')} с email в реестре</p>
       ) : null}
-      {shownLimit !== null ? <p>Лимит этого прогона: {shownLimit.toLocaleString('ru-RU')} кандидатов</p> : null}
-      {stats.rowsTotal !== null ? (
+      {!target && shownLimit !== null ? <p>Лимит этого прогона: {shownLimit.toLocaleString('ru-RU')} кандидатов</p> : null}
+      {!target && stats.rowsTotal !== null ? (
         <p>Собрано до обработки: {stats.rowsTotal.toLocaleString('ru-RU')} кандидатов</p>
       ) : null}
-      {processedRows !== null ? <p>После обработки: {processedRows.toLocaleString('ru-RU')} строк</p> : null}
+      {!target && processedRows !== null ? <p>После обработки: {processedRows.toLocaleString('ru-RU')} строк</p> : null}
       {stats.relevanceCheckedCompanies !== null && stats.relevanceTotalCompanies !== null ? (
         <p>
           Релевантность проверена: {stats.relevanceCheckedCompanies.toLocaleString('ru-RU')} из{' '}
           {stats.relevanceTotalCompanies.toLocaleString('ru-RU')} компаний
         </p>
       ) : null}
-      {stats.launchableRows !== null ? (
+      {!target && stats.launchableRows !== null ? (
         <p className="font-medium text-emerald-700">
           Прошли проверки: {stats.launchableRows.toLocaleString('ru-RU')} {recipientWord(stats.launchableRows)}
         </p>
@@ -1217,7 +1208,9 @@ function CollectProgress({ base, queuedCount, queued, otherVertical }: {
       {!queued ? (
         <p className="mt-3 text-xs text-gray-600">
           {progress.candidates !== null
-            ? `Собрано кандидатов: ${progress.candidates.toLocaleString('ru-RU')}. Готовые получатели появятся после проверок.`
+            ? base.collect_info?.target_progress
+              ? `Кандидатов в текущем проходе: ${progress.candidates.toLocaleString('ru-RU')}. После проверок они дополнят превью.`
+              : `Собрано кандидатов: ${progress.candidates.toLocaleString('ru-RU')}. Готовые получатели появятся после проверок.`
             : progress.sourceRows !== null
               ? `Получено из завершённых источников: ${progress.sourceRows.toLocaleString('ru-RU')} строк. Дубли ещё не исключены.`
               : 'Количество кандидатов пока неизвестно. Это не означает, что найдено 0.'}

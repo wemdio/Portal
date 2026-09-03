@@ -18,7 +18,8 @@ export function getCollectionQueue(
   bases: readonly VeBaseSummary[],
   jobs: readonly Pick<VeJobSummary, 'stage' | 'status' | 'payload'>[] = [],
 ) {
-  const ordered = bases.filter((base) => base.status === 'collecting').sort(
+  const ordered = bases.filter((base) => base.status === 'collecting'
+    && !(base.collect_info?.collection_mode === 'supply' && base.collect_info.supply_hold)).sort(
     (a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
   );
   const collectingIds = new Set(ordered.map((base) => base.id));
