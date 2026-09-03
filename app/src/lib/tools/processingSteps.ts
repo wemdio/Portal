@@ -1307,21 +1307,48 @@ export async function stepTAScore(
   let reportChain = Promise.resolve();
   let cancellationError: Error | null = null;
   const fatalErrors: Error[] = [];
+  const recordFatalError = (err: unknown): void => {
+    if (fatalErrors.length === 0) {
+      fatalErrors.push(err instanceof Error ? err : new Error(String(err)));
+    }
+  };
+
+  // Both lanes share the stop signal, including HTTP retries already waiting
+  // in backoff. Recheck after the async ownership/cancellation lookup: another
+  // lane may fail its checkpoint while that lookup is in flight.
+  const isScoringStopped = async (): Promise<boolean> => {
+    if (cancellationError || fatalErrors.length > 0) return true;
+    if (isCancelled && await isCancelled()) {
+      cancellationError = new AiRequestCancelledError();
+    }
+    return cancellationError !== null || fatalErrors.length > 0;
+  };
 
   const reportBatchCompletion = (rowCount: number): Promise<void> => {
     const report = async () => {
-      processedUniqueRows += rowCount;
-      const isLast = processedUniqueRows === uniqueRows.length;
-      if (
-        !isLast &&
-        options?.onCheckpoint &&
-        shouldCheckpoint(processedUniqueRows, false)
-      ) {
-        await checkpoint();
+      try {
+        if (await isScoringStopped()) return;
+        processedUniqueRows += rowCount;
+        const isLast = processedUniqueRows === uniqueRows.length;
+        if (
+          !isLast &&
+          options?.onCheckpoint &&
+          shouldCheckpoint(processedUniqueRows, false)
+        ) {
+          await checkpoint();
+          if (await isScoringStopped()) return;
+        }
+        await onProgress(Math.min(99, Math.round((processedUniqueRows / uniqueRows.length) * 100)));
+      } catch (err) {
+        // Stop sibling retries as soon as the save fails, before the error
+        // propagates through the queued reports and back to the pool.
+        recordFatalError(err);
+        throw err;
       }
-      await onProgress(Math.min(99, Math.round((processedUniqueRows / uniqueRows.length) * 100)));
     };
-    reportChain = reportChain.then(report, report);
+    // A failed save must also reject reports queued by the other lane. Healing
+    // the chain would write fresh progress after an unsaved checkpoint.
+    reportChain = reportChain.then(report);
     return reportChain;
   };
 
@@ -1351,11 +1378,7 @@ export async function stepTAScore(
     // A length failure shrinks 10 -> <=5 -> singletons (not binary recursion,
     // which could require 19 requests before any transport retries).
     while (queue.length > 0) {
-      if (cancellationError || fatalErrors.length > 0) return;
-      if (isCancelled && await isCancelled()) {
-        cancellationError = new Error('Отменено');
-        return;
-      }
+      if (await isScoringStopped()) return;
       const task = queue.shift()!;
       const unresolved = task.companies.filter(({ key }) => !scoreByKey.has(key));
       if (unresolved.length === 0) continue;
@@ -1378,7 +1401,7 @@ export async function stepTAScore(
         ], {
           temperature: 0.2, json: true, max_tokens: TA_MAX_OUTPUT_TOKENS,
           title: 'Portal - Base Constructor TA Scoring', budget,
-          isCancelled,
+          isCancelled: isScoringStopped,
           onAttempt: (ms) => {
             telemetry.http_attempts += 1;
             telemetry.api_duration_ms += ms;
@@ -1387,14 +1410,13 @@ export async function stepTAScore(
           onRetryWait: (ms) => { telemetry.retry_wait_ms += ms; publishTelemetry(); },
         });
       } catch (err) {
+        // A sibling's failed save is a step failure, not an unscored company.
+        if (fatalErrors.length > 0) return;
         if (err instanceof AiRequestCancelledError) { cancellationError = err; return; }
         failureReason = err instanceof Error ? err.message : String(err);
         break;
       }
-      if (isCancelled && await isCancelled()) {
-        cancellationError = new AiRequestCancelledError();
-        return;
-      }
+      if (await isScoringStopped()) return;
 
       const sawLength = completion.finishReason === 'length';
       if (sawLength) lengthResponses += 1;
@@ -1455,10 +1477,6 @@ export async function stepTAScore(
       );
     }
     publishTelemetry();
-    if (isCancelled && await isCancelled()) {
-      cancellationError = new AiRequestCancelledError();
-      return;
-    }
     await reportBatchCompletion(chunk.length);
   };
 
@@ -1470,9 +1488,7 @@ export async function stepTAScore(
       // processInPool deliberately isolates ordinary task failures. TA scoring
       // must not turn an unexpected internal failure into a plausible score=5,
       // so remember it here and fail the whole step after workers settle.
-      if (fatalErrors.length === 0) {
-        fatalErrors.push(err instanceof Error ? err : new Error(String(err)));
-      }
+      recordFatalError(err);
     }
   });
 
