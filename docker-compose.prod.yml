@@ -1859,7 +1859,9 @@ services:
       - MAILGANER_SCORING_CONCURRENCY=${MAILGANER_SCORING_CONCURRENCY:-}
       # Аренда строки прогона: продлевается таймером каждые lease/3 = 60 с,
       # 180 с ≈ три пропущенных продления. После краха прогон подберут через
-      # аренду (3 мин) + один опрос (30 с).
+      # аренду (3 мин) + один опрос (10 с, MANUAL_SCORING_POLL_INTERVAL_MS
+      # ниже — тридцатисекундный запасной интервал воркера работает только при
+      # подключённом realtime, а здесь его нет) ≈ 3 мин 10 с.
       - MANUAL_SCORING_LEASE_SECONDS=${MANUAL_SCORING_LEASE_SECONDS:-180}
       # Свой интервал опроса, а не общий WORKER_POLL_INTERVAL_MS: realtime здесь
       # намеренно не подключён (API создаёт строку прогона ДО вставки доменов, и

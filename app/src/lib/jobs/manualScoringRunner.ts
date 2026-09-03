@@ -51,12 +51,34 @@ interface EndpointConfig {
 interface ProcessOptions {
   runId: string;
   endpoint: EndpointConfig;
-  /** Прогресс-callback после каждого batch — даёт воркеру писать в БД. */
+  /**
+   * Прогресс-callback после каждого batch — даёт воркеру писать в БД.
+   *
+   * Получает АБСОЛЮТНОЕ число обработанных строк прогона, а не число строк,
+   * сделанных в этом захвате. Разница видна клиенту: тело берёт только строки
+   * без бакета, поэтому счётчик от нуля означал бы «обработано 25 из 1000» на
+   * прогоне, который сделан на девяносто процентов. Смещение считается из
+   * uniqueCount ниже, дополнительного запроса не требуется.
+   */
   onProgress?: (processed: number) => Promise<void>;
   /** Concurrency для Mailganer + scrape. Default 5. */
   concurrency?: number;
   /** Лимит на одну строку, чтобы не зависнуть. Default 60 сек. */
   perRowTimeoutMs?: number;
+  /**
+   * Сколько всего строк у прогона (client_manual_score_runs.unique_count).
+   *
+   * Издатель вставляет в client_manual_score_rows ровно столько строк, сколько
+   * записал в unique_count (api/client/manual-scoring/upload/route.ts: при
+   * частичной вставке прогон сразу переводится в failed). Значит смещение
+   * «сколько уже оценено до этого захвата» = unique_count минус число
+   * невыбранных строк, и лишний COUNT не нужен — воркер и так читает
+   * unique_count при захвате.
+   *
+   * Без него смещение считается нулевым: прогресс тогда абсолютен только для
+   * первого захвата, ровно как было до аренды.
+   */
+  uniqueCount?: number;
   /**
    * Сигнал прерывания от единого жизненного цикла задач (`ctx.signal`).
    *
@@ -66,7 +88,10 @@ interface ProcessOptions {
    * работе, аренду отпускает библиотека, а продолжит прогон следующий владелец
    * (возобновление по построению — берутся только строки с bucket IS NULL).
    *
-   * Необязателен: без сигнала поведение прежнее (прямой вызов, тесты).
+   * Необязателен: без сигнала поведение прежнее. Сегодня вызывающий ровно
+   * один — worker/manualScoringWorker.ts, и тестов на этот путь нет;
+   * необязательность оставлена под гипотетический прямой вызов, а не потому,
+   * что такой вызов уже где-то есть.
    */
   signal?: AbortSignal;
   /**
@@ -99,7 +124,9 @@ const EMPTY_BUCKETS = (): Record<ManualBucket, number> =>
  *
  * Один обёртывающий помощник на ВСЕ записи — тот же приём, что
  * `safeUpdateSearchJob` в lib/parsers/searchParserWorker.ts. Без жетона
- * фильтр не добавляется, и поведение остаётся ровно тем, что было до аренды.
+ * фильтр не добавляется, и поведение остаётся ровно тем, что было до аренды;
+ * это запас под гипотетический прямой вызов, а не описание существующего —
+ * сегодня processManualRun зовут из одного места и всегда с жетоном.
  */
 type RunFence = <T>(query: T) => T;
 
@@ -191,6 +218,23 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
   let processedSinceLastProgress = 0;
   const PROGRESS_FLUSH_EVERY = 25;
 
+  /**
+   * Абсолютный счётчик для прогресс-бара клиента.
+   *
+   * Смещение — сколько строк прогона было оценено ДО этого захвата: тело
+   * выбирает только строки без бакета, поэтому cursor считает с нуля на каждом
+   * захвате. Пока брошенный прогон никто не подбирал, эта ветка была
+   * недостижима; с арендой перехват стал штатным, и без смещения клиент видел
+   * бы на прогоне 900/1000 внезапное «обработано 25».
+   *
+   * Клампим по rows.length: каждый поток пула ровно один раз увеличивает
+   * cursor за пределы массива, прежде чем выйти, — при concurrency 2 полностью
+   * пройденная сотня дала бы 102. Экран это число подрезает, но писать в
+   * счётчик, который читает клиент, больше unique_count всё равно незачем.
+   */
+  const scoredBefore = Math.max(0, (opts.uniqueCount ?? rows.length) - rows.length);
+  const absoluteProcessed = (c: number) => scoredBefore + Math.min(c, rows.length);
+
   async function worker(): Promise<void> {
     while (true) {
       // Граница строки — единственная точка кооперативной остановки в пуле.
@@ -212,7 +256,7 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
 
       processedSinceLastProgress++;
       if (processedSinceLastProgress >= PROGRESS_FLUSH_EVERY) {
-        const total = cursor; // приближённо
+        const total = absoluteProcessed(cursor); // приближённо
         if (opts.onProgress) {
           await opts.onProgress(total).catch(() => undefined);
         }
@@ -241,7 +285,7 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
   // попыток ПЕРЕД фазой, которая не пишет processed_count вовсе: чистка имён
   // через AI, заливка в Instantly и снапшоты идут пачками по всему прогону.
   if (opts.onProgress) {
-    await opts.onProgress(cursor).catch(() => undefined);
+    await opts.onProgress(absoluteProcessed(cursor)).catch(() => undefined);
   }
   if (aborted()) return interrupted();
 
@@ -405,7 +449,14 @@ async function resolveNamesAndRoute(
   if (signal?.aborted) throw new Error('manual scoring interrupted');
 
   // 3. Сохраняем company_name ('' = резолв выполнен, имени нет → идемпотентность).
+  //    Проверка сигнала внутри цикла, а не только перед ним: это тысячи
+  //    последовательных запросов, самый длинный непрерываемый отрезок тела.
+  //    Без неё цикл продолжал бы писать десятки секунд после того, как бюджет
+  //    остановки вышел и аренда отпущена, — уже поверх нового владельца, без
+  //    ограждения (эти записи идут в client_manual_score_rows, а не в строку
+  //    прогона) и именами, которые AI между прогонами не обязан повторять.
   for (let i = 0; i < rows.length; i += 1) {
+    if (signal?.aborted) throw new Error('manual scoring interrupted');
     const { error } = await supabaseAdmin
       .from('client_manual_score_rows')
       .update({ company_name: cleaned[i] || '' })
@@ -709,9 +760,13 @@ async function processOneRow(
   try {
     scoreResult = await getOrFetchScore(domain, { ...endpoint, signal }, 'manual');
   } catch (err) {
-    // Прерывание — это не «домен невалиден». Записанный bucket='invalid'
-    // навсегда исключил бы домен из повтора (он берёт только bucket IS NULL),
-    // поэтому пробрасываем и даём вызывающему решить по сигналу.
+    // От вечного «домен невалиден» на прерывании защищает НЕ этот rethrow, а
+    // проверка сигнала на границе строки в пуле: прерванный вызов к внешнему
+    // сервису возвращает ok:false, а не бросает, и сюда обычно не доходит —
+    // результат просто не записывается. Rethrow оставлен как страховка для
+    // исключения из слоя кэша (запрос к БД за сохранённым score): без него
+    // такая строка легла бы с bucket='invalid', а повтор берёт только строки
+    // с bucket IS NULL, то есть переоценить её было бы уже некому.
     if (signal?.aborted) throw err;
     return {
       domain,
