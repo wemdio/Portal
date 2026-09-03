@@ -14,25 +14,27 @@
  * является: `all` — это значение по умолчанию в самом образе
  * (Dockerfile.worker: `ENV WORKER_KIND=all`), и сюда попадают сервис `worker`
  * из локального docker-compose.yml и любой ручной `docker run` без
- * WORKER_KIND. После 02.09.2026 такой контейнер молча НЕ обслуживает четыре
- * очереди ниже — их обслуживают только выделенные воркеры (worker-hh,
- * worker-eng-hiring, worker-search, worker-yandexmaps).
+ * WORKER_KIND. После 02.09.2026 такой контейнер молча НЕ обслуживает
+ * перечисленные ниже очереди — их обслуживают только выделенные воркеры
+ * (worker-hh, worker-eng-hiring, worker-search, worker-yandexmaps,
+ * worker-emailvalidation).
  *
  * Из-за того, что на проде эта ветка не поднимается, файл легко пропустить
  * при правках — и 02.09.2026 отсюда убраны очереди, переехавшие на единый
  * жизненный цикл задач (app/src/lib/jobs/lifecycle.ts): parser_jobs,
- * search_parser_jobs, yandex_maps_jobs и yandex_direct_jobs. Их захват здесь
- * шёл БЕЗ аренды и жетона, а восстановление при старте помечало чужие живые
- * задачи как failed — запустись эта ветка хоть раз рядом с нынешними
- * воркерами, она отобрала бы и испортила их строки. Если очередь понадобится
- * здесь снова — только через createJobRunner, как в отдельных воркерах.
+ * search_parser_jobs, yandex_maps_jobs и yandex_direct_jobs; 03.09.2026 к ним
+ * добавилась email_validation_jobs. Их захват здесь шёл БЕЗ аренды и жетона, а
+ * восстановление при старте помечало чужие живые задачи как failed (валидацию
+ * почт — сбрасывало в pending) — запустись эта ветка хоть раз рядом с
+ * нынешними воркерами, она отобрала бы и испортила их строки. Если очередь
+ * понадобится здесь снова — только через createJobRunner, как в отдельных
+ * воркерах.
  */
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
 import { recoverStalePreparingWebsiteEnrichmentJobs } from '@/lib/enrich/websiteEnrichmentJobPublisher';
 import { runBriefScoringJob } from '@/lib/briefScoring/briefScoringWorker';
-import { runEmailValidationJob } from '@/lib/emailValidation/emailValidationWorker';
 import { runInnEnrichJob } from '@/lib/innEnrich/runJob';
 import { runBugorSmtpValidation } from '@/lib/bugorOutreach/smtpValidationWorker';
 import { runNashSmtpValidation } from '@/lib/nashOutreach/smtpValidationWorker';
@@ -130,14 +132,10 @@ async function startupRecovery(): Promise<void> {
   if (briefErr) log('warn', 'Startup recovery: brief_scoring_jobs update failed', briefErr);
   else if (briefJobs?.length) log('info', `Startup recovery: reset ${briefJobs.length} brief_scoring_jobs to pending`);
 
-  // Email validation — сбрасываем в 'pending' (воркер сам продолжит с места остановки)
-  const { data: evJobs, error: evErr } = await db
-    .from('email_validation_jobs')
-    .update({ status: 'pending' })
-    .eq('status', 'running')
-    .select('id');
-  if (evErr) log('warn', 'Startup recovery: email_validation_jobs update failed', evErr);
-  else if (evJobs?.length) log('info', `Startup recovery: reset ${evJobs.length} email_validation_jobs to pending`);
+  // email_validation_jobs здесь НЕ восстанавливается: очередь на едином
+  // жизненном цикле задач, брошенную задачу определяет истёкшая аренда.
+  // Прежний сброс running→pending по ВСЕЙ таблице отобрал бы строку у живого
+  // worker-emailvalidation прямо посреди пачки.
 
   const { data: innJobs, error: innErr } = await db
     .from('inn_enrich_jobs')
@@ -207,29 +205,11 @@ async function claimBriefScoringJob(): Promise<string | null> {
   return claimed?.id ?? null;
 }
 
-async function claimEmailValidationJob(): Promise<string | null> {
-  const db = supabaseAdmin!;
-
-  const { data: pending } = await db
-    .from('email_validation_jobs')
-    .select('id')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (!pending) return null;
-
-  const { data: claimed } = await db
-    .from('email_validation_jobs')
-    .update({ status: 'running', started_at: new Date().toISOString() })
-    .eq('id', pending.id)
-    .eq('status', 'pending')
-    .select('id')
-    .maybeSingle();
-
-  return claimed?.id as string ?? null;
-}
+// claimEmailValidationJob убран 03.09.2026: очередь на едином жизненном цикле
+// задач. Прежний захват шёл одним UPDATE без аренды и жетона — рядом с
+// worker-emailvalidation это была бы вторая реплика без владения, которая
+// проверяла бы те же адреса второй раз за деньги и штамповала бы итог поверх
+// работы владельца.
 
 async function claimInnEnrichJob(): Promise<string | null> {
   const db = supabaseAdmin!;
@@ -355,13 +335,6 @@ async function pollOnce(): Promise<boolean> {
     return true;
   }
 
-  const evJobId = await claimEmailValidationJob();
-  if (evJobId) {
-    log('info', `Running email validation job ${evJobId}`);
-    await runEmailValidationJob(evJobId);
-    return true;
-  }
-
   const innJobId = await claimInnEnrichJob();
   if (innJobId) {
     log('info', `Running inn-enrich job ${innJobId}`);
@@ -440,7 +413,6 @@ async function pollOnce(): Promise<boolean> {
 const REALTIME_TABLES = [
   'website_enrichment_jobs',
   'brief_scoring_jobs',
-  'email_validation_jobs',
   'inn_enrich_jobs',
   'lead_import_jobs',
 ];

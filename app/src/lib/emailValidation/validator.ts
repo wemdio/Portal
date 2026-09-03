@@ -304,7 +304,7 @@ const RCPT_4XX_EGRESS_RE =
 async function smtpVerifyViaProxy(
   email: string,
   mxHost: string,
-  options?: { checkCatchAll?: boolean; timeout?: number },
+  options?: { checkCatchAll?: boolean; timeout?: number; signal?: AbortSignal },
 ): Promise<SmtpCheckResult> {
   // HELO is picked by the proxy itself (from EMAIL_VALIDATION_HELO_DOMAIN
   // env var or os.hostname() on the proxy VPS), so it matches the IP's PTR.
@@ -321,12 +321,24 @@ async function smtpVerifyViaProxy(
   let lastInconclusive: SmtpCheckResult | null = null;
 
   for (const baseUrl of proxyTryOrder(mxHost)) {
+    // Воркер остановлен или потерял аренду: перебирать оставшиеся egress'ы
+    // нечего — задача уже не наша, а каждая проба здесь платная. Проверка
+    // ДО запроса: иначе отключённое от задачи тело успевало бы обойти весь
+    // пул прокси по 25 с на каждый.
+    if (options?.signal?.aborted) {
+      lastError = lastError ?? 'SMTP probe aborted';
+      break;
+    }
     const url = `${baseUrl.replace(/\/+$/, '')}/smtp-check`;
 
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), SMTP_PROXY_TIMEOUT_MS);
+    // Таймаут пробы и внешняя остановка — один контроллер: fetch без сигнала
+    // висел бы до SMTP_PROXY_TIMEOUT_MS даже после SIGTERM.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), SMTP_PROXY_TIMEOUT_MS);
+    const abortFromOuter = () => controller.abort();
+    options?.signal?.addEventListener('abort', abortFromOuter, { once: true });
 
+    try {
       const res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -336,8 +348,6 @@ async function smtpVerifyViaProxy(
         body: JSON.stringify(body),
         signal: controller.signal,
       });
-
-      clearTimeout(timer);
 
       if (!res.ok) {
         lastError = `Proxy ${baseUrl}: HTTP ${res.status}`;
@@ -379,6 +389,12 @@ async function smtpVerifyViaProxy(
     } catch (err) {
       lastError = `Proxy ${baseUrl}: ${err instanceof Error ? err.message : 'unknown error'}`;
       continue;
+    } finally {
+      // И таймер, и подписка на внешний сигнал снимаются на ВСЕХ выходах из
+      // итерации (return/continue/throw): раньше clearTimeout стоял только на
+      // успешном пути, и упавшая проба оставляла висеть таймер до срабатывания.
+      clearTimeout(timer);
+      options?.signal?.removeEventListener('abort', abortFromOuter);
     }
   }
 
@@ -393,7 +409,7 @@ async function smtpVerifyViaProxy(
 export async function smtpVerify(
   email: string,
   mxHost: string,
-  options?: { checkCatchAll?: boolean; timeout?: number },
+  options?: { checkCatchAll?: boolean; timeout?: number; signal?: AbortSignal },
 ): Promise<SmtpCheckResult> {
   if (SMTP_PROXY_URLS.length > 0) {
     return smtpVerifyViaProxy(email, mxHost, options);
@@ -486,6 +502,13 @@ export function classifyRcpt5xx(text: string | undefined, probedEmail?: string):
 export async function validateEmail(
   rawEmail: string,
   domainCache: Map<string, DomainInfo>,
+  /**
+   * signal — остановка воркера или потеря аренды задачи. Пробрасывается в
+   * SMTP-пробы через прокси: без него отключённое от задачи тело продолжало бы
+   * платные обращения к пулу прокси минутами (до 3 MX × весь пул × 25 с).
+   * Необязателен: validateEmail зовут и вне механизма задач.
+   */
+  options?: { signal?: AbortSignal },
 ): Promise<ValidationResult> {
   let email = rawEmail.trim().toLowerCase();
   // IDN-домены (почта.рф → xn--80a1acny.xn--p1ai): syntax/MX/SMTP идут по
@@ -578,11 +601,17 @@ export async function validateEmail(
 
   const mxHostsToTry = domainInfo.mxHosts.slice(0, 3);
   for (let mxIndex = 0; mxIndex < mxHostsToTry.length; mxIndex += 1) {
+    // Остановка воркера прекращает перебор MX сразу: иначе после SIGTERM тело
+    // ходило бы ещё к двум резервным MX. Вердикт при этом остаётся
+    // неопределённым, и вызывающий (воркер) просто не записывает его — строка
+    // очереди вернётся в pending по reset_stale.
+    if (options?.signal?.aborted) break;
     const mxHost = mxHostsToTry[mxIndex];
     try {
       smtpResult = await smtpVerify(email, mxHost, {
         checkCatchAll: needCatchAllCheck,
         timeout: SMTP_CONNECT_TIMEOUT_MS,
+        signal: options?.signal,
       });
       if (smtpResult.isCatchAll !== null && domainInfo.isCatchAll === null) {
         domainInfo.isCatchAll = smtpResult.isCatchAll;

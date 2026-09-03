@@ -15,8 +15,9 @@
 # - не трогает таблицы воркеров, переехавших на общий жизненный цикл задач
 #   (app/src/lib/jobs/lifecycle.ts): base_constructor_jobs, tg_parser_jobs,
 #   search_parser_jobs, yandex_maps_jobs, parser_jobs (HH/ATS/ENG-найм),
-#   ai_campaigns с ai_caller_jobs (обзвон) и tg_outreach_campaigns с
-#   tg_outreach_warmup_runs и tg_outreach_jobs (TG-аутрич и прогрев).
+#   ai_campaigns с ai_caller_jobs (обзвон), tg_outreach_campaigns с
+#   tg_outreach_warmup_runs и tg_outreach_jobs (TG-аутрич и прогрев) и
+#   email_validation_jobs (валидация почт).
 #   Очередь sales_chat_sync_runs в списке ниже не значилась
 #   и не значится — искать, откуда её убрали, не нужно; воркер этой очереди
 #   просто добавлен в is_lifecycle_managed_worker, чтобы деплой одного его не
@@ -67,6 +68,7 @@ is_lifecycle_managed_worker() {
     worker-eng-hiring) return 0 ;;
     worker-aicaller) return 0 ;;
     worker-tg-outreach) return 0 ;;
+    worker-emailvalidation) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -174,7 +176,12 @@ if should_pause_legacy_queues && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
     # отпускает аренду по SIGTERM, а задача продолжается с сохранённых ссылок и
     # карточек в следующей реплике. Сброс её в pending отсюда только отбирал бы
     # строку у ещё живого исполнителя.
-    "email_validation_jobs"
+    # email_validation_jobs убран: воркер валидации почт на едином жизненном
+    # цикле. Задача продолжается с оставшихся строк email_validation_queue —
+    # проверенные адреса не переигрываются и не оплачиваются заново. Сброс в
+    # pending отсюда отбирал бы строку у живого исполнителя (реплика одна, но
+    # одиночный рестарт оставляет рядом работающий контейнер) и обнулял бы
+    # владение под ним.
     "lead_import_jobs"
     # tg_outreach_jobs убран: очередь стала каналом мгновенных команд оператора
     # («старт», «стоп», «обновить переписки»), а сама кампания живёт своей

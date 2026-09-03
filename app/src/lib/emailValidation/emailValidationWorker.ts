@@ -51,7 +51,31 @@ const DOMAIN_CACHE_TTL_MS = Number(process.env.EMAIL_VALIDATION_DOMAIN_CACHE_TTL
 const JOB_PROGRESS_FLUSH_INTERVAL = Number(process.env.EMAIL_VALIDATION_PROGRESS_FLUSH_MS ?? '2000');
 const SUPABASE_QUERY_TIMEOUT_MS = 30_000;
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Пауза, которую можно прервать сигналом остановки.
+ *
+ * Ожидание ближайшего отложенного ретрая доходит до RETRY_WAIT_CAP_MS (60 с), и
+ * отключённое от задачи тело столько спать не должно: пока оно спит, задачу уже
+ * ведёт новый владелец. Резолвится, а не бросает — решение, что делать с
+ * отменой, принимает вызывающий код (тот же приём, что в
+ * lib/parsers/searchParserWorker.ts).
+ */
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    // AbortSignal не переигрывает уже случившуюся отмену для поздних
+    // слушателей — поэтому проверка выше идёт до подписки.
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -492,7 +516,40 @@ export function retryDelayMs(cls: RetryClass, attempts: number, smtpText?: strin
 
 // ─── Main worker function ───────────────────────────────────────────────────
 
-export async function runEmailValidationJob(jobId: string) {
+/**
+ * Контекст единого жизненного цикла задач (app/src/lib/jobs/lifecycle.ts).
+ *
+ * Необязателен: `runEmailValidationJob` зовут ещё из монолитного воркера
+ * (`worker/index.ts`) без всякой аренды, и там поведение обязано остаться
+ * прежним.
+ */
+export interface EmailValidationRunContext {
+  /** Взводится на SIGTERM воркера и при потере аренды. */
+  signal: AbortSignal;
+  /**
+   * Жетон текущего захвата. Им ограждаются ВСЕ записи в строку
+   * email_validation_jobs: терминальный статус тут пишет само тело
+   * (manageTerminalStatus: false), и без жетона старый исполнитель после
+   * перехвата задачи проштамповал бы completed/failed поверх работы нового.
+   */
+  runToken: string;
+  /** false — задачу перехватили: прекратить работу. */
+  saveCheckpoint(data: { processed: number }): Promise<boolean>;
+}
+
+/**
+ * Чекпойнт пишем не чаще раза в столько.
+ *
+ * Настоящее возобновление у этой очереди считается не из чекпойнта, а из
+ * построчной очереди (email_validation_queue): новый владелец берёт только
+ * строки со статусом pending, уже проверенные не переигрываются. Чекпойнт
+ * нужен ради двух побочных эффектов библиотеки — он продлевает аренду и
+ * обнуляет бюджет неудач (attempts), а его ответ ещё и самый дешёвый способ
+ * узнать, что строку перехватили.
+ */
+const CHECKPOINT_MIN_INTERVAL_MS = 30_000;
+
+export async function runEmailValidationJob(jobId: string, ctx?: EmailValidationRunContext) {
   if (!supabaseAdmin) {
     await logError('email.validation.worker.no_admin', new Error('supabaseAdmin is not configured'));
     return;
@@ -500,6 +557,30 @@ export async function runEmailValidationJob(jobId: string) {
 
   const db = supabaseAdmin;
   let trace: Span | null = null;
+  const runToken = ctx?.runToken ?? null;
+
+  /**
+   * Работа прервана извне: остановка воркера (SIGTERM) или потерянная аренда.
+   *
+   * Это НЕ итог задачи. Строка обязана остаться в running: аренду отпустит
+   * библиотека, соседняя реплика подберёт задачу и продолжит с построчной
+   * очереди. Любая терминальная запись здесь (completed/failed/cancelled)
+   * стоила бы уже сделанной работы, поэтому флаг проверяется и после цикла, и
+   * в общем catch. Решение принимается по signal.aborted, а НЕ по имени
+   * ошибки: настоящий таймаут обязан остаться отказом.
+   */
+  let interrupted = false;
+
+  /**
+   * Все записи в строку задачи идут через один ограждённый жетоном путь.
+   * Без ctx (монолитный воркер) фильтр не добавляется — поведение прежнее.
+   */
+  // Тип билдера — any по той же причине, что в lib/jobs/lifecycle.ts: цепочка
+  // PostgREST меняет форму на каждом шаге, а нам нужен от неё только .eq.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fenced = <T>(q: T): T => (runToken ? ((q as any).eq('run_token', runToken) as T) : q);
+  const updateJob = (patch: Record<string, unknown>) =>
+    fenced(db.from('email_validation_jobs').update(patch).eq('id', jobId));
 
   try {
     workerLog('info', `Starting job ${jobId}`);
@@ -542,17 +623,14 @@ export async function runEmailValidationJob(jobId: string) {
       processed = completedCount + failedCount;
       success = completedCount;
       errors = failedCount;
-      await db
-        .from('email_validation_jobs')
-        .update({ status: 'running', completed_at: null })
-        .eq('id', jobId);
+      await updateJob({ status: 'running', completed_at: null });
     }
 
+    // Под механизмом задач сюда не попадаем: строку в running переводит сам
+    // захват (lib/jobs/lifecycle.ts), started_at ставит его claimPatch. Ветка
+    // осталась для монолитного воркера, который зовёт тело без ctx.
     if (job.status === 'pending') {
-      await db
-        .from('email_validation_jobs')
-        .update({ status: 'running', started_at: new Date().toISOString() })
-        .eq('id', jobId);
+      await updateJob({ status: 'running', started_at: new Date().toISOString() });
     }
 
     let cancelled = false;
@@ -573,10 +651,25 @@ export async function runEmailValidationJob(jobId: string) {
       const now = Date.now();
       if (now - lastProgressFlush < JOB_PROGRESS_FLUSH_INTERVAL) return;
       lastProgressFlush = now;
-      await db
-        .from('email_validation_jobs')
-        .update({ processed, success_count: success, error_count: errors })
-        .eq('id', jobId);
+      await updateJob({ processed, success_count: success, error_count: errors });
+    };
+
+    /**
+     * Чекпойнт после реально сделанной пачки, не чаще раза в
+     * CHECKPOINT_MIN_INTERVAL_MS. Возвращает false, если задачу перехватили.
+     *
+     * Намеренно НЕ зовётся в хвосте отложенных ретраев: там работа не идёт, и
+     * обнулять бюджет попыток нечем — иначе воркер, падающий по кругу, никогда
+     * не дошёл бы до предела. Живость строки в хвосте держит продление аренды,
+     * а перехват заметит либо оно, либо проверка signal в начале круга.
+     */
+    let lastCheckpointAt = Date.now();
+    const checkpointAfterBatch = async (): Promise<boolean> => {
+      if (!ctx) return true;
+      const nowMs = Date.now();
+      if (nowMs - lastCheckpointAt < CHECKPOINT_MIN_INTERVAL_MS) return true;
+      lastCheckpointAt = nowMs;
+      return ctx.saveCheckpoint({ processed });
     };
 
     // ── Main processing loop ────────────────────────────────────────────
@@ -585,6 +678,9 @@ export async function runEmailValidationJob(jobId: string) {
     // работа кончилась. Сбрасывается, пока есть processing (работа в полёте).
     let tailStartedAt: number | null = null;
     while (true) {
+      // Остановка воркера или потеря аренды: выходим БЕЗ терминальной записи.
+      if (ctx?.signal.aborted) { interrupted = true; break; }
+
       // Check for cancellation
       const { data: jobStatus } = await db
         .from('email_validation_jobs')
@@ -602,7 +698,7 @@ export async function runEmailValidationJob(jobId: string) {
       if (claimErr) {
         workerLog('error', `Claim failed for job ${jobId}`, claimErr);
         await logError('email.validation.worker.claim_failed', claimErr, { jobId });
-        await sleep(500);
+        await sleep(500, ctx?.signal);
         continue;
       }
 
@@ -641,8 +737,9 @@ export async function runEmailValidationJob(jobId: string) {
         }
 
         // Если остались только отложенные (retry_after в будущем) — спим до
-        // ближайшего, а не долбим claim каждые 600мс впустую.
-        await sleep(await msUntilNextRetry(jobId));
+        // ближайшего, а не долбим claim каждые 600мс впустую. Сон прерываемый:
+        // остановка воркера не должна ждать минуту.
+        await sleep(await msUntilNextRetry(jobId), ctx?.signal);
         continue;
       }
       tailStartedAt = null; // claim вернул работу — хвост закончился
@@ -652,6 +749,12 @@ export async function runEmailValidationJob(jobId: string) {
         batch,
         Math.max(1, Math.min(WORKER_CONCURRENCY, batch.length)),
         async (item) => {
+          // Задача уже не наша: оставшиеся строки пачки не трогаем вовсе.
+          // Они останутся в processing и вернутся в pending по
+          // reset_stale_email_validation_items у нового владельца — это лучше,
+          // чем платная проба за чужой счёт и вердикт поверх его работы.
+          if (ctx?.signal.aborted) return;
+
           const domain = item.email_normalized.split('@')[1] ?? '';
           const release = await acquireDomainSlot(domain);
 
@@ -671,7 +774,13 @@ export async function runEmailValidationJob(jobId: string) {
               return;
             }
 
-            const result = await validateEmail(item.email_normalized, domainCache);
+            const result = await validateEmail(item.email_normalized, domainCache, {
+              signal: ctx?.signal,
+            });
+            // Проба прервана остановкой — её вердикт недостоверен (перебор MX
+            // и прокси оборван на середине). Ничего не пишем: строка останется
+            // в processing и вернётся в очередь по reset_stale.
+            if (ctx?.signal.aborted) return;
 
             if (result.error && result.result === 'unknown') {
               const cls = classifyRetry(result.error, result.details, item.attempt_count);
@@ -696,6 +805,9 @@ export async function runEmailValidationJob(jobId: string) {
             }
             processed += 1;
           } catch (err) {
+            // Исключение НА ПРЕРЫВАНИИ — не отказ строки: решаем по signal, а
+            // не по тексту ошибки, чтобы настоящий таймаут остался отказом.
+            if (ctx?.signal.aborted) return;
             const msg = err instanceof Error ? err.message : 'Ошибка валидации';
             const cls = classifyRetry(msg, undefined, item.attempt_count);
             if (cls) {
@@ -715,10 +827,29 @@ export async function runEmailValidationJob(jobId: string) {
       );
 
       await flushProgress();
+      // Чекпойнт после реальной пачки: продлевает аренду, обнуляет бюджет
+      // попыток и отвечает, наша ли ещё строка. false — задачу перехватили:
+      // выходим БЕЗ терминальной записи, её допишет новый владелец.
+      if (!(await checkpointAfterBatch())) { interrupted = true; break; }
       workerLog('info', `Job ${jobId}: processed=${processed}/${job.total} (batch=${batch.length}, success=${success}, errors=${errors})`);
     }
 
     // ── Finalization ──────────────────────────────────────────────────────
+
+    if (interrupted) {
+      // Ни completed, ни failed, ни cancelled: строка остаётся running под
+      // управлением библиотеки — аренду отпустит она, задачу продолжит соседняя
+      // реплика с построчной очереди. Единственный корректный выход из
+      // прерывания. Счётчики дописываем ограждённой записью: они и есть
+      // отпечаток прогресса, по которому монитор судит о движении задачи.
+      await updateJob({ processed, success_count: success, error_count: errors });
+      workerLog('info', `Job ${jobId} interrupted — left running for reclaim (processed=${processed})`);
+      await logInfo('email.validation.worker.interrupted', 'Email validation job interrupted — left running for reclaim', {
+        jobId, processed, success, errors,
+      });
+      await trace?.cancel('Остановка воркера: задача продолжится с оставшихся строк очереди.');
+      return;
+    }
 
     if (cancelled) {
       const now = new Date().toISOString();
@@ -736,16 +867,21 @@ export async function runEmailValidationJob(jobId: string) {
     ]);
 
     const finalStatus: JobRow['status'] = cancelled ? 'cancelled' : 'completed';
-    await db
-      .from('email_validation_jobs')
-      .update({
-        status: finalStatus,
-        processed: completedCount + failedCount,
-        success_count: completedCount,
-        error_count: failedCount,
-        completed_at: new Date().toISOString(),
-      })
-      .eq('id', jobId);
+    // Терминальная запись ограждена жетоном и обнуляет владение: библиотека
+    // при manageTerminalStatus:false снимает осадок сама, но только если
+    // терминальная запись прошла — а прошла она ровно тогда, когда строка ещё
+    // наша. Обнуляем здесь же, чтобы дежурный запрос «кто держит аренду» не
+    // показывал закрытые задачи даже в окне между двумя записями.
+    await updateJob({
+      status: finalStatus,
+      processed: completedCount + failedCount,
+      success_count: completedCount,
+      error_count: failedCount,
+      completed_at: new Date().toISOString(),
+      lease_until: null,
+      run_token: null,
+      worker_id: null,
+    });
 
     // Persist domain cache for future jobs (только изменённые за прогон записи)
     await saveDomainCache(domainCache, domainCacheSnapshot);
@@ -759,17 +895,29 @@ export async function runEmailValidationJob(jobId: string) {
     await cleanupOldQueues();
 
   } catch (err) {
+    // Исключение НА ПРЕРЫВАНИИ — не отказ задачи: прерванный запрос бросает
+    // AbortError, и без этой проверки остановка воркера штамповала бы failed на
+    // живой задаче, которую сосед готов продолжить. Решаем по signal.aborted, а
+    // НЕ по имени/тексту ошибки: настоящий таймаут обязан остаться отказом.
+    if (interrupted || ctx?.signal.aborted) {
+      workerLog('info', `Job ${jobId} aborted mid-flight — left running for reclaim`);
+      await logInfo('email.validation.worker.interrupted', 'Email validation job aborted mid-flight — left running for reclaim', {
+        jobId, reason: err instanceof Error ? err.message : String(err),
+      });
+      await trace?.cancel('Остановка воркера: задача продолжится с оставшихся строк очереди.');
+      return;
+    }
     workerLog('error', `Job ${jobId} CRASHED`, err);
     await logError('email.validation.worker.failed', err, { jobId });
     await trace?.fail(err);
-    await db
-      .from('email_validation_jobs')
-      .update({
-        status: 'failed',
-        completed_at: new Date().toISOString(),
-        error_message: err instanceof Error ? err.message : 'Worker error',
-      })
-      .eq('id', jobId);
+    await updateJob({
+      status: 'failed',
+      completed_at: new Date().toISOString(),
+      error_message: err instanceof Error ? err.message : 'Worker error',
+      lease_until: null,
+      run_token: null,
+      worker_id: null,
+    });
     await cleanupOldQueues();
   }
 }
