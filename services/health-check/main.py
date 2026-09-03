@@ -1143,7 +1143,8 @@ def _track(key: str, failed: bool) -> tuple[bool, bool]:
 # One registry covers user-facing parsers and processing tools. Every five
 # minutes we look for:
 #   1) an active job whose DB heartbeat/progress has not moved for
-#      JOB_STUCK_MINUTES (20 min — see the constant for why not 15);
+#      JOB_STUCK_MINUTES (20 min — see the constant for why not 15) или для
+#      своего порога очереди (JobMonitorSpec.stuck_minutes);
 #   2) a newly failed job with a real error.
 #
 # Alerts are claimed in health_check_job_alerts, so a container restart or the
@@ -1165,6 +1166,29 @@ class JobMonitorSpec:
     queue_heartbeat_column: str | None = None
     extra_predicate: str | None = None
     progress_sql: str | None = None
+    # Свой порог «Долго висит» для ЭТОЙ таблицы, в минутах. None — общий
+    # JOB_STUCK_MINUTES.
+    #
+    # Зачем вообще нужен свой. Общие 20 минут держатся на допущении:
+    # самопочинка задачи заведомо быстрее, чем человек заметит остановку. Для
+    # большинства очередей это правда (см. арифметику над JOB_STUCK_MINUTES),
+    # но допущение ломается двумя способами, и оба здесь встречаются:
+    #  1) цепочка самопочинки очереди ДЛИННЕЕ порога. Зависшую задачу чинит
+    #     сама библиотека (lib/jobs/lifecycle.ts): порог простоя прогресса →
+    #     аренда не продлевается → истекает → строку подбирает сосед. Сумма
+    #     этих трёх слагаемых у кампаний TG-аутрича ≈ 28,5 мин, у обзвона
+    #     ≈ 23,5 мин — обе больше двадцати. С общим порогом монитор писал бы в
+    #     чат на КАЖДОЙ штатной передаче задачи соседу, то есть ровно тот
+    #     ложный поток, который разбирали 11.08.2026;
+    #  2) законная работа ДЛИННЕЕ порога. У Яндекс.Карт один чанк имеет право
+    #     молчать 148 минут (арифметика — в спецификации yandex_maps_jobs), и
+    #     двадцатиминутный порог объявляет исправную задачу зависшей.
+    #
+    # Правило при добавлении: порог обязан быть ЗАМЕТНО больше и цепочки
+    # самопочинки, и самого длинного законного молчания очереди. Монитор не
+    # имеет права тревожить чат из-за состояния, которое библиотека чинит сама
+    # в пределах порога.
+    stuck_minutes: int | None = None
     failed_statuses: tuple[str, ...] = (
         "failed", "error", "captcha", "blocked", "timeout", "login_required",
     )
@@ -1226,6 +1250,31 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
         # Без updated_column монитор считает простой по отпечатку прогресса
         # (колонки выше) — ровно так же, как для search_parser_jobs.
         "portal-worker-yandexmaps",
+        # Три часа вместо общих двадцати минут. Здесь ЗАКОННАЯ работа длиннее
+        # общего порога, и вот арифметика.
+        #
+        # Счётчики (processed_organizations, progress_stage) двигаются только
+        # на УСПЕШНОМ чанке. Неудачная попытка не пишет ничего и уходит на
+        # следующий прокси: maxProxyRetries = размер пула + 1 запасная
+        # (app/src/lib/parsers/yandexMapsWorker.ts, ветки collect и parse), то
+        # есть при нынешнем пуле из восьми прокси — девять попыток на чанк.
+        # Каждая ограничена сверху клиентом воркера: 990 с
+        # (YANDEXMAPS_SERVICE_TIMEOUT_MS в lib/parsers/yandexMapsServiceClient.ts,
+        # намеренно больше серверных COLLECT_TIMEOUT_SEC / PARSE_TIMEOUT_SEC =
+        # 900 с в services/yandexmaps/server.py). Итого 9 × 990 с = 8910 с
+        # ≈ 148 минут молчания у задачи, которая исправно перебирает медленные
+        # прокси. Двадцать минут объявляли её зависшей — это и был долг,
+        # оставленный ревью второй фазы.
+        # 180 = 148 + получас запаса на накладные (старт чанка, upsert
+        # результатов, пауза между попытками).
+        #
+        # ЧЕМ ПЛАТИМ: по-настоящему намертво вставшая задача Яндекс.Карт теперь
+        # попадёт в чат через три часа, а не через двадцать минут. Дешевле
+        # ложной тревоги на каждой второй задаче: цена ошибки здесь —
+        # пользователь ждёт результат, а не потерянные деньги.
+        # Если пул прокси вырастет — пересчитать: порог линейно зависит от
+        # числа попыток.
+        stuck_minutes=180,
     ),
     JobMonitorSpec(
         # Статус выполнения в этой таблице — processing (check-констрейнт из
@@ -1337,6 +1386,109 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
             "(j.payload #>> '{monitor_progress,progress_percent}') || '%')"
         ),
     ),
+    JobMonitorSpec(
+        # Кампания обзвона — не «задача в очереди», а строка, которую арендует
+        # исполнитель: статуса «ожидает» в таблице нет вовсе (check-констрейнт
+        # 20260325_0000: draft/running/paused/completed), очередь выражена
+        # отсутствием аренды. Поэтому активный статус ровно один — running.
+        #
+        # Пульс — called_contacts. Он двигается атомарным инкрементом
+        # ai_campaign_bump_counters (миграция 20260903_0003) на каждом
+        # состоявшемся звонке и НЕ пишется продлением аренды: продление трогает
+        # только lease_until (checkProgress/heartbeat в lib/jobs/lifecycle.ts),
+        # claimPatch у обзвона нет намеренно. Это и есть ловушка второй фазы,
+        # из-за которой updated_at сюда брать нельзя: bump_counters его двигает,
+        # но его же двигает любая другая запись в строку.
+        #
+        # Порог 40 минут при общих двадцати. Считаем цепочку самопочинки:
+        # порог простоя AI_CALLER_STALL_MS (20 мин) + аренда
+        # AI_CALLER_LEASE_SECONDS (3 мин; при простое она не отпускается, а
+        # истекает) + один опрос соседа (30 с) ≈ 23,5 мин, и новый исполнитель
+        # двигает счётчик не мгновенно, а после первого доведённого звонка
+        # (≤120 с разговора + пауза 5–15 с) ≈ 26 мин суммарно. Общие двадцать
+        # писали бы в чат на каждой штатной передаче кампании соседу. Сорок —
+        # это цепочка плюс её половина сверху.
+        #
+        # Что ловим на самом деле: состояние, которое библиотека починить НЕ
+        # может — кампанию в статусе running, за которую не берётся никто
+        # (контейнер обзвона мёртв, или все AI_CALLER_MAX_CONCURRENCY слотов
+        # заняты соседними кампаниями). Второе — не ложная тревога, а
+        # ровно то, чего оператор не видит в интерфейсе: он нажал «Запустить»,
+        # а звонков нет. Сообщение уходит один раз на кампанию (ключ
+        # stuck:<таблица>:<id> в health_check_job_alerts).
+        "ai_campaigns", "AI Кампании", ("running",),
+        ("called_contacts", "successful_contacts"),
+        "portal-worker-aicaller",
+        owner_column="created_by", started_column=None,
+        stuck_minutes=40,
+        # Колонки error_message в этой таблице нет (и статуса отказа тоже:
+        # draft/running/paused/completed). Пустой набор выключает проверку
+        # «новая ошибка» для таблицы — иначе она падала бы на каждом цикле с
+        # «column j.error_message does not exist» и забивала журнал.
+        failed_statuses=(),
+    ),
+    JobMonitorSpec(
+        # Как и у обзвона: статуса «ожидает» в таблице нет (check-констрейнт
+        # 20260804_0001: stopped/running/paused/error/warming), кнопка
+        # «Запустить» пишет сразу running, очередь выражена отсутствием аренды.
+        # Греющиеся кампании стоят в warming и сюда не попадают — их ведёт
+        # раннер прогрева по своей таблице.
+        #
+        # Пульс — progress_at (миграция 20260903_0006). Колонка заведена этой
+        # фазой ИМЕННО как признак «работа движется», отдельный от признака
+        # «процесс жив»: её пишут горячие точки цикла (верх круга, переход к
+        # аккаунту, каждый контакт первого касания, конец паузы) не чаще раза в
+        # минуту (PROGRESS_WRITE_INTERVAL_MS в app/worker/tgOutreach.ts), и
+        # продление аренды её не трогает — claimPatch у кампаний нет намеренно.
+        # updated_at сюда брать нельзя: это отметка «когда кампанию трогали
+        # руками».
+        #
+        # Порог 45 минут при общих двадцати. Цепочка самопочинки: порог простоя
+        # TG_OUTREACH_STALL_MS (25 мин — под ним анти-флуд пауза до 599 с,
+        # загрузка диалогов до 180 с и повторная попытка после
+        # переподключения) + аренда TG_OUTREACH_LEASE_SECONDS (3 мин, при
+        # простое истекает) + опрос соседа (30 с) ≈ 28,5 мин, плюс до минуты на
+        # первую отметку нового исполнителя ≈ 29,5 мин. Общие двадцать минут
+        # означали бы сообщение в чат на каждой штатной передаче кампании.
+        # 45 — цепочка плюс половина.
+        #
+        # Ловим то же, что и у обзвона: кампанию running, которую не держит
+        # никто (воркер мёртв или заняты все TG_OUTREACH_MAX_CONCURRENCY
+        # слотов). Зависание при живом исполнителе библиотека чинит сама
+        # быстрее порога — и это правильно, тревожить чат там незачем.
+        "tg_outreach_campaigns", "TG Кампании", ("running",),
+        ("progress_at",),
+        "portal-worker-tg-outreach",
+        started_column=None,
+        stuck_minutes=45,
+        # error_message в таблице нет: причину отказа кампания пишет в свой
+        # журнал tg_outreach_logs (failedPatch в app/worker/tgOutreach.ts), а
+        # оператор читает его на вкладке кампании. Пустой набор — см. обзвон.
+        failed_statuses=(),
+    ),
+    # tg_outreach_warmup_runs здесь НЕТ, и это решение, а не пропуск.
+    #
+    # Порога, который был бы одновременно осмысленным и тихим, для прогрева не
+    # существует. Снизу его держит законное молчание: sleep_periods по
+    # умолчанию 00:00–08:00 — восемь часов подряд без единой переписки, а в
+    # первый день переписок всего две на аккаунт, и между соседними законно
+    # проходят часы. Сверху — польза: прогон идёт ЧЕТВЕРО СУТОК, и детектор
+    # имеет смысл, только если срабатывает раньше, чем человек сам увидит
+    # остановившийся прогрев на вкладке «Прогрев», то есть в пределах суток.
+    # Порог больше восьми часов и заметно меньше двадцати четырёх — это
+    # «замечаем меньше половины поломок и всё равно с опозданием на ночь»;
+    # порог меньше восьми часов пишет в чат каждую ночь.
+    #
+    # Двигать в этой таблице нечего и технически: current_day меняется раз в
+    # сутки, счётчики переписок живут в tg_outreach_warmup_conversations
+    # отдельными строками, а checkpoint — jsonb. Колонки прогресса у прогона
+    # нет намеренно — арифметика повторена в комментарии к warmupRunner в
+    # app/worker/tgOutreach.ts.
+    #
+    # Что защищает прогон вместо монитора: мёртвый процесс не продлевает
+    # аренду, и прогон подберут через TG_WARMUP_LEASE_SECONDS (3 мин);
+    # зависшее тело в живом процессе ловит собственный сторож воркера
+    # (TG_OUTREACH_WATCHDOG_MS), оставленный ТОЛЬКО за прогревом.
 )
 
 # table:id -> (progress fingerprint, loop-clock time when it last changed)
@@ -1386,6 +1538,18 @@ async def _claim_job_alert(conn, alert_key: str) -> bool:
         alert_key,
     )
     return row is not None
+
+
+def _stuck_after_secs(spec: JobMonitorSpec) -> int:
+    """Порог «Долго висит» для очереди, в секундах.
+
+    Единственное место, где решается, чей порог применяется, — общий или свой.
+    Через него проходят ОБА способа измерения простоя: и отпечаток прогресса, и
+    пульс очереди по created_at/queue_heartbeat_column для статусов ожидания.
+    Иначе очередь со своим порогом молча оставалась бы на общем ровно в той
+    ветке, которую не поправили.
+    """
+    return max(2, spec.stuck_minutes or JOB_STUCK_MINUTES) * 60
 
 
 def _progress_sql(spec: JobMonitorSpec) -> str:
@@ -1441,7 +1605,7 @@ async def _fetch_active_job_rows(conn, spec: JobMonitorSpec):
 
 
 async def check_stuck_jobs() -> list[str]:
-    """Return one alert per parser job with no DB progress for JOB_STUCK_MINUTES."""
+    """Alert per job with no DB progress for the queue's stuck threshold."""
     if not DATABASE_URL:
         return []
     loop_now = asyncio.get_running_loop().time()
@@ -1479,7 +1643,8 @@ async def check_stuck_jobs() -> list[str]:
                 stalled_secs: int | None = None
 
                 # Queue/preparation states have no meaningful progress yet:
-                # created_at is the heartbeat and JOB_STUCK_MINUTES is enough.
+                # created_at is the heartbeat and the queue's threshold
+                # (_stuck_after_secs: свой, если задан, иначе общий) is enough.
                 if status in ("pending", "queued", "preparing", "planning", "uploading"):
                     stalled_secs = int(row["age_secs"] or 0)
                 elif spec.updated_column:
@@ -1495,7 +1660,7 @@ async def check_stuck_jobs() -> list[str]:
                     else:
                         stalled_secs = int(loop_now - previous[1])
 
-                if stalled_secs is None or stalled_secs < JOB_STUCK_MINUTES * 60:
+                if stalled_secs is None or stalled_secs < _stuck_after_secs(spec):
                     continue
                 if spec.table == "email_validation_jobs" and row["id"] in deferred_emailval_jobs:
                     _JOB_PROGRESS_TRACKER[key] = (str(row["progress"] or ""), loop_now)
@@ -1529,6 +1694,11 @@ async def _baseline_existing_failures(conn) -> bool:
     if exists:
         return True
     for spec in _JOB_MONITOR_SPECS:
+        # Пустой набор — «у таблицы нет ни статуса отказа, ни error_message»
+        # (кампании обзвона и TG-аутрича). Ни базы, ни алертов по ней быть не
+        # может; запрос с j.error_message на такой таблице падает.
+        if not spec.failed_statuses:
+            continue
         try:
             extra_filter = f" AND ({spec.extra_predicate})" if spec.extra_predicate else ""
             rows = await conn.fetch(
@@ -1569,6 +1739,12 @@ async def check_failed_jobs() -> list[str]:
             return []
 
         for spec in _JOB_MONITOR_SPECS:
+            # См. _baseline_existing_failures: у таблицы без колонки
+            # error_message проверка «новая ошибка» не просто пуста — её запрос
+            # не выполним вовсе, и без этой строки журнал каждые пять минут
+            # получал бы «column j.error_message does not exist».
+            if not spec.failed_statuses:
+                continue
             owner_select = (
                 "p.full_name AS owner_name, p.email AS owner_email"
                 if spec.owner_column
@@ -2384,8 +2560,10 @@ _JOB_TABLES: list[tuple[str, str, list[str]]] = [
         for spec in _JOB_MONITOR_SPECS
     ],
     ("ai_caller_jobs",          "AI Звонилка",       ["pending", "running"]),
-    ("ai_campaigns",            "AI Кампании",       ["running"]),
-    ("tg_outreach_campaigns",   "TG Кампании",       ["running"]),
+    # ai_campaigns и tg_outreach_campaigns отсюда убраны НЕ потому, что их
+    # перестали считать: обе теперь есть в _JOB_MONITOR_SPECS выше и приезжают
+    # сюда первой же строкой этого списка. Явные записи остались бы дублями —
+    # в отчёте «Активные задачи» каждая кампания считалась бы дважды.
     ("sales_copilot_jobs",      "Sales Copilot",     ["pending", "running"]),
 ]
 
@@ -3041,11 +3219,19 @@ async def main():
         if INSTANTLY_DATABASE_URL
         else "instantly_db=not set"
     )
+    # Свои пороги печатаем поимённо: иначе по строке старта нельзя отличить
+    # «очередь молчит по своему порогу» от «порог не подхватился».
+    overrides = ", ".join(
+        f"{spec.table}={spec.stuck_minutes}"
+        for spec in _JOB_MONITOR_SPECS
+        if spec.stuck_minutes
+    )
     print(
         f"[health] Started: site={PORTAL_URL}, server={SERVER_IP}, "
         f"proxies={proxy_count}, {instantly_info}, health every {HEALTH_INTERVAL_SEC}s, "
         f"job monitor every {JOB_MONITOR_INTERVAL_SEC}s "
-        f"(stuck after {JOB_STUCK_MINUTES} min), "
+        f"(stuck after {JOB_STUCK_MINUTES} min"
+        f"{'; own thresholds: ' + overrides if overrides else ''}), "
         f"heartbeat every {HEARTBEAT_INTERVAL_SEC}s, {keepalive_info}. "
         "Commands in chat: /mute /вкл /alerts"
     )
