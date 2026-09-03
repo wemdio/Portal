@@ -9,6 +9,7 @@ import { buildContactSupplyRequests, runProjectContactSupply } from '@/lib/verti
 import { allocateContactSupplyTargets } from '@/lib/verticalEngineV2/contactSupplyPlanner';
 import { prepareAuditSnapshot, runSegmentationAuditStage, toStoredAuditSummary } from '@/lib/verticalEngineV2/stages/segmentationAudit';
 import { buildSegmentationAudit } from '@/lib/verticalEngineV2/segmentationAudit';
+import { createVeJobWatchdog } from '@/lib/verticalEngineV2/workerLiveness';
 
 const COMPLETE_BINDING = {
   portal_project_id: '20000000-0000-0000-0000-000000000001',
@@ -23,6 +24,37 @@ const COMPLETE_BINDING = {
 };
 
 describe('VE2 contact delivery scheduler', () => {
+  it('aborts idle research, never revives it on late progress, and escalates only unresponsive work', () => {
+    jest.useFakeTimers();
+    try {
+      const abort = new AbortController();
+      const onTimeout = jest.fn();
+      const onUnresponsive = jest.fn();
+      const guard = createVeJobWatchdog({ abort, idleMs: 1000, graceMs: 100, onTimeout, onUnresponsive });
+      jest.advanceTimersByTime(900);
+      guard.touch();
+      jest.advanceTimersByTime(900);
+      expect(abort.signal.aborted).toBe(false);
+      jest.advanceTimersByTime(100);
+      expect(abort.signal.reason.message).toMatch(/timeout/i);
+      expect(onTimeout).toHaveBeenCalledTimes(1);
+      guard.touch(); // A late read/log cannot resurrect the expired operation.
+      jest.advanceTimersByTime(100);
+      expect(onUnresponsive).toHaveBeenCalledTimes(1);
+      guard.stop();
+
+      const cancelled = new AbortController();
+      const cooperative = createVeJobWatchdog({ abort: cancelled, idleMs: 1000, graceMs: 100, onTimeout, onUnresponsive });
+      cancelled.abort();
+      cooperative.stop(); // Settled cancellation must not terminate the worker later.
+      jest.advanceTimersByTime(2000);
+      expect(onUnresponsive).toHaveBeenCalledTimes(1);
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('runs only complete bindings and isolates one project failure from the next', async () => {
     const portal = createMockSupabase({
       tables: {
