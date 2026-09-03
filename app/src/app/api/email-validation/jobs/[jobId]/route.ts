@@ -46,7 +46,21 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ jo
   if (body.action === 'cancel') {
     const { error } = await supabaseAdmin
       .from('email_validation_jobs')
-      .update({ status: 'cancelled', completed_at: new Date().toISOString() })
+      .update({
+        status: 'cancelled',
+        completed_at: new Date().toISOString(),
+        // Владение снимаем здесь же. Задачу ведёт единый жизненный цикл
+        // (app/src/lib/jobs/lifecycle.ts), и терминальный статус, записанный
+        // мимо него, оставлял бы на строке живую аренду с жетоном навсегда:
+        // тело уходит по своему пути отмены и владение не снимает, а
+        // библиотека снимает его только после ШТАТНОГО возврата run(). Строка
+        // после этого неотличима от по-настоящему арендованной в дежурном
+        // запросе «кто держит аренду». Фильтры .eq(user_id) и .in(status) уже
+        // сужают запись до своей активной задачи — новых условий не нужно.
+        lease_until: null,
+        run_token: null,
+        worker_id: null,
+      })
       .eq('id', jobId)
       .eq('user_id', user.id)
       .in('status', ['pending', 'running']);
