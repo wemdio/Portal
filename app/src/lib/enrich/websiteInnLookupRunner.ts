@@ -236,12 +236,48 @@ export async function executeWebsiteInnLookupJob(
   }
 }
 
+/**
+ * Прерывание — НЕ результат строки, и проверять его надо у самой строки.
+ *
+ * Обход сайта отмену ГЛОТАЕТ: fetchHtml ловит любую ошибку, включая abort
+ * своего же контроллера, и возвращает null (websiteParser.ts), а
+ * fetchHtmlWithRetry на взведённом сигнале тоже отдаёт null. Поэтому
+ * fetchInnFromWebsite при остановке воркера не бросает ничего — она спокойно
+ * проходит все три шага (главная страница, www-вариант, юридические страницы) и
+ * возвращает null, как будто ИНН на сайте честно нет.
+ *
+ * Без этой проверки каждый деплой, каждая потеря аренды и каждый срыв по
+ * простою НАВСЕГДА помечали бы до пяти сайтов как «ИНН на сайте не найден»:
+ * строка терминальна, никто её больше не перепроверит, счётчики покажут работу
+ * сделанной, а значение уедет в таблицу пользователя. Прежний воркер сигнала не
+ * знал вовсе и оставлял такие строки в работе — сброс при старте возвращал их
+ * в очередь; убрав сброс, мы обязаны отдать эту роль сигналу.
+ *
+ * Проверка стоит у КАЖДОГО возврата, а не между обходом и записью пачки: в
+ * одной пачке пять строк идут параллельно, и та, что успела дочитать сайт до
+ * отмены, к моменту записи выглядела бы законным результатом.
+ *
+ * Цена: сайт, который надёжно висит, будет забираться и переигрываться снова и
+ * снова — счётчик попыток у СТРОКИ (website_inn_lookup_items.attempt_count)
+ * объявлен, но никем не увеличивается, так что сверху это ограничено только
+ * бюджетом попыток самой ЗАДАЧИ (maxAttempts). Размен осознанный: висящий сайт
+ * упрётся в таймауты обхода (≈44 с) и пачка всё равно доедет, а вот
+ * сфабрикованный «не найден» не чинится ничем.
+ */
+function throwIfAborted(signal: AbortSignal | undefined, url: string): void {
+  if (!signal?.aborted) return;
+  throw new Error(`website INN lookup aborted while processing ${url}`);
+}
+
 async function lookupOne(
   item: WebsiteInnLookupPendingItem,
   signal?: AbortSignal,
 ): Promise<WebsiteInnLookupResult> {
   try {
     const inn = await fetchInnFromWebsite(item.url, { timeout: SITE_TIMEOUT_MS, signal });
+    // Сразу после обхода: null здесь может означать и «нет ИНН», и «нас
+    // остановили», а различить их можно только по сигналу.
+    throwIfAborted(signal, item.url);
     let companyName: string | null = null;
     let dadataError: string | null = null;
     if (inn && hasDadataKey()) {
@@ -253,6 +289,7 @@ async function lookupOne(
         dadataError = `DaData: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
+    throwIfAborted(signal, item.url);
     return {
       id: item.id,
       row_index: item.row_index,
@@ -263,9 +300,9 @@ async function lookupOne(
       error_message: dadataError ?? (inn ? null : 'ИНН на сайте не найден'),
     };
   } catch (error) {
-    // Прерывание — не результат строки. Пробрасываем, чтобы пачка не легла в
-    // базу как «не найдено»: строку вернёт в очередь handOff, и её проверит
-    // следующий владелец. Решаем по signal.aborted, а не по имени ошибки.
+    // Строку вернёт в очередь handOff, и её проверит следующий владелец.
+    // Решаем по signal.aborted, а не по имени ошибки: настоящий таймаут обязан
+    // остаться отказом.
     if (signal?.aborted) throw error;
     return {
       id: item.id,
@@ -423,26 +460,56 @@ function createProductionDeps(ctx?: WebsiteInnLookupRunContext): WebsiteInnLooku
 
     async persistOutcomes(job, outcomes, current) {
       const now = new Date().toISOString();
-      const rows = outcomes.map((outcome) => ({
-        id: outcome.id,
-        job_id: job.id,
-        row_index: outcome.row_index,
-        url: outcome.url,
-        status: outcome.status,
-        inn: outcome.inn,
-        company_name: outcome.company_name,
-        error_message: outcome.error_message,
-        completed_at: now,
-        updated_at: now,
+      /**
+       * Результат строки пишет только её ВЛАДЕЛЕЦ.
+       *
+       * Раньше здесь стоял upsert без всяких условий, и с появлением возврата
+       * брошенных строк (reclaimAbandonedItems) это стало настоящей гонкой:
+       * медленную пачку владельца A через ITEM_STALE_MS забирает владелец B,
+       * переобходит те же сайты — а вернувшийся A перезаписывает его результаты
+       * вместе со статусом и отметкой времени по строкам, которые ему уже не
+       * принадлежат. Фильтр status='running' это закрывает: строку, которую
+       * вернули в очередь и перезабрали, чужая запись не тронет.
+       *
+       * insert-половина upsert'а не нужна: строки заводит издатель (API) в фазе
+       * подготовки, к моменту обработки они всегда существуют.
+       */
+      const writes = await Promise.all(outcomes.map(async (outcome) => {
+        const { data, error } = await db
+          .from('website_inn_lookup_items')
+          .update({
+            row_index: outcome.row_index,
+            url: outcome.url,
+            status: outcome.status,
+            inn: outcome.inn,
+            company_name: outcome.company_name,
+            error_message: outcome.error_message,
+            completed_at: now,
+            updated_at: now,
+          })
+          .eq('id', outcome.id)
+          .eq('job_id', job.id)
+          .eq('status', 'running')
+          .select('id')
+          .maybeSingle();
+        if (error) throw new Error(error.message);
+        return { written: !!data, found: Boolean(outcome.inn) };
       }));
-      const { error: itemError } = await db
-        .from('website_inn_lookup_items')
-        .upsert(rows, { onConflict: 'id' });
-      if (itemError) throw new Error(itemError.message);
 
+      // Считаем только то, что реально легло: строку, отобранную у нас, второй
+      // раз считать нечестно — её посчитает тот, кто её и записал.
+      //
+      // Полностью от двойного счёта это не спасает, и вот честная оговорка:
+      // processed пишется АБСОЛЮТНЫМ числом из счётчика в памяти, а счётчик
+      // засеян значением из строки задачи на момент загрузки. Если владелец A
+      // успел посчитать строки, которые потом вернули в очередь и переиграл B,
+      // то B прибавит их к уже учтённому — processed может стать больше total,
+      // и прогресс-бар покажет больше ста процентов. Ничего не ломается:
+      // завершение решается пустотой построчной очереди, а не этим числом.
+      const written = writes.filter((write) => write.written);
       const next = {
-        processed: current.processed + outcomes.length,
-        found: current.found + outcomes.filter((outcome) => Boolean(outcome.inn)).length,
+        processed: current.processed + written.length,
+        found: current.found + written.filter((write) => write.found).length,
       };
       // updated_at штампует здесь САМО ТЕЛО, и это единственный источник
       // «задача жива» для монитора здоровья (services/health-check/main.py,
