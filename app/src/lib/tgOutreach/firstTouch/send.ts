@@ -378,7 +378,29 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       .slice(0, Math.max(1, quota - result.sent));
     if (!picked.length) break;
 
-    for (const contact of picked) {
+    /**
+     * Замок в БАЗЕ, а не только в памяти.
+     *
+     * Множество `claimed` разводит аккаунты внутри ОДНОГО процесса и от второго
+     * исполнителя не защищает никак. А второй исполнитель теперь бывает:
+     * кампания арендуется как задача, и библиотека намеренно допускает короткое
+     * окно, когда уходящий владелец ещё дорабатывает, а сосед уже взял строку.
+     * Без замка в базе один и тот же человек получил бы два первых сообщения с
+     * двух номеров — брак, который не исправить.
+     *
+     * Проигранные контакты всё равно помечаем в памяти: их прямо сейчас ведёт
+     * кто-то другой, и на этом круге они не наши. Без этого следующая итерация
+     * добора выбрала бы ровно их же и цикл крутился бы вхолостую.
+     */
+    const { claimed: mine, error: claimError } = await fdb.claimContacts(db, picked, account.id);
+    if (claimError) {
+      log('warning', `Первое касание остановлено: не смог занять контакты в базе — ${claimError}. Контакты остаются в очереди нетронутыми, продолжим следующим кругом.`);
+      break;
+    }
+    for (const c of picked) claimed.add(c.id);
+    if (!mine.length) continue;
+
+    for (const contact of mine) {
       if (args.shouldStop?.()) { stopAll = true; break; }
       args.onProgress?.();
       claimed.add(contact.id);
@@ -688,7 +710,10 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       // Отметку «этот контакт уже разобран» с них снимаем: её ставит тот, кто
       // может судить о нике, а слепой аккаунт не может. Пусть в этом же круге
       // их попробует следующий — на исправном номере такой ник обычно уходит.
+      // Снимаем обе отметки: и память круга, и замок в базе — иначе следующий
+      // аккаунт увидел бы контакт свободным в памяти и не смог взять его в базе.
       for (const { contact } of notOccupied) claimed.delete(contact.id);
+      await fdb.releaseContactClaims(db, notOccupied.map(({ contact }) => contact.id));
     }
   } else {
     for (const { contact, attempts } of notOccupied) {
