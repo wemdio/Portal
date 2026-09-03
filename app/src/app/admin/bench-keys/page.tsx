@@ -4,6 +4,19 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, BookOpen, Copy, Download, KeyRound, Plus, RefreshCw, ScrollText, X } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 
+interface BenchKeyUsage {
+  requests_last_minute: number;
+  jobs_today: number;
+  rows_today: number;
+}
+
+interface DayUsage {
+  date: string;
+  jobs: number;
+  rows: number;
+  requests: number;
+}
+
 interface BenchKey {
   id: string;
   name: string;
@@ -16,6 +29,7 @@ interface BenchKey {
   revoked_at: string | null;
   last_used_at: string | null;
   created_at: string;
+  usage: BenchKeyUsage;
 }
 
 interface ToolInfo {
@@ -53,6 +67,23 @@ function formatDateTime(value: string | null): string {
   });
 }
 
+/** Доля израсходованного, 0-100. Нулевой лимит трактуем как «не задан». */
+function pct(used: number, limit: number): number {
+  if (!limit || limit <= 0) return 0;
+  return Math.min(100, Math.round((used / limit) * 100));
+}
+
+/**
+ * Цвет полосы. Порог в 80% — чтобы упор в потолок было видно ДО того, как
+ * ключ начнёт получать отказы, а не после.
+ */
+function usageTone(used: number, limit: number): string {
+  const p = pct(used, limit);
+  if (p >= 100) return 'bg-red-500';
+  if (p >= 80) return 'bg-amber-500';
+  return 'bg-emerald-500';
+}
+
 function statusBadge(code: number) {
   if (code < 300) return 'bg-emerald-50 text-emerald-700 border-emerald-200';
   if (code === 429) return 'bg-amber-50 text-amber-700 border-amber-200';
@@ -69,6 +100,11 @@ export default function BenchKeysPage() {
   const [form, setForm] = useState({ name: '', tools: [] as string[], ...DEFAULTS });
   const [issuedKey, setIssuedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+
+  const [historyFor, setHistoryFor] = useState<BenchKey | null>(null);
+  const [historyDays, setHistoryDays] = useState<DayUsage[]>([]);
+  const [historyLimits, setHistoryLimits] = useState<{ daily_jobs_limit: number; daily_rows_limit: number } | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const [logFor, setLogFor] = useState<BenchKey | null>(null);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
@@ -141,6 +177,23 @@ export default function BenchKeysPage() {
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось отозвать ключ');
+    }
+  }
+
+  async function openHistory(key: BenchKey) {
+    setHistoryFor(key);
+    setHistoryLoading(true);
+    setHistoryDays([]);
+    setHistoryLimits(null);
+    try {
+      const res = await authFetch(`/api/admin/bench-keys/${key.id}/history?days=10`);
+      const body = await res.json();
+      if (res.ok) {
+        setHistoryDays(body.days ?? []);
+        setHistoryLimits(body.limits ?? null);
+      }
+    } finally {
+      setHistoryLoading(false);
     }
   }
 
@@ -401,10 +454,45 @@ export default function BenchKeysPage() {
                     <td className="px-3 py-2 text-xs text-gray-600 max-w-xs">
                       {key.allowed_tools.map((t) => toolTitles.get(t) ?? t).join(', ')}
                     </td>
-                    <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">
-                      {key.rpm_limit}/мин · {key.daily_jobs_limit} задач
-                      <br />
-                      {key.daily_rows_limit.toLocaleString('ru-RU')} строк · {key.max_active_jobs} разом
+                    {/* Лимит без расхода — половина ответа: «50 задач в сутки»
+                        не говорит, упёрся ключ в потолок или не начинал. */}
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <button
+                        type="button"
+                        onClick={() => void openHistory(key)}
+                        title="История расхода за 10 дней"
+                        className="w-full min-w-[190px] rounded px-1 py-0.5 text-left hover:bg-gray-50"
+                      >
+                        {(
+                          [
+                            ['в минуту', key.usage.requests_last_minute, key.rpm_limit, false],
+                            ['задач сегодня', key.usage.jobs_today, key.daily_jobs_limit, false],
+                            ['строк сегодня', key.usage.rows_today, key.daily_rows_limit, true],
+                          ] as const
+                        ).map(([label, used, limit, big]) => (
+                          <div key={label} className="mb-1 last:mb-0">
+                            <div className="flex items-baseline justify-between gap-2 text-[11px] leading-tight">
+                              <span className="text-gray-400">{label}</span>
+                              <span className="tabular-nums text-gray-600">
+                                {big ? used.toLocaleString('ru-RU') : used}
+                                <span className="text-gray-400">
+                                  {' / '}
+                                  {big ? limit.toLocaleString('ru-RU') : limit}
+                                </span>
+                              </span>
+                            </div>
+                            <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-gray-100">
+                              <div
+                                className={`h-full rounded-full ${usageTone(used, limit)}`}
+                                style={{ width: `${pct(used, limit)}%` }}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                        <div className="mt-1 text-[11px] text-gray-400">
+                          одновременно: до {key.max_active_jobs}
+                        </div>
+                      </button>
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">
                       {formatDateTime(key.last_used_at)}
@@ -433,6 +521,94 @@ export default function BenchKeysPage() {
           </div>
         )}
       </section>
+
+      {historyFor && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="max-h-[80vh] w-full max-w-2xl overflow-hidden rounded-lg bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
+              <div>
+                <h3 className="font-medium">Расход по дням — {historyFor.name}</h3>
+                <p className="text-xs text-gray-500">
+                  Последние 10 суток по московскому времени. Норма обнуляется в полночь.
+                </p>
+              </div>
+              <button
+                onClick={() => setHistoryFor(null)}
+                className="p-1 hover:bg-gray-100 rounded"
+                aria-label="Закрыть"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="max-h-[65vh] overflow-y-auto">
+              {historyLoading ? (
+                <p className="p-4 text-sm text-gray-500">Загрузка…</p>
+              ) : historyDays.length === 0 ? (
+                <p className="p-4 text-sm text-gray-500">Обращений за этот период не было.</p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-gray-50 text-left text-xs uppercase text-gray-500">
+                    <tr>
+                      <th className="px-3 py-2">Дата</th>
+                      <th className="px-3 py-2">Задач</th>
+                      <th className="px-3 py-2">Строк</th>
+                      <th className="px-3 py-2">Запросов</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {historyDays.map((day) => (
+                      <tr key={day.date}>
+                        <td className="px-3 py-2 text-xs whitespace-nowrap tabular-nums">
+                          {new Date(day.date).toLocaleDateString('ru-RU', {
+                            day: '2-digit',
+                            month: '2-digit',
+                          })}
+                        </td>
+                        {/* Полоса рисуется относительно суточного лимита, а не
+                            относительно самого большого дня: так видно упор в
+                            потолок, а не просто «этот день выше соседнего». */}
+                        <td className="px-3 py-2 w-1/3">
+                          <div className="flex items-center gap-2">
+                            <span className="tabular-nums text-xs w-10 shrink-0">{day.jobs}</span>
+                            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-100">
+                              <div
+                                className={`h-full rounded-full ${usageTone(day.jobs, historyLimits?.daily_jobs_limit ?? 0)}`}
+                                style={{ width: `${pct(day.jobs, historyLimits?.daily_jobs_limit ?? 0)}%` }}
+                              />
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 w-1/3">
+                          <div className="flex items-center gap-2">
+                            <span className="tabular-nums text-xs w-16 shrink-0">
+                              {day.rows.toLocaleString('ru-RU')}
+                            </span>
+                            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-100">
+                              <div
+                                className={`h-full rounded-full ${usageTone(day.rows, historyLimits?.daily_rows_limit ?? 0)}`}
+                                style={{ width: `${pct(day.rows, historyLimits?.daily_rows_limit ?? 0)}%` }}
+                              />
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 text-xs tabular-nums text-gray-500">
+                          {day.requests}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            {historyLimits && (
+              <div className="border-t border-gray-200 px-4 py-2 text-xs text-gray-500">
+                Потолки: {historyLimits.daily_jobs_limit} задач и{' '}
+                {historyLimits.daily_rows_limit.toLocaleString('ru-RU')} строк в сутки
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {logFor && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
