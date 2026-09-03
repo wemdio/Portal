@@ -482,8 +482,18 @@ services:
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WEBSITE_INN_LOOKUP_CONCURRENCY=${WEBSITE_INN_LOOKUP_CONCURRENCY:-5}
+      - WEBSITE_INN_LOOKUP_LEASE_SECONDS=${WEBSITE_INN_LOOKUP_LEASE_SECONDS:-180}
+      - WEBSITE_INN_LOOKUP_STALL_MINUTES=${WEBSITE_INN_LOOKUP_STALL_MINUTES:-10}
       - WORKER_KIND=websiteinnlookup
-    stop_grace_period: 2m
+    # Было 2m — срок от воркера, который на SIGTERM дорабатывал пачку целиком.
+    # С единым жизненным циклом остановка стоит ≈ 9 с: ожидание тела 5 с
+    # (shutdownGraceMs) + два прохода освобождения аренды с паузой в секунду +
+    # контрольное чтение. Держать две минуты незачем и вредно: деплой всё равно
+    # шлёт docker stop --timeout 15 (.semaphore/scheduled-deploy.yml), а ручной
+    # `docker compose stop` без --timeout ждал бы полные две минуты контейнер,
+    # который давно всё отдал. Тридцать секунд — как у остальных переведённых
+    # воркеров: вдвое больше срока деплоя и втрое больше реальной остановки.
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:

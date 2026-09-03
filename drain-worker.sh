@@ -18,6 +18,11 @@
 #   ai_campaigns с ai_caller_jobs (обзвон), tg_outreach_campaigns с
 #   tg_outreach_warmup_runs и tg_outreach_jobs (TG-аутрич и прогрев) и
 #   email_validation_jobs (валидация почт).
+#   Очередь website_inn_lookup_jobs (поиск ИНН по сайтам) в списке ниже НИКОГДА
+#   не значилась — деплой просто убивал воркер посреди пачки. После переезда на
+#   общий жизненный цикл это перестало быть потерей: воркер отпускает аренду и
+#   возвращает взятые строки в очередь сам, а сосед продолжает с них же.
+#   Добавлять таблицу сюда не нужно — только сам сервис в список ниже.
 #   Очередь sales_chat_sync_runs в списке ниже не значилась
 #   и не значится — искать, откуда её убрали, не нужно; воркер этой очереди
 #   просто добавлен в is_lifecycle_managed_worker, чтобы деплой одного его не
@@ -69,6 +74,7 @@ is_lifecycle_managed_worker() {
     worker-aicaller) return 0 ;;
     worker-tg-outreach) return 0 ;;
     worker-emailvalidation) return 0 ;;
+    worker-website-inn-lookup) return 0 ;;
     *) return 1 ;;
   esac
 }

@@ -45,8 +45,17 @@ export function hasDadataKey(): boolean {
   return getDadataApiKey().length > 0;
 }
 
-export async function findByInn(inn: string): Promise<DadataSuggestion | null> {
-  return callDadata(DADATA_FIND_URL, { query: inn, branch_type: 'MAIN' });
+/**
+ * options.signal — прерывание вызывающего (остановка воркера, потеря аренды).
+ * У самого запроса таймаута нет вовсе, а undici не ставит его по умолчанию:
+ * без сигнала зависший DaData держал бы задачу столько, сколько живёт сокет.
+ * Параметр необязательный — вызовы без него ведут себя ровно как раньше.
+ */
+export async function findByInn(
+  inn: string,
+  options?: { signal?: AbortSignal },
+): Promise<DadataSuggestion | null> {
+  return callDadata(DADATA_FIND_URL, { query: inn, branch_type: 'MAIN' }, options);
 }
 
 export async function suggestByName(
@@ -62,6 +71,7 @@ export async function suggestByName(
 async function callDadata(
   url: string,
   body: Record<string, unknown>,
+  options?: { signal?: AbortSignal },
 ): Promise<DadataSuggestion | null> {
   const res = await fetch(url, {
     method: 'POST',
@@ -71,6 +81,7 @@ async function callDadata(
       Authorization: `Token ${getDadataApiKey()}`,
     },
     body: JSON.stringify({ count: 1, ...body }),
+    signal: options?.signal,
   });
   if (!res.ok) throw new Error(`DaData HTTP ${res.status}`);
   const json = (await res.json()) as { suggestions?: DadataSuggestion[] };
