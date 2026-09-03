@@ -18,7 +18,7 @@ import { __resetShutdownStateForTests } from '@/lib/workerShutdown';
 import { createJobRunner, type JobContext } from '@/lib/jobs/lifecycle';
 
 type Row = Record<string, unknown>;
-type Filter = { op: 'eq' | 'neq' | 'lt' | 'in' | 'or'; col?: string; value?: unknown; raw?: string };
+type Filter = { op: 'eq' | 'neq' | 'lt' | 'in' | 'or' | 'notIn'; col?: string; value?: unknown; raw?: string };
 
 const T0 = Date.parse('2026-09-02T10:00:00.000Z');
 let clock = T0;
@@ -42,6 +42,9 @@ function makeFakeDb(initial: Row[]) {
       if (f.op === 'eq') return row[f.col!] === f.value;
       if (f.op === 'neq') return row[f.col!] !== f.value;
       if (f.op === 'in') return (f.value as unknown[]).includes(row[f.col!]);
+      // not('id','in','(a,b)') — так библиотека исключает из захвата задачи,
+      // которые этот же раннер ещё выполняет.
+      if (f.op === 'notIn') return !(f.value as unknown[]).includes(row[f.col!]);
       if (f.op === 'lt') return typeof row[f.col!] === 'string' && (row[f.col!] as string) < (f.value as string);
       // or: 'lease_until.is.null,lease_until.lt."<iso>"' — значение в кавычках, как шлёт библиотека
       return f.raw!.split(',').some((clause) => {
@@ -67,6 +70,12 @@ function makeFakeDb(initial: Row[]) {
     q.in = (col: string, value: unknown[]) => { filters.push({ op: 'in', col, value }); return q; };
     q.lt = (col: string, value: unknown) => { filters.push({ op: 'lt', col, value }); return q; };
     q.or = (raw: string) => { filters.push({ op: 'or', raw }); return q; };
+    q.not = (col: string, op: string, raw: string) => {
+      if (op !== 'in') throw new Error(`fake db: unsupported not.${op}`);
+      const values = raw.replace(/^\(|\)$/g, '').split(',').filter(Boolean);
+      filters.push({ op: 'notIn', col, value: values });
+      return q;
+    };
     q.order = (col: string) => { orderCol = col; return q; };
     q.limit = (n: number) => { limit = n; return q; };
     q.maybeSingle = async () => {

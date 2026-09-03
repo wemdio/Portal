@@ -1054,6 +1054,8 @@ async function handleFollowUp(
   db: SupabaseClient,
   log: LogFn,
   shouldStop?: () => boolean,
+  /** Та же причина, что у двух проходов ниже: до десяти диалогов с паузами и вызовом модели. */
+  onProgress?: () => void,
 ) {
   const tg = campaign.telegram_settings as TelegramSettings;
   const oai = campaign.openai_settings as OpenAISettings;
@@ -1108,6 +1110,7 @@ async function handleFollowUp(
   };
 
   for (const dialog of dialogs) {
+    onProgress?.();
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
@@ -1204,6 +1207,17 @@ async function handleMissedRepliesLastDays(
   db: SupabaseClient,
   log: LogFn,
   shouldStop?: () => boolean,
+  /**
+   * Отметка «цикл продвинулся» — обязательна ЗДЕСЬ, а не только после возврата.
+   *
+   * Этот проход разбирает до 200 диалогов, и на каждый ответ тратит вызов
+   * модели, паузу «чтения» и отправку. На кампании с большим долгом он идёт
+   * заметно дольше порога простоя, и без отметок внутри здоровая работа
+   * выглядела бы зависанием: аренда уходит, все сессии рвутся, кампанию
+   * перезахватывают с полным переподключением дюжины аккаунтов — и на том же
+   * аккаунте всё повторяется. Отметка стоит одну запись в минуту.
+   */
+  onProgress?: () => void,
 ) {
   const tg = campaign.telegram_settings as TelegramSettings;
   const oai = campaign.openai_settings as OpenAISettings;
@@ -1245,6 +1259,7 @@ async function handleMissedRepliesLastDays(
 
   for (const dialog of dialogs) {
     if (shouldStop?.()) break;
+    onProgress?.();
     processed++;
 
     const tgUserId = dialog.tg_user_id as number;
@@ -1351,6 +1366,8 @@ async function backfillEmptyDialogs(
   campaign: OutreachCampaign,
   db: SupabaseClient,
   log: LogFn,
+  /** Та же причина, что и у handleMissedRepliesLastDays: до 50 загрузок истории подряд. */
+  onProgress?: () => void,
 ) {
   const tg = campaign.telegram_settings as TelegramSettings;
 
@@ -1381,6 +1398,7 @@ async function backfillEmptyDialogs(
   let errors = 0;
 
   for (const dialog of empty) {
+    onProgress?.();
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     try {
@@ -1624,27 +1642,43 @@ export async function runCampaignLoop(
    */
   let clients: ActiveClient[] = [];
   if (control) control.forceDisconnect = () => disconnectAll(clients);
-  clients = await buildClients(cycleOrder, proxies ?? [], log, downloadSessionFile, db, { sink: clients, signal });
-  log('info', `Подключились ${clients.length} из ${accounts.length} аккаунтов${clients.length < accounts.length ? ` (остальные с ошибками подключения, смотри строки выше)` : ''}`);
 
-  if (shouldStop()) return;
+  /*
+   * Подключение — под своей защитой: ни один выход отсюда не должен оставить
+   * сессии открытыми.
+   *
+   * Основной try/finally цикла открывается ниже, после запуска опроса передач,
+   * и до него отсюда ведут три пути наружу: исключение, ранний возврат по
+   * остановке и пауза «никто не подключился». Каждый из них раньше уходил, не
+   * закрыв то, что успело подключиться.
+   */
+  try {
+    clients = await buildClients(cycleOrder, proxies ?? [], log, downloadSessionFile, db, { sink: clients, signal });
+    log('info', `Подключились ${clients.length} из ${accounts.length} аккаунтов${clients.length < accounts.length ? ` (остальные с ошибками подключения, смотри строки выше)` : ''}`);
 
-  if (clients.length === 0) {
-    log('warning', 'Ни один аккаунт не подключился — пробую ещё раз через 60 секунд');
-    await interruptibleSleep(60_000, shouldStop, 2000, signal);
-    if (shouldStop()) return;
-    // Приёмник повторной попытки ставим в `clients` ДО вызова — по той же
-    // причине, что и выше: ручка обязана видеть то, что подключается сейчас.
-    clients = [];
-    const retryClients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db, { sink: clients, signal });
-    log('info', `Повторная попытка: подключились ${retryClients.length} из ${accounts.length} аккаунтов`);
-    if (retryClients.length === 0) {
-      log('error', 'Повторная попытка тоже провалилась — кампания на паузе. Проверьте прокси и сессии аккаунтов, затем запустите снова.');
-      const { error: stErr } = await campaignTerminal({ status: 'paused' });
-      if (stErr) log('error', `Не смог записать статус "на паузе" в базу данных — ${stErr.message}`);
-      return;
+    if (shouldStop()) { await disconnectAll(clients); return; }
+
+    if (clients.length === 0) {
+      log('warning', 'Ни один аккаунт не подключился — пробую ещё раз через 60 секунд');
+      await interruptibleSleep(60_000, shouldStop, 2000, signal);
+      if (shouldStop()) return;
+      // Приёмник повторной попытки ставим в `clients` ДО вызова — по той же
+      // причине, что и выше: ручка обязана видеть то, что подключается сейчас.
+      clients = [];
+      const retryClients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db, { sink: clients, signal });
+      log('info', `Повторная попытка: подключились ${retryClients.length} из ${accounts.length} аккаунтов`);
+      if (retryClients.length === 0) {
+        log('error', 'Повторная попытка тоже провалилась — кампания на паузе. Проверьте прокси и сессии аккаунтов, затем запустите снова.');
+        const { error: stErr } = await campaignTerminal({ status: 'paused' });
+        if (stErr) log('error', `Не смог записать статус "на паузе" в базу данных — ${stErr.message}`);
+        return;
+      }
+      clients = retryClients;
+      if (shouldStop()) { await disconnectAll(clients); return; }
     }
-    clients = retryClients;
+  } catch (err) {
+    await disconnectAll(clients);
+    throw err;
   }
 
   {
@@ -2126,13 +2160,13 @@ export async function runCampaignLoop(
           // свои паузы между сообщениями), поэтому отмечаемся после каждого:
           // молчание длиной в порог простоя не должно набегать из честной
           // работы.
-          await handleFollowUp(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop);
+          await handleFollowUp(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop, tick);
           tick();
-          await handleMissedRepliesLastDays(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop);
+          await handleMissedRepliesLastDays(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop, tick);
           tick();
 
           try {
-            await backfillEmptyDialogs(client, account, campaign as unknown as OutreachCampaign, db, log);
+            await backfillEmptyDialogs(client, account, campaign as unknown as OutreachCampaign, db, log, tick);
             tick();
           } catch (err) {
             log('warning', `Аккаунт ${account.session_name}: ошибка при загрузке истории пустых диалогов (backfill) — ${err instanceof Error ? err.message : String(err)}`);

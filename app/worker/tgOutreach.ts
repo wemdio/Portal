@@ -259,6 +259,16 @@ function closeCampaignClients(campaignId: string): Promise<void> {
     .forceDisconnect()
     .catch((err: unknown) => {
       log('error', `Не смог закрыть клиенты кампании ${campaignId}: ${err instanceof Error ? err.message : String(err)}`);
+      /*
+       * Неудачу НЕ запоминаем как успех.
+       *
+       * Промис кэшируется, чтобы два зовущих не рвали одни и те же сокеты
+       * дважды. Но кэш разрешённого промиса после ОШИБКИ означал бы, что
+       * повторная попытка разрыва не случится больше никогда — а нужна она
+       * ровно там, где первая не сработала: тело не проснулось, мы ждём его
+       * второй заход. Стираем запись, чтобы следующий вызов попробовал снова.
+       */
+      if (campaignClosing.get(campaignId) === closing) campaignClosing.delete(campaignId);
     });
   campaignClosing.set(campaignId, closing);
   return closing;
@@ -610,10 +620,15 @@ const campaignRunner = createJobRunner<
      * второй цикл поверх него — значит открыть те же сессии MTProto и получить
      * AUTH_KEY_DUPLICATED на каждый аккаунт (трижды — и аккаунт выключен
      * навсегда). Поэтому: просим прошлое тело закончить, рвём его сокеты и
-     * ЖДЁМ. Дождались — работаем дальше, оно уже сняло свои ручки. Не
-     * дождались — не начинаем вовсе и отпускаем аренду: строку возьмёт
-     * следующий опрос, через полминуты, и к тому времени тело, скорее всего,
-     * выйдет.
+     * ЖДЁМ. Дождались — работаем дальше, оно уже сняло свои ручки.
+     *
+     * Не дождались — второй цикл не начинаем и отпускаем аренду. Строку после
+     * этого возьмёт кто угодно: обычно мы же на следующем опросе (реплика на
+     * проде одна), но при двух репликах — сосед, и он увидит строку свободной,
+     * пока сессии, возможно, ещё держит наше тело. Это осознанный размен:
+     * альтернатива — держать аренду за телом, которое не отвечает, то есть
+     * запереть кампанию до перезапуска контейнера. Разрыв сокетов к этому
+     * моменту сделан и у него была целая минута.
      */
     const previousBody = campaignBodies.get(campaignId);
     if (previousBody) {
@@ -623,7 +638,7 @@ const campaignRunner = createJobRunner<
         log(
           'error',
           `Campaign ${campaignId}: предыдущий прогон не завершился за ${Math.round(CAMPAIGN_BODY_HANDOVER_MS / 1000)}с — не запускаю второй. ` +
-            'Клиенты Telegram этой кампании держит он; второй набор тех же сессий выключил бы аккаунты. Отпускаю аренду, вернусь на следующем опросе.',
+            'Клиенты Telegram этой кампании держит он; второй набор тех же сессий выключил бы аккаунты. Аренду отпускаю — кампанию возьмёт следующий свободный исполнитель (обычно этот же воркер на ближайшем опросе).',
         );
         await releaseCampaignLeaseIfIdle(campaignId, ctx.runToken);
         return;
@@ -717,28 +732,41 @@ const campaignRunner = createJobRunner<
         .finally(() => { progressWriteInFlight = false; });
     };
 
-    const trace = await startTrace({
-      name: 'tg-outreach.campaign.run',
-      input: {
-        campaignId,
-        campaignName: job.name,
-        route: 'tg_outreach_worker',
-        userId: job.user_id,
-      },
-      message: `TG Аутрич: ${job.name ?? campaignId}`,
-      userId: job.user_id ?? null,
-    });
-
-    const requestId = trace?.traceId ?? crypto.randomUUID();
-    if (trace) {
-      await db
-        .from('trace_spans')
-        .update({ input: { campaignId, campaignName: job.name, requestId, route: 'tg_outreach_worker', userId: job.user_id } })
-        .eq('id', trace.id);
-    }
-    const traceContext = trace ? { requestId } : undefined;
-
+    /*
+     * Дальше — ОДИН try/finally на всё, и старт трейса внутри него.
+     *
+     * Регистрацию живого тела снимает только finally, поэтому между
+     * `campaignBodies.set` и входом в try не должно быть ни одного действия,
+     * которое может бросить. Раньше между ними стояли старт трейса и запись
+     * span'а: их исключение оставило бы промис тела неразрешённым навсегда, и
+     * каждый следующий заход на эту кампанию ждал бы минуту, сдавался и
+     * повторял это до перезапуска контейнера — кампания, которую нельзя
+     * запустить ничем. Трейс — диагностика, ронять из-за неё нечего, но и
+     * полагаться на то, что она не бросит, тоже нельзя.
+     */
+    let trace: Awaited<ReturnType<typeof startTrace>> = null;
     try {
+      trace = await startTrace({
+        name: 'tg-outreach.campaign.run',
+        input: {
+          campaignId,
+          campaignName: job.name,
+          route: 'tg_outreach_worker',
+          userId: job.user_id,
+        },
+        message: `TG Аутрич: ${job.name ?? campaignId}`,
+        userId: job.user_id ?? null,
+      });
+
+      const requestId = trace?.traceId ?? crypto.randomUUID();
+      if (trace) {
+        await db
+          .from('trace_spans')
+          .update({ input: { campaignId, campaignName: job.name, requestId, route: 'tg_outreach_worker', userId: job.user_id } })
+          .eq('id', trace.id);
+      }
+      const traceContext = trace ? { requestId } : undefined;
+
       await runCampaignLoop(
         campaignId,
         db,
@@ -883,34 +911,25 @@ async function handleStopJob(job: { id: string; campaign_id: string }) {
    * ждать минуту незачем. Кросс-процессный путь при этом остаётся — просьба в
    * памяти его не заменяет, а опережает.
    */
-  const body = campaignBodies.get(campaignId);
   campaignStops.get(campaignId)?.();
 
   /*
-   * И только потом закрываем клиенты — до того, как команда будет отмечена
-   * выполненной.
+   * Закрываем клиенты — до того, как команда будет отмечена выполненной, но
+   * САМО ТЕЛО НЕ ЖДЁМ.
    *
-   * Как только команда закрыта, интерфейс показывает кнопку «Запустить», и
-   * следующий клик может прийти через секунду. Если к этому моменту сессии
-   * Telegram ещё открыты, новый прогон откроет их вторыми — AUTH_KEY_DUPLICATED
-   * и выключенные аккаунты. Поэтому «остановлено» означает «сессии свободны», а
-   * не «мы попросили».
+   * Закрытие быстрое (сокеты, не сеть) и это единственная честная гарантия
+   * слова «остановлено»: сессии свободны, а не «мы попросили». А вот ожидания
+   * тела здесь быть не должно. Оно шло бы внутри опроса и держало бы весь цикл
+   * до минуты: в это время не берётся ни чужой «стоп», ни «перезапуск», ни
+   * перехват брошенной кампании, ни прогрев. Голова очереди, забитая на
+   * аварийном пути оператора, — это ровно инцидент 29.07.2026, когда четыре
+   * стоп-клика подряд ушли в никуда.
    *
-   * Ждём и само тело — с тем же потолком, что и передача между прогонами.
-   * Не дождались — не страшно: второй запуск упрётся в ту же проверку и не
-   * начнётся, пока тело живо.
+   * Ждать и не нужно: от второго набора сессий защищает не эта пауза, а
+   * проверка живого тела в самом раннере (второй запуск не начнётся, пока
+   * прошлый цикл жив) и такая же проверка в догрузке переписок.
    */
   await closeCampaignClients(campaignId);
-  if (body) {
-    const finished = await handOverCampaign(campaignId, body);
-    if (!finished) {
-      log(
-        'warn',
-        `Кампания ${campaignId}: цикл ещё разматывается после остановки. Клиенты Telegram уже закрыты, ` +
-          'запуск до его выхода не начнётся — это защита от второго набора сессий.',
-      );
-    }
-  }
   log('info', `Stop recorded for campaign ${campaignId}`);
 
   await db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
@@ -928,9 +947,9 @@ async function handleStopJob(job: { id: string; campaign_id: string }) {
  * строкой выше.
  */
 async function handleRestartJob(job: { id: string; campaign_id: string }) {
-  // handleStopJob уже закрыл клиенты и дождался тела (или сказал, что не
-  // дождался) — отдельного ожидания здесь не нужно, а статус пишем только
-  // после него.
+  // handleStopJob закрыл клиенты и попросил цикл выйти; ждать его выхода не
+  // нужно и здесь — новый прогон всё равно упрётся в проверку живого тела в
+  // раннере и дождётся там, вне опроса команд.
   await handleStopJob(job);
   const { error } = await db
     .from('tg_outreach_campaigns')
@@ -943,6 +962,33 @@ async function handleRestartJob(job: { id: string; campaign_id: string }) {
 
 async function handleRefetchJob(job: { id: string; campaign_id: string }) {
   const campaignId = job.campaign_id;
+
+  /*
+   * Догрузка переписок — третий путь, открывающий те же сессии Telegram.
+   *
+   * Она строит свой набор клиентов, ни на что не глядя, и от этого её нужно
+   * держать так же, как второй запуск кампании: маршрут отказывает, пока
+   * кампания числится запущенной, но статус `stopped` пишется ДО того, как
+   * цикл вышел, а ожидание тела ограничено. То есть тело, пережившее потолок,
+   * всё ещё держит сессии в тот момент, когда догрузка к ним подключается —
+   * и это тот же AUTH_KEY_DUPLICATED, только с другой стороны.
+   */
+  const previousBody = campaignBodies.get(campaignId);
+  if (previousBody) {
+    log('warn', `Refetch ${campaignId}: цикл кампании ещё не вышел — прошу его закончить и жду`);
+    const handedOver = await handOverCampaign(campaignId, previousBody);
+    if (!handedOver) {
+      const msg = 'Цикл кампании ещё работает и держит сессии Telegram. Догрузка переписок открыла бы те же сессии вторыми — это выключает аккаунты. Остановите кампанию и повторите через минуту.';
+      log('error', `Refetch ${campaignId}: ${msg}`);
+      await db.from('tg_outreach_jobs').update({
+        status: 'failed',
+        error_message: msg,
+        finished_at: new Date().toISOString(),
+      }).eq('id', job.id);
+      return;
+    }
+  }
+
   log('info', `Refetch messages for campaign ${campaignId}`);
 
   try {

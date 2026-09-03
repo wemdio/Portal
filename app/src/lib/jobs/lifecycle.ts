@@ -374,6 +374,34 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
     return q;
   }
 
+  /**
+   * Исключить из захвата задачи, которые этот раннер ВСЁ ЕЩЁ выполняет.
+   *
+   * Строка выглядит свободной не только когда её бросили, но и когда её
+   * прежний прогон в ЭТОМ процессе ещё не размотался: продления прекращаются
+   * сразу после abort (потеря аренды, простой дольше порога), а тело может
+   * дорабатывать минутами, если стоит внутри зависшего сетевого вызова. Взять
+   * такую строку — значит запустить второе тело одной задачи в одном процессе:
+   * для TG-аутрича это второе подключение тех же MTProto-сессий и выключенные
+   * навсегда аккаунты, для остальных очередей — двойная работа и двойные
+   * платные запросы.
+   *
+   * Фильтр стоит и в выборе кандидата, и в CAS — по той же причине, что и
+   * where: между двумя запросами всё может измениться. И главное, он стоит ДО
+   * захвата, а не после. Проверка после CAS выглядела бы проще, но стоила бы
+   * дважды: захват уже переписал бы run_token и worker_id под работающим телом
+   * (его следующий чекпойнт вернул бы false и прервал бы работу, которую никто
+   * не просил прерывать), а сам захват выбирает ОДНОГО самого старого
+   * кандидата — то есть каждый опрос упирался бы в ту же строку и до остальных
+   * брошенных задач очередь не доходила бы вовсе, пока тело разматывается.
+   *
+   * Пустой набор — никакого фильтра: `not.in.()` PostgREST не принимает.
+   */
+  function excludeOwned(query: QueryBuilder): QueryBuilder {
+    if (owned.size === 0) return query;
+    return query.not('id', 'in', `(${Array.from(owned.keys()).join(',')})`);
+  }
+
   type Owned = {
     runToken: string;
     abort: AbortController;
@@ -493,12 +521,12 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
   }
 
   async function claimPending(): Promise<ClaimOutcome> {
-    const { data: candidate, error: selectError } = await applyWhere(
+    const { data: candidate, error: selectError } = await excludeOwned(applyWhere(
       client
         .from(table)
         .select('id, attempts')
         .eq('status', statuses.pending),
-    )
+    ))
       .order(orderBy, { ascending: true })
       .limit(1)
       .maybeSingle();
@@ -508,7 +536,7 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
     }
     if (!candidate) return EMPTY;
     const runToken = randomUUID();
-    const { data, error } = await applyWhere(
+    const { data, error } = await excludeOwned(applyWhere(
       client
         .from(table)
         .update({
@@ -521,7 +549,7 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
         .eq('id', candidate.id)
         // CAS: строку получит ровно та реплика, для которой она ещё pending.
         .eq('status', statuses.pending),
-    )
+    ))
       .select(select)
       .maybeSingle();
     // Ошибку захвата НЕЛЬЗЯ трактовать как проигранную гонку: ноль строк из-за
@@ -536,13 +564,13 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
   }
 
   async function claimExpired(): Promise<ClaimOutcome> {
-    const { data: candidate, error: selectError } = await applyWhere(
+    const { data: candidate, error: selectError } = await excludeOwned(applyWhere(
       client
         .from(table)
         .select('id, attempts, lease_until')
         .eq('status', statuses.running)
         .or(expiredFilter()),
-    )
+    ))
       .order(orderBy, { ascending: true })
       .limit(1)
       .maybeSingle();
@@ -581,7 +609,7 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
       return EMPTY;
     }
     const runToken = randomUUID();
-    const { data, error } = await applyWhere(
+    const { data, error } = await excludeOwned(applyWhere(
       client
         .from(table)
         .update({
@@ -600,7 +628,7 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
         // Тот же фильтр в UPDATE: между чтением кандидата и записью аренду мог
         // перехватить сосед — тогда строка уже не «истёкшая» и мы её не тронем.
         .or(expiredFilter()),
-    )
+    ))
       .select(select)
       .maybeSingle();
     // Как и на pending-пути: сбой запроса — не проигранная гонка.
@@ -889,29 +917,6 @@ export function createJobRunner<Row extends { id: string }, C = unknown>(
         return true;
       }
       if (claim.kind === 'empty') return false;
-      /**
-       * Раннер не берёт задачу, которую сам же ещё выполняет.
-       *
-       * Захват истёкшей аренды смотрит только на строку, а строка выглядит
-       * свободной и тогда, когда её прежний прогон в ЭТОМ процессе ещё не
-       * размотался: аренду перестают продлевать сразу после abort (потеря
-       * аренды, простой дольше порога), а тело может дорабатывать минутами,
-       * если стоит внутри зависшего сетевого вызова. Без этой проверки
-       * получалось бы два тела одной задачи в одном процессе — для TG-аутрича
-       * это второе подключение тех же MTProto-сессий и выключенные навсегда
-       * аккаунты, для остальных очередей — двойная работа и двойные внешние
-       * запросы.
-       *
-       * Аренду отпускаем: строка должна достаться кому-то, когда прежнее тело
-       * закончит. Захват сюда же вернётся на следующем опросе — это не гонка на
-       * месте, пауза между опросами есть всегда (pollLoop ждёт свой интервал на
-       * ответ false).
-       */
-      if (owned.has(claim.job.id)) {
-        log('warn', `[${table}] job ${claim.job.id} claimed while its previous run is still unwinding — releasing, will retry`);
-        await releaseLease(claim.job.id, claim.runToken);
-        return false;
-      }
       // Сигнал мог прийти, пока захват был в полёте: shutdown() уже снял свой
       // снимок owned, и эту задачу никто бы не прервал и не отпустил — она
       // дожила бы до SIGKILL с живой арендой, а сосед прождал бы полный
