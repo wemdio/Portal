@@ -24,6 +24,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { collectionRoundLimit, createCollectionTarget, type VeCollectionMode } from './collectionTarget';
 
 export interface VeBaseCollectInput {
   verticalId: string;
@@ -34,6 +35,8 @@ export interface VeBaseCollectInput {
   limit: number;
   /** Выбранные в UI гипотезы; null — собирать по всем. */
   hypothesisIds: string[] | null;
+  collectionMode?: VeCollectionMode;
+  readyTarget?: number;
   /**
    * Переопределение filename авто-базы (по умолчанию «auto: <name>»).
    * ENG auto-pipeline пишет «auto-refill: <name> · <дата>».
@@ -77,6 +80,12 @@ function repairJobPayload(base: Record<string, unknown>): Record<string, unknown
     payload.refill = true;
     return payload;
   }
+  if (info.collection_mode === 'preview' || info.collection_mode === 'supply') {
+    const target = createCollectionTarget(info.collection_mode, info.ready_target as number | undefined);
+    payload.collection_mode = target.mode;
+    payload.ready_target = target.ready_target;
+    if (typeof info.supply_batch_id === 'string') payload.supply_batch_id = info.supply_batch_id;
+  }
 
   const hypothesisId = typeof base.hypothesis_id === 'string' && base.hypothesis_id
     ? base.hypothesis_id
@@ -102,7 +111,10 @@ export async function enqueueVeBaseCollect(
   supabase: SupabaseClient,
   input: VeBaseCollectInput,
 ): Promise<VeBaseCollectResult> {
-  const { verticalId, projectId, verticalName, limit, hypothesisIds, filename, refill } = input;
+  const { verticalId, projectId, verticalName, hypothesisIds, filename, refill } = input;
+  if (refill && input.collectionMode) return { ok: false, message: 'Target collection cannot use legacy refill' };
+  const collectionTarget = input.collectionMode ? createCollectionTarget(input.collectionMode, input.readyTarget) : null;
+  const limit = collectionTarget ? collectionRoundLimit(collectionTarget) : input.limit;
 
   // Base-per-hypothesis: непустой выбор гипотез → по одной базе на каждую.
   // hypothesisIds = null/пусто → прежний путь «одна база на вертикаль» (легаси
@@ -153,6 +165,15 @@ export async function enqueueVeBaseCollect(
         : hypothesisIds
           ? { limit, hypothesis_ids: hypothesisIds }
           : { limit };
+    if (collectionTarget) {
+      Object.assign(collectInfo, {
+        collection_mode: collectionTarget.mode, ready_target: collectionTarget.ready_target,
+        target_progress: { ...collectionTarget },
+      });
+      Object.assign(jobPayload, {
+        collection_mode: collectionTarget.mode, ready_target: collectionTarget.ready_target,
+      });
+    }
 
     // Дедуп 1: уже собирающаяся auto-база этой гипотезы (или вертикали, когда
     // гипотезы нет — легаси-путь).

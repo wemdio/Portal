@@ -74,9 +74,14 @@ function job(): VeJob {
 function dbWithCap(
   dailyLeadsCap: number,
   reservationGrant = dailyLeadsCap,
+  deliveryBound = false,
 ): MockSupabaseClient {
   return createMockSupabase({
     tables: {
+      ve_projects: [{
+        id: 'project-1',
+        portal_period_id: deliveryBound ? 'period-1' : null,
+      }],
       ve_bases: [{
         id: 'base-refill',
         project_id: 'project-1',
@@ -173,6 +178,18 @@ beforeEach(() => {
 });
 
 describe('VE2 refill contact reservations', () => {
+  it('blocks legacy direct append before budget or provider work for a delivery-bound project', async () => {
+    const db = dbWithCap(3, 3, true);
+
+    await expect(run(db)).resolves.toMatchObject({
+      result: { refill: { status: 'failed', error: expect.stringContaining('шаг 5') } },
+    });
+
+    expect(mockAppendLeads).not.toHaveBeenCalled();
+    expect(mockGetBlockedEmailSet).not.toHaveBeenCalled();
+    expect(db.rpcCalls).toEqual([]);
+  });
+
   it('does not reserve candidates when a pre-append safety check fails', async () => {
     const db = dbWithCap(3);
     mockGetBlockedEmailSet.mockRejectedValue(new Error('blocklist unavailable'));

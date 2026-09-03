@@ -33,7 +33,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
       const { data: base, error: baseErr } = await supabaseAdmin
         .from('ve_bases')
-        .select('id, project_id, status')
+        .select('id, project_id, status, collect_info')
         .eq('id', id)
         .single();
       if (baseErr) {
@@ -43,6 +43,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         );
       }
 
+      if (base.collect_info?.collection_mode === 'supply') {
+        return jsonError('Партия пополнения использует согласованный шаблон и существующие кампании', 409);
+      }
       if (base.status !== 'analyzed') {
         return jsonError('База ещё не проанализирована — дождитесь завершения анализа', 409);
       }
@@ -111,6 +114,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
       const template = (data ?? [])[0];
       if (!template) return jsonError('Шаблон ещё не сгенерирован', 404);
+      if (template.supply_batch_id) {
+        return jsonError('Служебный шаблон пополнения недоступен для ручного просмотра и запуска', 409);
+      }
 
       // Строки базы для превью — лёгкие (sample_rows ≤ 30 в БД, отдаём ≤ 5);
       // ошибка чтения базы не должна ронять выдачу шаблона, но не должна и

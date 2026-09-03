@@ -127,6 +127,11 @@ const TA_SCORING_CONCURRENCY = boundedInteger(
 );
 /** Дополнительные попытки только для индексов, пропущенных в успешном HTTP 200. */
 const TA_RESPONSE_MAX_RETRIES = 3;
+// One original ten-company batch owns these limits, including all subdivisions
+// and transport retries. 240s stays below the default five-minute stale lease.
+const TA_MAX_HTTP_ATTEMPTS = 16;
+const TA_BATCH_TIMEOUT_MS = 240_000;
+const TA_MAX_OUTPUT_TOKENS = 8000;
 // CLEANUP_BATCH (50, не 100) и обоснование — в nameCleanupProtocol.ts.
 const PERSONALIZATION_BATCH = 5;
 const MAX_RETRIES = 3;
@@ -205,19 +210,61 @@ function parseRetryAfter(res: { headers?: { get?: (n: string) => string | null }
 interface OpenRouterCompletion {
   content: string;
   finishReason?: string | null;
+  model?: string;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
+}
+
+interface AiRequestBudget {
+  remainingAttempts: number;
+  deadlineAt: number;
+}
+
+interface AiRequestOptions {
+  temperature?: number;
+  max_tokens?: number;
+  json?: boolean;
+  title?: string;
+  budget?: AiRequestBudget;
+  onAttempt?: (durationMs: number) => void;
+  onRetryWait?: (durationMs: number) => void;
+  isCancelled?: CancelCheckFn;
+}
+
+class AiRequestCancelledError extends Error {
+  constructor() { super('Отменено'); }
+}
+
+async function assertAiNotCancelled(check?: CancelCheckFn): Promise<void> {
+  if (check && await check()) throw new AiRequestCancelledError();
+}
+
+function assertAiBudget(budget?: AiRequestBudget, waitMs = 0): void {
+  if (budget && (budget.remainingAttempts <= 0 || Date.now() + waitMs >= budget.deadlineAt)) {
+    throw new Error('Исчерпан лимит запросов или времени оценки пачки');
+  }
 }
 
 async function callOpenRouterRaw(
   apiKey: string,
   model: string,
   messages: { role: string; content: string }[],
-  opts: { temperature?: number; max_tokens?: number; json?: boolean; title?: string } = {},
+  opts: AiRequestOptions = {},
 ): Promise<OpenRouterCompletion> {
   let lastError: Error = new Error('Обращение к ИИ не состоялось');
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    await assertAiNotCancelled(opts.isCancelled);
+    assertAiBudget(opts.budget);
+    if (opts.budget) opts.budget.remainingAttempts -= 1;
+    const requestStarted = Date.now();
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 70_000);
+    const requestTimeout = Math.min(70_000, opts.budget ? opts.budget.deadlineAt - requestStarted : 70_000);
+    const timeout = setTimeout(() => controller.abort(), requestTimeout);
+    let retryPlan: ReturnType<typeof planAiRetry> | null = null;
     try {
       const res = await fetch('https://router.requesty.ai/v1/chat/completions', {
         method: 'POST',
@@ -236,13 +283,16 @@ async function callOpenRouterRaw(
           ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
         }),
       });
-      clearTimeout(timeout);
       if (res.ok) {
+        // Headers do not mean the body has arrived. Keep the abort deadline
+        // active through json()/text(), otherwise a stalled body hangs forever.
         const json = await res.json();
         const choice = json.choices?.[0];
         return {
-          content: choice?.message?.content || '',
+          content: typeof choice?.message?.content === 'string' ? choice.message.content : '',
           finishReason: choice?.finish_reason,
+          model: typeof json.model === 'string' ? json.model : undefined,
+          usage: json.usage,
         };
       }
 
@@ -256,22 +306,21 @@ async function callOpenRouterRaw(
       }
       lastError = new Error(`ИИ ответил HTTP ${res.status}${body ? `: ${body}` : ''}`);
 
-      const plan = planAiRetry({ status: res.status, attempt, retryAfterSec: parseRetryAfter(res) });
-      if (!plan.retry) throw lastError;
-      await sleep(plan.delayMs);
+      retryPlan = planAiRetry({ status: res.status, attempt, retryAfterSec: parseRetryAfter(res) });
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastError = new Error(`Обращение к ИИ не удалось: ${msg}`);
+      retryPlan = planAiRetry({ status: null, attempt });
+    } finally {
       clearTimeout(timeout);
-      const isOurs = err === lastError;
-      if (!isOurs) {
-        const msg = err instanceof Error ? err.message : String(err);
-        lastError = new Error(`Обращение к ИИ не удалось: ${msg}`);
-        const plan = planAiRetry({ status: null, attempt });
-        if (!plan.retry) throw lastError;
-        await sleep(plan.delayMs);
-        continue;
-      }
-      throw lastError;
+      opts.onAttempt?.(Math.max(0, Date.now() - requestStarted));
     }
+    if (!retryPlan?.retry) throw lastError;
+    await assertAiNotCancelled(opts.isCancelled);
+    assertAiBudget(opts.budget, retryPlan.delayMs);
+    const waitStarted = Date.now();
+    await sleep(retryPlan.delayMs);
+    opts.onRetryWait?.(Math.max(0, Date.now() - waitStarted));
   }
   throw lastError;
 }
@@ -954,6 +1003,7 @@ const TA_SYSTEM_PROMPT = `Ты — эксперт по B2B лидогенера�
 При малом количестве данных — максимум 5.
 
 Всегда копируй idx компании из входа без изменений. Не перенумеровывай компании.
+Обоснование reason — одно короткое предложение, не больше 150 символов.
 
 ФОРМАТ ОТВЕТА: Только JSON объект, без пояснений.
 {"scores":[{"idx": 0, "score": 7, "reason": "краткое обоснование на русском"}]}`;
@@ -1030,7 +1080,26 @@ function collectTAScoreAnswers(rows: unknown[], expectedIndexes: Set<number>): M
   return answers;
 }
 
+/** Aggregate metadata only: never persist prompts, answers, headers or API keys. */
+export interface TaScoringTelemetry {
+  unique_companies: number;
+  http_attempts: number;
+  api_duration_ms: number;
+  retry_wait_ms: number;
+  length_responses: number;
+  usage_responses: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  reasoning_tokens: number;
+  models: string[];
+  failed_rows: number;
+  failed_batches: number;
+  errors: Array<{ reason: string; count: number }>;
+}
+
 export interface StepTAScoreOptions {
+  /** Per-run snapshot; the worker saves it with existing progress/checkpoints. */
+  onTelemetry?: (snapshot: TaScoringTelemetry) => void;
   /**
    * Когда true — НЕ фильтровать по порогу 7+, оставить все оценённые строки
    * с проставленными колонками «ЦА Балл» / «ЦА Причина». Полезно когда
@@ -1069,6 +1138,7 @@ export interface StepTAScoreOptions {
 
 const TA_SCORE_COL = 'ЦА Балл';
 const TA_REASON_COL = 'ЦА Причина';
+const TA_ERROR_REASON = 'Ошибка оценки';
 
 function findTAScoreColumnIndexes(header: string[]): { scoreIdx: number; reasonIdx: number } {
   return {
@@ -1134,9 +1204,11 @@ export async function stepTAScore(
 
   // Уникальные представители в порядке первого появления.
   const repByKey = new Map<string, string[]>();
+  const rowsPerKey = new Map<string, number>();
   for (const row of body) {
     const k = keyOfRow(row);
     if (!repByKey.has(k)) repByKey.set(k, row);
+    rowsPerKey.set(k, (rowsPerKey.get(k) ?? 0) + 1);
   }
   const uniqueKeys = [...repByKey.keys()];
   const uniqueRows = [...repByKey.values()];
@@ -1157,6 +1229,22 @@ export async function stepTAScore(
   const errorCounts = new Map<string, number>();
   let failedBatches = 0;
   let lengthResponses = 0;
+  const telemetry: TaScoringTelemetry = {
+    unique_companies: uniqueKeys.length, http_attempts: 0, api_duration_ms: 0,
+    retry_wait_ms: 0, length_responses: 0, usage_responses: 0, prompt_tokens: 0,
+    completion_tokens: 0, reasoning_tokens: 0, models: [], failed_rows: 0,
+    failed_batches: 0, errors: [],
+  };
+  const publishTelemetry = () => {
+    telemetry.length_responses = lengthResponses;
+    telemetry.failed_batches = failedBatches;
+    telemetry.failed_rows = [...failedKeys].reduce((sum, key) => sum + (rowsPerKey.get(key) ?? 0), 0);
+    telemetry.errors = [...errorCounts].map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count).slice(0, 5);
+    options?.onTelemetry?.({ ...telemetry, models: [...telemetry.models], errors: [...telemetry.errors] });
+  };
+  const tokenCount = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value) : 0;
   const materializeCheckpointRows = (): string[][] => [
     newHeader,
     ...body.map((row) => {
@@ -1179,7 +1267,7 @@ export async function stepTAScore(
     failedBatches += 1;
     for (const key of keys) {
       failedKeys.add(key);
-      scoreByKey.set(key, { score: '5', reason: 'Ошибка оценки' });
+      scoreByKey.set(key, { score: '5', reason: TA_ERROR_REASON });
     }
     errorCounts.set(reason, (errorCounts.get(reason) ?? 0) + 1);
   };
@@ -1189,8 +1277,12 @@ export async function stepTAScore(
     const score = finiteNumber(row[scoreColIdx]);
     if (score == null) continue;
     const reason = row[reasonColIdx] || '';
+    // A technical failure is not an AI verdict. Retry it on resume, without
+    // invalidating a genuine zero/five or already-scored duplicate row.
+    if (reason.trim().toLowerCase() === TA_ERROR_REASON.toLowerCase()) continue;
     scoreByKey.set(keyOfRow(row), { score: String(score), reason });
   }
+  publishTelemetry();
 
   const batches: Array<{
     batchNumber: number;
@@ -1240,31 +1332,33 @@ export async function stepTAScore(
   }: (typeof batches)[number]): Promise<void> => {
     if (cancellationError || fatalErrors.length > 0) return;
 
-    let unresolved = chunk
+    const initiallyUnresolved = chunk
       .map((row, idx) => ({ idx, key: chunkKeys[idx], row }))
       .filter(({ key }) => !scoreByKey.has(key));
     let failureReason: string | null = null;
-    let batchSawLength = false;
 
-    if (unresolved.length === 0) {
+    if (initiallyUnresolved.length === 0) {
       await reportBatchCompletion(chunk.length);
       return;
     }
 
-    // HTTP/сеть уже повторяются внутри callOpenRouter. Этот цикл отвечает за
-    // другой класс ошибки: провайдер вернул 200, но забыл часть индексов.
-    // Успешные ответы сохраняем, а в следующий запрос отправляем только хвост.
-    for (
-      let responseAttempt = 0;
-      responseAttempt <= TA_RESPONSE_MAX_RETRIES && unresolved.length > 0;
-      responseAttempt += 1
-    ) {
+    const budget: AiRequestBudget = {
+      remainingAttempts: TA_MAX_HTTP_ATTEMPTS,
+      deadlineAt: Date.now() + TA_BATCH_TIMEOUT_MS,
+    };
+    const queue = [{ companies: initiallyUnresolved, responseAttempt: 0 }];
+    // One queue, stable original indexes, one shared raw-HTTP/time budget.
+    // A length failure shrinks 10 -> <=5 -> singletons (not binary recursion,
+    // which could require 19 requests before any transport retries).
+    while (queue.length > 0) {
       if (cancellationError || fatalErrors.length > 0) return;
       if (isCancelled && await isCancelled()) {
         cancellationError = new Error('Отменено');
         return;
       }
-
+      const task = queue.shift()!;
+      const unresolved = task.companies.filter(({ key }) => !scoreByKey.has(key));
+      if (unresolved.length === 0) continue;
       const companies = unresolved.map(({ idx, row }) => {
         const obj: Record<string, string> = {};
         const promptRow = stripRow(row);
@@ -1281,25 +1375,47 @@ export async function stepTAScore(
         completion = await callOpenRouterRaw(OPENROUTER_BRIEF_API_KEY, AI_MODEL, [
           { role: 'system', content: TA_SYSTEM_PROMPT },
           { role: 'user', content: userMsg },
-        ], { temperature: 0.2, json: true, title: 'Portal - Base Constructor TA Scoring' });
+        ], {
+          temperature: 0.2, json: true, max_tokens: TA_MAX_OUTPUT_TOKENS,
+          title: 'Portal - Base Constructor TA Scoring', budget,
+          isCancelled,
+          onAttempt: (ms) => {
+            telemetry.http_attempts += 1;
+            telemetry.api_duration_ms += ms;
+            publishTelemetry();
+          },
+          onRetryWait: (ms) => { telemetry.retry_wait_ms += ms; publishTelemetry(); },
+        });
       } catch (err) {
+        if (err instanceof AiRequestCancelledError) { cancellationError = err; return; }
         failureReason = err instanceof Error ? err.message : String(err);
         break;
       }
-
-      if (completion.finishReason === 'length') {
-        lengthResponses += 1;
-        batchSawLength = true;
+      if (isCancelled && await isCancelled()) {
+        cancellationError = new AiRequestCancelledError();
+        return;
       }
 
-      let responseRows: unknown[];
+      const sawLength = completion.finishReason === 'length';
+      if (sawLength) lengthResponses += 1;
+      if (completion.model && /^[\w./:-]{1,120}$/.test(completion.model)
+        && !telemetry.models.includes(completion.model) && telemetry.models.length < 8) {
+        telemetry.models.push(completion.model);
+      }
+      if (completion.usage && typeof completion.usage === 'object') {
+        telemetry.usage_responses += 1;
+        telemetry.prompt_tokens += tokenCount(completion.usage.prompt_tokens);
+        telemetry.completion_tokens += tokenCount(completion.usage.completion_tokens);
+        telemetry.reasoning_tokens += tokenCount(completion.usage.completion_tokens_details?.reasoning_tokens);
+      }
+      publishTelemetry();
+
+      let responseRows: unknown[] = [];
       try {
         responseRows = parseTAScoreResponse(completion.content);
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
-        failureReason = batchSawLength ? `${reason} (finish_reason=length)` : reason;
-        if (responseAttempt < TA_RESPONSE_MAX_RETRIES) continue;
-        break;
+        failureReason = sawLength ? `${reason} (finish_reason=length)` : reason;
       }
 
       const expectedIndexes = new Set(unresolved.map(({ idx }) => idx));
@@ -1311,17 +1427,23 @@ export async function stepTAScore(
         scoreByKey.set(company.key, { score: String(answer.score), reason: answer.reason });
       }
 
-      unresolved = unresolved.filter(({ idx }) => !answers.has(idx));
-      if (unresolved.length === 0) {
-        failureReason = null;
-        break;
+      const missing = unresolved.filter(({ idx }) => !answers.has(idx));
+      if (missing.length === 0) continue;
+      if (responseRows.length > 0) {
+        failureReason = `Неполный ответ ИИ: отсутствуют или неоднозначны индексы ` +
+          missing.map(({ idx }) => idx).join(', ') + (sawLength ? ' (finish_reason=length)' : '');
       }
-      failureReason =
-        `Неполный ответ ИИ: отсутствуют или неоднозначны индексы ` +
-        unresolved.map(({ idx }) => idx).join(', ') +
-        (batchSawLength ? ' (finish_reason=length)' : '');
+      if (sawLength && unresolved.length > 1) {
+        const size = unresolved.length > 5 ? 5 : 1;
+        for (let offset = 0; offset < missing.length; offset += size) {
+          queue.push({ companies: missing.slice(offset, offset + size), responseAttempt: 0 });
+        }
+      } else if (task.responseAttempt < (sawLength ? 1 : TA_RESPONSE_MAX_RETRIES)) {
+        queue.push({ companies: missing, responseAttempt: task.responseAttempt + 1 });
+      }
     }
 
+    const unresolved = initiallyUnresolved.filter(({ key }) => !scoreByKey.has(key));
     if (unresolved.length > 0) {
       // Причину НЕ теряем. Успешно оценённая часть пачки остаётся нетронутой,
       // явная заглушка ставится только компаниям, которые не удалось добрать.
@@ -1332,7 +1454,11 @@ export async function stepTAScore(
           `${unresolved.length}/${chunk.length} компаний не оценено: ${reason}`,
       );
     }
-
+    publishTelemetry();
+    if (isCancelled && await isCancelled()) {
+      cancellationError = new AiRequestCancelledError();
+      return;
+    }
     await reportBatchCompletion(chunk.length);
   };
 
@@ -1353,6 +1479,7 @@ export async function stepTAScore(
   await reportChain;
   if (fatalErrors.length > 0) throw fatalErrors[0];
   if (cancellationError) throw cancellationError;
+  await assertAiNotCancelled(isCancelled);
 
   // Защита инварианта: новый/изменённый код маршрутизации не должен снова
   // превратить потерянную компанию в молчаливый 0 и обойти телеметрию.
@@ -1368,7 +1495,7 @@ export async function stepTAScore(
   const scored: string[][] = body.map((row) => {
     // Защитный fallback тоже явный: даже при будущей ошибке маршрутизации строка
     // никогда снова не превратится в молчаливую «оценку 0».
-    const s = scoreByKey.get(keyOfRow(row)) ?? { score: '5', reason: 'Ошибка оценки' };
+    const s = scoreByKey.get(keyOfRow(row)) ?? { score: '5', reason: TA_ERROR_REASON };
     const out = [...row];
     while (out.length < newHeader.length) out.push('');
     out[scoreColIdx] = s.score;
@@ -1419,6 +1546,7 @@ export async function stepTAScore(
     );
   }
 
+  publishTelemetry();
   options?.onStats?.({
     pre_filter_rows: preFilterRows,
     filtered_out_count: preFilterRows - filtered.length,
@@ -1433,7 +1561,9 @@ export async function stepTAScore(
   // can continue scoring every company. Once scoring is complete, persist the
   // actual step output (including the 7+ filter) before exposing progress=100;
   // otherwise a restart in that window would skip TA and export unfiltered rows.
+  await assertAiNotCancelled(isCancelled);
   if (options?.onCheckpoint) await options.onCheckpoint([newHeader, ...filtered]);
+  await assertAiNotCancelled(isCancelled);
   await onProgress(100);
   return [newHeader, ...filtered];
 }

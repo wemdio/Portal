@@ -105,19 +105,20 @@ type EmailListQuery = {
   limit?: number;
 };
 
-function expectLeadScopedSentEvidenceCall(expectedLead: string): void {
+function expectLeadScopedSentEvidenceCall(expectedLead: string, expectedPages = 1): void {
   const sentCalls = listEmails.mock.calls.filter(
     ([params]) => (params as EmailListQuery).email_type === 'sent',
   );
-  expect(sentCalls).toHaveLength(1);
-  const params = sentCalls[0]?.[0] as EmailListQuery;
-  expect(params).toEqual(expect.objectContaining({
-    lead: expectedLead,
-    email_type: 'sent',
-    mode: 'emode_all',
-    limit: 100,
-  }));
-  expect(params).not.toHaveProperty('campaign_id');
+  expect(sentCalls).toHaveLength(expectedPages);
+  for (const [params] of sentCalls) {
+    expect(params).toEqual(expect.objectContaining({
+      lead: expectedLead,
+      email_type: 'sent',
+      mode: 'emode_all',
+      limit: 100,
+    }));
+    expect(params).not.toHaveProperty('campaign_id');
+  }
 }
 
 function installMailboxOwnershipConflictFixture(options?: {
@@ -2437,7 +2438,7 @@ describe('pollAndQualifyReplies', () => {
       ([params]) => (params as { search?: string }).search === 'partners@elma365.com',
     );
     expect(ownershipSearchCalls).toHaveLength(1);
-    expect(listEmails).toHaveBeenCalledTimes(3);
+    expect(listEmails).toHaveBeenCalledTimes(4);
     expect(
       listEmails.mock.calls.filter(
         ([params]) => Boolean((params as { campaign_id?: string }).campaign_id),
@@ -2866,7 +2867,7 @@ describe('pollAndQualifyReplies', () => {
     }));
     if (result.status !== 'resolved') throw new Error('expected resolved ownership');
     expect(result.context?.lastOutbound?.id).toBe('sibling-real-parent');
-    expect(listEmails).toHaveBeenCalledTimes(2);
+    expect(listEmails).toHaveBeenCalledTimes(3);
   });
 
   it('does not ignore a competing self-serve owner when a mailbox also maps to a project', async () => {
@@ -3239,6 +3240,72 @@ describe('pollAndQualifyReplies', () => {
       }),
     ]);
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toHaveLength(0);
+  });
+
+  it.each([
+    'terminal-empty-pages',
+    'search-late-conflict',
+    'sent-late-conflict',
+    'sent-page-error',
+    'sent-page-cap',
+  ])('completes bounded ownership surfaces without losing safeguards: %s', async (scenario) => {
+    const { providerCampaignId, providerContext, staleCampaignIds, inbound, leadEmail } =
+      installCurrentProviderWithStaleMailboxOwnersFixture({ strongProviderParent: true });
+    // TobyLab: the current provider parent is exact, but old paused campaigns
+    // of another project still share the mailbox and require the full proof.
+    getAccountCampaignMappings.mockResolvedValue([
+      { campaign_id: providerCampaignId, status: 1 },
+      { campaign_id: staleCampaignIds[0], status: 2 },
+    ]);
+    const parent = providerContext.lastOutbound!;
+    const competingParent = { ...parent, id: 'other-project-parent', campaign_id: staleCampaignIds[0] };
+    listEmails.mockImplementation(async (params: {
+      search?: string;
+      email_type?: string;
+      starting_after?: string;
+    }) => {
+      const surface = params.search ? 'search' : 'sent';
+      if (!params.starting_after) {
+        // A short provider page may still carry a cursor. It is not proof
+        // that all rows were consumed, even when we already found a parent.
+        return { items: [parent], next_starting_after: `${surface}-terminal` };
+      }
+      if (surface === 'sent' && scenario === 'sent-page-error') {
+        throw new Error('sent history temporarily unavailable');
+      }
+      return {
+        items: scenario === `${surface}-late-conflict` ? [competingParent] : [],
+        next_starting_after: surface === 'sent' && scenario === 'sent-page-cap'
+          ? 'sent-unread-page'
+          : null,
+      };
+    });
+    const { resolveEffectiveReplyOwner } = await import('@/lib/instantly/replyOwnershipResolver');
+    const result = await resolveEffectiveReplyOwner({
+      db: mockInstantlyDb! as unknown as Parameters<typeof resolveEffectiveReplyOwner>[0]['db'],
+      reply: inbound,
+      providerCampaignId,
+      leadEmail,
+      accountId: 'main',
+    });
+
+    const expected = scenario === 'terminal-empty-pages'
+      ? { status: 'resolved', effectiveProjectId: 'project-enagency', effectiveCampaignId: providerCampaignId }
+      : scenario === 'sent-page-error'
+        ? { status: 'defer', reason: expect.stringContaining('sent history temporarily unavailable') }
+        : {
+            status: 'ambiguous',
+            reason: expect.stringContaining(scenario === 'sent-page-cap'
+              ? 'bounded page budget'
+              : '2 distinct or unknown owners'),
+          };
+    expect(result).toEqual(expect.objectContaining(expected));
+    expect(listEmails.mock.calls.map(([params]) => params)).toEqual([
+      { search: leadEmail, mode: 'emode_all', limit: 100 },
+      { search: leadEmail, mode: 'emode_all', limit: 100, starting_after: 'search-terminal' },
+      { lead: leadEmail, email_type: 'sent', mode: 'emode_all', limit: 100 },
+      { lead: leadEmail, email_type: 'sent', mode: 'emode_all', limit: 100, starting_after: 'sent-terminal' },
+    ]);
   });
 
   it('fails closed when cross-owner workspace evidence still has another page after the call budget', async () => {
@@ -4970,7 +5037,7 @@ describe('pollAndQualifyReplies', () => {
       status: 'ambiguous',
       reason: 'workspace ownership evidence exceeded the bounded page budget',
     }));
-    expectLeadScopedSentEvidenceCall(leadEmail);
+    expectLeadScopedSentEvidenceCall(leadEmail, 2);
   });
 
   it('uses the bounded sent fallback when workspace search has only an unrelated outbound', async () => {

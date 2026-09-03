@@ -128,6 +128,7 @@ export interface SubmitPaymentRequestInput {
   expenseType: NewPaymentExpenseType;
   budgetScope: PaymentBudgetScope;
   costCategory: PaymentCostCategory | null;
+  /** Actual paid date for costs; expected date for general expenses. */
   expectedPaymentOn: string;
   urgency: PaymentUrgency;
   documentUrl: string | null;
@@ -136,7 +137,7 @@ export interface SubmitPaymentRequestInput {
 export interface SubmitPaymentRequestResponse {
   request: PaymentRequest;
   summary: PaymentMonthSummary;
-  outcome: 'auto_approved' | 'approval_required';
+  outcome: 'auto_approved' | 'approval_required' | 'recorded_paid';
 }
 
 export type PaymentRequestActionInput =

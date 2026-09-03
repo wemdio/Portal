@@ -18,6 +18,7 @@ import type {
   VeTemplate,
 } from '../types';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { isContactSupplyActive } from '../contactSupplyEligibility';
 import { VE_LAUNCH_MAX_LEADS } from '../launchHandoff';
 import {
   classifyBaseRowsIntoSegmentsDetailed,
@@ -32,7 +33,7 @@ import {
   type PreparedSegmentationAudience,
   type SegmentationAuditReport,
 } from '../segmentationAudit';
-import { payloadString, stageLog, type VeStageContext, type VeStageResult } from './shared';
+import { payloadString, requeueVeJob, stageLog, type VeStageContext, type VeStageResult, type VeUsage } from './shared';
 
 type TemplateSnapshot = Pick<
   VeTemplate,
@@ -443,10 +444,46 @@ export async function runSegmentationAuditStage(
     throw new Error(`ve_segmentation_audits ${auditId}: ${auditError?.message ?? 'not found'}`);
   }
   const audit = auditRow as VeSegmentationAudit;
+  const supplyBatchId = typeof job.payload?.supply_batch_id === 'string' ? job.payload.supply_batch_id : null;
+  let supplyPlanId: string | null = null;
+  let supplyRevision: string | null = null;
+  const holdSupplyAudit = async (usage?: VeUsage): Promise<VeStageResult> => {
+    await requeueVeJob(ctx, job, 5 * 60_000);
+    return { result: { audit_id: audit.id, waiting: true, supply_hold: true }, ...usage };
+  };
+  const readSupplyRevision = async () => {
+    if (!supplyPlanId) return null;
+    const { data: revision, error: revisionError } = await ctx.supabase.rpc('ve_contact_supply_preview_revision', {
+      p_template_id: audit.template_id,
+    });
+    if (revisionError || typeof revision !== 'string' || !/^[0-9a-f]{32}$/.test(revision)) {
+      throw new Error('Supply audit source revision is unavailable');
+    }
+    return revision;
+  };
+  if (supplyBatchId) {
+    const { data: batch, error: batchError } = await ctx.supabase.from('ve_contact_supply_batches')
+      .select('id, plan_id, base_id, template_id, audit_id, status').eq('id', supplyBatchId).maybeSingle();
+    if (batchError || !batch || batch.base_id !== audit.base_id || batch.template_id !== audit.template_id
+      || batch.audit_id !== audit.id || !['auditing', 'ready', 'appended'].includes(batch.status)) {
+      throw new Error('Supply audit batch identity does not match');
+    }
+    const { data: plan, error: planError } = await ctx.supabase.from('ve_contact_supply_plans')
+      .select('id, project_id, status').eq('id', batch.plan_id).maybeSingle();
+    if (planError || !plan || plan.project_id !== job.project_id) {
+      throw new Error('Supply audit plan does not belong to this project');
+    }
+    supplyPlanId = plan.id;
+    if (!await isContactSupplyActive(ctx.supabase, plan.id)) return holdSupplyAudit();
+    supplyRevision = await readSupplyRevision();
+  }
 
   // Idempotent recovery: the stage may have persisted the snapshot just
   // before a worker restart but not yet marked ve_jobs done.
   if (audit.status === 'ready' && audit.summary && audit.input_hash) {
+    if (supplyRevision && (auditRow as { supply_source_revision?: unknown }).supply_source_revision !== supplyRevision) {
+      throw new Error('Supply audit source changed after classification');
+    }
     return {
       result: {
         audit_id: audit.id,
@@ -525,6 +562,12 @@ export async function runSegmentationAuditStage(
     .map(([rowIndex, segment]) => ({ row_index: rowIndex, segment }));
   const summary = toStoredAuditSummary(report);
   const completedAt = new Date().toISOString();
+  if (supplyPlanId && !await isContactSupplyActive(ctx.supabase, supplyPlanId)) {
+    return holdSupplyAudit(report.usage);
+  }
+  if (supplyRevision && await readSupplyRevision() !== supplyRevision) {
+    throw new Error('Supply audit source changed during classification');
+  }
 
   // status='running' protects a concurrent project cancellation from being
   // overwritten after the LLM call returns.
@@ -541,6 +584,10 @@ export async function runSegmentationAuditStage(
       cost_usd: report.usage.costUsd,
       completed_at: completedAt,
       updated_at: completedAt,
+      ...(supplyRevision ? {
+        supply_source_revision: supplyRevision,
+        supply_leads: snapshot.audience.leads,
+      } : {}),
     })
     .eq('id', audit.id)
     .eq('status', 'running')

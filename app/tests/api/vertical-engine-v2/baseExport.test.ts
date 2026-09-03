@@ -61,7 +61,7 @@ jest.mock('@/lib/toolTrace', () => ({
 
 import { GET } from '@/app/api/tools/vertical-engine-v2/bases/[id]/export/route';
 
-function request(mode?: 'raw' | 'launch-ready', withLaunchContext = false): NextRequest {
+function request(mode?: 'raw' | 'launch-ready' | 'preview', withLaunchContext = false): NextRequest {
   const query = new URLSearchParams();
   if (mode) query.set('mode', mode);
   if (withLaunchContext) {
@@ -171,6 +171,19 @@ function seed(options: {
 
 describe('Vertical Engine v2 base CSV export', () => {
   beforeEach(seed);
+
+  it('exports at most 1000 checked preview contacts and refuses an unfinished preview', async () => {
+    const ready = Array.from({ length: 1100 }, (_, i) => ({ company: `Company ${i}`, email: `lead-${i}@example.com`, _email_status: 'ok' }));
+    await mockPortalDb.from('ve_bases').update({
+      status: 'analyzed', row_count: ready.length, data: ready,
+      collect_info: { collection_mode: 'preview', target_progress: { status: 'target_reached' } },
+    }).eq('id', BASE_ID);
+    const result = await GET(request('preview'), { params: Promise.resolve({ id: BASE_ID }) });
+    expect(result.status).toBe(200);
+    expect((await result.text()).split('\r\n')).toHaveLength(1001);
+    await mockPortalDb.from('ve_bases').update({ status: 'collecting' }).eq('id', BASE_ID);
+    expect((await GET(request('preview'), { params: Promise.resolve({ id: BASE_ID }) })).status).toBe(409);
+  });
 
   it('exports only the fresh audited, unblocked audience with its segment assignment', async () => {
     const response = await GET(request('launch-ready', true), {

@@ -1,15 +1,15 @@
 /**
  * «Отправить в запуск»: из готового шаблона «Движка вертикалей» создать
- * кампанию в Instantly НА ПАУЗЕ (никогда не активируем — сотрудник проверяет
- * её в Instantly сам) и загрузить лидов базы. Один запуск на шаблон: повтор
- * только с force (создаёт НОВУЮ paused-кампанию и перезаписывает launch_info).
+ * пустую кампанию в Instantly с письмами и закрепить проверенную базу в
+ * Portal-резерве. Отправка возможна только после одобрения специалистом
+ * и дозированной загрузки отдельным delivery runner.
  *
  * Ядро вынесено из POST api/tools/vertical-engine-v2/templates/[id]/launch.
  * Это только внутренний VE v2-контур; production ENG использует отдельный
  * hypothesisEngine backend и сюда не делегирует.
  *
  * Тарифных гейтов и журнала client_campaign_launches тут нет осознанно (см.
- * launchHandoff.ts): запуск HE-шаблона billing клиента не меняет.
+ * launchHandoff.ts): подготовка VE2-шаблона billing клиента не меняет.
  *
  * Материализация 15% (сегментные варианты) работает только по сохранённому
  * предзапускному аудиту. Запуск повторно не вызывает LLM: он валидирует, что
@@ -23,7 +23,8 @@ import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/bl
 import { buildCampaignPayloadFromPreset } from '@/lib/clientLaunch/buildCampaignPayload';
 import { hasUsableCampaignSequences } from '@/lib/clientLaunch/campaignSequences';
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
-import { createCampaign, createLeads, updateCampaign } from '@/lib/instantly/client';
+import { createCampaign, updateCampaign } from '@/lib/instantly/client';
+import { reservePeriodCampaignLinks } from '@/lib/instantly/campaignProjectOwnership';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { logAudit, logError } from '@/lib/loggerServer';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
@@ -49,6 +50,8 @@ import {
   readStoredRuSeasonality,
 } from './ruSeasonality';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
+import { loadContactDeliverySettings } from './contactDeliveryConfig';
+import { loadVeContactDeliveryRows } from './contactDeliveryInventory';
 
 export type VeLaunchLocale = 'ru' | 'en';
 
@@ -82,6 +85,9 @@ interface VeLaunchMessages {
   segmentationAuditIncomplete: string;
   launchInProgress: string;
   launchUncertain: string;
+  deliveryPlanRequired: string;
+  deliveryPlanFailed: string;
+  campaignOwnershipFailed: string;
 }
 
 const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
@@ -122,6 +128,9 @@ const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
     segmentationAuditIncomplete: 'Аудит сегментации не завершён полностью. Повторите проверку.',
     launchInProgress: 'Для этого шаблона уже выполняется запуск. Дождитесь его завершения.',
     launchUncertain: 'Предыдущий запуск мог создать кампанию. Проверьте результат вручную перед повтором.',
+    deliveryPlanRequired: 'Укажите Portal-проект, активный период и точное обязательство по контактам.',
+    deliveryPlanFailed: 'Не удалось закрепить план ежедневной загрузки контактов.',
+    campaignOwnershipFailed: 'Не удалось связать созданные кампании с периодом Portal-проекта.',
   },
   en: {
     templateNotFound: 'Template not found',
@@ -160,6 +169,9 @@ const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
     segmentationAuditIncomplete: 'The segmentation audit is incomplete. Run it again before launch.',
     launchInProgress: 'A launch is already running for this template. Wait for it to finish.',
     launchUncertain: 'A previous launch may have created a campaign. Review it manually before retrying.',
+    deliveryPlanRequired: 'Select a Portal project, its active period, and an exact contact commitment.',
+    deliveryPlanFailed: 'Failed to bind the daily contact delivery plan.',
+    campaignOwnershipFailed: 'Failed to link the created campaigns to the Portal project period.',
   },
 };
 
@@ -178,11 +190,24 @@ export interface VeTemplateLaunchInput {
   locale: VeLaunchLocale;
   /** Префикс событий логирования/аудита своего контура. */
   eventPrefix: string;
+  /** Explicit operational project/period; never inferred from a client name. */
+  portalProjectId: string;
+  expectedPortalPeriodId: string;
+  /** Exact specialist-confirmed integer; legacy range strings are never parsed. */
+  targetContacts: number;
 }
 
 export interface VeTemplateLaunchOutcome {
   status: number;
   body: Record<string, unknown>;
+}
+
+interface VeTemplateLaunchDripRow {
+  campaign_id: string;
+  source_row_index: number;
+  drip_order: number;
+  lead_payload: Record<string, unknown>;
+  email_normalized: string;
 }
 
 function conflict(code: string, error: string): VeTemplateLaunchOutcome {
@@ -193,14 +218,17 @@ export function normalizedMailboxIds(values: unknown): string[] {
   return normalizeLaunchMailboxIds(values);
 }
 
-function estimatedBundleRunDays(input: {
+export function estimatedBundleRunDays(input: {
   campaigns: VeTemplateLaunchCampaign[];
   preset: ClientCampaignPreset;
   letters: VeTemplate['letters'];
 }): number {
   const totalCampaignLeads = Math.max(
     1,
-    input.campaigns.reduce((total, campaign) => total + campaign.leads_count, 0),
+    input.campaigns.reduce(
+      (total, campaign) => total + (campaign.ready_leads_count ?? campaign.leads_count),
+      0,
+    ),
   );
   const dailyMax =
     Number.isFinite(input.preset.daily_max_leads) && input.preset.daily_max_leads > 0
@@ -321,10 +349,16 @@ async function settleTemplateLaunch(input: {
   reservationId: string;
   status: LaunchReservationTerminal;
   launchInfo?: VeTemplateLaunchInfo | null;
+  dripRows?: VeTemplateLaunchDripRow[];
   error?: string | null;
 }): Promise<string | null> {
   const completedAt = new Date().toISOString();
-  const { data, error } = await input.portalDb.rpc('ve_finalize_template_launch', {
+  const persistDripRows = input.status === 'succeeded' && Array.isArray(input.dripRows);
+  const { data, error } = await input.portalDb.rpc(
+    persistDripRows
+      ? 've_finalize_template_contact_delivery'
+      : 've_finalize_template_launch',
+    {
     p_audit_id: input.auditId,
     p_template_id: input.templateId,
     p_launch_reservation_id: input.reservationId,
@@ -332,7 +366,9 @@ async function settleTemplateLaunch(input: {
     p_launch_info: input.launchInfo ?? null,
     p_error: input.error?.slice(0, 500) ?? null,
     p_now: completedAt,
-  });
+      ...(persistDripRows ? { p_drip_rows: input.dripRows ?? [] } : {}),
+    },
+  );
   if (error) return error.message;
   const result = data && typeof data === 'object' ? (data as Record<string, unknown>) : null;
   return result?.finalized === true ? null : 'Резервирование запуска больше не активно';
@@ -370,6 +406,9 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     userId,
     locale,
     eventPrefix,
+    portalProjectId,
+    expectedPortalPeriodId,
+    targetContacts,
   } = input;
   const t = MESSAGES[locale];
 
@@ -380,6 +419,16 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   }
   if (!confirmSegmentation) {
     return conflict('SEGMENTATION_CONFIRMATION_REQUIRED', t.segmentationConfirmationRequired);
+  }
+  if (
+    typeof portalProjectId !== 'string' ||
+    !portalProjectId.trim() ||
+    typeof expectedPortalPeriodId !== 'string' ||
+    !expectedPortalPeriodId.trim() ||
+    !Number.isSafeInteger(targetContacts) ||
+    targetContacts <= 0
+  ) {
+    return conflict('CONTACT_DELIVERY_PLAN_REQUIRED', t.deliveryPlanRequired);
   }
 
   // 1. Шаблон.
@@ -394,7 +443,11 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       body: { error: tplErr.code === 'PGRST116' ? t.templateNotFound : tplErr.message },
     };
   }
-  const template = templateRow as VeTemplate & { launch_info?: unknown };
+  const template = templateRow as VeTemplate & { launch_info?: unknown; supply_batch_id?: string | null };
+
+  if (template.supply_batch_id) {
+    return conflict('SUPPLY_BATCH_NOT_LAUNCHABLE', 'Партия пополнения использует существующие кампании. Новый запуск запрещён.');
+  }
 
   if (template.status !== 'ready') {
     return { status: 409, body: { error: t.templateNotReady } };
@@ -408,7 +461,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   // 2. База шаблона.
   const { data: baseRow, error: baseErr } = await portalDb
     .from('ve_bases')
-    .select('id, project_id, vertical_id, hypothesis_id, filename, columns, data, source')
+    .select('id, project_id, vertical_id, hypothesis_id, filename, columns, data, source, collect_info')
     .eq('id', template.base_id)
     .single();
   if (baseErr) {
@@ -421,6 +474,27 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     VeBase,
     'id' | 'project_id' | 'vertical_id' | 'hypothesis_id' | 'filename' | 'columns' | 'data' | 'source'
   >;
+
+  const collectionInfo = baseRow.collect_info as { collection_mode?: string } | null;
+  let approvedSupplyWorkspace: string | null = null;
+  if (collectionInfo?.collection_mode === 'preview') {
+    const { data: plan, error: planError } = await portalDb.from('ve_contact_supply_plans')
+      .select('id, status, approval_snapshot, preview_audit_id, item_id')
+      .eq('template_id', templateId).maybeSingle();
+    if (planError) return { status: 500, body: { error: 'Не удалось проверить согласование превью' } };
+    if (plan?.item_id) return conflict('SUPPLY_ALREADY_LAUNCHED', 'Для этой гипотезы кампании уже созданы. Пополнение использует их, повторный запуск запрещён.');
+    if (!plan || !['approved', 'active'].includes(plan.status)
+      || plan.approval_snapshot?.preset_id !== presetId || plan.approval_snapshot?.portal_project_id !== portalProjectId
+      || plan.approval_snapshot?.portal_period_id !== expectedPortalPeriodId || plan.approval_snapshot?.target_contacts !== targetContacts
+      || plan.preview_audit_id !== segmentationAuditId) {
+      return conflict('SUPPLY_APPROVAL_REQUIRED', 'Сначала подтвердите согласование превью и условий запуска с заказчиком.');
+    }
+    const { data: current, error: currentError } = await portalDb.rpc('ve_contact_supply_approval_current', { p_plan_id: plan.id });
+    if (currentError || current !== true) {
+      return conflict('SUPPLY_APPROVAL_STALE', 'Согласованные данные изменились. Проверьте превью и согласуйте его заново.');
+    }
+    approvedSupplyWorkspace = plan.approval_snapshot.instantly_account_id;
+  }
 
   // 3. Письма шаблона + условия сегментных вариантов (when) для сплита запуска.
   const templateLetters = Array.isArray(template.letters) ? template.letters : [];
@@ -518,6 +592,9 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     return conflict('VE_LAUNCH_MAILBOX_SCOPE_REQUIRED', t.mailboxScopeRequired);
   }
   const instantlyAccountId = resolveInstantlyAccountId(preset.instantly_account_id);
+  if (collectionInfo?.collection_mode === 'preview' && approvedSupplyWorkspace !== instantlyAccountId) {
+    return conflict('SUPPLY_WORKSPACE_CHANGED', 'Workspace пресета изменился после согласования. Проверьте клиентский аккаунт.');
+  }
   const instantlyRequestOptions = { accountId: instantlyAccountId };
 
   // Client-scoped blocklist is the safety boundary for shared Instantly
@@ -554,6 +631,21 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   if (groups.length === 0) {
     return { status: 400, body: { error: t.allContactsBlocked } };
   }
+  // Filter before creating remote campaigns; the unique DB constraint remains
+  // the authority if two hypotheses prepare concurrently after this read.
+  try {
+    const rows = await loadVeContactDeliveryRows(portalDb, base.project_id);
+    const existingEmails = new Set(rows.map((row) => row.email_normalized));
+    groups = groups.map((group) => ({
+      ...group,
+      leadIdx: group.leadIdx.filter((index) => !existingEmails.has(leads[index].email.trim().toLowerCase())),
+    })).filter((group) => group.leadIdx.length > 0);
+  } catch {
+    return { status: 500, body: { code: 'DELIVERY_INVENTORY_UNAVAILABLE', error: 'Не удалось полностью сверить резерв контактов проекта' } };
+  }
+  if (groups.length === 0) {
+    return { status: 400, body: { code: 'DELIVERY_CONTACTS_ALREADY_RESERVED', error: 'Эти контакты уже закреплены за другими запусками проекта' } };
+  }
   const segmentsMaterialized = groups.some((group) => group.segment !== null);
 
   // A project gets one immutable preset/workspace scope on its first launch
@@ -585,6 +677,54 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   }
   if (projectBinding.status === 'workspace_changed') {
     return conflict('VE_PROJECT_WORKSPACE_CHANGED', t.projectWorkspaceChanged);
+  }
+
+  let deliverySettings;
+  try {
+    deliverySettings = await loadContactDeliverySettings(portalDb, base.project_id, {
+      portalProjectId, portalPeriodId: expectedPortalPeriodId, targetContacts, presetId,
+    }, preset);
+  } catch (error) {
+    return conflict('CONTACT_DELIVERY_PLAN_INVALID', error instanceof Error ? error.message : t.deliveryPlanFailed);
+  }
+  const { scheduleDays: deliveryScheduleDays, timezone: deliveryTimezone, dailyCapacity: senderDailyCapacity } = deliverySettings;
+  const deliveryPlanBoundAt = new Date().toISOString();
+  const { data: deliveryPlanData, error: deliveryPlanError } = await portalDb.rpc(
+    've_bind_contact_delivery_plan',
+    {
+      p_ve_project_id: base.project_id,
+      p_portal_project_id: portalProjectId,
+      p_expected_portal_period_id: expectedPortalPeriodId,
+      p_target_contacts: targetContacts,
+      p_schedule_days: deliveryScheduleDays,
+      p_timezone: deliveryTimezone,
+      p_sender_daily_capacity: senderDailyCapacity,
+      p_bound_by: userId,
+      p_now: deliveryPlanBoundAt,
+    },
+  );
+  const deliveryPlanResult =
+    deliveryPlanData && typeof deliveryPlanData === 'object'
+      ? (deliveryPlanData as Record<string, unknown>)
+      : null;
+  if (deliveryPlanError || deliveryPlanResult?.bound !== true) {
+    await logError(
+      `${eventPrefix}.delivery_plan_binding_failed`,
+      deliveryPlanError ?? new Error('Delivery plan binding was not confirmed'),
+      {
+        userId,
+        templateId,
+        veProjectId: base.project_id,
+        portalProjectId,
+        expectedPortalPeriodId,
+      },
+    );
+    return conflict(
+      'CONTACT_DELIVERY_PLAN_INVALID',
+      deliveryPlanError?.message
+        ? `${t.deliveryPlanFailed}: ${deliveryPlanError.message}`
+        : t.deliveryPlanFailed,
+    );
   }
 
   // Evidence-stage is the only source of the calendar assessment. Missing or
@@ -693,14 +833,17 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     }
   }
 
-  // 8. Instantly: по кампании на группу (НЕ активируем!) + лиды группы. Текст
+  // 8. Instantly: по paused-кампании на группу, без немедленной загрузки базы.
+  //    Проверенные контакты сохраняются в Portal как durable drip reserve и
+  //    будут передаваться точными дневными порциями после активации очереди.
+  //    Текст
   //    ошибки идёт без scrubBrand — staff-UI нужна точная формулировка API;
   //    клиентский роут скрабит бренд на своей стороне. Основная кампания
   //    (segment=null) создаётся первой — её id уходит в скалярные поля
   //    launch_info (их читает refill-долив и старый UI).
   const campaigns: VeTemplateLaunchCampaign[] = [];
+  const dripRows: VeTemplateLaunchDripRow[] = [];
   const groupErrors: string[] = [];
-  let accepted = 0;
   let externalMutationAttempted = false;
   let ambiguousGroupFailure = false;
   for (const group of groups) {
@@ -744,6 +887,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
         campaign_url: instantlyCampaignUrl(campaignId),
         segment: group.segment,
         leads_count: 0,
+        ready_leads_count: group.leadIdx.length,
       };
       campaigns.push(campaignRecord);
       await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });
@@ -756,20 +900,17 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
         await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });
       }
 
-      await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });
-      const leadResult = await createLeads(
-        group.leadIdx.map((i) => leads[i]),
-        {
+      for (const sourceRowIndex of group.leadIdx) {
+        const lead = leads[sourceRowIndex];
+        const emailNormalized = lead.email.trim().toLowerCase();
+        dripRows.push({
           campaign_id: campaignId,
-          skip_if_in_workspace: false,
-          skip_if_in_campaign: false,
-          skip_if_in_list: false,
-        },
-        instantlyRequestOptions,
-      );
-      await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });
-      accepted += leadResult.leads_uploaded;
-      campaignRecord.leads_count = leadResult.leads_uploaded;
+          source_row_index: sourceRowIndex,
+          drip_order: dripRows.length,
+          lead_payload: { ...lead },
+          email_normalized: emailNormalized,
+        });
+      }
     } catch (err) {
       // До первой успешно записанной группы весь запрос завершается ошибкой.
       // Если внешний вызов уже предпринимался, его исход может быть неясен:
@@ -805,28 +946,68 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     }
   }
 
-  const zeroAccepted = accepted === 0;
-  if (zeroAccepted && campaigns.length === 0) {
+  if (campaigns.length === 0) {
     await settleTemplateLaunch({
       portalDb,
       auditId: audit.id,
       templateId,
       reservationId,
       status: externalMutationAttempted ? 'uncertain' : 'failed',
-      error: t.zeroAccepted,
+      error: t.instantlyFailedFallback,
     });
     return {
       status: 500,
       body: {
-        error: t.zeroAccepted,
-        campaign_id: campaigns[0]?.campaign_id ?? null,
+        error: t.instantlyFailedFallback,
         ...(externalMutationAttempted ? { code: 'TEMPLATE_LAUNCH_UNCERTAIN' } : {}),
       },
     };
   }
-  if (zeroAccepted) {
-    ambiguousGroupFailure = true;
-    groupErrors.push(t.zeroAccepted);
+
+  if (!ambiguousGroupFailure) {
+    try {
+      const ownership = await reservePeriodCampaignLinks(
+        instantlyDb,
+        portalProjectId,
+        campaigns.map((campaign) => ({
+          periodId: expectedPortalPeriodId,
+          campaignId: campaign.campaign_id,
+          matchSource: 'manual' as const,
+          baselineContacts: 0,
+          matchConfidence: 1,
+          matchReason: 'Vertical Engine v2 explicit contact-delivery plan',
+        })),
+      );
+      if (ownership.status === 'conflict') {
+        throw new Error(
+          `campaign ownership conflict: ${ownership.conflictingProjectIds.join(', ') || 'unknown project'}`,
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t.campaignOwnershipFailed;
+      await settleTemplateLaunch({
+        portalDb,
+        auditId: audit.id,
+        templateId,
+        reservationId,
+        status: 'uncertain',
+        error: message,
+      });
+      await logError(`${eventPrefix}.campaign_ownership_failed`, error, {
+        userId,
+        templateId,
+        portalProjectId,
+        expectedPortalPeriodId,
+        campaignIds: campaigns.map((campaign) => campaign.campaign_id),
+      });
+      return {
+        status: 500,
+        body: {
+          error: t.campaignOwnershipFailed,
+          code: 'TEMPLATE_LAUNCH_UNCERTAIN',
+        },
+      };
+    }
   }
 
   // 9. Запись о запуске в шаблон. Скалярные поля — первая кампания;
@@ -841,9 +1022,13 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     campaign_id: primary.campaign_id,
     campaign_name: primary.campaign_name,
     campaign_url: primary.campaign_url,
-    leads_count: accepted,
+    leads_count: 0,
+    ready_leads_count: dripRows.length,
     preset_id: presetId,
     created_at: new Date().toISOString(),
+    portal_project_id: portalProjectId,
+    portal_period_id: expectedPortalPeriodId,
+    target_contacts: targetContacts,
     instantly_account_id: instantlyAccountId,
     mailbox_ids: mailboxIds,
     seasonality,
@@ -888,6 +1073,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     reservationId,
     status: ambiguousGroupFailure ? 'uncertain' : 'succeeded',
     launchInfo,
+    ...(ambiguousGroupFailure ? {} : { dripRows }),
     error: ambiguousGroupFailure ? groupErrors.join('; ') : null,
   });
   if (settleError) {
@@ -934,7 +1120,11 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       segmentationAuditId: audit.id,
       segmentationAuditInputHash: currentInputHash,
       launchReservationId: reservationId,
-      accepted,
+      accepted: 0,
+      prepared: dripRows.length,
+      portalProjectId,
+      portalPeriodId: expectedPortalPeriodId,
+      targetContacts,
       totalLeads: leads.length,
       blockedContacts: blockedContactsCount,
       force,
@@ -942,13 +1132,14 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   );
 
   return {
-    status: zeroAccepted ? 500 : 200,
+    status: ambiguousGroupFailure ? 500 : 200,
     body: {
-      ok: !zeroAccepted,
+      ok: !ambiguousGroupFailure,
       launch: launchInfo,
       warnings,
-      ...(zeroAccepted ? { error: t.zeroAccepted } : {}),
-      ...(ambiguousGroupFailure ? { code: 'TEMPLATE_LAUNCH_UNCERTAIN' } : {}),
+      ...(ambiguousGroupFailure
+        ? { error: t.launchUncertain, code: 'TEMPLATE_LAUNCH_UNCERTAIN' }
+        : {}),
     },
   };
 }

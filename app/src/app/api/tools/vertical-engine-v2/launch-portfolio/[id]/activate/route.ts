@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { activateCampaign, getCampaign } from '@/lib/instantly/client';
+import { getCampaign } from '@/lib/instantly/client';
 import { CampaignStatus } from '@/lib/instantly/types';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
+import { activateApprovedLaunchCampaigns } from '@/lib/verticalEngineV2/contactDeliveryActivation';
 import {
   launchMailboxScopesEqual,
   launchMailboxScopesOverlap,
@@ -29,6 +30,7 @@ interface ReserveCampaign {
 
 interface ReserveItem {
   id: string;
+  project_id?: string;
   status?: string;
   instantly_account_id?: string;
 }
@@ -528,6 +530,7 @@ export async function POST(
       );
 
       let activationError: unknown = null;
+      let deliveryActivationDeferred = false;
       if (
         reserved.activation_reservation_id !== activationReservationId ||
         reserved.item?.id !== id ||
@@ -538,13 +541,16 @@ export async function POST(
           'Reservation payload does not match the immutable workspace and campaign scope',
         );
       } else {
-        for (const campaign of campaigns) {
-          try {
-            await activateCampaign(campaign.campaign_id, { accountId });
-          } catch (error_) {
-            activationError = error_;
-            break;
-          }
+        try {
+          const projectId = reserved.item?.project_id;
+          if (!projectId) throw new Error('Reserved launch has no VE project identity');
+          const approval = await activateApprovedLaunchCampaigns({
+            portalDb: supabaseAdmin, veProjectId: projectId, accountId,
+            campaignIds: campaigns.map((campaign) => campaign.campaign_id),
+          });
+          deliveryActivationDeferred = approval.deferred;
+        } catch (error_) {
+          activationError = error_;
         }
       }
 
@@ -605,12 +611,15 @@ export async function POST(
 
       await logAudit(
         'tools.vertical-engine-v2.launch-portfolio.activated',
-        'Vertical Engine v2 launch bundle activated',
+        deliveryActivationDeferred
+          ? 'Vertical Engine v2 launch bundle approved for weekday delivery'
+          : 'Vertical Engine v2 launch bundle activated',
         {
           userId: authed.auth.userId,
           itemId: id,
           activationReservationId: exactReservationId,
           instantlyAccountId: accountId,
+          deliveryActivationDeferred,
           campaigns: campaigns?.map((campaign) => campaign.campaign_id) ?? [],
         },
       );
@@ -619,6 +628,7 @@ export async function POST(
         ok: true,
         replayed: false,
         status: 'active',
+        delivery_activation_deferred: deliveryActivationDeferred,
         item: reserved.item ?? null,
         result: finalized ?? null,
       });

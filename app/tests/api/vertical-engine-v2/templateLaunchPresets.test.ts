@@ -6,6 +6,8 @@ import type { NextRequest } from 'next/server';
 const TEMPLATE_ID = 'template-preset-list-1';
 const BASE_ID = 'base-preset-list-1';
 const PROJECT_ID = 'project-preset-list-1';
+const PORTAL_PROJECT_ID = '00000000-0000-4000-8000-000000000741';
+const PORTAL_PERIOD_ID = '00000000-0000-4000-8000-000000000742';
 const USER_ID = '00000000-0000-4000-8000-000000000731';
 
 let mockPortalDb: MockSupabaseClient = createMockSupabase();
@@ -78,6 +80,21 @@ function seed() {
         id: PROJECT_ID,
         launch_preset_id: 'preset-b',
         launch_instantly_account_id: 'workspace-b',
+      }],
+      projects: [{
+        id: PORTAL_PROJECT_ID,
+        client: 'Клиент Портала',
+        name: 'Аутрич',
+        status: 'В работе',
+      }],
+      project_periods: [{
+        id: PORTAL_PERIOD_ID,
+        project_id: PORTAL_PROJECT_ID,
+        name: 'Сентябрь',
+        status: 'active',
+        period_start: '2026-09-01',
+        deadline: '2026-09-30',
+        contacts_done: '17',
       }],
       profiles: [
         { id: 'client-a', full_name: 'Альфа' },
@@ -185,6 +202,18 @@ describe('GET /api/tools/vertical-engine-v2/templates/[id]/launch', () => {
           mailbox_count: 2,
         },
       ],
+      delivery_plan: null,
+      portal_projects: [{
+        id: PORTAL_PROJECT_ID,
+        name: 'Клиент Портала',
+        active_period: {
+          id: PORTAL_PERIOD_ID,
+          label: 'Сентябрь',
+          starts_at: '2026-09-01',
+          deadline: '2026-09-30',
+          contacts_done_count: 17,
+        },
+      }],
       presets: [
         {
           id: 'preset-a',

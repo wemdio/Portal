@@ -6,6 +6,7 @@
  * boundary without restoring the former broad leadQualifier test suite.
  */
 
+import { runInNewContext } from 'node:vm';
 import type { Email } from '@/lib/instantly/types';
 import {
   classifyMachineReply,
@@ -58,6 +59,30 @@ const ELTEX_BODY = [
   'Также Вы можете связаться с ним по телефону +7 (383) 274-10-01.',
 ].join(' ');
 
+const GRACIE_BODY = 'Добрый день! Мы обязательно ответим вам в ближайшее время! Если ваш запрос актуален и требует ответа, то свяжитесь с нами по телефону: +79824500811 или Telegram: @gr_web';
+
+const TOBYLAB_OUTBOUND_TEXT = [
+  'Hi,',
+  'If TobyLab is looking to create more qualified sales opportunities, Polza can quickly test relevant segments and find leads there.',
+  "We'll bring you 3 sales-qualified leads, or continue working for free until we do.",
+  'Am I in the right inbox for growth or outbound?',
+  'Julia Mirinova',
+  'Account Manager',
+  'Polza Agency',
+  'P.S. If Anna Kon owns growth or outbound, could you forward this to them?',
+].join('\n\n');
+
+const TOBYLAB_REPLY_TEXT = [
+  'Hi Julia!',
+  'We are 2 co-founders Anna and Svetlana. We are looking for sales opportunities, could you please',
+  'send a intro presentation about your services?',
+  '',
+  'Svetlana',
+  '',
+  'вт, 1 сент. 2026 г. в 11:24, Julia Mirinova <sales@example.com>:',
+  ...TOBYLAB_OUTBOUND_TEXT.split('\n').map((line) => `> ${line}`),
+].join('\n');
+
 const FORMAL_MAILBOX_CHANGE_BODY = [
   'ООО Ромашка обновило свой основной электронный почтовый адрес.',
   'Все официальные письма необходимо направлять на новый адрес info@new.example.',
@@ -66,6 +91,15 @@ const FORMAL_MAILBOX_CHANGE_BODY = [
 ].join(' ');
 
 const MACHINE_ACK_FIXTURES = [
+  {
+    name: 'Gracie receiptless response promise with a conditional contact',
+    email: {
+      from_address_email: 'info@gracie.example',
+      subject: 'Re: Re:',
+      body: { text: GRACIE_BODY },
+      content_preview: GRACIE_BODY,
+    },
+  },
   {
     name: 'HOCO generic service acknowledgement',
     email: {
@@ -100,6 +134,11 @@ const ADK_CRITERIA = [
   'Также считать лидом, если поделились почтой.',
   'Также считать лидом, если попросили сделать расчет заявки, рассчитать стоимость перевозки.',
 ].join(' ');
+
+const CONTACT_CRITERIA_CASES = [
+  { name: 'default', leadCriteria: undefined },
+  { name: 'custom contact criterion', leadCriteria: ADK_CRITERIA },
+];
 
 function email(overrides: Partial<Email>): Email {
   return {
@@ -204,6 +243,16 @@ afterAll(() => {
 });
 
 describe('machine acknowledgement policy', () => {
+  it('leaves an unrecognized long contact plus a human request to AI without blocking the worker', () => {
+    const fixture = email({
+      body: { text: `Добрый день! Мы обязательно ответим вам в ближайшее время! Если ваш запрос актуален и требует ответа, то свяжитесь с нами по телефону: ${'9'.repeat(150)} пришлите КП` },
+    });
+    // A VM deadline bounds the regression even if a future regexp backtracks.
+    expect(runInNewContext('classify(email)', {
+      classify: classifyMachineReply, email: fixture,
+    }, { timeout: 200 })).toBeNull();
+  });
+
   it.each(MACHINE_ACK_FIXTURES)('recognizes $name', ({ email: fixture }) => {
     expect(classifyMachineReply(fixture)).toBe('service_acknowledgement');
   });
@@ -240,6 +289,52 @@ describe('machine acknowledgement policy', () => {
       body: { text: FORMAL_MAILBOX_CHANGE_BODY },
       content_preview: FORMAL_MAILBOX_CHANGE_BODY,
     })).toBe('auto_reply');
+  });
+
+  it.each(CONTACT_CRITERIA_CASES)(
+    'does not call AI for a receiptless acknowledgement with $name',
+    async ({ leadCriteria }) => {
+      const ctx = contextWithReply(GRACIE_BODY);
+      ctx.replyEmail.body = { html: `<div>${GRACIE_BODY}</div>` };
+      const result = await qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+        apiKey: 'test-key', maxRetries: 0, briefText: '', leadCriteria, prefetchedContext: ctx,
+      });
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        isLead: false, customCriteriaMatched: false, needsReview: false,
+        interestSignals: [], objectionHandleable: false, objectionDraft: null,
+      });
+    },
+  );
+
+  it.each(CONTACT_CRITERIA_CASES)(
+    'respects an AI machine verdict before lead promotion with $name',
+    async ({ leadCriteria }) => {
+      mockAiResult({
+        machine_reply_kind: 'service_acknowledgement',
+        is_lead: true, custom_criteria_matched: true,
+        objection_handleable: true, objection_draft: 'Не отправлять',
+      });
+      // An unfamiliar service template is intentionally left for the AI layer.
+      const result = await qualify('Обработка продолжается. Свяжитесь с нами по адресу service@example.com.', {
+        leadCriteria,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({
+        isLead: false, customCriteriaMatched: false, needsReview: false,
+        proposalSeen: false, interestSignals: [], objectionHandleable: false, objectionDraft: null,
+      });
+    },
+  );
+
+  it('ignores absent or unrecognized AI machine values for a human call request', async () => {
+    for (const machineReplyKind of [undefined, null, false, true, 'false', 'unknown']) {
+      mockAiResult({ is_lead: false, machine_reply_kind: machineReplyKind });
+      const result = await qualify('Можете связаться со мной завтра.');
+      expect(result).toMatchObject({ isLead: true, machineReplyKind: null });
+    }
   });
 });
 
@@ -317,19 +412,42 @@ describe('plain contact routing policy', () => {
 });
 
 describe('elliptical material request policy', () => {
-  it('rejects Informatika generic materials without a confirmed proposal', async () => {
+  it.each([
+    { name: 'outbound and quote', outboundText: TOBYLAB_OUTBOUND_TEXT },
+    { name: 'quote only', outboundText: null },
+  ])(
+    'keeps the TobyLab presentation request with its concrete sales outcome offer: $name',
+    async ({ outboundText }) => {
+      mockAiResult({ is_lead: true, proposal_seen: true, needs_review: false });
+      const result = await qualify(TOBYLAB_REPLY_TEXT, { outboundText });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ isLead: true, proposalSeen: true, needsReview: false });
+    },
+  );
+
+  it.each([
+    { name: 'Informatika', replyText: 'Можно мне прислать', outboundText: INFORMATIKA_OUTBOUND_TEXT },
+    {
+      name: 'English contact opener with a long signature',
+      replyText: 'Could you please send a presentation about your services?',
+      outboundText: [
+        'Hi, we will be grateful if you forward this email to whoever owns growth or outbound at your company.',
+        'Could you share the name and contact details of the right person? We can send more information to them directly.',
+        'Kind regards, Julia Mirinova, Account Manager, Polza Agency. Thank you for your help.',
+      ].join('\n'),
+    },
+  ])('rejects generic materials without a confirmed proposal: $name', async ({ replyText, outboundText }) => {
     mockAiResult({
       is_lead: true,
       custom_criteria_matched: false,
-      proposal_seen: false,
+      proposal_seen: true,
       interest_signals: ['модель ошибочно увидела коммерческий интерес'],
       reason: 'Модель ошибочно квалифицировала общий запрос как лид.',
       needs_review: false,
     });
 
-    const result = await qualify('Можно мне прислать', {
-      outboundText: INFORMATIKA_OUTBOUND_TEXT,
-    });
+    const result = await qualify(replyText, { outboundText });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({
@@ -402,6 +520,16 @@ describe('positive lead controls', () => {
       name: 'self-targeted call CTA after a contact opener',
       replyText: 'Можете связаться со мной завтра.',
       outboundText: CONTACT_ONLY_OUTBOUND_TEXT,
+    },
+    {
+      name: 'a human response promise with a concrete call request',
+      replyText: 'Ответим по вашему КП завтра. Давайте созвонимся сегодня.',
+      outboundText: null,
+    },
+    {
+      name: 'a human commercial request alongside an acknowledgement',
+      replyText: `${GRACIE_BODY}\n\nОтдельно по вашему предложению: пришлите КП с ценами.`,
+      outboundText: null,
     },
     {
       name: 'interest after a substantive offer',

@@ -12,6 +12,10 @@ import {
 } from '@/lib/instantly/accounts';
 import { runVeTemplateLaunch } from '@/lib/verticalEngineV2/launchTemplate';
 import {
+  buildVeContactDeliveryPreview,
+  parseExactNonNegativeContactCount,
+} from '@/lib/verticalEngineV2/contactDeliveryPreview';
+import {
   listVeInstantlyAccountTagMappings,
   listVeInstantlyCustomTags,
 } from '@/lib/verticalEngineV2/launchClientProvisioning';
@@ -27,7 +31,7 @@ import type { CustomTag } from '@/lib/instantly/types';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-// До VE_LAUNCH_MAX_LEADS лидов = 2 вызова /leads/add + создание кампании.
+// Кампании и durable reserve создаются синхронно; сами контакты грузит daily runner.
 export const maxDuration = 60;
 
 function jsonError(message: string, status: number) {
@@ -39,6 +43,25 @@ interface LaunchPresetRow {
   client_user_id: string;
   instantly_account_id?: string | null;
   email_account_ids?: unknown;
+}
+
+interface PortalProjectOptionRow {
+  id: string;
+  client?: string | null;
+  name?: string | null;
+}
+
+interface PortalActivePeriodRow {
+  id: string;
+  project_id: string;
+  name?: string | null;
+  period_start?: string | null;
+  deadline?: string | null;
+  contacts_done?: string | number | null;
+}
+
+function portalProjectOptionName(project: PortalProjectOptionRow): string {
+  return project.client?.trim() || project.name?.trim() || `Проект ${project.id.slice(0, 8)}`;
 }
 
 interface WorkspaceTagData {
@@ -131,11 +154,66 @@ export async function GET(
 
       const { data: projectRow, error: projectErr } = await supabaseAdmin
         .from('ve_projects')
-        .select('launch_preset_id, launch_instantly_account_id')
+        .select(
+          'id, launch_preset_id, launch_instantly_account_id, portal_project_id, portal_period_id, target_contacts',
+        )
         .eq('id', baseRow.project_id)
         .maybeSingle();
       if (projectErr) return jsonError(projectErr.message, 500);
       if (!projectRow) return jsonError('Проект не найден', 404);
+
+      const { data: portalProjectRows, error: portalProjectsError } = await supabaseAdmin
+        .from('projects')
+        .select('id, client, name, status')
+        .in('status', ['В работе', 'Тестирование', 'Подготовка', 'На паузе']);
+      if (portalProjectsError) {
+        await logError(
+          'tools.vertical-engine-v2.template.launch.portal_projects_failed',
+          portalProjectsError,
+          { templateId },
+        );
+        return jsonError('Не удалось загрузить проекты Portal', 500);
+      }
+      const portalProjectsRaw = (portalProjectRows ?? []) as PortalProjectOptionRow[];
+      const portalProjectIds = portalProjectsRaw.map((project) => project.id);
+      let activePeriods: PortalActivePeriodRow[] = [];
+      if (portalProjectIds.length > 0) {
+        const { data: activePeriodRows, error: activePeriodsError } = await supabaseAdmin
+          .from('project_periods')
+          .select('id, project_id, name, period_start, deadline, contacts_done')
+          .in('project_id', portalProjectIds)
+          .eq('status', 'active');
+        if (activePeriodsError) {
+          await logError(
+            'tools.vertical-engine-v2.template.launch.portal_periods_failed',
+            activePeriodsError,
+            { templateId },
+          );
+          return jsonError('Не удалось загрузить активные периоды Portal', 500);
+        }
+        activePeriods = (activePeriodRows ?? []) as PortalActivePeriodRow[];
+      }
+      const activePeriodByProjectId = new Map(
+        activePeriods.map((period) => [period.project_id, period] as const),
+      );
+      const portalProjects = portalProjectsRaw
+        .map((project) => {
+          const period = activePeriodByProjectId.get(project.id) ?? null;
+          return {
+            id: project.id,
+            name: portalProjectOptionName(project),
+            active_period: period
+              ? {
+                  id: period.id,
+                  label: period.name?.trim() || null,
+                  starts_at: period.period_start ?? null,
+                  deadline: period.deadline ?? null,
+                  contacts_done_count: parseExactNonNegativeContactCount(period.contacts_done),
+                }
+              : null,
+          };
+        })
+        .sort((left, right) => left.name.localeCompare(right.name, 'ru') || left.id.localeCompare(right.id));
 
       const { data: presetRows, error: presetErr } = await supabaseInstantly
         .from('client_campaign_presets')
@@ -260,10 +338,51 @@ export async function GET(
           })
         : [];
 
+      let deliveryPlan: Record<string, unknown> | null = null;
+      if (
+        typeof projectRow.portal_project_id === 'string' &&
+        projectRow.portal_project_id &&
+        typeof projectRow.portal_period_id === 'string' &&
+        projectRow.portal_period_id &&
+        typeof projectRow.target_contacts === 'number' &&
+        Number.isSafeInteger(projectRow.target_contacts) &&
+        projectRow.target_contacts > 0 &&
+        typeof projectRow.launch_preset_id === 'string' &&
+        projectRow.launch_preset_id
+      ) {
+        const boundPreview = await buildVeContactDeliveryPreview(
+          supabaseAdmin,
+          supabaseInstantly,
+          {
+            templateId,
+            portalProjectId: projectRow.portal_project_id,
+            expectedPortalPeriodId: projectRow.portal_period_id,
+            targetContacts: projectRow.target_contacts,
+            presetId: projectRow.launch_preset_id,
+          },
+        );
+        const preview = boundPreview.body.preview;
+        if (boundPreview.status === 200 && preview && typeof preview === 'object') {
+          deliveryPlan = preview as Record<string, unknown>;
+        } else if (boundPreview.status >= 500) {
+          await logError(
+            'tools.vertical-engine-v2.template.launch.delivery_plan_failed',
+            new Error(
+              typeof boundPreview.body.error === 'string'
+                ? boundPreview.body.error
+                : 'Bound delivery plan preview failed',
+            ),
+            { templateId, veProjectId: projectRow.id },
+          );
+        }
+      }
+
       return NextResponse.json({
         presets,
         can_create_client: canCreateClient,
         mailbox_tag_options: mailboxTagOptions,
+        portal_projects: portalProjects,
+        delivery_plan: deliveryPlan,
         bound_preset_id:
           typeof projectRow.launch_preset_id === 'string' && projectRow.launch_preset_id
             ? projectRow.launch_preset_id
@@ -275,7 +394,7 @@ export async function GET(
 
 // POST — «Отправить в запуск»: из готового шаблона создать кампанию в Instantly
 // НА ПАУЗЕ (никогда не активируем — сотрудник проверяет её в Instantly сам) и
-// загрузить лидов базы. Один запуск на шаблон: повтор только с {force:true}
+// сохранить проверенную базу для дозированной загрузки. Один запуск на шаблон: повтор только с {force:true}
 // (создаёт НОВУЮ paused-кампанию и перезаписывает launch_info).
 // Вся механика — в lib/verticalEngineV2/launchTemplate.ts. ENG-контур сюда
 // не делегирует: он остаётся на отдельном hypothesisEngine backend.
@@ -296,6 +415,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         force?: unknown;
         segmentation_audit_id?: unknown;
         confirm_segmentation?: unknown;
+        portal_project_id?: unknown;
+        expected_portal_period_id?: unknown;
+        target_contacts?: unknown;
       };
       try {
         body = (await req.json()) as typeof body;
@@ -310,6 +432,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           ? body.segmentation_audit_id.trim()
           : '';
       const confirmSegmentation = body?.confirm_segmentation === true;
+      const portalProjectId =
+        typeof body?.portal_project_id === 'string' ? body.portal_project_id.trim() : '';
+      const expectedPortalPeriodId =
+        typeof body?.expected_portal_period_id === 'string'
+          ? body.expected_portal_period_id.trim()
+          : '';
+      const targetContacts = body?.target_contacts;
+      if (
+        !portalProjectId ||
+        !expectedPortalPeriodId ||
+        typeof targetContacts !== 'number' ||
+        !Number.isSafeInteger(targetContacts) ||
+        targetContacts <= 0
+      ) {
+        return jsonError(
+          'Укажите Portal-проект, его активный период и точное обязательство по контактам',
+          400,
+        );
+      }
 
       const outcome = await runVeTemplateLaunch({
         portalDb: supabaseAdmin,
@@ -319,6 +460,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         force,
         segmentationAuditId,
         confirmSegmentation,
+        portalProjectId,
+        expectedPortalPeriodId,
+        targetContacts,
         userId,
         locale: 'ru',
         eventPrefix: 'tools.vertical-engine-v2.template.launch',

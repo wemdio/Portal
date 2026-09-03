@@ -1,7 +1,8 @@
 /**
  * «Последняя миля» мастера «Движка вертикалей»: подготовка данных для
- * отправки готового шаблона (шаг 5) в запуск — создание PAUSED-кампании
- * в Instantly с лидами базы и цепочкой шаблона.
+ * отправки готового шаблона (шаг 5) в запуск — создание пустой кампании
+ * в Instantly с цепочкой шаблона и сохранение проверенной базы в durable
+ * Portal-резерв для последующей дозированной загрузки.
  *
  * Модуль ЧИСТЫЙ (без server-only/DB/фетчей): собирает sequence из писем
  * шаблона и маппит строки базы в лиды. HTTP-роут
@@ -10,14 +11,13 @@
  *   - buildCampaignPayloadFromPreset (delay-лесенка, HTML-обёртка, text_only,
  *     расписание/лимиты/трекинг из пресета);
  *   - instantly client createCampaign → (updateCampaign, если Instantly
- *     не принял sequences) → createLeads (чанкует по 1000 внутри);
- *   - activateCampaign НЕ вызывается никогда — сотрудник проверяет кампанию
- *     в Instantly и запускает вручную.
+ *     не принял sequences); контакты добавляет отдельный delivery runner;
+ *   - подготовка не активирует кампанию: после одобрения специалиста отдельный
+ *     delivery runner загружает дневную партию и активирует её через DB-fence.
  *
  * Отличия от клиентского runLaunch осознанные:
- *   - нет тарифных гейтов/чёрного списка клиента/журнала client_campaign_launches
- *     (запуск делает сотрудник из внутреннего инструмента, billing клиента не
- *     должен меняться);
+ *   - нет self-service тарифного гейта (managed-contract). Blocklist клиента
+ *     проверяется и при подготовке, и при загрузке; принятые контакты журналируются;
  *   - пресет читается по id без client_user_id-скоупа (service-level read через
  *     тот же supabaseInstantly, что и clientLaunch);
  *   - ошибки НЕ проходят scrubBrand — текст идёт во внутренний UI, где точная
@@ -37,8 +37,10 @@ import type {
 } from './types';
 import { normalizeLaunchMailboxIds } from './launchPortfolio';
 
-/** Максимум лидов за один запуск из мастера (v1-ограничение роута, 413 сверх). */
-export const VE_LAUNCH_MAX_LEADS = 2000;
+/** Максимум контактов в проверенном резерве одного шаблона, 413 сверх. */
+// Bounded durable reserve, not an Instantly upload batch. The worker sends
+// smaller exact daily batches; a 5k-contact period must fit in one reserve.
+export const VE_LAUNCH_MAX_LEADS = 20_000;
 
 /**
  * Кампания одного сегмента в записи о запуске. При материализации сегментных
@@ -52,6 +54,8 @@ export interface VeTemplateLaunchCampaign {
   /** Условие сегмента (when дословно); null — основная кампания. */
   segment: string | null;
   leads_count: number;
+  /** Immutable initial reserve prepared in Portal; not yet uploaded. */
+  ready_leads_count?: number;
 }
 
 /**
@@ -66,8 +70,14 @@ export interface VeTemplateLaunchInfo {
   campaign_name: string;
   campaign_url: string;
   leads_count: number;
+  /** Immutable initial launch-ready reserve. `leads_count` is accepted upload only. */
+  ready_leads_count?: number;
   preset_id: string;
   created_at: string;
+  /** Explicit operational ownership snapshot; never inferred from names. */
+  portal_project_id?: string;
+  portal_period_id?: string;
+  target_contacts?: number;
   /** Immutable Instantly capacity scope captured from the chosen preset. */
   instantly_account_id?: string;
   mailbox_ids?: string[];
@@ -125,6 +135,9 @@ export function parseLaunchInfo(raw: unknown): VeTemplateLaunchInfo | null {
           segment: typeof c.segment === 'string' ? c.segment : null,
           leads_count:
             typeof c.leads_count === 'number' && Number.isFinite(c.leads_count) ? c.leads_count : 0,
+          ...(typeof c.ready_leads_count === 'number' && Number.isFinite(c.ready_leads_count)
+            ? { ready_leads_count: Math.max(0, Math.trunc(c.ready_leads_count)) }
+            : {}),
         }))
     : undefined;
   const mailboxIds = Array.isArray(r.mailbox_ids)
@@ -144,8 +157,20 @@ export function parseLaunchInfo(raw: unknown): VeTemplateLaunchInfo | null {
     campaign_name: typeof r.campaign_name === 'string' ? r.campaign_name : '',
     campaign_url: typeof r.campaign_url === 'string' ? r.campaign_url : '',
     leads_count: typeof r.leads_count === 'number' && Number.isFinite(r.leads_count) ? r.leads_count : 0,
+    ...(typeof r.ready_leads_count === 'number' && Number.isFinite(r.ready_leads_count)
+      ? { ready_leads_count: Math.max(0, Math.trunc(r.ready_leads_count)) }
+      : {}),
     preset_id: typeof r.preset_id === 'string' ? r.preset_id : '',
     created_at: typeof r.created_at === 'string' ? r.created_at : '',
+    ...(typeof r.portal_project_id === 'string' && r.portal_project_id.trim()
+      ? { portal_project_id: r.portal_project_id.trim() }
+      : {}),
+    ...(typeof r.portal_period_id === 'string' && r.portal_period_id.trim()
+      ? { portal_period_id: r.portal_period_id.trim() }
+      : {}),
+    ...(typeof r.target_contacts === 'number' && Number.isSafeInteger(r.target_contacts) && r.target_contacts > 0
+      ? { target_contacts: r.target_contacts }
+      : {}),
     ...(typeof r.instantly_account_id === 'string' && r.instantly_account_id.trim()
       ? { instantly_account_id: r.instantly_account_id.trim() }
       : {}),

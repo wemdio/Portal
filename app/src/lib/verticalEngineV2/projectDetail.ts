@@ -2,9 +2,8 @@
  * Деталка проекта «Движка вертикалей»: гипотезы, вертикали, цепочки,
  * вокабуляр, базы, шаблоны, досье вертикалей, банк кейсов и последние jobs.
  *
- * Вынесено из GET api/tools/vertical-engine-v2/projects/[id] — та же сборка
- * нужна клиентскому ENG-контуру (api/client/eng/projects/[id]), который
- * дополнительно скоупит проект по владельцу (scopeCreatedBy).
+ * Сборка GET api/tools/vertical-engine-v2/projects/[id]. Только ve_*;
+ * клиентский ENG использует отдельный hypothesisEngine/projectDetail.
  *
  * Чейн/вокаб/шаблоны привязаны к вертикалям/базам, поэтому догружаются второй
  * волной по id вертикалей; досье и кейсы имеют project_id и идут первой волной.
@@ -12,6 +11,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { reconcileProjectVerticals } from './actualsReconcile';
+import { readContactDeliveryPages } from './contactDeliveryInventory';
 
 // Без data — тяжёлое jsonb-поле, деталка проекта его не тянет. sample_rows
 // (≤30 строк, серверный кап при записи) и columns лёгкие: шаг «База» рисует
@@ -47,25 +47,39 @@ export type VeProjectDetailResult =
   | { ok: true; detail: VeProjectDetail }
   | { ok: false; reason: 'not_found' | 'db'; message?: string };
 
+async function readDetailPages(
+  label: string,
+  read: Parameters<typeof readContactDeliveryPages<Record<string, unknown>>>[1],
+) {
+  try {
+    return { data: await readContactDeliveryPages(label, read), error: null };
+  } catch (error) {
+    return { data: null, error: { message: error instanceof Error ? error.message : `${label} read failed` } };
+  }
+}
+
 // collect_info.tasks[].harvest — полный предмерж-харвест задачи (до 50k строк
 // на задачу): рабочее состояние воркера для cross-requeue, клиенту не нужен.
 // Деталка проекта поллится каждые 4с, поэтому вырезаем harvest из ответа —
 // иначе каждая база тащит десятки МБ на каждый опрос. Остальное в tasks[]
 // (source/status/rows/…) оставляем как есть: по нему рисуется прогресс-карта.
-// Экспортировано для ENG-дашборда (api/client/eng/dashboard) — та же поллинговая
-// модель, тот же риск по объёму.
+// Также удаляем checkpoint исключённых кандидатов; helper используется всеми
+// VE2-ответами, возвращающими карточку сборки, включая идемпотентный collect POST.
 export function stripTaskHarvest(base: Record<string, unknown>): Record<string, unknown> {
-  const info = base.collect_info as { tasks?: unknown } | null | undefined;
-  if (!info || !Array.isArray(info.tasks)) return base;
-  const hasHarvest = info.tasks.some(
+  const info = base.collect_info as { tasks?: unknown; target_checkpoint?: unknown } | null | undefined;
+  if (!info) return base;
+  const tasks = Array.isArray(info.tasks) ? info.tasks : [];
+  const hasHarvest = tasks.some(
     (t) => t !== null && typeof t === 'object' && 'harvest' in (t as Record<string, unknown>),
   );
-  if (!hasHarvest) return base;
+  if (!hasHarvest && !('target_checkpoint' in info)) return base;
+  const publicInfo = { ...info };
+  delete publicInfo.target_checkpoint;
   return {
     ...base,
     collect_info: {
-      ...info,
-      tasks: info.tasks.map((t) => {
+      ...publicInfo,
+      tasks: tasks.map((t) => {
         if (t === null || typeof t !== 'object' || !('harvest' in t)) return t;
         const clone = { ...(t as Record<string, unknown>) };
         delete clone.harvest;
@@ -113,11 +127,16 @@ export async function loadVeProjectDetail(
       .select('*')
       .eq('project_id', projectId)
       .order('rank', { ascending: true }),
-    supabase
+    readDetailPages('project bases', (from, to) => supabase
       .from('ve_bases')
-      .select(VE_BASE_LIST_COLUMNS)
+      .select(VE_BASE_LIST_COLUMNS, { count: 'exact' })
       .eq('project_id', projectId)
-      .order('created_at', { ascending: false }),
+      // Exclude completed internal batches BEFORE PostgREST applies its page cap.
+      // Active supply stays visible to the project-wide collection queue.
+      .or('collect_info->>collection_mode.is.null,collect_info->>collection_mode.neq.supply,status.eq.collecting')
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, to)),
     supabase
       .from('ve_jobs')
       .select(VE_JOB_LIST_COLUMNS)
@@ -158,11 +177,14 @@ export async function loadVeProjectDetail(
         .select('*')
         .in('vertical_id', verticalIds)
         .order('created_at', { ascending: false }),
-      supabase
+      readDetailPages('project templates', (from, to) => supabase
         .from('ve_templates')
-        .select('*')
+        .select('*', { count: 'exact' })
         .in('vertical_id', verticalIds)
-        .order('created_at', { ascending: false }),
+        .is('supply_batch_id', null)
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: true })
+        .range(from, to)),
     ]);
     for (const res of [chainsRes, vocabsRes, templatesRes]) {
       if (res.error) return { ok: false, reason: 'db', message: res.error.message };
