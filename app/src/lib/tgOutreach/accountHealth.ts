@@ -55,6 +55,12 @@ export interface HealthMark {
   detail: string;
   /** Сколько дней длится текущее состояние. null — считать не от чего. */
   days: number | null;
+  /**
+   * Причина не в аккаунте, а в кампании: пустая очередь контактов, выключенное
+   * первое касание, остановленная рассылка. Такой аккаунт нельзя списывать в
+   * мёртвые — с ним всё в порядке, ему просто нечего делать.
+   */
+  campaignWide?: boolean;
 }
 
 /**
@@ -117,6 +123,18 @@ export interface SendingContext {
   campaignRunning: boolean;
   /** Включено ли первое касание в настройках кампании (лимит > 0). */
   firstTouchEnabled: boolean;
+  /**
+   * Сколько контактов ещё ждёт своей очереди во всех базах кампании.
+   *
+   * Ноль — писать некому, и молчат тогда все аккаунты сразу. Без этого числа
+   * колонка объясняла общую тишину по-аккаунтно: 04.09.2026 в ATOL-1 базы
+   * кончились 3 сентября, а экран показывал тридцать красных «молчит 2 дня» и
+   * отправлял оператора искать поломку в аккаунтах и прокси.
+   *
+   * `null` или отсутствие — портал не знает (ручка не ответила); тогда ведём
+   * себя как раньше и молчание объясняем аккаунтом.
+   */
+  queuePending?: number | null;
   now: number;
 }
 
@@ -128,7 +146,7 @@ export interface SendingContext {
  * важнее кулдауна: кулдаун пройдёт сам, сессия — нет.
  */
 export function describeSending(ctx: SendingContext): HealthMark {
-  const { account, stat, proxy, campaignRunning, firstTouchEnabled, now } = ctx;
+  const { account, stat, proxy, campaignRunning, firstTouchEnabled, queuePending, now } = ctx;
   const silentDays = daysSince(stat?.last_sent_at, now);
   const lastSentNote = stat?.last_sent_at
     ? `Последняя отправка — ${hhmm(stat.last_sent_at)} (${silenceWord(silentDays)}).`
@@ -207,8 +225,31 @@ export function describeSending(ctx: SendingContext): HealthMark {
   if (!firstTouchEnabled) {
     return {
       tone: 'unknown',
+      campaignWide: true,
       label: 'касание выключено',
       detail: `В настройках кампании дневной лимит первых сообщений — 0, новые контакты не пишутся никем. ${lastSentNote}`,
+      days: silentDays,
+    };
+  }
+
+  /**
+   * Пустая очередь важнее статуса кампании: запуск ничего не изменит, пока в
+   * базах некому писать, и сказать об этом надо до того, как оператор пойдёт
+   * жать «Запустить».
+   */
+  if (queuePending === 0) {
+    const todayNote = (stat?.sent_24h ?? 0) > 0
+      ? `За сутки от него успело уйти ${stat?.sent_24h}, дальше писать некому. `
+      : '';
+    return {
+      tone: 'unknown',
+      campaignWide: true,
+      label: 'нет контактов',
+      detail:
+        'В базах кампании не осталось ни одного контакта в очереди — писать некому, '
+        + 'поэтому молчат все аккаунты сразу, а не этот один. Залейте новую базу на '
+        + 'вкладке «Базы»; там же возвращаются в очередь сгоревшие контакты. '
+        + `${todayNote}${lastSentNote}`,
       days: silentDays,
     };
   }
@@ -216,6 +257,7 @@ export function describeSending(ctx: SendingContext): HealthMark {
   if (!campaignRunning) {
     return {
       tone: 'unknown',
+      campaignWide: true,
       label: 'кампания стоит',
       detail: `Кампания не запущена — молчат все аккаунты, и этот не исключение. ${lastSentNote}`,
       days: silentDays,
@@ -420,6 +462,13 @@ export function pickDeadAccounts(
     if (!row.isActive) continue;
     // Пауза пройдёт сама — это не повод списывать номер.
     if (row.mark.label === 'на паузе') continue;
+    /**
+     * Причина не в аккаунте, а в кампании: пустая очередь, остановленная
+     * рассылка, выключенное первое касание. Молчание там общее для всех, и без
+     * этой оговорки кнопка предлагала бы выключить весь пул разом — тридцать
+     * исправных номеров за то, что кончилась база.
+     */
+    if (row.mark.campaignWide) continue;
 
     if (row.mark.tone === 'bad') {
       picks.push({ id: row.id, name: row.name, reason: row.mark.label });
