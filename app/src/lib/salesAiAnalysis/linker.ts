@@ -48,8 +48,8 @@ export async function linkLead(
   }
 
   // 2. Транскрипты — прямой линк transcript_amo_lead_link: менеджеры пишут
-  //    «#<номер сделки>» в подписи к видео, линк создаётся при инжесте.
-  //    Приоритетный канал, confidence 1.0.
+  //    «#<номер сделки>» в подписи к видео (confidence 1.0), либо линк по
+  //    сайту клиента из подписи (caption_heuristic, 0.8, однозначный матч).
   const directIds = await findLinkedTranscripts(db, lead.id);
   links.transcript_ids = directIds;
 
@@ -72,7 +72,7 @@ async function findLinkedTranscripts(
     .from('transcript_amo_lead_link')
     .select('transcript_id')
     .eq('amo_lead_id', leadId)
-    .gte('confidence', 0.9)
+    .gte('confidence', 0.8)
     .limit(50);
   if (error || !links?.length) return [];
 

@@ -7,7 +7,7 @@ import {
   NoSpeechError,
 } from '@/lib/transcription';
 import { logError, logInfo } from '@/lib/loggerServer';
-import { linkTranscriptToAmoLead } from '@/lib/transcriptAmoLink';
+import { linkTranscriptToLead } from '@/lib/transcriptAmoLink';
 import {
   isMtprotoAvailable,
   isUserMtprotoAvailable,
@@ -648,7 +648,7 @@ export async function processVideoMessage(
     );
   }
 
-  await linkTranscriptToAmoLead(supabaseAdmin, insertOk, msg.caption);
+  await linkTranscriptToLead(supabaseAdmin, insertOk, msg.caption);
 
   await logInfo('tg-transcribe.completed', `Transcribed video from ${senderName}`, {
     chatId: msg.chat.id,
