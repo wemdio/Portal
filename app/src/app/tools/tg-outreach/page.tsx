@@ -2117,6 +2117,11 @@ function CampaignAccountsTab({
   >({});
   /** Что каждый аккаунт отправил за сутки и когда отправлял в последний раз. */
   const [sendingStats, setSendingStats] = useState<Record<string, AccountSendingStat>>({});
+  /**
+   * Сколько контактов ещё ждёт отправки во всех базах кампании. `null` — ручка
+   * не ответила, и тогда колонка «Рассылка» про очередь молчит.
+   */
+  const [queuePending, setQueuePending] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -2232,8 +2237,9 @@ function CampaignAccountsTab({
       setErrorCounts(d.counts ?? {});
     }
     if (sendRes.ok) {
-      const d = await sendRes.json() as { stats: Record<string, AccountSendingStat> };
+      const d = await sendRes.json() as { stats: Record<string, AccountSendingStat>; pending?: number };
       setSendingStats(d.stats ?? {});
+      setQueuePending(typeof d.pending === 'number' ? d.pending : null);
     }
     setLoadedAt(Date.now());
     setLoading(false);
@@ -2641,12 +2647,13 @@ function CampaignAccountsTab({
           proxy: proxies.find((p) => p.id === a.proxy_id) ?? null,
           campaignRunning: campaignStatus === 'running',
           firstTouchEnabled: firstTouchPerDay > 0,
+          queuePending,
           now: healthNow,
         }),
       })),
       { now: healthNow, silentDays: DEAD_SILENT_DAYS },
     ),
-    [accounts, sendingStats, proxies, campaignStatus, firstTouchPerDay, healthNow],
+    [accounts, sendingStats, proxies, campaignStatus, firstTouchPerDay, queuePending, healthNow],
   );
 
   /** Разбивка мёртвых по причине — человеческими ярлыками, для подсказки. */
@@ -3059,6 +3066,7 @@ function CampaignAccountsTab({
               proxy: proxy ?? null,
               campaignRunning: campaignStatus === 'running',
               firstTouchEnabled: firstTouchPerDay > 0,
+              queuePending,
               now: healthNow,
             });
             const proxyMark = describeProxy(proxy ?? null, healthNow);
