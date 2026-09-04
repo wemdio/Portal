@@ -267,7 +267,26 @@ export interface VeCaseEntry {
   /** Структурированные метрики результата (ve_cases.metrics — jsonb). */
   metrics: Record<string, unknown> | null;
   result: string | null;
+  /** Сохранённый текст кейса. У старых записей это может быть краткий пересказ. */
+  text?: string | null;
   created_at: string;
+}
+
+/** Результат разбора до явного сохранения специалистом. */
+export interface VeCaseDraft {
+  industry: string | null;
+  client_type: string | null;
+  task: string | null;
+  metrics: Record<string, unknown> | null;
+  result: string | null;
+  /** Фрагмент из исходного текста, относящийся только к этому кейсу. */
+  text: string;
+}
+
+export interface VeCasePreviewResponse {
+  cases?: VeCaseDraft[];
+  count?: number;
+  error?: string;
 }
 
 export interface VeProjectsResponse {
@@ -343,9 +362,11 @@ export interface VeBaseCollectResponse {
   error?: string;
 }
 
-/** POST /projects/[id]/cases → 201 { case }. */
+/** POST /projects/[id]/cases { mode: 'save', ... } → { cases, count }. */
 export interface VeCaseCreateResponse {
   case?: VeCaseEntry;
+  cases?: VeCaseEntry[];
+  count?: number;
   error?: string;
 }
 

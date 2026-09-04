@@ -55,6 +55,8 @@ export interface PaymentRequest {
   decidedAt: string | null;
   paidOn: string | null;
   paidOnSource: PaymentPaidOnSource;
+  /** Authorized automatic recognition date; absent on older manual approvals. */
+  autoPaymentOn?: string | null;
   paidBy: PaymentPerson | null;
   paidAt: string | null;
   createdAt: string;

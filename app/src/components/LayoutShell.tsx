@@ -38,6 +38,7 @@ export function LayoutShell({
   const isTwoGisParserPage = pathname === '/tools/2gis-parser';
   const isGuestReviewPage = pathname.startsWith('/review/');
   const isMaintenancePage = pathname === '/maintenance';
+  const useDocumentScroll = pathname === '/payments';
   const isTma = useIsTma();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isMobileLayout, setIsMobileLayout] = useState(false);
@@ -80,7 +81,9 @@ export function LayoutShell({
       ) ||
       pathname.startsWith('/admin')
     );
-  const mainOverflowClass = !isTma && (isSpreadsheetPage || isGuestReviewPage) ? 'overflow-hidden' : 'overflow-y-auto';
+  const mainOverflowClass = useDocumentScroll
+    ? 'overflow-visible'
+    : !isTma && (isSpreadsheetPage || isGuestReviewPage) ? 'overflow-hidden' : 'overflow-y-auto';
   const desktopDefaultPadding = shouldUseCompactDensity ? 'p-3 md:p-4' : 'p-6';
   const desktopToolsPadding = shouldUseCompactDensity ? 'px-6 py-6 md:p-8' : 'px-6 py-6 md:p-8';
   const contentPadding = isMaintenancePage
@@ -92,8 +95,11 @@ export function LayoutShell({
     isRdpPage || isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || pathname === '/';
   const contentWidth = shouldUseFullHeightContent ? 'w-full flex flex-1 min-h-0 flex-col' : 'w-full';
 
-  /** Высота = окно + скролл только в main — иначе тянется вся страница и уезжает TopNav. */
-  const shellClassName = isTma
+  // Long payment lists use the document as their only vertical scroller.
+  // Other tools keep their viewport-sized shell and existing inner scrolling.
+  const shellClassName = useDocumentScroll
+    ? 'flex flex-col min-h-0'
+    : isTma
     ? 'flex flex-col min-h-screen overflow-hidden'
     : isSpreadsheetPage
       ? 'flex flex-col h-screen overflow-hidden'
@@ -135,7 +141,7 @@ export function LayoutShell({
       className={`${shellClassName} portal-shell`}
       style={{
         minHeight: 'var(--app-viewport-height, 100vh)',
-        ...(!isTma ? { height: 'var(--app-viewport-height, 100vh)' } : {}),
+        ...(!isTma && !useDocumentScroll ? { height: 'var(--app-viewport-height, 100vh)' } : {}),
       }}
     >
       {!isTma ? (

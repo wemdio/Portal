@@ -11,9 +11,9 @@
  * Дополнительно — наполнение кейс-банка (ve_cases, source='site'): по тексту
  * сайта + до 3 очевидных кейс-страниц (/cases, /case-studies, /otzyvy, …)
  * LLM извлекает до 8 доказательных кейсов клиента (дедуп по нормализованному
- * тексту). Refresh атомарный: новые кейсы вставляются первыми, затем
- * удаляются устаревшие site-строки проекта (не совпавшие по нормализованному
- * тексту); при пустой выборке или сбое вставки старые кейсы сохраняются.
+ * тексту). Сначала вставляются недостающие кейсы, затем удаляются только
+ * ранее прочитанные устаревшие site-строки и дубликаты; это не транзакция.
+ * При пустой выборке или сбое вставки старые кейсы сохраняются.
  * Загруженные вручную (source='upload') не трогаются. Весь кейс-шаг
  * best-effort: ошибка (LLM/БД/нет таблицы на параллельном роллауте)
  * логируется и НЕ роняет основную стадию.
@@ -24,7 +24,7 @@
 
 import { z } from 'zod';
 
-import { callLLMWithSchema, getVeModel } from '../llm';
+import { callLLMWithSchema, getVeActiveJobSignal, getVeModel } from '../llm';
 import { compileClientBriefForPrompt, readClientBrief } from '../clientBriefIntake';
 import { projectMarket, type VeMarket } from '../market';
 import { VeSiteProfileSchema } from '../schemas';
@@ -195,11 +195,10 @@ async function fetchCasePages(
 }
 
 /**
- * Кейс-шаг стадии (best-effort): LLM-извлечение до 8 кейсов → атомарный
- * refresh в ve_cases (только source='site' этого проекта): insert новых
- * первым, затем delete устаревших site-строк вне свежего набора.
+ * Insert missing cases before removing captured stale/duplicate site rows.
+ * The VE2 worker runs this serially; this is not a database transaction.
  */
-async function refreshSiteCases(
+export async function refreshSiteCases(
   ctx: VeStageContext,
   projectId: string,
   websiteUrl: string,
@@ -208,9 +207,12 @@ async function refreshSiteCases(
   market: VeMarket,
   prefetchedPages?: Array<{ url: string; text: string }>,
 ): Promise<{ extracted: number; tokensUsed: number; costUsd: number }> {
+  const signal = ctx.signal ?? getVeActiveJobSignal() ?? undefined;
+  signal?.throwIfAborted();
   // Страницы уже скачанных кейс-путей переиспользуем (стадия качала их для
   // корпуса профиля); не переданы — старый слепой перебор.
   const extraPages = prefetchedPages ?? (await fetchCasePages(fetchText, websiteUrl));
+  signal?.throwIfAborted();
   stageLog(ctx, `[site_profile] кейс-страницы: ${extraPages.length}`);
 
   const casesInput = { websiteUrl, siteText, extraPages };
@@ -219,8 +221,9 @@ async function refreshSiteCases(
       ? buildSiteCaseExtractionMessagesEn(casesInput)
       : buildSiteCaseExtractionMessages(casesInput),
     VeSiteCasesSchema,
-    { model: getVeModel('bulk'), maxTokens: 4096 },
+    { model: getVeModel('bulk'), maxTokens: 4096, signal },
   );
+  signal?.throwIfAborted();
   // Дедуп по нормализованному тексту: главная и /cases часто описывают один
   // и тот же кейс — без дедупа он вставился бы дважды.
   const seen = new Set<string>();
@@ -239,38 +242,50 @@ async function refreshSiteCases(
     return { extracted: 0, tokensUsed: llm.tokensUsed, costUsd: llm.costUsd };
   }
 
-  // Insert-first: сначала новые строки — при сбое вставки старые site-кейсы
-  // проекта остаются на месте (delete-then-insert терял бы их все).
-  const { error: insError } = await ctx.supabase.from('ve_cases').insert(
-    cases.map((c) => ({
-      project_id: projectId,
-      source: 'site',
-      filename: null,
-      industry: c.industry,
-      client_type: c.client_type,
-      task: c.task,
-      metrics: c.metrics,
-      result: c.result,
-      text: c.text,
-    })),
-  );
-  if (insError) throw new Error(`ve_cases insert site: ${insError.message}`);
-
-  // Затем чистим устаревшие: site-кейсы проекта, чей нормализованный текст не
-  // вошёл в только что вставленный набор (совпавшие — те же кейсы, остаются
-  // в одном экземпляре). Upload-кейсы не трогаем.
-  const freshKeys = new Set(cases.map((c) => normalizeCaseText(c.text)));
+  // Capture only existing rows before insertion: cleanup cannot delete fresh
+  // rows from this run or unrelated writes made after this snapshot.
   const { data: siteRows, error: readError } = await ctx.supabase
     .from('ve_cases')
     .select('id, text')
     .eq('project_id', projectId)
-    .eq('source', 'site');
+    .eq('source', 'site')
+    .order('created_at', { ascending: true })
+    .order('id', { ascending: true });
+  signal?.throwIfAborted();
   if (readError) throw new Error(`ve_cases read site: ${readError.message}`);
-  const staleIds = ((siteRows ?? []) as Array<{ id: string; text: string | null }>)
-    .filter((r) => !freshKeys.has(normalizeCaseText(r.text ?? '')))
-    .map((r) => r.id);
+  const freshKeys = new Set(cases.map((c) => normalizeCaseText(c.text)));
+  const retainedKeys = new Set<string>();
+  const staleIds: string[] = [];
+  for (const row of (siteRows ?? []) as Array<{ id: string; text: string | null }>) {
+    const key = normalizeCaseText(row.text ?? '');
+    if (!freshKeys.has(key) || retainedKeys.has(key)) staleIds.push(row.id);
+    else retainedKeys.add(key);
+  }
+  const missingCases = cases.filter((draft) => !retainedKeys.has(normalizeCaseText(draft.text)));
+  // Insert-first retains the old set on failed inserts, including duplicates.
+  if (missingCases.length) {
+    signal?.throwIfAborted();
+    const { error: insError } = await ctx.supabase.from('ve_cases').insert(
+      missingCases.map((c) => ({
+        project_id: projectId,
+        source: 'site',
+        filename: null,
+        industry: c.industry,
+        client_type: c.client_type,
+        task: c.task,
+        metrics: c.metrics,
+        result: c.result,
+        text: c.text,
+      })),
+    );
+    signal?.throwIfAborted();
+    if (insError) throw new Error(`ve_cases insert site: ${insError.message}`);
+  }
   if (staleIds.length) {
-    const { error: delError } = await ctx.supabase.from('ve_cases').delete().in('id', staleIds);
+    signal?.throwIfAborted();
+    const { error: delError } = await ctx.supabase.from('ve_cases').delete()
+      .eq('project_id', projectId).eq('source', 'site').in('id', staleIds);
+    signal?.throwIfAborted();
     if (delError) throw new Error(`ve_cases delete stale site: ${delError.message}`);
   }
 

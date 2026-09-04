@@ -189,6 +189,7 @@ export function paymentRequestToApi(
     decidedAt: stringOrNull(row.decided_at),
     paidOn: stringOrNull(row.paid_on),
     paidOnSource: (stringOrNull(row.paid_on_source) ?? null) as PaymentPaidOnSource,
+    autoPaymentOn: stringOrNull(row.auto_payment_on),
     paidBy: person(row.paid_by, row.paid_by_name),
     paidAt: stringOrNull(row.paid_at),
     createdAt: stringOrNull(row.created_at) ?? '',
