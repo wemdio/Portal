@@ -4,7 +4,14 @@ import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { structureCaseText } from '@/lib/verticalEngineV2/caseBank';
+import {
+  MAX_CASE_TEXT_CHARS,
+  VeCaseImportIncompleteError,
+  structureCaseTexts,
+  validateCaseDrafts,
+} from '@/lib/verticalEngineV2/caseBank';
+import { VE_CASE_LIST_COLUMNS } from '@/lib/verticalEngineV2/projectDetail';
+import { withVeDeadline } from '@/lib/verticalEngineV2/operationDeadline';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -14,11 +21,6 @@ export const maxDuration = 60;
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
-
-const MAX_TEXT_CHARS = 20000;
-
-// Лёгкая проекция для списков/ответов: без text/metrics (тяжёлые поля).
-const CASE_LIST_COLUMNS = 'id, source, filename, industry, client_type, result, created_at';
 
 // GET — список кейсов проекта (и site-, и upload-источники).
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -34,7 +36,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
       const { data, error } = await supabaseAdmin
         .from('ve_cases')
-        .select(CASE_LIST_COLUMNS)
+        .select(VE_CASE_LIST_COLUMNS)
         .eq('project_id', id)
         .order('created_at', { ascending: false });
       if (error) return jsonError(error.message, 500);
@@ -44,8 +46,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   );
 }
 
-// POST — вставка кейса текстом (экспорт из PDF и т.п.): LLM-структуризация →
-// ve_cases с source='upload'. Сайт-стадия такие кейсы никогда не перезаписывает.
+// preview разбирает текст без записи; save сохраняет выбранные проверенные кейсы
+// без повторного LLM-вызова. Старый POST без mode разбирает и сохраняет весь набор.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.vertical-engine-v2.cases.post' },
@@ -58,7 +60,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const { id } = await params;
       if (!id) return jsonError('Missing id', 400);
 
-      let body: { text?: unknown; filename?: unknown };
+      let body: { text?: unknown; filename?: unknown; mode?: unknown; cases?: unknown };
       try {
         body = (await req.json()) as typeof body;
       } catch {
@@ -67,8 +69,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
       const text = typeof body?.text === 'string' ? body.text.trim() : '';
       if (!text) return jsonError('text должен быть непустой строкой', 400);
-      if (text.length > MAX_TEXT_CHARS) {
-        return jsonError(`Слишком длинный текст: ${text.length} символов. Максимум — ${MAX_TEXT_CHARS}`, 413);
+      if (text.length > MAX_CASE_TEXT_CHARS) {
+        return jsonError(`Слишком длинный текст: ${text.length} символов. Максимум: ${MAX_CASE_TEXT_CHARS}`, 413);
+      }
+      const mode = body?.mode ?? 'import';
+      if (mode !== 'preview' && mode !== 'save' && mode !== 'import') {
+        return jsonError('Неизвестное действие с кейсами', 400);
       }
 
       const filename =
@@ -89,42 +95,61 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         );
       }
 
-      let structured;
-      try {
-        structured = await structureCaseText(text);
-      } catch (e) {
-        await logError('tools.vertical-engine-v2.cases.structure_failed', e, { userId, projectId: id });
-        return jsonError('Не удалось разобрать текст кейса', 502);
+      let drafts;
+      if (mode === 'save') {
+        try {
+          drafts = validateCaseDrafts(text, body.cases);
+        } catch {
+          return jsonError('Разбор не соответствует исходному тексту. Вернитесь к тексту и разберите кейсы заново.', 422);
+        }
+      } else {
+        try {
+          drafts = await withVeDeadline('Case parsing', 45_000, req.signal, (signal) => structureCaseTexts(text, signal));
+        } catch (e) {
+          await logError('tools.vertical-engine-v2.cases.structure_failed', e, { userId, projectId: id });
+          if (e instanceof VeCaseImportIncompleteError) return jsonError(e.message, 502);
+          return jsonError('Не удалось полностью и надёжно разобрать кейсы. Разделите текст на меньшие части, укажите клиента, задачу и результат каждого кейса и повторите разбор.', 502);
+        }
       }
 
-      const { data: caseRow, error: caseErr } = await supabaseAdmin
+      if (mode === 'preview') {
+        return NextResponse.json({ cases: drafts, count: drafts.length });
+      }
+      if (!drafts.length) {
+        return jsonError('Нет кейсов для сохранения. Добавьте описание конкретного клиента, выполненной работы и результата.', 422);
+      }
+      if (req.signal.aborted) return jsonError('Добавление кейсов отменено', 409);
+
+      // Один batch insert: весь выбранный набор сохраняется одним SQL-запросом.
+      const { data: caseRows, error: caseErr } = await supabaseAdmin
         .from('ve_cases')
-        .insert({
+        .insert(drafts.map((draft) => ({
           project_id: id,
           source: 'upload',
           filename,
-          industry: structured.industry,
-          client_type: structured.client_type,
-          task: structured.task,
-          metrics: structured.metrics,
-          result: structured.result,
-          text: structured.text,
-        })
-        .select(CASE_LIST_COLUMNS)
-        .single();
-      if (caseErr || !caseRow) {
+          industry: draft.industry,
+          client_type: draft.client_type,
+          task: draft.task,
+          metrics: draft.metrics,
+          result: draft.result,
+          text: draft.text,
+        })))
+        .select(VE_CASE_LIST_COLUMNS);
+      if (caseErr || !caseRows?.length) {
         await logError('tools.vertical-engine-v2.cases.insert_failed', caseErr, { userId, projectId: id });
-        return jsonError(caseErr?.message ?? 'Не удалось сохранить кейс', 500);
+        return jsonError(caseErr?.message ?? 'Не удалось сохранить кейсы', 500);
       }
 
-      void logAudit('tools.vertical-engine-v2.cases.uploaded', 'Hypothesis engine case uploaded', {
+      void logAudit('tools.vertical-engine-v2.cases.uploaded', 'Vertical engine cases added', {
         userId,
         projectId: id,
-        caseId: (caseRow as { id?: string }).id,
+        caseIds: caseRows.map((row: { id: string }) => row.id),
+        count: caseRows.length,
         filename,
       });
 
-      return NextResponse.json({ case: caseRow }, { status: 201 });
+      // case остаётся для старых клиентов; новый UI использует cases и count.
+      return NextResponse.json({ cases: caseRows, count: caseRows.length, case: caseRows[0] }, { status: 201 });
     },
   );
 }
