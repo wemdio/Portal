@@ -2110,11 +2110,12 @@ async function readConstructJobStatus(
 async function dispatchConstructJob(input: {
   ctx: VeStageContext;
   ownerId: string | null | undefined;
+  projectName: string;
   baseLabel: string;
   rows: VeUnifiedRow[];
   market: VeMarket;
 }): Promise<{ bcJobId: string; locale: 'ru' | 'en'; construct: VeConstructInfo }> {
-  const { ctx, ownerId, baseLabel, rows, market } = input;
+  const { ctx, ownerId, projectName, baseLabel, rows, market } = input;
   if (!ownerId) {
     throw new Error('ve_projects.created_by пуст — джобе конструктора некому принадлежать');
   }
@@ -2122,7 +2123,8 @@ async function dispatchConstructJob(input: {
   const steps = constructStepsFor(rows);
   const bcJobId = await insertChildJob(ctx, 'base_constructor_jobs', {
     user_id: ownerId,
-    file_name: `VE2 · ${baseLabel}`,
+    // Общий список конструктора: сначала клиентский проект, затем сегмент.
+    file_name: ['VE2', projectName?.trim(), baseLabel.replace(/^auto:\s*/, '')].filter(Boolean).join(' · '),
     status: 'pending',
     locale,
     selected_steps: steps,
@@ -2736,6 +2738,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       const { bcJobId, locale, construct: queuedConstruct } = await dispatchConstructJob({
         ctx,
         ownerId: project.created_by,
+        projectName: project.name,
         baseLabel: base.filename ?? baseId,
         rows: merged,
         market,
@@ -2773,6 +2776,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
         const replacement = await dispatchConstructJob({
           ctx,
           ownerId: project.created_by,
+          projectName: project.name,
           baseLabel: base.filename ?? baseId,
           rows: merged,
           market,
