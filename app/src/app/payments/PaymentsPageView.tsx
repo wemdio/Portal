@@ -219,11 +219,11 @@ export default function PaymentsPageView() {
   const formVisible = isFormOpen && activeTab === 'requests';
 
   return (
-    <main
+    <section
       role="region"
       aria-label="Оплаты"
       aria-busy={loading}
-      className="min-h-screen bg-gray-50 px-4 py-6 text-gray-900 sm:px-6 lg:px-8"
+      className="bg-gray-50 px-4 py-6 text-gray-900 sm:px-6 lg:px-8"
     >
       <div className="mx-auto max-w-[1280px] space-y-5">
         <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -367,6 +367,6 @@ export default function PaymentsPageView() {
           </>
         )}
       </div>
-    </main>
+    </section>
   );
 }
