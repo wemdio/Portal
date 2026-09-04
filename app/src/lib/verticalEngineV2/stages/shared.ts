@@ -14,6 +14,10 @@ import type { VeJob, VeProject, VeStage } from '../types';
 
 export interface VeStageContext {
   supabase: SupabaseClient; /* supabaseAdmin client — создаётся воркером и передаётся сюда */
+  /** Captured per-job cancellation; never reuse a later job's signal. */
+  signal?: AbortSignal;
+  /** Real operation completion, not timer/heartbeat activity. */
+  onActivity?: () => void;
   /** Подменяемый фетч текста страницы (дефолт — SSRF-гейт + websiteParser, см. io.ts). */
   fetchText?: (url: string) => Promise<string>;
   /** Подменяемый поиск (дефолт — serperSearch, best-effort: может вернуть []). */
