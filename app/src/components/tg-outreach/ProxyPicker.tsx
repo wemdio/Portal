@@ -12,6 +12,27 @@ import {
 } from '@/lib/tgOutreach/proxyPicker';
 
 /**
+ * Куда открыть список: либо `top` (вниз от кнопки), либо `bottom` (вверх).
+ * Оба сразу не бывают — направление выбирается по свободному месту на экране.
+ */
+interface PopupBox {
+  top?: number;
+  bottom?: number;
+  left: number;
+  width: number;
+  maxHeight: number;
+}
+
+/** Просвет между кнопкой и списком. */
+const GAP = 4;
+/** Не прижимаем список вплотную к краю окна — иначе последний пункт режется. */
+const EDGE = 8;
+/** Потолок высоты: у кампании бывает под сотню прокси, весь экран им не отдаём. */
+const MAX_HEIGHT = 320;
+/** Ниже этого список бесполезен — лучше развернуть его в другую сторону. */
+const MIN_HEIGHT = 160;
+
+/**
  * Выбор прокси для аккаунта — со здоровьем каждого варианта.
  *
  * Почему не `<select>`. Плашки статуса в нативном списке не показать: popup
@@ -25,6 +46,10 @@ import {
  * абсолютный список обрезался бы по нижней границе строки. Скролл и смена
  * размера окна список закрывают — это честнее, чем догонять кнопку на каждом
  * кадре.
+ *
+ * Открывается вниз, а если внизу не помещается — вверх, и высота режется по
+ * оставшемуся месту. Без этого у нижних строк таблицы список уезжал за край
+ * окна целиком: 04.09.2026 сменить прокси последнему аккаунту было нечем.
  */
 export function ProxyPicker<T extends PickerProxy>({
   value,
@@ -54,7 +79,7 @@ export function ProxyPicker<T extends PickerProxy>({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const [activeIndex, setActiveIndex] = useState(0);
-  const [rect, setRect] = useState<{ top: number; left: number; width: number } | null>(null);
+  const [box, setBox] = useState<PopupBox | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
 
@@ -73,13 +98,29 @@ export function ProxyPicker<T extends PickerProxy>({
     onChange(proxyId);
   }, [onChange]);
 
-  /** Кнопка могла уехать за время, пока список был закрыт, — меряем при каждом открытии. */
+  /**
+   * Кнопка могла уехать за время, пока список был закрыт, — меряем при каждом
+   * открытии. Заодно решаем, в какую сторону его разворачивать: у нижних строк
+   * таблицы места под кнопкой нет, и список целиком уходил под край окна.
+   */
   useLayoutEffect(() => {
     if (!open) return;
     const el = triggerRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    setRect({ top: r.bottom + 4, left: r.left, width: Math.max(r.width, 320) });
+    const below = window.innerHeight - r.bottom - GAP - EDGE;
+    const above = r.top - GAP - EDGE;
+    // Вверх разворачиваем, только когда снизу и правда тесно, а сверху
+    // просторнее: привычное направление — вниз, и менять его без нужды значит
+    // сбивать руку оператору.
+    const dropUp = below < MIN_HEIGHT && above > below;
+    const space = dropUp ? above : below;
+    setBox({
+      ...(dropUp ? { bottom: window.innerHeight - r.top + GAP } : { top: r.bottom + GAP }),
+      left: r.left,
+      width: Math.max(r.width, 320),
+      maxHeight: Math.min(MAX_HEIGHT, Math.max(space, MIN_HEIGHT)),
+    });
   }, [open]);
 
   useEffect(() => {
@@ -153,13 +194,20 @@ export function ProxyPicker<T extends PickerProxy>({
         <ChevronDown className="h-3.5 w-3.5 shrink-0 text-gray-400" />
       </button>
 
-      {open && rect && createPortal(
+      {open && box && createPortal(
         <div
           ref={popupRef}
           role="listbox"
           aria-label={ariaLabel}
-          style={{ position: 'fixed', top: rect.top, left: rect.left, width: rect.width }}
-          className="dark-scrollbar z-50 max-h-80 overflow-auto rounded-lg border border-gray-200 bg-white py-1 shadow-xl"
+          style={{
+            position: 'fixed',
+            top: box.top,
+            bottom: box.bottom,
+            left: box.left,
+            width: box.width,
+            maxHeight: box.maxHeight,
+          }}
+          className="dark-scrollbar z-50 overflow-auto rounded-lg border border-gray-200 bg-white py-1 shadow-xl"
         >
           <button
             type="button"

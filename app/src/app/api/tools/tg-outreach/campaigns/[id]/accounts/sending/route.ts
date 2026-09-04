@@ -9,6 +9,10 @@
  * Один запрос на кампанию вместо запроса на аккаунт: у кампании их два
  * десятка, и двадцать округлений «сколько ты отправил» превратились бы в
  * двадцать походов в базу на каждое обновление экрана.
+ *
+ * Здесь же отдаём остаток очереди по всей кампании: без него колонка
+ * «Рассылка» объясняла общую тишину по-аккаунтно и звала здоровые номера
+ * молчунами, когда база просто кончилась.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
@@ -52,8 +56,16 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
       const stats: Record<string, AccountSendingStat> = {};
       if (!baseIds.length) {
-        return NextResponse.json({ since: sinceIso, lookback_days: LOOKBACK_DAYS, stats, truncated: false });
+        return NextResponse.json({ since: sinceIso, lookback_days: LOOKBACK_DAYS, stats, pending: 0, truncated: false });
       }
+
+      // Строк не поднимаем — нужно одно число, и считает его индекс по статусу.
+      const { count: pendingCount, error: pErr } = await auth.supabase
+        .from('tg_outreach_base_contacts')
+        .select('id', { count: 'exact', head: true })
+        .in('base_id', baseIds)
+        .eq('status', 'pending');
+      if (pErr) return jsonError(pErr.message, 500);
 
       let from = 0;
       let scanned = 0;
@@ -94,7 +106,13 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         from += PAGE_SIZE;
       }
 
-      return NextResponse.json({ since: sinceIso, lookback_days: LOOKBACK_DAYS, stats, truncated });
+      return NextResponse.json({
+        since: sinceIso,
+        lookback_days: LOOKBACK_DAYS,
+        stats,
+        pending: pendingCount ?? 0,
+        truncated,
+      });
     },
   );
 }
