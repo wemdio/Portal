@@ -106,3 +106,20 @@ describe('linkTranscriptBySite', () => {
     expect(db.getRows('transcript_amo_lead_link')).toEqual([]);
   });
 });
+
+describe('linkTranscriptBySite: только топик клиентских звонков', () => {
+  const leads = [{ id: 90, name: '@ztnalex', company_website: 'itprotect.ru', status_id: 123 }];
+
+  it('линкует из топика «Звонки» чата «Продажи Polza»', async () => {
+    const db = createMockSupabase({ tables: { amo_leads: leads } });
+    const ok = await linkTranscriptBySite(db as unknown as SupabaseClient, 'tr-20', 'https://itprotect.ru/', -1001852890744, 2420);
+    expect(ok).toBe(true);
+  });
+
+  it('не линкует из «Болталки» и чата внутренних звонков', async () => {
+    const db = createMockSupabase({ tables: { amo_leads: leads } });
+    expect(await linkTranscriptBySite(db as unknown as SupabaseClient, 'tr-21', 'споры | omni.korusconsulting.ru/ | не брать в аналитику', -1001852890744, 10409)).toBe(false);
+    expect(await linkTranscriptBySite(db as unknown as SupabaseClient, 'tr-22', 'https://itprotect.ru/', -1002179160904, 1715)).toBe(false);
+    expect(db.getRows('transcript_amo_lead_link')).toEqual([]);
+  });
+});

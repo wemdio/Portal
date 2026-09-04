@@ -4,6 +4,12 @@
 -- («https://itprotect.ru/»). Если домен из подписи однозначно матчится ровно
 -- на одну активную (не won/lost) сделку — создаём линк с confidence 0.8
 -- (method=caption_heuristic). Неоднозначные (uprav.ru → 8 сделок) не линкуем.
+--
+-- Эвристика применяется только к топику клиентских звонков «Звонки» (2420)
+-- форум-чата «Продажи Polza» (-1001852890744): в соседних топиках
+-- («Болталка», «Внутренние звонки», «Собеседования») домен в подписи не
+-- значит клиентскую встречу — был кейс «споры | korusconsulting |
+-- не брать в аналитику продаж».
 
 with candidates as (
   select distinct t.id as transcript_id, l.id as amo_lead_id
@@ -19,6 +25,8 @@ with candidates as (
      or strpos(lower(l.name), d.domain[1]) > 0)
   where t.created_at >= now() - interval '3 months'
     and t.caption is not null
+    and t.tg_chat_id = -1001852890744
+    and t.topic_id = 2420
     and d.domain[1] <> 'polzaagency.ru'
     -- уже привязанные по #номеру не трогаем
     and not exists (

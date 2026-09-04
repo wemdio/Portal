@@ -23,6 +23,16 @@ const DOMAIN_RE = /(?:https?:\/\/)?(?:www\.)?([a-z0-9][a-z0-9-]{1,}\.[a-z]{2,10}
 /** Свои домены в подписях встречаются (полезные ссылки) — это не клиент. */
 const OWN_DOMAINS = new Set(['polzaagency.ru']);
 
+/**
+ * Топик клиентских звонков в форум-чате «Продажи Polza». Эвристика по сайту
+ * применяется только к нему: в соседних топиках («Болталка», «Внутренние
+ * звонки», «Собеседования») домен в подписи не значит, что видео — встреча
+ * с клиентом (был кейс «споры | korusconsulting | не брать в аналитику»).
+ * Явный #номер сделки фильтром не ограничен — это однозначная разметка.
+ */
+const SALES_CALLS_CHAT_ID = -1001852890744;
+const SALES_CALLS_TOPIC_ID = 2420;
+
 /** Домены-кандидаты из подписи (сайт клиента без #номера сделки). */
 export function parseSitesFromCaption(caption: string | null | undefined): string[] {
   if (!caption) return [];
@@ -81,7 +91,10 @@ export async function linkTranscriptBySite(
   db: SupabaseClient,
   transcriptId: string,
   caption: string | null | undefined,
+  chatId?: number,
+  topicId?: number,
 ): Promise<boolean> {
+  if (chatId !== undefined && (chatId !== SALES_CALLS_CHAT_ID || topicId !== SALES_CALLS_TOPIC_ID)) return false;
   const sites = parseSitesFromCaption(caption);
   if (!sites.length) return false;
   try {
@@ -120,7 +133,9 @@ export async function linkTranscriptToLead(
   db: SupabaseClient,
   transcriptId: string,
   caption: string | null | undefined,
+  chatId?: number,
+  topicId?: number,
 ): Promise<boolean> {
   return (await linkTranscriptToAmoLead(db, transcriptId, caption))
-    || (await linkTranscriptBySite(db, transcriptId, caption));
+    || (await linkTranscriptBySite(db, transcriptId, caption, chatId, topicId));
 }

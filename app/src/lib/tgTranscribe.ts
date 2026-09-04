@@ -648,7 +648,7 @@ export async function processVideoMessage(
     );
   }
 
-  await linkTranscriptToLead(supabaseAdmin, insertOk, msg.caption);
+  await linkTranscriptToLead(supabaseAdmin, insertOk, msg.caption, msg.chat.id, msg.message_thread_id ?? 0);
 
   await logInfo('tg-transcribe.completed', `Transcribed video from ${senderName}`, {
     chatId: msg.chat.id,
