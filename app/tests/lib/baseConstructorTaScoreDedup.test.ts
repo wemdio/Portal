@@ -19,6 +19,13 @@ interface SentCompany {
   data: Record<string, string>;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 describe('stepTAScore — per-company dedup', () => {
   const SCORE: Record<string, number> = { Alpha: 9, Beta: 4, Gamma: 7 };
   const realFetch = global.fetch;
@@ -125,48 +132,86 @@ describe('stepTAScore — per-company dedup', () => {
     expect(sent[0].data['Описание']).toBe('desc A');
   });
 
-  it('scores correctly across a TA_BATCH (10) boundary', async () => {
-    // 15 unique companies × 2 rows each = 30 rows → still 15 unique →
-    // ceil(15/10) = 2 AI calls; scores must broadcast correctly across the split.
-    const bigHeader = ['компания', 'Сайт', 'email', 'Описание'];
-    const bigBody: string[][] = [];
-    for (let i = 0; i < 15; i++) {
+  it('bounds concurrent requests and serializes ordered checkpoints across reversed batches', async () => {
+    jest.useFakeTimers();
+    let now = 0;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const bigBody = Array.from({ length: 21 }, (_, i) => {
       const c = `C${String(i).padStart(2, '0')}`;
-      bigBody.push([c, `${c}.ru`, `a@${c}.ru`, `d-${c}`]);
-      bigBody.push([c, `${c}.ru`, `b@${c}.ru`, `d-${c}`]);
-    }
-    // score = company index (C00 → 0 … C14 → 14)
-    global.fetch = jest.fn(async (_url: unknown, init: { body: string }) => {
-      const reqBody = JSON.parse(init.body) as { messages: { content: string }[] };
-      const companies = JSON.parse(
-        reqBody.messages[1].content.split('Компании:\n')[1],
-      ) as SentCompany[];
-      sentBatches.push(companies);
-      const answer = companies.map((c) => ({
-        idx: c.idx,
-        score: parseInt(c.data['компания'].slice(1), 10),
-        reason: `r-${c.data['компания']}`,
-      }));
-      return {
-        ok: true,
-        json: async () => ({ choices: [{ message: { content: JSON.stringify(answer) } }] }),
-      };
-    }) as unknown as typeof fetch;
-
-    const out = await stepTAScore([bigHeader, ...bigBody], 'brief', noop, undefined, {
-      keepAllScored: true,
+      return ['a', 'b'].map((email) => [c, `${c}.ru`, `${email}@${c}.ru`, `d-${c}`]);
+    }).flat();
+    const score = (company: string) => 5 + Number(company.slice(1)) % 5;
+    const expected = [[...header, 'ЦА Балл', 'ЦА Причина'],
+      ...bigBody.map((row) => [...row, String(score(row[0])), `r-${row[0]}`])];
+    const requests: Array<{ companies: SentCompany[]; response: ReturnType<typeof deferred<unknown>> }> = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    global.fetch = jest.fn(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const companies = JSON.parse(request.messages[1].content.split('Компании:\n')[1]) as SentCompany[];
+      const response = deferred<unknown>();
+      requests.push({ companies, response });
+      maxInFlight = Math.max(maxInFlight, ++inFlight);
+      // Count the whole request, including reading the response body.
+      return { ok: true, json: () => response.promise.finally(() => { inFlight -= 1; }) } as Response;
     });
-
-    expect(global.fetch).toHaveBeenCalledTimes(2);
-    expect(sentBatches.map((b) => b.length)).toEqual([10, 5]); // batch split 10 + 5
-    const rows = out.slice(1);
-    expect(rows).toHaveLength(30);
-    // every row gets its OWN company's score, broadcast to both of its rows.
-    for (const r of rows) {
-      const idx = parseInt(r[0].slice(1), 10);
-      expect(r[4]).toBe(String(idx));
-      expect(r[5]).toBe(`r-${r[0]}`);
-    }
+    const finish = (index: number, partial = false) => {
+      const { companies, response } = requests[index];
+      const answers = (partial ? companies.slice(0, 1) : companies).map((c) => ({
+        idx: c.idx, score: score(c.data['компания']), reason: `r-${c.data['компания']}`,
+      }));
+      response.resolve({ choices: [{ message: { content: JSON.stringify({ scores: answers }) },
+        finish_reason: partial ? 'length' : 'stop' }] });
+    };
+    const checkpoints: Array<{ rows: string[][]; saved: ReturnType<typeof deferred<void>> }> = [];
+    const progress: number[] = [];
+    let activeCheckpoints = 0;
+    let maxActiveCheckpoints = 0;
+    const pending = stepTAScore([header, ...bigBody], 'brief', async (p) => { progress.push(p); }, undefined, {
+      concurrency: 2, keepAllScored: true,
+      onCheckpoint: async (rows) => {
+        const saved = deferred<void>();
+        checkpoints.push({ rows: rows.map((r) => [...r]), saved });
+        maxActiveCheckpoints = Math.max(maxActiveCheckpoints, ++activeCheckpoints);
+        try { await saved.promise; } finally { activeCheckpoints -= 1; }
+      },
+    });
+    const flush = () => jest.advanceTimersByTimeAsync(0);
+    await flush();
+    expect(requests.map((r) => r.companies.length)).toEqual([10, 10]);
+    finish(1, true); // Second batch finishes before the first, with a partial length response.
+    await flush();
+    finish(2);
+    await flush();
+    now = 61_000;
+    finish(3);
+    await flush();
+    expect(checkpoints).toHaveLength(1);
+    finish(0); // Its report must wait for the second batch's checkpoint.
+    await flush();
+    expect(checkpoints).toHaveLength(1);
+    now = 122_000;
+    checkpoints[0].saved.resolve();
+    await flush();
+    expect(checkpoints).toHaveLength(2);
+    finish(4); // Third batch may run, but must not overtake the queued checkpoint.
+    await flush();
+    expect(checkpoints).toHaveLength(2);
+    checkpoints[1].saved.resolve();
+    await flush();
+    expect(checkpoints.at(-1)?.rows).toEqual(expected);
+    expect(progress).not.toContain(100);
+    checkpoints.at(-1)!.saved.resolve();
+    expect(await pending).toEqual(expected);
+    expect({ maxInFlight, maxActiveCheckpoints, inFlight }).toEqual({ maxInFlight: 2, maxActiveCheckpoints: 1, inFlight: 0 });
+    expect(requests.map((r) => r.companies.map((c) => c.data['компания']))).toEqual([
+      Array.from({ length: 10 }, (_, i) => `C${String(i).padStart(2, '0')}`),
+      Array.from({ length: 10 }, (_, i) => `C${i + 10}`),
+      ['C11', 'C12', 'C13', 'C14', 'C15'], ['C16', 'C17', 'C18', 'C19'], ['C20'],
+    ]);
+    expect(checkpoints.every(({ rows }) => JSON.stringify(rows.slice(1).map((r) => r.slice(0, 4))) === JSON.stringify(bigBody))).toBe(true);
+    expect(progress).toEqual([...progress].sort((a, b) => a - b));
+    expect(progress.at(-1)).toBe(100);
   });
 
   // Incident 2026-09-02: valid partial JSON was covered historically, but a
@@ -267,6 +312,34 @@ describe('stepTAScore — per-company dedup', () => {
     expect(elapsed).toBeLessThanOrEqual(240_000);
     expect(global.fetch).toHaveBeenCalledTimes(4);
     expect(stats).toHaveBeenLastCalledWith(expect.objectContaining({ failed_rows: 1 }));
+
+    // A rate-limited lane must not restart or lose its successful sibling.
+    const concurrentBody = Array.from({ length: 11 }, (_, i) => [`C${i}`, `c${i}.ru`, '', 'd']);
+    const concurrentRequests: string[][] = [];
+    const concurrentProgress = jest.fn(noop);
+    global.fetch = jest.fn(async (_url, init) => {
+      const companies = JSON.parse(JSON.parse(String(init?.body)).messages[1].content.split('Компании:\n')[1]) as SentCompany[];
+      concurrentRequests.push(companies.map((c) => c.data['компания']));
+      if (concurrentRequests.length === 1) {
+        return { ok: false, status: 429, headers: { get: () => '5' }, text: async () => 'rate limited' } as unknown as Response;
+      }
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(companies.map((c) => ({
+        idx: c.idx, score: 8, reason: `r-${c.data['компания']}`,
+      }))) } }] }) } as Response;
+    });
+    const concurrent = stepTAScore([header, ...concurrentBody], 'brief', concurrentProgress, undefined, {
+      concurrency: 2, keepAllScored: true,
+    });
+    await jest.advanceTimersByTimeAsync(0);
+    expect(concurrentRequests).toHaveLength(2);
+    expect(concurrentProgress).not.toHaveBeenCalledWith(100);
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(await concurrent).toEqual([[...header, 'ЦА Балл', 'ЦА Причина'],
+      ...concurrentBody.map((row) => [...row, '8', `r-${row[0]}`])]);
+    expect(concurrentRequests).toEqual([
+      concurrentBody.slice(0, 10).map((r) => r[0]), ['C10'], concurrentBody.slice(0, 10).map((r) => r[0]),
+    ]);
+
     const budgets: number[] = [];
     global.fetch = jest.fn(async (_url, init) => {
       const req = JSON.parse(String(init?.body));
@@ -278,12 +351,68 @@ describe('stepTAScore — per-company dedup', () => {
     expect(budgets).toEqual([4000, 1500]);
   });
 
-  it('propagates a failed final checkpoint and does not report completion', async () => {
+  it('propagates checkpoint failure without completion or subsequent queued writes', async () => {
     const progress = jest.fn(noop);
     await expect(stepTAScore([header, ['Alpha', 'a.ru', '', 'd']], 'brief', progress, undefined, {
       onCheckpoint: async () => { throw new Error('checkpoint unavailable'); },
     })).rejects.toThrow('checkpoint unavailable');
     expect(progress).not.toHaveBeenCalledWith(100);
+
+    jest.useFakeTimers();
+    let now = 0;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const outcomes: Array<{ sibling: string; checkpoints: number; progress: unknown[]; requests: number; falseFailures: number[] }> = [];
+    for (const sibling of ['queued report', 'rate-limit retry']) {
+      now = 0;
+      const responses: Array<ReturnType<typeof deferred<void>>> = [];
+      global.fetch = jest.fn(async (_url, init) => {
+        const companies = JSON.parse(JSON.parse(String(init?.body)).messages[1].content.split('Компании:\n')[1]) as SentCompany[];
+        const response = deferred<void>();
+        const index = responses.push(response) - 1;
+        // Unexpected retries complete immediately, so a regression fails an
+        // assertion instead of leaving the test waiting on another deferred.
+        if (index < 2) await response.promise;
+        if (sibling === 'rate-limit retry' && index === 1) {
+          return { ok: false, status: 429, headers: { get: () => '5' }, text: async () => 'rate limited' } as unknown as Response;
+        }
+        return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(companies.map((c) => ({
+          idx: c.idx, score: 8, reason: 'ok',
+        }))) } }] }) } as Response;
+      });
+      const failedCheckpoint = deferred<void>();
+      const queuedProgress = jest.fn(noop);
+      const falseFailures: number[] = [];
+      const checkpoint = jest.fn(async () => {
+        if (checkpoint.mock.calls.length === 1) await failedCheckpoint.promise;
+      });
+      const rejected = expect(stepTAScore([header,
+        ...Array.from({ length: 30 }, (_, i) => [`C${i}`, `c${i}.ru`, '', 'd']),
+      ], 'brief', queuedProgress, undefined, {
+        concurrency: 2, onCheckpoint: checkpoint,
+        onTelemetry: (telemetry) => { if (telemetry.failed_rows) falseFailures.push(telemetry.failed_rows); },
+      })).rejects.toThrow('checkpoint unavailable');
+      await jest.advanceTimersByTimeAsync(0);
+      if (sibling === 'rate-limit retry') {
+        responses[1].resolve(); // Enters backoff while the other lane can still finish.
+        await jest.advanceTimersByTimeAsync(0);
+      }
+      now = 61_000;
+      responses[0].resolve();
+      await jest.advanceTimersByTimeAsync(0);
+      if (sibling === 'queued report') {
+        now = 121_000;
+        responses[1].resolve(); // Queues behind the first still-pending checkpoint.
+        await jest.advanceTimersByTimeAsync(0);
+      }
+      failedCheckpoint.reject(new Error('checkpoint unavailable'));
+      await jest.advanceTimersByTimeAsync(5_000);
+      await rejected;
+      outcomes.push({ sibling, checkpoints: checkpoint.mock.calls.length, progress: queuedProgress.mock.calls,
+        requests: responses.length, falseFailures });
+    }
+    expect(outcomes).toEqual(['queued report', 'rate-limit retry'].map((sibling) => ({
+      sibling, checkpoints: 1, progress: [], requests: 2, falseFailures: [],
+    })));
   });
 
   it('does not checkpoint or retry after cancellation during the provider response', async () => {

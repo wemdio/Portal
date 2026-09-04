@@ -18,6 +18,16 @@ const mode = process.argv.includes('--baseline') ? 'baseline' : 'latest';
 const migrationDir = join(root, 'supabase/migrations');
 const db = new PGlite();
 const actor = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const confirmer = '66873c8c-ae56-4ab2-afa5-5e77dcda391d';
+const confirmedBackfill = '20260903_0002_payment_costs_confirmed_paid_backfill';
+const confirmedCosts = [
+  ['7b296854-38ef-4aac-9ef5-74968cba00d5', 21457, '2026-09-01', 'instantly'],
+  ['f0c99996-109a-4913-8c84-f290c5207cfa', 850, '2026-09-02', 'domains'],
+  ['7c580e2b-dda6-433e-b2d9-2e01c29504f9', 71673, '2026-09-02', 'instantly'],
+  ['efc5c8b5-9d2e-4e11-a327-be98e7278ba4', 4511, '2026-09-02', 'other'],
+  ['9ad21d74-529e-4d8a-993b-77ebd3fa5123', 6983, '2026-09-02', 'instantly'],
+  ['1f8f2445-46ba-4735-aa09-32d646daaae8', 1654, '2026-09-03', 'domains'],
+];
 const migrations = [
   '20260214_create_email_subscriptions.sql',
   '20260218_0002_create_payment_requests.sql',
@@ -75,6 +85,25 @@ async function applyUpdates() {
   for (const file of updates) {
     await db.exec(readFileSync(join(migrationDir, file), 'utf8'));
   }
+}
+async function applyConfirmedBackfill() {
+  await db.exec(readFileSync(join(migrationDir, `${confirmedBackfill}.sql`), 'utf8'));
+}
+async function seedConfirmedCosts() {
+  await asActor('');
+  await q("insert into public.profiles(id, full_name, role) values ($1, 'Сергей', 'admin')", [confirmer]);
+  for (const [id, amount, date, category] of confirmedCosts) {
+    await q(`insert into public.payment_requests(
+      id, user_id, requester_user_id, requester_name, department, description, amount,
+      expense_type, budget_scope, cost_category, expected_payment_on, status,
+      idempotency_key, submission_fingerprint
+    ) values ($1, $2, $2, 'Сергей', 'outreach', 'Confirmed historical cost', $3,
+      'one_time', 'costs', $4, $5::date, 'approved', $6, $7)`,
+    [id, confirmer, amount, category, date, randomUUID(), '0'.repeat(64)]);
+  }
+}
+async function requestSnapshot() {
+  return q('select to_jsonb(request) as row from public.payment_requests request order by id');
 }
 
 try {
@@ -309,6 +338,144 @@ try {
     assert.equal((await summary(nextMonth)).costBudget.techReserved, 0);
     assert.equal((await summary()).costBudget.techPaid, 789);
   });
+
+  // This one-shot, explicitly confirmed data correction is intentionally separate
+  // from applyUpdates(): the earlier migration must still leave legacy rows alone.
+  if (mode !== 'baseline') {
+    await test('confirmed six-cost backfill moves exactly 107128 from reserve to fact and audits once', async () => {
+      await seedConfirmedCosts();
+      await q(`insert into public.payment_requests(user_id, requester_user_id, requester_name, department,
+        description, amount, expense_type, budget_scope, cost_category, expected_payment_on, status)
+        values ($1, $1, 'Other requester', 'outreach', 'Unrelated cost', 5000, 'one_time', 'costs', 'other', '2026-09-01', 'approved'),
+               ($1, $1, 'Other requester', 'outreach', 'General request', 1000, 'one_time', 'general', null, '2026-09-01', 'approved')`, [actor]);
+      await q(`insert into public.email_subscriptions(project_name, next_billing_date, billing_amount, currency, status)
+        values ('Untouched mail', '2026-09-04', 300, 'RUB', 'keep')`);
+      await q(`insert into public.tech_subscriptions(service_name, next_billing_date, amount, currency, status)
+        values ('Untouched tech', '2026-09-04', 700, 'RUB', 'keep')`);
+      const beforeRows = await requestSnapshot();
+      const beforeCalendars = await q('select to_jsonb(subscription) as row from public.email_subscriptions subscription union all select to_jsonb(subscription) from public.tech_subscriptions subscription');
+      const before = await summary('2026-09-01');
+      await applyConfirmedBackfill();
+      const after = await summary('2026-09-01');
+      assert.equal(after.costBudget.paid - before.costBudget.paid, 107128);
+      assert.equal(before.costBudget.reserved - after.costBudget.reserved, 107128);
+      for (const key of ['used', 'remaining', 'limit', 'dataComplete', 'mailPaid', 'mailReserved', 'techPaid', 'techReserved']) {
+        assert.equal(after.costBudget[key], before.costBudget[key]);
+      }
+      assert.equal(after.paidOneTime, before.paidOneTime);
+      assert.equal(after.reservedOneTime, before.reservedOneTime);
+      assert.deepEqual(await q('select to_jsonb(subscription) as row from public.email_subscriptions subscription union all select to_jsonb(subscription) from public.tech_subscriptions subscription'), beforeCalendars);
+      const afterRows = await requestSnapshot();
+      for (const { row: original } of beforeRows) {
+        const updated = afterRows.find(({ row }) => row.id === original.id).row;
+        const target = confirmedCosts.find(([id]) => id === original.id);
+        if (!target) {
+          assert.deepEqual(updated, original);
+          continue;
+        }
+        assert.equal(updated.status, 'paid');
+        assert.equal(updated.paid_on, target[2]);
+        assert.equal(updated.paid_on_source, 'entered');
+        assert.equal(updated.paid_by, confirmer);
+        assert.ok(updated.paid_at);
+        const lifecycle = new Set(['status', 'paid_on', 'paid_on_source', 'paid_by', 'paid_at', 'updated_at']);
+        for (const key of Object.keys(original).filter(key => !lifecycle.has(key))) assert.deepEqual(updated[key], original[key]);
+      }
+      const events = await q('select * from public.payment_request_events order by payment_request_id');
+      assert.equal(events.length, 6);
+      for (const event of events) {
+        const target = confirmedCosts.find(([id]) => id === event.payment_request_id);
+        assert.equal(event.event_type, 'mark_paid');
+        assert.equal(event.actor_user_id, confirmer);
+        assert.equal(event.actor_name, 'Сергей');
+        assert.equal(event.from_status, 'approved');
+        assert.equal(event.to_status, 'paid');
+        assert.equal(event.metadata.source, confirmedBackfill);
+        assert.equal(event.metadata.confirmed_by, confirmer);
+        assert.equal(event.metadata.confirmed_on, '2026-09-03');
+        assert.equal(event.metadata.old_paid_on, null);
+        assert.equal(event.metadata.new_paid_on, target[2]);
+        assert.equal(event.metadata.amount, target[1]);
+        assert.equal(event.metadata.budget_scope, 'costs');
+        assert.equal(event.metadata.cost_category, target[3]);
+      }
+      await applyConfirmedBackfill();
+      assert.deepEqual(await requestSnapshot(), afterRows);
+      assert.deepEqual(await q('select * from public.payment_request_events order by payment_request_id'), events);
+    });
+
+    await test('confirmed backfill skips missing actor/rows and financial or lifecycle drift without overwriting', async () => {
+      await asActor('');
+      await applyConfirmedBackfill();
+      assert.equal((await requestSnapshot()).length, 0);
+      await q("insert into public.profiles(id, full_name, role) values ($1, 'Сергей', 'admin')", [confirmer]);
+      await applyConfirmedBackfill();
+      assert.equal((await requestSnapshot()).length, 0);
+      assert.equal((await q('select count(*)::int as n from public.payment_request_events'))[0].n, 0);
+      await q('delete from public.profiles where id = $1', [confirmer]);
+      const driftCases = [
+        ['amount', 'amount = amount + 1'],
+        ['scope', "budget_scope = 'general', cost_category = null"],
+        ['type', "expense_type = 'planned'"],
+        ['category', "cost_category = 'other'"],
+        ['date', "expected_payment_on = '2026-09-04'"],
+        ['project', "project_id = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'"],
+        ['owner', `user_id = '${actor}'`],
+        ['requester', `requester_user_id = '${actor}'`],
+        ['status', "status = 'pending'"],
+        ['paid metadata', `paid_by = '${actor}', paid_at = now()`],
+        ['already paid', `status = 'paid', paid_on = expected_payment_on, paid_on_source = 'entered', paid_by = '${actor}', paid_at = now()`],
+        ['missing row', null],
+        ['missing confirmer', null],
+      ];
+      for (const [label, change] of driftCases) {
+        await db.exec('savepoint drift_case');
+        await seedConfirmedCosts();
+        await q("insert into public.projects(id, client) values ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'Drift fixture')");
+        const id = confirmedCosts[0][0];
+        if (label === 'missing row') await q('delete from public.payment_requests where id = $1', [id]);
+        else if (label === 'missing confirmer') await q('delete from public.profiles where id = $1', [confirmer]);
+        else await q(`update public.payment_requests set ${change} where id = $1`, [id]);
+        const before = await requestSnapshot();
+        await applyConfirmedBackfill();
+        const after = await requestSnapshot();
+        const skipped = before.find(({ row }) => row.id === id);
+        if (label === 'missing confirmer') assert.deepEqual(after, before);
+        else if (skipped) assert.deepEqual(after.find(({ row }) => row.id === id), skipped, label);
+        assert.equal((await q('select count(*)::int as n from public.payment_request_events'))[0].n, label === 'missing confirmer' ? 0 : 5, label);
+        await db.exec('rollback to drift_case');
+      }
+    });
+
+    await test('same-month confirmed backfill does not increase over-limit or incomplete budgets', async () => {
+      for (const issue of ['over_limit', 'missing_fx']) {
+        await db.exec('savepoint budget_case');
+        await seedConfirmedCosts();
+        if (issue === 'over_limit') {
+          await db.exec('alter table public.payment_requests disable trigger user');
+          await q(`insert into public.payment_requests(user_id, requester_user_id, requester_name, department,
+            description, amount, expense_type, budget_scope, cost_category, expected_payment_on, status)
+            values ($1, $1, 'Other requester', 'outreach', 'Legacy over-cap fixture', 550000,
+              'one_time', 'costs', 'other', '2026-09-01', 'approved')`, [actor]);
+          await db.exec('alter table public.payment_requests enable trigger user');
+        } else {
+          await db.exec('alter table public.email_subscriptions disable trigger user');
+          await q(`insert into public.email_subscriptions(project_name, next_billing_date, billing_amount, currency, status)
+            values ('Legacy missing FX', '2026-09-01', 100, 'USD', 'keep')`);
+          await db.exec('alter table public.email_subscriptions enable trigger user');
+        }
+        const before = await summary('2026-09-01');
+        if (issue === 'over_limit') assert.ok(before.costBudget.used > before.costBudget.limit);
+        else assert.equal(before.costBudget.dataComplete, false);
+        await applyConfirmedBackfill();
+        const after = await summary('2026-09-01');
+        assert.equal(after.costBudget.paid - before.costBudget.paid, 107128);
+        assert.equal(before.costBudget.reserved - after.costBudget.reserved, 107128);
+        for (const key of ['used', 'remaining', 'dataComplete']) assert.equal(after.costBudget[key], before.costBudget[key]);
+        await db.exec('rollback to budget_case');
+      }
+    });
+  }
 
   console.log(JSON.stringify({ mode, passed: testCount - failures.length, failed: failures.length, failures }));
   process.exitCode = failures.length ? 1 : 0;
