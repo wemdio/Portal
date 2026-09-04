@@ -47,18 +47,48 @@ export async function linkLead(
     }
   }
 
-  // 2. Транскрипты — если есть диалог и есть сайт, ищем упоминания домена
-  //    в сообщениях этого диалога; для каждого такого сообщения смотрим,
-  //    не привязана ли к нему транскрипция.
-  //    Fallback: если диалога нет — ищем сайт в переписках всех sales-chat
-  //    аккаунтов (менеджеры Егор/Саша) за последние 90 дней.
-  if (lead.company_website) {
+  // 2. Транскрипты — прямой линк transcript_amo_lead_link: менеджеры пишут
+  //    «#<номер сделки>» в подписи к видео, линк создаётся при инжесте.
+  //    Приоритетный канал, confidence 1.0.
+  const directIds = await findLinkedTranscripts(db, lead.id);
+  links.transcript_ids = directIds;
+
+  // 3. Fallback — если прямых линков нет: если есть диалог и есть сайт,
+  //    ищем упоминания домена в сообщениях диалога; для каждого такого
+  //    сообщения смотрим, не привязана ли к нему транскрипция.
+  if (!directIds.length && lead.company_website) {
     const site = lead.company_website.toLowerCase();
-    const tsIds = await findTranscriptsForSite(db, site, links.dialog_id);
-    links.transcript_ids = tsIds;
+    links.transcript_ids = await findTranscriptsForSite(db, site, links.dialog_id);
   }
 
   return links;
+}
+
+async function findLinkedTranscripts(
+  db: SupabaseClient,
+  leadId: number,
+): Promise<string[]> {
+  const { data: links, error } = await db
+    .from('transcript_amo_lead_link')
+    .select('transcript_id')
+    .eq('amo_lead_id', leadId)
+    .gte('confidence', 0.9)
+    .limit(50);
+  if (error || !links?.length) return [];
+
+  const ids = Array.from(new Set(
+    links.map((r) => (r as { transcript_id: string }).transcript_id),
+  ));
+  const since = new Date(Date.now() - 90 * 24 * 3600 * 1000).toISOString();
+  const { data: transcripts, error: tErr } = await db
+    .from('tg_video_transcripts')
+    .select('id')
+    .in('id', ids)
+    .eq('status', 'completed')
+    .gte('created_at', since)
+    .limit(20);
+  if (tErr) return [];
+  return (transcripts ?? []).map((t) => (t as { id: string }).id);
 }
 
 async function findTranscriptsForSite(
@@ -143,19 +173,22 @@ export async function fetchTranscripts(
 
   const { data, error } = await db
     .from('tg_video_transcripts')
-    .select('id, created_at, sender_name, duration_seconds, text')
+    .select('id, created_at, sender_name, duration_seconds, caption, text')
     .in('id', transcriptIds)
     .order('created_at', { ascending: false });
   if (error || !data?.length) return { text: '', count: 0, lastTranscriptAt: null };
 
   const items = data as Array<{
     id: string; created_at: string; sender_name: string | null;
-    duration_seconds: number | null; text: string;
+    duration_seconds: number | null; caption: string | null; text: string;
   }>;
   const parts = items.map((t) => {
     const dur = t.duration_seconds ? `${Math.round(t.duration_seconds)}с` : '?';
     const when = t.created_at.slice(0, 16).replace('T', ' ');
-    return `── Транскрипт (${when}, ${dur}, ${t.sender_name ?? '?'}) ──\n${t.text}`;
+    // Подпись менеджера к видео («решение принимает собственник, ОС 09.09») —
+    // самостоятельный контекст для разбора, не только текст звонка.
+    const note = t.caption?.trim() ? `\nЗаметка менеджера: ${t.caption.trim()}` : '';
+    return `── Транскрипт (${when}, ${dur}, ${t.sender_name ?? '?'}) ──${note}\n${t.text}`;
   });
 
   return {
