@@ -201,15 +201,17 @@ beforeEach(() => {
         return { data: mockCanUse, error: mockCapabilityError };
       case 'can_manage_payment_requests':
         return { data: mockCanManage, error: mockCapabilityError };
-      case 'list_payment_requests_with_budget':
-        return { data: [rawRequest()], error: mockListError };
-      case 'payment_request_month_summary':
-        return { data: summary(), error: mockSummaryError };
+      case 'payment_requests_read_model':
+        return {
+          data: { requests: [rawRequest({ auto_payment_on: '2026-08-25' })], summary: summary(), asOf: '2026-08-24' },
+          error: mockListError ?? mockSummaryError,
+        };
       case 'submit_payment_request_with_budget': {
         const isCosts = params.p_budget_scope === 'costs';
         const needsApproval = !isCosts && (
           params.p_expense_type === 'planned' || Number(params.p_amount) > 53_000
         );
+        const recordsFact = !needsApproval;
         return {
           data: {
             request: rawRequest({
@@ -219,10 +221,10 @@ beforeEach(() => {
               expected_payment_on: params.p_expected_payment_on,
               urgency: params.p_urgency,
               amount: params.p_amount,
-              status: isCosts ? 'paid' : needsApproval ? 'pending' : 'approved',
-              paid_on: isCosts ? params.p_expected_payment_on : null,
-              paid_on_source: isCosts ? 'entered' : null,
-              paid_by: isCosts ? mockCurrentUser?.id : null,
+              status: recordsFact ? 'paid' : 'pending',
+              paid_on: recordsFact ? params.p_expected_payment_on : null,
+              paid_on_source: recordsFact ? 'entered' : null,
+              paid_by: recordsFact ? mockCurrentUser?.id : null,
               approval_reason: !isCosts && params.p_expense_type === 'planned'
                 ? 'planned'
                 : needsApproval
@@ -230,7 +232,7 @@ beforeEach(() => {
                   : null,
             }),
             summary: summary(),
-            outcome: isCosts ? 'recorded_paid' : needsApproval ? 'approval_required' : 'auto_approved',
+            outcome: recordsFact ? 'recorded_paid' : 'approval_required',
           },
           error: mockSubmitError,
         };
@@ -253,7 +255,7 @@ describe('GET /api/payments', () => {
       label: 'Август 2026',
       previous: '2026-07',
       next: '2026-09',
-      asOf: expect.any(String),
+      asOf: '2026-08-24',
     });
     expect(body.summary).toEqual(summary());
     expect(body.canManage).toBe(false);
@@ -280,16 +282,14 @@ describe('GET /api/payments', () => {
         expectedPaymentOn: '2026-08-25',
         paidOn: null,
         paidOnSource: null,
+        autoPaymentOn: '2026-08-25',
         urgency: 'urgent',
         documentUrl: null,
         createdAt: '2026-08-18T10:00:00.000Z',
         updatedAt: '2026-08-18T10:00:00.000Z',
       }),
     ]);
-    expect(mockRpc).toHaveBeenCalledWith('list_payment_requests_with_budget', {
-      p_month: '2026-08-01',
-    });
-    expect(mockRpc).toHaveBeenCalledWith('payment_request_month_summary', {
+    expect(mockRpc).toHaveBeenCalledWith('payment_requests_read_model', {
       p_month: '2026-08-01',
     });
   });
@@ -469,10 +469,11 @@ describe('POST /api/payments', () => {
     expect(body).toEqual(expect.objectContaining({
       request: expect.objectContaining({
         expenseType: 'one_time',
-        status: 'approved',
+        status: 'paid',
+        paidOn: '2026-08-25',
       }),
       summary: summary(),
-      outcome: 'auto_approved',
+      outcome: 'recorded_paid',
     }));
     expect(mockRpc).not.toHaveBeenCalledWith('payment_request_month_summary', expect.anything());
   });
