@@ -27,8 +27,9 @@ export const VE_BASE_LIST_COLUMNS =
 export const VE_JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload, progress';
 // Досье вертикалей: data — объективные счётчики сегмента, нужна на карточке.
 export const VE_DOSSIER_LIST_COLUMNS = 'id, vertical_id, status, data, error';
-// Банк кейсов: БЕЗ text — полный текст кейса тяжёлый, списку хватает карточки.
-export const VE_CASE_LIST_COLUMNS = 'id, source, filename, industry, client_type, task, metrics, result, created_at';
+// Полный сохранённый разбор нужен специалисту для проверки кейса перед письмами.
+// Та же проекция используется отдельным cases API, чтобы карточки не теряли поля.
+export const VE_CASE_LIST_COLUMNS = 'id, source, filename, industry, client_type, task, metrics, result, text, created_at';
 
 export interface VeProjectDetail {
   project: Record<string, unknown>;

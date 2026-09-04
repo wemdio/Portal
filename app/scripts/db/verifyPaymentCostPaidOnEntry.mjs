@@ -40,6 +40,13 @@ const updates = mode === 'baseline' ? [] : readdirSync(migrationDir)
   .filter(name => /^20260902.*(?:paid_on_entry|mail_cost_paid_history_guard).*\.sql$/.test(name))
   .sort();
 const failures = [];
+const generalMigration = '20260904_0006_payment_automatic_fact.sql';
+const giftsMigration = '20260904_0007_payment_confirmed_gifts.sql';
+const alina = '33dec504-e6e0-4b0a-bc59-dcf570c6ecc9';
+const gifts = [
+  ['348e88ae-dba8-4e6b-b27c-ede5502f0b4c', 401, '2026-09-04'],
+  ['65045cf0-a74e-4911-a023-5f7352a215c3', 1615, '2026-09-03'],
+];
 let today;
 let tomorrow;
 let nextMonth;
@@ -474,6 +481,173 @@ try {
         for (const key of ['used', 'remaining', 'dataComplete']) assert.equal(after.costBudget[key], before.costBudget[key]);
         await db.exec('rollback to budget_case');
       }
+    });
+  }
+
+  // Approved extension: exercise the actual SQL locally, without adding CI work.
+  if (mode !== 'baseline') {
+    if (!process.argv.includes('--before-general')) {
+      await db.exec(readFileSync(join(migrationDir, generalMigration), 'utf8'));
+    }
+    async function manage(request, action = 'approve', comment = null) {
+      return (await q(`select public.transition_payment_request($1::uuid, $2, $3::timestamptz, $4) as result`,
+        [request.id, action, request.updated_at, comment]))[0].result;
+    }
+    async function allowManager() {
+      await q('insert into public.payment_request_managers(user_id) values ($1) on conflict do nothing', [actor]);
+    }
+    await test('general entries record paid fact within cap, preserve old approvals, and require planned/excess approval', async () => {
+      const key = randomUUID();
+      const result = await submit({ key, scope: 'general', amount: 401 });
+      assert.equal(result.request.status, 'paid');
+      assert.equal(result.request.paid_on, today);
+      assert.equal(result.outcome, 'recorded_paid');
+      assert.equal(result.summary.paidOneTime, 401);
+      assert.equal(result.summary.reservedOneTime, 0);
+      assert.deepEqual(await submit({ key, scope: 'general', amount: 401 }), result);
+      assert.equal((await q('select count(*)::int as n from public.payment_request_events'))[0].n, 1);
+      const planned = await submit({ scope: 'general', type: 'planned' });
+      const over = await submit({ scope: 'general', amount: 75001 });
+      assert.equal(planned.request.status, 'pending');
+      assert.equal(over.request.status, 'pending');
+      assert.equal(planned.request.approval_reason, 'planned');
+      assert.equal(over.request.approval_reason, 'limit_exceeded');
+      await rejected(() => manage(planned.request), 'payment_request_forbidden');
+      const [old] = await q(`insert into public.payment_requests(user_id, requester_user_id, requester_name,
+        department, description, amount, expense_type, budget_scope, expected_payment_on, status)
+        values ($1, $1, 'Old author', 'outreach', 'Untouched old approval', 500, 'one_time', 'general', $2, 'approved') returning id`, [actor, today]);
+      const before = await requestSnapshot();
+      await db.exec(readFileSync(join(migrationDir, generalMigration), 'utf8'));
+      assert.deepEqual(await requestSnapshot(), before);
+      assert.equal((await q('select public.payment_request_api_record($1) as r', [old.id]))[0].r.status, 'approved');
+      const legacyKey = randomUUID();
+      const legacyArgs = [legacyKey, today];
+      const legacySql = `select public.submit_payment_request($1::uuid, 'outreach', 'Legacy endpoint', 10,
+        null, null, 'one_time', $2::date, 'normal', null) as result`;
+      const legacyResult = (await q(legacySql, legacyArgs))[0].result;
+      assert.equal(legacyResult.request.status, 'paid');
+      assert.deepEqual((await q(legacySql, legacyArgs))[0].result, legacyResult);
+      // The old RPC hashed a payload without scope/category; keep that contract.
+      const [fingerprint] = await q(`select submission_fingerprint = encode(sha256(convert_to(jsonb_build_object(
+        'department', 'outreach', 'description', 'Legacy endpoint', 'amount', '10.00', 'project_id', null,
+        'comment', null, 'expense_type', 'one_time', 'expected_payment_on', $2::date, 'urgency', 'normal',
+        'document_url', null)::text, 'utf8')), 'hex') as unchanged
+        from public.payment_requests where id = $1`, [legacyResult.request.id, today]);
+      assert.equal(fingerprint.unchanged, true);
+      const [acl] = await q(`select
+        has_function_privilege('authenticated', 'public.payment_requests_read_model(date)', 'execute') as team_read,
+        has_function_privilege('anon', 'public.payment_requests_read_model(date)', 'execute') as anon_read,
+        has_function_privilege('authenticated', 'public.payment_request_today()', 'execute') as clock,
+        has_function_privilege('authenticated', 'public.payment_request_effective(public.payment_requests)', 'execute') as helper`);
+      assert.deepEqual(acl, { team_read: true, anon_read: false, clock: false, helper: false });
+      await asActor('');
+      await rejected(() => q('select public.payment_requests_read_model($1::date)', [month]), 'payment_request_forbidden');
+    });
+    await test('Anya approval records fact with its entered date, preserves decision audit and rejects stale actions', async () => {
+      await allowManager();
+      for (const input of [{ scope: 'general', type: 'planned' }, { scope: 'general', amount: 75001 }]) {
+        const pending = await submit(input);
+        const result = await manage(pending.request);
+        assert.equal(result.outcome, 'paid');
+        assert.equal(result.request.status, 'paid');
+        assert.equal(result.request.paid_on, today);
+        assert.equal(result.request.decided_by, actor);
+        assert.equal(result.request.paid_by, actor);
+        const [event] = await q("select * from public.payment_request_events where payment_request_id = $1 and event_type = 'approve'", [result.request.id]);
+        assert.equal(event.to_status, 'paid');
+        assert.equal(event.metadata.new_paid_on, today);
+        await rejected(() => manage(result.request, 'reject', 'Too late'), 'payment_request_invalid_transition');
+      }
+      const [dates] = await q("select ($1::date - interval '1 month')::date::text as previous", [month]);
+      const past = await submit({ scope: 'general', date: dates.previous, amount: 321 });
+      assert.equal(past.request.paid_on, dates.previous);
+      assert.equal(past.summary.paidOneTime, 321);
+    });
+    await test('future automatic payments switch reserve to fact on Moscow date across every reader without writes or duplicate accounting', async () => {
+      await allowManager();
+      const key = randomUUID();
+      const future = await submit({ key, scope: 'general', date: nextMonth, amount: 5000 });
+      const planned = await submit({ scope: 'general', type: 'planned', date: nextMonth, amount: 300 });
+      const decision = await manage(planned.request);
+      assert.equal(future.request.status, 'approved');
+      assert.equal(future.request.auto_payment_on, nextMonth);
+      assert.equal(decision.request.status, 'approved');
+      assert.equal(decision.request.auto_payment_on, nextMonth);
+      const before = await summary(nextMonth);
+      assert.equal(before.reservedOneTime, 5000);
+      assert.equal(before.paidAll, 0);
+      assert.equal(before.approvedCount, 2);
+      const snapshot = await requestSnapshot();
+      const events = await q('select to_jsonb(e) as row from public.payment_request_events e order by id');
+      // Advance only the private clock inside this rolled-back local transaction.
+      await db.exec(`create or replace function public.payment_request_today() returns date language sql stable as $$ select '${nextMonth}'::date $$`);
+      const after = await summary(nextMonth);
+      assert.equal(after.paidOneTime, 5000);
+      assert.equal(after.reservedOneTime, 0);
+      assert.equal(after.paidAll, 5300);
+      assert.equal(after.approvedCount, 0);
+      assert.equal(after.remaining, before.remaining);
+      assert.equal((await summary(month)).paidAll, 0);
+      for (const rpc of ['list_payment_requests', 'list_payment_requests_with_budget']) {
+        const rows = await q(`select * from public.${rpc}($1::date)`, [nextMonth]);
+        assert.equal(rows.length, 2);
+        for (const row of rows) {
+          assert.equal(row.status, 'paid');
+          assert.equal(row.paid_on instanceof Date ? row.paid_on.toISOString().slice(0, 10) : row.paid_on, nextMonth);
+        }
+      }
+      const [read] = await q('select public.payment_requests_read_model($1::date) as r', [nextMonth]);
+      assert.equal(read.r.asOf, nextMonth);
+      assert.equal(read.r.summary.paidAll, 5300);
+      assert.equal(read.r.requests.filter(r => r.status === 'paid').length, 2);
+      const retry = await submit({ key, scope: 'general', date: nextMonth, amount: 5000 });
+      assert.equal(retry.request.status, 'paid');
+      assert.equal(retry.outcome, 'recorded_paid');
+      await rejected(() => manage(future.request, 'reject', 'Stale future row'), 'payment_request_invalid_transition');
+      assert.deepEqual(await requestSnapshot(), snapshot);
+      assert.deepEqual(await q('select to_jsonb(e) as row from public.payment_request_events e order by id'), events);
+      const cost = await submit({ amount: 100 });
+      assert.equal(cost.request.status, 'paid');
+      assert.equal(cost.summary.costBudget.paid, 100);
+      assert.equal(cost.summary.costBudget.reserved, 0);
+      assert.equal(cost.summary.paidOneTime, 0);
+    });
+    await test('confirmed Alina gifts move only 2016 from reserve to fact, preserve dates and retry safely', async () => {
+      await asActor('');
+      await q("insert into public.profiles(id, full_name, role) values ($1, 'Алина', 'admin'), ($2, 'Сергей', 'admin')", [alina, confirmer]);
+      for (const [id, amount, date] of gifts) {
+        await q(`insert into public.payment_requests(id, user_id, requester_user_id, requester_name, department,
+          description, amount, expense_type, budget_scope, expected_payment_on, status)
+          values ($1, $2, $2, 'Алина', 'outreach', 'Confirmed gift', $3, 'one_time', 'general', $4, 'approved')`, [id, alina, amount, date]);
+      }
+      await q(`insert into public.payment_requests(user_id, requester_user_id, requester_name, department,
+        description, amount, expense_type, budget_scope, expected_payment_on, status)
+        values ($1, $1, 'Алина', 'outreach', 'Future prize', 5000, 'one_time', 'general', '2026-09-30', 'approved')`, [alina]);
+      const beforeRows = await requestSnapshot();
+      const before = await summary('2026-09-01');
+      await db.exec(readFileSync(join(migrationDir, giftsMigration), 'utf8'));
+      const after = await summary('2026-09-01');
+      assert.equal(after.paidOneTime - before.paidOneTime, 2016);
+      assert.equal(before.reservedOneTime - after.reservedOneTime, 2016);
+      assert.equal(after.remaining, before.remaining);
+      const afterRows = await requestSnapshot();
+      for (const { row } of afterRows) {
+        const gift = gifts.find(([id]) => id === row.id);
+        if (gift) {
+          assert.equal(row.status, 'paid');
+          assert.equal(row.paid_on, gift[2]);
+          assert.equal(row.paid_by, confirmer);
+        } else assert.deepEqual(row, beforeRows.find(r => r.row.id === row.id).row);
+      }
+      assert.equal((await q('select count(*)::int as n from public.payment_request_events'))[0].n, 2);
+      await db.exec(readFileSync(join(migrationDir, giftsMigration), 'utf8'));
+      assert.deepEqual(await requestSnapshot(), afterRows);
+      assert.equal((await q('select count(*)::int as n from public.payment_request_events'))[0].n, 2);
+      // A changed amount must never be silently corrected into a paid fact.
+      await q("update public.payment_requests set status = 'approved', paid_on = null, paid_on_source = null, paid_by = null, paid_at = null, amount = amount + 1 where id = $1", [gifts[0][0]]);
+      const drifted = await requestSnapshot();
+      await db.exec(readFileSync(join(migrationDir, giftsMigration), 'utf8'));
+      assert.deepEqual(await requestSnapshot(), drifted);
     });
   }
 

@@ -4,14 +4,14 @@
  *
  * Источники кейсов (колонка source):
  *  - 'site'   — извлечены стадией site_profile из текста сайта клиента
- *               (refresh атомарный: insert новых → delete устаревших site-строк);
+ *               (insert недостающих → delete старых site-строк и дубликатов);
  *  - 'upload' — вставлены специалистом текстом через API
  *               (POST projects/[id]/cases); сайт-стадия их никогда не трогает.
  *
  * Здесь же живут:
  *  - heCaseDraftSchema — zod-схема структурированного кейса (локальная для
  *    кейс-банка, НЕ из schemas.ts): industry/client_type/task/metrics/result/text;
- *  - structureCaseText — LLM-структуризация вставленного текста кейса
+ *  - structureCaseTexts — разбор вставки на отдельные кейсы с исходниками
  *    (общий хелпер для API-роута загрузки; модель getVeModel('gate'));
  *  - scoreCaseForVertical / selectCaseForVertical — подбор кейса под вертикаль
  *    (взвешенный токен-оверлап названия+синонимов вертикали по полям
@@ -66,32 +66,71 @@ export interface VeCaseDraft {
   text: string | null;
 }
 
-const CASE_STRUCTURING_SYSTEM = `Ты — аналитик B2B-кейсов агентства Polza. Из сырого текста кейса (вставка из PDF/документа/письма) ты достаёшь структуру для кейс-банка: она пойдёт в письма как доказательство, поэтому точность критична.
+export const MAX_CASE_TEXT_CHARS = 20000;
+export const MAX_CASES_PER_IMPORT = 20;
+
+/** Safe, user-facing explanation; no provider payload or secrets. */
+export class VeCaseImportIncompleteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VeCaseImportIncompleteError';
+  }
+}
+
+/** Manual imports preserve the source; site/legacy drafts still use summaries. */
+export const veCaseImportDraftSchema = z.object({
+  industry: z.string().trim().max(300).default(''),
+  client_type: z.string().trim().max(500).default(''),
+  task: z.string().trim().min(1).max(1500),
+  metrics: z.record(z.string().max(100), z.union([z.string().trim().max(300), z.number().finite()]))
+    .refine((value) => Object.keys(value).length <= 20, 'Слишком много метрик').default({}),
+  result: z.string().trim().min(1).max(1500),
+  text: z.string().trim().min(20).max(MAX_CASE_TEXT_CHARS),
+});
+
+const veCaseImportSchema = z.object({
+  has_more: z.boolean(),
+  cases: z.array(veCaseImportDraftSchema).max(MAX_CASES_PER_IMPORT),
+});
+
+const CASE_STRUCTURING_SYSTEM = `Ты — аналитик B2B-кейсов агентства Polza. Из сырого текста (вставка из PDF/документа/письма) выделяй ОТДЕЛЬНЫЕ клиентские проекты. Кейсы пойдут в письма как доказательство, поэтому точность критична.
 
 Жёсткие правила:
 - опирайся ТОЛЬКО на переданный текст — ничего не додумывай;
-- никаких выдуманных цифр: metrics заполняй только числами, которые буквально есть в тексте (если их нет — пустой объект);
-- если какого-то поля в тексте нет — пустая строка, а не догадка.
+- один кейс — одна конкретная работа для одного клиента. В одной вставке может быть несколько кейсов: верни отдельный объект для каждого;
+- абзацы, пункты «задача / решение / результат» и переносы страниц сами по себе НЕ делят кейс. Не делай отдельный кейс из каждого абзаца или показателя;
+- не смешивай клиентов, задачи, результаты и цифры разных проектов. Не объединяй разные работы только потому, что у них одна отрасль;
+- кейс должен содержать контекст клиента, конкретную задачу и достигнутый результат. Если их нет, не создавай пустую карточку. Рекламные обещания, списки отраслей и логотипов — не кейсы;
+- industry и client_type заполняй только из текста; если одно поле неизвестно — пустая строка. Если неизвестны оба — пропусти кейс;
+- никаких выдуманных цифр: metrics заполняй только числами, которые буквально есть в ИСХОДНОМ ФРАГМЕНТЕ ЭТОГО кейса (если их нет — пустой объект). Значения metrics — строки с цифрами или числа, не вложенные объекты;
+- text — дословный непрерывный фрагмент исходной вставки, включающий клиента, задачу и результат только этого кейса. НЕ пересказ и НЕ сокращение; не исправляй написание. Исходные фрагменты разных кейсов не должны пересекаться;
+- если конкретных кейсов нет — верни пустой массив; не выдумывай недостающие факты ради заполнения;
+- максимум ${MAX_CASES_PER_IMPORT} кейсов за один раз. Если во вставке больше конкретных кейсов, обязательно верни has_more=true: весь разбор будет остановлен с просьбой разделить текст. Нельзя молча вернуть первые ${MAX_CASES_PER_IMPORT}; если все кейсы вошли, has_more=false.
 
 Отвечай строго на русском.`;
 
 function buildCaseStructuringMessages(rawText: string): LLMMessage[] {
-  const user = `ТЕКСТ КЕЙСА (может быть выгрузкой из PDF/документа):
+  const user = `ИСХОДНЫЙ ТЕКСТ КЕЙСОВ (может быть выгрузкой из PDF/документа):
 """
 ${rawText}
 """
 
-Разбери кейс и верни ТОЛЬКО JSON строго такого вида (без markdown-фенсов и пояснений):
+Раздели самостоятельные проекты и верни ТОЛЬКО JSON такого вида (без markdown-фенсов и пояснений):
 {
-  "industry": string,     // индустрия/отрасль клиента из кейса (как названа в тексте)
-  "client_type": string,  // тип/размер клиента (напр. «сеть кофеен, 40 точек», «enterprise-банк»)
-  "task": string,         // задача клиента, 1 предложение
-  "metrics": object,      // свободный json: ТОЛЬКО конкретные цифры из текста, напр. {"рост_конверсии": "+32%", "срок": "2 месяца"}; нет цифр — {}
-  "result": string,       // достигнутый результат, 1 предложение, с опорой на цифры из текста, если они есть
-  "text": string          // краткое содержание кейса: 2–3 предложения (кто клиент, что сделали, что получили)
+  "has_more": boolean, // true, если конкретных кейсов во вставке больше ${MAX_CASES_PER_IMPORT}; иначе false
+  "cases": [
+    {
+      "industry": string,     // отрасль клиента из этого кейса, если названа
+      "client_type": string,  // название / тип клиента из этого кейса, если названы
+      "task": string,         // конкретная задача клиента
+      "metrics": object,      // только цифры этого кейса, например {"тираж": 3000, "срок": "2 недели"}; нет цифр — {}
+      "result": string,       // конкретный достигнутый результат
+      "text": string          // дословный исходный фрагмент целого кейса, НЕ краткое содержание
+    }
+  ]
 }
 
-Никакого текста вне JSON.`;
+Если кейсов нет — {"has_more": false, "cases": []}. Никакого текста вне JSON.`;
 
   return [
     { role: 'system', content: CASE_STRUCTURING_SYSTEM },
@@ -99,16 +138,104 @@ ${rawText}
   ];
 }
 
+/** Collapse whitespace while retaining offsets into the original submitted text. */
+function indexedSource(text: string): { text: string; offsets: number[] } {
+  let normalized = '';
+  const offsets: number[] = [];
+  let whitespace = false;
+  for (let index = 0; index < text.length; index++) {
+    if (/\s/u.test(text[index])) {
+      if (!whitespace) { normalized += ' '; offsets.push(index); }
+      whitespace = true;
+    } else {
+      normalized += text[index];
+      offsets.push(index);
+      whitespace = false;
+    }
+  }
+  return { text: normalized, offsets };
+}
+
+function numericTokens(text: string): string[] {
+  return [...text.matchAll(/\d+(?:[ \u00a0\u202f]\d{3})*(?:[.,]\d+)?/g)]
+    .map(([number]) => number.replace(/[ \u00a0\u202f]/g, '').replace(',', '.'));
+}
+
+function validateRawCaseText(rawText: string): void {
+  if (typeof rawText !== 'string' || !rawText.trim()) throw new Error('Вставьте исходный текст кейсов');
+  if (rawText.length > MAX_CASE_TEXT_CHARS) throw new Error(`Максимум ${MAX_CASE_TEXT_CHARS} символов за один раз`);
+}
+
 /**
- * Структурировать вставленный текст кейса через LLM (роль gate — мини-модель).
- * Бросает LLMValidationError при двойном невалидном ответе — роут маппит в 502.
+ * Same checks for preview and save. Provenance and numeric presence are verified;
+ * semantic attribution still needs the specialist's review before saving.
  */
-export async function structureCaseText(rawText: string): Promise<VeCaseDraft> {
-  const llm = await callLLMWithSchema(buildCaseStructuringMessages(rawText), heCaseDraftSchema, {
-    model: getVeModel('gate'),
-    maxTokens: 2048,
+export function validateCaseDrafts(rawText: string, value: unknown): VeCaseDraft[] {
+  validateRawCaseText(rawText);
+  const parsed = z.array(veCaseImportDraftSchema).max(MAX_CASES_PER_IMPORT).safeParse(value);
+  if (!parsed.success) throw new Error('Не удалось выделить полноценные кейсы: проверьте задачу, результат и исходный фрагмент');
+  const source = indexedSource(rawText);
+  const spans: Array<{ start: number; end: number }> = [];
+  const missing = /^(?:нет(?: данных)?|не (?:указан[аоы]?|известн[аоы]?)|unknown|n\/?a|[-—])$/i;
+  return parsed.data.map((draft, index) => {
+    const label = `Кейс ${index + 1}`;
+    if ((!draft.industry || missing.test(draft.industry)) && (!draft.client_type || missing.test(draft.client_type))) {
+      throw new Error(`${label}: не указан клиент или его отрасль`);
+    }
+    if (missing.test(draft.task) || missing.test(draft.result)) throw new Error(`${label}: нужны конкретные задача и результат`);
+    const fragment = draft.text.replace(/\s+/g, ' ');
+    const start = source.text.indexOf(fragment);
+    if (start < 0) throw new Error(`${label}: исходный фрагмент не найден во вставленном тексте`);
+    const end = start + fragment.length;
+    if (spans.some((span) => start < span.end && end > span.start)) {
+      throw new Error(`${label}: исходные фрагменты кейсов пересекаются — проверьте разделение`);
+    }
+    spans.push({ start, end });
+    const original = rawText.slice(source.offsets[start], source.offsets[end - 1] + 1);
+    const supportedNumbers = new Set(numericTokens(original));
+    for (const [key, metric] of Object.entries(draft.metrics)) {
+      const numbers = numericTokens(String(metric));
+      if (!numbers.length || [...numbers, ...numericTokens(key)].some((number) => !supportedNumbers.has(number))) {
+        throw new Error(`${label}: цифры метрики «${key}» не найдены в его исходном фрагменте`);
+      }
+    }
+    if (numericTokens([draft.industry, draft.client_type, draft.task, draft.result].join(' '))
+      .some((number) => !supportedNumbers.has(number))) {
+      throw new Error(`${label}: в описании есть цифры, которых нет в его исходном фрагменте`);
+    }
+    return { ...draft, text: original };
   });
-  return llm.data;
+}
+
+/** One bounded model call parses all engagements; saving the preview calls no model. */
+export async function structureCaseTexts(rawText: string, signal?: AbortSignal): Promise<VeCaseDraft[]> {
+  validateRawCaseText(rawText);
+  const llm = await callLLMWithSchema(buildCaseStructuringMessages(rawText), veCaseImportSchema, {
+    model: getVeModel('gate'),
+    maxTokens: 14000,
+    signal,
+  });
+  signal?.throwIfAborted();
+  const response = llm.rawResponse as {
+    choices?: Array<{ finish_reason?: string; message?: { content?: string } }>;
+  } | null;
+  const choice = response?.choices?.[0];
+  if (choice?.finish_reason && !['stop', 'end_turn'].includes(choice.finish_reason)) {
+    throw new VeCaseImportIncompleteError('Ответ с кейсами оборвался. Разделите исходный текст на меньшие части и повторите разбор');
+  }
+  // The shared helper may repair invalid/truncated JSON by dropping its tail.
+  // That is inappropriate for an import, which must not silently lose cases.
+  if (typeof choice?.message?.content === 'string') {
+    try {
+      JSON.parse(choice.message.content.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim());
+    } catch {
+      throw new VeCaseImportIncompleteError('Ответ с кейсами неполный. Разделите исходный текст на меньшие части и повторите разбор');
+    }
+  }
+  if (llm.data.has_more !== false) {
+    throw new VeCaseImportIncompleteError(`Во вставке больше ${MAX_CASES_PER_IMPORT} кейсов или не подтверждена полнота разбора. Разделите текст на части`);
+  }
+  return validateCaseDrafts(rawText, llm.data.cases);
 }
 
 /* ─────────────────── Подбор кейса под вертикаль ─────────────────── */

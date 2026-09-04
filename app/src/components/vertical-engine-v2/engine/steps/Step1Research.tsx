@@ -13,16 +13,13 @@
 import { useEffect, useRef, useState, type JSX } from 'react';
 import { Play, RotateCcw } from 'lucide-react';
 import type { VeStage } from '@/lib/verticalEngineV2/types';
-import { Badge, StatusBox } from '../ui';
+import { StatusBox } from '../ui';
 import { HE, Spinner, StatusDot } from '../design';
 import { ClientBriefBlock } from './ClientBriefBlock';
+import { CasesBlock } from './CasesBlock';
 import {
   VE_API,
-  veEngineDelete,
   veEnginePatch,
-  veEnginePost,
-  type VeCaseCreateResponse,
-  type VeCaseDeleteResponse,
   type VeCaseEntry,
   type VeJobSummary,
   type VeProjectDetailResponse,
@@ -377,6 +374,8 @@ function ResearchContextGrid({
         <BusinessBlock projectId={projectId} businessValue={businessValue} emphasized={siteThin} />
         <SignatureBlock projectId={projectId} signatureValue={signatureValue} />
         <StyleBlock projectId={projectId} styleValue={styleValue} onSaved={onStyleSaved} />
+      </div>
+      <div className="mt-4">
         <CasesBlock projectId={projectId} cases={cases} onCasesChanged={onCasesChanged} />
       </div>
     </section>
@@ -637,138 +636,6 @@ function StyleBlock({
       </div>
       {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
     </div>
-  );
-}
-
-/** Банк кейсов клиента: список (сайт/файл) + ручное добавление текста из PDF/презентации. */
-function CasesBlock({
-  projectId,
-  cases,
-  onCasesChanged,
-}: {
-  projectId: string | null;
-  cases: VeCaseEntry[];
-  onCasesChanged?: () => void;
-}) {
-  const [text, setText] = useState('');
-  const [filename, setFilename] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [error, setError] = useState('');
-
-  const handleAdd = async () => {
-    const value = text.trim();
-    if (!projectId || !value || saving) return;
-    setSaving(true);
-    setError('');
-    try {
-      const { ok, data } = await veEnginePost<VeCaseCreateResponse>(`${VE_API}/projects/${projectId}/cases`, {
-        text: value,
-        filename: filename.trim() || undefined,
-      });
-      if (!ok) {
-        setError(data.error || 'Не удалось добавить кейс');
-        return;
-      }
-      setText('');
-      setFilename('');
-      onCasesChanged?.();
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleDelete = async (id: string) => {
-    if (!projectId || deletingId) return;
-    if (!window.confirm('Удалить этот кейс?')) return;
-    setDeletingId(id);
-    setError('');
-    try {
-      const { ok, data } = await veEngineDelete<VeCaseDeleteResponse>(`${VE_API}/projects/${projectId}/cases`, { id });
-      if (!ok) {
-        setError(data.error || 'Не удалось удалить кейс');
-        return;
-      }
-      onCasesChanged?.();
-    } finally {
-      setDeletingId(null);
-    }
-  };
-
-  return (
-    <details className={`group mt-4 text-left ${HE.formPanel}`}>
-      <summary
-        className={`flex cursor-pointer select-none items-center gap-2 transition hover:text-gray-600 ${HE.eyebrow}`}
-      >
-        Кейсы клиента ({cases.length})
-      </summary>
-      <p className={`mt-2 text-xs leading-relaxed ${HE.muted}`}>
-        Кейсы с сайта собираются автоматически. Можно добавить вручную — текст из PDF/презентации; используются как
-        доказательство в письмах.
-      </p>
-
-      {cases.length > 0 ? (
-        <ul className="mt-3 space-y-2">
-          {cases.map((c) => (
-            <li key={c.id} className="flex items-start gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2">
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <Badge tone={c.source === 'site' ? 'blue' : 'violet'}>{c.source === 'site' ? 'сайт' : 'файл'}</Badge>
-                  {c.industry ? <span className="text-xs font-medium text-gray-700">{c.industry}</span> : null}
-                  {c.client_type ? <span className="text-xs text-gray-500">{c.client_type}</span> : null}
-                  {c.filename ? <span className="truncate text-[11px] text-gray-500">{c.filename}</span> : null}
-                </div>
-                {c.result ? <p className="mt-1 line-clamp-2 text-xs text-gray-600">{c.result}</p> : null}
-              </div>
-              {c.source === 'upload' ? (
-                <button
-                  type="button"
-                  onClick={() => void handleDelete(c.id)}
-                  disabled={deletingId === c.id}
-                  title="Удалить кейс"
-                  className="shrink-0 text-[11px] font-medium text-gray-500 transition hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {deletingId === c.id ? <Spinner className="h-3.5 w-3.5" /> : 'Удалить'}
-                </button>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className={`mt-3 text-xs ${HE.muted}`}>Кейсов пока нет.</p>
-      )}
-
-      <div className="mt-3">
-        <textarea
-          rows={3}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Вставьте текст кейса…"
-          aria-label="Текст кейса"
-          className={`resize-y ${HE.input}`}
-        />
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <input
-            type="text"
-            value={filename}
-            onChange={(e) => setFilename(e.target.value)}
-            placeholder="Имя файла (необязательно)"
-            aria-label="Имя файла"
-            className={`h-9 min-w-0 flex-1 ${HE.input}`}
-          />
-          <button
-            type="button"
-            onClick={() => void handleAdd()}
-            disabled={saving || !text.trim()}
-            className={HE.btnSmall}
-          >
-            {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
-            Добавить кейс
-          </button>
-        </div>
-        {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
-      </div>
-    </details>
   );
 }
 

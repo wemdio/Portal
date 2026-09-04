@@ -23,6 +23,26 @@ import {
   buildTemplatePlanMessages,
   type TemplatePlanPromptInput,
 } from '@/lib/verticalEngineV2/prompts/template';
+import { structureCaseTexts, validateCaseDrafts } from '@/lib/verticalEngineV2/caseBank';
+import { callLLMWithSchema } from '@/lib/verticalEngineV2/llm';
+import { refreshSiteCases } from '@/lib/verticalEngineV2/stages/siteProfile';
+import type { VeStageContext } from '@/lib/verticalEngineV2/stages/shared';
+import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
+import type { NextRequest } from 'next/server';
+import { POST as postCases } from '@/app/api/tools/vertical-engine-v2/projects/[id]/cases/route';
+
+let mockCaseDb = createMockSupabase();
+jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mockCaseDb; } }));
+jest.mock('@/lib/toolsApiAuth', () => ({
+  requireInternalToolAuth: jest.fn(async () => ({ auth: { userId: 'specialist' } })),
+}));
+jest.mock('@/lib/toolTrace', () => ({ withToolTrace: (_context: unknown, work: () => unknown) => work() }));
+jest.mock('@/lib/loggerServer', () => ({ logAudit: jest.fn(), logError: jest.fn() }));
+
+jest.mock('@/lib/verticalEngineV2/llm', () => ({
+  ...jest.requireActual('@/lib/verticalEngineV2/llm'),
+  callLLMWithSchema: jest.fn(),
+}));
 
 const BRIEF: VeClientBrief = {
   fields: {
@@ -214,5 +234,111 @@ describe('buildTemplatePlanMessages', () => {
       .map((m) => m.content)
       .join('\n');
     expect(prompt).not.toContain('Отсрочка до 90 дней');
+  });
+});
+
+describe('client case imports and refresh', () => {
+  const sourceA = 'Кейс сети кофеен Додо.\nИзготовили 3000 стикеров за 2 недели. Клиент успел запустить рекламную кампанию.';
+  const sourceB = 'Кейс спортивного клуба. Оформили 48 подарочных наборов. Болельщики получили готовый мерч к матчу.';
+  const raw = `${sourceA}\n\n---\n\n${sourceB}`;
+  const drafts = [
+    { industry: 'HoReCa', client_type: 'сеть кофеен Додо', task: 'Изготовить стикеры для кампании',
+      metrics: { тираж: 3000, срок: '2 недели' }, result: 'Клиент успел запустить рекламную кампанию.', text: sourceA },
+    { industry: 'спорт', client_type: 'спортивный клуб', task: 'Оформить подарочные наборы',
+      metrics: { наборов: 48 }, result: 'Болельщики получили готовый мерч к матчу.', text: sourceB },
+  ];
+  const response = (cases: unknown[], hasMore = false, finishReason = 'stop') => ({
+    data: { cases, has_more: hasMore }, tokensUsed: 40, costUsd: 0.001,
+    promptTokens: 20, completionTokens: 20, rawResponse: { choices: [{ finish_reason: finishReason }] },
+  });
+  const request = (body: Record<string, unknown>) => postCases(new Request('https://portal.test/api/cases', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }) as NextRequest, { params: Promise.resolve({ id: 'project' }) });
+  afterEach(() => jest.clearAllMocks());
+
+  it('keeps separate engagements, their own numbers and the exact source fragment through the import', async () => {
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response([
+      { ...drafts[0], text: sourceA.replace(/\s+/g, ' ') }, drafts[1],
+    ]));
+    const cases = await structureCaseTexts(raw);
+    expect(cases).toEqual(drafts);
+    expect(validateCaseDrafts(raw, cases)).toEqual(drafts);
+    expect(jest.mocked(callLLMWithSchema).mock.calls[0][0].map((message) => message.content).join('\n')).toContain(raw);
+    expect(cases[0].metrics).not.toHaveProperty('наборов');
+    expect(cases[1].text).not.toContain('3000');
+    mockCaseDb = createMockSupabase({ tables: { ve_projects: [{ id: 'project' }] } });
+    jest.mocked(callLLMWithSchema).mockClear().mockResolvedValueOnce(response(drafts));
+    const preview = await request({ mode: 'preview', text: raw });
+    expect(preview.status).toBe(200);
+    expect(mockCaseDb.inserts).toEqual([]);
+    const selected = await preview.json();
+    const saved = await request({ mode: 'save', text: raw, cases: selected.cases });
+    expect(saved.status).toBe(201);
+    expect(await saved.json()).toMatchObject({ count: 2, cases: drafts });
+    expect(mockCaseDb.inserts).toHaveLength(1);
+    expect(mockCaseDb.getRows('ve_cases')).toMatchObject(drafts);
+    expect(callLLMWithSchema).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts no cases for generic text and rejects incomplete, invented or cross-case proof before saving', async () => {
+    expect(validateCaseDrafts('Помогаем многим компаниям и всегда делаем качественно.', [])).toEqual([]);
+    for (const invalid of [
+      { ...drafts[0], task: '' },
+      { ...drafts[0], text: 'Придуманный клиент получил рост продаж на 3000 процентов.' },
+      { ...drafts[0], metrics: { тираж: 48 } },
+      { ...drafts[0], metrics: { тираж: { вложенное: 3000 } } },
+    ]) expect(() => validateCaseDrafts(raw, [invalid])).toThrow();
+    expect(() => validateCaseDrafts(raw, [drafts[0], drafts[0]])).toThrow();
+    mockCaseDb = createMockSupabase({ tables: { ve_projects: [{ id: 'project' }] } });
+    for (const cases of [[], [{ ...drafts[0], metrics: { тираж: 48 } }]]) {
+      expect((await request({ mode: 'save', text: raw, cases })).status).toBe(422);
+    }
+    expect(mockCaseDb.inserts).toEqual([]);
+    expect(callLLMWithSchema).not.toHaveBeenCalled();
+    // A syntactically repaired response must not look like a complete import.
+    for (const incomplete of [
+      response([drafts[0]], false, 'length'),
+      response([drafts[0]], true),
+      { ...response([drafts[0]]), rawResponse: { choices: [{ finish_reason: 'stop',
+        message: { content: '{"has_more":false,"cases":[{"text":"unfinished' } }] } },
+    ]) {
+      jest.mocked(callLLMWithSchema).mockResolvedValueOnce(incomplete);
+      expect((await request({ mode: 'preview', text: raw })).status).toBe(502);
+    }
+    expect(mockCaseDb.inserts).toEqual([]);
+  });
+
+  it('refreshes site cases without duplicates, preserving uploads and old rows on empty extraction or insert failure', async () => {
+    const seed = [
+      { ...drafts[0], id: 'kept', project_id: 'project', source: 'site', created_at: '2026-01-01' },
+      { ...drafts[0], id: 'duplicate', project_id: 'project', source: 'site', created_at: '2026-01-02' },
+      { ...drafts[0], id: 'stale', text: 'old text', project_id: 'project', source: 'site' },
+      { ...drafts[0], id: 'upload', project_id: 'project', source: 'upload' },
+      { ...drafts[0], id: 'other', project_id: 'other-project', source: 'site' },
+    ];
+    const db = createMockSupabase({ tables: { ve_cases: seed } });
+    const refresh = (database = db, signal?: AbortSignal) => refreshSiteCases(
+      { supabase: database, signal } as unknown as VeStageContext, 'project', 'https://client.test', raw,
+      jest.fn(), 'ru', [],
+    );
+    jest.mocked(callLLMWithSchema).mockResolvedValue(response(drafts));
+    await refresh();
+    await refresh();
+    expect(db.getRows('ve_cases').filter((row) => row.project_id === 'project' && row.source === 'site')
+      .map((row) => row.text)).toEqual([sourceA, sourceB]);
+    expect(db.inserts).toHaveLength(1);
+    expect(db.getRows('ve_cases').map((row) => row.id)).toEqual(expect.arrayContaining(['kept', 'upload', 'other']));
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response([]));
+    const saved = db.getRows('ve_cases');
+    await refresh();
+    expect(db.getRows('ve_cases')).toEqual(saved);
+    const failed = createMockSupabase({ tables: { ve_cases: seed },
+      errorInserts: { ve_cases: { code: 'unavailable', message: 'storage unavailable' } } });
+    await expect(refresh(failed)).rejects.toThrow('storage unavailable');
+    expect(failed.getRows('ve_cases')).toEqual(seed);
+    const controller = new AbortController();
+    controller.abort(new Error('cancelled'));
+    await expect(refresh(db, controller.signal)).rejects.toThrow('cancelled');
+    expect(db.getRows('ve_cases')).toEqual(saved);
   });
 });
