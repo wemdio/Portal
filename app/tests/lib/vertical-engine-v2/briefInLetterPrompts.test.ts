@@ -238,15 +238,22 @@ describe('buildTemplatePlanMessages', () => {
 });
 
 describe('client case imports and refresh', () => {
-  const sourceA = 'Кейс сети кофеен Додо.\nИзготовили 3000 стикеров за 2 недели. Клиент успел запустить рекламную кампанию.';
-  const sourceB = 'Кейс спортивного клуба. Оформили 48 подарочных наборов. Болельщики получили готовый мерч к матчу.';
-  const raw = `${sourceA}\n\n---\n\n${sourceB}`;
+  const sourceA = 'FlyZone\nСделали 161 стикерпак по 13 наклеек под смолой для детских мероприятий. Изготовили за 5 рабочих дней и решили проблему с логистикой после сбоя доставки.\nХорошо использовать для сегментов: детские товары, детские центры, мероприятия, срочность, надежность.';
+  const sourceB = 'Мармеладыч\nСделали 1500 стикерпаков формата А5 с индивидуальной упаковкой в прозрачный пакет.\nХорошо использовать для: сладости, подарочные наборы, детские/сладкие бренды, ритейл, упаковка.';
+  const raw = `${sourceA}\n\n${sourceB}`;
   const drafts = [
-    { industry: 'HoReCa', client_type: 'сеть кофеен Додо', task: 'Изготовить стикеры для кампании',
-      metrics: { тираж: 3000, срок: '2 недели' }, result: 'Клиент успел запустить рекламную кампанию.', text: sourceA },
-    { industry: 'спорт', client_type: 'спортивный клуб', task: 'Оформить подарочные наборы',
-      metrics: { наборов: 48 }, result: 'Болельщики получили готовый мерч к матчу.', text: sourceB },
+    { industry: '', client_type: 'FlyZone', task: 'Сделали 161 стикерпак по 13 наклеек под смолой для детских мероприятий',
+      metrics: { тираж: 161, наклеек_в_паке: 13, срок: '5 рабочих дней' },
+      result: 'Изготовили за 5 рабочих дней и решили проблему с логистикой после сбоя доставки.', text: sourceA },
+    { industry: '', client_type: 'Мармеладыч', task: 'Сделали 1500 стикерпаков формата А5',
+      metrics: { тираж: 1500, формат: 'А5' },
+      result: 'Сделали 1500 стикерпаков А5 с индивидуальной упаковкой в прозрачный пакет.', text: sourceB },
   ];
+  const indexedDrafts = drafts.map(({ text: _text, ...draft }, index) => ({
+    // The actual model returned only factual parts; attached recommendation
+    // parts 4/7 must survive in the original without pulling in the next case.
+    ...draft, source_start: index === 0 ? 1 : 5, source_end: index === 0 ? 3 : 6,
+  }));
   const response = (cases: unknown[], hasMore = false, finishReason = 'stop') => ({
     data: { cases, has_more: hasMore }, tokensUsed: 40, costUsd: 0.001,
     promptTokens: 20, completionTokens: 20, rawResponse: { choices: [{ finish_reason: finishReason }] },
@@ -257,17 +264,32 @@ describe('client case imports and refresh', () => {
   afterEach(() => jest.clearAllMocks());
 
   it('keeps separate engagements, their own numbers and the exact source fragment through the import', async () => {
-    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response([
-      { ...drafts[0], text: sourceA.replace(/\s+/g, ' ') }, drafts[1],
-    ]));
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response(indexedDrafts));
     const cases = await structureCaseTexts(raw);
     expect(cases).toEqual(drafts);
     expect(validateCaseDrafts(raw, cases)).toEqual(drafts);
-    expect(jest.mocked(callLLMWithSchema).mock.calls[0][0].map((message) => message.content).join('\n')).toContain(raw);
-    expect(cases[0].metrics).not.toHaveProperty('наборов');
-    expect(cases[1].text).not.toContain('3000');
+    expect(cases[0].metrics).toEqual({ тираж: 161, наклеек_в_паке: 13, срок: '5 рабочих дней' });
+    expect(cases[1].text).not.toContain('161');
+    expect(cases[0].industry).toBe('');
+    expect(cases[1].result).toContain('индивидуальной упаковкой');
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response([{ ...indexedDrafts[0], source_end: 2,
+      metrics: { тираж: 161, наклеек_в_паке: 13 }, result: 'Сделали 161 стикерпак по 13 наклеек под смолой.' }]));
+    expect((await structureCaseTexts(raw))[0].text).toBe(sourceA.slice(0, sourceA.indexOf(' Изготовили за')));
+    const crlf = raw.replace(/\n/g, '\r\n');
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response(indexedDrafts));
+    expect((await structureCaseTexts(crlf)).map((entry) => entry.text))
+      .toEqual([sourceA, sourceB].map((source) => source.replace(/\n/g, '\r\n')));
+    const inlineA = 'Клиент А: изготовили 1.5 кг образцов. Получили 3 партии без брака.';
+    const inlineB = 'Клиент Б: упаковали 200 наборов. Доставили их вовремя без повреждений!';
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response([
+      { industry: '', client_type: 'Клиент А', task: 'Изготовили 1.5 кг образцов', metrics: { масса: '1.5 кг', партии: 3 },
+        result: 'Получили 3 партии без брака.', source_start: 1, source_end: 2 },
+      { industry: '', client_type: 'Клиент Б', task: 'Упаковали 200 наборов', metrics: { наборов: 200 },
+        result: 'Доставили их вовремя без повреждений!', source_start: 3, source_end: 4 },
+    ]));
+    expect((await structureCaseTexts(`${inlineA} ${inlineB}`)).map((entry) => entry.text)).toEqual([inlineA, inlineB]);
     mockCaseDb = createMockSupabase({ tables: { ve_projects: [{ id: 'project' }] } });
-    jest.mocked(callLLMWithSchema).mockClear().mockResolvedValueOnce(response(drafts));
+    jest.mocked(callLLMWithSchema).mockClear().mockResolvedValueOnce(response(indexedDrafts));
     const preview = await request({ mode: 'preview', text: raw });
     expect(preview.status).toBe(200);
     expect(mockCaseDb.inserts).toEqual([]);
@@ -285,16 +307,31 @@ describe('client case imports and refresh', () => {
     for (const invalid of [
       { ...drafts[0], task: '' },
       { ...drafts[0], text: 'Придуманный клиент получил рост продаж на 3000 процентов.' },
-      { ...drafts[0], metrics: { тираж: 48 } },
+      { ...drafts[0], metrics: { тираж: 1500 } },
       { ...drafts[0], metrics: { тираж: { вложенное: 3000 } } },
+      { ...drafts[0], industry: 'детские товары' },
+      { ...drafts[0], result: 'Проект выполнен.' },
     ]) expect(() => validateCaseDrafts(raw, [invalid])).toThrow();
+    const withSuggestedNumber = sourceA.replace('надежность.', 'надежность, охват 900.');
+    expect(() => validateCaseDrafts(withSuggestedNumber, [{ ...drafts[0], text: withSuggestedNumber, metrics: { охват: 900 } }])).toThrow();
     expect(() => validateCaseDrafts(raw, [drafts[0], drafts[0]])).toThrow();
     mockCaseDb = createMockSupabase({ tables: { ve_projects: [{ id: 'project' }] } });
-    for (const cases of [[], [{ ...drafts[0], metrics: { тираж: 48 } }]]) {
+    for (const cases of [[], [{ ...drafts[0], metrics: { тираж: 1500 } }]]) {
       expect((await request({ mode: 'save', text: raw, cases })).status).toBe(422);
     }
     expect(mockCaseDb.inserts).toEqual([]);
     expect(callLLMWithSchema).not.toHaveBeenCalled();
+    for (const bounds of [
+      { source_start: 0, source_end: 4 }, { source_start: 1.5, source_end: 4 },
+      { source_start: 4, source_end: 1 }, { source_start: 1, source_end: 99 },
+    ]) {
+      jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response([{ ...indexedDrafts[0], ...bounds }]));
+      await expect(structureCaseTexts(raw)).rejects.toThrow();
+    }
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response([indexedDrafts[0], { ...indexedDrafts[1], source_start: 4 }]));
+    await expect(structureCaseTexts(raw)).rejects.toThrow(/пересекаются/);
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response([{ ...indexedDrafts[1], source_start: 4 }, indexedDrafts[0]]));
+    await expect(structureCaseTexts(raw)).rejects.toThrow(/пересекаются/);
     // A syntactically repaired response must not look like a complete import.
     for (const incomplete of [
       response([drafts[0]], false, 'length'),
