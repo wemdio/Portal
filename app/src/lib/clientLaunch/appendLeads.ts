@@ -21,6 +21,7 @@ import { createLeads, listLeads } from '@/lib/instantly/client';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { resolveClientInstantlyRequestOptions } from '@/lib/instantly/clientAccountOptions';
 import { getBlockedEmailSet, filterBlockedLeads } from '@/lib/clientBlocklist/blockedContacts';
+import { filterClientDomainLeads } from '@/lib/clientBlocklist/domainPolicy';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import {
@@ -91,7 +92,7 @@ export interface AppendLeadsResult {
   attemptedIndexes: number[];
   /** Exact positions in input.leads, or null when the provider only returned an aggregate. */
   acceptedIndexes: number[] | null;
-  /** Exact permanent skips (blocklist or identified provider rejection), never retryable omissions. */
+  /** Exact permanent skips (client policy, blocklist, or identified provider rejection), never retryable omissions. */
   skippedIndexes?: number[];
   identityComplete: boolean;
 }
@@ -188,17 +189,30 @@ export async function appendLeadsToClientCampaign(
   }
   const instantlyRequestOptions = { accountId: instantlyAccountId };
 
-  // 1b. Чёрный список клиента — как в runClientLaunch: заблокированные адреса
-  //     не попадают в Instantly и не съедают тарифный лимит. Особенно важно
-  //     здесь: авто-пайплайн каждый день подкладывает новых лидов без участия
-  //     клиента, и без фильтра негативный контакт получал бы письма снова.
+  // 1b. Client-scoped domain policy and blocklist run before tariff usage,
+  //     durable submission reporting, and provider delivery. Both filters
+  //     retain the original lead objects so input-relative result indexes stay exact.
+  const {
+    kept: domainAllowedLeads,
+    blockedCount: domainPolicyBlockedCount,
+  } = filterClientDomainLeads(leads, userId);
   const blockedSet = await getBlockedEmailSet(supabaseInstantly, userId);
-  const { kept: allowedLeads, blockedCount } = filterBlockedLeads(leads, blockedSet);
+  const {
+    kept: allowedLeads,
+    blockedCount: emailBlockedCount,
+  } = filterBlockedLeads(domainAllowedLeads, blockedSet);
+  const blockedCount = domainPolicyBlockedCount + emailBlockedCount;
   if (allowedLeads.length === 0) {
     await logAudit(
       'client.appendLeads.all_blocked',
-      'All leads in batch are on the client blocklist',
-      { campaignId, contextLabel, blocked: blockedCount },
+      'All leads in batch are excluded by client policy or blocklist',
+      {
+        campaignId,
+        contextLabel,
+        blocked: blockedCount,
+        domainPolicyBlocked: domainPolicyBlockedCount,
+        emailBlocked: emailBlockedCount,
+      },
       logMeta,
     );
     return {
@@ -268,7 +282,7 @@ export async function appendLeadsToClientCampaign(
   });
   const allowedInputIndexes = allowedLeads.map((lead) => {
     const index = inputIndexQueues.get(lead)?.shift();
-    if (index === undefined) throw new Error('Blocked-contact filter changed lead identity');
+    if (index === undefined) throw new Error('Client exclusion filter changed lead identity');
     return index;
   });
   const sentInputIndexes = allowedInputIndexes.slice(0, leadsToSend.length);
@@ -404,7 +418,8 @@ export async function appendLeadsToClientCampaign(
 
   }
 
-  // `skipped` remains backward compatible for callers: provider skips plus blocklist cuts.
+  // `skipped` remains backward compatible for callers: provider skips plus
+  // client-domain-policy and blocklist cuts.
   const result = currentResult();
   await logAudit(
     'client.appendLeads.success',
@@ -416,6 +431,8 @@ export async function appendLeadsToClientCampaign(
       accepted,
       skipped: result.skipped,
       blocked: blockedCount,
+      domainPolicyBlocked: domainPolicyBlockedCount,
+      emailBlocked: emailBlockedCount,
       requested: leadsToSend.length,
     },
     logMeta,

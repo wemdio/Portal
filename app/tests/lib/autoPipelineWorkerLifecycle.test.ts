@@ -2,6 +2,13 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { createMockSupabase } from '../helpers/mockSupabase';
+import { fetchTopUpFromCache } from '@/lib/jobs/baseOfBasesFromCache';
+import { fetchTopUpFromBaseOfBases } from '@/lib/jobs/baseOfBasesSource';
+
+let mockSourceDb: ReturnType<typeof createMockSupabase>;
+jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mockSourceDb; } }));
+jest.mock('@/lib/companiesSearch/rpcSearch', () => ({ searchRows: jest.fn() }));
 import {
   mapAutoPipelineChunkUntilStopped,
   retainRowsSafeAfterInterruptedAppend,
@@ -16,6 +23,28 @@ function readRepoFile(relativePath: string): string {
 }
 
 describe('auto-pipeline cooperative worker lifecycle', () => {
+  it('fills top-up slots with allowed company sites before enrichment, without changing the shared cache', async () => {
+    const clientUserId = '0a6d90e1-91d0-404e-b508-6b031bda7cfd';
+    const cached = [1, 2, 3].map((id) => ({
+      domain: `blocked-${id}.com`, score: 2000, company_name: 'Company', scored_at: '2026-09-05',
+    }));
+    cached.push({ domain: 'allowed.com.ru', score: 2000, company_name: 'Allowed', scored_at: '2026-09-01' });
+    mockSourceDb = createMockSupabase({ enforceQueryWindows: true, tables: { mailganer_domain_scores: cached } });
+    const input = { neededCount: 1, seenDomains: new Set<string>(), excludePatterns: [], clientUserId };
+    const fromCache = await fetchTopUpFromCache(input);
+    expect(fromCache.employers.map((employer) => employer.siteUrl)).toEqual(['https://allowed.com.ru']);
+    expect(mockSourceDb.getRows('mailganer_domain_scores')).toHaveLength(4);
+    expect(input.seenDomains.has('blocked-1.com')).toBe(false);
+    expect((await fetchTopUpFromCache({ ...input, clientUserId: 'other', seenDomains: new Set() })).employers[0].siteUrl).toBe('https://blocked-1.com');
+
+    const searchRowsImpl = jest.fn().mockResolvedValue({ rows: [
+      { id: 1, name: 'Excluded', website: 'https://blocked.com/contact' },
+      { id: 2, name: 'Allowed', website: 'https://allowed.ru' },
+    ], error: null });
+    const fromDirectory = await fetchTopUpFromBaseOfBases({ ...input, revenueFrom: 0, searchRowsImpl });
+    expect(fromDirectory.employers.map((employer) => employer.siteUrl)).toEqual(['https://allowed.ru']);
+  });
+
   it('stops scheduling new domains after shutdown and preserves completed results', async () => {
     let stopping = false;
     const processed: number[] = [];
