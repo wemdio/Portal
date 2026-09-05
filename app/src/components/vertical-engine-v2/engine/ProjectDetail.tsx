@@ -78,6 +78,10 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const [selectedVerticalId, setSelectedVerticalId] = useState<string | null>(null);
   const projectTopRef = useRef<HTMLDivElement | null>(null);
   const contentTopRef = useRef<HTMLElement | null>(null);
+  const contentLeaveGuardRef = useRef<(() => boolean) | null>(null);
+  const registerContentLeaveGuard = useCallback((guard: (() => boolean) | null) => {
+    contentLeaveGuardRef.current = guard;
+  }, []);
 
   const [researchStarting, setResearchStarting] = useState(false);
   const [selectedBaseId, setSelectedBaseId] = useState<string | null>(null);
@@ -95,6 +99,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const visitTrackedRef = useRef(false);
 
   const jumpTo = useCallback((next: number, options?: { scroll?: boolean }) => {
+    if (next !== 3 && contentLeaveGuardRef.current && !contentLeaveGuardRef.current()) return;
     setStep(next);
     setMaxVisitedStep((prev) => Math.max(prev, next));
     if (options?.scroll === false) return;
@@ -553,6 +558,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             onGenerateChain={(language: 'ru' | 'en' | 'pl') => void runChain(selectedVertical.id, language)}
             onGenerateVocab={() => void runVocab(selectedVertical.id)}
             onGoToBase={() => jumpTo(4)}
+            onRegisterLeaveGuard={registerContentLeaveGuard}
             dossiers={dossiers}
             onBuildDossier={() => void runDossier(selectedVertical.id)}
           />
@@ -629,7 +635,9 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
       {detail ? (
         <div className="ve2-wiz">
           <aside className="ve2-rail min-w-0">
-            <button type="button" onClick={onBack} className="ve2-b-quiet inline-flex items-center gap-1.5">
+            <button type="button" onClick={() => {
+              if (!contentLeaveGuardRef.current || contentLeaveGuardRef.current()) onBack();
+            }} className="ve2-b-quiet inline-flex items-center gap-1.5">
               <ArrowLeft aria-hidden className="h-3.5 w-3.5" />
               Все проекты
             </button>
