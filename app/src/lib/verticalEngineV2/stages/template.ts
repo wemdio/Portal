@@ -5,7 +5,7 @@
  *     у письма 1 — A/B-вариант ---LETTER 1 B---): основной текст — дефолт для
  *     всей базы, сегментные варианты хранятся отдельно
  *     (letters[].segment_variants), B-вариант — в letters[].variants,
- *     wait_days — лесенка CHAIN_WAIT_DAYS из stages/chain;
+ *     wait_days — сохранённые интервалы исходной цепочки вертикали;
  *  3) пост-проверки с одним retry каждая: длина тел (≤80 слов, письмо 1 ≤70) и
  *     консистентность operator_mapping (см. validateOperatorMapping);
  *  4) pure-маппинг операторов {{var}} финальных писем на колонки базы;
@@ -19,6 +19,7 @@
  */
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
+import { applyVeChainTiming } from '../chainTiming';
 import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getVeModel, type LLMMessage } from '../llm';
 import {
   VeBaseAnalysisSchema,
@@ -536,8 +537,8 @@ export async function runTemplateStage(job: VeJob, ctx: VeStageContext): Promise
     const seg = extractSegmentVariants(ab.cleaned);
     const parsed = parseLettersFromModelOutput(seg.cleaned);
     const sliced = parsed.slice(0, 6);
-    // wait_days — лесенка цепочки CHAIN_WAIT_DAYS (внутри parsedToChainLetters), по индексу письма.
-    const letters = parsedToChainLetters(sliced).map((l, i): VeChainLetterAB => {
+    // Every retry/rewrite inherits the saved chain timing, not generation defaults.
+    const letters = applyVeChainTiming(parsedToChainLetters(sliced), chainLetters).map((l, i): VeChainLetterAB => {
       const { variants: _legacy, ...rest } = l;
       const idx = sliced[i]?.letter_index ?? i + 1;
       const sv = seg.variants.get(idx);

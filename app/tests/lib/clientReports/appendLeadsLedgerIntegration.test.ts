@@ -5,14 +5,17 @@ import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/
 let mainDb: MockSupabaseClient = createMockSupabase();
 let instantlyDb: MockSupabaseClient = createMockSupabase();
 const createLeadsMock = jest.fn();
+const createCampaignMock = jest.fn();
 const resolveEffectiveLimitsMock = jest.fn(() => ({ max_contacts: 5000 }));
 const getClientTariffRowMock = jest.fn(async () => ({ status: 'active' }));
 const getClientStatusMock = jest.fn(() => 'active');
 let mockBlockedEmails = new Set<string>();
+const MAILGANER_CLIENT_ID = '0a6d90e1-91d0-404e-b508-6b031bda7cfd';
 
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mainDb; } }));
 jest.mock('@/lib/supabaseInstantly', () => ({ get supabaseInstantly() { return instantlyDb; } }));
 jest.mock('@/lib/instantly/client', () => ({
+  createCampaign: (...args: unknown[]) => createCampaignMock(...args),
   createLeads: (...args: unknown[]) => {
     const requestOptions = args[2] as { onRequestAttempt?: () => void } | undefined;
     requestOptions?.onRequestAttempt?.();
@@ -45,6 +48,7 @@ jest.mock('@/lib/loggerServer', () => ({
 }));
 
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
+import { runClientLaunch } from '@/lib/clientLaunch/runLaunch';
 
 const leads = [
   { email: 'one@example.com', company_name: 'One', custom_variables: { domain: 'example.com', score: '1001' } },
@@ -58,7 +62,16 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
       client_campaign_append_batches: [], client_campaign_contact_ledger: [],
     } });
     instantlyDb = createMockSupabase({ tables: {
-      client_campaign_presets: [{ id: 'preset-1', client_user_id: 'client-1', instantly_account_id: 'main' }],
+      client_campaign_presets: [
+        { id: 'preset-1', client_user_id: 'client-1', instantly_account_id: 'main' },
+        {
+          id: 'preset-mailganer', client_user_id: MAILGANER_CLIENT_ID, instantly_account_id: 'main',
+          email_account_ids: ['sender-1'], daily_limit: 30, daily_max_leads: 30,
+          email_gap_minutes: 10, open_tracking: false, link_tracking: false,
+          stop_on_reply: true, text_only: true, schedule_from: '09:00', schedule_to: '18:00',
+          schedule_days: [1, 2, 3, 4, 5], schedule_timezone: 'Etc/GMT-3',
+        },
+      ],
     } });
     createLeadsMock.mockResolvedValue({ leads_uploaded: 2 });
     resolveEffectiveLimitsMock.mockReturnValue({ max_contacts: 5000 });
@@ -255,6 +268,66 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
       userId: 'client-1', campaignId: 'campaign-1', leads, entitlementMode: 'managed_contract',
     })).resolves.toMatchObject({ attemptedIndexes: [], skippedIndexes: [0, 1] });
     expect(createLeadsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('excludes only .com sites for Mailganer before delivery and durable reporting', async () => {
+    const domainLeads = [
+      { email: 'excluded@example.com', website: 'https://excluded.com', custom_variables: { domain: 'excluded.com' } },
+      { email: 'local@example.com', website: 'https://local.com.ru', custom_variables: { domain: 'local.com.ru' } },
+      { email: 'other@example.org', website: 'https://other.example.org', custom_variables: { domain: 'other.example.org' } },
+    ];
+    createLeadsMock.mockImplementation(async (chunk: unknown[]) => ({ leads_uploaded: chunk.length }));
+
+    const mailganerResult = await appendLeadsToClientCampaign({
+      userId: MAILGANER_CLIENT_ID,
+      campaignId: 'campaign-mailganer',
+      leads: domainLeads,
+      entitlementMode: 'managed_contract',
+    });
+
+    expect(createLeadsMock.mock.calls[0][0]).toEqual(domainLeads.slice(1));
+    expect(createLeadsMock.mock.calls[0][0][0]).toBe(domainLeads[1]);
+    expect(createLeadsMock.mock.calls[0][0][1]).toBe(domainLeads[2]);
+    expect(mailganerResult).toMatchObject({
+      accepted: 2,
+      skipped: 1,
+      acceptedIndexes: [1, 2],
+      attemptedIndexes: [1, 2],
+      skippedIndexes: [0],
+    });
+    expect(mainDb.getRows('client_campaign_append_batches')[0]).toMatchObject({
+      requested_count: 2,
+      accepted_count: 2,
+    });
+    expect(mainDb.getRows('client_campaign_contact_ledger').map((row) => row.email)).toEqual([
+      'local@example.com',
+      'other@example.org',
+    ]);
+
+    const otherClientResult = await appendLeadsToClientCampaign({
+      userId: 'client-1',
+      campaignId: 'campaign-other-client',
+      leads: [domainLeads[0]],
+      entitlementMode: 'managed_contract',
+    });
+    expect(createLeadsMock.mock.calls[1][0]).toEqual([domainLeads[0]]);
+    expect(otherClientResult).toMatchObject({ accepted: 1, skipped: 0, attemptedIndexes: [0] });
+  });
+
+  it('explains an all-.com primary launch before tariff or provider work starts', async () => {
+    await expect(runClientLaunch({
+      userId: MAILGANER_CLIENT_ID,
+      sequence: { name: 'Mailganer campaign', steps: [{ subject: 'Subject', body: 'Body', wait_days: 0 }] },
+      leads: [{ email: 'person@example.ru', website: 'https://excluded.com' }],
+    })).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringContaining('доменной политикой (.com)'),
+    });
+
+    expect(getClientTariffRowMock).not.toHaveBeenCalled();
+    expect(createCampaignMock).not.toHaveBeenCalled();
+    expect(createLeadsMock).not.toHaveBeenCalled();
+    expect(instantlyDb.getRows('client_campaign_launches')).toHaveLength(0);
   });
 
   it('fences a changed workspace again at the actual append boundary', async () => {

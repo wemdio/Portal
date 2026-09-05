@@ -42,6 +42,7 @@ interface LargeJob {
   active_domains: number;
   cached_domains: number;
   junk_domains: number;
+  excluded_domains?: number;
   error_message: string | null;
   created_at: string;
   finished_at: string | null;
@@ -530,9 +531,10 @@ function StatusBadge({ status }: { status: RunRow['status'] }) {
 }
 
 function LargeJobCard({ job }: { job: LargeJob }) {
+  const excludedDomains = job.excluded_domains ?? 0;
   const scoringPct =
     job.total_domains > 0
-      ? Math.min(100, Math.round((job.scored_domains / job.total_domains) * 100))
+      ? Math.min(100, Math.round(((job.scored_domains + excludedDomains) / job.total_domains) * 100))
       : 0;
   const statusCfg: Record<string, { label: string; cls: string }> = {
     uploading: { label: 'Загрузка', cls: 'bg-gray-100 text-gray-700' },
@@ -569,8 +571,8 @@ function LargeJobCard({ job }: { job: LargeJob }) {
         <div className="mt-2">
           <div className="flex items-baseline justify-between text-xs text-gray-600 mb-1">
             <span>
-              Отскорено {job.scored_domains.toLocaleString('ru-RU')} /{' '}
-              {job.total_domains.toLocaleString('ru-RU')} · активных{' '}
+              Проверено {job.scored_domains.toLocaleString('ru-RU')} · всего в файле{' '}
+              {job.total_domains.toLocaleString('ru-RU')} · с оценкой выше нуля{' '}
               {job.active_domains.toLocaleString('ru-RU')}
             </span>
             <span>{scoringPct}%</span>
@@ -579,6 +581,12 @@ function LargeJobCard({ job }: { job: LargeJob }) {
             <div className="h-full bg-blue-500 transition-all" style={{ width: `${scoringPct}%` }} />
           </div>
         </div>
+      )}
+
+      {excludedDomains > 0 && (
+        <p className="mt-2 text-xs text-gray-600">
+          Исключено по сайту .com: {excludedDomains.toLocaleString('ru-RU')} — без проверки и загрузки в кампании.
+        </p>
       )}
 
       {job.status === 'failed' && job.error_message && (
