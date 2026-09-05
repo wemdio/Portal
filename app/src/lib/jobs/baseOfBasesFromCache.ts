@@ -16,9 +16,11 @@
 
 import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { getClientExcludedDomainSuffixes, isClientDomainExcluded } from '@/lib/clientBlocklist/domainPolicy';
 import type { HhEmployer } from './hhAutoParser';
 
 export interface FetchFromCacheInput {
+  clientUserId: string;
   /** Сколько активных компаний нужно из кэша. */
   neededCount: number;
   /** Уже виденные домены (HH-результаты + БД seen_employers). */
@@ -59,11 +61,16 @@ export async function fetchTopUpFromCache(
 
   log(`BoB cache: querying up to ${queryLimit} active domains from cache`);
 
-  const { data, error } = await supabaseAdmin
+  const query = supabaseAdmin
     .from('mailganer_domain_scores')
     .select('domain, score, company_name, area, employees_count, industries, bob_inn')
     .gt('score', 0)
-    .not('company_name', 'is', null)
+    .not('company_name', 'is', null);
+  // Filter before LIMIT: excluded domains must not crowd allowed candidates out.
+  for (const suffix of getClientExcludedDomainSuffixes(input.clientUserId)) {
+    query.not('domain', 'ilike', `%${suffix}`);
+  }
+  const { data, error } = await query
     .order('scored_at', { ascending: false })
     .limit(queryLimit);
 
@@ -89,6 +96,10 @@ export async function fetchTopUpFromCache(
 
   for (const row of rows) {
     if (employers.length >= input.neededCount) break;
+    if (isClientDomainExcluded(input.clientUserId, row.domain)) {
+      excludeSkipped++;
+      continue;
+    }
     if (!row.company_name) {
       noCompanyDataSkipped++;
       continue;

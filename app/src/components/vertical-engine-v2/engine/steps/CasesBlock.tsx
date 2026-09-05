@@ -56,6 +56,20 @@ function CaseFields({ entry, preview = false }: { entry: CaseContent; preview?: 
 
   return (
     <div className="min-w-0 max-w-[70ch] space-y-3 pb-1">
+      <div>
+        <p className="text-xs font-medium">{preview ? 'Исходное описание' : 'Сохранённое описание'}</p>
+        {entry.text?.trim() ? (
+          <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed">{entry.text}</p>
+        ) : (
+          <p className={`mt-2 text-xs ${HE.muted}`}>{preview ? 'Исходного описания нет.' : 'Сохранённого описания нет.'}</p>
+        )}
+      </div>
+      <div className="pt-2">
+        <p className="text-xs font-medium">Краткий разбор ИИ</p>
+        <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>
+          Разбор может опускать отдельные детали. Проверяйте факты по описанию кейса.
+        </p>
+      </div>
       <dl className="space-y-2.5 text-sm leading-relaxed">
         {fields.map(([label, value]) => (
           <div key={label} className="grid grid-cols-[76px_minmax(0,1fr)] gap-x-3">
@@ -74,16 +88,6 @@ function CaseFields({ entry, preview = false }: { entry: CaseContent; preview?: 
           </dd>
         </div>
       </dl>
-      {entry.text?.trim() ? (
-        <details className="text-xs">
-          <summary className={`cursor-pointer py-1 ${HE.muted}`}>
-            {preview ? 'Фрагмент исходного текста' : 'Сохранённое содержание'}
-          </summary>
-          <p className={`mt-2 max-w-[70ch] whitespace-pre-wrap break-words leading-relaxed ${HE.muted}`}>{entry.text}</p>
-        </details>
-      ) : !preview ? (
-        <p className={`text-xs ${HE.muted}`}>Сохранённого текста нет.</p>
-      ) : null}
     </div>
   );
 }
@@ -257,7 +261,7 @@ function ProjectCasesBlock({ projectId, cases, onCasesChanged }: CasesBlockProps
         {isPreview ? (
           <>
             <h4 ref={previewHeadingRef} tabIndex={-1} className="text-sm font-semibold">Найдено кейсов: {preview.length}</h4>
-            <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>Проверьте каждый кейс и его исходный фрагмент. Снимите отметку с того, что не нужно сохранять. Пока ничего не добавлено.</p>
+            <p className={`mt-1 text-xs leading-relaxed ${HE.muted}`}>Проверьте исходное описание каждого кейса. Снимите отметку с того, что не нужно сохранять. Пока ничего не добавлено.</p>
             {filename.trim() ? <p className={`mt-2 break-words text-xs ${HE.muted}`}>Источник: {filename.trim()}</p> : null}
             <ol className="mt-3 list-none">
               {preview.map(({ draft, key, included }, index) => (

@@ -24,7 +24,14 @@ import {
   type TemplatePlanPromptInput,
 } from '@/lib/verticalEngineV2/prompts/template';
 import { structureCaseTexts, validateCaseDrafts } from '@/lib/verticalEngineV2/caseBank';
-import { callLLMWithSchema } from '@/lib/verticalEngineV2/llm';
+import { callLLMText, callLLMTextWithFallback, callLLMWithSchema } from '@/lib/verticalEngineV2/llm';
+import { buildChainLetters, runChainStage } from '@/lib/verticalEngineV2/stages/chain';
+import { runTemplateStage } from '@/lib/verticalEngineV2/stages/template';
+import { normalizeVeChainLetters } from '@/lib/verticalEngineV2/chainLetters';
+import { buildLaunchSequence } from '@/lib/verticalEngineV2/launchHandoff';
+import { buildCampaignPayloadFromPreset } from '@/lib/clientLaunch/buildCampaignPayload';
+import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
+import type { VeChainLetter, VeJob } from '@/lib/verticalEngineV2/types';
 import { refreshSiteCases } from '@/lib/verticalEngineV2/stages/siteProfile';
 import type { VeStageContext } from '@/lib/verticalEngineV2/stages/shared';
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
@@ -41,7 +48,13 @@ jest.mock('@/lib/loggerServer', () => ({ logAudit: jest.fn(), logError: jest.fn(
 
 jest.mock('@/lib/verticalEngineV2/llm', () => ({
   ...jest.requireActual('@/lib/verticalEngineV2/llm'),
+  callLLMText: jest.fn(),
+  callLLMTextWithFallback: jest.fn(),
   callLLMWithSchema: jest.fn(),
+}));
+jest.mock('@/lib/verticalEngineV2/datasetStats', () => ({
+  ...jest.requireActual('@/lib/verticalEngineV2/datasetStats'),
+  getWinnerPatterns: jest.fn(async () => []),
 }));
 
 const BRIEF: VeClientBrief = {
@@ -238,15 +251,22 @@ describe('buildTemplatePlanMessages', () => {
 });
 
 describe('client case imports and refresh', () => {
-  const sourceA = 'Кейс сети кофеен Додо.\nИзготовили 3000 стикеров за 2 недели. Клиент успел запустить рекламную кампанию.';
-  const sourceB = 'Кейс спортивного клуба. Оформили 48 подарочных наборов. Болельщики получили готовый мерч к матчу.';
-  const raw = `${sourceA}\n\n---\n\n${sourceB}`;
+  const sourceA = 'FlyZone\nСделали 161 стикерпак по 13 наклеек под смолой для детских мероприятий. Изготовили за 5 рабочих дней и решили проблему с логистикой после сбоя доставки.\nХорошо использовать для сегментов: детские товары, детские центры, мероприятия, срочность, надежность.';
+  const sourceB = 'Мармеладыч\nСделали 1500 стикерпаков формата А5 с индивидуальной упаковкой в прозрачный пакет.\nХорошо использовать для: сладости, подарочные наборы, детские/сладкие бренды, ритейл, упаковка.';
+  const raw = `${sourceA}\n\n${sourceB}`;
   const drafts = [
-    { industry: 'HoReCa', client_type: 'сеть кофеен Додо', task: 'Изготовить стикеры для кампании',
-      metrics: { тираж: 3000, срок: '2 недели' }, result: 'Клиент успел запустить рекламную кампанию.', text: sourceA },
-    { industry: 'спорт', client_type: 'спортивный клуб', task: 'Оформить подарочные наборы',
-      metrics: { наборов: 48 }, result: 'Болельщики получили готовый мерч к матчу.', text: sourceB },
+    { industry: '', client_type: 'FlyZone', task: 'Сделали 161 стикерпак по 13 наклеек под смолой для детских мероприятий',
+      metrics: { тираж: 161, наклеек_в_паке: 13, срок: '5 рабочих дней' },
+      result: 'Изготовили за 5 рабочих дней и решили проблему с логистикой после сбоя доставки.', text: sourceA },
+    { industry: '', client_type: 'Мармеладыч', task: 'Сделали 1500 стикерпаков формата А5',
+      metrics: { тираж: 1500, формат: 'А5' },
+      result: 'Сделали 1500 стикерпаков А5 с индивидуальной упаковкой в прозрачный пакет.', text: sourceB },
   ];
+  const indexedDrafts = drafts.map(({ text: _text, ...draft }, index) => ({
+    // The actual model returned only factual parts; attached recommendation
+    // parts 4/7 must survive in the original without pulling in the next case.
+    ...draft, source_start: index === 0 ? 1 : 5, source_end: index === 0 ? 3 : 6,
+  }));
   const response = (cases: unknown[], hasMore = false, finishReason = 'stop') => ({
     data: { cases, has_more: hasMore }, tokensUsed: 40, costUsd: 0.001,
     promptTokens: 20, completionTokens: 20, rawResponse: { choices: [{ finish_reason: finishReason }] },
@@ -257,17 +277,32 @@ describe('client case imports and refresh', () => {
   afterEach(() => jest.clearAllMocks());
 
   it('keeps separate engagements, their own numbers and the exact source fragment through the import', async () => {
-    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response([
-      { ...drafts[0], text: sourceA.replace(/\s+/g, ' ') }, drafts[1],
-    ]));
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response(indexedDrafts));
     const cases = await structureCaseTexts(raw);
     expect(cases).toEqual(drafts);
     expect(validateCaseDrafts(raw, cases)).toEqual(drafts);
-    expect(jest.mocked(callLLMWithSchema).mock.calls[0][0].map((message) => message.content).join('\n')).toContain(raw);
-    expect(cases[0].metrics).not.toHaveProperty('наборов');
-    expect(cases[1].text).not.toContain('3000');
+    expect(cases[0].metrics).toEqual({ тираж: 161, наклеек_в_паке: 13, срок: '5 рабочих дней' });
+    expect(cases[1].text).not.toContain('161');
+    expect(cases[0].industry).toBe('');
+    expect(cases[1].result).toContain('индивидуальной упаковкой');
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response([{ ...indexedDrafts[0], source_end: 2,
+      metrics: { тираж: 161, наклеек_в_паке: 13 }, result: 'Сделали 161 стикерпак по 13 наклеек под смолой.' }]));
+    expect((await structureCaseTexts(raw))[0].text).toBe(sourceA.slice(0, sourceA.indexOf(' Изготовили за')));
+    const crlf = raw.replace(/\n/g, '\r\n');
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response(indexedDrafts));
+    expect((await structureCaseTexts(crlf)).map((entry) => entry.text))
+      .toEqual([sourceA, sourceB].map((source) => source.replace(/\n/g, '\r\n')));
+    const inlineA = 'Клиент А: изготовили 1.5 кг образцов. Получили 3 партии без брака.';
+    const inlineB = 'Клиент Б: упаковали 200 наборов. Доставили их вовремя без повреждений!';
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response([
+      { industry: '', client_type: 'Клиент А', task: 'Изготовили 1.5 кг образцов', metrics: { масса: '1.5 кг', партии: 3 },
+        result: 'Получили 3 партии без брака.', source_start: 1, source_end: 2 },
+      { industry: '', client_type: 'Клиент Б', task: 'Упаковали 200 наборов', metrics: { наборов: 200 },
+        result: 'Доставили их вовремя без повреждений!', source_start: 3, source_end: 4 },
+    ]));
+    expect((await structureCaseTexts(`${inlineA} ${inlineB}`)).map((entry) => entry.text)).toEqual([inlineA, inlineB]);
     mockCaseDb = createMockSupabase({ tables: { ve_projects: [{ id: 'project' }] } });
-    jest.mocked(callLLMWithSchema).mockClear().mockResolvedValueOnce(response(drafts));
+    jest.mocked(callLLMWithSchema).mockClear().mockResolvedValueOnce(response(indexedDrafts));
     const preview = await request({ mode: 'preview', text: raw });
     expect(preview.status).toBe(200);
     expect(mockCaseDb.inserts).toEqual([]);
@@ -285,16 +320,31 @@ describe('client case imports and refresh', () => {
     for (const invalid of [
       { ...drafts[0], task: '' },
       { ...drafts[0], text: 'Придуманный клиент получил рост продаж на 3000 процентов.' },
-      { ...drafts[0], metrics: { тираж: 48 } },
+      { ...drafts[0], metrics: { тираж: 1500 } },
       { ...drafts[0], metrics: { тираж: { вложенное: 3000 } } },
+      { ...drafts[0], industry: 'детские товары' },
+      { ...drafts[0], result: 'Проект выполнен.' },
     ]) expect(() => validateCaseDrafts(raw, [invalid])).toThrow();
+    const withSuggestedNumber = sourceA.replace('надежность.', 'надежность, охват 900.');
+    expect(() => validateCaseDrafts(withSuggestedNumber, [{ ...drafts[0], text: withSuggestedNumber, metrics: { охват: 900 } }])).toThrow();
     expect(() => validateCaseDrafts(raw, [drafts[0], drafts[0]])).toThrow();
     mockCaseDb = createMockSupabase({ tables: { ve_projects: [{ id: 'project' }] } });
-    for (const cases of [[], [{ ...drafts[0], metrics: { тираж: 48 } }]]) {
+    for (const cases of [[], [{ ...drafts[0], metrics: { тираж: 1500 } }]]) {
       expect((await request({ mode: 'save', text: raw, cases })).status).toBe(422);
     }
     expect(mockCaseDb.inserts).toEqual([]);
     expect(callLLMWithSchema).not.toHaveBeenCalled();
+    for (const bounds of [
+      { source_start: 0, source_end: 4 }, { source_start: 1.5, source_end: 4 },
+      { source_start: 4, source_end: 1 }, { source_start: 1, source_end: 99 },
+    ]) {
+      jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response([{ ...indexedDrafts[0], ...bounds }]));
+      await expect(structureCaseTexts(raw)).rejects.toThrow();
+    }
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response([indexedDrafts[0], { ...indexedDrafts[1], source_start: 4 }]));
+    await expect(structureCaseTexts(raw)).rejects.toThrow(/пересекаются/);
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(response([{ ...indexedDrafts[1], source_start: 4 }, indexedDrafts[0]]));
+    await expect(structureCaseTexts(raw)).rejects.toThrow(/пересекаются/);
     // A syntactically repaired response must not look like a complete import.
     for (const incomplete of [
       response([drafts[0]], false, 'length'),
@@ -340,5 +390,97 @@ describe('client case imports and refresh', () => {
     controller.abort(new Error('cancelled'));
     await expect(refresh(db, controller.signal)).rejects.toThrow('cancelled');
     expect(db.getRows('ve_cases')).toEqual(saved);
+  });
+});
+
+describe('VE2 follow-up timing through generation and launch', () => {
+  const rawLetters = (count = 4) => Array.from({ length: count }, (_, i) =>
+    `---LETTER ${i + 1}---\nТема: Продолжим\n\nЗдравствуйте. Обсудим сотрудничество?\nКоманда клиента`,
+  ).join('\n\n');
+  const usage = { tokensUsed: 0, promptTokens: 0, completionTokens: 0, costUsd: 0, rawResponse: {} };
+  const textResult = { text: rawLetters(), ...usage };
+  const sourceLetters = (waits: number[]) => waits.map((wait_days) => ({
+    subject: 'Сохранённая тема', body: 'Сохранённое тело', wait_days,
+  }));
+  const job = (stage: 'chain' | 'template'): VeJob => ({
+    id: 'timing-job', project_id: 'timing-project', stage, status: 'running',
+    payload: { vertical_id: 'timing-vertical', base_id: 'timing-base', language: 'ru' },
+    result: null, attempts: 1, error: null, started_at: null, tokens_used: 0, cost_usd: 0,
+    created_at: '2026-09-05', updated_at: '2026-09-05',
+  });
+  const timingDb = (waits: number[], failRead = false) => createMockSupabase({
+    enforceQueryWindows: true,
+    tables: {
+      ve_projects: [{ id: 'timing-project', brief: {} }],
+      ve_verticals: [{ id: 'timing-vertical', name: 'Клиники', synonyms: [] }],
+      ve_bases: [{ id: 'timing-base', vertical_id: 'timing-vertical', columns: [], analysis: {} }],
+      ve_chains: [
+        { id: 'other-vertical', vertical_id: 'other-vertical', language: 'ru',
+          created_at: '2026-09-06', letters: sourceLetters([0, 88, 88, 88]) },
+        { id: 'older-chain', vertical_id: 'timing-vertical', language: 'ru',
+          created_at: '2026-09-03', letters: sourceLetters([0, 33, 33, 33]) },
+        { id: 'latest-chain', vertical_id: 'timing-vertical', language: 'en',
+          created_at: '2026-09-05', letters: sourceLetters(waits) },
+      ],
+    },
+    ...(failRead ? { errorTables: { ve_chains: 'timing storage unavailable' } } : {}),
+  });
+  const context = (db: ReturnType<typeof timingDb>) => ({ supabase: db }) as unknown as VeStageContext;
+  const waitsOf = (letters: unknown) => (letters as VeChainLetter[]).map((letter) => letter.wait_days);
+
+  beforeEach(() => {
+    jest.mocked(callLLMText).mockReset().mockResolvedValue(textResult);
+    jest.mocked(callLLMTextWithFallback).mockReset().mockResolvedValue(textResult);
+    jest.mocked(callLLMWithSchema).mockReset().mockResolvedValue({
+      data: { verdict: 'rewrite', issues: [{ letter_index: 1, problem: 'Тон', fix: 'Уточнить' }] },
+      ...usage,
+    });
+  });
+
+  it('uses short defaults and keeps the latest manual gaps through regeneration, including language changes and read failure', async () => {
+    expect(waitsOf(buildChainLetters(rawLetters(6)).letters)).toEqual([0, 1, 3, 5, 7, 9]);
+    const manual = normalizeVeChainLetters(sourceLetters([8, 0, 2.9, 120])).letters!;
+    expect(waitsOf(manual)).toEqual([0, 0, 2, 90]);
+    for (const [saved, expected] of [
+      [[], [0, 1, 3, 5]],
+      [waitsOf(manual), [0, 0, 2, 90]],
+      [[0, 4], [0, 4, 3, 5]],
+      [[0, Number.NaN, -1, 2.8], [0, 1, 0, 2]],
+    ]) {
+      const db = timingDb(saved);
+      const result = await runChainStage(job('chain'), context(db));
+      expect(waitsOf(db.inserts.find((entry) => entry.table === 've_chains')!.rows[0].letters)).toEqual(expected);
+      expect(result.result).toMatchObject({ critique: { rewritten: true } });
+    }
+    const editedWhileGenerating = timingDb([0, 9, 9, 9]);
+    jest.mocked(callLLMTextWithFallback).mockImplementationOnce(async () => {
+      await editedWhileGenerating.from('ve_chains').update({ letters: sourceLetters([0, 2, 4, 6]) }).eq('id', 'latest-chain');
+      return textResult;
+    });
+    await runChainStage(job('chain'), context(editedWhileGenerating));
+    expect(waitsOf(editedWhileGenerating.inserts[0].rows[0].letters)).toEqual([0, 2, 4, 6]);
+    const failed = timingDb([0, 4, 6, 8], true);
+    await expect(runChainStage(job('chain'), context(failed))).rejects.toThrow('timing storage unavailable');
+    expect(failed.inserts).toEqual([]);
+  });
+
+  it('preserves the saved gaps through template rewriting and maps them to Instantly delay on the preceding step', async () => {
+    const db = timingDb([0, 0, 4, 8]);
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce({
+      data: { fixed_block: 'Костяк', personalization_plan: [], segment_additions: [], letters: [] },
+      ...usage,
+    });
+    const result = await runTemplateStage(job('template'), context(db));
+    const letters = db.inserts.find((entry) => entry.table === 've_templates')!.rows[0].letters as VeChainLetter[];
+    expect(waitsOf(letters)).toEqual([0, 0, 4, 8]);
+    expect(result.result).toMatchObject({ critique: { rewritten: true } });
+    const payload = buildCampaignPayloadFromPreset({
+      preset: { email_account_ids: ['sender@example.test'], daily_limit: 30, daily_max_leads: 20,
+        schedule_days: [1, 2, 3, 4, 5], schedule_timezone: 'Europe/Moscow',
+        schedule_from: '09:00', schedule_to: '18:00' } as ClientCampaignPreset,
+      sequence: { name: 'Timing', steps: buildLaunchSequence(letters)!.steps },
+    });
+    expect(payload.sequences?.[0].steps.map((step) => step.delay)).toEqual([0, 4, 8, 1]);
+    expect(payload.sequences?.[0].steps.every((step) => step.delay_unit === 'days')).toBe(true);
   });
 });

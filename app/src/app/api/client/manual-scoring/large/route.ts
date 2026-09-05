@@ -75,7 +75,7 @@ export async function GET(req: NextRequest) {
   const { data, error } = await supabaseAdmin
     .from('large_score_jobs')
     .select(
-      'id, source_filename, status, total_domains, parsed_domains, scored_domains, active_domains, cached_domains, junk_domains, error_message, created_at, finished_at',
+      'id, source_filename, status, total_domains, parsed_domains, scored_domains, active_domains, cached_domains, junk_domains, excluded_domains, error_message, created_at, finished_at',
     )
     .eq('client_user_id', userId)
     .order('created_at', { ascending: false })
