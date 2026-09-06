@@ -135,6 +135,49 @@ const ADK_CRITERIA = [
   'Также считать лидом, если попросили сделать расчет заявки, рассчитать стоимость перевозки.',
 ].join(' ');
 
+const AUDITED_SELLER_PITCHES = [
+  {
+    name: 'logistics company selling its own services',
+    replyText: [
+      'ООО «Транспортная компания» оказывает услуги по поставке инертных материалов,',
+      'перевозке сельхозпродукции и выполнению земляных работ.',
+      'Готовы к долгосрочному сотрудничеству.',
+      'По всем вопросам обращайтесь по телефону +7 999 555-99-92.',
+    ].join(' '),
+  },
+  {
+    name: 'supplier asking us for dimensions',
+    replyText: [
+      'Мы не производим костровые чаши, но со всем остальным можем Вам помочь.',
+      'Напишите, пожалуйста, свой запрос с размерами, и я вернусь с ответом.',
+      'Со мной также можно связаться по телефону +7 916 711-25-81.',
+    ].join(' '),
+  },
+] as const;
+
+const AUDITED_CONTACT_ROUTING_REPLIES = [
+  {
+    name: 'support desk redirecting to a shared department',
+    replyText: [
+      'Dear Roman,',
+      'Please send the requested information to affiliates@example.com;',
+      'the team manning this email will not be able to help with this matter.',
+      'Thank you for your interest and understanding.',
+      'Customer Support',
+    ].join(' '),
+  },
+  {
+    name: 'employee redirecting to a named partnerships contact',
+    replyText: [
+      'По вопросу сотрудничества можно связаться с Юлией.',
+      'Она отвечает за партнерские интеграции.',
+      'Напишите Юлии на почту, если у вас есть идеи для коллабораций и спецпроектов:',
+      'julia.partnerships@example.com.',
+    ].join(' '),
+  },
+  { name: 'preposed named contact', replyText: 'С Юлией можно связаться по телефону +7 999 555-44-33.' },
+] as const;
+
 const CONTACT_CRITERIA_CASES = [
   { name: 'default', leadCriteria: undefined },
   { name: 'custom contact criterion', leadCriteria: ADK_CRITERIA },
@@ -411,6 +454,150 @@ describe('plain contact routing policy', () => {
   });
 });
 
+describe('audited buyer-versus-seller direction regressions', () => {
+  it.each([
+    'Provider pricing can look fine until FX, withdrawal costs hit the route.',
+    'Please route this to affiliates@example.com; this team cannot help.\n\nYours sincerely,\nSupport\n\nRoman, Sep 4, 2026\nPlease send a commercial proposal with pricing.',
+  ])('does not invent a commercial request from a word prefix or quoted history: %s', async (replyText) => {
+    mockAiResult({ is_lead: false, interest_signals: [], needs_review: false });
+    const result = await qualify(replyText, { outboundText: null });
+    expect(result).toMatchObject({ isLead: false, needsReview: false, interestSignals: [] });
+  });
+
+  it.each([
+    'Напишите мне в Макс 8-995-927-90-89',
+    'Напишите, пожалуйста, мне в Макс 8-995-927-90-89',
+    'Write to me on WhatsApp +7 995 927-90-89',
+    'Свяжитесь со мной в Telegram @contact_person',
+  ])('honors the OutreachOS contact-only exclusion with a mobile footer: %s', async (contactReply) => {
+    mockAiResult({
+      is_lead: true,
+      custom_criteria_matched: true,
+      interest_signals: ['оставлен мессенджер'],
+      reason: 'Модель ошибочно приняла способ связи за интерес.',
+      confidence: 0.95,
+    });
+
+    const result = await qualify([
+      contactReply,
+      '',
+      'Отправлено из мобильной Почты Mail',
+      '',
+      'вторник, 25 августа 2026 г. в 11:08 +03:00 от sales@example.com:',
+      '> Наше прежнее предложение.',
+    ].join('\n'), {
+      leadCriteria: OUTREACH_OS_CRITERIA,
+      outboundText: SUBSTANTIVE_OUTBOUND_TEXT,
+    });
+
+    expect(result).toMatchObject({
+      isLead: false,
+      customCriteriaMatched: false,
+      needsReview: false,
+      interestSignals: [],
+      objectionHandleable: false,
+      objectionDraft: null,
+    });
+  });
+
+  it.each(AUDITED_SELLER_PITCHES)(
+    'rejects an audited seller-side reply under the default criterion: $name',
+    async ({ replyText }) => {
+      mockAiResult({
+        is_lead: true,
+        interest_signals: ['готовность к сотрудничеству'],
+        reason: 'Модель ошибочно приняла предложение собеседника продать свои услуги за покупательский интерес.',
+        confidence: 0.9,
+      });
+
+      const result = await qualify(replyText, { outboundText: SUBSTANTIVE_OUTBOUND_TEXT });
+
+      expect(result).toMatchObject({
+        isLead: false,
+        customCriteriaMatched: false,
+        needsReview: false,
+        interestSignals: [],
+      });
+    },
+  );
+
+  it('honors a strict semantic seller verdict before default positive normalization', async () => {
+    mockAiResult({
+      is_lead: true,
+      non_lead_kind: 'seller_pitch',
+      interest_signals: ['предложено сотрудничество'],
+      reason: 'Собеседник продаёт собственную услугу.',
+      confidence: 0.98,
+    });
+
+    const result = await qualify(
+      'We help agencies source candidates and would be happy to sell this service to you.',
+      { outboundText: SUBSTANTIVE_OUTBOUND_TEXT },
+    );
+
+    expect(result).toMatchObject({
+      isLead: false,
+      customCriteriaMatched: false,
+      needsReview: false,
+      interestSignals: [],
+    });
+  });
+
+  it('honors a strict service-followup verdict for the audited Mailganer ticket', async () => {
+    const replyText = [
+      'Полина, добрый день!',
+      'Очень ждем Вашу обратную связь, вопросы и комментарии.',
+      'Можем созвониться, чтобы обсудить детали.',
+      'T_I_C_K_E_T_I_D_291800983',
+    ].join('\n');
+    const ctx = contextWithReply(replyText, SUBSTANTIVE_OUTBOUND_TEXT);
+    ctx.replyEmail.from_address_email = 'support@example.com';
+    ctx.replyEmail.subject = 'Re: [#GA136122]: данные контрагента';
+    mockAiResult({
+      is_lead: true,
+      non_lead_kind: 'service_followup',
+      interest_signals: ['предложен созвон'],
+      reason: 'Это продолжение сервисного тикета поставщика, а не интерес к нашему офферу.',
+      confidence: 0.98,
+    });
+
+    const result = await qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+      apiKey: 'test-key',
+      maxRetries: 0,
+      briefText: '',
+      prefetchedContext: ctx,
+    });
+
+    expect(result).toMatchObject({
+      isLead: false,
+      customCriteriaMatched: false,
+      needsReview: false,
+      interestSignals: [],
+    });
+  });
+
+  it.each(AUDITED_CONTACT_ROUTING_REPLIES)(
+    'rejects audited third-party routing without personal interest: $name',
+    async ({ replyText }) => {
+      mockAiResult({
+        is_lead: true,
+        interest_signals: ['передан контакт'],
+        reason: 'Модель ошибочно приняла маршрутизацию за интерес.',
+        confidence: 0.9,
+      });
+
+      const result = await qualify(replyText, { outboundText: SUBSTANTIVE_OUTBOUND_TEXT });
+
+      expect(result).toMatchObject({
+        isLead: false,
+        customCriteriaMatched: false,
+        needsReview: false,
+        interestSignals: [],
+      });
+    },
+  );
+});
+
 describe('elliptical material request policy', () => {
   it.each([
     { name: 'outbound and quote', outboundText: TOBYLAB_OUTBOUND_TEXT },
@@ -557,6 +744,151 @@ describe('positive lead controls', () => {
     });
 
     const result = await qualify(replyText, { outboundText });
+
+    expect(result.isLead).toBe(true);
+    expect(result.needsReview).toBe(false);
+  });
+
+  it('keeps explicit OutreachOS interest from the responsible person even with contact details', async () => {
+    mockAiResult({
+      is_lead: false,
+      custom_criteria_matched: true,
+      non_lead_kind: 'contact_routing',
+      interest_signals: ['ответственный лично заинтересован'],
+      reason: 'Человек сам отвечает за привлечение клиентов и подтвердил интерес.',
+      confidence: 0.98,
+    });
+
+    const result = await qualify(
+      'Я занимаюсь привлечением клиентов. Мне интересно ваше предложение, напишите мне в Макс 8-995-927-90-89.',
+      { leadCriteria: OUTREACH_OS_CRITERIA, outboundText: SUBSTANTIVE_OUTBOUND_TEXT },
+    );
+
+    expect(result).toMatchObject({
+      isLead: true,
+      customCriteriaMatched: true,
+      nonLeadKind: null,
+      needsReview: false,
+    });
+  });
+
+  it('keeps a deliberately shared email under the ADK custom criterion despite contact-routing semantics', async () => {
+    mockAiResult({
+      is_lead: false,
+      custom_criteria_matched: false,
+      non_lead_kind: 'contact_routing',
+      interest_signals: [],
+      reason: 'Модель увидела только маршрутизацию.',
+      confidence: 0.9,
+    });
+
+    const result = await qualify('Уточните, пожалуйста, по адресу logistics@example.com', {
+      leadCriteria: ADK_CRITERIA,
+      outboundText: SUBSTANTIVE_OUTBOUND_TEXT,
+    });
+
+    expect(result).toMatchObject({
+      isLead: true,
+      customCriteriaMatched: true,
+      nonLeadKind: null,
+      needsReview: false,
+    });
+  });
+
+  it('does not blacklist a real buyer merely because the sender uses a support address', async () => {
+    const replyText = 'Please send your pricing and book a demo with our team next week.';
+    const ctx = contextWithReply(replyText, SUBSTANTIVE_OUTBOUND_TEXT);
+    ctx.replyEmail.from_address_email = 'support@buyer.example';
+    mockAiResult({
+      is_lead: false,
+      interest_signals: [],
+      reason: 'Модель пропустила коммерческий запрос.',
+      confidence: 0.4,
+    });
+
+    const result = await qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+      apiKey: 'test-key',
+      maxRetries: 0,
+      briefText: '',
+      prefetchedContext: ctx,
+    });
+
+    expect(result).toMatchObject({ isLead: true, needsReview: false });
+  });
+
+  it.each([
+    {
+      name: 'mixed seller context with an explicit request for our prices',
+      replyText: 'Мы сами оказываем перевозки, но нам нужны ваши контейнеры. Пришлите цены на 20-футовые КТК.',
+      aiOverrides: { non_lead_kind: 'seller_pitch' },
+    },
+    {
+      name: 'business description with a personal meeting agreement',
+      replyText: 'Мы производим мебель. Давайте завтра созвонимся.',
+      aiOverrides: {},
+    },
+    {
+      name: 'business description with genuine interest identified by AI',
+      replyText: 'Мы производим мебель. Нас заинтересовала ваша CRM.',
+      aiOverrides: { is_lead: true, needs_review: false },
+    },
+    {
+      name: 'request to contact our manager',
+      replyText: 'Можно связаться с вашим менеджером?',
+      aiOverrides: {},
+    },
+    {
+      name: 'explicit interest followed by a colleague contact',
+      replyText: 'Я заинтересован в вашем предложении. Свяжитесь с Юлией, она назначит встречу.',
+      aiOverrides: { is_lead: true, needs_review: false },
+    },
+    {
+      name: 'our product demo requested through the recipient team',
+      replyText: 'Можно связаться с нашей командой, чтобы провести демо вашего решения?',
+      aiOverrides: { is_lead: true, needs_review: false, non_lead_kind: 'contact_routing' },
+    },
+    {
+      name: 'commercial request before an English signature',
+      replyText: 'Please send a commercial proposal with pricing.\n\nYours sincerely,\nJaime',
+      aiOverrides: {},
+    },
+    {
+      name: 'personal call rather than third-party routing',
+      replyText: 'По вопросу сотрудничества можно связаться со мной завтра.',
+      aiOverrides: {},
+    },
+    {
+      name: 'Provider word boundary and an unknown semantic value',
+      replyText: 'Our current provider is expensive. What are your prices?',
+      aiOverrides: { non_lead_kind: 'unknown' },
+    },
+    {
+      name: 'seller wording only inside quoted history',
+      replyText: [
+        'Please send your pricing for the service.',
+        '',
+        'On 1 Sep 2026, Sales wrote:',
+        '> We provide logistics services and can help you with shipments.',
+        '> Contact us to discuss our offer.',
+      ].join('\n'),
+      aiOverrides: {},
+    },
+    {
+      name: 'commercial proposal routed to management',
+      replyText: 'Оставьте ваше коммерческое предложение с ценами. Я передам его руководству.',
+      aiOverrides: { non_lead_kind: 'contact_routing' },
+    },
+  ])('preserves $name', async ({ replyText, aiOverrides }) => {
+    mockAiResult({
+      is_lead: false,
+      interest_signals: [],
+      reason: 'Модель пропустила явный покупательский сигнал.',
+      confidence: 0.4,
+      needs_review: true,
+      ...aiOverrides,
+    });
+
+    const result = await qualify(replyText, { outboundText: SUBSTANTIVE_OUTBOUND_TEXT });
 
     expect(result.isLead).toBe(true);
     expect(result.needsReview).toBe(false);
