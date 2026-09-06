@@ -321,7 +321,20 @@ function isUsernameInvalid(err: unknown): boolean {
 }
 
 export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatchResult> {
-  const { db, client, campaignId, account, perDay, log } = args;
+  const { db, client, campaignId, account, perDay } = args;
+
+  /**
+   * Каждая строка отсюда подписана аккаунтом.
+   *
+   * Лог аккаунта в интерфейсе отбирает строки по его имени в тексте: ссылки на
+   * аккаунт в таблице логов нет (колонка `account_id` есть, но её никто не
+   * заполняет). Первое касание писало без подписи — и в карточке аккаунта из
+   * всей порции была видна одна сводка «отправлено 0, отложено 6», а причина,
+   * записанная миллисекундой позже, оставалась только в общем логе кампании.
+   * Оператор видел, что аккаунт молчит, и не видел почему.
+   */
+  const log: LogFn = (level, message) => args.log(level, `Аккаунт ${account.session_name}: ${message}`);
+
   const result: SendBatchResult = { sent: 0, skipped: 0, postponed: 0, resolveBlocked: false };
   const maxChars = resolveMaxChars(args.maxChars);
   const resolveTimeoutMs = args.resolveTimeoutMs ?? FT_RESOLVE_TIMEOUT_MS;
