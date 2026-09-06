@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import PaymentLimitSummary from '@/components/payments/PaymentLimitSummary';
 import PaymentRequestForm from '@/components/payments/PaymentRequestForm';
 import PaymentRequestList from '@/components/payments/PaymentRequestList';
-import { formatRubles, PAYMENT_DEPARTMENT_LABELS } from '@/components/payments/format';
+import { formatPaymentDate, formatRubles, PAYMENT_DEPARTMENT_LABELS } from '@/components/payments/format';
 import { currentMoscowDate } from '@/lib/calendarDate';
 import {
   loadPayments,
@@ -110,12 +110,13 @@ export default function PaymentsPageView() {
   const activeLoadRef = useRef<AbortController | null>(null);
   const loadErrorRef = useRef<HTMLDivElement>(null);
   const submissionKeyRef = useRef<{ signature: string; key: string } | null>(null);
+  const mutationInFlightRef = useRef(false);
 
-  const load = useCallback(async (targetMonth: string) => {
+  const load = useCallback(async (targetMonth: string, background = false) => {
     activeLoadRef.current?.abort();
     const controller = new AbortController();
     activeLoadRef.current = controller;
-    setLoading(true);
+    if (!background) setLoading(true);
     setLoadError('');
 
     try {
@@ -131,7 +132,10 @@ export default function PaymentsPageView() {
       }
       return null;
     } finally {
-      if (!controller.signal.aborted && activeLoadRef.current === controller) setLoading(false);
+      if (!controller.signal.aborted && activeLoadRef.current === controller) {
+        setLoading(false);
+        activeLoadRef.current = null;
+      }
     }
   }, []);
 
@@ -142,6 +146,23 @@ export default function PaymentsPageView() {
       activeLoadRef.current?.abort();
     };
   }, [load, month]);
+
+  useEffect(() => {
+    function refreshAtDateChange() {
+      if (document.visibilityState !== 'visible' || isFormOpen || hasOpenActionDraft
+        || mutationInFlightRef.current || activeLoadRef.current || !model
+        || model.period.asOf === currentMoscowDate()) return;
+      void load(month, true);
+    }
+    const timer = window.setInterval(refreshAtDateChange, 30_000);
+    window.addEventListener('focus', refreshAtDateChange);
+    document.addEventListener('visibilitychange', refreshAtDateChange);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refreshAtDateChange);
+      document.removeEventListener('visibilitychange', refreshAtDateChange);
+    };
+  }, [hasOpenActionDraft, isFormOpen, load, model, month]);
 
   useEffect(() => {
     if (loadError) loadErrorRef.current?.focus();
@@ -158,13 +179,23 @@ export default function PaymentsPageView() {
     const pending = submissionKeyRef.current;
     const idempotencyKey = pending?.signature === signature ? pending.key : newIdempotencyKey();
     submissionKeyRef.current = { signature, key: idempotencyKey };
-    const result = await submitPaymentRequest(input, idempotencyKey);
+    activeLoadRef.current?.abort();
+    activeLoadRef.current = null;
+    mutationInFlightRef.current = true;
+    let result: SubmitPaymentRequestResponse;
+    try {
+      result = await submitPaymentRequest(input, idempotencyKey);
+    } finally {
+      mutationInFlightRef.current = false;
+    }
     submissionKeyRef.current = null;
     setIsFormOpen(false);
     setSubmitFeedback(result.request.status === 'paid'
       ? 'Оплата записана и учтена в фактических расходах.'
       : result.outcome === 'auto_approved'
-        ? 'Расход одобрен автоматически.'
+        ? result.request.autoPaymentOn
+          ? `Сумма в резерве. Автоматически учтём оплату ${formatPaymentDate(result.request.autoPaymentOn)}`
+          : 'Расход одобрен.'
         : 'Расход отправлен Ане на согласование.');
     const targetMonth = input.expectedPaymentOn.slice(0, 7);
     if (model && targetMonth !== model.period.key) {
@@ -189,9 +220,19 @@ export default function PaymentsPageView() {
     id: string,
     input: PaymentRequestActionInput,
   ): Promise<PaymentRequestActionResponse> => {
-    const result = await updatePaymentRequest(id, input);
+    activeLoadRef.current?.abort();
+    activeLoadRef.current = null;
+    mutationInFlightRef.current = true;
+    let result: PaymentRequestActionResponse;
+    try {
+      result = await updatePaymentRequest(id, input);
+    } finally {
+      mutationInFlightRef.current = false;
+    }
     const feedbackByOutcome: Record<PaymentRequestActionResponse['outcome'], string> = {
-      approved: 'Расход одобрен.',
+      approved: result.request.autoPaymentOn
+        ? `Расход одобрен. Автоматически учтём оплату ${formatPaymentDate(result.request.autoPaymentOn)}`
+        : 'Расход одобрен.',
       rejected: 'Расход отклонён.',
       paid: 'Расход отмечен оплаченным.',
       legacy_classified: 'Тип и дата старого расхода уточнены.',
@@ -219,11 +260,11 @@ export default function PaymentsPageView() {
   const formVisible = isFormOpen && activeTab === 'requests';
 
   return (
-    <main
+    <section
       role="region"
       aria-label="Оплаты"
       aria-busy={loading}
-      className="min-h-screen bg-gray-50 px-4 py-6 text-gray-900 sm:px-6 lg:px-8"
+      className="bg-gray-50 px-4 py-6 text-gray-900 sm:px-6 lg:px-8"
     >
       <div className="mx-auto max-w-[1280px] space-y-5">
         <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -367,6 +408,6 @@ export default function PaymentsPageView() {
           </>
         )}
       </div>
-    </main>
+    </section>
   );
 }

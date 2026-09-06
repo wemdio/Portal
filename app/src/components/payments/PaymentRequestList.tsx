@@ -184,7 +184,7 @@ export default function PaymentRequestList({
             >
               <option value="all">Все статусы</option>
               <option value="pending">На согласовании</option>
-              <option value="approved">Одобрено</option>
+              <option value="approved">Одобрено / в плане</option>
               <option value="paid">Оплачено</option>
               <option value="rejected">Отклонено</option>
             </select>
@@ -291,8 +291,11 @@ export default function PaymentRequestList({
                     <p className="text-[11px] font-medium uppercase tracking-wide text-gray-400 xl:sr-only">Статус</p>
                     <span className={`mt-1 inline-flex items-center gap-2 rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset xl:mt-0 ${status.className}`}>
                       <span aria-hidden="true" className={`h-2 w-2 rounded-full ${status.dotClassName}`} />
-                      {status.label}
+                      {request.status === 'approved' && request.autoPaymentOn ? 'Запланировано' : status.label}
                     </span>
+                    {request.status === 'approved' && request.autoPaymentOn && (
+                      <p className="mt-1 text-xs leading-5 text-gray-500">В резерве. Автоматически в оплаченные {formatPaymentDate(request.autoPaymentOn)}</p>
+                    )}
                     {request.approvalReason === 'planned' && <p className="mt-1 text-xs text-gray-500">Плановый</p>}
                     {request.approvalReason === 'limit_exceeded' && <p className="mt-1 text-xs text-gray-500">Сверх лимита</p>}
                     {request.decisionComment && <p className="mt-2 text-xs leading-5 text-gray-600">{request.decisionComment}</p>}

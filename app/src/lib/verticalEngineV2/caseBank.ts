@@ -4,14 +4,14 @@
  *
  * Источники кейсов (колонка source):
  *  - 'site'   — извлечены стадией site_profile из текста сайта клиента
- *               (refresh атомарный: insert новых → delete устаревших site-строк);
+ *               (insert недостающих → delete старых site-строк и дубликатов);
  *  - 'upload' — вставлены специалистом текстом через API
  *               (POST projects/[id]/cases); сайт-стадия их никогда не трогает.
  *
  * Здесь же живут:
  *  - heCaseDraftSchema — zod-схема структурированного кейса (локальная для
  *    кейс-банка, НЕ из schemas.ts): industry/client_type/task/metrics/result/text;
- *  - structureCaseText — LLM-структуризация вставленного текста кейса
+ *  - structureCaseTexts — разбор вставки на отдельные кейсы с исходниками
  *    (общий хелпер для API-роута загрузки; модель getVeModel('gate'));
  *  - scoreCaseForVertical / selectCaseForVertical — подбор кейса под вертикаль
  *    (взвешенный токен-оверлап названия+синонимов вертикали по полям
@@ -66,32 +66,124 @@ export interface VeCaseDraft {
   text: string | null;
 }
 
-const CASE_STRUCTURING_SYSTEM = `Ты — аналитик B2B-кейсов агентства Polza. Из сырого текста кейса (вставка из PDF/документа/письма) ты достаёшь структуру для кейс-банка: она пойдёт в письма как доказательство, поэтому точность критична.
+export const MAX_CASE_TEXT_CHARS = 20000;
+export const MAX_CASES_PER_IMPORT = 20;
+
+/** Safe, user-facing explanation; no provider payload or secrets. */
+export class VeCaseImportIncompleteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VeCaseImportIncompleteError';
+  }
+}
+
+/** Manual imports preserve the source; site/legacy drafts still use summaries. */
+export const veCaseImportDraftSchema = z.object({
+  industry: z.string().trim().max(300).default(''),
+  client_type: z.string().trim().max(500).default(''),
+  task: z.string().trim().min(1).max(1500),
+  metrics: z.record(z.string().max(100), z.union([z.string().trim().max(300), z.number().finite()]))
+    .refine((value) => Object.keys(value).length <= 20, 'Слишком много метрик').default({}),
+  result: z.string().trim().min(1).max(1500),
+  text: z.string().trim().min(20).max(MAX_CASE_TEXT_CHARS),
+});
+
+const veCaseSourceDraftSchema = veCaseImportDraftSchema.omit({ text: true }).extend({
+  source_start: z.number().int().min(1),
+  source_end: z.number().int().min(1),
+});
+
+const veCaseImportSchema = z.object({
+  has_more: z.boolean(),
+  cases: z.array(veCaseSourceDraftSchema).max(MAX_CASES_PER_IMPORT),
+});
+
+interface CaseSourcePart {
+  id: number;
+  start: number;
+  end: number;
+  text: string;
+  recommendation: boolean;
+}
+
+/** Narrow labels mark operator suggestions, never factual customer outcomes. */
+function isCaseRecommendation(text: string): boolean {
+  const unmarked = text.replace(/^[\s#>*_-]+/u, '');
+  return /^(?:хорошо\s+использовать\s+для(?=\s|:|$)|рекомендуемые\s+сегменты\s*:)/iu.test(unmarked);
+}
+
+/**
+ * Addressable source parts, not case boundaries. A case may span many parts.
+ * Cutting after sentence punctuation also handles several cases on one line;
+ * decimal dots stay inside their part because no whitespace follows them.
+ */
+function caseSourceParts(rawText: string): CaseSourcePart[] {
+  const parts: CaseSourcePart[] = [];
+  let start = 0;
+  const append = (end: number) => {
+    while (start < end && /\s/u.test(rawText[start])) start++;
+    let trimmedEnd = end;
+    while (trimmedEnd > start && /\s/u.test(rawText[trimmedEnd - 1])) trimmedEnd--;
+    if (trimmedEnd > start) {
+      const text = rawText.slice(start, trimmedEnd);
+      parts.push({ id: parts.length + 1, start, end: trimmedEnd, text, recommendation: isCaseRecommendation(text) });
+    }
+    start = end;
+  };
+  for (let index = 0; index < rawText.length; index++) {
+    const char = rawText[index];
+    if (char === '\r' || char === '\n' || (/[.!?;]/u.test(char) && (index + 1 === rawText.length || /\s/u.test(rawText[index + 1])))) {
+      append(index + 1);
+    }
+  }
+  append(rawText.length);
+  return parts;
+}
+
+const CASE_STRUCTURING_SYSTEM = `Ты — аналитик B2B-кейсов агентства Polza. Из сырого текста (вставка из PDF/документа/письма) выделяй ОТДЕЛЬНЫЕ клиентские проекты. Кейсы пойдут в письма как доказательство, поэтому точность критична.
 
 Жёсткие правила:
 - опирайся ТОЛЬКО на переданный текст — ничего не додумывай;
-- никаких выдуманных цифр: metrics заполняй только числами, которые буквально есть в тексте (если их нет — пустой объект);
-- если какого-то поля в тексте нет — пустая строка, а не догадка.
+- один кейс — одна конкретная работа для одного клиента. В одной вставке может быть несколько кейсов: верни отдельный объект для каждого;
+- абзацы, пункты «задача / решение / результат» и переносы страниц сами по себе НЕ делят кейс. Не делай отдельный кейс из каждого абзаца или показателя;
+- не смешивай клиентов, задачи, результаты и цифры разных проектов. Не объединяй разные работы только потому, что у них одна отрасль;
+- кейс должен содержать контекст клиента, конкретную выполненную работу и фактический результат. Сам выпуск изделий, их комплектация, упаковка и решённая логистическая проблема — уже результат; не требуй выручку, проценты роста или «бизнес-эффект», которых нет в тексте;
+- client_type: если назван клиент, ОБЯЗАТЕЛЬНО сохрани его имя; не заменяй название общим сегментом. Тип клиента можно дополнить только когда он прямо указан;
+- industry: фактическая отрасль клиента, а не сегмент для будущих продаж. Если отрасль не названа — пустая строка. Одного имени клиента достаточно, чтобы сохранить кейс без отрасли;
+- task: что конкретно сделали для клиента. result: что фактически изготовили, упаковали, доставили или какую проблему решили. «Проект выполнен», «заказ исполнен» и подобные общие фразы теряют содержание — не используй их вместо результата;
+- в task обязательно сохраняй указанное фактическое назначение работы/изделий и для какой аудитории или события это было сделано. Не путай реальное назначение выполненного заказа с рекомендациями для будущих продаж;
+- сохрани все существенные исходные детали в task/result/metrics: тираж, количество изделий в наборе, материал/покрытие, формат, срок с единицами (например рабочие дни), индивидуальную упаковку и логистику. Не своди разные числа в одно и не теряй характеристики без цифр;
+- явно помеченные РЕКОМЕНДАЦИИ («Хорошо использовать для…», «Рекомендуемые сегменты:…») — предложения специалиста о будущем применении кейса. Они НЕ подтверждают отрасль клиента, выполненную работу или результат. Не переноси их в industry/client_type/task/result/metrics и не используй цифры из этих заметок как достигнутые показатели;
+- никаких выдуманных цифр: metrics заполняй только числами, которые буквально есть в ИСХОДНОМ ФРАГМЕНТЕ ЭТОГО кейса (если их нет — пустой объект). Значения metrics — строки с цифрами или числа, не вложенные объекты;
+- исходник разбит на пронумерованные ЧАСТИ. Это адреса строк/предложений, НЕ готовые кейсы. Для каждого кейса верни source_start/source_end — ID первой и последней части ВКЛЮЧИТЕЛЬНО. Используй только существующие целые ID; диапазоны кейсов не пересекаются;
+- диапазон обязан включать ВЕСЬ кейс: заголовок с клиентом, все предложения выполненной работы/результата и заключительные рекомендации, если они есть. Рекомендации сохраняются в оригинале для специалиста, хотя не являются фактами в полях. Не обрезай кейс до одного предложения и не захватывай начало следующего клиента;
+- поле text НЕ возвращай и исходник НЕ переписывай: сервер сам возьмёт точный исходный диапазон по ID, без переформулировок;
+- если конкретных кейсов нет — верни пустой массив; не выдумывай недостающие факты ради заполнения;
+- максимум ${MAX_CASES_PER_IMPORT} кейсов за один раз. Если во вставке больше конкретных кейсов, обязательно верни has_more=true: весь разбор будет остановлен с просьбой разделить текст. Нельзя молча вернуть первые ${MAX_CASES_PER_IMPORT}; если все кейсы вошли, has_more=false.
 
 Отвечай строго на русском.`;
 
-function buildCaseStructuringMessages(rawText: string): LLMMessage[] {
-  const user = `ТЕКСТ КЕЙСА (может быть выгрузкой из PDF/документа):
-"""
-${rawText}
-"""
+function buildCaseStructuringMessages(parts: CaseSourcePart[]): LLMMessage[] {
+  const user = `ИСХОДНЫЕ ЧАСТИ КЕЙСОВ (ID в квадратных скобках — адрес, а не факт о кейсе):
+${parts.map((part) => `[${part.id}]${part.recommendation ? ' [РЕКОМЕНДАЦИЯ, НЕ ФАКТ]' : ''} ${part.text}`).join('\n')}
 
-Разбери кейс и верни ТОЛЬКО JSON строго такого вида (без markdown-фенсов и пояснений):
+Раздели самостоятельные проекты и верни ТОЛЬКО JSON такого вида (без markdown-фенсов и пояснений):
 {
-  "industry": string,     // индустрия/отрасль клиента из кейса (как названа в тексте)
-  "client_type": string,  // тип/размер клиента (напр. «сеть кофеен, 40 точек», «enterprise-банк»)
-  "task": string,         // задача клиента, 1 предложение
-  "metrics": object,      // свободный json: ТОЛЬКО конкретные цифры из текста, напр. {"рост_конверсии": "+32%", "срок": "2 месяца"}; нет цифр — {}
-  "result": string,       // достигнутый результат, 1 предложение, с опорой на цифры из текста, если они есть
-  "text": string          // краткое содержание кейса: 2–3 предложения (кто клиент, что сделали, что получили)
+  "has_more": boolean, // true, если конкретных кейсов во вставке больше ${MAX_CASES_PER_IMPORT}; иначе false
+  "cases": [
+    {
+      "industry": string,     // отрасль клиента из этого кейса, если названа
+      "client_type": string,  // сохрани имя клиента, если оно названо; не заменяй сегментом
+      "task": string,         // конкретная выполненная работа со значимыми характеристиками
+      "metrics": object,      // только реальные цифры этого кейса с единицами; не цифры из рекомендаций; нет цифр — {}
+      "result": string,       // конкретный выпуск / упаковка / логистика / другой результат без общих заглушек
+      "source_start": integer, // ID первой части: с заголовком клиента
+      "source_end": integer    // ID последней части ВКЛЮЧИТЕЛЬНО: с финальными заметками кейса
+    }
+  ]
 }
 
-Никакого текста вне JSON.`;
+Если кейсов нет — {"has_more": false, "cases": []}. Никакого текста вне JSON.`;
 
   return [
     { role: 'system', content: CASE_STRUCTURING_SYSTEM },
@@ -99,16 +191,135 @@ ${rawText}
   ];
 }
 
+/** Collapse whitespace while retaining offsets into the original submitted text. */
+function indexedSource(text: string): { text: string; offsets: number[] } {
+  let normalized = '';
+  const offsets: number[] = [];
+  let whitespace = false;
+  for (let index = 0; index < text.length; index++) {
+    if (/\s/u.test(text[index])) {
+      if (!whitespace) { normalized += ' '; offsets.push(index); }
+      whitespace = true;
+    } else {
+      normalized += text[index];
+      offsets.push(index);
+      whitespace = false;
+    }
+  }
+  return { text: normalized, offsets };
+}
+
+function numericTokens(text: string): string[] {
+  return [...text.matchAll(/\d+(?:[ \u00a0\u202f]\d{3})*(?:[.,]\d+)?/g)]
+    .map(([number]) => number.replace(/[ \u00a0\u202f]/g, '').replace(',', '.'));
+}
+
+function validateRawCaseText(rawText: string): void {
+  if (typeof rawText !== 'string' || !rawText.trim()) throw new Error('Вставьте исходный текст кейсов');
+  if (rawText.length > MAX_CASE_TEXT_CHARS) throw new Error(`Максимум ${MAX_CASE_TEXT_CHARS} символов за один раз`);
+}
+
 /**
- * Структурировать вставленный текст кейса через LLM (роль gate — мини-модель).
- * Бросает LLMValidationError при двойном невалидном ответе — роут маппит в 502.
+ * Same checks for preview and save. Provenance and numeric presence are verified;
+ * semantic attribution still needs the specialist's review before saving.
  */
-export async function structureCaseText(rawText: string): Promise<VeCaseDraft> {
-  const llm = await callLLMWithSchema(buildCaseStructuringMessages(rawText), heCaseDraftSchema, {
-    model: getVeModel('gate'),
-    maxTokens: 2048,
+export function validateCaseDrafts(rawText: string, value: unknown): VeCaseDraft[] {
+  validateRawCaseText(rawText);
+  const parsed = z.array(veCaseImportDraftSchema).max(MAX_CASES_PER_IMPORT).safeParse(value);
+  if (!parsed.success) throw new Error('Не удалось выделить полноценные кейсы: проверьте задачу, результат и исходный фрагмент');
+  const source = indexedSource(rawText);
+  const spans: Array<{ start: number; end: number }> = [];
+  const missing = /^(?:нет(?: данных)?|не (?:указан[аоы]?|известн[аоы]?)|unknown|n\/?a|[-—])$/i;
+  return parsed.data.map((draft, index) => {
+    const label = `Кейс ${index + 1}`;
+    if ((!draft.industry || missing.test(draft.industry)) && (!draft.client_type || missing.test(draft.client_type))) {
+      throw new Error(`${label}: не указан клиент или его отрасль`);
+    }
+    if (missing.test(draft.task) || missing.test(draft.result)) throw new Error(`${label}: нужны конкретные задача и результат`);
+    const fragment = draft.text.replace(/\s+/g, ' ');
+    const start = source.text.indexOf(fragment);
+    if (start < 0) throw new Error(`${label}: исходный фрагмент не найден во вставленном тексте`);
+    const end = start + fragment.length;
+    if (spans.some((span) => start < span.end && end > span.start)) {
+      throw new Error(`${label}: исходные фрагменты кейсов пересекаются — проверьте разделение`);
+    }
+    spans.push({ start, end });
+    const original = rawText.slice(source.offsets[start], source.offsets[end - 1] + 1);
+    const originalParts = caseSourceParts(original);
+    const facts = originalParts.filter((part) => !part.recommendation).map((part) => part.text).join('\n');
+    const recommendations = normalizeCaseText(originalParts.filter((part) => part.recommendation).map((part) => part.text).join('\n'));
+    if (draft.industry && recommendations.includes(normalizeCaseText(draft.industry)) && !normalizeCaseText(facts).includes(normalizeCaseText(draft.industry))) {
+      throw new Error(`${label}: отрасль взята из рекомендации, а не из фактов о клиенте`);
+    }
+    const genericResult = /^(?:проект|заказ|работа)\s+(?:успешно\s+)?(?:выполнен[ао]?|заверш[её]н[ао]?|исполнен[ао]?)[.!]?$/iu;
+    if (isCaseRecommendation(draft.task) || isCaseRecommendation(draft.result) || genericResult.test(draft.result)) {
+      throw new Error(`${label}: укажите фактически выполненную работу и конкретный результат`);
+    }
+    const supportedNumbers = new Set(numericTokens(facts));
+    for (const [key, metric] of Object.entries(draft.metrics)) {
+      const numbers = numericTokens(String(metric));
+      if (!numbers.length || [...numbers, ...numericTokens(key)].some((number) => !supportedNumbers.has(number))) {
+        throw new Error(`${label}: цифры метрики «${key}» не найдены в его исходном фрагменте`);
+      }
+    }
+    if (numericTokens([draft.industry, draft.client_type, draft.task, draft.result].join(' '))
+      .some((number) => !supportedNumbers.has(number))) {
+      throw new Error(`${label}: в описании есть цифры, которых нет в его исходном фрагменте`);
+    }
+    return { ...draft, text: original };
   });
-  return llm.data;
+}
+
+/** One bounded model call parses all engagements; saving the preview calls no model. */
+export async function structureCaseTexts(rawText: string, signal?: AbortSignal): Promise<VeCaseDraft[]> {
+  validateRawCaseText(rawText);
+  const parts = caseSourceParts(rawText);
+  const llm = await callLLMWithSchema(buildCaseStructuringMessages(parts), veCaseImportSchema, {
+    model: getVeModel('gate'),
+    maxTokens: 14000,
+    signal,
+  });
+  signal?.throwIfAborted();
+  const response = llm.rawResponse as {
+    choices?: Array<{ finish_reason?: string; message?: { content?: string } }>;
+  } | null;
+  const choice = response?.choices?.[0];
+  if (choice?.finish_reason && !['stop', 'end_turn'].includes(choice.finish_reason)) {
+    throw new VeCaseImportIncompleteError('Ответ с кейсами оборвался. Разделите исходный текст на меньшие части и повторите разбор');
+  }
+  // The shared helper may repair invalid/truncated JSON by dropping its tail.
+  // That is inappropriate for an import, which must not silently lose cases.
+  if (typeof choice?.message?.content === 'string') {
+    try {
+      JSON.parse(choice.message.content.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim());
+    } catch {
+      throw new VeCaseImportIncompleteError('Ответ с кейсами неполный. Разделите исходный текст на меньшие части и повторите разбор');
+    }
+  }
+  if (llm.data.has_more !== false) {
+    throw new VeCaseImportIncompleteError(`Во вставке больше ${MAX_CASES_PER_IMPORT} кейсов или не подтверждена полнота разбора. Разделите текст на части`);
+  }
+  // Validate again at this boundary; neither a typed model response nor a mock
+  // proves that IDs are actual integers within this source's bounds.
+  const parsed = veCaseImportSchema.safeParse(llm.data);
+  if (!parsed.success) throw new Error('Не удалось определить границы кейсов в исходном тексте');
+  const spans: Array<{ start: number; end: number }> = [];
+  const drafts = parsed.data.cases.map(({ source_start: start, source_end: sourceEnd, ...draft }, index) => {
+    if (start > sourceEnd || sourceEnd > parts.length) {
+      throw new Error(`Кейс ${index + 1}: границы исходного текста некорректны`);
+    }
+    // Models often stop at the last fact even when asked to retain notes.
+    // Attach only immediately adjacent explicitly labelled recommendations;
+    // never skip a factual part or move across the next client's heading.
+    let end = sourceEnd;
+    while (end < parts.length && parts[end].recommendation) end++;
+    if (spans.some((span) => start <= span.end && end >= span.start)) {
+      throw new Error(`Кейс ${index + 1}: границы исходного текста пересекаются`);
+    }
+    spans.push({ start, end });
+    return { ...draft, text: rawText.slice(parts[start - 1].start, parts[end - 1].end) };
+  });
+  return validateCaseDrafts(rawText, drafts);
 }
 
 /* ─────────────────── Подбор кейса под вертикаль ─────────────────── */

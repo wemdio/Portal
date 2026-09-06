@@ -25,6 +25,7 @@
  */
 
 import { searchRows } from '@/lib/companiesSearch/rpcSearch';
+import { isClientDomainExcluded } from '@/lib/clientBlocklist/domainPolicy';
 import type { HhEmployer } from './hhAutoParser';
 
 /** Поля, которые мы реально используем из BoB row. Остальные jsonb-ключи игнорируем. */
@@ -80,6 +81,7 @@ function siteUrlToDomain(siteUrl: string | null): string | null {
 }
 
 export interface FetchTopUpInput {
+  clientUserId: string;
   /** Сколько ещё компаний нужно (после HH parsing). */
   neededCount: number;
   /** Минимальный оборот (в рублях). 40M default. */
@@ -177,6 +179,10 @@ export async function fetchTopUpFromBaseOfBases(
       const domain = siteUrlToDomain(siteUrl);
       if (!domain) {
         noSiteSkipped++;
+        continue;
+      }
+      if (isClientDomainExcluded(input.clientUserId, domain)) {
+        excludeSkipped++;
         continue;
       }
       if (input.seenDomains.has(domain)) {

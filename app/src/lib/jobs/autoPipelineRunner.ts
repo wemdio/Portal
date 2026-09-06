@@ -45,6 +45,7 @@
 
 import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { isClientDomainExcluded } from '@/lib/clientBlocklist/domainPolicy';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { findNewHhEmployers, deriveDomain, type HhEmployer } from './hhAutoParser';
@@ -876,13 +877,14 @@ export async function runAutoPipelineForClient(
 
     // 3. Дедуп HH-результатов по hh_employer_id.
     const seen = await loadSeenEmployerIds(clientUserId);
-    const freshFromHh = employers.filter((e) => !seen.has(e.id));
+    const unseenFromHh = employers.filter((e) => !seen.has(e.id));
+    const freshFromHh = unseenFromHh.filter((e) => !isClientDomainExcluded(clientUserId, e.siteUrl));
     logPhase('parse-done', { parsed: employers.length, freshFromHh: freshFromHh.length, seen: seen.size });
 
     await logAudit(
       'auto-pipeline.parsed',
       'Parsed HH employers',
-      { ...logCtx, parsed: employers.length, new: freshFromHh.length, seen: seen.size },
+      { ...logCtx, parsed: employers.length, new: freshFromHh.length, seen: seen.size, domainPolicyExcluded: unseenFromHh.length - freshFromHh.length },
     );
 
     // 3.5. Top-up из «базы баз», если HH дал меньше daily_target_employers.
@@ -908,6 +910,7 @@ export async function runAutoPipelineForClient(
       //    время прогона (с 2.5h до 10-15 мин когда кэш покрывает большую
       //    часть BoB).
       const cacheResult = await fetchTopUpFromCache({
+        clientUserId,
         neededCount: neededFromBob,
         seenDomains,
         excludePatterns,
@@ -924,6 +927,7 @@ export async function runAutoPipelineForClient(
       let bobLiveResult: Awaited<ReturnType<typeof fetchTopUpFromBaseOfBases>> | null = null;
       if (config.base_of_bases_live_fallback === true && stillNeeded > 0) {
         bobLiveResult = await fetchTopUpFromBaseOfBases({
+          clientUserId,
           neededCount: stillNeeded,
           revenueFrom: config.base_of_bases_revenue_from,
           seenDomains,

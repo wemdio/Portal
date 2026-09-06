@@ -4,7 +4,8 @@
  * Клиент загрузил большой файл (миллионы доменов) в S3 → создан джоб
  * large_score_jobs. Этот движок:
  *   1. parse:  стримит файл из S3, нормализует домены, чистит мусор, кладёт
- *              уникальные в очередь large_score_domains (status='pending').
+ *              уникальные в очередь large_score_domains; запрещённые политикой
+ *              клиента сразу получают status='excluded', остальные — pending.
  *              Резумируемо через parse_offset.
  *   2. drain:  батчами скорит pending-домены через getOrFetchScore (→ общий
  *              кэш mailganer_domain_scores). Для активных (score>0) ставит
@@ -17,6 +18,7 @@
  * Возобновляемость (переживает редеплой):
  *   - всё состояние в БД (large_score_jobs/domains на DB-сервере);
  *   - parse: при рестарте перечитывает файл, пропускает parse_offset строк;
+ *   - excluded_domains поддерживается атомарным statement-trigger БД;
  *   - drain: pending-строки остаются pending → переобрабатываются; повтор
  *     скоринга домена = no-op (getOrFetchScore сначала смотрит кэш).
  *
@@ -27,6 +29,7 @@ import 'server-only';
 import readline from 'node:readline';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getMainS3ObjectStream } from '@/lib/mainS3Server';
+import { isClientDomainExcluded } from '@/lib/clientBlocklist/domainPolicy';
 import { getOrFetchScore, getCachedScores, normalizeDomain, emptyCacheStats } from './mailganerScoreCache';
 import {
   buildLargeFileDomainSnapshot,
@@ -64,6 +67,45 @@ const MARK_CHUNK = 150;
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+async function markExcludedDomains(jobId: string, ids: number[]): Promise<void> {
+  if (!supabaseAdmin || ids.length === 0) return;
+  for (let i = 0; i < ids.length; i += MARK_CHUNK) {
+    const { error } = await supabaseAdmin
+      .from('large_score_domains')
+      .update({ status: 'excluded', scored_at: null })
+      .eq('job_id', jobId)
+      .eq('status', 'pending')
+      .in('id', ids.slice(i, i + MARK_CHUNK));
+    if (error) throw new Error(`large-score exclusion mark failed: ${error.message}`);
+  }
+}
+
+async function hasPendingDomains(jobId: string): Promise<boolean> {
+  if (!supabaseAdmin) return false;
+  const { data, error } = await supabaseAdmin
+    .from('large_score_domains')
+    .select('id')
+    .eq('job_id', jobId)
+    .eq('status', 'pending')
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`large-score pending lookup failed: ${error.message}`);
+  return data !== null;
+}
+
+async function updateLargeScoreJobChecked(
+  jobId: string,
+  patch: Record<string, unknown>,
+  operation: string,
+): Promise<void> {
+  if (!supabaseAdmin) throw new Error(`large-score ${operation} failed: database unavailable`);
+  const { error } = await supabaseAdmin
+    .from('large_score_jobs')
+    .update(patch)
+    .eq('id', jobId);
+  if (error) throw new Error(`large-score ${operation} failed: ${error.message}`);
 }
 
 /** Имя-кандидат из домена (фоллбек): "stripe.com" → "Stripe". AI потом почистит. */
@@ -141,16 +183,17 @@ async function parseJob(job: LargeScoreJob, log: (msg: string) => void): Promise
   let lineNo = 0;
   let kept = job.parsed_domains ?? 0;
   let junk = job.junk_domains ?? 0;
-  let batch: string[] = [];
+  let batch: Array<{ domain: string; status: 'pending' | 'excluded' }> = [];
 
   const flush = async (): Promise<void> => {
     if (batch.length === 0) return;
-    await supabaseAdmin!
+    const { error } = await supabaseAdmin!
       .from('large_score_domains')
       .upsert(
-        batch.map((domain) => ({ job_id: job.id, domain })),
+        batch.map((row) => ({ job_id: job.id, ...row })),
         { onConflict: 'job_id,domain', ignoreDuplicates: true },
       );
+    if (error) throw new Error(`large-score intake failed: ${error.message}`);
     batch = [];
   };
 
@@ -161,7 +204,10 @@ async function parseJob(job: LargeScoreJob, log: (msg: string) => void): Promise
       if (lineNo <= skip) continue; // resume: пропускаем уже обработанные строки
       const domain = extractDomain(raw);
       if (domain) {
-        batch.push(domain);
+        batch.push({
+          domain,
+          status: isClientDomainExcluded(job.client_user_id, domain) ? 'excluded' : 'pending',
+        });
         kept++;
       } else {
         junk++;
@@ -170,7 +216,12 @@ async function parseJob(job: LargeScoreJob, log: (msg: string) => void): Promise
         await flush();
         await supabaseAdmin
           .from('large_score_jobs')
-          .update({ parse_offset: lineNo, parsed_domains: kept, junk_domains: junk, updated_at: nowIso() })
+          .update({
+            parse_offset: lineNo,
+            parsed_domains: kept,
+            junk_domains: junk,
+            updated_at: nowIso(),
+          })
           .eq('id', job.id);
       }
     }
@@ -181,24 +232,24 @@ async function parseJob(job: LargeScoreJob, log: (msg: string) => void): Promise
   }
 
   // Реальное число уникальных доменов в очереди (после дедупа ON CONFLICT).
-  const { count } = await supabaseAdmin
+  const { count, error: countError } = await supabaseAdmin
     .from('large_score_domains')
     .select('id', { count: 'exact', head: true })
     .eq('job_id', job.id);
+  if (countError || count === null) {
+    throw new Error(`large-score total count failed: ${countError?.message ?? 'exact count missing'}`);
+  }
 
-  await supabaseAdmin
-    .from('large_score_jobs')
-    .update({
-      status: 'scoring',
-      parse_offset: lineNo,
-      parsed_domains: kept,
-      junk_domains: junk,
-      total_domains: count ?? kept,
-      updated_at: nowIso(),
-    })
-    .eq('id', job.id);
+  await updateLargeScoreJobChecked(job.id, {
+    status: 'scoring',
+    parse_offset: lineNo,
+    parsed_domains: kept,
+    junk_domains: junk,
+    total_domains: count,
+    updated_at: nowIso(),
+  }, 'parse completion update');
 
-  log(`large-score parse done: job=${job.id} lines=${lineNo} queued=${count ?? kept} junk=${junk}`);
+  log(`large-score parse done: job=${job.id} lines=${lineNo} queued=${count} junk=${junk}`);
 }
 
 async function drainJobBatch(
@@ -209,23 +260,49 @@ async function drainJobBatch(
 ): Promise<void> {
   if (!supabaseAdmin) return;
 
-  const { data: pendingData } = await supabaseAdmin
+  const { data: pendingData, error: pendingError } = await supabaseAdmin
     .from('large_score_domains')
     .select('id, domain')
     .eq('job_id', job.id)
     .eq('status', 'pending')
     .order('id', { ascending: true })
     .limit(DRAIN_BATCH);
+  if (pendingError) {
+    throw new Error(`large-score pending batch failed: ${pendingError.message}`);
+  }
 
   const rows = (pendingData ?? []) as Array<{ id: number; domain: string }>;
 
   if (rows.length === 0) {
     // Очередь пуста → джоб завершён.
-    await supabaseAdmin
-      .from('large_score_jobs')
-      .update({ status: 'completed', finished_at: nowIso(), updated_at: nowIso() })
-      .eq('id', job.id);
+    await updateLargeScoreJobChecked(job.id, {
+      status: 'completed',
+      finished_at: nowIso(),
+      updated_at: nowIso(),
+    }, 'completion update');
     log(`large-score job completed: ${job.id}`);
+    return;
+  }
+
+  // Apply the client policy before both the shared cache lookup and the remote
+  // scorer. This also drains policy-ineligible rows that were queued before
+  // the policy existed, without touching any already scored/history rows.
+  const excludedRows: typeof rows = [];
+  const scoreRows: typeof rows = [];
+  for (const row of rows) {
+    (isClientDomainExcluded(job.client_user_id, row.domain) ? excludedRows : scoreRows).push(row);
+  }
+  await markExcludedDomains(job.id, excludedRows.map((row) => row.id));
+
+  if (scoreRows.length === 0) {
+    const completed = !(await hasPendingDomains(job.id));
+    await updateLargeScoreJobChecked(job.id, {
+      ...(completed ? { status: 'completed', finished_at: nowIso() } : {}),
+      updated_at: nowIso(),
+    }, completed ? 'completion update' : 'exclusion progress update');
+    log(completed
+      ? `large-score job completed: ${job.id} (${excludedRows.length} excluded this tick)`
+      : `large-score: job=${job.id} excluded=${excludedRows.length} this tick`);
     return;
   }
 
@@ -237,7 +314,7 @@ async function drainJobBatch(
 
   // Кэш-lookup всей пачки одним батчем; промахи добираются getOrFetchScore.
   const cached = await getCachedScores(
-    rows.map((r) => normalizeDomain(r.domain)).filter((d): d is string => d !== null),
+    scoreRows.map((r) => normalizeDomain(r.domain)).filter((d): d is string => d !== null),
   );
 
   // Статусы копим в памяти и пишем пачкой после прогона. UPDATE на каждую
@@ -251,8 +328,8 @@ async function drainJobBatch(
   async function worker(): Promise<void> {
     while (true) {
       const i = cursor++;
-      if (i >= rows.length) return;
-      const r = rows[i];
+      if (i >= scoreRows.length) return;
+      const r = scoreRows[i];
       const domain = normalizeDomain(r.domain);
       if (!domain) {
         marks.error.push(r.id);
@@ -327,7 +404,7 @@ async function drainJobBatch(
     }
   }
 
-  await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(concurrency, scoreRows.length) }, worker));
 
   if (rateLimited) {
     log(`large-score: Mailganer daily limit reached — ${marks.scored.length} scored this tick, остальные остаются pending (добьём по мере пополнения бюджета)`);

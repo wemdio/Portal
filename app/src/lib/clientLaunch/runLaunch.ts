@@ -37,6 +37,7 @@ import { activateCampaign, createCampaign, createLeads, getCampaign, updateCampa
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaignCatalog';
 import { getBlockedEmailSet, filterBlockedLeads } from '@/lib/clientBlocklist/blockedContacts';
+import { filterClientDomainLeads } from '@/lib/clientBlocklist/domainPolicy';
 import { hasUsableCampaignSequences } from './campaignSequences';
 import {
   countClientContacts,
@@ -93,6 +94,8 @@ export interface RunClientLaunchResult {
    * Входит в skipped_rows; отдельное поле — чтобы UI мог объяснить причину.
    */
   blocked_rows: number;
+  /** Leads excluded by the client-scoped domain policy before provider delivery. */
+  domain_policy_blocked_rows?: number;
 }
 
 export class ClientLaunchError extends Error {
@@ -203,12 +206,36 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
 
   const preset = presetRow as ClientCampaignPreset | null;
 
-  // 1b. Чёрный список клиента: отрезаем заблокированные адреса ДО всего
-  //     остального — они не должны ни съедать тарифный лимит контактов,
-  //     ни попадать в Instantly. Ошибка загрузки списка — это стоп: лучше
-  //     не запустить кампанию, чем написать заблокированному контакту.
+  // 1b. Apply the client-scoped domain policy, then the email blocklist,
+  //     before validation, tariff accounting, campaign creation, or upload.
+  //     A blocklist read failure remains fail-closed.
+  const {
+    kept: domainAllowedLeads,
+    blockedCount: domainPolicyBlockedCount,
+  } = filterClientDomainLeads(leads, userId);
   const blockedSet = await getBlockedEmailSet(supabaseInstantly, userId);
-  const { kept: allowedLeads, blockedCount } = filterBlockedLeads(leads, blockedSet);
+  const {
+    kept: allowedLeads,
+    blockedCount: emailBlockedCount,
+  } = filterBlockedLeads(domainAllowedLeads, blockedSet);
+  const excludedCount = domainPolicyBlockedCount + emailBlockedCount;
+
+  if (allowedLeads.length === 0) {
+    const excludedReason = [
+      domainPolicyBlockedCount > 0
+        ? `${domainPolicyBlockedCount.toLocaleString('ru-RU')} — доменной политикой (.com)`
+        : null,
+      emailBlockedCount > 0
+        ? `${emailBlockedCount.toLocaleString('ru-RU')} — чёрным списком`
+        : null,
+    ].filter(Boolean).join(', ');
+    throw new ClientLaunchError(
+      excludedCount > 0
+        ? `Все ${excludedCount.toLocaleString('ru-RU')} лидов из загрузки исключены: ${excludedReason}.`
+        : 'Нет валидных лидов для отправки',
+      400,
+    );
+  }
 
   // 2. Валидация sequence + mapping (через существующую функцию). Для
   //    auto-pipeline mapping не нужен — передаём фиктивный с email-ключом,
@@ -227,15 +254,6 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
 
   if (!validation.ok) {
     throw new ClientLaunchError(validation.error, 400);
-  }
-
-  if (allowedLeads.length === 0) {
-    throw new ClientLaunchError(
-      blockedCount > 0
-        ? `Все ${blockedCount.toLocaleString('ru-RU')} лидов из загрузки находятся в вашем чёрном списке — отправлять некому.`
-        : 'Нет валидных лидов для отправки',
-      400,
-    );
   }
 
   // 2b. Если клиент явно выбрал подмножество ящиков из пула пресета,
@@ -386,9 +404,9 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
 
     const accepted = leadResult.leads_uploaded;
     // uploadedRows — число строк в исходной базе. Всё, что не было фактически
-    // принято Instantly (невалидные email, локальные дубли, чёрный список и
-    // отсев самого Instantly), считаем пропущенным. blocked_rows остаётся
-    // отдельным подмножеством, чтобы UI мог объяснить эту причину.
+    // принято Instantly (невалидные email, локальные дубли, доменная политика,
+    // чёрный список и отсев самого Instantly), считаем пропущенным. Обе
+    // клиентские причины сохраняем отдельно, чтобы UI их не смешивал.
     const skipped = Math.max(0, uploadedRows - accepted);
 
     // Сохраняем фактические счётчики сразу после импорта. Если активация ниже
@@ -441,7 +459,9 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
         instantlyCampaignId,
         accepted,
         skipped,
-        blocked: blockedCount,
+        blocked: excludedCount,
+        domainPolicyBlocked: domainPolicyBlockedCount,
+        emailBlocked: emailBlockedCount,
         totalLeads: leads.length,
         steps: sequence.steps.length,
       },
@@ -456,7 +476,8 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
       uploaded_rows: uploadedRows,
       accepted_rows: accepted,
       skipped_rows: skipped,
-      blocked_rows: blockedCount,
+      blocked_rows: emailBlockedCount,
+      domain_policy_blocked_rows: domainPolicyBlockedCount,
     };
   } catch (err) {
     const message = scrubBrand(err instanceof Error ? err.message : 'Не удалось запустить кампанию');
