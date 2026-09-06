@@ -276,7 +276,7 @@ export default function PaymentRequestActions({
             onClick={() => void run({ action: 'approve', expectedUpdatedAt: request.updatedAt })}
             className={`${buttonClass} border-emerald-600 bg-emerald-600 text-white hover:border-emerald-700 hover:bg-emerald-700`}
           >
-            Одобрить
+            {request.budgetScope === 'general' && request.expectedPaymentOn <= asOf ? 'Одобрить и учесть оплату' : 'Одобрить'}
           </button>
         </>
       )}
@@ -291,7 +291,7 @@ export default function PaymentRequestActions({
           Отклонить
         </button>
       )}
-      {request.status === 'approved' && (
+      {request.status === 'approved' && !request.autoPaymentOn && (
         <button ref={paidButtonRef} type="button" disabled={busy || disabled} onClick={() => open('paid')} className={`${buttonClass} border-gray-900 bg-gray-900 text-white hover:bg-gray-800`}>
           Отметить оплаченным
         </button>

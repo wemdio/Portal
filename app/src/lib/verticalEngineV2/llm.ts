@@ -15,6 +15,7 @@
  */
 
 import { z } from 'zod';
+import { withVeDeadline } from './operationDeadline';
 
 const API_URL = 'https://router.requesty.ai/v1/chat/completions';
 
@@ -136,6 +137,28 @@ export function setVeActiveJobSignal(signal: AbortSignal | null): void {
   activeJobSignal = signal;
 }
 
+/** Capture once per operation so late work cannot inherit the next job's signal. */
+export function getVeActiveJobSignal(): AbortSignal | null {
+  return activeJobSignal;
+}
+
+interface LLMCallOptions {
+  model: string;
+  maxTokens?: number;
+  signal?: AbortSignal;
+}
+
+function llmTimeoutMs(): number {
+  const configured = Number(process.env.VE_LLM_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured >= 30_000 && configured <= 600_000
+    ? configured
+    : 300_000;
+}
+
+function withLLMDeadline<T>(opts: LLMCallOptions, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  return withVeDeadline('LLM request', llmTimeoutMs(), opts.signal ?? getVeActiveJobSignal(), work);
+}
+
 /**
  * json_object-режим отвечает 400, если слово «json» не встречается ни в одном
  * сообщении. Промпты в prompts/ формат упоминают, а инлайновые (system досье
@@ -165,8 +188,19 @@ const RAW_MAX_RETRIES = 3;
 /** База экспоненциального бэкоффа: 2с → 4с → 8с. */
 const RAW_RETRY_BASE_MS = 2000;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function isAbortError(err: unknown): boolean {
@@ -178,11 +212,14 @@ async function rawCall(
   model: string,
   maxTokens: number,
   jsonMode: boolean,
+  signal: AbortSignal,
 ): Promise<{ text: string; response: RequestyResponse }> {
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= RAW_MAX_RETRIES; attempt++) {
-    if (attempt > 0) await sleep(RAW_RETRY_BASE_MS * 2 ** (attempt - 1));
+    signal.throwIfAborted();
+    if (attempt > 0) await sleep(RAW_RETRY_BASE_MS * 2 ** (attempt - 1), signal);
+    signal.throwIfAborted();
 
     let res: Response;
     try {
@@ -195,10 +232,12 @@ async function rawCall(
           max_tokens: maxTokens,
           ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
         }),
-        ...(activeJobSignal ? { signal: activeJobSignal } : {}),
+        signal,
       });
+      signal.throwIfAborted();
     } catch (err) {
       // Отмена задачи (AbortSignal) — пробрасываем сразу, бэкоффы не держим.
+      signal.throwIfAborted();
       if (isAbortError(err)) throw err;
       lastError = err instanceof Error ? err : new Error(String(err));
       continue;
@@ -206,12 +245,14 @@ async function rawCall(
 
     if (res.ok) {
       const response = (await res.json()) as RequestyResponse;
+      signal.throwIfAborted();
       const text = response.choices?.[0]?.message?.content ?? '';
       return { text, response };
     }
 
     const status = res.status;
     const body = await res.text().catch(() => '');
+    signal.throwIfAborted();
     const err = new Error(`Requesty ${status}: ${body.slice(0, 300)}`);
     if (status < 500 && !RAW_RETRYABLE_STATUSES.has(status)) throw err;
     lastError = err;
@@ -276,13 +317,23 @@ export function tryRepairTruncatedJson(text: string): unknown | null {
 export async function callLLMWithSchema<T>(
   messages: LLMMessage[],
   schema: z.ZodType<T>,
-  opts: { model: string; maxTokens?: number },
+  opts: LLMCallOptions,
+): Promise<LLMResult<T>> {
+  return withLLMDeadline(opts, (signal) => callLLMWithSchemaWithinDeadline(messages, schema, opts, signal));
+}
+
+async function callLLMWithSchemaWithinDeadline<T>(
+  messages: LLMMessage[],
+  schema: z.ZodType<T>,
+  opts: LLMCallOptions,
+  signal: AbortSignal,
 ): Promise<LLMResult<T>> {
   const maxTokens = opts.maxTokens ?? 4096;
 
   const attempts: Array<{ text: string; error?: string }> = [];
 
   for (let attempt = 0; attempt < 2; attempt++) {
+    signal.throwIfAborted();
     const currentMessages: LLMMessage[] = [...messages];
     if (attempt > 0 && attempts[0]) {
       currentMessages.push(
@@ -295,7 +346,8 @@ export async function callLLMWithSchema<T>(
       );
     }
 
-    const { text, response } = await rawCall(currentMessages, opts.model, maxTokens, true);
+    const { text, response } = await rawCall(currentMessages, opts.model, maxTokens, true, signal);
+    signal.throwIfAborted();
     const { promptTokens, completionTokens, tokensUsed } = usageOf(response);
 
     // strip markdown fences if модель их всё-таки добавила
@@ -348,10 +400,19 @@ export async function callLLMWithSchema<T>(
  */
 export async function callLLMText(
   messages: LLMMessage[],
-  opts: { model: string; maxTokens?: number },
+  opts: LLMCallOptions,
+): Promise<LLMTextResult> {
+  return withLLMDeadline(opts, (signal) => callLLMTextWithinDeadline(messages, opts, signal));
+}
+
+async function callLLMTextWithinDeadline(
+  messages: LLMMessage[],
+  opts: LLMCallOptions,
+  signal: AbortSignal,
 ): Promise<LLMTextResult> {
   const maxTokens = opts.maxTokens ?? 8192;
-  const { text, response } = await rawCall(messages, opts.model, maxTokens, false);
+  const { text, response } = await rawCall(messages, opts.model, maxTokens, false, signal);
+  signal.throwIfAborted();
   const { promptTokens, completionTokens, tokensUsed } = usageOf(response);
   return {
     text: text.trim(),
@@ -373,15 +434,25 @@ export async function callLLMText(
  */
 export async function callLLMTextWithFallback(
   messages: LLMMessage[],
-  opts: { model: string; maxTokens?: number; fallbackModel?: string; minChars?: number; log?: (msg: string) => void },
+  opts: LLMCallOptions & { fallbackModel?: string; minChars?: number; log?: (msg: string) => void },
+): Promise<LLMTextResult> {
+  return withLLMDeadline(opts, (signal) => callLLMTextWithFallbackWithinDeadline(messages, opts, signal));
+}
+
+async function callLLMTextWithFallbackWithinDeadline(
+  messages: LLMMessage[],
+  opts: LLMCallOptions & { fallbackModel?: string; minChars?: number; log?: (msg: string) => void },
+  signal: AbortSignal,
 ): Promise<LLMTextResult> {
   const minChars = opts.minChars ?? 20;
   const fallbackModel = (opts.fallbackModel ?? process.env.VE_MODEL_CHAIN_FALLBACK ?? '').trim();
-  const first = await callLLMText(messages, opts);
+  const first = await callLLMTextWithinDeadline(messages, opts, signal);
+  signal.throwIfAborted();
   const refused = first.finishReason === 'content_filter' || first.text.length < minChars;
   if (!refused || !fallbackModel || fallbackModel === opts.model) return first;
   opts.log?.(`[llm] ${opts.model}: отказ или пустой ответ (finish=${first.finishReason ?? 'n/a'}, len=${first.text.length}) — повтор на ${fallbackModel}`);
-  const second = await callLLMText(messages, { ...opts, model: fallbackModel });
+  const second = await callLLMTextWithinDeadline(messages, { ...opts, model: fallbackModel }, signal);
+  signal.throwIfAborted();
   // Суммируем стоимость обоих вызовов, текст — от успешного.
   return {
     ...second,

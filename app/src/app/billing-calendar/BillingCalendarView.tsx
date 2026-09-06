@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabaseClient';
 import { UserRole } from '@/types';
 import { isTechnician, isLead, isAdmin } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
+import { currentMoscowDate } from '@/lib/calendarDate';
 
 /* ═══════════════════════════════════════════
    TYPES
@@ -89,19 +90,26 @@ function formatSubscriptionTotals(
     .join(' · ') || '—';
 }
 
+function isPaidEmailSubscription(
+  subscription: Pick<EmailSubscription, 'status' | 'next_billing_date'>,
+): boolean {
+  return subscription.status === 'keep' && subscription.next_billing_date <= currentMoscowDate();
+}
+
 function canEditEmailSubscription(
   role: UserRole | null,
-  status: EmailSubscription['status'],
+  subscription: EmailSubscription,
 ): boolean {
+  if (isPaidEmailSubscription(subscription)) return false;
   return isAdmin(role)
-    || (role === 'technician' && (status === 'active' || status === 'pending_review'));
+    || (role === 'technician' && (subscription.status === 'active' || subscription.status === 'pending_review'));
 }
 
 function canDecideEmailSubscription(
   role: UserRole | null,
-  status: EmailSubscription['status'],
+  subscription: EmailSubscription,
 ): boolean {
-  return isLead(role) && status !== 'expired';
+  return isLead(role) && subscription.status !== 'expired' && !isPaidEmailSubscription(subscription);
 }
 
 function useModalFocusTrap(isOpen: boolean, onClose: () => void) {
@@ -172,6 +180,9 @@ function billingSaveErrorMessage(error: unknown): string {
   const message = error && typeof error === 'object' && 'message' in error
     ? String((error as { message?: unknown }).message ?? '')
     : '';
+  if (message.includes('email_subscription_paid_cycle_locked')) {
+    return 'Это списание уже учтено как оплаченное. Его нельзя отменить, изменить или удалить. Для следующего периода используйте следующую запись подписки.';
+  }
   if (message.includes('payment_request_cost_limit_exceeded')) {
     return 'Лимит костов 650 000 ₽ на этот месяц будет превышен. Измените сумму или дату.';
   }
@@ -469,7 +480,7 @@ export default function BillingCalendarView() {
   }
 
   function openEditModal(item: EmailSubscription) {
-    if (!canEditEmailSubscription(userRole, item.status)) return;
+    if (!canEditEmailSubscription(userRole, item)) return;
     setSaveError('');
     setModalMode('edit');
     setEditingItem(item);
@@ -503,9 +514,9 @@ export default function BillingCalendarView() {
   function openSubscriptionModal(item: EmailSubscription) {
     // Decision is the primary calendar action for leaders/admins; admins can
     // still use the list view when they need to edit an already decided row.
-    if (canDecideEmailSubscription(userRole, item.status)) {
+    if (canDecideEmailSubscription(userRole, item)) {
       openDecisionModal(item);
-    } else if (canEditEmailSubscription(userRole, item.status)) {
+    } else if (canEditEmailSubscription(userRole, item)) {
       openEditModal(item);
     }
   }
@@ -936,8 +947,8 @@ export default function BillingCalendarView() {
                   <div className="space-y-0.5">
                     {daySubs.slice(0, 3).map((sub) => {
                       const cfg = STATUS_CONFIG[sub.status] || STATUS_CONFIG.active;
-                      const canOpen = canDecideEmailSubscription(userRole, sub.status)
-                        || canEditEmailSubscription(userRole, sub.status);
+                      const canOpen = canDecideEmailSubscription(userRole, sub)
+                        || canEditEmailSubscription(userRole, sub);
                       const content = (
                         <>
                           <span className="font-medium truncate block">{sub.project_name}</span>
@@ -1036,8 +1047,8 @@ export default function BillingCalendarView() {
                 <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1" style={{ minHeight: 0 }}>
                   {popSubs.map((sub) => {
                     const cfg = STATUS_CONFIG[sub.status] || STATUS_CONFIG.active;
-                    const canOpen = canDecideEmailSubscription(userRole, sub.status)
-                      || canEditEmailSubscription(userRole, sub.status);
+                    const canOpen = canDecideEmailSubscription(userRole, sub)
+                      || canEditEmailSubscription(userRole, sub);
                     const content = (
                       <>
                         <div className="flex items-center justify-between gap-2">
@@ -1171,7 +1182,7 @@ export default function BillingCalendarView() {
                               Решение
                             </button>
                           )}
-                          {canEditEmailSubscription(userRole, sub.status) && (
+                          {canEditEmailSubscription(userRole, sub) && (
                             <>
                               <button
                                 onClick={() => openEditModal(sub)}
@@ -1181,7 +1192,7 @@ export default function BillingCalendarView() {
                               </button>
                             </>
                           )}
-                          {isAdmin(userRole) && (
+                          {isAdmin(userRole) && !isPaidEmailSubscription(sub) && (
                             <>
                               <button
                                 onClick={() => handleDelete(sub.id)}
@@ -1533,7 +1544,7 @@ export default function BillingCalendarView() {
             {/* Modal Footer */}
             <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between gap-3">
               <div>
-                {isAdmin(userRole) && (modalMode === 'edit' || modalMode === 'decision') && editingItem && (
+                {isAdmin(userRole) && (modalMode === 'edit' || modalMode === 'decision') && editingItem && !isPaidEmailSubscription(editingItem) && (
                   <button
                     onClick={handleDeleteFromModal}
                     disabled={saving}
@@ -1672,13 +1683,13 @@ export default function BillingCalendarView() {
                                   )}
                                 </div>
                               </div>
-                              <button
+                              {!isPaidEmailSubscription(item) && <button
                                 onClick={() => handleDeleteDuplicate(item.id)}
                                 disabled={deletingId === item.id}
                                 className="px-2.5 py-1 text-[11px] font-medium text-red-600 bg-red-50 rounded-md hover:bg-red-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                               >
                                 {deletingId === item.id ? 'Удаление...' : 'Удалить'}
-                              </button>
+                              </button>}
                             </div>
                           );
                         })}
@@ -1818,7 +1829,7 @@ function UpcomingDeadlines({
                     Решить
                   </button>
                 )}
-                {canEditEmailSubscription(userRole, sub.status) && (
+                {canEditEmailSubscription(userRole, sub) && (
                   <button
                     onClick={() => onEdit(sub)}
                     className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 rounded-lg hover:bg-blue-100 transition-colors"

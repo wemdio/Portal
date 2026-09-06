@@ -78,8 +78,13 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const [selectedVerticalId, setSelectedVerticalId] = useState<string | null>(null);
   const projectTopRef = useRef<HTMLDivElement | null>(null);
   const contentTopRef = useRef<HTMLElement | null>(null);
+  const contentLeaveGuardRef = useRef<(() => boolean) | null>(null);
+  const registerContentLeaveGuard = useCallback((guard: (() => boolean) | null) => {
+    contentLeaveGuardRef.current = guard;
+  }, []);
 
   const [researchStarting, setResearchStarting] = useState(false);
+  const [selectedBaseId, setSelectedBaseId] = useState<string | null>(null);
   const [offerSaving, setOfferSaving] = useState(false);
   const [cancelling, setCancelling] = useState(false);
 
@@ -94,6 +99,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const visitTrackedRef = useRef(false);
 
   const jumpTo = useCallback((next: number, options?: { scroll?: boolean }) => {
+    if (next !== 3 && contentLeaveGuardRef.current && !contentLeaveGuardRef.current()) return;
     setStep(next);
     setMaxVisitedStep((prev) => Math.max(prev, next));
     if (options?.scroll === false) return;
@@ -210,11 +216,11 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const selectedBases = useMemo(
     () =>
       (detail?.bases ?? [])
-        .filter((b) => b.vertical_id === selectedVerticalId)
+        .filter((b) => b.vertical_id === selectedVerticalId && b.collect_info?.collection_mode !== 'supply')
         .sort((a, b) => b.created_at.localeCompare(a.created_at)),
     [detail, selectedVerticalId],
   );
-  const selectedBase = selectedBases[0] ?? null;
+  const selectedBase = selectedBases.find((base) => base.id === selectedBaseId) ?? selectedBases[0] ?? null;
   // Шаблон — последний собранный для выбранной базы.
   const selectedTemplate = useMemo(() => {
     if (!selectedBase) return null;
@@ -492,6 +498,19 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
     />
   );
 
+  const baseSelector = selectedBases.length > 1 ? (
+    <div className="mb-5 max-w-xl">
+      <label htmlFor="ve2-selected-preview" className="ve2-label">База и гипотеза для согласования и запуска</label>
+      <select id="ve2-selected-preview" className="ve2-input w-full px-3 py-2" value={selectedBase?.id ?? ''}
+        onChange={(event) => setSelectedBaseId(event.target.value)}>
+        {selectedBases.map((base) => <option key={base.id} value={base.id}>
+          {hypotheses.find((hypothesis) => hypothesis.id === base.hypothesis_id)?.title ?? base.filename}
+          {' · '}{new Date(base.created_at).toLocaleString('ru-RU')}
+        </option>)}
+      </select>
+    </div>
+  ) : null;
+
   function renderStep() {
     switch (step) {
       case 2: {
@@ -539,6 +558,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             onGenerateChain={(language: 'ru' | 'en' | 'pl') => void runChain(selectedVertical.id, language)}
             onGenerateVocab={() => void runVocab(selectedVertical.id)}
             onGoToBase={() => jumpTo(4)}
+            onRegisterLeaveGuard={registerContentLeaveGuard}
             dossiers={dossiers}
             onBuildDossier={() => void runDossier(selectedVertical.id)}
           />
@@ -547,29 +567,37 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
       case 4: {
         if (!selectedVertical) return verticalRequiredHint;
         return (
+          <>
+          {baseSelector}
           <Step4Base
             projectId={projectId}
             vertical={selectedVertical}
             hypotheses={hypotheses}
-            bases={selectedBases}
+            bases={bases}
+            selectedBaseId={selectedBase?.id}
             jobs={jobs}
             parentPollingActive={hasActiveJobs}
             onUploaded={() => void load({ silent: true })}
             onTemplateStarted={handleTemplateStarted}
             onGoToTemplate={() => jumpTo(5)}
           />
+          </>
         );
       }
       case 5: {
         if (!selectedVertical) return verticalRequiredHint;
         return (
+          <>
+          {baseSelector}
           <Step5Template
+            key={selectedBase?.id ?? 'empty'}
             template={selectedTemplate}
             base={selectedBase}
             jobs={jobs}
             onBuildTemplate={handleBuildTemplate}
             onGoToContent={() => jumpTo(3)}
           />
+          </>
         );
       }
       case 1:
@@ -607,7 +635,9 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
       {detail ? (
         <div className="ve2-wiz">
           <aside className="ve2-rail min-w-0">
-            <button type="button" onClick={onBack} className="ve2-b-quiet inline-flex items-center gap-1.5">
+            <button type="button" onClick={() => {
+              if (!contentLeaveGuardRef.current || contentLeaveGuardRef.current()) onBack();
+            }} className="ve2-b-quiet inline-flex items-center gap-1.5">
               <ArrowLeft aria-hidden className="h-3.5 w-3.5" />
               Все проекты
             </button>

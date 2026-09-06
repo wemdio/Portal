@@ -7,6 +7,7 @@ const mockCreateCampaign = jest.fn();
 const mockCreateLeads = jest.fn();
 const mockUpdateCampaign = jest.fn();
 const mockValidateStoredAuditSnapshot = jest.fn();
+const mockReservePeriodCampaignLinks = jest.fn();
 
 jest.mock('@/lib/clientLaunch/buildCampaignPayload', () => ({
   buildCampaignPayloadFromPreset: jest.fn(() => ({ sequences: [{ steps: [] }] })),
@@ -38,6 +39,10 @@ jest.mock('@/lib/verticalEngineV2/projectLaunchPresetBinding', () => ({
   })),
 }));
 
+jest.mock('@/lib/instantly/campaignProjectOwnership', () => ({
+  reservePeriodCampaignLinks: (...args: unknown[]) => mockReservePeriodCampaignLinks(...args),
+}));
+
 jest.mock('@/lib/verticalEngineV2/stages/segmentationAudit', () => ({
   validateStoredAuditSnapshot: (...args: unknown[]) => mockValidateStoredAuditSnapshot(...args),
 }));
@@ -49,6 +54,8 @@ const BASE_ID = 'base-1';
 const AUDIT_ID = 'audit-1';
 const PROJECT_ID = 'project-1';
 const CLIENT_ID = 'client-1';
+const PORTAL_PROJECT_ID = '20000000-0000-0000-0000-000000000001';
+const PORTAL_PERIOD_ID = '30000000-0000-0000-0000-000000000001';
 
 const leads: LeadCreatePayload[] = [
   { email: 'blocked@example.test' },
@@ -58,6 +65,7 @@ const leads: LeadCreatePayload[] = [
 function portalDb() {
   return createMockSupabase({
     tables: {
+      ve_projects: [{ id: PROJECT_ID }],
       ve_templates: [
         {
           id: TEMPLATE_ID,
@@ -90,9 +98,19 @@ function portalDb() {
         },
       ],
       ve_verticals: [{ id: 'vertical-1', potential_pct: 50 }],
+      project_periods: [{
+        id: PORTAL_PERIOD_ID,
+        project_id: PORTAL_PROJECT_ID,
+        status: 'active',
+        contacts_done: '0',
+        deadline: '2026-09-30',
+      }],
     },
     rpcHandlers: {
       ve_finalize_template_launch: async () => ({ data: { finalized: true } }),
+      ve_bind_contact_delivery_plan: async () => ({ data: { bound: true, replayed: false } }),
+      ve_finalize_template_contact_delivery: async () => ({ data: { finalized: true } }),
+      ve_contact_supply_approval_current: async () => ({ data: true }),
     },
   });
 }
@@ -109,6 +127,7 @@ function instantlyDb(options: { blocklistError?: string; blockedEmails?: string[
           email_account_ids: ['sender@example.test'],
           daily_limit: 30,
           schedule_days: [1, 2, 3, 4, 5],
+          schedule_timezone: 'Europe/Moscow',
         },
       ],
     },
@@ -120,18 +139,38 @@ function instantlyDb(options: { blocklistError?: string; blockedEmails?: string[
   });
 }
 
-async function launch(options: { blocklistError?: string; blockedEmails?: string[] } = {}) {
+async function launch(options: { blocklistError?: string; blockedEmails?: string[]; reservedEmails?: string[]; preview?: boolean; supplyBatch?: boolean; approvedPlan?: Record<string, unknown>; force?: boolean } = {}) {
   const portal = portalDb();
+  if (options.preview) {
+    await portal.from('ve_bases').update({ collect_info: { collection_mode: 'preview' } }).eq('id', BASE_ID);
+  }
+  if (options.supplyBatch) {
+    await portal.from('ve_templates').update({ supply_batch_id: 'batch-1' }).eq('id', TEMPLATE_ID);
+  }
+  if (options.approvedPlan) await portal.from('ve_contact_supply_plans').insert({
+    id: 'supply-1', template_id: TEMPLATE_ID, status: 'active', preview_audit_id: AUDIT_ID,
+    approval_snapshot: { preset_id: 'preset-1', portal_project_id: PORTAL_PROJECT_ID,
+      portal_period_id: PORTAL_PERIOD_ID, target_contacts: 100, instantly_account_id: 'workspace-a' },
+    ...options.approvedPlan,
+  });
+  if (options.reservedEmails) {
+    await portal.from('ve_contact_delivery_rows').insert(options.reservedEmails.map((email, index) => ({
+      id: `reserved-${index}`, ve_project_id: PROJECT_ID, campaign_row_id: 'previous-child', email_normalized: email, status: 'accepted',
+    })));
+  }
   const instantly = instantlyDb(options);
   const outcome = await runVeTemplateLaunch({
     portalDb: portal as never,
     instantlyDb: instantly as never,
     templateId: TEMPLATE_ID,
     presetId: 'preset-1',
-    force: false,
+    force: options.force === true,
     segmentationAuditId: AUDIT_ID,
     confirmSegmentation: true,
     userId: 'staff-1',
+    portalProjectId: PORTAL_PROJECT_ID,
+    expectedPortalPeriodId: PORTAL_PERIOD_ID,
+    targetContacts: 100,
     locale: 'ru',
     eventPrefix: 'test.ve2.launch',
   });
@@ -167,11 +206,47 @@ beforeEach(() => {
     leads_uploaded: items.length,
     duplicated_leads: 0,
   }));
+  mockReservePeriodCampaignLinks.mockResolvedValue({
+    status: 'claimed',
+    conflictingProjectIds: [],
+  });
 });
 
 describe('Vertical Engine v2 initial launch client blocklist', () => {
-  it('removes blocked contacts before createLeads and preserves workspace skip flags', async () => {
-    const { outcome, instantly } = await launch();
+  it('requires customer approval for a new preview and never launches an internal supply template', async () => {
+    for (const options of [{ preview: true }, { supplyBatch: true },
+      { preview: true, approvedPlan: { preview_audit_id: 'other-audit' } },
+      { preview: true, approvedPlan: { item_id: 'already-launched' }, force: true },
+      { preview: true, approvedPlan: { approval_snapshot: { preset_id: 'preset-1', portal_project_id: PORTAL_PROJECT_ID,
+        portal_period_id: PORTAL_PERIOD_ID, target_contacts: 100, instantly_account_id: 'other-workspace' } } },
+    ]) {
+      const { outcome } = await launch(options);
+      expect(outcome.status).toBe(409);
+      expect(mockCreateCampaign).not.toHaveBeenCalled();
+      expect(mockCreateLeads).not.toHaveBeenCalled();
+    }
+  });
+  it('does not create campaigns for contacts already committed by another hypothesis', async () => {
+    const { outcome } = await launch({ reservedEmails: ['allowed@example.test'] });
+    expect(outcome.status).toBe(400);
+    expect(mockCreateCampaign).not.toHaveBeenCalled();
+  });
+  it('prepares a reserve larger than a provider batch without uploading it immediately', async () => {
+    const audience = Array.from({ length: 2001 }, (_, index) => ({ email: `lead-${index}@example.test` }));
+    const validation = mockValidateStoredAuditSnapshot.getMockImplementation()!();
+    mockValidateStoredAuditSnapshot.mockReturnValue({
+      ...validation,
+      snapshot: { ...validation.snapshot, audience: { ...validation.snapshot.audience, leads: audience, rows: audience, totalRows: audience.length } },
+      assignments: new Map(audience.map((_, index) => [index, null])),
+    });
+    const { outcome, portal } = await launch({ blockedEmails: [] });
+    expect(outcome.status).toBe(200);
+    expect(portal.rpcCalls.at(-1)?.params?.p_drip_rows).toHaveLength(2001);
+    expect(mockCreateLeads).not.toHaveBeenCalled();
+  });
+
+  it('removes blocked contacts before materializing the durable drip reserve', async () => {
+    const { outcome, instantly, portal } = await launch();
 
     expect(outcome.status).toBe(200);
     expect(outcome.body.warnings).toContain('Исключено контактов из чёрного списка клиента: 1.');
@@ -179,16 +254,40 @@ describe('Vertical Engine v2 initial launch client blocklist', () => {
       fn: 'client_blocklist_snapshot',
       params: { p_client_user_id: CLIENT_ID },
     });
-    expect(mockCreateLeads).toHaveBeenCalledWith(
-      [{ email: 'allowed@example.test' }],
-      {
-        campaign_id: 'campaign-1',
-        skip_if_in_workspace: false,
-        skip_if_in_campaign: false,
-        skip_if_in_list: false,
-      },
-      { accountId: 'workspace-a' },
+    expect(portal.rpcCalls).toContainEqual({
+      fn: 've_bind_contact_delivery_plan',
+      params: expect.objectContaining({
+        p_ve_project_id: PROJECT_ID,
+        p_portal_project_id: PORTAL_PROJECT_ID,
+        p_expected_portal_period_id: PORTAL_PERIOD_ID,
+        p_target_contacts: 100,
+        p_schedule_days: [1, 2, 3, 4, 5],
+        p_timezone: 'Europe/Moscow',
+        p_sender_daily_capacity: 30,
+        p_bound_by: 'staff-1',
+      }),
+    });
+    expect(mockCreateLeads).not.toHaveBeenCalled();
+    expect(mockReservePeriodCampaignLinks).toHaveBeenCalledWith(
+      instantly,
+      PORTAL_PROJECT_ID,
+      [expect.objectContaining({
+        periodId: PORTAL_PERIOD_ID,
+        campaignId: 'campaign-1',
+        baselineContacts: 0,
+      })],
     );
+    expect(portal.rpcCalls.at(-1)).toMatchObject({
+      fn: 've_finalize_template_contact_delivery',
+      params: {
+        p_drip_rows: [expect.objectContaining({
+          campaign_id: 'campaign-1',
+          email_normalized: 'allowed@example.test',
+          lead_payload: { email: 'allowed@example.test' },
+        })],
+      },
+    });
+    expect(outcome.body.launch).toMatchObject({ leads_count: 0, ready_leads_count: 1 });
   });
 
   it('fails closed before any Instantly mutation when the client blocklist cannot be read', async () => {

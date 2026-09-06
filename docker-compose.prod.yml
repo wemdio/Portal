@@ -1045,9 +1045,10 @@ services:
       - BASE_ENRICH_SCRAPE_CONCURRENCY=${BASE_ENRICH_SCRAPE_CONCURRENCY:-6}
       # 60s возвращают запас времени для retry/fallback-цепочки.
       - BASE_ENRICH_PER_SITE_TIMEOUT_MS=${BASE_ENRICH_PER_SITE_TIMEOUT_MS:-60000}
-      # У двенадцати воркеров общий Requesty-ключ: по одной AI-пачке на job
-      # даёт до 12 одновременных вызовов без неконтролируемого fan-out.
-      - BASE_TA_SCORING_CONCURRENCY=${BASE_TA_SCORING_CONCURRENCY:-1}
+      # Две TA-пачки на job: максимум 24 одновременных TA-вызова у 12 реплик.
+      # Другие AI-инструменты используют тот же Requesty-аккаунт; это не общий
+      # лимитер аккаунта. Для возврата к прежнему темпу задайте env=1.
+      - BASE_TA_SCORING_CONCURRENCY=${BASE_TA_SCORING_CONCURRENCY:-2}
       - BASE_CONSTRUCTOR_STALE_MINUTES=${BASE_CONSTRUCTOR_STALE_MINUTES:-15}
     # Job может занимать 30-60 минут (find_emails+enrich на 1.5к строк).
     # SIGTERM придёт при docker compose down, но шаг доработает до конца —

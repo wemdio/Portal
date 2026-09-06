@@ -8,6 +8,8 @@ import { getBlockedEmailSet, normalizeBlockedEmail } from '@/lib/clientBlocklist
 import { buildBaseCsv, safeBaseFilename } from '@/lib/verticalEngineV2/baseCsv';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from '@/lib/verticalEngineV2/types';
 import { validateStoredAuditSnapshot } from '@/lib/verticalEngineV2/stages/segmentationAudit';
+import { prepareSegmentationAudience } from '@/lib/verticalEngineV2/segmentationAudit';
+import { VE_PREVIEW_READY_TARGET } from '@/lib/verticalEngineV2/collectionTarget';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -17,12 +19,13 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-type BaseExportMode = 'raw' | 'launch-ready';
+type BaseExportMode = 'raw' | 'launch-ready' | 'preview';
 
 function exportMode(req: NextRequest): BaseExportMode | null {
   const requested = req.nextUrl.searchParams.get('mode');
   if (requested === null || requested === '' || requested === 'raw') return 'raw';
   if (requested === 'launch-ready') return 'launch-ready';
+  if (requested === 'preview') return 'preview';
   return null;
 }
 
@@ -67,7 +70,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
       const { data: base, error: baseErr } = await supabaseAdmin
         .from('ve_bases')
-        .select('id, project_id, vertical_id, hypothesis_id, filename, row_count, columns, data, source')
+        .select('id, project_id, vertical_id, hypothesis_id, filename, row_count, columns, data, source, status, collect_info')
         .eq('id', id)
         .single();
       if (baseErr) {
@@ -96,6 +99,15 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
       let exportRows = rows;
       let exportColumns = columns;
+      if (mode === 'preview') {
+        const info = base.collect_info as { collection_mode?: string; target_progress?: { status?: string } } | null;
+        if (info?.collection_mode !== 'preview' || !['analyzing', 'analyzed'].includes(base.status)
+          || !['target_reached', 'exhausted', 'limited'].includes(info?.target_progress?.status ?? '')) {
+          return jsonError('Превью ещё не прошло проверки', 409);
+        }
+        exportRows = prepareSegmentationAudience({ rows, columns, source: 'auto' }).rows.slice(0, VE_PREVIEW_READY_TARGET);
+        exportColumns = columns.filter((column) => !column.startsWith('_'));
+      }
       if (mode === 'launch-ready' && context) {
         if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
 

@@ -15,6 +15,39 @@ import {
 import type { LeadCreatePayload } from '@/lib/instantly/types';
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import {
+  filterClientDomainLeads,
+  getClientExcludedDomainSuffixes,
+  isClientDomainExcluded,
+} from '@/lib/clientBlocklist/domainPolicy';
+
+describe('client company-domain policy', () => {
+  const clientId = '0a6d90e1-91d0-404e-b508-6b031bda7cfd';
+
+  it('excludes only Mailganer .com sites, with normalized hostnames and stable lead identities', () => {
+    expect(getClientExcludedDomainSuffixes(clientId)).toEqual(['.com']);
+    expect(getClientExcludedDomainSuffixes('another-client')).toEqual([]);
+    for (const site of ['example.com', ' HTTPS://WWW.Example.COM.:443/contact ', '//sub.example.com/path']) {
+      expect(isClientDomainExcluded(clientId, site)).toBe(true);
+      expect(isClientDomainExcluded('another-client', site)).toBe(false);
+    }
+    for (const site of ['example.com.ru', 'example.ru/com', 'example.ru?site=example.com', 'example.company', '', null]) {
+      expect(isClientDomainExcluded(clientId, site)).toBe(false);
+    }
+    const leads = [
+      { email: 'one@example.ru', website: 'https://company.com' },
+      { email: 'two@gmail.com', website: 'company.ru' },
+      { email: 'three@example.ru', custom_variables: { domain: 'company.com' } },
+      { email: 'four@gmail.com' },
+      { email: 'five@company.com.ru', website: 'company.com.ru' },
+    ];
+    const result = filterClientDomainLeads(leads, clientId);
+    expect(result.blockedCount).toBe(2);
+    expect(result.kept).toEqual([leads[1], leads[3], leads[4]]);
+    expect(result.kept[0]).toBe(leads[1]);
+    expect(filterClientDomainLeads(leads, 'another-client').kept).toEqual(leads);
+  });
+});
 
 describe('getBlockedEmailSet', () => {
   it('loads one transactionally consistent snapshot beyond the PostgREST row cap', async () => {

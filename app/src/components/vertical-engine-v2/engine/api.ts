@@ -104,6 +104,23 @@ export interface VeCollectStatsDto {
 }
 
 export interface VeCollectInfo {
+  collection_mode?: 'preview' | 'supply';
+  ready_target?: number;
+  supply_hold?: boolean;
+  target_progress?: import('@/lib/verticalEngineV2/collectionTarget').VeCollectionTargetProgress;
+  /** Более ранняя база проекта, которую ждёт этот сбор. */
+  waiting_for_base_id?: string | null;
+  /** Снимок обработки; не означает, что итоговая база уже сохранена. */
+  construct?: {
+    status?: string;
+    progress?: {
+      status?: string;
+      current_step?: number | null;
+      total_steps?: number | null;
+      current_step_key?: string | null;
+      current_step_progress?: number | null;
+    } | null;
+  } | null;
   /** Лимит строк, выбранный при запуске сборки (у старых записей поля нет). */
   limit?: number | null;
   /** Гипотезы, выбранные при запуске сборки (у записей до пикера гипотез поля нет). */
@@ -146,7 +163,7 @@ export type VeJobSummary = Pick<
 > & {
   finished_at: string | null;
   /** Вход стадии: фильтрация джоб по вертикали (payload.vertical_id). */
-  payload?: { vertical_id?: string } | null;
+  payload?: { vertical_id?: string; base_id?: string } | null;
   /** Живой прогресс стадии (ve_jobs.progress): счётчик «— 14/33 · проверяем гипотезу». */
   progress?: { done?: number; total?: number; label?: string } | null;
 };
@@ -250,7 +267,26 @@ export interface VeCaseEntry {
   /** Структурированные метрики результата (ve_cases.metrics — jsonb). */
   metrics: Record<string, unknown> | null;
   result: string | null;
+  /** Сохранённый текст кейса. У старых записей это может быть краткий пересказ. */
+  text?: string | null;
   created_at: string;
+}
+
+/** Результат разбора до явного сохранения специалистом. */
+export interface VeCaseDraft {
+  industry: string | null;
+  client_type: string | null;
+  task: string | null;
+  metrics: Record<string, unknown> | null;
+  result: string | null;
+  /** Фрагмент из исходного текста, относящийся только к этому кейсу. */
+  text: string;
+}
+
+export interface VeCasePreviewResponse {
+  cases?: VeCaseDraft[];
+  count?: number;
+  error?: string;
 }
 
 export interface VeProjectsResponse {
@@ -326,9 +362,11 @@ export interface VeBaseCollectResponse {
   error?: string;
 }
 
-/** POST /projects/[id]/cases → 201 { case }. */
+/** POST /projects/[id]/cases { mode: 'save', ... } → { cases, count }. */
 export interface VeCaseCreateResponse {
   case?: VeCaseEntry;
+  cases?: VeCaseEntry[];
+  count?: number;
   error?: string;
 }
 
@@ -369,6 +407,62 @@ export interface VeClientBriefResponse {
   error?: string;
 }
 
+/* ── План выполнения обязательства перед запуском ── */
+
+/** Активный период Portal, который backend разрешает привязать к VE-проекту. */
+export interface VePortalActivePeriodDto {
+  id: string;
+  label?: string | null;
+  starts_at?: string | null;
+  deadline: string | null;
+  /** Факт первых контактов. Не равен числу загруженных в Instantly получателей. */
+  contacts_done_count: number | null;
+}
+
+/** Явный выбор Portal-проекта; источник периода всегда Portal. */
+export interface VePortalProjectOptionDto {
+  id: string;
+  name: string;
+  active_period: VePortalActivePeriodDto | null;
+}
+
+export interface VeDeliveryPlanPreviewRequest {
+  portal_project_id: string;
+  expected_portal_period_id: string;
+  target_contacts: number;
+  preset_id: string;
+  segmentation_audit_id?: string;
+}
+
+/** Серверный расчёт, общий для preview и финального запуска. */
+export interface VeDeliveryPlanPreviewDto {
+  portal_project_id: string;
+  portal_project_name?: string | null;
+  portal_period_id: string;
+  portal_period_label?: string | null;
+  deadline: string;
+  contacts_done_count: number;
+  target_contacts: number;
+  remaining: number;
+  remaining_workdays: number;
+  required_daily: number;
+  effective_daily: number;
+  ready_remaining: number;
+  reserve_remaining?: number;
+  outstanding_count?: number;
+  sender_capacity: number;
+  supply_deficit: number;
+  capacity_deficit: number;
+  delivery_timezone?: string | null;
+  delivery_schedule_days?: number[] | null;
+}
+
+export interface VeDeliveryPlanPreviewResponse {
+  preview?: VeDeliveryPlanPreviewDto;
+  error?: string;
+  code?: string;
+}
+
 /** authFetch + безопасный json-parse, без throw — вызывающий смотрит на ok/status. */
 export async function veEngineCall<T>(
   url: string,
@@ -384,6 +478,17 @@ export function veEnginePost<T>(url: string, body?: unknown): Promise<{ ok: bool
     method: 'POST',
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+}
+
+/** Additive endpoint: старый GET запуска остаётся совместим, новый запуск без preview блокируется в UI. */
+export function vePreviewDeliveryPlan(
+  templateId: string,
+  body: VeDeliveryPlanPreviewRequest,
+): Promise<{ ok: boolean; status: number; data: VeDeliveryPlanPreviewResponse }> {
+  return veEnginePost<VeDeliveryPlanPreviewResponse>(
+    `${VE_API}/templates/${templateId}/launch/delivery-preview`,
+    body,
+  );
 }
 
 export function veEnginePatch<T>(url: string, body: unknown): Promise<{ ok: boolean; status: number; data: T }> {

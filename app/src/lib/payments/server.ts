@@ -189,6 +189,7 @@ export function paymentRequestToApi(
     decidedAt: stringOrNull(row.decided_at),
     paidOn: stringOrNull(row.paid_on),
     paidOnSource: (stringOrNull(row.paid_on_source) ?? null) as PaymentPaidOnSource,
+    autoPaymentOn: stringOrNull(row.auto_payment_on),
     paidBy: person(row.paid_by, row.paid_by_name),
     paidAt: stringOrNull(row.paid_at),
     createdAt: stringOrNull(row.created_at) ?? '',
@@ -321,6 +322,13 @@ export function paymentRpcError(error: { message?: string } | null | undefined):
   if (message.includes('payment_request_project_not_found')) {
     return { status: 400, code: 'invalid_project', message: 'Выбранный проект не найден.' };
   }
+  if (message.includes('payment_request_invalid_paid_date')) {
+    return {
+      status: 400,
+      code: 'invalid_paid_date',
+      message: 'Укажите фактическую дату оплаты коста, не позднее сегодняшнего дня.',
+    };
+  }
   if (message.includes('payment_request_cost_limit_exceeded')) {
     return {
       status: 409,
@@ -332,7 +340,7 @@ export function paymentRpcError(error: { message?: string } | null | undefined):
     return {
       status: 409,
       code: 'cost_budget_incomplete',
-      message: 'Не удалось пересчитать календарь почт в рубли. Обновите курсы и повторите.',
+      message: 'Не удалось пересчитать календарные расходы в рубли. Обновите курсы и повторите.',
     };
   }
   return null;

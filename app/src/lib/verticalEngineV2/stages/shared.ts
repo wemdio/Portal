@@ -14,6 +14,10 @@ import type { VeJob, VeProject, VeStage } from '../types';
 
 export interface VeStageContext {
   supabase: SupabaseClient; /* supabaseAdmin client — создаётся воркером и передаётся сюда */
+  /** Captured per-job cancellation; never reuse a later job's signal. */
+  signal?: AbortSignal;
+  /** Real operation completion, not timer/heartbeat activity. */
+  onActivity?: () => void;
   /** Подменяемый фетч текста страницы (дефолт — SSRF-гейт + websiteParser, см. io.ts). */
   fetchText?: (url: string) => Promise<string>;
   /** Подменяемый поиск (дефолт — serperSearch, best-effort: может вернуть []). */
@@ -46,6 +50,17 @@ export function addUsage(acc: VeUsage, llm: { tokensUsed: number; costUsd: numbe
 
 export function stageLog(ctx: VeStageContext, msg: string): void {
   ctx.log?.(msg);
+}
+
+/** Worker preserves this pending state after a waiting stage returns. */
+export async function requeueVeJob(ctx: VeStageContext, job: VeJob, cooldownMs = 30_000): Promise<void> {
+  const { error } = await ctx.supabase.from('ve_jobs').update({
+    status: 'pending',
+    started_at: null,
+    run_after: new Date(Date.now() + cooldownMs).toISOString(),
+    updated_at: new Date().toISOString(),
+  }).eq('id', job.id).eq('status', 'running');
+  if (error) throw new Error(`ve_jobs requeue: ${error.message}`);
 }
 
 export function truncate(text: string, max: number): string {

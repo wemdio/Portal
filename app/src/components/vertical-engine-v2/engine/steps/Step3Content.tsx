@@ -17,6 +17,7 @@ import type {
   VeVertical,
 } from '@/lib/verticalEngineV2/types';
 import { decideEditorExit, EDITOR_EXIT_MESSAGE, type EditorExitIntent } from '@/lib/verticalEngineV2/editorDirtyGuard';
+import { getVeChainWaitDays } from '@/lib/verticalEngineV2/chainTiming';
 import { VE_API, veEnginePatch } from '../api';
 import type {
   VeChainDto,
@@ -57,6 +58,8 @@ const BUYS_CHANNELS_META: Record<'yes' | 'likely' | 'unknown', { label: string; 
 type JobTitleRow = VeJobTitle & { audience_side?: string };
 type ContentPanel = 'chain' | 'vocab' | 'dossier';
 const CONTENT_PANEL_ORDER: readonly ContentPanel[] = ['chain', 'vocab', 'dossier'];
+// Один активный редактор: -1 означает интервалы всей цепочки, 0..5 — текст письма.
+const TIMING_EDITOR_INDEX = -1;
 
 function normalizeChainLanguage(value: string | null | undefined): VeChainLanguage {
   return value === 'en' || value === 'pl' ? value : 'ru';
@@ -130,12 +133,14 @@ export function Step3Content(props: {
   onGenerateChain: (language: 'ru' | 'en' | 'pl') => void;
   onGenerateVocab: () => void;
   onGoToBase: () => void;
+  /** Родительские переходы мастера тоже должны проверять несохранённые правки. */
+  onRegisterLeaveGuard?: (guard: (() => boolean) | null) => void;
   /** Досье вертикалей проекта (из GET /projects/[id]). */
   dossiers?: VeDossier[];
   /** Запуск сборки досье выбранной вертикали (POST /verticals/[id]/dossier). */
   onBuildDossier?: () => void;
 }): JSX.Element {
-  const { vertical, chains, vocabs, jobs, onGenerateChain, onGenerateVocab, onGoToBase, dossiers, onBuildDossier } =
+  const { vertical, chains, vocabs, jobs, onGenerateChain, onGenerateVocab, onGoToBase, onRegisterLeaveGuard, dossiers, onBuildDossier } =
     props;
 
   const chain = useMemo(
@@ -187,6 +192,7 @@ export function Step3Content(props: {
   const editorDirtyRef = useRef(false);
   const [lettersSaving, setLettersSaving] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  const [timingSavedChainId, setTimingSavedChainId] = useState<string | null>(null);
 
   // Свежие данные цепочки закрыли редактор — сбрасываем и dirty-флаг,
   // иначе он протухнет и даст ложный confirm при следующем действии.
@@ -198,6 +204,7 @@ export function Step3Content(props: {
   // editorDirtyGuard). true = действие продолжается; при clear редактор
   // закрывается, а правки отменяются.
   const requestEditorExit = useCallback((intent: EditorExitIntent): boolean => {
+    if (lettersSaving || variantBusy !== null) return false;
     const { confirm, clear } = decideEditorExit(intent, editorDirtyRef.current);
     if (confirm && !window.confirm(EDITOR_EXIT_MESSAGE)) return false;
     if (clear) {
@@ -205,7 +212,22 @@ export function Step3Content(props: {
       setEditorState(null);
     }
     return true;
-  }, []);
+  }, [lettersSaving, variantBusy]);
+
+  useEffect(() => {
+    onRegisterLeaveGuard?.(() => requestEditorExit('leaveStep'));
+    return () => onRegisterLeaveGuard?.(null);
+  }, [onRegisterLeaveGuard, requestEditorExit]);
+
+  useEffect(() => {
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!editorDirtyRef.current && !lettersSaving) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeUnload);
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload);
+  }, [lettersSaving]);
 
   const selectContentPanel = useCallback(
     (nextPanel: ContentPanel, moveFocus = false) => {
@@ -241,7 +263,7 @@ export function Step3Content(props: {
   // Полная замена писем цепочки (редактирование/добавление): PATCH {letters},
   // нормализованный сервером массив из ответа кладём в override.
   const saveLetters = async (nextLetters: VeChainLetterDto[]): Promise<boolean> => {
-    if (!chain || lettersSaving) return false;
+    if (!chain || lettersSaving || variantBusy !== null) return false;
     setVariantError('');
     setLettersSaving(true);
     try {
@@ -254,6 +276,9 @@ export function Step3Content(props: {
       }
       setVariantError(data.error || 'Не удалось сохранить письма');
       return false;
+    } catch {
+      setVariantError('Не удалось сохранить письма. Правки остались в редакторе, попробуйте ещё раз.');
+      return false;
     } finally {
       setLettersSaving(false);
     }
@@ -264,6 +289,7 @@ export function Step3Content(props: {
   const openEditor = (idx: number) => {
     if (editorIdx === idx) return;
     if (!requestEditorExit('switchLetter')) return;
+    setTimingSavedChainId(null);
     setEditorState({ key: chainKey, idx });
   };
 
@@ -271,7 +297,7 @@ export function Step3Content(props: {
   // (variants/segment_variants пересылаем как есть — сервер их сохранит).
   const saveEditedLetter = async (
     idx: number,
-    patch: { subject: string | null; body: string; wait_days: number },
+    patch: { subject: string | null; body: string },
   ): Promise<void> => {
     const next = letters.map((l, i) => (i === idx ? { ...l, ...patch } : l));
     const saved = await saveLetters(next);
@@ -281,19 +307,27 @@ export function Step3Content(props: {
     }
   };
 
+  const saveTiming = async (waitDays: number[]): Promise<void> => {
+    const next = letters.map((letter, idx) => ({ ...letter, wait_days: idx === 0 ? 0 : waitDays[idx] }));
+    if (await saveLetters(next)) {
+      editorDirtyRef.current = false;
+      setEditorState(null);
+      setTimingSavedChainId(chain?.id ?? null);
+    }
+  };
+
   // «+ Добавить письмо»: новое письмо в конец со стартовым текстом,
-  // пауза = пауза предыдущего + 2; после сохранения открываем его в редакторе.
+  // пауза из общих defaults по номеру письма; после сохранения открываем редактор.
   const addLetter = async () => {
     if (!chain || letters.length === 0 || letters.length >= 6 || lettersSaving) return;
     // Добавление откроет редактор нового письма — это замена открытого редактора.
     if (editorIdx !== null && !requestEditorExit('switchLetter')) return;
-    const prevWait = Math.max(0, letters[letters.length - 1]?.wait_days ?? 0);
     const next: VeChainLetterDto[] = [
       ...letters,
       {
         subject: null,
         body: 'Здравствуйте!\n\n',
-        wait_days: Math.min(90, prevWait + 2),
+        wait_days: getVeChainWaitDays(letters.length),
       },
     ];
     const saved = await saveLetters(next);
@@ -460,7 +494,7 @@ export function Step3Content(props: {
                   value: e.target.value as VeChainLanguage,
                 })
               }
-              disabled={chainBusy}
+              disabled={chainBusy || lettersSaving || variantBusy !== null}
               aria-label="Язык цепочки"
               className="ve2-input h-9 min-h-9 w-auto px-2 text-xs"
             >
@@ -475,7 +509,7 @@ export function Step3Content(props: {
               onClick={() => {
                 if (requestEditorExit('regenerate')) onGenerateChain(language);
               }}
-              disabled={chainBusy}
+              disabled={chainBusy || lettersSaving || variantBusy !== null}
               className={HE.btnGhost}
             >
               {chainBusy ? <Spinner className="h-3.5 w-3.5" /> : null}
@@ -502,6 +536,52 @@ export function Step3Content(props: {
         {variantError ? (
           <div className="mt-3">
             <StatusBox tone="error">{variantError}</StatusBox>
+          </div>
+        ) : null}
+
+        {chain && letters.length > 0 ? (
+          <div className="mt-4" role="group" aria-labelledby="ve-chain-timing-title">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 id="ve-chain-timing-title" className="ve2-h4">Интервалы писем</h4>
+              {editorIdx !== TIMING_EDITOR_INDEX ? (
+                <button
+                  type="button"
+                  onClick={() => openEditor(TIMING_EDITOR_INDEX)}
+                  disabled={lettersSaving || chainBusy || variantBusy !== null}
+                  className={HE.btnQuiet}
+                >
+                  Настроить интервалы
+                </button>
+              ) : null}
+            </div>
+            <p className="ve2-mut mt-1 text-xs">
+              Паузы считаются после предыдущего письма. Дни и часы кампании в Instantly могут сдвинуть отправку.
+            </p>
+            {editorIdx === TIMING_EDITOR_INDEX ? (
+              <ChainTimingEditor
+                key={chainKey}
+                letters={letters}
+                saving={lettersSaving || chainBusy}
+                onSave={saveTiming}
+                onCancel={() => {
+                  editorDirtyRef.current = false;
+                  setEditorState(null);
+                }}
+                onDirtyChange={(dirty) => { editorDirtyRef.current = dirty; }}
+              />
+            ) : (
+              <div className="ve2-mut mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs">
+                {letters.map((letter, idx) => (
+                  <span key={idx}>
+                    Письмо {idx + 1}: {idx === 0 ? 'сразу' : `через ${letter.wait_days} ${daysWord(letter.wait_days)}`}
+                  </span>
+                ))}
+              </div>
+            )}
+            <p className="ve2-faint mt-2">
+              Настройки перейдут в новые шаблоны. Уже готовый шаблон нужно пересобрать; созданные кампании не изменятся.
+            </p>
+            {timingSavedChainId === chain.id ? <p role="status" className="ve2-mut mt-2 text-xs">Интервалы сохранены.</p> : null}
           </div>
         ) : null}
 
@@ -538,7 +618,7 @@ export function Step3Content(props: {
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                     <span className="ve2-eb">
                       Письмо {idx + 1}
-                      {letter.wait_days > 0 ? ` · через ${letter.wait_days} дн.` : ''}
+                      {idx === 0 ? ' · сразу' : ` · через ${letter.wait_days} дн. после предыдущего`}
                     </span>
                     {variants.length > 0 ? (
                       <>
@@ -548,7 +628,7 @@ export function Step3Content(props: {
                               key={side}
                               type="button"
                               aria-pressed={view === sideIdx}
-                              disabled={variantBusy === idx}
+                              disabled={lettersSaving || variantBusy !== null || chainBusy}
                               onClick={() => {
                                 if (!requestEditorExit('swapVariant')) return;
                                 setVariantView({
@@ -565,7 +645,7 @@ export function Step3Content(props: {
                         {view !== 0 ? (
                           <button
                             type="button"
-                            disabled={variantBusy !== null}
+                            disabled={lettersSaving || variantBusy !== null || chainBusy}
                             onClick={() => void makeVariantPrimary(idx)}
                             className={HE.btnQuiet}
                           >
@@ -590,7 +670,7 @@ export function Step3Content(props: {
                       <button
                         type="button"
                         onClick={() => openEditor(idx)}
-                        disabled={lettersSaving || chainBusy}
+                        disabled={lettersSaving || chainBusy || variantBusy !== null}
                         title="Редактировать письмо"
                         aria-label="Редактировать письмо"
                         className={HE.btnQuiet}
@@ -620,20 +700,23 @@ export function Step3Content(props: {
               <button
                 type="button"
                 onClick={() => void addLetter()}
-                disabled={lettersSaving || chainBusy}
+                disabled={lettersSaving || chainBusy || variantBusy !== null}
                 className="ve2-btn ve2-b-ghost ve2-b-sm"
               >
                 {lettersSaving ? <Spinner className="h-3.5 w-3.5" /> : null}
                 Добавить письмо
               </button>
             ) : null}
-            <span className="ve2-faint">{letters.length} из 6 · следующая пауза +2 дня</span>
+            <span className="ve2-faint">
+              {letters.length} из 6{letters.length < 6 ? ` · следующее письмо через ${getVeChainWaitDays(letters.length)} дн.` : ''}
+            </span>
             <span className="ml-auto">
               <button
                 type="button"
                 onClick={() => {
                   if (requestEditorExit('leaveStep')) onGoToBase();
                 }}
+                disabled={lettersSaving || variantBusy !== null}
                 className={HE.btnPrimary}
               >
                 Далее: база
@@ -767,6 +850,105 @@ export function Step3Content(props: {
   );
 }
 
+/** Интервалы редактируются отдельно от текста и отправляются одним PATCH. */
+function ChainTimingEditor({ letters, saving, onSave, onCancel, onDirtyChange }: {
+  letters: VeChainLetterDto[];
+  saving: boolean;
+  onSave: (waitDays: number[]) => Promise<void>;
+  onCancel: () => void;
+  onDirtyChange: (dirty: boolean) => void;
+}) {
+  const initial = letters.map((letter, idx) => String(idx === 0 ? 0 : letter.wait_days));
+  const [values, setValues] = useState(initial);
+  const valid = values.map((value) => /^\d+$/.test(value) && Number(value) <= 90);
+  const dirty = values.some((value, idx) => value !== initial[idx]);
+  const changeValues = (next: string[]) => {
+    setValues(next);
+    onDirtyChange(next.some((value, idx) => value !== initial[idx]));
+  };
+
+  return (
+    <fieldset disabled={saving} className="mt-3 min-w-0">
+      <legend className="sr-only">Настройки интервалов писем</legend>
+      <div className="grid max-w-lg grid-cols-[minmax(0,1fr)_5rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2 text-xs">
+        <span className="ve2-mut">Письмо</span>
+        <span className="ve2-mut">Пауза, дней</span>
+        <span className="ve2-mut">От первого</span>
+        {values.map((value, idx) => {
+          const hasInvalid = valid.slice(0, idx + 1).some((item) => !item);
+          const total = values.slice(0, idx + 1).reduce((sum, item) => sum + Number(item), 0);
+          const fromFirst = hasInvalid ? 'Укажите паузу' : total === 0 ? 'Сразу' : `${total} ${daysWord(total)}`;
+          return (
+            <TimingRow
+              key={idx}
+              index={idx}
+              value={value}
+              valid={valid[idx]}
+              fromFirst={fromFirst}
+              onChange={(next) => changeValues(values.map((old, i) => i === idx ? next : old))}
+            />
+          );
+        })}
+      </div>
+      {!valid.every(Boolean) ? (
+        <p id="ve-timing-error" role="alert" className="ve2-mut mt-2 text-xs">Введите целое число от 0 до 90 для каждой паузы.</p>
+      ) : null}
+      <p className="ve2-faint mt-2">Отсчёт от первого письма показан без учёта дней и часов отправки.</p>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => changeValues(values.map((_, idx) => String(getVeChainWaitDays(idx))))}
+          className={HE.btnQuiet}
+        >
+          Вернуть по умолчанию
+        </button>
+        <span className="ml-auto inline-flex flex-wrap gap-2">
+          <button type="button" onClick={onCancel} className={HE.btnGhost}>Отмена</button>
+          <button
+            type="button"
+            onClick={() => { if (dirty && valid.every(Boolean)) void onSave(values.map(Number)); }}
+            disabled={!dirty || !valid.every(Boolean) || saving}
+            className={HE.btnPrimary}
+          >
+            {saving ? 'Сохраняем…' : 'Сохранить интервалы'}
+          </button>
+        </span>
+      </div>
+    </fieldset>
+  );
+}
+
+function TimingRow({ index, value, valid, fromFirst, onChange }: {
+  index: number;
+  value: string;
+  valid: boolean;
+  fromFirst: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <>
+      <label htmlFor={index > 0 ? `ve-letter-wait-${index}` : undefined}>Письмо {index + 1}</label>
+      {index === 0 ? <span className="ve2-mut">Сразу</span> : (
+        <input
+          id={`ve-letter-wait-${index}`}
+          type="number"
+          min={0}
+          max={90}
+          step={1}
+          required
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          aria-label={`Пауза перед письмом ${index + 1}, дней после предыдущего`}
+          aria-invalid={!valid}
+          aria-describedby={!valid ? 've-timing-error' : undefined}
+          className="ve2-input min-h-9 w-full px-2 py-1 text-sm"
+        />
+      )}
+      <span className="ve2-mut tabular-nums">{fromFirst}</span>
+    </>
+  );
+}
+
 /* ─────────────────────────── Редактор письма ─────────────────────────── */
 
 /**
@@ -789,7 +971,7 @@ function ChainLetterEditor({
   /** Сумма wait_days писем ДО этого — для подписи «через N дней от старта». */
   baseDays: number;
   saving: boolean;
-  onSave: (patch: { subject: string | null; body: string; wait_days: number }) => Promise<void>;
+  onSave: (patch: { subject: string | null; body: string }) => Promise<void>;
   onCancel: () => void;
   onDirtyChange: (dirty: boolean) => void;
 }) {
@@ -800,13 +982,11 @@ function ChainLetterEditor({
   const [storedVersionKey, setStoredVersionKey] = useState(versionKey);
   const [subject, setSubject] = useState(letter.subject ?? '');
   const [body, setBody] = useState(letter.body);
-  const [waitDays, setWaitDays] = useState<number>(letter.wait_days ?? 0);
   const [dirty, setDirty] = useState(false);
   if (storedVersionKey !== versionKey) {
     setStoredVersionKey(versionKey);
     setSubject(letter.subject ?? '');
     setBody(letter.body);
-    setWaitDays(letter.wait_days ?? 0);
     setDirty(false);
     // Мутация ref родителя во время рендера безопасна (не setState).
     onDirtyChange(false);
@@ -819,34 +999,14 @@ function ChainLetterEditor({
 
   const isFirst = letterIndex === 0;
   // Кумулятивная подпись «от старта»: сумма пауз предыдущих писем + текущая.
-  const totalDays = baseDays + (isFirst ? 0 : waitDays);
-  const startCaption = totalDays === 0 ? 'Сразу' : `через ${totalDays} ${daysWord(totalDays)} от старта`;
+  const totalDays = baseDays + (isFirst ? 0 : letter.wait_days);
+  const startCaption = totalDays === 0 ? 'Сразу' : `через ${totalDays} ${daysWord(totalDays)} от первого письма, без учёта окна отправки`;
 
   return (
     <div className="ve2-letter-editor">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="ve2-eb">Письмо {letterIndex + 1}</span>
         <p className="ve2-h4">Редактирование письма</p>
-        {isFirst ? (
-          <span className="ve2-mut text-xs">Отправка: сразу</span>
-        ) : (
-          <label className="ve2-mut inline-flex items-center gap-1.5 text-xs">
-            Отправка: через
-            <input
-              type="number"
-              min={0}
-              max={90}
-              value={waitDays}
-              onChange={(e) => {
-                const v = Math.min(90, Math.max(0, Math.trunc(Number(e.target.value) || 0)));
-                setWaitDays(v);
-                markDirty();
-              }}
-              className="ve2-input min-h-8 w-16 px-2 py-1 text-center text-sm"
-            />
-            {daysWord(waitDays)} после предыдущего
-          </label>
-        )}
         <span className="ve2-faint">({startCaption})</span>
       </div>
 
@@ -884,7 +1044,6 @@ function ChainLetterEditor({
             void onSave({
               subject: subject.trim() === '' ? null : subject,
               body,
-              wait_days: isFirst ? 0 : waitDays,
             })
           }
           disabled={!dirty || saving}

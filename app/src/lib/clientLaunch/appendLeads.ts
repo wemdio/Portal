@@ -21,6 +21,7 @@ import { createLeads, listLeads } from '@/lib/instantly/client';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { resolveClientInstantlyRequestOptions } from '@/lib/instantly/clientAccountOptions';
 import { getBlockedEmailSet, filterBlockedLeads } from '@/lib/clientBlocklist/blockedContacts';
+import { filterClientDomainLeads } from '@/lib/clientBlocklist/domainPolicy';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import {
@@ -66,6 +67,15 @@ export interface AppendLeadsToClientCampaignInput {
    * должен грузить всё подготовленное, не отсеивая по пересечению с клиентами.
    */
   skipIfInCampaign?: boolean;
+  /**
+   * `managed_contract` is reserved for trusted server orchestrators whose
+   * fulfillment limit comes from an explicit Portal project period instead
+   * of the client's self-serve tariff. Blocklist and durable reporting still
+   * apply. Browser input must never choose this mode.
+   */
+  entitlementMode?: 'client_tariff' | 'managed_contract';
+  /** Immutable workspace fence supplied by a trusted campaign owner. */
+  expectedInstantlyAccountId?: string;
   /** Durable reporting provenance for this append operation. */
   ledgerSource?: {
     kind: string;
@@ -82,6 +92,8 @@ export interface AppendLeadsResult {
   attemptedIndexes: number[];
   /** Exact positions in input.leads, or null when the provider only returned an aggregate. */
   acceptedIndexes: number[] | null;
+  /** Exact permanent skips (client policy, blocklist, or identified provider rejection), never retryable omissions. */
+  skippedIndexes?: number[];
   identityComplete: boolean;
 }
 
@@ -142,6 +154,7 @@ export async function appendLeadsToClientCampaign(
       skipped: 0,
       attemptedIndexes: [],
       acceptedIndexes: [],
+      skippedIndexes: [],
       identityComplete: true,
     };
   }
@@ -167,18 +180,39 @@ export async function appendLeadsToClientCampaign(
   if (!preset) {
     throw new ClientLaunchError('Пресет клиента не настроен', 400);
   }
+  const instantlyAccountId = resolveInstantlyAccountId(preset.instantly_account_id);
+  if (
+    input.expectedInstantlyAccountId !== undefined
+    && instantlyAccountId !== input.expectedInstantlyAccountId
+  ) {
+    throw new ClientLaunchError('Instantly workspace изменился после подготовки кампании; долив остановлен', 409);
+  }
+  const instantlyRequestOptions = { accountId: instantlyAccountId };
 
-  // 1b. Чёрный список клиента — как в runClientLaunch: заблокированные адреса
-  //     не попадают в Instantly и не съедают тарифный лимит. Особенно важно
-  //     здесь: авто-пайплайн каждый день подкладывает новых лидов без участия
-  //     клиента, и без фильтра негативный контакт получал бы письма снова.
+  // 1b. Client-scoped domain policy and blocklist run before tariff usage,
+  //     durable submission reporting, and provider delivery. Both filters
+  //     retain the original lead objects so input-relative result indexes stay exact.
+  const {
+    kept: domainAllowedLeads,
+    blockedCount: domainPolicyBlockedCount,
+  } = filterClientDomainLeads(leads, userId);
   const blockedSet = await getBlockedEmailSet(supabaseInstantly, userId);
-  const { kept: allowedLeads, blockedCount } = filterBlockedLeads(leads, blockedSet);
+  const {
+    kept: allowedLeads,
+    blockedCount: emailBlockedCount,
+  } = filterBlockedLeads(domainAllowedLeads, blockedSet);
+  const blockedCount = domainPolicyBlockedCount + emailBlockedCount;
   if (allowedLeads.length === 0) {
     await logAudit(
       'client.appendLeads.all_blocked',
-      'All leads in batch are on the client blocklist',
-      { campaignId, contextLabel, blocked: blockedCount },
+      'All leads in batch are excluded by client policy or blocklist',
+      {
+        campaignId,
+        contextLabel,
+        blocked: blockedCount,
+        domainPolicyBlocked: domainPolicyBlockedCount,
+        emailBlocked: emailBlockedCount,
+      },
       logMeta,
     );
     return {
@@ -186,51 +220,56 @@ export async function appendLeadsToClientCampaign(
       skipped: blockedCount,
       attemptedIndexes: [],
       acceptedIndexes: [],
+      skippedIndexes: leads.map((_, index) => index),
       identityComplete: true,
     };
   }
 
-  // 2. Tariff / status — те же проверки, что в полном runClientLaunch.
-  const tariffRow = await getClientTariffRow(userId);
-  const clientStatus = getClientStatus(tariffRow);
-  if (clientStatus === 'setup') {
-    throw new ClientLaunchError(
-      'Идёт прогрев почт. Добавление лидов в кампании станет доступным после завершения прогрева (15 дней с момента оплаты).',
-      403,
-    );
-  }
-  if (clientStatus !== 'active') {
-    throw new ClientLaunchError(
-      'Подписка не активна — пропускаем прогон',
-      403,
-    );
-  }
-  // Эскалация: неоплаченный после прогрева навсегда 'active' — режем «оформил,
-  // но не оплатил» и на этом (авто-пайплайновом) send-пути тоже.
-  if (isAwaitingFirstPayment(tariffRow)) {
-    throw new ClientLaunchError(
-      'Оформлена подписка, но оплата ещё не поступила — пропускаем прогон',
-      403,
-    );
-  }
+  // 2. Entitlement. Self-serve callers retain the existing tariff gate. VE2
+  // uses an explicit Portal-period obligation whose atomic daily quota was
+  // reserved before this function; it must not be blocked by an unrelated
+  // self-serve subscription row created for the client's login.
+  let leadsToSend = allowedLeads;
+  if (input.entitlementMode !== 'managed_contract') {
+    const tariffRow = await getClientTariffRow(userId);
+    const clientStatus = getClientStatus(tariffRow);
+    if (clientStatus === 'setup') {
+      throw new ClientLaunchError(
+        'Идёт прогрев почт. Добавление лидов в кампании станет доступным после завершения прогрева (15 дней с момента оплаты).',
+        403,
+      );
+    }
+    if (clientStatus !== 'active') {
+      throw new ClientLaunchError(
+        'Подписка не активна — пропускаем прогон',
+        403,
+      );
+    }
+    // Эскалация: неоплаченный после прогрева навсегда 'active' — режем «оформил,
+    // но не оплатил» и на этом (авто-пайплайновом) send-пути тоже.
+    if (isAwaitingFirstPayment(tariffRow)) {
+      throw new ClientLaunchError(
+        'Оформлена подписка, но оплата ещё не поступила — пропускаем прогон',
+        403,
+      );
+    }
 
-  const limits = resolveEffectiveLimits(tariffRow);
-  const periodStart = getBillingPeriodStart(tariffRow);
-  const usedContacts = await countClientContacts(userId, periodStart);
-  const remaining = Math.max(0, limits.max_contacts - usedContacts);
+    const limits = resolveEffectiveLimits(tariffRow);
+    const periodStart = getBillingPeriodStart(tariffRow);
+    const usedContacts = await countClientContacts(userId, periodStart);
+    const remaining = Math.max(0, limits.max_contacts - usedContacts);
 
-  // Если остатка не хватает на ВСЕХ — режем пачку, а не падаем. Авто-пайплайн
-  // должен прокинуть в Instantly столько лидов, сколько вмещается; остальное
-  // помечается skipped в seen_employers с reason=tariff_exhausted (это знает
-  // оркестратор, не мы).
-  const leadsToSend =
-    allowedLeads.length <= remaining ? allowedLeads : allowedLeads.slice(0, remaining);
+    // Если остатка не хватает на ВСЕХ — режем пачку, а не падаем. Авто-пайплайн
+    // должен прокинуть в Instantly столько лидов, сколько вмещается; остальное
+    // помечается skipped в seen_employers с reason=tariff_exhausted (это знает
+    // оркестратор, не мы).
+    leadsToSend =
+      allowedLeads.length <= remaining ? allowedLeads : allowedLeads.slice(0, remaining);
+  }
   if (leadsToSend.length === 0) {
     throw new ClientLaunchError('Лимит контактов исчерпан', 400);
   }
 
-  const instantlyAccountId = resolveInstantlyAccountId(preset.instantly_account_id);
-  const instantlyRequestOptions = { accountId: instantlyAccountId };
   if (!supabaseAdmin) {
     throw new ClientLaunchError('Server misconfigured: reporting ledger is not available', 500);
   }
@@ -243,10 +282,14 @@ export async function appendLeadsToClientCampaign(
   });
   const allowedInputIndexes = allowedLeads.map((lead) => {
     const index = inputIndexQueues.get(lead)?.shift();
-    if (index === undefined) throw new Error('Blocked-contact filter changed lead identity');
+    if (index === undefined) throw new Error('Client exclusion filter changed lead identity');
     return index;
   });
   const sentInputIndexes = allowedInputIndexes.slice(0, leadsToSend.length);
+  const allowedInputSet = new Set(allowedInputIndexes);
+  const skippedIndexes = new Set(
+    leads.map((_, index) => index).filter((index) => !allowedInputSet.has(index)),
+  );
 
   const source = input.ledgerSource ?? { kind: 'campaign_append' };
   let accepted = 0;
@@ -261,6 +304,7 @@ export async function appendLeadsToClientCampaign(
     skipped: externalSkipped + blockedCount,
     attemptedIndexes: [...attemptedIndexes].sort((a, b) => a - b),
     acceptedIndexes: identityComplete ? [...acceptedIndexes].sort((a, b) => a - b) : null,
+    skippedIndexes: [...skippedIndexes].sort((a, b) => a - b),
     identityComplete,
   });
 
@@ -342,9 +386,13 @@ export async function appendLeadsToClientCampaign(
     accepted += chunkAccepted;
     externalSkipped += chunkSkipped;
     if (identity.identityComplete) {
+      const acceptedChunkIndexes = new Set(identity.acceptedIdentities.map((entry) => entry.index));
       for (const acceptedIdentity of identity.acceptedIdentities) {
         const inputIndex = sentInputIndexes[offset + acceptedIdentity.index];
         if (inputIndex !== undefined) acceptedIndexes.push(inputIndex);
+      }
+      for (let index = 0; index < chunk.length; index += 1) {
+        if (!acceptedChunkIndexes.has(index)) skippedIndexes.add(sentInputIndexes[offset + index]);
       }
     } else {
       identityComplete = false;
@@ -370,7 +418,8 @@ export async function appendLeadsToClientCampaign(
 
   }
 
-  // `skipped` remains backward compatible for callers: provider skips plus blocklist cuts.
+  // `skipped` remains backward compatible for callers: provider skips plus
+  // client-domain-policy and blocklist cuts.
   const result = currentResult();
   await logAudit(
     'client.appendLeads.success',
@@ -382,6 +431,8 @@ export async function appendLeadsToClientCampaign(
       accepted,
       skipped: result.skipped,
       blocked: blockedCount,
+      domainPolicyBlocked: domainPolicyBlockedCount,
+      emailBlocked: emailBlockedCount,
       requested: leadsToSend.length,
     },
     logMeta,

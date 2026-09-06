@@ -31,12 +31,11 @@ export async function GET(req: NextRequest) {
   const { actor } = auth;
   const databaseMonth = paymentMonthDatabaseDate(month);
 
-  const [listResult, summaryResult, projectsResult] = await Promise.all([
-    actor.client.rpc('list_payment_requests_with_budget', { p_month: databaseMonth }),
-    actor.client.rpc('payment_request_month_summary', { p_month: databaseMonth }),
+  const [readResult, projectsResult] = await Promise.all([
+    actor.client.rpc('payment_requests_read_model', { p_month: databaseMonth }),
     supabaseAdmin.from('projects').select('id, client, name').order('client').order('name'),
   ]);
-  const error = listResult.error ?? summaryResult.error ?? projectsResult.error;
+  const error = readResult.error ?? projectsResult.error;
   if (error) {
     await logError(
       'payments.list.failed',
@@ -47,11 +46,14 @@ export async function GET(req: NextRequest) {
     return jsonError('Failed to load payments', 500);
   }
 
-  const requests = Array.isArray(listResult.data) ? listResult.data : [];
+  const read = readResult.data as Record<string, unknown> | null;
+  if (!read || !Array.isArray(read.requests) || !read.summary || typeof read.asOf !== 'string') {
+    return jsonError('Failed to load payments', 500);
+  }
   return NextResponse.json({
-    period: paymentPeriod(month),
-    summary: paymentSummaryToApi(summaryResult.data),
-    requests: requests.map((row) => paymentRequestToApi(row, actor)),
+    period: { ...paymentPeriod(month), asOf: read.asOf },
+    summary: paymentSummaryToApi(read.summary),
+    requests: read.requests.map((row) => paymentRequestToApi(row, actor)),
     projects: (projectsResult.data ?? []).map((row) => ({
       id: String(row.id),
       client: String(row.client ?? ''),

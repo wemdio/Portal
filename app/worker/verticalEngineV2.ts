@@ -1,10 +1,15 @@
 /**
- * Hypothesis Engine worker — обрабатывает джобы из ve_jobs («Движок вертикалей»).
+ * Vertical Engine v2 worker — обрабатывает джобы из ve_jobs.
  *
  * Паттерн — копия salesAiAnalysis.ts: poll loop + realtime wake на INSERT/UPDATE
  * pending-джобы + graceful shutdown. На старте сбрасывает застрявшие 'running'
  * (после рестарта пода) обратно в 'pending' с сохранением attempts, иначе после
  * деплоя они висят навсегда.
+ *
+ * Здесь же живёт независимый guarded tick ежедневной VE2-дозагрузки контактов:
+ * один проход на старте и затем раз в пять минут. Суточную идемпотентность и
+ * точную резервацию строк обеспечивает main DB; process-local guard не даёт
+ * одному экземпляру воркера запускать два прохода одновременно.
  *
  * Джобы создаются API (/api/tools/vertical-engine-v2/*): API ставит только
  * первую research-стадию (site_profile) либо точечные стадии (chain/vocab/
@@ -32,25 +37,75 @@ import {
   retryRunAfter,
 } from '@/lib/verticalEngineV2/jobRetry';
 import { transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
+import { createVeJobWatchdog } from '@/lib/verticalEngineV2/workerLiveness';
+import {
+  createGuardedContactDeliveryTick,
+  runBoundContactDeliveries,
+} from '@/lib/verticalEngineV2/contactDeliveryScheduler';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import type { VeJob, VeStage } from '@/lib/verticalEngineV2/types';
 
 const WORKER_ID = `vertical-engine-v2-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
+const configuredContactDeliveryInterval = Number(process.env.VE_CONTACT_DELIVERY_INTERVAL_MS);
+const CONTACT_DELIVERY_INTERVAL_MS =
+  Number.isFinite(configuredContactDeliveryInterval) && configuredContactDeliveryInterval >= 60_000
+    ? configuredContactDeliveryInterval
+    : 5 * 60_000;
 /** Как часто воркер проверяет строку активной джобы на отмену пользователем. */
 const CANCEL_WATCH_MS = 3000;
+const RESEARCH_IDLE_TIMEOUT_MS = 15 * 60_000;
+const RESEARCH_ABORT_GRACE_MS = 30_000;
 
 /**
  * Heartbeat-файл: обновляется каждые 30с независимым setInterval-тиком.
  * Docker healthcheck читает mtime и флипает контейнер в unhealthy, если он
  * не обновлялся > 300с — autoheal тогда перезапускает воркер (паттерн
  * worker/yandexmaps.ts, инцидент 27.07.2026: event-loop hang при живом
- * процессе невидим без внешнего heartbeat).
+ * процессе невидим без внешнего heartbeat). Живой event loop при зависшем
+ * research-await отдельно защищён inactivity watchdog ниже.
  */
 const HEARTBEAT_PATH = process.env.VE_WORKER_HEARTBEAT_PATH ?? '/tmp/vertical-engine-v2-worker-heartbeat';
 
 const log = createWorkerLogger(WORKER_ID);
 const db = requireSupabaseAdmin(log);
 const shouldStop = setupGracefulShutdown(log);
+
+const contactDeliveryTick = createGuardedContactDeliveryTick({
+  log: (level, message, extra) => log(level, `[contact-delivery] ${message}`, extra),
+  run: async () => {
+    const result = await runBoundContactDeliveries({
+      portalDb: db,
+      instantlyDb: supabaseInstantly,
+      now: new Date(),
+      log: (level, message, extra) => log(level, `[contact-delivery] ${message}`, extra),
+    });
+    if (!result.skipped && result.eligibleProjects > 0) {
+      log(
+        result.failedProjects > 0 ? 'warn' : 'info',
+        `[contact-delivery] sweep done: ${result.attemptedProjects}/${result.eligibleProjects} attempted, ` +
+          `${result.failedProjects} failed or uncertain`,
+      );
+    }
+  },
+});
+
+let activeContactDeliveryTick: Promise<boolean> | null = null;
+let activeResearchAbort: AbortController | null = null;
+
+function triggerContactDeliveryTick(): Promise<boolean> {
+  // Do not start a provider upload while a research process is being recovered.
+  // An already attempted upload keeps its durable uncertain/recovery semantics.
+  if (shouldStop() || activeResearchAbort?.signal.aborted) return Promise.resolve(false);
+  const promise = contactDeliveryTick();
+  if (!activeContactDeliveryTick) {
+    activeContactDeliveryTick = promise;
+    void promise.finally(() => {
+      if (activeContactDeliveryTick === promise) activeContactDeliveryTick = null;
+    });
+  }
+  return promise;
+}
 
 /** Порядок research-пайплайна: после done стадии ставится следующая (если её ещё нет). */
 const NEXT_RESEARCH_STAGE: Partial<Record<VeStage, VeStage>> = {
@@ -172,8 +227,30 @@ async function handleJob(job: VeJob) {
   // LLM-вызове, отмена сработает по завершении: статус 'cancelled' ниже не
   // даёт записать done и дочейнить следующую стадию.
   const abort = new AbortController();
+  const isResearch = RESEARCH_STAGES.has(job.stage);
+  let lastActivity = `stage ${job.stage} started`;
+  const watchdog = isResearch ? createVeJobWatchdog({
+    abort,
+    idleMs: RESEARCH_IDLE_TIMEOUT_MS,
+    graceMs: RESEARCH_ABORT_GRACE_MS,
+    onTimeout: () => log('error', `Research inactivity timeout: job ${job.id}; last activity: ${lastActivity}`),
+    onUnresponsive: () => {
+      log('error', `Research job ${job.id} ignored abort for ${RESEARCH_ABORT_GRACE_MS}ms; exiting without starting another job`);
+      process.exit(1);
+    },
+  }) : null;
+  const onShutdown = () => abort.abort(new Error('VE2 research interrupted by worker shutdown'));
+  if (isResearch) {
+    activeResearchAbort = abort;
+    process.once('SIGTERM', onShutdown);
+    process.once('SIGINT', onShutdown);
+  }
   setVeActiveJobSignal(abort.signal);
+  let cancelCheckInFlight = false;
+  let watching = true;
   const cancelWatcher = setInterval(() => {
+    if (!watching || cancelCheckInFlight || abort.signal.aborted) return;
+    cancelCheckInFlight = true;
     void (async () => {
       try {
         const { data } = await db
@@ -181,9 +258,11 @@ async function handleJob(job: VeJob) {
           .select('status')
           .eq('id', job.id)
           .maybeSingle();
-        if (data && (data as { status: string }).status === 'cancelled') abort.abort();
+        if (watching && data && (data as { status: string }).status === 'cancelled') abort.abort();
       } catch {
         // Транзиентная ошибка БД не должна ронять воркер — следующий тик повторит.
+      } finally {
+        cancelCheckInFlight = false;
       }
     })();
   }, CANCEL_WATCH_MS);
@@ -197,14 +276,31 @@ async function handleJob(job: VeJob) {
       .eq('id', job.project_id)
       .maybeSingle();
     const market = normalizeVeMarket((proj as { market?: string } | null)?.market);
+    if (isResearch) abort.signal.throwIfAborted();
 
     stageResult = await runVeStage(job, {
       supabase: db,
       market,
-      log: (msg) => log('info', `[${job.stage}] ${msg}`),
+      signal: abort.signal,
+      onActivity: () => watchdog?.touch(),
+      log: (msg) => {
+        lastActivity = msg.slice(0, 500);
+        watchdog?.touch();
+        log('info', `[${job.stage}] ${msg}`);
+      },
     });
+    if (isResearch) abort.signal.throwIfAborted();
   } finally {
+    // Deliberately guard execution, not the legacy non-atomic done→enqueue
+    // finalization. Never kill between those writes as a recovery strategy.
+    watching = false;
     clearInterval(cancelWatcher);
+    watchdog?.stop();
+    if (isResearch) {
+      activeResearchAbort = null;
+      process.removeListener('SIGTERM', onShutdown);
+      process.removeListener('SIGINT', onShutdown);
+    }
     setVeActiveJobSignal(null);
   }
   const tokensUsed = stageResult.tokensUsed ?? 0;
@@ -362,7 +458,13 @@ async function pollOnce(): Promise<boolean> {
   try {
     await handleJob(job);
   } catch (err) {
-    await failJob(job, err);
+    if (shouldStop() && RESEARCH_STAGES.has(job.stage)) {
+      // Leave running + its checkpoint for startup recovery; a deployment
+      // interruption is not a failed provider attempt and must not use retries.
+      log('info', `Research job ${job.id} interrupted by shutdown; preserving checkpoint for restart`);
+    } else {
+      await failJob(job, err);
+    }
   }
   return true;
 }
@@ -375,7 +477,16 @@ async function main() {
 
   await resetStuckJobs();
 
+  const contactDeliveryTimer = setInterval(
+    () => { void triggerContactDeliveryTick(); },
+    CONTACT_DELIVERY_INTERVAL_MS,
+  );
+  if (typeof contactDeliveryTimer.unref === 'function') contactDeliveryTimer.unref();
+
   try {
+    // Delivery is independent from VE research/template jobs; do not hold the
+    // main poll loop behind a potentially slow provider batch at process start.
+    void triggerContactDeliveryTick();
     await pollLoop({
       log,
       pollIntervalMs: POLL_INTERVAL_MS,
@@ -384,6 +495,8 @@ async function main() {
       realtimeTables: ['ve_jobs'],
     });
   } finally {
+    clearInterval(contactDeliveryTimer);
+    if (activeContactDeliveryTick) await activeContactDeliveryTick;
     clearInterval(heartbeat);
   }
 

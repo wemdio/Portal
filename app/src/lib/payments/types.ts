@@ -55,6 +55,8 @@ export interface PaymentRequest {
   decidedAt: string | null;
   paidOn: string | null;
   paidOnSource: PaymentPaidOnSource;
+  /** Authorized automatic recognition date; absent on older manual approvals. */
+  autoPaymentOn?: string | null;
   paidBy: PaymentPerson | null;
   paidAt: string | null;
   createdAt: string;
@@ -128,6 +130,7 @@ export interface SubmitPaymentRequestInput {
   expenseType: NewPaymentExpenseType;
   budgetScope: PaymentBudgetScope;
   costCategory: PaymentCostCategory | null;
+  /** Actual paid date for costs; expected date for general expenses. */
   expectedPaymentOn: string;
   urgency: PaymentUrgency;
   documentUrl: string | null;
@@ -136,7 +139,7 @@ export interface SubmitPaymentRequestInput {
 export interface SubmitPaymentRequestResponse {
   request: PaymentRequest;
   summary: PaymentMonthSummary;
-  outcome: 'auto_approved' | 'approval_required';
+  outcome: 'auto_approved' | 'approval_required' | 'recorded_paid';
 }
 
 export type PaymentRequestActionInput =

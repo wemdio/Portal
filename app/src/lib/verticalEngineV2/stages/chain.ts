@@ -20,6 +20,7 @@
 import { z } from 'zod';
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
+import { applyVeChainTiming, VE_CHAIN_DEFAULT_WAIT_DAYS } from '../chainTiming';
 import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getVeModel, type LLMMessage } from '../llm';
 import { buildChainCriticMessages, buildChainMessages, buildChainRewriteMessages, buildChainRuleFixHint } from '../prompts/chain';
 import { checkLetterRules, extractNumberFacts, type VeLetterForCheck } from '../letterChecks';
@@ -38,15 +39,14 @@ import {
 } from './shared';
 
 /** Паузы в днях после предыдущего письма по индексу письма (0-based). */
-export const CHAIN_WAIT_DAYS = [0, 3, 7, 12, 16, 21];
+export const CHAIN_WAIT_DAYS = VE_CHAIN_DEFAULT_WAIT_DAYS;
 
 /** ParsedLetter[] letterParser → VeChainLetter[] с лесенкой wait_days. */
 export function parsedToChainLetters(parsed: ParsedLetter[]): VeChainLetter[] {
-  return parsed.map((l, i) => ({
+  return applyVeChainTiming(parsed.map((l) => ({
     subject: l.subject,
     body: l.body,
-    wait_days: CHAIN_WAIT_DAYS[Math.min(i, CHAIN_WAIT_DAYS.length - 1)],
-  }));
+  })));
 }
 
 /* ───────────────── A/B-варианты писем (---LETTER N B---) ───────────────── */
@@ -464,6 +464,18 @@ export async function runChainStage(job: VeJob, ctx: VeStageContext): Promise<Ve
   } catch (e) {
     stageLog(ctx, `[chain] критик-луп недоступен: ${e instanceof Error ? e.message : String(e)} — оставляем исходные письма`);
   }
+
+  // Read after all model rewrites: a specialist may have saved new gaps while
+  // generation was running. Timing belongs to the vertical, not its language.
+  const { data: latestChain, error: timingError } = await ctx.supabase
+    .from('ve_chains')
+    .select('letters')
+    .eq('vertical_id', verticalId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (timingError) throw new Error(`ve_chains timing read: ${timingError.message}`);
+  letters = applyVeChainTiming(letters, Array.isArray(latestChain?.letters) ? latestChain.letters : undefined);
 
   const { data: inserted, error: insError } = await ctx.supabase
     .from('ve_chains')
