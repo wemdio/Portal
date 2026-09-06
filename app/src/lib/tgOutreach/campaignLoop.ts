@@ -1586,7 +1586,27 @@ export async function runCampaignLoop(
    * неделю ноль отправленных первых касаний при 205 отложенных, тогда как
    * остальные восемнадцать рассылали с той же очереди.
    */
-  const resolveBlockedRounds = new Map<string, number>();
+  /**
+   * Счётчик живёт в строке аккаунта (миграция 20260906_0001), а не здесь.
+   *
+   * В памяти он не работал: круг перезапускается от остановки, передеплоя и
+   * переподключения, а до отдельного аккаунта за один запуск доходит один-два
+   * раза — порога в два пустых круга подряд не достигал никто. Одиннадцать
+   * замороженных аккаунтов ATOL-1 неделями числились исправными.
+   */
+  const readBlankRounds = (account: OutreachAccount): number => account.resolve_blank_rounds ?? 0;
+
+  const writeBlankRounds = async (account: OutreachAccount, value: number) => {
+    if (readBlankRounds(account) === value) return;
+    account.resolve_blank_rounds = value;
+    const { error } = await db
+      .from('tg_outreach_accounts')
+      .update({ resolve_blank_rounds: value })
+      .eq('id', account.id);
+    // Не смогли записать — счётчик просто не сдвинется, и диагноз отложится на
+    // круг. Ронять из-за этого рассылку нечем: она к резолву не привязана.
+    if (error) log('error', `Не смог записать счётчик пустых резолвов — ${error.message}`);
+  };
 
   /**
    * Контакты, уже разобранные кем-то в текущем проходе по аккаунтам.
@@ -2175,10 +2195,10 @@ export async function runCampaignLoop(
 
           // Ушедшее сообщение доказывает, что резолв у аккаунта работает —
           // счётчик пустых кругов обнуляем.
-          if (ft.sent > 0) resolveBlockedRounds.delete(account.id);
+          if (ft.sent > 0) await writeBlankRounds(account, 0);
           else if (ft.resolveBlocked) {
-            const blanks = (resolveBlockedRounds.get(account.id) ?? 0) + 1;
-            resolveBlockedRounds.set(account.id, blanks);
+            const blanks = readBlankRounds(account) + 1;
+            await writeBlankRounds(account, blanks);
             if (blanks >= RESOLVE_BLOCKED_LIMIT) {
               const detail =
                 `ВРЕМЕННОЕ ограничение — аккаунт не резолвит юзернеймы: ${blanks} круга подряд ` +
@@ -2197,7 +2217,7 @@ export async function runCampaignLoop(
                 client: null,
                 inferred: { status: 'restricted', detail },
               });
-              resolveBlockedRounds.delete(account.id);
+              await writeBlankRounds(account, 0);
               if (parked.parked) {
                 log(
                   'warning',
