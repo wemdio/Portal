@@ -11,6 +11,8 @@ export interface QualificationResult {
   isLead: boolean;
   /** Explicit AI verdict for a purely machine/service reply; absent in legacy results. */
   machineReplyKind?: MachineReplyKind | null;
+  /** Semantic direction of a human reply, not a sender-address blacklist. */
+  nonLeadKind?: NonLeadKind | null;
   /**
    * ИИ явно подтвердил совпадение ОСНОВНОГО человеческого ответа с
    * per-project/client lead_criteria. Код использует этот флаг как
@@ -365,15 +367,16 @@ const CONTACT_PHONE_CANDIDATE_PATTERN = /\+?\d[\d\s().-]{6,}\d/g;
 const CONTACT_PHONE_LABEL_PATTERN = /(?:телефон|тел(?=\s|[.:,;]|$)|номер|phone)/i;
 const CONTACT_DESCRIPTOR_PATTERN = /^(?:директор[а-яё]*|руководител[а-яё]*|начальник[а-яё]*|менеджер[а-яё]*|специалист[а-яё]*|координатор[а-яё]*|секретар[а-яё]*|телефон|тел\.|номер|e-?mail|почта|director|head|manager|specialist|coordinator|assistant|procurement)(?:\s+[А-ЯЁа-яёA-Za-z-]+){0,4}$/i;
 const GENERIC_FOOTER_CONTACT_PATTERN = /^\s*(?:позвоните\s+мне\s+по\s+любым\s+вопросам|feel\s+free\s+to\s+(?:call|contact|reach\s+out(?:\s+to)?)\s+me(?:\s+if\s+you\s+have\s+any\s+questions)?)[.!]?\s*$/i;
-const SIGNATURE_BOUNDARY_PATTERN = /^(?:--|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:[,.!].*)?|best\s+regards(?:[,.!].*)?|kind\s+regards(?:[,.!].*)?|regards(?:[,.!].*)?)$/i;
+const SIGNATURE_BOUNDARY_PATTERN = /^(?:--|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:[,.!].*)?|(?:best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[,.!].*)?)$/i;
 const QUOTED_REPLY_BOUNDARY_PATTERNS = [
+  /^(?:Отправлено\s+из\s+(?:мобильной\s+)?(?:Почты\s+Mail|мобильной\s+Яндекс\.Почты)|Sent\s+from\s+my\s+(?:iPhone|iPad|Android))(?:[\s:.]|$)/iu,
   /^>/,
   /^On\s+.+\s+wrote:\s*$/i,
   /^(?:От|From|Sent|Кому|To):\s+.+$/i,
   /^(?:-{2,}\s*)?(?:Original Message|Forwarded Message|Исходное сообщение|Пересланное сообщение|Перенаправленное сообщение|Пересылаемое сообщение)(?::)?(?:\s*-{2,})?$/i,
   /^Begin forwarded message:\s*$/i,
   /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}[^\n]{0,160}(?:пишет|написал(?:а)?|wrote):\s*$/i,
-  /^(?:пн|вт|ср|чт|пт|сб|вс),?\s+\d{1,2}\s+[а-яё]{3,}\.?(?:\s+\d{4})?(?:\s*г\.)?[^\n]{0,160}:\s*$/i,
+  /^(?:пн|вт|ср|чт|пт|сб|вс|понедельник|вторник|среда|четверг|пятница|суббота|воскресенье),?\s+\d{1,2}\s+[а-яё]{3,}\.?(?:\s+\d{4})?(?:\s*г\.)?[^\n]{0,160}:\s*$/i,
 ];
 const LETTER_TOKEN_START_SOURCE = String.raw`(?:^|[^A-Za-zА-ЯЁа-яё])`;
 const LETTER_TOKEN_END_SOURCE = String.raw`(?=$|[^A-Za-zА-ЯЁа-яё])`;
@@ -412,7 +415,7 @@ const MATERIAL_SEND_VERB_SOURCE = String.raw`(?:прислать|выслать|
 const MODAL_MATERIAL_SEND_SOURCE = String.raw`(?:можно|можете)(?:\s+(?:мне|нам))?\s+${MATERIAL_SEND_VERB_SOURCE}`;
 const ELLIPTICAL_MATERIAL_REQUEST_SOURCE =
   String.raw`${MODAL_MATERIAL_SEND_SOURCE}(?=\s*(?:,?\s*(?:пожалуйста|please))?\s*$)`;
-const MATERIAL_REQUEST_ACTION_SOURCE = String.raw`(?:(?:пришлите|вышлите|отправьте|направьте|скиньте|предоставьте)|(?:можно|хотел(?:и|а)?\s+бы)\s+(?:получить|посмотреть)|${MODAL_MATERIAL_SEND_SOURCE}|(?:send|share|forward|provide))`;
+const MATERIAL_REQUEST_ACTION_SOURCE = String.raw`(?:(?:пришлите|вышлите|отправьте|направьте|скиньте|предоставьте|оставьте)|(?:можно|хотел(?:и|а)?\s+бы)\s+(?:получить|посмотреть)|${MODAL_MATERIAL_SEND_SOURCE}|(?:send|share|forward|provide))${LETTER_TOKEN_END_SOURCE}`;
 const FOLLOWUP_MATERIAL_REQUEST_PATTERN = new RegExp(
   String.raw`${LETTER_TOKEN_START_SOURCE}(?:${MATERIAL_REQUEST_ACTION_SOURCE}[^.!?\n]{0,100}?(?:предложен[а-яё]*|информац[а-яё]*|материал[а-яё]*|презентац[а-яё]*|кейс[а-яё]*|пример[а-яё]*|proposal|information|materials?|presentation|case\s+stud(?:y|ies)|examples?)|${ELLIPTICAL_MATERIAL_REQUEST_SOURCE})${LETTER_TOKEN_END_SOURCE}`,
   'i',
@@ -703,6 +706,72 @@ function extractAuthoredReplyText(text: string): string {
     );
   });
   return lines.slice(0, boundaryIndex === -1 ? lines.length : boundaryIndex).join('\n').trim();
+}
+
+type NonLeadKind = 'seller_pitch' | 'service_followup' | 'contact_routing';
+
+function semanticNonLead(result: QualificationResult, kind: NonLeadKind): QualificationResult {
+  const reasons: Record<NonLeadKind, string> = {
+    seller_pitch: 'Получатель предлагает нам собственные товары или услуги, а не проявляет интерес к нашему предложению.',
+    service_followup: 'Служебное продолжение переписки без покупательского интереса к нашему предложению.',
+    contact_routing: 'Получатель только перенаправил обращение к другому человеку или в отдел без собственного интереса.',
+  };
+  return {
+    ...result,
+    nonLeadKind: kind,
+    isLead: false,
+    customCriteriaMatched: false,
+    interestSignals: [],
+    reason: reasons[kind],
+    needsReview: false,
+    objectionHandleable: false,
+    objectionDraft: null,
+  };
+}
+
+// Only an explicit self-sale construction is a deterministic fallback. General
+// descriptions of the recipient's business, support addresses and signatures
+// are not evidence of a reverse pitch. Less literal cases remain AI decisions.
+function isExplicitSellerOnlyReply(text: string): boolean {
+  const authored = extractAuthoredReplyText(text);
+  const sellerDescription = /(?:^|[.!?\n]\s*)(?:(?:общество\s+с\s+ограниченной\s+ответственностью|ооо|компания)[^,.!?\n]{0,200}\s+оказывает\s+услуги|мы\s+(?:сами\s+)?(?:предлагаем|производим|прода[её]м|оказываем\s+услуги))(?=\s|$)/iu.test(authored);
+  const offersToFulfilOurOrder = /можем\s+вам\s+помочь/iu.test(authored) &&
+    /(?:напишите|пришлите)[^.!?\n]{0,60}(?:свой|ваш)\s+(?:запрос|заказ|тз)[^.!?\n]{0,60}(?:размер|расч[её]т|ответ)/iu.test(authored);
+  const genericCompanyPitch = /(?:готовы|будем\s+рады)[^.!?\n]{0,60}сотрудничеств/iu.test(authored) &&
+    /по\s+всем\s+вопросам/iu.test(authored);
+  const buyerSignal = hasExplicitBuyerInterest(authored) ||
+    hasRequestedFollowupMaterials(authored) ||
+    (!offersToFulfilOurOrder && hasDirectActionableCta(authored));
+  return ((sellerDescription && genericCompanyPitch) || offersToFulfilOurOrder) && !buyerSignal;
+}
+
+// This is used ONLY for a project that explicitly excludes contact-only
+// redirection. Under the default/ADK policy a personal messenger CTA is valid.
+function isOnlyContactRedirect(text: string): boolean {
+  const authored = extractAuthoredReplyText(text);
+  if (isPlainContactRoutingReply(authored) || isSharedContactRoutingReply(authored)) return true;
+  const stripped = stripContactArtifacts(normalizeAuthoredStatement(authored)
+    .replace(/,?\s*(?:пожалуйста|please)\s*,?/giu, ' '));
+  return stripped.hadArtifact && /^(?:(?:можете\s+)?(?:напишите|написать|пишите|свяжитесь)|write(?:\s+to)?)\s+(?:мне|нам|сюда|со\s+мной|с\s+нами|me|us)(?:\s+(?:в|через|in|on|via)\s+(?:макс|max|телеграм(?:м)?(?:е|у)?|telegram|whatsapp|ватсап(?:е)?))?[\s.!]*$/iu.test(stripped.text);
+}
+
+function isThirdPartyContactTarget(text: string): boolean {
+  const target = stripContactArtifacts(text).text
+    .split(/\s+(?:в|по|на|через|via|at|on)\s+/iu, 1)[0].trim();
+  if (/^(?:мной|нами|вами|мне|нам|вам|ваш[а-яё]*|me|us|you|your)(?:\s|$)/iu.test(target)) return false;
+  return isStructurallyPlausibleRoutedContactName(target) ||
+    /^(?:ней|ним|ними|him|her|them)(?:\s|$)/iu.test(target) ||
+    new RegExp(`^${DEFERRED_THIRD_PARTY_TARGET_SOURCE}${LETTER_TOKEN_END_SOURCE}`, 'iu').test(target);
+}
+
+function hasThirdPartyContactRouting(text: string): boolean {
+  const targets = text.matchAll(/(?:связаться|свяжитесь|обратитесь|обращайтесь)\s+(?:с|к)\s+([^.!?;,\n]{1,80})|(?:напишите|пишите|contact|call|write\s+to)\s+([^.!?;,\n]{1,80})/giu);
+  if (Array.from(targets).some((match) => isThirdPartyContactTarget(match[1] ?? match[2]))) return true;
+  const preposedTargets = text.matchAll(/(?:^|\s)(?:с|к)\s+([^.!?;,\n]{1,65}?)\s+(?:(?:можно|можете)\s+)?(?:связаться|свяжитесь|обратиться|обратитесь)(?=\s|$)/giu);
+  if (Array.from(preposedTargets).some((match) => isThirdPartyContactTarget(match[1]))) return true;
+  return CONTACT_EMAIL_PATTERN.test(text) &&
+    /\b(?:send|forward|route)\b[^\n]{0,100}\bto\s+/iu.test(text) &&
+    /\b(?:team|we|i)\b[^.!?\n]{0,65}\b(?:cannot|can't|(?:will\s+not|won['’]t)\s+be\s+able\s+to)\s+help\b/iu.test(text);
 }
 
 export type MachineReplyKind =
@@ -1173,6 +1242,23 @@ function hasDirectPositiveInterest(authoredReply: string): boolean {
   );
 }
 
+function hasExplicitBuyerAction(text: string): boolean {
+  if (hasCategoricalNegativeContext(text)) return false;
+  const pattern = /(?:провести|назначить|покажите|обсудить|schedule|book|arrange)[^.!?\n]{0,50}(?:демо|тест|пилот|demo|test|pilot)[^.!?\n]{0,20}(?:ваш|your)|(?:хочет|хотим|хочу|хотят)\s+(?:заказать|купить)\s+ваш|\b(?:i|we)\s+want\s+to\s+(?:buy|order)\s+your\b/iu;
+  return findDirectActionableCtaMatches(text, pattern).some((match) => {
+    const prefix = text.slice(Math.max(0, (match.index ?? 0) - 35), match.index);
+    return !isDirectActionableCtaMatchNegated(text, match) &&
+      !/(?:не\s+(?:надо|нужно|хочу|хотим)|never|don't)\s*$/iu.test(prefix);
+  });
+}
+
+function hasExplicitBuyerInterest(text: string): boolean {
+  if (hasActionableDirectCommercialRequest(text) || hasDirectPositiveInterest(text)) return true;
+  if (hasCategoricalNegativeContext(text)) return false;
+  if (hasExplicitBuyerAction(text)) return true;
+  return /(?:заинтересова[а-яё]*[^.!?\n]{0,45}ваш|ваш[а-яё]*\s+(?:предложени[а-яё]*|решени[а-яё]*|услуг[а-яё]*)[^.!?\n]{0,35}интересн|(?:нам|мне)\s+(?:нужн[а-яё]*|подходит)\s+ваш|(?:обсудим|обсудить|созвонимся)[^.!?\n]{0,50}ваш[а-яё]*\s+(?:предложен|решени|услуг)|\binterested\s+in\s+your\b)/iu.test(text);
+}
+
 function hasSelfDirectedCooperationInterest(authoredReply: string): boolean {
   const statement = normalizeAuthoredStatement(authoredReply);
   if (
@@ -1241,7 +1327,12 @@ function hasDirectActionableCta(authoredReply: string): boolean {
     !hasCategoricalNegativeContext(statement) &&
     DIRECT_ACTIONABLE_CTA_PATTERNS.some((pattern) =>
       findDirectActionableCtaMatches(statement, pattern).some(
-        (match) => !isDirectActionableCtaMatchNegated(statement, match),
+        (match) => {
+          const prefix = statement.slice(0, match.index).split(/[.!?;,:]/).at(-1) ?? '';
+          const suffix = statement.slice((match.index ?? 0) + match[0].length).split(/[.!?;,:]/, 1)[0];
+          return !isDirectActionableCtaMatchNegated(statement, match) &&
+            !hasThirdPartyContactRouting(`${prefix}${match[0]}${suffix}`);
+        },
       ),
     )
   );
@@ -1488,10 +1579,22 @@ function protectedDefaultVerdict(
   const deferredClauses = findDeferredFollowupClauses(statement);
   const validDeferredFollowup = hasExplicitDeferredFollowup(statement);
   const actionableCommercialRequest = hasActionableDirectCommercialRequest(statement);
-  const actionableDirectCta = hasDirectActionableCta(statement);
+  const actionableDirectCta = hasDirectActionableCta(statement) || hasExplicitBuyerAction(statement);
   const negatedDirectCta = hasNegatedDirectActionableCta(statement);
   const requestedFollowupMaterials = isFollowupMaterialRequest(statement);
   const selfCooperationInterest = hasSelfDirectedCooperationInterest(statement);
+
+  if (
+    hasThirdPartyContactRouting(authoredReply) &&
+    !actionableCommercialRequest &&
+    !actionableDirectCta &&
+    !hasExplicitBuyerInterest(statement)
+  ) {
+    return {
+      reason: 'Получатель перенаправил обращение к другому человеку или в отдел без собственного интереса.',
+      needsReview: false,
+    };
+  }
 
   if (confirmedProposal && hasDirectPositiveInterest(statement)) {
     return null;
@@ -1611,6 +1714,7 @@ function normalizeDefaultLeadSignals(
 ): QualificationResult {
   const authoredReply = extractAuthoredReplyText(replyText);
   if (!authoredReply) return result;
+  if (isExplicitSellerOnlyReply(authoredReply)) return semanticNonLead(result, 'seller_pitch');
 
   const outboundTexts = getPreReplyOutboundTexts(ctx);
   const substantiveOutboundTexts = outboundTexts.filter(isSubstantiveOfferText);
@@ -1650,7 +1754,7 @@ function normalizeDefaultLeadSignals(
   ) {
     signal = 'отложенный интерес';
     reason = 'Получатель выразил собственный интерес и предложил вернуться к нему позже.';
-  } else if (hasDirectActionableCta(authoredReply)) {
+  } else if (hasDirectActionableCta(authoredReply) || hasExplicitBuyerAction(authoredReply)) {
     signal = 'прямой следующий шаг';
     reason = 'Получатель предложил прямой коммерчески значимый следующий шаг.';
   } else if (confirmedProposal && hasRequestedFollowupMaterials(authoredReply)) {
@@ -1672,6 +1776,7 @@ function normalizeDefaultLeadSignals(
   return {
     ...result,
     isLead: true,
+    nonLeadKind: null,
     proposalSeen: result.proposalSeen || confirmedProposal,
     interestSignals: [...new Set([...result.interestSignals, signal])],
     reason,
@@ -1720,6 +1825,15 @@ function buildSystemPrompt(briefText?: string | null, leadCriteria?: string | nu
 - Наличие нашего исходящего письма или развёрнутого предложения НЕ является обязательным. Если ответ сам однозначен — например, «Давайте завтра проведём встречу», «Можете меня набрать в 14:00», «Пришлите КП» или «Сколько стоит?» — ставь is_lead=true даже при proposal_seen=false.
 - proposal_seen описывает только наличие подтверждённого контекста оффера. proposal_seen=false НЕ отменяет лид, если прямое намерение видно из самого ответа.
 - Для однозначного лида ставь needs_review=false.
+
+СНАЧАЛА ОПРЕДЕЛИ НАПРАВЛЕНИЕ ИНТЕРЕСА В ОСНОВНОМ ОТВЕТЕ:
+- Лид — потенциальный покупатель НАШЕГО предложения, а не собеседник, который продаёт НАМ свои услуги. «Наша компания оказывает услуги перевозки, готовы к долгосрочному сотрудничеству» — встречная продажа, а не интерес к нашим контейнерам. «Мы можем вам помочь, пришлите свой запрос с размерами, подготовим ответ/расчёт, со мной можно связаться» — тоже продавец, а не покупатель.
+- Вежливая готовность сотрудничать, личный телефон и предложение созвониться внутри встречной продажи не меняют направление интереса. Для полностью встречного предложения ставь non_lead_kind="seller_pitch".
+- non_lead_kind="service_followup" — служебное продолжение тикета/обслуживания, в котором поставщик ждёт нашу обратную связь или обсуждает выполнение своего запроса, без интереса приобрести наше предложение. Это может быть живой человек, а не автоответ. Одни лишь адрес support@, номер тикета или слова «обратная связь» НЕ доказывают эту категорию: сверяй роли отправителей, содержание и контекст.
+- non_lead_kind="contact_routing" — только передача контакта/перенаправление к коллеге или в отдел без собственного интереса: «можно связаться с Юлией, она отвечает за партнёрства»; «send the requested information to affiliates@..., this team cannot help». Это не собственное согласие на звонок и не запрос нашей цены, даже после подробного оффера.
+- Если в том же основном ответе есть реальный покупательский интерес к НАШЕМУ предложению (вопрос о нашей цене, запрос нашего КП, согласие обсуждать наше решение), ставь non_lead_kind=null и оцени этот интерес. Описание своего бизнеса не отменяет покупательский запрос. «Пришлите ваше КП, передам руководству» — лид; простое перенаправление к коллеге без такого запроса — нет.
+- Положительный кастомный критерий проекта может считать сознательную передачу контакта лидом. Но явный кастомный запрет «передача своего или чужого контакта без интереса — НЕ лид» распространяется и на «Напишите мне в Макс +номер» после оффера; сама смена канала не является отдельным интересом.
+- При non_lead_kind != null и отсутствии совпадения с положительным кастомным критерием ставь is_lead=false, needs_review=false, objection_handleable=false, objection_draft=null. При сомнении в направлении или для иных ответов non_lead_kind=null. Не выдумывай направление из подписи или цитаты.
 
 КРИТЕРИИ ВОЗРАЖЕНИЯ:
 - Клиент видел предложение (proposal_seen=true)
@@ -1776,6 +1890,7 @@ ${criteriaReminder}
 ФОРМАТ ОТВЕТА (только валидный JSON, без markdown):
 {
   "machine_reply_kind": "auto_reply"/"delivery_failure"/"service_acknowledgement"/null,
+  "non_lead_kind": "seller_pitch"/"service_followup"/"contact_routing"/null,
   "is_lead": true/false,
   "custom_criteria_matched": true/false,
   "proposal_seen": true/false,
@@ -1915,6 +2030,7 @@ function buildUserMessage(ctx: ThreadContext): string {
     .find(isSubstantiveOfferText)
     ?.slice(0, 3000);
   const replyText = getBodyText(ctx.replyEmail.body).slice(0, 3000);
+  const authoredReply = extractAuthoredReplyText(replyText);
   const stepCount = outboundTexts.length;
 
   const hasQuotedContent = replyText.includes('>') || /(?:On|В|от)\s+.+(?:wrote|написал|:$)/im.test(replyText);
@@ -1955,7 +2071,14 @@ ${quotedText.slice(0, 3000)}
   return `${outboundSection}
 
 ОТВЕТ ПОТЕНЦИАЛЬНОГО КЛИЕНТА:
+Отправитель: ${ctx.replyEmail.from_address_email ?? '(не указан)'}
+Получатели: ${ctx.replyEmail.to_address_email_list ?? '(не указаны)'}
 Тема: ${ctx.replyEmail.subject ?? '(без темы)'}
+ОСНОВНОЙ ОТВЕТ БЕЗ ПОДПИСИ И СТАРОЙ ПЕРЕПИСКИ (источник намерения):
+---
+${authoredReply || '(не удалось выделить; проверь полный текст ниже)'}
+---
+ПОЛНЫЙ ТЕКСТ ПИСЬМА (цитаты и подпись — только контекст, не новые сигналы):
 ---
 ${replyText}
 ---
@@ -2086,6 +2209,12 @@ function parseAIResult(content: string): QualificationResult {
       parsed.machine_reply_kind === 'service_acknowledgement'
         ? parsed.machine_reply_kind
         : null,
+    nonLeadKind:
+      parsed.non_lead_kind === 'seller_pitch' ||
+      parsed.non_lead_kind === 'service_followup' ||
+      parsed.non_lead_kind === 'contact_routing'
+        ? parsed.non_lead_kind
+        : null,
     isLead: Boolean(parsed.is_lead),
     customCriteriaMatched: parsed.custom_criteria_matched === true,
     proposalSeen: Boolean(parsed.proposal_seen),
@@ -2130,6 +2259,7 @@ function enforceCustomCriteriaPriority(
   return {
     ...result,
     isLead: true,
+    nonLeadKind: null,
     needsReview: false,
     objectionHandleable: false,
     objectionDraft: null,
@@ -2153,6 +2283,7 @@ function enforceDeterministicCustomCriteria(
   return {
     ...result,
     isLead: true,
+    nonLeadKind: null,
     customCriteriaMatched: true,
     interestSignals: [...new Set([...result.interestSignals, signal])],
     reason: 'В основном ответе передан email, а кастомный критерий проекта прямо считает это лидом.',
@@ -2391,7 +2522,7 @@ export async function qualifyReply(
     replyText,
   );
   if (
-    plainContactRouting &&
+    (plainContactRouting || isOnlyContactRedirect(replyText)) &&
     customCriteriaExplicitlyRejectsPlainContactRouting(aiOptions.leadCriteria)
   ) {
     return {
@@ -2406,8 +2537,18 @@ export async function qualifyReply(
       threadContext: ctx,
     };
   }
+  const semanticResult = criteriaAwareResult.nonLeadKind &&
+    hasExplicitBuyerInterest(extractAuthoredReplyText(replyText))
+    ? { ...criteriaAwareResult, nonLeadKind: null }
+    : criteriaAwareResult;
+  if (semanticResult.nonLeadKind && !semanticResult.customCriteriaMatched) {
+    return {
+      ...semanticNonLead(semanticResult, semanticResult.nonLeadKind),
+      threadContext: ctx,
+    };
+  }
   const normalizedResult = hasCustomCriteria
-    ? criteriaAwareResult
-    : normalizeDefaultLeadSignals(ctx, replyText, criteriaAwareResult);
+    ? semanticResult
+    : normalizeDefaultLeadSignals(ctx, replyText, semanticResult);
   return { ...normalizedResult, threadContext: ctx };
 }
