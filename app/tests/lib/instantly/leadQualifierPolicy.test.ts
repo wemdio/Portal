@@ -176,6 +176,7 @@ const AUDITED_CONTACT_ROUTING_REPLIES = [
     ].join(' '),
   },
   { name: 'preposed named contact', replyText: 'С Юлией можно связаться по телефону +7 999 555-44-33.' },
+  { name: 'contracted department refusal', replyText: "Please send the information to affiliates@example.com; our team won't be able to help with this matter." },
 ] as const;
 
 const CONTACT_CRITERIA_CASES = [
@@ -469,6 +470,7 @@ describe('audited buyer-versus-seller direction regressions', () => {
     'Напишите, пожалуйста, мне в Макс 8-995-927-90-89',
     'Write to me on WhatsApp +7 995 927-90-89',
     'Свяжитесь со мной в Telegram @contact_person',
+    'Можете написать сюда: @buyerperson',
   ])('honors the OutreachOS contact-only exclusion with a mobile footer: %s', async (contactReply) => {
     mockAiResult({
       is_lead: true,
@@ -693,6 +695,15 @@ describe('elliptical material request policy', () => {
 
 describe('positive lead controls', () => {
   it.each([
+    'Не надо провести демо вашего решения.',
+    'Свяжитесь с Юлией, она не хочет заказать ваш сервис.',
+    'Please do not book a demo of your product.',
+  ])('does not promote a negated buyer action: %s', async (replyText) => {
+    mockAiResult({ is_lead: false, interest_signals: [], needs_review: false });
+    expect((await qualify(replyText)).isLead).toBe(false);
+  });
+
+  it.each([
     {
       name: 'КП with an elliptical modal prefix',
       replyText: 'Можно мне прислать КП с ценами?',
@@ -845,7 +856,27 @@ describe('positive lead controls', () => {
     {
       name: 'our product demo requested through the recipient team',
       replyText: 'Можно связаться с нашей командой, чтобы провести демо вашего решения?',
-      aiOverrides: { is_lead: true, needs_review: false, non_lead_kind: 'contact_routing' },
+      aiOverrides: { non_lead_kind: 'contact_routing' },
+    },
+    {
+      name: 'buyer describing the contractor they are looking for',
+      replyText: 'Компания «Ромашка» ищет подрядчика, который оказывает услуги лидогенерации. Готовы к сотрудничеству. По всем вопросам пишите +7 999 555-44-33.',
+      aiOverrides: { is_lead: true, needs_review: false },
+    },
+    {
+      name: 'routed contact explicitly wants to buy our service',
+      replyText: 'Свяжитесь с Юлией, она хочет заказать ваш сервис.',
+      aiOverrides: { is_lead: true, needs_review: false },
+    },
+    {
+      name: 'our solution accepted with pilot intent and colleague contact',
+      replyText: 'Свяжитесь с Юлией. Нам подходит ваше решение и хотим начать пилот.',
+      aiOverrides: { is_lead: true, needs_review: false },
+    },
+    {
+      name: 'direct purchase despite a negated team contact',
+      replyText: 'Please do not contact our team; I want to buy your service directly.',
+      aiOverrides: { is_lead: true, needs_review: false },
     },
     {
       name: 'commercial request before an English signature',

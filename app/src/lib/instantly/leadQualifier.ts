@@ -734,7 +734,7 @@ function semanticNonLead(result: QualificationResult, kind: NonLeadKind): Qualif
 // are not evidence of a reverse pitch. Less literal cases remain AI decisions.
 function isExplicitSellerOnlyReply(text: string): boolean {
   const authored = extractAuthoredReplyText(text);
-  const sellerDescription = /(?:^|[.!?\n]\s*)(?:(?:общество\s+с\s+ограниченной\s+ответственностью|ооо|компания)[^.!?\n]{0,200}\s+оказывает\s+услуги|мы\s+(?:сами\s+)?(?:предлагаем|производим|прода[её]м|оказываем\s+услуги))(?=\s|$)/iu.test(authored);
+  const sellerDescription = /(?:^|[.!?\n]\s*)(?:(?:общество\s+с\s+ограниченной\s+ответственностью|ооо|компания)[^,.!?\n]{0,200}\s+оказывает\s+услуги|мы\s+(?:сами\s+)?(?:предлагаем|производим|прода[её]м|оказываем\s+услуги))(?=\s|$)/iu.test(authored);
   const offersToFulfilOurOrder = /можем\s+вам\s+помочь/iu.test(authored) &&
     /(?:напишите|пришлите)[^.!?\n]{0,60}(?:свой|ваш)\s+(?:запрос|заказ|тз)[^.!?\n]{0,60}(?:размер|расч[её]т|ответ)/iu.test(authored);
   const genericCompanyPitch = /(?:готовы|будем\s+рады)[^.!?\n]{0,60}сотрудничеств/iu.test(authored) &&
@@ -752,7 +752,7 @@ function isOnlyContactRedirect(text: string): boolean {
   if (isPlainContactRoutingReply(authored) || isSharedContactRoutingReply(authored)) return true;
   const stripped = stripContactArtifacts(normalizeAuthoredStatement(authored)
     .replace(/,?\s*(?:пожалуйста|please)\s*,?/giu, ' '));
-  return stripped.hadArtifact && /^(?:напишите|пишите|свяжитесь|write(?:\s+to)?)\s+(?:мне|нам|со\s+мной|с\s+нами|me|us)(?:\s+(?:в|через|in|on|via)\s+(?:макс|max|телеграм(?:м)?(?:е|у)?|telegram|whatsapp|ватсап(?:е)?))?[\s.!]*$/iu.test(stripped.text);
+  return stripped.hadArtifact && /^(?:(?:можете\s+)?(?:напишите|написать|пишите|свяжитесь)|write(?:\s+to)?)\s+(?:мне|нам|сюда|со\s+мной|с\s+нами|me|us)(?:\s+(?:в|через|in|on|via)\s+(?:макс|max|телеграм(?:м)?(?:е|у)?|telegram|whatsapp|ватсап(?:е)?))?[\s.!]*$/iu.test(stripped.text);
 }
 
 function isThirdPartyContactTarget(text: string): boolean {
@@ -771,7 +771,7 @@ function hasThirdPartyContactRouting(text: string): boolean {
   if (Array.from(preposedTargets).some((match) => isThirdPartyContactTarget(match[1]))) return true;
   return CONTACT_EMAIL_PATTERN.test(text) &&
     /\b(?:send|forward|route)\b[^\n]{0,100}\bto\s+/iu.test(text) &&
-    /\b(?:team|we|i)\b[^.!?\n]{0,65}\b(?:cannot|can't|will\s+not\s+be\s+able\s+to)\s+help\b/iu.test(text);
+    /\b(?:team|we|i)\b[^.!?\n]{0,65}\b(?:cannot|can't|(?:will\s+not|won['’]t)\s+be\s+able\s+to)\s+help\b/iu.test(text);
 }
 
 export type MachineReplyKind =
@@ -1242,11 +1242,21 @@ function hasDirectPositiveInterest(authoredReply: string): boolean {
   );
 }
 
+function hasExplicitBuyerAction(text: string): boolean {
+  if (hasCategoricalNegativeContext(text)) return false;
+  const pattern = /(?:провести|назначить|покажите|обсудить|schedule|book|arrange)[^.!?\n]{0,50}(?:демо|тест|пилот|demo|test|pilot)[^.!?\n]{0,20}(?:ваш|your)|(?:хочет|хотим|хочу|хотят)\s+(?:заказать|купить)\s+ваш|\b(?:i|we)\s+want\s+to\s+(?:buy|order)\s+your\b/iu;
+  return findDirectActionableCtaMatches(text, pattern).some((match) => {
+    const prefix = text.slice(Math.max(0, (match.index ?? 0) - 35), match.index);
+    return !isDirectActionableCtaMatchNegated(text, match) &&
+      !/(?:не\s+(?:надо|нужно|хочу|хотим)|never|don't)\s*$/iu.test(prefix);
+  });
+}
+
 function hasExplicitBuyerInterest(text: string): boolean {
   if (hasActionableDirectCommercialRequest(text) || hasDirectPositiveInterest(text)) return true;
   if (hasCategoricalNegativeContext(text)) return false;
-  if (/(?:провести|назначить|покажите|обсудить|schedule|book|arrange)[^.!?\n]{0,50}(?:демо|тест|пилот|demo|test|pilot)[^.!?\n]{0,20}(?:ваш|your)/iu.test(text)) return true;
-  return /(?:заинтересова[а-яё]*[^.!?\n]{0,45}ваш|ваш[а-яё]*\s+(?:предложени[а-яё]*|решени[а-яё]*|услуг[а-яё]*)[^.!?\n]{0,35}интересн|(?:нам|мне)\s+нужн[а-яё]*\s+ваш|(?:обсудим|обсудить|созвонимся)[^.!?\n]{0,50}ваш[а-яё]*\s+(?:предложен|решени|услуг)|\binterested\s+in\s+your\b)/iu.test(text);
+  if (hasExplicitBuyerAction(text)) return true;
+  return /(?:заинтересова[а-яё]*[^.!?\n]{0,45}ваш|ваш[а-яё]*\s+(?:предложени[а-яё]*|решени[а-яё]*|услуг[а-яё]*)[^.!?\n]{0,35}интересн|(?:нам|мне)\s+(?:нужн[а-яё]*|подходит)\s+ваш|(?:обсудим|обсудить|созвонимся)[^.!?\n]{0,50}ваш[а-яё]*\s+(?:предложен|решени|услуг)|\binterested\s+in\s+your\b)/iu.test(text);
 }
 
 function hasSelfDirectedCooperationInterest(authoredReply: string): boolean {
@@ -1569,7 +1579,7 @@ function protectedDefaultVerdict(
   const deferredClauses = findDeferredFollowupClauses(statement);
   const validDeferredFollowup = hasExplicitDeferredFollowup(statement);
   const actionableCommercialRequest = hasActionableDirectCommercialRequest(statement);
-  const actionableDirectCta = hasDirectActionableCta(statement);
+  const actionableDirectCta = hasDirectActionableCta(statement) || hasExplicitBuyerAction(statement);
   const negatedDirectCta = hasNegatedDirectActionableCta(statement);
   const requestedFollowupMaterials = isFollowupMaterialRequest(statement);
   const selfCooperationInterest = hasSelfDirectedCooperationInterest(statement);
@@ -1744,7 +1754,7 @@ function normalizeDefaultLeadSignals(
   ) {
     signal = 'отложенный интерес';
     reason = 'Получатель выразил собственный интерес и предложил вернуться к нему позже.';
-  } else if (hasDirectActionableCta(authoredReply)) {
+  } else if (hasDirectActionableCta(authoredReply) || hasExplicitBuyerAction(authoredReply)) {
     signal = 'прямой следующий шаг';
     reason = 'Получатель предложил прямой коммерчески значимый следующий шаг.';
   } else if (confirmedProposal && hasRequestedFollowupMaterials(authoredReply)) {
