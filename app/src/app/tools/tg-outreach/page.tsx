@@ -4246,6 +4246,16 @@ function formatLatency(ms: number | null): string {
 }
 
 /** Что случилось с самим прокси — словом, по статусу проверки. */
+/** «1 аккаунт», «2 аккаунта», «5 аккаунтов». */
+function accountsWord(n: number): string {
+  const last = n % 10;
+  const teen = n % 100;
+  if (teen >= 11 && teen <= 14) return 'аккаунтов';
+  if (last === 1) return 'аккаунт';
+  if (last >= 2 && last <= 4) return 'аккаунта';
+  return 'аккаунтов';
+}
+
 function proxyVerdictWord(r: ProxyCheckResult): string {
   if (r.proxy_ok) return 'жив';
   if (r.status === 'bad_url') return 'строку не разобрать';
@@ -4977,6 +4987,8 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   const [tab, setTab] = useState<string>('dashboard');
   const [actionLoading, setActionLoading] = useState(false);
   const [stopping, setStopping] = useState(false);
+  /** Раскрыто ли пояснение к восклицательному знаку у статуса. */
+  const [warmingHint, setWarmingHint] = useState(false);
   const stoppingRef = useRef(false);
   const [refetchJobId, setRefetchJobId] = useState<string | null>(null);
   const [refetchProgress, setRefetchProgress] = useState<{
@@ -5067,13 +5079,38 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
 
   const displayStatus = stopping ? 'stopping' : campaign.status;
   const st = STATUS_LABELS[displayStatus] ?? STATUS_LABELS.stopped;
+  const warmingCount = campaign.warming_accounts ?? 0;
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-bold text-gray-900">{campaign.name}</h2>
-          <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-semibold ${st.cls}`}>{st.label}</span>
+          <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-semibold ${st.cls}`}>
+            {st.label}
+            {/*
+              Восклицательный знак рядом со статусом, а не отдельной плашкой:
+              «Запущена» теперь не полный ответ — часть аккаунтов может греться
+              параллельно, и оператор должен видеть это там же, где смотрит
+              статус, а не на вкладке «Аккаунты».
+            */}
+            {warmingCount > 0 && displayStatus === 'running' && (
+              <button
+                type="button"
+                onClick={() => setWarmingHint((v) => !v)}
+                title="Параллельно идёт прогрев"
+                className="ml-1 cursor-pointer align-middle text-[11px] font-bold text-amber-600 hover:text-amber-700"
+              >
+                !
+              </button>
+            )}
+          </span>
+          {warmingHint && warmingCount > 0 && (
+            <span className="rounded-lg bg-amber-50 px-2 py-1 text-[10px] leading-tight text-amber-800">
+              Параллельно греется {warmingCount} {accountsWord(warmingCount)} — в боевую рассылку
+              их не берут. Как только срок прогрева выйдет, круг подхватит их сам.
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {campaign.status !== 'running' && !stopping ? (

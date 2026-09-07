@@ -219,13 +219,35 @@ export async function runWarmupLoop(
     .select('*')
     .eq('campaign_id', campaignId)
     .eq('is_active', true);
-  const accounts = (accountRows ?? []) as OutreachAccount[];
+
+  /**
+   * Греем только тех, кому назначен срок прогрева.
+   *
+   * Аккаунт не может быть в двух кругах сразу: сессия одна, а второе
+   * подключение к ней Telegram встречает AUTH_KEY_DUPLICATED и выключает
+   * аккаунт. Поэтому разделение строгое — либо греется, либо рассылает.
+   *
+   * Следствие, о котором стоит знать: свежая партия греется сама с собой.
+   * Подмешать к ней боевой аккаунт «для солидности» нельзя по той же причине —
+   * его пришлось бы вынуть из рассылки.
+   */
+  const nowMs = Date.now();
+  const all = (accountRows ?? []) as OutreachAccount[];
+  const accounts = all.filter((a) => {
+    const until = a.warmup_until ? new Date(a.warmup_until).getTime() : NaN;
+    return Number.isFinite(until) && until > nowMs;
+  });
   if (accounts.length < 2) {
     await wdb.setRunStatus(db, run.id, {
       status: 'failed',
       error_message: 'need_at_least_two_accounts',
     });
-    log('error', 'Прогрев: нужно минимум два активных аккаунта — греть не с кем.');
+    log(
+      'error',
+      accounts.length === 1
+        ? 'Прогрев: на прогреве только один аккаунт — греть его не с кем. Поставьте на прогрев хотя бы двоих: они переписываются друг с другом.'
+        : 'Прогрев: ни один аккаунт не поставлен на прогрев. Отметьте нужные в списке аккаунтов и укажите срок.',
+    );
     await wdb.setCampaignWarming(db, campaignId, false);
     return;
   }
