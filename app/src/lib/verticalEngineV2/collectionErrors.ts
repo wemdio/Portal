@@ -13,7 +13,7 @@ export function isVeProviderBillingError(error: unknown): boolean {
 }
 
 export interface VeCollectionFailure {
-  kind: 'billing' | 'incomplete_checks' | 'source' | 'unknown';
+  kind: 'billing' | 'incomplete_checks' | 'name_cleanup' | 'source' | 'unknown';
   message: string;
 }
 
@@ -26,6 +26,11 @@ export function getVeCollectionFailure(
     return {
       kind: 'billing',
       message: 'Недостаточно средств на балансе сервиса ИИ (Requesty). Автоматические повторы остановлены. Попросите администратора пополнить баланс, затем продолжите подготовку превью.',
+    };
+  }
+  if (/Очистка названий завершилась не полностью/i.test(message)) {
+    return { kind: 'name_cleanup',
+      message: 'Не удалось закончить очистку названий компаний. Собранные контакты сохранены; строки без проверенного названия не попадут в запуск. Продолжите подготовку превью — повторятся только незавершённые проверки.',
     };
   }
   if (options.relevanceCoverageComplete === false

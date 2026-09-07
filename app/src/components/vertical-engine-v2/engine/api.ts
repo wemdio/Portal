@@ -105,6 +105,14 @@ export interface VeCollectStatsDto {
 }
 
 export interface VeCollectInfo {
+  company_name_cleanup?: import('@/lib/verticalEngineV2/companyNames').VeCompanyNameCleanupSummary;
+  /** Durable marker: contacts are saved and name preparation is the remaining phase. */
+  company_name_recovery?: {
+    has_buffered_candidates: boolean;
+    validation_error: string | null;
+    round_low_relevance: number;
+    round_relevance_unchecked: number;
+  };
   collection_mode?: 'preview' | 'supply';
   ready_target?: number;
   supply_hold?: boolean;

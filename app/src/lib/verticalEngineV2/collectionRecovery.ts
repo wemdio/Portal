@@ -9,12 +9,14 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
   const checkpoint = info.target_checkpoint as Record<string, unknown> | undefined;
   const construct = info.construct as Record<string, unknown> | undefined;
   const stats = info.stats as Record<string, unknown> | undefined;
+  const names = info.company_name_cleanup as Record<string, unknown> | undefined;
   if (!progress) return null;
   if (progress.status === 'error' && construct?.status === 'done' && typeof construct.bc_job_id === 'string'
     && checkpoint?.completed_round === progress.round
     && (progress.round === 1 || (typeof checkpoint?.prior_low_relevance === 'number'
       && typeof checkpoint?.prior_relevance_unchecked === 'number'))
-    && stats?.relevance_coverage_complete === false) return 'validation';
+    && (stats?.relevance_coverage_complete === false
+      || (!!info.company_name_recovery && names?.status === 'partial'))) return 'validation';
   // A failed planner has not committed any candidate round. Reuse its empty
   // base after funds are restored, instead of accumulating duplicate failures.
   if (!construct && !checkpoint && progress.round === 1 && progress.candidates_processed === 0

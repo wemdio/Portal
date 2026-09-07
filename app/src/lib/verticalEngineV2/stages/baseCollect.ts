@@ -98,6 +98,8 @@ import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
 import { findIrrelevantRows } from '../relevanceGate';
 import { VeRelevanceCheckpointError, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
+import { cleanVeCompanyNames, type VeCompanyNameCheckpoint } from '../companyNameCleanup';
+import { companyNameSource, isCompanyNameReady, VE_COMPANY_NAME_FIELD, type VeCompanyNameCleanupSummary } from '../companyNames';
 import { prepareSegmentationAudience } from '../segmentationAudit';
 import { isContactSupplyActive } from '../contactSupplyEligibility';
 import {
@@ -643,6 +645,15 @@ export interface VeCollectInfo {
   validation_retry?: boolean;
   /** Latest constructor validation snapshot; per-batch writes live in ve_jobs.result. */
   relevance_checkpoint?: VeRelevanceCheckpoint;
+  company_name_checkpoint?: VeCompanyNameCheckpoint;
+  company_name_cleanup?: VeCompanyNameCleanupSummary;
+  /** Durable post-validation phase: resume names without re-running paid collection. */
+  company_name_recovery?: {
+    has_buffered_candidates: boolean;
+    validation_error: string | null;
+    round_low_relevance: number;
+    round_relevance_unchecked: number;
+  };
   /** Worker-only: discarded candidates must not be paid for again next round. */
   target_checkpoint?: {
     completed_round: number;
@@ -2499,6 +2510,61 @@ async function resumeSavedPreviewValidation(
   });
 }
 
+async function cleanCollectedCompanyNames(
+  ctx: VeStageContext, job: VeJob, info: VeCollectInfo, rows: Array<Record<string, unknown>>, usage: VeUsage,
+) {
+  const { data: previous, error } = await ctx.supabase.from('ve_jobs')
+    .select('result').eq('project_id', job.project_id).eq('stage', 'base_collect')
+    .eq('payload->>base_id', payloadString(job, 'base_id')).neq('id', job.id)
+    .not('result->company_name_checkpoint', 'is', null)
+    .order('updated_at', { ascending: false }).limit(1).maybeSingle();
+  if (error) throw new VeRelevanceCheckpointError(`Saved company name checkpoint read: ${error.message}`);
+  const cleaned = await cleanVeCompanyNames({
+    rows, scope: payloadString(job, 'base_id'), language: ctx.market === 'us' ? 'en' : 'ru', signal: ctx.signal,
+    checkpoint: [job.result?.company_name_checkpoint, previous?.result?.company_name_checkpoint, info.company_name_checkpoint],
+    log: (message) => stageLog(ctx, message),
+    onCheckpoint: async (checkpoint, progress) => {
+      ctx.signal?.throwIfAborted();
+      const result = { ...job.result, company_name_checkpoint: checkpoint };
+      const now = new Date().toISOString();
+      const { data: saved, error: writeError } = await ctx.supabase.from('ve_jobs').update({
+        result, progress: { ...progress, label: 'Очищаем названия компаний', updated_at: now, substep_started_at: now },
+        updated_at: now,
+      }).eq('id', job.id).eq('status', 'running').select('id').maybeSingle();
+      if (writeError || !saved) throw new VeRelevanceCheckpointError(writeError
+        ? `Company name checkpoint save: ${writeError.message}` : 'Company name checkpoint lost job ownership');
+      job.result = result;
+      ctx.signal?.throwIfAborted();
+    },
+  });
+  info.company_name_checkpoint = cleaned.checkpoint;
+  info.company_name_cleanup = cleaned.summary;
+  usage.tokensUsed += cleaned.tokensUsed;
+  usage.costUsd += cleaned.costUsd;
+  return cleaned;
+}
+
+async function resumeSavedCompanyNames(
+  ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
+  target: VeCollectionTargetProgress, usage: VeUsage,
+): Promise<VeStageResult> {
+  const recovery = info.company_name_recovery!;
+  const rows = Array.isArray(base.data) ? base.data : [];
+  if (rows.some((row) => row._email_status !== 'ok' || row._low_relevance === true
+    || row._relevance_unchecked === true || !(VE_COMPANY_NAME_FIELD in row))) {
+    throw new Error('Saved company name phase has incomplete contact validation');
+  }
+  stageLog(ctx, '[company_names] продолжаем очистку сохранённых контактов без повторного сбора и валидации');
+  return completeTargetRound({ ctx, job, base, info, progress: target, candidates: [], rows,
+    columns: base.columns ?? [...VE_AUTO_COLLECT_COLUMNS],
+    stats: { tasks_total: 0, tasks_done: 0, tasks_failed: 0, rows_total: target.candidates_processed,
+      excluded_existing_bases: 0, excluded_during_fetch: 0,
+      ...info.stats, low_relevance: recovery.round_low_relevance,
+      relevance_unchecked: recovery.round_relevance_unchecked },
+    hasBufferedCandidates: recovery.has_buffered_candidates, validationError: recovery.validation_error, usage,
+  });
+}
+
 async function completeTargetRound(args: {
   ctx: VeStageContext; job: VeJob; base: VeAutoBase; info: VeCollectInfo;
   progress: VeCollectionTargetProgress; candidates: VeUnifiedRow[];
@@ -2509,14 +2575,14 @@ async function completeTargetRound(args: {
   const { ctx, job, base, info, progress } = args;
   const tasks = info.tasks ?? [];
   const prior = info.target_checkpoint;
-  const validationRetry = info.validation_retry === true;
+  const validationRetry = info.validation_retry === true || !!info.company_name_recovery;
   const columns = [...new Set([...(base.columns ?? []), ...args.columns])];
   const previousRows = Array.isArray(base.data) ? base.data : [];
   const freshKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, base.id, base.hypothesis_id);
   const availableRows = (validationRetry ? args.rows : [...previousRows, ...args.rows]).filter((row) =>
     row && typeof row === 'object' && !baseRowMatchesExclusion(freshKeys, row as VeUnifiedRow),
   );
-  const readyRows = prepareSegmentationAudience({ rows: availableRows, columns, source: 'auto' }).rows;
+  const contactRows = prepareSegmentationAudience({ rows: availableRows, columns, source: 'auto', ignoreCompanyNameCheck: true }).rows;
   const seen = new Map<string, Pick<VeUnifiedRow, 'company' | 'inn' | 'email'>>();
   for (const row of [...(prior?.seen_rows ?? []), ...args.candidates, ...args.rows]) {
     const compact = { company: cell(row.company), inn: cell(row.inn), email: cell(row.email) };
@@ -2529,11 +2595,11 @@ async function completeTargetRound(args: {
     task.source === 'companies_directory' && task.status === 'done' && task.exhausted && !task.hit_ceiling,
   );
   const taskError = tasks.find((task) => task.status === 'failed');
-  const next = finishCollectionRound(progress, {
-    candidates: args.candidates.length, readyRows: readyRows.length,
+  const finish = (readyCount: number, nameError?: string) => finishCollectionRound(progress, {
+    candidates: args.candidates.length, readyRows: readyCount,
     validationRetry,
     exhausted, canContinue: args.hasBufferedCandidates || renewableDirectory,
-    error: args.validationError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null),
+    error: nameError ?? args.validationError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null),
   });
   const checkpoint: NonNullable<VeCollectInfo['target_checkpoint']> = {
     completed_round: progress.round,
@@ -2545,18 +2611,47 @@ async function completeTargetRound(args: {
     relevance_unchecked: (validationRetry ? prior?.prior_relevance_unchecked ?? 0 : prior?.relevance_unchecked ?? 0) + (args.stats.relevance_unchecked ?? 0),
   };
   const stats: NonNullable<VeCollectInfo['stats']> = {
-    ...args.stats, rows_total: next.candidates_processed,
-    processed_rows: checkpoint.processed_rows, launchable_rows: readyRows.length,
+    ...args.stats, rows_total: progress.candidates_processed + (validationRetry ? 0 : args.candidates.length),
+    processed_rows: checkpoint.processed_rows,
     low_relevance: checkpoint.low_relevance, relevance_unchecked: checkpoint.relevance_unchecked,
   };
-  info.target_progress = next;
+  // Persist validated contacts + round counters BEFORE the first name call.
+  // Interrupted cleanup resumes this phase, not sources/constructor/relevance.
+  const pendingRows = contactRows.map((row) => VE_COMPANY_NAME_FIELD in row && isCompanyNameReady(row) ? row : {
+    ...row, [VE_COMPANY_NAME_FIELD]: { version: 1, ...companyNameSource(row), status: 'failed', value: '' },
+  });
+  info.company_name_recovery = {
+    has_buffered_candidates: args.hasBufferedCandidates, validation_error: args.validationError,
+    round_low_relevance: args.stats.low_relevance ?? 0,
+    round_relevance_unchecked: args.stats.relevance_unchecked ?? 0,
+  };
+  const nameCompanies = new Map(contactRows.map((row) => [JSON.stringify([companyNameSource(row), String(row.inn ?? '').replace(/\D/g, '')]), row]));
+  const namesChecked = [...nameCompanies.values()].filter((row) => VE_COMPANY_NAME_FIELD in row && isCompanyNameReady(row)).length;
+  info.company_name_cleanup = { status: 'partial', companies: nameCompanies.size, checked: namesChecked, failed: nameCompanies.size - namesChecked,
+    error: 'Очистка названий завершилась не полностью' };
+  info.target_progress = finish(prepareSegmentationAudience({ rows: pendingRows, columns, source: 'auto' }).rows.length,
+    'Очистка названий завершилась не полностью');
   info.target_checkpoint = checkpoint;
+  info.stats = stats;
+  const { error: pendingError } = await ctx.supabase.from('ve_bases').update({
+    data: pendingRows, columns, sample_rows: pendingRows.slice(0, SAMPLE_ROWS), row_count: pendingRows.length,
+    collect_info: info, updated_at: new Date().toISOString(),
+  }).eq('id', base.id);
+  if (pendingError) throw new VeRelevanceCheckpointError(`Company name phase save: ${pendingError.message}`);
+  ctx.signal?.throwIfAborted();
+  const cleaned = await cleanCollectedCompanyNames(ctx, job, info, pendingRows, args.usage);
+  const readyRows = prepareSegmentationAudience({ rows: cleaned.rows, columns, source: 'auto' }).rows;
+  const next = finish(readyRows.length, cleaned.summary.error);
+  stats.launchable_rows = readyRows.length;
+  info.target_progress = next;
+  if (cleaned.summary.status === 'complete') delete info.company_name_recovery;
   delete info.validation_retry;
   if (info.estimate) info.estimate.remaining_ready_estimate = estimateRemainingReady({
     population: info.estimate.unique_companies,
     candidatesProcessed: next.candidates_processed, readyRows: readyRows.length,
     asOf: new Date().toISOString(),
     eligible: progress.mode === 'preview' && progress.round === 1 && !args.validationError
+      && cleaned.summary.status === 'complete'
       && tasks.length === 1 && tasks[0].source === 'companies_directory'
       && !args.stats.excluded_existing_bases && !args.stats.excluded_during_fetch,
   });
@@ -2580,7 +2675,7 @@ async function completeTargetRound(args: {
     : next.status === 'error' ? 'failed'
       : next.mode === 'preview' && readyRows.length > 0 ? 'analyzing' : 'analyzed';
   const { error } = await ctx.supabase.from('ve_bases').update({
-    data: readyRows, columns, sample_rows: readyRows.slice(0, SAMPLE_ROWS), row_count: readyRows.length,
+    data: cleaned.rows, columns, sample_rows: cleaned.rows.slice(0, SAMPLE_ROWS), row_count: cleaned.rows.length,
     status, collect_info: info, error: next.status === 'error' ? next.reason?.slice(0, 500) : null,
     updated_at: new Date().toISOString(),
   }).eq('id', base.id);
@@ -2642,7 +2737,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       if (!Number.isSafeInteger(previous.round) || previous.round < 1 || previous.round > target.max_rounds
         || !Number.isSafeInteger(previous.candidates_processed) || previous.candidates_processed < 0 || previous.candidates_processed > target.max_candidates
         || !Number.isSafeInteger(previous.ready_rows) || previous.ready_rows < 0 || previous.ready_rows > target.max_candidates * 5
-        || (info.target_checkpoint?.completed_round ?? 0) !== previous.round - (info.validation_retry ? 0 : 1)) {
+        || (info.target_checkpoint?.completed_round ?? 0) !== previous.round - (info.validation_retry || info.company_name_recovery ? 0 : 1)) {
         throw new Error('Invalid collection target checkpoint');
       }
       target.round = previous.round;
@@ -2701,6 +2796,11 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // Рынок проекта: выбор промпта планировщика (EN-источники при 'us').
   // ctx.market прокидывает воркер, фолбэк — колонка ve_projects.market.
   const market = ctx.market ?? projectMarket(project);
+  ctx = { ...ctx, market };
+  if (info.company_name_recovery) {
+    if (!target) throw new Error('Company name recovery requires a collection target');
+    return resumeSavedCompanyNames(ctx, job, base, info, target, usage);
+  }
   if (info.validation_retry) {
     if (!target || mode !== 'preview') throw new Error('Validation recovery requires a preview target');
     return resumeSavedPreviewValidation(ctx, job, base, info, target, market, usage);
@@ -3198,6 +3298,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       : !relevanceCoverageComplete ? relevanceError ?? 'Проверка релевантности завершилась не полностью' : null,
     usage,
   });
+
+  // Legacy non-target/refill jobs keep their existing contract. The new name
+  // phase requires the durable round/recovery state used by preview and supply;
+  // do not introduce an unrecoverable paid phase into an old in-flight job.
 
   // ─── REFILL (ENG auto-pipeline) ───
   // Вместо финала «analyzing + base_analyze»: долив валидных строк лидами в

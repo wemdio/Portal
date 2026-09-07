@@ -37,6 +37,7 @@ import {
 import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { mapBaseRowsToLeads, parseLaunchInfo } from '../launchHandoff';
+import { isCompanyNameReady } from '../companyNames';
 import type { VeJob, VeOperatorMapping } from '../types';
 import { stageLog, type VeStageContext, type VeStageResult, type VeUsage } from './shared';
 import {
@@ -345,6 +346,7 @@ export function selectRefillLeadRows(
     const status = emailStatuses?.[i] ?? null;
     // TODO(catch_all): catch_all-домены частично рабочие — пока не шлём (риск баунсов).
     if (status !== 'ok') continue;
+    if (!isCompanyNameReady(row)) continue;
     leadRows.push(row);
   }
   return { leadRows, withEmail, valid: leadRows.length };

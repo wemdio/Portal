@@ -5,6 +5,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { approveVeContactSupply } from '@/lib/verticalEngineV2/contactSupplyApproval';
 import { loadVeContactSupplyStatus } from '@/lib/verticalEngineV2/contactSupplyStatus';
+import { prepareVeSupplyNameResume } from '@/lib/verticalEngineV2/contactSupplyNameRecovery';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -49,6 +50,13 @@ export async function POST(req: NextRequest, { params }: Context) {
     const { data: plan, error: planError } = await supabaseAdmin.from('ve_contact_supply_plans')
       .select('id').eq('template_id', templateId).maybeSingle();
     if (planError || !plan) return NextResponse.json({ error: 'План пополнения недоступен' }, { status: 409 });
+    if (input.action === 'resume') {
+      try {
+        await prepareVeSupplyNameResume(supabaseAdmin, { planId: plan.id, templateId });
+      } catch (error) {
+        return NextResponse.json({ error: error instanceof Error ? error.message : 'Не удалось продолжить сохранённую партию' }, { status: 409 });
+      }
+    }
     const { error } = await supabaseAdmin.rpc('ve_set_contact_supply_status', {
       p_plan_id: plan.id, p_status: input.action === 'pause' ? 'paused' : 'active',
       p_actor_id: authed.auth.userId, p_now: new Date().toISOString(),

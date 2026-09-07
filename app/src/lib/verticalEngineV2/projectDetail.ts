@@ -67,16 +67,19 @@ async function readDetailPages(
 // Также удаляем checkpoints исключённых кандидатов и relevance-вердиктов; helper используется всеми
 // VE2-ответами, возвращающими карточку сборки, включая идемпотентный collect POST.
 export function stripTaskHarvest(base: Record<string, unknown>): Record<string, unknown> {
-  const info = base.collect_info as { tasks?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown } | null | undefined;
+  const info = base.collect_info as { tasks?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown; company_name_checkpoint?: unknown; company_name_recovery?: unknown } | null | undefined;
   if (!info) return base;
   const tasks = Array.isArray(info.tasks) ? info.tasks : [];
   const hasHarvest = tasks.some(
     (t) => t !== null && typeof t === 'object' && 'harvest' in (t as Record<string, unknown>),
   );
-  if (!hasHarvest && !('target_checkpoint' in info) && !('relevance_checkpoint' in info)) return base;
+  if (!hasHarvest && !('target_checkpoint' in info) && !('relevance_checkpoint' in info)
+    && !('company_name_checkpoint' in info) && !('company_name_recovery' in info)) return base;
   const publicInfo = { ...info };
   delete publicInfo.target_checkpoint;
   delete publicInfo.relevance_checkpoint;
+  delete publicInfo.company_name_checkpoint;
+  // Recovery marker is needed by the collect button but contains no raw contacts.
   return {
     ...base,
     collect_info: {

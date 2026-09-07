@@ -10,6 +10,7 @@ import type { VeBase, VeSegmentationAudit, VeTemplate } from '@/lib/verticalEngi
 import { validateStoredAuditSnapshot } from '@/lib/verticalEngineV2/stages/segmentationAudit';
 import { prepareSegmentationAudience } from '@/lib/verticalEngineV2/segmentationAudit';
 import { VE_PREVIEW_READY_TARGET } from '@/lib/verticalEngineV2/collectionTarget';
+import { projectCompanyNames, VE_COMPANY_NAME_FIELD } from '@/lib/verticalEngineV2/companyNames';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -174,6 +175,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           });
         });
         exportColumns = [...columns.filter((column) => column !== '_ve_segment'), '_ve_segment'];
+      }
+      if (mode !== 'raw') {
+        exportRows = projectCompanyNames(exportRows);
+        exportColumns = exportColumns.filter((column) => column !== VE_COMPANY_NAME_FIELD);
       }
       if (exportRows.length === 0) {
         return jsonError('В базе нет строк, готовых к запуску', 409);

@@ -19,6 +19,7 @@ jest.mock('@/lib/companiesSearch/rpcSearch', () => ({
 jest.mock('@/lib/verticalEngineV2/llm', () => ({
   callLLMWithSchema: jest.fn(),
   getVeModel: jest.fn(() => 'test-bulk-model'),
+  getVeActiveJobSignal: jest.fn(() => undefined),
 }));
 
 const mockFindIrrelevantRows = jest.fn();
@@ -51,6 +52,7 @@ import {
 } from '@/lib/verticalEngineV2/collectionTarget';
 import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue';
+import { callLLMWithSchema } from '@/lib/verticalEngineV2/llm';
 
 const PROJECT = { id: 'p1', name: 'P', created_by: 'user-1', market: 'ru' };
 const VERTICAL = {
@@ -179,6 +181,13 @@ function lastBasePatch(db: MockSupabaseClient): Record<string, unknown> | undefi
 
 beforeEach(() => {
   jest.clearAllMocks();
+  jest.mocked(callLLMWithSchema).mockImplementation(async (messages, schema) => {
+    const input = JSON.parse(String(messages.at(-1)?.content));
+    if (!Array.isArray(input.companies)) throw new Error('Unexpected LLM request in CONSTRUCT fixture');
+    return { data: schema.parse({ cleaned: input.companies.map((company: { idx: number; name: string }) =>
+      ({ idx: company.idx, name: company.name })) }), tokensUsed: 0, costUsd: 0,
+      promptTokens: 0, completionTokens: 0, rawResponse: '' };
+  });
   mockFindIrrelevantRows.mockImplementation(async (input: { rows: unknown[] }) => ({
     flagged: new Set<number>(),
     unchecked: new Set<number>(),
@@ -227,6 +236,7 @@ describe('base_collect CONSTRUCT step order', () => {
       await expect(enqueueVeBaseCollect(supabase, enqueueInput)).resolves.toMatchObject({ ok: true, created: false, base: { id: 'b1' } });
       const queued = db.getRows('ve_jobs').filter((j) => j.stage === 'base_collect').at(-1)!;
       const job = { ...makeJob(), id: queued.id as string, payload: queued.payload as VeJob['payload'] };
+      await supabase.from('ve_jobs').update({ status: 'running' }).eq('id', queued.id);
       await runBaseCollectStage(job, { supabase });
       await supabase.from('ve_jobs').update({ status: 'done' }).eq('id', queued.id);
       const base = db.getRows('ve_bases').find((b) => b.id === 'b1')!;
@@ -272,6 +282,7 @@ describe('base_collect CONSTRUCT step order', () => {
       base_constructor_jobs: db.getRows('base_constructor_jobs') });
     await enqueueVeBaseCollect(bufferedDb as unknown as SupabaseClient, enqueueInput);
     const bufferedJob = bufferedDb.getRows('ve_jobs')[0];
+    await bufferedDb.from('ve_jobs').update({ status: 'running' }).eq('id', bufferedJob.id);
     await expect(runBaseCollectStage({ ...makeJob(), id: bufferedJob.id as string, payload: bufferedJob.payload as VeJob['payload'] },
       { supabase: bufferedDb as unknown as SupabaseClient })).resolves.toMatchObject({ result: { waiting: true, target_status: 'collecting' } });
     expect((bufferedDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress)
@@ -337,6 +348,7 @@ describe('base_collect CONSTRUCT step order', () => {
       { name: bad.company, email: bad.email, website: bad.website },
       { name: 'Clinic Next', email: 'next@next.test', website: 'next.test' },
     ] });
+    await db.from('ve_jobs').update({ status: 'running' }).eq('id', job.id);
     await runBaseCollectStage(job, { supabase: db as unknown as SupabaseClient });
     const constructor = db.getRows('base_constructor_jobs').find((row) => row.id !== 'bc-first')!;
     expect(constructor.data).not.toEqual(expect.arrayContaining([expect.arrayContaining([first.company])]));
@@ -346,6 +358,7 @@ describe('base_collect CONSTRUCT step order', () => {
         ['Clinic Next', 'next.test', 'next@next.test', 'ok'],
       ],
     }).eq('id', constructor.id);
+    await db.from('ve_jobs').update({ status: 'running' }).eq('id', job.id);
     await runBaseCollectStage(job, { supabase: db as unknown as SupabaseClient });
     const completed = db.getRows('ve_bases')[0];
     expect(completed).toMatchObject({ status: 'analyzed', row_count: 2 });

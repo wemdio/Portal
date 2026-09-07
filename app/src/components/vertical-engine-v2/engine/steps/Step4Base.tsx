@@ -26,6 +26,7 @@ import { downloadBaseCsvResponse } from '@/lib/verticalEngineV2/baseCsv';
 import { VE_LAUNCH_MAX_LEADS } from '@/lib/verticalEngineV2/launchHandoff';
 import { VE_PREVIEW_READY_TARGET, VE_COLLECTION_MAX_CANDIDATES } from '@/lib/verticalEngineV2/collectionTarget';
 import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
+import { companyNameCell, isCompanyNameReady, VE_COMPANY_NAME_FIELD } from '@/lib/verticalEngineV2/companyNames';
 import {
   VE_API,
   veEnginePost,
@@ -75,6 +76,10 @@ function latestStageJob(jobs: VeJobSummary[], stage: VeJobSummary['stage']): VeJ
 
 function jobActive(job: VeJobSummary | undefined): boolean {
   return job?.status === 'pending' || job?.status === 'running';
+}
+
+function activeCollectionJob(jobs: VeJobSummary[], baseId: string): VeJobSummary | undefined {
+  return latestStageJob(jobs.filter((job) => job.payload?.base_id === baseId && jobActive(job)), 'base_collect');
 }
 
 function collectionFailureMessage(base: VeBaseSummary): string {
@@ -508,6 +513,7 @@ export function Step4Base(props: {
           <div>
             <CollectProgress
               base={collectionQueue.current ?? collectingBase}
+              job={activeCollectionJob(jobs, (collectionQueue.current ?? collectingBase).id)}
               queuedCount={collectionQueue.queued.length}
               queued={!collectionQueue.current}
               otherVertical={collectionQueue.current != null && collectionQueue.current.vertical_id !== vertical.id}
@@ -692,6 +698,7 @@ export function Step4Base(props: {
               <BaseRow
                 key={base.id}
                 base={base}
+                job={activeCollectionJob(jobs, base.id)}
                 queued={queuedBaseIds.has(base.id)}
                 hypothesisTitle={base.hypothesis_id ? hypothesisTitleById.get(base.hypothesis_id) : undefined}
               />
@@ -793,14 +800,14 @@ function previewCellText(value: unknown): string {
   return typeof value === 'string' ? value : String(value);
 }
 
-function BaseRow({ base, hypothesisTitle, queued }: { base: VeBaseSummary; hypothesisTitle?: string; queued: boolean }) {
+function BaseRow({ base, job, hypothesisTitle, queued }: { base: VeBaseSummary; job?: VeJobSummary; hypothesisTitle?: string; queued: boolean }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [downloadingMode, setDownloadingMode] = useState<BaseExportMode | null>(null);
   const [downloadError, setDownloadError] = useState('');
 
   const hasRows = base.row_count > 0;
-  const progress = getCollectionProgress(base.collect_info);
-  const columns = Array.isArray(base.columns) ? base.columns : [];
+  const progress = getCollectionProgress(base.collect_info, job);
+  const columns = Array.isArray(base.columns) ? base.columns.filter((column) => column !== VE_COMPANY_NAME_FIELD) : [];
   const previewRows = (Array.isArray(base.sample_rows) ? base.sample_rows : []).slice(0, PREVIEW_ROWS);
 
   const handleDownload = useCallback(async (mode: BaseExportMode) => {
@@ -927,12 +934,17 @@ function BaseRow({ base, hypothesisTitle, queued }: { base: VeBaseSummary; hypot
               {previewRows.map((row, ri) => (
                 <tr key={ri}>
                   {columns.map((col) => {
-                    const text = previewCellText(row[col]);
+                    const hasNameCleanup = col === 'company' && VE_COMPANY_NAME_FIELD in row;
+                    const nameFailed = hasNameCleanup && !isCompanyNameReady(row);
+                    const text = nameFailed ? 'Название не подготовлено' : previewCellText(companyNameCell(row, col));
+                    const title = hasNameCleanup
+                      ? `${text}\nИсходное название: ${previewCellText(row[col])}`
+                      : text;
                     return (
                       <td
                         key={col}
                         className="max-w-[220px] truncate px-3 py-1.5 text-gray-700 first:pl-0"
-                        title={text}
+                        title={title}
                       >
                         {text === '' ? (
                           <span className={HE.chip}>—</span>
@@ -1098,8 +1110,14 @@ function readCollectInfo(info: VeCollectInfo | null | undefined) {
  * Честная воронка одной автосборки. Рыночная оценка, лимит задачи, строки
  * обработки и адресаты запуска не подменяют друг друга словом «контакты».
  */
-function CollectionFunnel({ base, useDefaultLimit = false }: { base: VeBaseSummary; useDefaultLimit?: boolean }) {
+function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBaseSummary; job?: VeJobSummary; useDefaultLimit?: boolean }) {
   const target = base.collect_info?.target_progress;
+  const nameCleanup = base.collect_info?.company_name_cleanup;
+  const nameProgress = getCollectionProgress(base.collect_info, job);
+  const namesInProgress = base.status === 'collecting' && nameProgress.phase === 'cleaning_names';
+  const namesChecked = nameProgress.nameProgress?.done ?? collectCount(nameCleanup?.checked);
+  const namesTotal = nameProgress.nameProgress?.total ?? collectCount(nameCleanup?.companies);
+  const namesFailed = collectCount(nameCleanup?.failed);
   const { limit, estimate, stats } = readCollectInfo(base.collect_info);
   const shownLimit = limit ?? (useDefaultLimit ? VE_COLLECTION_MAX_CANDIDATES : null);
   // После завершения CONSTRUCT row_count — надёжный фолбэк для старых записей,
@@ -1120,6 +1138,7 @@ function CollectionFunnel({ base, useDefaultLimit = false }: { base: VeBaseSumma
       stats.relevanceUnchecked,
       stats.relevanceCheckedCompanies,
       stats.relevanceTotalCompanies,
+      namesTotal,
     ].some((value) => value !== null);
   if (!hasAny) return null;
 
@@ -1132,7 +1151,8 @@ function CollectionFunnel({ base, useDefaultLimit = false }: { base: VeBaseSumma
         <div className="sm:col-span-2 mb-2 text-xs" role="status">
           <p className="font-medium">Проверено и подготовлено: {target.ready_rows.toLocaleString('ru-RU')} / цель {target.ready_target.toLocaleString('ru-RU')}</p>
           <p className="mt-1">
-            {target.status === 'collecting' ? `Проход ${target.round} из ${target.max_rounds}. Добираем контакты после проверок.`
+            {namesInProgress ? 'Контакты сохранены. Подготавливаем названия компаний для превью и писем.'
+              : target.status === 'collecting' ? `Проход ${target.round} из ${target.max_rounds}. Добираем контакты после проверок.`
               : target.status === 'target_reached' ? 'Превью готово к согласованию. Отправка ещё не включена.'
               : target.status === 'exhausted' ? 'Источники текущего плана закончились. Это не оценка всего рынка.'
               : target.status === 'limited' ? 'Сбор остановлен защитным лимитом. Это не означает, что контакты закончились.'
@@ -1163,6 +1183,15 @@ function CollectionFunnel({ base, useDefaultLimit = false }: { base: VeBaseSumma
           Прошли проверки: {stats.launchableRows.toLocaleString('ru-RU')} {recipientWord(stats.launchableRows)}
         </p>
       ) : null}
+      {namesChecked !== null && namesTotal !== null ? (
+        <p>Названия компаний подготовлены: {namesChecked.toLocaleString('ru-RU')} из {namesTotal.toLocaleString('ru-RU')}. Исходники сохранены.</p>
+      ) : null}
+      {namesFailed !== null && namesFailed > 0 && base.status !== 'collecting' ? (
+        <p className="sm:col-span-2 font-medium text-amber-700">
+          Не удалось подготовить названия {namesFailed.toLocaleString('ru-RU')} компаний. Их контакты не входят в готовое превью и не попадут в запуск.
+          {nameCleanup?.error ? ` ${nameCleanup.error}` : ''}
+        </p>
+      ) : null}
       {stats.launchableRows !== null && stats.launchableRows > VE_LAUNCH_MAX_LEADS ? (
         <p className="sm:col-span-2 font-medium text-amber-700">
           Лимит одного запуска — {VE_LAUNCH_MAX_LEADS.toLocaleString('ru-RU')}. Разделите аудиторию или уменьшите базу
@@ -1191,6 +1220,7 @@ const COLLECT_PHASE_LABELS = {
   construct_queued: 'Ждём обработку базы',
   processing: 'Обогащаем и проверяем',
   finishing: 'Завершаем проверку базы',
+  cleaning_names: 'Очищаем названия компаний',
   construct_failed: 'Обработка остановлена',
 };
 
@@ -1205,11 +1235,11 @@ const CONSTRUCT_STEP_LABELS: Record<string, string> = {
 };
 
 /** Лимит кандидатов не является целью или процентом готовности сбора. */
-function CollectProgress({ base, queuedCount, queued, otherVertical }: {
-  base: VeBaseSummary; queuedCount: number; queued: boolean; otherVertical: boolean;
+function CollectProgress({ base, job, queuedCount, queued, otherVertical }: {
+  base: VeBaseSummary; job?: VeJobSummary; queuedCount: number; queued: boolean; otherVertical: boolean;
 }) {
   const { plan, tasks } = readCollectInfo(base.collect_info);
-  const progress = getCollectionProgress(base.collect_info);
+  const progress = getCollectionProgress(base.collect_info, job);
   const stepLabel = CONSTRUCT_STEP_LABELS[progress.stepKey ?? ''] ?? 'Обработка базы';
 
   return (
@@ -1254,7 +1284,7 @@ function CollectProgress({ base, queuedCount, queued, otherVertical }: {
           </span>
         </div>
       ) : null}
-      <CollectionFunnel base={base} useDefaultLimit />
+      <CollectionFunnel base={base} job={job} useDefaultLimit />
       {!queued && plan.length > 0 ? (
         <ul className="mt-3 space-y-1">
           {plan.map((task, i) => (

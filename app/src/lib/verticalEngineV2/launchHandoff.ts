@@ -36,6 +36,7 @@ import type {
   VeRuSeasonalityPrioritySnapshot,
 } from './types';
 import { normalizeLaunchMailboxIds } from './launchPortfolio';
+import { companyNameCell, isCompanyNameReady, VE_COMPANY_NAME_FIELD } from './companyNames';
 
 /** Максимум контактов в проверенном резерве одного шаблона, 413 сверх. */
 // Bounded durable reserve, not an Instantly upload batch. The worker sends
@@ -335,6 +336,8 @@ export interface MapBaseRowsInput {
   rows: Array<Record<string, unknown>>;
   columns: string[];
   operatorMapping?: VeOperatorMapping[];
+  /** Internal collection filtering before name cleanup; never use for launch. */
+  ignoreCompanyNameCheck?: boolean;
 }
 
 export interface MapBaseRowsResult {
@@ -373,6 +376,7 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
   const matchedOperators = new Map<string, { column: string; fallback: string }>();
   for (const m of operatorMapping ?? []) {
     if (!m?.operator) continue;
+    if (m.column === VE_COMPANY_NAME_FIELD || m.operator === VE_COMPANY_NAME_FIELD) continue;
     if (m.matched && m.column) {
       if (!operatorByColumn.has(m.column)) operatorByColumn.set(m.column, m.operator);
       if (!matchedOperators.has(m.operator)) {
@@ -389,6 +393,7 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
   const seenEmails = new Set<string>();
 
   rows.forEach((row, rowIndex) => {
+    if (!input.ignoreCompanyNameCheck && !isCompanyNameReady(row)) return;
     const email = String(row[emailColumn] ?? '').trim().toLowerCase();
     if (!email || !EMAIL_RE.test(email)) return;
     if (seenEmails.has(email)) return;
@@ -398,8 +403,8 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
     const customVars: Record<string, string> = {};
 
     for (const col of columns) {
-      if (col === emailColumn) continue;
-      const val = String(row[col] ?? '').trim();
+      if (col === emailColumn || col === VE_COMPANY_NAME_FIELD) continue;
+      const val = String(companyNameCell(row, col) ?? '').trim();
       if (!val) continue;
       customVars[operatorByColumn.get(col) ?? col] = val;
     }
