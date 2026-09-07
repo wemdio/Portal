@@ -116,14 +116,21 @@ function randomRange([min, max]: [number, number]): number {
 
 
 /**
- * Сколько диалогов аккаунта забирать из getDialogs за итерацию.
- * Было 100 — снизили до 50: меньше данных через прокси = меньше шанс
- * таймаута на getDialogs (3 аккаунта стабильно зависали на 180с).
- * 50 достаточно, т.к. обрабатываются только непрочитанные User-диалоги,
- * а группы/каналы скипаются. Если лиды проваливаются ниже 50-й позиции —
- * поднять через env TG_OUTREACH_DIALOGS_LIMIT.
+ * Сколько последних диалогов аккаунта забирать из getDialogs за итерацию.
+ *
+ * Со 100 снижали до 50 в надежде, что меньше данных через прокси — меньше
+ * зависаний. Зависания не прекратились: 07.09.2026 их было 66 на 91 круг, и
+ * каждое лечилось переподключением, после которого те же диалоги приходили за
+ * 0.4с. Полсотни диалогов через прокси не грузятся три минуты ни при каких
+ * условиях — значит висел сокет, а объём был ни при чём, и платили за эту
+ * догадку покрытием лидов.
+ *
+ * Возвращаем 100: обрабатываются только непрочитанные диалоги с людьми,
+ * группы и каналы пропускаются, так что лишние полсотни строк почти ничего не
+ * стоят, а лид, провалившийся ниже пятидесятой позиции, перестаёт теряться.
+ * Настраивается через env TG_OUTREACH_DIALOGS_LIMIT.
  */
-const DIALOGS_FETCH_LIMIT = Number(process.env.TG_OUTREACH_DIALOGS_LIMIT ?? '50');
+const DIALOGS_FETCH_LIMIT = Number(process.env.TG_OUTREACH_DIALOGS_LIMIT ?? '100');
 
 /**
  * Hard per-account ceiling on the first gramJS call of each iteration
@@ -132,12 +139,45 @@ const DIALOGS_FETCH_LIMIT = Number(process.env.TG_OUTREACH_DIALOGS_LIMIT ?? '50'
  * hostage and triggering the worker watchdog at 15 minutes. The watchdog
  * still acts as the ultimate backstop for the rest of the iteration.
  */
-// Default 180s: accounts with thousands of dialogs (e.g. Политген) routinely
-// hit the original 60s ceiling on getDialogs() even when the proxy is healthy.
-// Raising the bar trades a small amount of wall-clock time for full dialog
-// coverage. Override via TG_OUTREACH_PER_ACCOUNT_TIMEOUT_MS if needed.
+// 180с оставлены как потолок ПОВТОРНОЙ попытки — той, что идёт по свежему
+// сокету. Первую сторожит короткий FIRST_DIALOGS_PROBE_TIMEOUT_MS ниже.
+// Прежнее объяснение («аккаунты с тысячами диалогов не укладываются в 60с»)
+// держалось на догадке про объём: забираем мы сотню последних диалогов, и
+// столько через исправный прокси не грузится и десяти секунд. Потолок остаётся
+// запасом на нештатный случай, а не ожидаемым временем работы.
+// Override via TG_OUTREACH_PER_ACCOUNT_TIMEOUT_MS if needed.
 const PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS =
   Number(process.env.TG_OUTREACH_PER_ACCOUNT_TIMEOUT_MS) || 180_000;
+
+/**
+ * Первая попытка getDialogs ждёт коротко — она проверяет сокет, а не грузит почту.
+ *
+ * Через мобильный прокси соединение регулярно становится полуоткрытым: гramJS
+ * ждёт ответа вечно, потолок выше срабатывает на 180-й секунде, а сразу после
+ * переподключения тот же запрос отрабатывает за 0.4с. 07.09.2026 так висели
+ * 66 кругов из 91 у 48 аккаунтов во всех четырёх кампаниях — 3.3 часа чистого
+ * ожидания в сутки на ровном месте.
+ *
+ * Мёртвый сокет от медленной загрузки отличается тем, что по нему не приходит
+ * вообще ничего. Поэтому первой попытке хватает короткого срока: не ответили —
+ * почти наверняка сокет, и переподключение стоит полторы секунды.
+ *
+ * Если же аккаунт не уложился честно, ничего не теряется: полный потолок
+ * остаётся у повторной попытки по свежему соединению. Цена ошибки — одно
+ * лишнее переподключение в полторы секунды вместо трёх минут простоя.
+ */
+const FIRST_DIALOGS_PROBE_TIMEOUT_MS =
+  Number(process.env.TG_OUTREACH_FIRST_PROBE_TIMEOUT_MS) || 25_000;
+
+/**
+ * Повтор уложился в этот срок — висел сокет, а не почта.
+ *
+ * Наблюдаемая разница огромна: на мёртвом сокете повтор по свежему соединению
+ * отдаёт диалоги за 0.3–0.7с, а большая почта грузится десятками секунд и
+ * после переподключения. Порог поставлен с большим запасом в сторону «это
+ * сокет»: ошибочно не обвинить прокси дешевле, чем свапнуть исправный.
+ */
+const FAST_RETRY_MEANS_DEAD_SOCKET_MS = 5_000;
 
 /** Marker string included in the Error message so the catch branch can
  *  distinguish our explicit timeout from generic TIMEOUT errors. */
@@ -1703,7 +1743,7 @@ export async function runCampaignLoop(
           // smaller result set reduces the chance gramJS's internal pagination
           // overshoots the dialog count (the "offset out of range" bug, also
           // handled there via a raw single-page GetDialogs fallback).
-          const raceGetDialogs = () => {
+          const raceGetDialogs = (timeoutMs: number) => {
             // Always read entry.client: after a mid-iteration reconnect the
             // retry must hit the fresh client, not the wedged one.
             const loadDialogsPromise = loadOutreachDialogs(entry.client, DIALOGS_FETCH_LIMIT);
@@ -1719,10 +1759,10 @@ export async function runCampaignLoop(
                   () =>
                     reject(
                       new Error(
-                        `${PER_ACCOUNT_TIMEOUT_MARKER} (${PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS / 1000}s) on getDialogs`,
+                        `${PER_ACCOUNT_TIMEOUT_MARKER} (${timeoutMs / 1000}s) on getDialogs`,
                       ),
                     ),
-                  PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS,
+                  timeoutMs,
                 ),
               ),
             ]);
@@ -1731,7 +1771,7 @@ export async function runCampaignLoop(
           let dialogs: helpers.TotalList<Dialog>;
           let usedRawPageFallback: boolean;
           try {
-            ({ dialogs, usedRawPageFallback } = await raceGetDialogs());
+            ({ dialogs, usedRawPageFallback } = await raceGetDialogs(FIRST_DIALOGS_PROBE_TIMEOUT_MS));
           } catch (firstErr) {
             const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
             // Only the wedged-socket timeout gets the reconnect-and-retry-now
@@ -1750,12 +1790,18 @@ export async function runCampaignLoop(
             const acctRef = `acc_id=${account.id}${account.phone ? ` тел=${account.phone}` : ''}${account.proxy_id ? ` proxy_id=${account.proxy_id}` : ''}`;
             const firstHangSec = ((Date.now() - accountStartMs) / 1000).toFixed(1);
 
-            // Прокси-инцидент №1: getDialogs завис на «мёртвом сокете».
-            // Регистрируем ошибку прокси и при необходимости свапаем — даже
-            // если reconnect ниже потом всё-таки помог. Один и тот же прокси
-            // не должен бесконечно сжигать наш 180с-таймаут на каждом круге.
-            await handleProxyError({ db, account, reason: 'getDialogs_hung', log });
-
+            // Прокси-инцидент №1 регистрируем НЕ здесь, а после повторной
+            // попытки — см. ниже.
+            //
+            // Пока первая попытка ждала три минуты, зависание можно было сразу
+            // считать мёртвым сокетом: столько не грузится ничто живое. С
+            // коротким сроком проверки это перестало быть верным — аккаунт с
+            // тысячами диалогов не укладывается в него честно, и обвинять его
+            // прокси значит свапать исправный адрес каждые три круга.
+            //
+            // Отличает их повторная попытка: по свежему сокету мёртвый случай
+            // отдаёт диалоги мгновенно, а большая почта грузится ровно столько
+            // же, сколько и была. Поэтому ждём её результата.
             const reconnectStartMs = Date.now();
             try {
               entry.client = await reconnectClient(account, proxy, entry.client, downloadSessionFile);
@@ -1780,7 +1826,7 @@ export async function runCampaignLoop(
 
             const retryStartMs = Date.now();
             try {
-              ({ dialogs, usedRawPageFallback } = await raceGetDialogs());
+              ({ dialogs, usedRawPageFallback } = await raceGetDialogs(PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS));
             } catch (secondErr) {
               const secMsg = secondErr instanceof Error ? secondErr.message : String(secondErr);
               const retrySec = ((Date.now() - retryStartMs) / 1000).toFixed(1);
@@ -1800,10 +1846,17 @@ export async function runCampaignLoop(
                   `Похоже на проблему не с сокетом (битая сессия / теневой бан аккаунта / прокси режет MTProto). ${proxyProbeLog}. ${acctRef}`,
               );
             }
+            const retryMs = Date.now() - retryStartMs;
             log(
               'info',
-              `Аккаунт ${account.session_name}: повторная загрузка после переподключения удалась за ${((Date.now() - retryStartMs) / 1000).toFixed(1)}с.`,
+              `Аккаунт ${account.session_name}: повторная загрузка после переподключения удалась за ${(retryMs / 1000).toFixed(1)}с.`,
             );
+            // Свежий сокет отдал то же самое мгновенно — значит висел именно
+            // сокет, а не объём почты. Только теперь это ошибка прокси: один и
+            // тот же адрес не должен сжигать проверку на каждом круге.
+            if (retryMs <= FAST_RETRY_MEANS_DEAD_SOCKET_MS) {
+              await handleProxyError({ db, account, reason: 'getDialogs_hung', log });
+            }
           }
           // Successful fetch — reset the chronic paging failure counter.
           if (pagingFailureCounts.has(account.id)) pagingFailureCounts.delete(account.id);
