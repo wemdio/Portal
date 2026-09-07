@@ -23,6 +23,7 @@
  */
 
 import type { VeOperatorMapping } from './types';
+import { companyNameCell } from './companyNames';
 
 /**
  * Тот же регексп операторов, что и в stages/template (байт-в-байт).
@@ -108,7 +109,7 @@ function resolveOperator(
 ): ResolvedOperator {
   const m = mapping.get(name.toLowerCase());
   if (m && m.matched && m.column) {
-    const value = stringifyCell(row[m.column]);
+    const value = stringifyCell(companyNameCell(row, m.column));
     if (value) return { kind: 'value', text: value };
     // Колонка есть, ячейка пуста → Instantly подставит пустую строку, а не
     // литерал {{var}}. Fallback matched-маппинга здесь НЕ применяется: боевой
@@ -185,7 +186,7 @@ function previewRowLabel(
     if (!m.matched || !m.column) continue;
     const op = m.operator.toLowerCase();
     if (op !== 'companyname' && op !== 'company') continue;
-    const value = stringifyCell(row[m.column]);
+    const value = stringifyCell(companyNameCell(row, m.column));
     if (value) return value;
   }
   const keys = [...columns, ...Object.keys(row)];
@@ -194,7 +195,7 @@ function previewRowLabel(
     // несколько — берём первую с непустым значением.
     for (const key of keys) {
       if (key.toLowerCase() !== candidate) continue;
-      const value = stringifyCell(row[key]);
+      const value = stringifyCell(companyNameCell(row, key));
       if (value) return value;
     }
   }

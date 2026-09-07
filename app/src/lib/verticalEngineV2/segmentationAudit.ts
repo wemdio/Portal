@@ -12,6 +12,8 @@ import type { LeadCreatePayload } from '@/lib/instantly/types';
 import type { VeChainLetter, VeOperatorMapping } from './types';
 import type { DetailedSegmentClassificationResult } from './segmentClassify';
 import { mapBaseRowsToLeads } from './launchHandoff';
+import { companyNameCell, isCompanyNameReady } from './companyNames';
+import { isVeRelevanceReady } from './relevanceDecision';
 
 export interface SegmentationAuditExcluded {
   lowRelevance: number;
@@ -20,6 +22,8 @@ export interface SegmentationAuditExcluded {
   invalidEmailStatus: number;
   invalidEmail: number;
   duplicateEmail: number;
+  /** Present only when rows were excluded by the new name-cleanup gate. */
+  nameCleanupUnchecked?: number;
 }
 
 export interface PreparedSegmentationAudience {
@@ -39,6 +43,8 @@ export interface PrepareSegmentationAudienceInput {
   columns: string[];
   source?: string | null;
   operatorMapping?: VeOperatorMapping[];
+  /** Internal collection filtering before name cleanup; never use for audit/launch. */
+  ignoreCompanyNameCheck?: boolean;
 }
 
 export interface SegmentationAuditExample {
@@ -142,13 +148,13 @@ function rowLabel(
     if (!mapping.matched || !mapping.column) continue;
     const operator = mapping.operator.trim().toLowerCase();
     if (operator !== 'companyname' && operator !== 'company') continue;
-    const value = stringifyCell(row[mapping.column]);
+    const value = stringifyCell(companyNameCell(row, mapping.column));
     if (value) return value;
   }
   for (const candidate of ['companyname', 'company', 'компания']) {
-    for (const [column, raw] of Object.entries(row)) {
+    for (const column of Object.keys(row)) {
       if (column.toLowerCase() !== candidate) continue;
-      const value = stringifyCell(raw);
+      const value = stringifyCell(companyNameCell(row, column));
       if (value) return value;
     }
   }
@@ -182,11 +188,19 @@ export function prepareSegmentationAudience(
         excluded.lowRelevance += 1;
         return;
       }
+      if (!isVeRelevanceReady(row)) {
+        excluded.relevanceUnchecked += 1;
+        return;
+      }
       const emailStatus = typeof row._email_status === 'string' ? row._email_status : null;
       if (emailStatus !== 'ok') {
         excluded.invalidEmailStatus += 1;
         return;
       }
+    }
+    if (!input.ignoreCompanyNameCheck && !isCompanyNameReady(row)) {
+      excluded.nameCleanupUnchecked = (excluded.nameCleanupUnchecked ?? 0) + 1;
+      return;
     }
     qualityRows.push({ row, originalIndex });
   });
@@ -195,6 +209,7 @@ export function prepareSegmentationAudience(
     rows: qualityRows.map((entry) => entry.row),
     columns,
     operatorMapping,
+    ignoreCompanyNameCheck: input.ignoreCompanyNameCheck,
   });
   const launchablePositions = new Set(mapped.leadRowIndices);
   const keptEmails = new Set(mapped.leads.map((lead) => lead.email.toLowerCase()));

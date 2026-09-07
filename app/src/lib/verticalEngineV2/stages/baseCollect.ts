@@ -93,10 +93,22 @@ import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
 import { extractEmail, extractEmails } from '@/lib/tools/dfybUtils';
+import {
+  mergeVeSourceFactText, normalizeVeCompanyInn, normalizeVeCompanyName, normalizeVeWebsiteHost,
+  veCompanyWebsiteKey,
+} from '../collectionIdentity';
 import { getVeDirectorySegmentStats } from '../dossierData';
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
-import { findIrrelevantRows } from '../relevanceGate';
+import { findIrrelevantRows, type VeRelevanceDecision } from '../relevanceGate';
+import { relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
+import {
+  buildVeRelevanceReviewBatch, mergeVeRelevanceRows, needsVeRelevanceReview, readVeRelevanceReserve, readVeRelevanceSourceRows, summarizeVeRelevanceReserve,
+  veRelevanceCompanyKey, veRelevanceRowKey, type VeRelevanceReserve, type VeRelevanceReserveSummary,
+} from '../relevanceReserve';
+import { cleanVeCompanyNames, type VeCompanyNameCheckpoint } from '../companyNameCleanup';
+import { recoverVeSavedEmails, needsVeSavedEmailReview, type VeSavedEmailRecoveryState } from '../savedEmailRecovery';
+import { companyNameSource, isCompanyNameReady, VE_COMPANY_NAME_FIELD, type VeCompanyNameCleanupSummary } from '../companyNames';
 import { prepareSegmentationAudience } from '../segmentationAudit';
 import { isContactSupplyActive } from '../contactSupplyEligibility';
 import {
@@ -331,15 +343,7 @@ export function mapEngHiringRow(row: Record<string, unknown>): VeUnifiedRow {
  * из hh жили в базе обе, как и «Acme, Inc.» из pdl и «ACME LLC» из eng_hiring.
  */
 export function normalizeCompanyForDedup(name: string): string {
-  let s = ` ${name.trim().toLowerCase()} `;
-  // Пунктуация → пробел: кавычки всех стилей, дефисы, точки — всё небуквенное.
-  s = s.replace(/[^0-9a-zа-яё\s]+/gi, ' ');
-  // Юрформы отдельными словами (длинные формы раньше коротких: «пао» до «ао»).
-  s = s.replace(
-    /(^|\s)(ооо|ип|пао|зао|оао|ано|нко|ао|llc|ltd|inc|ooo|corporation|corp|limited|llp|lp|gmbh|plc|sarl|sa|ag|bv|nv|pty|pte)(?=\s|$)/g,
-    ' ',
-  );
-  return s.replace(/\s+/g, ' ').trim();
+  return normalizeVeCompanyName(name);
 }
 
 /**
@@ -351,76 +355,54 @@ export function normalizeCompanyForDedup(name: string): string {
  * сохраняется полный website — хост используется только в ключе.
  */
 export function normalizeWebsiteForDedup(website: string): string {
-  const raw = website.trim().toLowerCase();
-  if (!raw) return '';
-  let host: string;
-  try {
-    const url = new URL(raw.includes('://') ? raw : `https://${raw}`);
-    host = url.hostname;
-  } catch {
-    // Кривая строка (пробелы, мусор): грубый срез схемы/пути руками.
-    host = raw.replace(/^[a-z]+:\/\//, '').split(/[\s/?#]/)[0];
-  }
-  host = host.replace(/^www\./, '').replace(/\.+$/, '');
-  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(host) ? host : '';
+  return normalizeVeWebsiteHost(website);
 }
 
 /**
- * Дедуп: точный ключ «компания|сайт» (первое вхождение побеждает — задачи
- * плана упорядочены по приоритету) плюс схлопывание пары «та же компания,
- * сайт пуст хотя бы у одной строки»: «ООО "ТЕРАБАЙТ"» с сайтом и «ТЕРАБАЙТ»
- * без сайта — одна компания, выживает более богатая строка (с website/email,
- * иначе первая). Асимметрия с кросс-базовым исключением осознанная: там
- * матч ТОЛЬКО по компании (website может отсутствовать у целого источника),
- * а здесь пары с РАЗНЫМИ непустыми сайтами живут обе — у дочек/филиалов
- * бывают разные домены. Строки с пустым нормализованным ключом компании
- * («ООО», «—», «») — мусор: все они схлопнулись бы в один ключ «|»,
- * выбрасываются как и строки с пустым сырым company.
+ * ИНН — главный идентификатор. Строку без ИНН можно присоединить по паре
+ * «имя + сайт», только если эта пара не принадлежит нескольким юрлицам.
+ * Одиноко стоящее имя не доказывает дубль: одноимённые компании остаются
+ * раздельно. Все email и дополняющие сведения подтверждённого дубля
+ * сохраняются, а разные ИНН никогда не смешиваются даже на общем домене.
  */
 export function dedupUnifiedRows(rows: VeUnifiedRow[]): VeUnifiedRow[] {
-  const idxByExactKey = new Map<string, number>();
-  const firstIdxByCompany = new Map<string, number>();
+  const innsByWebsite = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const inn = normalizeVeCompanyInn(row.inn), websiteKey = veCompanyWebsiteKey(row);
+    if (!inn || !websiteKey) continue;
+    const inns = innsByWebsite.get(websiteKey) ?? new Set<string>();
+    inns.add(inn);
+    innsByWebsite.set(websiteKey, inns);
+  }
+  const idxByIdentity = new Map<string, number>();
   const out: VeUnifiedRow[] = [];
-  const mergedEmails = (left: string, right: string): string =>
-    extractEmails(`${left}, ${right}`).join(', ');
   for (const row of rows) {
     const company = normalizeCompanyForDedup(row.company);
     if (!company) continue;
-    const website = normalizeWebsiteForDedup(row.website);
-    const key = `${company}|${website}`;
-    const idx = firstIdxByCompany.get(company);
+    const inn = normalizeVeCompanyInn(row.inn), websiteKey = veCompanyWebsiteKey(row);
+    const matchingInns = websiteKey ? innsByWebsite.get(websiteKey) : undefined;
+    const resolvedInn = inn || (matchingInns?.size === 1 ? [...matchingInns][0] : '');
+    // Without a stable identity only an identical complete observation is a
+    // duplicate. A richer source with the same generic name is not proof.
+    const key = resolvedInn ? `inn:${resolvedInn}` : websiteKey ? `site:${websiteKey}`
+      : `observation:${JSON.stringify(Object.entries(row).sort(([a], [b]) => a.localeCompare(b)))}`;
+    const idx = idxByIdentity.get(key);
     if (idx === undefined) {
-      firstIdxByCompany.set(company, out.length);
-      idxByExactKey.set(key, out.length);
-      out.push(row);
+      idxByIdentity.set(key, out.length);
+      out.push({ ...row });
       continue;
     }
-    const existingWebsite = normalizeWebsiteForDedup(out[idx].website);
-    if (website === '' || existingWebsite === '') {
-      // Та же компания, но сайт пуст хотя бы у одной строки (точный дубль
-      // «компания|» — тоже сюда): оставляем более богатую (с сайтом/email),
-      // при равенстве — первую.
-      const existingRich = existingWebsite !== '' || out[idx].email !== '';
-      const rowRich = website !== '' || row.email !== '';
-      const email = mergedEmails(out[idx].email, row.email);
-      if (rowRich && !existingRich) {
-        out[idx] = { ...row, email };
-        idxByExactKey.set(key, idx);
-      } else if (email !== out[idx].email) {
-        out[idx] = { ...out[idx], email };
-      }
-      continue;
+    const merged = { ...out[idx] } as VeUnifiedRow & Record<string, string>;
+    for (const [field, value] of Object.entries(row)) {
+      if (!cell(merged[field])) merged[field] = value;
     }
-    // У обеих строк непустые сайты: точный дубль пропускаем, разные домены
-    // (дочки/филиалы) живут обе.
-    const exactIdx = idxByExactKey.get(key);
-    if (exactIdx !== undefined) {
-      const email = mergedEmails(out[exactIdx].email, row.email);
-      if (email !== out[exactIdx].email) out[exactIdx] = { ...out[exactIdx], email };
-      continue;
+    if (!normalizeVeCompanyInn(merged.inn) && inn) merged.inn = row.inn;
+    if (!normalizeVeWebsiteHost(merged.website) && normalizeVeWebsiteHost(row.website)) merged.website = row.website;
+    for (const field of ['category', 'description', 'vacancy_title', 'phone', 'address', 'source_detail']) {
+      merged[field] = mergeVeSourceFactText(out[idx][field as keyof VeUnifiedRow], row[field as keyof VeUnifiedRow]);
     }
-    idxByExactKey.set(key, out.length);
-    out.push(row);
+    merged.email = extractEmails(`${out[idx].email}, ${row.email}`).join(', ');
+    out[idx] = merged;
   }
   return out;
 }
@@ -638,13 +620,37 @@ export interface VeCollectInfo {
   supply_hold?: boolean;
   supply_hold_since?: string;
   target_progress?: VeCollectionTargetProgress;
+  /** Explicit manual recovery: recheck persisted constructor output, not sources. */
+  validation_retry?: boolean;
+  /** Latest constructor validation snapshot; per-batch writes live in ve_jobs.result. */
+  relevance_checkpoint?: VeRelevanceCheckpoint;
+  /** Worker-only complete non-ready candidates; never use directly for sending. */
+  relevance_reserve?: VeRelevanceReserve;
+  /** Public counts. Pending review is retained stock, not a confirmed recipient. */
+  relevance_summary?: VeRelevanceReserveSummary;
+  /** Finish bounded evidence passes on saved candidates before purchasing a new round. */
+  relevance_review_requested?: boolean;
+  /** Worker-only checkpoint for validation of saved, unfinished email rows. */
+  saved_email_recovery?: import('../savedEmailRecovery').VeSavedEmailRecoveryState;
+  company_name_checkpoint?: VeCompanyNameCheckpoint;
+  company_name_cleanup?: VeCompanyNameCleanupSummary;
+  /** Durable post-validation phase: resume names without re-running paid collection. */
+  company_name_recovery?: {
+    has_buffered_candidates: boolean;
+    validation_error: string | null;
+    round_low_relevance: number;
+    round_relevance_unchecked: number;
+  };
   /** Worker-only: discarded candidates must not be paid for again next round. */
   target_checkpoint?: {
     completed_round: number;
-    seen_rows: Array<Pick<VeUnifiedRow, 'company' | 'inn' | 'email'>>;
+    seen_rows: Array<Pick<VeUnifiedRow, 'company' | 'inn' | 'email'> & Partial<Pick<VeUnifiedRow, 'website'>>>;
     processed_rows?: number;
     low_relevance?: number;
     relevance_unchecked?: number;
+    /** Baselines before this round, retained when its validation is replaced. */
+    prior_low_relevance?: number;
+    prior_relevance_unchecked?: number;
   };
   /**
    * Refill-режим ENG auto-pipeline (payload.refill джобы): после CONSTRUCT —
@@ -710,10 +716,14 @@ export interface VeCollectInfo {
     low_relevance?: number;
     /** Строки, исключённые fail-closed: их company-группа не получила verdict. */
     relevance_unchecked?: number;
+    relevance_needs_review?: number;
+    relevance_errors?: number;
     /** Покрытие relevance-gate по уникальным company-группам. */
     relevance_checked_companies?: number;
     relevance_total_companies?: number;
     relevance_coverage_complete?: boolean;
+    /** Coverage above concerns the remaining saved rows during manual recovery. */
+    relevance_recovery?: boolean;
     /** Отсутствует у промежуточного снимка кандидатов до окончания проверок. */
     finished_at?: string;
   };
@@ -1497,14 +1507,17 @@ async function fetchEngHiringRows(
     offset += rows.length;
   }
 
-  // Дедуп по компании внутри задачи: сортировка по свежести (в JS — порядок
-  // выборки не контракт), первое вхождение компании побеждает.
+  // Keep the latest vacancy per confirmed name + site identity. Generic names
+  // without sites cannot identify an employer: retain distinct observations.
   matched.sort((a, b) => publishedTime(b.published_at) - publishedTime(a.published_at));
   const seen = new Set<string>();
   const out: Record<string, unknown>[] = [];
   for (const r of matched) {
-    const key = normalizeCompanyForDedup(cell(r.company_name));
-    if (!key || seen.has(key)) continue;
+    if (!normalizeCompanyForDedup(cell(r.company_name))) continue;
+    const companyKey = veCompanyWebsiteKey({ company: r.company_name, website: r.company_site_url });
+    const key = companyKey ? `site:${companyKey}`
+      : `observation:${JSON.stringify(Object.entries(r).sort(([a], [b]) => a.localeCompare(b)))}`;
+    if (seen.has(key)) continue;
     seen.add(key);
     if (out.length < limit) out.push(r);
   }
@@ -1721,24 +1734,14 @@ async function pollTask(ctx: VeStageContext, state: VeCollectTaskState, limit: n
 
 /* ─────────────────────────── Исключение чужих баз проекта ─────────────────────────── */
 
-/** Нормализация ИНН для дедупа: только цифры, валидная длина 10/12. */
-function normalizeInnForDedup(value: unknown): string {
-  const digits = String(value ?? '').replace(/\D/g, '');
-  return digits.length === 10 || digits.length === 12 ? digits : '';
-}
-
 /**
- * Ключи исключения по другим базам проекта. Два канала матча:
- *  - ИНН: то же юрлицо под другим написанием имени («ООО Ромашка» vs
- *    «РОМАШКА ООО») ловится по множеству всех ИНН;
- *  - имя: если под этим именем в других базах есть ИНН и у входящей строки
- *    тоже — сравниваем юрлица точно (одноимённые компании разных регионов
- *    с разными ИНН больше НЕ вымываются); если ИНН пуст хотя бы с одной
- *    стороны — консервативный матч по имени, как раньше.
+ * Занятые юрлица подтверждаются ИНН или парой «имя + сайт». Одного имени
+ * недостаточно: «Клиника» без ИНН не должна закрывать другие клиники.
+ * Email остаётся независимым ключом защиты от повторной отправки.
  */
 export interface VeBaseExclusionKeys {
-  /** нормализованное имя → ИНН'ы, встреченные под ним в других базах. */
-  nameInns: Map<string, Set<string>>;
+  /** Пара «имя + сайт» → ИНН'ы; пустая строка означает неизвестный ИНН. */
+  websiteInns: Map<string, Set<string>>;
   /** Все ИНН других баз (матч «то же юрлицо, другое написание»). */
   inns: Set<string>;
   /** Все email других баз: один и тот же контакт не должен попасть в разные запуски. */
@@ -1748,22 +1751,23 @@ export interface VeBaseExclusionKeys {
 /** Совпадение юрлица исключает строку целиком, независимо от её контактов. */
 function baseRowMatchesCompanyExclusion(
   keys: VeBaseExclusionKeys,
-  row: Pick<VeUnifiedRow, 'company' | 'inn' | 'email'>,
+  row: Pick<VeUnifiedRow, 'company' | 'inn' | 'email'> & Partial<Pick<VeUnifiedRow, 'website'>>,
 ): boolean {
-  const innKey = normalizeInnForDedup(row.inn);
+  const innKey = normalizeVeCompanyInn(row.inn);
   if (innKey && keys.inns.has(innKey)) return true;
-  const nameKey = normalizeCompanyForDedup(row.company);
-  if (!nameKey) return false;
-  const knownInns = keys.nameInns.get(nameKey);
-  if (knownInns === undefined) return false;
-  // Точное сравнение юрлиц только когда ИНН есть с обеих сторон.
-  if (innKey && knownInns.size > 0) return knownInns.has(innKey);
-  return true;
+  const websiteKey = veCompanyWebsiteKey(row);
+  const knownInns = websiteKey ? keys.websiteInns.get(websiteKey) : undefined;
+  if (!knownInns) return false;
+  // A known conflicting legal entity overrides a shared name/domain. If the
+  // domain is ambiguous and this row has no INN, retain it for actual checking.
+  const identifiedInns = [...knownInns].filter(Boolean);
+  if (innKey) return identifiedInns.length === 0;
+  return identifiedInns.length <= 1;
 }
 
 /**
- * Удалить из multi-email строки уже занятые контакты. Совпадение компании или
- * ИНН исключает всю строку; совпадение одного email — только этот email.
+ * Удалить из multi-email строки уже занятые контакты. Подтверждённое совпадение
+ * юрлица исключает всю строку; совпадение одного email — только этот email.
  * null означает, что после безопасного исключения строка целиком занята.
  */
 export function pruneBaseRowAgainstExclusion(
@@ -1782,7 +1786,7 @@ export function pruneBaseRowAgainstExclusion(
 /** Строка исключена целиком: занято юрлицо или все найденные email. */
 export function baseRowMatchesExclusion(
   keys: VeBaseExclusionKeys,
-  row: Pick<VeUnifiedRow, 'company' | 'inn' | 'email'>,
+  row: Pick<VeUnifiedRow, 'company' | 'inn' | 'email'> & Partial<Pick<VeUnifiedRow, 'website'>>,
 ): boolean {
   if (baseRowMatchesCompanyExclusion(keys, row)) return true;
   const emails = extractEmails(row.email);
@@ -1828,6 +1832,7 @@ const COMPANY_UPLOAD_COLUMNS = new Set([
   'организация',
 ]);
 const INN_UPLOAD_COLUMNS = new Set(['inn', 'инн', 'tin', 'tax id']);
+const WEBSITE_UPLOAD_COLUMNS = new Set(['website', 'website url', 'site', 'site url', 'url', 'domain', 'сайт', 'сайт компании', 'домен']);
 
 function addRowsToExclusionKeys(keys: VeBaseExclusionKeys, rows: unknown[]): VeBaseExclusionKeys {
   for (const item of rows) {
@@ -1840,25 +1845,25 @@ function addRowsToExclusionKeys(keys: VeBaseExclusionKeys, rows: unknown[]): VeB
       keys.emails.add(email);
     }
     const innValue = uploadField(rec, INN_UPLOAD_COLUMNS);
-    const innKey = normalizeInnForDedup(innValue);
+    const innKey = normalizeVeCompanyInn(innValue);
     if (innKey) keys.inns.add(innKey);
     const company = uploadField(rec, COMPANY_UPLOAD_COLUMNS);
-    if (typeof company !== 'string') continue;
-    const nameKey = normalizeCompanyForDedup(company);
-    if (!nameKey) continue;
-    let bucket = keys.nameInns.get(nameKey);
+    const website = uploadField(rec, WEBSITE_UPLOAD_COLUMNS);
+    const websiteKey = veCompanyWebsiteKey({ company, website });
+    if (!websiteKey) continue;
+    let bucket = keys.websiteInns.get(websiteKey);
     if (!bucket) {
       bucket = new Set<string>();
-      keys.nameInns.set(nameKey, bucket);
+      keys.websiteInns.set(websiteKey, bucket);
     }
-    if (innKey) bucket.add(innKey);
+    bucket.add(innKey);
   }
   return keys;
 }
 
 export function buildBaseExclusionKeysFromRows(rows: unknown[]): VeBaseExclusionKeys {
   return addRowsToExclusionKeys(
-    { nameInns: new Map<string, Set<string>>(), inns: new Set<string>(), emails: new Set<string>() },
+    { websiteInns: new Map<string, Set<string>>(), inns: new Set<string>(), emails: new Set<string>() },
     rows,
   );
 }
@@ -1882,7 +1887,7 @@ async function loadOtherBaseExclusionKeys(
   const { data, error } = await ctx.supabase
     .from('ve_bases')
     .select(checkpointHypothesisId
-      ? 'data, hypothesis_id, target_checkpoint:collect_info->target_checkpoint'
+      ? 'data, columns, source, hypothesis_id, target_checkpoint:collect_info->target_checkpoint'
       : 'data')
     .eq('project_id', projectId)
     .neq('status', 'failed')
@@ -1890,15 +1895,21 @@ async function loadOtherBaseExclusionKeys(
   if (error) throw new Error(`ve_bases exclusion read: ${error.message}`);
 
   const keys: VeBaseExclusionKeys = {
-    nameInns: new Map<string, Set<string>>(),
+    websiteInns: new Map<string, Set<string>>(),
     inns: new Set<string>(),
     emails: new Set<string>(),
   };
   for (const row of (data ?? []) as Array<{
-    data?: unknown; hypothesis_id?: string; target_checkpoint?: VeCollectInfo['target_checkpoint'];
+    data?: unknown; columns?: string[]; source?: string; hypothesis_id?: string; target_checkpoint?: VeCollectInfo['target_checkpoint'];
     collect_info?: VeCollectInfo;
   }>) {
-    addRowsToExclusionKeys(keys, Array.isArray(row.data) ? row.data : []);
+    const storedRows = Array.isArray(row.data) ? row.data : [];
+    // Legacy auto bases kept raw/rejected candidates in data. Those candidates
+    // must not reserve a company against another, potentially correct hypothesis.
+    const reservedRows = checkpointHypothesisId && row.source === 'auto'
+      ? prepareSegmentationAudience({ rows: storedRows, columns: row.columns ?? [], source: 'auto' }).rows
+      : storedRows;
+    addRowsToExclusionKeys(keys, reservedRows);
     if (checkpointHypothesisId && row.hypothesis_id === checkpointHypothesisId) {
       const checkpoint = row.target_checkpoint ?? row.collect_info?.target_checkpoint;
       addRowsToExclusionKeys(keys, Array.isArray(checkpoint?.seen_rows) ? checkpoint.seen_rows : []);
@@ -2045,11 +2056,14 @@ function needsConstruct(merged: VeUnifiedRow[]): boolean {
 /** merged-строки → сетка string[][] конструктора (заголовок по локали рынка). */
 function buildConstructGrid(rows: VeUnifiedRow[], market: VeMarket): string[][] {
   const headers = market === 'us' ? CONSTRUCT_HEADERS_EN : CONSTRUCT_HEADERS_RU;
+  const descriptions = rows.map((row) => cell((row as Record<string, unknown>).description));
+  const hasDescription = descriptions.some(Boolean);
   return [
-    [...headers],
-    ...rows.map((r) => [
+    [...headers, ...(hasDescription ? [market === 'us' ? 'Description' : 'Описание'] : [])],
+    ...rows.map((r, index) => [
       r.company, r.website, r.email, r.phone, r.vacancy_title, r.address,
       r.category, r.employees, r.revenue, r.inn, r.source_detail,
+      ...(hasDescription ? [descriptions[index]] : []),
     ]),
   ];
 }
@@ -2267,7 +2281,7 @@ function resumeHeldSupplyTimers(info: VeCollectInfo): void {
 
 async function ensureTargetBaseAnalysis(ctx: VeStageContext, job: VeJob, baseId: string): Promise<void> {
   const { data, error } = await ctx.supabase.from('ve_jobs').select('id, payload')
-    .eq('project_id', job.project_id).eq('stage', 'base_analyze');
+    .eq('project_id', job.project_id).eq('stage', 'base_analyze').in('status', ['pending', 'running']);
   if (error) throw new Error(`ve_jobs analysis recovery read: ${error.message}`);
   if ((data ?? []).some((candidate) => (candidate.payload as { base_id?: string } | null)?.base_id === baseId)) return;
   const { error: insertError } = await ctx.supabase.from('ve_jobs').insert({
@@ -2276,26 +2290,401 @@ async function ensureTargetBaseAnalysis(ctx: VeStageContext, job: VeJob, baseId:
   if (insertError) throw new Error(`ve_jobs base_analyze enqueue: ${insertError.message}`);
 }
 
+async function checkCollectedRelevance(args: {
+  ctx: VeStageContext; job: VeJob; base: VeAutoBase; info: VeCollectInfo;
+  finalRows: VeUnifiedRow[]; finalEmailStatuses: Array<string | null> | null;
+  market: string; usage: VeUsage;
+  previousRelevanceCheckpoint?: unknown;
+  /** Company facts only: these rows must never become output recipients. */
+  evidenceRows?: Array<Record<string, unknown>>;
+}) {
+  const { ctx, job, base, info, finalRows, finalEmailStatuses, market, usage } = args;
+  // ─── QUALITY GATE (до refill/финала: пометки нужны обоим путям) ───
+  // 1) вердикты валидации почт → _email_status на строках (запуск пропускает
+  //    не-'ok' — баунсы не ложатся на домен клиента);
+  // 2) релевант-гейт LLM → _low_relevance для явного несовпадения и
+  //    _relevance_unchecked для хвоста/сбойного батча. Оба fail-closed
+  //    фильтруются из launchTemplate/refill. Пометки живут только в jsonb-
+  //    строках: в columns не попадают, сетки UI их не видят.
+  type StoredRow = VeUnifiedRow & {
+    _email_status?: string;
+    _low_relevance?: boolean;
+    _relevance_unchecked?: boolean;
+    _ve_relevance?: VeRelevanceDecision;
+  };
+  let storedRows: StoredRow[] = finalRows.map((row) => {
+    const clean: StoredRow = { ...row };
+    delete clean._low_relevance;
+    delete clean._relevance_unchecked;
+    // The gate never trusts an old verdict, but retains evidence-attempt counts
+    // so bounded follow-up work rotates through the whole saved reserve.
+    return clean;
+  });
+  if (finalEmailStatuses) {
+    storedRows = storedRows.map((r, i) => {
+      const st = finalEmailStatuses[i];
+      return st ? { ...r, _email_status: st } : r;
+    });
+  }
+  let lowRelevanceCount = 0;
+  let relevanceUncheckedCount = 0;
+  let relevanceNeedsReviewCount = 0;
+  let relevanceErrorCount = 0;
+  let relevanceCheckedCompanies: number | null = null;
+  let relevanceTotalCompanies: number | null = null;
+  let relevanceCoverageComplete = false;
+  let relevanceError: string | null = null;
+  try {
+    const { data: vrow } = await ctx.supabase
+      .from('ve_verticals')
+      .select('name, summary')
+      .eq('id', base.vertical_id)
+      .maybeSingle();
+    const verticalName = (vrow as { name?: string } | null)?.name ?? '';
+    let hypothesisTitle = '';
+    let hypothesisDescription = '';
+    if (base.hypothesis_id) {
+      const { data: hypothesisRow, error: hypothesisError } = await ctx.supabase
+        .from('ve_hypotheses')
+        .select('title, description')
+        .eq('id', base.hypothesis_id)
+        .eq('project_id', job.project_id)
+        .eq('vertical_id', base.vertical_id)
+        .maybeSingle();
+      if (hypothesisError) {
+        throw new Error(`гипотеза relevance-gate недоступна: ${hypothesisError.message}`);
+      } else {
+        hypothesisTitle = (hypothesisRow as { title?: string } | null)?.title ?? '';
+        hypothesisDescription =
+          (hypothesisRow as { description?: string | null } | null)?.description ?? '';
+        if (!hypothesisTitle.trim()) {
+          throw new Error(
+            `гипотеза relevance-gate ${base.hypothesis_id} не найдена или не имеет title`,
+          );
+        }
+      }
+    }
+    const gate = await findIrrelevantRows({
+      rows: storedRows,
+      evidenceRows: args.evidenceRows,
+      verticalName,
+      verticalSummary: (vrow as { summary?: string | null } | null)?.summary ?? '',
+      hypothesisTitle,
+      hypothesisDescription,
+      language: market === 'us' ? 'en' : 'ru',
+      log: (m) => stageLog(ctx, m),
+      signal: ctx.signal,
+      checkpointScope: JSON.stringify([
+        job.project_id, base.id, base.vertical_id, base.hypothesis_id ?? null,
+      ]),
+      reviewAttempt: job.payload?.review_relevance === true ? job.id : undefined,
+      checkpoint: [job.result?.relevance_checkpoint, args.previousRelevanceCheckpoint, info.relevance_checkpoint],
+      onCheckpoint: async (checkpoint) => {
+        ctx.signal?.throwIfAborted();
+        const result = { ...job.result, relevance_checkpoint: checkpoint };
+        // Keep the per-batch write small: collect_info includes source harvests.
+        // A retry of this job resumes these verdicts; terminal base save below
+        // carries them into a later manually enqueued recovery job as well.
+        const { data: saved, error } = await ctx.supabase.from('ve_jobs')
+          .update({ result, updated_at: new Date().toISOString() })
+          .eq('id', job.id).eq('status', 'running').select('id').maybeSingle();
+        if (error || !saved) throw new VeRelevanceCheckpointError(
+          error ? `Relevance checkpoint save: ${error.message}` : 'Relevance checkpoint lost job ownership',
+        );
+        job.result = result;
+        ctx.signal?.throwIfAborted();
+      },
+    });
+    if (gate.checkpoint) info.relevance_checkpoint = gate.checkpoint;
+    usage.tokensUsed += gate.tokensUsed;
+    usage.costUsd += gate.costUsd;
+    lowRelevanceCount = gate.flagged.size;
+    relevanceUncheckedCount = gate.unchecked.size;
+    relevanceNeedsReviewCount = gate.review.size;
+    relevanceErrorCount = gate.errored.size;
+    relevanceCheckedCompanies = gate.coverage.checkedCompanies;
+    relevanceTotalCompanies = gate.coverage.totalCompanies;
+    relevanceCoverageComplete = gate.coverage.complete;
+    relevanceError = gate.error ?? null;
+    storedRows = storedRows.map((row, index) => {
+      const decision = gate.decisions.get(index);
+      if (!decision) throw new Error('Relevance gate did not return a decision for every row');
+      return { ...row, _ve_relevance: decision,
+        ...(decision.status === 'irrelevant' ? { _low_relevance: true } : {}),
+        ...(['needs_review', 'error'].includes(decision.status) ? { _relevance_unchecked: true } : {}),
+      };
+    });
+    stageLog(
+      ctx,
+      `[base_collect] релевант-гейт: проверено ${gate.coverage.checkedCompanies}/` +
+        `${gate.coverage.totalCompanies} компаний; нерелевантных строк ${lowRelevanceCount}; ` +
+        `без verdict ${relevanceUncheckedCount}`,
+    );
+  } catch (e) {
+    ctx.signal?.throwIfAborted();
+    if (e instanceof VeRelevanceCheckpointError || (e instanceof Error && e.name === 'AbortError')) throw e;
+    relevanceError = e instanceof Error ? e.message : String(e);
+    // Неожиданный сбой вне never-throw контракта gate тоже fail-closed: ни одна
+    // строка без verdict не должна попасть в проверенный итог или refill.
+    relevanceUncheckedCount = storedRows.length;
+    lowRelevanceCount = 0;
+    relevanceNeedsReviewCount = 0;
+    relevanceErrorCount = storedRows.length;
+    relevanceCoverageComplete = false;
+    storedRows = storedRows.map((row) => ({ ...row, _relevance_unchecked: true,
+      _ve_relevance: { version: 2, status: 'error', reason: 'Не удалось завершить проверку; контакт сохранён для повторной попытки',
+        evidence: [], context_hash: relevanceHash([job.project_id, base.vertical_id, base.hypothesis_id]),
+        review_attempts: row._ve_relevance?.review_attempts ?? 0 },
+    }));
+    stageLog(
+      ctx,
+      `[base_collect] релевант-гейт недоступен, все ${storedRows.length} строк исключены: ` +
+        `${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  return { storedRows, lowRelevanceCount, relevanceUncheckedCount, relevanceNeedsReviewCount, relevanceErrorCount,
+    relevanceCheckedCompanies, relevanceTotalCompanies, relevanceCoverageComplete, relevanceError };
+}
+
+
+/** Recheck the durable constructor result, without paying for sources/BC again. */
+async function resumeSavedPreviewValidation(
+  ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
+  target: VeCollectionTargetProgress, market: VeMarket, usage: VeUsage,
+): Promise<VeStageResult> {
+  // New previews retain every round's pending candidates, not just the last BC
+  // output. Reuse that durable reserve before considering legacy BC recovery.
+  if (readVeRelevanceReserve(info.relevance_reserve).some(needsVeRelevanceReview)) {
+    return reviewSavedRelevance(ctx, job, base, info, target, market, usage);
+  }
+  const bcId = info.construct?.bc_job_id;
+  if (!bcId || info.construct?.status !== 'done') throw new Error('Saved constructor result is unavailable');
+  // A terminal write/cancellation failure may have left successful batches
+  // only in the old job, before the final base snapshot. A new manual job
+  // must not repay that work. The gate validates constructor/round/model/
+  // hypothesis context before accepting any of these candidate checkpoints.
+  const { data: previous, error: checkpointError } = await ctx.supabase.from('ve_jobs')
+    .select('result').eq('project_id', job.project_id).eq('stage', 'base_collect')
+    .eq('payload->>base_id', base.id).neq('id', job.id)
+    .not('result->relevance_checkpoint', 'is', null)
+    .order('updated_at', { ascending: false }).limit(1).maybeSingle();
+  if (checkpointError) throw new VeRelevanceCheckpointError(`Saved relevance read: ${checkpointError.message}`);
+  const { data: bc, error } = await ctx.supabase.from('base_constructor_jobs')
+    .select('status, selected_steps').eq('id', bcId).maybeSingle();
+  if (error) throw new Error(`Saved constructor read: ${error.message}`);
+  if (bc?.status !== 'completed' || !Array.isArray(bc.selected_steps)
+    || !bc.selected_steps.includes('split_emails') || !bc.selected_steps.includes('validate_emails')) {
+    throw new Error('Saved constructor has not completed per-address validation');
+  }
+  const imported = await importConstructRows(ctx, bcId);
+  if (!imported || imported.emailStatuses.some((status) => status === null)) {
+    throw new Error('Saved constructor email verdicts are incomplete');
+  }
+  // Legacy partial previews retained their verified recipients, but not the
+  // rejected/unchecked verdicts. Keep those recipients; recheck the remaining BC
+  // output for this same immutable hypothesis, including legacy rejected rows.
+  const priorReady = (Array.isArray(base.data) ? base.data : []) as Array<VeUnifiedRow & { _email_status?: string }>;
+  if (priorReady.some((row) => row._email_status !== 'ok')) throw new Error('Saved preview email verdicts are incomplete');
+  const identity = (row: VeUnifiedRow) => JSON.stringify([row.company, row.email.toLowerCase()]);
+  const priorKeys = new Set(priorReady.map(identity));
+  const combined = new Map<string, { row: VeUnifiedRow; status: string | null }>();
+  const add = (row: VeUnifiedRow, status: string | null) => {
+    const clean = { ...row } as VeUnifiedRow & { _low_relevance?: boolean; _relevance_unchecked?: boolean };
+    delete clean._low_relevance;
+    delete clean._relevance_unchecked;
+    if (!priorKeys.has(identity(row))) combined.set(identity(row), { row: clean, status });
+  };
+  imported.rows.forEach((row, index) => add(row, imported.emailStatuses[index]));
+  const keys = await loadOtherBaseExclusionKeys(ctx, job.project_id, base.id, base.hypothesis_id);
+  const finalRows: VeUnifiedRow[] = [];
+  const finalEmailStatuses: Array<string | null> = [];
+  for (const { row, status } of combined.values()) {
+    const pruned = pruneBaseRowAgainstExclusion(keys, row);
+    if (pruned) { finalRows.push(pruned); finalEmailStatuses.push(status); }
+  }
+  if (finalEmailStatuses.some((status) => status === null)) throw new Error('Saved preview email verdicts are incomplete');
+  stageLog(ctx, `[base_collect] продолжаем проверку сохранённых ${finalRows.length} строк; источники и конструктор не перезапускаются`);
+  const gate = await checkCollectedRelevance({ ctx, job, base, info, finalRows, finalEmailStatuses, market, usage,
+    previousRelevanceCheckpoint: previous?.result?.relevance_checkpoint });
+  const seenKeys = buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []);
+  const hasBufferedCandidates = (info.tasks ?? []).some((task) => task.status === 'done'
+    && (task.harvest ?? []).some((row) => {
+      const fresh = pruneBaseRowAgainstExclusion(keys, row);
+      return fresh !== null && pruneBaseRowAgainstExclusion(seenKeys, fresh) !== null;
+    }));
+  const stats: NonNullable<VeCollectInfo['stats']> = {
+    tasks_total: info.tasks?.length ?? 0, tasks_done: info.tasks?.filter((t) => t.status === 'done').length ?? 0,
+    tasks_failed: info.tasks?.filter((t) => t.status === 'failed').length ?? 0,
+    rows_total: target.candidates_processed, excluded_existing_bases: 0, excluded_during_fetch: 0,
+    ...info.stats,
+    low_relevance: gate.lowRelevanceCount, relevance_unchecked: gate.relevanceUncheckedCount,
+    relevance_checked_companies: gate.relevanceCheckedCompanies ?? undefined,
+    relevance_total_companies: gate.relevanceTotalCompanies ?? undefined,
+    relevance_coverage_complete: gate.relevanceCoverageComplete,
+    relevance_recovery: true,
+  };
+  return completeTargetRound({
+    ctx, job, base, info, progress: target, candidates: [], rows: [...priorReady, ...gate.storedRows],
+    columns: [...new Set([...(base.columns ?? []), ...VE_AUTO_COLLECT_COLUMNS, ...(imported.hasDescription ? ['description'] : [])])],
+    stats, hasBufferedCandidates,
+    validationError: gate.relevanceCoverageComplete ? null : gate.relevanceError ?? 'Проверка релевантности завершилась не полностью', usage,
+  });
+}
+
+/** Improve saved candidates only; manual runs may retry inconclusive email checks, never acquire new sources. */
+async function reviewSavedRelevance(
+  ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
+  target: VeCollectionTargetProgress, market: VeMarket, usage: VeUsage,
+): Promise<VeStageResult> {
+  const automatic = info.relevance_review_requested === true && job.payload?.review_relevance !== true;
+  let savedReserve = readVeRelevanceReserve(info.relevance_reserve);
+  let emailRecoveryError: string | null = null;
+  if (!automatic && job.payload?.review_relevance === true) {
+    const recovered = await recoverVeSavedEmails({
+      ctx, job, baseId: base.id, rows: savedReserve, state: info.saved_email_recovery,
+      save: async (state: VeSavedEmailRecoveryState, rows: Array<Record<string, unknown>>) => {
+        info.saved_email_recovery = state;
+        info.relevance_reserve = { ...info.relevance_reserve, version: 1, rows };
+        info.relevance_summary = summarizeVeRelevanceReserve(rows);
+        await persistCollectInfo(ctx, base.id, info);
+      },
+    });
+    savedReserve = recovered.rows;
+    if (recovered.waiting) {
+      await requeueSelf(ctx, job, 60_000);
+      return { result: { base_id: base.id, waiting: true, saved_email_review: true }, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
+    }
+    emailRecoveryError = recovered.error ?? null;
+  }
+  const { rows, evidenceRows, companies } = buildVeRelevanceReviewBatch({
+    reserve: savedReserve,
+    ready: Array.isArray(base.data) ? base.data : [],
+    source: readVeRelevanceSourceRows(info.relevance_reserve), automatic,
+  });
+  if (!rows.length && automatic) throw new Error('В сохранённом резерве нет контактов для уточнения релевантности');
+  stageLog(ctx, `[base_collect] уточняем ${rows.length} сохранённых контактов ${companies} компаний; факты всех адресов объединены, новый сбор не запускается`);
+  const gate = rows.length > 0 && !emailRecoveryError ? await checkCollectedRelevance({ ctx, job, base, info,
+    finalRows: rows as VeUnifiedRow[], finalEmailStatuses: rows.map((row) => typeof row._email_status === 'string' ? row._email_status : null),
+    market, usage, evidenceRows,
+  }) : null;
+  info.validation_retry = true;
+  const stats: NonNullable<VeCollectInfo['stats']> = {
+    tasks_total: info.tasks?.length ?? 0, tasks_done: info.tasks?.filter((task) => task.status === 'done').length ?? 0,
+    tasks_failed: info.tasks?.filter((task) => task.status === 'failed').length ?? 0,
+    rows_total: target.candidates_processed, excluded_existing_bases: 0, excluded_during_fetch: 0,
+    ...info.stats,
+    ...(gate ? { low_relevance: gate.lowRelevanceCount, relevance_unchecked: gate.relevanceUncheckedCount,
+      relevance_needs_review: gate.relevanceNeedsReviewCount, relevance_errors: gate.relevanceErrorCount,
+      relevance_checked_companies: gate.relevanceCheckedCompanies ?? undefined,
+      relevance_total_companies: gate.relevanceTotalCompanies ?? undefined,
+      relevance_coverage_complete: gate.relevanceCoverageComplete } : {}),
+    relevance_recovery: true,
+  };
+  const seenKeys = buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []);
+  const hasBufferedCandidates = automatic && (info.tasks ?? []).some((task) => task.status === 'done'
+    && (task.harvest ?? []).some((row) => pruneBaseRowAgainstExclusion(seenKeys, row) !== null));
+  return completeTargetRound({ ctx, job, base, info, progress: target, candidates: [], rows: mergeVeRelevanceRows(savedReserve, gate?.storedRows ?? []),
+    columns: base.columns ?? [...VE_AUTO_COLLECT_COLUMNS], stats, hasBufferedCandidates,
+    validationError: emailRecoveryError ?? (gate && !gate.relevanceCoverageComplete
+      ? gate.relevanceError ?? 'Проверка релевантности завершилась не полностью' : null), usage,
+  });
+}
+
+async function cleanCollectedCompanyNames(
+  ctx: VeStageContext, job: VeJob, info: VeCollectInfo, rows: Array<Record<string, unknown>>, usage: VeUsage,
+) {
+  const { data: previous, error } = await ctx.supabase.from('ve_jobs')
+    .select('result').eq('project_id', job.project_id).eq('stage', 'base_collect')
+    .eq('payload->>base_id', payloadString(job, 'base_id')).neq('id', job.id)
+    .not('result->company_name_checkpoint', 'is', null)
+    .order('updated_at', { ascending: false }).limit(1).maybeSingle();
+  if (error) throw new VeRelevanceCheckpointError(`Saved company name checkpoint read: ${error.message}`);
+  const cleaned = await cleanVeCompanyNames({
+    rows, scope: payloadString(job, 'base_id'), language: ctx.market === 'us' ? 'en' : 'ru', signal: ctx.signal,
+    checkpoint: [job.result?.company_name_checkpoint, previous?.result?.company_name_checkpoint, info.company_name_checkpoint],
+    log: (message) => stageLog(ctx, message),
+    onCheckpoint: async (checkpoint, progress) => {
+      ctx.signal?.throwIfAborted();
+      const result = { ...job.result, company_name_checkpoint: checkpoint };
+      const now = new Date().toISOString();
+      const { data: saved, error: writeError } = await ctx.supabase.from('ve_jobs').update({
+        result, progress: { ...progress, label: 'Очищаем названия компаний', updated_at: now, substep_started_at: now },
+        updated_at: now,
+      }).eq('id', job.id).eq('status', 'running').select('id').maybeSingle();
+      if (writeError || !saved) throw new VeRelevanceCheckpointError(writeError
+        ? `Company name checkpoint save: ${writeError.message}` : 'Company name checkpoint lost job ownership');
+      job.result = result;
+      ctx.signal?.throwIfAborted();
+    },
+  });
+  info.company_name_checkpoint = cleaned.checkpoint;
+  info.company_name_cleanup = cleaned.summary;
+  usage.tokensUsed += cleaned.tokensUsed;
+  usage.costUsd += cleaned.costUsd;
+  return cleaned;
+}
+
+async function resumeSavedCompanyNames(
+  ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
+  target: VeCollectionTargetProgress, usage: VeUsage,
+): Promise<VeStageResult> {
+  const recovery = info.company_name_recovery!;
+  const rows = Array.isArray(base.data) ? base.data : [];
+  if (rows.some((row) => row._email_status !== 'ok' || row._low_relevance === true
+    || row._relevance_unchecked === true || !(VE_COMPANY_NAME_FIELD in row))) {
+    throw new Error('Saved company name phase has incomplete contact validation');
+  }
+  stageLog(ctx, '[company_names] продолжаем очистку сохранённых контактов без повторного сбора и валидации');
+  return completeTargetRound({ ctx, job, base, info, progress: target, candidates: [], rows,
+    columns: base.columns ?? [...VE_AUTO_COLLECT_COLUMNS],
+    stats: { tasks_total: 0, tasks_done: 0, tasks_failed: 0, rows_total: target.candidates_processed,
+      excluded_existing_bases: 0, excluded_during_fetch: 0,
+      ...info.stats, low_relevance: recovery.round_low_relevance,
+      relevance_unchecked: recovery.round_relevance_unchecked },
+    hasBufferedCandidates: recovery.has_buffered_candidates, validationError: recovery.validation_error, usage,
+    continueManualReview: job.payload?.review_relevance === true,
+  });
+}
+
 async function completeTargetRound(args: {
   ctx: VeStageContext; job: VeJob; base: VeAutoBase; info: VeCollectInfo;
   progress: VeCollectionTargetProgress; candidates: VeUnifiedRow[];
   rows: Array<Record<string, unknown>>; columns: string[];
   stats: NonNullable<VeCollectInfo['stats']>; hasBufferedCandidates: boolean;
   validationError: string | null; usage: VeUsage;
+  /** Completing old name work must not consume the user's new reserve-review request. */
+  continueManualReview?: boolean;
 }): Promise<VeStageResult> {
   const { ctx, job, base, info, progress } = args;
   const tasks = info.tasks ?? [];
+  const reviewOnly = job.payload?.review_relevance === true;
   const prior = info.target_checkpoint;
+  const validationRetry = info.validation_retry === true || !!info.company_name_recovery || info.relevance_review_requested === true;
   const columns = [...new Set([...(base.columns ?? []), ...args.columns])];
   const previousRows = Array.isArray(base.data) ? base.data : [];
+  // Keep the complete post-constructor observations across every round. data is
+  // still only the validated contact projection used by audit and delivery.
+  const representedCompanies = new Set(args.rows.map(veRelevanceCompanyKey));
+  // A constructor may return no usable row for a source company. Retain that
+  // original company too; lack of an email verdict is not an irreversible reject.
+  const missingConstructorRows = args.candidates.filter((row) => !representedCompanies.has(veRelevanceCompanyKey(row)))
+    .map((row) => ({ ...row, _relevance_unchecked: true }));
+  const retainedRows = mergeVeRelevanceRows(readVeRelevanceReserve(info.relevance_reserve), previousRows, missingConstructorRows, args.rows);
   const freshKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, base.id, base.hypothesis_id);
-  const availableRows = [...previousRows, ...args.rows].filter((row) =>
+  const availableRows = retainedRows.filter((row) =>
     row && typeof row === 'object' && !baseRowMatchesExclusion(freshKeys, row as VeUnifiedRow),
   );
-  const readyRows = prepareSegmentationAudience({ rows: availableRows, columns, source: 'auto' }).rows;
-  const seen = new Map<string, Pick<VeUnifiedRow, 'company' | 'inn' | 'email'>>();
+  const contactRows = prepareSegmentationAudience({ rows: availableRows, columns, source: 'auto', ignoreCompanyNameCheck: true }).rows;
+  const contactKeys = new Set(contactRows.map(veRelevanceRowKey));
+  const reserveRows = retainedRows.filter((row) => !contactKeys.has(veRelevanceRowKey(row)));
+  info.relevance_reserve = { version: 1, rows: reserveRows,
+    source_rows: mergeVeRelevanceRows(readVeRelevanceSourceRows(info.relevance_reserve),
+      args.candidates.map((row) => ({ ...row, _ve_source_candidate: true }))),
+  };
+  info.relevance_summary = summarizeVeRelevanceReserve(reserveRows);
+  const seen = new Map<string, Pick<VeUnifiedRow, 'company' | 'inn' | 'email' | 'website'>>();
   for (const row of [...(prior?.seen_rows ?? []), ...args.candidates, ...args.rows]) {
-    const compact = { company: cell(row.company), inn: cell(row.inn), email: cell(row.email) };
+    const compact = { company: cell(row.company), inn: cell(row.inn), email: cell(row.email), website: cell(row.website) };
     seen.set(JSON.stringify(compact), compact);
   }
   const renewableDirectory = tasks.some((task) =>
@@ -2304,35 +2693,96 @@ async function completeTargetRound(args: {
   const exhausted = !args.hasBufferedCandidates && tasks.length > 0 && tasks.every((task) =>
     task.source === 'companies_directory' && task.status === 'done' && task.exhausted && !task.hit_ceiling,
   );
-  const taskError = tasks.find((task) => task.status === 'failed');
-  const next = finishCollectionRound(progress, {
-    candidates: args.candidates.length, readyRows: readyRows.length,
-    exhausted, canContinue: args.hasBufferedCandidates || renewableDirectory,
-    error: args.validationError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null),
+  // A saved-only review does not retry sources: their old failure remains in
+  // task history but must not invalidate a now-confirmed saved audience.
+  const taskError = reviewOnly ? undefined : tasks.find((task) => task.status === 'failed');
+  const finish = (readyCount: number, nameError?: string) => finishCollectionRound(progress, {
+    candidates: args.candidates.length, readyRows: readyCount,
+    validationRetry,
+    exhausted: reviewOnly ? false : exhausted, canContinue: !reviewOnly && (args.hasBufferedCandidates || renewableDirectory),
+    error: nameError ?? args.validationError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null),
   });
   const checkpoint: NonNullable<VeCollectInfo['target_checkpoint']> = {
     completed_round: progress.round,
     seen_rows: [...seen.values()],
-    processed_rows: (prior?.processed_rows ?? 0) + args.rows.length,
-    low_relevance: (prior?.low_relevance ?? 0) + (args.stats.low_relevance ?? 0),
-    relevance_unchecked: (prior?.relevance_unchecked ?? 0) + (args.stats.relevance_unchecked ?? 0),
+    processed_rows: validationRetry ? prior?.processed_rows ?? args.rows.length : (prior?.processed_rows ?? 0) + args.rows.length,
+    prior_low_relevance: validationRetry ? prior?.prior_low_relevance ?? 0 : prior?.low_relevance ?? 0,
+    prior_relevance_unchecked: validationRetry ? prior?.prior_relevance_unchecked ?? 0 : prior?.relevance_unchecked ?? 0,
+    low_relevance: info.relevance_summary.irrelevant,
+    relevance_unchecked: info.relevance_summary.needs_review + info.relevance_summary.error,
   };
   const stats: NonNullable<VeCollectInfo['stats']> = {
-    ...args.stats, rows_total: next.candidates_processed,
-    processed_rows: checkpoint.processed_rows, launchable_rows: readyRows.length,
+    ...args.stats, rows_total: progress.candidates_processed + (validationRetry ? 0 : args.candidates.length),
+    processed_rows: checkpoint.processed_rows,
     low_relevance: checkpoint.low_relevance, relevance_unchecked: checkpoint.relevance_unchecked,
+    relevance_needs_review: info.relevance_summary.needs_review, relevance_errors: info.relevance_summary.error,
   };
-  info.target_progress = next;
+  // Persist validated contacts + round counters BEFORE the first name call.
+  // Interrupted cleanup resumes this phase, not sources/constructor/relevance.
+  const pendingRows = contactRows.map((row) => VE_COMPANY_NAME_FIELD in row && isCompanyNameReady(row) ? row : {
+    ...row, [VE_COMPANY_NAME_FIELD]: { version: 1, ...companyNameSource(row), status: 'failed', value: '' },
+  });
+  info.company_name_recovery = {
+    has_buffered_candidates: args.hasBufferedCandidates, validation_error: args.validationError,
+    round_low_relevance: args.stats.low_relevance ?? 0,
+    round_relevance_unchecked: args.stats.relevance_unchecked ?? 0,
+  };
+  const nameCompanies = new Map(contactRows.map((row) => [JSON.stringify([companyNameSource(row), String(row.inn ?? '').replace(/\D/g, '')]), row]));
+  const namesChecked = [...nameCompanies.values()].filter((row) => VE_COMPANY_NAME_FIELD in row && isCompanyNameReady(row)).length;
+  info.company_name_cleanup = { status: 'partial', companies: nameCompanies.size, checked: namesChecked, failed: nameCompanies.size - namesChecked,
+    error: 'Очистка названий завершилась не полностью' };
+  info.target_progress = finish(prepareSegmentationAudience({ rows: pendingRows, columns, source: 'auto' }).rows.length,
+    'Очистка названий завершилась не полностью');
   info.target_checkpoint = checkpoint;
+  info.stats = stats;
+  const { error: pendingError } = await ctx.supabase.from('ve_bases').update({
+    data: pendingRows, columns, sample_rows: pendingRows.slice(0, SAMPLE_ROWS), row_count: pendingRows.length,
+    collect_info: info, updated_at: new Date().toISOString(),
+  }).eq('id', base.id);
+  if (pendingError) throw new VeRelevanceCheckpointError(`Company name phase save: ${pendingError.message}`);
+  ctx.signal?.throwIfAborted();
+  const cleaned = await cleanCollectedCompanyNames(ctx, job, info, pendingRows, args.usage);
+  const readyRows = prepareSegmentationAudience({ rows: cleaned.rows, columns, source: 'auto' }).rows;
+  let next = finish(readyRows.length, cleaned.summary.error);
+  const reviewablePending = reserveRows.some((row) => row._email_status === 'ok'
+    && (row._ve_relevance as { status?: unknown } | undefined)?.status === 'needs_review');
+  const pendingAutomaticReview = !reviewOnly && !args.validationError && !taskError
+    && readyRows.length < progress.ready_target && buildVeRelevanceReviewBatch({
+      reserve: reserveRows, ready: cleaned.rows, source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
+    }).rows.length > 0;
+  const pendingManualReview = args.continueManualReview === true
+    && reserveRows.some((row) => needsVeRelevanceReview(row) || needsVeSavedEmailReview(row));
+  const continueSavedReview = cleaned.summary.status === 'complete' && (pendingAutomaticReview || pendingManualReview);
+  if (continueSavedReview) {
+    // Same acquisition round, same candidates: the next job wake only improves
+    // already paid-for contacts. This marker is saved atomically with rows.
+    next = { ...progress, ready_rows: readyRows.length, candidates_processed: stats.rows_total, status: 'collecting' };
+    delete next.reason;
+    info.relevance_review_requested = true;
+  } else {
+    delete info.relevance_review_requested;
+    if (reviewOnly && !args.validationError && cleaned.summary.status === 'complete'
+      && readyRows.length < progress.ready_target && reviewablePending) {
+      next = { ...progress, ready_rows: readyRows.length, candidates_processed: stats.rows_total, status: 'limited',
+        reason: 'Уточнение сохранённых контактов завершено. Неопределённые контакты остались в резерве; новый сбор в этой операции не запускается.' };
+    }
+  }
+  stats.launchable_rows = readyRows.length;
+  info.target_progress = next;
+  if (cleaned.summary.status === 'complete') delete info.company_name_recovery;
+  delete info.validation_retry;
   if (info.estimate) info.estimate.remaining_ready_estimate = estimateRemainingReady({
     population: info.estimate.unique_companies,
     candidatesProcessed: next.candidates_processed, readyRows: readyRows.length,
     asOf: new Date().toISOString(),
     eligible: progress.mode === 'preview' && progress.round === 1 && !args.validationError
+      && info.relevance_summary.needs_review === 0 && info.relevance_summary.error === 0
+      && info.relevance_summary.email_retryable === 0
+      && cleaned.summary.status === 'complete'
       && tasks.length === 1 && tasks[0].source === 'companies_directory'
       && !args.stats.excluded_existing_bases && !args.stats.excluded_during_fetch,
   });
-  if (next.status === 'collecting') {
+  if (next.status === 'collecting' && !continueSavedReview) {
     // One atomic checkpoint: prior validated output is durable BEFORE the next
     // input round becomes pending. Resuming must never revalidate these rows.
     delete info.construct;
@@ -2343,7 +2793,7 @@ async function completeTargetRound(args: {
         : state,
     );
     info.limit = collectionRoundLimit(next);
-  } else {
+  } else if (next.status !== 'collecting') {
     stats.finished_at = new Date().toISOString();
   }
   info.stats = stats;
@@ -2351,7 +2801,7 @@ async function completeTargetRound(args: {
     : next.status === 'error' ? 'failed'
       : next.mode === 'preview' && readyRows.length > 0 ? 'analyzing' : 'analyzed';
   const { error } = await ctx.supabase.from('ve_bases').update({
-    data: readyRows, columns, sample_rows: readyRows.slice(0, SAMPLE_ROWS), row_count: readyRows.length,
+    data: cleaned.rows, columns, sample_rows: cleaned.rows.slice(0, SAMPLE_ROWS), row_count: cleaned.rows.length,
     status, collect_info: info, error: next.status === 'error' ? next.reason?.slice(0, 500) : null,
     updated_at: new Date().toISOString(),
   }).eq('id', base.id);
@@ -2402,6 +2852,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   const info: VeCollectInfo =
     base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
   const mode = info.collection_mode ?? job.payload?.collection_mode;
+  if (job.payload?.review_relevance === true) info.validation_retry = true;
   if (mode !== undefined && mode !== 'preview' && mode !== 'supply') throw new Error('Unknown collection_mode');
   let target: VeCollectionTargetProgress | null = null;
   if (mode === 'preview' || mode === 'supply') {
@@ -2413,7 +2864,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       if (!Number.isSafeInteger(previous.round) || previous.round < 1 || previous.round > target.max_rounds
         || !Number.isSafeInteger(previous.candidates_processed) || previous.candidates_processed < 0 || previous.candidates_processed > target.max_candidates
         || !Number.isSafeInteger(previous.ready_rows) || previous.ready_rows < 0 || previous.ready_rows > target.max_candidates * 5
-        || (info.target_checkpoint?.completed_round ?? 0) !== previous.round - 1) {
+        || (info.target_checkpoint?.completed_round ?? 0) !== previous.round - (info.validation_retry || info.company_name_recovery || info.relevance_review_requested ? 0 : 1)) {
         throw new Error('Invalid collection target checkpoint');
       }
       target.round = previous.round;
@@ -2472,6 +2923,23 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // Рынок проекта: выбор промпта планировщика (EN-источники при 'us').
   // ctx.market прокидывает воркер, фолбэк — колонка ve_projects.market.
   const market = ctx.market ?? projectMarket(project);
+  ctx = { ...ctx, market };
+  if (info.company_name_recovery) {
+    if (!target) throw new Error('Company name recovery requires a collection target');
+    return resumeSavedCompanyNames(ctx, job, base, info, target, usage);
+  }
+  if (job.payload?.review_relevance === true) {
+    if (!target || mode !== 'preview') throw new Error('Saved relevance review requires a preview target');
+    return reviewSavedRelevance(ctx, job, base, info, target, market, usage);
+  }
+  if (info.relevance_review_requested) {
+    if (!target) throw new Error('Saved relevance review requires a collection target');
+    return reviewSavedRelevance(ctx, job, base, info, target, market, usage);
+  }
+  if (info.validation_retry) {
+    if (!target || mode !== 'preview') throw new Error('Validation recovery requires a preview target');
+    return resumeSavedPreviewValidation(ctx, job, base, info, target, market, usage);
+  }
 
   // ─── PLAN ───
   if (!info.plan) {
@@ -2925,102 +3393,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     throw new Error(note);
   }
 
-  // ─── QUALITY GATE (до refill/финала: пометки нужны обоим путям) ───
-  // 1) вердикты валидации почт → _email_status на строках (запуск пропускает
-  //    не-'ok' — баунсы не ложатся на домен клиента);
-  // 2) релевант-гейт LLM → _low_relevance для явного несовпадения и
-  //    _relevance_unchecked для хвоста/сбойного батча. Оба fail-closed
-  //    фильтруются из launchTemplate/refill. Пометки живут только в jsonb-
-  //    строках: в columns не попадают, сетки UI их не видят.
-  type StoredRow = VeUnifiedRow & {
-    _email_status?: string;
-    _low_relevance?: boolean;
-    _relevance_unchecked?: boolean;
-  };
-  let storedRows: StoredRow[] = finalRows;
-  if (finalEmailStatuses) {
-    storedRows = storedRows.map((r, i) => {
-      const st = finalEmailStatuses[i];
-      return st ? { ...r, _email_status: st } : r;
-    });
-  }
-  let lowRelevanceCount = 0;
-  let relevanceUncheckedCount = 0;
-  let relevanceCheckedCompanies: number | null = null;
-  let relevanceTotalCompanies: number | null = null;
-  let relevanceCoverageComplete = false;
-  try {
-    const { data: vrow } = await ctx.supabase
-      .from('ve_verticals')
-      .select('name, summary')
-      .eq('id', base.vertical_id)
-      .maybeSingle();
-    const verticalName = (vrow as { name?: string } | null)?.name ?? '';
-    let hypothesisTitle = '';
-    let hypothesisDescription = '';
-    if (base.hypothesis_id) {
-      const { data: hypothesisRow, error: hypothesisError } = await ctx.supabase
-        .from('ve_hypotheses')
-        .select('title, description')
-        .eq('id', base.hypothesis_id)
-        .eq('project_id', job.project_id)
-        .eq('vertical_id', base.vertical_id)
-        .maybeSingle();
-      if (hypothesisError) {
-        throw new Error(`гипотеза relevance-gate недоступна: ${hypothesisError.message}`);
-      } else {
-        hypothesisTitle = (hypothesisRow as { title?: string } | null)?.title ?? '';
-        hypothesisDescription =
-          (hypothesisRow as { description?: string | null } | null)?.description ?? '';
-        if (!hypothesisTitle.trim()) {
-          throw new Error(
-            `гипотеза relevance-gate ${base.hypothesis_id} не найдена или не имеет title`,
-          );
-        }
-      }
-    }
-    const gate = await findIrrelevantRows({
-      rows: storedRows,
-      verticalName,
-      verticalSummary: (vrow as { summary?: string | null } | null)?.summary ?? '',
-      hypothesisTitle,
-      hypothesisDescription,
-      language: market === 'us' ? 'en' : 'ru',
-      log: (m) => stageLog(ctx, m),
-    });
-    usage.tokensUsed += gate.tokensUsed;
-    usage.costUsd += gate.costUsd;
-    lowRelevanceCount = gate.flagged.size;
-    relevanceUncheckedCount = gate.unchecked.size;
-    relevanceCheckedCompanies = gate.coverage.checkedCompanies;
-    relevanceTotalCompanies = gate.coverage.totalCompanies;
-    relevanceCoverageComplete = gate.coverage.complete;
-    if (gate.flagged.size > 0 || gate.unchecked.size > 0) {
-      storedRows = storedRows.map((r, i) =>
-        gate.flagged.has(i)
-          ? { ...r, _low_relevance: true }
-          : gate.unchecked.has(i)
-            ? { ...r, _relevance_unchecked: true }
-            : r,
-      );
-    }
-    stageLog(
-      ctx,
-      `[base_collect] релевант-гейт: проверено ${gate.coverage.checkedCompanies}/` +
-        `${gate.coverage.totalCompanies} компаний; нерелевантных строк ${lowRelevanceCount}; ` +
-        `без verdict ${relevanceUncheckedCount}`,
-    );
-  } catch (e) {
-    // Неожиданный сбой вне never-throw контракта gate тоже fail-closed: ни одна
-    // строка без verdict не должна попасть в проверенный итог или refill.
-    relevanceUncheckedCount = storedRows.length;
-    storedRows = storedRows.map((row) => ({ ...row, _relevance_unchecked: true }));
-    stageLog(
-      ctx,
-      `[base_collect] релевант-гейт недоступен, все ${storedRows.length} строк исключены: ` +
-        `${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
+  const { storedRows, lowRelevanceCount, relevanceUncheckedCount, relevanceNeedsReviewCount, relevanceErrorCount,
+    relevanceCheckedCompanies, relevanceTotalCompanies, relevanceCoverageComplete, relevanceError } = await checkCollectedRelevance({
+    ctx, job, base, info, finalRows, finalEmailStatuses, market, usage,
+  });
   // Ровно тот же pure-контракт фильтрует аудиторию перед запуском на шаге 5.
   // Но число можно называть проверенным только после успешной построчной
   // validation: partial/failed constructor без status-колонки не должен
@@ -3043,6 +3419,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     ...(launchableRows === null ? {} : { launchable_rows: launchableRows }),
     low_relevance: lowRelevanceCount,
     relevance_unchecked: relevanceUncheckedCount,
+    relevance_needs_review: relevanceNeedsReviewCount,
+    relevance_errors: relevanceErrorCount,
     ...(relevanceCheckedCompanies === null
       ? {}
       : { relevance_checked_companies: relevanceCheckedCompanies }),
@@ -3055,9 +3433,13 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     ctx, job, base, info, progress: target, candidates: merged, rows: storedRows,
     columns: finalColumns, stats: statsWithQuality, hasBufferedCandidates: kept.length > merged.length,
     validationError: !hasCompleteEmailValidation ? 'Проверка email завершилась не полностью'
-      : !relevanceCoverageComplete ? 'Проверка релевантности завершилась не полностью' : null,
+      : !relevanceCoverageComplete ? relevanceError ?? 'Проверка релевантности завершилась не полностью' : null,
     usage,
   });
+
+  // Legacy non-target/refill jobs keep their existing contract. The new name
+  // phase requires the durable round/recovery state used by preview and supply;
+  // do not introduce an unrecoverable paid phase into an old in-flight job.
 
   // ─── REFILL (ENG auto-pipeline) ───
   // Вместо финала «analyzing + base_analyze»: долив валидных строк лидами в

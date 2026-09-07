@@ -38,6 +38,7 @@ import {
 } from '@/lib/verticalEngineV2/jobRetry';
 import { transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
 import { createVeJobWatchdog } from '@/lib/verticalEngineV2/workerLiveness';
+import { claimVeJob } from '@/lib/verticalEngineV2/jobQueue';
 import {
   createGuardedContactDeliveryTick,
   runBoundContactDeliveries,
@@ -141,34 +142,7 @@ async function resetStuckJobs() {
 }
 
 async function claimJob(): Promise<VeJob | null> {
-  const { data: pending } = await db
-    .from('ve_jobs')
-    .select('*')
-    .eq('status', 'pending')
-    // Отложенные джобы (self-requeue base_collect ставит run_after в будущее)
-    // не клеймим раньше времени — иначе ожидание дочерних парсеров
-    // превращается в hot spin по БД.
-    .lte('run_after', new Date().toISOString())
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-  if (!pending) return null;
-
-  // attempts здесь НЕ инкрементируем: attempts — счётчик фейлов (failJob),
-  // а не клеймов. Self-requeue base_collect переводит джобу в pending десятки
-  // раз подряд — инкремент на клейме сжигал все попытки за секунды ожидания.
-  const { data: claimed } = await db
-    .from('ve_jobs')
-    .update({
-      status: 'running',
-      started_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', (pending as VeJob).id)
-    .eq('status', 'pending')
-    .select('*')
-    .maybeSingle();
-  return (claimed as VeJob | null) ?? null;
+  return claimVeJob(db);
 }
 
 /** Добавить расход стадии на проект (read-modify-write, воркер один на проект). */
@@ -306,8 +280,8 @@ async function handleJob(job: VeJob) {
   const tokensUsed = stageResult.tokensUsed ?? 0;
   const costUsd = stageResult.costUsd ?? 0;
 
-  // base_collect переводит свою строку обратно в pending (self-requeue на
-  // время работы дочерних парсеров) и возвращает {waiting: true}. Не затираем
+  // base_collect и evidence переводят свою строку обратно в pending (ожидание
+  // парсеров / уступка очереди после checkpoint). Не затираем
   // requeue финальным done-апдейтом — только накапливаем расход стадии.
   // Сюда же попадает 'cancelled': стадия завершилась после отмены — done и
   // дочейн следующей research-стадии не выполняем, джоба остаётся cancelled.
@@ -318,6 +292,13 @@ async function handleJob(job: VeJob) {
     .maybeSingle();
   if (current && (current as { status: string }).status !== 'running') {
     const cancelled = (current as { status: string }).status === 'cancelled';
+    // Evidence keeps cumulative usage in its durable checkpoint until the
+    // entire stage finishes. A yield must not account it, finalize the job or
+    // enqueue clustering; even a zero-usage bookkeeping write is unnecessary.
+    if (job.stage === 'evidence' && (current as { status: string }).status === 'pending') {
+      log('info', `Job ${job.id} (evidence) → yielded with saved checkpoint`);
+      return;
+    }
     await db
       .from('ve_jobs')
       .update({
