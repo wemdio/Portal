@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { companyNameSource, VE_COMPANY_NAME_FIELD } from './companyNames';
 
@@ -71,6 +72,33 @@ export async function prepareVeSupplyNameResume(
     p_plan_id: plan.id, p_error: 'Продолжение очистки сохранённых названий ожидает подтверждения запуска', p_now: now,
   });
   if (pauseError) throw new Error('Не удалось безопасно приостановить план перед продолжением');
+  const readActive = () => db.from('ve_jobs').select('id, payload')
+    .eq('project_id', plan.project_id).eq('stage', 'base_collect').eq('payload->>base_id', base.id)
+    .in('status', ['pending', 'running']).limit(1).maybeSingle();
+  const isSavedBatchJob = (job: { payload?: unknown } | null) =>
+    record(job?.payload)?.supply_batch_id === batch.id;
+  const confirmCollectingBase = async () => {
+    // The worker may finish/fail while we inspect or repair its queue. Do not
+    // activate from an obsolete collecting snapshot or overwrite its result.
+    const { data: current, error } = await db.from('ve_bases').select('id')
+      .eq('id', base.id).eq('project_id', plan.project_id).eq('status', 'collecting')
+      .eq('collect_info->>supply_batch_id', batch.id).maybeSingle();
+    if (error || !current) throw new Error('Состояние сохранённой базы изменилось. Обновите страницу и повторите продолжение; план остаётся на паузе.');
+  };
+  const { data: active, error: activeError } = await readActive();
+  if (activeError) throw new Error('Не удалось проверить очередь продолжения; план остаётся на паузе');
+  if (active) {
+    // A failed base must never be reopened while ANY prior attempt is active,
+    // including a previous resume with company_name_resume=true. That attempt
+    // may already have saved failed and only be waiting to write job.done.
+    if (base.status === 'failed' || !isSavedBatchJob(active)) {
+      throw new Error('Предыдущая попытка ещё завершается. Повторите продолжение через несколько секунд.');
+    }
+    // A still-collecting batch may have its original job waiting on supply_hold;
+    // it is a valid continuation too, not only a job created by this helper.
+    await confirmCollectingBase();
+    return true;
+  }
   if (base.status === 'failed') {
     const { data: claimed, error: claimError } = await db.from('ve_bases')
       .update({ status: 'collecting', error: null, updated_at: now }).eq('id', base.id)
@@ -78,32 +106,21 @@ export async function prepareVeSupplyNameResume(
       .select('id').maybeSingle();
     if (claimError || !claimed) throw new Error('Состояние сохранённой базы изменилось. Повторите продолжение после обновления страницы.');
   }
-  const readActive = () => db.from('ve_jobs').select('id, payload')
-    .eq('project_id', plan.project_id).eq('stage', 'base_collect').eq('payload->>base_id', base.id)
-    .in('status', ['pending', 'running']).limit(1).maybeSingle();
-  const isOurResume = (job: { payload?: unknown } | null) => {
-    const payload = record(job?.payload);
-    return payload?.company_name_resume === true && payload.supply_batch_id === batch.id;
-  };
-  const { data: active, error: activeError } = await readActive();
-  if (activeError) throw new Error('Не удалось проверить очередь продолжения; план остаётся на паузе');
-  if (active) {
-    // The old job can still be finishing its failed attempt. Do not report a
-    // repaired queue merely because that soon-terminal running row exists.
-    if (!isOurResume(active)) throw new Error('Предыдущая попытка ещё завершается. Повторите продолжение через несколько секунд.');
-    return true;
-  }
+  // An ambiguous INSERT is successful only when this exact attempt exists.
+  // A different concurrent winner can be joined by the next explicit request.
+  const resumeJobId = randomUUID();
   const { error: insertError } = await db.from('ve_jobs').insert({
-    project_id: plan.project_id, stage: 'base_collect', status: 'pending',
+    id: resumeJobId, project_id: plan.project_id, stage: 'base_collect', status: 'pending',
     payload: { base_id: base.id, vertical_id: base.vertical_id, hypothesis_id: base.hypothesis_id,
       collection_mode: 'supply', supply_batch_id: batch.id, ready_target: info.ready_target,
       company_name_resume: true },
   });
   if (insertError) {
     const { data: winner, error: winnerError } = await readActive();
-    if (winnerError || !isOurResume(winner)) {
+    if (winnerError || winner?.id !== resumeJobId || !isSavedBatchJob(winner)) {
       throw new Error('Не удалось поставить продолжение в очередь. Контакты сохранены, план на паузе; повторите продолжение.');
     }
   }
+  await confirmCollectingBase();
   return true;
 }
