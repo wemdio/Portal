@@ -110,6 +110,14 @@ export async function sendLeadForward(args: {
   accountName: string;
   log: LogFn;
   timeoutMs?: number;
+  /**
+   * Слать только карточку, без нативной пересылки переписки.
+   *
+   * Нужно подменному аккаунту: оригиналы лежат в диалоге того, кто вёл лида, и
+   * у подменного их попросту нет. Потери в этом мало — карточка содержит
+   * переписку текстом, и менеджеру её достаточно.
+   */
+  cardOnly?: boolean;
 }): Promise<'sent' | 'failed' | 'retry'> {
   const { db, client, task, accountName, log } = args;
   const timeoutMs = args.timeoutMs ?? FORWARD_CALL_TIMEOUT_MS;
@@ -142,6 +150,7 @@ export async function sendLeadForward(args: {
     // текстом, поэтому сбой здесь не повод считать передачу несостоявшейся:
     // менеджер получил всё нужное.
     try {
+      if (args.cardOnly) throw new Error('подменный аккаунт: оригиналов переписки у него нет');
       const entity = await withTimeout(client.getEntity(peer as string | number), timeoutMs, 'поиск собеседника');
       const history = await withTimeout(client.getMessages(entity, { limit: HISTORY_LIMIT }), timeoutMs, 'чтение переписки');
       const ids = history.map((m) => m.id).sort((a, b) => a - b);
@@ -197,6 +206,25 @@ export async function processLeadForwards(args: {
   db: SupabaseClient;
   campaignId: string;
   getClient: (accountId: string) => { client: TelegramClient; accountName: string } | null;
+  /**
+   * Пересобрать соединение аккаунта на свежем сокете.
+   *
+   * Опрос рассчитывал, что мёртвый сокет починит круг, а он берёт аккаунт раз
+   * в сутки: 07.09.2026 передача лида @melman_show сожгла все пять попыток за
+   * двадцать пять минут об один и тот же зависший сокет и была снята, хотя
+   * лечилось это переподключением за полторы секунды.
+   */
+  reconnect?: (accountId: string) => Promise<boolean>;
+  /**
+   * Здоровый аккаунт на замену, когда свой перестал отвечать.
+   *
+   * Лид, дошедший до менеджера, — итог всей работы кампании, и терять его из-за
+   * одного зависшего аккаунта нельзя: 07.09.2026 так пропала передача
+   * @melman_show. Карточку может отправить кто угодно — она содержит переписку
+   * текстом, — а оригиналы у подменного не найдутся, и это допустимая потеря.
+   */
+  getFallbackClient?: (excludeAccountId: string) =>
+    { client: TelegramClient; accountName: string } | null;
   log: LogFn;
   shouldStop?: () => boolean;
   retries?: Map<string, RetryState>;
@@ -247,8 +275,52 @@ export async function processLeadForwards(args: {
     });
 
     if (outcome === 'retry') {
+      /**
+       * Сорвалось по сети — пересобираем соединение, чтобы следующая попытка
+       * шла по свежему сокету, а не билась о тот же мёртвый.
+       *
+       * Именно на этом терялись лиды: попытки идут раз в пять минут, а круг
+       * доходит до аккаунта раз в сутки, и «подождём, пока круг починит» на
+       * деле означало пять одинаковых отказов подряд.
+       */
+      if (args.reconnect) {
+        const ok = await args.reconnect(task.account_id);
+        if (!ok) {
+          log('warning', `Передача (${forwardKindLabel(task.kind)}): переподключить аккаунт ${holder.accountName} не удалось — следующая попытка пойдёт по прежнему соединению.`);
+        }
+      }
       const attempts = (retry?.attempts ?? 0) + 1;
       if (attempts >= FORWARD_MAX_TRANSIENT_ATTEMPTS) {
+        /**
+         * Свой аккаунт не оживает — отдаём карточку любому здоровому.
+         *
+         * Лид у менеджера — итог всей работы кампании, и терять его из-за
+         * одного зависшего сокета нельзя. Карточка содержит переписку текстом,
+         * так что менеджер получает всё нужное; оригиналов у подменного нет, и
+         * пересылку он пропускает.
+         */
+        const spare = args.getFallbackClient?.(task.account_id) ?? null;
+        if (spare) {
+          log('warning', `Передача (${forwardKindLabel(task.kind)}): аккаунт ${holder.accountName} не отвечает ${attempts} попыток — отправляю карточку подменным аккаунтом ${spare.accountName}.`);
+          const viaSpare = await sendLeadForward({
+            db,
+            client: spare.client,
+            task,
+            accountName: spare.accountName,
+            log,
+            timeoutMs: args.timeoutMs,
+            cardOnly: true,
+          });
+          retries.delete(task.id);
+          if (viaSpare === 'sent') {
+            result.sent++;
+            continue;
+          }
+          // Не смог и подменный — значит дело не в аккаунте. Дальше по общей
+          // ветке: пометить «не отправлена» и показать оператору.
+          log('error', `Передача (${forwardKindLabel(task.kind)}): подменный аккаунт ${spare.accountName} тоже не смог отправить карточку.`);
+        }
+
         // Пять раз по пять минут — аккаунт не оживает; дальше ждать молча
         // значит прятать проблему. Оператор увидит «не отправлена» и решит:
         // поставить заново или разобраться с аккаунтом.
@@ -288,6 +360,11 @@ export async function runLeadForwardPoller(args: {
   db: SupabaseClient;
   campaignId: string;
   getClient: (accountId: string) => { client: TelegramClient; accountName: string } | null;
+  /** Пересобрать соединение аккаунта, когда отправка зависла на мёртвом сокете. */
+  reconnect?: (accountId: string) => Promise<boolean>;
+  /** Здоровый аккаунт на замену, когда свой перестал отвечать. */
+  getFallbackClient?: (excludeAccountId: string) =>
+    { client: TelegramClient; accountName: string } | null;
   log: LogFn;
   shouldStop: () => boolean;
   intervalMs?: number;
