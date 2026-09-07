@@ -22,7 +22,9 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
           return jsonError('Неверный JSON', 400);
         }
       
-        const allowed = ['session_name', 'api_id', 'api_hash', 'phone', 'proxy_id', 'session_data', 'is_active'] as const;
+        // `warmup_until` — срок прогрева: пока он не наступил, боевой круг
+        // аккаунт не берёт (миграция 20260907_0001). null снимает прогрев.
+        const allowed = ['session_name', 'api_id', 'api_hash', 'phone', 'proxy_id', 'session_data', 'is_active', 'warmup_until'] as const;
         const update: Record<string, unknown> = {};
         for (const key of allowed) {
           if (body[key] !== undefined) update[key] = body[key];
