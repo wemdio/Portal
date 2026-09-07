@@ -12,6 +12,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
+import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import {
   Play,
   Square,
@@ -547,14 +548,21 @@ export default function WarmupTab({
           )}
         </div>
 
-        <div className="mt-2 grid max-h-56 grid-cols-1 gap-x-4 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
+        {/*
+          Строка та же, что в таблице аккаунтов: лицо, id, имя с фамилией и ник.
+          Одного имени не хватало — в партии из двадцати семи узбекских
+          авторегов четыре «Дмитрия» и три «Виталия», и по такому списку нельзя
+          понять, кого отмечаешь.
+        */}
+        <div className="mt-2 grid max-h-72 grid-cols-1 gap-x-4 overflow-y-auto sm:grid-cols-2">
           {accounts.map((a) => {
             const disabled = isRunning || !a.is_active;
+            const fullName = [a.first_name, a.last_name].filter(Boolean).join(' ').trim();
             return (
               <label
                 key={a.id}
                 title={a.is_active ? undefined : 'Аккаунт выключен в портале — греть его нечем'}
-                className={`flex items-center gap-2 border-t border-gray-100 py-1.5 text-xs first:border-t-0 ${
+                className={`flex items-center gap-2 border-t border-gray-100 py-1.5 first:border-t-0 ${
                   disabled ? 'cursor-not-allowed opacity-40' : 'cursor-pointer'
                 }`}
               >
@@ -569,14 +577,23 @@ export default function WarmupTab({
                   })}
                   className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-indigo-600 disabled:cursor-not-allowed"
                 />
-                <span className="min-w-0 flex-1 truncate text-gray-700">
-                  {a.first_name || a.session_name}
-                </span>
-                {warmingIds.has(a.id) && (
-                  <span className="shrink-0 rounded bg-indigo-50 px-1 py-0.5 text-[10px] text-indigo-700">
-                    греется
+                <AccountAvatar account={a} size={28} />
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-1.5">
+                    <span className="truncate text-xs font-medium text-gray-800">
+                      {a.tg_user_id ?? a.session_name}
+                    </span>
+                    {warmingIds.has(a.id) && (
+                      <span className="shrink-0 rounded bg-indigo-50 px-1 py-0.5 text-[10px] text-indigo-700">
+                        греется
+                      </span>
+                    )}
                   </span>
-                )}
+                  <span className="block truncate text-[11px] text-gray-500">
+                    {fullName || 'профиль не прочитан'}
+                    {a.tg_username ? ` · @${a.tg_username}` : ''}
+                  </span>
+                </span>
               </label>
             );
           })}
