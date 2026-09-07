@@ -31,6 +31,7 @@ import {
 import { sendFirstTouchBatch } from './firstTouch/send';
 import { parkAccountAfterLimit } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
+import { sendFreezeAppeal } from './freezeAppeal';
 import { runLeadForwardPoller } from './leadForward';
 import { buildLeadMessage, splitTelegramMessage } from './leadMessage';
 import { loadLeadOrigin } from './leadOrigin';
@@ -146,6 +147,18 @@ const DIALOGS_FETCH_LIMIT = Number(process.env.TG_OUTREACH_DIALOGS_LIMIT ?? '100
 // столько через исправный прокси не грузится и десяти секунд. Потолок остаётся
 // запасом на нештатный случай, а не ожидаемым временем работы.
 // Override via TG_OUTREACH_PER_ACCOUNT_TIMEOUT_MS if needed.
+/**
+ * Статусы, при которых аккаунт нельзя ставить подменным на передачу лида.
+ *
+ * `restricted` сюда входит намеренно, в отличие от колонки здоровья: там речь
+ * о том, спишут ли номер, а здесь — доверят ли ему единственную попытку
+ * донести лида. Ограниченный аккаунт с заметной вероятностью не отправит
+ * ничего, и подменять им — менять одну поломку на другую.
+ */
+const TERMINAL_FORWARD_STATUSES = new Set([
+  'banned', 'frozen', 'restricted', 'session_revoked', 'session_duplicate', 'no_session',
+]);
+
 const PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS =
   Number(process.env.TG_OUTREACH_PER_ACCOUNT_TIMEOUT_MS) || 180_000;
 
@@ -1627,6 +1640,42 @@ export async function runCampaignLoop(
       const entry = clients.find((c) => c.account.id === accountId);
       return entry ? { client: entry.client, accountName: entry.account.session_name } : null;
     },
+    /**
+     * Кем подменить, когда свой аккаунт не отвечает.
+     *
+     * Требования те же, что к боевому: включён, не в кулдауне, без итогового
+     * запрета от Telegram и не на прогреве. Греющийся сюда не годится
+     * принципиально — он потому и греется, что писать ему пока рано.
+     *
+     * Берём первого подходящего, а не «самого свежего»: карточка уходит один
+     * раз и нагрузки не создаёт, а выбирать лучшего среди здоровых незачем.
+     */
+    getFallbackClient: (excludeAccountId) => {
+      const spare = clients.find((c) => {
+        const a = c.account;
+        if (a.id === excludeAccountId || !a.is_active) return false;
+        if (a.check_status && TERMINAL_FORWARD_STATUSES.has(a.check_status)) return false;
+        const cooldown = a.cooldown_until ? new Date(a.cooldown_until).getTime() : NaN;
+        if (Number.isFinite(cooldown) && cooldown > Date.now()) return false;
+        const warmup = a.warmup_until ? new Date(a.warmup_until).getTime() : NaN;
+        if (Number.isFinite(warmup) && warmup > Date.now()) return false;
+        return true;
+      });
+      return spare ? { client: spare.client, accountName: spare.account.session_name } : null;
+    },
+    reconnect: async (accountId) => {
+      const entry = clients.find((c) => c.account.id === accountId);
+      if (!entry) return false;
+      const proxy = entry.account.proxy_id ? proxyMap.get(entry.account.proxy_id) ?? null : null;
+      try {
+        entry.client = await reconnectClient(entry.account, proxy, entry.client, downloadSessionFile);
+        return true;
+      } catch {
+        // Не помогло — значит дело не в сокете. Очередь и дальше отсчитывает
+        // свои попытки, просто уже без надежды на свежее соединение.
+        return false;
+      }
+    },
     log,
     shouldStop: () => forwardsStopped || shouldStop(),
   }).catch((err) => {
@@ -1942,6 +1991,9 @@ export async function runCampaignLoop(
                   other_sessions: checkResult.other_sessions ?? [],
                   check_requested_at: null,
                   check_requested_by_name: null,
+                  // Ссылку пишем всегда, в том числе пустую: аккаунт мог
+                  // оттаять, и старый адрес обжалования вводил бы в заблуждение.
+                  freeze_appeal_url: checkResult.freeze_appeal_url ?? null,
                   ...(checkResult.tg_user_id != null ? { tg_user_id: checkResult.tg_user_id } : {}),
                   ...(checkResult.tg_username != null ? { tg_username: checkResult.tg_username } : {}),
                   ...(checkResult.phone ? { phone: checkResult.phone } : {}),
@@ -1963,6 +2015,44 @@ export async function runCampaignLoop(
               // сделать вид, что оператору ответили.
               log('warning', `Аккаунт ${account.session_name}: проверка по заказу (${who}) не удалась — ${msg}. Заказ остался в очереди, повторим в следующем круге.`);
             }
+          }
+
+          /**
+           * Обжалование заморозки — здесь же и по той же причине.
+           *
+           * Заморозку Telegram снимает по обращению, а не по таймеру, подать
+           * его должен сам аккаунт, а зайти в него оператор не может: телефон
+           * остался у продавца. Отправляем этим соединением — отдельное
+           * подключение к той же сессии выключило бы аккаунт.
+           *
+           * Итог пишем всегда, включая отказ: обжалование подают один раз и
+           * ждут ответа неделями, и молчание после нажатия кнопки оператор
+           * прочитает как «ушло».
+           */
+          if (account.appeal_requested_at) {
+            const who = account.appeal_requested_by_name || 'оператор';
+            const outcome = await sendFreezeAppeal({
+              client,
+              appealUrl: account.freeze_appeal_url,
+              text: account.appeal_text ?? '',
+            });
+            const { error: apErr } = await db
+              .from('tg_outreach_accounts')
+              .update({
+                appeal_status: outcome.status,
+                appeal_detail: outcome.detail.slice(0, 500),
+                appealed_at: new Date().toISOString(),
+                appeal_requested_at: null,
+                appeal_requested_by_name: null,
+              })
+              .eq('id', account.id);
+            if (apErr) {
+              log('warning', `Аккаунт ${account.session_name}: обжалование отработало, но итог не записался — ${apErr.message}`);
+            }
+            log(
+              outcome.status === 'sent' ? 'info' : 'warning',
+              `Аккаунт ${account.session_name}: обжалование по заказу (${who}) — ${outcome.detail}`,
+            );
           }
           if (usedRawPageFallback) {
             log(

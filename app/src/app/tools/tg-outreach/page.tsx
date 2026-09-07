@@ -3,6 +3,7 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
+import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
 import {
   MessageSquareMore,
   Plus,
@@ -1994,6 +1995,114 @@ interface CheckRow {
  * были красными и назывались похоже («ограничен» / «забанен»), из-за чего
  * живые номера, поймавшие спам-блок на пару дней, читались как сгоревшие.
  */
+/**
+ * Обжалование заморозки: кнопка и окно с текстом.
+ *
+ * Обращение отправляет не браузер, а воркер — тем соединением, которое уже
+ * держит аккаунт. Подключиться отсюда нельзя: второе подключение к той же
+ * сессии Telegram встречает AUTH_KEY_DUPLICATED и выключает аккаунт. Поэтому
+ * кнопка ставит заказ в очередь, а не «отправляет».
+ *
+ * Текст даём править. Обращение читает живой человек в поддержке, и заготовка
+ * на все случаи, разосланная десятком одинаковых аккаунтов, скорее навредит,
+ * чем поможет.
+ */
+function AppealButton({
+  account,
+  onDone,
+}: {
+  account: OutreachAccount;
+  onDone: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState(defaultAppealText());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/accounts/${account.id}/appeal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setError(body.error ?? 'Не получилось поставить обжалование');
+        return;
+      }
+      setOpen(false);
+      onDone();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        title="Отправить обращение в поддержку Telegram от имени этого аккаунта"
+        className="cursor-pointer rounded-md border border-rose-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-rose-700 transition hover:bg-rose-50"
+      >
+        Обжаловать
+      </button>
+
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-xl bg-white p-4 shadow-xl">
+            <h3 className="text-sm font-semibold text-gray-900">
+              Обжалование заморозки · {account.first_name || account.session_name}
+            </h3>
+            <p className="mt-1 text-[11px] leading-tight text-gray-500">
+              Обращение уйдёт от имени этого аккаунта, когда рассылка в ближайшем круге до него
+              дойдёт. Отправит его портал — заходить в аккаунт не нужно.
+            </p>
+            {account.freeze_appeal_url && (
+              <p className="mt-1 break-all text-[11px] text-gray-400">
+                Адрес от Telegram: {account.freeze_appeal_url}
+              </p>
+            )}
+
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              rows={6}
+              className="mt-3 w-full rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-800 outline-none focus:border-indigo-400"
+            />
+
+            {error && (
+              <p className="mt-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</p>
+            )}
+
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="cursor-pointer rounded-lg px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                disabled={busy || !text.trim()}
+                onClick={() => void submit()}
+                className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                Поставить в очередь
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 const CHECK_LABEL: Record<string, { text: string; cls: string }> = {
   ok: { text: 'жив', cls: 'bg-emerald-50 text-emerald-700' },
   session_revoked: { text: 'разлогинен', cls: 'bg-amber-50 text-amber-700' },
@@ -2002,6 +2111,9 @@ const CHECK_LABEL: Record<string, { text: string; cls: string }> = {
   proxy_dead: { text: 'прокси молчит', cls: 'bg-amber-50 text-amber-700' },
   restricted: { text: 'ограничен временно', cls: 'bg-amber-50 text-amber-700' },
   banned: { text: 'бан навсегда', cls: 'bg-rose-50 text-rose-700' },
+  // Заморозка отдельно от «ограничен временно»: спам-блок проходит сам по
+  // таймеру, а эта снимается только обжалованием — рядом и стоит кнопка.
+  frozen: { text: 'заморожен', cls: 'bg-rose-50 text-rose-700' },
   error: { text: 'ошибка', cls: 'bg-gray-100 text-gray-500' },
   // Не итог проверки, а её ожидание: кампания работает, и проверку выполнит
   // рассылка своим соединением, дойдя до аккаунта в круге.
@@ -3108,6 +3220,26 @@ function CampaignAccountsTab({
                           className={`rounded-md px-1.5 py-0.5 text-[10px] ${CHECK_LABEL[a.check_status]?.cls ?? 'bg-gray-100 text-gray-500'}`}
                         >
                           {CHECK_LABEL[a.check_status]?.text ?? a.check_status}
+                        </span>
+                      )}
+                      {a.check_status === 'frozen' && (
+                        <AppealButton account={a} onDone={() => { void load(); }} />
+                      )}
+                      {a.appeal_requested_at && !a.appeal_status && (
+                        <span className="rounded-md bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-700">
+                          обжалование в очереди
+                        </span>
+                      )}
+                      {a.appeal_status && !a.appeal_requested_at && (
+                        <span
+                          title={a.appeal_detail ?? undefined}
+                          className={`cursor-help rounded-md px-1.5 py-0.5 text-[10px] ${
+                            a.appeal_status === 'sent'
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : 'bg-amber-50 text-amber-700'
+                          }`}
+                        >
+                          {a.appeal_status === 'sent' ? 'обжаловано' : 'обжалование не ушло'}
                         </span>
                       )}
                       {(a.other_sessions?.length ?? 0) > 0 && (

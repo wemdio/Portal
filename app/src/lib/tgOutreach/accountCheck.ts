@@ -45,6 +45,14 @@ export interface AccountCheckResult {
   phone?: string | null;
   /** Чужие сеансы: наш собственный из списка исключён. */
   other_sessions?: OtherSession[];
+  /**
+   * Адрес обжалования, который Telegram отдал вместе с заморозкой.
+   *
+   * Отдаём отдельным полем, а не только внутри `detail`: по нему портал
+   * отправляет обращение, и выковыривать его обратно из человеческого текста
+   * было бы ошибкой при первой же правке формулировки.
+   */
+  freeze_appeal_url?: string | null;
 }
 
 function callTimeoutMs(): number {
@@ -334,7 +342,12 @@ export async function checkAccount(
    */
   const freeze = await probeFreeze(client);
   if (freeze) {
-    return { status: 'frozen', detail: describeFreeze(freeze), ...identity };
+    return {
+      status: 'frozen',
+      detail: describeFreeze(freeze),
+      freeze_appeal_url: freeze.appealUrl,
+      ...identity,
+    };
   }
 
   return {
