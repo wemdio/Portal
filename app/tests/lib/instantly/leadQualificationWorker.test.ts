@@ -4023,32 +4023,87 @@ describe('pollAndQualifyReplies', () => {
     });
 
     it('releases a transient provider failure back to needs_review with the same backoff', async () => {
-      installOwnershipReviewRetryFixture({ verdict: 'lead' });
-      getEmail.mockRejectedValueOnce(new Error('Instantly API 503: overloaded'));
-      const { reprocessOwnershipReviewRows } = await import(
-        '@/lib/instantly/leadQualificationWorker'
-      );
+      const clock = jest.spyOn(Date, 'now');
+      try {
+        for (const message of [
+          'Instantly API 503: overloaded',
+          'AI API 402: balance too low',
+          'Instantly API 429: rate limit exceeded',
+        ]) {
+          jest.resetModules();
+          clock.mockReturnValue(retryNow.getTime());
+          getEmail.mockReset();
+          qualifyReply.mockReset();
+          sendLeadTelegramAlert.mockClear();
+          const { inbound } = installOwnershipReviewRetryFixture({
+            verdict: 'lead', enforceQueryWindows: true,
+          });
+          const waitingRow = ownershipReviewRow({
+            id: 'waiting-qualification',
+            instantly_email_id: 'waiting-email',
+            thread_id: 'waiting-thread',
+            // Historical provider errors must not pause a successful replay.
+            ai_reason: 'Автоматическая повторная квалификация: AI API 402: old outage',
+            updated_at: '2026-08-24T17:00:00.000Z',
+          });
+          await mockInstantlyDb!.from('instantly_lead_qualifications').insert(waitingRow);
+          if (message.startsWith('AI API')) {
+            qualifyReply.mockRejectedValueOnce(new Error(message));
+          } else {
+            getEmail.mockRejectedValueOnce(new Error(message));
+          }
+          const worker = await import('@/lib/instantly/leadQualificationWorker');
 
-      const first = await reprocessOwnershipReviewRows({
-        now: retryNow,
-        minRetryAgeMs: 15 * 60_000,
-      });
-      const beforeBackoff = await reprocessOwnershipReviewRows({
-        now: new Date(retryNow.getTime() + 14 * 60_000),
-        minRetryAgeMs: 15 * 60_000,
-      });
+          expect(await worker.reprocessOwnershipReviewRows({
+            now: retryNow, minRetryAgeMs: 15 * 60_000,
+          })).toBe(1);
+          expect(getEmail).toHaveBeenCalledTimes(1);
+          expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
+            expect.objectContaining({
+              id: 'ownership-review-qualification',
+              status: 'needs_review',
+              updated_at: retryNow.toISOString(),
+              error_message: expect.stringContaining(message),
+            }),
+            expect.objectContaining(waitingRow),
+          ]);
+          expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
 
-      expect(first).toBe(1);
-      expect(beforeBackoff).toBe(0);
-      expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0]).toEqual(
-        expect.objectContaining({
-          status: 'needs_review',
-          updated_at: retryNow.toISOString(),
-          error_message: expect.stringContaining('Instantly API 503'),
-        }),
-      );
-      expect(qualifyReply).not.toHaveBeenCalled();
-      expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+          clock.mockReturnValue(retryNow.getTime() + 5 * 60_000 - 1);
+          expect(await worker.maybeReprocessOwnershipReviews()).toBe(0);
+          expect(getEmail).toHaveBeenCalledTimes(1);
+
+          clock.mockReturnValue(retryNow.getTime() + 5 * 60_000);
+          getEmail.mockResolvedValueOnce({
+            ...inbound, id: 'waiting-email', thread_id: '9c-waiting-thread',
+          });
+          expect(await worker.maybeReprocessOwnershipReviews()).toBe(1);
+          expect(getEmail).toHaveBeenLastCalledWith('waiting-email', expect.objectContaining({ accountId: 'main' }));
+          expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
+
+          clock.mockReturnValue(retryNow.getTime() + 14 * 60_000);
+          expect(await worker.reprocessOwnershipReviewRows({
+            now: new Date(Date.now()), minRetryAgeMs: 15 * 60_000,
+          })).toBe(0);
+          expect(getEmail).toHaveBeenCalledTimes(2);
+
+          clock.mockReturnValue(retryNow.getTime() + 15 * 60_000);
+          expect(await worker.maybeReprocessOwnershipReviews()).toBe(1);
+          expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
+            expect.objectContaining({ id: 'ownership-review-qualification', status: 'lead', error_message: null }),
+            expect.objectContaining({ id: 'waiting-qualification', status: 'lead', error_message: null }),
+          ]);
+          for (const id of ['ownership-review-qualification', 'waiting-qualification']) {
+            expect(sendLeadTelegramAlert.mock.calls.filter(([data]) => data.qualificationId === id)).toHaveLength(1);
+          }
+          clock.mockReturnValue(retryNow.getTime() + 17 * 60_000);
+          expect(await worker.maybeReprocessOwnershipReviews()).toBe(0);
+          expect(getEmail).toHaveBeenCalledTimes(3);
+          expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(2);
+        }
+      } finally {
+        clock.mockRestore();
+      }
     });
 
     it('recovers an ownership retry whose processing lease expired', async () => {
@@ -6874,7 +6929,7 @@ describe('ownership retry page-budget quarantine — RED contract', () => {
     );
   });
 
-  it('rechecks page-budget rows in a separate slow lane without consuming the transient lane', async () => {
+  it('drains transient retries faster while preserving slow-lane cadence and bounded serial work', async () => {
     const pageBudget = ownershipReviewRow({
       id: 'slow-page-budget',
       instantly_email_id: 'slow-page-budget-email',
@@ -6894,6 +6949,13 @@ describe('ownership retry page-budget quarantine — RED contract', () => {
       created_at: '2026-08-31T10:00:00.000Z',
       updated_at: '2026-08-31T10:00:00.000Z',
     });
+    const fastRows = Array.from({ length: 12 }, (_, i) => ({
+      ...transient, id: `fast-${i}`, instantly_email_id: `fast-email-${i}`,
+      ai_reason: 'Автоматическая повторная квалификация: AI API 402: insufficient balance',
+    }));
+    const slowRows = Array.from({ length: 3 }, (_, i) => ({
+      ...pageBudget, id: `slow-${i}`, instantly_email_id: `slow-email-${i}`,
+    }));
     mockInstantlyDb = createMockSupabase({
       enforceQueryWindows: true,
       tables: {
@@ -6903,7 +6965,7 @@ describe('ownership retry page-budget quarantine — RED contract', () => {
         project_period_instantly_campaigns: [],
         client_instantly_access: [],
         client_forwarded_leads: [],
-        instantly_lead_qualifications: [pageBudget, transient],
+        instantly_lead_qualifications: [...slowRows, ...fastRows],
       },
     });
     mockMainDb = createMockSupabase({
@@ -6916,7 +6978,7 @@ describe('ownership retry page-budget quarantine — RED contract', () => {
       },
     });
 
-    const { reprocessOwnershipReviewRows } = await import(
+    const { reprocessOwnershipReviewRows, maybeReprocessOwnershipReviews } = await import(
       '@/lib/instantly/leadQualificationWorker'
     );
     expect(await reprocessOwnershipReviewRows({
@@ -6926,16 +6988,62 @@ describe('ownership retry page-budget quarantine — RED contract', () => {
       lane: 'page_budget',
     })).toBe(1);
     expect(getEmail.mock.calls.map(([emailId]) => emailId)).toEqual([
-      'slow-page-budget-email',
+      'slow-email-0',
     ]);
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: 'slow-lane-transient',
+      expect.arrayContaining(fastRows.map(row => expect.objectContaining({
+          id: row.id,
           status: 'needs_review',
           updated_at: transient.updated_at,
-        }),
-      ]),
+      }))),
     );
+
+    let clock = Date.parse('2026-09-01T12:00:00.000Z');
+    const dateNow = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      // Historic 402 does not pause a successful replay. Five fast rows plus
+      // one slow row run initially, then only fast rows at the two-minute tick.
+      expect(await maybeReprocessOwnershipReviews()).toBe(6);
+      clock += 119_999;
+      expect(await maybeReprocessOwnershipReviews()).toBe(0);
+      clock += 1;
+      expect(await maybeReprocessOwnershipReviews()).toBe(5);
+      expect(getEmail.mock.calls.flat().filter(id => id === 'slow-email-2')).toHaveLength(0);
+      clock += 120_000;
+      expect(await maybeReprocessOwnershipReviews()).toBe(2);
+      clock = Date.parse('2026-09-01T12:15:00.000Z');
+      expect(await maybeReprocessOwnershipReviews()).toBe(1);
+      const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+      expect(rows).toHaveLength(15);
+      expect(rows.every(row => row.status === 'not_lead')).toBe(true);
+      expect(new Set(rows.map(row => row.id)).size).toBe(15);
+      expect(getEmail).toHaveBeenCalledTimes(15);
+      expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+
+      // A slow in-flight call must not overlap a second cycle or start more
+      // rows after the soft budget expires. No real timers or provider I/O.
+      await mockInstantlyDb!.from('instantly_lead_qualifications').insert(
+        fastRows.slice(0, 3).map((row, i) => ({
+          ...row, id: `budget-${i}`, instantly_email_id: `budget-email-${i}`,
+        })),
+      );
+      let release!: (reply: Email) => void;
+      getEmail.mockImplementationOnce(() => new Promise<Email>(resolve => { release = resolve; }));
+      clock += 120_000;
+      const running = maybeReprocessOwnershipReviews();
+      for (let tick = 0; !release && tick < 200; tick++) await Promise.resolve();
+      expect(release).toBeDefined();
+      clock += 120_000;
+      expect(await maybeReprocessOwnershipReviews()).toBe(0);
+      release(leadReplyForRetry('budget-email-0'));
+      expect(await running).toBe(1);
+      expect(getEmail).toHaveBeenCalledTimes(16);
+      clock += 120_000;
+      expect(await maybeReprocessOwnershipReviews()).toBe(2);
+      expect(await maybeReprocessOwnershipReviews()).toBe(0);
+      expect(getEmail).toHaveBeenCalledTimes(18);
+    } finally {
+      dateNow.mockRestore();
+    }
   });
 });

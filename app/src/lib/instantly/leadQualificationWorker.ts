@@ -66,12 +66,18 @@ export const TRANSIENT_RETRY_REASON_PREFIX =
   'Автоматическая повторная квалификация:';
 const TRANSIENT_OTHERS_RETRY_TAG = '[others]';
 
-const OWNERSHIP_REVIEW_RETRY_INTERVAL_MS = 15 * 60 * 1000;
+// Drain different eligible rows frequently, but do not retry one failing row
+// every tick. The old shared 15-minute clock limited all projects to 20/h.
+const OWNERSHIP_REVIEW_RETRY_INTERVAL_MS = 2 * 60 * 1000;
+const OWNERSHIP_REVIEW_RETRY_BACKOFF_MS = 15 * 60 * 1000;
+const OWNERSHIP_RETRY_TIME_BUDGET_MS = 45_000;
+const OWNERSHIP_RETRY_PROVIDER_BACKOFF_MS = 5 * 60 * 1000;
 const OWNERSHIP_REVIEW_RETRY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const OWNERSHIP_REVIEW_PROCESSING_LEASE_MS = 30 * 60 * 1000;
 const OWNERSHIP_PAGE_BUDGET_REASON_FRAGMENT =
   'workspace ownership evidence exceeded the bounded page budget';
 const OWNERSHIP_PAGE_BUDGET_RETRY_BACKOFF_MS = 6 * 60 * 60 * 1000;
+const OWNERSHIP_PAGE_BUDGET_RETRY_INTERVAL_MS = 15 * 60 * 1000;
 const OWNERSHIP_PAGE_BUDGET_RETRY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const LEAD_DELIVERY_RETRY_INTERVAL_MS = 15 * 60 * 1000;
 const LEAD_DELIVERY_RECENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -80,6 +86,9 @@ const LEAD_DELIVERY_FAILED_BACKOFF_MS = 15 * 60 * 1000;
 const LEAD_DELIVERY_RETRYING_ERROR = 'Lead notification retry in progress';
 const SPECIALIST_ALERT_CLAIM_RPC = 'claim_instantly_specialist_alert';
 let lastOwnershipReviewRetryAt = 0;
+let lastOwnershipPageBudgetRetryAt = 0;
+let ownershipRetryRunning = false;
+let ownershipRetryProviderPausedUntil = 0;
 let lastLeadDeliveryRetryAt = 0;
 
 type SpecialistAlertClaimDecision =
@@ -1813,6 +1822,8 @@ export interface OwnershipReviewRetryOptions {
   minRetryAgeMs?: number;
   maxAgeMs?: number;
   processingLeaseMs?: number;
+  /** Soft budget between rows; never abandons a claimed in-flight reply. */
+  timeBudgetMs?: number;
   /** Fast transient lane by default; page-budget uses its own tiny slow lane. */
   lane?: 'active' | 'page_budget';
 }
@@ -1833,6 +1844,12 @@ export async function reprocessOwnershipReviewRows(
   const db = supabaseAdmin;
   const now = options.now ?? new Date();
   const nowIso = now.toISOString();
+  const startedAt = Date.now();
+  const timeBudgetMs = Math.max(1_000, Math.min(120_000,
+    options.timeBudgetMs ?? envNumber(
+      'INSTANTLY_OWNERSHIP_RETRY_TIME_BUDGET_MS', OWNERSHIP_RETRY_TIME_BUDGET_MS,
+    ),
+  ));
   const pageBudgetLane = options.lane === 'page_budget';
   const limit = Math.max(
     1,
@@ -1854,7 +1871,7 @@ export async function reprocessOwnershipReviewRows(
         : 'INSTANTLY_OWNERSHIP_RETRY_BACKOFF_MS',
       pageBudgetLane
         ? OWNERSHIP_PAGE_BUDGET_RETRY_BACKOFF_MS
-        : OWNERSHIP_REVIEW_RETRY_INTERVAL_MS,
+        : OWNERSHIP_REVIEW_RETRY_BACKOFF_MS,
     ),
   );
   const maxAgeMs = Math.max(
@@ -2048,6 +2065,7 @@ export async function reprocessOwnershipReviewRows(
     updated_at: string;
   }>) {
     if (attempted >= limit) break;
+    if (attempted > 0 && Date.now() - startedAt >= timeBudgetMs) break;
     const emailId = raw.instantly_email_id?.trim();
     if (!emailId || emailId.startsWith('webhook:')) {
       await rotateSkippedCandidate(raw, 'not a provider email id');
@@ -2104,7 +2122,11 @@ export async function reprocessOwnershipReviewRows(
     attempted++;
 
     try {
-      const fullEmail = await instantly.getEmail(emailId, { accountId });
+      // Recovery already has durable retries. Do not spend another 28 seconds
+      // retrying a 429 inside getEmail before yielding to fresh replies.
+      const fullEmail = await instantly.getEmail(emailId, {
+        accountId, retryRateLimits: false, timeoutMs: 20_000,
+      });
       if (!fullEmail?.id || fullEmail.id !== emailId) {
         throw new Error(`provider email mismatch for ${emailId}`);
       }
@@ -2201,36 +2223,65 @@ export async function reprocessOwnershipReviewRows(
         .eq('status', 'processing')
         .eq('updated_at', nowIso);
       workerLog('warn', `ownership retry failed for ${raw.id}; released with backoff`, error);
+      if (
+        TRANSIENT_QUALIFY_ERROR_RE.test(message) ||
+        RETRIABLE_BILLING_QUALIFY_ERROR_RE.test(message)
+      ) {
+        // Only a CURRENT provider failure pauses recovery. An old 402 in
+        // ai_reason must not keep a successfully recovered queue frozen.
+        ownershipRetryProviderPausedUntil = Date.now() + Math.max(60_000,
+          envNumber('INSTANTLY_OWNERSHIP_RETRY_PROVIDER_BACKOFF_MS', OWNERSHIP_RETRY_PROVIDER_BACKOFF_MS),
+        );
+        workerLog('warn', 'qualification recovery paused after provider failure; remaining rows untouched');
+        break;
+      }
     }
   }
 
   return attempted;
 }
 
-async function maybeReprocessOwnershipReviews(): Promise<number> {
+export async function maybeReprocessOwnershipReviews(): Promise<number> {
   const nowMs = Date.now();
+  if (ownershipRetryRunning || nowMs < ownershipRetryProviderPausedUntil) return 0;
   const intervalMs = Math.max(
     60_000,
     envNumber('INSTANTLY_OWNERSHIP_RETRY_INTERVAL_MS', OWNERSHIP_REVIEW_RETRY_INTERVAL_MS),
   );
-  if (nowMs - lastOwnershipReviewRetryAt < intervalMs) return 0;
-  // Set before awaiting: concurrent calls in one process do not start a second
-  // scan. Cross-process concurrency is covered by the row CAS claim.
-  lastOwnershipReviewRetryAt = nowMs;
+  const pageBudgetIntervalMs = Math.max(60_000, envNumber(
+    'INSTANTLY_OWNERSHIP_PAGE_BUDGET_RETRY_INTERVAL_MS', OWNERSHIP_PAGE_BUDGET_RETRY_INTERVAL_MS,
+  ));
+  const activeDue = nowMs - lastOwnershipReviewRetryAt >= intervalMs;
+  const pageBudgetDue = nowMs - lastOwnershipPageBudgetRetryAt >= pageBudgetIntervalMs;
+  if (!activeDue && !pageBudgetDue) return 0;
+  // A slow API call can exceed the fast interval. Keep same-process cycles
+  // serial as well as retaining the cross-process row CAS claim.
+  ownershipRetryRunning = true;
   try {
     const now = new Date(nowMs);
-    const active = await reprocessOwnershipReviewRows({ now });
-    // A separate one-row lane eventually rechecks old bounded-page ambiguity
-    // after mailbox/catalog changes, without letting that backlog consume the
-    // five slots reserved for fresh infrastructure and ownership retries.
-    const pageBudget = await reprocessOwnershipReviewRows({
-      now,
-      lane: 'page_budget',
-    });
+    let active = 0;
+    let pageBudget = 0;
+    if (activeDue) {
+      lastOwnershipReviewRetryAt = nowMs;
+      active = await reprocessOwnershipReviewRows({ now });
+    }
+    // The expensive ownership lane keeps its old cadence; fast catch-up must
+    // not multiply its provider traffic or run it during a provider outage.
+    if (pageBudgetDue && Date.now() >= ownershipRetryProviderPausedUntil) {
+      lastOwnershipPageBudgetRetryAt = Date.now();
+      pageBudget = await reprocessOwnershipReviewRows({
+        now: new Date(lastOwnershipPageBudgetRetryAt), lane: 'page_budget',
+      });
+    }
+    if (active || pageBudget) {
+      workerLog('info', `qualification recovery: active=${active}, page-budget=${pageBudget}`);
+    }
     return active + pageBudget;
   } catch (error) {
     workerLog('warn', 'ownership retry cycle failed', error);
     return 0;
+  } finally {
+    ownershipRetryRunning = false;
   }
 }
 
