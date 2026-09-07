@@ -64,6 +64,11 @@ const MAX_SEASONAL_SOURCES = 6;
 const SOURCE_EXCERPT = 1500;
 const MAX_EVIDENCE_PER_HYPOTHESIS = 6;
 const READ_TIMEOUT_MS = 30_000;
+// Cooperative rather than concurrent execution: finish/checkpoint a candidate
+// before giving other projects and base polling a turn. The time budget is
+// checked at that safe boundary, not a hard deadline for one candidate.
+const SLICE_BUDGET_MS = 2 * 60_000;
+const MAX_CANDIDATES_PER_SLICE = 3;
 
 type EvidenceSearchScope = 'market' | 'seasonality';
 
@@ -273,6 +278,7 @@ async function saveCheckpoint(ctx: VeStageContext, job: VeJob, checkpoint: Evide
 }
 
 export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
+  const sliceStartedAt = Date.now();
   ctx = { ...ctx, signal: ctx.signal ?? getVeActiveJobSignal() ?? undefined };
   throwIfCancelled(ctx);
   const project = await withVeDeadline('evidence project read', READ_TIMEOUT_MS, ctx.signal, () => readProject(ctx.supabase, job.project_id));
@@ -312,6 +318,7 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
   const portfolioProfile = checkpoint.portfolio_profile;
   const markupHistory = checkpoint.markup_history;
   const todayMoscow = checkpoint.today_moscow;
+  const sliceStartIndex = checkpoint.next_index;
 
   for (let i = checkpoint.next_index; i < candidates.length; i += 1) {
     const candidate = candidates[i];
@@ -488,6 +495,26 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
     })();
     checkpoint.next_index = i + 1;
     await saveCheckpoint(ctx, job, checkpoint, candidates.length);
+    if (checkpoint.next_index < candidates.length && (
+      checkpoint.next_index - sliceStartIndex >= MAX_CANDIDATES_PER_SLICE ||
+      Date.now() - sliceStartedAt >= SLICE_BUDGET_MS
+    )) {
+      // The accepted verdicts and their complete usage are already durable.
+      // Keep attempts, error and original created_at: yielding is not a retry.
+      // A running CAS returning this row proves the handoff succeeded; a write
+      // error or lost ownership stops the stage before any further paid work.
+      const now = new Date().toISOString();
+      await writeJobState(ctx, job.id, {
+        status: 'pending', started_at: null, run_after: now,
+        progress: { done: checkpoint.next_index, total: candidates.length,
+          label: 'прогресс сохранён; ожидаем очередь для продолжения',
+          substep_started_at: now, updated_at: now },
+      });
+      stageLog(ctx, `[evidence] yielded after ${checkpoint.next_index}/${candidates.length} candidates`);
+      // Report no slice usage: the worker accounts cumulative checkpoint usage
+      // once, only after all candidates and hypothesis persistence complete.
+      return { result: { ...job.result, waiting: true }, tokensUsed: 0, costUsd: 0 };
+    }
   }
 
   // 4) Идемпотентная перезапись: сносим прошлые предложенные (ещё не

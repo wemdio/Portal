@@ -25,6 +25,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { collectionRoundLimit, createCollectionTarget, type VeCollectionMode } from './collectionTarget';
+import { previewRecoveryKind } from './collectionRecovery';
 
 export interface VeBaseCollectInput {
   verticalId: string;
@@ -105,6 +106,54 @@ function repairJobPayload(base: Record<string, unknown>): Record<string, unknown
     payload.hypothesis_ids = info.hypothesis_ids;
   }
   return payload;
+}
+
+async function resumeFailedPreview(
+  supabase: SupabaseClient, input: VeBaseCollectInput, hypothesisId: string,
+  activeBaseIds: string[],
+): Promise<VeBaseCollectResult | null> {
+  const { data: failed, error } = await supabase.from('ve_bases')
+    .select('id, project_id, vertical_id, hypothesis_id, source, status, error, collect_info, created_at')
+    .eq('project_id', input.projectId).eq('vertical_id', input.verticalId).eq('hypothesis_id', hypothesisId)
+    .eq('source', 'auto').eq('status', 'failed').order('created_at', { ascending: false }).limit(100);
+  if (error) return { ok: false, message: error.message };
+  const candidates = (failed ?? []).filter((base) => previewRecoveryKind(base));
+  // A newer empty 402 attempt must not hide an older already enriched result.
+  const saved = candidates.find((base) => previewRecoveryKind(base) === 'validation') ?? candidates[0];
+  if (!saved) return null;
+  if (activeBaseIds.includes(saved.id)) return { ok: true, created: false, base: saved };
+  const info = { ...saved.collect_info, ...(previewRecoveryKind(saved) === 'validation' ? { validation_retry: true } : {}) };
+  info.target_progress = { ...info.target_progress, status: 'collecting' };
+  delete info.target_progress.reason;
+  const claimedAt = new Date().toISOString();
+  const { data: claimed, error: claimError } = await supabase.from('ve_bases')
+    .update({ status: 'collecting', error: null, collect_info: info, updated_at: claimedAt })
+    .eq('id', saved.id).eq('status', 'failed').select('id, status, hypothesis_id, collect_info').maybeSingle();
+  if (claimError || !claimed) {
+    // Both same-base CAS and competing-base unique races are idempotent.
+    const { data: winner, error: winnerError } = await supabase.from('ve_bases')
+      .select('id, status, hypothesis_id, collect_info').eq('project_id', input.projectId)
+      .eq('vertical_id', input.verticalId).eq('hypothesis_id', hypothesisId)
+      .eq('source', 'auto').eq('status', 'collecting').limit(1).maybeSingle();
+    if (!winnerError && winner) return { ok: true, created: false, base: winner };
+    return { ok: false, message: claimError?.message ?? winnerError?.message ?? 'Состояние базы изменилось. Обновите страницу и повторите попытку.' };
+  }
+  const { error: jobError } = await supabase.from('ve_jobs').insert({
+    project_id: input.projectId, stage: 'base_collect', status: 'pending',
+    payload: { base_id: claimed.id, ...repairJobPayload(claimed) },
+  });
+  if (jobError) {
+    const { data: jobs, error: readError } = await supabase.from('ve_jobs').select('id, payload')
+      .eq('project_id', input.projectId).eq('stage', 'base_collect').in('status', ['pending', 'running']);
+    if (!readError && (jobs ?? []).some((j) => j.payload?.base_id === claimed.id)) {
+      return { ok: true, created: false, base: claimed };
+    }
+    // Never restore failed based on a non-atomic absence read: another request
+    // can insert an orphan-repair job without changing the base timestamp.
+    // UI exposes "Проверить запуск"; the existing repair is idempotent.
+    return { ok: false, message: jobError.message };
+  }
+  return { ok: true, created: true, base: claimed, bases: [claimed] };
 }
 
 export async function enqueueVeBaseCollect(
@@ -273,6 +322,15 @@ export async function enqueueVeBaseCollect(
       if (baseErr) return { ok: false, message: baseErr.message };
       if (existingBase) {
         existing.push(existingBase as Record<string, unknown>);
+        continue;
+      }
+    }
+
+    if (input.collectionMode === 'preview' && hypothesisId && !refill) {
+      const resumed = await resumeFailedPreview(supabase, input, hypothesisId, allActiveBaseIds);
+      if (resumed) {
+        if (!resumed.ok) return resumed;
+        (resumed.created ? created : existing).push(resumed.base);
         continue;
       }
     }

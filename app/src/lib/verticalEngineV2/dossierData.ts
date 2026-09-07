@@ -18,25 +18,10 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { getOkvedFlat, reduceToTopCodes } from '@/lib/companiesSearch/okved2';
+import { reduceToTopCodes } from '@/lib/companiesSearch/okved2';
 import { fetchWithRetry } from '@/lib/parsers/hhParser';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-
-/* Локальная копия whitelist'а категорий «Нашей базы» (ранее импортировалась
- * из projectBriefHypotheses/ourBaseValidation — тот файл пока не закоммичен,
- * из-за чего падал CI-тайпчек). Классы XX и группы XX.X, как в оригинале. */
-const ALLOWED_INDUSTRY_CATEGORY_CODE = /^\d{2}(?:\.\d)?$/;
-
-interface CompanyBaseIndustryCategory {
-  code: string;
-  name: string;
-}
-
-function getAllowedCompanyBaseIndustryCategories(): CompanyBaseIndustryCategory[] {
-  return getOkvedFlat()
-    .filter((entry) => ALLOWED_INDUSTRY_CATEGORY_CODE.test(entry.code))
-    .map(({ code, name }) => ({ code, name }));
-}
+import { matchVeDossierIndustryCategories } from './dossierIndustryMatch';
 
 export interface VeDossierSignal {
   kind: string;
@@ -83,92 +68,6 @@ export interface CollectDossierCountersDeps {
   supabase?: SupabaseClient;
   /** Подмена fetch (тесты). */
   fetchImpl?: typeof fetch;
-}
-
-/* ─────────────────── ОКВЭД-2: сопоставление вертикали ─────────────────── */
-
-/**
- * Скоринг повторяет promptTokens/promptCategoryScore из ourBaseValidation
- * (те хелперы не экспортируются), а допустимый набор категорий (классы XX и
- * родительские группы XX.X) собираем локально из getOkvedFlat — тот самый
- * whitelist, который разрешён в контракте «Нашей базы компаний».
- */
-const GENERIC_TOKEN_PREFIXES = [
-  'деятел',
-  'компан',
-  'организ',
-  'оказан',
-  'област',
-  'предос',
-  'произв',
-  'проч',
-  'сервис',
-  'услуг',
-];
-
-function significantTokens(value: string): string[] {
-  return [...new Set(
-    value
-      .toLocaleLowerCase('ru-RU')
-      .replace(/ё/g, 'е')
-      .match(/[a-zа-я0-9]{4,}/g) ?? [],
-  )].filter((token) => !GENERIC_TOKEN_PREFIXES.some((prefix) => token.startsWith(prefix)));
-}
-
-function dedupeQueryTokenStems(tokens: string[]): string[] {
-  const seen = new Set<string>();
-  return tokens.filter((token) => {
-    const stem = token.slice(0, Math.min(6, token.length));
-    if (seen.has(stem)) return false;
-    seen.add(stem);
-    return true;
-  });
-}
-
-/**
- * В названиях ОКВЭД всё после «кроме …»/«исключая …» — негативный контекст
- * («Производство древесины …, кроме мебели»). Отрезаем, иначе «мебель»
- * ложно матчится на класс 16.
- */
-const NEGATIVE_CONTEXT_RE = /[\s(,;]+(?:кроме|исключая)(?:\s|:|$)/i;
-
-function categoryTokens(categoryName: string): string[] {
-  return significantTokens(categoryName.split(NEGATIVE_CONTEXT_RE)[0]);
-}
-
-function categoryScore(categoryName: string, queryTokens: string[]): number {
-  const tokens = categoryTokens(categoryName);
-  return tokens.reduce((score, categoryToken) => score + queryTokens.reduce((tokenScore, queryToken) => {
-    if (categoryToken === queryToken) return tokenScore + 2;
-    const sharedPrefixLength = Math.min(6, categoryToken.length, queryToken.length);
-    return tokenScore + (sharedPrefixLength >= 4
-      && categoryToken.slice(0, sharedPrefixLength) === queryToken.slice(0, sharedPrefixLength)
-      ? 1
-      : 0);
-  }, 0), 0);
-}
-
-/**
- * Уверенное совпадение: хотя бы одно точное совпадение (+2) или несколько
- * независимых стем-совпадений. Один общий корень слишком слаб: например,
- * «медицинских целях» в фарм-производстве не делает его частной медициной.
- * Неуверенный матч → null + companies_note вместо широкой ложной выборки.
- */
-const MIN_OKVED_MATCH_SCORE = 2;
-const MAX_OKVED_CATEGORIES = 3;
-
-function matchOkvedCategories(text: string): CompanyBaseIndustryCategory[] {
-  // Synonyms often repeat the same lexical root (for example,
-  // «медицинская» + «медицина»). Count that root once so it cannot turn one
-  // weak overlap into a seemingly independent pair of signals.
-  const queryTokens = dedupeQueryTokenStems(significantTokens(text));
-  if (queryTokens.length === 0) return [];
-  return getAllowedCompanyBaseIndustryCategories()
-    .map((category) => ({ category, score: categoryScore(category.name, queryTokens) }))
-    .filter((item) => item.score >= MIN_OKVED_MATCH_SCORE)
-    .sort((a, b) => b.score - a.score || a.category.code.localeCompare(b.category.code, 'ru-RU'))
-    .slice(0, MAX_OKVED_CATEGORIES)
-    .map((item) => item.category);
 }
 
 /* ─────────────────── Директория компаний: честная статистика ─────────────────── */
@@ -391,7 +290,8 @@ export async function collectDossierCounters(
   let companies_with_any_contact: number | null = null;
   let companies_note: string | undefined;
   const matchText = [verticalName, ...synonyms].filter(Boolean).join(' ');
-  const categories = matchText ? matchOkvedCategories(matchText) : [];
+  const industryMatch = matchVeDossierIndustryCategories(verticalName, synonyms);
+  const { categories } = industryMatch;
   if (categories.length === 0) {
     companies_note = matchText
       ? 'Нет уверенного совпадения вертикали с категориями ОКВЭД-2 — объём директории не считали.'
@@ -418,6 +318,7 @@ export async function collectDossierCounters(
       companies_note = `${criteria}. Уникальные компании считаются по ИНН; строки без ИНН — отдельно. Email и телефоны из справочника ещё не валидированы.`;
     }
   }
+  if (industryMatch.note && companies_note) companies_note += ` ${industryMatch.note}`;
   log(`[dossier] companies: ${companies_total ?? 'null'} — ${companies_note}`);
 
   // ── 2. hh.ru: вертикаль + топовая целевая должность ──

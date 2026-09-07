@@ -50,7 +50,10 @@ export function getCollectionQueue(
   return { current, queued: ordered.filter((base) => base.id !== current?.id) };
 }
 
-export function getCollectionProgress(info: VeCollectInfo | null | undefined) {
+export function getCollectionProgress(
+  info: VeCollectInfo | null | undefined,
+  job?: Pick<VeJobSummary, 'stage' | 'status' | 'progress' | 'payload'>,
+) {
   const tasks = Array.isArray(info?.tasks) ? info.tasks : [];
   const completedCounts = tasks.filter((task) => task && collectTaskDone(task.status))
     .map((task) => collectCount(task.rows)).filter((count): count is number => count !== null);
@@ -58,7 +61,9 @@ export function getCollectionProgress(info: VeCollectInfo | null | undefined) {
   const candidates = collectCount(info?.stats?.rows_total);
   const construct = info?.construct;
   const snapshot = construct?.progress;
-  const phase = !construct
+  const phase = info?.company_name_recovery ? 'cleaning_names'
+    : info?.saved_email_review_pending ? 'reviewing_emails'
+    : info?.relevance_review_requested || job?.payload?.review_relevance ? 'reviewing_relevance' : !construct
     ? (tasks.length > 0 || (Array.isArray(info?.plan?.tasks) && info.plan.tasks.length > 0) ? 'collecting' : 'planning')
     : snapshot?.status === 'pending' ? 'construct_queued'
       : snapshot?.status === 'completed' || construct.status === 'done' ? 'finishing'
@@ -67,8 +72,15 @@ export function getCollectionProgress(info: VeCollectInfo | null | undefined) {
   const percent = collectCount(snapshot?.current_step_progress);
   const stepPercent = phase === 'processing' && snapshot?.status === 'processing'
     && percent !== null && percent <= 100 ? percent : null;
+  const liveNames = phase === 'cleaning_names' && job?.stage === 'base_collect'
+    && job.status === 'running' && job.progress?.label === 'Очищаем названия компаний'
+    ? job.progress : null;
+  const namesDone = collectCount(liveNames?.done);
+  const namesTotal = collectCount(liveNames?.total);
+  const nameProgress = namesDone !== null && namesTotal !== null && namesDone <= namesTotal
+    ? { done: namesDone, total: namesTotal } : null;
   return {
-    phase, candidates, sourceRows, stepPercent,
+    phase, candidates, sourceRows, stepPercent, nameProgress,
     stepKey: typeof snapshot?.current_step_key === 'string' ? snapshot.current_step_key : null,
   } as const;
 }
