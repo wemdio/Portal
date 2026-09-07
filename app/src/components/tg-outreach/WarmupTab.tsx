@@ -117,6 +117,18 @@ export default function WarmupTab({
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [expandedConvId, setExpandedConvId] = useState<number | null>(null);
   const [days, setDays] = useState(4);
+  /**
+   * Кого греем. Прогрев теперь идёт по выбранным аккаунтам, а не по всей
+   * кампании: остальные в это время продолжают рассылать.
+   */
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  /**
+   * У кого прогрев назначен прямо сейчас — считается при загрузке списка.
+   *
+   * Не в рендере: «сейчас» там читать нельзя, отрисовка обязана быть чистой, а
+   * список и так перезагружается по тому же опросу, что и остальной экран.
+   */
+  const [warmingIds, setWarmingIds] = useState<Set<string>>(new Set());
   const [settings, setSettings] = useState<WarmupSettings>(defaultWarmupSettings());
   const [chats, setChats] = useState<WarmupChat[]>([]);
   const [activities, setActivities] = useState<WarmupActivity[]>([]);
@@ -143,7 +155,20 @@ export default function WarmupTab({
     const res = await authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}`);
     if (!res.ok) return;
     const data = await res.json();
-    setAccounts((Array.isArray(data) ? data : data.items ?? []) as OutreachAccount[]);
+    const rows = (Array.isArray(data) ? data : data.items ?? []) as OutreachAccount[];
+    setAccounts(rows);
+    // Предвыбираем тех, у кого прогрев уже назначен: экран открывают, чтобы
+    // посмотреть на идущий прогрев, а не чтобы каждый раз собирать список
+    // заново.
+    const now = Date.now();
+    const warming = rows
+      .filter((a) => {
+        const until = a.warmup_until ? new Date(a.warmup_until).getTime() : NaN;
+        return Number.isFinite(until) && until > now;
+      })
+      .map((a) => a.id);
+    setWarmingIds(new Set(warming));
+    setSelected((prev) => (prev.size || !warming.length ? prev : new Set(warming)));
   }, [campaignId]);
 
   // Чаты нужны и для галочки (без проверенных её незачем включать), и для
@@ -300,6 +325,32 @@ export default function WarmupTab({
     setBusy(true);
     setError(null);
     try {
+      /**
+       * Сначала помечаем выбранных, потом запускаем.
+       *
+       * Порядок обязателен: круг прогрева берёт тех, у кого проставлен срок, и
+       * запуск без пометок нашёл бы ноль аккаунтов. Остановка снимает пометки
+       * тем же вызовом с нулём дней — иначе снятые с прогрева так и остались бы
+       * вне боевой рассылки.
+       */
+      const ids = [...selected];
+      if (method === 'POST' ? ids.length > 0 : accounts.length > 0) {
+        const markRes = await authFetch(`${API_BASE}/accounts/warmup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            method === 'POST'
+              ? { account_ids: ids, days }
+              : { account_ids: accounts.map((a) => a.id), days: 0 },
+          ),
+        });
+        if (!markRes.ok) {
+          const body = await markRes.json().catch(() => ({}));
+          setError(body.error ?? 'Не получилось отметить аккаунты');
+          return;
+        }
+      }
+
       const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup`, {
         method,
         ...(method === 'POST'
@@ -315,6 +366,7 @@ export default function WarmupTab({
       }
       await loadStatus();
       await loadConversations();
+      await loadAccounts();
     } finally {
       setBusy(false);
     }
@@ -340,19 +392,26 @@ export default function WarmupTab({
   // Ленту активностей показываем, если этап включён в прогоне либо включён в
   // настройках — оператор должен видеть, что переключатель живой.
   const chatStageVisible = Boolean(chatStage?.enabled) || settings.public_chats;
-  // Прогрев и боевой аутрич взаимоисключающие — на запущенной кампании кнопка
-  // всё равно получит отказ от сервера, поэтому предупреждаем заранее.
-  const blockedByCampaign = campaignStatus === 'running' || campaignStatus === 'paused';
+  /**
+   * Кампанию останавливать больше не нужно: взаимоисключающими остаются
+   * аккаунт и его роль, а не кампания целиком. Выбранные греются, остальные
+   * продолжают рассылать.
+   */
+  const warmingCount = selected.size;
+  const tooFewSelected = warmingCount < 2;
+  /** Выключенные в портале греть нечем — в «выбрать все» их не берём. */
+  const selectableIds = accounts.filter((a) => a.is_active).map((a) => a.id);
 
   return (
     <div className="space-y-3 p-4">
-      {blockedByCampaign && !isRunning && (
-        <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-800">
+      {campaignStatus === 'running' && !isRunning && (
+        <div className="flex items-start gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3.5 py-2.5 text-xs text-gray-600">
           <AlertCircle className="mt-px h-4 w-4 shrink-0" />
           <span>
-            <span className="font-medium">Кампания сейчас работает по боевым лидам.</span>{' '}
-            Прогрев можно запустить только на остановленной кампании: аккаунт не может
-            одновременно греться и писать клиентам. Остановите кампанию кнопкой сверху.
+            <span className="font-medium">Кампания работает — останавливать её не нужно.</span>{' '}
+            Выбранные аккаунты уйдут на прогрев, остальные продолжат рассылать. Аккаунт не
+            может делать и то и другое одновременно, поэтому греющиеся из рассылки временно
+            выпадают.
           </span>
         </div>
       )}
@@ -401,8 +460,8 @@ export default function WarmupTab({
           ) : (
             <button
               type="button"
-              disabled={busy || blockedByCampaign}
-              title={blockedByCampaign ? 'Сначала остановите кампанию' : undefined}
+              disabled={busy || tooFewSelected}
+              title={tooFewSelected ? 'Отметьте хотя бы два аккаунта — они греются, переписываясь друг с другом' : undefined}
               onClick={() => void act('POST')}
               className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
@@ -460,6 +519,69 @@ export default function WarmupTab({
         runActive={isRunning}
         onSaved={() => { void loadStatus(); void loadChats(); }}
       />
+
+      {/* Кого греем */}
+      <div className="rounded-xl border border-gray-200 bg-white p-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-gray-800">
+            <input
+              type="checkbox"
+              disabled={isRunning}
+              checked={selectableIds.length > 0 && selected.size === selectableIds.length}
+              // Частичный выбор помечаем «минусом»: без него галочка «все»
+              // выглядит снятой и приглашает нажать её второй раз, стирая
+              // набранный вручную список.
+              ref={(el) => { if (el) el.indeterminate = selected.size > 0 && selected.size < selectableIds.length; }}
+              onChange={(e) => setSelected(e.target.checked ? new Set(selectableIds) : new Set())}
+              className="h-3.5 w-3.5 cursor-pointer accent-indigo-600 disabled:cursor-not-allowed"
+            />
+            Все
+          </label>
+          <span className="text-[11px] text-gray-500">
+            Выбрано {selected.size} из {selectableIds.length}
+          </span>
+          {tooFewSelected && !isRunning && (
+            <span className="text-[11px] text-amber-700">
+              Нужно минимум два — они греются, переписываясь друг с другом.
+            </span>
+          )}
+        </div>
+
+        <div className="mt-2 grid max-h-56 grid-cols-1 gap-x-4 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
+          {accounts.map((a) => {
+            const disabled = isRunning || !a.is_active;
+            return (
+              <label
+                key={a.id}
+                title={a.is_active ? undefined : 'Аккаунт выключен в портале — греть его нечем'}
+                className={`flex items-center gap-2 border-t border-gray-100 py-1.5 text-xs first:border-t-0 ${
+                  disabled ? 'cursor-not-allowed opacity-40' : 'cursor-pointer'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  disabled={disabled}
+                  checked={selected.has(a.id)}
+                  onChange={(e) => setSelected((prev) => {
+                    const next = new Set(prev);
+                    if (e.target.checked) next.add(a.id); else next.delete(a.id);
+                    return next;
+                  })}
+                  className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-indigo-600 disabled:cursor-not-allowed"
+                />
+                <span className="min-w-0 flex-1 truncate text-gray-700">
+                  {a.first_name || a.session_name}
+                </span>
+                {warmingIds.has(a.id) && (
+                  <span className="shrink-0 rounded bg-indigo-50 px-1 py-0.5 text-[10px] text-indigo-700">
+                    греется
+                  </span>
+                )}
+              </label>
+            );
+          })}
+        </div>
+      </div>
 
       {/* Метрики */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
