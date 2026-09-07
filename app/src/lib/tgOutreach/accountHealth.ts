@@ -47,7 +47,15 @@ export interface HealthProxy {
   total_errors?: number | null;
 }
 
-export type HealthTone = 'ok' | 'warn' | 'bad' | 'unknown';
+/**
+ * `info` — состояние по плану, а не оценка здоровья.
+ *
+ * Прогрев не «хорошо» и не «плохо»: аккаунт молчит намеренно. Серый `unknown`
+ * читался как «портал не знает», зелёный — как «рассылает». Синий — тот же
+ * цвет, которым прогрев обозначен в статусе кампании, так что на двух экранах
+ * это одно и то же состояние.
+ */
+export type HealthTone = 'ok' | 'warn' | 'bad' | 'info' | 'unknown';
 
 export interface HealthMark {
   tone: HealthTone;
@@ -174,7 +182,7 @@ export function describeSending(ctx: SendingContext): HealthMark {
   const warmupUntil = ts(account.warmup_until);
   if (warmupUntil !== null && warmupUntil > ctx.now) {
     return {
-      tone: 'unknown',
+      tone: 'info',
       label: 'на прогреве',
       detail: `Аккаунт греется до ${hhmm(account.warmup_until as string)} и в боевую рассылку не берётся. `
         + 'Как только срок выйдет, круг подхватит его сам.',
@@ -411,6 +419,7 @@ export function healthToneClass(tone: HealthTone): string {
     case 'ok': return 'bg-emerald-50 text-emerald-700';
     case 'warn': return 'bg-amber-50 text-amber-700';
     case 'bad': return 'bg-rose-50 text-rose-700';
+    case 'info': return 'bg-blue-50 text-blue-700';
     default: return 'bg-gray-100 text-gray-500';
   }
 }

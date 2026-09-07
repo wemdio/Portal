@@ -5072,10 +5072,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
         <div className="flex items-center gap-2">
           {campaign.status !== 'running' && !stopping ? (
             <button type="button" onClick={() => void doAction('start')}
-              disabled={actionLoading || campaign.status === 'warming'}
-              title={campaign.status === 'warming'
-                ? 'Идёт прогрев аккаунтов — остановите его на вкладке «Прогрев»'
-                : undefined}
+              disabled={actionLoading}
               className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-emerald-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
               {actionLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
               Запустить
