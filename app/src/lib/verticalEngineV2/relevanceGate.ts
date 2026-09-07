@@ -5,6 +5,7 @@ import { isVeProviderBillingError } from './collectionErrors';
 import { readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint, type VeRelevanceFailureCode } from './relevanceCheckpoint';
 import { veRelevanceDecisionSchema, type VeRelevanceDecision } from './relevanceDecision';
 import { fetchVeRelevanceEvidence } from './relevanceEvidence';
+import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
 export type { VeRelevanceDecision } from './relevanceDecision';
 
 const BATCH_SIZE = 20;
@@ -12,25 +13,35 @@ const configuredMax = Number(process.env.VE_RELEVANCE_MAX_ROWS);
 const MAX_COMPANIES = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.min(10_000, Math.floor(configuredMax)) : 3000;
 const MAX_WEBSITES = 30;
 const FIELDS = ['company', 'website', 'category', 'description', 'vacancy_title', 'website_text'] as const;
+const ACTIVITY_FIELDS: ReadonlyArray<typeof FIELDS[number]> = ['description', 'website_text', 'category'];
 type Fields = Record<typeof FIELDS[number], string>;
 type Group = { rowIndices: number[]; rows: Array<Record<string, unknown>> };
 function rowText(row: Record<string, unknown>, names: string[]): string {
   for (const [key, value] of Object.entries(row)) {
-    if (names.includes(key.trim().toLowerCase()) && typeof value === 'string' && value.trim()) return value.trim();
+    if (!names.includes(key.trim().toLowerCase())) continue;
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   }
   return '';
 }
-function groupsFor(rows: Array<Record<string, unknown>>): Group[] {
+function companyIdentityFor(row: Record<string, unknown>): string | null {
+  return veCompanyIdentityKey({ inn: rowText(row, ['inn', 'инн']),
+    company: rowText(row, ['company', 'компания']), website: rowText(row, ['website', 'site', 'сайт']) });
+}
+function groupsFor(rows: Array<Record<string, unknown>>, evidenceRows: Array<Record<string, unknown>>): Group[] {
   const groups = new Map<string, Group>();
   rows.forEach((row, index) => {
-    const inn = rowText(row, ['inn', 'инн']).replace(/\D/g, '');
-    const company = rowText(row, ['company', 'компания']).toLowerCase().replace(/\s+/g, ' ');
-    const website = rowText(row, ['website', 'site', 'сайт']).toLowerCase();
-    const key = inn ? 'inn:' + inn : company || website ? JSON.stringify([company, website]) : 'anonymous:' + index;
+    const key = companyIdentityFor(row) ?? 'anonymous:' + index;
     const group = groups.get(key);
     if (group) { group.rowIndices.push(index); group.rows.push(row); }
     else groups.set(key, { rowIndices: [index], rows: [row] });
   });
+  for (const row of evidenceRows) {
+    const key = companyIdentityFor(row);
+    // A raw source observation supplies facts, never another recipient or a
+    // new company to classify. Weak/name-only identity cannot join companies.
+    if (key) groups.get(key)?.rows.push(row);
+  }
   return [...groups.values()];
 }
 function fieldsFor(group: Group): Fields {
@@ -50,6 +61,20 @@ function fieldsFor(group: Group): Fields {
     vacancy_title: merged(['vacancy_title', 'vacancy', 'вакансия'], 400), website_text: '' };
 }
 const normalized = (value: string) => value.replace(/\s+/g, ' ').trim().toLowerCase();
+const activityQuote = (quote: string) => /\p{L}/u.test(quote
+  .replace(/(?:https?:\/\/|www\.)[^\s<>]+/giu, '')
+  .replace(/(?:[\p{L}\p{N}-]+\.)+[\p{L}]{2,}(?:\/[^\s<>]*)?/gu, '')
+  .replace(/\b(?:url|website|okved|codes?)\b\s*:?|сайт\s*:|оквэд|коды?\s*(?:деятельности)?/giu, ''));
+function isCompleteShortActivityQuote(field: typeof FIELDS[number], quote: string, value: string): boolean {
+  const text = normalized(quote);
+  // A full catalog label such as «Банк» or «IT» is not a vague substring.
+  // Category observations are joined as separate lines; adding another source
+  // or a registry code must not invalidate a complete label from the first.
+  // Keep the stricter length check for free-text excerpts and identities.
+  const completeValues = field === 'category' ? value.split(/\r?\n/) : [value];
+  return ACTIVITY_FIELDS.includes(field) && text.length >= 2 && text.length < 6
+    && completeValues.some((part) => text === normalized(part)) && activityQuote(quote);
+}
 const outputDecision = z.object({
   i: z.number().int().nonnegative(), status: z.enum(['relevant', 'irrelevant', 'needs_review']),
   reason: z.string().min(1).max(400),
@@ -68,12 +93,9 @@ function messages(scope: string, batch: Fields[], language: 'ru' | 'en', secondP
   ].join('\n') }, { role: 'user', content: scope + '\nRows, local indices 0..' + (batch.length - 1) + ':\n' + JSON.stringify(batch.map((fields, i) => ({ i, ...fields }))) }];
 }
 function supportedDecision(raw: z.infer<typeof outputDecision>, fields: Fields, contextHash: string, attempts: number, secondPass: boolean): VeRelevanceDecision {
-  const evidence = raw.evidence.filter((item) => normalized(item.quote).length >= 6 && normalized(fields[item.field]).includes(normalized(item.quote)));
-  const activityQuote = (quote: string) => /\p{L}/u.test(quote
-    .replace(/(?:https?:\/\/|www\.)[^\s<>]+/giu, '')
-    .replace(/(?:[\p{L}\p{N}-]+\.)+[\p{L}]{2,}(?:\/[^\s<>]*)?/gu, '')
-    .replace(/\b(?:url|website|okved|codes?)\b\s*:?|сайт\s*:|оквэд|коды?\s*(?:деятельности)?/giu, ''));
-  const activityEvidence = evidence.some((item) => ['description', 'website_text', 'category'].includes(item.field) && activityQuote(item.quote));
+  const evidence = raw.evidence.filter((item) => normalized(fields[item.field]).includes(normalized(item.quote))
+    && (normalized(item.quote).length >= 6 || isCompleteShortActivityQuote(item.field, item.quote, fields[item.field])));
+  const activityEvidence = evidence.some((item) => ACTIVITY_FIELDS.includes(item.field) && activityQuote(item.quote));
   let status = raw.status, reason = raw.reason;
   if (status !== 'needs_review' && (!activityEvidence || evidence.length !== raw.evidence.length)) {
     status = 'needs_review'; reason = 'Недостаточно подтверждённых сведений о деятельности компании; нужна дополнительная проверка.';
@@ -96,6 +118,8 @@ export interface VeRelevanceGateResult {
 }
 export async function findIrrelevantRows(input: {
   rows: Array<Record<string, unknown>>; verticalName: string; verticalSummary?: string;
+  /** Supplementary company facts only; their emails/statuses never become recipients. */
+  evidenceRows?: Array<Record<string, unknown>>;
   hypothesisTitle?: string; hypothesisDescription?: string; language: 'ru' | 'en';
   log?: (message: string) => void; signal?: AbortSignal; checkpointScope?: string;
   checkpoint?: unknown; onCheckpoint?: (checkpoint: VeRelevanceCheckpoint) => Promise<void>;
@@ -112,16 +136,25 @@ export async function findIrrelevantRows(input: {
   const reviewAttempt = relevanceHash(input.reviewAttempt ?? 'automatic');
   const result: VeRelevanceGateResult = { checkpoint, decisions: new Map(), flagged: new Set(), unchecked: new Set(), review: new Set(), errored: new Set(),
     coverage: { checkedCompanies: 0, totalCompanies: 0, complete: false }, tokensUsed: 0, costUsd: 0 };
-  const groups = groupsFor(input.rows); result.coverage.totalCompanies = groups.length;
+  const groups = groupsFor(input.rows, input.evidenceRows ?? []); result.coverage.totalCompanies = groups.length;
   const scope = ['Vertical: ' + input.verticalName, input.verticalSummary ?? '', 'Target hypothesis: ' + (input.hypothesisTitle ?? ''), input.hypothesisDescription ?? ''].join('\n');
   const entries = groups.map((group) => {
     const fields = fieldsFor(group);
-    const identity = group.rows.map((row) => rowText(row, ['inn', 'инн']).replace(/\D/g, '')).find(Boolean) ?? '';
-    const attempts = group.rows.reduce((max, row) => {
-      const old = veRelevanceDecisionSchema.safeParse(row._ve_relevance);
+    const identity = normalizeVeCompanyInn(rowText(input.rows[group.rowIndices[0]], ['inn', 'инн']));
+    const attempts = group.rowIndices.reduce((max, index) => {
+      const old = veRelevanceDecisionSchema.safeParse(input.rows[index]._ve_relevance);
       return Math.max(max, old.success && old.data.context_hash === contextHash ? old.data.review_attempts ?? 0 : 0);
     }, 0);
-    return { group, fields, key: relevanceHash([identity, fields]), cacheable: Boolean(identity || fields.company || fields.website), attempts };
+    // Re-evaluate affected old verdicts once, without invalidating the paid
+    // checkpoint of unrelated companies. The old guard discarded valid short
+    // activity labels before saving their evidence, so they cannot be repaired
+    // merely by reinterpreting the saved verdict.
+    const keyParts: unknown[] = [identity, fields];
+    if (ACTIVITY_FIELDS.some((field) => (field === 'category' ? fields[field].split(/\r?\n/) : [fields[field]])
+      .some((value) => isCompleteShortActivityQuote(field, value, fields[field])))) {
+      keyParts.push('complete-short-activity-evidence-v1');
+    }
+    return { group, fields, key: relevanceHash(keyParts), cacheable: Boolean(identity || fields.company || fields.website), attempts };
   });
   type Entry = typeof entries[number];
   const current = new Map<Entry, VeRelevanceDecision>();

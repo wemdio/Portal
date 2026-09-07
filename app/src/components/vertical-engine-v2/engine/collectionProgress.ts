@@ -62,6 +62,7 @@ export function getCollectionProgress(
   const construct = info?.construct;
   const snapshot = construct?.progress;
   const phase = info?.company_name_recovery ? 'cleaning_names'
+    : info?.saved_email_review_pending ? 'reviewing_emails'
     : info?.relevance_review_requested || job?.payload?.review_relevance ? 'reviewing_relevance' : !construct
     ? (tasks.length > 0 || (Array.isArray(info?.plan?.tasks) && info.plan.tasks.length > 0) ? 'collecting' : 'planning')
     : snapshot?.status === 'pending' ? 'construct_queued'

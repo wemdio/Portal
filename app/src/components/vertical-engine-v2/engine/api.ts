@@ -109,6 +109,8 @@ export interface VeCollectStatsDto {
 
 export interface VeCollectInfo {
   relevance_review_requested?: boolean;
+  /** Only a phase marker; raw validation checkpoints stay on the server. */
+  saved_email_review_pending?: boolean;
   /** Worker-authoritative saved reserve; never count it as ready inventory. */
   relevance_summary?: import('@/lib/verticalEngineV2/relevanceReserve').VeRelevanceReserveSummary;
   company_name_cleanup?: import('@/lib/verticalEngineV2/companyNames').VeCompanyNameCleanupSummary;

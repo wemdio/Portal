@@ -1086,11 +1086,13 @@ describe('VE2 cross-base contact exclusion', () => {
       inn: '7700000123',
       email: 'fresh@other.test',
     }))).toBe(true);
+    // A matching generic name without INN or website does not prove that this
+    // new contact belongs to the company already present in the uploaded base.
     expect(baseRowMatchesExclusion(keys, unifiedRow({
       company: 'Альфа ООО',
       inn: '',
       email: 'fresh@other.test',
-    }))).toBe(true);
+    }))).toBe(false);
   });
 
   it('rechecks other project bases after constructor import and drops duplicate emails', async () => {

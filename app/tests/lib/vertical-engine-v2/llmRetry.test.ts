@@ -116,6 +116,7 @@ describe('llm rawCall retry', () => {
     fetchMock.mockClear();
     const rows = Array.from({ length: 102 }, (_, i) => ({
       company: `Company ${Math.floor(i / 2)}`, email: `contact${i}@example.org`,
+      inn: String(7700000000 + Math.floor(i / 2)),
     }));
     const gate = await findIrrelevantRows({ rows, verticalName: 'Equipment', language: 'en' });
     expect(fetchMock).toHaveBeenCalledTimes(1);

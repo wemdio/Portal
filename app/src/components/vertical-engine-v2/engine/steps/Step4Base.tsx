@@ -813,7 +813,8 @@ function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { base: VeBa
   const isReadyPreview = base.collect_info?.collection_mode === 'preview';
   const reserve = base.collect_info?.relevance_summary;
   const hasReserve = (collectCount(reserve?.total) ?? 0) > 0;
-  const hasReviewCandidates = (collectCount(reserve?.needs_review) ?? 0) + (collectCount(reserve?.error) ?? 0) > 0;
+  const hasReviewCandidates = (collectCount(reserve?.needs_review) ?? 0) > 0
+    || (collectCount(reserve?.error) ?? 0) > 0 || (collectCount(reserve?.email_retryable) ?? 0) > 0;
   const progress = getCollectionProgress(base.collect_info, job);
   const columns = Array.isArray(base.columns) ? base.columns.filter((column) => column !== VE_COMPANY_NAME_FIELD && column !== '_ve_relevance') : [];
   const previewRows = (Array.isArray(base.sample_rows) ? base.sample_rows : [])
@@ -947,7 +948,7 @@ function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { base: VeBa
               disabled={reviewStarting}>
               {reviewStarting ? 'Запускаем проверку…' : 'Уточнить сохранённые контакты'}
             </button>
-            <p className={`mt-1 ${HE.faint}`}>Повторно проверяются сохранённые компании без подтверждённой релевантности. Они не попадут в запуск до завершения проверок.</p>
+            <p className={`mt-1 ${HE.faint}`}>Уточняем релевантность и повторяем незавершённую проверку сохранённых email. Новый сбор не запускается. Непроверенные контакты не попадут в запуск.</p>
           </div> : null}
         </div>
       ) : null}
@@ -1168,6 +1169,7 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
   const nameProgress = getCollectionProgress(base.collect_info, job);
   const namesInProgress = base.status === 'collecting' && nameProgress.phase === 'cleaning_names';
   const relevanceInProgress = base.status === 'collecting' && nameProgress.phase === 'reviewing_relevance';
+  const emailsInProgress = base.status === 'collecting' && nameProgress.phase === 'reviewing_emails';
   const namesChecked = nameProgress.nameProgress?.done ?? collectCount(nameCleanup?.checked);
   const namesTotal = nameProgress.nameProgress?.total ?? collectCount(nameCleanup?.companies);
   const namesFailed = collectCount(nameCleanup?.failed);
@@ -1209,6 +1211,7 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
           <p className="font-medium">Проверено и подготовлено: {target.ready_rows.toLocaleString('ru-RU')} / цель {target.ready_target.toLocaleString('ru-RU')}</p>
           <p className="mt-1">
             {namesInProgress ? 'Контакты сохранены. Подготавливаем названия компаний для превью и писем.'
+              : emailsInProgress ? 'Повторяем незавершённую проверку сохранённых email. Контакты сохранены; новый сбор не запускается.'
               : relevanceInProgress ? 'Уточняем деятельность сохранённых компаний по доступным сведениям с сайтов. На этом этапе новый сбор не запускается.'
               : target.status === 'collecting' ? `Проход ${target.round} из ${target.max_rounds}. Добираем контакты после проверок.`
               : target.status === 'target_reached' ? 'Превью готово к согласованию. Отправка ещё не включена.'
@@ -1298,6 +1301,7 @@ const COLLECT_PHASE_LABELS = {
   finishing: 'Завершаем проверку базы',
   cleaning_names: 'Очищаем названия компаний',
   reviewing_relevance: 'Уточняем релевантность сохранённых контактов',
+  reviewing_emails: 'Проверяем сохранённые email',
   construct_failed: 'Обработка остановлена',
 };
 

@@ -1,3 +1,6 @@
+import { veCompanyIdentityKey } from './collectionIdentity';
+import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
+
 /** Durable candidates are separate from the approved/launchable base projection. */
 export interface VeRelevanceReserve {
   version: 1;
@@ -12,16 +15,16 @@ export interface VeRelevanceReserveSummary {
   error: number;
   irrelevant: number;
   email_unready: number;
+  /** Additional overlapping count, not another term in the total. */
+  email_retryable: number;
   other: number;
 }
 
 const cell = (value: unknown) => typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
 
 export function veRelevanceCompanyKey(row: Record<string, unknown>): string {
-  const inn = cell(row.inn).replace(/\D/g, '');
-  if (inn) return 'inn:' + inn;
-  const company = cell(row.company).toLocaleLowerCase(), website = cell(row.website).toLocaleLowerCase();
-  if (company || website) return JSON.stringify([company, website]);
+  const stableIdentity = veCompanyIdentityKey(row);
+  if (stableIdentity) return stableIdentity;
   // Anonymous rows still retain their distinct source facts rather than sharing
   // one empty key; quality metadata must not change that identity on a retry.
   return JSON.stringify(Object.entries(row).filter(([key]) => !key.startsWith('_') && key !== 'email')
@@ -72,8 +75,9 @@ export function mergeVeRelevanceRows(...groups: Array<Array<Record<string, unkno
 }
 
 export function summarizeVeRelevanceReserve(rows: Array<Record<string, unknown>>): VeRelevanceReserveSummary {
-  const summary: VeRelevanceReserveSummary = { total: rows.length, needs_review: 0, error: 0, irrelevant: 0, email_unready: 0, other: 0 };
+  const summary: VeRelevanceReserveSummary = { total: rows.length, needs_review: 0, error: 0, irrelevant: 0, email_unready: 0, email_retryable: 0, other: 0 };
   for (const row of rows) {
+    if (needsVeSavedEmailReview(row)) summary.email_retryable += 1;
     const decision = row._ve_relevance && typeof row._ve_relevance === 'object'
       ? row._ve_relevance as { status?: unknown } : null;
     if (decision?.status === 'needs_review') summary.needs_review += 1;
@@ -91,7 +95,7 @@ export function needsVeRelevanceReview(row: Record<string, unknown>): boolean {
   const decision = row._ve_relevance && typeof row._ve_relevance === 'object'
     ? row._ve_relevance as { status?: unknown } : null;
   return decision?.status === 'needs_review' || decision?.status === 'error'
-    || (!decision && row._relevance_unchecked === true);
+    || (row._relevance_unchecked === true && decision?.status !== 'irrelevant' && String(row._low_relevance ?? '') !== 'true');
 }
 
 /** Spend the next bounded website pass on usable emails not yet investigated. */
@@ -100,4 +104,41 @@ export function needsVeRelevanceEvidence(row: Record<string, unknown>): boolean 
     ? row._ve_relevance as { status?: unknown; review_attempts?: unknown } : null;
   return decision?.status === 'needs_review' && row._email_status === 'ok'
     && cell(row.website).length > 0 && (decision.review_attempts ?? 0) === 0;
+}
+
+export interface VeRelevanceReviewBatch {
+  /** All saved recipient rows of selected companies, with their own email verdicts. */
+  rows: Array<Record<string, unknown>>;
+  /** Source observations are classifier context only, never output recipients. */
+  evidenceRows: Array<Record<string, unknown>>;
+  companies: number;
+}
+
+/** A company is reviewed once using facts from all of its saved observations. */
+export function buildVeRelevanceReviewBatch(input: {
+  reserve: Array<Record<string, unknown>>;
+  ready: Array<Record<string, unknown>>;
+  source: Array<Record<string, unknown>>;
+  automatic: boolean;
+}): VeRelevanceReviewBatch {
+  const saved = mergeVeRelevanceRows(input.reserve, input.ready);
+  const withWebsite = new Set([...saved, ...input.source]
+    .filter((row) => Object.entries(row).some(([key, value]) =>
+      ['website', 'site', 'сайт'].includes(key.trim().toLowerCase()) && cell(value) !== ''))
+    .map(veRelevanceCompanyKey));
+  const selected = new Set(input.reserve.filter((row) => {
+    if (!needsVeRelevanceReview(row)) return false;
+    if (!input.automatic) return true;
+    const decision = row._ve_relevance as { status?: unknown; review_attempts?: unknown } | null;
+    return decision?.status === 'needs_review' && row._email_status === 'ok'
+      && (decision.review_attempts ?? 0) === 0 && withWebsite.has(veRelevanceCompanyKey(row));
+  }).map(veRelevanceCompanyKey));
+  return {
+    rows: saved.filter((row) => selected.has(veRelevanceCompanyKey(row))),
+    // Do not pass old raw-row verdicts into the cache/attempt counter. Only the
+    // recipient observations may carry authoritative validation metadata.
+    evidenceRows: input.source.filter((row) => selected.has(veRelevanceCompanyKey(row))).map((row) =>
+      Object.fromEntries(Object.entries(row).filter(([key]) => !key.startsWith('_')))),
+    companies: selected.size,
+  };
 }

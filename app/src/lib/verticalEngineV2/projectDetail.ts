@@ -67,24 +67,29 @@ async function readDetailPages(
 // Также удаляем checkpoints исключённых кандидатов и relevance-вердиктов; helper используется всеми
 // VE2-ответами, возвращающими карточку сборки, включая идемпотентный collect POST.
 export function stripTaskHarvest(base: Record<string, unknown>): Record<string, unknown> {
-  const info = base.collect_info as { tasks?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown; relevance_reserve?: unknown; company_name_checkpoint?: unknown; company_name_recovery?: unknown } | null | undefined;
+  const info = base.collect_info as { tasks?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown; relevance_reserve?: unknown; saved_email_recovery?: unknown; company_name_checkpoint?: unknown; company_name_recovery?: unknown } | null | undefined;
   if (!info) return base;
   const tasks = Array.isArray(info.tasks) ? info.tasks : [];
   const hasHarvest = tasks.some(
     (t) => t !== null && typeof t === 'object' && 'harvest' in (t as Record<string, unknown>),
   );
   if (!hasHarvest && !('target_checkpoint' in info) && !('relevance_checkpoint' in info) && !('relevance_reserve' in info)
-    && !('company_name_checkpoint' in info) && !('company_name_recovery' in info)) return base;
+    && !('saved_email_recovery' in info) && !('company_name_checkpoint' in info) && !('company_name_recovery' in info)) return base;
   const publicInfo = { ...info };
+  const emailRecovery = info.saved_email_recovery && typeof info.saved_email_recovery === 'object'
+    ? info.saved_email_recovery as { batch?: unknown; error?: unknown } : null;
   delete publicInfo.target_checkpoint;
   delete publicInfo.relevance_checkpoint;
   delete publicInfo.relevance_reserve;
+  delete publicInfo.saved_email_recovery;
   delete publicInfo.company_name_checkpoint;
   // Recovery marker is needed by the collect button but contains no raw contacts.
   return {
     ...base,
     collect_info: {
       ...publicInfo,
+      // Never send addresses, result hashes or the child job checkpoint in polls.
+      ...(emailRecovery ? { saved_email_review_pending: !!emailRecovery.batch && !emailRecovery.error } : {}),
       tasks: tasks.map((t) => {
         if (t === null || typeof t !== 'object' || !('harvest' in t)) return t;
         const clone = { ...(t as Record<string, unknown>) };
