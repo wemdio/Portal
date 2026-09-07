@@ -32,6 +32,8 @@ export interface HealthAccount {
   /** Разобранный диагноз Telegram — колонка показывает его дословно. */
   check_detail?: string | null;
   proxy_id?: string | null;
+  /** Пока не наступил — аккаунт греется и в боевую рассылку не берётся. */
+  warmup_until?: string | null;
 }
 
 export interface HealthProxy {
@@ -158,6 +160,25 @@ export function describeSending(ctx: SendingContext): HealthMark {
       label: 'выключен',
       detail: `Аккаунт выключен в портале — рассылка его не берёт вообще. ${lastSentNote}`,
       days: silentDays,
+    };
+  }
+
+  /**
+   * Прогрев — раньше всех диагнозов, кроме выключенного.
+   *
+   * Греющийся аккаунт молчит по плану, и назвать это «молчит 5 дней» значило бы
+   * отправить оператора искать поломку там, где всё идёт как задумано. Стоит
+   * выше проверок Telegram намеренно: свежая партия ещё не проверялась, и её
+   * «не проверялся» тоже не про поломку.
+   */
+  const warmupUntil = ts(account.warmup_until);
+  if (warmupUntil !== null && warmupUntil > ctx.now) {
+    return {
+      tone: 'unknown',
+      label: 'на прогреве',
+      detail: `Аккаунт греется до ${hhmm(account.warmup_until as string)} и в боевую рассылку не берётся. `
+        + 'Как только срок выйдет, круг подхватит его сам.',
+      days: null,
     };
   }
 

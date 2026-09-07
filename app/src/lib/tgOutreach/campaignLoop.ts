@@ -1501,14 +1501,43 @@ export async function runCampaignLoop(
     return;
   }
 
-  const { data: accounts } = await db
+  const { data: allAccounts } = await db
     .from('tg_outreach_accounts')
     .select('*')
     .eq('campaign_id', campaignId)
     .eq('is_active', true);
 
+  /**
+   * Греющиеся в бой не идут.
+   *
+   * Раньше прогрев останавливал кампанию целиком: его запуск переводил статус в
+   * `warming`, и рассылка вставала у всех. Пользоваться этим было нельзя, и
+   * новые аккаунты шли в бой с первого дня — там, где живут около тридцати
+   * писем. Теперь прогрев — свойство аккаунта: кампания продолжает рассылать
+   * готовыми, пока новички греются рядом.
+   *
+   * Отбор по времени, а не по флагу: срок истёк — аккаунт боевой без единого
+   * действия оператора.
+   */
+  const nowMs = Date.now();
+  const isWarming = (a: OutreachAccount): boolean => {
+    const until = a.warmup_until ? new Date(a.warmup_until).getTime() : NaN;
+    return Number.isFinite(until) && until > nowMs;
+  };
+  const warmingNow = (allAccounts ?? []).filter((a) => isWarming(a as OutreachAccount));
+  const accounts = (allAccounts ?? []).filter((a) => !isWarming(a as OutreachAccount));
+
+  if (warmingNow.length) {
+    log('info', `На прогреве ${warmingNow.length} аккаунтов — в боевую рассылку их не беру.`);
+  }
+
   if (!accounts?.length) {
-    log('error', 'Нет активных аккаунтов в кампании — поставил на паузу. Как только включите хотя бы один аккаунт, кампания возобновится автоматически.');
+    log(
+      'error',
+      warmingNow.length
+        ? `Все ${warmingNow.length} включённых аккаунтов на прогреве — рассылать некем. Кампания на паузе и поднимется сама, как только у кого-то закончится прогрев.`
+        : 'Нет активных аккаунтов в кампании — поставил на паузу. Как только включите хотя бы один аккаунт, кампания возобновится автоматически.',
+    );
     // Use paused (not error) so resumeRunningCampaigns retries us automatically
     // once accounts become active again, instead of leaving the campaign stuck.
     const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
