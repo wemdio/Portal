@@ -638,6 +638,8 @@ export interface VeCollectInfo {
   supply_hold?: boolean;
   supply_hold_since?: string;
   target_progress?: VeCollectionTargetProgress;
+  /** Explicit manual recovery: recheck persisted constructor output, not sources. */
+  validation_retry?: boolean;
   /** Worker-only: discarded candidates must not be paid for again next round. */
   target_checkpoint?: {
     completed_round: number;
@@ -645,6 +647,9 @@ export interface VeCollectInfo {
     processed_rows?: number;
     low_relevance?: number;
     relevance_unchecked?: number;
+    /** Baselines before this round, retained when its validation is replaced. */
+    prior_low_relevance?: number;
+    prior_relevance_unchecked?: number;
   };
   /**
    * Refill-режим ENG auto-pipeline (payload.refill джобы): после CONSTRUCT —
@@ -714,6 +719,8 @@ export interface VeCollectInfo {
     relevance_checked_companies?: number;
     relevance_total_companies?: number;
     relevance_coverage_complete?: boolean;
+    /** Coverage above concerns the remaining saved rows during manual recovery. */
+    relevance_recovery?: boolean;
     /** Отсутствует у промежуточного снимка кандидатов до окончания проверок. */
     finished_at?: string;
   };
@@ -2276,6 +2283,183 @@ async function ensureTargetBaseAnalysis(ctx: VeStageContext, job: VeJob, baseId:
   if (insertError) throw new Error(`ve_jobs base_analyze enqueue: ${insertError.message}`);
 }
 
+async function checkCollectedRelevance(args: {
+  ctx: VeStageContext; job: VeJob; base: VeAutoBase;
+  finalRows: VeUnifiedRow[]; finalEmailStatuses: Array<string | null> | null;
+  market: string; usage: VeUsage;
+}) {
+  const { ctx, job, base, finalRows, finalEmailStatuses, market, usage } = args;
+  // ─── QUALITY GATE (до refill/финала: пометки нужны обоим путям) ───
+  // 1) вердикты валидации почт → _email_status на строках (запуск пропускает
+  //    не-'ok' — баунсы не ложатся на домен клиента);
+  // 2) релевант-гейт LLM → _low_relevance для явного несовпадения и
+  //    _relevance_unchecked для хвоста/сбойного батча. Оба fail-closed
+  //    фильтруются из launchTemplate/refill. Пометки живут только в jsonb-
+  //    строках: в columns не попадают, сетки UI их не видят.
+  type StoredRow = VeUnifiedRow & {
+    _email_status?: string;
+    _low_relevance?: boolean;
+    _relevance_unchecked?: boolean;
+  };
+  let storedRows: StoredRow[] = finalRows;
+  if (finalEmailStatuses) {
+    storedRows = storedRows.map((r, i) => {
+      const st = finalEmailStatuses[i];
+      return st ? { ...r, _email_status: st } : r;
+    });
+  }
+  let lowRelevanceCount = 0;
+  let relevanceUncheckedCount = 0;
+  let relevanceCheckedCompanies: number | null = null;
+  let relevanceTotalCompanies: number | null = null;
+  let relevanceCoverageComplete = false;
+  let relevanceError: string | null = null;
+  try {
+    const { data: vrow } = await ctx.supabase
+      .from('ve_verticals')
+      .select('name, summary')
+      .eq('id', base.vertical_id)
+      .maybeSingle();
+    const verticalName = (vrow as { name?: string } | null)?.name ?? '';
+    let hypothesisTitle = '';
+    let hypothesisDescription = '';
+    if (base.hypothesis_id) {
+      const { data: hypothesisRow, error: hypothesisError } = await ctx.supabase
+        .from('ve_hypotheses')
+        .select('title, description')
+        .eq('id', base.hypothesis_id)
+        .eq('project_id', job.project_id)
+        .eq('vertical_id', base.vertical_id)
+        .maybeSingle();
+      if (hypothesisError) {
+        throw new Error(`гипотеза relevance-gate недоступна: ${hypothesisError.message}`);
+      } else {
+        hypothesisTitle = (hypothesisRow as { title?: string } | null)?.title ?? '';
+        hypothesisDescription =
+          (hypothesisRow as { description?: string | null } | null)?.description ?? '';
+        if (!hypothesisTitle.trim()) {
+          throw new Error(
+            `гипотеза relevance-gate ${base.hypothesis_id} не найдена или не имеет title`,
+          );
+        }
+      }
+    }
+    const gate = await findIrrelevantRows({
+      rows: storedRows,
+      verticalName,
+      verticalSummary: (vrow as { summary?: string | null } | null)?.summary ?? '',
+      hypothesisTitle,
+      hypothesisDescription,
+      language: market === 'us' ? 'en' : 'ru',
+      log: (m) => stageLog(ctx, m),
+    });
+    usage.tokensUsed += gate.tokensUsed;
+    usage.costUsd += gate.costUsd;
+    lowRelevanceCount = gate.flagged.size;
+    relevanceUncheckedCount = gate.unchecked.size;
+    relevanceCheckedCompanies = gate.coverage.checkedCompanies;
+    relevanceTotalCompanies = gate.coverage.totalCompanies;
+    relevanceCoverageComplete = gate.coverage.complete;
+    relevanceError = gate.error ?? null;
+    if (gate.flagged.size > 0 || gate.unchecked.size > 0) {
+      storedRows = storedRows.map((r, i) =>
+        gate.flagged.has(i)
+          ? { ...r, _low_relevance: true }
+          : gate.unchecked.has(i)
+            ? { ...r, _relevance_unchecked: true }
+            : r,
+      );
+    }
+    stageLog(
+      ctx,
+      `[base_collect] релевант-гейт: проверено ${gate.coverage.checkedCompanies}/` +
+        `${gate.coverage.totalCompanies} компаний; нерелевантных строк ${lowRelevanceCount}; ` +
+        `без verdict ${relevanceUncheckedCount}`,
+    );
+  } catch (e) {
+    relevanceError = e instanceof Error ? e.message : String(e);
+    // Неожиданный сбой вне never-throw контракта gate тоже fail-closed: ни одна
+    // строка без verdict не должна попасть в проверенный итог или refill.
+    relevanceUncheckedCount = storedRows.length;
+    storedRows = storedRows.map((row) => ({ ...row, _relevance_unchecked: true }));
+    stageLog(
+      ctx,
+      `[base_collect] релевант-гейт недоступен, все ${storedRows.length} строк исключены: ` +
+        `${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  return { storedRows, lowRelevanceCount, relevanceUncheckedCount, relevanceCheckedCompanies, relevanceTotalCompanies, relevanceCoverageComplete, relevanceError };
+}
+
+
+/** Recheck the durable constructor result, without paying for sources/BC again. */
+async function resumeSavedPreviewValidation(
+  ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
+  target: VeCollectionTargetProgress, market: VeMarket, usage: VeUsage,
+): Promise<VeStageResult> {
+  const bcId = info.construct?.bc_job_id;
+  if (!bcId || info.construct?.status !== 'done') throw new Error('Saved constructor result is unavailable');
+  const { data: bc, error } = await ctx.supabase.from('base_constructor_jobs')
+    .select('status, selected_steps').eq('id', bcId).maybeSingle();
+  if (error) throw new Error(`Saved constructor read: ${error.message}`);
+  if (bc?.status !== 'completed' || !Array.isArray(bc.selected_steps)
+    || !bc.selected_steps.includes('split_emails') || !bc.selected_steps.includes('validate_emails')) {
+    throw new Error('Saved constructor has not completed per-address validation');
+  }
+  const imported = await importConstructRows(ctx, bcId);
+  if (!imported || imported.emailStatuses.some((status) => status === null)) {
+    throw new Error('Saved constructor email verdicts are incomplete');
+  }
+  // Legacy partial previews retained their verified recipients, but not the
+  // rejected/unchecked verdicts. Keep those recipients; recheck the remaining BC
+  // output for this same immutable hypothesis, including legacy rejected rows.
+  const priorReady = (Array.isArray(base.data) ? base.data : []) as Array<VeUnifiedRow & { _email_status?: string }>;
+  if (priorReady.some((row) => row._email_status !== 'ok')) throw new Error('Saved preview email verdicts are incomplete');
+  const identity = (row: VeUnifiedRow) => JSON.stringify([row.company, row.email.toLowerCase()]);
+  const priorKeys = new Set(priorReady.map(identity));
+  const combined = new Map<string, { row: VeUnifiedRow; status: string | null }>();
+  const add = (row: VeUnifiedRow, status: string | null) => {
+    const clean = { ...row } as VeUnifiedRow & { _low_relevance?: boolean; _relevance_unchecked?: boolean };
+    delete clean._low_relevance;
+    delete clean._relevance_unchecked;
+    if (!priorKeys.has(identity(row))) combined.set(identity(row), { row: clean, status });
+  };
+  imported.rows.forEach((row, index) => add(row, imported.emailStatuses[index]));
+  const keys = await loadOtherBaseExclusionKeys(ctx, job.project_id, base.id, base.hypothesis_id);
+  const finalRows: VeUnifiedRow[] = [];
+  const finalEmailStatuses: Array<string | null> = [];
+  for (const { row, status } of combined.values()) {
+    const pruned = pruneBaseRowAgainstExclusion(keys, row);
+    if (pruned) { finalRows.push(pruned); finalEmailStatuses.push(status); }
+  }
+  if (finalEmailStatuses.some((status) => status === null)) throw new Error('Saved preview email verdicts are incomplete');
+  stageLog(ctx, `[base_collect] продолжаем проверку сохранённых ${finalRows.length} строк; источники и конструктор не перезапускаются`);
+  const gate = await checkCollectedRelevance({ ctx, job, base, finalRows, finalEmailStatuses, market, usage });
+  const seenKeys = buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []);
+  const hasBufferedCandidates = (info.tasks ?? []).some((task) => task.status === 'done'
+    && (task.harvest ?? []).some((row) => {
+      const fresh = pruneBaseRowAgainstExclusion(keys, row);
+      return fresh !== null && pruneBaseRowAgainstExclusion(seenKeys, fresh) !== null;
+    }));
+  const stats: NonNullable<VeCollectInfo['stats']> = {
+    tasks_total: info.tasks?.length ?? 0, tasks_done: info.tasks?.filter((t) => t.status === 'done').length ?? 0,
+    tasks_failed: info.tasks?.filter((t) => t.status === 'failed').length ?? 0,
+    rows_total: target.candidates_processed, excluded_existing_bases: 0, excluded_during_fetch: 0,
+    ...info.stats,
+    low_relevance: gate.lowRelevanceCount, relevance_unchecked: gate.relevanceUncheckedCount,
+    relevance_checked_companies: gate.relevanceCheckedCompanies ?? undefined,
+    relevance_total_companies: gate.relevanceTotalCompanies ?? undefined,
+    relevance_coverage_complete: gate.relevanceCoverageComplete,
+    relevance_recovery: true,
+  };
+  return completeTargetRound({
+    ctx, job, base, info, progress: target, candidates: [], rows: [...priorReady, ...gate.storedRows],
+    columns: [...new Set([...(base.columns ?? []), ...VE_AUTO_COLLECT_COLUMNS, ...(imported.hasDescription ? ['description'] : [])])],
+    stats, hasBufferedCandidates,
+    validationError: gate.relevanceCoverageComplete ? null : gate.relevanceError ?? 'Проверка релевантности завершилась не полностью', usage,
+  });
+}
+
 async function completeTargetRound(args: {
   ctx: VeStageContext; job: VeJob; base: VeAutoBase; info: VeCollectInfo;
   progress: VeCollectionTargetProgress; candidates: VeUnifiedRow[];
@@ -2286,10 +2470,11 @@ async function completeTargetRound(args: {
   const { ctx, job, base, info, progress } = args;
   const tasks = info.tasks ?? [];
   const prior = info.target_checkpoint;
+  const validationRetry = info.validation_retry === true;
   const columns = [...new Set([...(base.columns ?? []), ...args.columns])];
   const previousRows = Array.isArray(base.data) ? base.data : [];
   const freshKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, base.id, base.hypothesis_id);
-  const availableRows = [...previousRows, ...args.rows].filter((row) =>
+  const availableRows = (validationRetry ? args.rows : [...previousRows, ...args.rows]).filter((row) =>
     row && typeof row === 'object' && !baseRowMatchesExclusion(freshKeys, row as VeUnifiedRow),
   );
   const readyRows = prepareSegmentationAudience({ rows: availableRows, columns, source: 'auto' }).rows;
@@ -2307,15 +2492,18 @@ async function completeTargetRound(args: {
   const taskError = tasks.find((task) => task.status === 'failed');
   const next = finishCollectionRound(progress, {
     candidates: args.candidates.length, readyRows: readyRows.length,
+    validationRetry,
     exhausted, canContinue: args.hasBufferedCandidates || renewableDirectory,
     error: args.validationError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null),
   });
   const checkpoint: NonNullable<VeCollectInfo['target_checkpoint']> = {
     completed_round: progress.round,
     seen_rows: [...seen.values()],
-    processed_rows: (prior?.processed_rows ?? 0) + args.rows.length,
-    low_relevance: (prior?.low_relevance ?? 0) + (args.stats.low_relevance ?? 0),
-    relevance_unchecked: (prior?.relevance_unchecked ?? 0) + (args.stats.relevance_unchecked ?? 0),
+    processed_rows: validationRetry ? prior?.processed_rows ?? args.rows.length : (prior?.processed_rows ?? 0) + args.rows.length,
+    prior_low_relevance: validationRetry ? prior?.prior_low_relevance ?? 0 : prior?.low_relevance ?? 0,
+    prior_relevance_unchecked: validationRetry ? prior?.prior_relevance_unchecked ?? 0 : prior?.relevance_unchecked ?? 0,
+    low_relevance: (validationRetry ? prior?.prior_low_relevance ?? 0 : prior?.low_relevance ?? 0) + (args.stats.low_relevance ?? 0),
+    relevance_unchecked: (validationRetry ? prior?.prior_relevance_unchecked ?? 0 : prior?.relevance_unchecked ?? 0) + (args.stats.relevance_unchecked ?? 0),
   };
   const stats: NonNullable<VeCollectInfo['stats']> = {
     ...args.stats, rows_total: next.candidates_processed,
@@ -2324,6 +2512,7 @@ async function completeTargetRound(args: {
   };
   info.target_progress = next;
   info.target_checkpoint = checkpoint;
+  delete info.validation_retry;
   if (info.estimate) info.estimate.remaining_ready_estimate = estimateRemainingReady({
     population: info.estimate.unique_companies,
     candidatesProcessed: next.candidates_processed, readyRows: readyRows.length,
@@ -2413,7 +2602,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       if (!Number.isSafeInteger(previous.round) || previous.round < 1 || previous.round > target.max_rounds
         || !Number.isSafeInteger(previous.candidates_processed) || previous.candidates_processed < 0 || previous.candidates_processed > target.max_candidates
         || !Number.isSafeInteger(previous.ready_rows) || previous.ready_rows < 0 || previous.ready_rows > target.max_candidates * 5
-        || (info.target_checkpoint?.completed_round ?? 0) !== previous.round - 1) {
+        || (info.target_checkpoint?.completed_round ?? 0) !== previous.round - (info.validation_retry ? 0 : 1)) {
         throw new Error('Invalid collection target checkpoint');
       }
       target.round = previous.round;
@@ -2472,6 +2661,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // Рынок проекта: выбор промпта планировщика (EN-источники при 'us').
   // ctx.market прокидывает воркер, фолбэк — колонка ve_projects.market.
   const market = ctx.market ?? projectMarket(project);
+  if (info.validation_retry) {
+    if (!target || mode !== 'preview') throw new Error('Validation recovery requires a preview target');
+    return resumeSavedPreviewValidation(ctx, job, base, info, target, market, usage);
+  }
 
   // ─── PLAN ───
   if (!info.plan) {
@@ -2925,102 +3118,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     throw new Error(note);
   }
 
-  // ─── QUALITY GATE (до refill/финала: пометки нужны обоим путям) ───
-  // 1) вердикты валидации почт → _email_status на строках (запуск пропускает
-  //    не-'ok' — баунсы не ложатся на домен клиента);
-  // 2) релевант-гейт LLM → _low_relevance для явного несовпадения и
-  //    _relevance_unchecked для хвоста/сбойного батча. Оба fail-closed
-  //    фильтруются из launchTemplate/refill. Пометки живут только в jsonb-
-  //    строках: в columns не попадают, сетки UI их не видят.
-  type StoredRow = VeUnifiedRow & {
-    _email_status?: string;
-    _low_relevance?: boolean;
-    _relevance_unchecked?: boolean;
-  };
-  let storedRows: StoredRow[] = finalRows;
-  if (finalEmailStatuses) {
-    storedRows = storedRows.map((r, i) => {
-      const st = finalEmailStatuses[i];
-      return st ? { ...r, _email_status: st } : r;
-    });
-  }
-  let lowRelevanceCount = 0;
-  let relevanceUncheckedCount = 0;
-  let relevanceCheckedCompanies: number | null = null;
-  let relevanceTotalCompanies: number | null = null;
-  let relevanceCoverageComplete = false;
-  try {
-    const { data: vrow } = await ctx.supabase
-      .from('ve_verticals')
-      .select('name, summary')
-      .eq('id', base.vertical_id)
-      .maybeSingle();
-    const verticalName = (vrow as { name?: string } | null)?.name ?? '';
-    let hypothesisTitle = '';
-    let hypothesisDescription = '';
-    if (base.hypothesis_id) {
-      const { data: hypothesisRow, error: hypothesisError } = await ctx.supabase
-        .from('ve_hypotheses')
-        .select('title, description')
-        .eq('id', base.hypothesis_id)
-        .eq('project_id', job.project_id)
-        .eq('vertical_id', base.vertical_id)
-        .maybeSingle();
-      if (hypothesisError) {
-        throw new Error(`гипотеза relevance-gate недоступна: ${hypothesisError.message}`);
-      } else {
-        hypothesisTitle = (hypothesisRow as { title?: string } | null)?.title ?? '';
-        hypothesisDescription =
-          (hypothesisRow as { description?: string | null } | null)?.description ?? '';
-        if (!hypothesisTitle.trim()) {
-          throw new Error(
-            `гипотеза relevance-gate ${base.hypothesis_id} не найдена или не имеет title`,
-          );
-        }
-      }
-    }
-    const gate = await findIrrelevantRows({
-      rows: storedRows,
-      verticalName,
-      verticalSummary: (vrow as { summary?: string | null } | null)?.summary ?? '',
-      hypothesisTitle,
-      hypothesisDescription,
-      language: market === 'us' ? 'en' : 'ru',
-      log: (m) => stageLog(ctx, m),
-    });
-    usage.tokensUsed += gate.tokensUsed;
-    usage.costUsd += gate.costUsd;
-    lowRelevanceCount = gate.flagged.size;
-    relevanceUncheckedCount = gate.unchecked.size;
-    relevanceCheckedCompanies = gate.coverage.checkedCompanies;
-    relevanceTotalCompanies = gate.coverage.totalCompanies;
-    relevanceCoverageComplete = gate.coverage.complete;
-    if (gate.flagged.size > 0 || gate.unchecked.size > 0) {
-      storedRows = storedRows.map((r, i) =>
-        gate.flagged.has(i)
-          ? { ...r, _low_relevance: true }
-          : gate.unchecked.has(i)
-            ? { ...r, _relevance_unchecked: true }
-            : r,
-      );
-    }
-    stageLog(
-      ctx,
-      `[base_collect] релевант-гейт: проверено ${gate.coverage.checkedCompanies}/` +
-        `${gate.coverage.totalCompanies} компаний; нерелевантных строк ${lowRelevanceCount}; ` +
-        `без verdict ${relevanceUncheckedCount}`,
-    );
-  } catch (e) {
-    // Неожиданный сбой вне never-throw контракта gate тоже fail-closed: ни одна
-    // строка без verdict не должна попасть в проверенный итог или refill.
-    relevanceUncheckedCount = storedRows.length;
-    storedRows = storedRows.map((row) => ({ ...row, _relevance_unchecked: true }));
-    stageLog(
-      ctx,
-      `[base_collect] релевант-гейт недоступен, все ${storedRows.length} строк исключены: ` +
-        `${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
+  const { storedRows, lowRelevanceCount, relevanceUncheckedCount, relevanceCheckedCompanies, relevanceTotalCompanies, relevanceCoverageComplete, relevanceError } = await checkCollectedRelevance({
+    ctx, job, base, finalRows, finalEmailStatuses, market, usage,
+  });
   // Ровно тот же pure-контракт фильтрует аудиторию перед запуском на шаге 5.
   // Но число можно называть проверенным только после успешной построчной
   // validation: partial/failed constructor без status-колонки не должен
@@ -3055,7 +3155,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     ctx, job, base, info, progress: target, candidates: merged, rows: storedRows,
     columns: finalColumns, stats: statsWithQuality, hasBufferedCandidates: kept.length > merged.length,
     validationError: !hasCompleteEmailValidation ? 'Проверка email завершилась не полностью'
-      : !relevanceCoverageComplete ? 'Проверка релевантности завершилась не полностью' : null,
+      : !relevanceCoverageComplete ? relevanceError ?? 'Проверка релевантности завершилась не полностью' : null,
     usage,
   });
 

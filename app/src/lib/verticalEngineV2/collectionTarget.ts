@@ -60,7 +60,7 @@ export function collectionRoundLimit(progress: VeCollectionTargetProgress): numb
 
 export function finishCollectionRound(
   progress: VeCollectionTargetProgress,
-  result: { candidates: number; readyRows: number; exhausted: boolean; canContinue: boolean; error: string | null },
+  result: { candidates: number; readyRows: number; exhausted: boolean; canContinue: boolean; error: string | null; validationRetry?: boolean },
 ): VeCollectionTargetProgress {
   const next = {
     ...progress, ready_rows: result.readyRows,
@@ -73,7 +73,7 @@ export function finishCollectionRound(
   if (next.candidates_processed >= next.max_candidates || next.round >= next.max_rounds) {
     return { ...next, status: 'limited', reason: 'Достигнут защитный предел кандидатов или раундов; цель ещё не набрана' };
   }
-  if (!result.canContinue || result.candidates === 0) {
+  if (!result.canContinue || (result.candidates === 0 && !result.validationRetry)) {
     return { ...next, status: 'limited', reason: 'Нет подтверждённого продолжения источников; исчерпание рынка не доказано' };
   }
   return { ...next, round: next.round + 1, status: 'collecting' };

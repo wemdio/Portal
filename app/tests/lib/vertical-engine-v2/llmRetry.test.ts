@@ -19,6 +19,9 @@ import { fetchAndExtract } from '@/lib/enrich/websiteParser';
 import { callLLMText, callLLMWithSchema, setVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
 import { defaultFetchText, resolveFetchText, resolveSearch } from '@/lib/verticalEngineV2/stages/io';
 import type { VeStageContext } from '@/lib/verticalEngineV2/stages/shared';
+import { isRetryableStageError, maxAttemptsFor } from '@/lib/verticalEngineV2/jobRetry';
+import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
+import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 
 const schema = z.object({ ok: z.boolean() });
 
@@ -86,6 +89,40 @@ describe('llm rawCall retry', () => {
       callLLMWithSchema([{ role: 'user', content: 'json' }], schema, { model: 'test-model' }),
     ).rejects.toThrow(/Requesty 400/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops Requesty billing failures on the first job attempt and shows only a safe actionable reason', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(httpResponse(402, {
+      error: { message: 'Insufficient funds; account detail must stay private', amount: 500 },
+    }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const error = await callLLMWithSchema([{ role: 'user', content: 'json' }], schema, { model: 'test-model' })
+      .then(() => { throw new Error('Expected billing failure'); }, (reason: Error) => reason);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(error.message).toContain('Requesty 402');
+    expect(maxAttemptsFor(error.message)).toBe(1);
+    expect(isRetryableStageError(error.message)).toBe(false);
+    const visible = getVeCollectionFailure(error, { relevanceCoverageComplete: false });
+    expect(visible.kind).toBe('billing');
+    expect(visible.message).toMatch(/пополнить баланс/);
+    expect(visible.message).not.toMatch(/account detail|500|\{|\}/);
+    expect(getVeCollectionFailure('Проверка релевантности завершилась не полностью').kind).toBe('incomplete_checks');
+    expect(getVeCollectionFailure('Авто-сборка не дала строк: source details').kind).toBe('source');
+    expect(getVeCollectionFailure('private database error').message).not.toContain('private database');
+    expect(maxAttemptsFor('Requesty 502: unavailable')).toBe(5);
+    expect(maxAttemptsFor('Invalid candidate 402')).toBe(3);
+
+    fetchMock.mockClear();
+    const rows = Array.from({ length: 102 }, (_, i) => ({
+      company: `Company ${Math.floor(i / 2)}`, email: `contact${i}@example.org`,
+    }));
+    const gate = await findIrrelevantRows({ rows, verticalName: 'Equipment', language: 'en' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(gate.error).toContain('Requesty 402');
+    expect(gate.coverage).toEqual({ checkedCompanies: 0, totalCompanies: 51, complete: false });
+    expect(gate.unchecked).toEqual(new Set(rows.map((_, i) => i)));
+    expect(gate.flagged.size).toBe(0);
   });
 
   it('gives up after exhausting retries on 502', async () => {

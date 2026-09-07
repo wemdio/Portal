@@ -12,6 +12,7 @@
 
 import { z } from 'zod';
 import { callLLMWithSchema, getVeModel, type LLMMessage } from './llm';
+import { isVeProviderBillingError } from './collectionErrors';
 
 /** Строк в одном вызове (≈2-3k токенов); выше — растёт цена и риск усечения. */
 const BATCH_SIZE = 50;
@@ -80,6 +81,8 @@ const RelevanceSchema = z.object({
 });
 
 export interface VeRelevanceGateResult {
+  /** Actionable provider failure; all unvisited groups remain unchecked. */
+  error?: string;
   /** Глобальные индексы нерелевантных строк (во входном массиве rows). */
   flagged: Set<number>;
   /** Строки компаний, для которых gate не получил надёжный verdict. */
@@ -266,6 +269,11 @@ export async function findIrrelevantRows(input: {
       log?.(
         `[relevanceGate] батч ${start}–${start + batch.length - 1} пропущен: ${e instanceof Error ? e.message : String(e)}`,
       );
+      if (isVeProviderBillingError(e)) {
+        result.error = e instanceof Error ? e.message : String(e);
+        markGroupsUnchecked(result, checked.slice(start + batchGroups.length));
+        break;
+      }
     }
   }
   result.coverage.complete =

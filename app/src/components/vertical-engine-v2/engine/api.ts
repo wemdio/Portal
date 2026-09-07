@@ -80,6 +80,7 @@ export interface VeCollectEstimateDto {
 
 /** Воронка одного прогона автосборки: от ответа источников до готовых получателей. */
 export interface VeCollectStatsDto {
+  relevance_recovery?: boolean;
   tasks_total?: number | null;
   tasks_done?: number | null;
   tasks_failed?: number | null;

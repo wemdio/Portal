@@ -12,6 +12,8 @@
  * они умирают быстро, как раньше.
  */
 
+import { isVeProviderBillingError } from './collectionErrors';
+
 /** Попытки для постоянных ошибок — как было до автоповтора. */
 export const PERMANENT_MAX_ATTEMPTS = 3;
 /** Транзиентные ошибки пережидаем дольше: больше попыток + бэкофф. */
@@ -22,6 +24,7 @@ const RETRY_BACKOFF_MAX_MS = 120_000;
 
 /** Транзиентная ли ошибка стадии (стоит ли ждать и повторять). */
 export function isRetryableStageError(msg: string): boolean {
+  if (isVeProviderBillingError(msg)) return false;
   return (
     /\b(5\d\d|429)\b/.test(msg) ||
     /provider is currently unavailable/i.test(msg) ||
@@ -31,6 +34,7 @@ export function isRetryableStageError(msg: string): boolean {
 
 /** Лимит попыток для конкретной ошибки стадии. */
 export function maxAttemptsFor(msg: string): number {
+  if (isVeProviderBillingError(msg)) return 1;
   return isRetryableStageError(msg) ? RETRYABLE_MAX_ATTEMPTS : PERMANENT_MAX_ATTEMPTS;
 }
 
