@@ -6,13 +6,18 @@
  * вертикаль?». Помеченные нерелевантными строки остаются в базе для
  * прозрачности, но не уходят в запуск (фильтр в launchTemplate).
  *
- * Never-throw: сбой батча не валит сборку, но его company-группы получают
+ * Сбой провайдера не валит сборку, но его company-группы получают
  * явную fail-closed пометку unchecked и не допускаются к запуску/refill.
+ * Отмена и ошибка сохранения checkpoint останавливают дальнейшие вызовы.
  */
 
 import { z } from 'zod';
-import { callLLMWithSchema, getVeModel, type LLMMessage } from './llm';
+import { callLLMWithSchema, getVeActiveJobSignal, getVeModel, LLMValidationError, type LLMMessage } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
+import {
+  readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError,
+  type VeRelevanceCheckpoint, type VeRelevanceFailureCode,
+} from './relevanceCheckpoint';
 
 /** Строк в одном вызове (≈2-3k токенов); выше — растёт цена и риск усечения. */
 const BATCH_SIZE = 50;
@@ -74,15 +79,10 @@ function groupRowsByCompany(rows: Array<Record<string, unknown>>): RelevanceComp
   return [...groups.values()];
 }
 
-const RelevanceSchema = z.object({
-  /** Индексы нерелевантных строк (0-based, из входного батча). */
-  // Поле обязательно: отсутствие нельзя трактовать как «все релевантны».
-  irrelevant: z.array(z.number().int()),
-});
-
 export interface VeRelevanceGateResult {
   /** Actionable provider failure; all unvisited groups remain unchecked. */
   error?: string;
+  checkpoint: VeRelevanceCheckpoint;
   /** Глобальные индексы нерелевантных строк (во входном массиве rows). */
   flagged: Set<number>;
   /** Строки компаний, для которых gate не получил надёжный verdict. */
@@ -135,7 +135,7 @@ function buildRelevanceMessages(
           hasHypothesis
             ? 'does NOT fit the target hypothesis within this vertical'
             : 'does NOT belong to this vertical'
-        }. When in doubt — keep the row (do not list it).`,
+        }. Copy only the exact i values from this batch (0 to ${batch.length - 1}); never use indices from another batch. Return the complete list. When in doubt — keep the row (do not list it).`,
       },
     ];
   }
@@ -157,7 +157,7 @@ function buildRelevanceMessages(
         hasHypothesis
           ? 'НЕ подходит целевой гипотезе внутри вертикали'
           : 'НЕ принадлежит вертикали'
-      }. Сомневаешься — оставляй строку (в список не включай).`,
+      }. Копируй только точные значения i из этого пакета (от 0 до ${batch.length - 1}); индексы других пакетов запрещены. Верни полный список. Сомневаешься — оставляй строку (в список не включай).`,
     },
   ];
 }
@@ -177,6 +177,11 @@ export async function findIrrelevantRows(input: {
   hypothesisDescription?: string;
   language: 'ru' | 'en';
   log?: (msg: string) => void;
+  signal?: AbortSignal;
+  /** Constructor/round identity; never reuse a verdict for a different input context. */
+  checkpointScope?: string;
+  checkpoint?: unknown;
+  onCheckpoint?: (checkpoint: VeRelevanceCheckpoint) => Promise<void>;
 }): Promise<VeRelevanceGateResult> {
   const {
     rows,
@@ -189,7 +194,17 @@ export async function findIrrelevantRows(input: {
   } = input;
   const groups = groupRowsByCompany(rows);
   const checked = groups.slice(0, MAX_COMPANIES_TO_CHECK);
+  const signal = input.signal ?? getVeActiveJobSignal();
+  signal?.throwIfAborted();
+  const model = getVeModel('gate');
+  const checkpoint = readRelevanceCheckpoint(input.checkpoint, relevanceHash([
+    'relevance-local-ids-v1', input.checkpointScope ?? '', model, language,
+    verticalName, verticalSummary, hypothesisTitle, hypothesisDescription,
+  ]));
+  // Diagnostics describe this attempt, not a previously recovered failure.
+  checkpoint.failures = [];
   const result: VeRelevanceGateResult = {
+    checkpoint,
     flagged: new Set<number>(),
     unchecked: new Set<number>(),
     coverage: {
@@ -201,24 +216,54 @@ export async function findIrrelevantRows(input: {
     costUsd: 0,
   };
   markGroupsUnchecked(result, groups.slice(MAX_COMPANIES_TO_CHECK));
+  if (groups.length > checked.length) {
+    checkpoint.failures.push({ batch_hash: relevanceHash(['limit', checkpoint.context_hash]),
+      companies: groups.length - checked.length, code: 'limit' });
+    result.error = 'Проверка релевантности завершилась не полностью: лимит компаний';
+  }
   if (checked.length === 0) return result;
   if (!verticalName.trim()) {
     markGroupsUnchecked(result, checked);
+    checkpoint.failures.push({ batch_hash: relevanceHash(['context', checkpoint.context_hash]),
+      companies: checked.length, code: 'missing_context' });
+    result.error = 'Проверка релевантности завершилась не полностью: отсутствует контекст вертикали';
     return result;
   }
 
-  for (let start = 0; start < checked.length; start += BATCH_SIZE) {
-    const batchGroups = checked.slice(start, start + BATCH_SIZE);
-    const batch = batchGroups.map((group) => ({
-      i: group.representativeIndex,
+  const pending = checked.map((group) => {
+    const fields = {
       company: rowText(group.row, ['company', 'компания']).slice(0, 120),
       website: rowText(group.row, ['website', 'site', 'сайт']).slice(0, 80),
       category: rowText(group.row, ['category', 'категория']).slice(0, 80),
       vacancy_title: rowText(group.row, ['vacancy_title', 'vacancy', 'вакансия']).slice(0, 80),
-    }));
-    const groupByRepresentative = new Map(
-      batchGroups.map((group) => [group.representativeIndex, group] as const),
-    );
+    };
+    const identity = [rowText(group.row, ['inn', 'инн']).replace(/\D/g, ''),
+      normalizeIdentityPart(rowText(group.row, ['company', 'компания'])),
+      normalizeIdentityPart(rowText(group.row, ['website', 'site', 'сайт']))];
+    const cacheable = identity.some(Boolean);
+    const key = relevanceHash([identity, fields]);
+    return { group, fields, key, cacheable };
+  }).filter(({ group, key, cacheable }) => {
+    // Anonymous rows have no stable company identity; never let a cache hit
+    // on identical blank/truncated fields stand in for another company.
+    const verdict = cacheable ? checkpoint.verdicts[key] : undefined;
+    if (!verdict) return true;
+    result.coverage.checkedCompanies += 1;
+    if (verdict === 'irrelevant') for (const index of group.rowIndices) result.flagged.add(index);
+    return false;
+  });
+
+  for (let start = 0; start < pending.length; start += BATCH_SIZE) {
+    signal?.throwIfAborted();
+    const entries = pending.slice(start, start + BATCH_SIZE);
+    const batchGroups = entries.map((entry) => entry.group);
+    // Local contiguous IDs avoid sparse global email-row indices. Fan-out to
+    // every address of a company happens only on the server, after validation.
+    const batch = entries.map((entry, i) => ({ i, ...entry.fields }));
+    const schema = z.object({
+      irrelevant: z.array(z.number().int().min(0).max(batch.length - 1)).max(batch.length),
+    });
+    let billingFailure = false;
     try {
       const llm = await callLLMWithSchema(
         buildRelevanceMessages(
@@ -229,52 +274,52 @@ export async function findIrrelevantRows(input: {
           batch,
           language,
         ),
-        RelevanceSchema,
+        // ID validation is inside the retryable schema: one repair attempt is
+        // made for THIS batch, not for all previously checked companies.
+        schema,
         // Роль gate: мини-модель — бинарная классификация строк не требует
         // reasoning; на нём только тратились выходные токены и ловились
         // усечения max_tokens (finish_reason='length').
-        { model: getVeModel('gate'), maxTokens: 2048 },
+        { model, maxTokens: 2048, requireCompleteJson: true, signal: signal ?? undefined },
       );
-      // Защита от мусорного ответа (моки/обрезка): без массива irrelevant
-      // батч пропускаем, расход не считаем.
-      const irrelevant = Array.isArray((llm.data as { irrelevant?: unknown[] } | undefined)?.irrelevant)
-        ? (llm.data as { irrelevant: unknown[] }).irrelevant
-        : null;
-      if (!irrelevant) {
-        markGroupsUnchecked(result, batchGroups);
-        log?.(`[relevanceGate] батч ${start}–${start + batch.length - 1}: ответ без irrelevant — пропуск`);
-        continue;
-      }
-      const validRepresentatives = new Set(batchGroups.map((group) => group.representativeIndex));
-      if (irrelevant.some((idx) => typeof idx !== 'number' || !validRepresentatives.has(idx))) {
-        markGroupsUnchecked(result, batchGroups);
-        log?.(
-          `[relevanceGate] батч ${start}–${start + batch.length - 1}: ` +
-            'ответ содержит чужой индекс — весь батч остаётся непроверенным',
-        );
-        continue;
-      }
+      signal?.throwIfAborted();
+      const { irrelevant } = schema.parse(llm.data);
       result.tokensUsed += llm.tokensUsed;
       result.costUsd += llm.costUsd;
       result.coverage.checkedCompanies += batchGroups.length;
-      for (const idx of irrelevant) {
-        // Guard retained for TypeScript/runtime even after whole-array validation.
-        if (typeof idx !== 'number') continue;
-        const group = groupByRepresentative.get(idx);
-        if (!group) continue;
-        for (const rowIndex of group.rowIndices) result.flagged.add(rowIndex);
-      }
+      const rejected = new Set(irrelevant);
+      entries.forEach(({ group, key, cacheable }, index) => {
+        if (cacheable) checkpoint.verdicts[key] = rejected.has(index) ? 'irrelevant' : 'relevant';
+        if (rejected.has(index)) for (const rowIndex of group.rowIndices) result.flagged.add(rowIndex);
+      });
     } catch (e) {
+      signal?.throwIfAborted();
+      if (e instanceof Error && e.name === 'AbortError') throw e;
       markGroupsUnchecked(result, batchGroups);
-      log?.(
-        `[relevanceGate] батч ${start}–${start + batch.length - 1} пропущен: ${e instanceof Error ? e.message : String(e)}`,
-      );
-      if (isVeProviderBillingError(e)) {
-        result.error = e instanceof Error ? e.message : String(e);
-        markGroupsUnchecked(result, checked.slice(start + batchGroups.length));
-        break;
+      billingFailure = isVeProviderBillingError(e);
+      const code: VeRelevanceFailureCode = billingFailure ? 'billing'
+        : e instanceof LLMValidationError || e instanceof z.ZodError ? 'invalid_response'
+          : e instanceof Error && /timeout|deadline|timed out/i.test(`${e.name} ${e.message}`) ? 'timeout'
+            : 'provider';
+      checkpoint.failures.push({ batch_hash: relevanceHash(entries.map((entry) => entry.key)), companies: entries.length, code });
+      checkpoint.failures = checkpoint.failures.slice(-100);
+      log?.(`[relevanceGate] пакет ${start}–${start + batch.length - 1} не проверен: ${code}`);
+      result.error = billingFailure ? 'Requesty 402: insufficient balance'
+        : result.error ?? `Проверка релевантности завершилась не полностью: ${code}`;
+      if (billingFailure) {
+        markGroupsUnchecked(result, pending.slice(start + entries.length).map((entry) => entry.group));
       }
     }
+    // Deliberately outside the provider catch: a failed save must stop paid work.
+    try {
+      signal?.throwIfAborted();
+      await input.onCheckpoint?.(checkpoint);
+      signal?.throwIfAborted();
+    } catch (e) {
+      signal?.throwIfAborted();
+      throw new VeRelevanceCheckpointError(e instanceof Error ? e.message : 'Relevance checkpoint write failed');
+    }
+    if (billingFailure) break;
   }
   result.coverage.complete =
     result.coverage.checkedCompanies === result.coverage.totalCompanies

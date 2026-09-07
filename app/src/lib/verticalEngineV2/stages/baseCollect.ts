@@ -97,6 +97,7 @@ import { getVeDirectorySegmentStats } from '../dossierData';
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
 import { findIrrelevantRows } from '../relevanceGate';
+import { VeRelevanceCheckpointError, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
 import { prepareSegmentationAudience } from '../segmentationAudit';
 import { isContactSupplyActive } from '../contactSupplyEligibility';
 import {
@@ -640,6 +641,8 @@ export interface VeCollectInfo {
   target_progress?: VeCollectionTargetProgress;
   /** Explicit manual recovery: recheck persisted constructor output, not sources. */
   validation_retry?: boolean;
+  /** Latest constructor validation snapshot; per-batch writes live in ve_jobs.result. */
+  relevance_checkpoint?: VeRelevanceCheckpoint;
   /** Worker-only: discarded candidates must not be paid for again next round. */
   target_checkpoint?: {
     completed_round: number;
@@ -2284,11 +2287,12 @@ async function ensureTargetBaseAnalysis(ctx: VeStageContext, job: VeJob, baseId:
 }
 
 async function checkCollectedRelevance(args: {
-  ctx: VeStageContext; job: VeJob; base: VeAutoBase;
+  ctx: VeStageContext; job: VeJob; base: VeAutoBase; info: VeCollectInfo;
   finalRows: VeUnifiedRow[]; finalEmailStatuses: Array<string | null> | null;
   market: string; usage: VeUsage;
+  previousRelevanceCheckpoint?: unknown;
 }) {
-  const { ctx, job, base, finalRows, finalEmailStatuses, market, usage } = args;
+  const { ctx, job, base, info, finalRows, finalEmailStatuses, market, usage } = args;
   // ─── QUALITY GATE (до refill/финала: пометки нужны обоим путям) ───
   // 1) вердикты валидации почт → _email_status на строках (запуск пропускает
   //    не-'ok' — баунсы не ложатся на домен клиента);
@@ -2352,7 +2356,29 @@ async function checkCollectedRelevance(args: {
       hypothesisDescription,
       language: market === 'us' ? 'en' : 'ru',
       log: (m) => stageLog(ctx, m),
+      signal: ctx.signal,
+      checkpointScope: JSON.stringify([
+        job.project_id, base.vertical_id, base.hypothesis_id ?? null,
+        info.construct?.bc_job_id ?? null, info.target_progress?.round ?? null,
+      ]),
+      checkpoint: [job.result?.relevance_checkpoint, args.previousRelevanceCheckpoint, info.relevance_checkpoint],
+      onCheckpoint: async (checkpoint) => {
+        ctx.signal?.throwIfAborted();
+        const result = { ...job.result, relevance_checkpoint: checkpoint };
+        // Keep the per-batch write small: collect_info includes source harvests.
+        // A retry of this job resumes these verdicts; terminal base save below
+        // carries them into a later manually enqueued recovery job as well.
+        const { data: saved, error } = await ctx.supabase.from('ve_jobs')
+          .update({ result, updated_at: new Date().toISOString() })
+          .eq('id', job.id).eq('status', 'running').select('id').maybeSingle();
+        if (error || !saved) throw new VeRelevanceCheckpointError(
+          error ? `Relevance checkpoint save: ${error.message}` : 'Relevance checkpoint lost job ownership',
+        );
+        job.result = result;
+        ctx.signal?.throwIfAborted();
+      },
     });
+    if (gate.checkpoint) info.relevance_checkpoint = gate.checkpoint;
     usage.tokensUsed += gate.tokensUsed;
     usage.costUsd += gate.costUsd;
     lowRelevanceCount = gate.flagged.size;
@@ -2377,6 +2403,8 @@ async function checkCollectedRelevance(args: {
         `без verdict ${relevanceUncheckedCount}`,
     );
   } catch (e) {
+    ctx.signal?.throwIfAborted();
+    if (e instanceof VeRelevanceCheckpointError || (e instanceof Error && e.name === 'AbortError')) throw e;
     relevanceError = e instanceof Error ? e.message : String(e);
     // Неожиданный сбой вне never-throw контракта gate тоже fail-closed: ни одна
     // строка без verdict не должна попасть в проверенный итог или refill.
@@ -2399,6 +2427,16 @@ async function resumeSavedPreviewValidation(
 ): Promise<VeStageResult> {
   const bcId = info.construct?.bc_job_id;
   if (!bcId || info.construct?.status !== 'done') throw new Error('Saved constructor result is unavailable');
+  // A terminal write/cancellation failure may have left successful batches
+  // only in the old job, before the final base snapshot. A new manual job
+  // must not repay that work. The gate validates constructor/round/model/
+  // hypothesis context before accepting any of these candidate checkpoints.
+  const { data: previous, error: checkpointError } = await ctx.supabase.from('ve_jobs')
+    .select('result').eq('project_id', job.project_id).eq('stage', 'base_collect')
+    .eq('payload->>base_id', base.id).neq('id', job.id)
+    .not('result->relevance_checkpoint', 'is', null)
+    .order('updated_at', { ascending: false }).limit(1).maybeSingle();
+  if (checkpointError) throw new VeRelevanceCheckpointError(`Saved relevance read: ${checkpointError.message}`);
   const { data: bc, error } = await ctx.supabase.from('base_constructor_jobs')
     .select('status, selected_steps').eq('id', bcId).maybeSingle();
   if (error) throw new Error(`Saved constructor read: ${error.message}`);
@@ -2434,7 +2472,8 @@ async function resumeSavedPreviewValidation(
   }
   if (finalEmailStatuses.some((status) => status === null)) throw new Error('Saved preview email verdicts are incomplete');
   stageLog(ctx, `[base_collect] продолжаем проверку сохранённых ${finalRows.length} строк; источники и конструктор не перезапускаются`);
-  const gate = await checkCollectedRelevance({ ctx, job, base, finalRows, finalEmailStatuses, market, usage });
+  const gate = await checkCollectedRelevance({ ctx, job, base, info, finalRows, finalEmailStatuses, market, usage,
+    previousRelevanceCheckpoint: previous?.result?.relevance_checkpoint });
   const seenKeys = buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []);
   const hasBufferedCandidates = (info.tasks ?? []).some((task) => task.status === 'done'
     && (task.harvest ?? []).some((row) => {
@@ -2525,6 +2564,7 @@ async function completeTargetRound(args: {
     // One atomic checkpoint: prior validated output is durable BEFORE the next
     // input round becomes pending. Resuming must never revalidate these rows.
     delete info.construct;
+    delete info.relevance_checkpoint;
     delete stats.finished_at;
     info.tasks = tasks.map((state) =>
       state.source === 'companies_directory' && !state.exhausted && !state.hit_ceiling
@@ -3119,7 +3159,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
 
   const { storedRows, lowRelevanceCount, relevanceUncheckedCount, relevanceCheckedCompanies, relevanceTotalCompanies, relevanceCoverageComplete, relevanceError } = await checkCollectedRelevance({
-    ctx, job, base, finalRows, finalEmailStatuses, market, usage,
+    ctx, job, base, info, finalRows, finalEmailStatuses, market, usage,
   });
   // Ровно тот же pure-контракт фильтрует аудиторию перед запуском на шаге 5.
   // Но число можно называть проверенным только после успешной построчной

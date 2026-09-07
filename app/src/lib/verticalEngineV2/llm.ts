@@ -146,6 +146,8 @@ interface LLMCallOptions {
   model: string;
   maxTokens?: number;
   signal?: AbortSignal;
+  /** Classification must not treat a repaired/truncated exclusion list as complete. */
+  requireCompleteJson?: boolean;
 }
 
 function llmTimeoutMs(): number {
@@ -350,6 +352,11 @@ async function callLLMWithSchemaWithinDeadline<T>(
     signal.throwIfAborted();
     const { promptTokens, completionTokens, tokensUsed } = usageOf(response);
 
+    if (opts.requireCompleteJson && response.choices?.[0]?.finish_reason === 'length') {
+      attempts.push({ text, error: 'Response was truncated; return the complete JSON result.' });
+      continue;
+    }
+
     // strip markdown fences if модель их всё-таки добавила
     const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
 
@@ -360,7 +367,7 @@ async function callLLMWithSchemaWithinDeadline<T>(
       // Ремонт усечённого JSON: модель упёрлась в max_tokens посередине
       // массива объектов. Обрезаем до последней целой структуры и закрываем
       // скобки — спасаем то, что успело сгенерироваться, вместо жёсткого фейла.
-      parsed = tryRepairTruncatedJson(cleaned);
+      parsed = opts.requireCompleteJson ? null : tryRepairTruncatedJson(cleaned);
       if (parsed === null) {
         attempts.push({ text, error: `JSON.parse failed: ${e instanceof Error ? e.message : String(e)}` });
         continue;

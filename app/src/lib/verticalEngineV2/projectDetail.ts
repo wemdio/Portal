@@ -64,18 +64,19 @@ async function readDetailPages(
 // Деталка проекта поллится каждые 4с, поэтому вырезаем harvest из ответа —
 // иначе каждая база тащит десятки МБ на каждый опрос. Остальное в tasks[]
 // (source/status/rows/…) оставляем как есть: по нему рисуется прогресс-карта.
-// Также удаляем checkpoint исключённых кандидатов; helper используется всеми
+// Также удаляем checkpoints исключённых кандидатов и relevance-вердиктов; helper используется всеми
 // VE2-ответами, возвращающими карточку сборки, включая идемпотентный collect POST.
 export function stripTaskHarvest(base: Record<string, unknown>): Record<string, unknown> {
-  const info = base.collect_info as { tasks?: unknown; target_checkpoint?: unknown } | null | undefined;
+  const info = base.collect_info as { tasks?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown } | null | undefined;
   if (!info) return base;
   const tasks = Array.isArray(info.tasks) ? info.tasks : [];
   const hasHarvest = tasks.some(
     (t) => t !== null && typeof t === 'object' && 'harvest' in (t as Record<string, unknown>),
   );
-  if (!hasHarvest && !('target_checkpoint' in info)) return base;
+  if (!hasHarvest && !('target_checkpoint' in info) && !('relevance_checkpoint' in info)) return base;
   const publicInfo = { ...info };
   delete publicInfo.target_checkpoint;
+  delete publicInfo.relevance_checkpoint;
   return {
     ...base,
     collect_info: {
