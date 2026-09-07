@@ -31,6 +31,7 @@ import {
 import { sendFirstTouchBatch } from './firstTouch/send';
 import { parkAccountAfterLimit } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
+import { sendFreezeAppeal } from './freezeAppeal';
 import { runLeadForwardPoller } from './leadForward';
 import { buildLeadMessage, splitTelegramMessage } from './leadMessage';
 import { loadLeadOrigin } from './leadOrigin';
@@ -1990,6 +1991,9 @@ export async function runCampaignLoop(
                   other_sessions: checkResult.other_sessions ?? [],
                   check_requested_at: null,
                   check_requested_by_name: null,
+                  // Ссылку пишем всегда, в том числе пустую: аккаунт мог
+                  // оттаять, и старый адрес обжалования вводил бы в заблуждение.
+                  freeze_appeal_url: checkResult.freeze_appeal_url ?? null,
                   ...(checkResult.tg_user_id != null ? { tg_user_id: checkResult.tg_user_id } : {}),
                   ...(checkResult.tg_username != null ? { tg_username: checkResult.tg_username } : {}),
                   ...(checkResult.phone ? { phone: checkResult.phone } : {}),
@@ -2011,6 +2015,44 @@ export async function runCampaignLoop(
               // сделать вид, что оператору ответили.
               log('warning', `Аккаунт ${account.session_name}: проверка по заказу (${who}) не удалась — ${msg}. Заказ остался в очереди, повторим в следующем круге.`);
             }
+          }
+
+          /**
+           * Обжалование заморозки — здесь же и по той же причине.
+           *
+           * Заморозку Telegram снимает по обращению, а не по таймеру, подать
+           * его должен сам аккаунт, а зайти в него оператор не может: телефон
+           * остался у продавца. Отправляем этим соединением — отдельное
+           * подключение к той же сессии выключило бы аккаунт.
+           *
+           * Итог пишем всегда, включая отказ: обжалование подают один раз и
+           * ждут ответа неделями, и молчание после нажатия кнопки оператор
+           * прочитает как «ушло».
+           */
+          if (account.appeal_requested_at) {
+            const who = account.appeal_requested_by_name || 'оператор';
+            const outcome = await sendFreezeAppeal({
+              client,
+              appealUrl: account.freeze_appeal_url,
+              text: account.appeal_text ?? '',
+            });
+            const { error: apErr } = await db
+              .from('tg_outreach_accounts')
+              .update({
+                appeal_status: outcome.status,
+                appeal_detail: outcome.detail.slice(0, 500),
+                appealed_at: new Date().toISOString(),
+                appeal_requested_at: null,
+                appeal_requested_by_name: null,
+              })
+              .eq('id', account.id);
+            if (apErr) {
+              log('warning', `Аккаунт ${account.session_name}: обжалование отработало, но итог не записался — ${apErr.message}`);
+            }
+            log(
+              outcome.status === 'sent' ? 'info' : 'warning',
+              `Аккаунт ${account.session_name}: обжалование по заказу (${who}) — ${outcome.detail}`,
+            );
           }
           if (usedRawPageFallback) {
             log(

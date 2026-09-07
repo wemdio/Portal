@@ -242,6 +242,20 @@ export interface OutreachAccount {
    */
   warmup_until?: string | null;
   /**
+   * Обжалование заморозки (миграция 20260907_0002).
+   *
+   * `freeze_appeal_url` приносит проверка аккаунта — это адрес, по которому
+   * Telegram сам предлагает обжаловать. Остальное — очередь: оператор нажал,
+   * воркер отправил своим соединением и записал итог.
+   */
+  freeze_appeal_url?: string | null;
+  appeal_requested_at?: string | null;
+  appeal_requested_by_name?: string | null;
+  appeal_text?: string | null;
+  appeal_status?: string | null;
+  appeal_detail?: string | null;
+  appealed_at?: string | null;
+  /**
    * Личность самого аккаунта — заполняется getMe() при старте прогрева
    * (миграция 20260803_0006). Боевому циклу не нужна: он всегда отвечает уже
    * известному собеседнику. Прогреву нужна, чтобы аккаунты могли адресовать
