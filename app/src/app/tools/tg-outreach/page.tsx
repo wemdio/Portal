@@ -2,6 +2,7 @@
 
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
+import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import {
   MessageSquareMore,
   Plus,
@@ -2012,50 +2013,6 @@ const CHECK_LABEL: Record<string, { text: string; cls: string }> = {
  * Аватарка аккаунта. Пока профиль не читали из Telegram, показываем инициалы —
  * пустой серый кружок ничем не отличался бы от «фото нет».
  */
-function AccountAvatar({
-  account,
-  size = 36,
-}: {
-  account: OutreachAccount;
-  size?: number;
-}) {
-  const [broken, setBroken] = useState(false);
-  const label = (account.first_name || account.session_name || '?').trim();
-  const initials = label
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((w) => w[0]?.toUpperCase() ?? '')
-    .join('');
-  const url = account.avatar_url?.trim();
-
-  if (url && !broken) {
-    // Аватарки лежат в публичном бакете Supabase; next/image потребовал бы
-    // прописывать домен хранилища в конфиг ради картинки 36×36.
-    return (
-      // eslint-disable-next-line @next/next/no-img-element
-      <img
-        src={url}
-        alt=""
-        width={size}
-        height={size}
-        onError={() => setBroken(true)}
-        style={{ width: size, height: size }}
-        className="rounded-full object-cover bg-gray-100 shrink-0"
-      />
-    );
-  }
-
-  return (
-    <span
-      style={{ width: size, height: size, fontSize: Math.round(size / 2.8) }}
-      className="flex items-center justify-center rounded-full bg-gray-100 font-medium text-gray-400 shrink-0"
-      title={account.profile_synced_at ? 'В Telegram нет аватарки' : 'Профиль ещё не читали из Telegram'}
-    >
-      {initials || '?'}
-    </span>
-  );
-}
-
 /**
  * Итог загрузки файлов аккаунтов.
  *
