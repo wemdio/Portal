@@ -9,6 +9,12 @@
  *   --key-env REQUESTY_API_KEY (load secrets via node --env-file externally).
  * Resume a partial run with --start-index 3 --limit 37, keeping the ORIGINAL
  * fixture file and its hash. Resume has its own budget; account previous runs too.
+ * Optional --request-profiles FILE: {"models":{"exact/provider-model":{
+ *   "reasoning_effort":"low","temperature":null,"max_completion_tokens":4000}}}.
+ * Only reasoning_effort, temperature (null removes it), max_tokens and
+ * max_completion_tokens may change. Supply at most one profile output cap; it
+ * replaces the original cap. With no profile, the production payload is unchanged.
+ * Profiles never change prompts/messages, model IDs, response format or endpoint.
  *
  * Prices JSON: {"models":{"provider/model":{"input_usd_per_million":0.44,
  *   "output_usd_per_million":1.32,"max_attempts":1}}}.
@@ -49,6 +55,9 @@ const APP = path.resolve(path.dirname(HARNESS_PATH), '..');
 const REPO = path.dirname(APP);
 const ENDPOINT = 'https://router.requesty.ai/v1/chat/completions';
 const LABELS = new Set(['lead', 'not_lead', 'review']);
+const MODEL_ID_RE = /^[a-zA-Z0-9_.:@/-]+$/;
+const PROFILE_FIELDS = new Set(['reasoning_effort', 'temperature', 'max_tokens', 'max_completion_tokens']);
+const REASONING_EFFORTS = new Set(['none', 'low', 'medium', 'high', 'xhigh', 'max', 'minimal']);
 const nativeFetch = globalThis.fetch.bind(globalThis);
 const hash = (value) => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
 const jsonCopy = (value) => JSON.parse(JSON.stringify(value));
@@ -57,6 +66,7 @@ function argsOf(argv) {
   const args = { live: false, limit: 40, startIndex: 0, maxCalls: 160, budgetUsd: 3, timeoutMs: 45000,
     keyEnv: 'INSTANTLY_LEAD_EVAL_API_KEY' };
   const values = { '--fixtures': 'fixtures', '--models': 'models', '--out': 'out', '--prices': 'prices',
+    '--request-profiles': 'requestProfiles',
     '--limit': 'limit', '--start-index': 'startIndex', '--max-calls': 'maxCalls', '--budget-usd': 'budgetUsd',
     '--timeout-ms': 'timeoutMs', '--key-env': 'keyEnv' };
   for (let index = 0; index < argv.length; index++) {
@@ -69,7 +79,7 @@ function argsOf(argv) {
   if (args.help) return args;
   if (!args.fixtures || !args.models || !args.out) throw new Error('--fixtures, --models and --out are required');
   args.models = String(args.models).split(',').map((value) => value.trim()).filter(Boolean);
-  if (!args.models.length || new Set(args.models).size !== args.models.length || args.models.some((model) => !/^[a-zA-Z0-9_.:/-]+$/.test(model))) {
+  if (!args.models.length || new Set(args.models).size !== args.models.length || args.models.some((model) => !MODEL_ID_RE.test(model))) {
     throw new Error('Provide unique, explicit provider/model IDs');
   }
   for (const field of ['limit', 'maxCalls', 'timeoutMs']) {
@@ -180,6 +190,64 @@ function assertRequest(url, init) {
   return payload;
 }
 
+function effectiveOutputCap(payload) {
+  const fields = ['max_tokens', 'max_completion_tokens'].filter((field) => Object.hasOwn(payload, field));
+  if (fields.length !== 1) throw new Error('Exactly one effective output cap is required');
+  const cap = payload[fields[0]];
+  if (!Number.isSafeInteger(cap) || cap < 1000 || cap > 10000) throw new Error('Effective output cap must be an integer from 1000 to 10000');
+  return cap;
+}
+
+function validateRequestProfiles(config) {
+  if (!config || typeof config !== 'object' || Array.isArray(config) ||
+      Object.keys(config).some((key) => key !== 'models') ||
+      !config.models || typeof config.models !== 'object' || Array.isArray(config.models)) {
+    throw new Error('Request profiles must contain only a models object');
+  }
+  for (const [model, profile] of Object.entries(config.models)) {
+    if (!MODEL_ID_RE.test(model) || !profile || typeof profile !== 'object' || Array.isArray(profile) ||
+        Object.keys(profile).some((field) => !PROFILE_FIELDS.has(field))) {
+      throw new Error('Invalid model ID or non-allowlisted request profile field');
+    }
+    if (Object.hasOwn(profile, 'reasoning_effort') && !REASONING_EFFORTS.has(profile.reasoning_effort)) {
+      throw new Error('Invalid request profile reasoning_effort');
+    }
+    if (Object.hasOwn(profile, 'temperature') && profile.temperature !== null &&
+        (typeof profile.temperature !== 'number' || !Number.isFinite(profile.temperature) || profile.temperature < 0 || profile.temperature > 2)) {
+      throw new Error('Request profile temperature must be null or a number from 0 to 2');
+    }
+    const caps = ['max_tokens', 'max_completion_tokens'].filter((field) => Object.hasOwn(profile, field));
+    if (caps.length > 1) throw new Error('Request profile may override only one output cap');
+    if (caps.length) effectiveOutputCap(profile);
+  }
+  return config;
+}
+
+function applyRequestProfile(basePayload, profile) {
+  // Copy first: no shared messages or base payload may be mutated between models.
+  const payload = jsonCopy(basePayload);
+  if (profile) {
+    if (Object.hasOwn(profile, 'reasoning_effort')) payload.reasoning_effort = profile.reasoning_effort;
+    if (Object.hasOwn(profile, 'temperature')) {
+      if (profile.temperature === null) delete payload.temperature;
+      else payload.temperature = profile.temperature;
+    }
+    for (const field of ['max_tokens', 'max_completion_tokens']) {
+      if (Object.hasOwn(profile, field)) {
+        delete payload.max_tokens;
+        delete payload.max_completion_tokens;
+        payload[field] = profile[field];
+      }
+    }
+  }
+  effectiveOutputCap(payload);
+  if (payload.model !== basePayload.model || hash(payload.messages) !== hash(basePayload.messages) ||
+      hash(payload.response_format) !== hash(basePayload.response_format)) {
+    throw new Error('Request profile changed a protected production request field');
+  }
+  return payload;
+}
+
 function decision(value) {
   if (!value) return null;
   // Same disposition order as the worker: review takes precedence over isLead.
@@ -198,14 +266,18 @@ function withoutContext(result) {
   return jsonCopy(rest);
 }
 
-async function replay(isolated, entry, context, model, response = probeResponse) {
+async function replay(isolated, entry, context, model, response = probeResponse, requestProfile = null) {
   const options = { apiKey: 'evaluation-placeholder-not-a-real-key', model, maxRetries: 0,
     briefText: entry.input.briefText ?? '', leadCriteria: entry.input.leadCriteria ?? '', prefetchedContext: context };
   let captured = null;
+  let capturedBase = null;
   let calls = 0;
   isolated.setFetch(async (url, init) => {
-    const payload = assertRequest(url, init);
+    const basePayload = assertRequest(url, init);
+    const payload = applyRequestProfile(basePayload, requestProfile);
+    if (capturedBase && JSON.stringify(capturedBase) !== JSON.stringify(basePayload)) throw new Error('Replay base prompt differs from direct classifier prompt');
     if (captured && JSON.stringify(captured) !== JSON.stringify(payload)) throw new Error('Replay prompt differs from direct classifier prompt');
+    capturedBase = basePayload;
     captured = payload;
     calls++;
     return new Response(JSON.stringify(response), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -244,7 +316,7 @@ async function replay(isolated, entry, context, model, response = probeResponse)
     rawJson.interest_signals.every((signal) => typeof signal === 'string') &&
     (rawJson.objection_draft === null || typeof rawJson.objection_draft === 'string');
   const finalStatus = workerStatus(result, Boolean(entry.input.leadCriteria?.trim()));
-  return { payload: jsonCopy(captured), pipelineWouldCallAI: calls === 2, parsed: jsonCopy(parsed),
+  return { payload: jsonCopy(captured), basePayload: jsonCopy(capturedBase), pipelineWouldCallAI: calls === 2, parsed: jsonCopy(parsed),
     classified: jsonCopy(classified), final: withoutContext(result), rawJson,
     strictJson: rawJsonFormat === 'strict' && rawJson !== null && typeof rawJson === 'object' && !Array.isArray(rawJson),
     rawJsonFormat,
@@ -269,8 +341,9 @@ function reserveCost(payload, rate) {
   // Byte count is intentionally a loose upper estimate (not a tokenizer claim).
   // Include JSON structure plus generous wrapper overhead; reserve all max output.
   const inputTokensUpper = Buffer.byteLength(JSON.stringify(payload.messages), 'utf8') + 1024;
+  const outputTokensUpper = effectiveOutputCap(payload);
   return { inputTokensUpper, usd: rate.max_attempts *
-    (inputTokensUpper * rate.input_usd_per_million + payload.max_tokens * rate.output_usd_per_million) / 1e6 };
+    (inputTokensUpper * rate.input_usd_per_million + outputTokensUpper * rate.output_usd_per_million) / 1e6 };
 }
 
 function observedCost(data, requestedModel, prices, reservation) {
@@ -279,7 +352,7 @@ function observedCost(data, requestedModel, prices, reservation) {
   const actual = data.model;
   const rate = prices.models?.[actual];
   const usage = data.usage;
-  if (requestedModel.startsWith('policy/') || !rate || !usage ||
+  if (requestedModel.startsWith('policy/') || priceFor(prices, requestedModel).max_attempts > 1 || !rate || !usage ||
       !Number.isFinite(usage.prompt_tokens) || !Number.isFinite(usage.completion_tokens) ||
       usage.prompt_tokens < 0 || usage.completion_tokens < 0) {
     return { accountedUsd: reservation.usd, basis: 'conservative_reservation', usageEstimateUsd: null };
@@ -325,7 +398,7 @@ function summarize(records, models) {
 async function main() {
   const args = argsOf(process.argv.slice(2));
   if (args.help) {
-    console.log('Isolated lead-model eval. Required: --fixtures FILE --models a/model,b/model --out /absolute/NEW-dir.\nDry by default. Live: --live --prices FILE --key-env VAR [--budget-usd 3] [--max-calls 160] [--start-index 0] [--limit 40] [--timeout-ms 45000].\nSee script header for fixture/pricing schemas, privacy and fallback cost limitations.');
+    console.log('Isolated lead-model eval. Required: --fixtures FILE --models a/model,b/model --out /absolute/NEW-dir.\nDry by default. Live: --live --prices FILE --key-env VAR [--request-profiles FILE] [--budget-usd 3] [--max-calls 160] [--start-index 0] [--limit 40] [--timeout-ms 45000].\nSee script header for fixture/pricing schemas, privacy and fallback cost limitations.');
     return;
   }
   const fixtureBytes = await readFile(path.resolve(args.fixtures), 'utf8');
@@ -339,7 +412,11 @@ async function main() {
     if (entry.provenance.label_basis === 'ambiguous' && entry.score) throw new Error(`Ambiguous fixture ${entry.id} must have score:false`);
   }
   const prices = args.prices ? JSON.parse(await readFile(path.resolve(args.prices), 'utf8')) : { models: {} };
+  if (!prices.models || typeof prices.models !== 'object' || Array.isArray(prices.models)) throw new Error('Prices must contain a models object');
+  for (const model of Object.keys(prices.models)) priceFor(prices, model);
   if (args.live) for (const model of args.models) priceFor(prices, model);
+  const profileBytes = args.requestProfiles ? await readFile(path.resolve(args.requestProfiles), 'utf8') : null;
+  const requestProfiles = validateRequestProfiles(profileBytes === null ? { models: {} } : JSON.parse(profileBytes));
   const maxTokens = Number(process.env.INSTANTLY_LEAD_QUAL_MAX_TOKENS ?? 2000);
   if (!Number.isSafeInteger(maxTokens) || maxTokens < 1000 || maxTokens > 10000) throw new Error('INSTANTLY_LEAD_QUAL_MAX_TOKENS must be an integer from 1000 to 10000');
   const isolated = await loadClassifier(maxTokens);
@@ -360,8 +437,12 @@ async function main() {
   const manifest = { schema_version: 1, started_at: started, mode: args.live ? 'live' : 'dry_run',
     fixture_sha256: hash(fixtureBytes), source_sha256: isolated.sourceHash, bundle_sha256: isolated.bundleHash,
     harness_sha256: hash(await readFile(HARNESS_PATH, 'utf8')),
+    request_profiles: requestProfiles, request_profiles_source_sha256: profileBytes === null ? null : hash(profileBytes),
     models: args.models, cases: cases.length, start_index: args.startIndex, max_calls: args.maxCalls, budget_usd: args.budgetUsd,
-    timeout_ms: args.timeoutMs, max_output_tokens: maxTokens, prices, production_retries: 'disabled for comparison',
+    timeout_ms: args.timeoutMs, max_output_tokens: maxTokens, base_max_output_tokens: maxTokens,
+    effective_output_caps: Object.fromEntries(args.models.map((model) => [model,
+      effectiveOutputCap(applyRequestProfile({ ...prepared[0].probe.basePayload, model }, requestProfiles.models[model] ?? null))])),
+    prices, production_retries: 'disabled for comparison',
     scoring_note: 'User-confirmed, policy-derived and provisional labels reported separately; no held-out claim.',
     cost_note: 'Conservative client-side estimate, not provider hard cap; policy reservations include configured fallback attempts.',
     prefilter_note: 'AI evaluated even for prefiltered cases for defense-in-depth; production would skip those calls.' };
@@ -372,13 +453,17 @@ async function main() {
     const modelOffset = (args.startIndex + index) % args.models.length;
     const models = [...args.models.slice(modelOffset), ...args.models.slice(0, modelOffset)];
     for (const model of models) {
-      const payload = { ...probe.payload, model };
+      const basePayload = { ...probe.basePayload, model };
+      const requestProfile = requestProfiles.models[model] ?? null;
+      const payload = applyRequestProfile(basePayload, requestProfile);
       const row = { id: entry.id, fixture_index: args.startIndex + index, category: entry.category, language: entry.language,
         label_basis: entry.provenance.label_basis, expected_label: entry.expected_label, score: entry.score,
         input_sha256: hash({ context, briefText: entry.input.briefText ?? '', leadCriteria: entry.input.leadCriteria ?? '' }),
-        prompt_sha256: hash(payload.messages), payload_sha256: hash(payload), requested_model: model,
+        prompt_sha256: hash(payload.messages), original_prompt_sha256: hash(basePayload.messages),
+        payload_sha256: hash(payload), base_payload_sha256: hash(basePayload), requested_model: model,
+        request_profile: requestProfile, effective_output_cap: effectiveOutputCap(payload),
         pipeline_would_call_ai: probe.pipelineWouldCallAI,
-        prefilter: probe.pipelineWouldCallAI ? null : probe.final, request: payload };
+        prefilter: probe.pipelineWouldCallAI ? null : probe.final, base_request: basePayload, request: payload };
       if (!args.live) row.status = 'dry_run';
       else {
         const reservation = reserveCost(payload, priceFor(prices, model));
@@ -400,8 +485,11 @@ async function main() {
           row.response_text = responseText;
           if (!response.ok) throw new Error(`HTTP_${response.status}`);
           const data = JSON.parse(responseText);
-          const result = await replay(isolated, entry, context, model, data);
+          const result = await replay(isolated, entry, context, model, data, requestProfile);
           if (hash(result.payload) !== row.payload_sha256) throw new Error('Replay payload mismatch');
+          if (hash(result.basePayload) !== row.base_payload_sha256 || hash(result.basePayload.messages) !== row.original_prompt_sha256) {
+            throw new Error('Replay original production prompt mismatch');
+          }
           const costs = observedCost(data, model, prices, reservation);
           row.status = 'ok';
           row.actual_model = data.model ?? null;
