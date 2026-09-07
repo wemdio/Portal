@@ -83,19 +83,27 @@ async def _parse_current_campaign_row(cells: list[Locator], header_map: dict[str
     connected_numbers = _parse_numbers(await cells[header_map["connected"]].inner_text())
     connected_reached = connected_numbers[0] if connected_numbers else 0
     connected_total = connected_numbers[1] if len(connected_numbers) > 1 else connected_reached
-    opened_text = (await cells[header_map["opened"]].inner_text()).strip()
+    sent_text = (await cells[header_map["sent"]].inner_text()).strip()
+    # «Открыли» вернулась в список не у всех кабинетов — читаем, если колонка
+    # есть, и не роняем разбор строки, если её нет.
+    opened_text = (
+        (await cells[header_map["opened"]].inner_text()).strip()
+        if header_map.get("opened", -1) >= 0
+        else ""
+    )
     replied_text = (await cells[header_map["replied"]].inner_text()).strip()
 
     return Campaign(
         name=name,
         status=status,
         created=created,
-        # The redesigned page has no separate "sent" column. Its total
-        # contacted count is the equivalent aggregate for the report.
-        sent=connected_total,
+        # Колонка «Отправлено» вернулась в интерфейс Coldy (правка 24.08.2026).
+        # Раньше её не было, и вместо неё в отчёт шло общее число контактов —
+        # цифры расходились с кабинетом.
+        sent=_parse_int(sent_text),
         connected_reached=connected_reached,
         connected_total=connected_total,
-        opened=_parse_int(opened_text.split("(")[0]),
+        opened=_parse_int(opened_text.split("(")[0]) if opened_text else 0,
         opened_pct=_parse_pct(opened_text),
         replied=_parse_int(replied_text.split("(")[0]),
         replied_pct=_parse_pct(replied_text),
@@ -161,18 +169,25 @@ async def _get_campaigns_list(page: Page, base_url: str) -> list[Campaign]:
 
     await page.wait_for_selector("table, [class*='table'], [class*='campaign']", timeout=15_000)
 
-    # The redesigned (2026-07) list packs name/status/date into a single
-    # «Рассылка» column and has no separate «Отправлено» column. Detect it by
-    # the table headers and parse accordingly; otherwise fall back to the
-    # legacy positional layout below.
+    # Текущий список Coldy держит имя, статус и дату в одной колонке «Рассылка».
+    # Опознаём раскладку по заголовкам; не совпало — уходим на старую
+    # позиционную разборку ниже.
+    #
+    # «Открыли» в обязательные не входит: 24.08.2026 Coldy убрал её из списка у
+    # части кабинетов, и требование всех четырёх колонок разом уводило разбор
+    # на старую раскладку, где колонки стоят в других местах. Отчёт при этом не
+    # падал, а тихо приносил чужие числа.
     headers = [header.strip().casefold() for header in await page.locator("thead th").all_inner_texts()]
     header_map = {
         "campaign": next((i for i, header in enumerate(headers) if "рассылк" in header), -1),
         "connected": next((i for i, header in enumerate(headers) if "связал" in header), -1),
+        "sent": next((i for i, header in enumerate(headers) if "отправлен" in header), -1),
         "opened": next((i for i, header in enumerate(headers) if "открыл" in header), -1),
         "replied": next((i for i, header in enumerate(headers) if "ответил" in header), -1),
     }
-    is_current_layout = all(index >= 0 for index in header_map.values())
+    is_current_layout = all(
+        header_map[key] >= 0 for key in ("campaign", "connected", "sent", "replied")
+    )
 
     campaigns: list[Campaign] = []
 
@@ -383,36 +398,44 @@ async def _parse_current_letters(page: Page, campaign: Campaign) -> list[LetterS
 
 
 async def _parse_current_analytics(page: Page, campaign: Campaign) -> CampaignAnalytics:
-    """Parse the redesigned (2026-07) Coldy analytics screen.
+    """Parse the redesigned Coldy analytics screen.
 
-    The summary metrics are plain text lines — a label line (e.g. «Открыли»)
-    followed by a value line and a percent line — so read the whole body text
-    instead of looking for card elements.
+    Метрики читаем поэлементно, а не построчно из текста страницы (правка
+    24.08.2026). Раньше подпись, значение и процент шли тремя соседними
+    строками, и разбор опирался на это соседство. Coldy переставил вёрстку —
+    строки разъехались, и каждая метрика молча приходила нулём: отчёт
+    выглядел исправным, просто со всеми нулями.
+
+    Теперь берём сам элемент с подписью и поднимаемся к его карточке: числа
+    внутри карточки остаются рядом с подписью при любой перестановке блоков.
     """
+    # «За все время» больше не признак готовности: заголовок появляется раньше
+    # цифр. Ждём саму метрику и уход индикатора загрузки.
     try:
         await page.wait_for_function(
-            "document.body.innerText.includes('За все время')",
+            "document.body.innerText.includes('Открыли')"
+            " && !document.body.innerText.includes('Loading...')",
             timeout=10_000,
         )
     except PlaywrightTimeoutError:
         pass
 
-    analytics_body = await page.locator("body").inner_text()
+    async def current_metric(label: str) -> tuple[int, float]:
+        metric = page.get_by_text(re.compile(rf"^\s*{label}\s*$", re.IGNORECASE)).first
+        if not await metric.count():
+            return 0, 0.0
+        # Два уровня вверх — карточка метрики целиком: подпись лежит во
+        # вложенном элементе, а значение и процент рядом с ним.
+        card_text = await metric.locator("xpath=../..").inner_text()
+        numbers = re.findall(r"\d+(?:\.\d+)?", card_text.replace(" ", " "))
+        value = int(float(numbers[0])) if numbers else 0
+        pct = float(numbers[1]) if len(numbers) > 1 else 0.0
+        return value, pct
 
-    def current_metric(label: str) -> tuple[int, float]:
-        lines = [line.strip() for line in analytics_body.splitlines() if line.strip()]
-        for index, line in enumerate(lines[:-1]):
-            if line.casefold() != label.casefold():
-                continue
-            value = _parse_int(lines[index + 1])
-            pct = _parse_pct(lines[index + 2]) if len(lines) > index + 2 else 0.0
-            return value, pct
-        return 0, 0.0
-
-    connected, _ = current_metric("Связались")
-    opened, opened_pct = current_metric("Открыли")
-    replied, replied_pct = current_metric("Ответили")
-    interested, interested_pct = current_metric("Заинтересованы")
+    connected, _ = await current_metric("Связались")
+    opened, opened_pct = await current_metric("Открыли")
+    replied, replied_pct = await current_metric("Ответили")
+    interested, interested_pct = await current_metric("Заинтересованы")
 
     # --- Letter stats table ---
     letters_item = page.get_by_text(re.compile(r"^\s*Статистика писем\s*$", re.IGNORECASE)).first
@@ -465,15 +488,22 @@ async def _get_analytics(page: Page, campaign: Campaign) -> Optional[CampaignAna
     except PlaywrightTimeoutError:
         pass
 
-    # Give the SPA a moment to render the nav items after first paint.
-    await page.wait_for_timeout(3_000)
-
-    chain_item = page.get_by_text(re.compile(r"^\s*Цепочка писем\s*$", re.IGNORECASE)).first
+    # Вкладку «Цепочка писем» намеренно НЕ открываем (правка 24.08.2026).
+    #
+    # Раньше её открывали первой, чтобы дать SPA прорисоваться. Оказалось
+    # наоборот: у части кампаний она подгружается лениво и на время загрузки
+    # своего редактора прячет навигацию с «Аналитикой». Клик по ней уводил
+    # сбор в старую раскладку, и отчёт приходил пустым.
+    #
+    # Вместо паузы вслепую ждём появления самого пункта «Аналитика»: это и
+    # быстрее на живых кампаниях, и надёжнее на медленных.
     try:
-        await chain_item.click(timeout=10_000)
-        await page.wait_for_timeout(1_000)
+        await page.wait_for_function(
+            "document.body.innerText.includes('Аналитика')",
+            timeout=20_000,
+        )
     except PlaywrightTimeoutError:
-        logger.warning("Campaign chain tab was not found for %s", campaign.name)
+        pass
 
     analytics_item = page.get_by_text(re.compile(r"^\s*Аналитика\s*$", re.IGNORECASE)).first
     try:
