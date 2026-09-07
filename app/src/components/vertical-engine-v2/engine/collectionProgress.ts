@@ -52,7 +52,7 @@ export function getCollectionQueue(
 
 export function getCollectionProgress(
   info: VeCollectInfo | null | undefined,
-  job?: Pick<VeJobSummary, 'stage' | 'status' | 'progress'>,
+  job?: Pick<VeJobSummary, 'stage' | 'status' | 'progress' | 'payload'>,
 ) {
   const tasks = Array.isArray(info?.tasks) ? info.tasks : [];
   const completedCounts = tasks.filter((task) => task && collectTaskDone(task.status))
@@ -61,7 +61,8 @@ export function getCollectionProgress(
   const candidates = collectCount(info?.stats?.rows_total);
   const construct = info?.construct;
   const snapshot = construct?.progress;
-  const phase = info?.company_name_recovery ? 'cleaning_names' : !construct
+  const phase = info?.company_name_recovery ? 'cleaning_names'
+    : info?.relevance_review_requested || job?.payload?.review_relevance ? 'reviewing_relevance' : !construct
     ? (tasks.length > 0 || (Array.isArray(info?.plan?.tasks) && info.plan.tasks.length > 0) ? 'collecting' : 'planning')
     : snapshot?.status === 'pending' ? 'construct_queued'
       : snapshot?.status === 'completed' || construct.status === 'done' ? 'finishing'

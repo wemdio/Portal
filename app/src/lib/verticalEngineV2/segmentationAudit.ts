@@ -13,6 +13,7 @@ import type { VeChainLetter, VeOperatorMapping } from './types';
 import type { DetailedSegmentClassificationResult } from './segmentClassify';
 import { mapBaseRowsToLeads } from './launchHandoff';
 import { companyNameCell, isCompanyNameReady } from './companyNames';
+import { isVeRelevanceReady } from './relevanceDecision';
 
 export interface SegmentationAuditExcluded {
   lowRelevance: number;
@@ -185,6 +186,10 @@ export function prepareSegmentationAudience(
       }
       if (row._low_relevance === true) {
         excluded.lowRelevance += 1;
+        return;
+      }
+      if (!isVeRelevanceReady(row)) {
+        excluded.relevanceUnchecked += 1;
         return;
       }
       const emailStatus = typeof row._email_status === 'string' ? row._email_status : null;

@@ -11,6 +11,7 @@ import { validateStoredAuditSnapshot } from '@/lib/verticalEngineV2/stages/segme
 import { prepareSegmentationAudience } from '@/lib/verticalEngineV2/segmentationAudit';
 import { VE_PREVIEW_READY_TARGET } from '@/lib/verticalEngineV2/collectionTarget';
 import { projectCompanyNames, VE_COMPANY_NAME_FIELD } from '@/lib/verticalEngineV2/companyNames';
+import { readVeRelevanceReserve } from '@/lib/verticalEngineV2/relevanceReserve';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -20,13 +21,14 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-type BaseExportMode = 'raw' | 'launch-ready' | 'preview';
+type BaseExportMode = 'raw' | 'launch-ready' | 'preview' | 'review';
 
 function exportMode(req: NextRequest): BaseExportMode | null {
   const requested = req.nextUrl.searchParams.get('mode');
   if (requested === null || requested === '' || requested === 'raw') return 'raw';
   if (requested === 'launch-ready') return 'launch-ready';
   if (requested === 'preview') return 'preview';
+  if (requested === 'review') return 'review';
   return null;
 }
 
@@ -43,6 +45,26 @@ function launchContext(req: NextRequest): {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Diagnostic projection only; no internal decision/checkpoint JSON in downloads. */
+function reviewCells(row: Record<string, unknown>): Record<string, string> {
+  const decision = isRecord(row._ve_relevance) ? row._ve_relevance : null;
+  const status = decision?.status;
+  const statusLabel = status === 'needs_review' ? 'Требует уточнения'
+    : status === 'error' ? 'Техническая ошибка проверки'
+      : status === 'irrelevant' || row._low_relevance === true ? 'Не подходит этой гипотезе'
+        : row._relevance_unchecked === true ? 'Релевантность не подтверждена'
+          : row._email_status !== 'ok' ? 'Не готов по проверке email'
+            : 'Сохранён отдельно от готовой базы';
+  const reason = typeof decision?.reason === 'string' ? decision.reason
+    : row._email_status !== 'ok' ? 'Email не прошёл все проверки; контакт не готов к запуску'
+      : 'В сохранённой записи нет подробной причины';
+  const evidence = Array.isArray(decision?.evidence) ? decision.evidence
+    .filter(isRecord)
+    .filter((entry) => typeof entry.field === 'string' && typeof entry.quote === 'string')
+    .map((entry) => `${entry.field}: ${entry.quote}`).join('\n') : '';
+  return { 'Статус проверки': statusLabel, 'Причина': reason, 'Подтверждение': evidence };
 }
 
 // GET — скачать raw-базу целиком или только launch-ready аудиторию как CSV
@@ -82,7 +104,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       }
 
       const rowCount = typeof base.row_count === 'number' ? base.row_count : 0;
-      if (rowCount <= 0) {
+      if (rowCount <= 0 && mode !== 'review') {
         return jsonError('База пустая — нечего выгружать', 409);
       }
 
@@ -94,12 +116,26 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         : [];
       // row_count>0, но data пуст/не массив (битая запись) — тот же 409:
       // row_count здесь только счётчик, экспортировать по факту нечего.
-      if (rows.length === 0) {
+      if (rows.length === 0 && mode !== 'review') {
         return jsonError('База пустая — нечего выгружать', 409);
       }
 
       let exportRows = rows;
       let exportColumns = columns;
+      if (mode === 'review') {
+        const info = isRecord(base.collect_info) ? base.collect_info : null;
+        const reserve = readVeRelevanceReserve(info?.relevance_reserve);
+        if (reserve.length === 0) return jsonError('В базе нет сохранённых кандидатов для уточнения', 409);
+        const sourceColumns = columns.filter((column) => !column.startsWith('_'));
+        exportColumns = [...sourceColumns, 'Статус проверки', 'Причина', 'Подтверждение'];
+        exportRows = reserve.map((row) => {
+          const visible = Object.fromEntries(sourceColumns.map((column) => {
+            const value = row[column];
+            return [column, typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' ? value : ''];
+          }));
+          return { ...visible, ...reviewCells(row) };
+        });
+      }
       if (mode === 'preview') {
         const info = base.collect_info as { collection_mode?: string; target_progress?: { status?: string } } | null;
         if (info?.collection_mode !== 'preview' || !['analyzing', 'analyzed'].includes(base.status)
@@ -176,7 +212,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         });
         exportColumns = [...columns.filter((column) => column !== '_ve_segment'), '_ve_segment'];
       }
-      if (mode !== 'raw') {
+      if (mode !== 'raw' && mode !== 'review') {
         exportRows = projectCompanyNames(exportRows);
         exportColumns = exportColumns.filter((column) => column !== VE_COMPANY_NAME_FIELD);
       }

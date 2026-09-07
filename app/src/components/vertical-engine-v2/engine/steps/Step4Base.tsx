@@ -46,7 +46,7 @@ import { collectCount, collectTaskDone, collectTaskFailed, getCollectionProgress
 const COLLECT_POLL_MS = 4000;
 
 type BaseMode = 'auto' | 'upload';
-type BaseExportMode = 'raw' | 'preview';
+type BaseExportMode = 'raw' | 'preview' | 'review';
 
 interface ParsedFile {
   filename: string;
@@ -701,6 +701,7 @@ export function Step4Base(props: {
                 job={activeCollectionJob(jobs, base.id)}
                 queued={queuedBaseIds.has(base.id)}
                 hypothesisTitle={base.hypothesis_id ? hypothesisTitleById.get(base.hypothesis_id) : undefined}
+                onUpdated={onUploaded}
               />
             ))}
           </div>
@@ -800,15 +801,42 @@ function previewCellText(value: unknown): string {
   return typeof value === 'string' ? value : String(value);
 }
 
-function BaseRow({ base, job, hypothesisTitle, queued }: { base: VeBaseSummary; job?: VeJobSummary; hypothesisTitle?: string; queued: boolean }) {
+function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { base: VeBaseSummary; job?: VeJobSummary; hypothesisTitle?: string; queued: boolean; onUpdated: () => void }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [downloadingMode, setDownloadingMode] = useState<BaseExportMode | null>(null);
   const [downloadError, setDownloadError] = useState('');
+  const [reviewStarting, setReviewStarting] = useState(false);
+  const [reviewError, setReviewError] = useState('');
+  const [reviewNotice, setReviewNotice] = useState('');
 
   const hasRows = base.row_count > 0;
+  const isReadyPreview = base.collect_info?.collection_mode === 'preview';
+  const reserve = base.collect_info?.relevance_summary;
+  const hasReserve = (collectCount(reserve?.total) ?? 0) > 0;
+  const hasReviewCandidates = (collectCount(reserve?.needs_review) ?? 0) + (collectCount(reserve?.error) ?? 0) > 0;
   const progress = getCollectionProgress(base.collect_info, job);
-  const columns = Array.isArray(base.columns) ? base.columns.filter((column) => column !== VE_COMPANY_NAME_FIELD) : [];
-  const previewRows = (Array.isArray(base.sample_rows) ? base.sample_rows : []).slice(0, PREVIEW_ROWS);
+  const columns = Array.isArray(base.columns) ? base.columns.filter((column) => column !== VE_COMPANY_NAME_FIELD && column !== '_ve_relevance') : [];
+  const previewRows = (Array.isArray(base.sample_rows) ? base.sample_rows : [])
+    .filter((row) => !isReadyPreview || (isCompanyNameReady(row) && row._email_status === 'ok'
+      && row._low_relevance !== true && row._relevance_unchecked !== true))
+    .slice(0, PREVIEW_ROWS);
+
+  const handleReview = useCallback(async () => {
+    if (reviewStarting || base.status === 'collecting') return;
+    setReviewStarting(true);
+    setReviewError('');
+    setReviewNotice('');
+    try {
+      const { ok, data } = await veEnginePost<{ error?: string }>(`${VE_API}/bases/${base.id}/review`, {});
+      if (!ok) throw new Error(data.error || 'Не удалось продолжить проверку сохранённых контактов');
+      setReviewNotice('Проверка сохранённых контактов поставлена в очередь. Новый сбор не запускается.');
+      onUpdated();
+    } catch (error) {
+      setReviewError(error instanceof Error ? error.message : 'Не удалось продолжить проверку');
+    } finally {
+      setReviewStarting(false);
+    }
+  }, [base.id, base.status, onUpdated, reviewStarting]);
 
   const handleDownload = useCallback(async (mode: BaseExportMode) => {
     if (downloadingMode) return;
@@ -878,27 +906,33 @@ function BaseRow({ base, job, hypothesisTitle, queued }: { base: VeBaseSummary; 
             Загружена
           </span>
         )}
-        {hasRows ? (
+        {hasRows || hasReserve ? (
           <span className="ml-auto inline-flex shrink-0 items-center gap-2">
-            <button
+            {hasRows ? <button
               type="button"
               onClick={() => setPreviewOpen((v) => !v)}
               className={HE.btnQuiet}
               aria-expanded={previewOpen}
               aria-controls={`ve-base-preview-${base.id}`}
             >
-              {previewOpen ? 'Скрыть' : 'Превью'}
-            </button>
-            <button
+              {previewOpen ? 'Скрыть' : isReadyPreview ? 'Готовые контакты' : 'Исходные кандидаты'}
+            </button> : null}
+            {hasRows ? <button
               type="button"
               onClick={() => void handleDownload(base.collect_info?.collection_mode === 'preview' ? 'preview' : 'raw')}
               disabled={downloadingMode !== null || (base.collect_info?.collection_mode === 'preview' && base.status === 'collecting')}
               className={HE.btnQuiet}
               title={base.collect_info?.collection_mode === 'preview' ? 'До 1000 проверенных контактов для согласования' : 'Все собранные строки, включая исключённые из запуска'}
             >
-              {downloadingMode ? <Spinner className="h-3 w-3" /> : null}
+              {downloadingMode !== null && downloadingMode !== 'review' ? <Spinner className="h-3 w-3" /> : null}
               {base.collect_info?.collection_mode === 'preview' ? 'CSV превью' : 'Исходный CSV'}
-            </button>
+            </button> : null}
+            {hasReserve ? <button type="button" className={HE.btnQuiet}
+              onClick={() => void handleDownload('review')} disabled={downloadingMode !== null}
+              title="Сохранённые кандидаты с причинами проверки; не готовая база для рассылки">
+              {downloadingMode === 'review' ? <Spinner className="h-3 w-3" /> : null}
+              Контакты на уточнение
+            </button> : null}
           </span>
         ) : null}
       </div>
@@ -908,6 +942,13 @@ function BaseRow({ base, job, hypothesisTitle, queued }: { base: VeBaseSummary; 
             <p className="mt-2 text-xs text-red-600" role="alert">{collectionFailureMessage(base)}</p>
           ) : null}
           <CollectionFunnel base={base} />
+          {hasReviewCandidates ? <div className="mt-3">
+            <button type="button" className={HE.btnGhost} onClick={() => void handleReview()}
+              disabled={reviewStarting}>
+              {reviewStarting ? 'Запускаем проверку…' : 'Уточнить сохранённые контакты'}
+            </button>
+            <p className={`mt-1 ${HE.faint}`}>Повторно проверяются сохранённые компании без подтверждённой релевантности. Они не попадут в запуск до завершения проверок.</p>
+          </div> : null}
         </div>
       ) : null}
       {downloadError ? (
@@ -915,8 +956,13 @@ function BaseRow({ base, job, hypothesisTitle, queued }: { base: VeBaseSummary; 
           {downloadError}
         </p>
       ) : null}
+      {reviewError ? <p className="px-4 pb-3 text-[11px] text-red-600" role="alert">{reviewError}</p> : null}
+      {reviewNotice ? <p className="px-4 pb-3 text-[11px] text-gray-600" role="status">{reviewNotice}</p> : null}
       {previewOpen && hasRows ? (
         <div id={`ve-base-preview-${base.id}`} className="overflow-x-auto px-4 pb-4">
+          <p className={`mb-2 ${HE.faint}`}>{isReadyPreview
+            ? 'Первые готовые контакты для согласования. Это не весь исходный список.'
+            : 'Образец исходных кандидатов, включая не прошедших проверки. Не используйте его как готовую базу для рассылки.'}</p>
           <table className="min-w-full divide-y divide-gray-200 text-xs">
             <thead>
               <tr>
@@ -1096,6 +1142,12 @@ function readCollectInfo(info: VeCollectInfo | null | undefined) {
       rowsTotal: collectCount(stats?.rows_total),
       processedRows: collectCount(stats?.processed_rows),
       launchableRows: collectCount(stats?.launchable_rows),
+      relevanceNeedsReview: collectCount(info?.relevance_summary?.needs_review) ?? collectCount(stats?.relevance_needs_review),
+      relevanceErrors: collectCount(info?.relevance_summary?.error) ?? collectCount(stats?.relevance_errors),
+      relevanceIrrelevant: collectCount(info?.relevance_summary?.irrelevant) ?? collectCount(stats?.relevance_irrelevant) ?? collectCount(stats?.low_relevance),
+      reserveRows: collectCount(info?.relevance_summary?.total),
+      reserveEmailUnready: collectCount(info?.relevance_summary?.email_unready),
+      reserveOther: collectCount(info?.relevance_summary?.other),
       relevanceUnchecked: collectCount(stats?.relevance_unchecked),
       relevanceCheckedCompanies: collectCount(stats?.relevance_checked_companies),
       relevanceTotalCompanies: collectCount(stats?.relevance_total_companies),
@@ -1115,6 +1167,7 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
   const nameCleanup = base.collect_info?.company_name_cleanup;
   const nameProgress = getCollectionProgress(base.collect_info, job);
   const namesInProgress = base.status === 'collecting' && nameProgress.phase === 'cleaning_names';
+  const relevanceInProgress = base.status === 'collecting' && nameProgress.phase === 'reviewing_relevance';
   const namesChecked = nameProgress.nameProgress?.done ?? collectCount(nameCleanup?.checked);
   const namesTotal = nameProgress.nameProgress?.total ?? collectCount(nameCleanup?.companies);
   const namesFailed = collectCount(nameCleanup?.failed);
@@ -1135,6 +1188,10 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
       stats.rowsTotal,
       processedRows,
       stats.launchableRows,
+      stats.reserveRows,
+      stats.relevanceNeedsReview,
+      stats.relevanceErrors,
+      stats.relevanceIrrelevant,
       stats.relevanceUnchecked,
       stats.relevanceCheckedCompanies,
       stats.relevanceTotalCompanies,
@@ -1152,6 +1209,7 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
           <p className="font-medium">Проверено и подготовлено: {target.ready_rows.toLocaleString('ru-RU')} / цель {target.ready_target.toLocaleString('ru-RU')}</p>
           <p className="mt-1">
             {namesInProgress ? 'Контакты сохранены. Подготавливаем названия компаний для превью и писем.'
+              : relevanceInProgress ? 'Уточняем деятельность сохранённых компаний по доступным сведениям с сайтов. На этом этапе новый сбор не запускается.'
               : target.status === 'collecting' ? `Проход ${target.round} из ${target.max_rounds}. Добираем контакты после проверок.`
               : target.status === 'target_reached' ? 'Превью готово к согласованию. Отправка ещё не включена.'
               : target.status === 'exhausted' ? 'Источники текущего плана закончились. Это не оценка всего рынка.'
@@ -1180,8 +1238,26 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
       ) : null}
       {!target && stats.launchableRows !== null ? (
         <p className="font-medium text-emerald-700">
-          Прошли проверки: {stats.launchableRows.toLocaleString('ru-RU')} {recipientWord(stats.launchableRows)}
+          Готовы к запуску: {stats.launchableRows.toLocaleString('ru-RU')} {recipientWord(stats.launchableRows)}
         </p>
+      ) : null}
+      {stats.relevanceNeedsReview !== null && stats.relevanceNeedsReview > 0 ? (
+        <p className="font-medium text-amber-700">Требуют уточнения: {stats.relevanceNeedsReview.toLocaleString('ru-RU')} строк. Сохранены, не отправляются.</p>
+      ) : null}
+      {stats.relevanceErrors !== null && stats.relevanceErrors > 0 ? (
+        <p className="font-medium text-amber-700">Проверка прервана: {stats.relevanceErrors.toLocaleString('ru-RU')} строк. Сохранены для повторной проверки.</p>
+      ) : null}
+      {stats.relevanceIrrelevant !== null && stats.relevanceIrrelevant > 0 ? (
+        <p>Не подходят этой гипотезе: {stats.relevanceIrrelevant.toLocaleString('ru-RU')} строк.{stats.reserveRows !== null ? ' Сохранены отдельно от готовой базы.' : ''}</p>
+      ) : null}
+      {stats.reserveEmailUnready !== null && stats.reserveEmailUnready > 0 ? (
+        <p>Не готовы по проверке email: {stats.reserveEmailUnready.toLocaleString('ru-RU')} строк. Сохранены, не отправляются.</p>
+      ) : null}
+      {stats.reserveOther !== null && stats.reserveOther > 0 ? (
+        <p>Другие сохранённые кандидаты: {stats.reserveOther.toLocaleString('ru-RU')} строк. Не входят в готовый запас.</p>
+      ) : null}
+      {stats.reserveRows !== null && stats.reserveRows > 0 ? (
+        <p className="sm:col-span-2 text-gray-500">Сохранённый резерв: {stats.reserveRows.toLocaleString('ru-RU')} строк. Причины доступны в CSV «Контакты на уточнение». Это не гарантированный объём для выполнения обязательств.</p>
       ) : null}
       {namesChecked !== null && namesTotal !== null ? (
         <p>Названия компаний подготовлены: {namesChecked.toLocaleString('ru-RU')} из {namesTotal.toLocaleString('ru-RU')}. Исходники сохранены.</p>
@@ -1198,10 +1274,10 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
           перед запуском.
         </p>
       ) : null}
-      {stats.relevanceUnchecked !== null && stats.relevanceUnchecked > 0 ? (
+      {stats.relevanceNeedsReview === null && stats.relevanceErrors === null && stats.relevanceUnchecked !== null && stats.relevanceUnchecked > 0 ? (
         <p className="sm:col-span-2 font-medium text-amber-700">
-          {stats.relevanceUnchecked.toLocaleString('ru-RU')} строк без relevance-вердикта не входят в «Прошли проверки»
-          и исключены из запуска.
+          {stats.relevanceUnchecked.toLocaleString('ru-RU')} строк без подтверждённой релевантности не входят в готовый запас
+          и не отправляются. В этой старой записи причины не разделены на нехватку данных и технические ошибки.
         </p>
       ) : null}
       {estimate.companiesWithEmail !== null ? (
@@ -1221,6 +1297,7 @@ const COLLECT_PHASE_LABELS = {
   processing: 'Обогащаем и проверяем',
   finishing: 'Завершаем проверку базы',
   cleaning_names: 'Очищаем названия компаний',
+  reviewing_relevance: 'Уточняем релевантность сохранённых контактов',
   construct_failed: 'Обработка остановлена',
 };
 
@@ -1262,7 +1339,7 @@ function CollectProgress({ base, job, queuedCount, queued, otherVertical }: {
         <p className="mt-3 text-xs text-gray-600">
           {progress.candidates !== null
             ? base.collect_info?.target_progress
-              ? `Кандидатов в текущем проходе: ${progress.candidates.toLocaleString('ru-RU')}. После проверок они дополнят превью.`
+              ? `Кандидатов обработано за все проходы: ${progress.candidates.toLocaleString('ru-RU')}. Подтверждённые получатели дополнят превью.`
               : `Собрано кандидатов: ${progress.candidates.toLocaleString('ru-RU')}. Готовые получатели появятся после проверок.`
             : progress.sourceRows !== null
               ? `Получено из завершённых источников: ${progress.sourceRows.toLocaleString('ru-RU')} строк. Дубли ещё не исключены.`

@@ -38,6 +38,7 @@ import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/bl
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { mapBaseRowsToLeads, parseLaunchInfo } from '../launchHandoff';
 import { isCompanyNameReady } from '../companyNames';
+import { isVeRelevanceReady } from '../relevanceDecision';
 import type { VeJob, VeOperatorMapping } from '../types';
 import { stageLog, type VeStageContext, type VeStageResult, type VeUsage } from './shared';
 import {
@@ -341,7 +342,7 @@ export function selectRefillLeadRows(
       _low_relevance?: boolean;
       _relevance_unchecked?: boolean;
     };
-    if (quality._low_relevance === true || quality._relevance_unchecked === true) continue;
+    if (quality._low_relevance === true || quality._relevance_unchecked === true || !isVeRelevanceReady(row)) continue;
     withEmail += 1;
     const status = emailStatuses?.[i] ?? null;
     // TODO(catch_all): catch_all-домены частично рабочие — пока не шлём (риск баунсов).

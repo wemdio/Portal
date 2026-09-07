@@ -96,8 +96,12 @@ import { extractEmail, extractEmails } from '@/lib/tools/dfybUtils';
 import { getVeDirectorySegmentStats } from '../dossierData';
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
-import { findIrrelevantRows } from '../relevanceGate';
-import { VeRelevanceCheckpointError, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
+import { findIrrelevantRows, type VeRelevanceDecision } from '../relevanceGate';
+import { relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
+import {
+  mergeVeRelevanceRows, needsVeRelevanceEvidence, needsVeRelevanceReview, readVeRelevanceReserve, readVeRelevanceSourceRows, summarizeVeRelevanceReserve,
+  veRelevanceCompanyKey, veRelevanceRowKey, type VeRelevanceReserve, type VeRelevanceReserveSummary,
+} from '../relevanceReserve';
 import { cleanVeCompanyNames, type VeCompanyNameCheckpoint } from '../companyNameCleanup';
 import { companyNameSource, isCompanyNameReady, VE_COMPANY_NAME_FIELD, type VeCompanyNameCleanupSummary } from '../companyNames';
 import { prepareSegmentationAudience } from '../segmentationAudit';
@@ -645,6 +649,12 @@ export interface VeCollectInfo {
   validation_retry?: boolean;
   /** Latest constructor validation snapshot; per-batch writes live in ve_jobs.result. */
   relevance_checkpoint?: VeRelevanceCheckpoint;
+  /** Worker-only complete non-ready candidates; never use directly for sending. */
+  relevance_reserve?: VeRelevanceReserve;
+  /** Public counts. Pending review is retained stock, not a confirmed recipient. */
+  relevance_summary?: VeRelevanceReserveSummary;
+  /** Finish bounded evidence passes on saved candidates before purchasing a new round. */
+  relevance_review_requested?: boolean;
   company_name_checkpoint?: VeCompanyNameCheckpoint;
   company_name_cleanup?: VeCompanyNameCleanupSummary;
   /** Durable post-validation phase: resume names without re-running paid collection. */
@@ -729,6 +739,8 @@ export interface VeCollectInfo {
     low_relevance?: number;
     /** Строки, исключённые fail-closed: их company-группа не получила verdict. */
     relevance_unchecked?: number;
+    relevance_needs_review?: number;
+    relevance_errors?: number;
     /** Покрытие relevance-gate по уникальным company-группам. */
     relevance_checked_companies?: number;
     relevance_total_companies?: number;
@@ -1903,7 +1915,7 @@ async function loadOtherBaseExclusionKeys(
   const { data, error } = await ctx.supabase
     .from('ve_bases')
     .select(checkpointHypothesisId
-      ? 'data, hypothesis_id, target_checkpoint:collect_info->target_checkpoint'
+      ? 'data, columns, source, hypothesis_id, target_checkpoint:collect_info->target_checkpoint'
       : 'data')
     .eq('project_id', projectId)
     .neq('status', 'failed')
@@ -1916,10 +1928,16 @@ async function loadOtherBaseExclusionKeys(
     emails: new Set<string>(),
   };
   for (const row of (data ?? []) as Array<{
-    data?: unknown; hypothesis_id?: string; target_checkpoint?: VeCollectInfo['target_checkpoint'];
+    data?: unknown; columns?: string[]; source?: string; hypothesis_id?: string; target_checkpoint?: VeCollectInfo['target_checkpoint'];
     collect_info?: VeCollectInfo;
   }>) {
-    addRowsToExclusionKeys(keys, Array.isArray(row.data) ? row.data : []);
+    const storedRows = Array.isArray(row.data) ? row.data : [];
+    // Legacy auto bases kept raw/rejected candidates in data. Those candidates
+    // must not reserve a company against another, potentially correct hypothesis.
+    const reservedRows = checkpointHypothesisId && row.source === 'auto'
+      ? prepareSegmentationAudience({ rows: storedRows, columns: row.columns ?? [], source: 'auto' }).rows
+      : storedRows;
+    addRowsToExclusionKeys(keys, reservedRows);
     if (checkpointHypothesisId && row.hypothesis_id === checkpointHypothesisId) {
       const checkpoint = row.target_checkpoint ?? row.collect_info?.target_checkpoint;
       addRowsToExclusionKeys(keys, Array.isArray(checkpoint?.seen_rows) ? checkpoint.seen_rows : []);
@@ -2288,7 +2306,7 @@ function resumeHeldSupplyTimers(info: VeCollectInfo): void {
 
 async function ensureTargetBaseAnalysis(ctx: VeStageContext, job: VeJob, baseId: string): Promise<void> {
   const { data, error } = await ctx.supabase.from('ve_jobs').select('id, payload')
-    .eq('project_id', job.project_id).eq('stage', 'base_analyze');
+    .eq('project_id', job.project_id).eq('stage', 'base_analyze').in('status', ['pending', 'running']);
   if (error) throw new Error(`ve_jobs analysis recovery read: ${error.message}`);
   if ((data ?? []).some((candidate) => (candidate.payload as { base_id?: string } | null)?.base_id === baseId)) return;
   const { error: insertError } = await ctx.supabase.from('ve_jobs').insert({
@@ -2315,8 +2333,16 @@ async function checkCollectedRelevance(args: {
     _email_status?: string;
     _low_relevance?: boolean;
     _relevance_unchecked?: boolean;
+    _ve_relevance?: VeRelevanceDecision;
   };
-  let storedRows: StoredRow[] = finalRows;
+  let storedRows: StoredRow[] = finalRows.map((row) => {
+    const clean: StoredRow = { ...row };
+    delete clean._low_relevance;
+    delete clean._relevance_unchecked;
+    // The gate never trusts an old verdict, but retains evidence-attempt counts
+    // so bounded follow-up work rotates through the whole saved reserve.
+    return clean;
+  });
   if (finalEmailStatuses) {
     storedRows = storedRows.map((r, i) => {
       const st = finalEmailStatuses[i];
@@ -2325,6 +2351,8 @@ async function checkCollectedRelevance(args: {
   }
   let lowRelevanceCount = 0;
   let relevanceUncheckedCount = 0;
+  let relevanceNeedsReviewCount = 0;
+  let relevanceErrorCount = 0;
   let relevanceCheckedCompanies: number | null = null;
   let relevanceTotalCompanies: number | null = null;
   let relevanceCoverageComplete = false;
@@ -2369,9 +2397,9 @@ async function checkCollectedRelevance(args: {
       log: (m) => stageLog(ctx, m),
       signal: ctx.signal,
       checkpointScope: JSON.stringify([
-        job.project_id, base.vertical_id, base.hypothesis_id ?? null,
-        info.construct?.bc_job_id ?? null, info.target_progress?.round ?? null,
+        job.project_id, base.id, base.vertical_id, base.hypothesis_id ?? null,
       ]),
+      reviewAttempt: job.payload?.review_relevance === true ? job.id : undefined,
       checkpoint: [job.result?.relevance_checkpoint, args.previousRelevanceCheckpoint, info.relevance_checkpoint],
       onCheckpoint: async (checkpoint) => {
         ctx.signal?.throwIfAborted();
@@ -2394,19 +2422,20 @@ async function checkCollectedRelevance(args: {
     usage.costUsd += gate.costUsd;
     lowRelevanceCount = gate.flagged.size;
     relevanceUncheckedCount = gate.unchecked.size;
+    relevanceNeedsReviewCount = gate.review.size;
+    relevanceErrorCount = gate.errored.size;
     relevanceCheckedCompanies = gate.coverage.checkedCompanies;
     relevanceTotalCompanies = gate.coverage.totalCompanies;
     relevanceCoverageComplete = gate.coverage.complete;
     relevanceError = gate.error ?? null;
-    if (gate.flagged.size > 0 || gate.unchecked.size > 0) {
-      storedRows = storedRows.map((r, i) =>
-        gate.flagged.has(i)
-          ? { ...r, _low_relevance: true }
-          : gate.unchecked.has(i)
-            ? { ...r, _relevance_unchecked: true }
-            : r,
-      );
-    }
+    storedRows = storedRows.map((row, index) => {
+      const decision = gate.decisions.get(index);
+      if (!decision) throw new Error('Relevance gate did not return a decision for every row');
+      return { ...row, _ve_relevance: decision,
+        ...(decision.status === 'irrelevant' ? { _low_relevance: true } : {}),
+        ...(['needs_review', 'error'].includes(decision.status) ? { _relevance_unchecked: true } : {}),
+      };
+    });
     stageLog(
       ctx,
       `[base_collect] релевант-гейт: проверено ${gate.coverage.checkedCompanies}/` +
@@ -2420,14 +2449,23 @@ async function checkCollectedRelevance(args: {
     // Неожиданный сбой вне never-throw контракта gate тоже fail-closed: ни одна
     // строка без verdict не должна попасть в проверенный итог или refill.
     relevanceUncheckedCount = storedRows.length;
-    storedRows = storedRows.map((row) => ({ ...row, _relevance_unchecked: true }));
+    lowRelevanceCount = 0;
+    relevanceNeedsReviewCount = 0;
+    relevanceErrorCount = storedRows.length;
+    relevanceCoverageComplete = false;
+    storedRows = storedRows.map((row) => ({ ...row, _relevance_unchecked: true,
+      _ve_relevance: { version: 2, status: 'error', reason: 'Не удалось завершить проверку; контакт сохранён для повторной попытки',
+        evidence: [], context_hash: relevanceHash([job.project_id, base.vertical_id, base.hypothesis_id]),
+        review_attempts: row._ve_relevance?.review_attempts ?? 0 },
+    }));
     stageLog(
       ctx,
       `[base_collect] релевант-гейт недоступен, все ${storedRows.length} строк исключены: ` +
         `${e instanceof Error ? e.message : String(e)}`,
     );
   }
-  return { storedRows, lowRelevanceCount, relevanceUncheckedCount, relevanceCheckedCompanies, relevanceTotalCompanies, relevanceCoverageComplete, relevanceError };
+  return { storedRows, lowRelevanceCount, relevanceUncheckedCount, relevanceNeedsReviewCount, relevanceErrorCount,
+    relevanceCheckedCompanies, relevanceTotalCompanies, relevanceCoverageComplete, relevanceError };
 }
 
 
@@ -2436,6 +2474,11 @@ async function resumeSavedPreviewValidation(
   ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
   target: VeCollectionTargetProgress, market: VeMarket, usage: VeUsage,
 ): Promise<VeStageResult> {
+  // New previews retain every round's pending candidates, not just the last BC
+  // output. Reuse that durable reserve before considering legacy BC recovery.
+  if (readVeRelevanceReserve(info.relevance_reserve).some(needsVeRelevanceReview)) {
+    return reviewSavedRelevance(ctx, job, base, info, target, market, usage);
+  }
   const bcId = info.construct?.bc_job_id;
   if (!bcId || info.construct?.status !== 'done') throw new Error('Saved constructor result is unavailable');
   // A terminal write/cancellation failure may have left successful batches
@@ -2510,6 +2553,39 @@ async function resumeSavedPreviewValidation(
   });
 }
 
+/** Reclassify saved uncertain candidates only: no source acquisition or email replay. */
+async function reviewSavedRelevance(
+  ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
+  target: VeCollectionTargetProgress, market: VeMarket, usage: VeUsage,
+): Promise<VeStageResult> {
+  const automatic = info.relevance_review_requested === true && job.payload?.review_relevance !== true;
+  const rows = readVeRelevanceReserve(info.relevance_reserve).filter(automatic ? needsVeRelevanceEvidence : needsVeRelevanceReview);
+  if (!rows.length) throw new Error('В сохранённом резерве нет контактов для уточнения релевантности');
+  stageLog(ctx, `[base_collect] уточняем ${rows.length} сохранённых контактов; повторный сбор и email-валидация не запускаются`);
+  const gate = await checkCollectedRelevance({ ctx, job, base, info,
+    finalRows: rows as VeUnifiedRow[], finalEmailStatuses: rows.map((row) => typeof row._email_status === 'string' ? row._email_status : null),
+    market, usage,
+  });
+  info.validation_retry = true;
+  const stats: NonNullable<VeCollectInfo['stats']> = {
+    tasks_total: info.tasks?.length ?? 0, tasks_done: info.tasks?.filter((task) => task.status === 'done').length ?? 0,
+    tasks_failed: info.tasks?.filter((task) => task.status === 'failed').length ?? 0,
+    rows_total: target.candidates_processed, excluded_existing_bases: 0, excluded_during_fetch: 0,
+    ...info.stats, low_relevance: gate.lowRelevanceCount, relevance_unchecked: gate.relevanceUncheckedCount,
+    relevance_needs_review: gate.relevanceNeedsReviewCount, relevance_errors: gate.relevanceErrorCount,
+    relevance_checked_companies: gate.relevanceCheckedCompanies ?? undefined,
+    relevance_total_companies: gate.relevanceTotalCompanies ?? undefined,
+    relevance_coverage_complete: gate.relevanceCoverageComplete, relevance_recovery: true,
+  };
+  const seenKeys = buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []);
+  const hasBufferedCandidates = automatic && (info.tasks ?? []).some((task) => task.status === 'done'
+    && (task.harvest ?? []).some((row) => pruneBaseRowAgainstExclusion(seenKeys, row) !== null));
+  return completeTargetRound({ ctx, job, base, info, progress: target, candidates: [], rows: gate.storedRows,
+    columns: base.columns ?? [...VE_AUTO_COLLECT_COLUMNS], stats, hasBufferedCandidates,
+    validationError: gate.relevanceCoverageComplete ? null : gate.relevanceError ?? 'Проверка релевантности завершилась не полностью', usage,
+  });
+}
+
 async function cleanCollectedCompanyNames(
   ctx: VeStageContext, job: VeJob, info: VeCollectInfo, rows: Array<Record<string, unknown>>, usage: VeUsage,
 ) {
@@ -2574,15 +2650,31 @@ async function completeTargetRound(args: {
 }): Promise<VeStageResult> {
   const { ctx, job, base, info, progress } = args;
   const tasks = info.tasks ?? [];
+  const reviewOnly = job.payload?.review_relevance === true;
   const prior = info.target_checkpoint;
-  const validationRetry = info.validation_retry === true || !!info.company_name_recovery;
+  const validationRetry = info.validation_retry === true || !!info.company_name_recovery || info.relevance_review_requested === true;
   const columns = [...new Set([...(base.columns ?? []), ...args.columns])];
   const previousRows = Array.isArray(base.data) ? base.data : [];
+  // Keep the complete post-constructor observations across every round. data is
+  // still only the validated contact projection used by audit and delivery.
+  const representedCompanies = new Set(args.rows.map(veRelevanceCompanyKey));
+  // A constructor may return no usable row for a source company. Retain that
+  // original company too; lack of an email verdict is not an irreversible reject.
+  const missingConstructorRows = args.candidates.filter((row) => !representedCompanies.has(veRelevanceCompanyKey(row)))
+    .map((row) => ({ ...row, _relevance_unchecked: true }));
+  const retainedRows = mergeVeRelevanceRows(readVeRelevanceReserve(info.relevance_reserve), previousRows, missingConstructorRows, args.rows);
   const freshKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, base.id, base.hypothesis_id);
-  const availableRows = (validationRetry ? args.rows : [...previousRows, ...args.rows]).filter((row) =>
+  const availableRows = retainedRows.filter((row) =>
     row && typeof row === 'object' && !baseRowMatchesExclusion(freshKeys, row as VeUnifiedRow),
   );
   const contactRows = prepareSegmentationAudience({ rows: availableRows, columns, source: 'auto', ignoreCompanyNameCheck: true }).rows;
+  const contactKeys = new Set(contactRows.map(veRelevanceRowKey));
+  const reserveRows = retainedRows.filter((row) => !contactKeys.has(veRelevanceRowKey(row)));
+  info.relevance_reserve = { version: 1, rows: reserveRows,
+    source_rows: mergeVeRelevanceRows(readVeRelevanceSourceRows(info.relevance_reserve),
+      args.candidates.map((row) => ({ ...row, _ve_source_candidate: true }))),
+  };
+  info.relevance_summary = summarizeVeRelevanceReserve(reserveRows);
   const seen = new Map<string, Pick<VeUnifiedRow, 'company' | 'inn' | 'email'>>();
   for (const row of [...(prior?.seen_rows ?? []), ...args.candidates, ...args.rows]) {
     const compact = { company: cell(row.company), inn: cell(row.inn), email: cell(row.email) };
@@ -2594,11 +2686,13 @@ async function completeTargetRound(args: {
   const exhausted = !args.hasBufferedCandidates && tasks.length > 0 && tasks.every((task) =>
     task.source === 'companies_directory' && task.status === 'done' && task.exhausted && !task.hit_ceiling,
   );
-  const taskError = tasks.find((task) => task.status === 'failed');
+  // A saved-only review does not retry sources: their old failure remains in
+  // task history but must not invalidate a now-confirmed saved audience.
+  const taskError = reviewOnly ? undefined : tasks.find((task) => task.status === 'failed');
   const finish = (readyCount: number, nameError?: string) => finishCollectionRound(progress, {
     candidates: args.candidates.length, readyRows: readyCount,
     validationRetry,
-    exhausted, canContinue: args.hasBufferedCandidates || renewableDirectory,
+    exhausted: reviewOnly ? false : exhausted, canContinue: !reviewOnly && (args.hasBufferedCandidates || renewableDirectory),
     error: nameError ?? args.validationError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null),
   });
   const checkpoint: NonNullable<VeCollectInfo['target_checkpoint']> = {
@@ -2607,13 +2701,14 @@ async function completeTargetRound(args: {
     processed_rows: validationRetry ? prior?.processed_rows ?? args.rows.length : (prior?.processed_rows ?? 0) + args.rows.length,
     prior_low_relevance: validationRetry ? prior?.prior_low_relevance ?? 0 : prior?.low_relevance ?? 0,
     prior_relevance_unchecked: validationRetry ? prior?.prior_relevance_unchecked ?? 0 : prior?.relevance_unchecked ?? 0,
-    low_relevance: (validationRetry ? prior?.prior_low_relevance ?? 0 : prior?.low_relevance ?? 0) + (args.stats.low_relevance ?? 0),
-    relevance_unchecked: (validationRetry ? prior?.prior_relevance_unchecked ?? 0 : prior?.relevance_unchecked ?? 0) + (args.stats.relevance_unchecked ?? 0),
+    low_relevance: info.relevance_summary.irrelevant,
+    relevance_unchecked: info.relevance_summary.needs_review + info.relevance_summary.error,
   };
   const stats: NonNullable<VeCollectInfo['stats']> = {
     ...args.stats, rows_total: progress.candidates_processed + (validationRetry ? 0 : args.candidates.length),
     processed_rows: checkpoint.processed_rows,
     low_relevance: checkpoint.low_relevance, relevance_unchecked: checkpoint.relevance_unchecked,
+    relevance_needs_review: info.relevance_summary.needs_review, relevance_errors: info.relevance_summary.error,
   };
   // Persist validated contacts + round counters BEFORE the first name call.
   // Interrupted cleanup resumes this phase, not sources/constructor/relevance.
@@ -2641,7 +2736,25 @@ async function completeTargetRound(args: {
   ctx.signal?.throwIfAborted();
   const cleaned = await cleanCollectedCompanyNames(ctx, job, info, pendingRows, args.usage);
   const readyRows = prepareSegmentationAudience({ rows: cleaned.rows, columns, source: 'auto' }).rows;
-  const next = finish(readyRows.length, cleaned.summary.error);
+  let next = finish(readyRows.length, cleaned.summary.error);
+  const reviewablePending = reserveRows.some((row) => row._email_status === 'ok'
+    && (row._ve_relevance as { status?: unknown } | undefined)?.status === 'needs_review');
+  const continueSavedReview = !reviewOnly && !args.validationError && !taskError && cleaned.summary.status === 'complete'
+    && readyRows.length < progress.ready_target && reserveRows.some(needsVeRelevanceEvidence);
+  if (continueSavedReview) {
+    // Same acquisition round, same candidates: the next job wake only improves
+    // already paid-for contacts. This marker is saved atomically with rows.
+    next = { ...progress, ready_rows: readyRows.length, candidates_processed: stats.rows_total, status: 'collecting' };
+    delete next.reason;
+    info.relevance_review_requested = true;
+  } else {
+    delete info.relevance_review_requested;
+    if (reviewOnly && !args.validationError && cleaned.summary.status === 'complete'
+      && readyRows.length < progress.ready_target && reviewablePending) {
+      next = { ...progress, ready_rows: readyRows.length, candidates_processed: stats.rows_total, status: 'limited',
+        reason: 'Уточнение сохранённых контактов завершено. Неопределённые контакты остались в резерве; новый сбор в этой операции не запускается.' };
+    }
+  }
   stats.launchable_rows = readyRows.length;
   info.target_progress = next;
   if (cleaned.summary.status === 'complete') delete info.company_name_recovery;
@@ -2651,15 +2764,15 @@ async function completeTargetRound(args: {
     candidatesProcessed: next.candidates_processed, readyRows: readyRows.length,
     asOf: new Date().toISOString(),
     eligible: progress.mode === 'preview' && progress.round === 1 && !args.validationError
+      && info.relevance_summary.needs_review === 0 && info.relevance_summary.error === 0
       && cleaned.summary.status === 'complete'
       && tasks.length === 1 && tasks[0].source === 'companies_directory'
       && !args.stats.excluded_existing_bases && !args.stats.excluded_during_fetch,
   });
-  if (next.status === 'collecting') {
+  if (next.status === 'collecting' && !continueSavedReview) {
     // One atomic checkpoint: prior validated output is durable BEFORE the next
     // input round becomes pending. Resuming must never revalidate these rows.
     delete info.construct;
-    delete info.relevance_checkpoint;
     delete stats.finished_at;
     info.tasks = tasks.map((state) =>
       state.source === 'companies_directory' && !state.exhausted && !state.hit_ceiling
@@ -2667,7 +2780,7 @@ async function completeTargetRound(args: {
         : state,
     );
     info.limit = collectionRoundLimit(next);
-  } else {
+  } else if (next.status !== 'collecting') {
     stats.finished_at = new Date().toISOString();
   }
   info.stats = stats;
@@ -2726,6 +2839,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   const info: VeCollectInfo =
     base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
   const mode = info.collection_mode ?? job.payload?.collection_mode;
+  if (job.payload?.review_relevance === true) info.validation_retry = true;
   if (mode !== undefined && mode !== 'preview' && mode !== 'supply') throw new Error('Unknown collection_mode');
   let target: VeCollectionTargetProgress | null = null;
   if (mode === 'preview' || mode === 'supply') {
@@ -2737,7 +2851,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       if (!Number.isSafeInteger(previous.round) || previous.round < 1 || previous.round > target.max_rounds
         || !Number.isSafeInteger(previous.candidates_processed) || previous.candidates_processed < 0 || previous.candidates_processed > target.max_candidates
         || !Number.isSafeInteger(previous.ready_rows) || previous.ready_rows < 0 || previous.ready_rows > target.max_candidates * 5
-        || (info.target_checkpoint?.completed_round ?? 0) !== previous.round - (info.validation_retry || info.company_name_recovery ? 0 : 1)) {
+        || (info.target_checkpoint?.completed_round ?? 0) !== previous.round - (info.validation_retry || info.company_name_recovery || info.relevance_review_requested ? 0 : 1)) {
         throw new Error('Invalid collection target checkpoint');
       }
       target.round = previous.round;
@@ -2800,6 +2914,14 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   if (info.company_name_recovery) {
     if (!target) throw new Error('Company name recovery requires a collection target');
     return resumeSavedCompanyNames(ctx, job, base, info, target, usage);
+  }
+  if (job.payload?.review_relevance === true) {
+    if (!target || mode !== 'preview') throw new Error('Saved relevance review requires a preview target');
+    return reviewSavedRelevance(ctx, job, base, info, target, market, usage);
+  }
+  if (info.relevance_review_requested) {
+    if (!target) throw new Error('Saved relevance review requires a collection target');
+    return reviewSavedRelevance(ctx, job, base, info, target, market, usage);
   }
   if (info.validation_retry) {
     if (!target || mode !== 'preview') throw new Error('Validation recovery requires a preview target');
@@ -3258,7 +3380,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     throw new Error(note);
   }
 
-  const { storedRows, lowRelevanceCount, relevanceUncheckedCount, relevanceCheckedCompanies, relevanceTotalCompanies, relevanceCoverageComplete, relevanceError } = await checkCollectedRelevance({
+  const { storedRows, lowRelevanceCount, relevanceUncheckedCount, relevanceNeedsReviewCount, relevanceErrorCount,
+    relevanceCheckedCompanies, relevanceTotalCompanies, relevanceCoverageComplete, relevanceError } = await checkCollectedRelevance({
     ctx, job, base, info, finalRows, finalEmailStatuses, market, usage,
   });
   // Ровно тот же pure-контракт фильтрует аудиторию перед запуском на шаге 5.
@@ -3283,6 +3406,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     ...(launchableRows === null ? {} : { launchable_rows: launchableRows }),
     low_relevance: lowRelevanceCount,
     relevance_unchecked: relevanceUncheckedCount,
+    relevance_needs_review: relevanceNeedsReviewCount,
+    relevance_errors: relevanceErrorCount,
     ...(relevanceCheckedCompanies === null
       ? {}
       : { relevance_checked_companies: relevanceCheckedCompanies }),

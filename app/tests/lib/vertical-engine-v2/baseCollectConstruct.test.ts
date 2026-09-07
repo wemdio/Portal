@@ -25,7 +25,19 @@ jest.mock('@/lib/verticalEngineV2/llm', () => ({
 const mockFindIrrelevantRows = jest.fn();
 
 jest.mock('@/lib/verticalEngineV2/relevanceGate', () => ({
-  findIrrelevantRows: (...args: unknown[]) => mockFindIrrelevantRows(...args),
+  // Existing lifecycle scenarios now return the explicit decision contract;
+  // the triage model itself is not under test in this constructor suite.
+  findIrrelevantRows: async (...args: unknown[]) => {
+    const result = await mockFindIrrelevantRows(...args);
+    const rows = (args[0] as { rows: unknown[] }).rows;
+    return { ...result, review: result.review ?? new Set(), errored: result.errored ?? result.unchecked,
+      decisions: result.decisions ?? new Map(rows.map((_, index) => [index, {
+        version: 2, status: result.flagged.has(index) ? 'irrelevant' : result.unchecked.has(index) ? 'error' : 'relevant',
+        reason: 'Mocked completed constructor classification', context_hash: 'a'.repeat(64),
+        evidence: [{ field: 'description', quote: 'Mocked business activity' }], review_attempts: 0,
+      }])),
+    };
+  },
 }));
 
 import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
