@@ -403,6 +403,25 @@ export default function WarmupTab({
   /** Выключенные в портале греть нечем — в «выбрать все» их не берём. */
   const selectableIds = accounts.filter((a) => a.is_active).map((a) => a.id);
 
+  /**
+   * По дате добавления, свежие внизу.
+   *
+   * Прогрев нужен именно новой партии, а приходит она одним куском: внизу
+   * списка она лежит целиком и отмечается подряд. В сетке из двух колонок
+   * строки заполняются слева направо, поэтому «внизу» — это последние строки
+   * обеих колонок, то есть ровно последняя закупка.
+   *
+   * Без даты — наверх: это старые записи, заведённые до того, как портал начал
+   * её проставлять, и в новой партии их точно нет.
+   */
+  const ordered = [...accounts].sort((a, b) => {
+    const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+    const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+    if (ta !== tb) return ta - tb;
+    // Ровесники по секунде — по имени, чтобы порядок не прыгал между загрузками.
+    return (a.session_name ?? '').localeCompare(b.session_name ?? '');
+  });
+
   return (
     <div className="space-y-3 p-4">
       {campaignStatus === 'running' && !isRunning && (
@@ -555,7 +574,7 @@ export default function WarmupTab({
           понять, кого отмечаешь.
         */}
         <div className="mt-2 grid max-h-72 grid-cols-1 gap-x-4 overflow-y-auto sm:grid-cols-2">
-          {accounts.map((a) => {
+          {ordered.map((a) => {
             const disabled = isRunning || !a.is_active;
             const fullName = [a.first_name, a.last_name].filter(Boolean).join(' ').trim();
             return (
