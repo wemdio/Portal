@@ -22,6 +22,7 @@ import {
   buildClients,
   disconnectAll,
   getUpdatedSessionString,
+  reconnectClient,
   type ActiveClient,
 } from '../gramClient';
 import type { LoopControl } from '../watchdog';
@@ -285,6 +286,35 @@ export async function runWarmupLoop(
 
   // Ручка для сторожевого таймера: погасить только эту кампанию, не роняя
   // воркер с остальными.
+  /**
+   * Пересобрать соединение аккаунта на свежем сокете.
+   *
+   * Через мобильный прокси соединение становится полуоткрытым: вызов уходит и
+   * ответа не получает никогда, срабатывает таймаут. 07.09.2026 прогрев ATOL-1
+   * так потерял почти весь первый день — из одиннадцати запланированных
+   * переписок состоялась одна, остальные встали на «импорт телефона: нет ответа
+   * за 40с». Боевой круг это лечит переподключением: тот же вызов по новому
+   * сокету отрабатывает за доли секунды.
+   */
+  const reconnectFor = async (c: ActiveClient): Promise<boolean> => {
+    const proxy = c.account.proxy_id
+      ? proxies.find((p) => p.id === c.account.proxy_id) ?? null
+      : null;
+    try {
+      c.client = await reconnectClient(
+        c.account,
+        proxy,
+        c.client,
+        (storagePath) => downloadSessionToTemp(db, storagePath),
+      );
+      return true;
+    } catch {
+      // Не вышло — значит дело не в сокете, а в прокси или сессии. Переписку
+      // теряем как раньше, но хотя бы не молча: причина уже в логе.
+      return false;
+    }
+  };
+
   if (control) control.forceDisconnect = () => disconnectAll(clients);
 
   const byAccountId = new Map<string, ActiveClient>(clients.map((c) => [c.account.id, c]));
@@ -333,17 +363,35 @@ export async function runWarmupLoop(
   for (const c of clients) {
     if (shouldStop()) break;
     onProgress?.();
-    try {
+    const readIdentity = async () => {
       const identity = await bootstrapAccountIdentity(db, c.client, c.account);
       c.account.tg_user_id = identity.tg_user_id;
       c.account.tg_username = identity.tg_username;
       if (identity.phone) c.account.phone = identity.phone;
+    };
+    try {
+      await readIdentity();
     } catch (e) {
-      log(
-        'warning',
-        `Прогрев: не смог определить личность аккаунта — ${e instanceof Error ? e.message : String(e)}`,
-        c.account.id,
-      );
+      // Мёртвый сокет чиним переподключением — как и при поиске собеседника.
+      // Без личности аккаунт не найдут остальные, и он выпадает из прогрева
+      // целиком, поэтому одну повторную попытку он точно заслуживает.
+      const msg = e instanceof Error ? e.message : String(e);
+      const wedged = msg.includes(': нет ответа за ');
+      if (wedged && await reconnectFor(c)) {
+        onProgress?.();
+        try {
+          await readIdentity();
+          continue;
+        } catch (e2) {
+          log(
+            'warning',
+            `Прогрев: не смог определить личность аккаунта и после переподключения — ${e2 instanceof Error ? e2.message : String(e2)}`,
+            c.account.id,
+          );
+          continue;
+        }
+      }
+      log('warning', `Прогрев: не смог определить личность аккаунта — ${msg}`, c.account.id);
     }
   }
   onProgress?.();
@@ -441,7 +489,7 @@ export async function runWarmupLoop(
       for (const conv of due) {
         if (shouldStop()) break;
         onProgress?.();
-        await runOneConversation(db, conv, byAccountId, accountNames, peerCache, log, onProgress);
+        await runOneConversation(db, conv, byAccountId, accountNames, peerCache, log, reconnectFor, onProgress);
       }
 
       if (publicChatsEnabled) {
@@ -690,6 +738,8 @@ async function runOneConversation(
   /** Запомненные собеседники: переживают перезапуск воркера, живут в БД. */
   peerCache: Map<string, CachedPeer>,
   log: LogFn,
+  /** Пересобрать соединение аккаунта, когда вызов завис на мёртвом сокете. */
+  reconnectFor: (c: ActiveClient) => Promise<boolean>,
   /**
    * Признак жизни для сторожевого таймера воркера. Переписка идёт минутами, и
    * без отметок на каждом шаге здоровый разговор выглядит зависшим циклом.
@@ -734,10 +784,32 @@ async function runOneConversation(
     const cached = peerCache.get(key);
     if (cached) return { entity: toInputPeer(cached), imported: false };
 
-    const found = await resolveWarmupPeer(viewer.client, {
+    const lookup = () => resolveWarmupPeer(viewer.client, {
       tg_username: target.account.tg_username ?? null,
       phone: target.account.phone ?? null,
     });
+
+    /**
+     * Завис на мёртвом сокете — пересобираем соединение и пробуем ещё раз.
+     *
+     * Отличаем именно наш таймаут: он значит, что ответа не пришло вовсе, и
+     * почти всегда лечится свежим сокетом. Любая другая ошибка Telegram — про
+     * собеседника или про лимиты, и повторять её незачем.
+     */
+    let found: ResolvedPeer | null;
+    try {
+      found = await lookup();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes(': нет ответа за ')) throw err;
+      log('warning', `Прогрев: ${nameOf(viewer.account.id)} — ${msg}, переподключаю и повторяю.`);
+      onProgress?.();
+      if (!await reconnectFor(viewer)) {
+        log('error', `Прогрев: ${nameOf(viewer.account.id)} — переподключение не удалось, собеседника не ищу.`);
+        return null;
+      }
+      found = await lookup();
+    }
     if (!found) return null;
 
     if (found.entity instanceof Api.User) {
