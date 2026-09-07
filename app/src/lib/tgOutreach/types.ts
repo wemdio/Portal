@@ -177,6 +177,15 @@ export interface OutreachCampaign {
   telegram_settings: TelegramSettings;
   created_at: string;
   updated_at: string;
+  /**
+   * Сколько аккаунтов кампании сейчас на прогреве. Считает ручка списка
+   * кампаний; в самой таблице этого поля нет.
+   *
+   * Нужно шапке: с тех пор как прогрев перестал останавливать кампанию,
+   * «Запущена» перестала быть полным ответом — часть аккаунтов может греться
+   * параллельно.
+   */
+  warming_accounts?: number;
 }
 
 export interface OutreachProxy {
