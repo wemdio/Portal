@@ -88,18 +88,80 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
     }
   };
 
-  const handleCheckUsername = async () => {
-    // Placeholder: would check username availability via MTProto
-    alert(`Юзернейм "${username}" — проверка недоступна в текущей версии`);
+  /**
+   * Всё, что ходит в Telegram, идёт через одну ручку и один индикатор.
+   *
+   * Раньше «Проверить» показывала alert «проверка недоступна», а
+   * «Сгенерировать» выдавала случайное английское словосочетание, не спросив у
+   * Telegram, свободно ли оно. Оператор сохранял профиль и получал отказ уже на
+   * записи — или не получал ничего, потому что ник молча не применялся.
+   */
+  const [profileBusy, setProfileBusy] = useState<null | 'fill' | 'check' | 'regen'>(null);
+  const [usernameNote, setUsernameNote] = useState<string | null>(null);
+
+  interface AutofillResponse {
+    first_name?: string;
+    last_name?: string;
+    username?: string | null;
+    bio?: string;
+    available?: boolean;
+    checked?: number;
+  }
+
+  const callAutofill = async (
+    mode: 'fill' | 'check' | 'regen',
+    payload: Record<string, unknown>,
+  ): Promise<AutofillResponse | null> => {
+    setProfileBusy(mode);
+    setError(null);
+    setUsernameNote(null);
+    try {
+      return await tgOutreachFetch<AutofillResponse>(
+        `/accounts/${account.id}/profile/autofill`,
+        { method: 'POST', json: payload },
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Не получилось');
+      return null;
+    } finally {
+      setProfileBusy(null);
+    }
   };
 
-  const handleGenerateUsername = () => {
-    const adjectives = ['swift', 'bright', 'cool', 'dark', 'epic', 'fast', 'gold', 'iron'];
-    const nouns = ['hawk', 'wolf', 'star', 'fire', 'rock', 'wind', 'rain', 'bolt'];
-    const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
-    const noun = nouns[Math.floor(Math.random() * nouns.length)];
-    const num = Math.floor(Math.random() * 9000) + 1000;
-    setUsername(`${adj}_${noun}${num}`);
+  const handleAutofill = async () => {
+    const data = await callAutofill('fill', {});
+    if (!data) return;
+    if (data.first_name) setFirstName(data.first_name);
+    if (data.last_name) setLastName(data.last_name);
+    if (data.bio) setBio(data.bio);
+    if (data.username) {
+      setUsername(data.username);
+      setUsernameNote(`Ник свободен, проверено в Telegram (вариантов перебрано: ${data.checked ?? 1}).`);
+    } else {
+      setUsernameNote('Свободный ник не нашёлся — нажмите «Сгенерировать» ещё раз.');
+    }
+  };
+
+  const handleCheckUsername = async () => {
+    const data = await callAutofill('check', { username });
+    if (!data) return;
+    setUsernameNote(
+      data.available
+        ? 'Ник свободен — можно сохранять.'
+        : 'Ник занят или не подходит по правилам Telegram. Сохранить его не получится.',
+    );
+  };
+
+  const handleGenerateUsername = async () => {
+    // Имя и фамилию не трогаем: ник перегенерируют, когда имя уже устраивает.
+    const data = await callAutofill('regen', { first_name: firstName, last_name: lastName });
+    if (!data) return;
+    if (data.username) {
+      setUsername(data.username);
+      setUsernameNote('Ник свободен, проверено в Telegram.');
+    } else {
+      setUsernameNote('Свободный ник не нашёлся — попробуйте ещё раз или смените имя.');
+    }
   };
 
   const handleSave = async () => {
@@ -210,6 +272,28 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
                 ) : null}
               </div>
 
+              {/*
+                Автозаполнение стоит над всеми полями, которые меняет: имя,
+                фамилию, ник и описание. Кнопка ничего не пишет в Telegram —
+                только предлагает, и сохраняет всё та же кнопка внизу. Иначе
+                одно нажатие переписывало бы уже настроенный профиль.
+              */}
+              <div className="flex items-center gap-3 rounded-lg bg-indigo-50 px-3 py-2">
+                <button
+                  type="button"
+                  disabled={profileBusy !== null}
+                  onClick={() => void handleAutofill()}
+                  className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Shuffle className="mr-1 inline h-4 w-4" />
+                  {profileBusy === 'fill' ? 'Подбираю…' : 'Автозаполнение'}
+                </button>
+                <span className="text-xs leading-tight text-indigo-900">
+                  Подставит имя, фамилию, свободный ник и описание по компании.
+                  Ник проверяется в Telegram — занятый не предложит.
+                </span>
+              </div>
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Имя</label>
                 <input
@@ -237,23 +321,31 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
                     className="flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
                   />
                   <button
-                    onClick={handleCheckUsername}
-                    className="rounded-lg bg-emerald-500 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-600 transition-colors"
+                    type="button"
+                    disabled={profileBusy !== null || !username.trim()}
+                    onClick={() => void handleCheckUsername()}
+                    className="rounded-lg bg-emerald-500 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    <RefreshCw className="h-4 w-4 inline mr-1" />
-                    Проверить
+                    <RefreshCw className="mr-1 inline h-4 w-4" />
+                    {profileBusy === 'check' ? 'Проверяю…' : 'Проверить'}
                   </button>
                   <button
-                    onClick={handleGenerateUsername}
-                    className="rounded-lg bg-emerald-500 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-600 transition-colors"
+                    type="button"
+                    disabled={profileBusy !== null}
+                    onClick={() => void handleGenerateUsername()}
+                    className="rounded-lg bg-emerald-500 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    <Shuffle className="h-4 w-4 inline mr-1" />
-                    Сгенерировать
+                    <Shuffle className="mr-1 inline h-4 w-4" />
+                    {profileBusy === 'regen' ? 'Подбираю…' : 'Сгенерировать'}
                   </button>
                 </div>
-                <p className="mt-1 text-xs text-emerald-600">
-                  Минимальная длина — 5 символов. Можно использовать a-z, 0-9 и _.
-                </p>
+                {usernameNote ? (
+                  <p className="mt-1 text-xs text-indigo-700">{usernameNote}</p>
+                ) : (
+                  <p className="mt-1 text-xs text-emerald-600">
+                    Минимальная длина — 5 символов. Можно использовать a-z, 0-9 и _.
+                  </p>
+                )}
               </div>
 
               <div>
