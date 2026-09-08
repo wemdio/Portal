@@ -70,7 +70,9 @@ export async function POST(req: NextRequest) {
         phone: r.phone ?? '',
         proxy_id: r.proxy_id || null,
         session_data: r.session_data ?? '',
-        is_active: true,
+        // Выключен до настройки: включённый аккаунт попадает в боевую рассылку
+        // на ближайшем перезапуске круга — без прокси, профиля и проверок.
+        is_active: false,
       }));
 
       const { data, error } = await auth.supabase
