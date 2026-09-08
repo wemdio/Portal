@@ -597,9 +597,11 @@ services:
     networks:
       - portal-network
 
-  # One-shot Google Sheets report runner. The container stays idle; host cron
-  # executes /app/workers/leadsReportCron.js daily at 17:00 MSK (14:00 UTC),
-  # after the 17:30 MSK AMO sync.
+  # One-shot Google Sheets report runner. The container stays idle;
+  # /etc/cron.d/portal-leads-report on the prod host (not root's crontab)
+  # executes /app/workers/leadsReportCron.js daily at 18:15 MSK (that file sets
+  # TZ=Europe/Moscow itself),
+  # after the 18:05 MSK AMO sync (moved together on 2026-09-08).
   worker-leads-report:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-leads-report
@@ -630,10 +632,13 @@ services:
     networks:
       - portal-network
 
-  # Telegram-бот получателей пятничного отчёта. Сам отчёт запускается host cron:
-  # 0 14 * * 5 docker exec portal-worker-leads-report-bot
+  # Telegram-бот получателей пятничного отчёта. Сам отчёт запускается из
+  # /etc/cron.d/portal-leads-report на прод-сервере (не из crontab -l у root):
+  # 15 18 * * 5 root docker exec portal-worker-leads-report-bot
   #   node /app/workers/leadsReportSummaryCron.js
-  # 14:00 UTC = 17:00 МСК пятница.
+  # 18:15 пятница, время местное (сервер в Europe/Moscow). Окно отчёта
+  # закрывается в 18:00, синк AMO бежит в 18:05 — три времени связаны,
+  # двигать по отдельности нельзя.
   worker-leads-report-bot:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-leads-report-bot
@@ -1382,12 +1387,27 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - SUPABASE_DB_URL=${SUPABASE_DB_URL}
-      # Пайплайн отчётов: sync 16:30 МСК → запись в Google Sheets и TG-summary
-      # Егору в 17:00 МСК пт. Между sync и репортами 30 минут — успевает
-      # подтянуть свежие сделки из AMO до формирования отчёта.
-      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-30 13 * * *}  # 13:30 UTC = 16:30 МСК
-      - EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK:-16:30}
-      - EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK:-17:00}
+      # Пайплайн отчётов, сдвинут 08.09.2026 под договорённость с продажами
+      # (Александр: «неделя с субботы по пятницу на 18:00»):
+      # окно отчёта закрывается в 18:00 → sync 18:05 МСК → Google Sheets и
+      # TG-summary в 18:15 МСК.
+      #
+      # Порядок именно такой, и это главное: синк стартует ПОСЛЕ закрытия
+      # окна, поэтому всё, что попало в окно, к моменту синка уже существует
+      # и заведомо доедет. Раньше синк шёл ДО отсечки (16:30 против 17:00), и
+      # получасовая щель между ними глотала сделки насовсем — 04.09.2026 так
+      # потерялась 35041989 вместе с назначенной встречей: в тот отчёт она не
+      # попала (в базе ещё не было), в следующий тоже (создана до его начала).
+      #
+      # Десять минут от синка до отчёта — с запасом: замер за 02-07.09.2026
+      # даёт от 1:43 до 3:01 на весь прогон.
+      # ВНИМАНИЕ: эта строка читается в UTC, а не по часам хоста — APScheduler
+      # внутри сервиса прибит к UTC явно (`timezone="UTC"` в main.py). Хост при
+      # этом живёт в Europe/Moscow, и в host crontab те же 18:05 писались бы как
+      # `5 18`. Две разные системы отсчёта, легко перепутать.
+      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-5 15 * * *}  # 15:05 UTC = 18:05 МСК
+      - EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK:-18:05}
+      - EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK:-18:15}
       - YANDEX_METRIKA_TOKEN=${YANDEX_METRIKA_TOKEN:-}
       - YANDEX_METRIKA_COUNTER_ID=${YANDEX_METRIKA_COUNTER_ID:-62363425}
       - YANDEX_METRIKA_LOOKBACK_DAYS=${YANDEX_METRIKA_LOOKBACK_DAYS:-30}
