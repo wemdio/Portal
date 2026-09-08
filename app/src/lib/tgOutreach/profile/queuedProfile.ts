@@ -25,9 +25,25 @@ export interface QueuedProfilePayload {
   username_candidates?: string[];
 }
 
+/**
+ * Сколько аккаунт отлёживается после смены имени или аватарки.
+ *
+ * Правило из руководства TgNinja: после смены имени или аватарки дать аккаунту
+ * отлежаться 48 часов. Для Telegram свежепереименованный аккаунт, тут же
+ * ушедший писать незнакомым, — характерный признак подготовки к рассылке, и
+ * платим за это мы тем самым бюджетом в тридцать писем.
+ *
+ * Описание в это правило не входит намеренно: правка биографии не меняет того,
+ * как аккаунт выглядит в списке контактов, и терять из-за опечатки двое суток
+ * не за что.
+ */
+export const PROFILE_REST_HOURS = Number(process.env.TG_OUTREACH_PROFILE_REST_HOURS) || 48;
+
 export interface QueuedProfileResult {
   status: 'applied' | 'failed';
   detail: string;
+  /** Сменилось ли имя — по этому признаку аккаунт уходит на отлёжку. */
+  identityChanged?: boolean;
   applied?: {
     first_name: string;
     last_name: string;
@@ -100,10 +116,16 @@ export async function applyQueuedProfile(args: {
     const note = username && username !== payload.username
       ? ` Заказанный ник «${payload.username}» был занят, поставил «${username}».`
       : '';
+    const identityChanged = Boolean(
+      (payload.first_name ?? '') || (payload.last_name ?? '') || username,
+    );
     return {
       status: 'applied',
-      detail: `Профиль применён в Telegram.${note}`,
+      detail:
+        `Профиль применён в Telegram.${note}`
+        + (identityChanged ? ` Аккаунт отлёживается ${PROFILE_REST_HOURS} ч перед рассылкой.` : ''),
       applied,
+      identityChanged,
     };
   } catch (e) {
     return { status: 'failed', detail: describeTelegramError(e).slice(0, 500) };

@@ -32,7 +32,7 @@ import { sendFirstTouchBatch } from './firstTouch/send';
 import { parkAccountAfterLimit } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
 import { sendFreezeAppeal } from './freezeAppeal';
-import { applyQueuedProfile, type QueuedProfilePayload } from './profile/queuedProfile';
+import { applyQueuedProfile, PROFILE_REST_HOURS, type QueuedProfilePayload } from './profile/queuedProfile';
 import { runLeadForwardPoller } from './leadForward';
 import { buildLeadMessage, splitTelegramMessage } from './leadMessage';
 import { loadLeadOrigin } from './leadOrigin';
@@ -2071,6 +2071,12 @@ export async function runCampaignLoop(
                 profile_requested_at: null,
                 profile_requested_by_name: null,
                 profile_payload: null,
+                // Отлёжка после смены имени — см. PROFILE_REST_HOURS. Ставим
+                // только на успешном применении: аккаунт, которому профиль не
+                // записался, отлёживаться не за что.
+                ...(outcome.status === 'applied' && outcome.identityChanged
+                  ? { cooldown_until: new Date(Date.now() + PROFILE_REST_HOURS * 3_600_000).toISOString() }
+                  : {}),
                 // Что реально встало в Telegram — оттуда же, из ответа: заказ и
                 // результат расходятся, когда ник занят или значение подрезано.
                 ...(outcome.applied
