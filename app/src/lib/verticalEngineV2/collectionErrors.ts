@@ -7,13 +7,21 @@ function errorMessage(error: unknown): string {
 /** Billing needs an operator action, not another immediate attempt at the same paid operation. */
 export function isVeProviderBillingError(error: unknown): boolean {
   const message = errorMessage(error);
-  return /\bRequesty\s*(?:HTTP\s*)?[:(]?\s*402\b/i.test(message)
-    || (/\bRequesty\b/i.test(message)
-      && /insufficient[\s_-]+(?:funds|balance|credits)|payment[\s_-]+required|credit balance (?:is )?too low/i.test(message));
+  return /\b(?:Requesty|Serper)\s*(?:HTTP\s*)?[:(]?\s*402\b/i.test(message)
+    || /\bSerper billing:/i.test(message)
+    || (/\b(?:Requesty|Serper)\b/i.test(message)
+      && /not enough credits|insufficient[\s_-]+(?:funds|balance|credits|search credits)|payment[\s_-]+required|credit balance (?:is )?too low/i.test(message));
+}
+
+export function isVeProviderConfigurationError(error: unknown): boolean {
+  const message = errorMessage(error);
+  return /\bSerper configuration:/i.test(message)
+    || /\bSerper\s*(?:HTTP\s*)?[:(]?\s*(?:401|403)\b/i.test(message)
+    || (/\bSerper\b/i.test(message) && /(?:missing|invalid|absent|rejected)[\s_-]+(?:api[\s_-]+)?key|api[\s_-]+key.{0,30}(?:missing|invalid|absent|rejected)/i.test(message));
 }
 
 export interface VeCollectionFailure {
-  kind: 'billing' | 'incomplete_checks' | 'name_cleanup' | 'source' | 'unknown';
+  kind: 'billing' | 'configuration' | 'provider' | 'incomplete_checks' | 'name_cleanup' | 'source' | 'unknown';
   message: string;
 }
 
@@ -25,9 +33,19 @@ export function getVeCollectionFailure(
   if (isVeProviderBillingError(message)) {
     return {
       kind: 'billing',
-      message: 'Недостаточно средств на балансе сервиса ИИ (Requesty). Автоматические повторы остановлены. Попросите администратора пополнить баланс, затем продолжите подготовку превью.',
+      message: /\bSerper\b/i.test(message)
+        ? 'Нужно пополнить баланс сервиса поиска Serper. Автоматические повторы остановлены; собранные контакты сохранены.'
+        : 'Недостаточно средств на балансе сервиса ИИ (Requesty). Автоматические повторы остановлены. Попросите администратора пополнить баланс, затем продолжите подготовку превью.',
     };
   }
+  if (isVeProviderConfigurationError(message)) return {
+    kind: 'configuration',
+    message: 'Проверка остановлена: сервис поиска Serper не настроен или отклонил ключ либо запрос. Собранные контакты сохранены.',
+  };
+  if (/\bSerper transient:/i.test(message)) return {
+    kind: 'provider',
+    message: 'Автопроверка остановлена: сервис поиска Serper временно недоступен. Собранные контакты сохранены.',
+  };
   if (/Очистка названий завершилась не полностью/i.test(message)) {
     return { kind: 'name_cleanup',
       message: 'Не удалось закончить очистку названий компаний. Собранные контакты сохранены; строки без проверенного названия не попадут в запуск. Продолжите подготовку превью — повторятся только незавершённые проверки.',

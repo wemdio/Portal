@@ -3,15 +3,17 @@ import { isIP } from 'node:net';
 import { Agent, fetch } from 'undici';
 import { assertPublicWebsite } from '@/lib/clientDemo/personalize';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
-import { hasSerperKey, serperSearch, type SerperOrganicItem } from '@/lib/search/serperClient';
+import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { normalizeVeCompanyInn } from './collectionIdentity';
 import { parseVeEvidencePage, selectVeEvidenceText, type VeEvidencePage } from './relevancePage';
+import { searchVeRelevanceWebsites, veSearchProviderFailure, type VeSearchProviderFailure } from './relevanceSearch';
 
 export interface VeRelevanceEvidence {
   status: 'ok' | 'unavailable' | 'error';
   text: string;
   url: string;
   reason: string;
+  provider_error?: VeSearchProviderFailure;
 }
 
 export interface VeRelevanceEvidenceOptions {
@@ -172,6 +174,7 @@ export async function fetchVeRelevanceEvidence(
   if (!supplied.length && !inn) return { status: 'unavailable', text: '', url: '', reason: 'missing_or_unsafe_website' };
   const pages = new Map<string, Promise<VeEvidencePage | undefined>>();
   let failed = false, timedOut = false, unverified = false, searchAttempted = false;
+  let providerError: VeSearchProviderFailure | undefined;
   const verified = new Map<string, VeEvidencePage[]>();
   const read = async (url: URL, parent: AbortSignal): Promise<VeEvidencePage | undefined> => {
     parent.throwIfAborted();
@@ -250,12 +253,19 @@ export async function fetchVeRelevanceEvidence(
       for (let i = 0; i < candidates.length; i += 1) {
         await inspect(candidates[i], homes[i], signal);
       }
-      if (verified.size || !inn || pages.size >= MAX_PAGE_READS || (!opts.search && !hasSerperKey())) return;
+      if (verified.size || !inn || pages.size >= MAX_PAGE_READS) return;
       signal.throwIfAborted();
       searchAttempted = true;
       const query = '"' + inn + '" официальный сайт -site:rusprofile.ru -site:list-org.com -site:checko.ru -site:companium.ru';
-      const results = await withVeDeadline('relevance website search', 6_000, signal, async (searchSignal) =>
-        opts.search ? opts.search(query, searchSignal) : serperSearch(query, { num: 6, gl: 'ru', hl: 'ru', timeout: 5_000, signal: searchSignal }));
+      let results: SerperOrganicItem[];
+      try {
+        results = await withVeDeadline('relevance website search', 6_000, signal, async (searchSignal) =>
+          opts.search ? opts.search(query, searchSignal) : searchVeRelevanceWebsites(query, searchSignal));
+      } catch (error) {
+        signal.throwIfAborted();
+        providerError = veSearchProviderFailure(error);
+        return;
+      }
       signal.throwIfAborted();
       const found: URL[] = [];
       for (const item of results.slice(0, 6)) {
@@ -276,6 +286,10 @@ export async function fetchVeRelevanceEvidence(
     timedOut ||= error instanceof VeOperationTimeoutError;
   }
   opts.signal?.throwIfAborted();
+  if (providerError) return {
+    status: 'error', text: '', url: supplied[0]?.href ?? '',
+    reason: providerError.message, provider_error: providerError,
+  };
   // Reserve room for every page rather than letting a long home/menu consume
   // all evidence. Focus selection has already scanned each complete document.
   const selected = [...verified.values()].flat();
@@ -283,7 +297,7 @@ export async function fetchVeRelevanceEvidence(
   const perPage = Math.floor((MAX_TEXT_CHARS - unique.reduce((n, page) => n + page.url.length + 8, 0)) / Math.max(1, unique.length));
   const text = unique.map((page) => `URL: ${page.url}\n${selectVeEvidenceText(page.text, opts.focus, Math.max(200, perPage))}`).join('\n\n').slice(0, MAX_TEXT_CHARS);
   return {
-    status: text ? 'ok' : failed ? 'error' : 'unavailable', text, url: unique[0]?.url ?? supplied[0]?.href ?? '',
+    status: text ? 'ok' : 'unavailable', text, url: unique[0]?.url ?? supplied[0]?.href ?? '',
     reason: text ? (searchAttempted ? 'discovered_verified_website' : inn ? 'identity_verified_website' : 'supplied_website_evidence')
       : timedOut ? 'website_evidence_timeout' : unverified ? 'website_identity_unverified'
         : failed ? 'website_evidence_failed' : searchAttempted ? 'website_search_unverified' : 'no_usable_website_text',

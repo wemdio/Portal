@@ -22,6 +22,12 @@ export interface InstantlyRequestOptions {
   accountId?: string | null;
   /** Optional timeout for each fetch attempt; defaults to 90 seconds. */
   timeoutMs?: number;
+  /**
+   * Opt-in for recovery reads: keep the same deadline through JSON/error body
+   * consumption. Defaults to false (legacy headers-only timeout). The shared
+   * rate limiter still runs before this per-request deadline starts.
+   */
+  timeoutIncludesBody?: boolean;
   /** Internal recovery calls can bypass the shared limiter for a bounded read. */
   skipRateLimiter?: boolean;
   /** Defaults to true; recovery status reads disable 429 retries. */

@@ -1,4 +1,4 @@
-import { veCompanyIdentityKey } from './collectionIdentity';
+import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
 import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
 
 /** Durable candidates are separate from the approved/launchable base projection. */
@@ -21,9 +21,16 @@ export interface VeRelevanceReserveSummary {
 }
 
 const cell = (value: unknown) => typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
+const fact = (row: Record<string, unknown>, names: string[]) => {
+  for (const [key, value] of Object.entries(row)) if (names.includes(key.trim().toLowerCase()) && cell(value)) return cell(value);
+  return '';
+};
+const hasEvidenceSource = (row: Record<string, unknown>) => Boolean(normalizeVeCompanyInn(fact(row, ['inn', 'инн']))
+  || fact(row, ['website', 'site', 'сайт']));
 
 export function veRelevanceCompanyKey(row: Record<string, unknown>): string {
-  const stableIdentity = veCompanyIdentityKey(row);
+  const stableIdentity = veCompanyIdentityKey({ inn: fact(row, ['inn', 'инн']),
+    company: fact(row, ['company', 'компания']), website: fact(row, ['website', 'site', 'сайт']) });
   if (stableIdentity) return stableIdentity;
   // Anonymous rows still retain their distinct source facts rather than sharing
   // one empty key; quality metadata must not change that identity on a retry.
@@ -98,12 +105,19 @@ export function needsVeRelevanceReview(row: Record<string, unknown>): boolean {
     || (row._relevance_unchecked === true && decision?.status !== 'irrelevant' && String(row._low_relevance ?? '') !== 'true');
 }
 
-/** Spend the next bounded website pass on usable emails not yet investigated. */
-export function needsVeRelevanceEvidence(row: Record<string, unknown>): boolean {
+function canAutomaticallyReview(row: Record<string, unknown>, evidenceAvailable: boolean): boolean {
+  if (!needsVeRelevanceReview(row) || row._email_status !== 'ok') return false;
   const decision = row._ve_relevance && typeof row._ve_relevance === 'object'
     ? row._ve_relevance as { status?: unknown; review_attempts?: unknown } : null;
-  return decision?.status === 'needs_review' && row._email_status === 'ok'
-    && cell(row.website).length > 0 && (decision.review_attempts ?? 0) === 0;
+  // Newly recovered legacy emails still need their initial classification.
+  // Technical errors use the caller's bounded recovery policy, not a guess.
+  if (!decision || decision.status === 'error') return true;
+  return decision.status === 'needs_review' && evidenceAvailable && (decision.review_attempts ?? 0) === 0;
+}
+
+/** Spend the next bounded pass on usable emails with a site or searchable INN. */
+export function needsVeRelevanceEvidence(row: Record<string, unknown>): boolean {
+  return canAutomaticallyReview(row, hasEvidenceSource(row));
 }
 
 export interface VeRelevanceReviewBatch {
@@ -122,16 +136,13 @@ export function buildVeRelevanceReviewBatch(input: {
   automatic: boolean;
 }): VeRelevanceReviewBatch {
   const saved = mergeVeRelevanceRows(input.reserve, input.ready);
-  const withWebsite = new Set([...saved, ...input.source]
-    .filter((row) => Object.entries(row).some(([key, value]) =>
-      ['website', 'site', 'сайт'].includes(key.trim().toLowerCase()) && cell(value) !== ''))
+  const withEvidence = new Set([...saved, ...input.source]
+    .filter(hasEvidenceSource)
     .map(veRelevanceCompanyKey));
   const selected = new Set(input.reserve.filter((row) => {
     if (!needsVeRelevanceReview(row)) return false;
     if (!input.automatic) return true;
-    const decision = row._ve_relevance as { status?: unknown; review_attempts?: unknown } | null;
-    return decision?.status === 'needs_review' && row._email_status === 'ok'
-      && (decision.review_attempts ?? 0) === 0 && withWebsite.has(veRelevanceCompanyKey(row));
+    return canAutomaticallyReview(row, withEvidence.has(veRelevanceCompanyKey(row)));
   }).map(veRelevanceCompanyKey));
   return {
     rows: saved.filter((row) => selected.has(veRelevanceCompanyKey(row))),

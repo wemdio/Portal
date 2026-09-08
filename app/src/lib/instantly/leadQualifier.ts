@@ -24,6 +24,7 @@ export interface QualificationResult {
   interestSignals: string[];
   reason: string;
   confidence: number;
+  /** Internal uncertainty signal; qualifyReply resolves it automatically, never manually. */
   needsReview: boolean;
   objectionHandleable: boolean;
   objectionDraft: string | null;
@@ -33,6 +34,8 @@ export interface ThreadContext {
   replyEmail: Email;
   threadEmails: Email[];
   lastOutbound: Email | null;
+  /** A failed/incomplete lookup is not evidence that no outbound offer existed. */
+  historyFetchFailed?: boolean;
   /**
    * Ящики (eaccount, lowercase), с которых кампания слала письма — собраны из
    * ВСЕХ писем, полученных при восстановлении контекста (search + campaign-wide
@@ -53,6 +56,7 @@ export async function fetchThreadContext(
   accountId?: string,
 ): Promise<ThreadContext | null> {
   let allEmails: Email[] = [];
+  let historyFetchFailed = false;
 
   // Fetch emails for this specific lead using the search parameter
   // (lead_id filter on /emails does not work correctly in Instantly API v2)
@@ -63,8 +67,10 @@ export async function fetchThreadContext(
       limit: 100,
     }, { accountId });
     allEmails = res.items ?? [];
+    historyFetchFailed = Boolean(res.next_starting_after);
   } catch {
     // fall through to campaign-wide fetch
+    historyFetchFailed = true;
   }
 
   // The search=leadEmail query reliably returns the lead's INBOUND reply but
@@ -85,11 +91,15 @@ export async function fetchThreadContext(
         campaign_id: campaignId,
         limit: 100,
       }, { accountId });
+      // A complete campaign-wide fallback also repairs an earlier failed or
+      // truncated narrow lookup; otherwise the same reply would defer forever.
+      historyFetchFailed = Boolean(response.next_starting_after);
       const seen = new Set(allEmails.map((e) => e.id));
       for (const e of response.items ?? []) {
         if (!e.id || !seen.has(e.id)) allEmails.push(e);
       }
     } catch {
+      historyFetchFailed = true;
       if (allEmails.length === 0) return null;
     }
   }
@@ -152,7 +162,10 @@ export async function fetchThreadContext(
     ),
   ];
 
-  return { replyEmail, threadEmails: outboundScope, lastOutbound, campaignOutboundMailboxes };
+  return {
+    replyEmail, threadEmails: outboundScope, lastOutbound, campaignOutboundMailboxes,
+    ...(historyFetchFailed && !lastOutbound ? { historyFetchFailed: true } : {}),
+  };
 }
 
 // ─── Body Text Extraction ────────────────────────────────────────────────────
@@ -1649,7 +1662,7 @@ function protectedDefaultVerdict(
     hasVagueDeferredInterest(statement)
   ) {
     return {
-      reason: 'Без подтверждённого оффера неопределённый будущий интерес требует ручной проверки.',
+      reason: 'Без подтверждённого оффера неопределённый будущий интерес требует автоматической повторной оценки.',
       needsReview: true,
     };
   }
@@ -1787,7 +1800,11 @@ function normalizeDefaultLeadSignals(
 
 // ─── AI Classification ──────────────────────────────────────────────────────
 
-function buildSystemPrompt(briefText?: string | null, leadCriteria?: string | null): string {
+function buildSystemPrompt(
+  briefText?: string | null,
+  leadCriteria?: string | null,
+  adjudication = false,
+): string {
   const briefSection = briefText
     ? `\n\nКОНТЕКСТ ПРЕДЛОЖЕНИЯ (бриф клиента):\n---\n${briefText.slice(0, 2000)}\n---\nИспользуй этот контекст для определения возражений и генерации черновика ответа.`
     : '';
@@ -1887,6 +1904,18 @@ ${criteriaReminder}
 - При machine_reply_kind != null обязательно is_lead=false, custom_criteria_matched=false, needs_review=false, objection_handleable=false, objection_draft=null. Контакты и призывы из служебного шаблона не могут выполнить кастомное правило «передали контакт — лид».
 - Для человеческого ответа или при сомнении machine_reply_kind=null.
 
+РЕЖИМ РАБОТЫ — ПОЛНОСТЬЮ АВТОМАТИЧЕСКИЙ:
+- Ручной проверки специалистом нет. needs_review — только внутренний сигнал смысловой неопределённости для одной дополнительной автоматической оценки, а не итоговая категория.
+- Нельзя выдумывать интерес из-за вежливости, подписей, цитат или отсутствующих исходящих писем. В то же время самодостаточный коммерческий запрос и выполненный кастомный критерий не требуют найденного оффера.
+${adjudication ? `
+ЕДИНСТВЕННАЯ ПОВТОРНАЯ АВТОМАТИЧЕСКАЯ ОЦЕНКА:
+- Независимо заново оцени только переданные исходные письма, бриф и критерии проекта. Предыдущее рассуждение модели не является доказательством и здесь не передаётся.
+- Не отправляй ответ на ручную проверку и не запрашивай ещё одно голосование. Указания needs_review=true выше описывают только первую оценку; сейчас итог должен быть бинарным: is_lead=true или is_lead=false, needs_review=false.
+- Лид допустим только при доказанном по основному человеческому ответу положительном условии применимых критериев: сначала проектного определения, затем не противоречащих ему стандартных правил собственного покупательского интереса/CTA. Стандартный интерес не отменяет кастомное ограничение. Для лида перечисли конкретные сигналы из основного ответа в interest_signals.
+- Если после повторной оценки такого основания всё ещё нет, ставь is_lead=false, needs_review=false и кратко назови невыполненное условие. Не превращай неопределённость в подтверждённый интерес.
+- Машинный/служебный ответ всегда имеет приоритет над кастомным критерием; явные кастомные исключения остаются запретом. Не приписывай отправителю покупательский интерес из встречной продажи или чужой цитаты.
+` : ''}
+
 ФОРМАТ ОТВЕТА (только валидный JSON, без markdown):
 {
   "machine_reply_kind": "auto_reply"/"delivery_failure"/"service_acknowledgement"/null,
@@ -1913,6 +1942,12 @@ interface AIResponse {
 export interface ClassifyOptions {
   apiKey: string;
   model?: string;
+  /**
+   * Transport retries per evaluation, clamped to 0..2. qualifyReply shares a
+   * maximum of max(2, 1 + maxRetries) HTTP calls across the initial evaluation
+   * and at most one semantic adjudication. Zero disables transport retries,
+   * not the one required adjudication for an uncertain valid first response.
+   */
   maxRetries?: number;
   briefText?: string | null;
   /**
@@ -1935,6 +1970,17 @@ const DEFAULT_MODEL = 'policy/gemini-flash';
 const DEDICATED_LEAD_POLICY = 'policy/portal-instantly-lead-qualification';
 const DEFAULT_MAX_TOKENS = 2000;
 const AI_REQUEST_TIMEOUT_MS = 45_000;
+
+interface ClassificationAttemptControl {
+  adjudication?: boolean;
+  budget?: { remaining: number };
+}
+
+function boundedClassificationRetries(maxRetries: number | undefined): number {
+  return Number.isFinite(maxRetries)
+    ? Math.max(0, Math.min(2, Math.floor(maxRetries!)))
+    : 2;
+}
 
 function envNumber(name: string, fallback: number): number {
   const raw = Number(process.env[name] ?? String(fallback));
@@ -2370,16 +2416,15 @@ export const _private = {
 export async function classifyWithAI(
   ctx: ThreadContext,
   options: ClassifyOptions,
+  control?: ClassificationAttemptControl,
 ): Promise<QualificationResult> {
   const { apiKey, model = DEFAULT_MODEL, briefText, leadCriteria } = options;
   // One initial call plus at most two retries, including invalid model output.
   // Durable worker recovery owns later attempts; no caller can create an
   // unbounded synchronous retry loop with NaN, Infinity or a large override.
-  const maxRetries = Number.isFinite(options.maxRetries)
-    ? Math.max(0, Math.min(2, Math.floor(options.maxRetries!)))
-    : 2;
+  const maxRetries = boundedClassificationRetries(options.maxRetries);
   const userMessage = buildUserMessage(ctx);
-  const systemPrompt = buildSystemPrompt(briefText, leadCriteria);
+  const systemPrompt = buildSystemPrompt(briefText, leadCriteria, control?.adjudication);
   const maxTokens = Math.max(
     1000,
     envNumber('INSTANTLY_LEAD_QUAL_MAX_TOKENS', DEFAULT_MAX_TOKENS),
@@ -2393,6 +2438,14 @@ export async function classifyWithAI(
     : { temperature: 0.1, max_tokens: maxTokens };
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (control?.budget) {
+      if (control.budget.remaining <= 0) {
+        // A late valid-but-uncertain answer must not become not_lead merely
+        // because transport retries left no room for the required adjudication.
+        throw new Error('AI classification failed after retries: automatic adjudication request budget exhausted');
+      }
+      control.budget.remaining--;
+    }
     // The same deadline covers headers AND response.json()/text(). A headers-
     // only timer would still let a stalled response body block the worker.
     // Three timed-out calls plus the 1.5s/3s backoffs take about 139.5s total,
@@ -2499,6 +2552,50 @@ export async function classifyWithAI(
 
 // ─── Main Qualification Pipeline ─────────────────────────────────────────────
 
+/** Apply the same safety and project-specific rules to either semantic pass. */
+function applyQualificationGuards(
+  ctx: ThreadContext,
+  replyText: string,
+  leadCriteria: string | null | undefined,
+  aiResult: QualificationResult,
+): QualificationResult {
+  // classifyWithAI has already applied the machine veto before custom priority.
+  // Do not let contact/CTA postprocessing undo that verdict on either pass.
+  if (aiResult.machineReplyKind) return aiResult;
+  const criteriaAwareResult = enforceDeterministicCustomCriteria(
+    aiResult,
+    leadCriteria,
+    replyText,
+  );
+  if (
+    (isPlainContactReplyToContactOnlyOpener(ctx, replyText) || isOnlyContactRedirect(replyText)) &&
+    customCriteriaExplicitlyRejectsPlainContactRouting(leadCriteria)
+  ) {
+    return {
+      ...sharedContactRoutingNonLead(ctx, criteriaAwareResult),
+      reason: 'Кастомный критерий прямо исключает простую передачу контакта без интереса.',
+    };
+  }
+  if (isSharedContactRoutingReply(replyText) && !criteriaAwareResult.customCriteriaMatched) {
+    return sharedContactRoutingNonLead(ctx, criteriaAwareResult);
+  }
+  const semanticResult = criteriaAwareResult.nonLeadKind &&
+    hasExplicitBuyerInterest(extractAuthoredReplyText(replyText))
+    ? { ...criteriaAwareResult, nonLeadKind: null }
+    : criteriaAwareResult;
+  if (semanticResult.nonLeadKind && !semanticResult.customCriteriaMatched) {
+    return semanticNonLead(semanticResult, semanticResult.nonLeadKind);
+  }
+  return leadCriteria?.trim()
+    ? semanticResult
+    : normalizeDefaultLeadSignals(ctx, replyText, semanticResult);
+}
+
+/**
+ * Return a binary semantic verdict or throw a recoverable technical failure.
+ * Uncertainty gets one fresh adjudication, not a manual-review queue or an
+ * unbounded vote. Both passes share at most three HTTP requests by default.
+ */
 export async function qualifyReply(
   campaignId: string,
   leadEmail: string,
@@ -2519,18 +2616,9 @@ export async function qualifyReply(
       ? aiOptions.prefetchedContext
       : await fetchThreadContext(campaignId, leadEmail, threadId, accountId);
   if (!ctx) {
-    return {
-      isLead: false,
-      customCriteriaMatched: false,
-      proposalSeen: false,
-      interestSignals: [],
-      reason: 'Не удалось восстановить контекст переписки',
-      confidence: 0,
-      needsReview: true,
-      objectionHandleable: false,
-      objectionDraft: null,
-      threadContext: null,
-    };
+    // Missing evidence because a fetch failed is a technical problem, not a
+    // negative semantic judgment. The worker retains durable bounded recovery.
+    throw new Error('AI classification failed after retries: thread context unavailable');
   }
 
   const replyText = getBodyText(ctx.replyEmail.body);
@@ -2591,43 +2679,48 @@ export async function qualifyReply(
     briefText = await fetchBriefByCampaign(campaignId);
   }
 
-  const aiResult = await classifyWithAI(ctx, { ...aiOptions, briefText });
-  // classifyWithAI has already applied the machine veto before custom priority.
-  // Do not let contact/CTA postprocessing undo that verdict.
-  if (aiResult.machineReplyKind) return { ...aiResult, threadContext: ctx };
-  const criteriaAwareResult = enforceDeterministicCustomCriteria(
-    aiResult,
-    aiOptions.leadCriteria,
-    replyText,
-  );
+  const options = { ...aiOptions, briefText };
+  const budget = { remaining: Math.max(2, 1 + boundedClassificationRetries(options.maxRetries)) };
+  const aiResult = await classifyWithAI(ctx, options, { budget });
+  const firstVerdict = applyQualificationGuards(ctx, replyText, options.leadCriteria, aiResult);
   if (
-    (plainContactRouting || isOnlyContactRedirect(replyText)) &&
-    customCriteriaExplicitlyRejectsPlainContactRouting(aiOptions.leadCriteria)
+    ctx.historyFetchFailed && !ctx.lastOutbound && !firstVerdict.machineReplyKind &&
+    !(firstVerdict.isLead && !firstVerdict.needsReview)
   ) {
-    return {
-      ...sharedContactRoutingNonLead(ctx, criteriaAwareResult),
-      reason: 'Кастомный критерий прямо исключает простую передачу контакта без интереса.',
-      threadContext: ctx,
-    };
+    // A second opinion cannot reconstruct history that the provider failed to
+    // deliver. Self-contained positives still work; do not turn missing data
+    // into a final negative merely because the reply only says "interesting".
+    throw new Error('AI classification failed after retries: outbound history unavailable');
   }
-  if (sharedContactRouting && !criteriaAwareResult.customCriteriaMatched) {
-    return {
-      ...sharedContactRoutingNonLead(ctx, criteriaAwareResult),
-      threadContext: ctx,
-    };
+  // A deterministic proof (for example an explicit price request or matching
+  // custom contact rule) can resolve the model's uncertainty without more cost.
+  if (!firstVerdict.needsReview) {
+    return { ...firstVerdict, threadContext: ctx };
   }
-  const semanticResult = criteriaAwareResult.nonLeadKind &&
-    hasExplicitBuyerInterest(extractAuthoredReplyText(replyText))
-    ? { ...criteriaAwareResult, nonLeadKind: null }
-    : criteriaAwareResult;
-  if (semanticResult.nonLeadKind && !semanticResult.customCriteriaMatched) {
-    return {
-      ...semanticNonLead(semanticResult, semanticResult.nonLeadKind),
-      threadContext: ctx,
-    };
+
+  // Reuse the exact proven context and criteria, but never feed the previous
+  // model's reasoning back as evidence. A failed second assessment is still a
+  // technical failure; it must not silently turn the first uncertainty negative.
+  const adjudicated = await classifyWithAI(ctx, options, { budget, adjudication: true });
+  const finalVerdict = applyQualificationGuards(ctx, replyText, options.leadCriteria, adjudicated);
+  if (!finalVerdict.needsReview) {
+    return { ...finalVerdict, threadContext: ctx };
   }
-  const normalizedResult = hasCustomCriteria
-    ? semanticResult
-    : normalizeDefaultLeadSignals(ctx, replyText, semanticResult);
-  return { ...normalizedResult, threadContext: ctx };
+
+  // Positive custom matches and independently provable buyer signals have
+  // already been applied above and clear needsReview. Remaining uncertainty,
+  // AFTER the required second valid assessment, cannot prove a lead criterion.
+  return {
+    ...finalVerdict,
+    isLead: false,
+    customCriteriaMatched: false,
+    interestSignals: [],
+    needsReview: false,
+    objectionHandleable: false,
+    objectionDraft: null,
+    reason: hasCustomCriteria
+      ? 'Повторная автоматическая оценка: положительное условие кастомного критерия не подтверждено.'
+      : 'Повторная автоматическая оценка: собственный покупательский интерес или коммерческий следующий шаг не подтверждены.',
+    threadContext: ctx,
+  };
 }
