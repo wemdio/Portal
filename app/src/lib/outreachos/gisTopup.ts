@@ -1,5 +1,5 @@
 /**
- * OutreachOS 2GIS top-up — добор кандидатов из 2gis_dataset в дни недобора HH+SJ.
+ * OutreachOS 2GIS — ежедневный добор кандидатов из 2gis_dataset сверх результата HH.
  * Дизайн: docs/design/2026-08-11-outreachos-2gis-topup.md (фазы 8t.1–8t.2 runner'а).
  *
  * ИЗОЛЯЦИЯ: импортирует ТОЛЬКО twoGis/* (разрешённое направление) и outreachos/*
@@ -31,11 +31,11 @@ export interface GisTopupCandidate {
  * Выход валидных контактов конструктора на компанию-кандидата. Для GIS-ветки
  * НИЖЕ, чем у HH (у 2GIS-компаний сайты беднее на почты): первый боевой замер
  * 12.08 — 136 компаний → 38 валидных ≈ 0.28 (у HH ~0.45–0.58). Нужен, чтобы
- * пересчитать дефицит ЛИДОВ в число КОМПАНИЙ-кандидатов для pull'а.
+ * пересчитать цель КОНТАКТОВ GIS в число КОМПАНИЙ-кандидатов для pull'а.
  */
 export const GIS_CONSTRUCTOR_YIELD = 0.28;
 /**
- * Запас поверх расчётного дефицита: часть кандидатов вымрет на LLM-отсеве
+ * Запас поверх цели контактов GIS: часть кандидатов вымрет на LLM-отсеве
  * (по GIS шум ~17% против 6–8% у HH, замер 12.08), дедупе против своих кампаний
  * и капе catch-all — тянем с overshoot, чтобы добор реально добрал цель.
  */
@@ -50,20 +50,15 @@ export const GIS_MAX_SCAN_MULTIPLIER = 25;
 
 type Logger = (msg: string) => void;
 
-/** Дефицит добора: сколько лидов не хватает до цели (target − kept HH+SJ). */
-export function computeGisTopupDeficit(targetAppended: number, keptLeads: number): number {
-  return Math.max(0, Math.trunc(targetAppended) - keptLeads);
-}
-
 /**
- * Лимит кандидатов 2GIS за прогон: min(cap, ceil(deficit / yield × overshoot)).
- * deficit<=0 или cap<=0 → 0 (топ-ап не запускается).
+ * Лимит кандидатов 2GIS за прогон: min(cap, ceil(contactTarget / yield × overshoot)).
+ * Цель GIS не зависит от результата HH; contactTarget<=0 или cap<=0 → 0.
  */
-export function computeGisPullLimit(deficit: number, dailyCap: number): number {
-  if (deficit <= 0 || dailyCap <= 0) return 0;
+export function computeGisPullLimit(contactTarget: number, dailyCap: number): number {
+  if (contactTarget <= 0 || dailyCap <= 0) return 0;
   return Math.min(
     Math.trunc(dailyCap),
-    Math.ceil((deficit / GIS_CONSTRUCTOR_YIELD) * GIS_PULL_OVERSHOOT),
+    Math.ceil((contactTarget / GIS_CONSTRUCTOR_YIELD) * GIS_PULL_OVERSHOOT),
   );
 }
 

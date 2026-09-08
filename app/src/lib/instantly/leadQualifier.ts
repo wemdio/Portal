@@ -1,9 +1,11 @@
 import type { Email } from './types';
+import type { InstantlyRequestOptions } from './accounts';
 import { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
 import * as instantly from './client';
 import { isPersonName } from '@/lib/enrich/extractors/nameQuality';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
+import { qualificationAiFingerprint, type QualificationAiCheckpointStore } from './qualificationAiCheckpoint';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -54,6 +56,7 @@ export async function fetchThreadContext(
   leadEmail: string,
   threadId?: string | null,
   accountId?: string,
+  requestOptions?: Pick<InstantlyRequestOptions, 'requestPriority'>,
 ): Promise<ThreadContext | null> {
   let allEmails: Email[] = [];
   let historyFetchFailed = false;
@@ -65,7 +68,7 @@ export async function fetchThreadContext(
       campaign_id: campaignId,
       search: leadEmail,
       limit: 100,
-    }, { accountId });
+    }, { accountId, ...requestOptions });
     allEmails = res.items ?? [];
     historyFetchFailed = Boolean(res.next_starting_after);
   } catch {
@@ -90,7 +93,7 @@ export async function fetchThreadContext(
       const response = await instantly.listEmails({
         campaign_id: campaignId,
         limit: 100,
-      }, { accountId });
+      }, { accountId, ...requestOptions });
       // A complete campaign-wide fallback also repairs an earlier failed or
       // truncated narrow lookup; otherwise the same reply would defer forever.
       historyFetchFailed = Boolean(response.next_starting_after);
@@ -1941,6 +1944,8 @@ interface AIResponse {
 
 export interface ClassifyOptions {
   apiKey: string;
+  /** Required by the production worker. Omit only for explicitly standalone evaluation. */
+  checkpointStore?: QualificationAiCheckpointStore;
   model?: string;
   /**
    * Transport retries per evaluation, clamped to 0..2. qualifyReply shares a
@@ -2436,6 +2441,26 @@ export async function classifyWithAI(
   const inferenceOptions = model === DEDICATED_LEAD_POLICY
     ? { reasoning_effort: 'low', max_tokens: 4096 }
     : { temperature: 0.1, max_tokens: maxTokens };
+  const requestBody = {
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userMessage },
+    ],
+    ...inferenceOptions,
+    response_format: { type: 'json_object' },
+  };
+  // Both actual system prompts participate in one immutable logical budget:
+  // the adjudication has its own cache key but cannot reset the paid-call cap.
+  const budgetFingerprint = qualificationAiFingerprint({
+    version: 1, model, inferenceOptions, userMessage,
+    systemPrompts: [buildSystemPrompt(briefText, leadCriteria, false), buildSystemPrompt(briefText, leadCriteria, true)],
+    response_format: requestBody.response_format,
+  });
+  // Namespace the pass by its complete two-pass contract as well. Otherwise an
+  // adjudication-only prompt edit would reuse the first pass key with a NEW
+  // budget, violating the immutable checkpoint-to-budget relation.
+  const fingerprint = qualificationAiFingerprint({ budgetFingerprint, requestBody });
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (control?.budget) {
@@ -2444,8 +2469,31 @@ export async function classifyWithAI(
         // because transport retries left no room for the required adjudication.
         throw new Error('AI classification failed after retries: automatic adjudication request budget exhausted');
       }
-      control.budget.remaining--;
     }
+    let leaseToken: string | null = null;
+    if (options.checkpointStore) {
+      const reservation = await options.checkpointStore.reserve({ fingerprint, budgetFingerprint });
+      if (reservation.state === 'cached') {
+        try {
+          return enforceCustomCriteriaPriority(parseAIResult(reservation.rawResponse), Boolean(leadCriteria?.trim()));
+        } catch {
+          throw new Error('AI classification failed after retries: AI checkpoint unavailable: invalid cached output');
+        }
+      }
+      if (reservation.state === 'busy') {
+        throw new Error('AI classification failed after retries: AI checkpoint busy');
+      }
+      if (reservation.state === 'exhausted') {
+        throw new Error('AI classification failed after retries: AI paid attempt budget exhausted');
+      }
+      leaseToken = reservation.leaseToken;
+    }
+    if (control?.budget) control.budget.remaining--;
+    const releaseCheckpoint = async (errorCode: string): Promise<void> => {
+      if (leaseToken && options.checkpointStore) {
+        await options.checkpointStore.release({ fingerprint, leaseToken, errorCode });
+      }
+    };
     // The same deadline covers headers AND response.json()/text(). A headers-
     // only timer would still let a stalled response body block the worker.
     // Three timed-out calls plus the 1.5s/3s backoffs take about 139.5s total,
@@ -2462,17 +2510,10 @@ export async function classifyWithAI(
           'HTTP-Referer': 'https://portal.app',
           'X-Title': 'Portal - Instantly Lead Qualification',
         },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userMessage },
-          ],
-          ...inferenceOptions,
-          response_format: { type: 'json_object' },
-        }),
+        body: JSON.stringify(requestBody),
       });
     } catch (err) {
+      await releaseCheckpoint('network_error');
       if (attempt < maxRetries) {
         await sleep(1500 * Math.pow(2, attempt));
         continue;
@@ -2513,15 +2554,19 @@ export async function classifyWithAI(
         if (typeof content !== 'string' || !content.trim()) {
           throw new InvalidAIQualificationResponseError('AI returned empty or invalid content');
         }
-        return enforceCustomCriteriaPriority(
-          parseAIResult(content),
-          Boolean(leadCriteria?.trim()),
-        );
+        const parsedResult = parseAIResult(content);
+        if (leaseToken && options.checkpointStore) {
+          // Persist before any semantic guard/history deferral or worker write.
+          // Failed completion is technical: never pay again in this invocation.
+          await options.checkpointStore.complete({ fingerprint, leaseToken, rawResponse: content });
+        }
+        return enforceCustomCriteriaPriority(parsedResult, Boolean(leadCriteria?.trim()));
       } catch (error) {
         if (!(error instanceof InvalidAIQualificationResponseError)) throw error;
+        await releaseCheckpoint('invalid_ai_response');
         if (attempt === maxRetries) {
           // This stable prefix is recognized by all worker entry points. They
-          // persist needs_review for bounded durable recovery, not not_lead.
+          // persist technical pending for bounded durable recovery, not not_lead.
           // Keep logs free of the model's raw response and customer email text.
           throw new Error(`AI classification failed after retries: ${error.message}`);
         }
@@ -2532,11 +2577,13 @@ export async function classifyWithAI(
     }
 
     if ([502, 503, 504].includes(response.status) && attempt < maxRetries) {
+      await releaseCheckpoint(`http_${response.status}`);
       await sleep(1500 * Math.pow(2, attempt));
       continue;
     }
 
     const text = await response.text().catch(() => '');
+    await releaseCheckpoint(requestSignal.aborted ? 'response_body_timeout' : `http_${response.status}`);
     if (requestSignal.aborted) {
       if (attempt < maxRetries) {
         await sleep(1500 * Math.pow(2, attempt));

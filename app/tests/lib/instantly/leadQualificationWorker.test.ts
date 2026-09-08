@@ -609,26 +609,30 @@ describe('pollAndQualifyReplies', () => {
   });
 
   it('polls recent replies globally and qualifies only campaigns linked to a Portal client project', async () => {
+    process.env.INSTANTLY_LEADS_EMAIL_PAGES = '2';
     const replies = [
       replyEmail({ id: 'linked-email', campaign_id: 'linked-campaign' }),
       replyEmail({ id: 'prefs-only-email', campaign_id: 'prefs-only-campaign' }),
       replyEmail({ id: 'orphan-email', campaign_id: 'orphan-campaign' }),
     ];
-    listEmails.mockImplementation(async (params: { campaign_id?: string }) => {
+    listEmails.mockImplementation(async (params: { campaign_id?: string; starting_after?: string }) => {
+      if (params.starting_after) {
+        throw new Error('Instantly email read deferred: budget; retry after 45000 ms');
+      }
       if (params.campaign_id) {
         return {
           items: replies.filter((email) => email.campaign_id === params.campaign_id),
           next_starting_after: null,
         };
       }
-      return { items: replies, next_starting_after: null };
+      return { items: replies, next_starting_after: 'page-2-deferred' };
     });
 
     const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
     const processed = await pollAndQualifyReplies();
 
     expect(processed).toBe(1);
-    expect(listEmails).toHaveBeenCalledTimes(1);
+    expect(listEmails).toHaveBeenCalledTimes(2);
     expect(listEmails).toHaveBeenCalledWith(
       expect.objectContaining({
         // Правильный фильтр Instantly v2 — `email_type` (string enum),
@@ -2964,10 +2968,10 @@ describe('pollAndQualifyReplies', () => {
       }),
     ]);
 
-    const retryStart = Date.now() + 60_000;
+    let retryAt = Date.now() + 60_000;
     for (let attempt = 1; attempt <= 8; attempt++) {
       expect(await reprocessOwnershipReviewRows({
-        now: new Date(retryStart + attempt * 1_000),
+        now: new Date(retryAt),
         minRetryAgeMs: 0,
         maxAgeMs: 24 * 60 * 60 * 1000,
       })).toBe(1);
@@ -2978,6 +2982,12 @@ describe('pollAndQualifyReplies', () => {
         }),
       ]);
       expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+      const next = mockInstantlyDb!.getRows('instantly_lead_qualifications')[0];
+      expect(next.recovery_attempts).toBe(attempt);
+      retryAt = Date.parse(String(next.recovery_next_at));
+      expect(await reprocessOwnershipReviewRows({
+        now: new Date(retryAt - 1), minRetryAgeMs: 0,
+      })).toBe(0);
     }
 
     getAccountCampaignMappings.mockResolvedValue([
@@ -2990,7 +3000,7 @@ describe('pollAndQualifyReplies', () => {
     ]);
 
     expect(await reprocessOwnershipReviewRows({
-      now: new Date(retryStart + 10_000),
+      now: new Date(retryAt),
       minRetryAgeMs: 0,
       maxAgeMs: 24 * 60 * 60 * 1000,
     })).toBe(1);
@@ -3004,7 +3014,7 @@ describe('pollAndQualifyReplies', () => {
     expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
 
     expect(await reprocessOwnershipReviewRows({
-      now: new Date(retryStart + 11_000),
+      now: new Date(retryAt + 1_000),
       minRetryAgeMs: 0,
       maxAgeMs: 24 * 60 * 60 * 1000,
     })).toBe(0);
@@ -3022,13 +3032,14 @@ describe('pollAndQualifyReplies', () => {
     );
     expect(await pollAndQualifyReplies()).toBe(0);
 
-    const retryStart = Date.now() + 60_000;
+    let retryAt = Date.now() + 60_000;
     for (let attempt = 1; attempt <= 6; attempt++) {
       expect(await reprocessOwnershipReviewRows({
-        now: new Date(retryStart + attempt * 1_000),
+        now: new Date(retryAt),
         minRetryAgeMs: 0,
         maxAgeMs: 24 * 60 * 60 * 1000,
       })).toBe(1);
+      retryAt = Date.parse(String(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0].recovery_next_at));
     }
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
       expect.objectContaining({
@@ -3074,16 +3085,17 @@ describe('pollAndQualifyReplies', () => {
         }),
       ]);
 
-      const retryStart = Date.now() + 60_000;
+      let retryAt = Date.now() + 60_000;
       for (let attempt = 1; attempt <= 6; attempt++) {
         expect(await reprocessOwnershipReviewRows({
-          now: new Date(retryStart + attempt * 1_000),
+          now: new Date(retryAt),
           minRetryAgeMs: 0,
           maxAgeMs: 24 * 60 * 60 * 1000,
         })).toBe(1);
         expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
           expect.objectContaining({ status: 'pending' }),
         ]);
+        retryAt = Date.parse(String(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0].recovery_next_at));
       }
 
       getAccountCampaignMappings.mockResolvedValue([
@@ -3095,7 +3107,7 @@ describe('pollAndQualifyReplies', () => {
         },
       ]);
       expect(await reprocessOwnershipReviewRows({
-        now: new Date(retryStart + 8_000),
+        now: new Date(retryAt),
         minRetryAgeMs: 0,
         maxAgeMs: 24 * 60 * 60 * 1000,
       })).toBe(1);
@@ -3109,7 +3121,7 @@ describe('pollAndQualifyReplies', () => {
       ]);
       expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
       expect(await reprocessOwnershipReviewRows({
-        now: new Date(retryStart + 9_000),
+        now: new Date(retryAt + 1_000),
         minRetryAgeMs: 0,
         maxAgeMs: 24 * 60 * 60 * 1000,
       })).toBe(0);
@@ -3625,6 +3637,109 @@ describe('pollAndQualifyReplies', () => {
     });
 
     it('recovers an old technical row only in the cold lane without starving behind permanent errors', async () => {
+      // Provider 404 recovery is allowed only from a real full inbound. No
+      // daily dead-id reads, no preview-as-body, no invented To=our mailbox.
+      const { InstantlyApiError } = await import('@/lib/instantly/errors');
+      const { captureQualificationReplySnapshot } = await import('@/lib/instantly/qualificationRecovery');
+      const worker = await import('@/lib/instantly/leadQualificationWorker');
+      for (const source of ['safe', 'stray', 'legacy'] as const) {
+        getEmail.mockReset();
+        qualifyReply.mockReset();
+        sendLeadTelegramAlert.mockClear();
+        const { inbound } = installOwnershipReviewRetryFixture({ enforceQueryWindows: true });
+        const snapshot = captureQualificationReplySnapshot({ ...inbound,
+          to_address_email_list: source === 'stray' ? 'someone@another-vendor.example' : inbound.to_address_email_list,
+        });
+        await mockInstantlyDb!.from('instantly_lead_qualifications').update({
+          reply_recovery_snapshot: source === 'legacy' ? null : snapshot,
+        }).eq('id', 'ownership-review-qualification');
+        expect(captureQualificationReplySnapshot({ ...inbound, body: { html: '<p>Interested</p>' } })?.body)
+          .toEqual({ html: '<p>Interested</p>', text: undefined });
+        expect(captureQualificationReplySnapshot({ ...inbound, to_address_email_list: 'Julia <julia@enagency.example>' }))
+          .not.toBeNull();
+        getEmail.mockRejectedValue(new InstantlyApiError('Instantly API 404: email not found', 404));
+        expect(await worker.reprocessOwnershipReviewRows({ now: retryNow, minRetryAgeMs: 0 })).toBe(1);
+        const saved = mockInstantlyDb!.getRows('instantly_lead_qualifications')[0];
+        expect(saved.status).toBe(source === 'safe' ? 'lead' : 'pending');
+        expect(saved.recovery_use_snapshot).toBe(true);
+        expect(saved.recovery_attempts).toBe(1);
+        expect(getEmail).toHaveBeenCalledTimes(1);
+        expect(qualifyReply).toHaveBeenCalledTimes(source === 'safe' ? 1 : 0);
+        expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(source === 'safe' ? 1 : 0);
+        // Simulate restart, then a later technical retry. Unsafe/absent source
+        // cannot become lead and cannot issue a second GET for the dead id.
+        jest.resetModules();
+        const restarted = await import('@/lib/instantly/leadQualificationWorker');
+        await restarted.reprocessOwnershipReviewRows({
+          now: new Date(retryNow.getTime() + 24 * 60 * 60_000), minRetryAgeMs: 0,
+        });
+        expect(getEmail).toHaveBeenCalledTimes(1);
+        expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(source === 'safe' ? 1 : 0);
+        const beforeWake = { ...mockInstantlyDb!.getRows('instantly_lead_qualifications')[0] };
+        if (source !== 'legacy') {
+          // Neither a final lead nor an ownership-blocked reply is reopened.
+          expect(await restarted.refreshMissingRecoverySources(mockInstantlyDb! as never, [inbound])).toBe(0);
+        } else {
+          expect(beforeWake.recovery_failure_kind).toBe('source_missing');
+          expect(await restarted.refreshMissingRecoverySources(mockInstantlyDb! as never, [
+            { ...inbound, to_address_email_list: undefined, cc_address_email_list: undefined },
+          ])).toBe(0);
+          expect(await restarted.refreshMissingRecoverySources(mockInstantlyDb! as never, [
+            { ...inbound, from_address_email: 'different@example.com' },
+          ])).toBe(0);
+          await mockInstantlyDb!.from('instantly_lead_qualifications').update({ status: 'processing' })
+            .eq('id', 'ownership-review-qualification');
+          expect(await restarted.refreshMissingRecoverySources(mockInstantlyDb! as never, [inbound])).toBe(0);
+          await mockInstantlyDb!.from('instantly_lead_qualifications').update({ status: 'pending' })
+            .eq('id', 'ownership-review-qualification');
+          await mockInstantlyDb!.from('client_forwarded_leads').insert({
+            id: 'wake-forwarded', qualification_id: 'ownership-review-qualification',
+          });
+          expect(await restarted.refreshMissingRecoverySources(mockInstantlyDb! as never, [inbound])).toBe(0);
+          await mockInstantlyDb!.from('client_forwarded_leads').delete().eq('id', 'wake-forwarded');
+          // Others can omit campaign_id; the saved campaign is just a routing
+          // hint and the owner/recipient guards still execute during recovery.
+          expect(await restarted.refreshMissingRecoverySources(mockInstantlyDb! as never,
+            [{ ...inbound, campaign_id: undefined }])).toBe(1);
+          expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0]).toMatchObject({
+            status: 'pending', recovery_use_snapshot: true, recovery_next_at: null,
+            recovery_failure_kind: null, recovery_failure_count: 0,
+            recovery_attempts: beforeWake.recovery_attempts,
+            created_at: beforeWake.created_at, updated_at: beforeWake.updated_at,
+            reply_recovery_snapshot: { id: inbound.id, from_address_email: inbound.from_address_email,
+              to_address_email_list: inbound.to_address_email_list },
+          });
+          expect(getEmail).toHaveBeenCalledTimes(1);
+          expect(qualifyReply).not.toHaveBeenCalled();
+          await restarted.reprocessOwnershipReviewRows({
+            now: new Date(retryNow.getTime() + 24 * 60 * 60_000 + 60_000), minRetryAgeMs: 0,
+          });
+          expect(getEmail).toHaveBeenCalledTimes(1);
+          expect(qualifyReply).toHaveBeenCalledTimes(1);
+          expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
+
+          const wakeRows = Array.from({ length: 12 }, (_, index) => ({
+            ...beforeWake, id: `wake-bounded-${index}`, instantly_email_id: `wake-source-${index}`,
+          }));
+          const wakeEmails = wakeRows.map(row => ({ ...inbound, id: row.instantly_email_id }));
+          const boundedDb = createMockSupabase({ enforceQueryWindows: true, tables: {
+            instantly_lead_qualifications: wakeRows, client_forwarded_leads: [],
+          } });
+          expect(await restarted.refreshMissingRecoverySources(boundedDb as never, wakeEmails)).toBe(10);
+          expect(boundedDb.getRows('instantly_lead_qualifications')
+            .filter(row => row.recovery_failure_kind === 'source_missing')).toHaveLength(2);
+          const racedDb = createMockSupabase({ tables: {
+            instantly_lead_qualifications: [wakeRows[0]], client_forwarded_leads: [],
+          }, beforeFirstUpdates: { instantly_lead_qualifications: rows => rows.map(row => ({
+            ...row, status: 'lead', updated_at: '2026-08-26T00:00:00.000Z',
+          })) } });
+          expect(await restarted.refreshMissingRecoverySources(racedDb as never, [wakeEmails[0]])).toBe(0);
+          expect(racedDb.getRows('instantly_lead_qualifications')[0]).toMatchObject({ status: 'lead' });
+        }
+      }
+      getEmail.mockReset();
+      qualifyReply.mockReset();
+      sendLeadTelegramAlert.mockClear();
       installOwnershipReviewRetryFixture({
         enforceQueryWindows: true,
         row: {
@@ -3912,6 +4027,7 @@ describe('pollAndQualifyReplies', () => {
         'lead@example.com',
         refreshed.thread_id,
         'main',
+        { requestPriority: 'recovery' },
       );
     });
 
@@ -4300,7 +4416,6 @@ describe('pollAndQualifyReplies', () => {
       };
       qualifyReply
         .mockReset()
-        .mockResolvedValueOnce(leadResult)
         .mockResolvedValueOnce({
           ...leadResult,
           isLead: false,
@@ -4329,6 +4444,8 @@ describe('pollAndQualifyReplies', () => {
 
       releaseFirstGetEmail(inbound);
       await staleRun;
+      // The full-source snapshot CAS now rejects the stale worker BEFORE AI.
+      expect(qualifyReply).not.toHaveBeenCalled();
       expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0]).toEqual(
         expect.objectContaining({
           status: 'processing',
@@ -5218,6 +5335,91 @@ describe('pollAndQualifyReplies', () => {
       reason: 'workspace ownership evidence exceeded the bounded page budget',
     }));
     expectLeadScopedSentEvidenceCall(leadEmail, 2);
+
+    // Recovery is resumable on BOTH provider surfaces. A failed second page
+    // must not reset search or let its first-page parent hide a sent-page tie.
+    listEmails.mockClear();
+    let searchAttempts = 0;
+    let sentAttempts = 0;
+    const competingParent = { ...candidateParent, campaign_id: candidateCampaignIds[1] };
+    listEmails.mockImplementation(async (params: EmailListQuery & { starting_after?: string }) => {
+      if (params.search) {
+        if (!params.starting_after) return { items: [candidateParent], next_starting_after: 'search-continue' };
+        if (++searchAttempts === 1) throw new Error('Instantly 429: search temporarily throttled');
+        return { items: [], next_starting_after: null };
+      }
+      if (!params.starting_after) return { items: [], next_starting_after: 'sent-continue' };
+      if (++sentAttempts === 1) throw new Error('Instantly 429: sent temporarily throttled');
+      return { items: [competingParent], next_starting_after: null };
+    });
+    const onEvidenceProgress = jest.fn();
+    const recoveryArgs = {
+      db: mockInstantlyDb! as unknown as Parameters<typeof resolveEffectiveReplyOwner>[0]['db'],
+      reply: inbound, providerCampaignId, leadEmail, accountId: 'main', evidenceMode: 'recovery' as const,
+      onEvidenceProgress,
+    };
+    expect(await resolveEffectiveReplyOwner(recoveryArgs)).toEqual(expect.objectContaining({ status: 'defer' }));
+    expect(await resolveEffectiveReplyOwner(recoveryArgs)).toEqual(expect.objectContaining({ status: 'defer' }));
+    const recovered = await resolveEffectiveReplyOwner(recoveryArgs);
+    expect(recovered).toEqual(expect.objectContaining({
+      status: 'ambiguous', reason: 'outbound parent matches 2 distinct or unknown owners',
+    }));
+    expect(listEmails.mock.calls.map(([query]) => [query.search ? 'search' : 'sent', query.starting_after ?? null]))
+      .toEqual([
+        ['search', null], ['search', 'search-continue'], ['search', 'search-continue'],
+        ['sent', null], ['sent', 'sent-continue'], ['sent', 'sent-continue'],
+      ]);
+    expect(listEmails.mock.calls.every(([, options]) => options.requestPriority === 'recovery')).toBe(true);
+    expect(onEvidenceProgress).toHaveBeenCalledTimes(4);
+    // Completed unchanged evidence is reused, including its negative/tied
+    // ownership outcome. It is not downloaded from page one on every retry.
+    listEmails.mockClear();
+    expect(await resolveEffectiveReplyOwner(recoveryArgs)).toEqual(recovered);
+    expect(listEmails).not.toHaveBeenCalled();
+    expect(onEvidenceProgress).toHaveBeenCalledTimes(4);
+    // A materially different reply cannot inherit another reply's cursors.
+    const changedReply = { ...inbound, body: { text: 'Changed reply input' } };
+    await resolveEffectiveReplyOwner({ ...recoveryArgs, reply: changedReply, evidencePriority: 'fresh' });
+    expect(listEmails).toHaveBeenCalledWith(expect.not.objectContaining({ starting_after: expect.anything() }),
+      expect.objectContaining({ requestPriority: 'fresh' }));
+    expect(mockInstantlyDb!.getRows('instantly_ownership_evidence_progress')).toHaveLength(2);
+
+    // A wrong provider label is not a reason to defer before scanning forever:
+    // after both surfaces complete, the sole parent selects the real owner.
+    listEmails.mockImplementation(async (query: EmailListQuery) => ({
+      items: query.search ? [candidateParent] : [], next_starting_after: null,
+    }));
+    const corrected = await resolveEffectiveReplyOwner({
+      ...recoveryArgs, reply: { ...inbound, id: 'new-reply-requiring-complete-proof' },
+    });
+    expect(corrected).toEqual(expect.objectContaining({
+      status: 'resolved', effectiveProjectId: 'project-owner-a', effectiveCampaignId: candidateCampaignIds[0],
+    }));
+    if (corrected.status !== 'resolved') throw new Error('expected fully proven corrected owner');
+    expect(corrected.context?.threadEmails.some((email) => email.id === candidateParent.id)).toBe(true);
+    getAccountCampaignMappings.mockResolvedValue([{ campaign_id: candidateCampaignIds[0], status: 1 }]);
+    const oneOwner = await resolveEffectiveReplyOwner(recoveryArgs);
+    expect(oneOwner).toEqual(expect.objectContaining({ status: 'resolved', effectiveProjectId: 'project-owner-a' }));
+    listEmails.mockClear();
+    expect(await resolveEffectiveReplyOwner(recoveryArgs)).toEqual(oneOwner);
+    expect(listEmails).not.toHaveBeenCalled();
+
+    // CAS protects a completed proof from a slower worker restoring old cursors.
+    const { loadOwnershipEvidenceCheckpoint, saveOwnershipEvidenceCheckpoint } =
+      await import('@/lib/instantly/ownershipEvidenceCheckpoint');
+    const checkpointDb = mockInstantlyDb! as unknown as Parameters<typeof loadOwnershipEvidenceCheckpoint>[0];
+    const firstCheckpoint = await loadOwnershipEvidenceCheckpoint(checkpointDb, 'cas-scope');
+    const staleCheckpoint = await loadOwnershipEvidenceCheckpoint(checkpointDb, 'cas-scope');
+    await saveOwnershipEvidenceCheckpoint(checkpointDb, firstCheckpoint);
+    await expect(saveOwnershipEvidenceCheckpoint(checkpointDb, staleCheckpoint)).rejects.toThrow('changed concurrently');
+    const missingCheckpointDb = createMockSupabase({ errorSelects: {
+      instantly_ownership_evidence_progress: {
+        columnsInclude: 'checkpoint_key', code: '42P01', message: 'missing relation',
+      },
+    } });
+    await expect(loadOwnershipEvidenceCheckpoint(
+      missingCheckpointDb as unknown as typeof checkpointDb, 'missing',
+    )).rejects.toThrow('migration is not available');
   });
 
   it('uses the bounded sent fallback when workspace search has only an unrelated outbound', async () => {
@@ -7167,6 +7369,22 @@ describe('ownership retry page-budget quarantine — RED contract', () => {
       expect(await maybeReprocessOwnershipReviews()).toBe(2);
       expect(await maybeReprocessOwnershipReviews()).toBe(0);
       expect(getEmail).toHaveBeenCalledTimes(18);
+
+      // Fresh retries run first even when the backlog has older due timestamps.
+      // This exercises real lane queries, not a sorted fixture-only assertion.
+      clock += 120_000;
+      const hotCreated = new Date(clock - 5 * 60_000).toISOString();
+      await mockInstantlyDb!.from('instantly_lead_qualifications').insert([
+        { ...transient, id: 'late-backlog', instantly_email_id: 'late-backlog-email' },
+        ...[1, 2].map(index => ({ ...transient,
+          id: `hot-${index}`, instantly_email_id: `hot-email-${index}`,
+          created_at: hotCreated, updated_at: hotCreated,
+        })),
+      ]);
+      const callsBeforeFresh = getEmail.mock.calls.length;
+      expect(await maybeReprocessOwnershipReviews()).toBe(3);
+      expect(getEmail.mock.calls.slice(callsBeforeFresh).map(([id]) => id))
+        .toEqual(['hot-email-1', 'hot-email-2', 'late-backlog-email']);
     } finally {
       dateNow.mockRestore();
     }

@@ -59,6 +59,7 @@ import { readFileSync, existsSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
+import { createDatasetEmailReadBudget, DatasetEmailReadDeferredError } from './email-read-budget.mjs';
 
 const require = createRequire(import.meta.url);
 const { Client } = require('pg');
@@ -76,6 +77,7 @@ function loadEnv(path) {
   );
 }
 const env = { ...loadEnv(resolve(REPO_ROOT, '.env')), ...process.env };
+const emailReadBudget = createDatasetEmailReadBudget(env);
 
 const KEY = env.INSTANTLY_EXPORT_API_KEY || env.INSTANTLY_PORTAL_API_KEY || env.INSTANTLY_API_KEY;
 const DB_URL = env.INSTANTLY_DATASET_DB_URL;
@@ -127,6 +129,7 @@ function rateLimit(intervalMs = MIN_INTERVAL_MS) {
 }
 
 async function callApi(path, opts = {}) {
+  const isEmailList = path === '/emails' && (opts.method ?? 'GET') === 'GET';
   const url = new URL('https://api.instantly.ai/api/v2' + path);
   for (const [k, v] of Object.entries(opts.params ?? {})) {
     if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
@@ -138,9 +141,17 @@ async function callApi(path, opts = {}) {
   }
   for (let attempt = 0; attempt < 5; attempt++) {
     await rateLimit(opts.intervalMs ?? (opts.fastPace ? ANALYTICS_INTERVAL_MS : MIN_INTERVAL_MS));
+    if (isEmailList) await emailReadBudget.waitForSlot();
     try {
-      const r = await fetch(url.toString(), init);
+      const r = await fetch(url.toString(), isEmailList ? { ...init, signal: AbortSignal.timeout(90_000) } : init);
       if (r.status === 429) {
+        if (isEmailList) {
+          const retryAfter = r.headers.get('retry-after');
+          void r.body?.cancel().catch(() => {});
+          const wait = await emailReadBudget.cooldown(retryAfter);
+          if (attempt === 4) throw new DatasetEmailReadDeferredError('cooldown', wait);
+          continue;
+        }
         const wait = 15_000 + 5_000 * attempt;
         log(`  ! 429 on ${path} — sleep ${wait}ms`);
         await new Promise((res) => setTimeout(res, wait));
@@ -840,6 +851,6 @@ async function syncLeadsCapture(client, counts) {
     }
     process.exitCode = 1;
   } finally {
-    await client.end();
+    try { await client.end(); } finally { await emailReadBudget.close(); }
   }
 })();

@@ -39,6 +39,10 @@ import {
 } from './handoffSender';
 import type { Email } from './types';
 import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
+import { resolveInstantlyAccountId } from './accounts';
+import { createQualificationAiCheckpointStore } from './qualificationAiCheckpoint';
+import { captureQualificationReplySnapshot, qualificationRecoveryBackoff, qualificationReplySnapshot, type QualificationRecoveryState } from './qualificationRecovery';
+import { InstantlyApiError } from './errors';
 import {
   resolveCampaignProjectOwner,
   resolveCampaignProjectOwners,
@@ -58,7 +62,7 @@ const PROJECT_BATCH_SIZE = 100;
  * сохранить видимость без бесконечного повторения одного и того же сбоя.
  */
 const TRANSIENT_QUALIFY_ERROR_RE =
-  /\b(?:402|429|500|502|503|504)\b|overload|rate.?limit|fetch failed|network error|timed?.?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|aborted|failed after retries/i;
+  /\b(?:402|429|500|502|503|504)\b|Instantly email read deferred|overload|rate.?limit|fetch failed|network error|timed?.?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|aborted|failed after retries/i;
 const RETRIABLE_BILLING_QUALIFY_ERROR_RE =
   /\b(?:insufficient credits?|insufficient balance|balance is too low|payment required|out of credits?|spend(?:ing)? limit|billing limit)\b/i;
 const OWNERSHIP_DEFER_ERROR_PREFIX = 'Reply ownership deferred';
@@ -78,11 +82,13 @@ const OWNERSHIP_REVIEW_RETRY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const OWNERSHIP_REVIEW_PROCESSING_LEASE_MS = 30 * 60 * 1000;
 const OWNERSHIP_PAGE_BUDGET_REASON_FRAGMENT =
   'workspace ownership evidence exceeded the bounded page budget';
-const OWNERSHIP_PAGE_BUDGET_RETRY_BACKOFF_MS = 6 * 60 * 60 * 1000;
+const OWNERSHIP_PAGE_BUDGET_RETRY_BACKOFF_MS = 15 * 60 * 1000;
 const OWNERSHIP_PAGE_BUDGET_RETRY_INTERVAL_MS = 15 * 60 * 1000;
-const OWNERSHIP_PAGE_BUDGET_RETRY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-const QUALIFICATION_COLD_RETRY_INTERVAL_MS = 30 * 60 * 1000;
-const QUALIFICATION_COLD_RETRY_BACKOFF_MS = 24 * 60 * 60 * 1000;
+const OWNERSHIP_PAGE_BUDGET_RETRY_MAX_AGE_MS = OWNERSHIP_REVIEW_RETRY_MAX_AGE_MS;
+const QUALIFICATION_FRESH_WINDOW_MS = 2 * 60 * 60 * 1000;
+let lastQualificationFreshRetryAt = 0;
+const QUALIFICATION_COLD_RETRY_INTERVAL_MS = 5 * 60 * 1000;
+const QUALIFICATION_COLD_RETRY_BACKOFF_MS = 30 * 60 * 1000;
 const LEGACY_SEMANTIC_RETRY_TAG = '[legacy-semantic]';
 const LEAD_DELIVERY_RETRY_INTERVAL_MS = 15 * 60 * 1000;
 const LEAD_DELIVERY_RECENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -376,6 +382,7 @@ export async function persistTransientQualificationRetry(
       reply_preview: replyText.slice(0, 300) || null,
       reply_body: replyText || null,
       last_outbound_preview: lastOutboundText.slice(0, 300) || null,
+      reply_recovery_snapshot: captureQualificationReplySnapshot(reply),
       last_outbound_ue_type: options?.lastOutbound?.ue_type ?? null,
       status: 'pending',
       proposal_seen: false,
@@ -773,14 +780,24 @@ async function fetchRecentLinkedReplies(
   let startingAfter: string | undefined;
 
   for (let page = 0; page < maxPages; page++) {
-    const res = await instantly.listEmails({
-      // Правильный фильтр Instantly v2 — `email_type` (string enum),
-      // а не `ue_type` (это response-поле, query-параметр Instantly
-      // игнорил молча и возвращал все письма подряд).
-      email_type: 'received',
-      limit: REPLY_EMAILS_PAGE_SIZE,
-      starting_after: startingAfter,
-    }, { accountId });
+    let res: Awaited<ReturnType<typeof instantly.listEmails>>;
+    try {
+      res = await instantly.listEmails({
+        // Правильный фильтр Instantly v2 — `email_type` (string enum),
+        // а не `ue_type` (это response-поле, query-параметр Instantly
+        // игнорил молча и возвращал все письма подряд).
+        email_type: 'received',
+        limit: REPLY_EMAILS_PAGE_SIZE,
+        starting_after: startingAfter,
+      }, { accountId });
+    } catch (error) {
+      if (!(error instanceof Error && error.message.startsWith('Instantly email read deferred:'))) throw error;
+      // Discovery is not an ownership proof. Already fetched inbound messages
+      // remain useful even when this page cannot be admitted. Dropping the
+      // entire batch here would repeatedly waste the same first pages.
+      workerLog('info', `[${accountId ?? 'main'}] Reply discovery paused after ${page} page(s); keeping fetched replies`, error);
+      break;
+    }
     const allEmails = res.items ?? [];
     const linkedReplies = allEmails.filter((e) => {
       const campaignId = e.campaign_id;
@@ -908,6 +925,9 @@ export async function pollAndQualifyReplies(): Promise<number> {
     }
   }
 
+  // An authoritative list item can repair a formerly missing source without
+  // reopening completed leads or repeating the dead GET /emails/:id request.
+  await refreshMissingRecoverySources(db, replyEmails.filter((e) => existingIds.has(e.id)));
   let newReplies = replyEmails.filter((e) => e.id && !existingIds.has(e.id));
 
   // 3b. Within current batch: keep only the most recent reply per lead+campaign
@@ -1177,6 +1197,8 @@ export async function qualifyOneReply(
     existingQualificationAttemptedAt?: string;
     /** Recovery-only larger bounded proof; fresh polling keeps its normal cap. */
     ownershipEvidenceMode?: 'recovery';
+    ownershipEvidencePriority?: 'fresh' | 'recovery';
+    onOwnershipEvidenceProgress?: () => void;
   },
 ): Promise<void> {
   const providerCampaignId = reply.campaign_id;
@@ -1211,6 +1233,8 @@ export async function qualifyOneReply(
     // parent even when the reply has no provider thread id or quoted body.
     trustPrefetchedParent: opts?.prefetchedParentMatched === true,
     evidenceMode: opts?.ownershipEvidenceMode,
+    evidencePriority: opts?.ownershipEvidencePriority,
+    onEvidenceProgress: opts?.onOwnershipEvidenceProgress,
   });
   if (ownership.status === 'defer') {
     // Throw into the existing bounded retry machinery. A normal return would
@@ -1229,6 +1253,7 @@ export async function qualifyOneReply(
       db,
       {
         campaign_id: providerCampaignId,
+        reply_recovery_snapshot: captureQualificationReplySnapshot(reply),
         campaign_name: await resolveCampaignName(providerCampaignId, accountId),
         lead_email: leadEmail,
         thread_id: reply.thread_id,
@@ -1282,6 +1307,7 @@ export async function qualifyOneReply(
     ? {
         qualified_project_id: qualifiedProjectId,
         qualified_project_owner_proven: true,
+        reply_recovery_snapshot: captureQualificationReplySnapshot(effectiveReply),
       }
     : {};
 
@@ -1540,6 +1566,10 @@ export async function qualifyOneReply(
 
   const result = await qualifyReply(campaignId, leadEmail, effectiveReply.thread_id, {
     apiKey,
+    checkpointStore: createQualificationAiCheckpointStore(db, {
+      accountId: resolveInstantlyAccountId(accountId), replyId: effectiveReply.id,
+      projectId: qualifiedProjectId,
+    }),
     model: MODEL,
     // Empty string means "brief was resolved and absent"; null would make
     // qualifyReply resolve it again without the proven owner fingerprint.
@@ -1880,6 +1910,64 @@ async function qualificationRecoveryDisposition(
   return 'ready';
 }
 
+/** Wake only a source-missing pending row when normal ingestion sees its real
+ * full inbound again. No provider/AI calls, verdict changes or retry-budget reset. */
+export async function refreshMissingRecoverySources(
+  db: NonNullable<typeof supabaseAdmin>,
+  emails: Email[],
+): Promise<number> {
+  const byId = new Map(emails.filter(email => email.id && !email.id.startsWith('webhook:'))
+    .map(email => [email.id, email]));
+  const ids = [...byId.keys()];
+  let refreshed = 0;
+  let checked = 0;
+  try {
+    for (let offset = 0; offset < ids.length && checked < 10; offset += 50) {
+      const { data, error } = await db.from('instantly_lead_qualifications')
+        .select('id, instantly_email_id, campaign_id, lead_email, updated_at')
+        .eq('status', 'pending').eq('recovery_use_snapshot', true)
+        .eq('recovery_failure_kind', 'source_missing')
+        .in('instantly_email_id', ids.slice(offset, offset + 50))
+        .limit(10 - checked);
+      if (error) {
+        workerLog('warn', 'Missing-source refresh deferred: recovery metadata unavailable');
+        return refreshed;
+      }
+      for (const row of data ?? []) {
+        checked++;
+        const source = byId.get(row.instantly_email_id);
+        if (!source || typeof row.updated_at !== 'string') continue;
+        // An Others item may have no provider campaign. The old row supplies
+        // only the routing hint; recovery still has to prove the actual owner.
+        const snapshot = captureQualificationReplySnapshot({
+          ...source, campaign_id: source.campaign_id?.trim() || row.campaign_id,
+        });
+        if (!snapshot || snapshot.id !== row.instantly_email_id ||
+          snapshot.from_address_email?.trim().toLowerCase() !== row.lead_email?.trim().toLowerCase()) continue;
+        if (await qualificationRecoveryDisposition(db, row.id, Date.now()) !== 'ready') continue;
+        const { data: saved, error: saveError } = await db.from('instantly_lead_qualifications')
+          .update({ reply_recovery_snapshot: snapshot, recovery_next_at: null,
+            recovery_failure_kind: null, recovery_failure_count: 0,
+          })
+          .eq('id', row.id).eq('status', 'pending').eq('updated_at', row.updated_at)
+          .eq('lead_email', row.lead_email).eq('recovery_use_snapshot', true)
+          .eq('recovery_failure_kind', 'source_missing')
+          .select('id').maybeSingle();
+        if (saveError) {
+          workerLog('warn', 'Missing-source refresh deferred: checkpoint write unavailable');
+          continue;
+        }
+        if (saved) refreshed++;
+      }
+    }
+  } catch {
+    // Recovery metadata failure must not prevent processing new incoming mail.
+    workerLog('warn', 'Missing-source refresh deferred: checkpoint dependency unavailable');
+  }
+  if (refreshed) workerLog('info', `Refreshed ${refreshed} missing qualification source(s) from normal ingestion`);
+  return refreshed;
+}
+
 // Match technical legacy reasons in SQL BEFORE LIMIT. Ordinary semantic review
 // must neither be silently reopened nor starve technical adoption when opt-in is off.
 const LEGACY_TECHNICAL_RETRY_FILTER = [
@@ -1967,7 +2055,7 @@ export interface OwnershipReviewRetryOptions {
   /** Soft budget between rows; never abandons a claimed in-flight reply. */
   timeBudgetMs?: number;
   /** Old technical rows remain recoverable in a tiny, slow cold lane. */
-  lane?: 'active' | 'page_budget' | 'cold';
+  lane?: 'fresh' | 'active' | 'page_budget' | 'cold';
 }
 
 /**
@@ -1994,28 +2082,29 @@ export async function reprocessOwnershipReviewRows(
   ));
   const pageBudgetLane = options.lane === 'page_budget';
   const coldLane = options.lane === 'cold';
+  const freshLane = options.lane === 'fresh';
   const limit = Math.max(
     1,
     Math.min(
-      coldLane ? 1 : 5,
+      coldLane ? 2 : 5,
       options.limit ?? envNumber(
         coldLane ? 'INSTANTLY_QUALIFICATION_COLD_RETRY_BATCH' : pageBudgetLane
           ? 'INSTANTLY_OWNERSHIP_PAGE_BUDGET_RETRY_BATCH'
           : 'INSTANTLY_OWNERSHIP_RETRY_BATCH',
-        pageBudgetLane || coldLane ? 1 : 5,
+        coldLane ? 2 : pageBudgetLane ? 1 : 5,
       ),
     ),
   );
   const minRetryAgeMs = Math.max(
     0,
-    options.minRetryAgeMs ?? envNumber(
+    options.minRetryAgeMs ?? (freshLane ? 2 * 60_000 : envNumber(
       coldLane ? 'INSTANTLY_QUALIFICATION_COLD_RETRY_BACKOFF_MS' : pageBudgetLane
         ? 'INSTANTLY_OWNERSHIP_PAGE_BUDGET_RETRY_BACKOFF_MS'
         : 'INSTANTLY_OWNERSHIP_RETRY_BACKOFF_MS',
       coldLane ? QUALIFICATION_COLD_RETRY_BACKOFF_MS : pageBudgetLane
         ? OWNERSHIP_PAGE_BUDGET_RETRY_BACKOFF_MS
         : OWNERSHIP_REVIEW_RETRY_BACKOFF_MS,
-    ),
+    )),
   );
   const maxAgeMs = Math.max(
     minRetryAgeMs,
@@ -2038,6 +2127,7 @@ export async function reprocessOwnershipReviewRows(
   const recentCutoffIso = new Date(now.getTime() - maxAgeMs).toISOString();
   const retryCutoffIso = new Date(now.getTime() - minRetryAgeMs).toISOString();
   const leaseCutoffIso = new Date(now.getTime() - processingLeaseMs).toISOString();
+  const freshCutoffIso = new Date(now.getTime() - QUALIFICATION_FRESH_WINDOW_MS).toISOString();
   const ownershipReasonPattern = `${OWNERSHIP_REVIEW_REASON_PREFIX}%`;
   const transientReasonPattern = `${TRANSIENT_RETRY_REASON_PREFIX}%`;
   const retryReasonFilter =
@@ -2047,7 +2137,8 @@ export async function reprocessOwnershipReviewRows(
   // tick. The cold lane reaches failures older than the former seven-day DLQ.
   if (!pageBudgetLane) {
     await adoptLegacyQualificationRetries(db, {
-      nowIso, cutoffIso: recentCutoffIso, retryCutoffIso, cold: coldLane, semantic: false,
+      nowIso, cutoffIso: freshLane ? freshCutoffIso : recentCutoffIso,
+      retryCutoffIso, cold: coldLane, semantic: false,
       limit: coldLane ? 3 : 10,
     });
     if (coldLane && legacySemanticDrainEnabled()) {
@@ -2096,11 +2187,12 @@ export async function reprocessOwnershipReviewRows(
 
   let candidatesQuery = db
     .from('instantly_lead_qualifications')
-    .select('id, campaign_id, lead_email, instantly_email_id, status, ai_reason, ai_confidence, created_at, updated_at')
+    .select('id, campaign_id, lead_email, instantly_email_id, status, ai_reason, ai_confidence, created_at, updated_at, recovery_attempts, recovery_failure_kind, recovery_failure_count, recovery_use_snapshot')
     .in('status', ['pending', 'needs_review'])
     .eq('ai_confidence', 0)
-    .or(retryReasonFilter);
-  candidatesQuery = coldLane ? candidatesQuery : pageBudgetLane
+    .or(retryReasonFilter)
+    .or(`recovery_next_at.is.null,recovery_next_at.lte.${nowIso}`);
+  candidatesQuery = coldLane || freshLane ? candidatesQuery : pageBudgetLane
     ? candidatesQuery.ilike(
         'ai_reason',
         `%${OWNERSHIP_PAGE_BUDGET_REASON_FRAGMENT}%`,
@@ -2116,6 +2208,12 @@ export async function reprocessOwnershipReviewRows(
   candidatesQuery = coldLane
     ? candidatesQuery.lt('created_at', recentCutoffIso)
     : candidatesQuery.gte('created_at', recentCutoffIso);
+  if (freshLane) candidatesQuery = candidatesQuery.gte('created_at', freshCutoffIso);
+  // The scheduled lanes are disjoint. Direct bounded repair calls with no
+  // explicit lane retain the historical active-window semantics.
+  if (options.lane === 'active' || pageBudgetLane) {
+    candidatesQuery = candidatesQuery.lt('created_at', freshCutoffIso);
+  }
   if (!legacySemanticDrainEnabled()) {
     candidatesQuery = candidatesQuery.not('ai_reason', 'ilike', `%${LEGACY_SEMANTIC_RETRY_TAG}%`);
   }
@@ -2136,7 +2234,7 @@ export async function reprocessOwnershipReviewRows(
 
   const campaignsByAccount = await getCampaignsByAccountCached();
   let attempted = 0;
-  for (const raw of candidates as Array<{
+  for (const raw of candidates as Array<QualificationRecoveryState & {
     id: string;
     campaign_id: string;
     lead_email: string;
@@ -2178,7 +2276,10 @@ export async function reprocessOwnershipReviewRows(
     // the same candidate, but only one can transition pending→processing.
     const { data: claimed, error: claimError } = await db
       .from('instantly_lead_qualifications')
-      .update({ status: 'processing', updated_at: nowIso })
+      .update({ status: 'processing', updated_at: nowIso,
+        recovery_attempts: Math.max(0, raw.recovery_attempts ?? 0) + 1,
+        recovery_last_attempt_at: nowIso,
+      })
       .eq('id', raw.id)
       .eq('status', raw.status)
       .eq('ai_confidence', 0)
@@ -2195,6 +2296,11 @@ export async function reprocessOwnershipReviewRows(
     if (!claimed) continue;
     attempted++;
     const attemptStartedAt = Date.now();
+    let evidenceProgress = false;
+    const backoff = (message: string) => qualificationRecoveryBackoff(
+      evidenceProgress ? { ...raw, recovery_failure_count: 0 } : raw,
+      message, now.getTime(), minRetryAgeMs,
+    );
     const logAttempt = (phase: string, reasonCode?: string) => workerLog('info', JSON.stringify({
       event: 'qualification_retry', qualification_id: raw.id,
       lane: options.lane ?? 'active', phase, reason_code: reasonCode ?? null,
@@ -2208,11 +2314,46 @@ export async function reprocessOwnershipReviewRows(
     try {
       // Recovery already has durable retries. Do not spend another 28 seconds
       // retrying a 429 inside getEmail before yielding to fresh replies.
-      const fullEmail = await instantly.getEmail(emailId, {
-        accountId, retryRateLimits: false, timeoutMs: 20_000, timeoutIncludesBody: true,
-      });
+      const loadSnapshot = async () => {
+        const { data, error } = await db.from('instantly_lead_qualifications')
+          .select('instantly_email_id, lead_email, reply_recovery_snapshot')
+          .eq('id', raw.id).maybeSingle();
+        const snapshot = !error && data ? qualificationReplySnapshot(data) : null;
+        if (!snapshot || snapshot.id !== emailId) {
+          throw new Error('recovery source unavailable: provider 404 and no complete saved inbound');
+        }
+        return snapshot;
+      };
+      let fullEmail: Email;
+      if (raw.recovery_use_snapshot) fullEmail = await loadSnapshot();
+      else {
+        try {
+          fullEmail = await instantly.getEmail(emailId, {
+            accountId, retryRateLimits: false, timeoutMs: 20_000, timeoutIncludesBody: true,
+          });
+        } catch (error) {
+          if (!(error instanceof InstantlyApiError && error.status === 404)) throw error;
+          // Record a dead lookup even if old rows lack safe recipient/body
+          // metadata. Those rows only recheck local evidence, never GET this
+          // same missing provider id every day (and never call AI blindly).
+          const { data: saved, error: saveError } = await db.from('instantly_lead_qualifications')
+            .update({ recovery_use_snapshot: true })
+            .eq('id', raw.id).eq('status', 'processing').eq('updated_at', nowIso)
+            .select('id').maybeSingle();
+          if (saveError || !saved) throw new Error('recovery snapshot checkpoint unavailable');
+          fullEmail = await loadSnapshot();
+        }
+      }
       if (!fullEmail?.id || fullEmail.id !== emailId) {
         throw new Error(`provider email mismatch for ${emailId}`);
+      }
+      const sourceSnapshot = captureQualificationReplySnapshot(fullEmail);
+      if (sourceSnapshot && !raw.recovery_use_snapshot) {
+        const { data: saved, error: saveError } = await db.from('instantly_lead_qualifications')
+          .update({ reply_recovery_snapshot: sourceSnapshot })
+          .eq('id', raw.id).eq('status', 'processing').eq('updated_at', nowIso)
+          .select('id').maybeSingle();
+        if (saveError || !saved) throw new Error('recovery source checkpoint unavailable');
       }
       const refreshedCampaignId = fullEmail.campaign_id?.trim() || raw.campaign_id;
       let retryReply = { ...fullEmail, campaign_id: refreshedCampaignId } as Email;
@@ -2283,6 +2424,8 @@ export async function reprocessOwnershipReviewRows(
           existingQualificationId: raw.id,
           existingQualificationAttemptedAt: nowIso,
           ownershipEvidenceMode: 'recovery',
+          ownershipEvidencePriority: freshLane ? 'fresh' : 'recovery',
+          onOwnershipEvidenceProgress: () => { evidenceProgress = true; },
           skipClientReplyNotification: raw.ai_reason?.includes(LEGACY_SEMANTIC_RETRY_TAG) === true,
         },
       );
@@ -2292,12 +2435,21 @@ export async function reprocessOwnershipReviewRows(
       // so it is eligible again after the same backoff.
       const { data: released, error: releaseError } = await db
         .from('instantly_lead_qualifications')
-        .update({ status: 'pending', updated_at: nowIso })
+        .update({ status: 'pending', updated_at: nowIso,
+          ...backoff('ownership recovery incomplete'),
+        })
         .eq('id', raw.id)
         .eq('status', 'processing')
         .eq('updated_at', nowIso)
         .select('id')
         .maybeSingle();
+      // Ambiguous ownership writes pending in place rather than throwing.
+      // Persist its next deadline as well; an updated_at rotation is not enough.
+      const { data: pending } = await db.from('instantly_lead_qualifications')
+        .select('ai_reason').eq('id', raw.id).eq('status', 'pending').eq('updated_at', nowIso).maybeSingle();
+      if (pending) await db.from('instantly_lead_qualifications')
+        .update(backoff(String(pending.ai_reason ?? 'ownership')))
+        .eq('id', raw.id).eq('status', 'pending').eq('updated_at', nowIso);
       logAttempt(releaseError ? 'release_failed' : released ? 'pending' : 'completed_or_replaced');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2307,6 +2459,7 @@ export async function reprocessOwnershipReviewRows(
           status: 'pending',
           updated_at: nowIso,
           error_message: `Ownership retry failed: ${message}`.slice(0, 500),
+          ...backoff(message),
         })
         .eq('id', raw.id)
         .eq('status', 'processing')
@@ -2314,8 +2467,8 @@ export async function reprocessOwnershipReviewRows(
       workerLog('warn', `ownership retry failed for ${raw.id}; released with backoff`, error);
       logAttempt('pending', isTransientQualifyError(message) ? 'dependency_unavailable' : 'retry_failed');
       if (
-        TRANSIENT_QUALIFY_ERROR_RE.test(message) ||
-        RETRIABLE_BILLING_QUALIFY_ERROR_RE.test(message)
+        !/Instantly email read deferred|AI checkpoint|AI paid attempt budget exhausted/i.test(message) &&
+        (TRANSIENT_QUALIFY_ERROR_RE.test(message) || RETRIABLE_BILLING_QUALIFY_ERROR_RE.test(message))
       ) {
         // Only a CURRENT provider failure pauses recovery. An old 402 in
         // ai_reason must not keep a successfully recovered queue frozen.
@@ -2345,9 +2498,10 @@ export async function maybeReprocessOwnershipReviews(): Promise<number> {
     'INSTANTLY_QUALIFICATION_COLD_RETRY_INTERVAL_MS', QUALIFICATION_COLD_RETRY_INTERVAL_MS,
   ));
   const activeDue = nowMs - lastOwnershipReviewRetryAt >= intervalMs;
+  const freshDue = nowMs - lastQualificationFreshRetryAt >= 60_000;
   const pageBudgetDue = nowMs - lastOwnershipPageBudgetRetryAt >= pageBudgetIntervalMs;
   const coldDue = nowMs - lastQualificationColdRetryAt >= coldIntervalMs;
-  if (!activeDue && !pageBudgetDue && !coldDue) return 0;
+  if (!freshDue && !activeDue && !pageBudgetDue && !coldDue) return 0;
   // A slow API call can exceed the fast interval. Keep same-process cycles
   // serial as well as retaining the cross-process row CAS claim.
   ownershipRetryRunning = true;
@@ -2356,9 +2510,14 @@ export async function maybeReprocessOwnershipReviews(): Promise<number> {
     let active = 0;
     let pageBudget = 0;
     let cold = 0;
-    if (activeDue) {
+    let fresh = 0;
+    if (freshDue) {
+      lastQualificationFreshRetryAt = nowMs;
+      fresh = await reprocessOwnershipReviewRows({ now, lane: 'fresh' });
+    }
+    if (activeDue && Date.now() >= ownershipRetryProviderPausedUntil) {
       lastOwnershipReviewRetryAt = nowMs;
-      active = await reprocessOwnershipReviewRows({ now });
+      active = await reprocessOwnershipReviewRows({ now, lane: 'active' });
     }
     // The expensive ownership lane keeps its old cadence; fast catch-up must
     // not multiply its provider traffic or run it during a provider outage.
@@ -2374,10 +2533,10 @@ export async function maybeReprocessOwnershipReviews(): Promise<number> {
         now: new Date(lastQualificationColdRetryAt), lane: 'cold',
       });
     }
-    if (active || pageBudget || cold) {
-      workerLog('info', `qualification recovery: active=${active}, page-budget=${pageBudget}, cold=${cold}`);
+    if (fresh || active || pageBudget || cold) {
+      workerLog('info', `qualification recovery: fresh=${fresh}, active=${active}, page-budget=${pageBudget}, cold=${cold}`);
     }
-    return active + pageBudget + cold;
+    return fresh + active + pageBudget + cold;
   } catch (error) {
     workerLog('warn', 'ownership retry cycle failed', error);
     return 0;

@@ -11,8 +11,8 @@
  * Uses INSTANTLY_EXPORT_API_KEY. NB: лимит Instantly — workspace-wide ПОВЕРХ
  * ключей (отдельный ключ НЕ даёт отдельного бюджета — см. инцидент 22.05.2026 в
  * wiki/log.md, где этот скрипт задушил qualifier на другом ключе). Поэтому при
- * INSTANTLY_RATE_LIMITER_ENABLED=1 скрипт берёт общий токен через тот же
- * Postgres-бакет ('main'), что и portal/qualifier (см. acquireSharedToken ниже).
+ * LIST /emails всегда берёт строгий recovery-слот в основной БД ('main'),
+ * общий с portal/qualifier. Остальные endpoints сохраняют старый opt-in бакет.
  *
  * Usage:
  *   cd app
@@ -31,6 +31,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, statSync, readdirSync } from 'fs';
 import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { createDatasetEmailReadBudget, DatasetEmailReadDeferredError } from './email-read-budget.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '../../..');
@@ -86,6 +87,7 @@ const RL_URL     = (env.NEXT_PUBLIC_SUPABASE_URL || '').replace(/\/+$/, '');
 const RL_KEY     = env.SUPABASE_SERVICE_ROLE_KEY || '';
 const RL_MAX_WAIT_MS = Number(env.INSTANTLY_PULL_RL_MAX_WAIT_MS || 300_000);
 const RL_ON      = env.INSTANTLY_RATE_LIMITER_ENABLED === '1' && !!RL_URL && !!RL_KEY;
+const emailReadBudget = createDatasetEmailReadBudget({ ...env, ...process.env });
 
 async function acquireSharedToken() {
   if (!RL_ON) return;
@@ -111,6 +113,7 @@ async function acquireSharedToken() {
 
 // ─── HTTP w/ retry on 429/5xx ───────────────────────────────────────────
 async function call(path, opts = {}) {
+  const isEmailList = path === '/emails' && (opts.method ?? 'GET') === 'GET';
   const url = new URL('https://api.instantly.ai/api/v2' + path);
   for (const [k, v] of Object.entries(opts.params ?? {})) {
     if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
@@ -123,10 +126,18 @@ async function call(path, opts = {}) {
   let lastErr;
   for (let attempt = 0; attempt < 5; attempt++) {
     await rateLimit();
-    await acquireSharedToken();
+    if (isEmailList) await emailReadBudget.waitForSlot();
+    else await acquireSharedToken();
     try {
-      const r = await fetch(url.toString(), init);
+      const r = await fetch(url.toString(), isEmailList ? { ...init, signal: AbortSignal.timeout(90_000) } : init);
       if (r.status === 429) {
+        if (isEmailList) {
+          const retryAfter = r.headers.get('retry-after');
+          void r.body?.cancel().catch(() => {});
+          const wait = await emailReadBudget.cooldown(retryAfter);
+          if (attempt === 4) throw new DatasetEmailReadDeferredError('cooldown', wait);
+          continue;
+        }
         const wait = 15_000 + 5_000 * attempt;
         log(`  ! 429 on ${path} — sleeping ${wait}ms (attempt ${attempt + 1})`);
         await new Promise((res) => setTimeout(res, wait));
@@ -190,14 +201,17 @@ async function paginatePost(path, body, label) {
 async function runConcurrent(items, worker, concurrency, onProgress) {
   const results = new Array(items.length);
   let next = 0, done = 0;
+  let deferred;
   await Promise.all(
     Array.from({ length: Math.min(concurrency, items.length) }, async () => {
       while (true) {
+        if (deferred) return;
         const i = next++;
         if (i >= items.length) return;
         try {
           results[i] = await worker(items[i], i);
         } catch (e) {
+          if (e.emailReadDeferred) { deferred = e; return; }
           log(`  ! worker error idx ${i} for ${items[i]?.id ?? items[i]}: ${e.message}`);
           results[i] = null;
         }
@@ -206,6 +220,9 @@ async function runConcurrent(items, worker, concurrency, onProgress) {
       }
     }),
   );
+  // Let already in-flight peers settle before the caller closes the DB pool;
+  // no peer starts another campaign after the shared technical deferral.
+  if (deferred) throw deferred;
   return results;
 }
 
@@ -375,6 +392,9 @@ async function perCampaignDirPhase(phaseName, dirName, campaigns, fetcher) {
         const data = await fetcher(c);
         writeFileSync(join(dir, `${c.id}.json`), JSON.stringify(data));
       } catch (e) {
+        // A shared-budget deferral must not become a cached __error file which
+        // a later run would mistake for an already completed campaign export.
+        if (e.emailReadDeferred) throw e;
         writeFileSync(join(dir, `${c.id}.json`), JSON.stringify({ __error: e.message }));
       }
       return null;
@@ -503,5 +523,5 @@ async function phaseEmails(campaigns) {
   log(`DONE in ${mins} min.`);
 })().catch((e) => {
   log(`FATAL: ${e.stack || e.message}`);
-  process.exit(1);
-});
+  process.exitCode = 1;
+}).finally(() => emailReadBudget.close());

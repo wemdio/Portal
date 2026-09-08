@@ -502,6 +502,23 @@ LIMIT 5;
 - `tg_outreach_campaigns` (11), `tg_outreach_dialogs` (1144), `tg_outreach_logs` (242 900)
 - `li_leads` (8277), `li_campaigns`, `li_accounts`
 
+### Автоаутрич OutreachOS (`outreachos_*`)
+
+- `outreachos_pipeline_config` — singleton `id=1`, кампании `campaign_id` (A) и
+  `campaign_id_b` (B). В версии кода от 09.09.2026 `gis_topup_target_appended`
+  означает отдельную цель контактов **из 2GIS сверх HH** (по умолчанию 200),
+  а не общий результат HH+GIS. Перед выводами о проде проверьте версию воркера:
+  комментарий колонки сам по себе не подтверждает выкладку нового кода.
+- `gis_topup_daily_cap` — максимум компаний-кандидатов, не контактов.
+  При одном батче обработка и дедупы могут оставить результат ниже цели.
+- `outreachos_pipeline_runs`: всего принято за прогон —
+  `coalesce(appended,0) + coalesce(appended_b,0)`. `gis_appended` уже включён
+  в эту сумму; `valid_contacts`/`llm_kept` относятся к HH, для GIS есть отдельные
+  `gis_valid_contacts`/`gis_llm_kept`. NULL в `gis_*` означает, что GIS не запускался.
+- `outreachos_seen_employers` — окно 45 дней по `last_status_at`. Статус
+  `appended` ставится до фактической загрузки и не доказывает принятие контакта
+  Instantly; для объёма используйте журнал прогонов.
+
 ### Аутрич-пайплайн «2GIS + сигналы» (`gis_signal_*`, с 04.08.2026)
 - Клиентский пайплайн: 2gis_dataset (5 сегментов по рубрикам) → 6 сигналов с сайта → конструктор баз (`base_constructor_jobs`, кап 5 почт/компания) → добор в 5 кампаний Instantly. Воркер `gisSignalOutreachCron`.
 - `gis_signal_pipeline_config` — singleton id=1: `enabled`, `measure_only` (воронка без заливки/seen), `client_user_id` (владелец дашборда `/client/gis-signals`), `monthly_target_companies` (20000), `daily_limit`, `signal_min_count` (порог сигналов, дефолт 1), `selected_steps`/`step_config` конструктора.
@@ -683,6 +700,22 @@ ORDER BY bt.occurred_at DESC;
 - Если вопрос требует данных, которых нет в этой БД (аналитика Instantly outreach —
   кампании, письма, ниши, open/reply rate) — перенаправь пользователя на MCP
   `instantly-dataset`.
+
+## Instantly qualification recovery: граница баз (изменение 2026-09-09)
+
+Подготовлено в коде; наличие миграций в production нужно проверить отдельно.
+В **main Portal DB** новый `instantly_email_read_budget` и служебные RPC
+`instantly_reserve_email_read` / `instantly_defer_email_reads` координируют лимит
+чтения писем между процессами. Это не аналитическая база `instantly_dataset`.
+
+В **операционной Instantly DB**, не через `portal-db`, находятся
+`instantly_qualification_ai_budgets`, `instantly_qualification_ai_checkpoints`,
+`instantly_ownership_evidence_progress` и новые `recovery_*` поля квалификаций.
+`recovery_attempts` — число взятых в работу повторов, а не число платных AI-запросов.
+Технический pending не равен ручной проверке и не должен считаться «не лид».
+Историческую причину ошибки нельзя выдавать за текущую недоступность провайдера.
+Порядок согласованного применения и ограничения описаны в
+`docs/incidents/2026-09-09-instantly-qualification-queue-recovery.md`.
 
 ## Практика
 - **Данные обновляются в реальном времени** — это боевая БД портала, не снапшот.
