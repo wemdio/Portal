@@ -159,6 +159,24 @@ const TERMINAL_FORWARD_STATUSES = new Set([
   'banned', 'frozen', 'restricted', 'session_revoked', 'session_duplicate', 'no_session',
 ]);
 
+/**
+ * За сколько суток назад догоняем неотвеченные диалоги.
+ *
+ * Круг проверяет диалоги, где последним писал человек, и отвечает тем, кому
+ * ответить не успели. Окно было трое суток — и оказалось дедлайном на оплату
+ * ИИ: 08.09.2026 у OpenRouter кончились деньги, ответы начали падать с 402, и
+ * всё, что старше трёх дней, выпадало из догона навсегда.
+ *
+ * Семь суток дают неделю на восстановление счёта. Цена — круг перепроверяет
+ * вдвое больше диалогов, но платных вызовов это почти не добавляет: те, где мы
+ * уже ответили последними, отсеиваются до обращения к модели.
+ *
+ * Настраивается через env: у кампаний с плотной перепиской неделя старых
+ * диалогов может оказаться лишней.
+ */
+const CATCHUP_LOOKBACK_DAYS = Number(process.env.TG_OUTREACH_CATCHUP_DAYS) || 7;
+const CATCHUP_LOOKBACK_MS = CATCHUP_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+
 const PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS =
   Number(process.env.TG_OUTREACH_PER_ACCOUNT_TIMEOUT_MS) || 180_000;
 
@@ -1246,8 +1264,7 @@ async function handleMissedRepliesLastDays(
   const tg = campaign.telegram_settings as TelegramSettings;
   const oai = campaign.openai_settings as OpenAISettings;
   const blocked = new Set((tg.blocked_usernames ?? []).map((u) => u.trim().toLowerCase().replace(/^@/, '')));
-  const lookbackMs = 3 * 24 * 60 * 60 * 1000;
-  const cutoffIso = new Date(Date.now() - lookbackMs).toISOString();
+  const cutoffIso = new Date(Date.now() - CATCHUP_LOOKBACK_MS).toISOString();
 
   const { data: dialogs, error: cErr } = await db
     .from('tg_outreach_dialogs')
@@ -1265,7 +1282,7 @@ async function handleMissedRepliesLastDays(
     return;
   }
   if (!dialogs?.length) {
-    log('info', `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up) — нет диалогов за последние 3 дня, где пользователь написал последним`);
+    log('info', `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up) — нет диалогов за последние ${CATCHUP_LOOKBACK_DAYS} дн., где пользователь написал последним`);
     return;
   }
 
@@ -1367,7 +1384,7 @@ async function handleMissedRepliesLastDays(
   // Always emit a summary so the operator can confirm catch-up actually ran.
   log(
     'info',
-    `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up за 3 дня) — проверил ${processed} диалогов, отправил ${replied} ответов.` +
+    `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up за ${CATCHUP_LOOKBACK_DAYS} дн.) — проверил ${processed} диалогов, отправил ${replied} ответов.` +
       (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue || skipRepeat || skipCloser
         ? ' Не отправил по причинам:'
         : '') +
