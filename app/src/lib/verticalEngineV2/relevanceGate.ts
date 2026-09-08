@@ -88,6 +88,9 @@ function messages(scope: string, batch: Fields[], language: 'ru' | 'en', secondP
     'Broad registry codes, legal names, domain names, or a vacancy alone prove neither match nor mismatch. Missing size, geography, website, or trigger is NOT a reason to reject.',
     'Multi-specialty companies may fit multiple hypotheses: dentistry does not exclude cosmetology when cosmetic services are evidenced. Do not force exclusive segments.',
     'Cite 1-3 short verbatim quotes with exact field for relevant/irrelevant. Insufficient, conflicting, ambiguous facts mean needs_review. Selling TO an industry does not mean belonging to it. Absence of services in a short excerpt does not prove they are absent.',
+    'Every evidence item MUST be an object with exactly two string keys: {"field":"website_text","quote":"<verbatim substring of that field in this row>"}. Allowed field values: company, website, category, description, vacancy_title, website_text. Each quote must contain 1-400 characters from a NONEMPTY supplied field. Evidence contains at most 3 items; never pad it with empty quotes. Never return evidence as strings, {"text":...}, or objects missing field or quote.',
+    'When the supplied facts do not support a decision, return status needs_review and evidence: []. Do not invent an activity quote from a company name or registry code.',
+    'A broad sector description or general service category can coexist with a narrower target activity; it is not evidence that the target activity is absent. Treat short website excerpts as incomplete. Return irrelevant only when the cited facts establish an incompatible business; otherwise, if the target activity is unproven, return needs_review.',
     secondPass ? 'Independent second look using website evidence: reconsider provisional rejections AND uncertainty.' : 'Initial review: keep uncertainty explicit instead of guessing.',
     'Reasons in ' + (language === 'ru' ? 'Russian' : 'English') + '. JSON only: {"decisions":[{"i":0,"status":"needs_review","reason":"...","evidence":[]}]}',
   ].join('\n') }, { role: 'user', content: scope + '\nRows, local indices 0..' + (batch.length - 1) + ':\n' + JSON.stringify(batch.map((fields, i) => ({ i, ...fields }))) }];
@@ -133,7 +136,7 @@ export async function findIrrelevantRows(input: {
   const contextHash = relevanceHash(['relevance-evidence-v2', input.checkpointScope ?? '', model, input.language,
     input.verticalName, input.verticalSummary ?? '', input.hypothesisTitle ?? '', input.hypothesisDescription ?? '']);
   const checkpoint = readRelevanceCheckpoint(input.checkpoint, contextHash); checkpoint.failures = [];
-  const reviewAttempt = relevanceHash(input.reviewAttempt ?? 'automatic');
+  const reviewAttempt = relevanceHash([input.reviewAttempt ?? 'automatic', 'verified-website-reader-v1']);
   const result: VeRelevanceGateResult = { checkpoint, decisions: new Map(), flagged: new Set(), unchecked: new Set(), review: new Set(), errored: new Set(),
     coverage: { checkedCompanies: 0, totalCompanies: 0, complete: false }, tokensUsed: 0, costUsd: 0 };
   const groups = groupsFor(input.rows, input.evidenceRows ?? []); result.coverage.totalCompanies = groups.length;
@@ -154,7 +157,7 @@ export async function findIrrelevantRows(input: {
       .some((value) => isCompleteShortActivityQuote(field, value, fields[field])))) {
       keyParts.push('complete-short-activity-evidence-v1');
     }
-    return { group, fields, key: relevanceHash(keyParts), cacheable: Boolean(identity || fields.company || fields.website), attempts };
+    return { group, fields, identity, key: relevanceHash(keyParts), cacheable: Boolean(identity || fields.company || fields.website), attempts };
   });
   type Entry = typeof entries[number];
   const current = new Map<Entry, VeRelevanceDecision>();
@@ -209,7 +212,14 @@ export async function findIrrelevantRows(input: {
     const website = checkpoint.website_evidence[entry.key];
     if (cached && cached.context_hash === contextHash) {
       entry.attempts = Math.max(entry.attempts, cached.review_attempts ?? 0, website?.review_attempts ?? 0);
-      const pendingRefinement = website?.status === 'ok' && !website.refined && Boolean(website.text);
+      if (website && website.reader_version !== 1) {
+        // Retain the paid initial review, but never reuse a terminal decision
+        // backed by website text from before domain identity verification.
+        current.set(entry, { ...cached, status: 'needs_review',
+          reason: 'Сайт требует повторной проверки связи с компанией; контакт сохранён для уточнения.' });
+        return false;
+      }
+      const pendingRefinement = website?.reader_version === 1 && website.status === 'ok' && !website.refined && Boolean(website.text);
       if (cached.status !== 'error' || pendingRefinement) { current.set(entry, cached); return false; }
     }
     return true;
@@ -226,16 +236,16 @@ export async function findIrrelevantRows(input: {
       signal?.throwIfAborted(); await classify(eligible.slice(start, start + BATCH_SIZE), false);
     }
     const review = entries.filter((entry) => {
-      if (!entry.fields.website) return false;
+      if (!entry.fields.website && !entry.identity) return false;
       const cached = checkpoint.website_evidence[entry.key];
-      const pendingRefinement = cached?.status === 'ok' && !cached.refined && Boolean(cached.text);
+      const pendingRefinement = cached?.reader_version === 1 && cached.status === 'ok' && !cached.refined && Boolean(cached.text);
       if (pendingRefinement) return true;
       return current.get(entry)?.status === 'needs_review' && cached?.review_attempt !== reviewAttempt;
     })
       .sort((a, b) => {
         const pendingText = (entry: Entry) => {
           const evidence = checkpoint.website_evidence[entry.key];
-          return evidence?.status === 'ok' && !evidence.refined && evidence.text ? 1 : 0;
+          return evidence?.reader_version === 1 && evidence.status === 'ok' && !evidence.refined && evidence.text ? 1 : 0;
         };
         // Finish saved refinement before accumulating more paid/unfinished work.
         return pendingText(b) - pendingText(a) || a.attempts - b.attempts;
@@ -244,7 +254,7 @@ export async function findIrrelevantRows(input: {
       signal?.throwIfAborted(); const enriched: Entry[] = [];
       await Promise.all(review.slice(start, start + 4).map(async (entry) => {
         const cached = checkpoint.website_evidence[entry.key];
-        if (cached?.status === 'ok' && !cached.refined && cached.text) {
+        if (cached?.reader_version === 1 && cached.status === 'ok' && !cached.refined && cached.text) {
           // Even a new manual job first finishes a previously interrupted
           // refinement. It need not repay initial classification/refetch data.
           cached.review_attempt = reviewAttempt;
@@ -253,11 +263,12 @@ export async function findIrrelevantRows(input: {
           return;
         }
         entry.attempts += 1;
-        const evidence = await (input.fetchEvidence ?? fetchVeRelevanceEvidence)(entry.fields.website, { signal: signal ?? undefined });
+        const evidence = await (input.fetchEvidence ?? fetchVeRelevanceEvidence)(entry.fields.website, { signal: signal ?? undefined,
+          companyInn: entry.identity, focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' ') });
         signal?.throwIfAborted();
         const usable = evidence.status === 'ok' && Boolean(evidence.text.trim());
         checkpoint.website_evidence[entry.key] = {
-          status: evidence.status, text: usable ? evidence.text.slice(0, 6000) : '',
+          reader_version: 1, status: evidence.status, text: usable ? evidence.text.slice(0, 6000) : '',
           url: evidence.url.slice(0, 1000), reason: evidence.reason.slice(0, 400),
           review_attempt: reviewAttempt, review_attempts: entry.attempts, refined: !usable,
         };

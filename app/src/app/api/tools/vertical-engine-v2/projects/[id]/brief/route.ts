@@ -7,6 +7,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { compileBriefText } from '@/lib/clientBrief';
 import type { ClientBriefFields } from '@/lib/clientBrief';
 import { extractTextFromBriefFile } from '@/lib/emailSequenceV2/briefExtractor';
+import { isVeProviderBillingError } from '@/lib/verticalEngineV2/collectionErrors';
 import {
   applyClientBriefEdit,
   parseClientBriefText,
@@ -141,6 +142,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         parsed = await parseClientBriefText(text, { fileName: file.name });
       } catch (e) {
         await logError('tools.vertical-engine-v2.brief.parse_failed', e, { userId, projectId: id });
+        if (isVeProviderBillingError(e)) {
+          return jsonError('Разбор брифа остановлен: недостаточно средств в Requesty. Попросите администратора проверить баланс и ключ сервиса, затем загрузите файл снова.', 402);
+        }
         return jsonError('Не удалось разобрать бриф — попробуйте ещё раз', 502);
       }
 

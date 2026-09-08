@@ -349,6 +349,101 @@ describe('stepTAScore — per-company dedup', () => {
     await stepNameCleanup([header, ['Alpha', '', '', 'd']], noop);
     await stepPersonalize([header, ['Alpha', '', '', 'd']], 'brief', noop);
     expect(budgets).toEqual([4000, 1500]);
+
+    // A 200 with length/empty content is not a usable personalization. Retry
+    // only that row, keep the successful sibling and preserve input order.
+    const personalizationCalls: string[] = [];
+    global.fetch = jest.fn(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const name = request.messages[1].content.includes('Alpha') ? 'Alpha' : 'Beta';
+      personalizationCalls.push(name);
+      const attempt = personalizationCalls.filter((called) => called === name).length;
+      return { ok: true, json: async () => ({ choices: [{
+        message: { content: name === 'Beta' ? ' ready Beta ' : attempt === 1 ? 'cut off' : attempt === 2 ? ' ' : 'ready Alpha' },
+        finish_reason: name === 'Alpha' && attempt === 1 ? 'length' : 'stop',
+      }] }) } as Response;
+    });
+    const personalizationRows = [['Alpha', '', '', 'd'], ['Beta', '', '', 'd']];
+    const personalized = stepPersonalize([header, ...personalizationRows], 'brief', noop);
+    await jest.runAllTimersAsync();
+    expect(await personalized).toEqual([[...header, 'Персонализация'],
+      [...personalizationRows[0], 'ready Alpha'], [...personalizationRows[1], 'ready Beta']]);
+    expect(personalizationCalls.filter((name) => name === 'Alpha')).toHaveLength(3);
+    expect(personalizationCalls.filter((name) => name === 'Beta')).toHaveLength(1);
+
+    // Semantic and transport errors share a single budget; exhausted cells
+    // remain visible errors rather than being silently accepted as empty.
+    const lengthBudgets: number[] = [];
+    global.fetch = jest.fn(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      if (request.messages[1].content.includes('Beta')) {
+        return { ok: true, json: async () => ({ choices: [{
+          message: { content: 'ready Beta' }, finish_reason: 'stop',
+        }] }) } as Response;
+      }
+      lengthBudgets.push(request.max_tokens);
+      return { ok: true, json: async () => ({ choices: [{
+        message: { content: 'unfinished' }, finish_reason: 'length',
+      }] }) } as Response;
+    });
+    const failedPersonalization = stepPersonalize([header, ...personalizationRows], 'brief', noop);
+    await jest.runAllTimersAsync();
+    const failedRows = await failedPersonalization;
+    expect(global.fetch).toHaveBeenCalledTimes(5); // Alpha four attempts, Beta one.
+    expect(lengthBudgets).toEqual([1500, 3000, 6000, 6000]);
+    expect(failedRows[0]).toEqual([...header, 'Персонализация', 'Ошибка персонализации']);
+    expect(failedRows[1].slice(0, 4)).toEqual(personalizationRows[0]);
+    expect(failedRows[1][4]).toBe(''); // Never export an error as email copy.
+    expect(failedRows[1][5]).toContain('length');
+    expect(failedRows[2]).toEqual([...personalizationRows[1], 'ready Beta', '']);
+
+    const mixedBudgets: number[] = [];
+    global.fetch = jest.fn(async (_url, init) => {
+      mixedBudgets.push(JSON.parse(String(init?.body)).max_tokens);
+      if (mixedBudgets.length === 1) {
+        return { ok: false, status: 429, headers: { get: () => '5' } } as unknown as Response;
+      }
+      return { ok: true, json: async () => ({ choices: [{
+        message: { content: 'unfinished' }, finish_reason: 'length',
+      }] }) } as Response;
+    });
+    const mixed = stepPersonalize([header, personalizationRows[0]], 'brief', noop);
+    await jest.runAllTimersAsync();
+    expect((await mixed)[1][4]).toBe('');
+    expect((await mixed)[1][5]).toContain('length');
+    expect(mixedBudgets).toEqual([1500, 1500, 3000, 6000]);
+
+    // Body timeouts also consume the same wall-clock/attempt budget.
+    const personalizationSignals: AbortSignal[] = [];
+    global.fetch = jest.fn(async (_url, init) => ({ ok: true, json: async () => {
+      personalizationSignals.push(init!.signal as AbortSignal);
+      return new Promise((_resolve, reject) => {
+        init!.signal!.addEventListener('abort', () => reject(new Error('stalled body')), { once: true });
+      });
+    } }) as Response);
+    const personalizationStarted = Date.now();
+    let personalizationElapsed = 0;
+    const stalled = stepPersonalize([header, personalizationRows[0]], 'brief', noop).then((rows) => {
+      personalizationElapsed = Date.now() - personalizationStarted;
+      return rows;
+    });
+    await jest.runAllTimersAsync();
+    expect((await stalled)[1][4]).toBe('');
+    expect((await stalled)[1][5]).toContain('время ожидания');
+    expect(personalizationElapsed).toBeLessThanOrEqual(240_000);
+    expect(personalizationSignals).toHaveLength(4);
+    expect(personalizationSignals.every((signal) => signal.aborted)).toBe(true);
+
+    let personalizationCancelled = false;
+    global.fetch = jest.fn(async () => {
+      personalizationCancelled = true;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'too late' }, finish_reason: 'stop' }] }) } as Response;
+    });
+    const cancelProgress = jest.fn(noop);
+    await expect(stepPersonalize([header, personalizationRows[0]], 'brief', cancelProgress,
+      async () => personalizationCancelled)).rejects.toThrow('Отменено');
+    expect(cancelProgress).not.toHaveBeenCalled();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
   it('propagates checkpoint failure without completion or subsequent queued writes', async () => {

@@ -24,6 +24,10 @@ import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator'
 import { isSupportEmail } from './supportEmails';
 import { makeCheckpointGate } from './checkpointGate';
 import {
+  generatePersonalizationCompletion, PersonalizationCancelledError, personalizationFailureMessage,
+  buildPersonalizationTable, type PersonalizationRowResult,
+} from './personalizationCompletion';
+import {
   EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
   EMAIL_VALIDATION_MAX_ATTEMPTS,
   ENRICH_CHECKPOINT_ATTEMPTED_COL,
@@ -1679,8 +1683,7 @@ export async function stepPersonalize(
 ): Promise<string[][]> {
   const header = data[0];
   const body = data.slice(1);
-  const newHeader = [...header, 'Персонализация'];
-  const result: string[][] = [];
+  const result: PersonalizationRowResult[] = [];
 
   for (let batch = 0; batch < body.length; batch += PERSONALIZATION_BATCH) {
     if (isCancelled && await isCancelled()) throw new Error('Отменено');
@@ -1696,23 +1699,31 @@ export async function stepPersonalize(
 
       const userMsg = `Данные: "${sourceData.slice(0, 3000)}"\n\nЗадача: ${prompt.slice(0, 2000)}\n\nСгенерируй 1 персонализированное предложение.`;
       try {
-        const content = await callOpenRouter(OPENROUTER_PERSONALIZATION_API_KEY, AI_MODEL, [
-          { role: 'system', content: PERSONALIZATION_SYSTEM_PROMPT },
-          { role: 'user', content: userMsg },
-        ], { temperature: 0.7, max_tokens: 1500, title: 'Portal - Base Constructor Personalization' });
-        return [...row, content.trim()];
-      } catch {
-        return [...row, ''];
+        const content = await generatePersonalizationCompletion({
+          apiKey: OPENROUTER_PERSONALIZATION_API_KEY,
+          model: AI_MODEL,
+          messages: [
+            { role: 'system', content: PERSONALIZATION_SYSTEM_PROMPT },
+            { role: 'user', content: userMsg },
+          ],
+          title: 'Portal - Base Constructor Personalization',
+          isCancelled,
+        });
+        return { source: row, proposal: content };
+      } catch (error) {
+        if (error instanceof PersonalizationCancelledError) throw error;
+        return { source: row, proposal: '', error: personalizationFailureMessage(error) };
       }
     });
 
     const batchResults = await Promise.all(promises);
+    if (isCancelled && await isCancelled()) throw new PersonalizationCancelledError();
     result.push(...batchResults);
     await onProgress(Math.round(((batch + chunk.length) / body.length) * 100));
   }
 
   await onProgress(100);
-  return [newHeader, ...result];
+  return buildPersonalizationTable(header, result);
 }
 
 /* ═══════════════════════════════════════════
