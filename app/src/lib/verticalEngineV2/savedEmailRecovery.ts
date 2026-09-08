@@ -14,11 +14,29 @@ const emailResult = z.enum(['ok', 'invalid', 'disposable', 'catch_all', 'unknown
 const stateSchema = z.object({
   version: z.literal(1), attempt_id: z.string().min(1),
   checked: z.record(z.string(), emailResult),
-  batch: z.object({ id: z.string().uuid(), started_at: z.string(), emails: z.array(z.string()).min(1).max(EMAIL_BATCH) }).optional(),
+  /** Collection-wide automatic results survive a new job or explicit manual review. */
+  automatic_checked: z.record(z.string(), emailResult).optional(),
+  batch: z.object({ id: z.string().uuid(), started_at: z.string(), emails: z.array(z.string()).min(1).max(EMAIL_BATCH), automatic: z.boolean().optional() }).optional(),
   error: z.string().optional(),
 });
 export type VeSavedEmailRecoveryState = z.infer<typeof stateSchema>;
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const automaticAttemptId = (baseId: string) => `automatic:${baseId}`;
+
+/** Unknown after one automatic check is a bounded outcome, not another wake. */
+export function hasPendingVeSavedEmailRecovery(rows: Array<Record<string, unknown>>, value?: unknown): boolean {
+  const parsed = value === undefined ? null : stateSchema.safeParse(value);
+  if (parsed && !parsed.success) throw new VeRelevanceCheckpointError('Saved email recovery checkpoint is invalid');
+  const state = parsed?.success ? parsed.data : undefined;
+  if (state?.error && state.attempt_id.startsWith('automatic:')) return false;
+  if (state?.batch) return true;
+  const checked = { ...(state?.attempt_id.startsWith('automatic:') ? state.checked : {}), ...state?.automatic_checked };
+  return rows.some((row) => {
+    const email = singleEmail(row);
+    return needsVeSavedEmailReview(row) && email !== null && !checked[hash(email)];
+  });
+}
+
 function applyResults(rows: Array<Record<string, unknown>>, state: VeSavedEmailRecoveryState) {
   return rows.map((row) => {
     const email = singleEmail(row);
@@ -40,17 +58,23 @@ function applyResults(rows: Array<Record<string, unknown>>, state: VeSavedEmailR
 export async function recoverVeSavedEmails(input: {
   ctx: VeStageContext; job: VeJob; baseId: string; rows: Array<Record<string, unknown>>;
   state?: unknown;
+  /** One automatic attempt per saved address across this collection's jobs. */
+  automatic?: boolean;
   save: (state: VeSavedEmailRecoveryState, rows: Array<Record<string, unknown>>) => Promise<void>;
 }): Promise<{ rows: Array<Record<string, unknown>>; state: VeSavedEmailRecoveryState; waiting: boolean; error?: string }> {
   const { ctx, job, baseId } = input;
   ctx.signal?.throwIfAborted();
   const parsed = input.state === undefined ? null : stateSchema.safeParse(input.state);
   if (parsed && !parsed.success) throw new VeRelevanceCheckpointError('Saved email recovery checkpoint is invalid');
-  let state: VeSavedEmailRecoveryState = parsed?.success ? parsed.data : { version: 1, attempt_id: job.id, checked: {} };
-  if (state.attempt_id !== job.id) {
+  const attemptId = input.automatic ? automaticAttemptId(baseId) : job.id;
+  let state: VeSavedEmailRecoveryState = parsed?.success ? parsed.data : { version: 1, attempt_id: attemptId, checked: {} };
+  if (state.attempt_id !== attemptId) {
     // A previous parent may have failed while its child kept working. Reuse
     // that child, not a second concurrent validation of the same addresses.
-    state = { version: 1, attempt_id: job.id, checked: {}, ...(state.batch ? { batch: state.batch } : {}) };
+    state = { version: 1, attempt_id: attemptId,
+      checked: input.automatic ? { ...state.automatic_checked } : {},
+      ...(state.automatic_checked ? { automatic_checked: state.automatic_checked } : {}),
+      ...(state.batch ? { batch: state.batch } : {}) };
   }
   let rows = applyResults(input.rows, state);
   const save = async () => {
@@ -69,9 +93,9 @@ export async function recoverVeSavedEmails(input: {
   if (!state.batch) {
     const emails = pending().slice(0, EMAIL_BATCH);
     if (!emails.length) return { rows, state, waiting: false };
-    const digest = hash(['ve2-saved-email', baseId, job.id, emails]);
+    const digest = hash(['ve2-saved-email', baseId, attemptId, emails]);
     const id = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
-    state.batch = { id, emails, started_at: new Date().toISOString() };
+    state.batch = { id, emails, started_at: new Date().toISOString(), ...(input.automatic ? { automatic: true } : {}) };
     await save(); // Durable intent precedes the child INSERT, including ambiguous failures.
   }
   const batch = state.batch;
@@ -135,7 +159,11 @@ export async function recoverVeSavedEmails(input: {
       values.set(email, conflicting.has(email) ? 'unknown' : verdict);
     }
   }
-  for (const email of batch.emails) state.checked[hash(email)] = values.get(email) ?? 'unknown';
+  for (const email of batch.emails) {
+    const key = hash(email), status = values.get(email) ?? 'unknown';
+    state.checked[key] = status;
+    if (input.automatic || batch.automatic) (state.automatic_checked ??= {})[key] = status;
+  }
   // The constructor omits invalid rows from its final grid. Absence alone is
   // not copied as a negative verdict: keep the original contact as unknown.
   delete state.batch;

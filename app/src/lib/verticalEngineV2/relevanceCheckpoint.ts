@@ -12,12 +12,16 @@ const websiteEvidenceSchema = z.object({
   text: z.string().max(6000),
   url: z.string().max(1000),
   reason: z.string().max(400),
+  provider_error: z.object({
+    kind: z.enum(['billing', 'configuration', 'transient']),
+    message: z.string().max(400),
+  }).optional(),
   review_attempt: hashSchema,
   review_attempts: z.number().int().nonnegative(),
   refined: z.boolean(),
 });
 export const relevanceFailureCodeSchema = z.enum([
-  'billing', 'invalid_response', 'timeout', 'provider', 'limit', 'missing_context',
+  'billing', 'configuration', 'invalid_response', 'invalid_evidence', 'timeout', 'provider', 'limit', 'missing_context',
 ]);
 export type VeRelevanceFailureCode = z.infer<typeof relevanceFailureCodeSchema>;
 
@@ -29,6 +33,13 @@ const checkpointSchema = z.object({
   // Explanations retain bounded evidence, never email addresses or raw responses.
   verdicts: z.record(hashSchema, veRelevanceDecisionSchema),
   website_evidence: z.record(hashSchema, websiteEvidenceSchema).default({}),
+  // A durable reservation prevents a crash/retry from repaying the same repair.
+  // Website text remains in website_evidence only until this outcome is saved.
+  citation_repairs: z.record(hashSchema, z.object({
+    input_hash: hashSchema,
+    review_attempt: hashSchema.optional(),
+    status: z.enum(['started', 'finished']),
+  })).default({}),
   failures: z.array(z.object({
     batch_hash: hashSchema,
     companies: z.number().int().positive(),
@@ -47,7 +58,7 @@ export function readRelevanceCheckpoint(value: unknown, contextHash: string): Ve
     const parsed = checkpointSchema.safeParse(candidate);
     if (parsed.success && parsed.data.context_hash === contextHash) return parsed.data;
   }
-  return { version: 2, context_hash: contextHash, verdicts: {}, website_evidence: {}, failures: [] };
+  return { version: 2, context_hash: contextHash, verdicts: {}, website_evidence: {}, citation_repairs: {}, failures: [] };
 }
 
 /** Do not swallow a failed durable write and proceed to another paid batch. */

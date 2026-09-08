@@ -691,7 +691,7 @@ function AuditReport({
         <p className="font-medium text-gray-700">Исключено до запуска: {formatCount(excludedTotal)}</p>
         <ul className="mt-1 grid gap-x-5 gap-y-1 sm:grid-cols-2">
           <li>Низкая релевантность: {formatCount(summary.excluded.lowRelevance)}</li>
-          <li>Нет relevance-вердикта: {formatCount(summary.excluded.relevanceUnchecked)}</li>
+          <li>Релевантность не подтверждена: {formatCount(summary.excluded.relevanceUnchecked)}</li>
           <li>Не прошли email-проверку: {formatCount(summary.excluded.invalidEmailStatus)}</li>
           <li>Невалидный email: {formatCount(summary.excluded.invalidEmail)}</li>
           <li>Дубли email: {formatCount(summary.excluded.duplicateEmail)}</li>

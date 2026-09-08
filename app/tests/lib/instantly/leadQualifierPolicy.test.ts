@@ -230,7 +230,7 @@ const originalFetch = global.fetch;
 const fetchMock = jest.fn();
 
 function mockAiResult(overrides: Record<string, unknown> = {}) {
-  fetchMock.mockResolvedValue({
+  const response = {
     ok: true,
     status: 200,
     json: async () => ({
@@ -254,7 +254,9 @@ function mockAiResult(overrides: Record<string, unknown> = {}) {
         },
       }],
     }),
-  });
+  };
+  fetchMock.mockResolvedValue(response);
+  return response;
 }
 
 async function qualify(
@@ -654,7 +656,7 @@ describe('elliptical material request policy', () => {
     });
   });
 
-  it('keeps the same material request as a lead after a confirmed proposal', async () => {
+  it('preserves proven interest and resolves remaining uncertainty automatically without hiding technical failures', async () => {
     mockAiResult({
       is_lead: false,
       proposal_seen: false,
@@ -674,6 +676,61 @@ describe('elliptical material request policy', () => {
       proposalSeen: true,
       needsReview: false,
     });
+
+    // Proven deterministic signals above need no extra call. A genuinely
+    // unresolved custom verdict gets one separate assessment, never a manual task.
+    const uncertain = mockAiResult({
+      is_lead: false, needs_review: true, interest_signals: [],
+      reason: 'FIRST_REASON_NOT_EVIDENCE',
+    });
+    const positive = mockAiResult({
+      is_lead: true, custom_criteria_matched: true, needs_review: false,
+      interest_signals: ['основной ответ соответствует условию проекта'],
+    });
+    for (const accept of [true, false]) {
+      fetchMock.mockReset().mockResolvedValueOnce(uncertain)
+        .mockResolvedValue(accept ? positive : uncertain);
+      const adjudicated = await qualify(
+        accept ? 'Это относится к нашим задачам.' : 'Что именно вы имеете в виду?',
+        { leadCriteria: 'Лид, если подтвердили: «это относится к нашим задачам». Иначе интерес не подтверждён.' },
+      );
+      expect(adjudicated).toMatchObject({ isLead: accept, needsReview: false });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const [firstRequest, secondRequest] = fetchMock.mock.calls.map(([, request]) =>
+        JSON.parse(request.body as string) as { messages: Array<{ content: string }> },
+      );
+      expect(secondRequest.messages[1]).toEqual(firstRequest.messages[1]);
+      expect(secondRequest.messages[0].content).not.toBe(firstRequest.messages[0].content);
+      expect(JSON.stringify(secondRequest)).not.toContain('FIRST_REASON_NOT_EVIDENCE');
+    }
+
+    fetchMock.mockReset().mockResolvedValueOnce(uncertain).mockResolvedValue({
+      ok: false, status: 402, text: async () => 'insufficient balance',
+    });
+    await expect(qualify('Что именно вы имеете в виду?', {
+      leadCriteria: 'Лид, если запросили договор.',
+    })).rejects.toThrow('AI API 402');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    fetchMock.mockReset();
+    await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+      apiKey: 'test-key', maxRetries: 0, briefText: '', prefetchedContext: null,
+    })).rejects.toThrow('failed after retries: thread context unavailable');
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const incompleteContext = { ...contextWithReply('Интересно.', null), historyFetchFailed: true };
+    mockAiResult({ is_lead: true, needs_review: true, interest_signals: [] });
+    await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+      apiKey: 'test-key', maxRetries: 0, briefText: '', prefetchedContext: incompleteContext,
+    })).rejects.toThrow('failed after retries: outbound history unavailable');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockClear();
+    const selfContained = await qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+      apiKey: 'test-key', maxRetries: 0, briefText: '',
+      prefetchedContext: { ...contextWithReply('Пришлите КП с ценами.', null), historyFetchFailed: true },
+    });
+    expect(selfContained).toMatchObject({ isLead: true, needsReview: false });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('does not turn a department-routing object into materials after a confirmed proposal', async () => {

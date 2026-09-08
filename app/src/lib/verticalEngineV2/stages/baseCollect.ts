@@ -107,7 +107,7 @@ import {
   veRelevanceCompanyKey, veRelevanceRowKey, type VeRelevanceReserve, type VeRelevanceReserveSummary,
 } from '../relevanceReserve';
 import { cleanVeCompanyNames, type VeCompanyNameCheckpoint } from '../companyNameCleanup';
-import { recoverVeSavedEmails, needsVeSavedEmailReview, type VeSavedEmailRecoveryState } from '../savedEmailRecovery';
+import { recoverVeSavedEmails, needsVeSavedEmailReview, hasPendingVeSavedEmailRecovery, type VeSavedEmailRecoveryState } from '../savedEmailRecovery';
 import { companyNameSource, isCompanyNameReady, VE_COMPANY_NAME_FIELD, type VeCompanyNameCleanupSummary } from '../companyNames';
 import { prepareSegmentationAudience } from '../segmentationAudit';
 import { isContactSupplyActive } from '../contactSupplyEligibility';
@@ -2290,6 +2290,14 @@ async function ensureTargetBaseAnalysis(ctx: VeStageContext, job: VeJob, baseId:
   if (insertError) throw new Error(`ve_jobs base_analyze enqueue: ${insertError.message}`);
 }
 
+/** Yield through the normal worker accounting path after a durable bounded retry. */
+class VeRelevanceRetryScheduled extends Error {
+  constructor(readonly baseId: string, readonly usage: VeUsage) {
+    super('Automatic relevance retry scheduled');
+    this.name = 'VeRelevanceRetryScheduled';
+  }
+}
+
 async function checkCollectedRelevance(args: {
   ctx: VeStageContext; job: VeJob; base: VeAutoBase; info: VeCollectInfo;
   finalRows: VeUnifiedRow[]; finalEmailStatuses: Array<string | null> | null;
@@ -2398,6 +2406,38 @@ async function checkCollectedRelevance(args: {
     if (gate.checkpoint) info.relevance_checkpoint = gate.checkpoint;
     usage.tokensUsed += gate.tokensUsed;
     usage.costUsd += gate.costUsd;
+    // Keep the completed constructor and per-company verdicts. Re-entering the
+    // same stage reads these checkpoints; it does not buy another source round.
+    // The budget is durable for this job/context, including across worker exits.
+    if (gate.error && (gate.retryable || gate.continueFromCheckpoint)) {
+      const previous = job.result?.relevance_retry as { context_hash?: unknown; attempts?: unknown } | undefined;
+      const attempts = previous?.context_hash === gate.checkpoint.context_hash
+        && Number.isSafeInteger(previous.attempts) && Number(previous.attempts) >= 0
+        ? Number(previous.attempts) : 0;
+      const capacity = job.result?.relevance_capacity as { context_hash?: unknown; verdicts?: unknown } | undefined;
+      const previousVerdicts = capacity?.context_hash === gate.checkpoint.context_hash
+        && Number.isSafeInteger(capacity.verdicts) && Number(capacity.verdicts) >= 0 ? Number(capacity.verdicts) : 0;
+      const verdicts = Object.keys(gate.checkpoint.verdicts).length;
+      // A per-call company cap is a continuation only while durable decisions
+      // increase. It must never spend the transient retry budget or loop.
+      const continueCapacity = gate.continueFromCheckpoint === true && verdicts > previousVerdicts;
+      if (continueCapacity || (gate.retryable && attempts < 2)) {
+        const result = { ...job.result, ...(continueCapacity ? { relevance_capacity: {
+          context_hash: gate.checkpoint.context_hash, verdicts,
+        } } : { relevance_retry: { context_hash: gate.checkpoint.context_hash, attempts: attempts + 1 } }) };
+        const { data: saved, error } = await ctx.supabase.from('ve_jobs')
+          .update({ result, updated_at: new Date().toISOString() })
+          .eq('id', job.id).eq('status', 'running').select('id').maybeSingle();
+        if (error || !saved) throw new VeRelevanceCheckpointError(
+          error ? `Relevance retry checkpoint save: ${error.message}` : 'Relevance retry lost job ownership',
+        );
+        job.result = result;
+        await requeueSelf(ctx, job, continueCapacity ? 30_000 : 30_000 * (attempts + 1));
+        stageLog(ctx, continueCapacity ? '[base_collect] пакет проверен; автоматически продолжаем оставшиеся компании'
+          : `[base_collect] временный сбой автопроверки; повтор ${attempts + 1}/2 по сохранённым результатам`);
+        throw new VeRelevanceRetryScheduled(base.id, { ...usage });
+      }
+    }
     lowRelevanceCount = gate.flagged.size;
     relevanceUncheckedCount = gate.unchecked.size;
     relevanceNeedsReviewCount = gate.review.size;
@@ -2422,7 +2462,8 @@ async function checkCollectedRelevance(args: {
     );
   } catch (e) {
     ctx.signal?.throwIfAborted();
-    if (e instanceof VeRelevanceCheckpointError || (e instanceof Error && e.name === 'AbortError')) throw e;
+    if (e instanceof VeRelevanceCheckpointError || e instanceof VeRelevanceRetryScheduled
+      || (e instanceof Error && e.name === 'AbortError')) throw e;
     relevanceError = e instanceof Error ? e.message : String(e);
     // Неожиданный сбой вне never-throw контракта gate тоже fail-closed: ни одна
     // строка без verdict не должна попасть в проверенный итог или refill.
@@ -2531,7 +2572,7 @@ async function resumeSavedPreviewValidation(
   });
 }
 
-/** Improve saved candidates only; manual runs may retry inconclusive email checks, never acquire new sources. */
+/** Improve saved candidates before refill; explicit manual runs still acquire no new sources. */
 async function reviewSavedRelevance(
   ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
   target: VeCollectionTargetProgress, market: VeMarket, usage: VeUsage,
@@ -2539,9 +2580,9 @@ async function reviewSavedRelevance(
   const automatic = info.relevance_review_requested === true && job.payload?.review_relevance !== true;
   let savedReserve = readVeRelevanceReserve(info.relevance_reserve);
   let emailRecoveryError: string | null = null;
-  if (!automatic && job.payload?.review_relevance === true) {
+  if (automatic || job.payload?.review_relevance === true) {
     const recovered = await recoverVeSavedEmails({
-      ctx, job, baseId: base.id, rows: savedReserve, state: info.saved_email_recovery,
+      ctx, job, baseId: base.id, rows: savedReserve, state: info.saved_email_recovery, automatic,
       save: async (state: VeSavedEmailRecoveryState, rows: Array<Record<string, unknown>>) => {
         info.saved_email_recovery = state;
         info.relevance_reserve = { ...info.relevance_reserve, version: 1, rows };
@@ -2550,6 +2591,7 @@ async function reviewSavedRelevance(
       },
     });
     savedReserve = recovered.rows;
+    info.saved_email_recovery = recovered.state;
     if (recovered.waiting) {
       await requeueSelf(ctx, job, 60_000);
       return { result: { base_id: base.id, waiting: true, saved_email_review: true }, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
@@ -2561,7 +2603,8 @@ async function reviewSavedRelevance(
     ready: Array.isArray(base.data) ? base.data : [],
     source: readVeRelevanceSourceRows(info.relevance_reserve), automatic,
   });
-  if (!rows.length && automatic) throw new Error('В сохранённом резерве нет контактов для уточнения релевантности');
+  // An email-only pass can finish with no classifiable rows (for example all
+  // addresses remain unknown). It must reach the bounded refill decision.
   stageLog(ctx, `[base_collect] уточняем ${rows.length} сохранённых контактов ${companies} компаний; факты всех адресов объединены, новый сбор не запускается`);
   const gate = rows.length > 0 && !emailRecoveryError ? await checkCollectedRelevance({ ctx, job, base, info,
     finalRows: rows as VeUnifiedRow[], finalEmailStatuses: rows.map((row) => typeof row._email_status === 'string' ? row._email_status : null),
@@ -2700,7 +2743,7 @@ async function completeTargetRound(args: {
     candidates: args.candidates.length, readyRows: readyCount,
     validationRetry,
     exhausted: reviewOnly ? false : exhausted, canContinue: !reviewOnly && (args.hasBufferedCandidates || renewableDirectory),
-    error: nameError ?? args.validationError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null),
+    error: args.validationError ?? nameError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null),
   });
   const checkpoint: NonNullable<VeCollectInfo['target_checkpoint']> = {
     completed_round: progress.round,
@@ -2746,10 +2789,12 @@ async function completeTargetRound(args: {
   let next = finish(readyRows.length, cleaned.summary.error);
   const reviewablePending = reserveRows.some((row) => row._email_status === 'ok'
     && (row._ve_relevance as { status?: unknown } | undefined)?.status === 'needs_review');
-  const pendingAutomaticReview = !reviewOnly && !args.validationError && !taskError
-    && readyRows.length < progress.ready_target && buildVeRelevanceReviewBatch({
+  const pendingAutomaticEmails = hasPendingVeSavedEmailRecovery(reserveRows, info.saved_email_recovery);
+  const emailValidationCanContinue = pendingAutomaticEmails && args.validationError === 'Проверка email завершилась не полностью';
+  const pendingAutomaticReview = !reviewOnly && (!args.validationError || emailValidationCanContinue) && !taskError
+    && readyRows.length < progress.ready_target && (pendingAutomaticEmails || buildVeRelevanceReviewBatch({
       reserve: reserveRows, ready: cleaned.rows, source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
-    }).rows.length > 0;
+    }).rows.length > 0);
   const pendingManualReview = args.continueManualReview === true
     && reserveRows.some((row) => needsVeRelevanceReview(row) || needsVeSavedEmailReview(row));
   const continueSavedReview = cleaned.summary.status === 'complete' && (pendingAutomaticReview || pendingManualReview);
@@ -3432,8 +3477,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   if (target) return await completeTargetRound({
     ctx, job, base, info, progress: target, candidates: merged, rows: storedRows,
     columns: finalColumns, stats: statsWithQuality, hasBufferedCandidates: kept.length > merged.length,
-    validationError: !hasCompleteEmailValidation ? 'Проверка email завершилась не полностью'
-      : !relevanceCoverageComplete ? relevanceError ?? 'Проверка релевантности завершилась не полностью' : null,
+    validationError: !relevanceCoverageComplete ? relevanceError ?? 'Проверка релевантности завершилась не полностью'
+      : !hasCompleteEmailValidation ? 'Проверка email завершилась не полностью' : null,
     usage,
   });
 
@@ -3500,6 +3545,10 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   try {
     return await runBaseCollectStageImpl(job, ctx);
   } catch (error) {
+    if (error instanceof VeRelevanceRetryScheduled) {
+      return { result: { base_id: error.baseId, waiting: true, relevance_retry: true },
+        tokensUsed: error.usage.tokensUsed, costUsd: error.usage.costUsd };
+    }
     try {
       const baseId = payloadString(job, 'base_id');
       const { data: base, error: readError } = await ctx.supabase.from('ve_bases')
