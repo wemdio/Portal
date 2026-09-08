@@ -1555,18 +1555,40 @@ export async function runCampaignLoop(
     const until = a.warmup_until ? new Date(a.warmup_until).getTime() : NaN;
     return Number.isFinite(until) && until > nowMs;
   };
+  /**
+   * Отлёжка после смены имени — в бой тоже не идут.
+   *
+   * Отдельно от прогрева, потому что это разные состояния: греющийся ещё не
+   * готов, а отлёживающийся уже настроен и ждёт, пока Telegram перестанет
+   * видеть в нём свежепереименованный аккаунт. Греться ему при этом можно —
+   * поэтому фильтр стоит здесь, а не в круге прогрева.
+   */
+  const isResting = (a: OutreachAccount): boolean => {
+    const until = a.profile_rest_until ? new Date(a.profile_rest_until).getTime() : NaN;
+    return Number.isFinite(until) && until > nowMs;
+  };
+
   const warmingNow = (allAccounts ?? []).filter((a) => isWarming(a as OutreachAccount));
-  const accounts = (allAccounts ?? []).filter((a) => !isWarming(a as OutreachAccount));
+  const restingNow = (allAccounts ?? []).filter(
+    (a) => !isWarming(a as OutreachAccount) && isResting(a as OutreachAccount),
+  );
+  const accounts = (allAccounts ?? []).filter(
+    (a) => !isWarming(a as OutreachAccount) && !isResting(a as OutreachAccount),
+  );
 
   if (warmingNow.length) {
     log('info', `На прогреве ${warmingNow.length} аккаунтов — в боевую рассылку их не беру.`);
+  }
+  if (restingNow.length) {
+    log('info', `Отлёживаются после смены профиля ${restingNow.length} аккаунтов — в боевую рассылку их не беру.`);
   }
 
   if (!accounts?.length) {
     log(
       'error',
-      warmingNow.length
-        ? `Все ${warmingNow.length} включённых аккаунтов на прогреве — рассылать некем. Кампания на паузе и поднимется сама, как только у кого-то закончится прогрев.`
+      warmingNow.length || restingNow.length
+        ? `Рассылать некем: ${warmingNow.length} на прогреве, ${restingNow.length} отлёживаются после смены профиля. `
+          + 'Кампания на паузе и поднимется сама, как только кто-то освободится.'
         : 'Нет активных аккаунтов в кампании — поставил на паузу. Как только включите хотя бы один аккаунт, кампания возобновится автоматически.',
     );
     // Use paused (not error) so resumeRunningCampaigns retries us automatically
@@ -2071,11 +2093,13 @@ export async function runCampaignLoop(
                 profile_requested_at: null,
                 profile_requested_by_name: null,
                 profile_payload: null,
-                // Отлёжка после смены имени — см. PROFILE_REST_HOURS. Ставим
-                // только на успешном применении: аккаунт, которому профиль не
-                // записался, отлёживаться не за что.
+                // Отлёжка после смены имени — см. PROFILE_REST_HOURS. Своим
+                // полем, а не общим кулдауном: тот останавливает и прогрев, а
+                // греться в эти сутки как раз нужно. Ставим только на успешном
+                // применении: аккаунту, которому профиль не записался,
+                // отлёживаться не за что.
                 ...(outcome.status === 'applied' && outcome.identityChanged
-                  ? { cooldown_until: new Date(Date.now() + PROFILE_REST_HOURS * 3_600_000).toISOString() }
+                  ? { profile_rest_until: new Date(Date.now() + PROFILE_REST_HOURS * 3_600_000).toISOString() }
                   : {}),
                 // Что реально встало в Telegram — оттуда же, из ответа: заказ и
                 // результат расходятся, когда ник занят или значение подрезано.

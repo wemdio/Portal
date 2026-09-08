@@ -34,6 +34,8 @@ export interface HealthAccount {
   proxy_id?: string | null;
   /** Пока не наступил — аккаунт греется и в боевую рассылку не берётся. */
   warmup_until?: string | null;
+  /** Пока не наступил — аккаунт отлёживается после смены имени или ника. */
+  profile_rest_until?: string | null;
 }
 
 export interface HealthProxy {
@@ -55,7 +57,7 @@ export interface HealthProxy {
  * цвет, которым прогрев обозначен в статусе кампании, так что на двух экранах
  * это одно и то же состояние.
  */
-export type HealthTone = 'ok' | 'warn' | 'bad' | 'info' | 'unknown';
+export type HealthTone = 'ok' | 'warn' | 'bad' | 'info' | 'rest' | 'unknown';
 
 export interface HealthMark {
   tone: HealthTone;
@@ -186,6 +188,25 @@ export function describeSending(ctx: SendingContext): HealthMark {
       label: 'на прогреве',
       detail: `Аккаунт греется до ${hhmm(account.warmup_until as string)} и в боевую рассылку не берётся. `
         + 'Как только срок выйдет, круг подхватит его сам.',
+      days: null,
+    };
+  }
+
+  /**
+   * Отлёжка после смены профиля — сразу за прогревом.
+   *
+   * Тоже молчание по плану, но по другой причине, и причина эта оператору
+   * нужна: иначе свежезаполненный аккаунт выглядит сломанным ровно в тот день,
+   * когда его только что настроили.
+   */
+  const restUntil = ts(account.profile_rest_until);
+  if (restUntil !== null && restUntil > ctx.now) {
+    return {
+      tone: 'rest',
+      label: 'в отлёжке',
+      detail: `Аккаунт сменил данные профиля — имя или ник. До ${hhmm(account.profile_rest_until as string)} `
+        + 'он не идёт в боевую рассылку: Telegram настороженно смотрит на переименованный аккаунт, '
+        + 'который сразу пишет незнакомым. Прогрев между своими в это время разрешён.',
       days: null,
     };
   }
@@ -420,6 +441,10 @@ export function healthToneClass(tone: HealthTone): string {
     case 'warn': return 'bg-amber-50 text-amber-700';
     case 'bad': return 'bg-rose-50 text-rose-700';
     case 'info': return 'bg-blue-50 text-blue-700';
+    // Отлёжка после смены профиля — своим цветом: это не поломка и не прогрев,
+    // а третье состояние, и сваливать его в чужую плашку значит объяснять
+    // оператору неправильную причину простоя.
+    case 'rest': return 'bg-violet-50 text-violet-700';
     default: return 'bg-gray-100 text-gray-500';
   }
 }
