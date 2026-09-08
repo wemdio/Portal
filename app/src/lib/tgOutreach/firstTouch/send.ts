@@ -17,6 +17,7 @@ import {
 } from '../accountCooldown';
 import { classifyRestriction, describeRestriction } from '../restriction';
 import { withTimeout } from '../withTimeout';
+import { expandSpintax } from './spintax';
 
 /**
  * Сроки на вызовы Telegram в первом касании — та же причина, что в боевом
@@ -403,7 +404,18 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
 
       const attempts = Number((contact as PendingContact & { attempts?: number }).attempts ?? 0);
 
-      const check = validateFirstTouch(contact.message, maxChars);
+      /**
+       * Спинтакс разворачиваем до проверки длины.
+       *
+       * Проверять надо то, что реально уйдёт: `{Здравствуйте|Добрый день}`
+       * длиннее любого своего варианта, и контакт с нормальным текстом
+       * отсеивался бы как слишком длинный.
+       *
+       * Разворот на каждый контакт, а не на порцию: смысл в том, чтобы соседние
+       * получатели видели разные формулировки.
+       */
+      const messageText = expandSpintax(contact.message);
+      const check = validateFirstTouch(messageText, maxChars);
       if (!check.ok) {
         const why = describeFailure(check.reason, maxChars);
         const outcome = await fdb.recordContactFailure(db, contact.id, attempts, why);
@@ -516,7 +528,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
 
       try {
         await withTimeout(
-          client.sendMessage(`@${contact.username}`, { message: contact.message }),
+          client.sendMessage(`@${contact.username}`, { message: messageText }),
           sendTimeoutMs,
           'отправка первого сообщения',
         );
@@ -606,7 +618,9 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         account_id: account.id,
         tg_user_id: tgUserId,
         tg_username: contact.username,
-        messages: [{ role: 'assistant', content: contact.message, timestamp: nowIso }],
+        // В историю — отправленный вариант, а не шаблон: дальше по нему
+        // отвечает модель, и она должна видеть то же, что и собеседник.
+        messages: [{ role: 'assistant', content: messageText, timestamp: nowIso }],
         status: 'none',
         can_send: true,
         last_message_at: nowIso,

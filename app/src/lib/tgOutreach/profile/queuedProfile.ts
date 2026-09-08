@@ -25,9 +25,27 @@ export interface QueuedProfilePayload {
   username_candidates?: string[];
 }
 
+/**
+ * Сколько аккаунт отлёживается после смены имени или ника.
+ *
+ * Правило из руководства TgNinja: после смены имени дать аккаунту отлежаться.
+ * Для Telegram свежепереименованный аккаунт, тут же ушедший писать незнакомым,
+ * — характерный признак подготовки к рассылке, и платим за это тем самым
+ * бюджетом в тридцать писем.
+ *
+ * Отлёжка запрещает боевую рассылку, но НЕ прогрев: греться между своими
+ * аккаунтами в эти сутки можно и нужно — именно этим пауза и наполняется.
+ *
+ * Описание в правило не входит намеренно: правка биографии не меняет того, как
+ * аккаунт выглядит в списке контактов, и терять из-за опечатки сутки не за что.
+ */
+export const PROFILE_REST_HOURS = Number(process.env.TG_OUTREACH_PROFILE_REST_HOURS) || 24;
+
 export interface QueuedProfileResult {
   status: 'applied' | 'failed';
   detail: string;
+  /** Сменилось ли имя — по этому признаку аккаунт уходит на отлёжку. */
+  identityChanged?: boolean;
   applied?: {
     first_name: string;
     last_name: string;
@@ -100,10 +118,16 @@ export async function applyQueuedProfile(args: {
     const note = username && username !== payload.username
       ? ` Заказанный ник «${payload.username}» был занят, поставил «${username}».`
       : '';
+    const identityChanged = Boolean(
+      (payload.first_name ?? '') || (payload.last_name ?? '') || username,
+    );
     return {
       status: 'applied',
-      detail: `Профиль применён в Telegram.${note}`,
+      detail:
+        `Профиль применён в Telegram.${note}`
+        + (identityChanged ? ` Аккаунт отлёживается ${PROFILE_REST_HOURS} ч перед рассылкой (прогрев при этом разрешён).` : ''),
       applied,
+      identityChanged,
     };
   } catch (e) {
     return { status: 'failed', detail: describeTelegramError(e).slice(0, 500) };
