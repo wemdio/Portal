@@ -1,15 +1,13 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { generatePersonalizationCompletion, PersonalizationCancelledError, PersonalizationError } from '@/lib/tools/personalizationCompletion';
 
 export const dynamic = 'force-dynamic';
 
 const OPENROUTER_PERSONALIZATION_API_KEY =
   process.env.OPENROUTER_PERSONALIZATION_API_KEY ?? process.env.OPENROUTER_BRIEF_API_KEY ?? '';
 const OPENROUTER_MODEL = 'policy/gemini-flash';
-const OPENROUTER_TIMEOUT_MS = 70_000;
-const MAX_RETRIES = 3;
-const RETRY_BASE_DELAY = 1200;
 
 const SYSTEM_PROMPT = `Ты - помощник для персонализации холодного email-аутрича в B2B.
 
@@ -40,10 +38,6 @@ type RequestBody = {
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
-}
-
-async function sleep(ms: number) {
-  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function POST(req: NextRequest) {
@@ -80,72 +74,25 @@ export async function POST(req: NextRequest) {
 Сгенерируй 1 персонализированное предложение.
 Не нумеруй варианты. Пиши только сами предложения без пояснений.`;
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
-    let response: Response;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-
-    try {
-      const controller = new AbortController();
-      timeout = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
-      response = await fetch('https://router.requesty.ai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${OPENROUTER_PERSONALIZATION_API_KEY}`,
-          'HTTP-Referer': 'https://portal.app',
-          'X-Title': 'Portal - Database Personalization',
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: OPENROUTER_MODEL,
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: userMessage },
-          ],
-          temperature: 0.7,
-          max_tokens: 1500,
-        }),
-      });
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        if (attempt < MAX_RETRIES) {
-          await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
-          continue;
-        }
-        return jsonError('Превышено время ожидания ответа от AI', 504);
-      }
-      if (attempt < MAX_RETRIES) {
-        await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
-        continue;
-      }
-      const msg = err instanceof Error ? err.message : 'Network error';
-      return jsonError(`Ошибка сети при обращении к AI: ${msg}`, 502);
-    } finally {
-      if (timeout) clearTimeout(timeout);
-    }
-
-    if (response.ok) {
-      const data = await response.json();
-      const proposal = data.choices?.[0]?.message?.content?.trim() ?? '';
-      if (!proposal) return jsonError('Пустой ответ от AI', 502);
-      return NextResponse.json({ proposal });
-    }
-
-    const shouldRetry = [500, 502, 503, 504].includes(response.status);
-    if (shouldRetry && attempt < MAX_RETRIES) {
-      await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
-      continue;
-    }
-
-    let errorMessage = `API error: ${response.status}`;
-    try {
-      const errorData = await response.json();
-      errorMessage = errorData.error?.message || errorMessage;
-    } catch {
-      // ignore
-    }
-    return jsonError(errorMessage, response.status >= 500 ? 502 : response.status);
+  try {
+    const proposal = await generatePersonalizationCompletion({
+      apiKey: OPENROUTER_PERSONALIZATION_API_KEY,
+      model: OPENROUTER_MODEL,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: userMessage },
+      ],
+      title: 'Portal - Database Personalization',
+      signal: req.signal,
+    });
+    return NextResponse.json({ proposal });
+  } catch (error) {
+    const message = error instanceof PersonalizationError || error instanceof PersonalizationCancelledError
+      ? error.message : 'Не удалось получить персонализацию. Повторите генерацию этой строки';
+    const status = error instanceof PersonalizationError ? error.status
+      : error instanceof PersonalizationCancelledError ? 499 : 502;
+    // The server already exhausted its bounded retries. The browser must not
+    // repeat another full four-attempt cycle for this same failed row.
+    return NextResponse.json({ error: message, retryable: false }, { status });
   }
-
-  return jsonError('Не удалось получить ответ от AI после нескольких попыток', 502);
 }
