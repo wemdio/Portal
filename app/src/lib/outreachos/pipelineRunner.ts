@@ -15,8 +15,8 @@
  *   6. Журналируем seen + run.
  *
  * 2GIS TOP-UP (gis_topup_enabled): между шагом 7b (LLM) и шагом 8 (markSeen)
- * вставлены фазы 8t.1–8t.5 — добор из 2gis_dataset при недоборе HH до
- * gis_topup_target_appended. GIS-лиды объединяются с HH keptLeads ПЕРЕД общим
+ * вставлены фазы 8t.1–8t.5 — ежедневная цель gis_topup_target_appended
+ * контактов из 2gis_dataset СВЕРХ результата HH. GIS-лиды объединяются с HH keptLeads ПЕРЕД общим
  * markSeen, общим дедупом против своих кампаний и общим A/B-сплитом — отдельная
  * кампания C не заводится (решение §7.2 дизайн-дока
  * docs/design/2026-08-11-outreachos-2gis-topup.md).
@@ -51,7 +51,6 @@ import { employersToGrid, gridToLeadPayloads } from './gridMapping';
 import {
   buildGisClassifyIndustries,
   computeGisPullLimit,
-  computeGisTopupDeficit,
   gisCandidatesToGrid,
   loadGisSignalSeenDomains,
   markGisSignalSeen,
@@ -225,41 +224,25 @@ export async function runOutreachOsDailyPipeline(
     });
     log(`Новых (не контактированы за ${RECONTACT_AFTER_DAYS}д): ${fresh.length}`);
 
-    if (fresh.length === 0) {
-      await finishRun({
-        status: 'completed',
-        parsed: employers.length,
-        after_icp: icp.length,
-        new_employers: 0,
-        valid_contacts: 0,
-        appended: 0,
-        skipped: 0,
-      });
-      return {
-        runId,
-        status: 'completed',
-        parsed: employers.length,
-        newEmployers: 0,
-        validContacts: 0,
-        appended: 0,
-        skipped: 0,
-      };
-    }
-
     // 5. Сетка → base_constructor_jobs (чистка/валидация без ta_scoring/persona).
     //    Вставка + poll-цикл вынесены в runBaseConstructorJob — тот же helper
-    //    обслуживает второй (GIS top-up) джоб в фазе 8t.3.
-    const grid = employersToGrid(fresh);
+    //    обслуживает GIS-джоб в фазе 8t.3. Пустой HH не блокирует цель GIS.
     const today = new Date().toISOString().slice(0, 10);
-    const { jobId: baseJobId, finalGrid } = await runBaseConstructorJob(db, {
-      userId: config.client_user_id,
-      fileName: `outreachos-${today}`,
-      grid,
-      selectedSteps: config.selected_steps,
-      pollTimeoutMinutes: config.job_poll_timeout_minutes,
-      pollIntervalMs,
-      log,
-    });
+    let baseJobId: string | null = null;
+    let finalGrid: string[][] | null = null;
+    if (fresh.length > 0) {
+      const job = await runBaseConstructorJob(db, {
+        userId: config.client_user_id,
+        fileName: `outreachos-${today}`,
+        grid: employersToGrid(fresh),
+        selectedSteps: config.selected_steps,
+        pollTimeoutMinutes: config.job_poll_timeout_minutes,
+        pollIntervalMs,
+        log,
+      });
+      baseJobId = job.jobId;
+      finalGrid = job.finalGrid;
+    }
 
     // 7. Сетка → лиды (с suppression-рубежом по почте/домену внутри).
     const leads = gridToLeadPayloads(finalGrid ?? [], suppression);
@@ -286,31 +269,6 @@ export async function runOutreachOsDailyPipeline(
         parsed: employers.length,
         newEmployers: fresh.length,
         validContacts: leads.length,
-        appended: 0,
-        skipped: 0,
-      };
-    }
-
-    if (leads.length === 0) {
-      // Скрейп отработал, но почт не нашли — помечаем seen как no_email,
-      // чтобы не гонять тех же работодателей завтра.
-      await markSeen(fresh.map(toSeen(new Set(), new Set(), 'no_email')));
-      await finishRun({
-        status: 'completed',
-        parsed: employers.length,
-        after_icp: icp.length,
-        new_employers: fresh.length,
-        base_job_id: baseJobId,
-        valid_contacts: 0,
-        appended: 0,
-        skipped: 0,
-      });
-      return {
-        runId,
-        status: 'completed',
-        parsed: employers.length,
-        newEmployers: fresh.length,
-        validContacts: 0,
         appended: 0,
         skipped: 0,
       };
@@ -384,10 +342,10 @@ export async function runOutreachOsDailyPipeline(
     }
 
     // ── 8t. 2GIS TOP-UP (дизайн-док 2026-08-11-outreachos-2gis-topup §3.2) ──
-    // Добор из 2gis_dataset, когда HH+SJ не достаёт до цели. Точка решения —
-    // ПОСЛЕ LLM (дефицит считается точно по keptLeads, а не прогнозно). В
-    // «сытые» дни (deficit=0) и при выключенном флаге топ-ап не запускается
-    // вовсе (второй конструктор-джоб не создаётся).
+    // Самостоятельная ежедневная цель из 2gis_dataset СВЕРХ результата HH:
+    // keptLeads не уменьшает запрос GIS, даже если HH уже дал 200+ контактов.
+    // Один батч с прежним лимитом кандидатов; цель не гарантирует число
+    // принятых контактов после обработки и дедупов.
     // gis_topup_measure_only=true: фазы 8t.1–8t.4 выполняются, счётчики пишутся
     // в run, но GIS-лиды НЕ объединяются, seen по ним НЕ пишется (HH-ветка
     // работает как обычно — замер относится только к топ-апу).
@@ -395,19 +353,19 @@ export async function runOutreachOsDailyPipeline(
     const gisQualified: GisTopupCandidate[] = []; // кандидаты, ушедшие в конструктор (аналог fresh)
     let gisKeptLeads: LeadCreatePayload[] = [];   // GIS-лиды после LLM (аналог keptLeads)
     const gisNoiseDomains = new Set<string>();
-    const gisDeficit = computeGisTopupDeficit(config.gis_topup_target_appended, keptLeads.length);
+    const gisTarget = config.gis_topup_target_appended;
 
     if (!config.gis_topup_enabled) {
       log('[gis-topup] выключен (gis_topup_enabled=false) — пропускаем');
-    } else if (gisDeficit <= 0) {
-      log(`[gis-topup] дефицита нет (kept=${keptLeads.length} ≥ target=${config.gis_topup_target_appended}) — пропускаем`);
+    } else if (gisTarget <= 0) {
+      log('[gis-topup] ежедневная цель GIS равна нулю — пропускаем');
     } else if (config.gis_topup_rubric_groups.length === 0) {
       log('[gis-topup] пустой gis_topup_rubric_groups — нечего тянуть, пропускаем');
     } else {
       gisExecuted = true;
       // 8t.1 PULL: latest snapshot, rubric_groups, hasWebsite=true,
-      // лимит = min(cap, ceil(deficit / 0.45 * 1.3)).
-      const pullLimit = computeGisPullLimit(gisDeficit, config.gis_topup_daily_cap);
+      // Лимит рассчитывается из цели GIS с запасом на потери, затем режется cap.
+      const pullLimit = computeGisPullLimit(gisTarget, config.gis_topup_daily_cap);
       const snapshotId = await getLatestTwoGisSnapshotId();
       // §4.1.2: домены gis_signal_seen_companies — fail-closed (null): сбой
       // чтения кросс-журнала = топ-ап пропускаем, повторное письмо компании
@@ -439,7 +397,7 @@ export async function runOutreachOsDailyPipeline(
         });
         gisCounters.pulled = pull.pulled;
         log(
-          `[gis-topup] 8t.1 pull: дефицит=${gisDeficit}, лимит=${pullLimit}, ` +
+          `[gis-topup] 8t.1 pull: цель GIS=${gisTarget} сверх HH=${keptLeads.length}, лимит=${pullLimit}, ` +
             `взято=${pull.pulled} (кросс-дедуп -${pull.excludedDropped}, scanned=${pull.scanned}) → кандидатов ${pull.candidates.length}`,
         );
 
@@ -572,7 +530,9 @@ export async function runOutreachOsDailyPipeline(
     const ourCampaigns = [campaignId, ...(campaignIdB ? [campaignIdB] : [])];
     let existingEmails = new Set<string>();
     try {
-      existingEmails = await fetchExistingCampaignEmails(config.client_user_id, ourCampaigns);
+      if (keptLeads.length > 0) {
+        existingEmails = await fetchExistingCampaignEmails(config.client_user_id, ourCampaigns);
+      }
     } catch (err) {
       log(`[dedup] не удалось прочитать свои кампании (${err instanceof Error ? err.message : String(err)}) — шлём без дедупа против своих`);
     }

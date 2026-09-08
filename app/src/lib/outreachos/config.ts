@@ -58,11 +58,11 @@ export interface OutreachOsConfig {
   job_poll_timeout_minutes: number;
   /**
    * 2GIS top-up (миграция 20260811_0001, дизайн-док 2026-08-11): добор из
-   * 2gis_dataset в дни недобора HH до gis_topup_target_appended. false →
+   * 2gis_dataset с самостоятельной ежедневной целью сверх результата HH. false →
    * топ-ап не запускается (фазы 8t.* пропускаются целиком).
    */
   gis_topup_enabled: boolean;
-  /** Цель: суммарно залито A+B за прогон. Дефицит = target − keptLeads после LLM. */
+  /** Цель контактов ИЗ 2GIS за прогон, сверх HH; суммарно по A+B. По умолчанию 200. */
   gis_topup_target_appended: number;
   /** Рубрикатор 2GIS (jsonb, формат gis_signal_segments.rubric_groups). */
   gis_topup_rubric_groups: TwoGisRubricGroupConfig[];
