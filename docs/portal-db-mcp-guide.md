@@ -1,5 +1,13 @@
 # Portal DB — read-only Q&A
 
+## Учёт провайдеров Vertical Engine v2
+
+`ve_jobs.payload.provider_usage_origin` хранит безопасные runId/startedAt первого измеренного запуска. Отчёт проверяет сохранность этого начала, чтобы удаление старых записей не превращало поздний остаток журнала в полный расход.
+
+Новые вызовы VE2 worker сохраняют безопасный журнал в `application_logs`: `source = 've_provider_usage'`, `request_id = projectId`. `event` — `stage_started`/`stage_finished` для запуска стадии, `started`/`finished` для HTTP-попытки. `context` содержит `version`, `projectId`, `baseId` (если есть), `jobId`, `stage`, `runId`; у запроса — `attemptId`, provider, статус, модель, ID запроса провайдера, токены, `reportedCostUsd` отдельно от `estimatedCostUsd`, либо `serperCredits`. Тексты запросов, компаний, ответов и ключи не сохраняются. Дочерние планы содержат только типы, ID и имена шагов.
+
+Для базы фильтруйте точный `context->>'baseId'` и stage `base_collect`; для исследования используйте отдельные research-стадии. Не суммируйте started/finished или дубликаты attemptId. Отсутствие суммы/финала/журнала означает неизвестный расход. Старые `ve_projects.cost_usd` и `ve_jobs.cost_usd` — оценки. Журнал может очищаться через 30 дней: сохраняйте экспорт. GET-only CLI, правила полноты и пример VBI: [ve2-cost-measurement.md](./ve2-cost-measurement.md).
+
 READ-ONLY доступ к основной БД Portal (Supabase Postgres) через MCP-сервер **`portal-db`**
 (роль `readonly`, только `SELECT`, `statement_timeout=30s`, `default_transaction_read_only=on`).
 
