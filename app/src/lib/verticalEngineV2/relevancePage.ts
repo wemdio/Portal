@@ -1,4 +1,5 @@
 import { loadBuffer } from 'cheerio';
+import { isIP } from 'node:net';
 
 export interface VeEvidencePage {
   text: string;
@@ -83,10 +84,21 @@ function extractInns(text: string): string[] {
   return [...inns];
 }
 
-function isLegalPage(url: string): boolean {
+function isLegalPage(url: string, headings = ''): boolean {
   try {
     const path = decodeURIComponent(new URL(url).pathname);
-    return /(?:^|\/)(?:contacts?|kontakty|контакты|rekvizit[yi]?|requisites?|реквизиты|oferta|оферта|privacy(?:-policy)?|policy|legal|politika(?:-konfidencialnosti)?|политика(?:-конфиденциальности)?)(?:\.(?:html?|php))?\/?$/iu.test(path);
+    if (/(?:^|\/)(?:contacts?|kontakty|контакты|rekvizit[yi]?|requisites?|реквизиты|oferta|оферта|privacy(?:-policy)?|policy|legal|politika(?:-konfidencialnosti)?|политика(?:-конфиденциальности)?)(?:\.(?:html?|php))?\/?$/iu.test(path)) return true;
+    // Longer slugs need matching document headings, not a generic /about page
+    // or a company card that happens to mention somebody else's INN.
+    const slug = path.replace(/\/$/, '').split('/').pop()?.replace(/\.(?:html?|php)$/iu, '') ?? '';
+    const title = cleanText(headings);
+    if (/^(?:privacy|policy|politika|политика)(?:[-_][\p{L}\p{N}]+)+$/iu.test(slug)) {
+      return /политика.{0,80}(?:конфиденциальност|персональн)|privacy\s+policy|data\s+protection\s+policy/iu.test(title);
+    }
+    if (/^(?:oferta|оферта)(?:[-_][\p{L}\p{N}]+)+$/iu.test(slug)) {
+      return /(?:публичн[а-яё]*\s+оферт|договор.{0,40}оферт)|public\s+offer/iu.test(title);
+    }
+    return false;
   } catch { return false; }
 }
 
@@ -118,7 +130,9 @@ export function parseVeEvidencePage(body: Buffer, url: string, contentType: stri
   const inns = [...new Set([...extractInns(raw), ...extractInns(identityDom.text())])];
   const ownerInns = new Set<string>();
   const collectOwnerInns = (text: string) => extractInns(text).forEach((inn) => ownerInns.add(inn));
-  if (isLegalPage(url)) inns.forEach((inn) => ownerInns.add(inn));
+  if (isLegalPage(url, [title, ...$('h1, h2').slice(0, 4).map((_i, element) => $(element).text()).get()].join(' '))) {
+    inns.forEach((inn) => ownerInns.add(inn));
+  }
   else {
     identityDom.find('footer, address, [role="contentinfo"]').each((_i, element) => collectOwnerInns($(element).text()));
     identityDom.find('div, section, aside, dl, table').each((_i, element) => {
@@ -135,13 +149,24 @@ export function parseVeEvidencePage(body: Buffer, url: string, contentType: stri
   }
 
   const origin = new URL(url);
+  let linkBase = origin;
+  const baseHref = $('base[href]').first().attr('href');
+  if (baseHref && baseHref.length <= 1_000) {
+    try {
+      const candidate = new URL(baseHref, origin);
+      if (candidate.origin === origin.origin && /^https?:$/.test(candidate.protocol)
+        && !candidate.username && !candidate.password
+        && (!candidate.port || ['80', '443'].includes(candidate.port))
+        && !isIP(candidate.hostname) && !candidate.hostname.startsWith('[')) linkBase = candidate;
+    } catch { /* An unsafe or malformed base cannot change link destinations. */ }
+  }
   const terms = focusTerms(focus);
   const candidates = new Map<string, { url: string; text: string; score: number; order: number }>();
   $('a[href]').each((order, element) => {
     try {
       const href = $(element).attr('href') ?? '';
       if (href.length > 1_000) return;
-      const target = new URL(href, origin);
+      const target = new URL(href, linkBase);
       if (target.origin !== origin.origin || !/^https?:$/.test(target.protocol) || target.username || target.password) return;
       target.hash = '';
       if (target.href.length > 1_000) return;
