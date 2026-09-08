@@ -932,7 +932,7 @@ function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { base: VeBa
               onClick={() => void handleDownload('review')} disabled={downloadingMode !== null}
               title="Сохранённые кандидаты с причинами проверки; не готовая база для рассылки">
               {downloadingMode === 'review' ? <Spinner className="h-3 w-3" /> : null}
-              Контакты на уточнение
+              Не допущенные контакты
             </button> : null}
           </span>
         ) : null}
@@ -943,12 +943,12 @@ function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { base: VeBa
             <p className="mt-2 text-xs text-red-600" role="alert">{collectionFailureMessage(base)}</p>
           ) : null}
           <CollectionFunnel base={base} />
-          {hasReviewCandidates ? <div className="mt-3">
+          {base.status === 'failed' && hasReviewCandidates ? <div className="mt-3">
             <button type="button" className={HE.btnGhost} onClick={() => void handleReview()}
               disabled={reviewStarting}>
-              {reviewStarting ? 'Запускаем проверку…' : 'Уточнить сохранённые контакты'}
+              {reviewStarting ? 'Запускаем проверку…' : 'Возобновить автопроверку'}
             </button>
-            <p className={`mt-1 ${HE.faint}`}>Уточняем релевантность и повторяем незавершённую проверку сохранённых email. Новый сбор не запускается. Непроверенные контакты не попадут в запуск.</p>
+            <p className={`mt-1 ${HE.faint}`}>После устранения технической причины система повторит незавершённые проверки сохранённых контактов. Ручная разметка компаний не нужна.</p>
           </div> : null}
         </div>
       ) : null}
@@ -1212,7 +1212,7 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
           <p className="mt-1">
             {namesInProgress ? 'Контакты сохранены. Подготавливаем названия компаний для превью и писем.'
               : emailsInProgress ? 'Повторяем незавершённую проверку сохранённых email. Контакты сохранены; новый сбор не запускается.'
-              : relevanceInProgress ? 'Уточняем деятельность сохранённых компаний по доступным сведениям с сайтов. На этом этапе новый сбор не запускается.'
+              : relevanceInProgress ? 'Автоматически проверяем деятельность компаний: ищем сайты по ИНН и читаем подтверждённые страницы.'
               : target.status === 'collecting' ? `Проход ${target.round} из ${target.max_rounds}. Добираем контакты после проверок.`
               : target.status === 'target_reached' ? 'Превью готово к согласованию. Отправка ещё не включена.'
               : target.status === 'exhausted' ? 'Источники текущего плана закончились. Это не оценка всего рынка.'
@@ -1235,7 +1235,7 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
       {!target && processedRows !== null ? <p>После обработки: {processedRows.toLocaleString('ru-RU')} строк</p> : null}
       {stats.relevanceCheckedCompanies !== null && stats.relevanceTotalCompanies !== null ? (
         <p>
-          {stats.relevanceRecovery ? 'Повторная проверка оставшихся компаний: ' : 'Релевантность проверена: '}{stats.relevanceCheckedCompanies.toLocaleString('ru-RU')} из{' '}
+          {stats.relevanceRecovery ? 'Обработано повторной автопроверкой: ' : 'Обработано автопроверкой: '}{stats.relevanceCheckedCompanies.toLocaleString('ru-RU')} из{' '}
           {stats.relevanceTotalCompanies.toLocaleString('ru-RU')} компаний
         </p>
       ) : null}
@@ -1245,7 +1245,7 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
         </p>
       ) : null}
       {stats.relevanceNeedsReview !== null && stats.relevanceNeedsReview > 0 ? (
-        <p className="font-medium text-amber-700">Требуют уточнения: {stats.relevanceNeedsReview.toLocaleString('ru-RU')} строк. Сохранены, не отправляются.</p>
+        <p className="font-medium text-amber-700">{base.status === 'collecting' ? 'Пока нет подтверждений' : 'Данных недостаточно'}: {stats.relevanceNeedsReview.toLocaleString('ru-RU')} строк. Сохранены, не отправляются. Ручная проверка не требуется.</p>
       ) : null}
       {stats.relevanceErrors !== null && stats.relevanceErrors > 0 ? (
         <p className="font-medium text-amber-700">Проверка прервана: {stats.relevanceErrors.toLocaleString('ru-RU')} строк. Сохранены для повторной проверки.</p>
@@ -1260,7 +1260,7 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
         <p>Другие сохранённые кандидаты: {stats.reserveOther.toLocaleString('ru-RU')} строк. Не входят в готовый запас.</p>
       ) : null}
       {stats.reserveRows !== null && stats.reserveRows > 0 ? (
-        <p className="sm:col-span-2 text-gray-500">Сохранённый резерв: {stats.reserveRows.toLocaleString('ru-RU')} строк. Причины доступны в CSV «Контакты на уточнение». Это не гарантированный объём для выполнения обязательств.</p>
+        <p className="sm:col-span-2 text-gray-500">Сохранённый резерв: {stats.reserveRows.toLocaleString('ru-RU')} строк. Причины доступны в CSV «Не допущенные контакты». В готовую базу входят только прошедшие проверки.</p>
       ) : null}
       {namesChecked !== null && namesTotal !== null ? (
         <p>Названия компаний подготовлены: {namesChecked.toLocaleString('ru-RU')} из {namesTotal.toLocaleString('ru-RU')}. Исходники сохранены.</p>

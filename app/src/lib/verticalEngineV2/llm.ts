@@ -96,6 +96,13 @@ export interface LLMMessage {
   content: string;
 }
 
+export interface LLMUsage {
+  tokensUsed: number;
+  promptTokens: number;
+  completionTokens: number;
+  costUsd: number;
+}
+
 export interface LLMResult<T> {
   data: T;
   tokensUsed: number;
@@ -117,7 +124,8 @@ export interface LLMTextResult {
 }
 
 export class LLMValidationError extends Error {
-  constructor(message: string, public readonly rawText: string, public readonly zodError?: unknown) {
+  constructor(message: string, public readonly rawText: string, public readonly zodError?: unknown,
+    public readonly usage?: LLMUsage) {
     super(message);
     this.name = 'LLMValidationError';
   }
@@ -148,6 +156,12 @@ interface LLMCallOptions {
   signal?: AbortSignal;
   /** Classification must not treat a repaired/truncated exclusion list as complete. */
   requireCompleteJson?: boolean;
+  /** Narrow callers can reserve exactly one provider request; defaults stay unchanged. */
+  maxSchemaAttempts?: 1 | 2;
+  maxHttpAttempts?: 1 | 2 | 3 | 4;
+  timeoutMs?: number;
+  /** Each returned provider usage, including responses later rejected by validation. */
+  onUsage?: (usage: LLMUsage) => void;
 }
 
 function llmTimeoutMs(): number {
@@ -158,7 +172,7 @@ function llmTimeoutMs(): number {
 }
 
 function withLLMDeadline<T>(opts: LLMCallOptions, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
-  return withVeDeadline('LLM request', llmTimeoutMs(), opts.signal ?? getVeActiveJobSignal(), work);
+  return withVeDeadline('LLM request', opts.timeoutMs ?? llmTimeoutMs(), opts.signal ?? getVeActiveJobSignal(), work);
 }
 
 /**
@@ -215,10 +229,11 @@ async function rawCall(
   maxTokens: number,
   jsonMode: boolean,
   signal: AbortSignal,
+  opts?: Pick<LLMCallOptions, 'maxHttpAttempts' | 'onUsage'>,
 ): Promise<{ text: string; response: RequestyResponse }> {
   let lastError: Error | null = null;
 
-  for (let attempt = 0; attempt <= RAW_MAX_RETRIES; attempt++) {
+  for (let attempt = 0; attempt < (opts?.maxHttpAttempts ?? RAW_MAX_RETRIES + 1); attempt++) {
     signal.throwIfAborted();
     if (attempt > 0) await sleep(RAW_RETRY_BASE_MS * 2 ** (attempt - 1), signal);
     signal.throwIfAborted();
@@ -247,6 +262,8 @@ async function rawCall(
 
     if (res.ok) {
       const response = (await res.json()) as RequestyResponse;
+      const usage = usageOf(response);
+      opts?.onUsage?.({ ...usage, costUsd: estimateCost(model, usage.promptTokens, usage.completionTokens) });
       signal.throwIfAborted();
       const text = response.choices?.[0]?.message?.content ?? '';
       return { text, response };
@@ -333,8 +350,9 @@ async function callLLMWithSchemaWithinDeadline<T>(
   const maxTokens = opts.maxTokens ?? 4096;
 
   const attempts: Array<{ text: string; error?: string }> = [];
+  const total: LLMUsage = { tokensUsed: 0, promptTokens: 0, completionTokens: 0, costUsd: 0 };
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < (opts.maxSchemaAttempts ?? 2); attempt++) {
     signal.throwIfAborted();
     const currentMessages: LLMMessage[] = [...messages];
     if (attempt > 0 && attempts[0]) {
@@ -348,9 +366,13 @@ async function callLLMWithSchemaWithinDeadline<T>(
       );
     }
 
-    const { text, response } = await rawCall(currentMessages, opts.model, maxTokens, true, signal);
+    const { text, response } = await rawCall(currentMessages, opts.model, maxTokens, true, signal, opts);
     signal.throwIfAborted();
     const { promptTokens, completionTokens, tokensUsed } = usageOf(response);
+    total.promptTokens += promptTokens;
+    total.completionTokens += completionTokens;
+    total.tokensUsed += tokensUsed;
+    total.costUsd += estimateCost(opts.model, promptTokens, completionTokens);
 
     if (opts.requireCompleteJson && response.choices?.[0]?.finish_reason === 'length') {
       attempts.push({ text, error: 'Response was truncated; return the complete JSON result.' });
@@ -385,18 +407,15 @@ async function callLLMWithSchemaWithinDeadline<T>(
 
     return {
       data: validated.data,
-      tokensUsed,
-      promptTokens,
-      completionTokens,
-      costUsd: estimateCost(opts.model, promptTokens, completionTokens),
+      ...total,
       rawResponse: response,
     };
   }
 
   const last = attempts[attempts.length - 1]!;
   throw new LLMValidationError(
-    `LLM вернул невалидный JSON дважды: ${last.error}`,
-    last.text,
+    `LLM вернул невалидный JSON (${attempts.length} попыток): ${last.error}`,
+    last.text, undefined, total,
   );
 }
 
@@ -418,7 +437,7 @@ async function callLLMTextWithinDeadline(
   signal: AbortSignal,
 ): Promise<LLMTextResult> {
   const maxTokens = opts.maxTokens ?? 8192;
-  const { text, response } = await rawCall(messages, opts.model, maxTokens, false, signal);
+  const { text, response } = await rawCall(messages, opts.model, maxTokens, false, signal, opts);
   signal.throwIfAborted();
   const { promptTokens, completionTokens, tokensUsed } = usageOf(response);
   return {
