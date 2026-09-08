@@ -1,8 +1,14 @@
 /**
  * Ежедневный one-shot запуск: дописывает новые сделки AMO в маркетинговую
- * и outreach Google-таблицы. Расписание задаётся на prod-хосте после деплоя.
+ * и outreach Google-таблицы.
  *
- * Host crontab: 0 14 * * * (14:00 UTC = 17:00 МСК), после AMO-синка в 16:30 МСК.
+ * Расписание — на прод-сервере в `/etc/cron.d/portal-leads-report`, не в
+ * `crontab -l` у root: `15 18 * * * root docker exec portal-worker-leads-report
+ * node /app/workers/leadsReportCron.js`. Время местное — сервер живёт в
+ * Europe/Moscow (в шапке файла стоит TZ=Europe/Moscow). Запуск после
+ * AMO-синка в 18:05 МСК.
+ * Время сдвинуто вместе с синком 08.09.2026 — запуск в прежние 17:00 теперь
+ * пришёлся бы ДО синка и дописывал бы в таблицы вчерашнюю картину.
  */
 import {
   createWorkerLogger,
