@@ -1085,6 +1085,12 @@ function DialogsTab({ campaignId }: {
   const [filterCanSend, setFilterCanSend] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [filterAudience, setFilterAudience] = useState<'all' | 'users' | 'bots'>('all');
   /**
+   * Длина переписки. «Одно сообщение» — мы написали, ответа нет; «два и
+   * больше» — разговор завязался. Первых накапливаются сотни, и они прячут те
+   * немногие, ради которых экран и открывают.
+   */
+  const [filterMessages, setFilterMessages] = useState<'all' | 'one' | 'many'>('all');
+  /**
    * Чьи диалоги показывать — пустая строка означает «всех аккаунтов».
    *
    * Отбор идёт на сервере: список листается по тридцать штук, и фильтрация
@@ -1146,13 +1152,14 @@ function DialogsTab({ campaignId }: {
     if (filterAudience === 'users') params.set('tg_is_bot', 'false');
     if (filterAccountId) params.set('account_id', filterAccountId);
     if (filterBaseId) params.set('base_id', filterBaseId);
+    if (filterMessages !== 'all') params.set('messages', filterMessages);
     const res = await authFetch(`${API_BASE}/dialogs?${params}`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachDialog[]; total: number };
       setDialogs(d.items); setTotal(d.total);
     }
     setLoading(false);
-  }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience, filterAccountId, filterBaseId]);
+  }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience, filterAccountId, filterBaseId, filterMessages]);
 
   // Полсекунды тишины — и запрос уходит. Заодно сбрасываем страницу: искать на
   // третьей странице прошлого фильтра бессмысленно.
@@ -1393,6 +1400,20 @@ function DialogsTab({ campaignId }: {
               {s.label}
             </button>
           ))}
+          <span className="ml-2 text-xs text-gray-500">Сообщений:</span>
+          {[
+            { id: 'all', label: 'Любое количество' },
+            { id: 'one', label: '1 сообщение' },
+            { id: 'many', label: '2 и больше' },
+          ].map(s => (
+            <button key={s.id} type="button" onClick={() => { setFilterMessages(s.id as typeof filterMessages); setOffset(0); }}
+              title={s.id === 'one'
+                ? 'Мы написали, ответа не было'
+                : s.id === 'many' ? 'Разговор завязался — есть хотя бы один ответ' : undefined}
+              className={`rounded-full px-4 py-1.5 text-xs font-medium transition border cursor-pointer ${filterMessages === s.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
+              {s.label}
+            </button>
+          ))}
           {/* Не плашки, как у соседних фильтров: аккаунтов в кампании полтора
               десятка, и рядом кнопок они переносили бы всю панель на третью
               строку. Показываем контрол, только когда аккаунт не один — с
@@ -1459,7 +1480,11 @@ function DialogsTab({ campaignId }: {
                 // Та же причина, что и с аккаунтом: под фильтром пустой список
                 // читается как «диалогов нет вообще».
                 ? `По базе «${bases.find((b) => b.id === filterBaseId)?.name ?? ''}» диалогов пока нет. Выберите «База: Все», чтобы увидеть остальные.`
-                : 'Нет диалогов'}
+                : filterMessages === 'many'
+                  ? 'Диалогов с ответом пока нет — во всех переписках только наше первое сообщение.'
+                  : filterMessages === 'one'
+                    ? 'Диалогов без ответа нет: везде переписка завязалась.'
+                    : 'Нет диалогов'}
         </p>
       ) : (
         <div className="space-y-2">

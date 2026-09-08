@@ -100,6 +100,19 @@ export async function GET(req: NextRequest) {
       if (baseFilter) {
         query = query.or(baseFilter);
       }
+      /**
+       * Сколько сообщений в переписке: «одно» против «два и больше».
+       *
+       * Считает вычисляемая колонка (миграция 20260908_0004), а не выборка на
+       * экране: фильтровать уже загруженную страницу значит показывать не тех —
+       * отбор применился бы к пятидесяти строкам, а не ко всей кампании.
+       */
+      const messagesParam = url.searchParams.get('messages');
+      if (messagesParam === 'one') {
+        query = query.eq('messages_count', 1);
+      } else if (messagesParam === 'many') {
+        query = query.gte('messages_count', 2);
+      }
       if (status) {
         query = query.eq('status', status);
       }
