@@ -5,12 +5,11 @@
  * window 23:00 UTC → 03:00 UTC (= 02:00 МСК → 06:00 МСК). Outside that window,
  * sleeps and re-checks every 30 minutes.
  *
- * Why 5 RPM:
- *   - The qualifier worker (portal-worker-instantly-leads) polls /emails every
- *     30s, fetching 5 pages per cycle ≈ 9 RPM. Empirically Instantly's /emails
- *     ceiling is ~15-20 RPM per workspace. 5 RPM keeps headroom for the worker.
+ * 5 RPM is an additional local ceiling, not a separate provider allowance.
+ * pull.mjs also takes strict recovery slots from the shared main-Portal DB
+ * budget and respects the same workspace 429 cooldown as the qualifier.
  *
- * Per-window throughput: ~240 campaigns/night → completes 1349 in ~6 nights.
+ * Throughput depends on fresh qualification traffic; exports yield to it.
  *
  * Resumable: pull.mjs is idempotent (per-campaign file cache). Killing mid-
  * campaign costs at most one campaign's pages — re-run picks up from disk.

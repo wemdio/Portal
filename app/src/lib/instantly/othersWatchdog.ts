@@ -11,6 +11,7 @@ import {
   getCampaignsByAccountCached,
   isTransientQualifyError,
   persistTransientQualificationRetry,
+  refreshMissingRecoverySources,
   strayColumnsSupported,
 } from './leadQualificationWorker';
 import type { Email } from './types';
@@ -571,12 +572,21 @@ export async function pollOthersOnce(): Promise<number> {
   let startingAfter: string | undefined;
   for (let page = 0; page < maxPages; page++) {
     if (page > 0) await sleep(pageDelay);
-    const res = await instantly.listEmails({
-      email_type: 'received',
-      mode: 'emode_others',
-      limit: OTHERS_PAGE_SIZE,
-      starting_after: startingAfter,
-    });
+    let res: Awaited<ReturnType<typeof instantly.listEmails>>;
+    try {
+      res = await instantly.listEmails({
+        email_type: 'received',
+        mode: 'emode_others',
+        limit: OTHERS_PAGE_SIZE,
+        starting_after: startingAfter,
+      });
+    } catch (error) {
+      if (!(error instanceof Error && error.message.startsWith('Instantly email read deferred:'))) throw error;
+      // Keep successful discovery pages; normal attribution still has to prove
+      // each candidate independently, so this never marks partial proof complete.
+      workerLog('info', `Others discovery paused after ${page} page(s); keeping fetched candidates`, error);
+      break;
+    }
     const items = res.items ?? [];
     scanned += items.length;
     for (const email of items) {
@@ -616,6 +626,8 @@ export async function pollOthersOnce(): Promise<number> {
       existingIds.add((r as { instantly_email_id: string }).instantly_email_id);
     }
   }
+  await refreshMissingRecoverySources(db, rawCandidates
+    .filter(candidate => existingIds.has(candidate.email.id)).map(candidate => candidate.email));
   const unprocessed = rawCandidates.filter((c) => c.email.id && !existingIds.has(c.email.id));
 
   // 3. Новейшее письмо на отправителя+домен. Ключ ВКЛЮЧАЕТ citedDomain: один

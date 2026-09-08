@@ -544,7 +544,7 @@ blocks:
               DATASET_SYNC_FAILED=0
               if [ "$DEPLOY_DATASET_SYNC" = 1 ]; then
                 echo "[scheduled] Dataset sync: deploying scripts to ${USER}@${HOST}:/opt/instantly-dataset-sync"
-                DS_FILES="sync.mjs label-new-replies.mjs label-new-segments.mjs sync-portal-mirror.mjs 018_portal_mirror.sql 022_leads_capture.sql"
+                DS_FILES="email-read-budget.mjs sync.mjs label-new-replies.mjs label-new-segments.mjs sync-portal-mirror.mjs 018_portal_mirror.sql 022_leads_capture.sql"
                 DS_STAGE=".dataset-sync-stage"
                 for f in $DS_FILES; do
                   if [ ! -f "app/scripts/instantly-dataset/$f" ]; then
