@@ -238,6 +238,8 @@ function mockAiResult(overrides: Record<string, unknown> = {}) {
         finish_reason: 'stop',
         message: {
           content: JSON.stringify({
+            machine_reply_kind: null,
+            non_lead_kind: null,
             is_lead: true,
             custom_criteria_matched: false,
             proposal_seen: false,
@@ -373,11 +375,15 @@ describe('machine acknowledgement policy', () => {
     },
   );
 
-  it('ignores absent or unrecognized AI machine values for a human call request', async () => {
+  it('accepts null but rejects absent or invalid machine verdicts before lead promotion', async () => {
     for (const machineReplyKind of [undefined, null, false, true, 'false', 'unknown']) {
       mockAiResult({ is_lead: false, machine_reply_kind: machineReplyKind });
-      const result = await qualify('Можете связаться со мной завтра.');
-      expect(result).toMatchObject({ isLead: true, machineReplyKind: null });
+      const qualification = qualify('Можете связаться со мной завтра.');
+      if (machineReplyKind === null) {
+        await expect(qualification).resolves.toMatchObject({ isLead: true, machineReplyKind: null });
+      } else {
+        await expect(qualification).rejects.toThrow('failed after retries: Missing or invalid machine_reply_kind');
+      }
     }
   });
 });
@@ -889,7 +895,7 @@ describe('positive lead controls', () => {
       aiOverrides: {},
     },
     {
-      name: 'Provider word boundary and an unknown semantic value',
+      name: 'unknown semantic value as a retryable failure despite a buyer price request',
       replyText: 'Our current provider is expensive. What are your prices?',
       aiOverrides: { non_lead_kind: 'unknown' },
     },
@@ -909,7 +915,7 @@ describe('positive lead controls', () => {
       replyText: 'Оставьте ваше коммерческое предложение с ценами. Я передам его руководству.',
       aiOverrides: { non_lead_kind: 'contact_routing' },
     },
-  ])('preserves $name', async ({ replyText, aiOverrides }) => {
+  ])('handles $name', async ({ replyText, aiOverrides }) => {
     mockAiResult({
       is_lead: false,
       interest_signals: [],
@@ -919,7 +925,12 @@ describe('positive lead controls', () => {
       ...aiOverrides,
     });
 
-    const result = await qualify(replyText, { outboundText: SUBSTANTIVE_OUTBOUND_TEXT });
+    const qualification = qualify(replyText, { outboundText: SUBSTANTIVE_OUTBOUND_TEXT });
+    if (aiOverrides.non_lead_kind === 'unknown') {
+      await expect(qualification).rejects.toThrow('failed after retries: Missing or invalid non_lead_kind');
+      return;
+    }
+    const result = await qualification;
 
     expect(result.isLead).toBe(true);
     expect(result.needsReview).toBe(false);
