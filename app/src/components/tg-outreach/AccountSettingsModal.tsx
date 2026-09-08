@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { X, RefreshCw, Shuffle } from 'lucide-react';
 import { tgOutreachFetch } from '@/lib/tgOutreach/fetcher';
+import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
 import type { TgOutreachAccount, TgOutreachProxy, TgOutreachTag } from '@/lib/tgOutreach/types';
 
 type Tab = 'basic' | 'limits' | 'additional';
@@ -152,6 +153,21 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
     );
   };
 
+  /**
+   * Перебрать имя и фамилию, не трогая ник.
+   *
+   * Нужно отдельно от полного автозаполнения: имя не понравилось, а ник уже
+   * подобран и проверен — терять его ради нового имени незачем, второй подбор
+   * это ещё десяток вызовов через мобильный прокси.
+   *
+   * В Telegram не ходим вовсе: имя и фамилия ничем не заняты, проверять нечего.
+   */
+  const handleGenerateName = () => {
+    const identity = pickIdentity();
+    setFirstName(identity.firstName);
+    setLastName(identity.lastName);
+  };
+
   const handleGenerateUsername = async () => {
     // Имя и фамилию не трогаем: ник перегенерируют, когда имя уже устраивает.
     const data = await callAutofill('regen', { first_name: firstName, last_name: lastName });
@@ -295,7 +311,18 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Имя</label>
+                <div className="mb-1 flex items-center justify-between">
+                  <label className="block text-sm font-medium text-gray-700">Имя</label>
+                  <button
+                    type="button"
+                    onClick={handleGenerateName}
+                    title="Подобрать другие имя и фамилию. Ник останется прежним."
+                    className="cursor-pointer text-xs text-indigo-600 transition-colors hover:text-indigo-800"
+                  >
+                    <Shuffle className="mr-1 inline h-3.5 w-3.5" />
+                    Другие имя и фамилия
+                  </button>
+                </div>
                 <input
                   value={firstName}
                   onChange={(e) => setFirstName(e.target.value)}
