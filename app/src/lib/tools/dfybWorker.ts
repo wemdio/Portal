@@ -13,6 +13,10 @@ import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { fetchAndExtract } from '@/lib/enrich/websiteParser';
 import { runSearchParserJob } from '@/lib/parsers/searchParserWorker';
 import {
+  generatePersonalizationCompletion, PersonalizationCancelledError, personalizationFailureMessage,
+  buildPersonalizationTable, type PersonalizationRowResult,
+} from './personalizationCompletion';
+import {
   CLEANUP_JSON_SYSTEM_PROMPT,
   CLEANUP_BATCH,
   buildCleanupUserMessage,
@@ -601,12 +605,10 @@ async function stepPersonalize(
 ): Promise<string[][]> {
   const header = data[0];
   const body = data.slice(1);
-  const newHeader = [...header, 'Персонализация'];
-
-  const result: string[][] = [];
+  const result: PersonalizationRowResult[] = [];
 
   for (let batch = 0; batch < body.length; batch += PERSONALIZATION_BATCH) {
-    if (await isCancelled(jobId)) throw new Error('Отменено');
+    if (await isCancelled(jobId)) throw new PersonalizationCancelledError();
     const chunk = body.slice(batch, batch + PERSONALIZATION_BATCH);
 
     const promises = chunk.map(async (row) => {
@@ -619,24 +621,32 @@ async function stepPersonalize(
 
       const userMsg = `Данные: "${sourceData.slice(0, 3000)}"\n\nЗадача: ${prompt.slice(0, 2000)}\n\nСгенерируй 1 персонализированное предложение.`;
       try {
-        const content = await callOpenRouter(OPENROUTER_PERSONALIZATION_API_KEY, AI_MODEL, [
-          { role: 'system', content: PERSONALIZATION_SYSTEM_PROMPT },
-          { role: 'user', content: userMsg },
-        ], { temperature: 0.7, max_tokens: 1500, title: 'Portal - DFYB Personalization' });
-        return [...row, content.trim()];
-      } catch {
-        return [...row, ''];
+        const content = await generatePersonalizationCompletion({
+          apiKey: OPENROUTER_PERSONALIZATION_API_KEY,
+          model: AI_MODEL,
+          messages: [
+            { role: 'system', content: PERSONALIZATION_SYSTEM_PROMPT },
+            { role: 'user', content: userMsg },
+          ],
+          title: 'Portal - DFYB Personalization',
+          isCancelled: () => isCancelled(jobId),
+        });
+        return { source: row, proposal: content };
+      } catch (error) {
+        if (error instanceof PersonalizationCancelledError) throw error;
+        return { source: row, proposal: '', error: personalizationFailureMessage(error) };
       }
     });
 
     const batchResults = await Promise.all(promises);
+    if (await isCancelled(jobId)) throw new PersonalizationCancelledError();
     result.push(...batchResults);
 
     await updateProgress(jobId, 12, Math.round(((batch + chunk.length) / body.length) * 100));
   }
 
   await updateProgress(jobId, 12, 100);
-  return [newHeader, ...result];
+  return buildPersonalizationTable(header, result);
 }
 
 /* ═══════════════════════════════════════════
@@ -740,6 +750,9 @@ export async function runDfybJob(jobId: string): Promise<void> {
       })
       .eq('id', jobId);
   } catch (err) {
+    // The personalization cancellation check observed the persisted cancelled
+    // state. Do not replace that user decision with a generic failure.
+    if (err instanceof PersonalizationCancelledError) return;
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error(`[dfyb] Job ${jobId} failed:`, message);
     await admin

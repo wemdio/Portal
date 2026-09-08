@@ -1906,7 +1906,7 @@ ${criteriaReminder}
 interface AIResponse {
   choices?: Array<{
     finish_reason?: string;
-    message?: { content?: string };
+    message?: { content?: unknown; refusal?: unknown };
   }>;
 }
 
@@ -1932,7 +1932,9 @@ export interface ClassifyOptions {
 }
 
 const DEFAULT_MODEL = 'policy/gemini-flash';
+const DEDICATED_LEAD_POLICY = 'policy/portal-instantly-lead-qualification';
 const DEFAULT_MAX_TOKENS = 2000;
+const AI_REQUEST_TIMEOUT_MS = 45_000;
 
 function envNumber(name: string, fallback: number): number {
   const raw = Number(process.env[name] ?? String(fallback));
@@ -2141,93 +2143,116 @@ function sanitizeAIJsonString(raw: string): string {
   return out;
 }
 
+class InvalidAIQualificationResponseError extends Error {}
+
+interface AIQualificationPayload {
+  machine_reply_kind: MachineReplyKind | null;
+  non_lead_kind: NonLeadKind | null;
+  is_lead: boolean;
+  custom_criteria_matched: boolean;
+  proposal_seen: boolean;
+  interest_signals: string[];
+  reason: string;
+  confidence: number;
+  needs_review: boolean;
+  objection_handleable: boolean;
+  objection_draft: string | null;
+}
+
+function validateAIResult(value: unknown): asserts value is AIQualificationPayload {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new InvalidAIQualificationResponseError('Expected a qualification JSON object');
+  }
+  const fields = value as Record<string, unknown>;
+  for (const field of [
+    'is_lead', 'custom_criteria_matched', 'proposal_seen',
+    'needs_review', 'objection_handleable',
+  ]) {
+    if (typeof fields[field] !== 'boolean') {
+      throw new InvalidAIQualificationResponseError(`Missing or invalid boolean field: ${field}`);
+    }
+  }
+  if (
+    fields.machine_reply_kind !== null &&
+    fields.machine_reply_kind !== 'auto_reply' &&
+    fields.machine_reply_kind !== 'delivery_failure' &&
+    fields.machine_reply_kind !== 'service_acknowledgement'
+  ) {
+    throw new InvalidAIQualificationResponseError('Missing or invalid machine_reply_kind');
+  }
+  if (
+    fields.non_lead_kind !== null &&
+    fields.non_lead_kind !== 'seller_pitch' &&
+    fields.non_lead_kind !== 'service_followup' &&
+    fields.non_lead_kind !== 'contact_routing'
+  ) {
+    throw new InvalidAIQualificationResponseError('Missing or invalid non_lead_kind');
+  }
+  if (
+    !Array.isArray(fields.interest_signals) ||
+    !fields.interest_signals.every((signal) => typeof signal === 'string')
+  ) {
+    throw new InvalidAIQualificationResponseError('Missing or invalid interest_signals');
+  }
+  if (typeof fields.reason !== 'string' || !fields.reason.trim()) {
+    throw new InvalidAIQualificationResponseError('Missing or empty qualification reason');
+  }
+  if (typeof fields.confidence !== 'number' || !Number.isFinite(fields.confidence)) {
+    throw new InvalidAIQualificationResponseError('Missing or invalid confidence');
+  }
+  if (fields.objection_draft !== null && typeof fields.objection_draft !== 'string') {
+    throw new InvalidAIQualificationResponseError('Missing or invalid objection_draft');
+  }
+}
+
 function parseAIResult(content: string): QualificationResult {
   const trimmed = content.trim();
-  let parsed: Record<string, unknown>;
+  let parsed: unknown;
 
   try {
-    parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    parsed = JSON.parse(trimmed);
   } catch {
     const codeBlock = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
     const raw = codeBlock ? codeBlock[1].trim() : trimmed;
 
     try {
-      parsed = JSON.parse(raw) as Record<string, unknown>;
+      parsed = JSON.parse(raw);
     } catch {
       const jsonMatch = raw.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
-        console.error('[LeadQualifier] Cannot find JSON object in AI response:', trimmed.slice(0, 500));
-        return {
-          isLead: false,
-          customCriteriaMatched: false,
-          proposalSeen: false,
-          interestSignals: [],
-          reason: `AI вернул некорректный JSON: ${trimmed.slice(0, 150)}`,
-          confidence: 0,
-          needsReview: true,
-          objectionHandleable: false,
-          objectionDraft: null,
-        };
+        throw new InvalidAIQualificationResponseError('AI returned invalid JSON');
       }
       try {
-        parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+        parsed = JSON.parse(jsonMatch[0]);
       } catch {
         // Финальная попытка: санитизация управляющих символов внутри строк.
         // Случай hello@igroup.dev (14 мая 2026): AI вернул JSON с
         // неэкранированным \n внутри "reason" — JSON.parse падал с
         // «Bad control character at position 571». Раньше лид терялся.
         try {
-          parsed = JSON.parse(sanitizeAIJsonString(jsonMatch[0])) as Record<string, unknown>;
-        } catch (err) {
-          const errMsg = err instanceof Error ? err.message : String(err);
-          console.error(
-            '[LeadQualifier] All parse attempts failed:',
-            errMsg,
-            '\nRaw AI response (first 800 chars):\n',
-            trimmed.slice(0, 800),
-          );
-          return {
-            isLead: false,
-            customCriteriaMatched: false,
-            proposalSeen: false,
-            interestSignals: [],
-            reason: `AI вернул JSON с управляющими символами: ${errMsg.slice(0, 150)}`,
-            confidence: 0,
-            needsReview: true,
-            objectionHandleable: false,
-            objectionDraft: null,
-          };
+          parsed = JSON.parse(sanitizeAIJsonString(jsonMatch[0]));
+        } catch {
+          throw new InvalidAIQualificationResponseError('AI returned invalid JSON after sanitization');
         }
       }
     }
   }
 
+  // A parseable object is not necessarily a verdict. Never coerce "false" to
+  // true or default a missing decision to not_lead. Throw before any custom or
+  // deterministic postprocessing can turn an absent AI decision into a lead.
+  validateAIResult(parsed);
   return {
-    machineReplyKind:
-      parsed.machine_reply_kind === 'auto_reply' ||
-      parsed.machine_reply_kind === 'delivery_failure' ||
-      parsed.machine_reply_kind === 'service_acknowledgement'
-        ? parsed.machine_reply_kind
-        : null,
-    nonLeadKind:
-      parsed.non_lead_kind === 'seller_pitch' ||
-      parsed.non_lead_kind === 'service_followup' ||
-      parsed.non_lead_kind === 'contact_routing'
-        ? parsed.non_lead_kind
-        : null,
-    isLead: Boolean(parsed.is_lead),
-    customCriteriaMatched: parsed.custom_criteria_matched === true,
-    proposalSeen: Boolean(parsed.proposal_seen),
-    interestSignals: Array.isArray(parsed.interest_signals)
-      ? (parsed.interest_signals as unknown[]).map(String)
-      : [],
-    reason: typeof parsed.reason === 'string' ? parsed.reason : '',
-    confidence:
-      typeof parsed.confidence === 'number'
-        ? Math.max(0, Math.min(1, parsed.confidence))
-        : 0.5,
-    needsReview: Boolean(parsed.needs_review),
-    objectionHandleable: Boolean(parsed.objection_handleable),
+    machineReplyKind: parsed.machine_reply_kind,
+    nonLeadKind: parsed.non_lead_kind,
+    isLead: parsed.is_lead,
+    customCriteriaMatched: parsed.custom_criteria_matched,
+    proposalSeen: parsed.proposal_seen,
+    interestSignals: parsed.interest_signals,
+    reason: parsed.reason,
+    confidence: Math.max(0, Math.min(1, parsed.confidence)),
+    needsReview: parsed.needs_review,
+    objectionHandleable: parsed.objection_handleable,
     objectionDraft:
       typeof parsed.objection_draft === 'string' && parsed.objection_draft
         ? parsed.objection_draft
@@ -2346,19 +2371,38 @@ export async function classifyWithAI(
   ctx: ThreadContext,
   options: ClassifyOptions,
 ): Promise<QualificationResult> {
-  const { apiKey, model = DEFAULT_MODEL, maxRetries = 2, briefText, leadCriteria } = options;
+  const { apiKey, model = DEFAULT_MODEL, briefText, leadCriteria } = options;
+  // One initial call plus at most two retries, including invalid model output.
+  // Durable worker recovery owns later attempts; no caller can create an
+  // unbounded synchronous retry loop with NaN, Infinity or a large override.
+  const maxRetries = Number.isFinite(options.maxRetries)
+    ? Math.max(0, Math.min(2, Math.floor(options.maxRetries!)))
+    : 2;
   const userMessage = buildUserMessage(ctx);
   const systemPrompt = buildSystemPrompt(briefText, leadCriteria);
   const maxTokens = Math.max(
     1000,
     envNumber('INSTANTLY_LEAD_QUAL_MAX_TOKENS', DEFAULT_MAX_TOKENS),
   );
+  // Only the dedicated lead policy uses the exact Gemini profile evaluated on
+  // 2026-09-08. Shared policies and explicit model overrides retain the legacy
+  // payload. Keep this in sync with the policy's single Vertex Gemini 3.8 route;
+  // changing it to a different model requires evaluating its request profile.
+  const inferenceOptions = model === DEDICATED_LEAD_POLICY
+    ? { reasoning_effort: 'low', max_tokens: 4096 }
+    : { temperature: 0.1, max_tokens: maxTokens };
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    // The same deadline covers headers AND response.json()/text(). A headers-
+    // only timer would still let a stalled response body block the worker.
+    // Three timed-out calls plus the 1.5s/3s backoffs take about 139.5s total,
+    // not 45s for the whole qualification. Other tools keep their own limits.
+    const requestSignal = AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS);
     let response: Response;
     try {
       response = await fetch('https://router.requesty.ai/v1/chat/completions', {
         method: 'POST',
+        signal: requestSignal,
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
@@ -2371,8 +2415,7 @@ export async function classifyWithAI(
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userMessage },
           ],
-          temperature: 0.1,
-          max_tokens: maxTokens,
+          ...inferenceOptions,
           response_format: { type: 'json_object' },
         }),
       });
@@ -2387,23 +2430,52 @@ export async function classifyWithAI(
     }
 
     if (response.ok) {
-      const data = (await response.json()) as AIResponse;
-      const choice = data.choices?.[0];
-      const content = choice?.message?.content?.trim() ?? '';
-      if (choice?.finish_reason === 'length' && attempt < maxRetries) {
-        console.warn('[LeadQualifier] AI response hit max_tokens, retrying...');
+      try {
+        let data: AIResponse | null;
+        try {
+          data = (await response.json()) as AIResponse | null;
+          requestSignal.throwIfAborted();
+        } catch {
+          throw new InvalidAIQualificationResponseError(
+            requestSignal.aborted
+              ? 'AI response body timed out'
+              : 'AI returned an invalid response envelope',
+          );
+        }
+        const choice = Array.isArray(data?.choices) ? data.choices[0] : undefined;
+        if (choice?.message?.refusal) {
+          throw new InvalidAIQualificationResponseError('AI refused qualification');
+        }
+        // Even a complete-looking JSON object is not trusted after length,
+        // content_filter or tool_calls. This check also applies on the LAST
+        // attempt, which previously accepted a truncated final response.
+        if (choice?.finish_reason !== 'stop') {
+          throw new InvalidAIQualificationResponseError(
+            choice?.finish_reason === 'length'
+              ? 'AI response hit the output token limit'
+              : 'AI response did not finish with stop',
+          );
+        }
+        const content = choice.message?.content;
+        if (typeof content !== 'string' || !content.trim()) {
+          throw new InvalidAIQualificationResponseError('AI returned empty or invalid content');
+        }
+        return enforceCustomCriteriaPriority(
+          parseAIResult(content),
+          Boolean(leadCriteria?.trim()),
+        );
+      } catch (error) {
+        if (!(error instanceof InvalidAIQualificationResponseError)) throw error;
+        if (attempt === maxRetries) {
+          // This stable prefix is recognized by all worker entry points. They
+          // persist needs_review for bounded durable recovery, not not_lead.
+          // Keep logs free of the model's raw response and customer email text.
+          throw new Error(`AI classification failed after retries: ${error.message}`);
+        }
+        console.warn('[LeadQualifier] Invalid AI qualification, retrying:', error.message);
         await sleep(1500 * Math.pow(2, attempt));
-        continue;
       }
-      if (!content && attempt < maxRetries) {
-        console.warn('[LeadQualifier] Empty AI response, retrying...');
-        await sleep(1500 * Math.pow(2, attempt));
-        continue;
-      }
-      return enforceCustomCriteriaPriority(
-        parseAIResult(content),
-        Boolean(leadCriteria?.trim()),
-      );
+      continue;
     }
 
     if ([502, 503, 504].includes(response.status) && attempt < maxRetries) {
@@ -2412,6 +2484,13 @@ export async function classifyWithAI(
     }
 
     const text = await response.text().catch(() => '');
+    if (requestSignal.aborted) {
+      if (attempt < maxRetries) {
+        await sleep(1500 * Math.pow(2, attempt));
+        continue;
+      }
+      throw new Error('Network error: AI response body timed out');
+    }
     throw new Error(`AI API ${response.status}: ${text.slice(0, 200)}`);
   }
 

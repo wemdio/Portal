@@ -1,0 +1,29 @@
+{
+  "models": {
+    "vertex/gemini-3.8-flash": {
+      "reasoning_effort": "low",
+      "temperature": null,
+      "max_tokens": 4096
+    },
+    "azure/gpt-5.6-luna@eastus2": {
+      "reasoning_effort": "none",
+      "temperature": null,
+      "max_completion_tokens": 2000
+    },
+    "bedrock/gpt-5.6-luna@us-east-1": {
+      "reasoning_effort": "none",
+      "temperature": null,
+      "max_completion_tokens": 2000
+    },
+    "alibaba/qwen3.8-max": {
+      "reasoning_effort": "none",
+      "temperature": null,
+      "max_completion_tokens": 2000
+    },
+    "deepinfra/deepseek-v4-pro-0813": {
+      "reasoning_effort": "none",
+      "temperature": null,
+      "max_tokens": 2000
+    }
+  }
+}
