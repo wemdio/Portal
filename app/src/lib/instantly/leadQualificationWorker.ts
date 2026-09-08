@@ -52,8 +52,10 @@ const PROJECT_BATCH_SIZE = 100;
  * сеть/таймаут, исчерпанные ретраи внутри classifyWithAI. Такие письма НЕ
  * фиксируем строкой status='error' — иначе дедуп по instantly_email_id
  * заблокирует их навсегда (инцидент 14.07: 503 + fetch failed = 2 потерянных
- * горячих лида). Прочие ошибки (парсинг, битые данные) — постоянные, для них
- * строка нужна: повтор их не вылечит, а видимость важна.
+ * горячих лида). Некорректный ответ ИИ после ограниченных локальных попыток
+ * приходит с маркером failed after retries и тоже идёт в durable retry.
+ * Прочие ошибки входных данных — постоянные, для них строка нужна, чтобы
+ * сохранить видимость без бесконечного повторения одного и того же сбоя.
  */
 const TRANSIENT_QUALIFY_ERROR_RE =
   /\b(?:402|429|500|502|503|504)\b|overload|rate.?limit|fetch failed|network error|timed?.?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|aborted|failed after retries/i;
@@ -624,7 +626,7 @@ const API_KEY = () =>
   process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY ??
   process.env.OPENROUTER_BRIEF_API_KEY ??
   '';
-const MODEL = process.env.INSTANTLY_LEAD_QUAL_MODEL ?? 'policy/gemini-flash';
+const MODEL = process.env.INSTANTLY_LEAD_QUAL_MODEL?.trim() || 'policy/gemini-flash';
 
 function workerLog(
   level: 'info' | 'warn' | 'error',

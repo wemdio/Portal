@@ -165,7 +165,7 @@ async function loadClassifier(maxTokens) {
     } }] });
   let fetchHandler = async () => { throw new Error('EVALUATION_NETWORK_BLOCKED'); };
   const isolatedModule = { exports: {} };
-  const sandbox = { module: isolatedModule, exports: isolatedModule.exports, Response,
+  const sandbox = { module: isolatedModule, exports: isolatedModule.exports, Response, AbortSignal,
     process: { env: { INSTANTLY_LEAD_QUAL_MAX_TOKENS: String(maxTokens) } },
     fetch: (...args) => fetchHandler(...args),
     setTimeout: () => { throw new Error('Retries/backoffs are forbidden in model evaluation'); },
@@ -178,6 +178,7 @@ async function loadClassifier(maxTokens) {
 }
 
 const probeResponse = { choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({
+  machine_reply_kind: null, non_lead_kind: null,
   is_lead: false, custom_criteria_matched: false, proposal_seen: false, interest_signals: [],
   reason: 'Evaluation-only probe; not a model verdict', confidence: 0, needs_review: true,
   objection_handleable: false, objection_draft: null,
@@ -186,7 +187,8 @@ const probeResponse = { choices: [{ finish_reason: 'stop', message: { content: J
 function assertRequest(url, init) {
   if (String(url) !== ENDPOINT || init?.method !== 'POST') throw new Error('Unapproved network request blocked');
   const payload = JSON.parse(init.body);
-  if (!Array.isArray(payload.messages) || !Number.isSafeInteger(payload.max_tokens)) throw new Error('Unexpected classifier payload');
+  if (!Array.isArray(payload.messages)) throw new Error('Unexpected classifier payload');
+  effectiveOutputCap(payload);
   return payload;
 }
 
@@ -249,7 +251,7 @@ function applyRequestProfile(basePayload, profile) {
 }
 
 function decision(value) {
-  if (!value) return null;
+  if (!value || typeof value.needsReview !== 'boolean' || typeof value.isLead !== 'boolean') return null;
   // Same disposition order as the worker: review takes precedence over isLead.
   return value.needsReview ? 'review' : value.isLead ? 'lead' : 'not_lead';
 }
@@ -282,13 +284,26 @@ async function replay(isolated, entry, context, model, response = probeResponse,
     calls++;
     return new Response(JSON.stringify(response), { status: 200, headers: { 'content-type': 'application/json' } });
   });
-  const classified = await isolated.api.classifyWithAI(context, options);
+  // A rejected model response is an observation, not a runner failure. Replay
+  // every stage separately: production prefilters can still reject a machine
+  // reply without calling AI, but a failed AI verdict must never become not_lead.
+  const stageErrors = {};
+  async function observeStage(stage, operation) {
+    try { return await operation(); }
+    catch (error) {
+      // Private artifact only; parser errors may contain model-generated text.
+      stageErrors[stage] = String(error?.message ?? error).slice(0, 1000);
+      return null;
+    }
+  }
+  const classified = await observeStage('classified', () => isolated.api.classifyWithAI(context, options));
   if (calls !== 1) throw new Error('Direct classifier made an unexpected number of calls');
-  const result = await isolated.api.qualifyReply(context.replyEmail.campaign_id ?? `eval-${entry.id}`,
-    context.replyEmail.from_address_email ?? 'lead@example.com', context.replyEmail.thread_id ?? null, options);
+  const result = await observeStage('final', () => isolated.api.qualifyReply(context.replyEmail.campaign_id ?? `eval-${entry.id}`,
+    context.replyEmail.from_address_email ?? 'lead@example.com', context.replyEmail.thread_id ?? null, options));
   if (calls !== 1 && calls !== 2) throw new Error('Pipeline made an unexpected number of calls');
-  const rawText = response.choices?.[0]?.message?.content ?? '';
-  const parsed = isolated.api._private.parseAIResult(rawText);
+  const observedContent = response.choices?.[0]?.message?.content;
+  const rawText = typeof observedContent === 'string' ? observedContent : '';
+  const parsed = await observeStage('parsed', () => isolated.api._private.parseAIResult(rawText));
   let rawJson = null;
   let rawJsonFormat = 'unparseable';
   try {
@@ -307,23 +322,28 @@ async function replay(isolated, entry, context, model, response = probeResponse,
   }
   const rawFlagsValid = rawJson !== null && typeof rawJson === 'object' && !Array.isArray(rawJson) &&
     typeof rawJson.is_lead === 'boolean' && typeof rawJson.needs_review === 'boolean';
-  const strictSchema = rawFlagsValid && typeof rawJson.custom_criteria_matched === 'boolean' &&
-    [null, 'auto_reply', 'delivery_failure', 'service_acknowledgement'].includes(rawJson.machine_reply_kind) &&
-    [null, 'seller_pitch', 'service_followup', 'contact_routing'].includes(rawJson.non_lead_kind) &&
-    typeof rawJson.proposal_seen === 'boolean' && typeof rawJson.objection_handleable === 'boolean' &&
-    typeof rawJson.reason === 'string' && typeof rawJson.confidence === 'number' &&
-    rawJson.confidence >= 0 && rawJson.confidence <= 1 && Array.isArray(rawJson.interest_signals) &&
-    rawJson.interest_signals.every((signal) => typeof signal === 'string') &&
-    (rawJson.objection_draft === null || typeof rawJson.objection_draft === 'string');
-  const finalStatus = workerStatus(result, Boolean(entry.input.leadCriteria?.trim()));
+  const schemaIssues = [];
+  if (!rawJson || typeof rawJson !== 'object' || Array.isArray(rawJson)) schemaIssues.push('expected_json_object');
+  else {
+    for (const field of ['is_lead', 'needs_review', 'custom_criteria_matched', 'proposal_seen', 'objection_handleable']) {
+      if (typeof rawJson[field] !== 'boolean') schemaIssues.push(`invalid_${field}`);
+    }
+    if (![null, 'auto_reply', 'delivery_failure', 'service_acknowledgement'].includes(rawJson.machine_reply_kind)) schemaIssues.push('invalid_machine_reply_kind');
+    if (![null, 'seller_pitch', 'service_followup', 'contact_routing'].includes(rawJson.non_lead_kind)) schemaIssues.push('invalid_non_lead_kind');
+    if (typeof rawJson.reason !== 'string' || !rawJson.reason.trim()) schemaIssues.push('invalid_reason');
+    if (typeof rawJson.confidence !== 'number' || !Number.isFinite(rawJson.confidence) || rawJson.confidence < 0 || rawJson.confidence > 1) schemaIssues.push('invalid_confidence');
+    if (!Array.isArray(rawJson.interest_signals) || !rawJson.interest_signals.every((signal) => typeof signal === 'string')) schemaIssues.push('invalid_interest_signals');
+    if (rawJson.objection_draft !== null && typeof rawJson.objection_draft !== 'string') schemaIssues.push('invalid_objection_draft');
+  }
+  const finalStatus = result ? workerStatus(result, Boolean(entry.input.leadCriteria?.trim())) : null;
   return { payload: jsonCopy(captured), basePayload: jsonCopy(capturedBase), pipelineWouldCallAI: calls === 2, parsed: jsonCopy(parsed),
-    classified: jsonCopy(classified), final: withoutContext(result), rawJson,
+    classified: jsonCopy(classified), final: result ? withoutContext(result) : null, rawJson, stageErrors, schemaIssues,
     strictJson: rawJsonFormat === 'strict' && rawJson !== null && typeof rawJson === 'object' && !Array.isArray(rawJson),
     rawJsonFormat,
-    strictSchema, rawFlagsValid,
+    strictSchema: schemaIssues.length === 0, rawFlagsValid,
     rawLabel: rawFlagsValid ? (rawJson.needs_review ? 'review' : rawJson.is_lead ? 'lead' : 'not_lead') : null,
     parsedLabel: decision(parsed), classifiedLabel: decision(classified), finalStatus,
-    finalLabel: finalStatus === 'needs_review' ? 'review' : finalStatus === 'lead' ? 'lead' : 'not_lead' };
+    finalLabel: finalStatus === null ? null : finalStatus === 'needs_review' ? 'review' : finalStatus === 'lead' ? 'lead' : 'not_lead' };
 }
 
 function priceFor(prices, model) {
@@ -365,30 +385,43 @@ function summarize(records, models) {
   return models.map((model) => {
     const rows = records.filter((row) => row.requested_model === model);
     const good = rows.filter((row) => row.status === 'ok');
-    const latency = good.map((row) => row.elapsed_ms).sort((a, b) => a - b);
-    const groups = {};
-    for (const row of good.filter((row) => row.score)) {
+    const attempted = rows.filter((row) => row.status !== 'dry_run');
+    const responses = attempted.filter((row) => row.http_status >= 200 && row.http_status < 300);
+    // Include paid HTTP successes even when parsing/classification failed. The
+    // latency is HTTP completion time, not time spent on the offline replay.
+    const latency = responses.map((row) => row.elapsed_ms).filter(Number.isFinite).sort((a, b) => a - b);
+    const groups = Object.create(null);
+    // Every attempted scored case stays in the denominator, including transport
+    // and schema failures. Missing verdicts are null, never negative decisions.
+    for (const row of attempted.filter((row) => row.score)) {
       const group = groups[row.label_basis] ??= { n: 0, raw_correct: 0, final_correct: 0,
         raw_false_positive: 0, final_false_positive: 0, raw_missed_lead: 0, final_missed_lead: 0,
-        raw_reviews: 0, final_reviews: 0, invalid_raw_flags: 0, changed_by_rules: 0 };
+        raw_reviews: 0, final_reviews: 0, raw_no_verdict: 0, final_no_verdict: 0,
+        errors: 0, invalid_raw_flags: 0, changed_by_rules: 0 };
       group.n++;
       group.raw_correct += Number(row.raw_label === row.expected_label);
       group.final_correct += Number(row.final_label === row.expected_label);
       for (const [prefix, label] of [['raw', row.raw_label], ['final', row.final_label]]) {
-        group[`${prefix}_false_positive`] += Number(label === 'lead' && row.expected_label === 'not_lead');
+        group[`${prefix}_false_positive`] += Number(label === 'lead' && row.expected_label !== 'lead');
         group[`${prefix}_missed_lead`] += Number(label !== 'lead' && row.expected_label === 'lead');
         group[`${prefix}_reviews`] += Number(label === 'review');
+        group[`${prefix}_no_verdict`] += Number(label == null);
       }
+      group.errors += Number(row.status === 'error');
       group.invalid_raw_flags += Number(!row.raw_flags_valid);
-      group.changed_by_rules += Number(row.raw_label !== row.final_label);
+      group.changed_by_rules += Number(row.raw_label != null && row.final_label != null && row.raw_label !== row.final_label);
     }
     return { model, planned_or_attempted: rows.length, completed: good.length,
       errors: rows.filter((row) => row.status === 'error').length,
+      http_responses: attempted.filter((row) => Number.isInteger(row.http_status)).length,
+      successful_http_responses: responses.length,
+      final_verdicts: attempted.filter((row) => row.final_label != null).length,
+      classification_errors: attempted.filter((row) => row.classification_errors && Object.keys(row.classification_errors).length).length,
       prefiltered: rows.filter((row) => row.pipeline_would_call_ai === false).length,
-      actual_models: [...new Set(good.map((row) => row.actual_model ?? '(not reported)'))],
-      strict_json_failures: good.filter((row) => !row.strict_json).length,
-      markdown_fence_responses: good.filter((row) => row.raw_json_format === 'markdown_fence').length,
-      strict_schema_failures: good.filter((row) => !row.strict_schema).length,
+      actual_models: [...new Set(responses.map((row) => row.actual_model ?? '(not reported)'))],
+      strict_json_failures: responses.filter((row) => !row.strict_json).length,
+      markdown_fence_responses: responses.filter((row) => row.raw_json_format === 'markdown_fence').length,
+      strict_schema_failures: responses.filter((row) => !row.strict_schema).length,
       p50_ms: latency.length ? latency[Math.floor((latency.length - 1) * 0.5)] : null,
       p95_ms: latency.length ? latency[Math.ceil((latency.length - 1) * 0.95)] : null,
       accounted_usd: rows.reduce((sum, row) => sum + (row.accounted_usd ?? 0), 0), label_groups: groups };
@@ -431,8 +464,17 @@ async function main() {
   await writeFile(path.join(output, 'fixtures.private.json'), fixtureBytes, { mode: 0o600 });
   for (const entry of cases) {
     const context = makeContext(entry);
-    const probe = await replay(isolated, entry, context, args.models[0]);
-    prepared.push({ entry, context, probe });
+    const probes = new Map();
+    // Production may scope inference parameters to an exact policy/model ID.
+    // Changing only the model name on the first model's payload would leak that
+    // profile to other candidates and make the benchmark order-dependent.
+    // These captures/replays are offline and never consume a paid call.
+    for (const model of args.models) {
+      const probe = await replay(isolated, entry, context, model);
+      if (Object.keys(probe.stageErrors).length) throw new Error('Evaluation probe failed the current classifier contract');
+      probes.set(model, probe);
+    }
+    prepared.push({ entry, context, probes });
   }
   const manifest = { schema_version: 1, started_at: started, mode: args.live ? 'live' : 'dry_run',
     fixture_sha256: hash(fixtureBytes), source_sha256: isolated.sourceHash, bundle_sha256: isolated.bundleHash,
@@ -441,19 +483,20 @@ async function main() {
     models: args.models, cases: cases.length, start_index: args.startIndex, max_calls: args.maxCalls, budget_usd: args.budgetUsd,
     timeout_ms: args.timeoutMs, max_output_tokens: maxTokens, base_max_output_tokens: maxTokens,
     effective_output_caps: Object.fromEntries(args.models.map((model) => [model,
-      effectiveOutputCap(applyRequestProfile({ ...prepared[0].probe.basePayload, model }, requestProfiles.models[model] ?? null))])),
+      effectiveOutputCap(applyRequestProfile(prepared[0].probes.get(model).basePayload, requestProfiles.models[model] ?? null))])),
     prices, production_retries: 'disabled for comparison',
-    scoring_note: 'User-confirmed, policy-derived and provisional labels reported separately; no held-out claim.',
+    scoring_note: 'Label bases reported separately; all attempted scored cases remain in denominators, including errors; absent verdicts are null, never not_lead; no held-out claim.',
     cost_note: 'Conservative client-side estimate, not provider hard cap; policy reservations include configured fallback attempts.',
     prefilter_note: 'AI evaluated even for prefiltered cases for defense-in-depth; production would skip those calls.' };
   await writeFile(path.join(output, 'manifest.private.json'), JSON.stringify(manifest, null, 2), { mode: 0o600 });
   // Fixture-first, rotating model order spreads transient provider conditions.
   outer: for (let index = 0; index < prepared.length; index++) {
-    const { entry, context, probe } = prepared[index];
+    const { entry, context, probes } = prepared[index];
     const modelOffset = (args.startIndex + index) % args.models.length;
     const models = [...args.models.slice(modelOffset), ...args.models.slice(0, modelOffset)];
     for (const model of models) {
-      const basePayload = { ...probe.basePayload, model };
+      const probe = probes.get(model);
+      const basePayload = probe.basePayload;
       const requestProfile = requestProfiles.models[model] ?? null;
       const payload = applyRequestProfile(basePayload, requestProfile);
       const row = { id: entry.id, fixture_index: args.startIndex + index, category: entry.category, language: entry.language,
@@ -463,7 +506,8 @@ async function main() {
         payload_sha256: hash(payload), base_payload_sha256: hash(basePayload), requested_model: model,
         request_profile: requestProfile, effective_output_cap: effectiveOutputCap(payload),
         pipeline_would_call_ai: probe.pipelineWouldCallAI,
-        prefilter: probe.pipelineWouldCallAI ? null : probe.final, base_request: basePayload, request: payload };
+        prefilter: probe.pipelineWouldCallAI ? null : probe.final, base_request: basePayload, request: payload,
+        raw_label: null, parsed_label: null, classified_label: null, final_label: null, final_worker_status: null };
       if (!args.live) row.status = 'dry_run';
       else {
         const reservation = reserveCost(payload, priceFor(prices, model));
@@ -473,6 +517,7 @@ async function main() {
         const t0 = performance.now();
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), args.timeoutMs);
+        let errorPhase = 'request';
         try {
           const response = await nativeFetch(ENDPOINT, { method: 'POST', redirect: 'error', signal: controller.signal,
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env[args.keyEnv]}`,
@@ -484,21 +529,37 @@ async function main() {
           // Private artifact only. Never print an upstream body, which may echo inputs.
           row.response_text = responseText;
           if (!response.ok) throw new Error(`HTTP_${response.status}`);
+          errorPhase = 'response_envelope';
           const data = JSON.parse(responseText);
+          if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid response envelope');
+          // Persist billable transport evidence BEFORE replay. A strict parser
+          // rejecting {} or a truncated answer must not erase tokens/costs or
+          // masquerade as a transport failure with unknown model/finish reason.
+          row.actual_model = data.model ?? null;
+          row.response_id = data.id ?? null;
+          row.usage = data.usage ?? null;
+          row.finish_reason = data.choices?.[0]?.finish_reason ?? null;
+          row.response_content = data.choices?.[0]?.message?.content ?? null;
+          row.reported_top_level_cost = data.cost ?? null;
+          row.reported_usage_cost = data.usage?.cost ?? null;
+          const costs = observedCost(data, model, prices, reservation);
+          row.accounted_usd = costs.accountedUsd;
+          row.cost_basis = costs.basis;
+          row.usage_estimate_usd = costs.usageEstimateUsd;
+          if (costs.accountedUsd > reservation.usd) stopped = 'reported_usage_exceeded_reservation';
+          errorPhase = 'replay';
           const result = await replay(isolated, entry, context, model, data, requestProfile);
           if (hash(result.payload) !== row.payload_sha256) throw new Error('Replay payload mismatch');
           if (hash(result.basePayload) !== row.base_payload_sha256 || hash(result.basePayload.messages) !== row.original_prompt_sha256) {
             throw new Error('Replay original production prompt mismatch');
           }
-          const costs = observedCost(data, model, prices, reservation);
-          row.status = 'ok';
-          row.actual_model = data.model ?? null;
-          row.response_id = data.id ?? null;
-          row.usage = data.usage ?? null;
-          row.finish_reason = data.choices?.[0]?.finish_reason ?? null;
+          row.classification_errors = result.stageErrors;
+          row.status = Object.keys(result.stageErrors).length ? 'error' : 'ok';
+          if (row.status === 'error') row.error = 'AI_RESPONSE_REJECTED';
           row.strict_json = result.strictJson;
           row.raw_json_format = result.rawJsonFormat;
           row.strict_schema = result.strictSchema;
+          row.schema_issues = result.schemaIssues;
           row.raw_flags_valid = result.rawFlagsValid;
           row.raw_json = result.rawJson;
           row.raw_label = result.rawLabel;
@@ -513,22 +574,17 @@ async function main() {
           row.classified_label = result.classifiedLabel;
           row.final_label = result.finalLabel;
           row.final_worker_status = result.finalStatus;
-          // Preserve provider values verbatim: gateway cost field units/coverage
-          // can differ; configured per-token prices drive the spend estimate.
-          row.reported_top_level_cost = data.cost ?? null;
-          row.reported_usage_cost = data.usage?.cost ?? null;
-          row.accounted_usd = costs.accountedUsd;
-          row.cost_basis = costs.basis;
-          row.usage_estimate_usd = costs.usageEstimateUsd;
-          if (costs.accountedUsd > reservation.usd) stopped = 'reported_usage_exceeded_reservation';
-          const validResult = result.strictSchema && row.finish_reason !== 'length';
+          const validResult = row.status === 'ok' && result.strictSchema && row.finish_reason !== 'length';
           consecutiveFailures.set(model, validResult ? 0 : consecutiveFailures.get(model) + 1);
         } catch (error) {
           row.status = 'error';
-          row.elapsed_ms = Math.round(performance.now() - t0);
+          row.elapsed_ms ??= Math.round(performance.now() - t0);
           row.error = controller.signal.aborted ? 'TIMEOUT_BILLING_UNKNOWN' :
-            /^HTTP_\d+$/.test(error.message) ? error.message : 'REQUEST_OR_REPLAY_ERROR';
-          row.accounted_usd = reservation.usd;
+            /^HTTP_\d+$/.test(error.message) ? error.message :
+              errorPhase === 'response_envelope' ? 'INVALID_RESPONSE_ENVELOPE' :
+                errorPhase === 'replay' ? 'REPLAY_INVARIANT_ERROR' : 'REQUEST_OR_REPLAY_ERROR';
+          if (errorPhase === 'response_envelope') row.schema_issues = ['invalid_response_envelope'];
+          row.accounted_usd = Math.max(row.accounted_usd ?? 0, reservation.usd);
           row.cost_basis = 'error_reserved_maximum_billing_unknown';
           consecutiveFailures.set(model, consecutiveFailures.get(model) + 1);
           // Authentication/payment/rate failures are shared state, not bad cases.
