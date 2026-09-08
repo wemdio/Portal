@@ -51,7 +51,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function reviewCells(row: Record<string, unknown>): Record<string, string> {
   const decision = isRecord(row._ve_relevance) ? row._ve_relevance : null;
   const status = decision?.status;
-  const statusLabel = status === 'needs_review' ? 'Требует уточнения'
+  const statusLabel = status === 'needs_review' ? 'Недостаточно подтверждённых данных'
     : status === 'error' ? 'Техническая ошибка проверки'
       : status === 'irrelevant' || row._low_relevance === true ? 'Не подходит этой гипотезе'
         : row._relevance_unchecked === true ? 'Релевантность не подтверждена'

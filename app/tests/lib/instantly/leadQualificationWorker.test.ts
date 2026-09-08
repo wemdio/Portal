@@ -862,7 +862,7 @@ describe('pollAndQualifyReplies', () => {
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
       expect.objectContaining({
         instantly_email_id: 'owner-cas-email',
-        status: 'needs_review',
+        status: 'pending',
         ai_reason: expect.stringContaining('Reply ownership deferred'),
       }),
     ]);
@@ -954,7 +954,7 @@ describe('pollAndQualifyReplies', () => {
 
     const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
     expect(rows).toHaveLength(1);
-    expect(rows[0].status).toBe('needs_review');
+    expect(rows[0].status).toBe('pending');
     expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
   });
 
@@ -1512,8 +1512,8 @@ describe('pollAndQualifyReplies', () => {
 
   // «Слепые» письма (кейс NAIS→KIRA.PW 10.07): нашего ящика нет в To/CC —
   // скрытая копия / чужое письмо с домена лида, приклеенное Instantly к
-  // кампании. Не lead-алерт, а needs_review без пинга и без вызова ИИ.
-  it('routes emails not addressed to our mailbox (BCC/stray) to needs_review without AI or alert', async () => {
+  // кампании. Не lead-алерт, а pending без пинга и без вызова ИИ.
+  it('routes emails not addressed to our mailbox (BCC/stray) to pending without AI or alert', async () => {
     listEmails.mockResolvedValue({
       items: [
         replyEmail({
@@ -1534,7 +1534,7 @@ describe('pollAndQualifyReplies', () => {
     expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
     const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
     expect(rows).toHaveLength(1);
-    expect(rows[0].status).toBe('needs_review');
+    expect(rows[0].status).toBe('pending');
     expect(String(rows[0].ai_reason)).toContain('нет в To/CC');
   });
 
@@ -2011,7 +2011,7 @@ describe('pollAndQualifyReplies', () => {
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
       expect.objectContaining({
         instantly_email_id: 'transient-email',
-        status: 'needs_review',
+        status: 'pending',
         ai_confidence: 0,
       }),
     ]);
@@ -2039,7 +2039,7 @@ describe('pollAndQualifyReplies', () => {
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
       expect.objectContaining({
         instantly_email_id: 'requesty-balance-email',
-        status: 'needs_review',
+        status: 'pending',
         ai_confidence: 0,
       }),
     ]);
@@ -2126,7 +2126,7 @@ describe('pollAndQualifyReplies', () => {
 
     expect(qualifyReply).not.toHaveBeenCalled();
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
-      expect.objectContaining({ instantly_email_id: 'deferred-email', status: 'needs_review' }),
+      expect.objectContaining({ instantly_email_id: 'deferred-email', status: 'pending' }),
     ]);
   });
 
@@ -2144,7 +2144,7 @@ describe('pollAndQualifyReplies', () => {
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
       expect.objectContaining({
         instantly_email_id: 'brief-deferred-email',
-        status: 'needs_review',
+        status: 'pending',
       }),
     ]);
   });
@@ -2153,7 +2153,7 @@ describe('pollAndQualifyReplies', () => {
   // наших клиентов написал НОВОЕ письмо на ящик клиента A (To=eaccount, поэтому
   // BCC-guard молчит), а Instantly приклеил его по домену отправителя к
   // кампании клиента B. Детектор: eaccount ≠ ящики, писавшие лиду в треде.
-  it('routes cross-client domain-matched emails (arrived at another client mailbox) to needs_review without AI or alert', async () => {
+  it('routes cross-client domain-matched emails (arrived at another client mailbox) to pending without AI or alert', async () => {
     fetchThreadContext.mockResolvedValue({
       replyEmail: replyEmail({ id: 'cross-email' }),
       threadEmails: [
@@ -2191,7 +2191,7 @@ describe('pollAndQualifyReplies', () => {
     expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
     const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
     expect(rows).toHaveLength(1);
-    expect(rows[0].status).toBe('needs_review');
+    expect(rows[0].status).toBe('pending');
     expect(String(rows[0].ai_reason)).toContain('kirill@kira-aggregator.ru');
     expect(String(rows[0].ai_reason)).toContain('lyamina@ritso-contact.ru');
   });
@@ -2227,7 +2227,7 @@ describe('pollAndQualifyReplies', () => {
     expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
     const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
     expect(rows).toHaveLength(1);
-    expect(rows[0].status).toBe('needs_review');
+    expect(rows[0].status).toBe('pending');
     expect(String(rows[0].ai_reason)).toContain('kirill@kira-aggregator.ru');
   });
 
@@ -2446,7 +2446,7 @@ describe('pollAndQualifyReplies', () => {
     ).toHaveLength(0);
   });
 
-  it('keeps an exact-mailbox conflict between two project campaigns in needs_review when no parent outbound matches', async () => {
+  it('keeps an exact-mailbox conflict between two project campaigns in pending when no parent outbound matches', async () => {
     installMailboxOwnershipConflictFixture();
 
     const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
@@ -2464,7 +2464,7 @@ describe('pollAndQualifyReplies', () => {
         .map((row) => row.user_id),
     }).toEqual({
       processed: 1,
-      statuses: ['needs_review'],
+      statuses: ['pending'],
       aiCalls: 0,
       telegramCalls: 0,
       notificationRecipients: [],
@@ -2551,7 +2551,7 @@ describe('pollAndQualifyReplies', () => {
 
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
       expect.objectContaining({
-        status: 'needs_review',
+        status: 'pending',
         ai_reason: expect.stringContaining(OWNERSHIP_REVIEW_REASON_PREFIX),
       }),
     ]);
@@ -2600,7 +2600,7 @@ describe('pollAndQualifyReplies', () => {
     expect(qualifyReply).not.toHaveBeenCalled();
   });
 
-  it('keeps a mailbox configured in both the provider and another project in needs_review', async () => {
+  it('keeps a mailbox configured in both the provider and another project in pending', async () => {
     const { providerCampaignId, candidateCampaignIds } =
       installMailboxOwnershipConflictFixture();
     getAccountCampaignMappings.mockResolvedValue([
@@ -2618,7 +2618,7 @@ describe('pollAndQualifyReplies', () => {
       aiCalls: qualifyReply.mock.calls.length,
       telegramCalls: sendLeadTelegramAlert.mock.calls.length,
     }).toEqual({
-      statuses: ['needs_review'],
+      statuses: ['pending'],
       aiCalls: 0,
       telegramCalls: 0,
     });
@@ -2660,7 +2660,7 @@ describe('pollAndQualifyReplies', () => {
       aiCalls: qualifyReply.mock.calls.length,
       telegramCalls: sendLeadTelegramAlert.mock.calls.length,
     }).toEqual({
-      statuses: ['needs_review'],
+      statuses: ['pending'],
       aiCalls: 0,
       telegramCalls: 0,
     });
@@ -2959,7 +2959,7 @@ describe('pollAndQualifyReplies', () => {
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
       expect.objectContaining({
         instantly_email_id: inbound.id,
-        status: 'needs_review',
+        status: 'pending',
         ai_reason: expect.stringContaining(TRANSIENT_RETRY_REASON_PREFIX),
       }),
     ]);
@@ -2974,7 +2974,7 @@ describe('pollAndQualifyReplies', () => {
       expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
         expect.objectContaining({
           instantly_email_id: inbound.id,
-          status: 'needs_review',
+          status: 'pending',
         }),
       ]);
       expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
@@ -3033,7 +3033,7 @@ describe('pollAndQualifyReplies', () => {
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
       expect.objectContaining({
         instantly_email_id: 'mapping-error-reply',
-        status: 'needs_review',
+        status: 'pending',
         error_message: expect.stringContaining('Unexpected end of JSON input'),
       }),
     ]);
@@ -3069,7 +3069,7 @@ describe('pollAndQualifyReplies', () => {
       expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
         expect.objectContaining({
           instantly_email_id: inbound.id,
-          status: 'needs_review',
+          status: 'pending',
           webhook_event_id: 'ownership-defer-event',
         }),
       ]);
@@ -3082,7 +3082,7 @@ describe('pollAndQualifyReplies', () => {
           maxAgeMs: 24 * 60 * 60 * 1000,
         })).toBe(1);
         expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
-          expect.objectContaining({ status: 'needs_review' }),
+          expect.objectContaining({ status: 'pending' }),
         ]);
       }
 
@@ -3187,7 +3187,7 @@ describe('pollAndQualifyReplies', () => {
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
       expect.objectContaining({
         instantly_email_id: 'criteria-defer-reply',
-        status: 'needs_review',
+        status: 'pending',
         webhook_event_id: 'criteria-defer-event',
       }),
     ]);
@@ -3335,7 +3335,7 @@ describe('pollAndQualifyReplies', () => {
     const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
     expect(await pollAndQualifyReplies()).toBe(1);
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
-      expect.objectContaining({ status: 'needs_review' }),
+      expect.objectContaining({ status: 'pending' }),
     ]);
     expect(qualifyReply).not.toHaveBeenCalled();
     expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
@@ -3343,6 +3343,56 @@ describe('pollAndQualifyReplies', () => {
       ([params]) => Boolean((params as { search?: string }).search),
     );
     expect(ownershipCalls).toHaveLength(2);
+
+    // Recovery may inspect past the fresh-reply budget, but only a complete
+    // bounded history can prove ownership. A conflict on page 3 stays closed.
+    for (const conflicting of [false, true]) {
+      jest.resetModules();
+      const fixture = installMailboxOwnershipConflictFixture();
+      // The catalog has now converged; stale-mapping deferral is a separate
+      // guard from the deeper bounded evidence lookup exercised here.
+      getAccountCampaignMappings.mockResolvedValue([
+        { campaign_id: fixture.providerCampaignId, status: 3 },
+        ...fixture.candidateCampaignIds.map((campaign_id) => ({ campaign_id, status: 1 })),
+      ]);
+      const { resolveEffectiveReplyOwner } = await import('@/lib/instantly/replyOwnershipResolver');
+      listEmails.mockClear();
+      listEmails.mockImplementation(async (params: {
+        search?: string;
+        starting_after?: string;
+      }) => {
+        if (!params.search) return { items: [], next_starting_after: null };
+        if (!params.starting_after) {
+          return { items: [], next_starting_after: 'ownership-page-2' };
+        }
+        if (params.starting_after === 'ownership-page-2') {
+          return { items: [], next_starting_after: 'ownership-page-3' };
+        }
+        return {
+          items: [candidateParent, ...(conflicting ? [{
+            ...candidateParent,
+            id: 'third-page-competing-parent',
+            campaign_id: candidateCampaignIds[1],
+          }] : [])],
+          next_starting_after: null,
+        };
+      });
+      const result = await resolveEffectiveReplyOwner({
+        db: mockInstantlyDb! as unknown as Parameters<typeof resolveEffectiveReplyOwner>[0]['db'],
+        reply: fixture.inbound,
+        providerCampaignId: fixture.providerCampaignId,
+        leadEmail: fixture.inbound.from_address_email!,
+        accountId: 'main',
+        evidenceMode: 'recovery',
+      });
+      expect(result).toEqual(expect.objectContaining(conflicting
+        ? { status: 'ambiguous', reason: expect.stringContaining('2 distinct or unknown owners') }
+        : { status: 'resolved', effectiveCampaignId: candidateCampaignIds[0] }));
+      expect(listEmails.mock.calls.filter(([params]) => Boolean(params.search))).toHaveLength(3);
+      for (const [, options] of listEmails.mock.calls) {
+        expect(options).toEqual(expect.objectContaining({ retryRateLimits: false }));
+      }
+    }
   });
 
   it('trusts the current provider campaign when its exact-mailbox thread has a strong parent despite stale cross-owner mailbox history', async () => {
@@ -3574,7 +3624,7 @@ describe('pollAndQualifyReplies', () => {
       expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
     });
 
-    it('reopens a recent legacy terminal transient row and alerts exactly once', async () => {
+    it('recovers an old technical row only in the cold lane without starving behind permanent errors', async () => {
       installOwnershipReviewRetryFixture({
         enforceQueryWindows: true,
         row: {
@@ -3583,8 +3633,8 @@ describe('pollAndQualifyReplies', () => {
           ai_confidence: null,
           error_message:
             'Reply ownership deferred for ownership-email: lead criteria storage unavailable',
-          created_at: '2026-08-24T17:00:00.000Z',
-          updated_at: '2026-08-24T17:00:00.000Z',
+          created_at: '2026-07-01T17:00:00.000Z',
+          updated_at: '2026-07-01T17:00:00.000Z',
         },
       });
       await mockInstantlyDb!.from('instantly_lead_qualifications').insert(
@@ -3594,7 +3644,7 @@ describe('pollAndQualifyReplies', () => {
           lead_email: `permanent-${index}@example.com`,
           instantly_email_id: `permanent-email-${index}`,
           status: 'error',
-          error_message: 'Cannot find JSON object in AI response',
+          error_message: 'Malformed webhook payload: missing lead email',
           created_at: `2026-08-24T17:30:00.${String(index).padStart(3, '0')}Z`,
           updated_at: `2026-08-24T17:30:00.${String(index).padStart(3, '0')}Z`,
         })),
@@ -3603,9 +3653,20 @@ describe('pollAndQualifyReplies', () => {
       const { reprocessOwnershipReviewRows } = await import(
         '@/lib/instantly/leadQualificationWorker'
       );
+      // Old technical failures must not be reclassified as negative or expire:
+      // the hot lane leaves them intact; the slow lane still reaches them.
       expect(await reprocessOwnershipReviewRows({
         now: retryNow,
         minRetryAgeMs: 0,
+      })).toBe(0);
+      expect(getEmail).not.toHaveBeenCalled();
+      expect(mockInstantlyDb!.getRows('instantly_lead_qualifications').find(
+        (row) => row.id === 'ownership-review-qualification',
+      )?.status).toBe('error');
+      expect(await reprocessOwnershipReviewRows({
+        now: retryNow,
+        minRetryAgeMs: 0,
+        lane: 'cold',
       })).toBe(1);
       const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
       expect(rows).toHaveLength(131);
@@ -3622,17 +3683,27 @@ describe('pollAndQualifyReplies', () => {
       expect(await reprocessOwnershipReviewRows({
         now: new Date('2026-08-24T18:01:00.000Z'),
         minRetryAgeMs: 0,
+        lane: 'cold',
       })).toBe(0);
       expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
     });
 
     it('does not reopen a permanent legacy error row', async () => {
+      // The legacy SQL filter uses case-sensitive NOT LIKE, including NULL
+      // and escaped wildcard semantics; the shared mock must not widen it.
+      const likeDb = createMockSupabase({ tables: { reasons: [
+        { reason: 'prefix_A' }, { reason: 'Prefix_A' }, { reason: 'prefix\nA' }, { reason: null },
+      ] } });
+      expect((await likeDb.from('reasons').select().not('reason', 'like', 'prefix%A')).data)
+        .toEqual([{ reason: 'Prefix_A' }]);
+      expect((await likeDb.from('reasons').select().not('reason', 'like', 'prefix\\_A')).data)
+        .toEqual([{ reason: 'Prefix_A' }, { reason: 'prefix\nA' }]);
       installOwnershipReviewRetryFixture({
         row: {
           status: 'error',
           ai_reason: null,
           ai_confidence: null,
-          error_message: 'Cannot find JSON object in AI response',
+          error_message: 'Malformed webhook payload: missing lead email',
         },
       });
 
@@ -3726,7 +3797,7 @@ describe('pollAndQualifyReplies', () => {
       expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
         expect.objectContaining({
           id: 'ownership-review-qualification',
-          status: 'needs_review',
+          status: 'pending',
           ai_reason: expect.stringContaining('Не удалось однозначно определить'),
           reply_out_of_campaign: true,
           eaccount: 'julia@enagency.example',
@@ -3844,75 +3915,121 @@ describe('pollAndQualifyReplies', () => {
       );
     });
 
-    it('skips in-app and Telegram delivery when another worker already claimed the qualification', async () => {
-      installOwnershipReviewRetryFixture({ verdict: 'lead' });
-      mockMainDb = createMockSupabase({
-        tables: {
-          projects: [
-            { id: 'project-1', client: 'ENagency', specialist_user_id: 'specialist-1' },
-          ],
-          profiles: [
-            { id: 'specialist-1', full_name: 'Глеб', email: 'gleb@example.com' },
-          ],
-          telegram_links: [
-            { user_id: 'specialist-1', telegram_id: '428599712', telegram_username: null },
-          ],
-          notifications: [],
-          deadline_notification_log: [{
-            id: 'existing-delivery-claim',
-            entity_type: 'lead_qualification',
-            entity_id: 'ownership-review-qualification',
-            level: 'specialist',
-            tg_sent: true,
-          }],
-        },
-        errorInserts: {
-          deadline_notification_log: {
-            code: '23505',
-            message: 'duplicate key value violates unique constraint',
+    it('does not replay qualifications already delivered or manually forwarded', async () => {
+      for (const handledBy of ['telegram', 'forwarded'] as const) {
+        installOwnershipReviewRetryFixture({ verdict: 'lead', enforceQueryWindows: true });
+        getEmail.mockClear();
+        qualifyReply.mockClear();
+        sendLeadTelegramAlert.mockClear();
+        mockMainDb = createMockSupabase({
+          tables: {
+            projects: [
+              { id: 'project-1', client: 'ENagency', specialist_user_id: 'specialist-1' },
+            ],
+            profiles: [
+              { id: 'specialist-1', full_name: 'Глеб', email: 'gleb@example.com' },
+            ],
+            telegram_links: [
+              { user_id: 'specialist-1', telegram_id: '428599712', telegram_username: null },
+            ],
+            notifications: [],
+            deadline_notification_log: handledBy === 'telegram' ? [{
+              id: 'existing-delivery-claim',
+              entity_type: 'lead_qualification',
+              entity_id: 'ownership-review-qualification',
+              level: 'specialist',
+              tg_sent: true,
+            }] : [],
           },
-        },
-      });
-      const { reprocessOwnershipReviewRows } = await import(
-        '@/lib/instantly/leadQualificationWorker'
-      );
+          errorInserts: {
+            deadline_notification_log: {
+              code: '23505',
+              message: 'duplicate key value violates unique constraint',
+            },
+          },
+        });
+        if (handledBy === 'forwarded') {
+          await mockInstantlyDb!.from('client_forwarded_leads').insert({
+            id: 'already-forwarded', qualification_id: 'ownership-review-qualification',
+          });
+        }
+        const { reprocessOwnershipReviewRows } = await import(
+          '@/lib/instantly/leadQualificationWorker'
+        );
 
-      await reprocessOwnershipReviewRows({ now: retryNow, minRetryAgeMs: 0 });
+        await reprocessOwnershipReviewRows({ now: retryNow, minRetryAgeMs: 0 });
 
-      expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0]).toEqual(
-        expect.objectContaining({ status: 'lead' }),
-      );
-      expect(mockMainDb!.getRows('deadline_notification_log')).toHaveLength(1);
-      expect(mockMainDb!.getRows('notifications')).toHaveLength(0);
-      expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+        expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0]).toEqual(
+          expect.objectContaining({ status: 'needs_review', updated_at: retryNow.toISOString() }),
+        );
+        expect(mockMainDb!.getRows('deadline_notification_log')).toHaveLength(handledBy === 'telegram' ? 1 : 0);
+        expect(mockMainDb!.getRows('notifications')).toHaveLength(0);
+        expect(getEmail).not.toHaveBeenCalled();
+        expect(qualifyReply).not.toHaveBeenCalled();
+        expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+      }
     });
 
-    it('ignores ordinary needs_review rows that were not created by ownership ambiguity', async () => {
-      installOwnershipReviewRetryFixture({
-        row: {
-          ai_reason: 'Ответ «расскажите подробнее» требует ручной проверки.',
-          ai_confidence: 0,
-        },
-      });
-      const { reprocessOwnershipReviewRows } = await import(
-        '@/lib/instantly/leadQualificationWorker'
-      );
+    it('replays historical semantic reviews only with explicit opt-in and keeps them binary', async () => {
+      const previous = process.env.INSTANTLY_LEAD_QUAL_LEGACY_SEMANTIC_DRAIN_ENABLED;
+      try {
+        for (const status of ['needs_review', 'objection'] as const) {
+          delete process.env.INSTANTLY_LEAD_QUAL_LEGACY_SEMANTIC_DRAIN_ENABLED;
+          installOwnershipReviewRetryFixture({
+            verdict: 'not_lead',
+            enforceQueryWindows: true,
+            row: {
+              status,
+              ai_reason: 'Ответ «расскажите подробнее» требует ручной проверки.',
+              ai_confidence: 0.6,
+              created_at: '2026-07-01T12:00:05.000Z',
+              updated_at: '2026-07-01T12:00:05.000Z',
+            },
+          });
+          getEmail.mockClear();
+          qualifyReply.mockClear();
+          sendLeadTelegramAlert.mockClear();
+          sendClientReplyTelegram.mockClear();
+          // An enabled all-replies client subscription would normally send a DM.
+          // Historical semantic replay must not repeat that already-handled reply.
+          await mockMainDb!.from('projects').update({ client_user_id: 'client-1' }).eq('id', 'project-1');
+          await mockInstantlyDb!.from('client_reply_telegram_links').insert({
+            client_user_id: 'client-1', chat_id: 111, enabled: true, leads_only: false,
+          });
+          const { reprocessOwnershipReviewRows } = await import(
+            '@/lib/instantly/leadQualificationWorker'
+          );
 
-      const processed = await reprocessOwnershipReviewRows({
-        now: retryNow,
-        minRetryAgeMs: 0,
-      });
+          const processed = await reprocessOwnershipReviewRows({
+            now: retryNow,
+            minRetryAgeMs: 0,
+            lane: 'cold',
+          });
 
-      expect(processed).toBe(0);
-      expect(getEmail).not.toHaveBeenCalled();
-      expect(qualifyReply).not.toHaveBeenCalled();
-      expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
-      expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0]).toEqual(
-        expect.objectContaining({ status: 'needs_review' }),
-      );
+          expect(processed).toBe(0);
+          expect(getEmail).not.toHaveBeenCalled();
+          expect(qualifyReply).not.toHaveBeenCalled();
+          expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+          expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0]).toEqual(
+            expect.objectContaining({ status, ai_confidence: 0.6 }),
+          );
+          process.env.INSTANTLY_LEAD_QUAL_LEGACY_SEMANTIC_DRAIN_ENABLED = 'true';
+          expect(await reprocessOwnershipReviewRows({ now: retryNow, minRetryAgeMs: 0, lane: 'cold' })).toBe(1);
+          expect(getEmail).toHaveBeenCalledTimes(1);
+          expect(qualifyReply).toHaveBeenCalledTimes(1);
+          expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0]).toEqual(
+            expect.objectContaining({ status: 'not_lead', id: 'ownership-review-qualification' }),
+          );
+          expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+          expect(sendClientReplyTelegram).not.toHaveBeenCalled();
+        }
+      } finally {
+        if (previous === undefined) delete process.env.INSTANTLY_LEAD_QUAL_LEGACY_SEMANTIC_DRAIN_ENABLED;
+        else process.env.INSTANTLY_LEAD_QUAL_LEGACY_SEMANTIC_DRAIN_ENABLED = previous;
+      }
     });
 
-    it('returns unresolved ownership to needs_review with backoff and no alert', async () => {
+    it('returns unresolved ownership to pending with backoff and no alert', async () => {
       installOwnershipReviewRetryFixture({ ambiguous: true });
       const { reprocessOwnershipReviewRows } = await import(
         '@/lib/instantly/leadQualificationWorker'
@@ -3933,7 +4050,7 @@ describe('pollAndQualifyReplies', () => {
       expect(beforeBackoff).toBe(0);
       expect(rowAfterFirst).toEqual(expect.objectContaining({
         id: 'ownership-review-qualification',
-        status: 'needs_review',
+        status: 'pending',
         updated_at: retryNow.toISOString(),
       }));
       expect(String(rowAfterFirst.ai_reason).startsWith(
@@ -4022,7 +4139,7 @@ describe('pollAndQualifyReplies', () => {
       expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
     });
 
-    it('releases a transient provider failure back to needs_review with the same backoff', async () => {
+    it('releases a transient provider failure back to pending with the same backoff', async () => {
       const clock = jest.spyOn(Date, 'now');
       try {
         for (const message of [
@@ -4061,11 +4178,11 @@ describe('pollAndQualifyReplies', () => {
           expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
             expect.objectContaining({
               id: 'ownership-review-qualification',
-              status: 'needs_review',
+              status: 'pending',
               updated_at: retryNow.toISOString(),
               error_message: expect.stringContaining(message),
             }),
-            expect.objectContaining(waitingRow),
+            expect.objectContaining({ ...waitingRow, status: 'pending' }),
           ]);
           expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
 
@@ -4199,14 +4316,16 @@ describe('pollAndQualifyReplies', () => {
         minRetryAgeMs: 0,
         processingLeaseMs: 30 * 60_000,
       });
-      while (getEmail.mock.calls.length < 1) await Promise.resolve();
+      for (let spin = 0; spin < 500 && getEmail.mock.calls.length < 1; spin++) await Promise.resolve();
+      expect(getEmail).toHaveBeenCalledTimes(1);
 
       const currentRun = worker.reprocessOwnershipReviewRows({
         now: secondAttemptAt,
         minRetryAgeMs: 0,
         processingLeaseMs: 30 * 60_000,
       });
-      while (getEmail.mock.calls.length < 2) await Promise.resolve();
+      for (let spin = 0; spin < 500 && getEmail.mock.calls.length < 2; spin++) await Promise.resolve();
+      expect(getEmail).toHaveBeenCalledTimes(2);
 
       releaseFirstGetEmail(inbound);
       await staleRun;
@@ -4280,7 +4399,7 @@ describe('pollAndQualifyReplies', () => {
         expect.arrayContaining([
           expect.objectContaining({
             id: 'blocked-ownership-row',
-            status: 'needs_review',
+            status: 'pending',
             updated_at: retryNow.toISOString(),
           }),
           expect.objectContaining({
@@ -4297,7 +4416,7 @@ describe('pollAndQualifyReplies', () => {
         ),
       );
       expect(rotation?.filters).toEqual(expect.arrayContaining([
-        expect.objectContaining({ column: 'status', op: 'eq', value: 'needs_review' }),
+        expect.objectContaining({ column: 'status', op: 'eq', value: 'pending' }),
         expect.objectContaining({ column: 'updated_at', op: 'eq', value: blockedUpdatedAt }),
       ]));
     });
@@ -4672,6 +4791,12 @@ describe('pollAndQualifyReplies', () => {
 
     it('retries a failed delivery after backoff and skips a completed delivery', async () => {
       installLeadNotificationRecoveryFixture({
+        // A cold replay can qualify an old reply now; its first failed alert
+        // must remain discoverable through updated_at, not only created_at.
+        qualificationRow: {
+          created_at: '2026-07-01T17:00:00.000Z',
+          updated_at: '2026-08-24T17:30:00.000Z',
+        },
         logRow: {
           id: 'failed-delivery-log',
           entity_type: 'lead_qualification',
@@ -4856,7 +4981,7 @@ describe('pollAndQualifyReplies', () => {
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
       expect.objectContaining({
         instantly_email_id: inbound.id,
-        status: 'needs_review',
+        status: 'pending',
         webhook_event_id: 'ownership-requeue-failed-event',
         error_message: expect.stringContaining('503'),
       }),
@@ -4947,7 +5072,7 @@ describe('pollAndQualifyReplies', () => {
 
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
       expect.objectContaining({
-        status: 'needs_review',
+        status: 'pending',
         ai_reason: expect.stringContaining('historical'),
       }),
     ]);
@@ -5221,7 +5346,7 @@ describe('pollAndQualifyReplies', () => {
     const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
     expect(await pollAndQualifyReplies()).toBe(1);
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual([
-      expect.objectContaining({ status: 'needs_review' }),
+      expect.objectContaining({ status: 'pending' }),
     ]);
     expect(qualifyReply).not.toHaveBeenCalled();
     expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
@@ -5335,7 +5460,7 @@ describe('pollAndQualifyReplies', () => {
 
     expect(qualifyReply).not.toHaveBeenCalled();
     const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
-    expect(rows[0]?.status).toBe('needs_review');
+    expect(rows[0]?.status).toBe('pending');
   });
 
   it('does not flag cross-client when the reply arrived at the same mailbox that mailed the lead', async () => {
@@ -5373,7 +5498,7 @@ describe('pollAndQualifyReplies', () => {
  * opts.outOfCampaign и обязан: (а) прокинуть флаг + eaccount в DM клиенту
  * (buildClientReplyMessage замокан как JSON.stringify(data) — видим сырой
  * payload), (б) записать новые колонки reply_out_of_campaign/eaccount во ВСЕХ
- * upsert'ах (lead / needs_review — единообразно).
+ * upsert'ах (lead / pending — единообразно).
  */
 describe('qualifyOneReply — сирота (outOfCampaign) из Others-контура', () => {
   beforeEach(() => {
@@ -5598,7 +5723,7 @@ describe('qualifyOneReply — сирота (outOfCampaign) из Others-конт�
     expect(rows[0].eaccount).toBeNull();
   });
 
-  it('guard-upsert («слепое» письмо → needs_review) тоже пишет новые колонки (единообразно)', async () => {
+  it('guard-upsert («слепое» письмо → pending) тоже пишет новые колонки (единообразно)', async () => {
     const { qualifyOneReply } = await import('@/lib/instantly/leadQualificationWorker');
     await qualifyOneReply(
       mockInstantlyDb! as unknown as Parameters<typeof qualifyOneReply>[0],
@@ -5622,7 +5747,7 @@ describe('qualifyOneReply — сирота (outOfCampaign) из Others-конт�
     expect(rows).toHaveLength(1);
     expect(rows[0]).toEqual(
       expect.objectContaining({
-        status: 'needs_review',
+        status: 'pending',
         reply_out_of_campaign: true,
         eaccount: 'sales@clientmail.ru',
       }),
@@ -6923,7 +7048,7 @@ describe('ownership retry page-budget quarantine — RED contract', () => {
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toEqual(
       expect.arrayContaining(oldRows.map((row) => expect.objectContaining({
         id: row.id,
-        status: 'needs_review',
+        status: 'pending',
         updated_at: row.updated_at,
       }))),
     );
