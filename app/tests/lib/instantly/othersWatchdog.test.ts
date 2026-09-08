@@ -469,7 +469,7 @@ describe('pollOthersOnce', () => {
     expect((qualifyOneReply.mock.calls[0][1] as Email).campaign_id).toBe('camp-velar');
   });
 
-  it('транзиентный сбой квалификации пишет durable needs_review, а не terminal error', async () => {
+  it('транзиентный сбой квалификации пишет durable pending, а не terminal error', async () => {
     qualifyOneReply.mockRejectedValue(new Error('Instantly API 503: overloaded'));
     const { pollOthersOnce } = await importWatchdog();
     const processed = await pollOthersOnce();
@@ -479,7 +479,7 @@ describe('pollOthersOnce', () => {
       expect.objectContaining({
         instantly_email_id: 'others-email-1',
         campaign_id: 'camp-velar',
-        status: 'needs_review',
+        status: 'pending',
         reply_out_of_campaign: true,
       }),
     ]);

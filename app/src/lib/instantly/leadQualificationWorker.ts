@@ -81,6 +81,9 @@ const OWNERSHIP_PAGE_BUDGET_REASON_FRAGMENT =
 const OWNERSHIP_PAGE_BUDGET_RETRY_BACKOFF_MS = 6 * 60 * 60 * 1000;
 const OWNERSHIP_PAGE_BUDGET_RETRY_INTERVAL_MS = 15 * 60 * 1000;
 const OWNERSHIP_PAGE_BUDGET_RETRY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const QUALIFICATION_COLD_RETRY_INTERVAL_MS = 30 * 60 * 1000;
+const QUALIFICATION_COLD_RETRY_BACKOFF_MS = 24 * 60 * 60 * 1000;
+const LEGACY_SEMANTIC_RETRY_TAG = '[legacy-semantic]';
 const LEAD_DELIVERY_RETRY_INTERVAL_MS = 15 * 60 * 1000;
 const LEAD_DELIVERY_RECENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const LEAD_DELIVERY_PENDING_LEASE_MS = 30 * 60 * 1000;
@@ -89,6 +92,7 @@ const LEAD_DELIVERY_RETRYING_ERROR = 'Lead notification retry in progress';
 const SPECIALIST_ALERT_CLAIM_RPC = 'claim_instantly_specialist_alert';
 let lastOwnershipReviewRetryAt = 0;
 let lastOwnershipPageBudgetRetryAt = 0;
+let lastQualificationColdRetryAt = 0;
 let ownershipRetryRunning = false;
 let ownershipRetryProviderPausedUntil = 0;
 let lastLeadDeliveryRetryAt = 0;
@@ -328,7 +332,7 @@ async function qualificationOwnerSnapshotSupported(
 /**
  * Persist a retryable qualification failure without poisoning the provider
  * email id. The ordinary poller deliberately deduplicates every existing row,
- * so transient failures live as a generated needs_review row and are resumed
+ * so transient failures live as a generated pending row and are resumed
  * by reprocessOwnershipReviewRows instead of becoming terminal after a few
  * fast worker ticks. The existing UNIQUE(instantly_email_id) is the concurrent
  * poll/webhook send-once fence; no extra retry table is needed.
@@ -373,7 +377,7 @@ export async function persistTransientQualificationRetry(
       reply_body: replyText || null,
       last_outbound_preview: lastOutboundText.slice(0, 300) || null,
       last_outbound_ue_type: options?.lastOutbound?.ue_type ?? null,
-      status: 'needs_review',
+      status: 'pending',
       proposal_seen: false,
       interest_signals: [],
       ai_reason: `${TRANSIENT_RETRY_REASON_PREFIX}${retrySourceTag} ${message}`.slice(0, 500),
@@ -1150,6 +1154,8 @@ export async function qualifyOneReply(
      * не меняется.
      */
     clientDmOnlyOnLead?: boolean;
+    /** Historical semantic replay may already have sent the broader reply DM. */
+    skipClientReplyNotification?: boolean;
     /**
      * «Сирота»: Instantly НЕ привязал письмо к кампании (лид ответил с
      * другого адреса своей компании, сломанные заголовки треда) — атрибуция
@@ -1169,6 +1175,8 @@ export async function qualifyOneReply(
     existingQualificationId?: string;
     /** Stable timestamp used for the retry lease/backoff and row update. */
     existingQualificationAttemptedAt?: string;
+    /** Recovery-only larger bounded proof; fresh polling keeps its normal cap. */
+    ownershipEvidenceMode?: 'recovery';
   },
 ): Promise<void> {
   const providerCampaignId = reply.campaign_id;
@@ -1183,6 +1191,9 @@ export async function qualifyOneReply(
   // показываем в DM — «в каком ящике искать ответ». Пустую строку схлопываем
   // в null, чтобы не плодить два представления отсутствия.
   const replyEaccount = (reply.eaccount ?? '').trim() || null;
+  // Keep the historical-client-DM fence through another pending ownership
+  // result. The next retry must not forget this was a semantic replay.
+  const replayTag = opts?.skipClientReplyNotification ? `${LEGACY_SEMANTIC_RETRY_TAG} ` : '';
 
   // Instantly может приклеить входящее к новой кампании того же lead, хотя
   // письмо продолжает старый диалог другого проекта. До критериев, ИИ и любых
@@ -1199,6 +1210,7 @@ export async function qualifyOneReply(
     // sent mail across candidate campaigns. Preserve that already-proven
     // parent even when the reply has no provider thread id or quoted body.
     trustPrefetchedParent: opts?.prefetchedParentMatched === true,
+    evidenceMode: opts?.ownershipEvidenceMode,
   });
   if (ownership.status === 'defer') {
     // Throw into the existing bounded retry machinery. A normal return would
@@ -1223,10 +1235,10 @@ export async function qualifyOneReply(
         reply_subject: reply.subject ?? null,
         reply_preview: replyText.slice(0, 300) || null,
         reply_body: replyText || null,
-        status: 'needs_review',
+        status: 'pending',
         proposal_seen: false,
         interest_signals: [],
-        ai_reason: `${OWNERSHIP_REVIEW_REASON_PREFIX} ${ownership.reason}. Автоматические уведомления и передача отключены до ручной проверки.`,
+        ai_reason: `${OWNERSHIP_REVIEW_REASON_PREFIX} ${replayTag}${ownership.reason}. Ожидается автоматическое восстановление доказательств владельца; уведомления отключены.`,
         ai_confidence: 0,
         instantly_email_id: reply.id,
         instantly_lead_id: null,
@@ -1241,7 +1253,7 @@ export async function qualifyOneReply(
     }
     workerLog(
       'warn',
-      `reply ownership ambiguous for ${reply.id ?? '?'} (provider campaign ${providerCampaignId}) — needs_review, no side effects`,
+      `reply ownership ambiguous for ${reply.id ?? '?'} (provider campaign ${providerCampaignId}) — pending, no side effects`,
     );
     return;
   }
@@ -1337,8 +1349,8 @@ export async function qualifyOneReply(
   // подробности у ДРУГОГО вендора (To = его адрес), письмо прилетело нам
   // скрытой копией/пересылкой, Instantly приклеил его к кампании по домену
   // лида, ИИ прочитал «расскажите подробнее» → ложный lead-пинг. Такие письма
-  // не глушим совсем (это всё же домен лида) — needs_review без пинга, пусть
-  // человек глянет. Fail-open: без eaccount или без To/CC в данных листинга
+  // не глушим совсем (это всё же домен лида) — pending без пинга, повторяем
+  // проверку адресатов после обновления данных. Без eaccount или To/CC
   // проверка невозможна — идём обычным путём.
   const ourMailbox = (effectiveReply.eaccount ?? '').trim().toLowerCase();
   if (ourMailbox) {
@@ -1364,10 +1376,10 @@ export async function qualifyOneReply(
           reply_subject: reply.subject ?? null,
           reply_preview: replyText.slice(0, 300) || null,
           reply_body: replyText || null,
-          status: 'needs_review',
+          status: 'pending',
           proposal_seen: false,
           interest_signals: [],
-          ai_reason: `Письмо не адресовано нашему ящику (${ourMailbox} нет в To/CC — скрытая копия или чужое письмо с домена лида). Автоматический вердикт ненадёжен, нужна ручная проверка.`,
+          ai_reason: `${OWNERSHIP_REVIEW_REASON_PREFIX} ${replayTag}Письмо не адресовано нашему ящику (${ourMailbox} нет в To/CC). Ожидается автоматическая повторная проверка адресатов.`,
           ai_confidence: 0,
           instantly_email_id: reply.id,
           instantly_lead_id: null,
@@ -1386,7 +1398,7 @@ export async function qualifyOneReply(
       }
       workerLog(
         'info',
-        `Stray email from ${fromLower} in campaign ${campaignId}: our mailbox ${ourMailbox} not in To/CC → needs_review, no alert`,
+        `Stray email from ${fromLower} in campaign ${campaignId}: our mailbox ${ourMailbox} not in To/CC → pending, no alert`,
       );
       return;
     }
@@ -1429,10 +1441,10 @@ export async function qualifyOneReply(
           reply_subject: reply.subject ?? null,
           reply_preview: replyText.slice(0, 300) || null,
           reply_body: replyText || null,
-          status: 'needs_review',
+          status: 'pending',
           proposal_seen: false,
           interest_signals: [],
-          ai_reason: `Письмо пришло в ящик ${ourMailbox}, а лиду в этой кампании писал ${[...outboundMailboxes].join(', ')} — Instantly привязал его по домену отправителя. Похоже, это ответ на рассылку ДРУГОГО клиента (чей ящик ${ourMailbox}) — проверьте и передайте его специалисту вручную.`,
+          ai_reason: `${OWNERSHIP_REVIEW_REASON_PREFIX} ${replayTag}Письмо пришло в ящик ${ourMailbox}, а в треде использовались ${[...outboundMailboxes].join(', ')}. Ожидается автоматическое восстановление исходного проекта.`,
           ai_confidence: 0,
           instantly_email_id: reply.id,
           instantly_lead_id: null,
@@ -1451,7 +1463,7 @@ export async function qualifyOneReply(
       }
       workerLog(
         'info',
-        `Cross-client email from ${fromLower}: arrived at ${ourMailbox}, campaign ${campaignId} thread was mailed by ${[...outboundMailboxes].join(', ')} → needs_review, no alert`,
+        `Cross-client email from ${fromLower}: arrived at ${ourMailbox}, campaign ${campaignId} thread was mailed by ${[...outboundMailboxes].join(', ')} → pending, no alert`,
       );
       return;
     }
@@ -1537,6 +1549,13 @@ export async function qualifyOneReply(
     prefetchedContext: ctx,
   }, accountId);
 
+  // A technical/ambiguous contract result must never become a negative verdict
+  // or a permanent manual-review row, even with an older/mocked classifier.
+  const customMatch = Boolean(cachedCriteria?.trim()) && result.customCriteriaMatched === true;
+  if (!customMatch && (result.needsReview !== false || typeof result.isLead !== 'boolean')) {
+    throw new Error('Automatic qualification failed after retries: non-binary classifier result');
+  }
+
   const campaignName = await resolveCampaignName(campaignId, accountId);
 
   let leadName: string | undefined;
@@ -1571,9 +1590,8 @@ export async function qualifyOneReply(
   // всегда является лидом, даже если провайдер одновременно вернул
   // needs_review=true. classifyWithAI уже нормализует эту пару, но worker не
   // должен снова потерять лид при несовместимом/замоканном результате.
-  if (Boolean(cachedCriteria?.trim()) && result.customCriteriaMatched === true) status = 'lead';
-  else if (result.needsReview) status = 'needs_review';
-  else if (result.isLead) status = 'lead';
+  if (customMatch || result.isLead) status = 'lead';
+  // Compatibility subtype of a final negative verdict, not a manual queue.
   else if (result.objectionHandleable) status = 'objection';
   else status = 'not_lead';
 
@@ -1754,13 +1772,14 @@ export async function qualifyOneReply(
   // short replies: a terse "ок"/"да" can be meaningful in an ongoing thread
   // (e.g. confirming a call time). Broader than the studio lead gate. Reuses the
   // qualifier's own machine-message guard (runs before AI, so noise costs no AI).
-  // `inserted?.id` (new qualification) is the send-once guard. Never throws.
+  // `inserted?.id` guards a new qualification. Historical semantic replay
+  // updates that row in place, so it explicitly suppresses the old reply DM.
   const replyForMachineClassification = result.threadContext?.replyEmail ?? effectiveReply;
   const meaningfulForClient =
     !!replyText &&
     !classifyMachineReply(replyForMachineClassification) &&
     (!opts?.clientDmOnlyOnLead || status === 'lead');
-  if (inserted?.id && meaningfulForClient) {
+  if (inserted?.id && meaningfulForClient && !opts?.skipClientReplyNotification) {
     await notifyClientOfReply(db, campaignId, {
       campaignName,
       leadEmail,
@@ -1818,6 +1837,127 @@ export async function getCampaignsByAccountCached(): Promise<Map<string, Set<str
   return byAccount;
 }
 
+function legacySemanticDrainEnabled(): boolean {
+  return /^(?:1|true|yes|on)$/i.test(
+    process.env.INSTANTLY_LEAD_QUAL_LEGACY_SEMANTIC_DRAIN_ENABLED?.trim() ?? '',
+  );
+}
+
+/** A read failure is not permission to replay a potentially handled reply. */
+async function qualificationRecoveryDisposition(
+  db: NonNullable<typeof supabaseAdmin>,
+  qualificationId: string,
+  nowMs: number,
+): Promise<'ready' | 'forwarded' | 'notified' | 'delivery_in_flight' | 'unavailable'> {
+  const { data: forwarded, error } = await db
+    .from('client_forwarded_leads')
+    .select('id')
+    .eq('qualification_id', qualificationId)
+    .limit(1);
+  if (error) return 'unavailable';
+  if (forwarded?.length) return 'forwarded';
+  if (!supabaseMain) return 'unavailable';
+  const { data: delivery, error: deliveryError } = await supabaseMain
+    .from('deadline_notification_log')
+    .select('tg_sent, tg_sent_at, tg_message_id, created_at')
+    .eq('entity_type', 'lead_qualification')
+    .eq('entity_id', qualificationId)
+    .eq('level', 'specialist')
+    .maybeSingle();
+  if (deliveryError) return 'unavailable';
+  if (delivery?.tg_sent === true || delivery?.tg_message_id != null) return 'notified';
+  if (delivery && delivery.tg_sent == null) {
+    const stateAtMs = Date.parse(delivery.tg_sent_at ?? delivery.created_at ?? '');
+    const pendingLeaseMs = Math.max(60_000, envNumber(
+      'INSTANTLY_LEAD_DELIVERY_PENDING_LEASE_MS', LEAD_DELIVERY_PENDING_LEASE_MS,
+    ));
+    if (!Number.isFinite(stateAtMs) || stateAtMs > nowMs - pendingLeaseMs) {
+      return 'delivery_in_flight';
+    }
+    // The old lease expired. Do not clear/recreate its delivery log: after
+    // qualification, the existing delivery reconciler's CAS owns the retry.
+  }
+  return 'ready';
+}
+
+// Match technical legacy reasons in SQL BEFORE LIMIT. Ordinary semantic review
+// must neither be silently reopened nor starve technical adoption when opt-in is off.
+const LEGACY_TECHNICAL_RETRY_FILTER = [
+  `ai_reason.ilike.${OWNERSHIP_REVIEW_REASON_PREFIX}%`,
+  `ai_reason.ilike.${TRANSIENT_RETRY_REASON_PREFIX}%`,
+  'ai_reason.ilike.Не удалось восстановить контекст переписки%',
+  'ai_reason.ilike.Письмо не адресовано нашему ящику%',
+  'ai_reason.ilike.Письмо пришло в ящик%',
+  ...[
+    'invalid JSON', 'невалидн%JSON', 'некорректн%JSON',
+    'Cannot find JSON object in AI response', 'AI response hit max_tokens',
+    'empty AI response', 'AI вернул JSON с управляющими символами',
+  ].flatMap((text) => [
+    `ai_reason.ilike.%${text}%`, `error_message.ilike.%${text}%`,
+  ]),
+  ...[
+    '402', '429', '500', '502', '503', '504', 'overload', 'rate%limit',
+    'fetch failed', 'network error', 'timed%out', 'timeout', 'ECONN', 'EAI_AGAIN',
+    'socket hang up', 'aborted', 'failed after retries', 'insufficient%credit',
+    'insufficient%balance', 'balance is too low', 'payment required',
+    'out of credits', 'spend%limit', 'billing limit',
+    'Automatic qualification retry window expired', 'Reply ownership deferred',
+  ].map((text) => `error_message.ilike.%${text}%`),
+].join(',');
+
+/** Bounded adoption, never a bulk needs_review -> negative rewrite. */
+async function adoptLegacyQualificationRetries(
+  db: NonNullable<typeof supabaseAdmin>,
+  options: {
+    nowIso: string; cutoffIso: string; retryCutoffIso: string;
+    cold: boolean; semantic: boolean; limit: number;
+  },
+): Promise<void> {
+  let query = db.from('instantly_lead_qualifications')
+    .select('id, status, instantly_email_id, ai_reason, error_message, updated_at')
+    .in('status', options.semantic ? ['needs_review', 'objection'] : ['needs_review', 'error'])
+    .not('instantly_email_id', 'is', null)
+    .not('instantly_email_id', 'like', 'webhook:%');
+  if (!options.semantic) query = query.or(LEGACY_TECHNICAL_RETRY_FILTER);
+  query = options.cold
+    ? query.lt('created_at', options.cutoffIso)
+    : query.gte('created_at', options.cutoffIso);
+  const { data: candidates, error } = await query
+    .lte('updated_at', options.retryCutoffIso)
+    .order('updated_at', { ascending: true })
+    .order('id', { ascending: true })
+    .limit(options.limit);
+  if (error) {
+    workerLog('warn', 'qualification recovery: legacy adoption query unavailable');
+    return;
+  }
+  for (const row of candidates ?? []) {
+    const disposition = await qualificationRecoveryDisposition(db, row.id, Date.parse(options.nowIso));
+    // Rotate handled/unreadable rows without erasing their historical verdict,
+    // so they cannot monopolize every cold/legacy batch.
+    const previousReason = String(row.ai_reason ?? row.error_message ?? 'legacy qualification');
+    const generated = previousReason.startsWith(OWNERSHIP_REVIEW_REASON_PREFIX) ||
+      previousReason.startsWith(TRANSIENT_RETRY_REASON_PREFIX);
+    const reason = generated ? previousReason :
+      `${TRANSIENT_RETRY_REASON_PREFIX} ${options.semantic ? `${LEGACY_SEMANTIC_RETRY_TAG} ` : '[legacy-technical] '}${previousReason}`;
+    let update = db.from('instantly_lead_qualifications')
+      .update(disposition === 'ready' ? {
+        status: 'pending', ai_confidence: 0, ai_reason: reason.slice(0, 500),
+        // Preserve the original reply/row age and an already-due backoff.
+        updated_at: row.updated_at ?? options.nowIso,
+      } : { updated_at: options.nowIso })
+      .eq('id', row.id)
+      .eq('status', row.status);
+    update = row.updated_at ? update.eq('updated_at', row.updated_at) : update.is('updated_at', null);
+    const { error: adoptionError } = await update;
+    workerLog(adoptionError ? 'warn' : 'info', JSON.stringify({
+      event: 'qualification_retry_adoption', qualification_id: row.id,
+      source_status: row.status, state: adoptionError ? 'unavailable' : disposition,
+      lane: options.semantic ? 'legacy_semantic' : options.cold ? 'cold' : 'active',
+    }));
+  }
+}
+
 export interface OwnershipReviewRetryOptions {
   now?: Date;
   limit?: number;
@@ -1826,8 +1966,8 @@ export interface OwnershipReviewRetryOptions {
   processingLeaseMs?: number;
   /** Soft budget between rows; never abandons a claimed in-flight reply. */
   timeBudgetMs?: number;
-  /** Fast transient lane by default; page-budget uses its own tiny slow lane. */
-  lane?: 'active' | 'page_budget';
+  /** Old technical rows remain recoverable in a tiny, slow cold lane. */
+  lane?: 'active' | 'page_budget' | 'cold';
 }
 
 /**
@@ -1853,25 +1993,26 @@ export async function reprocessOwnershipReviewRows(
     ),
   ));
   const pageBudgetLane = options.lane === 'page_budget';
+  const coldLane = options.lane === 'cold';
   const limit = Math.max(
     1,
     Math.min(
-      5,
+      coldLane ? 1 : 5,
       options.limit ?? envNumber(
-        pageBudgetLane
+        coldLane ? 'INSTANTLY_QUALIFICATION_COLD_RETRY_BATCH' : pageBudgetLane
           ? 'INSTANTLY_OWNERSHIP_PAGE_BUDGET_RETRY_BATCH'
           : 'INSTANTLY_OWNERSHIP_RETRY_BATCH',
-        pageBudgetLane ? 1 : 5,
+        pageBudgetLane || coldLane ? 1 : 5,
       ),
     ),
   );
   const minRetryAgeMs = Math.max(
     0,
     options.minRetryAgeMs ?? envNumber(
-      pageBudgetLane
+      coldLane ? 'INSTANTLY_QUALIFICATION_COLD_RETRY_BACKOFF_MS' : pageBudgetLane
         ? 'INSTANTLY_OWNERSHIP_PAGE_BUDGET_RETRY_BACKOFF_MS'
         : 'INSTANTLY_OWNERSHIP_RETRY_BACKOFF_MS',
-      pageBudgetLane
+      coldLane ? QUALIFICATION_COLD_RETRY_BACKOFF_MS : pageBudgetLane
         ? OWNERSHIP_PAGE_BUDGET_RETRY_BACKOFF_MS
         : OWNERSHIP_REVIEW_RETRY_BACKOFF_MS,
     ),
@@ -1902,79 +2043,30 @@ export async function reprocessOwnershipReviewRows(
   const retryReasonFilter =
     `ai_reason.ilike.${ownershipReasonPattern},ai_reason.ilike.${transientReasonPattern}`;
 
-  // Backward recovery for rows written by the old five-attempt policy. Those
-  // rows used the real provider email id with status=error, so the normal poll
-  // dedup can never see them again. Reopen only recent, recognizable transient
-  // failures and fence the exact old status/timestamp; permanent parser/data
-  // errors remain terminal. Pagination covers the complete bounded max-age
-  // horizon so newer permanent errors cannot starve an older retryable row.
+  // Keep legacy repair bounded too: an old backlog must not monopolize a hot
+  // tick. The cold lane reaches failures older than the former seven-day DLQ.
   if (!pageBudgetLane) {
-    type LegacyErrorRow = {
-      id: string;
-      instantly_email_id: string | null;
-      error_message: string | null;
-      created_at: string | null;
-      updated_at: string | null;
-    };
-    const legacyErrors: LegacyErrorRow[] = [];
-    const legacyPageSize = 100;
-    let legacyScanFailed = false;
-    for (let pageStart = 0; ; pageStart += legacyPageSize) {
-      const { data: page, error: pageError } = await db
-        .from('instantly_lead_qualifications')
-        .select('id, instantly_email_id, error_message, created_at, updated_at')
-        .eq('status', 'error')
-        .not('instantly_email_id', 'is', null)
-        .gte('created_at', recentCutoffIso)
-        .order('created_at', { ascending: false })
-        .range(pageStart, pageStart + legacyPageSize - 1);
-      if (pageError) {
-        workerLog('warn', `qualification retry: legacy error scan failed: ${pageError.message}`);
-        legacyScanFailed = true;
-        break;
-      }
-      const rows = (page ?? []) as LegacyErrorRow[];
-      legacyErrors.push(...rows);
-      if (rows.length < legacyPageSize) break;
-    }
-    if (!legacyScanFailed) {
-      for (const raw of legacyErrors) {
-        const emailId = raw.instantly_email_id?.trim() ?? '';
-        const errorMessage = raw.error_message?.trim() ?? '';
-        if (!emailId || emailId.startsWith('webhook:') || !isTransientQualifyError(errorMessage)) {
-          continue;
-        }
-
-        const legacyClaimBase = db
-          .from('instantly_lead_qualifications')
-          .update({
-            status: 'needs_review',
-            ai_reason: `${TRANSIENT_RETRY_REASON_PREFIX} Recovered legacy terminal retry: ${errorMessage}`.slice(0, 500),
-            ai_confidence: 0,
-            updated_at: nowIso,
-          })
-          .eq('id', raw.id)
-          .eq('status', 'error');
-        const legacyClaim = raw.updated_at
-          ? legacyClaimBase.eq('updated_at', raw.updated_at)
-          : legacyClaimBase.is('updated_at', null);
-        const { error: reopenError } = await legacyClaim;
-        if (reopenError) {
-          workerLog('warn', `qualification retry: legacy row ${raw.id} reopen failed: ${reopenError.message}`);
-        }
-      }
+    await adoptLegacyQualificationRetries(db, {
+      nowIso, cutoffIso: recentCutoffIso, retryCutoffIso, cold: coldLane, semantic: false,
+      limit: coldLane ? 3 : 10,
+    });
+    if (coldLane && legacySemanticDrainEnabled()) {
+      await adoptLegacyQualificationRetries(db, {
+        nowIso, cutoffIso: new Date(0).toISOString(), retryCutoffIso,
+        cold: false, semantic: true, limit: 1,
+      });
     }
   }
 
   const rotateSkippedCandidate = async (
-    raw: { id: string; updated_at: string },
+    raw: { id: string; status: string; updated_at: string },
     reason: string,
   ): Promise<void> => {
     const { error } = await db
       .from('instantly_lead_qualifications')
       .update({ updated_at: nowIso })
       .eq('id', raw.id)
-      .eq('status', 'needs_review')
+      .eq('status', raw.status)
       .eq('ai_confidence', 0)
       .or(retryReasonFilter)
       // Exact old timestamp is both the skip CAS and a fairness token: a
@@ -1990,7 +2082,7 @@ export async function reprocessOwnershipReviewRows(
   // old updated_at so it is immediately eligible in the candidate query below.
   const { error: leaseError } = await db
     .from('instantly_lead_qualifications')
-    .update({ status: 'needs_review' })
+    .update({ status: 'pending' })
     .eq('status', 'processing')
     .eq('ai_confidence', 0)
     .or(retryReasonFilter)
@@ -1999,33 +2091,16 @@ export async function reprocessOwnershipReviewRows(
     workerLog('warn', `ownership retry: stale-claim recovery failed: ${leaseError.message}`);
   }
 
-  // Only transient infrastructure rows have an automatic DLQ horizon.
-  // Ownership ambiguity remains a manual review item after the automatic
-  // window; silently turning it into a terminal technical error would hide a
-  // real catalog conflict. Most importantly, no number of quick ticks can
-  // reach this branch: age is measured from the durable row timestamp.
-  const { error: expiredError } = await db
-    .from('instantly_lead_qualifications')
-    .update({
-      status: 'error',
-      error_message: 'Automatic qualification retry window expired',
-      updated_at: nowIso,
-    })
-    .eq('status', 'needs_review')
-    .eq('ai_confidence', 0)
-    .ilike('ai_reason', transientReasonPattern)
-    .lt('created_at', recentCutoffIso);
-  if (expiredError) {
-    workerLog('warn', `qualification retry: expired-row DLQ failed: ${expiredError.message}`);
-  }
+  // Age changes scheduling priority, never the business verdict. Old rows
+  // remain pending and are serviced by the cold lane, including page-budget cases.
 
   let candidatesQuery = db
     .from('instantly_lead_qualifications')
     .select('id, campaign_id, lead_email, instantly_email_id, status, ai_reason, ai_confidence, created_at, updated_at')
-    .eq('status', 'needs_review')
+    .in('status', ['pending', 'needs_review'])
     .eq('ai_confidence', 0)
     .or(retryReasonFilter);
-  candidatesQuery = pageBudgetLane
+  candidatesQuery = coldLane ? candidatesQuery : pageBudgetLane
     ? candidatesQuery.ilike(
         'ai_reason',
         `%${OWNERSHIP_PAGE_BUDGET_REASON_FRAGMENT}%`,
@@ -2038,14 +2113,20 @@ export async function reprocessOwnershipReviewRows(
         'ilike',
         `%${OWNERSHIP_PAGE_BUDGET_REASON_FRAGMENT}%`,
       );
+  candidatesQuery = coldLane
+    ? candidatesQuery.lt('created_at', recentCutoffIso)
+    : candidatesQuery.gte('created_at', recentCutoffIso);
+  if (!legacySemanticDrainEnabled()) {
+    candidatesQuery = candidatesQuery.not('ai_reason', 'ilike', `%${LEGACY_SEMANTIC_RETRY_TAG}%`);
+  }
   const { data: candidates, error: candidatesError } = await candidatesQuery
     .not('instantly_email_id', 'is', null)
-    .gte('created_at', recentCutoffIso)
     .lte('updated_at', retryCutoffIso)
     // Oldest eligible attempt first. Skipped candidates are rotated below, so
     // an ambiguous workspace/manual forward cannot permanently starve rows
     // just outside this bounded window.
     .order('updated_at', { ascending: true })
+    .order('id', { ascending: true })
     .limit(Math.max(limit, limit * 3));
   if (candidatesError) {
     workerLog('warn', `ownership retry: candidate query failed: ${candidatesError.message}`);
@@ -2067,7 +2148,7 @@ export async function reprocessOwnershipReviewRows(
     updated_at: string;
   }>) {
     if (attempted >= limit) break;
-    if (attempted > 0 && Date.now() - startedAt >= timeBudgetMs) break;
+    if (Date.now() - startedAt >= timeBudgetMs) break;
     const emailId = raw.instantly_email_id?.trim();
     if (!emailId || emailId.startsWith('webhook:')) {
       await rotateSkippedCandidate(raw, 'not a provider email id');
@@ -2085,30 +2166,21 @@ export async function reprocessOwnershipReviewRows(
     }
     const accountId = accountIds[0];
 
-    // A specialist already forwarded this exact qualification manually, so a
-    // historical automatic alert would only duplicate a handled lead.
-    const { data: forwarded, error: forwardedError } = await db
-      .from('client_forwarded_leads')
-      .select('id')
-      .eq('qualification_id', raw.id)
-      .limit(1);
-    if (forwardedError) {
-      workerLog('warn', `ownership retry: forwarded check failed for ${raw.id}: ${forwardedError.message}`);
-      await rotateSkippedCandidate(raw, 'forwarded check failed');
-      continue;
-    }
-    if (forwarded?.length) {
-      await rotateSkippedCandidate(raw, 'already forwarded');
+    // Never reclassify something already handed off/notified, or race an
+    // in-flight delivery. A failed lookup is fail-closed, not permission to send.
+    const disposition = await qualificationRecoveryDisposition(db, raw.id, now.getTime());
+    if (disposition !== 'ready') {
+      await rotateSkippedCandidate(raw, disposition);
       continue;
     }
 
     // Compare-and-set claim: concurrent dedicated/monolith workers may select
-    // the same candidate, but only one can transition needs_review→processing.
+    // the same candidate, but only one can transition pending→processing.
     const { data: claimed, error: claimError } = await db
       .from('instantly_lead_qualifications')
       .update({ status: 'processing', updated_at: nowIso })
       .eq('id', raw.id)
-      .eq('status', 'needs_review')
+      .eq('status', raw.status)
       .eq('ai_confidence', 0)
       .or(retryReasonFilter)
       .eq('updated_at', raw.updated_at)
@@ -2122,12 +2194,22 @@ export async function reprocessOwnershipReviewRows(
     }
     if (!claimed) continue;
     attempted++;
+    const attemptStartedAt = Date.now();
+    const logAttempt = (phase: string, reasonCode?: string) => workerLog('info', JSON.stringify({
+      event: 'qualification_retry', qualification_id: raw.id,
+      lane: options.lane ?? 'active', phase, reason_code: reasonCode ?? null,
+      age_ms: Math.max(0, now.getTime() - Date.parse(raw.created_at)),
+      latency_ms: Date.now() - attemptStartedAt,
+    }));
+    logAttempt('processing', raw.ai_reason?.startsWith(OWNERSHIP_REVIEW_REASON_PREFIX)
+      ? 'ownership' : raw.ai_reason?.includes(LEGACY_SEMANTIC_RETRY_TAG)
+        ? 'legacy_semantic' : 'technical');
 
     try {
       // Recovery already has durable retries. Do not spend another 28 seconds
       // retrying a 429 inside getEmail before yielding to fresh replies.
       const fullEmail = await instantly.getEmail(emailId, {
-        accountId, retryRateLimits: false, timeoutMs: 20_000,
+        accountId, retryRateLimits: false, timeoutMs: 20_000, timeoutIncludesBody: true,
       });
       if (!fullEmail?.id || fullEmail.id !== emailId) {
         throw new Error(`provider email mismatch for ${emailId}`);
@@ -2200,24 +2282,29 @@ export async function reprocessOwnershipReviewRows(
           ...retryFlowOptions,
           existingQualificationId: raw.id,
           existingQualificationAttemptedAt: nowIso,
+          ownershipEvidenceMode: 'recovery',
+          skipClientReplyNotification: raw.ai_reason?.includes(LEGACY_SEMANTIC_RETRY_TAG) === true,
         },
       );
 
       // Cold criteria/cache degradation deliberately returns without writing.
       // Release such a still-held claim; the exact ownership reason remains,
       // so it is eligible again after the same backoff.
-      await db
+      const { data: released, error: releaseError } = await db
         .from('instantly_lead_qualifications')
-        .update({ status: 'needs_review', updated_at: nowIso })
+        .update({ status: 'pending', updated_at: nowIso })
         .eq('id', raw.id)
         .eq('status', 'processing')
-        .eq('updated_at', nowIso);
+        .eq('updated_at', nowIso)
+        .select('id')
+        .maybeSingle();
+      logAttempt(releaseError ? 'release_failed' : released ? 'pending' : 'completed_or_replaced');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await db
         .from('instantly_lead_qualifications')
         .update({
-          status: 'needs_review',
+          status: 'pending',
           updated_at: nowIso,
           error_message: `Ownership retry failed: ${message}`.slice(0, 500),
         })
@@ -2225,6 +2312,7 @@ export async function reprocessOwnershipReviewRows(
         .eq('status', 'processing')
         .eq('updated_at', nowIso);
       workerLog('warn', `ownership retry failed for ${raw.id}; released with backoff`, error);
+      logAttempt('pending', isTransientQualifyError(message) ? 'dependency_unavailable' : 'retry_failed');
       if (
         TRANSIENT_QUALIFY_ERROR_RE.test(message) ||
         RETRIABLE_BILLING_QUALIFY_ERROR_RE.test(message)
@@ -2253,9 +2341,13 @@ export async function maybeReprocessOwnershipReviews(): Promise<number> {
   const pageBudgetIntervalMs = Math.max(60_000, envNumber(
     'INSTANTLY_OWNERSHIP_PAGE_BUDGET_RETRY_INTERVAL_MS', OWNERSHIP_PAGE_BUDGET_RETRY_INTERVAL_MS,
   ));
+  const coldIntervalMs = Math.max(60_000, envNumber(
+    'INSTANTLY_QUALIFICATION_COLD_RETRY_INTERVAL_MS', QUALIFICATION_COLD_RETRY_INTERVAL_MS,
+  ));
   const activeDue = nowMs - lastOwnershipReviewRetryAt >= intervalMs;
   const pageBudgetDue = nowMs - lastOwnershipPageBudgetRetryAt >= pageBudgetIntervalMs;
-  if (!activeDue && !pageBudgetDue) return 0;
+  const coldDue = nowMs - lastQualificationColdRetryAt >= coldIntervalMs;
+  if (!activeDue && !pageBudgetDue && !coldDue) return 0;
   // A slow API call can exceed the fast interval. Keep same-process cycles
   // serial as well as retaining the cross-process row CAS claim.
   ownershipRetryRunning = true;
@@ -2263,6 +2355,7 @@ export async function maybeReprocessOwnershipReviews(): Promise<number> {
     const now = new Date(nowMs);
     let active = 0;
     let pageBudget = 0;
+    let cold = 0;
     if (activeDue) {
       lastOwnershipReviewRetryAt = nowMs;
       active = await reprocessOwnershipReviewRows({ now });
@@ -2275,10 +2368,16 @@ export async function maybeReprocessOwnershipReviews(): Promise<number> {
         now: new Date(lastOwnershipPageBudgetRetryAt), lane: 'page_budget',
       });
     }
-    if (active || pageBudget) {
-      workerLog('info', `qualification recovery: active=${active}, page-budget=${pageBudget}`);
+    if (coldDue && Date.now() >= ownershipRetryProviderPausedUntil) {
+      lastQualificationColdRetryAt = Date.now();
+      cold = await reprocessOwnershipReviewRows({
+        now: new Date(lastQualificationColdRetryAt), lane: 'cold',
+      });
     }
-    return active + pageBudget;
+    if (active || pageBudget || cold) {
+      workerLog('info', `qualification recovery: active=${active}, page-budget=${pageBudget}, cold=${cold}`);
+    }
+    return active + pageBudget + cold;
   } catch (error) {
     workerLog('warn', 'ownership retry cycle failed', error);
     return 0;
@@ -3056,7 +3155,10 @@ export async function reconcileLeadNotificationDeliveries(
       .from('instantly_lead_qualifications')
       .select('id, campaign_id, qualified_project_id, qualified_project_owner_proven, thread_id, instantly_email_id, eaccount, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_body, reply_preview, last_outbound_preview, reply_timestamp, ai_reason, created_at, updated_at')
       .eq('status', 'lead')
-      .gte('created_at', recentCutoffIso)
+      // A cold retry preserves created_at but refreshes updated_at. Its first
+      // failed/interrupted Telegram send must have the same recovery window
+      // as a fresh lead instead of disappearing behind the original mail age.
+      .or(`created_at.gte.${recentCutoffIso},updated_at.gte.${recentCutoffIso}`)
       .order('updated_at', { ascending: true })
       .order('id', { ascending: true })
       .range(pageStart, pageStart + scanLimit - 1);

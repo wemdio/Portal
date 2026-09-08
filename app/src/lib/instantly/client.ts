@@ -71,6 +71,7 @@ async function request<T>(
         ? requestOptions.timeoutMs
         : 90_000;
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutIncludesBody = requestOptions?.timeoutIncludesBody === true;
     const init: RequestInit = { method: options.method ?? 'GET', headers, signal: controller.signal };
 
     if (options.body !== undefined) {
@@ -78,7 +79,6 @@ async function request<T>(
       init.body = JSON.stringify(options.body);
     }
 
-    let res: Response;
     try {
       // Everything that can fail locally (limiter, API key, URL and JSON
       // serialization) has completed. From this point a thrown timeout or
@@ -86,26 +86,39 @@ async function request<T>(
       // request. The hook is intentionally write-ahead and may fire again on
       // a 429 retry; callers must make their record idempotent.
       requestOptions?.onRequestAttempt?.();
-      res = await fetch(url.toString(), init);
+      const res = await fetch(url.toString(), init);
+      if (timeoutIncludesBody) controller.signal.throwIfAborted();
+      // Existing callers keep their original headers-only timeout. Recovery
+      // opts in so an arrived header cannot leave its response body unbounded.
+      if (!timeoutIncludesBody) clearTimeout(timeoutId);
+
+      if (res.status === 429 && attempt < rateLimitRetries) {
+        // The timeout belongs to this attempt, not the following backoff.
+        clearTimeout(timeoutId);
+        const delay = RATE_LIMIT_BASE_DELAY_MS * Math.pow(2, attempt);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+
+      if (!res.ok) {
+        const raw = await res.text().catch(() => '');
+        // Do not swallow an aborted error-body read and turn a timeout into
+        // a permanent HTTP/data failure in the durable recovery path.
+        if (timeoutIncludesBody) controller.signal.throwIfAborted();
+        const isHtml = raw.trimStart().startsWith('<');
+        const detail = isHtml ? res.statusText || 'Service unavailable' : raw.slice(0, 300);
+        throw new InstantlyApiError(`Instantly API ${res.status}: ${detail}`, res.status, isHtml ? undefined : raw);
+      }
+
+      if (res.status === 204) return undefined as T;
+      const body = (await res.json()) as T;
+      if (timeoutIncludesBody) controller.signal.throwIfAborted();
+      return body;
     } finally {
+      // This is idempotent for legacy callers whose timer was cleared at
+      // headers, and covers success, refusal, parse failure and network abort.
       clearTimeout(timeoutId);
     }
-
-    if (res.status === 429 && attempt < rateLimitRetries) {
-      const delay = RATE_LIMIT_BASE_DELAY_MS * Math.pow(2, attempt);
-      await new Promise((r) => setTimeout(r, delay));
-      continue;
-    }
-
-    if (!res.ok) {
-      const raw = await res.text().catch(() => '');
-      const isHtml = raw.trimStart().startsWith('<');
-      const detail = isHtml ? res.statusText || 'Service unavailable' : raw.slice(0, 300);
-      throw new InstantlyApiError(`Instantly API ${res.status}: ${detail}`, res.status, isHtml ? undefined : raw);
-    }
-
-    if (res.status === 204) return undefined as T;
-    return (await res.json()) as T;
   }
 
   throw new InstantlyApiError('Instantly API 429: Rate limit exceeded after retries', 429);

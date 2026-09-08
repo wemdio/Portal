@@ -674,6 +674,20 @@ describe('main qualified-leads immutable owner snapshot', () => {
         qualified_project_owner_proven: true,
         created_at: '2026-08-24T07:00:00Z',
       },
+      {
+        ...QUALIFICATION,
+        id: 'automatic-pending-own',
+        status: 'pending',
+        qualified_project_id: 'project-a',
+        qualified_project_owner_proven: true,
+      },
+      {
+        ...QUALIFICATION,
+        id: 'automatic-pending-other-project',
+        status: 'pending',
+        qualified_project_id: 'project-b',
+        qualified_project_owner_proven: true,
+      },
     ];
     mockInstantlyDb = createMockSupabase({
       enforceQueryWindows: true,
@@ -698,6 +712,11 @@ describe('main qualified-leads immutable owner snapshot', () => {
     expect(body.items.map(({ id }) => id)).toEqual(['legacy-second', 'legacy-third']);
     expect(body.total).toBe(4);
     expect(body.counts.lead).toBe(4);
+    expect(body.counts.pending).toBe(1);
+    expect(body.counts.processing).toBe(0);
+    const pendingResponse = await GET(mainGetReq('?status=pending'));
+    const pendingBody = await pendingResponse.json() as { items: Array<{ id: string }> };
+    expect(pendingBody.items.map(({ id }) => id)).toEqual(['automatic-pending-own']);
   });
 
   it('uses the same id tie-break in each source before globally paginating equal timestamps', async () => {

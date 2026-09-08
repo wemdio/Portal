@@ -177,7 +177,7 @@ export const GET = withAuth(async (req, user) => {
     total: 0,
     limit,
     offset,
-    counts: { lead: 0, objection: 0, needs_review: 0, not_lead: 0, error: 0 },
+    counts: { lead: 0, objection: 0, needs_review: 0, not_lead: 0, error: 0, pending: 0, processing: 0 },
   });
 
   // Code-before-migration compatibility. The new worker defers every new
@@ -207,7 +207,9 @@ export const GET = withAuth(async (req, user) => {
       .range(offset, offset + limit - 1);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-    const statuses = ['lead', 'objection', 'needs_review', 'not_lead', 'error'] as const;
+    // Pending is automatic technical recovery, not a manual qualification task.
+    // Expose its count even though the default business feed excludes it.
+    const statuses = ['lead', 'objection', 'needs_review', 'not_lead', 'error', 'pending', 'processing'] as const;
     const counts: Record<string, number> = {};
     await Promise.all(statuses.map(async (value) => {
       let countQuery = instantlyDb
@@ -379,7 +381,7 @@ export const GET = withAuth(async (req, user) => {
   const items = mergedRows.slice(offset, offset + limit);
   const total = (snapshotPage.count ?? 0) + (legacyPage.count ?? 0);
 
-  const statuses = ['lead', 'objection', 'needs_review', 'not_lead', 'error'] as const;
+  const statuses = ['lead', 'objection', 'needs_review', 'not_lead', 'error', 'pending', 'processing'] as const;
   const countEntries = await Promise.all(statuses.map(async (value) => {
     const countSource = async (source: QualificationSource | null) => {
       if (!source) return { count: 0, error: null };
