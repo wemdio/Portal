@@ -32,6 +32,7 @@ import { sendFirstTouchBatch } from './firstTouch/send';
 import { parkAccountAfterLimit } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
 import { sendFreezeAppeal } from './freezeAppeal';
+import { applyQueuedProfile, type QueuedProfilePayload } from './profile/queuedProfile';
 import { runLeadForwardPoller } from './leadForward';
 import { buildLeadMessage, splitTelegramMessage } from './leadMessage';
 import { loadLeadOrigin } from './leadOrigin';
@@ -2046,6 +2047,52 @@ export async function runCampaignLoop(
            * ждут ответа неделями, и молчание после нажатия кнопки оператор
            * прочитает как «ушло».
            */
+          /**
+           * Заказанная правка профиля — здесь же и по той же причине.
+           *
+           * Ручка профиля открывает своё соединение и потому работает только на
+           * остановленной кампании. Заказ из работающей приземляется сюда: круг
+           * применяет его тем соединением, что уже открыто, и оператору не
+           * приходится ради одного аккаунта останавливать рассылку всем.
+           */
+          if (account.profile_requested_at && account.profile_payload) {
+            const who = account.profile_requested_by_name || 'оператор';
+            const outcome = await applyQueuedProfile({
+              client,
+              payload: account.profile_payload as QueuedProfilePayload,
+              currentUsername: account.tg_username ?? undefined,
+            });
+            const { error: prErr } = await db
+              .from('tg_outreach_accounts')
+              .update({
+                profile_status: outcome.status,
+                profile_detail: outcome.detail.slice(0, 500),
+                profile_applied_at: new Date().toISOString(),
+                profile_requested_at: null,
+                profile_requested_by_name: null,
+                profile_payload: null,
+                // Что реально встало в Telegram — оттуда же, из ответа: заказ и
+                // результат расходятся, когда ник занят или значение подрезано.
+                ...(outcome.applied
+                  ? {
+                      first_name: outcome.applied.first_name,
+                      last_name: outcome.applied.last_name,
+                      bio: outcome.applied.bio,
+                      tg_username: outcome.applied.tg_username || null,
+                      profile_synced_at: new Date().toISOString(),
+                    }
+                  : {}),
+              })
+              .eq('id', account.id);
+            if (prErr) {
+              log('warning', `Аккаунт ${account.session_name}: профиль применён, но итог не записался — ${prErr.message}`);
+            }
+            log(
+              outcome.status === 'applied' ? 'info' : 'warning',
+              `Аккаунт ${account.session_name}: правка профиля по заказу (${who}) — ${outcome.detail}`,
+            );
+          }
+
           if (account.appeal_requested_at) {
             const who = account.appeal_requested_by_name || 'оператор';
             const outcome = await sendFreezeAppeal({

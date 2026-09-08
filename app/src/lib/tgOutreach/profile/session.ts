@@ -19,14 +19,18 @@ import type { OutreachAccount, OutreachProxy } from '@/lib/tgOutreach/types';
  * Аккаунт + гейт по статусу кампании.
  *
  * Работающая кампания уже держит соединение с этим аккаунтом; второе
- * подключение через мобильный прокси — лишний повод для сбоя. Правило одно и
- * для записи профиля, и для чтения: пока идёт рассылка или прогрев, в Telegram
- * не ходим, карточка показывает сохранённое в портале.
+ * подключение к той же сессии Telegram встречает AUTH_KEY_DUPLICATED и
+ * выключает аккаунт.
+ *
+ * Отсюда `busy`: не отказ, а признак. Чтение профиля на занятом аккаунте
+ * по-прежнему невозможно — карточка показывает сохранённое в портале, — а вот
+ * запись уходит в очередь и применяется кругом (миграция 20260908_0001).
+ * Решает вызывающая ручка, потому что для чтения и записи ответ разный.
  */
 export async function loadAccountForProfile(
   supabase: SupabaseClient,
   id: string,
-): Promise<{ account: OutreachAccount } | { error: NextResponse }> {
+): Promise<{ account: OutreachAccount; busy: boolean } | { error: NextResponse }> {
   const { data: accountRow } = await supabase
     .from('tg_outreach_accounts')
     .select('*')
@@ -41,15 +45,8 @@ export async function loadAccountForProfile(
     .eq('id', account.campaign_id)
     .maybeSingle();
   const status = (campaign as { status?: string } | null)?.status;
-  if (status && status !== 'stopped' && status !== 'error') {
-    return {
-      error: jsonError(
-        `Кампания сейчас в состоянии «${status}». Остановите её, чтобы работать с профилем аккаунта: во время работы аккаунт занят.`,
-        409,
-      ),
-    };
-  }
-  return { account };
+  const busy = Boolean(status && status !== 'stopped' && status !== 'error');
+  return { account, busy };
 }
 
 /**

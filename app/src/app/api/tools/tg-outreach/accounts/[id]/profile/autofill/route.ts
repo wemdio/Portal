@@ -105,6 +105,29 @@ export async function POST(req: NextRequest, ctx: Ctx) {
           }
         : pickIdentity();
 
+      /**
+       * Кампания работает — предлагаем без похода в Telegram.
+       *
+       * Подключиться нельзя: сессию держит круг. Проверить занятость ника
+       * поэтому не выйдет — но и не нужно: заказ на применение уносит с собой
+       * список запасных, и круг сам возьмёт первый свободный. Оператор при этом
+       * не ждёт своей очереди, чтобы просто увидеть предложение.
+       */
+      if (loaded.busy) {
+        const candidates = usernameCandidates(identity);
+        return NextResponse.json({
+          first_name: identity.firstName,
+          last_name: identity.lastName,
+          username: wanted || candidates[0] || null,
+          bio: buildBio(company),
+          available: null,
+          queued_check: true,
+          note:
+            'Кампания работает, ник в Telegram сейчас не проверить. Он проверится при применении: '
+            + 'если окажется занят, рассылка возьмёт следующий вариант и напишет, какой поставила.',
+        });
+      }
+
       let client;
       try {
         client = await connectAccount(auth.supabase, loaded.account);
