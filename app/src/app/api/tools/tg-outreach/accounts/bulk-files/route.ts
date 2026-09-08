@@ -210,12 +210,14 @@ export async function POST(req: NextRequest) {
         ...tdataRows,
       ];
 
-      let inserted: Array<{ id: string; session_name: string }> = [];
+      // Телефон возвращаем, чтобы экран сразу назвал страны партии: имена
+      // файлов вида «s386_tdata» о стране не говорят ничего.
+      let inserted: Array<{ id: string; session_name: string; phone?: string | null }> = [];
       if (insertRows.length) {
         const { data, error: insertError } = await db
           .from('tg_outreach_accounts')
           .insert(insertRows)
-          .select('id, session_name');
+          .select('id, session_name, phone');
         if (insertError) return jsonError(insertError.message, 500);
         inserted = data ?? [];
       }

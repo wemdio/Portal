@@ -5,6 +5,7 @@ import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
 import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
+import { countryLabel } from '@/lib/tgOutreach/phoneCountry';
 import {
   MessageSquareMore,
   Plus,
@@ -2624,6 +2625,7 @@ function CampaignAccountsTab({
       const body = await res.json().catch(() => null) as {
         error?: string;
         count?: number;
+        items?: Array<{ phone?: string | null }>;
         skipped?: Array<{ name: string; reason: string }>;
         errors?: Array<{ name: string; error: string }>;
         unchecked_existing_accounts?: number;
@@ -2644,8 +2646,24 @@ function CampaignAccountsTab({
         const errors = body.errors ?? [];
         // «Добавлено аккаунтов: 0» само по себе ничего не объясняет, поэтому
         // пустой результат проговариваем словами.
+        /**
+         * Страны партии — сразу в итоге загрузки.
+         *
+         * Аккаунты приезжают файлами вида «s386_tdata», и по имени страну не
+         * узнать. А она решает, какие прокси им нужны: гео прокси обязано
+         * совпадать с гео номера, иначе Telegram видит несовпадение.
+         */
+        const countries = new Map<string, number>();
+        for (const item of body.items ?? []) {
+          const label = countryLabel(item.phone);
+          if (label) countries.set(label, (countries.get(label) ?? 0) + 1);
+        }
+        const countryNote = countries.size
+          ? ` · ${[...countries.entries()].sort((a, b) => b[1] - a[1]).map(([c, n]) => `${c}: ${n}`).join(', ')}`
+          : '';
+
         const headline = count > 0
-          ? `Добавлено аккаунтов: ${count}`
+          ? `Добавлено аккаунтов: ${count}${countryNote}`
           : skipped.length || errors.length
             ? 'Ни одного аккаунта не добавлено — почему, ниже'
             : 'Ни одного аккаунта не добавлено: в этих файлах их не нашлось';
@@ -3298,7 +3316,18 @@ function CampaignAccountsTab({
                   )}
                 </div>
                 <HealthCell mark={sendingMark} />
-                <span className="text-xs text-gray-500 truncate">{a.phone || '—'}</span>
+                {/*
+                  Страна под номером: аккаунты покупают партиями и в списке они
+                  зовутся «s386_tdata» — по имени страну не узнать. А она тут не
+                  украшение: прокси обязаны совпадать с ней по гео, и от неё же
+                  зависит, сколько писем аккаунт отдаст.
+                */}
+                <span className="min-w-0 truncate">
+                  <span className="block truncate text-xs text-gray-500">{a.phone || '—'}</span>
+                  {a.phone && (
+                    <span className="block truncate text-[10px] text-gray-400">{countryLabel(a.phone)}</span>
+                  )}
+                </span>
                 {editingProxyFor === a.id ? (
                   /* Свой список вместо <select>: рядом с каждым адресом стоит
                      его состояние, иначе сорок одинаковых строк «тот же хост,
