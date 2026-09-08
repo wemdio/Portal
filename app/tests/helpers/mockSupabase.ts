@@ -20,7 +20,7 @@
  *     groups whose terms are simple `column.op.value` expressions. Other
  *     operators (`is`, `like`, ...) are not yet supported here on purpose.
  *   - .not('col', 'is', null), .not('col', 'in', '(a,b,c)') and
- *     .not('col', 'ilike', '%pattern%') are supported.
+ *     .not('col', 'ilike', '%pattern%') / case-sensitive 'like' are supported.
  *
  * Mutations:
  *   - insert(rows) appends to the table and records the call (per-table and
@@ -174,7 +174,7 @@ export interface MockSupabaseClient {
   selects: SelectCall[];
 }
 
-type Op = 'eq' | 'neq' | 'in' | 'overlaps' | 'gte' | 'lte' | 'gt' | 'lt' | 'is' | 'not_is' | 'not_in' | 'ilike' | 'not_ilike';
+type Op = 'eq' | 'neq' | 'in' | 'overlaps' | 'gte' | 'lte' | 'gt' | 'lt' | 'is' | 'not_is' | 'not_in' | 'ilike' | 'not_ilike' | 'not_like';
 
 interface Filter {
   column: string;
@@ -252,6 +252,20 @@ function applyFilter(rows: Row[], f: Filter): Row[] {
       return rows.filter((r) => matchesIlike(r[f.column], f.value));
     case 'not_ilike':
       return rows.filter((r) => !matchesIlike(r[f.column], f.value));
+    case 'not_like': {
+      // LIKE is case-sensitive; SQL NULL NOT LIKE pattern is not true.
+      // Preserve SQL wildcard/escape semantics without changing existing ILIKE.
+      const escapeRegex = (char: string) => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pattern = String(f.value);
+      let source = '';
+      for (let index = 0; index < pattern.length; index++) {
+        const char = pattern[index];
+        if (char === '\\' && index + 1 < pattern.length) source += escapeRegex(pattern[++index]);
+        else source += char === '%' ? '.*' : char === '_' ? '.' : escapeRegex(char);
+      }
+      const regex = new RegExp(`^${source}$`, 's');
+      return rows.filter((r) => r[f.column] != null && f.value != null && !regex.test(String(r[f.column])));
+    }
     case 'not_is':
       return rows.filter((r) => r[f.column] !== f.value);
     case 'not_in': {
@@ -550,6 +564,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         if (op === 'is') filters.push({ column, op: 'not_is', value });
         else if (op === 'in') filters.push({ column, op: 'not_in', value });
         else if (op === 'ilike') filters.push({ column, op: 'not_ilike', value });
+        else if (op === 'like') filters.push({ column, op: 'not_like', value });
         else throw new Error(`mockSupabase: not.${op} is not implemented`);
         return builder;
       },

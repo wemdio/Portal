@@ -16,6 +16,8 @@ const MAPPING_CACHE_MAX = 1_500;
 // than 100 rows (TobyLab, 2026-09-02). Reserve its own bounded budget: at most
 // four listEmails calls in total, still using the shared workspace limiter.
 const MAX_OWNERSHIP_EVIDENCE_PAGES_PER_SURFACE = 2;
+const RECOVERY_EVIDENCE_PAGES_PER_SURFACE = 8;
+const RECOVERY_EVIDENCE_TIME_BUDGET_MS = 45_000;
 
 interface MappedCampaigns {
   allCampaignIds: string[];
@@ -414,6 +416,7 @@ async function fetchWorkspaceEvidence(args: {
   prefetchedContext: ThreadContext | null;
   providerCampaignId: string;
   trustPrefetchedParent: boolean;
+  evidenceMode?: 'recovery';
 }): Promise<WorkspaceEvidenceResult> {
   const {
     campaignIds,
@@ -459,6 +462,18 @@ async function fetchWorkspaceEvidence(args: {
   );
   if (trustedParentAlreadyProven) return { evidence, complete: true };
 
+  // Fresh replies keep their small lookup. Recovery may inspect further than
+  // the same two pages that caused the deferral, but never accepts incomplete
+  // cross-project evidence as ownership proof. Bound both I/O and memory.
+  const recovery = args.evidenceMode === 'recovery';
+  const configuredPages = Number(process.env.INSTANTLY_OWNERSHIP_RECOVERY_EVIDENCE_PAGES);
+  const maxPages = recovery
+    ? Number.isFinite(configuredPages) && configuredPages >= 2
+      ? Math.min(20, Math.floor(configuredPages))
+      : RECOVERY_EVIDENCE_PAGES_PER_SURFACE
+    : MAX_OWNERSHIP_EVIDENCE_PAGES_PER_SURFACE;
+  const deadline = Date.now() + RECOVERY_EVIDENCE_TIME_BUDGET_MS;
+
   const consumeSurface = async (filter: {
     search?: string;
     lead?: string;
@@ -466,7 +481,9 @@ async function fetchWorkspaceEvidence(args: {
   }): Promise<boolean> => {
     let cursor: string | undefined;
     const seenCursors = new Set<string>();
-    for (let page = 0; page < MAX_OWNERSHIP_EVIDENCE_PAGES_PER_SURFACE; page++) {
+    for (let page = 0; page < maxPages; page++) {
+      const remainingMs = deadline - Date.now();
+      if (recovery && remainingMs <= 0) return false;
       const response = await instantly.listEmails(
         {
           ...filter,
@@ -474,7 +491,9 @@ async function fetchWorkspaceEvidence(args: {
           limit: 100,
           ...(cursor ? { starting_after: cursor } : {}),
         },
-        { accountId },
+        recovery
+          ? { accountId, retryRateLimits: false, timeoutMs: Math.min(20_000, remainingMs), timeoutIncludesBody: true }
+          : { accountId },
       );
       items.push(...(response.items ?? []));
       evidence = collectCampaignEvidence(
@@ -606,6 +625,8 @@ export async function resolveEffectiveReplyOwner(args: {
   prefetchedContext?: ThreadContext | null;
   /** Caller has already matched prefetched lastOutbound across campaigns. */
   trustPrefetchedParent?: boolean;
+  /** Bounded deeper search, only used by durable automatic recovery. */
+  evidenceMode?: 'recovery';
 }): Promise<ReplyOwnershipResolution> {
   const {
     db,
@@ -774,6 +795,7 @@ export async function resolveEffectiveReplyOwner(args: {
           prefetchedContext: providerContext,
           providerCampaignId,
           trustPrefetchedParent,
+          evidenceMode: args.evidenceMode,
         });
         // All candidate campaigns belong to the same proven owner here, so a
         // later global sent page cannot introduce a competing specialist.
@@ -796,9 +818,14 @@ export async function resolveEffectiveReplyOwner(args: {
             parentMatch.parent,
           );
           reason = `exact mailbox resolves one owner and outbound parent ${parentMatch.campaignId}`;
+        } else if (context && !context.lastOutbound) {
+          // A complete deeper lookup can also establish that no parent was
+          // found and release an earlier partial-history retry.
+          context = { ...context, historyFetchFailed: !workspaceEvidence.complete };
         }
       } catch (error) {
         reason += `; context enrichment unavailable: ${error instanceof Error ? error.message : String(error)}`;
+        if (context && !context.lastOutbound) context = { ...context, historyFetchFailed: true };
       }
     }
     return {
@@ -824,6 +851,7 @@ export async function resolveEffectiveReplyOwner(args: {
       prefetchedContext: providerContext,
       providerCampaignId,
       trustPrefetchedParent,
+      evidenceMode: args.evidenceMode,
     });
   } catch (error) {
     return {
