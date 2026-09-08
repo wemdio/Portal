@@ -4,6 +4,7 @@ import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
+import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
 import {
   MessageSquareMore,
   Plus,
@@ -3378,6 +3379,69 @@ function AccountProfileModal({
   const [firstName, setFirstName] = useState(account.first_name ?? '');
   const [lastName, setLastName] = useState(account.last_name ?? '');
   const [bio, setBio] = useState(account.bio ?? '');
+  /**
+   * Автозаполнение: имя, фамилия, свободный ник и описание по компании.
+   *
+   * Профили заполняли руками по одному — на партии в двадцать аккаунтов это час
+   * одинаковой работы, и у половины профиль так и оставался пустым. Пустой
+   * профиль первое, на что смотрит получатель холодного письма.
+   *
+   * Кнопки только подставляют в поля. Записывает в Telegram по-прежнему
+   * «Сохранить» — иначе одно нажатие переписывало бы уже настроенный аккаунт.
+   */
+  const [fillBusy, setFillBusy] = useState<null | 'all' | 'name' | 'check'>(null);
+  const [fillNote, setFillNote] = useState<string | null>(null);
+
+  const callFill = async (mode: 'all' | 'name' | 'check', payload: Record<string, unknown>) => {
+    setFillBusy(mode);
+    setFillNote(null);
+    try {
+      const token = await getAccessToken();
+      const res = await fetch(`${API_BASE}/accounts/${account.id}/profile/autofill`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const body = (await res.json().catch(() => null)) as
+        { error?: string; first_name?: string; last_name?: string; username?: string | null;
+          bio?: string; available?: boolean; checked?: number } | null;
+      if (!res.ok) {
+        setFillNote(body?.error ?? `Не получилось (HTTP ${res.status})`);
+        return null;
+      }
+      return body;
+    } catch (e) {
+      setFillNote(e instanceof Error ? e.message : 'Не получилось');
+      return null;
+    } finally {
+      setFillBusy(null);
+    }
+  };
+
+  const autofillAll = async () => {
+    const data = await callFill('all', {});
+    if (!data) return;
+    if (data.first_name) setFirstName(data.first_name);
+    if (data.last_name) setLastName(data.last_name);
+    if (data.bio) setBio(data.bio);
+    if (data.username) {
+      setUsername(data.username);
+      setFillNote(`Готово. Ник свободен — проверено в Telegram (вариантов перебрано: ${data.checked ?? 1}). Осталось нажать «Сохранить».`);
+    } else {
+      setFillNote('Имя и описание подставил, а свободный ник не нашёлся — нажмите «Другой ник».');
+    }
+  };
+
+  const regenerateUsername = async () => {
+    const data = await callFill('check', { first_name: firstName, last_name: lastName });
+    if (!data) return;
+    if (data.username) {
+      setUsername(data.username);
+      setFillNote('Ник свободен — проверено в Telegram.');
+    } else {
+      setFillNote('Свободный ник не нашёлся. Попробуйте ещё раз или смените имя.');
+    }
+  };
   const [username, setUsername] = useState(account.tg_username ?? '');
   // Превью держим рядом с файлом: ссылку на blob создаём в момент выбора, а не
   // эффектом на каждый рендер.
@@ -3557,6 +3621,45 @@ function AccountProfileModal({
               <RefreshCw className={`h-3 w-3 ${syncing ? 'animate-spin' : ''}`} />
               Обновить
             </button>
+          </div>
+
+          {/* Автозаполнение над всеми полями, которые оно меняет. */}
+          <div className="flex flex-wrap items-center gap-2 rounded-lg bg-indigo-50 px-3 py-2">
+            <button
+              type="button"
+              disabled={!canRead || fillBusy !== null}
+              onClick={() => void autofillAll()}
+              title={canRead ? undefined : 'Остановите кампанию: во время рассылки аккаунт занят'}
+              className="cursor-pointer rounded-lg bg-indigo-600 px-3 py-1.5 text-[11px] font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {fillBusy === 'all' ? 'Подбираю…' : 'Автозаполнение'}
+            </button>
+            <button
+              type="button"
+              disabled={fillBusy !== null}
+              onClick={() => {
+                const identity = pickIdentity();
+                setFirstName(identity.firstName);
+                setLastName(identity.lastName);
+                setFillNote('Имя и фамилия заменены, ник остался прежним.');
+              }}
+              title="Другая пара имя-фамилия. Ник не трогаем — он уже проверен."
+              className="cursor-pointer rounded-lg border border-indigo-200 bg-white px-3 py-1.5 text-[11px] font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:opacity-50"
+            >
+              Другое имя
+            </button>
+            <button
+              type="button"
+              disabled={!canRead || fillBusy !== null || !firstName.trim()}
+              onClick={() => void regenerateUsername()}
+              title={canRead ? 'Подобрать другой свободный ник под текущее имя' : 'Остановите кампанию'}
+              className="cursor-pointer rounded-lg border border-indigo-200 bg-white px-3 py-1.5 text-[11px] font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {fillBusy === 'check' ? 'Проверяю…' : 'Другой ник'}
+            </button>
+            <span className="w-full text-[10px] leading-tight text-indigo-900">
+              {fillNote ?? 'Имя и фамилия — русские, ник собирается из них латиницей и проверяется в Telegram на занятость. Описание — по компании кампании.'}
+            </span>
           </div>
 
           <div className="grid grid-cols-2 gap-3">

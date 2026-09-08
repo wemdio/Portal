@@ -91,26 +91,69 @@ export function isValidUsername(value: string): boolean {
 }
 
 /**
+ * Второе написание того же имени латиницей.
+ *
+ * Одно имя пишут по-разному, и это главный ресурс для поиска свободного ника:
+ * `alekseyvoronin` занят, а `aleksievoronin` — нет, и выглядит он так же
+ * по-человечески. Пока вариантов написания хватает, до цифр дело не доходит.
+ */
+const TRANSLIT_ALT: Record<string, string> = {
+  ...TRANSLIT,
+  // «е» намеренно оставлена как есть: замена на «ie» превращала Алексея в
+  // alieksiei — вроде и вариант, а читается как опечатка.
+  ё: 'yo', й: 'i', ы: 'i', ю: 'iu', я: 'ia', х: 'kh', ц: 'c',
+};
+
+function translitAlt(value: string): string {
+  return (value ?? '')
+    .toLowerCase()
+    .split('')
+    .map((ch) => (ch in TRANSLIT_ALT ? TRANSLIT_ALT[ch] : ch))
+    .join('')
+    .replace(/[^a-z0-9_]/g, '');
+}
+
+/** Удвоить одну гласную внутри слова: `voronin` → `voroniin`. */
+function stretched(value: string): string {
+  const positions: number[] = [];
+  for (let i = 1; i < value.length - 1; i += 1) {
+    if ('aeiou'.includes(value[i])) positions.push(i);
+  }
+  if (!positions.length) return value;
+  const at = positions[Math.floor(Math.random() * positions.length)];
+  return value.slice(0, at + 1) + value[at] + value.slice(at + 1);
+}
+
+/**
  * Варианты ника от самого «человеческого» к самому случайному.
  *
- * Порядок и есть суть: `ivan_petrov` выглядит как живой человек, `ivanp8421` —
- * как регистрация ради регистрации. Занятыми окажутся как раз первые, поэтому
- * список длинный, но вырождается постепенно, а не сразу в цифры.
+ * Порядок и есть суть: `aleksey_voronin` выглядит как живой человек, а
+ * `alekseyv8421` — как регистрация ради регистрации. Заняты обычно первые,
+ * поэтому список длинный, но вырождается постепенно: сначала другое написание
+ * того же имени, потом растянутая гласная, и только в конце цифры.
  */
 export function usernameCandidates(identity: Identity): string[] {
   const first = translit(identity.firstName);
   const last = translit(identity.lastName);
+  const firstAlt = translitAlt(identity.firstName);
+  const lastAlt = translitAlt(identity.lastName);
   const raw = [
-    `${first}_${last}`,
     `${first}${last}`,
-    `${first}_${last}${Math.floor(Math.random() * 90) + 10}`,
-    `${first}${last[0]}${Math.floor(Math.random() * 9000) + 1000}`,
-    `${first}_${last}_${Math.floor(Math.random() * 900) + 100}`,
+    `${first}_${last}`,
+    `${firstAlt}${last}`,
+    `${first}${lastAlt}`,
+    `${firstAlt}${lastAlt}`,
+    `${firstAlt}_${lastAlt}`,
+    `${first}${stretched(last)}`,
+    `${firstAlt}${stretched(lastAlt)}`,
+    `${last}${first}`,
     `${last}_${first}`,
-    `${first}${Math.floor(Math.random() * 90000) + 10000}`,
-    `${first}_${last}${Math.floor(Math.random() * 9000) + 1000}`,
+    `${first}_${last}${Math.floor(Math.random() * 90) + 10}`,
+    `${first}${last}${Math.floor(Math.random() * 9000) + 1000}`,
   ];
-  return raw.map(normalizeUsername).filter(isValidUsername);
+  // Повторы неизбежны: у имени без «й» и «я» оба написания совпадают, а каждая
+  // лишняя проверка — отдельный вызов через мобильный прокси.
+  return [...new Set(raw.map(normalizeUsername).filter(isValidUsername))];
 }
 
 /**
