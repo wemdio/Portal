@@ -28,7 +28,9 @@ import { getInstantlyAccountApiKey, resolveInstantlyAccountId, type InstantlyReq
 import { acquireInstantlyToken } from './rateLimiter';
 import { InstantlyApiError } from './errors';
 import { parseAccountCampaignMappingItems } from './accountCampaignMappings';
+import { deferInstantlyEmailReads, instantlyEmailRetryAfterMs, reserveInstantlyEmailRead } from './emailReadBudget';
 export { InstantlyApiError } from './errors';
+export { InstantlyEmailReadDeferredError } from './emailReadBudget';
 
 const BASE_URL = 'https://api.instantly.ai/api/v2';
 
@@ -44,10 +46,10 @@ async function request<T>(
   options: { method?: string; body?: unknown; params?: Record<string, string | number | boolean | undefined> } = {},
   requestOptions?: InstantlyRequestOptions,
 ): Promise<T> {
-  // Общий распределённый rate-limiter (workspace-wide лимит Instantly). Один раз
-  // на логический вызов, ДО retry-цикла. Fail-open: при любой проблеме лимитера
-  // запрос проходит как раньше. По умолчанию выключен (INSTANTLY_RATE_LIMITER_ENABLED).
-  if (!requestOptions?.skipRateLimiter) {
+  const isEmailList = path === '/emails' && (options.method ?? 'GET') === 'GET';
+  // Other endpoints preserve the legacy limiter. LIST /emails is always strict,
+  // including callers that use skipRateLimiter for bounded recovery reads.
+  if (!isEmailList && !requestOptions?.skipRateLimiter) {
     await acquireInstantlyToken(resolveInstantlyAccountId(requestOptions?.accountId));
   }
 
@@ -60,18 +62,24 @@ async function request<T>(
     }
   }
 
-  const rateLimitRetries = requestOptions?.retryRateLimits === false ? 0 : RATE_LIMIT_RETRIES;
+  const rateLimitRetries = isEmailList || requestOptions?.retryRateLimits === false ? 0 : RATE_LIMIT_RETRIES;
+  const timeoutMs =
+    typeof requestOptions?.timeoutMs === 'number' &&
+    Number.isFinite(requestOptions.timeoutMs) && requestOptions.timeoutMs > 0
+      ? requestOptions.timeoutMs : 90_000;
+  // The strict read deadline includes admission and body consumption, so a DB
+  // wait cannot be added on top of the caller's ownership-recovery budget.
+  const emailReadDeadline = isEmailList ? Date.now() + timeoutMs : undefined;
   for (let attempt = 0; attempt <= rateLimitRetries; attempt++) {
+    if (isEmailList) {
+      await reserveInstantlyEmailRead(resolveInstantlyAccountId(requestOptions?.accountId),
+        requestOptions?.requestPriority ?? 'fresh', emailReadDeadline);
+    }
     const headers: HeadersInit = { Authorization: `Bearer ${apiKey}` };
     const controller = new AbortController();
-    const timeoutMs =
-      typeof requestOptions?.timeoutMs === 'number' &&
-      Number.isFinite(requestOptions.timeoutMs) &&
-      requestOptions.timeoutMs > 0
-        ? requestOptions.timeoutMs
-        : 90_000;
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    const timeoutIncludesBody = requestOptions?.timeoutIncludesBody === true;
+    const remainingTimeoutMs = emailReadDeadline === undefined ? timeoutMs : Math.max(1, emailReadDeadline - Date.now());
+    const timeoutId = setTimeout(() => controller.abort(), remainingTimeoutMs);
+    const timeoutIncludesBody = isEmailList || requestOptions?.timeoutIncludesBody === true;
     const init: RequestInit = { method: options.method ?? 'GET', headers, signal: controller.signal };
 
     if (options.body !== undefined) {
@@ -91,6 +99,16 @@ async function request<T>(
       // Existing callers keep their original headers-only timeout. Recovery
       // opts in so an arrived header cannot leave its response body unbounded.
       if (!timeoutIncludesBody) clearTimeout(timeoutId);
+
+      if (res.status === 429 && isEmailList) {
+        const retryAfterMs = instantlyEmailRetryAfterMs(res.headers?.get?.('retry-after'));
+        // No eager retry, and no need to read a potentially hanging 429 body.
+        // Cancel the response transport, then persist the workspace cooldown.
+        controller.abort();
+        clearTimeout(timeoutId);
+        await deferInstantlyEmailReads(resolveInstantlyAccountId(requestOptions?.accountId),
+          retryAfterMs, emailReadDeadline);
+      }
 
       if (res.status === 429 && attempt < rateLimitRetries) {
         // The timeout belongs to this attempt, not the following backoff.

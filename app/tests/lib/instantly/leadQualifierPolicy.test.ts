@@ -8,6 +8,8 @@
 
 import { runInNewContext } from 'node:vm';
 import type { Email } from '@/lib/instantly/types';
+import { createQualificationAiCheckpointStore } from '@/lib/instantly/qualificationAiCheckpoint';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   classifyMachineReply,
   qualifyReply,
@@ -731,6 +733,123 @@ describe('elliptical material request policy', () => {
     });
     expect(selfContained).toMatchObject({ isLead: true, needsReview: false });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // RPC state survives factory recreation (worker restart). This extends the
+    // existing uncertainty regression without adding another test declaration.
+    const checkpoints = new Map<string, { token: string | null; raw: string | null; budgetKey: string }>();
+    const paidBudgets = new Map<string, number>();
+    let leaseCounter = 0;
+    const rpc = jest.fn(async (name: string, args: Record<string, string>) => {
+      const key = args.p_checkpoint_key;
+      const checkpoint = checkpoints.get(key);
+      if (name === 'reserve_instantly_qualification_ai') {
+        if (checkpoint?.raw) return { data: { state: 'cached', raw_response: checkpoint.raw } };
+        if (checkpoint?.token) return { data: { state: 'busy' } };
+        const attempts = paidBudgets.get(args.p_budget_key) ?? 0;
+        if (attempts >= 3) return { data: { state: 'exhausted' } };
+        paidBudgets.set(args.p_budget_key, attempts + 1);
+        const token = `lease-${++leaseCounter}`;
+        checkpoints.set(key, { token, raw: null, budgetKey: args.p_budget_key });
+        return { data: { state: 'reserved', lease_token: token } };
+      }
+      if (!checkpoint || checkpoint.token !== args.p_lease_token) return { data: { state: 'lease_lost' } };
+      checkpoint.token = null;
+      checkpoint.raw = args.p_raw_response ?? null;
+      if (!checkpoint.raw && ['http_402', 'http_429'].includes(args.p_error_code)) {
+        paidBudgets.set(checkpoint.budgetKey, (paidBudgets.get(checkpoint.budgetKey) ?? 1) - 1);
+      }
+      return { data: { state: checkpoint.raw ? 'saved' : 'released' } };
+    });
+    const restartStore = (replyId = 'reply-1') => createQualificationAiCheckpointStore(
+      { rpc } as unknown as Pick<SupabaseClient, 'rpc'>,
+      { accountId: 'account-1', replyId, projectId: 'project-1' },
+    );
+    const durableOptions = { apiKey: 'test-key', maxRetries: 0, briefText: '', prefetchedContext: incompleteContext };
+    fetchMock.mockReset();
+    mockAiResult({ is_lead: true, needs_review: true, interest_signals: [] });
+    for (let restart = 0; restart < 3; restart++) {
+      await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+        ...durableOptions, checkpointStore: restartStore(),
+      })).rejects.toThrow('outbound history unavailable');
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1); // deferred context no longer buys the same assessment daily
+    expect([...paidBudgets.values()]).toEqual([1]);
+
+    // Each semantic pass caches separately but shares the same lifetime cap.
+    fetchMock.mockReset().mockResolvedValueOnce(uncertain).mockResolvedValue(positive);
+    const adjudicationOptions = {
+      ...durableOptions, prefetchedContext: contextWithReply('Это относится к нашим задачам.'),
+      leadCriteria: 'Лид, если подтвердили: «это относится к нашим задачам».',
+    };
+    for (let restart = 0; restart < 2; restart++) {
+      await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+        ...adjudicationOptions, checkpointStore: restartStore('reply-two-pass'),
+      })).resolves.toMatchObject({ isLead: true, needsReview: false });
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect([...paidBudgets.values()]).toEqual([1, 2]);
+
+    fetchMock.mockReset().mockResolvedValue({ ok: true, json: async () => ({ choices: [{ finish_reason: 'length' }] }) });
+    for (let restart = 0; restart < 3; restart++) {
+      await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+        ...adjudicationOptions, checkpointStore: restartStore('reply-invalid'),
+      })).rejects.toThrow('output token limit');
+    }
+    await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+      ...adjudicationOptions, checkpointStore: restartStore('reply-invalid'),
+    })).rejects.toThrow('AI paid attempt budget exhausted');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    mockAiResult({ is_lead: true, custom_criteria_matched: true });
+    await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+      ...adjudicationOptions, leadCriteria: 'Лид, если запросили договор.',
+      checkpointStore: restartStore('reply-invalid'),
+    })).resolves.toMatchObject({ isLead: true });
+    expect(fetchMock).toHaveBeenCalledTimes(4); // changed criteria is a genuinely new exact input
+
+    for (const status of [402, 429, 402, 429]) {
+      fetchMock.mockResolvedValue({ ok: false, status, text: async () => 'temporary rejection' });
+      await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+        ...adjudicationOptions, checkpointStore: restartStore('reply-balance-restored'),
+      })).rejects.toThrow(`AI API ${status}`);
+      expect(rpc.mock.calls.at(-1)?.[1]).toMatchObject({ p_raw_response: null, p_error_code: `http_${status}` });
+    }
+    mockAiResult({ is_lead: true, custom_criteria_matched: true });
+    await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+      ...adjudicationOptions, checkpointStore: restartStore('reply-balance-restored'),
+    })).resolves.toMatchObject({ isLead: true }); // no-credit rejection did not exhaust paid attempts
+
+    // Database committed the raw verdict but the acknowledgement was lost.
+    // The next worker invocation must reuse it, not buy another assessment.
+    let loseCompletionAck = true;
+    const uncertainAckRpc = jest.fn(async (name: string, args: Record<string, string>) => {
+      const persisted = await rpc(name, args);
+      if (name === 'finish_instantly_qualification_ai' && loseCompletionAck) {
+        loseCompletionAck = false;
+        return { data: null, error: { code: 'NETWORK_ERROR' } };
+      }
+      return persisted;
+    });
+    const uncertainAckStore = createQualificationAiCheckpointStore(
+      { rpc: uncertainAckRpc } as unknown as Pick<SupabaseClient, 'rpc'>,
+      { accountId: 'account-1', replyId: 'reply-lost-ack', projectId: 'project-1' },
+    );
+    fetchMock.mockClear();
+    await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+      ...adjudicationOptions, checkpointStore: uncertainAckStore,
+    })).rejects.toThrow('AI checkpoint unavailable');
+    await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+      ...adjudicationOptions, checkpointStore: restartStore('reply-lost-ack'),
+    })).resolves.toMatchObject({ isLead: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fetchMock.mockClear();
+    const unavailable = createQualificationAiCheckpointStore({
+      rpc: jest.fn(async () => ({ data: null, error: { code: 'PGRST202' } })),
+    } as unknown as Pick<SupabaseClient, 'rpc'>, { accountId: 'account-1', replyId: 'reply-unavailable' });
+    await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+      ...adjudicationOptions, checkpointStore: unavailable,
+    })).rejects.toThrow('AI checkpoint unavailable');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('does not turn a department-routing object into materials after a confirmed proposal', async () => {

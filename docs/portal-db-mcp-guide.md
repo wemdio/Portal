@@ -676,6 +676,22 @@ ORDER BY bt.occurred_at DESC;
   кампании, письма, ниши, open/reply rate) — перенаправь пользователя на MCP
   `instantly-dataset`.
 
+## Instantly qualification recovery: граница баз (изменение 2026-09-09)
+
+Подготовлено в коде; наличие миграций в production нужно проверить отдельно.
+В **main Portal DB** новый `instantly_email_read_budget` и служебные RPC
+`instantly_reserve_email_read` / `instantly_defer_email_reads` координируют лимит
+чтения писем между процессами. Это не аналитическая база `instantly_dataset`.
+
+В **операционной Instantly DB**, не через `portal-db`, находятся
+`instantly_qualification_ai_budgets`, `instantly_qualification_ai_checkpoints`,
+`instantly_ownership_evidence_progress` и новые `recovery_*` поля квалификаций.
+`recovery_attempts` — число взятых в работу повторов, а не число платных AI-запросов.
+Технический pending не равен ручной проверке и не должен считаться «не лид».
+Историческую причину ошибки нельзя выдавать за текущую недоступность провайдера.
+Порядок согласованного применения и ограничения описаны в
+`docs/incidents/2026-09-09-instantly-qualification-queue-recovery.md`.
+
 ## Практика
 - **Данные обновляются в реальном времени** — это боевая БД портала, не снапшот.
 - **Внешние источники (AMO, Метрика, банки)** льются раз в сутки в 2:00 МСК (23:00 UTC). Если
