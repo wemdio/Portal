@@ -25,11 +25,11 @@ function pick(
 }
 
 export function formatSummary(
-  start: Date,
-  end: Date,
+  periodStart: Date,
+  periodEnd: Date,
   metrics: ChannelMetrics[],
 ): string {
-  const header = `📊 Отчёт продаж — ${shortMskDate(start)}–${shortMskDate(end)}`;
+  const header = `📊 Отчёт продаж — ${shortMskDate(periodStart)}–${shortMskDate(periodEnd)}`;
   const sections = metrics.map(section);
   return [header, ...sections].join('\n\n');
 }
@@ -51,11 +51,11 @@ export function formatSummary(
  * молчанием отчёт уже дважды скрывал потерянные сделки.
  */
 export function formatSummaryMessages(
-  start: Date,
-  end: Date,
+  periodStart: Date,
+  periodEnd: Date,
   metrics: ChannelMetrics[],
 ): string[] {
-  const period = `${shortMskDate(start)}–${shortMskDate(end)}`;
+  const period = `${shortMskDate(periodStart)}–${shortMskDate(periodEnd)}`;
   const main = pick(metrics, MAIN_SUMMARY_CHANNELS.map((c) => c.name));
   const extra = pick(metrics, EXTRA_SUMMARY_CHANNELS.map((c) => c.name));
 
