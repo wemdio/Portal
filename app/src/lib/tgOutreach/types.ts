@@ -256,6 +256,18 @@ export interface OutreachAccount {
   appeal_detail?: string | null;
   appealed_at?: string | null;
   /**
+   * Заказ на правку профиля с работающей кампании (миграция 20260908_0001).
+   *
+   * Ручка профиля открывает своё соединение и работает только на остановленной
+   * кампании. Заказ применяет круг — тем соединением, что уже открыто.
+   */
+  profile_requested_at?: string | null;
+  profile_requested_by_name?: string | null;
+  profile_payload?: unknown;
+  profile_status?: string | null;
+  profile_detail?: string | null;
+  profile_applied_at?: string | null;
+  /**
    * Личность самого аккаунта — заполняется getMe() при старте прогрева
    * (миграция 20260803_0006). Боевому циклу не нужна: он всегда отвечает уже
    * известному собеседнику. Прогреву нужна, чтобы аккаунты могли адресовать

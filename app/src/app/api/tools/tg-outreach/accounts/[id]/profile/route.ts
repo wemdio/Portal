@@ -6,6 +6,7 @@ import { applyProfile, describeTelegramError } from '@/lib/tgOutreach/profile/ap
 import { readProfile } from '@/lib/tgOutreach/profile/readProfile';
 import { storeAccountAvatar } from '@/lib/tgOutreach/profile/avatarStorage';
 import { loadAccountForProfile, connectAccount } from '@/lib/tgOutreach/profile/session';
+import { usernameCandidates } from '@/lib/tgOutreach/profile/autofill';
 
 export const dynamic = 'force-dynamic';
 
@@ -31,6 +32,16 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
       const loaded = await loadAccountForProfile(auth.supabase, id);
       if ('error' in loaded) return loaded.error;
+      // Чтение остаётся только на свободном аккаунте: заказывать поход в
+      // Telegram ради обновления карточки незачем, портал показывает
+      // сохранённое.
+      if (loaded.busy) {
+        return jsonError(
+          'Кампания сейчас работает — прочитать профиль из Telegram нельзя: аккаунт занят рассылкой. '
+          + 'Карточка показывает сохранённое в портале.',
+          409,
+        );
+      }
 
       let client;
       try {
@@ -108,6 +119,41 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
       const loaded = await loadAccountForProfile(auth.supabase, id);
       if ('error' in loaded) return loaded.error;
       const account = loaded.account;
+
+      /**
+       * Кампания работает — заказ вместо записи.
+       *
+       * Подключаться нельзя: сессию держит круг. Заказ применит он же, дойдя до
+       * аккаунта, и результат вернёт в те же поля карточки.
+       *
+       * Аватарку в заказ не берём: она весит до мегабайта, а очередь живёт в
+       * строке аккаунта. Аватарку по-прежнему меняют на остановленной кампании,
+       * и это честно сказано в ответе.
+       */
+      if (loaded.busy) {
+        const candidates = usernameCandidates({
+          firstName: profile.first_name,
+          lastName: profile.last_name,
+        });
+        const { error: qErr } = await auth.supabase
+          .from('tg_outreach_accounts')
+          .update({
+            profile_requested_at: new Date().toISOString(),
+            profile_payload: { ...profile, username_candidates: candidates },
+            profile_status: null,
+            profile_detail: null,
+          })
+          .eq('id', id);
+        if (qErr) return jsonError(qErr.message, 500);
+
+        const avatarAsked = (form.get('avatar') as File | null)?.size;
+        return NextResponse.json({
+          queued: true,
+          message:
+            'Кампания работает, поэтому профиль встал в очередь — рассылка применит его, когда дойдёт до аккаунта в круге.'
+            + (avatarAsked ? ' Аватарка в очередь не идёт: её меняют на остановленной кампании.' : ''),
+        });
+      }
 
       const avatarFile = form.get('avatar') as File | null;
       let avatar: { buffer: Buffer; name: string } | undefined;

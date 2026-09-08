@@ -3226,6 +3226,22 @@ function CampaignAccountsTab({
                       {a.check_status === 'frozen' && (
                         <AppealButton account={a} onDone={() => { void load(); }} />
                       )}
+                      {a.profile_requested_at && (
+                        <span
+                          title={`Правку профиля заказал ${a.profile_requested_by_name || 'сотрудник портала'}. Рассылка применит её своим соединением, когда дойдёт до аккаунта в круге.`}
+                          className="cursor-help rounded-md bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-700"
+                        >
+                          профиль в очереди
+                        </span>
+                      )}
+                      {a.profile_status === 'failed' && !a.profile_requested_at && (
+                        <span
+                          title={a.profile_detail ?? undefined}
+                          className="cursor-help rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-700"
+                        >
+                          профиль не применился
+                        </span>
+                      )}
                       {a.appeal_requested_at && !a.appeal_status && (
                         <span className="rounded-md bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-700">
                           обжалование в очереди
@@ -3404,7 +3420,7 @@ function AccountProfileModal({
       });
       const body = (await res.json().catch(() => null)) as
         { error?: string; first_name?: string; last_name?: string; username?: string | null;
-          bio?: string; available?: boolean; checked?: number } | null;
+          bio?: string; available?: boolean | null; checked?: number; note?: string } | null;
       if (!res.ok) {
         setFillNote(body?.error ?? `Не получилось (HTTP ${res.status})`);
         return null;
@@ -3426,7 +3442,10 @@ function AccountProfileModal({
     if (data.bio) setBio(data.bio);
     if (data.username) {
       setUsername(data.username);
-      setFillNote(`Готово. Ник свободен — проверено в Telegram (вариантов перебрано: ${data.checked ?? 1}). Осталось нажать «Сохранить».`);
+      setFillNote(
+        data.note
+          ?? `Готово. Ник свободен — проверено в Telegram (вариантов перебрано: ${data.checked ?? 1}). Осталось нажать «Применить».`,
+      );
     } else {
       setFillNote('Имя и описание подставил, а свободный ник не нашёлся — нажмите «Другой ник».');
     }
@@ -3437,7 +3456,7 @@ function AccountProfileModal({
     if (!data) return;
     if (data.username) {
       setUsername(data.username);
-      setFillNote('Ник свободен — проверено в Telegram.');
+      setFillNote(data.note ?? 'Ник свободен — проверено в Telegram.');
     } else {
       setFillNote('Свободный ник не нашёлся. Попробуйте ещё раз или смените имя.');
     }
@@ -3510,12 +3529,19 @@ function AccountProfileModal({
         body: form,
       });
       const body = (await res.json().catch(() => null)) as
-        { error?: string; avatar_error?: string } | null;
+        { error?: string; avatar_error?: string; queued?: boolean; message?: string } | null;
       if (!res.ok) {
         setError(body?.error ?? `Ошибка ${res.status}`);
         return;
       }
       onSaved();
+      // Кампания работает — профиль применит круг. Карточку не закрываем:
+      // иначе оператор решит, что всё уже в Telegram, и удивится, не найдя
+      // там изменений ближайший час.
+      if (body?.queued) {
+        setFillNote(body.message ?? 'Профиль поставлен в очередь — рассылка применит его в ближайшем круге.');
+        return;
+      }
       // Профиль в Telegram уже изменён, поэтому не откатываем и не считаем это
       // ошибкой — но карточку не закрываем, иначе предупреждение никто не увидит.
       if (body?.avatar_error) {
@@ -3627,9 +3653,8 @@ function AccountProfileModal({
           <div className="flex flex-wrap items-center gap-2 rounded-lg bg-indigo-50 px-3 py-2">
             <button
               type="button"
-              disabled={!canRead || fillBusy !== null}
+              disabled={fillBusy !== null}
               onClick={() => void autofillAll()}
-              title={canRead ? undefined : 'Остановите кампанию: во время рассылки аккаунт занят'}
               className="cursor-pointer rounded-lg bg-indigo-600 px-3 py-1.5 text-[11px] font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {fillBusy === 'all' ? 'Подбираю…' : 'Автозаполнение'}
@@ -3650,9 +3675,9 @@ function AccountProfileModal({
             </button>
             <button
               type="button"
-              disabled={!canRead || fillBusy !== null || !firstName.trim()}
+              disabled={fillBusy !== null || !firstName.trim()}
               onClick={() => void regenerateUsername()}
-              title={canRead ? 'Подобрать другой свободный ник под текущее имя' : 'Остановите кампанию'}
+              title="Подобрать другой свободный ник под текущее имя"
               className="cursor-pointer rounded-lg border border-indigo-200 bg-white px-3 py-1.5 text-[11px] font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {fillBusy === 'check' ? 'Проверяю…' : 'Другой ник'}
