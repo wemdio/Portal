@@ -36,6 +36,7 @@ import { ensureArchiveSinkJob, buildHhArchiveSinkCallback, getUserIdByEmail } fr
 import { appendLeadsToClientCampaign, fetchExistingCampaignEmails } from '@/lib/clientLaunch/appendLeads';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
 import { getLatestTwoGisSnapshotId } from '@/lib/twoGis/repository';
+import { normalizeTwoGisFilters } from '@/lib/twoGis/query';
 import { toTwoGisRubricGroups } from '@/lib/twoGis/rubricGroups';
 import { loadOutreachOsConfig } from './config';
 import { buildExcludePatterns } from './excludePatterns';
@@ -57,6 +58,13 @@ import {
   pullGisTopupCandidates,
   type GisTopupCandidate,
 } from './gisTopup';
+import {
+  gisScanRubricKey,
+  gisScanStartCursor,
+  loadGisScanState,
+  saveGisScanState,
+  type GisScanCheckpoint,
+} from './gisScanState';
 
 const POLL_INTERVAL_MS = 10_000;
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
@@ -354,12 +362,16 @@ export async function runOutreachOsDailyPipeline(
     let gisKeptLeads: LeadCreatePayload[] = [];   // GIS-лиды после LLM (аналог keptLeads)
     const gisNoiseDomains = new Set<string>();
     const gisTarget = config.gis_topup_target_appended;
+    let gisCheckpoint: GisScanCheckpoint | null = null;
+    const gisRubricGroups = normalizeTwoGisFilters({
+      rubricGroups: toTwoGisRubricGroups(config.gis_topup_rubric_groups),
+    }).rubricGroups ?? [];
 
     if (!config.gis_topup_enabled) {
       log('[gis-topup] выключен (gis_topup_enabled=false) — пропускаем');
     } else if (gisTarget <= 0) {
       log('[gis-topup] ежедневная цель GIS равна нулю — пропускаем');
-    } else if (config.gis_topup_rubric_groups.length === 0) {
+    } else if (gisRubricGroups.length === 0) {
       log('[gis-topup] пустой gis_topup_rubric_groups — нечего тянуть, пропускаем');
     } else {
       gisExecuted = true;
@@ -371,13 +383,22 @@ export async function runOutreachOsDailyPipeline(
       // чтения кросс-журнала = топ-ап пропускаем, повторное письмо компании
       // GIS-пайплайна недопустимо. HH-ветка от этого не зависит.
       const gisSignalSeenDomains = await loadGisSignalSeenDomains();
+      const scanState = await loadGisScanState(log);
       if (!snapshotId) {
         log('[gis-topup] снапшот 2gis_dataset недоступен (TWOGIS_DATASET_DB_URL?) — топ-ап пропущен, HH-ветка продолжается');
         gisExecuted = false;
       } else if (!gisSignalSeenDomains) {
         log('[gis-topup] не удалось прочитать gis_signal_seen_companies (fail-closed) — топ-ап пропущен, HH-ветка продолжается');
         gisExecuted = false;
+      } else if (!scanState) {
+        log('[gis-topup] позиция обхода недоступна — топ-ап пропущен, HH-ветка продолжается');
+        gisExecuted = false;
       } else {
+        const rubricKey = gisScanRubricKey(gisRubricGroups);
+        const cursor = gisScanStartCursor(scanState, snapshotId, rubricKey);
+        if (scanState.snapshot_id !== snapshotId || scanState.rubric_key !== rubricKey) {
+          log('[gis-topup] новый снапшот или набор рубрик — обход с начала');
+        }
         // Дедуп-матрица §4.1: (а) seen OutreachOS 45д + (б) gis_signal seen +
         // (в) домены сегодняшнего HH+SJ батча; (г) внутренний — в pull'е.
         const batchDomains = new Set(
@@ -389,31 +410,25 @@ export async function runOutreachOsDailyPipeline(
           ...batchDomains,
         ]);
         const pull = await pullGisTopupCandidates({
-          rubricGroups: toTwoGisRubricGroups(config.gis_topup_rubric_groups),
+          rubricGroups: gisRubricGroups,
           limit: pullLimit,
           snapshotId,
           excludeDomains,
+          suppression,
+          cursor,
           log: (m) => log(`[gis-topup] ${m}`),
         });
+        gisCheckpoint = { previous: scanState, snapshotId, rubricKey, afterId: pull.nextCursor };
         gisCounters.pulled = pull.pulled;
         log(
           `[gis-topup] 8t.1 pull: цель GIS=${gisTarget} сверх HH=${keptLeads.length}, лимит=${pullLimit}, ` +
-            `взято=${pull.pulled} (кросс-дедуп -${pull.excludedDropped}, scanned=${pull.scanned}) → кандидатов ${pull.candidates.length}`,
+            `взято=${pull.pulled} (кросс-дедуп -${pull.excludedDropped}, B2C -${pull.b2cDropped}, ` +
+            `suppression -${pull.suppressed}, scanned=${pull.scanned}) → кандидатов ${pull.candidates.length}; ` +
+            `позиция=${cursor ?? 'начало'} → ${pull.nextCursor ?? 'начало следующего прохода'}, остановка=${pull.stopReason}`,
         );
 
-        // 8t.2 Структурный B2C-отсев (тот же isOutreachOsB2cCompany, что шаг
-        //     3b) → suppression (тот же сет шага 3c; fail-closed уже обеспечен
-        //     загрузкой выше — здесь чистая фильтрация).
-        const gisAfterB2c = pull.candidates.filter((c) => !isOutreachOsB2cCompany(c.name, c.site));
-        if (gisAfterB2c.length < pull.candidates.length) {
-          log(`[gis-topup] B2C/ИП-отсев: -${pull.candidates.length - gisAfterB2c.length} → ${gisAfterB2c.length}`);
-        }
-        gisQualified.push(
-          ...gisAfterB2c.filter((c) => !isSuppressedCompany(c.site, suppression)),
-        );
-        if (gisQualified.length < gisAfterB2c.length) {
-          log(`[gis-topup] Suppression-отсев клиентов: -${gisAfterB2c.length - gisQualified.length} → ${gisQualified.length}`);
-        }
+        // 8t.2 B2C и suppression проверены внутри pull ДО заполнения лимита.
+        gisQualified.push(...pull.candidates);
         gisCounters.afterDedup = gisQualified.length;
 
         if (gisQualified.length === 0) {
@@ -517,6 +532,11 @@ export async function runOutreachOsDailyPipeline(
     const gisSeenRows =
       gisExecuted && !gisMeasureOnly ? gisQualified.map(toGisSeen(leadDomains, gisNoiseDomains)) : [];
     await markSeen(fresh.map(toSeen(leadDomains, noiseDomains, 'no_email')).concat(gisSeenRows));
+    // Продвигаем только обработанный участок после seen. Сбой конструктора
+    // или markSeen оставляет позицию для ретрая; GIS measure_only её не меняет.
+    if (gisCheckpoint && !gisMeasureOnly) {
+      await saveGisScanState(gisCheckpoint, log);
+    }
 
     // 8b. ДЕДУП ПРОТИВ СВОИХ КАМПАНИЙ (до Instantly). Мы шлём с
     //     skip_if_in_campaign=false, потому что этот флаг у Instantly работает

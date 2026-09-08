@@ -262,13 +262,14 @@ export async function* iterateTwoGisCards(
   filters: TwoGisFilters,
   options: {
     batchSize?: number;
+    cursor?: string;
     snapshotId: number;
     client?: PoolClient;
   },
 ): AsyncGenerator<TwoGisCard[]> {
   const requested = Number.isFinite(options.batchSize) ? Number(options.batchSize) : 5_000;
   const batchSize = Math.min(Math.max(Math.trunc(requested), 1), 10_000);
-  let cursor: string | undefined;
+  let cursor = options.cursor;
   const client = options.client ?? await twoGisDatasetExportConnect();
   let lockHeld = false;
 
