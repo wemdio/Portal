@@ -1,0 +1,752 @@
+{
+  "schema_version": 1,
+  "description": "Opt-in 40-case Instantly qualification pilot. Anonymized incident reconstructions and synthetic policy contrasts; NOT a random production sample, independent held-out set, or 150–200-case human gold dataset. No production credentials or personal contacts are included.",
+  "label_policy": {
+    "frozen_before_model_runs": true,
+    "user_confirmed": "The underlying qualification rule or example was explicitly stated by the user in this task. Reconstructed wording/context was not separately re-annotated by the user.",
+    "policy_derived": "Expected outcome derived from current documented/code policy or existing incident regression intent, not from a live model response. Report separately from user-confirmed rules.",
+    "ambiguous": "Unresolved business boundary. expected_label=review is a placeholder for inspection, not a human verdict; score=false excludes the item from accuracy.",
+    "limitations": [
+      "Do not infer production error rates or daily volume from this deliberately difficult pilot.",
+      "Near-duplicate contrast cases belong to the same development set; do not split them into train and held-out sets.",
+      "Do not retag labels after seeing model outputs without a versioned human policy decision.",
+      "All contact addresses use example.com and all telephone numbers use the fictional +1 202 555 01xx range."
+    ]
+  },
+  "cases": [
+    {
+      "id": "machine-ack-conditional-contact",
+      "category": "machine",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: Gracie-style acknowledgement complaint; leadQualifierPolicy.test.ts MACHINE_ACK_FIXTURES",
+        "notes": "User identified this template as an autoresponder. Phone and handle are synthetic placeholders."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Добрый день! Мы обязательно ответим вам в ближайшее время! Если ваш запрос актуален и требует ответа, то свяжитесь с нами по телефону: +1 202 555 0100 или Telegram: @example_support",
+        "outboundText": "Подскажите, пожалуйста, кто у вас отвечает за развитие продаж? Буду признательна за имя и контакт ответственного сотрудника.",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "machine-ack-custom-email",
+      "category": "machine_custom",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifierPolicy.test.ts: machine acknowledgement policy",
+        "notes": "Machine acknowledgement must not satisfy a custom shared-email criterion."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Ваше обращение зарегистрировано под номером 12345. Специалист ответит после обработки запроса. Если вопрос срочный, напишите service@example.com.",
+        "outboundText": "Подскажите, пожалуйста, кто у вас отвечает за развитие продаж? Буду признательна за имя и контакт ответственного сотрудника.",
+        "briefText": "",
+        "leadCriteria": "Дополнительно считать лидом, если дали номер телефона и Имя, предложили созвониться или попросили связаться. Оставили какой-то мессенджер для связи и попросили связаться в нем. Также считать лидом если поделились кодом в АТИ (ati.su). Также считать лидом, если поделились почтой. Также считать лидом, если попросили сделать расчет заявки, рассчитать стоимость перевозки.",
+        "subject": "Обращение принято"
+      }
+    },
+    {
+      "id": "machine-full-mailbox-bounce",
+      "category": "machine",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: Smartway delivery-failure complaint",
+        "notes": "User complained that a delivery failure was treated as deferred interest. Addresses and diagnostic details are anonymized."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Не удалось выполнить доставку следующим получателям или группам:\nrecipient@example.com\nПочтовый ящик получателя переполнен и в данный момент не может принимать сообщения. Попытайтесь повторно отправить это сообщение позже или свяжитесь с получателем напрямую.\nДиагностические сведения для администраторов:\n554 5.2.2 mailbox full; QuotaExceededException",
+        "outboundText": null,
+        "briefText": "",
+        "subject": "Не удается доставить: Re: предложение",
+        "leadEmail": "postmaster@example.com"
+      }
+    },
+    {
+      "id": "machine-mailbox-change",
+      "category": "machine",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: mailbox-change autoresponder complaint",
+        "notes": "Formal mailbox migration notice is not buyer interest, despite email, phone and cooperation wording."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Уважаемый отправитель!\nБлагодарим за Ваше сообщение. Наша компания обновила основной электронный почтовый адрес.\nВсе официальные письма следует направлять на новый адрес: office@example.com.\nСтарый адрес перенаправил Ваше сообщение, но для оперативности рекомендуем использовать новый. Если у Вас срочные вопросы, свяжитесь с нами по телефону +1 202 555 0101.\nСпасибо за понимание и сотрудничество!",
+        "outboundText": "Подскажите, пожалуйста, кто у вас отвечает за развитие продаж? Буду признательна за имя и контакт ответственного сотрудника.",
+        "briefText": "",
+        "subject": "Уведомление о смене электронного почтового адреса"
+      }
+    },
+    {
+      "id": "machine-out-of-office",
+      "category": "machine",
+      "language": "en",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifier.ts: machine reply policy",
+        "notes": "An automatic absence date and fallback contact are not deferred buyer interest."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Thank you for your email. I am out of the office until September 14 and will not be checking messages. For urgent matters contact my colleague at cover@example.com. This is an automatic reply.",
+        "outboundText": "Hi,\nIf your company is looking to create more qualified sales opportunities, our agency can quickly test relevant segments and find leads there.\nWe'll bring you 3 sales-qualified leads, or continue working for free until we do.\nAm I in the right inbox for growth or outbound?",
+        "briefText": "",
+        "subject": "Automatic reply: introduction"
+      }
+    },
+    {
+      "id": "service-ticket-followup",
+      "category": "service_followup",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifierPolicy.test.ts: audited Mailganer ticket regression",
+        "notes": "Synthetic ticket follow-up explicitly establishes that the sender is servicing our support request, not buying our offer."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Добрый день! По вашему обращению в нашу поддержку готовы уточнить детали настройки вашего аккаунта. Очень ждем Вашу обратную связь, вопросы и комментарии. Можем созвониться, чтобы обсудить детали.\nT_I_C_K_E_T_I_D_123456",
+        "outboundText": "Добрый день!\nПредлагаем единую систему для автоматизации продаж и обработки входящих заявок.\nРешение помогает команде быстрее отвечать новым клиентам, контролировать этапы работы и сокращать ручные операции.\nГотовы показать сценарий внедрения под ваши процессы и обсудить подходящий следующий шаг.",
+        "briefText": "",
+        "subject": "Re: [#DEMO123]: данные контрагента",
+        "leadEmail": "support@example.com"
+      }
+    },
+    {
+      "id": "human-ack-plus-commercial-request",
+      "category": "machine_boundary",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifierPolicy.test.ts: human commercial request alongside acknowledgement",
+        "notes": "An explicit authored commercial request appended to a template must not be discarded as a machine-only message."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Благодарим за обращение, мы получили Ваше письмо и ответим в ближайшее время.\n\nОтдельно по вашему предложению: пришлите КП с ценами на ваши услуги.",
+        "outboundText": null,
+        "briefText": ""
+      }
+    },
+    {
+      "id": "seller-logistics-cooperation",
+      "category": "seller_pitch",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: logistics seller pitch reported as false lead; leadQualifierPolicy.test.ts AUDITED_SELLER_PITCHES",
+        "notes": "Anonymized reconstruction of a complaint: generic readiness to sell the sender's own services is not buyer interest."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Общество с ограниченной ответственностью «Демо Транспорт» оказывает услуги по поставке инертных материалов, перевозке сельхозпродукции и выполнению земляных работ.\nГотовы к долгосрочному сотрудничеству.\nПо всем вопросам и для получения дополнительной информации обращайтесь: contact@example.com.",
+        "outboundText": "Добрый день!\nМы предоставляем контейнеры для экспортных и импортных перевозок. Подбираем свободную тару под маршрут и дату отправки, организуем поставку и рассчитываем итоговую стоимость.\nПредлагаем созвониться на 5 минут, чтобы обсудить ваши ближайшие отправки и подготовить расчет.",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "seller-request-our-specification",
+      "category": "seller_pitch",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifierPolicy.test.ts: supplier asking us for dimensions",
+        "notes": "Sender asks us for a specification to sell their product; not a purchase request for our CRM."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Мы не производим костровые чаши, но со всем остальным можем Вам помочь. Напишите, пожалуйста, свой запрос с размерами, и я вернусь с ответом. Со мной также можно связаться по телефону +1 202 555 0102.",
+        "outboundText": "Добрый день!\nПредлагаем единую систему для автоматизации продаж и обработки входящих заявок.\nРешение помогает команде быстрее отвечать новым клиентам, контролировать этапы работы и сокращать ручные операции.\nГотовы показать сценарий внедрения под ваши процессы и обсудить подходящий следующий шаг.",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "seller-description-plus-buyer-request",
+      "category": "seller_boundary",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifierPolicy.test.ts: mixed seller context with explicit request for our prices",
+        "notes": "Describing the sender's business must not erase a separate explicit request to buy our product."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Мы сами оказываем перевозки, но нам нужны ваши контейнеры. Пришлите цены на 20-футовые КТК.",
+        "outboundText": "Добрый день!\nМы предоставляем контейнеры для экспортных и импортных перевозок. Подбираем свободную тару под маршрут и дату отправки, организуем поставку и рассчитываем итоговую стоимость.\nПредлагаем созвониться на 5 минут, чтобы обсудить ваши ближайшие отправки и подготовить расчет.",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "ordinary-refusal-ru",
+      "category": "ordinary_negative",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifier.ts: default qualification policy",
+        "notes": "Synthetic ordinary rejection; no agreed future return or buyer action."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Спасибо, не интересно. У нас уже есть подходящая система, менять ее не планируем.",
+        "outboundText": "Добрый день!\nПредлагаем единую систему для автоматизации продаж и обработки входящих заявок.\nРешение помогает команде быстрее отвечать новым клиентам, контролировать этапы работы и сокращать ручные операции.\nГотовы показать сценарий внедрения под ваши процессы и обсудить подходящий следующий шаг.",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "buyer-interest-no-history-review",
+      "category": "buyer_interest_context",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifier.ts: default qualification policy",
+        "notes": "Current default policy requires review of a bare interest word without substantive offer context. This is a policy-derived expected review, not a user-reviewed exact fixture."
+      },
+      "expected_label": "review",
+      "score": true,
+      "input": {
+        "replyText": "Интересно.",
+        "outboundText": null,
+        "briefText": ""
+      }
+    },
+    {
+      "id": "ordinary-unsubscribe",
+      "category": "ordinary_negative",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifier.ts: default qualification policy",
+        "notes": "Synthetic unambiguous unsubscribe request."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Удалите наш адрес из рассылки и больше не пишите.",
+        "outboundText": "Добрый день!\nПредлагаем единую систему для автоматизации продаж и обработки входящих заявок.\nРешение помогает команде быстрее отвечать новым клиентам, контролировать этапы работы и сокращать ручные операции.\nГотовы показать сценарий внедрения под ваши процессы и обсудить подходящий следующий шаг.",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "ordinary-thanks-only",
+      "category": "ordinary_neutral",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifier.ts: default qualification policy",
+        "notes": "A courtesy acknowledgement alone does not express interest or request materials."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Спасибо за письмо.",
+        "outboundText": "Добрый день!\nПредлагаем единую систему для автоматизации продаж и обработки входящих заявок.\nРешение помогает команде быстрее отвечать новым клиентам, контролировать этапы работы и сокращать ручные операции.\nГотовы показать сценарий внедрения под ваши процессы и обсудить подходящий следующий шаг.",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "cta-meeting-no-history",
+      "category": "explicit_cta",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: user explicitly requested meeting acceptance without outbound history be a lead",
+        "notes": "Reconstructed from the user's stated example. No outbound context is deliberately supplied."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Давайте завтра встречу проведем.",
+        "outboundText": null,
+        "briefText": ""
+      }
+    },
+    {
+      "id": "cta-personal-whatsapp-call",
+      "category": "explicit_cta",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: personal WhatsApp call complaint example and user direct-CTA criterion",
+        "notes": "Personal call request, not routing to a receptionist or a signature number."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Не могли бы вы мне позвонить по WhatsApp: +1 202 555 0103.",
+        "outboundText": null,
+        "briefText": ""
+      }
+    },
+    {
+      "id": "cta-demo-no-history-en",
+      "category": "explicit_cta",
+      "language": "en",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifierPolicy.test.ts: our product demo requested through recipient team",
+        "notes": "Explicit request to demonstrate our product works without recoverable outbound text."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Could we book a demo of your solution with our team next week?",
+        "outboundText": null,
+        "briefText": ""
+      }
+    },
+    {
+      "id": "commercial-price-no-history",
+      "category": "commercial_request",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: user explicitly required price requests without original offer to be leads",
+        "notes": "Short direct price question; missing history must not suppress this buying signal."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Сколько стоит?",
+        "outboundText": null,
+        "briefText": ""
+      }
+    },
+    {
+      "id": "commercial-calculation-no-history",
+      "category": "commercial_request",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: user compared commercial proposal request to calculation request",
+        "notes": "Synthetic route and quantity preserve the user-approved request-for-calculation rule."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Пришлите расчет стоимости перевозки двух контейнеров по маршруту Москва — Владивосток.",
+        "outboundText": null,
+        "briefText": ""
+      }
+    },
+    {
+      "id": "commercial-proposal-routed",
+      "category": "commercial_request",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: commercial proposal sent to another address example; user stated КП is a commercial request",
+        "notes": "A requested commercial proposal is not reduced to mere contact routing; address is synthetic."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Присылайте коммерческое предложение на этот адрес: purchasing@example.com.",
+        "outboundText": "Подскажите, пожалуйста, кто у вас отвечает за развитие продаж? Буду признательна за имя и контакт ответственного сотрудника.",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "buyer-interest-single-word",
+      "category": "buyer_interest",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: user explicitly confirmed интересно as lead after substantive offer",
+        "notes": "Offer context is supplied. This label does not extend to a contact-only opener."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Интересно.",
+        "outboundText": "Добрый день!\nПредлагаем единую систему для автоматизации продаж и обработки входящих заявок.\nРешение помогает команде быстрее отвечать новым клиентам, контролировать этапы работы и сокращать ручные операции.\nГотовы показать сценарий внедрения под ваши процессы и обсудить подходящий следующий шаг.",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "buyer-future-cooperation",
+      "category": "buyer_interest",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: user explicitly confirmed hope for possible cooperation as lead",
+        "notes": "Own response to our substantive offer, not boilerplate selling the sender's services."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Обсудим с коллегами ваше предложение. Надеюсь на возможное сотрудничество.",
+        "outboundText": "Добрый день!\nПредлагаем единую систему для автоматизации продаж и обработки входящих заявок.\nРешение помогает команде быстрее отвечать новым клиентам, контролировать этапы работы и сокращать ручные операции.\nГотовы показать сценарий внедрения под ваши процессы и обсудить подходящий следующий шаг.",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "buyer-deferred-month",
+      "category": "deferred_interest",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: user explicitly said deferred interest through a month or summer counts as lead",
+        "notes": "Specific invitation to return later is retained even without outbound context."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Сейчас не актуально, но напишите через месяц.",
+        "outboundText": null,
+        "briefText": ""
+      }
+    },
+    {
+      "id": "ambiguous-materials-someday",
+      "category": "ambiguous_policy",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "ambiguous",
+        "source": "conversation: user raised vague someday wording as nearly a lead, without resolving missing-offer boundary",
+        "notes": "Do not score. Unlike a concrete future date, vague someday and absent offer leave the business boundary unresolved."
+      },
+      "expected_label": "review",
+      "score": false,
+      "input": {
+        "replyText": "Пришлите материалы, возможно когда-нибудь посмотрим.",
+        "outboundText": null,
+        "briefText": ""
+      }
+    },
+    {
+      "id": "materials-no-history",
+      "category": "materials_context",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: user said generic request to send proposal without interest is not a lead",
+        "notes": "No outbound offer, quoted history or own need is supplied. This synthetic context applies the user's general materials-without-interest rule, not a claim about a real thread."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Пришлите презентацию или информацию о компании.",
+        "outboundText": null,
+        "briefText": ""
+      }
+    },
+    {
+      "id": "materials-substantive-offer",
+      "category": "materials_context",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifierPolicy.test.ts: same material request after confirmed proposal",
+        "notes": "The contrast case uses the same reply but a substantive offer. Current policy treats request for materials as continued interest."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Пришлите презентацию или информацию о компании.",
+        "outboundText": "Добрый день!\nПредлагаем единую систему для автоматизации продаж и обработки входящих заявок.\nРешение помогает команде быстрее отвечать новым клиентам, контролировать этапы работы и сокращать ручные операции.\nГотовы показать сценарий внедрения под ваши процессы и обсудить подходящий следующий шаг.",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "materials-quoted-contact-opener",
+      "category": "quoted_context",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifierPolicy.test.ts: generic materials without confirmed proposal; quoted-context boundary",
+        "notes": "A quote longer than 50 characters is still only a contact opener. It is not proof of a substantive offer."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Пришлите презентацию.\n\nOn 1 Sep 2026, Sales <sales@example.com> wrote:\n> Подскажите, пожалуйста, кто у вас отвечает за развитие продаж? Буду признательна за имя и контакт ответственного сотрудника.\n> Спасибо за помощь.",
+        "outboundText": null,
+        "briefText": ""
+      }
+    },
+    {
+      "id": "materials-quoted-substantive-offer",
+      "category": "quoted_context",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifierPolicy.test.ts: quote-only substantive offer boundary",
+        "notes": "Outbound API history is absent, but the quoted message contains the offer itself."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Пришлите презентацию.\n\nOn 1 Sep 2026, Sales <sales@example.com> wrote:\n> Добрый день!\n> Предлагаем единую систему для автоматизации продаж и обработки входящих заявок.\n> Решение помогает команде быстрее отвечать новым клиентам, контролировать этапы работы и сокращать ручные операции.\n> Готовы показать сценарий внедрения под ваши процессы и обсудить подходящий следующий шаг.",
+        "outboundText": null,
+        "briefText": ""
+      }
+    },
+    {
+      "id": "en-founders-need-presentation",
+      "category": "english_incident",
+      "language": "en",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "policy_derived",
+        "source": "conversation: TobyLab missed notification; leadQualifierPolicy.test.ts TOBYLAB_REPLY_TEXT",
+        "notes": "Anonymized incident reconstruction. The sender states a need aligned to the supplied offer before requesting a presentation."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Hi!\nWe are two co-founders. We are looking for sales opportunities, could you please send an intro presentation about your services?",
+        "outboundText": "Hi,\nIf your company is looking to create more qualified sales opportunities, our agency can quickly test relevant segments and find leads there.\nWe'll bring you 3 sales-qualified leads, or continue working for free until we do.\nAm I in the right inbox for growth or outbound?",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "en-exploring-proposal",
+      "category": "english_incident",
+      "language": "en",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "policy_derived",
+        "source": "conversation: EN agency missed interested response",
+        "notes": "Anonymized reconstruction of explicit interest plus request for proposal, not a materials-only request."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Hello,\nInterested in exploring this further, please send your proposal.\nKind regards,\nCTO",
+        "outboundText": "Hi,\nIf your company is looking to create more qualified sales opportunities, our agency can quickly test relevant segments and find leads there.\nWe'll bring you 3 sales-qualified leads, or continue working for free until we do.\nAm I in the right inbox for growth or outbound?",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "en-costs-commercial-model",
+      "category": "english_incident",
+      "language": "en",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: Gleb English pricing complaint; user direct-price criterion",
+        "notes": "Incident-derived phrasing satisfies the user's explicit cost-question criterion. No live company or person is included."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Hi,\nI read the case study and it sounds interesting. What are your costs and commercial models? Is it a fixed monthly basis or commission-based?",
+        "outboundText": "Hi,\nIf your company is looking to create more qualified sales opportunities, our agency can quickly test relevant segments and find leads there.\nWe'll bring you 3 sales-qualified leads, or continue working for free until we do.\nAm I in the right inbox for growth or outbound?",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "custom-name-and-phone",
+      "category": "custom_positive",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: ADK name-and-phone criterion explicitly confirmed by user",
+        "notes": "Name and phone are deliberately shared in the authored reply, not extracted from a signature."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "+1 202 555 0104 Анна",
+        "outboundText": "Подскажите, пожалуйста, кто у вас отвечает за развитие продаж? Буду признательна за имя и контакт ответственного сотрудника.",
+        "briefText": "",
+        "leadCriteria": "Дополнительно считать лидом, если дали номер телефона и Имя, предложили созвониться или попросили связаться. Оставили какой-то мессенджер для связи и попросили связаться в нем. Также считать лидом если поделились кодом в АТИ (ati.su). Также считать лидом, если поделились почтой. Также считать лидом, если попросили сделать расчет заявки, рассчитать стоимость перевозки."
+      }
+    },
+    {
+      "id": "custom-shared-email",
+      "category": "custom_positive",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: ADK custom shared-email missed lead, user requested repair",
+        "notes": "The user explicitly confirmed this custom rule overrides ordinary contact-routing rejection."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Уточните, пожалуйста, по адресу logistics@example.com.",
+        "outboundText": "Подскажите, пожалуйста, кто у вас отвечает за развитие продаж? Буду признательна за имя и контакт ответственного сотрудника.",
+        "briefText": "",
+        "leadCriteria": "Дополнительно считать лидом, если дали номер телефона и Имя, предложили созвониться или попросили связаться. Оставили какой-то мессенджер для связи и попросили связаться в нем. Также считать лидом если поделились кодом в АТИ (ati.su). Также считать лидом, если поделились почтой. Также считать лидом, если попросили сделать расчет заявки, рассчитать стоимость перевозки."
+      }
+    },
+    {
+      "id": "custom-contact-only-in-signature",
+      "category": "custom_boundary",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifier.ts: deliberate contact in authored reply vs signature",
+        "notes": "A standard signature must not by itself satisfy name-and-phone or shared-email custom rules."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Спасибо за письмо.\n\nС уважением,\nАнна Примерова\nМенеджер по продажам\n+1 202 555 0105\nanna@example.com",
+        "outboundText": "Подскажите, пожалуйста, кто у вас отвечает за развитие продаж? Буду признательна за имя и контакт ответственного сотрудника.",
+        "briefText": "",
+        "leadCriteria": "Дополнительно считать лидом, если дали номер телефона и Имя, предложили созвониться или попросили связаться. Оставили какой-то мессенджер для связи и попросили связаться в нем. Также считать лидом если поделились кодом в АТИ (ati.su). Также считать лидом, если поделились почтой. Также считать лидом, если попросили сделать расчет заявки, рассчитать стоимость перевозки."
+      }
+    },
+    {
+      "id": "custom-email-only-in-quote",
+      "category": "custom_boundary",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifier.ts: custom criteria evidence restricted to authored reply",
+        "notes": "Only the quoted sender's email is present; the current reply shares no contact and expresses no interest."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Мы не занимаемся этим вопросом.\n\nOn 1 Sep 2026, Sales <sales@example.com> wrote:\n> Подскажите, кто отвечает за логистику. Наш адрес для связи logistics@example.com.\n> Будем признательны за контакт ответственного.",
+        "outboundText": null,
+        "briefText": "",
+        "leadCriteria": "Дополнительно считать лидом, если дали номер телефона и Имя, предложили созвониться или попросили связаться. Оставили какой-то мессенджер для связи и попросили связаться в нем. Также считать лидом если поделились кодом в АТИ (ati.su). Также считать лидом, если поделились почтой. Также считать лидом, если попросили сделать расчет заявки, рассчитать стоимость перевозки."
+      }
+    },
+    {
+      "id": "custom-explicit-routing-exclusion",
+      "category": "custom_negative",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifierPolicy.test.ts: OutreachOS contact-only exclusion",
+        "notes": "Custom rule expressly excludes own or third-party contact routing without personal interest, even when the offer was present."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Напишите мне в Telegram: @example_person",
+        "outboundText": "Добрый день!\nПредлагаем единую систему для автоматизации продаж и обработки входящих заявок.\nРешение помогает команде быстрее отвечать новым клиентам, контролировать этапы работы и сокращать ручные операции.\nГотовы показать сценарий внедрения под ваши процессы и обсудить подходящий следующий шаг.",
+        "briefText": "",
+        "leadCriteria": "Это холодный B2B-аутрич инструмента для рассылок.\nСчитай ЛИДОМ, когда ответственный отвечает САМ: если человек В ТЕКСТЕ письма представляется тем, кто занимается продажами, привлечением клиентов, маркетингом или развитием (например, «я занимаюсь...», «это ко мне»).\nНЕ лид: просто передача контакта — своего или чужого — без выраженного интереса: «можете написать сюда», «напишите на почту X», «вот контакт Ивана», «направьте на info@…» — это маршрутизация, а не интерес."
+      }
+    },
+    {
+      "id": "custom-responsible-with-interest",
+      "category": "custom_positive",
+      "language": "ru",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifierPolicy.test.ts: explicit OutreachOS interest from responsible person",
+        "notes": "The same contact channel is now accompanied by the respondent's responsibility and personal interest."
+      },
+      "expected_label": "lead",
+      "score": true,
+      "input": {
+        "replyText": "Я занимаюсь привлечением клиентов. Мне интересно ваше предложение, напишите мне в Telegram: @example_person.",
+        "outboundText": "Добрый день!\nПредлагаем единую систему для автоматизации продаж и обработки входящих заявок.\nРешение помогает команде быстрее отвечать новым клиентам, контролировать этапы работы и сокращать ручные операции.\nГотовы показать сценарий внедрения под ваши процессы и обсудить подходящий следующий шаг.",
+        "briefText": "",
+        "leadCriteria": "Это холодный B2B-аутрич инструмента для рассылок.\nСчитай ЛИДОМ, когда ответственный отвечает САМ: если человек В ТЕКСТЕ письма представляется тем, кто занимается продажами, привлечением клиентов, маркетингом или развитием (например, «я занимаюсь...», «это ко мне»).\nНЕ лид: просто передача контакта — своего или чужого — без выраженного интереса: «можете написать сюда», «напишите на почту X», «вот контакт Ивана», «направьте на info@…» — это маршрутизация, а не интерес."
+      }
+    },
+    {
+      "id": "default-reception-routing",
+      "category": "contact_routing",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "user_confirmed",
+        "source": "conversation: reception routing reported as a false default lead",
+        "notes": "A receptionist contact is not the recipient accepting a sales call; this case has no custom criterion."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Добрый день, обращайтесь, пожалуйста, в приемную. +1 202 555 0106",
+        "outboundText": "Добрый день!\nПредлагаем единую систему для автоматизации продаж и обработки входящих заявок.\nРешение помогает команде быстрее отвечать новым клиентам, контролировать этапы работы и сокращать ручные операции.\nГотовы показать сценарий внедрения под ваши процессы и обсудить подходящий следующий шаг.",
+        "briefText": ""
+      }
+    },
+    {
+      "id": "quoted-old-buying-request",
+      "category": "quoted_context",
+      "language": "en",
+      "provenance": {
+        "kind": "policy_synthetic",
+        "label_basis": "policy_derived",
+        "source": "leadQualifierPolicy.test.ts: authored routing versus quoted history",
+        "notes": "The commercial request exists only in quoted earlier history, not in the latest authored response."
+      },
+      "expected_label": "not_lead",
+      "score": true,
+      "input": {
+        "replyText": "Please send this to partnerships@example.com; our support team cannot help with this matter.\n\nYours sincerely,\nSupport\n\nOn 1 Sep 2026, Another Person <other@example.com> wrote:\n> Please send a commercial proposal with pricing.",
+        "outboundText": null,
+        "briefText": ""
+      }
+    },
+    {
+      "id": "ambiguous-tell-more",
+      "category": "ambiguous_policy",
+      "language": "ru",
+      "provenance": {
+        "kind": "incident_reconstruction",
+        "label_basis": "ambiguous",
+        "source": "conversation: Polka Retail case was disputed against default criteria",
+        "notes": "Do not score. Responsibility is established but no substantive offer or concrete buying signal is known; human label approval is needed."
+      },
+      "expected_label": "review",
+      "score": false,
+      "input": {
+        "replyText": "Вы попали по адресу. Рассказывайте))",
+        "outboundText": "Подскажите, пожалуйста, кто у вас отвечает за развитие продаж? Буду признательна за имя и контакт ответственного сотрудника.",
+        "briefText": ""
+      }
+    }
+  ]
+}

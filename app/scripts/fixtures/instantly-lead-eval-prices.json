@@ -1,0 +1,27 @@
+{
+  "source": "Authenticated GET https://router.requesty.ai/v1/models",
+  "observed_on": "2026-09-07",
+  "note": "USD per million tokens, converted from the endpoint's per-token prices. Refresh before later live runs. These are rate estimates, not a billing statement. Direct model IDs only: no routing policies or fallback attempts in this pilot.",
+  "models": {
+    "deepseek/deepseek-v4-flash-0731": {
+      "input_usd_per_million": 0.44,
+      "output_usd_per_million": 1.32,
+      "max_attempts": 1
+    },
+    "openai/gpt-4o-mini": {
+      "input_usd_per_million": 0.15,
+      "output_usd_per_million": 0.6,
+      "max_attempts": 1
+    },
+    "google/gemini-2.5-flash": {
+      "input_usd_per_million": 0.3,
+      "output_usd_per_million": 2.5,
+      "max_attempts": 1
+    },
+    "anthropic/claude-haiku-4-5": {
+      "input_usd_per_million": 1,
+      "output_usd_per_million": 5,
+      "max_attempts": 1
+    }
+  }
+}

@@ -4211,7 +4211,7 @@ export function DatabaseSpreadsheet() {
 
     for (let attempt = 0; attempt <= PERSONALIZATION_MAX_RETRIES; attempt += 1) {
       let response: Response;
-      let parsed: { proposal?: string; error?: string } | null = null;
+      let parsed: { proposal?: string; error?: string; retryable?: boolean } | null = null;
 
       try {
         response = await fetch('/api/personalization/generate', {
@@ -4238,7 +4238,7 @@ export function DatabaseSpreadsheet() {
       }
 
       try {
-        parsed = (await response.json()) as { proposal?: string; error?: string };
+        parsed = (await response.json()) as { proposal?: string; error?: string; retryable?: boolean };
       } catch {
         parsed = null;
       }
@@ -4249,7 +4249,7 @@ export function DatabaseSpreadsheet() {
         throw new Error(parsed?.error || 'Пустой ответ от API');
       }
 
-      const shouldRetry = [429, 500, 502, 503, 504].includes(response.status);
+      const shouldRetry = parsed?.retryable !== false && [429, 500, 502, 503, 504].includes(response.status);
       const errorMessage = parsed?.error || `API ошибка: ${response.status}`;
 
       if (shouldRetry && attempt < PERSONALIZATION_MAX_RETRIES) {
