@@ -1,0 +1,17 @@
+# Синк «Календаря технички» — 12:00 и 18:00 по Москве.
+#
+# Страница показывает балансы прокси-провайдеров и даты продлений; без
+# расписания она замерзает на дате последнего ручного нажатия «Синк сейчас»
+# (так и было с 01.09.2026 по 08.09.2026 — неделю висели цифры недельной
+# давности).
+#
+# TZ задан явно: часы сервера уже переезжали между зонами, и время в кроне
+# не должно от них зависеть.
+#
+# Установка:
+#   install -m 644 deploy/cron/portal-tech-calendar /etc/cron.d/portal-tech-calendar
+TZ=Europe/Moscow
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+0 12,18 * * * root /usr/local/bin/tech-calendar-sync.sh >> /var/log/portal/tech-calendar-sync.log 2>&1
