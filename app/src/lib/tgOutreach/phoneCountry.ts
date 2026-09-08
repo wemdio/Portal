@@ -84,3 +84,36 @@ export function countryLabel(phone: string | null | undefined): string {
   const digits = (phone ?? '').replace(/\D/g, '');
   return digits ? `+${digits.slice(0, 3)}` : '';
 }
+
+/** Все страны справочника, по алфавиту — для выпадающего списка на загрузке. */
+export function countryOptions(): PhoneCountry[] {
+  const seen = new Map<string, PhoneCountry>();
+  for (const [, country] of CODES) if (!seen.has(country.code)) seen.set(country.code, country);
+  return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+}
+
+/** Страна по ISO-коду, названному оператором при загрузке. */
+export function countryByCode(code: string | null | undefined): PhoneCountry | null {
+  const wanted = (code ?? '').trim().toUpperCase();
+  if (!wanted) return null;
+  for (const [, country] of CODES) if (country.code === wanted) return country;
+  return null;
+}
+
+/**
+ * Что показать в списке: страну по телефону, а если его ещё нет — заявленную
+ * при загрузке.
+ *
+ * Номер важнее: он факт, а сказанное при покупке — заявление продавца, и они
+ * могут разойтись. Заявленную помечаем вопросом, чтобы разница была видна.
+ */
+export function accountCountryLabel(
+  phone: string | null | undefined,
+  countryCode: string | null | undefined,
+): string {
+  const byPhone = countryFromPhone(phone);
+  if (byPhone) return `${byPhone.flag} ${byPhone.name}`;
+  const declared = countryByCode(countryCode);
+  if (declared) return `${declared.flag} ${declared.name} ?`;
+  return countryLabel(phone);
+}
