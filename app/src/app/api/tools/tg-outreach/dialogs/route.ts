@@ -47,6 +47,49 @@ export async function GET(req: NextRequest) {
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
       const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
 
+      /**
+       * Фильтр по базе: сначала контакты базы, потом диалоги по ним.
+       *
+       * Прямой связи диалога с базой нет — диалог заводится по входящему из
+       * Telegram и знает только собеседника, а базу к нему подбирают по
+       * юзернейму (см. ниже, там же и подпись в строке). Поэтому и фильтруем
+       * так же: берём контакты выбранной базы и оставляем диалоги, которые с
+       * ними совпали.
+       *
+       * Юзернеймы перед подстановкой в фильтр проверяем на состав символов.
+       * Строка фильтра Supabase не параметризуется, и пользовательский текст
+       * внутри неё пришлось бы экранировать — а после нормализации в юзернейме
+       * остаются только латиница, цифры и подчёркивание, и экранировать
+       * становится нечего.
+       */
+      const baseId = url.searchParams.get('base_id');
+      let baseFilter: string | null = null;
+      if (baseId) {
+        const { data: baseContacts } = await auth.supabase
+          .from('tg_outreach_base_contacts')
+          .select('username, tg_user_id')
+          .eq('base_id', baseId)
+          .limit(20_000);
+
+        const names = [...new Set(
+          ((baseContacts ?? []) as Array<{ username: string | null }>)
+            .map((c) => usernameKey(c.username))
+            .filter((n) => /^[a-z0-9_]+$/.test(n)),
+        )];
+        const ids = [...new Set(
+          ((baseContacts ?? []) as Array<{ tg_user_id: number | null }>)
+            .map((c) => c.tg_user_id)
+            .filter((v): v is number => typeof v === 'number'),
+        )];
+
+        const parts: string[] = [];
+        if (names.length) parts.push(`tg_username.in.(${names.join(',')})`);
+        if (ids.length) parts.push(`tg_user_id.in.(${ids.join(',')})`);
+        // Пустая база — ни одного совпадения, а не «фильтр не применился»:
+        // молча показать все диалоги значило бы соврать про выбранный фильтр.
+        baseFilter = parts.length ? parts.join(',') : 'tg_user_id.eq.0';
+      }
+
       let query = auth.supabase
         .from('tg_outreach_dialogs')
         .select('*', { count: 'exact' })
@@ -54,6 +97,9 @@ export async function GET(req: NextRequest) {
         .order('last_message_at', { ascending: false, nullsFirst: false })
         .range(offset, offset + limit - 1);
 
+      if (baseFilter) {
+        query = query.or(baseFilter);
+      }
       if (status) {
         query = query.eq('status', status);
       }
