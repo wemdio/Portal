@@ -66,8 +66,23 @@ export function planDay(params: PlanDayParams): PlannedConversation[] {
       .sort((x, y) => (remaining.get(y)! - remaining.get(x)!) || (x < y ? -1 : 1));
     if (candidates.length < 2) break;
 
-    const self = candidates[0];
-    const partners = candidates.slice(1).filter((id) => !usedToday.has(pairKey(self, id)));
+    /**
+     * Кого берём следующим: случайного из тех, кому осталось больше всех.
+     *
+     * Равномерность держится не на случайности, а на этом «больше всех»:
+     * аккаунт с непройденной нормой всегда идёт раньше того, кто своё уже
+     * набрал, поэтому никто не остаётся с одной перепиской, пока другой набрал
+     * пятнадцать. Случайность добавляем ВНУТРИ группы с одинаковым остатком —
+     * там она ничего не перекашивает, а состав пар перестаёт быть одним и тем
+     * же от запуска к запуску.
+     *
+     * Раньше здесь стоял `candidates[0]`, то есть первый по идентификатору: при
+     * одном и том же наборе аккаунтов получались ровно одни и те же пары.
+     */
+    const topRemaining = remaining.get(candidates[0])!;
+    const topTier = candidates.filter((id) => remaining.get(id) === topRemaining);
+    const self = topTier[Math.floor(random() * topTier.length)];
+    const partners = candidates.filter((id) => id !== self && !usedToday.has(pairKey(self, id)));
     if (!partners.length) {
       // Со всеми доступными аккаунт сегодня уже переписывался — норму не
       // добираем, иначе получился бы повтор пары внутри одного дня.
@@ -75,8 +90,11 @@ export function planDay(params: PlanDayParams): PlannedConversation[] {
       continue;
     }
 
+    // Собеседник — тоже случайный, но сначала среди тех, с кем ещё ни разу не
+    // говорили: новые связи для прогрева ценнее повторных.
     const fresh = partners.filter((id) => !seen.has(pairKey(self, id)));
-    const partner = (fresh.length ? fresh : partners)[0];
+    const pool = fresh.length ? fresh : partners;
+    const partner = pool[Math.floor(random() * pool.length)];
 
     const [a, b] = self < partner ? [self, partner] : [partner, self];
     usedToday.add(pairKey(a, b));

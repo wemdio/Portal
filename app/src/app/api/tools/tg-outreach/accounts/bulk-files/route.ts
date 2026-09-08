@@ -192,7 +192,20 @@ export async function POST(req: NextRequest) {
             proxy_id: null,
             session_data: candidate.sessionString,
             tg_user_id: candidate.tgUserId,
-            is_active: true,
+            /**
+             * Загруженный аккаунт выключен, пока оператор его не настроит.
+             *
+             * 08.09.2026 залитая партия ушла рассылать сама: круг фиксирует
+             * состав на старте, но любой его перезапуск — деплой, рестарт
+             * воркера, авто-резюм — перечитывает всех включённых, и новички
+             * попадали в боевую рассылку без прокси, без прочитанного профиля и
+             * без единой проверки.
+             *
+             * Включение — осознанное действие оператора: к этому моменту у
+             * аккаунта есть прокси нужной страны, заполненный профиль и
+             * пройденная отлёжка.
+             */
+            is_active: false,
           }));
         }
       }
@@ -209,7 +222,8 @@ export async function POST(req: NextRequest) {
           phone: acc.phone ?? '',
           proxy_id: null,
           session_data: '',
-          is_active: true,
+          // Выключен до настройки — см. пояснение выше.
+          is_active: false,
           ...(declaredCountry ? { country_code: declaredCountry } : {}),
         })),
         ...tdataRows,
