@@ -5,6 +5,7 @@ import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
 import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
+import { accountCountryLabel, countryOptions } from '@/lib/tgOutreach/phoneCountry';
 import {
   MessageSquareMore,
   Plus,
@@ -72,6 +73,7 @@ import {
 } from '@/lib/tgOutreach/proxySelection';
 import {
   describeSending,
+  healthToneClass,
   describeProxy,
   countSendingAccounts,
   pickDeadAccounts,
@@ -2150,13 +2152,14 @@ interface AccountsUploadSummary {
  * прибора, и оператор сравнивает не то.
  */
 function HealthCell({ mark }: { mark: HealthMark }) {
-  const cls = mark.tone === 'ok'
-    ? 'bg-emerald-50 text-emerald-700'
-    : mark.tone === 'warn'
-      ? 'bg-amber-50 text-amber-700'
-      : mark.tone === 'bad'
-        ? 'bg-rose-50 text-rose-700'
-        : 'bg-gray-100 text-gray-500';
+  /**
+   * Цвет берём из общей палитры, а не из собственной лесенки.
+   *
+   * Своя знала три тона и всё остальное красила серым. Добавленные потом
+   * «на прогреве» (синий) и «в отлёжке» (фиолетовый) молча приезжали серыми —
+   * то есть выглядели как «портал не знает», хотя портал знает точно.
+   */
+  const cls = healthToneClass(mark.tone);
   return (
     <span title={mark.detail} className={`w-fit cursor-help rounded-md px-1.5 py-0.5 text-[10px] font-medium ${cls}`}>
       {mark.label}
@@ -2197,6 +2200,8 @@ function CampaignAccountsTab({
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSummary, setUploadSummary] = useState<AccountsUploadSummary | null>(null);
+  /** Страна партии со слов оператора — см. выпадающий список у кнопки загрузки. */
+  const [uploadCountry, setUploadCountry] = useState('');
   const [sessionName, setSessionName] = useState('');
   const [apiId, setApiId] = useState('');
   const [apiHash, setApiHash] = useState('');
@@ -2602,6 +2607,7 @@ function CampaignAccountsTab({
       const token = await getAccessToken();
       const formData = new FormData();
       Array.from(files).forEach(f => formData.append('files', f));
+      if (uploadCountry) formData.append('country', uploadCountry);
       // fetch отклоняется, только когда ответа нет вовсе: обрыв связи,
       // соединение, разорванное на середине многомегабайтной партии. Это не то
       // же, что отказ сервера — там ответ есть, и он объясняет причину. Здесь
@@ -2622,6 +2628,7 @@ function CampaignAccountsTab({
       const body = await res.json().catch(() => null) as {
         error?: string;
         count?: number;
+        items?: Array<{ phone?: string | null; country_code?: string | null }>;
         skipped?: Array<{ name: string; reason: string }>;
         errors?: Array<{ name: string; error: string }>;
         unchecked_existing_accounts?: number;
@@ -2642,8 +2649,24 @@ function CampaignAccountsTab({
         const errors = body.errors ?? [];
         // «Добавлено аккаунтов: 0» само по себе ничего не объясняет, поэтому
         // пустой результат проговариваем словами.
+        /**
+         * Страны партии — сразу в итоге загрузки.
+         *
+         * Аккаунты приезжают файлами вида «s386_tdata», и по имени страну не
+         * узнать. А она решает, какие прокси им нужны: гео прокси обязано
+         * совпадать с гео номера, иначе Telegram видит несовпадение.
+         */
+        const countries = new Map<string, number>();
+        for (const item of body.items ?? []) {
+          const label = accountCountryLabel(item.phone, item.country_code);
+          if (label) countries.set(label, (countries.get(label) ?? 0) + 1);
+        }
+        const countryNote = countries.size
+          ? ` · ${[...countries.entries()].sort((a, b) => b[1] - a[1]).map(([c, n]) => `${c}: ${n}`).join(', ')}`
+          : '';
+
         const headline = count > 0
-          ? `Добавлено аккаунтов: ${count}`
+          ? `Добавлено аккаунтов: ${count}${countryNote}`
           : skipped.length || errors.length
             ? 'Ни одного аккаунта не добавлено — почему, ниже'
             : 'Ни одного аккаунта не добавлено: в этих файлах их не нашлось';
@@ -2817,6 +2840,27 @@ function CampaignAccountsTab({
                 ? `Обновить профили выбранных (${syncTargets.length})`
                 : `Обновить профили всех (${syncTargets.length})`}
           </button>
+          {/*
+            Страна партии — со слов оператора, до загрузки.
+            У tdata телефона нет, пока не подключишься, а подключаться положено
+            через прокси той же страны: чтобы узнать страну, нужен прокси, а
+            чтобы выбрать прокси — страна. Круг разрывается тем, что оператор
+            и так знает страну: он выбирал её в объявлении при покупке.
+          */}
+          <label className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">
+            Страна партии
+            <select
+              value={uploadCountry}
+              onChange={(e) => setUploadCountry(e.target.value)}
+              title="Страна, в которой зарегистрированы аккаунты партии. Нужна, чтобы подобрать прокси до первого подключения."
+              className="cursor-pointer rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-xs text-gray-800 outline-none focus:border-indigo-400"
+            >
+              <option value="">не указана</option>
+              {countryOptions().map((c) => (
+                <option key={c.code} value={c.code}>{c.flag} {c.name}</option>
+              ))}
+            </select>
+          </label>
           <label
             title="tdata — zip-архивами (можно сразу несколько), старый формат — парами .session и .json"
             className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer"
@@ -3296,7 +3340,20 @@ function CampaignAccountsTab({
                   )}
                 </div>
                 <HealthCell mark={sendingMark} />
-                <span className="text-xs text-gray-500 truncate">{a.phone || '—'}</span>
+                {/*
+                  Страна под номером: аккаунты покупают партиями и в списке они
+                  зовутся «s386_tdata» — по имени страну не узнать. А она тут не
+                  украшение: прокси обязаны совпадать с ней по гео, и от неё же
+                  зависит, сколько писем аккаунт отдаст.
+                */}
+                <span className="min-w-0 truncate">
+                  <span className="block truncate text-xs text-gray-500">{a.phone || '—'}</span>
+                  {(a.phone || a.country_code) && (
+                    <span className="block truncate text-[10px] text-gray-400">
+                      {accountCountryLabel(a.phone, a.country_code)}
+                    </span>
+                  )}
+                </span>
                 {editingProxyFor === a.id ? (
                   /* Свой список вместо <select>: рядом с каждым адресом стоит
                      его состояние, иначе сорок одинаковых строк «тот же хост,
@@ -4238,7 +4295,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       });
       const d = (await res.json().catch(() => null)) as {
         error?: string;
-        stats?: { total: number; accepted: number; noUsername: number; noMessage: number; duplicates: number };
+        stats?: { total: number; accepted: number; noUsername: number; noMessage: number; duplicates: number; spintaxVariants?: number };
       } | null;
       if (!res.ok) {
         setError(d?.error ?? `Ошибка загрузки (${res.status})`);
@@ -4247,7 +4304,12 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       const s = d?.stats;
       if (s) {
         setNotice(
-          `Загружено ${s.accepted} из ${s.total}. Без юзернейма — ${s.noUsername}, без текста — ${s.noMessage}, дублей — ${s.duplicates}.`,
+          `Загружено ${s.accepted} из ${s.total}. Без юзернейма — ${s.noUsername}, без текста — ${s.noMessage}, дублей — ${s.duplicates}.`
+          + (s.accepted > 0 && s.spintaxVariants !== undefined
+            ? s.spintaxVariants > 1
+              ? ` Вариантов текста: ${s.spintaxVariants}.`
+              : ' Вариантов текста: 1 — все получат дословно одинаковое сообщение. Добавьте синонимы в фигурных скобках.'
+            : ''),
         );
       }
       void load();
@@ -4291,6 +4353,8 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
           <Database className="mx-auto h-8 w-8 text-gray-300 mb-2" />
           <p className="text-xs text-gray-400">
             Баз пока нет. Создайте базу и загрузите файл: юзернейм в первой колонке, текст сообщения во второй.
+            В тексте можно писать варианты в фигурных скобках — {'{'}Здравствуйте|Добрый день|Приветствую{'}'} —
+            портал выберет один при отправке, и соседние получатели увидят разные формулировки.
           </p>
         </div>
       ) : (

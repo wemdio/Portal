@@ -39,11 +39,36 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 
       const { data: account, error: aErr } = await auth.supabase
         .from('tg_outreach_accounts')
-        .select('id, session_name, freeze_appeal_url, check_status')
+        .select('id, session_name, freeze_appeal_url, check_status, appealed_at, appeal_requested_at')
         .eq('id', id)
         .maybeSingle();
       if (aErr) return jsonError(aErr.message, 500);
       if (!account) return jsonError('Аккаунт не найден', 404);
+
+      /**
+       * Не чаще раза в сутки.
+       *
+       * Правило из руководства TgNinja по разблокировке: повторные обращения
+       * чаще одного раза в 24 часа поддержке не помогают, а выглядят как ещё
+       * одна рассылка — то есть подтверждают то, за что аккаунт и ограничили.
+       *
+       * Считаем от последней отправки, а не от постановки в очередь: заказ
+       * может простоять до своего круга часами, и запрещать на это время
+       * повторную попытку не за что.
+       */
+      const row = account as { appealed_at?: string | null; appeal_requested_at?: string | null };
+      if (row.appeal_requested_at) {
+        return jsonError('Обжалование по этому аккаунту уже стоит в очереди — рассылка отправит его в ближайшем круге.', 409);
+      }
+      const lastAt = row.appealed_at ? new Date(row.appealed_at).getTime() : 0;
+      const sinceHours = lastAt ? (Date.now() - lastAt) / 3_600_000 : Infinity;
+      if (sinceHours < 24) {
+        return jsonError(
+          `Прошлое обращение отправлено ${Math.round(sinceHours)} ч назад. `
+          + 'Чаще раза в сутки обжаловать нельзя: повторы не ускоряют разбор, а выглядят как рассылка.',
+          409,
+        );
+      }
 
       const target = parseAppealTarget(
         (account as { freeze_appeal_url?: string | null }).freeze_appeal_url,

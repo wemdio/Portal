@@ -74,6 +74,10 @@ export async function POST(req: NextRequest) {
 
       const formData = await req.formData();
       const files = formData.getAll('files') as File[];
+      // Страна партии со слов оператора: у tdata телефона нет до первого
+      // подключения, а прокси подбирать нужно уже сейчас. См. миграцию
+      // 20260908_0003.
+      const declaredCountry = String(formData.get('country') ?? '').trim().toUpperCase().slice(0, 2);
       if (!files?.length) return jsonError('Добавьте файлы (JSON и/или .session)', 400);
 
       const zipFiles = files.filter((f) => f.name.toLowerCase().endsWith('.zip'));
@@ -206,16 +210,19 @@ export async function POST(req: NextRequest) {
           proxy_id: null,
           session_data: '',
           is_active: true,
+          ...(declaredCountry ? { country_code: declaredCountry } : {}),
         })),
         ...tdataRows,
       ];
 
-      let inserted: Array<{ id: string; session_name: string }> = [];
+      // Телефон возвращаем, чтобы экран сразу назвал страны партии: имена
+      // файлов вида «s386_tdata» о стране не говорят ничего.
+      let inserted: Array<{ id: string; session_name: string; phone?: string | null; country_code?: string | null }> = [];
       if (insertRows.length) {
         const { data, error: insertError } = await db
           .from('tg_outreach_accounts')
           .insert(insertRows)
-          .select('id, session_name');
+          .select('id, session_name, phone, country_code');
         if (insertError) return jsonError(insertError.message, 500);
         inserted = data ?? [];
       }
