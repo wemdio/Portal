@@ -78,7 +78,7 @@ const CYRILLIC_LATIN: Record<string, string> = {
 export function safeBaseFilename(
   filename: string | null | undefined,
   id: string,
-  variant?: 'raw' | 'launch-ready' | 'preview',
+  variant?: 'raw' | 'launch-ready' | 'preview' | 'review',
 ): string {
   const stem = (filename ?? '')
     .toLowerCase()

@@ -1,0 +1,57 @@
+import { createHash } from 'node:crypto';
+import { z } from 'zod';
+import { veRelevanceDecisionSchema } from './relevanceDecision';
+
+const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);
+const websiteEvidenceSchema = z.object({
+  status: z.enum(['ok', 'unavailable', 'error']),
+  // Keep text only while refinement is pending. Completed checks retain their
+  // attempt marker, not thousands of full website extracts in every DB write.
+  text: z.string().max(6000),
+  url: z.string().max(1000),
+  reason: z.string().max(400),
+  review_attempt: hashSchema,
+  review_attempts: z.number().int().nonnegative(),
+  refined: z.boolean(),
+});
+export const relevanceFailureCodeSchema = z.enum([
+  'billing', 'invalid_response', 'timeout', 'provider', 'limit', 'missing_context',
+]);
+export type VeRelevanceFailureCode = z.infer<typeof relevanceFailureCodeSchema>;
+
+const checkpointSchema = z.object({
+  version: z.literal(2),
+  context_hash: hashSchema,
+  // Hashes cover company identity AND the original fields shown to the model.
+  // Supplemental website facts use that same immutable key in website_evidence.
+  // Explanations retain bounded evidence, never email addresses or raw responses.
+  verdicts: z.record(hashSchema, veRelevanceDecisionSchema),
+  website_evidence: z.record(hashSchema, websiteEvidenceSchema).default({}),
+  failures: z.array(z.object({
+    batch_hash: hashSchema,
+    companies: z.number().int().positive(),
+    code: relevanceFailureCodeSchema,
+  })).max(100),
+});
+
+export type VeRelevanceCheckpoint = z.infer<typeof checkpointSchema>;
+
+export function relevanceHash(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+export function readRelevanceCheckpoint(value: unknown, contextHash: string): VeRelevanceCheckpoint {
+  for (const candidate of (Array.isArray(value) ? value : [value]).slice(0, 3)) {
+    const parsed = checkpointSchema.safeParse(candidate);
+    if (parsed.success && parsed.data.context_hash === contextHash) return parsed.data;
+  }
+  return { version: 2, context_hash: contextHash, verdicts: {}, website_evidence: {}, failures: [] };
+}
+
+/** Do not swallow a failed durable write and proceed to another paid batch. */
+export class VeRelevanceCheckpointError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VeRelevanceCheckpointError';
+  }
+}

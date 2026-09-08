@@ -80,6 +80,7 @@ export interface VeCollectEstimateDto {
 
 /** Воронка одного прогона автосборки: от ответа источников до готовых получателей. */
 export interface VeCollectStatsDto {
+  relevance_recovery?: boolean;
   tasks_total?: number | null;
   tasks_done?: number | null;
   tasks_failed?: number | null;
@@ -93,6 +94,9 @@ export interface VeCollectStatsDto {
    */
   launchable_rows?: number | null;
   low_relevance?: number | null;
+  relevance_needs_review?: number | null;
+  relevance_errors?: number | null;
+  relevance_irrelevant?: number | null;
   /** Строки без надёжного relevance-verdict; они fail-closed исключены. */
   relevance_unchecked?: number | null;
   relevance_checked_companies?: number | null;
@@ -104,6 +108,19 @@ export interface VeCollectStatsDto {
 }
 
 export interface VeCollectInfo {
+  relevance_review_requested?: boolean;
+  /** Only a phase marker; raw validation checkpoints stay on the server. */
+  saved_email_review_pending?: boolean;
+  /** Worker-authoritative saved reserve; never count it as ready inventory. */
+  relevance_summary?: import('@/lib/verticalEngineV2/relevanceReserve').VeRelevanceReserveSummary;
+  company_name_cleanup?: import('@/lib/verticalEngineV2/companyNames').VeCompanyNameCleanupSummary;
+  /** Durable marker: contacts are saved and name preparation is the remaining phase. */
+  company_name_recovery?: {
+    has_buffered_candidates: boolean;
+    validation_error: string | null;
+    round_low_relevance: number;
+    round_relevance_unchecked: number;
+  };
   collection_mode?: 'preview' | 'supply';
   ready_target?: number;
   supply_hold?: boolean;
@@ -163,7 +180,7 @@ export type VeJobSummary = Pick<
 > & {
   finished_at: string | null;
   /** Вход стадии: фильтрация джоб по вертикали (payload.vertical_id). */
-  payload?: { vertical_id?: string; base_id?: string } | null;
+  payload?: { vertical_id?: string; base_id?: string; review_relevance?: boolean } | null;
   /** Живой прогресс стадии (ve_jobs.progress): счётчик «— 14/33 · проверяем гипотезу». */
   progress?: { done?: number; total?: number; label?: string } | null;
 };

@@ -10,6 +10,8 @@ import { loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows, read
 import { buildSegmentationLaunchGroups } from './segmentationAudit';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
+import { hasPendingSupplyNames } from './contactSupplyNameRecovery';
+import { isVeProviderBillingError } from './collectionErrors';
 
 const BUFFER_WORKDAYS = 2;
 export { buildContactSupplyRequests } from './contactSupplyPlanner';
@@ -170,7 +172,8 @@ export async function runProjectContactSupply(input: {
     // resume must not re-apply that old terminal decision on every sweep.
     if (['appended', 'failed'].includes(batch.status) && plan.source_state?.previous_base_id === batch.base_id) continue;
     const { data: rawBase, error: baseError } = await portalDb.from('ve_bases')
-      .select('id, project_id, status, collect_info->target_progress').eq('id', batch.base_id).maybeSingle();
+      .select('id, project_id, status, collect_info->target_progress, collect_info->company_name_recovery, collect_info->company_name_cleanup')
+      .eq('id', batch.base_id).maybeSingle();
     if (baseError || !rawBase || rawBase.project_id !== veProjectId) throw new Error('Supply batch source is unavailable');
     // Do not repeatedly transfer harvest/checkpoints/full data while collection
     // or the async audit is still working. PostgREST names this JSON projection
@@ -187,6 +190,21 @@ export async function runProjectContactSupply(input: {
     pendingWork = true;
     if (rawBase.status === 'collecting') continue;
     if (rawBase.status === 'failed' || batch.status === 'failed') {
+      if (rawBase.status === 'failed' && batch.status === 'collecting' && !batch.audit_id
+        && hasPendingSupplyNames(rawBase.company_name_recovery, rawBase.company_name_cleanup)) {
+        // Keep this batch open and its source cursor untouched. An explicit
+        // resume repairs the saved naming phase; no automatic paid retry and
+        // no new source batch may bypass these already validated contacts.
+        await rpc(portalDb, 've_pause_contact_supply_plan', {
+          p_plan_id: plan.id,
+          p_error: isVeProviderBillingError(outcome.reason)
+            ? 'Недостаточно средств в Requesty для очистки названий. Контакты сохранены. После пополнения баланса нажмите «Продолжить».'
+            : 'Очистка названий компаний завершилась не полностью. Контакты сохранены. Нажмите «Продолжить», чтобы проверить оставшиеся названия.',
+          p_now: now.toISOString(),
+        });
+        result.stoppedPlans += 1;
+        continue;
+      }
       await finishBatch(portalDb, batch, 'error', batch.error ?? outcome.reason ?? 'Сбор базы завершился ошибкой', now);
       result.stoppedPlans += 1;
       continue;
