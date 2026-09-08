@@ -612,6 +612,19 @@ export default function WarmupTab({
                     {fullName || 'профиль не прочитан'}
                     {a.tg_username ? ` · @${a.tg_username}` : ''}
                   </span>
+                  {/*
+                    Дата ЗАВЕДЕНИЯ в портал, а не последнего изменения: партии
+                    приезжают пачками, и на прогрев ставят свежую. По списку из
+                    полусотни одинаковых строк отличить её иначе нельзя, а
+                    сортировка без подписи заставляет верить на слово.
+                  */}
+                  {a.created_at && (
+                    <span className="block truncate text-[10px] text-gray-400">
+                      добавлен {new Date(a.created_at).toLocaleString('ru-RU', {
+                        day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+                      })}
+                    </span>
+                  )}
                 </span>
               </label>
             );
