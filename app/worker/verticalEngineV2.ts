@@ -30,6 +30,7 @@
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, startWorkerHeartbeat } from './_shared';
 import { markSegmentationAuditFailed, runVeStage } from '@/lib/verticalEngineV2/stages';
 import { setVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
+import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
 import { normalizeVeMarket } from '@/lib/verticalEngineV2/market';
 import {
   isRetryableStageError,
@@ -252,7 +253,7 @@ async function handleJob(job: VeJob) {
     const market = normalizeVeMarket((proj as { market?: string } | null)?.market);
     if (isResearch) abort.signal.throwIfAborted();
 
-    stageResult = await runVeStage(job, {
+    stageResult = await withVeCostTelemetry(db, job, () => runVeStage(job, {
       supabase: db,
       market,
       signal: abort.signal,
@@ -262,7 +263,7 @@ async function handleJob(job: VeJob) {
         watchdog?.touch();
         log('info', `[${job.stage}] ${msg}`);
       },
-    });
+    }));
     if (isResearch) abort.signal.throwIfAborted();
   } finally {
     // Deliberately guard execution, not the legacy non-atomic done→enqueue

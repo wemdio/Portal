@@ -34,6 +34,9 @@ export function isRetryableStageError(msg: string): boolean {
 
 /** Лимит попыток для конкретной ошибки стадии. */
 export function maxAttemptsFor(msg: string): number {
+  // A journal failure may occur after a paid response. A fresh worker scope
+  // must not automatically repeat the stage and charge for that work again.
+  if (msg === 'Provider usage journal could not be saved.') return 1;
   if (isVeProviderBillingError(msg)) return 1;
   return isRetryableStageError(msg) ? RETRYABLE_MAX_ATTEMPTS : PERMANENT_MAX_ATTEMPTS;
 }

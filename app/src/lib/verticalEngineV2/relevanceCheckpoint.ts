@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { veRelevanceDecisionSchema } from './relevanceDecision';
+import { veRelevanceReviewResultSchema } from './relevanceReview';
 
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const websiteEvidenceSchema = z.object({
@@ -40,6 +41,16 @@ const checkpointSchema = z.object({
     review_attempt: hashSchema.optional(),
     status: z.enum(['started', 'finished']),
   })).default({}),
+  // pending is safe to resume; started/failed can have incurred a charge and
+  // must never be repeated for the same evidence/model/context after a crash.
+  semantic_reviews: z.record(hashSchema, z.object({
+    company_key: hashSchema,
+    proposal: veRelevanceDecisionSchema,
+    status: z.enum(['pending', 'started', 'finished', 'failed']),
+    result: veRelevanceReviewResultSchema.optional(),
+    failure_code: relevanceFailureCodeSchema.optional(),
+  })).default({}),
+  semantic_review_refs: z.record(hashSchema, hashSchema).default({}),
   failures: z.array(z.object({
     batch_hash: hashSchema,
     companies: z.number().int().positive(),
@@ -58,7 +69,8 @@ export function readRelevanceCheckpoint(value: unknown, contextHash: string): Ve
     const parsed = checkpointSchema.safeParse(candidate);
     if (parsed.success && parsed.data.context_hash === contextHash) return parsed.data;
   }
-  return { version: 2, context_hash: contextHash, verdicts: {}, website_evidence: {}, citation_repairs: {}, failures: [] };
+  return { version: 2, context_hash: contextHash, verdicts: {}, website_evidence: {}, citation_repairs: {},
+    semantic_reviews: {}, semantic_review_refs: {}, failures: [] };
 }
 
 /** Do not swallow a failed durable write and proceed to another paid batch. */
