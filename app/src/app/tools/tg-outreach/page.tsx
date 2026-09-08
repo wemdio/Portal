@@ -72,6 +72,7 @@ import {
 } from '@/lib/tgOutreach/proxySelection';
 import {
   describeSending,
+  healthToneClass,
   describeProxy,
   countSendingAccounts,
   pickDeadAccounts,
@@ -2150,13 +2151,14 @@ interface AccountsUploadSummary {
  * прибора, и оператор сравнивает не то.
  */
 function HealthCell({ mark }: { mark: HealthMark }) {
-  const cls = mark.tone === 'ok'
-    ? 'bg-emerald-50 text-emerald-700'
-    : mark.tone === 'warn'
-      ? 'bg-amber-50 text-amber-700'
-      : mark.tone === 'bad'
-        ? 'bg-rose-50 text-rose-700'
-        : 'bg-gray-100 text-gray-500';
+  /**
+   * Цвет берём из общей палитры, а не из собственной лесенки.
+   *
+   * Своя знала три тона и всё остальное красила серым. Добавленные потом
+   * «на прогреве» (синий) и «в отлёжке» (фиолетовый) молча приезжали серыми —
+   * то есть выглядели как «портал не знает», хотя портал знает точно.
+   */
+  const cls = healthToneClass(mark.tone);
   return (
     <span title={mark.detail} className={`w-fit cursor-help rounded-md px-1.5 py-0.5 text-[10px] font-medium ${cls}`}>
       {mark.label}
@@ -4238,7 +4240,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       });
       const d = (await res.json().catch(() => null)) as {
         error?: string;
-        stats?: { total: number; accepted: number; noUsername: number; noMessage: number; duplicates: number };
+        stats?: { total: number; accepted: number; noUsername: number; noMessage: number; duplicates: number; spintaxVariants?: number };
       } | null;
       if (!res.ok) {
         setError(d?.error ?? `Ошибка загрузки (${res.status})`);
@@ -4247,7 +4249,12 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       const s = d?.stats;
       if (s) {
         setNotice(
-          `Загружено ${s.accepted} из ${s.total}. Без юзернейма — ${s.noUsername}, без текста — ${s.noMessage}, дублей — ${s.duplicates}.`,
+          `Загружено ${s.accepted} из ${s.total}. Без юзернейма — ${s.noUsername}, без текста — ${s.noMessage}, дублей — ${s.duplicates}.`
+          + (s.accepted > 0 && s.spintaxVariants !== undefined
+            ? s.spintaxVariants > 1
+              ? ` Вариантов текста: ${s.spintaxVariants}.`
+              : ' Вариантов текста: 1 — все получат дословно одинаковое сообщение. Добавьте синонимы в фигурных скобках.'
+            : ''),
         );
       }
       void load();
@@ -4291,6 +4298,8 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
           <Database className="mx-auto h-8 w-8 text-gray-300 mb-2" />
           <p className="text-xs text-gray-400">
             Баз пока нет. Создайте базу и загрузите файл: юзернейм в первой колонке, текст сообщения во второй.
+            В тексте можно писать варианты в фигурных скобках — {'{'}Здравствуйте|Добрый день|Приветствую{'}'} —
+            портал выберет один при отправке, и соседние получатели увидят разные формулировки.
           </p>
         </div>
       ) : (
