@@ -69,3 +69,47 @@ export function remainingDailyQuota({
   if (!perDay || perDay <= 0) return 0;
   return Math.max(perDay - sentToday, 0);
 }
+
+/**
+ * План порции первых сообщений: сколько аккаунту можно отправить прямо сейчас.
+ *
+ * Суточная норма сама по себе не защищает от PEER_FLOOD: аккаунт выбирал её
+ * одной очередью за минуты, и Telegram читал это как всплеск спама —
+ * 09.09.2026 в ATOL-1 блоки прилетали после 3–6 сообщений подряд при норме 4
+ * в сутки. Теперь норма делится на порции: с момента последней отправки
+ * должно пройти `gapMinutes` (по умолчанию 60), и за одно окно уходит не
+ * больше `perGap` писем (по умолчанию 2).
+ *
+ * Чистая функция — правила «не пора» и «не больше столько» проверяются
+ * тестами без базы и Telegram. `lastSentAtMs` null — аккаунт ещё не писал,
+ * первое окно открыто сразу.
+ */
+export function portionBudget({
+  perDay,
+  sentToday,
+  gapMinutes,
+  perGap,
+  lastSentAtMs,
+  nowMs,
+}: {
+  perDay: number | undefined;
+  sentToday: number;
+  /** Минут между порциями. 0 — разнос выключен, вся норма одной очередью. */
+  gapMinutes?: number;
+  /** Писем за окно. */
+  perGap?: number;
+  lastSentAtMs: number | null;
+  nowMs: number;
+}): { due: boolean; budget: number } {
+  const quota = remainingDailyQuota({ perDay, sentToday });
+  if (quota <= 0) return { due: false, budget: 0 };
+
+  const gap = gapMinutes === undefined ? 60 : Math.max(0, gapMinutes);
+  if (gap <= 0) return { due: true, budget: quota };
+
+  if (lastSentAtMs !== null && nowMs - lastSentAtMs < gap * 60_000) {
+    return { due: false, budget: 0 };
+  }
+  const portion = Math.max(1, perGap ?? 2);
+  return { due: true, budget: Math.min(quota, portion) };
+}

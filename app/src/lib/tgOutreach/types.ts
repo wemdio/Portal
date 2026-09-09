@@ -177,6 +177,21 @@ export interface TelegramSettings {
    * потолок — предел Telegram в 4096.
    */
   first_touch_max_chars?: number;
+  /**
+   * Минимальная пауза между порциями первых сообщений одного аккаунта,
+   * в минутах. Суточная норма больше не уходит одной очередью за минуты:
+   * аккаунт отправляет порцию и молчит до истечения паузы. Ноль — порции без
+   * паузы (старое поведение). Отсутствие поля = 60 минут: 09.09.2026 в ATOL-1
+   * Telegram выдавал PEER_FLOOD свежим аккаунтам после 3–6 сообщений подряд,
+   * и «4 в сутки» не спасало — спасает расстояние между отправками.
+   */
+  first_touch_gap_minutes?: number;
+  /**
+   * Сколько первых сообщений аккаунт отправляет за одну порцию (между паузами
+   * `first_touch_gap_minutes`). Отсутствие поля или меньше единицы = 2.
+   * Суточная норма остаётся потолком: порции лишь размазывают её по дню.
+   */
+  first_touch_per_gap?: number;
   follow_up: FollowUpSettings;
 }
 
@@ -513,5 +528,10 @@ export const DEFAULT_TELEGRAM_SETTINGS: TelegramSettings = {
   blocked_usernames: ['SpamBot'],
   account_cooldown_hours: 24,
   first_touch_max_chars: DEFAULT_MAX_MESSAGE_CHARS,
+  // Порции первых сообщений — по умолчанию включены (60 минут / 2 письма):
+  // очередь за полминуты покупает PEER_FLOOD быстрее, чем успевает сработать
+  // суточная норма. Ноль в gap выключает разнос обратно в очередь.
+  first_touch_gap_minutes: 60,
+  first_touch_per_gap: 2,
   follow_up: DEFAULT_FOLLOW_UP,
 };
