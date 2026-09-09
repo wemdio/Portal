@@ -1,5 +1,13 @@
 # Portal DB — read-only Q&A
 
+## Учёт провайдеров Vertical Engine v2
+
+`ve_jobs.payload.provider_usage_origin` хранит безопасные runId/startedAt первого измеренного запуска. Отчёт проверяет сохранность этого начала, чтобы удаление старых записей не превращало поздний остаток журнала в полный расход.
+
+Новые вызовы VE2 worker сохраняют безопасный журнал в `application_logs`: `source = 've_provider_usage'`, `request_id = projectId`. `event` — `stage_started`/`stage_finished` для запуска стадии, `started`/`finished` для HTTP-попытки. `context` содержит `version`, `projectId`, `baseId` (если есть), `jobId`, `stage`, `runId`; у запроса — `attemptId`, provider, статус, модель, ID запроса провайдера, токены, `reportedCostUsd` отдельно от `estimatedCostUsd`, либо `serperCredits`. Тексты запросов, компаний, ответов и ключи не сохраняются. Дочерние планы содержат только типы, ID и имена шагов.
+
+Для базы фильтруйте точный `context->>'baseId'` и stage `base_collect`; для исследования используйте отдельные research-стадии. Не суммируйте started/finished или дубликаты attemptId. Отсутствие суммы/финала/журнала означает неизвестный расход. Старые `ve_projects.cost_usd` и `ve_jobs.cost_usd` — оценки. Журнал может очищаться через 30 дней: сохраняйте экспорт. GET-only CLI, правила полноты и пример VBI: [ve2-cost-measurement.md](./ve2-cost-measurement.md).
+
 READ-ONLY доступ к основной БД Portal (Supabase Postgres) через MCP-сервер **`portal-db`**
 (роль `readonly`, только `SELECT`, `statement_timeout=30s`, `default_transaction_read_only=on`).
 
@@ -494,6 +502,63 @@ LIMIT 5;
 - `tg_outreach_campaigns` (11), `tg_outreach_dialogs` (1144), `tg_outreach_logs` (242 900)
 - `li_leads` (8277), `li_campaigns`, `li_accounts`
 
+### Автоаутрич OutreachOS (`outreachos_*`)
+
+- `outreachos_pipeline_config` — singleton `id=1`, кампании `campaign_id` (A) и
+  `campaign_id_b` (B). В версии кода от 09.09.2026 `gis_topup_target_appended`
+  означает отдельную цель контактов **из 2GIS сверх HH** (по умолчанию 200),
+  а не общий результат HH+GIS. Перед выводами о проде проверьте версию воркера:
+  комментарий колонки сам по себе не подтверждает выкладку нового кода.
+- `gis_topup_daily_cap` — максимум компаний-кандидатов, не контактов.
+  B2C/ИП и suppression проверяются до заполнения лимита. При одном батче
+  обработка и дедупы могут оставить результат ниже цели.
+- `outreachos_gis_scan_state` — серверный singleton `id=1`, добавлен миграцией
+  `20260909_0002_outreachos_gis_scan_state.sql`. `after_id` — последняя
+  просмотренная карточка (следующий запрос `id > after_id`), `snapshot_id`
+  и `rubric_key` привязывают позицию к датасету и рубрикам. При смене этой
+  пары обход начинается сначала; после конца выдачи `after_id=NULL` означает
+  начало следующего прохода. `revision` защищает UPDATE от устаревшего прогона.
+  Состояние сохраняется после `markSeen` до append только в live-режиме,
+  включая пустые участки; оба режима замера его не меняют. Если таблица
+  недоступна, GIS пропускается, HH продолжает работать. Таблица должна быть
+  создана до запуска нового воркера; наличие кода не доказывает деплой.
+- `outreachos_pipeline_runs`: всего принято за прогон —
+  `coalesce(appended,0) + coalesce(appended_b,0)`. `gis_appended` уже включён
+  в эту сумму; `valid_contacts`/`llm_kept` относятся к HH, для GIS есть отдельные
+  `gis_valid_contacts`/`gis_llm_kept`. NULL в `gis_*` означает, что GIS не запускался.
+- `outreachos_seen_employers` — окно 45 дней по `last_status_at`. Статус
+  `appended` ставится до фактической загрузки и не доказывает принятие контакта
+  Instantly; для объёма используйте журнал прогонов.
+
+### Личные Telegram-уведомления об ответах клиентов
+
+- Привязка бота: `client_reply_telegram_links` в **операционной Instantly БД**,
+  поля `client_user_id`, `enabled`, `leads_only`. Это не `telegram_links`
+  сотрудников и не `client_telegram_chats` для ручной пересылки в группы.
+- Получатель для кампании с проектом — только `projects.client_user_id` в
+  основной БД. Доступ к кампании через `client_instantly_access` не заменяет
+  эту привязку. Для кампаний без проекта получателей берут из access.
+  Проверять нужно обе модели связей: `project_instantly_campaigns` и
+  `project_period_instantly_campaigns` в операционной Instantly БД.
+- С версии кода 09.09.2026 исход попытки доступен в `application_logs`:
+  `client-replies.notification.sent`, `.failed`, `.blocked`. В `context`:
+  `qualificationId`, `campaignId`, `reason`, а при отправке также
+  `clientUserId`, `messageId`, `sentChunks`, `totalChunks`, `error`.
+  `project_client_missing` означает отсутствие клиентского аккаунта у
+  проекта; `telegram_send_failed` — отказ/таймаут Telegram (причина в error).
+  `sent` означает принятие сообщения Telegram, а не прочтение человеком.
+  Штатные пропуски при отключённом боте/привязке или фильтре «только лиды»
+  не записываются как ошибки. Журнал имеет обычную политику хранения
+  application_logs, записи могут отсутствовать при сбое БД/логгера.
+- `deadline_notification_log.tg_sent` относится к отдельному групповому
+  алерту специалистам и не доказывает личную доставку клиенту.
+  Повторной отправки клиентских DM после ошибки сейчас нет.
+- Миграция `20260909_0003_outreachos_client_reply_recipient.sql` восстанавливает
+  только проверенную привязку проекта OutreachOS. Она автоматически применяется
+  штатным деплоем; историю пропущенных уведомлений не отправляет. Перед
+  аналогичной ручной привязкой проверьте принадлежность всего проекта:
+  `client_user_id` открывает клиенту также проект и его задачи.
+
 ### Аутрич-пайплайн «2GIS + сигналы» (`gis_signal_*`, с 04.08.2026)
 - Клиентский пайплайн: 2gis_dataset (5 сегментов по рубрикам) → 6 сигналов с сайта → конструктор баз (`base_constructor_jobs`, кап 5 почт/компания) → добор в 5 кампаний Instantly. Воркер `gisSignalOutreachCron`.
 - `gis_signal_pipeline_config` — singleton id=1: `enabled`, `measure_only` (воронка без заливки/seen), `client_user_id` (владелец дашборда `/client/gis-signals`), `monthly_target_companies` (20000), `daily_limit`, `signal_min_count` (порог сигналов, дефолт 1), `selected_steps`/`step_config` конструктора.
@@ -675,6 +740,22 @@ ORDER BY bt.occurred_at DESC;
 - Если вопрос требует данных, которых нет в этой БД (аналитика Instantly outreach —
   кампании, письма, ниши, open/reply rate) — перенаправь пользователя на MCP
   `instantly-dataset`.
+
+## Instantly qualification recovery: граница баз (изменение 2026-09-09)
+
+Подготовлено в коде; наличие миграций в production нужно проверить отдельно.
+В **main Portal DB** новый `instantly_email_read_budget` и служебные RPC
+`instantly_reserve_email_read` / `instantly_defer_email_reads` координируют лимит
+чтения писем между процессами. Это не аналитическая база `instantly_dataset`.
+
+В **операционной Instantly DB**, не через `portal-db`, находятся
+`instantly_qualification_ai_budgets`, `instantly_qualification_ai_checkpoints`,
+`instantly_ownership_evidence_progress` и новые `recovery_*` поля квалификаций.
+`recovery_attempts` — число взятых в работу повторов, а не число платных AI-запросов.
+Технический pending не равен ручной проверке и не должен считаться «не лид».
+Историческую причину ошибки нельзя выдавать за текущую недоступность провайдера.
+Порядок согласованного применения и ограничения описаны в
+`docs/incidents/2026-09-09-instantly-qualification-queue-recovery.md`.
 
 ## Практика
 - **Данные обновляются в реальном времени** — это боевая БД портала, не снапшот.

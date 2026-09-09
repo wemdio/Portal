@@ -8,6 +8,16 @@ import {
 import { fetchThreadContext, getBodyText, type ThreadContext } from './leadQualifier';
 import { CampaignStatus, type Email } from './types';
 import { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
+import {
+  loadOwnershipEvidenceCheckpoint,
+  saveOwnershipEvidenceCheckpoint,
+  ownershipEvidenceDigest,
+  OWNERSHIP_CHECKPOINT_MAX_BYTES,
+  OWNERSHIP_CHECKPOINT_MAX_CAMPAIGNS,
+  OWNERSHIP_CHECKPOINT_MAX_PAGES,
+  type OwnershipEvidenceProgress,
+  type OwnershipCampaignEvidence,
+} from './ownershipEvidenceCheckpoint';
 
 const MAPPING_POSITIVE_TTL_MS = 10 * 60 * 1000;
 const MAPPING_NEGATIVE_TTL_MS = 60 * 1000;
@@ -94,7 +104,7 @@ function correctedContext(
   parent: Email | null,
 ): ThreadContext {
   const correctedReply: Email = { ...reply, campaign_id: campaignId };
-  const uniqueCampaignEmails = campaignEmails.filter(
+  const uniqueCampaignEmails = [...campaignEmails, ...(parent ? [parent] : [])].filter(
     (email, index, all) =>
       email.id !== correctedReply.id &&
       all.findIndex((candidate) => candidate.id === email.id) === index,
@@ -287,10 +297,7 @@ function projectIdFromOwnerKey(ownerKey: string): string | null {
   return ownerKey.startsWith('project:') ? ownerKey.slice('project:'.length) : null;
 }
 
-interface CampaignEvidence {
-  parents: Array<{ email: Email; score: number }>;
-  contextEmails: Email[];
-}
+type CampaignEvidence = OwnershipCampaignEvidence;
 
 interface WorkspaceEvidenceResult {
   evidence: Map<string, CampaignEvidence>;
@@ -408,6 +415,7 @@ function collectCampaignEvidence(
 }
 
 async function fetchWorkspaceEvidence(args: {
+  db: SupabaseClient;
   campaignIds: string[];
   reply: Email;
   mailbox: string;
@@ -417,6 +425,10 @@ async function fetchWorkspaceEvidence(args: {
   providerCampaignId: string;
   trustPrefetchedParent: boolean;
   evidenceMode?: 'recovery';
+  evidencePriority?: 'fresh' | 'recovery';
+  onEvidenceProgress?: () => void;
+  /** Includes current project/client links, not just campaign names. */
+  ownershipScope: unknown;
 }): Promise<WorkspaceEvidenceResult> {
   const {
     campaignIds,
@@ -462,17 +474,13 @@ async function fetchWorkspaceEvidence(args: {
   );
   if (trustedParentAlreadyProven) return { evidence, complete: true };
 
-  // Fresh replies keep their small lookup. Recovery may inspect further than
-  // the same two pages that caused the deferral, but never accepts incomplete
-  // cross-project evidence as ownership proof. Bound both I/O and memory.
-  const recovery = args.evidenceMode === 'recovery';
-  const configuredPages = Number(process.env.INSTANTLY_OWNERSHIP_RECOVERY_EVIDENCE_PAGES);
-  const maxPages = recovery
-    ? Number.isFinite(configuredPages) && configuredPages >= 2
-      ? Math.min(20, Math.floor(configuredPages))
-      : RECOVERY_EVIDENCE_PAGES_PER_SURFACE
-    : MAX_OWNERSHIP_EVIDENCE_PAGES_PER_SURFACE;
-  const deadline = Date.now() + RECOVERY_EVIDENCE_TIME_BUDGET_MS;
+  if (args.evidenceMode === 'recovery') {
+    return resumeWorkspaceEvidence({ ...args, identity, evidence, trustedParentId });
+  }
+
+  // Fresh replies keep their small lookup. Recovery above persists progress
+  // independently; neither path accepts incomplete cross-project proof.
+  const maxPages = MAX_OWNERSHIP_EVIDENCE_PAGES_PER_SURFACE;
 
   const consumeSurface = async (filter: {
     search?: string;
@@ -482,8 +490,6 @@ async function fetchWorkspaceEvidence(args: {
     let cursor: string | undefined;
     const seenCursors = new Set<string>();
     for (let page = 0; page < maxPages; page++) {
-      const remainingMs = deadline - Date.now();
-      if (recovery && remainingMs <= 0) return false;
       const response = await instantly.listEmails(
         {
           ...filter,
@@ -491,9 +497,7 @@ async function fetchWorkspaceEvidence(args: {
           limit: 100,
           ...(cursor ? { starting_after: cursor } : {}),
         },
-        recovery
-          ? { accountId, retryRateLimits: false, timeoutMs: Math.min(20_000, remainingMs), timeoutIncludesBody: true }
-          : { accountId },
+        { accountId },
       );
       items.push(...(response.items ?? []));
       evidence = collectCampaignEvidence(
@@ -525,6 +529,160 @@ async function fetchWorkspaceEvidence(args: {
   // so the terminal search page cannot starve this mandatory verification.
   const sentComplete = await consumeSurface({ lead: identity, email_type: 'sent' });
   return { evidence, complete: sentComplete };
+}
+
+/** Persist only useful conversation fields, never the provider's extra payload. */
+function compactEvidenceEmail(email: Email): Email {
+  return {
+    id: email.id,
+    campaign_id: email.campaign_id,
+    thread_id: email.thread_id,
+    timestamp_email: email.timestamp_email,
+    timestamp_created: email.timestamp_created,
+    eaccount: email.eaccount,
+    lead: email.lead,
+    ue_type: email.ue_type,
+    subject: email.subject,
+    from_address_email: email.from_address_email,
+    to_address_email_list: email.to_address_email_list,
+    cc_address_email_list: email.cc_address_email_list,
+    body: { text: getBodyText(email.body) },
+  };
+}
+
+function mergeCampaignEvidence(
+  previous: Map<string, CampaignEvidence>,
+  incoming: Map<string, CampaignEvidence>,
+): Map<string, CampaignEvidence> {
+  const merged = new Map(previous);
+  for (const [campaignId, next] of incoming) {
+    const old = previous.get(campaignId);
+    // Every candidate campaign retains its strongest proof. A low-scoring
+    // newer row cannot erase an earlier parent or hide a cross-owner tie.
+    const parents = [...(old?.parents ?? []), ...next.parents]
+      .sort((a, b) => b.score - a.score || emailTs(b.email) - emailTs(a.email))
+      .slice(0, 1);
+    const contexts = new Map<string, Email>();
+    for (const email of [...(old?.contextEmails ?? []), ...next.contextEmails]) {
+      contexts.set(email.id, email);
+    }
+    const contextEmails = [...contexts.values()]
+      .sort((a, b) => emailTs(b) - emailTs(a)).slice(0, 8);
+    // The exact parent is mandatory context even when it is older than the
+    // bounded recent conversation. correctedContext reads it independently.
+    merged.set(campaignId, { parents, contextEmails });
+  }
+  return merged;
+}
+
+function evidenceForCheckpoint(
+  evidence: Map<string, CampaignEvidence>,
+  progress: OwnershipEvidenceProgress,
+): Record<string, CampaignEvidence> | null {
+  const entries = [...evidence].filter(([, value]) => value.parents.length || value.contextEmails.length);
+  if (entries.length > OWNERSHIP_CHECKPOINT_MAX_CAMPAIGNS) return null;
+  const result = Object.fromEntries(entries.map(([id, entry]) => [id, {
+    parents: entry.parents.slice(0, 1).map((parent) => ({
+      score: parent.score, email: compactEvidenceEmail(parent.email),
+    })),
+    contextEmails: entry.contextEmails.slice(0, 8).map(compactEvidenceEmail),
+  }]));
+  const bytes = () => Buffer.byteLength(JSON.stringify({ ...progress, evidence: result }), 'utf8');
+  // Optional context may be trimmed, proof may not. Parent bodies are stored
+  // whole so replay cannot silently change downstream lead qualification.
+  if (bytes() > OWNERSHIP_CHECKPOINT_MAX_BYTES - 1024) {
+    for (const entry of Object.values(result)) entry.contextEmails = [];
+  }
+  return bytes() <= OWNERSHIP_CHECKPOINT_MAX_BYTES - 1024 ? result : null;
+}
+
+async function resumeWorkspaceEvidence(args: {
+  db: SupabaseClient;
+  campaignIds: string[];
+  reply: Email;
+  mailbox: string;
+  leadEmail: string;
+  identity: string;
+  accountId?: string;
+  providerCampaignId: string;
+  ownershipScope: unknown;
+  evidence: Map<string, CampaignEvidence>;
+  trustedParentId: string | null;
+  evidencePriority?: 'fresh' | 'recovery';
+  onEvidenceProgress?: () => void;
+}): Promise<WorkspaceEvidenceResult> {
+  const checkpoint = await loadOwnershipEvidenceCheckpoint(args.db, {
+    accountId: args.accountId ?? 'main',
+    // Changing a body, mailbox, identity, timestamp, thread or owner scope
+    // invalidates both cursors. Never reuse another reply's classification.
+    reply: compactEvidenceEmail(args.reply),
+    identity: args.identity.toLowerCase(),
+    mailbox: args.mailbox,
+    providerCampaignId: args.providerCampaignId,
+    campaigns: [...args.campaignIds].sort(),
+    owners: args.ownershipScope,
+    trustedParentId: args.trustedParentId,
+  });
+  if (checkpoint.progress.blockedReason) {
+    throw new Error(`ownership evidence checkpoint blocked: ${checkpoint.progress.blockedReason}`);
+  }
+  let evidence = mergeCampaignEvidence(new Map(Object.entries(checkpoint.progress.evidence)), args.evidence);
+  const configuredPages = Number(process.env.INSTANTLY_OWNERSHIP_RECOVERY_EVIDENCE_PAGES);
+  const maxPages = Number.isFinite(configuredPages) && configuredPages >= 2
+    ? Math.min(20, Math.floor(configuredPages)) : RECOVERY_EVIDENCE_PAGES_PER_SURFACE;
+  const deadline = Date.now() + RECOVERY_EVIDENCE_TIME_BUDGET_MS;
+  const block = async (reason: string): Promise<never> => {
+    checkpoint.progress.blockedReason = reason;
+    await saveOwnershipEvidenceCheckpoint(args.db, checkpoint);
+    throw new Error(`ownership evidence checkpoint blocked: ${reason}`);
+  };
+  const consumeSurface = async (name: 'search' | 'sent'): Promise<boolean> => {
+    const surface = checkpoint.progress[name];
+    if (surface.complete) return true;
+    for (let page = 0; page < maxPages; page++) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return false;
+      if (surface.pages >= OWNERSHIP_CHECKPOINT_MAX_PAGES) return block('provider page safety limit reached');
+      const response = await instantly.listEmails({
+        ...(name === 'search' ? { search: args.identity } : { lead: args.identity, email_type: 'sent' as const }),
+        mode: 'emode_all',
+        limit: 100,
+        ...(surface.cursor ? { starting_after: surface.cursor } : {}),
+      }, {
+        accountId: args.accountId,
+        requestPriority: args.evidencePriority ?? 'recovery',
+        retryRateLimits: false,
+        timeoutMs: Math.min(20_000, remainingMs),
+        timeoutIncludesBody: true,
+      });
+      const pageEvidence = collectCampaignEvidence(args.campaignIds, args.reply, args.mailbox,
+        args.leadEmail, response.items ?? [], args.trustedParentId);
+      evidence = mergeCampaignEvidence(evidence, pageEvidence);
+      const next = response.next_starting_after?.trim() || null;
+      const nextHash = next ? ownershipEvidenceDigest(next) : null;
+      if (nextHash && surface.seenCursorHashes.includes(nextHash)) return block('provider cursor cycle detected');
+      const candidateProgress = {
+        ...checkpoint.progress,
+        [name]: {
+          ...surface, cursor: next, complete: !next, pages: surface.pages + 1,
+          seenCursorHashes: nextHash ? [...surface.seenCursorHashes, nextHash] : surface.seenCursorHashes,
+        },
+      };
+      const compact = evidenceForCheckpoint(evidence, candidateProgress);
+      if (!compact) return block('required ownership proof exceeds storage safety limit');
+      checkpoint.progress = { ...candidateProgress, evidence: compact };
+      // Save before another HTTP attempt: a 429/crash on the next page resumes
+      // here, rather than re-downloading and re-evaluating the first pages.
+      await saveOwnershipEvidenceCheckpoint(args.db, checkpoint);
+      args.onEvidenceProgress?.();
+      Object.assign(surface, checkpoint.progress[name]);
+      if (!next) return true;
+    }
+    return false;
+  };
+  if (!(await consumeSurface('search'))) return { evidence, complete: false };
+  const complete = await consumeSurface('sent');
+  return { evidence, complete };
 }
 
 function campaignParentMatches(
@@ -627,6 +785,10 @@ export async function resolveEffectiveReplyOwner(args: {
   trustPrefetchedParent?: boolean;
   /** Bounded deeper search, only used by durable automatic recovery. */
   evidenceMode?: 'recovery';
+  /** Fresh retries keep priority; historical recovery must not consume it. */
+  evidencePriority?: 'fresh' | 'recovery';
+  /** A provider page was durably saved, not merely attempted or cache-read. */
+  onEvidenceProgress?: () => void;
 }): Promise<ReplyOwnershipResolution> {
   const {
     db,
@@ -640,7 +802,9 @@ export async function resolveEffectiveReplyOwner(args: {
   const providerContext =
     prefetchedContext !== undefined
       ? prefetchedContext
-      : await fetchThreadContext(providerCampaignId, leadEmail, reply.thread_id, accountId);
+      : await fetchThreadContext(providerCampaignId, leadEmail, reply.thread_id, accountId,
+        args.evidenceMode === 'recovery'
+          ? { requestPriority: args.evidencePriority ?? 'recovery' } : undefined);
   const mailbox = normalizeMailbox(reply.eaccount);
   if (!mailbox) {
     return resolveProviderCampaignFallback({
@@ -674,18 +838,9 @@ export async function resolveEffectiveReplyOwner(args: {
     });
   }
 
-  if (
-    mappings.refreshedForProviderMismatch &&
-    !mappings.allCampaignIds.includes(providerCampaignId)
-  ) {
-    return {
-      status: 'defer',
-      providerCampaignId,
-      reason:
-        `mailbox mapping refresh still omits provider campaign ${providerCampaignId}; ` +
-        'waiting for provider ownership to converge',
-    };
-  }
+  // A polluted provider campaign or a rotated mailbox may remain absent from
+  // the refreshed mapping permanently. That is a reason to prove the parent,
+  // not to defer before every evidence scan and restart this loop forever.
 
   // Every exact-mailbox mapping is ownership evidence. Current mappings choose
   // the representative campaign when all mapped campaigns belong to one owner;
@@ -708,6 +863,12 @@ export async function resolveEffectiveReplyOwner(args: {
       campaignOwnerKeys(links, campaignId),
     ]),
   );
+  const ownershipScope = {
+    currentCampaignIds: [...currentCampaignIds].sort(),
+    owners: linkIds.map((campaignId) =>
+      [campaignId, campaignOwnerKeys(links, campaignId).sort()],
+    ).sort(([left], [right]) => String(left).localeCompare(String(right))),
+  };
   const candidateProjectIds = [
     ...new Set(
       evidenceCampaignIds.flatMap((campaignId) => [
@@ -787,6 +948,7 @@ export async function resolveEffectiveReplyOwner(args: {
     if (!providerMapped || !providerContext?.lastOutbound) {
       try {
         const workspaceEvidence = await fetchWorkspaceEvidence({
+          db,
           campaignIds: evidenceCampaignIds,
           reply,
           mailbox,
@@ -796,6 +958,9 @@ export async function resolveEffectiveReplyOwner(args: {
           providerCampaignId,
           trustPrefetchedParent,
           evidenceMode: args.evidenceMode,
+          evidencePriority: args.evidencePriority,
+          onEvidenceProgress: args.onEvidenceProgress,
+          ownershipScope,
         });
         // All candidate campaigns belong to the same proven owner here, so a
         // later global sent page cannot introduce a competing specialist.
@@ -843,6 +1008,7 @@ export async function resolveEffectiveReplyOwner(args: {
   let workspaceEvidence: WorkspaceEvidenceResult;
   try {
     workspaceEvidence = await fetchWorkspaceEvidence({
+      db,
       campaignIds: evidenceCampaignIds,
       reply,
       mailbox,
@@ -852,6 +1018,9 @@ export async function resolveEffectiveReplyOwner(args: {
       providerCampaignId,
       trustPrefetchedParent,
       evidenceMode: args.evidenceMode,
+      evidencePriority: args.evidencePriority,
+      onEvidenceProgress: args.onEvidenceProgress,
+      ownershipScope,
     });
   } catch (error) {
     return {

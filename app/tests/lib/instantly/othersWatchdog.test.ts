@@ -35,6 +35,7 @@ jest.mock('@/lib/instantly/leadQualificationWorker', () => {
     getCampaignsByAccountCached: (...args: unknown[]) => getCampaignsByAccountCached(...args),
     isTransientQualifyError: actual.isTransientQualifyError,
     persistTransientQualificationRetry: actual.persistTransientQualificationRetry,
+    refreshMissingRecoverySources: actual.refreshMissingRecoverySources,
     // Гейт колонок сирот для error-insert'а: в тестах вотчдога «миграция
     // применена» — true (проверку самого окна «код без миграции» см. в
     // leadQualificationWorker.test.ts).
@@ -216,8 +217,24 @@ describe('screenOthersEmail', () => {
 
 describe('pollOthersOnce', () => {
   it('квалифицирует ответ, чья тема совпала с темой кампании, с правильным контекстом', async () => {
+    process.env.INSTANTLY_OTHERS_PAGES = '2';
+    listEmails.mockImplementation(async (params: { mode?: string; starting_after?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        if (params.starting_after) throw new Error('Instantly email read deferred: budget; retry after 45000 ms');
+        return { items: [makeOthersEmail()], next_starting_after: 'others-page-2-deferred' };
+      }
+      return { items: params.email_type === 'sent' ? [SENT_MATCH] : [], next_starting_after: null };
+    });
     const { pollOthersOnce } = await importWatchdog();
-    const processed = await pollOthersOnce();
+    let processed: number;
+    jest.useFakeTimers();
+    try {
+      const running = pollOthersOnce();
+      await jest.runAllTimersAsync();
+      processed = await running;
+    } finally {
+      jest.useRealTimers();
+    }
 
     expect(processed).toBe(1);
     expect(qualifyOneReply).toHaveBeenCalledTimes(1);

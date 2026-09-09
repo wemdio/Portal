@@ -41,6 +41,8 @@ REMOTE=/opt/instantly-dataset-sync
 
 # 1. sync.mjs + 022 DDL (ночной захват карточек лидов — sync.mjs применяет идемпотентно при старте)
 "$PSCP" -batch -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" \
+  app/scripts/instantly-dataset/email-read-budget.mjs "$PROD:$REMOTE/email-read-budget.mjs"
+"$PSCP" -batch -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" \
   app/scripts/instantly-dataset/sync.mjs "$PROD:$REMOTE/sync.mjs"
 "$PSCP" -batch -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" \
   app/scripts/instantly-dataset/022_leads_capture.sql "$PROD:$REMOTE/022_leads_capture.sql"

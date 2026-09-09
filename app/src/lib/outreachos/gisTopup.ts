@@ -1,5 +1,5 @@
 /**
- * OutreachOS 2GIS top-up — добор кандидатов из 2gis_dataset в дни недобора HH+SJ.
+ * OutreachOS 2GIS — ежедневный добор кандидатов из 2gis_dataset сверх результата HH.
  * Дизайн: docs/design/2026-08-11-outreachos-2gis-topup.md (фазы 8t.1–8t.2 runner'а).
  *
  * ИЗОЛЯЦИЯ: импортирует ТОЛЬКО twoGis/* (разрешённое направление) и outreachos/*
@@ -17,6 +17,8 @@ import { deriveDomain } from '@/lib/jobs/hhAutoParser';
 import { iterateTwoGisCards } from '@/lib/twoGis/repository';
 import type { TwoGisCard, TwoGisRubricGroup } from '@/lib/twoGis/types';
 import { GRID_HEADER } from './gridMapping';
+import { isOutreachOsB2cCompany } from './excludeB2c';
+import { isSuppressedCompany, type OutreachOsSuppression } from './suppression';
 
 export interface GisTopupCandidate {
   twogisId: string;
@@ -31,11 +33,11 @@ export interface GisTopupCandidate {
  * Выход валидных контактов конструктора на компанию-кандидата. Для GIS-ветки
  * НИЖЕ, чем у HH (у 2GIS-компаний сайты беднее на почты): первый боевой замер
  * 12.08 — 136 компаний → 38 валидных ≈ 0.28 (у HH ~0.45–0.58). Нужен, чтобы
- * пересчитать дефицит ЛИДОВ в число КОМПАНИЙ-кандидатов для pull'а.
+ * пересчитать цель КОНТАКТОВ GIS в число КОМПАНИЙ-кандидатов для pull'а.
  */
 export const GIS_CONSTRUCTOR_YIELD = 0.28;
 /**
- * Запас поверх расчётного дефицита: часть кандидатов вымрет на LLM-отсеве
+ * Запас поверх цели контактов GIS: часть кандидатов вымрет на LLM-отсеве
  * (по GIS шум ~17% против 6–8% у HH, замер 12.08), дедупе против своих кампаний
  * и капе catch-all — тянем с overshoot, чтобы добор реально добрал цель.
  */
@@ -50,20 +52,15 @@ export const GIS_MAX_SCAN_MULTIPLIER = 25;
 
 type Logger = (msg: string) => void;
 
-/** Дефицит добора: сколько лидов не хватает до цели (target − kept HH+SJ). */
-export function computeGisTopupDeficit(targetAppended: number, keptLeads: number): number {
-  return Math.max(0, Math.trunc(targetAppended) - keptLeads);
-}
-
 /**
- * Лимит кандидатов 2GIS за прогон: min(cap, ceil(deficit / yield × overshoot)).
- * deficit<=0 или cap<=0 → 0 (топ-ап не запускается).
+ * Лимит кандидатов 2GIS за прогон: min(cap, ceil(contactTarget / yield × overshoot)).
+ * Цель GIS не зависит от результата HH; contactTarget<=0 или cap<=0 → 0.
  */
-export function computeGisPullLimit(deficit: number, dailyCap: number): number {
-  if (deficit <= 0 || dailyCap <= 0) return 0;
+export function computeGisPullLimit(contactTarget: number, dailyCap: number): number {
+  if (contactTarget <= 0 || dailyCap <= 0) return 0;
   return Math.min(
     Math.trunc(dailyCap),
-    Math.ceil((deficit / GIS_CONSTRUCTOR_YIELD) * GIS_PULL_OVERSHOOT),
+    Math.ceil((contactTarget / GIS_CONSTRUCTOR_YIELD) * GIS_PULL_OVERSHOOT),
   );
 }
 
@@ -105,6 +102,11 @@ export interface GisTopupPullResult {
   excludedDropped: number;
   /** Всего просканировано карточек потока (для диагностики выгорания пула). */
   scanned: number;
+  b2cDropped: number;
+  suppressed: number;
+  /** ID последней просмотренной карточки; null после естественного конца выдачи. */
+  nextCursor: string | null;
+  stopReason: 'candidate_limit' | 'scan_limit' | 'exhausted' | 'skipped';
 }
 
 /**
@@ -115,15 +117,22 @@ export interface GisTopupPullResult {
  *         HH+SJ батча. Собирается runner'ом, сюда приходит готовым;
  *   (г)   внутри-прогонный дедуп по twogis_id И по домену (одна карточка может
  *         входить в несколько рубрик; разные карточки сети — один сайт).
+ * B2C и suppression проверяются ДО заполнения limit. Курсор продвигается
+ * по каждой просмотренной карточке, включая отсев, но не по хвосту DB-батча.
  */
 export async function pullGisTopupCandidates(opts: {
   rubricGroups: TwoGisRubricGroup[];
   limit: number;
   snapshotId: number;
   excludeDomains: ReadonlySet<string>;
+  suppression: OutreachOsSuppression;
+  cursor?: string;
   log?: Logger;
 }): Promise<GisTopupPullResult> {
-  const result: GisTopupPullResult = { candidates: [], pulled: 0, excludedDropped: 0, scanned: 0 };
+  const result: GisTopupPullResult = {
+    candidates: [], pulled: 0, excludedDropped: 0, scanned: 0,
+    b2cDropped: 0, suppressed: 0, nextCursor: opts.cursor ?? null, stopReason: 'skipped',
+  };
   const limit = Math.trunc(opts.limit);
   if (limit <= 0 || opts.rubricGroups.length === 0) return result;
 
@@ -131,13 +140,17 @@ export async function pullGisTopupCandidates(opts: {
   const takenDomains = new Set<string>();
   const maxScan = limit * GIS_MAX_SCAN_MULTIPLIER;
 
-  outer: for await (const batch of iterateTwoGisCards(
+  for await (const batch of iterateTwoGisCards(
     { rubricGroups: opts.rubricGroups, hasWebsite: true },
-    { snapshotId: opts.snapshotId },
+    { snapshotId: opts.snapshotId, cursor: opts.cursor },
   )) {
     for (const card of batch) {
+      if (result.scanned >= maxScan) {
+        result.stopReason = 'scan_limit';
+        return result;
+      }
       result.scanned += 1;
-      if (result.scanned > maxScan) break outer; // страховка, см. GIS_MAX_SCAN_MULTIPLIER
+      if (card.id) result.nextCursor = card.id;
       if (!card.id || !card.website || takenIds.has(card.id)) continue;
       const domain = deriveDomain(card.website);
       if (!domain || takenDomains.has(domain)) continue;
@@ -148,10 +161,23 @@ export async function pullGisTopupCandidates(opts: {
         result.excludedDropped += 1;
         continue;
       }
+      if (isOutreachOsB2cCompany(card.name ?? '', card.website)) {
+        result.b2cDropped += 1;
+        continue;
+      }
+      if (isSuppressedCompany(card.website, opts.suppression)) {
+        result.suppressed += 1;
+        continue;
+      }
       result.candidates.push(cardToCandidate(card));
-      if (result.candidates.length >= limit) break outer;
+      if (result.candidates.length >= limit) {
+        result.stopReason = 'candidate_limit';
+        return result;
+      }
     }
   }
+  result.nextCursor = null;
+  result.stopReason = 'exhausted';
   return result;
 }
 

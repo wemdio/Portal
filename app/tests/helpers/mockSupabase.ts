@@ -247,7 +247,8 @@ function applyFilter(rows: Row[], f: Filter): Row[] {
     case 'lt':
       return rows.filter((r) => (r[f.column] as never) < (f.value as never));
     case 'is':
-      return rows.filter((r) => r[f.column] === f.value);
+      // Omitted nullable seed fields represent SQL DEFAULT NULL.
+      return rows.filter((r) => f.value === null ? r[f.column] == null : r[f.column] === f.value);
     case 'ilike':
       return rows.filter((r) => matchesIlike(r[f.column], f.value));
     case 'not_ilike':

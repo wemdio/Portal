@@ -2,6 +2,7 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { Agent, fetch } from 'undici';
 import { assertPublicWebsite } from '@/lib/clientDemo/personalize';
+import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { normalizeVeCompanyInn } from './collectionIdentity';
@@ -262,6 +263,7 @@ export async function fetchVeRelevanceEvidence(
         results = await withVeDeadline('relevance website search', 6_000, signal, async (searchSignal) =>
           opts.search ? opts.search(query, searchSignal) : searchVeRelevanceWebsites(query, searchSignal));
       } catch (error) {
+        if (error instanceof ProviderUsageWriteError) throw error;
         signal.throwIfAborted();
         providerError = veSearchProviderFailure(error);
         return;
@@ -281,6 +283,7 @@ export async function fetchVeRelevanceEvidence(
       }
     });
   } catch (error) {
+    if (error instanceof ProviderUsageWriteError) throw error;
     opts.signal?.throwIfAborted();
     failed = true;
     timedOut ||= error instanceof VeOperationTimeoutError;

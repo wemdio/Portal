@@ -29,6 +29,11 @@
  */
 
 const ORIGINAL_API_KEY = process.env.INSTANTLY_API_KEY;
+const mockEmailBudgetRpc = jest.fn();
+
+jest.mock('@/lib/supabaseAdmin', () => ({
+  supabaseAdmin: { rpc: (...args: unknown[]) => mockEmailBudgetRpc(...args) },
+}));
 
 beforeAll(() => {
   process.env.INSTANTLY_API_KEY = 'test-api-key';
@@ -42,6 +47,10 @@ afterAll(() => {
 let fetchMock: jest.Mock;
 
 beforeEach(() => {
+  mockEmailBudgetRpc.mockReset();
+  mockEmailBudgetRpc.mockReturnValue({
+    abortSignal: () => Promise.resolve({ data: { granted: true, retry_after_ms: 0 }, error: null }),
+  });
   fetchMock = jest.fn().mockResolvedValue(
     new Response(JSON.stringify({ items: [], next_starting_after: null }), {
       status: 200,
@@ -71,7 +80,7 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
   it('marks a provider attempt only when the transport is about to start', async () => {
     const onRequestAttempt = jest.fn();
     fetchMock.mockRejectedValueOnce(new Error('provider timeout'));
-    const { createLeads } = await import('@/lib/instantly/client');
+    const { createLeads, listEmails, InstantlyEmailReadDeferredError } = await import('@/lib/instantly/client');
 
     await expect(createLeads(
       [{ email: 'person@example.test' }],
@@ -81,6 +90,59 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
 
     expect(onRequestAttempt).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(mockEmailBudgetRpc).not.toHaveBeenCalled();
+
+    // Read admission is a separate hard gate, including skipRateLimiter callers.
+    fetchMock.mockClear();
+    onRequestAttempt.mockClear();
+    mockEmailBudgetRpc.mockReturnValueOnce({
+      abortSignal: () => Promise.resolve({
+        data: { granted: false, reason: 'budget', retry_after_ms: 45_000 }, error: null,
+      }),
+    });
+    await expect(listEmails({ limit: 1 }, {
+      requestPriority: 'recovery', skipRateLimiter: true, onRequestAttempt,
+    })).rejects.toMatchObject({
+      status: 429, reason: 'budget', retryAfterMs: 45_000,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(onRequestAttempt).not.toHaveBeenCalled();
+    expect(mockEmailBudgetRpc).toHaveBeenLastCalledWith('instantly_reserve_email_read', {
+      p_account: 'main', p_priority: 'recovery',
+    });
+
+    mockEmailBudgetRpc.mockReturnValueOnce({
+      abortSignal: () => Promise.resolve({ data: null, error: { code: 'PGRST202' } }),
+    });
+    await expect(listEmails({ limit: 1 })).rejects.toMatchObject({
+      status: 503, reason: 'storage_unavailable',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await listEmails({ limit: 1 }, { onRequestAttempt });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onRequestAttempt).toHaveBeenCalledTimes(1);
+    expect(mockEmailBudgetRpc).toHaveBeenLastCalledWith('instantly_reserve_email_read', {
+      p_account: 'main', p_priority: 'fresh',
+    });
+
+    fetchMock.mockResolvedValueOnce(new Response('', { status: 429, headers: { 'Retry-After': '120' } }));
+    mockEmailBudgetRpc.mockReturnValueOnce({
+      abortSignal: () => Promise.resolve({ data: { granted: true, retry_after_ms: 0 }, error: null }),
+    }).mockReturnValueOnce({
+      abortSignal: () => Promise.resolve({ data: { deferred: true, retry_after_ms: 120_000 }, error: null }),
+    });
+    await expect(listEmails({ limit: 1 }, { retryRateLimits: true, onRequestAttempt }))
+      .rejects.toBeInstanceOf(InstantlyEmailReadDeferredError);
+    expect(mockEmailBudgetRpc).toHaveBeenLastCalledWith('instantly_defer_email_reads', {
+      p_account: 'main', p_retry_after_ms: 120_000,
+    });
+    // A second logical call cannot defeat the shared/local cooldown or pay for
+    // a second HTTP attempt. No real backoff timer is slept in this test.
+    await expect(listEmails({ limit: 1 }, { skipRateLimiter: true }))
+      .rejects.toMatchObject({ reason: 'cooldown' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(onRequestAttempt).toHaveBeenCalledTimes(2);
   });
 
   it('translates campaign_id → campaign (the actual Instantly API key)', async () => {

@@ -20,6 +20,8 @@ export interface PublicInstantlyAccount {
 
 export interface InstantlyRequestOptions {
   accountId?: string | null;
+  /** LIST /emails recovery reads share a smaller budget, reserving room for fresh replies. */
+  requestPriority?: 'fresh' | 'recovery';
   /** Optional timeout for each fetch attempt; defaults to 90 seconds. */
   timeoutMs?: number;
   /**
@@ -28,7 +30,7 @@ export interface InstantlyRequestOptions {
    * rate limiter still runs before this per-request deadline starts.
    */
   timeoutIncludesBody?: boolean;
-  /** Internal recovery calls can bypass the shared limiter for a bounded read. */
+  /** Bypasses only the legacy limiter; never bypasses the strict LIST /emails budget. */
   skipRateLimiter?: boolean;
   /** Defaults to true; recovery status reads disable 429 retries. */
   retryRateLimits?: boolean;
