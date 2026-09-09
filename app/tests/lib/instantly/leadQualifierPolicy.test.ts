@@ -918,9 +918,9 @@ describe('positive lead controls', () => {
       outboundText: SUBSTANTIVE_OUTBOUND_TEXT,
     },
     {
-      name: 'deferred self-interest',
+      name: 'deferred self-interest after a substantive offer',
       replyText: 'Сейчас не актуально, но напишите через месяц.',
-      outboundText: null,
+      outboundText: SUBSTANTIVE_OUTBOUND_TEXT,
     },
     {
       name: 'own phone supplied for an offer CTA',

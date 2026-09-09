@@ -546,6 +546,16 @@ const DIRECT_ACTIONABLE_CTA_PATTERNS = [
   /(?:запустим|начн[её]м|провед[её]м)[^.!?\n]{0,30}(?:тест|пилот|демо)/i,
   /(?:let(?:'s|\s+us)|we\s+can)[^.!?\n]{0,50}(?:schedule|book|have|start|run)[^.!?\n]{0,30}(?:call|meeting|demo|test|pilot)/i,
 ];
+// Only concrete actions exempt a delayed reply from needing offer context.
+// Do not treat generic "обсудим/свяжитесь позже" as a standalone meeting.
+const CONCRETE_ACTIONABLE_CTA_PATTERNS = [
+  /давайте\s+(?:созвонимся|встретимся|провед[её]м\s+встречу)(?![a-zа-яё])/i,
+  /(?:позвоните|наберите)[^.!?\n]{0,30}(?:мне|нам)(?![a-zа-яё])/i,
+  /(?:можете|можно)\s+(?:(?:вы|мне|нам|меня|нас)\s+)?(?:набрать|позвонить|созвониться|встретиться)(?![a-zа-яё])/i,
+  /(?:запустим|начн[её]м|провед[её]м)\s+(?:ваш\s+)?(?:тест|пилот|демо)(?![a-zа-яё])/i,
+  /(?:предлагаю|предлагаем|готов(?:ы|а)?|соглас(?:ен|на|ны))\s+(?:на\s+)?(?:встречу|встретиться|созвониться|звонок|демо|тест|пилот)(?![a-zа-яё])/i,
+  /\b(?:let['’]s|let\s+us|we\s+can)\s+(?:meet|talk|(?:schedule|book|have|start|run)\s+(?:(?:a|an|the|your)\s+)?(?:call|meeting|demo|test|pilot))\b/i,
+];
 const VAGUE_DEFERRED_INTEREST_PATTERN = /^(?:(?:возможно|может\s+быть|наверное)[,\s]+)?(?:когда-нибудь|позже|в\s+будущем)\s+(?:посмотрим|рассмотрим|ознакомимся|обсудим|верн[её]мся)(?:(?:\s+к\s+(?:этому|вопросу|предложению))|(?:\s+(?:ваше|это)\s+предложение))?(?:[.!?,\s]+(?:спасибо|благодарю|thanks|thank\s+you))?$/i;
 const NEGATED_SELF_SIGNAL_PREFIX_PATTERN = new RegExp(
   String.raw`${LETTER_TOKEN_START_SOURCE}(?:не(?:\s+(?:очень|особо))?|вряд\s+ли|едва\s+ли)\s*$`,
@@ -1435,11 +1445,11 @@ function isNegatedFollowupMaterialRequest(statement: string): boolean {
   );
 }
 
-function hasDirectActionableCta(authoredReply: string): boolean {
+function hasDirectActionableCta(authoredReply: string, requireConcreteAction = false): boolean {
   const statement = normalizeAuthoredStatement(authoredReply);
   return (
     !hasCategoricalNegativeContext(statement) &&
-    DIRECT_ACTIONABLE_CTA_PATTERNS.some((pattern) =>
+    (requireConcreteAction ? CONCRETE_ACTIONABLE_CTA_PATTERNS : DIRECT_ACTIONABLE_CTA_PATTERNS).some((pattern) =>
       findDirectActionableCtaMatches(statement, pattern).some(
         (match) => {
           const prefix = statement.slice(0, match.index).split(/[.!?;,:]/).at(-1) ?? '';
@@ -1680,6 +1690,13 @@ function hasExplicitDeferredFollowup(authoredReply: string): boolean {
   );
 }
 
+function hasContextDependentDeferredSignal(authoredReply: string): boolean {
+  return hasExplicitDeferredFollowup(authoredReply) ||
+    hasAuthoredConversationResumption(authoredReply) ||
+    hasStandaloneFutureCooperationInterest(authoredReply) ||
+    hasVagueDeferredInterest(authoredReply);
+}
+
 interface ProtectedDefaultVerdict {
   reason: string;
   needsReview: boolean;
@@ -1688,6 +1705,7 @@ interface ProtectedDefaultVerdict {
 function protectedDefaultVerdict(
   authoredReply: string,
   confirmedProposal: boolean,
+  semanticShortOffer = false,
 ): ProtectedDefaultVerdict | null {
   const statement = normalizeAuthoredStatement(authoredReply);
   const deferredClauses = findDeferredFollowupClauses(statement);
@@ -1697,6 +1715,19 @@ function protectedDefaultVerdict(
   const negatedDirectCta = hasNegatedDirectActionableCta(statement);
   const requestedFollowupMaterials = isFollowupMaterialRequest(statement);
   const selfCooperationInterest = hasSelfDirectedCooperationInterest(statement);
+
+  if (
+    !confirmedProposal && !semanticShortOffer &&
+    hasContextDependentDeferredSignal(authoredReply) &&
+    !actionableCommercialRequest &&
+    !hasExplicitBuyerAction(statement) &&
+    !hasDirectActionableCta(statement, true)
+  ) {
+    return {
+      reason: 'Просьба вернуться к разговору позже без подтверждённого содержательного предложения не является лидом.',
+      needsReview: false,
+    };
+  }
 
   if (
     hasThirdPartyContactRouting(authoredReply) &&
@@ -1755,16 +1786,6 @@ function protectedDefaultVerdict(
         ? 'Явный отказ или условный интерес третьих лиц не становится лидом из-за просьбы о материалах.'
         : 'Без подтверждённого оффера общая просьба прислать ознакомительные материалы не является лидом.',
       needsReview: false,
-    };
-  }
-
-  if (
-    !confirmedProposal &&
-    hasVagueDeferredInterest(statement)
-  ) {
-    return {
-      reason: 'Без подтверждённого оффера неопределённый будущий интерес требует автоматической повторной оценки.',
-      needsReview: true,
     };
   }
 
@@ -1835,10 +1856,20 @@ function normalizeDefaultLeadSignals(
   const quotedText = extractQuotedText(replyText) ?? '';
   const confirmedProposal =
     substantiveOutboundTexts.length > 0 || isSubstantiveOfferText(quotedText);
+  // The >=200-character positive heuristic is not a minimum offer length.
+  // For a visible short offer candidate, retain AI's explicit interpretation;
+  // a bare proposalSeen flag, the brief or a contact-only opener is not proof.
+  // This only avoids the deferred veto; it never forces a positive verdict.
+  const semanticShortOffer = result.proposalSeen &&
+    [...outboundTexts, quotedText].some((text) =>
+      text.trim().length > 0 && text.length < 200 &&
+      SUBSTANTIVE_OFFER_SIGNAL_PATTERNS.some((pattern) => pattern.test(text)),
+    );
 
   const protectedVerdict = protectedDefaultVerdict(
     authoredReply,
     confirmedProposal,
+    semanticShortOffer,
   );
   if (protectedVerdict) {
     return {
@@ -1862,13 +1893,20 @@ function normalizeDefaultLeadSignals(
     signal = 'прямой коммерческий запрос';
     reason = 'Получатель прямо запросил коммерческое предложение, расчёт или цены.';
   } else if (
-    hasExplicitDeferredFollowup(authoredReply) ||
-    hasStandaloneFutureCooperationInterest(authoredReply) ||
-    (confirmedProposal && hasVagueDeferredInterest(authoredReply))
+    confirmedProposal && (
+      hasExplicitDeferredFollowup(authoredReply) ||
+      hasStandaloneFutureCooperationInterest(authoredReply) ||
+      hasVagueDeferredInterest(authoredReply)
+    )
   ) {
     signal = 'отложенный интерес';
     reason = 'Получатель выразил собственный интерес и предложил вернуться к нему позже.';
-  } else if (hasDirectActionableCta(authoredReply) || hasExplicitBuyerAction(authoredReply)) {
+  } else if (
+    hasDirectActionableCta(
+      authoredReply,
+      !confirmedProposal && hasContextDependentDeferredSignal(authoredReply),
+    ) || hasExplicitBuyerAction(authoredReply)
+  ) {
     signal = 'прямой следующий шаг';
     reason = 'Получатель предложил прямой коммерчески значимый следующий шаг.';
   } else if (confirmedProposal && hasRequestedFollowupMaterials(authoredReply)) {
@@ -1933,7 +1971,7 @@ function buildSystemPrompt(
 ЗАДАЧА: определить категорию ответа.
 
 КАТЕГОРИИ:
-1. КВАЛИФИЦИРОВАННЫЙ ЛИД — клиент выразил собственный положительный интерес к полученному офферу или готовность к коммерчески значимому следующему действию: звонку, встрече, демо, тесту, пилоту, покупке, заказу, обсуждению условий или другому конкретному CTA. Явная просьба вернуться к разговору позже (через месяц, летом, в конкретный будущий период) — это отложенный CTA и тоже лид. Также лидом является конкретный коммерческий запрос: КП или коммерческое предложение; цену, стоимость, тарифы, расчёт или смету.
+1. КВАЛИФИЦИРОВАННЫЙ ЛИД — клиент выразил собственный положительный интерес к полученному офферу или готовность к коммерчески значимому следующему действию: звонку, встрече, демо, тесту, пилоту, покупке, заказу, обсуждению условий или другому конкретному CTA. Просьба вернуться к разговору позже (через месяц, летом, в конкретный будущий период) — лид только при подтверждённом содержательном оффере, когда человеку понятно, что ему предлагают. Также лидом является конкретный коммерческий запрос: КП или коммерческое предложение; цену, стоимость, тарифы, расчёт или смету.
 2. МОЖНО ОБРАБОТАТЬ ВОЗРАЖЕНИЕ — клиент видел предложение, но выразил сомнение, возражение или мягкий отказ, который можно обработать аргументами (например: "дорого", "не сейчас" без просьбы вернуться позже, "у нас уже есть подрядчик", "не уверен что нам это нужно"). НЕ прямой категоричный отказ.
 3. НЕ ЛИД — автоответ, отписка, прямой отказ, простая передача контакта, общий запрос ознакомительной информации без коммерческого намерения или нейтральный ответ.
 
@@ -1963,6 +2001,8 @@ function buildSystemPrompt(
 - ИЛИ в ответе клиента ЦИТИРУЕТСЯ наше предложение (текст после ">" или ниже строки "On ... wrote:" / даты отправки)
 - ИЛИ клиент ссылается на содержание предложения (цены, услуги, условия)
 - Запрос контакта ответственного — это НЕ предложение. Но если до ответа было отправлено отдельное содержательное предложение — учитывай его
+- Бриф проекта, название кампании, сам факт ответа или цитирования письма НЕ доказывают, что клиент получил понятный оффер. В исходящем письме или цитате должно быть описано, что именно мы предлагаем, а не только «кому направить информацию?».
+- Оффер может быть коротким: важен понятный продукт/услуга и предложение для клиента, а не длина письма.
 
 КОНКРЕТНЫЙ КОММЕРЧЕСКИЙ ЗАПРОС — ЭТО ЛИД:
 - Запрос КП или коммерческого предложения.
@@ -1975,8 +2015,8 @@ function buildSystemPrompt(
 - Самостоятельное «Надеюсь на возможное сотрудничество», «Будем рады сотрудничеству» или «Хотели бы сотрудничать» также является лидом, даже если исходящее письмо не восстановилось.
 - Выполнение прямого CTA из содержательного предложения — например, мы попросили личный номер, а человек передал свой номер — является лидом.
 - После подтверждённого оффера просьба прислать предложение, информацию, материалы, презентацию, кейсы или примеры означает продолжение интереса и является лидом. В том числе «пришлите материалы, возможно, когда-нибудь посмотрим». Но просьба о материалах не отменяет явный отказ или условный интерес третьих лиц.
-- Явный отложенный интерес — «вернитесь через месяц», «напишите летом», «через месяц напишите мне», «летом свяжитесь со мной», «сейчас не актуально, но напишите через месяц» — является лидом даже без восстановленного исходящего письма. Самостоятельная готовность сотрудничать в будущем тоже является лидом. Категоричный отказ («не интересно») и перенаправление к другому человеку, чужому менеджеру/коллеге или в общий отдел отложенным интересом не являются; дата такого перенаправления ничего не меняет.
-- После подтверждённого оффера неопределённое «возможно, когда-нибудь посмотрим» считается отложенным интересом. Без подтверждённого оффера такой ответ неоднозначен и идёт на проверку.
+- Отложенный интерес — «вернитесь через месяц», «напишите летом», «через месяц напишите мне», «летом свяжитесь со мной», «давайте обсудим позже», «сейчас не актуально, но напишите через месяц», готовность сотрудничать в будущем — является лидом только после подтверждённого содержательного оффера. После одного запроса контакта или без подтверждения оффера такой перенос сам по себе НЕ лид: is_lead=false, needs_review=false. Слова «к теме» или «к вашему предложению» сами по себе не доказывают понимания, что именно предлагается. Самодостаточный запрос КП/цены/покупки или явное согласие на звонок, встречу, демо или тест оценивай отдельно: это самостоятельное основание даже без найденного исходящего письма. Категоричный отказ («не интересно») и перенаправление к другому человеку, чужому менеджеру/коллеге или в общий отдел отложенным интересом не являются; дата такого перенаправления ничего не меняет.
+- После подтверждённого оффера неопределённое «возможно, когда-нибудь посмотрим» считается отложенным интересом. Без подтверждённого оффера такой ответ сам по себе не является лидом: is_lead=false, needs_review=false.
 - Явное отрицание («не интересно», «не актуально») и условный интерес третьих лиц («если коллегам будет интересно — они свяжутся») не являются положительным интересом самого получателя.
 
 ОБЩЕЕ ЛЮБОПЫТСТВО — НЕ ЛИД:
@@ -2002,7 +2042,7 @@ ${criteriaReminder}
 ФИНАЛЬНАЯ ПРОВЕРКА МАШИННОГО ОТВЕТА (раньше любых критериев лида):
 - machine_reply_kind = "auto_reply" для автоматического ответа/отпуска, "delivery_failure" для уведомления о недоставке, "service_acknowledgement" для шаблонного подтверждения или обещания обработать запрос/ответить. Например, «Мы обязательно ответим в ближайшее время. Если запрос актуален — свяжитесь по телефону» — служебный шаблон, не коммерческий CTA, даже без слов «письмо получено».
 - Ставь этот признак только для полностью машинного/служебного ОСНОВНОГО ответа без самостоятельного человеческого интереса. Машинный текст в цитате или подписи не учитывай. Если рядом есть живой вопрос про цену/КП или просьба обсудить предложение/созвониться, machine_reply_kind=null: оцени человеческую часть по обычным критериям.
-- Само упоминание отпуска или отсутствия не делает ответ автоматическим. «С завтрашнего дня я в отпуске. Смогу вернуться к теме после 24 сентября» — собственный отложенный интерес к разговору, machine_reply_kind=null; по дефолтным критериям это лид. Отличай от обычного автоответа «Я в отпуске, вернусь в офис 24 сентября, на письма отвечу после возвращения»: здесь нет интереса к нашему предложению. Кастомные критерии продолжают определять квалификацию человеческого ответа.
+- Само упоминание отпуска или отсутствия не делает ответ автоматическим. «С завтрашнего дня я в отпуске. Смогу вернуться к теме после 24 сентября» — человеческое намерение продолжить разговор, machine_reply_kind=null, но НЕ безусловный лид: по дефолтным критериям это отложенный интерес только после подтверждённого содержательного оффера. После запроса контакта или без подтверждённого оффера один перенос разговора не является лидом. Отличай от обычного автоответа «Я в отпуске, вернусь в офис 24 сентября, на письма отвечу после возвращения»: здесь нет интереса к нашему предложению. Кастомные критерии продолжают определять квалификацию человеческого ответа.
 - При machine_reply_kind != null обязательно is_lead=false, custom_criteria_matched=false, needs_review=false, objection_handleable=false, objection_draft=null. Контакты и призывы из служебного шаблона не могут выполнить кастомное правило «передали контакт — лид».
 - Для человеческого ответа или при сомнении machine_reply_kind=null.
 
@@ -2237,7 +2277,7 @@ ${lastOutText}
 ---
 ${quotedText.slice(0, 3000)}
 ---
-ВАЖНО: Исходящее письмо не найдено в API, но клиент процитировал его в ответе — значит он его ПОЛУЧИЛ и ВИДЕЛ (proposal_seen=true).`;
+ВАЖНО: Цитата подтверждает получение процитированного письма, но не обязательно оффера. Ставь proposal_seen=true только если текст содержит понятное содержательное предложение; цитата запроса контакта этого не доказывает.`;
   } else {
     outboundSection = `НАШЕ ПОСЛЕДНЕЕ ИСХОДЯЩЕЕ ПИСЬМО (шаг ${stepCount} кампании):
 ---

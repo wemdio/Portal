@@ -251,6 +251,22 @@ criteria. The prompt explicitly distinguishes this delayed interest from a plain
 out-of-office notice such as «Вернусь в офис 24 сентября». Quoted history,
 signatures and the final AI machine-reply veto retain their existing safeguards.
 
+The user's clarified default boundary requires an understood, substantive offer
+before generic «напишите через месяц» / «вернусь к теме» / future-only cooperation
+can count as deferred interest. A default-only post-AI guard enforces this on both
+semantic passes; an AI-positive flag or a brief alone cannot supply missing offer
+evidence. A pre-reply outbound or substantive quote supplies context, including an
+earlier offer before a short follow-up. A visible short offer candidate can still
+be interpreted by AI: the existing 200-character promotion heuristic is not used
+as a minimum offer length for this veto, and the short candidate never forces a
+positive result. The quoted-message prompt no longer declares every quote an
+offer. Explicit independent commercial requests, purchase/call/meeting/test
+actions and custom criteria keep their separate rules.
+
+This clarification passed 109 private offline boundary checks and the 116 private
+machine-filter checks. One existing policy fixture was aligned with the clarified
+offer requirement; no CI test cases were added.
+
 Offline validation reproduced the old false rejection and passed 53 focused
 checks plus 116 existing private machine-filter checks. The 229 existing
 classifier/parser/worker tests, strict TypeScript and touched-file ESLint also
