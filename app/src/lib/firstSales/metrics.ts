@@ -263,6 +263,26 @@ export function meetingsByDeal(
   return byDeal;
 }
 
+/**
+ * Сделка → дата последней её встречи, попавшей в период.
+ *
+ * Нужна списку рядом с воронкой: строка обязана показывать дату события,
+ * которым сделка попала в период, а не дату своего создания. Сделка 2024 года
+ * со встречей в августе 2026 иначе выглядит как «список не слушается фильтра».
+ */
+export function lastMeetingByDeal(
+  links: MeetingLinkRow[],
+  from: Date,
+  to: Date,
+): Map<number, string> {
+  const byDeal = new Map<number, string>();
+  for (const link of countedMeetingLinks(links, from, to)) {
+    const prev = byDeal.get(link.amo_deal_id);
+    if (prev === undefined || link.meeting_at > prev) byDeal.set(link.amo_deal_id, link.meeting_at);
+  }
+  return byDeal;
+}
+
 function median(values: number[]): number | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);

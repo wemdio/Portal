@@ -15,6 +15,7 @@ import {
 } from '@/components/charts/theme';
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
+import type { FiltersState } from '@/components/renewals/FiltersBar';
 import type { RenewalsFunnel as FunnelData } from '@/lib/renewals/funnel';
 import RenewalsDealsList from '@/components/renewals/RenewalsDealsList';
 
@@ -99,7 +100,7 @@ function buildOption(data: FunnelData, theme: ChartTheme, animate: boolean): ECh
   };
 }
 
-export default function RenewalsFunnel() {
+export default function RenewalsFunnel({ filters }: { filters: FiltersState }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const theme = useChartTheme(rootRef);
   const reducedMotion = usePrefersReducedMotion();
@@ -115,7 +116,10 @@ export default function RenewalsFunnel() {
     const run = async () => {
       setLoading(true);
       try {
-        const res = await authFetch('/api/analytics/renewals/funnel', { signal: controller.signal });
+        const qs = new URLSearchParams({ from: filters.from, to: filters.to });
+        const res = await authFetch(`/api/analytics/renewals/funnel?${qs.toString()}`, {
+          signal: controller.signal,
+        });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = (await res.json()) as FunnelData;
         if (!active) return;
@@ -136,7 +140,7 @@ export default function RenewalsFunnel() {
       active = false;
       controller.abort();
     };
-  }, []);
+  }, [filters.from, filters.to]);
 
   const option = useMemo(
     () => (theme && data && data.totalDeals > 0 ? buildOption(data, theme, !reducedMotion) : null),
@@ -152,15 +156,13 @@ export default function RenewalsFunnel() {
     // вопрос — «а кто это?». На узком экране список уезжает вниз.
     <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
       <div ref={rootRef} className="glass-tile p-3">
-        <h3 className="text-sm font-semibold text-zinc-900">Воронка вторичных продаж: где проекты сейчас</h3>
-        {/* Период здесь не действует намеренно (см. renewals/funnel/route.ts):
-            воронка отвечает на «где стоят проекты и сколько дошло до
-            продления», а не «сколько продлили за выбранные дни». Без этой
-            строки экран противоречит сам себе: сверху «0 продлений за период»,
-            снизу шестнадцать сделок. */}
+        <h3 className="text-sm font-semibold text-zinc-900">Воронка вторичных продаж за период</h3>
+        {/* Отбор когортный, и это обязано быть написано на экране: иначе
+            «проект в работе, а в воронке его нет» читается как потеря данных,
+            хотя он просто заведён раньше окна. */}
         <p className="mb-2 text-[11px] text-zinc-400">
-          Снимок всей воронки на сейчас — выбранный период на него не влияет. Сколько продлили за период,
-          показывают плитки сверху и таблица ниже.
+          Сделки, заведённые в выбранном периоде, — и докуда каждая дошла. Проекты, заведённые раньше,
+          в эту воронку не входят, даже если сейчас движутся.
         </p>
 
         {loading ? <div className="px-3 py-10 text-center text-sm text-zinc-400">Загружаю…</div> : null}
@@ -173,8 +175,8 @@ export default function RenewalsFunnel() {
 
         {!loading && !error && data && data.totalDeals === 0 ? (
           <p className="px-3 py-8 text-center text-sm text-zinc-400">
-            Сделок, прошедших по этапам, пока нет. Проекты попадают в воронку автоматически, когда сделка закрывается
-            успешно в основной воронке, — и двигаются по ней дальше.
+            За выбранный период сделок в этой воронке нет. Проекты попадают в неё автоматически, когда сделка
+            закрывается успешно в основной воронке, — попробуйте расширить период.
           </p>
         ) : null}
 

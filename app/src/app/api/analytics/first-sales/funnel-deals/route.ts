@@ -2,12 +2,13 @@ import 'server-only';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireFirstSalesAccess } from '@/lib/firstSales/access';
 import { parseFirstSalesParams } from '@/lib/firstSales/params';
-import { groupByDeepestStage } from '@/lib/firstSales/funnelDeals';
+import { deepestStage, groupByDeepestStage, stageDate } from '@/lib/firstSales/funnelDeals';
 import {
   fetchFirstSalesLeads,
   isContractInWindow,
   isLeadInWindow,
   isQualifiedInWindow,
+  lastMeetingByDeal,
   meetingsByDeal,
   stageAvailability,
 } from '@/lib/firstSales/metrics';
@@ -64,6 +65,7 @@ export async function GET(req: NextRequest) {
     );
 
     const meetings = meetingsByDeal(meetingLinks, from, to);
+    const meetingAt = lastMeetingByDeal(meetingLinks, from, to);
     const money = moneyByDeal(payments, from, to);
 
     // Достоверность ступеней берём той же функцией, что и сводка: правило
@@ -80,6 +82,11 @@ export async function GET(req: NextRequest) {
         company_name: lead.company_name,
         responsible_name: lead.responsible_name,
         created_at: lead.created_at,
+        // Даты событий, которыми сделка попала в период. Строка списка
+        // показывает именно их: `created_at` у старой сделки со встречей в
+        // окне читается как «фильтр не сработал».
+        contract_at: lead.first_contract_at,
+        meeting_at: meetingAt.get(lead.amo_id) ?? null,
         history_complete: lead.history_complete,
         in_period: {
           lead: isLeadInWindow(lead, from, to),
@@ -90,8 +97,15 @@ export async function GET(req: NextRequest) {
         },
         amo_url: AMO_BASE ? `${AMO_BASE}/leads/detail/${lead.amo_id}` : null,
       }))
-      // Свежие сверху — тот же порядок, что в drill-down таблицах.
-      .sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''));
+      // Свежие сверху — но по дате события периода, а не создания сделки:
+      // строка показывает именно её, и порядок обязан совпадать с видимым.
+      .sort((a, b) => {
+        const key = (row: typeof a) => {
+          const stage = deepestStage(row.in_period, available);
+          return (stage === null ? row.created_at : stageDate(stage, row)) ?? '';
+        };
+        return key(b).localeCompare(key(a));
+      });
 
     const groups = groupByDeepestStage(rows, (row) => row.in_period, available);
 

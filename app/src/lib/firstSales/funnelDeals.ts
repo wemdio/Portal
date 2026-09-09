@@ -87,6 +87,27 @@ export function deepestStage(hits: FunnelHits, available: StageAvailability): Fu
   return null;
 }
 
+/** Даты сделки, из которых выбирается показываемая в строке. */
+export type FunnelStageDates = {
+  created_at: string | null;
+  meeting_at: string | null;
+  contract_at: string | null;
+};
+
+/**
+ * Дата, которой сделка попала в период, — та, что стоит в строке списка.
+ *
+ * Для договора это дата договора, для встречи — дата встречи; квал и лид
+ * считаются когортно по дате прихода лида, поэтому у них это `created_at`.
+ * Показывать везде `created_at` нельзя: сделка 2024 года со встречей в августе
+ * 2026 выглядит как сделка вне периода, и список читается как сломанный.
+ */
+export function stageDate(stage: FunnelStageId, dates: FunnelStageDates): string | null {
+  if (stage === 'contract') return dates.contract_at ?? dates.created_at;
+  if (stage === 'meeting') return dates.meeting_at ?? dates.created_at;
+  return dates.created_at;
+}
+
 export type FunnelStageGroup<T> = {
   stage: FunnelStageId;
   label: string;
