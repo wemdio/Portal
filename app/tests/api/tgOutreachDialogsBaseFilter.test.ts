@@ -16,6 +16,7 @@
 const AUTH_USER_ID = 'user-A';
 
 let orFilters: string[] = [];
+let neqFilters: Array<[string, unknown]> = [];
 let rpcCalls: Array<{ fn: string; args: Record<string, unknown>; options: Record<string, unknown> | undefined }> = [];
 let fromTables: string[] = [];
 
@@ -23,6 +24,10 @@ function makeBuilder(result: { data?: unknown[]; count?: number } = {}) {
   const builder: Record<string, unknown> = {
     select: () => builder,
     eq: () => builder,
+    neq: (column: string, value: unknown) => {
+      neqFilters.push([column, value]);
+      return builder;
+    },
     gte: () => builder,
     ilike: () => builder,
     in: () => builder,
@@ -74,6 +79,7 @@ function makeGetReq(query: string): Request {
 
 beforeEach(() => {
   orFilters = [];
+  neqFilters = [];
   rpcCalls = [];
   fromTables = [];
 });
@@ -94,6 +100,9 @@ describe('GET /tg-outreach/dialogs — фильтр по базе', () => {
     // Страховка от возврата к старому способу: or(tg_username.in.(…)) длиной
     // в тысячи символов — тот самый «URI too long».
     expect(orFilters).toEqual([]);
+
+    // Служебный чат Telegram (777000) прячется из списка при любом фильтре.
+    expect(neqFilters).toContainEqual(['tg_user_id', 777000]);
   });
 
   it('без base_id список идёт прямой выборкой из tg_outreach_dialogs', async () => {

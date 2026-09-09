@@ -7,6 +7,7 @@ import {
   type DialogBaseRef,
 } from '@/lib/tgOutreach/dialogBase';
 import { usernameKey } from '@/lib/tgOutreach/report';
+import { TG_SERVICE_NOTIFICATIONS_USER_ID } from '@/lib/tgOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -73,6 +74,11 @@ export async function GET(req: NextRequest) {
             .from('tg_outreach_dialogs')
             .select('*', { count: 'exact' })
             .eq('campaign_id', campaignId);
+
+      // Служебный чат Telegram (коды входа и уведомления) собеседником не
+      // является, но успел накопиться в базе до скипа в воркере — из списка
+      // его прячем независимо от фильтров.
+      query = query.neq('tg_user_id', TG_SERVICE_NOTIFICATIONS_USER_ID);
 
       query = query
         .order('last_message_at', { ascending: false, nullsFirst: false })

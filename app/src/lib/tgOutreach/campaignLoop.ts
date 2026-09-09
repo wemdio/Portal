@@ -15,7 +15,7 @@ import type {
   DialogMessage,
   OutreachProxy,
 } from './types';
-import { DEFAULT_FOLLOW_UP } from './types';
+import { DEFAULT_FOLLOW_UP, TG_SERVICE_NOTIFICATIONS_USER_ID } from './types';
 import { checkAccount, classifyCheckError } from './accountCheck';
 import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient } from './gramClient';
@@ -620,6 +620,12 @@ async function upsertDialog(
   status?: string,
   opts?: { canSend?: boolean; initialCanSend?: boolean; tgIsBot?: boolean; autoForward?: AutoForwardOutcome },
 ) {
+  // Служебный аккаунт Telegram не становится диалогом кампании ни при каких
+  // настройках: это страховка поверх скипа в цикле, закрывающая и все прочие
+  // пути записи — backfill, refetch, догоняющие ответы и напоминания, которые
+  // читают диалоги из базы и могут дотянуться до старых строк с 777000.
+  if (tgUserId === TG_SERVICE_NOTIFICATIONS_USER_ID) return;
+
   const { data: existing } = await db
     .from('tg_outreach_dialogs')
     .select('id, messages, status, can_send, tg_is_bot')
@@ -1895,6 +1901,7 @@ export async function runCampaignLoop(
           unread: 0,
           not_user: 0,
           own_account: 0,
+          service: 0,
           processed: 0,
           replied: 0,
           flood: 0,
@@ -2227,6 +2234,14 @@ export async function runCampaignLoop(
               cycleStats.own_account++;
               continue;
             }
+            // Коды входа и сервисные уведомления: непрочитанный чат с 777000
+            // есть у каждого аккаунта после логина, но собеседником он не
+            // является — на него не должно тратиться ни GPT-обращение, ни
+            // строка в списке диалогов.
+            if (Number(dialog.entity.id) === TG_SERVICE_NOTIFICATIONS_USER_ID) {
+              cycleStats.service++;
+              continue;
+            }
 
             try {
               const r = await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop, { blockedUserIds });
@@ -2315,6 +2330,7 @@ export async function runCampaignLoop(
               `Обработано ${cycleStats.processed} непрочитанных из ${cycleStats.unread}, отправлено ${cycleStats.replied} ответов. ` +
               `Пропуски: групп/каналов ${cycleStats.not_user}, ошибок ${cycleStats.errors}` +
               (cycleStats.own_account ? `, своих аккаунтов кампании ${cycleStats.own_account}` : '') +
+              (cycleStats.service ? `, служебных чатов Telegram ${cycleStats.service}` : '') +
               (cycleStats.flood ? `, паузы из-за Flood ${cycleStats.flood}` : '') +
               '.',
           );
