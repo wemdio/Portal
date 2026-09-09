@@ -88,7 +88,8 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
-import { searchRows } from '@/lib/companiesSearch/rpcSearch';
+import { searchCount, searchRows } from '@/lib/companiesSearch/rpcSearch';
+import { OKVED2_TREE, reduceToTopCodes } from '@/lib/companiesSearch/okved2';
 import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
@@ -112,8 +113,9 @@ import { companyNameSource, isCompanyNameReady, VE_COMPANY_NAME_FIELD, type VeCo
 import { prepareSegmentationAudience } from '../segmentationAudit';
 import { isContactSupplyActive } from '../contactSupplyEligibility';
 import {
-  collectionRoundLimit, createCollectionTarget, finishCollectionRound, estimateRemainingReady,
-  type VeCollectionMode, type VeCollectionTargetProgress, type VeRemainingReadyEstimate,
+  collectionRoundLimit, createCollectionTarget, finishCollectionRound, updateCollectionEstimate,
+  VE_SOURCE_POPULATION_MAX_AGE_MS,
+  type VeCollectionMode, type VeCollectionTargetProgress, type VeCollectionEstimate,
 } from '../collectionTarget';
 import {
   probeSliceRelevance,
@@ -450,6 +452,17 @@ export function mapDirectoryFilters(
   return out;
 }
 
+function directoryEstimateScope(plan: VeSourcePlan): string {
+  return JSON.stringify(plan.tasks.map((task) => task.source === 'companies_directory'
+    ? { source: task.source, filters: mapDirectoryFilters(task.directory_filters) } : { source: task.source }));
+}
+
+function needsDirectoryEstimateRefresh(plan: VeSourcePlan, estimate: VeCollectionEstimate | undefined): boolean {
+  const age = Date.now() - Date.parse(estimate?.population_as_of ?? '');
+  return !estimate || estimate.version !== 2 || estimate.population_filters !== directoryEstimateScope(plan)
+    || !Number.isFinite(age) || age < 0 || age > VE_SOURCE_POPULATION_MAX_AGE_MS;
+}
+
 /**
  * Оценить company-level размер реестровой части плана. Складывать два
  * независимых среза нельзя: одна компания может проходить оба фильтра, а RPC
@@ -462,8 +475,12 @@ async function estimatePlanDirectorySegment(
   supabase: SupabaseClient,
 ): Promise<NonNullable<VeCollectInfo['estimate']>> {
   const directoryTasks = plan.tasks.filter((task) => task.source === 'companies_directory');
+  const populationAsOf = new Date().toISOString();
+  const populationFilters = directoryEstimateScope(plan);
+  const provenance = { version: 2 as const, population_as_of: populationAsOf, population_filters: populationFilters };
   if (directoryTasks.length === 0) {
     return {
+      ...provenance,
       unique_companies: null,
       companies_with_email: null,
       note: 'В плане нет реестрового среза: размер оценивается по фактическим результатам источников.',
@@ -471,6 +488,7 @@ async function estimatePlanDirectorySegment(
   }
   if (directoryTasks.length > 1) {
     return {
+      ...provenance,
       unique_companies: null,
       companies_with_email: null,
       note: 'В плане несколько пересекающихся реестровых срезов; их размеры не складываются.',
@@ -478,27 +496,46 @@ async function estimatePlanDirectorySegment(
   }
 
   const filters = mapDirectoryFilters(directoryTasks[0].directory_filters);
+  // Match the fetcher's expansion of letter sections/top-level OKVED prefixes.
+  const okvedCodes = reduceToTopCodes(new Set(filters.okvedCodes ?? [])).flatMap((code) =>
+    /^[A-Z]$/i.test(code) ? OKVED2_TREE.find((node) => node.code === code)?.children?.map((child) => child.code) ?? [code] : [code]);
   const stats = await getVeDirectorySegmentStats(
     {
-      okvedCodes: filters.okvedCodes ?? [],
+      okvedCodes,
       includeIp: filters.includeIp,
       regionCodes: filters.regionCodes,
       revenueFrom: filters.revenueFrom ?? undefined,
       revenueTo: filters.revenueTo ?? undefined,
       employeesFrom: filters.employeesFrom ?? undefined,
       employeesTo: filters.employeesTo ?? undefined,
-      // Email — следующая ступень воронки, а не фильтр population estimate.
-      // Иначе при hasEmail=true обе цифры искусственно становятся одинаковыми.
-      requireEmail: false,
+      // Population and measured yield must cover the same email-filtered slice.
+      requireEmail: filters.hasEmail === true,
     },
     supabase,
   );
+  // The company counter and fetch RPC have historically differed in empty-email
+  // handling. Verify exact fetch-row coverage before extrapolating, without
+  // changing the shared search RPC used by ENG and other Portal tools.
+  let matchingPopulation = false;
+  let coverageError: string | undefined;
+  try {
+    const exact = await searchCount(filters);
+    matchingPopulation = !exact.error && !stats.error && Number.isSafeInteger(exact.count)
+      && exact.count >= 0 && exact.count === stats.directory_rows_total && plan.tasks.length === 1;
+    if (!matchingPopulation) coverageError = exact.error
+      ? 'Не удалось сверить размер источника с фильтрами сбора.'
+      : 'Размер источника и выборка не совпадают по фильтрам; прогноз не рассчитан.';
+  } catch {
+    coverageError = 'Не удалось сверить размер источника с фильтрами сбора.';
+  }
   return {
+    ...provenance, population_matches_source: matchingPopulation,
     unique_companies: stats.companies_unique_total,
     companies_with_email: stats.matched_companies_with_email ?? null,
     companies_with_phone: stats.matched_companies_with_phone ?? null,
     directory_rows_total: stats.directory_rows_total,
-    ...(stats.error ? { note: `Оценка реестрового среза недоступна: ${stats.error}` } : {}),
+    ...(stats.error ? { note: `Оценка реестрового среза недоступна: ${stats.error}` }
+      : coverageError ? { note: coverageError } : {}),
   };
 }
 
@@ -681,14 +718,7 @@ export interface VeCollectInfo {
    * складывать: их компании могут пересекаться, поэтому в таком случае числа
    * остаются null, а причина записывается в note.
    */
-  estimate?: {
-    unique_companies: number | null;
-    companies_with_email: number | null;
-    companies_with_phone?: number | null;
-    directory_rows_total?: number | null;
-    note?: string;
-    remaining_ready_estimate?: VeRemainingReadyEstimate | null;
-  };
+  estimate?: VeCollectionEstimate;
   tasks?: VeCollectTaskState[];
   /** Фаза CONSTRUCT: состояние передачи базы конструктору (появляется после HARVEST). */
   construct?: VeConstructInfo;
@@ -2816,17 +2846,30 @@ async function completeTargetRound(args: {
   info.target_progress = next;
   if (cleaned.summary.status === 'complete') delete info.company_name_recovery;
   delete info.validation_retry;
-  if (info.estimate) info.estimate.remaining_ready_estimate = estimateRemainingReady({
-    population: info.estimate.unique_companies,
-    candidatesProcessed: next.candidates_processed, readyRows: readyRows.length,
-    asOf: new Date().toISOString(),
-    eligible: progress.mode === 'preview' && progress.round === 1 && !args.validationError
-      && info.relevance_summary.needs_review === 0 && info.relevance_summary.error === 0
-      && info.relevance_summary.email_retryable === 0
-      && cleaned.summary.status === 'complete'
-      && tasks.length === 1 && tasks[0].source === 'companies_directory'
-      && !args.stats.excluded_existing_bases && !args.stats.excluded_during_fetch,
-  });
+  if (info.plan && needsDirectoryEstimateRefresh(info.plan, info.estimate)) {
+    // A long-running batch can outlive its initial source snapshot. Refresh only
+    // at a worker checkpoint, never as a side effect of an interface read.
+    info.estimate = await estimatePlanDirectorySegment(info.plan, ctx.supabase);
+  }
+  if (info.estimate) {
+    const sourceRows = readVeRelevanceSourceRows(info.relevance_reserve);
+    const candidateCompanies = new Set(sourceRows.map(veRelevanceCompanyKey));
+    // Company-level population uses INN, with row-id fallback. Source rows do
+    // not retain directory row ids, so missing INN cannot prove that fallback.
+    const identitiesComplete = sourceRows.length > 0 && sourceRows.every((row) => Boolean(normalizeVeCompanyInn(cell(row.inn))));
+    info.estimate = updateCollectionEstimate(info.estimate, {
+      candidates: candidateCompanies.size, ready: readyRows.length,
+      asOf: new Date().toISOString(), identitiesComplete,
+      complete: !args.validationError && !taskError && !continueSavedReview
+        && info.relevance_summary.needs_review === 0 && info.relevance_summary.error === 0
+        && info.relevance_summary.email_retryable === 0 && cleaned.summary.status === 'complete',
+      // Earlier rounds of THIS base are represented in the cumulative source
+      // cohort. Other bases can consume unseen parts of the same population;
+      // their global exclusion keys do not prove an exact remaining source size.
+      externalExclusions: freshKeys.inns.size > 0 || freshKeys.emails.size > 0 || freshKeys.websiteInns.size > 0
+        || Boolean(args.stats.excluded_existing_bases),
+    });
+  }
   if (next.status === 'collecting' && !continueSavedReview) {
     // One atomic checkpoint: prior validated output is durable BEFORE the next
     // input round becomes pending. Resuming must never revalidate these rows.
@@ -3041,7 +3084,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
   // Базы, чей план был сохранён до появления estimate, получают его при
   // следующем безопасном тике, не переигрывая LLM-план и сбор источников.
-  if (!info.estimate && info.plan) {
+  if (info.plan && needsDirectoryEstimateRefresh(info.plan, info.estimate)) {
     info.estimate = await estimatePlanDirectorySegment(info.plan, ctx.supabase);
     await persistCollectInfo(ctx, baseId, info);
   }

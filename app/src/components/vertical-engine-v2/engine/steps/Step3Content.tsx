@@ -1069,7 +1069,7 @@ function DossierNum({ value, caption, className = '' }: { value: string; caption
 }
 
 /** «Сегмент в цифрах»: компании директории, вакансии hh, оценка размера сегмента. */
-function DossierSegmentCard({ data }: { data: VeDossierData }) {
+export function DossierSegmentCard({ data }: { data: VeDossierData }) {
   const { interpretation } = data;
   const counters = data.counters as VeDossierData['counters'] & {
     directory_rows_total?: number | null;
@@ -1183,7 +1183,7 @@ function SegmentSizeBadge({ value }: { value: string }) {
 }
 
 /** «Сигналы боли»: список сигналов из счётчиков (метка + значение). */
-function DossierSignalsCard({ data }: { data: VeDossierData }) {
+export function DossierSignalsCard({ data }: { data: VeDossierData }) {
   const { signals } = data.counters;
   // У старых досье поля вердикта нет — тогда блок не рендерим вообще.
   const buysChannels = data.interpretation.buys_sales_channels;
@@ -1220,7 +1220,7 @@ function DossierSignalsCard({ data }: { data: VeDossierData }) {
 }
 
 /** «Наши кампании»: reply против базового, охват, сегменты, лучшие темы, выводы. */
-function DossierDatasetCard({ data }: { data: VeDossierData }) {
+export function DossierDatasetCard({ data }: { data: VeDossierData }) {
   const { dataset_stats: ds, interpretation } = data;
   return (
     <div className="mt-4 border-t pt-4 ve2-div">

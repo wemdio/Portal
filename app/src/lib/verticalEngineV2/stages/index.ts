@@ -19,6 +19,8 @@ import { runBaseCollectStage } from './baseCollect';
 import { runTemplateStage } from './template';
 import { runDossierStage } from './dossier';
 import { runSegmentationAuditStage } from './segmentationAudit';
+import { runVeOutreachStartStage } from '../outreachLaunch';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
 export type { VeStageContext, VeStageResult } from './shared';
 
@@ -50,6 +52,9 @@ export async function runVeStage(job: VeJob, ctx: VeStageContext): Promise<VeSta
       return runDossierStage(job, ctx);
     case 'segmentation_audit':
       return runSegmentationAuditStage(job, ctx);
+    case 'outreach_start':
+      if (!supabaseInstantly) throw new Error('Instantly database is unavailable');
+      return runVeOutreachStartStage(job, ctx, supabaseInstantly);
     default: {
       const neverStage: never = job.stage;
       throw new Error(`Неизвестная стадия hypothesis engine: ${String(neverStage)}`);

@@ -99,7 +99,10 @@ export function Step4Base(props: {
   jobs: VeJobSummary[];
   /** Родитель уже обновляет project detail, локальный interval тогда не нужен. */
   parentPollingActive?: boolean;
-  onUploaded: () => void;
+  /** Вторичный путь для своих файлов: без кнопок запуска нового автосбора. */
+  uploadOnly?: boolean;
+  templateReady?: boolean;
+  onUploaded: (baseId?: string) => void;
   onTemplateStarted: () => void;
   onGoToTemplate: () => void;
 }): JSX.Element {
@@ -111,12 +114,14 @@ export function Step4Base(props: {
     selectedBaseId,
     jobs,
     parentPollingActive = false,
+    uploadOnly = false,
+    templateReady = false,
     onUploaded,
     onTemplateStarted,
     onGoToTemplate,
   } = props;
 
-  const [baseMode, setBaseMode] = useState<BaseMode>('auto');
+  const [baseMode, setBaseMode] = useState<BaseMode>(uploadOnly ? 'upload' : 'auto');
   const [parsed, setParsed] = useState<ParsedFile | null>(null);
   const [parsing, setParsing] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -256,7 +261,7 @@ export function Step4Base(props: {
 
   const templateJob = useMemo(() => latestStageJob(jobs.filter((job) => job.payload?.base_id === latestBase?.id), 'template'), [jobs, latestBase?.id]);
   const templateBusy = templateStarting || jobActive(templateJob);
-  const templateDone = !templateBusy && templateJob?.status === 'done';
+  const templateDone = templateReady || (!templateBusy && templateJob?.status === 'done');
   const templateFailed = !templateBusy && templateJob?.status === 'failed';
 
   const clearFile = useCallback(() => {
@@ -320,7 +325,7 @@ export function Step4Base(props: {
         return;
       }
       clearFile();
-      onUploaded();
+      onUploaded(data.base?.id);
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Не удалось загрузить базу');
     } finally {
@@ -415,7 +420,7 @@ export function Step4Base(props: {
 
   return (
     <div className="max-w-6xl">
-      <div className="ve2-tabs" role="tablist" aria-label="Способ подготовки базы">
+      {!uploadOnly ? <div className="ve2-tabs" role="tablist" aria-label="Способ подготовки базы">
         <button
           id="ve-base-tab-auto"
           type="button"
@@ -438,9 +443,9 @@ export function Step4Base(props: {
         >
           Загрузить файл
         </button>
-      </div>
+      </div> : null}
 
-      <section
+      {!uploadOnly ? <section
         id="ve-base-panel-auto"
         role="tabpanel"
         aria-labelledby="ve-base-tab-auto"
@@ -555,19 +560,20 @@ export function Step4Base(props: {
             ) : null}
           </div>
         )}
-      </section>
+      </section> : null}
 
       <section
         id="ve-base-panel-upload"
-        role="tabpanel"
-        aria-labelledby="ve-base-tab-upload"
-        hidden={baseMode !== 'upload'}
+        role={uploadOnly ? 'region' : 'tabpanel'}
+        aria-label={uploadOnly ? 'Загрузка своей базы' : undefined}
+        aria-labelledby={uploadOnly ? undefined : 've-base-tab-upload'}
+        hidden={!uploadOnly && baseMode !== 'upload'}
         className="ve2-sec"
       >
         <div className="ve2-sec-head">
           <div>
             <p className={HE.eyebrow}>01 → Загрузка файла</p>
-            <p className={`mt-1.5 ${HE.muted}`}>Своя база тоже работает: движок разберёт колонки и покажет состав.</p>
+            <p className={`mt-1.5 ${HE.muted}`}>Загрузите CSV или XLSX. Движок разберёт колонки и покажет состав базы.</p>
           </div>
         </div>
 
@@ -686,7 +692,7 @@ export function Step4Base(props: {
       <section className="ve2-sec" aria-labelledby="ve-bases-title">
         <div className="ve2-sec-head">
           <p id="ve-bases-title" className={HE.eyebrow}>
-            02 → Базы под эту вертикаль
+            {uploadOnly && selectedBaseId ? '02 → Выбранная база' : '02 → Базы под эту вертикаль'}
           </p>
           {verticalBases.length > 0 ? (
             <span className={HE.faint}>{verticalBases.length.toLocaleString('ru-RU')}</span>
@@ -694,7 +700,7 @@ export function Step4Base(props: {
         </div>
         {verticalBases.length > 0 ? (
           <div className="ve2-rows">
-            {verticalBases.map((base) => (
+            {verticalBases.filter((base) => !uploadOnly || !selectedBaseId || base.id === selectedBaseId).map((base) => (
               <BaseRow
                 key={base.id}
                 base={base}
@@ -707,7 +713,7 @@ export function Step4Base(props: {
           </div>
         ) : (
           <div className="ve2-nt ve2-nt-info px-4 py-3">
-            Баз под эту вертикаль пока нет. Соберите новую или загрузите файл выше.
+            {uploadOnly ? 'Баз под эту вертикаль пока нет. Загрузите файл выше.' : 'Баз под эту вертикаль пока нет. Соберите новую или загрузите файл выше.'}
           </div>
         )}
         {latestBase?.status === 'failed' && latestBase.source !== 'auto' ? (
@@ -726,7 +732,7 @@ export function Step4Base(props: {
               03 → Состав базы
             </p>
             {latestAnalyzed ? (
-              <p className={`mt-1.5 ${HE.muted}`}>Последний разбор: {latestAnalyzed.filename}</p>
+              <p className={`mt-1.5 ${HE.muted}`}>Разбор базы: {latestAnalyzed.filename}</p>
             ) : null}
           </div>
         </div>
@@ -746,7 +752,7 @@ export function Step4Base(props: {
         <div className="ve2-step-footer">
           {templateDone ? (
             <button type="button" onClick={onGoToTemplate} className={HE.btnPrimary}>
-              Перейти к шаблону
+              {uploadOnly ? 'Открыть итоговые письма' : 'Перейти к шаблону'}
               <ArrowRight aria-hidden className="h-4 w-4" />
             </button>
           ) : (
@@ -757,18 +763,19 @@ export function Step4Base(props: {
               className={`${HE.btnPrimary} inline-flex items-center justify-center gap-2`}
             >
               {templateBusy ? <Spinner /> : null}
-              {templateBusy ? 'Собираем шаблон…' : 'Собрать шаблон'}
+              {uploadOnly ? (templateBusy ? 'Готовим письма…' : 'Подготовить итоговые письма') : (templateBusy ? 'Собираем шаблон…' : 'Собрать шаблон')}
               {!templateBusy ? <ArrowRight aria-hidden className="h-4 w-4" /> : null}
             </button>
           )}
           <span className={HE.faint}>
-            {templateBusy
+            {uploadOnly ? (templateBusy ? 'Подготовка обычно занимает 1–2 минуты.' : templateDone ? 'Письма доступны ниже: выберите текст и темы.' : 'Письма можно подготовить после завершения разбора базы.') : (
+            templateBusy
               ? 'AI собирает боевой шаблон — обычно это занимает 1–2 минуты.'
               : templateDone
                 ? 'Шаблон готов и доступен на следующем шаге.'
                 : latestBase?.status === 'analyzed'
                   ? 'База разобрана, можно собирать шаблон.'
-                  : 'Кнопка станет активной, когда база будет разобрана.'}
+                  : 'Кнопка станет активной, когда база будет разобрана.')}
           </span>
         </div>
         {templateError ? (
@@ -801,7 +808,7 @@ function previewCellText(value: unknown): string {
   return typeof value === 'string' ? value : String(value);
 }
 
-function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { base: VeBaseSummary; job?: VeJobSummary; hypothesisTitle?: string; queued: boolean; onUpdated: () => void }) {
+export function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { base: VeBaseSummary; job?: VeJobSummary; hypothesisTitle?: string; queued: boolean; onUpdated: () => void }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [downloadingMode, setDownloadingMode] = useState<BaseExportMode | null>(null);
   const [downloadError, setDownloadError] = useState('');
@@ -1437,7 +1444,7 @@ function BarList({ title, entries }: { title: string; entries: VeDistributionEnt
   );
 }
 
-function BaseAnalysisCards({ analysis }: { analysis: VeBaseAnalysis }) {
+export function BaseAnalysisCards({ analysis }: { analysis: VeBaseAnalysis }) {
   const qualityItems = (analysis.data_quality_notes ?? '')
     .split(/\n+/)
     .map((s) => s.replace(/^[•\-–*]\s*/, '').trim())

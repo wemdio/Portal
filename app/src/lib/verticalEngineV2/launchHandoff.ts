@@ -37,6 +37,7 @@ import type {
 } from './types';
 import { normalizeLaunchMailboxIds } from './launchPortfolio';
 import { companyNameCell, isCompanyNameReady, VE_COMPANY_NAME_FIELD } from './companyNames';
+import { materializeVeFinalLetters, normalizeVeFinalLetters } from './finalLetters';
 
 /** Максимум контактов в проверенном резерве одного шаблона, 413 сверх. */
 // Bounded durable reserve, not an Instantly upload batch. The worker sends
@@ -256,6 +257,9 @@ export function buildLaunchSequence(
   opts?: { segmentWhen?: string | null },
 ): VeLaunchSequence | null {
   if (!Array.isArray(letters) || letters.length === 0) return null;
+  const finalEditor = letters.some((letter) => letter.selected_variant !== undefined);
+  if (finalEditor && !normalizeVeFinalLetters(letters).letters) return null;
+  const finalLetters = finalEditor ? materializeVeFinalLetters(letters, opts?.segmentWhen) : null;
 
   const segmentKey = (opts?.segmentWhen ?? '').trim().toLowerCase();
   let droppedSegmentVariants = 0;
@@ -279,6 +283,13 @@ export function buildLaunchSequence(
       }
     }
     const first = i === 0;
+    if (finalLetters) {
+      const chosen = finalLetters[i];
+      return { subject: first ? chosen.subject ?? '' : '', body: chosen.body,
+        wait_days: chosen.wait_days, variants: chosen.variants?.map((variant) => ({
+          subject: first ? variant.subject ?? '' : '', body: variant.body,
+        })) ?? [] };
+    }
     return {
       subject: first ? letter.subject ?? '' : '',
       body,
