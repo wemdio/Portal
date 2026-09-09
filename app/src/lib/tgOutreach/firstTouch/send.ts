@@ -77,6 +77,13 @@ export interface SendBatchArgs {
    * десять минут.
    */
   claimed?: Set<string>;
+  /**
+   * Замок вокруг выбора контактов из очереди.
+   *
+   * Круг обходит аккаунты параллельно; без него два аккаунта берут одну порцию.
+   * По умолчанию замка нет — для одиночного вызова он не нужен.
+   */
+  claimLock?: <T>(fn: () => Promise<T>) => Promise<T>;
 }
 
 export interface SendBatchResult {
@@ -381,6 +388,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
   const WINDOW = quota * 6;
 
   const claimed = args.claimed ?? new Set<string>();
+  const withClaimLock = args.claimLock ?? (<T,>(fn: () => Promise<T>) => fn());
   // RPC USERNAME_NOT_OCCUPIED неоднозначен: так Telegram отвечает и за мёртвый
   // ник, и за замороженный аккаунт (на живые ники). Решаем судьбу таких контактов
   // только по итогу круга — по одному сигналу ничего сказать нельзя.
@@ -391,16 +399,30 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
   let stopAll = false;
 
   while (!stopAll && result.sent < quota && examined < MAX_EXAMINED) {
-    const perBase = await fdb.loadPendingByBase(db, baseIds, WINDOW, account.id);
-    const picked = selectNextContacts({ perBase, limit: WINDOW })
-      .filter((c) => !claimed.has(c.id))
-      .slice(0, Math.max(1, quota - result.sent));
+    /**
+     * Выбор и захват контактов — одним неделимым куском.
+     *
+     * Круг обходит аккаунты параллельно, а между чтением очереди и пометкой
+     * «занято» есть await. Без замка два аккаунта успевали прочитать одну и ту
+     * же порцию до того, как первый её пометит, и писали одному человеку
+     * дважды с разных номеров — для получателя это очевидная рассылка.
+     *
+     * Замок держим только на выборке: сама отправка идёт параллельно, ради
+     * чего параллельность и делалась.
+     */
+    const picked = await withClaimLock(async () => {
+      const perBase = await fdb.loadPendingByBase(db, baseIds, WINDOW, account.id);
+      const chosen = selectNextContacts({ perBase, limit: WINDOW })
+        .filter((c) => !claimed.has(c.id))
+        .slice(0, Math.max(1, quota - result.sent));
+      for (const c of chosen) claimed.add(c.id);
+      return chosen;
+    });
     if (!picked.length) break;
 
     for (const contact of picked) {
       if (args.shouldStop?.()) { stopAll = true; break; }
       args.onProgress?.();
-      claimed.add(contact.id);
       // Пауза не после отправки, а перед каждым следующим контактом: добор
       // означает и резолвы без отправки, а частые резолвы подряд Telegram не
       // любит ровно так же.
