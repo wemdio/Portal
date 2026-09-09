@@ -16,6 +16,7 @@ import {
 } from '@/lib/clientReplyBot/bot';
 import * as instantly from './client';
 import { isFreeProvider } from '@/lib/emailValidation/shared';
+import { deriveWebsiteFromEmail } from '@/lib/leadBoard/deriveWebsite';
 import { getEmailRecipients } from '@/lib/clientCampaignReplies/participants';
 import { buildHandoffDraft } from './handoffLegend';
 import { signHandoffCallback } from './handoffCallback';
@@ -1044,7 +1045,10 @@ export async function qualifyOneReply(
           leadName: leadName ?? fromName,
           companyName: companyName ?? null,
           phone: leadPhone ?? null,
-          website: leadWebsite ?? null,
+          // Instantly возвращает сайт только если он был в залитой базе лидов
+          // (~20% лидов). Фолбэк — домен корпоративной почты; для персональных
+          // ящиков (mail.ru и т.п.) хелпер отдаёт null.
+          website: leadWebsite ?? deriveWebsiteFromEmail(leadEmail),
           requestText: replyText || null,
           stepNumber,
           replyTimestamp: reply.timestamp_email ?? null,
