@@ -18,7 +18,7 @@ import type {
 import { DEFAULT_FOLLOW_UP, TG_SERVICE_NOTIFICATIONS_USER_ID } from './types';
 import { checkAccount, classifyCheckError } from './accountCheck';
 import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
-import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient } from './gramClient';
+import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient, type ActiveClient } from './gramClient';
 import type { LoopControl } from './watchdog';
 import { orderByStaleness } from './accountRotation';
 import { openaiGenerate, detectTrigger } from './openaiChat';
@@ -33,7 +33,7 @@ import { parkAccountAfterLimit } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
 import { sendFreezeAppeal } from './freezeAppeal';
 import { applyQueuedProfile, PROFILE_REST_HOURS, type QueuedProfilePayload } from './profile/queuedProfile';
-import { runLeadForwardPoller } from './leadForward';
+import { runLeadForwardPoller, isAccountRestrictedError } from './leadForward';
 import { buildLeadMessage, splitTelegramMessage } from './leadMessage';
 import { loadLeadOrigin } from './leadOrigin';
 import { withTimeout } from './withTimeout';
@@ -815,6 +815,33 @@ async function writeLog(
 }
 
 /**
+ * Свободный аккаунт на замену для передачи лида/партнёра.
+ *
+ * Требования те же, что к боевому: включён, не в кулдауне, без итогового
+ * запрета от Telegram и не на прогреве. Греющийся сюда не годится
+ * принципиально — он потому и греется, что писать ему пока рано.
+ *
+ * Берём первого подходящего, а не «самого свежего»: карточка уходит один
+ * раз и нагрузки не создаёт, а выбирать лучшего среди здоровых незачем.
+ */
+function pickSpareClient(
+  clients: ActiveClient[],
+  excludeAccountId: string,
+): { client: TelegramClient; accountName: string } | null {
+  const spare = clients.find((c) => {
+    const a = c.account;
+    if (a.id === excludeAccountId || !a.is_active) return false;
+    if (a.check_status && TERMINAL_FORWARD_STATUSES.has(a.check_status)) return false;
+    const cooldown = a.cooldown_until ? new Date(a.cooldown_until).getTime() : NaN;
+    if (Number.isFinite(cooldown) && cooldown > Date.now()) return false;
+    const warmup = a.warmup_until ? new Date(a.warmup_until).getTime() : NaN;
+    if (Number.isFinite(warmup) && warmup > Date.now()) return false;
+    return true;
+  });
+  return spare ? { client: spare.client, accountName: spare.account.session_name } : null;
+}
+
+/**
  * Исход пересылки возвращаем, а не только пишем в журнал.
  *
  * Сбой автопересылки — это лид, который не доехал до менеджера. Пока он оседал
@@ -879,6 +906,12 @@ export interface HandleChatOptions {
    * so spammers (especially ones without a username) can't keep poking through.
    */
   blockedUserIds?: Set<number>;
+  /**
+   * Здоровый аккаунт кампании на замену: автопересылка лида по триггеру идёт
+   * клиентом владельца диалога, и если тот под PEER_FLOOD, карточку отправляет
+   * подменный — переписка в ней текстом, оригиналы подменному недоступны.
+   */
+  getSpareClient?: (excludeAccountId: string) => { client: TelegramClient; accountName: string } | null;
 }
 
 export async function handleChat(
@@ -1100,6 +1133,29 @@ export async function handleChat(
         }
       }
       outcome = await forwardToTargetChat(client, entity, messageIdsToForward, targetChat, log, card);
+      // PEER_FLOOD на владельце диалога: оригиналы пересылки больше некому
+      // отправить, но карточка самодостаточна — переписка в ней текстом. Её
+      // везёт любой здоровый аккаунт кампании, и лид доезжает до менеджера.
+      if (!outcome.ok && isAccountRestrictedError(outcome.error) && card) {
+        const spare = options?.getSpareClient?.(account.id) ?? null;
+        if (spare) {
+          const target = targetChat.startsWith('@') ? targetChat.slice(1) : targetChat;
+          try {
+            for (const part of splitTelegramMessage(card)) {
+              await withTimeout(
+                spare.client.sendMessage(target, { message: part }),
+                TG_SEND_TIMEOUT_MS,
+                'отправка карточки лида подменным аккаунтом',
+              );
+            }
+            outcome = { ok: true };
+            log('warning', `Пересылка по триггеру упёрлась в ограничение аккаунта ${account.session_name} — карточку в ${targetChat} отправил ${spare.accountName}.`);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log('error', `Подменный аккаунт ${spare.accountName} тоже не смог отправить карточку в ${targetChat} — ${msg}`);
+          }
+        }
+      }
     } else {
       log('info', `${displayName}: триггер "${triggerLabel}" сработал, но чат для пересылки не указан в настройках кампании — пересылка пропущена`);
       outcome = { ok: false, error: 'чат для пересылки не указан в настройках кампании' };
@@ -1708,28 +1764,11 @@ export async function runCampaignLoop(
       return entry ? { client: entry.client, accountName: entry.account.session_name } : null;
     },
     /**
-     * Кем подменить, когда свой аккаунт не отвечает.
-     *
-     * Требования те же, что к боевому: включён, не в кулдауне, без итогового
-     * запрета от Telegram и не на прогреве. Греющийся сюда не годится
-     * принципиально — он потому и греется, что писать ему пока рано.
-     *
-     * Берём первого подходящего, а не «самого свежего»: карточка уходит один
-     * раз и нагрузки не создаёт, а выбирать лучшего среди здоровых незачем.
+     * Кем подменить, когда свой аккаунт не отвечает или под ограничением
+     * (PEER_FLOOD). Отбор — общий `pickSpareClient`, им же пользуется и
+     * автопересылка по триггеру.
      */
-    getFallbackClient: (excludeAccountId) => {
-      const spare = clients.find((c) => {
-        const a = c.account;
-        if (a.id === excludeAccountId || !a.is_active) return false;
-        if (a.check_status && TERMINAL_FORWARD_STATUSES.has(a.check_status)) return false;
-        const cooldown = a.cooldown_until ? new Date(a.cooldown_until).getTime() : NaN;
-        if (Number.isFinite(cooldown) && cooldown > Date.now()) return false;
-        const warmup = a.warmup_until ? new Date(a.warmup_until).getTime() : NaN;
-        if (Number.isFinite(warmup) && warmup > Date.now()) return false;
-        return true;
-      });
-      return spare ? { client: spare.client, accountName: spare.account.session_name } : null;
-    },
+    getFallbackClient: (excludeAccountId) => pickSpareClient(clients, excludeAccountId),
     reconnect: async (accountId) => {
       const entry = clients.find((c) => c.account.id === accountId);
       if (!entry) return false;
@@ -2256,7 +2295,10 @@ export async function runCampaignLoop(
             }
 
             try {
-              const r = await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop, { blockedUserIds });
+              const r = await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop, {
+                blockedUserIds,
+                getSpareClient: (excludeId) => pickSpareClient(clients, excludeId),
+              });
               cycleStats.processed++;
               if (r.replied) cycleStats.replied++;
             } catch (err: unknown) {
