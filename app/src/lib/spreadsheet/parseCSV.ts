@@ -26,6 +26,55 @@
 export type CsvDelimiter = ',' | ';' | '\t';
 
 /**
+ * Строка-подсказка Excel в начале файла: `sep=;`.
+ *
+ * Её кладут выгрузки, рассчитанные на открытие в Excel двойным щелчком —
+ * например парсер 2ГИС. Для CSV это не данные и не заголовок, а служебное
+ * объявление разделителя, и разбор обязан снять её до всего остального.
+ *
+ * 09.09.2026 конструктор баз из-за неё видел в файле ровно одну колонку с
+ * именем «sep=»: строка становилась заголовком, а настоящие name, website,
+ * phone уезжали в данные. Оператор при этом смотрел на тот же файл в Google
+ * Sheets, где всё разложено правильно, и причину найти не мог.
+ *
+ * Заодно берём из неё разделитель: это её прямое назначение и источник
+ * надёжнее, чем подсчёт символов в заголовке.
+ */
+const SEP_HINT = /^\ufeff?sep=([^\r\n]?)[^\r\n]*\r?\n/i;
+
+export interface SeparatorHint {
+  /** Текст без строки-подсказки. */
+  text: string;
+  /** Разделитель, если он объявлен и мы его понимаем. */
+  delimiter?: CsvDelimiter;
+}
+
+export function stripSeparatorHint(text: string): SeparatorHint {
+  const match = SEP_HINT.exec(text ?? '');
+  if (!match) return { text: text ?? '' };
+  const declared = match[1];
+  const delimiter = declared === ',' || declared === ';' || declared === '	'
+    ? (declared as CsvDelimiter)
+    : undefined;
+  return { text: (text ?? '').slice(match[0].length), delimiter };
+}
+
+/**
+ * Убрать строку-подсказку из уже разобранных строк.
+ *
+ * Нужно для xlsx: там разбор делает библиотека, и до текста мы не добираемся, а
+ * `sep=` приезжает обычной первой строкой с единственной заполненной ячейкой.
+ */
+export function dropSeparatorHintRow(rows: string[][]): string[][] {
+  const first = rows[0];
+  if (!first) return rows;
+  const filled = first.filter((c) => (c ?? '').trim().length > 0);
+  if (filled.length === 1 && /^sep=/i.test(filled[0].trim())) return rows.slice(1);
+  return rows;
+}
+
+
+/**
  * Inspect the first row only (terminated by the first unquoted newline)
  * and pick the candidate delimiter that appears most often outside quoted
  * cells. Tie / all-zero → defaults to `,`. Exposed for tests and for
@@ -71,8 +120,12 @@ export function detectDelimiter(text: string): CsvDelimiter {
   return best;
 }
 
-export function parseCSV(text: string, delimiterOverride?: CsvDelimiter): string[][] {
-  const delimiter = delimiterOverride ?? detectDelimiter(text);
+export function parseCSV(rawText: string, delimiterOverride?: CsvDelimiter): string[][] {
+  // Подсказку снимаем до всего: иначе она станет заголовком, а объявленный
+  // в ней разделитель пропадёт.
+  const hint = stripSeparatorHint(rawText);
+  const text = hint.text;
+  const delimiter = delimiterOverride ?? hint.delimiter ?? detectDelimiter(text);
   const rows: string[][] = [];
   let current: string[] = [];
   let cell = '';
@@ -157,7 +210,10 @@ export async function readXlsxRows(buffer: ArrayBuffer): Promise<string[][]> {
     }
     rows.push(row);
   }
-  return rows;
+  // Та же подсказка Excel, но пришедшая уже строкой таблицы: файл из парсера
+  // сохранили как xlsx вместе с ней. Снимаем здесь, а не у каждого читателя, —
+  // читателей четыре, и пропустить один значит вернуть ту же поломку.
+  return dropSeparatorHintRow(rows);
 }
 
 /**
