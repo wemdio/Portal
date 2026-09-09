@@ -742,11 +742,12 @@ describe('elliptical material request policy', () => {
     const rpc = jest.fn(async (name: string, args: Record<string, string>) => {
       const key = args.p_checkpoint_key;
       const checkpoint = checkpoints.get(key);
-      if (name === 'reserve_instantly_qualification_ai') {
+      if (name === 'reserve_instantly_qualification_ai' || name === 'reserve_instantly_qualification_ai_recovery') {
         if (checkpoint?.raw) return { data: { state: 'cached', raw_response: checkpoint.raw } };
         if (checkpoint?.token) return { data: { state: 'busy' } };
         const attempts = paidBudgets.get(args.p_budget_key) ?? 0;
-        if (attempts >= 3) return { data: { state: 'exhausted' } };
+        const finalRecovery = name === 'reserve_instantly_qualification_ai_recovery';
+        if (finalRecovery ? attempts !== 3 : attempts >= 3) return { data: { state: 'exhausted' } };
         paidBudgets.set(args.p_budget_key, attempts + 1);
         const token = `lease-${++leaseCounter}`;
         checkpoints.set(key, { token, raw: null, budgetKey: args.p_budget_key });
@@ -755,7 +756,7 @@ describe('elliptical material request policy', () => {
       if (!checkpoint || checkpoint.token !== args.p_lease_token) return { data: { state: 'lease_lost' } };
       checkpoint.token = null;
       checkpoint.raw = args.p_raw_response ?? null;
-      if (!checkpoint.raw && ['http_402', 'http_429'].includes(args.p_error_code)) {
+      if (!checkpoint.raw && ['http_402', 'http_429', 'http_412_no_credit'].includes(args.p_error_code)) {
         paidBudgets.set(checkpoint.budgetKey, (paidBudgets.get(checkpoint.budgetKey) ?? 1) - 1);
       }
       return { data: { state: checkpoint.raw ? 'saved' : 'released' } };
@@ -790,21 +791,21 @@ describe('elliptical material request policy', () => {
     expect([...paidBudgets.values()]).toEqual([1, 2]);
 
     fetchMock.mockReset().mockResolvedValue({ ok: true, json: async () => ({ choices: [{ finish_reason: 'length' }] }) });
-    for (let restart = 0; restart < 3; restart++) {
+    for (let restart = 0; restart < 4; restart++) {
       await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
         ...adjudicationOptions, checkpointStore: restartStore('reply-invalid'),
       })).rejects.toThrow('output token limit');
     }
     await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
       ...adjudicationOptions, checkpointStore: restartStore('reply-invalid'),
-    })).rejects.toThrow('AI paid attempt budget exhausted');
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    })).rejects.toThrow('AI final paid attempt budget exhausted');
+    expect(fetchMock).toHaveBeenCalledTimes(4); // three normal calls plus exactly one final recovery
     mockAiResult({ is_lead: true, custom_criteria_matched: true });
     await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
       ...adjudicationOptions, leadCriteria: 'Лид, если запросили договор.',
       checkpointStore: restartStore('reply-invalid'),
     })).resolves.toMatchObject({ isLead: true });
-    expect(fetchMock).toHaveBeenCalledTimes(4); // changed criteria is a genuinely new exact input
+    expect(fetchMock).toHaveBeenCalledTimes(5); // changed criteria is a genuinely new exact input
 
     for (const status of [402, 429, 402, 429]) {
       fetchMock.mockResolvedValue({ ok: false, status, text: async () => 'temporary rejection' });

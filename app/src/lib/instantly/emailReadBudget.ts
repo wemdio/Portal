@@ -2,9 +2,11 @@ import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { InstantlyApiError } from './errors';
+import type { InstantlyEmailReadDeferredReason } from './emailReadDeferral';
+
+export type { InstantlyEmailReadDeferredReason } from './emailReadDeferral';
 
 export type InstantlyEmailReadPriority = 'fresh' | 'recovery';
-export type InstantlyEmailReadDeferredReason = 'budget' | 'cooldown' | 'storage_unavailable';
 
 /** A technical deferral, never evidence that a reply is not a lead. */
 export class InstantlyEmailReadDeferredError extends InstantlyApiError {
@@ -25,6 +27,10 @@ const RATE_LIMIT_COOLDOWN_MS = 60_000;
 // Fences this process too if the provider's cooldown cannot be persisted. It is
 // not a substitute for shared storage: reservations always go through Postgres.
 const localCooldowns = new Map<string, number>();
+// Cache only denied admission, never a granted reservation. Avoid hammering
+// storage for the same unavailable slot; recovery exhaustion must not fence
+// fresh work. A restart drops this hint, but the shared DB gate still decides.
+const localAdmissionDeferrals = new Map<string, number>();
 
 function rpcTimeoutMs(deadline?: number): number {
   const remaining = deadline === undefined ? RPC_TIMEOUT_MS : deadline - Date.now();
@@ -70,11 +76,18 @@ export async function reserveInstantlyEmailRead(
   priority: InstantlyEmailReadPriority = 'fresh',
   deadline?: number,
 ): Promise<void> {
+  const nowMs = Date.now();
   const localUntil = localCooldowns.get(accountId) ?? 0;
-  if (localUntil > Date.now()) {
-    throw new InstantlyEmailReadDeferredError('cooldown', localUntil - Date.now());
+  if (localUntil > nowMs) {
+    throw new InstantlyEmailReadDeferredError('cooldown', localUntil - nowMs);
   }
   if (localUntil) localCooldowns.delete(accountId);
+  const admissionKey = `${accountId}:${priority}`;
+  const admissionUntil = localAdmissionDeferrals.get(admissionKey) ?? 0;
+  if (admissionUntil > nowMs) {
+    throw new InstantlyEmailReadDeferredError('budget', admissionUntil - nowMs);
+  }
+  if (admissionUntil) localAdmissionDeferrals.delete(admissionKey);
   const data = await budgetRpc('instantly_reserve_email_read', {
     p_account: accountId,
     p_priority: priority,
@@ -88,6 +101,7 @@ export async function reserveInstantlyEmailRead(
       Number.isFinite(result.retry_after_ms) && result.retry_after_ms > 0 &&
       (result.reason === 'budget' || result.reason === 'cooldown')) {
     if (result.reason === 'cooldown') localCooldowns.set(accountId, Date.now() + result.retry_after_ms);
+    else localAdmissionDeferrals.set(admissionKey, Date.now() + result.retry_after_ms);
     throw new InstantlyEmailReadDeferredError(result.reason, result.retry_after_ms);
   }
   throw new InstantlyEmailReadDeferredError('storage_unavailable', STORAGE_RETRY_MS);

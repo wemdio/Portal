@@ -4,6 +4,7 @@ import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
 import {
   authorizeQualificationRowsForUser,
+  QUALIFICATION_ACTION_GUARD_COLUMNS,
   qualificationProjectSnapshotSupported,
   qualifiedLeadAccessErrorResponse,
   resolveQualificationReadScope,
@@ -40,9 +41,8 @@ export const PATCH = withAuth(async (req, user) => {
 
   const { data: qualifications, error: qualificationsError } = await instantlyDb
     .from('instantly_lead_qualifications')
-    // `*` keeps code-before-migration compatible: selecting the new snapshot
-    // column by name would fail until the Instantly migration is visible.
-    .select('*')
+    // The action fence is mandatory even if a wildcard projection is stale.
+    .select(`*, ${QUALIFICATION_ACTION_GUARD_COLUMNS}`)
     .in('id', ids);
   if (qualificationsError) {
     return NextResponse.json({ error: qualificationsError.message }, { status: 500 });
@@ -107,6 +107,7 @@ export const PATCH = withAuth(async (req, user) => {
       .update({ read_at: readAt, read_by: user.id })
       .in('id', group.ids)
       .eq('campaign_id', group.campaignId)
+      .is('machine_reply_kind', null)
       .is('read_at', null);
     if (group.ownerState !== 'missing') {
       update = group.ownerState === 'legacy'
@@ -306,6 +307,7 @@ export const GET = withAuth(async (req, user) => {
       // FALSE is a durable retry/unresolved row; NULL is pre-migration history.
       // Both remain tied to the live owner until the worker proves a snapshot.
       query = query
+        .is('machine_reply_kind', null)
         .or(
           'qualified_project_owner_proven.eq.false,' +
           'qualified_project_owner_proven.is.null',
