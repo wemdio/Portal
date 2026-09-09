@@ -4,6 +4,7 @@ import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
+import { BaseContactsModal } from '@/components/tg-outreach/BaseContactsModal';
 import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
 import { accountCountryLabel, countryOptions } from '@/lib/tgOutreach/phoneCountry';
 import {
@@ -31,6 +32,7 @@ import {
   AlertCircle,
   Flame,
   Database,
+  Eye,
   ShieldCheck,
   FileSpreadsheet,
   LayoutDashboard,
@@ -4162,6 +4164,8 @@ function CampaignBasesTab({
   const [queuePending, setQueuePending] = useState<number | null>(null);
   /** База, у которой сейчас правят список рассыльщиков. */
   const [editingSendersFor, setEditingSendersFor] = useState<string | null>(null);
+  /** Открытая база в окне просмотра контактов. */
+  const [viewingBase, setViewingBase] = useState<{ id: string; name: string } | null>(null);
   const [sendersDraft, setSendersDraft] = useState<Set<string>>(new Set());
   const [savingSenders, setSavingSenders] = useState(false);
 
@@ -4592,6 +4596,15 @@ function CampaignBasesTab({
                   onChange={(e) => { void uploadContacts(b.id, e); }} />
               </label>
                 {exportButton(b)}
+                {/* Просмотр базы: до него она была чёрным ящиком — видно
+                    только счётчики. Убрать один неверный ник значило выгрузить
+                    файл, поправить и залить обратно, потеряв статусы отправки
+                    по всей базе. */}
+                <button type="button" onClick={() => setViewingBase({ id: b.id, name: b.name })} disabled={busy}
+                  title="Посмотреть контакты базы, поправить или удалить отдельные, очистить базу целиком"
+                  className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-50">
+                  <Eye className="h-3.5 w-3.5" />
+                </button>
                 <button type="button" onClick={() => { void requeueBase(b); }} disabled={busy || b.counts.failed === 0}
                   title="Вернуть отложенные контакты в очередь — например, после того как подняли порог длины первого сообщения"
                   className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent">
@@ -4713,6 +4726,15 @@ function CampaignBasesTab({
             ))}
           </div>
         </div>
+      )}
+
+      {viewingBase && (
+        <BaseContactsModal
+          baseId={viewingBase.id}
+          baseName={viewingBase.name}
+          onClose={() => setViewingBase(null)}
+          onChanged={() => { void load(); }}
+        />
       )}
     </div>
   );
