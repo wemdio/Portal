@@ -1410,65 +1410,67 @@ function DialogsTab({ campaignId }: {
           </button>
         </div>
 
+        {/* Фильтры отбора — дропдаунами: плашки по три-четыре на фильтр
+            переносили панель на несколько строк, а выбирают за раз обычно
+            одно значение. «Все» сбрасывает фильтр. */}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <div className="flex items-center gap-1">
-          <span className="text-xs text-gray-500">Статус:</span>
-          {['', 'none', 'lead', 'not_lead', 'later'].map(s => (
-            <button key={s} type="button" onClick={() => { setFilterStatus(s); setOffset(0); }}
-              className={`rounded-full px-3 py-1.5 text-xs font-medium transition border cursor-pointer ${filterStatus === s ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
-              {s ? DIALOG_STATUS_LABELS[s]?.label : 'Все'}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-1">
-          <span className="text-xs text-gray-500">Отправка:</span>
-          {[
-            { id: 'all', label: 'Все' },
-            { id: 'enabled', label: 'Разрешено' },
-            { id: 'disabled', label: 'Запрещено' },
-          ].map(s => (
-            <button key={s.id} type="button" onClick={() => { setFilterCanSend(s.id as typeof filterCanSend); setOffset(0); }}
-              className={`rounded-full px-3 py-1.5 text-xs font-medium transition border cursor-pointer ${filterCanSend === s.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
-              {s.label}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-1">
-          <span className="text-xs text-gray-500">Тип:</span>
-          {[
-            { id: 'all', label: 'Все' },
-            { id: 'users', label: 'Люди' },
-            { id: 'bots', label: 'Боты' },
-          ].map(s => (
-            <button key={s.id} type="button" onClick={() => { setFilterAudience(s.id as typeof filterAudience); setOffset(0); }}
-              className={`rounded-full px-3 py-1.5 text-xs font-medium transition border cursor-pointer ${filterAudience === s.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
-              {s.label}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-1">
-          <span className="text-xs text-gray-500">Сообщений:</span>
-          {[
-            { id: 'all', label: 'Любое количество' },
-            { id: 'one', label: '1 сообщение' },
-            { id: 'many', label: '2 и больше' },
-          ].map(s => (
-            <button key={s.id} type="button" onClick={() => { setFilterMessages(s.id as typeof filterMessages); setOffset(0); }}
-              title={s.id === 'one'
-                ? 'Мы написали, ответа не было'
-                : s.id === 'many' ? 'Разговор завязался — есть хотя бы один ответ' : undefined}
-              className={`rounded-full px-3 py-1.5 text-xs font-medium transition border cursor-pointer ${filterMessages === s.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
-              {s.label}
-            </button>
-          ))}
-          {/* Не плашки, как у соседних фильтров: аккаунтов в кампании полтора
-              десятка, и рядом кнопок они переносили бы всю панель на третью
-              строку. Показываем контрол, только когда аккаунт не один — с
-              единственным выбирать не из чего. */}
-          {/* Фильтр по базе: диалогов набирается много, а смотрят их обычно по
-              одной гипотезе — какая как отвечает. Показываем, только когда баз
-              больше одной: с единственной выбирать не из чего. */}
-        </div>
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-500">Статус:</span>
+            <select
+              value={filterStatus}
+              onChange={(e) => { setFilterStatus(e.target.value); setOffset(0); }}
+              aria-label="Показывать диалоги только с этим статусом"
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterStatus ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+            >
+              <option value="">Все</option>
+              <option value="none">Без статуса</option>
+              <option value="lead">Лид</option>
+              <option value="not_lead">Не лид</option>
+              <option value="later">Потом</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-500">Отправка:</span>
+            <select
+              value={filterCanSend}
+              onChange={(e) => { setFilterCanSend(e.target.value as typeof filterCanSend); setOffset(0); }}
+              aria-label="Показывать диалоги по признаку «можно писать»"
+              title="Разрешена ли нашему аккаунту отправка в этот диалог"
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterCanSend !== 'all' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+            >
+              <option value="all">Все</option>
+              <option value="enabled">Разрешено</option>
+              <option value="disabled">Запрещено</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-500">Тип:</span>
+            <select
+              value={filterAudience}
+              onChange={(e) => { setFilterAudience(e.target.value as typeof filterAudience); setOffset(0); }}
+              aria-label="Показывать диалоги с людьми или с ботами"
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterAudience !== 'all' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+            >
+              <option value="all">Все</option>
+              <option value="users">Люди</option>
+              <option value="bots">Боты</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-500">Сообщений:</span>
+            <select
+              value={filterMessages}
+              onChange={(e) => { setFilterMessages(e.target.value as typeof filterMessages); setOffset(0); }}
+              aria-label="Показывать диалоги по количеству сообщений"
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterMessages !== 'all' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+            >
+              <option value="all">Все</option>
+              <option value="one" title="Мы написали, ответа не было">1 сообщение</option>
+              <option value="many" title="Разговор завязался — есть хотя бы один ответ">2 и больше</option>
+            </select>
+          </div>
+          {/* База и аккаунт — те же дропдауны, но появляются не всегда:
+              с единственной базой (аккаунтом) выбирать не из чего. */}
           {bases.length > 1 && (
             <div className="flex items-center gap-1">
               <span className="text-xs text-gray-500">База:</span>
