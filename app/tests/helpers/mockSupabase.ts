@@ -326,6 +326,12 @@ function parseOrExpr(expr: string): Filter[][] {
 
 function parseTerm(term: string): Filter {
   const [column, op, ...rest] = term.split('.');
+  // Match PostgREST's negated operator inside OR, just like builder.not().
+  // Treating `col.not.ilike.pattern` as equality silently removes every row
+  // from recovery's page-budget/local-admission disjunction.
+  if (op === 'not' && rest[0] === 'ilike') {
+    return { column, op: 'not_ilike', value: rest.slice(1).join('.') };
+  }
   const valueRaw = rest.join('.');
   const value = valueRaw === 'null'
     ? null

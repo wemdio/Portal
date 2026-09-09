@@ -6,6 +6,7 @@ import { isPersonName } from '@/lib/enrich/extractors/nameQuality';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
 import { qualificationAiFingerprint, type QualificationAiCheckpointStore } from './qualificationAiCheckpoint';
+import { readInstantlyEmailReadDeferral } from './emailReadDeferral';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -38,6 +39,8 @@ export interface ThreadContext {
   lastOutbound: Email | null;
   /** A failed/incomplete lookup is not evidence that no outbound offer existed. */
   historyFetchFailed?: boolean;
+  /** Preserve the technical cause when a partial reply can still be examined. */
+  historyFetchFailureReason?: string;
   /**
    * Ящики (eaccount, lowercase), с которых кампания слала письма — собраны из
    * ВСЕХ писем, полученных при восстановлении контекста (search + campaign-wide
@@ -60,6 +63,12 @@ export async function fetchThreadContext(
 ): Promise<ThreadContext | null> {
   let allEmails: Email[] = [];
   let historyFetchFailed = false;
+  let historyFetchFailureReason: string | undefined;
+  let historyFetchError: unknown;
+  const missingContext = (): null => {
+    if (readInstantlyEmailReadDeferral(historyFetchError)) throw historyFetchError;
+    return null;
+  };
 
   // Fetch emails for this specific lead using the search parameter
   // (lead_id filter on /emails does not work correctly in Instantly API v2)
@@ -71,9 +80,14 @@ export async function fetchThreadContext(
     }, { accountId, ...requestOptions });
     allEmails = res.items ?? [];
     historyFetchFailed = Boolean(res.next_starting_after);
-  } catch {
+  } catch (error) {
+    // A denied admission/cooldown fences every LIST in this workspace and
+    // priority. Another search cannot repair it or reveal missing history.
+    if (readInstantlyEmailReadDeferral(error)) throw error;
     // fall through to campaign-wide fetch
     historyFetchFailed = true;
+    historyFetchError = error;
+    historyFetchFailureReason = error instanceof Error ? error.message : String(error);
   }
 
   // The search=leadEmail query reliably returns the lead's INBOUND reply but
@@ -97,13 +111,21 @@ export async function fetchThreadContext(
       // A complete campaign-wide fallback also repairs an earlier failed or
       // truncated narrow lookup; otherwise the same reply would defer forever.
       historyFetchFailed = Boolean(response.next_starting_after);
+      historyFetchError = undefined;
+      historyFetchFailureReason = undefined;
       const seen = new Set(allEmails.map((e) => e.id));
       for (const e of response.items ?? []) {
         if (!e.id || !seen.has(e.id)) allEmails.push(e);
       }
-    } catch {
+    } catch (error) {
       historyFetchFailed = true;
-      if (allEmails.length === 0) return null;
+      historyFetchError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      const deferral = readInstantlyEmailReadDeferral(error);
+      historyFetchFailureReason = deferral && !readInstantlyEmailReadDeferral(message)
+        ? `Instantly email read deferred: ${deferral.reason}; retry after ${Math.ceil(deferral.retryAfterMs)} ms`
+        : message;
+      if (allEmails.length === 0) return missingContext();
     }
   }
 
@@ -126,11 +148,11 @@ export async function fetchThreadContext(
     ? allEmails.filter((e) => e.thread_id === threadId)
     : allEmails.filter(matchesLead);
 
-  if (replyScope.length === 0) return null;
+  if (replyScope.length === 0) return missingContext();
   replyScope.sort(byTs);
 
   const replyEmail = replyScope.filter((e) => (e.ue_type ?? 1) === 2).pop();
-  if (!replyEmail) return null;
+  if (!replyEmail) return missingContext();
 
   const replyTs = new Date(
     replyEmail.timestamp_email ?? replyEmail.timestamp_created ?? 0,
@@ -167,7 +189,10 @@ export async function fetchThreadContext(
 
   return {
     replyEmail, threadEmails: outboundScope, lastOutbound, campaignOutboundMailboxes,
-    ...(historyFetchFailed && !lastOutbound ? { historyFetchFailed: true } : {}),
+    ...(historyFetchFailed && !lastOutbound ? {
+      historyFetchFailed: true,
+      ...(historyFetchFailureReason ? { historyFetchFailureReason } : {}),
+    } : {}),
   };
 }
 
@@ -848,6 +873,51 @@ const SERVICE_ACK_OPERATIONAL_CONTACT_PATTERN = new RegExp(
 );
 const SERVICE_ACK_PATIENCE_PATTERN = /^(?:спасибо|благодарим(?:\s+вас)?)\s+за\s+терпение$/iu;
 
+// These are delivery/support instructions, not an invitation to discuss the
+// outbound offer. Require complete template segments: an email address, the
+// word "spam", or "fill in a form" in a human reply is never enough.
+const ANTISPAM_REJECTION_SEGMENT_PATTERN =
+  /^(?:ваше\s+(?:письмо|сообщение)\s+(?:было\s+)?(?:распознано|определено|классифицировано|помечено)\s*,?\s*как\s+спам|your\s+(?:email|message)\s+(?:has\s+been|was)\s+(?:detected|recognized|identified|marked|classified)\s+as\s+spam)$/iu;
+const ANTISPAM_RECOVERY_SEGMENT_PATTERN =
+  /^(?:(?:(?:если\s+(?:вы\s+не\s+являетесь\s+спамером|ваше\s+письмо\s+не\s+является\s+спамом|(?:вы\s+)?считаете,?\s+что\s+(?:это\s+)?ошибка)|для\s+(?:(?:проверки|разблокировки)(?:\s+(?:вашего\s+)?письма)?|предотвращения\s+подобных\s+ситуаций)),?\s*(?:то\s+)?)?(?:пожалуйста,?\s*)?перешлите\s+(?:данное|это)\s+(?:письмо|сообщение)\s+на\s+(?:адрес\s*:?)?|(?:to\s+(?:prevent|avoid)\s+(?:similar|such)\s+situations,?\s*)?(?:please\s+)?forward\s+this\s+(?:email|message|letter)\s+to\s+(?:(?:the\s+)?(?:following\s+)?address\s*:?)?)\s*(?:antispam@[a-z0-9.-]+\.[a-z]{2,})?$/iu;
+const SUPPORT_BOT_IDENTITY_SEGMENT_PATTERN =
+  /^я\s+(?:чат-)?бот\s+[\p{L}\p{N}_-]{1,40}(?:\s+и\s+учусь\s+вместе\s+с\s+вами)?(?:\s*[\p{Extended_Pictographic}\uFE0F]+)?$/iu;
+const SUPPORT_BOT_FORM_SEGMENT_PATTERN =
+  /^(?:(?:чтобы\s+(?:получить\s+помощь|связаться\s+с\s+(?:нами|поддержкой))|если\s+у\s+вас\s+(?:есть\s+)?(?:вопрос|вопросы)),?\s*)?(?:пожалуйста,?\s*)?заполните\s+(?:(?:эту|нашу)\s+)?форму(?:\s+(?:обратной\s+связи|обращения))?(?:\s+(?:на\s+сайте|по\s+ссылке))?\s*:?\s*(?:https?:\/\/[^\s]+)?$/iu;
+const SUPPORT_BOT_PARTNERSHIP_SEGMENT_PATTERN =
+  /^(?:спасибо\s+за\s+интерес\s+к\s+сотрудничеству\s+с[о]?\s+[\p{L}\p{N}_-]{1,40}|мы\s+открыты\s+к\s+новым\s+предложениям\s+и\s+готовы\s+рассмотреть\s+возможности\s+партн[её]рства|мы\s+изучим\s+заявку\s+и,?\s+при\s+взаимной\s+заинтересованности,?\s+(?:свяжемся\s+с\s+вами|сами\s+выйдем\s+на\s+связь))$/iu;
+const SUPPORT_BOT_OPERATOR_SEGMENT_PATTERN =
+  /^если\s+остались\s+вопросы,?\s+напишите\s+[«"“]?оператор[»"”]?\s*[—–-]\s*переведу\s+вас\s+на\s+человека$/iu;
+// A known concatenated HTML/text footer, not arbitrary text after "support".
+// Keep the end anchor so a buyer request appended to the footer is not hidden.
+const SUPPORT_BOT_SKILLBOX_FOOTER_PATTERN =
+  /^служба\s+заботы\s+Skillbox,?\s+с\s+\d{1,2}:\d{2}\s+до\s+\d{1,2}:\d{2}\s+по\s+мск\s*оставьте\s+отзыв\s+об\s+обучении\s+в\s+Skillbox\s*первое\s+занятие\s+по\s+английскому\s+за\s+\d{1,5}\s*₽\s*курс-знакомство\s+«как\s+учиться\s+в\s+Skillbox»\s*ответы\s+на\s+частые\s+вопросы\s+пользователей\s*пишите:\s*hello@skillbox\.ru$/iu;
+
+function classifyTechnicalTemplateSegments(segments: string[]): MachineReplyKind | null {
+  const antiSpam = segments.some((segment) => ANTISPAM_REJECTION_SEGMENT_PATTERN.test(segment)) &&
+    segments.some((segment) => ANTISPAM_RECOVERY_SEGMENT_PATTERN.test(segment)) &&
+    segments.some((segment) => /\bantispam@[a-z0-9.-]+\.[a-z]{2,}(?=$|\s)/iu.test(segment));
+  if (antiSpam && segments.every((segment) =>
+    isServiceAcknowledgementBoilerplateSegment(segment) ||
+    ANTISPAM_REJECTION_SEGMENT_PATTERN.test(segment) ||
+    ANTISPAM_RECOVERY_SEGMENT_PATTERN.test(segment))) {
+    return 'auto_reply';
+  }
+
+  const supportBot = segments.some((segment) => SUPPORT_BOT_IDENTITY_SEGMENT_PATTERN.test(segment)) &&
+    segments.some((segment) => SUPPORT_BOT_FORM_SEGMENT_PATTERN.test(segment));
+  if (supportBot && segments.every((segment) =>
+    isServiceAcknowledgementBoilerplateSegment(segment) ||
+    SUPPORT_BOT_IDENTITY_SEGMENT_PATTERN.test(segment) ||
+    SUPPORT_BOT_FORM_SEGMENT_PATTERN.test(segment) ||
+    SUPPORT_BOT_PARTNERSHIP_SEGMENT_PATTERN.test(segment) ||
+    SUPPORT_BOT_OPERATOR_SEGMENT_PATTERN.test(segment) ||
+    SUPPORT_BOT_SKILLBOX_FOOTER_PATTERN.test(segment))) {
+    return 'service_acknowledgement';
+  }
+  return null;
+}
+
 function normalizeServiceAcknowledgementSegment(rawSegment: string): string {
   return rawSegment
     .trim()
@@ -902,7 +972,11 @@ export function classifyMachineReply(
   const senderLocalPart = sender.split('@', 1)[0] ?? '';
   const subject = (email.subject ?? '').trim();
   const fullBody = getBodyText(email.body) || (email.content_preview ?? '');
-  const authoredBody = extractAuthoredReplyText(fullBody) || fullBody.trim();
+  // An empty authored part is not permission to classify the quoted history.
+  // In particular a forwarded/quoted support bot is not the human sender's
+  // own reply, even when it is the only text in the message.
+  const authoredBody = extractAuthoredReplyText(fullBody);
+  if (!authoredBody) return null;
 
   const deliverySubject = DELIVERY_FAILURE_SUBJECT_PATTERN.test(subject);
   const deliveryBody = DELIVERY_FAILURE_BODY_PATTERN.test(authoredBody);
@@ -915,9 +989,12 @@ export function classifyMachineReply(
   }
 
   const serviceReceipt = SERVICE_RECEIPT_PATTERN.test(authoredBody);
-  const serviceProcessing = SERVICE_PROCESSING_PATTERN.test(authoredBody);
   const serviceContext = SERVICE_CONTEXT_PATTERN.test(`${subject}\n${authoredBody}`);
   const serviceSegments = serviceAcknowledgementSegments(authoredBody);
+  const serviceProcessing = SERVICE_PROCESSING_PATTERN.test(authoredBody) ||
+    serviceSegments.some((segment) => SERVICE_ACK_PROCESSING_SEGMENT_PATTERN.test(segment));
+  const technicalTemplate = classifyTechnicalTemplateSegments(serviceSegments);
+  if (technicalTemplate) return technicalTemplate;
   // Some service templates never say "received" (GracieDigital). Require two
   // independent boilerplate signals, not just a human promise to reply/call.
   const receiptlessAcknowledgement =
@@ -937,6 +1014,13 @@ export function classifyMachineReply(
   // но здесь три независимых административных сигнала доказывают автоответ.
   if (hasFormalMailboxChangeNotification(subject, authoredBody)) {
     return 'auto_reply';
+  }
+
+  // A human can paste an automatic-response marker next to their own request.
+  // The early worker filter must not terminate that mixed message merely
+  // because the marker occurs in one of its first lines.
+  if (hasStructuredAutoReplyMarker(authoredBody) && hasHumanReplyContinuation(authoredBody)) {
+    return null;
   }
 
   if (isAutoReplyOrUnsubscribe(authoredBody)) {
@@ -1952,6 +2036,8 @@ export interface ClassifyOptions {
    * maximum of max(2, 1 + maxRetries) HTTP calls across the initial evaluation
    * and at most one semantic adjudication. Zero disables transport retries,
    * not the one required adjudication for an uncertain valid first response.
+   * A durable store may separately reserve one final recovery call after the
+   * three lifetime normal attempts; that call never has transport retries.
    */
   maxRetries?: number;
   briefText?: string | null;
@@ -1979,12 +2065,40 @@ const AI_REQUEST_TIMEOUT_MS = 45_000;
 interface ClassificationAttemptControl {
   adjudication?: boolean;
   budget?: { remaining: number };
+  finalRecovery?: boolean;
+}
+
+class QualificationAiBudgetExhaustedError extends Error {
+  constructor(reason: string) {
+    super(`AI classification failed after retries: ${reason}`);
+    this.name = 'QualificationAiBudgetExhaustedError';
+  }
 }
 
 function boundedClassificationRetries(maxRetries: number | undefined): number {
   return Number.isFinite(maxRetries)
     ? Math.max(0, Math.min(2, Math.floor(maxRetries!)))
     : 2;
+}
+
+function isExplicitRequestyNoCreditRejection(responseText: string): boolean {
+  let message = responseText.trim();
+  try {
+    const envelope: unknown = JSON.parse(message);
+    if (envelope && typeof envelope === 'object' && !Array.isArray(envelope)) {
+      const error = (envelope as { error?: unknown }).error;
+      const value = typeof error === 'string' ? error
+        : error && typeof error === 'object' && !Array.isArray(error)
+          ? (error as { message?: unknown }).message
+          : (envelope as { message?: unknown }).message;
+      if (typeof value !== 'string') return false;
+      message = value.trim();
+    }
+  } catch {
+    // Requesty can return the same explicit error as a plain-text body.
+  }
+  return /^Reached monthly spend limit for API key(?:[.!:]|$)/i.test(message) ||
+    /^insufficient (?:balance|credits?)[.!]?$/i.test(message);
 }
 
 function envNumber(name: string, fallback: number): number {
@@ -2427,7 +2541,10 @@ export async function classifyWithAI(
   // One initial call plus at most two retries, including invalid model output.
   // Durable worker recovery owns later attempts; no caller can create an
   // unbounded synchronous retry loop with NaN, Infinity or a large override.
-  const maxRetries = boundedClassificationRetries(options.maxRetries);
+  const maxRetries = control?.finalRecovery ? 0 : boundedClassificationRetries(options.maxRetries);
+  if (control?.finalRecovery && (!control.adjudication || !options.checkpointStore)) {
+    throw new Error('AI classification failed after retries: AI checkpoint unavailable: final recovery requires durable adjudication');
+  }
   const userMessage = buildUserMessage(ctx);
   const systemPrompt = buildSystemPrompt(briefText, leadCriteria, control?.adjudication);
   const maxTokens = Math.max(
@@ -2467,12 +2584,14 @@ export async function classifyWithAI(
       if (control.budget.remaining <= 0) {
         // A late valid-but-uncertain answer must not become not_lead merely
         // because transport retries left no room for the required adjudication.
-        throw new Error('AI classification failed after retries: automatic adjudication request budget exhausted');
+        throw new QualificationAiBudgetExhaustedError('automatic adjudication request budget exhausted');
       }
     }
     let leaseToken: string | null = null;
     if (options.checkpointStore) {
-      const reservation = await options.checkpointStore.reserve({ fingerprint, budgetFingerprint });
+      const reservation = control?.finalRecovery
+        ? await options.checkpointStore.reserveRecovery({ fingerprint, budgetFingerprint })
+        : await options.checkpointStore.reserve({ fingerprint, budgetFingerprint });
       if (reservation.state === 'cached') {
         try {
           return enforceCustomCriteriaPriority(parseAIResult(reservation.rawResponse), Boolean(leadCriteria?.trim()));
@@ -2484,7 +2603,8 @@ export async function classifyWithAI(
         throw new Error('AI classification failed after retries: AI checkpoint busy');
       }
       if (reservation.state === 'exhausted') {
-        throw new Error('AI classification failed after retries: AI paid attempt budget exhausted');
+        throw new QualificationAiBudgetExhaustedError(control?.finalRecovery
+          ? 'AI final paid attempt budget exhausted' : 'AI paid attempt budget exhausted');
       }
       leaseToken = reservation.leaseToken;
     }
@@ -2583,7 +2703,9 @@ export async function classifyWithAI(
     }
 
     const text = await response.text().catch(() => '');
-    await releaseCheckpoint(requestSignal.aborted ? 'response_body_timeout' : `http_${response.status}`);
+    const errorCode = response.status === 412 && isExplicitRequestyNoCreditRejection(text)
+      ? 'http_412_no_credit' : `http_${response.status}`;
+    await releaseCheckpoint(requestSignal.aborted ? 'response_body_timeout' : errorCode);
     if (requestSignal.aborted) {
       if (attempt < maxRetries) {
         await sleep(1500 * Math.pow(2, attempt));
@@ -2638,10 +2760,23 @@ function applyQualificationGuards(
     : normalizeDefaultLeadSignals(ctx, replyText, semanticResult);
 }
 
+function requireQualificationHistoryEvidence(ctx: ThreadContext, verdict: QualificationResult): void {
+  if (
+    ctx.historyFetchFailed && !ctx.lastOutbound && !verdict.machineReplyKind &&
+    !(verdict.isLead && !verdict.needsReview)
+  ) {
+    // Another assessment cannot reconstruct unavailable evidence. The final
+    // recovery path must retain the same guard as the ordinary first pass.
+    throw new Error(ctx.historyFetchFailureReason ||
+      'AI classification failed after retries: outbound history unavailable');
+  }
+}
+
 /**
  * Return a binary semantic verdict or throw a recoverable technical failure.
  * Uncertainty gets one fresh adjudication, not a manual-review queue or an
- * unbounded vote. Both passes share at most three HTTP requests by default.
+ * unbounded vote. Both passes share at most three normal HTTP requests by
+ * default; durable exhaustion permits one separately reserved final assessment.
  */
 export async function qualifyReply(
   campaignId: string,
@@ -2728,17 +2863,30 @@ export async function qualifyReply(
 
   const options = { ...aiOptions, briefText };
   const budget = { remaining: Math.max(2, 1 + boundedClassificationRetries(options.maxRetries)) };
-  const aiResult = await classifyWithAI(ctx, options, { budget });
-  const firstVerdict = applyQualificationGuards(ctx, replyText, options.leadCriteria, aiResult);
-  if (
-    ctx.historyFetchFailed && !ctx.lastOutbound && !firstVerdict.machineReplyKind &&
-    !(firstVerdict.isLead && !firstVerdict.needsReview)
-  ) {
-    // A second opinion cannot reconstruct history that the provider failed to
-    // deliver. Self-contained positives still work; do not turn missing data
-    // into a final negative merely because the reply only says "interesting".
-    throw new Error('AI classification failed after retries: outbound history unavailable');
+  const recoverFinalAssessment = async () => {
+    // This is the existing adjudication request, not a new model/prompt/key.
+    // Cached final output remains reusable after the fourth slot is consumed.
+    const assessment = await classifyWithAI(ctx, options, {
+      adjudication: true, finalRecovery: true, budget: { remaining: 1 },
+    });
+    const verdict = applyQualificationGuards(ctx, replyText, options.leadCriteria, assessment);
+    requireQualificationHistoryEvidence(ctx, verdict);
+    if (verdict.needsReview) {
+      // After three transport failures this can be the FIRST valid output.
+      // Do not invent a second successful assessment to force a negative.
+      throw new Error('AI classification failed after retries: AI final paid attempt budget exhausted: final automatic assessment did not return a binary verdict');
+    }
+    return { ...verdict, threadContext: ctx };
+  };
+  let aiResult: QualificationResult;
+  try {
+    aiResult = await classifyWithAI(ctx, options, { budget });
+  } catch (error) {
+    if (!(error instanceof QualificationAiBudgetExhaustedError) || !options.checkpointStore) throw error;
+    return recoverFinalAssessment();
   }
+  const firstVerdict = applyQualificationGuards(ctx, replyText, options.leadCriteria, aiResult);
+  requireQualificationHistoryEvidence(ctx, firstVerdict);
   // A deterministic proof (for example an explicit price request or matching
   // custom contact rule) can resolve the model's uncertainty without more cost.
   if (!firstVerdict.needsReview) {
@@ -2748,7 +2896,13 @@ export async function qualifyReply(
   // Reuse the exact proven context and criteria, but never feed the previous
   // model's reasoning back as evidence. A failed second assessment is still a
   // technical failure; it must not silently turn the first uncertainty negative.
-  const adjudicated = await classifyWithAI(ctx, options, { budget, adjudication: true });
+  let adjudicated: QualificationResult;
+  try {
+    adjudicated = await classifyWithAI(ctx, options, { budget, adjudication: true });
+  } catch (error) {
+    if (!(error instanceof QualificationAiBudgetExhaustedError) || !options.checkpointStore) throw error;
+    return recoverFinalAssessment();
+  }
   const finalVerdict = applyQualificationGuards(ctx, replyText, options.leadCriteria, adjudicated);
   if (!finalVerdict.needsReview) {
     return { ...finalVerdict, threadContext: ctx };

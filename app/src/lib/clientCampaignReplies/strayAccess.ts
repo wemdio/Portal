@@ -40,6 +40,7 @@
 import 'server-only';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { normalizeMailbox, resolveClientMailboxes } from './foreignMailboxFilter';
+import { isUnownedGeneratedQualificationRetry } from '@/lib/instantly/qualificationRecovery';
 
 export interface StrayAccess {
   /**
@@ -70,13 +71,15 @@ export async function resolveStrayAccess(params: {
   // 1. Письмо должно быть известно нам ИМЕННО как сирота этой кампании.
   const { data, error } = await supabaseInstantly
     .from('instantly_lead_qualifications')
-    .select('lead_email, eaccount')
+    // Explicit projection fails closed while the marker migration/cache is
+    // unavailable; a select('*') could silently omit the authorization fence.
+    .select('lead_email, eaccount, machine_reply_kind, status, ai_reason, ai_confidence, qualified_project_id, qualified_project_owner_proven')
     .eq('instantly_email_id', emailId)
     .eq('campaign_id', campaignId)
     .eq('reply_out_of_campaign', true)
     .limit(1)
     .maybeSingle();
-  if (error || !data) return null;
+  if (error || !data || data.machine_reply_kind != null || isUnownedGeneratedQualificationRetry(data)) return null;
 
   const row = data as { lead_email: string | null; eaccount: string | null };
 
