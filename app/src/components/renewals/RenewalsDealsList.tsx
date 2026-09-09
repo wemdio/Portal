@@ -13,13 +13,17 @@ import type { RenewalsStageDeals } from '@/lib/renewals/funnel';
  * группы приходят пропсом, а компонент отвечает только за показ.
  */
 
-/** Высота области прокрутки — под график воронки слева (340 px у EChart),
+/** Высота области прокрутки — под график воронки слева (400 px у EChart),
  *  чтобы блоки кончались на одной линии и список не растягивал страницу. */
-const LIST_HEIGHT_PX = 340;
+const LIST_HEIGHT_PX = 400;
 
 /** Порция строк на шаг прокрутки. Данные не обрезаются, ограничен только DOM. */
 const CHUNK = 60;
 const SCROLL_TAIL_PX = 400;
+
+/** Полоска сделок из секции «Вне пути»: янтарный, как у значков исхода
+ *  в строках ступеней, — чтобы блок читался как их продолжение. */
+const OUTCOME_ACCENT = '#f59e0b';
 
 const fmtMoney = (n: number) => `${Math.round(n).toLocaleString('ru-RU')} ₽`;
 
@@ -31,24 +35,44 @@ function stageColorVar(index: number): string {
 
 type Item =
   | { kind: 'header'; key: string; name: string; count: number; colorVar: string }
+  | { kind: 'outcomes-label'; key: string }
+  | { kind: 'outcome-header'; key: string; name: string; count: number }
   | { kind: 'deal'; deal: RenewalsStageDeals['deals'][number]; colorVar: string };
 
-function flatten(groups: RenewalsStageDeals[]): Item[] {
+function flatten(groups: RenewalsStageDeals[], outcomeGroups: RenewalsStageDeals[]): Item[] {
   const items: Item[] = [];
   groups.forEach((group, index) => {
     const colorVar = stageColorVar(index);
     items.push({ kind: 'header', key: String(group.statusId), name: group.name, count: group.deals.length, colorVar });
     for (const deal of group.deals) items.push({ kind: 'deal', deal, colorVar });
   });
+  if (outcomeGroups.length > 0) {
+    items.push({ kind: 'outcomes-label', key: 'out-of-path' });
+    outcomeGroups.forEach((group) => {
+      items.push({
+        kind: 'outcome-header',
+        key: `o-${group.statusId}`,
+        name: group.name,
+        count: group.deals.length,
+      });
+      for (const deal of group.deals) items.push({ kind: 'deal', deal, colorVar: OUTCOME_ACCENT });
+    });
+  }
   return items;
 }
 
-export default function RenewalsDealsList({ groups }: { groups: RenewalsStageDeals[] }) {
+export default function RenewalsDealsList({
+  groups,
+  outcomeGroups,
+}: {
+  groups: RenewalsStageDeals[];
+  outcomeGroups: RenewalsStageDeals[];
+}) {
   const [scrolled, setScrolled] = useState(CHUNK);
   const [openDeal, setOpenDeal] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const items = useMemo(() => flatten(groups), [groups]);
+  const items = useMemo(() => flatten(groups, outcomeGroups), [groups, outcomeGroups]);
   const shown = items.slice(0, scrolled);
   // Сбрасывать `scrolled` при смене групп не нужно: воронка грузится один раз
   // при открытии страницы и периодом не фильтруется (см. renewals/funnel/route.ts),
@@ -69,6 +93,7 @@ export default function RenewalsDealsList({ groups }: { groups: RenewalsStageDea
           слева, а она от периода не зависит. */}
       <p className="mb-2 text-[11px] text-zinc-400">
         Все сделки воронки, каждая — в той ступени, до которой дошла. Период не влияет. Клик открывает карточку.
+        Внизу отдельным блоком — сделки вне пути: где стоят сейчас.
       </p>
 
       {items.length === 0 ? (
@@ -88,6 +113,22 @@ export default function RenewalsDealsList({ groups }: { groups: RenewalsStageDea
                 key={`h-${item.key}`}
                 style={{ color: item.colorVar }}
                 className="sticky top-0 z-10 border-b border-zinc-100 bg-[var(--glass-rows)] px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider backdrop-blur"
+              >
+                {item.name} — {item.count}
+              </h4>
+            ) : item.kind === 'outcomes-label' ? (
+              /* Служебный разделитель между путём и исходами: не sticky, чтобы
+                 не залипать поверх заголовков исходов при прокрутке. */
+              <div
+                key={item.key}
+                className="border-t border-zinc-200 bg-zinc-50/60 px-2.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-400"
+              >
+                Вне пути
+              </div>
+            ) : item.kind === 'outcome-header' ? (
+              <h4
+                key={item.key}
+                className="sticky top-0 z-10 border-b border-zinc-100 bg-[var(--glass-rows)] px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-amber-700 backdrop-blur"
               >
                 {item.name} — {item.count}
               </h4>

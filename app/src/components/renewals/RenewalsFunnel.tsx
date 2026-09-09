@@ -180,7 +180,7 @@ export default function RenewalsFunnel() {
 
         {option ? (
           <div className="mx-auto w-full max-w-[680px]">
-            <EChart option={option} height={340} ariaLabel="Воронка вторичных продаж по этапам AMO" />
+            <EChart option={option} height={400} ariaLabel="Воронка вторичных продаж по этапам AMO" />
           </div>
         ) : null}
 
@@ -214,7 +214,9 @@ export default function RenewalsFunnel() {
         ) : null}
       </div>
 
-      {data && data.dealGroups.length > 0 ? <RenewalsDealsList groups={data.dealGroups} /> : null}
+      {data && (data.dealGroups.length > 0 || data.outcomeGroups.length > 0) ? (
+        <RenewalsDealsList groups={data.dealGroups} outcomeGroups={data.outcomeGroups} />
+      ) : null}
     </div>
   );
 }
