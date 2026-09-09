@@ -1350,8 +1350,21 @@ function DialogsTab({ campaignId }: {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <div className="flex items-center gap-2 flex-wrap">
+      {/*
+       * Две строки, а не одна: поиск с выгрузками сверху, фильтры снизу.
+       *
+       * Фильтров стало шесть, и в один ряд они не помещались — панель
+       * переносилась как попало, разрывая группы посередине: подпись «Тип:»
+       * оставалась на одной строке, а её кнопки уезжали на следующую.
+       *
+       * Каждая группа теперь отдельным блоком, который не разрывается: перенос
+       * идёт по границам групп, и подпись всегда рядом со своими кнопками.
+       */}
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          {/* Поле не растягиваем на весь экран: ник короткий, а строка в
+              полтора метра выглядит как поле для абзаца. */}
+          <div className="min-w-0 max-w-md flex-1">
           {/* Поиск стоит первым: когда ищут конкретного человека, фильтры не
               нужны, а листать три сотни диалогов руками — не вариант. */}
           <div className="relative">
@@ -1361,7 +1374,7 @@ function DialogsTab({ campaignId }: {
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Поиск по нику или ID"
               aria-label="Поиск диалога по никнейму или числовому ID"
-              className="w-56 rounded-full border border-gray-200 bg-white py-1.5 pl-8 pr-7 text-xs outline-none transition focus:border-indigo-400"
+              className="w-full rounded-full border border-gray-200 bg-white py-1.5 pl-8 pr-7 text-xs outline-none transition focus:border-indigo-400"
             />
             {search && (
               <button
@@ -1374,36 +1387,55 @@ function DialogsTab({ campaignId }: {
               </button>
             )}
           </div>
+          </div>
+          {/* Выгрузки — в одной строке с поиском: обе про весь список целиком,
+              а не про отбор, и внизу они мешались бы фильтрам. */}
+          <button type="button" onClick={() => void exportDialogs('json')} className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
+            <Download className="h-3.5 w-3.5" /> JSON
+          </button>
+          <button type="button" onClick={() => void exportDialogs('html')} className="inline-flex shrink-0 items-center gap-1 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
+            <Download className="h-3.5 w-3.5" /> HTML
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="flex items-center gap-1">
           <span className="text-xs text-gray-500">Статус:</span>
           {['', 'none', 'lead', 'not_lead', 'later'].map(s => (
             <button key={s} type="button" onClick={() => { setFilterStatus(s); setOffset(0); }}
-              className={`rounded-full px-4 py-1.5 text-xs font-medium transition border cursor-pointer ${filterStatus === s ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
+              className={`rounded-full px-3 py-1.5 text-xs font-medium transition border cursor-pointer ${filterStatus === s ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
               {s ? DIALOG_STATUS_LABELS[s]?.label : 'Все'}
             </button>
           ))}
-          <span className="ml-2 text-xs text-gray-500">Отправка:</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-gray-500">Отправка:</span>
           {[
             { id: 'all', label: 'Все' },
             { id: 'enabled', label: 'Разрешено' },
             { id: 'disabled', label: 'Запрещено' },
           ].map(s => (
             <button key={s.id} type="button" onClick={() => { setFilterCanSend(s.id as typeof filterCanSend); setOffset(0); }}
-              className={`rounded-full px-4 py-1.5 text-xs font-medium transition border cursor-pointer ${filterCanSend === s.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
+              className={`rounded-full px-3 py-1.5 text-xs font-medium transition border cursor-pointer ${filterCanSend === s.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
               {s.label}
             </button>
           ))}
-          <span className="ml-2 text-xs text-gray-500">Тип:</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-gray-500">Тип:</span>
           {[
             { id: 'all', label: 'Все' },
             { id: 'users', label: 'Люди' },
             { id: 'bots', label: 'Боты' },
           ].map(s => (
             <button key={s.id} type="button" onClick={() => { setFilterAudience(s.id as typeof filterAudience); setOffset(0); }}
-              className={`rounded-full px-4 py-1.5 text-xs font-medium transition border cursor-pointer ${filterAudience === s.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
+              className={`rounded-full px-3 py-1.5 text-xs font-medium transition border cursor-pointer ${filterAudience === s.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
               {s.label}
             </button>
           ))}
-          <span className="ml-2 text-xs text-gray-500">Сообщений:</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-gray-500">Сообщений:</span>
           {[
             { id: 'all', label: 'Любое количество' },
             { id: 'one', label: '1 сообщение' },
@@ -1413,7 +1445,7 @@ function DialogsTab({ campaignId }: {
               title={s.id === 'one'
                 ? 'Мы написали, ответа не было'
                 : s.id === 'many' ? 'Разговор завязался — есть хотя бы один ответ' : undefined}
-              className={`rounded-full px-4 py-1.5 text-xs font-medium transition border cursor-pointer ${filterMessages === s.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
+              className={`rounded-full px-3 py-1.5 text-xs font-medium transition border cursor-pointer ${filterMessages === s.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
               {s.label}
             </button>
           ))}
@@ -1424,9 +1456,10 @@ function DialogsTab({ campaignId }: {
           {/* Фильтр по базе: диалогов набирается много, а смотрят их обычно по
               одной гипотезе — какая как отвечает. Показываем, только когда баз
               больше одной: с единственной выбирать не из чего. */}
+        </div>
           {bases.length > 1 && (
-            <>
-              <span className="ml-2 text-xs text-gray-500">База:</span>
+            <div className="flex items-center gap-1">
+              <span className="text-xs text-gray-500">База:</span>
               <select
                 value={filterBaseId}
                 onChange={(e) => { setFilterBaseId(e.target.value); setOffset(0); }}
@@ -1439,11 +1472,11 @@ function DialogsTab({ campaignId }: {
                   <option key={b.id} value={b.id}>{b.name}</option>
                 ))}
               </select>
-            </>
+            </div>
           )}
           {accounts.length > 1 && (
-            <>
-              <span className="ml-2 text-xs text-gray-500">Аккаунт:</span>
+            <div className="flex items-center gap-1">
+              <span className="text-xs text-gray-500">Аккаунт:</span>
               <select
                 value={filterAccountId}
                 onChange={(e) => { setFilterAccountId(e.target.value); setOffset(0); }}
@@ -1456,16 +1489,8 @@ function DialogsTab({ campaignId }: {
                   <option key={a.id} value={a.id}>{accountLabel(a) ?? a.session_name}</option>
                 ))}
               </select>
-            </>
+            </div>
           )}
-        </div>
-        <div className="flex gap-2">
-          <button type="button" onClick={() => void exportDialogs('json')} className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
-            <Download className="h-3.5 w-3.5" /> JSON
-          </button>
-          <button type="button" onClick={() => void exportDialogs('html')} className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
-            <Download className="h-3.5 w-3.5" /> HTML
-          </button>
         </div>
       </div>
 
