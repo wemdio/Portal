@@ -12,6 +12,8 @@ export type QualificationAiReservation =
 /** Successful RAW output is reparsed and guarded on every replay. */
 export interface QualificationAiCheckpointStore {
   reserve(input: { fingerprint: string; budgetFingerprint: string }): Promise<QualificationAiReservation>;
+  /** One final-assessment allowance after the normal lifetime budget, never a reset. */
+  reserveRecovery(input: { fingerprint: string; budgetFingerprint: string }): Promise<QualificationAiReservation>;
   complete(input: { fingerprint: string; leaseToken: string; rawResponse: string }): Promise<void>;
   release(input: { fingerprint: string; leaseToken: string; errorCode: string }): Promise<void>;
 }
@@ -44,21 +46,26 @@ export function createQualificationAiCheckpointStore(
       throw new Error(`${CHECKPOINT_FAILURE}: durable accounting could not be confirmed`);
     }
   };
+  const reserve = async (
+    rpcName: string,
+    { fingerprint, budgetFingerprint }: { fingerprint: string; budgetFingerprint: string },
+  ): Promise<QualificationAiReservation> => {
+    const result = await call(rpcName, {
+      p_checkpoint_key: scopedKey(fingerprint),
+      p_budget_key: scopedKey(budgetFingerprint),
+    });
+    if (result.state === 'cached' && typeof result.raw_response === 'string') {
+      return { state: 'cached', rawResponse: result.raw_response };
+    }
+    if (result.state === 'reserved' && typeof result.lease_token === 'string') {
+      return { state: 'reserved', leaseToken: result.lease_token };
+    }
+    if (result.state === 'busy' || result.state === 'exhausted') return { state: result.state };
+    throw new Error(`${CHECKPOINT_FAILURE}: unrecognized reservation`);
+  };
   return {
-    async reserve({ fingerprint, budgetFingerprint }) {
-      const result = await call('reserve_instantly_qualification_ai', {
-        p_checkpoint_key: scopedKey(fingerprint),
-        p_budget_key: scopedKey(budgetFingerprint),
-      });
-      if (result.state === 'cached' && typeof result.raw_response === 'string') {
-        return { state: 'cached', rawResponse: result.raw_response };
-      }
-      if (result.state === 'reserved' && typeof result.lease_token === 'string') {
-        return { state: 'reserved', leaseToken: result.lease_token };
-      }
-      if (result.state === 'busy' || result.state === 'exhausted') return { state: result.state };
-      throw new Error(`${CHECKPOINT_FAILURE}: unrecognized reservation`);
-    },
+    reserve: input => reserve('reserve_instantly_qualification_ai', input),
+    reserveRecovery: input => reserve('reserve_instantly_qualification_ai_recovery', input),
     async complete({ fingerprint, leaseToken, rawResponse }) {
       const result = await call('finish_instantly_qualification_ai', {
         p_checkpoint_key: scopedKey(fingerprint), p_lease_token: leaseToken,

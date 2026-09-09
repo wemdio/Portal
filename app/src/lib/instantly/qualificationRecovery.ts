@@ -1,11 +1,24 @@
 import type { Email } from './types';
 import { getEmailRecipients } from '@/lib/clientCampaignReplies/participants';
+import { readInstantlyEmailReadDeferral } from './emailReadDeferral';
 
 export interface QualificationRecoveryState {
+  id?: string | null;
   recovery_attempts?: number | null;
   recovery_failure_kind?: string | null;
   recovery_failure_count?: number | null;
   recovery_use_snapshot?: boolean | null;
+}
+
+/** This unhandled cohort may become an ownerless machine disposition. Do not
+ * authorize delivery against its temporary live-campaign attribution while
+ * the worker is proving ownership; finalized legacy/proven rows are unchanged. */
+export function isUnownedGeneratedQualificationRetry(row: Record<string, unknown>): boolean {
+  return row.qualified_project_owner_proven !== true && row.qualified_project_id == null &&
+    row.ai_confidence === 0 &&
+    ['pending', 'processing', 'needs_review', 'error'].includes(String(row.status ?? '')) &&
+    typeof row.ai_reason === 'string' &&
+    /^(?:Автоматическая повторная квалификация:|Не удалось однозначно определить проект-владельца ответа:)/iu.test(row.ai_reason);
 }
 
 /** Scheduling state is durable; it is never a business verdict or a paid attempt. */
@@ -15,22 +28,42 @@ export function qualificationRecoveryBackoff(
   nowMs: number,
   minimumDelayMs: number,
 ) {
-  const kind = /AI paid attempt budget exhausted/i.test(message) ? 'ai_budget_exhausted'
-    : /ownership evidence checkpoint blocked/i.test(message) ? 'evidence_blocked'
-      : /recovery source unavailable/i.test(message) ? 'source_missing'
-        : /Instantly email read deferred|\b429\b/i.test(message) ? 'provider_rate_limit'
-          : /\b402\b|balance|credits|payment required/i.test(message) ? 'provider_billing'
-            : /checkpoint (?:busy|unavailable)/i.test(message) ? 'checkpoint_unavailable'
-              : /ownership|page budget/i.test(message) ? 'ownership'
-                : 'dependency_unavailable';
+  const readDeferral = readInstantlyEmailReadDeferral(message);
+  if (readDeferral?.reason === 'budget') {
+    // Admission exhaustion means no LIST /emails attempt reached Instantly.
+    // It must not accumulate hours of failure backoff, or inherit a slow
+    // ownership lane's 15-minute minimum. The atomic DB gate still enforces
+    // all 18/min and recovery 6/min reservations on every eventual attempt.
+    // Ten seconds avoids subsecond retry churn; the rolling window is 60s.
+    // Stable row jitter spreads due dates without changing after a restart.
+    let hash = 0;
+    for (const character of previous.id ?? '') hash = (Math.imul(hash, 31) + character.charCodeAt(0)) >>> 0;
+    const delay = Math.max(10_000, Math.min(60_000, readDeferral.retryAfterMs)) + hash % 5_001;
+    return {
+      recovery_failure_kind: 'local_read_quota',
+      recovery_failure_count: 0,
+      recovery_next_at: new Date(nowMs + delay).toISOString(),
+    };
+  }
+  const kind = /AI final paid attempt budget exhausted/i.test(message) ? 'ai_final_budget_exhausted'
+    : /AI paid attempt budget exhausted/i.test(message) ? 'ai_budget_exhausted'
+      : /ownership evidence checkpoint blocked/i.test(message) ? 'evidence_blocked'
+        : /recovery source unavailable/i.test(message) ? 'source_missing'
+          : readDeferral?.reason === 'storage_unavailable' ? 'read_budget_unavailable'
+            : readDeferral?.reason === 'cooldown' || /\b429\b/i.test(message) ? 'provider_rate_limit'
+              : /\b402\b|payment required|insufficient (?:balance|credits?)\b|balance is too low|out of credits/i.test(message) ||
+                (/\b412\b/i.test(message) && /\bReached monthly spend limit for API key(?:[.!:"']|$)/i.test(message)) ? 'provider_billing'
+                : /checkpoint (?:busy|unavailable)/i.test(message) ? 'checkpoint_unavailable'
+                  : /ownership|page budget/i.test(message) ? 'ownership'
+                    : 'dependency_unavailable';
   const count = previous.recovery_failure_kind === kind
     ? Math.min(30, Math.max(0, previous.recovery_failure_count ?? 0) + 1) : 1;
-  const blocked = ['ai_budget_exhausted', 'evidence_blocked', 'source_missing'].includes(kind);
+  const blocked = ['ai_budget_exhausted', 'ai_final_budget_exhausted', 'evidence_blocked', 'source_missing'].includes(kind);
   // Cheap rechecks may discover changed source/owner/input; they cannot reset
   // the durable AI budget. There is no daily paid replay allowance.
   const delay = blocked ? 24 * 60 * 60_000
     : Math.min(6 * 60 * 60_000, 2 * 60_000 * 2 ** Math.min(8, count - 1));
-  const providerDelay = Number(message.match(/retry after (\d+) ms/i)?.[1] ?? 0);
+  const providerDelay = readDeferral?.retryAfterMs ?? Number(message.match(/retry after (\d+) ms/i)?.[1] ?? 0);
   return {
     recovery_failure_kind: kind,
     recovery_failure_count: count,

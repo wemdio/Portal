@@ -484,6 +484,7 @@ async function readStrayReplyItems(
       'id, campaign_id, campaign_name, lead_email, lead_name, company_name, thread_id, reply_subject, reply_preview, reply_body, status, ai_reason, instantly_email_id, reply_timestamp, created_at, eaccount',
     )
     .eq('reply_out_of_campaign', true)
+    .is('machine_reply_kind', null)
     .in('campaign_id', campaignIds)
     .or(`reply_timestamp.gte.${sinceIso},created_at.gte.${sinceIso}`)
     .order('created_at', { ascending: false })
