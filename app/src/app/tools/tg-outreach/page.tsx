@@ -531,6 +531,21 @@ function SettingsTab({ campaign, onSave }: {
           </div>
           <div className="space-y-1">
             <RangeField label="Пауза между аккаунтами (сек)" value={telegram.account_loop_delay_range} onChange={v => setTG('account_loop_delay_range', v)} />
+            {/* Сколько аккаунтов работают одновременно. Ждать друг друга им
+                незачем — у каждого своя сессия и свой прокси; ограничение
+                упирается в прокси-хост, а не в Telegram. */}
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-gray-600">Аккаунтов одновременно</span>
+              <input
+                type="number"
+                min={1}
+                max={20}
+                value={telegram.account_concurrency ?? 6}
+                onChange={(e) => setTG('account_concurrency', Math.min(Math.max(Number(e.target.value) || 1, 1), 20))}
+                title="Сколько аккаунтов кампания обходит параллельно. Больше — быстрее круг, но выше нагрузка на прокси-хост."
+                className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400"
+              />
+            </label>
             <p className="text-[10px] text-gray-400">
               Разбежка между заходами разных аккаунтов, чтобы они не работали гурьбой.
             </p>

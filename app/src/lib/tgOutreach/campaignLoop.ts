@@ -198,6 +198,15 @@ const PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS =
  * остаётся у повторной попытки по свежему соединению. Цена ошибки — одно
  * лишнее переподключение в полторы секунды вместо трёх минут простоя.
  */
+/**
+ * Сколько аккаунтов обходим одновременно, если кампания не задала своё число.
+ *
+ * Шесть — осторожная середина: круг по полусотне аккаунтов сжимается с десяти
+ * часов примерно до полутора, а на прокси-хост приходится столько же
+ * одновременных соединений, сколько бывало при ручной проверке партии.
+ */
+const DEFAULT_ACCOUNT_CONCURRENCY = Number(process.env.TG_OUTREACH_ACCOUNT_CONCURRENCY) || 6;
+
 const FIRST_DIALOGS_PROBE_TIMEOUT_MS =
   Number(process.env.TG_OUTREACH_FIRST_PROBE_TIMEOUT_MS) || 25_000;
 
@@ -1776,6 +1785,25 @@ export async function runCampaignLoop(
    * попробовать снова, но не через десять минут.
    */
   let claimedContacts = new Set<string>();
+
+  /**
+   * Замок вокруг выбора контактов из очереди.
+   *
+   * Аккаунты идут параллельно, а между чтением очереди и пометкой «занято»
+   * есть обращение к базе. Без замка двое успевают прочитать одну и ту же
+   * порцию и написать одному человеку с разных номеров — для получателя это
+   * очевидная рассылка, а для нас сожжённый контакт и лишняя жалоба.
+   *
+   * Держит он только выборку: отправка идёт параллельно, ради чего всё и
+   * затевалось. Очередь из промисов вместо настоящего мьютекса потому, что
+   * поток один — достаточно выстроить желающих в цепочку.
+   */
+  let claimChain: Promise<unknown> = Promise.resolve();
+  const withClaimLock = <T,>(fn: () => Promise<T>): Promise<T> => {
+    const next = claimChain.then(fn, fn);
+    claimChain = next.catch(() => {});
+    return next;
+  };
   /** После скольких пустых кругов подряд уводим аккаунт на паузу. */
   const RESOLVE_BLOCKED_LIMIT = 2;
   // Stays true while we're inside a sleep_periods window so we can emit a
@@ -1811,9 +1839,36 @@ export async function runCampaignLoop(
 
       let tlSchemaErrorCount = 0;
       claimedContacts = new Set<string>();
-      log('info', `Начинаю обход ${clients.length} аккаунтов`);
 
-      for (const entry of clients) {
+      /**
+       * Аккаунты обходим параллельно, а не по одному.
+       *
+       * Последовательный обход стоил кампании суток: 49 аккаунтов по ~190 с
+       * работы и ~570 с паузы после каждого — круг длиной 10 часов, из которых
+       * почти 8 приходилось на паузы. Аккаунт отправлял свои три письма раз в
+       * полсуток, при том что живёт он около тридцати писем и вопрос всегда
+       * «успеть до заморозки».
+       *
+       * Ждать друг друга аккаунтам незачем: у каждого своя сессия и свой прокси
+       * со своим IP, и Telegram видит независимые подключения. Пауза защищает
+       * от всплеска активности ОДНОГО аккаунта — поэтому она осталась там же,
+       * между кругами одного и того же аккаунта, а не между разными.
+       *
+       * Одновременность ограничена: полсотни параллельных MTProto-соединений
+       * через один прокси-хост упрутся уже в него, а не в Telegram.
+       */
+      const concurrency = Math.min(
+        Math.max(Number(tg.account_concurrency) || DEFAULT_ACCOUNT_CONCURRENCY, 1),
+        clients.length || 1,
+      );
+      log('info', `Начинаю обход ${clients.length} аккаунтов, одновременно по ${concurrency}`);
+
+      let cursor = 0;
+      const runAccountWorker = async (): Promise<void> => {
+      for (;;) {
+        const entry = clients[cursor];
+        if (!entry || shouldStop()) return;
+        cursor += 1;
         const { account } = entry;
         // `let`, not destructured const: if getDialogs wedges we rebuild the
         // client mid-iteration and must point every downstream call (handleChat,
@@ -2451,6 +2506,7 @@ export async function runCampaignLoop(
             onProgress: tick,
             gapMs: randomRange(tg.read_reply_delay_range) * 1000,
             claimed: claimedContacts,
+            claimLock: withClaimLock,
           });
           if (ft.sent || ft.skipped || ft.postponed) {
             log(
@@ -2526,6 +2582,9 @@ export async function runCampaignLoop(
         await interruptibleSleep(accountDelay, shouldStop);
         tick();
       }
+      };
+
+      await Promise.all(Array.from({ length: concurrency }, () => runAccountWorker()));
 
       if (tlSchemaErrorCount > 0 && tlSchemaErrorCount >= clients.length) {
         const tlBackoff = 300_000;
