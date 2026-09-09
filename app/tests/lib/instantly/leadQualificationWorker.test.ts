@@ -1033,9 +1033,13 @@ describe('pollAndQualifyReplies', () => {
     expect(boardRows[0]).not.toHaveProperty('quality');
     expect(boardRows[0]).not.toHaveProperty('comment');
     expect(boardRows[0]).not.toHaveProperty('taken');
-    // Ссылка на доску ушла в TG-алерт
+    // Ссылка и те же обогащённые контакты ушли в TG-алерт.
     expect(sendLeadTelegramAlert).toHaveBeenCalledWith(
-      expect.objectContaining({ boardLink: expect.stringMatching(/\/leads-board\/lb_/) }),
+      expect.objectContaining({
+        boardLink: expect.stringMatching(/\/leads-board\/lb_/),
+        phone: '+7 900 111-22-33',
+        website: 'acme.ru',
+      }),
     );
   });
 
@@ -4741,6 +4745,9 @@ describe('pollAndQualifyReplies', () => {
       const newerMissingLead = ownershipReviewRow({
         id: 'newer-missing-alert',
         status: 'lead',
+        reply_preview: 'Давайте обсудим предложение.',
+        reply_body: 'Давайте обсудим предложение.\n' + 'Подробности. '.repeat(40)
+          + '\nС уважением,\nИван\nТелефон: +7 900 111-22-33\nhttps://acme.ru',
         created_at: '2026-08-24T17:00:00.000Z',
         updated_at: '2026-08-24T17:00:00.000Z',
       });
@@ -4792,6 +4799,8 @@ describe('pollAndQualifyReplies', () => {
       expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
       expect(sendLeadTelegramAlert).toHaveBeenCalledWith(expect.objectContaining({
         qualificationId: 'newer-missing-alert',
+        phone: '+7 900 111-22-33',
+        website: 'https://acme.ru',
       }));
       expect(mockMainDb!.getRows('deadline_notification_log')).toEqual(
         expect.arrayContaining([
@@ -4812,6 +4821,7 @@ describe('pollAndQualifyReplies', () => {
       const managedLead = ownershipReviewRow({
         id: 'managed-missing-alert',
         status: 'lead',
+        reply_body: 'Мой телефон +7 900 111-22-33.\nС уважением,\nИван\nhttps://old.acme.ru',
         created_at: '2026-08-24T17:00:00.000Z',
         updated_at: '2026-08-24T17:00:00.000Z',
       });
@@ -4822,6 +4832,12 @@ describe('pollAndQualifyReplies', () => {
           ],
           project_period_instantly_campaigns: [],
           instantly_lead_qualifications: [selfServeLead, managedLead],
+          project_lead_board_rows: [
+            // Same qualification under an unrelated project must not supply contacts.
+            { qualification_id: 'managed-missing-alert', project_id: 'other-project', phone: '+7 900 000-00-01', website: 'wrong.ru' },
+            // Guest cleared phone and edited site: the alert respects both changes.
+            { qualification_id: 'managed-missing-alert', project_id: 'project-1', phone: null, website: 'edited.acme.ru' },
+          ],
         },
       });
       mockMainDb = createMockSupabase({
@@ -4851,6 +4867,8 @@ describe('pollAndQualifyReplies', () => {
       expect(recovered).toBe(1);
       expect(sendLeadTelegramAlert).toHaveBeenCalledWith(expect.objectContaining({
         qualificationId: 'managed-missing-alert',
+        phone: null,
+        website: 'edited.acme.ru',
       }));
       expect(mockMainDb!.getRows('deadline_notification_log')).toEqual([
         expect.objectContaining({ entity_id: 'managed-missing-alert', tg_sent: true }),

@@ -13,6 +13,8 @@ export interface LeadTelegramAlertData {
   leadEmail: string;
   leadName: string | null;
   companyName: string | null;
+  phone?: string | null;
+  website?: string | null;
   campaignName: string | null;
   clientName: string | null;
   specialistMentions: LeadTelegramSpecialistMention[];
@@ -73,12 +75,24 @@ function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;');
 }
 
+/** Limit raw text, never assembled HTML or a partially escaped entity. */
+function clip(text: string, limit: number): string {
+  if (limit <= 0) return '';
+  if (text.length <= limit) return text;
+  return text.slice(0, Math.max(0, limit - 1)).replace(/[\uD800-\uDBFF]$/, '') + '…';
+}
+
+function visibleLength(html: string): number {
+  // Only the tags/entities generated in this module occur before decoding.
+  return html.replace(/<[^>]*>/g, '').replace(/&(?:amp|lt|gt|quot);/g, '_').length;
+}
+
 function normalizeUsername(username: string | null): string | null {
   const value = username?.trim().replace(/^@+/, '');
   return value || null;
 }
 
-function mentionSpecialist(specialist: LeadTelegramSpecialistMention): string {
+function mentionSpecialist(specialist: LeadTelegramSpecialistMention, labelLimit: number): string {
   // Пинг по числовому telegram_id НАДЁЖНЕЕ, чем @username. Ник кэшируется в
   // telegram_links при линковке и устаревает: сменил ник или даже регистр —
   // @упоминание перестаёт пинговать, хотя человек в группе. Инцидент Илианы
@@ -90,19 +104,22 @@ function mentionSpecialist(specialist: LeadTelegramSpecialistMention): string {
     normalizeUsername(specialist.telegramUsername) ||
     'Специалист';
   if (specialist.telegramId) {
-    return `<a href="tg://user?id=${escapeHtml(String(specialist.telegramId))}">${escapeHtml(name)}</a>`;
+    return `<a href="tg://user?id=${escapeHtml(String(specialist.telegramId))}">${escapeHtml(clip(name, labelLimit))}</a>`;
   }
   const username = normalizeUsername(specialist.telegramUsername);
-  if (username) return `@${escapeHtml(username)}`;
-  return escapeHtml(name);
+  if (username) return `@${escapeHtml(clip(username, 64))}`;
+  return escapeHtml(clip(name, labelLimit));
 }
 
 function buildMessage(data: LeadTelegramAlertData): string {
   const contactLabel = data.leadName
-    ? `${data.leadName} (${data.leadEmail})`
-    : data.leadEmail;
+    ? `${clip(data.leadName, 160)} (${clip(data.leadEmail, 320)})`
+    : clip(data.leadEmail, 320);
+  // The normal owner is one user. Legacy full-name matches may yield several:
+  // shorten display labels, not numeric ping targets, so contacts still fit.
+  const mentionLabelLimit = Math.max(1, Math.min(120, Math.floor(800 / Math.max(1, data.specialistMentions.length)) - 2));
   const mentions = data.specialistMentions.length
-    ? data.specialistMentions.map(mentionSpecialist).join(', ')
+    ? data.specialistMentions.map((specialist) => mentionSpecialist(specialist, mentionLabelLimit)).join(', ')
     : 'ответственный специалист не найден';
 
   const lines: string[] = [
@@ -112,31 +129,35 @@ function buildMessage(data: LeadTelegramAlertData): string {
     `<b>Контакт:</b> ${escapeHtml(contactLabel)}`,
   ];
 
-  if (data.companyName) lines.push(`<b>Компания:</b> ${escapeHtml(data.companyName)}`);
-  if (data.clientName) lines.push(`<b>Клиент Portal:</b> ${escapeHtml(data.clientName)}`);
-  if (data.campaignName) lines.push(`<b>Кампания:</b> ${escapeHtml(data.campaignName)}`);
-  if (data.replySubject) lines.push(`<b>Тема:</b> ${escapeHtml(data.replySubject)}`);
+  if (data.companyName) lines.push(`<b>Компания:</b> ${escapeHtml(clip(data.companyName, 200))}`);
+  if (data.phone?.trim()) lines.push(`<b>Телефон:</b> ${escapeHtml(clip(data.phone.trim(), 200))}`);
+  if (data.website?.trim()) lines.push(`<b>Сайт:</b> ${escapeHtml(clip(data.website.trim(), 300))}`);
+  if (data.clientName) lines.push(`<b>Клиент Portal:</b> ${escapeHtml(clip(data.clientName, 200))}`);
+  if (data.campaignName) lines.push(`<b>Кампания:</b> ${escapeHtml(clip(data.campaignName, 300))}`);
+  if (data.replySubject) lines.push(`<b>Тема:</b> ${escapeHtml(clip(data.replySubject, 300))}`);
+
+  // Reserve the durable table link and qualification ID before fitting prose.
+  const footer: string[] = [];
+  if (data.boardLink) footer.push('', `📋 <a href="${escapeHtml(data.boardLink)}">Все лиды проекта</a>`);
+  footer.push('', `<code>${escapeHtml(data.qualificationId)}</code>`);
+  const remaining = () => Math.max(0, 4096 - visibleLength([...lines, ...footer].join('\n')));
+  const reason = data.aiReason ? clip(data.aiReason, Math.min(700, Math.max(0, remaining() - 7))) : '';
 
   if (data.replyPreview) {
-    lines.push('');
-    lines.push('<b>Ответ:</b>');
-    lines.push(`<pre>${escapeHtml(data.replyPreview.slice(0, 1200))}</pre>`);
+    const budget = Math.min(1200, Math.max(0, remaining() - (reason ? reason.length + 7 : 0) - 10));
+    if (budget > 0) {
+      lines.push('');
+      lines.push('<b>Ответ:</b>');
+      lines.push(`<pre>${escapeHtml(clip(data.replyPreview, budget))}</pre>`);
+    }
   }
 
-  if (data.aiReason) {
+  if (reason) {
     lines.push('');
-    lines.push(`<b>AI:</b> ${escapeHtml(data.aiReason)}`);
+    lines.push(`<b>AI:</b> ${escapeHtml(reason)}`);
   }
 
-  if (data.boardLink) {
-    lines.push('');
-    lines.push(`📋 <a href="${escapeHtml(data.boardLink)}">Все лиды проекта</a>`);
-  }
-
-  lines.push('');
-  lines.push(`<code>${escapeHtml(data.qualificationId)}</code>`);
-
-  return lines.join('\n');
+  return [...lines, ...footer].join('\n');
 }
 
 export async function sendLeadTelegramAlert(

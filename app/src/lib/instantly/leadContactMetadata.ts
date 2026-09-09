@@ -12,23 +12,56 @@ export interface LeadContactMetadata {
 const COMPANY_KEYS = ['company_name', 'company', 'organization', 'organization_name',
   'organisation', 'organisation_name', 'business_name', 'legal_name',
   'компания', 'название компании', 'наименование компании', 'организация',
-  'название организации', 'наименование организации', 'название'];
-const PHONE_KEYS = ['phone', 'phone_number', 'phone_numbers', 'telephone', 'mobile',
+  'название организации', 'наименование организации', 'название', 'наименование',
+  'фирма', 'предприятие', 'brand', 'brand_name', 'бренд', 'employer_name', 'account_name',
+  'полное наименование', 'сокращенное наименование', 'краткое наименование'];
+const PHONE_KEYS = ['phone', 'phones', 'phone_number', 'phone_numbers', 'telephone', 'mobile',
   'mobile_phone', 'contact_phone', 'company_phone', 'телефон', 'телефоны',
   'номер телефона', 'телефон компании', 'телефон контакта', 'телефон ЛПР', 'мобильный',
-  'мобильный телефон', 'основной телефон'];
+  'мобильный телефон', 'основной телефон', 'tel', 'cell', 'cellphone', 'тел', 'моб',
+  'сотовый', 'рабочий телефон', 'контактный телефон'];
 const WEBSITE_KEYS = ['website', 'company_website', 'website_url', 'company_url',
-  'site', 'url', 'web_site', 'сайт',
-  'сайт компании', 'ссылка на сайт'];
+  'site', 'url', 'web_site', 'web', 'www', 'homepage', 'сайт',
+  'сайт компании', 'ссылка на сайт', 'веб-сайт', 'интернет-сайт'];
 const DOMAIN_KEYS = ['company_domain', 'domain', 'домен', 'домен компании'];
 const NON_COMPANY_DOMAINS = ['linkedin.com', 'facebook.com', 'instagram.com', 'twitter.com',
   'x.com', 'youtube.com', 'youtu.be', 't.me', 'telegram.me', 'wa.me', 'whatsapp.com',
   'vk.com', 'ok.ru', 'max.ru', 'bit.ly', 'tinyurl.com', 'goo.gl', 'clck.ru'];
 
-const normalizeKey = (value: string) => value.normalize('NFKC').toLowerCase().replace(/[^a-zа-яё0-9]/g, '').replace(/\d+$/, '');
+const normalizeKey = (value: string) => value.replace(/№/g, '').normalize('NFKC').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]/g, '').replace(/\d+$/, '');
 const normalizeEmail = (value: unknown) => typeof value === 'string' ? value.trim().toLowerCase() : '';
 const record = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+
+type ContactField = 'company' | 'phone' | 'website' | 'domain';
+const ENTITY_WORD = /^(?:company|companies|organization|organisation|business|firm|brand|employer|компания|компании|организация|организации|фирма|фирмы|предприятие|предприятия|бренд|бренда|работодатель)$/;
+const PHONE_WORD = /^(?:phone|phones|telephone|telephones|tel|mobile|cell|cellphone|телефон|телефоны|телефона|телефонов|тел|моб|мобильный|мобильного|мобильные|сотовый|сотового)$/;
+const WEBSITE_WORD = /^(?:website|websites|site|sites|homepage|url|urls|web|www|сайт|сайты|сайта|сайтов|вебсайт|вебсайта)$/;
+const DOMAIN_WORD = /^(?:domain|domains|домен|домены|домена|доменов)$/;
+const SOURCE_WORD = /^(?:apollo|sbis|сбис|2gis|2гис|dadata|дадата|hh|ru|en|рус|англ)$/;
+const COMMON_MODIFIER = /^(?:primary|secondary|main|additional|official|verified|valid|основной|основная|основное|основные|дополнительный|дополнительные|официальный|официальная|официальное|проверенный|проверенные|проверено|номер|no|num|\d+)$/;
+const COMPANY_MODIFIER = /^(?:name|names|legal|full|short|clean|cleaned|registered|account|customer|client|название|наименование|полное|полный|сокращенное|краткое|юридическое|очищенное|юр|юрлицо|юрлица|юридического|лица|на|русском|английском)$/;
+const PHONE_MODIFIER = /^(?:number|numbers|contact|contacts|person|personal|work|office|business|corporate|direct|hq|headquarters|reception|контакт|контакта|контактов|контактный|контактные|контактного|лица|лпр|рабочий|рабочие|личный|личные|общий|общие|офиса|корпоративный|корпоративные|прямой|прямые|приемной|руководителя|директора|менеджера|для|связи)$/;
+const WEBSITE_MODIFIER = /^(?:url|urls|web|www|internet|link|links|address|ссылка|ссылки|адрес|веб|интернет|на)$/;
+
+/**
+ * Unmapped upload headers survive verbatim in custom_variables. Accept complete
+ * descriptive labels, not substrings: "Direct Phone (Apollo)" is a phone field,
+ * but "phone status", "company description" and "LinkedIn profile URL" are not.
+ * Unknown labels must be explicitly mapped at import instead of guessed from
+ * their values (an ID can look exactly like a telephone number).
+ */
+function descriptiveHeader(key: string, field: ContactField): boolean {
+  if (key.length > 200) return false;
+  const words = key.replace(/№/g, ' ').normalize('NFKC').replace(/([a-zа-я])([A-ZА-Я])/g, '$1 $2')
+    .toLowerCase().replace(/ё/g, 'е').match(/[a-zа-я0-9]+/g) ?? [];
+  if (!words.length || words.length > 16) return false;
+  const core = field === 'company' ? ENTITY_WORD : field === 'phone' ? PHONE_WORD : field === 'website' ? WEBSITE_WORD : DOMAIN_WORD;
+  const modifier = field === 'company' ? COMPANY_MODIFIER : field === 'phone' ? PHONE_MODIFIER : WEBSITE_MODIFIER;
+  return words.some((word) => core.test(word)) && words.every((word) =>
+    core.test(word) || ENTITY_WORD.test(word) || modifier.test(word) ||
+    COMMON_MODIFIER.test(word) || SOURCE_WORD.test(word));
+}
 
 function cleanValue(value: unknown): string | null {
   if (typeof value !== 'string' && typeof value !== 'number') return null;
@@ -38,11 +71,16 @@ function cleanValue(value: unknown): string | null {
   return text;
 }
 
-function fieldValues(source: Record<string, unknown>, aliases: readonly string[]): unknown[] {
+function fieldValues(source: Record<string, unknown>, aliases: readonly string[], field?: ContactField): unknown[] {
   const entries = Object.entries(source);
-  return aliases.flatMap((alias) => entries
-    .filter(([key]) => normalizeKey(key) === normalizeKey(alias))
-    .flatMap(([, value]) => Array.isArray(value) ? value.slice(0, 20) : [value]));
+  const matched = new Set<string>();
+  const exact = aliases.flatMap((alias) => entries.filter(([key]) => {
+    if (matched.has(key) || normalizeKey(key) !== normalizeKey(alias)) return false;
+    matched.add(key);
+    return true;
+  }));
+  const descriptive = field ? entries.filter(([key]) => !matched.has(key) && descriptiveHeader(key, field)) : [];
+  return [...exact, ...descriptive].flatMap(([, value]) => Array.isArray(value) ? value.slice(0, 20) : [value]);
 }
 
 /** Provider search is fuzzy: never enrich with the first unrelated result. */
@@ -68,10 +106,10 @@ function sourcesForLead(lead: Lead): Record<string, unknown>[] {
 
 function firstField(
   sources: Record<string, unknown>[], aliases: readonly string[],
-  normalize: (value: unknown) => string | null,
+  normalize: (value: unknown) => string | null, field?: ContactField,
 ): string | null {
   for (const source of sources) {
-    for (const value of fieldValues(source, aliases)) {
+    for (const value of fieldValues(source, aliases, field)) {
       const normalized = normalize(value);
       if (normalized) return normalized;
     }
@@ -150,12 +188,12 @@ export function resolveLeadContactMetadata(input: {
   const emailDomain = normalizeEmail(input.leadEmail).match(/^[^@\s]+@([^@\s]+)$/)?.[1];
   return {
     leadName: [firstName, lastName].filter(Boolean).join(' ') || null,
-    companyName: firstField(sources, COMPANY_KEYS, companyValue) || companyValue(reply.companyName),
-    phone: firstField(sources, PHONE_KEYS, phoneValue) || phoneValue(reply.bodyPhone) || phoneValue(reply.signaturePhone),
+    companyName: firstField(sources, COMPANY_KEYS, companyValue, 'company') || companyValue(reply.companyName),
+    phone: firstField(sources, PHONE_KEYS, phoneValue, 'phone') || phoneValue(reply.bodyPhone) || phoneValue(reply.signaturePhone),
     // An explicit uploaded website is stronger than a provider's inferred
     // company domain, even when that domain is in the top-level lead fields.
-    website: firstField(sources, WEBSITE_KEYS, normalizeLeadWebsite) ||
-      firstField(sources, DOMAIN_KEYS, normalizeLeadWebsite) || normalizeLeadWebsite(reply.website) ||
+    website: firstField(sources, WEBSITE_KEYS, normalizeLeadWebsite, 'website') ||
+      firstField(sources, DOMAIN_KEYS, normalizeLeadWebsite, 'domain') || normalizeLeadWebsite(reply.website) ||
       (emailDomain ? normalizeLeadWebsite(emailDomain) : null),
   };
 }

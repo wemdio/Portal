@@ -1829,7 +1829,11 @@ export async function qualifyOneReply(
       effectiveReply.subject ?? null,
       replyText || null,
       result.reason ?? null,
-      { projectId: qualifiedProjectId, threadClaimConfirmed: true },
+      {
+        projectId: qualifiedProjectId,
+        threadClaimConfirmed: true,
+        contactMetadata: { phone: leadPhone, website: leadWebsite },
+      },
     );
   }
 
@@ -3119,6 +3123,8 @@ async function notifySpecialistsAboutLead(
     threadClaimConfirmed?: boolean;
     /** Stable attempt timestamp used for failed-delivery backoff. */
     attemptedAt?: string;
+    /** Already resolved enrichment; also usable if the optional board write failed. */
+    contactMetadata?: { phone: string | null; website: string | null };
   },
 ): Promise<void> {
   if (!supabaseMain) return;
@@ -3350,6 +3356,27 @@ async function notifySpecialistsAboutLead(
       return;
     }
 
+    let contacts = delivery?.contactMetadata ?? { phone: null, website: null };
+    try {
+      // Same source as the guest table, including retries after a worker restart.
+      // A row with null fields may be a deliberate guest edit: do not refill it.
+      const { data: boardRow, error: boardError } = await instantlyDb
+        .from('project_lead_board_rows')
+        .select('phone, website')
+        .eq('qualification_id', qualificationId)
+        .eq('project_id', projectId)
+        .maybeSingle();
+      if (boardError) throw new Error(boardError.message);
+      if (boardRow) {
+        contacts = {
+          phone: typeof boardRow.phone === 'string' ? boardRow.phone : null,
+          website: typeof boardRow.website === 'string' ? boardRow.website : null,
+        };
+      }
+    } catch (error) {
+      workerLog('warn', `lead alert contact lookup failed for ${qualificationId}; sending with available metadata`, error);
+    }
+
     const tgResult = await sendTelegramLeadAlertForSpecialists({
       userIds: userIdList,
       qualificationId,
@@ -3357,6 +3384,8 @@ async function notifySpecialistsAboutLead(
       leadEmail,
       leadName,
       companyName,
+      phone: contacts.phone,
+      website: contacts.website,
       campaignName,
       clientName,
       replySubject,
@@ -3728,6 +3757,14 @@ export async function reconcileLeadNotificationDeliveries(
         threadClaimConfirmed,
         attemptedAt: nowIso,
         projectId: lead.qualified_project_id,
+        // Full persisted reply includes signatures omitted from the short preview.
+        // No repeat Instantly lookup or AI call for delivery-only retries.
+        contactMetadata: resolveLeadContactMetadata({
+          leads: [],
+          leadEmail: lead.lead_email,
+          campaignId: lead.campaign_id,
+          replyBody: lead.reply_body?.trim() || lead.reply_preview || '',
+        }),
       },
     );
     if (threadClaimConfirmed) {
@@ -3761,6 +3798,8 @@ async function sendTelegramLeadAlertForSpecialists(data: {
   leadEmail: string;
   leadName: string | null;
   companyName: string | null;
+  phone: string | null;
+  website: string | null;
   campaignName: string | null;
   clientName: string | null;
   replySubject: string | null;
@@ -3811,6 +3850,8 @@ async function sendTelegramLeadAlertForSpecialists(data: {
       leadEmail: data.leadEmail,
       leadName: data.leadName,
       companyName: data.companyName,
+      phone: data.phone,
+      website: data.website,
       campaignName: data.campaignName,
       clientName: data.clientName,
       specialistMentions,
