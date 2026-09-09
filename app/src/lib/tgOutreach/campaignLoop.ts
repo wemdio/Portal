@@ -1634,9 +1634,9 @@ export async function runCampaignLoop(
    * действия оператора.
    */
   const nowMs = Date.now();
-  const isWarming = (a: OutreachAccount): boolean => {
+  const isWarming = (a: OutreachAccount, now: number): boolean => {
     const until = a.warmup_until ? new Date(a.warmup_until).getTime() : NaN;
-    return Number.isFinite(until) && until > nowMs;
+    return Number.isFinite(until) && until > now;
   };
   /**
    * Отлёжка после смены имени — в бой тоже не идут.
@@ -1646,18 +1646,18 @@ export async function runCampaignLoop(
    * видеть в нём свежепереименованный аккаунт. Греться ему при этом можно —
    * поэтому фильтр стоит здесь, а не в круге прогрева.
    */
-  const isResting = (a: OutreachAccount): boolean => {
+  const isResting = (a: OutreachAccount, now: number): boolean => {
     const until = a.profile_rest_until ? new Date(a.profile_rest_until).getTime() : NaN;
-    return Number.isFinite(until) && until > nowMs;
+    return Number.isFinite(until) && until > now;
   };
+  /** Готов рассылать прямо сейчас: не греется и не отлёживается. */
+  const isFree = (a: OutreachAccount, now: number): boolean => !isWarming(a, now) && !isResting(a, now);
 
-  const warmingNow = (allAccounts ?? []).filter((a) => isWarming(a as OutreachAccount));
+  const warmingNow = (allAccounts ?? []).filter((a) => isWarming(a as OutreachAccount, nowMs));
   const restingNow = (allAccounts ?? []).filter(
-    (a) => !isWarming(a as OutreachAccount) && isResting(a as OutreachAccount),
+    (a) => !isWarming(a as OutreachAccount, nowMs) && isResting(a as OutreachAccount, nowMs),
   );
-  const accounts = (allAccounts ?? []).filter(
-    (a) => !isWarming(a as OutreachAccount) && !isResting(a as OutreachAccount),
-  );
+  const accounts = (allAccounts ?? []).filter((a) => isFree(a as OutreachAccount, nowMs));
 
   if (warmingNow.length) {
     log('info', `На прогреве ${warmingNow.length} аккаунтов — в боевую рассылку их не беру.`);
@@ -1666,19 +1666,37 @@ export async function runCampaignLoop(
     log('info', `Отлёживаются после смены профиля ${restingNow.length} аккаунтов — в боевую рассылку их не беру.`);
   }
 
-  if (!accounts?.length) {
+  /**
+   * Все заняты временно — ждём в цикле, а не уходим в паузу.
+   *
+   * Пауза здесь означала смерть до перезагрузки воркера: `resumeRunningCampaigns`
+   * поднимает paused-кампании только на старте процесса (см. `worker/tgOutreach`),
+   * а не по расписанию. Партию настраивают вечером — заливают, заполняют профили,
+   * включают, запускают, — и к этому моменту все аккаунты в отлёжке; кампания
+   * вставала намертво, хотя через полсуток рассылать было бы кем. Прогрев — тот
+   * же случай.
+   *
+   * Отсутствие включённых аккаунтов — по-прежнему пауза: там ждать нечего,
+   * пока оператор не включит хотя бы один.
+   */
+  const busyOnly = !accounts.length && Boolean(warmingNow.length || restingNow.length);
+  if (!accounts.length && !busyOnly) {
     log(
       'error',
-      warmingNow.length || restingNow.length
-        ? `Рассылать некем: ${warmingNow.length} на прогреве, ${restingNow.length} отлёживаются после смены профиля. `
-          + 'Кампания на паузе и поднимется сама, как только кто-то освободится.'
-        : 'Нет активных аккаунтов в кампании — поставил на паузу. Как только включите хотя бы один аккаунт, кампания возобновится автоматически.',
+      'Нет активных аккаунтов в кампании — поставил на паузу. Как только включите хотя бы один аккаунт, кампания возобновится автоматически.',
     );
     // Use paused (not error) so resumeRunningCampaigns retries us automatically
     // once accounts become active again, instead of leaving the campaign stuck.
     const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
     if (stErr) log('error', `Не смог записать статус "на паузе" в базу данных — ${stErr.message}`);
     return;
+  }
+  if (busyOnly) {
+    log(
+      'warning',
+      `Рассылать пока некем: ${warmingNow.length} на прогреве, ${restingNow.length} отлёживаются после смены профиля. `
+        + 'Кампанию не останавливаю — жду и перечитываю состав каждую минуту, круг возьмёт их сам, как только срок выйдет.',
+    );
   }
 
   const { data: proxies } = await db
@@ -1721,9 +1739,15 @@ export async function runCampaignLoop(
   // соседние. Замыкание читает `clients` в момент вызова, поэтому переживает
   // переподключение ниже.
   if (control) control.forceDisconnect = () => disconnectAll(clients);
-  log('info', `Подключились ${clients.length} из ${accounts.length} аккаунтов${clients.length < accounts.length ? ` (остальные с ошибками подключения, смотри строки выше)` : ''}`);
+  // При пустом составе (все на прогреве или в отлёжке) строка «подключились 0
+  // из 0» только сбивает с толку — про ожидание уже сказано выше.
+  if (accounts.length) {
+    log('info', `Подключились ${clients.length} из ${accounts.length} аккаунтов${clients.length < accounts.length ? ` (остальные с ошибками подключения, смотри строки выше)` : ''}`);
+  }
 
-  if (clients.length === 0) {
+  // Пустой состав из-за прогрева и отлёжки — не сбой подключения: подключать
+  // было некого. Переподключаться незачем, ждём в цикле (см. busyOnly выше).
+  if (accounts.length && clients.length === 0) {
     log('warning', 'Ни один аккаунт не подключился — пробую ещё раз через 60 секунд');
     await interruptibleSleep(60_000, shouldStop);
     if (shouldStop()) return;
@@ -1742,6 +1766,83 @@ export async function runCampaignLoop(
     const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'running', updated_at: new Date().toISOString() }).eq('id', campaignId);
     if (stErr) log('error', `Не смог записать статус "запущена" в базу данных — ${stErr.message}`);
   }
+
+  /**
+   * Состав круга перечитывается на каждом круге, а не фиксируется на старте.
+   *
+   * До 09.09.2026 список аккаунтов читался один раз, перед первым кругом, и
+   * дальше цикл гонял ровно его. Из-за этого «как только срок выйдет, круг
+   * подхватит его сам» из подсказки в портале было неправдой: аккаунт,
+   * вышедший из прогрева или отлёжки, ждал перезапуска кампании — то есть
+   * деплоя или ручного стоп-старта. Симметрично не работало и обратное:
+   * выключенный оператором аккаунт продолжал рассылать до конца запуска, а
+   * отлёжка, назначенная кругом при смене профиля, на этот же запуск не
+   * действовала — аккаунт оставался в составе и писал дальше.
+   *
+   * Раз в круг, а не чаще: состав меняется руками оператора, минута задержки
+   * тут ничего не решает, а лишний запрос на каждый аккаунт — решает.
+   */
+  const refreshRoster = async (): Promise<void> => {
+    const { data: rows, error } = await db
+      .from('tg_outreach_accounts')
+      .select('*')
+      .eq('campaign_id', campaignId)
+      .eq('is_active', true);
+    if (error) {
+      log('warning', `Не смог перечитать состав аккаунтов — ${error.message}. Иду прежним составом.`);
+      return;
+    }
+
+    const now = Date.now();
+    const free = ((rows ?? []) as OutreachAccount[]).filter((a) => isFree(a, now));
+    const freeIds = new Set(free.map((a) => a.id));
+    const inRound = new Set(clients.map((c) => c.account.id));
+
+    /**
+     * Соединения ушедших рвём, а не оставляем висеть: сессия одна на аккаунт, и
+     * если он ушёл на прогрев, второе подключение к ней встретит
+     * AUTH_KEY_DUPLICATED — Telegram выключит аккаунт (см. gramClient).
+     */
+    const leaving = clients.filter((c) => !freeIds.has(c.account.id));
+    if (leaving.length) {
+      clients = clients.filter((c) => freeIds.has(c.account.id));
+      log(
+        'info',
+        `Из круга выходят ${leaving.length}: ${leaving.map((c) => c.account.session_name).join(', ')} — `
+          + 'выключены оператором, ушли на прогрев или в отлёжку. Разрываю их соединения.',
+      );
+      await disconnectAll(leaving);
+    }
+
+    const joining = free.filter((a) => !inRound.has(a.id));
+    if (!joining.length) return;
+
+    /**
+     * Прокси перечитываем вместе с аккаунтами: список читался один раз на
+     * старте, а новичку прокси назначают вместе с включением — без этого он
+     * подключался бы «без прокси», то есть с IP сервера.
+     */
+    const { data: freshProxies } = await db
+      .from('tg_outreach_proxies')
+      .select('*')
+      .eq('campaign_id', campaignId)
+      .eq('is_active', true);
+    const proxyList = (freshProxies ?? proxies ?? []) as OutreachProxy[];
+    for (const p of proxyList) proxyMap.set(p.id, p);
+
+    const added = await buildClients(orderByStaleness(joining), proxyList, log, downloadSessionFile, db);
+    for (const entry of added) {
+      clients.push(entry);
+      // Свой аккаунт остальные обязаны опознавать как свой, иначе переписка с
+      // ним уедет в рабочий чат как заявка (см. ownTgUserIds выше).
+      if (typeof entry.account.tg_user_id === 'number') ownTgUserIds.add(entry.account.tg_user_id);
+    }
+    log(
+      'info',
+      `В круг добавлены ${added.length} из ${joining.length} освободившихся аккаунтов`
+        + (added.length ? `: ${added.map((c) => c.account.session_name).join(', ')}` : ' (остальные не подключились, смотри строки выше)'),
+    );
+  };
 
   /**
    * Ручные передачи лидов и партнёров — отдельным опросом, а не по ходу круга.
@@ -1867,6 +1968,10 @@ export async function runCampaignLoop(
   // matching "сон закончился" line when it ends (otherwise users see only
   // the start of the silence and can't tell when work resumed).
   let inSleepPeriod = false;
+  // Та же логика, что у inSleepPeriod: «рассылать некем» пишем один раз на
+  // вход в простой, а не каждую минуту ожидания — иначе за ночь отлёжки журнал
+  // кампании состоит из этой строки.
+  let idleAnnounced = false;
 
   try {
     while (!shouldStop()) {
@@ -1884,6 +1989,23 @@ export async function runCampaignLoop(
         log('info', 'Тихий час закончился — возобновляю рассылку.');
         inSleepPeriod = false;
       }
+
+      // Состав круга — заново на каждом круге, до всей остальной работы:
+      // освободившиеся попадут уже в этот круг, ушедшие в него не попадут.
+      await refreshRoster();
+      if (!clients.length) {
+        if (!idleAnnounced) {
+          log(
+            'warning',
+            'Рассылать некем: все аккаунты выключены, на прогреве или в отлёжке. Кампанию не останавливаю — '
+              + 'проверяю состав раз в минуту и возьму в круг первого же освободившегося.',
+          );
+          idleAnnounced = true;
+        }
+        await interruptibleSleep(60_000, shouldStop);
+        continue;
+      }
+      idleAnnounced = false;
 
       let blockedUserIds: Set<number>;
       try {
