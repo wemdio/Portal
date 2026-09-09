@@ -63,7 +63,19 @@ function splitMessage(text: string): string[] {
   return chunks;
 }
 
-async function tgSend(token: string, chatId: number, text: string): Promise<number | null> {
+type TgSendResult = { messageId: number | null; error: string | null };
+
+/** Error text can contain the request URL; never persist the bot credential. */
+function safeTelegramError(message: string, token: string): string {
+  return message
+    .split(token).join('[REDACTED]')
+    .split(encodeURIComponent(token)).join('[REDACTED]')
+    .replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]')
+    .replace(/\s+/g, ' ')
+    .slice(0, 500);
+}
+
+async function tgSend(token: string, chatId: number, text: string): Promise<TgSendResult> {
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
@@ -76,32 +88,57 @@ async function tgSend(token: string, chatId: number, text: string): Promise<numb
       }),
       signal: AbortSignal.timeout(TG_FETCH_TIMEOUT_MS),
     });
-    if (!res.ok) return null;
-    const json = (await res.json()) as { ok: boolean; result?: { message_id: number } };
-    return json.ok ? (json.result?.message_id ?? null) : null;
-  } catch {
-    return null;
+    const json = await res.json().catch(() => null) as {
+      ok?: boolean;
+      result?: { message_id?: number };
+      error_code?: number;
+      description?: string;
+    } | null;
+    if (!res.ok || json?.ok !== true) {
+      const code = typeof json?.error_code === 'number' ? ` (error_code=${json.error_code})` : '';
+      const description = typeof json?.description === 'string' ? `: ${json.description}` : '';
+      return {
+        messageId: null,
+        error: safeTelegramError(`Telegram HTTP ${res.status}${code}${description}`, token),
+      };
+    }
+    const messageId = json.result?.message_id;
+    if (typeof messageId !== 'number' || !Number.isSafeInteger(messageId) || messageId <= 0) {
+      return { messageId: null, error: 'Telegram response is missing a valid message_id' };
+    }
+    return { messageId, error: null };
+  } catch (error) {
+    return {
+      messageId: null,
+      error: safeTelegramError(error instanceof Error ? error.message : String(error), token),
+    };
   }
 }
 
 /**
  * Send an already-built HTML message to a chat. Returns the first chunk's
- * message id (or null on any failure — never throws).
+ * message id only when every chunk was sent. Partial delivery returns the
+ * failure and sent chunk count, and stops before sending the remaining chunks.
  */
 export async function sendClientReplyTelegram(
   chatId: number,
   html: string,
-): Promise<{ messageId: number | null }> {
+): Promise<TgSendResult & { sentChunks: number; totalChunks: number }> {
   const token = getClientRepliesBotToken();
-  if (!token) return { messageId: null };
-
   const chunks = splitMessage(html);
+  if (!token) {
+    return { messageId: null, error: 'Bot token is not configured', sentChunks: 0, totalChunks: chunks.length };
+  }
+
   let firstId: number | null = null;
   for (let i = 0; i < chunks.length; i++) {
-    const id = await tgSend(token, chatId, chunks[i]);
-    if (i === 0) firstId = id;
+    const result = await tgSend(token, chatId, chunks[i]);
+    if (result.messageId === null) {
+      return { messageId: null, error: result.error, sentChunks: i, totalChunks: chunks.length };
+    }
+    if (i === 0) firstId = result.messageId;
   }
-  return { messageId: firstId };
+  return { messageId: firstId, error: null, sentChunks: chunks.length, totalChunks: chunks.length };
 }
 
 /** Send a short plain status message (linking confirmations, errors). */
