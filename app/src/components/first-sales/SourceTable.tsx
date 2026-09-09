@@ -30,7 +30,7 @@ const sourceSortColumns: SortColumns<SourceBreakdown> = {
   leads: { type: 'number', getValue: (r) => r.leads },
   qualified: { type: 'number', getValue: (r) => r.qualified },
   meetings: { type: 'number', getValue: (r) => r.meetings },
-  contracts: { type: 'number', getValue: (r) => r.contracts },
+  sales: { type: 'number', getValue: (r) => r.sales },
   money: { type: 'number', getValue: (r) => r.money },
 };
 
@@ -53,7 +53,7 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
             <th className="px-3 py-2 text-right font-medium">Доля</th>
             <SortableTh label="Квал" sortKey="qualified" sort={sort} onSort={toggleSort} align="right" />
             <SortableTh label="Встречи" sortKey="meetings" sort={sort} onSort={toggleSort} align="right" />
-            <SortableTh label="Договоры" sortKey="contracts" sort={sort} onSort={toggleSort} align="right" />
+            <SortableTh label="Продажи" sortKey="sales" sort={sort} onSort={toggleSort} align="right" />
             {/* Деньги, связанные со сделкой по ИНН плательщика. Прочерк —
                 «связать не смогли», а не «денег не было»; доля покрытия стоит
                 на карточке «Деньги» вверху дашборда. */}
@@ -94,7 +94,7 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-500">{pct(row.leads, totalLeads)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(row.qualified)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(row.meetings)}</td>
-                  <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(row.contracts)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(row.sales)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmtMoney(row.money)}</td>
                 </tr>
                 {isOpen && <DealDrillDown query={{ source: row.key }} filters={filters} colSpan={7} />}

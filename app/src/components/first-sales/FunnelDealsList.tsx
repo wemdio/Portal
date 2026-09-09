@@ -26,7 +26,7 @@ type DealRow = {
   created_at: string | null;
   /** Даты событий периода — из них строка берёт свою дату (см. stageDate). */
   meeting_at: string | null;
-  contract_at: string | null;
+  won_at: string | null;
   history_complete: boolean;
   in_period: InPeriod;
   amo_url: string | null;
@@ -66,7 +66,7 @@ const STAGE_DATE_LABEL: Record<FunnelStageId, string> = {
   lead: 'Дата прихода лида',
   qualified: 'Дата прихода лида (квал считается когортно)',
   meeting: 'Дата встречи в периоде',
-  contract: 'Дата договора',
+  sale: 'Дата продажи',
 };
 
 function periodBadges(p: InPeriod): string[] {
@@ -74,6 +74,7 @@ function periodBadges(p: InPeriod): string[] {
   if (p.qualified) out.push('квал');
   if (p.meetings > 0) out.push(p.meetings > 1 ? `встречи · ${p.meetings}` : 'встреча');
   if (p.contract) out.push('договор');
+  if (p.sale) out.push('продажа');
   if (p.money > 0) out.push(fmtMoney(p.money));
   return out;
 }

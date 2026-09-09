@@ -6,10 +6,13 @@
  *      их выбрасывает; для дашборда это означало бы, что число лидов за май
  *      уменьшается задним числом каждый раз, когда майскую сделку закрывают.
  *      Прошлое должно быть неподвижным.
- *   2. Договоры считаются по ДАТЕ достижения этапа из истории переходов, а
- *      не когортно «из пришедших в окне дошли до». Встречи — по ДАТЕ записи
- *      разговора (`meeting_deal_links` → `tg_video_transcripts`), а не по
- *      этапу AMO вовсе: этап «Встреча проведена» засорён, см. `meetings.ts`.
+ *   2. Продажи считаются по ДАТЕ закрытия сделки в плюс, а не по этапу
+ *      «Согласование договора»: за август 2026 этап дал 9 при 13 реально
+ *      оплаченных сделках — пять продаж Егора этап вообще не проходили, а три
+ *      прошли его в прошлых месяцах. Этап остаётся промежуточной отметкой в
+ *      карточке сделки, метрикой перестал быть 09.09.2026. Встречи — по ДАТЕ
+ *      записи разговора (`meeting_deal_links` → `tg_video_transcripts`), а не
+ *      по этапу AMO вовсе: этап «Встреча проведена» засорён, см. `meetings.ts`.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
@@ -52,14 +55,15 @@ export type SeriesBucket = {
   leads: number;
   qualified: number;
   meetings: number;
-  contracts: number;
+  /** Сделки, закрытые в плюс в этой корзине. См. `isSaleInWindow`. */
+  sales: number;
 };
 
 /**
  * Разбивка по ответственному менеджеру.
  *
  * Считается ровно теми же правилами, что и разбивка по источникам: лиды по
- * дате создания, договоры по дате этапа, встречи по записям разговоров. Иначе
+ * дате создания, продажи по дате закрытия, встречи по записям разговоров. Иначе
  * два среза одного дашборда давали бы разные суммы, и объяснить это было бы
  * нечем.
  */
@@ -68,7 +72,7 @@ export type ManagerBreakdown = {
   leads: number;
   qualified: number;
   meetings: number;
-  contracts: number;
+  sales: number;
   /** Рубли, пришедшие в окне по сделкам этого менеджера. См. `money.ts`. */
   money: number;
 };
@@ -81,7 +85,7 @@ export type SourceBreakdown = {
   leads: number;
   qualified: number;
   meetings: number;
-  contracts: number;
+  sales: number;
   /** Рубли, пришедшие в окне по сделкам этого источника. См. `money.ts`. */
   money: number;
 };
@@ -94,21 +98,13 @@ export type FirstSalesTotals = {
   leads: number;
   qualified: number;
   meetings: number;
-  contracts: number;
+  /** Сделки, закрытые в плюс в окне, — то, что продажи называют продажами. */
+  sales: number;
   leadMagnets: number;
   noSourceLeads: number;
   wonCount: number;
   cycleAvgDays: number | null;
   cycleMedianDays: number | null;
-  /**
-   * false — окно целиком раньше даты, с которой этап «Согласование договора»
-   * начал означать договор. Тогда `contracts` заведомо равен нулю не потому,
-   * что договоров не было, а потому что мы отказались считать грязные данные.
-   * UI обязан показать прочерк, а не ноль.
-   */
-  contractsReliable: boolean;
-  /** Дата вступления правила в силу — чтобы UI мог назвать её пользователю. */
-  contractsSince: string;
   /**
    * false — окно целиком раньше даты, с которой подписи к записям в чате
    * встреч стали регулярными (`MEETINGS_RELIABLE_SINCE`). Тогда `meetings`
@@ -192,15 +188,18 @@ export const CONTRACT_RULE_SINCE = new Date(
  * Какие ступени воронки достоверны для окна, кончающегося на `to`.
  *
  * Окно целиком раньше даты правила означает, что ступени НЕТ, а не что она
- * равна нулю: до этой даты этап ставили не по тому поводу (договоры) либо
- * записи разговоров не подписывали (встречи). Одна функция на всех, потому
- * что правило читают в трёх местах — сводка, воронка и список сделок рядом с
- * ней, — и разъехавшись, они покажут разное на одном экране.
+ * равна нулю: до этой даты записи разговоров не подписывали, и привязать их
+ * нечем. Одна функция на всех, потому что правило читают в трёх местах —
+ * сводка, воронка и список сделок рядом с ней, — и разъехавшись, они покажут
+ * разное на одном экране.
+ *
+ * Продажи такой оговорки не требуют: они считаются по дате закрытия сделки,
+ * а она синкается с 2024 года и достоверна на всю историю — в отличие от
+ * этапа «Согласование договора», ради которого эта оговорка и заводилась.
  */
-export function stageAvailability(to: Date): { meetingsReliable: boolean; contractsReliable: boolean } {
+export function stageAvailability(to: Date): { meetingsReliable: boolean } {
   return {
     meetingsReliable: to.getTime() >= MEETINGS_RELIABLE_SINCE.getTime(),
-    contractsReliable: to.getTime() >= CONTRACT_RULE_SINCE.getTime(),
   };
 }
 
@@ -213,7 +212,27 @@ export function isQualifiedInWindow(lead: FirstSalesLeadRow, from: Date, to: Dat
   return isLeadInWindow(lead, from, to) && !!lead.first_qualified_at && lead.history_complete;
 }
 
-/** Договор — по дате этапа и только с CONTRACT_RULE_SINCE. */
+/**
+ * Продажа — сделка, закрытая в плюс внутри окна.
+ *
+ * Именно это продажи называют продажей, и именно это сходится с деньгами:
+ * за август 2026 закрыто 13 сделок и получено 13 первых платежей, тогда как
+ * этап «Согласование договора» дал 9. `won_at` приходит из `closed_at`,
+ * который синкается с 2024 года, поэтому оговорка о достоверности здесь не
+ * нужна — в отличие от этапа договора.
+ */
+export function isSaleInWindow(lead: FirstSalesLeadRow, from: Date, to: Date): boolean {
+  return inWindow(lead.won_at, from, to);
+}
+
+/**
+ * Этап «Согласование договора» — промежуточная отметка в карточке сделки.
+ *
+ * Метрикой перестал быть 09.09.2026 (см. заголовок файла), но из drill-down
+ * не убран: пометка «договор» в строке сделки показывает, что этап проходили,
+ * и это полезный след работы менеджера. Ограничение CONTRACT_RULE_SINCE
+ * остаётся — до него этап ставили и на «просто отправил файл».
+ */
 export function isContractInWindow(lead: FirstSalesLeadRow, from: Date, to: Date): boolean {
   return (
     lead.history_complete
@@ -307,7 +326,7 @@ export function computeFirstSalesSeries(
 
   const keys = buildBuckets(from, to, groupBy);
   const series = new Map<string, SeriesBucket>(
-    keys.map((key) => [key, { key, leads: 0, qualified: 0, meetings: 0, contracts: 0 }]),
+    keys.map((key) => [key, { key, leads: 0, qualified: 0, meetings: 0, sales: 0 }]),
   );
   const bySource = new Map<string, SourceBreakdown>();
   const byManager = new Map<string, ManagerBreakdown>();
@@ -316,7 +335,7 @@ export function computeFirstSalesSeries(
     const key = managerKey(name);
     let row = byManager.get(key);
     if (!row) {
-      row = { manager: key, leads: 0, qualified: 0, meetings: 0, contracts: 0, money: 0 };
+      row = { manager: key, leads: 0, qualified: 0, meetings: 0, sales: 0, money: 0 };
       byManager.set(key, row);
     }
     return row;
@@ -331,18 +350,17 @@ export function computeFirstSalesSeries(
   const sourceRow = (key: string, label: string): SourceBreakdown => {
     let row = bySource.get(key);
     if (!row) {
-      row = { key, source: label, leads: 0, qualified: 0, meetings: 0, contracts: 0, money: 0 };
+      row = { key, source: label, leads: 0, qualified: 0, meetings: 0, sales: 0, money: 0 };
       bySource.set(key, row);
     }
     return row;
   };
 
   const totals: FirstSalesTotals = {
-    leads: 0, qualified: 0, meetings: 0, contracts: 0,
+    leads: 0, qualified: 0, meetings: 0, sales: 0,
     leadMagnets: 0, noSourceLeads: 0, wonCount: 0,
     cycleAvgDays: null, cycleMedianDays: null,
     ...stageAvailability(to),
-    contractsSince: CONTRACT_RULE_SINCE.toISOString(),
     meetingsSince: MEETINGS_RELIABLE_SINCE.toISOString(),
     money: emptyMoneyTotals(),
   };
@@ -369,7 +387,7 @@ export function computeFirstSalesSeries(
 
   // Тип поля сужен до счётчиков: `keyof SeriesBucket` включал бы `key: string`,
   // и `bucket[field] += 1` не прошёл бы проверку типов.
-  type CounterField = 'leads' | 'qualified' | 'meetings' | 'contracts';
+  type CounterField = 'leads' | 'qualified' | 'meetings' | 'sales';
   const bump = (key: string | null, field: CounterField) => {
     if (!key) return;
     const bucket = series.get(key);
@@ -413,12 +431,12 @@ export function computeFirstSalesSeries(
       // достижения этапа (first_qualified_at используется только как флаг
       // «дошёл ли»). Это когортная семантика — «из пришедших в этот день/
       // неделю/месяц скольких сумели квалифицировать», та же логика, что и у
-      // «леды». Отличается от meetings/contracts ниже, которые по спеке
+      // «леды». Отличается от meetings/sales ниже, которые по спеке
       // кладутся по дате самого этапа («сколько встреч случилось в этот
       // день», независимо от того, когда лид пришёл). Оба взгляда осмыслены,
       // но соседствуют в одном SeriesBucket — при чтении графика это стоит
       // держать в голове: столбец qualified отвечает на другой вопрос, чем
-      // столбцы meetings/contracts в той же строке.
+      // столбцы meetings/sales в той же строке.
       if (isQualifiedInWindow(lead, from, to)) {
         totals.qualified += 1;
         breakdown.qualified += 1;
@@ -440,16 +458,18 @@ export function computeFirstSalesSeries(
     // остаётся полезным следом того, что происходило в CRM, и показывается в
     // drill-down (SourceTable) под меткой «Этап AMO», но в счётчик встреч не
     // идёт, чтобы под одним названием не жили две разные цифры.
-    // Договоры — только с даты, когда этап начал означать договор.
-    // До неё этап ставили и на «просто отправил файл», см. CONTRACT_RULE_SINCE.
-    if (isContractInWindow(lead, from, to)) {
-      totals.contracts += 1;
-      breakdown.contracts += 1;
-      manager.contracts += 1;
-      bump(bucketKey(new Date(lead.first_contract_at as string), groupBy), 'contracts');
-      // Покрытие ИНН считается ровно по тем договорам, что попали в метрику:
+    // Продажи — по дате закрытия сделки в плюс. Этап «Согласование договора»
+    // метрикой быть перестал: за август 2026 он дал 9 при 13 оплаченных
+    // сделках, потому что пять продаж его вообще не проходили. Этап остался
+    // отметкой в карточке (см. isContractInWindow), но не цифрой на экране.
+    if (isSaleInWindow(lead, from, to)) {
+      totals.sales += 1;
+      breakdown.sales += 1;
+      manager.sales += 1;
+      bump(bucketKey(new Date(lead.won_at as string), groupBy), 'sales');
+      // Покрытие ИНН считается ровно по тем продажам, что попали в метрику:
       // знаменатель «сколько денег мы вообще могли бы увидеть» должен быть
-      // тем же числом, что показано на карточке «Договоры», иначе доля будет
+      // тем же числом, что показано на карточке «Продажи», иначе доля будет
       // считаться от одного, а читаться от другого.
       if (dealInn(lead.raw)) totals.money.contractsWithInn += 1;
     }
@@ -530,7 +550,34 @@ export function computeFirstSalesSeries(
     if (amount <= 0) continue;
     if (!inWindow(p.occurred_at, from, to)) continue;
 
-    if (p.renewal_state === 'renewal') continue;
+    // Контрольная сумма экрана: сюда идёт КАЖДЫЙ приход окна, включая чужие
+    // первичке. Читатель обязан видеть, что дашборд и выписка сходятся, —
+    // иначе разницу выясняют в переписке (так и было до 09.09.2026).
+    totals.money.bankTotal += amount;
+    totals.money.bankPayments += 1;
+
+    // Сделки первички у платежа нет вовсе: либо клиент живёт в воронке
+    // продлений, либо это не клиентский платёж (эквайринг). Разбирается до
+    // `renewal_state` намеренно — состояние «первый приход от ИНН» у чужого
+    // платежа ничего не значит.
+    if (p.deal_matches === 0) {
+      if (p.renewal_deal_matches > 0) {
+        totals.money.renewals += amount;
+        totals.money.renewalsPayments += 1;
+      } else {
+        totals.money.unlinked += amount;
+        totals.money.unlinkedPayments += 1;
+      }
+      continue;
+    }
+
+    if (p.renewal_state === 'renewal') {
+      // Размеченное человеком продление по клиенту, который есть и в
+      // первичке: в деньги первички не идёт, но в сходимость с банком — да.
+      totals.money.renewals += amount;
+      totals.money.renewalsPayments += 1;
+      continue;
+    }
     if (p.renewal_state === 'pending') {
       totals.money.pending += amount;
       totals.money.pendingPayments += 1;
@@ -564,7 +611,7 @@ export function computeFirstSalesSeries(
     // кладёт имя той сделки, что встретилась первой, а показать нужно самое
     // свежее написание (см. `labelPick`).
     bySource: [...bySource.values()]
-      .filter((s) => s.leads + s.qualified + s.meetings + s.contracts + s.money > 0)
+      .filter((s) => s.leads + s.qualified + s.meetings + s.sales + s.money > 0)
       .map((s) => ({ ...s, source: labelPick.get(s.key)?.label ?? s.source }))
       .sort((a, b) => b.leads - a.leads),
     // Список для выпадашки фильтра — по всем сделкам выборки, ДО отсева по
@@ -577,7 +624,7 @@ export function computeFirstSalesSeries(
     // могла попасть в выборку оплатой старой сделки и дать менеджеру строку из
     // одних нулей.
     byManager: [...byManager.values()]
-      .filter((m) => m.leads + m.qualified + m.meetings + m.contracts + m.money > 0)
+      .filter((m) => m.leads + m.qualified + m.meetings + m.sales + m.money > 0)
       .sort((a, b) => b.leads - a.leads || a.manager.localeCompare(b.manager, 'ru')),
     totals,
   };

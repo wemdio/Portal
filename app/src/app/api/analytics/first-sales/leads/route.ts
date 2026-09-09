@@ -6,6 +6,7 @@ import { matchesDrill, parseDrillSlice } from '@/lib/firstSales/drill';
 import {
   fetchFirstSalesLeads,
   isContractInWindow,
+  isSaleInWindow,
   isLeadInWindow,
   isQualifiedInWindow,
   meetingsByDeal,
@@ -74,6 +75,7 @@ export async function GET(req: NextRequest) {
           lead: isLeadInWindow(lead, from, to),
           qualified: isQualifiedInWindow(lead, from, to),
           meetings: meetings.get(lead.amo_id) ?? 0,
+          sale: isSaleInWindow(lead, from, to),
           contract: isContractInWindow(lead, from, to),
           money: money.get(lead.amo_id) ?? 0,
         },
@@ -114,6 +116,7 @@ export async function GET(req: NextRequest) {
           lead: hits.lead,
           qualified: hits.qualified,
           meetings: hits.meetings,
+          sale: hits.sale,
           contract: hits.contract,
           money: hits.money,
         },

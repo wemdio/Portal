@@ -33,6 +33,7 @@ function payment(over: Partial<FirstSalesPaymentRow> = {}): FirstSalesPaymentRow
     payer_name: 'ООО «Ромашка»',
     amo_deal_id: 1,
     deal_matches: 1,
+    renewal_deal_matches: 0,
     renewal_state: 'first',
     ...over,
   };
@@ -133,6 +134,12 @@ describe('emptyMoneyTotals', () => {
       pending: 0,
       pendingPayments: 0,
       contractsWithInn: 0,
+      renewals: 0,
+      renewalsPayments: 0,
+      unlinked: 0,
+      unlinkedPayments: 0,
+      bankTotal: 0,
+      bankPayments: 0,
     });
   });
 });

@@ -8,6 +8,7 @@ import {
   isContractInWindow,
   isLeadInWindow,
   isQualifiedInWindow,
+  isSaleInWindow,
   lastMeetingByDeal,
   meetingsByDeal,
   stageAvailability,
@@ -85,13 +86,16 @@ export async function GET(req: NextRequest) {
         // Даты событий, которыми сделка попала в период. Строка списка
         // показывает именно их: `created_at` у старой сделки со встречей в
         // окне читается как «фильтр не сработал».
-        contract_at: lead.first_contract_at,
+        won_at: lead.won_at,
         meeting_at: meetingAt.get(lead.amo_id) ?? null,
         history_complete: lead.history_complete,
         in_period: {
           lead: isLeadInWindow(lead, from, to),
           qualified: isQualifiedInWindow(lead, from, to),
           meetings: meetings.get(lead.amo_id) ?? 0,
+          sale: isSaleInWindow(lead, from, to),
+          // Этап «Согласование договора» — отметка в строке, а не ступень
+          // воронки: пять августовских продаж его вообще не проходили.
           contract: isContractInWindow(lead, from, to),
           money: money.get(lead.amo_id) ?? 0,
         },

@@ -293,7 +293,7 @@ export default function FirstSalesView() {
                     lead: data.totals.leads,
                     qualified: data.totals.qualified,
                     meeting: data.totals.meetingsReliable ? data.totals.meetings : undefined,
-                    contract: data.totals.contractsReliable ? data.totals.contracts : undefined,
+                    sale: data.totals.sales,
                   }}
                 />
               </div>
