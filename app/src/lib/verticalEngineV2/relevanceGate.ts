@@ -1,6 +1,6 @@
 /** Evidence-backed hypothesis triage. Uncertainty is retained, never silently accepted or discarded. */
 import { z } from 'zod';
-import { callLLMWithSchema, getVeActiveJobSignal, getVeModel, LLMValidationError, type LLMMessage, type LLMUsage } from './llm';
+import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel, LLMValidationError, type LLMMessage, type LLMUsage } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
 import { readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint, type VeRelevanceFailureCode } from './relevanceCheckpoint';
 import { veRelevanceDecisionSchema, type VeRelevanceDecision } from './relevanceDecision';
@@ -10,6 +10,7 @@ import { reviewVeRelevanceEvidence, type VeRelevanceReviewCompany, type VeReleva
 export type { VeRelevanceDecision } from './relevanceDecision';
 
 const BATCH_SIZE = 20;
+const RECOVERY_BATCH_SIZE = 5;
 const configuredMax = Number(process.env.VE_RELEVANCE_MAX_ROWS);
 const MAX_COMPANIES = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.min(10_000, Math.floor(configuredMax)) : 3000;
 const MAX_WEBSITES = 30;
@@ -78,8 +79,12 @@ function isCompleteShortActivityQuote(field: typeof FIELDS[number], quote: strin
 }
 const outputDecision = z.object({
   i: z.number().int().nonnegative(), status: z.enum(['relevant', 'irrelevant', 'needs_review']),
-  reason: z.string().min(1).max(400),
-  evidence: z.array(z.object({ field: z.enum(FIELDS), quote: z.string().min(1).max(400) })).max(3),
+  // Explanation verbosity must not discard otherwise valid company decisions.
+  reason: z.string().min(1).max(2000).transform((value) => value.slice(0, 400)),
+  // Empty padding is unusable evidence, not a reason to lose the entire batch.
+  // checkedEvidence removes it; supportedDecision then withholds admission and
+  // the website pass can repair citations under its existing bounded policy.
+  evidence: z.array(z.object({ field: z.enum(FIELDS), quote: z.string().max(400) })).max(3),
 });
 function messages(scope: string, batch: Fields[], language: 'ru' | 'en', secondPass: boolean, evidenceIds = false): LLMMessage[] {
   return [{ role: 'system', content: [
@@ -95,10 +100,10 @@ function messages(scope: string, batch: Fields[], language: 'ru' | 'en', secondP
       : 'Every evidence item MUST be an object with exactly two string keys: {"field":"website_text","quote":"<verbatim substring of that field in this row>"}. Allowed field values: company, website, category, description, vacancy_title, website_text. Each quote must contain 1-400 characters from a NONEMPTY supplied field. Evidence contains at most 3 items; never pad it with empty quotes. Never return evidence as strings, {"text":...}, or objects missing field or quote.',
     'When the supplied facts do not support a decision, return status needs_review and ' + (evidenceIds ? 'evidence_ids' : 'evidence') + ': []. Do not infer activity from a company name or registry code.',
     'A broad sector description or general service category can coexist with a narrower target activity; it is not evidence that the target activity is absent. Treat short website excerpts as incomplete. Return irrelevant only when the cited facts establish an incompatible business; otherwise, if the target activity is unproven, return needs_review.',
-    'The reason must follow from the cited service facts. Do not claim that a company works exclusively in one area, or lacks the target service, when the excerpts merely omit other activities.',
+    'The reason must follow from the cited service facts. Keep each reason concise, at most 240 characters. Do not claim that a company works exclusively in one area, or lacks the target service, when the excerpts merely omit other activities.',
     secondPass ? 'Independent second look using website evidence: reconsider provisional rejections AND uncertainty.' : 'Initial review: keep uncertainty explicit instead of guessing.',
     'Reasons in ' + (language === 'ru' ? 'Russian' : 'English') + '. JSON only: {"decisions":[{"i":0,"status":"needs_review","reason":"...","' + (evidenceIds ? 'evidence_ids' : 'evidence') + '":[]}]}',
-  ].join('\n') }, { role: 'user', content: scope + '\nRows, local indices 0..' + (batch.length - 1) + ':\n' + JSON.stringify(batch.map((fields, i) => ({ i, ...fields }))) }];
+  ].join('\n') }, { role: 'user', content: scope + '\nReturn exactly ' + batch.length + ' decisions. Include EVERY local i exactly once: ' + batch.map((_, i) => i).join(', ') + '. Never return a partial list.\nRows, local indices 0..' + (batch.length - 1) + ':\n' + JSON.stringify(batch.map((fields, i) => ({ i, ...fields }))) }];
 }
 function supportedDecision(raw: z.infer<typeof outputDecision>, fields: Fields, contextHash: string, attempts: number, secondPass: boolean): VeRelevanceDecision {
   const evidence = checkedEvidence(raw, fields);
@@ -360,15 +365,24 @@ export async function findIrrelevantRows(input: {
     finishWebsite(entry);
     await save();
   };
-  const classify = async (batch: Entry[], secondPass: boolean) => {
-    const schema = z.object({ decisions: z.array(outputDecision).length(batch.length) }).superRefine((data, ctx) => {
+  const classify = async (batch: Entry[], secondPass: boolean, recovering = false): Promise<void> => {
+    const schema = z.object({ decisions: z.array(outputDecision.extend({ i: z.number().int().min(0).max(batch.length - 1) })).length(batch.length) }).superRefine((data, ctx) => {
       const ids = new Set(data.decisions.map((item) => item.i));
       if (ids.size !== batch.length || data.decisions.some((item) => item.i >= batch.length)) ctx.addIssue({ code: 'custom', message: 'Every local i must occur exactly once' });
     });
+    // Verified with Requesty's default gate model. Other configured providers
+    // retain JSON mode until their native schema support has been verified.
+    // Provider constraints do not replace local completeness/evidence checks.
+    const jsonSchema = /^(?:openai\/)?gpt-4o-mini(?:-\d{4}-\d{2}-\d{2})?$/.test(model)
+      ? { name: 've_relevance_batch', schema: z.toJSONSchema(schema, { io: 'input', override: ({ jsonSchema }) => {
+        if (jsonSchema.type === 'object') jsonSchema.additionalProperties = false;
+      } }) } : undefined;
+    let classified = false;
     try {
       const llm = await invoke(messages(scope, batch.map((entry) => entry.fields), input.language, secondPass), schema,
-        { model, maxTokens: 5000, requireCompleteJson: true, signal: signal ?? undefined });
+        { model, maxTokens: 5000, requireCompleteJson: true, jsonSchema, ...(recovering ? { maxSchemaAttempts: 1 as const } : {}), signal: signal ?? undefined });
       signal?.throwIfAborted(); const data = schema.parse(llm.data);
+      classified = true;
       const repair: Array<{ entry: Entry; raw: z.infer<typeof outputDecision> }> = [];
       for (const raw of data.decisions) {
         const entry = batch[raw.i];
@@ -381,6 +395,19 @@ export async function findIrrelevantRows(input: {
     } catch (e) {
       signal?.throwIfAborted(); if (e instanceof Error && e.name === 'AbortError') throw e;
       if (e instanceof VeRelevanceCheckpointError) throw e;
+      const diagnostic = getLLMValidationDiagnostic(e, ['decisions', 'i', 'status', 'reason', 'evidence', 'field', 'quote']);
+      if (diagnostic) input.log?.('[relevanceGate] invalid response: ' + JSON.stringify({ ...diagnostic, companies: batch.length, secondPass, recovering }));
+      // One malformed large response must not strand the whole collection.
+      // Retry only the unclassified batch, once in smaller complete packets.
+      // Each packet keeps the same admission guards and saves its own checkpoint;
+      // the first failing recovery packet stops further calls as usual.
+      if (!classified && diagnostic && !recovering && batch.length > RECOVERY_BATCH_SIZE) {
+        input.log?.('[relevanceGate] повторная проверка пакета группами по ' + RECOVERY_BATCH_SIZE);
+        for (let offset = 0; offset < batch.length && !stopProviderCalls; offset += RECOVERY_BATCH_SIZE) {
+          await classify(batch.slice(offset, offset + RECOVERY_BATCH_SIZE), secondPass, true);
+        }
+        return;
+      }
       stopProviderCalls = true;
       const billing = isVeProviderBillingError(e), transient = transientProviderError(e);
       transientFailure ||= transient; permanentFailure ||= !transient;

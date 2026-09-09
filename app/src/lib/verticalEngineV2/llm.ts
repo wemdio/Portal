@@ -1,6 +1,6 @@
 /**
  * LLM-хелпер «Движка вертикалей». Копия паттерна salesAiAnalysis/llm.ts:
- * Requesty router (OpenAI-compatible), response_format: json_object +
+ * Requesty router (OpenAI-compatible), json_object (opt-in strict json_schema) +
  * Zod-валидация + 1 retry с фидбэком об ошибке, учёт токенов/стоимости.
  *
  * Отличия от salesAiAnalysis:
@@ -151,12 +151,58 @@ export interface LLMTextResult {
   finishReason?: string;
 }
 
+interface LLMValidationDetails {
+  kind: 'json_syntax' | 'schema' | 'truncated';
+  finishReason?: string;
+  attempts: number;
+}
+
 export class LLMValidationError extends Error {
   constructor(message: string, public readonly rawText: string, public readonly zodError?: unknown,
-    public readonly usage?: LLMUsage) {
+    public readonly usage?: LLMUsage, public readonly validation?: LLMValidationDetails) {
     super(message);
     this.name = 'LLMValidationError';
   }
+}
+
+export interface LLMValidationDiagnostic {
+  kind: LLMValidationDetails['kind'] | 'unknown';
+  finishReason?: 'stop' | 'length' | 'content_filter' | 'tool_calls' | 'function_call' | 'other';
+  attempts?: number;
+  responseChars?: number;
+  issueCount?: number;
+  issues?: Array<{ code: string; path: Array<string | number> }>;
+}
+
+/** Safe for job logs: allow only caller-supplied static schema keys, never issue messages or response values. */
+export function getLLMValidationDiagnostic(
+  error: unknown,
+  safePathKeys: readonly string[] = [],
+): LLMValidationDiagnostic | undefined {
+  const validation = error instanceof LLMValidationError ? error : undefined;
+  const zodError = validation?.zodError instanceof z.ZodError ? validation.zodError
+    : error instanceof z.ZodError ? error : undefined;
+  if (!validation && !zodError) return undefined;
+  const reason = validation?.validation?.finishReason;
+  const knownReasons = ['stop', 'length', 'content_filter', 'tool_calls', 'function_call'] as const;
+  const finishReason = knownReasons.find((value) => value === reason) ?? (reason === undefined ? undefined : 'other');
+  const allowedKeys = new Set(safePathKeys);
+  const allowedCodes = new Set<string>(Object.values(z.ZodIssueCode));
+  return {
+    kind: validation?.validation?.kind ?? (zodError ? 'schema' : 'unknown'),
+    ...(validation ? { responseChars: validation.rawText.length } : {}),
+    ...(validation?.validation ? { attempts: validation.validation.attempts } : {}),
+    ...(finishReason ? { finishReason } : {}),
+    ...(zodError ? {
+      issueCount: zodError.issues.length,
+      issues: zodError.issues.slice(0, 8).map((issue) => ({
+        code: allowedCodes.has(issue.code) ? issue.code : 'custom',
+        path: issue.path.slice(0, 12).map((part) =>
+          typeof part === 'number' && Number.isSafeInteger(part) && part >= 0 ? part
+            : typeof part === 'string' && allowedKeys.has(part) ? part : '*'),
+      })),
+    } : {}),
+  };
 }
 
 /**
@@ -182,6 +228,8 @@ interface LLMCallOptions {
   model: string;
   maxTokens?: number;
   signal?: AbortSignal;
+  /** Opt in only for models/providers verified to support strict structured outputs. */
+  jsonSchema?: { name: string; schema: Record<string, unknown> };
   /** Classification must not treat a repaired/truncated exclusion list as complete. */
   requireCompleteJson?: boolean;
   /** Narrow callers can reserve exactly one provider request; defaults stay unchanged. */
@@ -257,7 +305,7 @@ async function rawCall(
   maxTokens: number,
   jsonMode: boolean,
   signal: AbortSignal,
-  opts?: Pick<LLMCallOptions, 'maxHttpAttempts' | 'onUsage'>,
+  opts?: Pick<LLMCallOptions, 'maxHttpAttempts' | 'onUsage' | 'jsonSchema'>,
 ): Promise<{ text: string; response: RequestyResponse }> {
   let lastError: Error | null = null;
 
@@ -278,7 +326,9 @@ async function rawCall(
           model,
           messages: jsonMode ? withJsonModeHint(messages) : messages,
           max_tokens: maxTokens,
-          ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+          ...(jsonMode ? { response_format: opts?.jsonSchema
+            ? { type: 'json_schema', json_schema: { name: opts.jsonSchema.name, strict: true, schema: opts.jsonSchema.schema } }
+            : { type: 'json_object' } } : {}),
           ...(scope ? { requesty: { metadata: {
             feature: 'vertical_engine_v2', project_id: scope.projectId,
             job_id: scope.jobId, stage: scope.stage, ...(scope.baseId ? { base_id: scope.baseId } : {}),
@@ -378,7 +428,7 @@ export function tryRepairTruncatedJson(text: string): unknown | null {
 
 /**
  * Один LLM-вызов с response_format=json_object + Zod-валидация ответа.
- * При невалидном JSON — 1 retry с system-фидбэком об ошибке. Если и второй
+ * При невалидном JSON — 1 retry с фидбэком об ошибке. Если и второй
  * раз невалидно — бросает LLMValidationError (воркер помечает job failed).
  */
 export async function callLLMWithSchema<T>(
@@ -397,18 +447,30 @@ async function callLLMWithSchemaWithinDeadline<T>(
 ): Promise<LLMResult<T>> {
   const maxTokens = opts.maxTokens ?? 4096;
 
-  const attempts: Array<{ text: string; error?: string }> = [];
+  const attempts: Array<{
+    text: string;
+    error: string;
+    kind: LLMValidationDetails['kind'];
+    finishReason?: string;
+    zodError?: z.ZodError;
+  }> = [];
   const total: LLMUsage = { tokensUsed: 0, promptTokens: 0, completionTokens: 0, costUsd: 0 };
 
   for (let attempt = 0; attempt < (opts.maxSchemaAttempts ?? 2); attempt++) {
     signal.throwIfAborted();
     const currentMessages: LLMMessage[] = [...messages];
     if (attempt > 0 && attempts[0]) {
+      // A prefix of a valid JSON array looks like a truncated answer and can
+      // teach the retry to return only that prefix. Replay intact or omit it.
+      const replayPrevious = attempts[0].text.length <= 32_000;
+      if (replayPrevious) currentMessages.push({ role: 'assistant', content: attempts[0].text });
       currentMessages.push(
-        { role: 'assistant', content: attempts[0].text.slice(0, 2000) },
         { role: 'user', content:
           `Твой предыдущий ответ не прошёл валидацию JSON-схемы. Ошибка:\n` +
           `${attempts[0].error}\n\n` +
+          (replayPrevious ? '' : 'Предыдущий ответ слишком длинный и здесь полностью опущен.\n') +
+          `Сгенерируй заново ПОЛНЫЙ результат по исходному запросу, включая ВСЕ исходные строки, если они были заданы. ` +
+          `Не возвращай только исправленные элементы или фрагмент предыдущего ответа. ` +
           `Верни валидный JSON строго по схеме. Никаких markdown-фенсов, никакого текста до/после.`,
         },
       );
@@ -422,8 +484,9 @@ async function callLLMWithSchemaWithinDeadline<T>(
     total.tokensUsed += tokensUsed;
     total.costUsd += costUsd;
 
-    if (opts.requireCompleteJson && response.choices?.[0]?.finish_reason === 'length') {
-      attempts.push({ text, error: 'Response was truncated; return the complete JSON result.' });
+    const finishReason = response.choices?.[0]?.finish_reason;
+    if (opts.requireCompleteJson && finishReason === 'length') {
+      attempts.push({ text, finishReason, kind: 'truncated', error: 'Response was truncated; return the complete JSON result.' });
       continue;
     }
 
@@ -439,7 +502,7 @@ async function callLLMWithSchemaWithinDeadline<T>(
       // скобки — спасаем то, что успело сгенерироваться, вместо жёсткого фейла.
       parsed = opts.requireCompleteJson ? null : tryRepairTruncatedJson(cleaned);
       if (parsed === null) {
-        attempts.push({ text, error: `JSON.parse failed: ${e instanceof Error ? e.message : String(e)}` });
+        attempts.push({ text, finishReason, kind: 'json_syntax', error: `JSON.parse failed: ${e instanceof Error ? e.message : String(e)}` });
         continue;
       }
     }
@@ -448,6 +511,9 @@ async function callLLMWithSchemaWithinDeadline<T>(
     if (!validated.success) {
       attempts.push({
         text,
+        finishReason,
+        kind: 'schema',
+        zodError: validated.error,
         error: JSON.stringify(validated.error.format()).slice(0, 800),
       });
       continue;
@@ -463,7 +529,8 @@ async function callLLMWithSchemaWithinDeadline<T>(
   const last = attempts[attempts.length - 1]!;
   throw new LLMValidationError(
     `LLM вернул невалидный JSON (${attempts.length} попыток): ${last.error}`,
-    last.text, undefined, total,
+    last.text, last.zodError, total,
+    { kind: last.kind, finishReason: last.finishReason, attempts: attempts.length },
   );
 }
 

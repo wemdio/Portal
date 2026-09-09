@@ -45,6 +45,7 @@ import {
   runBoundContactDeliveries,
 } from '@/lib/verticalEngineV2/contactDeliveryScheduler';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import { runVeOutreachPreparations } from '@/lib/verticalEngineV2/outreachPreparation';
 import type { VeJob, VeStage } from '@/lib/verticalEngineV2/types';
 
 const WORKER_ID = `vertical-engine-v2-${process.pid}`;
@@ -351,6 +352,7 @@ async function handleJob(job: VeJob) {
 
   await accumulateProjectUsage(job.project_id, tokensUsed, costUsd);
   await enqueueNextResearchStage(job);
+  if (job.stage === 'base_analyze' || job.stage === 'template') { lastOutreachPreparationAt = 0; await tickOutreachPreparation(); }
   log('info', `Job ${job.id} (${job.stage}) → done (+${tokensUsed} tok, $${costUsd.toFixed(6)})`);
 }
 
@@ -434,7 +436,18 @@ async function failJob(job: VeJob, err: unknown) {
 
 }
 
+let lastOutreachPreparationAt = 0;
+let outreachPreparationInFlight = false;
+async function tickOutreachPreparation() {
+  if (shouldStop() || outreachPreparationInFlight || Date.now() - lastOutreachPreparationAt < 10_000) return;
+  outreachPreparationInFlight = true; lastOutreachPreparationAt = Date.now();
+  try { await runVeOutreachPreparations(db); }
+  catch (error) { log('warn', `[outreach] preparation tick: ${error instanceof Error ? error.message : 'unavailable'}`); }
+  finally { outreachPreparationInFlight = false; }
+}
+
 async function pollOnce(): Promise<boolean> {
+  await tickOutreachPreparation();
   const job = await claimJob();
   if (!job) return false;
   try {

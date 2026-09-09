@@ -15,7 +15,7 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-// POST — поставить генерацию шаблона 85/15 по проанализированной базе.
+// POST — подготовить финальные письма по проанализированной базе.
 // База должна пройти стадию base_analyze (status='analyzed'), иначе 409.
 // Дедуп: активная (pending/running) template-задача на эту базу уже есть →
 // возвращаем её со статусом 200, новую не создаём.
@@ -73,6 +73,17 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         .select()
         .single();
       if (jobErr || !job) {
+        // Preparation and a manual retry can both pass the read above. The
+        // database's active-template index chooses one; return that job instead
+        // of reporting a failed generation or creating another paid request.
+        if (jobErr?.code === '23505') {
+          const { data: racedJobs, error: racedError } = await supabaseAdmin.from('ve_jobs')
+            .select('*').eq('project_id', base.project_id).eq('stage', 'template').in('status', ['pending', 'running']);
+          if (racedError) return jsonError('Не удалось проверить уже запущенную подготовку писем. Обновите страницу.', 503);
+          const winner = (racedJobs ?? []).find(candidate => (candidate.payload as { base_id?: string } | null)?.base_id === id);
+          if (winner) return NextResponse.json({ ok: true, job: winner });
+          return jsonError('Подготовка писем уже изменилась. Обновите страницу перед повторной попыткой.', 409);
+        }
         await logError('tools.vertical-engine-v2.template.enqueue_failed', jobErr, { userId, baseId: id });
         return jsonError(jobErr?.message ?? 'Не удалось поставить задачу', 500);
       }

@@ -71,6 +71,7 @@ function portalDb() {
           id: TEMPLATE_ID,
           base_id: BASE_ID,
           status: 'ready',
+          updated_at: '2026-09-09T10:00:00.000Z',
           launch_info: null,
           letters: [{ subject: 'Тема', body: 'Письмо', wait_days: 0 }],
         },
@@ -107,6 +108,10 @@ function portalDb() {
       }],
     },
     rpcHandlers: {
+      ve_reserve_final_template_launch: async (params, db) => {
+        await db.from('ve_segmentation_audits').update({ launch_status: 'running', launch_reservation_id: params.p_reservation_id }).eq('id', params.p_audit_id);
+        return { data: true };
+      },
       ve_finalize_template_launch: async () => ({ data: { finalized: true } }),
       ve_bind_contact_delivery_plan: async () => ({ data: { bound: true, replayed: false } }),
       ve_finalize_template_contact_delivery: async () => ({ data: { finalized: true } }),
