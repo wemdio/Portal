@@ -256,6 +256,11 @@ export interface Lead {
   title?: string | null;
   phone?: string | null;
   website?: string | null;
+  /** Provider metadata retained from the originally uploaded lead. */
+  company_domain?: string | null;
+  payload?: Record<string, unknown> | null;
+  /** Raw API v2 spelling (campaign_id remains the caller-facing alias). */
+  campaign?: string | null;
   linkedin_url?: string | null;
   campaign_id?: string | null;
   lead_list_id?: string | null;
