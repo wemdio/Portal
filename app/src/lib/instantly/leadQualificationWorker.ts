@@ -38,7 +38,8 @@ import {
   sendHandoffNow,
   type PendingHandoffRow,
 } from './handoffSender';
-import type { Email } from './types';
+import type { Email, Lead } from './types';
+import { resolveLeadContactMetadata } from './leadContactMetadata';
 import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
 import { resolveInstantlyAccountId } from './accounts';
 import { createQualificationAiCheckpointStore } from './qualificationAiCheckpoint';
@@ -1667,25 +1668,22 @@ export async function qualifyOneReply(
 
   const campaignName = await resolveCampaignName(campaignId, accountId);
 
-  let leadName: string | undefined;
-  let companyName: string | undefined;
-  // Телефон/сайт — для авто-строки гостевой таблицы лидов (в саму квалификацию
-  // не пишутся: у instantly_lead_qualifications таких колонок нет).
-  let leadPhone: string | undefined;
-  let leadWebsite: string | undefined;
+  let leadMetadata: Lead[] = [];
   try {
     const leads = await instantly.getLeadsByEmail({ email: leadEmail, campaign_id: campaignId }, { accountId });
-    const lead = leads?.[0];
-    if (lead) {
-      leadName =
-        [lead.first_name, lead.last_name].filter(Boolean).join(' ') || undefined;
-      companyName = lead.company_name ?? undefined;
-      leadPhone = lead.phone?.trim() || undefined;
-      leadWebsite = lead.website?.trim() || undefined;
-    }
+    leadMetadata = Array.isArray(leads) ? leads : [];
   } catch {
     // lead metadata is optional enrichment
   }
+  // The loaded base also lives in payload/custom_variables. Reply fallback
+  // retains the responder's signature, never quoted outbound contact details.
+  // Phone/site belong to the board, not instantly_lead_qualifications.
+  const { leadName, companyName, phone: leadPhone, website: leadWebsite } = resolveLeadContactMetadata({
+    leads: leadMetadata,
+    leadEmail,
+    campaignId,
+    replyBody: (result.threadContext?.replyEmail ?? effectiveReply).body,
+  });
 
   const replyText = result.threadContext
     ? getBodyText(result.threadContext.replyEmail.body)
@@ -1716,8 +1714,8 @@ export async function qualifyOneReply(
       ...qualificationOwnerSnapshot,
       campaign_name: campaignName,
       lead_email: leadEmail,
-      lead_name: leadName,
-      company_name: companyName,
+      lead_name: leadName ?? undefined,
+      company_name: companyName ?? undefined,
       thread_id: effectiveReply.thread_id,
       reply_subject: effectiveReply.subject ?? null,
       reply_preview: replyText.slice(0, 300) || null,

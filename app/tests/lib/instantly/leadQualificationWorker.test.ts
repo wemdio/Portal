@@ -966,11 +966,15 @@ describe('pollAndQualifyReplies', () => {
     process.env.GUEST_TOKEN_SECRET = 'test-board-secret';
     getLeadsByEmail.mockResolvedValueOnce([
       {
+        email: 'lead@example.com',
+        campaign: 'linked-campaign',
         first_name: 'Иван',
         last_name: 'Петров',
-        company_name: 'ACME',
-        phone: '+7 900 111-22-33',
-        website: 'acme.ru',
+        company_name: null,
+        phone: null,
+        website: null,
+        custom_variables: { 'Название компании': 'ACME' },
+        payload: { phoneNumber: '+7 900 111-22-33', website: 'acme.ru' },
       },
     ]);
     qualifyReply.mockResolvedValueOnce({
