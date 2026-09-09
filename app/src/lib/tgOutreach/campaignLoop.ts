@@ -76,6 +76,12 @@ const TG_FORWARD_TIMEOUT_MS = Number(process.env.TG_OUTREACH_FORWARD_TIMEOUT_MS)
  * механизма и не ломал его логику повторной попытки.
  */
 const TG_DIALOGS_TIMEOUT_MS = Number(process.env.TG_OUTREACH_DIALOGS_TIMEOUT_MS) || 240_000;
+/**
+ * Пауза перед отметкой входящего «прочитано». Настраивалась раньше полем
+ * pre_read_delay_range, 09.09.2026 убрана с экрана и зафиксирована: живой
+ * человек не открывает чат в ту же секунду, и настраивать это незачем.
+ */
+const PRE_READ_DELAY_RANGE_SEC: [number, number] = [5, 15];
 
 const BUCKET_SESSIONS = 'tg-outreach-sessions';
 const SESSION_CACHE_MAX = 100;
@@ -918,7 +924,7 @@ export async function handleChat(
     return { replied: false, triggerType: null };
   }
 
-  const preReadDelay = randomRange(tg.pre_read_delay_range) * 1000;
+  const preReadDelay = randomRange(PRE_READ_DELAY_RANGE_SEC) * 1000;
   if (shouldStop) await interruptibleSleep(preReadDelay, shouldStop); else await sleep(preReadDelay);
 
   try {
@@ -1152,6 +1158,9 @@ async function handleFollowUp(
     .eq('account_id', account.id)
     .eq('status', 'none')
     .eq('can_send', true)
+    // Служебный чат Telegram не получает и напоминаний: строка могла остаться
+    // в базе до скипа в цикле, и без этого фильтра воркер писал бы 777000.
+    .neq('tg_user_id', TG_SERVICE_NOTIFICATIONS_USER_ID)
     .lt('last_message_at', cutoff)
     .limit(10);
 
@@ -1289,6 +1298,9 @@ async function handleMissedRepliesLastDays(
     .eq('account_id', account.id)
     .eq('status', 'none')
     .eq('can_send', true)
+    // Тот же запрет, что у напоминаний: старые строки со служебным чатом
+    // Telegram не должны получать догоняющих ответов.
+    .neq('tg_user_id', TG_SERVICE_NOTIFICATIONS_USER_ID)
     .gte('last_message_at', cutoffIso)
     .order('last_message_at', { ascending: true })
     .limit(200);
