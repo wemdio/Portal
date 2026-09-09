@@ -351,7 +351,12 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
   const quota = remainingDailyQuota({ perDay, sentToday });
   if (quota <= 0) return result;
 
-  const baseIds = await fdb.loadCampaignBaseIds(db, campaignId);
+  // Из включённых баз кампании аккаунту доступны те, где он в списке
+  // рассыльщиков (пустой список у базы = шлют все). Аккаунт, исключённый из
+  // всех баз, уходит отсюда с пустым результатом — диалоги и фоллапы при этом
+  // остаются за ним: фильтр только на первые касания.
+  const campaignBases = await fdb.loadCampaignBases(db, campaignId);
+  const baseIds = fdb.basesAllowedForAccount(campaignBases, account.id);
   if (!baseIds.length) return result;
 
   /**

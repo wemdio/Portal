@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
+import { sanitizeSendingAccountIds } from '@/lib/tgOutreach/bases';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -99,7 +100,7 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
       const { id } = await ctx.params;
 
       const body = (await req.json().catch(() => null)) as
-        { name?: string; notes?: string; source_chats?: string } | null;
+        { name?: string; notes?: string; source_chats?: string; sending_account_ids?: string[] } | null;
       if (!body) return jsonError('Неверный JSON', 400);
 
       const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -111,11 +112,25 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
       if (typeof body.notes === 'string') patch.notes = body.notes.trim();
       if (typeof body.source_chats === 'string') patch.source_chats = body.source_chats.trim();
 
+      // Список рассыльщиков проверяем против кампании-владельца базы. Базе без
+      // кампании выбирать некого — она ни в одной рассылке не участвует.
+      if (Array.isArray(body.sending_account_ids)) {
+        const { data: base } = await auth.supabase
+          .from('tg_outreach_bases')
+          .select('campaign_id')
+          .eq('id', id)
+          .maybeSingle();
+        if (!base) return jsonError('База не найдена', 404);
+        const owner = (base as { campaign_id: string | null }).campaign_id;
+        if (!owner) return jsonError('У базы нет кампании — список рассыльщиков ей не нужен', 400);
+        patch.sending_account_ids = await sanitizeSendingAccountIds(auth.supabase, owner, body.sending_account_ids);
+      }
+
       const { data, error } = await auth.supabase
         .from('tg_outreach_bases')
         .update(patch)
         .eq('id', id)
-        .select('id, name, notes, source_chats')
+        .select('id, name, notes, source_chats, sending_account_ids')
         .maybeSingle();
       if (error) return jsonError(error.message, 500);
       if (!data) return jsonError('База не найдена', 404);
