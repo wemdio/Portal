@@ -37,6 +37,11 @@ import {
   FileSpreadsheet,
   LayoutDashboard,
   PowerOff,
+  FolderPlus,
+  Inbox,
+  Folder,
+  Move,
+  Pencil,
 } from 'lucide-react';
 import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import BaseComparison from '@/components/tg-outreach/BaseComparison';
@@ -48,6 +53,8 @@ import type {
   OutreachCampaign,
   OutreachAccount,
   OutreachProxy,
+  OutreachProxyList,
+  OutreachProxyListStats,
   OutreachDialog,
   OutreachProcessed,
   OutreachLog,
@@ -1964,6 +1971,13 @@ function BulkActionsBar({
   /** Что именно проверяем — по умолчанию аккаунты, у прокси свои слова. */
   checkLabel,
   checkTitle,
+  /**
+   * Дополнительные кнопки между «Проверить» и «Удалить» — для разовых
+   * действий, специфичных типу строк (например, «Переместить в список» у
+   * прокси). Не children, чтобы случайно не засунуть сюда разметку вне
+   * кнопок — иначе визуальный ряд в баре ломается.
+   */
+  extra,
 }: {
   selectedCount: number;
   deleting: boolean;
@@ -1974,6 +1988,7 @@ function BulkActionsBar({
   onCheck?: () => void;
   checkLabel?: string;
   checkTitle?: string;
+  extra?: React.ReactNode;
 }) {
   if (selectedCount === 0) return null;
   return (
@@ -1993,6 +2008,7 @@ function BulkActionsBar({
           {checkLabel ?? 'Проверить аккаунты'}
         </button>
       )}
+      {extra}
       <button
         type="button"
         onClick={onDelete}
@@ -2807,6 +2823,12 @@ function CampaignAccountsTab({
     [accounts, sendingStats],
   );
 
+  /** Кого Telegram хоть раз за сутки прижал: ошибка или предупреждение в логах.
+   *  FLOOD_WAIT, PEER_FLOOD, повторное подключение и т.п. — это и читается
+   *  сводным словом «ограничены». Считается поверх alive/dead — отдельно от
+   *  статуса проверки и отдельно от фактических отправок. */
+  const restrictedCount = accountStats.withErrors + accountStats.withWarningsOnly;
+
   /** Кто именно не рассылает — под курсор на плашке, чтобы не искать глазами. */
   const notSendingNames = useMemo(
     () => accounts
@@ -2843,15 +2865,6 @@ function CampaignAccountsTab({
       { now: healthNow, silentDays: DEAD_SILENT_DAYS },
     ),
     [accounts, sendingStats, proxies, campaignStatus, firstTouchPerDay, queuePending, healthNow],
-  );
-
-  /** Разбивка мёртвых по причине — человеческими ярлыками, для подсказки. */
-  const deadBreakdown = useMemo(
-    () => Object.entries(accountStats.byStatus)
-      .sort((a, b) => b[1] - a[1])
-      .map(([st, n]) => `${CHECK_LABEL[st]?.text ?? st} — ${n}`)
-      .join(', '),
-    [accountStats.byStatus],
   );
 
   /**
@@ -2973,14 +2986,28 @@ function CampaignAccountsTab({
       </div>
 
       {/* Сводка идёт до таблицы: вопрос «сколько из партии рабочих» встаёт
-          раньше, чем вопрос про конкретную строку. Возраст проверки стоит
-          рядом с числами намеренно — зелёное «жив 20» на позавчерашней
-          проверке читается как «сейчас всё хорошо», а это не так. */}
+          раньше, чем вопрос про конкретную строку. Три числа отвечают на три
+          разных вопроса: «живо» — про разрешения (последняя проверка ok),
+          «ограничены» — про работу за сутки (были ли сбои в логах),
+          «рассылали за 24ч» — про факт. Возраст проверки стоит рядом
+          намеренно — зелёное «живо 50/53» на позавчерашней проверке читается
+          как «сейчас всё хорошо», а это не так. */}
       {!loading && accounts.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-[11px]">
-          {/* Первым числом — то, ради чего экран открывают: сколько аккаунтов
-              реально пишут людям. «Жив» и «Активен» отвечают только на вопрос
-              о разрешениях. */}
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.alive > 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}
+            title="Последняя проверка вернула «жив». Проверку теперь ставит и сама рассылка: каждый успешный круг аккаунта — это подтверждение, что он жив, без остановки кампании."
+          >
+            живо {accountStats.alive} из {accounts.length}
+          </span>
+
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${restrictedCount > 0 ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-400'}`}
+            title="За сутки в логах аккаунта были ошибки или предупреждения — обычно это временные ограничения Telegram (FLOOD_WAIT, PEER_FLOOD), разрыв соединения со второй попытки или отложенный контакт. Считается по факту работы за сутки, а не по статусу проверки."
+          >
+            ограничены {restrictedCount} из {accounts.length}
+          </span>
+
           <span
             className={`rounded-md px-2 py-1 font-medium ${sendingCount > 0 ? 'bg-indigo-50 text-indigo-700' : 'bg-rose-50 text-rose-700'}`}
             title={
@@ -2988,71 +3015,12 @@ function CampaignAccountsTab({
               + (notSendingNames ? ` Не рассылают: ${notSendingNames}${accounts.length - sendingCount > 12 ? ' и другие' : ''}. Причина по каждому — в колонке «Рассылка».` : '')
             }
           >
-            рассылают {sendingCount} из {accounts.length}
-          </span>
-
-          <span className="mx-1 h-4 w-px bg-gray-200" aria-hidden />
-
-          <span
-            className="rounded-md bg-emerald-50 px-2 py-1 font-medium text-emerald-700"
-            title="Последняя проверка вернула «жив». Проверку теперь ставит и сама рассылка: каждый успешный круг аккаунта — это подтверждение, что он жив, без остановки кампании."
-          >
-            жив {accountStats.alive}
-          </span>
-          <span
-            className={`rounded-md px-2 py-1 font-medium ${accountStats.dead > 0 ? 'bg-rose-50 text-rose-700' : 'bg-gray-100 text-gray-500'}`}
-            title={deadBreakdown
-              ? `По причинам: ${deadBreakdown}`
-              : 'Аккаунтов с неудачной проверкой нет'}
-          >
-            не жив {accountStats.dead}
-          </span>
-          <span
-            className={`rounded-md px-2 py-1 font-medium ${accountStats.unchecked > 0 ? 'bg-gray-100 text-gray-600' : 'bg-gray-50 text-gray-400'}`}
-            title="Проверка ни разу не запускалась. Эти аккаунты не входят ни в «жив», ни в «не жив» — про них просто ничего не известно."
-          >
-            не проверялись {accountStats.unchecked}
-          </span>
-          {accountStats.disabled > 0 && (
-            <span
-              className="rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-700"
-              title="Выключены в портале — воркер их не берёт в работу вообще. Аккаунт выключается сам после трёх AUTH_KEY_DUPLICATED подряд; чинится завершением чужих сеансов и перевыпуском session_data."
-            >
-              выключены {accountStats.disabled}
-            </span>
-          )}
-
-          <span className="mx-1 h-4 w-px bg-gray-200" aria-hidden />
-
-          <span
-            className={`rounded-md px-2 py-1 font-medium ${accountStats.withErrors > 0 ? 'bg-rose-50 text-rose-700' : 'bg-gray-50 text-gray-400'}`}
-            title={`Аккаунты, у которых за сутки в логах были строки уровня «ошибка». Всего таких строк: ${accountStats.errorTotal}.`}
-          >
-            с ошибками за 24ч {accountStats.withErrors}
-          </span>
-          {accountStats.withWarningsOnly > 0 && (
-            <span
-              className="rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-700"
-              title="За сутки были только предупреждения, ошибок не было. Обычно это подключение со второй попытки или отложенный контакт."
-            >
-              только предупреждения {accountStats.withWarningsOnly}
-            </span>
-          )}
-
-          <span
-            className={`rounded-md px-2 py-1 font-medium ${freeProxies.length > 0 ? 'bg-gray-100 text-gray-600' : 'bg-amber-50 text-amber-700'}`}
-            title={
-              `Прокси в кампании: ${proxies.length}. Свободных — ${freeProxies.length}: только они и предлагаются при назначении. `
-              + 'Занятость считается по адресу и по всему порталу — один адрес это одно устройство для Telegram, '
-              + 'и два аккаунта на нём это повод для блокировки.'
-            }
-          >
-            свободных прокси {freeProxies.length} из {proxies.length}
+            рассылали за 24ч {sendingCount} из {accounts.length}
           </span>
 
           <span className="ml-auto text-[10px] text-gray-400">
             {accountStats.newestCheck === null ? (
-              'проверок ещё не было — «жив» и «не жив» показывать не из чего'
+              'проверок ещё не было — «живо» показывать не из чего'
             ) : (
               <>
                 проверка от{' '}
@@ -4844,11 +4812,43 @@ function ProxyVerdict({
   );
 }
 
+/**
+ * Ключ активного списка в UI: либо uuid, либо `null` = «Неопределённые»
+ * (виртуальный список, прокси с proxy_list_id IS NULL). Строковое
+ * представление для ключей в state.
+ */
+type ActiveProxyListKey = string | null;
+
 function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
+  const [lists, setLists] = useState<OutreachProxyList[]>([]);
+  const [activeList, setActiveList] = useState<ActiveProxyListKey>(null);
+  /** null = «Неопределённые»: счётчик рисуем отдельно, чтобы в сайдбаре
+   *  видеть, сколько прокси ещё не разнесено. */
+  const [undefinedCount, setUndefinedCount] = useState<number | null>(null);
+  /** Сколько в каждом именованном списке — нужно для сайдбара. Считается
+   *  одним запросом при загрузке: `select id, count(*)` по прокси. */
+  const [listCounts, setListCounts] = useState<Record<string, number>>({});
+
   const [proxies, setProxies] = useState<OutreachProxy[]>([]);
+  /** Сводка активного списка: работает/всего/средний возраст. null пока не
+   *  подгрузили. */
+  const [stats, setStats] = useState<OutreachProxyListStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [showBulk, setShowBulk] = useState(false);
+  const [showCreateList, setShowCreateList] = useState(false);
+  const [newListName, setNewListName] = useState('');
+  /** Переименование списка: id редактируемого списка и текущее значение. */
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  /** Удаление списка: id и состояние галочки «удалить прокси вместе со
+   *  списком». По умолчанию выключено — это безопасный вариант (прокси
+   *  уезжают в «Неопределённые»), и случайно снести 50 прокси одним
+   *  нажатием нельзя. */
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteProxiesToo, setDeleteProxiesToo] = useState(false);
+  /** Куда перетаскиваем сейчас: открывает модалку выбора списка. */
+  const [moveTarget, setMoveTarget] = useState<{ ids: string[]; fromList: ActiveProxyListKey } | null>(null);
   const [url, setUrl] = useState('');
   const [name, setName] = useState('');
   const [bulkText, setBulkText] = useState('');
@@ -4887,17 +4887,169 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     return () => clearInterval(timer);
   }, [checking]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    const res = await authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`);
-    if (res.ok) {
-      const d = await res.json() as { items: OutreachProxy[] };
-      setProxies(d.items);
+  /**
+   * Сайдбар: списки + «Неопределённые». Список прокси одного запроса
+   * хватает: `select count(*) ... group by proxy_list_id` даёт обе цифры
+   * разом — сколько в именованных списках и сколько без списка.
+   */
+  const loadSidebar = useCallback(async () => {
+    const [listsRes, countRes] = await Promise.all([
+      authFetch(`${API_BASE}/proxy-lists?campaign_id=${campaignId}`),
+      authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`),
+    ]);
+    if (listsRes.ok) {
+      const d = await listsRes.json() as { items: OutreachProxyList[] };
+      setLists(d.items ?? []);
     }
-    setLoading(false);
+    if (countRes.ok) {
+      const d = await countRes.json() as { items: OutreachProxy[] };
+      const counts: Record<string, number> = {};
+      let undefinedN = 0;
+      for (const p of d.items ?? []) {
+        if (p.proxy_list_id == null) {
+          undefinedN++;
+        } else {
+          counts[p.proxy_list_id] = (counts[p.proxy_list_id] ?? 0) + 1;
+        }
+      }
+      setListCounts(counts);
+      setUndefinedCount(undefinedN);
+    }
   }, [campaignId]);
 
-  useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
+  /** Прокси активного списка. С сервера сейчас нет фильтра по proxy_list_id,
+   *  поэтому берём все и фильтруем на клиенте — прокси 140 строк, мелочь. */
+  const loadActiveList = useCallback(async () => {
+    setLoading(true);
+    const [proxRes, statsRes] = await Promise.all([
+      authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`),
+      activeList === null
+        ? authFetch(`${API_BASE}/proxies/undefined/stats?campaign_id=${campaignId}`)
+        : authFetch(`${API_BASE}/proxy-lists/${activeList}/stats`),
+    ]);
+    if (proxRes.ok) {
+      const d = await proxRes.json() as { items: OutreachProxy[] };
+      const filtered = activeList === null
+        ? (d.items ?? []).filter(p => p.proxy_list_id == null)
+        : (d.items ?? []).filter(p => p.proxy_list_id === activeList);
+      setProxies(filtered);
+    } else {
+      setProxies([]);
+    }
+    if (statsRes.ok) {
+      const s = await statsRes.json() as OutreachProxyListStats;
+      setStats(s);
+    } else {
+      setStats(null);
+    }
+    setLoading(false);
+  }, [campaignId, activeList]);
+
+  useEffect(() => { queueMicrotask(() => { void loadSidebar(); }); }, [loadSidebar]);
+  useEffect(() => { queueMicrotask(() => { void loadActiveList(); }); }, [loadActiveList]);
+  // Смена списка сбрасывает выбор — выделенные строки не должны «перепрыгивать»
+  // в другой список: пользователь и не заметит, и bulk-операция сделает не то.
+  useEffect(() => { clear(); }, [activeList, clear]);
+
+  const reloadAll = useCallback(async () => {
+    await Promise.all([loadSidebar(), loadActiveList()]);
+  }, [loadSidebar, loadActiveList]);
+
+  const createList = async () => {
+    const n = newListName.trim();
+    if (!n) return;
+    setSaving(true);
+    setProxyError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/proxy-lists`, {
+        method: 'POST',
+        body: JSON.stringify({ campaign_id: campaignId, name: n }),
+      });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        setProxyError(errBody?.error ?? `Ошибка сервера (${res.status})`);
+        return;
+      }
+      const created = await res.json() as OutreachProxyList;
+      setNewListName('');
+      setShowCreateList(false);
+      setActiveList(created.id);
+      void loadSidebar();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /**
+   * Переименовать список. PUT /proxy-lists/[id] с body { name }.
+   * Сохраняем по Enter, отменяем по Escape — стандарт для inline-форм в этом UI.
+   */
+  const submitRename = async () => {
+    if (!renamingId) return;
+    const n = renameValue.trim();
+    if (!n) return;
+    setSaving(true);
+    setProxyError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/proxy-lists/${renamingId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ name: n }),
+      });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        setProxyError(errBody?.error ?? `Не удалось переименовать (${res.status})`);
+        return;
+      }
+      setRenamingId(null);
+      setRenameValue('');
+      void loadSidebar();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /**
+   * Удаление списка с двумя ветками:
+   *  - deleteProxiesToo = false: только DELETE /proxy-lists/[id]. Прокси
+   *    уезжают в «Неопределённые» по FK on delete set null.
+   *  - deleteProxiesToo = true: сначала POST /proxies/bulk-by-list (удалит
+   *    все прокси списка с отвязкой аккаунтов), потом DELETE /proxy-lists/[id].
+   *
+   * Двухшагово, а не одним server-RPC, чтобы UI-эффект был прозрачен по
+   * логам: видно отдельно «прокси удалены» и «список удалён». Случай, когда
+   * прокси удалились, а список — нет, обработан ниже: reload вернёт
+   * актуальное состояние, а прокси уже не вернуть (так и задумано).
+   */
+  const submitDelete = async () => {
+    if (!deletingId) return;
+    setSaving(true);
+    setProxyError(null);
+    try {
+      if (deleteProxiesToo) {
+        const res = await authFetch(`${API_BASE}/proxies/bulk-by-list`, {
+          method: 'POST',
+          body: JSON.stringify({ campaign_id: campaignId, list_id: deletingId }),
+        });
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+          setProxyError(errBody?.error ?? `Не удалось удалить прокси (${res.status})`);
+          return;
+        }
+      }
+      const res = await authFetch(`${API_BASE}/proxy-lists/${deletingId}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        setProxyError(errBody?.error ?? `Не удалось удалить список (${res.status})`);
+        return;
+      }
+      if (activeList === deletingId) setActiveList(null);
+      setDeletingId(null);
+      setDeleteProxiesToo(false);
+      void reloadAll();
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const addProxy = async () => {
     if (!url.trim()) return;
@@ -4906,7 +5058,12 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     try {
       const res = await authFetch(`${API_BASE}/proxies`, {
         method: 'POST',
-        body: JSON.stringify({ campaign_id: campaignId, url: url.trim(), name: name.trim() }),
+        body: JSON.stringify({
+          campaign_id: campaignId,
+          url: url.trim(),
+          name: name.trim(),
+          proxy_list_id: activeList,
+        }),
       });
       if (!res.ok) {
         const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -4914,7 +5071,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         return;
       }
       setUrl(''); setName(''); setShowAdd(false);
-      void load();
+      void reloadAll();
     } finally {
       setSaving(false);
     }
@@ -4929,7 +5086,12 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
       for (let i = 0; i < lines.length; i++) {
         const res = await authFetch(`${API_BASE}/proxies`, {
           method: 'POST',
-          body: JSON.stringify({ campaign_id: campaignId, url: lines[i], name: '' }),
+          body: JSON.stringify({
+            campaign_id: campaignId,
+            url: lines[i],
+            name: '',
+            proxy_list_id: activeList,
+          }),
         });
         if (!res.ok) {
           const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -4940,7 +5102,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         }
       }
       setBulkText(''); setShowBulk(false);
-      void load();
+      void reloadAll();
     } finally {
       setSaving(false);
     }
@@ -4994,13 +5156,13 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
       method: 'PUT',
       body: JSON.stringify({ is_active: !current }),
     });
-    void load();
+    void reloadAll();
   };
 
   const deleteProxy = async (id: string) => {
     if (!confirm('Удалить прокси? Аккаунты с этим прокси будут отвязаны.')) return;
     await authFetch(`${API_BASE}/proxies/${id}`, { method: 'DELETE' });
-    void load();
+    void reloadAll();
   };
 
   const deleteSelected = async () => {
@@ -5020,215 +5182,578 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         return;
       }
       clear();
-      void load();
+      void reloadAll();
     } finally {
       setBulkDeleting(false);
     }
   };
 
+  /**
+   * Переместить пачку прокси в выбранный список (или в «Неопределённые»).
+   * Один POST на всю пачку — см. /api/.../proxies/bulk-move.
+   */
+  const executeMove = async (targetList: ActiveProxyListKey) => {
+    if (!moveTarget) return;
+    const ids = moveTarget.ids;
+    setSaving(true);
+    setProxyError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/proxies/bulk-move`, {
+        method: 'POST',
+        body: JSON.stringify({
+          campaign_id: campaignId,
+          ids,
+          list_id: targetList,
+        }),
+      });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        setProxyError(errBody?.error ?? `Не удалось переместить (${res.status})`);
+        return;
+      }
+      setMoveTarget(null);
+      clear();
+      void reloadAll();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** Переместить один прокси прямо из строки — без модалки, чтобы частый
+   *  кейс «не глядя переложить один» не требовал двух кликов. */
+  const moveOne = async (id: string, fromList: ActiveProxyListKey, toList: ActiveProxyListKey) => {
+    setProxyError(null);
+    const res = await authFetch(`${API_BASE}/proxies/${id}/list`, {
+      method: 'PUT',
+      body: JSON.stringify({ list_id: toList }),
+    });
+    if (!res.ok) {
+      const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+      setProxyError(errBody?.error ?? `Не удалось переместить (${res.status})`);
+      return;
+    }
+    void reloadAll();
+  };
+
+  /** Списки для выбора в модалке перемещения. Исключаем тот, в котором сейчас
+   *  лежат выбранные — нет смысла «перенести в этот же список». */
+  const moveOptions = useMemo(() => {
+    const options: Array<{ key: ActiveProxyListKey; label: string; icon: typeof Folder }> = [
+      { key: null, label: 'Неопределённые', icon: Inbox },
+    ];
+    for (const l of lists) {
+      if (l.id !== moveTarget?.fromList) {
+        options.push({ key: l.id, label: l.name, icon: Folder });
+      }
+    }
+    return options;
+  }, [lists, moveTarget]);
+
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <span className="text-sm font-medium text-gray-700">
-          Прокси кампании <span className="text-gray-400 font-normal">({proxies.length})</span>
-        </span>
-        <div className="flex items-center gap-2">
-          <button type="button" onClick={() => { setShowBulk(!showBulk); setShowAdd(false); setProxyError(null); }}
-            className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
-            Массовое добавление
-          </button>
-          <button type="button" onClick={() => { setShowAdd(!showAdd); setShowBulk(false); setProxyError(null); }}
-            className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">
-            <Plus className="h-3.5 w-3.5" /> Добавить
-          </button>
-        </div>
-      </div>
-
-      {/* Без привязки к showAdd/showBulk: ошибка массового удаления приходит при
-          закрытых формах и иначе была бы не видна вообще. */}
-      {proxyError && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-          {proxyError}
-        </div>
-      )}
-
-      {showAdd && (
-        <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <label className="space-y-1">
-              <span className="text-[11px] font-medium text-gray-500">URL прокси</span>
-              <input value={url} onChange={e => setUrl(e.target.value)} placeholder="http://user:pass@host:port"
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
-            </label>
-            <label className="space-y-1">
-              <span className="text-[11px] font-medium text-gray-500">Название (необязательно)</span>
-              <input value={name} onChange={e => setName(e.target.value)} placeholder="Proxy 1"
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
-            </label>
-          </div>
-          <div className="flex gap-2">
-            <button type="button" onClick={() => { void addProxy(); }} disabled={saving || !url.trim()}
-              className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Сохранить'}
-            </button>
-            <button type="button" onClick={() => setShowAdd(false)}
-              className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
-          </div>
-        </div>
-      )}
-
-      {showBulk && (
-        <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
-          <p className="text-xs text-gray-500">Введите по одному URL прокси на строку:</p>
-          <textarea value={bulkText} onChange={e => setBulkText(e.target.value)} rows={5}
-            placeholder={'http://user:pass@host:port\nпо одному URL на строку'}
-            className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y font-mono" />
-          <div className="flex gap-2">
-            <button type="button" onClick={() => { void addBulk(); }} disabled={saving || !bulkText.trim()}
-              className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Добавить'}
-            </button>
-            <button type="button" onClick={() => setShowBulk(false)}
-              className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
-          </div>
-        </div>
-      )}
-
-      <BulkActionsBar
-        selectedCount={selectedIds.length}
-        deleting={bulkDeleting}
-        onClear={clear}
-        onDelete={() => { void deleteSelected(); }}
-        checking={checking}
-        canCheck
-        onCheck={() => { void checkSelected(); }}
-        checkLabel={checking
-          ? `Проверяю прокси (${selectedIds.length})… ${checkElapsed} с`
-          : `Проверить прокси (${selectedIds.length})`}
-        checkTitle="Проверить два раза подряд: отвечает ли сам прокси и открывается ли через него туннель до Telegram"
-      />
-
-      {/* Проверка сетевая и небыстрая: сорок прокси — около минуты. Молчащая
-          кнопка со спиннером на минуту читается как «всё зависло». */}
-      {checking && (
-        <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-500" />
-          Проверяю прокси: {selectedIds.length}. Идёт {checkElapsed} с — на сорок прокси уходит около
-          минуты, вкладку можно не трогать.
-        </div>
-      )}
-
-      {checkRun && checkRun.rows.length > 0 && (
-        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
-          <div className="flex items-start justify-between gap-3">
-            <span>
-              Проверено прокси: {checkRun.rows.length} в{' '}
-              {new Date(checkRun.checkedAt).toLocaleString('ru-RU', {
-                day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
-              })}
-              . Слева — отвечает ли сам прокси, справа — доходит ли через него Telegram:
-            </span>
-            <button type="button" onClick={() => setCheckRun(null)} className="cursor-pointer text-gray-400 hover:text-gray-600">
-              <X className="h-3.5 w-3.5" />
-            </button>
-          </div>
-          <ul className="mt-2 space-y-1.5">
-            {checkRun.rows.map((r) => (
-              <li key={r.id} className="flex flex-wrap items-center gap-1.5">
-                <span className="font-medium text-gray-800">{r.name || 'без названия'}</span>
-                <ProxyVerdict
-                  label="прокси"
-                  verdict={proxyVerdictWord(r)}
-                  ok={r.proxy_ok}
-                  latencyMs={r.proxy_latency_ms}
-                />
-                <ProxyVerdict
-                  label="Telegram"
-                  verdict={r.telegram_ok ? 'доходит' : r.proxy_ok ? 'не доходит' : 'не проверяли'}
-                  ok={r.telegram_ok}
-                  latencyMs={r.telegram_latency_ms}
-                  skipped={!r.proxy_ok && !r.telegram_ok}
-                />
-                {/* Технический код — для инженера в логах, словами — оператору. */}
-                <span className="text-gray-400">({r.status})</span>
-                {r.reason && <span className="text-gray-500">{r.reason}</span>}
-              </li>
-            ))}
-          </ul>
-          {/* Прокси удалили в другой вкладке, пока оператор выбирал строки. */}
-          {checkRun.missing > 0 && (
-            <div className="mt-2 text-gray-500">
-              Не нашлись в кампании: {checkRun.missing} — список на экране устарел, обновите страницу.
-            </div>
+    <div className="grid grid-cols-1 md:grid-cols-[220px_1fr] gap-4">
+      {/* Сайдбар списков. Виртуальный «Неопределённые» — первым, потому что
+          на старте у всех 140 прокси именно он. Иконка Inbox читается как
+          «всё подряд», не как именованная папка. */}
+      <aside className="space-y-1">
+        <button
+          type="button"
+          onClick={() => setActiveList(null)}
+          className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs transition cursor-pointer ${
+            activeList === null
+              ? 'bg-indigo-50 text-indigo-700 font-semibold'
+              : 'text-gray-700 hover:bg-gray-50'
+          }`}
+        >
+          <Inbox className="h-3.5 w-3.5 shrink-0" />
+          <span className="flex-1 truncate">Неопределённые</span>
+          {undefinedCount != null && (
+            <span className="text-[10px] text-gray-400">{undefinedCount}</span>
           )}
-        </div>
-      )}
+        </button>
 
-      {loading ? (
-        <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
-      ) : proxies.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
-          <Network className="mx-auto h-8 w-8 text-gray-300 mb-2" />
-          <p className="text-xs text-gray-400">Нет прокси. Добавьте для этой кампании.</p>
-        </div>
-      ) : (
-        <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[32px_1fr_80px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
-            <SelectAllCheckbox total={proxies.length} selectedCount={selectedIds.length} onChange={setAll} />
-            <span>URL / Название</span><span>Активен</span><span />
-          </div>
-          {proxies.map(p => {
-            const check = checkById.get(p.id);
-            return (
-            <div
-              key={p.id}
-              className={`grid grid-cols-[32px_1fr_80px_40px] gap-4 items-center px-4 py-2.5 ${isSelected(p.id) ? 'bg-indigo-50/60' : ''}`}
-            >
-              <input
-                type="checkbox"
-                checked={isSelected(p.id)}
-                onChange={() => toggle(p.id)}
-                aria-label={`Выбрать ${p.name || p.url}`}
-                className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
-              />
-              <div className="min-w-0">
-                {p.name && <p className="text-xs font-medium text-gray-800">{p.name}</p>}
-                <p className="text-xs text-gray-500 truncate font-mono">{p.url}</p>
-                {/* Итог последней проверки прямо в строке: список не
-                    перечитываем, показываем то, что ответила проверка. */}
-                {check && (
-                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px]">
-                    <ProxyVerdict
-                      label="прокси"
-                      verdict={proxyVerdictWord(check)}
-                      ok={check.proxy_ok}
-                      latencyMs={check.proxy_latency_ms}
-                    />
-                    <ProxyVerdict
-                      label="Telegram"
-                      verdict={check.telegram_ok ? 'доходит' : check.proxy_ok ? 'не доходит' : 'не проверяли'}
-                      ok={check.telegram_ok}
-                      latencyMs={check.telegram_latency_ms}
-                      skipped={!check.proxy_ok && !check.telegram_ok}
-                    />
-                  </div>
+        {lists.length > 0 && <div className="my-2 h-px bg-gray-100" />}
+
+        {lists.map(l => {
+          const count = listCounts[l.id] ?? 0;
+          const active = activeList === l.id;
+          const isRenaming = renamingId === l.id;
+          const isDeleting = deletingId === l.id;
+          return (
+            <div key={l.id} className="space-y-1">
+              <div
+                className={`group flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs transition ${
+                  active ? 'bg-indigo-50 text-indigo-700' : 'text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                <Folder className="h-3.5 w-3.5 shrink-0 ml-1" />
+                {isRenaming ? (
+                  /* Inline input вместо названия. Enter — сохранить, Escape — отмена.
+                     Авто-фокус обязателен, иначе придётся ещё раз кликать. */
+                  <input
+                    autoFocus
+                    value={renameValue}
+                    onChange={e => setRenameValue(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') { void submitRename(); }
+                      if (e.key === 'Escape') { setRenamingId(null); setRenameValue(''); }
+                    }}
+                    onBlur={() => { if (renameValue.trim() && renameValue.trim() !== l.name) { void submitRename(); } else { setRenamingId(null); setRenameValue(''); } }}
+                    aria-label={`Переименовать список ${l.name}`}
+                    className="flex-1 min-w-0 rounded border border-indigo-300 bg-white px-1.5 py-0.5 text-xs outline-none focus:border-indigo-500"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setActiveList(l.id)}
+                    onDoubleClick={() => { setRenamingId(l.id); setRenameValue(l.name); }}
+                    className={`flex-1 min-w-0 text-left truncate cursor-pointer ${active ? 'font-semibold' : ''}`}
+                    title="Клик — открыть. Двойной клик — переименовать."
+                  >
+                    {l.name}
+                  </button>
+                )}
+                <span className="text-[10px] text-gray-400 mr-1">{count}</span>
+                {!isRenaming && !isDeleting && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => { setRenamingId(l.id); setRenameValue(l.name); }}
+                      title="Переименовать"
+                      aria-label={`Переименовать ${l.name}`}
+                      className="p-1 text-gray-300 hover:text-indigo-600 hover:bg-indigo-50 rounded transition cursor-pointer opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setDeletingId(l.id); setDeleteProxiesToo(false); }}
+                      title="Удалить список"
+                      aria-label={`Удалить ${l.name}`}
+                      className="p-1 text-gray-300 hover:text-rose-600 hover:bg-rose-50 rounded transition cursor-pointer opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </>
                 )}
               </div>
-              <button type="button" onClick={() => { void toggleActive(p.id, p.is_active); }}
-                className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${p.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
-                {p.is_active ? 'Да' : 'Нет'}
+
+              {/* Inline-форма удаления с галочкой. Не confirm(): нужен выбор
+                  между «оставить прокси» и «удалить прокси», и его надо
+                  показать словами — что именно произойдёт в каждом из
+                  вариантов. confirm этого не умеет. */}
+              {isDeleting && (
+                <div className="rounded-lg border border-rose-200 bg-rose-50/50 p-2.5 space-y-2 text-[11px]">
+                  <div className="text-rose-900 font-medium">
+                    Удалить «{l.name}»?
+                  </div>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={deleteProxiesToo}
+                      onChange={e => setDeleteProxiesToo(e.target.checked)}
+                      className="mt-0.5 h-3.5 w-3.5 cursor-pointer accent-rose-600"
+                    />
+                    <span className="text-rose-900">
+                      Удалить <b>{count}</b> прокси из этого списка полностью
+                    </span>
+                  </label>
+                  <div
+                    className={`rounded border px-2 py-1.5 ${
+                      deleteProxiesToo
+                        ? 'border-rose-300 bg-rose-100 text-rose-900'
+                        : 'border-gray-200 bg-white text-gray-700'
+                    }`}
+                  >
+                    {deleteProxiesToo ? (
+                      <>
+                        Прокси будут <b>безвозвратно удалены</b>. Аккаунты с
+                        этими прокси останутся, но будут отвязаны от прокси.
+                      </>
+                    ) : (
+                      <>
+                        Список удалится, <b>{count} прокси уедут в «Неопределённые»</b>:
+                        они останутся в кампании, прокси не пропадут, и их можно
+                        будет положить в другой список.
+                      </>
+                    )}
+                  </div>
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => { void submitDelete(); }}
+                      disabled={saving}
+                      className="flex-1 rounded bg-rose-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-rose-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      {saving ? <Loader2 className="h-3 w-3 animate-spin mx-auto" /> : 'Удалить'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setDeletingId(null); setDeleteProxiesToo(false); }}
+                      className="rounded border border-gray-200 bg-white px-2 py-1 text-[11px] text-gray-500 hover:bg-gray-50 transition cursor-pointer"
+                    >
+                      Отмена
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {showCreateList ? (
+          <div className="rounded-lg border border-gray-200 bg-white p-2 space-y-1.5">
+            <input
+              autoFocus
+              value={newListName}
+              onChange={e => setNewListName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') { void createList(); }
+                if (e.key === 'Escape') { setShowCreateList(false); setNewListName(''); }
+              }}
+              placeholder="Название списка"
+              className="block w-full rounded border border-gray-200 bg-white px-2 py-1 text-xs outline-none focus:border-indigo-400"
+            />
+            <div className="flex gap-1">
+              <button
+                type="button"
+                onClick={() => { void createList(); }}
+                disabled={saving || !newListName.trim()}
+                className="flex-1 rounded bg-indigo-600 px-2 py-1 text-[10px] font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {saving ? <Loader2 className="h-3 w-3 animate-spin mx-auto" /> : 'Создать'}
               </button>
-              <button type="button" onClick={() => { void deleteProxy(p.id); }}
-                className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer">
-                <Trash2 className="h-3.5 w-3.5" />
+              <button
+                type="button"
+                onClick={() => { setShowCreateList(false); setNewListName(''); }}
+                className="rounded border border-gray-200 px-2 py-1 text-[10px] text-gray-500 hover:bg-gray-50 transition cursor-pointer"
+              >
+                Отмена
               </button>
             </div>
-            );
-          })}
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setShowCreateList(true)}
+            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs text-indigo-600 hover:bg-indigo-50 transition cursor-pointer"
+          >
+            <FolderPlus className="h-3.5 w-3.5" />
+            Создать список
+          </button>
+        )}
+      </aside>
+
+      <div className="space-y-4 min-w-0">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-gray-700">
+              {activeList === null ? 'Неопределённые' : (lists.find(l => l.id === activeList)?.name ?? 'Список')}
+              <span className="ml-1 text-gray-400 font-normal">({stats?.proxy_count ?? 0})</span>
+            </div>
+            {stats && (
+              <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-gray-500">
+                <span className={stats.active_count > 0 ? 'text-emerald-700' : 'text-gray-400'}>
+                  работает {stats.active_count} из {stats.proxy_count}
+                </span>
+                {stats.dead_count > 0 && (
+                  <span className="text-rose-600">· выключены {stats.dead_count}</span>
+                )}
+                {stats.avg_age_hours != null && (
+                  <span>
+                    · средний возраст {formatHours(stats.avg_age_hours)}
+                  </span>
+                )}
+                {stats.avg_age_hours_at_death != null && (
+                  <span
+                    className="text-gray-400"
+                    title="Средний возраст выключенных прокси в списке. Грубая оценка того, как долго партия жила — точной даты отключения мы не пишем."
+                  >
+                    · до отказа {formatHours(stats.avg_age_hours_at_death)}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => { setShowBulk(!showBulk); setShowAdd(false); setProxyError(null); }}
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
+              Массовое добавление
+            </button>
+            <button type="button" onClick={() => { setShowAdd(!showAdd); setShowBulk(false); setProxyError(null); }}
+              className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">
+              <Plus className="h-3.5 w-3.5" /> Добавить
+            </button>
+          </div>
         </div>
-      )}
+
+        {/* Без привязки к showAdd/showBulk: ошибка массового удаления приходит при
+            закрытых формах и иначе была бы не видна вообще. */}
+        {proxyError && (
+          <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+            {proxyError}
+          </div>
+        )}
+
+        {showAdd && (
+          <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
+            <div className="text-[11px] text-gray-500">
+              Новый прокси попадёт в <b>{activeList === null ? '«Неопределённые»' : `«${lists.find(l => l.id === activeList)?.name ?? '—'}»`}</b>.
+              Переложить в другой можно после создания.
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <label className="space-y-1">
+                <span className="text-[11px] font-medium text-gray-500">URL прокси</span>
+                <input value={url} onChange={e => setUrl(e.target.value)} placeholder="http://user:pass@host:port"
+                  className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[11px] font-medium text-gray-500">Название (необязательно)</span>
+                <input value={name} onChange={e => setName(e.target.value)} placeholder="Proxy 1"
+                  className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
+              </label>
+            </div>
+            <div className="flex gap-2">
+              <button type="button" onClick={() => { void addProxy(); }} disabled={saving || !url.trim()}
+                className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+                {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Сохранить'}
+              </button>
+              <button type="button" onClick={() => setShowAdd(false)}
+                className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
+            </div>
+          </div>
+        )}
+
+        {showBulk && (
+          <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
+            <p className="text-xs text-gray-500">
+              Каждая строка — отдельный прокси. Все уйдут в <b>{activeList === null ? '«Неопределённые»' : `«${lists.find(l => l.id === activeList)?.name ?? '—'}»`}</b>.
+            </p>
+            <textarea value={bulkText} onChange={e => setBulkText(e.target.value)} rows={5}
+              placeholder={'http://user:pass@host:port\nпо одному URL на строку'}
+              className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y font-mono" />
+            <div className="flex gap-2">
+              <button type="button" onClick={() => { void addBulk(); }} disabled={saving || !bulkText.trim()}
+                className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+                {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Добавить'}
+              </button>
+              <button type="button" onClick={() => setShowBulk(false)}
+                className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
+            </div>
+          </div>
+        )}
+
+        <BulkActionsBar
+          selectedCount={selectedIds.length}
+          deleting={bulkDeleting}
+          onClear={clear}
+          onDelete={() => { void deleteSelected(); }}
+          checking={checking}
+          canCheck
+          onCheck={() => { void checkSelected(); }}
+          checkLabel={checking
+            ? `Проверяю прокси (${selectedIds.length})… ${checkElapsed} с`
+            : `Проверить прокси (${selectedIds.length})`}
+          checkTitle="Проверить два раза подряд: отвечает ли сам прокси и открывается ли через него туннель до Telegram"
+          extra={selectedIds.length > 0 ? (
+            /* Кнопка перемещения пачки. Модалка — потому что перенести в любой
+               из N списков одной кнопкой нельзя: целевой список должен выбрать
+               оператор. */
+            <button
+              type="button"
+              onClick={() => setMoveTarget({ ids: selectedIds, fromList: activeList })}
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer"
+            >
+              <Move className="h-3.5 w-3.5" />
+              Переместить ({selectedIds.length})
+            </button>
+          ) : null}
+        />
+
+        {/* Модалка выбора списка для перемещения пачки. Не отдельный
+            компонент: используется ровно в одном месте, а вынос только ради
+            выноса усложнил бы. */}
+        {moveTarget && (
+          <div className="rounded-lg border border-gray-200 bg-white p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-medium text-gray-700">
+                Переместить {moveTarget.ids.length} прокси в:
+              </span>
+              <button type="button" onClick={() => setMoveTarget(null)}
+                aria-label="Закрыть выбор списка"
+                className="p-1 text-gray-400 hover:text-gray-600 transition cursor-pointer">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {moveOptions.length === 0 ? (
+                <span className="text-xs text-gray-400">
+                  Нет других списков — сначала создайте.
+                </span>
+              ) : moveOptions.map(opt => {
+                const Icon = opt.icon;
+                return (
+                  <button
+                    key={opt.key ?? '__undefined__'}
+                    type="button"
+                    onClick={() => { void executeMove(opt.key); }}
+                    disabled={saving}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    <Icon className="h-3.5 w-3.5" />
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Проверка сетевая и небыстрая: сорок прокси — около минуты. Молчащая
+            кнопка со спиннером на минуту читается как «всё зависло». */}
+        {checking && (
+          <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-500" />
+            Проверяю прокси: {selectedIds.length}. Идёт {checkElapsed} с — на сорок прокси уходит около
+            минуты, вкладку можно не трогать.
+          </div>
+        )}
+
+        {checkRun && checkRun.rows.length > 0 && (
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+            <div className="flex items-start justify-between gap-3">
+              <span>
+                Проверено прокси: {checkRun.rows.length} в{' '}
+                {new Date(checkRun.checkedAt).toLocaleString('ru-RU', {
+                  day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+                })}
+                . Слева — отвечает ли сам прокси, справа — доходит ли через него Telegram:
+              </span>
+              <button type="button" onClick={() => setCheckRun(null)} className="cursor-pointer text-gray-400 hover:text-gray-600">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <ul className="mt-2 space-y-1.5">
+              {checkRun.rows.map((r) => (
+                <li key={r.id} className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-medium text-gray-800">{r.name || 'без названия'}</span>
+                  <ProxyVerdict
+                    label="прокси"
+                    verdict={proxyVerdictWord(r)}
+                    ok={r.proxy_ok}
+                    latencyMs={r.proxy_latency_ms}
+                  />
+                  <ProxyVerdict
+                    label="Telegram"
+                    verdict={r.telegram_ok ? 'доходит' : r.proxy_ok ? 'не доходит' : 'не проверяли'}
+                    ok={r.telegram_ok}
+                    latencyMs={r.telegram_latency_ms}
+                    skipped={!r.proxy_ok && !r.telegram_ok}
+                  />
+                  {/* Технический код — для инженера в логах, словами — оператору. */}
+                  <span className="text-gray-400">({r.status})</span>
+                  {r.reason && <span className="text-gray-500">{r.reason}</span>}
+                </li>
+              ))}
+            </ul>
+            {/* Прокси удалили в другой вкладке, пока оператор выбирал строки. */}
+            {checkRun.missing > 0 && (
+              <div className="mt-2 text-gray-500">
+                Не нашлись в кампании: {checkRun.missing} — список на экране устарел, обновите страницу.
+              </div>
+            )}
+          </div>
+        )}
+
+        {loading ? (
+          <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
+        ) : proxies.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
+            <Network className="mx-auto h-8 w-8 text-gray-300 mb-2" />
+            <p className="text-xs text-gray-400">
+              {activeList === null
+                ? 'В «Неопределённых» пусто. Все прокси разнесены по спискам — или ещё не добавлены.'
+                : 'В этом списке пусто. Добавьте прокси или перенесите из «Неопределённых».'}
+            </p>
+          </div>
+        ) : (
+          <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
+            <div className="grid grid-cols-[32px_1fr_80px_180px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+              <SelectAllCheckbox total={proxies.length} selectedCount={selectedIds.length} onChange={setAll} />
+              <span>URL / Название</span><span>Активен</span><span>Список</span><span />
+            </div>
+            {proxies.map(p => {
+              const check = checkById.get(p.id);
+              return (
+              <div
+                key={p.id}
+                className={`grid grid-cols-[32px_1fr_80px_180px_40px] gap-4 items-center px-4 py-2.5 ${isSelected(p.id) ? 'bg-indigo-50/60' : ''}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={isSelected(p.id)}
+                  onChange={() => toggle(p.id)}
+                  aria-label={`Выбрать ${p.name || p.url}`}
+                  className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+                />
+                <div className="min-w-0">
+                  {p.name && <p className="text-xs font-medium text-gray-800">{p.name}</p>}
+                  <p className="text-xs text-gray-500 truncate font-mono">{p.url}</p>
+                  {/* Итог последней проверки прямо в строке: список не
+                      перечитываем, показываем то, что ответила проверка. */}
+                  {check && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px]">
+                      <ProxyVerdict
+                        label="прокси"
+                        verdict={proxyVerdictWord(check)}
+                        ok={check.proxy_ok}
+                        latencyMs={check.proxy_latency_ms}
+                      />
+                      <ProxyVerdict
+                        label="Telegram"
+                        verdict={check.telegram_ok ? 'доходит' : check.proxy_ok ? 'не доходит' : 'не проверяли'}
+                        ok={check.telegram_ok}
+                        latencyMs={check.telegram_latency_ms}
+                        skipped={!check.proxy_ok && !check.telegram_ok}
+                      />
+                    </div>
+                  )}
+                </div>
+                <button type="button" onClick={() => { void toggleActive(p.id, p.is_active); }}
+                  className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${p.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
+                  {p.is_active ? 'Да' : 'Нет'}
+                </button>
+                <select
+                  value={p.proxy_list_id ?? ''}
+                  onChange={e => { void moveOne(p.id, p.proxy_list_id ?? null, e.target.value || null); }}
+                  aria-label={`Список для ${p.name || p.url}`}
+                  className="block w-full rounded-lg border border-gray-200 bg-white px-2 py-1 text-[11px] outline-none focus:border-indigo-400 cursor-pointer"
+                >
+                  <option value="">Неопределённые</option>
+                  {lists.map(l => (
+                    <option key={l.id} value={l.id}>{l.name}</option>
+                  ))}
+                </select>
+                <button type="button" onClick={() => { void deleteProxy(p.id); }}
+                  className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
+}
+
+/** Часы → «2.5 ч» / «3 д 4 ч» — для шапки статистики списка. */
+function formatHours(h: number): string {
+  if (h < 1) return `${Math.round(h * 60)} мин`;
+  if (h < 48) return `${h.toFixed(1)} ч`;
+  const days = Math.floor(h / 24);
+  const rem = Math.round(h - days * 24);
+  return rem > 0 ? `${days} д ${rem} ч` : `${days} д`;
 }
 
 /* =================== CAMPAIGN REPORT TAB =================== */
