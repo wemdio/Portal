@@ -38,6 +38,7 @@ import {
 } from 'lucide-react';
 import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import BaseComparison from '@/components/tg-outreach/BaseComparison';
+import { AccountPicker } from '@/components/tg-outreach/AccountPicker';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
 import type {
   CampaignStatus,
@@ -4099,6 +4100,12 @@ interface OutreachBase {
   source_chats?: string;
   /** Кампания-владелец. null — база осталась без владельца от старой модели. */
   campaign_id: string | null;
+  /**
+   * Аккаунты, которым разрешено рассылать эту базу. Пусто/null — все активные
+   * аккаунты кампании (поведение до фичи). Действует только на первые касания:
+   * диалоги, уже открытые другим аккаунтом, остаются за ним.
+   */
+  sending_account_ids?: string[] | null;
   counts: { total: number; pending: number; sent: number; replied: number; failed: number; skipped: number };
 }
 
@@ -4114,7 +4121,15 @@ interface OutreachBase {
  * Галочка теперь означает не «чья база», а «участвует в рассылке» — выключатель,
  * которым базу ставят на паузу, не удаляя.
  */
-function CampaignBasesTab({ campaignId }: { campaignId: string }) {
+function CampaignBasesTab({
+  campaignId,
+  campaignStatus,
+  firstTouchPerDay,
+}: {
+  campaignId: string;
+  campaignStatus: string;
+  firstTouchPerDay: number;
+}) {
   const [bases, setBases] = useState<OutreachBase[]>([]);
   /**
    * Базы без кампании — наследство старой модели: кнопка «Создать базу» не
@@ -4135,11 +4150,29 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   /** id базы, пока её файл собирается на сервере. */
   const [exporting, setExporting] = useState<string | null>(null);
 
+  /**
+   * Аккаунты кампании и их состояние — для выбора рассыльщиков базы.
+   *
+   * Те же три запроса, что грузит вкладка «Аккаунты»; без статусов выбор
+   * превращается в угадывание (см. комментарий у AccountPicker).
+   */
+  const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
+  const [proxies, setProxies] = useState<OutreachProxy[]>([]);
+  const [sendingStats, setSendingStats] = useState<Record<string, AccountSendingStat>>({});
+  const [queuePending, setQueuePending] = useState<number | null>(null);
+  /** База, у которой сейчас правят список рассыльщиков. */
+  const [editingSendersFor, setEditingSendersFor] = useState<string | null>(null);
+  const [sendersDraft, setSendersDraft] = useState<Set<string>>(new Set());
+  const [savingSenders, setSavingSenders] = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
-    const [basesRes, linkRes] = await Promise.all([
+    const [basesRes, linkRes, accRes, proxRes, sendRes] = await Promise.all([
       authFetch(`${API_BASE}/bases?campaign_id=${campaignId}`),
       authFetch(`${API_BASE}/campaigns/${campaignId}/bases`),
+      authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}`),
+      authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`),
+      authFetch(`${API_BASE}/campaigns/${campaignId}/accounts/sending`),
     ]);
     if (basesRes.ok) {
       const d = (await basesRes.json()) as { items: OutreachBase[]; orphans?: OutreachBase[] };
@@ -4150,10 +4183,44 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       const d = (await linkRes.json()) as { items: Array<{ base_id: string }> };
       setLinked(new Set(d.items.map((i) => i.base_id)));
     }
+    if (accRes.ok) {
+      const d = await accRes.json() as { items: OutreachAccount[] };
+      setAccounts(d.items);
+    }
+    if (proxRes.ok) {
+      const d = await proxRes.json() as { items: OutreachProxy[] };
+      setProxies(d.items);
+    }
+    if (sendRes.ok) {
+      const d = await sendRes.json() as { stats: Record<string, AccountSendingStat>; pending?: number };
+      setSendingStats(d.stats ?? {});
+      setQueuePending(typeof d.pending === 'number' ? d.pending : null);
+    }
     setLoading(false);
   }, [campaignId]);
 
   useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
+
+  /**
+   * Статусы аккаунтов считаем от момента загрузки, а не от ререндера:
+   * «на паузе» не должно мигать из-за того, что React перерисовал панель.
+   */
+  const [marksNow] = useState(() => Date.now());
+  const senderMarks = useMemo(() => {
+    const out: Record<string, HealthMark> = {};
+    for (const a of accounts) {
+      out[a.id] = describeSending({
+        account: a,
+        stat: sendingStats[a.id],
+        proxy: proxies.find((p) => p.id === a.proxy_id) ?? null,
+        campaignRunning: campaignStatus === 'running',
+        firstTouchEnabled: firstTouchPerDay > 0,
+        queuePending,
+        now: marksNow,
+      });
+    }
+    return out;
+  }, [accounts, sendingStats, proxies, campaignStatus, firstTouchPerDay, queuePending, marksNow]);
 
   const createBase = async () => {
     if (!newName.trim()) return;
@@ -4237,6 +4304,34 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       setBases((cur) => cur.map((b) => (b.id === baseId ? { ...b, source_chats: chatsDraft.trim() } : b)));
       setEditingChatsFor(null);
     } finally { setSavingChats(false); }
+  };
+
+  /**
+   * Сохранить список рассыльщиков базы.
+   *
+   * Пустой список — не «никто», а «все аккаунты кампании»: это и поведение
+   * баз, заведённых до фичи, и способ вернуть базу к общему пулу одним
+   * движением. Поэтому галочку «снять всё» не запрещаем — наоборот, ей
+   * возвращают базу из персонального режима в общий.
+   */
+  const saveSendingAccounts = async (baseId: string) => {
+    setSavingSenders(true); setError(null); setNotice(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases/${baseId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ sending_account_ids: [...sendersDraft] }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(d?.error ?? `Не удалось сохранить список аккаунтов (${res.status})`);
+        return;
+      }
+      const saved = (await res.json()) as { sending_account_ids?: string[] | null };
+      setBases((cur) => cur.map((b) => (b.id === baseId
+        ? { ...b, sending_account_ids: saved.sending_account_ids ?? [] }
+        : b)));
+      setEditingSendersFor(null);
+    } finally { setSavingSenders(false); }
   };
 
   /**
@@ -4453,12 +4548,34 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
                   type="button"
                   onClick={() => {
                     setEditingChatsFor(editingChatsFor === b.id ? null : b.id);
+                    setEditingSendersFor(null);
                     setChatsDraft(b.source_chats ?? '');
                   }}
                   title="Чаты, из которых собрана эта гипотеза. Идут в отчёт: «Кол-во обработанных чатов» и «Канал/чат»."
-                  className={`mt-0.5 text-[10px] underline decoration-dotted underline-offset-2 transition cursor-pointer ${chats.length ? 'text-gray-400 hover:text-indigo-600' : 'text-amber-600 hover:text-amber-700'}`}
+                  className={`mt-0.5 block text-[10px] underline decoration-dotted underline-offset-2 transition cursor-pointer ${chats.length ? 'text-gray-400 hover:text-indigo-600' : 'text-amber-600 hover:text-amber-700'}`}
                 >
                   {chats.length ? `чатов-источников: ${chats.length}` : 'чаты-источники не указаны — отчёт не посчитает'}
+                </button>
+                {/* Рассыльщики — вторая такая же ссылка: слева от счётчиков её
+                    некуда ставить, а в строке базы оператор видит её ровно в
+                    момент, когда настраивает базу. */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingSendersFor(editingSendersFor === b.id ? null : b.id);
+                    setEditingChatsFor(null);
+                    setSendersDraft(new Set(b.sending_account_ids ?? []));
+                  }}
+                  title="Какие аккаунты берут первые касания из этой базы. Пустой выбор — все аккаунты кампании."
+                  className={`mt-0.5 block text-[10px] underline decoration-dotted underline-offset-2 transition cursor-pointer ${
+                    (b.sending_account_ids?.length ?? 0) > 0
+                      ? 'text-indigo-600 hover:text-indigo-700'
+                      : 'text-gray-400 hover:text-indigo-600'
+                  }`}
+                >
+                  {(b.sending_account_ids?.length ?? 0) > 0
+                    ? `рассылают: ${b.sending_account_ids?.length} из ${accounts.length}`
+                    : 'рассылают: все аккаунты'}
                 </button>
               </div>
               <span className="text-xs text-gray-600">{b.counts.total}</span>
@@ -4487,6 +4604,34 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
                 </button>
               </div>
             </div>
+            {editingSendersFor === b.id && (
+              <div className="space-y-2 border-t border-gray-100 bg-gray-50 px-4 py-3">
+                <div className="text-[11px] font-medium text-gray-700">
+                  Кто рассылает базу «{b.name}»
+                </div>
+                <p className="text-[10px] text-gray-500">
+                  Отмеченные аккаунты берут первые касания из этой базы по общим настройкам
+                  кампании — лимиты, паузы и тихие часы те же. Пустой выбор — шлют все аккаунты
+                  кампании. Ответы в уже открытых диалогах остаются за тем, кто их начал.
+                </p>
+                <AccountPicker
+                  accounts={accounts}
+                  marks={senderMarks}
+                  selected={sendersDraft}
+                  onChange={setSendersDraft}
+                />
+                <div className="flex items-center gap-2">
+                  <button type="button" disabled={savingSenders} onClick={() => { void saveSendingAccounts(b.id); }}
+                    className="rounded-full bg-indigo-600 px-4 py-1.5 text-[11px] font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-50 cursor-pointer">
+                    {savingSenders ? 'Сохраняю…' : 'Сохранить'}
+                  </button>
+                  <button type="button" onClick={() => setEditingSendersFor(null)}
+                    className="rounded-full border border-gray-200 px-3 py-1.5 text-[11px] text-gray-500 transition hover:bg-gray-100 cursor-pointer">
+                    Отмена
+                  </button>
+                </div>
+              </div>
+            )}
             {editingChatsFor === b.id && (
               <div className="space-y-2 border-t border-gray-100 bg-gray-50 px-4 py-3">
                 <div className="text-[11px] font-medium text-gray-700">
@@ -5553,7 +5698,13 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
             firstTouchPerDay={campaign.telegram_settings?.first_touch_per_account_per_day ?? 0}
           />
         )}
-        {tab === 'bases' && <CampaignBasesTab campaignId={campaign.id} />}
+        {tab === 'bases' && (
+          <CampaignBasesTab
+            campaignId={campaign.id}
+            campaignStatus={campaign.status}
+            firstTouchPerDay={campaign.telegram_settings?.first_touch_per_account_per_day ?? 0}
+          />
+        )}
         {tab === 'proxies' && <CampaignProxiesTab campaignId={campaign.id} />}
         {tab === 'warmup' && (
           <WarmupTab campaignId={campaign.id} campaignStatus={campaign.status} />
