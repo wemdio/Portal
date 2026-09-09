@@ -38,10 +38,14 @@ After the owner approves the one-time diagnostic execution:
    variables, private keys or the contents of `authorized_keys` into logs/artifacts.
 
 Semaphore documents this workflow in [Tasks](https://docs.semaphore.io/using-semaphore/tasks).
-The unfortunately named `SEMAPHORE_WORKFLOW_TRIGGERED_BY_SCHEDULE` also identifies
-workflows triggered through Tasks, per its [environment-variable reference](https://docs.semaphore.io/reference/env-vars).
-The script uses it as an accidental-trigger guard, **not** as proof that a Task has
-no schedule or that a human has authorized a write. This script has no write mode.
+For **Run now**, the scheduler sets `MANUAL_RUN`, not `SCHEDULE`: see the
+[scheduler implementation](https://github.com/semaphoreio/semaphore/blob/main/periodic_scheduler/scheduler/lib/scheduler/actions/schedule_wf_impl.ex).
+The general environment-variable documentation describes Tasks too broadly; our
+first run on 2026-09-09 stopped at the old SCHEDULE guard, before any SSH connection.
+The script now requires `SEMAPHORE_WORKFLOW_TRIGGERED_BY_MANUAL_RUN=true`, rejecting
+the cron path. It is an accidental-trigger guard, **not** proof of Task identity or
+authorization to write. The explicit confirmation, branch and pinned server checks
+remain mandatory; this script has no write mode.
 
 ## Interpreting the result
 

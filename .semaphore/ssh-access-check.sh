@@ -8,7 +8,8 @@ fail() { printf '[ssh-check] %s\n' "$1" >&2; exit 1; }
 # These are guardrails against accidental execution, not an authorization system.
 [[ "${SEMAPHORE:-}" == true ]] || fail 'Run only in Semaphore.'
 [[ "${SEMAPHORE_GIT_BRANCH:-}" == Sergey ]] || fail 'Only the Sergey branch is allowed.'
-[[ "${SEMAPHORE_WORKFLOW_TRIGGERED_BY_SCHEDULE:-}" == true ]] || fail 'Run only through a dedicated unscheduled Task.'
+# Tasks -> Run now is MANUAL_RUN, not SCHEDULE (which means the cron path).
+[[ "${SEMAPHORE_WORKFLOW_TRIGGERED_BY_MANUAL_RUN:-}" == true ]] || fail 'Run only through the dedicated Task Run now action.'
 [[ "${SSH_ACCESS_CHECK_CONFIRM:-}" == CHECK_ONLY_33074 ]] || fail 'Explicit read-only confirmation is missing.'
 
 # Verified in Hostkey server 33074 on 2026-09-09; older repository docs say .12.
