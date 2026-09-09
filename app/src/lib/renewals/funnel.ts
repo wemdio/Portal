@@ -101,6 +101,20 @@ export interface RenewalsFunnel {
   backfilledCount: number;
   /** Те же сделки, что стоят за ступенями, — списком (см. RenewalsStageDeals). */
   dealGroups: RenewalsStageDeals[];
+  /**
+   * Сделки вне пути («Пауза», «Реанимация», «Отвал / не продлен»), сгруппированные
+   * по текущему исходу, — раскрывают цифры из `outcomes` в конкретные карточки.
+   *
+   * Ключ — ТЕКУЩИЙ этап, как и у `outcomes`: пауза, из которой проект вернулся
+   * в работу, здесь уже не пауза. В `dealGroups` сделка при этом остаётся в
+   * своей ступени с значком исхода — там вопрос «докуда дошла», здесь «кто
+   * стоит вне пути сейчас». Дубль в двух списках осознанный.
+   *
+   * Входит и сделка, не прошедшая ни одного этапа пути (например, уехавшая в
+   * отвал из «Неразобранного»): в ступенях ей нет места, а здесь она видна —
+   * иначе цифра исхода и список расходились бы.
+   */
+  outcomeGroups: RenewalsStageDeals[];
 }
 
 interface StatusRow {
@@ -226,6 +240,17 @@ export async function fetchRenewalsFunnel(db: SupabaseClient): Promise<RenewalsF
     if (row.sort !== null) nameBySort.set(Number(row.sort), row);
   }
 
+  const toFunnelDeal = (lead: LeadRow, outcome: string | null): RenewalsFunnelDeal => ({
+    amoId: Number(lead.amo_id),
+    name: lead.name,
+    companyName: lead.company_name,
+    responsibleName: lead.responsible_name,
+    amount: lead.amount,
+    currentStatusName: lead.status_name,
+    outcome,
+    amoUrl: AMO_BASE ? `${AMO_BASE}/leads/detail/${lead.amo_id}` : null,
+  });
+
   const dealsBySort = new Map<number, RenewalsFunnelDeal[]>();
   for (const lead of leads) {
     const reached = maxPathSort.get(lead.amo_id) ?? 0;
@@ -235,20 +260,15 @@ export async function fetchRenewalsFunnel(db: SupabaseClient): Promise<RenewalsF
 
     const currentSort = lead.status_id === null ? undefined : sortById.get(Number(lead.status_id));
     const list = dealsBySort.get(reached) ?? [];
-    list.push({
-      amoId: Number(lead.amo_id),
-      name: lead.name,
-      companyName: lead.company_name,
-      responsibleName: lead.responsible_name,
-      amount: lead.amount,
-      currentStatusName: lead.status_name,
+    list.push(
       // Исход — состояние, а не пройденный этап: сделка стоит там СЕЙЧАС.
-      outcome:
+      toFunnelDeal(
+        lead,
         currentSort !== undefined && currentSort > PATH_MAX_SORT && currentSort < SYSTEM_SORT
           ? lead.status_name
           : null,
-      amoUrl: AMO_BASE ? `${AMO_BASE}/leads/detail/${lead.amo_id}` : null,
-    });
+      ),
+    );
     dealsBySort.set(reached, list);
   }
 
@@ -264,6 +284,32 @@ export async function fetchRenewalsFunnel(db: SupabaseClient): Promise<RenewalsF
       };
     });
 
+  // Раскрываем исходы в конкретные сделки — по текущему этапу, как и сами
+  // цифры исходов, чтобы список и воронка не могли разойтись.
+  const outcomeDeals = new Map<number, RenewalsFunnelDeal[]>();
+  for (const lead of leads) {
+    if (lead.status_id === null) continue;
+    const sort = sortById.get(Number(lead.status_id));
+    if (sort === undefined || sort <= PATH_MAX_SORT || sort >= SYSTEM_SORT) continue;
+    const id = Number(lead.status_id);
+    const list = outcomeDeals.get(id) ?? [];
+    // outcome тут не нужен: имя группы уже называет исход, значок в строке
+    // был бы повтором.
+    list.push(toFunnelDeal(lead, null));
+    outcomeDeals.set(id, list);
+  }
+
+  const outcomeGroups: RenewalsStageDeals[] = statuses
+    .filter((row) => row.sort !== null && row.sort > PATH_MAX_SORT && row.sort < SYSTEM_SORT)
+    .sort((a, b) => (a.sort as number) - (b.sort as number))
+    .map((row) => ({
+      statusId: Number(row.status_id),
+      name: row.status_name ?? String(row.status_id),
+      sort: Number(row.sort),
+      deals: outcomeDeals.get(Number(row.status_id)) ?? [],
+    }))
+    .filter((group) => group.deals.length > 0);
+
   return {
     pipelineId: SECONDARY_PIPELINE_ID,
     totalDeals: leads.length,
@@ -271,5 +317,6 @@ export async function fetchRenewalsFunnel(db: SupabaseClient): Promise<RenewalsF
     outcomes,
     backfilledCount,
     dealGroups,
+    outcomeGroups,
   };
 }
