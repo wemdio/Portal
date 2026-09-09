@@ -1,0 +1,26 @@
+version: v1.0
+name: Manual SSH access check — read only, no deploy
+agent:
+  machine:
+    type: e1-standard-2
+    os_image: ubuntu2204
+execution_time_limit:
+  minutes: 5
+
+# Standalone pipeline: never attach to push pipelines, promotions or a schedule.
+# See docs/ssh-access-check.md. There is deliberately no key-installation mode.
+blocks:
+  - name: Inspect SSH access only
+    dependencies: []
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - bash -n .semaphore/ssh-access-check.sh
+          - command -v sshpass >/dev/null || (sudo apt-get update && sudo apt-get install -y sshpass)
+      jobs:
+        - name: Read-only SSH check
+          commands:
+            - bash .semaphore/ssh-access-check.sh
