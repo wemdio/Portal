@@ -2,6 +2,11 @@
  * Встречи дашборда первички — по привязкам записей разговоров
  * (`meeting_deal_links`), а не по этапу AMO «Встреча проведена».
  *
+ * Привязка идёт по номеру сделки из подписи, домену и названию компании — в
+ * этом порядке (см. `apply_meeting_deal_links`, миграция 20260909_0006).
+ * Записи, которые менеджер пометил «в аналитику ОП не считать», сюда не
+ * попадают: это встречи по продлениям.
+ *
  * Зачем: этап AMO даёт 200+ встреч в месяц против 64 у руководителя продаж —
  * этап засорён (сделку двигают по нему и без реальной встречи). Руководитель
  * считает встречу так: есть запись разговора в телеграм-чате встреч. Таблица
@@ -43,6 +48,24 @@ export const MEETING_CHAT_ID = -1001852890744;
 export const MEETINGS_RELIABLE_SINCE = new Date(
   process.env.FIRST_SALES_MEETINGS_SINCE ?? '2026-05-01T00:00:00.000Z',
 );
+
+/**
+ * Пометка в подписи, которой менеджер сам исключает встречу из аналитики
+ * отдела продаж: «#33181669 | Зиккурат | Продление (В аналитику ОП не
+ * считать)».
+ *
+ * Такие встречи реальные, но это разговоры о продлении действующего клиента —
+ * в воронку первички они не идут. За август 2026 их семь. Ловим именно
+ * «не считать», а не слово «продление»: обсуждение продления вполне может
+ * всплыть на встрече по новой сделке, и выбрасывать её из-за одного слова в
+ * комментарии значило бы занижать метрику молча.
+ */
+export const NOT_FOR_ANALYTICS_RE = /не\s*счита/i;
+
+/** Исключена ли запись из аналитики отдела продаж пометкой в подписи. */
+export function excludedFromAnalytics(caption: string | null | undefined): boolean {
+  return NOT_FOR_ANALYTICS_RE.test(caption ?? '');
+}
 
 /**
  * Тянет пары «сделка + дата записи» за окно `[from, to]`.
@@ -92,20 +115,28 @@ export async function fetchMeetingLinks(
     chunkArray(transcriptIds, IN_CHUNK_SIZE).map(async (chunk) => {
       const { data: trChunk, error: trError } = await db
         .from('tg_video_transcripts')
-        .select('id, tg_message_date')
+        .select('id, tg_message_date, caption')
         .in('id', chunk);
       if (trError) throw trError;
-      return (trChunk ?? []) as Array<{ id: string; tg_message_date: string | null }>;
+      return (trChunk ?? []) as Array<{
+        id: string; tg_message_date: string | null; caption: string | null;
+      }>;
     }),
   );
   const dateByTranscript = new Map<string, string | null>();
+  /** Записи, которые менеджер сам пометил «в аналитику ОП не считать». */
+  const excluded = new Set<string>();
   for (const t of transcriptChunks.flat()) {
     dateByTranscript.set(t.id, t.tg_message_date);
+    if (excludedFromAnalytics(t.caption)) excluded.add(t.id);
   }
 
   const fromMs = from.getTime();
   const toMs = to.getTime();
   const inWindow = links.filter((l) => {
+    // Пометка человека сильнее любой автоматики: он провёл эту встречу и сам
+    // сказал, что она про продление.
+    if (excluded.has(l.transcript_id)) return false;
     const dateStr = dateByTranscript.get(l.transcript_id);
     if (!dateStr) return false;
     const t = new Date(dateStr).getTime();

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
 import type { FiltersState } from '@/components/first-sales/FiltersBar';
-import { FUNNEL_STAGE_COLOR_VAR, type FunnelStageId } from '@/lib/firstSales/funnelDeals';
+import { FUNNEL_STAGE_COLOR_VAR, stageDate, type FunnelStageId } from '@/lib/firstSales/funnelDeals';
 import type { InPeriod } from '@/components/first-sales/DealDrillDown';
 import DealModal from '@/components/analytics/DealModal';
 
@@ -24,6 +24,9 @@ type DealRow = {
   company_name: string | null;
   responsible_name: string | null;
   created_at: string | null;
+  /** Даты событий периода — из них строка берёт свою дату (см. stageDate). */
+  meeting_at: string | null;
+  won_at: string | null;
   history_complete: boolean;
   in_period: InPeriod;
   amo_url: string | null;
@@ -58,11 +61,20 @@ const LIST_HEIGHT_PX = 320;
 const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('ru-RU') : '—');
 const fmtMoney = (n: number) => `${Math.round(n).toLocaleString('ru-RU')} ₽`;
 
+/** Что означает дата в строке — подсказкой, чтобы её не путали с датой сделки. */
+const STAGE_DATE_LABEL: Record<FunnelStageId, string> = {
+  lead: 'Дата прихода лида',
+  qualified: 'Дата прихода лида (квал считается когортно)',
+  meeting: 'Дата встречи в периоде',
+  sale: 'Дата продажи',
+};
+
 function periodBadges(p: InPeriod): string[] {
   const out: string[] = [];
   if (p.qualified) out.push('квал');
   if (p.meetings > 0) out.push(p.meetings > 1 ? `встречи · ${p.meetings}` : 'встреча');
   if (p.contract) out.push('договор');
+  if (p.sale) out.push('продажа');
   if (p.money > 0) out.push(fmtMoney(p.money));
   return out;
 }
@@ -244,8 +256,14 @@ export default function FunnelDealsList({
                   <span className="min-w-0 flex-1 truncate text-xs text-zinc-800">
                     {item.deal.company_name || item.deal.name || `Сделка #${item.deal.amo_id}`}
                   </span>
-                  <span className="shrink-0 tabular-nums text-[10px] text-zinc-400">
-                    {fmtDate(item.deal.created_at)}
+                  <span
+                    // Дата события, которым сделка попала в период, а не дата
+                    // её создания: иначе сделка 2024 года со встречей в августе
+                    // 2026 читается как «список не слушается фильтра».
+                    title={`${STAGE_DATE_LABEL[item.stage]} · создана ${fmtDate(item.deal.created_at)}`}
+                    className="shrink-0 tabular-nums text-[10px] text-zinc-400"
+                  >
+                    {fmtDate(stageDate(item.stage, item.deal))}
                   </span>
                 </div>
                 <div className="mt-0.5 flex flex-wrap items-center gap-1">

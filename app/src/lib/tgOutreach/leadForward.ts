@@ -91,6 +91,19 @@ export function isTransientForwardError(message: string): boolean {
   return /нет ответа за|TIMEOUT|FLOOD_WAIT|ECONN|EHOSTUNREACH|EPIPE|socket|Not connected|disconnect/i.test(message);
 }
 
+/**
+ * Ограничение самого аккаунта (PEER_FLOOD): номеру запрещено писать новым
+ * людям, и снимается это часами, а не пятью минутами повторов. Ждать свой
+ * аккаунт бессмысленно — отправить должен другой.
+ *
+ * 09.09.2026 в ATOL-1 передача лида @golden_imperator так и осталась «не
+ * отправлена»: 29 аккаунтов кампании ушли под PEER_FLOOD, а очередь считала
+ * эту ошибку окончательной и даже не пробовала подменный аккаунт.
+ */
+export function isAccountRestrictedError(message: string): boolean {
+  return message.toUpperCase().includes('PEER_FLOOD');
+}
+
 /** Сколько раз задача уже срывалась по сети и когда её можно брать снова. */
 interface RetryState {
   attempts: number;
@@ -100,8 +113,10 @@ interface RetryState {
 /**
  * Отправить одну задачу.
  *
- * Возвращает `sent` / `failed` / `retry`; статус в базе меняет сама, кроме
- * `retry` — там задача остаётся `pending`, чтобы её взял следующий опрос.
+ * Возвращает `sent` / `failed` / `retry` / `restricted`; статус в базе меняет
+ * сама, кроме `retry` и `restricted` — там задача остаётся `pending`, чтобы её
+ * взял следующий опрос (или подменный аккаунт — см. ветку `restricted` в
+ * `processLeadForwards`).
  */
 export async function sendLeadForward(args: {
   db: SupabaseClient;
@@ -118,7 +133,7 @@ export async function sendLeadForward(args: {
    * переписку текстом, и менеджеру её достаточно.
    */
   cardOnly?: boolean;
-}): Promise<'sent' | 'failed' | 'retry'> {
+}): Promise<'sent' | 'failed' | 'retry' | 'restricted'> {
   const { db, client, task, accountName, log } = args;
   const timeoutMs = args.timeoutMs ?? FORWARD_CALL_TIMEOUT_MS;
   const label = forwardKindLabel(task.kind);
@@ -180,6 +195,12 @@ export async function sendLeadForward(args: {
         .eq('id', task.id);
       log('warning', `Передача (${label}) ${who}: не ушла в ${task.target_chat} аккаунтом ${accountName} — ${msg}. Осталась в очереди, повторю через ${Math.round(FORWARD_RETRY_DELAY_MS / 60_000)} мин.`);
       return 'retry';
+    }
+    if (isAccountRestrictedError(msg)) {
+      // Ничего не пишем в задачу: решение за очередью — она немедленно отдаст
+      // карточку здоровому аккаунту кампании, и задача закроется уже им.
+      log('warning', `Передача (${label}) ${who}: аккаунт ${accountName} ограничен Telegram (${msg}) — отправлю другим аккаунтом кампании.`);
+      return 'restricted';
     }
     await db
       .from('tg_outreach_lead_forwards')
@@ -273,6 +294,64 @@ export async function processLeadForwards(args: {
       log,
       timeoutMs: args.timeoutMs,
     });
+
+    if (outcome === 'restricted') {
+      /**
+       * Аккаунт под PEER_FLOOD — ждать нечего: ограничение снимается часами,
+       * а лид нужен менеджеру сейчас. Карточку отправляет любой здоровый
+       * аккаунт кампании; оригиналы переписки у подменного не найдутся, и это
+       * допустимая потеря — карточка содержит переписку текстом.
+       */
+      const spare = args.getFallbackClient?.(task.account_id) ?? null;
+      if (!spare) {
+        await db
+          .from('tg_outreach_lead_forwards')
+          .update({
+            status: 'failed',
+            error_message: `Аккаунт ${holder.accountName} ограничен Telegram (PEER_FLOOD), а свободного аккаунта кампании нет`,
+          })
+          .eq('id', task.id);
+        log('error', `Передача (${forwardKindLabel(task.kind)}): НЕ отправлена — аккаунт ${holder.accountName} под PEER_FLOOD, свободного аккаунта для подмены нет. Верните передачу, когда аккаунт отдохнёт.`);
+        result.failed++;
+        continue;
+      }
+      log('warning', `Передача (${forwardKindLabel(task.kind)}): аккаунт ${holder.accountName} под PEER_FLOOD — отправляю карточку аккаунтом ${spare.accountName}.`);
+      const viaSpare = await sendLeadForward({
+        db,
+        client: spare.client,
+        task,
+        accountName: spare.accountName,
+        log,
+        timeoutMs: args.timeoutMs,
+        cardOnly: true,
+      });
+      if (viaSpare === 'sent') {
+        result.sent++;
+        continue;
+      }
+      if (viaSpare === 'retry') {
+        // Подменный в коротком FLOOD_WAIT и придёт в себя: задача остаётся в
+        // очереди. Следующая попытка снова начнётся с хозяина и снова уйдёт
+        // на подмену — это дешевле, чем выбрать подменного раз и навсегда.
+        retries.set(task.id, { attempts: (retry?.attempts ?? 0) + 1, notBefore: now() + FORWARD_RETRY_DELAY_MS });
+        result.retried++;
+        continue;
+      }
+      if (viaSpare === 'restricted') {
+        // Оба ограничены. Гарантий по третьему нет, а молча перебирать всю
+        // кампанию каждые 10 секунд незачем — закрываем с понятной причиной.
+        await db
+          .from('tg_outreach_lead_forwards')
+          .update({
+            status: 'failed',
+            error_message: `Аккаунты ${holder.accountName} и ${spare.accountName} ограничены Telegram (PEER_FLOOD)`,
+          })
+          .eq('id', task.id);
+      }
+      // 'failed' подменный уже записал сам — с настоящей причиной отказа.
+      result.failed++;
+      continue;
+    }
 
     if (outcome === 'retry') {
       /**

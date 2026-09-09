@@ -142,18 +142,24 @@ export default function KpiRow({
   const syncedValid = !!syncedDate && Number.isFinite(syncedDate.getTime());
   const syncStale = isSyncStale(syncedDate);
 
-  // Деньги — единственная цифра дашборда, чья неполнота структурная: связка с
-  // банком идёт через ИНН, а ИНН заполнен у меньшинства сделок. Пока покрытие
-  // не полное, плитка жёлтая и подписана долей — читать её как «столько мы
-  // заработали» нельзя, только как «столько смогли связать».
+  // Деньги — цифра, которую читают вместе с выпиской, поэтому подпись обязана
+  // объяснять всю разницу с ней: что ушло в продления, что ждёт разбора, что
+  // не связано ни с одной сделкой. Пока связано не всё, плитка жёлтая —
+  // читать её как «столько мы заработали» нельзя, только как «столько
+  // связали с первичкой».
   const money = totals.money;
-  const coverageKnown = totals.contractsReliable && totals.contracts > 0;
-  const moneyPartial = !coverageKnown || money.contractsWithInn < totals.contracts;
+  const coverageKnown = totals.sales > 0;
+  const moneyPartial = money.received < money.bankTotal;
   const moneySub = [
     `платежей: ${fmt(money.payments)}`,
-    coverageKnown ? `ИНН у ${fmt(money.contractsWithInn)} из ${fmt(totals.contracts)} договоров` : null,
+    coverageKnown ? `ИНН у ${fmt(money.contractsWithInn)} из ${fmt(totals.sales)} продаж` : null,
     money.pendingPayments > 0 ? `ждут разбора: ${fmtMoney(money.pending)}` : null,
     money.ambiguousPayments > 0 ? `спорных: ${fmtMoney(money.ambiguous)}` : null,
+    money.renewalsPayments > 0 ? `в продления: ${fmtMoney(money.renewals)}` : null,
+    money.unlinkedPayments > 0 ? `не связано: ${fmtMoney(money.unlinked)}` : null,
+    // Контрольная сумма последней строкой: с ней разницу видно прямо на
+    // экране, без выгрузки из банка и переписки.
+    money.bankPayments > 0 ? `всего по банку: ${fmtMoney(money.bankTotal)}` : null,
   ].filter(Boolean).join(' · ');
 
   return (
@@ -172,7 +178,7 @@ export default function KpiRow({
       {/* Прочерк, а не ноль, пока окно целиком раньше даты, с которой подписи
           к записям в чате встреч стали регулярными: ноль читался бы как
           «встреч не было», хотя на деле автоматчер не может привязать
-          неподписанную запись. Тот же приём, что у «Договоры» ниже. */}
+          неподписанную запись. */}
       <Tile
         label="Встречи"
         value={totals.meetingsReliable ? fmt(totals.meetings) : '—'}
@@ -187,23 +193,15 @@ export default function KpiRow({
             : undefined
         }
       />
-      {/* Прочерк, а не ноль, пока окно целиком раньше даты правила: ноль
-          читался бы как «договоров не было», хотя на деле мы отказались
-          считать грязные данные. Дельту в этом случае тоже не показываем —
-          сравнивать не с чем. */}
+      {/* Продажи — сделки, закрытые в плюс в периоде. Оговорки о
+          достоверности здесь нет: дата закрытия синкается с 2024 года. Раньше
+          на этом месте стоял этап «Согласование договора» — он давал 9 при 13
+          реальных продажах августа, потому что часть сделок его не проходит. */}
       <Tile
-        label="Договоры"
-        value={totals.contractsReliable ? fmt(totals.contracts) : '—'}
-        sub={
-          totals.contractsReliable
-            ? undefined
-            : `считаются с ${new Date(totals.contractsSince).toLocaleDateString('ru-RU')}`
-        }
-        delta={
-          totals.contractsReliable
-            ? <Delta current={totals.contracts} previous={previousTotals.contracts} label="Договоров" {...prevWindow} />
-            : undefined
-        }
+        label="Продажи"
+        value={fmt(totals.sales)}
+        sub="закрыто в плюс"
+        delta={<Delta current={totals.sales} previous={previousTotals.sales} label="Продаж" {...prevWindow} />}
       />
       <Tile
         label="Деньги"

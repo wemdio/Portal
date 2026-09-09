@@ -7,6 +7,7 @@ import { readProfile } from '@/lib/tgOutreach/profile/readProfile';
 import { storeAccountAvatar } from '@/lib/tgOutreach/profile/avatarStorage';
 import { loadAccountForProfile, connectAccount } from '@/lib/tgOutreach/profile/session';
 import { usernameCandidates } from '@/lib/tgOutreach/profile/autofill';
+import { PROFILE_REST_HOURS } from '@/lib/tgOutreach/profile/queuedProfile';
 
 export const dynamic = 'force-dynamic';
 
@@ -187,6 +188,34 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
         }
         const avatarUrl = stored?.url ?? null;
 
+        /**
+         * Отлёжка после смены имени — и на остановленной кампании тоже.
+         *
+         * До 09.09.2026 её ставила только очередь круга (см. `campaignLoop`,
+         * PROFILE_REST_HOURS), то есть правка профиля НА РАБОТАЮЩЕЙ кампании.
+         * А настраивают партию ровно наоборот: кампанию останавливают, заливают
+         * аккаунты, заполняют профили — и эта, самая частая, ветка отлёжку не
+         * записывала вовсе. Правило TgNinja, ради которого всё делалось, на
+         * практике не работало.
+         *
+         * Считаем по факту, а не по заказу: сравниваем то, что реально встало в
+         * Telegram, с тем, что портал знал до правки. Иначе «открыл карточку,
+         * ничего не менял, нажал Сохранить» стоило бы аккаунту полусуток
+         * простоя — поля в форме предзаполнены текущими значениями.
+         *
+         * Аватарка входит в правило наравне с именем (её меняют только здесь:
+         * в очередь она не идёт, весит слишком много) — для антиспама смена
+         * фото такой же признак подготовки к рассылке, как переименование.
+         */
+        const identityChanged =
+          applied.first_name !== (account.first_name ?? '')
+          || applied.last_name !== (account.last_name ?? '')
+          || applied.tg_username !== (account.tg_username ?? '')
+          || Boolean(avatar);
+        const restUntil = identityChanged
+          ? new Date(Date.now() + PROFILE_REST_HOURS * 3_600_000).toISOString()
+          : null;
+
         await auth.supabase
           .from('tg_outreach_accounts')
           .update({
@@ -196,6 +225,7 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
             tg_username: applied.tg_username,
             ...(applied.tg_user_id != null ? { tg_user_id: applied.tg_user_id } : {}),
             ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
+            ...(restUntil ? { profile_rest_until: restUntil } : {}),
             profile_synced_at: new Date().toISOString(),
           })
           .eq('id', id);
@@ -206,6 +236,10 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
           ...applied,
           avatar_url: avatarUrl ?? undefined,
           ...(stored?.error ? { avatar_error: stored.error } : {}),
+          // Экран показывает срок сразу после сохранения: «почему свежий
+          // аккаунт не рассылает» — первый вопрос оператора после настройки
+          // партии, и отвечать на него постфактум плашкой в списке поздно.
+          ...(restUntil ? { rest_until: restUntil } : {}),
         });
       } catch (e) {
         return jsonError(describeTelegramError(e), 400);

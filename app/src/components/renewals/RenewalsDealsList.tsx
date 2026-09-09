@@ -26,6 +26,7 @@ const SCROLL_TAIL_PX = 400;
 const OUTCOME_ACCENT = '#f59e0b';
 
 const fmtMoney = (n: number) => `${Math.round(n).toLocaleString('ru-RU')} ₽`;
+const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('ru-RU') : '—');
 
 /** Цвет ступени — та же палитра и тот же перебор слотов, что у самой воронки
  *  (`seriesColor(theme, i % 6)` в RenewalsFunnel.tsx). */
@@ -154,6 +155,11 @@ export default function RenewalsDealsList({
                 <div className="mt-0.5 flex flex-wrap items-center gap-1">
                   <span className="text-[10px] text-zinc-500">
                     {item.deal.responsibleName || 'не закреплён'}
+                  </span>
+                  {/* Дата заведения: по ней сделка и попала в период (отбор
+                      когортный), без неё строка выглядит вне фильтра. */}
+                  <span title="Дата заведения сделки" className="text-[10px] text-zinc-400">
+                    {fmtDate(item.deal.createdAt)}
                   </span>
                   {/* Исход — состояние на сейчас, а не пройденный этап: сделка
                       прошла свой путь и уехала в паузу или отвал. Ступень при

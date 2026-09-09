@@ -23,11 +23,11 @@ const STAGE_BY_NAME: Record<string, FunnelStageId> = {
   'Лиды': 'lead',
   'Квал': 'qualified',
   'Встречи': 'meeting',
-  'Договоры': 'contract',
+  'Продажи': 'sale',
 };
 
 /**
- * Воронка первички: лиды → квалификация → встречи → договоры.
+ * Воронка первички: лиды → квалификация → встречи → продажи.
  *
  * Показывает то, чего не показывает график по времени: не «сколько было в
  * каждом месяце», а «сколько дошло от этапа к этапу» за весь выбранный период.
@@ -141,7 +141,7 @@ export default function FunnelChart({
       { name: 'Квал', value: totals.qualified, slot: 1 },
     ];
     if (totals.meetingsReliable) list.push({ name: 'Встречи', value: totals.meetings, slot: 2 });
-    if (totals.contractsReliable) list.push({ name: 'Договоры', value: totals.contracts, slot: 3 });
+    list.push({ name: 'Продажи', value: totals.sales, slot: 3 });
     return list;
   }, [totals]);
 
@@ -152,10 +152,10 @@ export default function FunnelChart({
 
   const hidden: string[] = [];
   if (!totals.meetingsReliable) hidden.push(`встречи считаются с ${formatSince(totals.meetingsSince)}`);
-  if (!totals.contractsReliable) hidden.push(`договоры считаются с ${formatSince(totals.contractsSince)}`);
+
 
   // Ступень шире предыдущей — не ошибка отрисовки, а разная логика подсчёта:
-  // «квал» кладётся когортно, по дате прихода лида, а встречи и договоры — по
+  // «квал» кладётся когортно, по дате прихода лида, а встречи и продажи — по
   // дате самого события. В одном окне встреч может оказаться больше, чем
   // квалификаций. Без объяснения такой выступ читается как баг.
   const widened = stages

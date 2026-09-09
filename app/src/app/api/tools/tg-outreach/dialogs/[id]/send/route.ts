@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
-import type { DialogMessage } from '@/lib/tgOutreach/types';
+import { TG_SERVICE_NOTIFICATIONS_USER_ID, type DialogMessage } from '@/lib/tgOutreach/types';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -35,6 +35,11 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       
         if (dErr || !dialog) return jsonError('Диалог не найден', 404);
         if (dialog.can_send === false) return jsonError('Отправка для этого диалога отключена', 400);
+        // Служебному чату Telegram не отвечают ни автоматически, ни руками —
+        // правило общее для всех кампаний, не настройка.
+        if (dialog.tg_user_id === TG_SERVICE_NOTIFICATIONS_USER_ID) {
+          return jsonError('Служебный чат Telegram — отправка запрещена', 400);
+        }
       
         const newMsg: DialogMessage = {
           role: 'assistant',

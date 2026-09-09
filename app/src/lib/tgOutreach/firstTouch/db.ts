@@ -132,6 +132,27 @@ export async function countSentToday(
   return count ?? 0;
 }
 
+/**
+ * Когда аккаунт отправил последнее первое сообщение (любого дня).
+ *
+ * Основа разнесения нормы по дню: пауза между порциями считается именно от
+ * фактической отправки, а не от «круга кампании». Индекс
+ * (account_id, sent_at desc) делает запрос дешёвым.
+ */
+export async function lastFirstTouchSentAt(
+  db: SupabaseClient,
+  accountId: string,
+): Promise<string | null> {
+  const { data } = await db
+    .from('tg_outreach_base_contacts')
+    .select('sent_at')
+    .eq('account_id', accountId)
+    .not('sent_at', 'is', null)
+    .order('sent_at', { ascending: false })
+    .limit(1);
+  return ((data ?? [])[0] as { sent_at: string } | undefined)?.sent_at ?? null;
+}
+
 export async function markContactSent(
   db: SupabaseClient,
   contactId: string,

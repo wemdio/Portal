@@ -23,16 +23,16 @@ import {
 import type { SeriesBucket } from '@/lib/firstSales/metrics';
 import type { GroupBy } from '@/lib/firstSales/buckets';
 
-const LABELS: Record<'leads' | 'qualified' | 'meetings' | 'contracts', string> = {
+const LABELS: Record<'leads' | 'qualified' | 'meetings' | 'sales', string> = {
   leads: 'Лиды',
   // Не просто «Квал»: qualified кладётся в корзину по дате ПРИХОДА лида
   // (когортно — «из пришедших в этот день скольких квалифицировали»), а
-  // meetings/contracts ниже — по дате самого этапа. Без пояснения в легенде
+  // meetings/sales ниже — по дате самого события. Без пояснения в легенде
   // все четыре числа читаются как «что случилось в этот день», и это неверно
   // для этого столбца.
   qualified: 'Квал (из пришедших)',
   meetings: 'Встречи',
-  contracts: 'Договоры',
+  sales: 'Продажи',
 };
 
 const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
@@ -58,7 +58,7 @@ interface TooltipItem {
 /**
  * Столбцы для трёх верхних этапов и линия для договоров.
  *
- * Договоры вынесены в линию не ради разнообразия: их на порядок меньше лидов,
+ * Продажи вынесены в линию не ради разнообразия: их на порядок меньше лидов,
  * и четвёртый столбец в группе выродился бы в полоску в пару пикселей. Линия
  * поверх столбцов читается при любом соотношении величин. Все четыре ряда
  * при этом на ОДНОЙ шкале — второй оси справа здесь нет и быть не должно,
@@ -99,13 +99,13 @@ function buildOption(
     ...(slot === 0 && selectedIndex >= 0 ? { markArea: selectionMark(selectedIndex) } : {}),
   });
 
-  const contractsColor = seriesColor(theme, 3);
+  const salesColor = seriesColor(theme, 3);
 
   // Квадратики в подсказке красим по своему списку, а не по `params.color`.
   // У столбцов заливка — объект-градиент, и `params.color` возвращает именно
   // его; подставленный в CSS, он даёт `background:[object Object]`, то есть
   // пустоту. Строкой остаётся только линия, поэтому цвет был ровно у одного ряда.
-  const swatches = [seriesColor(theme, 0), seriesColor(theme, 1), seriesColor(theme, 2), contractsColor];
+  const swatches = [seriesColor(theme, 0), seriesColor(theme, 1), seriesColor(theme, 2), salesColor];
 
   return {
     animation: animate,
@@ -162,15 +162,15 @@ function buildOption(
       bar(LABELS.qualified, data.map((b) => b.qualified), 1),
       bar(LABELS.meetings, data.map((b) => b.meetings), 2),
       {
-        name: LABELS.contracts,
+        name: LABELS.sales,
         type: 'line',
-        data: data.map((b) => b.contracts),
+        data: data.map((b) => b.sales),
         smooth: true,
         symbol: 'circle',
         symbolSize: 8,
         z: 3,
-        lineStyle: { width: 3, color: contractsColor },
-        itemStyle: { color: contractsColor, borderColor: theme.surface, borderWidth: 2 },
+        lineStyle: { width: 3, color: salesColor },
+        itemStyle: { color: salesColor, borderColor: theme.surface, borderWidth: 2 },
         areaStyle: {
           color: {
             type: 'linear',
@@ -179,8 +179,8 @@ function buildOption(
             x2: 0,
             y2: 1,
             colorStops: [
-              { offset: 0, color: withAlpha(contractsColor, 0.28) },
-              { offset: 1, color: withAlpha(contractsColor, 0) },
+              { offset: 0, color: withAlpha(salesColor, 0.28) },
+              { offset: 1, color: withAlpha(salesColor, 0) },
             ],
           },
         },
