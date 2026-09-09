@@ -207,7 +207,7 @@ Final local validation:
   `git diff --check` pass. The standalone `instantlyLeads` worker bundles with
   esbuild for Node 22; the resulting bundle was not executed.
 
-Activation still requires the separately authorized production phase:
+The separately authorized production activation procedure is:
 
 1. Release the reviewed commit through the user's normal branch/deploy workflow.
 2. Set the standalone worker's runtime
@@ -215,8 +215,64 @@ Activation still requires the separately authorized production phase:
 3. Recreate/deploy that worker using the approved release, then read-only verify
    its exact env, actual Requesty model, qualification errors and notification age.
 
-Neither production env nor containers were changed here. An application env-file
-save/reload does not restart the standalone worker. Saved SSH authentication needs
-reconnection before agent-operated activation; local database endpoint records are
-stale as described above. No database migrations, status rewrites, mail sends or
-Telegram replay was performed.
+During the September 8 evaluation, neither production env nor containers were
+changed. An application env-file save/reload does not restart the standalone
+worker. At that point, saved SSH authentication needed reconnection before
+agent-operated activation; local database endpoint records were stale as
+described above. No database migrations, status rewrites, mail sends or Telegram
+replay were performed during the evaluation.
+
+## Production activation — September 9
+
+Under separate explicit authorization, the persisted production `.env` setting
+was changed to
+`INSTANTLY_LEAD_QUAL_MODEL=policy/portal-instantly-lead-qualification`, and only
+`worker-instantly-leads` was recreated at 23:59 Samara time using its existing
+image. No other containers, migrations or qualification records were changed.
+
+A synthetic connection check through that worker's configured policy returned
+HTTP 200, actual model `gemini-3.8-flash`, valid JSON and `finish_reason=stop` in
+1.488 seconds. This confirms routing, not accuracy on live replies.
+
+The normal scheduled redeploy preserves the server `.env`; Compose reads this
+model setting from it. It therefore does not revert this activation. Manual env
+replacement, saving an outdated admin environment form (which replaces the whole
+env file), or editing the Requesty policy can still change the effective model.
+
+## Deferred-interest machine-filter fix — September 10
+
+The pre-AI filter incorrectly rejected a human reply containing both an absence
+notice and an explicit intention to resume the conversation: «С завтрашнего дня
+я в отпуске. Смогу вернуться к теме после 24 сентября».
+
+A narrow authored-conversation-resumption guard now lets such replies reach AI
+qualification. It does not itself force a lead verdict or override custom
+criteria. The prompt explicitly distinguishes this delayed interest from a plain
+out-of-office notice such as «Вернусь в офис 24 сентября». Quoted history,
+signatures and the final AI machine-reply veto retain their existing safeguards.
+
+The user's clarified default boundary requires an understood, substantive offer
+before generic «напишите через месяц» / «вернусь к теме» / future-only cooperation
+can count as deferred interest. A default-only post-AI guard enforces this on both
+semantic passes; an AI-positive flag or a brief alone cannot supply missing offer
+evidence. A pre-reply outbound or substantive quote supplies context, including an
+earlier offer before a short follow-up. A visible short offer candidate can still
+be interpreted by AI: the existing 200-character promotion heuristic is not used
+as a minimum offer length for this veto, and the short candidate never forces a
+positive result. The quoted-message prompt no longer declares every quote an
+offer. Explicit independent commercial requests, purchase/call/meeting/test
+actions and custom criteria keep their separate rules.
+
+This clarification passed 109 private offline boundary checks and the 116 private
+machine-filter checks. One existing policy fixture was aligned with the clarified
+offer requirement; no CI test cases were added.
+
+Offline validation reproduced the old false rejection and passed 53 focused
+checks plus 116 existing private machine-filter checks. The 229 existing
+classifier/parser/worker tests, strict TypeScript and touched-file ESLint also
+passed. The complete existing suite passed (213 suites, 2,402 tests), and the
+standalone worker bundled successfully for Node 22 without being executed. No
+new CI tests or paid AI requests were added for this fix.
+
+This code change requires the normal release/redeploy. It does not reclassify
+historical decisions or replay Telegram notifications.
