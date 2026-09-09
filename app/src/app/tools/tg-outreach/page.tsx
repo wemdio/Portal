@@ -396,40 +396,15 @@ function SettingsTab({ campaign, onSave }: {
         <FieldArea label="Системный промпт" value={openai.system_prompt} onChange={v => setOAI('system_prompt', v)} rows={6} />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <FieldArea label="Триггер (положительный)" value={openai.trigger_phrases_positive} onChange={v => setOAI('trigger_phrases_positive', v)} rows={2} />
-          <FieldArea label="Триггер (отрицательный)" value={openai.trigger_phrases_negative} onChange={v => setOAI('trigger_phrases_negative', v)} rows={2} />
           <Field label="Чат для пересылки (+)" value={openai.target_chats_positive} onChange={v => setOAI('target_chats_positive', v)} placeholder="@username" />
-          <Field label="Чат для пересылки (−)" value={openai.target_chats_negative} onChange={v => setOAI('target_chats_negative', v)} placeholder="@username" />
-          <div className="space-y-1 md:col-span-2">
-            <Field
-              label="Чат для партнёров"
-              value={openai.target_chats_partner ?? ''}
-              onChange={v => setOAI('target_chats_partner', v)}
-              placeholder="@username или оставьте пустым"
-            />
-            <p className="text-[10px] text-gray-400">
-              Куда уходит кнопка «Передать партнёра» на вкладке «Диалоги». Заинтересованного клиента
-              и человека, который хочет стать партнёром, обычно разбирают разные люди. Пусто —
-              уйдёт в «Чат для пересылки (+)».
-            </p>
-          </div>
         </div>
-        {/* Два верхних поля наполняет автоматика по триггерным фразам, нижнее —
-            только ручная кнопка. Сказать об этом стоит здесь: иначе разница
-            между «чатом пересылки» и «чатом партнёров» выглядит произвольной. */}
+        {/* Чат пересылки наполняет автоматика по триггерной фразе; ручные
+            передачи с вкладки «Диалоги» — лид и партнёр — уходят в него же. */}
         <p className="text-[10px] text-gray-400 -mt-2">
-          В чаты пересылки (+) и (−) бот отправляет сам, когда в его ответе встречается триггерная
-          фраза. Передача лида и партнёра с вкладки «Диалоги» — всегда ручная, по кнопке и с
-          подтверждением.
+          В чат пересылки бот отправляет сам, когда в его ответе встречается триггерная фраза.
+          Передача лида и партнёра с вкладки «Диалоги» — ручная, по кнопке и с подтверждением,
+          уходит в тот же чат.
         </p>
-        <div className="flex items-center gap-4">
-          <label className="flex items-center gap-2 text-xs text-gray-700">
-            <input type="checkbox" checked={openai.use_fallback_on_fail} onChange={e => setOAI('use_fallback_on_fail', e.target.checked)} className="rounded border-gray-300" />
-            Резервный ответ при ошибке
-          </label>
-        </div>
-        {openai.use_fallback_on_fail && (
-          <FieldArea label="Резервный текст" value={openai.fallback_text} onChange={v => setOAI('fallback_text', v)} rows={2} />
-        )}
       </section>
 
       {/* Telegram */}
@@ -438,19 +413,11 @@ function SettingsTab({ campaign, onSave }: {
         {/* Названия сверены с кодом: каждое поле подписано тем, что оно делает
             на самом деле, а не тем, как называется переменная. Три подписи были
             неверны и вводили в заблуждение — история в комментариях ниже. */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="space-y-1">
-            <FieldNum label="Сообщений в пересылке" value={telegram.forward_limit} onChange={v => setTG('forward_limit', v)} />
-            <p className="text-[10px] text-gray-400">
-              Сколько последних сообщений диалога уйдёт в чат-приёмник при пересылке лида.
-            </p>
-          </div>
-          <div className="space-y-1">
-            <FieldNum label="Сообщений в контексте GPT" value={telegram.history_limit} onChange={v => setTG('history_limit', v)} />
-            <p className="text-[10px] text-gray-400">
-              Сколько последних сообщений диалога читает модель, прежде чем ответить.
-            </p>
-          </div>
+        {/* «Сообщений в пересылке» и «Сообщений в контексте GPT» убраны с экрана
+            09.09.2026: пересылка лида шлёт 5 последних сообщений, модель читает
+            20 — дефолты подходят всегда, сохранённые значения кампаний воркер
+            продолжает читать как раньше. */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="space-y-1">
             <FieldNum label="Часовой пояс (UTC±)" value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
             <p className="text-[10px] text-gray-400">
@@ -537,13 +504,9 @@ function SettingsTab({ campaign, onSave }: {
             </p>
           </div>
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="space-y-1">
-            <RangeField label="Пауза перед прочтением (сек)" value={telegram.pre_read_delay_range} onChange={v => setTG('pre_read_delay_range', v)} />
-            <p className="text-[10px] text-gray-400">
-              Сколько ждём, прежде чем отметить входящее прочитанным.
-            </p>
-          </div>
+        {/* «Пауза перед прочтением» убрана с экрана 09.09.2026: теперь всегда
+            рандом 5–15 сек (campaignLoop), настройкой не управляется. */}
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
           {/* Было «Задержка до ответа» — подпись покрывала лишь одно из четырёх
               применений. Тот же диапазон задаёт паузу между ПЕРВЫМИ сообщениями
               внутри дневной нормы (firstTouch/send.ts, gapMs), а при 5–10 сек
