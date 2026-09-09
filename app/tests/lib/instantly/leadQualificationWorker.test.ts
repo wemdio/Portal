@@ -1217,6 +1217,7 @@ describe('pollAndQualifyReplies', () => {
             specialist_user_id: 'specialist-1',
             handoff_email: 'client@clientco.ru',
             handoff_legend: 'Передаю коллеге.',
+            handoff_ai_adapt: true,
             handoff_auto_send: false,
           },
         ],
@@ -1249,15 +1250,26 @@ describe('pollAndQualifyReplies', () => {
       next_starting_after: null,
     });
 
-    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
-    expect(await pollAndQualifyReplies()).toBe(1);
+    // Optional adaptation must not lose the manual card when the provider
+    // produces an empty draft (the specialist's production incident).
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: '' }, finish_reason: 'length' }],
+    })));
+    try {
+      const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+      expect(await pollAndQualifyReplies()).toBe(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
 
     expect(postHandoffMessage).toHaveBeenCalledTimes(1);
     const card = postHandoffMessage.mock.calls[0][0] as { callbackData?: string };
     expect(typeof card.callbackData).toBe('string');
     expect(replyToEmail).not.toHaveBeenCalled();
     expect(sendTestEmail).not.toHaveBeenCalled();
-    expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')[0].status).toBe('pending');
+    expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')[0]).toEqual(expect.objectContaining({
+      status: 'pending', draft_text: 'Передаю коллеге.', auto_send: false,
+    }));
   });
 
   it('handoff fails closed when legacy and period links point to different projects', async () => {
@@ -6477,15 +6489,20 @@ describe('thread-level specialist alert dedup — RED contract', () => {
       instantly_lead_handoff_outbox: [{ qualification_id: qualification.id, status: 'pending' }],
     }));
     mockMainDb = createMockSupabase({ tables: {
-      projects: [{ id: 'project-a', specialist_user_id: 'specialist-a', handoff_email: 'client@example.com', handoff_legend: 'Передаю.', handoff_ai_adapt: false, handoff_auto_send: false }],
+      projects: [{ id: 'project-a', specialist_user_id: 'specialist-a', handoff_email: 'client@example.com', handoff_legend: 'Передаю.', handoff_ai_adapt: true, handoff_auto_send: false }],
       profiles: [{ id: 'specialist-a', full_name: 'Specialist A' }],
       deadline_notification_log: [{ entity_id: qualification.id, tg_sent: true }],
     } });
 
-    const { reconcileLeadHandoffJobs } = await import('@/lib/instantly/leadQualificationWorker');
-    expect(await reconcileLeadHandoffJobs({ qualificationId: qualification.id })).toBe(1);
+    const fetchSpy = jest.spyOn(global, 'fetch').mockRejectedValue(new Error('provider unavailable'));
+    try {
+      const { reconcileLeadHandoffJobs } = await import('@/lib/instantly/leadQualificationWorker');
+      expect(await reconcileLeadHandoffJobs({ qualificationId: qualification.id })).toBe(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
     expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')).toEqual([
-      expect.objectContaining({ qualification_id: qualification.id, status: 'pending' }),
+      expect.objectContaining({ qualification_id: qualification.id, status: 'pending', draft_text: 'Передаю.', auto_send: false }),
     ]);
     expect(mockInstantlyDb!.getRows('instantly_lead_handoff_outbox')).toEqual([
       expect.objectContaining({ qualification_id: qualification.id, status: 'completed' }),

@@ -4123,6 +4123,7 @@ export async function maybePostLeadHandoff(opts: {
       leadReplyText: opts.leadReplyText,
       lastOutboundText: opts.lastOutboundText,
       apiKey: opts.apiKey,
+      onFallback: (reason) => workerLog('warn', `Handoff ${qualificationId}: using configured legend (${reason})`),
     });
     if (!draft.trim()) return { disposition: 'skipped', detail: 'handoff draft is empty' };
 

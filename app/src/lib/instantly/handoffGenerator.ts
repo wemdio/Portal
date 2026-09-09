@@ -31,6 +31,8 @@ export interface HandoffOptions {
   apiKey: string;
   model?: string;
   maxRetries?: number;
+  /** Bounds both response headers and body; optional AI must not stall the worker. */
+  timeoutMs?: number;
 }
 
 function buildSystemPrompt(framing: string): string {
@@ -110,6 +112,9 @@ export async function generateHandoffReply(
   // rejects it ("Invalid model, expected provider/model"). `||` falls through.
   const model = options.model || process.env.LEAD_HANDOFF_MODEL || DEFAULT_MODEL;
   const maxRetries = options.maxRetries ?? 2;
+  const timeoutMs = Number.isFinite(options.timeoutMs)
+    ? Math.max(1, Math.min(60_000, options.timeoutMs!))
+    : 20_000;
   // deepseek (текущий бэкенд policy/gemini-flash) — reasoning-модель: тратит
   // 500–900 токенов на «размышления» ДО ответа, поэтому при max_tokens=600 ответ
   // мог обрезаться (finish=length) и вернуться пустым/куцым. Даём запас; env для
@@ -139,6 +144,7 @@ export async function generateHandoffReply(
           temperature: 0.4,
           max_tokens: maxTokens,
         }),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
       if (attempt < maxRetries) {
@@ -153,21 +159,27 @@ export async function generateHandoffReply(
         choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
       };
       const choice = data.choices?.[0];
-      const text = choice?.message?.content?.trim() ?? '';
+      const rawText = typeof choice?.message?.content === 'string' ? choice.message.content : '';
+      const text = humanizeDashes(unwrapQuotes(rawText));
       // Обрезка по лимиту (reasoning съел бюджет) либо пустой ответ — ретраим,
       // чтобы не отдать клиенту куцый/пустой драфт.
-      if ((choice?.finish_reason === 'length' || !text) && attempt < maxRetries) {
-        await sleep(1500 * 2 ** attempt);
-        continue;
-      }
       // Языковой гард (инцидент 31.07: при русской переписке драфт ушёл на
       // английский): легенда кириллическая, а пришедший драфт — латиница →
       // ретрай, англоязычные проекты (легенда латиницей) не затрагиваются.
-      if (cyrRatio(framing) >= 0.6 && cyrRatio(text) < 0.3 && attempt < maxRetries) {
-        await sleep(1500 * 2 ** attempt);
-        continue;
+      const invalidReason = !text ? 'empty response'
+        : choice?.finish_reason && choice.finish_reason !== 'stop' ? 'incomplete response'
+        : cyrRatio(framing) >= 0.6 && cyrRatio(text) < 0.3 ? 'wrong language'
+        : null;
+      if (invalidReason) {
+        if (attempt < maxRetries) {
+          await sleep(1500 * 2 ** attempt);
+          continue;
+        }
+        // A final invalid attempt is not a successful draft. The caller can
+        // use the approved project legend instead of losing the handoff card.
+        throw new Error(`Handoff AI returned unusable draft: ${invalidReason}`);
       }
-      return humanizeDashes(unwrapQuotes(text));
+      return text;
     }
 
     if ([429, 502, 503, 504].includes(response.status) && attempt < maxRetries) {
