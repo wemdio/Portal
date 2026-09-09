@@ -4523,7 +4523,7 @@ function CampaignBasesTab({
           {/* «Отложено» (status=failed) раньше не показывали вовсе: контакты
               копились в невидимой колонке, и база, вставшая на пороге длины,
               выглядела просто пустеющей. */}
-          <div className="grid grid-cols-[32px_1fr_repeat(5,80px)_180px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_1fr_repeat(5,80px)_215px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <span />
             <span>База</span><span>Всего</span><span>Ждут</span><span>Отправлено</span><span>Пропущено</span><span>Отложено</span><span />
           </div>
@@ -4534,7 +4534,7 @@ function CampaignBasesTab({
               .filter(Boolean);
             return (
             <React.Fragment key={b.id}>
-            <div className={`grid grid-cols-[32px_1fr_repeat(5,80px)_180px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
+            <div className={`grid grid-cols-[32px_1fr_repeat(5,80px)_215px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
               <input
                 type="checkbox"
                 checked={linked.has(b.id)}
