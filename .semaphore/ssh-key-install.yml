@@ -1,0 +1,26 @@
+version: v1.0
+name: Manual Mac SSH key installation — no deploy
+agent:
+  machine:
+    type: e1-standard-2
+    os_image: ubuntu2204
+execution_time_limit:
+  minutes: 5
+
+# Standalone, unscheduled Task only. Never promote from a build or deploy.
+# Explicit approval immediately before Run now is required; see the runbook.
+blocks:
+  - name: Append the approved Mac public key
+    dependencies: []
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - bash -n .semaphore/ssh-key-install.sh
+          - command -v sshpass >/dev/null || (sudo apt-get update && sudo apt-get install -y sshpass)
+      jobs:
+        - name: Install the one approved public key
+          commands:
+            - bash .semaphore/ssh-key-install.sh

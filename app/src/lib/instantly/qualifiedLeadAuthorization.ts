@@ -3,8 +3,11 @@ import { NextResponse } from 'next/server';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { resolveCampaignProjectOwners } from './campaignProjectOwnerResolver';
+import { isUnownedGeneratedQualificationRetry } from './qualificationRecovery';
 
 const SUPERVISOR_ROLES = new Set(['admin', 'director', 'lead', 'manager']);
+export const QUALIFICATION_ACTION_GUARD_COLUMNS =
+  'status, ai_reason, ai_confidence, qualified_project_id, qualified_project_owner_proven, machine_reply_kind';
 
 export interface CampaignAccess {
   campaignIds: string[];
@@ -198,6 +201,16 @@ export async function authorizeQualificationRowsForUser(
   const legacyProjectIdsByCampaign = new Map<string, string>();
 
   for (const qualification of qualifications) {
+    // A technical disposition deliberately has no owner. Its provider
+    // campaign is provenance, never permission to use live campaign access.
+    if (qualification.machine_reply_kind != null) {
+      return { ok: false, status: 403, error: 'Владелец технического ответа не определён' };
+    }
+    if (isUnownedGeneratedQualificationRetry(qualification)) {
+      // Deny before external work can start. This is the mutable cohort that
+      // recovery may atomically turn into an ownerless machine disposition.
+      return { ok: false, status: 409, error: 'Владелец ответа ещё проверяется; действия временно недоступны' };
+    }
     const campaignId = typeof qualification.campaign_id === 'string'
       ? qualification.campaign_id.trim()
       : '';
@@ -284,7 +297,7 @@ export async function qualificationProjectSnapshotSupported(): Promise<boolean> 
   const { instantlyDb } = configuredDatabases();
   const { error } = await instantlyDb
     .from('instantly_lead_qualifications')
-    .select('qualified_project_id, qualified_project_owner_proven')
+    .select('qualified_project_id, qualified_project_owner_proven, machine_reply_kind')
     .limit(1);
   if (!error) return true;
   // A stale cache is not proof that the migration is absent. Falling back to
@@ -292,6 +305,11 @@ export async function qualificationProjectSnapshotSupported(): Promise<boolean> 
   // to the campaign's new project until PostgREST reloads its schema.
   if (isSnapshotSchemaCacheError(error)) {
     throw new Error(`Qualification owner snapshot schema cache is stale: ${error.message}`);
+  }
+  // Do not reinterpret a missing/stale marker as legacy data. This explicit
+  // probe also protects select('*') in single-row actions and mark-as-read.
+  if (/machine_reply_kind/i.test(error.message ?? '')) {
+    throw new Error(`Qualification machine marker unavailable: ${error.message}`);
   }
   if (isMissingSnapshotColumnError(error)) return false;
   throw new Error(`Unable to probe qualification owner snapshot: ${error.message}`);
@@ -316,11 +334,9 @@ export async function authorizeCampaignForUser(
 }
 
 /**
- * Load and authorize one qualification without naming the snapshot column in
- * SQL. `select('*')` is intentional: during code-before-migration rollout an
- * explicit qualified_project_id projection would fail. Once present and set,
- * the immutable snapshot is authoritative; legacy/null rows fall back to the
- * mandatory two-table campaign resolver.
+ * Load the complete action payload with explicit authorization fields. A
+ * missing/stale guard column fails closed, never becomes a legacy permission.
+ * Finalized legacy/null rows still use the mandatory two-table campaign resolver.
  */
 export async function loadAuthorizedQualification<
   T extends Record<string, unknown> = Record<string, unknown>,
@@ -332,7 +348,7 @@ export async function loadAuthorizedQualification<
   await qualificationProjectSnapshotSupported();
   const { data, error } = await instantlyDb
     .from('instantly_lead_qualifications')
-    .select('*')
+    .select(`*, ${QUALIFICATION_ACTION_GUARD_COLUMNS}`)
     .eq('id', qualificationId)
     .single();
   if (error || !data) {

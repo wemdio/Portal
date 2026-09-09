@@ -44,6 +44,7 @@ import { resolveInstantlyAccountId } from './accounts';
 import { createQualificationAiCheckpointStore } from './qualificationAiCheckpoint';
 import { captureQualificationReplySnapshot, qualificationRecoveryBackoff, qualificationReplySnapshot, type QualificationRecoveryState } from './qualificationRecovery';
 import { InstantlyApiError } from './errors';
+import { readInstantlyEmailReadDeferral } from './emailReadDeferral';
 import {
   resolveCampaignProjectOwner,
   resolveCampaignProjectOwners,
@@ -1218,6 +1219,83 @@ export async function qualifyOneReply(
   // result. The next retry must not forget this was a semantic replay.
   const replayTag = opts?.skipClientReplyNotification ? `${LEGACY_SEMANTIC_RETRY_TAG} ` : '';
 
+  // A complete, directly fetched inbound can prove technical noise without
+  // proving its project. Never use a preview/synthetic webhook body here: its
+  // missing continuation could contain a human request. The provider campaign
+  // below is provenance only; the explicit marker fences all live-owner reads.
+  const machineSnapshot = captureQualificationReplySnapshot(reply);
+  let earlyMachineReply = machineSnapshot ? classifyMachineReply(reply) : null;
+  if (earlyMachineReply && opts?.existingQualificationId) {
+    if (!opts.existingQualificationAttemptedAt) {
+      throw new Error(`${OWNERSHIP_DEFER_ERROR_PREFIX}: machine reply retry token missing`);
+    }
+    const { data: current, error } = await db.from('instantly_lead_qualifications')
+      .select('qualified_project_owner_proven')
+      .eq('id', opts.existingQualificationId).eq('status', 'processing')
+      .eq('updated_at', opts.existingQualificationAttemptedAt)
+      .eq('instantly_email_id', reply.id!)
+      .eq('lead_email', leadEmail)
+      .maybeSingle();
+    if (error) throw new Error(`${OWNERSHIP_DEFER_ERROR_PREFIX}: machine reply retry state unavailable: ${error.message}`);
+    if (!current) return;
+    // Proven historical ownership is immutable. Such a legacy retry keeps
+    // using the ordinary owned writer rather than being made ownerless.
+    if (current.qualified_project_owner_proven === true) earlyMachineReply = null;
+  }
+  if (earlyMachineReply) {
+    const existingId = opts?.existingQualificationId;
+    const attemptedAt = opts?.existingQualificationAttemptedAt;
+    if (existingId) {
+      if (!attemptedAt) throw new Error(`${OWNERSHIP_DEFER_ERROR_PREFIX}: machine reply retry token missing`);
+      // Recheck delivery immediately before the CAS. Atomic in-DB handoff /
+      // specialist claims are additionally fenced by the machine-marker trigger.
+      if (await qualificationRecoveryDisposition(db, existingId, Date.now()) !== 'ready') return;
+    }
+    const replyText = getBodyText(reply.body);
+    const payload = {
+      campaign_id: providerCampaignId,
+      campaign_name: null,
+      qualified_project_id: null,
+      qualified_project_owner_proven: false,
+      machine_reply_kind: earlyMachineReply,
+      reply_recovery_snapshot: machineSnapshot,
+      lead_email: leadEmail,
+      thread_id: reply.thread_id ?? null,
+      reply_subject: reply.subject ?? null,
+      reply_preview: replyText.slice(0, 300) || null,
+      reply_body: replyText,
+      status: 'not_lead',
+      proposal_seen: false,
+      interest_signals: [],
+      ai_reason: `Технический машинный ответ (${earlyMachineReply}); проект-владелец не определялся, уведомления отключены.`,
+      ai_confidence: 1,
+      instantly_email_id: reply.id,
+      instantly_lead_id: null,
+      reply_timestamp: reply.timestamp_email ?? reply.timestamp_created ?? null,
+      reply_out_of_campaign: opts?.outOfCampaign === true,
+      eaccount: replyEaccount,
+      error_message: null,
+    };
+    const write = existingId
+      ? db.from('instantly_lead_qualifications').update({ ...payload, updated_at: attemptedAt })
+        .eq('id', existingId).eq('status', 'processing').eq('updated_at', attemptedAt!)
+        .eq('instantly_email_id', reply.id!)
+        .eq('lead_email', leadEmail)
+        .eq('ai_confidence', 0)
+        .not('qualified_project_owner_proven', 'is', true)
+        .is('qualified_project_id', null).is('machine_reply_kind', null)
+        .or(`ai_reason.ilike.${OWNERSHIP_REVIEW_REASON_PREFIX}%,ai_reason.ilike.${TRANSIENT_RETRY_REASON_PREFIX}%`)
+      : db.from('instantly_lead_qualifications')
+        .upsert(payload, { onConflict: 'instantly_email_id', ignoreDuplicates: true });
+    const { error } = await write.select('id').maybeSingle();
+    if (error) {
+      // Missing marker migration/storage must retain durable recovery, never
+      // silently fall through to an owner guess or ACK a missing disposition.
+      throw new Error(`${OWNERSHIP_DEFER_ERROR_PREFIX}: machine reply storage unavailable: ${error.message}`);
+    }
+    return;
+  }
+
   // Instantly может приклеить входящее к новой кампании того же lead, хотя
   // письмо продолжает старый диалог другого проекта. До критериев, ИИ и любых
   // пользовательских side effects восстанавливаем владельца по ТОЧНОМУ
@@ -2060,6 +2138,46 @@ export interface OwnershipReviewRetryOptions {
   lane?: 'fresh' | 'active' | 'page_budget' | 'cold';
 }
 
+/** Repair only the old scheduler's provable local-quota misclassification.
+ * Bounded, lazy and CAS-protected: no owner, verdict or paid attempt changes. */
+async function normalizeLegacyLocalQuotaBackoff(
+  db: NonNullable<typeof supabaseAdmin>,
+  nowMs: number,
+  retryReasonFilter: string,
+): Promise<void> {
+  const { data: rows, error } = await db.from('instantly_lead_qualifications')
+    .select('id, status, updated_at, error_message, recovery_failure_kind, recovery_failure_count, recovery_next_at')
+    .in('status', ['pending', 'needs_review'])
+    .eq('ai_confidence', 0)
+    .or(retryReasonFilter)
+    .eq('recovery_failure_kind', 'provider_rate_limit')
+    .gt('recovery_next_at', new Date(nowMs + 65_000).toISOString())
+    // The latest failure is authoritative; an old ai_reason may describe an
+    // unrelated quota wait that was followed by a genuine provider outage.
+    .ilike('error_message', '%Instantly email read deferred: budget; retry after%')
+    .order('updated_at', { ascending: true })
+    .order('id', { ascending: true })
+    .limit(20);
+  if (error) {
+    workerLog('warn', 'qualification recovery: local quota schedule normalization unavailable');
+    return;
+  }
+  for (const row of rows ?? []) {
+    if (readInstantlyEmailReadDeferral(row.error_message)?.reason !== 'budget') continue;
+    const { error: updateError } = await db.from('instantly_lead_qualifications')
+      .update(qualificationRecoveryBackoff(row, row.error_message, nowMs, 0))
+      .eq('id', row.id)
+      .eq('status', row.status)
+      .eq('ai_confidence', 0)
+      .or(retryReasonFilter)
+      .eq('updated_at', row.updated_at)
+      .eq('recovery_failure_kind', 'provider_rate_limit')
+      .eq('recovery_next_at', row.recovery_next_at)
+      .eq('error_message', row.error_message);
+    if (updateError) workerLog('warn', 'qualification recovery: local quota schedule normalization deferred');
+  }
+}
+
 /**
  * Re-open generated retry rows (ownership ambiguity and transient
  * qualification outages). The original row/id is retained: board, handoff and
@@ -2135,6 +2253,10 @@ export async function reprocessOwnershipReviewRows(
   const retryReasonFilter =
     `ai_reason.ilike.${ownershipReasonPattern},ai_reason.ilike.${transientReasonPattern}`;
 
+  if (freshLane || options.lane === undefined) {
+    await normalizeLegacyLocalQuotaBackoff(db, now.getTime(), retryReasonFilter);
+  }
+
   // Keep legacy repair bounded too: an old backlog must not monopolize a hot
   // tick. The cold lane reaches failures older than the former seven-day DLQ.
   if (!pageBudgetLane) {
@@ -2154,10 +2276,14 @@ export async function reprocessOwnershipReviewRows(
   const rotateSkippedCandidate = async (
     raw: { id: string; status: string; updated_at: string },
     reason: string,
+    scheduling?: ReturnType<typeof qualificationRecoveryBackoff>,
   ): Promise<void> => {
     const { error } = await db
       .from('instantly_lead_qualifications')
-      .update({ updated_at: nowIso })
+      .update({ updated_at: nowIso,
+        recovery_next_at: new Date(now.getTime() + minRetryAgeMs).toISOString(),
+        ...scheduling,
+      })
       .eq('id', raw.id)
       .eq('status', raw.status)
       .eq('ai_confidence', 0)
@@ -2193,7 +2319,10 @@ export async function reprocessOwnershipReviewRows(
     .in('status', ['pending', 'needs_review'])
     .eq('ai_confidence', 0)
     .or(retryReasonFilter)
-    .or(`recovery_next_at.is.null,recovery_next_at.lte.${nowIso}`);
+    // Once a durable deadline exists it is authoritative. Applying the old
+    // updated_at age floor as well stretched a seconds-long local admission
+    // wait into the ownership lane's 15-minute delay on every attempt.
+    .or(`and(recovery_next_at.is.null,updated_at.lte.${retryCutoffIso}),recovery_next_at.lte.${nowIso}`);
   candidatesQuery = coldLane || freshLane ? candidatesQuery : pageBudgetLane
     ? candidatesQuery.ilike(
         'ai_reason',
@@ -2201,11 +2330,10 @@ export async function reprocessOwnershipReviewRows(
       )
     // This reason means the bounded ownership proof remained incomplete, not
     // that a transient API call failed. Exclude it in SQL before LIMIT so a
-    // large manual-review backlog cannot consume every fresh retry slot.
-    : candidatesQuery.not(
-        'ai_reason',
-        'ilike',
-        `%${OWNERSHIP_PAGE_BUDGET_REASON_FRAGMENT}%`,
+    // large unresolved-evidence backlog cannot consume every fresh retry slot.
+    // A local admission wait is cheap and resumes on the active cadence.
+    : candidatesQuery.or(
+        `ai_reason.not.ilike.%${OWNERSHIP_PAGE_BUDGET_REASON_FRAGMENT}%,recovery_failure_kind.eq.local_read_quota`,
       );
   candidatesQuery = coldLane
     ? candidatesQuery.lt('created_at', recentCutoffIso)
@@ -2221,7 +2349,6 @@ export async function reprocessOwnershipReviewRows(
   }
   const { data: candidates, error: candidatesError } = await candidatesQuery
     .not('instantly_email_id', 'is', null)
-    .lte('updated_at', retryCutoffIso)
     // Oldest eligible attempt first. Skipped candidates are rotated below, so
     // an ambiguous workspace/manual forward cannot permanently starve rows
     // just outside this bounded window.
@@ -2235,6 +2362,7 @@ export async function reprocessOwnershipReviewRows(
   if (!candidates?.length) return 0;
 
   const campaignsByAccount = await getCampaignsByAccountCached();
+  const deferredAccounts = new Map<string, string>();
   let attempted = 0;
   for (const raw of candidates as Array<QualificationRecoveryState & {
     id: string;
@@ -2265,6 +2393,17 @@ export async function reprocessOwnershipReviewRows(
       continue;
     }
     const accountId = accountIds[0];
+    const accountDeferral = deferredAccounts.get(accountId);
+    if (accountDeferral) {
+      // No further context/AI/provider work for an unavailable workspace in
+      // this batch. Rotate only selected candidates with a durable due time,
+      // without claiming them or consuming a recovery attempt; other accounts
+      // remain eligible and cannot be hidden behind the same oldest rows.
+      await rotateSkippedCandidate(raw, 'workspace email reads deferred',
+        qualificationRecoveryBackoff(raw, accountDeferral,
+          now.getTime() + Math.max(0, Date.now() - startedAt), minRetryAgeMs));
+      continue;
+    }
 
     // Never reclassify something already handed off/notified, or race an
     // in-flight delivery. A failed lookup is fail-closed, not permission to send.
@@ -2301,7 +2440,7 @@ export async function reprocessOwnershipReviewRows(
     let evidenceProgress = false;
     const backoff = (message: string) => qualificationRecoveryBackoff(
       evidenceProgress ? { ...raw, recovery_failure_count: 0 } : raw,
-      message, now.getTime(), minRetryAgeMs,
+      message, now.getTime() + Math.max(0, Date.now() - startedAt), minRetryAgeMs,
     );
     const logAttempt = (phase: string, reasonCode?: string) => workerLog('info', JSON.stringify({
       event: 'qualification_retry', qualification_id: raw.id,
@@ -2331,7 +2470,8 @@ export async function reprocessOwnershipReviewRows(
       else {
         try {
           fullEmail = await instantly.getEmail(emailId, {
-            accountId, retryRateLimits: false, timeoutMs: 20_000, timeoutIncludesBody: true,
+            accountId, requestPriority: 'recovery', retryRateLimits: false,
+            timeoutMs: 20_000, timeoutIncludesBody: true,
           });
         } catch (error) {
           if (!(error instanceof InstantlyApiError && error.status === 404)) throw error;
@@ -2426,7 +2566,7 @@ export async function reprocessOwnershipReviewRows(
           existingQualificationId: raw.id,
           existingQualificationAttemptedAt: nowIso,
           ownershipEvidenceMode: 'recovery',
-          ownershipEvidencePriority: freshLane ? 'fresh' : 'recovery',
+          ownershipEvidencePriority: 'recovery',
           onOwnershipEvidenceProgress: () => { evidenceProgress = true; },
           skipClientReplyNotification: raw.ai_reason?.includes(LEGACY_SEMANTIC_RETRY_TAG) === true,
         },
@@ -2454,7 +2594,14 @@ export async function reprocessOwnershipReviewRows(
         .eq('id', raw.id).eq('status', 'pending').eq('updated_at', nowIso);
       logAttempt(releaseError ? 'release_failed' : released ? 'pending' : 'completed_or_replaced');
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      const readDeferral = readInstantlyEmailReadDeferral(error);
+      const message = readDeferral && !readInstantlyEmailReadDeferral(rawMessage)
+        ? `Instantly email read deferred: ${readDeferral.reason}; retry after ${Math.ceil(readDeferral.retryAfterMs)} ms`
+        : rawMessage;
+      if (readDeferral?.reason === 'budget' || readDeferral?.reason === 'cooldown') {
+        deferredAccounts.set(accountId, message);
+      }
       await db
         .from('instantly_lead_qualifications')
         .update({
@@ -2467,7 +2614,7 @@ export async function reprocessOwnershipReviewRows(
         .eq('status', 'processing')
         .eq('updated_at', nowIso);
       workerLog('warn', `ownership retry failed for ${raw.id}; released with backoff`, error);
-      logAttempt('pending', isTransientQualifyError(message) ? 'dependency_unavailable' : 'retry_failed');
+      logAttempt('pending', backoff(message).recovery_failure_kind);
       if (
         !/Instantly email read deferred|AI checkpoint|AI paid attempt budget exhausted/i.test(message) &&
         (TRANSIENT_QUALIFY_ERROR_RE.test(message) || RETRIABLE_BILLING_QUALIFY_ERROR_RE.test(message))

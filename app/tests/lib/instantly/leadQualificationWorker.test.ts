@@ -4240,7 +4240,8 @@ describe('pollAndQualifyReplies', () => {
       worker = await import('@/lib/instantly/leadQualificationWorker');
 
       const retried = await worker.reprocessOwnershipReviewRows({
-        now: new Date(retryNow.getTime() + 15 * 60_000),
+        // The durable due time includes time spent on the preceding attempt.
+        now: new Date(String(deferredRow.recovery_next_at)),
         minRetryAgeMs: 15 * 60_000,
       });
 

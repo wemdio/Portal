@@ -1,6 +1,55 @@
 # Instantly: durable recovery without repeated paid classification
 
-Status: implemented locally; migrations and production rollout require separate approval.
+Status: the first three operational migrations and main-DB email-read budget were
+verified applied by a read-only audit on 2026-09-09. The follow-up described below
+is prepared locally; its migrations and production rollout require separate approval.
+
+## Follow-up: quota waits, machine replies, bounded final assessment
+
+The 2026-09-09 audit found 299 pending rows at one moving snapshot, including 41
+local read-quota deferrals and five exhausted AI budgets. Many other rows lacked
+source data or ownership evidence. The delivery audit accounted for all 225
+recently created/updated accepted qualifications: 192 sent, 32 covered by an
+already-notified thread, one self-service project without a specialist. This
+does not establish that every inbound reply was correctly qualified.
+
+- Local admission denial is now distinct from an actual provider 429. It has a
+  10–65-second durable deadline, not exponential hours of backoff. The scheduler
+  resumes due work on its lane cadence; this is not a seconds-level delivery SLA.
+  A saved deadline supersedes the legacy updated-at delay. Known older local
+  quota deadlines are repaired in bounded CAS-protected batches. Other technical
+  reasons are not blanket-reset.
+- Unavailable workspace reads stop within that batch without blocking another
+  workspace. Recovery, including fresh-reply recovery, uses the recovery quota;
+  the 18/min total and 6/min recovery limits are unchanged. Exact read-deferral
+  causes survive missing/partial thread context instead of becoming generic errors.
+- Conservative machine detection runs before ownership/AI. A guarded write records
+  a terminal `not_lead` with `machine_reply_kind`, no asserted project owner and
+  no notification/handoff. Provider campaign is provenance only. Project/client
+  list, count and direct-access paths exclude these ownerless technical records.
+  New actions are also refused while a generated technical retry has no proven
+  owner. This is not a transaction spanning an already-started external send;
+  operations authorized before legacy adoption cannot be retroactively cancelled.
+  Human continuations and quoted/forwarded templates are not sufficient to trigger
+  the new technical-template rules. Existing finalized/delivered rows are fenced.
+- The normal AI budget stays three. One separate lifetime reservation permits
+  the existing final-assessment prompt on the same model and unchanged input key:
+  **at most four potentially paid attempts**, never four per day. Cache hits are
+  checked first; prompts/fingerprints and prior responses are preserved. A failed
+  final request stays technical pending without a fifth paid replay. Explicit
+  no-credit 412 responses now refund their reservation like 402; ambiguous 412,
+  timeouts and network failures do not.
+  The migration makes eligible old exhausted waits due once for the new final
+  slot; it does not reset counters or rewrite their verdicts.
+
+New operational migrations are `20260909_0004_qualification_ai_final_recovery.sql`
+and `20260909_0005_machine_reply_dispositions.sql`. Apply them via the normal
+approved migration-before-code rollout. No live reprocessing, paid model calls,
+Telegram sends, Requesty policy changes or deployment were performed for this fix.
+All web/API readers must be upgraded before workers write the new marker: old
+readers lack its visibility fence. Use a full Portal-then-workers rollout, not
+a worker-only hotfix or a mixed old-reader/new-worker deployment. The checked-in
+scheduled deployment already recreates core services before selected workers.
 
 ## Why the backlog could repeat
 
@@ -16,7 +65,7 @@ mailbox mapping from ever reaching the existing ownership proof.
 - Successful raw AI responses are saved before downstream guards/writes and
   reparsed with current rules on replay. Keys bind the exact reply/account/owner,
   request text, both semantic-pass prompts and requested model/inference profile.
-- The initial pass and adjudication share three potentially paid HTTP attempts
+- The initial pass and adjudication share three normal potentially paid HTTP attempts
   per identical input, atomically reserved before dispatch. Process crashes and
   uncertain network outcomes consume a reservation. Explicit 402/429 responses
   release it and install a durable five-minute/one-minute cooldown. This is an
@@ -74,11 +123,11 @@ does not deploy anything or drain the live backlog by itself.
 
 ## Limitations that must remain visible
 
-An external outage, absent original source, unresolved owner, or three uncertain
+An external outage, absent original source, unresolved owner, or four uncertain
 paid attempts can still leave a technical wait. It is not manual qualification
 and not a negative verdict. Unchanged-input budget exhaustion cannot safely be
-turned into a lead/not-lead result or reset every day. A separately evaluated
-fallback inside an approved total budget is a possible follow-up.
+turned into a lead/not-lead result or reset every day. The final-assessment slot
+  above is bounded recovery, not a promise that an unavailable provider will reply.
 
 Queue <= 5 and age <= 2 hours are operational targets, not guarantees when
 provider data is unavailable. Alert on violations; never hide rows to meet them.
