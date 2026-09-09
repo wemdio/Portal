@@ -67,7 +67,7 @@ describe('computeFirstSalesSeries', () => {
     expect(res.totals.leadMagnets).toBe(1);
   });
 
-  it('сделка с неполной историей не даёт договоров, но остаётся лидом; first_meeting_at (этап AMO) на встречи больше не влияет', () => {
+  it('сделка без закрытия не даёт продаж, но остаётся лидом; first_meeting_at (этап AMO) на встречи больше не влияет', () => {
     const res = computeFirstSalesSeries(
       [lead({
         history_complete: false,
@@ -79,7 +79,20 @@ describe('computeFirstSalesSeries', () => {
     );
     expect(res.totals.leads).toBe(1);
     expect(res.totals.meetings).toBe(0);
-    expect(res.totals.contracts).toBe(0);
+    // Этап «Согласование договора» продажей больше не считается: продажа —
+    // это закрытие сделки в плюс, а `won_at` здесь пуст.
+    expect(res.totals.sales).toBe(0);
+  });
+
+  it('продажа считается по дате закрытия сделки, а не по этапу договора', () => {
+    // Ровно тот случай, из-за которого метрику и меняли: за август 2026 пять
+    // продаж Егора этап «Согласование договора» не проходили вовсе.
+    const res = computeFirstSalesSeries(
+      [lead({ first_contract_at: null, won_at: '2026-07-20T09:00:00.000Z' })],
+      [], from, to, 'day', null,
+    );
+    expect(res.totals.sales).toBe(1);
+    expect(res.series.find((b) => b.key === '2026-07-20')?.sales).toBe(1);
   });
 
   it('фильтр по каналам применяется ко всем метрикам', () => {
@@ -240,7 +253,7 @@ describe('computeFirstSalesSeries', () => {
   });
 });
 
-describe('договоры считаются только с даты, когда этап начал означать договор', () => {
+describe('этап «Согласование договора» — отметка в карточке, а не метрика', () => {
   // До 30.07.2026 этап «Согласование договора» ставили и когда договор реально
   // правили, и когда его просто отправили по просьбе клиента. За июнь 2026 туда
   // попали 169 сделок, из которых 162 умерли с нулевой суммой, — при том что
@@ -252,37 +265,26 @@ describe('договоры считаются только с даты, когд
 
   const wide = { from: new Date(cutoff - 60 * 24 * 60 * 60 * 1000), to: new Date(cutoff + 60 * 24 * 60 * 60 * 1000) };
 
-  it('договор до даты правила не засчитывается', () => {
+  it('отметка «договор» до даты правила не ставится', () => {
+    expect(isContractInWindow(
+      lead({ created_at: before, first_contract_at: before }), wide.from, wide.to,
+    )).toBe(false);
+  });
+
+  it('отметка «договор» после даты правила ставится', () => {
+    expect(isContractInWindow(
+      lead({ created_at: before, first_contract_at: after }), wide.from, wide.to,
+    )).toBe(true);
+  });
+
+  it('на цифру продаж этап не влияет ни в ту, ни в другую сторону', () => {
+    // Сделка прошла этап договора, но закрыта не была — продажи ноль. И
+    // наоборот: закрытая без этапа сделка продажу даёт (проверка выше).
     const res = computeFirstSalesSeries(
-      [lead({ created_at: before, first_contract_at: before })],
+      [lead({ created_at: before, first_contract_at: after, won_at: null })],
       [], wide.from, wide.to, 'month', null,
     );
-    expect(res.totals.contracts).toBe(0);
-  });
-
-  it('договор после даты правила засчитывается', () => {
-    const res = computeFirstSalesSeries(
-      [lead({ created_at: before, first_contract_at: after })],
-      [], wide.from, wide.to, 'month', null,
-    );
-    expect(res.totals.contracts).toBe(1);
-  });
-
-  it('окно целиком до правила помечено как недостоверное', () => {
-    const res = computeFirstSalesSeries(
-      [], [],
-      new Date(cutoff - 60 * 24 * 60 * 60 * 1000),
-      new Date(cutoff - 1),
-      'month', null,
-    );
-    // UI обязан показать прочерк: ноль тут означал бы «договоров не было»,
-    // хотя на самом деле мы отказались считать грязные данные.
-    expect(res.totals.contractsReliable).toBe(false);
-  });
-
-  it('окно, захватывающее дату правила, помечено как достоверное', () => {
-    const res = computeFirstSalesSeries([], [], wide.from, wide.to, 'month', null);
-    expect(res.totals.contractsReliable).toBe(true);
+    expect(res.totals.sales).toBe(0);
   });
 });
 
@@ -477,6 +479,7 @@ describe('реальные деньги по ИНН', () => {
     payer_name: 'ООО «Ромашка»',
     amo_deal_id: 1,
     deal_matches: 1,
+    renewal_deal_matches: 0,
     renewal_state: 'first',
     ...over,
   });
@@ -550,11 +553,11 @@ describe('реальные деньги по ИНН', () => {
   });
 
   /** Покрытие ИНН — знаменатель честности карточки. */
-  it('считает, у скольких договоров окна вообще заполнен ИНН', () => {
-    const contractAt = new Date(CONTRACT_RULE_SINCE.getTime() + 24 * 60 * 60 * 1000).toISOString();
+  it('считает, у скольких продаж окна вообще заполнен ИНН', () => {
+    const wonAt = '2026-07-20T09:00:00.000Z';
     const withInn = lead({
       amo_id: 1,
-      first_contract_at: contractAt,
+      won_at: wonAt,
       raw: {
         custom_fields_values: [
           { field_name: 'Источник', values: [{ value: 'Email Outreach' }] },
@@ -563,10 +566,10 @@ describe('реальные деньги по ИНН', () => {
       },
     });
     const res = computeFirstSalesSeries(
-      [withInn, lead({ amo_id: 2, first_contract_at: contractAt })],
+      [withInn, lead({ amo_id: 2, won_at: wonAt })],
       [], from, to, 'day', null, [],
     );
-    expect(res.totals.contracts).toBe(2);
+    expect(res.totals.sales).toBe(2);
     expect(res.totals.money.contractsWithInn).toBe(1);
   });
 

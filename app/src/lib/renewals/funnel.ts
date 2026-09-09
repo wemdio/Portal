@@ -58,6 +58,8 @@ export interface RenewalsFunnelDeal {
   amount: number | null;
   /** Этап, на котором сделка стоит СЕЙЧАС. */
   currentStatusName: string | null;
+  /** Дата заведения сделки — по ней сделка и попала в период. */
+  createdAt: string | null;
   /** Заполнено, если сделка сейчас вне пути: пауза, реанимация, отвал. */
   outcome: string | null;
   amoUrl: string | null;
@@ -131,11 +133,24 @@ interface LeadRow {
   responsible_name: string | null;
   amount: number | null;
   status_name: string | null;
+  created_at: string | null;
 }
 
 const AMO_BASE = (process.env.AMO_BASE_URL ?? '').replace(/\/$/, '');
 
-export async function fetchRenewalsFunnel(db: SupabaseClient): Promise<RenewalsFunnel> {
+/**
+ * Окно периода. Сделки отбираются когортно — по дате заведения карточки:
+ * «что пришло в работу за этот месяц и докуда дошло». Резать по датам смены
+ * этапов нельзя: тогда одна и та же сделка попадала бы в разные месяцы разными
+ * ступенями, и вложенность воронки (каждая ступень — подмножество предыдущей)
+ * ломалась бы.
+ */
+export interface FunnelWindow { from: Date; to: Date }
+
+export async function fetchRenewalsFunnel(
+  db: SupabaseClient,
+  window?: FunnelWindow,
+): Promise<RenewalsFunnel> {
   const { data: statusData, error: statusError } = await db
     .from('amo_statuses')
     .select('status_id, status_name, sort')
@@ -150,7 +165,7 @@ export async function fetchRenewalsFunnel(db: SupabaseClient): Promise<RenewalsF
 
   const { data: leadData, error: leadError } = await db
     .from('amo_leads')
-    .select('amo_id, status_id, name, company_name, responsible_name, amount, status_name')
+    .select('amo_id, status_id, name, company_name, responsible_name, amount, status_name, created_at')
     .eq('pipeline_id', SECONDARY_PIPELINE_ID);
   if (leadError) throw new Error(`amo_leads: ${leadError.message}`);
 
@@ -169,8 +184,19 @@ export async function fetchRenewalsFunnel(db: SupabaseClient): Promise<RenewalsF
     ((backfillData ?? []) as { amo_deal_id: number }[]).map((r) => Number(r.amo_deal_id)),
   );
 
-  const leads = allLeads.filter((l) => !backfilled.has(l.amo_id));
-  const backfilledCount = allLeads.length - leads.length;
+  // Когорта периода: сделки, заведённые внутри окна. Сделка без даты
+  // создания в когорту не попадает — отнести её к периоду нечем, и молча
+  // засчитывать её текущему окну значило бы выдумывать данные.
+  const inWindow = (lead: LeadRow): boolean => {
+    if (window === undefined) return true;
+    if (!lead.created_at) return false;
+    const t = new Date(lead.created_at).getTime();
+    return Number.isFinite(t) && t >= window.from.getTime() && t <= window.to.getTime();
+  };
+
+  const windowLeads = allLeads.filter(inWindow);
+  const leads = windowLeads.filter((l) => !backfilled.has(l.amo_id));
+  const backfilledCount = windowLeads.length - leads.length;
 
   // Максимальный `sort` прямого пути, которого сделка достигала. Стартуем с
   // текущего этапа: событий может не быть вовсе (сделка создалась сразу на
@@ -247,6 +273,7 @@ export async function fetchRenewalsFunnel(db: SupabaseClient): Promise<RenewalsF
     responsibleName: lead.responsible_name,
     amount: lead.amount,
     currentStatusName: lead.status_name,
+    createdAt: lead.created_at,
     outcome,
     amoUrl: AMO_BASE ? `${AMO_BASE}/leads/detail/${lead.amo_id}` : null,
   });

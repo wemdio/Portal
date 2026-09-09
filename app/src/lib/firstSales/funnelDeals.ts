@@ -2,15 +2,15 @@
  * Раскладка сделок по ступеням воронки первички — для списка справа от самой
  * воронки (спека: docs/superpowers/specs/2026-08-30-first-sales-funnel-deals-design.md).
  *
- * Воронка вложенная: те же 9 договоров сидят и в 35 встречах, и в 67 квалах, и
- * в 290 лидах. Показывать сделку в каждой ступени, которой она достигла,
- * значило бы вывести одну карточку четыре раза и превратить список в кашу.
- * Поэтому каждая сделка попадает РОВНО В ОДНУ группу — самую глубокую из
- * достигнутых, и список читается как «эти дошли до договора, эти застряли на
- * встрече, эти на квале, эти остались лидами».
+ * Воронка вложенная: те же 13 продаж сидят и во встречах, и в квалах, и в
+ * лидах. Показывать сделку в каждой ступени, которой она достигла, значило бы
+ * вывести одну карточку четыре раза и превратить список в кашу. Поэтому каждая
+ * сделка попадает РОВНО В ОДНУ группу — самую глубокую из достигнутых, и
+ * список читается как «эти купили, эти застряли на встрече, эти на квале, эти
+ * остались лидами».
  *
  * Сумма по группам НЕ равна числу лидов периода, и это не ошибка: «Встречи» и
- * «Договоры» считаются по дате самого события, а «Лиды» и «Квал» — когортно, по
+ * «Продажи» считаются по дате самого события, а «Лиды» и «Квал» — когортно, по
  * дате прихода лида. Сделка из июля со встречей в августе даёт августу встречу,
  * но в число лидов августа не входит. Та же особенность уже объяснена сноской
  * под самой воронкой (FunnelChart.tsx). Поэтому UI обязан показывать в
@@ -20,14 +20,14 @@
 
 /**
  * Ступени в порядке показа — сверху вниз, как на самой воронке: лиды,
- * квал, встречи, договоры.
+ * квал, встречи, продажи.
  *
  * Список читается глазами вместе с воронкой слева, и порядок обязан совпадать
- * с ней. Обратный («сначала договоры») выглядит логично сам по себе — сверху
+ * с ней. Обратный («сначала продажи») выглядит логично сам по себе — сверху
  * самое ценное, — но рядом с воронкой заставляет читать два соседних блока в
  * разные стороны.
  */
-export const FUNNEL_STAGE_ORDER = ['lead', 'qualified', 'meeting', 'contract'] as const;
+export const FUNNEL_STAGE_ORDER = ['lead', 'qualified', 'meeting', 'sale'] as const;
 
 export type FunnelStageId = (typeof FUNNEL_STAGE_ORDER)[number];
 
@@ -35,7 +35,7 @@ export const FUNNEL_STAGE_LABEL: Record<FunnelStageId, string> = {
   lead: 'Лиды',
   qualified: 'Квал',
   meeting: 'Встречи',
-  contract: 'Договоры',
+  sale: 'Продажи',
 };
 
 /**
@@ -48,7 +48,7 @@ export const FUNNEL_STAGE_COLOR_VAR: Record<FunnelStageId, string> = {
   lead: 'var(--chart-series-1)',
   qualified: 'var(--chart-series-2)',
   meeting: 'var(--chart-series-3)',
-  contract: 'var(--chart-series-4)',
+  sale: 'var(--chart-series-4)',
 };
 
 /** Что этой сделки попало в период — те же поля, что отдаёт drill-down. */
@@ -56,7 +56,8 @@ export type FunnelHits = {
   lead: boolean;
   qualified: boolean;
   meetings: number;
-  contract: boolean;
+  /** Сделка закрыта в плюс внутри окна. */
+  sale: boolean;
 };
 
 /**
@@ -69,7 +70,6 @@ export type FunnelHits = {
  */
 export type StageAvailability = {
   meetingsReliable: boolean;
-  contractsReliable: boolean;
 };
 
 /**
@@ -80,11 +80,32 @@ export type StageAvailability = {
  * не является. Такие сделки в список не идут — на воронке их тоже нет.
  */
 export function deepestStage(hits: FunnelHits, available: StageAvailability): FunnelStageId | null {
-  if (hits.contract && available.contractsReliable) return 'contract';
+  if (hits.sale) return 'sale';
   if (hits.meetings > 0 && available.meetingsReliable) return 'meeting';
   if (hits.qualified) return 'qualified';
   if (hits.lead) return 'lead';
   return null;
+}
+
+/** Даты сделки, из которых выбирается показываемая в строке. */
+export type FunnelStageDates = {
+  created_at: string | null;
+  meeting_at: string | null;
+  won_at: string | null;
+};
+
+/**
+ * Дата, которой сделка попала в период, — та, что стоит в строке списка.
+ *
+ * Для продажи это дата закрытия сделки, для встречи — дата встречи; квал и
+ * лид считаются когортно по дате прихода лида, поэтому у них это `created_at`.
+ * Показывать везде `created_at` нельзя: сделка 2024 года со встречей в августе
+ * 2026 выглядит как сделка вне периода, и список читается как сломанный.
+ */
+export function stageDate(stage: FunnelStageId, dates: FunnelStageDates): string | null {
+  if (stage === 'sale') return dates.won_at ?? dates.created_at;
+  if (stage === 'meeting') return dates.meeting_at ?? dates.created_at;
+  return dates.created_at;
 }
 
 export type FunnelStageGroup<T> = {
@@ -96,8 +117,8 @@ export type FunnelStageGroup<T> = {
 /**
  * Разносит сделки по группам в порядке FUNNEL_STAGE_ORDER.
  *
- * Пустые группы не возвращаются: заголовок «Договоры — 0» на экране, где
- * договоров нет, занимает место и ничего не сообщает. Порядок сделок внутри
+ * Пустые группы не возвращаются: заголовок «Продажи — 0» на экране, где
+ * продаж нет, занимает место и ничего не сообщает. Порядок сделок внутри
  * группы сохраняется тот, в котором они пришли, — сортировать здесь нечем и
  * незачем, вызывающий уже отсортировал их по дате создания.
  */

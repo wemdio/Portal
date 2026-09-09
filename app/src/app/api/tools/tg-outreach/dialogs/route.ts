@@ -7,6 +7,7 @@ import {
   type DialogBaseRef,
 } from '@/lib/tgOutreach/dialogBase';
 import { usernameKey } from '@/lib/tgOutreach/report';
+import { TG_SERVICE_NOTIFICATIONS_USER_ID } from '@/lib/tgOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -48,58 +49,40 @@ export async function GET(req: NextRequest) {
       const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
 
       /**
-       * Фильтр по базе: сначала контакты базы, потом диалоги по ним.
+       * Фильтр по базе: диалоги, чей собеседник есть среди контактов базы.
        *
        * Прямой связи диалога с базой нет — диалог заводится по входящему из
-       * Telegram и знает только собеседника, а базу к нему подбирают по
-       * юзернейму (см. ниже, там же и подпись в строке). Поэтому и фильтруем
-       * так же: берём контакты выбранной базы и оставляем диалоги, которые с
-       * ними совпали.
+       * Telegram и знает только собеседника. Раньше фильтр собирали здесь:
+       * выгружали все контакты базы (до 20 000) и вклеивали их юзернеймы и id
+       * в условие запроса `or(tg_username.in.(…),tg_user_id.in.(…))`. Условие
+       * едет в URL запроса к базе, и уже на нескольких сотнях контактов он
+       * перерастал лимит шлюза — вкладка падала с «URI too long». Совпадение
+       * теперь считает сама база функцией tg_outreach_dialogs_by_base: те же
+       * два ключа, что у подписи базы в строке диалога (нормализованный
+       * юзернейм или tg_user_id). Пустая база даёт ноль строк, а не «фильтр
+       * не применился»: молча показать все диалогы значило бы соврать про
+       * выбранный фильтр.
        *
-       * Юзернеймы перед подстановкой в фильтр проверяем на состав символов.
-       * Строка фильтра Supabase не параметризуется, и пользовательский текст
-       * внутри неё пришлось бы экранировать — а после нормализации в юзернейме
-       * остаются только латиница, цифры и подчёркивание, и экранировать
-       * становится нечего.
+       * `get: true` обязателен: только GET-вызов функции PostgREST разрешает
+       * фильтровать и сортировать поверх результата, как над таблицей.
        */
       const baseId = url.searchParams.get('base_id');
-      let baseFilter: string | null = null;
-      if (baseId) {
-        const { data: baseContacts } = await auth.supabase
-          .from('tg_outreach_base_contacts')
-          .select('username, tg_user_id')
-          .eq('base_id', baseId)
-          .limit(20_000);
+      let query = baseId
+        ? auth.supabase
+            .rpc('tg_outreach_dialogs_by_base', { p_campaign_id: campaignId, p_base_id: baseId }, { get: true, count: 'exact' })
+        : auth.supabase
+            .from('tg_outreach_dialogs')
+            .select('*', { count: 'exact' })
+            .eq('campaign_id', campaignId);
 
-        const names = [...new Set(
-          ((baseContacts ?? []) as Array<{ username: string | null }>)
-            .map((c) => usernameKey(c.username))
-            .filter((n) => /^[a-z0-9_]+$/.test(n)),
-        )];
-        const ids = [...new Set(
-          ((baseContacts ?? []) as Array<{ tg_user_id: number | null }>)
-            .map((c) => c.tg_user_id)
-            .filter((v): v is number => typeof v === 'number'),
-        )];
+      // Служебный чат Telegram (коды входа и уведомления) собеседником не
+      // является, но успел накопиться в базе до скипа в воркере — из списка
+      // его прячем независимо от фильтров.
+      query = query.neq('tg_user_id', TG_SERVICE_NOTIFICATIONS_USER_ID);
 
-        const parts: string[] = [];
-        if (names.length) parts.push(`tg_username.in.(${names.join(',')})`);
-        if (ids.length) parts.push(`tg_user_id.in.(${ids.join(',')})`);
-        // Пустая база — ни одного совпадения, а не «фильтр не применился»:
-        // молча показать все диалоги значило бы соврать про выбранный фильтр.
-        baseFilter = parts.length ? parts.join(',') : 'tg_user_id.eq.0';
-      }
-
-      let query = auth.supabase
-        .from('tg_outreach_dialogs')
-        .select('*', { count: 'exact' })
-        .eq('campaign_id', campaignId)
+      query = query
         .order('last_message_at', { ascending: false, nullsFirst: false })
         .range(offset, offset + limit - 1);
-
-      if (baseFilter) {
-        query = query.or(baseFilter);
-      }
       /**
        * Сколько сообщений в переписке: «одно» против «два и больше».
        *
